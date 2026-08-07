@@ -14,8 +14,6 @@ rbitcoin-log = { workspace = true }
 bitcoin_hashes = { workspace = true }
 # fallocate / punch-hole for multi‑GiB grows without zero-fill storms (Linux).
 libc = "0.2"
-# Bulk pread submission for head-resolve / confirm body load (Linux).
-io-uring = "0.7"
 # Datadir store.secret CSPRNG.
 getrandom = "0.2"
 # Sealed segment binary fuse8 (~9 bits/key).
@@ -23,6 +21,11 @@ xorf = { workspace = true }
 bincode = { workspace = true }
 # Product bin only (store_bench); library tests keep the platform allocator.
 mimalloc = { workspace = true }
+
+# Bulk pread submission for head-resolve / confirm body load. Linux-only crate;
+# all uses in src are #[cfg(target_os = "linux")]-gated with darwin fallbacks.
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.7"
 
 [[bin]]
 name = "rbitcoin-store-bench"

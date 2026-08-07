@@ -15,6 +15,7 @@
 
 use crate::error::StoreError;
 use std::os::fd::RawFd;
+#[cfg(target_os = "linux")]
 use std::path::Path;
 
 /// Default SQ/CQ depth for all store io_uring sessions (bulk, plan head-resolve,

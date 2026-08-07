@@ -33,6 +33,7 @@ use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 /// SQ/CQ depth for bulk batch sessions.
+#[cfg(target_os = "linux")]
 const RING_ENTRIES: u32 = crate::uring_session::DEFAULT_ENTRIES;
 
 /// One independent pread. Caller owns `buf` for the full submit/wait.
@@ -43,6 +44,8 @@ pub struct ReadOp<'a> {
     /// Filled: bytes read (≥0) or negated errno on failure.
     pub result: i32,
     /// When true, SQE uses [`crate::uring_session::RWF_DONTCACHE`].
+    // Only read on the Linux io_uring submit path.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub dontcache: bool,
 }
 
@@ -54,6 +57,8 @@ pub struct WriteOp<'a> {
     /// Filled: bytes written (≥0) or negated errno on failure.
     pub result: i32,
     /// When true, SQE uses [`crate::uring_session::RWF_DONTCACHE`].
+    // Only read on the Linux io_uring submit path.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub dontcache: bool,
 }
 
