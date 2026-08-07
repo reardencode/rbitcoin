@@ -15,6 +15,8 @@
       systems = [
         "x86_64-linux"
         "aarch64-linux"
+        "x86_64-darwin"
+        "aarch64-darwin"
       ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
 
@@ -34,19 +36,23 @@
             config = { };
             overlays = [ ];
           };
-          # Optional dynamic glibc package (Nix-store linked; not portable off-store).
-          rbitcoin-glibc = mkRbitcoin pkgs;
-          # Primary / default: fully static musl — portable operator binary.
-          rbitcoin-musl = mkRbitcoin pkgs.pkgsStatic;
+          isLinux = nixpkgs.lib.hasSuffix "-linux" system;
+          # Native build (Nix-store linked): glibc on Linux, plain darwin stdenv on macOS.
+          rbitcoin-native = mkRbitcoin pkgs;
+          # Primary / default on Linux: fully static musl — portable operator binary.
+          # musl is Linux-only, so darwin defaults to the native build instead.
+          rbitcoin-default = if isLinux then mkRbitcoin pkgs.pkgsStatic else rbitcoin-native;
         in
         {
-          default = rbitcoin-musl;
-          rbitcoin = rbitcoin-musl;
-          rbitcoin-node = rbitcoin-musl;
-          rbitcoin-cli = rbitcoin-musl;
-          rbitcoin-musl = rbitcoin-musl;
+          default = rbitcoin-default;
+          rbitcoin = rbitcoin-default;
+          rbitcoin-node = rbitcoin-default;
+          rbitcoin-cli = rbitcoin-default;
+        }
+        // nixpkgs.lib.optionalAttrs isLinux {
+          rbitcoin-musl = rbitcoin-default;
           # Kept for store-native Nix environments / optional dual-platform repro.
-          rbitcoin-glibc = rbitcoin-glibc;
+          rbitcoin-glibc = rbitcoin-native;
         }
         // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
           # Optional third platform: aarch64-linux cross from x86_64 (heavy toolchain).
@@ -103,7 +109,8 @@
       checks = forAllSystems (
         system:
         {
-          rbitcoin = self.packages.${system}.rbitcoin-musl;
+          # musl on Linux, native on darwin — matches the default package.
+          rbitcoin = self.packages.${system}.default;
         }
       );
     };

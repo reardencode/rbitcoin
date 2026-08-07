@@ -114,7 +114,7 @@ let
           asl20
         ];
         mainProgram = "rbitcoin-node";
-        platforms = platforms.linux;
+        platforms = platforms.linux ++ platforms.darwin;
       };
     }
   );
