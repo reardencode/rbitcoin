@@ -20,8 +20,8 @@ jobs:
   fmt:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt
       - name: cargo fmt --check
@@ -32,8 +32,8 @@ jobs:
     env:
       CARGO_TARGET_DIR: target/dev
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -49,8 +49,8 @@ jobs:
       # Keep uninstrumented artifacts out of the coverage tree (and vice versa).
       CARGO_TARGET_DIR: target/dev
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-test
@@ -69,8 +69,8 @@ jobs:
       # coverage.sh also forces target/cov; set here so rust-cache keys match.
       CARGO_TARGET_DIR: target/cov
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
