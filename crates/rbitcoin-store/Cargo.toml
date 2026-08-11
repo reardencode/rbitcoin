@@ -17,7 +17,7 @@ libc = "0.2"
 # Bulk pread submission for head-resolve / confirm body load (Linux).
 io-uring = "0.7"
 # Datadir store.secret CSPRNG.
-getrandom = "0.2"
+getrandom = "0.4"
 # Sealed segment fuse8 is in-tree (`binary_fuse8` + `fuse8_filter`); no xorf/bincode.
 
 [[bin]]
