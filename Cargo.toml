@@ -45,7 +45,7 @@ rbitcoin-test = { path = "crates/rbitcoin-test" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Esplora REST + wallet WebSocket live updates.
-axum = { version = "0.7", features = ["ws"] }
+axum = { version = "0.8", features = ["ws"] }
 tower = { version = "0.5", features = ["limit"] }
 tower-http = { version = "0.5", features = ["limit", "timeout"] }
 # rust-bitcoin stack
