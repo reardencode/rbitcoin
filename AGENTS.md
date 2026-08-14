@@ -247,11 +247,13 @@ is HTTPS-only (`gh auth setup-git`).
 ```bash
 ~/.config/rbitcoin-grok/gh-login.sh   # if the hour-token expired
 git fetch https://github.com/reardencode/rbitcoin.git master:refs/remotes/origin/master
-git push -u https://github.com/reardencode/rbitcoin.git HEAD:<area>/<short-name>
-gh pr create --title "…" --body "…"
+# No -u: that would set branch.<name>.remote to the HTTPS URL and `gh pr create`
+# then cannot see the branch on origin.
+git push https://github.com/reardencode/rbitcoin.git HEAD:<area>/<short-name>
+gh pr create --repo reardencode/rbitcoin --head <area>/<short-name> --title "…" --body "…"
 gh pr checks --watch          # or: gh run watch
 # later commits on the same branch:
-git push https://github.com/reardencode/rbitcoin.git HEAD
+git push https://github.com/reardencode/rbitcoin.git HEAD:<area>/<short-name>
 ```
 
 | Rule | Detail |
