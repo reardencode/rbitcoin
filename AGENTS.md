@@ -194,7 +194,8 @@ Implement on a **linked worktree**, not the primary checkout (that tree may be
 another agent’s dirty branch, and sharing `target/` fights cargo locks).
 
 ```bash
-git fetch origin master   # or HTTPS if SSH is not the App remote
+# Fetch without rewriting origin (origin stays SSH — see Push below).
+git fetch https://github.com/reardencode/rbitcoin.git master:refs/remotes/origin/master
 git worktree add -b <area>/<short-name> /tmp/rbtc-<short> origin/master
 export CARGO_TARGET_DIR=/tmp/rbtc-<short>/target/dev
 ```
@@ -205,6 +206,7 @@ export CARGO_TARGET_DIR=/tmp/rbtc-<short>/target/dev
 | Branch | Topic name (`store/…`, `perf/…`, `docs/…`) — **never** commit the plan onto `master` |
 | `CARGO_TARGET_DIR` | Inside the worktree (`…/target/dev`) so objects stay off the other agent’s tree |
 | Identity | Worktree-only `git config --worktree user.name` / `user.email` when committing as a bot; do not change the primary checkout’s `user.*` |
+| Remotes | Worktrees **share** `origin` with the primary checkout. Never `git remote set-url origin`. |
 | After merge | `git worktree remove` the dir; delete the local branch |
 
 ### Local tests (thin on purpose)
@@ -232,19 +234,34 @@ Required PR/push jobs (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml
 The UI shows which gate failed. **`musl.yml`** is **not** required (runs after
 green `master` `ci` and uploads node/cli + `SHA256SUMS`).
 
+`origin` stays **SSH** (`git@github.com:reardencode/rbitcoin.git`). The operator
+auths over SSH only. This VM has **no** GitHub App SSH key (`Permission denied
+(publickey)`). The App token from `~/.config/rbitcoin-grok/gh-login.sh` (~1h)
+is HTTPS-only (`gh auth setup-git`).
+
+`gh pr create` / `gh pr checks` talk to the API — they do not use `origin`.
+`git fetch` / `git push` as the bot must use an **explicit HTTPS URL**. Do
+**not** `git remote set-url origin https://…` (breaks the operator). Do **not**
+`git push origin` as the bot (SSH will fail here).
+
 ```bash
-git push -u origin HEAD
+~/.config/rbitcoin-grok/gh-login.sh   # if the hour-token expired
+git fetch https://github.com/reardencode/rbitcoin.git master:refs/remotes/origin/master
+git push -u https://github.com/reardencode/rbitcoin.git HEAD:<area>/<short-name>
 gh pr create --title "…" --body "…"
 gh pr checks --watch          # or: gh run watch
+# later commits on the same branch:
+git push https://github.com/reardencode/rbitcoin.git HEAD
 ```
 
 | Rule | Detail |
 |------|--------|
+| **Leave `origin` on SSH** | Shared with the primary checkout. Push/fetch via the HTTPS URL above. |
 | **One PR per plan** | Do not open a PR per step. Push more commits to the same branch. |
 | **Poll until green** | After opening (and after each fixup push), watch required checks. Do not walk away and call the plan done. |
 | **Red PR** | Fix on the worktree, commit, push, poll again. Same TDD: targeted test first when the fail is behavioral. |
 | **Done** | Required checks green **and** the PR is up for review. Do not merge unless the user asked. |
-| **Do not** | Force-push `master`, merge a red PR, or skip polling because “tests passed locally.” |
+| **Do not** | Force-push `master`, merge a red PR, rewrite `origin` to HTTPS, or skip polling because “tests passed locally.” |
 
 A red required check on the PR is incomplete work. A red `ci` on **`master`**
 after merge is also incomplete — fix forward or revert.

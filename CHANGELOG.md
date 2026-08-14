@@ -72,7 +72,9 @@ before 1.0).
 - **Agent delivery:** plans land on a worktree topic branch as many small
   commits and **one PR**. Full workspace test/coverage is GitHub Actions, not
   a local plan-end ritual; poll the PR to green. Musl install stays
-  post-merge on `master`. See `AGENTS.md` and `docs/how-we-plan.md`.
+  post-merge on `master`. Leave `origin` on SSH (operator auth); the App
+  fetch/push uses an explicit HTTPS URL. See `AGENTS.md` and
+  `docs/how-we-plan.md`.
 
 - **Docs honesty:** root `/api.jsonl` is gitignored. SCHEMA `archive_epoch.wire_depth`
   is an unread leftover field (no tip wire ring). `page_rmw_pipelined` is
