@@ -339,6 +339,13 @@ pub fn with_thread_local<R>(
                 );
             }
             depth.set(1);
+            struct DepthGuard;
+            impl Drop for DepthGuard {
+                fn drop(&mut self) {
+                    DEPTH.with(|depth| depth.set(0));
+                }
+            }
+            let _guard = DepthGuard;
             let out = SESSION.with(|cell| -> Result<R, StoreError> {
                 let mut slot = cell.borrow_mut();
                 let need_open = match slot.as_ref() {
@@ -361,7 +368,6 @@ pub fn with_thread_local<R>(
                 }
                 Ok(f(session))
             });
-            depth.set(0);
             out
         })
     }

@@ -9,6 +9,15 @@ before 1.0).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Lookup nested io_uring on write-behind pending hits:** IBD
+  `ibd-confirm-lookup` panicked (`nested thread-local io_uring`) when stamp
+  resolved a parent still in the `tx.head` pending map — `record_range` opened a
+  second TLS ring inside the plan machine. The window is long while drain
+  **seals** a full segment. Pending hits now fill idx ranges on the held
+  session (libc when none).
+
 ### Removed
 
 - **Dead store APIs / duplicate benches:** refuse-only `TxTable::put` /
