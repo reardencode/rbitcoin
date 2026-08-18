@@ -40,19 +40,29 @@ pub(super) fn assemble_run(
                 let start = prev_h.0.saturating_sub(10);
                 let prev_hash = block.header.prev_blockhash.to_byte_array();
                 let mut times = Vec::with_capacity(11);
+                let mut prev_bits_raw: Option<u32> = None;
+                let mut prev_time: Option<u32> = None;
                 for h in start..=prev_h.0 {
                     if let Some(plan) = query.confirm_parent_cache().get_header_plan(h) {
                         times.push(plan.header_rec.timestamp);
-                        if h == prev_h.0 && plan.header_rec.hash != prev_hash {
-                            return Err(ConsensusError::BadPrev);
+                        if h == prev_h.0 {
+                            if plan.header_rec.hash != prev_hash {
+                                return Err(ConsensusError::BadPrev);
+                            }
+                            prev_bits_raw = Some(plan.header_rec.bits);
+                            prev_time = Some(plan.header_rec.timestamp);
                         }
                     } else if let Some((_fk, rec)) = query
                         .header_at_height(Height(h))
                         .map_err(ConsensusError::from)?
                     {
                         times.push(rec.timestamp);
-                        if h == prev_h.0 && rec.hash != prev_hash {
-                            return Err(ConsensusError::BadPrev);
+                        if h == prev_h.0 {
+                            if rec.hash != prev_hash {
+                                return Err(ConsensusError::BadPrev);
+                            }
+                            prev_bits_raw = Some(rec.bits);
+                            prev_time = Some(rec.timestamp);
                         }
                     } else {
                         return Err(ConsensusError::Store(StoreError::Corrupt(
@@ -67,45 +77,32 @@ pub(super) fn assemble_run(
                 prev_mtp = mtp;
                 time_window = times;
 
-                if query
-                    .header_at_height(prev_h)
-                    .map_err(ConsensusError::from)?
-                    .is_some()
-                {
-                    validate_header(query, params, height, &block.header)?;
-                } else if let Some(prev_plan) =
-                    query.confirm_parent_cache().get_header_plan(prev_h.0)
-                {
-                    if let Some(cp) = params.checkpoint_at(height) {
-                        if cp.to_byte_array() != block_hash {
-                            return Err(ConsensusError::BadHeader("checkpoint mismatch"));
-                        }
-                    }
-                    let prev_bits =
-                        bitcoin::CompactTarget::from_consensus(prev_plan.header_rec.bits);
-                    let expected = expected_bits_extending(
-                        query,
-                        params,
-                        height,
-                        prev_bits,
-                        prev_plan.header_rec.timestamp,
-                    )?;
-                    if block.header.bits != expected {
-                        return Err(ConsensusError::BadHeader("incorrect proof of work bits"));
-                    }
-                    let target = Target::from_compact(block.header.bits);
-                    if target > params.pow_limit {
-                        return Err(ConsensusError::BadHeader("target above pow limit"));
-                    }
-                    block
-                        .header
-                        .validate_pow(target)
-                        .map_err(|_| ConsensusError::InvalidPow)?;
-                } else {
+                // MTP + prev hash already checked. Do not call validate_header
+                // (second MTP walk + header rehash).
+                let (Some(prev_bits_raw), Some(prev_time)) = (prev_bits_raw, prev_time) else {
                     return Err(ConsensusError::Store(StoreError::Corrupt(
                         "confirm: load incomplete (parent header plan missing above tip)",
                     )));
+                };
+                if let Some(cp) = params.checkpoint_at(height) {
+                    if cp.to_byte_array() != block_hash {
+                        return Err(ConsensusError::BadHeader("checkpoint mismatch"));
+                    }
                 }
+                let prev_bits = bitcoin::CompactTarget::from_consensus(prev_bits_raw);
+                let expected =
+                    expected_bits_extending(query, params, height, prev_bits, prev_time)?;
+                if block.header.bits != expected {
+                    return Err(ConsensusError::BadHeader("incorrect proof of work bits"));
+                }
+                let target = Target::from_compact(block.header.bits);
+                if target > params.pow_limit {
+                    return Err(ConsensusError::BadHeader("target above pow limit"));
+                }
+                block
+                    .header
+                    .validate_pow(target)
+                    .map_err(|_| ConsensusError::InvalidPow)?;
             } else {
                 prev_mtp = 0;
                 validate_header(query, params, height, &block.header)?;
