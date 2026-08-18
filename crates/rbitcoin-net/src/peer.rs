@@ -289,6 +289,11 @@ pub async fn peer_session_with(
     // Untracked keepalive so `connect_nodes` can wait for `bytesrecv_per_msg.pong` ≥ 29
     // before LivePeer ping state is armed. Session peers send a tracked ping ~50ms later.
     let _ = write_v2_msg(&mut writer, NetworkMessage::Ping(rand_nonce())).await;
+    let fee_sat = hub
+        .mempool()
+        .map(|m| m.min_relay_sat_kvb())
+        .unwrap_or(rbitcoin_consensus::policy::MIN_RELAY_FEE_RATE_SAT_PER_KVB);
+    let _ = write_v2_msg(&mut writer, NetworkMessage::FeeFilter(fee_sat as i64)).await;
 
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<NetworkMessage>();
 
@@ -772,6 +777,11 @@ async fn handle_peer_frame(
             queue_out(out_tx, NetworkMessage::Pong(*n))?;
         }
         NetworkMessage::Pong(_) => {}
+        NetworkMessage::FeeFilter(amt) => {
+            if let Some(s) = session {
+                s.note_minfeefilter_sat_kvb((*amt).max(0) as u64);
+            }
+        }
         NetworkMessage::SendHeaders => {
             *peer_wants_headers = true;
         }
@@ -1067,6 +1077,7 @@ async fn handle_peer_frame(
             if let Some(s) = session {
                 s.note_block_from_peer(hash);
                 s.note_best_known(hash);
+                s.note_last_block();
             }
             if !requested_blocks.contains(&hash) {
                 if hub.header_below_minwork(&block.header) {
@@ -1228,7 +1239,11 @@ async fn handle_peer_frame(
                     let txid = tx.compute_txid();
                     from_this_peer.insert(txid, ());
                     match mp.accept_tx(tx) {
-                        Ok(_) => {}
+                        Ok(_) => {
+                            if let Some(s) = session {
+                                s.note_last_transaction();
+                            }
+                        }
                         Err(rbitcoin_mempool::AcceptError::Duplicate(_)) => {}
                         Err(rbitcoin_mempool::AcceptError::Orphaned(_)) => {}
                         Err(rbitcoin_mempool::AcceptError::Policy("mempool full")) => {}

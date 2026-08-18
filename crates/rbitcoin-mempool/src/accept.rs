@@ -318,6 +318,10 @@ impl ActiveMempool {
         self.min_relay_sat_kvb = sat_kvb;
     }
 
+    pub fn min_relay_sat_kvb(&self) -> u64 {
+        self.min_relay_sat_kvb
+    }
+
     /// `persist=false` abandons any on-disk live set (Core `-persistmempool=0`).
     pub fn open_with_limit_persist(
         dir: impl Into<std::path::PathBuf>,

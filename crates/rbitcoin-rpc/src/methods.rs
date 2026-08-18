@@ -21,6 +21,10 @@ use std::time::Instant;
 ///
 /// Store and rust-bitcoin `to_byte_array()` use **internal** byte order; RPC
 /// clients expect the reversed hex (same as `BlockHash`/`Txid` `Display`).
+fn sat_kvb_to_btc(sat_kvb: u64) -> f64 {
+    sat_kvb as f64 / 100_000_000.0
+}
+
 fn hash_hex_display(h: &[u8; 32]) -> String {
     let mut rev = *h;
     rev.reverse();
@@ -352,7 +356,7 @@ fn dispatch_inner(ctx: &RpcContext, method: &str, params: RpcParams) -> Result<V
         }
         "getconnectioncount" => {
             params.reject_unknown(&[])?;
-            Ok(json!(ctx.connections.load(Ordering::Relaxed)))
+            Ok(json!(connection_count(ctx)))
         }
         "getnettotals" => {
             params.reject_unknown(&[])?;
@@ -608,6 +612,10 @@ fn method_help(m: &str) -> String {
         "submitheader" => "submitheader hexdata\n\
              All networks. Persist a header via the P2P header path (`ensure_header`)."
             .into(),
+        "getpeerinfo" => "getpeerinfo\n\
+             Returns data about each connected network node as a json array of objects.\n\
+             Valid networks: (ipv4, ipv6, onion, i2p, cjdns, not_publicly_routable)"
+            .into(),
         "help" => "help\nhelp ( \"command\" ) — list methods or describe one.".into(),
         "echo" => "echo\necho ( arg0 ... arg9 ) — return arguments as a positional array.".into(),
         other if METHOD_LIST.contains(&other) => format!("{other} — see docs/rpc.md"),
@@ -707,12 +715,25 @@ fn getblockchaininfo(ctx: &RpcContext) -> Result<Value, Value> {
     } else {
         (tip as f64 / headers as f64).clamp(0.0, 1.0)
     };
+    let (time, mediantime) = if let Some(h) = ctx.query.tip_height() {
+        if let Ok(Some((_, rec))) = ctx.query.header_at_height(h) {
+            let mtp = rbitcoin_consensus::median_time_past(ctx.query.as_ref(), h)
+                .unwrap_or(rec.timestamp);
+            (rec.timestamp, mtp)
+        } else {
+            (0u32, 0u32)
+        }
+    } else {
+        (0u32, 0u32)
+    };
     Ok(json!({
         "chain": chain_name(ctx.network),
         "blocks": tip,
         "headers": headers,
         "bestblockhash": best,
         "difficulty": difficulty_at_tip(ctx).unwrap_or(0.0),
+        "time": time,
+        "mediantime": mediantime,
         "verificationprogress": verificationprogress,
         "initialblockdownload": ibd,
         "chainwork": chainwork_hex(ctx, ctx.query.tip_height()),
@@ -1000,6 +1021,9 @@ fn peerinfo_json(p: rbitcoin_net::PeerInfo) -> Value {
         "synced_blocks": -1,
         "bip152_hb_to": p.bip152_hb_to,
         "bip152_hb_from": p.bip152_hb_from,
+        "last_block": p.last_block,
+        "last_transaction": p.last_transaction,
+        "minfeefilter": sat_kvb_to_btc(p.minfeefilter_sat_kvb),
     });
     if let Some(v) = p.pingtime {
         row["pingtime"] = json!(v);
@@ -1097,6 +1121,16 @@ fn addconnection(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
         "address": address,
         "connection_type": typ.as_str(),
     }))
+}
+
+/// Live P2P sessions (Core `getconnectioncount`). Inbound + outbound.
+/// Falls back to the outbound-follow counter when no PeerHub is attached.
+fn connection_count(ctx: &RpcContext) -> u64 {
+    if let Some(hub) = ctx.peers.as_ref() {
+        hub.snapshot().len() as u64
+    } else {
+        ctx.connections.load(Ordering::Relaxed)
+    }
 }
 
 fn getnetworkinfo(ctx: &RpcContext) -> Value {
@@ -3207,6 +3241,8 @@ mod tests {
         let info = dispatch(&ctx, "getblockchaininfo", vec![]).unwrap();
         assert_eq!(info["blocks"], 1);
         assert_eq!(info["headers"], 1);
+        assert!(info["time"].as_u64().unwrap() > 0);
+        assert!(info["mediantime"].as_u64().is_some());
         assert_eq!(info["verificationprogress"], 1.0);
         let store_bytes = dir_file_bytes(&dir.join("store"));
         assert_eq!(info["size_on_disk"].as_u64().unwrap(), store_bytes);
@@ -5237,13 +5273,16 @@ mod tests {
         };
         let live = hub.register(addr, bind, &ver, false, PeerConnType::OutboundFullRelay);
         live.note_recv("pong", 8);
-        ctx.peers = Some(hub);
+        ctx.peers = Some(hub.clone());
         let r = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["subver"], "/rbitcoin:0.1.0(testnode0)/");
         assert_eq!(arr[0]["inbound"], false);
         assert_eq!(arr[0]["addr"], "127.0.0.1:18444");
+        assert_eq!(arr[0]["last_block"], 0);
+        assert_eq!(arr[0]["last_transaction"], 0);
+        assert!(arr[0].get("minfeefilter").is_some());
         assert!(arr[0]["bytesrecv_per_msg"]["pong"].as_u64().unwrap() >= 29);
         let net = dispatch(&ctx, "getnetworkinfo", vec![]).unwrap();
         assert_eq!(net["connections_in"], 0);
@@ -5252,6 +5291,15 @@ mod tests {
         let totals = dispatch(&ctx, "getnettotals", vec![]).unwrap();
         assert!(totals["totalbytesrecv"].as_u64().unwrap() >= 29);
         assert_eq!(totals["totalbytessent"].as_u64().unwrap(), 0);
+
+        // rpc_net.py:100 — dual inbound+outbound is two connections, not
+        // outbound-follow-only (ctx.connections stays 0 here).
+        let inbound = hub.register(bind, addr, &ver, true, PeerConnType::Inbound);
+        assert_eq!(
+            dispatch(&ctx, "getconnectioncount", vec![]).unwrap(),
+            json!(2)
+        );
+        drop(inbound);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

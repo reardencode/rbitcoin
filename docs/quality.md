@@ -3,7 +3,7 @@
 What is strong, what still blocks “industry-leading,” and what is already
 closed. Replaces the 2026-08-06 point-in-time audit.
 
-**Last reaudit:** 2026-08-17 (docs map #81, Core functional **32** `run`,
+**Last reaudit:** 2026-08-17 (docs map #81, Core functional **33** `run`,
 no-repo-sniff #85, CI `test` ~85 s). Previous: 2026-08-16 schema 17 +
 harness + Q-15 / Q-42–Q-46.
 
@@ -76,7 +76,7 @@ evidence (failed Core corpus, new dual path, red required CI, MSRV drift).
 | Rank | ID | Item | Tag | Done looks like |
 |-----:|----|------|-----|-----------------|
 | 1 | **Q-30** | Continuous differential fuzz | reliability | A nightly/weekly job that feeds BIP324 + header/block (and script) wire. Crashes → `docs/external_findings/` + named regression. **Today: no fuzz crate, no corpus, no job.** |
-| 2 | **Q-41** | Grow Core functional `run` set | test | Inventory `run` covers the wallet-client / P2P / mempool / buried-activation scripts we **claim**. **Today: 32 / 267.** Next: leftover P2P (`p2p_compactblocks`, headers-sync) and `rpc-missing` / `core-log` that still match claimed node/P2P/miner surface. Product-never skips stay skip (`no-wallet` 68, `no-prune` 7, `no-zmq`/`no-ipc`, `v1-only`). Unlabeled PRs stay cargo-only; nightly green |
+| 2 | **Q-41** | Grow Core functional `run` set | test | Inventory `run` covers the wallet-client / P2P / mempool / buried-activation scripts we **claim**. **Today: 33 / 267.** Next: leftover P2P (`p2p_compactblocks`, headers-sync) and `rpc-missing` / `core-log` that still match claimed node/P2P/miner surface. Product-never skips stay skip (`no-wallet` 68, `no-prune` 7, `no-zmq`/`no-ipc`, `v1-only`). Unlabeled PRs stay cargo-only; nightly green |
 | 3 | **Q-36** | Perf log diet | ops | Default INFO short enough to ship a node without a pager. DEBUG / `tip: perf` keep meters. Getheaders storm (#43) and SH megakey 10 s heartbeat are closed |
 | 4 | **Q-48** | BIP331 rust-bitcoin package types | interop | Native BIP331 `NetworkMessage` when rust-bitcoin exposes it (**RB-007**). Packages today are RPC `submitpackage` / Esplora `POST /txs/package` only — no private P2P command |
 | 5 | **Q-49** | v2-only peer discovery | ops | Tip-follow is not starved by v1-only DNS seeds. Documented v2 seed set and/or addr relay that finds BIP324 peers without dual-stack |
@@ -89,7 +89,7 @@ evidence (failed Core corpus, new dual path, red required CI, MSRV drift).
 | ID | Verdict |
 |----|---------|
 | **Q-30** | Keep. Highest correctness hole. Zero in-tree fuzz. |
-| **Q-41** | Keep. 9 → **32** `run` (Waves A–D leftovers). 235 skips remain; `rpc-missing` + `core-log` are the only growth that matches claimed surface. |
+| **Q-41** | Keep. 9 → **33** `run` (Waves A–D leftovers + `mempool_reorg`). 234 skips remain; `rpc-missing` + `core-log` are the only growth that matches claimed surface. |
 | **Q-37** | **Close.** CI `test` ~85 s (2026-08-17). Recorded in [`TESTING.md`](../TESTING.md). |
 | **Q-47** | **Close.** `size_on_disk` is a store file walk; `verificationprogress` is `blocks/headers`. |
 | **Q-31** | Keep, lowered. Useful for Q-30; not blocking operators. |
@@ -151,7 +151,7 @@ findings 001–021, CI split, map-free README, …) live in
 | **Q-37** | Warm default suite ≤3 min | Required CI `test` **~85 s** (2026-08-17, ubuntu-24.04). Stretch &lt;2 min met on CI-class. Recorded in TESTING.md |
 | **—** | Docs map + one owner per fact | `docs/README.md`; folded store-format / startup-states / future-features / COVERAGE (`#81`) |
 | **—** | Tests assert behavior, not repo text | No `include_str!` of production `.rs` / CONTRIBUTING (`#85`) |
-| **—** | Core functional `run` set | **32** unmodified v31.1 scripts (was 9). Remaining growth is **Q-41** |
+| **—** | Core functional `run` set | **33** unmodified v31.1 scripts (was 9). Remaining growth is **Q-41** |
 | **Q-15 / Q-42–Q-46** | CLI, inbound config, RPC honesty, Libre-only, IO aliases | 2026-08-16 cruft program |
 | **R-01–R-06** | Mempool snapshot, `script_pool`, remine pads, TxGraph cache, llvm-cov pin, tip-follow store integrity | 2026-08-12. Wall leftover was **Q-37** (now closed) |
 | **Q-16 / Q-20 / Q-23** | Residual env, `cargo deny` CI, optional musl artifact | `env-knobs.md`; required `deny`; `musl.yml` after green master `ci` |

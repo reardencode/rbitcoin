@@ -1270,6 +1270,10 @@ impl MempoolHub {
         self.inner.write().unwrap().set_min_relay_sat_kvb(sat_kvb);
     }
 
+    pub fn min_relay_sat_kvb(&self) -> u64 {
+        self.inner.read().unwrap().min_relay_sat_kvb()
+    }
+
     /// In-mempool ancestors of `txid`, **excluding** itself (Core RPC).
     pub fn ancestor_txids(&self, txid: &Txid) -> Option<Vec<Txid>> {
         let g = self.inner.read().unwrap();

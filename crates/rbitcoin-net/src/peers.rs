@@ -15,6 +15,8 @@ use tokio::sync::mpsc;
 pub enum PeerConnType {
     Inbound,
     OutboundFullRelay,
+    /// Core `addnode` / `connect_nodes` (`connection_type` = `manual`).
+    Manual,
     BlockRelay,
     AddrFetch,
     Feeler,
@@ -25,6 +27,7 @@ impl PeerConnType {
         match self {
             Self::Inbound => "inbound",
             Self::OutboundFullRelay => "outbound-full-relay",
+            Self::Manual => "manual",
             Self::BlockRelay => "block-relay-only",
             Self::AddrFetch => "addr-fetch",
             Self::Feeler => "feeler",
@@ -35,6 +38,7 @@ impl PeerConnType {
         match s {
             "inbound" => Ok(Self::Inbound),
             "outbound-full-relay" => Ok(Self::OutboundFullRelay),
+            "manual" => Ok(Self::Manual),
             "block-relay-only" => Ok(Self::BlockRelay),
             "addr-fetch" => Ok(Self::AddrFetch),
             "feeler" => Ok(Self::Feeler),
@@ -97,6 +101,9 @@ pub struct LivePeer {
     owner: std::sync::Weak<PeerHub>,
     recv: Mutex<HashMap<String, u64>>,
     sent: Mutex<HashMap<String, u64>>,
+    last_block: AtomicU64,
+    last_transaction: AtomicU64,
+    minfeefilter_sat_kvb: AtomicU64,
 }
 
 impl LivePeer {
@@ -233,6 +240,20 @@ impl LivePeer {
         self.ping_queued.store(true, Ordering::Relaxed);
     }
 
+    pub fn note_last_block(&self) {
+        self.last_block.store(self.clock_now(), Ordering::Relaxed);
+    }
+
+    pub fn note_last_transaction(&self) {
+        self.last_transaction
+            .store(self.clock_now(), Ordering::Relaxed);
+    }
+
+    pub fn note_minfeefilter_sat_kvb(&self, sat_kvb: u64) {
+        self.minfeefilter_sat_kvb
+            .store(sat_kvb, Ordering::Relaxed);
+    }
+
     pub fn clock_now(&self) -> u64 {
         self.owner
             .upgrade()
@@ -349,6 +370,9 @@ impl LivePeer {
             pingtime,
             minping,
             pingwait,
+            last_block: self.last_block.load(Ordering::Relaxed),
+            last_transaction: self.last_transaction.load(Ordering::Relaxed),
+            minfeefilter_sat_kvb: self.minfeefilter_sat_kvb.load(Ordering::Relaxed),
         }
     }
 }
@@ -401,6 +425,12 @@ pub struct PeerInfo {
     pub pingtime: Option<f64>,
     pub minping: Option<f64>,
     pub pingwait: Option<f64>,
+    /// Unix seconds of last block from this peer (`0` = never).
+    pub last_block: u64,
+    /// Unix seconds of last accepted tx from this peer (`0` = never).
+    pub last_transaction: u64,
+    /// Fee filter they sent us, sat/kvB (`0` = none).
+    pub minfeefilter_sat_kvb: u64,
 }
 
 /// Thread-safe session table + addnode remembered addrs.
@@ -497,6 +527,9 @@ impl PeerHub {
             owner: Arc::downgrade(self),
             recv: Mutex::new(HashMap::new()),
             sent: Mutex::new(HashMap::new()),
+            last_block: AtomicU64::new(0),
+            last_transaction: AtomicU64::new(0),
+            minfeefilter_sat_kvb: AtomicU64::new(0),
         });
         // Handshake already exchanged version + verack (+ maybe ping).
         peer.note_recv("version", 100);
@@ -545,13 +578,13 @@ impl PeerHub {
 
     pub fn addnode(&self, addr: SocketAddr, cmd: &str) -> Result<(), String> {
         match cmd {
-            "onetry" => self.dial(addr, PeerConnType::OutboundFullRelay),
+            "onetry" => self.dial(addr, PeerConnType::Manual),
             "add" => {
                 self.added
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .insert(addr);
-                let _ = self.dial(addr, PeerConnType::OutboundFullRelay);
+                let _ = self.dial(addr, PeerConnType::Manual);
                 Ok(())
             }
             "remove" => {

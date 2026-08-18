@@ -853,7 +853,7 @@ reason = "core-net-policy"
 name = "rpc_blockchain.py"
 status = "skip"
 reason = "rpc-missing"
-analog = "official: future-block init shipped; getblockchaininfo missing 'time' (rpc_blockchain.py:157); prune keys / muhash / getchaintxstats still later"
+analog = "official: getblockchaininfo missing 'time' (rpc_blockchain.py:157); time+mediantime now shipped; prune keys / muhash / getchaintxstats still later"
 
 [[test]]
 name = "rpc_createmultisig.py"
@@ -892,7 +892,7 @@ analog = "follow-up: estimatesmartfee exists; Core multi-horizon text"
 name = "rpc_generate.py"
 status = "skip"
 reason = "rpc-missing"
-analog = "official: getblock(verbose=2) scriptPubKey.address shipped; generateblock combo() not parsed (rpc_generate.py:55)"
+analog = "official: generateblock combo() not parsed (rpc_generate.py:55) 'output must be an address or hex script: odd hex length'"
 
 [[test]]
 name = "rpc_getblockfilter.py"
@@ -904,7 +904,7 @@ analog = "none (no compact filters)"
 name = "rpc_getblockfrompeer.py"
 status = "skip"
 reason = "rpc-missing"
-analog = "official: headers-only competing tip shipped; Method not found: getblockfrompeer (rpc_getblockfrompeer.py:69); prune fetch later"
+analog = "official: Method not found: getblockfrompeer (rpc_getblockfrompeer.py:69); headers-only competing tip shipped; prune fetch later"
 
 [[test]]
 name = "rpc_getblockstats.py"
@@ -961,8 +961,8 @@ status = "run"
 [[test]]
 name = "rpc_net.py"
 status = "skip"
-reason = "core-log"
-analog = "official: getconnectioncount is 1 not 2 after connect_nodes both ways (rpc_net.py:100); -proxy/-deprecatedrpc ignored; addrman/getnettotals/setnetworkactive still missing"
+reason = "core-net-policy"
+analog = "official: dual-connect getconnectioncount + last_block/last_transaction/minfeefilter/manual/help shipped; getpeerinfo before version: v1 magic mismatch (rpc_net.py:138 add_p2p_connection send_version=False); v2 wait_for_new_peer (pre-version session); addrman/setnetworkactive later"
 
 [[test]]
 name = "rpc_orphans.py"
