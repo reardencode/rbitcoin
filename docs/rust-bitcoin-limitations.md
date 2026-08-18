@@ -35,7 +35,7 @@ rust-bitcoin helper,” put it **here**; when the engine still disagrees with Co
 | RB-006 | PoW / retarget | Compact target / retarget math lives in rust-bitcoin | `expected_next_bits` / `validate_pow` via rust-bitcoin; H7 documented as delegated | `header.rs`; [consensus-tests H7](./consensus-tests.md) | mitigated | We do not reimplement PoW math |
 | RB-007 | BIP331 / wire types | Some P2P message types not exposed yet | Track outside script; COMPAT / experimental docs | `COMPAT.md`, `experimental-mainnet.md` | open | Not an allowlist issue |
 | RB-008 | Full script engine | rust-bitcoin is **not** a Core script consensus engine; we intentionally avoid `bitcoinconsensus` | In-tree pure-Rust `rbitcoin-consensus::script` | `architecture.md` | mitigated (by design) | Core corpora all-rows-pass |
-| RB-009 | Structure / BIP143 midstates | `compute_txid`/`compute_wtxid`/`block.weight` plus `SighashCache` rewalk prevouts | `TxPrecompute` one-pass at lookup; load reuses stash; rust-bitcoin is the unit oracle | `query/tx_precompute.rs`; `script::crypto::bip143_*` | mitigated | SHA-NI already in `bitcoin_hashes` 0.14; do not add `sha2` for that |
+| RB-009 | Structure / BIP143 midstates | `compute_txid`/`compute_wtxid`/`block.weight` plus `SighashCache` rewalk prevouts | `TxPrecompute` one-pass at lookup; load + script jobs reuse stash; rust-bitcoin is the unit oracle | `query/tx_precompute.rs`; `script::crypto::bip143_*` | mitigated | SHA-NI already in `bitcoin_hashes` 0.14; do not add `sha2` for that |
 
 ## Related
 

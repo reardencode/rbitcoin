@@ -25,6 +25,13 @@ before 1.0).
   on Query. Lookup decodes each BQ height once, promotes to decoded-only
   (drops raw; `bytes()` keeps `max(payload, decoded)` charge; one mutex
   per wave), and load pack / structure reuse `Arc<Block>` + pres.
+  Script jobs carry that pres (no job `from_tx` / `finish_spent`;
+  WitnessV0 does not rehash per CHECKSIG). `SighashCache` is lazy
+  (P2WPKH does not construct one). Stamp loads published/recent once
+  per pack (`TxidHasher` on remaining txid maps); lookup keep uses a
+  height `BTreeSet` (`range`, not `lo..=hi` / `list_meta`). Assemble
+  confirmed-parent skips `validate_header` after the MTP walk; one
+  `pending_spent` set; assemble clocks flush once per block.
   `ibd: sizes` adds `bq_dec=`. BIP143 P2WPKH/P2WSH / interpreter consume
   those midstates. `stamp_sub` adds `struct_txid=` / `struct_walk=`.
   rust-bitcoin remains the test oracle. Taproot still uses `SighashCache`.
