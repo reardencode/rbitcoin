@@ -1553,6 +1553,12 @@ impl Query {
         g.list_meta()
     }
 
+    /// Distinct queued heights (one lock). Lookup keep must not use `list_meta`.
+    pub fn block_queue_queued_heights(&self) -> std::collections::BTreeSet<u32> {
+        let g = self.block_queue.lock().unwrap();
+        g.heights().into_iter().collect()
+    }
+
     /// Lowest unresolved BQ heights `≥ path_lo` not in `skip`, capped at `cap`.
     ///
     /// One queue lock. Lookup wave select must use this instead of

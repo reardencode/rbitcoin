@@ -42,6 +42,19 @@ struct Inner {
     fifo: VecDeque<(u32, Vec<[u8; 32]>)>,
 }
 
+/// Immutable live map for one stamp pack.
+#[derive(Clone)]
+pub struct RecentSnap(std::sync::Arc<LiveMap>);
+
+impl RecentSnap {
+    pub fn get(&self, txid: &[u8; 32]) -> Option<(Fk, (u64, u64))> {
+        if *txid == [0u8; 32] {
+            return None;
+        }
+        self.0.get(txid).map(|e| (e.fk, e.range))
+    }
+}
+
 /// Write-published, load-read identity ring.
 pub struct RecentCreates {
     live: ArcSwap<LiveMap>,
@@ -133,10 +146,12 @@ impl RecentCreates {
 
     /// Point get. Zero txid is never a hit. Lock-free snapshot load.
     pub fn get(&self, txid: &[u8; 32]) -> Option<(Fk, (u64, u64))> {
-        if *txid == [0u8; 32] {
-            return None;
-        }
-        self.live.load().get(txid).map(|e| (e.fk, e.range))
+        self.snapshot().get(txid)
+    }
+
+    /// One Arc for a stamp pack (do not `load` per parent).
+    pub fn snapshot(&self) -> RecentSnap {
+        RecentSnap(self.live.load_full())
     }
 
     /// Occupancy for `ibd: sizes`.

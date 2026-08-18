@@ -166,6 +166,11 @@ impl LiveUnion {
         self.head = splice_kept(self.head.take(), keep);
     }
 
+    /// Same as [`Self::keep_heights`] using a queued-height set (`range`, not `lo..=hi`).
+    pub fn keep_queued_heights(&mut self, queued: &std::collections::BTreeSet<u32>) {
+        self.head = splice_queued(self.head.take(), queued);
+    }
+
     /// Prepend one layer covering `lo..=hi` (inclusive).
     pub fn note_span(&mut self, lo: u32, hi: u32, hits: &IdMap) {
         let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
@@ -211,6 +216,11 @@ fn span_kept(lo: u32, hi: u32, keep: &impl Fn(u32) -> bool) -> bool {
     (lo..=hi).any(keep)
 }
 
+/// True when any height in `queued` falls in `lo..=hi` (no 1080-wide walk).
+pub fn span_overlaps_queued(lo: u32, hi: u32, queued: &std::collections::BTreeSet<u32>) -> bool {
+    queued.range(lo..=hi).next().is_some()
+}
+
 /// Rebuild the chain keeping nodes that still have a queued height in span.
 /// Kept hit maps are `Arc`-cloned; suffix nodes whose `older` is unchanged
 /// are reused.
@@ -225,6 +235,41 @@ fn splice_kept(head: Option<Arc<IdLayer>>, keep: impl Fn(u32) -> bool) -> Option
     let mut new_head: Option<Arc<IdLayer>> = None;
     for n in nodes.into_iter().rev() {
         if !span_kept(n.lo, n.hi, &keep) {
+            continue;
+        }
+        let older_ok = match (n.older.as_ref(), new_head.as_ref()) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        };
+        if older_ok {
+            new_head = Some(n);
+        } else {
+            new_head = Some(Arc::new(IdLayer {
+                lo: n.lo,
+                hi: n.hi,
+                hits: Arc::clone(&n.hits),
+                older: new_head,
+            }));
+        }
+    }
+    new_head
+}
+
+fn splice_queued(
+    head: Option<Arc<IdLayer>>,
+    queued: &std::collections::BTreeSet<u32>,
+) -> Option<Arc<IdLayer>> {
+    let mut nodes = Vec::new();
+    let mut cur = head;
+    while let Some(n) = cur {
+        let older = n.older.clone();
+        nodes.push(n);
+        cur = older;
+    }
+    let mut new_head: Option<Arc<IdLayer>> = None;
+    for n in nodes.into_iter().rev() {
+        if !span_overlaps_queued(n.lo, n.hi, queued) {
             continue;
         }
         let older_ok = match (n.older.as_ref(), new_head.as_ref()) {
@@ -386,6 +431,15 @@ mod tests {
             Arc::ptr_eq(&head.hits, &kept_hits),
             "kept layer hit map must not be cloned"
         );
+    }
+
+    #[test]
+    fn span_overlaps_queued_does_not_walk_width() {
+        let mut q = std::collections::BTreeSet::new();
+        q.insert(500);
+        assert!(span_overlaps_queued(0, 1079, &q));
+        assert!(!span_overlaps_queued(0, 499, &q));
+        assert!(!span_overlaps_queued(501, 1079, &q));
     }
 
     #[test]

@@ -285,12 +285,8 @@ pub fn confirm_bq_resolve_wave_with_ids(
             live.note_span(lo, hi, &hits);
         }
         let t_keep = Instant::now();
-        let queued: HashSet<u32> = query
-            .block_queue_list_meta()
-            .into_iter()
-            .map(|m| m.height)
-            .collect();
-        live.keep_heights(|h| queued.contains(&h));
+        let queued = query.block_queue_queued_heights();
+        live.keep_queued_heights(&queued);
         live.publish(published);
         crate::confirm_phase_stats::LOOKUP_KEEP_NS
             .fetch_add(t_keep.elapsed().as_nanos() as u64, Ordering::Relaxed);

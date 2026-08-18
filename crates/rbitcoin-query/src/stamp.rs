@@ -3,17 +3,21 @@
 //! One function for S0 plan (`archive_plan_batch_from_store`) and plan=None
 //! rehydrate. Pipeline parent store is outs only — not a create_fk source.
 
+use crate::published_ids::TxidHasher;
 use crate::{InFlightView, PublishedIds, QueryError, RecentCreates, U64Map, U64Set};
 use rbitcoin_primitives::Fk;
 use rbitcoin_store::Store;
 use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
 use std::time::Instant;
+
+type TxidFkMap = HashMap<[u8; 32], Fk, BuildHasherDefault<TxidHasher>>;
 
 /// Lookup-stamped external parent identity (same-batch stays offline at pin).
 #[derive(Debug, Default, Clone)]
 pub struct ExternalParentStamp {
     /// prev_txid → create_fk
-    pub resolved: HashMap<[u8; 32], Fk>,
+    pub resolved: TxidFkMap,
     /// create_fk_id → Class A body range
     pub ranges: U64Map<(u64, u64)>,
     /// create_fk_id → prev_txid
@@ -40,8 +44,10 @@ pub fn stamp_external_parents(
     published: &PublishedIds,
     recent: &RecentCreates,
 ) -> Result<ExternalParentStamp, QueryError> {
+    let pub_head = published.load();
+    let recent_snap = recent.snapshot();
     let mut stamp = ExternalParentStamp {
-        resolved: HashMap::with_capacity(need.len() / 2),
+        resolved: TxidFkMap::with_capacity_and_hasher(need.len() / 2, Default::default()),
         txids: U64Map::with_capacity_and_hasher(need.len(), Default::default()),
         ..ExternalParentStamp::default()
     };
@@ -66,7 +72,7 @@ pub fn stamp_external_parents(
     let t_pin_txid = Instant::now();
     let mut after_pub: Vec<&[u8; 32]> = Vec::new();
     for t in still_need {
-        if let Some((fk, range)) = published.get(t) {
+        if let Some((fk, range)) = pub_head.as_ref().and_then(|h| h.get(t)) {
             stamp.resolved.insert(*t, fk);
             if let Some(id) = fk.get() {
                 stamp.ranges.insert(id, range);
@@ -82,7 +88,7 @@ pub fn stamp_external_parents(
     let t_recent = Instant::now();
     let mut need_head: Vec<[u8; 32]> = Vec::new();
     for t in after_pub {
-        if let Some((fk, range)) = recent.get(t) {
+        if let Some((fk, range)) = recent_snap.get(t) {
             stamp.resolved.insert(*t, fk);
             if let Some(id) = fk.get() {
                 stamp.ranges.insert(id, range);
