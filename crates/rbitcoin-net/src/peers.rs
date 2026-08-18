@@ -250,8 +250,7 @@ impl LivePeer {
     }
 
     pub fn note_minfeefilter_sat_kvb(&self, sat_kvb: u64) {
-        self.minfeefilter_sat_kvb
-            .store(sat_kvb, Ordering::Relaxed);
+        self.minfeefilter_sat_kvb.store(sat_kvb, Ordering::Relaxed);
     }
 
     pub fn clock_now(&self) -> u64 {
