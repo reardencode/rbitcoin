@@ -111,6 +111,7 @@ mod tests {
             witness_active: true,
             discourage_upgradable_witness: false,
             const_scriptcode: false,
+            pre: std::sync::OnceLock::new(),
         };
         assert!(verify(&job, 0, &*job.tx).is_err());
 

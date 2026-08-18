@@ -737,6 +737,7 @@ fn run_script_row(
             .iter()
             .any(|e| e == "DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM"),
         const_scriptcode: flags.extra.iter().any(|e| e == "CONST_SCRIPTCODE"),
+        pre: std::sync::OnceLock::new(),
     };
     verify_job_all_inputs(&job).map_err(|e| format!("{e}"))
 }

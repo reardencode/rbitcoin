@@ -125,6 +125,7 @@ mod tests {
             witness_active: true,
             discourage_upgradable_witness: false,
             const_scriptcode: false,
+            pre: std::sync::OnceLock::new(),
         };
         let mut cache = SighashCache::new(&*job.tx);
         let err = verify(&job, 0, &*job.tx, &mut cache).unwrap_err();

@@ -242,6 +242,7 @@ mod tests {
             witness_active,
             discourage_upgradable_witness: false,
             const_scriptcode: false,
+            pre: std::sync::OnceLock::new(),
         }
     }
 
@@ -517,6 +518,7 @@ mod tests {
             witness_active: true,
             discourage_upgradable_witness: false,
             const_scriptcode: false,
+            pre: std::sync::OnceLock::new(),
         };
         let mut cache = SighashCache::new(&*job.tx);
         let r = try_p2sh_nested_segwit(
@@ -551,6 +553,7 @@ mod tests {
             witness_active: true,
             discourage_upgradable_witness: false,
             const_scriptcode: false,
+            pre: std::sync::OnceLock::new(),
         };
         let mut cache2 = SighashCache::new(&*job2.tx);
         assert!(matches!(
@@ -596,6 +599,7 @@ mod tests {
             witness_active: true,
             discourage_upgradable_witness: false,
             const_scriptcode: false,
+            pre: std::sync::OnceLock::new(),
         };
         assert!(matches!(
             try_p2sh_nested_segwit(
@@ -630,6 +634,7 @@ mod tests {
             witness_active: true,
             discourage_upgradable_witness: false,
             const_scriptcode: false,
+            pre: std::sync::OnceLock::new(),
         };
         assert!(matches!(
             try_p2sh_nested_segwit(
@@ -667,6 +672,7 @@ mod tests {
             witness_active: true,
             discourage_upgradable_witness: false,
             const_scriptcode: false,
+            pre: std::sync::OnceLock::new(),
         };
         let mut c5 = SighashCache::new(&*job5.tx);
         assert!(try_p2sh_nested_segwit(
@@ -704,6 +710,7 @@ mod tests {
             witness_active: true,
             discourage_upgradable_witness: false,
             const_scriptcode: false,
+            pre: std::sync::OnceLock::new(),
         };
         assert!(verify_p2sh_legacy(&job_e, 0, &*job_e.tx).is_err());
         // Hash mismatch on legacy
@@ -731,6 +738,7 @@ mod tests {
             witness_active: true,
             discourage_upgradable_witness: false,
             const_scriptcode: false,
+            pre: std::sync::OnceLock::new(),
         };
         assert!(verify_p2sh_legacy(&job_h, 0, &*job_h.tx).is_err());
     }
@@ -769,6 +777,7 @@ mod tests {
             witness_active: true,
             discourage_upgradable_witness: false,
             const_scriptcode: false,
+            pre: std::sync::OnceLock::new(),
         };
         // Empty witness → p2wsh fails, but nested path reached scripthash copy + call.
         assert!(matches!(
@@ -813,6 +822,7 @@ mod tests {
             witness_active: true,
             discourage_upgradable_witness: false,
             const_scriptcode: false,
+            pre: std::sync::OnceLock::new(),
         };
         let mut cache = SighashCache::new(&*job2.tx);
         assert!(matches!(
@@ -855,6 +865,7 @@ mod tests {
             witness_active: true,
             discourage_upgradable_witness: false,
             const_scriptcode: false,
+            pre: std::sync::OnceLock::new(),
         };
         assert!(verify_p2sh_legacy(&job3, 0, &*job3.tx).is_ok());
 

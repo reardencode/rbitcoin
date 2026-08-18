@@ -604,6 +604,7 @@ pub fn validate_block_connect(
         &block_hash,
         bip16_active,
         None,
+        None,
     )?;
     if check_scripts && !script_jobs.is_empty() {
         verify_scripts_pool(&script_jobs)?;
@@ -791,6 +792,8 @@ pub struct ScriptCheckJob {
     pub(crate) discourage_upgradable_witness: bool,
     /// SCRIPT_VERIFY_CONST_SCRIPTCODE: CODESEPARATOR + FindAndDelete hard-fail.
     pub(crate) const_scriptcode: bool,
+    /// Lookup/structure `TxPrecompute`. Set on the confirm path; tests lazy-`from_tx`.
+    pub(crate) pre: std::sync::OnceLock<std::sync::Arc<rbitcoin_query::TxPrecompute>>,
 }
 
 impl ScriptCheckJob {
@@ -900,7 +903,29 @@ impl ScriptCheckJob {
             witness_active: true,
             discourage_upgradable_witness: false,
             const_scriptcode: false,
+            pre: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Confirm path: reuse structure/lookup pres (no job `from_tx`).
+    #[inline]
+    pub(crate) fn with_pre(self, pre: std::sync::Arc<rbitcoin_query::TxPrecompute>) -> Self {
+        let _ = self.pre.set(pre);
+        self
+    }
+
+    #[inline]
+    pub(crate) fn pre_arc(&self) -> std::sync::Arc<rbitcoin_query::TxPrecompute> {
+        self.pre
+            .get_or_init(|| std::sync::Arc::new(rbitcoin_query::TxPrecompute::from_tx(&*self.tx)))
+            .clone()
+    }
+
+    #[inline]
+    pub(crate) fn pre(&self) -> &rbitcoin_query::TxPrecompute {
+        self.pre
+            .get_or_init(|| std::sync::Arc::new(rbitcoin_query::TxPrecompute::from_tx(&*self.tx)))
+            .as_ref()
     }
 
     /// BIP141/147: NULLDUMMY + WITNESS rules follow `segwit` (not CSV).
@@ -998,6 +1023,7 @@ pub(crate) fn assemble_block_prevouts(
     block_hash: &[u8; 32],
     bip16_active: bool,
     wire: Option<&Arc<Block>>,
+    pres: Option<&[rbitcoin_query::TxPrecompute]>,
 ) -> Result<
     (
         Vec<ScriptCheckJob>,
@@ -1026,6 +1052,7 @@ pub(crate) fn assemble_block_prevouts(
         block_hash,
         bip16_active,
         wire,
+        pres,
     )
 }
 
@@ -1044,6 +1071,7 @@ fn assemble_block_prevouts_mode(
     block_hash: &[u8; 32],
     bip16_active: bool,
     wire: Option<&Arc<Block>>,
+    pres: Option<&[rbitcoin_query::TxPrecompute]>,
 ) -> Result<
     (
         Vec<ScriptCheckJob>,
@@ -1298,7 +1326,7 @@ fn assemble_block_prevouts_mode(
             if build_script_jobs {
                 let t_job = Instant::now();
                 // Reuse A1 wire txid — scripts stage must not re-hash for preverified.
-                let job = if let Some(w) = wire {
+                let mut job = if let Some(w) = wire {
                     ScriptCheckJob::with_shared_tx(
                         txid,
                         prevouts,
@@ -1324,6 +1352,9 @@ fn assemble_block_prevouts_mode(
                     )
                     .with_segwit(ctx.params.segwit_active_at(ctx.height.0))
                 };
+                if let Some(p) = pres.and_then(|ps| ps.get(ti)) {
+                    job = job.with_pre(Arc::new(p.clone()));
+                }
                 script_jobs.push(job);
                 confirm_phase_stats::ASM_JOB_NS
                     .fetch_add(t_job.elapsed().as_nanos() as u64, Ordering::Relaxed);

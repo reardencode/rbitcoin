@@ -847,6 +847,7 @@ fn assemble_full_mode_spend_and_bip68() {
         &bh,
         bip16_active_from_prev_mtp(ctx.params, ctx.height.0, &bh, 0),
         None,
+        None,
     );
     // Immature coinbase or spentness walk — either exercises Full arms.
     let _ = r;
@@ -896,6 +897,7 @@ fn assemble_rejects_empty_and_fk_mismatch() {
         &zero,
         false,
         None,
+        None,
     )
     .err()
     .expect("empty");
@@ -924,6 +926,7 @@ fn assemble_rejects_empty_and_fk_mismatch() {
         &bh,
         false,
         None,
+        None,
     )
     .err()
     .expect("fk mismatch");
@@ -951,6 +954,7 @@ fn assemble_rejects_empty_and_fk_mismatch() {
         0,
         &bh3,
         false,
+        None,
         None,
     )
     .err()
@@ -1012,6 +1016,7 @@ fn assemble_pending_creates_is_txid_map_and_meters_flush() {
         0,
         &bh,
         bip16,
+        None,
         None,
     )
     .expect("coinbase-only assemble");

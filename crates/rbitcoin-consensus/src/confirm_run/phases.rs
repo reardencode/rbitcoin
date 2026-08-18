@@ -171,6 +171,7 @@ pub(super) fn assemble_run(
             &block_hash,
             bip16_active,
             Some(block),
+            Some(meta.pres.as_ref()),
         )?;
         confirm_phase_stats::CONNECT_NS
             .fetch_add(t_connect.elapsed().as_nanos() as u64, Ordering::Relaxed);

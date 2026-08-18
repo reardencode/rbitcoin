@@ -385,6 +385,7 @@ pub(super) fn wire_lookup_phase(
             header_rec,
             tx_fks: Vec::new(),
             txids,
+            pres: std::sync::Arc::from(pres),
         });
     }
 
@@ -766,6 +767,7 @@ mod tests {
             },
             tx_fks: Vec::new(),
             txids: Vec::new(),
+            pres: std::sync::Arc::from(Vec::new()),
         };
         let stamp = stamp_parent_pin_archived(
             &q,

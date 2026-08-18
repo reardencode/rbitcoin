@@ -74,6 +74,7 @@ fn make_p2wpkh_spend() -> (ScriptCheckJob, bool) {
         witness_active: true,
         discourage_upgradable_witness: false,
         const_scriptcode: false,
+        pre: std::sync::OnceLock::new(),
     };
     (job, true)
 }
@@ -163,6 +164,7 @@ fn mainnet_508011_nested_p2wpkh_raw_sighash_0x65() {
         witness_active: true,
         discourage_upgradable_witness: false,
         const_scriptcode: false,
+        pre: std::sync::OnceLock::new(),
     };
     script::verify_job_all_inputs(&job).unwrap_or_else(|e| {
         panic!(
@@ -211,6 +213,7 @@ fn anyone_can_spend_accepts() {
         witness_active: true,
         discourage_upgradable_witness: false,
         const_scriptcode: false,
+        pre: std::sync::OnceLock::new(),
     };
     script::verify_job_all_inputs(&job).expect("op_true");
 }
@@ -257,6 +260,7 @@ fn pretaproot_v1_witness_program_anyone_can_spend() {
         witness_active: true,
         discourage_upgradable_witness: false,
         const_scriptcode: false,
+        pre: std::sync::OnceLock::new(),
     };
     script::verify_job_all_inputs(&job).expect("pre-taproot v1 ACS");
 }
@@ -301,6 +305,7 @@ fn empty_script_pubkey_rejects() {
         witness_active: true,
         discourage_upgradable_witness: false,
         const_scriptcode: false,
+        pre: std::sync::OnceLock::new(),
     };
     assert!(
         script::verify_job_all_inputs(&job).is_err(),
@@ -379,6 +384,7 @@ fn p2pkh_valid_signature_accepts() {
         witness_active: true,
         discourage_upgradable_witness: false,
         const_scriptcode: false,
+        pre: std::sync::OnceLock::new(),
     };
     script::verify_job_all_inputs(&job).expect("valid p2pkh");
 }
@@ -430,6 +436,7 @@ fn p2wsh_op_true_accepts() {
         witness_active: true,
         discourage_upgradable_witness: false,
         const_scriptcode: false,
+        pre: std::sync::OnceLock::new(),
     };
     script::verify_job_all_inputs(&job).expect("p2wsh op_true");
 }
@@ -476,6 +483,7 @@ fn p2wsh_wrong_script_hash_rejects() {
         witness_active: true,
         discourage_upgradable_witness: false,
         const_scriptcode: false,
+        pre: std::sync::OnceLock::new(),
     };
     assert!(script::verify_job_all_inputs(&job).is_err());
 }
@@ -555,6 +563,7 @@ fn p2sh_p2wpkh_nested_accepts() {
         witness_active: true,
         discourage_upgradable_witness: false,
         const_scriptcode: false,
+        pre: std::sync::OnceLock::new(),
     };
     script::verify_job_all_inputs(&job).expect("p2sh-p2wpkh");
 }
@@ -614,6 +623,7 @@ fn p2sh_legacy_multi_push_op_true_accepts() {
         witness_active: true,
         discourage_upgradable_witness: false,
         const_scriptcode: false,
+        pre: std::sync::OnceLock::new(),
     };
     script::verify_job_all_inputs(&job).expect("p2sh multi-push legacy");
 }
@@ -658,6 +668,7 @@ fn mainnet_block_183_high_s_p2pk_accepts() {
         witness_active: true,
         discourage_upgradable_witness: false,
         const_scriptcode: false,
+        pre: std::sync::OnceLock::new(),
     };
     script::verify_job_all_inputs(&job).expect("mainnet 183 high-S P2PK must verify");
 }
@@ -706,6 +717,7 @@ fn mainnet_block_110300_sighash_type_zero_p2pkh() {
         witness_active: true,
         discourage_upgradable_witness: false,
         const_scriptcode: false,
+        pre: std::sync::OnceLock::new(),
     };
     script::verify_job_all_inputs(&job).expect("hashtype 0 P2PKH must verify");
 }
@@ -762,6 +774,7 @@ fn mainnet_block_124276_lax_der_pre_bip66() {
         witness_active: true,
         discourage_upgradable_witness: false,
         const_scriptcode: false,
+        pre: std::sync::OnceLock::new(),
     };
     script::verify_job_all_inputs(&job).expect("pre-BIP66 lax DER must verify");
 
@@ -924,6 +937,7 @@ fn mainnet_block_170060_pre_bip16_p2sh_as_bare() {
         witness_active: true,
         discourage_upgradable_witness: false,
         const_scriptcode: false,
+        pre: std::sync::OnceLock::new(),
     };
     script::verify_job_all_inputs(&job).expect("pre-BIP16 P2SH-shape must verify as bare");
 
@@ -985,6 +999,7 @@ fn mainnet_block_163685_scriptsig_codeseparator_checkmultisig() {
         witness_active: true,
         discourage_upgradable_witness: false,
         const_scriptcode: false,
+        pre: std::sync::OnceLock::new(),
     };
     script::verify_job_all_inputs(&job)
         .expect("bare CODESEPARATOR+CHECKMULTISIG scriptSig must verify");
@@ -1038,6 +1053,7 @@ fn mainnet_block_140493_high_bit_s_lax_der_p2pkh() {
         witness_active: true,
         discourage_upgradable_witness: false,
         const_scriptcode: false,
+        pre: std::sync::OnceLock::new(),
     };
     script::verify_job_all_inputs(&job).expect("pre-BIP66 high-bit-S DER must verify");
 
@@ -1094,6 +1110,7 @@ fn mainnet_block_443992_p2sh_codeseparator_scriptcode() {
         witness_active: true,
         discourage_upgradable_witness: false,
         const_scriptcode: false,
+        pre: std::sync::OnceLock::new(),
     };
     script::verify_job_all_inputs(&job)
         .expect("P2SH redeem with CODESEPARATOR must verify under Core scriptCode rules");
@@ -1140,6 +1157,7 @@ fn cltv_in_scriptsig_with_op_true_spk_enforced() {
         witness_active: false,
         discourage_upgradable_witness: false,
         const_scriptcode: false,
+        pre: std::sync::OnceLock::new(),
     };
     let err = script::verify_job_all_inputs(&job).expect_err("CLTV in scriptSig must run");
     assert!(
@@ -1191,6 +1209,7 @@ fn unknown_witness_v16_accepts_without_discourage() {
         witness_active: true,
         discourage_upgradable_witness: false,
         const_scriptcode: false,
+        pre: std::sync::OnceLock::new(),
     };
     script::verify_job_all_inputs(&job).expect("unknown v16 ACS without discourage");
 }
@@ -1236,6 +1255,7 @@ fn unknown_witness_v16_malleated_scriptsig() {
         witness_active: true,
         discourage_upgradable_witness: false,
         const_scriptcode: false,
+        pre: std::sync::OnceLock::new(),
     };
     let err = script::verify_job_all_inputs(&job).expect_err("malleated");
     assert!(
@@ -1286,6 +1306,7 @@ fn unknown_witness_v16_discourage_rejects() {
         witness_active: true,
         discourage_upgradable_witness: true,
         const_scriptcode: false,
+        pre: std::sync::OnceLock::new(),
     };
     let err = script::verify_job_all_inputs(&job).expect_err("discourage");
     assert!(format!("{err}").contains("DISCOURAGE"), "got {err}");
@@ -1338,6 +1359,7 @@ fn p2wsh_oversized_witness_element_rejected() {
         witness_active: true,
         discourage_upgradable_witness: false,
         const_scriptcode: false,
+        pre: std::sync::OnceLock::new(),
     };
     let err = script::verify_job_all_inputs(&job).expect_err("oversized element");
     let s = format!("{err}");
@@ -1404,6 +1426,7 @@ fn p2wsh_witness_script_larger_than_520_is_valid() {
         witness_active: true,
         discourage_upgradable_witness: false,
         const_scriptcode: false,
+        pre: std::sync::OnceLock::new(),
     };
     script::verify_job_all_inputs(&job).expect(
         "P2WSH witnessScript >520 must verify (Core ExecuteWitnessScript after SpanPopBack)",

@@ -86,6 +86,8 @@ struct BodyMeta {
     /// Create txids for this block — **exactly one** `compute_txid` per entry
     /// at structure/entry (plan or archived load). Assemble must use these only.
     txids: Vec<[u8; 32]>,
+    /// Same walk as `txids` (lookup/structure). Script jobs reuse these.
+    pres: std::sync::Arc<[rbitcoin_query::TxPrecompute]>,
 }
 
 /// Assemble output for one height (held through scripts → write).
@@ -338,6 +340,7 @@ pub fn confirm_wire_load_phase_pipelined(
             header_rec,
             tx_fks: Vec::new(),
             txids,
+            pres: std::sync::Arc::from(pres),
         });
     }
 

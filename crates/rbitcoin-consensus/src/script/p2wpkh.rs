@@ -146,6 +146,7 @@ mod tests {
             witness_active: true,
             discourage_upgradable_witness: false,
             const_scriptcode: false,
+            pre: std::sync::OnceLock::new(),
         }
     }
 

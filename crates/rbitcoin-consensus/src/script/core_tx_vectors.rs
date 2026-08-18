@@ -642,6 +642,7 @@ fn verify_tx_row(
         witness_active: flags.witness,
         discourage_upgradable_witness: flags.discourage_upgradable_witness,
         const_scriptcode: flags.const_scriptcode,
+        pre: std::sync::OnceLock::new(),
     };
     script::verify_job_all_inputs(&job).map_err(|e| format!("{e}"))
 }

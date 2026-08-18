@@ -230,6 +230,7 @@ mod bip341_tests {
             witness_active: true,
             discourage_upgradable_witness: false,
             const_scriptcode: false,
+            pre: std::sync::OnceLock::new(),
         };
         (job, control)
     }
@@ -300,6 +301,7 @@ mod bip341_tests {
             witness_active: true,
             discourage_upgradable_witness: false,
             const_scriptcode: false,
+            pre: std::sync::OnceLock::new(),
         };
         script::verify_job_all_inputs(&job)
             .expect("unknown tapleaf must succeed after BIP341 commitment");
@@ -371,6 +373,7 @@ mod bip341_tests {
             witness_active: true,
             discourage_upgradable_witness: false,
             const_scriptcode: false,
+            pre: std::sync::OnceLock::new(),
         };
         let mut cache = SighashCache::new(&*job.tx);
         assert!(verify(&job, 0, &*job.tx, &mut cache).is_err());
@@ -439,6 +442,7 @@ mod bip341_tests {
             witness_active: true,
             discourage_upgradable_witness: false,
             const_scriptcode: false,
+            pre: std::sync::OnceLock::new(),
         };
         script::verify_job_all_inputs(&job).expect("p2tr key path");
     }
@@ -502,6 +506,7 @@ mod bip341_tests {
             witness_active: true,
             discourage_upgradable_witness: false,
             const_scriptcode: false,
+            pre: std::sync::OnceLock::new(),
         };
         let err = script::verify_job_all_inputs(&job).expect_err("0x00 sighash must fail");
         let msg = format!("{err}");
@@ -585,6 +590,7 @@ mod bip341_tests {
                 witness_active: true,
                 discourage_upgradable_witness: false,
                 const_scriptcode: false,
+                pre: std::sync::OnceLock::new(),
             };
             let err = script::verify_job_all_inputs(&job).unwrap_err();
             assert!(
@@ -626,6 +632,7 @@ mod bip341_tests {
                 witness_active: true,
                 discourage_upgradable_witness: false,
                 const_scriptcode: false,
+                pre: std::sync::OnceLock::new(),
             };
             script::verify_job_all_inputs(&job).expect("key path + annex");
         }
@@ -697,6 +704,7 @@ mod bip341_tests {
             witness_active: true,
             discourage_upgradable_witness: false,
             const_scriptcode: false,
+            pre: std::sync::OnceLock::new(),
         };
         script::verify_job_all_inputs(&job).expect("empty annex payload");
     }
@@ -792,6 +800,7 @@ mod bip341_tests {
             witness_active: true,
             discourage_upgradable_witness: false,
             const_scriptcode: false,
+            pre: std::sync::OnceLock::new(),
         };
         script::verify_job_all_inputs(&job).expect("script path + annex CHECKSIG");
     }
@@ -875,6 +884,7 @@ mod bip341_tests {
             witness_active: true,
             discourage_upgradable_witness: false,
             const_scriptcode: false,
+            pre: std::sync::OnceLock::new(),
         };
         script::verify_job_all_inputs(&job).expect("two-leaf script path");
     }
@@ -994,6 +1004,7 @@ mod bip341_tests {
             witness_active: true,
             discourage_upgradable_witness: false,
             const_scriptcode: false,
+            pre: std::sync::OnceLock::new(),
         };
         script::verify_job_all_inputs(&job).expect("CODESEPARATOR chain must verify");
     }
@@ -1044,6 +1055,7 @@ mod bip341_tests {
             witness_active: true,
             discourage_upgradable_witness: false,
             const_scriptcode: false,
+            pre: std::sync::OnceLock::new(),
         };
         assert!(script::verify_job_all_inputs(&job).is_err());
     }
