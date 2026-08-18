@@ -1,19 +1,25 @@
 //! Lightweight parallel script-check pool (replaces rayon on the hot path).
 //!
-//! Production: (1) [`try_for_each_parallel`] steals indices on the process-wide
-//! `rbtc-scripts-*` workers; (2) [`spawn_detached`] / [`run_detached_join`] for
-//! mempool accept. Confirm scripts phases run on [`spawn_coordinator`], not on
-//! steal workers (a worker must not wait on this pool).
+//! Production: (1) [`try_for_each_parallel`] steals **chunks** of indices on
+//! the process-wide `rbtc-scripts-*` workers; (2) [`spawn_detached`] /
+//! [`run_detached_join`] for mempool accept. Confirm scripts phases run on
+//! [`spawn_coordinator`], not on steal workers (a worker must not wait on
+//! this pool).
 //!
 //! No rayon / crossbeam.
 
 use arc_swap::ArcSwap;
 use std::cell::Cell;
 use std::collections::VecDeque;
+use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
+
+/// Jobs claimed per steal. Amortizes `next` / `in_wave` / `Arc<Wave>` traffic
+/// without a megachunk on mixed P2WPKH/P2WSH waves.
+const STEAL_CHUNK: usize = 32;
 
 use crate::error::ConsensusError;
 
@@ -49,16 +55,18 @@ struct Wave {
 }
 
 impl Wave {
-    fn claim(&self) -> Option<usize> {
+    fn claim_chunk(&self) -> Option<Range<usize>> {
         if self.failed.load(Ordering::Relaxed) {
             return None;
         }
-        let i = self.next.fetch_add(1, Ordering::Relaxed);
+        let i = self.next.fetch_add(STEAL_CHUNK, Ordering::Relaxed);
         if i >= self.n {
             return None;
         }
+        #[cfg(test)]
+        STEAL_CLAIMS.fetch_add(1, Ordering::Relaxed);
         self.in_wave.fetch_add(1, Ordering::AcqRel);
-        Some(i)
+        Some(i..self.n.min(i.saturating_add(STEAL_CHUNK)))
     }
 
     fn is_complete(&self) -> bool {
@@ -67,15 +75,21 @@ impl Wave {
         claimed_out && self.in_wave.load(Ordering::Acquire) == 0
     }
 
-    fn run_one(&self, i: usize) {
-        // SAFETY: `in_wave` was incremented by `claim`; publisher does not
-        // return until `wait_done` sees `in_wave == 0`.
-        let r = unsafe { (self.apply.f)(self.apply.ctx, i) };
-        if let Err(e) = r {
-            self.failed.store(true, Ordering::Relaxed);
-            let mut g = self.first_err.lock().unwrap_or_else(|p| p.into_inner());
-            if g.is_none() {
-                *g = Some(e);
+    fn run_chunk(&self, range: Range<usize>) {
+        // SAFETY: `in_wave` was incremented by `claim_chunk`; publisher does
+        // not return until `wait_done` sees `in_wave == 0`.
+        for i in range {
+            if self.failed.load(Ordering::Relaxed) {
+                break;
+            }
+            let r = unsafe { (self.apply.f)(self.apply.ctx, i) };
+            if let Err(e) = r {
+                self.failed.store(true, Ordering::Relaxed);
+                let mut g = self.first_err.lock().unwrap_or_else(|p| p.into_inner());
+                if g.is_none() {
+                    *g = Some(e);
+                }
+                break;
             }
         }
         self.in_wave.fetch_sub(1, Ordering::AcqRel);
@@ -98,6 +112,8 @@ static WAVES_SNAP: OnceLock<ArcSwap<Vec<Arc<Wave>>>> = OnceLock::new();
 
 #[cfg(test)]
 static STEAL_WAVES_LOCKS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static STEAL_CLAIMS: AtomicUsize = AtomicUsize::new(0);
 
 fn waves_snap() -> &'static ArcSwap<Vec<Arc<Wave>>> {
     WAVES_SNAP.get_or_init(|| ArcSwap::from_pointee(Vec::new()))
@@ -107,14 +123,13 @@ fn publish_waves(waves: &[Arc<Wave>]) {
     waves_snap().store(Arc::new(waves.to_vec()));
 }
 
-/// Lock-free claim: load the published wave list. Must not lock [`WAVES`]
-/// (IBD waves are tens of thousands of short jobs). [`STEAL_WAVES_LOCKS`]
-/// counts steal-path mutex takes only — increment it if this function locks.
-fn steal_index() -> Option<(Arc<Wave>, usize)> {
+/// Lock-free claim: load the published wave list. Must not lock [`WAVES`].
+/// [`STEAL_WAVES_LOCKS`] counts steal-path mutex takes only.
+fn steal_chunk() -> Option<(Arc<Wave>, Range<usize>)> {
     let snap = waves_snap().load();
     for w in snap.iter() {
-        if let Some(i) = w.claim() {
-            return Some((Arc::clone(w), i));
+        if let Some(range) = w.claim_chunk() {
+            return Some((Arc::clone(w), range));
         }
     }
     None
@@ -242,8 +257,8 @@ fn workers() -> &'static ScriptWorkers {
                 .spawn(move || {
                     ON_STEAL_WORKER.with(|c| c.set(true));
                     loop {
-                        if let Some((w, idx)) = steal_index() {
-                            w.run_one(idx);
+                        if let Some((w, range)) = steal_chunk() {
+                            w.run_chunk(range);
                             continue;
                         }
                         let mut g = pool.jobs.lock().unwrap_or_else(|p| p.into_inner());
@@ -252,9 +267,9 @@ fn workers() -> &'static ScriptWorkers {
                             job();
                             continue;
                         }
-                        if let Some((w, idx)) = steal_index() {
+                        if let Some((w, range)) = steal_chunk() {
                             drop(g);
-                            w.run_one(idx);
+                            w.run_chunk(range);
                             continue;
                         }
                         #[cfg(test)]
@@ -530,6 +545,28 @@ mod tests {
         b.join().expect("b").expect("b ok");
         assert_eq!(a_hits.load(Ordering::Relaxed), 16);
         assert_eq!(b_hits.load(Ordering::Relaxed), 16);
+    }
+
+    #[test]
+    fn steal_chunk_amortizes_claims() {
+        // 256 items → 8 chunks of 32. Not 256 fetch_adds on `next`.
+        workers();
+        STEAL_CLAIMS.store(0, Ordering::Relaxed);
+        let items: Vec<u32> = (0..256).collect();
+        let hits: Vec<AtomicUsize> = (0..256).map(|_| AtomicUsize::new(0)).collect();
+        try_for_each_parallel(&items, |&i| {
+            hits[i as usize].fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        })
+        .unwrap();
+        for (i, h) in hits.iter().enumerate() {
+            assert_eq!(h.load(Ordering::Relaxed), 1, "index {i} not run once");
+        }
+        let claims = STEAL_CLAIMS.load(Ordering::Relaxed);
+        assert_eq!(
+            claims, 8,
+            "expected 256/32=8 successful claims, got {claims}"
+        );
     }
 
     #[test]
