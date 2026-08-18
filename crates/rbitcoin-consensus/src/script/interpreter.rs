@@ -176,8 +176,8 @@ pub(crate) struct EvalContext<'a> {
     ///
     /// BIP143 / legacy CHECKSIG use this truncated script as `scriptCode`.
     codeseparator_script_off: Cell<Option<usize>>,
-    /// One cache per script eval so multi-CHECKSIG / CHECKSIGADD reuse midstate.
-    cache: RefCell<SighashCache<&'a Transaction>>,
+    /// Legacy / taproot midstate. Created on first use (WitnessV0 uses `pre` only).
+    cache: RefCell<Option<SighashCache<&'a Transaction>>>,
     /// Structure/lookup midstates (WitnessV0 BIP143). Tests `new` compute once.
     pre: std::sync::Arc<rbitcoin_query::TxPrecompute>,
 }
@@ -261,7 +261,7 @@ impl<'a> EvalContext<'a> {
             const_scriptcode: false,
             codeseparator_pos: Cell::new(0xFFFF_FFFF),
             codeseparator_script_off: Cell::new(None),
-            cache: RefCell::new(SighashCache::new(tx)),
+            cache: RefCell::new(None),
             pre,
         }
     }
@@ -1336,9 +1336,9 @@ fn checksig_schnorr(
         .map(Annex::new)
         .transpose()
         .map_err(|_| ConsensusError::Script("tapscript annex".into()))?;
-    let sighash = ctx
-        .cache
-        .borrow_mut()
+    let mut slot = ctx.cache.borrow_mut();
+    let cache = slot.get_or_insert_with(|| SighashCache::new(ctx.tx));
+    let sighash = cache
         .taproot_signature_hash(
             ctx.input_index,
             &prevouts,
@@ -1362,9 +1362,9 @@ fn sighash_for_script(
             // Raw hashtype 0 is not SIGHASH_ALL=1.
             let stripped = strip_op_codeseparator(script_bytes);
             let script_code = Script::from_bytes(&stripped);
-            let h = ctx
-                .cache
-                .borrow_mut()
+            let mut slot = ctx.cache.borrow_mut();
+            let cache = slot.get_or_insert_with(|| SighashCache::new(ctx.tx));
+            let h = cache
                 .legacy_signature_hash(ctx.input_index, script_code, ty_raw)
                 .map_err(|_| ConsensusError::Script("legacy sighash".into()))?;
             Ok(h.to_byte_array())
