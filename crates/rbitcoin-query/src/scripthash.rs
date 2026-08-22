@@ -877,7 +877,16 @@ impl Query {
                 unconfirmed: 0,
             });
         };
-        let joined = self.join_creates_and_spends(scripthash, ShJoinNeed::BALANCE, None, &view)?;
+        self.scripthash_balance_in(scripthash, &view)
+    }
+
+    /// Confirmed balance as of `view`.
+    pub fn scripthash_balance_in(
+        &self,
+        scripthash: &[u8; 32],
+        view: &ChainView,
+    ) -> Result<ScriptHashBalance, QueryError> {
+        let joined = self.join_creates_and_spends(scripthash, ShJoinNeed::BALANCE, None, view)?;
         self.balance_from_joined(&joined)
     }
 
@@ -956,8 +965,17 @@ impl Query {
         let Some(view) = self.pin_chain_view()? else {
             return Ok(Vec::new());
         };
+        self.scripthash_listunspent_in(scripthash, &view)
+    }
+
+    /// Confirmed UTXOs as of `view`.
+    pub fn scripthash_listunspent_in(
+        &self,
+        scripthash: &[u8; 32],
+        view: &ChainView,
+    ) -> Result<Vec<ScriptHashUtxo>, QueryError> {
         let mut joined =
-            self.join_creates_and_spends(scripthash, ShJoinNeed::LISTUNSPENT, None, &view)?;
+            self.join_creates_and_spends(scripthash, ShJoinNeed::LISTUNSPENT, None, view)?;
         self.fill_create_txids(&mut joined, true)?;
         self.listunspent_from_joined(&joined)
     }
@@ -1064,8 +1082,17 @@ impl Query {
                 spent_txo_sum: 0,
             });
         };
+        self.scripthash_chain_stats_in(scripthash, &view)
+    }
+
+    /// Confirmed chain_stats as of `view`.
+    pub fn scripthash_chain_stats_in(
+        &self,
+        scripthash: &[u8; 32],
+        view: &ChainView,
+    ) -> Result<ScriptHashChainStats, QueryError> {
         let joined =
-            self.join_creates_and_spends(scripthash, ShJoinNeed::CHAIN_STATS, None, &view)?;
+            self.join_creates_and_spends(scripthash, ShJoinNeed::CHAIN_STATS, None, view)?;
         self.chain_stats_from_joined(&joined)
     }
 

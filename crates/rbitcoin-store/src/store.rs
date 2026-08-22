@@ -924,6 +924,17 @@ impl Store {
         body_range: Option<(u64, u64)>,
     ) -> Result<bool, StoreError> {
         let tip = self.confirmed.tip_height().map(|t| t.0);
+        self.has_confirmed_strong_spender_create_at(create_tx_fk, out_index, body_range, tip)
+    }
+
+    /// Like [`Self::has_confirmed_strong_spender_create`] with a caller-cached tip.
+    pub fn has_confirmed_strong_spender_create_at(
+        &self,
+        create_tx_fk: Fk,
+        out_index: u32,
+        body_range: Option<(u64, u64)>,
+        tip: Option<u32>,
+    ) -> Result<bool, StoreError> {
         let (multi, field) = match body_range {
             Some((off, len)) => self.txs.get_output_spender_meta_at(off, len, out_index)?,
             None => self.txs.get_output_spender_meta(create_tx_fk, out_index)?,
@@ -1046,6 +1057,16 @@ impl Store {
         out_index: u32,
     ) -> Result<bool, StoreError> {
         let tip = self.confirmed.tip_height().map(|t| t.0);
+        self.has_confirmed_strong_spender_at(out_txid, out_index, tip)
+    }
+
+    /// Like [`Self::has_confirmed_strong_spender`] with a caller-cached tip.
+    pub fn has_confirmed_strong_spender_at(
+        &self,
+        out_txid: &[u8; 32],
+        out_index: u32,
+        tip: Option<u32>,
+    ) -> Result<bool, StoreError> {
         let Some((create_fk, _)) = self.txs.get_by_txid(out_txid)? else {
             return Ok(false);
         };
