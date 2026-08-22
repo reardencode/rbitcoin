@@ -5,19 +5,20 @@ IBD and tip follow, block/tx relay, and Electrum serving for **wallet backends**
 and similar infrastructure—not a desktop GUI or end-user wallet.
 
 Until **1.0**, treat mainnet deployment as **early production / high-scrutiny**:
-on-disk format and APIs can still change, and there is **no** long-term support
-SLA. Run signet first, then mainnet with monitoring. See
-[`docs/experimental-mainnet.md`](./docs/experimental-mainnet.md) and
-[`OPERATOR.md`](./OPERATOR.md).
+on-disk format and APIs can still change (named refuse/wipe, not a silent
+wipe), and there is **no** long-term support SLA. **0.5.x** is the supported
+published line until 0.6 or 1.0. Run signet first, then mainnet with
+monitoring. See [`docs/experimental-mainnet.md`](./docs/experimental-mainnet.md)
+and [`OPERATOR.md`](./OPERATOR.md).
 
 ## Supported versions
 
 | Version | Support |
 |---------|---------|
-| **0.x** (this tree) | Active development. Security-relevant fixes are prioritized; there is **no** multi-year LTS branch yet. |
+| **0.5.x** | Supported **published** line. Security-relevant fixes land here until **0.6** or **1.0**. No LTS. Report against the tag (and binary digest if you built musl static). |
 | **1.0+** (future) | Will define a clearer support window once the on-disk schema and public surface stabilize. |
 
-Report against a **git commit** (and binary digest if you built musl static).
+Untagged trees: report against a **git commit** (and binary digest if you built musl static).
 
 ## Reporting a vulnerability
 

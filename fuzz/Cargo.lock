@@ -227,7 +227,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rbitcoin-consensus"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "arc-swap",
  "bitcoin",
@@ -248,15 +248,15 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-log"
-version = "0.1.0"
+version = "0.5.0"
 
 [[package]]
 name = "rbitcoin-primitives"
-version = "0.1.0"
+version = "0.5.0"
 
 [[package]]
 name = "rbitcoin-query"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "arc-swap",
  "bitcoin",
@@ -267,7 +267,7 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-store"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "bitcoin_hashes",
  "getrandom",

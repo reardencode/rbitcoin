@@ -9,6 +9,16 @@ before 1.0).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-08-22
+
+First **named published** 0.x line. **Not 1.0.** Schema 19 is still bumpable
+(named refuse/wipe, no silent wipe). Default mainnet `--milestone 840000`
+skips historical script/sig checks (`--milestone 0` is full scripts).
+`--shindex` default off (required for Electrum/Esplora). BIP324 v2-only.
+GitHub Release: Linux musl (operator) + Windows CRT-static PE + Darwin
+aarch64 zip (ad-hoc signed, not notarized). In-tree `fuzz/` `block_wire`
+nightly job (not a required PR check). P2P DoS is not Core-parity.
+
 ### Added
 
 - **Fuzz (Q-30 min):** isolated `fuzz/` workspace, `block_wire` target on
@@ -23,9 +33,13 @@ before 1.0).
 
 ### Changed
 
+- **0.5 operator voice:** README / SECURITY / experimental-mainnet treat
+  **0.5.x** as the named published 0.x line (not 1.0, not a soak badge).
+  Default milestone skip, `--shindex` off, and schema refuse/wipe stay
+  unmissable. Workspace version **0.5.0**.
+
 - **`getnetworkinfo.version`:** pin `rpc_client_version("0.5.0") == 500`
-  (`major*10000+minor*100+patch`, same as `0.1.0` → `100`). Workspace
-  version stays 0.1.0 until the tag PR.
+  (`major*10000+minor*100+patch`, same as `0.1.0` → `100`).
 
 - **Core functional inventory:** skip reason `rpc-dialect` for COMPAT-done
   methods whose unmodified script still fails on type-check / field zoo.
@@ -66,6 +80,10 @@ before 1.0).
   (16–512 MiB).
 
 ### Fixed
+
+- **Fuzz CI nightly:** `scripts/fuzz-run.sh` / `fuzz.yml` set
+  `RUSTUP_TOOLCHAIN=nightly` so `rust-toolchain.toml` 1.95 cannot feed
+  cargo-fuzz (`-Zsanitizer` is nightly-only).
 
 - **SH materialize last page:** megakey chunking sizes the last extent page
   for the `ver=2` 24 B header (4072 B stream), not the `ver=1` 4088 B cap.

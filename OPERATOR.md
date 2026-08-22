@@ -3,7 +3,8 @@
 ## Status
 
 BIP324 v2-only P2P, cluster mempool (Libre admission + **consensus script checks on accept**),
-Electrum confirmed + unconfirmed (TLS via reverse proxy). **Mainnet is experimental** — see
+Electrum confirmed + unconfirmed (TLS via reverse proxy). **0.5 mainnet** is
+early production / high-scrutiny — see
 [`docs/experimental-mainnet.md`](./docs/experimental-mainnet.md). Watch reorgs and disk
 headroom before any serious use. Default mainnet **`--milestone 840000` skips script/sig checks** at/below
 that height; use `--milestone 0` for full scripts.

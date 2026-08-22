@@ -32,6 +32,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
         with:
           toolchain: nightly
+          components: rust-src
 
       - name: clang (libFuzzer)
         run: sudo apt-get update && sudo apt-get install -y clang
@@ -39,15 +40,8 @@ jobs:
       - name: cargo-fuzz
         run: cargo install cargo-fuzz --locked
 
-      - name: Seed corpus from in-tree signet fixture
-        run: |
-          set -euo pipefail
-          mkdir -p fuzz/corpus/block_wire
-          cp crates/rbitcoin-consensus/tests/fixtures/signet_block_1.bin \
-            fuzz/corpus/block_wire/signet_block_1.bin
-
+      # rust-toolchain.toml is 1.95; cargo-fuzz needs nightly -Zsanitizer.
       - name: cargo fuzz run block_wire
-        run: |
-          set -euo pipefail
-          cargo fuzz run block_wire -- \
-            -max_total_time=120 -timeout=10 -max_len=1048576
+        env:
+          RUSTUP_TOOLCHAIN: nightly
+        run: ./scripts/fuzz-run.sh

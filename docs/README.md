@@ -32,7 +32,7 @@ Planning a multi-step change: [`how-we-plan.md`](./how-we-plan.md).
 | [`io-modality.md`](./io-modality.md) | `RBITCOIN_IO`, fd vs uring, host A/B. |
 | [`heads.md`](./heads.md) | Which head file / module (tx / header / SH). |
 | [`env-knobs.md`](./env-knobs.md) | Residual `RBITCOIN_*` inventory. |
-| [`experimental-mainnet.md`](./experimental-mainnet.md) | Lab mainnet runbook. |
+| [`experimental-mainnet.md`](./experimental-mainnet.md) | 0.5 mainnet runbook (early production / high-scrutiny). |
 | [`rpc.md`](./rpc.md) | Core-class JSON-RPC subset. |
 | [`consensus-tests.md`](./consensus-tests.md) | Rules we own vs Core corpora. |
 | [`core-functional.md`](./core-functional.md) | Core v31.1 functional harness. |

@@ -78,6 +78,8 @@ jobs:
         run: ./scripts/stage-musl-artifacts.test.sh
       - name: stage-native-artifacts self-test
         run: ./scripts/stage-native-artifacts.test.sh
+      - name: fuzz-run self-test
+        run: ./scripts/fuzz-run.test.sh
       - name: cargo test
         run: cargo test --workspace
 
