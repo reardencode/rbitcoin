@@ -29,10 +29,25 @@ impl Query {
         let Some(height) = self.tip_height() else {
             return Ok(None);
         };
+        let Some((_, rec)) = self.header_at_height(height)? else {
+            return Ok(None);
+        };
+        self.pin_chain_view_at(&rec.hash)
+    }
+
+    /// Pin a **best-chain** header hash (tip or buried). `None` if it is not
+    /// `confirmed[height]` (unknown, archive-only orphan, or disconnected).
+    pub fn pin_chain_view_at(&self, hash: &[u8; 32]) -> Result<Option<ChainView>, QueryError> {
+        let Some(height) = self.height_of_hash(hash)? else {
+            return Ok(None);
+        };
         let Some(header_fk) = self.store.confirmed.get(height)? else {
             return Ok(None);
         };
         let rec = self.store.get_header(header_fk)?;
+        if rec.hash != *hash {
+            return Ok(None);
+        }
         Ok(Some(ChainView {
             height,
             hash: rec.hash,

@@ -2715,6 +2715,50 @@ mod tests {
     }
 
     #[test]
+    fn chain_view_at_buried_pin_survives_tip_extension_and_higher_replace() {
+        let (dir, q) = temp_query("chain-view-at");
+        let (h0, t0) = coinbase_block(0, Fk::NULL, None);
+        let hash0 = h0.hash;
+        q.connect_block(Height(0), &h0, &[t0]).unwrap();
+        assert!(q.pin_chain_view_at(&[0xee; 32]).unwrap().is_none());
+
+        let prev_fk = q.tip_header_fk().unwrap().unwrap();
+        let (h1, t1) = coinbase_block(1, prev_fk, Some(hash0));
+        q.connect_block(Height(1), &h1, &[t1]).unwrap();
+        let prev1 = q.tip_header_fk().unwrap().unwrap();
+        let (h2, t2) = coinbase_block(2, prev1, Some(h1.hash));
+        q.connect_block(Height(2), &h2, &[t2]).unwrap();
+
+        let buried = q.pin_chain_view_at(&hash0).unwrap().expect("genesis hash");
+        assert_eq!(buried.height, Height(0));
+        assert_eq!(buried.hash, hash0);
+        assert!(buried.still_live(&q).unwrap());
+
+        q.disconnect_tip().unwrap();
+        assert_eq!(q.tip_height(), Some(Height(1)));
+        assert!(
+            buried.still_live(&q).unwrap(),
+            "disconnect of height 2 must not kill a height-0 pin"
+        );
+        assert_eq!(
+            q.pin_chain_view_at(&hash0).unwrap().unwrap().header_fk,
+            buried.header_fk
+        );
+
+        q.disconnect_tip().unwrap();
+        assert_eq!(q.tip_height(), Some(Height(0)));
+        assert!(buried.still_live(&q).unwrap());
+
+        q.disconnect_tip().unwrap();
+        assert!(
+            !buried.still_live(&q).unwrap(),
+            "disconnect of the pinned height kills the buried view"
+        );
+        assert!(q.pin_chain_view_at(&hash0).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn chain_view_sh_join_slot_miss_on_same_height_replace() {
         let (dir, q) = temp_query("chain-view-sh-slot");
         let (h0, t0) = coinbase_block(0, Fk::NULL, None);
