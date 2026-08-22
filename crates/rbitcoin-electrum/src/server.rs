@@ -521,7 +521,7 @@ where
                     let stamp = method_stamps_chain_tip(&method_owned);
                     match tokio::task::spawn_blocking(move || {
                         let (r, view) = if stamp {
-                            electrum_at_chain_view(&q, |q| {
+                            electrum_at_chain_view(&q, &method_owned, &params_owned, |q| {
                                 dispatch_with_join(
                                     &method_owned,
                                     &params_owned,
@@ -849,30 +849,52 @@ fn rpc_result(id: &Value, result: &Value, view: Option<&ChainView>) -> Value {
     obj
 }
 
-fn electrum_at_chain_view<F>(query: &Query, mut f: F) -> (Result<Value, String>, Option<ChainView>)
+fn electrum_at_chain_view<F>(
+    query: &Query,
+    method: &str,
+    params: &Value,
+    mut f: F,
+) -> (Result<Value, String>, Option<ChainView>)
 where
     F: FnMut(&Query) -> Result<Value, String>,
 {
-    const BOUND: u32 = 8;
-    for _ in 0..BOUND {
-        let view = match query.pin_chain_view() {
-            Ok(v) => v,
-            Err(e) => return (Err(e.to_string()), None),
-        };
-        let Some(view) = view else {
-            return (f(query), None);
-        };
-        let out = f(query);
-        if out.is_err() {
-            return (out, None);
+    match take_trailing_asof(method, params) {
+        Ok((_, Some(hash))) => match query.pin_chain_view_at(&hash) {
+            Ok(Some(view)) => {
+                let out = f(query);
+                match view.still_live(query) {
+                    Ok(true) => (out, Some(view)),
+                    Ok(false) => (Err("asof not on chain".into()), None),
+                    Err(e) => (Err(e.to_string()), None),
+                }
+            }
+            Ok(None) => (Err("asof not on chain".into()), None),
+            Err(e) => (Err(e.to_string()), None),
+        },
+        Ok((_, None)) => {
+            const BOUND: u32 = 8;
+            for _ in 0..BOUND {
+                let view = match query.pin_chain_view() {
+                    Ok(v) => v,
+                    Err(e) => return (Err(e.to_string()), None),
+                };
+                let Some(view) = view else {
+                    return (f(query), None);
+                };
+                let out = f(query);
+                if out.is_err() {
+                    return (out, None);
+                }
+                match view.still_live(query) {
+                    Ok(true) => return (out, Some(view)),
+                    Ok(false) => continue,
+                    Err(e) => return (Err(e.to_string()), None),
+                }
+            }
+            (Err("chain view moved".into()), None)
         }
-        match view.still_live(query) {
-            Ok(true) => return (out, Some(view)),
-            Ok(false) => continue,
-            Err(e) => return (Err(e.to_string()), None),
-        }
+        Err(e) => (Err(e), None),
     }
-    (Err("chain view moved".into()), None)
 }
 
 #[cfg(test)]
@@ -923,6 +945,7 @@ fn dispatch_with_join(
             "silent_payments": [0],
             "tweaks": true,
             "chain_tip": true,
+            "asof": true,
         })),
         "blockchain.headers.subscribe" => {
             *header_sub = true;
@@ -952,11 +975,23 @@ fn dispatch_with_join(
             Ok(json!({"count": n, "hex": hexes, "max": 2016}))
         }
         "blockchain.scripthash.get_history" => {
-            let sh = param_scripthash(params, 0)?;
-            let (filter, include_mempool) = parse_get_history_window(params)?;
-            let mut hist = query
-                .scripthash_history_filtered_slot(&sh, &filter, sh_join)
-                .map_err(|e| e.to_string())?;
+            let (params, asof) = take_trailing_asof(method, params)?;
+            let sh = param_scripthash(&params, 0)?;
+            let (filter, mut include_mempool) = parse_get_history_window(&params)?;
+            let mut hist = if let Some(hash) = asof {
+                include_mempool = false;
+                let view = query
+                    .pin_chain_view_at(&hash)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "asof not on chain".to_string())?;
+                query
+                    .scripthash_history_filtered_in(&sh, &filter, &view)
+                    .map_err(|e| e.to_string())?
+            } else {
+                query
+                    .scripthash_history_filtered_slot(&sh, &filter, sh_join)
+                    .map_err(|e| e.to_string())?
+            };
             // Confirmed rows are height-asc from the filter. Mempool (if any) is
             // appended as a tail — Electrum Cash: only when to_height is -1/omitted.
             if include_mempool {
@@ -982,20 +1017,43 @@ fn dispatch_with_join(
             Ok(Value::Array(arr))
         }
         "blockchain.scripthash.get_balance" => {
-            let sh = param_scripthash(params, 0)?;
-            let mut b = query
-                .scripthash_balance_slot(&sh, sh_join)
-                .map_err(|e| e.to_string())?;
-            if let Some(mp) = mempool {
-                b.unconfirmed = mp.scripthash_unconfirmed_delta(&sh);
+            let (params, asof) = take_trailing_asof(method, params)?;
+            let sh = param_scripthash(&params, 0)?;
+            let mut b = if let Some(hash) = asof {
+                let view = query
+                    .pin_chain_view_at(&hash)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "asof not on chain".to_string())?;
+                query
+                    .scripthash_balance_in(&sh, &view)
+                    .map_err(|e| e.to_string())?
+            } else {
+                query
+                    .scripthash_balance_slot(&sh, sh_join)
+                    .map_err(|e| e.to_string())?
+            };
+            if asof.is_none() {
+                if let Some(mp) = mempool {
+                    b.unconfirmed = mp.scripthash_unconfirmed_delta(&sh);
+                }
             }
             Ok(json!({"confirmed": b.confirmed, "unconfirmed": b.unconfirmed}))
         }
         "blockchain.scripthash.listunspent" => {
-            let sh = param_scripthash(params, 0)?;
-            let u =
+            let (params, asof) = take_trailing_asof(method, params)?;
+            let sh = param_scripthash(&params, 0)?;
+            let u = if let Some(hash) = asof {
+                let view = query
+                    .pin_chain_view_at(&hash)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "asof not on chain".to_string())?;
+                query
+                    .scripthash_listunspent_in(&sh, &view)
+                    .map_err(|e| e.to_string())?
+            } else {
                 crate::unspent::scripthash_utxos_with_mempool_slot(query, mempool, &sh, sh_join)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| e.to_string())?
+            };
             let arr: Vec<Value> = u
                 .iter()
                 .map(|x| {
@@ -1194,6 +1252,52 @@ fn param_i64(params: &Value, idx: usize) -> Result<i64, String> {
                 .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
         })
         .ok_or_else(|| format!("param {idx} expected integer"))
+}
+
+fn method_accepts_asof(method: &str) -> bool {
+    matches!(
+        method,
+        "blockchain.scripthash.get_history"
+            | "blockchain.scripthash.get_balance"
+            | "blockchain.scripthash.listunspent"
+    )
+}
+
+fn parse_blockhash32(s: &str) -> Option<[u8; 32]> {
+    let mut bytes = rbitcoin_primitives::hex_decode(s).ok()?;
+    if bytes.len() != 32 {
+        return None;
+    }
+    bytes.reverse();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Some(out)
+}
+
+/// Trailing 64-hex is an asof block hash (display order). Never the sole param
+/// (that is the scripthash).
+fn take_trailing_asof(method: &str, params: &Value) -> Result<(Value, Option<[u8; 32]>), String> {
+    if !method_accepts_asof(method) {
+        return Ok((params.clone(), None));
+    }
+    let Some(arr) = params.as_array() else {
+        return Ok((params.clone(), None));
+    };
+    if arr.len() < 2 {
+        return Ok((params.clone(), None));
+    }
+    let Some(last) = arr.last().and_then(|v| v.as_str()) else {
+        return Ok((params.clone(), None));
+    };
+    if last.len() != 64 {
+        return Ok((params.clone(), None));
+    }
+    let Some(hash) = parse_blockhash32(last) else {
+        return Err("asof must be 32 bytes hex".into());
+    };
+    let mut rest = arr.clone();
+    rest.pop();
+    Ok((Value::Array(rest), Some(hash)))
 }
 
 /// Electrum Cash optional height window after scripthash for `get_history`.
@@ -1396,6 +1500,18 @@ mod tests {
         assert_eq!(f.from_height, 1);
         assert_eq!(f.to_height, Some(10));
         assert!(!mp);
+        let asof_hex = "ab".repeat(32);
+        let (rest, h) = take_trailing_asof(
+            "blockchain.scripthash.get_balance",
+            &json!([sh_hex, asof_hex]),
+        )
+        .unwrap();
+        assert!(h.is_some());
+        assert_eq!(rest, json!([sh_hex]));
+        let (_, none) =
+            take_trailing_asof("blockchain.scripthash.get_balance", &json!([sh_hex])).unwrap();
+        assert!(none.is_none());
+
         assert!(parse_get_history_window(&json!([sh_hex, 10, 5]))
             .unwrap_err()
             .contains("from_height"));
@@ -1510,6 +1626,7 @@ mod tests {
         assert_eq!(features["silent_payments"], json!([0]));
         assert_eq!(features["tweaks"], json!(true));
         assert_eq!(features["chain_tip"], json!(true));
+        assert_eq!(features["asof"], json!(true));
 
         let probe = dispatch(
             "blockchain.tweaks.subscribe",
@@ -2329,6 +2446,207 @@ mod tests {
         assert!(!status.as_str().unwrap().is_empty());
 
         let _ = hashes;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn asof_scripthash_reads_hide_later_spend() {
+        use rbitcoin_primitives::{Fk, Height};
+        use rbitcoin_query::TxApply;
+        use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
+
+        let (dir, q) = tmp_store();
+        let params = ChainParams::regtest();
+        let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+        let merkle = [0xab; 32];
+        let h0 = HeaderRecord {
+            prev_fk: Fk::NULL,
+            version: 1,
+            timestamp: 1,
+            bits: 0x207fffff,
+            nonce: 0,
+            merkle_root: merkle,
+            hash: merkle,
+        };
+        let mut create_txid = [0xcb; 32];
+        create_txid[31] = 0;
+        let ta0 = TxApply {
+            tx: TxRecord {
+                txid: create_txid,
+                version: 1,
+                locktime: 0,
+                input_start_fk: Fk::NULL,
+                input_count: 1,
+                output_start_fk: Fk::NULL,
+                output_count: 1,
+            },
+            inputs: vec![InputRecord {
+                prev_txid: [0u8; 32],
+                create_fk: Fk::NULL,
+                prev_index: u32::MAX,
+                sequence: u32::MAX,
+                script_sig: vec![0],
+                witness: vec![],
+            }],
+            outputs: vec![OutputRecord::unspent(10_0000_0000, vec![0x51])],
+        };
+        let hfk0 = q.connect_block(Height(0), &h0, &[ta0]).unwrap();
+        let create_fk = q.block_tx_fks(Height(0)).unwrap()[0];
+        let hash1 = rbitcoin_store::block_header_hash(1, &merkle, &[0x11; 32], 2, 0x207fffff, 1);
+        let h1 = HeaderRecord {
+            prev_fk: hfk0,
+            version: 1,
+            timestamp: 2,
+            bits: 0x207fffff,
+            nonce: 1,
+            merkle_root: [0x11; 32],
+            hash: hash1,
+        };
+        let mut spend_txid = [0u8; 32];
+        spend_txid[0] = 0x11;
+        spend_txid[31] = 0xcd;
+        q.connect_block(
+            Height(1),
+            &h1,
+            &[TxApply {
+                tx: TxRecord {
+                    txid: spend_txid,
+                    version: 1,
+                    locktime: 0,
+                    input_start_fk: Fk::NULL,
+                    input_count: 1,
+                    output_start_fk: Fk::NULL,
+                    output_count: 1,
+                },
+                inputs: vec![InputRecord {
+                    prev_txid: create_txid,
+                    create_fk,
+                    prev_index: 0,
+                    sequence: u32::MAX,
+                    script_sig: vec![],
+                    witness: vec![],
+                }],
+                outputs: vec![OutputRecord::unspent(9_0000_0000, vec![0x00])],
+            }],
+        )
+        .unwrap();
+
+        let sh = electrum_scripthash_hex(&[0x51]);
+        let asof0 = hash_hex_rev(&merkle);
+        let asof1 = hash_hex_rev(&hash1);
+        let mut header_sub = false;
+        let mut sh_subs = HashSet::new();
+
+        let bal0 = dispatch(
+            "blockchain.scripthash.get_balance",
+            &json!([sh, asof0]),
+            &q,
+            &cfg,
+            &params,
+            None,
+            &mut header_sub,
+            &mut sh_subs,
+        )
+        .unwrap();
+        assert_eq!(bal0["confirmed"], 10_0000_0000);
+        assert_eq!(bal0["unconfirmed"], 0);
+        let utxo0 = dispatch(
+            "blockchain.scripthash.listunspent",
+            &json!([sh, asof0]),
+            &q,
+            &cfg,
+            &params,
+            None,
+            &mut header_sub,
+            &mut sh_subs,
+        )
+        .unwrap();
+        assert_eq!(utxo0.as_array().unwrap().len(), 1);
+        let hist0 = dispatch(
+            "blockchain.scripthash.get_history",
+            &json!([sh, asof0]),
+            &q,
+            &cfg,
+            &params,
+            None,
+            &mut header_sub,
+            &mut sh_subs,
+        )
+        .unwrap();
+        assert_eq!(hist0.as_array().unwrap().len(), 1);
+
+        let bal1 = dispatch(
+            "blockchain.scripthash.get_balance",
+            &json!([sh, asof1]),
+            &q,
+            &cfg,
+            &params,
+            None,
+            &mut header_sub,
+            &mut sh_subs,
+        )
+        .unwrap();
+        assert_eq!(bal1["confirmed"], 0);
+        let utxo1 = dispatch(
+            "blockchain.scripthash.listunspent",
+            &json!([sh, asof1]),
+            &q,
+            &cfg,
+            &params,
+            None,
+            &mut header_sub,
+            &mut sh_subs,
+        )
+        .unwrap();
+        assert!(utxo1.as_array().unwrap().is_empty());
+        let hist1 = dispatch(
+            "blockchain.scripthash.get_history",
+            &json!([sh, asof1]),
+            &q,
+            &cfg,
+            &params,
+            None,
+            &mut header_sub,
+            &mut sh_subs,
+        )
+        .unwrap();
+        assert_eq!(hist1.as_array().unwrap().len(), 2);
+
+        let err = dispatch(
+            "blockchain.scripthash.get_balance",
+            &json!([sh, "ee".repeat(32)]),
+            &q,
+            &cfg,
+            &params,
+            None,
+            &mut header_sub,
+            &mut sh_subs,
+        )
+        .unwrap_err();
+        assert!(err.contains("asof not on chain"), "unknown asof: {err}");
+        let (out, view) = electrum_at_chain_view(
+            &q,
+            "blockchain.scripthash.get_balance",
+            &json!([sh, asof0]),
+            |q| {
+                let mut hs = false;
+                let mut subs = HashSet::new();
+                let mut slot = None;
+                dispatch_with_join(
+                    "blockchain.scripthash.get_balance",
+                    &json!([sh, asof0]),
+                    q,
+                    &cfg,
+                    &params,
+                    None,
+                    &mut hs,
+                    &mut subs,
+                    &mut slot,
+                )
+            },
+        );
+        assert_eq!(out.unwrap()["confirmed"], 10_0000_0000);
+        assert_eq!(view.unwrap().hash, merkle);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
