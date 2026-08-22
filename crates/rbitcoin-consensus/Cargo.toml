@@ -19,6 +19,8 @@ bitcoin_hashes = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# Test-only zstd decode for Floresta historical block packs (not on the node graph).
+ruzstd = "0.8"
 
 [lints]
 workspace = true

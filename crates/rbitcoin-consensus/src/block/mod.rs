@@ -2236,6 +2236,8 @@ pub use rbitcoin_query::TxPrecompute;
 #[cfg(test)]
 mod bip34_tests;
 #[cfg(test)]
+mod block_866342;
+#[cfg(test)]
 mod finality_tests;
 #[cfg(test)]
 mod sigop_cost_tests;

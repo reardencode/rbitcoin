@@ -1163,7 +1163,7 @@ fn script_code_bytes<'a>(ctx: &'a EvalContext<'_>) -> &'a [u8] {
 /// that point are still omitted from the serialized scriptCode. Without this,
 /// redeem scripts that embed CODESEPARATOR (e.g. mainnet block 443992 P2SH
 /// multi-condition contracts) produce a wrong sighash and fail CHECKSIGVERIFY.
-fn strip_op_codeseparator(script: &[u8]) -> Vec<u8> {
+pub(crate) fn strip_op_codeseparator(script: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(script.len());
     let mut i = 0usize;
     while i < script.len() {

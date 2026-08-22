@@ -13,7 +13,11 @@ mod p2wpkh;
 mod p2wsh;
 
 #[cfg(test)]
+mod core_bip341;
+#[cfg(test)]
 mod core_fixture;
+#[cfg(test)]
+mod core_sighash;
 #[cfg(test)]
 mod core_tx_vectors;
 #[cfg(test)]

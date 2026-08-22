@@ -1,9 +1,9 @@
 //! Stage Bitcoin Core `src/test/data` JSON from the v31.1 submodule.
 //!
-//! In-tree copies of `script_tests.json` / `tx_valid.json` / `tx_invalid.json`
-//! are not kept. Each corpus run hard-links (or copies) the pin into
-//! `$CARGO_TARGET_DIR/core-data/`. If the submodule is missing (typical CI
-//! checkout), this runs `scripts/core-functional/init-submodule.sh`.
+//! In-tree copies of Core `src/test/data/*.json` are not kept. Each corpus
+//! run hard-links (or copies) the pin into `$CARGO_TARGET_DIR/core-data/`.
+//! If the submodule is missing (typical CI checkout), this runs
+//! `scripts/core-functional/init-submodule.sh`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,9 +12,7 @@ use std::sync::Once;
 
 const HINT: &str = "run ./scripts/core-functional/init-submodule.sh (sparse v31.1 pin)";
 
-const KNOWN: &[&str] = &["script_tests.json", "tx_valid.json", "tx_invalid.json"];
-
-/// Directory that holds the three Core JSON corpora (`RBITCOIN_CORE_DATA` or
+/// Directory that holds Core JSON corpora (`RBITCOIN_CORE_DATA` or
 /// `third_party/bitcoin/src/test/data` walking up from this crate).
 pub fn core_data_dir() -> PathBuf {
     if let Some(d) = try_core_data_dir() {
@@ -89,10 +87,14 @@ fn ensure_submodule() {
 }
 
 /// Hard-link or copy `name` from the submodule into `$CARGO_TARGET_DIR/core-data`.
+///
+/// `name` is a `.json` basename in Core `src/test/data/` (no path separators).
 pub fn stage_core_json(name: &str) -> PathBuf {
     assert!(
-        KNOWN.contains(&name),
-        "unknown Core fixture {name:?} (expected one of {KNOWN:?})"
+        !name.is_empty()
+            && Path::new(name).file_name() == Some(name.as_ref())
+            && name.ends_with(".json"),
+        "core fixture name must be a .json basename, got {name:?}"
     );
     let src = core_data_dir().join(name);
     if !src.is_file() {
@@ -148,9 +150,44 @@ mod tests {
     }
 
     #[test]
+    fn stages_sighash_json_from_submodule() {
+        let p = stage_core_json("sighash.json");
+        assert!(p.is_file(), "staged {p:?}");
+        let head = fs::read_to_string(&p).unwrap();
+        assert!(
+            head.trim_start().starts_with('['),
+            "expected JSON array at {p:?}"
+        );
+    }
+
+    #[test]
+    fn stages_bip341_wallet_vectors_from_submodule() {
+        let p = stage_core_json("bip341_wallet_vectors.json");
+        assert!(p.is_file(), "staged {p:?}");
+        let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        assert!(v.get("version").is_some(), "expected version at {p:?}");
+        assert!(
+            v.get("scriptPubKey").is_some(),
+            "expected scriptPubKey at {p:?}"
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn unknown_core_json_name_panics() {
+        let _ = stage_core_json("not-a-core-file.json");
+    }
+
+    #[test]
     fn in_tree_core_json_copies_are_gone() {
         let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-        for name in KNOWN {
+        for name in [
+            "script_tests.json",
+            "tx_valid.json",
+            "tx_invalid.json",
+            "sighash.json",
+            "bip341_wallet_vectors.json",
+        ] {
             let p = fixtures.join(name);
             assert!(
                 !p.exists(),

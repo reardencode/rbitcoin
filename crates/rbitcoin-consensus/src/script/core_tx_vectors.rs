@@ -312,7 +312,7 @@ fn opcode_byte(name: &str) -> Option<u8> {
 }
 
 /// Script flags we implement for Core tx corpora.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct TxFlags {
     p2sh: bool,
     dersig: bool,
@@ -485,6 +485,97 @@ fn parse_tx_invalid_flags(s: &str) -> TxFlags {
     parse_named_flag_bits(s)
 }
 
+fn fill_implied(f: &mut TxFlags) {
+    if f.taproot {
+        f.witness = true;
+    }
+    if f.cleanstack {
+        f.witness = true;
+        f.p2sh = true;
+    }
+    if f.witness {
+        f.p2sh = true;
+    }
+    if f.strictenc || f.low_s {
+        f.dersig = true;
+    }
+}
+
+fn flags_to_job(tx: Transaction, prevouts: Vec<TxOut>, flags: &TxFlags) -> ScriptCheckJob {
+    ScriptCheckJob {
+        txid: tx.compute_txid().to_byte_array(),
+        prevouts,
+        tx: JobTx::owned(tx),
+        bip65_active: flags.cltv,
+        bip112_active: flags.csv,
+        bip66_active: flags.dersig || flags.strictenc || flags.low_s,
+        bip16_active: flags.p2sh,
+        taproot_active: flags.taproot,
+        minimal_if: flags.minimal_if,
+        nullfail: flags.nullfail,
+        low_s: flags.low_s,
+        strictenc: flags.strictenc,
+        null_dummy: flags.null_dummy,
+        minimal_data: flags.minimal_data,
+        witness_pubkeytype: flags.witness_pubkeytype,
+        witness_active: flags.witness,
+        discourage_upgradable_witness: flags.discourage_upgradable_witness,
+        const_scriptcode: flags.const_scriptcode,
+        pre: std::sync::OnceLock::new(),
+    }
+}
+
+fn flag_on(f: &TxFlags, i: usize) -> bool {
+    match i {
+        0 => f.p2sh,
+        1 => f.dersig,
+        2 => f.cltv,
+        3 => f.csv,
+        4 => f.witness,
+        5 => f.taproot,
+        6 => f.low_s,
+        7 => f.strictenc,
+        8 => f.nullfail,
+        9 => f.null_dummy,
+        10 => f.minimal_data,
+        11 => f.discourage_upgradable_witness,
+        12 => f.witness_pubkeytype,
+        13 => f.const_scriptcode,
+        14 => f.sig_push_only,
+        15 => f.minimal_if,
+        _ => false,
+    }
+}
+
+const TOGGLE_N: usize = 16;
+const I_P2SH: usize = 0;
+const I_WITNESS: usize = 4;
+const I_TAPROOT: usize = 5;
+
+fn with_flag(mut f: TxFlags, i: usize, on: bool) -> TxFlags {
+    match i {
+        0 => f.p2sh = on,
+        1 => f.dersig = on,
+        2 => f.cltv = on,
+        3 => f.csv = on,
+        4 => f.witness = on,
+        5 => f.taproot = on,
+        6 => f.low_s = on,
+        7 => f.strictenc = on,
+        8 => f.nullfail = on,
+        9 => f.null_dummy = on,
+        10 => f.minimal_data = on,
+        11 => f.discourage_upgradable_witness = on,
+        12 => f.witness_pubkeytype = on,
+        13 => f.const_scriptcode = on,
+        14 => f.sig_push_only = on,
+        15 => f.minimal_if = on,
+        _ => {}
+    }
+    fill_implied(&mut f);
+    f
+}
+
 /// Parse one prevout entry: [txid_hex, vout, scriptPubKey_scriptlang, amount?]
 fn parse_prevout(cell: &Value) -> Result<(bitcoin::Txid, u32, TxOut), String> {
     let a = cell
@@ -615,7 +706,10 @@ fn verify_tx_row(
     } else {
         parse_tx_invalid_flags(flags_s)
     };
-    // SIGPUSHONLY: enforce on scriptSigs when flag set.
+    verify_parsed_tx(&tx, prevouts, &flags)
+}
+
+fn verify_parsed_tx(tx: &Transaction, prevouts: Vec<TxOut>, flags: &TxFlags) -> Result<(), String> {
     if flags.sig_push_only {
         for vin in &tx.input {
             let mut tmp = Vec::new();
@@ -623,27 +717,7 @@ fn verify_tx_row(
                 .map_err(|_| "SIG_PUSHONLY".to_string())?;
         }
     }
-    let job = ScriptCheckJob {
-        txid: tx.compute_txid().to_byte_array(),
-        prevouts,
-        tx: JobTx::owned(tx),
-        bip65_active: flags.cltv,
-        bip112_active: flags.csv,
-        bip66_active: flags.dersig || flags.strictenc || flags.low_s,
-        bip16_active: flags.p2sh,
-        taproot_active: flags.taproot,
-        minimal_if: flags.minimal_if,
-        nullfail: flags.nullfail,
-        low_s: flags.low_s,
-        strictenc: flags.strictenc,
-        null_dummy: flags.null_dummy,
-        minimal_data: flags.minimal_data,
-        witness_pubkeytype: flags.witness_pubkeytype,
-        witness_active: flags.witness,
-        discourage_upgradable_witness: flags.discourage_upgradable_witness,
-        const_scriptcode: flags.const_scriptcode,
-        pre: std::sync::OnceLock::new(),
-    };
+    let job = flags_to_job(tx.clone(), prevouts, flags);
     script::verify_job_all_inputs(&job).map_err(|e| format!("{e}"))
 }
 
@@ -734,4 +808,115 @@ fn core_tx_spot_first_valid_accepts() {
     }
     // At least one of the first 40 data rows must accept on the shipped path.
     panic!("no accepting tx_valid row in first {tried} data rows");
+}
+
+fn load_tx_data_rows(name: &str) -> Vec<(Value, String, String)> {
+    let mut out = Vec::new();
+    for row in load_array(name) {
+        let Value::Array(cells) = row else {
+            continue;
+        };
+        if cells.len() < 3 || !cells[0].is_array() {
+            continue;
+        }
+        let Some(tx_hex) = cells[1].as_str() else {
+            continue;
+        };
+        let flags_s = cells[2].as_str().unwrap_or("NONE").to_string();
+        out.push((cells[0].clone(), tx_hex.to_string(), flags_s));
+    }
+    out
+}
+
+/// Core `transaction_tests.cpp`: a valid row still accepts with any extra
+/// implemented flag turned off, unless FillFlags would turn it back on.
+#[test]
+fn core_tx_valid_flag_subsets() {
+    let mut n = 0u32;
+    for (prev, tx_hex, flags_s) in load_tx_data_rows("tx_valid.json") {
+        let flags = parse_tx_valid_flags(&flags_s);
+        let tx_bytes = decode_hex(&tx_hex).expect("hex");
+        let tx: Transaction = deserialize(&tx_bytes).expect("tx");
+        let mut map = std::collections::HashMap::new();
+        for p in prev.as_array().expect("prevouts") {
+            let (txid, vout, txo) = parse_prevout(p).expect("prevout");
+            map.insert((txid, vout), txo);
+        }
+        let mut prevouts = Vec::new();
+        for vin in &tx.input {
+            prevouts.push(
+                map.get(&(vin.previous_output.txid, vin.previous_output.vout))
+                    .cloned()
+                    .expect("missing prevout"),
+            );
+        }
+        for i in 0..TOGGLE_N {
+            if !flag_on(&flags, i) {
+                continue;
+            }
+            let less = with_flag(flags.clone(), i, false);
+            if flag_on(&less, i) {
+                continue;
+            }
+            n += 1;
+            verify_parsed_tx(&tx, prevouts.clone(), &less).unwrap_or_else(|e| {
+                panic!("tx_valid subset i={i} flags={flags_s} still-on-row must accept: {e}")
+            });
+        }
+    }
+    assert!(n > 0, "expected some subset toggles");
+}
+
+/// Core `transaction_tests.cpp`: an invalid row still rejects with any extra
+/// implemented flag turned on. BADTX rows are structural (no script flags).
+#[test]
+fn core_tx_invalid_flag_supersets() {
+    let mut n = 0u32;
+    for (prev, tx_hex, flags_s) in load_tx_data_rows("tx_invalid.json") {
+        let flags = parse_tx_invalid_flags(&flags_s);
+        if flags.badtx {
+            continue;
+        }
+        let tx_bytes = decode_hex(&tx_hex).expect("hex");
+        let tx: Transaction = deserialize(&tx_bytes).expect("tx");
+        if check_transaction_struct(&tx).is_err() {
+            continue;
+        }
+        let mut map = std::collections::HashMap::new();
+        for p in prev.as_array().expect("prevouts") {
+            let (txid, vout, txo) = parse_prevout(p).expect("prevout");
+            map.insert((txid, vout), txo);
+        }
+        let mut prevouts = Vec::new();
+        let mut missing = false;
+        for vin in &tx.input {
+            match map.get(&(vin.previous_output.txid, vin.previous_output.vout)) {
+                Some(po) => prevouts.push(po.clone()),
+                None => {
+                    missing = true;
+                    break;
+                }
+            }
+        }
+        if missing {
+            continue;
+        }
+        for i in 0..TOGGLE_N {
+            if i == I_P2SH || i == I_WITNESS || i == I_TAPROOT {
+                continue;
+            }
+            if flag_on(&flags, i) {
+                continue;
+            }
+            let more = with_flag(flags.clone(), i, true);
+            if more == flags {
+                continue;
+            }
+            n += 1;
+            verify_parsed_tx(&tx, prevouts.clone(), &more).expect_err(&format!(
+                "tx_invalid superset i={i} flags={flags_s} must still reject"
+            ));
+        }
+    }
+    assert!(n > 0, "expected some superset toggles");
 }
