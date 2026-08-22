@@ -31,7 +31,7 @@ fn ctx_empty() -> (RpcContext, PathBuf) {
         peers: None,
         chain: None,
         logpath: String::new(),
-        active: std::sync::Mutex::new(Vec::new()),
+        active: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         permit_bare_multisig: true,
     };
     (ctx, dir)
@@ -171,6 +171,89 @@ fn estimatesmartfee_maps_to_product() {
     let r = dispatch(&ctx, "estimatesmartfee", vec![json!(2)]).unwrap();
     // Empty mempool → negative feerate with errors.
     assert!(r["feerate"].as_f64().unwrap() < 0.0 || r.get("rbitcoin_model").is_some());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Core `rpc_estimatefee.py`: missing/typed/mode gates + estimaterawfee.
+#[test]
+fn estimatesmartfee_core_param_gates() {
+    let (ctx, dir) = ctx_empty();
+    let e = dispatch(&ctx, "estimatesmartfee", vec![]).unwrap_err();
+    assert_eq!(e["code"], ERR_MISC);
+    assert!(
+        e["message"].as_str().unwrap().contains("estimatesmartfee"),
+        "{e}"
+    );
+    let e = dispatch(&ctx, "estimaterawfee", vec![]).unwrap_err();
+    assert_eq!(e["code"], ERR_MISC);
+    assert!(
+        e["message"].as_str().unwrap().contains("estimaterawfee"),
+        "{e}"
+    );
+
+    let e = dispatch(&ctx, "estimatesmartfee", vec![json!("foo")]).unwrap_err();
+    assert_eq!(e["code"], ERR_TYPE_ERROR);
+    assert!(
+        e["message"]
+            .as_str()
+            .unwrap()
+            .contains("JSON value of type string is not of expected type number"),
+        "{e}"
+    );
+    let e = dispatch(&ctx, "estimatesmartfee", vec![json!(1), json!(1)]).unwrap_err();
+    assert_eq!(e["code"], ERR_TYPE_ERROR);
+    assert!(
+        e["message"]
+            .as_str()
+            .unwrap()
+            .contains("JSON value of type number is not of expected type string"),
+        "{e}"
+    );
+    let e = dispatch(&ctx, "estimatesmartfee", vec![json!(1), json!("foo")]).unwrap_err();
+    assert_eq!(e["code"], ERR_INVALID_PARAMETER);
+    assert!(
+        e["message"]
+            .as_str()
+            .unwrap()
+            .contains("Invalid estimate_mode parameter"),
+        "{e}"
+    );
+    let e = dispatch(
+        &ctx,
+        "estimatesmartfee",
+        vec![json!(1), json!("ECONOMICAL"), json!(1)],
+    )
+    .unwrap_err();
+    assert_eq!(e["code"], ERR_MISC);
+    assert!(e["message"].as_str().unwrap().contains("estimatesmartfee"));
+
+    let e = dispatch(&ctx, "estimaterawfee", vec![json!(1009)]).unwrap_err();
+    assert_eq!(e["code"], ERR_INVALID_PARAMETER);
+    assert!(
+        e["message"]
+            .as_str()
+            .unwrap()
+            .contains("Invalid conf_target, must be between 1 and 1008"),
+        "{e}"
+    );
+
+    // Valid calls must succeed (empty mempool still returns an object).
+    let _ = dispatch(&ctx, "estimatesmartfee", vec![json!(1)]).unwrap();
+    let _ = dispatch(
+        &ctx,
+        "estimatesmartfee",
+        vec![json!(1), json!("ECONOMICAL")],
+    )
+    .unwrap();
+    let _ = dispatch(&ctx, "estimatesmartfee", vec![json!(1), json!("unset")]).unwrap();
+    let _ = dispatch(
+        &ctx,
+        "estimatesmartfee",
+        vec![json!(1), json!("conservative")],
+    )
+    .unwrap();
+    let _ = dispatch(&ctx, "estimaterawfee", vec![json!(1)]).unwrap();
+    let _ = dispatch(&ctx, "estimaterawfee", vec![json!(1), json!(1)]).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -370,6 +453,23 @@ fn stop_sets_flag() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `feature_shutdown.py`: waitfornewblock must return when stop is set.
+#[test]
+fn waitfornewblock_returns_on_stop() {
+    use std::thread;
+    use std::time::Duration;
+    let (ctx, dir, _hub) = ctx_regtest_hub();
+    let stop = Arc::clone(&ctx.stop);
+    let h = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(30));
+        stop.store(true, Ordering::SeqCst);
+    });
+    let got = dispatch(&ctx, "waitfornewblock", vec![json!(5_000)]).unwrap();
+    assert_eq!(got["height"], 0);
+    h.join().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn unsupported_methods_error() {
     let (ctx, dir) = ctx_empty();
@@ -566,8 +666,8 @@ fn all_methods_callable_empty_or_error() {
     }
     let e = dispatch(&ctx, "decodescript", vec![json!("51")]).unwrap_err();
     assert_eq!(e["code"], ERR_METHOD_NOT_FOUND);
-    // estimatesmartfee default conf
-    let _ = dispatch(&ctx, "estimatesmartfee", vec![]).unwrap();
+    // estimatesmartfee requires conf_target (rpc_estimatefee.py)
+    let _ = dispatch(&ctx, "estimatesmartfee", vec![]).unwrap_err();
     let _ = dispatch(&ctx, "estimatesmartfee", vec![json!(6)]).unwrap();
     // handle_request error shapes
     let _ = handle_request(&ctx, &json!({}));
@@ -592,7 +692,7 @@ fn all_methods_callable_empty_or_error() {
         peers: None,
         chain: None,
         logpath: String::new(),
-        active: std::sync::Mutex::new(Vec::new()),
+        active: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         permit_bare_multisig: true,
     };
     let mem2 = dispatch(&ctx2, "getmempoolinfo", vec![]).unwrap();
@@ -640,7 +740,7 @@ fn chain_methods_against_mined_regtest() {
         peers: None,
         chain: None,
         logpath: String::new(),
-        active: std::sync::Mutex::new(Vec::new()),
+        active: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         permit_bare_multisig: true,
     };
 
@@ -1108,7 +1208,7 @@ fn ctx_regtest_hub() -> (RpcContext, PathBuf, Arc<rbitcoin_net::ChainHub>) {
         peers: None,
         chain: Some(Arc::clone(&hub)),
         logpath: String::new(),
-        active: std::sync::Mutex::new(Vec::new()),
+        active: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         permit_bare_multisig: true,
     };
     (ctx, dir, hub)
@@ -2529,7 +2629,7 @@ fn rpc_honesty_mempool_budget_and_network_identity() {
         peers: None,
         chain: None,
         logpath: String::new(),
-        active: std::sync::Mutex::new(Vec::new()),
+        active: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         permit_bare_multisig: true,
     };
     let mem = dispatch(&ctx, "getmempoolinfo", vec![]).unwrap();

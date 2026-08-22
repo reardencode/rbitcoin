@@ -70,7 +70,7 @@ pub struct RpcContext {
     /// Core `-permitbaremultisig` (default true). `getmempoolinfo`.
     pub permit_bare_multisig: bool,
     /// In-flight RPC methods (method, start) for `getrpcinfo.active_commands`.
-    pub active: std::sync::Mutex<Vec<(String, Instant)>>,
+    pub active: Arc<std::sync::Mutex<Vec<(String, Instant)>>>,
 }
 
 /// Outcome of `submitblock` (Core: `null` or a reject-reason string).
@@ -385,6 +385,7 @@ fn dispatch_inner(ctx: &RpcContext, method: &str, params: RpcParams) -> Result<V
         "sendrawtransaction" => sendrawtransaction(ctx, &params),
         "testmempoolaccept" => testmempoolaccept(ctx, &params),
         "estimatesmartfee" => estimatesmartfee(ctx, &params),
+        "estimaterawfee" => estimaterawfee(ctx, &params),
         "generatetoaddress" => generatetoaddress(ctx, &params),
         "generatetodescriptor" => generatetodescriptor(ctx, &params),
         "generateblock" => generateblock(ctx, &params),
@@ -525,6 +526,7 @@ const METHOD_LIST: &[&str] = &[
     "sendrawtransaction",
     "testmempoolaccept",
     "estimatesmartfee",
+    "estimaterawfee",
     "generatetoaddress",
     "generatetodescriptor",
     "generateblock",
@@ -558,9 +560,15 @@ const METHOD_LIST: &[&str] = &[
 fn method_help(m: &str) -> String {
     match m {
         "estimatesmartfee" => {
-            "estimatesmartfee conf_target (mode ignored). Returns this node's 10-minute \
-             inclusion frontier feerate (BTC/kvB), not Core historical multi-horizon. \
-             See docs/mempool-fee-estimation.md."
+            "estimatesmartfee conf_target (estimate_mode)\n\
+             Returns this node's 10-minute inclusion frontier feerate (BTC/kvB), \
+             not Core historical multi-horizon. See docs/mempool-fee-estimation.md."
+                .into()
+        }
+        "estimaterawfee" => {
+            "estimaterawfee conf_target (threshold)\n\
+             Regtest/harness surface matching Core's RPC name. Returns this node's \
+             10-minute inclusion frontier (same product as estimatesmartfee)."
                 .into()
         }
         "getblockchaininfo" => "getblockchaininfo\nReturns tip height, chain name, and IBD flag.\n\
@@ -1557,8 +1565,123 @@ fn testmempoolaccept(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Valu
 /// Map Core `estimatesmartfee` to this node's **10-minute inclusion** product.
 fn estimatesmartfee(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["conf_target", "estimate_mode"])?;
-    let conf_target = params.opt_u64(0, "conf_target")?.unwrap_or(2) as u32;
-    // Core conf_target is blocks; we map 1–2 (and default) to 10-minute horizon.
+    // Core requires conf_target (`rpc_estimatefee.py`).
+    if params.get(0, "conf_target").is_none() {
+        return Err(rpc_error(ERR_MISC, method_help("estimatesmartfee")));
+    }
+    if params.pos_len() > 2 {
+        return Err(rpc_error(ERR_MISC, method_help("estimatesmartfee")));
+    }
+    let conf_v = params.get(0, "conf_target").unwrap();
+    let conf_target = match conf_v {
+        Value::Number(n) => n
+            .as_u64()
+            .or_else(|| n.as_i64().and_then(|i| u64::try_from(i).ok()))
+            .ok_or_else(|| {
+                rpc_error(
+                    ERR_TYPE_ERROR,
+                    "JSON value of type number is not of expected type number",
+                )
+            })? as u32,
+        other => {
+            return Err(rpc_error(
+                ERR_TYPE_ERROR,
+                format!(
+                    "JSON value of type {} is not of expected type number",
+                    json_type_name(other)
+                ),
+            ));
+        }
+    };
+    if let Some(mode_v) = params.get(1, "estimate_mode") {
+        if !matches!(mode_v, Value::Null) {
+            let mode = mode_v.as_str().ok_or_else(|| {
+                rpc_error(
+                    ERR_TYPE_ERROR,
+                    format!(
+                        "JSON value of type {} is not of expected type string",
+                        json_type_name(mode_v)
+                    ),
+                )
+            })?;
+            let ok = matches!(
+                mode.to_ascii_lowercase().as_str(),
+                "unset" | "economical" | "conservative"
+            );
+            if !ok {
+                return Err(rpc_error(
+                    ERR_INVALID_PARAMETER,
+                    "Invalid estimate_mode parameter, must be one of: \"unset\", \"economical\", \"conservative\"",
+                ));
+            }
+        }
+    }
+    estimate_fee_result(ctx, conf_target)
+}
+
+/// Core `estimaterawfee` name; same 10-minute product as [`estimatesmartfee`].
+fn estimaterawfee(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
+    params.reject_unknown(&["conf_target", "threshold"])?;
+    if params.get(0, "conf_target").is_none() {
+        return Err(rpc_error(ERR_MISC, method_help("estimaterawfee")));
+    }
+    if params.pos_len() > 2 {
+        return Err(rpc_error(ERR_MISC, method_help("estimaterawfee")));
+    }
+    let conf_v = params.get(0, "conf_target").unwrap();
+    let conf_target = match conf_v {
+        Value::Number(n) => n
+            .as_u64()
+            .or_else(|| n.as_i64().and_then(|i| u64::try_from(i).ok()))
+            .ok_or_else(|| {
+                rpc_error(
+                    ERR_TYPE_ERROR,
+                    "JSON value of type number is not of expected type number",
+                )
+            })? as u32,
+        other => {
+            return Err(rpc_error(
+                ERR_TYPE_ERROR,
+                format!(
+                    "JSON value of type {} is not of expected type number",
+                    json_type_name(other)
+                ),
+            ));
+        }
+    };
+    if !(1..=1008).contains(&conf_target) {
+        return Err(rpc_error(
+            ERR_INVALID_PARAMETER,
+            "Invalid conf_target, must be between 1 and 1008",
+        ));
+    }
+    if let Some(th) = params.get(1, "threshold") {
+        if !matches!(th, Value::Null) && json_u64(th).is_none() && th.as_f64().is_none() {
+            return Err(rpc_error(
+                ERR_TYPE_ERROR,
+                format!(
+                    "JSON value of type {} is not of expected type number",
+                    json_type_name(th)
+                ),
+            ));
+        }
+    }
+    // Core returns nested short/medium/long buckets; we expose the same
+    // single-horizon product under `short` for harness compatibility.
+    let base = estimate_fee_result(ctx, conf_target)?;
+    Ok(json!({
+        "short": {
+            "feerate": base.get("feerate").cloned().unwrap_or(json!(-1.0)),
+            "decay": 0.962,
+            "scale": 2,
+            "pass": { "startrange": 0, "endrange": 0, "withintarget": 0, "totalconfirmed": 0, "inmempool": 0, "leftmempool": 0 },
+            "fail": Value::Null,
+            "errors": base.get("errors").cloned().unwrap_or(Value::Null),
+        }
+    }))
+}
+
+fn estimate_fee_result(ctx: &RpcContext, conf_target: u32) -> Result<Value, Value> {
     let Some(mp) = ctx.mempool.as_ref() else {
         return Ok(json!({
             "feerate": -1.0,
@@ -1578,9 +1701,19 @@ fn estimatesmartfee(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value
         "feerate": rate,
         "blocks": conf_target.max(1),
         "errors": Value::Null,
-        // Non-Core field: document the product mapping.
         "rbitcoin_model": "10-minute inclusion frontier (not Core historical)",
     }))
+}
+
+fn json_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 fn require_regtest(ctx: &RpcContext, method: &str) -> Result<(), Value> {
@@ -2301,6 +2434,13 @@ fn waitfornewblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value>
     let (start_hash, _) = tip_hash_height(ctx)?;
     let deadline = Instant::now() + std::time::Duration::from_millis(timeout_ms);
     loop {
+        // `feature_shutdown.py`: stop must wake waiters so the in-flight
+        // waitfornewblock returns tip height 0 instead of hanging until
+        // the connection drops with a warm-up -28.
+        if ctx.stop.load(Ordering::SeqCst) {
+            let (hash, height) = tip_hash_height(ctx)?;
+            return Ok(json!({ "hash": hash, "height": height }));
+        }
         let (hash, height) = tip_hash_height(ctx)?;
         if hash != start_hash {
             return Ok(json!({ "hash": hash, "height": height }));

@@ -3519,3 +3519,84 @@ fn inv_of_already_asked_block_does_not_getdata() {
         let _ = std::fs::remove_dir_all(dir);
     });
 }
+
+/// `p2p_nobloomfilter_messages.py`: mempool/filter* disconnect when bloom off.
+#[test]
+fn bloom_disabled_messages_request_disconnect() {
+    use bitcoin::consensus::encode::serialize;
+    use bitcoin::p2p::message::RawNetworkMessage;
+    use bitcoin::p2p::message_bloom::{BloomFlags, FilterAdd, FilterLoad};
+    use bitcoin::Network;
+
+    fn frame_for(msg: NetworkMessage) -> FramedMessage {
+        let magic = Magic::from(Network::Regtest);
+        let raw = RawNetworkMessage::new(magic, msg);
+        let full = serialize(&raw);
+        let command: [u8; 12] = full[4..16].try_into().unwrap();
+        let checksum: [u8; 4] = full[20..24].try_into().unwrap();
+        FramedMessage {
+            magic,
+            command,
+            checksum,
+            payload: full[24..].to_vec(),
+        }
+    }
+
+    let (dir, q) = tmp_store("bloom-off");
+    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    hub.ensure_genesis().unwrap();
+    hub.set_peer_bloom_filters(false);
+    let (out_tx, _out_rx) = mpsc::unbounded_channel();
+    let mut pending_headers = HashMap::new();
+    let mut pending_blocks = HashMap::new();
+    let mut pending_cmpct = HashMap::new();
+    let mut from_peer = HashMap::new();
+    let mut requested = HashSet::new();
+    let mut wants_headers = false;
+    let mut wtxid = false;
+    let mut send_cmpct = false;
+    let mut cmpct_ver = 2u32;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let msgs = [
+        NetworkMessage::MemPool,
+        NetworkMessage::FilterClear,
+        NetworkMessage::FilterAdd(FilterAdd { data: vec![0xcc] }),
+        NetworkMessage::FilterLoad(FilterLoad {
+            filter: vec![],
+            hash_funcs: 1,
+            tweak: 0,
+            flags: BloomFlags::None,
+        }),
+    ];
+    for msg in msgs {
+        let mut ban = 0u32;
+        rt.block_on(async {
+            handle_peer_frame(
+                frame_for(msg),
+                &hub,
+                &out_tx,
+                &mut wants_headers,
+                &mut wtxid,
+                &mut send_cmpct,
+                &mut cmpct_ver,
+                &mut pending_headers,
+                &mut pending_blocks,
+                &mut pending_cmpct,
+                &mut from_peer,
+                &mut requested,
+                &mut ban,
+                None,
+            )
+            .await
+            .unwrap();
+        });
+        assert!(
+            ban >= BAN_SCORE_THRESHOLD,
+            "bloom-off message must punish-disconnect (ban={ban})"
+        );
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}

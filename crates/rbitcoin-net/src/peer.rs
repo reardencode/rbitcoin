@@ -1643,7 +1643,17 @@ async fn handle_peer_frame(
                 }
             }
         }
-        NetworkMessage::MemPool => {}
+        // Core `-peerbloomfilters=0`: disconnect mempool/filter* peers
+        // (`p2p_nobloomfilter_messages.py`). Default is on — do not disconnect.
+        NetworkMessage::MemPool
+        | NetworkMessage::FilterLoad(_)
+        | NetworkMessage::FilterAdd(_)
+        | NetworkMessage::FilterClear => {
+            if !hub.peer_bloom_filters() {
+                punish_disconnect(ban_score, session);
+                return Ok(());
+            }
+        }
         NetworkMessage::GetAddr => {
             queue_out(out_tx, NetworkMessage::Addr(vec![]))?;
         }

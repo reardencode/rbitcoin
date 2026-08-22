@@ -49,6 +49,7 @@ FORWARD_FLAGS = frozenset(
         "blocksonly",
         "minrelaytxfee",
         "permitbaremultisig",
+        "peerbloomfilters",
         "limitclustercount",
         "limitclustersize",
         "peertimeout",

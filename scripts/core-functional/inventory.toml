@@ -299,9 +299,7 @@ analog = "none"
 
 [[test]]
 name = "feature_shutdown.py"
-status = "skip"
-reason = "rpc-missing"
-analog = "follow-up: shutdown RPC / interrupt"
+status = "run"
 
 [[test]]
 name = "feature_signet.py"
@@ -725,9 +723,7 @@ analog = "follow-up: net deadlock harness"
 
 [[test]]
 name = "p2p_nobloomfilter_messages.py"
-status = "skip"
-reason = "rpc-missing"
-analog = "follow-up: bloom disabled"
+status = "run"
 
 [[test]]
 name = "p2p_node_network_limited.py"
@@ -867,9 +863,7 @@ analog = "none"
 
 [[test]]
 name = "rpc_estimatefee.py"
-status = "skip"
-reason = "rpc-dialect"
-analog = "follow-up: estimatesmartfee exists; Core multi-horizon text"
+status = "run"
 
 [[test]]
 name = "rpc_generate.py"

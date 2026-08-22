@@ -94,6 +94,8 @@ pub struct NodeConfig {
     pub min_relay_fee_btc: Option<String>,
     /// Core `-permitbaremultisig` (default true).
     pub permit_bare_multisig: bool,
+    /// Core `-peerbloomfilters` (default true).
+    pub peer_bloom_filters: bool,
     /// Core `-limitclustercount` overlay (`None` = mempool default 64).
     pub limit_cluster_count: Option<u32>,
     /// Core `-limitclustersize` in kvB (`None` = mempool default 101).
@@ -147,6 +149,7 @@ impl Default for NodeConfig {
             blocksonly: false,
             min_relay_fee_btc: None,
             permit_bare_multisig: true,
+            peer_bloom_filters: true,
             limit_cluster_count: None,
             limit_cluster_size_kvb: None,
             peer_timeout_secs: None,
@@ -514,6 +517,10 @@ impl NodeConfig {
                 "permitbaremultisig" | "permit_bare_multisig" => {
                     self.permit_bare_multisig = parse_conf_bool(val)
                         .map_err(|e| NodeError::Config(format!("conf permitbaremultisig: {e}")))?;
+                }
+                "peerbloomfilters" | "peer_bloom_filters" => {
+                    self.peer_bloom_filters = parse_conf_bool(val)
+                        .map_err(|e| NodeError::Config(format!("conf peerbloomfilters: {e}")))?;
                 }
                 "limitclustercount" | "limit_cluster_count" => {
                     self.limit_cluster_count =

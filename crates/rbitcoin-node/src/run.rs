@@ -256,6 +256,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     .await
     .map_err(|e| NodeError::Config(format!("p2p start: {e}")))?;
     node.hub.set_minimum_chain_work(config.minimum_chain_work);
+    node.hub.set_peer_bloom_filters(config.peer_bloom_filters);
     if let Some(t) = config.mock_time {
         node.hub.clock.set_mock(t);
     }
@@ -757,6 +758,16 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             .await;
             if let Some(ref h) = rpc_handle {
                 if h.stop.load(Ordering::SeqCst) {
+                    // Core keeps the RPC server up until in-flight handlers
+                    // finish (`feature_shutdown.py` waitfornewblock must
+                    // return tip height 0, not a proxy -28 on close).
+                    for _ in 0..200 {
+                        let n = h.active.lock().map(|a| a.len()).unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
                     info!("rpc: stop — shutting down");
                     shutdown.request();
                     break;
