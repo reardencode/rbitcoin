@@ -77,6 +77,9 @@ IGNORE_FLAGS = frozenset(
         "print-cmd",
         "acceptnonstdtxn",
         "peerblockfilters",
+        # Bloom filters are not a product; ignore so scripts that set
+        # -peerbloomfilters=0 still start (p2p_nobloomfilter_messages.py).
+        "peerbloomfilters",
         # Core v31.1: ancestor/descendant limits are deprecated no-ops
         # (cluster limits replaced them). Match that — do not invent a second
         # mempool graph policy.

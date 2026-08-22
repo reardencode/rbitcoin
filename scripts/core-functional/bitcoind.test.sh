@@ -250,6 +250,16 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# -peerbloomfilters is ignored (no bloom product; p2p_nobloomfilter_messages).
+OUT_BLOOM="$("$SHIM" --print-cmd -datadir="$DATADIR" -regtest -peerbloomfilters=0 2>/dev/null)" || OUT_BLOOM=""
+if printf '%s' "$OUT_BLOOM" | grep -q -- "--network regtest"; then
+  echo "ok - peerbloomfilters ignored"
+  PASS=$((PASS + 1))
+else
+  echo "not ok - peerbloomfilters ignored (got: $OUT_BLOOM)"
+  FAIL=$((FAIL + 1))
+fi
+
 # Live smoke when a real node binary is on disk (optional in this script).
 REAL=""
 if [[ -n "${RBITCOIN_NODE_REAL:-}" && -x "${RBITCOIN_NODE_REAL}" ]]; then

@@ -1643,7 +1643,16 @@ async fn handle_peer_frame(
                 }
             }
         }
-        NetworkMessage::MemPool => {}
+        // Bloom is not a product (`-peerbloomfilters=0` / ignored). Core
+        // disconnects peers that send mempool/filter* when bloom is off
+        // (`p2p_nobloomfilter_messages.py`).
+        NetworkMessage::MemPool
+        | NetworkMessage::FilterLoad(_)
+        | NetworkMessage::FilterAdd(_)
+        | NetworkMessage::FilterClear => {
+            punish_disconnect(ban_score, session);
+            return Ok(());
+        }
         NetworkMessage::GetAddr => {
             queue_out(out_tx, NetworkMessage::Addr(vec![]))?;
         }
