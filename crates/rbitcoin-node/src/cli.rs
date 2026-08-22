@@ -60,6 +60,7 @@ where
     let mut blocksonly: Option<bool> = None;
     let mut min_relay_fee_btc: Option<String> = None;
     let mut permit_bare_multisig: Option<bool> = None;
+    let mut peer_bloom_filters: Option<bool> = None;
     let mut limit_cluster_count: Option<u32> = None;
     let mut limit_cluster_size_kvb: Option<u32> = None;
     let mut peer_timeout_secs: Option<u64> = None;
@@ -510,6 +511,20 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
                 }
                 i += 1;
             }
+            "--peerbloomfilters" => {
+                peer_bloom_filters = Some(true);
+                i += 1;
+            }
+            other if other.starts_with("--peerbloomfilters=") => {
+                match parse_cli_bool(&other["--peerbloomfilters=".len()..]) {
+                    Some(b) => peer_bloom_filters = Some(b),
+                    None => {
+                        eprintln!("error: bad --peerbloomfilters value");
+                        return ExitCode::from(2);
+                    }
+                }
+                i += 1;
+            }
             other if other.starts_with("--whitelist=") => {
                 let v = &other["--whitelist=".len()..];
                 if !v.is_empty() {
@@ -902,6 +917,9 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
     }
     if let Some(b) = permit_bare_multisig {
         config.permit_bare_multisig = b;
+    }
+    if let Some(b) = peer_bloom_filters {
+        config.peer_bloom_filters = b;
     }
     if let Some(n) = limit_cluster_count {
         config.limit_cluster_count = Some(n);

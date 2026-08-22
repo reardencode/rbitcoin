@@ -256,6 +256,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     .await
     .map_err(|e| NodeError::Config(format!("p2p start: {e}")))?;
     node.hub.set_minimum_chain_work(config.minimum_chain_work);
+    node.hub.set_peer_bloom_filters(config.peer_bloom_filters);
     if let Some(t) = config.mock_time {
         node.hub.clock.set_mock(t);
     }

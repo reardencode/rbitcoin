@@ -250,13 +250,13 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-# -peerbloomfilters is ignored (no bloom product; p2p_nobloomfilter_messages).
+# -peerbloomfilters=0 is forwarded (p2p_nobloomfilter_messages).
 OUT_BLOOM="$("$SHIM" --print-cmd -datadir="$DATADIR" -regtest -peerbloomfilters=0 2>/dev/null)" || OUT_BLOOM=""
-if printf '%s' "$OUT_BLOOM" | grep -q -- "--network regtest"; then
-  echo "ok - peerbloomfilters ignored"
+if printf '%s' "$OUT_BLOOM" | grep -q -- '--peerbloomfilters=0'; then
+  echo "ok - peerbloomfilters forwarded"
   PASS=$((PASS + 1))
 else
-  echo "not ok - peerbloomfilters ignored (got: $OUT_BLOOM)"
+  echo "not ok - peerbloomfilters forwarded (got: $OUT_BLOOM)"
   FAIL=$((FAIL + 1))
 fi
 

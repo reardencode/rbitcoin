@@ -3545,6 +3545,7 @@ fn bloom_disabled_messages_request_disconnect() {
     let (dir, q) = tmp_store("bloom-off");
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
+    hub.set_peer_bloom_filters(false);
     let (out_tx, _out_rx) = mpsc::unbounded_channel();
     let mut pending_headers = HashMap::new();
     let mut pending_blocks = HashMap::new();

@@ -102,6 +102,9 @@ pub struct ChainHub {
     block_min_tx_fee_sat_kvb: AtomicU64,
     /// Block hashes we already issued getdata for (any peer).
     asked_blocks: RwLock<HashSet<BlockHash>>,
+    /// Core `-peerbloomfilters` (default true). When false, disconnect peers
+    /// that send `mempool` / `filter*` (`p2p_nobloomfilter_messages.py`).
+    peer_bloom_filters: AtomicBool,
 }
 
 /// One `getchaintips` row. Status is a Core-shaped string (`active`,
@@ -148,7 +151,17 @@ impl ChainHub {
             gbt_assembled: AtomicBool::new(false),
             block_min_tx_fee_sat_kvb: AtomicU64::new(1),
             asked_blocks: RwLock::new(HashSet::new()),
+            peer_bloom_filters: AtomicBool::new(true),
         }
+    }
+
+    /// Core `-peerbloomfilters` (default true).
+    pub fn set_peer_bloom_filters(&self, on: bool) {
+        self.peer_bloom_filters.store(on, Ordering::Relaxed);
+    }
+
+    pub fn peer_bloom_filters(&self) -> bool {
+        self.peer_bloom_filters.load(Ordering::Relaxed)
     }
 
     pub fn note_asked_block(&self, hash: BlockHash) {
