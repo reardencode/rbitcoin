@@ -175,12 +175,19 @@ mod bip341_tests {
 
     /// Single-leaf tree: leaf script `OP_TRUE`, empty initial stack.
     fn make_script_path_spend() -> (ScriptCheckJob, ControlBlock) {
+        make_script_path_spend_with(&[0x51], &[])
+    }
+
+    fn make_script_path_spend_with(
+        leaf_bytes: &[u8],
+        stack_items: &[&[u8]],
+    ) -> (ScriptCheckJob, ControlBlock) {
         let secp = Secp256k1::new();
         let internal_sk = SecretKey::from_slice(&[3u8; 32]).unwrap();
         let internal_kp = Keypair::from_secret_key(&secp, &internal_sk);
         let (internal_xonly, _) = internal_kp.x_only_public_key();
 
-        let leaf = ScriptBuf::from_bytes(vec![0x51]); // OP_TRUE
+        let leaf = ScriptBuf::from_bytes(leaf_bytes.to_vec());
         let builder = TaprootBuilder::new()
             .add_leaf(0, leaf.clone())
             .expect("leaf");
@@ -190,8 +197,12 @@ mod bip341_tests {
             .control_block(&(leaf.clone(), LeafVersion::TapScript))
             .expect("control");
 
-        // Sanity: rust-bitcoin's own check must pass for our fixture.
         assert!(control.verify_taproot_commitment(&secp, output_key, leaf.as_script()));
+
+        let ctrl = control.serialize();
+        let mut wit: Vec<&[u8]> = stack_items.to_vec();
+        wit.push(leaf.as_bytes());
+        wit.push(ctrl.as_slice());
 
         let prevout = TxOut {
             value: Amount::from_sat(50_000),
@@ -204,7 +215,7 @@ mod bip341_tests {
                 previous_output: OutPoint::null(),
                 script_sig: ScriptBuf::new(),
                 sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-                witness: Witness::from_slice(&[leaf.as_bytes(), control.serialize().as_slice()]),
+                witness: Witness::from_slice(&wit),
             }],
             output: vec![TxOut {
                 value: Amount::from_sat(49_000),
@@ -305,6 +316,49 @@ mod bip341_tests {
         };
         script::verify_job_all_inputs(&job)
             .expect("unknown tapleaf must succeed after BIP341 commitment");
+    }
+
+    /// Core ExecuteWitnessScript (TAPSCRIPT): initial stack > 1000 is
+    /// SCRIPT_ERR_STACK_SIZE even if the leaf would drain it.
+    #[test]
+    fn script_path_rejects_initial_stack_over_max_size() {
+        let ones: Vec<Vec<u8>> = (0..1001).map(|_| vec![0x01]).collect();
+        let refs: Vec<&[u8]> = ones.iter().map(|v| v.as_slice()).collect();
+        let leaf: Vec<u8> = vec![0x75; 1000];
+        let (job, _) = make_script_path_spend_with(&leaf, &refs);
+        let err = script::verify_job_all_inputs(&job).expect_err("1001 initial stack");
+        let msg = format!("{err}");
+        assert!(msg.contains("stack size"), "expected stack size, got {msg}");
+    }
+
+    /// Core ExecuteWitnessScript: every initial tapscript witness element ≤ 520.
+    #[test]
+    fn script_path_rejects_initial_element_over_520() {
+        let true_item = vec![0x01];
+        let big = vec![0u8; 521];
+        let (job, _) =
+            make_script_path_spend_with(&[0x75], &[true_item.as_slice(), big.as_slice()]);
+        let err = script::verify_job_all_inputs(&job).expect_err("521-byte initial element");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("PUSH_SIZE") || msg.contains("push too large"),
+            "expected PUSH_SIZE-class, got {msg}"
+        );
+    }
+
+    /// BIP342: OP_SUCCESS overrides initial-stack count and element-size limits.
+    #[test]
+    fn script_path_op_success_overrides_initial_stack_limits() {
+        let ones: Vec<Vec<u8>> = (0..1001).map(|_| vec![0x01]).collect();
+        let refs: Vec<&[u8]> = ones.iter().map(|v| v.as_slice()).collect();
+        let (job, _) = make_script_path_spend_with(&[0x50], &refs);
+        script::verify_job_all_inputs(&job).expect("OP_SUCCESS + 1001 stack");
+
+        let true_item = vec![0x01];
+        let big = vec![0u8; 521];
+        let (job, _) =
+            make_script_path_spend_with(&[0x50], &[true_item.as_slice(), big.as_slice()]);
+        script::verify_job_all_inputs(&job).expect("OP_SUCCESS + 521-byte element");
     }
 
     #[test]

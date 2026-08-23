@@ -25,6 +25,15 @@ before 1.0).
   `RBITCOIN_SH_MERGE_WORKERS` still override (`1` = serial). Start logs
   include `free_GiB=`.
 
+### Fixed
+
+- **Tapscript initial witness stack ([023](docs/external_findings/023-tapscript-initial-stack-limits.md)):**
+  after the BIP342 OP_SUCCESS scan, tapscript now rejects an initial
+  stack over 1000 items (`stack size`) and any initial element over 520
+  bytes (`PUSH_SIZE`), matching Core `ExecuteWitnessScript`. OP_SUCCESS
+  still overrides both. Regression:
+  `script_path_rejects_initial_stack_over_max_size`.
+
 ## [0.5.1] — 2026-08-22
 
 Workspace version **0.5.1**. Consensus + Electrum serve fixes on the 0.5 line.

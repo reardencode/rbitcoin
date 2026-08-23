@@ -382,6 +382,16 @@ pub(crate) fn eval_script(
     if ctx.sig_version == SigVersion::TapScript && tapscript_has_op_success(script) {
         return Ok(false);
     }
+    if ctx.sig_version == SigVersion::TapScript {
+        if stack.len() > MAX_STACK_SIZE {
+            return Err(ConsensusError::Script("stack size".into()));
+        }
+        for item in stack.iter() {
+            if item.len() > MAX_SCRIPT_ELEMENT_SIZE {
+                return Err(ConsensusError::Script("PUSH_SIZE".into()));
+            }
+        }
+    }
     // Legacy / v0 only: 10k script size. Tapscript: no explicit size limit.
     if ctx.sig_version != SigVersion::TapScript && bytes.len() > MAX_SCRIPT_SIZE_LEGACY {
         return Err(ConsensusError::Script("script too large".into()));
