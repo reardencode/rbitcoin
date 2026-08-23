@@ -77,7 +77,7 @@ Full method list, auth, and shindex matrix: **[`docs/rpc.md`](./docs/rpc.md)**.
 | server.version / banner / features | done | Banner: libre-relay-class. `server.version[0]` is `rbitcoin-electrs <workspace.package.version>` — **not electrs**; see below |
 | blockchain.tweaks.subscribe | done | Cake stream (first height as result, then notifies + `done`). Naive walk, or `--sptweaks` thin index (`len:tweak` only; one `txout` span per wave). Pre-taproot: empty maps in ≤1024-height writes. Isolate may still hardcode `electrs.cakewallet.com` |
 | headers / block headers | done | Tip push on subscribe |
-| scripthash history / balance / listunspent | done | Unconf when mempool attached; `get_history` optional BCH-style `from_height` / exclusive `to_height` (`-1` = tip + mempool); 1-arg = full history; **subscribe status always full**; `listunspent` loads `txid.body` only for unspent creates; one TCP connection reuses the last SH outs+spent join until tip **hash** changes. Confirmed methods stamp `chain_tip` / `chain_tip_height` on the JSON-RPC object (not inside `result`). `server.features.chain_tip = true`. |
+| scripthash history / balance / listunspent | done | Unconf when mempool attached; `get_history` optional BCH-style `from_height` / exclusive `to_height` (`-1` = tip + mempool); 1-arg = full history; **subscribe status always full**; `listunspent` loads `txid.body` only for unspent creates; one TCP connection reuses the last SH outs+spent join until tip **hash** changes. Confirmed methods stamp `chain_tip` / `chain_tip_height` on the JSON-RPC object (not inside `result`). `server.features.chain_tip = true`. Trailing 64-hex **asof** hash (`server.features.asof`): confirmed rows as of that still-live ancestor, **no** mempool; stamp is the asof block; unknown hash → `asof not on chain`. |
 | scripthash.get_mempool / subscribe | done | Status on mempool announce **and** on confirming tip when that block creates or spends the hash (posting-list probe; no Class A expand on a miss). Reorg (`TipNotify.reorg_from_height`) restatuses every watch even if the new block misses the script. Status preimage is `txid:height:blockhash:` for confirmed rows (mempool rows stay `txid:height:`). |
 | transaction.get / get_merkle | done | get falls back to mempool; confirmed responses stamp `chain_tip` |
 | transaction.broadcast | done | Mempool accept + P2P inv |
@@ -116,8 +116,15 @@ the published tip and retry if it disconnects
 | Electrum TCP | JSON-RPC extra members `chain_tip` / `chain_tip_height` next to `result` (ping/version omit). `server.features.chain_tip`. | `result` shape unchanged. Status preimage includes confirming `blockhash` so subscribe clients refetch on same-height replace. Notification `params` stay `[scripthash, status]`. |
 
 We stamp **tip**, not only the last relevant history tx hash (empty history
-and list envelopes still need a token). We do **not** serve “as of hash H”
-after H is disconnected.
+and list envelopes still need a token).
+
+**As-of (buried ancestor):** thanks again to Yuval — the same A-B-A /
+bind-confirmations-to-a-chain work implies “wallet as of this block”
+while that block is still on the best chain. Esplora `?asof=<hash>` and
+Electrum trailing asof hash join under `pin_chain_view_at`. Stamp is
+that hash. If the asof block leaves the tip chain: **404** /
+`asof not on chain` (no retry onto another block at the same height).
+We still do **not** serve a disconnected fork hash.
 
 ## Esplora REST surface
 
@@ -129,8 +136,8 @@ via reverse proxy; app `ServeLimits` always on (same model as Electrum).
 | Tip | done | `/blocks/tip/height`, `/blocks/tip/hash`. Every REST response with a published tip also stamps `X-Bitcoin-Chain-Tip` (display-order hex, same as `/blocks/tip/hash`) and `X-Bitcoin-Chain-Tip-Height`, CORS-exposed. Empty chain omits them (existing 503). If the pin dies mid-request: **503** `chain view moved`. |
 | Blocks list | done | `/blocks`, `/blocks/:start_height` (10 summaries, newest-first) |
 | Block | done | `/block/:hash` JSON, `/raw`, `/status`, `/header`, `/txids`, `/txid/:i`, `/txs[/:start]` |
-| Tx | done | `/tx/:txid` full JSON, `/hex`, `/raw`, `/status`, Electrum `/merkle-proof`, BIP37 `/merkleblock-proof`, `/outspend(s)` |
-| Address / scripthash | done | stats + `/utxo` + `/txs` + `/txs/mempool` + `/txs/chain[/:last_seen_txid]`; `/utxo` matches Electrum listunspent (mempool funding + drop mempool-spent confirmed); `/txs` from SH join fks; last SH join reused across sequential REST calls until tip **hash** changes; needs SH finalize |
+| Tx | done | `/tx/:txid` full JSON, `/hex`, `/raw`, `/status`, Electrum `/merkle-proof`, BIP37 `/merkleblock-proof`, `/outspend(s)`. `?asof=<hash>` on `/status` and `/outspend(s)`: confirmed/spent as of that ancestor; 404 if not on chain. |
+| Address / scripthash | done | stats + `/utxo` + `/txs` + `/txs/mempool` + `/txs/chain[/:last_seen_txid]`; `/utxo` matches Electrum listunspent (mempool funding + drop mempool-spent confirmed); `/txs` from SH join fks; last SH join reused across sequential REST calls until tip **hash** changes; needs SH finalize. `?asof=<hash>` on `/`, `/utxo`, `/txs`, `/txs/chain`: confirmed join at that ancestor, **no** mempool; headers are the asof hash; 404 if not on chain. |
 | Mempool / fees | done | `/mempool`, `/mempool/txids`, `/mempool/recent` (accept-order ring), `/fee-estimates` |
 | `POST /tx` | done | broadcast via mempool hub; **503** if hub absent |
 | `POST /txs/package` | done | JSON array of hex txs → `accept_package`; **503** without hub; max 25 txs |

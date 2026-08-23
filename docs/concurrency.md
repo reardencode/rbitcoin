@@ -96,10 +96,11 @@ cannot pin bitcoind RPC — we can).
 | Rule | Detail |
 |------|--------|
 | Pin | `Query::pin_chain_view` captures `{height, hash, header_fk}` of published tip |
+| Buried / as-of | `pin_chain_view_at(hash)` for a still-live ancestor. As-of APIs stamp that hash. If it leaves the tip chain: 404 / `asof not on chain` — **do not** retry onto another block at the same height |
 | Filter | SH join uses `is_confirmed_strong_at(fk, view.height)`; slot keys on **hash** |
 | Live-check | `ChainView::still_live` ⇔ `confirmed[height] == header_fk` |
 | Extension | Prefix pin stays live; creates above the pin are filtered |
-| Disconnect / same-height replace | Pin dies; `run_at_chain_view` retries (bound 8) then `StoreError::Stale` |
+| Disconnect / same-height replace | Live pin dies; `run_at_chain_view` retries (bound 8) then `StoreError::Stale` |
 | Not OK | Pause queries during write, MVCC Class C, serving a disconnected hash |
 
 API tokens: [`COMPAT.md`](../COMPAT.md) (Esplora headers, Electrum JSON-RPC extra members, status preimage).
