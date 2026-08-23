@@ -54,6 +54,7 @@ async fn electrum_server_version_history_balance() {
     assert!(v.get("result").is_some(), "{v}");
     let ver = v["result"].as_array().unwrap();
     assert_eq!(ver.len(), 2);
+    assert_eq!(ver[1].as_str(), Some("1.4"));
 
     // OP_TRUE scripthash
     let sh_hex = electrum_scripthash_hex(&[0x51]);

@@ -74,10 +74,10 @@ Full method list, auth, and shindex matrix: **[`docs/rpc.md`](./docs/rpc.md)**.
 
 | Method | Status | Notes |
 |--------|--------|-------|
-| server.version / banner / features | done | Banner: libre-relay-class. `server.version[0]` is `rbitcoin-electrs <workspace.package.version>` — **not electrs**; see below |
+| server.version / banner / features | done | Banner: libre-relay-class. `server.version[0]` is `rbitcoin-electrs <workspace.package.version>` — **not electrs**; see below. `server.version` negotiates: omitted → `1.4.2`; `"1.4"` → `1.4`; `["1.4","1.4.2"]` → `1.4.2`; `"1.4.2-asof"` (or a range containing it) → as-of dialect. First call wins. `features.protocol_max` is `1.4.2`; `features.asof_protocol` is `1.4.2-asof`. |
 | blockchain.tweaks.subscribe | done | Cake stream (first height as result, then notifies + `done`). Naive walk, or `--sptweaks` thin index (`len:tweak` only; one `txout` span per wave). Pre-taproot: empty maps in ≤1024-height writes. Isolate may still hardcode `electrs.cakewallet.com` |
 | headers / block headers | done | Tip push on subscribe |
-| scripthash history / balance / listunspent | done | Unconf when mempool attached; `get_history` optional BCH-style `from_height` / exclusive `to_height` (`-1` = tip + mempool); 1-arg = full history; **subscribe status always full**; `listunspent` loads `txid.body` only for unspent creates; one TCP connection reuses the last SH outs+spent join until tip **hash** changes. Confirmed methods stamp `chain_tip` / `chain_tip_height` on the JSON-RPC object (not inside `result`). `server.features.chain_tip = true`. Trailing 64-hex **asof** hash (`server.features.asof`): confirmed rows as of that still-live ancestor, **no** mempool; stamp is the asof block; unknown hash → `asof not on chain`. |
+| scripthash history / balance / listunspent | done | Unconf when mempool attached; `get_history` optional BCH-style `from_height` / exclusive `to_height` (`-1` = tip + mempool); 1-arg = full history; **subscribe status always full**; `listunspent` loads `txid.body` only for unspent creates; one TCP connection reuses the last SH outs+spent join until tip **hash** changes. Confirmed methods stamp `chain_tip` / `chain_tip_height` on the JSON-RPC object (not inside `result`). `server.features.chain_tip = true`. Trailing **`asof:<blockhash>`** after the official args (`server.features.asof` / `asof_protocol = 1.4.2-asof`): confirmed rows as of that still-live ancestor, **no** mempool; stamp is the asof block; unknown hash → `asof not on chain`. Prefix keeps it off the future positional-string landmine. Requires negotiated `1.4.2-asof` (first `server.version` only). Electrum `protocol_max` stays `1.4.2`. |
 | scripthash.get_mempool / subscribe | done | Status on mempool announce **and** on confirming tip when that block creates or spends the hash (posting-list probe; no Class A expand on a miss). Reorg (`TipNotify.reorg_from_height`) restatuses every watch even if the new block misses the script. Status preimage is `txid:height:blockhash:` for confirmed rows (mempool rows stay `txid:height:`). |
 | transaction.get / get_merkle | done | get falls back to mempool; confirmed responses stamp `chain_tip` |
 | transaction.broadcast | done | Mempool accept + P2P inv |
@@ -121,10 +121,18 @@ and list envelopes still need a token).
 **As-of (buried ancestor):** thanks again to Yuval — the same A-B-A /
 bind-confirmations-to-a-chain work implies “wallet as of this block”
 while that block is still on the best chain. Esplora `?asof=<hash>` and
-Electrum trailing asof hash join under `pin_chain_view_at`. Stamp is
-that hash. If the asof block leaves the tip chain: **404** /
-`asof not on chain` (no retry onto another block at the same height).
-We still do **not** serve a disconnected fork hash.
+Electrum trailing `asof:<hash>` (after official positional args) join
+under `pin_chain_view_at`. Stamp is that hash. If the asof block leaves
+the tip chain: **404** / `asof not on chain` (no retry onto another
+block at the same height). We still do **not** serve a disconnected fork
+hash.
+
+Electrum clients that want as-of send `server.version(name, "1.4.2-asof")`
+(or a `[min, max]` range whose max is that string). Standard Electrum
+`"1.4"` / `["1.4", "1.4.2"]` stays on dotted-int 1.4.x; an `asof:` tag
+without the dialect is an error. `server.features.protocol_max` remains
+`"1.4.2"` so Electrum dotted-int parsers do not choke; discovery is
+`asof` + `asof_protocol`.
 
 ## Esplora REST surface
 

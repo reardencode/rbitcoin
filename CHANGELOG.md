@@ -21,11 +21,14 @@ before 1.0).
   [`COMPAT.md`](COMPAT.md), [`docs/concurrency.md`](docs/concurrency.md).
 
 - **As-of ancestor snapshot:** `?asof=<blockhash>` (Esplora) and a trailing
-  asof hash (Electrum `get_balance` / `listunspent` / `get_history`) return
-  confirmed UTXOs/balance/history as of a still-live best-chain block.
-  Thanks again to Yuval — this is the buried-height half of binding
-  confirmations to a chain. Stamp is the asof hash; unknown/disconnected
-  → 404 / `asof not on chain`.
+  Electrum `asof:<blockhash>` string on `get_balance` / `listunspent` /
+  `get_history` return confirmed UTXOs/balance/history as of a still-live
+  best-chain block. Thanks again to Yuval — this is the buried-height half
+  of binding confirmations to a chain. Stamp is the asof hash;
+  unknown/disconnected → 404 / `asof not on chain`. The `asof:` prefix
+  cannot be a later official hash/string arg. Clients negotiate protocol
+  `1.4.2-asof` (`server.features.asof_protocol`); Electrum `protocol_max`
+  stays dotted-int `1.4.2`.
 
 - **Road to 1.0:** [`docs/road-to-1.0.md`](docs/road-to-1.0.md) owns 1.0
   product gates (claimed Core functional, Core-parity fuzz, selected
