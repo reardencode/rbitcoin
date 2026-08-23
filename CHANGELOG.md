@@ -9,21 +9,7 @@ before 1.0).
 
 ## [Unreleased]
 
-### Added
-
-- **Road to 1.0:** [`docs/road-to-1.0.md`](docs/road-to-1.0.md) owns 1.0
-  product gates (claimed Core functional, Core-parity fuzz, selected
-  crates.io libraries, SH/RSS, eclipse/DoS, fee validation, schema freeze).
-  [`docs/quality.md`](docs/quality.md) stays the living Open backlog.
-
-### Changed
-
-- **SH workers follow free RAM:** recollect and k-way materialize default to
-  at most **one worker per 1.5 GiB** host free RAM (Linux `MemAvailable`,
-  Darwin free+inactive pages, Windows `AvailPhys`; unknown OS → 1 worker).
-  Unset env is auto; `RBITCOIN_SH_RECOLLECT_WORKERS` /
-  `RBITCOIN_SH_MERGE_WORKERS` still override (`1` = serial). Start logs
-  include `free_GiB=`.
+## [0.5.2] — 2026-08-23
 
 ### Fixed
 
@@ -37,6 +23,14 @@ before 1.0).
 ## [0.5.1] — 2026-08-22
 
 Workspace version **0.5.1**. Consensus + Electrum serve fixes on the 0.5 line.
+
+### Added
+
+- **Road to 1.0:** [`docs/road-to-1.0.md`](docs/road-to-1.0.md) owns 1.0
+  product gates (claimed Core functional, Core-parity fuzz, selected
+  crates.io libraries, SH/RSS, eclipse/DoS, fee validation, schema freeze).
+  [`docs/quality.md`](docs/quality.md) stays the living Open backlog.
+
 
 ### Fixed
 
@@ -52,6 +46,13 @@ Workspace version **0.5.1**. Consensus + Electrum serve fixes on the 0.5 line.
   an in-flight wave.
 
 ### Changed
+
+- **SH workers follow free RAM:** recollect and k-way materialize default to
+  at most **one worker per 1.5 GiB** host free RAM (Linux `MemAvailable`,
+  Darwin free+inactive pages, Windows `AvailPhys`; unknown OS → 1 worker).
+  Unset env is auto; `RBITCOIN_SH_RECOLLECT_WORKERS` /
+  `RBITCOIN_SH_MERGE_WORKERS` still override (`1` = serial). Start logs
+  include `free_GiB=`.
 
 - **PR CI OS smoke:** `ci.yml` `windows` / `macos` jobs run native store
   platform tests (TableFile, SH free-RAM probe, pool/IOCP session, default

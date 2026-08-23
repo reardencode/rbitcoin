@@ -709,7 +709,7 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-bench"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "bitcoin",
  "serde_json",
@@ -718,7 +718,7 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-cli"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "base64 0.23.1",
  "mimalloc",
@@ -727,7 +727,7 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-consensus"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "arc-swap",
  "bitcoin",
@@ -741,7 +741,7 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-electrum"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "bitcoin",
  "rbitcoin-consensus",
@@ -757,7 +757,7 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-esplora"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "axum",
  "bitcoin",
@@ -779,11 +779,11 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-log"
-version = "0.5.1"
+version = "0.5.2"
 
 [[package]]
 name = "rbitcoin-mempool"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "bitcoin",
  "rbitcoin-consensus",
@@ -792,7 +792,7 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-net"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "arc-swap",
  "bip324",
@@ -808,7 +808,7 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-node"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "bitcoin",
  "mimalloc",
@@ -827,11 +827,11 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-primitives"
-version = "0.5.1"
+version = "0.5.2"
 
 [[package]]
 name = "rbitcoin-query"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "arc-swap",
  "bitcoin",
@@ -842,7 +842,7 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-rpc"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -864,7 +864,7 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-store"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "bitcoin_hashes 0.14.101",
  "getrandom 0.4.3",
@@ -876,7 +876,7 @@ dependencies = [
 
 [[package]]
 name = "rbitcoin-test"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "bitcoin",
  "rbitcoin-cli",

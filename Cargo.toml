@@ -19,7 +19,7 @@ members = [
 default-members = ["crates/rbitcoin-node"]
 
 [workspace.package]
-version = "0.5.1"
+version = "0.5.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/reardencode/rbitcoin"
