@@ -2129,6 +2129,15 @@ impl Query {
         self.store.spenders(out_txid, out_index)
     }
 
+    pub fn spenders_at(
+        &self,
+        out_txid: &[u8; 32],
+        out_index: u32,
+        tip: Option<u32>,
+    ) -> Result<Vec<PointRecord>, QueryError> {
+        self.store.spenders_at(out_txid, out_index, tip)
+    }
+
     pub fn spenders_raw(
         &self,
         out_txid: &[u8; 32],

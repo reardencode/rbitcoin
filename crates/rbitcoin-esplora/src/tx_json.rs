@@ -13,8 +13,21 @@ use std::collections::HashMap;
 
 /// Esplora `status` object for a Class A tx fk (confirmed or not).
 pub fn tx_status_json(query: &Query, tx_fk: Fk) -> Result<Value, QueryError> {
-    let tip = query.pin_chain_view()?.map(|v| v.height.0);
-    let confirmed = query.store().is_confirmed_strong_at(tx_fk, tip)?;
+    match query.pin_chain_view()? {
+        Some(view) => tx_status_json_in(query, tx_fk, &view),
+        None => Ok(json!({ "confirmed": false })),
+    }
+}
+
+/// Confirmation status as of `view`.
+pub fn tx_status_json_in(
+    query: &Query,
+    tx_fk: Fk,
+    view: &rbitcoin_query::ChainView,
+) -> Result<Value, QueryError> {
+    let confirmed = query
+        .store()
+        .is_confirmed_strong_at(tx_fk, Some(view.height.0))?;
     if !confirmed {
         return Ok(json!({ "confirmed": false }));
     }

@@ -1094,6 +1094,16 @@ impl Store {
         out_index: u32,
     ) -> Result<Vec<PointRecord>, StoreError> {
         let tip = self.confirmed.tip_height().map(|t| t.0);
+        self.spenders_at(out_txid, out_index, tip)
+    }
+
+    /// Spenders confirmed-strong as of `tip` (`None` = none).
+    pub fn spenders_at(
+        &self,
+        out_txid: &[u8; 32],
+        out_index: u32,
+        tip: Option<u32>,
+    ) -> Result<Vec<PointRecord>, StoreError> {
         let mut out = Vec::new();
         for rec in self.spenders_raw(out_txid, out_index)? {
             if self.is_confirmed_strong_at(rec.spending_tx_fk, tip)? {

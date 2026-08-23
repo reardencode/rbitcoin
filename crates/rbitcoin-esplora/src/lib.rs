@@ -16,4 +16,6 @@ pub use server::{
     run_esplora, sample_reset_perf, EsploraConfig, EsploraHandle, DEFAULT_MAX_TRACK_ADDRESSES,
     DEFAULT_MAX_TRACK_TXS, DEFAULT_MAX_WS_CONNECTIONS, DEFAULT_MAX_WS_MESSAGE_BYTES,
 };
-pub use tx_json::{build_tx_json, history_items_to_tx_json, tx_status_json, utxo_list_json};
+pub use tx_json::{
+    build_tx_json, history_items_to_tx_json, tx_status_json, tx_status_json_in, utxo_list_json,
+};

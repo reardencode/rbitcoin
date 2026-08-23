@@ -1,9 +1,9 @@
 //! Esplora HTTP listener (axum + tower limits) and wallet WebSocket live path.
 
 use crate::handlers;
-use crate::tx_json::{build_tx_json, tx_status_json};
+use crate::tx_json::{build_tx_json, tx_status_json, tx_status_json_in};
 use crate::ws;
-use axum::extract::{Path, Request, State};
+use axum::extract::{Path, Query as AxumQuery, Request, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -17,6 +17,7 @@ use rbitcoin_net::{MempoolHub, TipEvent};
 use rbitcoin_primitives::Height;
 use rbitcoin_query::{ChainView, Query, ShJoinSlot};
 use rbitcoin_store::StoreError;
+use serde::Deserialize;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -99,10 +100,49 @@ fn stamp_chain_view_headers(resp: &mut Response, view: &ChainView) {
     );
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+pub(crate) struct AsOfQuery {
+    pub asof: Option<String>,
+}
+
+pub(crate) fn parse_asof_param(q: &AsOfQuery) -> Result<Option<[u8; 32]>, ()> {
+    match q.asof.as_deref() {
+        None => Ok(None),
+        Some(s) => parse_hash32(s).map(Some),
+    }
+}
+
+fn asof_hash_from_uri(uri: &axum::http::Uri) -> Result<Option<[u8; 32]>, ()> {
+    let Some(query) = uri.query() else {
+        return Ok(None);
+    };
+    for pair in query.split('&') {
+        if let Some(v) = pair.strip_prefix("asof=") {
+            if v.is_empty() {
+                return Err(());
+            }
+            return parse_hash32(v).map(Some);
+        }
+    }
+    Ok(None)
+}
+
 async fn stamp_chain_view_mw(State(st): State<AppState>, req: Request, next: Next) -> Response {
-    let view = match st.query.pin_chain_view() {
+    let asof = match asof_hash_from_uri(req.uri()) {
         Ok(v) => v,
-        Err(e) => return store_err(e),
+        Err(()) => return not_found(),
+    };
+    let view = if let Some(hash) = asof {
+        match st.query.pin_chain_view_at(&hash) {
+            Ok(Some(v)) => Some(v),
+            Ok(None) => return not_found(),
+            Err(e) => return store_err(e),
+        }
+    } else {
+        match st.query.pin_chain_view() {
+            Ok(v) => v,
+            Err(e) => return store_err(e),
+        }
     };
     let mut resp = next.run(req).await;
     let Some(view) = view else {
@@ -113,6 +153,7 @@ async fn stamp_chain_view_mw(State(st): State<AppState>, req: Request, next: Nex
             stamp_chain_view_headers(&mut resp, &view);
             resp
         }
+        Ok(false) if asof.is_some() => not_found(),
         Ok(false) => (StatusCode::SERVICE_UNAVAILABLE, "chain view moved").into_response(),
         Err(e) => store_err(e),
     }
@@ -432,16 +473,35 @@ async fn tx_hex(State(st): State<AppState>, Path(txid_hex): Path<String>) -> Res
 }
 
 /// `GET /tx/:txid/status` → Esplora confirmation status JSON.
-async fn tx_status(State(st): State<AppState>, Path(txid_hex): Path<String>) -> Response {
+async fn tx_status(
+    State(st): State<AppState>,
+    Path(txid_hex): Path<String>,
+    AxumQuery(asof): AxumQuery<AsOfQuery>,
+) -> Response {
+    let asof = match parse_asof_param(&asof) {
+        Ok(v) => v,
+        Err(()) => return not_found(),
+    };
     handlers::spawn_join(move || {
         let Ok(txid) = parse_hash32(&txid_hex) else {
             return not_found();
         };
         match st.query.tx_fk_by_txid(&txid) {
-            Ok(Some(fk)) => match tx_status_json(&st.query, fk) {
-                Ok(v) => Json(v).into_response(),
-                Err(e) => store_err(e),
-            },
+            Ok(Some(fk)) => {
+                let status = if let Some(hash) = asof {
+                    match st.query.pin_chain_view_at(&hash) {
+                        Ok(Some(view)) => tx_status_json_in(&st.query, fk, &view),
+                        Ok(None) => return not_found(),
+                        Err(e) => return store_err(e),
+                    }
+                } else {
+                    tx_status_json(&st.query, fk)
+                };
+                match status {
+                    Ok(v) => Json(v).into_response(),
+                    Err(e) => store_err(e),
+                }
+            }
             Ok(None) => not_found(),
             Err(e) => store_err(e),
         }
@@ -721,6 +781,110 @@ mod tests {
         let tip_b = header_value(&raw_b, HDR_CHAIN_TIP).expect("tip B");
         assert_eq!(tip_b, block_hash_hex(&h1b.hash));
         assert_ne!(tip_a, tip_b);
+
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn asof_utxo_hides_later_spend() {
+        use rbitcoin_primitives::Fk;
+        use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
+
+        let (dir, q) = temp_query("asof-utxo");
+        let (h0, mut t0) = coinbase(0, Fk::NULL, None);
+        t0.outputs = vec![OutputRecord::unspent(10_0000_0000, vec![0x51])];
+        let create_txid = t0.tx.txid;
+        let hash0 = h0.hash;
+        let hfk0 = q.connect_block(Height(0), &h0, &[t0]).unwrap();
+        let create_fk = q.block_tx_fks(Height(0)).unwrap()[0];
+        let hash1 = rbitcoin_store::block_header_hash(1, &hash0, &[0x11; 32], 2, 0x207fffff, 1);
+        let h1 = HeaderRecord {
+            prev_fk: hfk0,
+            version: 1,
+            timestamp: 2,
+            bits: 0x207fffff,
+            nonce: 1,
+            merkle_root: [0x11; 32],
+            hash: hash1,
+        };
+        let mut spend_txid = [0u8; 32];
+        spend_txid[0] = 0x11;
+        spend_txid[31] = 0xcd;
+        q.connect_block(
+            Height(1),
+            &h1,
+            &[TxApply {
+                tx: TxRecord {
+                    txid: spend_txid,
+                    version: 1,
+                    locktime: 0,
+                    input_start_fk: Fk::NULL,
+                    input_count: 1,
+                    output_start_fk: Fk::NULL,
+                    output_count: 1,
+                },
+                inputs: vec![InputRecord {
+                    prev_txid: create_txid,
+                    create_fk,
+                    prev_index: 0,
+                    sequence: u32::MAX,
+                    script_sig: vec![],
+                    witness: vec![],
+                }],
+                outputs: vec![OutputRecord::unspent(9_0000_0000, vec![0x00])],
+            }],
+        )
+        .unwrap();
+
+        let q = Arc::new(q);
+        let cfg = EsploraConfig::new("127.0.0.1:0".parse().unwrap());
+        let handle = run_esplora(cfg, Arc::clone(&q), None, None)
+            .await
+            .expect("listen");
+        let addr = handle.local_addr;
+        let sh = rbitcoin_store::script_hash(&[0x51]);
+        let sh_hex = block_hash_hex(&sh);
+        let asof0 = block_hash_hex(&hash0);
+        let asof1 = block_hash_hex(&hash1);
+
+        let (st, raw, body) =
+            http_get_raw(addr, &format!("/scripthash/{sh_hex}/utxo?asof={asof0}")).await;
+        assert_eq!(st, 200, "asof0 body={body}");
+        let utxos: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(utxos.as_array().unwrap().len(), 1);
+        assert_eq!(
+            header_value(&raw, HDR_CHAIN_TIP).as_deref(),
+            Some(asof0.as_str())
+        );
+        assert_eq!(
+            header_value(&raw, HDR_CHAIN_TIP_HEIGHT).as_deref(),
+            Some("0")
+        );
+
+        let (st, raw, body) =
+            http_get_raw(addr, &format!("/scripthash/{sh_hex}/utxo?asof={asof1}")).await;
+        assert_eq!(st, 200, "asof1 body={body}");
+        let utxos: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(utxos.as_array().unwrap().is_empty());
+        assert_eq!(
+            header_value(&raw, HDR_CHAIN_TIP).as_deref(),
+            Some(asof1.as_str())
+        );
+
+        let create_hex = block_hash_hex(&create_txid);
+        let (st, _, body) =
+            http_get_raw(addr, &format!("/tx/{create_hex}/status?asof={asof0}")).await;
+        assert_eq!(st, 200, "status0={body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["confirmed"], true);
+
+        let (st, _, _) = http_get_raw(
+            addr,
+            &format!("/scripthash/{sh_hex}/utxo?asof={}", "ee".repeat(32)),
+        )
+        .await;
+        assert_eq!(st, 404);
 
         handle.shutdown().await;
         let _ = std::fs::remove_dir_all(&dir);
