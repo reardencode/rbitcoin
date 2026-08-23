@@ -80,9 +80,23 @@ Full method list, auth, and shindex matrix: **[`docs/rpc.md`](./docs/rpc.md)**.
 | scripthash history / balance / listunspent | done | Unconf when mempool attached; `get_history` optional BCH-style `from_height` / exclusive `to_height` (`-1` = tip + mempool); 1-arg = full history; **subscribe status always full**; `listunspent` loads `txid.body` only for unspent creates; one TCP connection reuses the last SH outs+spent join until tip **hash** changes. Confirmed methods stamp `chain_tip` / `chain_tip_height` on the JSON-RPC object (not inside `result`). `server.features.chain_tip = true`. |
 | scripthash.get_mempool / subscribe | done | Status on mempool announce **and** on confirming tip when that block creates or spends the hash (posting-list probe; no Class A expand on a miss). Reorg (`TipNotify.reorg_from_height`) restatuses every watch even if the new block misses the script. Status preimage is `txid:height:blockhash:` for confirmed rows (mempool rows stay `txid:height:`). |
 | transaction.get / get_merkle | done | get falls back to mempool; confirmed responses stamp `chain_tip` |
-| transaction.broadcast | done | Mempool accept + P2P inv |
+| transaction.broadcast | done | Mempool accept + P2P inv. `broadcast_package` is Electrum **1.6** — wait for P2P package relay, then bump (below). |
 | relayfee / estimatefee / histogram | done | Libre min + live median |
 | TLS | external | terminate at reverse proxy; node is plain TCP |
+
+### Protocol versions
+
+`features.protocol_max` is **1.4.2** on purpose. Electrum 4.8 wallets
+speak 1.4–1.6; ElectrumX advertises 1.7. Do **not** raise the number
+ahead of the methods.
+
+**After P2P package relay** ([`docs/quality.md`](./docs/quality.md) **Q-48** /
+BIP331), implement Electrum **1.6** (`blockchain.transaction.broadcast_package`,
+`mempool.get_info`, `block.headers` as a list, `server.version` first) then
+**1.7** (`scriptpubkey.*`, outpoint subscribe) and raise `protocol_max` in
+the same work. Dual-serve `scripthash.*` until 1.7 clients exist. RPC
+`submitpackage` / Esplora `POST /txs/package` already accept packages; the
+Electrum bump waits on the P2P command so 1.6 is not a lie.
 
 ### Why `server.version` says electrs
 

@@ -124,6 +124,6 @@ Older-than-1.0 or corrupt files can still refuse with a one-line message.
 
 ## After 1.0 (unless it falls out earlier)
 
-- BIP331 package relay, if rust-bitcoin still has no types (**Q-48**)
+- BIP331 package relay, if rust-bitcoin still has no types (**Q-48**); then Electrum protocol 1.6/1.7 ([`COMPAT.md`](../COMPAT.md) § Protocol versions)
 - Tor
 - Publishing the store as a crate
