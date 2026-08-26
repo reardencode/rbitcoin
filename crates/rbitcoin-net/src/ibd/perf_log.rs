@@ -41,7 +41,8 @@
 //! `scriptq` can stay empty. Prefer `lookup_thr busy=` / `thr load=busy/wait=` /
 //! `ready=` + `scriptq_hwm=` (OS-thread occupancy + queue high-water). High
 //! `load_thr stamp=` nests `pack=` (plan HashMap) vs `head=` (leftover TipOnly
-//! `prep_head_fk_ns`). After a published wave `head=` is ~0. High `head=` +
+//! `prep_head_fk_ns`) vs `fill=` (`fill_missing_parent_ranges`; `idx=` is
+//! spent/body range batches). After a published wave `head=` is ~0. High `head=` +
 //! `ready>0` + `scriptq=1` ⇒ leftover TipOnly on load, not “scripts hungry.”
 //! High load_recv_wait + ready=0 ⇒ lookup is the pole.
 //!
@@ -346,6 +347,9 @@ pub(crate) struct IbdPerfSample {
     pub stamp_batch_head_fk_ms: u64,
     pub stamp_batch_stamp_ms: u64,
     pub stamp_batch_finish_ms: u64,
+    /// `fill_missing_parent_ranges` (skip walk + idx). Nested `idx=` is spent/body range batches.
+    pub stamp_batch_fill_ms: u64,
+    pub stamp_batch_fill_idx_ms: u64,
     pub thr_load_recv_wait_ms: u64,
     pub thr_load_pack_ms: u64,
     pub thr_load_clone_ms: u64,
@@ -436,6 +440,8 @@ pub(crate) struct IbdPerfSample {
     pub arch_prep_body_lookups: u64,
     pub arch_prep_stamp_ms: u64,
     pub arch_prep_finish_ms: u64,
+    pub arch_prep_fill_ms: u64,
+    pub arch_prep_fill_idx_ms: u64,
     pub arch_write_total_ms: u64,
     pub arch_write_reserve_ms: u64,
     pub arch_write_body_ms: u64,
@@ -609,6 +615,8 @@ impl Default for IbdPerfSample {
             stamp_batch_head_fk_ms: 0,
             stamp_batch_stamp_ms: 0,
             stamp_batch_finish_ms: 0,
+            stamp_batch_fill_ms: 0,
+            stamp_batch_fill_idx_ms: 0,
             thr_load_recv_wait_ms: 0,
             thr_load_pack_ms: 0,
             thr_load_clone_ms: 0,
@@ -686,6 +694,8 @@ impl Default for IbdPerfSample {
             arch_prep_body_lookups: 0,
             arch_prep_stamp_ms: 0,
             arch_prep_finish_ms: 0,
+            arch_prep_fill_ms: 0,
+            arch_prep_fill_idx_ms: 0,
             arch_write_total_ms: 0,
             arch_write_reserve_ms: 0,
             arch_write_body_ms: 0,
@@ -1072,6 +1082,8 @@ pub(crate) fn sample(
         stamp_batch_head_fk_ms: ns_ms(arch_res.prep_head_fk_ns),
         stamp_batch_stamp_ms: ns_ms(arch_res.prep_stamp_ns),
         stamp_batch_finish_ms: ns_ms(arch_res.prep_finish_ns),
+        stamp_batch_fill_ms: ns_ms(arch_res.prep_fill_ns),
+        stamp_batch_fill_idx_ms: ns_ms(arch_res.prep_fill_idx_ns),
         thr_load_recv_wait_ms: ns_ms(thr.load_recv_wait_ns),
         thr_load_pack_ms: ns_ms(thr.load_pack_ns),
         thr_load_clone_ms: ns_ms(thr.load_clone_ns),
@@ -1149,6 +1161,8 @@ pub(crate) fn sample(
         arch_prep_body_lookups: head_res.body_lookups,
         arch_prep_stamp_ms: ns_ms(arch_res.prep_stamp_ns),
         arch_prep_finish_ms: ns_ms(arch_res.prep_finish_ns),
+        arch_prep_fill_ms: ns_ms(arch_res.prep_fill_ns),
+        arch_prep_fill_idx_ms: ns_ms(arch_res.prep_fill_idx_ns),
         arch_write_total_ms: ns_ms(arch_res.write_total_ns),
         arch_write_reserve_ms: ns_ms(arch_res.write_reserve_ns),
         arch_write_body_ms: ns_ms(arch_res.write_body_ns),
@@ -1209,6 +1223,7 @@ fn plan_batch_ms(s: &IbdPerfSample) -> u64 {
         .saturating_add(s.arch_prep_inflight_ms)
         .saturating_add(s.arch_prep_head_ms)
         .saturating_add(s.arch_prep_stamp_ms)
+        .saturating_add(s.arch_prep_fill_ms)
         .saturating_add(s.arch_prep_finish_ms)
 }
 
@@ -1317,7 +1332,7 @@ pub(crate) fn format_info(s: &IbdPerfSample) -> String {
              batch_assign={}ms collect={}ms pin_txid={} pin_txid%={} pin_txid_ms={} \
              leftover_n={} leftover_hit={} leftover_ms={} leftover_pend={} leftover_cdf0={} leftover_cdf3={} leftover_age_n={} \
              recent={} recent_ms={} \
-             head={}ms stamp={}ms finish={}ms)",
+             head={}ms stamp={}ms fill={}ms(idx={}ms) finish={}ms)",
             s.stamp_struct_ms,
             s.stamp_struct_txid_ms,
             s.stamp_struct_walk_ms,
@@ -1340,6 +1355,8 @@ pub(crate) fn format_info(s: &IbdPerfSample) -> String {
             s.arch_recent_ms,
             s.stamp_batch_head_ms,
             s.stamp_batch_stamp_ms,
+            s.stamp_batch_fill_ms,
+            s.stamp_batch_fill_idx_ms,
             s.stamp_batch_finish_ms,
         ));
     }
@@ -1701,7 +1718,7 @@ pub(crate) fn format_debug(s: &IbdPerfSample) -> String {
         out.push_str(&format!(
             " | plan_batch assign={} collect={} inflight={} pin_txid={}/{} pin_txid_ms={} \
              us/pin_txid={} recent={} recent_ms={} head_fk={} head={} \
-             stamp={} finish={} resolve_us/blk={} ext={} head_hit={}/{} \
+             stamp={} finish={} fill={} fill_idx={} resolve_us/blk={} ext={} head_hit={}/{} \
              stamp_n batch={}",
             s.arch_prep_assign_ms,
             s.arch_prep_collect_ms,
@@ -1716,6 +1733,8 @@ pub(crate) fn format_debug(s: &IbdPerfSample) -> String {
             s.arch_prep_head_ms,
             s.arch_prep_stamp_ms,
             s.arch_prep_finish_ms,
+            s.arch_prep_fill_ms,
+            s.arch_prep_fill_idx_ms,
             resolve_us_blk,
             s.arch_ext_need,
             s.arch_head_hit,
@@ -2380,6 +2399,8 @@ mod tests {
         s.stamp_batch_head_ms = 2;
         s.stamp_batch_stamp_ms = 1;
         s.stamp_batch_finish_ms = 1;
+        s.stamp_batch_fill_ms = 8;
+        s.stamp_batch_fill_idx_ms = 7;
         s.arch_prep_age_hit_n = 50;
         s.arch_prep_age_cdf0_pct = 10;
         s.arch_prep_age_cdf3_pct = 40;
@@ -2394,6 +2415,8 @@ mod tests {
         s.arch_prep_head_ms = 3;
         s.arch_prep_stamp_ms = 1;
         s.arch_prep_finish_ms = 1;
+        s.arch_prep_fill_ms = 8;
+        s.arch_prep_fill_idx_ms = 7;
         s.arch_resolve_ns = 8_000_000;
         s.arch_resolve_blocks = 4;
         s.arch_head_hit = 20;
@@ -2430,6 +2453,7 @@ mod tests {
         s.stamp_struct_walk_ms = 2;
         let info = format_info(&s);
         assert!(info.contains("stamp_sub("), "{info}");
+        assert!(info.contains("fill=8ms(idx=7ms)"), "{info}");
         assert!(info.contains("struct_txid=6ms"), "{info}");
         assert!(info.contains("struct_walk=2ms"), "{info}");
         assert!(info.contains("pin_txid=15"), "{info}");

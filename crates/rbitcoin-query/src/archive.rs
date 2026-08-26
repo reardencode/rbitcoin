@@ -1852,6 +1852,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// In-flight CreatePin on the oldest layer still skips idx (no store row).
+    #[test]
+    fn fill_missing_skips_idx_when_oldest_layer_has_outs() {
+        let (dir, q) = temp_query("fill-skip-oldest-outs");
+        let pin = std::sync::Arc::new((
+            TxRecord {
+                txid: [1u8; 32],
+                version: 1,
+                locktime: 0,
+                input_start_fk: Fk::NULL,
+                input_count: 1,
+                output_start_fk: Fk::NULL,
+                output_count: 1,
+            },
+            vec![OutputRecord::unspent(1, vec![0x51])],
+        ));
+        let mut log = crate::InFlightLog::new();
+        log.note_layer(crate::InFlightLayer::from_plan_pins([(Fk(1), &pin)]));
+        for i in 10u8..18 {
+            let mut tid = [0u8; 32];
+            tid[0] = i;
+            log.note_layer(crate::InFlightLayer::from_txid_fks([(tid, Fk(i as u64))]));
+        }
+        let mut idents = crate::U64Map::default();
+        idents.insert(1, crate::ParentIdent::new([1u8; 32]));
+        crate::fill_missing_parent_ranges(q.store(), &log.snapshot(), &mut idents)
+            .expect("in-flight outs skip idx even on the oldest layer");
+        assert!(
+            idents.get(&1).and_then(|p| p.body).is_none(),
+            "skip must not invent a body_range"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn archive_filter_need_header_fks_drops_archived() {
         use rbitcoin_store::HeaderRecord;

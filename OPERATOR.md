@@ -211,7 +211,7 @@ Requires **tip mode** (`node: catch-up complete … tip tracking`). During IBD u
 | Line | Level | Use |
 |------|-------|-----|
 | `ibd: progress` | INFO | Tip rate, `loadq`/`scriptq`/`writeq`, `txs=` (Class A / `tx.idx` count), horizon, tip ETA, **`bq soft=n/win RAM=`** (in-RAM body queue; soft densify: under ~100 MiB free ahead, over that only ~1 min confirm window, at/over 1 GiB assign-stop fill holes in the fetched range only) |
-| `ibd: perf` | DEBUG | Inflight + **`bq soft= RAM=`**; **`load=`** is pin+assemble only. **`load_thr pack/stamp/pin/asm/prune`** is the load OS thread. **`stamp=`** nests **`pack=`** (plan HashMap) vs **`head=`** (leftover TipOnly). After a published wave `head=` is ~0. **`script=`** is verify ns (`jobs=` / `skip=`); recv/send are wait. **`lookup_thr keep=`** is live-union splice. **`pin_txid=`** vs leftover `tx.head` |
+| `ibd: perf` | DEBUG | Inflight + **`bq soft= RAM=`**; **`load=`** is pin+assemble only. **`load_thr pack/stamp/pin/asm/prune`** is the load OS thread. **`stamp=`** nests **`pack=`** (plan HashMap) vs **`head=`** (leftover TipOnly) vs **`fill=`** (`fill_missing`; **`idx=`** spent/body ranges). After a published wave `head=` is ~0. **`script=`** is verify ns (`jobs=` / `skip=`); recv/send are wait. **`lookup_thr keep=`** is live-union splice. **`pin_txid=`** vs leftover `tx.head` |
 | `ibd: sizes` | DEBUG | RSS + work path + **`bq soft=` / `RAM=`** + **conf_plans** + confirm pipe |
 | `ibd: perf_dbg` | DEBUG | µs/blk load/write, pin/edge detail, **plan_batch** (`us/pin_txid` vs `probe/idx/body us/key`) + **class_a commit** |
 

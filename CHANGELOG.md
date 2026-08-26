@@ -54,6 +54,13 @@ before 1.0).
 
 ### Changed
 
+- **Load in-flight outs: iterate pins, not parents×layers.** Post-milestone
+  unique spent parents (~160k/window) were probing every in-flight layer
+  via `get_out` in `fill_missing_parent_ranges` and pin adopt. Union
+  `out_ids` / `for_each_out` instead. `ibd: perf` `stamp_sub` prints
+  **`fill=`** / **`idx=`** for that wall (it was inside `batch=` with no
+  token).
+
 - **Pin `merge_outs` no-op Arc:** empty / already-covered `checked`+`live`
   keep the outs Arc (assemble sticky `ptr_eq`). RCU compose borrows `live`
   instead of cloning script bytes on every retry.

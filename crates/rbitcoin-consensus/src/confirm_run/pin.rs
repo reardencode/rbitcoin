@@ -129,15 +129,12 @@ pub(super) fn pin_for_wire_batch(
     }
 
     if let Some(ifo) = in_flight {
-        for (id, need) in &parent_vouts {
-            if plan_by_id.contains_key(id) {
-                continue;
+        ifo.for_each_out(|id, pin| {
+            if plan_by_id.contains_key(&id) || !parent_vouts.contains_key(&id) {
+                return;
             }
-            if let Some(pin) = ifo.get_out(*id) {
-                let _ = need;
-                plan_by_id.insert(*id, std::sync::Arc::clone(pin));
-            }
-        }
+            plan_by_id.insert(id, std::sync::Arc::clone(pin));
+        });
     }
     for (id, _need) in &parent_vouts {
         if plan_by_id.contains_key(id) {

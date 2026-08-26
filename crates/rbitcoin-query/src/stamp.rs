@@ -215,10 +215,12 @@ pub fn fill_missing_parent_ranges(
     idents: &mut U64Map<ParentIdent>,
 ) -> Result<(), QueryError> {
     crate::archive_phase_stats::note_fill_missing();
+    let t_all = Instant::now();
+    let inflight_outs = in_flight.out_ids();
     let mut need_body: Vec<Fk> = Vec::new();
     let mut need_spent: Vec<Fk> = Vec::new();
     for (&id, ident) in idents.iter() {
-        if in_flight.get_out(id).is_some() {
+        if inflight_outs.contains(&id) {
             continue;
         }
         let fk = Fk(id);
@@ -229,6 +231,7 @@ pub fn fill_missing_parent_ranges(
             need_spent.push(fk);
         }
     }
+    let t_idx = Instant::now();
     let mut body_filled = U64Set::default();
     if !need_body.is_empty() {
         let filled = store.tx_body_range_batch(&need_body)?;
@@ -270,5 +273,7 @@ pub fn fill_missing_parent_ranges(
             }
         }
     }
+    let idx_ns = t_idx.elapsed().as_nanos() as u64;
+    crate::archive_phase_stats::note_fill_missing_ns(t_all.elapsed().as_nanos() as u64, idx_ns);
     Ok(())
 }

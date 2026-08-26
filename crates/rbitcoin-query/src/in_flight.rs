@@ -12,8 +12,9 @@
 //! layer (Class C ∥ drain/seal). Call after pin — stamp skips `body_range`
 //! when this map still has CreatePin outs.
 //!
-//! Lookup is newest→oldest scan over layers (O(L)); pack counts are small and
-//! L is bounded by pipeline queue depth.
+//! Per-key [`InFlightView::get_out`] / `get_create_fk` is newest→oldest (O(L)).
+//! Bulk skip/adopt over many parents must iterate outs (O(pins)), not
+//! parents×L — post-milestone unique parents dwarf pipeline CreatePins.
 
 use crate::archive::CreatePin;
 use crate::U64Map;
@@ -255,6 +256,30 @@ impl InFlightView {
         None
     }
 
+    /// Union of CreatePin keys across layers.
+    pub fn out_ids(&self) -> crate::U64Set {
+        let n: usize = self.layers.iter().map(|l| l.outs.len()).sum();
+        let mut ids = crate::U64Set::with_capacity_and_hasher(n, Default::default());
+        for layer in self.layers.iter() {
+            for id in layer.outs.keys() {
+                ids.insert(*id);
+            }
+        }
+        ids
+    }
+
+    /// Newest layer first; each id once (same winner as [`Self::get_out`]).
+    pub fn for_each_out(&self, mut f: impl FnMut(u64, &CreatePin)) {
+        let mut seen = crate::U64Set::default();
+        for layer in self.layers.iter().rev() {
+            for (id, pin) in &layer.outs {
+                if seen.insert(*id) {
+                    f(*id, pin);
+                }
+            }
+        }
+    }
+
     /// Create fk for txid from prior uncommitted packs.
     #[inline]
     pub fn get_create_fk(&self, txid: &[u8; 32]) -> Option<Fk> {
@@ -325,6 +350,30 @@ mod tests {
             again,
             "size_snapshot must reuse layer-cached bytes (no per-pack pin walk)"
         );
+    }
+
+    #[test]
+    fn out_ids_unions_layers_and_matches_get_out() {
+        let mut log = InFlightLog::new();
+        let a = pin(1);
+        let b = pin(2);
+        log.note_layer(InFlightLayer::from_plan_pins([(Fk(1), &a)]));
+        log.note_layer(InFlightLayer::from_plan_pins([(Fk(2), &b)]));
+        let v = log.snapshot();
+        let ids = v.out_ids();
+        assert!(ids.contains(&1));
+        assert!(ids.contains(&2));
+        assert_eq!(ids.len(), 2);
+        assert!(v.get_out(1).is_some());
+        assert!(v.get_out(99).is_none());
+        assert!(!ids.contains(&99));
+        let mut newest = None;
+        v.for_each_out(|id, _| {
+            if newest.is_none() {
+                newest = Some(id);
+            }
+        });
+        assert_eq!(newest, Some(2), "newest layer first");
     }
 
     #[test]

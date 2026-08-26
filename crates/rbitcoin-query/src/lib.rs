@@ -474,6 +474,10 @@ pub mod archive_phase_stats {
     pub static RESOLVED_STAMP: AtomicU64 = AtomicU64::new(0);
     /// `fill_missing_parent_ranges` entries (stamp + optional prestamp).
     pub static FILL_MISSING_N: AtomicU64 = AtomicU64::new(0);
+    /// Wall of `fill_missing_parent_ranges` (skip walk + idx).
+    pub static FILL_MISSING_NS: AtomicU64 = AtomicU64::new(0);
+    /// `tx_body_range_batch` + `tx_spent_range_batch` inside fill_missing.
+    pub static FILL_MISSING_IDX_NS: AtomicU64 = AtomicU64::new(0);
 
     /// Full load batch wall (struct → lookup → enqueue wait).
     pub static PREP_TOTAL_NS: AtomicU64 = AtomicU64::new(0);
@@ -534,6 +538,8 @@ pub mod archive_phase_stats {
         pub prep_head_fk_ns: u64,
         pub prep_stamp_ns: u64,
         pub prep_finish_ns: u64,
+        pub prep_fill_ns: u64,
+        pub prep_fill_idx_ns: u64,
         pub prep_publish_ns: u64,
         pub prep_qwait_ns: u64,
         pub prep_blocks: u64,
@@ -558,6 +564,7 @@ pub mod archive_phase_stats {
                 .saturating_add(self.prep_head_ns)
                 .saturating_add(self.prep_stamp_ns)
                 .saturating_add(self.prep_finish_ns)
+                .saturating_add(self.prep_fill_ns)
                 .saturating_add(self.prep_publish_ns)
                 .saturating_add(self.prep_qwait_ns)
         }
@@ -623,6 +630,8 @@ pub mod archive_phase_stats {
             prep_head_fk_ns: prep_head_fk,
             prep_stamp_ns: PREP_STAMP_NS.swap(0, Ordering::Relaxed),
             prep_finish_ns: PREP_FINISH_NS.swap(0, Ordering::Relaxed),
+            prep_fill_ns: FILL_MISSING_NS.swap(0, Ordering::Relaxed),
+            prep_fill_idx_ns: FILL_MISSING_IDX_NS.swap(0, Ordering::Relaxed),
             prep_publish_ns: PREP_PUBLISH_NS.swap(0, Ordering::Relaxed),
             prep_qwait_ns: PREP_QWAIT_NS.swap(0, Ordering::Relaxed),
             prep_blocks: PREP_BLOCKS.swap(0, Ordering::Relaxed),
@@ -674,6 +683,14 @@ pub mod archive_phase_stats {
     pub fn note_fill_missing() {
         exclusive::with(|| {
             FILL_MISSING_N.fetch_add(1, Ordering::Relaxed);
+        });
+    }
+
+    #[inline]
+    pub fn note_fill_missing_ns(all_ns: u64, idx_ns: u64) {
+        exclusive::with(|| {
+            add(&FILL_MISSING_NS, all_ns);
+            add(&FILL_MISSING_IDX_NS, idx_ns);
         });
     }
 
