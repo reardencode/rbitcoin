@@ -923,6 +923,30 @@ fn pack_unsorted_shard(
     Ok(pack)
 }
 
+fn pack_and_seal_unsorted_shard(
+    table: &ScriptHashTable,
+    dir: &Path,
+    shard: usize,
+    n_shards: usize,
+    cancel: Option<&AtomicBool>,
+    progress: &MaterializeProgress,
+    max_fk: &AtomicU64,
+) -> Result<(), StoreError> {
+    let t0 = Instant::now();
+    let pack = pack_unsorted_shard(table, dir, shard, cancel, progress)?;
+    let keys = pack.keys;
+    let creates = pack.creates;
+    seal_shard(table, shard, pack, max_fk, progress)?;
+    rbitcoin_log::info!(
+        "store: scripthash unsorted pack shard={shard:02x} keys={keys} creates={creates} \
+         shards={}/{} elapsed={:?}",
+        progress.shards_published.load(Ordering::Relaxed),
+        n_shards,
+        t0.elapsed()
+    );
+    Ok(())
+}
+
 /// Unique-sort each unsorted shard file in place and seal `head/NN` for unsealed shards.
 pub fn materialize_sh_from_unsorted(
     table: &ScriptHashTable,
@@ -974,8 +998,15 @@ pub fn materialize_sh_from_unsorted(
                 if cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
                     return Err(StoreError::Cancelled("scripthash unsorted shard pack"));
                 }
-                let pack = pack_unsorted_shard(table, unsorted_dir, shard, cancel, progress)?;
-                seal_shard(table, shard, pack, max_fk, progress)?;
+                pack_and_seal_unsorted_shard(
+                    table,
+                    unsorted_dir,
+                    shard,
+                    n_shards,
+                    cancel,
+                    progress,
+                    max_fk,
+                )?;
             }
         } else {
             let shared = Arc::new(ShardPool {
@@ -1000,9 +1031,15 @@ pub fn materialize_sh_from_unsorted(
                     let Some(shard) = shard else {
                         break;
                     };
-                    match pack_unsorted_shard(table, unsorted_dir, shard, cancel, progress)
-                        .and_then(|pack| seal_shard(table, shard, pack, max_fk, progress))
-                    {
+                    match pack_and_seal_unsorted_shard(
+                        table,
+                        unsorted_dir,
+                        shard,
+                        n_shards,
+                        cancel,
+                        progress,
+                        max_fk,
+                    ) {
                         Ok(()) => {}
                         Err(e) => {
                             *shared.err.lock().unwrap() = Some(e);

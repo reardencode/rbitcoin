@@ -2408,9 +2408,34 @@ fn unsorted_pack_sorts_numeric_fk_and_keeps_all_creates() {
         for shard in [0usize, 2, 3] {
             std::fs::write(crate::unsorted_shard_path(&udir, shard), []).unwrap();
         }
+        rbitcoin_log::capture_logs(true);
         let mat = crate::materialize_sh_from_unsorted(&table, &udir, 1, None).unwrap();
+        let logs = rbitcoin_log::take_logs();
+        rbitcoin_log::capture_logs(false);
         assert_eq!(mat.creates, 4, "null and duplicate (sh,fk) must not pack");
         assert_eq!(mat.keys, 2);
+        let done: Vec<&str> = logs
+            .iter()
+            .filter_map(|(level, m)| {
+                (*level == rbitcoin_log::Level::Info
+                    && m.contains("scripthash unsorted pack shard="))
+                .then_some(m.as_str())
+            })
+            .collect();
+        assert_eq!(done.len(), 4, "one finish line per shard, got {logs:?}");
+        for shard in 0..n_shards {
+            let tag = format!("shard={shard:02x}");
+            assert!(
+                done.iter()
+                    .any(|m| m.contains(&tag) && m.contains("elapsed=")),
+                "missing finish log for {tag}: {done:?}"
+            );
+        }
+        assert!(
+            done.iter()
+                .any(|m| m.contains("shard=01") && m.contains("keys=2") && m.contains("creates=4")),
+            "data shard must log packed keys/creates: {done:?}"
+        );
         let mut lo: Vec<u64> = table
             .entries(&sh_lo)
             .unwrap()
