@@ -448,7 +448,8 @@ pub const UNSORTED_SHARD_DIR: &str = "scripthash.unsorted";
 const UNSORTED_DONE_NAME: &str = "DONE";
 const UNSORTED_DONE_MAGIC: &[u8; 8] = b"SHUNSRT1";
 const UNSORTED_REC_LEN: usize = 40;
-const UNSORTED_FLUSH_BYTES: usize = 256 * 1024;
+const UNSORTED_FLUSH_BYTES: usize = 1024 * 1024;
+const UNSORTED_ALLOC_STEP: u64 = 64 << 20;
 const CLASS_A_CHUNK_FKS: u64 = 64_000;
 
 /// RAM budget per unsorted-shard pack worker (one file image + unique pack recs).
@@ -469,7 +470,7 @@ pub fn unsorted_shard_path(dir: &Path, shard: usize) -> PathBuf {
     dir.join(format!("{shard:02x}"))
 }
 
-/// Collect workers: `RBITCOIN_SH_RECOLLECT_WORKERS` or nCPU (small write buffers).
+/// Collect workers: `RBITCOIN_SH_RECOLLECT_WORKERS` or nCPU (1 MiB write buffers).
 pub fn unsorted_collect_workers() -> usize {
     if let Ok(s) = std::env::var("RBITCOIN_SH_RECOLLECT_WORKERS") {
         if let Ok(n) = s.parse::<usize>() {
@@ -525,7 +526,43 @@ fn pwrite_all(file: &File, path: &Path, offset: u64, bytes: &[u8]) -> Result<(),
 struct UnsortedShardSink {
     path: PathBuf,
     file: File,
-    cursor: AtomicU64,
+    write: Mutex<UnsortedShardWrite>,
+}
+
+struct UnsortedShardWrite {
+    cursor: u64,
+    allocated: u64,
+}
+
+fn ensure_unsorted_allocated(
+    file: &File,
+    path: &Path,
+    allocated: &mut u64,
+    need: u64,
+    write_len: usize,
+) -> Result<(), StoreError> {
+    if need <= *allocated {
+        return Ok(());
+    }
+    if write_len < UNSORTED_FLUSH_BYTES {
+        return Ok(());
+    }
+    let new_cap = need
+        .div_ceil(UNSORTED_ALLOC_STEP)
+        .saturating_mul(UNSORTED_ALLOC_STEP)
+        .max(need);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        let rc = unsafe { libc::fallocate(file.as_raw_fd(), 0, 0, new_cap as i64) };
+        if rc == 0 {
+            *allocated = new_cap;
+            return Ok(());
+        }
+    }
+    file.set_len(new_cap).map_err(|e| StoreError::io(path, e))?;
+    *allocated = new_cap;
+    Ok(())
 }
 
 fn flush_unsorted_buf(sink: &UnsortedShardSink, buf: &mut Vec<u8>) -> Result<(), StoreError> {
@@ -538,7 +575,11 @@ fn flush_unsorted_buf(sink: &UnsortedShardSink, buf: &mut Vec<u8>) -> Result<(),
         ));
     }
     let n = buf.len() as u64;
-    let off = sink.cursor.fetch_add(n, Ordering::Relaxed);
+    let mut g = sink.write.lock().unwrap();
+    let off = g.cursor;
+    g.cursor = g.cursor.saturating_add(n);
+    let need = g.cursor;
+    ensure_unsorted_allocated(&sink.file, &sink.path, &mut g.allocated, need, buf.len())?;
     pwrite_all(&sink.file, &sink.path, off, buf)?;
     buf.clear();
     Ok(())
@@ -636,7 +677,10 @@ fn collect_unsorted_from_txs(
         sinks.push(UnsortedShardSink {
             path,
             file,
-            cursor: AtomicU64::new(0),
+            write: Mutex::new(UnsortedShardWrite {
+                cursor: 0,
+                allocated: 0,
+            }),
         });
     }
 
@@ -692,9 +736,7 @@ fn collect_unsorted_from_txs(
         let mut joins = Vec::with_capacity(workers);
         for _ in 0..workers {
             joins.push(scope.spawn(|| {
-                let mut bufs: Vec<Vec<u8>> = (0..n_shards)
-                    .map(|_| Vec::with_capacity(UNSORTED_FLUSH_BYTES))
-                    .collect();
+                let mut bufs: Vec<Vec<u8>> = (0..n_shards).map(|_| Vec::new()).collect();
                 loop {
                     if stop.load(Ordering::Relaxed)
                         || cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false)
@@ -763,7 +805,7 @@ fn collect_unsorted_from_txs(
 
     let mut per_shard = Vec::with_capacity(n_shards);
     for sink in &sinks {
-        let bytes = sink.cursor.load(Ordering::Relaxed);
+        let bytes = sink.write.lock().unwrap().cursor;
         if !bytes.is_multiple_of(UNSORTED_REC_LEN as u64) {
             return Err(StoreError::Corrupt(
                 "scripthash unsorted shard size not a multiple of 40",
@@ -1197,6 +1239,73 @@ mod tests {
                 (sh, u64::from_le_bytes(c[32..].try_into().unwrap()))
             })
             .collect()
+    }
+
+    fn tmp_sink() -> (PathBuf, UnsortedShardSink) {
+        let dir = std::env::temp_dir().join(format!(
+            "rbitcoin-sh-unsink-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("00");
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        let sink = UnsortedShardSink {
+            path: path.clone(),
+            file,
+            write: Mutex::new(UnsortedShardWrite {
+                cursor: 0,
+                allocated: 0,
+            }),
+        };
+        (dir, sink)
+    }
+
+    #[test]
+    fn unsorted_flush_appends_in_offset_order() {
+        let (dir, sink) = tmp_sink();
+        let mut a = rec_bytes(1, 1).to_vec();
+        let mut b = rec_bytes(2, 2).to_vec();
+        flush_unsorted_buf(&sink, &mut a).unwrap();
+        flush_unsorted_buf(&sink, &mut b).unwrap();
+        let bytes = fs::read(&sink.path).unwrap();
+        assert_eq!(recs_of(&bytes), vec![([1u8; 32], 1), ([2u8; 32], 2)]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unsorted_flush_concurrent_workers_do_not_tear_recs() {
+        let (dir, sink) = tmp_sink();
+        std::thread::scope(|scope| {
+            for t in 0u8..4 {
+                let sink = &sink;
+                scope.spawn(move || {
+                    let mut buf = Vec::new();
+                    for i in 0..1000u64 {
+                        buf.extend_from_slice(&rec_bytes(t, t as u64 * 1000 + i + 1));
+                        if buf.len() >= UNSORTED_REC_LEN * 17 {
+                            flush_unsorted_buf(sink, &mut buf).unwrap();
+                        }
+                    }
+                    flush_unsorted_buf(sink, &mut buf).unwrap();
+                });
+            }
+        });
+        let bytes = fs::read(&sink.path).unwrap();
+        assert_eq!(bytes.len(), 4 * 1000 * UNSORTED_REC_LEN);
+        for chunk in bytes.chunks_exact(UNSORTED_REC_LEN) {
+            let fk = u64::from_le_bytes(chunk[32..].try_into().unwrap());
+            assert!(fk >= 1, "every rec must be a full 40-byte create");
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

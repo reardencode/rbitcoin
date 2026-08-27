@@ -325,7 +325,8 @@ k-ways catalog runs (recollect spills ~128 MiB). Materialize status logs
 `RBITCOIN_SH_FORCE_REBUILD=1` wipes the head and does a full Class A collect +
 FullCold — unset after success; see [`docs/env-knobs.md`](docs/env-knobs.md).
 Unstable `RBITCOIN_SH_MATERIALIZE=unsorted-shards` skips catalog runs: one Class A
-pass writes unsorted `scripthash.unsorted/NN` (nCPU concurrent pwrite), then each
+pass writes unsorted `scripthash.unsorted/NN` (nCPU, 1 MiB per-shard buffers,
+offset-ordered pwrite), then each
 pack worker unique-sorts one file **in place** (~2 GiB) and seals `head/NN`. Unset keeps k-way.
 Incomplete catalog (high SEAL + tiny run mass) on an **empty** head triggers
 full Class A recollect (SEAL=0). Missing `include_hwm` on a durable head

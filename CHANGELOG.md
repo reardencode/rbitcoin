@@ -13,8 +13,8 @@ before 1.0).
 
 - **Unsorted-shard SH materialize (env):** `RBITCOIN_SH_MATERIALIZE=unsorted-shards`
   does one Class A `txout` pass into unsorted `scripthash.unsorted/NN` (nCPU
-  workers, concurrent pwrite by prefix), then unique-sorts each file **in
-  place** and seals `head/NN` (~2 GiB per pack worker; one file image, no
+  workers, 1 MiB per-shard buffers, offset-ordered pwrite, 64 MiB fallocate
+  extents), then unique-sorts each file **in place** and seals `head/NN` (~2 GiB per pack worker; one file image, no
   HashSet at MPHF seal). Unset keeps catalog k-way. SIGINT keeps sealed
   shards; missing `DONE` restarts collect.
 
