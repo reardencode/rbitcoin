@@ -35,6 +35,7 @@ for signet/mainnet sync. **Not** CLI.
 | `RBITCOIN_SH_RECOLLECT_WORKERS` | min(n-cpu, free-RAM/1.5 GiB) | SH recollect parallelism (`1` = serial). Unset = auto (see [`ibd-memory.md`](./ibd-memory.md)) |
 | `RBITCOIN_SH_RECOLLECT_SPILL_BYTES` | 128 MiB | Recollect per-worker spill (clamp 16–512 MiB); compact floor is 3/4 of this |
 | `RBITCOIN_SH_MERGE_WORKERS` | min(n-cpu, free-RAM/1.5 GiB) | Recollect + shard k-way (`1` = serial). Unset = auto (see [`ibd-memory.md`](./ibd-memory.md)) |
+| `RBITCOIN_SH_MATERIALIZE` | unset = catalog k-way | `unsorted-shards`: one Class A pass writes unsorted `scripthash.unsorted/NN`, then RAM-sort + seal (`~2 GiB`/pack worker). Unset keeps catalog k-way |
 | `RBITCOIN_P2P_MAX_INBOUND` | 125 | Only if `--maxinbound` / conf omitted |
 
 ## Hardcoded (no env)

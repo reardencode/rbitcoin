@@ -6,15 +6,19 @@
 //! 1. Parallel fk chunks spill ~128 MiB catalog runs (`spill_creates_catalog`).
 //! 2. `SEAL` is the contiguous create_fk resume floor (`create_fk > SEAL`).
 //! 3. Tip finalize claims runs → `ColdResume` | `FullCold`.
+//!
+//! `RBITCOIN_SH_MATERIALIZE=unsorted-shards` skips catalog runs: one Class A
+//! pass into unsorted shard files, then RAM-sort + seal.
 
 use super::run_builder_core::{clear_runs_dir, on_disk_run_count, runs_dir_io, RunControl};
 use rbitcoin_log::{debug, info};
 use rbitcoin_primitives::Fk;
 use rbitcoin_store::{
     claim_run_for_materialize, commit_run_to_catalog, for_each_merged_rec_opts,
-    list_materialize_claims, list_runs, materialize_sh_shards, next_run_path,
-    write_sorted_run_file_with_policy, ColdProgress, RunWritePolicy, ScriptHashRecord,
-    SortedRunPath, Store, StoreError, SH_RUN_SORT_KEY_LEN,
+    list_materialize_claims, list_runs, materialize_sh_shards,
+    materialize_sh_unsorted_from_class_a, next_run_path, write_sorted_run_file_with_policy,
+    ColdProgress, RunWritePolicy, ScriptHashRecord, SortedRunPath, Store, StoreError,
+    SH_RUN_SORT_KEY_LEN,
 };
 
 /// How tip finalize applies remaining SH runs (pure decision; no I/O).
@@ -60,6 +64,15 @@ pub fn sh_force_rebuild() -> bool {
             .ok(),
         Some(true)
     )
+}
+
+/// `RBITCOIN_SH_MATERIALIZE=unsorted-shards` — one Class A pass, unsorted shard files, RAM-sort.
+pub fn parse_sh_materialize_unsorted(raw: Option<&str>) -> bool {
+    raw.is_some_and(|s| s.eq_ignore_ascii_case("unsorted-shards"))
+}
+
+pub fn sh_unsorted_shard_materialize() -> bool {
+    parse_sh_materialize_unsorted(std::env::var("RBITCOIN_SH_MATERIALIZE").ok().as_deref())
 }
 
 /// Allowed SEAL lag behind tip create count (recollect cancel window).
@@ -757,6 +770,76 @@ impl ShRunBuilder {
         );
         Ok(n_total.saturating_add(n_deferred))
     }
+
+    /// One Class A pass into unsorted shard files, then RAM-sort + seal. SIGINT keeps sealed shards.
+    pub fn finalize_and_unsorted_materialize_cancellable(
+        &self,
+        store: &Store,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<u64, StoreError> {
+        let n_existing = store.scripthash.entry_count();
+        let head_empty = store.scripthash.head_is_empty();
+        let n_shards = store.scripthash.head_shard_count();
+        let unsealed = store.scripthash.unsealed_main_shards();
+        if unsealed.is_empty() && (!head_empty || n_existing > 0) {
+            info!(
+                "node: scripthash unsorted-shards skip (all {n_shards} shards sealed, entry_count={n_existing})"
+            );
+            self.discard_residual_runs();
+            rbitcoin_store::clear_unsorted_shard_dir(&rbitcoin_store::unsorted_shard_dir(
+                store.path(),
+            ));
+            let tip_max = store.txs.count();
+            if tip_max > 0 {
+                self.publish_seal_watermark(tip_max)?;
+                let _ = store.scripthash.note_include_hwm(tip_max);
+            }
+            return Ok(0);
+        }
+
+        let collect_workers = rbitcoin_store::unsorted_collect_workers();
+        let pack_workers = rbitcoin_store::unsorted_pack_workers();
+        let free_gib = rbitcoin_store::free_gib_label();
+        let tip_max = store.txs.count();
+        info!(
+            "node: scripthash unsorted-shards start collect_workers={collect_workers} \
+             pack_workers={pack_workers} free_GiB={free_gib} n_shards={n_shards} \
+             unsealed={} tip_max_fk={tip_max} head_empty={head_empty}",
+            unsealed.len(),
+        );
+        let t0 = Instant::now();
+        let mat = match materialize_sh_unsorted_from_class_a(
+            store,
+            collect_workers,
+            pack_workers,
+            cancel,
+        ) {
+            Ok(m) => m,
+            Err(StoreError::Cancelled(msg)) => {
+                info!(
+                    "node: scripthash unsorted-shards cancelled ({msg}); \
+                     complete shards kept — restart resumes from DONE"
+                );
+                return Err(StoreError::Cancelled(msg));
+            }
+            Err(e) => return Err(e),
+        };
+        store.scripthash.flush()?;
+        self.discard_residual_runs();
+        let hwm = mat.max_fk.max(tip_max);
+        if hwm > 0 {
+            self.publish_seal_watermark(hwm)?;
+            let _ = store.scripthash.note_include_hwm(hwm);
+        }
+        info!(
+            "node: scripthash unsorted-shards done creates≈{} keys≈{} shards={n_shards} \
+             elapsed={:?}",
+            mat.creates,
+            mat.keys,
+            t0.elapsed(),
+        );
+        Ok(mat.creates)
+    }
 }
 
 /// Batch size for warm deferred apply (records per `put_create_batch_append`).
@@ -1435,6 +1518,16 @@ mod tests {
         // Post-success state: high SEAL, zero runs — incomplete for *empty* head only.
         assert!(sh_catalog_is_stale_tail(1_411_000_000, 0));
         assert!(!sh_catalog_looks_complete(1_411_000_000, 1_411_000_000, 0));
+    }
+
+    #[test]
+    fn unsorted_shard_materialize_env_parse() {
+        assert!(!parse_sh_materialize_unsorted(None));
+        assert!(!parse_sh_materialize_unsorted(Some("kway")));
+        assert!(!parse_sh_materialize_unsorted(Some("ram-shard")));
+        assert!(!parse_sh_materialize_unsorted(Some("1")));
+        assert!(parse_sh_materialize_unsorted(Some("unsorted-shards")));
+        assert!(parse_sh_materialize_unsorted(Some("UNSORTED-SHARDS")));
     }
 
     #[test]

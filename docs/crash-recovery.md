@@ -89,6 +89,7 @@ Disconnect: confirmed truncate + `flush_confirmed_only` (also refreshes `tip_sea
   - **Cold resume** via `scripthash.cold_progress`. Dir-variant: sealed
     `scripthash.head/NN` is the commit (holes stay); `next_shard` is the
     lowest unsealed shard. File-variant: prefix HWM + `body_bump`.
+  - **`RBITCOIN_SH_MATERIALIZE=unsorted-shards`:** one Class A pass writes unsorted `scripthash.unsorted/NN` (concurrent pwrite). Incomplete collect (no `DONE`) restarts the pass. `DONE` + sealed heads: pack only unsealed files (RAM-sort ~2 GiB/worker). After all shards seal, the unsorted dir is removed.
   Catalog sanity: high SEAL + tiny run mass ⇒ incomplete **only for empty head** (full Class A recollect). Durable head: leftover runs are wiped, `SEAL` kept; missing `include_hwm` bootstraps from SEAL. Inclusion HWM: `scripthash.include_hwm`. **Leftover live OA** at `scripthash.head` (or non-`SHSR` `ovf/NNNNNN`): refuse — wipe `store/scripthash*` and restart with `--shindex`.
   **SH head open:** sealed **main** shards load `.idx` only (one entry per 128
   records; no fuse). Sealed **ovf** loads `.idx` + BF8R. Occupancy scan is not
