@@ -174,7 +174,7 @@ itself changed.
     scripthash.ovf/NNNNNN[.fuse8][.idx]                  # L0 SHSR pack8
     scripthash.ovf/NNNNNN.mphf|.val|.fuse8               # L1 promoted ovf (at most one)
     scripthash.runs              # leftover catalog (key_len=40); discarded at tip
-    scripthash.unsorted/NN       # tip collect: raw 40 B recs, unsorted; DONE; unlinked after seal
+    scripthash.unsorted/NN       # tip collect: raw 24 B recs (prefix16+fk), unsorted; DONE; unlinked after seal
     sp_tweaks.idx/  sp_tweaks.body/   # optional BIP-352 (schema 17 dirs; leftover files unlinked)
 
 <datadir-cold>/                  # only when --datadir-cold is set
@@ -600,7 +600,7 @@ compact still merges **heads only** — all ovf keys share
 ### Query join
 
 Heights, value, spentness, vouts: expand from Class A outputs (match full scripthash) + spend annotations + Class C.  
-IBD may stage creates in **unsorted per-shard files** (40 B `{scripthash\|create_fk}`)
+IBD may stage creates in **unsorted per-shard files** (24 B `{sh_prefix16\|create_fk}`)
 and unique-sort + pack durable SH at tip entry. Leftover schema-16 `key_len=32`
 catalogs are refused.
 

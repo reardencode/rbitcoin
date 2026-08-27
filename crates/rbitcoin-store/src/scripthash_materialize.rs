@@ -8,6 +8,7 @@ use crate::error::StoreError;
 use crate::io_handle::IoHandle;
 use crate::scripthash::{ColdProgress, ScriptHashTable, ShBodyLayout, ShShardPack};
 use crate::scripthash_head::prefix_shard_of;
+use crate::scripthash_layout::SH_HEAD_KEY_LEN;
 use crate::store::Store;
 use crate::tx_table::TxTable;
 use rbitcoin_primitives::Fk;
@@ -90,13 +91,15 @@ impl ShShardMaterialize {
     }
 }
 
-fn decode_sh_run_rec(rec: &[u8]) -> Result<([u8; 32], Fk), StoreError> {
-    if rec.len() < 40 {
-        return Err(StoreError::Corrupt("sh run short record in shard merge"));
+fn decode_unsorted_rec(rec: &[u8]) -> Result<([u8; 32], Fk), StoreError> {
+    if rec.len() != UNSORTED_REC_LEN {
+        return Err(StoreError::Corrupt("scripthash unsorted rec length"));
     }
     let mut sh = [0u8; 32];
-    sh.copy_from_slice(&rec[..32]);
-    let fk = Fk(u64::from_le_bytes(rec[32..40].try_into().unwrap()));
+    sh[..SH_HEAD_KEY_LEN].copy_from_slice(&rec[..SH_HEAD_KEY_LEN]);
+    let fk = Fk(u64::from_le_bytes(
+        rec[SH_HEAD_KEY_LEN..].try_into().unwrap(),
+    ));
     Ok((sh, fk))
 }
 
@@ -139,11 +142,12 @@ struct ShardPool {
     err: Mutex<Option<StoreError>>,
 }
 
-/// Temp dir for one Class A pass → unsorted per-shard 40-byte records.
+/// Temp dir for one Class A pass → unsorted per-shard 24-byte records
+/// (16-byte head prefix + create_fk).
 pub const UNSORTED_SHARD_DIR: &str = "scripthash.unsorted";
 const UNSORTED_DONE_NAME: &str = "DONE";
-const UNSORTED_DONE_MAGIC: &[u8; 8] = b"SHUNSRT1";
-const UNSORTED_REC_LEN: usize = 40;
+const UNSORTED_DONE_MAGIC: &[u8; 8] = b"SHUNSRT2";
+const UNSORTED_REC_LEN: usize = SH_HEAD_KEY_LEN + 8;
 const UNSORTED_FLUSH_BYTES: usize = 1024 * 1024;
 const UNSORTED_ALLOC_STEP: u64 = 64 << 20;
 const CLASS_A_CHUNK_FKS: u64 = 64_000;
@@ -187,8 +191,8 @@ pub fn unsorted_pack_workers() -> usize {
 
 fn encode_unsorted_rec(sh: &[u8; 32], fk: Fk) -> [u8; UNSORTED_REC_LEN] {
     let mut r = [0u8; UNSORTED_REC_LEN];
-    r[..32].copy_from_slice(sh);
-    r[32..].copy_from_slice(&fk.0.to_le_bytes());
+    r[..SH_HEAD_KEY_LEN].copy_from_slice(&sh[..SH_HEAD_KEY_LEN]);
+    r[SH_HEAD_KEY_LEN..].copy_from_slice(&fk.0.to_le_bytes());
     r
 }
 
@@ -262,7 +266,7 @@ fn flush_unsorted_buf(sink: &UnsortedShardSink, buf: &mut Vec<u8>) -> Result<(),
     }
     if !buf.len().is_multiple_of(UNSORTED_REC_LEN) {
         return Err(StoreError::Corrupt(
-            "scripthash unsorted shard buffer not a multiple of 40",
+            "scripthash unsorted shard buffer not a multiple of 24",
         ));
     }
     let n = buf.len() as u64;
@@ -329,7 +333,7 @@ pub fn clear_unsorted_shard_dir(dir: &Path) {
     let _ = fs::remove_dir_all(dir);
 }
 
-/// One Class A pass: n workers scan fk chunks and pwrite 40-byte recs to `n_shards` FDs.
+/// One Class A pass: n workers scan fk chunks and pwrite 24-byte recs to `n_shards` FDs.
 pub fn collect_unsorted_shard_files(
     store: &Store,
     dir: &Path,
@@ -499,7 +503,7 @@ fn collect_unsorted_from_txs(
         let bytes = sink.write.lock().unwrap().cursor;
         if !bytes.is_multiple_of(UNSORTED_REC_LEN as u64) {
             return Err(StoreError::Corrupt(
-                "scripthash unsorted shard size not a multiple of 40",
+                "scripthash unsorted shard size not a multiple of 24",
             ));
         }
         sink.file
@@ -520,7 +524,7 @@ fn collect_unsorted_from_txs(
 }
 
 fn rec_fk_le(rec: &[u8; UNSORTED_REC_LEN]) -> u64 {
-    u64::from_le_bytes(rec[32..].try_into().unwrap())
+    u64::from_le_bytes(rec[SH_HEAD_KEY_LEN..].try_into().unwrap())
 }
 
 fn sort_unique_unsorted_recs(bytes: &mut Vec<u8>) -> Result<(), StoreError> {
@@ -529,13 +533,17 @@ fn sort_unique_unsorted_recs(bytes: &mut Vec<u8>) -> Result<(), StoreError> {
     }
     if !bytes.len().is_multiple_of(UNSORTED_REC_LEN) {
         return Err(StoreError::Corrupt(
-            "scripthash unsorted shard file length not a multiple of 40",
+            "scripthash unsorted shard file length not a multiple of 24",
         ));
     }
     let keep = {
         let (recs, rem) = bytes.as_chunks_mut::<UNSORTED_REC_LEN>();
         debug_assert!(rem.is_empty());
-        recs.sort_unstable_by(|a, b| a[..32].cmp(&b[..32]).then(rec_fk_le(a).cmp(&rec_fk_le(b))));
+        recs.sort_unstable_by(|a, b| {
+            a[..SH_HEAD_KEY_LEN]
+                .cmp(&b[..SH_HEAD_KEY_LEN])
+                .then(rec_fk_le(a).cmp(&rec_fk_le(b)))
+        });
         let mut w = 0usize;
         for r in 0..recs.len() {
             if Fk(rec_fk_le(&recs[r])).is_null() {
@@ -559,7 +567,7 @@ fn unique_sh_key_count(bytes: &[u8]) -> usize {
     let mut n = 0usize;
     let mut prev: Option<&[u8]> = None;
     for chunk in bytes.chunks_exact(UNSORTED_REC_LEN) {
-        let sh = &chunk[..32];
+        let sh = &chunk[..SH_HEAD_KEY_LEN];
         if prev != Some(sh) {
             n += 1;
             prev = Some(sh);
@@ -594,7 +602,7 @@ fn pack_unsorted_shard(
             if i & 0xfff == 0 && cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
                 return Err(StoreError::Cancelled("scripthash unsorted shard pack"));
             }
-            let (sh, fk) = decode_sh_run_rec(chunk)?;
+            let (sh, fk) = decode_unsorted_rec(chunk)?;
             session.push_sorted_fk(sh, fk)?;
             progress.recs_packed.fetch_add(1, Ordering::Relaxed);
         }
@@ -909,10 +917,19 @@ mod tests {
             .chunks_exact(UNSORTED_REC_LEN)
             .map(|c| {
                 let mut sh = [0u8; 32];
-                sh.copy_from_slice(&c[..32]);
-                (sh, u64::from_le_bytes(c[32..].try_into().unwrap()))
+                sh[..SH_HEAD_KEY_LEN].copy_from_slice(&c[..SH_HEAD_KEY_LEN]);
+                (
+                    sh,
+                    u64::from_le_bytes(c[SH_HEAD_KEY_LEN..].try_into().unwrap()),
+                )
             })
             .collect()
+    }
+
+    fn prefix_key(b: u8) -> [u8; 32] {
+        let mut k = [0u8; 32];
+        k[..SH_HEAD_KEY_LEN].fill(b);
+        k
     }
 
     fn tmp_sink() -> (PathBuf, UnsortedShardSink) {
@@ -951,7 +968,10 @@ mod tests {
         flush_unsorted_buf(&sink, &mut a).unwrap();
         flush_unsorted_buf(&sink, &mut b).unwrap();
         let bytes = fs::read(&sink.path).unwrap();
-        assert_eq!(recs_of(&bytes), vec![([1u8; 32], 1), ([2u8; 32], 2)]);
+        assert_eq!(
+            recs_of(&bytes),
+            vec![(prefix_key(1), 1), (prefix_key(2), 2)]
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -976,8 +996,8 @@ mod tests {
         let bytes = fs::read(&sink.path).unwrap();
         assert_eq!(bytes.len(), 4 * 1000 * UNSORTED_REC_LEN);
         for chunk in bytes.chunks_exact(UNSORTED_REC_LEN) {
-            let fk = u64::from_le_bytes(chunk[32..].try_into().unwrap());
-            assert!(fk >= 1, "every rec must be a full 40-byte create");
+            let fk = u64::from_le_bytes(chunk[SH_HEAD_KEY_LEN..].try_into().unwrap());
+            assert!(fk >= 1, "every rec must be a full 24-byte create");
         }
         let _ = fs::remove_dir_all(&dir);
     }
@@ -995,10 +1015,10 @@ mod tests {
         assert_eq!(
             recs_of(&bytes),
             vec![
-                ([6u8; 32], 9),
-                ([7u8; 32], 2),
-                ([7u8; 32], 256),
-                ([8u8; 32], 1),
+                (prefix_key(6), 9),
+                (prefix_key(7), 2),
+                (prefix_key(7), 256),
+                (prefix_key(8), 1),
             ],
             "numeric fk order (256 after 2), drop null and duplicate (sh,fk)"
         );
@@ -1009,8 +1029,45 @@ mod tests {
     fn sort_unique_unsorted_recs_rejects_torn_length() {
         let err = sort_unique_unsorted_recs(&mut vec![0u8; 39]).unwrap_err();
         assert!(
-            matches!(err, StoreError::Corrupt(m) if m.contains("multiple of 40")),
+            matches!(err, StoreError::Corrupt(m) if m.contains("multiple of 24")),
             "got {err}"
         );
+    }
+
+    #[test]
+    fn unsorted_rec_is_16_byte_head_prefix_plus_fk() {
+        let mut sh = [0u8; 32];
+        sh[..16].fill(0x11);
+        sh[16..].fill(0x22);
+        let rec = encode_unsorted_rec(&sh, Fk(0x0102_0304_0506_0708));
+        assert_eq!(UNSORTED_REC_LEN, 24);
+        assert_eq!(rec.len(), 24);
+        assert_eq!(&rec[..16], &[0x11; 16]);
+        assert_eq!(&rec[16..], &0x0102_0304_0506_0708u64.to_le_bytes());
+        assert!(
+            rec.iter().all(|&b| b != 0x22),
+            "must not store the trailing 16 hash bytes"
+        );
+    }
+
+    #[test]
+    fn unsorted_done_magic_is_v2() {
+        assert_eq!(UNSORTED_DONE_MAGIC, b"SHUNSRT2");
+    }
+
+    #[test]
+    fn sort_unique_collapses_full_hashes_that_share_a_16_byte_prefix() {
+        let mut a = [0u8; 32];
+        a[0] = 1;
+        a[31] = 9;
+        let mut b = [0u8; 32];
+        b[0] = 1;
+        b[31] = 8;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&encode_unsorted_rec(&a, Fk(3)));
+        bytes.extend_from_slice(&encode_unsorted_rec(&b, Fk(3)));
+        sort_unique_unsorted_recs(&mut bytes).unwrap();
+        assert_eq!(bytes.len(), UNSORTED_REC_LEN);
+        assert_eq!(unique_sh_key_count(&bytes), 1);
     }
 }

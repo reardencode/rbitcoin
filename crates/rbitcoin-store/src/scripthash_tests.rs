@@ -2010,13 +2010,13 @@ fn class_a_coinbase(
 
 fn decode_unsorted_file(path: &std::path::Path) -> Vec<ScriptHashRecord> {
     let bytes = std::fs::read(path).unwrap();
-    assert_eq!(bytes.len() % 40, 0, "unsorted file must be 40-byte recs");
+    assert_eq!(bytes.len() % 24, 0, "unsorted file must be 24-byte recs");
     bytes
-        .chunks_exact(40)
+        .chunks_exact(24)
         .map(|c| {
             let mut sh = [0u8; 32];
-            sh.copy_from_slice(&c[..32]);
-            let fk = Fk(u64::from_le_bytes(c[32..40].try_into().unwrap()));
+            sh[..16].copy_from_slice(&c[..16]);
+            let fk = Fk(u64::from_le_bytes(c[16..24].try_into().unwrap()));
             ScriptHashRecord::from_fk(sh, fk)
         })
         .collect()
@@ -2121,9 +2121,9 @@ fn unsorted_pack_sorts_numeric_fk_and_keeps_all_creates() {
         let sh_hi = script_hash(&high);
         let mut bytes = Vec::new();
         let mut push = |sh: [u8; 32], fk: u64| {
-            let mut r = [0u8; 40];
-            r[..32].copy_from_slice(&sh);
-            r[32..].copy_from_slice(&fk.to_le_bytes());
+            let mut r = [0u8; 24];
+            r[..16].copy_from_slice(&sh[..16]);
+            r[16..].copy_from_slice(&fk.to_le_bytes());
             bytes.extend_from_slice(&r);
         };
         push(sh_hi, 256);

@@ -21,6 +21,10 @@ before 1.0).
   Collect workers are always nCPU. Class A collect preads are 1 MiB spans.
   SIGINT keeps sealed shards; missing `DONE` restarts collect.
 
+- **Unsorted SH recs store the 16-byte head prefix:** each file rec is 24 B
+  (`prefix16` + `create_fk`), matching the sealed head. `DONE` magic is
+  `SHUNSRT2` so leftover 40 B `SHUNSRT1` files restart collect.
+
 - **Peer full-node notes:** [`docs/peer-clients.md`](docs/peer-clients.md)
   compares Hornet Node and satd (tests and ideas to consider later, and
   explicit non-copies). Not a quality.md Open list.
