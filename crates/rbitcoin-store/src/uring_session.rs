@@ -5,7 +5,6 @@
 //! - plan head-resolve (confirm stamp / denserels)
 //! - spend annotate abs-meta RMW / pure pwrite
 //! - [`crate::bulk_io`] pread/pwrite batches and page RMW
-//! - k-way sorted-run merge (ahead pread, wait only on promote)
 //!
 //! Backends: Linux `io_uring`, portable [`crate::io_session_pool`] (Darwin
 //! default + `RBITCOIN_IO=pool`), Windows IOCP.
@@ -821,8 +820,6 @@ pub const KIND_SPEND_PAGE_WRITE: u8 = 8;
 pub const KIND_RMW_READ: u8 = 9;
 #[cfg(test)]
 pub const KIND_RMW_WRITE: u8 = 10;
-/// k-way merge cursor ahead pread (`sorted_run::RunCursor`).
-pub const KIND_MERGE_PREAD: u8 = 11;
 /// SP-tweak machine: `txout.body` pread.
 pub const KIND_SP_TXOUT: u8 = 12;
 /// SP-tweak machine: `inwit.body` pread (P2TR only).
@@ -1002,7 +999,6 @@ mod tests {
             KIND_SPEND_PAGE_WRITE,
             KIND_RMW_READ,
             KIND_RMW_WRITE,
-            KIND_MERGE_PREAD,
             KIND_SP_TXOUT,
             KIND_SP_INWIT,
             KIND_SP_PARENT,

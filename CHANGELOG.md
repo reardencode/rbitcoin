@@ -11,12 +11,14 @@ before 1.0).
 
 ### Added
 
-- **Unsorted-shard SH materialize (env):** `RBITCOIN_SH_MATERIALIZE=unsorted-shards`
-  does one Class A `txout` pass into unsorted `scripthash.unsorted/NN` (nCPU
-  workers, 1 MiB per-shard buffers, offset-ordered pwrite, 64 MiB fallocate
-  extents), then unique-sorts each file **in place** and seals `head/NN`
-  (~2 GiB per pack worker; one file image, no HashSet at MPHF seal). Each
-  sealed shard logs `unsorted pack shard=NN`. Unset keeps catalog k-way.
+- **Unsorted-shard SH materialize is the default:** tip finalize does one Class A
+  `txout` pass into unsorted `scripthash.unsorted/NN` (nCPU collect, 1 MiB
+  per-shard buffers, offset-ordered pwrite, 64 MiB fallocate extents), then
+  unique-sorts each file **in place** and seals `head/NN` (~2 GiB per pack
+  worker). Catalog k-way merge and Class A catalog recollect/spill are
+  removed (`RBITCOIN_SH_RECOLLECT_WORKERS` / `RBITCOIN_SH_RECOLLECT_SPILL_BYTES`
+  deleted). Leftover `scripthash.runs` are discarded at tip (never rematerialized).
+  Collect workers are always nCPU. Class A collect preads are 1 MiB spans.
   SIGINT keeps sealed shards; missing `DONE` restarts collect.
 
 - **Peer full-node notes:** [`docs/peer-clients.md`](docs/peer-clients.md)

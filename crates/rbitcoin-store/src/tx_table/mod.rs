@@ -17,8 +17,12 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-/// Host RAM budget per parallel `tx.head` rebuild worker (not SH's 1.5 GiB).
+/// Host RAM budget per parallel `tx.head` rebuild worker (not SH pack's 2 GiB).
 pub const TX_HEAD_REBUILD_WORKER_FREE_RAM_BYTES: u64 = 750 * 1024 * 1024;
+
+/// Max coalesced `txout.body` pread for SH Class A collect. 1 MiB stays inside
+/// the TLS uring 5 s wait with n-core workers sharing the disk (was 16 MiB).
+pub const SCRIPT_HASH_COLLECT_SPAN: u64 = 1024 * 1024;
 
 pub(crate) fn parse_rebuild_seal_bits(raw: Option<&str>) -> u32 {
     raw.and_then(|s| s.parse::<u32>().ok())
@@ -1204,6 +1208,9 @@ impl TxTable {
 
     /// Walk create_fks `first..=last` from a coalesced `txout.body` span (one idx
     /// walk, sequential body pread), yielding `script_hash` per out.
+    ///
+    /// Spans are capped at [`SCRIPT_HASH_COLLECT_SPAN`] so one TLS uring pread
+    /// finishes inside the 5 s wait with n-core collect workers on the disk.
     pub fn for_each_script_hashes_in_fk_span(
         &self,
         first: u64,
@@ -1218,7 +1225,7 @@ impl TxTable {
             Err(StoreError::NotFound) | Err(StoreError::InvalidFk) => return Ok(()),
             Err(e) => return Err(e),
         };
-        const MAX_SPAN: u64 = 16 * 1024 * 1024;
+        const MAX_SPAN: u64 = SCRIPT_HASH_COLLECT_SPAN;
         let mut i = 0usize;
         while i < ranges.len() {
             let span_lo = ranges[i].0;
@@ -1520,7 +1527,7 @@ impl TxTable {
     /// Range width is [`Self::rebuild_seal_keys`] (default 2²⁵). Remainder is
     /// sealed too; an empty open tail is created for later inserts.
     /// Workers: [`Self::rebuild_workers`] (min of CPUs, free RAM / 750 MiB,
-    /// and range count). Distinct from SH's 1.5 GiB cap.
+    /// and range count). Distinct from SH pack's 2 GiB cap.
     pub fn rebuild_head_from_bodies(
         &self,
         mut on_progress: impl FnMut(u64, u64, u64),
@@ -1615,7 +1622,7 @@ impl TxTable {
     }
 
     /// Parallel wipe-rebuild workers. Env `RBITCOIN_TX_HEAD_REBUILD_WORKERS`;
-    /// default min(CPUs, free RAM / 750 MiB). Not SH's 1.5 GiB cap.
+    /// default min(CPUs, free RAM / 750 MiB). Not SH pack's 2 GiB cap.
     pub fn rebuild_workers() -> usize {
         #[cfg(test)]
         if let Some(n) = TEST_REBUILD_WORKERS.with(std::cell::Cell::get) {

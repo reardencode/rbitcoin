@@ -2793,11 +2793,6 @@ fn parse_rebuild_workers_and_750mib_cap() {
     assert_eq!(tx_head_rebuild_workers_for_free_ram(8, 750 * MIB), 1);
     assert_eq!(tx_head_rebuild_workers_for_free_ram(8, 1500 * MIB), 2);
     assert_eq!(tx_head_rebuild_workers_for_free_ram(4, 20 * 750 * MIB), 4);
-    assert_eq!(
-        crate::sorted_run::sh_workers_for_free_ram(8, 1500 * MIB),
-        1,
-        "SH cap is 1.5 GiB, not 750 MiB"
-    );
 }
 
 #[test]
@@ -3280,4 +3275,9 @@ fn idx_roll_independent_of_inwit_span() {
         assert!(raw_in.len() >= 1800, "len={}", raw_in.len());
         let _ = std::fs::remove_dir_all(&dir);
     });
+}
+
+#[test]
+fn script_hash_collect_span_is_1mib() {
+    assert_eq!(SCRIPT_HASH_COLLECT_SPAN, 1024 * 1024);
 }

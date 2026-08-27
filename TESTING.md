@@ -106,7 +106,7 @@ reads it; rustup users export it). Override coverage dir:
 
 | Anti-pattern | Prefer |
 |--------------|--------|
-| Thousands of SH catalog run files | Recollect spills ~128 MiB runs; tests use tens of tiny runs and k-way |
+| Thousands of SH catalog run files | Unsorted collect writes 64 prefix files; tests use tiny Class A |
 | Multi‑GiB / mainnet head scale under `cargo test` | `RBITCOIN_HEAD_SCALE=tiny` / `cfg(test)` default; force mainnet only for explicit scale tests |
 | Remining 100-block maturity pads with `confirm_wire_run` | `pad_empty_from` / `build_mature_regtest_with_spend` **once per binary journey** (not once per skinny test) |
 | Wall-time multi-round microbenches in default suite | Deterministic structure / chunk-load asserts; demote wall arms to `#[ignore]` |

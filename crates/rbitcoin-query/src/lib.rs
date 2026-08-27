@@ -1130,7 +1130,7 @@ pub struct Query {
     lookup_started_hi: AtomicU32,
     /// Max height whose Class A append committed (`u32::MAX` = none).
     class_a_hi: AtomicU32,
-    /// Post-IBD SH catalog (Class A recollect spills; no IBD memtable).
+    /// Post-IBD SH SEAL + leftover-run discard (unsorted collect is tip finalize).
     sh_run: sh_builder::ShRunBuilder,
     /// Operator scripthash index intent (`--shindex`). When false, Class C skips
     /// SH collect/enqueue/durable write-through entirely (tip follow independent).
