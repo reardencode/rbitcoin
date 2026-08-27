@@ -2223,3 +2223,117 @@ fn for_each_live_create_skips_unlinked() {
     assert_eq!(seen, vec![1, 3]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn script_for_prefix_shard(shard: usize, n_shards: usize) -> Vec<u8> {
+    for n in 0u32..1_000_000 {
+        let script = vec![0x51, n as u8, (n >> 8) as u8, (n >> 16) as u8];
+        if crate::prefix_shard_of(&script_hash(&script), n_shards) == shard {
+            return script;
+        }
+    }
+    panic!("no script for shard {shard} of {n_shards}");
+}
+
+fn class_a_coinbase(
+    txid: [u8; 32],
+    script: Vec<u8>,
+) -> (
+    crate::TxRecord,
+    Vec<crate::InputRecord>,
+    Vec<crate::OutputRecord>,
+) {
+    (
+        crate::TxRecord {
+            txid,
+            version: 1,
+            locktime: 0,
+            input_start_fk: Fk::NULL,
+            input_count: 1,
+            output_start_fk: Fk::NULL,
+            output_count: 1,
+        },
+        vec![crate::InputRecord::coinbase(u32::MAX, vec![0x01], vec![])],
+        vec![crate::OutputRecord::unspent(50, script)],
+    )
+}
+
+#[test]
+fn ram_shard_collect_keeps_only_prefix() {
+    HeadScale::test_with(HeadScale::Tiny, || {
+        let dir = tmp();
+        let s = crate::Store::create(&dir).unwrap();
+        let n_shards = 4usize;
+        let mut expect = Vec::new();
+        for shard in 0..n_shards {
+            let script = script_for_prefix_shard(shard, n_shards);
+            let sh = script_hash(&script);
+            expect.push(sh);
+            let mut txid = [0u8; 32];
+            txid[0] = shard as u8;
+            s.put_tx_full_batch_indexed(&[class_a_coinbase(txid, script)], true)
+                .unwrap();
+        }
+        let recs = crate::collect_class_a_shard_records(&s, 2, n_shards, 2, None).unwrap();
+        assert!(
+            recs.iter()
+                .all(|r| crate::prefix_shard_of(&r.scripthash, n_shards) == 2),
+            "collect must drop other shards"
+        );
+        assert_eq!(recs.len(), 1, "one create in shard 2");
+        assert_eq!(recs[0].scripthash, expect[2]);
+        let _ = std::fs::remove_dir_all(&dir);
+    });
+}
+
+#[test]
+fn ram_shard_materialize_four_shards_from_class_a_no_runs() {
+    HeadScale::test_with(HeadScale::Tiny, || {
+        let dir = tmp();
+        let s = crate::Store::create(&dir).unwrap();
+        let n_shards = 4usize;
+        let mut keys = Vec::new();
+        for shard in 0..n_shards {
+            let script = script_for_prefix_shard(shard, n_shards);
+            keys.push(script_hash(&script));
+            let mut txid = [0u8; 32];
+            txid[0] = shard as u8;
+            s.put_tx_full_batch_indexed(&[class_a_coinbase(txid, script)], true)
+                .unwrap();
+        }
+        let sh_dir = dir.join("sh4");
+        std::fs::create_dir_all(&sh_dir).unwrap();
+        let table = four_shard_dir_table(&sh_dir);
+        let mat = crate::materialize_sh_from_class_a_into(&s, &table, 2, None).unwrap();
+        assert_eq!(mat.creates, 4, "all Class A creates packed");
+        assert_eq!(mat.keys, 4);
+        for k in &keys {
+            assert_eq!(table.entries(k).unwrap().len(), 1, "key must be queryable");
+        }
+        let runs = sh_dir.join("scripthash.runs");
+        assert!(
+            !runs.exists()
+                || std::fs::read_dir(&runs)
+                    .map(|it| it.count() == 0)
+                    .unwrap_or(true),
+            "ram-shard must not write catalog runs"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    });
+}
+
+#[test]
+fn ram_shard_cancel_before_pack_is_cancelled() {
+    HeadScale::test_with(HeadScale::Tiny, || {
+        let dir = tmp();
+        let s = crate::Store::create(&dir).unwrap();
+        s.put_tx_full_batch_indexed(&[class_a_coinbase([1u8; 32], vec![0x51])], true)
+            .unwrap();
+        let cancel = AtomicBool::new(true);
+        let err = crate::materialize_sh_shards_from_class_a(&s, 1, Some(&cancel)).unwrap_err();
+        assert!(
+            matches!(err, StoreError::Cancelled(_)),
+            "expected Cancelled, got {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    });
+}

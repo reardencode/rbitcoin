@@ -2,16 +2,28 @@
 //!
 //! Sharded bodies: each worker packs `body/NN` and seals `head/NN` itself.
 //! Shared body: one writer, prefix `SHCOLDP1` HWM.
+//!
+//! Alternate path: [`materialize_sh_shards_from_class_a`] scans Class A once
+//! per unsealed prefix shard, sorts that shard in RAM, and packs it. No catalog
+//! runs. `RBITCOIN_SH_MATERIALIZE=ram-shard` selects it at tip finalize.
 
 use crate::error::StoreError;
 use crate::file::ensure_nofile_budget_at_least;
-use crate::scripthash::{ColdProgress, ScriptHashTable, ShBodyLayout, ShShardPack};
+use crate::scripthash::{
+    ColdProgress, ScriptHashRecord, ScriptHashTable, ShBodyLayout, ShShardPack,
+};
+use crate::scripthash_head::prefix_shard_of;
 use crate::sorted_run::{for_each_merged_rec_shard, SortedRunPath};
+use crate::store::Store;
+use crate::tx_table::TxTable;
 use rbitcoin_primitives::Fk;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
+
+/// Create_fk span per parallel Class A scan unit (same grain as recollect).
+const CLASS_A_CHUNK_FKS: u64 = 64_000;
 
 const MATERIALIZE_STATUS_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -426,6 +438,278 @@ pub fn materialize_sh_shards(
         .with_stages(progress.stages()))
     })?;
     Ok(out)
+}
+
+/// Scan Class A `txout` for `create_fk` in `1..=count`, keep rows whose
+/// scripthash lands in `shard` of `n_shards`, sort by `(scripthash, create_fk)`.
+pub fn collect_class_a_shard_records(
+    store: &Store,
+    shard: usize,
+    n_shards: usize,
+    workers: usize,
+    cancel: Option<&AtomicBool>,
+) -> Result<Vec<ScriptHashRecord>, StoreError> {
+    let last = store.txs.count();
+    if last == 0 {
+        return Ok(Vec::new());
+    }
+    collect_class_a_shard_from_txs(&store.txs, shard, n_shards, 1, last, workers, cancel)
+}
+
+fn collect_class_a_shard_from_txs(
+    txs: &TxTable,
+    shard: usize,
+    n_shards: usize,
+    first: u64,
+    last: u64,
+    workers: usize,
+    cancel: Option<&AtomicBool>,
+) -> Result<Vec<ScriptHashRecord>, StoreError> {
+    if last < first {
+        return Ok(Vec::new());
+    }
+    let n_shards = n_shards.max(1);
+    let work_span = last.saturating_sub(first.saturating_sub(1));
+    let n_chunks = work_span.div_ceil(CLASS_A_CHUNK_FKS).max(1) as usize;
+    let workers = workers.max(1).min(n_chunks);
+    let next_chunk = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let first_err: Mutex<Option<StoreError>> = Mutex::new(None);
+    let parts: Mutex<Vec<Vec<ScriptHashRecord>>> = Mutex::new(Vec::new());
+
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                let mut local = Vec::new();
+                loop {
+                    if stop.load(Ordering::Relaxed)
+                        || cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false)
+                    {
+                        stop.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                    if first_err.lock().unwrap().is_some() {
+                        break;
+                    }
+                    let i = next_chunk.fetch_add(1, Ordering::Relaxed);
+                    if i >= n_chunks {
+                        break;
+                    }
+                    let lo = first.saturating_add((i as u64).saturating_mul(CLASS_A_CHUNK_FKS));
+                    let hi = lo
+                        .saturating_add(CLASS_A_CHUNK_FKS)
+                        .saturating_sub(1)
+                        .min(last);
+                    if lo > last {
+                        continue;
+                    }
+                    match txs.for_each_script_hashes_in_fk_span(lo, hi, |fk, sh| {
+                        if prefix_shard_of(&sh, n_shards) == shard {
+                            local.push(ScriptHashRecord::from_fk(sh, fk));
+                        }
+                        Ok(())
+                    }) {
+                        Ok(()) => {}
+                        Err(StoreError::Cancelled(_)) => {
+                            stop.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                        Err(e) => {
+                            *first_err.lock().unwrap() = Some(e);
+                            stop.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                }
+                if !local.is_empty() {
+                    parts.lock().unwrap().push(local);
+                }
+            });
+        }
+    });
+
+    if let Some(e) = first_err.lock().unwrap().take() {
+        return Err(e);
+    }
+    if cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
+        return Err(StoreError::Cancelled("scripthash ram-shard class a scan"));
+    }
+
+    let mut recs: Vec<ScriptHashRecord> =
+        parts.into_inner().unwrap().into_iter().flatten().collect();
+    recs.sort_unstable_by(|a, b| {
+        a.scripthash
+            .cmp(&b.scripthash)
+            .then(a.create_tx_fk.0.cmp(&b.create_tx_fk.0))
+    });
+    recs.dedup_by(|a, b| a.scripthash == b.scripthash && a.create_tx_fk == b.create_tx_fk);
+    Ok(recs)
+}
+
+fn pack_sorted_class_a_shard(
+    table: &ScriptHashTable,
+    shard: usize,
+    recs: &[ScriptHashRecord],
+    cancel: Option<&AtomicBool>,
+    progress: &MaterializeProgress,
+) -> Result<ShShardPack, StoreError> {
+    let mut session = table.pack_shard_session(shard)?;
+    let t_loop = Instant::now();
+    for (i, r) in recs.iter().enumerate() {
+        if i & 0xfff == 0 && cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
+            return Err(StoreError::Cancelled("scripthash ram-shard pack"));
+        }
+        if r.create_tx_fk.is_null() {
+            continue;
+        }
+        session.push_sorted_fk(r.scripthash, r.create_tx_fk)?;
+        progress.recs_packed.fetch_add(1, Ordering::Relaxed);
+    }
+    let loop_wall = t_loop.elapsed().as_nanos() as u64;
+    let pack_during_loop = session.pack_ns;
+    progress.merge_ns.fetch_add(
+        loop_wall.saturating_sub(pack_during_loop),
+        Ordering::Relaxed,
+    );
+    let pack = session.finish_pack()?;
+    progress.pack_ns.fetch_add(pack.pack_ns, Ordering::Relaxed);
+    progress
+        .body_flush_ns
+        .fetch_add(pack.body_flush_ns, Ordering::Relaxed);
+    progress.keys_packed.fetch_add(pack.keys, Ordering::Relaxed);
+    Ok(pack)
+}
+
+fn ram_shard_jobs(table: &ScriptHashTable, resume_from: usize) -> Vec<usize> {
+    let n_shards = table.head_shard_count().max(1);
+    match table.body_layout() {
+        ShBodyLayout::Sharded => table.unsealed_main_shards(),
+        ShBodyLayout::Shared => {
+            if resume_from >= n_shards {
+                Vec::new()
+            } else {
+                (resume_from..n_shards).collect()
+            }
+        }
+    }
+}
+
+/// One Class A pass per unsealed prefix shard: filter, sort in RAM, pack+seal.
+///
+/// Does not read or write `scripthash.runs`. Shards run **serially** (one RAM
+/// image). `workers` parallelize the `txout` scan inside each pass.
+pub fn materialize_sh_shards_from_class_a(
+    store: &Store,
+    workers: usize,
+    cancel: Option<&AtomicBool>,
+) -> Result<ShShardMaterialize, StoreError> {
+    materialize_sh_from_txout(&store.txs, &store.scripthash, workers, cancel)
+}
+
+/// Like [`materialize_sh_shards_from_class_a`] packing `table` from `store` Class A.
+///
+/// `table` may be a different SH layout than `store.scripthash` (tests).
+pub fn materialize_sh_from_class_a_into(
+    store: &Store,
+    table: &ScriptHashTable,
+    workers: usize,
+    cancel: Option<&AtomicBool>,
+) -> Result<ShShardMaterialize, StoreError> {
+    materialize_sh_from_txout(&store.txs, table, workers, cancel)
+}
+
+fn materialize_sh_from_txout(
+    txs: &TxTable,
+    table: &ScriptHashTable,
+    workers: usize,
+    cancel: Option<&AtomicBool>,
+) -> Result<ShShardMaterialize, StoreError> {
+    let n_shards = table.head_shard_count().max(1);
+    let resume_from = match ColdProgress::load(table.store_dir()).ok().flatten() {
+        Some(p) if table.body_layout() == ShBodyLayout::Shared => p.next_shard as usize,
+        _ => 0,
+    };
+    let jobs = ram_shard_jobs(table, resume_from);
+    if jobs.is_empty() {
+        return Ok(ShShardMaterialize {
+            creates: table.entry_count(),
+            keys: 0,
+            max_fk: 0,
+            merge_ns: 0,
+            pack_ns: 0,
+            mphf_ns: 0,
+            body_flush_ns: 0,
+            head_fill_ns: 0,
+        });
+    }
+    let workers = workers.max(1);
+    let tip_max = txs.count();
+    rbitcoin_log::info!(
+        "store: scripthash ram-shard start resume_from={resume_from} n_shards={n_shards} \
+         jobs={} workers={workers} tip_max_create_fk={tip_max}",
+        jobs.len(),
+    );
+    let t0 = Instant::now();
+    let progress = MaterializeProgress::new();
+    let already = (n_shards - jobs.len()) as u32;
+    progress.shards_published.store(already, Ordering::Relaxed);
+    progress
+        .recs_packed
+        .store(table.entry_count(), Ordering::Relaxed);
+    progress
+        .creates_published
+        .store(table.entry_count(), Ordering::Relaxed);
+    if let Some(p) = ColdProgress::load(table.store_dir()).ok().flatten() {
+        progress
+            .keys_packed
+            .store(p.keys_written, Ordering::Relaxed);
+    }
+    let max_fk = AtomicU64::new(0);
+    let n_jobs = jobs.len();
+
+    for (ji, shard) in jobs.into_iter().enumerate() {
+        if cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
+            return Err(StoreError::Cancelled("scripthash ram-shard pack"));
+        }
+        let t_shard = Instant::now();
+        rbitcoin_log::info!(
+            "store: scripthash ram-shard pass={}/{n_jobs} shard={shard}/{n_shards} \
+             workers={workers} tip_max_create_fk={tip_max}",
+            ji + 1,
+        );
+        let recs =
+            collect_class_a_shard_from_txs(txs, shard, n_shards, 1, tip_max, workers, cancel)?;
+        let n_recs = recs.len() as u64;
+        let pack = pack_sorted_class_a_shard(table, shard, &recs, cancel, &progress)?;
+        drop(recs);
+        seal_shard(table, shard, pack, &max_fk, &progress)?;
+        rbitcoin_log::info!(
+            "store: scripthash ram-shard packed shard={shard}/{n_shards} recs={n_recs} \
+             shards={}/{} elapsed={:?}",
+            progress.shards_published.load(Ordering::Relaxed),
+            n_shards,
+            t_shard.elapsed(),
+        );
+    }
+
+    progress.complete.store(true, Ordering::Release);
+    rbitcoin_log::info!(
+        "store: scripthash ram-shard done shards={n_shards} creates≈{} keys≈{} elapsed={:?}",
+        progress.creates_published.load(Ordering::Relaxed),
+        progress.keys_packed.load(Ordering::Relaxed),
+        t0.elapsed(),
+    );
+    Ok(ShShardMaterialize {
+        creates: progress.creates_published.load(Ordering::Relaxed),
+        keys: progress.keys_packed.load(Ordering::Relaxed),
+        max_fk: max_fk.load(Ordering::Relaxed),
+        merge_ns: 0,
+        pack_ns: 0,
+        mphf_ns: 0,
+        body_flush_ns: 0,
+        head_fill_ns: 0,
+    }
+    .with_stages(progress.stages()))
 }
 
 struct ShardPool {

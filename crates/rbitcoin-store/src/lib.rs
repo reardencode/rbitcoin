@@ -97,7 +97,10 @@ pub use scripthash_head::{
 };
 pub use scripthash_layout::ShHeadValue;
 pub use scripthash_layout::SH_MAX_SLAB_CLASS;
-pub use scripthash_materialize::{materialize_sh_shards, MaterializeStageNs, ShShardMaterialize};
+pub use scripthash_materialize::{
+    collect_class_a_shard_records, materialize_sh_from_class_a_into, materialize_sh_shards,
+    materialize_sh_shards_from_class_a, MaterializeStageNs, ShShardMaterialize,
+};
 pub use scripthash_slabs::{
     decode_fk_delta_stream, decode_fk_delta_stream_into, decode_slab_payload,
     decode_slab_payload_into, encode_fk_delta_stream, encode_fk_delta_stream_into,
