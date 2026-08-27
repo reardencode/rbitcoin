@@ -153,7 +153,7 @@ touches. Census: [`SCHEMA.md`](../SCHEMA.md) (tip 962298, 1.42 B creates).
 | **Comfortable serve** (busy wallets, Electrum tweaks, RPC reconstruct) | Above + more `txout` + SH body slabs + `txid.body` | **16–32 GiB** | `inwit` except rawtx |
 | **IBD pin+annotate (no thrash)** | **All** `txout` + **all** `spent` + three `*.idx` + `txid.body` + `tx.head` | **~227 GiB** | **`inwit` (~486 GiB)** — wire still holds witness |
 | **IBD + reconstruct/getdata** | Previous + `inwit` | **~710 GiB** (same order as old packed `tx.body`) | — |
-| **SH tip materialize** | Sliced k-way: n-cpu workers, 256 KiB double-buffered pages on the TLS completion session (submit ahead, wait on promote), no temp pack bodies; ingest OA **~768 MiB** (2²⁵×24 B) | **≪1 GiB** extra heap | No 0.5–1 GiB OA image per shard |
+| **SH tip materialize** | Sliced k-way: n-cpu workers, 256 KiB double-buffered pages on the TLS completion session (submit ahead, wait on promote), no temp pack bodies; ingest OA **~768 MiB** (2²⁵×24 B). **`RBITCOIN_SH_MATERIALIZE=ram-shard`:** one shard at a time; ~2.4 GiB of `(scripthash, fk)` plus ~1 GiB pack recs per mainnet shard | **≪1 GiB** extra heap (k-way); **~3.5 GiB** peak (ram-shard) | No 0.5–1 GiB OA image per shard |
 
 Packed schema 13/14 needed the whole **`tx.body` (~663 GiB)** hot for the same
 pin/annotate work. Split Class A drops that to **~161 GiB** (`txout`+`spent`)

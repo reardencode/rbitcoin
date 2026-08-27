@@ -207,38 +207,51 @@ impl Query {
     ) -> Result<u64, QueryError> {
         use crate::sh_builder::{
             plan_sh_pre_materialize, sh_catalog_total_records, sh_force_rebuild,
-            ShPreMaterializeAction, SH_SEAL_LAG_OK,
+            sh_ram_shard_materialize, ShPreMaterializeAction, SH_SEAL_LAG_OK,
         };
 
         if !sh_force_rebuild() && self.sh_use_writebehind() {
-            let residual = self.sh_run.on_disk_run_count();
-            self.sh_run.discard_residual_runs();
-            if residual > 0 {
+            let ram_resume = sh_ram_shard_materialize()
+                && !self.store.scripthash.unsealed_main_shards().is_empty();
+            if ram_resume {
                 rbitcoin_log::info!(
-                    "node: scripthash durable head — discarding {residual} leftover run(s); \
-                     gap uses write-behind (no Class A recollect / WarmOnly)"
+                    "node: scripthash ram-shard resume unsealed={} (partial sealed head)",
+                    self.store.scripthash.unsealed_main_shards().len()
                 );
-            }
-            // Legacy head without include_hwm: SEAL is the inclusion floor.
-            self.sh_run.refresh_seal();
-            let seal = self.sh_run.sealed_max_create_fk();
-            if self.store.scripthash.include_hwm() == 0 && seal > 0 {
-                self.store.scripthash.note_include_hwm(seal)?;
-            }
-            self.sync_sh_seal_from_include_hwm()?;
-            if self.sh_is_tip_ready() {
-                rbitcoin_log::info!(
-                    "node: scripthash already tip-ready (durable head covers tip) — \
-                     skip Class A recollect and bulk materialize"
-                );
-                self.mark_sh_indexed_through_tip();
             } else {
-                rbitcoin_log::info!(
-                    "node: scripthash durable head with HWM/SEAL lag — skip collect; \
+                let residual = self.sh_run.on_disk_run_count();
+                self.sh_run.discard_residual_runs();
+                if residual > 0 {
+                    rbitcoin_log::info!(
+                        "node: scripthash durable head — discarding {residual} leftover run(s); \
+                     gap uses write-behind (no Class A recollect / WarmOnly)"
+                    );
+                }
+                // Legacy head without include_hwm: SEAL is the inclusion floor.
+                self.sh_run.refresh_seal();
+                let seal = self.sh_run.sealed_max_create_fk();
+                if self.store.scripthash.include_hwm() == 0 && seal > 0 {
+                    self.store.scripthash.note_include_hwm(seal)?;
+                }
+                self.sync_sh_seal_from_include_hwm()?;
+                if self.sh_is_tip_ready() {
+                    rbitcoin_log::info!(
+                        "node: scripthash already tip-ready (durable head covers tip) — \
+                     skip Class A recollect and bulk materialize"
+                    );
+                    self.mark_sh_indexed_through_tip();
+                } else {
+                    rbitcoin_log::info!(
+                        "node: scripthash durable head with HWM/SEAL lag — skip collect; \
                      recover/write-behind fills the height gap"
-                );
+                    );
+                }
+                return Ok(0);
             }
-            return Ok(0);
+        }
+
+        if sh_ram_shard_materialize() {
+            return self.finalize_sh_ram_shard_cancellable(cancel);
         }
 
         self.sh_run.refresh_seal();
@@ -404,6 +417,52 @@ impl Query {
             }
         }
         self.mark_sh_indexed_through_tip();
+        Ok(n)
+    }
+
+    fn finalize_sh_ram_shard_cancellable(
+        &self,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<u64, QueryError> {
+        if crate::sh_builder::sh_force_rebuild() {
+            rbitcoin_log::info!(
+                "node: scripthash FORCE_REBUILD + ram-shard — wipe head then Class A shard passes"
+            );
+            self.sh_run.prepare_force_full_rebuild(&self.store)?;
+        }
+        let tip_max = self.store.txs.count();
+        let n = self
+            .sh_run
+            .finalize_and_ram_shard_materialize_cancellable(&self.store, cancel)?;
+        if n == 0 && !self.store.scripthash.has_durable_index() && tip_max > 0 {
+            return Err(StoreError::Corrupt(
+                "scripthash ram-shard materialize finished empty while Class A creates remain",
+            ));
+        }
+        if tip_max > 0 {
+            const MAX_POST_DRAIN_ROUNDS: u32 = 8;
+            let mut n = n;
+            for round in 1..=MAX_POST_DRAIN_ROUNDS {
+                if self.sh_is_tip_ready() {
+                    break;
+                }
+                rbitcoin_log::info!(
+                    "node: scripthash ram-shard post-materialize round={round}/{MAX_POST_DRAIN_ROUNDS}"
+                );
+                n = n.saturating_add(
+                    self.sh_run
+                        .finalize_and_ram_shard_materialize_cancellable(&self.store, cancel)?,
+                );
+            }
+            if !self.sh_is_tip_ready() {
+                return Err(StoreError::Corrupt(
+                    "scripthash ram-shard create gap remain after materialize drain \
+                     (refuse tip-follow / Electrum)",
+                ));
+            }
+            self.mark_sh_indexed_through_tip();
+            return Ok(n);
+        }
         Ok(n)
     }
 
@@ -1204,7 +1263,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Direct enter never recollects; Class A recollect is tip finalize only.
+    /// `RBITCOIN_SH_MATERIALIZE=ram-shard` packs from Class A without catalog runs.
+    #[test]
+    fn ram_shard_finalize_skips_catalog_runs() {
+        let _g = FORCE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("rbitcoin-q-sh-ram-shard-{n}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let q = Query::open_or_create(&dir).unwrap();
+        seed_direct_chain(&q, 5);
+        std::env::set_var("RBITCOIN_SH_MATERIALIZE", "ram-shard");
+        let result = q.finalize_sh_runs();
+        std::env::remove_var("RBITCOIN_SH_MATERIALIZE");
+        let n_mat = result.expect("ram-shard finalize");
+        assert!(
+            n_mat > 0 || q.store.scripthash.has_durable_index(),
+            "ram-shard must settle SH"
+        );
+        assert!(q.store.scripthash.has_durable_index());
+        assert_eq!(
+            q.scripthash_run_count(),
+            0,
+            "ram-shard must not leave catalog runs"
+        );
+        let sh = rbitcoin_store::script_hash(&[0x51, 0]);
+        assert!(
+            !q.scripthash_history(&sh).unwrap().is_empty(),
+            "Class A creates must be queryable"
+        );
+        assert!(q.sh_is_tip_ready() || q.store.scripthash.entry_count() > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn scenario_direct_enter_does_not_recollect() {
         let n = SystemTime::now()

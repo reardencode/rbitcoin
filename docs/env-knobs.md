@@ -34,7 +34,8 @@ for signet/mainnet sync. **Not** CLI.
 | `RBITCOIN_SH_FORCE_REBUILD` | off | Sticky SH rebuild (also in OPERATOR) |
 | `RBITCOIN_SH_RECOLLECT_WORKERS` | min(n-cpu, free-RAM/1.5 GiB) | SH recollect parallelism (`1` = serial). Unset = auto (see [`ibd-memory.md`](./ibd-memory.md)) |
 | `RBITCOIN_SH_RECOLLECT_SPILL_BYTES` | 128 MiB | Recollect per-worker spill (clamp 16–512 MiB); compact floor is 3/4 of this |
-| `RBITCOIN_SH_MERGE_WORKERS` | min(n-cpu, free-RAM/1.5 GiB) | Recollect + shard k-way (`1` = serial). Unset = auto (see [`ibd-memory.md`](./ibd-memory.md)) |
+| `RBITCOIN_SH_MERGE_WORKERS` | min(n-cpu, free-RAM/1.5 GiB) | Recollect + shard k-way / ram-shard Class A scan (`1` = serial). Unset = auto (see [`ibd-memory.md`](./ibd-memory.md)) |
+| `RBITCOIN_SH_MATERIALIZE` | k-way (unset) | Unset / other: catalog k-way. **`ram-shard`**: skip `scripthash.runs`; one Class A `txout` pass per unsealed prefix shard, sort that shard in RAM, pack+seal. Resume keeps sealed `head/NN`. |
 | `RBITCOIN_P2P_MAX_INBOUND` | 125 | Only if `--maxinbound` / conf omitted |
 
 ## Hardcoded (no env)

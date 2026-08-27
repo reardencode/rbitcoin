@@ -12,9 +12,9 @@ use rbitcoin_log::{debug, info};
 use rbitcoin_primitives::Fk;
 use rbitcoin_store::{
     claim_run_for_materialize, commit_run_to_catalog, for_each_merged_rec_opts,
-    list_materialize_claims, list_runs, materialize_sh_shards, next_run_path,
-    write_sorted_run_file_with_policy, ColdProgress, RunWritePolicy, ScriptHashRecord,
-    SortedRunPath, Store, StoreError, SH_RUN_SORT_KEY_LEN,
+    list_materialize_claims, list_runs, materialize_sh_shards, materialize_sh_shards_from_class_a,
+    next_run_path, write_sorted_run_file_with_policy, ColdProgress, RunWritePolicy,
+    ScriptHashRecord, SortedRunPath, Store, StoreError, SH_RUN_SORT_KEY_LEN,
 };
 
 /// How tip finalize applies remaining SH runs (pure decision; no I/O).
@@ -60,6 +60,16 @@ pub fn sh_force_rebuild() -> bool {
             .ok(),
         Some(true)
     )
+}
+
+/// `RBITCOIN_SH_MATERIALIZE=ram-shard` — one Class A pass per prefix shard, sort in RAM.
+pub fn parse_sh_materialize_ram_shard(raw: Option<&str>) -> bool {
+    raw.is_some_and(|s| s.eq_ignore_ascii_case("ram-shard"))
+}
+
+/// True when tip finalize should skip catalog runs and pack from Class A per shard.
+pub fn sh_ram_shard_materialize() -> bool {
+    parse_sh_materialize_ram_shard(std::env::var("RBITCOIN_SH_MATERIALIZE").ok().as_deref())
 }
 
 /// Allowed SEAL lag behind tip create count (recollect cancel window).
@@ -756,6 +766,73 @@ impl ShRunBuilder {
             Duration::from_nanos(finish_ns),
         );
         Ok(n_total.saturating_add(n_deferred))
+    }
+
+    /// Class A → one shard in RAM per pass (no catalog runs). SIGINT keeps sealed shards.
+    pub fn finalize_and_ram_shard_materialize_cancellable(
+        &self,
+        store: &Store,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<u64, StoreError> {
+        let n_existing = store.scripthash.entry_count();
+        let head_empty = store.scripthash.head_is_empty();
+        let n_shards = store.scripthash.head_shard_count();
+        let unsealed = store.scripthash.unsealed_main_shards();
+        if unsealed.is_empty() && (!head_empty || n_existing > 0) {
+            info!(
+                "node: scripthash ram-shard skip (all {n_shards} shards sealed, entry_count={n_existing})"
+            );
+            self.discard_residual_runs();
+            let tip_max = store.txs.count();
+            if tip_max > 0 {
+                self.publish_seal_watermark(tip_max)?;
+                let _ = store.scripthash.note_include_hwm(tip_max);
+            }
+            return Ok(0);
+        }
+
+        if head_empty {
+            info!(
+                "node: scripthash ram-shard reinit empty for cold rematerialize n_shards={n_shards}"
+            );
+            store.scripthash.reinit_empty_for_cold_materialize()?;
+        }
+
+        let workers = rbitcoin_store::sh_merge_workers();
+        let free_gib = rbitcoin_store::free_gib_label();
+        let tip_max = store.txs.count();
+        info!(
+            "node: scripthash ram-shard materialize start workers={workers} free_GiB={free_gib} \
+             n_shards={n_shards} unsealed={} tip_max_fk={tip_max} head_empty={head_empty}",
+            unsealed.len(),
+        );
+        let t0 = Instant::now();
+        let mat = match materialize_sh_shards_from_class_a(store, workers, cancel) {
+            Ok(m) => m,
+            Err(StoreError::Cancelled(msg)) => {
+                info!(
+                    "node: scripthash ram-shard cancelled ({msg}); complete shards kept — restart resumes"
+                );
+                return Err(StoreError::Cancelled(msg));
+            }
+            Err(e) => return Err(e),
+        };
+        store.scripthash.flush()?;
+        ColdProgress::clear(store.path());
+        self.discard_residual_runs();
+        let hwm = mat.max_fk.max(tip_max);
+        if hwm > 0 {
+            self.publish_seal_watermark(hwm)?;
+            let _ = store.scripthash.note_include_hwm(hwm);
+        }
+        info!(
+            "node: scripthash ram-shard materialize done creates≈{} keys≈{} shards={n_shards} \
+             elapsed={:?}",
+            mat.creates,
+            mat.keys,
+            t0.elapsed(),
+        );
+        Ok(mat.creates)
     }
 }
 
@@ -1500,6 +1577,15 @@ mod tests {
             catalog_compact_floor_bytes(256 * 1024 * 1024),
             192 * 1024 * 1024
         );
+    }
+
+    #[test]
+    fn ram_shard_materialize_env_parse() {
+        assert!(!parse_sh_materialize_ram_shard(None));
+        assert!(!parse_sh_materialize_ram_shard(Some("kway")));
+        assert!(!parse_sh_materialize_ram_shard(Some("1")));
+        assert!(parse_sh_materialize_ram_shard(Some("ram-shard")));
+        assert!(parse_sh_materialize_ram_shard(Some("RAM-SHARD")));
     }
 
     #[test]

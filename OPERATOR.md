@@ -321,6 +321,9 @@ to one **global ingest OA** (mainnet 2²⁵ slots × 24 B ≈ 768 MiB). Mate
 k-ways catalog runs (recollect spills ~128 MiB). Materialize status logs
 ~**every 10s** from one observer (`keys`/`creates`/`pending` unpublished/
 `shards` published/`rate`). Path selection logs `path=FullCold|ColdResume|Skip`.
+Unstable **`RBITCOIN_SH_MATERIALIZE=ram-shard`** skips catalog runs: one Class A
+pass per unsealed prefix shard, sort that shard in RAM, pack+seal (peak ~3.5 GiB
+per mainnet shard). Default remains k-way.
 **Full cold reinit only if the SH head is empty** (or force rebuild).
 `RBITCOIN_SH_FORCE_REBUILD=1` wipes the head and does a full Class A collect +
 FullCold — unset after success; see [`docs/env-knobs.md`](docs/env-knobs.md).

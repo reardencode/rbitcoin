@@ -11,6 +11,11 @@ before 1.0).
 
 ### Added
 
+- **SH ram-shard materialize:** `RBITCOIN_SH_MATERIALIZE=ram-shard` skips
+  `scripthash.runs` and packs one prefix shard per Class A `txout` pass
+  (sort in RAM, seal `head/NN`). Default remains catalog k-way.
+  [`docs/env-knobs.md`](docs/env-knobs.md).
+
 - **Peer full-node notes:** [`docs/peer-clients.md`](docs/peer-clients.md)
   compares Hornet Node and satd (tests and ideas to consider later, and
   explicit non-copies). Not a quality.md Open list.
