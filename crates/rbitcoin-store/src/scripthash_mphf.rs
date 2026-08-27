@@ -9,7 +9,6 @@ use crate::error::StoreError;
 use crate::fuse8_filter::fuse_key_from_mixed;
 use crate::io_handle::IoHandle;
 use crate::scripthash_layout::{pack8, unpack8, ShHeadKey, ShHeadValue, SH_HEAD_KEY_LEN};
-use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -42,6 +41,18 @@ pub fn mix_key16(key: &ShHeadKey) -> u64 {
     let mut pad = [0u8; 32];
     pad[..SH_HEAD_KEY_LEN].copy_from_slice(key);
     fuse_key_from_mixed(&pad)
+}
+
+fn mix64_keys_unique(recs: &[(ShHeadKey, u64)]) -> Result<Vec<u64>, StoreError> {
+    let keys: Vec<u64> = recs.iter().map(|(k, _)| mix_key16(k)).collect();
+    if keys.len() >= 2 {
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        if sorted.windows(2).any(|w| w[0] == w[1]) {
+            return Err(StoreError::Corrupt("sh mphf: mix64 collision"));
+        }
+    }
+    Ok(keys)
 }
 
 impl MphfHead {
@@ -84,15 +95,7 @@ impl MphfHead {
         if let Some(parent) = base.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let mut keys = Vec::with_capacity(recs.len());
-        let mut seen = HashSet::with_capacity(recs.len());
-        for (k, _) in recs {
-            let ku = mix_key16(k);
-            if !seen.insert(ku) {
-                return Err(StoreError::Corrupt("sh mphf: mix64 collision"));
-            }
-            keys.push(ku);
-        }
+        let keys = mix64_keys_unique(recs)?;
         let mphf = BdzMphf::build_compact(&keys)?;
         let n = recs.len();
         let mut val = vec![0u8; n.saturating_mul(8)];
@@ -345,6 +348,20 @@ mod tests {
                 last_page: 8192,
             } => {}
             other => panic!("{other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sh_mphf_duplicate_key16_is_mix64_collision() {
+        let dir = tmp();
+        let base = dir.join("00");
+        let a = ShHeadValue::inline_one(Fk(11));
+        let recs = [(key(1), pack8(&a).unwrap()), (key(1), pack8(&a).unwrap())];
+        match MphfHead::write_pack8(&base, &recs) {
+            Err(StoreError::Corrupt(m)) if m.contains("mix64 collision") => {}
+            Err(e) => panic!("expected mix64 collision, got {e}"),
+            Ok(_) => panic!("expected mix64 collision"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -4,14 +4,12 @@
 //! Shared body: one writer, prefix `SHCOLDP1` HWM.
 //!
 //! Alternate env path: one Class A pass into unsorted per-shard files, then
-//! RAM-sort + pack (`RBITCOIN_SH_MATERIALIZE=unsorted-shards`).
+//! in-place unique-sort + pack (`RBITCOIN_SH_MATERIALIZE=unsorted-shards`).
 
 use crate::error::StoreError;
 use crate::file::ensure_nofile_budget_at_least;
 use crate::io_handle::IoHandle;
-use crate::scripthash::{
-    ColdProgress, ScriptHashRecord, ScriptHashTable, ShBodyLayout, ShShardPack,
-};
+use crate::scripthash::{ColdProgress, ScriptHashTable, ShBodyLayout, ShShardPack};
 use crate::scripthash_head::prefix_shard_of;
 use crate::sorted_run::{for_each_merged_rec_shard, SortedRunPath};
 use crate::store::Store;
@@ -453,7 +451,7 @@ const UNSORTED_REC_LEN: usize = 40;
 const UNSORTED_FLUSH_BYTES: usize = 256 * 1024;
 const CLASS_A_CHUNK_FKS: u64 = 64_000;
 
-/// RAM budget per unsorted-shard pack worker (read + sort + pack session).
+/// RAM budget per unsorted-shard pack worker (one file image + unique pack recs).
 pub const SH_UNSORTED_PACK_RAM_BYTES: u64 = 2 << 30;
 
 /// Collect / pack result counts for one unsorted-shard cold pass.
@@ -788,31 +786,61 @@ fn collect_unsorted_from_txs(
     Ok(UnsortedShardCollect { recs, per_shard })
 }
 
-fn load_unsorted_shard_records(path: &Path) -> Result<Vec<ScriptHashRecord>, StoreError> {
-    let bytes = match fs::read(path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(StoreError::io(path, e)),
-    };
+fn rec_fk_le(rec: &[u8; UNSORTED_REC_LEN]) -> u64 {
+    u64::from_le_bytes(rec[32..].try_into().unwrap())
+}
+
+fn sort_unique_unsorted_recs(bytes: &mut Vec<u8>) -> Result<(), StoreError> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
     if !bytes.len().is_multiple_of(UNSORTED_REC_LEN) {
         return Err(StoreError::Corrupt(
             "scripthash unsorted shard file length not a multiple of 40",
         ));
     }
-    let mut recs = Vec::with_capacity(bytes.len() / UNSORTED_REC_LEN);
-    for chunk in bytes.chunks_exact(UNSORTED_REC_LEN) {
-        let (sh, fk) = decode_sh_run_rec(chunk)?;
-        if fk.is_null() {
-            continue;
+    let keep = {
+        let (recs, rem) = bytes.as_chunks_mut::<UNSORTED_REC_LEN>();
+        debug_assert!(rem.is_empty());
+        recs.sort_unstable_by(|a, b| a[..32].cmp(&b[..32]).then(rec_fk_le(a).cmp(&rec_fk_le(b))));
+        let mut w = 0usize;
+        for r in 0..recs.len() {
+            if Fk(rec_fk_le(&recs[r])).is_null() {
+                continue;
+            }
+            if w > 0 && recs[r] == recs[w - 1] {
+                continue;
+            }
+            if w != r {
+                recs[w] = recs[r];
+            }
+            w += 1;
         }
-        recs.push(ScriptHashRecord::from_fk(sh, fk));
+        w
+    };
+    bytes.truncate(keep.saturating_mul(UNSORTED_REC_LEN));
+    Ok(())
+}
+
+fn unique_sh_key_count(bytes: &[u8]) -> usize {
+    let mut n = 0usize;
+    let mut prev: Option<&[u8]> = None;
+    for chunk in bytes.chunks_exact(UNSORTED_REC_LEN) {
+        let sh = &chunk[..32];
+        if prev != Some(sh) {
+            n += 1;
+            prev = Some(sh);
+        }
     }
-    recs.sort_unstable_by(|a, b| {
-        a.scripthash
-            .cmp(&b.scripthash)
-            .then(a.create_tx_fk.0.cmp(&b.create_tx_fk.0))
-    });
-    Ok(recs)
+    n
+}
+
+fn read_unsorted_shard_bytes(path: &Path) -> Result<Vec<u8>, StoreError> {
+    match fs::read(path) {
+        Ok(b) => Ok(b),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(StoreError::io(path, e)),
+    }
 }
 
 fn pack_unsorted_shard(
@@ -823,15 +851,20 @@ fn pack_unsorted_shard(
     progress: &MaterializeProgress,
 ) -> Result<ShShardPack, StoreError> {
     let path = unsorted_shard_path(dir, shard);
-    let recs = load_unsorted_shard_records(&path)?;
     let mut session = table.pack_shard_session(shard)?;
     let t_loop = Instant::now();
-    for (i, rec) in recs.iter().enumerate() {
-        if i & 0xfff == 0 && cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
-            return Err(StoreError::Cancelled("scripthash unsorted shard pack"));
+    {
+        let mut bytes = read_unsorted_shard_bytes(&path)?;
+        sort_unique_unsorted_recs(&mut bytes)?;
+        session.reserve_pack_recs(unique_sh_key_count(&bytes));
+        for (i, chunk) in bytes.chunks_exact(UNSORTED_REC_LEN).enumerate() {
+            if i & 0xfff == 0 && cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
+                return Err(StoreError::Cancelled("scripthash unsorted shard pack"));
+            }
+            let (sh, fk) = decode_sh_run_rec(chunk)?;
+            session.push_sorted_fk(sh, fk)?;
+            progress.recs_packed.fetch_add(1, Ordering::Relaxed);
         }
-        session.push_sorted_fk(rec.scripthash, rec.create_tx_fk)?;
-        progress.recs_packed.fetch_add(1, Ordering::Relaxed);
     }
     let loop_wall = t_loop.elapsed().as_nanos() as u64;
     let pack_during_loop = session.pack_ns;
@@ -848,7 +881,7 @@ fn pack_unsorted_shard(
     Ok(pack)
 }
 
-/// RAM-sort each unsorted shard file and seal `head/NN` for unsealed shards.
+/// Unique-sort each unsorted shard file in place and seal `head/NN` for unsealed shards.
 pub fn materialize_sh_from_unsorted(
     table: &ScriptHashTable,
     unsorted_dir: &Path,
@@ -1148,6 +1181,53 @@ mod tests {
             crate::sorted_run::workers_for_free_ram(16, 8 << 30, SH_UNSORTED_PACK_RAM_BYTES),
             4,
             "8 GiB free → 4 unsorted pack workers"
+        );
+    }
+
+    fn rec_bytes(sh0: u8, fk: u64) -> [u8; UNSORTED_REC_LEN] {
+        encode_unsorted_rec(&[sh0; 32], Fk(fk))
+    }
+
+    fn recs_of(bytes: &[u8]) -> Vec<([u8; 32], u64)> {
+        bytes
+            .chunks_exact(UNSORTED_REC_LEN)
+            .map(|c| {
+                let mut sh = [0u8; 32];
+                sh.copy_from_slice(&c[..32]);
+                (sh, u64::from_le_bytes(c[32..].try_into().unwrap()))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sort_unique_unsorted_recs_orders_fk_numerically_and_compacts() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&rec_bytes(7, 256));
+        bytes.extend_from_slice(&rec_bytes(7, 2));
+        bytes.extend_from_slice(&rec_bytes(7, 2));
+        bytes.extend_from_slice(&rec_bytes(7, 0));
+        bytes.extend_from_slice(&rec_bytes(8, 1));
+        bytes.extend_from_slice(&rec_bytes(6, 9));
+        sort_unique_unsorted_recs(&mut bytes).unwrap();
+        assert_eq!(
+            recs_of(&bytes),
+            vec![
+                ([6u8; 32], 9),
+                ([7u8; 32], 2),
+                ([7u8; 32], 256),
+                ([8u8; 32], 1),
+            ],
+            "numeric fk order (256 after 2), drop null and duplicate (sh,fk)"
+        );
+        assert_eq!(unique_sh_key_count(&bytes), 3);
+    }
+
+    #[test]
+    fn sort_unique_unsorted_recs_rejects_torn_length() {
+        let err = sort_unique_unsorted_recs(&mut vec![0u8; 39]).unwrap_err();
+        assert!(
+            matches!(err, StoreError::Corrupt(m) if m.contains("multiple of 40")),
+            "got {err}"
         );
     }
 }

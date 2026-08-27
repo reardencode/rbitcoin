@@ -2379,6 +2379,63 @@ fn unsorted_materialize_four_shards_from_class_a_no_catalog_runs() {
 }
 
 #[test]
+fn unsorted_pack_sorts_numeric_fk_and_keeps_all_creates() {
+    HeadScale::test_with(HeadScale::Tiny, || {
+        let dir = tmp();
+        let sh_dir = dir.join("sh4");
+        std::fs::create_dir_all(&sh_dir).unwrap();
+        let table = four_shard_dir_table(&sh_dir);
+        let n_shards = 4usize;
+        let udir = sh_dir.join(crate::UNSORTED_SHARD_DIR);
+        std::fs::create_dir_all(&udir).unwrap();
+        let (low, high) = two_scripts_same_shard_reverse_hash(1, n_shards);
+        let sh_lo = script_hash(&low);
+        let sh_hi = script_hash(&high);
+        let mut bytes = Vec::new();
+        let mut push = |sh: [u8; 32], fk: u64| {
+            let mut r = [0u8; 40];
+            r[..32].copy_from_slice(&sh);
+            r[32..].copy_from_slice(&fk.to_le_bytes());
+            bytes.extend_from_slice(&r);
+        };
+        push(sh_hi, 256);
+        push(sh_hi, 2);
+        push(sh_lo, 3);
+        push(sh_lo, 1);
+        push(sh_lo, 1);
+        push(sh_hi, 0);
+        std::fs::write(crate::unsorted_shard_path(&udir, 1), &bytes).unwrap();
+        for shard in [0usize, 2, 3] {
+            std::fs::write(crate::unsorted_shard_path(&udir, shard), []).unwrap();
+        }
+        let mat = crate::materialize_sh_from_unsorted(&table, &udir, 1, None).unwrap();
+        assert_eq!(mat.creates, 4, "null and duplicate (sh,fk) must not pack");
+        assert_eq!(mat.keys, 2);
+        let mut lo: Vec<u64> = table
+            .entries(&sh_lo)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.0 .0)
+            .collect();
+        lo.sort_unstable();
+        assert_eq!(lo, vec![1, 3]);
+        let mut hi: Vec<u64> = table
+            .entries(&sh_hi)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.0 .0)
+            .collect();
+        hi.sort_unstable();
+        assert_eq!(
+            hi,
+            vec![2, 256],
+            "fk 256 must sort after 2, not as LE bytes"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    });
+}
+
+#[test]
 fn unsorted_combined_skips_collect_when_done_and_resumes_unsealed() {
     HeadScale::test_with(HeadScale::Tiny, || {
         let dir = tmp();

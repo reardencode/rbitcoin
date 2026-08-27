@@ -2805,6 +2805,10 @@ impl<'a> ScriptHashBulkSession<'a> {
         self.keys_written
     }
 
+    pub(crate) fn reserve_pack_recs(&mut self, n: usize) {
+        self.recs.reserve(n);
+    }
+
     fn take_fk_scratch(&mut self) -> Vec<u64> {
         let mut buf = std::mem::take(&mut self.fk_scratch);
         if buf.capacity() < 512 {

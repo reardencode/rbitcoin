@@ -8,7 +8,7 @@
 //! 3. Tip finalize claims runs → `ColdResume` | `FullCold`.
 //!
 //! `RBITCOIN_SH_MATERIALIZE=unsorted-shards` skips catalog runs: one Class A
-//! pass into unsorted shard files, then RAM-sort + seal.
+//! pass into unsorted shard files, then in-place unique-sort + seal.
 
 use super::run_builder_core::{clear_runs_dir, on_disk_run_count, runs_dir_io, RunControl};
 use rbitcoin_log::{debug, info};
@@ -66,7 +66,7 @@ pub fn sh_force_rebuild() -> bool {
     )
 }
 
-/// `RBITCOIN_SH_MATERIALIZE=unsorted-shards` — one Class A pass, unsorted shard files, RAM-sort.
+/// `RBITCOIN_SH_MATERIALIZE=unsorted-shards` — one Class A pass, unsorted shard files, in-place unique-sort.
 pub fn parse_sh_materialize_unsorted(raw: Option<&str>) -> bool {
     raw.is_some_and(|s| s.eq_ignore_ascii_case("unsorted-shards"))
 }
@@ -771,7 +771,7 @@ impl ShRunBuilder {
         Ok(n_total.saturating_add(n_deferred))
     }
 
-    /// One Class A pass into unsorted shard files, then RAM-sort + seal. SIGINT keeps sealed shards.
+    /// One Class A pass into unsorted shard files, then in-place unique-sort + seal. SIGINT keeps sealed shards.
     pub fn finalize_and_unsorted_materialize_cancellable(
         &self,
         store: &Store,

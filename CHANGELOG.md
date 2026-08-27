@@ -13,9 +13,10 @@ before 1.0).
 
 - **Unsorted-shard SH materialize (env):** `RBITCOIN_SH_MATERIALIZE=unsorted-shards`
   does one Class A `txout` pass into unsorted `scripthash.unsorted/NN` (nCPU
-  workers, concurrent pwrite by prefix), then RAM-sorts and seals each
-  `head/NN` (~2 GiB per pack worker). Unset keeps catalog k-way. SIGINT keeps
-  sealed shards; missing `DONE` restarts collect.
+  workers, concurrent pwrite by prefix), then unique-sorts each file **in
+  place** and seals `head/NN` (~2 GiB per pack worker; one file image, no
+  HashSet at MPHF seal). Unset keeps catalog k-way. SIGINT keeps sealed
+  shards; missing `DONE` restarts collect.
 
 - **Peer full-node notes:** [`docs/peer-clients.md`](docs/peer-clients.md)
   compares Hornet Node and satd (tests and ideas to consider later, and
