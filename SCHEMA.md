@@ -14,6 +14,18 @@ indexes rewrite `meta` to 20.
 Operator copy-paste (which dirs to wipe; kill-9 is not a migrate):
 [`OPERATOR.md`](./OPERATOR.md#schema-upgrade).
 
+### Changing durable bytes
+
+A populated datadir must not be silently wiped. Pick one, and write it here
+plus [`SCHEMA_HISTORY.md`](./SCHEMA_HISTORY.md) in the **same commit** as the
+format code:
+
+| Option | When |
+|--------|------|
+| **Soft migrate** | Payload-only (e.g. fuse8 v1→v2): open legacy, `warn!`, rewrite on open or next seal — **not** “recreate whole table” |
+| **`SCHEMA_VERSION` bump** | Class A / OA / body layout change, or anything that cannot soft-open prior files |
+| **Explicit refuse** | Hard error with a one-line wipe/reindex message (which files) |
+
 **13/14→17 open:** Empty Class A (no creates) + empty/missing SH may silently
 rewrite `meta` to 17. A packed `tx.body` **with creates**, or a durable page-era
 (or schema-13 slab) SH index, is refused (wipe + IBD). Schema 15 Class A is

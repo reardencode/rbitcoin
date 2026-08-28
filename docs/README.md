@@ -12,7 +12,7 @@ update that file — do not paste a parallel spec.
 | Product / interop | [`COMPAT.md`](../COMPAT.md) | Intentional differences, Electrum/RPC surface |
 | Contributor (human) | [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Getting started (any OS, no Nix), principles, review checklist, comments-as-smell, CI commands |
 | Agent | [`AGENTS.md`](../AGENTS.md) | Short hard rules + pointers (not a second design book) |
-| On-disk | [`SCHEMA.md`](../SCHEMA.md) | Current bytes; history in [`SCHEMA_HISTORY.md`](../SCHEMA_HISTORY.md) |
+| On-disk | [`SCHEMA.md`](../SCHEMA.md) | Current bytes; soft migrate / bump / refuse; history in [`SCHEMA_HISTORY.md`](../SCHEMA_HISTORY.md) |
 | Confirm / store implementer | [`invariants.md`](./invariants.md) + [`concurrency.md`](./concurrency.md) | Stage IO, leftover union, roles, tip commit |
 | Tests | [`TESTING.md`](../TESTING.md) | How to run, budgets, coverage |
 | Peer full nodes | [`peer-clients.md`](./peer-clients.md) | Hornet / satd comparison; later-consideration tests and ideas |
@@ -32,7 +32,7 @@ quality backlog).
 | [`invariants.md`](./invariants.md) | Confirm stage IO (the **only** copy), leftover union, store start states S0–S4, no silent fallbacks. |
 | [`crash-recovery.md`](./crash-recovery.md) | Tip-as-commit write order, kill-9, open repair. |
 | [`ibd-memory.md`](./ibd-memory.md) | Process RAM vs page cache; body-queue soft assign; production evict APIs. |
-| [`io-modality.md`](./io-modality.md) | `RBITCOIN_IO`, fd vs uring, host A/B. |
+| [`io-modality.md`](./io-modality.md) | `RBITCOIN_IO`, fd vs uring, TLS harvest, do-not-flatten machines, host A/B. |
 | [`heads.md`](./heads.md) | Which head file / module (tx / header / SH). |
 | [`env-knobs.md`](./env-knobs.md) | Residual `RBITCOIN_*` inventory. |
 | [`experimental-mainnet.md`](./experimental-mainnet.md) | 0.5 mainnet runbook (early production / high-scrutiny). |
@@ -56,11 +56,11 @@ quality backlog).
 | [`README.md`](../README.md) | Product pitch + short pointer table (this map is the rest). |
 | [`OPERATOR.md`](../OPERATOR.md) | Day-to-day ops, flags. |
 | [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Getting started (rustup; Linux / macOS / Windows) + human+agent principles + checklist. |
-| [`AGENTS.md`](../AGENTS.md) | Harness-injected agent contract. |
+| [`AGENTS.md`](../AGENTS.md) | Harness-injected agent contract (hard rules + pointers; not a second design book). |
 | [`COMPAT.md`](../COMPAT.md) | Product surface. |
 | [`SECURITY.md`](../SECURITY.md) | Vulnerability reporting. |
 | [`CHANGELOG.md`](../CHANGELOG.md) | Release notes. |
-| [`SCHEMA.md`](../SCHEMA.md) | Current on-disk schema (`SCHEMA_VERSION` home). |
+| [`SCHEMA.md`](../SCHEMA.md) | Current on-disk schema (`SCHEMA_VERSION` home). Soft migrate / bump / refuse. |
 | [`SCHEMA_HISTORY.md`](../SCHEMA_HISTORY.md) | Prior versions and migrations. |
 | [`TESTING.md`](../TESTING.md) | Suite, budgets, coverage policy. |
 

@@ -3,7 +3,7 @@
 **Source of truth** for bulk `RBITCOIN_IO` vs table transport (fd + tiered RAM).
 **Phase 6 complete:** workspace has **zero `memmap2` / `MmapMut`** for store tables.
 
-Related: [`OPERATOR.md`](../OPERATOR.md) (env knobs), [`concurrency.md`](./concurrency.md),
+Related: [`env-knobs.md`](./env-knobs.md), [`concurrency.md`](./concurrency.md),
 [`crash-recovery.md`](./crash-recovery.md), [`architecture.md`](./architecture.md).
 
 ---
@@ -40,17 +40,38 @@ thread pools (`kern.aiomax` default 16) — same class as `pool`, not an
 SQ/CQ. The pool session is the honest Darwin completion ring. Pool
 **workers** are process-shared; each TLS session keeps its own CQE queue.
 
-Harvest invariants (TLS session): every SQE is tracked by packed
-`(kind, epoch, slot)`. A CQE that is unmatched, duplicate, or from a
-prior epoch is `Corrupt`, not a completion and not a TipOnly miss.
-`drain_all` is `Result`; leftover pending is `Corrupt`. CQ overflow is
-`Corrupt`. Per-op short/errno on a live session still libc-completes that
-op; libc fail is `StoreError::io`. `RBITCOIN_IO=pread` is the only
-whole-batch pread fallback (session unavailable also falls back).
+**TLS session:** one completion session per OS thread (`with_thread_local`).
+Nested calls panic. Harvest tracks pending `(kind, epoch, slot)`. A CQE that
+is unmatched, duplicate, from a prior epoch, leftover after `drain_all`, or
+from CQ overflow is `Corrupt` — not a completion and not a TipOnly miss.
+`begin_batch` drains leftover SQEs before bumping epoch and **returns `Err`**
+if the session is poisoned or leftover cannot drain (probe / idx / BDZ
+g-pages / rel preads share the ring). Held idx fill fails closed on that
+error (no libc fallback on a dirty ring). Undrained / unexpected /
+wait-timeout **poisons** the session and drops the TLS ring so the next wave
+opens a new one. `submit_and_wait_one` is capped (5 s). Drain before SQE
+buffers drop (spend annotate `DrainOnDrop`). Per-op short/errno on a live
+session still libc-completes that op; libc fail is `StoreError::io`.
+`RBITCOIN_IO=pread` is the only whole-batch pread fallback (session
+unavailable also falls back).
 
-Machines (spend-annotate RMW, fused head-resolve, pipelined bulk fill)
-stay **multi-stage**. Pool/IOCP are session backends — they do
-not flatten those loops to one-shot `pread_batch`.
+### Do not flatten custom machines
+
+Machines (spend-annotate RMW, fused head-resolve, pipelined bulk fill) stay
+**multi-stage**. Pool/IOCP are session backends — they do not flatten those
+loops to one-shot `pread_batch`.
+
+**Do not** replace a purpose-built / multi-stage **io_uring machine** with
+batched `pread`/`pwrite` / one-shot `pread_batch`/`pwrite_batch` **without
+explicit permission from the user**.
+
+| OK | Not OK without permission |
+|----|---------------------------|
+| Fix bugs inside the existing machine | Delete/retire a custom machine and call bulk batch helpers |
+| Thread new flags through the same SQE path | “Simplify” to serial pread + one big submit |
+| Fall back to pread when uring is unavailable | Rewrite a machine away “because batch is enough” |
+
+If a change seems to require collapsing a machine, **stop and ask**.
 
 ---
 
