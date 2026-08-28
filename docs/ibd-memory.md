@@ -56,6 +56,7 @@ Not page cache. Caps on **decoded `Block` objects and live outbound sessions**:
 | **`follow_live`** | ≤ `max_outbound` | Stale extra at cap **rotates** one random outbound full-relay (not `noban`) then dials a replacement. |
 | **GetData serve inflight** | **16** full `Block`/`CmpctBlock` per session writer | Writer saturating-decrements after send so unpaired compact tip announce cannot wrap to `usize::MAX`. Announce is not counted on this cap (a burst would starve reconstruct). Extra inv hashes not reconstructed. |
 | **Tip-follow catch-up getdata** | **16** (`MAX_SERVE_BLOCKS`) hashes per ask | `requested` tracks inflight; after those bodies connect, drain asks the next window. Asking the whole header path left hashes stuck while the peer served only 16. |
+| **`from_this_peer`** | **50_000** txids / session (INV origin skip) | Clear and restart on overflow (`announced_wtx` pattern). |
 | **`pending_blocks`** | **128** decoded bodies / session | Insert evicts one existing hash at cap. Unsolicited BIP130 window still 16. |
 | **Hub `held_bodies`** | **320** | Existing; side-branch hold for most-work apply. |
 | **getheaders continuation** | full 2000-header reply locates from last hash | Next batch after that hash, not a replay from our tip. |
