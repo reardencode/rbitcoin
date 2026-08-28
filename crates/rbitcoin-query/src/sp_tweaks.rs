@@ -21,6 +21,9 @@ pub struct ThinTweakRangeLimits {
     pub max_heights: u32,
     /// Cap on total eligible txs across the wave (default 16384).
     pub max_eligible: usize,
+    /// Drop confirmed-spent P2TR outs (and txs with none left). Cake
+    /// `historicalMode=false` / param `[2]=false`.
+    pub cut_through: bool,
 }
 
 impl Default for ThinTweakRangeLimits {
@@ -28,6 +31,7 @@ impl Default for ThinTweakRangeLimits {
         Self {
             max_heights: 128,
             max_eligible: 16384,
+            cut_through: false,
         }
     }
 }
@@ -220,6 +224,7 @@ impl Query {
             ThinTweakRangeLimits {
                 max_heights: 1,
                 max_eligible: usize::MAX,
+                ..ThinTweakRangeLimits::default()
             },
         )?;
         Ok(batch.pop().map(|(_, rows)| rows))
@@ -232,7 +237,8 @@ impl Query {
     /// back per-height). Eligible Class A join is **one sequential `txout`
     /// span** from first..=last eligible fk in the wave (ineligible txout in
     /// the hole is included; `inwit` is not). `sp_tweaks` mutex is not held
-    /// during Class A IO.
+    /// during Class A IO. `limits.cut_through` drops confirmed-spent P2TR
+    /// outs after the join (txs with none left are omitted; the height remains).
     pub fn load_thin_tweaks_range(
         &self,
         start: Height,
@@ -355,6 +361,27 @@ impl Query {
             self.note_thin_tweak_body_bytes(span_len);
         }
 
+        if limits.cut_through && !elig_fks.is_empty() {
+            let mut k = 0usize;
+            for rows in &mut out_rows {
+                let n = rows.len();
+                let fks = &elig_fks[k..k + n];
+                let mut kept = Vec::with_capacity(n);
+                for (mut row, fk) in rows.drain(..).zip(fks.iter()) {
+                    let vouts: Vec<u32> = row.p2tr.iter().map(|p| p.0).collect();
+                    let live = self.store.unspent_create_vouts(*fk, &vouts, None)?;
+                    if live.len() != row.p2tr.len() {
+                        row.p2tr.retain(|(v, _, _)| live.iter().any(|u| u == v));
+                    }
+                    if !row.p2tr.is_empty() {
+                        kept.push(row);
+                    }
+                }
+                *rows = kept;
+                k = k.saturating_add(n);
+            }
+        }
+
         Ok(plans
             .into_iter()
             .zip(out_rows.into_iter())
@@ -445,6 +472,7 @@ mod tests {
         let d = ThinTweakRangeLimits::default();
         assert_eq!(d.max_heights, 128);
         assert_eq!(d.max_eligible, 16384);
+        assert!(!d.cut_through);
     }
 
     #[test]
@@ -921,6 +949,7 @@ mod tests {
                 ThinTweakRangeLimits {
                     max_heights: 1,
                     max_eligible: 8192,
+                    ..ThinTweakRangeLimits::default()
                 },
             )
             .unwrap();
@@ -934,6 +963,7 @@ mod tests {
                 ThinTweakRangeLimits {
                     max_heights: 10,
                     max_eligible: 1,
+                    ..ThinTweakRangeLimits::default()
                 },
             )
             .unwrap();
@@ -950,6 +980,185 @@ mod tests {
             .unwrap();
         assert_eq!(only2.len(), 1);
         assert_eq!(only2[0].0, Height(2));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_thin_cut_through_drops_spent_p2tr() {
+        let (dir, q) = tmp_q();
+        q.set_sptweaks_enabled(true, Height(0)).unwrap();
+        let (p2wpkh, p2tr, ser) = p2wpkh_p2tr();
+        let mut genesis_txid = [0u8; 32];
+        genesis_txid[31] = 0xcb;
+        let h0 = header(0, Fk::NULL, None);
+        let fk0 = q
+            .connect_block(
+                Height(0),
+                &h0,
+                &[TxApply {
+                    tx: TxRecord {
+                        txid: genesis_txid,
+                        version: 1,
+                        locktime: 0,
+                        input_start_fk: Fk::NULL,
+                        input_count: 1,
+                        output_start_fk: Fk::NULL,
+                        output_count: 2,
+                    },
+                    inputs: vec![InputRecord::coinbase(u32::MAX, vec![0x00], vec![])],
+                    outputs: vec![
+                        OutputRecord::unspent(25_0000_0000, p2wpkh.clone()),
+                        OutputRecord::unspent(25_0000_0000, p2wpkh.clone()),
+                    ],
+                }],
+            )
+            .unwrap();
+        q.put_sp_tweaks_block(Height(0), fk0, &[None]).unwrap();
+        let create0 = q.block_tx_fks(Height(0)).unwrap()[0];
+        let mut tid_elig = [0u8; 32];
+        tid_elig[0] = 0xaa;
+        let spend = |prev: u32, txid: [u8; 32], outs: Vec<OutputRecord>| TxApply {
+            tx: TxRecord {
+                txid,
+                version: 2,
+                locktime: 0,
+                input_start_fk: Fk::NULL,
+                input_count: 1,
+                output_start_fk: Fk::NULL,
+                output_count: outs.len() as u32,
+            },
+            inputs: vec![InputRecord {
+                prev_txid: genesis_txid,
+                create_fk: create0,
+                prev_index: prev,
+                sequence: u32::MAX,
+                script_sig: vec![],
+                witness: vec![vec![0u8; 64], ser.clone()],
+            }],
+            outputs: outs,
+        };
+        let h1 = header(1, fk0, Some(h0.hash));
+        let mut tid_b = [0u8; 32];
+        tid_b[0] = 0xbb;
+        let fk1 = q
+            .connect_block(
+                Height(1),
+                &h1,
+                &[spend(
+                    0,
+                    tid_elig,
+                    vec![
+                        OutputRecord::unspent(12_0000_0000, p2tr.clone()),
+                        OutputRecord::unspent(12_0000_0000, p2tr.clone()),
+                    ],
+                )],
+            )
+            .unwrap();
+        let mut tw = [0x02; 33];
+        tw[0] = 0x02;
+        q.put_sp_tweaks_block(Height(1), fk1, &[Some(tw)]).unwrap();
+        let elig_fk = q.block_tx_fks(Height(1)).unwrap()[0];
+
+        let full = q
+            .load_thin_tweaks_range(Height(1), ThinTweakRangeLimits::default())
+            .unwrap();
+        assert_eq!(full[0].1[0].p2tr.len(), 2);
+
+        let h2 = header(2, fk1, Some(h1.hash));
+        let fk2 = q
+            .connect_block(
+                Height(2),
+                &h2,
+                &[TxApply {
+                    tx: TxRecord {
+                        txid: tid_b,
+                        version: 2,
+                        locktime: 0,
+                        input_start_fk: Fk::NULL,
+                        input_count: 1,
+                        output_start_fk: Fk::NULL,
+                        output_count: 1,
+                    },
+                    inputs: vec![InputRecord {
+                        prev_txid: tid_elig,
+                        create_fk: elig_fk,
+                        prev_index: 0,
+                        sequence: u32::MAX,
+                        script_sig: vec![],
+                        witness: vec![vec![0u8; 64]],
+                    }],
+                    outputs: vec![OutputRecord::unspent(11_0000_0000, p2wpkh)],
+                }],
+            )
+            .unwrap();
+        q.put_sp_tweaks_block(Height(2), fk2, &[None]).unwrap();
+
+        let kept = q
+            .load_thin_tweaks_range(
+                Height(1),
+                ThinTweakRangeLimits {
+                    cut_through: true,
+                    ..ThinTweakRangeLimits::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(kept[0].1.len(), 1);
+        assert_eq!(kept[0].1[0].p2tr.len(), 1);
+        assert_eq!(kept[0].1[0].p2tr[0].0, 1);
+
+        let hist = q
+            .load_thin_tweaks_range(
+                Height(1),
+                ThinTweakRangeLimits {
+                    cut_through: false,
+                    ..ThinTweakRangeLimits::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(hist[0].1[0].p2tr.len(), 2);
+
+        let mut tid_c = [0u8; 32];
+        tid_c[0] = 0xcc;
+        let h3 = header(3, fk2, Some(h2.hash));
+        let fk3 = q
+            .connect_block(
+                Height(3),
+                &h3,
+                &[TxApply {
+                    tx: TxRecord {
+                        txid: tid_c,
+                        version: 2,
+                        locktime: 0,
+                        input_start_fk: Fk::NULL,
+                        input_count: 1,
+                        output_start_fk: Fk::NULL,
+                        output_count: 1,
+                    },
+                    inputs: vec![InputRecord {
+                        prev_txid: tid_elig,
+                        create_fk: elig_fk,
+                        prev_index: 1,
+                        sequence: u32::MAX,
+                        script_sig: vec![],
+                        witness: vec![vec![0u8; 64]],
+                    }],
+                    outputs: vec![OutputRecord::unspent(11_0000_0000, vec![0x51])],
+                }],
+            )
+            .unwrap();
+        q.put_sp_tweaks_block(Height(3), fk3, &[None]).unwrap();
+        let gone = q
+            .load_thin_tweaks_range(
+                Height(1),
+                ThinTweakRangeLimits {
+                    cut_through: true,
+                    ..ThinTweakRangeLimits::default()
+                },
+            )
+            .unwrap();
+        assert!(gone[0].1.is_empty(), "all-spent eligible tx is omitted");
+        assert_eq!(gone[0].0, Height(1));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
