@@ -1483,6 +1483,18 @@ fn sendrawtransaction(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Val
         Err(e) if e.to_string().starts_with("duplicate ") => {
             Ok(json!(hash_hex_display(&tx.compute_txid().to_byte_array())))
         }
+        // Same txid, different witness: success + flush INV of the live body
+        // so a peer that missed the first announce still sees it
+        // (`mempool_accept_wtxid.py:82`). Do not re-note unbroadcast.
+        Err(e) if e.to_string() == "policy: txn-same-nonwitness-data-in-mempool" => {
+            mp.notify_inv_flush();
+            if let (Some(peers), Some(chain)) = (ctx.peers.as_ref(), ctx.chain.as_ref()) {
+                rbitcoin_net::flush_tx_invs(chain, peers);
+            } else if let Some(peers) = ctx.peers.as_ref() {
+                peers.request_all_tx_inv();
+            }
+            Ok(json!(hash_hex_display(&tx.compute_txid().to_byte_array())))
+        }
         Err(e) => Err(rpc_error(ERR_VERIFY_REJECTED, accept_reject_reason(&e))),
     }
 }
