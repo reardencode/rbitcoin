@@ -18,7 +18,6 @@ const MAX_SEED: u32 = 256;
 const HEADER_LEN2: u64 = 32;
 const HEADER_LEN3: u64 = 32;
 const G_PAGE_BYTES: usize = 4096;
-const G_PAGE_WORDS: u32 = (G_PAGE_BYTES / 4) as u32;
 const G_BITS_WORDS: u32 = 32;
 const COMPACT_G_BITS: u32 = 2;
 const RANK_SUPER_BITS: u32 = 512;
@@ -213,60 +212,76 @@ impl BdzMphf {
         else {
             return Err(StoreError::Corrupt("bdz mphf: fd batch"));
         };
+        let g_bits = *g_bits;
         let partite = self.compact.is_some();
         let verts: Vec<[u32; 3]> = keys
             .iter()
             .map(|&k| hash_verts(k, self.seed, self.m, partite))
             .collect();
-        if *g_bits == G_BITS_WORDS {
-            let mut page_ids: Vec<u32> = verts
-                .iter()
-                .flat_map(|v| v.iter().map(|&vert| vert / G_PAGE_WORDS))
-                .collect();
-            page_ids.sort_unstable();
-            page_ids.dedup();
-            let mut words = vec![[0u32; 3]; keys.len()];
-            let mut fill = |page: u32, buf: &[u8]| {
-                let page_base = page * G_PAGE_WORDS;
-                for (ki, v) in verts.iter().enumerate() {
-                    for (j, &vert) in v.iter().enumerate() {
-                        if vert / G_PAGE_WORDS != page {
-                            continue;
-                        }
-                        let rel = ((vert - page_base) as usize) * 4;
-                        words[ki][j] = u32::from_le_bytes(buf[rel..rel + 4].try_into().unwrap());
-                    }
-                }
-            };
-            stream_or_load_pages(
-                file,
-                path,
-                *off,
-                *n_bytes,
-                &page_ids,
-                page_preads,
-                ctx,
-                &mut fill,
-            )?;
-            return Ok(words
-                .iter()
-                .zip(verts.iter())
-                .map(|([ga, gb, gc], verts)| self.finish_index(*ga, *gb, *gc, *verts))
-                .collect());
-        }
         let mut page_ids: Vec<u32> = verts
             .iter()
             .flat_map(|v| {
                 v.iter()
                     .copied()
-                    .flat_map(|vert| vertex_pages(vert, *g_bits))
+                    .flat_map(|vert| vertex_pages(vert, g_bits))
             })
             .collect();
         page_ids.sort_unstable();
         page_ids.dedup();
-        let mut loaded: Vec<(u32, Vec<u8>)> = Vec::with_capacity(page_ids.len());
+        let mut extracts: Vec<(u32, GExtract)> = Vec::with_capacity(keys.len() * 3);
+        for (ki, v) in verts.iter().enumerate() {
+            for (slot, &vert) in v.iter().enumerate() {
+                let start = u64::from(vert) * u64::from(g_bits);
+                let start_byte = start / 8;
+                let start_page = (start_byte / G_PAGE_BYTES as u64) as u32;
+                let end = start + u64::from(g_bits.saturating_sub(1));
+                let end_page = (end / 8 / G_PAGE_BYTES as u64) as u32;
+                extracts.push((
+                    end_page,
+                    GExtract {
+                        ki: ki as u32,
+                        slot: slot as u8,
+                        off: (start_byte % G_PAGE_BYTES as u64) as u16,
+                        rem: (start % 8) as u8,
+                        start_page,
+                    },
+                ));
+            }
+        }
+        extracts.sort_unstable_by_key(|e| e.0);
+        let mut words = vec![[0u32; 3]; keys.len()];
+        let mut ei = 0usize;
+        let mut prev_id = u32::MAX;
+        let mut prev_len = 0usize;
+        let mut prev_tail = [0u8; 8];
         let mut fill = |page: u32, buf: &[u8]| {
-            loaded.push((page, buf.to_vec()));
+            while ei < extracts.len() && extracts[ei].0 == page {
+                let e = extracts[ei].1;
+                words[e.ki as usize][e.slot as usize] = if e.start_page == page {
+                    extract_g_window(buf, None, e.off as usize, e.rem as u32, g_bits)
+                } else {
+                    let (head, plen) = if prev_id == e.start_page {
+                        (&prev_tail, prev_len)
+                    } else {
+                        (&[0u8; 8], G_PAGE_BYTES)
+                    };
+                    extract_g_window(
+                        head,
+                        Some(buf),
+                        8 + e.off as usize - plen,
+                        e.rem as u32,
+                        g_bits,
+                    )
+                };
+                ei += 1;
+            }
+            prev_id = page;
+            prev_len = buf.len();
+            prev_tail = [0u8; 8];
+            let n = buf.len().min(8);
+            if n > 0 {
+                prev_tail[8 - n..].copy_from_slice(&buf[buf.len() - n..]);
+            }
         };
         stream_or_load_pages(
             file,
@@ -278,14 +293,10 @@ impl BdzMphf {
             ctx,
             &mut fill,
         )?;
-        Ok(verts
+        Ok(words
             .iter()
-            .map(|&[a, b, c]| {
-                let ga = unpack_g_from_pages(&loaded, a, *g_bits);
-                let gb = unpack_g_from_pages(&loaded, b, *g_bits);
-                let gc = unpack_g_from_pages(&loaded, c, *g_bits);
-                self.finish_index(ga, gb, gc, [a, b, c])
-            })
+            .zip(verts.iter())
+            .map(|([ga, gb, gc], verts)| self.finish_index(*ga, *gb, *gc, *verts))
             .collect())
     }
 
@@ -908,38 +919,67 @@ fn pack_g(g: &[u32], g_bits: u32) -> Vec<u8> {
 
 fn unpack_g_at(buf: &[u8], v: u32, g_bits: u32) -> u32 {
     let start = u64::from(v) * u64::from(g_bits);
-    let mut val = 0u32;
-    for i in 0..g_bits {
-        let bit = start + u64::from(i);
-        let byte = (bit / 8) as usize;
-        if byte >= buf.len() {
-            break;
-        }
-        let rem = (bit % 8) as u32;
-        if buf[byte] & (1 << rem) != 0 {
-            val |= 1 << i;
-        }
+    let byte = (start / 8) as usize;
+    if byte >= buf.len() {
+        return 0;
     }
-    val
+    extract_g_window(&buf[byte..], None, 0, (start % 8) as u32, g_bits)
 }
 
-fn unpack_g_from_pages(pages: &[(u32, Vec<u8>)], v: u32, g_bits: u32) -> u32 {
+#[cfg(test)]
+fn unpack_g_bits_from_page_window(
+    page: &[u8],
+    next: Option<&[u8]>,
+    page_id: u32,
+    v: u32,
+    g_bits: u32,
+) -> u32 {
     let start = u64::from(v) * u64::from(g_bits);
-    let mut val = 0u32;
-    for i in 0..g_bits {
-        let bit = start + u64::from(i);
-        let byte_i = bit / 8;
-        let page = (byte_i / G_PAGE_BYTES as u64) as u32;
-        let off = (byte_i % G_PAGE_BYTES as u64) as usize;
-        let rem = (bit % 8) as u32;
-        let Some((_, buf)) = pages.iter().find(|(p, _)| *p == page) else {
-            continue;
-        };
-        if off < buf.len() && buf[off] & (1 << rem) != 0 {
-            val |= 1 << i;
-        }
+    let start_byte = start / 8;
+    let page_base = u64::from(page_id) * G_PAGE_BYTES as u64;
+    if start_byte < page_base {
+        return 0;
     }
-    val
+    extract_g_window(
+        page,
+        next,
+        (start_byte - page_base) as usize,
+        (start % 8) as u32,
+        g_bits,
+    )
+}
+
+fn extract_g_window(page: &[u8], next: Option<&[u8]>, off: usize, rem: u32, g_bits: u32) -> u32 {
+    let last = rem.saturating_add(g_bits.saturating_sub(1)) / 8;
+    let need = (last as usize + 1).min(8);
+    let mut acc = 0u64;
+    for i in 0..need {
+        let src = off + i;
+        let b = if src < page.len() {
+            page[src]
+        } else {
+            match next {
+                Some(n) => n.get(src - page.len()).copied().unwrap_or(0),
+                None => 0,
+            }
+        };
+        acc |= u64::from(b) << (8 * i);
+    }
+    let mask = if g_bits >= 32 {
+        u32::MAX
+    } else {
+        (1u32 << g_bits) - 1
+    };
+    ((acc >> rem) as u32) & mask
+}
+
+#[derive(Clone, Copy)]
+struct GExtract {
+    ki: u32,
+    slot: u8,
+    off: u16,
+    rem: u8,
+    start_page: u32,
 }
 
 fn vertex_pages(v: u32, g_bits: u32) -> impl Iterator<Item = u32> {
@@ -1347,6 +1387,40 @@ mod tests {
     }
 
     #[test]
+    fn unpack_g_bits_from_page_window_matches_unpack_g_at() {
+        let g_bits = 25u32;
+        let n = 1_400u32;
+        let g: Vec<u32> = (0..n).map(|i| i.wrapping_mul(17)).collect();
+        let packed = pack_g(&g, g_bits);
+        assert!(packed.len() > G_PAGE_BYTES);
+        let page0 = &packed[..G_PAGE_BYTES];
+        let page1 = &packed[G_PAGE_BYTES..];
+        let straddle = (0..n)
+            .find(|&v| vertex_straddles_page(v, g_bits))
+            .expect("25-bit field must cross a 4 KiB page");
+        assert_eq!(
+            unpack_g_bits_from_page_window(page0, Some(page1), 0, straddle, g_bits),
+            unpack_g_at(&packed, straddle, g_bits),
+        );
+        let on_p0 = 0u32;
+        assert!(!vertex_straddles_page(on_p0, g_bits));
+        assert_eq!(
+            unpack_g_bits_from_page_window(page0, None, 0, on_p0, g_bits),
+            unpack_g_at(&packed, on_p0, g_bits),
+        );
+        let on_p1 = (0..n)
+            .find(|&v| {
+                let start = u64::from(v) * u64::from(g_bits);
+                (start / 8 / G_PAGE_BYTES as u64) == 1 && !vertex_straddles_page(v, g_bits)
+            })
+            .expect("vertex contained in page 1");
+        assert_eq!(
+            unpack_g_bits_from_page_window(page1, None, 1, on_p1, g_bits),
+            unpack_g_at(&packed, on_p1, g_bits),
+        );
+    }
+
+    #[test]
     fn assigned_packed_fd_matches_ram_and_straddles() {
         let dir = std::env::temp_dir().join(format!(
             "rbitcoin-bdz2-{}-{}",
@@ -1404,6 +1478,47 @@ mod tests {
             pages.len() >= 2,
             "straddle vertex must include both page sides"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn assigned_packed_fd_index_batch_matches_ram() {
+        let dir = std::env::temp_dir().join(format!(
+            "rbitcoin-bdz2-batch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let n = 1_200u32;
+        let modulus = 1u32 << 25;
+        let keys: Vec<u64> = (0..n as u64)
+            .map(|i| i.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(13))
+            .collect();
+        let values: Vec<u32> = (0..n).map(|i| i * 17 + 3).collect();
+        let ram = BdzMphf::build_assigned(&keys, &values, modulus).unwrap();
+        let p = dir.join("t.mphf");
+        ram.write_packed_to(&p).unwrap();
+        let fd = BdzMphf::read_packed_from(&p).unwrap();
+        let g_bits = g_bits_for_modulus(modulus);
+        assert!(
+            keys.iter().any(|&k| ram
+                .vertices(k)
+                .iter()
+                .any(|&v| vertex_straddles_page(v, g_bits))),
+            "batch must include a page-straddling vertex"
+        );
+        let mut want: Vec<u32> = keys.iter().map(|&k| ram.index(k).unwrap()).collect();
+        let miss = 0xDEAD_BEEF_u64;
+        want.push(ram.index(miss).unwrap());
+        let mut batch_keys = keys.clone();
+        batch_keys.push(miss);
+        let got = fd
+            .index_batch(&batch_keys, &mut crate::IoCtx::none())
+            .unwrap();
+        assert_eq!(got, want);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
