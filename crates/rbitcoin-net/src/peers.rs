@@ -123,6 +123,8 @@ pub struct LivePeer {
     out_tx: Mutex<Option<mpsc::UnboundedSender<NetworkMessage>>>,
     /// Unix seconds when this session was registered (Core `m_connected`).
     connected_at: AtomicU64,
+    /// Skip INV for mempool txs with `accept_gen < floor` (post-verack privacy).
+    inv_gen_floor: AtomicU64,
 }
 
 impl LivePeer {
@@ -374,6 +376,14 @@ impl LivePeer {
 
     pub fn connected_at(&self) -> u64 {
         self.connected_at.load(Ordering::Relaxed)
+    }
+
+    pub fn set_inv_gen_floor(&self, floor: u64) {
+        self.inv_gen_floor.store(floor, Ordering::Relaxed);
+    }
+
+    pub fn inv_gen_floor(&self) -> u64 {
+        self.inv_gen_floor.load(Ordering::Relaxed)
     }
 
     /// Core `MaybeSendPing`: timeout first, then RPC-queued / interval probe.
@@ -904,6 +914,7 @@ impl PeerHub {
             failed_cmpct: Mutex::new(HashSet::new()),
             out_tx: Mutex::new(None),
             connected_at: AtomicU64::new(connected_at),
+            inv_gen_floor: AtomicU64::new(0),
         });
         // Handshake already exchanged version + verack (+ maybe ping).
         peer.note_recv("version", 100);

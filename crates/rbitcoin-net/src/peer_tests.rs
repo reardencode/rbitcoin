@@ -1230,6 +1230,85 @@ fn relay_on_unbroadcast_keeps_inbound_age_gate() {
     });
 }
 
+/// `p2p_tx_privacy.py`: txs accepted before a peer's handshake completes must
+/// not be INV'd to that peer after they come online.
+#[test]
+fn queue_due_skips_txs_accepted_before_peer_connected() {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::p2p::address::Address;
+    use bitcoin::p2p::message_network::VersionMessage;
+    use bitcoin::p2p::ServiceFlags;
+    use bitcoin::script::ScriptBuf;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
+    use rbitcoin_primitives::Height;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use tokio::runtime::Builder;
+
+    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+    }
+    let rt = Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let (dir, q) = tmp_store("tx-privacy-pre");
+        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        hub.ensure_genesis().unwrap();
+        hub.generate_to_script(102, ScriptBuf::from_bytes(vec![0x51]), vec![])
+            .expect("pad");
+        let mp = crate::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
+        mp.set_relay_enabled(true);
+        assert!(hub.attach_mempool(mp).is_ok());
+        let cb = hub
+            .query
+            .reconstruct_block_at_height(Height(1))
+            .unwrap()
+            .txdata[0]
+            .compute_txid();
+        let early = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint { txid: cb, vout: 0 },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(49_9999_0000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let mp = hub.mempool().unwrap();
+        mp.note_mock_now(50);
+        mp.accept_tx(&early).expect("accept early");
+        let peers = crate::peers::PeerHub::new();
+        peers.set_mock_now(100);
+        mp.note_mock_now(100);
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+        let ver = VersionMessage {
+            version: 70016,
+            services: ServiceFlags::NETWORK,
+            timestamp: 0,
+            receiver: Address::new(&addr, ServiceFlags::NONE),
+            sender: Address::new(&addr, ServiceFlags::NONE),
+            nonce: 1,
+            user_agent: "/rbitcoin:test/".into(),
+            start_height: 0,
+            relay: true,
+        };
+        let inbound = peers.register(addr, addr, &ver, true, crate::peers::PeerConnType::Inbound);
+        inbound.set_inv_gen_floor(mp.next_accept_gen());
+        assert!(mp.tx_inv_due(&early.compute_wtxid()), "age elapsed");
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        queue_due_tx_invs(&hub, inbound.as_ref(), &HashMap::new(), &out_tx);
+        assert!(
+            out_rx.try_recv().is_err(),
+            "must not INV a tx accepted before this peer connected"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    });
+}
+
 /// 50ms session tick must not `list_live()` (clone every mempool body).
 #[test]
 fn queue_due_tx_invs_idle_tick_does_not_clone_live_bodies() {

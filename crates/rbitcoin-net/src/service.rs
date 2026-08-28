@@ -180,6 +180,9 @@ impl P2PNode {
                             };
                             let sess =
                                 peers.register(peer_addr, bind, &ver, true, PeerConnType::Inbound);
+                            if let Some(mp) = hub.mempool() {
+                                sess.set_inv_gen_floor(mp.next_accept_gen());
+                            }
                             sess.attach_wire(wire);
                             let id = sess.id;
                             let meta = FollowSessionMeta {
@@ -451,6 +454,9 @@ async fn prepare_outbound_session(
     };
     peers.unregister(provisional_id);
     let sess = peers.register_with_id(provisional_id, peer, bind, &ver, false, typ);
+    if let Some(mp) = hub.mempool() {
+        sess.set_inv_gen_floor(mp.next_accept_gen());
+    }
     sess.attach_wire(wire);
     let id = sess.id;
     follow_live.fetch_add(1, Ordering::SeqCst);

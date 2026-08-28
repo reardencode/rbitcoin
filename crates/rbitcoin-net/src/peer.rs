@@ -1249,6 +1249,14 @@ fn queue_due_tx_invs(
         if session.has_announced_wtx(&w) {
             continue;
         }
+        // `p2p_tx_privacy.py`: do not INV txs accepted before this peer's
+        // post-verack register (`inv_gen_floor`).
+        if mp
+            .accept_gen(&w)
+            .is_some_and(|g| g < session.inv_gen_floor())
+        {
+            continue;
+        }
         let local = !mp.relay_enabled() && mp.is_unbroadcast(&txid);
         let age_due_this = mp.tx_inv_due(&w);
         // Inbound + relay on: a mocktime jump / request_tx_inv only

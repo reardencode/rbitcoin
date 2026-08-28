@@ -327,6 +327,9 @@ pub struct MempoolHub {
     mock_now: AtomicU64,
     /// Mock/wall seconds when each live wtxid was accepted.
     accept_at: Mutex<HashMap<Wtxid, u64>>,
+    /// Monotonic accept generation for `p2p_tx_privacy` (skip pre-handshake txs).
+    next_accept_gen: AtomicU64,
+    accept_gen: Mutex<HashMap<Wtxid, u64>>,
 }
 
 impl MempoolHub {
@@ -399,6 +402,8 @@ impl MempoolHub {
             immediate_relay: AtomicBool::new(false),
             mock_now: AtomicU64::new(0),
             accept_at: Mutex::new(HashMap::new()),
+            next_accept_gen: AtomicU64::new(1),
+            accept_gen: Mutex::new(HashMap::new()),
             fee_deltas: Mutex::new(HashMap::new()),
             template_updates: AtomicU64::new(0),
         };
@@ -483,22 +488,36 @@ impl MempoolHub {
 
     fn insert_relay_maps(&self, txid: Txid, wtxid: Wtxid, seq: u64) {
         let at = self.relay_now_secs();
+        let gen = self.next_accept_gen.fetch_add(1, Ordering::Relaxed);
         let mut by_tx = self.wtxid_by_txid.lock().unwrap();
         let mut seqs = self.relay_seq.lock().unwrap();
         let mut ats = self.accept_at.lock().unwrap();
+        let mut gens = self.accept_gen.lock().unwrap();
         by_tx.insert(txid, wtxid);
         seqs.insert(wtxid, seq);
         ats.insert(wtxid, at);
+        gens.insert(wtxid, gen);
     }
 
     fn remove_relay_maps(&self, txid: &Txid) {
         let mut by_tx = self.wtxid_by_txid.lock().unwrap();
         let mut seqs = self.relay_seq.lock().unwrap();
         let mut ats = self.accept_at.lock().unwrap();
+        let mut gens = self.accept_gen.lock().unwrap();
         if let Some(w) = by_tx.remove(txid) {
             seqs.remove(&w);
             ats.remove(&w);
+            gens.remove(&w);
         }
+    }
+
+    /// Next accept generation (for peer `inv_gen_floor` at register).
+    pub fn next_accept_gen(&self) -> u64 {
+        self.next_accept_gen.load(Ordering::Relaxed)
+    }
+
+    pub fn accept_gen(&self, wtxid: &Wtxid) -> Option<u64> {
+        self.accept_gen.lock().unwrap().get(wtxid).copied()
     }
 
     /// Core `mempool_unbroadcast.py` debug.log needle when a local tx confirms
@@ -653,6 +672,10 @@ impl MempoolHub {
     /// Wake session loops so they INV due / unbroadcast txs now.
     pub fn notify_inv_flush(&self) {
         let _ = self.inv_flush.send(());
+    }
+
+    pub fn accept_time(&self, wtxid: &Wtxid) -> Option<u64> {
+        self.accept_at.lock().unwrap().get(wtxid).copied()
     }
 
     pub fn tx_inv_due(&self, wtxid: &Wtxid) -> bool {
