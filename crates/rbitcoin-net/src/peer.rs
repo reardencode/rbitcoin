@@ -713,69 +713,68 @@ pub async fn peer_session_with(
                     continue;
                 }
                 tip = tip_rx.recv() => {
-                    match tip {
-                        Ok(ev) => {
-                            // Below `-minimumchainwork` stay in IBD: do not relay blocks.
-                            if !hub.meets_minimum_chain_work() {
+                    let ev = match tip_event_for_announce(tip, hub.as_ref()) {
+                        TipRecvAnnounce::Closed => return Ok(()),
+                        TipRecvAnnounce::Skip => continue,
+                        TipRecvAnnounce::Announce(ev) => ev,
+                    };
+                    // Below `-minimumchainwork` stay in IBD: do not relay blocks.
+                    if !hub.meets_minimum_chain_work() {
+                        continue;
+                    }
+                    let from_peer = session
+                        .as_ref()
+                        .is_some_and(|s| s.take_block_from_peer(&ev.hash));
+                    let (sent, known) = session
+                        .as_ref()
+                        .map(|s| s.header_marks())
+                        .unwrap_or((None, None));
+                    // sendcmpct announce=1: Core sends cmpctblock even
+                    // without sendheaders (`p2p_compactblocks` :249).
+                    if peer_send_cmpct && !from_peer {
+                        if let Some(msg) = cmpct_announce_msg(
+                            hub.as_ref(),
+                            &ev.hash,
+                            peer_cmpct_version,
+                        ) {
+                            queue_cmpct_tip_announce(&out_tx, msg)?;
+                            if let Some(s) = session.as_ref() {
+                                s.note_best_header_sent(ev.hash);
+                            }
+                            // Compact-only when the peer did not send
+                            // sendheaders. Node-to-node always sends
+                            // sendheaders; also announce headers so a
+                            // longer fork can reorg (`p2p_sendheaders`).
+                            if !peer_wants_headers {
                                 continue;
                             }
-                            let from_peer = session
-                                .as_ref()
-                                .is_some_and(|s| s.take_block_from_peer(&ev.hash));
-                            let (sent, known) = session
-                                .as_ref()
-                                .map(|s| s.header_marks())
-                                .unwrap_or((None, None));
-                            // sendcmpct announce=1: Core sends cmpctblock even
-                            // without sendheaders (`p2p_compactblocks` :249).
-                            if peer_send_cmpct && !from_peer {
-                                if let Some(msg) = cmpct_announce_msg(
-                                    hub.as_ref(),
-                                    &ev.hash,
-                                    peer_cmpct_version,
-                                ) {
-                                    queue_cmpct_tip_announce(&out_tx, msg)?;
-                                    if let Some(s) = session.as_ref() {
-                                        s.note_best_header_sent(ev.hash);
-                                    }
-                                    // Compact-only when the peer did not send
-                                    // sendheaders. Node-to-node always sends
-                                    // sendheaders; also announce headers so a
-                                    // longer fork can reorg (`p2p_sendheaders`).
-                                    if !peer_wants_headers {
-                                        continue;
-                                    }
-                                }
-                            }
-                            match tip_announce_decision(
-                                hub.as_ref(),
-                                &ev,
-                                peer_wants_headers,
-                                sent,
-                                known,
-                                from_peer,
-                            ) {
-                                TipAnnounce::Skip => continue,
-                                TipAnnounce::Inv(h) => {
-                                    // Core block *announcements* use MSG_BLOCK
-                                    // (`p2p_compactblocks` TestP2PConn.on_inv).
-                                    queue_out(
-                                        &out_tx,
-                                        NetworkMessage::Inv(vec![Inventory::Block(h)]),
-                                    )?;
-                                }
-                                TipAnnounce::Headers(hs) => {
-                                    if let Some(last) = hs.last() {
-                                        if let Some(s) = session.as_ref() {
-                                            s.note_best_header_sent(last.block_hash());
-                                        }
-                                    }
-                                    queue_out(&out_tx, NetworkMessage::Headers(hs))?;
-                                }
-                            }
                         }
-                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                        Err(broadcast::error::RecvError::Closed) => return Ok(()),
+                    }
+                    match tip_announce_decision(
+                        hub.as_ref(),
+                        &ev,
+                        peer_wants_headers,
+                        sent,
+                        known,
+                        from_peer,
+                    ) {
+                        TipAnnounce::Skip => continue,
+                        TipAnnounce::Inv(h) => {
+                            // Core block *announcements* use MSG_BLOCK
+                            // (`p2p_compactblocks` TestP2PConn.on_inv).
+                            queue_out(
+                                &out_tx,
+                                NetworkMessage::Inv(vec![Inventory::Block(h)]),
+                            )?;
+                        }
+                        TipAnnounce::Headers(hs) => {
+                            if let Some(last) = hs.last() {
+                                if let Some(s) = session.as_ref() {
+                                    s.note_best_header_sent(last.block_hash());
+                                }
+                            }
+                            queue_out(&out_tx, NetworkMessage::Headers(hs))?;
+                        }
                     }
                 }
                 _ = headers_poll.tick() => {
@@ -2183,6 +2182,41 @@ enum TipAnnounce {
     Headers(Vec<bitcoin::block::Header>),
     Inv(BlockHash),
     Skip,
+}
+
+#[derive(Debug)]
+pub(crate) enum TipRecvAnnounce {
+    Announce(crate::chain::TipEvent),
+    Skip,
+    Closed,
+}
+
+/// Map a `tip_rx.recv()` result to the tip we should announce.
+///
+/// `Lagged` means missed tip advances — announce the **current** hub tip so the
+/// peer can catch up inside functional `sync_blocks` (60s), not via the 120s
+/// headers poll.
+pub(crate) fn tip_event_for_announce(
+    recv: Result<crate::chain::TipEvent, broadcast::error::RecvError>,
+    hub: &ChainHub,
+) -> TipRecvAnnounce {
+    match recv {
+        Ok(ev) => TipRecvAnnounce::Announce(ev),
+        Err(broadcast::error::RecvError::Closed) => TipRecvAnnounce::Closed,
+        Err(broadcast::error::RecvError::Lagged(_)) => {
+            match (hub.tip_height(), hub.tip_hash(), hub.tip_header()) {
+                (Some(height), Some(hash), Some(header)) => {
+                    TipRecvAnnounce::Announce(crate::chain::TipEvent {
+                        height,
+                        hash,
+                        header,
+                        reorg_branch_len: 0,
+                    })
+                }
+                _ => TipRecvAnnounce::Skip,
+            }
+        }
+    }
 }
 
 fn peer_has_header(

@@ -5465,3 +5465,103 @@ fn coinbase_compact_fills_without_mempool() {
         let _ = std::fs::remove_dir_all(dir);
     });
 }
+
+#[test]
+fn tip_event_for_announce_on_lagged_uses_current_hub_tip() {
+    use bitcoin::ScriptBuf;
+    use tokio::sync::broadcast;
+
+    let (dir, q) = tmp_store("lagged-tip-ev");
+    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    hub.ensure_genesis().unwrap();
+    hub.generate_to_script(80, ScriptBuf::from_bytes(vec![0x51]), vec![])
+        .unwrap();
+    let want = hub.tip_hash().unwrap();
+    let height = hub.tip_height().unwrap();
+    let TipRecvAnnounce::Announce(ev) =
+        tip_event_for_announce(Err(broadcast::error::RecvError::Lagged(99)), &hub)
+    else {
+        panic!("Lagged must re-announce current tip, not drop");
+    };
+    assert_eq!(ev.hash, want);
+    assert_eq!(ev.height, height);
+    assert_eq!(ev.reorg_branch_len, 0);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Burst tip advances (> tip broadcast capacity) must still reach a follow peer
+/// without waiting for the 120s headers poll (`sync_blocks` is 60s).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tip_burst_past_broadcast_capacity_still_syncs_peer() {
+    use crate::P2PNode;
+    use bitcoin::ScriptBuf;
+    use std::time::Duration;
+
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("rbitcoin-tip-burst-{n}"));
+    std::fs::create_dir_all(dir.join("a")).unwrap();
+    std::fs::create_dir_all(dir.join("b")).unwrap();
+    let qa = Query::open_or_create(dir.join("a/store")).unwrap();
+    let qb = Query::open_or_create(dir.join("b/store")).unwrap();
+    let params = ChainParams::regtest();
+    let mut na = P2PNode::start_with_agent(
+        "127.0.0.1:0".parse().unwrap(),
+        qa,
+        params.clone(),
+        Milestone::NONE,
+        "/rbitcoin:0.1.0(burst-a)/".into(),
+        crate::DEFAULT_MAX_INBOUND,
+    )
+    .await
+    .unwrap();
+    let nb = P2PNode::start_with_agent(
+        "127.0.0.1:0".parse().unwrap(),
+        qb,
+        params,
+        Milestone::NONE,
+        "/rbitcoin:0.1.0(burst-b)/".into(),
+        crate::DEFAULT_MAX_INBOUND,
+    )
+    .await
+    .unwrap();
+
+    na.follow_from(nb.local_addr).await.unwrap();
+    let mut linked = false;
+    for _ in 0..100 {
+        if na.follow_live_count() >= 1 && !nb.peers.snapshot().is_empty() {
+            linked = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(linked, "follow session must be live before tip burst");
+
+    // Capacity is 64; sync generate without await fills the ring so the
+    // announce task sees Lagged instead of every TipEvent.
+    const BURST: u32 = 80;
+    na.hub
+        .generate_to_script(BURST, ScriptBuf::from_bytes(vec![0x51]), vec![])
+        .unwrap();
+    let want = na.tip_height().unwrap();
+    assert!(want >= BURST, "miner tip {want}");
+
+    let mut peer_tip = nb.tip_height().unwrap_or(0);
+    for _ in 0..200 {
+        peer_tip = nb.tip_height().unwrap_or(0);
+        if peer_tip >= want {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        peer_tip, want,
+        "peer must catch tip after Lagged burst within ~10s (not headers_poll 120s)"
+    );
+
+    na.shutdown().await;
+    nb.shutdown().await;
+    let _ = std::fs::remove_dir_all(dir);
+}
