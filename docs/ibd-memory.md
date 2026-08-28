@@ -37,9 +37,9 @@ pres and **not** the raw bytes. Reorg gather that wants wire re-encodes.
 | **In-flight CreatePin map** | identity + full create outs; one load-thread HashMap; lookup snapshots `drain_and_fence_hi` before TipOnly and passes it on the last load batch; load drops pack height below that after the in-flight read | Load notes after stamp; disconnect `drop_from` on pack height. Sizes: `iflight=`. Not a coins cache / spend FIFO |
 | **ConfirmParentCache header plans** | tip-GC window | Always on — required for multi-block wire MTP |
 | **Confirm plans / headers** | offer-ahead window | `ConfirmParentCache::advance_tip` from write `post_commit` |
-| **SH catalog runs** | on disk after post-IBD Class A recollect | bulk FullCold / ColdResume at tip; not during Direct confirm |
-| **SH recollect / k-way workers** | min(CPUs, host free RAM / 1.5 GiB); floor 1. Linux `/proc/meminfo` `MemAvailable`; Darwin `host_statistics64` free+inactive pages; Windows `GlobalMemoryStatusEx` `ullAvailPhys`. Unknown OS → 1 worker. Env `RBITCOIN_SH_RECOLLECT_WORKERS` / `RBITCOIN_SH_MERGE_WORKERS` override | Start of recollect / tip materialize. Logs `workers=` `free_GiB=` |
-| **`tx.head` wipe-rebuild workers** | min(CPUs, host free RAM / 750 MiB, range count); floor 1. Same free-RAM probe as SH. **Not** the SH 1.5 GiB cap. Env `RBITCOIN_TX_HEAD_REBUILD_WORKERS` override (`1` = serial) | Empty/wipe `tx.head` rebuild from `txid.body`. Logs `workers=` `free_GiB=` |
+| **SH catalog runs** | leftover `scripthash.runs` discarded at tip (unsorted collect does not write them) | write-behind / discard; not during Direct confirm |
+| **SH unsorted collect / pack** | Collect: nCPU (no env / RAM cap; 1 MiB grow-on-demand write buffers; per-shard mutex so pwrite issues in offset order; 64 MiB fallocate on full flushes). Pack: min(CPUs, free RAM / 2 GiB); `RBITCOIN_SH_MERGE_WORKERS` override. One anonymous file image per pack worker (in-place unique-sort; MPHF has no HashSet). Class A collect spans 1 MiB | Tip finalize. Unsorted files under `scripthash.unsorted/` |
+| **`tx.head` wipe-rebuild workers** | min(CPUs, host free RAM / 750 MiB, range count); floor 1. Same free-RAM probe as SH. **Not** the SH pack 2 GiB cap. Env `RBITCOIN_TX_HEAD_REBUILD_WORKERS` override (`1` = serial) | Empty/wipe `tx.head` rebuild from `txid.body`. Logs `workers=` `free_GiB=` |
 | **Ordered work path** | `MAX_ORDERED_HEADERS` | `IbdWorkState::hygiene` |
 
 Tests that need a clean process must call these **same** entry points (or drop the
@@ -153,7 +153,7 @@ touches. Census: [`SCHEMA.md`](../SCHEMA.md) (tip 962298, 1.42 B creates).
 | **Comfortable serve** (busy wallets, Electrum tweaks, RPC reconstruct) | Above + more `txout` + SH body slabs + `txid.body` | **16–32 GiB** | `inwit` except rawtx |
 | **IBD pin+annotate (no thrash)** | **All** `txout` + **all** `spent` + three `*.idx` + `txid.body` + `tx.head` | **~227 GiB** | **`inwit` (~486 GiB)** — wire still holds witness |
 | **IBD + reconstruct/getdata** | Previous + `inwit` | **~710 GiB** (same order as old packed `tx.body`) | — |
-| **SH tip materialize** | Sliced k-way: n-cpu workers, 256 KiB double-buffered pages on the TLS completion session (submit ahead, wait on promote), no temp pack bodies; ingest OA **~768 MiB** (2²⁵×24 B) | **≪1 GiB** extra heap | No 0.5–1 GiB OA image per shard |
+| **SH tip materialize** | Unsorted shards: nCPU Class A collect (16 MiB libc `pread` `txout` spans + 1 MiB write buffers); pack workers min(CPUs, free RAM / 2 GiB); ingest OA **~768 MiB** (2²⁵×24 B) | **~2 GiB** heap per pack worker | No catalog k-way pages |
 
 Packed schema 13/14 needed the whole **`tx.body` (~663 GiB)** hot for the same
 pin/annotate work. Split Class A drops that to **~161 GiB** (`txout`+`spent`)

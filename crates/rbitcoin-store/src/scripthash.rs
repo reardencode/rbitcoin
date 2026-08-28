@@ -971,32 +971,6 @@ pub fn sh_run_catalog_key_len_ok(store_dir: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// True when `scripthash.runs` (catalog or claims) can rebuild the head.
-pub fn has_sh_run_rebuild_source(store_dir: &Path) -> bool {
-    let runs = store_dir.join("scripthash.runs");
-    if list_runs(&runs).map(|r| !r.is_empty()).unwrap_or(false) {
-        return true;
-    }
-    if list_materialize_claims(&runs)
-        .map(|r| !r.is_empty())
-        .unwrap_or(false)
-    {
-        return true;
-    }
-    dir_has_run_files(&runs)
-}
-
-fn dir_has_run_files(dir: &Path) -> bool {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return false;
-    };
-    rd.flatten().any(|e| {
-        let name = e.file_name();
-        let s = name.to_string_lossy();
-        s.ends_with(".run") || s.ends_with(".run.mat") || s.ends_with(".run.tmp")
-    })
-}
-
 impl ScriptHashTable {
     pub fn entry_count(&self) -> u64 {
         let mut n = 0u64;
@@ -2803,6 +2777,10 @@ impl<'a> ScriptHashBulkSession<'a> {
     /// Unique keys packed so far.
     pub fn keys_written(&self) -> u64 {
         self.keys_written
+    }
+
+    pub(crate) fn reserve_pack_recs(&mut self, n: usize) {
+        self.recs.reserve(n);
     }
 
     fn take_fk_scratch(&mut self) -> Vec<u64> {

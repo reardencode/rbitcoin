@@ -1449,276 +1449,6 @@ fn shared_body_table(dir: &std::path::Path) -> ScriptHashTable {
 }
 
 #[test]
-fn materialize_parallel_matches_serial() {
-    HeadScale::test_with(HeadScale::Tiny, || {
-        let dir = tmp();
-        let runs_dir = dir.join("runs");
-        std::fs::create_dir_all(&runs_dir).unwrap();
-        let key = |shard: u8, i: u8| {
-            let mut k = [0u8; 32];
-            k[0] = shard << 6 | (i & 0x3f);
-            k
-        };
-        let rec = |shard: u8, i: u8, fk: u64| {
-            let mut r = [0u8; 40];
-            r[..32].copy_from_slice(&key(shard, i));
-            r[32..40].copy_from_slice(&fk.to_le_bytes());
-            r
-        };
-        let mut a = Vec::new();
-        let mut b = Vec::new();
-        for shard in 0..4u8 {
-            for i in 0..3u8 {
-                let fk = u64::from(shard) * 10 + u64::from(i) + 1;
-                if i % 2 == 0 {
-                    a.extend_from_slice(&rec(shard, i, fk));
-                } else {
-                    b.extend_from_slice(&rec(shard, i, fk));
-                }
-            }
-        }
-        crate::sorted_run::write_sorted_run(&runs_dir.join("000001.run"), 40, 40, &a).unwrap();
-        crate::sorted_run::write_sorted_run(&runs_dir.join("000002.run"), 40, 40, &b).unwrap();
-        let inputs = [
-            crate::sorted_run::open_run(&runs_dir.join("000001.run")).unwrap(),
-            crate::sorted_run::open_run(&runs_dir.join("000002.run")).unwrap(),
-        ];
-
-        let serial_dir = dir.join("serial");
-        std::fs::create_dir_all(&serial_dir).unwrap();
-        let serial = four_shard_dir_table(&serial_dir);
-        let s = crate::materialize_sh_shards(&serial, &inputs, 0, 1, None).unwrap();
-
-        let par_dir = dir.join("par");
-        std::fs::create_dir_all(&par_dir).unwrap();
-        let par = four_shard_dir_table(&par_dir);
-        assert_eq!(par.body_layout(), ShBodyLayout::Sharded);
-        let p = crate::materialize_sh_shards(&par, &inputs, 0, 2, None).unwrap();
-
-        assert_eq!(s.creates, p.creates);
-        assert_eq!(s.keys, p.keys);
-        assert_eq!(serial.entry_count(), par.entry_count());
-        for shard in 0..4u8 {
-            for i in 0..3u8 {
-                let k = key(shard, i);
-                assert_eq!(
-                    serial.entries(&k).unwrap().len(),
-                    par.entries(&k).unwrap().len(),
-                    "shard={shard} i={i}"
-                );
-            }
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    });
-}
-
-#[test]
-fn materialize_parallel_resume() {
-    HeadScale::test_with(HeadScale::Tiny, || {
-        let dir = tmp();
-        let runs_dir = dir.join("runs");
-        std::fs::create_dir_all(&runs_dir).unwrap();
-        let key = |shard: u8, i: u8| {
-            let mut k = [0u8; 32];
-            k[0] = shard << 6 | (i & 0x3f);
-            k
-        };
-        let rec = |shard: u8, i: u8, fk: u64| {
-            let mut r = [0u8; 40];
-            r[..32].copy_from_slice(&key(shard, i));
-            r[32..40].copy_from_slice(&fk.to_le_bytes());
-            r
-        };
-        let mut body = Vec::new();
-        for shard in 0..4u8 {
-            body.extend_from_slice(&rec(shard, 0, u64::from(shard) + 1));
-        }
-        crate::sorted_run::write_sorted_run(&runs_dir.join("000001.run"), 40, 40, &body).unwrap();
-        let inputs = [crate::sorted_run::open_run(&runs_dir.join("000001.run")).unwrap()];
-
-        let t = four_shard_dir_table(&dir);
-        let k0 = key(0, 0);
-        let mut session = t.pack_shard_session(0).unwrap();
-        session.push_sorted_fk(k0, Fk(1)).unwrap();
-        let pack = session.finish_pack().unwrap();
-        let bump1 = t.publish_packed_shard(0, pack).unwrap();
-        ColdProgress {
-            next_shard: 1,
-            body_bump: bump1,
-            live_count: 1,
-            keys_written: 1,
-        }
-        .store(&dir)
-        .unwrap();
-        assert_eq!(t.entries(&k0).unwrap().len(), 1);
-
-        let cancel = AtomicBool::new(true);
-        let err = crate::materialize_sh_shards(&t, &inputs, 1, 2, Some(&cancel));
-        assert!(matches!(err, Err(StoreError::Cancelled(_))));
-        assert_eq!(
-            t.entries(&k0).unwrap()[0].1.create_tx_fk,
-            Fk(1),
-            "published shard 0 must survive cancel"
-        );
-
-        let resume_dir = dir.join("resume");
-        std::fs::create_dir_all(&resume_dir).unwrap();
-        let t2 = four_shard_dir_table(&resume_dir);
-        let mut session = t2.pack_shard_session(0).unwrap();
-        session.push_sorted_fk(k0, Fk(1)).unwrap();
-        let pack = session.finish_pack().unwrap();
-        let b = t2.publish_packed_shard(0, pack).unwrap();
-        ColdProgress {
-            next_shard: 1,
-            body_bump: b,
-            live_count: 1,
-            keys_written: 1,
-        }
-        .store(t2.store_dir())
-        .unwrap();
-        crate::materialize_sh_shards(&t2, &inputs, 1, 2, None).unwrap();
-        assert_eq!(t2.entries(&k0).unwrap()[0].1.create_tx_fk, Fk(1));
-        assert_eq!(t2.entries(&key(3, 0)).unwrap().len(), 1);
-        let _ = std::fs::remove_dir_all(&dir);
-    });
-}
-
-#[test]
-fn materialize_sharded_resume_keeps_sealed_holes() {
-    HeadScale::test_with(HeadScale::Tiny, || {
-        let dir = tmp();
-        let runs_dir = dir.join("runs");
-        std::fs::create_dir_all(&runs_dir).unwrap();
-        let key = |shard: u8, i: u8| {
-            let mut k = [0u8; 32];
-            k[0] = shard << 6 | (i & 0x3f);
-            k
-        };
-        let rec = |shard: u8, i: u8, fk: u64| {
-            let mut r = [0u8; 40];
-            r[..32].copy_from_slice(&key(shard, i));
-            r[32..40].copy_from_slice(&fk.to_le_bytes());
-            r
-        };
-        let mut body = Vec::new();
-        for shard in 0..4u8 {
-            body.extend_from_slice(&rec(shard, 0, u64::from(shard) + 1));
-        }
-        crate::sorted_run::write_sorted_run(&runs_dir.join("000001.run"), 40, 40, &body).unwrap();
-        let inputs = [crate::sorted_run::open_run(&runs_dir.join("000001.run")).unwrap()];
-        let t = four_shard_dir_table(&dir);
-        for shard in [0usize, 2] {
-            let k = key(shard as u8, 0);
-            let mut session = t.pack_shard_session(shard).unwrap();
-            session
-                .push_sorted_fk(k, Fk(u64::from(shard as u8) + 1))
-                .unwrap();
-            let pack = session.finish_pack().unwrap();
-            t.publish_packed_shard(shard, pack).unwrap();
-        }
-        assert_eq!(t.entries(&key(0, 0)).unwrap().len(), 1);
-        assert_eq!(t.entries(&key(2, 0)).unwrap().len(), 1);
-        assert!(
-            MphfHead::exists(&dir.join("scripthash.head").join("02")),
-            "shard 2 head is the durable mphf+val commit"
-        );
-        ColdProgress {
-            next_shard: 1,
-            body_bump: 0,
-            live_count: 2,
-            keys_written: 2,
-        }
-        .store(&dir)
-        .unwrap();
-        t.prepare_cold_resume(&ColdProgress::load(&dir).unwrap().unwrap())
-            .unwrap();
-        assert_eq!(
-            t.entries(&key(2, 0)).unwrap().len(),
-            1,
-            "sealed shard 2 must survive a hole at shard 1"
-        );
-        crate::materialize_sh_shards(&t, &inputs, 1, 2, None).unwrap();
-        for shard in 0..4u8 {
-            assert_eq!(t.entries(&key(shard, 0)).unwrap().len(), 1, "shard {shard}");
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    });
-}
-
-#[test]
-fn materialize_no_temp_body() {
-    use crate::scripthash_pages::SH_PAGE_STREAM_MAX;
-    HeadScale::test_with(HeadScale::Tiny, || {
-        let dir = tmp();
-        let runs_dir = dir.join("runs");
-        std::fs::create_dir_all(&runs_dir).unwrap();
-        let rec = |shard: u8, i: u8, fk: u64| {
-            let mut r = [0u8; 40];
-            r[..32].copy_from_slice(&sh_prefix_key(shard, i));
-            r[32..40].copy_from_slice(&fk.to_le_bytes());
-            r
-        };
-        let mut a = Vec::new();
-        let mut b = Vec::new();
-        let mega_key = sh_prefix_key(0, 7);
-        let n_mega = SH_PAGE_STREAM_MAX + 10;
-        for shard in 0..4u8 {
-            for i in 0..3u8 {
-                let fk = u64::from(shard) * 10 + u64::from(i) + 1;
-                if i % 2 == 0 {
-                    a.extend_from_slice(&rec(shard, i, fk));
-                } else {
-                    b.extend_from_slice(&rec(shard, i, fk));
-                }
-            }
-            if shard == 0 {
-                for i in 1..=n_mega as u64 {
-                    a.extend_from_slice(&rec(0, 7, i));
-                }
-            }
-        }
-        crate::sorted_run::write_sorted_run(&runs_dir.join("000001.run"), 40, 40, &a).unwrap();
-        crate::sorted_run::write_sorted_run(&runs_dir.join("000002.run"), 40, 40, &b).unwrap();
-        let inputs = [
-            crate::sorted_run::open_run(&runs_dir.join("000001.run")).unwrap(),
-            crate::sorted_run::open_run(&runs_dir.join("000002.run")).unwrap(),
-        ];
-        let t = four_shard_dir_table(&dir);
-        crate::materialize_sh_shards(&t, &inputs, 0, 2, None).unwrap();
-        for e in std::fs::read_dir(&dir).unwrap() {
-            let n = e.unwrap().file_name();
-            let s = n.to_string_lossy();
-            assert!(
-                !s.contains("pack") || !s.contains(".body"),
-                "leftover pack body {s}"
-            );
-        }
-        let payload0 = crate::scripthash_layout::payload_start(crate::file::FILE_HEADER_LEN);
-        let b0 = t.bodies[0].logical_len();
-        let b1 = t.bodies[1].logical_len();
-        assert!(
-            b0 > b1.saturating_mul(2).max(payload0 + 4096),
-            "megakey shard body must dwarf a small sibling, got {b0} vs {b1}"
-        );
-        assert_eq!(t.entries(&sh_prefix_key(0, 0)).unwrap().len(), 1);
-        assert_eq!(t.entries(&mega_key).unwrap().len(), n_mega);
-        match t.head_value(&mega_key).unwrap().unwrap() {
-            ShHeadValue::Extent { last_page } => {
-                let mut page = [0u8; SH_PAGE_SIZE];
-                t.body().read_at(last_page, &mut page).unwrap();
-                let (base, n) = sh_page_extent(sh_page_as_array(&page).unwrap())
-                    .unwrap()
-                    .expect("ver=2 last page");
-                assert_eq!(n, 2);
-                assert_eq!(last_page, base + SH_PAGE_SIZE as u64);
-            }
-            other => panic!("expected extent megakey, got {other:?}"),
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    });
-}
-
-#[test]
 fn bulk_session_stream_small_key_still_slab() {
     let dir = tmp();
     let t = ScriptHashTable::create(&dir).unwrap();
@@ -2167,7 +1897,6 @@ fn open_migrates_legacy_head_when_runs_present() {
         rec[32..40].copy_from_slice(&1u64.to_le_bytes());
         let path = crate::sorted_run::next_run_path(&runs_dir, 1);
         crate::sorted_run::write_sorted_run(&path, 32, 40, &rec).unwrap();
-        assert!(has_sh_run_rebuild_source(&dir));
 
         match ScriptHashTable::open(&dir) {
             Ok(_) => panic!("leftover OA must refuse"),
@@ -2196,7 +1925,6 @@ fn open_refuses_legacy_head_without_runs() {
         write_alloc_header(&body, &state).unwrap();
         drop(body);
         ShardedScriptHashHead::create_sharded(dir.join("scripthash.head"), 16, 64).unwrap();
-        assert!(!has_sh_run_rebuild_source(&dir));
         match ScriptHashTable::open(&dir) {
             Err(StoreError::Layout(m)) => {
                 assert!(m.contains("scripthash*"), "{m}");
@@ -2222,4 +1950,295 @@ fn for_each_live_create_skips_unlinked() {
     seen.sort_unstable();
     assert_eq!(seen, vec![1, 3]);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn script_for_prefix_shard(shard: usize, n_shards: usize) -> Vec<u8> {
+    for n in 0u32..100_000 {
+        let script = vec![0x51, n as u8, (n >> 8) as u8, (n >> 16) as u8];
+        if crate::prefix_shard_of(&script_hash(&script), n_shards) == shard {
+            return script;
+        }
+    }
+    panic!("no script for shard {shard} of {n_shards}");
+}
+
+fn two_scripts_same_shard_reverse_hash(shard: usize, n_shards: usize) -> (Vec<u8>, Vec<u8>) {
+    let mut found: Vec<(Vec<u8>, [u8; 32])> = Vec::new();
+    for n in 0u32..200_000 {
+        let script = vec![0x51, n as u8, (n >> 8) as u8, (n >> 16) as u8];
+        let sh = script_hash(&script);
+        if crate::prefix_shard_of(&sh, n_shards) == shard {
+            found.push((script, sh));
+            if found.len() >= 8 {
+                break;
+            }
+        }
+    }
+    found.sort_by(|a, b| a.1.cmp(&b.1));
+    assert!(
+        found.len() >= 2,
+        "need two scripts in shard {shard}/{n_shards}"
+    );
+    let low = found.first().unwrap().0.clone();
+    let high = found.last().unwrap().0.clone();
+    assert!(script_hash(&low) < script_hash(&high));
+    (low, high)
+}
+
+fn class_a_coinbase(
+    txid: [u8; 32],
+    script: Vec<u8>,
+) -> (
+    crate::TxRecord,
+    Vec<crate::InputRecord>,
+    Vec<crate::OutputRecord>,
+) {
+    (
+        crate::TxRecord {
+            txid,
+            version: 1,
+            locktime: 0,
+            input_start_fk: Fk::NULL,
+            input_count: 1,
+            output_start_fk: Fk::NULL,
+            output_count: 1,
+        },
+        vec![crate::InputRecord::coinbase(u32::MAX, vec![0x01], vec![])],
+        vec![crate::OutputRecord::unspent(50, script)],
+    )
+}
+
+fn decode_unsorted_file(path: &std::path::Path) -> Vec<ScriptHashRecord> {
+    let bytes = std::fs::read(path).unwrap();
+    assert_eq!(bytes.len() % 24, 0, "unsorted file must be 24-byte recs");
+    bytes
+        .chunks_exact(24)
+        .map(|c| {
+            let mut sh = [0u8; 32];
+            sh[..16].copy_from_slice(&c[..16]);
+            let fk = Fk(u64::from_le_bytes(c[16..24].try_into().unwrap()));
+            ScriptHashRecord::from_fk(sh, fk)
+        })
+        .collect()
+}
+
+#[test]
+fn unsorted_collect_partitions_by_prefix_and_is_not_scripthash_sorted() {
+    HeadScale::test_with(HeadScale::Tiny, || {
+        let dir = tmp();
+        let s = crate::Store::create(&dir).unwrap();
+        let n_shards = 4usize;
+        let (low_script, high_script) = two_scripts_same_shard_reverse_hash(1, n_shards);
+        let mut txid_lo = [0u8; 32];
+        txid_lo[0] = 1;
+        let mut txid_hi = [0u8; 32];
+        txid_hi[0] = 2;
+        s.put_tx_full_batch_indexed(&[class_a_coinbase(txid_lo, high_script.clone())], true)
+            .unwrap();
+        s.put_tx_full_batch_indexed(&[class_a_coinbase(txid_hi, low_script.clone())], true)
+            .unwrap();
+        for shard in [0usize, 2, 3] {
+            let script = script_for_prefix_shard(shard, n_shards);
+            let mut txid = [0u8; 32];
+            txid[0] = 10 + shard as u8;
+            s.put_tx_full_batch_indexed(&[class_a_coinbase(txid, script)], true)
+                .unwrap();
+        }
+        let udir = dir.join("unsorted");
+        let out = crate::collect_unsorted_shard_files(&s, &udir, n_shards, 1, None).unwrap();
+        assert_eq!(out.per_shard.len(), n_shards);
+        assert!(crate::unsorted_manifest_ok(&udir, n_shards));
+        assert_eq!(out.recs, 5);
+        for shard in 0..n_shards {
+            let recs = decode_unsorted_file(&crate::unsorted_shard_path(&udir, shard));
+            assert!(
+                recs.iter()
+                    .all(|r| crate::prefix_shard_of(&r.scripthash, n_shards) == shard),
+                "shard {shard} must contain only its prefix"
+            );
+            assert_eq!(recs.len() as u64, out.per_shard[shard]);
+        }
+        let shard1 = decode_unsorted_file(&crate::unsorted_shard_path(&udir, 1));
+        assert_eq!(shard1.len(), 2);
+        assert!(
+            shard1[0].scripthash > shard1[1].scripthash,
+            "collect writes fk order, not scripthash order"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    });
+}
+
+#[test]
+fn unsorted_materialize_four_shards_from_class_a_no_catalog_runs() {
+    HeadScale::test_with(HeadScale::Tiny, || {
+        let dir = tmp();
+        let s = crate::Store::create(&dir).unwrap();
+        let n_shards = 4usize;
+        let mut keys = Vec::new();
+        for shard in 0..n_shards {
+            let script = script_for_prefix_shard(shard, n_shards);
+            keys.push(script_hash(&script));
+            let mut txid = [0u8; 32];
+            txid[0] = shard as u8;
+            s.put_tx_full_batch_indexed(&[class_a_coinbase(txid, script)], true)
+                .unwrap();
+        }
+        let sh_dir = dir.join("sh4");
+        std::fs::create_dir_all(&sh_dir).unwrap();
+        let table = four_shard_dir_table(&sh_dir);
+        let udir = sh_dir.join(crate::UNSORTED_SHARD_DIR);
+        crate::collect_unsorted_shard_files(&s, &udir, n_shards, 2, None).unwrap();
+        let mat = crate::materialize_sh_from_unsorted(&table, &udir, 2, None).unwrap();
+        assert_eq!(mat.creates, 4, "all Class A creates packed");
+        assert_eq!(mat.keys, 4);
+        for k in &keys {
+            assert_eq!(table.entries(k).unwrap().len(), 1, "key must be queryable");
+        }
+        let runs = sh_dir.join("scripthash.runs");
+        assert!(
+            !runs.exists()
+                || std::fs::read_dir(&runs)
+                    .map(|it| it.count() == 0)
+                    .unwrap_or(true),
+            "unsorted path must not write catalog runs"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    });
+}
+
+#[test]
+fn unsorted_pack_sorts_numeric_fk_and_keeps_all_creates() {
+    HeadScale::test_with(HeadScale::Tiny, || {
+        let dir = tmp();
+        let sh_dir = dir.join("sh4");
+        std::fs::create_dir_all(&sh_dir).unwrap();
+        let table = four_shard_dir_table(&sh_dir);
+        let n_shards = 4usize;
+        let udir = sh_dir.join(crate::UNSORTED_SHARD_DIR);
+        std::fs::create_dir_all(&udir).unwrap();
+        let (low, high) = two_scripts_same_shard_reverse_hash(1, n_shards);
+        let sh_lo = script_hash(&low);
+        let sh_hi = script_hash(&high);
+        let mut bytes = Vec::new();
+        let mut push = |sh: [u8; 32], fk: u64| {
+            let mut r = [0u8; 24];
+            r[..16].copy_from_slice(&sh[..16]);
+            r[16..].copy_from_slice(&fk.to_le_bytes());
+            bytes.extend_from_slice(&r);
+        };
+        push(sh_hi, 256);
+        push(sh_hi, 2);
+        push(sh_lo, 3);
+        push(sh_lo, 1);
+        push(sh_lo, 1);
+        push(sh_hi, 0);
+        std::fs::write(crate::unsorted_shard_path(&udir, 1), &bytes).unwrap();
+        for shard in [0usize, 2, 3] {
+            std::fs::write(crate::unsorted_shard_path(&udir, shard), []).unwrap();
+        }
+        rbitcoin_log::capture_logs(true);
+        let mat = crate::materialize_sh_from_unsorted(&table, &udir, 1, None).unwrap();
+        let logs = rbitcoin_log::take_logs();
+        rbitcoin_log::capture_logs(false);
+        assert_eq!(mat.creates, 4, "null and duplicate (sh,fk) must not pack");
+        assert_eq!(mat.keys, 2);
+        let done: Vec<&str> = logs
+            .iter()
+            .filter_map(|(level, m)| {
+                (*level == rbitcoin_log::Level::Info
+                    && m.contains("scripthash unsorted pack shard="))
+                .then_some(m.as_str())
+            })
+            .collect();
+        assert_eq!(done.len(), 4, "one finish line per shard, got {logs:?}");
+        for shard in 0..n_shards {
+            let tag = format!("shard={shard:02x}");
+            assert!(
+                done.iter()
+                    .any(|m| m.contains(&tag) && m.contains("elapsed=")),
+                "missing finish log for {tag}: {done:?}"
+            );
+        }
+        assert!(
+            done.iter()
+                .any(|m| m.contains("shard=01") && m.contains("keys=2") && m.contains("creates=4")),
+            "data shard must log packed keys/creates: {done:?}"
+        );
+        let mut lo: Vec<u64> = table
+            .entries(&sh_lo)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.0 .0)
+            .collect();
+        lo.sort_unstable();
+        assert_eq!(lo, vec![1, 3]);
+        let mut hi: Vec<u64> = table
+            .entries(&sh_hi)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.0 .0)
+            .collect();
+        hi.sort_unstable();
+        assert_eq!(
+            hi,
+            vec![2, 256],
+            "fk 256 must sort after 2, not as LE bytes"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    });
+}
+
+#[test]
+fn unsorted_combined_skips_collect_when_done_and_resumes_unsealed() {
+    HeadScale::test_with(HeadScale::Tiny, || {
+        let dir = tmp();
+        let s = crate::Store::create(&dir).unwrap();
+        let n_shards = 4usize;
+        let mut keys = Vec::new();
+        for shard in 0..n_shards {
+            let script = script_for_prefix_shard(shard, n_shards);
+            keys.push(script_hash(&script));
+            let mut txid = [0u8; 32];
+            txid[0] = shard as u8;
+            s.put_tx_full_batch_indexed(&[class_a_coinbase(txid, script)], true)
+                .unwrap();
+        }
+        let sh_dir = dir.join("sh4");
+        std::fs::create_dir_all(&sh_dir).unwrap();
+        let table = four_shard_dir_table(&sh_dir);
+        let udir = sh_dir.join(crate::UNSORTED_SHARD_DIR);
+        crate::collect_unsorted_shard_files(&s, &udir, n_shards, 1, None).unwrap();
+        crate::materialize_sh_from_unsorted(&table, &udir, 1, None).unwrap();
+        assert!(table.unsealed_main_shards().is_empty());
+        let again = crate::materialize_sh_from_unsorted(&table, &udir, 2, None).unwrap();
+        assert_eq!(again.creates, 4);
+        for k in &keys {
+            assert_eq!(table.entries(k).unwrap().len(), 1);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    });
+}
+
+#[test]
+fn unsorted_cancel_before_collect_is_cancelled() {
+    HeadScale::test_with(HeadScale::Tiny, || {
+        let dir = tmp();
+        let s = crate::Store::create(&dir).unwrap();
+        s.put_tx_full_batch_indexed(&[class_a_coinbase([1u8; 32], vec![0x51])], true)
+            .unwrap();
+        let cancel = AtomicBool::new(true);
+        let err = crate::materialize_sh_unsorted_from_class_a(&s, 1, 1, Some(&cancel)).unwrap_err();
+        assert!(
+            matches!(err, StoreError::Cancelled(_)),
+            "expected Cancelled, got {err}"
+        );
+        assert!(
+            !crate::unsorted_manifest_ok(
+                &crate::unsorted_shard_dir(s.path()),
+                s.scripthash.head_shard_count()
+            ),
+            "cancel must not write DONE"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    });
 }

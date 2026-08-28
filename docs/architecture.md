@@ -49,7 +49,7 @@ for unknown-height bodies (mark missing → re-getdata).
 - **Electrum** is **native** to the store (optional **scripthash** tables via
   `--shindex`, default off), not a second process re-indexing blk files.
   Tip-follow does **not** wait on SH materialize; Electrum/Esplora do.
-  SH catalog runs are unique `(scripthash, create_fk)`; cold megakey pages
+  SH tip materialize is unsorted per-shard files then unique-sort; cold megakey pages
   stream into 4 KiB delta pages (schema 17).
 - **JSON-RPC** (optional) is a Core-class **subset** over archive + mempool —
   see [`rpc.md`](./rpc.md).

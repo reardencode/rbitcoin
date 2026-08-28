@@ -1086,7 +1086,7 @@ pub(crate) struct TipModeGates {
 /// **SH methods (exactly two):**
 /// - Durable head: stay/flip [`IndexMode::Tip`], discard leftover runs, Electrum
 ///   on (`sh_tip_ready`); catch-up / follow use write-behind.
-/// - No head: Class A collect + FullCold/ColdResume **while Direct** (write-behind
+/// - No head: Class A collect + unsorted pack **while Direct** (write-behind
 ///   no-ops), then Tip. Cancel leaves Direct; Electrum stays closed.
 ///
 /// **When `!shindex`:** skip SH; `sh_tip_ready = false`; Tip for follow/relay.

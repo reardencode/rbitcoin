@@ -27,14 +27,12 @@ for signet/mainnet sync. **Not** CLI.
 | `RBITCOIN_CLASS_C_INRAM_MAX_MB` | 256 | L2 cap for `confirmed` / `header_txs_*`; over → fd L0. `strong_tx` always L2 |
 | `RBITCOIN_TX_HEAD_BITS` | scale default | `tx.head` bits (dangerous on a live datadir) |
 | `RBITCOIN_TX_HEAD_REBUILD_SEAL_BITS` | 25 | Wipe/empty-head MPHF range `2^bits` (26 wider; clamp 6..=26) |
-| `RBITCOIN_TX_HEAD_REBUILD_WORKERS` | min(n-cpu, free-RAM/750 MiB) | Wipe/empty-head MPHF parallelism (`1` = serial). Unset = auto. **Not** SH's 1.5 GiB cap |
+| `RBITCOIN_TX_HEAD_REBUILD_WORKERS` | min(n-cpu, free-RAM/750 MiB) | Wipe/empty-head MPHF parallelism (`1` = serial). Unset = auto. **Not** SH pack's 2 GiB cap |
 | `RBITCOIN_TX_IDX_SOFT_SPAN` | 16 GiB | Per-stem idx soft rollover (do not set above 32 GiB hard span). Does **not** cut `tx.head`. |
 | `RBITCOIN_HEAD_SLOTS_HEADER` | scale default | Header hash-head initial slots (power of two) |
 | `RBITCOIN_SH_UNIQUE_HINT` | off | SH unique-hint probe |
 | `RBITCOIN_SH_FORCE_REBUILD` | off | Sticky SH rebuild (also in OPERATOR) |
-| `RBITCOIN_SH_RECOLLECT_WORKERS` | min(n-cpu, free-RAM/1.5 GiB) | SH recollect parallelism (`1` = serial). Unset = auto (see [`ibd-memory.md`](./ibd-memory.md)) |
-| `RBITCOIN_SH_RECOLLECT_SPILL_BYTES` | 128 MiB | Recollect per-worker spill (clamp 16–512 MiB); compact floor is 3/4 of this |
-| `RBITCOIN_SH_MERGE_WORKERS` | min(n-cpu, free-RAM/1.5 GiB) | Recollect + shard k-way (`1` = serial). Unset = auto (see [`ibd-memory.md`](./ibd-memory.md)) |
+| `RBITCOIN_SH_MERGE_WORKERS` | min(n-cpu, free-RAM/2 GiB) | Unsorted SH pack (`1` = serial). Unset = auto (see [`ibd-memory.md`](./ibd-memory.md)) |
 | `RBITCOIN_P2P_MAX_INBOUND` | 125 | Only if `--maxinbound` / conf omitted |
 
 ## Hardcoded (no env)
@@ -67,8 +65,11 @@ for signet/mainnet sync. **Not** CLI.
 | `RBITCOIN_TX_HEAD_ACCESS` | Deleted; tables are always fd pread/pwrite |
 | `RBITCOIN_IO=mmap` | Deleted; unknown token falls through to default |
 | `RBITCOIN_HEAD_SLOTS_TX` | Deleted; `tx.head` is segmented address head |
-| `RBITCOIN_SH_MAX_DIRECT_MERGE` | Deleted; catalog materialize is always k-way |
-| `RBITCOIN_SH_TARGET_RUN_BYTES` | Deleted; recollect spill size is `RBITCOIN_SH_RECOLLECT_SPILL_BYTES` |
+| `RBITCOIN_SH_MAX_DIRECT_MERGE` | Deleted; catalog k-way materialize removed (unsorted shards are the tip path) |
+| `RBITCOIN_SH_MATERIALIZE` | Deleted; unsorted-shard collect/pack is the default (was env-select vs k-way) |
+| `RBITCOIN_SH_RECOLLECT_WORKERS` | Deleted; unsorted collect is always nCPU |
+| `RBITCOIN_SH_RECOLLECT_SPILL_BYTES` | Deleted; catalog recollect/spill is gone (unsorted shards) |
+| `RBITCOIN_SH_TARGET_RUN_BYTES` | Deleted; catalog recollect/spill is gone |
 | `RBITCOIN_SH_MERGE_FANIN` | Deleted; no fan-in reduce |
 
 ## Related

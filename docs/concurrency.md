@@ -13,7 +13,7 @@ Short map of who may write which tables. **Format is unstable until 1.0.**
 | Confirm **write** | 1 OS thread (`ibd-confirm-write`) + 1 process-wide `ibd-confirm-head` | **sole Class A appender** (`txout`+`inwit`+`spent`; IBD encodes ins from `Arc<Block>` + SpendEdges) + structural + Class C + spend annotate on **`spent.body`** + tip GC; **`block_queue_dequeue_height`**. `tx.head` write-behind insert runs on **`ibd-confirm-head`** overlapping structural + Class C (not a per-batch spawn). Class A **never leads tip** (same commit era; no archive-ahead DONTNEED) |
 | IBD main loop | 1 tokio task | none (orchestration only) |
 
-**IoSession TLS:** one completion session per OS thread (`with_thread_local`). Nested calls panic. Harvest tracks pending `(kind, epoch, slot)`; unexpected CQE / undrained leftover / CQ overflow is `Corrupt`, not a TipOnly miss. `begin_batch` drains leftover SQEs before bumping epoch and **returns `Err`** if the session is poisoned or leftover cannot drain (probe / idx / BDZ g-pages / rel preads share the ring — a swallowed drain must not surface as leftover CQE). Drain harvest does not ignore unmatched CQE or CQ overflow. Held idx fill fails closed on that error (no libc fallback on a dirty ring). Undrained / unexpected / wait-timeout **poisons** the session and drops the TLS ring so the next wave opens a new one. `submit_and_wait_one` is capped (5 s). Drain before SQE buffers drop (spend annotate / k-way merge `DrainOnDrop`). Backends: Linux `io_uring` (per thread), portable `pool` (Darwin default; **one process worker set**, per-session CQE queues), Windows IOCP. `RBITCOIN_IO=pread` disables the session. SH k-way merge submits 256 KiB ahead preads on that TLS session and waits only when promote needs a page that has not completed.
+**IoSession TLS:** one completion session per OS thread (`with_thread_local`). Nested calls panic. Harvest tracks pending `(kind, epoch, slot)`; unexpected CQE / undrained leftover / CQ overflow is `Corrupt`, not a TipOnly miss. `begin_batch` drains leftover SQEs before bumping epoch and **returns `Err`** if the session is poisoned or leftover cannot drain (probe / idx / BDZ g-pages / rel preads share the ring — a swallowed drain must not surface as leftover CQE). Drain harvest does not ignore unmatched CQE or CQ overflow. Held idx fill fails closed on that error (no libc fallback on a dirty ring). Undrained / unexpected / wait-timeout **poisons** the session and drops the TLS ring so the next wave opens a new one. `submit_and_wait_one` is capped (5 s). Drain before SQE buffers drop (spend annotate `DrainOnDrop`). Backends: Linux `io_uring` (per thread), portable `pool` (Darwin default; **one process worker set**, per-session CQE queues), Windows IOCP. `RBITCOIN_IO=pread` disables the session. SH k-way merge submits 256 KiB ahead preads on that TLS session and waits only when promote needs a page that has not completed.
 
 **Height-ordered unified pipeline (current):** peer → **body queue** (raw only) → **lookup** (in-order from `max(path_lo, lookup_taken_hi+1)`; decode + TipOnly `head_fk`; **dequeue** raw into `loadq=14`). Hole/densify/receive: in-hand = confirmed ∨ BQ hash ∨ `H ≤ lookup_taken_hi` → **load** (recv load-sized batch; stamp + pin + assemble) → scripts → write. Stage IO: [`invariants.md`](./invariants.md). **No** peer→confirm-feed wire retain. **No** hash-only / Class-A-only confirm (bq wire required). Load bind order is same-batch → in-flight → load-batch skeleton → Corrupt (plan=None leftover TipOnly). Lookup does not own a published identity chain. Write drain inserts `tx.head` in parallel with Class C on the process-wide `ibd-confirm-head` thread. Drain complete is max inserted **fk** (not tip/fence — those advance during drain). Header-cache GC polls store tip every load pack. In-flight prune is **after the last load batch of a lookup wave finishes its in-flight read**, using the drain+fence height snapshotted before that wave's TipOnly (`docs/invariants.md`). No leftover pending map. Bodies without a known height are marked missing and re-getdata after the height map is ready — there is **no** dual-track archive-job / ContigPark fallback. Load pack **waits** on `feed.cv` when tip+1 is in `ready` but the BQ is not resolve-complete (no retain/BQ spin). Pack takes the feed mutex to collect candidates and again to mark inflight; one BQ `pack_snapshot` in between.
 
@@ -52,7 +52,7 @@ The 2-wave split is sealed age, not an IO flag.
 
 | Mode | When | Spentness | Durable `tx.head` / spends | SH |
 |------|------|-----------|----------------------------|-----|
-| **Direct** | IBD (`enter_direct_index_mode`) | confirmed-strong annotations | commit-stage head insert; spend annotate in same stage | append-only target-sized runs + SEAL → bulk at tip |
+| **Direct** | IBD (`enter_direct_index_mode`) | confirmed-strong annotations | commit-stage head insert; spend annotate in same stage | Class A collect → unsorted shards → seal at tip |
 | **Tip** | after IBD (`enter_tip_mode`) | confirmed-strong annotations | live heads + confirm spends | write-behind after tip commit (may lag live tip by 1+ blocks) |
 
 Do not enter Tip until IBD catch-up complete: no best-chain remainder
@@ -60,10 +60,9 @@ Do not enter Tip until IBD catch-up complete: no best-chain remainder
 on-path getdata) and path high water at or within 1 of max peer height
 (one-block version chatter only when `headers_done`). Competing
 `hash_height` and leftover explore getdata are not remainder. Tip entry
-bulk-materializes SH
-(runs → sliced k-way per prefix shard, workers
-capped at one per 1.5 GiB host free RAM, writing `scripthash.body/NN`
-and sealing `scripthash.head/NN` themselves). Shared file `scripthash.body`
+bulk-materializes SH (Class A collect → unsorted per-shard files →
+in-place unique-sort + seal `scripthash.head/NN`; pack workers capped at
+one per 2 GiB host free RAM). Shared file `scripthash.body`
 is one writer. Overflow body
 is one writer (ingest / compact). It does **not** rebuild `tx.head` or
 spend annotations.

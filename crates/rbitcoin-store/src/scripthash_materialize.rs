@@ -1,28 +1,28 @@
-//! Sliced k-way SH tip materialize: one worker per prefix shard.
+//! Unsorted-shard SH tip materialize: one Class A pass into per-shard files,
+//! then in-place unique-sort + pack + seal `head/NN`.
 //!
-//! Sharded bodies: each worker packs `body/NN` and seals `head/NN` itself.
+//! Sharded bodies: each pack worker writes `body/NN` and seals `head/NN` itself.
 //! Shared body: one writer, prefix `SHCOLDP1` HWM.
 
 use crate::error::StoreError;
-use crate::file::ensure_nofile_budget_at_least;
+use crate::io_handle::IoHandle;
 use crate::scripthash::{ColdProgress, ScriptHashTable, ShBodyLayout, ShShardPack};
-use crate::sorted_run::{for_each_merged_rec_shard, SortedRunPath};
+use crate::scripthash_head::prefix_shard_of;
+use crate::scripthash_layout::SH_HEAD_KEY_LEN;
+use crate::store::Store;
+use crate::tx_table::TxTable;
 use rbitcoin_primitives::Fk;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::fs::{self, File, OpenOptions};
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const MATERIALIZE_STATUS_INTERVAL: Duration = Duration::from_secs(10);
 
-fn status_interval_due(last: Option<Instant>, now: Instant, interval: Duration) -> bool {
-    match last {
-        None => true,
-        Some(t) => now.saturating_duration_since(t) >= interval,
-    }
-}
-
-/// Global pack/publish counters. One observer thread samples these.
+/// Global pack/publish counters (per-shard seal logs sample these).
 struct MaterializeProgress {
     recs_packed: AtomicU64,
     keys_packed: AtomicU64,
@@ -32,18 +32,6 @@ struct MaterializeProgress {
     pack_ns: AtomicU64,
     mphf_ns: AtomicU64,
     body_flush_ns: AtomicU64,
-    stop: AtomicBool,
-    complete: AtomicBool,
-    wake: Condvar,
-    wake_mu: Mutex<()>,
-}
-
-struct StatusSnapshot {
-    keys: u64,
-    creates: u64,
-    pending: u64,
-    shards: u32,
-    pct: f64,
 }
 
 impl MaterializeProgress {
@@ -57,29 +45,6 @@ impl MaterializeProgress {
             pack_ns: AtomicU64::new(0),
             mphf_ns: AtomicU64::new(0),
             body_flush_ns: AtomicU64::new(0),
-            stop: AtomicBool::new(false),
-            complete: AtomicBool::new(false),
-            wake: Condvar::new(),
-            wake_mu: Mutex::new(()),
-        }
-    }
-
-    fn snapshot(&self, total_recs: u64, done: bool) -> StatusSnapshot {
-        let creates = self.recs_packed.load(Ordering::Relaxed);
-        let published = self.creates_published.load(Ordering::Relaxed);
-        let pct = if done {
-            100.0
-        } else if total_recs > 0 {
-            (100.0 * creates as f64 / total_recs as f64).clamp(0.0, 99.9)
-        } else {
-            0.0
-        };
-        StatusSnapshot {
-            keys: self.keys_packed.load(Ordering::Relaxed),
-            creates,
-            pending: creates.saturating_sub(published),
-            shards: self.shards_published.load(Ordering::Relaxed),
-            pct,
         }
     }
 
@@ -93,39 +58,7 @@ impl MaterializeProgress {
     }
 }
 
-fn log_materialize_status(
-    last_log: &mut Option<Instant>,
-    snap: &StatusSnapshot,
-    n_shards: usize,
-    t0: Instant,
-) {
-    *last_log = Some(Instant::now());
-    let elapsed = t0.elapsed();
-    let secs = elapsed.as_secs_f64().max(1e-3);
-    let recs_per_s = snap.creates as f64 / secs;
-    rbitcoin_log::info!(
-        "node: scripthash materialize status keys≈{} creates≈{} pending≈{} \
-         pct≈{:.1}% shards={}/{} rate≈{:.0}creates/s elapsed={elapsed:?}",
-        snap.keys,
-        snap.creates,
-        snap.pending,
-        snap.pct,
-        snap.shards,
-        n_shards,
-        recs_per_s,
-    );
-}
-
-struct StopOnDrop<'a>(&'a MaterializeProgress);
-
-impl Drop for StopOnDrop<'_> {
-    fn drop(&mut self) {
-        self.0.stop.store(true, Ordering::Release);
-        self.0.wake.notify_all();
-    }
-}
-
-/// CPU-summed stage times for [`materialize_sh_shards`] (parallel workers add).
+/// CPU-summed stage times for unsorted SH pack (parallel workers add).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MaterializeStageNs {
     pub merge_ns: u64,
@@ -134,7 +67,7 @@ pub struct MaterializeStageNs {
     pub body_flush_ns: u64,
 }
 
-/// Result of [`materialize_sh_shards`].
+/// Result of unsorted SH collect + pack.
 #[derive(Debug, Clone, Copy)]
 pub struct ShShardMaterialize {
     pub creates: u64,
@@ -158,79 +91,16 @@ impl ShShardMaterialize {
     }
 }
 
-fn decode_sh_run_rec(rec: &[u8]) -> Result<([u8; 32], Fk), StoreError> {
-    if rec.len() < 40 {
-        return Err(StoreError::Corrupt("sh run short record in shard merge"));
+fn decode_unsorted_rec(rec: &[u8]) -> Result<([u8; 32], Fk), StoreError> {
+    if rec.len() != UNSORTED_REC_LEN {
+        return Err(StoreError::Corrupt("scripthash unsorted rec length"));
     }
     let mut sh = [0u8; 32];
-    sh.copy_from_slice(&rec[..32]);
-    let fk = Fk(u64::from_le_bytes(rec[32..40].try_into().unwrap()));
+    sh[..SH_HEAD_KEY_LEN].copy_from_slice(&rec[..SH_HEAD_KEY_LEN]);
+    let fk = Fk(u64::from_le_bytes(
+        rec[SH_HEAD_KEY_LEN..].try_into().unwrap(),
+    ));
     Ok((sh, fk))
-}
-
-fn resolve_workers(
-    requested: usize,
-    n_shards: usize,
-    n_runs: usize,
-    layout: ShBodyLayout,
-) -> usize {
-    let n_shards = n_shards.max(1);
-    let mut workers = requested.max(1).min(n_shards);
-    let k = n_runs.max(1);
-    let want = (workers.saturating_mul(k).saturating_add(64)) as u64;
-    let (soft, _) = ensure_nofile_budget_at_least(want);
-    if soft > 0 && (soft as usize) < want as usize {
-        let clamped = (soft as usize / k).max(1).min(n_shards);
-        if clamped < workers {
-            rbitcoin_log::warn!(
-                "store: scripthash shard workers clamped {workers}→{clamped} \
-                 (nofile soft={soft} runs={k} fds≈{})",
-                workers.saturating_mul(k)
-            );
-            workers = clamped;
-        }
-    }
-    if layout == ShBodyLayout::Shared && workers > 1 {
-        workers = 1;
-    }
-    workers
-}
-
-fn pack_shard(
-    table: &ScriptHashTable,
-    inputs: &[SortedRunPath],
-    cuts: &[Vec<u64>],
-    shard: usize,
-    cancel: Option<&AtomicBool>,
-    progress: &MaterializeProgress,
-) -> Result<ShShardPack, StoreError> {
-    let mut session = table.pack_shard_session(shard)?;
-    let t_loop = Instant::now();
-    for_each_merged_rec_shard(inputs, cuts, shard, false, |rec| {
-        if cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
-            return Err(StoreError::Cancelled("scripthash shard pack"));
-        }
-        let (sh, fk) = decode_sh_run_rec(rec)?;
-        if fk.is_null() {
-            return Ok(());
-        }
-        session.push_sorted_fk(sh, fk)?;
-        progress.recs_packed.fetch_add(1, Ordering::Relaxed);
-        Ok(())
-    })?;
-    let loop_wall = t_loop.elapsed().as_nanos() as u64;
-    let pack_during_loop = session.pack_ns;
-    progress.merge_ns.fetch_add(
-        loop_wall.saturating_sub(pack_during_loop),
-        Ordering::Relaxed,
-    );
-    let pack = session.finish_pack()?;
-    progress.pack_ns.fetch_add(pack.pack_ns, Ordering::Relaxed);
-    progress
-        .body_flush_ns
-        .fetch_add(pack.body_flush_ns, Ordering::Relaxed);
-    progress.keys_packed.fetch_add(pack.keys, Ordering::Relaxed);
-    Ok(pack)
 }
 
 fn seal_shard(
@@ -267,25 +137,528 @@ fn seal_shard(
     Ok(())
 }
 
-/// Pack prefix shards in parallel. Sharded: each worker seals its own `head/NN`.
-pub fn materialize_sh_shards(
-    table: &ScriptHashTable,
-    inputs: &[SortedRunPath],
-    resume_from: usize,
+struct ShardPool {
+    jobs: Mutex<VecDeque<usize>>,
+    err: Mutex<Option<StoreError>>,
+}
+
+/// Temp dir for one Class A pass → unsorted per-shard 24-byte records
+/// (16-byte head prefix + create_fk).
+pub const UNSORTED_SHARD_DIR: &str = "scripthash.unsorted";
+const UNSORTED_DONE_NAME: &str = "DONE";
+const UNSORTED_DONE_MAGIC: &[u8; 8] = b"SHUNSRT2";
+const UNSORTED_REC_LEN: usize = SH_HEAD_KEY_LEN + 8;
+const UNSORTED_FLUSH_BYTES: usize = 1024 * 1024;
+const UNSORTED_ALLOC_STEP: u64 = 64 << 20;
+const CLASS_A_CHUNK_FKS: u64 = 64_000;
+
+/// RAM budget per unsorted-shard pack worker (one file image + unique pack recs).
+pub const SH_UNSORTED_PACK_RAM_BYTES: u64 = 2 << 30;
+
+/// Collect / pack result counts for one unsorted-shard cold pass.
+#[derive(Clone, Debug, Default)]
+pub struct UnsortedShardCollect {
+    pub recs: u64,
+    pub per_shard: Vec<u64>,
+}
+
+pub fn unsorted_shard_dir(store_dir: &Path) -> PathBuf {
+    store_dir.join(UNSORTED_SHARD_DIR)
+}
+
+pub fn unsorted_shard_path(dir: &Path, shard: usize) -> PathBuf {
+    dir.join(format!("{shard:02x}"))
+}
+
+/// Collect workers: nCPU (1 MiB write buffers; no RAM cap / env).
+pub fn unsorted_collect_workers() -> usize {
+    crate::sorted_run::logical_cpus()
+}
+
+/// Pack workers: `RBITCOIN_SH_MERGE_WORKERS` or free RAM / 2 GiB.
+pub fn unsorted_pack_workers() -> usize {
+    if let Ok(s) = std::env::var("RBITCOIN_SH_MERGE_WORKERS") {
+        if let Ok(n) = s.parse::<usize>() {
+            return n.clamp(1, 256);
+        }
+    }
+    crate::sorted_run::workers_for_free_ram(
+        crate::sorted_run::logical_cpus(),
+        crate::sorted_run::host_mem_available_bytes().unwrap_or(0),
+        SH_UNSORTED_PACK_RAM_BYTES,
+    )
+}
+
+fn encode_unsorted_rec(sh: &[u8; 32], fk: Fk) -> [u8; UNSORTED_REC_LEN] {
+    let mut r = [0u8; UNSORTED_REC_LEN];
+    r[..SH_HEAD_KEY_LEN].copy_from_slice(&sh[..SH_HEAD_KEY_LEN]);
+    r[SH_HEAD_KEY_LEN..].copy_from_slice(&fk.0.to_le_bytes());
+    r
+}
+
+fn pwrite_all(file: &File, path: &Path, offset: u64, bytes: &[u8]) -> Result<(), StoreError> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let handle = IoHandle::from_file(file);
+    let mut done = 0usize;
+    while done < bytes.len() {
+        let rc = handle.pwrite(offset + done as u64, &bytes[done..]);
+        if rc < 0 {
+            return Err(StoreError::io(path, io::Error::from_raw_os_error(-rc)));
+        }
+        if rc == 0 {
+            return Err(StoreError::io(
+                path,
+                io::Error::new(io::ErrorKind::WriteZero, "pwrite returned 0"),
+            ));
+        }
+        done += rc as usize;
+    }
+    Ok(())
+}
+
+struct UnsortedShardSink {
+    path: PathBuf,
+    file: File,
+    write: Mutex<UnsortedShardWrite>,
+}
+
+struct UnsortedShardWrite {
+    cursor: u64,
+    allocated: u64,
+}
+
+fn ensure_unsorted_allocated(
+    file: &File,
+    path: &Path,
+    allocated: &mut u64,
+    need: u64,
+    write_len: usize,
+) -> Result<(), StoreError> {
+    if need <= *allocated {
+        return Ok(());
+    }
+    if write_len < UNSORTED_FLUSH_BYTES {
+        return Ok(());
+    }
+    let new_cap = need
+        .div_ceil(UNSORTED_ALLOC_STEP)
+        .saturating_mul(UNSORTED_ALLOC_STEP)
+        .max(need);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        let rc = unsafe { libc::fallocate(file.as_raw_fd(), 0, 0, new_cap as i64) };
+        if rc == 0 {
+            *allocated = new_cap;
+            return Ok(());
+        }
+    }
+    file.set_len(new_cap).map_err(|e| StoreError::io(path, e))?;
+    *allocated = new_cap;
+    Ok(())
+}
+
+fn flush_unsorted_buf(sink: &UnsortedShardSink, buf: &mut Vec<u8>) -> Result<(), StoreError> {
+    if buf.is_empty() {
+        return Ok(());
+    }
+    if !buf.len().is_multiple_of(UNSORTED_REC_LEN) {
+        return Err(StoreError::Corrupt(
+            "scripthash unsorted shard buffer not a multiple of 24",
+        ));
+    }
+    let n = buf.len() as u64;
+    let mut g = sink.write.lock().unwrap();
+    let off = g.cursor;
+    g.cursor = g.cursor.saturating_add(n);
+    let need = g.cursor;
+    ensure_unsorted_allocated(&sink.file, &sink.path, &mut g.allocated, need, buf.len())?;
+    pwrite_all(&sink.file, &sink.path, off, buf)?;
+    buf.clear();
+    Ok(())
+}
+
+fn write_unsorted_done(dir: &Path, per_shard: &[u64]) -> Result<(), StoreError> {
+    let n = per_shard.len() as u32;
+    let mut buf = Vec::with_capacity(12 + per_shard.len() * 8);
+    buf.extend_from_slice(UNSORTED_DONE_MAGIC);
+    buf.extend_from_slice(&n.to_le_bytes());
+    for c in per_shard {
+        buf.extend_from_slice(&c.to_le_bytes());
+    }
+    let tmp = dir.join(format!("{UNSORTED_DONE_NAME}.tmp"));
+    let dst = dir.join(UNSORTED_DONE_NAME);
+    fs::write(&tmp, &buf).map_err(|e| StoreError::io(&tmp, e))?;
+    {
+        let f = OpenOptions::new()
+            .write(true)
+            .open(&tmp)
+            .map_err(|e| StoreError::io(&tmp, e))?;
+        f.sync_all().map_err(|e| StoreError::io(&tmp, e))?;
+    }
+    fs::rename(&tmp, &dst).map_err(|e| StoreError::io(&dst, e))?;
+    Ok(())
+}
+
+/// True when `DONE` matches `n_shards` and every shard file is `count * 40` bytes.
+pub fn unsorted_manifest_ok(dir: &Path, n_shards: usize) -> bool {
+    let p = dir.join(UNSORTED_DONE_NAME);
+    let Ok(buf) = fs::read(&p) else {
+        return false;
+    };
+    if buf.len() < 12 || buf.len() != 12 + n_shards * 8 || &buf[..8] != UNSORTED_DONE_MAGIC {
+        return false;
+    }
+    let n = u32::from_le_bytes(buf[8..12].try_into().unwrap_or([0; 4])) as usize;
+    if n != n_shards {
+        return false;
+    }
+    for i in 0..n_shards {
+        let off = 12 + i * 8;
+        let count = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap_or([0; 8]));
+        let path = unsorted_shard_path(dir, i);
+        let Ok(meta) = fs::metadata(&path) else {
+            return false;
+        };
+        if meta.len() != count.saturating_mul(UNSORTED_REC_LEN as u64) {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn clear_unsorted_shard_dir(dir: &Path) {
+    let _ = fs::remove_dir_all(dir);
+}
+
+/// One Class A pass: n workers scan fk chunks and pwrite 24-byte recs to `n_shards` FDs.
+pub fn collect_unsorted_shard_files(
+    store: &Store,
+    dir: &Path,
+    n_shards: usize,
     workers: usize,
+    cancel: Option<&AtomicBool>,
+) -> Result<UnsortedShardCollect, StoreError> {
+    let last = store.txs.count();
+    if last == 0 {
+        return collect_unsorted_from_txs(&store.txs, dir, n_shards, 1, 0, workers, cancel);
+    }
+    collect_unsorted_from_txs(&store.txs, dir, n_shards, 1, last, workers, cancel)
+}
+
+fn collect_unsorted_from_txs(
+    txs: &TxTable,
+    dir: &Path,
+    n_shards: usize,
+    first: u64,
+    last: u64,
+    workers: usize,
+    cancel: Option<&AtomicBool>,
+) -> Result<UnsortedShardCollect, StoreError> {
+    let n_shards = n_shards.max(1);
+    clear_unsorted_shard_dir(dir);
+    fs::create_dir_all(dir).map_err(|e| StoreError::io(dir, e))?;
+    let mut sinks = Vec::with_capacity(n_shards);
+    for shard in 0..n_shards {
+        let path = unsorted_shard_path(dir, shard);
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .map_err(|e| StoreError::io(&path, e))?;
+        sinks.push(UnsortedShardSink {
+            path,
+            file,
+            write: Mutex::new(UnsortedShardWrite {
+                cursor: 0,
+                allocated: 0,
+            }),
+        });
+    }
+
+    if last < first {
+        let per_shard = vec![0u64; n_shards];
+        write_unsorted_done(dir, &per_shard)?;
+        return Ok(UnsortedShardCollect { recs: 0, per_shard });
+    }
+
+    let work_span = last.saturating_sub(first.saturating_sub(1));
+    let workers = workers.max(1).min(256);
+    let by_size = work_span.div_ceil(CLASS_A_CHUNK_FKS).max(1) as usize;
+    let n_chunks = by_size.max(workers.min(work_span as usize).max(1));
+    let chunk_span = work_span.div_ceil(n_chunks as u64).max(1);
+    let workers = workers.min(n_chunks);
+    let next_chunk = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let first_err: Mutex<Option<StoreError>> = Mutex::new(None);
+    let n_recs = AtomicU64::new(0);
+    let t0 = Instant::now();
+
+    rbitcoin_log::info!(
+        "store: scripthash unsorted collect start n_shards={n_shards} workers={workers} \
+         chunks={n_chunks} first={first} last={last}"
+    );
+
+    std::thread::scope(|scope| {
+        let sinks = &sinks;
+        let next_chunk = &next_chunk;
+        let stop = &stop;
+        let first_err = &first_err;
+        let n_recs = &n_recs;
+        scope.spawn(|| {
+            let mut last_log = Instant::now();
+            loop {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+                if last_log.elapsed() < MATERIALIZE_STATUS_INTERVAL {
+                    continue;
+                }
+                last_log = Instant::now();
+                let recs = n_recs.load(Ordering::Relaxed);
+                rbitcoin_log::info!(
+                    "store: scripthash unsorted collect status recs≈{recs} assigned={} \
+                     workers={workers} elapsed={:?}",
+                    next_chunk.load(Ordering::Relaxed).min(n_chunks),
+                    t0.elapsed()
+                );
+            }
+        });
+        let mut joins = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            joins.push(scope.spawn(|| {
+                let mut bufs: Vec<Vec<u8>> = (0..n_shards).map(|_| Vec::new()).collect();
+                loop {
+                    if stop.load(Ordering::Relaxed)
+                        || cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false)
+                    {
+                        stop.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                    if first_err.lock().unwrap().is_some() {
+                        break;
+                    }
+                    let i = next_chunk.fetch_add(1, Ordering::Relaxed);
+                    if i >= n_chunks {
+                        break;
+                    }
+                    let lo = first.saturating_add((i as u64).saturating_mul(chunk_span));
+                    let hi = lo.saturating_add(chunk_span).saturating_sub(1).min(last);
+                    if lo > last {
+                        continue;
+                    }
+                    match txs.for_each_script_hashes_in_fk_span(lo, hi, |fk, sh| {
+                        let shard = prefix_shard_of(&sh, n_shards);
+                        let rec = encode_unsorted_rec(&sh, fk);
+                        bufs[shard].extend_from_slice(&rec);
+                        n_recs.fetch_add(1, Ordering::Relaxed);
+                        if bufs[shard].len() >= UNSORTED_FLUSH_BYTES {
+                            flush_unsorted_buf(&sinks[shard], &mut bufs[shard])?;
+                        }
+                        Ok(())
+                    }) {
+                        Ok(()) => {}
+                        Err(StoreError::Cancelled(_)) => {
+                            stop.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                        Err(e) => {
+                            *first_err.lock().unwrap() = Some(e);
+                            stop.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                }
+                for (shard, buf) in bufs.iter_mut().enumerate() {
+                    if let Err(e) = flush_unsorted_buf(&sinks[shard], buf) {
+                        *first_err.lock().unwrap() = Some(e);
+                        stop.store(true, Ordering::Relaxed);
+                    }
+                }
+            }));
+        }
+        for j in joins {
+            if j.join().is_err() {
+                *first_err.lock().unwrap() = Some(StoreError::Corrupt(
+                    "scripthash unsorted collect worker panicked",
+                ));
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+    });
+
+    if let Some(e) = first_err.lock().unwrap().take() {
+        return Err(e);
+    }
+    if cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
+        return Err(StoreError::Cancelled("scripthash unsorted class a collect"));
+    }
+
+    let mut per_shard = Vec::with_capacity(n_shards);
+    for sink in &sinks {
+        let bytes = sink.write.lock().unwrap().cursor;
+        if !bytes.is_multiple_of(UNSORTED_REC_LEN as u64) {
+            return Err(StoreError::Corrupt(
+                "scripthash unsorted shard size not a multiple of 24",
+            ));
+        }
+        sink.file
+            .set_len(bytes)
+            .map_err(|e| StoreError::io(&sink.path, e))?;
+        sink.file
+            .sync_all()
+            .map_err(|e| StoreError::io(&sink.path, e))?;
+        per_shard.push(bytes / UNSORTED_REC_LEN as u64);
+    }
+    write_unsorted_done(dir, &per_shard)?;
+    let recs = per_shard.iter().copied().sum();
+    rbitcoin_log::info!(
+        "store: scripthash unsorted collect done recs={recs} n_shards={n_shards} elapsed={:?}",
+        t0.elapsed()
+    );
+    Ok(UnsortedShardCollect { recs, per_shard })
+}
+
+fn rec_fk_le(rec: &[u8; UNSORTED_REC_LEN]) -> u64 {
+    u64::from_le_bytes(rec[SH_HEAD_KEY_LEN..].try_into().unwrap())
+}
+
+fn sort_unique_unsorted_recs(bytes: &mut Vec<u8>) -> Result<(), StoreError> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    if !bytes.len().is_multiple_of(UNSORTED_REC_LEN) {
+        return Err(StoreError::Corrupt(
+            "scripthash unsorted shard file length not a multiple of 24",
+        ));
+    }
+    let keep = {
+        let (recs, rem) = bytes.as_chunks_mut::<UNSORTED_REC_LEN>();
+        debug_assert!(rem.is_empty());
+        recs.sort_unstable_by(|a, b| {
+            a[..SH_HEAD_KEY_LEN]
+                .cmp(&b[..SH_HEAD_KEY_LEN])
+                .then(rec_fk_le(a).cmp(&rec_fk_le(b)))
+        });
+        let mut w = 0usize;
+        for r in 0..recs.len() {
+            if Fk(rec_fk_le(&recs[r])).is_null() {
+                continue;
+            }
+            if w > 0 && recs[r] == recs[w - 1] {
+                continue;
+            }
+            if w != r {
+                recs[w] = recs[r];
+            }
+            w += 1;
+        }
+        w
+    };
+    bytes.truncate(keep.saturating_mul(UNSORTED_REC_LEN));
+    Ok(())
+}
+
+fn unique_sh_key_count(bytes: &[u8]) -> usize {
+    let mut n = 0usize;
+    let mut prev: Option<&[u8]> = None;
+    for chunk in bytes.chunks_exact(UNSORTED_REC_LEN) {
+        let sh = &chunk[..SH_HEAD_KEY_LEN];
+        if prev != Some(sh) {
+            n += 1;
+            prev = Some(sh);
+        }
+    }
+    n
+}
+
+fn read_unsorted_shard_bytes(path: &Path) -> Result<Vec<u8>, StoreError> {
+    match fs::read(path) {
+        Ok(b) => Ok(b),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(StoreError::io(path, e)),
+    }
+}
+
+fn pack_unsorted_shard(
+    table: &ScriptHashTable,
+    dir: &Path,
+    shard: usize,
+    cancel: Option<&AtomicBool>,
+    progress: &MaterializeProgress,
+) -> Result<ShShardPack, StoreError> {
+    let path = unsorted_shard_path(dir, shard);
+    let mut session = table.pack_shard_session(shard)?;
+    let t_loop = Instant::now();
+    {
+        let mut bytes = read_unsorted_shard_bytes(&path)?;
+        sort_unique_unsorted_recs(&mut bytes)?;
+        session.reserve_pack_recs(unique_sh_key_count(&bytes));
+        for (i, chunk) in bytes.chunks_exact(UNSORTED_REC_LEN).enumerate() {
+            if i & 0xfff == 0 && cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
+                return Err(StoreError::Cancelled("scripthash unsorted shard pack"));
+            }
+            let (sh, fk) = decode_unsorted_rec(chunk)?;
+            session.push_sorted_fk(sh, fk)?;
+            progress.recs_packed.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let loop_wall = t_loop.elapsed().as_nanos() as u64;
+    let pack_during_loop = session.pack_ns;
+    progress.merge_ns.fetch_add(
+        loop_wall.saturating_sub(pack_during_loop),
+        Ordering::Relaxed,
+    );
+    let pack = session.finish_pack()?;
+    progress.pack_ns.fetch_add(pack.pack_ns, Ordering::Relaxed);
+    progress
+        .body_flush_ns
+        .fetch_add(pack.body_flush_ns, Ordering::Relaxed);
+    progress.keys_packed.fetch_add(pack.keys, Ordering::Relaxed);
+    Ok(pack)
+}
+
+fn pack_and_seal_unsorted_shard(
+    table: &ScriptHashTable,
+    dir: &Path,
+    shard: usize,
+    n_shards: usize,
+    cancel: Option<&AtomicBool>,
+    progress: &MaterializeProgress,
+    max_fk: &AtomicU64,
+) -> Result<(), StoreError> {
+    let t0 = Instant::now();
+    let pack = pack_unsorted_shard(table, dir, shard, cancel, progress)?;
+    let keys = pack.keys;
+    let creates = pack.creates;
+    seal_shard(table, shard, pack, max_fk, progress)?;
+    rbitcoin_log::info!(
+        "store: scripthash unsorted pack shard={shard:02x} keys={keys} creates={creates} \
+         shards={}/{} elapsed={:?}",
+        progress.shards_published.load(Ordering::Relaxed),
+        n_shards,
+        t0.elapsed()
+    );
+    Ok(())
+}
+
+/// Unique-sort each unsorted shard file in place and seal `head/NN` for unsealed shards.
+pub fn materialize_sh_from_unsorted(
+    table: &ScriptHashTable,
+    unsorted_dir: &Path,
+    pack_workers: usize,
     cancel: Option<&AtomicBool>,
 ) -> Result<ShShardMaterialize, StoreError> {
     let n_shards = table.head_shard_count().max(1);
-    let jobs: Vec<usize> = match table.body_layout() {
-        ShBodyLayout::Sharded => table.unsealed_main_shards(),
-        ShBodyLayout::Shared => {
-            if resume_from >= n_shards {
-                Vec::new()
-            } else {
-                (resume_from..n_shards).collect()
-            }
-        }
-    };
+    let jobs: Vec<usize> = table
+        .unsealed_main_shards()
+        .into_iter()
+        .filter(|s| *s < n_shards)
+        .collect();
     if jobs.is_empty() {
         return Ok(ShShardMaterialize {
             creates: table.entry_count(),
@@ -298,15 +671,7 @@ pub fn materialize_sh_shards(
             head_fill_ns: 0,
         });
     }
-    let cuts = crate::sorted_run::shard_record_starts_many(inputs, n_shards)?;
-    let workers = resolve_workers(workers, jobs.len(), inputs.len(), table.body_layout());
-    rbitcoin_log::info!(
-        "store: scripthash shard-kway start resume_from={resume_from} n_shards={n_shards} \
-         jobs={} workers={workers} runs={} fds≈{}",
-        jobs.len(),
-        inputs.len(),
-        workers.saturating_mul(inputs.len().max(1))
-    );
+    let workers = pack_workers.max(1).min(jobs.len());
     let t0 = Instant::now();
     let progress = MaterializeProgress::new();
     let already = (n_shards - jobs.len()) as u32;
@@ -317,54 +682,29 @@ pub fn materialize_sh_shards(
     progress
         .creates_published
         .store(table.entry_count(), Ordering::Relaxed);
-    if let Some(p) = ColdProgress::load(table.store_dir()).ok().flatten() {
-        progress
-            .keys_packed
-            .store(p.keys_written, Ordering::Relaxed);
-    }
-    let total_recs: u64 = inputs.iter().map(|r| r.count).sum();
     let max_fk = AtomicU64::new(0);
+    rbitcoin_log::info!(
+        "store: scripthash unsorted pack start unsealed={} n_shards={n_shards} workers={workers}",
+        jobs.len()
+    );
 
     let out = std::thread::scope(|scope| {
         let progress = &progress;
         let max_fk = &max_fk;
-        let _stop = StopOnDrop(progress);
-        scope.spawn(move || {
-            let mut last = None;
-            loop {
-                let stop = progress.stop.load(Ordering::Relaxed);
-                if status_interval_due(last, Instant::now(), MATERIALIZE_STATUS_INTERVAL) || stop {
-                    log_materialize_status(
-                        &mut last,
-                        &progress.snapshot(
-                            total_recs,
-                            stop && progress.complete.load(Ordering::Relaxed),
-                        ),
-                        n_shards,
-                        t0,
-                    );
-                }
-                if stop {
-                    break;
-                }
-                let g = progress.wake_mu.lock().unwrap();
-                if progress.stop.load(Ordering::Relaxed) {
-                    continue;
-                }
-                let wait = last
-                    .map(|t| MATERIALIZE_STATUS_INTERVAL.saturating_sub(t.elapsed()))
-                    .unwrap_or(MATERIALIZE_STATUS_INTERVAL);
-                let _ = progress.wake.wait_timeout(g, wait);
-            }
-        });
-
         if workers <= 1 {
             for shard in jobs {
                 if cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
-                    return Err(StoreError::Cancelled("scripthash shard pack"));
+                    return Err(StoreError::Cancelled("scripthash unsorted shard pack"));
                 }
-                let pack = pack_shard(table, inputs, &cuts, shard, cancel, progress)?;
-                seal_shard(table, shard, pack, max_fk, progress)?;
+                pack_and_seal_unsorted_shard(
+                    table,
+                    unsorted_dir,
+                    shard,
+                    n_shards,
+                    cancel,
+                    progress,
+                    max_fk,
+                )?;
             }
         } else {
             let shared = Arc::new(ShardPool {
@@ -374,12 +714,11 @@ pub fn materialize_sh_shards(
             let mut joins = Vec::with_capacity(workers);
             for _ in 0..workers {
                 let shared = Arc::clone(&shared);
-                let cuts = &cuts;
                 joins.push(scope.spawn(move || loop {
                     if cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
                         let mut g = shared.err.lock().unwrap();
                         if g.is_none() {
-                            *g = Some(StoreError::Cancelled("scripthash shard pack"));
+                            *g = Some(StoreError::Cancelled("scripthash unsorted shard pack"));
                         }
                         break;
                     }
@@ -390,9 +729,15 @@ pub fn materialize_sh_shards(
                     let Some(shard) = shard else {
                         break;
                     };
-                    match pack_shard(table, inputs, cuts, shard, cancel, progress)
-                        .and_then(|pack| seal_shard(table, shard, pack, max_fk, progress))
-                    {
+                    match pack_and_seal_unsorted_shard(
+                        table,
+                        unsorted_dir,
+                        shard,
+                        n_shards,
+                        cancel,
+                        progress,
+                        max_fk,
+                    ) {
                         Ok(()) => {}
                         Err(e) => {
                             *shared.err.lock().unwrap() = Some(e);
@@ -403,7 +748,9 @@ pub fn materialize_sh_shards(
             }
             for j in joins {
                 if j.join().is_err() {
-                    return Err(StoreError::Corrupt("scripthash shard pack worker panicked"));
+                    return Err(StoreError::Corrupt(
+                        "scripthash unsorted pack worker panicked",
+                    ));
                 }
             }
             let err = shared.err.lock().unwrap().take();
@@ -411,8 +758,6 @@ pub fn materialize_sh_shards(
                 return Err(e);
             }
         }
-
-        progress.complete.store(true, Ordering::Release);
         Ok(ShShardMaterialize {
             creates: progress.creates_published.load(Ordering::Relaxed),
             keys: progress.keys_packed.load(Ordering::Relaxed),
@@ -425,59 +770,74 @@ pub fn materialize_sh_shards(
         }
         .with_stages(progress.stages()))
     })?;
+    rbitcoin_log::info!(
+        "store: scripthash unsorted pack done creates≈{} keys≈{} elapsed={:?}",
+        out.creates,
+        out.keys,
+        t0.elapsed()
+    );
     Ok(out)
 }
 
-struct ShardPool {
-    jobs: Mutex<VecDeque<usize>>,
-    err: Mutex<Option<StoreError>>,
+/// Collect (unless `DONE` is valid) then pack unsealed shards from Class A.
+pub fn materialize_sh_unsorted_from_class_a(
+    store: &Store,
+    collect_workers: usize,
+    pack_workers: usize,
+    cancel: Option<&AtomicBool>,
+) -> Result<ShShardMaterialize, StoreError> {
+    let table = &store.scripthash;
+    let n_shards = table.head_shard_count().max(1);
+    let dir = unsorted_shard_dir(store.path());
+    let collect_workers = if collect_workers == 0 {
+        unsorted_collect_workers()
+    } else {
+        collect_workers
+    };
+    let pack_workers = if pack_workers == 0 {
+        unsorted_pack_workers()
+    } else {
+        pack_workers
+    };
+
+    let unsealed = table.unsealed_main_shards();
+    if unsealed.is_empty() && (!table.head_is_empty() || table.entry_count() > 0) {
+        clear_unsorted_shard_dir(&dir);
+        ColdProgress::clear(store.path());
+        return Ok(ShShardMaterialize {
+            creates: table.entry_count(),
+            keys: 0,
+            max_fk: 0,
+            merge_ns: 0,
+            pack_ns: 0,
+            mphf_ns: 0,
+            body_flush_ns: 0,
+            head_fill_ns: 0,
+        });
+    }
+
+    if table.head_is_empty() {
+        table.reinit_empty_for_cold_materialize()?;
+    }
+
+    if !unsorted_manifest_ok(&dir, n_shards) {
+        if cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
+            return Err(StoreError::Cancelled("scripthash unsorted class a collect"));
+        }
+        collect_unsorted_shard_files(store, &dir, n_shards, collect_workers, cancel)?;
+    }
+
+    let mat = materialize_sh_from_unsorted(table, &dir, pack_workers, cancel)?;
+    if table.unsealed_main_shards().is_empty() {
+        clear_unsorted_shard_dir(&dir);
+        ColdProgress::clear(store.path());
+    }
+    Ok(mat)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn materialize_status_interval_due_is_wall_only() {
-        let interval = Duration::from_secs(10);
-        let t0 = Instant::now();
-        assert!(
-            status_interval_due(None, t0, interval),
-            "first tick must emit"
-        );
-        assert!(
-            !status_interval_due(Some(t0), t0, interval),
-            "must not emit before the wall interval"
-        );
-        assert!(
-            status_interval_due(Some(t0), t0 + interval, interval),
-            "emit when the wall interval has elapsed"
-        );
-    }
-
-    #[test]
-    fn materialize_status_snapshot_is_global() {
-        let p = MaterializeProgress::new();
-        p.recs_packed.store(1_000_000, Ordering::Relaxed);
-        p.keys_packed.store(400_000, Ordering::Relaxed);
-        p.creates_published.store(250_000, Ordering::Relaxed);
-        p.shards_published.store(3, Ordering::Relaxed);
-        let s = p.snapshot(10_000_000, false);
-        assert_eq!(s.creates, 1_000_000, "creates are all packed recs");
-        assert_eq!(s.keys, 400_000, "keys are packed shards, not one worker");
-        assert_eq!(s.pending, 750_000, "pending is packed minus published");
-        assert_eq!(s.shards, 3);
-        assert!(
-            (s.pct - 10.0).abs() < 0.01,
-            "pct uses global recs/total, got {}",
-            s.pct
-        );
-        let done = p.snapshot(10_000_000, true);
-        assert!((done.pct - 100.0).abs() < 0.01);
-        let mut last = None;
-        log_materialize_status(&mut last, &s, 64, Instant::now());
-        assert!(last.is_some());
-    }
 
     #[test]
     fn materialize_stage_ns_are_populated() {
@@ -492,36 +852,22 @@ mod tests {
             ));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
-            let runs_dir = dir.join("runs");
-            std::fs::create_dir_all(&runs_dir).unwrap();
-            let rec = |sh0: u8, fk: u64| {
-                let mut r = [0u8; 40];
-                r[0] = sh0;
-                r[32..40].copy_from_slice(&fk.to_le_bytes());
-                r
-            };
-            let mut a = Vec::new();
-            let mut b = Vec::new();
-            for i in 0..8u64 {
-                let sh0 = (i as u8) * 16;
-                let body1 = rec(sh0, i * 10 + 1);
-                let body2 = rec(sh0, i * 10 + 2);
-                if i % 2 == 0 {
-                    a.extend_from_slice(&body1);
-                    a.extend_from_slice(&body2);
-                } else {
-                    b.extend_from_slice(&body1);
-                    b.extend_from_slice(&body2);
-                }
-            }
-            crate::sorted_run::write_sorted_run(&runs_dir.join("000001.run"), 40, 40, &a).unwrap();
-            crate::sorted_run::write_sorted_run(&runs_dir.join("000002.run"), 40, 40, &b).unwrap();
-            let inputs = [
-                crate::sorted_run::open_run(&runs_dir.join("000001.run")).unwrap(),
-                crate::sorted_run::open_run(&runs_dir.join("000002.run")).unwrap(),
-            ];
             let table = crate::scripthash::ScriptHashTable::create(&dir).unwrap();
-            let mat = materialize_sh_shards(&table, &inputs, 0, 1, None).unwrap();
+            let n_shards = table.head_shard_count();
+            let udir = dir.join("unsorted");
+            fs::create_dir_all(&udir).unwrap();
+            let mut bytes = Vec::new();
+            for i in 0..32u64 {
+                let mut sh = [0u8; 32];
+                sh[0] = i as u8;
+                bytes.extend_from_slice(&encode_unsorted_rec(&sh, Fk(i * 10 + 1)));
+                bytes.extend_from_slice(&encode_unsorted_rec(&sh, Fk(i * 10 + 2)));
+            }
+            fs::write(unsorted_shard_path(&udir, 0), &bytes).unwrap();
+            for shard in 1..n_shards {
+                fs::write(unsorted_shard_path(&udir, shard), []).unwrap();
+            }
+            let mat = materialize_sh_from_unsorted(&table, &udir, 1, None).unwrap();
             assert!(mat.creates >= 16);
             assert!(
                 mat.pack_ns > 0 && mat.body_flush_ns > 0 && mat.mphf_ns > 0,
@@ -537,5 +883,191 @@ mod tests {
             );
             let _ = std::fs::remove_dir_all(&dir);
         });
+    }
+
+    #[test]
+    fn unsorted_collect_workers_are_n_cores() {
+        assert_eq!(
+            unsorted_collect_workers(),
+            crate::sorted_run::logical_cpus(),
+            "collect workers follow nCPU (no RAM cap / env)"
+        );
+    }
+
+    #[test]
+    fn unsorted_pack_workers_use_2gib_budget() {
+        assert_eq!(
+            crate::sorted_run::workers_for_free_ram(8, 3 << 30, SH_UNSORTED_PACK_RAM_BYTES),
+            1,
+            "3 GiB free / 2 GiB per unsorted pack worker"
+        );
+        assert_eq!(
+            crate::sorted_run::workers_for_free_ram(16, 8 << 30, SH_UNSORTED_PACK_RAM_BYTES),
+            4,
+            "8 GiB free → 4 unsorted pack workers"
+        );
+    }
+
+    fn rec_bytes(sh0: u8, fk: u64) -> [u8; UNSORTED_REC_LEN] {
+        encode_unsorted_rec(&[sh0; 32], Fk(fk))
+    }
+
+    fn recs_of(bytes: &[u8]) -> Vec<([u8; 32], u64)> {
+        bytes
+            .chunks_exact(UNSORTED_REC_LEN)
+            .map(|c| {
+                let mut sh = [0u8; 32];
+                sh[..SH_HEAD_KEY_LEN].copy_from_slice(&c[..SH_HEAD_KEY_LEN]);
+                (
+                    sh,
+                    u64::from_le_bytes(c[SH_HEAD_KEY_LEN..].try_into().unwrap()),
+                )
+            })
+            .collect()
+    }
+
+    fn prefix_key(b: u8) -> [u8; 32] {
+        let mut k = [0u8; 32];
+        k[..SH_HEAD_KEY_LEN].fill(b);
+        k
+    }
+
+    fn tmp_sink() -> (PathBuf, UnsortedShardSink) {
+        let dir = std::env::temp_dir().join(format!(
+            "rbitcoin-sh-unsink-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("00");
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        let sink = UnsortedShardSink {
+            path: path.clone(),
+            file,
+            write: Mutex::new(UnsortedShardWrite {
+                cursor: 0,
+                allocated: 0,
+            }),
+        };
+        (dir, sink)
+    }
+
+    #[test]
+    fn unsorted_flush_appends_in_offset_order() {
+        let (dir, sink) = tmp_sink();
+        let mut a = rec_bytes(1, 1).to_vec();
+        let mut b = rec_bytes(2, 2).to_vec();
+        flush_unsorted_buf(&sink, &mut a).unwrap();
+        flush_unsorted_buf(&sink, &mut b).unwrap();
+        let bytes = fs::read(&sink.path).unwrap();
+        assert_eq!(
+            recs_of(&bytes),
+            vec![(prefix_key(1), 1), (prefix_key(2), 2)]
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unsorted_flush_concurrent_workers_do_not_tear_recs() {
+        let (dir, sink) = tmp_sink();
+        std::thread::scope(|scope| {
+            for t in 0u8..4 {
+                let sink = &sink;
+                scope.spawn(move || {
+                    let mut buf = Vec::new();
+                    for i in 0..1000u64 {
+                        buf.extend_from_slice(&rec_bytes(t, t as u64 * 1000 + i + 1));
+                        if buf.len() >= UNSORTED_REC_LEN * 17 {
+                            flush_unsorted_buf(sink, &mut buf).unwrap();
+                        }
+                    }
+                    flush_unsorted_buf(sink, &mut buf).unwrap();
+                });
+            }
+        });
+        let bytes = fs::read(&sink.path).unwrap();
+        assert_eq!(bytes.len(), 4 * 1000 * UNSORTED_REC_LEN);
+        for chunk in bytes.chunks_exact(UNSORTED_REC_LEN) {
+            let fk = u64::from_le_bytes(chunk[SH_HEAD_KEY_LEN..].try_into().unwrap());
+            assert!(fk >= 1, "every rec must be a full 24-byte create");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sort_unique_unsorted_recs_orders_fk_numerically_and_compacts() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&rec_bytes(7, 256));
+        bytes.extend_from_slice(&rec_bytes(7, 2));
+        bytes.extend_from_slice(&rec_bytes(7, 2));
+        bytes.extend_from_slice(&rec_bytes(7, 0));
+        bytes.extend_from_slice(&rec_bytes(8, 1));
+        bytes.extend_from_slice(&rec_bytes(6, 9));
+        sort_unique_unsorted_recs(&mut bytes).unwrap();
+        assert_eq!(
+            recs_of(&bytes),
+            vec![
+                (prefix_key(6), 9),
+                (prefix_key(7), 2),
+                (prefix_key(7), 256),
+                (prefix_key(8), 1),
+            ],
+            "numeric fk order (256 after 2), drop null and duplicate (sh,fk)"
+        );
+        assert_eq!(unique_sh_key_count(&bytes), 3);
+    }
+
+    #[test]
+    fn sort_unique_unsorted_recs_rejects_torn_length() {
+        let err = sort_unique_unsorted_recs(&mut vec![0u8; 39]).unwrap_err();
+        assert!(
+            matches!(err, StoreError::Corrupt(m) if m.contains("multiple of 24")),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn unsorted_rec_is_16_byte_head_prefix_plus_fk() {
+        let mut sh = [0u8; 32];
+        sh[..16].fill(0x11);
+        sh[16..].fill(0x22);
+        let rec = encode_unsorted_rec(&sh, Fk(0x0102_0304_0506_0708));
+        assert_eq!(UNSORTED_REC_LEN, 24);
+        assert_eq!(rec.len(), 24);
+        assert_eq!(&rec[..16], &[0x11; 16]);
+        assert_eq!(&rec[16..], &0x0102_0304_0506_0708u64.to_le_bytes());
+        assert!(
+            rec.iter().all(|&b| b != 0x22),
+            "must not store the trailing 16 hash bytes"
+        );
+    }
+
+    #[test]
+    fn unsorted_done_magic_is_v2() {
+        assert_eq!(UNSORTED_DONE_MAGIC, b"SHUNSRT2");
+    }
+
+    #[test]
+    fn sort_unique_collapses_full_hashes_that_share_a_16_byte_prefix() {
+        let mut a = [0u8; 32];
+        a[0] = 1;
+        a[31] = 9;
+        let mut b = [0u8; 32];
+        b[0] = 1;
+        b[31] = 8;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&encode_unsorted_rec(&a, Fk(3)));
+        bytes.extend_from_slice(&encode_unsorted_rec(&b, Fk(3)));
+        sort_unique_unsorted_recs(&mut bytes).unwrap();
+        assert_eq!(bytes.len(), UNSORTED_REC_LEN);
+        assert_eq!(unique_sh_key_count(&bytes), 1);
     }
 }

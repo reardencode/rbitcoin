@@ -171,7 +171,7 @@ Retired on purpose. Not a backlog. Not a failure.
 | **—** | Process pin FIFO / CreateResidency / ContigPark / archive sticky | Pins are plan/batch only. IBD confirm is body-queue wire → lookup → load. See AGENTS.md |
 | **—** | `rbitcoin-bench` default-member / musl / required CI | Optional crate, host A/B against a live store. Not a packaging or coverage gate |
 | **—** | `cargo miri test --workspace` | io_uring, tokio, secp256k1-sys. Same class as Q-38 (too heavy / cannot go green). Primitives only (**Q-53**); extra islands are **Q-56**. |
-| **—** | `cargo crap --fail-above --threshold 30` | At ≥90% line coverage CRAP **equals CC**. `handle_peer_frame` / confirm write / SH k-way would force **R-10** peels. Use **Q-55** regression instead. |
+| **—** | `cargo crap --fail-above --threshold 30` | At ≥90% line coverage CRAP **equals CC**. `handle_peer_frame` / confirm write / SH pack would force **R-10** peels. Use **Q-55** regression instead. |
 | **—** | ast-grep as a second clippy for style | `cognitive_complexity` and friends are allowed on purpose. Structural rules catch RSS/task-leak *shapes*; they do not re-litigate clippy. |
 
 ---

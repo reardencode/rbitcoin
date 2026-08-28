@@ -13,8 +13,7 @@ export RBITCOIN_HEAD_SCALE="${RBITCOIN_HEAD_SCALE:-tiny}"
 # Keep this list the platform-diff surface, not the whole store suite.
 STORE_PLATFORM_FILTERS=(
   file::advise_tests
-  sorted_run::tests::sh_workers
-  sorted_run::tests::sh_merge_workers_env
+  sorted_run::tests::workers_for_free_ram
   sorted_run::tests::mem_available
   sorted_run::tests::host_mem
   sorted_run::tests::darwin_vm
