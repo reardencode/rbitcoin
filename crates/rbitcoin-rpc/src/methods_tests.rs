@@ -30,6 +30,8 @@ fn ctx_empty() -> (RpcContext, PathBuf) {
         regtest: None,
         peers: None,
         chain: None,
+        addrman: None,
+        peers_path: None,
         logpath: String::new(),
         active: std::sync::Arc::new(std::sync::Mutex::new(RpcActive::default())),
         permit_bare_multisig: true,
@@ -731,6 +733,8 @@ fn all_methods_callable_empty_or_error() {
         regtest: None,
         peers: None,
         chain: None,
+        addrman: None,
+        peers_path: None,
         logpath: String::new(),
         active: std::sync::Arc::new(std::sync::Mutex::new(RpcActive::default())),
         permit_bare_multisig: true,
@@ -779,6 +783,8 @@ fn chain_methods_against_mined_regtest() {
         regtest: None,
         peers: None,
         chain: None,
+        addrman: None,
+        peers_path: None,
         logpath: String::new(),
         active: std::sync::Arc::new(std::sync::Mutex::new(RpcActive::default())),
         permit_bare_multisig: true,
@@ -1253,6 +1259,8 @@ fn ctx_regtest_hub() -> (RpcContext, PathBuf, Arc<rbitcoin_net::ChainHub>) {
         regtest: Some(Arc::new(TestMiner(Arc::clone(&hub)))),
         peers: None,
         chain: Some(Arc::clone(&hub)),
+        addrman: None,
+        peers_path: None,
         logpath: String::new(),
         active: std::sync::Arc::new(std::sync::Mutex::new(RpcActive::default())),
         permit_bare_multisig: true,
@@ -2577,6 +2585,46 @@ fn addnode_and_disconnectnode_on_table() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn addpeeraddress_adds_to_addrman_and_saves_peers() {
+    use rbitcoin_net::AddrMan;
+    use std::sync::Mutex;
+
+    let (mut ctx, dir) = ctx_empty();
+    let peers_path = dir.join("peers");
+    let am = Arc::new(Mutex::new(AddrMan::new()));
+    ctx.addrman = Some(Arc::clone(&am));
+    ctx.peers_path = Some(peers_path.clone());
+
+    let out = dispatch(
+        &ctx,
+        "addpeeraddress",
+        vec![json!("128.1.2.3"), json!(8333)],
+    )
+    .unwrap();
+    assert_eq!(out, json!({"success": true}));
+    {
+        let g = am.lock().unwrap();
+        assert_eq!(g.len(), 1);
+        assert!(g.peers().contains(&"128.1.2.3:8333".parse().unwrap()));
+    }
+    let loaded = AddrMan::load(&peers_path).unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert!(loaded.peers().contains(&"128.1.2.3:8333".parse().unwrap()));
+
+    let named = RpcParams::named(
+        json!({"address": "129.0.0.1", "port": 8334, "tried": false})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    let out = dispatch(&ctx, "addpeeraddress", named).unwrap();
+    assert_eq!(out, json!({"success": true}));
+    assert_eq!(am.lock().unwrap().len(), 2);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn addnode_two_nodes_see_each_other() {
     use rbitcoin_consensus::{ChainParams, Milestone};
@@ -2674,6 +2722,8 @@ fn rpc_honesty_mempool_budget_and_network_identity() {
         regtest: None,
         peers: None,
         chain: None,
+        addrman: None,
+        peers_path: None,
         logpath: String::new(),
         active: std::sync::Arc::new(std::sync::Mutex::new(RpcActive::default())),
         permit_bare_multisig: true,

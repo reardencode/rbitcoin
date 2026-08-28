@@ -405,6 +405,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     // True only after IBD reports true catch-up (or no peers to dial).
     // Mid-chain peer death must not enter tip mode (materialize durable indexes).
     let mut catch_up_complete = ibd_targets.is_empty();
+    let mut ibd_dial_failed_all = false;
     if !ibd_targets.is_empty() && !shutdown.requested() {
         let target_peers = max_out.clamp(8, 32);
         let ibd_cfg = IbdConfig {
@@ -457,10 +458,18 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 if shutdown.requested() {
                     warn!("signal: IBD cancelled ({e})");
                 } else {
-                    warn!(
-                        "ibd: incomplete: {e}; tip={:?} — keeping catch-up indexes (no tip mode; restart to resume)",
-                        node.tip_height()
-                    );
+                    let tip = node.tip_height().unwrap_or(0);
+                    if tip > 0 && node.hub.query.index_mode().is_tip() {
+                        warn!(
+                            "ibd: incomplete: {e}; tip={tip:?} — tip indexes present, continuing tip-follow"
+                        );
+                        catch_up_complete = true;
+                        ibd_dial_failed_all = true;
+                    } else {
+                        warn!(
+                            "ibd: incomplete: {e}; tip={tip:?} — keeping catch-up indexes (no tip mode; restart to resume)"
+                        );
+                    }
                 }
             }
         }
@@ -527,8 +536,6 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         );
     }
 
-    // Core `-seednode`: when addrman is empty, dial each seed as addr-fetch
-    // immediately (`p2p_seednode.py` empty-addrman case).
     if tip_follow_ready && !shutdown.requested() && addrman.is_empty() {
         for raw in &config.seednodes {
             let addr = match resolve_seednode(raw, config.network) {
@@ -545,41 +552,98 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             }
         }
     }
+    if !shutdown.requested() && !config.seednodes.is_empty() && !addrman.is_empty() {
+        const ADD_NEXT_SEEDNODE_SECS: u64 = 10;
+        let seeds = config.seednodes.clone();
+        let network = config.network;
+        let peers = Arc::clone(&node.peers);
+        let clock = Arc::clone(&node.hub.clock);
+        let stop = Arc::clone(&shutdown.flag);
+        let start_secs = clock.now_secs();
+        tokio::spawn(async move {
+            loop {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                if clock
+                    .now_secs()
+                    .saturating_sub(start_secs)
+                    >= ADD_NEXT_SEEDNODE_SECS
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            if stop.load(Ordering::SeqCst) {
+                return;
+            }
+            if peers.outbound_full_relay_ids().len() >= 2 {
+                return;
+            }
+            for raw in &seeds {
+                let addr = match resolve_seednode(raw, network) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        warn!("seednode {raw}: {e}");
+                        continue;
+                    }
+                };
+                let host = raw.split(':').next().unwrap_or(raw);
+                info!(
+                    "Couldn't connect to peers from addrman after {ADD_NEXT_SEEDNODE_SECS} seconds. Adding seednode ({host}) to addrfetch"
+                );
+                if let Err(e) = peers.dial(addr, PeerConnType::AddrFetch) {
+                    warn!("seednode dial {addr}: {e}");
+                }
+            }
+        });
+    }
 
     if tip_follow_ready && !shutdown.requested() {
         let follow_n = targets.len().min(max_out.min(3));
         const FOLLOW_CONNECT_SECS: u64 = 8;
-        for (i, peer) in targets.iter().take(follow_n).enumerate() {
-            if shutdown.requested() {
-                break;
+        if ibd_dial_failed_all {
+            for peer in targets.iter().take(follow_n) {
+                if let Err(e) = node.peers.dial(*peer, PeerConnType::OutboundFullRelay) {
+                    warn!("node: follow dial {peer}: {e}");
+                }
             }
-            tokio::select! {
-                biased;
-                _ = shutdown.cancelled() => {
-                    warn!("signal: skip remaining follow connects");
+            if node.follow_live_count() == 0 && !targets.is_empty() {
+                warn!("node: no follow peers connected — tip announce may stall");
+            }
+        } else {
+            for (i, peer) in targets.iter().take(follow_n).enumerate() {
+                if shutdown.requested() {
                     break;
                 }
-                result = tokio::time::timeout(
-                    Duration::from_secs(FOLLOW_CONNECT_SECS),
-                    node.follow_from(*peer),
-                ) => {
-                    match result {
-                        Ok(Ok(())) => {
-                            info!(
-                                "node: following peer[{i}] {peer} (live={})",
-                                node.follow_live_count()
-                            );
+                tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => {
+                        warn!("signal: skip remaining follow connects");
+                        break;
+                    }
+                    result = tokio::time::timeout(
+                        Duration::from_secs(FOLLOW_CONNECT_SECS),
+                        node.follow_from(*peer),
+                    ) => {
+                        match result {
+                            Ok(Ok(())) => {
+                                info!(
+                                    "node: following peer[{i}] {peer} (live={})",
+                                    node.follow_live_count()
+                                );
+                            }
+                            Ok(Err(e)) => warn!("node: follow {peer} failed: {e}"),
+                            Err(_) => warn!(
+                                "node: follow {peer} timed out ({FOLLOW_CONNECT_SECS}s)"
+                            ),
                         }
-                        Ok(Err(e)) => warn!("node: follow {peer} failed: {e}"),
-                        Err(_) => warn!(
-                            "node: follow {peer} timed out ({FOLLOW_CONNECT_SECS}s)"
-                        ),
                     }
                 }
             }
-        }
-        if node.follow_live_count() == 0 && !targets.is_empty() {
-            warn!("node: no follow peers connected — tip announce may stall");
+            if node.follow_live_count() == 0 && !targets.is_empty() {
+                warn!("node: no follow peers connected — tip announce may stall");
+            }
         }
     }
 
@@ -726,6 +790,8 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 miner,
                 Some(Arc::clone(&node.peers)),
                 Some(Arc::clone(&node.hub)),
+                Some(Arc::clone(&shared_peers)),
+                Some(peers_path.clone()),
             )
             .await
             {
