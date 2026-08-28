@@ -253,8 +253,7 @@ impl Query {
             let Some(t) = g.as_ref() else {
                 return Ok(Vec::new());
             };
-            let mut plans = Vec::new();
-            let mut elig_total = 0usize;
+            let mut meta: Vec<(Height, u64, u32)> = Vec::new();
             for step in 0..limits.max_heights {
                 let h = Height(start.0.saturating_add(step));
                 let Some(header_fk) = self.store.confirmed.get(h)? else {
@@ -263,27 +262,39 @@ impl Query {
                 let Some((first_fk, n_tx)) = self.store.header_txs.get_range(header_fk)? else {
                     break;
                 };
-                let Some(elig) = t.get_eligible(h, n_tx)? else {
-                    break;
-                };
-                let add = elig.len();
-                if !plans.is_empty()
-                    && limits.max_eligible != usize::MAX
-                    && elig_total.saturating_add(add) > limits.max_eligible
-                {
-                    break;
-                }
                 let Some(first_id) = first_fk.get() else {
                     return Err(StoreError::InvalidFk);
                 };
-                elig_total = elig_total.saturating_add(add);
-                plans.push(HeightPlan {
-                    height: h,
-                    first_id,
-                    elig,
-                });
+                meta.push((h, first_id, n_tx));
             }
-            plans
+            if meta.is_empty() {
+                Vec::new()
+            } else {
+                let n_txs: Vec<u32> = meta.iter().map(|m| m.2).collect();
+                match t.get_eligible_range(meta[0].0, &n_txs)? {
+                    None => Vec::new(),
+                    Some(eligs) => {
+                        let mut plans = Vec::new();
+                        let mut elig_total = 0usize;
+                        for (i, elig) in eligs.into_iter().enumerate() {
+                            let add = elig.len();
+                            if !plans.is_empty()
+                                && limits.max_eligible != usize::MAX
+                                && elig_total.saturating_add(add) > limits.max_eligible
+                            {
+                                break;
+                            }
+                            elig_total = elig_total.saturating_add(add);
+                            plans.push(HeightPlan {
+                                height: meta[i].0,
+                                first_id: meta[i].1,
+                                elig,
+                            });
+                        }
+                        plans
+                    }
+                }
+            }
         };
 
         if plans.is_empty() {

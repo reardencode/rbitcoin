@@ -268,6 +268,32 @@ impl SpTweaksTable {
         Ok(u32::from_le_bytes(buf))
     }
 
+    fn read_offs_run(seg: &Seg, local: u64, n: u64) -> Result<(Vec<u32>, u64), StoreError> {
+        if n == 0 {
+            return Ok((Vec::new(), 0));
+        }
+        if local.saturating_add(n) > seg.n_slots {
+            return Err(StoreError::Corrupt("sp_tweaks run past segment"));
+        }
+        let need_next = local + n < seg.n_slots;
+        let n_offs = n + u64::from(need_next);
+        let mut buf = vec![0u8; (n_offs as usize) * SLOT as usize];
+        seg.idx
+            .read_at(FILE_HEADER_LEN as u64 + local * SLOT, &mut buf)?;
+        let mut starts = Vec::with_capacity(n as usize);
+        for i in 0..n as usize {
+            let s = i * SLOT as usize;
+            starts.push(u32::from_le_bytes(buf[s..s + 4].try_into().unwrap()));
+        }
+        let end = if need_next {
+            let s = n as usize * SLOT as usize;
+            u64::from(u32::from_le_bytes(buf[s..s + 4].try_into().unwrap()))
+        } else {
+            seg.body.logical_len()
+        };
+        Ok((starts, end))
+    }
+
     fn locate(inner: &Inner, origin: u32, height: Height) -> Option<(usize, u64)> {
         if height.0 < origin {
             return None;
@@ -362,30 +388,73 @@ impl SpTweaksTable {
         Ok(elig)
     }
 
-    fn read_height_bytes(&self, height: Height) -> Result<Option<Vec<u8>>, StoreError> {
+    fn read_height_bytes_range(
+        &self,
+        start: Height,
+        count: u32,
+    ) -> Result<Option<Vec<Vec<u8>>>, StoreError> {
+        if count == 0 {
+            return Ok(Some(Vec::new()));
+        }
         let inner = self.lock();
-        let Some((si, local)) = Self::locate(&inner, self.origin, height) else {
+        let Some((mut si, mut local)) = Self::locate(&inner, self.origin, start) else {
             return Ok(None);
         };
-        let seg = &inner.segs[si];
-        let start = u64::from(Self::read_off(seg, local)?);
-        let end = if local + 1 < seg.n_slots {
-            u64::from(Self::read_off(seg, local + 1)?)
-        } else {
-            seg.body.logical_len()
-        };
-        if end < start {
-            return Err(StoreError::Corrupt("sp_tweaks off order"));
+        let mut out = Vec::with_capacity(count as usize);
+        let mut left = u64::from(count);
+        while left > 0 {
+            if si >= inner.segs.len() {
+                break;
+            }
+            let seg = &inner.segs[si];
+            if local >= seg.n_slots {
+                break;
+            }
+            let run = left.min(seg.n_slots - local);
+            let (starts, end) = Self::read_offs_run(seg, local, run)?;
+            let body_start = u64::from(*starts.first().unwrap_or(&0));
+            if end < body_start {
+                return Err(StoreError::Corrupt("sp_tweaks off order"));
+            }
+            if body_start < FILE_HEADER_LEN as u64 {
+                return Err(StoreError::Corrupt("sp_tweaks off in header"));
+            }
+            let mut blob = vec![0u8; (end - body_start) as usize];
+            if !blob.is_empty() {
+                seg.body.read_at(body_start, &mut blob)?;
+            }
+            for i in 0..starts.len() {
+                let s = u64::from(starts[i]);
+                let e = if i + 1 < starts.len() {
+                    u64::from(starts[i + 1])
+                } else {
+                    end
+                };
+                if e < s {
+                    return Err(StoreError::Corrupt("sp_tweaks off order"));
+                }
+                let rel = (s - body_start) as usize;
+                let len = (e - s) as usize;
+                let slice = blob
+                    .get(rel..rel.saturating_add(len))
+                    .ok_or(StoreError::Corrupt("sp_tweaks range body truncated"))?;
+                out.push(slice.to_vec());
+            }
+            left -= run;
+            local += run;
+            if local >= seg.n_slots {
+                si += 1;
+                local = 0;
+            }
         }
-        if start < FILE_HEADER_LEN as u64 {
-            return Err(StoreError::Corrupt("sp_tweaks off in header"));
+        Ok(Some(out))
+    }
+
+    fn read_height_bytes(&self, height: Height) -> Result<Option<Vec<u8>>, StoreError> {
+        match self.read_height_bytes_range(height, 1)? {
+            None => Ok(None),
+            Some(mut v) => Ok(v.pop()),
         }
-        let len = (end - start) as usize;
-        let mut buf = vec![0u8; len];
-        if len > 0 {
-            seg.body.read_at(start, &mut buf)?;
-        }
-        Ok(Some(buf))
     }
 
     /// Append the next **tip** height. `records.len()` is `header_txs` count.
@@ -484,10 +553,28 @@ impl SpTweaksTable {
         height: Height,
         n_tx: u32,
     ) -> Result<Option<Vec<(u32, [u8; 33])>>, StoreError> {
-        let Some(buf) = self.read_height_bytes(height)? else {
+        match self.get_eligible_range(height, &[n_tx])? {
+            None => Ok(None),
+            Some(mut v) => Ok(v.pop()),
+        }
+    }
+
+    /// Contiguous eligible tweaks from `start`. `n_tx[i]` is `header_txs` count
+    /// at `start + i`. Missing first height → `None`. Index hole → prefix.
+    pub fn get_eligible_range(
+        &self,
+        start: Height,
+        n_tx: &[u32],
+    ) -> Result<Option<Vec<Vec<(u32, [u8; 33])>>>, StoreError> {
+        let Some(bufs) = self.read_height_bytes_range(start, n_tx.len() as u32)? else {
             return Ok(None);
         };
-        Ok(Some(Self::decode_eligible(&buf, n_tx)?))
+        let n = bufs.len().min(n_tx.len());
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            out.push(Self::decode_eligible(&bufs[i], n_tx[i])?);
+        }
+        Ok(Some(out))
     }
 
     /// Drop heights **above** `new_tip` (inclusive keep `origin..=new_tip`).
@@ -803,6 +890,48 @@ mod tests {
         t.put_block(Height(1), &[Some(b)]).unwrap();
         assert_eq!(t.get_block(Height(1), 1).unwrap().unwrap(), vec![Some(b)]);
         assert_eq!(t.get_eligible(Height(1), 1).unwrap().unwrap(), vec![(0, b)]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_eligible_range_matches_singles_and_stops_on_hole() {
+        let dir = tmp_dir();
+        let t = SpTweaksTable::create(&dir, Height(0)).unwrap();
+        let mut a = [0u8; 33];
+        a[0] = 0x02;
+        let mut b = [0u8; 33];
+        b[0] = 0x03;
+        t.put_block(Height(0), &[None, Some(a)]).unwrap();
+        t.put_block(Height(1), &[None]).unwrap();
+        t.put_block(Height(2), &[Some(b), None]).unwrap();
+
+        let got = t
+            .get_eligible_range(Height(0), &[2, 1, 2])
+            .unwrap()
+            .expect("indexed");
+        assert_eq!(
+            got,
+            vec![
+                t.get_eligible(Height(0), 2).unwrap().unwrap(),
+                t.get_eligible(Height(1), 1).unwrap().unwrap(),
+                t.get_eligible(Height(2), 2).unwrap().unwrap(),
+            ]
+        );
+
+        assert!(t.get_eligible_range(Height(3), &[1]).unwrap().is_none());
+        assert!(t
+            .get_eligible_range(Height(0), &[])
+            .unwrap()
+            .unwrap()
+            .is_empty());
+
+        let prefix = t
+            .get_eligible_range(Height(2), &[2, 1])
+            .unwrap()
+            .expect("start indexed");
+        assert_eq!(prefix.len(), 1);
+        assert_eq!(prefix[0], vec![(0, b)]);
+
         let _ = fs::remove_dir_all(&dir);
     }
 
