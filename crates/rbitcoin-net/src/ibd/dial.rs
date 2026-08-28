@@ -3,6 +3,7 @@
 use super::peer_io::{ibd_mono_ms, spawn_peer, PeerCmd, PeerEventSinks, PeerSlot};
 use crate::chain::ChainHub;
 use crate::error::NetError;
+use crate::peers::{trying_connection_log, PeerConnType};
 use crate::seeds::AddrMan;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::Magic;
@@ -256,7 +257,10 @@ pub(crate) async fn dial_batch(
         }
         let id = next_id.fetch_add(1, Ordering::Relaxed);
         let sinks = sinks.clone();
-        debug!("trying v1 connection (outbound-full-relay) to {addr}");
+        debug!(
+            "{}",
+            trying_connection_log(PeerConnType::OutboundFullRelay, addr)
+        );
         handles.push(tokio::spawn(async move {
             let fut = spawn_peer(id, addr, magic, local_addr, tip_h, sinks);
             match tokio::time::timeout(connect_timeout, fut).await {
