@@ -15,7 +15,9 @@ before 1.0).
   as **one notify** with ≤1024 keys (Cake last-key progress), not one line per
   height. Cake `historicalMode=false` (param `[2]`) **cut-through**: omit
   confirmed-spent P2TR outs (and txs with none left). `true` keeps spent outs
-  for restore. Probe `[0,1,false]` is still `{"0": {}}`.
+  for restore. Probe `[0,1,false]` is still `{"0": {}}`. `{"message":"done"}`
+  ends a **chunk** (60s wall at a wave boundary, or the requested `count` if
+  sooner) so Cake resubscribes; it is not “`count` through tip”.
 
 ### Added
 
