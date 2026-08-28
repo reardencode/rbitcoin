@@ -47,6 +47,33 @@ const COLD_PROGRESS_MAGIC: &[u8; 8] = b"SHCOLDP1";
 /// Max create_fk fully present in durable SH (inclusion HWM; crash catch-up).
 pub const INCLUDE_HWM_NAME: &str = "scripthash.include_hwm";
 
+/// Process-local `Query::sh_heads` cap. Miss path `locate_head`s.
+pub const SH_HEADS_CAP: usize = 65_536;
+
+pub fn sh_heads_insert_capped(
+    heads: &mut HashMap<[u8; 32], ShHeadValue>,
+    key: [u8; 32],
+    val: ShHeadValue,
+    cap: usize,
+) {
+    if heads.len() >= cap && !heads.contains_key(&key) {
+        if let Some(k) = heads.keys().next().copied() {
+            heads.remove(&k);
+        }
+    }
+    heads.insert(key, val);
+}
+
+fn sh_heads_trim(heads: &mut HashMap<[u8; 32], ShHeadValue>, cap: usize) {
+    while heads.len() > cap {
+        if let Some(k) = heads.keys().next().copied() {
+            heads.remove(&k);
+        } else {
+            break;
+        }
+    }
+}
+
 /// Progress after each fully installed prefix shard (SIGINT resume).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ColdProgress {
@@ -1587,6 +1614,7 @@ impl ScriptHashTable {
             self.apply_head_upserts(&head_final, flush_each)?;
             timing.head_ns = t_head.elapsed().as_nanos() as u64;
         }
+        sh_heads_trim(heads, SH_HEADS_CAP);
         Ok((written, timing))
     }
 

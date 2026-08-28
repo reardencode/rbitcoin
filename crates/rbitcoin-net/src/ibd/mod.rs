@@ -27,6 +27,8 @@ mod reorg;
 mod state;
 mod status;
 
+pub use perf_log::{format_tip_perf_sizes, read_proc_rss, ProcRss, TipPerfSizes};
+
 use archive::{rehydrate_block_queue_into_confirm, rehydrate_class_a_into_body_queue};
 use assign_plan::{remove_from_ordered, want_headers_beyond_soft_cap};
 use confirm::{offer_confirm_ready, spawn_confirm_engine, ConfirmEvent, ConfirmFeed};

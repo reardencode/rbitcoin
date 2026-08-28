@@ -1,8 +1,8 @@
 //! In-memory wire block cache for P2P serve and ordered sync.
 //!
 //! Full block bodies are kept only for a recent tip window (default
-//! [`DEFAULT_BODY_DEPTH`]). Best-chain **hashes** are retained for locator
-//! construction without holding the entire IBD history in RAM.
+//! [`DEFAULT_BODY_DEPTH`], compact/`getblocktxn` serve). Best-chain **hashes**
+//! are retained for locator construction without holding decoded IBD history.
 
 use bitcoin::block::{Block, Header};
 use bitcoin::hashes::Hash;
@@ -10,9 +10,9 @@ use bitcoin::BlockHash;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-/// How many recent full block bodies to retain (matches IBD horizon; hash chain
-/// is kept without bodies for locators).
-pub const DEFAULT_BODY_DEPTH: usize = 144;
+/// How many recent full block bodies to retain (compact/`getblocktxn` serve
+/// depths are 5 and 10; hashes stay for locators).
+pub const DEFAULT_BODY_DEPTH: usize = 16;
 
 #[derive(Debug)]
 pub struct BlockCache {
@@ -65,6 +65,10 @@ impl BlockCache {
 
     pub fn is_empty(&self) -> bool {
         self.inner.read().unwrap().chain.is_empty()
+    }
+
+    pub fn body_count(&self) -> usize {
+        self.inner.read().unwrap().by_hash.len()
     }
 
     pub fn get_block(&self, hash: &BlockHash) -> Option<Block> {
@@ -298,5 +302,39 @@ mod tests {
         let orphan = dummy_block(BlockHash::from_byte_array([9u8; 32]), 1);
         assert!(d.push_best(orphan).is_err());
         assert!(d.get_header(&g2.block_hash()).is_some());
+    }
+
+    #[test]
+    fn default_body_depth_is_compact_serve_window() {
+        assert_eq!(DEFAULT_BODY_DEPTH, 16);
+        let c = BlockCache::new();
+        let g = dummy_block(BlockHash::from_byte_array([0u8; 32]), 0);
+        let genesis = g.block_hash();
+        c.push_best(g).unwrap();
+        let mut tip = genesis;
+        for n in 1..=20u32 {
+            let b = dummy_block(tip, n);
+            tip = b.block_hash();
+            c.push_best(b).unwrap();
+        }
+        assert_eq!(c.tip_height(), Some(20));
+        assert_eq!(c.body_count(), 16);
+        assert!(c.get_block(&genesis).is_none());
+        assert!(c.hash_at_height(0).is_some());
+        assert_eq!(c.hash_at_height(0), Some(genesis));
+        assert!(c.get_block(&tip).is_some());
+        let keep_from = 20u32.saturating_sub(15);
+        for h in 0..=20u32 {
+            assert!(c.hash_at_height(h).is_some());
+            let hash = c.hash_at_height(h).unwrap();
+            if h < keep_from {
+                assert!(
+                    c.get_block(&hash).is_none(),
+                    "body at height {h} must evict"
+                );
+            } else {
+                assert!(c.get_block(&hash).is_some(), "body at height {h} must stay");
+            }
+        }
     }
 }

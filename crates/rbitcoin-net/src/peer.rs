@@ -105,6 +105,20 @@ const MAX_PENDING_BLOCKS: usize = 128;
 /// matching catch-up `getdata` window (extra hashes stick in `requested`).
 pub(crate) const MAX_SERVE_BLOCKS: usize = 16;
 
+/// INV-origin txids this session sent us. Cap matches `announced_wtx` (clear on overflow).
+pub(crate) const FROM_THIS_PEER_CAP: usize = 50_000;
+
+pub(crate) fn insert_capped_txid(
+    map: &mut HashMap<bitcoin::Txid, ()>,
+    txid: bitcoin::Txid,
+    cap: usize,
+) {
+    if map.len() >= cap {
+        map.clear();
+    }
+    map.insert(txid, ());
+}
+
 /// Test/assert surface for the tip-follow pending-body cap (equals production).
 #[cfg(test)]
 pub(crate) const MAX_PENDING_BLOCKS_FOR_TEST: usize = MAX_PENDING_BLOCKS;
@@ -2077,7 +2091,7 @@ async fn handle_peer_frame(
                     || session.is_some_and(|s| s.hub().is_some_and(|ph| ph.is_relay_perm()))
                 {
                     let txid = tx.compute_txid();
-                    from_this_peer.insert(txid, ());
+                    insert_capped_txid(from_this_peer, txid, FROM_THIS_PEER_CAP);
                     match mp.accept_tx(tx) {
                         Ok(r) => {
                             if let Some(s) = session {

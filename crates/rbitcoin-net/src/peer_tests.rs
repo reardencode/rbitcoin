@@ -1,7 +1,7 @@
 use super::*;
 use rbitcoin_consensus::{ChainParams, Milestone};
 use rbitcoin_query::Query;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 fn tmp_store(label: &str) -> (std::path::PathBuf, Query) {
     let dir = std::env::temp_dir().join(format!(
@@ -42,6 +42,19 @@ fn store_not_found_is_soft_session_error() {
     assert!(!net_error_is_store_not_found(&NetError::Io(
         std::io::Error::new(std::io::ErrorKind::Other, "x")
     )));
+}
+
+#[test]
+fn from_this_peer_insert_caps_and_keeps_latest() {
+    use bitcoin::hashes::Hash;
+    let mut m = HashMap::new();
+    let cap = 4usize;
+    for i in 0u8..6 {
+        insert_capped_txid(&mut m, bitcoin::Txid::from_byte_array([i; 32]), cap);
+        assert!(m.len() <= cap, "len {}", m.len());
+    }
+    assert!(m.contains_key(&bitcoin::Txid::from_byte_array([5u8; 32])));
+    assert_eq!(FROM_THIS_PEER_CAP, 50_000);
 }
 
 #[test]

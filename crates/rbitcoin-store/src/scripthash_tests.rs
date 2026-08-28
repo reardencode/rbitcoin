@@ -485,6 +485,70 @@ fn put_create_batch_append_uses_heads() {
 }
 
 #[test]
+fn sh_heads_insert_capped_caps_and_keeps_latest() {
+    let mut heads = HashMap::new();
+    let cap = 8usize;
+    for i in 0u8..20 {
+        sh_heads_insert_capped(&mut heads, [i; 32], ShHeadValue::Empty, cap);
+        assert!(heads.len() <= cap, "len={}", heads.len());
+    }
+    let last = [0xff; 32];
+    sh_heads_insert_capped(&mut heads, last, ShHeadValue::Empty, cap);
+    assert!(heads.len() <= cap);
+    assert!(heads.contains_key(&last), "latest insert must stay");
+}
+
+fn dummy_sh_head_key(i: u64) -> [u8; 32] {
+    let mut k = [0xEE; 32];
+    k[..8].copy_from_slice(&i.to_le_bytes());
+    k
+}
+
+#[test]
+fn put_create_batch_append_caps_heads_and_miss_still_writes() {
+    let dir = tmp();
+    let t = ScriptHashTable::create(&dir).unwrap();
+    let mut heads = HashMap::new();
+    for i in 0..SH_HEADS_CAP as u64 {
+        heads.insert(dummy_sh_head_key(i), ShHeadValue::Empty);
+    }
+    assert_eq!(heads.len(), SH_HEADS_CAP);
+    let sh = script_hash(&[0x51]);
+    let (n, _) = t
+        .put_create_batch_append(&[rec(sh, 1, 0)], &mut heads)
+        .unwrap();
+    assert_eq!(n, 1);
+    assert!(
+        heads.len() <= SH_HEADS_CAP,
+        "process heads must cap, got {}",
+        heads.len()
+    );
+    assert_eq!(t.entries(&sh).unwrap().len(), 1);
+
+    let evicted = (0..SH_HEADS_CAP as u64).find_map(|i| {
+        let k = dummy_sh_head_key(i);
+        (!heads.contains_key(&k)).then_some(k)
+    });
+    if let Some(evicted) = evicted {
+        let (n2, _) = t
+            .put_create_batch_append(&[rec(evicted, 2, 0)], &mut heads)
+            .unwrap();
+        assert_eq!(n2, 1);
+        assert_eq!(t.entries(&evicted).unwrap().len(), 1);
+        assert!(heads.len() <= SH_HEADS_CAP);
+    } else {
+        heads.remove(&sh);
+        let (n2, _) = t
+            .put_create_batch_append(&[rec(sh, 3, 0)], &mut heads)
+            .unwrap();
+        assert_eq!(n2, 1);
+        assert_eq!(t.entries(&sh).unwrap().len(), 2);
+        assert!(heads.len() <= SH_HEADS_CAP);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn page_append_preserves_prefix_and_order() {
     let dir = tmp();
     let t = ScriptHashTable::create(&dir).unwrap();
