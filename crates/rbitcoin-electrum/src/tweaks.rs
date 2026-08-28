@@ -12,6 +12,7 @@ use rbitcoin_query::{Query, ThinTweakRangeLimits, ThinTweakRow};
 #[cfg(test)]
 use serde_json::Map;
 use serde_json::{json, Value};
+use std::future::Future;
 use std::time::Instant;
 
 /// Parsed `blockchain.tweaks.subscribe` window.
@@ -78,6 +79,41 @@ fn wrap_height_notify(map_json: &str) -> String {
     s.push_str(map_json);
     s.push_str("]}");
     s
+}
+
+/// Spawn wave N+1 before writing wave N. `spawn_load(h)` must start work
+/// immediately (e.g. `spawn_blocking`), not when the wait future is polled.
+pub async fn overlap_wave_writes<E, Spawn, H, Wait, WF, Write, WR>(
+    mut start: u32,
+    last: u32,
+    mut spawn_load: Spawn,
+    mut wait_load: Wait,
+    mut write: Write,
+) -> Result<(), E>
+where
+    Spawn: FnMut(u32) -> H,
+    Wait: FnMut(H) -> WF,
+    WF: Future<Output = Result<Option<Vec<String>>, E>>,
+    Write: FnMut(Vec<String>) -> WR,
+    WR: Future<Output = Result<(), E>>,
+{
+    if start > last {
+        return Ok(());
+    }
+    let mut pending = Some(spawn_load(start));
+    while let Some(job) = pending.take() {
+        let Some(batch) = wait_load(job).await? else {
+            return Ok(());
+        };
+        let n = batch.len() as u32;
+        let next = start.saturating_add(n.max(1));
+        if next <= last {
+            pending = Some(spawn_load(next));
+        }
+        write(batch).await?;
+        start = next;
+    }
+    Ok(())
 }
 
 /// Default multi-height load budgets for subscribe (max 128 heights, 8192 eligible).
@@ -638,5 +674,50 @@ mod tests {
         assert!(v["tweak"].as_str().unwrap().starts_with("02"));
         assert_eq!(v["output_pubkeys"]["1"][0].as_str().unwrap().len(), 64);
         assert_eq!(v["output_pubkeys"]["1"][1], 5410);
+    }
+
+    #[tokio::test]
+    async fn overlap_wave_writes_starts_next_load_before_write_returns() {
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        let load_starts = Arc::new(Mutex::new(Vec::<Instant>::new()));
+        let write_ends = Arc::new(Mutex::new(Vec::<Instant>::new()));
+        let ls = Arc::clone(&load_starts);
+        let we = Arc::clone(&write_ends);
+
+        overlap_wave_writes(
+            0,
+            1,
+            move |h| {
+                let ls = Arc::clone(&ls);
+                tokio::spawn(async move {
+                    ls.lock().unwrap().push(Instant::now());
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    Ok::<_, String>(vec![h.to_string()])
+                })
+            },
+            |join| async move { join.await.unwrap().map(Some) },
+            move |batch| {
+                let we = Arc::clone(&we);
+                async move {
+                    tokio::time::sleep(Duration::from_millis(40)).await;
+                    we.lock().unwrap().push(Instant::now());
+                    let _ = batch;
+                    Ok::<_, String>(())
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        let starts = load_starts.lock().unwrap();
+        let ends = write_ends.lock().unwrap();
+        assert_eq!(starts.len(), 2);
+        assert_eq!(ends.len(), 2);
+        assert!(
+            starts[1] < ends[0],
+            "wave 1 load must start before wave 0 write returns"
+        );
     }
 }
