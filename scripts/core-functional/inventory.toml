@@ -792,9 +792,7 @@ analog = "follow-up: tx download"
 
 [[test]]
 name = "p2p_tx_privacy.py"
-status = "skip"
-reason = "rpc-missing"
-analog = "follow-up: tx privacy"
+status = "run"
 
 [[test]]
 name = "p2p_unrequested_blocks.py"
