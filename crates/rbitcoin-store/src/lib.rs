@@ -87,9 +87,10 @@ pub use io_handle::IoHandle;
 pub use point_table::PointRecord;
 pub use scripthash::{
     copy_sh_body_range, detect_sh_body_layout, load_include_hwm, remap_copied_page_chain,
-    remap_sh_head_value, script_hash, sh_run_catalog_key_len_ok, store_include_hwm, ColdProgress,
-    ScriptHashBulkSession, ScriptHashRecord, ScriptHashTable, ShBodyLayout, ShShardPack,
-    COLD_PROGRESS_NAME, INCLUDE_HWM_NAME, SH_RUN_SORT_KEY_LEN,
+    remap_sh_head_value, script_hash, sh_heads_insert_capped, sh_run_catalog_key_len_ok,
+    store_include_hwm, ColdProgress, ScriptHashBulkSession, ScriptHashRecord, ScriptHashTable,
+    ShBodyLayout, ShShardPack, COLD_PROGRESS_NAME, INCLUDE_HWM_NAME, SH_HEADS_CAP,
+    SH_RUN_SORT_KEY_LEN,
 };
 pub use scripthash_head::{
     prefix_shard_of, sh_per_shard_key_budget, sh_slots_for_keys, sh_unique_hint_default,

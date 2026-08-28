@@ -763,7 +763,12 @@ impl Query {
             for sh in touched_sh {
                 match self.store.scripthash.head_value(&sh) {
                     Ok(Some(v)) if !v.is_empty() => {
-                        heads.insert(sh, v);
+                        rbitcoin_store::sh_heads_insert_capped(
+                            &mut heads,
+                            sh,
+                            v,
+                            rbitcoin_store::SH_HEADS_CAP,
+                        );
                     }
                     _ => {
                         heads.remove(&sh);
