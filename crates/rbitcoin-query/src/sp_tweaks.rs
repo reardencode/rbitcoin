@@ -325,28 +325,33 @@ impl Query {
                 span_end = span_end.max(off.saturating_add(len));
             }
             let span_len = span_end - span_off;
-            self.store.txs.with_body_span(span_off, span_len, |raw| {
-                for (i, r) in ranges.iter().enumerate() {
-                    let (off, len) = r.unwrap();
-                    let rel = (off - span_off) as usize;
-                    let sl = raw.get(rel..rel.saturating_add(len as usize)).ok_or(
-                        StoreError::Corrupt("invariant: thin tweak eligible body span truncated"),
-                    )?;
-                    let Some(txid) = txids.get(i).copied().flatten() else {
-                        return Err(StoreError::Corrupt(
-                            "invariant: thin tweak eligible txid missing",
-                        ));
-                    };
-                    let (pi, ei) = tag[i];
-                    let p2tr = self.store.txs.packed_p2tr_from_raw(sl)?;
-                    out_rows[pi].push(ThinTweakRow {
-                        txid,
-                        tweak: plans[pi].elig[ei].1,
-                        p2tr,
-                    });
-                }
-                Ok(())
-            })?;
+            let mut span_buf = Vec::new();
+            self.store
+                .txs
+                .with_body_span_into(span_off, span_len, &mut span_buf, |raw| {
+                    for (i, r) in ranges.iter().enumerate() {
+                        let (off, len) = r.unwrap();
+                        let rel = (off - span_off) as usize;
+                        let sl = raw.get(rel..rel.saturating_add(len as usize)).ok_or(
+                            StoreError::Corrupt(
+                                "invariant: thin tweak eligible body span truncated",
+                            ),
+                        )?;
+                        let Some(txid) = txids.get(i).copied().flatten() else {
+                            return Err(StoreError::Corrupt(
+                                "invariant: thin tweak eligible txid missing",
+                            ));
+                        };
+                        let (pi, ei) = tag[i];
+                        let p2tr = self.store.txs.packed_p2tr_from_raw(sl)?;
+                        out_rows[pi].push(ThinTweakRow {
+                            txid,
+                            tweak: plans[pi].elig[ei].1,
+                            p2tr,
+                        });
+                    }
+                    Ok(())
+                })?;
             self.note_thin_tweak_body_bytes(span_len);
         }
 

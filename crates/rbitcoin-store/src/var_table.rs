@@ -288,12 +288,39 @@ impl VarTable {
         len: u64,
         f: impl FnOnce(&[u8]) -> Result<R, StoreError>,
     ) -> Result<R, StoreError> {
+        let mut buf = Vec::new();
+        self.with_bytes_at_into(offset, len, &mut buf, f)
+    }
+
+    /// Like [`Self::with_bytes_at`] into a caller buffer. Pread overwrites
+    /// `buf`; it is not zero-filled first.
+    pub fn with_bytes_at_into<R>(
+        &self,
+        offset: u64,
+        len: u64,
+        buf: &mut Vec<u8>,
+        f: impl FnOnce(&[u8]) -> Result<R, StoreError>,
+    ) -> Result<R, StoreError> {
         if len == 0 {
+            buf.clear();
             return f(&[]);
         }
-        let mut buf = vec![0u8; len as usize];
-        self.read_body_bulk(offset, &mut buf)?;
-        f(&buf)
+        let n = usize::try_from(len).map_err(|_| StoreError::Corrupt("body span too large"))?;
+        buf.clear();
+        buf.reserve(n);
+        // SAFETY: `read_body_bulk` fills `n` bytes, or we set_len(0) on error.
+        unsafe {
+            buf.set_len(n);
+        }
+        match self.read_body_bulk(offset, buf) {
+            Ok(()) => f(buf),
+            Err(e) => {
+                unsafe {
+                    buf.set_len(0);
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Like [`Self::with_bytes_at`] but always libc `pread` (no TLS uring).
@@ -1121,6 +1148,36 @@ mod tests {
             VarTable::open(&dir, "tx", TableKind::TxOut),
             Err(StoreError::Corrupt(_)) | Err(StoreError::Io { .. })
         ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn with_bytes_at_into_overwrites_dirty_capacity() {
+        let dir = std::env::temp_dir().join(format!(
+            "rbitcoin-var-into-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let t = VarTable::create(&dir, "tx", TableKind::TxOut).unwrap();
+        let fks = t
+            .put_batch_encode(2, 64, |i, buf| {
+                buf.extend_from_slice(&[(i as u8).saturating_add(0x5a); 16]);
+            })
+            .unwrap();
+        let (off, len) = t.record_range(fks[1]).unwrap();
+        let mut buf = vec![0xFFu8; (len as usize).saturating_add(32)];
+        buf.clear();
+        t.with_bytes_at_into(off, len, &mut buf, |b| {
+            assert!(!b.is_empty());
+            assert_ne!(b[0], 0xFF);
+            assert_eq!(b[0], 0x5b);
+            Ok(())
+        })
+        .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
