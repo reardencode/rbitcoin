@@ -50,13 +50,16 @@ hit so a connected sibling in an older age can win.
 cold. Open is its own wave. It is not an IO flag. `RWF_DONTCACHE`
 is retired ([`SCHEMA.md`](../SCHEMA.md) Schema 17 freeze).
 
-## Confirm stages (pointer)
+## Confirm stages (head contact only)
 
-| Stage | Head contact |
-|-------|----------------|
-| **lookup** | BQ-ahead TipOnly `get_fk_by_txid_batch` (same **3-wave** open / sealed-hot / cold; sealed-hot and cold only unfinished keys). In-page hop keeps 8 `(depth, fk)` on the stack and spills past that; page grouping and the uring stream are unchanged. Combined `head_loc` cdf3 was ~90% on late-mainnet — not enough to pay a full-depth probe for every key. Revisit if leftover-split `wave` cdf3 is &lt;60%. |
-| **load** | Stamp from in-flight then skeleton (IBD) or leftover TipOnly (plan=None / S0). Pins `txout` by stamped range or in-flight outs. Does **not** `spent.idx`-batch. In-flight is a load-thread map; holds planned creates until load finishes the last batch of a lookup wave that snapshotted drain+fence before TipOnly (pack height below that snapshot). |
-| **scripts** | No store. |
-| **write** | Sole Class A appender **and** sole `spent.idx` stamper (`ensure_spend_abs_layouts`). `head_insert_many` write-behind on process-wide `ibd-confirm-head` (Drain ∥ Class C; not a per-batch spawn). Write queued is insert-only. In-flight is the RAM home until drain+fence after the next bind. RPC `get_fk_by_txid` hits durable head only until drain. |
+Allowed/Forbidden IO and in-flight prune: [`invariants.md`](./invariants.md).
+Roles: [`concurrency.md`](./concurrency.md).
 
-Roles and locks: [`concurrency.md`](./concurrency.md).
+**lookup** is the only stage that probes `tx.head`: BQ-ahead TipOnly
+`get_fk_by_txid_batch` (same **3-wave** open / sealed-hot / cold; sealed-hot
+and cold only unfinished keys). In-page hop keeps 8 `(depth, fk)` on the
+stack and spills past that; page grouping and the uring stream are unchanged.
+Combined `head_loc` cdf3 was ~90% on late-mainnet — not enough to pay a
+full-depth probe for every key. Revisit if leftover-split `wave` cdf3 is
+&lt;60%. Write inserts via `head_insert_many` on `ibd-confirm-head` (Drain ∥
+Class C). RPC `get_fk_by_txid` hits durable head only until that drain.

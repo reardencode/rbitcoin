@@ -31,7 +31,8 @@ the linked owner docs.
 body queue** and notes readiness on the confirm feed; confirm **lookup** decodes,
 TipOnly-resolves, and **`take_raw` onto loadq**; **load** stamps with that
 `pres` then pins; **scripts** are pure CPU; **write** is the only Class A
-appender. Roles: [`concurrency.md`](./concurrency.md).
+appender. Roles: [`concurrency.md`](./concurrency.md). Stage IO:
+[`invariants.md`](./invariants.md). RAM: [`ibd-memory.md`](./ibd-memory.md).
 
 **Invariant — Class A never leads tip:** there is no dual-track “archive Class A
 far ahead of confirmed tip.” Wire plan + Class A append + Class C tip advance
@@ -187,43 +188,6 @@ create_fk; verify on **`txid.body`**). Header hashes use `header.head`
 
 ---
 
-## Concurrent IBD / IO model
-
-Roles and locks: [`docs/concurrency.md`](./concurrency.md). IO modality:
-[`docs/io-modality.md`](./io-modality.md). Process RAM budgets:
-[`docs/ibd-memory.md`](./ibd-memory.md).
-
-### Design principles
-
-1. **Roles, not a global store mutex.** At most one Class A appender and one
-   spend annotator per process; **N readers** of published ranges are free.
-2. **Allocate-then-publish.** Write body → idx → count/HWM (Release); readers
-   use Acquire. Incomplete records are invisible.
-3. **Confirm pipeline** splits **lookup (stamp) → load (body-queue wire + pin) → scripts
-   (CPU only) → write** so disk work, script verify, and Class A/C publish
-   overlap without pausing queries under a map lock. Confirm write is the
-   **sole Class A appender** on the unified IBD path.
-4. **Request-bounded wire memory.** Body-queue **soft time-depth** and the
-   1 GiB densify assign-stop limit new `getdata` (holes in the fetched range
-   still fill) — **not** peer TCP accept of already-requested blocks (see
-   ibd-memory).
-5. **Bulk IO vs table transport.** `RBITCOIN_IO=uring|pread` selects **bulk
-   batch** backends for `txout` pin, `txid.body` identity, `spent` annotate, spend paths
-   (thread-local ring depth 128). **Table files** are always **fd** (page-/chunk-
-   coalesced pread/pwrite); compact Class C is **L2 write-behind**; mempool is
-   private InRam+sidecar. Head resolve **page-batches multi-key probes**.
-   Historical host A/B: naive uring head insert ~5× slower than page RMW —
-   production uses coalesced pages, not per-slot uring. Fuse8 builds in process
-   RAM on seal. See [`docs/io-modality.md`](./io-modality.md).
-
-### Capacity growth / durability
-
-Store tables: fallocate only (no maps). Class C tip flush
-(`flush_class_c_tip`) completes before body-queue dequeue. Mempool durability is
-**InRam + private sidecars** under `{datadir}/mempool/` (not Class A).
-
----
-
 ## Pure-Rust consensus (secp exception)
 
 | Piece | Implementation |
@@ -240,38 +204,8 @@ Workspace Cargo.toml explicitly avoids enabling bitcoin’s `bitcoinconsensus`
 feature. Script verification is a pure function of `(tx, input_index, prevout)`
 after connect resolves prevouts.
 
-**Milestone (assumevalid-style):** by default mainnet skips **script/sig**
-checks at/below `--milestone` (840000). Prevouts, double-spend, maturity, and
-fees still run. Use `--milestone 0` for full historical scripts. This is an
-honest speed tradeoff, not a claim that all historical scripts were checked
-under the default flag.
+**Milestone (assumevalid-style):** default mainnet skips **script/sig** checks
+at/below `--milestone`. Flags and honesty: [`OPERATOR.md`](../OPERATOR.md).
 
 Test matrix for rules we own: [`docs/consensus-tests.md`](./consensus-tests.md).
-
----
-
-## Pipeline summary (IBD)
-
-Peer → body queue → **lookup** (stamp) → **load** (pin) → **scripts** → **write**
-(sole Class A appender). Stage IO:
-[`invariants.md`](./invariants.md). Roles, pack size, pins:
-[`concurrency.md`](./concurrency.md). Heads used on lookup:
-[`heads.md`](./heads.md).
-
-Tip follow adds compact blocks (BIP152 v2), wtxid relay (BIP339), and
-libre-class mempool policy — see COMPAT and the experimental mainnet runbook.
-
----
-
-## Further reading
-
-| Doc | Contents |
-|-----|----------|
-| [`SCHEMA.md`](../SCHEMA.md) | Current on-disk tables, schema 17 freeze, what forces 18 |
-| [`docs/invariants.md`](./invariants.md) | Confirm stage IO, leftover union, store start states |
-| [`docs/crash-recovery.md`](./crash-recovery.md) | Tip commit, SEAL/HWM, crash resume |
-| [`docs/concurrency.md`](./concurrency.md) | Who may write which table |
-| [`docs/heads.md`](./heads.md) | Which head file / module (tx / header / SH) |
-| [`docs/experimental-mainnet.md`](./experimental-mainnet.md) | Lab mainnet ops |
-| [`OPERATOR.md`](../OPERATOR.md) | Knobs, logging, memory budgets |
-| [`COMPAT.md`](../COMPAT.md) | Product surface vs Core / Electrum methods |
+Map of every owner: [`docs/README.md`](./README.md).

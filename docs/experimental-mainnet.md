@@ -22,14 +22,8 @@ trusting Electrum.
 
 ## Build
 
-```bash
-nix build .#rbitcoin-musl
-mkdir -p target/release
-install -m 755 result/bin/rbitcoin-node result/bin/rbitcoin-cli target/release/
-```
-
-Binary: `./target/release/rbitcoin-node` (fully static). More knobs:
-[`OPERATOR.md`](../OPERATOR.md).
+Musl install: [`OPERATOR.md`](../OPERATOR.md) (Build). Binary:
+`./target/release/rbitcoin-node`.
 
 ## Signet lab first
 

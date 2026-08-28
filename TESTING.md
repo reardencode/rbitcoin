@@ -43,23 +43,17 @@ not a musl product bin. Suites and packed `--corpus` lists:
 ## Running tests
 
 Install rustc **1.95** and a first build: [`CONTRIBUTING.md`](./CONTRIBUTING.md)
-(Getting started). **Nix is not required.** `nix-shell` / `nix develop` are a
-Linux-only pin (they set `CARGO_TARGET_DIR=target/dev` and `RUSTFLAGS=-Dwarnings`).
+(Getting started). **Nix is not required.**
 
 ```bash
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target/dev}"   # see Artifact silos
-# Warnings are errors (workspace.lints; Nix shell also sets RUSTFLAGS=-Dwarnings)
-cargo build --workspace --all-targets
-# Default suite: unit + scenarios + **fast** multi-node only (no --ignored)
 cargo test --workspace
 ./scripts/coverage.sh   # uses target/cov — does not thrash target/dev
-# Guard: no libbitcoinconsensus in the dependency graph
-cargo tree -i bitcoinconsensus 2>&1 | grep -q 'package ID specification' || \
-  (echo "FAIL: bitcoinconsensus still in dependency tree" && cargo tree -i bitcoinconsensus && exit 1)
 ```
 
 Windows/macOS PR surface is `./scripts/ci-os-smoke.sh`, not this full suite —
-see CONTRIBUTING (What works on each OS).
+see CONTRIBUTING (What works on each OS). No `libbitcoinconsensus` in the graph:
+`cargo tree -i bitcoinconsensus` must fail to resolve.
 
 ### Artifact silos (do not mix)
 

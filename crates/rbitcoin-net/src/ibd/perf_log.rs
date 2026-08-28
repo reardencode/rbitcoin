@@ -37,7 +37,7 @@
 //!
 //! **Inventory rule:** new work on lookup / load / scripts / write (or a sidecar
 //! the write thread joins) must add a named token here in the **same commit**.
-//! See `AGENTS.md` “Confirm pipeline timers”. `write=` must equal `write_stage_ms`.
+//! Same-commit rule: `AGENTS.md`. `write=` must equal `write_stage_ms`.
 //!
 //! **Long-pole diagnosis:** do **not** rank stages by work-sum alone when
 //! `scriptq` can stay empty. Prefer `lookup_thr busy=` / `thr load=busy/wait=` /

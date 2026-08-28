@@ -218,27 +218,12 @@ on Windows) rather than the full workspace suite.
 
 ### Release binaries (portable static, byte-identical)
 
-Do **not** treat host or nix-shell `cargo build --release` digests as canonical
-(and do not ship those binaries to operators — they are not portable). Use the
-pinned **musl static** flake package and the double-build check:
-
-```bash
-nix build .#rbitcoin-musl
-./scripts/repro-build.sh          # day-to-day one musl build (crane deps + app)
-./scripts/repro-check.sh          # release only: two clean --rebuilds; compare SHA-256
-```
-
-See [`docs/reproducible-builds.md`](./docs/reproducible-builds.md).
-Tag a published line with [`scripts/release.sh`](./scripts/release.sh)
-(clean `master` after a local merge of the version bump; matching
-Cargo/nix/CHANGELOG; annotated `vX.Y.Z`; pushes master + tag).
-
-Required `ci.yml` **`windows`** / **`macos`** jobs smoke native store
-platform tests (TableFile, SH free-RAM probe, pool/IOCP session) and
-`rbitcoin-node --smoke`. They do **not** package operator binaries.
-Linux musl / Windows CRT-static / Darwin zips are GitHub Releases
-([`.github/workflows/release.yml`](./.github/workflows/release.yml)).
-That is not the byte-identity gate (`repro-check.sh`).
+Do **not** treat host or nix-shell `cargo build --release` as the operator
+binary. Musl pin, `repro-build.sh` / `repro-check.sh`, and `scripts/release.sh`:
+[`docs/reproducible-builds.md`](./docs/reproducible-builds.md). Operator install:
+[`OPERATOR.md`](./OPERATOR.md). PR `windows` / `macos` jobs smoke native store
+IO; they do not package zips. GitHub Releases:
+[`.github/workflows/release.yml`](./.github/workflows/release.yml).
 
 ## Commits
 

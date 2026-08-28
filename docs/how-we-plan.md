@@ -173,36 +173,12 @@ Aligned with AGENTS.md TDD + suite speed:
 
 ### Mid-plan gates vs plan-end gates
 
-Multi-step plan execution uses **targeted** verification between slices.
-**Full** workspace suite, clippy `-D warnings`, and coverage are **GitHub
-Actions** on the plan PR — not a local plan-end ritual. See
-[`AGENTS.md`](../AGENTS.md) (worktree + PR).
+Worktree, local tests, push URL, poll CI, musl-after-merge, after-merge
+cleanup: [`AGENTS.md`](../AGENTS.md). Suite speed and fixture size:
+[`TESTING.md`](../TESTING.md).
 
-**Musl** is **not** a plan-branch gate. Install the static musl binary **only
-on `master`/`main` after the PR merges**.
-
-| When | Run |
-|------|-----|
-| **Each plan step** | Targeted tests for crates/modules touched (`cargo test -p …`); Red→green on the step contract; **one logical commit** |
-| **Not locally (default)** | `cargo test --workspace`, `./scripts/coverage.sh`, workspace `clippy … -D warnings`, `nix build .#rbitcoin-musl` |
-| **Plan coded** | Push the worktree branch over the **explicit HTTPS URL** (bot has no SSH; `origin` `pushurl` stays SSH for the operator); **one PR** for the whole plan (many commits). See `AGENTS.md` § Push. |
-| **Plan complete** | Required Actions checks on that PR are **green** (`fmt` / `deny` / `clippy` / `test` / `multinode` / `coverage`). Poll after open and after every fixup push. |
-| **Musl install** | **Only** on `master`/`main` after merge |
-| **After merge** | Remove the worktree; delete the local **and** remote topic branch; `git fetch --prune`. See `AGENTS.md` § After merge cleanup. |
-
-Logical commits per step still follow public hygiene; each checkpoint must leave
-**targeted** tests green. Do not call the plan done on a red PR.
-
-**Suite speed is a first-class planning constraint.** More steps ⇒ more tests ⇒
-we must keep each Red thin. A plan that multiplies multi-second full-store opens
-is a bad plan even if slices are “vertical.”
-
-Concrete anti-pattern (see [`TESTING.md`](../TESTING.md) budgets): default-suite
-unit tests that set fixture size to **production** constants (mainnet head
-scale, full coinbase-maturity remine loops) when a **tiny** N still
-enters the same branch. Keep production geometry in pure helpers; drive IO paths
-with small targets. A step that adds a default test routinely **&gt;2 s** wall must
-justify the cost in the step / PR.
+Do not call the plan done on a red PR. A plan that multiplies multi-second
+full-store opens is a bad plan even if slices are “vertical.”
 
 ---
 
@@ -302,4 +278,4 @@ Before closing a **plan**:
 - Extreme Programming: planning game, stories, small releases, TDD, refactoring  
 - Bill Wake — **INVEST** user stories  
 - Vertical story slicing (value through the stack, not layer-by-layer)  
-- Project: [AGENTS.md](../AGENTS.md) (TDD, worktree + PR, lean-code, concurrency, musl after merge)
+- Project: [AGENTS.md](../AGENTS.md) (TDD, worktree + PR, musl after merge)
