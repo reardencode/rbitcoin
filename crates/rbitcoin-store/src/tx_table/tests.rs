@@ -3278,6 +3278,6 @@ fn idx_roll_independent_of_inwit_span() {
 }
 
 #[test]
-fn script_hash_collect_span_is_1mib() {
-    assert_eq!(SCRIPT_HASH_COLLECT_SPAN, 1024 * 1024);
+fn script_hash_collect_span_is_16mib() {
+    assert_eq!(SCRIPT_HASH_COLLECT_SPAN, 16 * 1024 * 1024);
 }

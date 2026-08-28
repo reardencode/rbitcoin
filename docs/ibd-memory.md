@@ -153,7 +153,7 @@ touches. Census: [`SCHEMA.md`](../SCHEMA.md) (tip 962298, 1.42 B creates).
 | **Comfortable serve** (busy wallets, Electrum tweaks, RPC reconstruct) | Above + more `txout` + SH body slabs + `txid.body` | **16–32 GiB** | `inwit` except rawtx |
 | **IBD pin+annotate (no thrash)** | **All** `txout` + **all** `spent` + three `*.idx` + `txid.body` + `tx.head` | **~227 GiB** | **`inwit` (~486 GiB)** — wire still holds witness |
 | **IBD + reconstruct/getdata** | Previous + `inwit` | **~710 GiB** (same order as old packed `tx.body`) | — |
-| **SH tip materialize** | Unsorted shards: nCPU Class A collect (1 MiB `txout` spans + 1 MiB write buffers); pack workers min(CPUs, free RAM / 2 GiB); ingest OA **~768 MiB** (2²⁵×24 B) | **~2 GiB** heap per pack worker | No catalog k-way pages |
+| **SH tip materialize** | Unsorted shards: nCPU Class A collect (16 MiB libc `pread` `txout` spans + 1 MiB write buffers); pack workers min(CPUs, free RAM / 2 GiB); ingest OA **~768 MiB** (2²⁵×24 B) | **~2 GiB** heap per pack worker | No catalog k-way pages |
 
 Packed schema 13/14 needed the whole **`tx.body` (~663 GiB)** hot for the same
 pin/annotate work. Split Class A drops that to **~161 GiB** (`txout`+`spent`)

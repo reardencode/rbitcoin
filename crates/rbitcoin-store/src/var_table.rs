@@ -296,6 +296,21 @@ impl VarTable {
         f(&buf)
     }
 
+    /// Like [`Self::with_bytes_at`] but always libc `pread` (no TLS uring).
+    pub fn with_bytes_at_pread<R>(
+        &self,
+        offset: u64,
+        len: u64,
+        f: impl FnOnce(&[u8]) -> Result<R, StoreError>,
+    ) -> Result<R, StoreError> {
+        if len == 0 {
+            return f(&[]);
+        }
+        let mut buf = vec![0u8; len as usize];
+        self.read_body_pread(offset, &mut buf)?;
+        f(&buf)
+    }
+
     /// Absolute write into Class A body via **pwrite** (never mmap).
     ///
     /// Prefer [`Self::write_body_blob_bulk`] for Class A append (bulk pwrite path).
@@ -625,6 +640,32 @@ impl VarTable {
             return Ok(());
         }
         let rc = crate::bulk_io::pread_single(self.body.read_fd(), offset, buf);
+        if rc < 0 {
+            return Err(StoreError::io(
+                self.body.path(),
+                std::io::Error::from_raw_os_error(-rc),
+            ));
+        }
+        if (rc as usize) != buf.len() {
+            self.body.read_at(offset, buf)?;
+        }
+        Ok(())
+    }
+
+    fn read_body_pread(&self, offset: u64, buf: &mut [u8]) -> Result<(), StoreError> {
+        if buf.is_empty() {
+            return Ok(());
+        }
+        use crate::bulk_io::ReadOp;
+        use crate::io_backend::ReadIoBackend;
+        let mut ops = [ReadOp {
+            fd: self.body.read_fd(),
+            offset,
+            buf,
+            result: i32::MIN,
+        }];
+        crate::bulk_io::pread_batch_backend(&mut ops, ReadIoBackend::Pread);
+        let rc = ops[0].result;
         if rc < 0 {
             return Err(StoreError::io(
                 self.body.path(),
@@ -1046,6 +1087,11 @@ mod tests {
         assert_eq!(prefix, [0, 0, 0, 0]);
         assert_eq!(t.read_prefix_at(off, len, &mut []).unwrap(), 0);
         t.with_bytes_at(off, len, |b| {
+            assert!(b.len() >= 16);
+            Ok(())
+        })
+        .unwrap();
+        t.with_bytes_at_pread(off, len, |b| {
             assert!(b.len() >= 16);
             Ok(())
         })

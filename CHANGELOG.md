@@ -18,12 +18,18 @@ before 1.0).
   worker). Catalog k-way merge and Class A catalog recollect/spill are
   removed (`RBITCOIN_SH_RECOLLECT_WORKERS` / `RBITCOIN_SH_RECOLLECT_SPILL_BYTES`
   deleted). Leftover `scripthash.runs` are discarded at tip (never rematerialized).
-  Collect workers are always nCPU. Class A collect preads are 1 MiB spans.
-  SIGINT keeps sealed shards; missing `DONE` restarts collect.
+  Collect workers are always nCPU. Class A collect body IO is libc `pread`
+  (16 MiB spans), not TLS uring. SIGINT keeps sealed shards; missing `DONE`
+  restarts collect.
 
 - **Unsorted SH recs store the 16-byte head prefix:** each file rec is 24 B
   (`prefix16` + `create_fk`), matching the sealed head. `DONE` magic is
   `SHUNSRT2` so leftover 40 B `SHUNSRT1` files restart collect.
+
+- **SH collect body IO is libc pread:** nCPU workers read coalesced 16 MiB
+  `txout.body` spans with blocking `pread`. The TLS uring 5 s wait is a
+  lost-CQE fence for 4 KiB lookup/g-page machines — not this path. Avoids
+  `undrained pending=1` when n workers share the disk.
 
 - **Peer full-node notes:** [`docs/peer-clients.md`](docs/peer-clients.md)
   compares Hornet Node and satd (tests and ideas to consider later, and

@@ -20,9 +20,9 @@ thread_local! {
 /// Host RAM budget per parallel `tx.head` rebuild worker (not SH pack's 2 GiB).
 pub const TX_HEAD_REBUILD_WORKER_FREE_RAM_BYTES: u64 = 750 * 1024 * 1024;
 
-/// Max coalesced `txout.body` pread for SH Class A collect. 1 MiB stays inside
-/// the TLS uring 5 s wait with n-core workers sharing the disk (was 16 MiB).
-pub const SCRIPT_HASH_COLLECT_SPAN: u64 = 1024 * 1024;
+/// Max coalesced `txout.body` pread for SH Class A collect. Sequential libc
+/// pread (not TLS uring); 16 MiB matches Class A locality.
+pub const SCRIPT_HASH_COLLECT_SPAN: u64 = 16 * 1024 * 1024;
 
 pub(crate) fn parse_rebuild_seal_bits(raw: Option<&str>) -> u32 {
     raw.and_then(|s| s.parse::<u32>().ok())
@@ -1209,8 +1209,9 @@ impl TxTable {
     /// Walk create_fks `first..=last` from a coalesced `txout.body` span (one idx
     /// walk, sequential body pread), yielding `script_hash` per out.
     ///
-    /// Spans are capped at [`SCRIPT_HASH_COLLECT_SPAN`] so one TLS uring pread
-    /// finishes inside the 5 s wait with n-core collect workers on the disk.
+    /// Body IO is libc `pread` (not the TLS uring ring). Collect is nCPU workers
+    /// each doing one large sequential span — not a completion machine. The ring
+    /// 5 s wait is a lost-CQE fence for 4 KiB lookup/g-page waves.
     pub fn for_each_script_hashes_in_fk_span(
         &self,
         first: u64,
@@ -1241,7 +1242,7 @@ impl TxTable {
                 j += 1;
             }
             let span_len = span_hi.saturating_sub(span_lo);
-            self.body.with_bytes_at(span_lo, span_len, |buf| {
+            self.body.with_bytes_at_pread(span_lo, span_len, |buf| {
                 for k in i..j {
                     let (off, len) = ranges[k];
                     let rel = (off.saturating_sub(span_lo)) as usize;
