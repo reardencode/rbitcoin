@@ -31,40 +31,15 @@ Most full nodes center a **UTXO set + block files** (Bitcoin Core). Most Electru
 backends are **external indexers** of another node. rbitcoin does neither:
 **no UTXO set** (libbitcoin-class archive), **Electrum + txindex in-process**.
 
-Operator-order facts (mainnet tip moves; treat as ballpark, not a warranty):
+- **~200 GiB** hot pin/annotate set (schema 17); **~700 GiB** with cold `inwit` —
+  census in [`SCHEMA.md`](./SCHEMA.md), `--shindex` costs in [`OPERATOR.md`](./OPERATOR.md)
+- **Under ~30 h** IBD on a laptop-class host with **`--milestone 0`**
+- **Modest RAM** during sync — no multi‑GiB `dbcache` pause
+- **Pure-Rust** consensus/scripts (**no** `libbitcoinconsensus`)
+- **Reproducible static musl** for ordinary Linux hosts
 
-- **~200 GiB** hot pin/annotate set after schema 17 (`txout` + `spent` + idx +
-  `txid` + `tx.head`); **~700 GiB** if you keep cold `inwit` for reconstruct.
-  Optional `--shindex` is extra (Electrum/Esplora require it; on/off costs in
-  [`OPERATOR.md`](./OPERATOR.md)). Ballpark, not a warranty — census in
-  [`SCHEMA.md`](./SCHEMA.md)
-- **Core-class JSON-RPC subset** (default off): [`docs/rpc.md`](./docs/rpc.md)
-- **Under ~30 h** IBD on a laptop-class host with **`--milestone 0`** (full scripts)
-- **Modest RAM** during sync — no multi‑GiB `dbcache`, no long “flush the cache”
-  pauses (confirm is lookup → load → scripts → write)
-- **Segmented `tx.head`** — **newer** txs resolve hottest (tip-local traffic wins)
-- **Pure-Rust** consensus/scripts on rust-bitcoin (**no** `libbitcoinconsensus`)
-- **Reproducible static musl** builds for ordinary Linux hosts
-
-1. **On-disk archive** — **map-free** Class A/B/C tables (pread/pwrite + fallocate
-   grow; kernel page cache as L0): split Class A (`txout` / `inwit` / `spent`),
-   keyless `tx.head`, spend annotations, native scripthash. Historical blocks are **reconstructed** from
-   the archive; tip serve / reorg uses the in-RAM body queue and peer wire.
-   Confirm/mempool prevouts use the archive (and in-mempool parents), not a
-   separate UTXO hash table. Layout: [`SCHEMA.md`](./SCHEMA.md); IO:
-   [`docs/io-modality.md`](./docs/io-modality.md); concurrency:
-   [`docs/concurrency.md`](./docs/concurrency.md).
-2. **Concurrent IBD / IO** — fixed writer roles (one Class A appender),
-   allocate-then-publish HWMs (no map epochs), confirm as **lookup → load →
-   scripts → write**, bulk **io_uring** where available (pread/pwrite fallback).
-   Linux-shaped IO; porting needs work. Map:
-   [`docs/concurrency.md`](./docs/concurrency.md).
-3. **Pure-Rust consensus** — structure, connect, and **script verification in
-   Rust**; only **secp256k1** (via rust-bitcoin) as the crypto primitive — **no**
-   `libbitcoinconsensus` dual-eval. Tests: [`docs/consensus-tests.md`](./docs/consensus-tests.md).
-
-Full narrative and Core / Fulcrum contrasts: **[`docs/architecture.md`](./docs/architecture.md)**.
-Product surface: [`COMPAT.md`](./COMPAT.md).
+Core / Fulcrum contrasts: **[`docs/architecture.md`](./docs/architecture.md)**.
+Product surface: [`COMPAT.md`](./COMPAT.md). RPC subset: [`docs/rpc.md`](./docs/rpc.md).
 
 ## Status
 
@@ -84,25 +59,9 @@ address-prefix autocomplete, explorer-only catalogue APIs). Product surface:
 
 **Authorship:** first-party code is **AI-written** (Grok / xAI) under
 **Brandon Black** ([@reardencode](https://github.com/reardencode)) prompting —
-details in [`SECURITY.md`](./SECURITY.md).
-
-**Milestone (default mainnet 840000):** at/below `--milestone`, **script/sig
-checks are skipped** on block connect (assumevalid-style speed tradeoff).
-Prevouts, double-spend, maturity, and fees still run. Use **`--milestone 0`**
-for full script validation.
-
-```bash
-# Portable static release (preferred)
-nix build .#rbitcoin-musl
-install -m 755 result/bin/rbitcoin-node result/bin/rbitcoin-cli target/release/
-
-# Signet lab (time-boxed)
-./target/release/rbitcoin-node --datadir ./datadir-signet --network signet \
-  --listen 127.0.0.1:38333 --milestone 200000 --max-run-secs 120
-```
-
-Custom Signets are supported with `--signetchallenge` and
-`--signetblocktime`; see the [custom Signet example](./OPERATOR.md#custom-signet).
+details in [`SECURITY.md`](./SECURITY.md). Default milestone and script skip:
+[`OPERATOR.md`](./OPERATOR.md). Signet lab:
+[`docs/experimental-mainnet.md`](./docs/experimental-mainnet.md).
 
 ## Build
 
@@ -124,29 +83,14 @@ gates — [`AGENTS.md`](./AGENTS.md).
 
 ### Portable static release (Linux operator)
 
-Pinned **nixpkgs + Cargo.lock** produce a **fully static, portable**
-`rbitcoin-node` / `rbitcoin-cli` (musl) that runs on ordinary Linux hosts without
-Nix or a matching glibc. Byte-identical digests for a given revision + target.
-Not NixOS-specific — any machine with [Nix](https://nixos.org/download/) + flakes:
-
-```bash
-nix build .#rbitcoin-musl          # default package; fully static
-# or: ./scripts/repro-build.sh
-install -m 755 result/bin/rbitcoin-node result/bin/rbitcoin-cli target/release/
-./scripts/repro-build.sh           # day-to-day musl install (crane-layered)
-./scripts/repro-check.sh           # release only: two clean rebuilds; compare digests
-```
+Pinned **nixpkgs + Cargo.lock** musl static binaries. Commands and
+byte-identity: [`docs/reproducible-builds.md`](./docs/reproducible-builds.md).
+Day-to-day flags: [`OPERATOR.md`](./OPERATOR.md). Experimental mainnet:
+[`docs/experimental-mainnet.md`](./docs/experimental-mainnet.md).
 
 Do **not** use `cargo build --release` inside `nix-shell` / `nix develop` as the
 operator binary — that links against the Nix store glibc and fails outside the
-store (`No such file or directory` at exec). Details:
-[`docs/reproducible-builds.md`](./docs/reproducible-builds.md).
-
-Operator binary: always the static install under `./target/release/` (or
-`./result/bin/`), or the GitHub Release for a `v*.*.*` tag. PR CI smokes
-Windows / Darwin store IO; it does not package zips.
-Operator knobs: [`OPERATOR.md`](./OPERATOR.md). Experimental mainnet:
-[`docs/experimental-mainnet.md`](./docs/experimental-mainnet.md).
+store.
 
 ## Crate map
 

@@ -71,7 +71,7 @@ Not Open, not Completed — see **Won't fix** for retired Q-ids.
 - Multi-OS operator binaries before Linux IBD/tip is boringly solid
 - 100% line-coverage theater (gate is **≥90%** LCOV + property-focused tests)
 - Rewriting secp256k1 / rust-bitcoin / tokio “to reduce deps”
-- Flattening purpose-built io_uring machines to batched `pread` (see AGENTS.md)
+- Flattening purpose-built io_uring machines to batched `pread` (see [`io-modality.md`](./io-modality.md))
 - Core-compatible full RPC surface; graphical block-explorer APIs
 - Growing leftover RAM maps to `Vec<Fk>` unless a mainnet miss is shown
   ([`errata.md`](./errata.md))
@@ -167,8 +167,8 @@ Retired on purpose. Not a backlog. Not a failure.
 | **—** | Retired algo-review micro-opts | BDZ page fill, `HashHead::bulk_fill_empty` RAM, SH `insert_many` N², INV O(peers×mempool), Electrum per-row header read, mempool `find_free_slot` O(cap), `evict_nonfinal` O(n²), BQ `index.iter().find`, `BlockCache` prefix O(chain), GBT `depends` scan, log-macro eval when disabled, `api_log` mutex, bit-by-bit `count_ones`, `U64IdentityHasher` clustering, `last_push_data` PUSHDATA4, `--api-log` unbounded JSONL. Not a second backlog. Reopen a named Q-id only with a mainnet profile that names the cost. |
 | **—** | Headerless SH extent interior pages | Extent is a span-read of the existing 4 KiB delta-page record. Interiors keep `ver`/`n_fks`/`next` so one decoder serves leftovers, tails, and last-page append. Full-page payload is ~0.2% and a schema bump |
 | **—** | Restore `rbtc-script-coord-*` | `ibd-confirm` publishes waves, polls lock-free completion, feeds `scriptq` when steal is empty. Steal workers unpark the publisher. Do not add coordinator threads to keep the pool fed |
-| **—** | Flatten purpose-built io_uring machines | AGENTS.md: fix the machine; do not replace it with batched `pread`/`pwrite` without an explicit ask |
-| **—** | Process pin FIFO / CreateResidency / ContigPark / archive sticky | Pins are plan/batch only. IBD confirm is body-queue wire → lookup → load. See AGENTS.md |
+| **—** | Flatten purpose-built io_uring machines | [`io-modality.md`](./io-modality.md): fix the machine; do not replace it with batched `pread`/`pwrite` without an explicit ask |
+| **—** | Process pin FIFO / CreateResidency / ContigPark / archive sticky | Pins are plan/batch only. IBD confirm is body-queue wire → lookup → load. [`concurrency.md`](./concurrency.md), [`invariants.md`](./invariants.md) |
 | **—** | `rbitcoin-bench` default-member / musl / required CI | Optional crate, host A/B against a live store. Not a packaging or coverage gate |
 | **—** | `cargo miri test --workspace` | io_uring, tokio, secp256k1-sys. Same class as Q-38 (too heavy / cannot go green). Primitives only (**Q-53**); extra islands are **Q-56**. |
 | **—** | `cargo crap --fail-above --threshold 30` | At ≥90% line coverage CRAP **equals CC**. `handle_peer_frame` / confirm write / SH pack would force **R-10** peels. Use **Q-55** regression instead. |

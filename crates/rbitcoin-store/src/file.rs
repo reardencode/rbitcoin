@@ -25,7 +25,7 @@
 //!
 //! - **Published logical length** is an `AtomicU64` (Acquire/Release).
 //! - `File` is locked only for grow (fallocate / Windows EOF / `set_len`), fsync, and fadvise.
-//! - Roles (see `AGENTS.md` / `docs/concurrency.md`): at most one appender and
+//! - Roles (see `docs/concurrency.md`): at most one appender and
 //!   one annotator; N concurrent readers of published ranges.
 
 use crate::error::StoreError;

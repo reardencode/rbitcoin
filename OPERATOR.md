@@ -9,10 +9,10 @@ early production / high-scrutiny — see
 headroom before any serious use. Default mainnet **`--milestone 840000` skips script/sig checks** at/below
 that height; use `--milestone 0` for full scripts.
 
-Architecture: peer wire lands in an **in-RAM body queue**; confirm
-(lookup → load → scripts → write) is the **sole Class A appender** and
-advances Class C tip in the same era. Download defaults to **1024** concurrent
-getdata (not a tip-distance cap), max **16** blocks in transit per peer.
+Architecture and confirm pipeline: [`docs/architecture.md`](./docs/architecture.md),
+[`docs/concurrency.md`](./docs/concurrency.md). Download defaults to **1024**
+concurrent getdata (not a tip-distance cap), max **16** blocks in transit per
+peer.
 
 ## Build
 
@@ -255,17 +255,8 @@ env overrides are **removed**. If `uring` is selected but setup fails, demote to
 | **`RBITCOIN_IO`** | `uring` \| `pool` \| `iocp` \| `pread` | Only bulk switch |
 
 Inventory / survivors: [`docs/env-knobs.md`](docs/env-knobs.md).
-
-**RWF_DONTCACHE:** not used. `spent.body` is its own file; evicting those
-pages after annotate does not protect `txout`. See
-[`SCHEMA.md`](SCHEMA.md) (Schema 17 freeze).
-
-- **uring** — Linux io_uring (ring depth **128**). On Windows this opens
-  IOCP.
-- **pool** — worker-pool completion session (Darwin default).
-- **iocp** — Windows IOCP (Windows default).
-- **pread** / **pwrite** — libc positional IO (session off).
-- Class A **`txout` / `inwit` / `spent` + `*.idx` linear appends always pwrite**.
+Token meanings and ring depth: [`docs/io-modality.md`](docs/io-modality.md).
+`RWF_DONTCACHE` is not used ([`SCHEMA.md`](SCHEMA.md) Schema 17 freeze).
 
 ## Defaults and memory budgets
 
@@ -277,10 +268,10 @@ pages after annotate does not protect `txout`. See
 | Inbound P2P sessions | **125** | `--maxinbound` / `--maxconnections`. Incomplete VERSION/VERACK is dropped after **60 s** (releases the slot). |
 | Milestone (skip scripts ≤ height) | mainnet **840000**, signet 2000000, … | `--milestone` / `--assumevalid-height` (`0` = full scripts) |
 | ConfirmParentCache header plans | always on | Tip-ahead header + tx_fks for multi-block MTP (no create pin FIFO) |
-| Bulk store IO | **uring** (Linux) when available | `RBITCOIN_IO` only; ring depth **128**. Segmented `tx.head` FdOnly; Class C L2 write-behind (`docs/io-modality.md`) |
-| Archive Class A append | **pwrite** (always) | `txout` / `inwit` / `spent` + `*.idx` mega-appends use `write_at_pwrite` only |
-| `tx.head` (segmented) | fixed geometry | Default **25-bit** heads. Open segment is 4 B OA; roll opens the next OA immediately and seals the previous (**value-assigned MPHF + fuse8**) on a sidecar. Wipe/empty rebuild writes MPHF directly in parallel (default **2²⁵** keys, min(CPUs, free RAM/750 MiB) workers; `RBITCOIN_TX_HEAD_REBUILD_SEAL_BITS=26` / `RBITCOIN_TX_HEAD_REBUILD_WORKERS` override). Legacy mono-head datadirs require reindex |
-| Confirm stages | **lookup · load · scripts · write** | Real queues **loadq=14 · scriptq=4 · writeq=14**. Lookup takes BQ in height order (stops at a hole after `lookup_taken_hi`), parks resolved rows, and dequeues **per load-batch send** (8000 inputs / 144 blocks). IBD **lookup** TipOnly-resolves remaining-loadq × load pack (safety cap **64000** inputs / **1080** heights); hard **min 8000** when more unresolved heights remain. Wave table: [`docs/concurrency.md`](docs/concurrency.md). |
+| Bulk store IO | **uring** (Linux) when available | `RBITCOIN_IO` only. Matrix: [`docs/io-modality.md`](docs/io-modality.md) |
+| Archive Class A append | **pwrite** (always) | `txout` / `inwit` / `spent` + `*.idx` |
+| `tx.head` (segmented) | fixed geometry | Default **25-bit**. Rebuild env: [`docs/env-knobs.md`](docs/env-knobs.md). Bytes: [`SCHEMA.md`](SCHEMA.md) / [`docs/heads.md`](docs/heads.md). Legacy mono-head datadirs require reindex |
+| Confirm stages | **lookup · load · scripts · write** | Queues and pack/wave: [`docs/concurrency.md`](docs/concurrency.md). RAM: [`docs/ibd-memory.md`](docs/ibd-memory.md) |
 | Confirm batch inputs | **8000** soft | Hardcoded. Live line: `h= n= in=` (**n** = blocks in pack, **in** = Σ inputs) |
 | Mempool weight budget | **~300e6 WU** | `--mempool-size-mb N` (maps N×1e6 WU) |
 | Inhibit auto-suspend | **off** | `--inhibit-suspend` (uses `systemd-inhibit` if available) |
@@ -298,82 +289,33 @@ warning and continues without inhibit.
 start (before seeds), updated after IBD and on shutdown. Seeds are merged in
 without clearing known flags.
 
-**Index modes:** IBD defaults to **`IndexMode::Direct`**: archive batch-writes
-split Class A (`txout` / `inwit` / `spent`) + durable **`tx.head`**; confirm
-batch-writes **spend annotations** on **`spent.body`** after Class C. Those
-indexes are **complete before tip** — catch-up must finish; tip entry does not
-backfill them. Scripthash has **two** methods: a **durable head** stays
-`IndexMode::Tip` (catch-up uses the same write-behind as tip follow;
-leftover `scripthash.runs` are discarded). **No head:** Direct IBD defers SH.
-After the horizon, one Class A pass writes unsorted `scripthash.unsorted/NN`
-(nCPU, 1 MiB per-shard buffers, offset-ordered pwrite), then each pack worker
-unique-sorts one file **in place** (~2 GiB; workers = min(CPUs, free RAM / 2 GiB))
-and seals `scripthash.head/NN`. Confirm does **not** enqueue SH during Direct.
-SIGINT keeps every sealed head; resume packs only unsealed shards (holes stay;
-missing `DONE` restarts collect). Legacy shared `scripthash.body` stays one
-writer with prefix `scripthash.cold_progress`. No temp `pack*.body`. Leftover
-schema-16 `key_len=32` `scripthash.runs` are refused (wipe that dir and
-rematerialize). Class A with creates in the pre-pack 16-byte meta /
-9-byte spent layout is refused (wipe datadir and redo IBD). New keys after seal go
-to one **global ingest OA** (mainnet 2²⁵ slots × 24 B ≈ 768 MiB). Materialize
-status logs ~**every 10s** from one observer (`keys`/`creates`/`pending`
-unpublished/`shards` published/`rate`).
-**Full cold reinit only if the SH head is empty** (or force rebuild).
-`RBITCOIN_SH_FORCE_REBUILD=1` wipes the head and does a full Class A collect +
-unsorted pack — unset after success; see [`docs/env-knobs.md`](docs/env-knobs.md).
-Missing `include_hwm` on a durable head bootstraps from SEAL (never clamp SEAL→0).
-Clearing residual run files **preserves `SEAL`**. **SIGINT** mid cold keeps
-finished prefix shards (`scripthash.cold_progress`).
-On enter Direct, leftover
-`ibd_utxo.map` / `point.runs` / `tx.runs` from old Catchup datadirs are removed
-— prefer a **fresh datadir**. Legacy **16-way** `scripthash.head/` with
-**`scripthash.runs` still present** auto-migrates on open (old head renamed
-`scripthash.head.legacy-*`, empty 64-way + tip rebuild from runs). No runs left
-⇒ reindex.
+**Index modes:** Direct vs Tip: [`docs/concurrency.md`](docs/concurrency.md).
+IBD finishes Class A + `tx.head` + spend annotations **before** tip; tip entry
+does not backfill them. Scripthash: durable head stays Tip write-behind;
+no head means Direct defers SH until a Class A collect + unsorted pack at
+horizon. Confirm does **not** enqueue SH during Direct.
 
-**Schema 15 SH layout:** durable values are Empty / Inline / geometric **slab**
-(3–256 fks) / megakey **pages** (≥257). Main shards are **sealed sorted+idx** (no fuse);
-new keys land in **`scripthash.ovf/ingest`**. ≥8 sealed ovf files compact-merge.
-**Open upgrade:** empty Class A + empty/missing SH may silently rewrite `meta`
-13/14→15. A packed `tx.body` **with creates**, or a durable page-era (or
-schema-13 slab) SH index, is **refused** — wipe `store/scripthash*` (and/or
-Class A) and rematerialize / redo IBD; there is **no dual-read**.
-After ingest load ≥ ~0.80, ingest seals to sorted ovf and rolls. Legacy
-full-size `scripthash.ovf.head` is removed on open. Existing main keys update
-`value16` in place.
+SIGINT keeps every sealed SH head; resume packs only unsealed shards (holes
+stay; missing `DONE` restarts collect). `RBITCOIN_SH_FORCE_REBUILD=1` wipes the
+head and does a full Class A collect + unsorted pack — unset after success
+([`docs/env-knobs.md`](docs/env-knobs.md)). Missing `include_hwm` bootstraps
+from SEAL (never clamp SEAL→0). Clearing residual run files **preserves
+`SEAL`**. **SIGINT** mid cold keeps finished prefix shards
+(`scripthash.cold_progress`). Materialize status logs ~**every 10s**.
 
-New stores: **header.head** = **single** open-address file (~96 MiB sparse at
-2²² slots; overflow `header.head.gN`). Leftover 256-way `header.head/` is
-**refused** — wipe `store/header.head` and `store/header.body` and reindex.
-**scripthash** **64** shards, **tx.head** = **segmented** fixed **25-bit**
-heads (`tx.head/meta` + open `NNNNNN` OA, sealed `NNNNNN.mphf|.fuse8`).
-Capacity ends at **80% of head slots** (~26.8 M creates at 25-bit): seal
-builds a value-assigned MPHF + **binary fuse8**, unlinks OA, then opens a new
-segment. Idx 16 GiB soft-span does not cut `tx.head`. Open segment has **no** filter (always probed); sealed segments are
-fuse-gated then one packed MPHF probe (`rel−1`). Legacy monolithic `tx.head` / `.new` /
-`.resize` / `.overflow` are **refused** — reindex. Schema 17 populated indexes
-versus this binary: [Schema upgrade](#schema-upgrade). Create height is a RAM fence (no
-`tx_height` file; schema 16).
-Dense Class A fk + segmented **`txout.idx` / `inwit.idx` / `spent.idx`**.
-Class A is **split** (outs / ins+wit / sole-spender). Spends are schema-v5
-annotations on **`spent.body`** (no `point.head`). Inputs store **`create_fk` +
-vout** (soft `prev_txid` in RAM only).
-
-**Memory rule:** Direct IBD writes durable segmented `tx.head.*` live and spend
-annotations on confirm. Pin/SH/tweaks read **`txout` only**; annotate dirties
-**`spent`**. Parent resolve uses parent cache + `tx.head` (open + fuse-gated
-sealed). SH create dedupe is an **O(1) height watermark**; durable SH tables
-bulk-load at tip as sorted files (ingest OA is the only large SH heap). Densify
-is gated by body-queue soft depth — do not raise that depth without watching
-RSS vs page cache. Working-set sizes:
-[`SCHEMA.md`](./SCHEMA.md) (mainnet census) and [`docs/ibd-memory.md`](docs/ibd-memory.md).
+On enter Direct, leftover `ibd_utxo.map` / `point.runs` / `tx.runs` from old
+Catchup datadirs are removed — prefer a **fresh datadir**. Layout, shard
+counts, ingest OA, and refuse lines: [`SCHEMA.md`](./SCHEMA.md) and
+[Schema upgrade](#schema-upgrade). Working-set sizes: SCHEMA census and
+[`docs/ibd-memory.md`](docs/ibd-memory.md).
 
 ## Schema upgrade
 
 Live bytes: [`SCHEMA.md`](./SCHEMA.md) (`SCHEMA_VERSION = 20`). This section is
 the operator copy-paste only — do not treat it as a second layout map.
 
-Open **never silently wipes** a populated store. An older `store/meta` either
+Open **never silently wipes** a populated store (policy:
+[`SCHEMA.md`](./SCHEMA.md#changing-durable-bytes)). An older `store/meta` either
 rewrites `meta` (payload-only) or **refuses** with a one-line message that
 names the dirs. Corrupt files are **not** repaired in-process.
 
