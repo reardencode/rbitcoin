@@ -411,9 +411,7 @@ analog = "official: after permitbaremultisig + incrementalrelayfee, testmempoola
 
 [[test]]
 name = "mempool_accept_wtxid.py"
-status = "skip"
-reason = "rpc-missing"
-analog = "follow-up: wtxid accept"
+status = "run"
 
 [[test]]
 name = "mempool_cluster.py"
