@@ -1,10 +1,11 @@
 //! `blockchain.tweaks.subscribe` (naive, uncached).
 //!
 //! Stream: JSON-RPC result is the first height; remaining heights are
-//! notifications; `{"message":"done"}` ends the run. Cake Wallet and
-//! kiss-bdk scan locally from tweak + txid + taproot outs. Pre-taproot empty
-//! maps collapse into one notify (≤1024 keys). `historicalMode=false` omits
-//! confirmed-spent P2TR outs.
+//! notifications; `{"message":"done"}` ends the **chunk** (60s wall at a
+//! wave boundary, or the requested `count` if that finishes first). Cake
+//! resubscribes. kiss-bdk one-shot stops until it loops (kiss-bdk#10).
+//! Pre-taproot empty maps collapse into one notify (≤1024 keys).
+//! `historicalMode=false` omits confirmed-spent P2TR outs.
 
 use rbitcoin_consensus::{tweaks_for_height, ChainParams, TxTweak};
 #[cfg(test)]
@@ -30,7 +31,8 @@ pub fn seal_subscribe_chunk(elapsed: Duration, budget: Duration, more: bool) -> 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TweakReq {
     pub start: u32,
-    /// Requested height count (scan sends tip − restore). Served through tip.
+    /// Requested height count (scan sends tip − restore). Served until
+    /// `count`/tip **or** the 60s wave-boundary chunk, whichever first.
     pub count: u32,
     /// Cake `historicalMode`. `false` → cut-through spent P2TR outs.
     pub historical: bool,
