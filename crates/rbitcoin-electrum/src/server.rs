@@ -121,6 +121,10 @@ pub struct ElectrumConfig {
     pub max_scripthash_subs: usize,
     /// Max hex length accepted by `blockchain.transaction.broadcast`.
     pub max_broadcast_hex: usize,
+    /// `blockchain.tweaks.subscribe` sends `done` at a wave boundary after
+    /// this wall time so Cake resubscribes. [`Duration::ZERO`] seals after
+    /// wave 0 (tests). Default [`crate::tweaks::SUBSCRIBE_CHUNK`].
+    pub tweaks_chunk: Duration,
 }
 
 impl ElectrumConfig {
@@ -138,6 +142,7 @@ impl ElectrumConfig {
             limits: ServeLimits::for_public_proxy(),
             max_scripthash_subs: DEFAULT_MAX_SCRIPTHASH_SUBS,
             max_broadcast_hex: DEFAULT_MAX_BROADCAST_HEX,
+            tweaks_chunk: crate::tweaks::SUBSCRIBE_CHUNK,
         }
     }
 
@@ -518,6 +523,7 @@ where
                         &params_v,
                         idle,
                         max_line,
+                        config.tweaks_chunk,
                     )
                     .await?;
                     continue;
@@ -665,6 +671,7 @@ async fn serve_tweaks_subscribe<R, W>(
     params_v: &Value,
     idle: Duration,
     max_line: usize,
+    chunk: Duration,
 ) -> Result<(), std::io::Error>
 where
     R: AsyncBufReadExt + Unpin,
@@ -774,9 +781,12 @@ where
     // Remaining heights after wave 0. Pre-taproot empty waves (no store), else
     // budgeted thin load then per-height notifies. Hole → one height.
     // `server.ping` must not drop the in-flight wave.
+    // Cake electrs caps count at 1000 then done; we seal at a wave boundary
+    // after `chunk` wall so Cake resubscribes. Wave 0 always completed above.
     let mut next = req.start.saturating_add(wave.consumed.max(1));
     let limits = crate::tweaks::subscribe_serve_limits(req.historical);
-    if next <= last {
+    let more = next <= last;
+    if more && !crate::tweaks::seal_subscribe_chunk(t0.elapsed(), chunk, more) {
         let spawn_wave = |batch_start: u32| {
             let q = Arc::clone(query);
             let c = Arc::clone(chain);
@@ -841,11 +851,12 @@ where
             };
             let n = batch.consumed.max(1);
             next = batch_start.saturating_add(n);
-            if next <= last {
+            let more = next <= last;
+            if more && !crate::tweaks::seal_subscribe_chunk(t0.elapsed(), chunk, more) {
                 handle = spawn_wave(next);
             }
             write_raw_lines(writer, &batch.lines).await?;
-            if next > last {
+            if !more || crate::tweaks::seal_subscribe_chunk(t0.elapsed(), chunk, more) {
                 break;
             }
             batch_start = next;
@@ -1827,6 +1838,7 @@ mod tests {
         let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
         assert!(!cfg.genesis_hash_hex.is_empty());
         assert!(cfg.banner.contains("rbitcoin"));
+        assert_eq!(cfg.tweaks_chunk, crate::tweaks::SUBSCRIBE_CHUNK);
 
         let sh = electrum_scripthash_hex(&[0x51]);
         assert_eq!(sh.len(), 64);
@@ -5431,6 +5443,121 @@ mod tests {
         let done = read_json(&mut reader).await;
         assert_eq!(done["method"], "blockchain.tweaks.subscribe");
         assert_eq!(done["params"][0]["message"], "done");
+
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn tweaks_subscribe_zero_chunk_dones_after_wave0_then_resubscribe() {
+        use rbitcoin_primitives::{Fk, Height};
+        use rbitcoin_query::TxApply;
+        use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
+
+        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+        }
+        let (dir, q) = tmp_store();
+        let mut prev = Fk::NULL;
+        let mut parent_hash: Option<[u8; 32]> = None;
+        for h in 0..5u32 {
+            let mut merkle = [0u8; 32];
+            merkle[0..4].copy_from_slice(&h.to_le_bytes());
+            merkle[5] = 0xec;
+            let hash = match parent_hash {
+                None => merkle,
+                Some(ph) => {
+                    rbitcoin_store::block_header_hash(1, &ph, &merkle, h + 1, 0x207fffff, h)
+                }
+            };
+            let header = HeaderRecord {
+                prev_fk: prev,
+                version: 1,
+                timestamp: h + 1,
+                bits: 0x207fffff,
+                nonce: h,
+                merkle_root: merkle,
+                hash,
+            };
+            let mut txid = [0u8; 32];
+            txid[0..4].copy_from_slice(&h.to_le_bytes());
+            txid[31] = 0xcb;
+            let ta = TxApply {
+                tx: TxRecord {
+                    txid,
+                    version: 1,
+                    locktime: 0,
+                    input_start_fk: Fk::NULL,
+                    input_count: 1,
+                    output_start_fk: Fk::NULL,
+                    output_count: 1,
+                },
+                inputs: vec![InputRecord::coinbase(u32::MAX, vec![h as u8], vec![])],
+                outputs: vec![OutputRecord::unspent(50_0000_0000, vec![0x51])],
+            };
+            prev = q.connect_block(Height(h), &header, &[ta]).unwrap();
+            parent_hash = Some(hash);
+        }
+
+        let params = ChainParams::regtest();
+        let q = std::sync::Arc::new(q);
+        let (tip_tx, _) = broadcast::channel(4);
+        let mut cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+        cfg.tweaks_chunk = Duration::ZERO;
+        let handle = run_electrum(cfg, q, params, tip_tx, None)
+            .await
+            .expect("listen");
+
+        let mut stream = TcpStream::connect(handle.local_addr).await.unwrap();
+        async fn read_json(reader: &mut BufReader<&mut TcpStream>) -> Value {
+            let mut resp = String::new();
+            tokio::time::timeout(Duration::from_secs(3), reader.read_line(&mut resp))
+                .await
+                .unwrap_or_else(|_| panic!("tweaks stream: timed out"))
+                .unwrap();
+            serde_json::from_str(&resp)
+                .unwrap_or_else(|e| panic!("tweaks stream parse {e}: {resp}"))
+        }
+        async fn subscribe(stream: &mut TcpStream, id: &str, start: u32, count: u32) {
+            let req = json!({
+                "jsonrpc":"2.0","id": id,
+                "method":"blockchain.tweaks.subscribe",
+                "params":[start, count, false]
+            });
+            let mut line = serde_json::to_string(&req).unwrap();
+            line.push('\n');
+            stream.write_all(line.as_bytes()).await.unwrap();
+        }
+
+        subscribe(&mut stream, "scan", 1, 3).await;
+        let mut reader = BufReader::new(&mut stream);
+
+        let result = read_json(&mut reader).await;
+        assert_eq!(result["id"], "scan");
+        let map = result["result"].as_object().expect("result map");
+        assert_eq!(map.len(), 1, "wave 0 result is one height, got {map:?}");
+        assert!(map.contains_key("1"), "{map:?}");
+
+        let done = read_json(&mut reader).await;
+        assert_eq!(done["method"], "blockchain.tweaks.subscribe");
+        assert_eq!(
+            done["params"][0]["message"], "done",
+            "zero chunk must done after wave 0 with heights left, got {done}"
+        );
+
+        drop(reader);
+        subscribe(&mut stream, "scan2", 2, 2).await;
+        let mut reader = BufReader::new(&mut stream);
+        let result2 = read_json(&mut reader).await;
+        assert_eq!(result2["id"], "scan2");
+        let map2 = result2["result"].as_object().expect("resubscribe result");
+        assert!(
+            map2.contains_key("2"),
+            "Cake noData path resubscribes on the same socket, got {map2:?}"
+        );
+
+        let done2 = read_json(&mut reader).await;
+        assert_eq!(done2["params"][0]["message"], "done");
 
         handle.shutdown().await;
         let _ = std::fs::remove_dir_all(&dir);
