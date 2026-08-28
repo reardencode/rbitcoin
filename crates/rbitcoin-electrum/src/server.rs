@@ -692,7 +692,54 @@ where
     let tip = query.tip_height().map(|h| h.0);
     let last = crate::tweaks::last_height(req.start, req.count, tip);
     let t0 = Instant::now();
-    let first = match crate::tweaks::height_map_json(query, chain, req.start) {
+    let Some(last) = last else {
+        let first = match crate::tweaks::height_map_json(query, chain, req.start) {
+            Ok(v) => v,
+            Err(e) => {
+                rbitcoin_log::api_call(
+                    "electrum",
+                    &peer.to_string(),
+                    "blockchain.tweaks.subscribe",
+                    &serde_json::to_string(params_v).unwrap_or_else(|_| "[]".into()),
+                    t0.elapsed().as_millis() as u64,
+                    Some(&e),
+                );
+                write_line(
+                    writer,
+                    &json!({"jsonrpc":"2.0","id": id, "error": {"code": 1, "message": e}}),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        let wall_ms = t0.elapsed().as_millis() as u64;
+        meter_dispatch_wall(t0.elapsed().as_micros() as u64);
+        rbitcoin_log::api_call(
+            "electrum",
+            &peer.to_string(),
+            "blockchain.tweaks.subscribe",
+            &serde_json::to_string(params_v).unwrap_or_else(|_| "[]".into()),
+            wall_ms,
+            None,
+        );
+        write_rpc_result(writer, &id, &first).await?;
+        write_line(writer, &crate::tweaks::done_notify()).await?;
+        return Ok(());
+    };
+    let limits = crate::tweaks::subscribe_range_limits();
+    let wave_fut = {
+        let q = Arc::clone(query);
+        let c = Arc::clone(chain);
+        let start_h = req.start;
+        async move {
+            tokio::task::spawn_blocking(move || {
+                crate::tweaks::first_subscribe_wave(&q, &c, start_h, last, limits)
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()))
+        }
+    };
+    let wave = match wave_fut.await {
         Ok(v) => v,
         Err(e) => {
             rbitcoin_log::api_call(
@@ -721,16 +768,13 @@ where
         wall_ms,
         None,
     );
-    write_rpc_result(writer, &id, &first).await?;
+    write_rpc_result(writer, &id, &wave.result_json).await?;
+    write_raw_lines(writer, &wave.rest_notifies).await?;
 
-    let Some(last) = last else {
-        write_line(writer, &crate::tweaks::done_notify()).await?;
-        return Ok(());
-    };
-    // Remaining heights: pre-taproot empty waves (no store), else budgeted
-    // thin load (one txout span per batch) then per-height notifies. Hole → one height.
+    // Remaining heights after wave 0. Pre-taproot empty waves (no store), else
+    // budgeted thin load then per-height notifies. Hole → one height.
     // `server.ping` must not drop the in-flight wave.
-    let mut next = req.start.saturating_add(1);
+    let mut next = req.start.saturating_add(wave.consumed.max(1));
     let limits = crate::tweaks::subscribe_range_limits();
     while next <= last {
         let batch_start = next;
