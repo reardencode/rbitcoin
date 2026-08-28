@@ -152,11 +152,6 @@ where
     Ok(())
 }
 
-/// Default multi-height load budgets for subscribe (max 128 heights, 16384 eligible).
-pub fn subscribe_range_limits() -> ThinTweakRangeLimits {
-    ThinTweakRangeLimits::default()
-}
-
 /// Serve budgets plus Cake cut-through when `historical` is false.
 pub fn subscribe_serve_limits(historical: bool) -> ThinTweakRangeLimits {
     ThinTweakRangeLimits {
@@ -537,13 +532,15 @@ mod tests {
     }
 
     #[test]
-    fn subscribe_range_limits_matches_query_default() {
-        assert_eq!(subscribe_range_limits(), ThinTweakRangeLimits::default());
-        assert_eq!(subscribe_range_limits().max_eligible, 16384);
-        assert_eq!(subscribe_range_limits().max_heights, 128);
-        assert!(!subscribe_range_limits().cut_through);
-        assert!(subscribe_serve_limits(false).cut_through);
+    fn subscribe_serve_limits_matches_query_default() {
+        assert_eq!(
+            subscribe_serve_limits(true),
+            ThinTweakRangeLimits::default()
+        );
+        assert_eq!(subscribe_serve_limits(true).max_eligible, 16384);
+        assert_eq!(subscribe_serve_limits(true).max_heights, 128);
         assert!(!subscribe_serve_limits(true).cut_through);
+        assert!(subscribe_serve_limits(false).cut_through);
     }
 
     #[test]
@@ -647,7 +644,7 @@ mod tests {
         }
 
         let chain = ChainParams::regtest();
-        let wave = first_subscribe_wave(&q, &chain, 1, 3, subscribe_range_limits()).unwrap();
+        let wave = first_subscribe_wave(&q, &chain, 1, 3, ThinTweakRangeLimits::default()).unwrap();
         let result: Value = serde_json::from_str(&wave.result_json).unwrap();
         assert_eq!(result.as_object().unwrap().len(), 1);
         assert!(result.get("1").unwrap().as_object().unwrap().is_empty());
@@ -663,7 +660,7 @@ mod tests {
         assert_eq!(encode_thin_height_json(1, &thin1), wave.result_json);
 
         let main = ChainParams::mainnet();
-        let pre = first_subscribe_wave(&q, &main, 0, 10, subscribe_range_limits()).unwrap();
+        let pre = first_subscribe_wave(&q, &main, 0, 10, ThinTweakRangeLimits::default()).unwrap();
         assert_eq!(pre.consumed, 1);
         assert!(pre.rest_notifies.is_empty());
         let pre_v: Value = serde_json::from_str(&pre.result_json).unwrap();
@@ -733,7 +730,8 @@ mod tests {
             parent_hash = Some(hash);
         }
         let chain = ChainParams::mainnet();
-        let wave = remaining_notify_lines(&q, &chain, 1, 7, subscribe_range_limits()).unwrap();
+        let wave =
+            remaining_notify_lines(&q, &chain, 1, 7, ThinTweakRangeLimits::default()).unwrap();
         assert_eq!(wave.consumed, 7);
         assert_eq!(wave.lines.len(), 1);
         let v: Value = serde_json::from_str(&wave.lines[0]).unwrap();
