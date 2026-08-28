@@ -472,8 +472,13 @@ impl ActiveMempool {
             return Err(AcceptError::Coinbase);
         }
         let txid = tx.compute_txid();
-        if self.graph.contains(&txid) {
-            return Err(AcceptError::Duplicate(txid));
+        if let Some(live) = self.graph.get(&txid) {
+            if live.wtxid == tx.compute_wtxid() {
+                return Err(AcceptError::Duplicate(txid));
+            }
+            // Same txid, different witness (Core testmempoolaccept /
+            // mempool_accept_wtxid.py).
+            return Err(AcceptError::Policy("txn-same-nonwitness-data-in-mempool"));
         }
         // Already parked: soft re-announce of the same orphan.
         if self.orphanage.contains(&txid) {
@@ -686,8 +691,11 @@ impl ActiveMempool {
     ) -> Result<(BTreeSet<Txid>, u64, u64), AcceptError> {
         let _ = tip;
         let txid = tx.compute_txid();
-        if self.graph.contains(&txid) {
-            return Err(AcceptError::Duplicate(txid));
+        if let Some(live) = self.graph.get(&txid) {
+            if live.wtxid == tx.compute_wtxid() {
+                return Err(AcceptError::Duplicate(txid));
+            }
+            return Err(AcceptError::Policy("txn-same-nonwitness-data-in-mempool"));
         }
         if self.orphanage.contains(&txid) {
             return Err(AcceptError::Orphaned(txid));

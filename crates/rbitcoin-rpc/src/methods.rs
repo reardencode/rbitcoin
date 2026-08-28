@@ -1530,9 +1530,12 @@ fn accept_reject_reason(e: &impl std::fmt::Display) -> String {
     s.to_string()
 }
 
-/// Core `reject-details` for a script-verify mempool reject.
+/// Core `reject-details` for mempool rejects.
 fn accept_reject_details(e: &impl std::fmt::Display, tx: &Transaction) -> Option<String> {
     let reason = accept_reject_reason(e);
+    if reason == "txn-already-in-mempool" || reason == "txn-same-nonwitness-data-in-mempool" {
+        return Some(reason);
+    }
     if !reason.starts_with("mempool-script-verify-flag-failed") {
         return None;
     }
