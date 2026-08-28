@@ -102,7 +102,16 @@ TCP buffers filled. Dual-track `ArchiveJob` + ContigPark charge/release is
 Host check / in-process:
 
 Every ~5s IBD emits **`ibd: sizes`** (INFO) with process RSS and occupancy of
-known retain structures:
+known retain structures. Tip-follow emits **`tip: perf`** (DEBUG) with the same
+`rss=` `anon=` `file=` `hwm=` split plus `cache=` `held=` `sh_heads=` `mp_live=`.
+`anon=` growth is process heap; `file=` growth is mmap page cache.
+
+Grep:
+
+```bash
+grep 'ibd: sizes' mainnet.log
+grep 'tip: perf' mainnet.log
+```
 
 | Token group | What it meters |
 |-------------|----------------|
@@ -139,6 +148,7 @@ Grep:
 
 ```bash
 grep 'ibd: sizes' mainnet.log
+grep 'tip: perf' mainnet.log
 ```
 
 ## Hard RAM (page-cache working set)

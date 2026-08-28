@@ -67,6 +67,10 @@ impl BlockCache {
         self.inner.read().unwrap().chain.is_empty()
     }
 
+    pub fn body_count(&self) -> usize {
+        self.inner.read().unwrap().by_hash.len()
+    }
+
     pub fn get_block(&self, hash: &BlockHash) -> Option<Block> {
         self.inner.read().unwrap().by_hash.get(hash).cloned()
     }

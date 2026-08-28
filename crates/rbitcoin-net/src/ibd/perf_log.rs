@@ -721,7 +721,7 @@ impl Default for IbdPerfSample {
 /// - `file_kb` — file-backed resident (shared libs + **our table mmaps**)
 /// - `locked_kb` — `mlock`/`mlockall` only (usually 0 for us)
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct ProcRss {
+pub struct ProcRss {
     pub rss_kb: u64,
     pub anon_kb: u64,
     pub file_kb: u64,
@@ -736,7 +736,7 @@ pub(crate) struct ProcRss {
 /// `RssFile` / `VmRSS`). Fall back to `smaps_rollup` (`Anonymous:`, `Rss:`,
 /// `Locked:`) when status split is missing — older rollups do **not** expose
 /// `RssAnon:` / `RssFile:` (that bug made `ibd: sizes` print `anon=0 file=0`).
-pub(crate) fn read_proc_rss() -> ProcRss {
+pub fn read_proc_rss() -> ProcRss {
     let mut out = ProcRss::default();
     if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
         for line in s.lines() {
@@ -798,6 +798,31 @@ fn parse_kb_field(rest: &str) -> u64 {
 
 fn kb_mib(kb: u64) -> u64 {
     kb / 1024
+}
+
+/// Occupancy + RSS for the tip-follow 5s DEBUG `tip: perf` line.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TipPerfSizes {
+    pub rss: ProcRss,
+    pub cache_bodies: usize,
+    pub held_bodies: usize,
+    pub sh_heads: usize,
+    pub mp_live: usize,
+}
+
+/// `rss=` `anon=` `file=` `hwm=` (MiB) plus O(1) retain counts. Not the IBD residual line.
+pub fn format_tip_perf_sizes(s: &TipPerfSizes) -> String {
+    format!(
+        "rss={}MiB anon={}MiB file={}MiB hwm={}MiB cache={} held={} sh_heads={} mp_live={}",
+        kb_mib(s.rss.rss_kb),
+        kb_mib(s.rss.anon_kb),
+        kb_mib(s.rss.file_kb),
+        kb_mib(s.rss.hwm_kb),
+        s.cache_bodies,
+        s.held_bodies,
+        s.sh_heads,
+        s.mp_live,
+    )
 }
 
 /// Sample every counter once and reset atomics.
@@ -2792,5 +2817,32 @@ mod tests {
         slow.load_ms = 6000;
         slow.write.class_a_ms = 6000;
         log_sample(&slow);
+    }
+
+    #[test]
+    fn format_tip_perf_sizes_tokens_and_mib() {
+        let line = super::format_tip_perf_sizes(&super::TipPerfSizes {
+            rss: super::ProcRss {
+                rss_kb: 2 * 1024,
+                anon_kb: 1024,
+                file_kb: 512,
+                hwm_kb: 3 * 1024,
+                locked_kb: 0,
+            },
+            cache_bodies: 4,
+            held_bodies: 1,
+            sh_heads: 8,
+            mp_live: 12,
+        });
+        assert!(line.contains("rss=2MiB"), "{line}");
+        assert!(line.contains("anon=1MiB"), "{line}");
+        assert!(line.contains("file=0MiB"), "{line}");
+        assert!(line.contains("hwm=3MiB"), "{line}");
+        assert!(line.contains("cache=4"), "{line}");
+        assert!(line.contains("held=1"), "{line}");
+        assert!(line.contains("sh_heads=8"), "{line}");
+        assert!(line.contains("mp_live=12"), "{line}");
+        assert!(!line.contains("accounted="), "{line}");
+        assert!(!line.contains("residual="), "{line}");
     }
 }

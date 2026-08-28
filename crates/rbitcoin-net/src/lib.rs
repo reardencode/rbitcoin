@@ -25,7 +25,8 @@ pub use chain::{
 pub use codec::{MAX_HEADERS_RESULTS, MAX_INV_SIZE, MAX_LOCATOR_SZ, MAX_PROTOCOL_MESSAGE_LENGTH};
 pub use error::NetError;
 pub use ibd::{
-    ibd, ibd_cancellable, IbdConfig, DEFAULT_BLOCKS_IN_TRANSIT_PER_PEER, DEFAULT_IBD_WINDOW,
+    format_tip_perf_sizes, ibd, ibd_cancellable, read_proc_rss, IbdConfig, ProcRss, TipPerfSizes,
+    DEFAULT_BLOCKS_IN_TRANSIT_PER_PEER, DEFAULT_IBD_WINDOW,
 };
 pub use most_work::{
     first_best_ancestor, lca_on_best_chain, path_hashes_from_ancestor, select_most_work, sum_work,

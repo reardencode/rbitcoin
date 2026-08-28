@@ -5,7 +5,10 @@ use bitcoin::consensus::Encodable;
 use rbitcoin_electrum::{run_electrum, ElectrumConfig, TipNotify};
 use rbitcoin_esplora::{run_esplora, EsploraConfig};
 use rbitcoin_log::{debug, enabled, info, warn, Level};
-use rbitcoin_net::{default_port, AddrMan, IbdConfig, MempoolHub, P2PNode, TipEvent};
+use rbitcoin_net::{
+    default_port, format_tip_perf_sizes, read_proc_rss, AddrMan, IbdConfig, MempoolHub, P2PNode,
+    TipEvent, TipPerfSizes,
+};
 use rbitcoin_primitives::Network;
 use rbitcoin_query::{spawn_sh_writebehind, Query};
 use rbitcoin_rpc::{run_rpc, RpcConfig, RpcHandle, RpcRegtest};
@@ -829,8 +832,15 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     };
                     let esp_avg = if esp_n > 0 { esp_us / esp_n } else { 0 };
                     let el_avg = if el_n > 0 { el_us / el_n } else { 0 };
+                    let sizes = format_tip_perf_sizes(&TipPerfSizes {
+                        rss: read_proc_rss(),
+                        cache_bodies: node.hub.cache_body_count(),
+                        held_bodies: node.hub.held_body_count(),
+                        sh_heads: node.query.process_owned_size_snapshot().sh_heads,
+                        mp_live: live,
+                    });
                     debug!(
-                        "tip: perf follow_live={follow_live} blocks={blks} \
+                        "tip: perf {sizes} follow_live={follow_live} blocks={blks} \
                          mempool live={live} accepts={} rejects={} accept_avg_us={acc_avg} \
                          accept_max_us={} accept_lock_us={} accept_utxo_us={} \
                          accept_script_us={} accept_durable_us={} \

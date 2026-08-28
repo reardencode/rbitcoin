@@ -1595,6 +1595,14 @@ impl ChainHub {
         self.held_bodies.read().unwrap().get(hash).cloned()
     }
 
+    pub fn cache_body_count(&self) -> usize {
+        self.cache.body_count()
+    }
+
+    pub fn held_body_count(&self) -> usize {
+        self.held_bodies.read().unwrap().len()
+    }
+
     /// Parents of held bodies that are neither on the best chain nor held
     /// (nor reconstructable from archive). Peer download window uses this.
     pub fn held_missing_parents(&self) -> Vec<BlockHash> {
