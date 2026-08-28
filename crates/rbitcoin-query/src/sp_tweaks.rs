@@ -44,6 +44,57 @@ fn require_thin_body_range(r: Option<(u64, u64)>) -> Result<(u64, u64), StoreErr
     }
 }
 
+fn wave_join_is_dense(elig_count: usize, first_id: u64, last_id: u64) -> bool {
+    if elig_count == 0 || last_id < first_id {
+        return false;
+    }
+    let Ok(span) = usize::try_from(last_id - first_id + 1) else {
+        return false;
+    };
+    elig_count.saturating_mul(4) >= span
+}
+
+fn thin_join_txids_and_ranges(
+    store: &Store,
+    elig_fks: &[Fk],
+) -> Result<(Vec<Option<[u8; 32]>>, Vec<Option<(u64, u64)>>), StoreError> {
+    let Some(first_id) = elig_fks.first().and_then(|f| f.get()) else {
+        return Err(StoreError::InvalidFk);
+    };
+    let Some(last_id) = elig_fks.last().and_then(|f| f.get()) else {
+        return Err(StoreError::InvalidFk);
+    };
+    if wave_join_is_dense(elig_fks.len(), first_id, last_id) {
+        let all_txids = store.txs.txid_sidefile().get_range(first_id, last_id)?;
+        let all_ranges = store.txs.body_ranges(first_id, last_id)?;
+        let n = (last_id - first_id + 1) as usize;
+        if all_txids.len() != n || all_ranges.len() != n {
+            return Err(StoreError::Corrupt(
+                "invariant: thin tweak dense join length mismatch",
+            ));
+        }
+        let mut txids = Vec::with_capacity(elig_fks.len());
+        let mut ranges = Vec::with_capacity(elig_fks.len());
+        for fk in elig_fks {
+            let id = fk.get().ok_or(StoreError::InvalidFk)?;
+            let i = (id - first_id) as usize;
+            if i >= n {
+                return Err(StoreError::Corrupt(
+                    "invariant: thin tweak dense join fk outside span",
+                ));
+            }
+            txids.push(Some(all_txids[i]));
+            ranges.push(Some(all_ranges[i]));
+        }
+        Ok((txids, ranges))
+    } else {
+        Ok((
+            store.txs.txid_sidefile().get_many(elig_fks)?,
+            store.tx_body_range_batch(elig_fks)?,
+        ))
+    }
+}
+
 impl Query {
     pub fn sptweaks_enabled(&self) -> bool {
         self.sptweaks_enabled.load(AtomicOrdering::Acquire)
@@ -254,8 +305,7 @@ impl Query {
             .collect();
 
         if !elig_fks.is_empty() {
-            let txids = self.store.txs.txid_sidefile().get_many(&elig_fks)?;
-            let ranges = self.store.tx_body_range_batch(&elig_fks)?;
+            let (txids, ranges) = thin_join_txids_and_ranges(&self.store, &elig_fks)?;
             let mut span_off = u64::MAX;
             let mut span_end = 0u64;
             for r in &ranges {
@@ -372,6 +422,17 @@ mod tests {
             "{err}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wave_join_is_dense_packed_vs_sparse() {
+        assert!(wave_join_is_dense(4, 10, 13));
+        assert!(wave_join_is_dense(1, 10, 13));
+        assert!(!wave_join_is_dense(1, 10, 14));
+        assert!(!wave_join_is_dense(0, 10, 13));
+        assert!(wave_join_is_dense(2, 100, 107));
+        assert!(!wave_join_is_dense(2, 100, 108));
+        assert!(!wave_join_is_dense(1, 20, 10));
     }
 
     #[test]
@@ -820,6 +881,15 @@ mod tests {
                 assert_eq!(a.p2tr, b.p2tr);
             }
         }
+
+        let fks1 = q.block_tx_fks(Height(1)).unwrap();
+        let fks2 = q.block_tx_fks(Height(2)).unwrap();
+        let first = fks1[0].get().unwrap();
+        let last = fks2[0].get().unwrap();
+        assert!(
+            wave_join_is_dense(2, first, last),
+            "fully eligible consecutive txs must take the dense join"
+        );
 
         // max_heights=1
         let one = q
