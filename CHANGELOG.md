@@ -9,6 +9,14 @@ before 1.0).
 
 ## [Unreleased]
 
+### Changed
+
+- **Electrum `blockchain.tweaks.subscribe`:** pre-taproot empty heights go out
+  as **one notify** with ≤1024 keys (Cake last-key progress), not one line per
+  height. Cake `historicalMode=false` (param `[2]`) **cut-through**: omit
+  confirmed-spent P2TR outs (and txs with none left). `true` keeps spent outs
+  for restore. Probe `[0,1,false]` is still `{"0": {}}`.
+
 ### Added
 
 - **Unsorted-shard SH materialize is the default:** tip finalize does one Class A

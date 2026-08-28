@@ -693,7 +693,7 @@ where
     let last = crate::tweaks::last_height(req.start, req.count, tip);
     let t0 = Instant::now();
     let Some(last) = last else {
-        let first = match crate::tweaks::height_map_json(query, chain, req.start) {
+        let first = match crate::tweaks::height_map_json(query, chain, req.start, !req.historical) {
             Ok(v) => v,
             Err(e) => {
                 rbitcoin_log::api_call(
@@ -726,7 +726,7 @@ where
         write_line(writer, &crate::tweaks::done_notify()).await?;
         return Ok(());
     };
-    let limits = crate::tweaks::subscribe_range_limits();
+    let limits = crate::tweaks::subscribe_serve_limits(req.historical);
     let wave_fut = {
         let q = Arc::clone(query);
         let c = Arc::clone(chain);
@@ -775,7 +775,7 @@ where
     // budgeted thin load then per-height notifies. Hole → one height.
     // `server.ping` must not drop the in-flight wave.
     let mut next = req.start.saturating_add(wave.consumed.max(1));
-    let limits = crate::tweaks::subscribe_range_limits();
+    let limits = crate::tweaks::subscribe_serve_limits(req.historical);
     if next <= last {
         let spawn_wave = |batch_start: u32| {
             let q = Arc::clone(query);
@@ -839,12 +839,12 @@ where
                     break;
                 }
             };
-            let n = batch.len() as u32;
-            next = batch_start.saturating_add(n.max(1));
+            let n = batch.consumed.max(1);
+            next = batch_start.saturating_add(n);
             if next <= last {
                 handle = spawn_wave(next);
             }
-            write_raw_lines(writer, &batch).await?;
+            write_raw_lines(writer, &batch.lines).await?;
             if next > last {
                 break;
             }
@@ -5427,6 +5427,109 @@ mod tests {
         let p3 = n3["params"][0].as_object().expect("notify 3");
         assert_eq!(p3.len(), 1);
         assert!(p3.contains_key("3"), "{p3:?}");
+
+        let done = read_json(&mut reader).await;
+        assert_eq!(done["method"], "blockchain.tweaks.subscribe");
+        assert_eq!(done["params"][0]["message"], "done");
+
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn tweaks_subscribe_pre_taproot_collapses_empty_heights() {
+        use rbitcoin_primitives::{Fk, Height};
+        use rbitcoin_query::TxApply;
+        use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
+
+        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+        }
+        let (dir, q) = tmp_store();
+        let mut prev = Fk::NULL;
+        let mut parent_hash: Option<[u8; 32]> = None;
+        for h in 0..5u32 {
+            let mut merkle = [0u8; 32];
+            merkle[0..4].copy_from_slice(&h.to_le_bytes());
+            merkle[5] = 0xec;
+            let hash = match parent_hash {
+                None => merkle,
+                Some(ph) => {
+                    rbitcoin_store::block_header_hash(1, &ph, &merkle, h + 1, 0x207fffff, h)
+                }
+            };
+            let header = HeaderRecord {
+                prev_fk: prev,
+                version: 1,
+                timestamp: h + 1,
+                bits: 0x207fffff,
+                nonce: h,
+                merkle_root: merkle,
+                hash,
+            };
+            let mut txid = [0u8; 32];
+            txid[0..4].copy_from_slice(&h.to_le_bytes());
+            txid[31] = 0xcb;
+            let ta = TxApply {
+                tx: TxRecord {
+                    txid,
+                    version: 1,
+                    locktime: 0,
+                    input_start_fk: Fk::NULL,
+                    input_count: 1,
+                    output_start_fk: Fk::NULL,
+                    output_count: 1,
+                },
+                inputs: vec![InputRecord::coinbase(u32::MAX, vec![h as u8], vec![])],
+                outputs: vec![OutputRecord::unspent(50_0000_0000, vec![0x51])],
+            };
+            prev = q.connect_block(Height(h), &header, &[ta]).unwrap();
+            parent_hash = Some(hash);
+        }
+
+        let params = ChainParams::mainnet();
+        let q = std::sync::Arc::new(q);
+        let (tip_tx, _) = broadcast::channel(4);
+        let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+        let handle = run_electrum(cfg, q, params, tip_tx, None)
+            .await
+            .expect("listen");
+
+        let mut stream = TcpStream::connect(handle.local_addr).await.unwrap();
+        let req = json!({
+            "jsonrpc":"2.0","id":"scan",
+            "method":"blockchain.tweaks.subscribe",
+            "params":[0, 5, false]
+        });
+        let mut line = serde_json::to_string(&req).unwrap();
+        line.push('\n');
+        stream.write_all(line.as_bytes()).await.unwrap();
+        let mut reader = BufReader::new(&mut stream);
+
+        async fn read_json(reader: &mut BufReader<&mut TcpStream>) -> Value {
+            let mut resp = String::new();
+            tokio::time::timeout(Duration::from_secs(3), reader.read_line(&mut resp))
+                .await
+                .unwrap_or_else(|_| panic!("tweaks stream: timed out"))
+                .unwrap();
+            serde_json::from_str(&resp)
+                .unwrap_or_else(|e| panic!("tweaks stream parse {e}: {resp}"))
+        }
+
+        let result = read_json(&mut reader).await;
+        assert_eq!(result["id"], "scan");
+        let map = result["result"].as_object().expect("result map");
+        assert_eq!(map.len(), 1, "probe/result stays one height, got {map:?}");
+        assert!(map.contains_key("0"), "{map:?}");
+
+        let n = read_json(&mut reader).await;
+        assert_eq!(n["method"], "blockchain.tweaks.subscribe");
+        let p = n["params"][0].as_object().expect("collapsed notify");
+        assert_eq!(p.len(), 4, "heights 1..=4 in one notify, got {p:?}");
+        for h in 1u32..=4 {
+            assert!(p.contains_key(&h.to_string()), "{p:?}");
+            assert!(p[&h.to_string()].as_object().unwrap().is_empty());
+        }
 
         let done = read_json(&mut reader).await;
         assert_eq!(done["method"], "blockchain.tweaks.subscribe");

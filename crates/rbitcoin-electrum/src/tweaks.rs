@@ -2,7 +2,9 @@
 //!
 //! Stream: JSON-RPC result is the first height; remaining heights are
 //! notifications; `{"message":"done"}` ends the run. Cake Wallet and
-//! kiss-bdk scan locally from tweak + txid + taproot outs.
+//! kiss-bdk scan locally from tweak + txid + taproot outs. Pre-taproot empty
+//! maps collapse into one notify (≤1024 keys). `historicalMode=false` omits
+//! confirmed-spent P2TR outs.
 
 use rbitcoin_consensus::{tweaks_for_height, ChainParams, TxTweak};
 #[cfg(test)]
@@ -12,6 +14,7 @@ use rbitcoin_query::{Query, ThinTweakRangeLimits, ThinTweakRow};
 #[cfg(test)]
 use serde_json::Map;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 /// Parsed `blockchain.tweaks.subscribe` window.
@@ -20,13 +23,19 @@ pub struct TweakReq {
     pub start: u32,
     /// Requested height count (scan sends tip − restore). Served through tip.
     pub count: u32,
+    /// Cake `historicalMode`. `false` → cut-through spent P2TR outs.
+    pub historical: bool,
 }
 
 pub fn parse_req(params: &Value) -> Result<TweakReq, String> {
     let start = param_u32(params, 0)?;
     let count = param_u32(params, 1).unwrap_or(1).max(1);
-    let _historical = param_bool(params, 2);
-    Ok(TweakReq { start, count })
+    let historical = param_bool(params, 2).unwrap_or(false);
+    Ok(TweakReq {
+        start,
+        count,
+        historical,
+    })
 }
 
 /// Inclusive last height to serve (`start` if `count==1`), not past tip.
@@ -39,21 +48,43 @@ pub fn last_height(start: u32, count: u32, tip: Option<u32>) -> Option<u32> {
 }
 
 /// One height key → txs. Cake `fromJson` uses the **last** map key as `block`.
-pub fn height_map(query: &Query, chain: &ChainParams, h: u32) -> Result<Value, String> {
-    let s = height_map_json(query, chain, h)?;
+pub fn height_map(
+    query: &Query,
+    chain: &ChainParams,
+    h: u32,
+    cut_through: bool,
+) -> Result<Value, String> {
+    let s = height_map_json(query, chain, h, cut_through)?;
     serde_json::from_str(&s).map_err(|e| e.to_string())
 }
 
 /// Cake height map as JSON text (no `serde_json::Value` tree).
-pub fn height_map_json(query: &Query, chain: &ChainParams, h: u32) -> Result<String, String> {
+pub fn height_map_json(
+    query: &Query,
+    chain: &ChainParams,
+    h: u32,
+    cut_through: bool,
+) -> Result<String, String> {
     let tip = query.tip_height().map(|t| t.0);
     if tip.is_none_or(|t| h > t) || !chain.taproot_active_at(h) {
         return Ok(empty_height_json(h));
     }
-    match query.load_thin_tweaks(Height(h)) {
-        Ok(Some(rows)) => Ok(encode_thin_height_json(h, &rows)),
-        Ok(None) => {
-            let tweaks = tweaks_for_height(query, chain, Height(h)).map_err(|e| e.to_string())?;
+    let limits = ThinTweakRangeLimits {
+        max_heights: 1,
+        max_eligible: usize::MAX,
+        cut_through,
+    };
+    match query.load_thin_tweaks_range(Height(h), limits) {
+        Ok(mut batch) if !batch.is_empty() => {
+            let rows = batch.pop().map(|(_, r)| r).unwrap_or_default();
+            Ok(encode_thin_height_json(h, &rows))
+        }
+        Ok(_) => {
+            let mut tweaks =
+                tweaks_for_height(query, chain, Height(h)).map_err(|e| e.to_string())?;
+            if cut_through {
+                retain_unspent_taproot(query, Height(h), &mut tweaks)?;
+            }
             let mut s = String::new();
             s.push('{');
             push_quoted_u32(&mut s, h);
@@ -67,8 +98,13 @@ pub fn height_map_json(query: &Query, chain: &ChainParams, h: u32) -> Result<Str
 }
 
 /// Electrum notify line for one height (json-rpc wrapper + newline not included).
-pub fn height_notify_json(query: &Query, chain: &ChainParams, h: u32) -> Result<String, String> {
-    let map = height_map_json(query, chain, h)?;
+pub fn height_notify_json(
+    query: &Query,
+    chain: &ChainParams,
+    h: u32,
+    cut_through: bool,
+) -> Result<String, String> {
+    let map = height_map_json(query, chain, h, cut_through)?;
     Ok(wrap_height_notify(&map))
 }
 
@@ -121,10 +157,25 @@ pub fn subscribe_range_limits() -> ThinTweakRangeLimits {
     ThinTweakRangeLimits::default()
 }
 
+/// Serve budgets plus Cake cut-through when `historical` is false.
+pub fn subscribe_serve_limits(historical: bool) -> ThinTweakRangeLimits {
+    ThinTweakRangeLimits {
+        cut_through: !historical,
+        ..ThinTweakRangeLimits::default()
+    }
+}
+
 /// First JSON-RPC height plus remaining notifies of the same thin wave.
 pub struct FirstWave {
     pub result_json: String,
     pub rest_notifies: Vec<String>,
+    pub consumed: u32,
+}
+
+/// One remaining-wave write: `consumed` heights, possibly fewer JSON lines
+/// (pre-taproot empty maps collapse into one notify).
+pub struct NotifyWave {
+    pub lines: Vec<String>,
     pub consumed: u32,
 }
 
@@ -154,7 +205,7 @@ pub fn first_subscribe_wave(
     let thin = load_thin_batch(query, start, last, limits)?;
     if thin.is_empty() {
         return Ok(FirstWave {
-            result_json: height_map_json(query, chain, start)?,
+            result_json: height_map_json(query, chain, start, limits.cut_through)?,
             rest_notifies: Vec::new(),
             consumed: 1,
         });
@@ -173,7 +224,8 @@ pub fn first_subscribe_wave(
 }
 
 /// Pre-taproot empty notifies per write (no store). Mainnet genesis→origin
-/// is ~700k heights; one flush per height is the 10/s-class path.
+/// is ~700k heights; one flush per height is the 10/s-class path. One notify
+/// carries up to this many empty height keys (Cake `fromJson` last key = progress).
 pub const EMPTY_WAVE_HEIGHTS: u32 = 1024;
 
 /// Inclusive last height of a pre-taproot empty wave, if `start` is below
@@ -188,34 +240,44 @@ pub fn pre_taproot_wave_last(start: u32, last: u32, taproot_h: u32) -> Option<u3
 
 /// One subscribe wave of notify lines starting at `start`.
 ///
-/// Pre-taproot: empty height maps, no Class A. Indexed: thin batch. Hole:
-/// one naive/thin height.
+/// Pre-taproot: one notify whose params map has every empty height in the
+/// wave (Cake last-key progress). Indexed: thin batch, one line per height.
+/// Hole: one naive/thin height.
 pub fn remaining_notify_lines(
     query: &Query,
     chain: &ChainParams,
     start: u32,
     last: u32,
     limits: ThinTweakRangeLimits,
-) -> Result<Vec<String>, String> {
+) -> Result<NotifyWave, String> {
     if start > last {
-        return Ok(Vec::new());
+        return Ok(NotifyWave {
+            lines: Vec::new(),
+            consumed: 0,
+        });
     }
     if let Some(end) = pre_taproot_wave_last(start, last, chain.taproot_height()) {
-        let n = end.saturating_sub(start).saturating_add(1) as usize;
-        let mut out = Vec::with_capacity(n);
-        for h in start..=end {
-            out.push(thin_height_notify_json(h, &[]));
-        }
-        return Ok(out);
+        let consumed = end.saturating_sub(start).saturating_add(1);
+        return Ok(NotifyWave {
+            lines: vec![wrap_height_notify(&empty_heights_json(start, end))],
+            consumed,
+        });
     }
     let thin = load_thin_batch(query, start, last, limits)?;
     if thin.is_empty() {
-        return Ok(vec![height_notify_json(query, chain, start)?]);
+        return Ok(NotifyWave {
+            lines: vec![height_notify_json(query, chain, start, limits.cut_through)?],
+            consumed: 1,
+        });
     }
-    Ok(thin
-        .into_iter()
-        .map(|(h, rows)| thin_height_notify_json(h, &rows))
-        .collect())
+    let consumed = thin.len() as u32;
+    Ok(NotifyWave {
+        lines: thin
+            .into_iter()
+            .map(|(h, rows)| thin_height_notify_json(h, &rows))
+            .collect(),
+        consumed,
+    })
 }
 
 /// Load a budgeted contiguous thin-index batch starting at `start`.
@@ -234,7 +296,7 @@ pub fn load_thin_batch(
     let max_h = last.saturating_sub(start).saturating_add(1);
     let limits = ThinTweakRangeLimits {
         max_heights: limits.max_heights.min(max_h),
-        max_eligible: limits.max_eligible,
+        ..limits
     };
     let batch = query
         .load_thin_tweaks_range(Height(start), limits)
@@ -248,11 +310,47 @@ pub fn thin_height_notify_json(h: u32, rows: &[ThinTweakRow]) -> String {
 }
 
 fn empty_height_json(h: u32) -> String {
-    let mut s = String::with_capacity(16);
+    empty_heights_json(h, h)
+}
+
+fn empty_heights_json(first: u32, last: u32) -> String {
+    let n = last.saturating_sub(first).saturating_add(1) as usize;
+    let mut s = String::with_capacity(n.saturating_mul(12).saturating_add(2));
     s.push('{');
-    push_quoted_u32(&mut s, h);
-    s.push_str(":{}}");
+    for h in first..=last {
+        if h > first {
+            s.push(',');
+        }
+        push_quoted_u32(&mut s, h);
+        s.push_str(":{}");
+    }
+    s.push('}');
     s
+}
+
+fn retain_unspent_taproot(
+    query: &Query,
+    height: Height,
+    tweaks: &mut BTreeMap<[u8; 32], TxTweak>,
+) -> Result<(), String> {
+    let fks = query.block_tx_fks(height).map_err(|e| e.to_string())?;
+    for fk in fks {
+        let txid = query.store().txs.body_txid(fk).map_err(|e| e.to_string())?;
+        let Some(t) = tweaks.get_mut(&txid) else {
+            continue;
+        };
+        if t.output_pubkeys.is_empty() {
+            continue;
+        }
+        let vouts: Vec<u32> = t.output_pubkeys.iter().map(|o| o.vout).collect();
+        let live = query
+            .unspent_create_vouts(fk, &vouts)
+            .map_err(|e| e.to_string())?;
+        t.output_pubkeys
+            .retain(|o| live.iter().any(|v| *v == o.vout));
+    }
+    tweaks.retain(|_, t| !t.output_pubkeys.is_empty());
+    Ok(())
 }
 
 pub(crate) fn encode_thin_height_json(h: u32, rows: &[rbitcoin_query::ThinTweakRow]) -> String {
@@ -350,7 +448,7 @@ pub fn done_notify() -> Value {
 pub fn subscribe(query: &Query, params: &Value, chain: &ChainParams) -> Result<Value, String> {
     let req = parse_req(params)?;
     let t0 = Instant::now();
-    let map = height_map(query, chain, req.start)?;
+    let map = height_map(query, chain, req.start, !req.historical)?;
     rbitcoin_log::trace!(
         "electrum: tweaks h={} count={} result_keys={} wall_ms={}",
         req.start,
@@ -443,6 +541,26 @@ mod tests {
         assert_eq!(subscribe_range_limits(), ThinTweakRangeLimits::default());
         assert_eq!(subscribe_range_limits().max_eligible, 16384);
         assert_eq!(subscribe_range_limits().max_heights, 128);
+        assert!(!subscribe_range_limits().cut_through);
+        assert!(subscribe_serve_limits(false).cut_through);
+        assert!(!subscribe_serve_limits(true).cut_through);
+    }
+
+    #[test]
+    fn parse_req_historical_defaults_false() {
+        let r = parse_req(&json!([10, 3])).unwrap();
+        assert_eq!(
+            r,
+            TweakReq {
+                start: 10,
+                count: 3,
+                historical: false
+            }
+        );
+        let h = parse_req(&json!([10, 3, true])).unwrap();
+        assert!(h.historical);
+        let c = parse_req(&json!([0, 1, false])).unwrap();
+        assert!(!c.historical);
     }
 
     #[test]
@@ -615,14 +733,186 @@ mod tests {
             parent_hash = Some(hash);
         }
         let chain = ChainParams::mainnet();
-        let lines = remaining_notify_lines(&q, &chain, 1, 7, subscribe_range_limits()).unwrap();
-        assert_eq!(lines.len(), 7);
-        for (i, line) in lines.iter().enumerate() {
-            let v: Value = serde_json::from_str(line).unwrap();
-            let h = (i + 1).to_string();
-            assert_eq!(v["method"], "blockchain.tweaks.subscribe");
-            assert!(v["params"][0][&h].as_object().unwrap().is_empty(), "{v}");
+        let wave = remaining_notify_lines(&q, &chain, 1, 7, subscribe_range_limits()).unwrap();
+        assert_eq!(wave.consumed, 7);
+        assert_eq!(wave.lines.len(), 1);
+        let v: Value = serde_json::from_str(&wave.lines[0]).unwrap();
+        assert_eq!(v["method"], "blockchain.tweaks.subscribe");
+        let map = v["params"][0].as_object().expect("collapsed empty map");
+        assert_eq!(map.len(), 7, "{v}");
+        for h in 1u32..=7 {
+            assert!(
+                map.get(&h.to_string())
+                    .and_then(|x| x.as_object())
+                    .is_some_and(|o| o.is_empty()),
+                "{v}"
+            );
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn height_map_cut_through_omits_spent_p2tr() {
+        use bitcoin::hashes::{hash160, Hash};
+        use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+        use rbitcoin_primitives::{Fk, Height};
+        use rbitcoin_query::TxApply;
+        use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
+
+        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "rbitcoin-electrum-cut-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let q = Query::open_or_create(&dir).unwrap();
+        q.set_sptweaks_enabled(true, Height(0)).unwrap();
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(&[2u8; 32]).unwrap();
+        let pk = PublicKey::from_secret_key(&secp, &sk);
+        let ser = pk.serialize();
+        let h160 = hash160::Hash::hash(&ser);
+        let mut p2wpkh = vec![0x00, 0x14];
+        p2wpkh.extend_from_slice(h160.as_ref());
+        let (xonly, _) = pk.x_only_public_key();
+        let mut p2tr = vec![0x51, 0x20];
+        p2tr.extend_from_slice(&xonly.serialize());
+        let mut genesis_txid = [0u8; 32];
+        genesis_txid[31] = 0xcb;
+        let mut merkle0 = [0u8; 32];
+        merkle0[5] = 0xec;
+        let h0 = HeaderRecord {
+            prev_fk: Fk::NULL,
+            version: 1,
+            timestamp: 1,
+            bits: 0x207fffff,
+            nonce: 0,
+            merkle_root: merkle0,
+            hash: merkle0,
+        };
+        let fk0 = q
+            .connect_block(
+                Height(0),
+                &h0,
+                &[TxApply {
+                    tx: TxRecord {
+                        txid: genesis_txid,
+                        version: 1,
+                        locktime: 0,
+                        input_start_fk: Fk::NULL,
+                        input_count: 1,
+                        output_start_fk: Fk::NULL,
+                        output_count: 1,
+                    },
+                    inputs: vec![InputRecord::coinbase(u32::MAX, vec![0x00], vec![])],
+                    outputs: vec![OutputRecord::unspent(50_0000_0000, p2wpkh.clone())],
+                }],
+            )
+            .unwrap();
+        q.put_sp_tweaks_block(Height(0), fk0, &[None]).unwrap();
+        let create0 = q.block_tx_fks(Height(0)).unwrap()[0];
+        let mut spend_txid = [0u8; 32];
+        spend_txid[0] = 0x11;
+        spend_txid[31] = 0xcd;
+        let hash1 = rbitcoin_store::block_header_hash(1, &h0.hash, &[0x11; 32], 2, 0x207fffff, 1);
+        let h1 = HeaderRecord {
+            prev_fk: fk0,
+            version: 1,
+            timestamp: 2,
+            bits: 0x207fffff,
+            nonce: 1,
+            merkle_root: [0x11; 32],
+            hash: hash1,
+        };
+        let fk1 = q
+            .connect_block(
+                Height(1),
+                &h1,
+                &[TxApply {
+                    tx: TxRecord {
+                        txid: spend_txid,
+                        version: 2,
+                        locktime: 0,
+                        input_start_fk: Fk::NULL,
+                        input_count: 1,
+                        output_start_fk: Fk::NULL,
+                        output_count: 1,
+                    },
+                    inputs: vec![InputRecord {
+                        prev_txid: genesis_txid,
+                        create_fk: create0,
+                        prev_index: 0,
+                        sequence: u32::MAX,
+                        script_sig: vec![],
+                        witness: vec![vec![0u8; 64], ser.to_vec()],
+                    }],
+                    outputs: vec![OutputRecord::unspent(49_0000_0000, p2tr)],
+                }],
+            )
+            .unwrap();
+        let mut tw = [0x02; 33];
+        tw[0] = 0x02;
+        q.put_sp_tweaks_block(Height(1), fk1, &[Some(tw)]).unwrap();
+        let chain = ChainParams::regtest();
+        let live = height_map_json(&q, &chain, 1, true).unwrap();
+        let live_v: Value = serde_json::from_str(&live).unwrap();
+        assert_eq!(live_v["1"].as_object().unwrap().len(), 1);
+
+        let elig_fk = q.block_tx_fks(Height(1)).unwrap()[0];
+        let mut spend2 = [0u8; 32];
+        spend2[0] = 0x22;
+        let hash2 = rbitcoin_store::block_header_hash(1, &h1.hash, &[0x22; 32], 3, 0x207fffff, 2);
+        let h2 = HeaderRecord {
+            prev_fk: fk1,
+            version: 1,
+            timestamp: 3,
+            bits: 0x207fffff,
+            nonce: 2,
+            merkle_root: [0x22; 32],
+            hash: hash2,
+        };
+        q.connect_block(
+            Height(2),
+            &h2,
+            &[TxApply {
+                tx: TxRecord {
+                    txid: spend2,
+                    version: 2,
+                    locktime: 0,
+                    input_start_fk: Fk::NULL,
+                    input_count: 1,
+                    output_start_fk: Fk::NULL,
+                    output_count: 1,
+                },
+                inputs: vec![InputRecord {
+                    prev_txid: spend_txid,
+                    create_fk: elig_fk,
+                    prev_index: 0,
+                    sequence: u32::MAX,
+                    script_sig: vec![],
+                    witness: vec![vec![0u8; 64]],
+                }],
+                outputs: vec![OutputRecord::unspent(48_0000_0000, p2wpkh)],
+            }],
+        )
+        .unwrap();
+
+        let cut = height_map_json(&q, &chain, 1, true).unwrap();
+        let cut_v: Value = serde_json::from_str(&cut).unwrap();
+        assert!(
+            cut_v["1"].as_object().unwrap().is_empty(),
+            "cut-through must omit spent p2tr, got {cut}"
+        );
+        let hist = height_map_json(&q, &chain, 1, false).unwrap();
+        let hist_v: Value = serde_json::from_str(&hist).unwrap();
+        assert_eq!(hist_v["1"].as_object().unwrap().len(), 1, "{hist}");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
