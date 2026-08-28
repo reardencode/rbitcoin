@@ -690,7 +690,18 @@ impl TxTable {
         len: u64,
         f: impl FnOnce(&[u8]) -> Result<R, StoreError>,
     ) -> Result<R, StoreError> {
-        self.body.with_bytes_at(offset, len, f)
+        let mut buf = Vec::new();
+        self.with_body_span_into(offset, len, &mut buf, f)
+    }
+
+    pub fn with_body_span_into<R>(
+        &self,
+        offset: u64,
+        len: u64,
+        buf: &mut Vec<u8>,
+        f: impl FnOnce(&[u8]) -> Result<R, StoreError>,
+    ) -> Result<R, StoreError> {
+        self.body.with_bytes_at_into(offset, len, buf, f)
     }
 
     /// Contiguous Class A body `(offset, len)` for create_fks `first..=last`.

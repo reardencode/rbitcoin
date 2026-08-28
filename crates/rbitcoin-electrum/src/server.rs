@@ -692,7 +692,54 @@ where
     let tip = query.tip_height().map(|h| h.0);
     let last = crate::tweaks::last_height(req.start, req.count, tip);
     let t0 = Instant::now();
-    let first = match crate::tweaks::height_map_json(query, chain, req.start) {
+    let Some(last) = last else {
+        let first = match crate::tweaks::height_map_json(query, chain, req.start) {
+            Ok(v) => v,
+            Err(e) => {
+                rbitcoin_log::api_call(
+                    "electrum",
+                    &peer.to_string(),
+                    "blockchain.tweaks.subscribe",
+                    &serde_json::to_string(params_v).unwrap_or_else(|_| "[]".into()),
+                    t0.elapsed().as_millis() as u64,
+                    Some(&e),
+                );
+                write_line(
+                    writer,
+                    &json!({"jsonrpc":"2.0","id": id, "error": {"code": 1, "message": e}}),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        let wall_ms = t0.elapsed().as_millis() as u64;
+        meter_dispatch_wall(t0.elapsed().as_micros() as u64);
+        rbitcoin_log::api_call(
+            "electrum",
+            &peer.to_string(),
+            "blockchain.tweaks.subscribe",
+            &serde_json::to_string(params_v).unwrap_or_else(|_| "[]".into()),
+            wall_ms,
+            None,
+        );
+        write_rpc_result(writer, &id, &first).await?;
+        write_line(writer, &crate::tweaks::done_notify()).await?;
+        return Ok(());
+    };
+    let limits = crate::tweaks::subscribe_range_limits();
+    let wave_fut = {
+        let q = Arc::clone(query);
+        let c = Arc::clone(chain);
+        let start_h = req.start;
+        async move {
+            tokio::task::spawn_blocking(move || {
+                crate::tweaks::first_subscribe_wave(&q, &c, start_h, last, limits)
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()))
+        }
+    };
+    let wave = match wave_fut.await {
         Ok(v) => v,
         Err(e) => {
             rbitcoin_log::api_call(
@@ -721,87 +768,88 @@ where
         wall_ms,
         None,
     );
-    write_rpc_result(writer, &id, &first).await?;
+    write_rpc_result(writer, &id, &wave.result_json).await?;
+    write_raw_lines(writer, &wave.rest_notifies).await?;
 
-    let Some(last) = last else {
-        write_line(writer, &crate::tweaks::done_notify()).await?;
-        return Ok(());
-    };
-    // Remaining heights: pre-taproot empty waves (no store), else budgeted
-    // thin load (one txout span per batch) then per-height notifies. Hole → one height.
+    // Remaining heights after wave 0. Pre-taproot empty waves (no store), else
+    // budgeted thin load then per-height notifies. Hole → one height.
     // `server.ping` must not drop the in-flight wave.
-    let mut next = req.start.saturating_add(1);
+    let mut next = req.start.saturating_add(wave.consumed.max(1));
     let limits = crate::tweaks::subscribe_range_limits();
-    while next <= last {
-        let batch_start = next;
-        let batch_fut = {
+    if next <= last {
+        let spawn_wave = |batch_start: u32| {
             let q = Arc::clone(query);
             let c = Arc::clone(chain);
             let lim = limits;
             let last_h = last;
-            let start_h = batch_start;
-            async move {
-                tokio::task::spawn_blocking(move || {
-                    crate::tweaks::remaining_notify_lines(&q, &c, start_h, last_h, lim)
-                })
-                .await
-                .unwrap_or_else(|e| Err(e.to_string()))
-            }
+            tokio::task::spawn_blocking(move || {
+                crate::tweaks::remaining_notify_lines(&q, &c, batch_start, last_h, lim)
+            })
         };
-        tokio::pin!(batch_fut);
-        let batch = loop {
-            tokio::select! {
-                biased;
-                line = tokio::time::timeout(idle, read_line_capped(reader, max_line)) => {
-                    match line {
-                        Ok(Ok(Some(l))) => {
-                            if !l.trim().is_empty() {
-                                if let Ok(req) = serde_json::from_str::<Value>(&l) {
-                                    let ping_id = req.get("id").cloned().unwrap_or(Value::Null);
-                                    if req.get("method").and_then(|m| m.as_str()) == Some("server.ping")
-                                    {
-                                        write_line(
-                                            writer,
-                                            &json!({"jsonrpc":"2.0","id": ping_id, "result": null}),
-                                        )
-                                        .await?;
+        let mut batch_start = next;
+        let mut handle = spawn_wave(batch_start);
+        loop {
+            let batch = loop {
+                tokio::select! {
+                    biased;
+                    line = tokio::time::timeout(idle, read_line_capped(reader, max_line)) => {
+                        match line {
+                            Ok(Ok(Some(l))) => {
+                                if !l.trim().is_empty() {
+                                    if let Ok(req) = serde_json::from_str::<Value>(&l) {
+                                        let ping_id = req.get("id").cloned().unwrap_or(Value::Null);
+                                        if req.get("method").and_then(|m| m.as_str()) == Some("server.ping")
+                                        {
+                                            write_line(
+                                                writer,
+                                                &json!({"jsonrpc":"2.0","id": ping_id, "result": null}),
+                                            )
+                                            .await?;
+                                        }
                                     }
                                 }
+                                continue;
                             }
-                            continue;
-                        }
-                        Ok(Ok(None)) => return Ok(()),
-                        Ok(Err(e)) => return Err(e),
-                        Err(_) => {
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::TimedOut,
-                                "idle timeout",
-                            ));
+                            Ok(Ok(None)) => return Ok(()),
+                            Ok(Err(e)) => return Err(e),
+                            Err(_) => {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::TimedOut,
+                                    "idle timeout",
+                                ));
+                            }
                         }
                     }
+                    map = &mut handle => {
+                        break map.unwrap_or_else(|e| Err(e.to_string()));
+                    }
                 }
-                map = &mut batch_fut => {
-                    break map;
+            };
+            let batch = match batch {
+                Ok(v) => v,
+                Err(e) => {
+                    rbitcoin_log::api_call(
+                        "electrum",
+                        &peer.to_string(),
+                        "blockchain.tweaks.subscribe",
+                        &format!("[{batch_start},batch]"),
+                        0,
+                        Some(&e),
+                    );
+                    break;
                 }
+            };
+            let n = batch.len() as u32;
+            next = batch_start.saturating_add(n.max(1));
+            if next <= last {
+                handle = spawn_wave(next);
             }
-        };
-        let batch = match batch {
-            Ok(v) => v,
-            Err(e) => {
-                rbitcoin_log::api_call(
-                    "electrum",
-                    &peer.to_string(),
-                    "blockchain.tweaks.subscribe",
-                    &format!("[{batch_start},batch]"),
-                    0,
-                    Some(&e),
-                );
+            write_raw_lines(writer, &batch).await?;
+            if next > last {
                 break;
             }
-        };
-        let n = batch.len() as u32;
-        write_raw_lines(writer, &batch).await?;
-        next = batch_start.saturating_add(n.max(1));
+            batch_start = next;
+        }
     }
     write_line(writer, &crate::tweaks::done_notify()).await?;
     Ok(())

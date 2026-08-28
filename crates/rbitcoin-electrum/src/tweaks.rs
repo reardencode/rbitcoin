@@ -80,9 +80,96 @@ fn wrap_height_notify(map_json: &str) -> String {
     s
 }
 
-/// Default multi-height load budgets for subscribe (max 128 heights, 8192 eligible).
+/// Spawn wave N+1 before writing wave N. `spawn_load(h)` must start work
+/// immediately (e.g. `spawn_blocking`), not when the wait future is polled.
+#[cfg(test)]
+pub async fn overlap_wave_writes<E, Spawn, H, Wait, WF, Write, WR>(
+    mut start: u32,
+    last: u32,
+    mut spawn_load: Spawn,
+    mut wait_load: Wait,
+    mut write: Write,
+) -> Result<(), E>
+where
+    Spawn: FnMut(u32) -> H,
+    Wait: FnMut(H) -> WF,
+    WF: std::future::Future<Output = Result<Option<Vec<String>>, E>>,
+    Write: FnMut(Vec<String>) -> WR,
+    WR: std::future::Future<Output = Result<(), E>>,
+{
+    if start > last {
+        return Ok(());
+    }
+    let mut pending = Some(spawn_load(start));
+    while let Some(job) = pending.take() {
+        let Some(batch) = wait_load(job).await? else {
+            return Ok(());
+        };
+        let n = batch.len() as u32;
+        let next = start.saturating_add(n.max(1));
+        if next <= last {
+            pending = Some(spawn_load(next));
+        }
+        write(batch).await?;
+        start = next;
+    }
+    Ok(())
+}
+
+/// Default multi-height load budgets for subscribe (max 128 heights, 16384 eligible).
 pub fn subscribe_range_limits() -> ThinTweakRangeLimits {
     ThinTweakRangeLimits::default()
+}
+
+/// First JSON-RPC height plus remaining notifies of the same thin wave.
+pub struct FirstWave {
+    pub result_json: String,
+    pub rest_notifies: Vec<String>,
+    pub consumed: u32,
+}
+
+/// Indexed: one thin batch starting at `start`. Pre-taproot / hole: first
+/// height only (`consumed == 1`).
+pub fn first_subscribe_wave(
+    query: &Query,
+    chain: &ChainParams,
+    start: u32,
+    last: u32,
+    limits: ThinTweakRangeLimits,
+) -> Result<FirstWave, String> {
+    if start > last {
+        return Ok(FirstWave {
+            result_json: empty_height_json(start),
+            rest_notifies: Vec::new(),
+            consumed: 1,
+        });
+    }
+    if !chain.taproot_active_at(start) {
+        return Ok(FirstWave {
+            result_json: empty_height_json(start),
+            rest_notifies: Vec::new(),
+            consumed: 1,
+        });
+    }
+    let thin = load_thin_batch(query, start, last, limits)?;
+    if thin.is_empty() {
+        return Ok(FirstWave {
+            result_json: height_map_json(query, chain, start)?,
+            rest_notifies: Vec::new(),
+            consumed: 1,
+        });
+    }
+    let (h0, rows0) = &thin[0];
+    debug_assert_eq!(*h0, start);
+    let rest_notifies = thin[1..]
+        .iter()
+        .map(|(h, rows)| thin_height_notify_json(*h, rows))
+        .collect();
+    Ok(FirstWave {
+        result_json: encode_thin_height_json(*h0, rows0),
+        rest_notifies,
+        consumed: thin.len() as u32,
+    })
 }
 
 /// Pre-taproot empty notifies per write (no store). Mainnet genesis→origin
@@ -352,6 +439,13 @@ mod tests {
     }
 
     #[test]
+    fn subscribe_range_limits_matches_query_default() {
+        assert_eq!(subscribe_range_limits(), ThinTweakRangeLimits::default());
+        assert_eq!(subscribe_range_limits().max_eligible, 16384);
+        assert_eq!(subscribe_range_limits().max_heights, 128);
+    }
+
+    #[test]
     fn last_height_stops_at_tip() {
         assert_eq!(last_height(880_791, 81_427, Some(962_217)), Some(962_217));
         assert_eq!(last_height(10, 3, Some(11)), Some(11));
@@ -370,6 +464,94 @@ mod tests {
         );
         assert_eq!(pre_taproot_wave_last(709_632, 800_000, 709_632), None);
         assert_eq!(pre_taproot_wave_last(0, 100, 0), None);
+    }
+
+    #[test]
+    fn first_subscribe_wave_indexed_shares_batch_and_pre_taproot_is_empty() {
+        use rbitcoin_primitives::{Fk, Height};
+        use rbitcoin_query::{Query, TxApply};
+        use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
+
+        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "rbitcoin-electrum-first-wave-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let q = Query::open_or_create(&dir).unwrap();
+        q.set_sptweaks_enabled(true, Height(0)).unwrap();
+        let mut prev = Fk::NULL;
+        let mut parent_hash: Option<[u8; 32]> = None;
+        for h in 0..4u32 {
+            let mut merkle = [0u8; 32];
+            merkle[0..4].copy_from_slice(&h.to_le_bytes());
+            merkle[5] = 0xec;
+            let hash = match parent_hash {
+                None => merkle,
+                Some(ph) => {
+                    rbitcoin_store::block_header_hash(1, &ph, &merkle, h + 1, 0x207fffff, h)
+                }
+            };
+            let header = HeaderRecord {
+                prev_fk: prev,
+                version: 1,
+                timestamp: h + 1,
+                bits: 0x207fffff,
+                nonce: h,
+                merkle_root: merkle,
+                hash,
+            };
+            let mut txid = [0u8; 32];
+            txid[0..4].copy_from_slice(&h.to_le_bytes());
+            txid[31] = 0xcb;
+            let ta = TxApply {
+                tx: TxRecord {
+                    txid,
+                    version: 1,
+                    locktime: 0,
+                    input_start_fk: Fk::NULL,
+                    input_count: 1,
+                    output_start_fk: Fk::NULL,
+                    output_count: 1,
+                },
+                inputs: vec![InputRecord::coinbase(u32::MAX, vec![h as u8], vec![])],
+                outputs: vec![OutputRecord::unspent(50_0000_0000, vec![0x51])],
+            };
+            prev = q.connect_block(Height(h), &header, &[ta]).unwrap();
+            parent_hash = Some(hash);
+            q.put_sp_tweaks_block(Height(h), prev, &[None]).unwrap();
+        }
+
+        let chain = ChainParams::regtest();
+        let wave = first_subscribe_wave(&q, &chain, 1, 3, subscribe_range_limits()).unwrap();
+        let result: Value = serde_json::from_str(&wave.result_json).unwrap();
+        assert_eq!(result.as_object().unwrap().len(), 1);
+        assert!(result.get("1").unwrap().as_object().unwrap().is_empty());
+        assert_eq!(wave.consumed, 3);
+        assert_eq!(wave.rest_notifies.len(), 2);
+        for (i, line) in wave.rest_notifies.iter().enumerate() {
+            let v: Value = serde_json::from_str(line).unwrap();
+            let h = (i + 2).to_string();
+            assert_eq!(v["method"], "blockchain.tweaks.subscribe");
+            assert!(v["params"][0][&h].as_object().unwrap().is_empty(), "{v}");
+        }
+        let thin1 = q.load_thin_tweaks(Height(1)).unwrap().expect("indexed");
+        assert_eq!(encode_thin_height_json(1, &thin1), wave.result_json);
+
+        let main = ChainParams::mainnet();
+        let pre = first_subscribe_wave(&q, &main, 0, 10, subscribe_range_limits()).unwrap();
+        assert_eq!(pre.consumed, 1);
+        assert!(pre.rest_notifies.is_empty());
+        let pre_v: Value = serde_json::from_str(&pre.result_json).unwrap();
+        assert!(pre_v["0"].as_object().unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -499,5 +681,50 @@ mod tests {
         assert!(v["tweak"].as_str().unwrap().starts_with("02"));
         assert_eq!(v["output_pubkeys"]["1"][0].as_str().unwrap().len(), 64);
         assert_eq!(v["output_pubkeys"]["1"][1], 5410);
+    }
+
+    #[tokio::test]
+    async fn overlap_wave_writes_starts_next_load_before_write_returns() {
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        let load_starts = Arc::new(Mutex::new(Vec::<Instant>::new()));
+        let write_ends = Arc::new(Mutex::new(Vec::<Instant>::new()));
+        let ls = Arc::clone(&load_starts);
+        let we = Arc::clone(&write_ends);
+
+        overlap_wave_writes(
+            0,
+            1,
+            move |h| {
+                let ls = Arc::clone(&ls);
+                tokio::spawn(async move {
+                    ls.lock().unwrap().push(Instant::now());
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    Ok::<_, String>(vec![h.to_string()])
+                })
+            },
+            |join| async move { join.await.unwrap().map(Some) },
+            move |batch| {
+                let we = Arc::clone(&we);
+                async move {
+                    tokio::time::sleep(Duration::from_millis(40)).await;
+                    we.lock().unwrap().push(Instant::now());
+                    let _ = batch;
+                    Ok::<_, String>(())
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        let starts = load_starts.lock().unwrap();
+        let ends = write_ends.lock().unwrap();
+        assert_eq!(starts.len(), 2);
+        assert_eq!(ends.len(), 2);
+        assert!(
+            starts[1] < ends[0],
+            "wave 1 load must start before wave 0 write returns"
+        );
     }
 }

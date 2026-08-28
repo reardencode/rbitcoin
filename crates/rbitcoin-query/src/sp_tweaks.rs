@@ -19,7 +19,7 @@ pub struct ThinTweakRow {
 pub struct ThinTweakRangeLimits {
     /// Cap on contiguous heights in one wave (default 128).
     pub max_heights: u32,
-    /// Cap on total eligible txs across the wave (default 8192).
+    /// Cap on total eligible txs across the wave (default 16384).
     pub max_eligible: usize,
 }
 
@@ -27,7 +27,7 @@ impl Default for ThinTweakRangeLimits {
     fn default() -> Self {
         Self {
             max_heights: 128,
-            max_eligible: 8192,
+            max_eligible: 16384,
         }
     }
 }
@@ -41,6 +41,57 @@ fn require_thin_body_range(r: Option<(u64, u64)>) -> Result<(u64, u64), StoreErr
             "invariant: thin tweak eligible body empty",
         )),
         Some((off, len)) => Ok((off, len)),
+    }
+}
+
+fn wave_join_is_dense(elig_count: usize, first_id: u64, last_id: u64) -> bool {
+    if elig_count == 0 || last_id < first_id {
+        return false;
+    }
+    let Ok(span) = usize::try_from(last_id - first_id + 1) else {
+        return false;
+    };
+    elig_count.saturating_mul(4) >= span
+}
+
+fn thin_join_txids_and_ranges(
+    store: &Store,
+    elig_fks: &[Fk],
+) -> Result<(Vec<Option<[u8; 32]>>, Vec<Option<(u64, u64)>>), StoreError> {
+    let Some(first_id) = elig_fks.first().and_then(|f| f.get()) else {
+        return Err(StoreError::InvalidFk);
+    };
+    let Some(last_id) = elig_fks.last().and_then(|f| f.get()) else {
+        return Err(StoreError::InvalidFk);
+    };
+    if wave_join_is_dense(elig_fks.len(), first_id, last_id) {
+        let all_txids = store.txs.txid_sidefile().get_range(first_id, last_id)?;
+        let all_ranges = store.txs.body_ranges(first_id, last_id)?;
+        let n = (last_id - first_id + 1) as usize;
+        if all_txids.len() != n || all_ranges.len() != n {
+            return Err(StoreError::Corrupt(
+                "invariant: thin tweak dense join length mismatch",
+            ));
+        }
+        let mut txids = Vec::with_capacity(elig_fks.len());
+        let mut ranges = Vec::with_capacity(elig_fks.len());
+        for fk in elig_fks {
+            let id = fk.get().ok_or(StoreError::InvalidFk)?;
+            let i = (id - first_id) as usize;
+            if i >= n {
+                return Err(StoreError::Corrupt(
+                    "invariant: thin tweak dense join fk outside span",
+                ));
+            }
+            txids.push(Some(all_txids[i]));
+            ranges.push(Some(all_ranges[i]));
+        }
+        Ok((txids, ranges))
+    } else {
+        Ok((
+            store.txs.txid_sidefile().get_many(elig_fks)?,
+            store.tx_body_range_batch(elig_fks)?,
+        ))
     }
 }
 
@@ -202,8 +253,7 @@ impl Query {
             let Some(t) = g.as_ref() else {
                 return Ok(Vec::new());
             };
-            let mut plans = Vec::new();
-            let mut elig_total = 0usize;
+            let mut meta: Vec<(Height, u64, u32)> = Vec::new();
             for step in 0..limits.max_heights {
                 let h = Height(start.0.saturating_add(step));
                 let Some(header_fk) = self.store.confirmed.get(h)? else {
@@ -212,27 +262,39 @@ impl Query {
                 let Some((first_fk, n_tx)) = self.store.header_txs.get_range(header_fk)? else {
                     break;
                 };
-                let Some(elig) = t.get_eligible(h, n_tx)? else {
-                    break;
-                };
-                let add = elig.len();
-                if !plans.is_empty()
-                    && limits.max_eligible != usize::MAX
-                    && elig_total.saturating_add(add) > limits.max_eligible
-                {
-                    break;
-                }
                 let Some(first_id) = first_fk.get() else {
                     return Err(StoreError::InvalidFk);
                 };
-                elig_total = elig_total.saturating_add(add);
-                plans.push(HeightPlan {
-                    height: h,
-                    first_id,
-                    elig,
-                });
+                meta.push((h, first_id, n_tx));
             }
-            plans
+            if meta.is_empty() {
+                Vec::new()
+            } else {
+                let n_txs: Vec<u32> = meta.iter().map(|m| m.2).collect();
+                match t.get_eligible_range(meta[0].0, &n_txs)? {
+                    None => Vec::new(),
+                    Some(eligs) => {
+                        let mut plans = Vec::new();
+                        let mut elig_total = 0usize;
+                        for (i, elig) in eligs.into_iter().enumerate() {
+                            let add = elig.len();
+                            if !plans.is_empty()
+                                && limits.max_eligible != usize::MAX
+                                && elig_total.saturating_add(add) > limits.max_eligible
+                            {
+                                break;
+                            }
+                            elig_total = elig_total.saturating_add(add);
+                            plans.push(HeightPlan {
+                                height: meta[i].0,
+                                first_id: meta[i].1,
+                                elig,
+                            });
+                        }
+                        plans
+                    }
+                }
+            }
         };
 
         if plans.is_empty() {
@@ -254,8 +316,7 @@ impl Query {
             .collect();
 
         if !elig_fks.is_empty() {
-            let txids = self.store.txs.txid_sidefile().get_many(&elig_fks)?;
-            let ranges = self.store.tx_body_range_batch(&elig_fks)?;
+            let (txids, ranges) = thin_join_txids_and_ranges(&self.store, &elig_fks)?;
             let mut span_off = u64::MAX;
             let mut span_end = 0u64;
             for r in &ranges {
@@ -264,28 +325,33 @@ impl Query {
                 span_end = span_end.max(off.saturating_add(len));
             }
             let span_len = span_end - span_off;
-            self.store.txs.with_body_span(span_off, span_len, |raw| {
-                for (i, r) in ranges.iter().enumerate() {
-                    let (off, len) = r.unwrap();
-                    let rel = (off - span_off) as usize;
-                    let sl = raw.get(rel..rel.saturating_add(len as usize)).ok_or(
-                        StoreError::Corrupt("invariant: thin tweak eligible body span truncated"),
-                    )?;
-                    let Some(txid) = txids.get(i).copied().flatten() else {
-                        return Err(StoreError::Corrupt(
-                            "invariant: thin tweak eligible txid missing",
-                        ));
-                    };
-                    let (pi, ei) = tag[i];
-                    let p2tr = self.store.txs.packed_p2tr_from_raw(sl)?;
-                    out_rows[pi].push(ThinTweakRow {
-                        txid,
-                        tweak: plans[pi].elig[ei].1,
-                        p2tr,
-                    });
-                }
-                Ok(())
-            })?;
+            let mut span_buf = Vec::new();
+            self.store
+                .txs
+                .with_body_span_into(span_off, span_len, &mut span_buf, |raw| {
+                    for (i, r) in ranges.iter().enumerate() {
+                        let (off, len) = r.unwrap();
+                        let rel = (off - span_off) as usize;
+                        let sl = raw.get(rel..rel.saturating_add(len as usize)).ok_or(
+                            StoreError::Corrupt(
+                                "invariant: thin tweak eligible body span truncated",
+                            ),
+                        )?;
+                        let Some(txid) = txids.get(i).copied().flatten() else {
+                            return Err(StoreError::Corrupt(
+                                "invariant: thin tweak eligible txid missing",
+                            ));
+                        };
+                        let (pi, ei) = tag[i];
+                        let p2tr = self.store.txs.packed_p2tr_from_raw(sl)?;
+                        out_rows[pi].push(ThinTweakRow {
+                            txid,
+                            tweak: plans[pi].elig[ei].1,
+                            p2tr,
+                        });
+                    }
+                    Ok(())
+                })?;
             self.note_thin_tweak_body_bytes(span_len);
         }
 
@@ -372,6 +438,24 @@ mod tests {
             "{err}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn thin_tweak_range_limits_default_eligible_cap() {
+        let d = ThinTweakRangeLimits::default();
+        assert_eq!(d.max_heights, 128);
+        assert_eq!(d.max_eligible, 16384);
+    }
+
+    #[test]
+    fn wave_join_is_dense_packed_vs_sparse() {
+        assert!(wave_join_is_dense(4, 10, 13));
+        assert!(wave_join_is_dense(1, 10, 13));
+        assert!(!wave_join_is_dense(1, 10, 14));
+        assert!(!wave_join_is_dense(0, 10, 13));
+        assert!(wave_join_is_dense(2, 100, 107));
+        assert!(!wave_join_is_dense(2, 100, 108));
+        assert!(!wave_join_is_dense(1, 20, 10));
     }
 
     #[test]
@@ -820,6 +904,15 @@ mod tests {
                 assert_eq!(a.p2tr, b.p2tr);
             }
         }
+
+        let fks1 = q.block_tx_fks(Height(1)).unwrap();
+        let fks2 = q.block_tx_fks(Height(2)).unwrap();
+        let first = fks1[0].get().unwrap();
+        let last = fks2[0].get().unwrap();
+        assert!(
+            wave_join_is_dense(2, first, last),
+            "fully eligible consecutive txs must take the dense join"
+        );
 
         // max_heights=1
         let one = q
