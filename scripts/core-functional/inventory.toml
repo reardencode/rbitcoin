@@ -761,8 +761,7 @@ reason = "v1-only"
 
 [[test]]
 name = "p2p_seednode.py"
-status = "skip"
-reason = "core-log"
+status = "run"
 
 [[test]]
 name = "p2p_segwit.py"
