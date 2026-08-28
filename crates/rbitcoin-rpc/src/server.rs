@@ -76,6 +76,8 @@ pub async fn run_rpc(
     regtest: Option<Arc<dyn RpcRegtest>>,
     peers: Option<Arc<rbitcoin_net::PeerHub>>,
     chain: Option<Arc<rbitcoin_net::ChainHub>>,
+    addrman: Option<Arc<std::sync::Mutex<rbitcoin_net::AddrMan>>>,
+    peers_path: Option<std::path::PathBuf>,
 ) -> Result<RpcHandle, String> {
     let (auth, cookie_path) = resolve_rpc_auth(
         &config.datadir,
@@ -107,6 +109,8 @@ pub async fn run_rpc(
         regtest,
         peers,
         chain,
+        addrman,
+        peers_path,
         logpath: config.datadir.join("debug.log").display().to_string(),
         active: Arc::clone(&active),
         permit_bare_multisig: config.permit_bare_multisig,
@@ -508,7 +512,9 @@ mod tests {
             work_queue: None,
             permit_bare_multisig: true,
         };
-        let handle = run_rpc(cfg, q, Some(mp), None, None, None).await.unwrap();
+        let handle = run_rpc(cfg, q, Some(mp), None, None, None, None, None)
+            .await
+            .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
 
         let count = post_rpc(
@@ -630,7 +636,9 @@ mod tests {
             work_queue: None,
             permit_bare_multisig: true,
         };
-        let handle = run_rpc(cfg, q, Some(mp), None, None, None).await.unwrap();
+        let handle = run_rpc(cfg, q, Some(mp), None, None, None, None, None)
+            .await
+            .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(40)).await;
 
         let batch = serde_json::json!([
@@ -712,7 +720,9 @@ mod tests {
             work_queue: Some(1),
             permit_bare_multisig: true,
         };
-        let handle = run_rpc(cfg, q, Some(mp), None, None, None).await.unwrap();
+        let handle = run_rpc(cfg, q, Some(mp), None, None, None, None, None)
+            .await
+            .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(40)).await;
         let (st, body) = post_raw(
             handle.local_addr,

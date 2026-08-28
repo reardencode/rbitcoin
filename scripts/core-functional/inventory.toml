@@ -411,9 +411,7 @@ analog = "official: after permitbaremultisig + incrementalrelayfee, testmempoola
 
 [[test]]
 name = "mempool_accept_wtxid.py"
-status = "skip"
-reason = "rpc-missing"
-analog = "follow-up: wtxid accept"
+status = "run"
 
 [[test]]
 name = "mempool_cluster.py"
@@ -763,8 +761,7 @@ reason = "v1-only"
 
 [[test]]
 name = "p2p_seednode.py"
-status = "skip"
-reason = "core-log"
+status = "run"
 
 [[test]]
 name = "p2p_segwit.py"
@@ -794,9 +791,7 @@ analog = "follow-up: tx download"
 
 [[test]]
 name = "p2p_tx_privacy.py"
-status = "skip"
-reason = "rpc-missing"
-analog = "follow-up: tx privacy"
+status = "run"
 
 [[test]]
 name = "p2p_unrequested_blocks.py"

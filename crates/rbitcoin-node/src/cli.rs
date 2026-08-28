@@ -38,6 +38,7 @@ where
     let mut rpc_password: Option<String> = None;
     let mut rpc_work_queue: Option<usize> = None;
     let mut connect: Vec<SocketAddr> = Vec::new();
+    let mut seednodes: Vec<String> = Vec::new();
     let mut use_seeds = true;
     let mut seeds_set = false;
     let mut milestone_height = 0u32;
@@ -233,6 +234,20 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
                         return ExitCode::from(2);
                     }
                 }
+                i += 1;
+            }
+            "--seednode" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: --seednode requires a value");
+                    return ExitCode::from(2);
+                }
+                let v = args[i].to_string_lossy().into_owned();
+                if v.is_empty() {
+                    eprintln!("error: --seednode requires a value");
+                    return ExitCode::from(2);
+                }
+                seednodes.push(v);
                 i += 1;
             }
             "--electrum-listen" => {
@@ -590,6 +605,15 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
                 }
                 i += 1;
             }
+            other if other.starts_with("--seednode=") => {
+                let v = other["--seednode=".len()..].to_string();
+                if v.is_empty() {
+                    eprintln!("error: --seednode requires a value");
+                    return ExitCode::from(2);
+                }
+                seednodes.push(v);
+                i += 1;
+            }
             other if other.starts_with("--peertimeout=") => {
                 match other["--peertimeout=".len()..].parse() {
                     Ok(n) => peer_timeout_secs = Some(n),
@@ -886,6 +910,9 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
     }
     if !connect.is_empty() {
         config.connect = connect;
+    }
+    if !seednodes.is_empty() {
+        config.seednodes = seednodes;
     }
     if seeds_set {
         config.use_seeds = use_seeds;

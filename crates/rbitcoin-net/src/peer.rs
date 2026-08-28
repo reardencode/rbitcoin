@@ -1212,6 +1212,34 @@ pub fn flush_tx_invs(hub: &ChainHub, peers: &crate::peers::PeerHub) {
     }
 }
 
+/// INV one live mempool tx to every peer that has not seen it, ignoring the
+/// inbound age gate and `inv_gen_floor` (Core same-nonwitness rebroadcast).
+pub fn force_announce_txid(hub: &ChainHub, peers: &crate::peers::PeerHub, txid: bitcoin::Txid) {
+    let Some(mp) = hub.mempool() else {
+        return;
+    };
+    let Some(tx) = mp.get_tx(&txid) else {
+        return;
+    };
+    let w = tx.compute_wtxid();
+    for s in peers.live_peers() {
+        if s.conn_type == crate::peers::PeerConnType::BlockRelay {
+            continue;
+        }
+        if s.has_announced_wtx(&w) {
+            continue;
+        }
+        let Some(out) = s.writer() else {
+            continue;
+        };
+        s.note_announced_wtx(w);
+        let _ = queue_out(&out, NetworkMessage::Inv(vec![Inventory::WTx(w)]));
+        if let Some(seq) = mp.relay_seq_of(&w) {
+            s.note_tx_inv_seq(s.last_inv_sequence().max(seq.saturating_add(1)));
+        }
+    }
+}
+
 fn queue_due_tx_invs(
     hub: &ChainHub,
     session: &crate::peers::LivePeer,
@@ -1247,6 +1275,14 @@ fn queue_due_tx_invs(
             continue;
         }
         if session.has_announced_wtx(&w) {
+            continue;
+        }
+        // `p2p_tx_privacy.py`: do not INV txs accepted before this peer's
+        // post-verack register (`inv_gen_floor`).
+        if mp
+            .accept_gen(&w)
+            .is_some_and(|g| g < session.inv_gen_floor())
+        {
             continue;
         }
         let local = !mp.relay_enabled() && mp.is_unbroadcast(&txid);

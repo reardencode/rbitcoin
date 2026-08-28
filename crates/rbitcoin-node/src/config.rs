@@ -32,6 +32,8 @@ pub struct NodeConfig {
     pub p2p_listen: Option<SocketAddr>,
     /// Explicit outbound peers (`--connect`).
     pub connect: Vec<SocketAddr>,
+    /// Core `-seednode` host or host:port (resolved with chain default port).
+    pub seednodes: Vec<String>,
     /// Inject fixed/DNS seeds into addrman when connecting without `--connect`.
     pub use_seeds: bool,
     /// When true, open store and exit (CI / smoke).
@@ -122,6 +124,7 @@ impl Default for NodeConfig {
             signet_block_time: None,
             p2p_listen: None,
             connect: Vec::new(),
+            seednodes: Vec::new(),
             use_seeds: true,
             smoke: false,
             max_run_secs: None,
@@ -444,6 +447,11 @@ impl NodeConfig {
                         val.parse()
                             .map_err(|e| NodeError::Config(format!("conf connect: {e}")))?,
                     );
+                }
+                "seednode" => {
+                    if !val.is_empty() {
+                        self.seednodes.push(val.to_string());
+                    }
                 }
                 "electrum_listen" | "electrumlisten" => {
                     self.electrum_listen =

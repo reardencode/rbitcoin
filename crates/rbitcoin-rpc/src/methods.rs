@@ -66,6 +66,10 @@ pub struct RpcContext {
     pub peers: Option<Arc<rbitcoin_net::PeerHub>>,
     /// Live chain (invalidate / reconsider / precious).
     pub chain: Option<Arc<rbitcoin_net::ChainHub>>,
+    /// Shared addrman for `addpeeraddress` / seednode (optional).
+    pub addrman: Option<Arc<std::sync::Mutex<rbitcoin_net::AddrMan>>>,
+    /// Path to durable peers file (with [`Self::addrman`]).
+    pub peers_path: Option<std::path::PathBuf>,
     /// Core `getrpcinfo.logpath` (`{datadir}/debug.log`).
     pub logpath: String,
     /// Core `-permitbaremultisig` (default true). `getmempoolinfo`.
@@ -414,6 +418,7 @@ fn dispatch_inner(ctx: &RpcContext, method: &str, params: RpcParams) -> Result<V
         "addnode" => addnode(ctx, &params),
         "disconnectnode" => disconnectnode(ctx, &params),
         "addconnection" => addconnection(ctx, &params),
+        "addpeeraddress" => addpeeraddress(ctx, &params),
         "getmempoolinfo" => {
             params.reject_unknown(&[])?;
             getmempoolinfo(ctx)
@@ -1200,6 +1205,34 @@ fn addconnection(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     }))
 }
 
+/// Core `addpeeraddress` (hidden): insert into addrman + durable peers file.
+fn addpeeraddress(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
+    params.reject_unknown(&["address", "port", "tried"])?;
+    let address = params.req_str(0, "address")?;
+    let port = params.req_u64(1, "port")?;
+    let _tried = params.opt_bool(2, "tried")?;
+    if port > u64::from(u16::MAX) {
+        return Err(rpc_error(ERR_INVALID_PARAMS, "JSON integer out of range"));
+    }
+    let ip: std::net::IpAddr = address
+        .parse()
+        .map_err(|_| rpc_error(ERR_INVALID_PARAMETER, "Invalid IP address"))?;
+    let addr = std::net::SocketAddr::new(ip, port as u16);
+    let Some(am) = ctx.addrman.as_ref() else {
+        return Err(rpc_error(ERR_MISC, "addrman not available"));
+    };
+    {
+        let mut g = am.lock().unwrap_or_else(|e| e.into_inner());
+        g.add(addr);
+        if let Some(path) = ctx.peers_path.as_ref() {
+            if let Err(e) = g.save(path) {
+                return Err(rpc_error(ERR_MISC, format!("peers save: {e}")));
+            }
+        }
+    }
+    Ok(json!({ "success": true }))
+}
+
 /// Live P2P sessions (Core `getconnectioncount`). Inbound + outbound.
 /// Falls back to the outbound-follow counter when no PeerHub is attached.
 fn connection_count(ctx: &RpcContext) -> u64 {
@@ -1483,6 +1516,16 @@ fn sendrawtransaction(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Val
         Err(e) if e.to_string().starts_with("duplicate ") => {
             Ok(json!(hash_hex_display(&tx.compute_txid().to_byte_array())))
         }
+        // Same txid, different witness: success + force-INV the live body so a
+        // peer that missed the first announce still sees it
+        // (`mempool_accept_wtxid.py:82`). Ignores inv_gen_floor / age gate.
+        Err(e) if e.to_string() == "policy: txn-same-nonwitness-data-in-mempool" => {
+            let tid = tx.compute_txid();
+            if let (Some(peers), Some(chain)) = (ctx.peers.as_ref(), ctx.chain.as_ref()) {
+                rbitcoin_net::force_announce_txid(chain, peers, tid);
+            }
+            Ok(json!(hash_hex_display(&tid.to_byte_array())))
+        }
         Err(e) => Err(rpc_error(ERR_VERIFY_REJECTED, accept_reject_reason(&e))),
     }
 }
@@ -1530,9 +1573,12 @@ fn accept_reject_reason(e: &impl std::fmt::Display) -> String {
     s.to_string()
 }
 
-/// Core `reject-details` for a script-verify mempool reject.
+/// Core `reject-details` for mempool rejects.
 fn accept_reject_details(e: &impl std::fmt::Display, tx: &Transaction) -> Option<String> {
     let reason = accept_reject_reason(e);
+    if reason == "txn-already-in-mempool" || reason == "txn-same-nonwitness-data-in-mempool" {
+        return Some(reason);
+    }
     if !reason.starts_with("mempool-script-verify-flag-failed") {
         return None;
     }

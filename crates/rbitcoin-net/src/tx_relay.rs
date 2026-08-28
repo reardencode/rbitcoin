@@ -327,6 +327,9 @@ pub struct MempoolHub {
     mock_now: AtomicU64,
     /// Mock/wall seconds when each live wtxid was accepted.
     accept_at: Mutex<HashMap<Wtxid, u64>>,
+    /// Monotonic accept generation for `p2p_tx_privacy` (skip pre-handshake txs).
+    next_accept_gen: AtomicU64,
+    accept_gen: Mutex<HashMap<Wtxid, u64>>,
 }
 
 impl MempoolHub {
@@ -399,6 +402,8 @@ impl MempoolHub {
             immediate_relay: AtomicBool::new(false),
             mock_now: AtomicU64::new(0),
             accept_at: Mutex::new(HashMap::new()),
+            next_accept_gen: AtomicU64::new(1),
+            accept_gen: Mutex::new(HashMap::new()),
             fee_deltas: Mutex::new(HashMap::new()),
             template_updates: AtomicU64::new(0),
         };
@@ -470,24 +475,49 @@ impl MempoolHub {
         }
     }
 
+    fn relay_now_secs(&self) -> u64 {
+        let mock = self.mock_now.load(Ordering::Relaxed);
+        if mock != 0 {
+            return mock;
+        }
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
     fn insert_relay_maps(&self, txid: Txid, wtxid: Wtxid, seq: u64) {
-        let at = self.mock_now.load(Ordering::Relaxed);
+        let at = self.relay_now_secs();
+        let gen = self.next_accept_gen.fetch_add(1, Ordering::Relaxed);
         let mut by_tx = self.wtxid_by_txid.lock().unwrap();
         let mut seqs = self.relay_seq.lock().unwrap();
         let mut ats = self.accept_at.lock().unwrap();
+        let mut gens = self.accept_gen.lock().unwrap();
         by_tx.insert(txid, wtxid);
         seqs.insert(wtxid, seq);
         ats.insert(wtxid, at);
+        gens.insert(wtxid, gen);
     }
 
     fn remove_relay_maps(&self, txid: &Txid) {
         let mut by_tx = self.wtxid_by_txid.lock().unwrap();
         let mut seqs = self.relay_seq.lock().unwrap();
         let mut ats = self.accept_at.lock().unwrap();
+        let mut gens = self.accept_gen.lock().unwrap();
         if let Some(w) = by_tx.remove(txid) {
             seqs.remove(&w);
             ats.remove(&w);
+            gens.remove(&w);
         }
+    }
+
+    /// Next accept generation (for peer `inv_gen_floor` at register).
+    pub fn next_accept_gen(&self) -> u64 {
+        self.next_accept_gen.load(Ordering::Relaxed)
+    }
+
+    pub fn accept_gen(&self, wtxid: &Wtxid) -> Option<u64> {
+        self.accept_gen.lock().unwrap().get(wtxid).copied()
     }
 
     /// Core `mempool_unbroadcast.py` debug.log needle when a local tx confirms
@@ -644,11 +674,12 @@ impl MempoolHub {
         let _ = self.inv_flush.send(());
     }
 
+    pub fn accept_time(&self, wtxid: &Wtxid) -> Option<u64> {
+        self.accept_at.lock().unwrap().get(wtxid).copied()
+    }
+
     pub fn tx_inv_due(&self, wtxid: &Wtxid) -> bool {
-        let now = self.mock_now.load(Ordering::Relaxed);
-        if now == 0 {
-            return false;
-        }
+        let now = self.relay_now_secs();
         self.accept_at
             .lock()
             .unwrap()
@@ -656,13 +687,10 @@ impl MempoolHub {
             .is_some_and(|at| now.saturating_sub(*at) >= 30)
     }
 
-    /// Any live wtxid has passed the 30s mocktime age gate. False when mocktime
-    /// is off (production) — does not clone bodies.
+    /// Any live wtxid has passed the 30s INV age gate (mocktime when set,
+    /// otherwise wall clock). Does not clone bodies.
     pub fn any_tx_inv_due(&self) -> bool {
-        let now = self.mock_now.load(Ordering::Relaxed);
-        if now == 0 {
-            return false;
-        }
+        let now = self.relay_now_secs();
         self.accept_at
             .lock()
             .unwrap()
@@ -1998,6 +2026,7 @@ mod tests {
         let mp = tmp();
         let hub = MempoolHub::open(&mp, Arc::clone(&q)).unwrap();
         hub.set_relay_enabled(true);
+        hub.note_mock_now(10);
         let gone = spend_true(cbs[0], 1_000, spk.clone());
         let stay = spend_true(cbs[1], 2_000, spk);
         hub.accept_tx(&gone).expect("accept gone");
@@ -2013,6 +2042,57 @@ mod tests {
         hub.note_mock_now(40);
         assert!(!hub.tx_inv_due(&gone_w));
         assert!(hub.tx_inv_due(&stay_w));
+        let _ = std::fs::remove_dir_all(&mp);
+        let _ = std::fs::remove_dir_all(&store_dir);
+    }
+
+    /// Without `setmocktime`, INV age must still elapse on wall clock
+    /// (`mempool_accept_wtxid` wait_for_broadcast; mock_now==0 must not freeze).
+    #[test]
+    fn tx_inv_due_uses_wall_clock_when_mocktime_unset() {
+        use bitcoin::script::ScriptBuf;
+        use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
+        use rbitcoin_primitives::Height;
+
+        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+        }
+        let store_dir = tmp();
+        let q = Query::open_or_create(&store_dir).unwrap();
+        let params = ChainParams::regtest();
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+        let (_tip, _tip_time, cbs) = rbitcoin_consensus::pad_empty_from(
+            &q,
+            &params,
+            genesis.block_hash(),
+            genesis.header.time,
+            1,
+            102,
+            1,
+        );
+        let q = Arc::new(q);
+        let mp = tmp();
+        let hub = MempoolHub::open(&mp, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        assert_eq!(hub.mock_now.load(Ordering::Relaxed), 0);
+        let tx = spend_true(cbs[0], 1_000, ScriptBuf::from_bytes(vec![0x51]));
+        hub.accept_tx(&tx).expect("accept");
+        let w = tx.compute_wtxid();
+        assert!(
+            !hub.tx_inv_due(&w),
+            "fresh accept must not be due before 30s"
+        );
+        {
+            let mut ats = hub.accept_at.lock().unwrap();
+            let at = ats.get_mut(&w).expect("accept_at");
+            *at = at.saturating_sub(30);
+        }
+        assert!(
+            hub.tx_inv_due(&w),
+            "30s wall age must due when mocktime is unset"
+        );
+        assert!(hub.any_tx_inv_due());
         let _ = std::fs::remove_dir_all(&mp);
         let _ = std::fs::remove_dir_all(&store_dir);
     }

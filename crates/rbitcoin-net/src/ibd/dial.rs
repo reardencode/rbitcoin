@@ -7,7 +7,7 @@ use crate::seeds::AddrMan;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::Magic;
 use bitcoin::BlockHash;
-use rbitcoin_log::{error, warn};
+use rbitcoin_log::{debug, error, warn};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -256,6 +256,7 @@ pub(crate) async fn dial_batch(
         }
         let id = next_id.fetch_add(1, Ordering::Relaxed);
         let sinks = sinks.clone();
+        debug!("trying v1 connection (outbound-full-relay) to {addr}");
         handles.push(tokio::spawn(async move {
             let fut = spawn_peer(id, addr, magic, local_addr, tip_h, sinks);
             match tokio::time::timeout(connect_timeout, fut).await {

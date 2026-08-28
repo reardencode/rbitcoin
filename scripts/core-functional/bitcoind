@@ -65,6 +65,7 @@ FORWARD_FLAGS = frozenset(
         "limitclustercount",
         "limitclustersize",
         "peertimeout",
+        "seednode",
         "minimumchainwork",
         "mocktime",
         "maxtipage",
