@@ -78,6 +78,15 @@ before 1.0).
 
 ### Changed
 
+- **Electrum thin tweaks serve:** indexed `blockchain.tweaks.subscribe`
+  joins packed eligible create_fks with one `txid.body` range pread and
+  a sequential idx walk, batches consecutive `sp_tweaks` heights (one
+  idx + one body pread per segment), loads the JSON-RPC first height in
+  the same Class A `txout` span as the first notifies, overlaps the next
+  wave's load with the previous TCP flush, and skips zero-fill on the
+  span pread. Default wave cap is **16384** eligible txs (128 heights
+  unchanged). No `sp_tweaks` schema change.
+
 - **Parallel `tx.head` wipe-rebuild:** ranges seal concurrently,
   min(CPUs, free RAM / **750 MiB**, range count). Distinct from SH
   materialize (1.5 GiB/worker). `RBITCOIN_TX_HEAD_REBUILD_WORKERS`

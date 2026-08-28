@@ -116,7 +116,7 @@ where
     Ok(())
 }
 
-/// Default multi-height load budgets for subscribe (max 128 heights, 8192 eligible).
+/// Default multi-height load budgets for subscribe (max 128 heights, 16384 eligible).
 pub fn subscribe_range_limits() -> ThinTweakRangeLimits {
     ThinTweakRangeLimits::default()
 }
@@ -436,6 +436,13 @@ mod tests {
         let pk = tx["output_pubkeys"]["1"][0].as_str().unwrap();
         assert_eq!(pk.len(), 64);
         assert_eq!(tx["output_pubkeys"]["1"][1], 5410);
+    }
+
+    #[test]
+    fn subscribe_range_limits_matches_query_default() {
+        assert_eq!(subscribe_range_limits(), ThinTweakRangeLimits::default());
+        assert_eq!(subscribe_range_limits().max_eligible, 16384);
+        assert_eq!(subscribe_range_limits().max_heights, 128);
     }
 
     #[test]

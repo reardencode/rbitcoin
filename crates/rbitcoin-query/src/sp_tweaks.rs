@@ -19,7 +19,7 @@ pub struct ThinTweakRow {
 pub struct ThinTweakRangeLimits {
     /// Cap on contiguous heights in one wave (default 128).
     pub max_heights: u32,
-    /// Cap on total eligible txs across the wave (default 8192).
+    /// Cap on total eligible txs across the wave (default 16384).
     pub max_eligible: usize,
 }
 
@@ -27,7 +27,7 @@ impl Default for ThinTweakRangeLimits {
     fn default() -> Self {
         Self {
             max_heights: 128,
-            max_eligible: 8192,
+            max_eligible: 16384,
         }
     }
 }
@@ -438,6 +438,13 @@ mod tests {
             "{err}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn thin_tweak_range_limits_default_eligible_cap() {
+        let d = ThinTweakRangeLimits::default();
+        assert_eq!(d.max_heights, 128);
+        assert_eq!(d.max_eligible, 16384);
     }
 
     #[test]
