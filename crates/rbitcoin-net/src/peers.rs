@@ -1090,7 +1090,7 @@ impl PeerHub {
         n > 0
     }
 
-    fn dial(&self, addr: SocketAddr, typ: PeerConnType) -> Result<(), String> {
+    pub fn dial(&self, addr: SocketAddr, typ: PeerConnType) -> Result<(), String> {
         let g = self.dial_tx.lock().unwrap_or_else(|e| e.into_inner());
         let tx = g.as_ref().ok_or("no dialer attached")?;
         tx.send(DialRequest { addr, typ })

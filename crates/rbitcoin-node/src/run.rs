@@ -7,7 +7,7 @@ use rbitcoin_esplora::{run_esplora, EsploraConfig};
 use rbitcoin_log::{debug, enabled, info, warn, Level};
 use rbitcoin_net::{
     default_port, format_tip_perf_sizes, read_proc_rss, AddrMan, IbdConfig, MempoolHub, P2PNode,
-    TipEvent, TipPerfSizes,
+    PeerConnType, TipEvent, TipPerfSizes,
 };
 use rbitcoin_primitives::Network;
 use rbitcoin_query::{spawn_sh_writebehind, Query};
@@ -525,6 +525,25 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             "node: catch-up not complete tip={:?} — skip tip mode; restart to resume IBD",
             node.tip_height()
         );
+    }
+
+    // Core `-seednode`: when addrman is empty, dial each seed as addr-fetch
+    // immediately (`p2p_seednode.py` empty-addrman case).
+    if tip_follow_ready && !shutdown.requested() && addrman.is_empty() {
+        for raw in &config.seednodes {
+            let addr = match resolve_seednode(raw, config.network) {
+                Ok(a) => a,
+                Err(e) => {
+                    warn!("seednode {raw}: {e}");
+                    continue;
+                }
+            };
+            let host = raw.split(':').next().unwrap_or(raw);
+            info!("Empty addrman, adding seednode ({host}) to addrfetch");
+            if let Err(e) = node.peers.dial(addr, PeerConnType::AddrFetch) {
+                warn!("seednode dial {addr}: {e}");
+            }
+        }
     }
 
     if tip_follow_ready && !shutdown.requested() {
@@ -1948,4 +1967,15 @@ mod tests {
         drop(held);
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// Parse Core `-seednode` host or host:port using the chain default P2P port.
+fn resolve_seednode(raw: &str, network: Network) -> Result<SocketAddr, String> {
+    if let Ok(a) = raw.parse::<SocketAddr>() {
+        return Ok(a);
+    }
+    let ip: std::net::IpAddr = raw
+        .parse()
+        .map_err(|e| format!("bad seednode address: {e}"))?;
+    Ok(SocketAddr::new(ip, default_port(network)))
 }
