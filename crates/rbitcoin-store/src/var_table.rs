@@ -308,19 +308,20 @@ impl VarTable {
         let n = usize::try_from(len).map_err(|_| StoreError::Corrupt("body span too large"))?;
         buf.clear();
         buf.reserve(n);
-        // SAFETY: `read_body_bulk` fills `n` bytes, or we set_len(0) on error.
+        let dst = {
+            let spare = buf.spare_capacity_mut();
+            if spare.len() < n {
+                return Err(StoreError::Corrupt("body span spare short"));
+            }
+            // SAFETY: `n` bytes of spare capacity; pread fills them before set_len.
+            unsafe { std::slice::from_raw_parts_mut(spare.as_mut_ptr().cast::<u8>(), n) }
+        };
+        self.read_body_bulk(offset, dst)?;
+        // SAFETY: `read_body_bulk` wrote `n` bytes into spare capacity.
         unsafe {
             buf.set_len(n);
         }
-        match self.read_body_bulk(offset, buf) {
-            Ok(()) => f(buf),
-            Err(e) => {
-                unsafe {
-                    buf.set_len(0);
-                }
-                Err(e)
-            }
-        }
+        f(buf)
     }
 
     /// Like [`Self::with_bytes_at`] but always libc `pread` (no TLS uring).

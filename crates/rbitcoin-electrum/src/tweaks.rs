@@ -12,7 +12,6 @@ use rbitcoin_query::{Query, ThinTweakRangeLimits, ThinTweakRow};
 #[cfg(test)]
 use serde_json::Map;
 use serde_json::{json, Value};
-use std::future::Future;
 use std::time::Instant;
 
 /// Parsed `blockchain.tweaks.subscribe` window.
@@ -83,6 +82,7 @@ fn wrap_height_notify(map_json: &str) -> String {
 
 /// Spawn wave N+1 before writing wave N. `spawn_load(h)` must start work
 /// immediately (e.g. `spawn_blocking`), not when the wait future is polled.
+#[cfg(test)]
 pub async fn overlap_wave_writes<E, Spawn, H, Wait, WF, Write, WR>(
     mut start: u32,
     last: u32,
@@ -93,9 +93,9 @@ pub async fn overlap_wave_writes<E, Spawn, H, Wait, WF, Write, WR>(
 where
     Spawn: FnMut(u32) -> H,
     Wait: FnMut(H) -> WF,
-    WF: Future<Output = Result<Option<Vec<String>>, E>>,
+    WF: std::future::Future<Output = Result<Option<Vec<String>>, E>>,
     Write: FnMut(Vec<String>) -> WR,
-    WR: Future<Output = Result<(), E>>,
+    WR: std::future::Future<Output = Result<(), E>>,
 {
     if start > last {
         return Ok(());
