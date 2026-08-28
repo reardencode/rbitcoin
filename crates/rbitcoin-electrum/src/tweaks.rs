@@ -15,7 +15,16 @@ use rbitcoin_query::{Query, ThinTweakRangeLimits, ThinTweakRow};
 use serde_json::Map;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// Cake-compatible subscribe chunk: `done` at a wave boundary after this
+/// wall time so Cake resubscribes (persist lags one event; cake_wallet#3574).
+pub const SUBSCRIBE_CHUNK: Duration = Duration::from_secs(60);
+
+/// End this RPC (`done`) when heights remain and the chunk budget has elapsed.
+pub fn seal_subscribe_chunk(elapsed: Duration, budget: Duration, more: bool) -> bool {
+    more && elapsed >= budget
+}
 
 /// Parsed `blockchain.tweaks.subscribe` window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -919,6 +928,29 @@ mod tests {
         let v = done_notify();
         assert_eq!(v["method"], "blockchain.tweaks.subscribe");
         assert_eq!(v["params"][0]["message"], "done");
+    }
+
+    #[test]
+    fn seal_subscribe_chunk_only_when_more_remain_and_budget_elapsed() {
+        use std::time::Duration;
+        let min = Duration::from_secs(60);
+        assert!(
+            !seal_subscribe_chunk(Duration::from_secs(90), min, false),
+            "natural end of count/tip is not a time seal"
+        );
+        assert!(
+            !seal_subscribe_chunk(Duration::from_secs(59), min, true),
+            "under budget keeps the RPC open"
+        );
+        assert!(
+            seal_subscribe_chunk(min, min, true),
+            "wave boundary at budget with heights left must done"
+        );
+        assert!(
+            seal_subscribe_chunk(Duration::ZERO, Duration::ZERO, true),
+            "zero budget is the TCP test injection: seal after wave 0"
+        );
+        assert_eq!(SUBSCRIBE_CHUNK, Duration::from_secs(60));
     }
 
     #[test]
