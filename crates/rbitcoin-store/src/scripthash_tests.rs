@@ -2242,3 +2242,52 @@ fn unsorted_cancel_before_collect_is_cancelled() {
         let _ = std::fs::remove_dir_all(&dir);
     });
 }
+
+#[test]
+fn unsorted_done_records_class_a_last_fk() {
+    HeadScale::test_with(HeadScale::Tiny, || {
+        let dir = tmp();
+        let s = crate::Store::create(&dir).unwrap();
+        s.put_tx_full_batch_indexed(&[class_a_coinbase([1u8; 32], vec![0x51])], true)
+            .unwrap();
+        let n_shards = s.scripthash.head_shard_count();
+        let udir = crate::unsorted_shard_dir(s.path());
+        let out = crate::collect_unsorted_shard_files(&s, &udir, n_shards, 1, None).unwrap();
+        assert!(crate::unsorted_manifest_ok(&udir, n_shards));
+        assert_eq!(out.last_fk, s.txs.count());
+        assert_eq!(
+            crate::unsorted_done_last_fk(&udir, n_shards),
+            Some(s.txs.count())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    });
+}
+
+#[test]
+fn unsorted_materialize_appends_when_done_lags_and_no_shards() {
+    HeadScale::test_with(HeadScale::Tiny, || {
+        let dir = tmp();
+        let s = crate::Store::create(&dir).unwrap();
+        s.put_tx_full_batch_indexed(&[class_a_coinbase([1u8; 32], vec![0x51])], true)
+            .unwrap();
+        let n_shards = s.scripthash.head_shard_count();
+        let udir = crate::unsorted_shard_dir(s.path());
+        crate::collect_unsorted_shard_files(&s, &udir, n_shards, 1, None).unwrap();
+        let done_last = crate::unsorted_done_last_fk(&udir, n_shards).unwrap();
+        s.put_tx_full_batch_indexed(&[class_a_coinbase([2u8; 32], vec![0x52])], true)
+            .unwrap();
+        assert!(s.txs.count() > done_last);
+        let mat = crate::materialize_sh_unsorted_from_class_a(&s, 1, 1, None).unwrap();
+        assert!(mat.creates >= 2);
+        assert_eq!(
+            s.scripthash.entries(&script_hash(&[0x51])).unwrap().len(),
+            1
+        );
+        assert_eq!(
+            s.scripthash.entries(&script_hash(&[0x52])).unwrap().len(),
+            1,
+            "Class A grown after DONE must be appended into unsorted before pack"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    });
+}

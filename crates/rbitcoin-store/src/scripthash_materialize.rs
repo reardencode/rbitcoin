@@ -146,7 +146,7 @@ struct ShardPool {
 /// (16-byte head prefix + create_fk).
 pub const UNSORTED_SHARD_DIR: &str = "scripthash.unsorted";
 const UNSORTED_DONE_NAME: &str = "DONE";
-const UNSORTED_DONE_MAGIC: &[u8; 8] = b"SHUNSRT2";
+const UNSORTED_DONE_MAGIC: &[u8; 8] = b"SHUNSRT3";
 const UNSORTED_REC_LEN: usize = SH_HEAD_KEY_LEN + 8;
 const UNSORTED_FLUSH_BYTES: usize = 1024 * 1024;
 const UNSORTED_ALLOC_STEP: u64 = 64 << 20;
@@ -160,6 +160,31 @@ pub const SH_UNSORTED_PACK_RAM_BYTES: u64 = 2 << 30;
 pub struct UnsortedShardCollect {
     pub recs: u64,
     pub per_shard: Vec<u64>,
+    /// Inclusive Class A create_fk scanned into these files (`txs.count()` at collect).
+    pub last_fk: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UnsortedCollectAction {
+    Full,
+    Append { first: u64, last: u64 },
+    Skip,
+}
+
+fn plan_unsorted_collect(
+    done_last: Option<u64>,
+    class_a_last: u64,
+    any_sealed_shards: bool,
+) -> UnsortedCollectAction {
+    match done_last {
+        None => UnsortedCollectAction::Full,
+        Some(d) if d >= class_a_last => UnsortedCollectAction::Skip,
+        Some(_) if any_sealed_shards => UnsortedCollectAction::Skip,
+        Some(d) => UnsortedCollectAction::Append {
+            first: d.saturating_add(1).max(1),
+            last: class_a_last,
+        },
+    }
 }
 
 pub fn unsorted_shard_dir(store_dir: &Path) -> PathBuf {
@@ -280,11 +305,12 @@ fn flush_unsorted_buf(sink: &UnsortedShardSink, buf: &mut Vec<u8>) -> Result<(),
     Ok(())
 }
 
-fn write_unsorted_done(dir: &Path, per_shard: &[u64]) -> Result<(), StoreError> {
+fn write_unsorted_done(dir: &Path, last_fk: u64, per_shard: &[u64]) -> Result<(), StoreError> {
     let n = per_shard.len() as u32;
-    let mut buf = Vec::with_capacity(12 + per_shard.len() * 8);
+    let mut buf = Vec::with_capacity(20 + per_shard.len() * 8);
     buf.extend_from_slice(UNSORTED_DONE_MAGIC);
     buf.extend_from_slice(&n.to_le_bytes());
+    buf.extend_from_slice(&last_fk.to_le_bytes());
     for c in per_shard {
         buf.extend_from_slice(&c.to_le_bytes());
     }
@@ -302,31 +328,44 @@ fn write_unsorted_done(dir: &Path, per_shard: &[u64]) -> Result<(), StoreError> 
     Ok(())
 }
 
-/// True when `DONE` matches `n_shards` and every shard file is `count * 40` bytes.
-pub fn unsorted_manifest_ok(dir: &Path, n_shards: usize) -> bool {
+struct UnsortedDone {
+    last_fk: u64,
+    per_shard: Vec<u64>,
+}
+
+fn read_unsorted_done(dir: &Path, n_shards: usize) -> Option<UnsortedDone> {
     let p = dir.join(UNSORTED_DONE_NAME);
-    let Ok(buf) = fs::read(&p) else {
-        return false;
-    };
-    if buf.len() < 12 || buf.len() != 12 + n_shards * 8 || &buf[..8] != UNSORTED_DONE_MAGIC {
-        return false;
+    let buf = fs::read(&p).ok()?;
+    if buf.len() != 20 + n_shards * 8 || &buf[..8] != UNSORTED_DONE_MAGIC {
+        return None;
     }
-    let n = u32::from_le_bytes(buf[8..12].try_into().unwrap_or([0; 4])) as usize;
+    let n = u32::from_le_bytes(buf[8..12].try_into().ok()?) as usize;
     if n != n_shards {
-        return false;
+        return None;
     }
+    let last_fk = u64::from_le_bytes(buf[12..20].try_into().ok()?);
+    let mut per_shard = Vec::with_capacity(n_shards);
     for i in 0..n_shards {
-        let off = 12 + i * 8;
-        let count = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap_or([0; 8]));
+        let off = 20 + i * 8;
+        let count = u64::from_le_bytes(buf[off..off + 8].try_into().ok()?);
         let path = unsorted_shard_path(dir, i);
-        let Ok(meta) = fs::metadata(&path) else {
-            return false;
-        };
+        let meta = fs::metadata(&path).ok()?;
         if meta.len() != count.saturating_mul(UNSORTED_REC_LEN as u64) {
-            return false;
+            return None;
         }
+        per_shard.push(count);
     }
-    true
+    Some(UnsortedDone { last_fk, per_shard })
+}
+
+/// True when `DONE` is `SHUNSRT3` (includes last create_fk) and shard files match counts.
+pub fn unsorted_manifest_ok(dir: &Path, n_shards: usize) -> bool {
+    read_unsorted_done(dir, n_shards).is_some()
+}
+
+/// Inclusive Class A create_fk recorded in `DONE`, if the manifest is valid.
+pub fn unsorted_done_last_fk(dir: &Path, n_shards: usize) -> Option<u64> {
+    read_unsorted_done(dir, n_shards).map(|d| d.last_fk)
 }
 
 pub fn clear_unsorted_shard_dir(dir: &Path) {
@@ -342,10 +381,42 @@ pub fn collect_unsorted_shard_files(
     cancel: Option<&AtomicBool>,
 ) -> Result<UnsortedShardCollect, StoreError> {
     let last = store.txs.count();
-    if last == 0 {
-        return collect_unsorted_from_txs(&store.txs, dir, n_shards, 1, 0, workers, cancel);
+    collect_unsorted_from_txs(&store.txs, dir, n_shards, 1, last, workers, false, cancel)
+}
+
+/// Resume collect: append when `DONE` lags and no shards are sealed; skip when sealed.
+pub(crate) fn collect_unsorted_covering_class_a(
+    store: &Store,
+    dir: &Path,
+    n_shards: usize,
+    workers: usize,
+    any_sealed_shards: bool,
+    cancel: Option<&AtomicBool>,
+) -> Result<UnsortedShardCollect, StoreError> {
+    let last = store.txs.count();
+    let done = read_unsorted_done(dir, n_shards);
+    let action = plan_unsorted_collect(done.as_ref().map(|d| d.last_fk), last, any_sealed_shards);
+    if !matches!(action, UnsortedCollectAction::Skip)
+        && cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false)
+    {
+        return Err(StoreError::Cancelled("scripthash unsorted class a collect"));
     }
-    collect_unsorted_from_txs(&store.txs, dir, n_shards, 1, last, workers, cancel)
+    match action {
+        UnsortedCollectAction::Skip => {
+            let d = done.expect("skip requires a valid DONE");
+            Ok(UnsortedShardCollect {
+                recs: d.per_shard.iter().copied().sum(),
+                last_fk: d.last_fk,
+                per_shard: d.per_shard,
+            })
+        }
+        UnsortedCollectAction::Full => {
+            collect_unsorted_from_txs(&store.txs, dir, n_shards, 1, last, workers, false, cancel)
+        }
+        UnsortedCollectAction::Append { first, last } => collect_unsorted_from_txs(
+            &store.txs, dir, n_shards, first, last, workers, true, cancel,
+        ),
+    }
 }
 
 fn collect_unsorted_from_txs(
@@ -355,34 +426,55 @@ fn collect_unsorted_from_txs(
     first: u64,
     last: u64,
     workers: usize,
+    append: bool,
     cancel: Option<&AtomicBool>,
 ) -> Result<UnsortedShardCollect, StoreError> {
     let n_shards = n_shards.max(1);
-    clear_unsorted_shard_dir(dir);
+    if !append {
+        clear_unsorted_shard_dir(dir);
+    }
     fs::create_dir_all(dir).map_err(|e| StoreError::io(dir, e))?;
     let mut sinks = Vec::with_capacity(n_shards);
     for shard in 0..n_shards {
         let path = unsorted_shard_path(dir, shard);
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&path)
-            .map_err(|e| StoreError::io(&path, e))?;
+        let mut opts = OpenOptions::new();
+        opts.create(true).write(true);
+        if !append {
+            opts.truncate(true);
+        }
+        let file = opts.open(&path).map_err(|e| StoreError::io(&path, e))?;
+        let cursor = if append {
+            let len = file.metadata().map_err(|e| StoreError::io(&path, e))?.len();
+            if !len.is_multiple_of(UNSORTED_REC_LEN as u64) {
+                return Err(StoreError::Corrupt(
+                    "scripthash unsorted shard size not a multiple of 24",
+                ));
+            }
+            len
+        } else {
+            0
+        };
         sinks.push(UnsortedShardSink {
             path,
             file,
             write: Mutex::new(UnsortedShardWrite {
-                cursor: 0,
-                allocated: 0,
+                cursor,
+                allocated: cursor,
             }),
         });
     }
 
     if last < first {
-        let per_shard = vec![0u64; n_shards];
-        write_unsorted_done(dir, &per_shard)?;
-        return Ok(UnsortedShardCollect { recs: 0, per_shard });
+        let per_shard: Vec<u64> = sinks
+            .iter()
+            .map(|s| s.write.lock().unwrap().cursor / UNSORTED_REC_LEN as u64)
+            .collect();
+        write_unsorted_done(dir, last, &per_shard)?;
+        return Ok(UnsortedShardCollect {
+            recs: per_shard.iter().copied().sum(),
+            per_shard,
+            last_fk: last,
+        });
     }
 
     let work_span = last.saturating_sub(first.saturating_sub(1));
@@ -399,7 +491,7 @@ fn collect_unsorted_from_txs(
 
     rbitcoin_log::info!(
         "store: scripthash unsorted collect start n_shards={n_shards} workers={workers} \
-         chunks={n_chunks} first={first} last={last}"
+         chunks={n_chunks} first={first} last={last} append={append}"
     );
 
     std::thread::scope(|scope| {
@@ -514,13 +606,18 @@ fn collect_unsorted_from_txs(
             .map_err(|e| StoreError::io(&sink.path, e))?;
         per_shard.push(bytes / UNSORTED_REC_LEN as u64);
     }
-    write_unsorted_done(dir, &per_shard)?;
+    write_unsorted_done(dir, last, &per_shard)?;
     let recs = per_shard.iter().copied().sum();
     rbitcoin_log::info!(
-        "store: scripthash unsorted collect done recs={recs} n_shards={n_shards} elapsed={:?}",
+        "store: scripthash unsorted collect done recs={recs} n_shards={n_shards} last_fk={last} \
+         append={append} elapsed={:?}",
         t0.elapsed()
     );
-    Ok(UnsortedShardCollect { recs, per_shard })
+    Ok(UnsortedShardCollect {
+        recs,
+        per_shard,
+        last_fk: last,
+    })
 }
 
 fn rec_fk_le(rec: &[u8; UNSORTED_REC_LEN]) -> u64 {
@@ -820,14 +917,18 @@ pub fn materialize_sh_unsorted_from_class_a(
         table.reinit_empty_for_cold_materialize()?;
     }
 
-    if !unsorted_manifest_ok(&dir, n_shards) {
-        if cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
-            return Err(StoreError::Cancelled("scripthash unsorted class a collect"));
-        }
-        collect_unsorted_shard_files(store, &dir, n_shards, collect_workers, cancel)?;
-    }
+    let any_sealed = unsealed.len() < n_shards;
+    let collected = collect_unsorted_covering_class_a(
+        store,
+        &dir,
+        n_shards,
+        collect_workers,
+        any_sealed,
+        cancel,
+    )?;
 
-    let mat = materialize_sh_from_unsorted(table, &dir, pack_workers, cancel)?;
+    let mut mat = materialize_sh_from_unsorted(table, &dir, pack_workers, cancel)?;
+    mat.max_fk = mat.max_fk.max(collected.last_fk);
     if table.unsealed_main_shards().is_empty() {
         clear_unsorted_shard_dir(&dir);
         ColdProgress::clear(store.path());
@@ -1051,8 +1152,56 @@ mod tests {
     }
 
     #[test]
-    fn unsorted_done_magic_is_v2() {
-        assert_eq!(UNSORTED_DONE_MAGIC, b"SHUNSRT2");
+    fn unsorted_done_magic_is_v3() {
+        assert_eq!(UNSORTED_DONE_MAGIC, b"SHUNSRT3");
+    }
+
+    #[test]
+    fn leftover_shunsrt2_done_is_not_ok() {
+        let dir = std::env::temp_dir().join(format!(
+            "rbitcoin-sh-done-v2-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let n_shards = 2usize;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"SHUNSRT2");
+        buf.extend_from_slice(&(n_shards as u32).to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        fs::write(dir.join("DONE"), &buf).unwrap();
+        fs::write(unsorted_shard_path(&dir, 0), []).unwrap();
+        fs::write(unsorted_shard_path(&dir, 1), []).unwrap();
+        assert!(
+            !unsorted_manifest_ok(&dir, n_shards),
+            "SHUNSRT2 without last_fk must restart collect"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plan_unsorted_collect_appends_only_when_no_shards() {
+        assert!(matches!(
+            plan_unsorted_collect(None, 10, false),
+            UnsortedCollectAction::Full
+        ));
+        assert!(matches!(
+            plan_unsorted_collect(Some(10), 10, false),
+            UnsortedCollectAction::Skip
+        ));
+        assert!(matches!(
+            plan_unsorted_collect(Some(4), 10, false),
+            UnsortedCollectAction::Append { first: 5, last: 10 }
+        ));
+        assert!(matches!(
+            plan_unsorted_collect(Some(4), 10, true),
+            UnsortedCollectAction::Skip
+        ));
     }
 
     #[test]
