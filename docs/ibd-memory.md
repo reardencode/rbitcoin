@@ -58,7 +58,7 @@ Not page cache. Caps on **decoded `Block` objects and live outbound sessions**:
 | **Tip-follow catch-up getdata** | **16** (`MAX_SERVE_BLOCKS`) hashes per ask | `requested` tracks inflight; after those bodies connect, drain asks the next window. Asking the whole header path left hashes stuck while the peer served only 16. |
 | **`from_this_peer`** | **50_000** txids / session (INV origin skip) | Clear and restart on overflow (`announced_wtx` pattern). |
 | **`pending_blocks`** | **128** decoded bodies / session | Insert evicts one existing hash at cap. Unsolicited BIP130 window still 16. |
-| **Hub `held_bodies`** | **320** | Existing; side-branch hold for most-work apply. |
+| **Hub `held_bodies`** | **320** count + **288** height window | Side-branch hold for most-work apply. After a successful tip connect, drop bodies whose connected height is more than **288** below tip (Core unrequested window). Do not hold `IgnoredWeaker` already that far behind. Count cap still evicts an arbitrary hash at 320. |
 | **getheaders continuation** | full 2000-header reply locates from last hash | Next batch after that hash, not a replay from our tip. |
 | **headers poll** | skip if `best_known` cannot beat our tip | 120s `getheaders` only for peers that can still add work. |
 | **Chainwork prefix** | `Vec<Work>` `prefix[h] = work through h` (~32 B × tip; ≈28–32 MiB at 900k) | Process cache. Extend/truncate to `query.tip_height()`. Not durable. Restart rebuilds on first `chain_work`. |

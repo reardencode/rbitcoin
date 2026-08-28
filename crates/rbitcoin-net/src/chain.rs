@@ -266,7 +266,7 @@ impl ChainHub {
         let Some(parent_h) = parent_h else {
             return false;
         };
-        parent_h.saturating_add(1) > tip.saturating_add(288)
+        parent_h.saturating_add(1) > tip.saturating_add(Self::HELD_STALE_BELOW)
     }
 
     /// Unrequested body whose header-path work is strictly below the tip.
@@ -1559,13 +1559,60 @@ impl ChainHub {
         }
     }
 
-    /// Core unrequested-block window is 288 ahead of the validated tip.
     const HELD_BODIES_CAP: usize = 320;
+    const HELD_STALE_BELOW: u32 = 288;
+
+    fn held_body_height(&self, block: &Block) -> Option<u32> {
+        let prev = block.header.prev_blockhash;
+        if prev.to_byte_array() == [0u8; 32] {
+            return Some(0);
+        }
+        self.query
+            .height_of_hash(&prev.to_byte_array())
+            .ok()
+            .flatten()
+            .map(|h| h.0.saturating_add(1))
+            .or_else(|| {
+                self.header_tips
+                    .read()
+                    .unwrap()
+                    .get(&prev)
+                    .map(|(_, h)| h.saturating_add(1))
+            })
+    }
+
+    fn trim_held_bodies(&self, tip: u32) {
+        let drop: Vec<BlockHash> = {
+            let held = self.held_bodies.read().unwrap();
+            held.iter()
+                .filter_map(|(hash, b)| {
+                    let h = self.held_body_height(b)?;
+                    (tip.saturating_sub(h) > Self::HELD_STALE_BELOW).then_some(*hash)
+                })
+                .collect()
+        };
+        if drop.is_empty() {
+            return;
+        }
+        let mut held = self.held_bodies.write().unwrap();
+        let mut seqs = self.held_seq.write().unwrap();
+        for h in drop {
+            held.remove(&h);
+            seqs.remove(&h);
+        }
+    }
 
     fn hold_body(&self, block: Block) {
         let hash = block.block_hash();
         if self.is_connected(&hash) {
             return;
+        }
+        if let Some(h) = self.held_body_height(&block) {
+            if let Some(tip) = self.tip_height() {
+                if tip.saturating_sub(h) > Self::HELD_STALE_BELOW {
+                    return;
+                }
+            }
         }
         let evict = {
             let held = self.held_bodies.read().unwrap();
@@ -1774,6 +1821,7 @@ impl ChainHub {
         let _ = self.tip_tx.send(event);
         self.notify.notify_waiters();
         self.query.release_sh_writebehind(Height(height));
+        self.trim_held_bodies(height);
         Ok(())
     }
 
@@ -2206,6 +2254,22 @@ mod tests {
             }
         }
         block
+    }
+
+    fn mine_distinct(prev: BlockHash, time: u32, height: u32, avoid: &[BlockHash]) -> Block {
+        let mut b = mine(prev, time, height);
+        if !avoid.iter().any(|h| *h == b.block_hash()) {
+            return b;
+        }
+        let target = Target::from_compact(b.header.bits);
+        for nonce in 0..u32::MAX {
+            b.header.nonce = nonce;
+            if b.header.validate_pow(target).is_ok() && !avoid.iter().any(|h| *h == b.block_hash())
+            {
+                return b;
+            }
+        }
+        panic!("no distinct pow sibling");
     }
 
     #[test]
@@ -3576,6 +3640,89 @@ mod tests {
         );
         assert_eq!(hub.tip_height(), Some(100));
         assert_eq!(hub.tip_hash().unwrap(), branch.last().unwrap().block_hash());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn held_bodies_trim_stale_below_unrequested_window() {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let b1 = mine(gen, 1_300_040_000, 1);
+        hub.accept_block(b1.clone()).unwrap();
+        let stale = mine_distinct(gen, 1_300_040_001, 1, &[b1.block_hash()]);
+        assert!(matches!(
+            hub.accept_received_block(stale.clone()).unwrap(),
+            AcceptOutcome::IgnoredWeaker
+        ));
+        assert!(hub.held_body(&stale.block_hash()).is_some());
+
+        rbitcoin_consensus::pad_empty_from(
+            hub.query.as_ref(),
+            &hub.params,
+            b1.block_hash(),
+            b1.header.time,
+            2,
+            289,
+            0,
+        );
+        assert_eq!(hub.tip_height(), Some(289));
+        let tip_hash = hub.tip_hash().unwrap();
+        let tip_block = hub
+            .block_at_height(289)
+            .unwrap()
+            .expect("padded tip reconstructable");
+        let mut near = rbitcoin_consensus::mine_empty_regtest(
+            tip_block.header.prev_blockhash,
+            tip_block.header.time.saturating_add(1),
+            289,
+        );
+        if near.block_hash() == tip_hash {
+            let target = Target::from_compact(near.header.bits);
+            for nonce in 0..u32::MAX {
+                near.header.nonce = nonce;
+                if near.header.validate_pow(target).is_ok() && near.block_hash() != tip_hash {
+                    break;
+                }
+            }
+        }
+        assert!(matches!(
+            hub.accept_received_block(near.clone()).unwrap(),
+            AcceptOutcome::IgnoredWeaker
+        ));
+        assert!(hub.held_body(&near.block_hash()).is_some());
+
+        let next = rbitcoin_consensus::mine_empty_regtest(
+            tip_hash,
+            tip_block.header.time.saturating_add(600),
+            290,
+        );
+        hub.accept_block(next).unwrap();
+        assert_eq!(hub.tip_height(), Some(290));
+        assert!(
+            hub.held_body(&stale.block_hash()).is_none(),
+            "held body 289 heights behind tip must trim"
+        );
+        assert!(
+            hub.held_body(&near.block_hash()).is_some(),
+            "sibling at previous tip height must stay held"
+        );
+
+        let far = mine_distinct(
+            gen,
+            1_300_040_002,
+            1,
+            &[b1.block_hash(), stale.block_hash()],
+        );
+        assert!(matches!(
+            hub.accept_received_block(far.clone()).unwrap(),
+            AcceptOutcome::IgnoredWeaker
+        ));
+        assert!(
+            hub.held_body(&far.block_hash()).is_none(),
+            "must not hold IgnoredWeaker already >288 below tip"
+        );
+
         let _ = std::fs::remove_dir_all(dir);
     }
 }
