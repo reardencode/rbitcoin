@@ -3,6 +3,10 @@
 # Applied by the bitcoind shim. Unmapped strings stay skip reason core-log.
 
 [[rule]]
+match = 'p2p: trying connection \(([^)]+)\) to (.+)$'
+emit = ['trying v1 connection ({1}) to {2}']
+
+[[rule]]
 match = 'rpc: listening on 127\.0\.0\.1:(\d+)'
 emit = ['Bound to 127.0.0.1:{1}']
 

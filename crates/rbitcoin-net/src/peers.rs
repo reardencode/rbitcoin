@@ -48,6 +48,10 @@ impl PeerConnType {
     }
 }
 
+pub(crate) fn trying_connection_log(typ: PeerConnType, addr: impl std::fmt::Display) -> String {
+    format!("p2p: trying connection ({}) to {addr}", typ.as_str())
+}
+
 /// Request that the node dial `addr` as `typ`.
 #[derive(Clone, Debug)]
 pub struct DialRequest {
@@ -1142,6 +1146,19 @@ mod tests {
             start_height: 0,
             relay: true,
         }
+    }
+
+    #[test]
+    fn trying_connection_log_is_p2p_not_v1() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(25, 0, 0, 1)), 8333);
+        assert_eq!(
+            trying_connection_log(PeerConnType::OutboundFullRelay, addr),
+            "p2p: trying connection (outbound-full-relay) to 25.0.0.1:8333"
+        );
+        assert_eq!(
+            trying_connection_log(PeerConnType::AddrFetch, addr),
+            "p2p: trying connection (addr-fetch) to 25.0.0.1:8333"
+        );
     }
 
     #[test]
