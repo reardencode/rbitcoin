@@ -24,7 +24,11 @@ before 1.0).
 
 - **Unsorted SH recs store the 16-byte head prefix:** each file rec is 24 B
   (`prefix16` + `create_fk`), matching the sealed head. `DONE` magic is
-  `SHUNSRT2` so leftover 40 B `SHUNSRT1` files restart collect.
+  `SHUNSRT3` and records the inclusive Class A create_fk scanned. Leftover
+  `SHUNSRT2` / `SHUNSRT1` files restart collect. If Class A grows after `DONE`
+  with no sealed shards, collect appends the tail into the unsorted files;
+  if any `head/NN` is already sealed, pack finishes then Direct Class A tail
+  backfill fills the gap (write-behind no-ops until Tip).
 
 - **SH collect body IO is libc pread:** nCPU workers read coalesced 16 MiB
   `txout.body` spans with blocking `pread`. The TLS uring 5 s wait is a

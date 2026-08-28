@@ -511,7 +511,10 @@ Tip-follow readiness is **independent** of SH materialize (`tip_follow_ready` �
 Keep **`store/scripthash.unsorted/`** until all shards seal. SIGINT / SIGTERM
 mid-cold keeps every **sealed** `scripthash.head/NN`; restart with the same
 `--datadir --shindex` packs **unsealed** shards only (holes stay). Incomplete
-collect (no `DONE`) restarts the Class A pass. Do not delete unsorted files
+collect (no `DONE`) restarts the Class A pass. `DONE` names the Class A
+`create_fk` scanned; restart appends new creates into unsorted files when no
+shards are sealed, or tail-appends onto the durable head after pack when any
+`head/NN` already exists. Do not delete unsorted files
 to “start over” unless you intend a full Class A collect
 (`RBITCOIN_SH_FORCE_REBUILD`). Leftover `scripthash.runs` are discarded at tip
 (never k-way rematerialized).
@@ -520,6 +523,8 @@ to “start over” unless you intend a full Class A collect
 |------|-------------------|
 | SIGTERM / SIGINT mid pack | Resume. Sealed `head/NN` stays; unsealed shards re-pack from unsorted files. |
 | Kill-9 mid pack | Same idea; unfinished shard work is redone. Open follows [`docs/crash-recovery.md`](docs/crash-recovery.md) (scripthash Direct). |
+| `DONE` then more Class A, no sealed shards | Append the new fk span into unsorted files, then pack. |
+| `DONE` then more Class A, some/all shards sealed | Pack remaining unsealed files; Class A tail onto the durable head (Direct) or write-behind (Tip). |
 | Empty SH head + leftover catalog | Wipe leftover runs + SEAL, then Class A collect into unsorted shards. |
 | Durable SH head + leftover runs | Discard leftover runs (keep SEAL); write-behind fills HWM lag. |
 | Corrupt SH (leftover live OA, mixed body, refuse line) | Wipe `store/scripthash*` only, keep Class A, rematerialize with `--shindex`. |

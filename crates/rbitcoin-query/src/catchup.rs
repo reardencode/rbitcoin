@@ -229,6 +229,19 @@ impl Query {
                      skip Class A recollect and bulk materialize"
                     );
                     self.mark_sh_indexed_through_tip();
+                } else if self.index_mode().is_direct() {
+                    rbitcoin_log::info!(
+                        "node: scripthash durable head with HWM/SEAL lag while Direct — \
+                     Class A tail backfill (write-behind no-ops until Tip)"
+                    );
+                    self.backfill_sh_creates_from_class_a()?;
+                    if self.sh_is_tip_ready() {
+                        self.mark_sh_indexed_through_tip();
+                    } else {
+                        return Err(StoreError::Corrupt(
+                            "scripthash Class A tail backfill left include_hwm short of tip",
+                        ));
+                    }
                 } else {
                     rbitcoin_log::info!(
                         "node: scripthash durable head with HWM/SEAL lag — skip collect; \
@@ -269,22 +282,12 @@ impl Query {
             ));
         }
         if tip_max > 0 {
-            const MAX_POST_DRAIN_ROUNDS: u32 = 8;
             let mut n = n;
-            for round in 1..=MAX_POST_DRAIN_ROUNDS {
-                if self.sh_is_tip_ready() {
-                    break;
-                }
+            if !self.sh_is_tip_ready() && self.store.scripthash.has_durable_index() {
                 rbitcoin_log::info!(
-                    "node: scripthash unsorted-shards post-materialize round={round}/{MAX_POST_DRAIN_ROUNDS}"
+                    "node: scripthash unsorted-shards post-materialize Class A tail backfill"
                 );
-                rbitcoin_store::clear_unsorted_shard_dir(&rbitcoin_store::unsorted_shard_dir(
-                    self.store.path(),
-                ));
-                n = n.saturating_add(
-                    self.sh_run
-                        .finalize_and_unsorted_materialize_cancellable(&self.store, cancel)?,
-                );
+                n = n.saturating_add(self.backfill_sh_creates_from_class_a()?);
             }
             if !self.sh_is_tip_ready() {
                 return Err(StoreError::Corrupt(
@@ -296,6 +299,53 @@ impl Query {
             return Ok(n);
         }
         Ok(n)
+    }
+
+    /// Append Class A creates after the durable inclusion floor onto a live SH head.
+    fn backfill_sh_creates_from_class_a(&self) -> Result<u64, QueryError> {
+        use crate::sh_builder::durable_sh_inclusion_floor;
+
+        let last = self.store.txs.count();
+        self.sh_run.refresh_seal();
+        let floor = durable_sh_inclusion_floor(
+            self.store.scripthash.include_hwm(),
+            self.sh_run.sealed_max_create_fk(),
+        );
+        let first = if floor == 0 {
+            1
+        } else {
+            floor.saturating_add(1)
+        };
+        if last < first {
+            return Ok(0);
+        }
+        rbitcoin_log::info!("node: scripthash Class A tail backfill first={first} last={last}");
+        const CHUNK: u64 = 64_000;
+        let mut total = 0u64;
+        let mut lo = first;
+        let mut heads = self.sh_heads.lock().unwrap();
+        while lo <= last {
+            let hi = lo.saturating_add(CHUNK.saturating_sub(1)).min(last);
+            let mut recs = Vec::new();
+            self.store
+                .txs
+                .for_each_script_hashes_in_fk_span(lo, hi, |fk, sh| {
+                    recs.push(ScriptHashRecord::from_fk(sh, fk));
+                    Ok(())
+                })?;
+            if !recs.is_empty() {
+                total = total.saturating_add(recs.len() as u64);
+                self.store
+                    .scripthash
+                    .put_create_batch_append(&recs, &mut heads)?;
+            }
+            lo = hi.saturating_add(1);
+        }
+        drop(heads);
+        self.store.scripthash.flush()?;
+        self.store.scripthash.note_include_hwm(last)?;
+        self.sh_run.publish_seal_watermark(last)?;
+        Ok(total)
     }
 
     fn mark_sh_indexed_through_tip(&self) {
@@ -391,15 +441,28 @@ mod tests {
 
     fn seed_direct_chain(q: &Query, n: u32) {
         q.enter_direct_index_mode().unwrap();
+        extend_direct_chain(q, n);
+        assert_eq!(q.tip_height(), Some(Height(n - 1)));
+        assert!(q.store.txs.count() >= u64::from(n));
+    }
+
+    fn extend_direct_chain(q: &Query, add: u32) {
+        if add == 0 {
+            return;
+        }
+        let start = q.tip_height().map(|h| h.0.saturating_add(1)).unwrap_or(0);
         let mut prev = Fk::NULL;
         let mut parent_hash: Option<[u8; 32]> = None;
-        for h in 0..n {
+        if start > 0 {
+            let prev_h = Height(start - 1);
+            prev = q.store.confirmed.get(prev_h).unwrap().unwrap();
+            parent_hash = Some(q.get_header(prev).unwrap().hash);
+        }
+        for h in start..start + add {
             let (header, ta) = coinbase_block(h, prev, parent_hash);
             parent_hash = Some(header.hash);
             prev = q.connect_block(Height(h), &header, &[ta]).unwrap();
         }
-        assert_eq!(q.tip_height(), Some(Height(n - 1)));
-        assert!(q.store.txs.count() >= u64::from(n));
     }
 
     #[test]
@@ -720,11 +783,16 @@ mod tests {
             "leftover run must not be applied onto the live head"
         );
         assert_eq!(q.scripthash_run_count(), 0, "leftover runs discarded");
-        assert_eq!(
-            q.store.scripthash.include_hwm(),
-            lag,
-            "skip must not bump HWM from the leftover run"
+        assert!(
+            q.store.scripthash.include_hwm() >= tip_max,
+            "Direct finalize backfills Class A tail (hwm={} tip_max={tip_max}), not leftover fk=99",
+            q.store.scripthash.include_hwm()
         );
+        assert!(
+            q.store.scripthash.include_hwm() < 99,
+            "leftover run fk=99 must not become include_hwm"
+        );
+        assert!(q.sh_is_tip_ready());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -808,6 +876,70 @@ mod tests {
             q.sh_run.sealed_max_create_fk() >= tip_max,
             "Direct enter must raise SEAL to include_hwm covering tip"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn finalize_sh_appends_unsorted_when_done_lags_before_any_shard() {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("rbitcoin-q-sh-done-lag-{n}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let q = Query::open_or_create(&dir).unwrap();
+        seed_direct_chain(&q, 3);
+        let n_shards = q.store.scripthash.head_shard_count();
+        let udir = rbitcoin_store::unsorted_shard_dir(q.store.path());
+        rbitcoin_store::collect_unsorted_shard_files(&q.store, &udir, n_shards, 1, None).unwrap();
+        let done_last = rbitcoin_store::unsorted_done_last_fk(&udir, n_shards).unwrap();
+        extend_direct_chain(&q, 2);
+        assert!(q.store.txs.count() > done_last);
+        assert!(!q.store.scripthash.has_durable_index());
+        let _ = q.finalize_sh_runs().unwrap();
+        let sh_old = rbitcoin_store::script_hash(&[0x51, 0]);
+        let sh_new = rbitcoin_store::script_hash(&[0x51, 3]);
+        assert!(
+            !q.scripthash_history(&sh_old).unwrap().is_empty(),
+            "creates from the original collect must remain"
+        );
+        assert!(
+            !q.scripthash_history(&sh_new).unwrap().is_empty(),
+            "creates after DONE must be in unsorted catch-up before pack"
+        );
+        assert!(q.sh_is_tip_ready());
+        assert!(q.store.scripthash.include_hwm() >= q.store.txs.count());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn finalize_sh_backfills_class_a_tail_when_shards_already_sealed() {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("rbitcoin-q-sh-shard-lag-{n}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let q = Query::open_or_create(&dir).unwrap();
+        seed_direct_chain(&q, 3);
+        let _ = q.finalize_sh_runs().unwrap();
+        assert!(q.store.scripthash.has_durable_index());
+        assert!(q.sh_is_tip_ready());
+        extend_direct_chain(&q, 2);
+        assert!(
+            !q.sh_is_tip_ready(),
+            "new Class A after seal must lag honest include_hwm"
+        );
+        let _ = q.finalize_sh_runs().unwrap();
+        let sh_new = rbitcoin_store::script_hash(&[0x51, 3]);
+        assert!(
+            !q.scripthash_history(&sh_new).unwrap().is_empty(),
+            "Direct finalize must backfill Class A tail onto sealed shards"
+        );
+        assert!(q.sh_is_tip_ready());
+        assert!(q.store.scripthash.include_hwm() >= q.store.txs.count());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

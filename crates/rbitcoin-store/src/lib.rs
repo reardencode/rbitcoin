@@ -99,9 +99,10 @@ pub use scripthash_layout::ShHeadValue;
 pub use scripthash_layout::SH_MAX_SLAB_CLASS;
 pub use scripthash_materialize::{
     clear_unsorted_shard_dir, collect_unsorted_shard_files, materialize_sh_from_unsorted,
-    materialize_sh_unsorted_from_class_a, unsorted_collect_workers, unsorted_manifest_ok,
-    unsorted_pack_workers, unsorted_shard_dir, unsorted_shard_path, MaterializeStageNs,
-    ShShardMaterialize, UnsortedShardCollect, SH_UNSORTED_PACK_RAM_BYTES, UNSORTED_SHARD_DIR,
+    materialize_sh_unsorted_from_class_a, unsorted_collect_workers, unsorted_done_last_fk,
+    unsorted_manifest_ok, unsorted_pack_workers, unsorted_shard_dir, unsorted_shard_path,
+    MaterializeStageNs, ShShardMaterialize, UnsortedShardCollect, SH_UNSORTED_PACK_RAM_BYTES,
+    UNSORTED_SHARD_DIR,
 };
 pub use scripthash_slabs::{
     decode_fk_delta_stream, decode_fk_delta_stream_into, decode_slab_payload,

@@ -179,11 +179,6 @@ impl ShRunBuilder {
             rbitcoin_store::clear_unsorted_shard_dir(&rbitcoin_store::unsorted_shard_dir(
                 store.path(),
             ));
-            let tip_max = store.txs.count();
-            if tip_max > 0 {
-                self.publish_seal_watermark(tip_max)?;
-                let _ = store.scripthash.note_include_hwm(tip_max);
-            }
             return Ok(0);
         }
 
@@ -220,10 +215,9 @@ impl ShRunBuilder {
         };
         store.scripthash.flush()?;
         self.discard_residual_runs();
-        let hwm = mat.max_fk.max(tip_max);
-        if hwm > 0 {
-            self.publish_seal_watermark(hwm)?;
-            let _ = store.scripthash.note_include_hwm(hwm);
+        if mat.max_fk > 0 {
+            self.publish_seal_watermark(mat.max_fk)?;
+            let _ = store.scripthash.note_include_hwm(mat.max_fk);
         }
         info!(
             "node: scripthash unsorted-shards done creates≈{} keys≈{} shards={n_shards} \

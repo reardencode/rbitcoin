@@ -174,7 +174,7 @@ itself changed.
     scripthash.ovf/NNNNNN[.fuse8][.idx]                  # L0 SHSR pack8
     scripthash.ovf/NNNNNN.mphf|.val|.fuse8               # L1 promoted ovf (at most one)
     scripthash.runs              # leftover catalog (key_len=40); discarded at tip
-    scripthash.unsorted/NN       # tip collect: raw 24 B recs (prefix16+fk), unsorted; DONE; unlinked after seal
+    scripthash.unsorted/NN       # tip collect: raw 24 B recs (prefix16+fk), unsorted; DONE=SHUNSRT3+last_fk+counts; unlinked after seal
     sp_tweaks.idx/  sp_tweaks.body/   # optional BIP-352 (schema 17 dirs; leftover files unlinked)
 
 <datadir-cold>/                  # only when --datadir-cold is set
