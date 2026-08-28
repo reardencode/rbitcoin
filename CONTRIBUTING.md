@@ -183,6 +183,20 @@ That is **not** the operator binary (`nix build .#rbitcoin-musl`). Details:
    production sources or markdown and `contains` identifiers, comments, or
    call graphs. Fixture JSON/hex and tests that read **datadir** bytes are
    not this rule.
+9. **RAM and CPU are design inputs.** This node indexes chain-scale
+   structures (tens of millions of keys, hundred-MiB arrays, GiB-class
+   heads). Iterating those structures is expensive. Every algorithm should
+   avoid wasting RAM and avoid wasting CPU. Spending one to save the other
+   is allowed only as a **named trade** — owner doc or rustdoc on the
+   surface, not an accident of the first version that compiled. FdOnly
+   packed `g` (`mphf_g=0`) versus fuse8 in RAM is that kind of choice.
+
+   Write as if the structure is huge, because in IBD it is. **Address** it
+   (hash, slot, page, bit offset, subscript). Do not walk everything resident
+   to recover the few fields this call needs. Nested loops over a loaded
+   collection are guilty until the inner work is O(what this call needs),
+   not O(what exists). Tiny fixtures prove correctness, not cost
+   ([`TESTING.md`](./TESTING.md)).
 
 ## Workflow
 
@@ -243,3 +257,5 @@ IO; they do not package zips. GitHub Releases:
       protocol, `SAFETY` requirement, or library quirk the types cannot state.
 - [ ] Tests assert shipped behavior, not source/docs text (`include_str!` of
       production `.rs` or markdown is not a pin).
+- [ ] Hot-path algorithm is O(need) at chain scale, or the RAM/CPU trade is
+      named (principle 9).

@@ -169,6 +169,7 @@ Aligned with AGENTS.md TDD + suite speed:
 | New scenarios must justify cost (what unit cannot catch) | |
 | No step that “adds coverage later” | |
 | Prefer synthetic `/tmp` fixtures; no agent-VM mainnet open | |
+| Hot-path Contract includes the cost model | [`CONTRIBUTING.md`](../CONTRIBUTING.md) principle 9 |
 | After Refactor, same tests still pass; only drop **duplicate** tests | |
 
 ### Mid-plan gates vs plan-end gates
