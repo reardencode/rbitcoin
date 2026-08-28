@@ -565,11 +565,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 if stop.load(Ordering::SeqCst) {
                     return;
                 }
-                if clock
-                    .now_secs()
-                    .saturating_sub(start_secs)
-                    >= ADD_NEXT_SEEDNODE_SECS
-                {
+                if clock.now_secs().saturating_sub(start_secs) >= ADD_NEXT_SEEDNODE_SECS {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;

@@ -422,11 +422,7 @@ async fn prepare_outbound_session(
     follow_live: Arc<AtomicUsize>,
     typ: PeerConnType,
 ) -> Result<PreparedOutbound, NetError> {
-    rbitcoin_log::debug!(
-        "trying v1 connection ({}) to {}",
-        typ.as_str(),
-        peer
-    );
+    rbitcoin_log::debug!("trying v1 connection ({}) to {}", typ.as_str(), peer);
     let stream = TcpStream::connect(peer).await?;
     let bind = stream.local_addr().unwrap_or(local);
     let height = hub.tip_height().map(|h| h as i32).unwrap_or(0);
