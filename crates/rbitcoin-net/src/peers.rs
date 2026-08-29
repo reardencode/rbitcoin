@@ -129,9 +129,10 @@ pub struct LivePeer {
     connected_at: AtomicU64,
     /// Skip INV for mempool txs with `accept_gen < floor` (post-verack privacy).
     inv_gen_floor: AtomicU64,
-    /// Writer-task abort — `disconnectnode` aborts the write half so the peer
-    /// sees FIN without waiting for our read loop (`mempool_reorg` disconnect_nodes).
+    /// Writer-task abort — FIN via dropping the write half.
     writer_abort: Mutex<Option<tokio::task::AbortHandle>>,
+    /// Whole session-task abort — drops reader+writer if the loop is stuck.
+    session_abort: Mutex<Option<tokio::task::AbortHandle>>,
 }
 
 impl LivePeer {
@@ -203,8 +204,19 @@ impl LivePeer {
         *self.writer_abort.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
     }
 
+    pub fn set_session_abort(&self, handle: tokio::task::AbortHandle) {
+        *self.session_abort.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
+    }
+
     fn take_writer_abort(&self) -> Option<tokio::task::AbortHandle> {
         self.writer_abort
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+
+    fn take_session_abort(&self) -> Option<tokio::task::AbortHandle> {
+        self.session_abort
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take()
@@ -1034,6 +1046,7 @@ impl PeerHub {
             connected_at: AtomicU64::new(connected_at),
             inv_gen_floor: AtomicU64::new(0),
             writer_abort: Mutex::new(None),
+            session_abort: Mutex::new(None),
         });
         // Handshake already exchanged version + verack (+ maybe ping).
         peer.note_recv("version", 100);
@@ -1193,14 +1206,16 @@ impl PeerHub {
             return false;
         };
         p.request_disconnect();
-        // Drop our writer-channel sender and abort the writer task so TCP FIN
-        // goes out even if the read loop is between ticks.
+        // Drop writer channel + abort writer/session so both TCP halves close
+        // even if the read loop is mid-frame (`mempool_reorg` disconnect_nodes).
         p.clear_out_tx();
         if let Some(h) = p.take_writer_abort() {
             h.abort();
         }
-        // Drop from getpeerinfo before the session task finishes tearing down
-        // so disconnect_nodes' far-side wait sees us gone promptly.
+        if let Some(h) = p.take_session_abort() {
+            h.abort();
+        }
+        // Drop from getpeerinfo before teardown finishes.
         self.unregister(id);
         true
     }

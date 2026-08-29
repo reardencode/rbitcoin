@@ -150,11 +150,18 @@ impl P2PNode {
                 let peers = dial_peers.clone();
                 let ua = dial_ua.clone();
                 let live = dial_live.clone();
+                let (sess_tx, sess_rx) = tokio::sync::oneshot::channel::<Arc<LivePeer>>();
                 let h = tokio::spawn(async move {
-                    let _ = run_outbound_session(
-                        req.addr, magic, local_addr, hub, peers, ua, live, req.typ,
+                    let _ = run_outbound_session_with_sess_hook(
+                        req.addr, magic, local_addr, hub, peers, ua, live, req.typ, sess_tx,
                     )
                     .await;
+                });
+                let ah = h.abort_handle();
+                tokio::spawn(async move {
+                    if let Ok(sess) = sess_rx.await {
+                        sess.set_session_abort(ah);
+                    }
                 });
                 push_session_task(&sessions_dial, h);
             }
@@ -406,6 +413,7 @@ fn spawn_inbound_accept(
                         Err(_) => our,
                     };
                     let sessions = session_tasks.clone();
+                    let (sess_tx, sess_rx) = tokio::sync::oneshot::channel::<Arc<LivePeer>>();
                     let h = tokio::spawn(async move {
                         let _session_slot = permit;
                         let (ver, reader, writer, wire) = match inbound_connect_and_handshake(
@@ -438,6 +446,7 @@ fn spawn_inbound_accept(
                         }
                         sess.attach_wire(wire);
                         let id = sess.id;
+                        let _ = sess_tx.send(Arc::clone(&sess));
                         let meta = FollowSessionMeta {
                             peer: Some(peer_addr),
                             live: None,
@@ -445,6 +454,12 @@ fn spawn_inbound_accept(
                         };
                         let _ = peer_session_with(reader, writer, magic, hub, tip_rx, meta).await;
                         peers.unregister(id);
+                    });
+                    let ah = h.abort_handle();
+                    tokio::spawn(async move {
+                        if let Ok(sess) = sess_rx.await {
+                            sess.set_session_abort(ah);
+                        }
                     });
                     push_session_task(&sessions, h);
                 }
@@ -554,7 +569,7 @@ async fn run_prepared_outbound(prepared: PreparedOutbound) -> Result<(), NetErro
     out
 }
 
-async fn run_outbound_session(
+async fn run_outbound_session_with_sess_hook(
     peer: SocketAddr,
     magic: Magic,
     local: SocketAddr,
@@ -563,6 +578,7 @@ async fn run_outbound_session(
     user_agent: String,
     follow_live: Arc<AtomicUsize>,
     typ: PeerConnType,
+    sess_tx: tokio::sync::oneshot::Sender<Arc<LivePeer>>,
 ) -> Result<(), NetError> {
     if typ == PeerConnType::Feeler {
         let stream = TcpStream::connect(peer).await?;
@@ -572,6 +588,7 @@ async fn run_outbound_session(
     let prepared =
         prepare_outbound_session(peer, magic, local, hub, peers, user_agent, follow_live, typ)
             .await?;
+    let _ = sess_tx.send(Arc::clone(&prepared.sess));
     run_prepared_outbound(prepared).await
 }
 
