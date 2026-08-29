@@ -599,9 +599,7 @@ impl NodeConfig {
                         .parse()
                         .map_err(|e| NodeError::Config(format!("conf maxconnections: {e}")))?;
                     if total == 0 {
-                        return Err(NodeError::Config(
-                            "conf maxconnections must be >= 1".into(),
-                        ));
+                        return Err(NodeError::Config("conf maxconnections must be >= 1".into()));
                     }
                     self.max_inbound = inbound_from_maxconnections(total);
                     self.max_inbound_explicit = true;

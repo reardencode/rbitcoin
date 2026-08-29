@@ -847,10 +847,7 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
                 i += 1;
             }
             other if other.starts_with("--maxinbound=") || other.starts_with("--max-inbound=") => {
-                let raw = other
-                    .split_once('=')
-                    .map(|(_, v)| v)
-                    .unwrap_or("");
+                let raw = other.split_once('=').map(|(_, v)| v).unwrap_or("");
                 match raw.parse::<u32>() {
                     Ok(n) if n > 0 => {
                         max_inbound = n;

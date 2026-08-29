@@ -35,8 +35,8 @@ fn ctx_empty() -> (RpcContext, PathBuf) {
         logpath: String::new(),
         active: std::sync::Arc::new(std::sync::Mutex::new(RpcActive::default())),
         permit_bare_multisig: true,
-    alert_notify: None,
-    alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        alert_notify: None,
+        alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     (ctx, dir)
 }
@@ -740,8 +740,8 @@ fn all_methods_callable_empty_or_error() {
         logpath: String::new(),
         active: std::sync::Arc::new(std::sync::Mutex::new(RpcActive::default())),
         permit_bare_multisig: true,
-    alert_notify: None,
-    alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        alert_notify: None,
+        alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let mem2 = dispatch(&ctx2, "getmempoolinfo", vec![]).unwrap();
     assert_eq!(mem2["loaded"], true);
@@ -792,8 +792,8 @@ fn chain_methods_against_mined_regtest() {
         logpath: String::new(),
         active: std::sync::Arc::new(std::sync::Mutex::new(RpcActive::default())),
         permit_bare_multisig: true,
-    alert_notify: None,
-    alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        alert_notify: None,
+        alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
 
     let tip_h = chain.tip_height();
@@ -1270,8 +1270,8 @@ fn ctx_regtest_hub() -> (RpcContext, PathBuf, Arc<rbitcoin_net::ChainHub>) {
         logpath: String::new(),
         active: std::sync::Arc::new(std::sync::Mutex::new(RpcActive::default())),
         permit_bare_multisig: true,
-    alert_notify: None,
-    alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        alert_notify: None,
+        alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     (ctx, dir, hub)
 }
@@ -2735,8 +2735,8 @@ fn rpc_honesty_mempool_budget_and_network_identity() {
         logpath: String::new(),
         active: std::sync::Arc::new(std::sync::Mutex::new(RpcActive::default())),
         permit_bare_multisig: true,
-    alert_notify: None,
-    alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        alert_notify: None,
+        alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let mem = dispatch(&ctx, "getmempoolinfo", vec![]).unwrap();
     assert_eq!(

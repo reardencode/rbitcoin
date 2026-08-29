@@ -816,7 +816,11 @@ fn rpc_warnings(ctx: &RpcContext) -> Vec<String> {
             // Core ShellEscape: single-quote so `(versionbit N)` is not a subshell.
             let escaped = format!("'{}'", msg.replace('\'', "'\\''"));
             let shell = cmd.replace("%s", &escaped);
-            match std::process::Command::new("sh").arg("-c").arg(&shell).status() {
+            match std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&shell)
+                .status()
+            {
                 Ok(st) if !st.success() => {
                     rbitcoin_log::warn!("alertnotify exited {st}: {shell}");
                 }

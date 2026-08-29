@@ -33,7 +33,11 @@ pub fn select_inbound_eviction(mut cands: Vec<InboundEvictCandidate>) -> Option<
         return None;
     }
 
-    cands.sort_by(|a, b| b.last_block.cmp(&a.last_block).then_with(|| a.id.cmp(&b.id)));
+    cands.sort_by(|a, b| {
+        b.last_block
+            .cmp(&a.last_block)
+            .then_with(|| a.id.cmp(&b.id))
+    });
     remove_first_k(&mut cands, PROTECT_BLOCKS);
     if cands.is_empty() {
         return None;
@@ -57,7 +61,11 @@ pub fn select_inbound_eviction(mut cands: Vec<InboundEvictCandidate>) -> Option<
     }
 
     // Prefer the longest-connected remaining peer (stable id tie-break).
-    cands.sort_by(|a, b| a.connected_at.cmp(&b.connected_at).then_with(|| a.id.cmp(&b.id)));
+    cands.sort_by(|a, b| {
+        a.connected_at
+            .cmp(&b.connected_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
     Some(cands[0].id)
 }
 
@@ -88,7 +96,11 @@ fn protect_by_netgroup(cands: &mut Vec<InboundEvictCandidate>, k: usize) {
         if protect_ids.len() >= k {
             break;
         }
-        if let Some(c) = cands.iter().filter(|c| c.netgroup == group).min_by_key(|c| c.id) {
+        if let Some(c) = cands
+            .iter()
+            .filter(|c| c.netgroup == group)
+            .min_by_key(|c| c.id)
+        {
             protect_ids.push(c.id);
         }
     }

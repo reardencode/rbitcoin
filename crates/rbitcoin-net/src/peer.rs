@@ -2208,9 +2208,9 @@ async fn handle_peer_frame(
             return Ok(());
         }
         NetworkMessage::GetAddr => {
-            let bind = session.map(|s| s.addrbind).unwrap_or_else(|| {
-                std::net::SocketAddr::from(([127, 0, 0, 1], 0))
-            });
+            let bind = session
+                .map(|s| s.addrbind)
+                .unwrap_or_else(|| std::net::SocketAddr::from(([127, 0, 0, 1], 0)));
             let addrs = match session.and_then(|s| s.peer_hub()) {
                 Some(hub) => hub.addr_response_for_bind(bind),
                 None => Vec::new(),

@@ -515,8 +515,7 @@ mod tests {
             subversion: None,
             work_queue: None,
             permit_bare_multisig: true,
-        alert_notify: None,
-        alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            alert_notify: None,
         };
         let handle = run_rpc(cfg, q, Some(mp), None, None, None, None, None)
             .await
@@ -641,8 +640,7 @@ mod tests {
             subversion: None,
             work_queue: None,
             permit_bare_multisig: true,
-        alert_notify: None,
-        alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            alert_notify: None,
         };
         let handle = run_rpc(cfg, q, Some(mp), None, None, None, None, None)
             .await
@@ -727,8 +725,7 @@ mod tests {
             subversion: None,
             work_queue: Some(1),
             permit_bare_multisig: true,
-        alert_notify: None,
-        alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            alert_notify: None,
         };
         let handle = run_rpc(cfg, q, Some(mp), None, None, None, None, None)
             .await

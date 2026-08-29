@@ -111,12 +111,12 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-# -bind=0.0.0.0:P supplies the P2P port; we still listen on 127.0.0.1.
+# -bind=0.0.0.0:P supplies the P2P port; onion binds become extra --listen.
 OUT3="$("$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
   -bind=0.0.0.0:19333 -bind=127.0.0.1:19444=onion 2>/dev/null)"
 if printf '%s' "$OUT3" | grep -q -- "--listen 127.0.0.1:19333" \
-  && ! printf '%s' "$OUT3" | grep -q -- "--listen 127.0.0.1:19444"; then
-  echo "ok - bind port becomes listen (onion ignored)"
+  && printf '%s' "$OUT3" | grep -q -- "--listen 127.0.0.1:19444"; then
+  echo "ok - bind port becomes listen (onion as extra listen)"
   PASS=$((PASS + 1))
 else
   echo "not ok - bind port becomes listen (got: $OUT3)"

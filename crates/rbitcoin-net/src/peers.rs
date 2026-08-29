@@ -608,9 +608,8 @@ pub struct PeerHub {
     /// Shared addrman for GetAddr responses (optional until node wires it).
     addrman: Mutex<Option<std::sync::Arc<Mutex<crate::seeds::AddrMan>>>>,
     /// Per-bind GetAddr response cache: bind → (cached_at_secs, addrs).
-    addr_response_cache: Mutex<
-        HashMap<SocketAddr, (u64, Vec<(u32, bitcoin::p2p::address::Address)>)>,
-    >,
+    addr_response_cache:
+        Mutex<HashMap<SocketAddr, (u64, Vec<(u32, bitcoin::p2p::address::Address)>)>>,
 }
 
 impl PeerHub {
@@ -636,10 +635,7 @@ impl PeerHub {
 
     /// Attach the process addrman so inbound GetAddr can sample peers.
     pub fn set_addrman(&self, am: std::sync::Arc<Mutex<crate::seeds::AddrMan>>) {
-        *self
-            .addrman
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(am);
+        *self.addrman.lock().unwrap_or_else(|e| e.into_inner()) = Some(am);
     }
 
     /// Core GetAddr reply: per-bind cache (24h) of up to 1000 / 23% of addrman.
@@ -686,9 +682,7 @@ impl PeerHub {
             ^ (bind.port() as u64)
             ^ bind.ip().to_string().bytes().map(|b| b as u64).sum::<u64>();
         for i in (1..idxs.len()).rev() {
-            state = state
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1);
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
             let j = (state as usize) % (i + 1);
             idxs.swap(i, j);
         }
@@ -696,7 +690,10 @@ impl PeerHub {
         let mut out = Vec::with_capacity(cap);
         for &i in idxs.iter().take(cap) {
             let addr = entries[i].addr;
-            out.push((now as u32, bitcoin::p2p::address::Address::new(&addr, services)));
+            out.push((
+                now as u32,
+                bitcoin::p2p::address::Address::new(&addr, services),
+            ));
         }
         self.addr_response_cache
             .lock()
