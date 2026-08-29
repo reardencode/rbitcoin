@@ -39,7 +39,7 @@ pres and **not** the raw bytes. Reorg gather that wants wire re-encodes.
 | **Confirm plans / headers** | offer-ahead window | `ConfirmParentCache::advance_tip` from write `post_commit` |
 | **SH catalog runs** | leftover `scripthash.runs` discarded at tip (unsorted collect does not write them) | write-behind / discard; not during Direct confirm |
 | **SH unsorted collect / pack** | Collect: nCPU (no env / RAM cap; 1 MiB grow-on-demand write buffers; per-shard mutex so pwrite issues in offset order; 64 MiB fallocate on full flushes). Pack: min(CPUs, free RAM / 2 GiB); `RBITCOIN_SH_MERGE_WORKERS` override. One anonymous file image per pack worker (in-place unique-sort; MPHF has no HashSet). Class A collect spans 1 MiB | Tip finalize. Unsorted files under `scripthash.unsorted/` |
-| **`tx.head` wipe-rebuild workers** | min(CPUs, host free RAM / 750 MiB, range count); floor 1. Same free-RAM probe as SH. **Not** the SH pack 2 GiB cap. Env `RBITCOIN_TX_HEAD_REBUILD_WORKERS` override (`1` = serial) | Empty/wipe `tx.head` rebuild from `txid.body`. Logs `workers=` `free_GiB=` |
+| **`tx.head` wipe-rebuild workers** | min(CPUs, host free RAM / 1 GiB, range count); floor 1. Same free-RAM probe as SH. Matches BDZ peel+keys+g peak at default 2²⁵. **Not** the SH pack 2 GiB cap. Env `RBITCOIN_TX_HEAD_REBUILD_WORKERS` override (`1` = serial) | Empty/wipe `tx.head` rebuild from `txid.body`. Logs `workers=` `free_GiB=` |
 | **Ordered work path** | `MAX_ORDERED_HEADERS` | `IbdWorkState::hygiene` |
 
 Tests that need a clean process must call these **same** entry points (or drop the

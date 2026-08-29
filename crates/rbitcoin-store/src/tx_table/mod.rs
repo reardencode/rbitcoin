@@ -18,7 +18,8 @@ thread_local! {
 }
 
 /// Host RAM budget per parallel `tx.head` rebuild worker (not SH pack's 2 GiB).
-pub const TX_HEAD_REBUILD_WORKER_FREE_RAM_BYTES: u64 = 750 * 1024 * 1024;
+/// BDZ peel scratch + keys + g at the default 2²⁵ seal is ≈1 GiB peak.
+pub const TX_HEAD_REBUILD_WORKER_FREE_RAM_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Max coalesced `txout.body` pread for SH Class A collect. Sequential libc
 /// pread (not TLS uring); 16 MiB matches Class A locality.
@@ -1553,7 +1554,7 @@ impl TxTable {
     ///
     /// Range width is [`Self::rebuild_seal_keys`] (default 2²⁵). Remainder is
     /// sealed too; an empty open tail is created for later inserts.
-    /// Workers: [`Self::rebuild_workers`] (min of CPUs, free RAM / 750 MiB,
+    /// Workers: [`Self::rebuild_workers`] (min of CPUs, free RAM / 1 GiB,
     /// and range count). Distinct from SH pack's 2 GiB cap.
     pub fn rebuild_head_from_bodies(
         &self,
@@ -1649,7 +1650,7 @@ impl TxTable {
     }
 
     /// Parallel wipe-rebuild workers. Env `RBITCOIN_TX_HEAD_REBUILD_WORKERS`;
-    /// default min(CPUs, free RAM / 750 MiB). Not SH pack's 2 GiB cap.
+    /// default min(CPUs, free RAM / 1 GiB). Not SH pack's 2 GiB cap.
     pub fn rebuild_workers() -> usize {
         #[cfg(test)]
         if let Some(n) = TEST_REBUILD_WORKERS.with(std::cell::Cell::get) {

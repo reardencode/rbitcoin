@@ -98,7 +98,7 @@ before 1.0).
   unchanged). No `sp_tweaks` schema change.
 
 - **Parallel `tx.head` wipe-rebuild:** ranges seal concurrently,
-  min(CPUs, free RAM / **750 MiB**, range count). Distinct from SH
+  min(CPUs, free RAM / **1 GiB**, range count). Distinct from SH
   materialize (1.5 GiB/worker). `RBITCOIN_TX_HEAD_REBUILD_WORKERS`
   overrides (`1` = serial).
 
