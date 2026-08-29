@@ -133,6 +133,9 @@ pub struct LivePeer {
     writer_abort: Mutex<Option<tokio::task::AbortHandle>>,
     /// Whole session-task abort — drops reader+writer if the loop is stuck.
     session_abort: Mutex<Option<tokio::task::AbortHandle>>,
+    /// Cloned std TCP fd for `Shutdown::Both` on `disconnectnode` so the far
+    /// side sees EOF even if our session task is mid-frame.
+    tcp_shutdown: Mutex<Option<std::net::TcpStream>>,
 }
 
 impl LivePeer {
@@ -208,6 +211,10 @@ impl LivePeer {
         *self.session_abort.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
     }
 
+    pub fn attach_tcp_shutdown(&self, stream: std::net::TcpStream) {
+        *self.tcp_shutdown.lock().unwrap_or_else(|e| e.into_inner()) = Some(stream);
+    }
+
     fn take_writer_abort(&self) -> Option<tokio::task::AbortHandle> {
         self.writer_abort
             .lock()
@@ -217,6 +224,13 @@ impl LivePeer {
 
     fn take_session_abort(&self) -> Option<tokio::task::AbortHandle> {
         self.session_abort
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+
+    fn take_tcp_shutdown(&self) -> Option<std::net::TcpStream> {
+        self.tcp_shutdown
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take()
@@ -1047,6 +1061,7 @@ impl PeerHub {
             inv_gen_floor: AtomicU64::new(0),
             writer_abort: Mutex::new(None),
             session_abort: Mutex::new(None),
+            tcp_shutdown: Mutex::new(None),
         });
         // Handshake already exchanged version + verack (+ maybe ping).
         peer.note_recv("version", 100);
@@ -1206,8 +1221,13 @@ impl PeerHub {
             return false;
         };
         p.request_disconnect();
-        // Drop writer channel + abort writer/session so both TCP halves close
-        // even if the read loop is mid-frame (`mempool_reorg` disconnect_nodes).
+        // Hard-close TCP first so the far side's read sees EOF inside the
+        // Core `disconnect_nodes` 5s wait (`mempool_reorg`).
+        if let Some(s) = p.take_tcp_shutdown() {
+            let _ = s.shutdown(std::net::Shutdown::Both);
+        }
+        // Drop writer channel + abort writer/session so local halves tear down
+        // even if the read loop is mid-frame.
         p.clear_out_tx();
         if let Some(h) = p.take_writer_abort() {
             h.abort();
@@ -1359,6 +1379,56 @@ mod tests {
             hub.snapshot().is_empty(),
             "disconnect_id must unregister before the session task exits"
         );
+    }
+
+    #[test]
+    fn disconnect_id_shuts_down_tcp_so_far_side_sees_eof() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::{Duration, Instant};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut local = std::net::TcpStream::connect(addr).unwrap();
+        let (mut far, _) = listener.accept().unwrap();
+        far.set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+
+        let hub = PeerHub::new();
+        let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+        let b = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18445);
+        let p = hub.register(
+            a,
+            b,
+            &ver("/rbitcoin:0.1.0(testnode0)/"),
+            false,
+            PeerConnType::OutboundFullRelay,
+        );
+        let killer = local.try_clone().unwrap();
+        p.attach_tcp_shutdown(killer);
+
+        assert!(hub.disconnect_id(0));
+
+        let start = Instant::now();
+        let mut buf = [0u8; 1];
+        let n = far.read(&mut buf);
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "far side must observe close promptly, took {:?}",
+            start.elapsed()
+        );
+        match n {
+            Ok(0) => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::UnexpectedEof
+                ) => {}
+            other => panic!("expected EOF/reset after disconnect_id, got {other:?}"),
+        }
+        let _ = local.write(&[1]);
     }
 
     #[test]

@@ -177,7 +177,7 @@ pub(crate) async fn spawn_peer(
     let stream = TcpStream::connect(addr).await?;
     let ua = rbitcoin_primitives::rbitcoin_subversion(env!("CARGO_PKG_VERSION"), &[] as &[&str])
         .unwrap_or_else(|_| format!("/rbitcoin:{}/", env!("CARGO_PKG_VERSION")));
-    let (ver, reader, writer, _wire) = connect_and_handshake_timed(
+    let (ver, reader, writer, _wire, _tcp_shutdown) = connect_and_handshake_timed(
         HANDSHAKE_TIMEOUT,
         stream,
         magic,

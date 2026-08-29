@@ -412,31 +412,33 @@ fn spawn_inbound_accept(
                         tokio::sync::oneshot::channel::<tokio::task::AbortHandle>();
                     let h = tokio::spawn(async move {
                         let _session_slot = permit;
-                        let (ver, reader, writer, wire) = match inbound_connect_and_handshake(
-                            stream,
-                            magic,
-                            our,
-                            peer_addr,
-                            height,
-                            &ua,
-                            HandshakePolicy {
-                                hub: Some(hub.as_ref()),
-                                peers: Some(peers.as_ref()),
-                                conn_type: PeerConnType::Inbound,
-                            },
-                        )
-                        .await
-                        {
-                            Ok(x) => x,
-                            Err(e) => {
-                                rbitcoin_log::debug!(
-                                    "p2p: inbound handshake {peer_addr} failed: {e}"
-                                );
-                                return;
-                            }
-                        };
+                        let (ver, reader, writer, wire, tcp_shutdown) =
+                            match inbound_connect_and_handshake(
+                                stream,
+                                magic,
+                                our,
+                                peer_addr,
+                                height,
+                                &ua,
+                                HandshakePolicy {
+                                    hub: Some(hub.as_ref()),
+                                    peers: Some(peers.as_ref()),
+                                    conn_type: PeerConnType::Inbound,
+                                },
+                            )
+                            .await
+                            {
+                                Ok(x) => x,
+                                Err(e) => {
+                                    rbitcoin_log::debug!(
+                                        "p2p: inbound handshake {peer_addr} failed: {e}"
+                                    );
+                                    return;
+                                }
+                            };
                         let sess =
                             peers.register(peer_addr, bind, &ver, true, PeerConnType::Inbound);
+                        sess.attach_tcp_shutdown(tcp_shutdown);
                         if let Ok(ah) = ah_rx.await {
                             sess.set_session_abort(ah);
                         }
@@ -514,7 +516,7 @@ async fn prepare_outbound_session(
         },
     )
     .await;
-    let (ver, reader, writer, wire) = match handshake {
+    let (ver, reader, writer, wire, tcp_shutdown) = match handshake {
         Ok(x) => x,
         Err(e) => {
             peers.unregister(provisional_id);
@@ -523,6 +525,7 @@ async fn prepare_outbound_session(
     };
     peers.unregister(provisional_id);
     let sess = peers.register_with_id(provisional_id, peer, bind, &ver, false, typ);
+    sess.attach_tcp_shutdown(tcp_shutdown);
     if let Some(mp) = hub.mempool() {
         sess.set_inv_gen_floor(mp.next_accept_gen());
     }

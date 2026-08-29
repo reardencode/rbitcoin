@@ -448,14 +448,21 @@ fn map_protocol_error(e: ProtocolError) -> NetError {
 
 /// Complete BIP324 handshake on a connected TCP stream; return split encrypted halves.
 ///
+/// The fourth value is a cloned std TCP handle for [`std::net::TcpStream::shutdown`]
+/// on `disconnectnode` (far-side EOF without waiting on our session task).
+///
 /// Not cancellation-safe (BIP324 handshake). Callers should not wrap this in
 /// `select!` without a dedicated task.
 pub async fn open_v2(
     stream: TcpStream,
     magic: Magic,
     inbound: bool,
-) -> Result<(V2Reader, V2Writer, WireBytes), NetError> {
+) -> Result<(V2Reader, V2Writer, WireBytes, std::net::TcpStream), NetError> {
     let _ = stream.set_nodelay(true);
+    let std = stream.into_std().map_err(NetError::Io)?;
+    std.set_nonblocking(true).map_err(NetError::Io)?;
+    let tcp_shutdown = std.try_clone().map_err(NetError::Io)?;
+    let stream = TcpStream::from_std(std).map_err(NetError::Io)?;
     let role = if inbound {
         Role::Responder
     } else {
@@ -477,7 +484,12 @@ pub async fn open_v2(
         .await
         .map_err(map_protocol_error)?;
     let (r, w) = protocol.into_split();
-    Ok((V2SessionReader::from_protocol_reader(r), w, wire))
+    Ok((
+        V2SessionReader::from_protocol_reader(r),
+        w,
+        wire,
+        tcp_shutdown,
+    ))
 }
 
 /// Encrypt and send one application message.
