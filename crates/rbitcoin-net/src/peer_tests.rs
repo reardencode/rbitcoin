@@ -4240,9 +4240,9 @@ fn pending_blocks_insert_evicts_at_cap() {
         b.header.bits = bits;
         let h = b.block_hash();
         hashes.push(h);
-        stash_pending_block(&mut pending, h, b);
+        pending.insert(h, b);
     }
-    assert_eq!(pending.len(), MAX_PENDING_BLOCKS_FOR_TEST);
+    assert_eq!(pending.keys().len(), MAX_PENDING_BLOCKS_FOR_TEST);
     assert!(
         !pending.contains_key(&hashes[0]),
         "cap eviction must drop the oldest insert, not HashMap::keys().next()"

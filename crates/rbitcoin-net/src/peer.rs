@@ -136,10 +136,6 @@ impl PendingBlocks {
         Self::default()
     }
 
-    pub(crate) fn len(&self) -> usize {
-        self.map.len()
-    }
-
     pub(crate) fn contains_key(&self, hash: &BlockHash) -> bool {
         self.map.contains_key(hash)
     }
@@ -1926,7 +1922,7 @@ async fn handle_peer_frame(
             requested_blocks.remove(&hash);
             pending_headers.entry(hash).or_insert(block.header);
             if !any_header_path_meets_minwork(hub, pending_headers, hash) {
-                stash_pending_block(pending_blocks, hash, block.clone());
+                pending_blocks.insert(hash, block.clone());
                 return Ok(());
             }
             match hub.accept_received_block(block.clone()) {
