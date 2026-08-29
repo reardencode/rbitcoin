@@ -63,6 +63,33 @@ pub(crate) fn far_slots_per_peer(per_peer: usize, tip_hole: bool) -> usize {
     }
 }
 
+/// Per-peer densify cap: drip 2 while a tip hole is open; otherwise half of
+/// `per_peer`, or `per_peer` when this peer's recent bps is ≥ 2× pack median
+/// and the pack is not a tight cluster.
+pub(crate) fn densify_slots_for_peer(
+    per_peer: usize,
+    tip_hole: bool,
+    peer_bps: Option<u64>,
+    pack_median: Option<u64>,
+    pack_tight: bool,
+) -> usize {
+    let base = far_slots_per_peer(per_peer, tip_hole);
+    if tip_hole || pack_tight {
+        return base;
+    }
+    let Some(bps) = peer_bps else {
+        return base;
+    };
+    let Some(med) = pack_median else {
+        return base;
+    };
+    if med > 0 && bps >= med.saturating_mul(2) {
+        per_peer
+    } else {
+        base
+    }
+}
+
 /// Whether to request more headers past the soft cap.
 ///
 /// Only when the ordered path is **mostly claim-ready** (dense body-queue /
@@ -278,5 +305,46 @@ mod tests {
 
         assert_eq!(far_slots_per_peer(1, false), 1); // max(0,1)=1
         assert_eq!(far_slots_per_peer(3, false), 1);
+    }
+
+    #[test]
+    fn densify_slots_tip_hole_is_two_for_all() {
+        assert_eq!(
+            densify_slots_for_peer(16, true, Some(10_000_000), Some(1_000_000), false),
+            2
+        );
+        assert_eq!(densify_slots_for_peer(16, true, None, None, true), 2);
+    }
+
+    #[test]
+    fn densify_slots_tight_pack_stays_half() {
+        assert_eq!(
+            densify_slots_for_peer(16, false, Some(1_500_000), Some(1_000_000), true),
+            8
+        );
+        assert_eq!(
+            densify_slots_for_peer(16, false, Some(2_000_000), Some(1_000_000), true),
+            8
+        );
+    }
+
+    #[test]
+    fn densify_slots_fast_outlier_gets_full() {
+        assert_eq!(
+            densify_slots_for_peer(16, false, Some(2_000_000), Some(1_000_000), false),
+            16
+        );
+        assert_eq!(
+            densify_slots_for_peer(16, false, Some(1_500_000), Some(1_000_000), false),
+            8
+        );
+        assert_eq!(
+            densify_slots_for_peer(16, false, None, Some(1_000_000), false),
+            8
+        );
+        assert_eq!(
+            densify_slots_for_peer(16, false, Some(2_000_000), None, false),
+            8
+        );
     }
 }

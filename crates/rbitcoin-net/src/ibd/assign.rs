@@ -16,8 +16,10 @@
 //! - Never request beyond densify horizon; events refuse far bodies too.
 //! - One body-queue copy per height (receive path drops duplicates).
 
-use super::assign_plan::far_slots_per_peer;
-use super::dial::{relative_slow_pick, RelativeSlowSample};
+use super::assign_plan::densify_slots_for_peer;
+use super::dial::{
+    median_u64, relative_slow_pick, RelativeSlowSample, RELATIVE_SLOW_CLUSTER_SPREAD,
+};
 use super::peer_io::{ibd_mono_ms, snapshot_peer_rx, touch_block_progress, PeerCmd, PeerSlot};
 use super::state::{self, IbdWorkState};
 use super::status::LoopStats;
@@ -212,9 +214,27 @@ pub(crate) fn assign_work_ordered(
         return;
     }
 
-    // Leave per-peer headroom for tip races while hole>0.
-    let densify_per_peer = far_slots_per_peer(cfg.per_peer, !tip_holes.is_empty());
-    issued += steal_hung_densify(st, hub, &alive, tip_batch_hi, densify_per_peer);
+    // Leave per-peer headroom for tip races while hole>0. Extra densify slots
+    // only for a recent-bps outlier (≥ 2× pack median) when the pack is spread.
+    let tip_hole = !tip_holes.is_empty();
+    let (pack_median, pack_tight) = pack_recent_bps(&st.slots, &alive);
+    let caps: HashMap<usize, usize> = alive
+        .iter()
+        .map(|&pid| {
+            (
+                pid,
+                densify_cap_for(
+                    &st.slots,
+                    pid,
+                    cfg.per_peer,
+                    tip_hole,
+                    pack_median,
+                    pack_tight,
+                ),
+            )
+        })
+        .collect();
+    issued += steal_hung_densify(st, hub, &alive, tip_batch_hi, &caps);
 
     let mut room = cfg.window.saturating_sub(st.inflight.len());
     if room == 0 {
@@ -246,7 +266,7 @@ pub(crate) fn assign_work_ordered(
     st.densify_scan_lo = st.densify_scan_lo.max(path_lo);
     if !alive
         .iter()
-        .any(|&pid| peer_has_slot(st, pid, densify_per_peer))
+        .any(|&pid| peer_has_slot(st, pid, caps.get(&pid).copied().unwrap_or(1)))
     {
         finish_assign(loop_stats, t0, issued);
         return;
@@ -260,24 +280,21 @@ pub(crate) fn assign_work_ordered(
 
     let ranked = rank_peers_by_speed(&st.slots, &alive, &HashSet::new());
     let mut densify_q = densify;
-    while room > 0 && !densify_q.is_empty() {
-        let mut any = false;
-        for &pid in &ranked {
-            if room == 0 || densify_q.is_empty() {
+    for &pid in &ranked {
+        if room == 0 || densify_q.is_empty() {
+            break;
+        }
+        let cap = caps.get(&pid).copied().unwrap_or(1);
+        while room > 0 && !densify_q.is_empty() {
+            if !peer_has_slot(st, pid, cap) {
                 break;
-            }
-            if !peer_has_slot(st, pid, densify_per_peer) {
-                continue;
             }
             let Some(h) = pop_need(&mut densify_q, st, hub) else {
                 break;
             };
-            if issue_one(st, pid, h, &mut room, &mut issued) {
-                any = true;
+            if !issue_one(st, pid, h, &mut room, &mut issued) {
+                break;
             }
-        }
-        if !any {
-            break;
         }
     }
 
@@ -655,6 +672,45 @@ fn peer_bps(slots: &[PeerSlot], pid: usize) -> u64 {
         .unwrap_or(0)
 }
 
+fn pack_recent_bps(slots: &[PeerSlot], alive: &[usize]) -> (Option<u64>, bool) {
+    let mut samples: Vec<u64> = alive
+        .iter()
+        .filter_map(|&pid| {
+            slots
+                .iter()
+                .find(|s| s.id == pid && s.alive)
+                .and_then(|s| s.recent_bps())
+        })
+        .collect();
+    if samples.is_empty() {
+        return (None, true);
+    }
+    samples.sort_unstable();
+    let lo = samples[0];
+    let hi = samples[samples.len() - 1];
+    let tight = if lo == 0 {
+        hi == 0
+    } else {
+        hi <= lo.saturating_mul(RELATIVE_SLOW_CLUSTER_SPREAD)
+    };
+    (Some(median_u64(&samples)), tight)
+}
+
+fn densify_cap_for(
+    slots: &[PeerSlot],
+    pid: usize,
+    per_peer: usize,
+    tip_hole: bool,
+    pack_median: Option<u64>,
+    pack_tight: bool,
+) -> usize {
+    let bps = slots
+        .iter()
+        .find(|s| s.id == pid && s.alive)
+        .and_then(|s| s.recent_bps());
+    densify_slots_for_peer(per_peer, tip_hole, bps, pack_median, pack_tight)
+}
+
 /// Move hung single-peer densify getdata to a faster peer with a free slot.
 ///
 /// Hung = no recent stream rx and inflight age ≥ [`TIP_HOLE_RX_STALE`]. Does not
@@ -665,7 +721,7 @@ fn steal_hung_densify(
     hub: &ChainHub,
     alive: &[usize],
     tip_batch_hi: u32,
-    densify_per_peer: usize,
+    densify_caps: &HashMap<usize, usize>,
 ) -> u64 {
     let now = Instant::now();
     let now_ms = ibd_mono_ms();
@@ -721,7 +777,7 @@ fn steal_hung_densify(
         faster.sort_by(|&a, &b| peer_bps(&st.slots, b).cmp(&peer_bps(&st.slots, a)));
         let dest = faster
             .into_iter()
-            .find(|&pid| peer_has_slot(st, pid, densify_per_peer));
+            .find(|&pid| peer_has_slot(st, pid, densify_caps.get(&pid).copied().unwrap_or(1)));
         let ht = st.hash_height.get(&h).copied();
         drop_hash_owner(st, h, owner);
         if let Some(pid) = dest {
@@ -1438,6 +1494,69 @@ mod tests {
             st.densify_scan_lo, 40,
             "band walk must not advance scan_lo; scan_lo={}",
             st.densify_scan_lo
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn densify_fast_peer_receives_more_than_eight() {
+        use super::super::peer_io::ibd_mono_ms;
+        use bitcoin::hashes::Hash as _;
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let mut st = IbdWorkState::new(
+            vec![dummy_slot(0), dummy_slot(1), dummy_slot(2)],
+            hub.tip_hash(),
+            hub.tip_height(),
+        );
+        let stats = LoopStats::default();
+        let mut cfg = IbdConfig::for_test();
+        cfg.window = 128;
+        cfg.per_peer = 16;
+        let path_lo = hub.tip_height().unwrap_or(0).saturating_add(1);
+        plant_work_path(&mut st, path_lo, 52);
+        for ht in path_lo..=32 {
+            hub.query
+                .block_queue_offer(ht, h(ht).to_byte_array(), 1, &[0u8; 80])
+                .unwrap();
+            st.body.mark_pending(h(ht));
+        }
+        while ibd_mono_ms() < 1_200 {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let now = ibd_mono_ms();
+        let win = now.saturating_sub(5_000).max(1);
+        inject_bps(&mut st.slots[0], now, 5_000_000);
+        inject_bps(&mut st.slots[1], now, 15_000_000);
+        inject_bps(&mut st.slots[2], now, 5_000_000);
+        for s in &st.slots {
+            s.window_start_ms.store(win, Ordering::Relaxed);
+            s.window_start_bytes.store(0, Ordering::Relaxed);
+        }
+        st.densify_scan_lo = 33;
+        assign_work_ordered(
+            &mut st,
+            &hub,
+            &cfg,
+            &stats,
+            path_lo,
+            AssignDepth::Full,
+            None,
+        );
+        assert_eq!(
+            st.slots[1].in_flight.len(),
+            16,
+            "2×-median outlier must get full densify cap"
+        );
+        assert!(
+            st.slots[0].in_flight.len() <= 8,
+            "non-outlier stays at half cap; n={}",
+            st.slots[0].in_flight.len()
+        );
+        assert!(
+            st.slots[2].in_flight.len() <= 8,
+            "non-outlier stays at half cap; n={}",
+            st.slots[2].in_flight.len()
         );
         let _ = std::fs::remove_dir_all(dir);
     }
