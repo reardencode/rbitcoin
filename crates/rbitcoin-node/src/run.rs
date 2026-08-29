@@ -261,6 +261,11 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     )
     .await
     .map_err(|e| NodeError::Config(format!("p2p start: {e}")))?;
+    for extra in &config.p2p_extra_listens {
+        node.add_listen(*extra)
+            .await
+            .map_err(|e| NodeError::Config(format!("p2p extra listen {extra}: {e}")))?;
+    }
     node.hub.set_minimum_chain_work(config.minimum_chain_work);
     if let Some(secs) = config.max_tip_age_secs {
         node.hub.set_max_tip_age_secs(secs);
@@ -395,6 +400,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         warn!("custom signet has no peers; use --connect ADDR or reuse a datadir with known peers");
     }
     let shared_peers = std::sync::Arc::new(std::sync::Mutex::new(addrman.clone()));
+    node.peers.set_addrman(std::sync::Arc::clone(&shared_peers));
 
     let max_out = config.max_outbound.max(1) as usize;
     let candidate_n = max_out.saturating_mul(2).clamp(16, 48);
@@ -780,6 +786,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     .unwrap_or_else(|_| format!("/rbitcoin:{}/", env!("CARGO_PKG_VERSION"))),
                 ),
                 permit_bare_multisig: config.permit_bare_multisig,
+                alert_notify: config.alert_notify.clone(),
             };
             let miner: Option<Arc<dyn RpcRegtest>> = if config.network == Network::Regtest {
                 Some(Arc::new(HubRegtest(Arc::clone(&node.hub))))

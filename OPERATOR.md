@@ -121,7 +121,8 @@ Routine knobs are **CLI / conf**, not required env vars. Clean smoke:
 | `--connect ADDR` | (repeatable) | seeds |
 | `--milestone HEIGHT` | `--assumevalid-height` | network default (mainnet 840000) |
 | `--max-outbound N` | `--maxoutbound` | 16 live download peers |
-| `--maxinbound N` | `--maxconnections` | 125 inbound sessions |
+| `--maxinbound N` | | 125 inbound sessions |
+| `--maxconnections N` | | Core total slots; inbound = `N − 11` (10 outbound + feeler) |
 | `--mempool-size-mb N` | `--maxmempool` | ~300 MiB weight |
 | `--conf FILE` | | none |
 | `--log-level LEVEL` | | `info` |
@@ -265,7 +266,7 @@ Token meanings and ring depth: [`docs/io-modality.md`](docs/io-modality.md).
 | IBD concurrent getdata | **1024** | code `IbdConfig::window` |
 | Blocks in transit / peer | **16** | `IbdConfig::per_peer` |
 | Live IBD peers | **16** | `--max-outbound` |
-| Inbound P2P sessions | **125** | `--maxinbound` / `--maxconnections`. Incomplete VERSION/VERACK is dropped after **60 s** (releases the slot). |
+| Inbound P2P sessions | **125** | `--maxinbound`, or `--maxconnections` (Core total → inbound `N−11`). At capacity, unprotected inbounds are evicted. Incomplete VERSION/VERACK is dropped after **60 s** (releases the slot). |
 | Milestone (skip scripts ≤ height) | mainnet **840000**, signet 2000000, … | `--milestone` / `--assumevalid-height` (`0` = full scripts) |
 | ConfirmParentCache header plans | always on | Tip-ahead header + tx_fks for multi-block MTP (no create pin FIFO) |
 | Bulk store IO | **uring** (Linux) when available | `RBITCOIN_IO` only. Matrix: [`docs/io-modality.md`](docs/io-modality.md) |

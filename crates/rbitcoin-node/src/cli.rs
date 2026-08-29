@@ -26,7 +26,7 @@ where
     let mut signet_challenge = None;
     let mut signet_block_time = None;
     let mut smoke = false;
-    let mut listen: Option<SocketAddr> = None;
+    let mut listen: Vec<SocketAddr> = Vec::new();
     let mut electrum_listen: Option<SocketAddr> = None;
     let mut esplora_listen: Option<SocketAddr> = None;
     let mut shindex = false;
@@ -62,6 +62,7 @@ where
     let mut min_relay_fee_btc: Option<String> = None;
     let mut mempool_expiry_hours: Option<u64> = None;
     let mut startup_notify: Option<String> = None;
+    let mut alert_notify: Option<String> = None;
     let mut permit_bare_multisig: Option<bool> = None;
     let mut limit_cluster_count: Option<u32> = None;
     let mut limit_cluster_size_kvb: Option<u32> = None;
@@ -82,7 +83,7 @@ where
     [--listen ADDR] [--connect ADDR]... [--electrum-listen ADDR] [--esplora-listen ADDR] \\\n\
     [--shindex] [--sptweaks] [--rpc-listen ADDR] [--rpcuser USER] [--rpcpassword PASS] \\\n\
     [--milestone|--assumevalid-height HEIGHT] \\\n\
-    [--maxoutbound|--max-outbound N] [--maxinbound|--maxconnections N] \\\n\
+    [--maxoutbound|--max-outbound N] [--maxinbound N] [--maxconnections N] \\\n\
     [--mempool-size-mb|--maxmempool N] \\\n\
     [--testactivationheight name@height] [--persistmempool[=0|1]] [--whitelist SPEC] \\\n\
     [--blocksonly] [--minrelaytxfee BTC] [--permitbaremultisig[=0|1]] \\\n\
@@ -97,7 +98,7 @@ API log: --api-log PATH writes one JSON line per Electrum/Esplora/RPC call (also
 Milestone / assumevalid-height: skip script/sig checks at/below HEIGHT.\n\
   Defaults: mainnet 840000, signet 2000000, testnet 2500000, regtest 0. Use 0 for full scripts.\n\
 Mempool: --mempool-size-mb / --maxmempool (default ~300 MiB weight budget).\n\
-Peers: --maxoutbound (default 16 live download), --maxinbound/--maxconnections (default 125).\n\
+Peers: --maxoutbound (default 16 live download), --maxinbound (default 125), --maxconnections Core total (inbound = N-11).\n\
 Scripthash: --shindex (default off) builds Class B for Electrum/Esplora; both require it.\n\
 Silent payments: --sptweaks (default off) writes/serves the thin BIP-352 tweak index.\n\
 RPC: --rpc-listen ADDR (default off); cookie under datadir/.cookie or --rpcuser/--rpcpassword.\n\
@@ -215,7 +216,7 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
                     return ExitCode::from(2);
                 }
                 match args[i].to_string_lossy().parse::<SocketAddr>() {
-                    Ok(a) => listen = Some(a),
+                    Ok(a) => listen.push(a),
                     Err(e) => {
                         eprintln!("error: bad --listen: {e}");
                         return ExitCode::from(2);
@@ -409,7 +410,7 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
                 }
                 i += 1;
             }
-            "--max-inbound" | "--maxinbound" | "--maxconnections" => {
+            "--max-inbound" | "--maxinbound" => {
                 i += 1;
                 if i >= args.len() {
                     eprintln!("error: --maxinbound requires a number");
@@ -426,6 +427,28 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
                     }
                     Err(e) => {
                         eprintln!("error: bad --maxinbound: {e}");
+                        return ExitCode::from(2);
+                    }
+                }
+                i += 1;
+            }
+            "--maxconnections" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: --maxconnections requires a number");
+                    return ExitCode::from(2);
+                }
+                match args[i].to_string_lossy().parse::<u32>() {
+                    Ok(n) if n > 0 => {
+                        max_inbound = crate::config::inbound_from_maxconnections(n);
+                        max_inbound_set = true;
+                    }
+                    Ok(_) => {
+                        eprintln!("error: --maxconnections must be >= 1");
+                        return ExitCode::from(2);
+                    }
+                    Err(e) => {
+                        eprintln!("error: bad --maxconnections: {e}");
                         return ExitCode::from(2);
                     }
                 }
@@ -593,6 +616,19 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
                     return ExitCode::from(2);
                 }
                 startup_notify = Some(args[i].to_string_lossy().into_owned());
+                i += 1;
+            }
+            other if other.starts_with("--alertnotify=") => {
+                alert_notify = Some(other["--alertnotify=".len()..].to_string());
+                i += 1;
+            }
+            "--alertnotify" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: --alertnotify requires a value");
+                    return ExitCode::from(2);
+                }
+                alert_notify = Some(args[i].to_string_lossy().into_owned());
                 i += 1;
             }
             other if other.starts_with("--limitclustercount=") => {
@@ -796,6 +832,24 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
             other if other.starts_with("--maxconnections=") => {
                 match other["--maxconnections=".len()..].parse::<u32>() {
                     Ok(n) if n > 0 => {
+                        max_inbound = crate::config::inbound_from_maxconnections(n);
+                        max_inbound_set = true;
+                    }
+                    Ok(_) => {
+                        eprintln!("error: --maxconnections must be >= 1");
+                        return ExitCode::from(2);
+                    }
+                    Err(e) => {
+                        eprintln!("error: bad --maxconnections: {e}");
+                        return ExitCode::from(2);
+                    }
+                }
+                i += 1;
+            }
+            other if other.starts_with("--maxinbound=") || other.starts_with("--max-inbound=") => {
+                let raw = other.split_once('=').map(|(_, v)| v).unwrap_or("");
+                match raw.parse::<u32>() {
+                    Ok(n) if n > 0 => {
                         max_inbound = n;
                         max_inbound_set = true;
                     }
@@ -804,7 +858,7 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
                         return ExitCode::from(2);
                     }
                     Err(e) => {
-                        eprintln!("error: bad --maxconnections: {e}");
+                        eprintln!("error: bad --maxinbound: {e}");
                         return ExitCode::from(2);
                     }
                 }
@@ -921,8 +975,9 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
     if signet_block_time.is_some() {
         config.signet_block_time = signet_block_time;
     }
-    if let Some(a) = listen {
-        config.p2p_listen = Some(a);
+    if let Some((first, rest)) = listen.split_first() {
+        config.p2p_listen = Some(*first);
+        config.p2p_extra_listens.extend(rest.iter().copied());
     }
     if let Some(a) = electrum_listen {
         config.electrum_listen = Some(a);
@@ -998,6 +1053,9 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
     }
     if let Some(s) = startup_notify {
         config.startup_notify = Some(s);
+    }
+    if let Some(s) = alert_notify {
+        config.alert_notify = Some(s);
     }
     if let Some(b) = permit_bare_multisig {
         config.permit_bare_multisig = b;

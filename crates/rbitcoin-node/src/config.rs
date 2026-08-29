@@ -9,6 +9,17 @@ use std::path::{Path, PathBuf};
 /// Default max concurrent inbound P2P sessions (Core-ish).
 pub const DEFAULT_MAX_INBOUND: u32 = 125;
 
+/// Core `-maxconnections=N` reserves this many slots for outbound full/block-relay
+/// peers plus one feeler (`10 + 1`). Inbound capacity is `N - reserve`.
+pub const CORE_MAXCONNECTIONS_OUTBOUND_RESERVE: u32 = 11;
+
+/// Core total-slot flag → inbound session cap.
+pub fn inbound_from_maxconnections(total: u32) -> u32 {
+    total
+        .saturating_sub(CORE_MAXCONNECTIONS_OUTBOUND_RESERVE)
+        .max(1)
+}
+
 /// Node process configuration (CLI + optional conf file).
 ///
 /// Operator-critical knobs live here. Advanced IO/perf tunables may still be
@@ -30,6 +41,8 @@ pub struct NodeConfig {
     pub signet_block_time: Option<u64>,
     /// Bind address for P2P listen (`None` = do not listen / default bind later).
     pub p2p_listen: Option<SocketAddr>,
+    /// Extra P2P listen sockets (Core multi-`-bind`, including onion binds).
+    pub p2p_extra_listens: Vec<SocketAddr>,
     /// Explicit outbound peers (`--connect`).
     pub connect: Vec<SocketAddr>,
     /// Core `-seednode` host or host:port (resolved with chain default port).
@@ -98,6 +111,8 @@ pub struct NodeConfig {
     pub mempool_expiry_hours: Option<u64>,
     /// Core `-startupnotify` shell command (run once after start).
     pub startup_notify: Option<String>,
+    /// Core `-alertnotify` shell command (`%s` = warning text).
+    pub alert_notify: Option<String>,
     /// Core `-permitbaremultisig` (default true).
     pub permit_bare_multisig: bool,
     /// Core `-limitclustercount` overlay (`None` = mempool default 64).
@@ -127,6 +142,7 @@ impl Default for NodeConfig {
             signet_challenge: None,
             signet_block_time: None,
             p2p_listen: None,
+            p2p_extra_listens: Vec::new(),
             connect: Vec::new(),
             seednodes: Vec::new(),
             use_seeds: true,
@@ -157,6 +173,7 @@ impl Default for NodeConfig {
             min_relay_fee_btc: None,
             mempool_expiry_hours: None,
             startup_notify: None,
+            alert_notify: None,
             permit_bare_multisig: true,
             limit_cluster_count: None,
             limit_cluster_size_kvb: None,
@@ -378,7 +395,8 @@ impl NodeConfig {
     ///
     /// Supported keys: `datadir`, `datadir-cold` / `datadir_cold`, `network` / `chain`, `listen`, `connect` (repeatable),
     /// `milestone` / `assumevalid_height`, `maxoutbound` / `max_outbound`,
-    /// `maxinbound` / `max_inbound` / `maxconnections`, `mempool_size_mb` / `maxmempool`,
+    /// `maxinbound` / `max_inbound`, `maxconnections` (Core total → inbound N-11),
+    /// `mempool_size_mb` / `maxmempool`,
     /// `log_level`, `api_log`, `electrum_listen`, `esplora_listen`,
     /// `shindex`, `rpc_listen`, `rpcuser`, `rpcpassword`,
     /// `noseeds` / `no_seeds`, `signetchallenge`, and `signetblocktime`.
@@ -570,10 +588,20 @@ impl NodeConfig {
                         .parse()
                         .map_err(|e| NodeError::Config(format!("conf maxoutbound: {e}")))?;
                 }
-                "maxinbound" | "max_inbound" | "maxconnections" => {
+                "maxinbound" | "max_inbound" => {
                     self.max_inbound = val
                         .parse()
                         .map_err(|e| NodeError::Config(format!("conf maxinbound: {e}")))?;
+                    self.max_inbound_explicit = true;
+                }
+                "maxconnections" => {
+                    let total: u32 = val
+                        .parse()
+                        .map_err(|e| NodeError::Config(format!("conf maxconnections: {e}")))?;
+                    if total == 0 {
+                        return Err(NodeError::Config("conf maxconnections must be >= 1".into()));
+                    }
+                    self.max_inbound = inbound_from_maxconnections(total);
                     self.max_inbound_explicit = true;
                 }
                 "mempool_size_mb" | "maxmempool" => {
@@ -820,6 +848,29 @@ mod tests {
         };
         assert_eq!(cfg.max_inbound, 42);
         assert_eq!(NodeConfig::default().max_inbound, DEFAULT_MAX_INBOUND);
+    }
+
+    #[test]
+    fn maxconnections_derives_inbound_like_core() {
+        assert_eq!(CORE_MAXCONNECTIONS_OUTBOUND_RESERVE, 11);
+        assert_eq!(inbound_from_maxconnections(32), 21);
+        assert_eq!(inbound_from_maxconnections(125), 114);
+        assert_eq!(inbound_from_maxconnections(11), 1);
+        assert_eq!(inbound_from_maxconnections(1), 1);
+        let dir = tmp();
+        std::fs::create_dir_all(&dir).unwrap();
+        let conf = dir.join("mc.conf");
+        std::fs::write(&conf, "maxconnections=32\n").unwrap();
+        let mut cfg = NodeConfig::default().with_datadir(dir.join("d"));
+        cfg.merge_conf_file(&conf).unwrap();
+        assert_eq!(cfg.max_inbound, 21);
+        assert!(cfg.max_inbound_explicit);
+        let conf2 = dir.join("mi.conf");
+        std::fs::write(&conf2, "maxinbound=40\n").unwrap();
+        let mut cfg2 = NodeConfig::default().with_datadir(dir.join("d2"));
+        cfg2.merge_conf_file(&conf2).unwrap();
+        assert_eq!(cfg2.max_inbound, 40, "maxinbound stays explicit inbound");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

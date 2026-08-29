@@ -74,6 +74,10 @@ pub struct RpcContext {
     pub logpath: String,
     /// Core `-permitbaremultisig` (default true). `getmempoolinfo`.
     pub permit_bare_multisig: bool,
+    /// Core `-alertnotify` (`%s` = warning). Fired once when warnings appear.
+    pub alert_notify: Option<String>,
+    /// Latches after the first alertnotify invocation.
+    pub alert_fired: Arc<AtomicBool>,
     /// In-flight RPC methods for `getrpcinfo.active_commands`.
     pub active: Arc<std::sync::Mutex<RpcActive>>,
 }
@@ -795,8 +799,37 @@ fn getblockchaininfo(ctx: &RpcContext) -> Result<Value, Value> {
         "chainwork": chainwork_hex(ctx, ctx.query.tip_height()),
         "size_on_disk": ctx.query.store().datadir_bytes(),
         "pruned": false,
-        "warnings": "",
+        "warnings": rpc_warnings(ctx),
     }))
+}
+
+fn rpc_warnings(ctx: &RpcContext) -> Vec<String> {
+    let w = rbitcoin_net::warning_strings(ctx.query.as_ref(), ctx.network);
+    if !w.is_empty()
+        && ctx
+            .alert_fired
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    {
+        if let Some(cmd) = ctx.alert_notify.as_deref() {
+            let msg = w.join(", ");
+            // Core ShellEscape: single-quote so `(versionbit N)` is not a subshell.
+            let escaped = format!("'{}'", msg.replace('\'', "'\\''"));
+            let shell = cmd.replace("%s", &escaped);
+            match std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&shell)
+                .status()
+            {
+                Ok(st) if !st.success() => {
+                    rbitcoin_log::warn!("alertnotify exited {st}: {shell}");
+                }
+                Err(e) => rbitcoin_log::warn!("alertnotify failed: {e}: {shell}"),
+                _ => {}
+            }
+        }
+    }
+    w
 }
 
 fn difficulty_from_bits(bits: u32) -> f64 {
@@ -1222,15 +1255,9 @@ fn addpeeraddress(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> 
     let Some(am) = ctx.addrman.as_ref() else {
         return Err(rpc_error(ERR_MISC, "addrman not available"));
     };
-    {
-        let mut g = am.lock().unwrap_or_else(|e| e.into_inner());
-        g.add(addr);
-        if let Some(path) = ctx.peers_path.as_ref() {
-            if let Err(e) = g.save(path) {
-                return Err(rpc_error(ERR_MISC, format!("peers save: {e}")));
-            }
-        }
-    }
+    // RAM-only: do not rewrite peers on every call (p2p_getaddr_caching fills
+    // 10k addresses). The node still persists addrman on shutdown / catch-up.
+    am.lock().unwrap_or_else(|e| e.into_inner()).add(addr);
     Ok(json!({ "success": true }))
 }
 
@@ -1331,7 +1358,7 @@ fn getnetworkinfo(ctx: &RpcContext) -> Value {
         "relayfee": MempoolHub::relay_fee_btc_per_kb(),
         "incrementalfee": MempoolHub::relay_fee_btc_per_kb(),
         "localaddresses": [],
-        "warnings": "BIP324 v2-only; not full Core networkinfo parity",
+        "warnings": rpc_warnings(ctx),
     })
 }
 
@@ -3128,7 +3155,7 @@ fn getmininginfo(ctx: &RpcContext) -> Result<Value, Value> {
             "difficulty": difficulty,
         }),
     );
-    m.insert("warnings".into(), json!(""));
+    m.insert("warnings".into(), json!(rpc_warnings(ctx)));
     Ok(Value::Object(m))
 }
 

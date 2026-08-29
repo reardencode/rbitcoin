@@ -5,6 +5,7 @@ mod chain;
 mod codec;
 mod compact;
 mod error;
+mod eviction;
 mod ibd;
 mod most_work;
 mod msg_decode;
@@ -15,6 +16,7 @@ mod seeds;
 mod service;
 mod tx_relay;
 mod v2;
+mod versionbits_warn;
 
 pub use cache::BlockCache;
 pub use chain::{
@@ -24,6 +26,7 @@ pub use chain::{
 };
 pub use codec::{MAX_HEADERS_RESULTS, MAX_INV_SIZE, MAX_LOCATOR_SZ, MAX_PROTOCOL_MESSAGE_LENGTH};
 pub use error::NetError;
+pub use eviction::{eviction_netgroup, select_inbound_eviction, InboundEvictCandidate};
 pub use ibd::{
     format_tip_perf_sizes, ibd, ibd_cancellable, read_proc_rss, IbdConfig, ProcRss, TipPerfSizes,
     DEFAULT_BLOCKS_IN_TRANSIT_PER_PEER, DEFAULT_IBD_WINDOW,
@@ -52,6 +55,9 @@ pub use tx_relay::{
     ElectrumMempoolItem, MempoolAnnounce, MempoolHub, MempoolPerfSample, QueryUtxoProvider,
 };
 pub use v2::WireBytes;
+pub use versionbits_warn::{
+    active_unknown_bits, unknown_rules_warning, warn_period_threshold, warning_strings,
+};
 
 /// Default number of **live download peers** during IBD (`IbdConfig::target_peers`
 /// and node `--max-outbound` default).

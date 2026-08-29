@@ -66,6 +66,8 @@ pub struct P2PNode {
     user_agent: String,
     /// Inbound session cap used by the accept loop (not process env).
     pub max_inbound: usize,
+    /// Shared inbound slots across all listen sockets.
+    inbound_sem: Arc<tokio::sync::Semaphore>,
 }
 
 pub struct P2PHandle {
@@ -116,91 +118,21 @@ impl P2PNode {
         let (dial_tx, mut dial_rx) = tokio::sync::mpsc::unbounded_channel::<DialRequest>();
         peers.set_dialer(dial_tx);
 
-        let hub_c = hub.clone();
-        let shutdown_c = shutdown.clone();
-        let magic_c = magic;
-        let peers_in = peers.clone();
-        let ua_in = user_agent.clone();
         let max_inbound = max_inbound.max(1);
         let inbound_sem = inbound_semaphore(max_inbound);
         let session_tasks = Arc::new(Mutex::new(Vec::<JoinHandle<()>>::new()));
-        let sessions_in = session_tasks.clone();
-        let accept_task = tokio::spawn(async move {
-            loop {
-                if shutdown_c.load(Ordering::SeqCst) {
-                    break;
-                }
-                let accept =
-                    tokio::time::timeout(Duration::from_millis(200), listener.accept()).await;
-                match accept {
-                    Ok(Ok((stream, peer_addr))) => {
-                        let Ok(permit) = inbound_sem.clone().try_acquire_owned() else {
-                            rbitcoin_log::warn!(
-                                "p2p: reject inbound {peer_addr} (at max_inbound={max_inbound})"
-                            );
-                            drop(stream);
-                            continue;
-                        };
-                        let our = local_addr;
-                        let hub = hub_c.clone();
-                        let height = hub.tip_height().map(|h| h as i32).unwrap_or(0);
-                        let tip_rx = hub.subscribe_tips();
-                        let peers = peers_in.clone();
-                        let ua = ua_in.clone();
-                        let bind = match stream.local_addr() {
-                            Ok(a) => a,
-                            Err(_) => our,
-                        };
-                        let sessions = sessions_in.clone();
-                        let h = tokio::spawn(async move {
-                            let _session_slot = permit;
-                            let (ver, reader, writer, wire) = match inbound_connect_and_handshake(
-                                stream,
-                                magic_c,
-                                our,
-                                peer_addr,
-                                height,
-                                &ua,
-                                HandshakePolicy {
-                                    hub: Some(hub.as_ref()),
-                                    peers: Some(peers.as_ref()),
-                                    conn_type: PeerConnType::Inbound,
-                                },
-                            )
-                            .await
-                            {
-                                Ok(x) => x,
-                                Err(e) => {
-                                    // V1-only peers fail BIP324; log once-style message.
-                                    rbitcoin_log::debug!(
-                                        "p2p: inbound handshake {peer_addr} failed: {e}"
-                                    );
-                                    return;
-                                }
-                            };
-                            let sess =
-                                peers.register(peer_addr, bind, &ver, true, PeerConnType::Inbound);
-                            if let Some(mp) = hub.mempool() {
-                                sess.set_inv_gen_floor(mp.next_accept_gen());
-                            }
-                            sess.attach_wire(wire);
-                            let id = sess.id;
-                            let meta = FollowSessionMeta {
-                                peer: Some(peer_addr),
-                                live: None,
-                                session: Some(sess),
-                            };
-                            let _ =
-                                peer_session_with(reader, writer, magic_c, hub, tip_rx, meta).await;
-                            peers.unregister(id);
-                        });
-                        push_session_task(&sessions, h);
-                    }
-                    Ok(Err(_)) => break,
-                    Err(_) => continue,
-                }
-            }
-        });
+        let accept_task = spawn_inbound_accept(
+            listener,
+            local_addr,
+            hub.clone(),
+            peers.clone(),
+            user_agent.clone(),
+            magic,
+            max_inbound,
+            inbound_sem.clone(),
+            shutdown.clone(),
+            session_tasks.clone(),
+        );
 
         let follow_live = Arc::new(AtomicUsize::new(0));
         let dial_hub = hub.clone();
@@ -241,7 +173,28 @@ impl P2PNode {
             peers,
             user_agent,
             max_inbound,
+            inbound_sem,
         })
+    }
+
+    /// Bind an additional listen socket (Core multi-`-bind`, including `=onion`).
+    pub async fn add_listen(&mut self, listen: SocketAddr) -> Result<SocketAddr, NetError> {
+        let listener = TcpListener::bind(listen).await?;
+        let local_addr = listener.local_addr()?;
+        let accept_task = spawn_inbound_accept(
+            listener,
+            local_addr,
+            self.hub.clone(),
+            self.peers.clone(),
+            self.user_agent.clone(),
+            self.magic,
+            self.max_inbound,
+            self.inbound_sem.clone(),
+            self.shutdown.clone(),
+            self.session_tasks.clone(),
+        );
+        self.tasks.push(accept_task);
+        Ok(local_addr)
     }
 
     /// BIP14 subversion advertised in `version` (same as RPC `getnetworkinfo`).
@@ -393,6 +346,113 @@ fn push_session_task(bag: &Mutex<Vec<JoinHandle<()>>>, h: JoinHandle<()>) {
         g.retain(|t| !t.is_finished());
         g.push(h);
     }
+}
+
+fn spawn_inbound_accept(
+    listener: TcpListener,
+    local_addr: SocketAddr,
+    hub: Arc<ChainHub>,
+    peers: Arc<PeerHub>,
+    user_agent: String,
+    magic: Magic,
+    max_inbound: usize,
+    inbound_sem: Arc<tokio::sync::Semaphore>,
+    shutdown: Arc<AtomicBool>,
+    session_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            if shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+            let accept = tokio::time::timeout(Duration::from_millis(200), listener.accept()).await;
+            match accept {
+                Ok(Ok((stream, peer_addr))) => {
+                    let permit = match inbound_sem.clone().try_acquire_owned() {
+                        Ok(p) => p,
+                        Err(_) => {
+                            if !peers.try_evict_inbound() {
+                                rbitcoin_log::warn!(
+                                    "p2p: reject inbound {peer_addr} (at max_inbound={max_inbound})"
+                                );
+                                drop(stream);
+                                continue;
+                            }
+                            match tokio::time::timeout(
+                                Duration::from_millis(500),
+                                inbound_sem.clone().acquire_owned(),
+                            )
+                            .await
+                            {
+                                Ok(Ok(p)) => p,
+                                _ => {
+                                    rbitcoin_log::warn!(
+                                        "p2p: reject inbound {peer_addr} (evict slot wait)"
+                                    );
+                                    drop(stream);
+                                    continue;
+                                }
+                            }
+                        }
+                    };
+                    let our = local_addr;
+                    let hub = hub.clone();
+                    let height = hub.tip_height().map(|h| h as i32).unwrap_or(0);
+                    let tip_rx = hub.subscribe_tips();
+                    let peers = peers.clone();
+                    let ua = user_agent.clone();
+                    let bind = match stream.local_addr() {
+                        Ok(a) => a,
+                        Err(_) => our,
+                    };
+                    let sessions = session_tasks.clone();
+                    let h = tokio::spawn(async move {
+                        let _session_slot = permit;
+                        let (ver, reader, writer, wire) = match inbound_connect_and_handshake(
+                            stream,
+                            magic,
+                            our,
+                            peer_addr,
+                            height,
+                            &ua,
+                            HandshakePolicy {
+                                hub: Some(hub.as_ref()),
+                                peers: Some(peers.as_ref()),
+                                conn_type: PeerConnType::Inbound,
+                            },
+                        )
+                        .await
+                        {
+                            Ok(x) => x,
+                            Err(e) => {
+                                rbitcoin_log::debug!(
+                                    "p2p: inbound handshake {peer_addr} failed: {e}"
+                                );
+                                return;
+                            }
+                        };
+                        let sess =
+                            peers.register(peer_addr, bind, &ver, true, PeerConnType::Inbound);
+                        if let Some(mp) = hub.mempool() {
+                            sess.set_inv_gen_floor(mp.next_accept_gen());
+                        }
+                        sess.attach_wire(wire);
+                        let id = sess.id;
+                        let meta = FollowSessionMeta {
+                            peer: Some(peer_addr),
+                            live: None,
+                            session: Some(sess),
+                        };
+                        let _ = peer_session_with(reader, writer, magic, hub, tip_rx, meta).await;
+                        peers.unregister(id);
+                    });
+                    push_session_task(&sessions, h);
+                }
+                Ok(Err(_)) => break,
+                Err(_) => continue,
+            }
+        }
+    })
 }
 
 fn default_user_agent() -> String {
