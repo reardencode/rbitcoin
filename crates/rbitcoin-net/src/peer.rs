@@ -287,8 +287,17 @@ pub async fn connect_and_handshake(
     inbound: bool,
     user_agent: &str,
     policy: HandshakePolicy<'_>,
-) -> Result<(VersionMessage, V2Reader, V2Writer, crate::v2::WireBytes), NetError> {
-    let (mut reader, mut writer, wire) = open_v2(stream, magic, inbound).await?;
+) -> Result<
+    (
+        VersionMessage,
+        V2Reader,
+        V2Writer,
+        crate::v2::WireBytes,
+        std::net::TcpStream,
+    ),
+    NetError,
+> {
+    let (mut reader, mut writer, wire, tcp_shutdown) = open_v2(stream, magic, inbound).await?;
     let their_version = application_handshake(
         &mut reader,
         &mut writer,
@@ -301,7 +310,7 @@ pub async fn connect_and_handshake(
         policy,
     )
     .await?;
-    Ok((their_version, reader, writer, wire))
+    Ok((their_version, reader, writer, wire, tcp_shutdown))
 }
 
 /// Core VERSION/VERACK bound: 60s from TCP connect/accept. Timeout drops the stream.
@@ -315,7 +324,16 @@ pub(crate) async fn inbound_connect_and_handshake(
     start_height: i32,
     user_agent: &str,
     policy: HandshakePolicy<'_>,
-) -> Result<(VersionMessage, V2Reader, V2Writer, crate::v2::WireBytes), NetError> {
+) -> Result<
+    (
+        VersionMessage,
+        V2Reader,
+        V2Writer,
+        crate::v2::WireBytes,
+        std::net::TcpStream,
+    ),
+    NetError,
+> {
     connect_and_handshake_timed(
         HANDSHAKE_TIMEOUT,
         stream,
@@ -340,7 +358,16 @@ pub(crate) async fn connect_and_handshake_timed(
     inbound: bool,
     user_agent: &str,
     policy: HandshakePolicy<'_>,
-) -> Result<(VersionMessage, V2Reader, V2Writer, crate::v2::WireBytes), NetError> {
+) -> Result<
+    (
+        VersionMessage,
+        V2Reader,
+        V2Writer,
+        crate::v2::WireBytes,
+        std::net::TcpStream,
+    ),
+    NetError,
+> {
     tokio::time::timeout(
         limit,
         connect_and_handshake(
@@ -411,7 +438,7 @@ async fn run_feeler_inner(
     start_height: i32,
     user_agent: &str,
 ) -> Result<(), NetError> {
-    let (mut reader, mut writer, _wire) = open_v2(stream, magic, false).await?;
+    let (mut reader, mut writer, _wire, _tcp_shutdown) = open_v2(stream, magic, false).await?;
     let services = local_service_flags();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -669,6 +696,9 @@ pub async fn peer_session_with(
             }
         }
     });
+    if let Some(s) = meta.session.as_ref() {
+        s.set_writer_abort(writer_task.abort_handle());
+    }
 
     if let Some(s) = meta.session.as_ref() {
         let _ = maybe_queue_addrfetch_getaddr(&out_tx, s);
@@ -937,7 +967,15 @@ pub async fn peer_session_with(
                 frame = read_v2_frame(&mut reader, magic) => {
                     let frame = match frame {
                         Ok(f) => f,
-                        Err(NetError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        Err(NetError::Io(e))
+                            if matches!(
+                                e.kind(),
+                                std::io::ErrorKind::UnexpectedEof
+                                    | std::io::ErrorKind::ConnectionReset
+                                    | std::io::ErrorKind::BrokenPipe
+                                    | std::io::ErrorKind::ConnectionAborted
+                            ) =>
+                        {
                             return Ok(());
                         }
                         Err(NetError::MessageTooLarge(n)) => {

@@ -150,12 +150,14 @@ impl P2PNode {
                 let peers = dial_peers.clone();
                 let ua = dial_ua.clone();
                 let live = dial_live.clone();
+                let (ah_tx, ah_rx) = tokio::sync::oneshot::channel::<tokio::task::AbortHandle>();
                 let h = tokio::spawn(async move {
-                    let _ = run_outbound_session(
-                        req.addr, magic, local_addr, hub, peers, ua, live, req.typ,
+                    let _ = run_outbound_session_with_abort(
+                        req.addr, magic, local_addr, hub, peers, ua, live, req.typ, ah_rx,
                     )
                     .await;
                 });
+                let _ = ah_tx.send(h.abort_handle());
                 push_session_task(&sessions_dial, h);
             }
         });
@@ -406,33 +408,40 @@ fn spawn_inbound_accept(
                         Err(_) => our,
                     };
                     let sessions = session_tasks.clone();
+                    let (ah_tx, ah_rx) =
+                        tokio::sync::oneshot::channel::<tokio::task::AbortHandle>();
                     let h = tokio::spawn(async move {
                         let _session_slot = permit;
-                        let (ver, reader, writer, wire) = match inbound_connect_and_handshake(
-                            stream,
-                            magic,
-                            our,
-                            peer_addr,
-                            height,
-                            &ua,
-                            HandshakePolicy {
-                                hub: Some(hub.as_ref()),
-                                peers: Some(peers.as_ref()),
-                                conn_type: PeerConnType::Inbound,
-                            },
-                        )
-                        .await
-                        {
-                            Ok(x) => x,
-                            Err(e) => {
-                                rbitcoin_log::debug!(
-                                    "p2p: inbound handshake {peer_addr} failed: {e}"
-                                );
-                                return;
-                            }
-                        };
+                        let (ver, reader, writer, wire, tcp_shutdown) =
+                            match inbound_connect_and_handshake(
+                                stream,
+                                magic,
+                                our,
+                                peer_addr,
+                                height,
+                                &ua,
+                                HandshakePolicy {
+                                    hub: Some(hub.as_ref()),
+                                    peers: Some(peers.as_ref()),
+                                    conn_type: PeerConnType::Inbound,
+                                },
+                            )
+                            .await
+                            {
+                                Ok(x) => x,
+                                Err(e) => {
+                                    rbitcoin_log::debug!(
+                                        "p2p: inbound handshake {peer_addr} failed: {e}"
+                                    );
+                                    return;
+                                }
+                            };
                         let sess =
                             peers.register(peer_addr, bind, &ver, true, PeerConnType::Inbound);
+                        sess.attach_tcp_shutdown(tcp_shutdown);
+                        if let Ok(ah) = ah_rx.await {
+                            sess.set_session_abort(ah);
+                        }
                         if let Some(mp) = hub.mempool() {
                             sess.set_inv_gen_floor(mp.next_accept_gen());
                         }
@@ -446,6 +455,7 @@ fn spawn_inbound_accept(
                         let _ = peer_session_with(reader, writer, magic, hub, tip_rx, meta).await;
                         peers.unregister(id);
                     });
+                    let _ = ah_tx.send(h.abort_handle());
                     push_session_task(&sessions, h);
                 }
                 Ok(Err(_)) => break,
@@ -506,7 +516,7 @@ async fn prepare_outbound_session(
         },
     )
     .await;
-    let (ver, reader, writer, wire) = match handshake {
+    let (ver, reader, writer, wire, tcp_shutdown) = match handshake {
         Ok(x) => x,
         Err(e) => {
             peers.unregister(provisional_id);
@@ -515,6 +525,7 @@ async fn prepare_outbound_session(
     };
     peers.unregister(provisional_id);
     let sess = peers.register_with_id(provisional_id, peer, bind, &ver, false, typ);
+    sess.attach_tcp_shutdown(tcp_shutdown);
     if let Some(mp) = hub.mempool() {
         sess.set_inv_gen_floor(mp.next_accept_gen());
     }
@@ -554,7 +565,7 @@ async fn run_prepared_outbound(prepared: PreparedOutbound) -> Result<(), NetErro
     out
 }
 
-async fn run_outbound_session(
+async fn run_outbound_session_with_abort(
     peer: SocketAddr,
     magic: Magic,
     local: SocketAddr,
@@ -563,6 +574,7 @@ async fn run_outbound_session(
     user_agent: String,
     follow_live: Arc<AtomicUsize>,
     typ: PeerConnType,
+    ah_rx: tokio::sync::oneshot::Receiver<tokio::task::AbortHandle>,
 ) -> Result<(), NetError> {
     if typ == PeerConnType::Feeler {
         let stream = TcpStream::connect(peer).await?;
@@ -572,6 +584,9 @@ async fn run_outbound_session(
     let prepared =
         prepare_outbound_session(peer, magic, local, hub, peers, user_agent, follow_live, typ)
             .await?;
+    if let Ok(ah) = ah_rx.await {
+        prepared.sess.set_session_abort(ah);
+    }
     run_prepared_outbound(prepared).await
 }
 
