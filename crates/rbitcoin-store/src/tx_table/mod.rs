@@ -488,6 +488,7 @@ impl TxTable {
                 ));
             }
         }
+        let n_bodies = body.count();
         let mut need_rebuild = false;
         let head = if !crate::segmented_head::head_meta_exists(dir) {
             need_rebuild = n_bodies > 0;
@@ -505,10 +506,24 @@ impl TxTable {
         } else {
             match SegmentedTxHead::open(dir) {
                 Ok(h) => {
-                    if n_bodies > 0 && h.occupied() == 0 {
-                        need_rebuild = true;
+                    let covered = h.last_inserted_fk();
+                    if covered > n_bodies {
+                        // Torn Class A truncate: stale head entries past the
+                        // bodies would fail a later seal — rebuild instead.
+                        rbitcoin_log::warn!(
+                            "store: tx.head leads Class A covered={covered} n={n_bodies} \
+                             — wipe + rebuild"
+                        );
+                        drop(h);
+                        crate::segmented_head::wipe_segmented_head_files(dir);
+                        need_rebuild = n_bodies > 0;
+                        SegmentedTxHead::create(dir, crate::address_head::default_layout())?
+                    } else {
+                        if n_bodies > 0 && h.occupied() == 0 {
+                            need_rebuild = true;
+                        }
+                        h
                     }
-                    h
                 }
                 Err(e) => {
                     if n_bodies > 0 {
