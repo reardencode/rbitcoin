@@ -386,6 +386,10 @@ impl LivePeer {
         self.connected_at.load(Ordering::Relaxed)
     }
 
+    pub fn peer_hub(&self) -> Option<Arc<PeerHub>> {
+        self.owner.upgrade()
+    }
+
     pub fn set_inv_gen_floor(&self, floor: u64) {
         self.inv_gen_floor.store(floor, Ordering::Relaxed);
     }
@@ -601,6 +605,12 @@ pub struct PeerHub {
     cmpct_fills: Mutex<HashMap<BlockHash, (u8, bool)>>,
     /// Version nonces of outbound sessions still in handshake (Core self-connect).
     pending_outbound_nonces: Mutex<HashSet<u64>>,
+    /// Shared addrman for GetAddr responses (optional until node wires it).
+    addrman: Mutex<Option<std::sync::Arc<Mutex<crate::seeds::AddrMan>>>>,
+    /// Per-bind GetAddr response cache: bind → (cached_at_secs, addrs).
+    addr_response_cache: Mutex<
+        HashMap<SocketAddr, (u64, Vec<(u32, bitcoin::p2p::address::Address)>)>,
+    >,
 }
 
 impl PeerHub {
@@ -619,7 +629,80 @@ impl PeerHub {
             forcerelay_perm: AtomicBool::new(false),
             cmpct_fills: Mutex::new(HashMap::new()),
             pending_outbound_nonces: Mutex::new(HashSet::new()),
+            addrman: Mutex::new(None),
+            addr_response_cache: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Attach the process addrman so inbound GetAddr can sample peers.
+    pub fn set_addrman(&self, am: std::sync::Arc<Mutex<crate::seeds::AddrMan>>) {
+        *self
+            .addrman
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(am);
+    }
+
+    /// Core GetAddr reply: per-bind cache (24h) of up to 1000 / 23% of addrman.
+    pub fn addr_response_for_bind(
+        &self,
+        bind: SocketAddr,
+    ) -> Vec<(u32, bitcoin::p2p::address::Address)> {
+        const MAX_ADDR_TO_SEND: usize = 1000;
+        const MAX_PCT_ADDR_TO_SEND: usize = 23;
+        const CACHE_SECS: u64 = 24 * 60 * 60;
+        let now = self.now_secs();
+        {
+            let cache = self
+                .addr_response_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some((cached_at, addrs)) = cache.get(&bind) {
+                if now.saturating_sub(*cached_at) < CACHE_SECS {
+                    return addrs.clone();
+                }
+            }
+        }
+        let am = {
+            let g = self.addrman.lock().unwrap_or_else(|e| e.into_inner());
+            g.clone()
+        };
+        let Some(am) = am else {
+            return Vec::new();
+        };
+        let entries = {
+            let g = am.lock().unwrap_or_else(|e| e.into_inner());
+            g.entries()
+        };
+        let n = entries.len();
+        let pct_cap = (n * MAX_PCT_ADDR_TO_SEND / 100).max(1);
+        let cap = MAX_ADDR_TO_SEND.min(pct_cap).min(n);
+        if cap == 0 {
+            return Vec::new();
+        }
+        // Deterministic shuffle from mocktime + bind so same bind caches stably,
+        // different binds diverge.
+        let mut idxs: Vec<usize> = (0..n).collect();
+        let mut state = now
+            ^ (bind.port() as u64)
+            ^ bind.ip().to_string().bytes().map(|b| b as u64).sum::<u64>();
+        for i in (1..idxs.len()).rev() {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1);
+            let j = (state as usize) % (i + 1);
+            idxs.swap(i, j);
+        }
+        let services = crate::peer::local_service_flags();
+        let mut out = Vec::with_capacity(cap);
+        for &i in idxs.iter().take(cap) {
+            let addr = entries[i].addr;
+            out.push((now as u32, bitcoin::p2p::address::Address::new(&addr, services)));
+        }
+        self.addr_response_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(bind, (now, out.clone()));
+        out
     }
 
     /// Core: register local version nonce while an outbound handshake is open.

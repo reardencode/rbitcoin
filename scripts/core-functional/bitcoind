@@ -440,6 +440,15 @@ def translate(
         "--esplora-listen",
         f"127.0.0.1:{esplora_port(int(rpcport))}",
     ]
+    # Core `-bind=host:port=onion` → extra listen sockets (getaddr caching).
+    for host, bport, onion in binds:
+        if not onion or bport is None:
+            continue
+        listen_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+        extra = f"{listen_host}:{bport}"
+        if extra == f"127.0.0.1:{p2pport}":
+            continue
+        cmd += ["--listen", extra]
     if log_level:
         cmd += ["--log-level", log_level]
     for c in uacomments:

@@ -41,6 +41,8 @@ pub struct NodeConfig {
     pub signet_block_time: Option<u64>,
     /// Bind address for P2P listen (`None` = do not listen / default bind later).
     pub p2p_listen: Option<SocketAddr>,
+    /// Extra P2P listen sockets (Core multi-`-bind`, including onion binds).
+    pub p2p_extra_listens: Vec<SocketAddr>,
     /// Explicit outbound peers (`--connect`).
     pub connect: Vec<SocketAddr>,
     /// Core `-seednode` host or host:port (resolved with chain default port).
@@ -138,6 +140,7 @@ impl Default for NodeConfig {
             signet_challenge: None,
             signet_block_time: None,
             p2p_listen: None,
+            p2p_extra_listens: Vec::new(),
             connect: Vec::new(),
             seednodes: Vec::new(),
             use_seeds: true,

@@ -2208,7 +2208,14 @@ async fn handle_peer_frame(
             return Ok(());
         }
         NetworkMessage::GetAddr => {
-            queue_out(out_tx, NetworkMessage::Addr(vec![]))?;
+            let bind = session.map(|s| s.addrbind).unwrap_or_else(|| {
+                std::net::SocketAddr::from(([127, 0, 0, 1], 0))
+            });
+            let addrs = match session.and_then(|s| s.peer_hub()) {
+                Some(hub) => hub.addr_response_for_bind(bind),
+                None => Vec::new(),
+            };
+            queue_out(out_tx, NetworkMessage::Addr(addrs))?;
         }
         NetworkMessage::Unknown { .. } => {}
         _ => {}

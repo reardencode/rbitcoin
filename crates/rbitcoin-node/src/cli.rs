@@ -26,7 +26,7 @@ where
     let mut signet_challenge = None;
     let mut signet_block_time = None;
     let mut smoke = false;
-    let mut listen: Option<SocketAddr> = None;
+    let mut listen: Vec<SocketAddr> = Vec::new();
     let mut electrum_listen: Option<SocketAddr> = None;
     let mut esplora_listen: Option<SocketAddr> = None;
     let mut shindex = false;
@@ -215,7 +215,7 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
                     return ExitCode::from(2);
                 }
                 match args[i].to_string_lossy().parse::<SocketAddr>() {
-                    Ok(a) => listen = Some(a),
+                    Ok(a) => listen.push(a),
                     Err(e) => {
                         eprintln!("error: bad --listen: {e}");
                         return ExitCode::from(2);
@@ -964,8 +964,9 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
     if signet_block_time.is_some() {
         config.signet_block_time = signet_block_time;
     }
-    if let Some(a) = listen {
-        config.p2p_listen = Some(a);
+    if let Some((first, rest)) = listen.split_first() {
+        config.p2p_listen = Some(*first);
+        config.p2p_extra_listens.extend(rest.iter().copied());
     }
     if let Some(a) = electrum_listen {
         config.electrum_listen = Some(a);
