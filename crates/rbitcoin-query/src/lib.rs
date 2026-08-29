@@ -1528,7 +1528,7 @@ impl Query {
 
     /// Last contiguous height lookup took off the BQ (`None` if none yet).
     pub fn lookup_taken_hi(&self) -> Option<u32> {
-        let h = self.lookup_taken_hi.load(AtomicOrdering::Relaxed);
+        let h = self.lookup_taken_hi.load(AtomicOrdering::Acquire);
         if h == u32::MAX {
             None
         } else {
@@ -1543,7 +1543,7 @@ impl Query {
     }
 
     pub fn lookup_started_hi(&self) -> Option<u32> {
-        let h = self.lookup_started_hi.load(AtomicOrdering::Relaxed);
+        let h = self.lookup_started_hi.load(AtomicOrdering::Acquire);
         if h == u32::MAX {
             None
         } else {
@@ -1563,7 +1563,7 @@ impl Query {
     }
 
     pub fn class_a_hi(&self) -> Option<u32> {
-        let h = self.class_a_hi.load(AtomicOrdering::Relaxed);
+        let h = self.class_a_hi.load(AtomicOrdering::Acquire);
         if h == u32::MAX {
             None
         } else {
