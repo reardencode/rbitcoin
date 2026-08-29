@@ -211,14 +211,15 @@ pub(crate) fn assign_work_ordered(
         return;
     }
 
+    // Leave per-peer headroom for tip races while hole>0.
+    let densify_per_peer = far_slots_per_peer(cfg.per_peer, !tip_holes.is_empty());
+    issued += steal_hung_densify(st, hub, &alive, tip_batch_hi, densify_per_peer);
+
     let mut room = cfg.window.saturating_sub(st.inflight.len());
     if room == 0 {
         finish_assign(loop_stats, t0, issued);
         return;
     }
-
-    // Leave per-peer headroom for tip races while hole>0.
-    let densify_per_peer = far_slots_per_peer(cfg.per_peer, !tip_holes.is_empty());
 
     let densify_hi = path_lo.saturating_add(CONTIG_DENSIFY_AHEAD);
     let depth_bytes = hub.query.block_queue_stats().1;
@@ -641,6 +642,92 @@ fn drop_hash_owner(st: &mut IbdWorkState, hash: BlockHash, pid: usize) {
     }
 }
 
+fn peer_bps(slots: &[PeerSlot], pid: usize) -> u64 {
+    slots
+        .iter()
+        .find(|s| s.id == pid && s.alive)
+        .and_then(|s| s.speed_sample())
+        .map(|(_, b)| b)
+        .unwrap_or(0)
+}
+
+/// Move hung single-peer densify getdata to a faster peer with a free slot.
+///
+/// Hung = no recent stream rx and inflight age ≥ [`TIP_HOLE_RX_STALE`]. Does not
+/// steal while the owner is still pulling, or when no faster peer exists.
+/// Faster-but-full: drop the hung hash and rewind `densify_scan_lo`.
+fn steal_hung_densify(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    alive: &[usize],
+    tip_batch_hi: u32,
+    densify_per_peer: usize,
+) -> u64 {
+    let now = Instant::now();
+    let now_ms = ibd_mono_ms();
+    let candidates: Vec<(BlockHash, u32, usize, Instant)> = st
+        .inflight
+        .iter()
+        .filter_map(|(h, req)| {
+            if req.len() != 1 {
+                return None;
+            }
+            let &ht = st.hash_height.get(h)?;
+            if ht <= tip_batch_hi {
+                return None;
+            }
+            let &pid = req.peers.iter().next()?;
+            Some((*h, ht, pid, req.started_at))
+        })
+        .collect();
+    let hung: Vec<BlockHash> = candidates
+        .into_iter()
+        .filter(|(h, ht, pid, started)| {
+            if super::progress::claim_ready(hub, &mut st.body, *ht, h) {
+                return false;
+            }
+            let Some(slot) = st.slots.iter().find(|s| s.id == *pid && s.alive) else {
+                return false;
+            };
+            if peer_has_recent_rx(slot, now_ms) {
+                return false;
+            }
+            now.duration_since(*started) >= TIP_HOLE_RX_STALE
+        })
+        .map(|(h, _, _, _)| h)
+        .collect();
+    let mut issued = 0u64;
+    for h in hung {
+        let Some(owner) = st
+            .inflight
+            .get(&h)
+            .and_then(|req| req.peers.iter().copied().next())
+        else {
+            continue;
+        };
+        let owner_bps = peer_bps(&st.slots, owner);
+        let mut faster: Vec<usize> = alive
+            .iter()
+            .copied()
+            .filter(|&pid| pid != owner && peer_bps(&st.slots, pid) > owner_bps)
+            .collect();
+        if faster.is_empty() {
+            continue;
+        }
+        faster.sort_by(|&a, &b| peer_bps(&st.slots, b).cmp(&peer_bps(&st.slots, a)));
+        let dest = faster.into_iter().find(|&pid| peer_has_slot(st, pid, densify_per_peer));
+        let ht = st.hash_height.get(&h).copied();
+        drop_hash_owner(st, h, owner);
+        if let Some(pid) = dest {
+            let mut room = 1usize;
+            let _ = issue_one(st, pid, h, &mut room, &mut issued);
+        } else if let Some(ht) = ht {
+            st.densify_scan_lo = st.densify_scan_lo.min(ht);
+        }
+    }
+    issued
+}
+
 /// Rank alive peer ids for tip-hole getdata: prefer peers not in `avoid`, then
 /// higher live `speed_sample` bps, then lower id. Unsampled peers sort last
 /// among non-avoided (bps=0).
@@ -1047,6 +1134,188 @@ mod tests {
         assert_eq!(far_slots_per_peer(16, true), 2);
         assert!(far_slots_per_peer(16, true) < 16);
         assert_eq!(far_slots_per_peer(16, false), 8);
+    }
+
+    fn plant_work_path(st: &mut IbdWorkState, lo: u32, hi: u32) {
+        for ht in lo..=hi {
+            let hash = h(ht);
+            st.record_height(hash, ht);
+            st.height_to_hash.insert(ht, hash);
+            st.ordered_set.insert(hash);
+            st.ordered.push_back(hash);
+            st.max_ordered_height = ht;
+            st.body.mark_missing(hash);
+        }
+    }
+
+    fn inject_bps(slot: &mut PeerSlot, now: u64, bytes: u64) {
+        slot.connected_ms = now.saturating_sub(2_000);
+        slot.first_data_ms
+            .store(now.saturating_sub(1_000), Ordering::Relaxed);
+        slot.bytes_rx.store(bytes, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn densify_hung_owner_stolen_to_faster_peer() {
+        use bitcoin::hashes::Hash as _;
+        use super::super::peer_io::ibd_mono_ms;
+        use super::super::state::InflightReq;
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let mut st = IbdWorkState::new(
+            vec![dummy_slot(0), dummy_slot(1)],
+            hub.tip_hash(),
+            hub.tip_height(),
+        );
+        let stats = LoopStats::default();
+        let mut cfg = IbdConfig::for_test();
+        cfg.window = 64;
+        cfg.per_peer = 16;
+        let path_lo = hub.tip_height().unwrap_or(0).saturating_add(1);
+        plant_work_path(&mut st, path_lo, 40);
+        hub.query
+            .block_queue_offer(path_lo, h(path_lo).to_byte_array(), 1, &[0u8; 80])
+            .unwrap();
+        st.body.mark_pending(h(path_lo));
+        let hung = h(40);
+        let mut req = InflightReq::new(0);
+        req.started_at = Instant::now() - Duration::from_secs(31);
+        st.inflight.insert(hung, req);
+        st.slots[0].in_flight.insert(hung);
+        let now = ibd_mono_ms().max(2_000);
+        inject_bps(&mut st.slots[1], now, 1_000_000);
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, path_lo, AssignDepth::Full, None);
+        let peers = &st.inflight[&hung].peers;
+        assert!(
+            peers.contains(&1) && !peers.contains(&0),
+            "hung densify must move to faster peer; peers={peers:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn densify_slow_but_rx_live_not_stolen() {
+        use bitcoin::hashes::Hash as _;
+        use super::super::peer_io::ibd_mono_ms;
+        use super::super::state::InflightReq;
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let mut st = IbdWorkState::new(
+            vec![dummy_slot(0), dummy_slot(1)],
+            hub.tip_hash(),
+            hub.tip_height(),
+        );
+        let stats = LoopStats::default();
+        let mut cfg = IbdConfig::for_test();
+        cfg.window = 64;
+        cfg.per_peer = 16;
+        let path_lo = hub.tip_height().unwrap_or(0).saturating_add(1);
+        plant_work_path(&mut st, path_lo, 40);
+        hub.query
+            .block_queue_offer(path_lo, h(path_lo).to_byte_array(), 1, &[0u8; 80])
+            .unwrap();
+        st.body.mark_pending(h(path_lo));
+        let hung = h(40);
+        let mut req = InflightReq::new(0);
+        req.started_at = Instant::now() - Duration::from_secs(31);
+        st.inflight.insert(hung, req);
+        st.slots[0].in_flight.insert(hung);
+        let now = ibd_mono_ms().max(2_000);
+        st.slots[0]
+            .last_rx_progress_ms
+            .store(now, Ordering::Relaxed);
+        inject_bps(&mut st.slots[1], now, 1_000_000);
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, path_lo, AssignDepth::Full, None);
+        assert!(
+            st.inflight[&hung].contains_peer(0),
+            "live rx must not be stolen; peers={:?}",
+            st.inflight[&hung].peers
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn densify_hung_no_faster_peer_does_not_steal() {
+        use bitcoin::hashes::Hash as _;
+        use super::super::state::InflightReq;
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let mut st = IbdWorkState::new(
+            vec![dummy_slot(0)],
+            hub.tip_hash(),
+            hub.tip_height(),
+        );
+        let stats = LoopStats::default();
+        let mut cfg = IbdConfig::for_test();
+        cfg.window = 64;
+        cfg.per_peer = 16;
+        let path_lo = hub.tip_height().unwrap_or(0).saturating_add(1);
+        plant_work_path(&mut st, path_lo, 40);
+        hub.query
+            .block_queue_offer(path_lo, h(path_lo).to_byte_array(), 1, &[0u8; 80])
+            .unwrap();
+        st.body.mark_pending(h(path_lo));
+        let hung = h(40);
+        let mut req = InflightReq::new(0);
+        req.started_at = Instant::now() - Duration::from_secs(31);
+        st.inflight.insert(hung, req);
+        st.slots[0].in_flight.insert(hung);
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, path_lo, AssignDepth::Full, None);
+        assert!(
+            st.inflight[&hung].contains_peer(0),
+            "solo hung densify has no faster peer to steal to"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn densify_hung_no_slot_rewinds_scan_lo() {
+        use bitcoin::hashes::Hash as _;
+        use super::super::peer_io::ibd_mono_ms;
+        use super::super::state::InflightReq;
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let mut st = IbdWorkState::new(
+            vec![dummy_slot(0), dummy_slot(1)],
+            hub.tip_hash(),
+            hub.tip_height(),
+        );
+        let stats = LoopStats::default();
+        let mut cfg = IbdConfig::for_test();
+        cfg.window = 1;
+        cfg.per_peer = 2;
+        let path_lo = hub.tip_height().unwrap_or(0).saturating_add(1);
+        plant_work_path(&mut st, path_lo, 41);
+        hub.query
+            .block_queue_offer(path_lo, h(path_lo).to_byte_array(), 1, &[0u8; 80])
+            .unwrap();
+        st.body.mark_pending(h(path_lo));
+        let hung = h(40);
+        let other = h(41);
+        let mut req = InflightReq::new(0);
+        req.started_at = Instant::now() - Duration::from_secs(31);
+        st.inflight.insert(hung, req);
+        st.slots[0].in_flight.insert(hung);
+        st.inflight
+            .insert(other, InflightReq::new(1));
+        st.slots[1].in_flight.insert(other);
+        st.slots[1]
+            .last_rx_progress_ms
+            .store(ibd_mono_ms().max(1), Ordering::Relaxed);
+        let now = ibd_mono_ms().max(2_000);
+        inject_bps(&mut st.slots[1], now, 1_000_000);
+        st.densify_scan_lo = 90;
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, path_lo, AssignDepth::Full, None);
+        assert!(
+            !st.inflight.contains_key(&hung),
+            "hung hash cleared when faster peer has no slot"
+        );
+        assert!(
+            st.densify_scan_lo <= 40,
+            "scan_lo must rewind to hung height; scan_lo={}",
+            st.densify_scan_lo
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Wrong first-wins body at tip+1 is not claim-ready; cover must dequeue and
