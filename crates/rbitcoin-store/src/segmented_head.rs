@@ -150,6 +150,14 @@ impl SegmentedTxHead {
                 if !TxHeadMphf::exists(&path) {
                     return Err(StoreError::Corrupt("tx.head sealed segment missing mphf"));
                 }
+                if path.is_file() {
+                    // Crash between sealed-meta persist and OA unlink.
+                    rbitcoin_log::warn!(
+                        "store: tx.head discarding leftover OA for sealed segment file_id={}",
+                        d.file_id
+                    );
+                    let _ = std::fs::remove_file(&path);
+                }
                 (None, Some(Arc::new(TxHeadMphf::open(&path)?)))
             } else {
                 let head = AddressHead::open(&path)?;
@@ -945,10 +953,14 @@ impl SegmentedTxHead {
         }
         *guard = Arc::new(new_list);
         drop(guard);
+        // Sealed meta must be durable before the OA is unlinked: a crash after
+        // unlink with meta still "open" would force a full head rebuild. A
+        // leftover OA after persist is discarded on open.
+        self.persist_meta_locked()?;
         let base = segment_head_path(&self.dir, p.file_id);
         let _ = std::fs::remove_file(&base);
         SEALS.fetch_add(1, Ordering::Relaxed);
-        self.persist_meta_locked()
+        Ok(())
     }
 
     fn roll_tail_background_locked(&self) -> Result<(), StoreError> {
@@ -1592,6 +1604,67 @@ mod tests {
             "newest first {cands:?}"
         );
         assert!(cands.iter().any(|f| f.0 == 821), "cands={cands:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Seal publish must persist sealed meta **before** unlinking the open OA.
+    /// A meta-persist failure mid-publish (crash model) must leave the OA on
+    /// disk so reopen serves the segment unsealed instead of forcing a full
+    /// head rebuild.
+    #[test]
+    fn seal_publish_keeps_oa_when_meta_persist_fails() {
+        let dir = tmp();
+        let layout = HeadLayout::with_entry_bytes(10, 4).unwrap();
+        {
+            let h = SegmentedTxHead::create(&dir, layout).unwrap();
+            let n = 820u64; // max_keys=819 → roll + background seal of file 000000
+            let mut entries: Vec<_> = (0..n).map(|i| (mixed(i + 1), Fk(i + 1))).collect();
+            h.insert_many(&mut entries).unwrap();
+            // Block `meta.tmp` so persist_meta fails inside the publish.
+            let block = dir.join("tx.head").join("meta.tmp");
+            std::fs::create_dir(&block).unwrap();
+            let err = h
+                .flush()
+                .expect_err("meta persist must fail during publish");
+            let _ = err;
+            std::fs::remove_dir(&block).unwrap();
+        }
+        let oa = dir.join("tx.head").join("000000");
+        assert!(
+            oa.is_file(),
+            "OA must not be unlinked before sealed meta is durable"
+        );
+        let h2 = SegmentedTxHead::open(&dir).expect("reopen without rebuild");
+        let cands = h2.probe_candidates(&mixed(1)).unwrap();
+        assert!(cands.iter().any(|f| f.0 == 1), "cands={cands:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Crash between sealed-meta persist and OA unlink leaves a leftover open
+    /// OA next to the sealed `.mphf`. Open must discard it (sealed segments
+    /// never read the base file).
+    #[test]
+    fn open_discards_leftover_oa_for_sealed_segment() {
+        let dir = tmp();
+        let layout = HeadLayout::with_entry_bytes(10, 4).unwrap();
+        {
+            let h = SegmentedTxHead::create(&dir, layout).unwrap();
+            let n = 820u64;
+            let mut entries: Vec<_> = (0..n).map(|i| (mixed(i + 1), Fk(i + 1))).collect();
+            h.insert_many(&mut entries).unwrap();
+            h.flush().unwrap();
+            assert!(h.sealed_segment_count() >= 1);
+        }
+        let oa = dir.join("tx.head").join("000000");
+        assert!(!oa.is_file());
+        std::fs::write(&oa, b"leftover pre-unlink OA").unwrap();
+        let h2 = SegmentedTxHead::open(&dir).unwrap();
+        assert!(
+            !oa.is_file(),
+            "leftover sealed-segment OA must be discarded on open"
+        );
+        let cands = h2.probe_candidates(&mixed(1)).unwrap();
+        assert!(cands.iter().any(|f| f.0 == 1), "cands={cands:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
