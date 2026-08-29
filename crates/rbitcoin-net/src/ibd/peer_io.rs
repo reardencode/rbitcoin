@@ -110,6 +110,10 @@ pub(crate) struct PeerSlot {
     pub first_data_ms: AtomicU64,
     /// Cumulative block payload bytes (speed sample).
     pub bytes_rx: AtomicU64,
+    /// Main-thread recent-bps window origin ([`ibd_mono_ms`]). `0` = unset.
+    pub window_start_ms: AtomicU64,
+    /// `bytes_rx` at [`window_start_ms`].
+    pub window_start_bytes: AtomicU64,
     pub alive: bool,
     pub task: JoinHandle<()>,
 }
@@ -141,6 +145,58 @@ impl PeerSlot {
         let elapsed_ms = ibd_mono_ms().saturating_sub(first).max(1);
         let bps = bytes.saturating_mul(1000) / elapsed_ms;
         Some((latency_ms, bps))
+    }
+
+    /// Rotate the recent-bps window at [`RX_BPS_WINDOW_MS`]. IBD main thread only.
+    pub fn snapshot_rx(&self) {
+        self.snapshot_rx_at(ibd_mono_ms());
+    }
+
+    pub(crate) fn snapshot_rx_at(&self, now: u64) {
+        let now = now.max(1);
+        let bytes = self.bytes_rx.load(Ordering::Relaxed);
+        let start = self.window_start_ms.load(Ordering::Relaxed);
+        if start == 0 {
+            self.window_start_ms.store(now, Ordering::Relaxed);
+            self.window_start_bytes.store(bytes, Ordering::Relaxed);
+            return;
+        }
+        if now.saturating_sub(start) >= RX_BPS_WINDOW_MS {
+            self.window_start_ms.store(now, Ordering::Relaxed);
+            self.window_start_bytes.store(bytes, Ordering::Relaxed);
+        }
+    }
+
+    /// Complete-block bytes/sec over the current ~60s window.
+    ///
+    /// Unset or too-young windows fall back to lifetime [`speed_sample`] bps.
+    pub fn recent_bps(&self) -> Option<u64> {
+        self.recent_bps_at(ibd_mono_ms())
+    }
+
+    pub(crate) fn recent_bps_at(&self, now: u64) -> Option<u64> {
+        let start = self.window_start_ms.load(Ordering::Relaxed);
+        if start == 0 {
+            return self.speed_sample().map(|(_, b)| b);
+        }
+        let elapsed = now.saturating_sub(start).max(1);
+        if elapsed < RX_BPS_MIN_ELAPSED_MS {
+            return self.speed_sample().map(|(_, b)| b);
+        }
+        let bytes = self.bytes_rx.load(Ordering::Relaxed);
+        let start_b = self.window_start_bytes.load(Ordering::Relaxed);
+        let delta = bytes.saturating_sub(start_b);
+        Some(delta.saturating_mul(1000) / elapsed)
+    }
+}
+
+/// Recent complete-block ranking window (ms).
+pub(crate) const RX_BPS_WINDOW_MS: u64 = 60_000;
+const RX_BPS_MIN_ELAPSED_MS: u64 = 1_000;
+
+pub(crate) fn snapshot_peer_rx(slots: &[PeerSlot]) {
+    for s in slots {
+        s.snapshot_rx();
     }
 }
 
@@ -469,6 +525,8 @@ pub(crate) async fn spawn_peer(
         connected_ms: ibd_mono_ms(),
         first_data_ms: AtomicU64::new(0),
         bytes_rx: AtomicU64::new(0),
+        window_start_ms: AtomicU64::new(0),
+        window_start_bytes: AtomicU64::new(0),
         alive: true,
         task,
     })
@@ -551,6 +609,8 @@ mod tests {
             connected_ms: 1,
             first_data_ms: AtomicU64::new(0),
             bytes_rx: AtomicU64::new(0),
+            window_start_ms: AtomicU64::new(0),
+            window_start_bytes: AtomicU64::new(0),
             alive: true,
             task,
         }
@@ -608,6 +668,36 @@ mod tests {
         note_block_progress(std::slice::from_mut(&mut s), 99); // missing peer
         note_block_rx(std::slice::from_mut(&mut s), 99, 1);
         assert!(ibd_mono_ms() > 0);
+    }
+
+    #[test]
+    fn recent_bps_prefers_current_window_over_lifetime() {
+        let mut idle = dummy_slot(0);
+        idle.connected_ms = 1;
+        idle.first_data_ms.store(1, Ordering::Relaxed);
+        idle.bytes_rx.store(10_000_000, Ordering::Relaxed);
+        idle.window_start_ms.store(115_000, Ordering::Relaxed);
+        idle.window_start_bytes.store(10_000_000, Ordering::Relaxed);
+        assert_eq!(idle.recent_bps_at(120_000), Some(0));
+        assert!(
+            idle.speed_sample().expect("lifetime").1 > 0,
+            "AddrMan lifetime sample must remain"
+        );
+
+        let mut live = dummy_slot(1);
+        live.connected_ms = 110_000;
+        live.first_data_ms.store(114_000, Ordering::Relaxed);
+        live.bytes_rx.store(500_000, Ordering::Relaxed);
+        live.window_start_ms.store(115_000, Ordering::Relaxed);
+        live.window_start_bytes.store(0, Ordering::Relaxed);
+        assert_eq!(live.recent_bps_at(120_000), Some(100_000));
+
+        idle.snapshot_rx_at(115_000 + RX_BPS_WINDOW_MS);
+        assert_eq!(
+            idle.window_start_ms.load(Ordering::Relaxed),
+            115_000 + RX_BPS_WINDOW_MS
+        );
+        assert_eq!(idle.window_start_bytes.load(Ordering::Relaxed), 10_000_000);
     }
 
     #[test]

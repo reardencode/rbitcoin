@@ -18,7 +18,7 @@
 
 use super::assign_plan::far_slots_per_peer;
 use super::dial::{relative_slow_pick, RelativeSlowSample};
-use super::peer_io::{ibd_mono_ms, touch_block_progress, PeerCmd, PeerSlot};
+use super::peer_io::{ibd_mono_ms, snapshot_peer_rx, touch_block_progress, PeerCmd, PeerSlot};
 use super::state::{self, IbdWorkState};
 use super::status::LoopStats;
 use super::{
@@ -135,6 +135,7 @@ pub(crate) fn assign_work_ordered(
     if alive.is_empty() {
         return;
     }
+    snapshot_peer_rx(&st.slots);
 
     prune_satisfied_inflight(&mut st.slots, &mut st.inflight, hub);
     prune_off_path_inflight(st);
@@ -627,7 +628,7 @@ pub(crate) fn tip_hole_owner_to_drop(
             let s = slots.iter().find(|s| s.id == id && s.alive)?;
             Some(RelativeSlowSample {
                 peer_id: id,
-                bps: s.speed_sample().map(|(_, b)| b).unwrap_or(0),
+                bps: s.recent_bps().unwrap_or(0),
                 has_inflight: true,
             })
         })
@@ -650,8 +651,7 @@ fn peer_bps(slots: &[PeerSlot], pid: usize) -> u64 {
     slots
         .iter()
         .find(|s| s.id == pid && s.alive)
-        .and_then(|s| s.speed_sample())
-        .map(|(_, b)| b)
+        .and_then(|s| s.recent_bps())
         .unwrap_or(0)
 }
 
@@ -735,13 +735,14 @@ fn steal_hung_densify(
 }
 
 /// Rank alive peer ids for getdata: prefer peers not in `avoid`, then
-/// higher live `speed_sample` bps, then lower id. Unsampled peers sort last
-/// among non-avoided (bps=0).
+/// higher live [`PeerSlot::recent_bps`], then lower id. Unsampled peers sort
+/// last among non-avoided (bps=0).
 pub(crate) fn rank_peers_by_speed(
     slots: &[PeerSlot],
     alive: &[usize],
     avoid: &std::collections::HashSet<usize>,
 ) -> Vec<usize> {
+    snapshot_peer_rx(slots);
     let mut ranked: Vec<usize> = alive.to_vec();
     ranked.sort_by(|&a, &b| {
         let avoided_a = avoid.contains(&a) as u8;
@@ -751,8 +752,7 @@ pub(crate) fn rank_peers_by_speed(
                 slots
                     .iter()
                     .find(|s| s.id == pid && s.alive)
-                    .and_then(|s| s.speed_sample())
-                    .map(|(_, bps)| bps)
+                    .and_then(|s| s.recent_bps())
                     .unwrap_or(0)
             };
             bps(b).cmp(&bps(a)).then_with(|| a.cmp(&b))
@@ -934,6 +934,8 @@ mod tests {
             connected_ms: 1,
             first_data_ms: AtomicU64::new(0),
             bytes_rx: AtomicU64::new(0),
+            window_start_ms: AtomicU64::new(0),
+            window_start_bytes: AtomicU64::new(0),
             alive: true,
             task,
         }
@@ -1834,6 +1836,40 @@ mod tests {
             "fast peer must be in tip-hole race; peers={peers:?}"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Historically-fast / currently-idle sorts behind a currently-fast peer.
+    #[test]
+    fn rank_peers_prefers_recent_window_over_lifetime() {
+        use super::super::peer_io::ibd_mono_ms;
+        let mut st = IbdWorkState::new(
+            vec![dummy_slot(0), dummy_slot(1), dummy_slot(2)],
+            None,
+            Some(0),
+        );
+        while ibd_mono_ms() < 1_200 {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let now = ibd_mono_ms();
+        let win = now.saturating_sub(5_000).max(1);
+        inject_bps(&mut st.slots[0], now, 10_000_000);
+        st.slots[0].window_start_ms.store(win, Ordering::Relaxed);
+        st.slots[0]
+            .window_start_bytes
+            .store(10_000_000, Ordering::Relaxed);
+        inject_bps(&mut st.slots[1], now, 200_000);
+        st.slots[1].window_start_ms.store(win, Ordering::Relaxed);
+        st.slots[1].window_start_bytes.store(0, Ordering::Relaxed);
+        let alive = vec![0usize, 1, 2];
+        let ranked = rank_peers_by_speed(&st.slots, &alive, &HashSet::new());
+        assert_eq!(
+            ranked[0], 1,
+            "currently-fast must rank first; ranked={ranked:?}"
+        );
+        assert!(
+            st.slots[0].speed_sample().expect("lifetime").1 > st.slots[1].recent_bps().unwrap_or(0),
+            "peer 0 lifetime still exceeds peer 1 recent"
+        );
     }
 
     /// After dropping a silent owner, replacement prefers peers not in avoid.

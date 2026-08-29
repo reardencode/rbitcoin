@@ -887,6 +887,8 @@ fn confirmed_height_mids_blocked_while_densify_ahead_leaves_tip_hole() {
         connected_ms: 1,
         first_data_ms: AtomicU64::new(0),
         bytes_rx: AtomicU64::new(0),
+        window_start_ms: AtomicU64::new(0),
+        window_start_bytes: AtomicU64::new(0),
         alive: true,
         task,
     };
@@ -1085,6 +1087,8 @@ fn zombie_pending_mid_at_confirmed_height_never_reget() {
         connected_ms: 1,
         first_data_ms: AtomicU64::new(0),
         bytes_rx: AtomicU64::new(0),
+        window_start_ms: AtomicU64::new(0),
+        window_start_bytes: AtomicU64::new(0),
         alive: true,
         task,
     };
@@ -1659,6 +1663,8 @@ fn apply_peer_event_body_and_control_surface() {
             connected_ms: 1,
             first_data_ms: AtomicU64::new(0),
             bytes_rx: AtomicU64::new(0),
+            window_start_ms: AtomicU64::new(0),
+            window_start_bytes: AtomicU64::new(0),
             alive: true,
             task,
         }
@@ -1911,6 +1917,8 @@ fn apply_peer_event_block_framed_bq_horizon_and_headers_done() {
             connected_ms: 1,
             first_data_ms: AtomicU64::new(0),
             bytes_rx: AtomicU64::new(0),
+            window_start_ms: AtomicU64::new(0),
+            window_start_bytes: AtomicU64::new(0),
             alive: true,
             task,
         }
@@ -2178,6 +2186,8 @@ fn block_framed_raw_offers_body_queue_with_confirm_feed() {
             connected_ms: 1,
             first_data_ms: AtomicU64::new(0),
             bytes_rx: AtomicU64::new(0),
+            window_start_ms: AtomicU64::new(0),
+            window_start_bytes: AtomicU64::new(0),
             alive: true,
             task,
         }
@@ -2326,6 +2336,8 @@ fn known_headers_re_admit_to_ordered_after_tip_drain() {
             connected_ms: 1,
             first_data_ms: AtomicU64::new(0),
             bytes_rx: AtomicU64::new(0),
+            window_start_ms: AtomicU64::new(0),
+            window_start_bytes: AtomicU64::new(0),
             alive: true,
             task,
         }
@@ -2487,6 +2499,8 @@ fn path_slot_first_wins_chained_via_headers() {
             connected_ms: 1,
             first_data_ms: AtomicU64::new(0),
             bytes_rx: AtomicU64::new(0),
+            window_start_ms: AtomicU64::new(0),
+            window_start_bytes: AtomicU64::new(0),
             alive: true,
             task,
         }

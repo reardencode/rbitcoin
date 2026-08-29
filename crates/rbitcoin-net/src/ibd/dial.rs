@@ -1,6 +1,8 @@
 //! Peer dial, header request, stall disconnect / cooldown.
 
-use super::peer_io::{ibd_mono_ms, spawn_peer, PeerCmd, PeerEventSinks, PeerSlot};
+use super::peer_io::{
+    ibd_mono_ms, snapshot_peer_rx, spawn_peer, PeerCmd, PeerEventSinks, PeerSlot,
+};
 use crate::chain::ChainHub;
 use crate::error::NetError;
 use crate::peers::{trying_connection_log, PeerConnType};
@@ -133,6 +135,7 @@ pub(crate) fn relative_slow_with_hysteresis(
 
 /// Build mature relative-slow samples from live slots (age + bytes floors).
 pub(crate) fn mature_relative_slow_samples(slots: &[PeerSlot]) -> Vec<RelativeSlowSample> {
+    snapshot_peer_rx(slots);
     let now = ibd_mono_ms();
     let mut out = Vec::new();
     for s in slots {
@@ -150,7 +153,7 @@ pub(crate) fn mature_relative_slow_samples(slots: &[PeerSlot]) -> Vec<RelativeSl
         if bytes < RELATIVE_SLOW_MIN_BYTES {
             continue;
         }
-        let Some((_, bps)) = s.speed_sample() else {
+        let Some(bps) = s.recent_bps() else {
             continue;
         };
         out.push(RelativeSlowSample {
@@ -520,7 +523,7 @@ mod tests {
     use bitcoin::hashes::Hash;
     use bitcoin::BlockHash;
     use std::net::{IpAddr, Ipv4Addr};
-    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn addr(o: u8) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, o)), 8333)
@@ -545,6 +548,8 @@ mod tests {
             connected_ms: 0,
             first_data_ms: AtomicU64::new(0),
             bytes_rx: AtomicU64::new(0),
+            window_start_ms: AtomicU64::new(0),
+            window_start_bytes: AtomicU64::new(0),
             alive,
             task,
         }
@@ -994,5 +999,50 @@ mod tests {
         );
         assert!(suspect.is_none());
         assert!(cooldown.is_empty());
+    }
+
+    #[test]
+    fn mature_relative_slow_samples_uses_recent_bps() {
+        let now = {
+            while ibd_mono_ms() < 1_200 {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            ibd_mono_ms()
+        };
+        let win = now.saturating_sub(5_000).max(1);
+        let mut slots: Vec<_> = (0..8)
+            .map(|i| dummy_slot(i, addr(50 + i as u8), true))
+            .collect();
+        for (i, s) in slots.iter_mut().enumerate() {
+            s.first_data_ms.store(1, Ordering::Relaxed);
+            s.bytes_rx
+                .store(RELATIVE_SLOW_MIN_BYTES * 4, Ordering::Relaxed);
+            s.window_start_ms.store(win, Ordering::Relaxed);
+            if i == 0 {
+                s.window_start_bytes
+                    .store(RELATIVE_SLOW_MIN_BYTES * 4, Ordering::Relaxed);
+                s.in_flight.insert(BlockHash::from_byte_array([1u8; 32]));
+            } else {
+                s.window_start_bytes.store(0, Ordering::Relaxed);
+            }
+        }
+        assert_eq!(slots[0].recent_bps().unwrap(), 0);
+        assert!(slots[1].recent_bps().unwrap() > 0);
+        assert!(
+            slots[0].speed_sample().expect("lifetime").1 > 0,
+            "lifetime sample kept for AddrMan"
+        );
+        let samples = mature_relative_slow_samples(&slots);
+        if now.saturating_sub(1) >= RELATIVE_SLOW_MIN_AGE_MS {
+            let idle = samples
+                .iter()
+                .find(|s| s.peer_id == 0)
+                .expect("idle peer still mature");
+            assert_eq!(
+                idle.bps, 0,
+                "mature sample must use recent window, not lifetime"
+            );
+            assert!(samples.iter().filter(|s| s.peer_id != 0).all(|s| s.bps > 0));
+        }
     }
 }
