@@ -93,7 +93,15 @@ pub(crate) struct PeerSlot {
     /// Hashes currently requested from this peer.
     pub in_flight: HashSet<BlockHash>,
     /// Last block-download progress as [`ibd_mono_ms`].
+    ///
+    /// Touched on getdata issue (empty in-flight), stream bytes, block, notfound.
+    /// Stall-disconnect uses this clock.
     pub block_progress_ms: Arc<AtomicU64>,
+    /// Last **receive** progress as [`ibd_mono_ms`] (stream 64 KiB / block / notfound).
+    ///
+    /// Not touched when issuing getdata. `0` = no rx yet. Tip-hole owner eviction
+    /// uses this so a slow download is not treated as a hung racer.
+    pub last_rx_progress_ms: Arc<AtomicU64>,
     /// Peer's `version.start_height` (best-effort network tip signal).
     pub peer_height: u32,
     /// Mono ms when the slot became live (post-handshake).
@@ -156,12 +164,14 @@ pub(crate) fn touch_block_progress(ms: &AtomicU64) {
 pub(crate) fn note_block_progress(slots: &mut [PeerSlot], peer: usize) {
     if let Some(s) = slots.iter_mut().find(|s| s.id == peer) {
         touch_block_progress(&s.block_progress_ms);
+        touch_block_progress(&s.last_rx_progress_ms);
     }
 }
 
 pub(crate) fn note_block_rx(slots: &mut [PeerSlot], peer: usize, wire_bytes: usize) {
     if let Some(s) = slots.iter_mut().find(|s| s.id == peer) {
         touch_block_progress(&s.block_progress_ms);
+        touch_block_progress(&s.last_rx_progress_ms);
         s.note_rx_bytes(wire_bytes as u64);
     }
 }
@@ -196,7 +206,9 @@ pub(crate) async fn spawn_peer(
     // stall the receive half and look like a peer stall).
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<NetworkMessage>();
     let block_progress_ms = Arc::new(AtomicU64::new(ibd_mono_ms()));
+    let last_rx_progress_ms = Arc::new(AtomicU64::new(0));
     let progress_io = Arc::clone(&block_progress_ms);
+    let rx_io = Arc::clone(&last_rx_progress_ms);
 
     // Parent owns concurrent read + write tasks. Aborting the parent (PeerSlot
     // Drop / stall disconnect) must abort both children — plain JoinHandle drop
@@ -228,6 +240,7 @@ pub(crate) async fn spawn_peer(
                     if buffered >= prog_mark + STEP || buffered <= STEP {
                         prog_mark = buffered;
                         touch_block_progress(&progress_io);
+                        touch_block_progress(&rx_io);
                     }
                 })
                 .await;
@@ -243,6 +256,7 @@ pub(crate) async fn spawn_peer(
 
                         if frame.is_block() || frame.is_notfound() {
                             touch_block_progress(&progress_io);
+                            touch_block_progress(&rx_io);
                         }
 
                         if frame.is_block() {
@@ -268,6 +282,7 @@ pub(crate) async fn spawn_peer(
                         }
 
                         let progress = Arc::clone(&progress_io);
+                        let rx = Arc::clone(&rx_io);
                         let sinks_d = sinks_r.clone();
                         // Non-block: decode off-thread. Never await a decode permit
                         // on the reader (stalls TCP). Soft budgets gate *requests* only.
@@ -283,6 +298,7 @@ pub(crate) async fn spawn_peer(
                                     }
                                     NetworkMessage::NotFound(inv) => {
                                         touch_block_progress(&progress);
+                                        touch_block_progress(&rx);
                                         let hashes: Vec<BlockHash> = inv
                                             .iter()
                                             .filter_map(|i| match i {
@@ -448,6 +464,7 @@ pub(crate) async fn spawn_peer(
         cmd_tx,
         in_flight: HashSet::new(),
         block_progress_ms,
+        last_rx_progress_ms,
         peer_height,
         connected_ms: ibd_mono_ms(),
         first_data_ms: AtomicU64::new(0),
@@ -529,6 +546,7 @@ mod tests {
             cmd_tx,
             in_flight: HashSet::new(),
             block_progress_ms: Arc::new(AtomicU64::new(0)),
+            last_rx_progress_ms: Arc::new(AtomicU64::new(0)),
             peer_height: 100,
             connected_ms: 1,
             first_data_ms: AtomicU64::new(0),

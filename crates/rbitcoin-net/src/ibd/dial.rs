@@ -540,6 +540,7 @@ mod tests {
             cmd_tx,
             in_flight: HashSet::new(),
             block_progress_ms: Arc::new(AtomicU64::new(0)),
+            last_rx_progress_ms: Arc::new(AtomicU64::new(0)),
             peer_height: 0,
             connected_ms: 0,
             first_data_ms: AtomicU64::new(0),

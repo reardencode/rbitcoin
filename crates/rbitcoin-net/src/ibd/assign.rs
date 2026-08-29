@@ -17,7 +17,8 @@
 //! - One body-queue copy per height (receive path drops duplicates).
 
 use super::assign_plan::far_slots_per_peer;
-use super::peer_io::{touch_block_progress, PeerCmd, PeerSlot};
+use super::dial::{relative_slow_pick, RelativeSlowSample};
+use super::peer_io::{ibd_mono_ms, touch_block_progress, PeerCmd, PeerSlot};
 use super::state::{self, IbdWorkState};
 use super::status::LoopStats;
 use super::{
@@ -562,12 +563,83 @@ fn demote_zombie_pending_for_fetch(
     body.mark_missing(hash);
 }
 
-/// Tip-hole getdata older than this with no claimable wire is cleared and re-issued
-/// (mainnet freeze: inflight stuck, soft frozen, hole=1 forever).
+/// Stream rx older than this is not “recent” for tip-hole owner eviction.
+/// Matches the absolute stall floor so slow-but-steady 64 KiB ticks stay live.
+const TIP_HOLE_RX_STALE: Duration = Duration::from_secs(30);
+
+fn peer_has_recent_rx(slot: &PeerSlot, now_ms: u64) -> bool {
+    let p = slot.last_rx_progress_ms.load(Ordering::Relaxed);
+    p != 0 && now_ms.saturating_sub(p) <= TIP_HOLE_RX_STALE.as_millis() as u64
+}
+
+/// Which current owner of a tip-hole hash to drop from **this hash** (not disconnect).
 ///
-/// Short on purpose: confirm claim waits ~5s per tick while tip is blocked; 20s
-/// left the same slow race set holding hole=1 while densify progressed.
-const TIP_HOLE_INFLIGHT_STALE: Duration = Duration::from_secs(6);
+/// - No owner has recent rx → none (too early / first 64 KiB still in flight).
+/// - Some have recent rx, some do not → drop a no-rx owner (quick dead-racer).
+/// - All have recent rx → [`relative_slow_pick`] among those owners (`min_samples` =
+///   owner count). Tight cluster → none.
+/// - Solo owner: drop only when no recent rx and `started_at` is ≥ [`TIP_HOLE_RX_STALE`].
+pub(crate) fn tip_hole_owner_to_drop(
+    owners: &[usize],
+    slots: &[PeerSlot],
+    started_at: Instant,
+) -> Option<usize> {
+    if owners.is_empty() {
+        return None;
+    }
+    let now_ms = ibd_mono_ms();
+    let mut recent = Vec::new();
+    let mut stale = Vec::new();
+    for &id in owners {
+        let Some(slot) = slots.iter().find(|s| s.id == id && s.alive) else {
+            stale.push(id);
+            continue;
+        };
+        if peer_has_recent_rx(slot, now_ms) {
+            recent.push(id);
+        } else {
+            stale.push(id);
+        }
+    }
+    if owners.len() == 1 {
+        if !recent.is_empty() {
+            return None;
+        }
+        if Instant::now().duration_since(started_at) >= TIP_HOLE_RX_STALE {
+            return Some(owners[0]);
+        }
+        return None;
+    }
+    if recent.is_empty() {
+        return None;
+    }
+    if let Some(&id) = stale.iter().min() {
+        return Some(id);
+    }
+    let samples: Vec<RelativeSlowSample> = owners
+        .iter()
+        .filter_map(|&id| {
+            let s = slots.iter().find(|s| s.id == id && s.alive)?;
+            Some(RelativeSlowSample {
+                peer_id: id,
+                bps: s.speed_sample().map(|(_, b)| b).unwrap_or(0),
+                has_inflight: true,
+            })
+        })
+        .collect();
+    relative_slow_pick(&samples, samples.len())
+}
+
+fn drop_hash_owner(st: &mut IbdWorkState, hash: BlockHash, pid: usize) {
+    if let Some(s) = st.slots.iter_mut().find(|s| s.id == pid) {
+        s.in_flight.remove(&hash);
+    }
+    if let Some(req) = st.inflight.get_mut(&hash) {
+        if req.remove_peer(pid) {
+            st.inflight.remove(&hash);
+        }
+    }
+}
 
 /// Rank alive peer ids for tip-hole getdata: prefer peers not in `avoid`, then
 /// higher live `speed_sample` bps, then lower id. Unsampled peers sort last
@@ -598,8 +670,10 @@ pub(crate) fn rank_tip_hole_peers(
 
 /// Cover each tip-hole hash with multi-peer getdata, preferring faster peers.
 ///
-/// Stale tip-batch inflight is cleared after [`TIP_HOLE_INFLIGHT_STALE`] and
-/// re-raced, preferring peers that were **not** in the cleared set.
+/// While the hole is open, at most one current owner of **this hash** is dropped
+/// per call when a sibling is pulling or that owner is a relative-slow outlier
+/// among owners ([`tip_hole_owner_to_drop`]). The whole race set is never
+/// cleared on request age.
 pub(crate) fn cover_tip_holes(
     st: &mut IbdWorkState,
     hub: &ChainHub,
@@ -636,10 +710,10 @@ pub(crate) fn cover_tip_holes(
         demote_zombie_pending_for_fetch(&mut st.body, hub, h, ht);
         let mut avoid: HashSet<usize> = HashSet::new();
         if let Some(req) = st.inflight.get(&h) {
-            if now.duration_since(req.started_at) >= TIP_HOLE_INFLIGHT_STALE {
-                avoid = req.peers.clone();
-                clear_hash_inflight(&mut st.slots, &mut st.inflight, h);
-                st.body.mark_missing(h);
+            let owners: Vec<usize> = req.peers.iter().copied().collect();
+            if let Some(pid) = tip_hole_owner_to_drop(&owners, &st.slots, req.started_at) {
+                drop_hash_owner(st, h, pid);
+                avoid.insert(pid);
             }
         }
         let (already, second_at) = st
@@ -657,6 +731,9 @@ pub(crate) fn cover_tip_holes(
         for &pid in &ranked {
             if need == 0 {
                 break;
+            }
+            if avoid.contains(&pid) {
+                continue;
             }
             let Some(idx) = st.slots.iter().position(|s| s.id == pid && s.alive) else {
                 continue;
@@ -759,6 +836,7 @@ mod tests {
             cmd_tx,
             in_flight: HashSet::new(),
             block_progress_ms: Arc::new(AtomicU64::new(0)),
+            last_rx_progress_ms: Arc::new(AtomicU64::new(0)),
             peer_height: 100,
             connected_ms: 1,
             first_data_ms: AtomicU64::new(0),
@@ -917,6 +995,53 @@ mod tests {
     }
 
     #[test]
+    fn tip_hole_owner_to_drop_too_early_dead_racer_and_solo() {
+        use super::super::peer_io::ibd_mono_ms;
+        let slots = vec![dummy_slot(0), dummy_slot(1)];
+        let started = Instant::now();
+        assert_eq!(
+            tip_hole_owner_to_drop(&[0, 1], &slots, started),
+            None,
+            "no rx yet is too early"
+        );
+        slots[1]
+            .last_rx_progress_ms
+            .store(ibd_mono_ms().max(1), Ordering::Relaxed);
+        assert_eq!(
+            tip_hole_owner_to_drop(&[0, 1], &slots, started),
+            Some(0),
+            "silent owner drops when sibling has rx"
+        );
+        slots[0]
+            .last_rx_progress_ms
+            .store(ibd_mono_ms().max(1), Ordering::Relaxed);
+        assert_eq!(
+            tip_hole_owner_to_drop(&[0], &slots, Instant::now() - Duration::from_secs(7)),
+            None,
+            "solo with live rx is kept"
+        );
+        assert_eq!(
+            tip_hole_owner_to_drop(
+                &[0],
+                &slots,
+                Instant::now() - Duration::from_secs(31)
+            ),
+            None,
+            "solo with live rx kept even if started_at is old"
+        );
+        slots[0].last_rx_progress_ms.store(0, Ordering::Relaxed);
+        assert_eq!(
+            tip_hole_owner_to_drop(
+                &[0],
+                &slots,
+                Instant::now() - Duration::from_secs(31)
+            ),
+            Some(0),
+            "solo hung with no rx after 30s is replaced"
+        );
+    }
+
+    #[test]
     fn densify_yields_peer_slots_while_tip_hole_open() {
         use super::super::assign_plan::far_slots_per_peer;
         assert_eq!(far_slots_per_peer(16, true), 2);
@@ -1070,10 +1195,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Stale tip-hole inflight (≥6s) with no claimable wire must clear and re-race.
-    /// Mainnet freeze: hole=1, inflight stuck forever, soft frozen, conf=0.
+    /// Aged started_at does not clear the whole race set when owners have rx.
     #[test]
-    fn cover_tip_holes_re_races_stale_inflight() {
+    fn cover_tip_holes_does_not_clear_whole_set_on_started_at() {
+        use super::super::peer_io::ibd_mono_ms;
         use super::super::state::InflightReq;
         let (dir, hub) = tmp_hub();
         hub.ensure_genesis().unwrap();
@@ -1088,50 +1213,182 @@ mod tests {
         st.record_height(hole, ht);
         st.height_to_hash.insert(ht, hole);
         st.body.mark_missing(hole);
-        // Fresh inflight (<6s) must not re-race yet.
-        let mut fresh = InflightReq::new(0);
-        fresh.started_at = Instant::now() - Duration::from_secs(3);
-        st.inflight.insert(hole, fresh);
+        let mut req = InflightReq::new(0);
+        req.add_peer(1);
+        req.started_at = Instant::now() - Duration::from_secs(7);
+        st.inflight.insert(hole, req);
         st.slots[0].in_flight.insert(hole);
-        let holes = contiguous_tip_holes(&mut st, &hub, 8);
-        assert_eq!(holes, vec![hole]);
+        st.slots[1].in_flight.insert(hole);
+        let now = ibd_mono_ms().max(1);
+        st.slots[0]
+            .last_rx_progress_ms
+            .store(now, Ordering::Relaxed);
+        st.slots[1]
+            .last_rx_progress_ms
+            .store(now, Ordering::Relaxed);
+        // Tight bps cluster so relative-slow among owners does not fire.
+        for i in 0..2 {
+            st.slots[i].connected_ms = now.saturating_sub(2_000);
+            st.slots[i]
+                .first_data_ms
+                .store(now.saturating_sub(1_000), Ordering::Relaxed);
+            st.slots[i].bytes_rx.store(500_000, Ordering::Relaxed);
+        }
         let cfg = IbdConfig::for_test();
         let alive: Vec<usize> = st.slots.iter().filter(|s| s.alive).map(|s| s.id).collect();
-        let issued_fresh = cover_tip_holes(&mut st, &hub, &cfg, &alive, &holes);
-        // Still at want peers (race fills), but started_at not cleared as stale.
-        let age_fresh = Instant::now().duration_since(st.inflight[&hole].started_at);
+        let holes = contiguous_tip_holes(&mut st, &hub, 8);
+        let _ = cover_tip_holes(&mut st, &hub, &cfg, &alive, &holes);
+        let peers = &st.inflight[&hole].peers;
         assert!(
-            age_fresh >= Duration::from_secs(2),
-            "fresh inflight must keep original started_at; age={age_fresh:?} issued={issued_fresh}"
+            peers.contains(&0) && peers.contains(&1),
+            "aged started_at must not drop live racers; peers={peers:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Sibling pulling the block → silent owner is dropped from this hash.
+    #[test]
+    fn cover_tip_holes_drops_owner_with_no_rx_when_sibling_progresses() {
+        use super::super::peer_io::ibd_mono_ms;
+        use super::super::state::InflightReq;
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let mut st = IbdWorkState::new(
+            vec![dummy_slot(0), dummy_slot(1), dummy_slot(2)],
+            hub.tip_hash(),
+            hub.tip_height(),
+        );
+        let hole = h(0x52);
+        let tip = hub.tip_height().unwrap_or(0);
+        let ht = tip.saturating_add(1);
+        st.record_height(hole, ht);
+        st.height_to_hash.insert(ht, hole);
+        st.body.mark_missing(hole);
+        let mut req = InflightReq::new(0);
+        req.add_peer(1);
+        st.inflight.insert(hole, req);
+        st.slots[0].in_flight.insert(hole);
+        st.slots[1].in_flight.insert(hole);
+        st.slots[1]
+            .last_rx_progress_ms
+            .store(ibd_mono_ms().max(1), Ordering::Relaxed);
+        let cfg = IbdConfig::for_test();
+        let alive: Vec<usize> = st.slots.iter().filter(|s| s.alive).map(|s| s.id).collect();
+        let holes = contiguous_tip_holes(&mut st, &hub, 8);
+        let _ = cover_tip_holes(&mut st, &hub, &cfg, &alive, &holes);
+        let peers = &st.inflight[&hole].peers;
+        assert!(
+            !peers.contains(&0),
+            "no-rx owner must leave the race when a sibling has rx; peers={peers:?}"
+        );
+        assert!(
+            peers.contains(&1),
+            "progressing sibling must stay; peers={peers:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// All owners have rx: drop half-median outlier; keep a tight 2× pack.
+    #[test]
+    fn cover_tip_holes_drops_relative_slow_owner_among_progressing() {
+        use super::super::peer_io::ibd_mono_ms;
+        use super::super::state::InflightReq;
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let mut st = IbdWorkState::new(
+            vec![dummy_slot(0), dummy_slot(1), dummy_slot(2)],
+            hub.tip_hash(),
+            hub.tip_height(),
+        );
+        let hole = h(0x53);
+        let tip = hub.tip_height().unwrap_or(0);
+        let ht = tip.saturating_add(1);
+        st.record_height(hole, ht);
+        st.height_to_hash.insert(ht, hole);
+        st.body.mark_missing(hole);
+        let now = ibd_mono_ms().max(2_000);
+        let mut req = InflightReq::new(0);
+        req.add_peer(1);
+        req.add_peer(2);
+        st.inflight.insert(hole, req);
+        for i in 0..3 {
+            st.slots[i].in_flight.insert(hole);
+            st.slots[i]
+                .last_rx_progress_ms
+                .store(now, Ordering::Relaxed);
+            st.slots[i].connected_ms = now.saturating_sub(2_000);
+            st.slots[i]
+                .first_data_ms
+                .store(now.saturating_sub(1_000), Ordering::Relaxed);
+        }
+        st.slots[0].bytes_rx.store(100_000, Ordering::Relaxed);
+        st.slots[1].bytes_rx.store(1_000_000, Ordering::Relaxed);
+        st.slots[2].bytes_rx.store(1_000_000, Ordering::Relaxed);
+        let cfg = IbdConfig::for_test();
+        let alive: Vec<usize> = st.slots.iter().filter(|s| s.alive).map(|s| s.id).collect();
+        let holes = contiguous_tip_holes(&mut st, &hub, 8);
+        let _ = cover_tip_holes(&mut st, &hub, &cfg, &alive, &holes);
+        let peers = &st.inflight[&hole].peers;
+        assert!(
+            !peers.contains(&0),
+            "half-median owner must drop; peers={peers:?}"
         );
 
-        // Frozen inflight from a prior race that never delivered wire (≥6s).
+        // Tight cluster: rebuild with similar bps.
         st.inflight.clear();
         for s in st.slots.iter_mut() {
             s.in_flight.clear();
         }
-        let mut frozen = InflightReq::new(0);
-        frozen.started_at = Instant::now() - Duration::from_secs(7);
-        st.inflight.insert(hole, frozen);
+        let mut tight = InflightReq::new(0);
+        tight.add_peer(1);
+        tight.add_peer(2);
+        st.inflight.insert(hole, tight);
+        for i in 0..3 {
+            st.slots[i].in_flight.insert(hole);
+            st.slots[i].bytes_rx.store(500_000, Ordering::Relaxed);
+        }
+        let _ = cover_tip_holes(&mut st, &hub, &cfg, &alive, &holes);
+        let peers = &st.inflight[&hole].peers;
+        assert!(
+            peers.contains(&0) && peers.contains(&1) && peers.contains(&2),
+            "tight 2× pack must keep all owners; peers={peers:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Solo owner with live rx is not “slowest of one” even if started_at is old.
+    #[test]
+    fn cover_tip_holes_solo_slow_but_rx_live_kept() {
+        use super::super::peer_io::ibd_mono_ms;
+        use super::super::state::InflightReq;
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let mut st = IbdWorkState::new(
+            vec![dummy_slot(0), dummy_slot(1)],
+            hub.tip_hash(),
+            hub.tip_height(),
+        );
+        let hole = h(0x54);
+        let tip = hub.tip_height().unwrap_or(0);
+        let ht = tip.saturating_add(1);
+        st.record_height(hole, ht);
+        st.height_to_hash.insert(ht, hole);
+        st.body.mark_missing(hole);
+        let mut req = InflightReq::new(0);
+        req.started_at = Instant::now() - Duration::from_secs(7);
+        st.inflight.insert(hole, req);
         st.slots[0].in_flight.insert(hole);
+        st.slots[0]
+            .last_rx_progress_ms
+            .store(ibd_mono_ms().max(1), Ordering::Relaxed);
+        let cfg = IbdConfig::for_test();
+        let alive: Vec<usize> = st.slots.iter().filter(|s| s.alive).map(|s| s.id).collect();
+        let holes = contiguous_tip_holes(&mut st, &hub, 8);
+        let _ = cover_tip_holes(&mut st, &hub, &cfg, &alive, &holes);
+        let peers = &st.inflight[&hole].peers;
         assert!(
-            !super::super::progress::claim_ready(&hub, &mut st.body, ht, &hole),
-            "no wire → not claim-ready"
-        );
-        let issued = cover_tip_holes(&mut st, &hub, &cfg, &alive, &holes);
-        assert!(
-            issued >= 1,
-            "stale inflight must re-race getdata; issued={issued}"
-        );
-        assert!(
-            st.inflight.contains_key(&hole),
-            "hash remains inflight after re-race"
-        );
-        // Fresh started_at (not still the 7s-old stamp).
-        let age = Instant::now().duration_since(st.inflight[&hole].started_at);
-        assert!(
-            age < Duration::from_secs(2),
-            "re-race must reset started_at; age={age:?}"
+            peers.contains(&0),
+            "solo slow-but-steady owner must stay; peers={peers:?}"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1188,9 +1445,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// After stale clear, re-race prefers peers not in the cleared set.
+    /// After dropping a silent owner, replacement prefers peers not in avoid.
     #[test]
     fn cover_tip_holes_rerace_avoids_prior_peers() {
+        use super::super::peer_io::ibd_mono_ms;
         use super::super::state::InflightReq;
         let (dir, hub) = tmp_hub();
         hub.ensure_genesis().unwrap();
@@ -1208,10 +1466,12 @@ mod tests {
 
         let mut frozen = InflightReq::new(0);
         frozen.add_peer(1);
-        frozen.started_at = Instant::now() - Duration::from_secs(7);
         st.inflight.insert(hole, frozen);
         st.slots[0].in_flight.insert(hole);
         st.slots[1].in_flight.insert(hole);
+        st.slots[1]
+            .last_rx_progress_ms
+            .store(ibd_mono_ms().max(1), Ordering::Relaxed);
 
         let cfg = IbdConfig::for_test();
         let alive: Vec<usize> = st.slots.iter().filter(|s| s.alive).map(|s| s.id).collect();
@@ -1219,11 +1479,14 @@ mod tests {
         let issued = cover_tip_holes(&mut st, &hub, &cfg, &alive, &holes);
         assert!(issued >= 1, "issued={issued}");
         let peers = &st.inflight[&hole].peers;
-        // Prefer 2,3,4 over reusing 0,1 first — at least one new peer in race.
+        assert!(
+            !peers.contains(&0),
+            "silent owner 0 must be dropped; peers={peers:?}"
+        );
         let new = peers.iter().any(|&p| p >= 2);
         assert!(
             new,
-            "re-race should include peers outside cleared set; peers={peers:?}"
+            "replacement should include peers outside avoid; peers={peers:?}"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
