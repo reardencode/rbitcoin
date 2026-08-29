@@ -150,19 +150,14 @@ impl P2PNode {
                 let peers = dial_peers.clone();
                 let ua = dial_ua.clone();
                 let live = dial_live.clone();
-                let (sess_tx, sess_rx) = tokio::sync::oneshot::channel::<Arc<LivePeer>>();
+                let (ah_tx, ah_rx) = tokio::sync::oneshot::channel::<tokio::task::AbortHandle>();
                 let h = tokio::spawn(async move {
-                    let _ = run_outbound_session_with_sess_hook(
-                        req.addr, magic, local_addr, hub, peers, ua, live, req.typ, sess_tx,
+                    let _ = run_outbound_session_with_abort(
+                        req.addr, magic, local_addr, hub, peers, ua, live, req.typ, ah_rx,
                     )
                     .await;
                 });
-                let ah = h.abort_handle();
-                tokio::spawn(async move {
-                    if let Ok(sess) = sess_rx.await {
-                        sess.set_session_abort(ah);
-                    }
-                });
+                let _ = ah_tx.send(h.abort_handle());
                 push_session_task(&sessions_dial, h);
             }
         });
@@ -413,7 +408,8 @@ fn spawn_inbound_accept(
                         Err(_) => our,
                     };
                     let sessions = session_tasks.clone();
-                    let (sess_tx, sess_rx) = tokio::sync::oneshot::channel::<Arc<LivePeer>>();
+                    let (ah_tx, ah_rx) =
+                        tokio::sync::oneshot::channel::<tokio::task::AbortHandle>();
                     let h = tokio::spawn(async move {
                         let _session_slot = permit;
                         let (ver, reader, writer, wire) = match inbound_connect_and_handshake(
@@ -441,12 +437,14 @@ fn spawn_inbound_accept(
                         };
                         let sess =
                             peers.register(peer_addr, bind, &ver, true, PeerConnType::Inbound);
+                        if let Ok(ah) = ah_rx.await {
+                            sess.set_session_abort(ah);
+                        }
                         if let Some(mp) = hub.mempool() {
                             sess.set_inv_gen_floor(mp.next_accept_gen());
                         }
                         sess.attach_wire(wire);
                         let id = sess.id;
-                        let _ = sess_tx.send(Arc::clone(&sess));
                         let meta = FollowSessionMeta {
                             peer: Some(peer_addr),
                             live: None,
@@ -455,12 +453,7 @@ fn spawn_inbound_accept(
                         let _ = peer_session_with(reader, writer, magic, hub, tip_rx, meta).await;
                         peers.unregister(id);
                     });
-                    let ah = h.abort_handle();
-                    tokio::spawn(async move {
-                        if let Ok(sess) = sess_rx.await {
-                            sess.set_session_abort(ah);
-                        }
-                    });
+                    let _ = ah_tx.send(h.abort_handle());
                     push_session_task(&sessions, h);
                 }
                 Ok(Err(_)) => break,
@@ -569,7 +562,7 @@ async fn run_prepared_outbound(prepared: PreparedOutbound) -> Result<(), NetErro
     out
 }
 
-async fn run_outbound_session_with_sess_hook(
+async fn run_outbound_session_with_abort(
     peer: SocketAddr,
     magic: Magic,
     local: SocketAddr,
@@ -578,7 +571,7 @@ async fn run_outbound_session_with_sess_hook(
     user_agent: String,
     follow_live: Arc<AtomicUsize>,
     typ: PeerConnType,
-    sess_tx: tokio::sync::oneshot::Sender<Arc<LivePeer>>,
+    ah_rx: tokio::sync::oneshot::Receiver<tokio::task::AbortHandle>,
 ) -> Result<(), NetError> {
     if typ == PeerConnType::Feeler {
         let stream = TcpStream::connect(peer).await?;
@@ -588,7 +581,9 @@ async fn run_outbound_session_with_sess_hook(
     let prepared =
         prepare_outbound_session(peer, magic, local, hub, peers, user_agent, follow_live, typ)
             .await?;
-    let _ = sess_tx.send(Arc::clone(&prepared.sess));
+    if let Ok(ah) = ah_rx.await {
+        prepared.sess.set_session_abort(ah);
+    }
     run_prepared_outbound(prepared).await
 }
 
