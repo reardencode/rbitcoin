@@ -1255,15 +1255,9 @@ fn addpeeraddress(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> 
     let Some(am) = ctx.addrman.as_ref() else {
         return Err(rpc_error(ERR_MISC, "addrman not available"));
     };
-    {
-        let mut g = am.lock().unwrap_or_else(|e| e.into_inner());
-        g.add(addr);
-        if let Some(path) = ctx.peers_path.as_ref() {
-            if let Err(e) = g.save(path) {
-                return Err(rpc_error(ERR_MISC, format!("peers save: {e}")));
-            }
-        }
-    }
+    // RAM-only: do not rewrite peers on every call (p2p_getaddr_caching fills
+    // 10k addresses). The node still persists addrman on shutdown / catch-up.
+    am.lock().unwrap_or_else(|e| e.into_inner()).add(addr);
     Ok(json!({ "success": true }))
 }
 

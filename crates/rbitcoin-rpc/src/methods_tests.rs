@@ -2594,7 +2594,7 @@ fn addnode_and_disconnectnode_on_table() {
 }
 
 #[test]
-fn addpeeraddress_adds_to_addrman_and_saves_peers() {
+fn addpeeraddress_updates_addrman_without_rewriting_peers_file() {
     use rbitcoin_net::AddrMan;
     use std::sync::Mutex;
 
@@ -2616,9 +2616,10 @@ fn addpeeraddress_adds_to_addrman_and_saves_peers() {
         assert_eq!(g.len(), 1);
         assert!(g.peers().contains(&"128.1.2.3:8333".parse().unwrap()));
     }
-    let loaded = AddrMan::load(&peers_path).unwrap();
-    assert_eq!(loaded.len(), 1);
-    assert!(loaded.peers().contains(&"128.1.2.3:8333".parse().unwrap()));
+    assert!(
+        !peers_path.exists(),
+        "addpeeraddress must not rewrite peers on every call"
+    );
 
     let named = RpcParams::named(
         json!({"address": "129.0.0.1", "port": 8334, "tried": false})
@@ -2629,6 +2630,7 @@ fn addpeeraddress_adds_to_addrman_and_saves_peers() {
     let out = dispatch(&ctx, "addpeeraddress", named).unwrap();
     assert_eq!(out, json!({"success": true}));
     assert_eq!(am.lock().unwrap().len(), 2);
+    assert!(!peers_path.exists());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
