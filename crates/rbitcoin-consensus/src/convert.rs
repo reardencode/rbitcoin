@@ -152,6 +152,13 @@ pub(crate) fn input_records_from_wire(
                 "invariant: write encode missing create_fk",
             )));
         }
+        if e.prev_txid != inp.previous_output.txid.to_byte_array()
+            || e.vout != inp.previous_output.vout
+        {
+            return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
+                "invariant: write encode edge/wire prevout mismatch",
+            )));
+        }
         out.push(InputRecord {
             prev_txid: inp.previous_output.txid.to_byte_array(),
             create_fk: e.create_fk,
@@ -263,5 +270,45 @@ mod tests {
         };
         let apply = tx_to_apply(&non_cb, non_cb.compute_txid().to_byte_array()).unwrap();
         assert_eq!(apply.inputs[0].prev_index, 3);
+    }
+
+    /// Write encode must bind each stamped spend edge to the wire prevout it
+    /// claims to spend — a stale/mismatched edge is Corrupt, not encoded.
+    #[test]
+    fn input_encode_rejects_edge_wire_prevout_mismatch() {
+        let tx = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([1; 32]),
+                    vout: 3,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let edge = |prev_txid: [u8; 32], vout: u32| rbitcoin_query::SpendEdge {
+            prev_txid,
+            vout,
+            spend_fk: Fk(9),
+            create_fk: Fk(5),
+        };
+        let ok = input_records_from_wire(&tx, Fk(9), &[edge([1u8; 32], 3)]).unwrap();
+        assert_eq!(ok[0].prev_txid, [1u8; 32]);
+        assert_eq!(ok[0].prev_index, 3);
+        for bad in [edge([2u8; 32], 3), edge([1u8; 32], 4)] {
+            let err = input_records_from_wire(&tx, Fk(9), &[bad])
+                .expect_err("mismatched edge must not encode");
+            assert!(
+                format!("{err}").contains("edge/wire prevout"),
+                "unexpected error: {err}"
+            );
+        }
     }
 }
