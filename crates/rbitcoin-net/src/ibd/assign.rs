@@ -13,6 +13,12 @@
 //!   - BQ payload **≥ assign-stop** (default 1 GiB) → holes only within the
 //!     ~1 min tip-rate window **and** not past fetched_hi (do not grow past
 //!     fetched; do not densify far holes outside the window)
+//! - **Getdata owners:** tip-hole adds up to [`TIP_HOLE_MAX_PEERS`] immediately,
+//!   then drops at most one owner of that hash when a sibling has stream rx or
+//!   that owner is a relative-slow outlier among owners — never a wall-clock
+//!   whole-set abort. Densify is single-peer, issued by recent-bps rank.
+//!   Default cap **8**; **16** only if recent bps ≥ 2× pack median; `hole>0`
+//!   drips **2** for tip-race headroom.
 //! - Never request beyond densify horizon; events refuse far bodies too.
 //! - One body-queue copy per height (receive path drops duplicates).
 
@@ -998,13 +1004,15 @@ mod tests {
     }
 
     fn tmp_hub() -> (std::path::PathBuf, ChainHub) {
+        static N: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "rbitcoin-assign-{}-{}",
+            "rbitcoin-assign-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            N.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = std::fs::create_dir_all(&dir);
         let q = Query::open_or_create(dir.join("store")).unwrap();
@@ -1012,6 +1020,36 @@ mod tests {
             dir,
             ChainHub::new(q, ChainParams::regtest(), Milestone::NONE),
         )
+    }
+
+    /// Serialize env mutators — parallel suite races `bq_assign_stop_bytes`.
+    static BQ_ASSIGN_STOP_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct AssignStopEnvRestore(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
+    impl Drop for AssignStopEnvRestore {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(v) => std::env::set_var("RBITCOIN_BLOCK_QUEUE_BYTES", v),
+                None => std::env::remove_var("RBITCOIN_BLOCK_QUEUE_BYTES"),
+            }
+            match self.1.take() {
+                Some(v) => std::env::set_var("RBITCOIN_BLOCK_QUEUE_GB", v),
+                None => std::env::remove_var("RBITCOIN_BLOCK_QUEUE_GB"),
+            }
+        }
+    }
+
+    fn lock_default_assign_stop() -> (std::sync::MutexGuard<'static, ()>, AssignStopEnvRestore) {
+        let g = BQ_ASSIGN_STOP_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let restore = AssignStopEnvRestore(
+            std::env::var_os("RBITCOIN_BLOCK_QUEUE_BYTES"),
+            std::env::var_os("RBITCOIN_BLOCK_QUEUE_GB"),
+        );
+        std::env::remove_var("RBITCOIN_BLOCK_QUEUE_BYTES");
+        std::env::remove_var("RBITCOIN_BLOCK_QUEUE_GB");
+        (g, restore)
     }
 
     #[test]
@@ -1403,6 +1441,7 @@ mod tests {
 
     #[test]
     fn densify_issues_to_fastest_peer_first() {
+        let _env = lock_default_assign_stop();
         use super::super::peer_io::ibd_mono_ms;
         use bitcoin::hashes::Hash as _;
         let (dir, hub) = tmp_hub();
@@ -1414,7 +1453,7 @@ mod tests {
         );
         let stats = LoopStats::default();
         let mut cfg = IbdConfig::for_test();
-        cfg.window = 8;
+        cfg.window = 128;
         cfg.per_peer = 16;
         let path_lo = hub.tip_height().unwrap_or(0).saturating_add(1);
         plant_work_path(&mut st, path_lo, 40);
@@ -1500,6 +1539,7 @@ mod tests {
 
     #[test]
     fn densify_fast_peer_receives_more_than_eight() {
+        let _env = lock_default_assign_stop();
         use super::super::peer_io::ibd_mono_ms;
         use bitcoin::hashes::Hash as _;
         let (dir, hub) = tmp_hub();
@@ -2468,31 +2508,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Serialize env mutators — parallel suite races `bq_assign_stop_bytes`.
-    static BQ_ASSIGN_STOP_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// Over assign-stop: densify within confirm window ∩ fetched; not past window.
     #[test]
     fn densify_over_assign_stop_clamps_window_and_fetched() {
         let _g = BQ_ASSIGN_STOP_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let prev_b = std::env::var_os("RBITCOIN_BLOCK_QUEUE_BYTES");
-        let prev_g = std::env::var_os("RBITCOIN_BLOCK_QUEUE_GB");
-        struct Restore(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(v) => std::env::set_var("RBITCOIN_BLOCK_QUEUE_BYTES", v),
-                    None => std::env::remove_var("RBITCOIN_BLOCK_QUEUE_BYTES"),
-                }
-                match self.1.take() {
-                    Some(v) => std::env::set_var("RBITCOIN_BLOCK_QUEUE_GB", v),
-                    None => std::env::remove_var("RBITCOIN_BLOCK_QUEUE_GB"),
-                }
-            }
-        }
-        let _restore = Restore(prev_b, prev_g);
+        let _restore = AssignStopEnvRestore(
+            std::env::var_os("RBITCOIN_BLOCK_QUEUE_BYTES"),
+            std::env::var_os("RBITCOIN_BLOCK_QUEUE_GB"),
+        );
         std::env::remove_var("RBITCOIN_BLOCK_QUEUE_GB");
         std::env::set_var("RBITCOIN_BLOCK_QUEUE_BYTES", "2048");
 

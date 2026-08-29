@@ -82,7 +82,8 @@ is over target.
 window, outstanding requests remain finite (per-peer in-flight window).
 Enqueueing those bodies cannot create a truly unbounded leak; the backlog
 drains as confirm dequeues. Bound queue size by **not requesting**, not by
-**not reading**.
+**not reading**. A tight slow pack (local bottleneck) keeps 8 densify getdata
+per peer and is not stolen or relative-slow disconnected.
 
 Historical regression (do not reintroduce): bounded arch_job Full-drop and
 reader-side decode-permit wait before the next frame made peers look dead while
