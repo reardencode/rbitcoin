@@ -8,7 +8,7 @@ IBD path. It is **not** about kernel page cache under FdOnly store files
 
 | Structure | Cap / bound | Production clear / evict |
 |-----------|-------------|---------------------------|
-| **In-RAM body queue** | Soft densify assign (no hysteresis): under ~100 MiB free densify ahead; over ~100 MiB only heights confirm will consume in the next ~1 min at tip rate; at/over 1 GiB assign-stop (`RBITCOIN_BLOCK_QUEUE_GB` / `_BYTES`, `0` = unlimited) fill holes through the already-fetched height horizon only (BQ max / lookup_taken) — do not grow past it. **Never** refuse enqueue. `bytes()` is **raw only** | Peer **BlockFramed** enqueues **raw** frame payload and stamps Σ `tx.input` via a CompactSize walk (no `Block` decode). Lookup packs/holds on that count; **dequeues** after load-batch send. Decoded `Arc<Block>` + `TxPrecompute` live on **loadq** (cap 14), then scriptq/writeq. **Have-body** (hole / densify / receive) is confirmed ∨ BQ hash ∨ `H ≤ lookup_taken_hi`. **Never both** raw and decoded. **RAM-only by design**. Restart empties BQ+loadq. Logs: `bq soft=n/win RAM=` `loadq=n/14`. |
+| **In-RAM body queue** | Soft densify assign (no hysteresis): under ~100 MiB free densify ahead; over ~100 MiB only heights confirm will consume in the next ~1 min at tip rate; at/over 1 GiB assign-stop (`RBITCOIN_BLOCK_QUEUE_GB` / `_BYTES`, `0` = unlimited) holes only within that ~1 min window **and** not past fetched_hi (do not grow past fetched; do not densify far holes outside the window). **Never** refuse enqueue. `bytes()` is **raw only** | Peer **BlockFramed** enqueues **raw** frame payload and stamps Σ `tx.input` via a CompactSize walk (no `Block` decode). Lookup packs/holds on that count; **dequeues** after load-batch send. Decoded `Arc<Block>` + `TxPrecompute` live on **loadq** (cap 14), then scriptq/writeq. **Have-body** (hole / densify / receive) is confirmed ∨ BQ hash ∨ `H ≤ lookup_taken_hi`. **Never both** raw and decoded. **RAM-only by design**. Restart empties BQ+loadq. Logs: `bq soft=n/win RAM=` `loadq=n/14`. |
 | **Body densify height horizon** | `CONTIG_DENSIFY_AHEAD` (64 k past tip) | Safety max walk/receive; primary gate is soft assign (100 MiB free / 1 min confirm window). |
 | **Confirm feed** | readiness (height/hash), no wire retain | Load pack / lookup-wave caps: [`concurrency.md`](./concurrency.md). Requeue / finish on outcome |
 
@@ -74,7 +74,7 @@ is over target.
 | Allowed | Forbidden |
 |---------|-----------|
 | Limit **densify getdata assign** when BQ payload is over ~100 MiB to heights confirm will consume in the next ~1 min at tip rate | Await a soft gate **before** the next TCP read on a peer |
-| At/over 1 GiB assign-stop, densify **holes in the already-fetched height range only** (do not grow past BQ max / lookup_taken) | Drop a body we already received solely for soft budget |
+| At/over 1 GiB assign-stop, densify holes only within the ~1 min tip-rate window **and** not past fetched_hi (do not grow past fetched; do not densify far holes outside the window) | Drop a body we already received solely for soft budget |
 | Free densify ahead while BQ payload is under ~100 MiB | Make healthy peers look stalled by parking the reader on soft backpressure |
 | Overshoot soft limits while in-flight requests complete; accept all in-flight bodies via `block_queue_offer` (assign-stop is ignored on offer) | Bound process RAM by refusing peer bytes already on the wire |
 

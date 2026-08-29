@@ -12,8 +12,9 @@ pub const BQ_SOFT_FREE_BYTES: u64 = 100 * 1024 * 1024;
 /// rate. Tunable constant — no hysteresis band.
 pub const BQ_SOFT_CONFIRM_SECS: f64 = 60.0;
 
-/// Default densify assign-stop (1 GiB). Over this, fill holes in the already
-/// fetched height range; do not grow past that horizon. Override with
+/// Default densify assign-stop (1 GiB). At/over this, densify only holes within
+/// the ~1 min tip-rate confirm window **and** not past `fetched_hi` (do not grow
+/// past fetched; do not densify far holes outside the window). Override with
 /// `RBITCOIN_BLOCK_QUEUE_BYTES` / `_GB` (`0` = unlimited).
 pub const BQ_ASSIGN_STOP_BYTES: u64 = 1024 * 1024 * 1024;
 
@@ -61,8 +62,10 @@ pub fn bq_assign_stop_bytes() -> u64 {
 
 /// Inclusive densify band high height for getdata assign.
 ///
-/// - **At/over** `assign_stop_bytes`: holes through `fetched_hi` only (do not
-///   grow past the already-fetched horizon). No fetched range → empty band.
+/// - **At/over** `assign_stop_bytes`: holes only within the ~1 min tip-rate
+///   confirm window **and** not past `fetched_hi` (do not grow past fetched;
+///   do not densify far holes outside the window). No usable fetched range →
+///   empty band.
 /// - **Under** [`BQ_SOFT_FREE_BYTES`]: full `densify_hi` (usual densify ahead).
 /// - **Over** free bytes (and under assign-stop): only heights confirm will
 ///   pick up within [`BQ_SOFT_CONFIRM_SECS`] at current rate —
@@ -82,8 +85,14 @@ pub fn soft_densify_band_hi(
         return densify_hi;
     }
     if soft_assign_stopped(depth_bytes, assign_stop_bytes) {
+        let n = soft_confirm_window_n(rate_blocks_per_s);
+        let window_hi = if n == 0 {
+            path_lo.min(densify_hi)
+        } else {
+            path_lo.saturating_add(n.saturating_sub(1)).min(densify_hi)
+        };
         return match fetched_hi {
-            Some(h) if h >= path_lo => h.min(densify_hi),
+            Some(h) if h >= path_lo => window_hi.min(h),
             _ => path_lo.saturating_sub(1),
         };
     }
@@ -168,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn assign_stop_clamps_to_fetched_horizon() {
+    fn assign_stop_clamps_to_confirm_window_and_fetched() {
         let stop = 2048u64;
         let over = 4096u64;
         let free = BQ_SOFT_FREE_BYTES;
@@ -182,15 +191,26 @@ mod tests {
             6,
             "over free / under 1 GiB still uses confirm window"
         );
-        // Over stop: fill through fetched_hi, do not grow, ignore 1-min window.
+        // Over stop: min(confirm_window_hi, fetched_hi, densify_hi); rate 5 → window 300.
         assert_eq!(
             soft_densify_band_hi(1, 1000, over, Some(5.0), stop, Some(80)),
-            80
+            80,
+            "fetched_hi below window → fetched_hi"
+        );
+        assert_eq!(
+            soft_densify_band_hi(1, 1000, over, Some(5.0), stop, Some(500)),
+            300,
+            "fetched_hi above window → confirm window, not fetched_hi"
         );
         assert_eq!(
             soft_densify_band_hi(1, 50, over, Some(5.0), stop, Some(80)),
             50,
-            "fetched_hi clamped to densify_hi"
+            "densify_hi below fetched and window → densify_hi"
+        );
+        assert_eq!(
+            soft_densify_band_hi(1, 1000, over, None, stop, Some(80)),
+            1,
+            "rate cold → path_lo only, not full fetched"
         );
         assert_eq!(
             soft_densify_band_hi(1, 1000, over, Some(5.0), stop, None),
