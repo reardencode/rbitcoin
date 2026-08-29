@@ -304,10 +304,17 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     if config.whitelist.iter().any(|w| w.contains("relay")) {
         node.peers.set_relay_perm(true);
     }
+    if config.whitelist.iter().any(|w| w.contains("forcerelay")) {
+        node.peers.set_forcerelay_perm(true);
+        node.peers.set_relay_perm(true);
+    }
     if let Some(s) = config.min_relay_fee_btc.as_deref() {
         if let Some(sat) = parse_btc_to_sat(s) {
             mempool.set_min_relay_sat_kvb(sat);
         }
+    }
+    if let Some(h) = config.mempool_expiry_hours {
+        mempool.set_expiry_hours(h);
     }
     node.hub
         .attach_mempool(mempool.clone())
@@ -813,6 +820,14 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 }
                 Err(e) => warn!("rpc start warning: {e}"),
             }
+        }
+    }
+
+    if let Some(cmd) = config.startup_notify.as_deref() {
+        match std::process::Command::new("sh").arg("-c").arg(cmd).status() {
+            Ok(st) if st.success() => {}
+            Ok(st) => warn!("startupnotify exited {st}: {cmd}"),
+            Err(e) => warn!("startupnotify failed: {e}: {cmd}"),
         }
     }
 

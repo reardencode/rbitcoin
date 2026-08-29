@@ -306,9 +306,7 @@ reason = "core-log"
 
 [[test]]
 name = "feature_startupnotify.py"
-status = "skip"
-reason = "rpc-missing"
-analog = "none (startupnotify)"
+status = "run"
 
 [[test]]
 name = "feature_taproot.py"
@@ -440,9 +438,7 @@ reason = "policy-libre"
 
 [[test]]
 name = "mempool_expiry.py"
-status = "skip"
-reason = "rpc-missing"
-analog = "follow-up: expiry"
+status = "run"
 
 [[test]]
 name = "mempool_limit.py"
@@ -604,9 +600,7 @@ analog = "follow-up: inbound eviction"
 
 [[test]]
 name = "p2p_feefilter.py"
-status = "skip"
-reason = "rpc-missing"
-analog = "follow-up: feefilter"
+status = "run"
 
 [[test]]
 name = "p2p_filter.py"

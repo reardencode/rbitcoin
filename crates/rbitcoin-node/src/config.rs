@@ -94,6 +94,10 @@ pub struct NodeConfig {
     pub blocksonly: bool,
     /// Core `-minrelaytxfee` in BTC/kvB (None = Libre default).
     pub min_relay_fee_btc: Option<String>,
+    /// Core `-mempoolexpiry` hours (`None` = 336).
+    pub mempool_expiry_hours: Option<u64>,
+    /// Core `-startupnotify` shell command (run once after start).
+    pub startup_notify: Option<String>,
     /// Core `-permitbaremultisig` (default true).
     pub permit_bare_multisig: bool,
     /// Core `-limitclustercount` overlay (`None` = mempool default 64).
@@ -151,6 +155,8 @@ impl Default for NodeConfig {
             whitelist: Vec::new(),
             blocksonly: false,
             min_relay_fee_btc: None,
+            mempool_expiry_hours: None,
+            startup_notify: None,
             permit_bare_multisig: true,
             limit_cluster_count: None,
             limit_cluster_size_kvb: None,
@@ -516,6 +522,17 @@ impl NodeConfig {
                         ));
                     }
                     self.min_relay_fee_btc = Some(val.to_string());
+                }
+                "mempoolexpiry" | "mempool_expiry" => {
+                    let h: u64 = val
+                        .parse()
+                        .map_err(|e| NodeError::Config(format!("conf mempoolexpiry: {e}")))?;
+                    self.mempool_expiry_hours = Some(h.max(1));
+                }
+                "startupnotify" | "startup_notify" => {
+                    if !val.is_empty() {
+                        self.startup_notify = Some(val.to_string());
+                    }
                 }
                 "permitbaremultisig" | "permit_bare_multisig" => {
                     self.permit_bare_multisig = parse_conf_bool(val)
