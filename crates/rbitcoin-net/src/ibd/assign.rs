@@ -243,6 +243,13 @@ pub(crate) fn assign_work_ordered(
     }
     st.assign_path_lo = path_lo;
     st.densify_scan_lo = st.densify_scan_lo.max(path_lo);
+    if !alive
+        .iter()
+        .any(|&pid| peer_has_slot(st, pid, densify_per_peer))
+    {
+        finish_assign(loop_stats, t0, issued);
+        return;
+    }
     let densify_lo = path_lo.max(st.densify_scan_lo);
     let densify = collect_height_band(st, hub, densify_lo, band_hi, room.max(1));
     if densify.is_empty() {
@@ -1378,6 +1385,57 @@ mod tests {
             st.inflight.get(&want).is_some_and(|r| r.contains_peer(1)),
             "first densify hash must go to fastest peer; inflight={:?}",
             st.inflight.get(&want).map(|r| &r.peers)
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn densify_skips_band_walk_when_peers_at_cap() {
+        use super::super::state::InflightReq;
+        use bitcoin::hashes::Hash as _;
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let mut st = IbdWorkState::new(
+            vec![dummy_slot(0), dummy_slot(1)],
+            hub.tip_hash(),
+            hub.tip_height(),
+        );
+        let stats = LoopStats::default();
+        let mut cfg = IbdConfig::for_test();
+        cfg.window = 128;
+        cfg.per_peer = 16;
+        let path_lo = hub.tip_height().unwrap_or(0).saturating_add(1);
+        plant_work_path(&mut st, path_lo, 70);
+        for ht in path_lo..=32 {
+            hub.query
+                .block_queue_offer(ht, h(ht).to_byte_array(), 1, &[0u8; 80])
+                .unwrap();
+            st.body.mark_pending(h(ht));
+        }
+        for i in 0..16u32 {
+            let ht = 40 + i;
+            let hash = h(ht);
+            let pid = (i % 2) as usize;
+            st.inflight.insert(hash, InflightReq::new(pid));
+            st.slots[pid].in_flight.insert(hash);
+        }
+        st.densify_scan_lo = 40;
+        let before_keys: HashSet<_> = st.inflight.keys().copied().collect();
+        assign_work_ordered(
+            &mut st,
+            &hub,
+            &cfg,
+            &stats,
+            path_lo,
+            AssignDepth::Full,
+            None,
+        );
+        let after_keys: HashSet<_> = st.inflight.keys().copied().collect();
+        assert_eq!(after_keys, before_keys, "no new densify when peers at cap");
+        assert_eq!(
+            st.densify_scan_lo, 40,
+            "band walk must not advance scan_lo; scan_lo={}",
+            st.densify_scan_lo
         );
         let _ = std::fs::remove_dir_all(dir);
     }
