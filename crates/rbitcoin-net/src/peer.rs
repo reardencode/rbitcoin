@@ -669,6 +669,9 @@ pub async fn peer_session_with(
             }
         }
     });
+    if let Some(s) = meta.session.as_ref() {
+        s.set_writer_abort(writer_task.abort_handle());
+    }
 
     if let Some(s) = meta.session.as_ref() {
         let _ = maybe_queue_addrfetch_getaddr(&out_tx, s);
@@ -937,7 +940,15 @@ pub async fn peer_session_with(
                 frame = read_v2_frame(&mut reader, magic) => {
                     let frame = match frame {
                         Ok(f) => f,
-                        Err(NetError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        Err(NetError::Io(e))
+                            if matches!(
+                                e.kind(),
+                                std::io::ErrorKind::UnexpectedEof
+                                    | std::io::ErrorKind::ConnectionReset
+                                    | std::io::ErrorKind::BrokenPipe
+                                    | std::io::ErrorKind::ConnectionAborted
+                            ) =>
+                        {
                             return Ok(());
                         }
                         Err(NetError::MessageTooLarge(n)) => {

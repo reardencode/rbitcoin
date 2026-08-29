@@ -129,6 +129,9 @@ pub struct LivePeer {
     connected_at: AtomicU64,
     /// Skip INV for mempool txs with `accept_gen < floor` (post-verack privacy).
     inv_gen_floor: AtomicU64,
+    /// Writer-task abort — `disconnectnode` aborts the write half so the peer
+    /// sees FIN without waiting for our read loop (`mempool_reorg` disconnect_nodes).
+    writer_abort: Mutex<Option<tokio::task::AbortHandle>>,
 }
 
 impl LivePeer {
@@ -194,6 +197,21 @@ impl LivePeer {
 
     pub fn request_disconnect(&self) {
         self.stop.store(true, Ordering::SeqCst);
+    }
+
+    pub fn set_writer_abort(&self, handle: tokio::task::AbortHandle) {
+        *self.writer_abort.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
+    }
+
+    fn take_writer_abort(&self) -> Option<tokio::task::AbortHandle> {
+        self.writer_abort
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+
+    fn clear_out_tx(&self) {
+        *self.out_tx.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     pub fn note_failed_cmpct(&self, hash: BlockHash) {
@@ -1015,6 +1033,7 @@ impl PeerHub {
             out_tx: Mutex::new(None),
             connected_at: AtomicU64::new(connected_at),
             inv_gen_floor: AtomicU64::new(0),
+            writer_abort: Mutex::new(None),
         });
         // Handshake already exchanged version + verack (+ maybe ping).
         peer.note_recv("version", 100);
@@ -1170,12 +1189,20 @@ impl PeerHub {
     }
 
     pub fn disconnect_id(&self, id: u64) -> bool {
-        if let Some(p) = self.get(id) {
-            p.request_disconnect();
-            true
-        } else {
-            false
+        let Some(p) = self.get(id) else {
+            return false;
+        };
+        p.request_disconnect();
+        // Drop our writer-channel sender and abort the writer task so TCP FIN
+        // goes out even if the read loop is between ticks.
+        p.clear_out_tx();
+        if let Some(h) = p.take_writer_abort() {
+            h.abort();
         }
+        // Drop from getpeerinfo before the session task finishes tearing down
+        // so disconnect_nodes' far-side wait sees us gone promptly.
+        self.unregister(id);
+        true
     }
 
     /// Core `AttemptToEvictConnection`: disconnect one unprotected inbound.
@@ -1207,11 +1234,16 @@ impl PeerHub {
     }
 
     pub fn disconnect_addr(&self, addr: SocketAddr) -> bool {
-        let g = self.live.read().unwrap_or_else(|e| e.into_inner());
+        let ids: Vec<u64> = {
+            let g = self.live.read().unwrap_or_else(|e| e.into_inner());
+            g.values()
+                .filter(|p| p.addr == addr)
+                .map(|p| p.id)
+                .collect()
+        };
         let mut n = 0usize;
-        for p in g.values() {
-            if p.addr == addr {
-                p.request_disconnect();
+        for id in ids {
+            if self.disconnect_id(id) {
                 n += 1;
             }
         }
@@ -1306,8 +1338,12 @@ mod tests {
         assert!(snap[0].bytesrecv_per_msg.get("pong").copied().unwrap() >= 29);
         assert!(hub.disconnect_id(0));
         assert!(p.stop.load(Ordering::SeqCst));
-        hub.unregister(0);
-        assert!(hub.snapshot().is_empty());
+        // disconnectnode must clear getpeerinfo immediately (mempool_reorg
+        // disconnect_nodes waits ≤5s on the far side seeing us gone).
+        assert!(
+            hub.snapshot().is_empty(),
+            "disconnect_id must unregister before the session task exits"
+        );
     }
 
     #[test]
