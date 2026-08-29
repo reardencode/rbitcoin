@@ -419,6 +419,7 @@ fn dispatch_inner(ctx: &RpcContext, method: &str, params: RpcParams) -> Result<V
         "disconnectnode" => disconnectnode(ctx, &params),
         "addconnection" => addconnection(ctx, &params),
         "addpeeraddress" => addpeeraddress(ctx, &params),
+        "getnodeaddresses" => getnodeaddresses(ctx, &params),
         "getmempoolinfo" => {
             params.reject_unknown(&[])?;
             getmempoolinfo(ctx)
@@ -1233,6 +1234,66 @@ fn addpeeraddress(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> 
     Ok(json!({ "success": true }))
 }
 
+/// Core `getnodeaddresses`: sample from addrman (`count=0` → all).
+fn getnodeaddresses(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
+    params.reject_unknown(&["count", "network"])?;
+    let count_raw = params.get(0, "count");
+    let count: u64 = match count_raw {
+        None | Some(Value::Null) => 1,
+        Some(v) => {
+            let n = json_i64(v)
+                .ok_or_else(|| rpc_error(ERR_INVALID_PARAMS, "count must be an integer"))?;
+            if n < 0 {
+                return Err(rpc_error(
+                    ERR_INVALID_PARAMETER,
+                    "Address count out of range",
+                ));
+            }
+            n as u64
+        }
+    };
+    let network = params.opt_str(1, "network")?;
+    if let Some(want) = network {
+        if !matches!(want, "ipv4" | "ipv6" | "onion" | "i2p" | "cjdns") {
+            return Err(rpc_error(
+                ERR_INVALID_PARAMETER,
+                format!("Network not recognized: {want}"),
+            ));
+        }
+    }
+    let Some(am) = ctx.addrman.as_ref() else {
+        return Ok(json!([]));
+    };
+    let g = am.lock().unwrap_or_else(|e| e.into_inner());
+    let mut out = Vec::new();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    for e in g.entries() {
+        let net = match e.addr.ip() {
+            std::net::IpAddr::V4(_) => "ipv4",
+            std::net::IpAddr::V6(_) => "ipv6",
+        };
+        if let Some(want) = network {
+            if want != net {
+                continue;
+            }
+        }
+        out.push(json!({
+            "time": now,
+            "services": rbitcoin_net::local_service_flags().to_u64(),
+            "address": e.addr.ip().to_string(),
+            "port": e.addr.port(),
+            "network": net,
+        }));
+        if count > 0 && (out.len() as u64) >= count {
+            break;
+        }
+    }
+    Ok(Value::Array(out))
+}
+
 /// Live P2P sessions (Core `getconnectioncount`). Inbound + outbound.
 /// Falls back to the outbound-follow counter when no PeerHub is attached.
 fn connection_count(ctx: &RpcContext) -> u64 {
@@ -1366,7 +1427,7 @@ fn mempool_graph_json(mp: &MempoolHub, txid: &Txid, fee: u64, weight: u64) -> Va
         // Top-level `modifiedfee` stays the base fee (same pattern as
         // ancestorfees/descendantfees). Real modified value is `fees.modified`.
         "modifiedfee": sat_btc_json(fee as i64),
-        "time": 0,
+        "time": mp.accept_time_txid(txid).unwrap_or(0),
         "height": 0,
         "descendantcount": dc,
         "descendantsize": dsz,
@@ -1432,7 +1493,10 @@ fn getmempoolentry(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value>
         }
         return Ok(entry);
     }
-    Err(rpc_error(ERR_MISC, "Transaction not in mempool"))
+    Err(rpc_error(
+        ERR_INVALID_ADDRESS_OR_KEY,
+        "Transaction not in mempool",
+    ))
 }
 
 fn getrawtransaction(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {

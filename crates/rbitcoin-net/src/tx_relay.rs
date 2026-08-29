@@ -263,6 +263,9 @@ pub struct MempoolPerfSample {
     pub list_live_meta: u64,
 }
 
+/// Core default `-mempoolexpiry` (336 hours) in seconds.
+const DEFAULT_MEMPOOL_EXPIRY_SECS: u64 = 336 * 3600;
+
 /// Shared mempool + relay gate used by peer sessions and tip confirm.
 pub struct MempoolHub {
     inner: RwLock<ActiveMempool>,
@@ -330,6 +333,8 @@ pub struct MempoolHub {
     /// Monotonic accept generation for `p2p_tx_privacy` (skip pre-handshake txs).
     next_accept_gen: AtomicU64,
     accept_gen: Mutex<HashMap<Wtxid, u64>>,
+    /// Core `-mempoolexpiry` in seconds (default 336h).
+    expiry_secs: AtomicU64,
 }
 
 impl MempoolHub {
@@ -404,6 +409,7 @@ impl MempoolHub {
             accept_at: Mutex::new(HashMap::new()),
             next_accept_gen: AtomicU64::new(1),
             accept_gen: Mutex::new(HashMap::new()),
+            expiry_secs: AtomicU64::new(DEFAULT_MEMPOOL_EXPIRY_SECS),
             fee_deltas: Mutex::new(HashMap::new()),
             template_updates: AtomicU64::new(0),
         };
@@ -665,6 +671,74 @@ impl MempoolHub {
         let _ = self.inv_flush.send(());
     }
 
+    pub fn set_expiry_hours(&self, hours: u64) {
+        let secs = hours.saturating_mul(3600).max(1);
+        self.expiry_secs.store(secs, Ordering::Relaxed);
+    }
+
+    pub fn expiry_hours(&self) -> u64 {
+        self.expiry_secs.load(Ordering::Relaxed) / 3600
+    }
+
+    /// Entry time for `getmempoolentry.time` (mock/wall seconds at accept).
+    pub fn accept_time_txid(&self, txid: &Txid) -> Option<u64> {
+        let w = self.wtxid_by_txid.lock().unwrap().get(txid).copied()?;
+        self.accept_at.lock().unwrap().get(&w).copied()
+    }
+
+    /// Drop live txs (and in-mempool descendants) older than `-mempoolexpiry`.
+    /// Called when a new tx is admitted so expiry is checked on the accept path.
+    pub fn expire_stale(&self) -> usize {
+        let now = self.relay_now_secs();
+        let lim = self.expiry_secs.load(Ordering::Relaxed);
+        if lim == 0 || now == 0 {
+            return 0;
+        }
+        let expired_roots: Vec<Txid> = {
+            let ats = self.accept_at.lock().unwrap();
+            let by_tx = self.wtxid_by_txid.lock().unwrap();
+            by_tx
+                .iter()
+                .filter_map(|(txid, wtxid)| {
+                    let at = ats.get(wtxid)?;
+                    if now.saturating_sub(*at) >= lim {
+                        Some(*txid)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        if expired_roots.is_empty() {
+            return 0;
+        }
+        let mut kill = std::collections::BTreeSet::new();
+        {
+            let g = self.inner.read().unwrap();
+            for t in &expired_roots {
+                if let Some(set) = g.graph.descendant_set(t) {
+                    kill.extend(set);
+                } else {
+                    kill.insert(*t);
+                }
+            }
+        }
+        let mut n = 0usize;
+        let mut g = self.inner.write().unwrap();
+        for t in kill.iter().rev() {
+            if g.graph.get(t).is_some() {
+                if g.remove_txid(t).is_ok() {
+                    self.unindex_txid(t);
+                    n += 1;
+                }
+            }
+        }
+        if n > 0 {
+            self.note_template_update();
+        }
+        n
+    }
+
     pub fn subscribe_inv_flush(&self) -> broadcast::Receiver<()> {
         self.inv_flush.subscribe()
     }
@@ -913,6 +987,8 @@ impl MempoolHub {
                     .unwrap_or_default();
                 self.publish_announce(&r, shs);
                 self.note_template_update();
+                // Core: expiry checked when a new tx is added to the mempool.
+                let _ = self.expire_stale();
                 Ok(r)
             }
             Err(e) => self.finish_accept_err(us, e),
@@ -1994,6 +2070,60 @@ mod tests {
             let _ = std::fs::remove_dir_all(&mp);
         }
 
+        let _ = std::fs::remove_dir_all(&store_dir);
+    }
+
+    /// Parent+child expire together when mocktime past `-mempoolexpiry` and a
+    /// new tx triggers the check (`mempool_expiry.py`).
+    #[test]
+    fn expire_stale_removes_parent_and_child_keeps_priority() {
+        use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
+        use rbitcoin_primitives::Height;
+
+        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+        }
+        let store_dir = tmp();
+        let q = Query::open_or_create(&store_dir).unwrap();
+        let params = ChainParams::regtest();
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+        let (_tip, _tip_time, cbs) = rbitcoin_consensus::pad_empty_from(
+            &q,
+            &params,
+            genesis.block_hash(),
+            genesis.header.time,
+            1,
+            102,
+            4,
+        );
+        let q = Arc::new(q);
+        let spk = ScriptBuf::from_bytes(vec![0x51]);
+        let mp = tmp();
+        let hub = MempoolHub::open(&mp, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        hub.set_expiry_hours(1);
+        hub.note_mock_now(1_000);
+        let parent = spend_true(cbs[0], 1_000, spk.clone());
+        hub.accept_tx(&parent).expect("parent");
+        hub.prioritise_tx(parent.compute_txid(), 50_000);
+        let other = spend_true(cbs[1], 2_000, spk.clone());
+        hub.accept_tx(&other).expect("other");
+        let trigger_utxo = cbs[2];
+        hub.note_mock_now(1_000 + 3600 + 5);
+        let trigger = spend_true(trigger_utxo, 3_000, spk);
+        hub.accept_tx(&trigger).expect("trigger expires stale");
+        assert!(
+            !hub.contains(&parent.compute_txid()),
+            "parent must expire after mempoolexpiry"
+        );
+        assert!(
+            !hub.contains(&other.compute_txid()),
+            "sibling accepted before expiry must also expire"
+        );
+        assert!(hub.contains(&trigger.compute_txid()));
+        assert_eq!(hub.fee_delta(&parent.compute_txid()), 50_000);
+        let _ = std::fs::remove_dir_all(&mp);
         let _ = std::fs::remove_dir_all(&store_dir);
     }
 

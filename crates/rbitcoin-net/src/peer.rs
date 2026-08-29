@@ -599,7 +599,13 @@ pub async fn peer_session_with(
         .mempool()
         .map(|m| m.min_relay_sat_kvb())
         .unwrap_or(rbitcoin_consensus::policy::MIN_RELAY_FEE_RATE_SAT_PER_KVB);
-    let _ = write_v2_msg(&mut writer, NetworkMessage::FeeFilter(fee_sat as i64)).await;
+    let skip_feefilter = meta.session.as_ref().is_some_and(|s| {
+        s.conn_type == crate::peers::PeerConnType::BlockRelay
+            || s.hub().is_some_and(|h| h.is_forcerelay_perm())
+    }) || hub.mempool().is_none_or(|m| !m.relay_enabled());
+    if !skip_feefilter {
+        let _ = write_v2_msg(&mut writer, NetworkMessage::FeeFilter(fee_sat as i64)).await;
+    }
 
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<NetworkMessage>();
     if let Some(s) = meta.session.as_ref() {
@@ -822,6 +828,21 @@ pub async fn peer_session_with(
                                         && mp.contains(&txid)
                                         && (mp.relay_enabled() || mp.is_unbroadcast(&txid))
                                     {
+                                        let peer_min = session
+                                            .as_ref()
+                                            .map(|s| s.minfeefilter_sat_kvb())
+                                            .unwrap_or(0);
+                                        if peer_min > 0 {
+                                            if let Some((fee, weight)) = mp.get_live_meta(&txid) {
+                                                let rate =
+                                                    rbitcoin_consensus::policy::fee_rate_sat_per_kvb(
+                                                        fee, weight,
+                                                    );
+                                                if rate < peer_min {
+                                                    continue;
+                                                }
+                                            }
+                                        }
                                         let inv = if let Some(tx) = mp.get_tx(&txid) {
                                             Inventory::WTx(tx.compute_wtxid())
                                         } else {
@@ -1228,6 +1249,15 @@ pub fn force_announce_txid(hub: &ChainHub, peers: &crate::peers::PeerHub, txid: 
         if s.has_announced_wtx(&w) {
             continue;
         }
+        let peer_min = s.minfeefilter_sat_kvb();
+        if peer_min > 0 {
+            if let Some((fee, weight)) = mp.get_live_meta(&txid) {
+                let rate = rbitcoin_consensus::policy::fee_rate_sat_per_kvb(fee, weight);
+                if rate < peer_min {
+                    continue;
+                }
+            }
+        }
         let Some(out) = s.writer() else {
             continue;
         };
@@ -1283,6 +1313,15 @@ fn queue_due_tx_invs(
             .is_some_and(|g| g < session.inv_gen_floor())
         {
             continue;
+        }
+        let peer_min = session.minfeefilter_sat_kvb();
+        if peer_min > 0 {
+            if let Some((fee, weight)) = mp.get_live_meta(&txid) {
+                let rate = rbitcoin_consensus::policy::fee_rate_sat_per_kvb(fee, weight);
+                if rate < peer_min {
+                    continue;
+                }
+            }
         }
         let local = !mp.relay_enabled() && mp.is_unbroadcast(&txid);
         let age_due_this = mp.tx_inv_due(&w);

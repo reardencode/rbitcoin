@@ -362,6 +362,10 @@ impl LivePeer {
         self.minfeefilter_sat_kvb.store(sat_kvb, Ordering::Relaxed);
     }
 
+    pub fn minfeefilter_sat_kvb(&self) -> u64 {
+        self.minfeefilter_sat_kvb.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn hub(&self) -> Option<Arc<PeerHub>> {
         self.owner.upgrade()
     }
@@ -591,6 +595,8 @@ pub struct PeerHub {
     noban: AtomicBool,
     /// Core whitelist `relay` — accept txs even when the node is `-blocksonly`.
     relay_perm: AtomicBool,
+    /// Core whitelist `forcerelay` — no outbound `feefilter` (relay all).
+    forcerelay_perm: AtomicBool,
     /// Parallel compact-fill slots per block: up to 2 inbound + 1 outbound.
     cmpct_fills: Mutex<HashMap<BlockHash, (u8, bool)>>,
     /// Version nonces of outbound sessions still in handshake (Core self-connect).
@@ -610,6 +616,7 @@ impl PeerHub {
             last_inv_headers_sync: Mutex::new(None),
             noban: AtomicBool::new(false),
             relay_perm: AtomicBool::new(false),
+            forcerelay_perm: AtomicBool::new(false),
             cmpct_fills: Mutex::new(HashMap::new()),
             pending_outbound_nonces: Mutex::new(HashSet::new()),
         })
@@ -680,6 +687,15 @@ impl PeerHub {
     /// Core whitelist `relay` — P2P txs allowed while `-blocksonly`.
     pub fn is_relay_perm(&self) -> bool {
         self.relay_perm.load(Ordering::Relaxed)
+    }
+
+    pub fn set_forcerelay_perm(&self, v: bool) {
+        self.forcerelay_perm.store(v, Ordering::Relaxed);
+    }
+
+    /// Core whitelist `forcerelay` — do not send `feefilter`.
+    pub fn is_forcerelay_perm(&self) -> bool {
+        self.forcerelay_perm.load(Ordering::Relaxed)
     }
 
     fn is_preferred_download(p: &LivePeer) -> bool {

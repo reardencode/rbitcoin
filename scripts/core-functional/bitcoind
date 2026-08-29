@@ -61,6 +61,8 @@ FORWARD_FLAGS = frozenset(
         "whitelist",
         "blocksonly",
         "minrelaytxfee",
+        "mempoolexpiry",
+        "startupnotify",
         "permitbaremultisig",
         "limitclustercount",
         "limitclustersize",
@@ -107,6 +109,8 @@ IGNORE_FLAGS = frozenset(
         "walletdir",
         "wallet",
         "noserver",
+        # Wallet create-tx floor; MiniWallet / harness only (p2p_feefilter).
+        "mintxfee",
         # Test-only: refuse public outbound (we already --no-seeds + explicit
         # connect). Not an operator proxy implementation.
         "proxy",
