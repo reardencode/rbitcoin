@@ -1255,6 +1255,71 @@ fn missing_tx_head_with_no_bodies_creates_empty() {
     });
 }
 
+/// A torn Class A truncate at open can leave the head **leading** the bodies.
+/// Open must rebuild the head to match Class A instead of keeping stale
+/// entries past the truncate (which a later seal would trip over).
+#[test]
+fn head_leading_truncated_class_a_rebuilds_on_open() {
+    with_env_lock(|| {
+        let dir = tempfile_dir("head-leads");
+        let mk = |i: u64| {
+            let mut txid = [0u8; 32];
+            txid[0..8].copy_from_slice(&i.to_le_bytes());
+            let rec = TxRecord {
+                txid,
+                version: 1,
+                locktime: 0,
+                input_start_fk: Fk::NULL,
+                input_count: 1,
+                output_start_fk: Fk::NULL,
+                output_count: 1,
+            };
+            let inputs = vec![InputRecord {
+                prev_txid: [0u8; 32],
+                create_fk: Fk::NULL,
+                prev_index: u32::MAX,
+                sequence: u32::MAX,
+                script_sig: vec![],
+                witness: vec![],
+            }];
+            let outputs = vec![OutputRecord::unspent(1, vec![0x51])];
+            (rec, inputs, outputs)
+        };
+        {
+            let t = create_tiny(&dir);
+            for i in 1..=20u64 {
+                let _ = t.put_full_batch_indexed(&[mk(i)], true).unwrap();
+            }
+            t.flush().unwrap();
+        }
+        // Torn state: one stem shorter than the head coverage. Open repairs
+        // Class A to the min count (15), leaving the head claiming 20.
+        {
+            let txids = crate::txid_body::TxidBody::open(&dir).unwrap();
+            txids.truncate_to_count(15).unwrap();
+        }
+        let t = TxTable::open(&dir).unwrap();
+        assert_eq!(t.count(), 15);
+        assert!(
+            t.head.last_inserted_fk() <= t.count(),
+            "head must not lead Class A after open (covered={} n={})",
+            t.head.last_inserted_fk(),
+            t.count()
+        );
+        for i in 1..=15u64 {
+            let mut txid = [0u8; 32];
+            txid[0..8].copy_from_slice(&i.to_le_bytes());
+            assert_eq!(t.get_fk_by_txid(&txid).unwrap(), Some(Fk(i)), "fk {i}");
+        }
+        for i in 16..=20u64 {
+            let mut txid = [0u8; 32];
+            txid[0..8].copy_from_slice(&i.to_le_bytes());
+            assert_eq!(t.get_fk_by_txid(&txid).unwrap(), None, "truncated fk {i}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    });
+}
+
 #[test]
 fn get_output_spender_metas_at_one_walk() {
     let dir = std::env::temp_dir().join(format!(
