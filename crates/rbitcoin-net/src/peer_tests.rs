@@ -284,7 +284,7 @@ fn header_getdata_is_compact_after_sendcmpct() {
     hub.ensure_genesis().unwrap();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel();
     let mut pending_headers = HashMap::new();
-    let mut pending_blocks = HashMap::new();
+    let mut pending_blocks = PendingBlocks::new();
     let mut pending_cmpct = HashMap::new();
     let mut from_peer = HashMap::new();
     let mut requested = HashSet::new();
@@ -368,7 +368,7 @@ fn submitheader_parent_p2p_child_header_getdatas_body() {
 
     let (out_tx, mut out_rx) = mpsc::unbounded_channel();
     let mut pending_headers = HashMap::new();
-    let mut pending_blocks = HashMap::new();
+    let mut pending_blocks = PendingBlocks::new();
     let mut pending_cmpct = HashMap::new();
     let mut from_peer = HashMap::new();
     let mut requested = HashSet::new();
@@ -655,7 +655,7 @@ fn minchainwork_does_not_getdata_below_floor() {
 
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
         let mut pending_headers = HashMap::new();
-        let mut pending_blocks = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
         let mut pending_cmpct = HashMap::new();
         let mut from_peer = HashMap::new();
         let mut requested = HashSet::new();
@@ -793,7 +793,7 @@ fn minchainwork_one_header_announces_ignore_height_14() {
 
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
         let mut pending_headers = HashMap::new();
-        let mut pending_blocks = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
         let mut pending_cmpct = HashMap::new();
         let mut from_peer = HashMap::new();
         let mut requested = HashSet::new();
@@ -897,7 +897,7 @@ fn blocksonly_tx_and_inv_raise_ban() {
 
         let (out_tx, _out_rx) = mpsc::unbounded_channel();
         let mut pending_headers = HashMap::new();
-        let mut pending_blocks = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
         let mut pending_cmpct = HashMap::new();
         let mut from_peer = HashMap::new();
         let mut requested = HashSet::new();
@@ -1123,7 +1123,7 @@ fn blocksonly_sendraw_invs_unbroadcast_to_inbound() {
         let mut send_cmpct = false;
         let mut cmpct_ver = 2u32;
         let mut pending_headers = HashMap::new();
-        let mut pending_blocks = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
         let mut pending_cmpct = HashMap::new();
         let mut from_peer = HashMap::new();
         let mut ban = 0u32;
@@ -1553,7 +1553,7 @@ fn mocktime_jump_does_not_inv_or_serve_new_sendraw() {
         let mut send_cmpct = false;
         let mut cmpct_ver = 2u32;
         let mut pending_headers = HashMap::new();
-        let mut pending_blocks = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
         let mut pending_cmpct = HashMap::new();
         let mut from_peer = HashMap::new();
         let mut ban = 0u32;
@@ -1679,7 +1679,7 @@ fn blocksonly_relay_perm_tx_invs_other_inbound() {
         let mut send_cmpct = false;
         let mut cmpct_ver = 2u32;
         let mut pending_headers = HashMap::new();
-        let mut pending_blocks = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
         let mut pending_cmpct = HashMap::new();
         let mut from_first = HashMap::new();
         let mut ban = 0u32;
@@ -1753,7 +1753,7 @@ fn cmpct_helpers_without_mempool_and_queue_out_closed() {
     assert!(hdrs.is_empty() || !hdrs.is_empty());
 
     // drain_pending empty is a no-op.
-    let mut pb = HashMap::new();
+    let mut pb = PendingBlocks::new();
     let mut ph = HashMap::new();
     let (tx, _rx) = mpsc::unbounded_channel();
     drain_pending(&hub, &tx, &mut pb, &mut ph, &mut HashSet::new(), false).unwrap();
@@ -1870,7 +1870,7 @@ fn compact_child_of_invalid_disconnects_cached_same_stays() {
         let mut send_cmpct = false;
         let mut cmpct_ver = 2u32;
         let mut pending_headers = HashMap::new();
-        let mut pending_blocks = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
         let mut pending_cmpct = HashMap::new();
         let mut from_peer = HashMap::new();
         let mut requested = HashSet::new();
@@ -2006,7 +2006,7 @@ fn handle_peer_frame_control_and_inv_paths() {
         let mut send_cmpct = false;
         let mut cmpct_ver = 2u32;
         let mut pending_headers = HashMap::new();
-        let mut pending_blocks = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
         let mut pending_cmpct = HashMap::new();
         let mut from_peer = HashMap::new();
         let mut ban = 0u32;
@@ -2607,7 +2607,7 @@ fn handle_peer_frame_mempool_tx_and_inv_paths() {
         let mut send_cmpct = false;
         let mut cmpct_ver = 2u32;
         let mut pending_headers = HashMap::new();
-        let mut pending_blocks = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
         let mut pending_cmpct = HashMap::new();
         let mut from_peer = HashMap::new();
         let mut ban = 0u32;
@@ -2885,7 +2885,7 @@ fn getdata_tx_notfound_unless_announced_or_reorg() {
         let mut send_cmpct = false;
         let mut cmpct_ver = 2u32;
         let mut pending_headers = HashMap::new();
-        let mut pending_blocks = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
         let mut pending_cmpct = HashMap::new();
         let mut from_peer = HashMap::new();
         let mut ban = 0u32;
@@ -3070,7 +3070,7 @@ fn invalid_getdata_type0_still_serves_tip_block() {
         let mut send_cmpct = false;
         let mut cmpct_ver = 0u32;
         let mut pending_headers = HashMap::new();
-        let mut pending_blocks = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
         let mut pending_cmpct = HashMap::new();
         let mut from_peer = HashMap::new();
         let mut ban = 0u32;
@@ -3444,7 +3444,7 @@ fn drain_requests_missing_parent_of_pending_branch() {
         }
     }
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let mut pb = HashMap::new();
+    let mut pb = PendingBlocks::new();
     pb.insert(orphan.block_hash(), orphan);
     let mut ph = HashMap::new();
     drain_pending(&hub, &tx, &mut pb, &mut ph, &mut HashSet::new(), false).unwrap();
@@ -3526,7 +3526,7 @@ fn drain_connects_pending_child_of_new_tip_after_reorg() {
 
     let b1 = mine(gen, 1_300_001_000, 1);
     let b2 = mine(b1.block_hash(), 1_300_001_600, 2);
-    let mut pb = HashMap::new();
+    let mut pb = PendingBlocks::new();
     pb.insert(b1.block_hash(), b1.clone());
     pb.insert(b2.block_hash(), b2.clone());
     let mut ph = HashMap::new();
@@ -3595,7 +3595,7 @@ fn inv_of_already_asked_block_does_not_getdata() {
 
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
         let mut pending_headers = HashMap::new();
-        let mut pending_blocks = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
         let mut pending_cmpct = HashMap::new();
         let mut from_peer = HashMap::new();
         let mut requested = HashSet::new();
@@ -3685,7 +3685,7 @@ fn bloom_disabled_messages_request_disconnect() {
     hub.ensure_genesis().unwrap();
     let (out_tx, _out_rx) = mpsc::unbounded_channel();
     let mut pending_headers = HashMap::new();
-    let mut pending_blocks = HashMap::new();
+    let mut pending_blocks = PendingBlocks::new();
     let mut pending_cmpct = HashMap::new();
     let mut from_peer = HashMap::new();
     let mut requested = HashSet::new();
@@ -3763,7 +3763,7 @@ fn oversize_locator_request_disconnect() {
     hub.ensure_genesis().unwrap();
     let (out_tx, _out_rx) = mpsc::unbounded_channel();
     let mut pending_headers = HashMap::new();
-    let mut pending_blocks = HashMap::new();
+    let mut pending_blocks = PendingBlocks::new();
     let mut pending_cmpct = HashMap::new();
     let mut from_peer = HashMap::new();
     let mut requested = HashSet::new();
@@ -3931,7 +3931,7 @@ fn redundant_verack_is_ignored_and_logged() {
         let mut send_cmpct = false;
         let mut cmpct_ver = 0u32;
         let mut pending_headers = HashMap::new();
-        let mut pending_blocks = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
         let mut pending_cmpct = HashMap::new();
         let mut from_peer = HashMap::new();
         let mut ban = 0u32;
@@ -4081,7 +4081,7 @@ fn addrfetch_multi_addr_disconnects() {
     let mut send_cmpct = false;
     let mut cmpct_ver = 0u32;
     let mut pending_headers = HashMap::new();
-    let mut pending_blocks = HashMap::new();
+    let mut pending_blocks = PendingBlocks::new();
     let mut pending_cmpct = HashMap::new();
     let mut from_peer = HashMap::new();
     let mut ban = 0u32;
@@ -4224,8 +4224,9 @@ fn addrfetch_times_out_after_300s() {
 
 #[test]
 fn pending_blocks_insert_evicts_at_cap() {
-    let mut pending = HashMap::new();
+    let mut pending = PendingBlocks::new();
     let bits = bitcoin::CompactTarget::from_consensus(0x207f_ffff);
+    let mut hashes = Vec::new();
     for i in 0u32..(MAX_PENDING_BLOCKS_FOR_TEST as u32 + 1) {
         let mut b = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         b.header.merkle_root = bitcoin::TxMerkleNode::from_byte_array({
@@ -4238,9 +4239,15 @@ fn pending_blocks_insert_evicts_at_cap() {
         });
         b.header.bits = bits;
         let h = b.block_hash();
+        hashes.push(h);
         stash_pending_block(&mut pending, h, b);
     }
     assert_eq!(pending.len(), MAX_PENDING_BLOCKS_FOR_TEST);
+    assert!(
+        !pending.contains_key(&hashes[0]),
+        "cap eviction must drop the oldest insert, not HashMap::keys().next()"
+    );
+    assert!(pending.contains_key(&hashes[MAX_PENDING_BLOCKS_FOR_TEST]));
 }
 
 #[test]
@@ -4318,7 +4325,7 @@ fn shorter_higher_work_fork_is_not_hopeless() {
         !announced_tip_is_hopeless(hub.tip_height().unwrap(), announced_h, work_cmp),
         "shorter higher-work path must not be hopeless"
     );
-    let want = fetchable_header_path_bodies(&hub, &pending, tip, &HashMap::new(), &HashSet::new());
+    let want = fetchable_header_path_bodies(&hub, &pending, tip, &PendingBlocks::new(), &HashSet::new());
     assert!(
         !want.is_empty(),
         "must not skip bodies on a shorter higher-work path"
@@ -4413,7 +4420,7 @@ fn connecting_ancient_weaker_headers_request_disconnect() {
         let mut send_cmpct = false;
         let mut cmpct_ver = 2u32;
         let mut pending_headers = HashMap::new();
-        let mut pending_blocks = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
         let mut pending_cmpct = HashMap::new();
         let mut from_peer = HashMap::new();
         let mut requested = HashSet::new();
@@ -4540,7 +4547,7 @@ fn getdata_skips_reconstruct_when_serve_inflight_at_cap() {
         let mut send_cmpct = false;
         let mut cmpct_ver = 2u32;
         let mut pending_headers = HashMap::new();
-        let mut pending_blocks = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
         let mut pending_cmpct = HashMap::new();
         let mut from_peer = HashMap::new();
         let mut requested = HashSet::new();
@@ -4643,7 +4650,7 @@ fn catchup_headers_getdata_stays_in_serve_window() {
         hub.ensure_genesis().unwrap();
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
         let mut pending_headers = HashMap::new();
-        let mut pending_blocks = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
         let mut pending_cmpct = HashMap::new();
         let mut from_peer = HashMap::new();
         let mut requested = HashSet::new();
@@ -4788,7 +4795,7 @@ fn catchup_compact_getdata_clears_requested_for_next_window() {
         assert!(hub.attach_mempool(mp).is_ok());
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
         let mut pending_headers = HashMap::new();
-        let mut pending_blocks = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
         let mut pending_cmpct = HashMap::new();
         let mut from_peer = HashMap::new();
         let mut requested = HashSet::new();
@@ -4961,7 +4968,7 @@ fn full_headers_batch_continues_from_last_header() {
         let mut send_cmpct = false;
         let mut cmpct_ver = 2u32;
         let mut pending_headers = HashMap::new();
-        let mut pending_blocks = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
         let mut pending_cmpct = HashMap::new();
         let mut from_peer = HashMap::new();
         let mut requested = HashSet::new();
@@ -5238,7 +5245,7 @@ fn compact_tip_announce_must_not_wrap_serve_inflight() {
         let mut send_cmpct = true;
         let mut cmpct_ver = 2u32;
         let mut pending_headers = HashMap::new();
-        let mut pending_blocks = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
         let mut pending_cmpct = HashMap::new();
         let mut from_peer = HashMap::new();
         let mut requested = HashSet::new();
@@ -5344,7 +5351,7 @@ fn compact_tip_announce_must_not_consume_serve_slots() {
         let mut send_cmpct = true;
         let mut cmpct_ver = 2u32;
         let mut pending_headers = HashMap::new();
-        let mut pending_blocks = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
         let mut pending_cmpct = HashMap::new();
         let mut from_peer = HashMap::new();
         let mut requested = HashSet::new();
@@ -5423,7 +5430,7 @@ fn coinbase_compact_fills_without_mempool() {
         assert!(hub.mempool().is_none());
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
         let mut pending_headers = HashMap::new();
-        let mut pending_blocks = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
         let mut pending_cmpct = HashMap::new();
         let mut from_peer = HashMap::new();
         let mut requested = HashSet::new();

@@ -57,7 +57,7 @@ Not page cache. Caps on **decoded `Block` objects and live outbound sessions**:
 | **GetData serve inflight** | **16** full `Block`/`CmpctBlock` per session writer | Writer saturating-decrements after send so unpaired compact tip announce cannot wrap to `usize::MAX`. Announce is not counted on this cap (a burst would starve reconstruct). Extra inv hashes not reconstructed. |
 | **Tip-follow catch-up getdata** | **16** (`MAX_SERVE_BLOCKS`) hashes per ask | `requested` tracks inflight; after those bodies connect, drain asks the next window. Asking the whole header path left hashes stuck while the peer served only 16. |
 | **`from_this_peer`** | **50_000** txids / session (INV origin skip) | Clear and restart on overflow (`announced_wtx` pattern). |
-| **`pending_blocks`** | **128** decoded bodies / session | Insert evicts one existing hash at cap. Unsolicited BIP130 window still 16. |
+| **`pending_blocks`** | **128** decoded bodies / session | Insert evicts the **oldest** hash (FIFO). Unsolicited BIP130 window still 16. |
 | **Hub `BlockCache` bodies** | **16** decoded (`DEFAULT_BODY_DEPTH`) | Hashes kept for locators. Compact/`getblocktxn` serve is depth 5/10; IBD does not `push_best`. Reconstruct from store past the window. |
 | **Hub `held_bodies`** | **320** count + **288** height window | Side-branch hold for most-work apply. After a successful tip connect, drop bodies whose connected height is more than **288** below tip (Core unrequested window). Do not hold `IgnoredWeaker` already that far behind. Count cap still evicts an arbitrary hash at 320. |
 | **Query `sh_heads`** | **65_536** process-local SH body heads | Evict arbitrary key at cap (`keys().next()`). Miss path `locate_head`s. Catch-up and tip SH apply share this map. |
