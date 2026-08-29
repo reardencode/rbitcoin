@@ -238,7 +238,8 @@ impl Query {
     /// span** from first..=last eligible fk in the wave (ineligible txout in
     /// the hole is included; `inwit` is not). `sp_tweaks` mutex is not held
     /// during Class A IO. `limits.cut_through` drops confirmed-spent P2TR
-    /// outs after the join (txs with none left are omitted; the height remains).
+    /// outs after the join (one `spent.idx` batch, then one spent-body walk
+    /// per create; txs with none left are omitted; the height remains).
     pub fn load_thin_tweaks_range(
         &self,
         start: Height,
@@ -362,14 +363,31 @@ impl Query {
         }
 
         if limits.cut_through && !elig_fks.is_empty() {
-            let mut k = 0usize;
+            let n_rows: usize = out_rows.iter().map(Vec::len).sum();
+            if n_rows != elig_fks.len() {
+                return Err(StoreError::Corrupt(
+                    "invariant: thin cut_through row/fk count",
+                ));
+            }
+            let items: Vec<(Fk, Vec<u32>)> = out_rows
+                .iter()
+                .flatten()
+                .zip(elig_fks.iter().copied())
+                .map(|(row, fk)| (fk, row.p2tr.iter().map(|p| p.0).collect()))
+                .collect();
+            let live_rows = self.unspent_create_vouts_batch(&items)?;
+            if live_rows.len() != items.len() {
+                return Err(StoreError::Corrupt(
+                    "invariant: unspent_create_vouts_batch length",
+                ));
+            }
+            let mut live_iter = live_rows.into_iter();
             for rows in &mut out_rows {
-                let n = rows.len();
-                let fks = &elig_fks[k..k + n];
-                let mut kept = Vec::with_capacity(n);
-                for (mut row, fk) in rows.drain(..).zip(fks.iter()) {
-                    let vouts: Vec<u32> = row.p2tr.iter().map(|p| p.0).collect();
-                    let live = self.store.unspent_create_vouts(*fk, &vouts, None)?;
+                let mut kept = Vec::with_capacity(rows.len());
+                for mut row in rows.drain(..) {
+                    let live = live_iter
+                        .next()
+                        .ok_or(StoreError::Corrupt("invariant: thin cut_through live rows"))?;
                     if live.len() != row.p2tr.len() {
                         row.p2tr.retain(|(v, _, _)| live.iter().any(|u| u == v));
                     }
@@ -378,7 +396,6 @@ impl Query {
                     }
                 }
                 *rows = kept;
-                k = k.saturating_add(n);
             }
         }
 

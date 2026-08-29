@@ -144,7 +144,9 @@ impl PendingBlocks {
         self.map.contains_key(hash)
     }
 
-    pub(crate) fn values(&self) -> std::collections::hash_map::Values<'_, BlockHash, bitcoin::Block> {
+    pub(crate) fn values(
+        &self,
+    ) -> std::collections::hash_map::Values<'_, BlockHash, bitcoin::Block> {
         self.map.values()
     }
 

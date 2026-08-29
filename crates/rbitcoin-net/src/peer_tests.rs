@@ -4325,7 +4325,8 @@ fn shorter_higher_work_fork_is_not_hopeless() {
         !announced_tip_is_hopeless(hub.tip_height().unwrap(), announced_h, work_cmp),
         "shorter higher-work path must not be hopeless"
     );
-    let want = fetchable_header_path_bodies(&hub, &pending, tip, &PendingBlocks::new(), &HashSet::new());
+    let want =
+        fetchable_header_path_bodies(&hub, &pending, tip, &PendingBlocks::new(), &HashSet::new());
     assert!(
         !want.is_empty(),
         "must not skip bodies on a shorter higher-work path"

@@ -1162,13 +1162,22 @@ impl TxTable {
         if vouts.is_empty() {
             return Ok(Vec::new());
         }
-        let mut out = Vec::with_capacity(vouts.len());
-        for &v in vouts {
-            if let Ok((multi, field)) = self.get_output_spender_meta_at(body_off, body_len, v) {
-                out.push((v, multi, field));
+        let slot = OutputRecord::SPENT_SLOT_LEN;
+        self.spent.with_bytes_at(body_off, body_len, |raw| {
+            let mut out = Vec::with_capacity(vouts.len());
+            for &v in vouts {
+                let start = (v as usize).saturating_mul(slot);
+                let end = start.saturating_add(slot);
+                if end > raw.len() {
+                    continue;
+                }
+                let Ok((flags, field)) = decode_spent_slot_v17(&raw[start..end]) else {
+                    continue;
+                };
+                out.push((v, flags & output_flags::MULTI_SPENDER != 0, field));
             }
-        }
-        Ok(out)
+            Ok(out)
+        })
     }
 
     /// Patch multi + spender_field on create tx output (packed Class A body).

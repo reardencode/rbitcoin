@@ -1022,6 +1022,27 @@ impl Store {
         Ok(unspent)
     }
 
+    /// Batch [`Self::unspent_create_vouts`]: one `spent.idx` walk, then one
+    /// spent-body read per create that has a range.
+    pub fn unspent_create_vouts_batch(
+        &self,
+        items: &[(Fk, Vec<u32>)],
+    ) -> Result<Vec<Vec<u32>>, StoreError> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let fks: Vec<Fk> = items.iter().map(|(fk, _)| *fk).collect();
+        let ranges = self.txs.spent_range_batch(&fks)?;
+        if ranges.len() != items.len() {
+            return Err(StoreError::Corrupt("invariant: spent_range_batch length"));
+        }
+        let mut out = Vec::with_capacity(items.len());
+        for ((fk, vouts), range) in items.iter().zip(ranges) {
+            out.push(self.unspent_create_vouts(*fk, vouts, range)?);
+        }
+        Ok(out)
+    }
+
     /// Multi-list node count only (sole spends do not allocate body rows).
     pub fn spender_list_count(&self) -> u64 {
         self.spenders.count()
@@ -2982,6 +3003,11 @@ mod tests {
             assert_eq!(u, vec![0]);
             // empty vouts
             assert!(s.unspent_create_vouts(fk, &[], None).unwrap().is_empty());
+            let batch = s
+                .unspent_create_vouts_batch(&[(fk, vec![0u32]), (fk, vec![])])
+                .unwrap();
+            assert_eq!(batch[0], vec![0]);
+            assert!(batch[1].is_empty());
             // has_confirmed without range, no spender
             assert!(!s.has_confirmed_strong_spender_create(fk, 0, None).unwrap());
             assert!(!s.has_confirmed_strong_spender(&[20u8; 32], 0).unwrap());
@@ -2990,6 +3016,36 @@ mod tests {
             assert_eq!(s.repair_class_c_above_tip().unwrap(), 0);
             drop(s);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unspent_create_vouts_batch_matches_serial() {
+        let dir = tmp();
+        let s = Store::create(&dir).unwrap();
+        let mut fks = Vec::new();
+        for i in 1u8..=4 {
+            let item = coinbase_item(
+                [i; 32],
+                vec![
+                    OutputRecord::unspent(10, vec![0x51]),
+                    OutputRecord::unspent(11, vec![0x51]),
+                ],
+            );
+            fks.push(s.put_tx_full_batch_indexed(&[item], true).unwrap()[0]);
+        }
+        s.flush().unwrap();
+        let items: Vec<(Fk, Vec<u32>)> = fks.iter().map(|fk| (*fk, vec![0, 1])).collect();
+        let batch = s.unspent_create_vouts_batch(&items).unwrap();
+        assert_eq!(batch.len(), 4);
+        for (i, fk) in fks.iter().enumerate() {
+            assert_eq!(
+                batch[i],
+                s.unspent_create_vouts(*fk, &[0, 1], None).unwrap(),
+                "fk {fk:?}"
+            );
+        }
+        assert!(s.unspent_create_vouts_batch(&[]).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

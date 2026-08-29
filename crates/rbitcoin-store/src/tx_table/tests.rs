@@ -1362,7 +1362,9 @@ fn get_output_spender_metas_at_one_walk() {
     let s1 = Fk(10);
     t.put_spends_on_create_at(&spenders, off, len, &[(0, s1), (2, Fk(20))])
         .unwrap();
-    let metas = t.get_output_spender_metas_at(off, len, &[0, 1, 2]).unwrap();
+    let metas = t
+        .get_output_spender_metas_at(off, len, &[0, 1, 2, 99])
+        .unwrap();
     assert_eq!(metas.len(), 3);
     assert!(!metas[0].1 && metas[0].2 == s1);
     assert!(!metas[1].1 && metas[1].2.is_null());

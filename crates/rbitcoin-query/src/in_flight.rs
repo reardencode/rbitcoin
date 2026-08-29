@@ -73,8 +73,8 @@ impl InFlight {
             if let Some(id) = fk.get() {
                 self.outs.insert(id, Arc::clone(pin));
                 keys.out_ids.push(id);
-                let pin_bytes = 40u64
-                    .saturating_add(crate::archive::create_pin_approx_bytes(pin) as u64);
+                let pin_bytes =
+                    40u64.saturating_add(crate::archive::create_pin_approx_bytes(pin) as u64);
                 keys.approx_bytes = keys.approx_bytes.saturating_add(pin_bytes);
                 self.approx_bytes = self.approx_bytes.saturating_add(pin_bytes);
             }
