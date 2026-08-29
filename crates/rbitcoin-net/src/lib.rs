@@ -16,6 +16,7 @@ mod seeds;
 mod service;
 mod tx_relay;
 mod v2;
+mod versionbits_warn;
 
 pub use cache::BlockCache;
 pub use chain::{
@@ -54,6 +55,9 @@ pub use tx_relay::{
     ElectrumMempoolItem, MempoolAnnounce, MempoolHub, MempoolPerfSample, QueryUtxoProvider,
 };
 pub use v2::WireBytes;
+pub use versionbits_warn::{
+    active_unknown_bits, unknown_rules_warning, warn_period_threshold, warning_strings,
+};
 
 /// Default number of **live download peers** during IBD (`IbdConfig::target_peers`
 /// and node `--max-outbound` default).

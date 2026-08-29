@@ -111,6 +111,8 @@ pub struct NodeConfig {
     pub mempool_expiry_hours: Option<u64>,
     /// Core `-startupnotify` shell command (run once after start).
     pub startup_notify: Option<String>,
+    /// Core `-alertnotify` shell command (`%s` = warning text).
+    pub alert_notify: Option<String>,
     /// Core `-permitbaremultisig` (default true).
     pub permit_bare_multisig: bool,
     /// Core `-limitclustercount` overlay (`None` = mempool default 64).
@@ -171,6 +173,7 @@ impl Default for NodeConfig {
             min_relay_fee_btc: None,
             mempool_expiry_hours: None,
             startup_notify: None,
+            alert_notify: None,
             permit_bare_multisig: true,
             limit_cluster_count: None,
             limit_cluster_size_kvb: None,

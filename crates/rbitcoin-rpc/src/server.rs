@@ -36,6 +36,8 @@ pub struct RpcConfig {
     pub work_queue: Option<usize>,
     /// Core `-permitbaremultisig` (default true).
     pub permit_bare_multisig: bool,
+    /// Core `-alertnotify` (`%s` = warning text).
+    pub alert_notify: Option<String>,
 }
 
 /// Live RPC server handle.
@@ -114,6 +116,8 @@ pub async fn run_rpc(
         logpath: config.datadir.join("debug.log").display().to_string(),
         active: Arc::clone(&active),
         permit_bare_multisig: config.permit_bare_multisig,
+        alert_notify: config.alert_notify.clone(),
+        alert_fired: Arc::new(AtomicBool::new(false)),
     });
 
     let listener = TcpListener::bind(config.listen)
@@ -511,6 +515,8 @@ mod tests {
             subversion: None,
             work_queue: None,
             permit_bare_multisig: true,
+        alert_notify: None,
+        alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         let handle = run_rpc(cfg, q, Some(mp), None, None, None, None, None)
             .await
@@ -635,6 +641,8 @@ mod tests {
             subversion: None,
             work_queue: None,
             permit_bare_multisig: true,
+        alert_notify: None,
+        alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         let handle = run_rpc(cfg, q, Some(mp), None, None, None, None, None)
             .await
@@ -719,6 +727,8 @@ mod tests {
             subversion: None,
             work_queue: Some(1),
             permit_bare_multisig: true,
+        alert_notify: None,
+        alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         let handle = run_rpc(cfg, q, Some(mp), None, None, None, None, None)
             .await

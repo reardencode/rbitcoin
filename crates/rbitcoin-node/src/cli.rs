@@ -62,6 +62,7 @@ where
     let mut min_relay_fee_btc: Option<String> = None;
     let mut mempool_expiry_hours: Option<u64> = None;
     let mut startup_notify: Option<String> = None;
+    let mut alert_notify: Option<String> = None;
     let mut permit_bare_multisig: Option<bool> = None;
     let mut limit_cluster_count: Option<u32> = None;
     let mut limit_cluster_size_kvb: Option<u32> = None;
@@ -617,6 +618,19 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
                 startup_notify = Some(args[i].to_string_lossy().into_owned());
                 i += 1;
             }
+            other if other.starts_with("--alertnotify=") => {
+                alert_notify = Some(other["--alertnotify=".len()..].to_string());
+                i += 1;
+            }
+            "--alertnotify" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: --alertnotify requires a value");
+                    return ExitCode::from(2);
+                }
+                alert_notify = Some(args[i].to_string_lossy().into_owned());
+                i += 1;
+            }
             other if other.starts_with("--limitclustercount=") => {
                 match other["--limitclustercount=".len()..].parse() {
                     Ok(n) => limit_cluster_count = Some(n),
@@ -1042,6 +1056,9 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
     }
     if let Some(s) = startup_notify {
         config.startup_notify = Some(s);
+    }
+    if let Some(s) = alert_notify {
+        config.alert_notify = Some(s);
     }
     if let Some(b) = permit_bare_multisig {
         config.permit_bare_multisig = b;

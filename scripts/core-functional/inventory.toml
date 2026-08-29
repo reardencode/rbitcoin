@@ -332,9 +332,7 @@ analog = "none"
 
 [[test]]
 name = "feature_versionbits_warning.py"
-status = "skip"
-reason = "rpc-missing"
-analog = "follow-up: versionbits warning"
+status = "run"
 
 [[test]]
 name = "interface_bitcoin_cli.py"
@@ -594,9 +592,7 @@ reason = "core-net-policy"
 
 [[test]]
 name = "p2p_eviction.py"
-status = "skip"
-reason = "rpc-missing"
-analog = "follow-up: inbound eviction"
+status = "run"
 
 [[test]]
 name = "p2p_feefilter.py"
@@ -616,9 +612,7 @@ analog = "follow-up: stale-tip serve"
 
 [[test]]
 name = "p2p_getaddr_caching.py"
-status = "skip"
-reason = "rpc-missing"
-analog = "follow-up: getaddr"
+status = "run"
 
 [[test]]
 name = "p2p_getdata.py"

@@ -63,6 +63,7 @@ FORWARD_FLAGS = frozenset(
         "minrelaytxfee",
         "mempoolexpiry",
         "startupnotify",
+        "alertnotify",
         "permitbaremultisig",
         "limitclustercount",
         "limitclustersize",
