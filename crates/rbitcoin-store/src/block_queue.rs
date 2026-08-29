@@ -12,10 +12,10 @@
 //!
 //! **Primary capacity** is soft densify assign in the net layer (no hysteresis):
 //! under ~100 MiB free densify ahead; over ~100 MiB only the next ~1 min of
-//! confirm work at tip rate; over the 1 GiB assign-stop (`RBITCOIN_BLOCK_QUEUE_GB`
-//! / `_BYTES`) densify fills holes inside the already-fetched height range
-//! and does not grow past that horizon. This type **always** accepts
-//! already-requested payloads (OOM aside).
+//! confirm work at tip rate; at/over the 1 GiB assign-stop (`RBITCOIN_BLOCK_QUEUE_GB`
+//! / `_BYTES`) densify holes only within that ~1 min window **and** not past
+//! fetched_hi (do not grow past fetched; do not densify far holes outside the
+//! window). This type **always** accepts already-requested payloads (OOM aside).
 
 use crate::error::StoreError;
 use std::collections::{BTreeMap, HashMap, HashSet};

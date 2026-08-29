@@ -10,8 +10,9 @@
 //!   - BQ payload **≤ ~100 MiB** → usual densify ahead to the height horizon
 //!   - BQ payload **> ~100 MiB** → only heights confirm will consume in the
 //!     next **~1 min** at current tip rate ([`rbitcoin_query::soft_densify_band_hi`])
-//!   - BQ payload **≥ assign-stop** (default 1 GiB) → holes through the
-//!     already-fetched height horizon only (BQ max / lookup_taken); do not grow
+//!   - BQ payload **≥ assign-stop** (default 1 GiB) → holes only within the
+//!     ~1 min tip-rate window **and** not past fetched_hi (do not grow past
+//!     fetched; do not densify far holes outside the window)
 //! - Never request beyond densify horizon; events refuse far bodies too.
 //! - One body-queue copy per height (receive path drops duplicates).
 
@@ -1661,9 +1662,9 @@ mod tests {
     /// Serialize env mutators — parallel suite races `bq_assign_stop_bytes`.
     static BQ_ASSIGN_STOP_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// Over assign-stop: fill holes in the already-fetched range, do not grow past it.
+    /// Over assign-stop: densify within confirm window ∩ fetched; not past window.
     #[test]
-    fn densify_over_assign_stop_fills_fetched_range_only() {
+    fn densify_over_assign_stop_clamps_window_and_fetched() {
         let _g = BQ_ASSIGN_STOP_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1694,7 +1695,7 @@ mod tests {
         cfg.window = 128;
         cfg.per_peer = 64;
 
-        for ht in 1u32..=200 {
+        for ht in 1u32..=500 {
             let hash = h(ht);
             st.record_height(hash, ht);
             st.height_to_hash.insert(ht, hash);
@@ -1710,13 +1711,14 @@ mod tests {
                 .unwrap();
             st.body.mark_pending(h(ht));
         }
+        // Far fetched_hi=500 trips assign-stop; rate 5 → confirm window 300.
         let chunk = vec![0u8; 4096];
         hub.query
-            .block_queue_enqueue(80, h(80).to_byte_array(), 80, &chunk)
+            .block_queue_enqueue(500, h(500).to_byte_array(), 500, &chunk)
             .unwrap();
-        st.body.mark_pending(h(80));
+        st.body.mark_pending(h(500));
         assert!(hub.query.block_queue_stats().1 >= 2048);
-        assert_eq!(hub.query.block_queue_max_height(), Some(80));
+        assert_eq!(hub.query.block_queue_max_height(), Some(500));
 
         assign_work_ordered(&mut st, &hub, &cfg, &stats, 1, AssignDepth::Full, Some(5.0));
 
@@ -1728,12 +1730,12 @@ mod tests {
         assert!(
             issued_hts
                 .iter()
-                .any(|&ht| ht > TIP_HOLE_MAX as u32 && ht < 80),
-            "assign-stop must still densify holes inside fetched range; issued={issued_hts:?}"
+                .any(|&ht| ht > TIP_HOLE_MAX as u32 && ht <= 300),
+            "assign-stop must densify holes inside confirm window; issued={issued_hts:?}"
         );
         assert!(
-            issued_hts.iter().all(|&ht| ht <= 80),
-            "assign-stop must not grow past fetched horizon 80; issued={issued_hts:?}"
+            issued_hts.iter().all(|&ht| ht <= 300),
+            "assign-stop must not issue past window 300 (fetched_hi=500); issued={issued_hts:?}"
         );
 
         let _ = std::fs::remove_dir_all(dir);
