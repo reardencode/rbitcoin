@@ -460,7 +460,7 @@ impl LivePeer {
         })
     }
 
-    fn ping_rpc_fields(&self, now_secs: u64) -> (Option<f64>, Option<f64>, Option<f64>) {
+    pub(crate) fn ping_rpc_fields(&self, now_secs: u64) -> (Option<f64>, Option<f64>, Option<f64>) {
         let pingtime = *self.pingtime.lock().unwrap_or_else(|e| e.into_inner());
         let minping = *self.minping.lock().unwrap_or_else(|e| e.into_inner());
         let nonce = self.ping_nonce_sent.load(Ordering::Relaxed);
@@ -1096,6 +1096,34 @@ impl PeerHub {
         } else {
             false
         }
+    }
+
+    /// Core `AttemptToEvictConnection`: disconnect one unprotected inbound.
+    pub fn try_evict_inbound(&self) -> bool {
+        let noban = self.is_noban();
+        let now = self.now_secs();
+        let cands: Vec<crate::eviction::InboundEvictCandidate> = self
+            .live_peers()
+            .into_iter()
+            .filter(|p| p.inbound && !p.stop.load(Ordering::Relaxed))
+            .map(|p| {
+                let (_pt, minping, _pw) = p.ping_rpc_fields(now);
+                crate::eviction::InboundEvictCandidate {
+                    id: p.id,
+                    connected_at: p.connected_at(),
+                    min_ping: minping,
+                    last_block: p.last_block.load(Ordering::Relaxed),
+                    last_tx: p.last_transaction.load(Ordering::Relaxed),
+                    netgroup: crate::eviction::eviction_netgroup(p.addr),
+                    noban,
+                }
+            })
+            .collect();
+        let Some(id) = crate::eviction::select_inbound_eviction(cands) else {
+            return false;
+        };
+        rbitcoin_log::info!("p2p: evict inbound peer={id} (inbound full)");
+        self.disconnect_id(id)
     }
 
     pub fn disconnect_addr(&self, addr: SocketAddr) -> bool {

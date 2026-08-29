@@ -5,6 +5,7 @@ mod chain;
 mod codec;
 mod compact;
 mod error;
+mod eviction;
 mod ibd;
 mod most_work;
 mod msg_decode;
@@ -24,6 +25,7 @@ pub use chain::{
 };
 pub use codec::{MAX_HEADERS_RESULTS, MAX_INV_SIZE, MAX_LOCATOR_SZ, MAX_PROTOCOL_MESSAGE_LENGTH};
 pub use error::NetError;
+pub use eviction::{eviction_netgroup, select_inbound_eviction, InboundEvictCandidate};
 pub use ibd::{
     format_tip_perf_sizes, ibd, ibd_cancellable, read_proc_rss, IbdConfig, ProcRss, TipPerfSizes,
     DEFAULT_BLOCKS_IN_TRANSIT_PER_PEER, DEFAULT_IBD_WINDOW,
