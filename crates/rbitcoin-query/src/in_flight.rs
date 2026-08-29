@@ -27,7 +27,10 @@ type TxidEvictMap = HashMap<[u8; 32], u32, BuildHasherDefault<TxidHasher>>;
 
 #[derive(Debug, Default)]
 struct HeightKeys {
-    txids: Vec<[u8; 32]>,
+    /// `(txid, fk)` as noted by this pack: removal only drops a `creates`
+    /// entry this pack still owns (exact fk match), so packs can retire in
+    /// any order (ascending prune, descending disconnect drop).
+    txids: Vec<([u8; 32], Fk)>,
     out_ids: Vec<u64>,
     approx_bytes: u64,
 }
@@ -66,7 +69,7 @@ impl InFlight {
         let mut keys = HeightKeys::default();
         for (fk, pin) in pins {
             self.note_create_fk(pin.0.txid, fk);
-            keys.txids.push(pin.0.txid);
+            keys.txids.push((pin.0.txid, fk));
             keys.approx_bytes = keys.approx_bytes.saturating_add(40);
             if let Some(id) = fk.get() {
                 self.outs.insert(id, Arc::clone(pin));
@@ -89,7 +92,7 @@ impl InFlight {
         let mut keys = HeightKeys::default();
         for (txid, fk) in pairs {
             self.note_create_fk(txid, fk);
-            keys.txids.push(txid);
+            keys.txids.push((txid, fk));
             keys.approx_bytes = keys.approx_bytes.saturating_add(40);
         }
         self.commit_keys(keys, height);
@@ -130,15 +133,18 @@ impl InFlight {
 
     fn remove_keys(&mut self, keys: HeightKeys) {
         if self.evictions.is_empty() {
-            for tid in &keys.txids {
+            for (tid, _) in &keys.txids {
                 self.creates.remove(tid);
             }
         } else {
-            for tid in &keys.txids {
-                if self.consume_eviction(tid) {
-                    continue;
+            for (tid, fk) in &keys.txids {
+                if self.creates.get(tid) == Some(fk) {
+                    self.creates.remove(tid);
+                } else {
+                    // This pack's entry was clobbered (or the clobberer was
+                    // dropped first); retire one eviction credit instead.
+                    self.consume_eviction(tid);
                 }
-                self.creates.remove(tid);
             }
         }
         for id in &keys.out_ids {
@@ -409,6 +415,30 @@ mod tests {
         );
         assert!(m.get_out(91880).is_some());
         assert!(m.get_out(91722).is_none());
+    }
+
+    /// Disconnect drops packs newest-first. Dropping the newer of two
+    /// same-txid packs must not leave `creates` pointing at the dropped
+    /// pack's fk, and the older pack's later prune must still clean up.
+    #[test]
+    fn drop_newer_same_txid_does_not_strand_creates() {
+        let mut m = InFlight::new();
+        let mut txid = [0u8; 32];
+        txid[0] = 0xe3;
+        let old = pin_with_txid(txid);
+        let new = pin_with_txid(txid);
+        m.note_pins([(Fk(1), &old)], Some(91722));
+        m.note_pins([(Fk(2), &new)], Some(91880));
+        m.drop_from_height(91880);
+        assert_ne!(
+            m.get_create_fk(&txid),
+            Some(Fk(2)),
+            "creates must not point at the dropped pack"
+        );
+        assert!(m.get_out(2).is_none());
+        m.prune_below_height(Some(91723));
+        assert_eq!(m.get_create_fk(&txid), None);
+        assert!(m.is_empty(), "no leaked entries after both packs retire");
     }
 
     #[test]
