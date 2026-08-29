@@ -1473,6 +1473,14 @@ impl Query {
         Ok(self.store.unspent_create_vouts(create_fk, vouts, None)?)
     }
 
+    /// Batch [`Self::unspent_create_vouts`]: one `spent.idx` walk across creates.
+    pub fn unspent_create_vouts_batch(
+        &self,
+        items: &[(Fk, Vec<u32>)],
+    ) -> Result<Vec<Vec<u32>>, QueryError> {
+        Ok(self.store.unspent_create_vouts_batch(items)?)
+    }
+
     /// Enable/disable txid hash-head inserts on archive (default on). Off under
     /// milestone IBD; Class A bodies remain complete via header_txs fk lists.
     pub fn set_tx_index(&self, enabled: bool) {

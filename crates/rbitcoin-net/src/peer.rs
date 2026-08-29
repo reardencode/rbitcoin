@@ -22,7 +22,7 @@ use bitcoin::p2p::{Magic, ServiceFlags, PROTOCOL_VERSION};
 use bitcoin::{Block, BlockHash, Transaction};
 use rbitcoin_primitives::Height;
 use rbitcoin_query::Query;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -123,17 +123,56 @@ pub(crate) fn insert_capped_txid(
 #[cfg(test)]
 pub(crate) const MAX_PENDING_BLOCKS_FOR_TEST: usize = MAX_PENDING_BLOCKS;
 
-fn stash_pending_block(
-    pending: &mut HashMap<BlockHash, bitcoin::Block>,
-    hash: BlockHash,
-    block: bitcoin::Block,
-) {
-    if pending.len() >= MAX_PENDING_BLOCKS && !pending.contains_key(&hash) {
-        if let Some(k) = pending.keys().next().copied() {
-            pending.remove(&k);
+/// Tip-follow decoded bodies waiting for a connectable parent. Cap 128;
+/// insert evicts the oldest hash (FIFO), not `HashMap::keys().next()`.
+#[derive(Default)]
+pub(crate) struct PendingBlocks {
+    map: HashMap<BlockHash, bitcoin::Block>,
+    fifo: VecDeque<BlockHash>,
+}
+
+impl PendingBlocks {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn contains_key(&self, hash: &BlockHash) -> bool {
+        self.map.contains_key(hash)
+    }
+
+    pub(crate) fn values(
+        &self,
+    ) -> std::collections::hash_map::Values<'_, BlockHash, bitcoin::Block> {
+        self.map.values()
+    }
+
+    pub(crate) fn keys(&self) -> std::collections::hash_map::Keys<'_, BlockHash, bitcoin::Block> {
+        self.map.keys()
+    }
+
+    pub(crate) fn insert(&mut self, hash: BlockHash, block: bitcoin::Block) {
+        stash_pending_block(self, hash, block);
+    }
+
+    pub(crate) fn remove(&mut self, hash: &BlockHash) -> Option<bitcoin::Block> {
+        let b = self.map.remove(hash)?;
+        if let Some(i) = self.fifo.iter().position(|h| h == hash) {
+            self.fifo.remove(i);
+        }
+        Some(b)
+    }
+}
+
+fn stash_pending_block(pending: &mut PendingBlocks, hash: BlockHash, block: bitcoin::Block) {
+    if pending.map.len() >= MAX_PENDING_BLOCKS && !pending.map.contains_key(&hash) {
+        if let Some(k) = pending.fifo.pop_front() {
+            pending.map.remove(&k);
         }
     }
-    pending.insert(hash, block);
+    if !pending.map.contains_key(&hash) {
+        pending.fifo.push_back(hash);
+    }
+    pending.map.insert(hash, block);
 }
 
 /// Services we advertise once store-backed reconstruct serve is available.
@@ -645,7 +684,7 @@ pub async fn peer_session_with(
     // relay peer getdata CMPCT and broke tests that only serve `msg_block`.
     let mut peer_cmpct_version: u32 = 0;
     let mut pending_headers: HashMap<BlockHash, bitcoin::block::Header> = HashMap::new();
-    let mut pending_blocks: HashMap<BlockHash, bitcoin::Block> = HashMap::new();
+    let mut pending_blocks = PendingBlocks::new();
     let mut pending_cmpct: HashMap<BlockHash, PendingCmpct> = HashMap::new();
     let mut from_this_peer: HashMap<bitcoin::Txid, ()> = HashMap::new();
     let mut requested_blocks: HashSet<BlockHash> = HashSet::new();
@@ -1374,7 +1413,7 @@ async fn handle_peer_frame(
     peer_send_cmpct: &mut bool,
     peer_cmpct_version: &mut u32,
     pending_headers: &mut HashMap<BlockHash, bitcoin::block::Header>,
-    pending_blocks: &mut HashMap<BlockHash, bitcoin::Block>,
+    pending_blocks: &mut PendingBlocks,
     pending_cmpct: &mut HashMap<BlockHash, PendingCmpct>,
     from_this_peer: &mut HashMap<bitcoin::Txid, ()>,
     requested_blocks: &mut HashSet<BlockHash>,
@@ -1883,7 +1922,7 @@ async fn handle_peer_frame(
             requested_blocks.remove(&hash);
             pending_headers.entry(hash).or_insert(block.header);
             if !any_header_path_meets_minwork(hub, pending_headers, hash) {
-                stash_pending_block(pending_blocks, hash, block.clone());
+                pending_blocks.insert(hash, block.clone());
                 return Ok(());
             }
             match hub.accept_received_block(block.clone()) {
@@ -2562,7 +2601,7 @@ fn fetchable_header_path_bodies(
     hub: &ChainHub,
     pending: &HashMap<BlockHash, bitcoin::block::Header>,
     tip: BlockHash,
-    pending_blocks: &HashMap<BlockHash, bitcoin::Block>,
+    pending_blocks: &PendingBlocks,
     requested: &HashSet<BlockHash>,
 ) -> Vec<BlockHash> {
     if !header_path_meets_minwork(hub, pending, tip) {
@@ -2582,7 +2621,7 @@ fn missing_blocks_on_header_path(
     hub: &ChainHub,
     pending: &HashMap<BlockHash, bitcoin::block::Header>,
     tip: BlockHash,
-    pending_blocks: &HashMap<BlockHash, bitcoin::Block>,
+    pending_blocks: &PendingBlocks,
     requested: &HashSet<BlockHash>,
 ) -> Vec<BlockHash> {
     let mut path = Vec::new();
@@ -2694,7 +2733,7 @@ fn pending_header_leaves(pending: &HashMap<BlockHash, bitcoin::block::Header>) -
 fn drain_pending(
     hub: &ChainHub,
     out: &mpsc::UnboundedSender<NetworkMessage>,
-    pending_blocks: &mut HashMap<BlockHash, bitcoin::Block>,
+    pending_blocks: &mut PendingBlocks,
     pending_headers: &mut HashMap<BlockHash, bitcoin::block::Header>,
     requested_blocks: &mut HashSet<BlockHash>,
     compact: bool,
@@ -2744,7 +2783,7 @@ fn drain_pending(
 /// download window, not a second most-work assembler.
 fn drain_pending_once(
     hub: &ChainHub,
-    pending_blocks: &mut HashMap<BlockHash, bitcoin::Block>,
+    pending_blocks: &mut PendingBlocks,
     pending_headers: &mut HashMap<BlockHash, bitcoin::block::Header>,
 ) -> Result<(), NetError> {
     let mut progress = true;

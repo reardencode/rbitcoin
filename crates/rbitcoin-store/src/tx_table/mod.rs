@@ -18,7 +18,8 @@ thread_local! {
 }
 
 /// Host RAM budget per parallel `tx.head` rebuild worker (not SH pack's 2 GiB).
-pub const TX_HEAD_REBUILD_WORKER_FREE_RAM_BYTES: u64 = 750 * 1024 * 1024;
+/// BDZ peel scratch + keys + g at the default 2²⁵ seal is ≈1 GiB peak.
+pub const TX_HEAD_REBUILD_WORKER_FREE_RAM_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Max coalesced `txout.body` pread for SH Class A collect. Sequential libc
 /// pread (not TLS uring); 16 MiB matches Class A locality.
@@ -1161,13 +1162,22 @@ impl TxTable {
         if vouts.is_empty() {
             return Ok(Vec::new());
         }
-        let mut out = Vec::with_capacity(vouts.len());
-        for &v in vouts {
-            if let Ok((multi, field)) = self.get_output_spender_meta_at(body_off, body_len, v) {
-                out.push((v, multi, field));
+        let slot = OutputRecord::SPENT_SLOT_LEN;
+        self.spent.with_bytes_at(body_off, body_len, |raw| {
+            let mut out = Vec::with_capacity(vouts.len());
+            for &v in vouts {
+                let start = (v as usize).saturating_mul(slot);
+                let end = start.saturating_add(slot);
+                if end > raw.len() {
+                    continue;
+                }
+                let Ok((flags, field)) = decode_spent_slot_v17(&raw[start..end]) else {
+                    continue;
+                };
+                out.push((v, flags & output_flags::MULTI_SPENDER != 0, field));
             }
-        }
-        Ok(out)
+            Ok(out)
+        })
     }
 
     /// Patch multi + spender_field on create tx output (packed Class A body).
@@ -1553,7 +1563,7 @@ impl TxTable {
     ///
     /// Range width is [`Self::rebuild_seal_keys`] (default 2²⁵). Remainder is
     /// sealed too; an empty open tail is created for later inserts.
-    /// Workers: [`Self::rebuild_workers`] (min of CPUs, free RAM / 750 MiB,
+    /// Workers: [`Self::rebuild_workers`] (min of CPUs, free RAM / 1 GiB,
     /// and range count). Distinct from SH pack's 2 GiB cap.
     pub fn rebuild_head_from_bodies(
         &self,
@@ -1649,7 +1659,7 @@ impl TxTable {
     }
 
     /// Parallel wipe-rebuild workers. Env `RBITCOIN_TX_HEAD_REBUILD_WORKERS`;
-    /// default min(CPUs, free RAM / 750 MiB). Not SH pack's 2 GiB cap.
+    /// default min(CPUs, free RAM / 1 GiB). Not SH pack's 2 GiB cap.
     pub fn rebuild_workers() -> usize {
         #[cfg(test)]
         if let Some(n) = TEST_REBUILD_WORKERS.with(std::cell::Cell::get) {

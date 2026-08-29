@@ -481,7 +481,7 @@ seals it. Two unsealed non-tails is **Corrupt**.
 **Capacity @ 0.80 load (25-bit):** ≈ **26.8 M creates/segment**, ~29 MiB fuse8 when sealed (~6.1 B total sealed storage per create including head slots).
 
 **Wipe / empty-head rebuild:** writes MPHF+fuse8 **directly** from `txid.body`
-(no historical OA). Ranges seal in parallel: min(CPUs, free RAM / 750 MiB,
+(no historical OA). Ranges seal in parallel: min(CPUs, free RAM / 1 GiB,
 range count); `RBITCOIN_TX_HEAD_REBUILD_WORKERS` overrides (`1` = serial).
 Default range **2²⁵ keys** (`RBITCOIN_TX_HEAD_REBUILD_SEAL_BITS=25`); **26** is
 wider. Remainder is sealed; an empty open tail is created. Live IBD rolls OA

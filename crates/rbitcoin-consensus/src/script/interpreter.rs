@@ -1000,15 +1000,15 @@ fn tapscript_sig_result(
     pubkey: &[u8],
     ctx: &EvalContext<'_>,
 ) -> Result<TapSigResult, ConsensusError> {
-    if pubkey.is_empty() {
-        return Err(ConsensusError::Script("tapscript empty pubkey".into()));
-    }
     if !sig.is_empty() {
         let left = ctx.validation_weight_left.get() - TAPSCRIPT_VALIDATION_WEIGHT_PER_SIGOP;
         ctx.validation_weight_left.set(left);
         if left < 0 {
             return Err(ConsensusError::Script("tapscript validation weight".into()));
         }
+    }
+    if pubkey.is_empty() {
+        return Err(ConsensusError::Script("tapscript empty pubkey".into()));
     }
     // Unknown public key type (not 32 bytes): treat signature as valid (soft-fork hook).
     if pubkey.len() != 32 {
@@ -1792,6 +1792,20 @@ mod success_and_disabled_tests {
         let script = vec![0x00, 0x00, 0xac];
         let err = eval(&script, SigVersion::TapScript).unwrap_err();
         assert!(format!("{err}").contains("empty pubkey"));
+    }
+
+    #[test]
+    fn tapscript_empty_pubkey_reports_weight_when_budget_exhausted() {
+        // OP_1 OP_1 CHECKSIG then OP_1 OP_0 CHECKSIG.
+        // Dummy witness init weight is 51; first non-empty sig burns 50.
+        // Core decrements weight before the empty-pubkey fail, so the second
+        // CHECKSIG is TAPSCRIPT_VALIDATION_WEIGHT, not empty pubkey.
+        let script = vec![0x51, 0x51, 0xac, 0x51, 0x00, 0xac];
+        let err = eval(&script, SigVersion::TapScript).unwrap_err();
+        assert!(
+            format!("{err}").contains("validation weight"),
+            "Core order: weight before empty pubkey, got {err}"
+        );
     }
 
     #[test]

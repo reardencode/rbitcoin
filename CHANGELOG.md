@@ -14,7 +14,9 @@ before 1.0).
 - **Electrum `blockchain.tweaks.subscribe`:** pre-taproot empty heights go out
   as **one notify** with ≤1024 keys (Cake last-key progress), not one line per
   height. Cake `historicalMode=false` (param `[2]`) **cut-through**: omit
-  confirmed-spent P2TR outs (and txs with none left). `true` keeps spent outs
+  confirmed-spent P2TR outs (and txs with none left). Spentness is one
+  `spent.idx` batch plus one spent-body walk per create, not a serial
+  idx+body per eligible tx. `true` keeps spent outs
   for restore. Probe `[0,1,false]` is still `{"0": {}}`. `{"message":"done"}`
   ends a **chunk** (60s wall at a wave boundary, or the requested `count` if
   sooner) so Cake resubscribes; it is not “`count` through tip”.
@@ -98,7 +100,7 @@ before 1.0).
   unchanged). No `sp_tweaks` schema change.
 
 - **Parallel `tx.head` wipe-rebuild:** ranges seal concurrently,
-  min(CPUs, free RAM / **750 MiB**, range count). Distinct from SH
+  min(CPUs, free RAM / **1 GiB**, range count). Distinct from SH
   materialize (1.5 GiB/worker). `RBITCOIN_TX_HEAD_REBUILD_WORKERS`
   overrides (`1` = serial).
 

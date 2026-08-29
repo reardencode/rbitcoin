@@ -914,16 +914,16 @@ mod tests {
     }
 
     #[test]
-    fn workers_for_free_ram_750mib_is_not_sh_1_5gib() {
-        const MIB: u64 = 1024 * 1024;
-        const HEAD: u64 = 750 * MIB;
+    fn workers_for_free_ram_1gib_head_is_not_sh_1_5gib() {
+        const HEAD: u64 = crate::tx_table::TX_HEAD_REBUILD_WORKER_FREE_RAM_BYTES;
         assert_eq!(workers_for_free_ram(8, 0, HEAD), 1);
         assert_eq!(workers_for_free_ram(8, HEAD.saturating_sub(1), HEAD), 1);
         assert_eq!(workers_for_free_ram(8, HEAD, HEAD), 1);
         assert_eq!(workers_for_free_ram(8, 2 * HEAD, HEAD), 2);
         assert_eq!(workers_for_free_ram(8, 3 * HEAD, HEAD), 3);
         assert_eq!(workers_for_free_ram(4, 20 * HEAD, HEAD), 4);
-        assert_eq!(workers_for_free_ram(8, 3 * (1 << 30) / 2, HEAD), 2);
+        assert_eq!(workers_for_free_ram(8, 3 * (1 << 30) / 2, HEAD), 1);
+        assert_eq!(workers_for_free_ram(8, 2 * (1 << 30), HEAD), 2);
     }
 
     #[test]

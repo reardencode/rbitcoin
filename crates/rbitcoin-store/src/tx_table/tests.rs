@@ -1362,7 +1362,9 @@ fn get_output_spender_metas_at_one_walk() {
     let s1 = Fk(10);
     t.put_spends_on_create_at(&spenders, off, len, &[(0, s1), (2, Fk(20))])
         .unwrap();
-    let metas = t.get_output_spender_metas_at(off, len, &[0, 1, 2]).unwrap();
+    let metas = t
+        .get_output_spender_metas_at(off, len, &[0, 1, 2, 99])
+        .unwrap();
     assert_eq!(metas.len(), 3);
     assert!(!metas[0].1 && metas[0].2 == s1);
     assert!(!metas[1].1 && metas[1].2.is_null());
@@ -2846,18 +2848,19 @@ fn parse_rebuild_seal_bits_default_25() {
 }
 
 #[test]
-fn parse_rebuild_workers_and_750mib_cap() {
+fn parse_rebuild_workers_and_1gib_cap() {
     assert_eq!(parse_rebuild_workers(None), None);
     assert_eq!(parse_rebuild_workers(Some("foo")), None);
     assert_eq!(parse_rebuild_workers(Some("1")), Some(1));
     assert_eq!(parse_rebuild_workers(Some("0")), Some(1));
     assert_eq!(parse_rebuild_workers(Some("8")), Some(8));
     assert_eq!(parse_rebuild_workers(Some("999")), Some(256));
-    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * 1024 * 1024;
+    assert_eq!(TX_HEAD_REBUILD_WORKER_FREE_RAM_BYTES, GIB);
     assert_eq!(tx_head_rebuild_workers_for_free_ram(8, 0), 1);
-    assert_eq!(tx_head_rebuild_workers_for_free_ram(8, 750 * MIB), 1);
-    assert_eq!(tx_head_rebuild_workers_for_free_ram(8, 1500 * MIB), 2);
-    assert_eq!(tx_head_rebuild_workers_for_free_ram(4, 20 * 750 * MIB), 4);
+    assert_eq!(tx_head_rebuild_workers_for_free_ram(8, GIB), 1);
+    assert_eq!(tx_head_rebuild_workers_for_free_ram(8, 2 * GIB), 2);
+    assert_eq!(tx_head_rebuild_workers_for_free_ram(4, 20 * GIB), 4);
 }
 
 #[test]

@@ -70,14 +70,13 @@ impl InFlight {
         for (fk, pin) in pins {
             self.note_create_fk(pin.0.txid, fk);
             keys.txids.push((pin.0.txid, fk));
-            keys.approx_bytes = keys.approx_bytes.saturating_add(40);
             if let Some(id) = fk.get() {
                 self.outs.insert(id, Arc::clone(pin));
                 keys.out_ids.push(id);
-                keys.approx_bytes = keys
-                    .approx_bytes
-                    .saturating_add(40)
-                    .saturating_add(crate::archive::create_pin_approx_bytes(pin) as u64);
+                let pin_bytes =
+                    40u64.saturating_add(crate::archive::create_pin_approx_bytes(pin) as u64);
+                keys.approx_bytes = keys.approx_bytes.saturating_add(pin_bytes);
+                self.approx_bytes = self.approx_bytes.saturating_add(pin_bytes);
             }
         }
         self.commit_keys(keys, height);
@@ -93,7 +92,6 @@ impl InFlight {
         for (txid, fk) in pairs {
             self.note_create_fk(txid, fk);
             keys.txids.push((txid, fk));
-            keys.approx_bytes = keys.approx_bytes.saturating_add(40);
         }
         self.commit_keys(keys, height);
     }
@@ -102,7 +100,6 @@ impl InFlight {
         if keys.is_empty() {
             return;
         }
-        self.approx_bytes = self.approx_bytes.saturating_add(keys.approx_bytes);
         let slot = match height {
             Some(h) => self.by_height.entry(h).or_default(),
             None => &mut self.untagged,
@@ -113,10 +110,14 @@ impl InFlight {
     }
 
     fn note_create_fk(&mut self, txid: [u8; 32], fk: Fk) {
-        if let Some(old) = self.creates.insert(txid, fk) {
-            if old != fk {
+        match self.creates.insert(txid, fk) {
+            None => {
+                self.approx_bytes = self.approx_bytes.saturating_add(40);
+            }
+            Some(old) if old != fk => {
                 *self.evictions.entry(txid).or_insert(0) += 1;
             }
+            Some(_) => {}
         }
     }
 
@@ -134,23 +135,28 @@ impl InFlight {
     fn remove_keys(&mut self, keys: HeightKeys) {
         if self.evictions.is_empty() {
             for (tid, _) in &keys.txids {
-                self.creates.remove(tid);
+                if self.creates.remove(tid).is_some() {
+                    self.approx_bytes = self.approx_bytes.saturating_sub(40);
+                }
             }
         } else {
             for (tid, fk) in &keys.txids {
                 if self.creates.get(tid) == Some(fk) {
                     self.creates.remove(tid);
+                    self.approx_bytes = self.approx_bytes.saturating_sub(40);
                 } else {
-                    // This pack's entry was clobbered (or the clobberer was
-                    // dropped first); retire one eviction credit instead.
                     self.consume_eviction(tid);
                 }
             }
         }
         for id in &keys.out_ids {
-            self.outs.remove(id);
+            if let Some(pin) = self.outs.remove(id) {
+                self.approx_bytes = self
+                    .approx_bytes
+                    .saturating_sub(40)
+                    .saturating_sub(crate::archive::create_pin_approx_bytes(&pin) as u64);
+            }
         }
-        self.approx_bytes = self.approx_bytes.saturating_sub(keys.approx_bytes);
     }
 
     /// Drop tagged packs at or above a disconnected height. Untagged stay.
@@ -450,6 +456,24 @@ mod tests {
         m.note_creates([(txid, Fk(2))], Some(91880));
         m.prune_below_height(Some(91750));
         assert_eq!(m.get_create_fk(&txid), Some(Fk(2)));
+    }
+
+    #[test]
+    fn same_txid_overwrite_does_not_double_count_creates_bytes() {
+        let mut m = InFlight::new();
+        let mut txid = [0u8; 32];
+        txid[0] = 0xe3;
+        m.note_creates([(txid, Fk(1))], Some(91722));
+        let (_, _, once) = m.size_snapshot();
+        m.note_creates([(txid, Fk(2))], Some(91880));
+        let (_, _, twice) = m.size_snapshot();
+        assert_eq!(
+            twice, once,
+            "creates map still holds one slot; iflight= must not grow on clobber"
+        );
+        m.prune_below_height(Some(91750));
+        let (_, _, after) = m.size_snapshot();
+        assert_eq!(after, once);
     }
 
     #[test]
