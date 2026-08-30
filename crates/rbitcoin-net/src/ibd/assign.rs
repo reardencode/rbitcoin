@@ -570,7 +570,7 @@ fn demote_zombie_pending_for_fetch(
 const TIP_HOLE_INFLIGHT_STALE: Duration = Duration::from_secs(6);
 
 /// Rank alive peer ids for tip-hole getdata: prefer peers not in `avoid`, then
-/// higher live `speed_sample` bps, then lower id. Unsampled peers sort last
+/// higher live EWMA bps, then lower id. Unsampled peers sort last
 /// among non-avoided (bps=0).
 pub(crate) fn rank_tip_hole_peers(
     slots: &[PeerSlot],
@@ -586,8 +586,7 @@ pub(crate) fn rank_tip_hole_peers(
                 slots
                     .iter()
                     .find(|s| s.id == pid && s.alive)
-                    .and_then(|s| s.speed_sample())
-                    .map(|(_, bps)| bps)
+                    .and_then(|s| s.rate.bps())
                     .unwrap_or(0)
             };
             bps(b).cmp(&bps(a)).then_with(|| a.cmp(&b))
@@ -764,6 +763,7 @@ mod tests {
             first_data_ms: AtomicU64::new(0),
             bytes_rx: AtomicU64::new(0),
             bytes_rx_total: Arc::new(AtomicU64::new(0)),
+            rate: Default::default(),
             alive: true,
             task,
         }
@@ -1137,10 +1137,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Tip-hole cover prefers higher speed_sample bps peers first.
+    /// Tip-hole cover prefers higher EWMA bps peers first.
     #[test]
     fn cover_tip_holes_prefers_fast_peers() {
-        use super::super::peer_io::ibd_mono_ms;
         let (dir, hub) = tmp_hub();
         hub.ensure_genesis().unwrap();
         let mut st = IbdWorkState::new(
@@ -1155,17 +1154,12 @@ mod tests {
         st.height_to_hash.insert(ht, hole);
         st.body.mark_missing(hole);
 
-        // Peer 0 slow, peer 1 fast, peer 2 medium — inject lifetime samples.
-        let now = ibd_mono_ms().max(2_000);
-        for (i, bps_equiv_bytes) in [(0usize, 100_000u64), (1, 10_000_000u64), (2, 1_000_000u64)] {
-            st.slots[i].connected_ms = now.saturating_sub(2_000);
+        // Peer 0 slow, peer 1 fast, peer 2 medium — inject mature EWMA samples.
+        for (i, bytes_per_sec) in [(0usize, 100_000u64), (1, 10_000_000u64), (2, 1_000_000u64)] {
+            st.slots[i].rate.sample(0, 0, true);
             st.slots[i]
-                .first_data_ms
-                .store(now.saturating_sub(1_000), Ordering::Relaxed);
-            // bytes such that bps ≈ bytes*1000/1000ms = bytes for ~1s elapsed
-            st.slots[i]
-                .bytes_rx
-                .store(bps_equiv_bytes, Ordering::Relaxed);
+                .rate
+                .sample(5_000, bytes_per_sec.saturating_mul(5), true);
         }
         // Cap want to 2 so only the top two speeds get work if ranking works.
         // TIP_HOLE_MAX_PEERS is 4 but we only have 3 peers — all may get work.

@@ -4,6 +4,7 @@
 //! - reader: decrypt frame + cheap ping handling; heavy decode off-thread
 //! - writer: encode offloaded for heavy payloads; then encrypt + write
 
+use super::rate::PeerRate;
 use crate::codec::MAX_INV_SIZE;
 use crate::error::NetError;
 use crate::msg_decode::spawn_decode_then_with_err;
@@ -104,6 +105,7 @@ pub(crate) struct PeerSlot {
     pub bytes_rx: AtomicU64,
     /// All streamed wire bytes (EWMA input). Reader-only `fetch_add`.
     pub bytes_rx_total: Arc<AtomicU64>,
+    pub rate: PeerRate,
     pub alive: bool,
     pub task: JoinHandle<()>,
 }
@@ -160,6 +162,16 @@ pub(crate) fn note_stream_bytes(counter: &AtomicU64, n: u64) {
         return;
     }
     counter.fetch_add(n, Ordering::Relaxed);
+}
+
+pub(crate) fn sample_peer_rates(slots: &mut [PeerSlot], now_ms: u64) {
+    for s in slots {
+        if !s.alive {
+            continue;
+        }
+        let bytes = s.bytes_rx_total.load(Ordering::Relaxed);
+        s.rate.sample(now_ms, bytes, !s.in_flight.is_empty());
+    }
 }
 
 pub(crate) fn note_block_progress(slots: &mut [PeerSlot], peer: usize) {
@@ -455,6 +467,7 @@ pub(crate) async fn spawn_peer(
         first_data_ms: AtomicU64::new(0),
         bytes_rx: AtomicU64::new(0),
         bytes_rx_total,
+        rate: PeerRate::default(),
         alive: true,
         task,
     })
@@ -537,6 +550,7 @@ mod tests {
             first_data_ms: AtomicU64::new(0),
             bytes_rx: AtomicU64::new(0),
             bytes_rx_total: Arc::new(AtomicU64::new(0)),
+            rate: Default::default(),
             alive: true,
             task,
         }
@@ -592,6 +606,11 @@ mod tests {
         note_stream_bytes(&s.bytes_rx_total, 100);
         note_stream_bytes(&s.bytes_rx_total, 50);
         assert_eq!(s.bytes_rx_total.load(Ordering::Relaxed), 150);
+
+        s.in_flight.insert(BlockHash::from_byte_array([1u8; 32]));
+        sample_peer_rates(std::slice::from_mut(&mut s), 0);
+        sample_peer_rates(std::slice::from_mut(&mut s), 5_000);
+        assert!(s.rate.bps().is_some());
 
         touch_block_progress(&s.block_progress_ms);
         assert!(s.block_progress_ms.load(Ordering::Relaxed) > 0);

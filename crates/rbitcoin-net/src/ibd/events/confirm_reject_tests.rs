@@ -887,6 +887,7 @@ fn confirmed_height_mids_blocked_while_densify_ahead_leaves_tip_hole() {
         first_data_ms: AtomicU64::new(0),
         bytes_rx: AtomicU64::new(0),
         bytes_rx_total: Arc::new(AtomicU64::new(0)),
+        rate: Default::default(),
         alive: true,
         task,
     };
@@ -1085,6 +1086,7 @@ fn zombie_pending_mid_at_confirmed_height_never_reget() {
         first_data_ms: AtomicU64::new(0),
         bytes_rx: AtomicU64::new(0),
         bytes_rx_total: Arc::new(AtomicU64::new(0)),
+        rate: Default::default(),
         alive: true,
         task,
     };
@@ -1659,6 +1661,7 @@ fn apply_peer_event_body_and_control_surface() {
             first_data_ms: AtomicU64::new(0),
             bytes_rx: AtomicU64::new(0),
             bytes_rx_total: Arc::new(AtomicU64::new(0)),
+            rate: Default::default(),
             alive: true,
             task,
         }
@@ -1911,6 +1914,7 @@ fn apply_peer_event_block_framed_bq_horizon_and_headers_done() {
             first_data_ms: AtomicU64::new(0),
             bytes_rx: AtomicU64::new(0),
             bytes_rx_total: Arc::new(AtomicU64::new(0)),
+            rate: Default::default(),
             alive: true,
             task,
         }
@@ -2178,6 +2182,7 @@ fn block_framed_raw_offers_body_queue_with_confirm_feed() {
             first_data_ms: AtomicU64::new(0),
             bytes_rx: AtomicU64::new(0),
             bytes_rx_total: Arc::new(AtomicU64::new(0)),
+            rate: Default::default(),
             alive: true,
             task,
         }
@@ -2326,6 +2331,7 @@ fn known_headers_re_admit_to_ordered_after_tip_drain() {
             first_data_ms: AtomicU64::new(0),
             bytes_rx: AtomicU64::new(0),
             bytes_rx_total: Arc::new(AtomicU64::new(0)),
+            rate: Default::default(),
             alive: true,
             task,
         }
@@ -2487,6 +2493,7 @@ fn path_slot_first_wins_chained_via_headers() {
             first_data_ms: AtomicU64::new(0),
             bytes_rx: AtomicU64::new(0),
             bytes_rx_total: Arc::new(AtomicU64::new(0)),
+            rate: Default::default(),
             alive: true,
             task,
         }

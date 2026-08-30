@@ -48,7 +48,7 @@ use exit::{
     ibd_caught_up, path_drained, should_unlatch_headers_done, AllPeersDead,
 };
 use path::{path_hashes_above_tip, seed_work_path_from_store, work_path_tips};
-use peer_io::{PeerCmd, PeerEvent, PeerEventSinks};
+use peer_io::{sample_peer_rates, PeerCmd, PeerEvent, PeerEventSinks};
 use progress::{
     claim_ready, format_progress_line, ibd_pct, work_chain_progress, ProgressLineInput,
     TipRateTracker,
@@ -664,6 +664,7 @@ pub async fn ibd_cancellable(
             last_progress = Instant::now();
         }
 
+        sample_peer_rates(&mut st.slots, peer_io::ibd_mono_ms());
         let now = Instant::now();
         disconnect_stalled_block_peers(
             &mut st.slots,

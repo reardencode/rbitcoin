@@ -89,7 +89,6 @@ impl PeerRate {
         let last = self.progress_ms.max(self.work_started_ms);
         now_ms.saturating_sub(last) > stall_ms
     }
-
 }
 
 #[cfg(test)]
@@ -104,7 +103,6 @@ mod tests {
         assert!(r.bps().is_some());
         assert!(r.active_ms < RELSLOW_ACTIVE_MS);
     }
-
 
     #[test]
     fn idle_rebaseline_freezes_ewma() {

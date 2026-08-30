@@ -545,6 +545,7 @@ mod tests {
             first_data_ms: AtomicU64::new(0),
             bytes_rx: AtomicU64::new(0),
             bytes_rx_total: Arc::new(AtomicU64::new(0)),
+            rate: Default::default(),
             alive,
             task,
         }
