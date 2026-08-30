@@ -17,7 +17,7 @@
 //! - One body-queue copy per height (receive path drops duplicates).
 
 use super::assign_plan::far_slots_per_peer;
-use super::peer_io::{touch_block_progress, PeerCmd, PeerSlot};
+use super::peer_io::{ibd_mono_ms, PeerCmd, PeerSlot};
 use super::state::{self, IbdWorkState};
 use super::status::LoopStats;
 use super::{
@@ -447,7 +447,7 @@ pub(crate) fn issue_batch(
         st.slots[idx].in_flight.insert(h);
     }
     if empty {
-        touch_block_progress(&st.slots[idx].block_progress_ms);
+        st.slots[idx].rate.note_work_started(ibd_mono_ms());
     }
     let _ = st.slots[idx].cmd_tx.send(PeerCmd::GetData {
         hashes: batch.clone(),
@@ -833,6 +833,23 @@ mod tests {
         let cfg = IbdConfig::for_test();
         assign_work_ordered(&mut st, &hub, &cfg, &stats, 1, AssignDepth::Full, None);
 
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn issue_batch_does_not_count_as_rx() {
+        let (dir, _hub) = tmp_hub();
+        let mut st = IbdWorkState::new(vec![dummy_slot(0)], None, Some(0));
+        st.slots[0].rate.progress_ms = 42;
+        st.slots[0].rate.work_started_ms = 7;
+        let mut room = 10usize;
+        let mut issued = 0u64;
+        let t0 = super::super::peer_io::ibd_mono_ms();
+        assert!(issue_one(&mut st, 0, h(30), &mut room, &mut issued));
+        let t1 = super::super::peer_io::ibd_mono_ms();
+        assert_eq!(st.slots[0].rate.progress_ms, 42);
+        assert!(st.slots[0].rate.work_started_ms >= t0);
+        assert!(st.slots[0].rate.work_started_ms <= t1);
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -176,13 +176,13 @@ pub(crate) fn sample_peer_rates(slots: &mut [PeerSlot], now_ms: u64) {
 
 pub(crate) fn note_block_progress(slots: &mut [PeerSlot], peer: usize) {
     if let Some(s) = slots.iter_mut().find(|s| s.id == peer) {
-        touch_block_progress(&s.block_progress_ms);
+        s.rate.note_rx(ibd_mono_ms());
     }
 }
 
 pub(crate) fn note_block_rx(slots: &mut [PeerSlot], peer: usize, wire_bytes: usize) {
     if let Some(s) = slots.iter_mut().find(|s| s.id == peer) {
-        touch_block_progress(&s.block_progress_ms);
+        s.rate.note_rx(ibd_mono_ms());
         s.note_rx_bytes(wire_bytes as u64);
     }
 }

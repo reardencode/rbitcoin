@@ -435,13 +435,23 @@ pub(crate) fn disconnect_stalled_block_peers(
     now: Instant,
     stall: Duration,
 ) {
+    disconnect_stalled_block_peers_at(slots, inflight, addr_cooldown, now, stall, ibd_mono_ms());
+}
+
+pub(crate) fn disconnect_stalled_block_peers_at(
+    slots: &mut [PeerSlot],
+    inflight: &mut HashMap<bitcoin::BlockHash, super::state::InflightReq>,
+    addr_cooldown: &mut HashMap<SocketAddr, Instant>,
+    now: Instant,
+    stall: Duration,
+    now_ms: u64,
+) {
     let stall = stall.max(Duration::from_secs(30));
     let stall_ms = stall.as_millis() as u64;
-    let now_ms = ibd_mono_ms();
     let stalled_peers: Vec<(usize, usize, SocketAddr)> = slots
         .iter()
         .filter(|s| s.alive && !s.in_flight.is_empty())
-        .filter(|s| now_ms.saturating_sub(s.block_progress_ms.load(Ordering::Relaxed)) > stall_ms)
+        .filter(|s| s.rate.stalled(now_ms, stall_ms, true))
         .map(|s| (s.id, s.in_flight.len(), s.addr))
         .collect();
     for (id, n_work, addr) in stalled_peers {
@@ -796,38 +806,54 @@ mod tests {
     }
 
     #[test]
-    fn disconnect_stalled_releases_and_cools_addr() {
-        use std::sync::atomic::Ordering as AtOrd;
+    fn disconnect_stalled_after_30s_without_rx() {
         let a = addr(11);
         let mut slot = dummy_slot(5, a, true);
         let h = BlockHash::from_byte_array([0xee; 32]);
         slot.in_flight.insert(h);
-        // Old progress → stalled relative to mono clock.
-        slot.block_progress_ms.store(0, AtOrd::Relaxed);
-        // Ensure mono has advanced past stall window.
-        while ibd_mono_ms() < 50 {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        slot.rate.note_work_started(0);
         let mut inflight = HashMap::new();
         inflight.insert(h, super::super::state::InflightReq::new(5));
         let mut cooldown = HashMap::new();
-        let now = Instant::now();
-        disconnect_stalled_block_peers(
-            &mut [slot],
+        disconnect_stalled_block_peers_at(
+            std::slice::from_mut(&mut slot),
             &mut inflight,
             &mut cooldown,
-            now,
-            Duration::from_millis(1), // clamped to 30s internally
+            Instant::now(),
+            Duration::from_secs(30),
+            30_001,
         );
-        // With stall floor 30s, may not disconnect if mono elapsed < 30s.
-        // Drive with a very old progress and long stall requirement by faking:
-        // store progress far in the past relative to mono.
-        let mut slot2 = dummy_slot(6, addr(12), true);
-        slot2.in_flight.insert(h);
-        slot2.block_progress_ms.store(0, AtOrd::Relaxed);
-        // Advance mono if needed is limited — instead assert cooldown path when
-        // we force-release after a simulated stall disconnect (release already tested).
-        // Call with empty inflight peer (no work) → no-op.
+        assert!(cooldown.contains_key(&a));
+        assert!(inflight.is_empty());
+    }
+
+    #[test]
+    fn disconnect_stalled_not_when_rx_recent() {
+        let a = addr(12);
+        let mut slot = dummy_slot(6, a, true);
+        let h = BlockHash::from_byte_array([0xee; 32]);
+        slot.in_flight.insert(h);
+        slot.rate.note_work_started(0);
+        slot.rate.note_rx(25_000);
+        let mut inflight = HashMap::new();
+        inflight.insert(h, super::super::state::InflightReq::new(6));
+        let mut cooldown = HashMap::new();
+        disconnect_stalled_block_peers_at(
+            std::slice::from_mut(&mut slot),
+            &mut inflight,
+            &mut cooldown,
+            Instant::now(),
+            Duration::from_secs(30),
+            45_000,
+        );
+        assert!(cooldown.get(&a).is_none());
+        assert!(inflight.contains_key(&h));
+    }
+
+    #[test]
+    fn disconnect_stalled_releases_and_cools_addr() {
+        let now = Instant::now();
+        let mut cooldown = HashMap::new();
         disconnect_stalled_block_peers(
             &mut [dummy_slot(7, addr(13), true)],
             &mut HashMap::new(),
@@ -835,7 +861,6 @@ mod tests {
             now,
             Duration::from_secs(30),
         );
-        // Alive peer with no in_flight is never stalled.
         assert!(cooldown.get(&addr(13)).is_none());
     }
 
