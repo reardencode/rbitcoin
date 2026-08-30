@@ -679,7 +679,7 @@ pub async fn peer_session_with(
     }
 
     let writer_session = meta.session.clone();
-    let writer_task = tokio::spawn(async move {
+    let mut writer_task = tokio::spawn(async move {
         while let Some(msg) = out_rx.recv().await {
             let full = matches!(
                 msg,
@@ -736,6 +736,12 @@ pub async fn peer_session_with(
             }
             tokio::select! {
                 biased;
+                // Peer half-close / write failure: tear down so getpeerinfo
+                // clears without waiting on a stuck read/decode arm.
+                writer_done = &mut writer_task => {
+                    let _ = writer_done;
+                    return Ok(());
+                }
                 _ = tokio::time::sleep(Duration::from_millis(50)), if session.is_some() => {
                     if tx_announce_rx.is_none() {
                         tx_announce_rx = hub.mempool().map(|m| m.subscribe_announces());
@@ -967,17 +973,9 @@ pub async fn peer_session_with(
                 frame = read_v2_frame(&mut reader, magic) => {
                     let frame = match frame {
                         Ok(f) => f,
-                        Err(NetError::Io(e))
-                            if matches!(
-                                e.kind(),
-                                std::io::ErrorKind::UnexpectedEof
-                                    | std::io::ErrorKind::ConnectionReset
-                                    | std::io::ErrorKind::BrokenPipe
-                                    | std::io::ErrorKind::ConnectionAborted
-                            ) =>
-                        {
-                            return Ok(());
-                        }
+                        // Any socket Io means the peer is gone — exit cleanly so
+                        // unregister runs inside the Core disconnect_nodes 5s wait.
+                        Err(NetError::Io(_)) => return Ok(()),
                         Err(NetError::MessageTooLarge(n)) => {
                             ban_score = ban_score.saturating_add(OVERSIZE_BAN_SCORE);
                             rbitcoin_log::warn!(
@@ -1059,8 +1057,13 @@ pub async fn peer_session_with(
     .await;
 
     drop(out_tx);
-    writer_task.abort();
-    let _ = writer_task.await;
+    // If select! already joined the writer, do not await again (would pend).
+    if writer_task.is_finished() {
+        drop(writer_task);
+    } else {
+        writer_task.abort();
+        let _ = writer_task.await;
+    }
     match &result {
         Ok(()) => rbitcoin_log::debug!("p2p: session {peer_s} closed"),
         Err(e) => rbitcoin_log::warn!("p2p: session {peer_s} ended: {e}"),
