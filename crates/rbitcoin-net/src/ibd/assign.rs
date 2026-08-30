@@ -763,6 +763,7 @@ mod tests {
             connected_ms: 1,
             first_data_ms: AtomicU64::new(0),
             bytes_rx: AtomicU64::new(0),
+            bytes_rx_total: Arc::new(AtomicU64::new(0)),
             alive: true,
             task,
         }

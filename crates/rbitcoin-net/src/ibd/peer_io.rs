@@ -102,6 +102,8 @@ pub(crate) struct PeerSlot {
     pub first_data_ms: AtomicU64,
     /// Cumulative block payload bytes (speed sample).
     pub bytes_rx: AtomicU64,
+    /// All streamed wire bytes (EWMA input). Reader-only `fetch_add`.
+    pub bytes_rx_total: Arc<AtomicU64>,
     pub alive: bool,
     pub task: JoinHandle<()>,
 }
@@ -153,6 +155,13 @@ pub(crate) fn touch_block_progress(ms: &AtomicU64) {
     ms.store(ibd_mono_ms(), Ordering::Relaxed);
 }
 
+pub(crate) fn note_stream_bytes(counter: &AtomicU64, n: u64) {
+    if n == 0 {
+        return;
+    }
+    counter.fetch_add(n, Ordering::Relaxed);
+}
+
 pub(crate) fn note_block_progress(slots: &mut [PeerSlot], peer: usize) {
     if let Some(s) = slots.iter_mut().find(|s| s.id == peer) {
         touch_block_progress(&s.block_progress_ms);
@@ -196,7 +205,8 @@ pub(crate) async fn spawn_peer(
     // stall the receive half and look like a peer stall).
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<NetworkMessage>();
     let block_progress_ms = Arc::new(AtomicU64::new(ibd_mono_ms()));
-    let progress_io = Arc::clone(&block_progress_ms);
+    let bytes_rx_total = Arc::new(AtomicU64::new(0));
+    let bytes_io = Arc::clone(&bytes_rx_total);
 
     // Parent owns concurrent read + write tasks. Aborting the parent (PeerSlot
     // Drop / stall disconnect) must abort both children — plain JoinHandle drop
@@ -224,11 +234,9 @@ pub(crate) async fn spawn_peer(
             let mut prog_mark = 0usize;
             loop {
                 let frame = read_v2_frame_with_progress(&mut reader, magic, |buffered| {
-                    const STEP: usize = 64 * 1024;
-                    if buffered >= prog_mark + STEP || buffered <= STEP {
-                        prog_mark = buffered;
-                        touch_block_progress(&progress_io);
-                    }
+                    let delta = buffered.saturating_sub(prog_mark);
+                    note_stream_bytes(&bytes_io, delta as u64);
+                    prog_mark = buffered;
                 })
                 .await;
                 prog_mark = 0;
@@ -239,10 +247,6 @@ pub(crate) async fn spawn_peer(
                                 let _ = out_tx.send(NetworkMessage::Pong(n));
                             }
                             continue;
-                        }
-
-                        if frame.is_block() || frame.is_notfound() {
-                            touch_block_progress(&progress_io);
                         }
 
                         if frame.is_block() {
@@ -267,7 +271,6 @@ pub(crate) async fn spawn_peer(
                             continue;
                         }
 
-                        let progress = Arc::clone(&progress_io);
                         let sinks_d = sinks_r.clone();
                         // Non-block: decode off-thread. Never await a decode permit
                         // on the reader (stalls TCP). Soft budgets gate *requests* only.
@@ -282,7 +285,6 @@ pub(crate) async fn spawn_peer(
                                         });
                                     }
                                     NetworkMessage::NotFound(inv) => {
-                                        touch_block_progress(&progress);
                                         let hashes: Vec<BlockHash> = inv
                                             .iter()
                                             .filter_map(|i| match i {
@@ -452,6 +454,7 @@ pub(crate) async fn spawn_peer(
         connected_ms: ibd_mono_ms(),
         first_data_ms: AtomicU64::new(0),
         bytes_rx: AtomicU64::new(0),
+        bytes_rx_total,
         alive: true,
         task,
     })
@@ -533,6 +536,7 @@ mod tests {
             connected_ms: 1,
             first_data_ms: AtomicU64::new(0),
             bytes_rx: AtomicU64::new(0),
+            bytes_rx_total: Arc::new(AtomicU64::new(0)),
             alive: true,
             task,
         }
@@ -582,6 +586,12 @@ mod tests {
         assert!(s.first_data_ms.load(Ordering::Relaxed) > 0);
         let sample = s.speed_sample().expect("bps after ≥64KiB");
         assert!(sample.1 > 0);
+
+        note_stream_bytes(&s.bytes_rx_total, 0);
+        assert_eq!(s.bytes_rx_total.load(Ordering::Relaxed), 0);
+        note_stream_bytes(&s.bytes_rx_total, 100);
+        note_stream_bytes(&s.bytes_rx_total, 50);
+        assert_eq!(s.bytes_rx_total.load(Ordering::Relaxed), 150);
 
         touch_block_progress(&s.block_progress_ms);
         assert!(s.block_progress_ms.load(Ordering::Relaxed) > 0);
