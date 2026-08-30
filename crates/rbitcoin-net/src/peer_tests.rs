@@ -5667,3 +5667,110 @@ async fn disconnect_clears_far_side_getpeerinfo_within_5s() {
     nb.shutdown().await;
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// `mempool_reorg` disconnect_nodes after generate+sync — far side must still
+/// clear within 5s even if the session was just busy accepting tip blocks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disconnect_after_tip_sync_clears_far_side_within_5s() {
+    use crate::P2PNode;
+    use bitcoin::ScriptBuf;
+    use std::time::Duration;
+
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("rbitcoin-disc-tip-{n}"));
+    std::fs::create_dir_all(dir.join("a")).unwrap();
+    std::fs::create_dir_all(dir.join("b")).unwrap();
+    let qa = Query::open_or_create(dir.join("a/store")).unwrap();
+    let qb = Query::open_or_create(dir.join("b/store")).unwrap();
+    let params = ChainParams::regtest();
+    let mut na = P2PNode::start_with_agent(
+        "127.0.0.1:0".parse().unwrap(),
+        qa,
+        params.clone(),
+        Milestone::NONE,
+        "/rbitcoin:0.1.0(testnode0)/".into(),
+        crate::DEFAULT_MAX_INBOUND,
+    )
+    .await
+    .unwrap();
+    let nb = P2PNode::start_with_agent(
+        "127.0.0.1:0".parse().unwrap(),
+        qb,
+        params,
+        Milestone::NONE,
+        "/rbitcoin:0.1.0(testnode1)/".into(),
+        crate::DEFAULT_MAX_INBOUND,
+    )
+    .await
+    .unwrap();
+
+    na.follow_from(nb.local_addr).await.unwrap();
+    let mut linked = false;
+    for _ in 0..100 {
+        let a_sees = na
+            .peers
+            .snapshot()
+            .iter()
+            .any(|p| p.subver.contains("testnode1"));
+        let b_sees = nb
+            .peers
+            .snapshot()
+            .iter()
+            .any(|p| p.subver.contains("testnode0"));
+        if a_sees && b_sees {
+            linked = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(linked, "both sides must list each other before generate");
+
+    const BURST: u32 = 3;
+    na.hub
+        .generate_to_script(BURST, ScriptBuf::from_bytes(vec![0x51]), vec![])
+        .unwrap();
+    let want = na.tip_height().unwrap();
+    let mut synced = false;
+    for _ in 0..200 {
+        if nb.tip_height().unwrap_or(0) >= want {
+            synced = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(synced, "far side must sync tip before disconnect");
+
+    let peer_id = na
+        .peers
+        .snapshot()
+        .into_iter()
+        .find(|p| p.subver.contains("testnode1"))
+        .map(|p| p.id)
+        .expect("outbound peer id");
+    assert!(na.peers.disconnect_id(peer_id));
+
+    let mut far_clear = false;
+    for _ in 0..100 {
+        if !nb
+            .peers
+            .snapshot()
+            .iter()
+            .any(|p| p.subver.contains("testnode0"))
+        {
+            far_clear = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        far_clear,
+        "far side getpeerinfo must drop us within 5s after tip sync (mempool_reorg)"
+    );
+
+    na.shutdown().await;
+    nb.shutdown().await;
+    let _ = std::fs::remove_dir_all(dir);
+}

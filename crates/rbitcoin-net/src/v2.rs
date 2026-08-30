@@ -431,10 +431,13 @@ fn map_protocol_error(e: ProtocolError) -> NetError {
         // completed v2 then dropped us. Prefer the IO detail when present so
         // logs are not all "does not speak BIP324 v2".
         ProtocolError::Io(io, ProtocolFailureSuggestion::RetryV1) => {
-            if io.kind() == std::io::ErrorKind::UnexpectedEof
-                || io.kind() == std::io::ErrorKind::ConnectionReset
-                || io.kind() == std::io::ErrorKind::BrokenPipe
-            {
+            if matches!(
+                io.kind(),
+                std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionAborted
+            ) {
                 NetError::Io(io)
             } else {
                 NetError::V1Peer
