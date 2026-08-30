@@ -223,12 +223,18 @@ Default INFO is `ibd: progress` only. `--log-level debug` adds perf / sizes / pe
 
 **Tip hole / peer hygiene:** `hole=` on the progress line is the fetch gap from
 tip+1 to the next in-hand body (confirmed, still on the BQ, or already taken
-onto loadq). Tip-batch getdata races up to 4 peers
-(preferring faster live rates) and re-races after ~6s without wire. WARN
-`ibd: peer[…] stalled` is absolute zero block progress (~30s). WARN
+onto loadq). Peer speed is one EWMA of all received bytes while that peer has
+block getdata in flight. Tip-batch getdata races up to 4 peers (preferring
+higher EWMA). A hole owner with no qualifying rx is dropped from that hash
+when a sibling is pulling; the whole race set is not cleared on getdata age.
+Densify default is 8 in-flight hashes per peer (2 while a tip hole is open);
+16 only for an EWMA outlier at ≥ 2× pack median. WARN
+`ibd: peer[…] stalled` is 30s without qualifying rx (≥64 KiB stream or a
+block / decode-fail / NotFound event) after work start. WARN
 `ibd: peer[…] relative-slow (bps= med= spread=…)` disconnects a clear
-half-median outlier only after ~60s warm-up and only when the peer pack is not
-tight (max/min bps &gt; 2×); good-but-slightly-slower peers are kept.
+half-median outlier only after ~60s pack warm-up and 30s of inflight EWMA,
+and only when the pack is not tight (max/min bps &gt; 2×); a uniformly slow
+pipe is kept.
 
 **Create pins:** pipeline-local only (`batch_pin` / `BatchParents`). No process pin FIFO. Header plans via ConfirmParentCache. Just-confirmed **identity + full create outs** stay on in-flight until a later lookup wave snapshots drain+fence past the pack height and load finishes that wave's last in-flight read. Not a coins cache.
 

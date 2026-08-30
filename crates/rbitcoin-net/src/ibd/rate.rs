@@ -17,7 +17,8 @@ pub(crate) const PROGRESS_STEP: u64 = 64 * 1024;
 /// the byte cursor so it does not dilute the rate. `progress_ms` is last qualifying
 /// rx (stream ≥ [`PROGRESS_STEP`] or event-path `note_rx`); `work_started_ms` is the
 /// last empty→nonempty getdata. Stall is `now - max(progress, work_started) > stall`
-/// while inflight.
+/// while inflight. Ranking, relative-slow, densify caps, and AddrMan FAST/SLOW
+/// all read [`Self::bps`].
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct PeerRate {
     ewma: u64,
