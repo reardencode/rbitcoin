@@ -803,14 +803,6 @@ pub(crate) fn rank_peers_by_speed(
     ranked
 }
 
-pub(crate) fn rank_tip_hole_peers(
-    slots: &[PeerSlot],
-    alive: &[usize],
-    avoid: &std::collections::HashSet<usize>,
-) -> Vec<usize> {
-    rank_peers_by_speed(slots, alive, avoid)
-}
-
 /// Cover each tip-hole hash with multi-peer getdata, preferring faster peers.
 ///
 /// While the hole is open, at most one current owner of **this hash** is dropped
@@ -1534,7 +1526,7 @@ mod tests {
         let cfg = IbdConfig::for_test();
         let alive: Vec<usize> = st.slots.iter().filter(|s| s.alive).map(|s| s.id).collect();
         let avoid = HashSet::new();
-        let ranked = rank_tip_hole_peers(&st.slots, &alive, &avoid);
+        let ranked = rank_peers_by_speed(&st.slots, &alive, &avoid);
         assert_eq!(ranked[0], 1, "fastest peer first: ranked={ranked:?}");
         assert_eq!(ranked[1], 2, "medium second: ranked={ranked:?}");
         assert_eq!(ranked[2], 0, "slow last: ranked={ranked:?}");
