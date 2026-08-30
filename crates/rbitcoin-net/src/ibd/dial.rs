@@ -1,6 +1,7 @@
 //! Peer dial, header request, stall disconnect / cooldown.
 
 use super::peer_io::{ibd_mono_ms, spawn_peer, PeerCmd, PeerEventSinks, PeerSlot};
+use super::rate::RELSLOW_ACTIVE_MS;
 use crate::chain::ChainHub;
 use crate::error::NetError;
 use crate::peers::{trying_connection_log, PeerConnType};
@@ -22,10 +23,6 @@ pub(crate) const STALL_ADDR_COOLDOWN: Duration = Duration::from_secs(10 * 60);
 pub(crate) const RELATIVE_SLOW_CLUSTER_SPREAD: u64 = 2;
 /// Disconnect only if peer bps ≤ median / this (default 2 → half median).
 pub(crate) const RELATIVE_SLOW_OUTLIER_RATIO: u64 = 2;
-/// Per-peer mature sample age (ms since first block byte).
-pub(crate) const RELATIVE_SLOW_MIN_AGE_MS: u64 = 60_000;
-/// Per-peer mature payload floor for disconnect decisions (tip-rank may use less).
-pub(crate) const RELATIVE_SLOW_MIN_BYTES: u64 = 2 * 1024 * 1024;
 /// Target mature peers before relative rule runs (full IBD peer set).
 pub(crate) const RELATIVE_SLOW_MIN_SAMPLES: usize = 8;
 /// Floor when fewer than 16 alive peers.
@@ -131,26 +128,17 @@ pub(crate) fn relative_slow_with_hysteresis(
     }
 }
 
-/// Build mature relative-slow samples from live slots (age + bytes floors).
+/// Build mature relative-slow samples from live slots (`active_ms` floor).
 pub(crate) fn mature_relative_slow_samples(slots: &[PeerSlot]) -> Vec<RelativeSlowSample> {
-    let now = ibd_mono_ms();
     let mut out = Vec::new();
     for s in slots {
         if !s.alive {
             continue;
         }
-        let first = s.first_data_ms.load(Ordering::Relaxed);
-        if first == 0 {
+        if s.rate.active_ms < RELSLOW_ACTIVE_MS {
             continue;
         }
-        if now.saturating_sub(first) < RELATIVE_SLOW_MIN_AGE_MS {
-            continue;
-        }
-        let bytes = s.bytes_rx.load(Ordering::Relaxed);
-        if bytes < RELATIVE_SLOW_MIN_BYTES {
-            continue;
-        }
-        let Some((_, bps)) = s.speed_sample() else {
+        let Some(bps) = s.rate.bps() else {
             continue;
         };
         out.push(RelativeSlowSample {
@@ -928,47 +916,21 @@ mod tests {
         ];
         assert_eq!(relative_slow_pick(&tie, 8), Some(2));
 
-        // Mature filters: dead / no first_data / young / under bytes / no sample.
+        // Mature filters: dead / young active_ms / no sample.
         let dead = {
-            let s = dummy_slot(0, addr(20), false);
-            s.first_data_ms
-                .store(1, std::sync::atomic::Ordering::Relaxed);
-            s.bytes_rx.store(
-                RELATIVE_SLOW_MIN_BYTES,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            s
-        };
-        let no_first = {
-            let s = dummy_slot(1, addr(21), true);
-            s.bytes_rx.store(
-                RELATIVE_SLOW_MIN_BYTES * 2,
-                std::sync::atomic::Ordering::Relaxed,
-            );
+            let mut s = dummy_slot(0, addr(20), false);
+            s.rate.sample(0, 0, true);
+            s.rate.sample(RELSLOW_ACTIVE_MS, RELSLOW_ACTIVE_MS * 1_000, true);
             s
         };
         let young = {
-            let s = dummy_slot(2, addr(22), true);
-            // first_data near "now" → age too small for RELATIVE_SLOW_MIN_AGE_MS.
-            s.first_data_ms
-                .store(ibd_mono_ms().max(1), std::sync::atomic::Ordering::Relaxed);
-            s.bytes_rx.store(
-                RELATIVE_SLOW_MIN_BYTES * 2,
-                std::sync::atomic::Ordering::Relaxed,
-            );
+            let mut s = dummy_slot(2, addr(22), true);
+            s.rate.sample(0, 0, true);
+            s.rate.sample(5_000, 50_000_000, true);
             s
         };
-        let thin = {
-            let s = dummy_slot(3, addr(23), true);
-            s.first_data_ms
-                .store(1, std::sync::atomic::Ordering::Relaxed);
-            s.bytes_rx.store(1024, std::sync::atomic::Ordering::Relaxed);
-            s
-        };
-        let samples = mature_relative_slow_samples(&[dead, no_first, young, thin]);
-        // Fresh process: none mature (age/bytes). Long-lived llvm-cov may mature
-        // a slot with first=1 + enough mono — still never includes dead/no_first.
-        assert!(samples.iter().all(|s| s.peer_id != 0 && s.peer_id != 1));
+        let samples = mature_relative_slow_samples(&[dead, young]);
+        assert!(samples.iter().all(|s| s.peer_id != 0 && s.peer_id != 2));
 
         assert_eq!(global_first_block_ms(&[]), 0);
         let a_empty = dummy_slot(10, addr(30), true);
@@ -1020,5 +982,27 @@ mod tests {
         );
         assert!(suspect.is_none());
         assert!(cooldown.is_empty());
+    }
+
+    #[test]
+    fn mature_relative_slow_samples_uses_ewma_active_ms() {
+        let h = BlockHash::from_byte_array([9u8; 32]);
+        let mut young = dummy_slot(0, addr(50), true);
+        young.rate.sample(0, 0, true);
+        young.rate.sample(5_000, 50_000_000, true);
+        young.in_flight.insert(h);
+        assert!(young.rate.bps().is_some());
+        assert!(young.rate.active_ms < RELSLOW_ACTIVE_MS);
+
+        let mut mature = dummy_slot(1, addr(51), true);
+        mature.rate.sample(0, 0, true);
+        mature
+            .rate
+            .sample(RELSLOW_ACTIVE_MS, RELSLOW_ACTIVE_MS * 10_000, true);
+        mature.in_flight.insert(h);
+
+        let samples = mature_relative_slow_samples(&[young, mature]);
+        assert!(samples.iter().all(|s| s.peer_id != 0));
+        assert!(samples.iter().any(|s| s.peer_id == 1));
     }
 }
