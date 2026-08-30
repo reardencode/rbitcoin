@@ -1463,7 +1463,7 @@ mod tests {
         let peers = &st.inflight[&hole].peers;
         assert!(
             !peers.contains(&0),
-            "half-median owner among progressing racers drops; peers={peers:?}"
+            "quarter-median owner among progressing racers drops; peers={peers:?}"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
