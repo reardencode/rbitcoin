@@ -232,9 +232,10 @@ Densify default is 8 in-flight hashes per peer (2 while a tip hole is open);
 `ibd: peer[…] stalled` is 30s without qualifying rx (≥64 KiB stream or a
 block / decode-fail / NotFound event) after work start. WARN
 `ibd: peer[…] relative-slow (bps= med= spread=…)` disconnects a clear
-half-median outlier only after ~60s pack warm-up and 30s of inflight EWMA,
-and only when the pack is not tight (max/min bps &gt; 2×); a uniformly slow
-pipe is kept.
+quarter-median outlier only after ~60s pack warm-up, 30s of inflight EWMA,
+and 2s of the same peer failing Gate B (at most one kick per 5s). Cluster
+gate is median/min (not max/min), so one fast peer does not peel the pack.
+`bps=0` is stall, not relative-slow. A uniformly slow pipe is kept.
 
 **Create pins:** pipeline-local only (`batch_pin` / `BatchParents`). No process pin FIFO. Header plans via ConfirmParentCache. Just-confirmed **identity + full create outs** stay on in-flight until a later lookup wave snapshots drain+fence past the pack height and load finishes that wave's last in-flight read. Not a coins cache.
 

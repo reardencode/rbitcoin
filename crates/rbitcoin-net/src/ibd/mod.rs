@@ -679,6 +679,7 @@ pub async fn ibd_cancellable(
             &mut st.addr_cooldown,
             now,
             &mut st.relative_slow_suspect,
+            &mut st.relative_slow_last_kick_ms,
         );
         st.slots.retain(|s| s.alive);
         expire_addr_cooldown(&mut st.addr_cooldown, now);
