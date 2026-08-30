@@ -157,7 +157,7 @@ pub(crate) fn global_first_block_ms(slots: &[PeerSlot]) -> u64 {
         if !s.alive {
             continue;
         }
-        let first = s.first_data_ms.load(Ordering::Relaxed);
+        let first = s.first_data_ms;
         if first == 0 {
             continue;
         }
@@ -537,11 +537,9 @@ mod tests {
             addr: a,
             cmd_tx,
             in_flight: HashSet::new(),
-            block_progress_ms: Arc::new(AtomicU64::new(0)),
             peer_height: 0,
             connected_ms: 0,
-            first_data_ms: AtomicU64::new(0),
-            bytes_rx: AtomicU64::new(0),
+            first_data_ms: 0,
             bytes_rx_total: Arc::new(AtomicU64::new(0)),
             rate: Default::default(),
             alive,
@@ -939,29 +937,25 @@ mod tests {
         let b_dead = {
             let mut s = dummy_slot(11, addr(31), true);
             s.alive = false;
-            s.first_data_ms
-                .store(5, std::sync::atomic::Ordering::Relaxed);
+            s.first_data_ms = 5;
             s
         };
         assert_eq!(global_first_block_ms(std::slice::from_ref(&b_dead)), 0);
         let a = {
-            let s = dummy_slot(10, addr(30), true);
-            s.first_data_ms
-                .store(42, std::sync::atomic::Ordering::Relaxed);
+            let mut s = dummy_slot(10, addr(30), true);
+            s.first_data_ms = 42;
             s
         };
         let c = {
-            let s = dummy_slot(12, addr(32), true);
-            s.first_data_ms
-                .store(10, std::sync::atomic::Ordering::Relaxed);
+            let mut s = dummy_slot(12, addr(32), true);
+            s.first_data_ms = 10;
             s
         };
         assert_eq!(global_first_block_ms(&[a, c]), 10);
         // Warmup fails when age since global first < 60s (typical unit-test process).
         let a2 = {
-            let s = dummy_slot(10, addr(30), true);
-            s.first_data_ms
-                .store(10, std::sync::atomic::Ordering::Relaxed);
+            let mut s = dummy_slot(10, addr(30), true);
+            s.first_data_ms = 10;
             s
         };
         let warm = relative_slow_global_warmup_ok(std::slice::from_ref(&a2));
