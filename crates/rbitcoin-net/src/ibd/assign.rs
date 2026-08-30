@@ -16,8 +16,11 @@
 //! - Never request beyond densify horizon; events refuse far bodies too.
 //! - One body-queue copy per height (receive path drops duplicates).
 
-use super::assign_plan::far_slots_per_peer;
-use super::peer_io::{touch_block_progress, PeerCmd, PeerSlot};
+use super::assign_plan::densify_slots_for_peer;
+use super::dial::{
+    median_u64, relative_slow_pick, RelativeSlowSample, RELATIVE_SLOW_CLUSTER_SPREAD,
+};
+use super::peer_io::{ibd_mono_ms, PeerCmd, PeerSlot};
 use super::state::{self, IbdWorkState};
 use super::status::LoopStats;
 use super::{
@@ -210,14 +213,31 @@ pub(crate) fn assign_work_ordered(
         return;
     }
 
+    let tip_hole = !tip_holes.is_empty();
+    let (pack_median, pack_tight) = pack_ewma_bps(&st.slots, &alive);
+    let caps: HashMap<usize, usize> = alive
+        .iter()
+        .map(|&pid| {
+            (
+                pid,
+                densify_cap_for(
+                    &st.slots,
+                    pid,
+                    cfg.per_peer,
+                    tip_hole,
+                    pack_median,
+                    pack_tight,
+                ),
+            )
+        })
+        .collect();
+    issued += steal_hung_densify(st, hub, &alive, tip_batch_hi, &caps);
+
     let mut room = cfg.window.saturating_sub(st.inflight.len());
     if room == 0 {
         finish_assign(loop_stats, t0, issued);
         return;
     }
-
-    // Leave per-peer headroom for tip races while hole>0.
-    let densify_per_peer = far_slots_per_peer(cfg.per_peer, !tip_holes.is_empty());
 
     let densify_hi = path_lo.saturating_add(CONTIG_DENSIFY_AHEAD);
     let depth_bytes = hub.query.block_queue_stats().1;
@@ -241,6 +261,13 @@ pub(crate) fn assign_work_ordered(
     }
     st.assign_path_lo = path_lo;
     st.densify_scan_lo = st.densify_scan_lo.max(path_lo);
+    if !alive
+        .iter()
+        .any(|&pid| peer_has_slot(st, pid, caps.get(&pid).copied().unwrap_or(1)))
+    {
+        finish_assign(loop_stats, t0, issued);
+        return;
+    }
     let densify_lo = path_lo.max(st.densify_scan_lo);
     let densify = collect_height_band(st, hub, densify_lo, band_hi, room.max(1));
     if densify.is_empty() {
@@ -248,29 +275,23 @@ pub(crate) fn assign_work_ordered(
         return;
     }
 
-    let mut peer_i = st.assign_rot;
-    st.assign_rot = st.assign_rot.wrapping_add(1);
+    let ranked = rank_peers_by_speed(&st.slots, &alive, &HashSet::new());
     let mut densify_q = densify;
-    while room > 0 && !densify_q.is_empty() {
-        let mut any = false;
-        for _ in 0..alive.len() {
-            if room == 0 || densify_q.is_empty() {
+    for &pid in &ranked {
+        if room == 0 || densify_q.is_empty() {
+            break;
+        }
+        let cap = caps.get(&pid).copied().unwrap_or(1);
+        while room > 0 && !densify_q.is_empty() {
+            if !peer_has_slot(st, pid, cap) {
                 break;
-            }
-            let pid = alive[peer_i % alive.len()];
-            peer_i += 1;
-            if !peer_has_slot(st, pid, densify_per_peer) {
-                continue;
             }
             let Some(h) = pop_need(&mut densify_q, st, hub) else {
                 break;
             };
-            if issue_one(st, pid, h, &mut room, &mut issued) {
-                any = true;
+            if !issue_one(st, pid, h, &mut room, &mut issued) {
+                break;
             }
-        }
-        if !any {
-            break;
         }
     }
 
@@ -447,7 +468,7 @@ pub(crate) fn issue_batch(
         st.slots[idx].in_flight.insert(h);
     }
     if empty {
-        touch_block_progress(&st.slots[idx].block_progress_ms);
+        st.slots[idx].rate.note_work_started(ibd_mono_ms());
     }
     let _ = st.slots[idx].cmd_tx.send(PeerCmd::GetData {
         hashes: batch.clone(),
@@ -562,17 +583,210 @@ fn demote_zombie_pending_for_fetch(
     body.mark_missing(hash);
 }
 
-/// Tip-hole getdata older than this with no claimable wire is cleared and re-issued
-/// (mainnet freeze: inflight stuck, soft frozen, hole=1 forever).
-///
-/// Short on purpose: confirm claim waits ~5s per tick while tip is blocked; 20s
-/// left the same slow race set holding hole=1 while densify progressed.
-const TIP_HOLE_INFLIGHT_STALE: Duration = Duration::from_secs(6);
+/// Stream rx older than this is not “recent” for tip-hole owner eviction.
+/// Matches the absolute stall floor so slow-but-steady 64 KiB ticks stay live.
+const TIP_HOLE_RX_STALE: Duration = Duration::from_secs(30);
 
-/// Rank alive peer ids for tip-hole getdata: prefer peers not in `avoid`, then
-/// higher live `speed_sample` bps, then lower id. Unsampled peers sort last
+fn peer_has_recent_rx(slot: &PeerSlot, now_ms: u64) -> bool {
+    slot.rate
+        .has_recent_rx(now_ms, TIP_HOLE_RX_STALE.as_millis() as u64)
+}
+
+/// Which current owner of a tip-hole hash to drop from **this hash** (not disconnect).
+///
+/// - No owner has recent rx → none (too early / first 64 KiB still in flight).
+/// - Some have recent rx, some do not → drop a no-rx owner (quick dead-racer).
+/// - All have recent rx → [`relative_slow_pick`] among those owners (`min_samples` =
+///   owner count). Tight cluster → none.
+/// - Solo owner: drop only when no recent rx and inflight age ≥ [`TIP_HOLE_RX_STALE`].
+pub(crate) fn tip_hole_owner_to_drop(
+    owners: &[usize],
+    slots: &[PeerSlot],
+    started_at: Instant,
+) -> Option<usize> {
+    if owners.is_empty() {
+        return None;
+    }
+    let now_ms = ibd_mono_ms();
+    let mut recent = Vec::new();
+    let mut stale = Vec::new();
+    for &id in owners {
+        let Some(slot) = slots.iter().find(|s| s.id == id && s.alive) else {
+            stale.push(id);
+            continue;
+        };
+        if peer_has_recent_rx(slot, now_ms) {
+            recent.push(id);
+        } else {
+            stale.push(id);
+        }
+    }
+    if owners.len() == 1 {
+        if !recent.is_empty() {
+            return None;
+        }
+        if Instant::now().duration_since(started_at) >= TIP_HOLE_RX_STALE {
+            return Some(owners[0]);
+        }
+        return None;
+    }
+    if recent.is_empty() {
+        return None;
+    }
+    if let Some(&id) = stale.iter().min() {
+        return Some(id);
+    }
+    let samples: Vec<RelativeSlowSample> = owners
+        .iter()
+        .filter_map(|&id| {
+            let s = slots.iter().find(|s| s.id == id && s.alive)?;
+            Some(RelativeSlowSample {
+                peer_id: id,
+                bps: s.rate.bps().unwrap_or(0),
+                has_inflight: true,
+            })
+        })
+        .collect();
+    relative_slow_pick(&samples, samples.len())
+}
+
+fn drop_hash_owner(st: &mut IbdWorkState, hash: BlockHash, pid: usize) {
+    if let Some(s) = st.slots.iter_mut().find(|s| s.id == pid) {
+        s.in_flight.remove(&hash);
+    }
+    if let Some(req) = st.inflight.get_mut(&hash) {
+        if req.remove_peer(pid) {
+            st.inflight.remove(&hash);
+        }
+    }
+}
+
+fn peer_bps(slots: &[PeerSlot], pid: usize) -> u64 {
+    slots
+        .iter()
+        .find(|s| s.id == pid && s.alive)
+        .and_then(|s| s.rate.bps())
+        .unwrap_or(0)
+}
+
+fn pack_ewma_bps(slots: &[PeerSlot], alive: &[usize]) -> (Option<u64>, bool) {
+    let mut samples: Vec<u64> = alive
+        .iter()
+        .filter_map(|&pid| {
+            slots
+                .iter()
+                .find(|s| s.id == pid && s.alive)
+                .and_then(|s| s.rate.bps())
+        })
+        .collect();
+    if samples.is_empty() {
+        return (None, true);
+    }
+    samples.sort_unstable();
+    let lo = samples[0];
+    let hi = samples[samples.len() - 1];
+    let tight = if lo == 0 {
+        hi == 0
+    } else {
+        hi <= lo.saturating_mul(RELATIVE_SLOW_CLUSTER_SPREAD)
+    };
+    (Some(median_u64(&samples)), tight)
+}
+
+fn densify_cap_for(
+    slots: &[PeerSlot],
+    pid: usize,
+    per_peer: usize,
+    tip_hole: bool,
+    pack_median: Option<u64>,
+    pack_tight: bool,
+) -> usize {
+    let bps = slots
+        .iter()
+        .find(|s| s.id == pid && s.alive)
+        .and_then(|s| s.rate.bps());
+    densify_slots_for_peer(per_peer, tip_hole, bps, pack_median, pack_tight)
+}
+
+/// Move hung single-peer densify getdata to a faster peer with a free slot.
+fn steal_hung_densify(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    alive: &[usize],
+    tip_batch_hi: u32,
+    densify_caps: &HashMap<usize, usize>,
+) -> u64 {
+    let now = Instant::now();
+    let now_ms = ibd_mono_ms();
+    let candidates: Vec<(BlockHash, u32, usize, Instant)> = st
+        .inflight
+        .iter()
+        .filter_map(|(h, req)| {
+            if req.len() != 1 {
+                return None;
+            }
+            let &ht = st.hash_height.get(h)?;
+            if ht <= tip_batch_hi {
+                return None;
+            }
+            let &pid = req.peers.iter().next()?;
+            Some((*h, ht, pid, req.started_at))
+        })
+        .collect();
+    let hung: Vec<BlockHash> = candidates
+        .into_iter()
+        .filter(|(h, ht, pid, started)| {
+            if super::progress::claim_ready(hub, &mut st.body, *ht, h) {
+                return false;
+            }
+            let Some(slot) = st.slots.iter().find(|s| s.id == *pid && s.alive) else {
+                return false;
+            };
+            if peer_has_recent_rx(slot, now_ms) {
+                return false;
+            }
+            now.duration_since(*started) >= TIP_HOLE_RX_STALE
+        })
+        .map(|(h, _, _, _)| h)
+        .collect();
+    let mut issued = 0u64;
+    for h in hung {
+        let Some(owner) = st
+            .inflight
+            .get(&h)
+            .and_then(|req| req.peers.iter().copied().next())
+        else {
+            continue;
+        };
+        let owner_bps = peer_bps(&st.slots, owner);
+        let mut faster: Vec<usize> = alive
+            .iter()
+            .copied()
+            .filter(|&pid| pid != owner && peer_bps(&st.slots, pid) > owner_bps)
+            .collect();
+        if faster.is_empty() {
+            continue;
+        }
+        faster.sort_by(|&a, &b| peer_bps(&st.slots, b).cmp(&peer_bps(&st.slots, a)));
+        let dest = faster
+            .into_iter()
+            .find(|&pid| peer_has_slot(st, pid, densify_caps.get(&pid).copied().unwrap_or(1)));
+        let ht = st.hash_height.get(&h).copied();
+        drop_hash_owner(st, h, owner);
+        if let Some(pid) = dest {
+            let mut room = 1usize;
+            let _ = issue_one(st, pid, h, &mut room, &mut issued);
+        } else if let Some(ht) = ht {
+            st.densify_scan_lo = st.densify_scan_lo.min(ht);
+        }
+    }
+    issued
+}
+
+/// Rank alive peer ids for getdata: prefer peers not in `avoid`, then
+/// higher live EWMA bps, then lower id. Unsampled peers sort last
 /// among non-avoided (bps=0).
-pub(crate) fn rank_tip_hole_peers(
+pub(crate) fn rank_peers_by_speed(
     slots: &[PeerSlot],
     alive: &[usize],
     avoid: &std::collections::HashSet<usize>,
@@ -582,14 +796,7 @@ pub(crate) fn rank_tip_hole_peers(
         let avoided_a = avoid.contains(&a) as u8;
         let avoided_b = avoid.contains(&b) as u8;
         avoided_a.cmp(&avoided_b).then_with(|| {
-            let bps = |pid: usize| -> u64 {
-                slots
-                    .iter()
-                    .find(|s| s.id == pid && s.alive)
-                    .and_then(|s| s.speed_sample())
-                    .map(|(_, bps)| bps)
-                    .unwrap_or(0)
-            };
+            let bps = |pid: usize| -> u64 { peer_bps(slots, pid) };
             bps(b).cmp(&bps(a)).then_with(|| a.cmp(&b))
         })
     });
@@ -598,8 +805,9 @@ pub(crate) fn rank_tip_hole_peers(
 
 /// Cover each tip-hole hash with multi-peer getdata, preferring faster peers.
 ///
-/// Stale tip-batch inflight is cleared after [`TIP_HOLE_INFLIGHT_STALE`] and
-/// re-raced, preferring peers that were **not** in the cleared set.
+/// While the hole is open, at most one current owner of **this hash** is dropped
+/// per call when a sibling is pulling or that owner is a relative-slow outlier
+/// among owners. The whole race set is never cleared on request age.
 pub(crate) fn cover_tip_holes(
     st: &mut IbdWorkState,
     hub: &ChainHub,
@@ -614,13 +822,6 @@ pub(crate) fn cover_tip_holes(
     let now = Instant::now();
 
     for &h in holes {
-        // Skip only when **claim-ready** (confirmed or body-queue wire present).
-        // Class A alone and **zombie pending without BQ** are not enough — sole
-        // confirm intake is BQ wire. Resume seed marks Class A as known so densify
-        // does not re-walk the whole band; tip-hole race must still re-get.
-        //
-        // Exception: tip+1 held for incomplete reorg mid gather — re-get would
-        // re-BadPrev forever while mids starve.
         if st.reorg.is_awaiting_held_tip(&h) {
             continue;
         }
@@ -636,10 +837,10 @@ pub(crate) fn cover_tip_holes(
         demote_zombie_pending_for_fetch(&mut st.body, hub, h, ht);
         let mut avoid: HashSet<usize> = HashSet::new();
         if let Some(req) = st.inflight.get(&h) {
-            if now.duration_since(req.started_at) >= TIP_HOLE_INFLIGHT_STALE {
-                avoid = req.peers.clone();
-                clear_hash_inflight(&mut st.slots, &mut st.inflight, h);
-                st.body.mark_missing(h);
+            let owners: Vec<usize> = req.peers.iter().copied().collect();
+            if let Some(pid) = tip_hole_owner_to_drop(&owners, &st.slots, req.started_at) {
+                drop_hash_owner(st, h, pid);
+                avoid.insert(pid);
             }
         }
         let (already, second_at) = st
@@ -653,10 +854,13 @@ pub(crate) fn cover_tip_holes(
         }
         let mut need = want - already;
         let mut placed_any = false;
-        let ranked = rank_tip_hole_peers(&st.slots, alive, &avoid);
+        let ranked = rank_peers_by_speed(&st.slots, alive, &avoid);
         for &pid in &ranked {
             if need == 0 {
                 break;
+            }
+            if avoid.contains(&pid) {
+                continue;
             }
             let Some(idx) = st.slots.iter().position(|s| s.id == pid && s.alive) else {
                 continue;
@@ -758,13 +962,41 @@ mod tests {
             addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444 + id as u16),
             cmd_tx,
             in_flight: HashSet::new(),
-            block_progress_ms: Arc::new(AtomicU64::new(0)),
             peer_height: 100,
             connected_ms: 1,
-            first_data_ms: AtomicU64::new(0),
-            bytes_rx: AtomicU64::new(0),
+            first_data_ms: 0,
+            bytes_rx_total: Arc::new(AtomicU64::new(0)),
+            rate: Default::default(),
             alive: true,
             task,
+        }
+    }
+
+    fn plant_work_path(st: &mut IbdWorkState, lo: u32, hi: u32) {
+        for ht in lo..=hi {
+            let hash = h(ht);
+            st.record_height(hash, ht);
+            st.height_to_hash.insert(ht, hash);
+            st.ordered_set.insert(hash);
+            st.ordered.push_back(hash);
+            st.max_ordered_height = ht;
+            st.body.mark_missing(hash);
+        }
+    }
+
+    fn seed_ewma(slot: &mut PeerSlot, bytes_per_sec: u64) {
+        slot.rate.sample(0, 0, true);
+        slot.rate
+            .sample(5_000, bytes_per_sec.saturating_mul(5), true);
+    }
+
+    fn mark_tip_batch_ready(st: &mut IbdWorkState, hub: &ChainHub, path_lo: u32) {
+        use bitcoin::hashes::Hash as _;
+        for ht in path_lo..=32 {
+            hub.query
+                .block_queue_offer(ht, h(ht).to_byte_array(), 1, &[0u8; 80])
+                .unwrap();
+            st.body.mark_pending(h(ht));
         }
     }
 
@@ -832,6 +1064,23 @@ mod tests {
         let cfg = IbdConfig::for_test();
         assign_work_ordered(&mut st, &hub, &cfg, &stats, 1, AssignDepth::Full, None);
 
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn issue_batch_does_not_count_as_rx() {
+        let (dir, _hub) = tmp_hub();
+        let mut st = IbdWorkState::new(vec![dummy_slot(0)], None, Some(0));
+        st.slots[0].rate.progress_ms = 42;
+        st.slots[0].rate.work_started_ms = 7;
+        let mut room = 10usize;
+        let mut issued = 0u64;
+        let t0 = super::super::peer_io::ibd_mono_ms();
+        assert!(issue_one(&mut st, 0, h(30), &mut room, &mut issued));
+        let t1 = super::super::peer_io::ibd_mono_ms();
+        assert_eq!(st.slots[0].rate.progress_ms, 42);
+        assert!(st.slots[0].rate.work_started_ms >= t0);
+        assert!(st.slots[0].rate.work_started_ms <= t1);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -922,6 +1171,41 @@ mod tests {
         assert_eq!(far_slots_per_peer(16, true), 2);
         assert!(far_slots_per_peer(16, true) < 16);
         assert_eq!(far_slots_per_peer(16, false), 8);
+    }
+
+    #[test]
+    fn tip_hole_owner_to_drop_too_early_dead_racer_and_solo() {
+        use super::super::peer_io::ibd_mono_ms;
+        let mut slots = vec![dummy_slot(0), dummy_slot(1)];
+        let started = Instant::now();
+        assert_eq!(
+            tip_hole_owner_to_drop(&[0, 1], &slots, started),
+            None,
+            "no rx yet is too early"
+        );
+        slots[1].rate.note_rx(ibd_mono_ms().max(1));
+        assert_eq!(
+            tip_hole_owner_to_drop(&[0, 1], &slots, started),
+            Some(0),
+            "silent owner drops when sibling has rx"
+        );
+        slots[0].rate.note_rx(ibd_mono_ms().max(1));
+        assert_eq!(
+            tip_hole_owner_to_drop(&[0], &slots, Instant::now() - Duration::from_secs(7)),
+            None,
+            "solo with live rx is kept"
+        );
+        assert_eq!(
+            tip_hole_owner_to_drop(&[0], &slots, Instant::now() - Duration::from_secs(31)),
+            None,
+            "solo with live rx kept even if started_at is old"
+        );
+        slots[0].rate.progress_ms = 0;
+        assert_eq!(
+            tip_hole_owner_to_drop(&[0], &slots, Instant::now() - Duration::from_secs(31)),
+            Some(0),
+            "solo hung with no rx after 30s is replaced"
+        );
     }
 
     /// Wrong first-wins body at tip+1 is not claim-ready; cover must dequeue and
@@ -1070,10 +1354,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Stale tip-hole inflight (≥6s) with no claimable wire must clear and re-race.
-    /// Mainnet freeze: hole=1, inflight stuck forever, soft frozen, conf=0.
+    /// Request age does not clear the whole tip-hole race set.
     #[test]
-    fn cover_tip_holes_re_races_stale_inflight() {
+    fn cover_tip_holes_does_not_clear_whole_set_on_started_at() {
+        use super::super::peer_io::ibd_mono_ms;
         use super::super::state::InflightReq;
         let (dir, hub) = tmp_hub();
         hub.ensure_genesis().unwrap();
@@ -1088,58 +1372,133 @@ mod tests {
         st.record_height(hole, ht);
         st.height_to_hash.insert(ht, hole);
         st.body.mark_missing(hole);
-        // Fresh inflight (<6s) must not re-race yet.
-        let mut fresh = InflightReq::new(0);
-        fresh.started_at = Instant::now() - Duration::from_secs(3);
-        st.inflight.insert(hole, fresh);
-        st.slots[0].in_flight.insert(hole);
-        let holes = contiguous_tip_holes(&mut st, &hub, 8);
-        assert_eq!(holes, vec![hole]);
-        let cfg = IbdConfig::for_test();
-        let alive: Vec<usize> = st.slots.iter().filter(|s| s.alive).map(|s| s.id).collect();
-        let issued_fresh = cover_tip_holes(&mut st, &hub, &cfg, &alive, &holes);
-        // Still at want peers (race fills), but started_at not cleared as stale.
-        let age_fresh = Instant::now().duration_since(st.inflight[&hole].started_at);
-        assert!(
-            age_fresh >= Duration::from_secs(2),
-            "fresh inflight must keep original started_at; age={age_fresh:?} issued={issued_fresh}"
-        );
-
-        // Frozen inflight from a prior race that never delivered wire (≥6s).
-        st.inflight.clear();
-        for s in st.slots.iter_mut() {
-            s.in_flight.clear();
-        }
         let mut frozen = InflightReq::new(0);
+        frozen.add_peer(1);
         frozen.started_at = Instant::now() - Duration::from_secs(7);
         st.inflight.insert(hole, frozen);
         st.slots[0].in_flight.insert(hole);
+        st.slots[1].in_flight.insert(hole);
+        let now = ibd_mono_ms().max(1);
+        st.slots[0].rate.note_rx(now);
+        st.slots[1].rate.note_rx(now);
+        seed_ewma(&mut st.slots[0], 1_000_000);
+        seed_ewma(&mut st.slots[1], 1_100_000);
+        seed_ewma(&mut st.slots[2], 1_050_000);
+        let cfg = IbdConfig::for_test();
+        let alive: Vec<usize> = st.slots.iter().filter(|s| s.alive).map(|s| s.id).collect();
+        let _ = cover_tip_holes(&mut st, &hub, &cfg, &alive, &[hole]);
+        let peers = &st.inflight[&hole].peers;
         assert!(
-            !super::super::progress::claim_ready(&hub, &mut st.body, ht, &hole),
-            "no wire → not claim-ready"
-        );
-        let issued = cover_tip_holes(&mut st, &hub, &cfg, &alive, &holes);
-        assert!(
-            issued >= 1,
-            "stale inflight must re-race getdata; issued={issued}"
-        );
-        assert!(
-            st.inflight.contains_key(&hole),
-            "hash remains inflight after re-race"
-        );
-        // Fresh started_at (not still the 7s-old stamp).
-        let age = Instant::now().duration_since(st.inflight[&hole].started_at);
-        assert!(
-            age < Duration::from_secs(2),
-            "re-race must reset started_at; age={age:?}"
+            peers.contains(&0) && peers.contains(&1),
+            "tight pack with live rx must keep owners; peers={peers:?}"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Tip-hole cover prefers higher speed_sample bps peers first.
+    #[test]
+    fn cover_tip_holes_drops_owner_with_no_rx_when_sibling_progresses() {
+        use super::super::peer_io::ibd_mono_ms;
+        use super::super::state::InflightReq;
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let mut st = IbdWorkState::new(
+            vec![dummy_slot(0), dummy_slot(1), dummy_slot(2)],
+            hub.tip_hash(),
+            hub.tip_height(),
+        );
+        let hole = h(0x52);
+        let tip = hub.tip_height().unwrap_or(0);
+        let ht = tip.saturating_add(1);
+        st.record_height(hole, ht);
+        st.height_to_hash.insert(ht, hole);
+        st.body.mark_missing(hole);
+        let mut req = InflightReq::new(0);
+        req.add_peer(1);
+        st.inflight.insert(hole, req);
+        st.slots[0].in_flight.insert(hole);
+        st.slots[1].in_flight.insert(hole);
+        st.slots[1].rate.note_rx(ibd_mono_ms().max(1));
+        let cfg = IbdConfig::for_test();
+        let alive: Vec<usize> = st.slots.iter().filter(|s| s.alive).map(|s| s.id).collect();
+        let _ = cover_tip_holes(&mut st, &hub, &cfg, &alive, &[hole]);
+        let peers = &st.inflight[&hole].peers;
+        assert!(
+            !peers.contains(&0),
+            "silent owner must leave this hash; peers={peers:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cover_tip_holes_drops_relative_slow_owner_among_progressing() {
+        use super::super::peer_io::ibd_mono_ms;
+        use super::super::state::InflightReq;
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let mut st = IbdWorkState::new(
+            vec![dummy_slot(0), dummy_slot(1), dummy_slot(2)],
+            hub.tip_hash(),
+            hub.tip_height(),
+        );
+        let hole = h(0x53);
+        let tip = hub.tip_height().unwrap_or(0);
+        let ht = tip.saturating_add(1);
+        st.record_height(hole, ht);
+        st.height_to_hash.insert(ht, hole);
+        st.body.mark_missing(hole);
+        let mut req = InflightReq::new(0);
+        req.add_peer(1);
+        req.add_peer(2);
+        st.inflight.insert(hole, req);
+        for i in 0..3 {
+            st.slots[i].in_flight.insert(hole);
+            st.slots[i].rate.note_rx(ibd_mono_ms().max(1));
+        }
+        seed_ewma(&mut st.slots[0], 400_000);
+        seed_ewma(&mut st.slots[1], 2_000_000);
+        seed_ewma(&mut st.slots[2], 1_900_000);
+        let cfg = IbdConfig::for_test();
+        let alive: Vec<usize> = st.slots.iter().filter(|s| s.alive).map(|s| s.id).collect();
+        let _ = cover_tip_holes(&mut st, &hub, &cfg, &alive, &[hole]);
+        let peers = &st.inflight[&hole].peers;
+        assert!(
+            !peers.contains(&0),
+            "half-median owner among progressing racers drops; peers={peers:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cover_tip_holes_solo_slow_but_rx_live_kept() {
+        use super::super::peer_io::ibd_mono_ms;
+        use super::super::state::InflightReq;
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let mut st = IbdWorkState::new(vec![dummy_slot(0)], hub.tip_hash(), hub.tip_height());
+        let hole = h(0x54);
+        let tip = hub.tip_height().unwrap_or(0);
+        let ht = tip.saturating_add(1);
+        st.record_height(hole, ht);
+        st.height_to_hash.insert(ht, hole);
+        st.body.mark_missing(hole);
+        let mut req = InflightReq::new(0);
+        req.started_at = Instant::now() - Duration::from_secs(31);
+        st.inflight.insert(hole, req);
+        st.slots[0].in_flight.insert(hole);
+        st.slots[0].rate.note_rx(ibd_mono_ms().max(1));
+        let cfg = IbdConfig::for_test();
+        let alive: Vec<usize> = vec![0];
+        let _ = cover_tip_holes(&mut st, &hub, &cfg, &alive, &[hole]);
+        assert!(
+            st.inflight[&hole].contains_peer(0),
+            "solo slow-but-steady download stays"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Tip-hole cover prefers higher EWMA bps peers first.
     #[test]
     fn cover_tip_holes_prefers_fast_peers() {
-        use super::super::peer_io::ibd_mono_ms;
         let (dir, hub) = tmp_hub();
         hub.ensure_genesis().unwrap();
         let mut st = IbdWorkState::new(
@@ -1154,17 +1513,12 @@ mod tests {
         st.height_to_hash.insert(ht, hole);
         st.body.mark_missing(hole);
 
-        // Peer 0 slow, peer 1 fast, peer 2 medium — inject lifetime samples.
-        let now = ibd_mono_ms().max(2_000);
-        for (i, bps_equiv_bytes) in [(0usize, 100_000u64), (1, 10_000_000u64), (2, 1_000_000u64)] {
-            st.slots[i].connected_ms = now.saturating_sub(2_000);
+        // Peer 0 slow, peer 1 fast, peer 2 medium — inject mature EWMA samples.
+        for (i, bytes_per_sec) in [(0usize, 100_000u64), (1, 10_000_000u64), (2, 1_000_000u64)] {
+            st.slots[i].rate.sample(0, 0, true);
             st.slots[i]
-                .first_data_ms
-                .store(now.saturating_sub(1_000), Ordering::Relaxed);
-            // bytes such that bps ≈ bytes*1000/1000ms = bytes for ~1s elapsed
-            st.slots[i]
-                .bytes_rx
-                .store(bps_equiv_bytes, Ordering::Relaxed);
+                .rate
+                .sample(5_000, bytes_per_sec.saturating_mul(5), true);
         }
         // Cap want to 2 so only the top two speeds get work if ranking works.
         // TIP_HOLE_MAX_PEERS is 4 but we only have 3 peers — all may get work.
@@ -1172,7 +1526,7 @@ mod tests {
         let cfg = IbdConfig::for_test();
         let alive: Vec<usize> = st.slots.iter().filter(|s| s.alive).map(|s| s.id).collect();
         let avoid = HashSet::new();
-        let ranked = rank_tip_hole_peers(&st.slots, &alive, &avoid);
+        let ranked = rank_peers_by_speed(&st.slots, &alive, &avoid);
         assert_eq!(ranked[0], 1, "fastest peer first: ranked={ranked:?}");
         assert_eq!(ranked[1], 2, "medium second: ranked={ranked:?}");
         assert_eq!(ranked[2], 0, "slow last: ranked={ranked:?}");
@@ -1188,42 +1542,316 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// After stale clear, re-race prefers peers not in the cleared set.
     #[test]
-    fn cover_tip_holes_rerace_avoids_prior_peers() {
+    fn densify_hung_owner_stolen_to_faster_peer() {
+        use super::super::state::InflightReq;
+        use bitcoin::hashes::Hash as _;
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let mut st = IbdWorkState::new(
+            vec![dummy_slot(0), dummy_slot(1)],
+            hub.tip_hash(),
+            hub.tip_height(),
+        );
+        let stats = LoopStats::default();
+        let mut cfg = IbdConfig::for_test();
+        cfg.window = 64;
+        cfg.per_peer = 16;
+        let path_lo = hub.tip_height().unwrap_or(0).saturating_add(1);
+        plant_work_path(&mut st, path_lo, 40);
+        hub.query
+            .block_queue_offer(path_lo, h(path_lo).to_byte_array(), 1, &[0u8; 80])
+            .unwrap();
+        st.body.mark_pending(h(path_lo));
+        let hung = h(40);
+        let mut req = InflightReq::new(0);
+        req.started_at = Instant::now() - Duration::from_secs(31);
+        st.inflight.insert(hung, req);
+        st.slots[0].in_flight.insert(hung);
+        seed_ewma(&mut st.slots[1], 1_000_000);
+        assign_work_ordered(
+            &mut st,
+            &hub,
+            &cfg,
+            &stats,
+            path_lo,
+            AssignDepth::Full,
+            None,
+        );
+        let peers = &st.inflight[&hung].peers;
+        assert!(
+            peers.contains(&1) && !peers.contains(&0),
+            "hung densify must move to faster peer; peers={peers:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn densify_slow_but_rx_live_not_stolen() {
+        use super::super::peer_io::ibd_mono_ms;
+        use super::super::state::InflightReq;
+        use bitcoin::hashes::Hash as _;
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let mut st = IbdWorkState::new(
+            vec![dummy_slot(0), dummy_slot(1)],
+            hub.tip_hash(),
+            hub.tip_height(),
+        );
+        let stats = LoopStats::default();
+        let mut cfg = IbdConfig::for_test();
+        cfg.window = 64;
+        cfg.per_peer = 16;
+        let path_lo = hub.tip_height().unwrap_or(0).saturating_add(1);
+        plant_work_path(&mut st, path_lo, 40);
+        hub.query
+            .block_queue_offer(path_lo, h(path_lo).to_byte_array(), 1, &[0u8; 80])
+            .unwrap();
+        st.body.mark_pending(h(path_lo));
+        let hung = h(40);
+        let mut req = InflightReq::new(0);
+        req.started_at = Instant::now() - Duration::from_secs(31);
+        st.inflight.insert(hung, req);
+        st.slots[0].in_flight.insert(hung);
+        st.slots[0].rate.note_rx(ibd_mono_ms().max(1));
+        seed_ewma(&mut st.slots[1], 1_000_000);
+        assign_work_ordered(
+            &mut st,
+            &hub,
+            &cfg,
+            &stats,
+            path_lo,
+            AssignDepth::Full,
+            None,
+        );
+        assert!(
+            st.inflight[&hung].contains_peer(0),
+            "live rx must not be stolen; peers={:?}",
+            st.inflight[&hung].peers
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn densify_hung_no_faster_peer_does_not_steal() {
+        use super::super::state::InflightReq;
+        use bitcoin::hashes::Hash as _;
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let mut st = IbdWorkState::new(vec![dummy_slot(0)], hub.tip_hash(), hub.tip_height());
+        let stats = LoopStats::default();
+        let mut cfg = IbdConfig::for_test();
+        cfg.window = 64;
+        cfg.per_peer = 16;
+        let path_lo = hub.tip_height().unwrap_or(0).saturating_add(1);
+        plant_work_path(&mut st, path_lo, 40);
+        hub.query
+            .block_queue_offer(path_lo, h(path_lo).to_byte_array(), 1, &[0u8; 80])
+            .unwrap();
+        st.body.mark_pending(h(path_lo));
+        let hung = h(40);
+        let mut req = InflightReq::new(0);
+        req.started_at = Instant::now() - Duration::from_secs(31);
+        st.inflight.insert(hung, req);
+        st.slots[0].in_flight.insert(hung);
+        assign_work_ordered(
+            &mut st,
+            &hub,
+            &cfg,
+            &stats,
+            path_lo,
+            AssignDepth::Full,
+            None,
+        );
+        assert!(
+            st.inflight[&hung].contains_peer(0),
+            "solo hung densify has no faster peer to steal to"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn densify_hung_no_slot_rewinds_scan_lo() {
+        use super::super::peer_io::ibd_mono_ms;
+        use super::super::state::InflightReq;
+        use bitcoin::hashes::Hash as _;
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let mut st = IbdWorkState::new(
+            vec![dummy_slot(0), dummy_slot(1)],
+            hub.tip_hash(),
+            hub.tip_height(),
+        );
+        let stats = LoopStats::default();
+        let mut cfg = IbdConfig::for_test();
+        cfg.window = 1;
+        cfg.per_peer = 2;
+        let path_lo = hub.tip_height().unwrap_or(0).saturating_add(1);
+        plant_work_path(&mut st, path_lo, 41);
+        hub.query
+            .block_queue_offer(path_lo, h(path_lo).to_byte_array(), 1, &[0u8; 80])
+            .unwrap();
+        st.body.mark_pending(h(path_lo));
+        let hung = h(40);
+        let other = h(41);
+        let mut req = InflightReq::new(0);
+        req.started_at = Instant::now() - Duration::from_secs(31);
+        st.inflight.insert(hung, req);
+        st.slots[0].in_flight.insert(hung);
+        st.inflight.insert(other, InflightReq::new(1));
+        st.slots[1].in_flight.insert(other);
+        st.slots[1].rate.note_rx(ibd_mono_ms().max(1));
+        seed_ewma(&mut st.slots[1], 1_000_000);
+        st.densify_scan_lo = 90;
+        assign_work_ordered(
+            &mut st,
+            &hub,
+            &cfg,
+            &stats,
+            path_lo,
+            AssignDepth::Full,
+            None,
+        );
+        assert!(
+            !st.inflight.contains_key(&hung),
+            "hung hash cleared when faster peer has no slot"
+        );
+        assert!(
+            st.densify_scan_lo <= 40,
+            "scan_lo must rewind to hung height; scan_lo={}",
+            st.densify_scan_lo
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn densify_issues_to_fastest_peer_first() {
+        let _env = lock_default_assign_stop();
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let mut st = IbdWorkState::new(
+            vec![dummy_slot(0), dummy_slot(1), dummy_slot(2)],
+            hub.tip_hash(),
+            hub.tip_height(),
+        );
+        let stats = LoopStats::default();
+        let mut cfg = IbdConfig::for_test();
+        cfg.window = 128;
+        cfg.per_peer = 16;
+        let path_lo = hub.tip_height().unwrap_or(0).saturating_add(1);
+        plant_work_path(&mut st, path_lo, 40);
+        mark_tip_batch_ready(&mut st, &hub, path_lo);
+        seed_ewma(&mut st.slots[0], 100_000);
+        seed_ewma(&mut st.slots[1], 10_000_000);
+        seed_ewma(&mut st.slots[2], 1_000_000);
+        st.densify_scan_lo = 40;
+        assign_work_ordered(
+            &mut st,
+            &hub,
+            &cfg,
+            &stats,
+            path_lo,
+            AssignDepth::Full,
+            None,
+        );
+        let want = h(40);
+        assert!(
+            st.inflight.get(&want).is_some_and(|r| r.contains_peer(1)),
+            "first densify hash must go to fastest peer; inflight={:?}",
+            st.inflight.get(&want).map(|r| &r.peers)
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn densify_skips_band_walk_when_peers_at_cap() {
         use super::super::state::InflightReq;
         let (dir, hub) = tmp_hub();
         hub.ensure_genesis().unwrap();
         let mut st = IbdWorkState::new(
-            (0..5).map(dummy_slot).collect(),
+            vec![dummy_slot(0), dummy_slot(1)],
             hub.tip_hash(),
             hub.tip_height(),
         );
-        let hole = h(0x71);
-        let tip = hub.tip_height().unwrap_or(0);
-        let ht = tip.saturating_add(1);
-        st.record_height(hole, ht);
-        st.height_to_hash.insert(ht, hole);
-        st.body.mark_missing(hole);
+        let stats = LoopStats::default();
+        let mut cfg = IbdConfig::for_test();
+        cfg.window = 128;
+        cfg.per_peer = 16;
+        let path_lo = hub.tip_height().unwrap_or(0).saturating_add(1);
+        plant_work_path(&mut st, path_lo, 70);
+        mark_tip_batch_ready(&mut st, &hub, path_lo);
+        for i in 0..16u32 {
+            let ht = 40 + i;
+            let hash = h(ht);
+            let pid = (i % 2) as usize;
+            st.inflight.insert(hash, InflightReq::new(pid));
+            st.slots[pid].in_flight.insert(hash);
+        }
+        st.densify_scan_lo = 40;
+        let before_keys: HashSet<_> = st.inflight.keys().copied().collect();
+        assign_work_ordered(
+            &mut st,
+            &hub,
+            &cfg,
+            &stats,
+            path_lo,
+            AssignDepth::Full,
+            None,
+        );
+        let after_keys: HashSet<_> = st.inflight.keys().copied().collect();
+        assert_eq!(after_keys, before_keys, "no new densify when peers at cap");
+        assert_eq!(
+            st.densify_scan_lo, 40,
+            "band walk must not advance scan_lo; scan_lo={}",
+            st.densify_scan_lo
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
-        let mut frozen = InflightReq::new(0);
-        frozen.add_peer(1);
-        frozen.started_at = Instant::now() - Duration::from_secs(7);
-        st.inflight.insert(hole, frozen);
-        st.slots[0].in_flight.insert(hole);
-        st.slots[1].in_flight.insert(hole);
-
-        let cfg = IbdConfig::for_test();
-        let alive: Vec<usize> = st.slots.iter().filter(|s| s.alive).map(|s| s.id).collect();
-        let holes = vec![hole];
-        let issued = cover_tip_holes(&mut st, &hub, &cfg, &alive, &holes);
-        assert!(issued >= 1, "issued={issued}");
-        let peers = &st.inflight[&hole].peers;
-        // Prefer 2,3,4 over reusing 0,1 first — at least one new peer in race.
-        let new = peers.iter().any(|&p| p >= 2);
+    #[test]
+    fn densify_fast_peer_receives_more_than_eight() {
+        let _env = lock_default_assign_stop();
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let mut st = IbdWorkState::new(
+            vec![dummy_slot(0), dummy_slot(1), dummy_slot(2)],
+            hub.tip_hash(),
+            hub.tip_height(),
+        );
+        let stats = LoopStats::default();
+        let mut cfg = IbdConfig::for_test();
+        cfg.window = 128;
+        cfg.per_peer = 16;
+        let path_lo = hub.tip_height().unwrap_or(0).saturating_add(1);
+        plant_work_path(&mut st, path_lo, 52);
+        mark_tip_batch_ready(&mut st, &hub, path_lo);
+        seed_ewma(&mut st.slots[0], 5_000_000);
+        seed_ewma(&mut st.slots[1], 15_000_000);
+        seed_ewma(&mut st.slots[2], 5_000_000);
+        st.densify_scan_lo = 33;
+        assign_work_ordered(
+            &mut st,
+            &hub,
+            &cfg,
+            &stats,
+            path_lo,
+            AssignDepth::Full,
+            None,
+        );
+        assert_eq!(
+            st.slots[1].in_flight.len(),
+            16,
+            "2×-median outlier must get full densify cap"
+        );
         assert!(
-            new,
-            "re-race should include peers outside cleared set; peers={peers:?}"
+            st.slots[0].in_flight.len() <= 8,
+            "non-outlier stays at half cap; n={}",
+            st.slots[0].in_flight.len()
+        );
+        assert!(
+            st.slots[2].in_flight.len() <= 8,
+            "non-outlier stays at half cap; n={}",
+            st.slots[2].in_flight.len()
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1448,6 +2076,7 @@ mod tests {
 
     #[test]
     fn densify_requests_beyond_legacy_2k_when_soft_allows() {
+        let _env = lock_default_assign_stop();
         let (dir, hub) = tmp_hub();
         hub.ensure_genesis().unwrap();
         let mut st = IbdWorkState::new(vec![dummy_slot(0), dummy_slot(1)], None, Some(0));
@@ -1662,28 +2291,43 @@ mod tests {
     /// Serialize env mutators — parallel suite races `bq_assign_stop_bytes`.
     static BQ_ASSIGN_STOP_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    struct AssignStopEnvRestore(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
+    impl Drop for AssignStopEnvRestore {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(v) => std::env::set_var("RBITCOIN_BLOCK_QUEUE_BYTES", v),
+                None => std::env::remove_var("RBITCOIN_BLOCK_QUEUE_BYTES"),
+            }
+            match self.1.take() {
+                Some(v) => std::env::set_var("RBITCOIN_BLOCK_QUEUE_GB", v),
+                None => std::env::remove_var("RBITCOIN_BLOCK_QUEUE_GB"),
+            }
+        }
+    }
+
+    fn lock_default_assign_stop() -> (std::sync::MutexGuard<'static, ()>, AssignStopEnvRestore) {
+        let g = BQ_ASSIGN_STOP_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let restore = AssignStopEnvRestore(
+            std::env::var_os("RBITCOIN_BLOCK_QUEUE_BYTES"),
+            std::env::var_os("RBITCOIN_BLOCK_QUEUE_GB"),
+        );
+        std::env::remove_var("RBITCOIN_BLOCK_QUEUE_BYTES");
+        std::env::remove_var("RBITCOIN_BLOCK_QUEUE_GB");
+        (g, restore)
+    }
+
     /// Over assign-stop: densify within confirm window ∩ fetched; not past window.
     #[test]
     fn densify_over_assign_stop_clamps_window_and_fetched() {
         let _g = BQ_ASSIGN_STOP_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let prev_b = std::env::var_os("RBITCOIN_BLOCK_QUEUE_BYTES");
-        let prev_g = std::env::var_os("RBITCOIN_BLOCK_QUEUE_GB");
-        struct Restore(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(v) => std::env::set_var("RBITCOIN_BLOCK_QUEUE_BYTES", v),
-                    None => std::env::remove_var("RBITCOIN_BLOCK_QUEUE_BYTES"),
-                }
-                match self.1.take() {
-                    Some(v) => std::env::set_var("RBITCOIN_BLOCK_QUEUE_GB", v),
-                    None => std::env::remove_var("RBITCOIN_BLOCK_QUEUE_GB"),
-                }
-            }
-        }
-        let _restore = Restore(prev_b, prev_g);
+        let _restore = AssignStopEnvRestore(
+            std::env::var_os("RBITCOIN_BLOCK_QUEUE_BYTES"),
+            std::env::var_os("RBITCOIN_BLOCK_QUEUE_GB"),
+        );
         std::env::remove_var("RBITCOIN_BLOCK_QUEUE_GB");
         std::env::set_var("RBITCOIN_BLOCK_QUEUE_BYTES", "2048");
 

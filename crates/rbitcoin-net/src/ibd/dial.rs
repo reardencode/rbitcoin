@@ -1,6 +1,7 @@
 //! Peer dial, header request, stall disconnect / cooldown.
 
 use super::peer_io::{ibd_mono_ms, spawn_peer, PeerCmd, PeerEventSinks, PeerSlot};
+use super::rate::RELSLOW_ACTIVE_MS;
 use crate::chain::ChainHub;
 use crate::error::NetError;
 use crate::peers::{trying_connection_log, PeerConnType};
@@ -22,10 +23,6 @@ pub(crate) const STALL_ADDR_COOLDOWN: Duration = Duration::from_secs(10 * 60);
 pub(crate) const RELATIVE_SLOW_CLUSTER_SPREAD: u64 = 2;
 /// Disconnect only if peer bps ≤ median / this (default 2 → half median).
 pub(crate) const RELATIVE_SLOW_OUTLIER_RATIO: u64 = 2;
-/// Per-peer mature sample age (ms since first block byte).
-pub(crate) const RELATIVE_SLOW_MIN_AGE_MS: u64 = 60_000;
-/// Per-peer mature payload floor for disconnect decisions (tip-rank may use less).
-pub(crate) const RELATIVE_SLOW_MIN_BYTES: u64 = 2 * 1024 * 1024;
 /// Target mature peers before relative rule runs (full IBD peer set).
 pub(crate) const RELATIVE_SLOW_MIN_SAMPLES: usize = 8;
 /// Floor when fewer than 16 alive peers.
@@ -131,26 +128,17 @@ pub(crate) fn relative_slow_with_hysteresis(
     }
 }
 
-/// Build mature relative-slow samples from live slots (age + bytes floors).
+/// Build mature relative-slow samples from live slots (`active_ms` floor).
 pub(crate) fn mature_relative_slow_samples(slots: &[PeerSlot]) -> Vec<RelativeSlowSample> {
-    let now = ibd_mono_ms();
     let mut out = Vec::new();
     for s in slots {
         if !s.alive {
             continue;
         }
-        let first = s.first_data_ms.load(Ordering::Relaxed);
-        if first == 0 {
+        if s.rate.active_ms < RELSLOW_ACTIVE_MS {
             continue;
         }
-        if now.saturating_sub(first) < RELATIVE_SLOW_MIN_AGE_MS {
-            continue;
-        }
-        let bytes = s.bytes_rx.load(Ordering::Relaxed);
-        if bytes < RELATIVE_SLOW_MIN_BYTES {
-            continue;
-        }
-        let Some((_, bps)) = s.speed_sample() else {
+        let Some(bps) = s.rate.bps() else {
             continue;
         };
         out.push(RelativeSlowSample {
@@ -169,7 +157,7 @@ pub(crate) fn global_first_block_ms(slots: &[PeerSlot]) -> u64 {
         if !s.alive {
             continue;
         }
-        let first = s.first_data_ms.load(Ordering::Relaxed);
+        let first = s.first_data_ms;
         if first == 0 {
             continue;
         }
@@ -435,13 +423,23 @@ pub(crate) fn disconnect_stalled_block_peers(
     now: Instant,
     stall: Duration,
 ) {
+    disconnect_stalled_block_peers_at(slots, inflight, addr_cooldown, now, stall, ibd_mono_ms());
+}
+
+pub(crate) fn disconnect_stalled_block_peers_at(
+    slots: &mut [PeerSlot],
+    inflight: &mut HashMap<bitcoin::BlockHash, super::state::InflightReq>,
+    addr_cooldown: &mut HashMap<SocketAddr, Instant>,
+    now: Instant,
+    stall: Duration,
+    now_ms: u64,
+) {
     let stall = stall.max(Duration::from_secs(30));
     let stall_ms = stall.as_millis() as u64;
-    let now_ms = ibd_mono_ms();
     let stalled_peers: Vec<(usize, usize, SocketAddr)> = slots
         .iter()
         .filter(|s| s.alive && !s.in_flight.is_empty())
-        .filter(|s| now_ms.saturating_sub(s.block_progress_ms.load(Ordering::Relaxed)) > stall_ms)
+        .filter(|s| s.rate.stalled(now_ms, stall_ms, true))
         .map(|s| (s.id, s.in_flight.len(), s.addr))
         .collect();
     for (id, n_work, addr) in stalled_peers {
@@ -539,11 +537,11 @@ mod tests {
             addr: a,
             cmd_tx,
             in_flight: HashSet::new(),
-            block_progress_ms: Arc::new(AtomicU64::new(0)),
             peer_height: 0,
             connected_ms: 0,
-            first_data_ms: AtomicU64::new(0),
-            bytes_rx: AtomicU64::new(0),
+            first_data_ms: 0,
+            bytes_rx_total: Arc::new(AtomicU64::new(0)),
+            rate: Default::default(),
             alive,
             task,
         }
@@ -794,38 +792,54 @@ mod tests {
     }
 
     #[test]
-    fn disconnect_stalled_releases_and_cools_addr() {
-        use std::sync::atomic::Ordering as AtOrd;
+    fn disconnect_stalled_after_30s_without_rx() {
         let a = addr(11);
         let mut slot = dummy_slot(5, a, true);
         let h = BlockHash::from_byte_array([0xee; 32]);
         slot.in_flight.insert(h);
-        // Old progress → stalled relative to mono clock.
-        slot.block_progress_ms.store(0, AtOrd::Relaxed);
-        // Ensure mono has advanced past stall window.
-        while ibd_mono_ms() < 50 {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        slot.rate.note_work_started(0);
         let mut inflight = HashMap::new();
         inflight.insert(h, super::super::state::InflightReq::new(5));
         let mut cooldown = HashMap::new();
-        let now = Instant::now();
-        disconnect_stalled_block_peers(
-            &mut [slot],
+        disconnect_stalled_block_peers_at(
+            std::slice::from_mut(&mut slot),
             &mut inflight,
             &mut cooldown,
-            now,
-            Duration::from_millis(1), // clamped to 30s internally
+            Instant::now(),
+            Duration::from_secs(30),
+            30_001,
         );
-        // With stall floor 30s, may not disconnect if mono elapsed < 30s.
-        // Drive with a very old progress and long stall requirement by faking:
-        // store progress far in the past relative to mono.
-        let mut slot2 = dummy_slot(6, addr(12), true);
-        slot2.in_flight.insert(h);
-        slot2.block_progress_ms.store(0, AtOrd::Relaxed);
-        // Advance mono if needed is limited — instead assert cooldown path when
-        // we force-release after a simulated stall disconnect (release already tested).
-        // Call with empty inflight peer (no work) → no-op.
+        assert!(cooldown.contains_key(&a));
+        assert!(inflight.is_empty());
+    }
+
+    #[test]
+    fn disconnect_stalled_not_when_rx_recent() {
+        let a = addr(12);
+        let mut slot = dummy_slot(6, a, true);
+        let h = BlockHash::from_byte_array([0xee; 32]);
+        slot.in_flight.insert(h);
+        slot.rate.note_work_started(0);
+        slot.rate.note_rx(25_000);
+        let mut inflight = HashMap::new();
+        inflight.insert(h, super::super::state::InflightReq::new(6));
+        let mut cooldown = HashMap::new();
+        disconnect_stalled_block_peers_at(
+            std::slice::from_mut(&mut slot),
+            &mut inflight,
+            &mut cooldown,
+            Instant::now(),
+            Duration::from_secs(30),
+            45_000,
+        );
+        assert!(cooldown.get(&a).is_none());
+        assert!(inflight.contains_key(&h));
+    }
+
+    #[test]
+    fn disconnect_stalled_releases_and_cools_addr() {
+        let now = Instant::now();
+        let mut cooldown = HashMap::new();
         disconnect_stalled_block_peers(
             &mut [dummy_slot(7, addr(13), true)],
             &mut HashMap::new(),
@@ -833,7 +847,6 @@ mod tests {
             now,
             Duration::from_secs(30),
         );
-        // Alive peer with no in_flight is never stalled.
         assert!(cooldown.get(&addr(13)).is_none());
     }
 
@@ -901,47 +914,22 @@ mod tests {
         ];
         assert_eq!(relative_slow_pick(&tie, 8), Some(2));
 
-        // Mature filters: dead / no first_data / young / under bytes / no sample.
+        // Mature filters: dead / young active_ms / no sample.
         let dead = {
-            let s = dummy_slot(0, addr(20), false);
-            s.first_data_ms
-                .store(1, std::sync::atomic::Ordering::Relaxed);
-            s.bytes_rx.store(
-                RELATIVE_SLOW_MIN_BYTES,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            s
-        };
-        let no_first = {
-            let s = dummy_slot(1, addr(21), true);
-            s.bytes_rx.store(
-                RELATIVE_SLOW_MIN_BYTES * 2,
-                std::sync::atomic::Ordering::Relaxed,
-            );
+            let mut s = dummy_slot(0, addr(20), false);
+            s.rate.sample(0, 0, true);
+            s.rate
+                .sample(RELSLOW_ACTIVE_MS, RELSLOW_ACTIVE_MS * 1_000, true);
             s
         };
         let young = {
-            let s = dummy_slot(2, addr(22), true);
-            // first_data near "now" → age too small for RELATIVE_SLOW_MIN_AGE_MS.
-            s.first_data_ms
-                .store(ibd_mono_ms().max(1), std::sync::atomic::Ordering::Relaxed);
-            s.bytes_rx.store(
-                RELATIVE_SLOW_MIN_BYTES * 2,
-                std::sync::atomic::Ordering::Relaxed,
-            );
+            let mut s = dummy_slot(2, addr(22), true);
+            s.rate.sample(0, 0, true);
+            s.rate.sample(5_000, 50_000_000, true);
             s
         };
-        let thin = {
-            let s = dummy_slot(3, addr(23), true);
-            s.first_data_ms
-                .store(1, std::sync::atomic::Ordering::Relaxed);
-            s.bytes_rx.store(1024, std::sync::atomic::Ordering::Relaxed);
-            s
-        };
-        let samples = mature_relative_slow_samples(&[dead, no_first, young, thin]);
-        // Fresh process: none mature (age/bytes). Long-lived llvm-cov may mature
-        // a slot with first=1 + enough mono — still never includes dead/no_first.
-        assert!(samples.iter().all(|s| s.peer_id != 0 && s.peer_id != 1));
+        let samples = mature_relative_slow_samples(&[dead, young]);
+        assert!(samples.iter().all(|s| s.peer_id != 0 && s.peer_id != 2));
 
         assert_eq!(global_first_block_ms(&[]), 0);
         let a_empty = dummy_slot(10, addr(30), true);
@@ -949,29 +937,25 @@ mod tests {
         let b_dead = {
             let mut s = dummy_slot(11, addr(31), true);
             s.alive = false;
-            s.first_data_ms
-                .store(5, std::sync::atomic::Ordering::Relaxed);
+            s.first_data_ms = 5;
             s
         };
         assert_eq!(global_first_block_ms(std::slice::from_ref(&b_dead)), 0);
         let a = {
-            let s = dummy_slot(10, addr(30), true);
-            s.first_data_ms
-                .store(42, std::sync::atomic::Ordering::Relaxed);
+            let mut s = dummy_slot(10, addr(30), true);
+            s.first_data_ms = 42;
             s
         };
         let c = {
-            let s = dummy_slot(12, addr(32), true);
-            s.first_data_ms
-                .store(10, std::sync::atomic::Ordering::Relaxed);
+            let mut s = dummy_slot(12, addr(32), true);
+            s.first_data_ms = 10;
             s
         };
         assert_eq!(global_first_block_ms(&[a, c]), 10);
         // Warmup fails when age since global first < 60s (typical unit-test process).
         let a2 = {
-            let s = dummy_slot(10, addr(30), true);
-            s.first_data_ms
-                .store(10, std::sync::atomic::Ordering::Relaxed);
+            let mut s = dummy_slot(10, addr(30), true);
+            s.first_data_ms = 10;
             s
         };
         let warm = relative_slow_global_warmup_ok(std::slice::from_ref(&a2));
@@ -993,5 +977,27 @@ mod tests {
         );
         assert!(suspect.is_none());
         assert!(cooldown.is_empty());
+    }
+
+    #[test]
+    fn mature_relative_slow_samples_uses_ewma_active_ms() {
+        let h = BlockHash::from_byte_array([9u8; 32]);
+        let mut young = dummy_slot(0, addr(50), true);
+        young.rate.sample(0, 0, true);
+        young.rate.sample(5_000, 50_000_000, true);
+        young.in_flight.insert(h);
+        assert!(young.rate.bps().is_some());
+        assert!(young.rate.active_ms < RELSLOW_ACTIVE_MS);
+
+        let mut mature = dummy_slot(1, addr(51), true);
+        mature.rate.sample(0, 0, true);
+        mature
+            .rate
+            .sample(RELSLOW_ACTIVE_MS, RELSLOW_ACTIVE_MS * 10_000, true);
+        mature.in_flight.insert(h);
+
+        let samples = mature_relative_slow_samples(&[young, mature]);
+        assert!(samples.iter().all(|s| s.peer_id != 0));
+        assert!(samples.iter().any(|s| s.peer_id == 1));
     }
 }

@@ -432,7 +432,9 @@ pub(crate) fn apply_peer_event(
         PeerEvent::Dead { peer, reason } => {
             warn!("ibd: peer[{peer}] dead: {reason}");
             if let Some(s) = st.slots.iter().find(|s| s.id == peer) {
-                if let Some((lat, bps)) = s.speed_sample() {
+                if let Some(bps) = s.rate.bps() {
+                    let first = s.first_data_ms;
+                    let lat = first.saturating_sub(s.connected_ms);
                     peer_book.note_speed(s.addr, lat, bps);
                 }
             }

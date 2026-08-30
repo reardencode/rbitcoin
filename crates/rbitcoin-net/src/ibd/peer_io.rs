@@ -4,6 +4,7 @@
 //! - reader: decrypt frame + cheap ping handling; heavy decode off-thread
 //! - writer: encode offloaded for heavy payloads; then encrypt + write
 
+use super::rate::PeerRate;
 use crate::codec::MAX_INV_SIZE;
 use crate::error::NetError;
 use crate::msg_decode::spawn_decode_then_with_err;
@@ -92,48 +93,17 @@ pub(crate) struct PeerSlot {
     pub cmd_tx: mpsc::UnboundedSender<PeerCmd>,
     /// Hashes currently requested from this peer.
     pub in_flight: HashSet<BlockHash>,
-    /// Last block-download progress as [`ibd_mono_ms`].
-    pub block_progress_ms: Arc<AtomicU64>,
     /// Peer's `version.start_height` (best-effort network tip signal).
     pub peer_height: u32,
     /// Mono ms when the slot became live (post-handshake).
     pub connected_ms: u64,
-    /// First block-payload mono ms (0 = none yet).
-    pub first_data_ms: AtomicU64,
-    /// Cumulative block payload bytes (speed sample).
-    pub bytes_rx: AtomicU64,
+    /// First block-payload mono ms (0 = none yet). IBD main thread only.
+    pub first_data_ms: u64,
+    /// All streamed wire bytes (EWMA input). Reader-only `fetch_add`.
+    pub bytes_rx_total: Arc<AtomicU64>,
+    pub rate: PeerRate,
     pub alive: bool,
     pub task: JoinHandle<()>,
-}
-
-impl PeerSlot {
-    /// Record received block payload bytes for FAST/SLOW classification.
-    pub fn note_rx_bytes(&self, n: u64) {
-        if n == 0 {
-            return;
-        }
-        let now = ibd_mono_ms();
-        let _ = self
-            .first_data_ms
-            .compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed);
-        self.bytes_rx.fetch_add(n, Ordering::Relaxed);
-    }
-
-    /// `(latency_ms, bytes_per_sec)` once we have ≥64 KiB of block data.
-    pub fn speed_sample(&self) -> Option<(u64, u64)> {
-        let first = self.first_data_ms.load(Ordering::Relaxed);
-        if first == 0 {
-            return None;
-        }
-        let bytes = self.bytes_rx.load(Ordering::Relaxed);
-        if bytes < 64 * 1024 {
-            return None;
-        }
-        let latency_ms = first.saturating_sub(self.connected_ms);
-        let elapsed_ms = ibd_mono_ms().saturating_sub(first).max(1);
-        let bps = bytes.saturating_mul(1000) / elapsed_ms;
-        Some((latency_ms, bps))
-    }
 }
 
 impl Drop for PeerSlot {
@@ -149,20 +119,36 @@ pub(crate) fn ibd_mono_ms() -> u64 {
     T0.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
-pub(crate) fn touch_block_progress(ms: &AtomicU64) {
-    ms.store(ibd_mono_ms(), Ordering::Relaxed);
+pub(crate) fn note_stream_bytes(counter: &AtomicU64, n: u64) {
+    if n == 0 {
+        return;
+    }
+    counter.fetch_add(n, Ordering::Relaxed);
+}
+
+pub(crate) fn sample_peer_rates(slots: &mut [PeerSlot], now_ms: u64) {
+    for s in slots {
+        if !s.alive {
+            continue;
+        }
+        let bytes = s.bytes_rx_total.load(Ordering::Relaxed);
+        s.rate.sample(now_ms, bytes, !s.in_flight.is_empty());
+    }
 }
 
 pub(crate) fn note_block_progress(slots: &mut [PeerSlot], peer: usize) {
     if let Some(s) = slots.iter_mut().find(|s| s.id == peer) {
-        touch_block_progress(&s.block_progress_ms);
+        s.rate.note_rx(ibd_mono_ms());
     }
 }
 
 pub(crate) fn note_block_rx(slots: &mut [PeerSlot], peer: usize, wire_bytes: usize) {
     if let Some(s) = slots.iter_mut().find(|s| s.id == peer) {
-        touch_block_progress(&s.block_progress_ms);
-        s.note_rx_bytes(wire_bytes as u64);
+        let now = ibd_mono_ms();
+        s.rate.note_rx(now);
+        if wire_bytes > 0 && s.first_data_ms == 0 {
+            s.first_data_ms = now;
+        }
     }
 }
 
@@ -195,8 +181,8 @@ pub(crate) async fn spawn_peer(
     // Reader → writer for pongs (must not write on the read task — that would
     // stall the receive half and look like a peer stall).
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<NetworkMessage>();
-    let block_progress_ms = Arc::new(AtomicU64::new(ibd_mono_ms()));
-    let progress_io = Arc::clone(&block_progress_ms);
+    let bytes_rx_total = Arc::new(AtomicU64::new(0));
+    let bytes_io = Arc::clone(&bytes_rx_total);
 
     // Parent owns concurrent read + write tasks. Aborting the parent (PeerSlot
     // Drop / stall disconnect) must abort both children — plain JoinHandle drop
@@ -224,11 +210,9 @@ pub(crate) async fn spawn_peer(
             let mut prog_mark = 0usize;
             loop {
                 let frame = read_v2_frame_with_progress(&mut reader, magic, |buffered| {
-                    const STEP: usize = 64 * 1024;
-                    if buffered >= prog_mark + STEP || buffered <= STEP {
-                        prog_mark = buffered;
-                        touch_block_progress(&progress_io);
-                    }
+                    let delta = buffered.saturating_sub(prog_mark);
+                    note_stream_bytes(&bytes_io, delta as u64);
+                    prog_mark = buffered;
                 })
                 .await;
                 prog_mark = 0;
@@ -239,10 +223,6 @@ pub(crate) async fn spawn_peer(
                                 let _ = out_tx.send(NetworkMessage::Pong(n));
                             }
                             continue;
-                        }
-
-                        if frame.is_block() || frame.is_notfound() {
-                            touch_block_progress(&progress_io);
                         }
 
                         if frame.is_block() {
@@ -267,7 +247,6 @@ pub(crate) async fn spawn_peer(
                             continue;
                         }
 
-                        let progress = Arc::clone(&progress_io);
                         let sinks_d = sinks_r.clone();
                         // Non-block: decode off-thread. Never await a decode permit
                         // on the reader (stalls TCP). Soft budgets gate *requests* only.
@@ -282,7 +261,6 @@ pub(crate) async fn spawn_peer(
                                         });
                                     }
                                     NetworkMessage::NotFound(inv) => {
-                                        touch_block_progress(&progress);
                                         let hashes: Vec<BlockHash> = inv
                                             .iter()
                                             .filter_map(|i| match i {
@@ -447,11 +425,11 @@ pub(crate) async fn spawn_peer(
         addr,
         cmd_tx,
         in_flight: HashSet::new(),
-        block_progress_ms,
         peer_height,
         connected_ms: ibd_mono_ms(),
-        first_data_ms: AtomicU64::new(0),
-        bytes_rx: AtomicU64::new(0),
+        first_data_ms: 0,
+        bytes_rx_total,
+        rate: PeerRate::default(),
         alive: true,
         task,
     })
@@ -528,11 +506,11 @@ mod tests {
             addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 18444),
             cmd_tx,
             in_flight: HashSet::new(),
-            block_progress_ms: Arc::new(AtomicU64::new(0)),
             peer_height: 100,
             connected_ms: 1,
-            first_data_ms: AtomicU64::new(0),
-            bytes_rx: AtomicU64::new(0),
+            first_data_ms: 0,
+            bytes_rx_total: Arc::new(AtomicU64::new(0)),
+            rate: Default::default(),
             alive: true,
             task,
         }
@@ -568,26 +546,28 @@ mod tests {
     }
 
     #[test]
-    fn speed_sample_and_progress_helpers() {
+    fn stream_bytes_sample_and_first_data() {
         let mut s = dummy_slot(7);
-        assert!(s.speed_sample().is_none());
-        s.note_rx_bytes(0); // no-op
-                            // first_data_ms==0 is treated as "no sample yet"; wait so mono ms > 0.
+        note_stream_bytes(&s.bytes_rx_total, 0);
+        assert_eq!(s.bytes_rx_total.load(Ordering::Relaxed), 0);
+        note_stream_bytes(&s.bytes_rx_total, 100);
+        note_stream_bytes(&s.bytes_rx_total, 50);
+        assert_eq!(s.bytes_rx_total.load(Ordering::Relaxed), 150);
+
+        s.in_flight.insert(BlockHash::from_byte_array([1u8; 32]));
+        sample_peer_rates(std::slice::from_mut(&mut s), 0);
+        sample_peer_rates(std::slice::from_mut(&mut s), 5_000);
+        assert!(s.rate.bps().is_some());
+
         while ibd_mono_ms() == 0 {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        s.note_rx_bytes(32 * 1024);
-        assert!(s.speed_sample().is_none()); // need ≥64 KiB
-        s.note_rx_bytes(64 * 1024);
-        assert!(s.first_data_ms.load(Ordering::Relaxed) > 0);
-        let sample = s.speed_sample().expect("bps after ≥64KiB");
-        assert!(sample.1 > 0);
-
-        touch_block_progress(&s.block_progress_ms);
-        assert!(s.block_progress_ms.load(Ordering::Relaxed) > 0);
+        note_block_rx(std::slice::from_mut(&mut s), 7, 0);
+        assert_eq!(s.first_data_ms, 0);
         note_block_progress(std::slice::from_mut(&mut s), 7);
         note_block_rx(std::slice::from_mut(&mut s), 7, 1000);
-        note_block_progress(std::slice::from_mut(&mut s), 99); // missing peer
+        assert!(s.first_data_ms > 0);
+        note_block_progress(std::slice::from_mut(&mut s), 99);
         note_block_rx(std::slice::from_mut(&mut s), 99, 1);
         assert!(ibd_mono_ms() > 0);
     }
