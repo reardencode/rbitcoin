@@ -23,6 +23,7 @@ mod path;
 mod peer_io;
 mod perf_log;
 mod progress;
+mod rate;
 mod reorg;
 mod state;
 mod status;
