@@ -89,6 +89,10 @@ impl PeerRate {
         let last = self.progress_ms.max(self.work_started_ms);
         now_ms.saturating_sub(last) > stall_ms
     }
+
+    pub(crate) fn has_recent_rx(&self, now_ms: u64, stale_ms: u64) -> bool {
+        self.progress_ms != 0 && now_ms.saturating_sub(self.progress_ms) <= stale_ms
+    }
 }
 
 #[cfg(test)]
@@ -167,5 +171,7 @@ mod tests {
         r.note_rx(20_000);
         assert!(!r.stalled(45_000, 30_000, true));
         assert!(r.stalled(50_001, 30_000, true));
+        assert!(r.has_recent_rx(45_000, 30_000));
+        assert!(!r.has_recent_rx(50_001, 30_000));
     }
 }

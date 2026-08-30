@@ -920,7 +920,8 @@ mod tests {
         let dead = {
             let mut s = dummy_slot(0, addr(20), false);
             s.rate.sample(0, 0, true);
-            s.rate.sample(RELSLOW_ACTIVE_MS, RELSLOW_ACTIVE_MS * 1_000, true);
+            s.rate
+                .sample(RELSLOW_ACTIVE_MS, RELSLOW_ACTIVE_MS * 1_000, true);
             s
         };
         let young = {
