@@ -8,7 +8,7 @@
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
   # Layered cargo builds: deps derivation + app derivation (faster rebuilds).
   # Crane ≥0.23 targets modern nixpkgs; keep in lockstep with the channel bump.
-  inputs.crane.url = "github:ipetkov/crane/v0.23.4";
+  inputs.crane.url = "github:ipetkov/crane/v0.24.0";
 
   outputs =
     { self, nixpkgs, crane }:
