@@ -347,9 +347,10 @@ impl ChainHub {
         if self.tip_height().is_some() {
             return Ok(());
         }
-        if !crate::tip_accept::on_tip_accept_thread() {
-            return crate::tip_accept::run_on_tip_accept(|| self.ensure_genesis());
-        }
+        crate::tip_accept::run_on_tip_accept(|| self.ensure_genesis_inner())
+    }
+
+    fn ensure_genesis_inner(&self) -> Result<(), NetError> {
         let _guard = self.connect_lock.lock().unwrap_or_else(|e| e.into_inner());
         if self.tip_height().is_some() {
             return Ok(());
@@ -1038,12 +1039,18 @@ impl ChainHub {
         script_pubkey: ScriptBuf,
         extra_txs: Vec<Transaction>,
     ) -> Result<Vec<BlockHash>, NetError> {
-        if !crate::tip_accept::on_tip_accept_thread() {
-            return crate::tip_accept::run_on_tip_accept(|| {
-                self.generate_to_script(nblocks, script_pubkey, extra_txs)
-            });
-        }
-        self.ensure_genesis()?;
+        crate::tip_accept::run_on_tip_accept(|| {
+            self.generate_to_script_inner(nblocks, script_pubkey, extra_txs)
+        })
+    }
+
+    fn generate_to_script_inner(
+        &self,
+        nblocks: u32,
+        script_pubkey: ScriptBuf,
+        extra_txs: Vec<Transaction>,
+    ) -> Result<Vec<BlockHash>, NetError> {
+        self.ensure_genesis_inner()?;
         if nblocks == 0 {
             return Ok(Vec::new());
         }
@@ -1076,7 +1083,7 @@ impl ChainHub {
                 script_pubkey.clone(),
                 txs,
             );
-            match self.accept_block(block.clone())? {
+            match self.accept_block_inner(block.clone())? {
                 AcceptOutcome::Accepted { .. } => hashes.push(block.block_hash()),
                 other => {
                     return Err(NetError::Consensus(format!(
@@ -1096,9 +1103,10 @@ impl ChainHub {
     /// next most-work non-invalid fork (production: invalidate is not "stay
     /// on the stump").
     pub fn invalidate_block(&self, hash: BlockHash) -> Result<(), NetError> {
-        if !crate::tip_accept::on_tip_accept_thread() {
-            return crate::tip_accept::run_on_tip_accept(|| self.invalidate_block(hash));
-        }
+        crate::tip_accept::run_on_tip_accept(|| self.invalidate_block_inner(hash))
+    }
+
+    fn invalidate_block_inner(&self, hash: BlockHash) -> Result<(), NetError> {
         let tip = self.tip_height().unwrap_or(0);
         let on_tip = self
             .query
@@ -1175,7 +1183,7 @@ impl ChainHub {
         let Some((_, _, branch)) = best else {
             return Ok(None);
         };
-        match self.accept_branch(&branch) {
+        match self.accept_branch_inner(&branch) {
             Ok(AcceptOutcome::Accepted { height }) => Ok(Some(AcceptOutcome::Accepted { height })),
             Ok(AcceptOutcome::IgnoredWeaker) => Ok(None),
             Ok(other) => Ok(Some(other)),
@@ -1187,9 +1195,10 @@ impl ChainHub {
     /// Clear the invalid mark on `hash`, its invalidated path, and ancestors;
     /// re-apply bodies from archive. Header-only descendants stay header tips.
     pub fn reconsider_block(&self, hash: BlockHash) -> Result<(), NetError> {
-        if !crate::tip_accept::on_tip_accept_thread() {
-            return crate::tip_accept::run_on_tip_accept(|| self.reconsider_block(hash));
-        }
+        crate::tip_accept::run_on_tip_accept(|| self.reconsider_block_inner(hash))
+    }
+
+    fn reconsider_block_inner(&self, hash: BlockHash) -> Result<(), NetError> {
         let known = self.is_connected(&hash)
             || self.load_side_body(&hash).is_some()
             || self.header_tips.read().unwrap().contains_key(&hash)
@@ -1279,7 +1288,7 @@ impl ChainHub {
                 branch.push(b);
             }
             if !branch.is_empty() {
-                match self.accept_branch(&branch) {
+                match self.accept_branch_inner(&branch) {
                     Err(NetError::Protocol(s)) if s.contains("branch parent not on chain") => {}
                     Err(e) => return Err(e),
                     Ok(_) => {}
@@ -1288,7 +1297,7 @@ impl ChainHub {
         }
         if !self.is_connected(&hash) {
             if let Some(branch) = self.assemble_side_branch(hash) {
-                match self.accept_branch(&branch) {
+                match self.accept_branch_inner(&branch) {
                     Err(NetError::Protocol(s)) if s.contains("branch parent not on chain") => {}
                     Err(e) => return Err(e),
                     Ok(_) => {}
@@ -1300,12 +1309,13 @@ impl ChainHub {
 
     /// Prefer this hash among equal-work competing tips.
     pub fn precious_block(&self, hash: BlockHash) -> Result<(), NetError> {
-        if !crate::tip_accept::on_tip_accept_thread() {
-            return crate::tip_accept::run_on_tip_accept(|| self.precious_block(hash));
-        }
+        crate::tip_accept::run_on_tip_accept(|| self.precious_block_inner(hash))
+    }
+
+    fn precious_block_inner(&self, hash: BlockHash) -> Result<(), NetError> {
         *self.precious.write().unwrap() = Some(hash);
         if let Some(branch) = self.assemble_side_branch(hash) {
-            match self.accept_branch(&branch) {
+            match self.accept_branch_inner(&branch) {
                 Err(NetError::Protocol(s)) if s.contains("branch parent not on chain") => {}
                 Err(e) => return Err(e),
                 Ok(_) => {}
@@ -1318,9 +1328,10 @@ impl ChainHub {
 
     /// Accept a block that extends the tip, or reorg to a stronger competing tip / branch.
     pub fn accept_block(&self, block: Block) -> Result<AcceptOutcome, NetError> {
-        if !crate::tip_accept::on_tip_accept_thread() {
-            return crate::tip_accept::run_on_tip_accept(|| self.accept_block(block));
-        }
+        crate::tip_accept::run_on_tip_accept(|| self.accept_block_inner(block))
+    }
+
+    fn accept_block_inner(&self, block: Block) -> Result<AcceptOutcome, NetError> {
         let hash = block.block_hash();
         if self.tip_hash() == Some(hash) || self.has_block(&hash) {
             return Ok(AcceptOutcome::AlreadyHave);
@@ -1393,9 +1404,10 @@ impl ChainHub {
     /// Connect a contiguous branch `[blocks[0]…blocks[n]]` where `blocks[0].prev` is on our chain.
     /// Reorgs if the new path has strictly more work than our path from the fork.
     pub fn accept_branch(&self, blocks: &[Block]) -> Result<AcceptOutcome, NetError> {
-        if !crate::tip_accept::on_tip_accept_thread() {
-            return crate::tip_accept::run_on_tip_accept(|| self.accept_branch(blocks));
-        }
+        crate::tip_accept::run_on_tip_accept(|| self.accept_branch_inner(blocks))
+    }
+
+    fn accept_branch_inner(&self, blocks: &[Block]) -> Result<AcceptOutcome, NetError> {
         let _guard = self.connect_lock.lock().unwrap_or_else(|e| e.into_inner());
         if blocks.is_empty() {
             return Err(NetError::Protocol("empty branch"));
@@ -1522,9 +1534,10 @@ impl ChainHub {
     /// bodies stay in Class A. Does not connect a replacement — IBD then
     /// confirms the heavier header path as a linear extension.
     pub fn rewind_to_height(&self, keep_height: u32) -> Result<(), NetError> {
-        if !crate::tip_accept::on_tip_accept_thread() {
-            return crate::tip_accept::run_on_tip_accept(|| self.rewind_to_height(keep_height));
-        }
+        crate::tip_accept::run_on_tip_accept(|| self.rewind_to_height_inner(keep_height))
+    }
+
+    fn rewind_to_height_inner(&self, keep_height: u32) -> Result<(), NetError> {
         let _guard = self.connect_lock.lock().unwrap_or_else(|e| e.into_inner());
         let tip = self.tip_height().unwrap_or(0);
         if keep_height > tip {
@@ -1542,11 +1555,12 @@ impl ChainHub {
     /// and [`Self::accept_branch`] when a held (or archived) path has more
     /// work — or is precious at equal work. Not the IBD body-queue pipeline.
     pub fn accept_received_block(&self, block: Block) -> Result<AcceptOutcome, NetError> {
-        if !crate::tip_accept::on_tip_accept_thread() {
-            return crate::tip_accept::run_on_tip_accept(|| self.accept_received_block(block));
-        }
+        crate::tip_accept::run_on_tip_accept(|| self.accept_received_block_inner(block))
+    }
+
+    fn accept_received_block_inner(&self, block: Block) -> Result<AcceptOutcome, NetError> {
         let hash = block.block_hash();
-        match self.accept_block(block.clone()) {
+        match self.accept_block_inner(block.clone()) {
             Ok(AcceptOutcome::Accepted { height }) => {
                 self.held_bodies.write().unwrap().remove(&hash);
                 self.held_seq.write().unwrap().remove(&hash);
@@ -1595,7 +1609,7 @@ impl ChainHub {
         &self,
         block: Block,
     ) -> Result<AcceptOutcome, NetError> {
-        crate::tip_accept::run_on_tip_accept_async(|| self.accept_received_block(block)).await
+        crate::tip_accept::run_on_tip_accept_async(|| self.accept_received_block_inner(block)).await
     }
 
     const HELD_BODIES_CAP: usize = 320;
@@ -1789,7 +1803,7 @@ impl ChainHub {
         let Some((_, _, branch, _)) = best else {
             return Ok(None);
         };
-        match self.accept_branch(&branch) {
+        match self.accept_branch_inner(&branch) {
             Ok(AcceptOutcome::Accepted { height }) => Ok(Some(AcceptOutcome::Accepted { height })),
             Ok(AcceptOutcome::IgnoredWeaker) => Ok(None),
             Ok(other) => Ok(Some(other)),
@@ -1800,8 +1814,8 @@ impl ChainHub {
 
     fn connect_at(&self, height: u32, block: Block) -> Result<(), NetError> {
         debug_assert!(
-            !crate::tip_accept::is_tokio_runtime_worker(),
-            "connect_at must not run on a tokio worker (tip-accept lane)"
+            crate::tip_accept::on_tip_accept_thread(),
+            "connect_at must run on tip-accept"
         );
         let hash = block.block_hash();
         let header = block.header;

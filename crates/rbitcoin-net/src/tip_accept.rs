@@ -39,6 +39,7 @@ pub(crate) fn on_tip_accept_thread() -> bool {
     thread::current().name() == Some(TIP_ACCEPT_THREAD_NAME)
 }
 
+#[cfg(test)]
 pub(crate) fn is_tokio_runtime_worker() -> bool {
     thread::current()
         .name()
@@ -52,7 +53,8 @@ fn erase_lifetime(job: Box<dyn FnOnce() + Send + '_>) -> Job {
     unsafe { std::mem::transmute::<Box<dyn FnOnce() + Send + '_>, Job>(job) }
 }
 
-fn run_on_tip_accept_blocking<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+/// Run `f` on `tip-accept`. Always enqueues (nested connect uses inner methods).
+pub(crate) fn run_on_tip_accept<R: Send>(f: impl FnOnce() -> R + Send) -> R {
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     let job = erase_lifetime(Box::new(move || {
         let _ = tx.send(panic::catch_unwind(AssertUnwindSafe(f)));
@@ -62,19 +64,6 @@ fn run_on_tip_accept_blocking<R: Send>(f: impl FnOnce() -> R + Send) -> R {
         Ok(v) => v,
         Err(p) => panic::resume_unwind(p),
     }
-}
-
-/// Run `f` on `tip-accept`. Re-entrant (already on that thread → inline).
-pub(crate) fn run_on_tip_accept<R: Send>(f: impl FnOnce() -> R + Send) -> R {
-    if on_tip_accept_thread() {
-        return f();
-    }
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
-            return tokio::task::block_in_place(|| run_on_tip_accept_blocking(f));
-        }
-    }
-    run_on_tip_accept_blocking(f)
 }
 
 struct JobCell<R> {
@@ -124,9 +113,6 @@ fn finish_cell<R>(cell: &JobCell<R>, r: thread::Result<R>) {
 
 /// Same as [`run_on_tip_accept`] but the caller `.await`s (peer session).
 pub(crate) async fn run_on_tip_accept_async<R: Send>(f: impl FnOnce() -> R + Send) -> R {
-    if on_tip_accept_thread() {
-        return f();
-    }
     let cell = Arc::new(JobCell {
         result: Mutex::new(None),
         waker: Mutex::new(None),
@@ -160,14 +146,6 @@ mod tests {
     #[test]
     fn lane_runs_on_named_thread() {
         let name = run_on_tip_accept(|| thread::current().name().map(str::to_string));
-        assert_eq!(name.as_deref(), Some(TIP_ACCEPT_THREAD_NAME));
-    }
-
-    #[test]
-    fn lane_reentrant_stays_on_named_thread() {
-        let name = run_on_tip_accept(|| {
-            run_on_tip_accept(|| thread::current().name().map(str::to_string))
-        });
         assert_eq!(name.as_deref(), Some(TIP_ACCEPT_THREAD_NAME));
     }
 
