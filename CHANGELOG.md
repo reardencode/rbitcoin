@@ -11,6 +11,11 @@ before 1.0).
 
 ### Changed
 
+- **Tip connect runs on a dedicated `tip-accept` OS thread:** P2P reconstruct
+  and RPC generate/submitblock no longer take `connect_lock` or run
+  `confirm_wire_run_preverified` on a tokio worker. The peer awaits a oneshot;
+  scripts still steal on `rbtc-scripts-*`. Not the IBD body-queue pipeline.
+
 - **Electrum `blockchain.tweaks.subscribe`:** pre-taproot empty heights go out
   as **one notify** with ≤1024 keys (Cake last-key progress), not one line per
   height. Cake `historicalMode=false` (param `[2]`) **cut-through**: omit
