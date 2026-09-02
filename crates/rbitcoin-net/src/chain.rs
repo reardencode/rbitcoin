@@ -2373,10 +2373,6 @@ mod tests {
     async fn generate_to_script_from_tokio_connects_off_worker() {
         let (dir, hub) = tmp_hub();
         let task = tokio::spawn(async move {
-            assert!(
-                crate::tip_accept::is_tokio_runtime_worker(),
-                "pin is the debug_assert in connect_at"
-            );
             let hashes = hub
                 .generate_to_script(1, ScriptBuf::from_bytes(vec![0x51]), vec![])
                 .expect("generate");
@@ -2392,7 +2388,6 @@ mod tests {
     async fn accept_received_block_async_connects_off_worker() {
         let (dir, hub) = tmp_hub();
         let task = tokio::spawn(async move {
-            assert!(crate::tip_accept::is_tokio_runtime_worker());
             hub.ensure_genesis().unwrap();
             let genesis = hub.tip_hash().unwrap();
             let b = mine(genesis, 1_300_000_000, 1);

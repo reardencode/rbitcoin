@@ -39,13 +39,6 @@ pub(crate) fn on_tip_accept_thread() -> bool {
     thread::current().name() == Some(TIP_ACCEPT_THREAD_NAME)
 }
 
-#[cfg(test)]
-pub(crate) fn is_tokio_runtime_worker() -> bool {
-    thread::current()
-        .name()
-        .is_some_and(|n| n.starts_with("tokio-rt-worker") || n.starts_with("tokio-runtime-worker"))
-}
-
 fn erase_lifetime(job: Box<dyn FnOnce() + Send + '_>) -> Job {
     // SAFETY: `run_on_tip_accept` blocks on the result channel until `f`
     // returns. `run_on_tip_accept_async` waits on a condvar in Drop of the
@@ -166,22 +159,18 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn lane_async_is_not_tokio_worker() {
         let task = tokio::spawn(async {
-            let caller = is_tokio_runtime_worker();
-            let (name, ran_on_tokio) = run_on_tip_accept_async(|| {
-                (
-                    thread::current().name().map(str::to_string),
-                    is_tokio_runtime_worker(),
-                )
-            })
-            .await;
-            (caller, name, ran_on_tokio)
+            let caller = thread::current().name().map(str::to_string);
+            let name =
+                run_on_tip_accept_async(|| thread::current().name().map(str::to_string)).await;
+            (caller, name)
         });
-        let (caller, name, ran_on_tokio) = task.await.expect("join worker task");
+        let (caller, name) = task.await.expect("join worker task");
         assert!(
-            caller,
-            "spawned task must run on a tokio worker so the pin is meaningful"
+            caller
+                .as_deref()
+                .is_some_and(|n| n.starts_with("tokio-rt-worker")),
+            "spawned task must run on a tokio worker, got {caller:?}"
         );
         assert_eq!(name.as_deref(), Some(TIP_ACCEPT_THREAD_NAME));
-        assert!(!ran_on_tokio, "job ran on {name:?}");
     }
 }
