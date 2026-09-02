@@ -347,6 +347,10 @@ impl ChainHub {
         if self.tip_height().is_some() {
             return Ok(());
         }
+        crate::tip_accept::run_on_tip_accept(|| self.ensure_genesis_inner())
+    }
+
+    fn ensure_genesis_inner(&self) -> Result<(), NetError> {
         let _guard = self.connect_lock.lock().unwrap_or_else(|e| e.into_inner());
         if self.tip_height().is_some() {
             return Ok(());
@@ -1035,7 +1039,18 @@ impl ChainHub {
         script_pubkey: ScriptBuf,
         extra_txs: Vec<Transaction>,
     ) -> Result<Vec<BlockHash>, NetError> {
-        self.ensure_genesis()?;
+        crate::tip_accept::run_on_tip_accept(|| {
+            self.generate_to_script_inner(nblocks, script_pubkey, extra_txs)
+        })
+    }
+
+    fn generate_to_script_inner(
+        &self,
+        nblocks: u32,
+        script_pubkey: ScriptBuf,
+        extra_txs: Vec<Transaction>,
+    ) -> Result<Vec<BlockHash>, NetError> {
+        self.ensure_genesis_inner()?;
         if nblocks == 0 {
             return Ok(Vec::new());
         }
@@ -1068,7 +1083,7 @@ impl ChainHub {
                 script_pubkey.clone(),
                 txs,
             );
-            match self.accept_block(block.clone())? {
+            match self.accept_block_inner(block.clone())? {
                 AcceptOutcome::Accepted { .. } => hashes.push(block.block_hash()),
                 other => {
                     return Err(NetError::Consensus(format!(
@@ -1088,6 +1103,10 @@ impl ChainHub {
     /// next most-work non-invalid fork (production: invalidate is not "stay
     /// on the stump").
     pub fn invalidate_block(&self, hash: BlockHash) -> Result<(), NetError> {
+        crate::tip_accept::run_on_tip_accept(|| self.invalidate_block_inner(hash))
+    }
+
+    fn invalidate_block_inner(&self, hash: BlockHash) -> Result<(), NetError> {
         let tip = self.tip_height().unwrap_or(0);
         let on_tip = self
             .query
@@ -1164,7 +1183,7 @@ impl ChainHub {
         let Some((_, _, branch)) = best else {
             return Ok(None);
         };
-        match self.accept_branch(&branch) {
+        match self.accept_branch_inner(&branch) {
             Ok(AcceptOutcome::Accepted { height }) => Ok(Some(AcceptOutcome::Accepted { height })),
             Ok(AcceptOutcome::IgnoredWeaker) => Ok(None),
             Ok(other) => Ok(Some(other)),
@@ -1176,6 +1195,10 @@ impl ChainHub {
     /// Clear the invalid mark on `hash`, its invalidated path, and ancestors;
     /// re-apply bodies from archive. Header-only descendants stay header tips.
     pub fn reconsider_block(&self, hash: BlockHash) -> Result<(), NetError> {
+        crate::tip_accept::run_on_tip_accept(|| self.reconsider_block_inner(hash))
+    }
+
+    fn reconsider_block_inner(&self, hash: BlockHash) -> Result<(), NetError> {
         let known = self.is_connected(&hash)
             || self.load_side_body(&hash).is_some()
             || self.header_tips.read().unwrap().contains_key(&hash)
@@ -1265,7 +1288,7 @@ impl ChainHub {
                 branch.push(b);
             }
             if !branch.is_empty() {
-                match self.accept_branch(&branch) {
+                match self.accept_branch_inner(&branch) {
                     Err(NetError::Protocol(s)) if s.contains("branch parent not on chain") => {}
                     Err(e) => return Err(e),
                     Ok(_) => {}
@@ -1274,7 +1297,7 @@ impl ChainHub {
         }
         if !self.is_connected(&hash) {
             if let Some(branch) = self.assemble_side_branch(hash) {
-                match self.accept_branch(&branch) {
+                match self.accept_branch_inner(&branch) {
                     Err(NetError::Protocol(s)) if s.contains("branch parent not on chain") => {}
                     Err(e) => return Err(e),
                     Ok(_) => {}
@@ -1286,9 +1309,13 @@ impl ChainHub {
 
     /// Prefer this hash among equal-work competing tips.
     pub fn precious_block(&self, hash: BlockHash) -> Result<(), NetError> {
+        crate::tip_accept::run_on_tip_accept(|| self.precious_block_inner(hash))
+    }
+
+    fn precious_block_inner(&self, hash: BlockHash) -> Result<(), NetError> {
         *self.precious.write().unwrap() = Some(hash);
         if let Some(branch) = self.assemble_side_branch(hash) {
-            match self.accept_branch(&branch) {
+            match self.accept_branch_inner(&branch) {
                 Err(NetError::Protocol(s)) if s.contains("branch parent not on chain") => {}
                 Err(e) => return Err(e),
                 Ok(_) => {}
@@ -1301,6 +1328,10 @@ impl ChainHub {
 
     /// Accept a block that extends the tip, or reorg to a stronger competing tip / branch.
     pub fn accept_block(&self, block: Block) -> Result<AcceptOutcome, NetError> {
+        crate::tip_accept::run_on_tip_accept(|| self.accept_block_inner(block))
+    }
+
+    fn accept_block_inner(&self, block: Block) -> Result<AcceptOutcome, NetError> {
         let hash = block.block_hash();
         if self.tip_hash() == Some(hash) || self.has_block(&hash) {
             return Ok(AcceptOutcome::AlreadyHave);
@@ -1373,6 +1404,10 @@ impl ChainHub {
     /// Connect a contiguous branch `[blocks[0]…blocks[n]]` where `blocks[0].prev` is on our chain.
     /// Reorgs if the new path has strictly more work than our path from the fork.
     pub fn accept_branch(&self, blocks: &[Block]) -> Result<AcceptOutcome, NetError> {
+        crate::tip_accept::run_on_tip_accept(|| self.accept_branch_inner(blocks))
+    }
+
+    fn accept_branch_inner(&self, blocks: &[Block]) -> Result<AcceptOutcome, NetError> {
         let _guard = self.connect_lock.lock().unwrap_or_else(|e| e.into_inner());
         if blocks.is_empty() {
             return Err(NetError::Protocol("empty branch"));
@@ -1499,6 +1534,10 @@ impl ChainHub {
     /// bodies stay in Class A. Does not connect a replacement — IBD then
     /// confirms the heavier header path as a linear extension.
     pub fn rewind_to_height(&self, keep_height: u32) -> Result<(), NetError> {
+        crate::tip_accept::run_on_tip_accept(|| self.rewind_to_height_inner(keep_height))
+    }
+
+    fn rewind_to_height_inner(&self, keep_height: u32) -> Result<(), NetError> {
         let _guard = self.connect_lock.lock().unwrap_or_else(|e| e.into_inner());
         let tip = self.tip_height().unwrap_or(0);
         if keep_height > tip {
@@ -1508,15 +1547,20 @@ impl ChainHub {
     }
 
     /// Production "we received a full block" (P2P `block` / compact, RPC
-    /// `submitblock`). Tip-extend via [`Self::accept_block`]; otherwise hold
-    /// the body by hash and [`Self::accept_branch`] when a held (or archived)
-    /// path has more work — or is precious at equal work.
+    /// `submitblock`). Runs on the process-wide `tip-accept` thread (lookup →
+    /// load → `rbtc-scripts-*` steal → write). Peer sessions should
+    /// [`Self::accept_received_block_async`].
     ///
-    /// [`Self::accept_block`] stays the tip-extend / competing-tip hot path
-    /// (generate, IBD planned windows). Do not add a second confirm pipeline.
+    /// Tip-extend via [`Self::accept_block`]; otherwise hold the body by hash
+    /// and [`Self::accept_branch`] when a held (or archived) path has more
+    /// work — or is precious at equal work. Not the IBD body-queue pipeline.
     pub fn accept_received_block(&self, block: Block) -> Result<AcceptOutcome, NetError> {
+        crate::tip_accept::run_on_tip_accept(|| self.accept_received_block_inner(block))
+    }
+
+    fn accept_received_block_inner(&self, block: Block) -> Result<AcceptOutcome, NetError> {
         let hash = block.block_hash();
-        match self.accept_block(block.clone()) {
+        match self.accept_block_inner(block.clone()) {
             Ok(AcceptOutcome::Accepted { height }) => {
                 self.held_bodies.write().unwrap().remove(&hash);
                 self.held_seq.write().unwrap().remove(&hash);
@@ -1557,6 +1601,15 @@ impl ChainHub {
                 Err(e)
             }
         }
+    }
+
+    /// Peer-session accept: same work as [`Self::accept_received_block`], awaited
+    /// so the tokio worker is not parked across confirm.
+    pub async fn accept_received_block_async(
+        &self,
+        block: Block,
+    ) -> Result<AcceptOutcome, NetError> {
+        crate::tip_accept::run_on_tip_accept_async(|| self.accept_received_block_inner(block)).await
     }
 
     const HELD_BODIES_CAP: usize = 320;
@@ -1750,7 +1803,7 @@ impl ChainHub {
         let Some((_, _, branch, _)) = best else {
             return Ok(None);
         };
-        match self.accept_branch(&branch) {
+        match self.accept_branch_inner(&branch) {
             Ok(AcceptOutcome::Accepted { height }) => Ok(Some(AcceptOutcome::Accepted { height })),
             Ok(AcceptOutcome::IgnoredWeaker) => Ok(None),
             Ok(other) => Ok(Some(other)),
@@ -1760,6 +1813,10 @@ impl ChainHub {
     }
 
     fn connect_at(&self, height: u32, block: Block) -> Result<(), NetError> {
+        debug_assert!(
+            crate::tip_accept::on_tip_accept_thread(),
+            "connect_at must run on tip-accept"
+        );
         let hash = block.block_hash();
         let header = block.header;
         // Reorg disconnect is done before connect; confirm pipeline is tip+1 only.
@@ -2310,6 +2367,92 @@ mod tests {
             headers_download_timeout_secs(1_000_000, 0),
             1_000_000 + 900 + 2
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn generate_to_script_from_tokio_connects_off_worker() {
+        let (dir, hub) = tmp_hub();
+        let task = tokio::spawn(async move {
+            let hashes = hub
+                .generate_to_script(1, ScriptBuf::from_bytes(vec![0x51]), vec![])
+                .expect("generate");
+            (hashes, hub.tip_height())
+        });
+        let (hashes, tip) = task.await.expect("join worker task");
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(tip, Some(1));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn accept_received_block_async_connects_off_worker() {
+        let (dir, hub) = tmp_hub();
+        let task = tokio::spawn(async move {
+            hub.ensure_genesis().unwrap();
+            let genesis = hub.tip_hash().unwrap();
+            let b = mine(genesis, 1_300_000_000, 1);
+            let out = hub.accept_received_block_async(b).await.unwrap();
+            (out, hub.tip_height())
+        });
+        let (out, tip) = task.await.expect("join worker task");
+        assert_eq!(out, AcceptOutcome::Accepted { height: 1 });
+        assert_eq!(tip, Some(1));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn linux_thread_comms() -> Vec<String> {
+        let Ok(dir) = std::fs::read_dir("/proc/self/task") else {
+            return Vec::new();
+        };
+        dir.filter_map(|e| {
+            let p = e.ok()?.path().join("comm");
+            std::fs::read_to_string(p).ok()
+        })
+        .map(|s| s.trim().to_string())
+        .collect()
+    }
+
+    /// Two real script jobs in one tip block must publish to `rbtc-scripts-*`
+    /// (same steal pool as IBD). Single-item waves still run inline on the
+    /// publisher — this pin needs N≥2.
+    #[test]
+    fn tip_accept_script_jobs_use_steal_pool() {
+        let (dir, hub) = tmp_hub();
+        hub.generate_to_script(101, ScriptBuf::from_bytes(vec![0x51]), vec![])
+            .expect("mature coinbases");
+        let cb1 = hub.block_at_height(1).unwrap().unwrap().txdata[0].compute_txid();
+        let cb2 = hub.block_at_height(2).unwrap().unwrap().txdata[0].compute_txid();
+        let spend = |txid, value| Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint { txid, vout: 0 },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(value),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        hub.generate_to_script(
+            1,
+            ScriptBuf::from_bytes(vec![0x51]),
+            vec![spend(cb1, 49_9999_0000), spend(cb2, 49_9999_0000)],
+        )
+        .expect("spend block");
+        assert_eq!(hub.tip_height(), Some(102));
+        let comms = linux_thread_comms();
+        if comms.is_empty() {
+            let _ = std::fs::remove_dir_all(dir);
+            return;
+        }
+        assert!(
+            comms.iter().any(|c| c.starts_with("rbtc-scripts-")),
+            "tip connect must publish script jobs to steal workers, comms={comms:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -14,6 +14,7 @@ mod peer_dos;
 mod peers;
 mod seeds;
 mod service;
+mod tip_accept;
 mod tx_relay;
 mod v2;
 mod versionbits_warn;

@@ -2141,8 +2141,10 @@ mod tests {
     fn densify_over_free_bytes_limited_to_confirm_window() {
         use rbitcoin_query::{soft_confirm_window_n, BQ_SOFT_FREE_BYTES};
 
+        let _env = lock_default_assign_stop();
         let (dir, hub) = tmp_hub();
         hub.ensure_genesis().unwrap();
+        assert_eq!(hub.tip_height(), Some(0), "tip-accept genesis");
         // Genesis tip=0 → path_lo=1.
         let mut st = IbdWorkState::new(vec![dummy_slot(0), dummy_slot(1)], None, Some(0));
         let stats = LoopStats::default();
@@ -2203,6 +2205,7 @@ mod tests {
     fn densify_under_free_bytes_uses_full_ahead() {
         use rbitcoin_query::BQ_SOFT_FREE_BYTES;
 
+        let _env = lock_default_assign_stop();
         let (dir, hub) = tmp_hub();
         hub.ensure_genesis().unwrap();
         // Genesis tip=0 → path_lo=1.

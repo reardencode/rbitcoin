@@ -1966,7 +1966,7 @@ async fn handle_peer_frame(
                 pending_blocks.insert(hash, block.clone());
                 return Ok(());
             }
-            match hub.accept_received_block(block.clone()) {
+            match hub.accept_received_block_async(block.clone()).await {
                 Ok(AcceptOutcome::Accepted { .. }) => {
                     pending_blocks.remove(&hash);
                     pending_headers.remove(&hash);
@@ -1978,7 +1978,8 @@ async fn handle_peer_frame(
                         pending_headers,
                         requested_blocks,
                         getdata_use_compact(hub, *peer_cmpct_version),
-                    )?;
+                    )
+                    .await?;
                 }
                 Ok(AcceptOutcome::AlreadyHave) => {
                     pending_blocks.remove(&hash);
@@ -1990,7 +1991,8 @@ async fn handle_peer_frame(
                         pending_headers,
                         requested_blocks,
                         getdata_use_compact(hub, *peer_cmpct_version),
-                    )?;
+                    )
+                    .await?;
                 }
                 Ok(AcceptOutcome::IgnoredWeaker) => {
                     pending_blocks.remove(&hash);
@@ -2002,7 +2004,8 @@ async fn handle_peer_frame(
                         pending_headers,
                         requested_blocks,
                         getdata_use_compact(hub, *peer_cmpct_version),
-                    )?;
+                    )
+                    .await?;
                 }
                 Err(e) if net_error_is_store_not_found(&e) => {
                     rbitcoin_log::warn!(
@@ -2094,7 +2097,7 @@ async fn handle_peer_frame(
                     requested_blocks.remove(&hash);
                     pending_cmpct.remove(&hash);
                     let accepted = matches!(
-                        hub.accept_received_block(block),
+                        hub.accept_received_block_async(block).await,
                         Ok(AcceptOutcome::Accepted { .. })
                     );
                     if accepted {
@@ -2111,7 +2114,8 @@ async fn handle_peer_frame(
                         pending_headers,
                         requested_blocks,
                         getdata_use_compact(hub, *peer_cmpct_version),
-                    )?;
+                    )
+                    .await?;
                 } else if let Some(missing) = try_cmpct_missing(hub, &hsi, 2) {
                     if missing.is_empty() {
                         queue_out(
@@ -2168,7 +2172,7 @@ async fn handle_peer_frame(
             }
             if let Some(pc) = pending_cmpct.remove(&hash) {
                 match apply_cmpct_blocktxn(hub, &pc, bt) {
-                    Ok(block) => match hub.accept_received_block(block) {
+                    Ok(block) => match hub.accept_received_block_async(block).await {
                         Ok(AcceptOutcome::Accepted { .. }) => {
                             requested_blocks.remove(&hash);
                             maybe_select_hb_if_relay(hub, session);
@@ -2184,7 +2188,8 @@ async fn handle_peer_frame(
                                 pending_headers,
                                 requested_blocks,
                                 getdata_use_compact(hub, *peer_cmpct_version),
-                            )?;
+                            )
+                            .await?;
                         }
                         Ok(_) => {
                             requested_blocks.remove(&hash);
@@ -2195,7 +2200,8 @@ async fn handle_peer_frame(
                                 pending_headers,
                                 requested_blocks,
                                 getdata_use_compact(hub, *peer_cmpct_version),
-                            )?;
+                            )
+                            .await?;
                         }
                         Err(_) => {
                             // Reconstructed but unconnectable (swapped txs):
@@ -2771,7 +2777,7 @@ fn pending_header_leaves(pending: &HashMap<BlockHash, bitcoin::block::Header>) -
 }
 
 /// Try to accept pending blocks that connect to tip or form a better branch.
-fn drain_pending(
+async fn drain_pending(
     hub: &ChainHub,
     out: &mpsc::UnboundedSender<NetworkMessage>,
     pending_blocks: &mut PendingBlocks,
@@ -2783,7 +2789,7 @@ fn drain_pending(
     // greedy pass already ran. Repeat until the tip is stable.
     loop {
         let tip_before = hub.tip_hash();
-        drain_pending_once(hub, pending_blocks, pending_headers)?;
+        drain_pending_once(hub, pending_blocks, pending_headers).await?;
         if hub.tip_hash() == tip_before {
             break;
         }
@@ -2820,9 +2826,32 @@ fn drain_pending(
     Ok(())
 }
 
+#[cfg(test)]
+fn drain_pending_now(
+    hub: &ChainHub,
+    out: &mpsc::UnboundedSender<NetworkMessage>,
+    pending_blocks: &mut PendingBlocks,
+    pending_headers: &mut HashMap<BlockHash, bitcoin::block::Header>,
+    requested_blocks: &mut HashSet<BlockHash>,
+    compact: bool,
+) -> Result<(), NetError> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("drain_pending test runtime")
+        .block_on(drain_pending(
+            hub,
+            out,
+            pending_blocks,
+            pending_headers,
+            requested_blocks,
+            compact,
+        ))
+}
+
 /// Feed complete pending bodies into the hub receive path. Pending is a
 /// download window, not a second most-work assembler.
-fn drain_pending_once(
+async fn drain_pending_once(
     hub: &ChainHub,
     pending_blocks: &mut PendingBlocks,
     pending_headers: &mut HashMap<BlockHash, bitcoin::block::Header>,
@@ -2836,7 +2865,7 @@ fn drain_pending_once(
                 continue;
             };
             pending_headers.remove(&h);
-            match hub.accept_received_block(block) {
+            match hub.accept_received_block_async(block).await {
                 Ok(AcceptOutcome::Accepted { .. })
                 | Ok(AcceptOutcome::AlreadyHave)
                 | Ok(AcceptOutcome::IgnoredWeaker) => {
