@@ -9,6 +9,15 @@ before 1.0).
 
 ## [Unreleased]
 
+### Fixed
+
+- **IBD empty-headers lag no longer reseeds a live work path:** `getheaders`
+  empty while peers advertise ahead still re-asks, but
+  `seed_work_path_from_store` (full header-graph walk) runs only when
+  `ordered` is empty. Latter mainnet IBD was walking ~1M headers every ~2s
+  (0.5–1.2s each) while already holding 12k–64k ordered hashes. The matching
+  WARN is `trace` unless the path is empty.
+
 ### Changed
 
 - **Tip connect runs on a dedicated `tip-accept` OS thread:** P2P reconstruct
