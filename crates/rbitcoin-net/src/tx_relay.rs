@@ -906,27 +906,45 @@ impl MempoolHub {
     /// mutex so concurrent readers are not blocked by interpreter CPU.
     pub fn accept_tx(&self, tx: &Transaction) -> Result<AcceptResult, AcceptError> {
         crate::reactor::assert_not_reactor("mempool accept");
+        self.accept_with_utxo(
+            tx,
+            &QueryUtxoProvider {
+                query: self.query.as_ref(),
+            },
+        )
+    }
+
+    fn accept_with_utxo(
+        &self,
+        tx: &Transaction,
+        utxo: &impl rbitcoin_mempool::UtxoProvider,
+    ) -> Result<AcceptResult, AcceptError> {
         let t0 = Instant::now();
-        let utxo = QueryUtxoProvider {
-            query: self.query.as_ref(),
-        };
         let tip = self.chain_tip_ctx();
 
         let mut stages = rbitcoin_mempool::AcceptStageUs::default();
         let mut lock_us = 0u64;
 
         let prep = {
-            let t_lock = Instant::now();
-            let mut g = self.inner.write().unwrap();
-            g.last_accept_stages = rbitcoin_mempool::AcceptStageUs::default();
+            let g = self.inner.read().unwrap();
             let delta = self.fee_delta(&tx.compute_txid());
-            let r = g.prepare_admit(tx, &utxo, tip, delta, true);
-            stages.utxo_us = g.last_accept_stages.utxo_us;
-            lock_us = lock_us.saturating_add(t_lock.elapsed().as_micros() as u64);
-            r
+            g.prepare_admit(tx, utxo, tip, delta, true)
         };
         let prep = match prep {
-            Ok(p) => p,
+            Ok(p) => {
+                stages.utxo_us = p.utxo_us;
+                p
+            }
+            Err(AcceptError::Orphaned(_)) => {
+                let t_lock = Instant::now();
+                let mut g = self.inner.write().unwrap();
+                let e = g.park_orphan(tx, utxo);
+                lock_us = lock_us.saturating_add(t_lock.elapsed().as_micros() as u64);
+                drop(g);
+                let us = t0.elapsed().as_micros() as u64;
+                self.meter_accept_stages(lock_us, stages);
+                return self.finish_accept_err(us, e);
+            }
             Err(e) => {
                 let us = t0.elapsed().as_micros() as u64;
                 self.meter_accept_stages(lock_us, stages);
@@ -949,26 +967,26 @@ impl MempoolHub {
             let t_lock = Instant::now();
             let mut g = self.inner.write().unwrap();
             g.last_accept_stages = stages;
-            let r = match g.commit_after_script(tx, prep, &utxo, tip) {
+            let r = match g.commit_after_script(tx, prep, utxo, tip) {
                 Ok(ar) => {
-                    g.promote_orphans_of(ar.txid, &utxo, tip);
+                    g.promote_orphans_of(ar.txid, utxo, tip);
                     Ok(ar)
                 }
                 Err(e) => Err(e),
             };
-            if let Ok(ref ar) = r {
-                for old in &ar.replaced {
-                    self.unindex_txid(old);
-                }
-                let seq = self.next_relay_seq.fetch_add(1, Ordering::Relaxed);
-                let w = tx.compute_wtxid();
-                self.insert_relay_maps(ar.txid, w, seq);
-                self.reorg_servable.lock().unwrap().remove(&w);
-            }
             stages = g.last_accept_stages;
             lock_us = lock_us.saturating_add(t_lock.elapsed().as_micros() as u64);
             r
         };
+        if let Ok(ref ar) = result {
+            for old in &ar.replaced {
+                self.unindex_txid(old);
+            }
+            let seq = self.next_relay_seq.fetch_add(1, Ordering::Relaxed);
+            let w = tx.compute_wtxid();
+            self.insert_relay_maps(ar.txid, w, seq);
+            self.reorg_servable.lock().unwrap().remove(&w);
+        }
 
         let us = t0.elapsed().as_micros() as u64;
         self.meter_accept_stages(lock_us, stages);
@@ -1036,15 +1054,13 @@ impl MempoolHub {
         let mut lock_us = 0u64;
 
         let prep = {
-            let t_lock = Instant::now();
-            let mut g = self.inner.write().unwrap();
-            g.last_accept_stages = rbitcoin_mempool::AcceptStageUs::default();
+            let g = self.inner.read().unwrap();
             let delta = self.fee_delta(&tx.compute_txid());
-            let r = g.prepare_admit(tx, &utxo, tip, delta, false);
-            stages.utxo_us = g.last_accept_stages.utxo_us;
-            lock_us = lock_us.saturating_add(t_lock.elapsed().as_micros() as u64);
-            r
+            g.prepare_admit(tx, &utxo, tip, delta, false)
         };
+        if let Ok(ref p) = prep {
+            stages.utxo_us = p.utxo_us;
+        }
         let prep = match prep {
             Ok(p) => p,
             Err(e) => {
@@ -2572,6 +2588,89 @@ mod tests {
             ),
             "async accept off reactor: {r:?}"
         );
+        let _ = std::fs::remove_dir_all(&mp_dir);
+        let _ = std::fs::remove_dir_all(&store_dir);
+    }
+
+    #[test]
+    fn contains_wtxid_during_slow_utxo_prepare() {
+        use rbitcoin_mempool::UtxoProvider;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Condvar;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        struct StallUtxo {
+            entered: Arc<AtomicBool>,
+            release: Arc<(Mutex<bool>, Condvar)>,
+        }
+        impl UtxoProvider for StallUtxo {
+            fn get_coin(&self, _: &OutPoint) -> Option<rbitcoin_mempool::Coin> {
+                self.entered.store(true, Ordering::Release);
+                let (lock, cv) = &*self.release;
+                let mut g = lock.lock().unwrap();
+                while !*g {
+                    g = cv.wait(g).unwrap();
+                }
+                None
+            }
+        }
+
+        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+        }
+        let store_dir = tmp();
+        let mp_dir = tmp();
+        let q = Query::open_or_create(&store_dir).unwrap();
+        let hub = MempoolHub::open(&mp_dir, Arc::new(q)).unwrap();
+        hub.set_relay_enabled(true);
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let stall = StallUtxo {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        };
+        let tx = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array([7u8; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let h = Arc::clone(&hub);
+        let join = thread::spawn(move || h.accept_with_utxo(&tx, &stall));
+        let start = Instant::now();
+        while !entered.load(Ordering::Acquire) {
+            assert!(
+                start.elapsed() < Duration::from_secs(2),
+                "UTXO provider never entered"
+            );
+            thread::yield_now();
+        }
+        let miss = Wtxid::from_byte_array([0u8; 32]);
+        let t_read = Instant::now();
+        let _ = hub.contains_wtxid(&miss);
+        assert!(
+            t_read.elapsed() < Duration::from_millis(200),
+            "contains_wtxid blocked on prepare UTXO ({:?})",
+            t_read.elapsed()
+        );
+        {
+            let (lock, cv) = &*release;
+            *lock.lock().unwrap() = true;
+            cv.notify_all();
+        }
+        let _ = join.join().expect("accept thread");
         let _ = std::fs::remove_dir_all(&mp_dir);
         let _ = std::fs::remove_dir_all(&store_dir);
     }
