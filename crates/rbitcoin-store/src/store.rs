@@ -2720,8 +2720,8 @@ mod tests {
         assert_eq!(on, crate::LeftoverMissOn::Body);
         assert!(n_cands >= 1, "A must be a hop cand, n_cands={n_cands}");
         assert!(
-            crate::head_resolve_stats::take_leftover_probe_diag().is_none(),
-            "resolve must not dump; leftover caller does"
+            !crate::head_resolve_stats::leftover_probe_diag_recorded(&b),
+            "resolve must not dump this key; leftover caller does"
         );
         s.diagnose_leftover_probe(&b);
         let diag = crate::head_resolve_stats::take_leftover_probe_diag()
@@ -2780,8 +2780,8 @@ mod tests {
         let hits = s.get_fk_by_txid_batch(&[miss]).unwrap();
         assert!(hits[0].1.is_none(), "unknown txid must miss");
         assert!(
-            crate::head_resolve_stats::take_leftover_probe_diag().is_none(),
-            "resolve TipOnly miss must not hop-dump; leftover miss path only"
+            !crate::head_resolve_stats::leftover_probe_diag_recorded(&miss),
+            "resolve TipOnly miss must not hop-dump this key; leftover miss path only"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

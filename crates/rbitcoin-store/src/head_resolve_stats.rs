@@ -65,11 +65,14 @@ fn miss_on_from_code(code: u64) -> Option<LeftoverMissOn> {
 }
 
 /// Clear leftover-miss classification (start of a resolve batch).
+///
+/// Does **not** drop the leftover hop-dump: every TipOnly/leftover resolve
+/// starts a batch. Wiping the dump here raced parallel tests
+/// (`leftover_miss_dumps_probe_diag`) and could clear `diag=1` on the
+/// operator reject line before it was read.
 pub fn clear_leftover_miss() {
     LAST_MISS_ON.store(0, Ordering::Relaxed);
     LAST_MISS_CANDS.store(0, Ordering::Relaxed);
-    LAST_PROBE_DIAG_SET.store(0, Ordering::Relaxed);
-    *LAST_PROBE_DIAG.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// Record the first leftover miss in this batch (later calls ignored).
@@ -120,10 +123,22 @@ pub struct LeftoverProbeDiag {
 
 static LAST_PROBE_DIAG: std::sync::Mutex<Option<LeftoverProbeDiag>> = std::sync::Mutex::new(None);
 static LAST_PROBE_DIAG_SET: AtomicU64 = AtomicU64::new(0);
+/// Recent leftover hop-dump txids (cap 16). Survives `take` / next resolve
+/// `clear_leftover_miss` so tests can pin **this** parent, not a process flag.
+static RECORDED_PROBE_TXIDS: std::sync::Mutex<Vec<[u8; 32]>> = std::sync::Mutex::new(Vec::new());
 
 /// True when leftover (not lookup) recorded a probe dump (`diag=1` on the reject line).
 pub fn leftover_probe_diag_ready() -> bool {
     LAST_PROBE_DIAG_SET.load(Ordering::Relaxed) != 0
+}
+
+/// True when a leftover hop-dump for `txid` was recorded this process.
+pub fn leftover_probe_diag_recorded(txid: &[u8; 32]) -> bool {
+    RECORDED_PROBE_TXIDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|t| t == txid)
 }
 
 pub fn take_leftover_probe_diag() -> Option<LeftoverProbeDiag> {
@@ -136,6 +151,15 @@ pub fn take_leftover_probe_diag() -> Option<LeftoverProbeDiag> {
 
 pub(crate) fn note_leftover_probe_diag(diag: LeftoverProbeDiag) {
     LAST_PROBE_DIAG_SET.store(1, Ordering::Relaxed);
+    {
+        let mut rec = RECORDED_PROBE_TXIDS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if rec.len() >= 16 {
+            rec.remove(0);
+        }
+        rec.push(diag.txid);
+    }
     *LAST_PROBE_DIAG.lock().unwrap_or_else(|e| e.into_inner()) = Some(diag);
 }
 
@@ -450,5 +474,41 @@ mod tests {
         add_hit_ages(&local);
         add_hit_age(7);
         let _ = sample_and_reset();
+    }
+
+    fn dummy_probe_diag(txid: [u8; 32]) -> LeftoverProbeDiag {
+        LeftoverProbeDiag {
+            txid,
+            mixed_prefix: [0; 8],
+            page_base: 0,
+            bits: 16,
+            file_id: 0,
+            first_fk: 1,
+            sealed_age: None,
+            hit_empty: true,
+            depth_end: 0,
+            empty_local: 0,
+            page_occupied: 0,
+            hop_equal_second: true,
+            cands: Vec::new(),
+        }
+    }
+
+    /// Next resolve batch (`clear_leftover_miss`) must not drop a leftover hop-dump.
+    /// Parallel `get_fk_by_txid_batch` used to wipe `diag=1` before the pin.
+    #[test]
+    fn clear_leftover_miss_keeps_probe_diag() {
+        let ghost = [0xEEu8; 32];
+        note_leftover_probe_diag(dummy_probe_diag(ghost));
+        note_leftover_miss(LeftoverMissOn::Head, 3);
+        clear_leftover_miss();
+        assert!(
+            take_leftover_miss().is_none(),
+            "miss class is per resolve batch"
+        );
+        assert!(
+            leftover_probe_diag_recorded(&ghost),
+            "hop-dump txid must survive the next resolve clear"
+        );
     }
 }
