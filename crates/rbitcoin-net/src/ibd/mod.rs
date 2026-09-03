@@ -10,11 +10,14 @@
 //! - Peer frames land **raw** in the body queue (no peer full-block decode);
 //!   confirm pack is the sole decode site for wire
 //! - Stall: 30s with no block-download progress on a peer → disconnect + cooldown
+//! - Main-loop housekeeping is wall-clock cadenced (assign ≤50 ms, headers
+//!   ≤500 ms, peer-slow/hygiene ≤1 s). Drain + confirm-offer stay event-driven.
 
 mod archive;
 mod assign;
 mod assign_plan;
 mod body;
+mod cadence;
 mod confirm;
 mod dial;
 mod events;
@@ -35,6 +38,7 @@ use assign_plan::{remove_from_ordered, want_headers_beyond_soft_cap};
 use confirm::{offer_confirm_ready, spawn_confirm_engine, ConfirmEvent, ConfirmFeed};
 
 use assign::{archive_pipeline_saturated, assign_work_ordered, AssignDepth};
+use cadence::IbdLoopCadence;
 use dial::{
     apply_dial_result, dial_batch, dial_blocked_addrs, disconnect_relative_slow_block_peers,
     disconnect_stalled_block_peers, expire_addr_cooldown, request_headers,
@@ -411,6 +415,7 @@ pub async fn ibd_cancellable(
     update_confirm_lag(&confirm_lag, hub.tip_height(), st.max_ready_height);
 
     let mut loop_n = 0u32;
+    let mut cadence = IbdLoopCadence::new();
     loop {
         if cancelled() {
             warn!("ibd: cancel requested — stopping IBD");
@@ -476,33 +481,43 @@ pub async fn ibd_cancellable(
                 break;
             }
         }
-        st.hygiene();
+        let now_cadence = Instant::now();
+        if cadence.hygiene_due(now_cadence, st.ordered_bloated()) {
+            st.hygiene();
+            cadence.mark_hygiene(now_cadence);
+        }
 
-        let tip_rate_opt = tip_rate_tracker.eta_rate(Instant::now());
-        let _ = hub.query.block_queue_update_soft_pressure(tip_rate_opt);
-        let (_bq_budget, bq_bytes, bq_count) = hub.query.block_queue_stats();
-        let bq_window_covered =
-            rbitcoin_query::soft_confirm_window_covered(bq_count as u32, bq_bytes, tip_rate_opt);
-        let write_next = archive_write_next.load(Ordering::Relaxed);
-        let inflight_before = st.inflight.len();
-        let depth = if archive_pipeline_saturated(
-            st.body.pending_len(),
-            st.inflight.len(),
-            bq_window_covered,
-        ) {
-            AssignDepth::Critical
-        } else {
-            AssignDepth::Full
-        };
-        assign_work_ordered(
-            &mut st,
-            hub.as_ref(),
-            &cfg,
-            &loop_stats,
-            write_next,
-            depth,
-            tip_rate_opt,
-        );
+        if cadence.assign_due(now_cadence, st.inflight.is_empty()) {
+            let tip_rate_opt = tip_rate_tracker.eta_rate(now_cadence);
+            let _ = hub.query.block_queue_update_soft_pressure(tip_rate_opt);
+            let (_bq_budget, bq_bytes, bq_count) = hub.query.block_queue_stats();
+            let bq_window_covered = rbitcoin_query::soft_confirm_window_covered(
+                bq_count as u32,
+                bq_bytes,
+                tip_rate_opt,
+            );
+            let write_next = archive_write_next.load(Ordering::Relaxed);
+            let depth = if archive_pipeline_saturated(
+                st.body.pending_len(),
+                st.inflight.len(),
+                bq_window_covered,
+            ) {
+                AssignDepth::Critical
+            } else {
+                AssignDepth::Full
+            };
+            assign_work_ordered(
+                &mut st,
+                hub.as_ref(),
+                &cfg,
+                &loop_stats,
+                write_next,
+                depth,
+                tip_rate_opt,
+            );
+            sample_peer_rates(&mut st.slots, peer_io::ibd_mono_ms());
+            cadence.mark_assign(now_cadence);
+        }
 
         if st.reorg.awaiting().is_some() && try_complete_awaiting_reorg(&mut st, hub.as_ref()) {
             last_progress = Instant::now();
@@ -559,34 +574,12 @@ pub async fn ibd_cancellable(
         )? {
             break;
         }
-        let freed = inflight_before.saturating_sub(st.inflight.len());
-        if freed >= 8 || st.inflight.is_empty() {
-            let tip_rate2 = tip_rate_tracker.eta_rate(Instant::now());
-            let _ = hub.query.block_queue_update_soft_pressure(tip_rate2);
-            let (_b2, bq_bytes2, bq_count2) = hub.query.block_queue_stats();
-            let covered2 =
-                rbitcoin_query::soft_confirm_window_covered(bq_count2 as u32, bq_bytes2, tip_rate2);
-            let write_next2 = archive_write_next.load(Ordering::Relaxed);
-            let depth2 =
-                if archive_pipeline_saturated(st.body.pending_len(), st.inflight.len(), covered2) {
-                    AssignDepth::Critical
-                } else {
-                    AssignDepth::Full
-                };
-            assign_work_ordered(
-                &mut st,
-                hub.as_ref(),
-                &cfg,
-                &loop_stats,
-                write_next2,
-                depth2,
-                tip_rate2,
-            );
-        }
 
         // Soft-cap `ordered_set` (not deque ghosts). Bypass only when the path is dense
         // (sparse far-ready used to look empty forever → header flood / drain livelock).
-        {
+        // Full-batch continuation still fires from apply_peer_event; this is the poll.
+        let path_empty = st.ordered.is_empty() && !st.headers_done;
+        if cadence.headers_due(now_cadence, path_empty) {
             let live = st.ordered_set.len();
             let known_ready = st.body.known_len();
             let ready_gap = st.max_ordered_height.saturating_sub(st.max_ready_height);
@@ -628,6 +621,7 @@ pub async fn ibd_cancellable(
                     }
                 }
             }
+            cadence.mark_headers(now_cadence);
         }
 
         // Hard reset only when ordered is empty — a full queue still waiting on getdata is not stalled.
@@ -661,28 +655,32 @@ pub async fn ibd_cancellable(
             st.headers_done = false;
             let tips = work_path_tips(&st);
             let _ = request_headers(&st.slots, &hub, &mut st.header_req_seq, &tips);
+            cadence.mark_headers(Instant::now());
             last_progress = Instant::now();
         }
 
-        sample_peer_rates(&mut st.slots, peer_io::ibd_mono_ms());
-        let now = Instant::now();
-        disconnect_stalled_block_peers(
-            &mut st.slots,
-            &mut st.inflight,
-            &mut st.addr_cooldown,
-            now,
-            cfg.stall,
-        );
-        disconnect_relative_slow_block_peers(
-            &mut st.slots,
-            &mut st.inflight,
-            &mut st.addr_cooldown,
-            now,
-            &mut st.relative_slow_suspect,
-            &mut st.relative_slow_last_kick_ms,
-        );
+        if cadence.peer_slow_due(now_cadence) {
+            sample_peer_rates(&mut st.slots, peer_io::ibd_mono_ms());
+            let now = Instant::now();
+            disconnect_stalled_block_peers(
+                &mut st.slots,
+                &mut st.inflight,
+                &mut st.addr_cooldown,
+                now,
+                cfg.stall,
+            );
+            disconnect_relative_slow_block_peers(
+                &mut st.slots,
+                &mut st.inflight,
+                &mut st.addr_cooldown,
+                now,
+                &mut st.relative_slow_suspect,
+                &mut st.relative_slow_last_kick_ms,
+            );
+            expire_addr_cooldown(&mut st.addr_cooldown, now);
+            cadence.mark_peer_slow(now);
+        }
         st.slots.retain(|s| s.alive);
-        expire_addr_cooldown(&mut st.addr_cooldown, now);
 
         if redial_handle
             .as_ref()

@@ -133,8 +133,6 @@ pub(crate) struct IbdWorkState {
     pub relative_slow_last_kick_ms: u64,
     /// Process-local invalid apply marks for most-work reorg (IBD run only).
     pub reorg: IbdReorgState,
-    /// Loop turns since last [`Self::hygiene`].
-    hygiene_counter: u32,
     /// First height ≥ path_lo densify should walk (filled prefix skip).
     pub densify_scan_lo: u32,
     /// Last Full-assign `path_lo`; drop watermark when the tip shrinks.
@@ -187,7 +185,6 @@ impl IbdWorkState {
             relative_slow_suspect: None,
             relative_slow_last_kick_ms: 0,
             reorg: IbdReorgState::new(),
-            hygiene_counter: 0,
             densify_scan_lo: 0,
             assign_path_lo: 0,
         }
@@ -281,14 +278,15 @@ impl IbdWorkState {
         }
     }
 
+    /// True when `ordered` has piled up ghost entries (completed hashes left
+    /// in the deque). Caller cadences retain; bloat skips the wait.
+    pub(crate) fn ordered_bloated(&self) -> bool {
+        self.ordered.len() > self.ordered_set.len().saturating_mul(4).max(128)
+    }
+
     /// Compact ghost entries in `ordered` and drop auxiliary map keys no longer
-    /// on the live work path.
+    /// on the live work path. Caller owns cadence (main loop ~1 s, or bloat).
     pub(crate) fn hygiene(&mut self) {
-        self.hygiene_counter = self.hygiene_counter.wrapping_add(1);
-        let bloated = self.ordered.len() > self.ordered_set.len().saturating_mul(4).max(128);
-        if !bloated && !self.hygiene_counter.is_multiple_of(32) {
-            return;
-        }
         compact_ordered(&mut self.ordered, &self.ordered_set);
         let live = &self.ordered_set;
         let inflight = &self.inflight;
@@ -353,6 +351,18 @@ mod tests {
     }
 
     #[test]
+    fn ordered_bloated_when_ghosts_exceed_live_set() {
+        let tip = h(0);
+        let mut st = IbdWorkState::new(Vec::new(), Some(tip), Some(10));
+        assert!(!st.ordered_bloated());
+        for i in 1u8..=200 {
+            st.ordered.push_back(h(i));
+        }
+        st.ordered_set.insert(h(1));
+        assert!(st.ordered_bloated());
+    }
+
+    #[test]
     fn record_height_structure_sizes_and_hygiene() {
         let tip = h(0);
         let mut st = IbdWorkState::new(Vec::new(), Some(tip), Some(10));
@@ -376,10 +386,7 @@ mod tests {
             }
             st.known_headers.insert(hash);
         }
-        // Force hygiene by counter (not only bloat path): advance to %32==0.
-        for _ in 0..32 {
-            st.hygiene();
-        }
+        st.hygiene();
         // Live set only even hashes; compact should drop ghosts when bloated.
         assert!(
             st.ordered.len() <= st.ordered_set.len().saturating_add(64).max(128)
@@ -402,7 +409,6 @@ mod tests {
         st.inflight.insert(keep, InflightReq::new(0));
         st.record_height(keep, 999);
         st.header_fks.insert(keep, Fk(200));
-        st.hygiene_counter = 31; // next call hits %32
         st.hygiene();
         assert!(st.hash_height.contains_key(&keep));
         assert!(st.header_fks.contains_key(&keep));
@@ -474,8 +480,6 @@ mod tests {
             st.header_fks.insert(hash, Fk(u64::from(i)));
         }
         assert!(st.known_headers.len() > 4096);
-        // Force periodic hygiene path.
-        st.hygiene_counter = 31;
         st.hygiene();
         // Only live ordered (+ inflight) remains in known; bulk pruned.
         assert!(

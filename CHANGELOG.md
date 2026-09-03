@@ -33,6 +33,15 @@ before 1.0).
 
 ### Changed
 
+- **IBD main loop cadences housekeeping off the event path:** getdata
+  assign (≤50 ms, immediate if inflight empty), main-loop `getheaders`
+  locator walks (≤500 ms, empty path immediate), peer stall/relative-slow
+  (≤1 s), and work-path hygiene (≤1 s) no longer run after every peer
+  frame. Drain and confirm-offer stay event-driven. Full 2000-header
+  continuation still fires from the Headers event. Cuts CPU/IO that was
+  competing with confirm (64 k densify scans and `locator_hashes`
+  header-table walks at event rate).
+
 - **Tip connect runs on a dedicated `tip-accept` OS thread:** P2P reconstruct
   and RPC generate/submitblock no longer take `connect_lock` or run
   `confirm_wire_run_preverified` on a tokio worker. The peer awaits a oneshot;
