@@ -1456,8 +1456,8 @@ mod tests {
         let mut need = vec![(Fk(1), vec![child_spend(ghost, 0xaa)])];
         let _ = q.archive_plan_batch_from_store(&mut need, 1, &empty, None);
         assert!(
-            rbitcoin_store::leftover_probe_diag_ready(),
-            "leftover miss must hop-dump once"
+            rbitcoin_store::leftover_probe_diag_recorded(&ghost),
+            "leftover miss must hop-dump this parent"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

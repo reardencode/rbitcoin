@@ -11,6 +11,12 @@ before 1.0).
 
 ### Fixed
 
+- **Leftover hop-dump is not cleared by the next head-resolve batch:**
+  `clear_leftover_miss` wiped `diag=1` at the start of every TipOnly
+  resolve. Parallel `cargo test` failed `leftover_miss_dumps_probe_diag`;
+  the operator reject line could also lose the dump. Miss classification
+  is still per-batch.
+
 - **Mempool accept does not run on a tokio worker:** P2P `tx` and Esplora
   `POST /tx` used `accept_tx` on the session/axum thread, holding
   `inner` write across store UTXO lookups. All workers parked; timers and

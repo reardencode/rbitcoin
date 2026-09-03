@@ -74,7 +74,9 @@ pub use hashhead::{
     initial_slots_for, sh_main_shard_count, HeadRole, HeadScale, SH_MAIN_SHARDS_MAINNET,
 };
 pub use head_resolve_pick::{classify_leftover_miss, LeftoverMissOn};
-pub use head_resolve_stats::{leftover_probe_diag_ready, Sample as HeadResolveSample};
+pub use head_resolve_stats::{
+    leftover_probe_diag_ready, leftover_probe_diag_recorded, Sample as HeadResolveSample,
+};
 pub use header_table::{block_header_hash, HeaderRecord, HeaderTable};
 pub use height_fence::{FenceRun, HeightFence};
 pub use idx_body_pipeline::{run_idx_body_pipeline, BodyMode as IdxBodyMode, IdxBodyJob};
