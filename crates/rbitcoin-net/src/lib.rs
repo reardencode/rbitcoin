@@ -12,6 +12,7 @@ mod msg_decode;
 mod peer;
 mod peer_dos;
 mod peers;
+mod reactor;
 mod seeds;
 mod service;
 mod tip_accept;
@@ -37,6 +38,7 @@ pub use most_work::{
     sum_work_for_hashes, work_better, InvalidHashSet, SelectOutcome, WorkCandidate,
 };
 pub use peer::{flush_tx_invs, force_announce_txid, local_service_flags};
+pub use reactor::BlockingRegion;
 pub use peer_dos::{
     inbound_semaphore, PeerRateLimiter, DEFAULT_MAX_BYTES_PER_SEC, DEFAULT_MAX_INBOUND,
     DEFAULT_MAX_MSGS_PER_SEC, OVERSIZE_BAN_SCORE, RATE_LIMIT_BAN_SCORE,

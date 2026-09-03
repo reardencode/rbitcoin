@@ -6,7 +6,7 @@
 use bitcoin::consensus::Encodable;
 use bitcoin::hashes::Hash;
 use rbitcoin_consensus::ChainParams;
-use rbitcoin_net::MempoolHub;
+use rbitcoin_net::{BlockingRegion, MempoolHub};
 use rbitcoin_primitives::{Fk, Height};
 use rbitcoin_query::{ChainView, ChainViewKind, HistoryFilter, Query, ShJoinSlot};
 use rbitcoin_store::{script_hash, StoreError};
@@ -556,6 +556,7 @@ where
                     let proto = protocol.clone();
                     let stamp = method_stamps_chain_tip(&method_owned);
                     match tokio::task::spawn_blocking(move || {
+                        let _g = BlockingRegion::enter();
                         let (r, view) = if stamp {
                             electrum_at_chain_view(
                                 &q,

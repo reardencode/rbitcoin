@@ -905,6 +905,7 @@ impl MempoolHub {
     /// verify runs on the shared `rbtc-scripts` path **outside** the mempool
     /// mutex so concurrent readers are not blocked by interpreter CPU.
     pub fn accept_tx(&self, tx: &Transaction) -> Result<AcceptResult, AcceptError> {
+        crate::reactor::assert_not_reactor("mempool accept");
         let t0 = Instant::now();
         let utxo = QueryUtxoProvider {
             query: self.query.as_ref(),
@@ -993,6 +994,34 @@ impl MempoolHub {
             }
             Err(e) => self.finish_accept_err(us, e),
         }
+    }
+
+    /// Accept on the tokio blocking pool (never on `tokio-rt-worker`).
+    pub async fn accept_tx_async(
+        self: &Arc<Self>,
+        tx: Transaction,
+    ) -> Result<AcceptResult, AcceptError> {
+        let hub = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            let _g = crate::reactor::BlockingRegion::enter();
+            hub.accept_tx(&tx)
+        })
+        .await
+        .expect("mempool accept join")
+    }
+
+    /// Package accept on the tokio blocking pool (never on `tokio-rt-worker`).
+    pub async fn accept_package_async(
+        self: &Arc<Self>,
+        txs: Vec<Transaction>,
+    ) -> Result<Vec<AcceptResult>, AcceptError> {
+        let hub = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            let _g = crate::reactor::BlockingRegion::enter();
+            hub.accept_package(&txs)
+        })
+        .await
+        .expect("mempool accept join")
     }
 
     /// Prepare + scripts + RBF/cluster checks with no mempool mutation.
@@ -1180,6 +1209,7 @@ impl MempoolHub {
 
     /// Accept an ancestor package (local / Electrum path; BIP331 wire later).
     pub fn accept_package(&self, txs: &[Transaction]) -> Result<Vec<AcceptResult>, AcceptError> {
+        crate::reactor::assert_not_reactor("mempool accept");
         let t0 = Instant::now();
         let utxo = QueryUtxoProvider {
             query: self.query.as_ref(),
@@ -2455,6 +2485,93 @@ mod tests {
         let _ = hub.fee_histogram();
         let _ = hub.fee_histogram();
         assert_eq!(hub.take_chunks_rebuilds(), 0);
+        let _ = std::fs::remove_dir_all(&mp_dir);
+        let _ = std::fs::remove_dir_all(&store_dir);
+    }
+
+    /// Production accept must not run on a tokio worker (reactor starvation).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn accept_tx_refuses_tokio_worker() {
+        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+        }
+        let store_dir = tmp();
+        let mp_dir = tmp();
+        let q = Query::open_or_create(&store_dir).unwrap();
+        let hub = MempoolHub::open(&mp_dir, Arc::new(q)).unwrap();
+        hub.set_relay_enabled(true);
+        let tx = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array([1u8; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let join = tokio::spawn(async move {
+            let name = std::thread::current().name().unwrap_or("").to_string();
+            let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = hub.accept_tx(&tx);
+            }));
+            (name, panicked)
+        });
+        let (name, panicked) = join.await.expect("join worker");
+        assert!(
+            name.starts_with("tokio-rt-worker"),
+            "spawned task must run on a tokio worker, got {name:?}"
+        );
+        assert!(
+            panicked.is_err(),
+            "accept_tx must panic on tokio-rt-worker, not return {panicked:?}"
+        );
+        let _ = std::fs::remove_dir_all(&mp_dir);
+        let _ = std::fs::remove_dir_all(&store_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn accept_tx_async_runs_off_reactor() {
+        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+        }
+        let store_dir = tmp();
+        let mp_dir = tmp();
+        let q = Query::open_or_create(&store_dir).unwrap();
+        let hub = MempoolHub::open(&mp_dir, Arc::new(q)).unwrap();
+        hub.set_relay_enabled(true);
+        let tx = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array([1u8; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let r = hub.accept_tx_async(tx).await;
+        assert!(
+            matches!(
+                r,
+                Err(AcceptError::Orphaned(_)) | Err(AcceptError::MissingPrevout(_))
+            ),
+            "async accept off reactor: {r:?}"
+        );
         let _ = std::fs::remove_dir_all(&mp_dir);
         let _ = std::fs::remove_dir_all(&store_dir);
     }

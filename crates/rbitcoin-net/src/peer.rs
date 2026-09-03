@@ -2252,7 +2252,7 @@ async fn handle_peer_frame(
                 {
                     let txid = tx.compute_txid();
                     insert_capped_txid(from_this_peer, txid, FROM_THIS_PEER_CAP);
-                    match mp.accept_tx(tx) {
+                    match mp.accept_tx_async(tx.clone()).await {
                         Ok(r) => {
                             if let Some(s) = session {
                                 s.note_last_transaction();

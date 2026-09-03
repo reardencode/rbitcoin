@@ -504,7 +504,12 @@ fn outspend_json(
 }
 
 pub(crate) async fn spawn_join(f: impl FnOnce() -> Response + Send + 'static) -> Response {
-    match tokio::task::spawn_blocking(f).await {
+    match tokio::task::spawn_blocking(move || {
+        let _g = rbitcoin_net::BlockingRegion::enter();
+        f()
+    })
+    .await
+    {
         Ok(r) => r,
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -1039,7 +1044,7 @@ pub async fn post_tx(State(st): State<AppState>, body: Bytes) -> Response {
             return (StatusCode::BAD_REQUEST, format!("invalid tx: {e}")).into_response();
         }
     };
-    match mp.accept_tx(&tx) {
+    match mp.accept_tx_async(tx).await {
         Ok(r) => {
             let tid = r.txid.to_byte_array();
             plain_ok(block_hash_hex(&tid))
@@ -1107,7 +1112,7 @@ pub async fn post_tx_package(State(st): State<AppState>, body: Bytes) -> Respons
             }
         }
     }
-    match mp.accept_package(&txs) {
+    match mp.accept_package_async(txs).await {
         Ok(results) => {
             let txids: Vec<String> = results
                 .iter()
