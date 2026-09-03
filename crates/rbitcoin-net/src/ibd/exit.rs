@@ -100,15 +100,16 @@ pub(crate) fn empty_path_header_fan(st: &IbdWorkState, tip_h: u32, alive: usize)
 
 /// Clear `headers_done` so empty-path `getheaders` can resume.
 ///
-/// Latch is only to stop the tip storm. Unlatch when peers are more than one
-/// ahead **or** the connecting header is missing while they still advertise.
+/// Latch stops the tip storm. Unlatch only for a 1–2 block connecting-header
+/// hole. A far-ahead `max_peer_height` (less-work fork / bogus LastBlock) is
+/// not a most-work tip — do not unlatch and chase it.
 #[inline]
 pub(crate) fn should_unlatch_headers_done(st: &IbdWorkState, tip_h: u32) -> bool {
     if !st.headers_done || !st.ordered.is_empty() {
         return false;
     }
     let lag = header_lag_behind_peers(st, tip_h);
-    lag > 1 || (lag > 0 && !has_tip_plus_one(st, tip_h))
+    lag > 0 && lag <= 2 && !has_tip_plus_one(st, tip_h)
 }
 
 /// Full `seed_work_path_from_store` (O(header_count) walk) while empty-lagging.
@@ -131,7 +132,11 @@ pub fn path_drained(st: &IbdWorkState) -> bool {
     st.ordered.is_empty() && !on_path_inflight(st)
 }
 
-/// IBD densify may exit: no best-chain remainder and at (or one chatter block from) peers.
+/// IBD densify may exit: no best-chain remainder and at the most-work path tip.
+///
+/// `max_peer_height` may sit far above that path (less-work high-height fork
+/// or bogus `version.start_height`). Empty-EOF (`headers_done`) means we do
+/// not chase that height. A 2-block connecting-header hole still holds exit.
 #[inline]
 pub fn ibd_caught_up(st: &IbdWorkState, tip_h: u32) -> bool {
     if tip_h == 0 || best_chain_remainder(st, tip_h) {
@@ -140,7 +145,8 @@ pub fn ibd_caught_up(st: &IbdWorkState, tip_h: u32) -> bool {
     match header_lag_behind_peers(st, tip_h) {
         0 => true,
         1 => st.headers_done,
-        _ => false,
+        2 => false,
+        _ => st.headers_done,
     }
 }
 
@@ -201,12 +207,14 @@ mod tests {
             AllPeersDead::CatchupComplete
         );
 
-        // Path drain complete requires near peer tip (headers_done alone is not enough).
+        // Path drain + empty-EOF completes even if advertised height is far
+        // ahead (less-work fork / bogus LastBlock). Still asking if not EOF.
         let mut path = IbdWorkState::new(Vec::new(), None, Some(2000));
         path.max_peer_height = 313_000;
         path.max_ready_height = 2000;
-        path.headers_done = true;
         assert!(!ibd_caught_up(&path, 2000));
+        path.headers_done = true;
+        assert!(ibd_caught_up(&path, 2000));
         path.max_peer_height = 2001;
         assert!(ibd_caught_up(&path, 2000));
 
@@ -495,13 +503,24 @@ mod tests {
             AllPeersDead::CatchupComplete
         );
 
-        // Signet false headers_done at h≈2000 with peers at ~313k.
+        // Still asking: inflated start_height, no empty-EOF yet.
         let mut signet = IbdWorkState::new(Vec::new(), None, Some(2000));
         signet.max_peer_height = 313_000;
         signet.max_ready_height = 2000;
-        signet.headers_done = true;
         assert!(!ibd_caught_up(&signet, 2000));
-        assert!(super::should_unlatch_headers_done(&signet, 2000));
+        assert!(!super::should_unlatch_headers_done(&signet, 2000));
+
+        // Empty-EOF at the most-work path: extra advertised height is not a
+        // tip we chase (less-work high-height fork / bogus LastBlock).
+        signet.headers_done = true;
+        assert!(
+            ibd_caught_up(&signet, 2000),
+            "headers_done at path HWM completes even if start_height is far ahead"
+        );
+        assert!(
+            !super::should_unlatch_headers_done(&signet, 2000),
+            "do not unlatch a 900-block less-work height claim"
+        );
     }
 
     /// Empty path with a connecting-header hole must keep getheaders, not latch.
@@ -548,7 +567,10 @@ mod tests {
                 .insert(BlockHash::from_byte_array([i; 32]), InflightReq::new(0));
         }
         assert_eq!(header_lag_behind_peers(&st, 100), 5);
-        assert!(super::should_unlatch_headers_done(&st, 100));
+        assert!(
+            !super::should_unlatch_headers_done(&st, 100),
+            "lag>2 with no connecting hole is not a most-work tip we unlatch for"
+        );
 
         st.max_peer_height = 100;
         assert_eq!(header_lag_behind_peers(&st, 100), 0);

@@ -177,9 +177,10 @@ pub(crate) fn apply_peer_event(
                                 st.reorg.register_explore(std::iter::once(hash), Some(hash));
                             }
                         }
+                    } else {
+                        st.max_peer_height = st.max_peer_height.max(h);
+                        st.max_ordered_height = st.max_ordered_height.max(h);
                     }
-                    st.max_peer_height = st.max_peer_height.max(h);
-                    st.max_ordered_height = st.max_ordered_height.max(h);
                     batch_prev = Some((hash, h));
                 }
                 if !already_known {
@@ -260,16 +261,13 @@ pub(crate) fn apply_peer_event(
                 let lag = header_lag_behind_peers(st, tip_h);
                 let path_idle = st.ordered.is_empty() && st.inflight.is_empty();
                 let peers_n = st.slots.iter().filter(|s| s.alive).count() as u32;
-                if st.empty_header_streak >= peers_n.max(2) && path_idle && lag <= 2 {
+                if st.empty_header_streak >= peers_n.max(2) && path_idle {
+                    // Empty replies with no ordered/inflight work. Extra
+                    // advertised height is not a most-work tip we chase.
                     st.headers_done = true;
                 } else if lag > 2 {
-                    // Peers advertise a higher tip than our work path — empty is a
-                    // false EOF (locator stuck / peer-horizon skew). Keep syncing;
-                    // never mark headers_done.
-                    //
-                    // **Do not reset** `empty_header_streak` here: a prior reset every
-                    // 8 empties re-triggered `streak == 1` WARNs and re-getheaders
-                    // storms (mainnet: thousands of "empty headers but lag=…" lines).
+                    // On-path remainder still exists (or path not idle): keep
+                    // asking. Do not reset empty_header_streak (re-fires streak==1).
                     if should_log_empty_headers_lag(st.empty_header_streak) {
                         let known = st
                             .max_ready_height

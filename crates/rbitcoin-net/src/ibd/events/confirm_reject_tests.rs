@@ -2560,6 +2560,7 @@ fn path_slot_first_wins_chained_via_headers() {
         "occupied-height sibling registers explore, not path"
     );
     let lag = super::super::exit::header_lag_behind_peers(&st, 0);
+    let horizon = st.max_peer_height;
     apply_peer_event(
         &mut st,
         &hub,
@@ -2576,6 +2577,25 @@ fn path_slot_first_wins_chained_via_headers() {
         super::super::exit::header_lag_behind_peers(&st, 0),
         lag,
         "further competitors must not inflate path lag"
+    );
+    // Longer less-work fork: chain off the sibling. Height grows; most-work
+    // horizon (max_peer_height / lag) must not follow it.
+    let ext = dummy_header(hb, 4);
+    apply_peer_event(
+        &mut st,
+        &hub,
+        PeerEvent::Headers {
+            peer: 1,
+            headers: vec![ext],
+        },
+        &write_next,
+        &mut book,
+        local,
+        None,
+    );
+    assert_eq!(
+        st.max_peer_height, horizon,
+        "off-path high-height fork must not become the tip horizon"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

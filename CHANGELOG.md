@@ -11,6 +11,12 @@ before 1.0).
 
 ### Fixed
 
+- **IBD tip is most-work, not max advertised height:** a higher-height
+  less-work fork (or bogus `version.start_height`) is `register_explore`
+  only and does not raise the work-path horizon. Empty `headers` at a
+  drained most-work path is EOF even if `max_peer_height` is hundreds
+  ahead — restart-at-tip no longer chases that height.
+
 - **IBD empty-headers lag no longer reseeds a live work path:** `getheaders`
   empty while peers advertise ahead still re-asks, but
   `seed_work_path_from_store` (full header-graph walk) runs only when
