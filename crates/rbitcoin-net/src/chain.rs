@@ -2389,7 +2389,10 @@ mod tests {
     async fn accept_received_block_async_connects_off_worker() {
         let (dir, hub) = tmp_hub();
         let task = tokio::spawn(async move {
-            hub.ensure_genesis().unwrap();
+            {
+                let _g = crate::reactor::BlockingRegion::enter();
+                hub.ensure_genesis().unwrap();
+            }
             let genesis = hub.tip_hash().unwrap();
             let b = mine(genesis, 1_300_000_000, 1);
             let out = hub.accept_received_block_async(b).await.unwrap();

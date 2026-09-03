@@ -38,7 +38,6 @@ pub use most_work::{
     sum_work_for_hashes, work_better, InvalidHashSet, SelectOutcome, WorkCandidate,
 };
 pub use peer::{flush_tx_invs, force_announce_txid, local_service_flags};
-pub use reactor::BlockingRegion;
 pub use peer_dos::{
     inbound_semaphore, PeerRateLimiter, DEFAULT_MAX_BYTES_PER_SEC, DEFAULT_MAX_INBOUND,
     DEFAULT_MAX_MSGS_PER_SEC, OVERSIZE_BAN_SCORE, RATE_LIMIT_BAN_SCORE,
@@ -48,6 +47,7 @@ pub use peers::{
     PeerInfo, PingAction,
 };
 pub use rbitcoin_mempool::MempoolGraphStats;
+pub use reactor::BlockingRegion;
 pub use seeds::{
     default_port, dns_seed_query_host, dns_seeds, fixed_seed_hosts, pick_seed_results,
     required_seed_services, resolve_all_seeds, resolve_dns_seeds, resolve_fixed_seeds,
