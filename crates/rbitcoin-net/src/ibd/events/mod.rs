@@ -21,7 +21,7 @@ use crate::error::NetError;
 use crate::seeds::AddrMan;
 use bitcoin::hashes::Hash;
 use bitcoin::BlockHash;
-use rbitcoin_log::{info, warn};
+use rbitcoin_log::{info, trace, warn};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -271,16 +271,27 @@ pub(crate) fn apply_peer_event(
                     // 8 empties re-triggered `streak == 1` WARNs and re-getheaders
                     // storms (mainnet: thousands of "empty headers but lag=…" lines).
                     if should_log_empty_headers_lag(st.empty_header_streak) {
-                        warn!(
-                            "ibd: empty headers but lag={lag} behind max_peer_height={} (known≈{}, tip={tip_h}) — keep header sync",
-                            st.max_peer_height,
-                            st.max_ready_height
-                                .max(st.hash_height.values().copied().max().unwrap_or(0)),
-                        );
+                        let known = st
+                            .max_ready_height
+                            .max(st.hash_height.values().copied().max().unwrap_or(0));
+                        if st.ordered_set.is_empty() {
+                            warn!(
+                                "ibd: empty headers but lag={lag} behind max_peer_height={} (known≈{known}, tip={tip_h}) — keep header sync",
+                                st.max_peer_height,
+                            );
+                        } else {
+                            trace!(
+                                "ibd: empty headers but lag={lag} behind max_peer_height={} (known≈{known}, tip={tip_h}) — keep header sync",
+                                st.max_peer_height,
+                            );
+                        }
                     }
                     st.headers_done = false;
                     if should_rerequest_headers_on_empty_lag(st.empty_header_streak) {
-                        if should_reseed_work_path_on_empty_lag(st.empty_header_streak) {
+                        if should_reseed_work_path_on_empty_lag(
+                            st.empty_header_streak,
+                            st.ordered_set.is_empty(),
+                        ) {
                             super::path::seed_work_path_from_store(st, hub);
                         }
                         let tips = work_path_tips(st);

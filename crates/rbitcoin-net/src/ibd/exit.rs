@@ -113,11 +113,13 @@ pub(crate) fn should_unlatch_headers_done(st: &IbdWorkState, tip_h: u32) -> bool
 
 /// Full `seed_work_path_from_store` (O(header_count) walk) while empty-lagging.
 ///
-/// Must stay rare: mainnet ~1M headers ≈ 200–300ms per call. Same cadence as
-/// [`should_log_empty_headers_lag`] so getheaders can still fan out every 8.
+/// Only when the ordered path is empty — a live queue already supplies locator
+/// tips. Must stay rare: the walk scans every header (~1M on mainnet, 0.5–1.2s).
+/// Same streak cadence as [`should_log_empty_headers_lag`] so getheaders can
+/// still fan out every 8.
 #[inline]
-pub(crate) fn should_reseed_work_path_on_empty_lag(streak: u32) -> bool {
-    should_log_empty_headers_lag(streak)
+pub(crate) fn should_reseed_work_path_on_empty_lag(streak: u32, ordered_empty: bool) -> bool {
+    ordered_empty && should_log_empty_headers_lag(streak)
 }
 
 /// Work path idle: no ordered hashes, no on-path getdata.
@@ -308,16 +310,21 @@ mod tests {
         assert_eq!(regets, 9); // 1,8,16,...,64
 
         // Full store reseed is sparser than getheaders (O(headers) walk).
-        assert!(should_reseed_work_path_on_empty_lag(1));
-        assert!(!should_reseed_work_path_on_empty_lag(8));
-        assert!(should_reseed_work_path_on_empty_lag(64));
+        assert!(should_reseed_work_path_on_empty_lag(1, true));
+        assert!(!should_reseed_work_path_on_empty_lag(8, true));
+        assert!(should_reseed_work_path_on_empty_lag(64, true));
         let reseeds: u32 = (1..=64)
-            .filter(|&s| should_reseed_work_path_on_empty_lag(s))
+            .filter(|&s| should_reseed_work_path_on_empty_lag(s, true))
             .count() as u32;
         assert!(
             reseeds < regets,
             "reseed={reseeds} must be rarer than reget={regets}"
         );
+
+        // Live ordered path already has locator tips — do not walk the header graph.
+        assert!(!should_reseed_work_path_on_empty_lag(1, false));
+        assert!(!should_reseed_work_path_on_empty_lag(64, false));
+        assert!(!should_reseed_work_path_on_empty_lag(128, false));
 
         // Already-known 1-header at tip must not re-getheaders (storm).
         assert!(!should_advance_locator_after_known_batch(0, 0, false, true));
