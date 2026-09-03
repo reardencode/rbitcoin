@@ -1,7 +1,9 @@
 //! Consolidated IBD performance sampling and logging.
 //!
 //! **Cadence:** one centralized ~5s status tick (see `ibd` main loop) emits
-//! `ibd: progress`, `ibd: perf`, and `ibd: sizes` together.
+//! `ibd: progress`, `ibd: perf`, and `ibd: sizes` together. Housekeeping that
+//! is not confirm progress (assign, peer-slow, hygiene, header locator poll)
+//! is wall-clock gated in that same loop — not run on every peer frame.
 //!
 //! | Level | Message | Contents |
 //! |-------|---------|----------|

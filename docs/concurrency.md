@@ -11,7 +11,7 @@ Short map of who may write which tables. **Format is unstable until 1.0.**
 | Confirm **load** | 1 OS thread | `confirm_wire_lookup_stamp` (structure with **loadq `pres`**, plan_batch, skeleton bind) + pin `txout` + assemble |
 | Confirm **scripts** | 1 OS thread (`ibd-confirm`) publishes waves + `rbtc-scripts` steal (lock-free claim) | **none** — pure CPU |
 | Confirm **write** | 1 OS thread (`ibd-confirm-write`) + 1 process-wide `ibd-confirm-head` | **sole Class A appender** (`txout`+`inwit`+`spent`; IBD encodes ins from `Arc<Block>` + SpendEdges) + structural + Class C + spend annotate on **`spent.body`** + tip GC; **`block_queue_dequeue_height`**. `tx.head` write-behind insert runs on **`ibd-confirm-head`** overlapping structural + Class C (not a per-batch spawn). Class A **never leads tip** (same commit era; no archive-ahead DONTNEED) |
-| IBD main loop | 1 tokio task | none (orchestration only) |
+| IBD main loop | 1 tokio task | none (orchestration only). Event drain + confirm-offer every turn; getdata assign ≤50 ms (immediate if inflight empty); main-loop `getheaders`/`locator_hashes` ≤500 ms (empty path immediate); peer stall/relative-slow and work-path hygiene ≤1 s. Full-batch header continuation stays on the Headers event. |
 
 **IoSession TLS:** one completion session per OS thread (`with_thread_local`). Harvest / poison / drain / do-not-flatten: [`io-modality.md`](./io-modality.md). `RBITCOIN_IO=pread` disables the session. SH k-way merge submits 256 KiB ahead preads on that TLS session and waits only when promote needs a page that has not completed.
 
