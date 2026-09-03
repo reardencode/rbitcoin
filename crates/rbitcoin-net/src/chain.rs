@@ -2372,13 +2372,14 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn generate_to_script_from_tokio_connects_off_worker() {
         let (dir, hub) = tmp_hub();
-        let task = tokio::spawn(async move {
+        let task = tokio::task::spawn_blocking(move || {
+            let _g = crate::reactor::BlockingRegion::enter();
             let hashes = hub
                 .generate_to_script(1, ScriptBuf::from_bytes(vec![0x51]), vec![])
                 .expect("generate");
             (hashes, hub.tip_height())
         });
-        let (hashes, tip) = task.await.expect("join worker task");
+        let (hashes, tip) = task.await.expect("join blocking");
         assert_eq!(hashes.len(), 1);
         assert_eq!(tip, Some(1));
         let _ = std::fs::remove_dir_all(dir);

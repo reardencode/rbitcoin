@@ -1136,7 +1136,7 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
             }
         }
     } else {
-        let rt = match tokio::runtime::Runtime::new() {
+        let rt = match node_tokio_runtime() {
             Ok(rt) => rt,
             Err(e) => {
                 error!("runtime: {e}");
@@ -1159,6 +1159,23 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
         rt.shutdown_timeout(std::time::Duration::from_secs(2));
         code
     }
+}
+
+/// Tokio runtime for `run_p2p`: cap `spawn_blocking` at nCPU (min 4).
+/// Default `Runtime::new()` allows 512 blocking threads.
+fn blocking_pool_size() -> usize {
+    std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4)
+        .max(4)
+}
+
+fn node_tokio_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .max_blocking_threads(blocking_pool_size())
+        .thread_name("tokio-rt-worker")
+        .build()
 }
 
 fn parse_cli_bool(v: &str) -> Option<bool> {
@@ -1190,6 +1207,12 @@ mod tests {
             format!("{want:?}"),
             "exit code mismatch"
         );
+    }
+
+    #[test]
+    fn blocking_pool_is_capped_not_tokio_default() {
+        assert!(blocking_pool_size() >= 4);
+        assert!(blocking_pool_size() <= 512);
     }
 
     #[test]

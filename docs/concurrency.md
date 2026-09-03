@@ -41,9 +41,17 @@ The 2-wave split is sealed age, not an IO flag.
 
 ## Roles after IBD / tip follow
 
+Three thread kinds only. **Tokio workers must not wait on a `std` mutex/rwlock, store IO, or script verify** (`assert_not_reactor` / `BlockingRegion` on the blocking pool). Tokio names both workers and `spawn_blocking` threads `tokio-rt-worker`; blocking work enters `BlockingRegion`.
+
+| Kind | Who | Notes |
+|------|-----|--------|
+| Reactor | `tokio-rt-worker` × nCPU | epoll, timers, framing. Node caps `spawn_blocking` at nCPU (min 4), not tokio’s 512. |
+| Role | `tip-accept`, `ibd-confirm-*`, `rbtc-sh-wb` | Sole writer for a resource. Not a job pool. |
+| Work pool | `rbtc-scripts-*` steal; tokio blocking pool | Independent jobs. Mempool accept / Electrum / Esplora / RPC run here. |
+
 | Role | Notes |
 |------|--------|
-| `peer_session` (split read/write) | Serve + reconstruct compact/body. Offers reconstructed blocks to **`tip-accept`** (does **not** take `connect_lock` or run confirm on the tokio worker). 50 ms tick calls `PeerHub::on_session_heartbeat` (headers-sync stall timeout). Inbound accept is `inbound_connect_and_handshake` (60 s VERSION/VERACK); timeout drops the `max_inbound` permit. |
+| `peer_session` (split read/write) | Serve + reconstruct compact/body. Offers reconstructed blocks to **`tip-accept`** (does **not** take `connect_lock` or run confirm on the tokio worker). P2P `tx` is `accept_tx_async` (blocking pool). 50 ms tick calls `PeerHub::on_session_heartbeat` (headers-sync stall timeout). Inbound accept is `inbound_connect_and_handshake` (60 s VERSION/VERACK); timeout drops the `max_inbound` permit. |
 | `tip-accept` | **One** process-wide OS thread. Queue depth 8. Sole production thread for `accept_block` / `accept_branch` / `accept_received_block` / `generate_to_script` / `connect_lock` at tip. Confirm is **`confirm_wire_run_preverified`** (lookup stamp, load pin/assemble, `confirm_scripts_phase` → `rbtc-scripts-*`, write + `ibd-confirm-head` drain). TLS uring is this thread’s `with_thread_local` session. SIGINT stays on tokio; the current job finishes, then the session sees shutdown. |
 | `rbtc-sh-wb` | **One** Class B scripthash appender. Used for tip follow **and** short catch-up when a durable SH head already exists. Confirm enqueues RAM records; `connect_at` / `note_confirmed_tip` **release** after `tip_tx`. This thread `put_create_batch_append` only for released heights, then advances `sh_indexed_through`. Apply errors re-queue and halt. Post-IBD Class A collect uses pack sessions (not a second appender); it runs while still Direct so this thread no-ops. |
 | Electrum / Esplora | Confirmed SH reads join durable index **plus a RAM SH head** (pending jobs keyed by scripthash) and pin that visible height (live tip while jobs sit, never above published tip). A tx is in mempool overlay **or** SH (pending/durable), not both and not neither. Reorg reaccepts then drops pending. Headers subscribe is live tip. |
