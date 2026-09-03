@@ -11,6 +11,13 @@ before 1.0).
 
 ### Fixed
 
+- **Mempool accept does not run on a tokio worker:** P2P `tx` and Esplora
+  `POST /tx` used `accept_tx` on the session/axum thread, holding
+  `inner` write across store UTXO lookups. All workers parked; timers and
+  P2P died. Accept is `spawn_blocking` (`BlockingRegion`); prepare uses a
+  graph **read** lock. The node runtime caps blocking threads at nCPU
+  (min 4).
+
 - **IBD tip is most-work, not max advertised height:** a higher-height
   less-work fork (or bogus `version.start_height`) is `register_explore`
   only and does not raise the work-path horizon. Empty `headers` at a

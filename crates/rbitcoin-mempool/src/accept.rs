@@ -268,6 +268,7 @@ pub struct PreparedAdmit {
     pub chain_coins: Vec<Option<Coin>>,
     pub parent_txids: BTreeSet<Txid>,
     pub direct_conflicts: BTreeSet<Txid>,
+    pub utxo_us: u64,
 }
 
 /// Mempool with RAM TxGraph layered on durable store.
@@ -442,7 +443,12 @@ impl ActiveMempool {
         tip: ChainTipCtx,
     ) -> Result<AcceptResult, AcceptError> {
         self.last_accept_stages = AcceptStageUs::default();
-        let prep = self.prepare_admit(tx, utxos, tip, 0, true)?;
+        let prep = match self.prepare_admit(tx, utxos, tip, 0, true) {
+            Ok(p) => p,
+            Err(AcceptError::Orphaned(_)) => return Err(self.park_orphan(tx, utxos)),
+            Err(e) => return Err(e),
+        };
+        self.last_accept_stages.utxo_us = prep.utxo_us;
         let t_script = Instant::now();
         let script_res = verify_tx_scripts(tx, prep.prevouts.clone());
         self.last_accept_stages.script_us = self
@@ -455,13 +461,10 @@ impl ActiveMempool {
         Ok(r)
     }
 
-    /// Resolve prevouts + structural/policy (no script, no durable write).
-    ///
-    /// For hub staged accept: call under exclusive lock (or after short graph peek),
-    /// then run [`verify_tx_scripts`] / [`rbitcoin_consensus::verify_tx_scripts_detached`]
-    /// **outside** the lock, then [`Self::commit_after_script`].
+    /// Graph peek + UTXO resolve (`&self`: callers may hold a read lock).
+    /// Does not park orphans; [`Self::park_orphan`] does that under write.
     pub fn prepare_admit(
-        &mut self,
+        &self,
         tx: &Transaction,
         utxos: &impl UtxoProvider,
         tip: ChainTipCtx,
@@ -515,10 +518,6 @@ impl ActiveMempool {
                     if let Some(c) = self.graph.conflict_txid(&op) {
                         direct_conflicts.insert(c);
                     } else {
-                        self.last_accept_stages.utxo_us = self
-                            .last_accept_stages
-                            .utxo_us
-                            .saturating_add(t_utxo.elapsed().as_micros() as u64);
                         return Err(AcceptError::Policy("mempool double-spend"));
                     }
                 }
@@ -545,17 +544,11 @@ impl ActiveMempool {
             prevouts.push(txout);
             chain_coins.push(chain_coin);
         }
-        self.last_accept_stages.utxo_us = self
-            .last_accept_stages
-            .utxo_us
-            .saturating_add(t_utxo.elapsed().as_micros() as u64);
+        let utxo_us = t_utxo.elapsed().as_micros() as u64;
 
         if !missing_parents.is_empty() {
             if park_orphans {
-                if self.orphanage.insert(tx.clone(), missing_parents) {
-                    return Err(AcceptError::Orphaned(txid));
-                }
-                return Err(AcceptError::MissingPrevout(tx.input[0].previous_output));
+                return Err(AcceptError::Orphaned(txid));
             }
             return Err(AcceptError::MissingPrevout(tx.input[0].previous_output));
         }
@@ -583,7 +576,37 @@ impl ActiveMempool {
             chain_coins,
             parent_txids,
             direct_conflicts,
+            utxo_us,
         })
+    }
+
+    /// Park `tx` in the orphanage (write-lock caller). Re-resolves missing parents.
+    pub fn park_orphan(&mut self, tx: &Transaction, utxos: &impl UtxoProvider) -> AcceptError {
+        let txid = tx.compute_txid();
+        if self.graph.get(&txid).is_some() {
+            return AcceptError::Duplicate(txid);
+        }
+        if self.orphanage.contains(&txid) {
+            return AcceptError::Orphaned(txid);
+        }
+        let mut missing = BTreeSet::new();
+        for inp in &tx.input {
+            let op = inp.previous_output;
+            if self.graph.creator(&op).is_some() {
+                continue;
+            }
+            if utxos.get_coin(&op).is_none() {
+                missing.insert(op.txid);
+            }
+        }
+        if missing.is_empty() {
+            return AcceptError::MissingPrevout(tx.input[0].previous_output);
+        }
+        if self.orphanage.insert(tx.clone(), missing) {
+            AcceptError::Orphaned(txid)
+        } else {
+            AcceptError::MissingPrevout(tx.input[0].previous_output)
+        }
     }
 
     /// Re-check + RBF + durable insert after scripts verified off-lock.

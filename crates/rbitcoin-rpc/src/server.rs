@@ -9,7 +9,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::Router;
 use rbitcoin_log::info;
-use rbitcoin_net::MempoolHub;
+use rbitcoin_net::{BlockingRegion, MempoolHub};
 use rbitcoin_primitives::Network;
 use rbitcoin_query::Query;
 use std::net::SocketAddr;
@@ -203,7 +203,11 @@ async fn rpc_post(State(state): State<AppState>, headers: HeaderMap, body: Bytes
         }
     };
     let ctx = Arc::clone(&state.ctx);
-    let joined = tokio::task::spawn_blocking(move || exec_http_rpc(&ctx, parsed)).await;
+    let joined = tokio::task::spawn_blocking(move || {
+        let _g = BlockingRegion::enter();
+        exec_http_rpc(&ctx, parsed)
+    })
+    .await;
     match joined {
         Ok(HttpRpcOut::Json(status, body)) => (status, axum::Json(body)).into_response(),
         Ok(HttpRpcOut::Empty(status)) => status.into_response(),

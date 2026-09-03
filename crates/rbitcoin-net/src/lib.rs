@@ -12,6 +12,7 @@ mod msg_decode;
 mod peer;
 mod peer_dos;
 mod peers;
+mod reactor;
 mod seeds;
 mod service;
 mod tip_accept;
@@ -46,6 +47,7 @@ pub use peers::{
     PeerInfo, PingAction,
 };
 pub use rbitcoin_mempool::MempoolGraphStats;
+pub use reactor::BlockingRegion;
 pub use seeds::{
     default_port, dns_seed_query_host, dns_seeds, fixed_seed_hosts, pick_seed_results,
     required_seed_services, resolve_all_seeds, resolve_dns_seeds, resolve_fixed_seeds,

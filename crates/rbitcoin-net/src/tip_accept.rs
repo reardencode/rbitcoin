@@ -41,13 +41,14 @@ pub(crate) fn on_tip_accept_thread() -> bool {
 
 fn erase_lifetime(job: Box<dyn FnOnce() + Send + '_>) -> Job {
     // SAFETY: `run_on_tip_accept` blocks on the result channel until `f`
-    // returns. `run_on_tip_accept_async` waits on a condvar in Drop of the
-    // future, which still holds the caller's borrows (`&self` on ChainHub).
+    // returns, so captured borrows outlive the job. The async path is `'static`
+    // and does not use this transmute.
     unsafe { std::mem::transmute::<Box<dyn FnOnce() + Send + '_>, Job>(job) }
 }
 
 /// Run `f` on `tip-accept`. Always enqueues (nested connect uses inner methods).
 pub(crate) fn run_on_tip_accept<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+    crate::reactor::assert_not_reactor("tip-accept wait");
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     let job = erase_lifetime(Box::new(move || {
         let _ = tx.send(panic::catch_unwind(AssertUnwindSafe(f)));
