@@ -546,6 +546,7 @@ async fn on_mempool_announce(
     let txid = ann.txid;
     let ann = ann.clone();
     let frames = match tokio::task::spawn_blocking(move || {
+        let _g = rbitcoin_net::BlockingRegion::enter();
         mempool_announce_frames(
             query.as_ref(),
             mempool.as_deref(),

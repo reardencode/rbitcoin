@@ -16,7 +16,8 @@ before 1.0).
   promote, package, and reorg strip no longer hold `inner` write across
   Query or script verify. Compact fill clones matching bodies only, not
   the live set. Dropping a `tip-accept` join detaches instead of
-  condvar-waiting on the worker.
+  condvar-waiting on the worker. Esplora WS announce and mempool HTTP
+  enter `BlockingRegion` on `spawn_blocking` (same assert as P2P).
 
 - **Leftover hop-dump is not cleared by the next head-resolve batch:**
   `clear_leftover_miss` wiped `diag=1` at the start of every TipOnly
