@@ -54,6 +54,31 @@ impl<'a> ValidationContext<'a> {
     }
 }
 
+const MAX_BLOCK_STRIPPED_SIZE: usize = 1_000_000;
+
+fn check_tx_local(tx: &Transaction, base_size: usize) -> Result<(), ConsensusError> {
+    if tx.input.is_empty() {
+        return Err(ConsensusError::BadTx("no inputs"));
+    }
+    if tx.output.is_empty() {
+        return Err(ConsensusError::BadTx("no outputs"));
+    }
+    if base_size > MAX_BLOCK_STRIPPED_SIZE {
+        return Err(ConsensusError::BadTx("bad-txns-oversize"));
+    }
+    for (i, inp) in tx.input.iter().enumerate() {
+        if !tx.is_coinbase() && inp.previous_output.is_null() {
+            return Err(ConsensusError::BadTx("bad-txns-prevout-null"));
+        }
+        for prev in &tx.input[..i] {
+            if prev.previous_output == inp.previous_output {
+                return Err(ConsensusError::BadTx("bad-txns-inputs-duplicate"));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Context-free / structural block checks (no UTXO / prevout).
 pub fn validate_block_structure(
     block: &Block,
@@ -140,6 +165,9 @@ pub fn validate_block_structure_with_pres(
         .saturating_add(tx_count_vi)
         .saturating_add(pres.iter().map(|p| p.total_size).sum());
     let weight_wu = (base.saturating_mul(3).saturating_add(total)) as u64;
+    if base > MAX_BLOCK_STRIPPED_SIZE {
+        return Err(ConsensusError::BadBlock("block stripped size too large"));
+    }
     if weight_wu > 4_000_000 {
         return Err(ConsensusError::BadBlock("block weight too large"));
     }
@@ -165,9 +193,7 @@ pub fn validate_block_structure_with_pres(
 
     const MAX_MONEY: u64 = 21_000_000 * 100_000_000;
     for (tx, p) in block.txdata.iter().zip(pres.iter()) {
-        if tx.output.is_empty() {
-            return Err(ConsensusError::BadTx("no outputs"));
-        }
+        check_tx_local(tx, p.base_size)?;
         for o in &tx.output {
             if o.value.to_sat() > MAX_MONEY {
                 return Err(ConsensusError::BadBlock("bad-txns-vout-toolarge"));

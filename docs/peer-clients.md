@@ -1,6 +1,6 @@
 # Peer full nodes: Hornet and satd
 
-Date: 2026-08-25. Research snapshot (Hornet `main`, satd `master`, public
+Date: 2026-09-04. Research snapshot (Hornet `main` @ `151462fa`, satd `master`, public
 docs). Analysis only at write time.
 
 **Owner of these notes:** this file. Ranked later-consideration items stay
@@ -19,7 +19,7 @@ Sources at write time:
 
 | Project | Tree / docs |
 |---------|-------------|
-| **Hornet** | [tobysharp/hornet](https://github.com/tobysharp/hornet), [docs/overview.md](https://github.com/tobysharp/hornet/blob/main/docs/overview.md), [spec.html](https://hornetnode.org/spec.html), arXiv [2509.15754](https://arxiv.org/abs/2509.15754) |
+| **Hornet** | [tobysharp/hornet](https://github.com/tobysharp/hornet) `main` @ [`151462fa`](https://github.com/tobysharp/hornet/commit/151462fa5ceece39c159674886dcfa6cfe9b1234), [docs/overview.md](https://github.com/tobysharp/hornet/blob/main/docs/overview.md), [spec.html](https://hornetnode.org/spec.html), [`spec.h`](https://github.com/tobysharp/hornet/blob/main/src/hornetlib/consensus/rules/spec.h), arXiv [2509.15754](https://arxiv.org/abs/2509.15754) |
 | **satd** | [epochbtc/satd](https://github.com/epochbtc/satd), [CORE_DIFFERENCES.md](https://github.com/epochbtc/satd/blob/master/CORE_DIFFERENCES.md), [E2E_TESTING.md](https://github.com/epochbtc/satd/blob/master/docs/E2E_TESTING.md), [`fuzz/fuzz_targets/block_differential.rs`](https://github.com/epochbtc/satd/blob/master/fuzz/fuzz_targets/block_differential.rs) |
 
 ---
@@ -29,7 +29,7 @@ Sources at write time:
 | | **rbitcoin** | **Hornet** | **satd** |
 |--|--|--|--|
 | Thesis | Relational **archive** (no UTXO), pure-Rust scripts, in-process Electrum/Esplora, map-free Linux IO | **Spec-first** C++ consensus + custom UTXO LSM; IBD as a demo of the spec | **Core drop-in** (UTXO + `blocks/` + `bitcoin.conf`) with extra APIs in one process |
-| Consensus | Independent Rust; Core JSON corpora + [`consensus-tests.md`](./consensus-tests.md); **no** `libbitcoinconsensus` | 34 named declarative rules in `spec.h` / DSL; isolated from storage | Rust engine **plus** C++ `libbitcoinconsensus` shadow |
+| Consensus | Independent Rust; Core JSON corpora + [`consensus-tests.md`](./consensus-tests.md); **no** `libbitcoinconsensus` | Named declarative rules in `spec.h` / DSL (published [spec.html](https://hornetnode.org/spec.html) H01–S09; unreleased `spec.h` merges S02 into S03); isolated from storage | Rust engine **plus** C++ `libbitcoinconsensus` shadow |
 | Store | Class A/B/C tables, spent annotations ([`SCHEMA.md`](../SCHEMA.md)) | Age-stratified UTXO LSM, `ChainTree` + sidecars | RocksDB coins + Core-shaped flat files |
 | IBD | Multi-peer, lookup→load→scripts→write ([`concurrency.md`](./concurrency.md)); default `--milestone 840000` | Single-peer concurrent UTXO pipeline; claims ~15 min assumevalid on 32 cores | “Swarm” parallel download + speculative verify |
 | Wallet APIs | Native Electrum + Esplora; SH optional and can **lag** tip ([`COMPAT.md`](../COMPAT.md)) | None yet | Native Electrum + Esplora + BIP 157; indexes **atomic** with `connect_block` |
@@ -75,23 +75,63 @@ We do **not** have one CI test that mines/broadcasts and asserts all three.
 Cheap, and it hits SH lag / mempool overlay bugs we already care about
 ([`concurrency.md`](./concurrency.md) Electrum/Esplora roles).
 
-### 3. Hornet’s published rule table as a checklist
+### 3. Hornet block-validation rules ↔ our tests
 
-[hornetnode.org/spec.html](https://hornetnode.org/spec.html) is 34
-invariants (H01–H06, L01–L13, C01–C07, S01–S09). We already own a similar
-matrix in [`consensus-tests.md`](./consensus-tests.md). Worth a one-pass
-**gap hunt**, then add missing **named rows there** (not a second matrix
-here). Candidates at write time:
+[hornetnode.org/spec.html](https://hornetnode.org/spec.html) is the published
+table (H01–H06, L01–L13, C01–C07, S01–S09). Hornet `main` `spec.h` @
+`151462fa` is the same graph except **S02 `ValidateInputPrevoutsCreated` is
+folded into S03** (`ValidateInputPrevoutsUnspent`: an input must reference a
+prevout that exists and is still unspent). Wording nits only elsewhere (H02
+“MUST achieve” vs “MUST NOT exceed”; H04 “strictly greater”; H05 `<= now+2h`).
 
-| Hornet ID | Rule | Notes |
-|-----------|------|--------|
-| **L03** | 1 000 000-byte **stripped** size | Distinct from 4 M WU (our S4) |
-| **C02** | Pre-SegWit block must not carry witness | |
-| **C06 / C07** | Witness nonce + witness merkle | We have commitment tests; confirm nonce/merkle are named |
-| **S04** | Total sigop **cost** 80 000 | They have `validate_sigop_costs_test.cpp` |
-| **S01** | BIP30 exceptions as explicit table rows | Fuzzamoto BIP30 cluster is closed; the *table* is still useful |
+This table is the Hornet checklist. Named rows for rules we own stay in
+[`consensus-tests.md`](./consensus-tests.md). Do not import Hornet DSL.
 
-Do not import Hornet DSL or their C++ `Rule{…}` array.
+Happy = accept at/under the limit. Boundary = exact limit accept + one-past
+reject (or the Core-equivalent edge). Tests live in the suites named in
+[`consensus-tests.md`](./consensus-tests.md) (`structure_rule_tests`,
+`header.rs` `median_time_past_tests`, `consensus_rules`, `finality_tests`,
+`sigop_cost_tests`). Named selector: `./scripts/test-hornet-rules.sh`.
+
+| ID | Hornet rule (`spec.h` / spec.html) | Happy | Boundary / reject |
+|----|-------------------------------------|-------|-------------------|
+| **H01** | Parent hash is a valid header | `header_and_spending_boundaries` (`validate_header` height 1) | `h2_rejects_bad_prev_link` |
+| **H02** | Header hash `<=` claimed target | same journey (regtest grind) | `h7_rejects_header_hash_above_target` (mainnet bits, nonce misses) |
+| **H03** | `nBits` matches difficulty adjust | same journey | `h5_regtest_rejects_wrong_bits`; testnet 20 min min-diff: `testnet_min_difficulty_after_20_minute_gap` |
+| **H04** | `time > MTP(11)` | journey: `mtp+1` accepts | journey + `h3_rejects_timestamp_not_after_mtp`: `time == mtp` rejects |
+| **H05** | `time <= now + 2h` | `h8_timestamp_exactly_two_hours_accepts_plus_one_rejects` (`now+7200`) | same test (`now+7201`); `h8_rejects_timestamp_too_far_in_future` |
+| **H06** | Version not retired by BIP34/66/65 | `h9_version_floors_at_bip34_66_65` (v2 @ BIP34, v3 @ BIP66, v4 @ BIP65 / regtest h=1) | same test (v1 @ BIP34, v2 @ BIP66, v3 @ BIP65 / regtest v3) |
+| **L01** | ≥1 transaction | `s1_rejects_empty_txdata` (coinbase accepts) | same (`txdata` empty) |
+| **L02** | Merkle root matches unique txid tree | `s6_rejects_merkle_root_mismatch` (matching accepts) | same; odd-leaf: `merkle_root_bytes_single_and_odd` |
+| **L03** | Stripped size `<= 1_000_000` | `s14_stripped_size_1_000_000_accepts_1_000_001_rejects` | same (`1_000_001`) |
+| **L04** | First tx is the only coinbase | `s2_rejects_non_coinbase_first` (coinbase then spend accepts) | same; `s3_rejects_second_coinbase` |
+| **L05** | Legacy sigop **count** `<= 20_000` | `s11_rejects_excessive_legacy_sigops` (`20_000`) | same (`20_001`) |
+| **L06** | ≥1 input | `s15_rejects_empty_vin` (one input accepts) | same (empty `vin` on non-coinbase) |
+| **L07** | ≥1 output | `s13_rejects_coinbase_empty_vout` (one output accepts) | same; `c1_non_coinbase_empty_outputs_rejected` |
+| **L08** | Tx stripped size `<= 1_000_000` | `s16_tx_stripped_size_1_000_000_accepts_1_000_001_rejects` | same (`check_tx_local`) |
+| **L09** | Output amounts non-negative | `s10_rejects_vout_toolarge` (`Amount::ZERO`) | rust-bitcoin `Amount` is `u64` — negative is unrepresentable |
+| **L10** | Output sum `<= 21e6` BTC | `s10_rejects_vout_toolarge` (exactly `MAX_MONEY`) | same (`MAX_MONEY+1`); `s10_rejects_txouttotal_toolarge` |
+| **L11** | No duplicate outpoints in a tx | `s17_rejects_duplicate_outpoints` (unique inputs accept) | same (two identical prevouts) |
+| **L12** | Coinbase scriptSig length `2..=100` | `s9_rejects_bad_cb_length_short` / `_long` (2 and 100 accept) | same (1 and 101) |
+| **L13** | Non-coinbase inputs non-null | `s18_rejects_non_coinbase_null_prevout` (non-null accepts) | same (null among two inputs) |
+| **C01** | All txs final at height / locktime | journey: `locktime=100` at height 101; `finality_tests::final_when_locktime_zero` | journey: `locktime==height`; `height_locktime_not_final_until_height` (`lt < height`) |
+| **C02** | Pre-SegWit block has no witness | `s8_mainnet_rejects_witness_before_segwit` (no-witness accepts) | same (witness before segwit) |
+| **C03** | Weight `<= 4_000_000` WU | `s4_weight_4_000_000_accepts_4_000_001_rejects` (no-witness 4 M and witness 4 M) | same (`4_000_001` via +1 witness byte); `s4_rejects_overweight_block` |
+| **C04** | BIP34 coinbase height push | `s7_rejects_bip34_missing_after_activation_signet` (height push at activation) | same; `s7_*` activation / pre-activation |
+| **C05** | Witness data ⇒ commitment | `s8_rejects_missing_witness_commitment` (no witness, no commitment) | same (witness, no commitment) |
+| **C06** | Commitment ⇒ 32-byte nonce | `s8_accepts_witness_commitment_with_reserved_value` | `s8_rejects_empty_or_multi_item_coinbase_witness_reserved` |
+| **C07** | Commitment matches witness merkle + nonce | same accept test (`apply_witness_commitment`) | `s8_rejects_wrong_witness_commitment` |
+| **S01** | BIP30 unique unspent creates | every connecting block; exception table `is_bip30_repeat_matches_core` (91842 / 91880) | `bip30_rejects_unspent_connected_sibling` |
+| **S02** | Prevout exists *(merged into S03 in `spec.h`)* | journey OP_TRUE spend of height-1 coinbase | journey: random txid → `MissingPrevout`; `c8_same_block_child_before_parent_rejected` |
+| **S03** | Prevout still unspent | journey first spend | journey second spend of same outpoint; `c2_same_block_double_spend_rejected` |
+| **S04** | Sigop **cost** `<= 80_000` | `s11_rejects_excessive_legacy_sigops` (20 000×CHECKSIG) | same (`20_001` → cost 80 004); `sigop_cost_tests::*` (P2SH/witness) |
+| **S05** | Coinbase `<=` subsidy + fees | journey exact 50 BTC empty pads; `p1_block_subsidy_halvings` | journey `subsidy+1` sat; `c7_coinbase_excess_subsidy_rejected` |
+| **S06** | Tx `out <= in` | journey `in==out` (zero fee) | journey `in+1`; `c6_value_in_less_than_out_rejected` |
+| **S07** | Scripts succeed | journey anyone-can-spend `OP_TRUE`; Core `script_tests` / `tx_valid` | Core `tx_invalid` / `script_tests` reject rows |
+| **S08** | BIP68 relative finality | journey `nSequence=10` at height 101; `bip68_height_relative_lock` | journey `nSequence=200` at 101; `finality_tests` 109/110 edge |
+| **S09** | Coinbase maturity 100 | journey spend at height 101 (`created+100`) | journey spend at height 100; `c5_immature_coinbase_spend_rejected` |
+
+Connect-path journey: `rbitcoin-test` `header_and_spending_boundaries`.
 
 ### 4. satd E2E flake-gate
 
@@ -161,11 +201,11 @@ only when scheduling a slice.
 |-----:|------|--------|----------|
 | 1 | In-tree **verdict-only** differential fuzz vs Docker `bitcoind` (harness-vs-finding exit codes) | satd `block_differential` | **Q-30** / [`TESTING.md`](../TESTING.md) |
 | 2 | One cross-surface scenario: Esplora `POST /tx` → Electrum history + RPC mempool | satd E2E | scenarios / Electrum–Esplora tests |
-| 3 | Hornet spec.html vs [`consensus-tests.md`](./consensus-tests.md): add missing named rows | Hornet | `consensus-tests.md` |
+| — | ~~Hornet spec.html vs consensus-tests.md gap hunt~~ **done 2026-09-04** (table in this file; pins in `structure_rule_tests` / `header.rs` / `consensus_rules`) | Hornet | this file + [`consensus-tests.md`](./consensus-tests.md) |
 | 4 | `/healthz` (and maybe `/readyz`) on the node listen; Prometheus later as a flag | satd | node / [`OPERATOR.md`](../OPERATOR.md) |
 | 5 | BIP352 serve: hash-bind tweak batches so a client can audit the stream | satd row idea on our tweaks path | Electrum tweaks / [`OPERATOR.md`](../OPERATOR.md) |
 
-1–3 are tests. 4–5 are small product. None require becoming a UTXO node or a
+1–2 are remaining tests. 4–5 are small product. None require becoming a UTXO node or a
 Core conf clone.
 
 ---

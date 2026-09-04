@@ -2,16 +2,17 @@
 
 use super::{
     apply_witness_commitment, bip16_active_from_prev_mtp, bip34_height_script, block_subsidy,
-    is_p2sh_script, is_p2wpkh_program, is_p2wsh_program, last_script_push, merkle_root_bytes,
-    script_sigop_count, validate_block_structure, validate_block_structure_hashed,
-    validate_block_structure_with_pres, witness_commitment_script, ScriptCheckJob,
-    ValidationContext, BIP16_EXCEPTION_MAINNET,
+    check_tx_local, is_p2sh_script, is_p2wpkh_program, is_p2wsh_program, last_script_push,
+    merkle_root_bytes, script_sigop_count, validate_block_structure,
+    validate_block_structure_hashed, validate_block_structure_with_pres, witness_commitment_script,
+    ScriptCheckJob, ValidationContext, BIP16_EXCEPTION_MAINNET, MAX_BLOCK_STRIPPED_SIZE,
 };
 use crate::error::ConsensusError;
 use crate::milestone::Milestone;
 use crate::params::ChainParams;
 use bitcoin::absolute::LockTime;
 use bitcoin::block::{Header, Version};
+use bitcoin::consensus::encode::VarInt;
 use bitcoin::hashes::Hash;
 use bitcoin::script::ScriptBuf;
 use bitcoin::transaction::Version as TxVersion;
@@ -198,6 +199,140 @@ fn assert_bad_block(err: ConsensusError, needle: &str) {
     }
 }
 
+fn assert_bad_tx(err: ConsensusError, needle: &str) {
+    match err {
+        ConsensusError::BadTx(s) => {
+            assert!(
+                s.contains(needle),
+                "expected BadTx containing {needle:?}, got {s:?}"
+            );
+        }
+        other => panic!("expected BadTx({needle:?}), got {other:?}"),
+    }
+}
+
+fn stripped_size(block: &Block) -> usize {
+    let n = block.txdata.len();
+    80usize + VarInt(n as u64).size() + block.txdata.iter().map(|t| t.base_size()).sum::<usize>()
+}
+
+fn weight_wu(block: &Block) -> u64 {
+    let n = block.txdata.len();
+    let vi = VarInt(n as u64).size();
+    let base = 80 + vi + block.txdata.iter().map(|t| t.base_size()).sum::<usize>();
+    let total = 80 + vi + block.txdata.iter().map(|t| t.total_size()).sum::<usize>();
+    (base.saturating_mul(3).saturating_add(total)) as u64
+}
+
+fn set_coinbase_pad(block: &mut Block, data_len: usize) {
+    const COMMIT_MAGIC: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+    let mut spk = Vec::with_capacity(data_len.saturating_add(6));
+    spk.push(0x6a);
+    spk.push(0x4e);
+    spk.extend_from_slice(&(data_len as u32).to_le_bytes());
+    spk.extend(std::iter::repeat_n(0x61, data_len));
+    let pad = TxOut {
+        value: Amount::ZERO,
+        script_pubkey: ScriptBuf::from_bytes(spk),
+    };
+    let pad_at = block.txdata[0].output.iter().position(|o| {
+        let b = o.script_pubkey.as_bytes();
+        b.first() == Some(&0x6a) && (b.len() < 6 || b[..6] != COMMIT_MAGIC)
+    });
+    match pad_at {
+        Some(i) => block.txdata[0].output[i] = pad,
+        None => block.txdata[0].output.push(pad),
+    }
+    block.header.merkle_root = block.compute_merkle_root().unwrap();
+}
+
+fn refresh_witness_commitment(block: &mut Block) {
+    let reserved = [0u8; 32];
+    block.txdata[0].input[0].witness = Witness::from_slice(&[reserved.as_slice()]);
+    let wtxids = block
+        .txdata
+        .iter()
+        .skip(1)
+        .map(|tx| tx.compute_wtxid().to_byte_array());
+    let spk = witness_commitment_script(wtxids, &reserved);
+    const MAGIC: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+    if let Some(out) = block.txdata[0].output.iter_mut().rev().find(|o| {
+        let b = o.script_pubkey.as_bytes();
+        b.len() >= 38 && b[..6] == MAGIC
+    }) {
+        out.script_pubkey = ScriptBuf::from_bytes(spk);
+    } else {
+        block.txdata[0].output.push(TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::from_bytes(spk),
+        });
+    }
+    block.header.merkle_root = block.compute_merkle_root().unwrap();
+}
+
+fn extend_spend_witness_one_byte(block: &mut Block) {
+    let items: Vec<Vec<u8>> = block.txdata[1].input[0]
+        .witness
+        .iter()
+        .map(|s| {
+            let mut v = s.to_vec();
+            v.push(0xcd);
+            v
+        })
+        .collect();
+    block.txdata[1].input[0].witness = Witness::from_slice(&items);
+    refresh_witness_commitment(block);
+}
+
+fn pad_stripped_to(block: &mut Block, target: usize) {
+    let before = stripped_size(block);
+    assert!(
+        before < target,
+        "fixture already {before}, want pad to {target}"
+    );
+    let guess = target.saturating_sub(before).saturating_sub(24).max(1);
+    set_coinbase_pad(block, guess);
+    let got = stripped_size(block);
+    if got != target {
+        let adj = if got < target {
+            guess + (target - got)
+        } else {
+            guess.saturating_sub(got - target)
+        };
+        set_coinbase_pad(block, adj);
+    }
+    assert_eq!(
+        stripped_size(block),
+        target,
+        "stripped pad missed target (before {before})"
+    );
+}
+
+fn padded_spend(data_len: usize) -> Transaction {
+    let mut spk = Vec::with_capacity(data_len.saturating_add(6));
+    spk.push(0x6a);
+    spk.push(0x4e);
+    spk.extend_from_slice(&(data_len as u32).to_le_bytes());
+    spk.extend(std::iter::repeat_n(0x61, data_len));
+    Transaction {
+        version: TxVersion::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: bitcoin::Txid::from_byte_array([7; 32]),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: ScriptBuf::from_bytes(spk),
+        }],
+    }
+}
+
 /// Unspent connected sibling + same create txid is BIP30 (not the 91842/91880
 /// mainnet grandfather). Spentness is durable annotate; this pin is the reject.
 #[test]
@@ -278,6 +413,7 @@ fn bip30_rejects_unspent_connected_sibling() {
 
 #[test]
 fn s1_rejects_empty_txdata() {
+    validate_block_structure(&block_with(vec![coinbase(0)]), &ctx_h(0)).unwrap();
     let b = block_with(vec![]);
     let err = validate_block_structure(&b, &ctx_h(0)).unwrap_err();
     assert_bad_block(err, "no transactions");
@@ -285,6 +421,11 @@ fn s1_rejects_empty_txdata() {
 
 #[test]
 fn s2_rejects_non_coinbase_first() {
+    validate_block_structure(
+        &block_with(vec![coinbase(0), non_coinbase_spend(1)]),
+        &ctx_h(0),
+    )
+    .unwrap();
     let b = block_with(vec![non_coinbase_spend(1)]);
     let err = validate_block_structure(&b, &ctx_h(1)).unwrap_err();
     assert_bad_block(err, "first tx not coinbase");
@@ -331,7 +472,46 @@ fn s4_rejects_overweight_block() {
         b.weight().to_wu()
     );
     let err = validate_block_structure(&b, &ctx_h(1)).unwrap_err();
-    assert_bad_block(err, "weight");
+    match err {
+        ConsensusError::BadBlock(s) => {
+            assert!(
+                s.contains("weight") || s.contains("stripped"),
+                "expected weight or stripped reject, got {s:?}"
+            );
+        }
+        other => panic!("expected BadBlock, got {other:?}"),
+    }
+}
+
+#[test]
+fn s4_weight_4_000_000_accepts_4_000_001_rejects() {
+    let mut ok = block_with(vec![coinbase(0)]);
+    pad_stripped_to(&mut ok, MAX_BLOCK_STRIPPED_SIZE);
+    assert_eq!(weight_wu(&ok), 4_000_000);
+    validate_block_structure(&ok, &ctx_h(0)).expect("exactly 4_000_000 WU");
+
+    let mut spend = non_coinbase_spend(11);
+    spend.input[0].witness = Witness::from_slice(&[vec![0xab]]);
+    let mut wblock = block_with(vec![coinbase(1), spend]);
+    apply_witness_commitment(&mut wblock);
+    while !weight_wu(&wblock).is_multiple_of(4) {
+        extend_spend_witness_one_byte(&mut wblock);
+    }
+    let w = weight_wu(&wblock);
+    assert!(w < 4_000_000);
+    let gap = 4_000_000 - w;
+    let target = stripped_size(&wblock) + (gap / 4) as usize;
+    pad_stripped_to(&mut wblock, target);
+    assert_eq!(weight_wu(&wblock), 4_000_000);
+    validate_block_structure(&wblock, &ctx_h(1)).expect("witness block at 4_000_000 WU");
+
+    extend_spend_witness_one_byte(&mut wblock);
+    assert_eq!(weight_wu(&wblock), 4_000_001);
+    assert!(stripped_size(&wblock) <= MAX_BLOCK_STRIPPED_SIZE);
+    assert_bad_block(
+        validate_block_structure(&wblock, &ctx_h(1)).unwrap_err(),
+        "weight",
+    );
 }
 
 #[test]
@@ -344,9 +524,11 @@ fn s5_rejects_duplicate_txid() {
 
 #[test]
 fn s6_rejects_merkle_root_mismatch() {
-    let mut b = block_with(vec![coinbase(1)]);
+    let good = block_with(vec![coinbase(0), non_coinbase_spend(1)]);
+    validate_block_structure(&good, &ctx_h(0)).unwrap();
+    let mut b = good;
     b.header.merkle_root = TxMerkleNode::from_byte_array([0x11; 32]);
-    let err = validate_block_structure(&b, &ctx_h(1)).unwrap_err();
+    let err = validate_block_structure(&b, &ctx_h(0)).unwrap_err();
     assert_bad_block(err, "merkle");
 }
 
@@ -354,9 +536,13 @@ fn s6_rejects_merkle_root_mismatch() {
 fn s7_rejects_bip34_missing_after_activation_signet() {
     // Signet activates BIP34 at height 1 (rust-bitcoin Params::SIGNET).
     let p = Box::leak(Box::new(ChainParams::signet()));
-    let ctx = ValidationContext::at(p, Height(1), Milestone::NONE);
-    let mut cb = coinbase(1);
-    cb.input[0].script_sig = ScriptBuf::new(); // strip BIP34
+    let h = p.btc.bip34_height;
+    assert_eq!(h, 1);
+    let ctx = ValidationContext::at(p, Height(h), Milestone::NONE);
+    validate_block_structure(&block_with(vec![coinbase(h)]), &ctx)
+        .expect("BIP34 height push at activation");
+    let mut cb = coinbase(h);
+    cb.input[0].script_sig = ScriptBuf::from_bytes(vec![0x00, 0x00]);
     let b = block_with(vec![cb]);
     let err = validate_block_structure(&b, &ctx).unwrap_err();
     assert_bad_block(err, "bip34");
@@ -412,6 +598,8 @@ fn s7_regtest_does_not_activate_bip34_early() {
 
 #[test]
 fn s8_rejects_missing_witness_commitment() {
+    validate_block_structure(&block_with(vec![coinbase(1)]), &ctx_h(1))
+        .expect("no witness, no commitment");
     let mut spend = non_coinbase_spend(9);
     // Non-empty witness forces BIP141 commitment path.
     spend.input[0].witness = Witness::from_slice(&[vec![0x01]]);
@@ -445,7 +633,9 @@ fn s8_rejects_wrong_witness_commitment() {
 #[test]
 fn s8_mainnet_rejects_witness_before_segwit() {
     let p = Box::leak(Box::new(ChainParams::mainnet()));
+    assert!(!p.segwit_active_at(1));
     let ctx = ValidationContext::at(p, Height(1), Milestone::NONE);
+    validate_block_structure(&block_with(vec![coinbase(1)]), &ctx).unwrap();
     let mut spend = non_coinbase_spend(10);
     spend.input[0].witness = Witness::from_slice(&[vec![0x01]]);
     let mut cb = coinbase(1);
@@ -641,6 +831,9 @@ fn p3_default_milestone_heights() {
 
 #[test]
 fn s9_rejects_bad_cb_length_short() {
+    let mut two = coinbase(0);
+    two.input[0].script_sig = ScriptBuf::from_bytes(vec![0x00, 0x00]);
+    validate_block_structure(&block_with(vec![two]), &ctx_h(0)).unwrap();
     let mut cb = coinbase(0);
     cb.input[0].script_sig = ScriptBuf::from_bytes(vec![0x01]); // len 1
     let b = block_with(vec![cb]);
@@ -650,6 +843,9 @@ fn s9_rejects_bad_cb_length_short() {
 
 #[test]
 fn s9_rejects_bad_cb_length_long() {
+    let mut hundred = coinbase(0);
+    hundred.input[0].script_sig = ScriptBuf::from_bytes(vec![0x01; 100]);
+    validate_block_structure(&block_with(vec![hundred]), &ctx_h(0)).unwrap();
     let mut cb = coinbase(0);
     cb.input[0].script_sig = ScriptBuf::from_bytes(vec![0x01; 101]);
     let b = block_with(vec![cb]);
@@ -659,9 +855,15 @@ fn s9_rejects_bad_cb_length_long() {
 
 #[test]
 fn s10_rejects_vout_toolarge() {
+    const MAX_MONEY: u64 = 21_000_000 * 100_000_000;
+    let mut zero = coinbase(0);
+    zero.output[0].value = Amount::ZERO;
+    validate_block_structure(&block_with(vec![zero]), &ctx_h(0)).unwrap();
+    let mut ok = coinbase(0);
+    ok.output[0].value = Amount::from_sat(MAX_MONEY);
+    validate_block_structure(&block_with(vec![ok]), &ctx_h(0)).expect("exactly MAX_MONEY");
     let mut cb = coinbase(0);
-    // MAX_MONEY + 1 sat.
-    cb.output[0].value = Amount::from_sat(21_000_000 * 100_000_000 + 1);
+    cb.output[0].value = Amount::from_sat(MAX_MONEY + 1);
     let b = block_with(vec![cb]);
     let err = validate_block_structure(&b, &ctx_h(0)).unwrap_err();
     assert_bad_block(err, "toolarge");
@@ -669,6 +871,7 @@ fn s10_rejects_vout_toolarge() {
 
 #[test]
 fn s13_rejects_coinbase_empty_vout() {
+    validate_block_structure(&block_with(vec![coinbase(0)]), &ctx_h(0)).unwrap();
     let mut cb = coinbase(0);
     cb.output.clear();
     let b = block_with(vec![cb]);
@@ -682,6 +885,9 @@ fn s13_rejects_coinbase_empty_vout() {
 
 #[test]
 fn s11_rejects_excessive_legacy_sigops() {
+    let mut ok = coinbase(0);
+    ok.output[0].script_pubkey = ScriptBuf::from_bytes(vec![0xac; 20_000]);
+    validate_block_structure(&block_with(vec![ok]), &ctx_h(0)).expect("20_000 legacy sigops");
     let mut cb = coinbase(0);
     // 20_001 × OP_CHECKSIG × WITNESS_SCALE(4) = 80_004 > MAX 80_000.
     cb.output[0].script_pubkey = ScriptBuf::from_bytes(vec![0xac; 20_001]);
@@ -1927,4 +2133,151 @@ fn script_job_shared_tx_is_wire_pointer() {
         &block.txdata[1] as *const Transaction
     ));
     assert_eq!(job.txid, tid);
+}
+
+#[test]
+fn s14_stripped_size_1_000_000_accepts_1_000_001_rejects() {
+    let mut ok = block_with(vec![coinbase(0)]);
+    pad_stripped_to(&mut ok, MAX_BLOCK_STRIPPED_SIZE);
+    assert_eq!(stripped_size(&ok), MAX_BLOCK_STRIPPED_SIZE);
+    assert_eq!(weight_wu(&ok), 4_000_000);
+    validate_block_structure(&ok, &ctx_h(0)).expect("exactly 1_000_000 stripped");
+
+    let mut over = block_with(vec![coinbase(0)]);
+    pad_stripped_to(&mut over, MAX_BLOCK_STRIPPED_SIZE + 1);
+    assert_eq!(stripped_size(&over), MAX_BLOCK_STRIPPED_SIZE + 1);
+    assert_bad_block(
+        validate_block_structure(&over, &ctx_h(0)).unwrap_err(),
+        "stripped",
+    );
+}
+
+#[test]
+fn s15_rejects_empty_vin() {
+    validate_block_structure(
+        &block_with(vec![coinbase(0), non_coinbase_spend(1)]),
+        &ctx_h(0),
+    )
+    .unwrap();
+    let empty = Transaction {
+        version: TxVersion::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![],
+        output: vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    assert_bad_tx(
+        validate_block_structure(&block_with(vec![coinbase(0), empty]), &ctx_h(0)).unwrap_err(),
+        "no inputs",
+    );
+}
+
+#[test]
+fn s16_tx_stripped_size_1_000_000_accepts_1_000_001_rejects() {
+    let mut lo = 0usize;
+    let mut hi = MAX_BLOCK_STRIPPED_SIZE;
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if padded_spend(mid).base_size() < MAX_BLOCK_STRIPPED_SIZE {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    let mut data_ok = lo;
+    while padded_spend(data_ok).base_size() > MAX_BLOCK_STRIPPED_SIZE {
+        data_ok -= 1;
+    }
+    while padded_spend(data_ok).base_size() < MAX_BLOCK_STRIPPED_SIZE {
+        data_ok += 1;
+    }
+    let ok = padded_spend(data_ok);
+    assert_eq!(ok.base_size(), MAX_BLOCK_STRIPPED_SIZE);
+    check_tx_local(&ok, ok.base_size()).expect("tx stripped == 1_000_000");
+
+    let over = padded_spend(data_ok + 1);
+    assert!(over.base_size() > MAX_BLOCK_STRIPPED_SIZE);
+    assert_bad_tx(
+        check_tx_local(&over, over.base_size()).unwrap_err(),
+        "oversize",
+    );
+}
+
+#[test]
+fn s17_rejects_duplicate_outpoints() {
+    validate_block_structure(
+        &block_with(vec![coinbase(0), non_coinbase_spend(1)]),
+        &ctx_h(0),
+    )
+    .unwrap();
+    let op = OutPoint {
+        txid: bitcoin::Txid::from_byte_array([3; 32]),
+        vout: 0,
+    };
+    let dup = Transaction {
+        version: TxVersion::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![
+            TxIn {
+                previous_output: op,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            },
+            TxIn {
+                previous_output: op,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            },
+        ],
+        output: vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    assert_bad_tx(
+        validate_block_structure(&block_with(vec![coinbase(0), dup]), &ctx_h(0)).unwrap_err(),
+        "duplicate",
+    );
+}
+
+#[test]
+fn s18_rejects_non_coinbase_null_prevout() {
+    validate_block_structure(
+        &block_with(vec![coinbase(0), non_coinbase_spend(1)]),
+        &ctx_h(0),
+    )
+    .unwrap();
+    let mixed = Transaction {
+        version: TxVersion::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![
+            TxIn {
+                previous_output: OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([4; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            },
+            TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            },
+        ],
+        output: vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    assert_bad_tx(
+        validate_block_structure(&block_with(vec![coinbase(0), mixed]), &ctx_h(0)).unwrap_err(),
+        "prevout-null",
+    );
 }
