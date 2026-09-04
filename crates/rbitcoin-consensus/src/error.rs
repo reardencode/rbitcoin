@@ -79,7 +79,9 @@ pub fn block_reject_reason(err: &ConsensusError) -> String {
     match err {
         ConsensusError::BadTx("not final" | "bad-txns-nonfinal") => "bad-txns-nonfinal".into(),
         ConsensusError::BadTx(s) => (*s).into(),
-        ConsensusError::BadBlock("no transactions") => "bad-blk-length".into(),
+        ConsensusError::BadBlock("no transactions" | "block stripped size too large") => {
+            "bad-blk-length".into()
+        }
         ConsensusError::BadBlock("first tx not coinbase") => "bad-cb-missing".into(),
         ConsensusError::BadBlock("coinbase not first") => "bad-txns-duplicate".into(),
         ConsensusError::BadBlock("duplicate txid") => "bad-txns-duplicate".into(),
@@ -189,6 +191,10 @@ mod tests {
         );
         assert_eq!(
             block_reject_reason(&ConsensusError::BadBlock("no transactions")),
+            "bad-blk-length"
+        );
+        assert_eq!(
+            block_reject_reason(&ConsensusError::BadBlock("block stripped size too large")),
             "bad-blk-length"
         );
         assert_eq!(

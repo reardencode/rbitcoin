@@ -5,14 +5,14 @@
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, BlockHash, CompactTarget};
 use rbitcoin_consensus::{
-    accept_and_connect_block, block_subsidy, expected_next_bits, median_time_past,
+    accept_and_connect_block, block_subsidy, expected_next_bits, genesis_block, median_time_past,
     validate_block_connect, validate_header, ChainParams, Checkpoint, ConsensusError, Milestone,
     ValidationContext,
 };
 use rbitcoin_primitives::Height;
 use rbitcoin_query::Query;
 use rbitcoin_test::mine::{mine_regtest_block, regtest_genesis, spend_anyone_can_spend};
-use rbitcoin_test::TestDatadir;
+use rbitcoin_test::{pad_empty_from, TestDatadir};
 
 fn regtest_q() -> (TestDatadir, Query, ChainParams) {
     let td = TestDatadir::new().unwrap();
@@ -413,4 +413,169 @@ fn c8_same_block_parent_before_child_ok() {
     accept_and_connect_block(&q, &params, Height(h + 1), &good, Milestone::NONE)
         .expect("parent-before-child same-block must connect");
     assert_eq!(q.tip_height(), Some(Height(h + 1)));
+}
+
+fn grind_pow(block: &mut bitcoin::Block) {
+    let target = bitcoin::Target::from_compact(block.header.bits);
+    for nonce in 0..u32::MAX {
+        block.header.nonce = nonce;
+        if block.header.validate_pow(target).is_ok() {
+            return;
+        }
+    }
+    panic!("failed to grind regtest pow");
+}
+
+#[test]
+fn h02_rejects_header_hash_above_target() {
+    let (_td, q, params) = {
+        let td = TestDatadir::new().unwrap();
+        let q = Query::open_or_create(td.store_path()).unwrap();
+        let params = ChainParams::mainnet();
+        (td, q, params)
+    };
+    let g = genesis_block(&params);
+    accept_and_connect_block(&q, &params, Height::GENESIS, &g, Milestone::NONE).unwrap();
+    let mut h = g.header;
+    h.prev_blockhash = g.block_hash();
+    h.time = g.header.time + 600;
+    h.version = bitcoin::block::Version::from_consensus(1);
+    h.nonce = 0;
+    let expected = expected_next_bits(&q, &params, Height(1), h.time).unwrap();
+    h.bits = expected;
+    if h.validate_pow(bitcoin::Target::from_compact(h.bits))
+        .is_ok()
+    {
+        h.nonce = h.nonce.wrapping_add(1);
+    }
+    let err = validate_header(&q, &params, Height(1), &h).unwrap_err();
+    assert!(
+        matches!(err, ConsensusError::InvalidPow),
+        "expected InvalidPow, got {err:?}"
+    );
+}
+
+#[test]
+fn hornet_header_and_spending_boundaries() {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::Sequence;
+
+    let (_td, q, params) = regtest_q();
+    let g = regtest_genesis();
+    accept_and_connect_block(&q, &params, Height::GENESIS, &g, Milestone::NONE).unwrap();
+
+    let b1 = mine_regtest_block(g.block_hash(), g.header.time + 600, 1, vec![]);
+    validate_header(&q, &params, Height(1), &b1.header)
+        .expect("H01/H02/H03: valid parent, pow, bits");
+    accept_and_connect_block(&q, &params, Height(1), &b1, Milestone::NONE).unwrap();
+    let cb_txid = b1.txdata[0].compute_txid();
+
+    let mut tip = b1.block_hash();
+    let mut time = b1.header.time;
+    (tip, time) = pad_empty_from(&q, &params, tip, time, 2, 11);
+
+    let mtp = median_time_past(&q, Height(11)).unwrap();
+    let mut eq = mine_regtest_block(tip, mtp, 12, vec![]);
+    let expected = expected_next_bits(&q, &params, Height(12), eq.header.time).unwrap();
+    eq.header.bits = expected;
+    grind_pow(&mut eq);
+    let err = validate_header(&q, &params, Height(12), &eq.header).unwrap_err();
+    assert!(
+        matches!(err, ConsensusError::BadHeader(s) if s.contains("median-time")),
+        "H04 time==mtp: {err:?}"
+    );
+
+    let mut after = mine_regtest_block(tip, mtp + 1, 12, vec![]);
+    after.header.bits = expected_next_bits(&q, &params, Height(12), after.header.time).unwrap();
+    grind_pow(&mut after);
+    validate_header(&q, &params, Height(12), &after.header).expect("H04 time==mtp+1");
+
+    (tip, time) = pad_empty_from(&q, &params, tip, time, 12, 99);
+    assert_eq!(q.tip_height(), Some(Height(99)));
+
+    let immature = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(49_0000_0000));
+    let bad100 = mine_regtest_block(tip, time + 600, 100, vec![immature]);
+    let err = accept_and_connect_block(&q, &params, Height(100), &bad100, Milestone::NONE);
+    assert!(
+        matches!(err, Err(ConsensusError::BadTx(s)) if s.contains("immature")),
+        "S09 height 100: {err:?}"
+    );
+
+    (tip, time) = pad_empty_from(&q, &params, tip, time, 100, 100);
+    assert_eq!(q.tip_height(), Some(Height(100)));
+    time += 600;
+
+    let missing = spend_anyone_can_spend(
+        bitcoin::Txid::from_byte_array([0xab; 32]),
+        0,
+        Amount::from_sat(1),
+    );
+    let miss_block = mine_regtest_block(tip, time, 101, vec![missing]);
+    let err = accept_and_connect_block(&q, &params, Height(101), &miss_block, Milestone::NONE);
+    assert!(
+        matches!(err, Err(ConsensusError::MissingPrevout))
+            || matches!(err, Err(ConsensusError::BadTx(s)) if s.contains("missing")),
+        "S02 missing prevout: {err:?}"
+    );
+
+    let mut nonfinal = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(49_0000_0000));
+    nonfinal.lock_time = LockTime::from_height(101).unwrap();
+    nonfinal.input[0].sequence = Sequence::ZERO;
+    let nf_block = mine_regtest_block(tip, time, 101, vec![nonfinal]);
+    let err = accept_and_connect_block(&q, &params, Height(101), &nf_block, Milestone::NONE);
+    assert!(
+        matches!(err, Err(ConsensusError::BadTx(s)) if s.contains("nonfinal") || s.contains("not final")),
+        "C01 locktime==height: {err:?}"
+    );
+
+    let mut csv_early = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(49_0000_0000));
+    csv_early.version = TxVersion::TWO;
+    csv_early.input[0].sequence = Sequence::from_consensus(200);
+    let csv_block = mine_regtest_block(tip, time, 101, vec![csv_early]);
+    let err = accept_and_connect_block(&q, &params, Height(101), &csv_block, Milestone::NONE);
+    assert!(
+        err.is_err(),
+        "S08 relative lock 200 at height 101 must reject, got {err:?}"
+    );
+
+    let over = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(50_0000_0000 + 1));
+    let over_block = mine_regtest_block(tip, time, 101, vec![over]);
+    let err = accept_and_connect_block(&q, &params, Height(101), &over_block, Milestone::NONE);
+    assert!(
+        matches!(err, Err(ConsensusError::BadTx(s)) if s.contains("in < out")),
+        "S06 in < out: {err:?}"
+    );
+
+    let mut excess = mine_regtest_block(tip, time, 101, vec![]);
+    excess.txdata[0].output[0].value = Amount::from_sat(50_0000_0000 + 1);
+    excess.header.merkle_root = excess.compute_merkle_root().unwrap();
+    grind_pow(&mut excess);
+    let err = accept_and_connect_block(&q, &params, Height(101), &excess, Milestone::NONE);
+    assert!(
+        matches!(err, Err(ConsensusError::BadBlock(s)) if s.contains("coinbase excess")),
+        "S05 subsidy+1: {err:?}"
+    );
+
+    let mut good_spend = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(50_0000_0000));
+    good_spend.version = TxVersion::TWO;
+    good_spend.lock_time = LockTime::from_height(100).unwrap();
+    good_spend.input[0].sequence = Sequence::from_consensus(10);
+    let good = mine_regtest_block(tip, time, 101, vec![good_spend]);
+    accept_and_connect_block(&q, &params, Height(101), &good, Milestone::NONE).expect(
+        "S05/S06/S07/S08/S09/C01: exact subsidy, in==out, OP_TRUE, seq=10, mature, locktime 100",
+    );
+    assert_eq!(q.tip_height(), Some(Height(101)));
+
+    let spent_again = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(1));
+    let again = mine_regtest_block(good.block_hash(), time + 600, 102, vec![spent_again]);
+    let err = accept_and_connect_block(&q, &params, Height(102), &again, Milestone::NONE);
+    assert!(
+        matches!(err, Err(ConsensusError::PrevoutSpent))
+            || matches!(
+                err,
+                Err(ConsensusError::BadTx(s)) if s.contains("double spend") || s.contains("spent")
+            ),
+        "S03 already spent: {err:?}"
+    );
 }

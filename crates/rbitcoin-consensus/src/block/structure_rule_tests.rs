@@ -331,7 +331,15 @@ fn s4_rejects_overweight_block() {
         b.weight().to_wu()
     );
     let err = validate_block_structure(&b, &ctx_h(1)).unwrap_err();
-    assert_bad_block(err, "weight");
+    match err {
+        ConsensusError::BadBlock(s) => {
+            assert!(
+                s.contains("weight") || s.contains("stripped"),
+                "expected weight or stripped reject, got {s:?}"
+            );
+        }
+        other => panic!("expected BadBlock, got {other:?}"),
+    }
 }
 
 #[test]
