@@ -129,6 +129,9 @@ pub struct LivePeer {
     connected_at: AtomicU64,
     /// Skip INV for mempool txs with `accept_gen < floor` (post-verack privacy).
     inv_gen_floor: AtomicU64,
+    /// Age-INV due-log cursor (`due_secs`, `accept_gen`).
+    age_inv_seen_due: AtomicU64,
+    age_inv_seen_gen: AtomicU64,
     /// Writer-task abort — FIN via dropping the write half.
     writer_abort: Mutex<Option<tokio::task::AbortHandle>>,
     /// Whole session-task abort — drops reader+writer if the loop is stuck.
@@ -440,6 +443,18 @@ impl LivePeer {
 
     pub fn inv_gen_floor(&self) -> u64 {
         self.inv_gen_floor.load(Ordering::Relaxed)
+    }
+
+    pub fn age_inv_seen(&self) -> (u64, u64) {
+        (
+            self.age_inv_seen_due.load(Ordering::Relaxed),
+            self.age_inv_seen_gen.load(Ordering::Relaxed),
+        )
+    }
+
+    pub fn note_age_inv_seen(&self, due: u64, gen: u64) {
+        self.age_inv_seen_due.store(due, Ordering::Relaxed);
+        self.age_inv_seen_gen.store(gen, Ordering::Relaxed);
     }
 
     /// Core `MaybeSendPing`: timeout first, then RPC-queued / interval probe.
@@ -1059,6 +1074,8 @@ impl PeerHub {
             out_tx: Mutex::new(None),
             connected_at: AtomicU64::new(connected_at),
             inv_gen_floor: AtomicU64::new(0),
+            age_inv_seen_due: AtomicU64::new(0),
+            age_inv_seen_gen: AtomicU64::new(0),
             writer_abort: Mutex::new(None),
             session_abort: Mutex::new(None),
             tcp_shutdown: Mutex::new(None),

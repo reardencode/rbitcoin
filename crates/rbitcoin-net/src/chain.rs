@@ -3300,11 +3300,9 @@ mod tests {
         assert_eq!(mp.live_count(), 2);
 
         // QueryUtxoProvider must see a coinbase at height 1 (same path evict uses).
-        let coin = crate::tx_relay::QueryUtxoProvider {
-            query: hub.query.as_ref(),
-        }
-        .get_coin(&OutPoint { txid: cb, vout: 0 })
-        .expect("coinbase still a chain coin");
+        let coin = crate::tx_relay::QueryUtxoProvider::new(hub.query.as_ref())
+            .get_coin(&OutPoint { txid: cb, vout: 0 })
+            .expect("coinbase still a chain coin");
         assert!(coin.is_coinbase, "shipped get_coin must mark coinbase");
         assert_eq!(coin.create_height, 1);
 

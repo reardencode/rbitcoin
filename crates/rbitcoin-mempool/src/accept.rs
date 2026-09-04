@@ -56,6 +56,9 @@ pub trait UtxoProvider {
     fn get_txout(&self, op: &OutPoint) -> Option<TxOut> {
         self.get_coin(op).map(|c| c.txout)
     }
+
+    /// Spender about to resolve coins (BIP68 time-lock MTP only when needed).
+    fn note_spender(&self, _tx: &Transaction) {}
 }
 
 /// Map-backed provider for tests and simple callers.
