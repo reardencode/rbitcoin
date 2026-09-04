@@ -40,3 +40,10 @@ path = "fuzz_targets/block_spend_differential.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "block_fork_differential"
+path = "fuzz_targets/block_fork_differential.rs"
+test = false
+doc = false
+bench = false
