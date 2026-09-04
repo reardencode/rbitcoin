@@ -255,26 +255,33 @@ New features: add a high-level scenario; remove obsolete lower-level tests in th
 
 ## Core differential
 
-Nightly (not a required PR check) `fuzz.yml` runs two cargo-fuzz targets:
+Nightly (not a required PR check) `fuzz.yml` runs three cargo-fuzz targets:
 
 | Target | What | Oracle |
 |--------|------|--------|
 | `block_wire` | `check_block_wire` (ASan) | none |
 | `block_differential` | height-1 `ChainHub::accept_received_block` vs Core `submitblock`, **accept vs reject only** | official **v31.1** `bitcoind` tarball (`scripts/core-functional/fetch-bitcoind.sh`) |
+| `block_spend_differential` | height-101 spend of a mature pad coinbase, same path and oracle | same tarball |
 
 ```bash
-./scripts/fuzz-run.sh                    # block_wire (ASan)
-./scripts/fuzz-run.sh block_differential # fetch bitcoind, --sanitizer none
+./scripts/fuzz-run.sh                           # block_wire (ASan)
+./scripts/fuzz-run.sh block_differential        # fetch bitcoind, --sanitizer none
+./scripts/fuzz-run.sh block_spend_differential  # 100-block pad, --sanitizer none, -timeout=180
 ```
 
 `block_differential` prepares every candidate on **regtest genesis** (`prev`
 fixed; coinbase/version stay fuzzer-owned). After a compared accept, rbitcoin
 `rewind_to_height(0)` and Core `invalidateblock` until `getblockcount==0`.
-The diff hub overlays `bip34@1` only — global `ChainParams::regtest()` is
-unchanged. Harness/oracle failure exits **2** (no libFuzzer crash file).
-Accept/reject disagreement **panics** (reproducer). A red nightly is a
-**finding** (`docs/external_findings/`), not a test to green by changing
-production in the harness PR.
+`block_spend_differential` mines a **byte-identical** 100-block empty pad
+(in-process, then `submitblock` each to Core — never Core `generate`), then
+prepares candidates that spend the height-1 `OP_TRUE` coinbase. After a
+compared accept, both sides rewind to height **100**. Default-suite pins use a
+3-block pad for rewind-keep-height only; they do not prove coinbase maturity
+(the seed + nightly pad of 100 do). The diff hub overlays `bip34@1` only —
+global `ChainParams::regtest()` is unchanged. Harness/oracle failure exits
+**2** (no libFuzzer crash file). Accept/reject disagreement **panics**
+(reproducer). A red nightly is a **finding** (`docs/external_findings/`), not
+a test to green by changing production in the harness PR.
 
 Default `cargo test` does **not** download Core, bind RPC, or compile `fuzz/`.
 The official tarball is glibc; GitHub Actions `ubuntu-latest` runs it. A NixOS
