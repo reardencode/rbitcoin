@@ -43,8 +43,12 @@ assert_ok "differential dry-run bin" \
   grep -qx "FUZZ_BIN=block_differential" <<<"$out"
 assert_ok "differential dry-run sanitizer none" \
   grep -qx "FUZZ_SANITIZER=none" <<<"$out"
-assert_ok "differential dry-run jobs" \
-  grep -qx "FUZZ_JOBS=-jobs=1" <<<"$out"
+assert_ok "differential dry-run in-process (no -jobs)" \
+  grep -qx "FUZZ_JOBS=in-process" <<<"$out"
+assert_ok "differential dry-run timeout 90" \
+  grep -qx "FUZZ_TIMEOUT=90" <<<"$out"
+assert_ok "dry-run rustc wrapper" \
+  grep -q "^RUSTC_WRAPPER=.*fuzz-rustc-allow-warnings.sh$" <<<"$out"
 assert_ok "differential dry-run unsets CARGO_TARGET_DIR" \
   grep -qx "CARGO_TARGET_DIR_UNSET=1" <<<"$out"
 

@@ -214,7 +214,7 @@ pub fn build_jsonrpc_http_request(
 ) -> Vec<u8> {
     let body = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"{method}","params":{params_json}}}"#);
     let mut out = format!(
-        "POST / HTTP/1.1\r\nHost: {host}\r\nAuthorization: Basic {auth_b64}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: {host}\r\nAuthorization: Basic {auth_b64}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
         body.len()
     )
     .into_bytes();
@@ -665,6 +665,7 @@ mod tests {
         let s = String::from_utf8(req.clone()).unwrap();
         assert!(s.contains("POST / HTTP/1.1"));
         assert!(s.contains("Authorization: Basic abc"));
+        assert!(s.contains("Connection: close"));
         assert!(s.contains(r#""method":"submitblock""#));
         let body = split_http_body(&req).unwrap();
         assert!(std::str::from_utf8(body).unwrap().contains("submitblock"));

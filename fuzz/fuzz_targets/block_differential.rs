@@ -22,6 +22,8 @@ struct Base {
 
 static BASE: OnceLock<Base> = OnceLock::new();
 static COMPARISONS: AtomicU64 = AtomicU64::new(0);
+static ORACLE_DOWN_STREAK: AtomicU64 = AtomicU64::new(0);
+const MAX_ORACLE_DOWN_STREAK: u64 = 20;
 
 fn harness_failure(what: &str) -> ! {
     eprintln!("=== BLOCK-DIFFERENTIAL FUZZ HARNESS FAILURE ===");
@@ -34,6 +36,7 @@ fn harness_failure(what: &str) -> ! {
 }
 
 fn note_comparison() {
+    ORACLE_DOWN_STREAK.store(0, Ordering::Relaxed);
     let n = COMPARISONS.fetch_add(1, Ordering::Relaxed) + 1;
     if n == 1 || n.is_multiple_of(100) {
         eprintln!("block-differential: comparisons={n}");
@@ -75,13 +78,21 @@ fuzz_target!(|data: &[u8]| {
     let b = base();
     let mut tip = b.tip.lock().unwrap_or_else(|e| e.into_inner());
     match compare_one(&b.hub, &mut tip, &b.core.rpc, data) {
-        CompareOne::NotABlock | CompareOne::Skipped => {}
+        CompareOne::NotABlock | CompareOne::Skipped => {
+            ORACLE_DOWN_STREAK.store(0, Ordering::Relaxed);
+        }
         CompareOne::Agreed { .. } => note_comparison(),
         CompareOne::Disagreed { ours, core, hex } => {
             eprintln!("=== BLOCK-DIFFERENTIAL FUZZ CONSENSUS DIVERGENCE ===");
             eprintln!("ours_accept={ours} core_accept={core}");
             eprintln!("block_hex={hex}");
             panic!("block-differential: ours={ours} core={core} hex={hex}");
+        }
+        CompareOne::Harness(msg) if msg == "oracle dead" => {
+            let n = ORACLE_DOWN_STREAK.fetch_add(1, Ordering::Relaxed) + 1;
+            if n >= MAX_ORACLE_DOWN_STREAK {
+                harness_failure(msg);
+            }
         }
         CompareOne::Harness(msg) => harness_failure(msg),
     }
