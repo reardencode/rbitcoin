@@ -393,6 +393,64 @@ mod median_time_past_tests {
             check_header_version_and_future_time(&params, Height(1), &h).unwrap();
         });
     }
+
+    #[test]
+    fn h8_timestamp_exactly_two_hours_accepts_plus_one_rejects() {
+        let params = ChainParams::regtest();
+        let mut h = crate::params::genesis_block(&params).header;
+        h.version = Version::from_consensus(4);
+        crate::clock::with_now(1_700_000_000, || {
+            h.time = 1_700_000_000 + 2 * 60 * 60;
+            check_header_version_and_future_time(&params, Height(1), &h).unwrap();
+            h.time = 1_700_000_000 + 2 * 60 * 60 + 1;
+            let err = check_header_version_and_future_time(&params, Height(1), &h).unwrap_err();
+            assert!(
+                matches!(err, ConsensusError::BadHeader(s) if s.contains("future")),
+                "{err:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn h9_version_floors_at_bip34_66_65() {
+        let rt = ChainParams::regtest();
+        let mut h = crate::params::genesis_block(&rt).header;
+        crate::clock::with_now(1_700_000_000, || {
+            h.time = 1_700_000_000;
+            h.version = Version::from_consensus(3);
+            let err = check_header_version_and_future_time(&rt, Height(1), &h).unwrap_err();
+            assert!(matches!(err, ConsensusError::BadVersion(3)), "{err:?}");
+            h.version = Version::from_consensus(4);
+            check_header_version_and_future_time(&rt, Height(1), &h).unwrap();
+        });
+
+        let main = ChainParams::mainnet();
+        let mut mh = crate::params::genesis_block(&main).header;
+        crate::clock::with_now(1_700_000_000, || {
+            mh.time = 1_700_000_000;
+            let bip34 = main.btc.bip34_height;
+            mh.version = Version::from_consensus(1);
+            check_header_version_and_future_time(&main, Height(bip34 - 1), &mh).unwrap();
+            let err = check_header_version_and_future_time(&main, Height(bip34), &mh).unwrap_err();
+            assert!(matches!(err, ConsensusError::BadVersion(1)), "{err:?}");
+            mh.version = Version::from_consensus(2);
+            check_header_version_and_future_time(&main, Height(bip34), &mh).unwrap();
+
+            let bip66 = main.btc.bip66_height;
+            mh.version = Version::from_consensus(2);
+            let err = check_header_version_and_future_time(&main, Height(bip66), &mh).unwrap_err();
+            assert!(matches!(err, ConsensusError::BadVersion(2)), "{err:?}");
+            mh.version = Version::from_consensus(3);
+            check_header_version_and_future_time(&main, Height(bip66), &mh).unwrap();
+
+            let bip65 = main.btc.bip65_height;
+            mh.version = Version::from_consensus(3);
+            let err = check_header_version_and_future_time(&main, Height(bip65), &mh).unwrap_err();
+            assert!(matches!(err, ConsensusError::BadVersion(3)), "{err:?}");
+            mh.version = Version::from_consensus(4);
+            check_header_version_and_future_time(&main, Height(bip65), &mh).unwrap();
+        });
+    }
 }
 
 /// Expected `nBits` for a new header at `height`.

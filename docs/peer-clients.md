@@ -88,48 +88,50 @@ This table is the Hornet checklist. Named rows for rules we own stay in
 [`consensus-tests.md`](./consensus-tests.md). Do not import Hornet DSL.
 
 Happy = accept at/under the limit. Boundary = exact limit accept + one-past
-reject (or the Core-equivalent edge). Tests live in
-`crates/rbitcoin-consensus/src/block/hornet_rule_tests.rs` unless noted.
+reject (or the Core-equivalent edge). Tests live in the suites named in
+[`consensus-tests.md`](./consensus-tests.md) (`structure_rule_tests`,
+`header.rs` `median_time_past_tests`, `consensus_rules`, `finality_tests`,
+`sigop_cost_tests`). Named selector: `./scripts/test-hornet-rules.sh`.
 
 | ID | Hornet rule (`spec.h` / spec.html) | Happy | Boundary / reject |
 |----|-------------------------------------|-------|-------------------|
-| **H01** | Parent hash is a valid header | `hornet_header_and_spending_boundaries` (`validate_header` height 1) | `h2_rejects_bad_prev_link` |
-| **H02** | Header hash `<=` claimed target | same journey (regtest grind) | `h02_rejects_header_hash_above_target` (mainnet bits, nonce misses) |
+| **H01** | Parent hash is a valid header | `header_and_spending_boundaries` (`validate_header` height 1) | `h2_rejects_bad_prev_link` |
+| **H02** | Header hash `<=` claimed target | same journey (regtest grind) | `h7_rejects_header_hash_above_target` (mainnet bits, nonce misses) |
 | **H03** | `nBits` matches difficulty adjust | same journey | `h5_regtest_rejects_wrong_bits`; testnet 20 min min-diff: `testnet_min_difficulty_after_20_minute_gap` |
 | **H04** | `time > MTP(11)` | journey: `mtp+1` accepts | journey + `h3_rejects_timestamp_not_after_mtp`: `time == mtp` rejects |
-| **H05** | `time <= now + 2h` | `h05_timestamp_exactly_two_hours_accepts_plus_one_rejects` (`now+7200`) | same test (`now+7201`); `h8_rejects_timestamp_too_far_in_future` |
-| **H06** | Version not retired by BIP34/66/65 | `h06_version_floors_at_bip34_66_65` (v2 @ BIP34, v3 @ BIP66, v4 @ BIP65 / regtest h=1) | same test (v1 @ BIP34, v2 @ BIP66, v3 @ BIP65 / regtest v3) |
-| **L01** | ≥1 transaction | `l01_accepts_single_coinbase_rejects_empty` | same (`txdata` empty) |
-| **L02** | Merkle root matches unique txid tree | `l02_accepts_matching_merkle_rejects_mismatch` | same; odd-leaf: `merkle_odd_leaf_duplication_is_unique_root` |
-| **L03** | Stripped size `<= 1_000_000` | `l03_stripped_size_1_000_000_accepts_1_000_001_rejects` | same (`1_000_001`) |
-| **L04** | First tx is the only coinbase | `l04_accepts_coinbase_first_only_rejects_later_or_missing` | same (non-coinbase first / second coinbase) |
-| **L05** | Legacy sigop **count** `<= 20_000` | `l05_legacy_sigops_20_000_accepts_20_001_rejects` | same (`20_001`); `s11_rejects_excessive_legacy_sigops` |
-| **L06** | ≥1 input | `l06_accepts_one_input_rejects_empty_vin` | same (empty `vin` on non-coinbase) |
-| **L07** | ≥1 output | `l07_accepts_one_output_rejects_empty_vout` | same; `s13_rejects_coinbase_empty_vout`; `c1_non_coinbase_empty_outputs_rejected` |
-| **L08** | Tx stripped size `<= 1_000_000` | `l08_tx_stripped_size_1_000_000_accepts_1_000_001_rejects` | same (`check_tx_local`) |
-| **L09** | Output amounts non-negative | `l09_zero_output_is_non_negative` (`Amount::ZERO`) | rust-bitcoin `Amount` is `u64` — negative is unrepresentable |
-| **L10** | Output sum `<= 21e6` BTC | `l10_max_money_accepts_max_plus_one_rejects` (exactly `MAX_MONEY`) | same (`MAX_MONEY+1` and two-output overflow); `s10_*` |
-| **L11** | No duplicate outpoints in a tx | `l11_unique_inputs_accept_duplicate_reject` | same (two identical prevouts) |
-| **L12** | Coinbase scriptSig length `2..=100` | `l12_coinbase_scriptsig_2_and_100_accept_1_and_101_reject` | same; `s9_rejects_bad_cb_length_*` |
-| **L13** | Non-coinbase inputs non-null | `l13_non_coinbase_null_prevout_rejected_non_null_accepted` | same (null among two inputs) |
+| **H05** | `time <= now + 2h` | `h8_timestamp_exactly_two_hours_accepts_plus_one_rejects` (`now+7200`) | same test (`now+7201`); `h8_rejects_timestamp_too_far_in_future` |
+| **H06** | Version not retired by BIP34/66/65 | `h9_version_floors_at_bip34_66_65` (v2 @ BIP34, v3 @ BIP66, v4 @ BIP65 / regtest h=1) | same test (v1 @ BIP34, v2 @ BIP66, v3 @ BIP65 / regtest v3) |
+| **L01** | ≥1 transaction | `s1_rejects_empty_txdata` (coinbase accepts) | same (`txdata` empty) |
+| **L02** | Merkle root matches unique txid tree | `s6_rejects_merkle_root_mismatch` (matching accepts) | same; odd-leaf: `merkle_root_bytes_single_and_odd` |
+| **L03** | Stripped size `<= 1_000_000` | `s14_stripped_size_1_000_000_accepts_1_000_001_rejects` | same (`1_000_001`) |
+| **L04** | First tx is the only coinbase | `s2_rejects_non_coinbase_first` (coinbase then spend accepts) | same; `s3_rejects_second_coinbase` |
+| **L05** | Legacy sigop **count** `<= 20_000` | `s11_rejects_excessive_legacy_sigops` (`20_000`) | same (`20_001`) |
+| **L06** | ≥1 input | `s15_rejects_empty_vin` (one input accepts) | same (empty `vin` on non-coinbase) |
+| **L07** | ≥1 output | `s13_rejects_coinbase_empty_vout` (one output accepts) | same; `c1_non_coinbase_empty_outputs_rejected` |
+| **L08** | Tx stripped size `<= 1_000_000` | `s16_tx_stripped_size_1_000_000_accepts_1_000_001_rejects` | same (`check_tx_local`) |
+| **L09** | Output amounts non-negative | `s10_rejects_vout_toolarge` (`Amount::ZERO`) | rust-bitcoin `Amount` is `u64` — negative is unrepresentable |
+| **L10** | Output sum `<= 21e6` BTC | `s10_rejects_vout_toolarge` (exactly `MAX_MONEY`) | same (`MAX_MONEY+1`); `s10_rejects_txouttotal_toolarge` |
+| **L11** | No duplicate outpoints in a tx | `s17_rejects_duplicate_outpoints` (unique inputs accept) | same (two identical prevouts) |
+| **L12** | Coinbase scriptSig length `2..=100` | `s9_rejects_bad_cb_length_short` / `_long` (2 and 100 accept) | same (1 and 101) |
+| **L13** | Non-coinbase inputs non-null | `s18_rejects_non_coinbase_null_prevout` (non-null accepts) | same (null among two inputs) |
 | **C01** | All txs final at height / locktime | journey: `locktime=100` at height 101; `finality_tests::final_when_locktime_zero` | journey: `locktime==height`; `height_locktime_not_final_until_height` (`lt < height`) |
-| **C02** | Pre-SegWit block has no witness | `c02_pre_segwit_accepts_no_witness_rejects_witness` | same; `s8_mainnet_rejects_witness_before_segwit` |
-| **C03** | Weight `<= 4_000_000` WU | `c03_weight_4_000_000_accepts_4_000_001_rejects` (no-witness 4 M and witness 4 M) | same (`4_000_001` via +1 witness byte); `s4_rejects_overweight_block` |
-| **C04** | BIP34 coinbase height push | `c04_bip34_height_push_accepts_at_activation_rejects_missing` | same; `s7_*` activation / pre-activation |
-| **C05** | Witness data ⇒ commitment | `c05_c06_c07_witness_commitment_nonce_merkle` (no witness, no commitment) | same (witness, no commitment); `s8_rejects_missing_witness_commitment` |
-| **C06** | Commitment ⇒ 32-byte nonce | same test (exactly one 32-byte reserved) | same (empty nonce); `s8_rejects_empty_or_multi_item_coinbase_witness_reserved` |
-| **C07** | Commitment matches witness merkle + nonce | same test (`apply_witness_commitment`) | same (wrong hash); `s8_rejects_wrong_witness_commitment` |
+| **C02** | Pre-SegWit block has no witness | `s8_mainnet_rejects_witness_before_segwit` (no-witness accepts) | same (witness before segwit) |
+| **C03** | Weight `<= 4_000_000` WU | `s4_weight_4_000_000_accepts_4_000_001_rejects` (no-witness 4 M and witness 4 M) | same (`4_000_001` via +1 witness byte); `s4_rejects_overweight_block` |
+| **C04** | BIP34 coinbase height push | `s7_rejects_bip34_missing_after_activation_signet` (height push at activation) | same; `s7_*` activation / pre-activation |
+| **C05** | Witness data ⇒ commitment | `s8_rejects_missing_witness_commitment` (no witness, no commitment) | same (witness, no commitment) |
+| **C06** | Commitment ⇒ 32-byte nonce | `s8_accepts_witness_commitment_with_reserved_value` | `s8_rejects_empty_or_multi_item_coinbase_witness_reserved` |
+| **C07** | Commitment matches witness merkle + nonce | same accept test (`apply_witness_commitment`) | `s8_rejects_wrong_witness_commitment` |
 | **S01** | BIP30 unique unspent creates | every connecting block; exception table `is_bip30_repeat_matches_core` (91842 / 91880) | `bip30_rejects_unspent_connected_sibling` |
 | **S02** | Prevout exists *(merged into S03 in `spec.h`)* | journey OP_TRUE spend of height-1 coinbase | journey: random txid → `MissingPrevout`; `c8_same_block_child_before_parent_rejected` |
 | **S03** | Prevout still unspent | journey first spend | journey second spend of same outpoint; `c2_same_block_double_spend_rejected` |
-| **S04** | Sigop **cost** `<= 80_000` | `s04_sigop_cost_80_000_accepts_80_004_rejects` (20 000×CHECKSIG) | same (`20_001` → cost 80 004); `sigop_cost_tests::*` (P2SH/witness) |
-| **S05** | Coinbase `<=` subsidy + fees | journey exact 50 BTC empty pads; `s05_subsidy_exact_halving_boundaries` | journey `subsidy+1` sat; `c7_coinbase_excess_subsidy_rejected` |
+| **S04** | Sigop **cost** `<= 80_000` | `s11_rejects_excessive_legacy_sigops` (20 000×CHECKSIG) | same (`20_001` → cost 80 004); `sigop_cost_tests::*` (P2SH/witness) |
+| **S05** | Coinbase `<=` subsidy + fees | journey exact 50 BTC empty pads; `p1_block_subsidy_halvings` | journey `subsidy+1` sat; `c7_coinbase_excess_subsidy_rejected` |
 | **S06** | Tx `out <= in` | journey `in==out` (zero fee) | journey `in+1`; `c6_value_in_less_than_out_rejected` |
 | **S07** | Scripts succeed | journey anyone-can-spend `OP_TRUE`; Core `script_tests` / `tx_valid` | Core `tx_invalid` / `script_tests` reject rows |
 | **S08** | BIP68 relative finality | journey `nSequence=10` at height 101; `bip68_height_relative_lock` | journey `nSequence=200` at 101; `finality_tests` 109/110 edge |
 | **S09** | Coinbase maturity 100 | journey spend at height 101 (`created+100`) | journey spend at height 100; `c5_immature_coinbase_spend_rejected` |
 
-Connect-path journey: `rbitcoin-test` `hornet_header_and_spending_boundaries`.
+Connect-path journey: `rbitcoin-test` `header_and_spending_boundaries`.
 
 ### 4. satd E2E flake-gate
 
@@ -199,7 +201,7 @@ only when scheduling a slice.
 |-----:|------|--------|----------|
 | 1 | In-tree **verdict-only** differential fuzz vs Docker `bitcoind` (harness-vs-finding exit codes) | satd `block_differential` | **Q-30** / [`TESTING.md`](../TESTING.md) |
 | 2 | One cross-surface scenario: Esplora `POST /tx` → Electrum history + RPC mempool | satd E2E | scenarios / Electrum–Esplora tests |
-| — | ~~Hornet spec.html vs consensus-tests.md gap hunt~~ **done 2026-09-04** (table in this file, pins in `hornet_rule_tests.rs`) | Hornet | this file + [`consensus-tests.md`](./consensus-tests.md) |
+| — | ~~Hornet spec.html vs consensus-tests.md gap hunt~~ **done 2026-09-04** (table in this file; pins in `structure_rule_tests` / `header.rs` / `consensus_rules`) | Hornet | this file + [`consensus-tests.md`](./consensus-tests.md) |
 | 4 | `/healthz` (and maybe `/readyz`) on the node listen; Prometheus later as a flag | satd | node / [`OPERATOR.md`](../OPERATOR.md) |
 | 5 | BIP352 serve: hash-bind tweak batches so a client can audit the stream | satd row idea on our tweaks path | Electrum tweaks / [`OPERATOR.md`](../OPERATOR.md) |
 

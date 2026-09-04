@@ -427,7 +427,7 @@ fn grind_pow(block: &mut bitcoin::Block) {
 }
 
 #[test]
-fn h02_rejects_header_hash_above_target() {
+fn h7_rejects_header_hash_above_target() {
     let (_td, q, params) = {
         let td = TestDatadir::new().unwrap();
         let q = Query::open_or_create(td.store_path()).unwrap();
@@ -456,7 +456,7 @@ fn h02_rejects_header_hash_above_target() {
 }
 
 #[test]
-fn hornet_header_and_spending_boundaries() {
+fn header_and_spending_boundaries() {
     use bitcoin::absolute::LockTime;
     use bitcoin::transaction::Version as TxVersion;
     use bitcoin::Sequence;
@@ -466,8 +466,7 @@ fn hornet_header_and_spending_boundaries() {
     accept_and_connect_block(&q, &params, Height::GENESIS, &g, Milestone::NONE).unwrap();
 
     let b1 = mine_regtest_block(g.block_hash(), g.header.time + 600, 1, vec![]);
-    validate_header(&q, &params, Height(1), &b1.header)
-        .expect("H01/H02/H03: valid parent, pow, bits");
+    validate_header(&q, &params, Height(1), &b1.header).expect("valid parent, pow, bits");
     accept_and_connect_block(&q, &params, Height(1), &b1, Milestone::NONE).unwrap();
     let cb_txid = b1.txdata[0].compute_txid();
 
@@ -483,13 +482,13 @@ fn hornet_header_and_spending_boundaries() {
     let err = validate_header(&q, &params, Height(12), &eq.header).unwrap_err();
     assert!(
         matches!(err, ConsensusError::BadHeader(s) if s.contains("median-time")),
-        "H04 time==mtp: {err:?}"
+        "time==mtp: {err:?}"
     );
 
     let mut after = mine_regtest_block(tip, mtp + 1, 12, vec![]);
     after.header.bits = expected_next_bits(&q, &params, Height(12), after.header.time).unwrap();
     grind_pow(&mut after);
-    validate_header(&q, &params, Height(12), &after.header).expect("H04 time==mtp+1");
+    validate_header(&q, &params, Height(12), &after.header).expect("time==mtp+1");
 
     (tip, time) = pad_empty_from(&q, &params, tip, time, 12, 99);
     assert_eq!(q.tip_height(), Some(Height(99)));
@@ -499,7 +498,7 @@ fn hornet_header_and_spending_boundaries() {
     let err = accept_and_connect_block(&q, &params, Height(100), &bad100, Milestone::NONE);
     assert!(
         matches!(err, Err(ConsensusError::BadTx(s)) if s.contains("immature")),
-        "S09 height 100: {err:?}"
+        "immature at created+99: {err:?}"
     );
 
     (tip, time) = pad_empty_from(&q, &params, tip, time, 100, 100);
@@ -516,7 +515,7 @@ fn hornet_header_and_spending_boundaries() {
     assert!(
         matches!(err, Err(ConsensusError::MissingPrevout))
             || matches!(err, Err(ConsensusError::BadTx(s)) if s.contains("missing")),
-        "S02 missing prevout: {err:?}"
+        "missing prevout: {err:?}"
     );
 
     let mut nonfinal = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(49_0000_0000));
@@ -526,7 +525,7 @@ fn hornet_header_and_spending_boundaries() {
     let err = accept_and_connect_block(&q, &params, Height(101), &nf_block, Milestone::NONE);
     assert!(
         matches!(err, Err(ConsensusError::BadTx(s)) if s.contains("nonfinal") || s.contains("not final")),
-        "C01 locktime==height: {err:?}"
+        "locktime==height: {err:?}"
     );
 
     let mut csv_early = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(49_0000_0000));
@@ -536,7 +535,7 @@ fn hornet_header_and_spending_boundaries() {
     let err = accept_and_connect_block(&q, &params, Height(101), &csv_block, Milestone::NONE);
     assert!(
         err.is_err(),
-        "S08 relative lock 200 at height 101 must reject, got {err:?}"
+        "relative lock 200 at height 101 must reject, got {err:?}"
     );
 
     let over = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(50_0000_0000 + 1));
@@ -544,7 +543,7 @@ fn hornet_header_and_spending_boundaries() {
     let err = accept_and_connect_block(&q, &params, Height(101), &over_block, Milestone::NONE);
     assert!(
         matches!(err, Err(ConsensusError::BadTx(s)) if s.contains("in < out")),
-        "S06 in < out: {err:?}"
+        "in < out: {err:?}"
     );
 
     let mut excess = mine_regtest_block(tip, time, 101, vec![]);
@@ -554,7 +553,7 @@ fn hornet_header_and_spending_boundaries() {
     let err = accept_and_connect_block(&q, &params, Height(101), &excess, Milestone::NONE);
     assert!(
         matches!(err, Err(ConsensusError::BadBlock(s)) if s.contains("coinbase excess")),
-        "S05 subsidy+1: {err:?}"
+        "subsidy+1: {err:?}"
     );
 
     let mut good_spend = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(50_0000_0000));
@@ -562,9 +561,8 @@ fn hornet_header_and_spending_boundaries() {
     good_spend.lock_time = LockTime::from_height(100).unwrap();
     good_spend.input[0].sequence = Sequence::from_consensus(10);
     let good = mine_regtest_block(tip, time, 101, vec![good_spend]);
-    accept_and_connect_block(&q, &params, Height(101), &good, Milestone::NONE).expect(
-        "S05/S06/S07/S08/S09/C01: exact subsidy, in==out, OP_TRUE, seq=10, mature, locktime 100",
-    );
+    accept_and_connect_block(&q, &params, Height(101), &good, Milestone::NONE)
+        .expect("exact subsidy, in==out, OP_TRUE, seq=10, mature, locktime 100");
     assert_eq!(q.tip_height(), Some(Height(101)));
 
     let spent_again = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(1));
@@ -576,6 +574,6 @@ fn hornet_header_and_spending_boundaries() {
                 err,
                 Err(ConsensusError::BadTx(s)) if s.contains("double spend") || s.contains("spent")
             ),
-        "S03 already spent: {err:?}"
+        "already spent: {err:?}"
     );
 }

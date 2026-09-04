@@ -2385,8 +2385,6 @@ mod block_866342;
 #[cfg(test)]
 mod finality_tests;
 #[cfg(test)]
-mod hornet_rule_tests;
-#[cfg(test)]
 mod sigop_cost_tests;
 #[cfg(test)]
 mod structure_rule_tests;
