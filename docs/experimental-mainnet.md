@@ -101,8 +101,9 @@ Heap caps: [`docs/ibd-memory.md`](./ibd-memory.md) (tip-follow / P2P serve).
 Incoming `cmpctblock` is reconstructed from the mempool short-id map; missing txs
 use `getblocktxn` / `blocktxn`. Full `getdata` MSG_WITNESS_BLOCK remains the
 fallback when mempool is cold or fill fails. We serve `getblocktxn` and
-`MSG_CMPCT_BLOCK` getdata from store/cache, and announce tips as `cmpctblock`
-when the peer enabled high-bandwidth mode.
+`MSG_CMPCT_BLOCK` getdata from store/cache. A PoW-valid header that extends
+our tip is announced as `cmpctblock` to other HB peers **before** connect
+(Core `NewPoWValidBlock`); connect failure does not take that back.
 
 **WTx (BIP339):** handshake sends `wtxidrelay` (protocol ≥70016). When the peer
 also sends it, we announce and request `MSG_WTX` inventory.

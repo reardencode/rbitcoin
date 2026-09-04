@@ -11,6 +11,13 @@ before 1.0).
 
 ### Added
 
+- **Tip-follow compact relay matches Core `NewPoWValidBlock`:** a
+  reconstructed or received body whose header has valid PoW and extends
+  the current tip is announced as `cmpctblock` to other high-bandwidth
+  peers **before** `tip-accept` connect. Invalid body still keeps the
+  session. `tip: accept` now names `lookup=` / `struct=` / `drain=` /
+  `mp_strip=` / `other=` so the connect wall is not a silent remainder.
+
 - **Q-30 height-1 differential fuzz vs Core v31.1:** nightly
   `block_differential` mutates a regtest height-1 block, runs in-process
   `ChainHub::accept_received_block`, and `submitblock`s the same bytes to

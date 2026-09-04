@@ -200,7 +200,7 @@ confirm does **not** spam this line per block — use the periodic IBD status be
 | Line | Level | Use |
 |------|-------|-----|
 | `tip: perf` | DEBUG | Every ~5s: follow peers, blocks this window, mempool accept/reject + wall µs, inv/getdata/announce, Esplora/Electrum req counts + avg/max µs |
-| `tip: accept` | INFO | Per accepted tip block: wall/load/script/class_a/class_c/SH breakdown (not emitted on reject) |
+| `tip: accept` | INFO | Per accepted tip block: wall/load/script/class_a/class_c/SH plus lookup/struct/drain/mp_strip/other (not emitted on reject) |
 | `UpdateTip` | INFO | New best hash/height after connect |
 | `node: tip=…` | DEBUG | Same height change plus `follow_live` (use `UpdateTip` at info) |
 | `received getdata for: wtx` | TRACE | One line per peer `MSG_WTX` getdata (Core `p2p_blocksonly` needle; counts are on `tip: perf`) |
