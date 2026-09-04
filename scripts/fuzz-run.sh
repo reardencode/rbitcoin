@@ -48,7 +48,7 @@ timeout=10
 if [[ "$BIN" == "block_differential" ]]; then
   sanitizer="none"
   timeout=90
-elif [[ "$BIN" == "block_spend_differential" ]]; then
+elif [[ "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" ]]; then
   sanitizer="none"
   timeout=180
 fi
@@ -65,7 +65,7 @@ if [[ "${FUZZ_DRY_RUN:-}" == "1" ]]; then
   echo "FUZZ_TIMEOUT=$timeout"
   echo "CARGO_TARGET_DIR_UNSET=1"
   echo "RUSTC_WRAPPER=$WRAP"
-  if [[ "$BIN" == "block_differential" || "$BIN" == "block_spend_differential" ]]; then
+  if [[ "$BIN" == "block_differential" || "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" ]]; then
     echo "RBITCOIN_CORE_BITCOIND=${RBITCOIN_CORE_BITCOIND:-}"
   fi
   exit 0
@@ -81,7 +81,7 @@ if [[ "$BIN" == "block_wire" ]]; then
     -max_len=1048576
 fi
 
-if [[ "$BIN" != "block_differential" && "$BIN" != "block_spend_differential" ]]; then
+if [[ "$BIN" != "block_differential" && "$BIN" != "block_spend_differential" && "$BIN" != "block_fork_differential" ]]; then
   echo "fuzz-run: unknown target $BIN" >&2
   exit 1
 fi
@@ -94,10 +94,14 @@ if [[ "$BIN" == "block_differential" ]]; then
   mkdir -p fuzz/corpus/block_differential
   cp crates/rbitcoin-consensus/tests/fixtures/regtest_height1.bin \
     fuzz/corpus/block_differential/height1.bin
-else
+elif [[ "$BIN" == "block_spend_differential" ]]; then
   mkdir -p fuzz/corpus/block_spend_differential
   cp crates/rbitcoin-consensus/tests/fixtures/regtest_height101_spend.bin \
     fuzz/corpus/block_spend_differential/spend.bin
+else
+  mkdir -p fuzz/corpus/block_fork_differential
+  cp crates/rbitcoin-consensus/tests/fixtures/regtest_fork_child.bin \
+    fuzz/corpus/block_fork_differential/fork.bin
 fi
 
 log="${TMPDIR:-/tmp}/rbtc-fuzz-diff.$$.log"
