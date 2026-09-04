@@ -1847,7 +1847,7 @@ impl ChainHub {
             NetError::Consensus(reason)
         })?;
         self.header_tips.write().unwrap().remove(&hash);
-        let wall_ns = t_wall.elapsed().as_nanos() as u64;
+        let t_mp = std::time::Instant::now();
         if let Some(mp) = self.mempool() {
             let ids: Vec<_> = block.txdata.iter().map(|t| t.compute_txid()).collect();
             let spent: Vec<_> = block
@@ -1861,6 +1861,8 @@ impl ChainHub {
                 rbitcoin_log::debug!("mempool: removed {n} confirmed tx(s) @ height {height}");
             }
         }
+        let mp_strip_ns = t_mp.elapsed().as_nanos() as u64;
+        let wall_ns = t_wall.elapsed().as_nanos() as u64;
         self.confirmed.write().unwrap().insert(hash);
         let n_tx = block.txdata.len();
         let _ = self.cache.push_best(block);
@@ -1868,7 +1870,7 @@ impl ChainHub {
         // UpdateTip). IBD bulk confirm uses note_confirmed_tip without this line;
         // IBD retains periodic progress/perf status instead.
         log_update_tip(height, &hash, &header, n_tx);
-        log_tip_accept_sh(&self.query, height, n_tx, wall_ns);
+        log_tip_accept_sh(&self.query, height, n_tx, wall_ns, mp_strip_ns);
         let event = TipEvent {
             height,
             hash,
@@ -2059,6 +2061,9 @@ pub fn log_update_tip(height: u32, hash: &BlockHash, header: &Header, n_tx: usiz
 /// Clear confirm + Class C SH meters before a tip-follow accept sample window.
 fn tip_accept_stats_reset() {
     let _ = rbitcoin_consensus::confirm_phase_stats::sample_and_reset();
+    let _ = rbitcoin_consensus::lookup_stage_stats::sample_and_reset();
+    let _ = rbitcoin_consensus::confirm_phase_stats::WRITE_DRAIN_JOIN_NS
+        .swap(0, std::sync::atomic::Ordering::Relaxed);
     let _ = rbitcoin_query::class_c_phase_stats::sample_and_reset();
     let _ = rbitcoin_query::class_c_phase_stats::sample_tip_sh_and_reset();
 }
@@ -2079,6 +2084,14 @@ pub struct TipAcceptShInput {
     pub tip_ns: u64,
     /// BIP-352 tip write-through (`index_sp_tweaks_batch`). Zero when `--sptweaks` is off.
     pub tweak_ns: u64,
+    /// Lookup stamp (`lookup_stage_stats::TOTAL_NS`).
+    pub lookup_ns: u64,
+    /// Write structural (spentness / maturity / BIP68).
+    pub structural_ns: u64,
+    /// Residual wait on `tx.head` drain after structural/Class C overlap.
+    pub drain_ns: u64,
+    /// `remove_for_block_spent` after confirm (not inside confirm_write).
+    pub mp_strip_ns: u64,
     pub sh_lag: u32,
     pub sh: rbitcoin_query::class_c_phase_stats::TipShSnap,
 }
@@ -2094,6 +2107,23 @@ pub fn format_tip_accept_sh_line(i: &TipAcceptShInput) -> String {
     let strong_ms = i.strong_ns / 1_000_000;
     let tip_ms = i.tip_ns / 1_000_000;
     let tweak_ms = i.tweak_ns / 1_000_000;
+    let lookup_ms = i.lookup_ns / 1_000_000;
+    let structural_ms = i.structural_ns / 1_000_000;
+    let drain_ms = i.drain_ns / 1_000_000;
+    let mp_strip_ms = i.mp_strip_ns / 1_000_000;
+    let named = i
+        .load_ns
+        .saturating_add(i.script_ns)
+        .saturating_add(i.class_a_ns)
+        .saturating_add(i.class_c_ns)
+        .saturating_add(i.sh.total_sh_ns())
+        .saturating_add(i.spend_ns)
+        .saturating_add(i.tweak_ns)
+        .saturating_add(i.lookup_ns)
+        .saturating_add(i.structural_ns)
+        .saturating_add(i.drain_ns)
+        .saturating_add(i.mp_strip_ns);
+    let other_ms = i.wall_ns.saturating_sub(named) / 1_000_000;
     let sh = &i.sh;
     let sh_ms = sh.total_sh_ns() / 1_000_000;
     let coll_ms = sh.collect_ns / 1_000_000;
@@ -2113,7 +2143,8 @@ pub fn format_tip_accept_sh_line(i: &TipAcceptShInput) -> String {
          sh={sh_ms}ms sh_lag={sh_lag} \
          (collect={coll_ms} sort={sort_ms} seed={seed_ms} body={body_ms} head={head_ms} \
          pin={pin} cold={cold} creates={creates} unique={unique} written={written}) \
-         spend={spend_ms}ms tweaks={tweak_ms}ms sh/wall={sh_ratio}%",
+         spend={spend_ms}ms tweaks={tweak_ms}ms lookup={lookup_ms}ms struct={structural_ms}ms \
+         drain={drain_ms}ms mp_strip={mp_strip_ms}ms other={other_ms}ms sh/wall={sh_ratio}%",
         h = i.height,
         n_tx = i.n_tx,
         sh_lag = i.sh_lag,
@@ -2126,7 +2157,7 @@ pub fn format_tip_accept_sh_line(i: &TipAcceptShInput) -> String {
 }
 
 /// Sample meters after tip accept and emit INFO `tip: accept …` (SH breakdown).
-fn log_tip_accept_sh(query: &Query, height: u32, n_tx: usize, wall_ns: u64) {
+fn log_tip_accept_sh(query: &Query, height: u32, n_tx: usize, wall_ns: u64, mp_strip_ns: u64) {
     let (
         _recon,
         _wire,
@@ -2145,11 +2176,14 @@ fn log_tip_accept_sh(query: &Query, height: u32, n_tx: usize, wall_ns: u64) {
         _spend_ranged,
         _spend_idx,
         _spend_skip,
-        _structural,
+        structural_ns,
         _struct_spent,
         _struct_create_h,
         _struct_bip68,
     ) = rbitcoin_consensus::confirm_phase_stats::sample_and_reset();
+    let lookup_ns = rbitcoin_consensus::lookup_stage_stats::sample_and_reset().total_ns;
+    let drain_ns = rbitcoin_consensus::confirm_phase_stats::WRITE_DRAIN_JOIN_NS
+        .swap(0, std::sync::atomic::Ordering::Relaxed);
     let sh = rbitcoin_query::class_c_phase_stats::sample_tip_sh_and_reset();
     let ca = rbitcoin_query::archive_phase_stats::sample_and_reset();
     let tweak_ns = rbitcoin_consensus::confirm_phase_stats::TWEAK_NS
@@ -2168,6 +2202,10 @@ fn log_tip_accept_sh(query: &Query, height: u32, n_tx: usize, wall_ns: u64) {
         strong_ns,
         tip_ns,
         tweak_ns,
+        lookup_ns,
+        structural_ns,
+        drain_ns,
+        mp_strip_ns,
         sh_lag: query.sh_lag_heights(),
         sh,
     });
@@ -2609,6 +2647,10 @@ mod tests {
             strong_ns: 5_000_000,
             tip_ns: 2_000_000,
             tweak_ns: 400_000_000,
+            lookup_ns: 300_000_000,
+            structural_ns: 40_000_000,
+            drain_ns: 10_000_000,
+            mp_strip_ns: 20_000_000,
             sh_lag: 2,
             sh: rbitcoin_query::class_c_phase_stats::TipShSnap {
                 collect_ns: 20_000_000,
@@ -2639,6 +2681,12 @@ mod tests {
         assert!(line.contains("pin=4000"), "{line}");
         assert!(line.contains("cold=12"), "{line}");
         assert!(line.contains("tweaks=400ms"), "{line}");
+        assert!(line.contains("lookup=300ms"), "{line}");
+        assert!(line.contains("struct=40ms"), "{line}");
+        assert!(line.contains("drain=10ms"), "{line}");
+        assert!(line.contains("mp_strip=20ms"), "{line}");
+        // 2500 - (100+200+50+7+1725+80+400+300+40+10+20) = -432 → 0
+        assert!(line.contains("other=0ms"), "{line}");
         assert!(line.contains("sh/wall=69%"), "{line}");
     }
 
