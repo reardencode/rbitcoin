@@ -2031,7 +2031,7 @@ async fn handle_peer_frame(
                 pending_blocks.insert(hash, block.clone());
                 return Ok(());
             }
-            relay_new_pow_valid_block(hub, &block, session);
+            relay_new_pow_valid_block(hub, block, session);
             match hub.accept_received_block_async(block.clone()).await {
                 Ok(AcceptOutcome::Accepted { .. }) => {
                     pending_blocks.remove(&hash);
