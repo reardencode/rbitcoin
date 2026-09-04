@@ -61,6 +61,15 @@ before 1.0).
 
 ### Changed
 
+- **Tip-follow accept/relay CPU:** the 50 ms session INV tick no longer
+  walks every live wtxid/`accept_at` once any tx is 30 s old. Age-INV is an
+  append-only due log plus a per-peer cursor (inbound 30 s gate and
+  `clock_due` / unbroadcast unchanged). Accept caches tip MTP until the
+  header fk changes; `get_coin` skips create MTP unless a BIP68 time lock
+  is present and skips `block_tx_fks` when the create's input-0 record
+  exists; `index_txid` hashes prepare prevouts instead of re-Querying.
+  Expiry skips the live walk while nothing can be old enough.
+
 - **IBD main loop cadences housekeeping off the event path:** getdata
   assign (≤50 ms, immediate if inflight empty), main-loop `getheaders`
   locator walks (≤500 ms, empty path immediate), peer stall/relative-slow
