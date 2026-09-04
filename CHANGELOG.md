@@ -36,6 +36,11 @@ before 1.0).
   child (reorg). Same v31.1 `bitcoind` oracle and verdict-only contract.
   Q-30 stays Open (BIP324 / compact P2P still later).
 
+- **Q-30 BIP324 `v2_contents` ASan:** nightly libFuzzer feeds post-decrypt
+  v2 application contents through `parse_v2_contents` + `try_decode`
+  (`--sanitizer address`, no `bitcoind`). Handshake/ciphertext vs a Core
+  v2 peer is later. Q-30 stays Open.
+
 ### Fixed
 
 - **Tip-follow FeeFilter no longer panics on the reactor:** session handshake
