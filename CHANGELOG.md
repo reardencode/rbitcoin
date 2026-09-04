@@ -73,6 +73,11 @@ before 1.0).
 
 ### Added
 
+- **Hornet block-validation matrix:** happy-path and boundary pins for every
+  Hornet `spec.h` / spec.html rule (H01–S09), including stripped-size 1 MB,
+  per-tx oversize, duplicate inputs, and null prevouts. Map:
+  [`docs/peer-clients.md`](docs/peer-clients.md).
+
 - **Unsorted-shard SH materialize is the default:** tip finalize does one Class A
   `txout` pass into unsorted `scripthash.unsorted/NN` (nCPU collect, 1 MiB
   per-shard buffers, offset-ordered pwrite, 64 MiB fallocate extents), then

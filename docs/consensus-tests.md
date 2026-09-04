@@ -65,9 +65,10 @@ refreshing; do not check copies into `tests/fixtures/`.
 See `crates/rbitcoin-consensus/tests/fixtures/README.md`.
 
 Hornet’s published 34-rule table is a **gap checklist** against this
-matrix, not a second spec:
-[`peer-clients.md`](./peer-clients.md) (Hornet spec.html). Add missing
-named rows here.
+matrix, not a second spec. Full ID-by-ID happy/boundary map (Hornet `main`
+`spec.h` @ `151462fa` vs spec.html):
+[`peer-clients.md`](./peer-clients.md) § Hornet block-validation rules.
+Pins: `block/hornet_rule_tests.rs` + `consensus_rules::hornet_header_and_spending_boundaries`.
 
 ## A. Block structure — `validate_block_structure_hashed`
 
@@ -83,11 +84,17 @@ named rows here.
 | S8 | Witness commitment when any witness | missing / mismatch | `s8_rejects_missing_witness_commitment`, `s8_rejects_wrong_witness_commitment` |
 | S9 | Coinbase scriptSig length 2..=100 | `bad-cb-length` | `s9_rejects_bad_cb_length_short`, `s9_rejects_bad_cb_length_long` |
 | S10 | Output value / sum ≤ MAX_MONEY | `toolarge` | `s10_rejects_vout_toolarge` |
-| S11 | Legacy sigops cost ≤ 80_000 | `bad-blk-sigops` | `s11_rejects_excessive_legacy_sigops` |
+| S11 | Legacy sigops cost ≤ 80_000 | `bad-blk-sigops` | `s11_rejects_excessive_legacy_sigops` + `l05_legacy_sigops_20_000_accepts_20_001_rejects` |
 | S12 | Connect: P2SH + witness sigops (BIP16/BIP141); P2SH scriptSig opcode `> OP_16` → 0; witness sigops only when segwit is active | `bad-blk-sigops` | `sigop_cost_tests::*` + `p2sh_sigops_non_push_scriptsig_is_zero` + `witness_sigops_gated_on_segwit` |
-| S13 | Every tx including coinbase has ≥1 output | `no outputs` | `s13_rejects_coinbase_empty_vout` |
+| S13 | Every tx including coinbase has ≥1 output | `no outputs` | `s13_rejects_coinbase_empty_vout` + `l07_accepts_one_output_rejects_empty_vout` |
+| S14 | Stripped size ≤ 1_000_000 (Hornet L03) | `block stripped size too large` | `l03_stripped_size_1_000_000_accepts_1_000_001_rejects` |
+| S15 | Every tx has ≥1 input (Hornet L06) | `no inputs` | `l06_accepts_one_input_rejects_empty_vin` |
+| S16 | Tx stripped size ≤ 1_000_000 (Hornet L08) | `bad-txns-oversize` | `l08_tx_stripped_size_1_000_000_accepts_1_000_001_rejects` |
+| S17 | No duplicate outpoints in a tx (Hornet L11) | `bad-txns-inputs-duplicate` | `l11_unique_inputs_accept_duplicate_reject` |
+| S18 | Non-coinbase inputs non-null (Hornet L13) | `bad-txns-prevout-null` | `l13_non_coinbase_null_prevout_rejected_non_null_accepted` |
 
-Location: `crates/rbitcoin-consensus/src/block/structure_rule_tests.rs`.
+Location: `crates/rbitcoin-consensus/src/block/structure_rule_tests.rs` and
+`hornet_rule_tests.rs` (S14–S18 and Hornet-named happy/boundary pins).
 
 ## B. Header — `validate_header` / helpers
 
@@ -99,9 +106,9 @@ Location: `crates/rbitcoin-consensus/src/block/structure_rule_tests.rs`.
 | H4 | Checkpoint hash at height | `checkpoint mismatch` | `h4_rejects_checkpoint_mismatch` |
 | H5 | `bits == expected_next_bits` | `incorrect proof of work bits` | `h5_regtest_rejects_wrong_bits` (regtest: must equal prev) |
 | H6 | Target ≤ `pow_limit` | `target above pow limit` | `h6_target_above_pow_limit_is_detectable` |
-| H7 | PoW valid for claimed bits | `InvalidPow` | **rust-bitcoin** `validate_pow` — smoke via any successful `mine_regtest_block` accept |
-| H8 | Time not > now + 2h | `timestamp too far in future` | `h8_rejects_timestamp_too_far_in_future` |
-| H9 | `assemble_run` future-time + BIP34/66/65 nVersion on every block | `time-too-new` / `bad-version` | `check_header_version_and_future_time_regtest` + `assemble_second_block_rejects_stale_nversion` |
+| H7 | PoW valid for claimed bits | `InvalidPow` | `h02_rejects_header_hash_above_target` + smoke via `mine_regtest_block` accept |
+| H8 | Time not > now + 2h | `timestamp too far in future` | `h8_rejects_timestamp_too_far_in_future` + `h05_timestamp_exactly_two_hours_accepts_plus_one_rejects` |
+| H9 | `assemble_run` future-time + BIP34/66/65 nVersion on every block | `time-too-new` / `bad-version` | `check_header_version_and_future_time_regtest` + `h06_version_floors_at_bip34_66_65` + `assemble_second_block_rejects_stale_nversion` |
 | H10 | Testnet min-difficulty after 20 min | `expected_next_bits` = powLimit | `testnet_min_difficulty_after_20_minute_gap` |
 
 Location: `crates/rbitcoin-test/tests/consensus_rules.rs`.
