@@ -191,7 +191,7 @@ impl From<MempoolError> for AcceptError {
 }
 
 /// Maturity, absolute finality (`is_final_tx`), and BIP68 at the next block.
-fn check_mempool_structural(
+pub fn check_mempool_structural(
     tx: &Transaction,
     chain_coins: &[Option<Coin>],
     tip: ChainTipCtx,
@@ -445,7 +445,7 @@ impl ActiveMempool {
         self.last_accept_stages = AcceptStageUs::default();
         let prep = match self.prepare_admit(tx, utxos, tip, 0, true) {
             Ok(p) => p,
-            Err(AcceptError::Orphaned(_)) => return Err(self.park_orphan(tx, utxos)),
+            Err(AcceptError::Orphaned(_)) => return Err(self.park_orphan(tx)),
             Err(e) => return Err(e),
         };
         self.last_accept_stages.utxo_us = prep.utxo_us;
@@ -456,7 +456,7 @@ impl ActiveMempool {
             .script_us
             .saturating_add(t_script.elapsed().as_micros() as u64);
         script_res?;
-        let r = self.commit_after_script(tx, prep, utxos, tip)?;
+        let r = self.commit_after_script(tx, prep, tip)?;
         self.promote_orphans_of(r.txid, utxos, tip);
         Ok(r)
     }
@@ -580,8 +580,9 @@ impl ActiveMempool {
         })
     }
 
-    /// Park `tx` in the orphanage (write-lock caller). Re-resolves missing parents.
-    pub fn park_orphan(&mut self, tx: &Transaction, utxos: &impl UtxoProvider) -> AcceptError {
+    /// Park `tx` in the orphanage (write-lock caller). Graph-only: any input
+    /// not created in-mempool is a missing parent (no chain UTXO lookup).
+    pub fn park_orphan(&mut self, tx: &Transaction) -> AcceptError {
         let txid = tx.compute_txid();
         if self.graph.get(&txid).is_some() {
             return AcceptError::Duplicate(txid);
@@ -595,9 +596,7 @@ impl ActiveMempool {
             if self.graph.creator(&op).is_some() {
                 continue;
             }
-            if utxos.get_coin(&op).is_none() {
-                missing.insert(op.txid);
-            }
+            missing.insert(op.txid);
         }
         if missing.is_empty() {
             return AcceptError::MissingPrevout(tx.input[0].previous_output);
@@ -609,17 +608,27 @@ impl ActiveMempool {
         }
     }
 
+    /// Take orphans waiting on `parent` (hub promote outside the write lock).
+    pub fn take_orphan_children(&mut self, parent: Txid) -> Vec<Transaction> {
+        self.orphanage.take_children_of(&parent)
+    }
+
+    /// Drop orphans that are themselves in `block_txids`.
+    pub fn erase_orphans_for_block(&mut self, block_txids: &[Txid]) {
+        self.orphanage.erase_for_block(block_txids);
+    }
+
     /// Re-check + RBF + durable insert after scripts verified off-lock.
     ///
     /// Fail closed on race (duplicate, conflict set changed, parent gone).
+    /// Chain coins come from `prep` (resolved under read); no UTXO provider.
     pub fn commit_after_script(
         &mut self,
         tx: &Transaction,
         prep: PreparedAdmit,
-        utxos: &impl UtxoProvider,
         tip: ChainTipCtx,
     ) -> Result<AcceptResult, AcceptError> {
-        let (conflict_set, fee_sat, weight) = self.plan_after_script(tx, prep, utxos, tip)?;
+        let (conflict_set, fee_sat, weight) = self.plan_after_script(tx, prep, tip)?;
         let txid = tx.compute_txid();
 
         let mut replaced_scripthashes: Vec<[u8; 32]> = Vec::new();
@@ -691,10 +700,9 @@ impl ActiveMempool {
         &self,
         tx: &Transaction,
         prep: PreparedAdmit,
-        utxos: &impl UtxoProvider,
         tip: ChainTipCtx,
     ) -> Result<AcceptResult, AcceptError> {
-        let (conflict_set, fee_sat, weight) = self.plan_after_script(tx, prep, utxos, tip)?;
+        let (conflict_set, fee_sat, weight) = self.plan_after_script(tx, prep, tip)?;
         Ok(AcceptResult {
             txid: tx.compute_txid(),
             fee_sat,
@@ -709,7 +717,6 @@ impl ActiveMempool {
         &self,
         tx: &Transaction,
         prep: PreparedAdmit,
-        utxos: &impl UtxoProvider,
         tip: ChainTipCtx,
     ) -> Result<(BTreeSet<Txid>, u64, u64), AcceptError> {
         let _ = tip;
@@ -726,7 +733,7 @@ impl ActiveMempool {
 
         let mut direct_conflicts = BTreeSet::new();
         let mut parent_txids = BTreeSet::new();
-        for inp in &tx.input {
+        for (i, inp) in tx.input.iter().enumerate() {
             let op = inp.previous_output;
             if let Some(c) = self.graph.conflict_txid(&op) {
                 if c != txid {
@@ -745,13 +752,12 @@ impl ActiveMempool {
                 if self.bodies.get(&creator).is_none() {
                     return Err(AcceptError::Durable("parent body missing".into()));
                 }
-            } else if utxos.get_coin(&op).is_none() {
+            } else if prep.chain_coins.get(i).and_then(|c| c.as_ref()).is_none() {
                 return Err(AcceptError::MissingPrevout(op));
             }
         }
         let _ = prep.direct_conflicts;
         let _ = prep.parent_txids;
-        let _ = prep.chain_coins;
 
         let fee_sat = prep.fee_sat;
         let weight = prep.weight;
@@ -823,7 +829,7 @@ impl ActiveMempool {
             .script_us
             .saturating_add(t_script.elapsed().as_micros() as u64);
         script_res?;
-        self.commit_after_script(tx, prep, utxos, tip)
+        self.commit_after_script(tx, prep, tip)
     }
 
     /// Electrum scripthash = SHA256(scriptPubKey) (same as store `script_hash`).
@@ -925,15 +931,8 @@ impl ActiveMempool {
         Ok(removed)
     }
 
-    /// Accept an ancestor package (CPFP): txs must be parent-before-child.
-    ///
-    /// On any failure, already-accepted members of this package are rolled back.
-    pub fn accept_package(
-        &mut self,
-        txs: &[Transaction],
-        utxos: &impl UtxoProvider,
-        tip: ChainTipCtx,
-    ) -> Result<Vec<AcceptResult>, AcceptError> {
+    /// Count / weight / topo checks for an ancestor package (no graph lock).
+    pub fn check_package_shape(txs: &[Transaction]) -> Result<(), AcceptError> {
         if txs.is_empty() {
             return Err(AcceptError::PackageEmpty);
         }
@@ -968,6 +967,19 @@ impl ActiveMempool {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Accept an ancestor package (CPFP): txs must be parent-before-child.
+    ///
+    /// On any failure, already-accepted members of this package are rolled back.
+    pub fn accept_package(
+        &mut self,
+        txs: &[Transaction],
+        utxos: &impl UtxoProvider,
+        tip: ChainTipCtx,
+    ) -> Result<Vec<AcceptResult>, AcceptError> {
+        Self::check_package_shape(txs)?;
 
         self.last_accept_stages = AcceptStageUs::default();
         let mut accepted: Vec<AcceptResult> = Vec::with_capacity(txs.len());
@@ -1025,13 +1037,8 @@ impl ActiveMempool {
         )
     }
 
-    /// Like [`remove_for_block`], then promote orphans of confirmed parents via `utxos`.
-    pub fn remove_for_block_with_utxo(
-        &mut self,
-        block_txids: &[Txid],
-        utxos: &impl UtxoProvider,
-        tip: ChainTipCtx,
-    ) -> Result<usize, AcceptError> {
+    /// Remove live graph entries listed in `block_txids` (no orphan promote).
+    pub fn remove_live_txids(&mut self, block_txids: &[Txid]) -> Result<usize, AcceptError> {
         let mut n = 0usize;
         for txid in block_txids {
             if self.graph.contains(txid) {
@@ -1039,16 +1046,25 @@ impl ActiveMempool {
                 n += 1;
             }
         }
-        // Re-accept orphans waiting on confirmed parents first, then drop any
-        // orphan that was itself included in the block.
-        for txid in block_txids {
-            self.promote_orphans_of(*txid, utxos, tip);
-        }
-        self.orphanage.erase_for_block(block_txids);
         if n > 0 {
             let _ = self.maybe_compact();
             let _ = self.store.persist_if_dirty();
         }
+        Ok(n)
+    }
+
+    /// Like [`remove_for_block`], then promote orphans of confirmed parents via `utxos`.
+    pub fn remove_for_block_with_utxo(
+        &mut self,
+        block_txids: &[Txid],
+        utxos: &impl UtxoProvider,
+        tip: ChainTipCtx,
+    ) -> Result<usize, AcceptError> {
+        let n = self.remove_live_txids(block_txids)?;
+        for txid in block_txids {
+            self.promote_orphans_of(*txid, utxos, tip);
+        }
+        self.orphanage.erase_for_block(block_txids);
         Ok(n)
     }
 
@@ -1999,11 +2015,41 @@ mod tests {
         mp.accept_tx(&low, &utxos, TIP_OK).unwrap();
         let prep = mp.prepare_admit(&high, &utxos, TIP_OK, 0, true).unwrap();
         let r = mp
-            .evaluate_after_script(&high, prep, &utxos, TIP_OK)
+            .evaluate_after_script(&high, prep, TIP_OK)
             .expect("preview");
         assert!(r.replaced.contains(&low_id));
         assert!(mp.graph.contains(&low_id));
         assert!(!mp.graph.contains(&high.compute_txid()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn commit_after_script_does_not_take_utxo_provider() {
+        let dir = tmp_dir();
+        let (op, _, utxos) = chain_utxo(100_000);
+        let tx = spend_tx(op, 99_000);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let prep = mp.prepare_admit(&tx, &utxos, TIP_OK, 0, true).unwrap();
+        mp.commit_after_script(&tx, prep, TIP_OK)
+            .expect("commit uses prep.chain_coins");
+        assert!(mp.graph.contains(&tx.compute_txid()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn park_orphan_is_graph_only() {
+        let dir = tmp_dir();
+        let tx = spend_tx(
+            OutPoint {
+                txid: Txid::from_byte_array([9u8; 32]),
+                vout: 0,
+            },
+            1,
+        );
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let e = mp.park_orphan(&tx);
+        assert!(matches!(e, AcceptError::Orphaned(_)), "{e}");
+        assert_eq!(mp.orphan_count(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
