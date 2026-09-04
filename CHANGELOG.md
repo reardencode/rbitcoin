@@ -29,7 +29,12 @@ before 1.0).
   mines a byte-identical 100-block empty pad, then compares height-101
   blocks that spend the mature height-1 `OP_TRUE` coinbase. Same oracle and
   verdict-only contract. Default-suite pins use a 3-block pad for rewind
-  keep-height only. Q-30 stays Open (BIP324 / P2P / dual-chain still later).
+  keep-height only. Q-30 stays Open (BIP324 / P2P still later).
+
+- **Q-30 2-block fork differential:** nightly `block_fork_differential`
+  holds an equal-work sibling of a pad+1 stem, then compares the heavier
+  child (reorg). Same v31.1 `bitcoind` oracle and verdict-only contract.
+  Q-30 stays Open (BIP324 / compact P2P still later).
 
 ### Fixed
 
