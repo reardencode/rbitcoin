@@ -900,7 +900,7 @@ pub async fn peer_session_with(
                                                 || !mp.relay_enabled())
                                     });
                                     if peer_ok
-                                        && mp.contains(&txid)
+                                        && mp.try_contains(&txid)
                                         && (mp.relay_enabled() || mp.is_unbroadcast(&txid))
                                     {
                                         let peer_min = session
@@ -908,7 +908,8 @@ pub async fn peer_session_with(
                                             .map(|s| s.minfeefilter_sat_kvb())
                                             .unwrap_or(0);
                                         if peer_min > 0 {
-                                            if let Some((fee, weight)) = mp.get_live_meta(&txid) {
+                                            if let Some((fee, weight)) = mp.try_get_live_meta(&txid)
+                                            {
                                                 let rate =
                                                     rbitcoin_consensus::policy::fee_rate_sat_per_kvb(
                                                         fee, weight,
@@ -918,7 +919,7 @@ pub async fn peer_session_with(
                                                 }
                                             }
                                         }
-                                        let inv = if let Some(tx) = mp.get_tx(&txid) {
+                                        let inv = if let Some(tx) = mp.try_get_tx(&txid) {
                                             Inventory::WTx(tx.compute_wtxid())
                                         } else {
                                             Inventory::WitnessTransaction(txid)
@@ -1268,17 +1269,23 @@ struct PendingCmpct {
     version: u32,
 }
 
-/// Snapshot live mempool txs for short-id fill (owned so map can borrow them).
-fn mempool_live_txs(hub: &ChainHub) -> Vec<Transaction> {
+/// Clone only mempool bodies whose short-ids appear in `hsi` (never `list_live`).
+fn mempool_shortid_txs(
+    hub: &ChainHub,
+    header: &bitcoin::block::Header,
+    nonce: u64,
+    version: u32,
+    short_ids: &[bitcoin::bip152::ShortId],
+) -> Vec<Transaction> {
     hub.mempool()
-        .map(|mp| mp.list_live().into_iter().map(|(_, _, _, tx)| tx).collect())
+        .and_then(|mp| mp.try_clone_matching_shortids(header, nonce, version, short_ids))
         .unwrap_or_default()
 }
 
 /// Reconstruct a compact block from prefilled txs plus mempool short-ids.
 /// Coinbase-only compact has no short-ids; an empty mempool map still fills.
 fn try_fill_cmpct(hub: &ChainHub, hsi: &HeaderAndShortIds, version: u32) -> Option<Block> {
-    let live = mempool_live_txs(hub);
+    let live = mempool_shortid_txs(hub, &hsi.header, hsi.nonce, version, &hsi.short_ids);
     let avail = crate::compact::shortid_map_from_txs(&hsi.header, hsi.nonce, version, live.iter());
     crate::compact::try_reconstruct(hsi, &avail, version).ok()
 }
@@ -1292,7 +1299,7 @@ fn try_cmpct_missing(hub: &ChainHub, hsi: &HeaderAndShortIds, version: u32) -> O
     if hub.mempool().is_none() {
         return None;
     }
-    let live = mempool_live_txs(hub);
+    let live = mempool_shortid_txs(hub, &hsi.header, hsi.nonce, version, &hsi.short_ids);
     let avail = crate::compact::shortid_map_from_txs(&hsi.header, hsi.nonce, version, live.iter());
     match crate::compact::try_reconstruct(hsi, &avail, version) {
         Ok(_) => Some(Vec::new()),
@@ -1318,7 +1325,7 @@ pub fn force_announce_txid(hub: &ChainHub, peers: &crate::peers::PeerHub, txid: 
     let Some(mp) = hub.mempool() else {
         return;
     };
-    let Some(tx) = mp.get_tx(&txid) else {
+    let Some(tx) = mp.try_get_tx(&txid) else {
         return;
     };
     let w = tx.compute_wtxid();
@@ -1331,7 +1338,7 @@ pub fn force_announce_txid(hub: &ChainHub, peers: &crate::peers::PeerHub, txid: 
         }
         let peer_min = s.minfeefilter_sat_kvb();
         if peer_min > 0 {
-            if let Some((fee, weight)) = mp.get_live_meta(&txid) {
+            if let Some((fee, weight)) = mp.try_get_live_meta(&txid) {
                 let rate = rbitcoin_consensus::policy::fee_rate_sat_per_kvb(fee, weight);
                 if rate < peer_min {
                     continue;
@@ -1373,7 +1380,10 @@ fn queue_due_tx_invs(
     }
     let mut n = 0u32;
     let mut max_ann = session.last_inv_sequence();
-    for (txid, w) in mp.list_live_wtxids() {
+    let Some(live_wtx) = mp.try_list_live_wtxids() else {
+        return;
+    };
+    for (txid, w) in live_wtx {
         if from_this_peer.contains_key(&txid) {
             continue;
         }
@@ -1396,7 +1406,7 @@ fn queue_due_tx_invs(
         }
         let peer_min = session.minfeefilter_sat_kvb();
         if peer_min > 0 {
-            if let Some((fee, weight)) = mp.get_live_meta(&txid) {
+            if let Some((fee, weight)) = mp.try_get_live_meta(&txid) {
                 let rate = rbitcoin_consensus::policy::fee_rate_sat_per_kvb(fee, weight);
                 if rate < peer_min {
                     continue;
@@ -1438,7 +1448,13 @@ fn apply_cmpct_blocktxn(
     pc: &PendingCmpct,
     bt: &BlockTransactions,
 ) -> Result<Block, ()> {
-    let live = mempool_live_txs(hub);
+    let live = mempool_shortid_txs(
+        hub,
+        &pc.hsi.header,
+        pc.hsi.nonce,
+        pc.version,
+        &pc.hsi.short_ids,
+    );
     let avail =
         crate::compact::shortid_map_from_txs(&pc.hsi.header, pc.hsi.nonce, pc.version, live.iter());
     crate::compact::apply_block_transactions(&pc.hsi, &pc.missing, bt, &avail, pc.version)
@@ -1641,7 +1657,7 @@ async fn handle_peer_frame(
                     }
                     Inventory::Transaction(txid) | Inventory::WitnessTransaction(txid) => {
                         if let Some(mp) = hub.mempool() {
-                            if let Some(tx) = mp.get_tx(txid) {
+                            if let Some(tx) = mp.try_get_tx(txid) {
                                 let w = tx.compute_wtxid();
                                 let announced = session.is_some_and(|s| s.has_announced_wtx(&w));
                                 let last_inv = session.map(|s| s.last_inv_sequence()).unwrap_or(1);
@@ -1670,7 +1686,7 @@ async fn handle_peer_frame(
                             rbitcoin_log::trace!("{}", received_getdata_wtx_log(wtxid, s.id));
                         }
                         if let Some(mp) = hub.mempool() {
-                            if let Some(tx) = mp.get_tx_by_wtxid(wtxid) {
+                            if let Some(tx) = mp.try_get_tx_by_wtxid(wtxid) {
                                 let announced = session.is_some_and(|s| s.has_announced_wtx(wtxid));
                                 let last_inv = session.map(|s| s.last_inv_sequence()).unwrap_or(1);
                                 if announced || mp.is_relay_servable(wtxid, last_inv) {
@@ -1785,7 +1801,7 @@ async fn handle_peer_frame(
                         }
                         if relay {
                             if let Some(mp) = hub.mempool() {
-                                if !mp.contains(txid) {
+                                if !mp.try_contains(txid) {
                                     want.push(Inventory::WitnessTransaction(*txid));
                                     inv_tx_n = inv_tx_n.saturating_add(1);
                                 }
@@ -1798,7 +1814,7 @@ async fn handle_peer_frame(
                         }
                         if relay {
                             if let Some(mp) = hub.mempool() {
-                                if !mp.contains_wtxid(wtxid) {
+                                if !mp.try_contains_wtxid(wtxid) {
                                     want.push(Inventory::WTx(*wtxid));
                                     inv_tx_n = inv_tx_n.saturating_add(1);
                                 }

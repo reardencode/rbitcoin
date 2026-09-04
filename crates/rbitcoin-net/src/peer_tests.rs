@@ -1734,7 +1734,7 @@ fn cmpct_helpers_without_mempool_and_queue_out_closed() {
         "coinbase-only compact fills from prefilled txs without a mempool"
     );
     assert!(try_cmpct_missing(&hub, &hsi, 2).is_none());
-    assert!(mempool_live_txs(&hub).is_empty());
+    assert!(hub.mempool().is_none());
 
     // Closed channel → Protocol error.
     let (tx, rx) = mpsc::unbounded_channel();
@@ -3198,7 +3198,15 @@ fn cmpct_helpers_with_mempool_live_and_blocktxn() {
     let missing = try_cmpct_missing(&hub, &hsi, 2).expect("mempool present");
     assert_eq!(missing, vec![1]); // spend short-id missing
     assert!(try_fill_cmpct(&hub, &hsi, 2).is_none());
-    assert!(mempool_live_txs(&hub).is_empty());
+    let mp = hub.mempool().unwrap();
+    let _ = mp.sample_reset_perf();
+    let _ = try_fill_cmpct(&hub, &hsi, 2);
+    let fill = mp.sample_reset_perf();
+    assert_eq!(
+        fill.list_live, 0,
+        "compact fill must not list_live/clone every body (got {})",
+        fill.list_live
+    );
 
     let pc = PendingCmpct {
         hsi: hsi.clone(),
