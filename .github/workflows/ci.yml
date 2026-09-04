@@ -105,6 +105,10 @@ jobs:
         run: ./scripts/stage-native-artifacts.test.sh
       - name: fuzz-run self-test
         run: ./scripts/fuzz-run.test.sh
+      - name: release-pin self-test
+        run: ./scripts/core-functional/release_pin.test.sh
+      - name: fetch-bitcoind self-test
+        run: ./scripts/core-functional/fetch-bitcoind.test.sh
       - name: miri-run self-test
         run: ./scripts/miri.test.sh
       - name: coverage-crap self-test
