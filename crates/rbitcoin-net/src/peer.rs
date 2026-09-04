@@ -1356,6 +1356,54 @@ pub fn force_announce_txid(hub: &ChainHub, peers: &crate::peers::PeerHub, txid: 
     }
 }
 
+fn tx_inv_candidate_ok(
+    mp: &crate::tx_relay::MempoolHub,
+    session: &crate::peers::LivePeer,
+    from_this_peer: &HashMap<bitcoin::Txid, ()>,
+    txid: bitcoin::Txid,
+    w: bitcoin::Wtxid,
+    clock_due: bool,
+    inbound_age_gate: bool,
+) -> bool {
+    if from_this_peer.contains_key(&txid) {
+        return false;
+    }
+    if session.conn_type == crate::peers::PeerConnType::BlockRelay {
+        return false;
+    }
+    if !mp.relay_enabled() && !mp.is_unbroadcast(&txid) {
+        return false;
+    }
+    if session.has_announced_wtx(&w) {
+        return false;
+    }
+    if mp
+        .accept_gen(&w)
+        .is_some_and(|g| g < session.inv_gen_floor())
+    {
+        return false;
+    }
+    let peer_min = session.minfeefilter_sat_kvb();
+    if peer_min > 0 {
+        if let Some((fee, weight)) = mp.try_get_live_meta(&txid) {
+            let rate = rbitcoin_consensus::policy::fee_rate_sat_per_kvb(fee, weight);
+            if rate < peer_min {
+                return false;
+            }
+        }
+    }
+    let local = !mp.relay_enabled() && mp.is_unbroadcast(&txid);
+    let age_due_this = mp.tx_inv_due(&w);
+    if inbound_age_gate {
+        if !age_due_this {
+            return false;
+        }
+    } else if !clock_due && !local && !age_due_this {
+        return false;
+    }
+    true
+}
+
 fn queue_due_tx_invs(
     hub: &ChainHub,
     session: &crate::peers::LivePeer,
@@ -1378,60 +1426,60 @@ fn queue_due_tx_invs(
     if !clock_due && !age_due && !unbroadcast_due {
         return;
     }
+    let inbound_age_gate =
+        session.inbound && mp.relay_enabled() && !session.hub().is_some_and(|h| h.is_noban());
     let mut n = 0u32;
     let mut max_ann = session.last_inv_sequence();
-    let Some(live_wtx) = mp.try_list_live_wtxids() else {
-        return;
-    };
-    for (txid, w) in live_wtx {
-        if from_this_peer.contains_key(&txid) {
-            continue;
-        }
-        if session.conn_type == crate::peers::PeerConnType::BlockRelay {
-            continue;
-        }
-        if !mp.relay_enabled() && !mp.is_unbroadcast(&txid) {
-            continue;
-        }
-        if session.has_announced_wtx(&w) {
-            continue;
-        }
-        // `p2p_tx_privacy.py`: do not INV txs accepted before this peer's
-        // post-verack register (`inv_gen_floor`).
-        if mp
-            .accept_gen(&w)
-            .is_some_and(|g| g < session.inv_gen_floor())
-        {
-            continue;
-        }
-        let peer_min = session.minfeefilter_sat_kvb();
-        if peer_min > 0 {
-            if let Some((fee, weight)) = mp.try_get_live_meta(&txid) {
-                let rate = rbitcoin_consensus::policy::fee_rate_sat_per_kvb(fee, weight);
-                if rate < peer_min {
-                    continue;
-                }
-            }
-        }
-        let local = !mp.relay_enabled() && mp.is_unbroadcast(&txid);
-        let age_due_this = mp.tx_inv_due(&w);
-        // Inbound + relay on: a mocktime jump / request_tx_inv only
-        // flushes txs whose own 30s clock has elapsed. clock_due must
-        // not INV a brand-new sendraw (`mempool_reorg.py:122`).
-        let inbound_age_gate =
-            session.inbound && mp.relay_enabled() && !session.hub().is_some_and(|h| h.is_noban());
-        if inbound_age_gate {
-            if !age_due_this {
+    let mp_now = mp.relay_now_secs();
+    if clock_due || unbroadcast_due {
+        let Some(live_wtx) = mp.try_list_live_wtxids() else {
+            return;
+        };
+        for (txid, w) in live_wtx {
+            if !tx_inv_candidate_ok(
+                mp,
+                session,
+                from_this_peer,
+                txid,
+                w,
+                clock_due,
+                inbound_age_gate,
+            ) {
                 continue;
             }
-        } else if !clock_due && !local && !age_due_this {
-            continue;
+            session.note_announced_wtx(w);
+            let _ = queue_out(out_tx, NetworkMessage::Inv(vec![Inventory::WTx(w)]));
+            n += 1;
+            if let Some(seq) = mp.relay_seq_of(&w) {
+                max_ann = max_ann.max(seq.saturating_add(1));
+            }
         }
-        session.note_announced_wtx(w);
-        let _ = queue_out(out_tx, NetworkMessage::Inv(vec![Inventory::WTx(w)]));
-        n += 1;
-        if let Some(seq) = mp.relay_seq_of(&w) {
-            max_ann = max_ann.max(seq.saturating_add(1));
+        if let Some((due, gen)) = mp.try_age_inv_watermark(mp_now) {
+            session.note_age_inv_seen(due, gen);
+        }
+    } else {
+        let Some((last, due_wtx)) = mp.try_age_inv_since(session.age_inv_seen(), mp_now) else {
+            return;
+        };
+        session.note_age_inv_seen(last.0, last.1);
+        for (txid, w) in due_wtx {
+            if !tx_inv_candidate_ok(
+                mp,
+                session,
+                from_this_peer,
+                txid,
+                w,
+                false,
+                inbound_age_gate,
+            ) {
+                continue;
+            }
+            session.note_announced_wtx(w);
+            let _ = queue_out(out_tx, NetworkMessage::Inv(vec![Inventory::WTx(w)]));
+            n += 1;
+            if let Some(seq) = mp.relay_seq_of(&w) {
+                max_ann = max_ann.max(seq.saturating_add(1));
+            }
         }
     }
     if n > 0 {

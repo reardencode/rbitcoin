@@ -14,9 +14,11 @@ use rbitcoin_mempool::{
     weight_above_from_chunks, AcceptError, AcceptResult, ActiveMempool, ChainTipCtx, Chunk, Coin,
     FeeFlowMeter, UtxoProvider, BLOCK_WEIGHT_WU,
 };
+use rbitcoin_primitives::{Fk, Height};
 use rbitcoin_query::Query;
 use rbitcoin_store::OutputRecord;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -89,16 +91,53 @@ impl FeeSnapshot {
     }
 }
 
+/// BIP68 time-form relative lock (`SEQUENCE_LOCKTIME_TYPE_FLAG`, disable unset).
+fn tx_has_bip68_time_lock(tx: &Transaction) -> bool {
+    if (tx.version.0 as u32) < 2 {
+        return false;
+    }
+    const DISABLE: u32 = 1 << 31;
+    const TYPE_FLAG: u32 = 1 << 22;
+    tx.input.iter().any(|inp| {
+        let seq = inp.sequence.to_consensus_u32();
+        seq & DISABLE == 0 && seq & TYPE_FLAG != 0
+    })
+}
+
 /// Resolve prevouts from the relational archive (confirmed **unspent** UTXOs).
 ///
 /// Returns no coin when the create is unknown **or** a confirmed-strong spender
 /// exists (finding 010 — mirror Core coins-view spentness).
 pub struct QueryUtxoProvider<'a> {
     pub query: &'a Query,
+    need_create_mtp: AtomicBool,
+    meter_get_coin: Option<&'a AtomicU64>,
+    meter_block_tx_fks: Option<&'a AtomicU64>,
+    meter_create_mtp: Option<&'a AtomicU64>,
+}
+
+impl<'a> QueryUtxoProvider<'a> {
+    pub fn new(query: &'a Query) -> Self {
+        Self {
+            query,
+            need_create_mtp: AtomicBool::new(false),
+            meter_get_coin: None,
+            meter_block_tx_fks: None,
+            meter_create_mtp: None,
+        }
+    }
 }
 
 impl UtxoProvider for QueryUtxoProvider<'_> {
+    fn note_spender(&self, tx: &Transaction) {
+        self.need_create_mtp
+            .store(tx_has_bip68_time_lock(tx), Ordering::Relaxed);
+    }
+
     fn get_coin(&self, op: &OutPoint) -> Option<Coin> {
+        if let Some(m) = self.meter_get_coin {
+            m.fetch_add(1, Ordering::Relaxed);
+        }
         let tid = op.txid.to_byte_array();
         let (fk, rec) = self.query.get_tx_by_txid(&tid).ok().flatten()?;
         // Confirmed-strong spent ⇒ absent (do not admit double-spends of chain UTXOs).
@@ -121,29 +160,33 @@ impl UtxoProvider for QueryUtxoProvider<'_> {
         if create_height > tip {
             return None;
         }
-        // Coinbase: null prevout on input 0, or first tx in its confirmed block.
-        // Either signal is enough — `block_tx_fks` can miss after a disconnect
-        // while the input record still says coinbase (`mempool_reorg`).
-        let input_cb = self
-            .query
-            .tx_input_at_fk(fk, &rec, 0)
-            .ok()
-            .map(|i| i.is_coinbase() || i.prev_index == u32::MAX)
-            .unwrap_or(false);
-        let first_in_block = create_height > 0
-            && self
-                .query
-                .block_tx_fks(rbitcoin_primitives::Height(create_height))
-                .ok()
-                .and_then(|fks| fks.first().copied())
-                == Some(fk);
-        let is_coinbase = input_cb || first_in_block;
-        let create_mtp = if create_height == 0 {
+        // Coinbase: null prevout on input 0. `block_tx_fks` only when the input
+        // record is missing (it can miss after a disconnect while the input
+        // still says coinbase — `mempool_reorg`).
+        let is_coinbase = match self.query.tx_input_at_fk(fk, &rec, 0) {
+            Ok(i) => i.is_coinbase() || i.prev_index == u32::MAX,
+            Err(_) => {
+                if let Some(m) = self.meter_block_tx_fks {
+                    m.fetch_add(1, Ordering::Relaxed);
+                }
+                create_height > 0
+                    && self
+                        .query
+                        .block_tx_fks(Height(create_height))
+                        .ok()
+                        .and_then(|fks| fks.first().copied())
+                        == Some(fk)
+            }
+        };
+        let create_mtp = if create_height == 0 || !self.need_create_mtp.load(Ordering::Relaxed) {
             0
         } else {
+            if let Some(m) = self.meter_create_mtp {
+                m.fetch_add(1, Ordering::Relaxed);
+            }
             rbitcoin_consensus::median_time_past(
                 self.query,
-                rbitcoin_primitives::Height(create_height.saturating_sub(1)),
+                Height(create_height.saturating_sub(1)),
             )
             .unwrap_or(0)
         };
@@ -261,6 +304,20 @@ pub struct MempoolPerfSample {
     pub list_live: u64,
     /// Calls to [`MempoolHub::list_live_meta`] (full live-set scan).
     pub list_live_meta: u64,
+    /// Calls to [`MempoolHub::list_live_wtxids`] / `try_list_live_wtxids`.
+    pub list_live_wtxids: u64,
+    /// Full `accept_at` walks for INV age (`any_tx_inv_due` before the due-log).
+    pub age_scan: u64,
+    /// `expire_stale` walks of live accept times.
+    pub expire_full_scans: u64,
+    /// Tip MTP computed for accept ctx (cache miss).
+    pub tip_mtp: u64,
+    /// `QueryUtxoProvider::get_coin` calls on the hub provider.
+    pub get_coin: u64,
+    /// `block_tx_fks` from `get_coin` (missing input-0 record only).
+    pub get_coin_block_tx_fks: u64,
+    /// Create-block MTP from `get_coin` (BIP68 time-lock spends only).
+    pub get_coin_create_mtp: u64,
 }
 
 /// Core default `-mempoolexpiry` (336 hours) in seconds.
@@ -305,6 +362,13 @@ pub struct MempoolHub {
     meter_list_live: AtomicU64,
     /// Full live-set meta scans ([`Self::list_live_meta`]).
     meter_list_live_meta: AtomicU64,
+    meter_list_live_wtxids: AtomicU64,
+    meter_age_scan: AtomicU64,
+    meter_expire_full_scans: AtomicU64,
+    meter_tip_mtp: AtomicU64,
+    meter_get_coin: AtomicU64,
+    meter_get_coin_block_tx_fks: AtomicU64,
+    meter_get_coin_create_mtp: AtomicU64,
     /// Live mempool txs by Electrum scripthash (updated on accept/remove).
     sh_index: Mutex<MempoolShIndex>,
     /// `{datadir}/mempool` — sidecar `unbroadcast` lives here.
@@ -338,6 +402,12 @@ pub struct MempoolHub {
     /// Core `-minrelaytxfee` overlay (sat/kvB). Session FeeFilter reads this
     /// without taking `inner`.
     min_relay_sat_kvb: AtomicU64,
+    /// Age-INV log: `(due_secs, accept_gen) → (txid, wtxid)`. Not `inner`.
+    age_inv: Mutex<BTreeMap<(u64, u64), (Txid, Wtxid)>>,
+    /// Min live `accept_at` (`u64::MAX` if empty).
+    min_live_accept_at: AtomicU64,
+    /// Cached tip MTP for accept (`{header_fk, ctx}`).
+    tip_ctx: Mutex<Option<(Fk, ChainTipCtx)>>,
 }
 
 impl MempoolHub {
@@ -411,6 +481,13 @@ impl MempoolHub {
             meter_spent_body_loads: AtomicU64::new(0),
             meter_list_live: AtomicU64::new(0),
             meter_list_live_meta: AtomicU64::new(0),
+            meter_list_live_wtxids: AtomicU64::new(0),
+            meter_age_scan: AtomicU64::new(0),
+            meter_expire_full_scans: AtomicU64::new(0),
+            meter_tip_mtp: AtomicU64::new(0),
+            meter_get_coin: AtomicU64::new(0),
+            meter_get_coin_block_tx_fks: AtomicU64::new(0),
+            meter_get_coin_create_mtp: AtomicU64::new(0),
             sh_index: Mutex::new(MempoolShIndex::new()),
             unbroadcast: Mutex::new(unbroadcast),
             reorg_servable: Mutex::new(HashSet::new()),
@@ -428,6 +505,9 @@ impl MempoolHub {
             ),
             fee_deltas: Mutex::new(HashMap::new()),
             template_updates: AtomicU64::new(0),
+            age_inv: Mutex::new(BTreeMap::new()),
+            min_live_accept_at: AtomicU64::new(u64::MAX),
+            tip_ctx: Mutex::new(None),
         };
         {
             let mut u = hub.unbroadcast.lock().unwrap();
@@ -444,9 +524,7 @@ impl MempoolHub {
         for o in &tx.output {
             out.push(script_hash(o.script_pubkey.as_bytes()));
         }
-        let provider = QueryUtxoProvider {
-            query: self.query.as_ref(),
-        };
+        let provider = QueryUtxoProvider::new(self.query.as_ref());
         for inp in &tx.input {
             let op = inp.previous_output;
             let spk = if let Some(creator) = mp.graph.creator(&op) {
@@ -479,12 +557,28 @@ impl MempoolHub {
         *self.sh_index.lock().unwrap() = idx;
     }
 
-    fn index_txid(&self, txid: Txid, tx: &Transaction) {
-        let shs = {
-            let g = self.lock_read();
-            self.collect_tx_scripthashes(tx, &g)
-        };
+    fn index_txid(&self, txid: Txid, tx: &Transaction, prevouts: &[TxOut]) {
+        use rbitcoin_store::script_hash;
+        let mut shs = Vec::with_capacity(tx.output.len() + prevouts.len());
+        for o in &tx.output {
+            shs.push(script_hash(o.script_pubkey.as_bytes()));
+        }
+        for o in prevouts {
+            shs.push(script_hash(o.script_pubkey.as_bytes()));
+        }
+        shs.sort_unstable();
+        shs.dedup();
         self.sh_index.lock().unwrap().insert(txid, shs);
+    }
+
+    fn utxo_provider(&self) -> QueryUtxoProvider<'_> {
+        QueryUtxoProvider {
+            query: self.query.as_ref(),
+            need_create_mtp: AtomicBool::new(false),
+            meter_get_coin: Some(&self.meter_get_coin),
+            meter_block_tx_fks: Some(&self.meter_get_coin_block_tx_fks),
+            meter_create_mtp: Some(&self.meter_get_coin_create_mtp),
+        }
     }
 
     fn unindex_txid(&self, txid: &Txid) {
@@ -497,7 +591,7 @@ impl MempoolHub {
         }
     }
 
-    fn relay_now_secs(&self) -> u64 {
+    pub(crate) fn relay_now_secs(&self) -> u64 {
         let mock = self.mock_now.load(Ordering::Relaxed);
         if mock != 0 {
             return mock;
@@ -511,14 +605,18 @@ impl MempoolHub {
     fn insert_relay_maps(&self, txid: Txid, wtxid: Wtxid, seq: u64) {
         let at = self.relay_now_secs();
         let gen = self.next_accept_gen.fetch_add(1, Ordering::Relaxed);
+        let due = at.saturating_add(30);
         let mut by_tx = self.wtxid_by_txid.lock().unwrap();
         let mut seqs = self.relay_seq.lock().unwrap();
         let mut ats = self.accept_at.lock().unwrap();
         let mut gens = self.accept_gen.lock().unwrap();
+        let mut age = self.age_inv.lock().unwrap();
         by_tx.insert(txid, wtxid);
         seqs.insert(wtxid, seq);
         ats.insert(wtxid, at);
         gens.insert(wtxid, gen);
+        age.insert((due, gen), (txid, wtxid));
+        self.min_live_accept_at.fetch_min(at, Ordering::Relaxed);
     }
 
     fn remove_relay_maps(&self, txid: &Txid) {
@@ -526,10 +624,16 @@ impl MempoolHub {
         let mut seqs = self.relay_seq.lock().unwrap();
         let mut ats = self.accept_at.lock().unwrap();
         let mut gens = self.accept_gen.lock().unwrap();
+        let mut age = self.age_inv.lock().unwrap();
         if let Some(w) = by_tx.remove(txid) {
             seqs.remove(&w);
-            ats.remove(&w);
-            gens.remove(&w);
+            let at = ats.remove(&w);
+            let gen = gens.remove(&w);
+            if let (Some(at), Some(gen)) = (at, gen) {
+                age.remove(&(at.saturating_add(30), gen));
+            }
+            let min = ats.values().copied().min().unwrap_or(u64::MAX);
+            self.min_live_accept_at.store(min, Ordering::Relaxed);
         }
     }
 
@@ -614,6 +718,13 @@ impl MempoolHub {
             spent_body_loads: self.meter_spent_body_loads.swap(0, Ordering::Relaxed),
             list_live: self.meter_list_live.swap(0, Ordering::Relaxed),
             list_live_meta: self.meter_list_live_meta.swap(0, Ordering::Relaxed),
+            list_live_wtxids: self.meter_list_live_wtxids.swap(0, Ordering::Relaxed),
+            age_scan: self.meter_age_scan.swap(0, Ordering::Relaxed),
+            expire_full_scans: self.meter_expire_full_scans.swap(0, Ordering::Relaxed),
+            tip_mtp: self.meter_tip_mtp.swap(0, Ordering::Relaxed),
+            get_coin: self.meter_get_coin.swap(0, Ordering::Relaxed),
+            get_coin_block_tx_fks: self.meter_get_coin_block_tx_fks.swap(0, Ordering::Relaxed),
+            get_coin_create_mtp: self.meter_get_coin_create_mtp.swap(0, Ordering::Relaxed),
         }
     }
 
@@ -708,6 +819,11 @@ impl MempoolHub {
         if lim == 0 || now == 0 {
             return 0;
         }
+        let min_at = self.min_live_accept_at.load(Ordering::Relaxed);
+        if min_at == u64::MAX || now.saturating_sub(min_at) < lim {
+            return 0;
+        }
+        self.meter_expire_full_scans.fetch_add(1, Ordering::Relaxed);
         let expired_roots: Vec<Txid> = {
             let ats = self.accept_at.lock().unwrap();
             let by_tx = self.wtxid_by_txid.lock().unwrap();
@@ -778,24 +894,51 @@ impl MempoolHub {
     /// Any live wtxid has passed the 30s INV age gate (mocktime when set,
     /// otherwise wall clock). Does not clone bodies.
     pub fn any_tx_inv_due(&self) -> bool {
+        let min_at = self.min_live_accept_at.load(Ordering::Relaxed);
+        if min_at == u64::MAX {
+            return false;
+        }
         let now = self.relay_now_secs();
-        self.accept_at
-            .lock()
-            .unwrap()
-            .values()
-            .any(|at| now.saturating_sub(*at) >= 30)
+        now.saturating_sub(min_at) >= 30
     }
 
     /// Live txid + wtxid from the graph (no body clone).
     pub fn list_live_wtxids(&self) -> Vec<(Txid, Wtxid)> {
+        self.meter_list_live_wtxids.fetch_add(1, Ordering::Relaxed);
         let g = self.lock_read();
         g.graph.iter().map(|(txid, e)| (*txid, e.wtxid)).collect()
     }
 
     /// Session INV tick: never parks. Busy write → skip this tick.
     pub fn try_list_live_wtxids(&self) -> Option<Vec<(Txid, Wtxid)>> {
+        self.meter_list_live_wtxids.fetch_add(1, Ordering::Relaxed);
         let g = self.inner.try_read().ok()?;
         Some(g.graph.iter().map(|(txid, e)| (*txid, e.wtxid)).collect())
+    }
+
+    /// Newly age-due INVs after `seen` (`(due_secs, accept_gen)` cursor).
+    /// Session tick: `try_lock` — busy skip.
+    pub fn try_age_inv_since(
+        &self,
+        seen: (u64, u64),
+        now: u64,
+    ) -> Option<((u64, u64), Vec<(Txid, Wtxid)>)> {
+        let log = self.age_inv.try_lock().ok()?;
+        let mut last = seen;
+        let mut out = Vec::new();
+        for (&(due, gen), &(txid, wtxid)) in
+            log.range((Bound::Excluded(seen), Bound::Included((now, u64::MAX))))
+        {
+            out.push((txid, wtxid));
+            last = (due, gen);
+        }
+        Some((last, out))
+    }
+
+    /// Last due-log key with `due <= now` (advance cursor after a rare full walk).
+    pub fn try_age_inv_watermark(&self, now: u64) -> Option<(u64, u64)> {
+        let log = self.age_inv.try_lock().ok()?;
+        log.range(..=(now, u64::MAX)).next_back().map(|(k, _)| *k)
     }
 
     /// Drop every live mempool entry whose create is confirmed-strong on tip.
@@ -936,14 +1079,30 @@ impl MempoolHub {
     /// Confirmed tip snapshot for mempool structural checks (height + BIP113 MTP).
     fn chain_tip_ctx(&self) -> ChainTipCtx {
         use rbitcoin_consensus::median_time_past;
-        use rbitcoin_primitives::Height;
         let height = self.query.tip_height().map(|h| h.0).unwrap_or(0);
+        let fk = self.query.tip_header_fk().ok().flatten();
+        if let Some(fk) = fk {
+            if let Ok(c) = self.tip_ctx.lock() {
+                if let Some((cached_fk, ctx)) = *c {
+                    if cached_fk == fk && ctx.height == height {
+                        return ctx;
+                    }
+                }
+            }
+        }
         let mtp = if height == 0 {
             0
         } else {
+            self.meter_tip_mtp.fetch_add(1, Ordering::Relaxed);
             median_time_past(self.query.as_ref(), Height(height)).unwrap_or(0)
         };
-        ChainTipCtx { height, mtp }
+        let ctx = ChainTipCtx { height, mtp };
+        if let Some(fk) = fk {
+            if let Ok(mut c) = self.tip_ctx.lock() {
+                *c = Some((fk, ctx));
+            }
+        }
+        ctx
     }
 
     /// Accept a peer (or local) transaction when relay is enabled.
@@ -953,12 +1112,7 @@ impl MempoolHub {
     /// mutex so concurrent readers are not blocked by interpreter CPU.
     pub fn accept_tx(&self, tx: &Transaction) -> Result<AcceptResult, AcceptError> {
         crate::reactor::assert_not_reactor("mempool accept");
-        self.accept_with_utxo(
-            tx,
-            &QueryUtxoProvider {
-                query: self.query.as_ref(),
-            },
-        )
+        self.accept_with_utxo(tx, &self.utxo_provider())
     }
 
     fn accept_with_utxo(
@@ -966,6 +1120,7 @@ impl MempoolHub {
         tx: &Transaction,
         utxo: &impl rbitcoin_mempool::UtxoProvider,
     ) -> Result<AcceptResult, AcceptError> {
+        utxo.note_spender(tx);
         let t0 = Instant::now();
         let tip = self.chain_tip_ctx();
 
@@ -1010,6 +1165,7 @@ impl MempoolHub {
         }
         stages.script_us = t_script.elapsed().as_micros() as u64;
 
+        let prevouts = prep.prevouts.clone();
         let result = {
             let t_lock = Instant::now();
             let mut g = self.lock_write();
@@ -1036,7 +1192,7 @@ impl MempoolHub {
                 self.meter_accept_wall(us, true);
                 self.note_fee_flow_admit(r.weight, r.fee_sat);
                 self.push_recent(tx, &r);
-                self.index_txid(r.txid, tx);
+                self.index_txid(r.txid, tx, &prevouts);
                 let shs = self
                     .sh_index
                     .lock()
@@ -1097,9 +1253,8 @@ impl MempoolHub {
     /// Prepare + scripts + RBF/cluster checks with no mempool mutation.
     pub fn test_accept(&self, tx: &Transaction) -> Result<AcceptResult, AcceptError> {
         let t0 = Instant::now();
-        let utxo = QueryUtxoProvider {
-            query: self.query.as_ref(),
-        };
+        let utxo = self.utxo_provider();
+        utxo.note_spender(tx);
         let tip = self.chain_tip_ctx();
 
         let mut stages = rbitcoin_mempool::AcceptStageUs::default();
@@ -1280,14 +1435,13 @@ impl MempoolHub {
         crate::reactor::assert_not_reactor("mempool accept");
         rbitcoin_mempool::ActiveMempool::check_package_shape(txs)?;
         let t0 = Instant::now();
-        let utxo = QueryUtxoProvider {
-            query: self.query.as_ref(),
-        };
+        let utxo = self.utxo_provider();
         let tip = self.chain_tip_ctx();
         let mut stages = rbitcoin_mempool::AcceptStageUs::default();
         let mut lock_us = 0u64;
         let mut preps = Vec::with_capacity(txs.len());
         for tx in txs {
+            utxo.note_spender(tx);
             let prep = {
                 let t_lock = Instant::now();
                 let g = self.lock_read();
@@ -1334,6 +1488,7 @@ impl MempoolHub {
                 .saturating_add(t_script.elapsed().as_micros() as u64);
             preps.push(prep);
         }
+        let prevouts: Vec<Vec<TxOut>> = preps.iter().map(|p| p.prevouts.clone()).collect();
         let result = {
             let t_lock = Instant::now();
             let mut g = self.lock_write();
@@ -1364,14 +1519,18 @@ impl MempoolHub {
         match result {
             Ok(res) => {
                 let per = us / (res.len().max(1) as u64);
-                for (tx, r) in txs.iter().zip(res.iter()) {
+                for (i, (tx, r)) in txs.iter().zip(res.iter()).enumerate() {
                     self.meter_accept_wall(per, true);
                     self.note_fee_flow_admit(r.weight, r.fee_sat);
                     self.push_recent(tx, r);
                     for old in &r.replaced {
                         self.unindex_txid(old);
                     }
-                    self.index_txid(r.txid, tx);
+                    self.index_txid(
+                        r.txid,
+                        tx,
+                        prevouts.get(i).map(Vec::as_slice).unwrap_or(&[]),
+                    );
                     let shs = self
                         .sh_index
                         .lock()
@@ -1415,9 +1574,7 @@ impl MempoolHub {
     /// Evict live txids even when relay is off (`testmempoolaccept` dry-run
     /// rollback under `-blocksonly`). Do not sample confirm-memory.
     pub fn evict_live_txids(&self, txids: &[Txid]) -> usize {
-        let utxo = QueryUtxoProvider {
-            query: self.query.as_ref(),
-        };
+        let utxo = self.utxo_provider();
         let n = {
             let mut g = self.lock_write();
             g.remove_live_txids(txids).unwrap_or(0)
@@ -1449,9 +1606,7 @@ impl MempoolHub {
         if !self.relay_enabled() {
             return 0;
         }
-        let utxo = QueryUtxoProvider {
-            query: self.query.as_ref(),
-        };
+        let utxo = self.utxo_provider();
         let n = {
             let mut g = self.lock_write();
             for tid in txids {
@@ -1512,21 +1667,19 @@ impl MempoolHub {
 
     /// Re-admit txs after reorg disconnect (best-effort).
     pub fn reorg_reaccept(&self, txs: &[Transaction]) -> usize {
-        let utxo = QueryUtxoProvider {
-            query: self.query.as_ref(),
-        };
-        let mut admitted: Vec<&Transaction> = Vec::new();
+        let utxo = self.utxo_provider();
+        let mut admitted: Vec<(&Transaction, Vec<TxOut>)> = Vec::new();
         for tx in txs.iter().filter(|t| !t.is_coinbase()) {
-            if self.staged_reorg_admit(tx, &utxo).is_ok() {
+            if let Ok(prevouts) = self.staged_reorg_admit(tx, &utxo) {
                 let w = tx.compute_wtxid();
                 self.reorg_servable.lock().unwrap().insert(w);
                 self.insert_relay_maps(tx.compute_txid(), w, 0);
-                admitted.push(tx);
+                admitted.push((tx, prevouts));
             }
         }
         self.evict_after_reorg();
-        for tx in &admitted {
-            self.index_txid(tx.compute_txid(), tx);
+        for (tx, prevouts) in &admitted {
+            self.index_txid(tx.compute_txid(), tx, prevouts);
         }
         admitted.len()
     }
@@ -1535,7 +1688,8 @@ impl MempoolHub {
         &self,
         tx: &Transaction,
         utxo: &impl rbitcoin_mempool::UtxoProvider,
-    ) -> Result<AcceptResult, AcceptError> {
+    ) -> Result<Vec<TxOut>, AcceptError> {
+        utxo.note_spender(tx);
         let tip = self.chain_tip_ctx();
         let prep = {
             let g = self.lock_read();
@@ -1554,12 +1708,13 @@ impl MempoolHub {
         {
             return Err(AcceptError::Script(e.to_string()));
         }
-        let r = {
+        let prevouts = prep.prevouts.clone();
+        {
             let mut g = self.lock_write();
-            g.commit_after_script(tx, prep, tip)?
-        };
-        self.promote_orphans_staged(r.txid, utxo);
-        Ok(r)
+            g.commit_after_script(tx, prep, tip)?;
+        }
+        self.promote_orphans_staged(tx.compute_txid(), utxo);
+        Ok(prevouts)
     }
 
     /// True if this wtxid entered the mempool from a disconnected block.
@@ -1588,9 +1743,7 @@ impl MempoolHub {
     /// Drop live txs that are non-final / immature at the new tip (invalidate
     /// of empty blocks still has to evict mempool coinbase spends).
     pub fn evict_after_reorg(&self) {
-        let utxo = QueryUtxoProvider {
-            query: self.query.as_ref(),
-        };
+        let utxo = self.utxo_provider();
         let tip = self.chain_tip_ctx();
         loop {
             let snaps: Vec<(Txid, Transaction, Vec<bool>)> = {
@@ -1974,9 +2127,7 @@ impl MempoolHub {
         }
         let g = self.lock_read();
         let mut delta = 0i64;
-        let provider = QueryUtxoProvider {
-            query: self.query.as_ref(),
-        };
+        let provider = self.utxo_provider();
         for txid in want {
             let Some(tx) = g.get_tx(&txid) else { continue };
             for (vout, o) in tx.output.iter().enumerate() {
@@ -2256,7 +2407,7 @@ mod tests {
             let hub = MempoolHub::open(&mp, Arc::clone(&q)).unwrap();
             hub.set_relay_enabled(true);
             let mut ann_rx = hub.subscribe_announces();
-            let provider = QueryUtxoProvider { query: q.as_ref() };
+            let provider = QueryUtxoProvider::new(q.as_ref());
             let op0 = OutPoint {
                 txid: cbs[3],
                 vout: 0,
@@ -2422,6 +2573,199 @@ mod tests {
         let _ = std::fs::remove_dir_all(&store_dir);
     }
 
+    /// Young admits must not walk live accept times for expiry.
+    #[test]
+    fn expire_stale_skips_full_scan_when_nothing_can_expire() {
+        use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
+        use rbitcoin_primitives::Height;
+
+        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+        }
+        let store_dir = tmp();
+        let q = Query::open_or_create(&store_dir).unwrap();
+        let params = ChainParams::regtest();
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+        let (_tip, _tip_time, cbs) = rbitcoin_consensus::pad_empty_from(
+            &q,
+            &params,
+            genesis.block_hash(),
+            genesis.header.time,
+            1,
+            130,
+            16,
+        );
+        let q = Arc::new(q);
+        let spk = ScriptBuf::from_bytes(vec![0x51]);
+        let mp = tmp();
+        let hub = MempoolHub::open(&mp, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        hub.note_mock_now(1_000);
+        let _ = hub.sample_reset_perf();
+        for (i, cb) in cbs.iter().enumerate() {
+            hub.accept_tx(&spend_true(*cb, 1_000 + i as u64, spk.clone()))
+                .expect("accept");
+        }
+        let s = hub.sample_reset_perf();
+        assert_eq!(
+            s.expire_full_scans, 0,
+            "young pool must not walk accept_at for expiry (got {})",
+            s.expire_full_scans
+        );
+        assert_eq!(hub.live_count(), 16);
+        let _ = std::fs::remove_dir_all(&mp);
+        let _ = std::fs::remove_dir_all(&store_dir);
+    }
+
+    /// Two accepts at the same tip share one tip MTP computation.
+    #[test]
+    fn accept_tx_caches_tip_mtp() {
+        use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
+        use rbitcoin_primitives::Height;
+
+        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+        }
+        let store_dir = tmp();
+        let q = Query::open_or_create(&store_dir).unwrap();
+        let params = ChainParams::regtest();
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+        let (_tip, _tip_time, cbs) = rbitcoin_consensus::pad_empty_from(
+            &q,
+            &params,
+            genesis.block_hash(),
+            genesis.header.time,
+            1,
+            102,
+            2,
+        );
+        let q = Arc::new(q);
+        let spk = ScriptBuf::from_bytes(vec![0x51]);
+        let mp = tmp();
+        let hub = MempoolHub::open(&mp, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        let _ = hub.sample_reset_perf();
+        hub.accept_tx(&spend_true(cbs[0], 1_000, spk.clone()))
+            .expect("a");
+        hub.accept_tx(&spend_true(cbs[1], 2_000, spk)).expect("b");
+        let s = hub.sample_reset_perf();
+        assert_eq!(
+            s.tip_mtp, 1,
+            "same tip must compute MTP once (got {})",
+            s.tip_mtp
+        );
+        let _ = std::fs::remove_dir_all(&mp);
+        let _ = std::fs::remove_dir_all(&store_dir);
+    }
+
+    /// Non-coinbase, no BIP68 time-lock: no `block_tx_fks` and no create MTP.
+    #[test]
+    fn get_coin_skips_block_tx_fks_and_mtp_without_time_lock() {
+        use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
+        use rbitcoin_primitives::Height;
+        use rbitcoin_store::script_hash;
+
+        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+        }
+        let store_dir = tmp();
+        let q = Query::open_or_create(&store_dir).unwrap();
+        let params = ChainParams::regtest();
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+        let (tip, tip_time, cbs) = rbitcoin_consensus::pad_empty_from(
+            &q,
+            &params,
+            genesis.block_hash(),
+            genesis.header.time,
+            1,
+            102,
+            3,
+        );
+        let spk = ScriptBuf::from_bytes(vec![0x51]);
+        let confirmed = spend_true(cbs[0], 1_000, spk.clone());
+        let b = rbitcoin_consensus::mine_regtest_paying(
+            tip,
+            tip_time + 600,
+            103,
+            spk.clone(),
+            vec![confirmed.clone()],
+        );
+        accept_and_connect_block(&q, &params, Height(103), &b, Milestone::NONE).unwrap();
+        q.apply_sh_pending().unwrap();
+        let q = Arc::new(q);
+        let mp = tmp();
+        let hub = MempoolHub::open(&mp, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        let _ = hub.sample_reset_perf();
+        let child = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: confirmed.compute_txid(),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(confirmed.output[0].value.to_sat() - 1_000),
+                script_pubkey: spk.clone(),
+            }],
+        };
+        hub.accept_tx(&child).expect("non-coinbase chain spend");
+        let s = hub.sample_reset_perf();
+        assert_eq!(
+            s.get_coin, 1,
+            "chain-spend index_txid must not re-Query the same prevout (got {})",
+            s.get_coin
+        );
+        assert_eq!(
+            s.get_coin_block_tx_fks, 0,
+            "non-coinbase get_coin must not call block_tx_fks"
+        );
+        assert_eq!(
+            s.get_coin_create_mtp, 0,
+            "no BIP68 time-lock must not compute create MTP"
+        );
+        assert!(
+            !hub.scripthash_mempool(&script_hash(spk.as_bytes()))
+                .is_empty(),
+            "output script must still hit SH overlay"
+        );
+
+        let _ = hub.sample_reset_perf();
+        let timed = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: cbs[1],
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::from_consensus((1 << 22) | 1),
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(49_9999_0000),
+                script_pubkey: spk,
+            }],
+        };
+        hub.accept_tx(&timed).expect("bip68 time-lock spend");
+        let s = hub.sample_reset_perf();
+        assert!(
+            s.get_coin_create_mtp >= 1,
+            "BIP68 time-lock spend must compute create MTP"
+        );
+        let _ = std::fs::remove_dir_all(&mp);
+        let _ = std::fs::remove_dir_all(&store_dir);
+    }
+
     /// Confirm/RBF unindex must drop `relay_seq` / `accept_at` for the gone
     /// wtxid and leave a still-live sibling indexed.
     #[test]
@@ -2512,6 +2856,7 @@ mod tests {
             let mut ats = hub.accept_at.lock().unwrap();
             let at = ats.get_mut(&w).expect("accept_at");
             *at = at.saturating_sub(30);
+            hub.min_live_accept_at.store(*at, Ordering::Relaxed);
         }
         assert!(
             hub.tx_inv_due(&w),
@@ -2636,7 +2981,7 @@ mod tests {
     fn query_utxo_provider_miss_is_none() {
         let store_dir = tmp();
         let q = Query::open_or_create(&store_dir).unwrap();
-        let provider = QueryUtxoProvider { query: &q };
+        let provider = QueryUtxoProvider::new(&q);
         let op = OutPoint {
             txid: Txid::from_byte_array([0xcd; 32]),
             vout: 0,
@@ -2960,6 +3305,9 @@ mod tests {
             write_hits: Arc<AtomicU64>,
         }
         impl UtxoProvider for ProbeUtxo<'_> {
+            fn note_spender(&self, tx: &Transaction) {
+                self.inner.note_spender(tx);
+            }
             fn get_coin(&self, op: &OutPoint) -> Option<rbitcoin_mempool::Coin> {
                 let h = Arc::clone(&self.hub);
                 let write_held = thread::spawn(move || h.inner.try_read().is_err())
@@ -2996,7 +3344,7 @@ mod tests {
         let hits = Arc::new(AtomicU64::new(0));
         let probe = ProbeUtxo {
             hub: Arc::clone(&hub),
-            inner: QueryUtxoProvider { query: q.as_ref() },
+            inner: QueryUtxoProvider::new(q.as_ref()),
             write_hits: Arc::clone(&hits),
         };
         let tx = spend_true(cbs[0], 1_000, ScriptBuf::from_bytes(vec![0x51]));
