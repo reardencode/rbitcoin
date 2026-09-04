@@ -79,13 +79,17 @@ impl BlockOracle for CoreRpc {
         self.call("getblockcount", "[]").is_ok()
     }
 
-    fn core_rewind_to_genesis(&self) -> Result<(), &'static str> {
-        for _ in 0..32 {
+    fn core_rewind_to_height(&self, keep: u32) -> Result<(), &'static str> {
+        let keep = u64::from(keep);
+        for _ in 0..128 {
             let body = self
                 .call("getblockcount", "[]")
                 .map_err(|_| "getblockcount")?;
-            if json_result_u64(&body) == Some(0) {
-                return Ok(());
+            match json_result_u64(&body) {
+                Some(n) if n == keep => return Ok(()),
+                Some(n) if n < keep => return Err("core below pad"),
+                Some(_) => {}
+                None => return Err("getblockcount"),
             }
             let hash_body = self
                 .call("getbestblockhash", "[]")
@@ -96,7 +100,7 @@ impl BlockOracle for CoreRpc {
             let params = format!(r#"["{hash}"]"#);
             let _ = self.call("invalidateblock", &params);
         }
-        Err("core still above genesis")
+        Err("core still above pad")
     }
 }
 
