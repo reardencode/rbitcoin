@@ -21,6 +21,16 @@ assert_ok() {
   fi
 }
 
+out="$(FUZZ_DRY_RUN=1 "$RUN" v2_contents)"
+assert_ok "v2_contents dry-run bin" \
+  grep -qx "FUZZ_BIN=v2_contents" <<<"$out"
+assert_ok "v2_contents dry-run sanitizer address" \
+  grep -qx "FUZZ_SANITIZER=address" <<<"$out"
+assert_ok "v2_contents dry-run in-process (no -jobs)" \
+  grep -qx "FUZZ_JOBS=in-process" <<<"$out"
+assert_ok "v2_contents dry-run timeout 10" \
+  grep -qx "FUZZ_TIMEOUT=10" <<<"$out"
+
 out="$(FUZZ_DRY_RUN=1 "$RUN")"
 assert_ok "dry-run default toolchain is nightly" \
   grep -qx "RUSTUP_TOOLCHAIN=nightly" <<<"$out"

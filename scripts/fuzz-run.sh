@@ -81,6 +81,18 @@ if [[ "$BIN" == "block_wire" ]]; then
     -max_len=1048576
 fi
 
+if [[ "$BIN" == "v2_contents" ]]; then
+  mkdir -p fuzz/corpus/v2_contents
+  cp crates/rbitcoin-net/tests/fixtures/v2_ping.bin \
+    crates/rbitcoin-net/tests/fixtures/v2_verack.bin \
+    crates/rbitcoin-net/tests/fixtures/v2_sendaddrv2.bin \
+    fuzz/corpus/v2_contents/
+  exec env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" v2_contents -- \
+    -max_total_time="${FUZZ_MAX_TOTAL_TIME:-120}" \
+    -timeout="$timeout" \
+    -max_len=65536
+fi
+
 if [[ "$BIN" != "block_differential" && "$BIN" != "block_spend_differential" && "$BIN" != "block_fork_differential" ]]; then
   echo "fuzz-run: unknown target $BIN" >&2
   exit 1
