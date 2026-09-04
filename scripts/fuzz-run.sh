@@ -13,7 +13,7 @@ fail_if_no_comparisons() {
     return 1
   fi
   local n
-  n="$(grep -Eo 'block-differential: comparisons=[0-9]+' "$log" | tail -1 | grep -Eo '[0-9]+$' || true)"
+  n="$(grep -Eo '[A-Za-z0-9_-]+: comparisons=[0-9]+' "$log" | tail -1 | grep -Eo '[0-9]+$' || true)"
   if [[ -z "$n" || "$n" -lt 1 ]]; then
     echo "fuzz-run: no comparisons in $log (got ${n:-missing})" >&2
     return 1
@@ -48,6 +48,9 @@ timeout=10
 if [[ "$BIN" == "block_differential" ]]; then
   sanitizer="none"
   timeout=90
+elif [[ "$BIN" == "block_spend_differential" ]]; then
+  sanitizer="none"
+  timeout=180
 fi
 
 WRAP="$ROOT/scripts/fuzz-rustc-allow-warnings.sh"
@@ -62,7 +65,7 @@ if [[ "${FUZZ_DRY_RUN:-}" == "1" ]]; then
   echo "FUZZ_TIMEOUT=$timeout"
   echo "CARGO_TARGET_DIR_UNSET=1"
   echo "RUSTC_WRAPPER=$WRAP"
-  if [[ "$BIN" == "block_differential" ]]; then
+  if [[ "$BIN" == "block_differential" || "$BIN" == "block_spend_differential" ]]; then
     echo "RBITCOIN_CORE_BITCOIND=${RBITCOIN_CORE_BITCOIND:-}"
   fi
   exit 0
@@ -78,7 +81,7 @@ if [[ "$BIN" == "block_wire" ]]; then
     -max_len=1048576
 fi
 
-if [[ "$BIN" != "block_differential" ]]; then
+if [[ "$BIN" != "block_differential" && "$BIN" != "block_spend_differential" ]]; then
   echo "fuzz-run: unknown target $BIN" >&2
   exit 1
 fi
@@ -87,13 +90,19 @@ export RBITCOIN_HEAD_SCALE="${RBITCOIN_HEAD_SCALE:-tiny}"
 export RBITCOIN_IO="${RBITCOIN_IO:-fd}"
 export RBITCOIN_CORE_BITCOIND="$(./scripts/core-functional/fetch-bitcoind.sh)"
 
-mkdir -p fuzz/corpus/block_differential
-cp crates/rbitcoin-consensus/tests/fixtures/regtest_height1.bin \
-  fuzz/corpus/block_differential/height1.bin
+if [[ "$BIN" == "block_differential" ]]; then
+  mkdir -p fuzz/corpus/block_differential
+  cp crates/rbitcoin-consensus/tests/fixtures/regtest_height1.bin \
+    fuzz/corpus/block_differential/height1.bin
+else
+  mkdir -p fuzz/corpus/block_spend_differential
+  cp crates/rbitcoin-consensus/tests/fixtures/regtest_height101_spend.bin \
+    fuzz/corpus/block_spend_differential/spend.bin
+fi
 
 log="${TMPDIR:-/tmp}/rbtc-fuzz-diff.$$.log"
 set +e
-env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" --sanitizer none block_differential -- \
+env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" --sanitizer none "$BIN" -- \
   -max_total_time="${FUZZ_MAX_TOTAL_TIME:-480}" \
   -timeout="$timeout" \
   -max_len=262144 \

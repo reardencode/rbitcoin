@@ -47,6 +47,16 @@ assert_ok "differential dry-run in-process (no -jobs)" \
   grep -qx "FUZZ_JOBS=in-process" <<<"$out"
 assert_ok "differential dry-run timeout 90" \
   grep -qx "FUZZ_TIMEOUT=90" <<<"$out"
+
+out="$(FUZZ_DRY_RUN=1 "$RUN" block_spend_differential)"
+assert_ok "spend-differential dry-run bin" \
+  grep -qx "FUZZ_BIN=block_spend_differential" <<<"$out"
+assert_ok "spend-differential dry-run sanitizer none" \
+  grep -qx "FUZZ_SANITIZER=none" <<<"$out"
+assert_ok "spend-differential dry-run in-process (no -jobs)" \
+  grep -qx "FUZZ_JOBS=in-process" <<<"$out"
+assert_ok "spend-differential dry-run timeout 180" \
+  grep -qx "FUZZ_TIMEOUT=180" <<<"$out"
 assert_ok "dry-run rustc wrapper" \
   grep -q "^RUSTC_WRAPPER=.*fuzz-rustc-allow-warnings.sh$" <<<"$out"
 wrap="$ROOT/scripts/fuzz-rustc-allow-warnings.sh"
@@ -69,6 +79,8 @@ assert_ok "zero comparisons fail" \
   bash -c '! '"$RUN"' --check-log '"$WORKDIR/zero.log"
 echo "block-differential: comparisons=1" >"$WORKDIR/one.log"
 assert_ok "comparisons=1 pass" "$RUN" --check-log "$WORKDIR/one.log"
+echo "block-spend-differential: comparisons=1" >"$WORKDIR/spend.log"
+assert_ok "spend comparisons=1 pass" "$RUN" --check-log "$WORKDIR/spend.log"
 rm -rf "$WORKDIR"
 
 # Pin/fetch tests land before the operator YAML commit; required CI already

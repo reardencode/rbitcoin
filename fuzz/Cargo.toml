@@ -33,3 +33,10 @@ path = "fuzz_targets/block_differential.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "block_spend_differential"
+path = "fuzz_targets/block_spend_differential.rs"
+test = false
+doc = false
+bench = false
