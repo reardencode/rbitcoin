@@ -22,10 +22,11 @@ mod v2;
 mod versionbits_warn;
 
 pub use block_diff::{
-    basic_auth_b64, build_jsonrpc_http_request, check_diff_env, compare_one, diff_regtest_params,
-    genesis_diff_tip, is_core_connectivity_skip, parse_submitblock_json, split_http_body,
-    verdict_from_accept, verdict_from_core_reply, wait_for_file, BlockOracle, CompareOne, DiffTip,
-    DiffVerdict, OracleReply,
+    basic_auth_b64, build_jsonrpc_http_request, check_diff_env, compare_one, compare_spend_one,
+    diff_regtest_params, genesis_diff_tip, is_core_connectivity_skip, mine_diff_pad,
+    parse_submitblock_json, prepare_spend_candidate, split_http_body, submit_pad_to_oracle,
+    verdict_from_accept, verdict_from_core_reply, wait_for_file, BlockOracle, CompareOne, DiffPad,
+    DiffTip, DiffVerdict, OracleReply, DIFF_MATURE_PAD_HEIGHT, DIFF_TEST_PAD_HEIGHT,
 };
 pub use cache::BlockCache;
 pub use chain::{

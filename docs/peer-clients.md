@@ -53,12 +53,13 @@ accept, `submitblock` the same bytes to Core, compare **accept vs reject
 only** (not first-fault strings). Harness failures exit 2 so Docker flakes
 are not filed as consensus bugs.
 
-In-tree **Q-30** first slice is `fuzz/fuzz_targets/block_differential.rs`
-against official **v31.1** `bitcoind` (SHA256-pinned tarball, not Docker, not
-the sparse submodule). Height-1 only: rewind both to genesis after accept.
-Verdict-only; harness `exit 2` vs finding `panic!`. Spend/maturity/BIP30
-pads and tip-extending dual-chain are later Q-30. JSON corpora and
-fuzzamoto 001–023 stay as they were.
+In-tree **Q-30** slices against official **v31.1** `bitcoind` (SHA256-pinned
+tarball, not Docker, not the sparse submodule):
+`fuzz/fuzz_targets/block_differential.rs` (height-1) and
+`block_spend_differential.rs` (height-101 mature-pad spend of the height-1
+`OP_TRUE` coinbase). Verdict-only; harness `exit 2` vs finding `panic!`.
+BIP324, compact/reorg P2P, and no-rewind dual-chain (BIP30 / competing tips)
+are later Q-30. JSON corpora and fuzzamoto 001–023 stay as they were.
 
 Their curated single-fault file (reason-string parity) is less useful; we
 already pin reject *class* in [`consensus-tests.md`](./consensus-tests.md).
@@ -198,7 +199,7 @@ only when scheduling a slice.
 
 | Rank | Item | Source | Lands in |
 |-----:|------|--------|----------|
-| 1 | Height-1 verdict-only differential vs official v31.1 `bitcoind` (**landed**; spend-pad / dual-chain later) | satd `block_differential` | **Q-30** / [`TESTING.md`](../TESTING.md) |
+| 1 | Height-1 + mature-pad spend differential vs official v31.1 `bitcoind` (**landed**; BIP324 / dual-chain later) | satd `block_differential` | **Q-30** / [`TESTING.md`](../TESTING.md) |
 | 2 | One cross-surface scenario: Esplora `POST /tx` → Electrum history + RPC mempool | satd E2E | scenarios / Electrum–Esplora tests |
 | — | ~~Hornet spec.html vs consensus-tests.md gap hunt~~ **done 2026-09-04** (table in this file; pins in `structure_rule_tests` / `header.rs` / `consensus_rules`) | Hornet | this file + [`consensus-tests.md`](./consensus-tests.md) |
 | 4 | `/healthz` (and maybe `/readyz`) on the node listen; Prometheus later as a flag | satd | node / [`OPERATOR.md`](../OPERATOR.md) |

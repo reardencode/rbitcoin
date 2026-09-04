@@ -1,11 +1,16 @@
-//! Height-1 differential vs Core `submitblock`. Not a node RPC.
+//! Verdict-only block differential vs Core `submitblock`. Not a node RPC.
 
 use crate::chain::{AcceptOutcome, ChainHub};
 use crate::error::NetError;
+use bitcoin::absolute::LockTime;
 use bitcoin::consensus::encode::{deserialize, serialize};
-use bitcoin::{Block, BlockHash};
+use bitcoin::transaction::Version as TxVersion;
+use bitcoin::{
+    Amount, Block, BlockHash, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
+};
 use rbitcoin_consensus::{
-    genesis_block, prepare_regtest_candidate, ChainParams, REGTEST_BLOCK_SPACING,
+    genesis_block, mine_empty_regtest, mine_regtest_paying, prepare_regtest_candidate, ChainParams,
+    REGTEST_BLOCK_SPACING,
 };
 use rbitcoin_primitives::hex_encode;
 use std::path::Path;
@@ -41,14 +46,24 @@ pub enum OracleReply {
 pub trait BlockOracle {
     fn submitblock_hex(&self, hex: &str) -> OracleReply;
     fn liveness_ok(&self) -> bool;
-    fn core_rewind_to_genesis(&self) -> Result<(), &'static str>;
+    fn core_rewind_to_height(&self, keep: u32) -> Result<(), &'static str>;
 }
+
+pub const DIFF_TEST_PAD_HEIGHT: u32 = 3;
+pub const DIFF_MATURE_PAD_HEIGHT: u32 = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffTip {
     pub hash: BlockHash,
     pub time: u32,
     pub height: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct DiffPad {
+    pub tip: DiffTip,
+    pub mature: OutPoint,
+    pub bodies: Vec<Block>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +90,107 @@ pub fn genesis_diff_tip(params: &ChainParams) -> DiffTip {
         time: g.header.time,
         height: 0,
     }
+}
+
+pub fn mine_diff_pad(hub: &ChainHub, last: u32) -> Result<DiffPad, &'static str> {
+    if last < 1 {
+        return Err("pad last");
+    }
+    let params = diff_regtest_params();
+    let g = genesis_block(&params);
+    let mut hash = g.block_hash();
+    let mut time = g.header.time;
+    let mut bodies = Vec::with_capacity(last as usize);
+    let mut mature = None;
+    for h in 1..=last {
+        let b = mine_empty_regtest(hash, time.saturating_add(REGTEST_BLOCK_SPACING), h);
+        match hub.accept_received_block(b.clone()) {
+            Ok(AcceptOutcome::Accepted { height }) if height == h => {}
+            _ => return Err("pad accept"),
+        }
+        if h == 1 {
+            mature = Some(OutPoint {
+                txid: b.txdata[0].compute_txid(),
+                vout: 0,
+            });
+        }
+        hash = b.block_hash();
+        time = b.header.time;
+        bodies.push(b);
+    }
+    Ok(DiffPad {
+        tip: DiffTip {
+            hash,
+            time,
+            height: last,
+        },
+        mature: mature.ok_or("pad mature")?,
+        bodies,
+    })
+}
+
+pub fn submit_pad_to_oracle(
+    oracle: &dyn BlockOracle,
+    bodies: &[Block],
+) -> Result<(), &'static str> {
+    for b in bodies {
+        let hex = hex_encode(serialize(b));
+        match oracle.submitblock_hex(&hex) {
+            OracleReply::NullAccept => {}
+            _ => return Err("pad submit"),
+        }
+    }
+    Ok(())
+}
+
+fn default_spend_in(mature: OutPoint) -> TxIn {
+    TxIn {
+        previous_output: mature,
+        script_sig: ScriptBuf::new(),
+        sequence: Sequence::MAX,
+        witness: Witness::new(),
+    }
+}
+
+fn default_op_true_spend(mature: OutPoint) -> Transaction {
+    Transaction {
+        version: TxVersion::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![default_spend_in(mature)],
+        output: vec![TxOut {
+            value: Amount::from_sat(49_0000_0000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    }
+}
+
+pub fn prepare_spend_candidate(tip: &DiffTip, mature: OutPoint, data: &[u8]) -> Option<Block> {
+    let parsed: Block = deserialize(data).ok()?;
+    if parsed.txdata.is_empty() {
+        return None;
+    }
+    let height = tip.height.saturating_add(1);
+    let mut spend = parsed
+        .txdata
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| default_op_true_spend(mature));
+    if spend.input.is_empty() {
+        spend.input.push(default_spend_in(mature));
+    } else {
+        spend.input[0].previous_output = mature;
+    }
+    let extra: Vec<Transaction> = parsed.txdata.into_iter().skip(2).collect();
+    let mut txs = Vec::with_capacity(1 + extra.len());
+    txs.push(spend);
+    txs.extend(extra);
+    Some(mine_regtest_paying(
+        tip.hash,
+        tip.time.saturating_add(REGTEST_BLOCK_SPACING),
+        height,
+        ScriptBuf::from_bytes(vec![0x51]),
+        txs,
+    ))
 }
 
 pub fn is_core_connectivity_skip(reason: &str) -> bool {
@@ -259,12 +375,34 @@ pub fn compare_one(
     if block.txdata.is_empty() {
         return CompareOne::NotABlock;
     }
-    let old = tip.clone();
     prepare_regtest_candidate(
         &mut block,
-        old.hash,
-        old.time.saturating_add(REGTEST_BLOCK_SPACING),
+        tip.hash,
+        tip.time.saturating_add(REGTEST_BLOCK_SPACING),
     );
+    compare_prepared(hub, tip, oracle, block)
+}
+
+pub fn compare_spend_one(
+    hub: &ChainHub,
+    tip: &mut DiffTip,
+    oracle: &dyn BlockOracle,
+    mature: OutPoint,
+    data: &[u8],
+) -> CompareOne {
+    let Some(block) = prepare_spend_candidate(tip, mature, data) else {
+        return CompareOne::NotABlock;
+    };
+    compare_prepared(hub, tip, oracle, block)
+}
+
+fn compare_prepared(
+    hub: &ChainHub,
+    tip: &DiffTip,
+    oracle: &dyn BlockOracle,
+    block: Block,
+) -> CompareOne {
+    let keep = tip.height;
     let hex = hex_encode(serialize(&block));
     let ours_res = hub.accept_received_block(block);
     let ours = match verdict_from_accept(ours_res) {
@@ -276,18 +414,19 @@ pub fn compare_one(
         || (matches!(reply, OracleReply::RpcError) && !oracle.liveness_ok())
     {
         if ours == DiffVerdict::Accept {
-            let _ = hub.rewind_to_height(0);
+            let _ = hub.rewind_to_height(keep);
         }
-        let _ = oracle.core_rewind_to_genesis();
+        let _ = oracle.core_rewind_to_height(keep);
         return CompareOne::Harness("oracle dead");
     }
     let core = verdict_from_core_reply(&reply);
-    combine(hub, oracle, ours, core, &reply, &hex)
+    combine(hub, oracle, keep, ours, core, &reply, &hex)
 }
 
 fn combine(
     hub: &ChainHub,
     oracle: &dyn BlockOracle,
+    keep: u32,
     ours: DiffVerdict,
     core: DiffVerdict,
     reply: &OracleReply,
@@ -298,14 +437,14 @@ fn combine(
         _ => "",
     };
     match (ours, core) {
-        (DiffVerdict::Accept, DiffVerdict::Accept) => rewind_agreed(hub, oracle, true),
+        (DiffVerdict::Accept, DiffVerdict::Accept) => rewind_agreed(hub, oracle, keep, true),
         (DiffVerdict::Accept, DiffVerdict::Skip) if CORE_DUPLICATE_SKIP.contains(&reason) => {
-            rewind_agreed(hub, oracle, true)
+            rewind_agreed(hub, oracle, keep, true)
         }
         (DiffVerdict::Accept, DiffVerdict::Skip) if CORE_DESYNC_SKIP.contains(&reason) => {
-            let _ = hub.rewind_to_height(0);
-            let _ = oracle.core_rewind_to_genesis();
-            CompareOne::Harness("core not at genesis")
+            let _ = hub.rewind_to_height(keep);
+            let _ = oracle.core_rewind_to_height(keep);
+            CompareOne::Harness("core not at pad tip")
         }
         (DiffVerdict::Accept, DiffVerdict::Reject) => CompareOne::Disagreed {
             ours: true,
@@ -320,22 +459,22 @@ fn combine(
         },
         (DiffVerdict::Reject, DiffVerdict::Skip) => CompareOne::Skipped,
         (DiffVerdict::Skip, DiffVerdict::Accept) => {
-            let _ = oracle.core_rewind_to_genesis();
+            let _ = oracle.core_rewind_to_height(keep);
             CompareOne::Harness("skip+accept")
         }
         (DiffVerdict::Skip, DiffVerdict::Reject | DiffVerdict::Skip) => CompareOne::Skipped,
         (DiffVerdict::Accept, DiffVerdict::Skip) => {
-            let _ = hub.rewind_to_height(0);
+            let _ = hub.rewind_to_height(keep);
             CompareOne::Skipped
         }
     }
 }
 
-fn rewind_agreed(hub: &ChainHub, oracle: &dyn BlockOracle, accept: bool) -> CompareOne {
-    if hub.rewind_to_height(0).is_err() {
+fn rewind_agreed(hub: &ChainHub, oracle: &dyn BlockOracle, keep: u32, accept: bool) -> CompareOne {
+    if hub.rewind_to_height(keep).is_err() {
         return CompareOne::Harness("rewind failed");
     }
-    if oracle.core_rewind_to_genesis().is_err() {
+    if oracle.core_rewind_to_height(keep).is_err() {
         return CompareOne::Harness("core rewind failed");
     }
     CompareOne::Agreed { accept }
@@ -345,7 +484,8 @@ fn rewind_agreed(hub: &ChainHub, oracle: &dyn BlockOracle, accept: bool) -> Comp
 mod tests {
     use super::*;
     use bitcoin::hashes::Hash;
-    use bitcoin::{OutPoint, ScriptBuf};
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence};
     use rbitcoin_consensus::{mine_empty_regtest, mine_regtest_paying, Milestone};
     use rbitcoin_query::Query;
     use std::cell::Cell;
@@ -356,6 +496,8 @@ mod tests {
     struct MockOracle {
         reply: OracleReply,
         rewind: Cell<u32>,
+        last_keep: Cell<u32>,
+        submits: Cell<u32>,
         live: bool,
     }
 
@@ -364,6 +506,8 @@ mod tests {
             Self {
                 reply,
                 rewind: Cell::new(0),
+                last_keep: Cell::new(u32::MAX),
+                submits: Cell::new(0),
                 live: true,
             }
         }
@@ -371,13 +515,15 @@ mod tests {
 
     impl BlockOracle for MockOracle {
         fn submitblock_hex(&self, _hex: &str) -> OracleReply {
+            self.submits.set(self.submits.get() + 1);
             self.reply.clone()
         }
         fn liveness_ok(&self) -> bool {
             self.live
         }
-        fn core_rewind_to_genesis(&self) -> Result<(), &'static str> {
+        fn core_rewind_to_height(&self, keep: u32) -> Result<(), &'static str> {
             self.rewind.set(self.rewind.get() + 1);
+            self.last_keep.set(keep);
             Ok(())
         }
     }
@@ -534,6 +680,7 @@ mod tests {
         }
         assert_eq!(hub.tip_height(), Some(0));
         assert!(mock.rewind.get() >= 1);
+        assert_eq!(mock.last_keep.get(), 0);
 
         let mock = MockOracle::new(OracleReply::Reason("inconclusive".into()));
         match compare_one(&hub, &mut tip, &mock, &raw) {
@@ -589,6 +736,8 @@ mod tests {
         let mock = MockOracle {
             reply: OracleReply::Dead,
             rewind: Cell::new(0),
+            last_keep: Cell::new(u32::MAX),
+            submits: Cell::new(0),
             live: false,
         };
         match compare_one(&hub, &mut tip, &mock, &raw) {
@@ -686,5 +835,126 @@ mod tests {
     #[test]
     fn basic_auth_b64_known() {
         assert_eq!(basic_auth_b64("user", "pass"), "dXNlcjpwYXNz");
+    }
+
+    fn height1_mature_out() -> OutPoint {
+        let params = diff_regtest_params();
+        let g = genesis_block(&params);
+        let h1 = mine_empty_regtest(g.block_hash(), g.header.time + REGTEST_BLOCK_SPACING, 1);
+        OutPoint {
+            txid: h1.txdata[0].compute_txid(),
+            vout: 0,
+        }
+    }
+
+    fn spend_seed_block() -> Block {
+        let params = diff_regtest_params();
+        let g = genesis_block(&params);
+        let spend = super::default_op_true_spend(height1_mature_out());
+        mine_regtest_paying(
+            g.block_hash(),
+            g.header.time + REGTEST_BLOCK_SPACING,
+            1,
+            ScriptBuf::from_bytes(vec![0x51]),
+            vec![spend],
+        )
+    }
+
+    #[test]
+    fn diff_pad_spend_journey() {
+        let (dir, hub, _genesis_tip) = tmp_diff_hub();
+        let pad = mine_diff_pad(&hub, DIFF_TEST_PAD_HEIGHT).unwrap();
+        assert_eq!(hub.tip_height(), Some(DIFF_TEST_PAD_HEIGHT));
+        assert_eq!(pad.tip.height, DIFF_TEST_PAD_HEIGHT);
+        assert_eq!(pad.bodies.len(), DIFF_TEST_PAD_HEIGHT as usize);
+        assert_eq!(pad.mature.vout, 0);
+        let h1 = &pad.bodies[0];
+        assert_eq!(h1.txdata[0].output[0].value, Amount::from_sat(50_0000_0000));
+        assert_eq!(h1.txdata[0].output[0].script_pubkey.as_bytes(), &[0x51]);
+        assert_eq!(h1.txdata[0].compute_txid(), pad.mature.txid);
+
+        let mock = MockOracle::new(OracleReply::NullAccept);
+        submit_pad_to_oracle(&mock, &pad.bodies).unwrap();
+        assert_eq!(mock.submits.get(), DIFF_TEST_PAD_HEIGHT);
+
+        let mock_rej = MockOracle::new(OracleReply::Reason("bad-txnmrklroot".into()));
+        assert!(submit_pad_to_oracle(&mock_rej, &pad.bodies).is_err());
+        assert_eq!(mock_rej.submits.get(), 1);
+
+        let mut tip = pad.tip.clone();
+        let empty = serialize(&mine_empty_regtest(
+            tip.hash,
+            tip.time + REGTEST_BLOCK_SPACING,
+            DIFF_TEST_PAD_HEIGHT + 1,
+        ));
+        let mock = MockOracle::new(OracleReply::NullAccept);
+        match compare_one(&hub, &mut tip, &mock, &empty) {
+            CompareOne::Agreed { accept: true } => {}
+            other => panic!("pad empty accept: {other:?}"),
+        }
+        assert_eq!(hub.tip_height(), Some(DIFF_TEST_PAD_HEIGHT));
+        assert_eq!(mock.last_keep.get(), DIFF_TEST_PAD_HEIGHT);
+
+        let seed = serialize(&spend_seed_block());
+        let mock = MockOracle::new(OracleReply::Reason(
+            "bad-txns-premature-spend-of-coinbase".into(),
+        ));
+        match compare_spend_one(&hub, &mut tip, &mock, pad.mature, &seed) {
+            CompareOne::Agreed { accept: false } => {}
+            other => panic!("immature spend: {other:?}"),
+        }
+        assert_eq!(hub.tip_height(), Some(DIFF_TEST_PAD_HEIGHT));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prepare_spend_candidate_forces_prevout() {
+        let params = diff_regtest_params();
+        let g = genesis_block(&params);
+        let mature = height1_mature_out();
+        let dummy = DiffTip {
+            hash: BlockHash::from_byte_array([0x33; 32]),
+            time: 1,
+            height: DIFF_MATURE_PAD_HEIGHT,
+        };
+        let mut spend = super::default_op_true_spend(OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0x44; 32]),
+            vout: 7,
+        });
+        spend.version = TxVersion::TWO;
+        spend.input[0].script_sig = ScriptBuf::from_bytes(vec![0x51]);
+        spend.input[0].sequence = Sequence::from_consensus(0xffff_fffe);
+        let raw = serialize(&mine_regtest_paying(
+            g.block_hash(),
+            g.header.time + REGTEST_BLOCK_SPACING,
+            1,
+            ScriptBuf::from_bytes(vec![0x51]),
+            vec![spend],
+        ));
+        let got = prepare_spend_candidate(&dummy, mature, &raw).unwrap();
+        assert_eq!(got.header.prev_blockhash, dummy.hash);
+        assert_eq!(got.txdata.len(), 2);
+        assert_eq!(got.txdata[1].input[0].previous_output, mature);
+        assert_eq!(got.txdata[1].version, TxVersion::TWO);
+        assert_eq!(got.txdata[1].input[0].script_sig.as_bytes(), &[0x51]);
+        assert_eq!(
+            got.txdata[1].input[0].sequence,
+            Sequence::from_consensus(0xffff_fffe)
+        );
+        let target = bitcoin::Target::from_compact(got.header.bits);
+        assert!(got.header.validate_pow(target).is_ok());
+        assert!(prepare_spend_candidate(&dummy, mature, b"junk").is_none());
+    }
+
+    #[test]
+    fn regtest_height101_spend_fixture() {
+        let expected = serialize(&spend_seed_block());
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../rbitcoin-consensus/tests/fixtures/regtest_height101_spend.bin");
+        let raw = fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        assert_eq!(raw, expected);
+        let b: Block = deserialize(&raw).unwrap();
+        assert!(b.txdata.len() >= 2);
+        assert_eq!(b.txdata[1].input[0].previous_output, height1_mature_out());
     }
 }

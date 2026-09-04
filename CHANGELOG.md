@@ -25,6 +25,12 @@ before 1.0).
   `scripts/core-functional/inventory.toml`). Compare accept vs reject only.
   Default `cargo test` does not fetch Core. Not a required PR check.
 
+- **Q-30 mature-pad spend differential:** nightly `block_spend_differential`
+  mines a byte-identical 100-block empty pad, then compares height-101
+  blocks that spend the mature height-1 `OP_TRUE` coinbase. Same oracle and
+  verdict-only contract. Default-suite pins use a 3-block pad for rewind
+  keep-height only. Q-30 stays Open (BIP324 / P2P / dual-chain still later).
+
 ### Fixed
 
 - **Tip-follow FeeFilter no longer panics on the reactor:** session handshake

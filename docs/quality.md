@@ -94,7 +94,7 @@ evidence (failed Core corpus, new dual path, red required CI, MSRV drift).
 
 | Rank | ID | Item | Tag | Done looks like |
 |-----:|----|------|-----|-----------------|
-| 1 | **Q-30** | Continuous differential fuzz | reliability | A nightly/weekly job that feeds BIP324 + header/block (and script) wire. Crashes → `docs/external_findings/` + named regression. **Today: `fuzz/` `block_wire` (ASan) + `block_differential` (verdict-only height-1 vs official v31.1 `bitcoind`, `--sanitizer none`) on nightly `fuzz.yml` (not a required PR check).** Grow corpus / spend-pad / script-wire / BIP324 later. Findings 001–023 came from external review + fuzzamoto — that is not a substitute for the in-tree job. |
+| 1 | **Q-30** | Continuous differential fuzz | reliability | A nightly/weekly job that feeds BIP324 + header/block (and script) wire. Crashes → `docs/external_findings/` + named regression. **Today: `fuzz/` `block_wire` (ASan) + `block_differential` (height-1) + `block_spend_differential` (height-101 mature-pad spend) vs official v31.1 `bitcoind`, `--sanitizer none`, on nightly `fuzz.yml` (not a required PR check).** Still missing BIP324 / script-wire / compact-reorg P2P / no-rewind dual-chain. Findings 001–023 came from external review + fuzzamoto — that is not a substitute for the in-tree job. |
 | 2 | **Q-41** | Grow Core functional `run` set | test | Inventory `run` covers the wallet-client / P2P / mempool / buried-activation scripts we **claim**. **Today: 62 run / 205 skip (22 rpc-missing, 25 core-log, 68 no-wallet).** COMPAT-done leftovers are `rpc-dialect` (not `rpc-missing`). Next `run` candidates: `mempool_accept` type-check, `mining_basic` weight, `rpc_getblockfrompeer`. Product-never skips stay skip. Unlabeled PRs stay cargo-only; nightly green |
 | 3 | **Q-57** | Store publish / Class C flush / sidecar | store | `VarTable::published_meta` loads count/end `Acquire` (ARM cannot tear the pair). `ArrayTable` / `StrongTxTable` `flush_dirty` cannot lose a `set` in the write window (clear dirty then snapshot, or equivalent). fuse8 `decode_body` fails closed (`NeedsRewrite`) instead of indexing fingerprints OOB. Spender overflow walk bounded by `spenders.count()`. Sidecar meta / `.mphf` / SH `.idx` do not rename an unsynced empty file into place. `sorted_run` orphan GC cannot delete a live run (lock is a type, not a comment). **Today: `published_meta` seqlock Acquire landed.** `BinaryFuse8::contains` still indexes `fingerprints` without a closed length check. |
 | 4 | **Q-58** | Mempool persist order + eviction | mempool | `persist_all` writes body before claiming LIVE slots. Known-parent out-of-range vout hard-rejects (not orphan-forever). `worst_chunk` rate-tie does not strand descendants. `evict_to_budget` no-op iterations break (no spin). **Today: `evict_to_budget` breaks when a pass removes 0.** `persist_all` still writes meta/slots then body. |
@@ -119,7 +119,7 @@ remaining holes already have Open rows.
 
 | ID | Verdict |
 |----|---------|
-| **Q-30** | Keep rank 1. Height-1 `block_differential` vs official v31.1 `bitcoind` landed; still not BIP324 / spend-pad / script-wire breadth. External fuzzamoto + finding 023 are not a substitute job. |
+| **Q-30** | Keep rank 1. Height-1 `block_differential` and height-101 `block_spend_differential` vs official v31.1 `bitcoind` landed; still not BIP324 / script-wire / compact-reorg P2P / no-rewind dual-chain. External fuzzamoto + finding 023 are not a substitute job. |
 | **Q-41** | Keep rank 2. 53 → **62** `run`. 205 skips; `rpc-missing` 22 + `core-log` 25 are the growth matching claimed surface. |
 | **Q-57** | Keep rank 3. Seqlock `published_meta` landed; fuse8 fingerprint OOB, flush_dirty window, sidecar rename, spender overflow bound, sorted_run GC lock type still open. |
 | **Q-58** | Keep rank 4. `evict_to_budget` no-op break landed. `persist_all` still meta/slots then body. |
@@ -266,7 +266,7 @@ included; tree at #318):
 | On-disk | **Schema 20** (Class A/C still 17 bytes; 18 = MPHF indexes; 19 = SH extent last page; 20 = BDZ2 `tx.head` + BDZ3 SH). Occupied 18/19 `tx.head`/`scripthash*` refused |
 | Confirm queues | **loadq=14 · scriptq=4 · writeq=14** (hardcoded) |
 | IBD confirm rate | Last instrumented fat-era number **6.4 blk/s** at #126 (2026-08-18). Not re-baselined after cadence / tip-accept / reactor-safe. Residual meters are named (`other=`) — **Q-50** closed |
-| Fuzz | **height-1 differential** (`block_wire` ASan + `block_differential` vs v31.1 `bitcoind`; breadth still Q-30) |
+| Fuzz | **height-1 + mature-pad spend differential** (`block_wire` ASan + `block_differential` / `block_spend_differential` vs v31.1 `bitcoind`; breadth still Q-30) |
 
 ### Grade board (subjective; 2026-09-03)
 
@@ -284,7 +284,7 @@ included; tree at #318):
 | Test reliability/speed | Strong | **Q-37** closed on CI-class; 2 s default-test rule remains |
 | Tip-follow mempool APIs | Strong | **R-01–R-04**; persist sidecars exist (Core persist script still skip → Q-41); INV tick no longer clones the mempool |
 | Wallet-client APIs | Strong | Last-slot SH join + serve-lean identity for Electrum/Esplora; Casa/Sparrow times stay host-only (`rbitcoin-bench`) |
-| Adversarial / findings | Medium–Strong | **001–023** closed; in-tree `block_differential` vs Core v31.1 (height-1); breadth is **Q-30**. Core functional is the active surface program (**Q-41**) |
+| Adversarial / findings | Medium–Strong | **001–023** closed; in-tree `block_differential` + `block_spend_differential` vs Core v31.1; breadth is **Q-30**. Core functional is the active surface program (**Q-41**) |
 | Perf observability | Strong | Named residuals (`other=` / `drain_join=`) (**Q-50**). Default INFO is `ibd: progress` (**Q-36**) |
 
 ---
