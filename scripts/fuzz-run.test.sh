@@ -50,7 +50,11 @@ assert_ok "differential dry-run timeout 90" \
 assert_ok "dry-run rustc wrapper" \
   grep -q "^RUSTC_WRAPPER=.*fuzz-rustc-allow-warnings.sh$" <<<"$out"
 wrap="$ROOT/scripts/fuzz-rustc-allow-warnings.sh"
-wout="$("$wrap" /bin/echo probe)"
+fake="$(mktemp "${TMPDIR:-/tmp}/rbtc-fake-rustc.XXXXXX")"
+printf '#!/bin/sh\necho "$@"\n' >"$fake"
+chmod +x "$fake"
+wout="$("$wrap" "$fake" probe)"
+rm -f "$fake"
 assert_ok "wrapper execs given rustc (Cargo RUSTC_WRAPPER protocol)" \
   grep -qx "probe -A warnings" <<<"$wout"
 assert_ok "differential dry-run unsets CARGO_TARGET_DIR" \
