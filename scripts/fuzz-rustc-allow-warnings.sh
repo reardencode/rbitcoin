@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
-# Nightly cargo-fuzz inherits workspace `warnings = deny` on path members.
+# Cargo sets RUSTC_WRAPPER and invokes: $WRAPPER $RUSTC <args>.
+# Exec the given rustc (do not insert another rustc in front of $1).
 # Append so this wins over Cargo's `-D warnings` (later rustc flags win).
-exec rustc "$@" -A warnings
+exec "$@" -A warnings
