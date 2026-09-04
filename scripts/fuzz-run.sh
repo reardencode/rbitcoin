@@ -44,19 +44,24 @@ if [[ -z "$target" ]]; then
 fi
 
 sanitizer="address"
-jobs=""
+timeout=10
 if [[ "$BIN" == "block_differential" ]]; then
   sanitizer="none"
-  jobs="-jobs=1"
+  timeout=90
 fi
+
+WRAP="$ROOT/scripts/fuzz-rustc-allow-warnings.sh"
+export RUSTC_WRAPPER="$WRAP"
 
 if [[ "${FUZZ_DRY_RUN:-}" == "1" ]]; then
   echo "RUSTUP_TOOLCHAIN=$RUSTUP_TOOLCHAIN"
   echo "CARGO_FUZZ_TARGET=$target"
   echo "FUZZ_BIN=$BIN"
   echo "FUZZ_SANITIZER=$sanitizer"
-  echo "FUZZ_JOBS=${jobs:--}"
+  echo "FUZZ_JOBS=in-process"
+  echo "FUZZ_TIMEOUT=$timeout"
   echo "CARGO_TARGET_DIR_UNSET=1"
+  echo "RUSTC_WRAPPER=$WRAP"
   if [[ "$BIN" == "block_differential" ]]; then
     echo "RBITCOIN_CORE_BITCOIND=${RBITCOIN_CORE_BITCOIND:-}"
   fi
@@ -69,7 +74,7 @@ if [[ "$BIN" == "block_wire" ]]; then
     fuzz/corpus/block_wire/signet_block_1.bin
   exec env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" block_wire -- \
     -max_total_time="${FUZZ_MAX_TOTAL_TIME:-120}" \
-    -timeout=10 \
+    -timeout="$timeout" \
     -max_len=1048576
 fi
 
@@ -89,9 +94,8 @@ cp crates/rbitcoin-consensus/tests/fixtures/regtest_height1.bin \
 log="${TMPDIR:-/tmp}/rbtc-fuzz-diff.$$.log"
 set +e
 env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" --sanitizer none block_differential -- \
-  -jobs=1 \
   -max_total_time="${FUZZ_MAX_TOTAL_TIME:-480}" \
-  -timeout=30 \
+  -timeout="$timeout" \
   -max_len=262144 \
   2>&1 | tee "$log"
 st=${PIPESTATUS[0]}

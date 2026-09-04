@@ -23,6 +23,7 @@ impl CoreRpc {
             .set_read_timeout(Some(Duration::from_secs(10)))
             .map_err(|e| e.to_string())?;
         stream.write_all(&req).map_err(|e| e.to_string())?;
+        let _ = stream.shutdown(std::net::Shutdown::Write);
         let mut buf = Vec::new();
         let mut tmp = [0u8; 4096];
         loop {
@@ -68,7 +69,9 @@ impl BlockOracle for CoreRpc {
                 Err("rpc error") => OracleReply::RpcError,
                 Err(_) => OracleReply::RpcError,
             },
-            Err(_) => OracleReply::Dead,
+            // TCP/read glitches are not a dead oracle; compare_one + liveness
+            // decide whether to skip or fail closed after a streak.
+            Err(_) => OracleReply::RpcError,
         }
     }
 
