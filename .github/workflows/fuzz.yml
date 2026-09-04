@@ -88,3 +88,43 @@ jobs:
         env:
           FUZZ_MAX_TOTAL_TIME: "600"
         run: ./scripts/fuzz-run.sh block_differential
+
+  block_spend_differential:
+    name: block_spend_differential
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      RUSTFLAGS: "-A warnings"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: false
+
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
+        with:
+          toolchain: nightly
+          components: rust-src
+
+      - name: clang (libFuzzer)
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
+        with:
+          tool: cargo-fuzz@0.13.2
+
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/rbitcoin/core-bitcoind
+          key: core-bitcoind-v31.1-${{ runner.os }}-${{ runner.arch }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: fuzz-block-spend
+          workspaces: "fuzz -> fuzz/target"
+
+      - name: cargo fuzz run block_spend_differential
+        env:
+          FUZZ_MAX_TOTAL_TIME: "600"
+        run: ./scripts/fuzz-run.sh block_spend_differential
