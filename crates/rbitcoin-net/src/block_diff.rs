@@ -62,6 +62,7 @@ pub struct DiffTip {
 #[derive(Debug, Clone)]
 pub struct DiffPad {
     pub tip: DiffTip,
+    pub fork_parent: DiffTip,
     pub mature: OutPoint,
     pub bodies: Vec<Block>,
 }
@@ -118,15 +119,60 @@ pub fn mine_diff_pad(hub: &ChainHub, last: u32) -> Result<DiffPad, &'static str>
         time = b.header.time;
         bodies.push(b);
     }
+    let tip = DiffTip {
+        hash,
+        time,
+        height: last,
+    };
     Ok(DiffPad {
-        tip: DiffTip {
-            hash,
-            time,
-            height: last,
-        },
+        fork_parent: tip.clone(),
+        tip,
         mature: mature.ok_or("pad mature")?,
         bodies,
     })
+}
+
+pub fn mine_diff_stem(hub: &ChainHub, pad: DiffPad) -> Result<DiffPad, &'static str> {
+    let h = pad.tip.height.saturating_add(1);
+    let b = mine_empty_regtest(
+        pad.tip.hash,
+        pad.tip.time.saturating_add(REGTEST_BLOCK_SPACING),
+        h,
+    );
+    match hub.accept_received_block(b.clone()) {
+        Ok(AcceptOutcome::Accepted { height }) if height == h => {}
+        _ => return Err("stem accept"),
+    }
+    let mut bodies = pad.bodies;
+    bodies.push(b.clone());
+    Ok(DiffPad {
+        fork_parent: pad.tip,
+        tip: DiffTip {
+            hash: b.block_hash(),
+            time: b.header.time,
+            height: h,
+        },
+        mature: pad.mature,
+        bodies,
+    })
+}
+
+pub fn setup_side_block(
+    hub: &ChainHub,
+    oracle: &dyn BlockOracle,
+    block: &Block,
+) -> Result<(), &'static str> {
+    let hex = hex_encode(serialize(block));
+    match hub.accept_received_block(block.clone()) {
+        Ok(AcceptOutcome::IgnoredWeaker | AcceptOutcome::AlreadyHave) => {}
+        Ok(AcceptOutcome::Accepted { .. }) => return Err("side became tip"),
+        Err(_) => return Err("side reject"),
+    }
+    match oracle.submitblock_hex(&hex) {
+        OracleReply::NullAccept => Ok(()),
+        OracleReply::Reason(r) if CORE_DUPLICATE_SKIP.contains(&r.as_str()) => Ok(()),
+        _ => Err("side submit"),
+    }
 }
 
 pub fn submit_pad_to_oracle(
@@ -394,6 +440,65 @@ pub fn compare_spend_one(
         return CompareOne::NotABlock;
     };
     compare_prepared(hub, tip, oracle, block)
+}
+
+fn restore_stem(
+    hub: &ChainHub,
+    oracle: &dyn BlockOracle,
+    stem: &Block,
+) -> Result<(), &'static str> {
+    match hub.accept_received_block(stem.clone()) {
+        Ok(AcceptOutcome::Accepted { .. } | AcceptOutcome::AlreadyHave) => {}
+        _ => return Err("stem restore"),
+    }
+    let hex = hex_encode(serialize(stem));
+    match oracle.submitblock_hex(&hex) {
+        OracleReply::NullAccept => Ok(()),
+        OracleReply::Reason(r) if CORE_DUPLICATE_SKIP.contains(&r.as_str()) => Ok(()),
+        _ => Err("stem restore submit"),
+    }
+}
+
+pub fn compare_fork_one(
+    hub: &ChainHub,
+    base: &DiffPad,
+    oracle: &dyn BlockOracle,
+    data: &[u8],
+) -> CompareOne {
+    let Ok(parsed) = deserialize::<Block>(data) else {
+        return CompareOne::NotABlock;
+    };
+    if parsed.txdata.is_empty() {
+        return CompareOne::NotABlock;
+    }
+    let Some(stem) = base.bodies.last() else {
+        return CompareOne::Harness("no stem");
+    };
+    let side = mine_regtest_paying(
+        base.fork_parent.hash,
+        base.fork_parent.time.saturating_add(REGTEST_BLOCK_SPACING),
+        base.fork_parent.height.saturating_add(1),
+        ScriptBuf::from_bytes(vec![0x51, 0x51]),
+        Vec::new(),
+    );
+    if let Err(e) = setup_side_block(hub, oracle, &side) {
+        return CompareOne::Harness(e);
+    }
+    let extra: Vec<Transaction> = parsed.txdata.into_iter().skip(1).collect();
+    let child = mine_regtest_paying(
+        side.block_hash(),
+        side.header.time.saturating_add(REGTEST_BLOCK_SPACING),
+        base.fork_parent.height.saturating_add(2),
+        ScriptBuf::from_bytes(vec![0x51]),
+        extra,
+    );
+    let r = compare_prepared(hub, &base.fork_parent, oracle, child);
+    if hub.tip_height() == Some(base.fork_parent.height) {
+        if let Err(e) = restore_stem(hub, oracle, stem) {
+            return CompareOne::Harness(e);
+        }
+    }
+    r
 }
 
 fn compare_prepared(
@@ -956,5 +1061,73 @@ mod tests {
         let b: Block = deserialize(&raw).unwrap();
         assert!(b.txdata.len() >= 2);
         assert_eq!(b.txdata[1].input[0].previous_output, height1_mature_out());
+    }
+
+    fn fork_child_seed_block() -> Block {
+        let params = diff_regtest_params();
+        let g = genesis_block(&params);
+        mine_empty_regtest(g.block_hash(), g.header.time + REGTEST_BLOCK_SPACING, 1)
+    }
+
+    #[test]
+    fn setup_side_block_holds_sibling_of_stem() {
+        let (dir, hub, _g) = tmp_diff_hub();
+        let pad = mine_diff_pad(&hub, DIFF_TEST_PAD_HEIGHT).unwrap();
+        let base = mine_diff_stem(&hub, pad).unwrap();
+        assert_eq!(hub.tip_height(), Some(DIFF_TEST_PAD_HEIGHT + 1));
+        assert_eq!(base.tip.height, DIFF_TEST_PAD_HEIGHT + 1);
+        assert_eq!(base.fork_parent.height, DIFF_TEST_PAD_HEIGHT);
+
+        let side = mine_regtest_paying(
+            base.fork_parent.hash,
+            base.fork_parent.time + REGTEST_BLOCK_SPACING,
+            DIFF_TEST_PAD_HEIGHT + 1,
+            ScriptBuf::from_bytes(vec![0x51, 0x51]),
+            Vec::new(),
+        );
+        let mock = MockOracle::new(OracleReply::NullAccept);
+        setup_side_block(&hub, &mock, &side).unwrap();
+        assert_eq!(hub.tip_height(), Some(DIFF_TEST_PAD_HEIGHT + 1));
+        assert_eq!(mock.submits.get(), 1);
+
+        let mock_rej = MockOracle::new(OracleReply::Reason("bad-txnmrklroot".into()));
+        assert!(setup_side_block(&hub, &mock_rej, &side).is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn compare_fork_one_rewinds_to_stem() {
+        let (dir, hub, _g) = tmp_diff_hub();
+        let pad = mine_diff_pad(&hub, DIFF_TEST_PAD_HEIGHT).unwrap();
+        let base = mine_diff_stem(&hub, pad).unwrap();
+        let mock = MockOracle::new(OracleReply::NullAccept);
+        submit_pad_to_oracle(&mock, &base.bodies).unwrap();
+
+        let seed = serialize(&fork_child_seed_block());
+        let mock = MockOracle::new(OracleReply::NullAccept);
+        match compare_fork_one(&hub, &base, &mock, &seed) {
+            CompareOne::Agreed { accept: true } => {}
+            other => panic!("fork child accept: {other:?}"),
+        }
+        assert_eq!(hub.tip_height(), Some(DIFF_TEST_PAD_HEIGHT + 1));
+        assert_eq!(hub.tip_hash(), Some(base.tip.hash));
+        assert_eq!(mock.last_keep.get(), DIFF_TEST_PAD_HEIGHT);
+
+        assert!(matches!(
+            compare_fork_one(&hub, &base, &mock, b"junk"),
+            CompareOne::NotABlock
+        ));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn regtest_fork_child_fixture() {
+        let expected = serialize(&fork_child_seed_block());
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../rbitcoin-consensus/tests/fixtures/regtest_fork_child.bin");
+        let raw = fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        assert_eq!(raw, expected);
+        let b: Block = deserialize(&raw).unwrap();
+        assert!(!b.txdata.is_empty());
     }
 }
