@@ -3,10 +3,13 @@
 What is strong, what still blocks “industry-leading,” and what is already
 closed. Replaces the 2026-08-06 point-in-time audit.
 
-**Last reaudit:** 2026-08-21 (schema 18/19 + SH extent #177, confirm
-no-coord / park / head-drain #173–#176, wallet-client join + bench
-#162–#172, Core functional **44** `run`). Previous: 2026-08-18 (confirm
-perf #117–#126, repo cruft #127, **Q-50**, leftover-P2P **37** `run`).
+**Last reaudit:** 2026-09-03 (schema **20** BDZ indexes, IBD tick cadence,
+leftover hop-dump vs resolve-batch clear, reactor-safe mempool accept,
+tip-accept OS thread, most-work IBD tip, empty-headers live-path reseed,
+Core functional **62** `run`, finding **023**). Previous: 2026-08-21
+(schema 18/19 + SH extent #177, confirm no-coord / park / head-drain
+#173–#176, wallet-client join + bench #162–#172, Core functional **44**
+`run`).
 
 **Three lists only**
 
@@ -91,43 +94,52 @@ evidence (failed Core corpus, new dual path, red required CI, MSRV drift).
 
 | Rank | ID | Item | Tag | Done looks like |
 |-----:|----|------|-----|-----------------|
-| 1 | **Q-30** | Continuous differential fuzz | reliability | A nightly/weekly job that feeds BIP324 + header/block (and script) wire. Crashes → `docs/external_findings/` + named regression. **Today: `fuzz/` `block_wire` + nightly `fuzz.yml` (not a required PR check).** Grow corpus / more targets. Findings 001–021 came from an external fuzzamoto campaign — that is not a substitute for the in-tree job. |
-| 2 | **Q-41** | Grow Core functional `run` set | test | Inventory `run` covers the wallet-client / P2P / mempool / buried-activation scripts we **claim**. **Today: 53 run / 214 skip (30 rpc-missing, 26 core-log).** COMPAT-done leftovers are `rpc-dialect` (not `rpc-missing`). Next `run` candidates: `mempool_accept` type-check, `mining_basic` weight, `rpc_getblockfrompeer`. Product-never skips stay skip. Unlabeled PRs stay cargo-only; nightly green |
-| 3 | **Q-57** | Store publish / Class C flush / sidecar | store | `VarTable::published_meta` loads count/end `Acquire` (ARM cannot tear the pair). `ArrayTable` / `StrongTxTable` `flush_dirty` cannot lose a `set` in the write window (clear dirty then snapshot, or equivalent). fuse8 `decode_body` fails closed (`NeedsRewrite`) instead of indexing fingerprints OOB. Spender overflow walk bounded by `spenders.count()`. Sidecar meta / `.mphf` / SH `.idx` do not rename an unsynced empty file into place. `sorted_run` orphan GC cannot delete a live run (lock is a type, not a comment). |
-| 4 | **Q-58** | Mempool persist order + eviction | mempool | `persist_all` writes body before claiming LIVE slots. Known-parent out-of-range vout hard-rejects (not orphan-forever). `worst_chunk` rate-tie does not strand descendants. `evict_to_budget` no-op iterations break (no spin). |
-| 5 | **Q-59** | RPC / CLI honesty | ops | `submitblock` matches [`rpc.md`](./rpc.md) / COMPAT (all networks) or those docs say regtest-only. `gettxout include_mempool` hides mempool-spent confirmed outs. `sendrawtransaction` / `submitpackage` enforce or reject `maxfeerate` / `maxburnamount`. Conf `milestone=0` is not overwritten by the network default. `--minrelaytxfee` parse failure is an error (negatives rejected). `getmininginfo` `blockmintxfee` uses a feerate formatter. `getnetworkhashps` is not a dummy ~2 hashes/block (or is labeled). JSON-RPC batch is bounded under the work permit. |
-| 6 | **Q-60** | P2P caps + compact reconstruction | p2p | Compact-block prefilled indexes are strictly increasing and in-bounds. AddrMan has tried/new caps. `cmpct_fills` / `requested_blocks` prune on abandon/timeout. `announced_wtx` rolls instead of clear-all INV burst. Pending/held eviction is FIFO (`held_seq`), not `HashMap::keys().next()`. Esplora WS mempool-announce store IO uses `spawn_blocking` like REST (**landed**). IBD `disconnect_to` skips cloning the losing branch when there is no mempool. |
+| 1 | **Q-30** | Continuous differential fuzz | reliability | A nightly/weekly job that feeds BIP324 + header/block (and script) wire. Crashes → `docs/external_findings/` + named regression. **Today: `fuzz/` `block_wire` + nightly `fuzz.yml` (not a required PR check).** Grow corpus / more targets. Findings 001–023 came from external review + fuzzamoto — that is not a substitute for the in-tree job. |
+| 2 | **Q-41** | Grow Core functional `run` set | test | Inventory `run` covers the wallet-client / P2P / mempool / buried-activation scripts we **claim**. **Today: 62 run / 205 skip (22 rpc-missing, 25 core-log, 68 no-wallet).** COMPAT-done leftovers are `rpc-dialect` (not `rpc-missing`). Next `run` candidates: `mempool_accept` type-check, `mining_basic` weight, `rpc_getblockfrompeer`. Product-never skips stay skip. Unlabeled PRs stay cargo-only; nightly green |
+| 3 | **Q-57** | Store publish / Class C flush / sidecar | store | `VarTable::published_meta` loads count/end `Acquire` (ARM cannot tear the pair). `ArrayTable` / `StrongTxTable` `flush_dirty` cannot lose a `set` in the write window (clear dirty then snapshot, or equivalent). fuse8 `decode_body` fails closed (`NeedsRewrite`) instead of indexing fingerprints OOB. Spender overflow walk bounded by `spenders.count()`. Sidecar meta / `.mphf` / SH `.idx` do not rename an unsynced empty file into place. `sorted_run` orphan GC cannot delete a live run (lock is a type, not a comment). **Today: `published_meta` seqlock Acquire landed.** `BinaryFuse8::contains` still indexes `fingerprints` without a closed length check. |
+| 4 | **Q-58** | Mempool persist order + eviction | mempool | `persist_all` writes body before claiming LIVE slots. Known-parent out-of-range vout hard-rejects (not orphan-forever). `worst_chunk` rate-tie does not strand descendants. `evict_to_budget` no-op iterations break (no spin). **Today: `evict_to_budget` breaks when a pass removes 0.** `persist_all` still writes meta/slots then body. |
+| 5 | **Q-59** | RPC / CLI honesty | ops | `submitblock` matches [`rpc.md`](./rpc.md) / COMPAT (all networks) or those docs say regtest-only. `gettxout include_mempool` hides mempool-spent confirmed outs. `sendrawtransaction` / `submitpackage` enforce or reject `maxfeerate` / `maxburnamount`. Conf `milestone=0` is not overwritten by the network default. `--minrelaytxfee` parse failure is an error (negatives rejected). `getmininginfo` `blockmintxfee` uses a feerate formatter. `getnetworkhashps` is not a dummy ~2 hashes/block (or is labeled). JSON-RPC batch is bounded under the work permit. **Today: `submitblock` is `require_regtest_miner` while COMPAT excepts it from regtest-only. `getnetworkhashps` still `2 * nblocks / dt`. `gettxout` does not hide mempool-spent confirmed outs. JSON-RPC array batch is unbounded.** |
+| 6 | **Q-60** | P2P caps + compact reconstruction | p2p | Compact-block prefilled indexes are strictly increasing and in-bounds. AddrMan has tried/new caps. `cmpct_fills` / `requested_blocks` prune on abandon/timeout. `announced_wtx` rolls instead of clear-all INV burst. Pending/held eviction is FIFO (`held_seq`), not `HashMap::keys().next()`. Esplora WS mempool-announce store IO uses `spawn_blocking` like REST (**landed**). IBD `disconnect_to` skips cloning the losing branch when there is no mempool. **Today: `prefilled_indexes_ok` + `held_seq` FIFO + WS `spawn_blocking` landed.** `announced_wtx` still `clear()` at 50k. AddrMan is an unbounded `HashMap`. |
 | 7 | **Q-48** | BIP331 rust-bitcoin package types | interop | Native BIP331 `NetworkMessage` when rust-bitcoin exposes it (**RB-007**). Packages today are RPC `submitpackage` / Esplora `POST /txs/package` only — no private P2P command. Blocked upstream — ranked below unblocked ops work. **After this:** Electrum 1.6 then 1.7 (`protocol_max` bump in the same work) — [`COMPAT.md`](../COMPAT.md) § Protocol versions |
 | 8 | **Q-31** | Hermetic tip fixtures | ops | Frozen signet/mainnet tip packs for offline consensus/Electrum regression (no live API). Unblocks Q-30 corpora |
-| 9 | **R-10** | Residual god-files | code | Peel **only** when a higher row needs a seam. After extracting `peer_tests` / `methods_tests` / `scripthash_tests`: production `query/lib` **4.2k**, `electrum/server` **3.7k**, `scripthash` **3.4k**, `sorted_run` **3.4k**, `methods` **3.3k**, `chain` **3.3k**, `store` **3.2k**. Further production peels wait for a real seam. **Q-54** may need a seam if a cap rule cannot match a god-file. |
+| 9 | **R-10** | Residual god-files | code | Peel **only** when a higher row needs a seam. Production leftover (2026-09-03 `wc -l`): `electrum/server` **5.8k**, `query/lib` **5.1k**, `chain` **3.9k**, `rpc/methods` **3.6k**, `scripthash` **3.5k**, `store` **3.4k**, `peer` **2.9k**, `ibd/perf_log` **2.9k**, `interpreter` **2.7k**. `sorted_run` peeled to **1.3k**. Further production peels wait for a real seam. **Q-54** may need a seam if a cap rule cannot match a god-file. |
 | 10 | **Q-54** | Grow ast-grep rules from `ibd-memory.md` | code | One rule per named cap that is easy to delete: `pending_blocks` 128, `held_bodies` 320, `MAX_SERVE_BLOCKS` 16, `follow_live` vs `max_outbound`. Each rule has `lint/ast-grep/fixtures/{good,bad}/`. Peel god-files (**R-10**) only if a rule needs a seam. |
 | 11 | **Q-55** | CRAP `--fail-regression` | test | Commit `crap_baseline.json` (`--format json --sort file`) from a green coverage artifact. PRs fail if a function’s CRAP rises. Still no `--fail-above 30` while clippy allows `cognitive_complexity`. |
 | 12 | **Q-56** | Miri islands beyond primitives | reliability | `cfg(miri)` tests for FFI-free helpers (scriptnum, pack_ud-style integers) that do not pull secp/store. Never workspace miri. |
 
 ### Still valid? (this reaudit)
 
-2026-08-21 pass. Tree at #177. Verified: zero in-tree fuzz, inventory
-**44** `run` / **223** `skip` / 267 total, `SCHEMA_VERSION = 19`, findings
-001–022 all fixed, **0** `TODO`/`FIXME`, **2** `#[allow(` (clippy
-`type_complexity` in consensus), `unsafe`
-in store IO sessions + `script_pool` + confirm `head_drain`.
+2026-09-03 pass. Tree at #318. Verified: in-tree fuzz is still **one**
+target (`block_wire` nightly), inventory **62** `run` / **205** `skip` /
+267 total, `SCHEMA_VERSION = 20`, findings **001–023** all fixed, **0**
+`TODO`/`FIXME`, **4** `#[allow(` (consensus `type_complexity` ×2; Darwin
+`deprecated` + Windows `dead_code` FFI in `sorted_run`), `unsafe` in
+store IO sessions + `script_pool` + confirm `head_drain`. No new Q-61 —
+remaining holes already have Open rows.
 
 | ID | Verdict |
 |----|---------|
-| **Q-30** | Keep rank 1. Still the highest correctness hole; zero in-tree fuzz. External fuzzamoto is not a substitute job. |
-| **Q-41** | Keep rank 2. 44 → **53** `run`. 214 skips; `rpc-missing` 30 + `core-log` 26 are the only growth matching claimed surface. |
-| **Q-50** | **Closed.** Write/lookup/load inventory includes `drain_join` / `dequeue` / wave nested tokens; `other=` is the explicit residual (`format_info` pins). A fat `other=` on a later IBD is confirm-perf, not a missing-meter program. 2026-08-18 dark-time numbers retired. |
-| **Q-36** | **Closed.** Default INFO is `ibd: progress`; `ibd: perf` / `ibd: sizes` / `perf_dbg` are DEBUG (`log_sample`). |
+| **Q-30** | Keep rank 1. Highest correctness hole. `block_wire` nightly exists; it is not BIP324/header/script breadth. External fuzzamoto + finding 023 are not a substitute job. |
+| **Q-41** | Keep rank 2. 53 → **62** `run`. 205 skips; `rpc-missing` 22 + `core-log` 25 are the growth matching claimed surface. |
+| **Q-57** | Keep rank 3. Seqlock `published_meta` landed; fuse8 fingerprint OOB, flush_dirty window, sidecar rename, spender overflow bound, sorted_run GC lock type still open. |
+| **Q-58** | Keep rank 4. `evict_to_budget` no-op break landed. `persist_all` still meta/slots then body. |
+| **Q-59** | Keep rank 5. COMPAT vs `submitblock` regtest clamp, dummy `getnetworkhashps`, `gettxout` mempool-spent confirmed, unbounded JSON-RPC batch. |
+| **Q-60** | Keep rank 6. Prefill monotonic + `held_seq` + WS `spawn_blocking` landed. AddrMan caps and `announced_wtx` roll still open. |
 | **Q-48** | Keep, rank 7. Waits on rust-bitcoin (**RB-007**). |
 | **Q-31** | Keep. Useful for Q-30; not blocking operators. |
-| **Q-34** | **Closed.** `OPERATOR.md` § First hour (regtest); README points at that section. |
-| **R-10** | Keep last among peels. Inline tests left `peer.rs` / `methods.rs` / `scripthash.rs`. Remaining giants are production-sized (`query/lib` **4.2k**). |
-| **Q-57–Q-60** | **Added 2026-08-25** from retired `algo-review.md`. Not a reaudit of the rest of this table. |
+| **R-10** | Keep last among peels. Largest production file is now `electrum/server` **5.8k** (tweaks subscribe). `sorted_run` peeled to **1.3k**. |
+| **Q-54** | Keep. ast-grep still three rules (`detached-tokio-spawn`, `mem-forget-or-leak`, `thread-spawn-dropped`). No named-cap rules from `ibd-memory.md`. |
+| **Q-55** | Keep. `scripts/coverage-crap.sh` exists; no committed `crap_baseline.json`. |
+| **Q-56** | Keep. Nightly `miri.yml` is still primitives-only. |
+| **Q-50** | **Closed** (prior). Named write/lookup/load inventory + `other=`. |
+| **Q-36** | **Closed** (prior). Default INFO is `ibd: progress`. |
+| **Q-34** | **Closed** (prior). `OPERATOR.md` § First hour. |
 
 Prior-reaudit closures (Q-37, Q-47, Q-49) and Won't-fix calls
-(Q-24/25/32/33/35/38) stand — evidence unchanged. This pass adds
-Won't-fix rows for headerless SH interiors, script coordinators,
-and bench-in-CI (shipped shape, not a backlog).
+(Q-24/25/32/33/35/38) stand — evidence unchanged. This pass does **not**
+reopen them. New Completed rows: tip-accept thread, reactor-safe accept,
+IBD cadence, leftover hop-dump, most-work tip, empty-lag reseed, schema 20,
+finding 023.
 
 ### ID aliases (R-program ↔ catalog)
 
@@ -184,6 +196,14 @@ findings 001–022, CI split, map-free README, …) live in
 
 | ID | Item | Resolution |
 |----|------|------------|
+| **—** | Schema 20 indexes | Sealed `tx.head` MPHF+`.rel` → packed BDZ2; sealed SH MPHF → compact BDZ3. Occupied 18/19 `tx.head`/`scripthash*` **refused** (wipe those dirs, Class A kept). Empty 18/19 rewrite `meta` to 20. |
+| **—** | IBD main-loop cadence | Assign ≤50 ms (immediate if inflight empty); header locator poll ≤500 ms (empty path immediate); stall/relative-slow and work-path hygiene ≤1 s. Drain + confirm-offer stay event-driven. Full 2000-header continuation stays on the Headers event. |
+| **—** | Leftover hop-dump vs resolve-batch clear | `clear_leftover_miss` no longer wipes `diag=1`. Miss class is per-batch; dump is `take` only. Tests pin the parent txid (`leftover_probe_diag_recorded`). |
+| **—** | Reactor-safe mempool accept | P2P `tx` / Esplora `POST /tx` `spawn_blocking` (`BlockingRegion`). Prepare under graph **read**. Node blocking pool capped at nCPU (min 4). |
+| **—** | Tip-accept OS thread | P2P reconstruct and RPC generate/submitblock do not take `connect_lock` on a tokio worker. Scripts still steal on `rbtc-scripts-*`. Not the IBD body-queue pipeline. |
+| **—** | Most-work IBD tip | Higher-height less-work fork (or bogus `version.start_height`) is `register_explore` only. Empty headers at a drained most-work path is EOF. |
+| **—** | Empty-headers lag reseed | `seed_work_path_from_store` only when `ordered` is empty. Live path is not walked on empty `getheaders`. |
+| **023** | Tapscript initial stack 1000/520 | After OP_SUCCESS scan, tapscript rejects `stack.len() > 1000` and elements `> 520`, matching Core `ExecuteWitnessScript`. |
 | **Q-51** | ast-grep structural lints | `sgconfig.yml` + `lint/ast-grep/` first rules (`detached-tokio-spawn`, `mem-forget-or-leak`, `thread-spawn-dropped`) + `scripts/ast-grep.sh`. Required CI job `ast-grep` (fmt-class). Grow named-cap rules: **Q-54**. |
 | **Q-52** | CRAP report on coverage LCOV | `scripts/coverage-crap.sh` after the ≥90% gate; `coverage/crap.json`. No `--fail-above 30`. Regression gate: **Q-55**. |
 | **Q-53** | Miri on primitives | `scripts/miri.sh` → `cargo miri test -p rbitcoin-primitives`. Nightly `miri.yml` like `fuzz.yml` (not required). Islands: **Q-56**. |
@@ -198,7 +218,7 @@ findings 001–022, CI split, map-free README, …) live in
 | **Q-37** | Warm default suite ≤3 min | Required CI `test` **~85 s** (2026-08-17, ubuntu-24.04). Stretch &lt;2 min met on CI-class. Recorded in TESTING.md |
 | **—** | Docs map + one owner per fact | `docs/README.md`; folded store-format / startup-states / future-features / COVERAGE (`#81`) |
 | **—** | Tests assert behavior, not repo text | No `include_str!` of production `.rs` / CONTRIBUTING (`#85`) |
-| **—** | Core functional `run` set | **53** unmodified v31.1 scripts (was 44 at last reaudit, 9 at first green). Remaining growth is **Q-41** |
+| **—** | Core functional `run` set | **62** unmodified v31.1 scripts (was 53 at last reaudit, 9 at first green). Remaining growth is **Q-41** |
 | **Q-15 / Q-42–Q-46** | CLI, inbound config, RPC honesty, Libre-only, IO aliases | 2026-08-16 cruft program |
 | **R-01–R-06** | Mempool snapshot, `script_pool`, remine pads, TxGraph cache, llvm-cov pin, tip-follow store integrity | 2026-08-12. Wall leftover was **Q-37** (now closed) |
 | **Q-16 / Q-20 / Q-23** | Residual env, `cargo deny` CI, optional musl artifact | `env-knobs.md`; required `deny`; musl zip is GitHub Release only |
@@ -221,50 +241,50 @@ findings 001–022, CI split, map-free README, …) live in
 
 ## Baseline snapshot
 
-**Measured 2026-08-21** (`crates/**/*.rs` raw `wc -l`, inline test mods
-included; tree at #177):
+**Measured 2026-09-03** (`crates/**/*.rs` raw `wc -l`, inline test mods
+included; tree at #318):
 
 | Metric | Value |
 |--------|-------|
-| First-party Rust LOC | **~167k** (was ~150k on 2026-08-18; SH extents, confirm pipeline, wallet join, bench crate) |
+| First-party Rust LOC | **~182k** (was ~167k on 2026-08-21; schema 20 BDZ, Electrum tweaks subscribe, IBD cadence, reactor-safe accept) |
 | Workspace crates | **14** (`rbitcoin-cli` … `rbitcoin-test` + optional `rbitcoin-bench`; no wallet crate). `rbitcoin-bench` is not default-members and not musl |
-| Largest production files (lines) | `query/lib` **4159**, `electrum/server` **3685**, `scripthash` **3446**, `sorted_run` **3366**, `rpc/methods` **3296**, `chain` **3251**, `store` **3242**, `ibd/perf_log` **2743**, `interpreter` **2628**, `peer` **2132** |
-| Largest test files (lines) | `peer_tests` **3521**, `tx_table/tests` **3209**, `methods_tests` **2575**, `confirm_reject_tests` **2555**, `scenarios` **2267**, `scripthash_tests` **2111** |
-| `#[test]` / `#[tokio::test]` | **~1.69k** |
-| `TODO` / `FIXME` / `#[allow(` | **0** / **0** / **2** |
+| Largest production files (lines) | `electrum/server` **5807**, `query/lib` **5099**, `chain` **3875**, `rpc/methods` **3598**, `scripthash` **3531**, `store` **3416**, `peer` **2936**, `ibd/perf_log` **2850**, `interpreter` **2719**, `ibd/assign` **2535** |
+| Largest test files (lines) | `peer_tests`, `tx_table/tests`, `methods_tests`, `confirm_reject_tests`, `scenarios`, `scripthash_tests` (same order as last pass; not re-ranked) |
+| `#[test]` / `#[tokio::test]` | **~1.93k** |
+| `TODO` / `FIXME` / `#[allow(` | **0** / **0** / **4** |
 | Coverage gate | **≥90%** LCOV `LH`/`LF` (required CI) |
 | Required CI | `fmt`, `deny`, `clippy`, `ast-grep`, `test`, `windows`, `macos`, `multinode`, `coverage` (+ CodeQL) |
 | Extra CI | `release.yml` on `v*.*.*` / dispatch; `fuzz.yml` nightly; `miri.yml` nightly primitives; `core-functional.yml` nightly / labeled PR (not required) |
 | rustc | **1.95** (`Cargo.toml` + `rust-toolchain.toml` + `dtolnay/rust-toolchain@1.95.0` + nixos-26.05 / shell) |
-| Nix | **nixos-26.05** + crane **0.23.x** |
+| Nix | **nixos-26.05** + crane **0.24.0** |
 | Host cargo silos | `target/dev` (test) / `target/cov` (coverage) |
 | Release | `nix build .#rbitcoin-musl` → static install |
 | Core corpora | **No allowlist** |
-| Findings 001–022 | All **fixed** |
-| Core functional | **53** unmodified v31.1 scripts `run`; 214 skip (68 `no-wallet`, 30 `rpc-missing`, 26 `core-log`, …) |
+| Findings 001–023 | All **fixed** |
+| Core functional | **62** unmodified v31.1 scripts `run`; 205 skip (68 `no-wallet`, 22 `rpc-missing`, 25 `core-log`, …) |
 | Residual `RBITCOIN_*` in crates | Honored set listed in `env-knobs.md` (**Q-16** closed) |
-| On-disk | **Schema 19** (Class A/C still 17 bytes; 18 = MPHF indexes; 19 = SH extent last page). Populated 17 `tx.head`/`scripthash*` refused |
+| On-disk | **Schema 20** (Class A/C still 17 bytes; 18 = MPHF indexes; 19 = SH extent last page; 20 = BDZ2 `tx.head` + BDZ3 SH). Occupied 18/19 `tx.head`/`scripthash*` refused |
 | Confirm queues | **loadq=14 · scriptq=4 · writeq=14** (hardcoded) |
-| IBD confirm rate | Last instrumented fat-era number **6.4 blk/s** at #126 (2026-08-18). Not re-baselined after loadq/stamp/no-coord/head-drain. Residual meters are named (`other=`) — **Q-50** closed |
+| IBD confirm rate | Last instrumented fat-era number **6.4 blk/s** at #126 (2026-08-18). Not re-baselined after cadence / tip-accept / reactor-safe. Residual meters are named (`other=`) — **Q-50** closed |
 | Fuzz | **minimal** (`block_wire` nightly; breadth is Q-30) |
 
-### Grade board (subjective; 2026-08-21)
+### Grade board (subjective; 2026-09-03)
 
 | Dimension | Grade | Note |
 |-----------|-------|------|
-| Architecture clarity | Strong | Roles + HWM + single Class A appender; schema 19 in SCHEMA.md; scripts have no coordinator threads |
+| Architecture clarity | Strong | Roles + HWM + single Class A appender; schema 20 in SCHEMA.md; scripts have no coordinator threads; tip-accept + IBD cadence are named roles |
 | Dependency hygiene | Strong | No `libbitcoinconsensus`; fuse8/script_pool in-tree; bench crate optional |
-| Operator honesty | Strong | CLI primary; chaininfo disk/progress are real (Q-47); SH materialize keep-runs + last-page cap is pinned; README size matches SCHEMA census |
-| Code modularity | Medium | Inline tests peeled from `peer` / `methods` / `scripthash`. Production leftover: `query/lib` **4.2k** (**R-10**) |
+| Operator honesty | Strong | CLI primary; chaininfo disk/progress are real (Q-47); schema 20 refuse names wipe dirs; leftover hop-dump no longer dropped by the next resolve. Residual: Q-59 dummy `getnetworkhashps` / `submitblock` COMPAT |
+| Code modularity | Medium | Inline tests peeled from `peer` / `methods` / `scripthash`. Production leftover: `electrum/server` **5.8k** (**R-10**) |
 | Cross-platform | Medium (honest) | Completion session ports Darwin/Windows store IO. CI snapshots: musl + CRT-static Windows + system-dylib Darwin |
 | Docs consistency | Strong | One map (`docs/README.md`); AGENTS slim; comments-as-smell + no repo-text tests |
 | Contributor onboarding | Strong | how-we-plan + TDD + inventory; first hour is OPERATOR.md (Q-34) |
 | CI fidelity | Strong | Split gates; `test` ~85 s; Core functional nightly extra |
-| Dead / stub surface | Strong | Node RPC is a real subset; no dummy chaininfo numbers |
+| Dead / stub surface | Strong | Node RPC is a real subset; chaininfo disk/progress real (Q-47). Residual dummy is `getnetworkhashps` (~2 hashes/block) — **Q-59** |
 | Test reliability/speed | Strong | **Q-37** closed on CI-class; 2 s default-test rule remains |
 | Tip-follow mempool APIs | Strong | **R-01–R-04**; persist sidecars exist (Core persist script still skip → Q-41); INV tick no longer clones the mempool |
 | Wallet-client APIs | Strong | Last-slot SH join + serve-lean identity for Electrum/Esplora; Casa/Sparrow times stay host-only (`rbitcoin-bench`) |
-| Adversarial / findings | Medium–Strong | **001–022** closed; **minimal fuzz** (`block_wire` nightly); breadth is **Q-30**. Core functional is the active surface program (**Q-41**) |
+| Adversarial / findings | Medium–Strong | **001–023** closed; **minimal fuzz** (`block_wire` nightly); breadth is **Q-30**. Core functional is the active surface program (**Q-41**) |
 | Perf observability | Strong | Named residuals (`other=` / `drain_join=`) (**Q-50**). Default INFO is `ibd: progress` (**Q-36**) |
 
 ---
@@ -283,9 +303,10 @@ included; tree at #177):
 - Confirm dual-path kill + tier-A multinode in default/CI.
 - Soft-migrate durable side formats; no silent wipes.
 - Tests assert shipped behavior, not repo text.
-- Schema 19 SH last-page stream cap (`ver=2` header 24 B / 4072 B stream);
-  chunkers share `sh_page_chunk_ranges`.
-- Sealed MPHF `g` stays FdOnly (fuse8 fingerprints in RAM).
+- Schema 20 BDZ2 `tx.head` / BDZ3 SH; occupied 18/19 index dirs refused
+  (Class A kept). Schema 19 SH last-page stream cap (`ver=2` header 24 B /
+  4072 B stream); chunkers share `sh_page_chunk_ranges`.
+- Sealed fuse8 fingerprints stay RAM; BDZ `g` is FdOnly.
 - Schema 17 leftover regenerate for optional `sp_tweaks` files (not a Class A wipe).
 
 ---
@@ -294,7 +315,7 @@ included; tree at #177):
 
 | Audience | Read |
 |----------|------|
-| Next quality slice | **Open**, rank 1 (**Q-30** fuzz). Active program: **Q-41** (Core functional `run` set). Folded store/mempool/RPC/P2P leftovers: **Q-57–Q-60** |
+| Next quality slice | **Open**, rank 1 (**Q-30** fuzz). Active program: **Q-41** (Core functional `run` set). Folded store/mempool/RPC/P2P leftovers: **Q-57–Q-60**. Next unused Q-id remains **Q-61** |
 | Peer full nodes | [`peer-clients.md`](./peer-clients.md) — Hornet / satd notes; not a fourth backlog |
 | Release engineering | **Q-20**, **Q-21**, **Q-23** (completed) |
 | Security / adversarial | Protect Q-01–Q-02; next **Q-30** |
