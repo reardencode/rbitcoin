@@ -3,8 +3,7 @@
 use crate::chain::{AcceptOutcome, ChainHub};
 use crate::error::NetError;
 use bitcoin::consensus::encode::{deserialize, serialize};
-use bitcoin::hashes::Hash;
-use bitcoin::{Block, BlockHash, OutPoint, ScriptBuf};
+use bitcoin::{Block, BlockHash};
 use rbitcoin_consensus::{
     genesis_block, prepare_regtest_candidate, ChainParams, REGTEST_BLOCK_SPACING,
 };
@@ -345,6 +344,8 @@ fn rewind_agreed(hub: &ChainHub, oracle: &dyn BlockOracle, accept: bool) -> Comp
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin::hashes::Hash;
+    use bitcoin::{OutPoint, ScriptBuf};
     use rbitcoin_consensus::{mine_empty_regtest, mine_regtest_paying, Milestone};
     use rbitcoin_query::Query;
     use std::cell::Cell;
