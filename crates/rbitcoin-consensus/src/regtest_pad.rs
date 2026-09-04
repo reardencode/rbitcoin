@@ -18,6 +18,32 @@ use crate::{
     block_subsidy, ChainParams, Milestone,
 };
 
+pub const REGTEST_POW_BITS: u32 = 0x207f_ffff;
+pub const REGTEST_BLOCK_SPACING: u32 = 600;
+
+/// Grind `header.nonce` until PoW matches `header.bits`. Does not change version.
+pub fn grind_regtest_pow(header: &mut Header) {
+    let target = Target::from_compact(header.bits);
+    for nonce in 0..u32::MAX {
+        header.nonce = nonce;
+        if header.validate_pow(target).is_ok() {
+            return;
+        }
+    }
+    panic!("regtest pow grind exhausted");
+}
+
+/// Fuzzer / tests keep txdata + version. Harness owns prev/bits/time/merkle/nonce.
+pub fn prepare_regtest_candidate(block: &mut Block, prev: BlockHash, time: u32) {
+    block.header.prev_blockhash = prev;
+    block.header.bits = CompactTarget::from_consensus(REGTEST_POW_BITS);
+    block.header.time = time;
+    block.header.merkle_root = block
+        .compute_merkle_root()
+        .unwrap_or(TxMerkleNode::from_byte_array([0u8; 32]));
+    grind_regtest_pow(&mut block.header);
+}
+
 /// Mine one empty-ish regtest block (trivial bits).
 pub fn mine_empty_regtest(prev: BlockHash, time: u32, height: u32) -> Block {
     mine_regtest_paying(
@@ -40,7 +66,7 @@ pub fn mine_regtest_paying(
     script_pubkey: ScriptBuf,
     extra_txs: Vec<Transaction>,
 ) -> Block {
-    let bits = CompactTarget::from_consensus(0x207f_ffff);
+    let bits = CompactTarget::from_consensus(REGTEST_POW_BITS);
     // Post-BIP65 (regtest height 1) requires nVersion ≥ 4. Core generate uses
     // VERSIONBITS_TOP_BITS; 4 is the buried minimum and enough for dersig/cltv.
     let header = Header {
@@ -60,13 +86,7 @@ pub fn mine_regtest_paying(
     } else if let Some(root) = block.compute_merkle_root() {
         block.header.merkle_root = root;
     }
-    let target = Target::from_compact(bits);
-    for nonce in 0..u32::MAX {
-        block.header.nonce = nonce;
-        if block.header.validate_pow(target).is_ok() {
-            break;
-        }
-    }
+    grind_regtest_pow(&mut block.header);
     block
 }
 
@@ -182,6 +202,81 @@ mod tests {
         assert_eq!(
             b150.txdata[0].output[0].value,
             Amount::from_sat(25_0000_0000)
+        );
+    }
+
+    #[test]
+    fn grind_regtest_pow_changes_nonce_only() {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let mut header = genesis.header;
+        header.bits = CompactTarget::from_consensus(REGTEST_POW_BITS);
+        header.nonce = 0;
+        let version = header.version;
+        let prev = header.prev_blockhash;
+        let merkle = header.merkle_root;
+        let time = header.time;
+        let bits = header.bits;
+        grind_regtest_pow(&mut header);
+        assert_eq!(header.version, version);
+        assert_eq!(header.prev_blockhash, prev);
+        assert_eq!(header.merkle_root, merkle);
+        assert_eq!(header.time, time);
+        assert_eq!(header.bits, bits);
+        let target = Target::from_compact(header.bits);
+        assert!(header.validate_pow(target).is_ok());
+    }
+
+    #[test]
+    fn prepare_regtest_candidate_keeps_version_and_txids() {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let mut block = mine_empty_regtest(genesis.block_hash(), genesis.header.time + 1, 1);
+        block.header.version = Version::from_consensus(5);
+        let txids: Vec<_> = block.txdata.iter().map(|t| t.compute_txid()).collect();
+        let version = block.header.version;
+        prepare_regtest_candidate(
+            &mut block,
+            genesis.block_hash(),
+            genesis.header.time + REGTEST_BLOCK_SPACING,
+        );
+        assert_eq!(block.header.version, version);
+        let after: Vec<_> = block.txdata.iter().map(|t| t.compute_txid()).collect();
+        assert_eq!(after, txids);
+        assert_eq!(block.header.prev_blockhash, genesis.block_hash());
+        assert_eq!(
+            block.header.bits,
+            CompactTarget::from_consensus(REGTEST_POW_BITS)
+        );
+        assert_eq!(
+            block.header.merkle_root,
+            block.compute_merkle_root().unwrap()
+        );
+        let target = Target::from_compact(block.header.bits);
+        assert!(block.header.validate_pow(target).is_ok());
+    }
+
+    #[test]
+    fn regtest_height1_fixture_matches_mine_empty() {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let b = mine_empty_regtest(
+            genesis.block_hash(),
+            genesis.header.time + REGTEST_BLOCK_SPACING,
+            1,
+        );
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/regtest_height1.bin");
+        let raw = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let got: Block = bitcoin::consensus::encode::deserialize(&raw).expect("fixture block");
+        assert_eq!(got.header.prev_blockhash, genesis.block_hash());
+        assert_eq!(
+            got.header.bits,
+            CompactTarget::from_consensus(REGTEST_POW_BITS)
+        );
+        let target = Target::from_compact(got.header.bits);
+        assert!(got.header.validate_pow(target).is_ok());
+        assert_eq!(
+            bitcoin::consensus::encode::serialize(&b),
+            raw,
+            "regtest_height1.bin must match mine_empty_regtest(genesis, t+600, 1)"
         );
     }
 }
