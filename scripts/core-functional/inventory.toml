@@ -4,6 +4,19 @@
 pin = "v31.1"
 core_commit = "9be056a8a72b624dae9623b2f7bded92c2a21c91"
 
+[release]
+base_url = "https://bitcoincore.org/bin/bitcoin-core-31.1"
+
+[[release.linux]]
+arch = "x86_64-linux-gnu"
+tarball = "bitcoin-31.1-x86_64-linux-gnu.tar.gz"
+sha256 = "b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e"
+
+[[release.linux]]
+arch = "aarch64-linux-gnu"
+tarball = "bitcoin-31.1-aarch64-linux-gnu.tar.gz"
+sha256 = "dcf1873f2208ba4f962f3398d47e154c39c0084be8f4553e05c940d0ace3d004"
+
 [[test]]
 name = "combine_logs.py"
 status = "skip"

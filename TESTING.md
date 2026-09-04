@@ -255,9 +255,31 @@ New features: add a high-level scenario; remove obsolete lower-level tests in th
 
 ## Core differential
 
-In-tree fuzz is still `block_wire` (nightly `fuzz.yml`). A satd-style
-**verdict-only** dual-submit vs live `bitcoind` is later-consideration
-for **Q-30**: [`docs/peer-clients.md`](./docs/peer-clients.md).
+Nightly (not a required PR check) `fuzz.yml` runs two cargo-fuzz targets:
+
+| Target | What | Oracle |
+|--------|------|--------|
+| `block_wire` | `check_block_wire` (ASan) | none |
+| `block_differential` | height-1 `ChainHub::accept_received_block` vs Core `submitblock`, **accept vs reject only** | official **v31.1** `bitcoind` tarball (`scripts/core-functional/fetch-bitcoind.sh`) |
+
+```bash
+./scripts/fuzz-run.sh                    # block_wire (ASan)
+./scripts/fuzz-run.sh block_differential # fetch bitcoind, --sanitizer none
+```
+
+`block_differential` prepares every candidate on **regtest genesis** (`prev`
+fixed; coinbase/version stay fuzzer-owned). After a compared accept, rbitcoin
+`rewind_to_height(0)` and Core `invalidateblock` until `getblockcount==0`.
+The diff hub overlays `bip34@1` only — global `ChainParams::regtest()` is
+unchanged. Harness/oracle failure exits **2** (no libFuzzer crash file).
+Accept/reject disagreement **panics** (reproducer). A red nightly is a
+**finding** (`docs/external_findings/`), not a test to green by changing
+production in the harness PR.
+
+Default `cargo test` does **not** download Core, bind RPC, or compile `fuzz/`.
+The official tarball is glibc; GitHub Actions `ubuntu-latest` runs it. A NixOS
+host cannot exec it without a foreign-glibc loader — that is CI-only, not a
+default-suite concern.
 
 Inventory for Bitcoin Core **v31.1** functional tests lives in
 [`scripts/core-functional/`](scripts/core-functional/)

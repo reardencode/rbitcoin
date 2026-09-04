@@ -9,6 +9,15 @@ before 1.0).
 
 ## [Unreleased]
 
+### Added
+
+- **Q-30 height-1 differential fuzz vs Core v31.1:** nightly
+  `block_differential` mutates a regtest height-1 block, runs in-process
+  `ChainHub::accept_received_block`, and `submitblock`s the same bytes to
+  official `bitcoind` (downloaded tarball, SHA256 in
+  `scripts/core-functional/inventory.toml`). Compare accept vs reject only.
+  Default `cargo test` does not fetch Core. Not a required PR check.
+
 ### Fixed
 
 - **Tip-follow FeeFilter no longer panics on the reactor:** session handshake

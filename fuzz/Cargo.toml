@@ -11,13 +11,25 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 rbitcoin-consensus = { path = "../crates/rbitcoin-consensus" }
+rbitcoin-net = { path = "../crates/rbitcoin-net" }
+rbitcoin-query = { path = "../crates/rbitcoin-query" }
 
 [workspace]
 members = ["."]
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "block_wire"
 path = "fuzz_targets/block_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "block_differential"
+path = "fuzz_targets/block_differential.rs"
 test = false
 doc = false
 bench = false

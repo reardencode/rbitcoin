@@ -5,7 +5,10 @@ Pin: **Bitcoin Core v31.1** (`9be056a8a72b624dae9623b2f7bded92c2a21c91`).
 `scripts/core-functional/` holds the inventory, checkers, runner, and
 the test-only bitcoind shim. Core’s Python tests and `src/test/data` live in the
 **`third_party/bitcoin` submodule** (v31.1). We do **not** copy the 267
-`*.py` files into this repo.
+`*.py` files into this repo. Official `bitcoind` binaries for differential
+fuzz are **not** built from the submodule (sparse `src/test/data` + `test`
+only); `fetch-bitcoind.sh` downloads the `[release]` tarball into
+`~/.cache/rbitcoin/core-bitcoind`.
 
 Default `cargo test` never runs those Python tests. Consensus JSON corpora
 are staged from the submodule each run (the helper runs `init-submodule.sh`
@@ -69,6 +72,11 @@ Without it, the checker uses `scripts/core-functional/v31.1-tests.txt`
 ## Inventory schema
 
 `scripts/core-functional/inventory.toml`:
+
+Top-level `pin` / `core_commit` identify the Core tree. Optional `[release]`
+pins official `bitcoind` tarball SHA256s for differential fuzz
+(`scripts/core-functional/release_pin.py`, `fetch-bitcoind.sh`). The
+inventory checker only reads `[[test]]` rows and ignores `[release]`.
 
 | Field | Rule |
 |-------|------|

@@ -1,5 +1,6 @@
 //! Bitcoin P2P: BIP324 v2 transport, headers/blocks, tip follow, tip-mode **tx relay**.
 
+mod block_diff;
 mod cache;
 mod chain;
 mod codec;
@@ -20,6 +21,12 @@ mod tx_relay;
 mod v2;
 mod versionbits_warn;
 
+pub use block_diff::{
+    basic_auth_b64, build_jsonrpc_http_request, check_diff_env, compare_one, diff_regtest_params,
+    genesis_diff_tip, is_core_connectivity_skip, parse_submitblock_json, split_http_body,
+    verdict_from_accept, verdict_from_core_reply, wait_for_file, BlockOracle, CompareOne, DiffTip,
+    DiffVerdict, OracleReply,
+};
 pub use cache::BlockCache;
 pub use chain::{
     accept_block_header_nodos_log, headers_download_timeout_secs, headers_timeout_disconnect_log,
