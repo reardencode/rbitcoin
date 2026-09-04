@@ -5905,3 +5905,177 @@ async fn disconnect_after_tip_sync_clears_far_side_within_5s() {
     nb.shutdown().await;
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Core `NewPoWValidBlock`: a reconstructed compact that extends tip is
+/// announced as `cmpctblock` to other HB peers even if connect then fails
+/// (PoW-valid header, invalid body).
+#[test]
+fn new_pow_valid_compact_relays_to_hb_before_connect() {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::bip152::HeaderAndShortIds;
+    use bitcoin::consensus::encode::serialize;
+    use bitcoin::p2p::address::Address;
+    use bitcoin::p2p::message::RawNetworkMessage;
+    use bitcoin::p2p::message_compact_blocks::CmpctBlock;
+    use bitcoin::p2p::message_network::VersionMessage;
+    use bitcoin::p2p::ServiceFlags;
+    use bitcoin::script::ScriptBuf;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{Amount, Network, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
+    use rbitcoin_consensus::mine_regtest_paying;
+    use rbitcoin_primitives::Height;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use tokio::runtime::Builder;
+
+    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+    }
+
+    fn frame_for(msg: NetworkMessage) -> FramedMessage {
+        let magic = Magic::from(Network::Regtest);
+        let raw = RawNetworkMessage::new(magic, msg);
+        let full = serialize(&raw);
+        let command: [u8; 12] = full[4..16].try_into().unwrap();
+        FramedMessage {
+            magic,
+            command,
+            payload: full[24..].to_vec(),
+        }
+    }
+
+    let rt = Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let (dir, q) = tmp_store("npow-early-cmpct");
+        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        hub.ensure_genesis().unwrap();
+        hub.generate_to_script(102, ScriptBuf::from_bytes(vec![0x51]), vec![])
+            .expect("pad");
+        let tip = hub.tip_hash().expect("tip");
+        let tip_time = hub.tip_header().expect("hdr").time;
+        let cb = hub
+            .query
+            .reconstruct_block_at_height(Height(1))
+            .unwrap()
+            .txdata[0]
+            .compute_txid();
+        let bad = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::from_height(500_000).unwrap(),
+            input: vec![TxIn {
+                previous_output: OutPoint { txid: cb, vout: 0 },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(49_9999_0000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let block = mine_regtest_paying(
+            tip,
+            tip_time + 600,
+            103,
+            ScriptBuf::from_bytes(vec![0x51]),
+            vec![bad],
+        );
+        let hash = block.block_hash();
+        assert_ne!(hub.tip_hash(), Some(hash), "must not connect before relay");
+        let pref: Vec<usize> = (0..block.txdata.len()).collect();
+        let hsi = HeaderAndShortIds::from_block(&block, 1, 2, &pref).expect("hsi");
+
+        let peers = crate::peers::PeerHub::new();
+        let ver = |port: u16, nonce: u64| {
+            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+            VersionMessage {
+                version: 70016,
+                services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+                timestamp: 0,
+                receiver: Address::new(&addr, ServiceFlags::NONE),
+                sender: Address::new(&addr, ServiceFlags::NONE),
+                nonce,
+                user_agent: "/rbitcoin:test/".into(),
+                start_height: 0,
+                relay: true,
+            }
+        };
+        let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+        let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18445);
+        let a = peers.register(
+            addr_a,
+            addr_a,
+            &ver(18444, 1),
+            false,
+            crate::peers::PeerConnType::OutboundFullRelay,
+        );
+        let b = peers.register(
+            addr_b,
+            addr_b,
+            &ver(18445, 2),
+            false,
+            crate::peers::PeerConnType::OutboundFullRelay,
+        );
+        b.set_hb_to(true);
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        let (b_tx, mut b_rx) = mpsc::unbounded_channel();
+        a.attach_out(a_tx.clone());
+        b.attach_out(b_tx);
+
+        let mut wants_headers = false;
+        let mut wtxid = true;
+        let mut send_cmpct = true;
+        let mut cmpct_ver = 2u32;
+        let mut pending_headers = HashMap::new();
+        let mut pending_blocks = PendingBlocks::new();
+        let mut pending_cmpct = HashMap::new();
+        let mut from_peer = HashMap::new();
+        let mut requested = HashSet::new();
+        let mut ban = 0u32;
+        handle_peer_frame(
+            frame_for(NetworkMessage::CmpctBlock(CmpctBlock {
+                compact_block: hsi,
+            })),
+            &hub,
+            &a_tx,
+            &mut wants_headers,
+            &mut wtxid,
+            &mut send_cmpct,
+            &mut cmpct_ver,
+            &mut pending_headers,
+            &mut pending_blocks,
+            &mut pending_cmpct,
+            &mut from_peer,
+            &mut requested,
+            &mut ban,
+            Some(a.as_ref()),
+        )
+        .await
+        .expect("invalid compact must keep the session");
+        assert_ne!(
+            hub.tip_hash(),
+            Some(hash),
+            "non-final body must not become tip"
+        );
+
+        let mut got = false;
+        while let Ok(msg) = b_rx.try_recv() {
+            if let NetworkMessage::CmpctBlock(c) = msg {
+                assert_eq!(c.compact_block.header.block_hash(), hash);
+                got = true;
+            }
+        }
+        assert!(
+            got,
+            "HB peer must get cmpctblock before/without successful connect"
+        );
+        while let Ok(msg) = a_rx.try_recv() {
+            if let NetworkMessage::CmpctBlock(c) = msg {
+                panic!(
+                    "sender must not receive our compact announce, got {}",
+                    c.compact_block.header.block_hash()
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    });
+}

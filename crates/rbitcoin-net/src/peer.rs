@@ -812,7 +812,8 @@ pub async fn peer_session_with(
                         .unwrap_or((None, None));
                     // sendcmpct announce=1: Core sends cmpctblock even
                     // without sendheaders (`p2p_compactblocks` :249).
-                    if peer_send_cmpct && !from_peer {
+                    // Skip if NewPoWValidBlock already announced this hash.
+                    if peer_send_cmpct && !from_peer && sent != Some(ev.hash) {
                         if let Some(msg) = cmpct_announce_msg(
                             hub.as_ref(),
                             &ev.hash,
@@ -2030,6 +2031,7 @@ async fn handle_peer_frame(
                 pending_blocks.insert(hash, block.clone());
                 return Ok(());
             }
+            relay_new_pow_valid_block(hub, &block, session);
             match hub.accept_received_block_async(block.clone()).await {
                 Ok(AcceptOutcome::Accepted { .. }) => {
                     pending_blocks.remove(&hash);
@@ -2042,6 +2044,7 @@ async fn handle_peer_frame(
                         pending_headers,
                         requested_blocks,
                         getdata_use_compact(hub, *peer_cmpct_version),
+                        session,
                     )
                     .await?;
                 }
@@ -2055,6 +2058,7 @@ async fn handle_peer_frame(
                         pending_headers,
                         requested_blocks,
                         getdata_use_compact(hub, *peer_cmpct_version),
+                        session,
                     )
                     .await?;
                 }
@@ -2068,6 +2072,7 @@ async fn handle_peer_frame(
                         pending_headers,
                         requested_blocks,
                         getdata_use_compact(hub, *peer_cmpct_version),
+                        session,
                     )
                     .await?;
                 }
@@ -2160,6 +2165,7 @@ async fn handle_peer_frame(
                 } else if let Some(block) = try_fill_cmpct(hub, &hsi, 2) {
                     requested_blocks.remove(&hash);
                     pending_cmpct.remove(&hash);
+                    relay_new_pow_valid_block(hub, &block, session);
                     let accepted = matches!(
                         hub.accept_received_block_async(block).await,
                         Ok(AcceptOutcome::Accepted { .. })
@@ -2178,6 +2184,7 @@ async fn handle_peer_frame(
                         pending_headers,
                         requested_blocks,
                         getdata_use_compact(hub, *peer_cmpct_version),
+                        session,
                     )
                     .await?;
                 } else if let Some(missing) = try_cmpct_missing(hub, &hsi, 2) {
@@ -2236,54 +2243,59 @@ async fn handle_peer_frame(
             }
             if let Some(pc) = pending_cmpct.remove(&hash) {
                 match apply_cmpct_blocktxn(hub, &pc, bt) {
-                    Ok(block) => match hub.accept_received_block_async(block).await {
-                        Ok(AcceptOutcome::Accepted { .. }) => {
-                            requested_blocks.remove(&hash);
-                            maybe_select_hb_if_relay(hub, session);
-                            if let Some(s) = session {
-                                if let Some(ph) = s.hub() {
-                                    ph.clear_cmpct_fill(hash);
+                    Ok(block) => {
+                        relay_new_pow_valid_block(hub, &block, session);
+                        match hub.accept_received_block_async(block).await {
+                            Ok(AcceptOutcome::Accepted { .. }) => {
+                                requested_blocks.remove(&hash);
+                                maybe_select_hb_if_relay(hub, session);
+                                if let Some(s) = session {
+                                    if let Some(ph) = s.hub() {
+                                        ph.clear_cmpct_fill(hash);
+                                    }
                                 }
+                                drain_pending(
+                                    hub,
+                                    out_tx,
+                                    pending_blocks,
+                                    pending_headers,
+                                    requested_blocks,
+                                    getdata_use_compact(hub, *peer_cmpct_version),
+                                    session,
+                                )
+                                .await?;
                             }
-                            drain_pending(
-                                hub,
-                                out_tx,
-                                pending_blocks,
-                                pending_headers,
-                                requested_blocks,
-                                getdata_use_compact(hub, *peer_cmpct_version),
-                            )
-                            .await?;
-                        }
-                        Ok(_) => {
-                            requested_blocks.remove(&hash);
-                            drain_pending(
-                                hub,
-                                out_tx,
-                                pending_blocks,
-                                pending_headers,
-                                requested_blocks,
-                                getdata_use_compact(hub, *peer_cmpct_version),
-                            )
-                            .await?;
-                        }
-                        Err(_) => {
-                            // Reconstructed but unconnectable (swapped txs):
-                            // Core falls back to getdata and remembers the fail
-                            // (`p2p_compactblocks` `test_multiple_blocktxn_response`).
-                            rbitcoin_log::info!(
-                                "previous compact block reconstruction attempt failed"
-                            );
-                            if let Some(s) = session {
-                                s.note_failed_cmpct(hash);
+                            Ok(_) => {
+                                requested_blocks.remove(&hash);
+                                drain_pending(
+                                    hub,
+                                    out_tx,
+                                    pending_blocks,
+                                    pending_headers,
+                                    requested_blocks,
+                                    getdata_use_compact(hub, *peer_cmpct_version),
+                                    session,
+                                )
+                                .await?;
                             }
-                            *ban_score = ban_score.saturating_add(10);
-                            queue_out(
-                                out_tx,
-                                NetworkMessage::GetData(vec![Inventory::WitnessBlock(hash)]),
-                            )?;
+                            Err(_) => {
+                                // Reconstructed but unconnectable (swapped txs):
+                                // Core falls back to getdata and remembers the fail
+                                // (`p2p_compactblocks` `test_multiple_blocktxn_response`).
+                                rbitcoin_log::info!(
+                                    "previous compact block reconstruction attempt failed"
+                                );
+                                if let Some(s) = session {
+                                    s.note_failed_cmpct(hash);
+                                }
+                                *ban_score = ban_score.saturating_add(10);
+                                queue_out(
+                                    out_tx,
+                                    NetworkMessage::GetData(vec![Inventory::WitnessBlock(hash)]),
+                                )?;
+                            }
                         }
-                    },
+                    }
                     Err(()) => {
                         rbitcoin_log::info!("previous compact block reconstruction attempt failed");
                         if let Some(s) = session {
@@ -2432,6 +2444,16 @@ fn peer_has_header(
     false
 }
 
+/// BIP152 compact tip announcement (coinbase prefilled) from an in-RAM body.
+fn cmpct_announce_from_block(block: &Block, cmpct_version: u32) -> Option<NetworkMessage> {
+    let nonce = rand_nonce();
+    let hsi =
+        HeaderAndShortIds::from_block(block, nonce, cmpct_version.max(1).min(2), &[0]).ok()?;
+    Some(NetworkMessage::CmpctBlock(CmpctBlock {
+        compact_block: hsi,
+    }))
+}
+
 /// BIP152 compact tip announcement (coinbase prefilled). `None` if the body
 /// is not in cache/store yet.
 fn cmpct_announce_msg(
@@ -2440,12 +2462,58 @@ fn cmpct_announce_msg(
     cmpct_version: u32,
 ) -> Option<NetworkMessage> {
     let block = block_for_peer(hub.cache.as_ref(), hub.query.as_ref(), hash).ok()??;
-    let nonce = rand_nonce();
-    let hsi =
-        HeaderAndShortIds::from_block(&block, nonce, cmpct_version.max(1).min(2), &[0]).ok()?;
-    Some(NetworkMessage::CmpctBlock(CmpctBlock {
-        compact_block: hsi,
-    }))
+    cmpct_announce_from_block(&block, cmpct_version)
+}
+
+/// Core `NewPoWValidBlock`: send `cmpctblock` to HB peers as soon as a
+/// reconstructed/received body has a PoW-valid header that extends our tip,
+/// **before** `tip-accept` connect. Does not mark the block connected.
+///
+/// Only the current tip-child (not a reorg branch). Sender is skipped.
+fn relay_new_pow_valid_block(hub: &ChainHub, block: &Block, from: Option<&crate::peers::LivePeer>) {
+    if !hub.meets_minimum_chain_work() {
+        return;
+    }
+    if hub.mempool().is_some_and(|m| !m.relay_enabled()) {
+        return;
+    }
+    let hash = block.block_hash();
+    if hub.has_block(&hash) {
+        return;
+    }
+    let Some(tip) = hub.tip_hash() else {
+        return;
+    };
+    if block.header.prev_blockhash != tip {
+        return;
+    }
+    if hub.ensure_header(&block.header).is_err() {
+        return;
+    }
+    let Some(ph) = from.and_then(|s| s.hub()) else {
+        return;
+    };
+    let from_id = from.map(|s| s.id);
+    for s in ph.live_peers() {
+        if from_id == Some(s.id) {
+            continue;
+        }
+        if !s.hb_to.load(Ordering::Relaxed) {
+            continue;
+        }
+        if s.conn_type == crate::peers::PeerConnType::BlockRelay {
+            continue;
+        }
+        let Some(out) = s.writer() else {
+            continue;
+        };
+        let Some(msg) = cmpct_announce_from_block(block, 2) else {
+            continue;
+        };
+        if queue_cmpct_tip_announce(&out, msg).is_ok() {
+            s.note_best_header_sent(hash);
+        }
+    }
 }
 
 fn tip_announce_decision(
@@ -2848,12 +2916,13 @@ async fn drain_pending(
     pending_headers: &mut HashMap<BlockHash, bitcoin::block::Header>,
     requested_blocks: &mut HashSet<BlockHash>,
     compact: bool,
+    session: Option<&crate::peers::LivePeer>,
 ) -> Result<(), NetError> {
     // A reorg can make a held block the child of the *new* tip after the
     // greedy pass already ran. Repeat until the tip is stable.
     loop {
         let tip_before = hub.tip_hash();
-        drain_pending_once(hub, pending_blocks, pending_headers).await?;
+        drain_pending_once(hub, pending_blocks, pending_headers, session).await?;
         if hub.tip_hash() == tip_before {
             break;
         }
@@ -2910,6 +2979,7 @@ fn drain_pending_now(
             pending_headers,
             requested_blocks,
             compact,
+            None,
         ))
 }
 
@@ -2919,6 +2989,7 @@ async fn drain_pending_once(
     hub: &ChainHub,
     pending_blocks: &mut PendingBlocks,
     pending_headers: &mut HashMap<BlockHash, bitcoin::block::Header>,
+    session: Option<&crate::peers::LivePeer>,
 ) -> Result<(), NetError> {
     let mut progress = true;
     while progress {
@@ -2929,6 +3000,7 @@ async fn drain_pending_once(
                 continue;
             };
             pending_headers.remove(&h);
+            relay_new_pow_valid_block(hub, &block, session);
             match hub.accept_received_block_async(block).await {
                 Ok(AcceptOutcome::Accepted { .. })
                 | Ok(AcceptOutcome::AlreadyHave)
