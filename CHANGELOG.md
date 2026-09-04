@@ -11,6 +11,11 @@ before 1.0).
 
 ### Fixed
 
+- **Tip-follow FeeFilter no longer panics on the reactor:** session handshake
+  called `min_relay_sat_kvb()`, which took a blocking `inner` read after
+  #320's `assert_not_reactor`. The overlay is an atomic; `rebroadcast_unbroadcast`
+  uses `try_contains` instead of blocking `contains`.
+
 - **Tip-follow reactor never parks on mempool `inner`:** INV/getdata/compact
   use `try_read` (busy write skips that item). Accept commit, orphan
   promote, package, and reorg strip no longer hold `inner` write across

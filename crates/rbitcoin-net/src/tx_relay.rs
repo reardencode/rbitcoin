@@ -335,6 +335,9 @@ pub struct MempoolHub {
     accept_gen: Mutex<HashMap<Wtxid, u64>>,
     /// Core `-mempoolexpiry` in seconds (default 336h).
     expiry_secs: AtomicU64,
+    /// Core `-minrelaytxfee` overlay (sat/kvB). Session FeeFilter reads this
+    /// without taking `inner`.
+    min_relay_sat_kvb: AtomicU64,
 }
 
 impl MempoolHub {
@@ -420,6 +423,9 @@ impl MempoolHub {
             next_accept_gen: AtomicU64::new(1),
             accept_gen: Mutex::new(HashMap::new()),
             expiry_secs: AtomicU64::new(DEFAULT_MEMPOOL_EXPIRY_SECS),
+            min_relay_sat_kvb: AtomicU64::new(
+                rbitcoin_consensus::policy::MIN_RELAY_FEE_RATE_SAT_PER_KVB,
+            ),
             fee_deltas: Mutex::new(HashMap::new()),
             template_updates: AtomicU64::new(0),
         };
@@ -1787,11 +1793,12 @@ impl MempoolHub {
 
     /// Core `-minrelaytxfee` overlay (sat/kvB). `0` admits any non-negative fee.
     pub fn set_min_relay_sat_kvb(&self, sat_kvb: u64) {
+        self.min_relay_sat_kvb.store(sat_kvb, Ordering::Release);
         self.lock_write().set_min_relay_sat_kvb(sat_kvb);
     }
 
     pub fn min_relay_sat_kvb(&self) -> u64 {
-        self.lock_read().min_relay_sat_kvb()
+        self.min_relay_sat_kvb.load(Ordering::Acquire)
     }
 
     /// In-mempool ancestors of `txid`, **excluding** itself (Core RPC).
@@ -1888,7 +1895,7 @@ impl MempoolHub {
     pub fn rebroadcast_unbroadcast(&self) {
         let ids: Vec<Txid> = self.unbroadcast.lock().unwrap().iter().copied().collect();
         for txid in ids {
-            if !self.contains(&txid) {
+            if !self.try_contains(&txid) {
                 continue;
             }
             let _ = self.announce.send(MempoolAnnounce {
@@ -2856,6 +2863,55 @@ mod tests {
             "spawned task must run on a tokio worker, got {name:?}"
         );
         assert!(!hit);
+        let _ = std::fs::remove_dir_all(&mp_dir);
+        let _ = std::fs::remove_dir_all(&store_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn min_relay_sat_kvb_does_not_panic_on_tokio_worker() {
+        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+        }
+        let store_dir = tmp();
+        let mp_dir = tmp();
+        let q = Query::open_or_create(&store_dir).unwrap();
+        let hub = MempoolHub::open(&mp_dir, Arc::new(q)).unwrap();
+        hub.set_min_relay_sat_kvb(250);
+        let join = tokio::spawn(async move {
+            let name = std::thread::current().name().unwrap_or("").to_string();
+            let rate = hub.min_relay_sat_kvb();
+            (name, rate)
+        });
+        let (name, rate) = join.await.expect("join worker");
+        assert!(
+            name.starts_with("tokio-rt-worker"),
+            "spawned task must run on a tokio worker, got {name:?}"
+        );
+        assert_eq!(rate, 250);
+        let _ = std::fs::remove_dir_all(&mp_dir);
+        let _ = std::fs::remove_dir_all(&store_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rebroadcast_unbroadcast_does_not_panic_on_tokio_worker() {
+        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+        }
+        let store_dir = tmp();
+        let mp_dir = tmp();
+        let q = Query::open_or_create(&store_dir).unwrap();
+        let hub = MempoolHub::open(&mp_dir, Arc::new(q)).unwrap();
+        hub.note_unbroadcast(Txid::from_byte_array([1u8; 32]));
+        let join = tokio::spawn(async move {
+            let name = std::thread::current().name().unwrap_or("").to_string();
+            hub.rebroadcast_unbroadcast();
+            name
+        });
+        let name = join.await.expect("join worker");
+        assert!(
+            name.starts_with("tokio-rt-worker"),
+            "spawned task must run on a tokio worker, got {name:?}"
+        );
         let _ = std::fs::remove_dir_all(&mp_dir);
         let _ = std::fs::remove_dir_all(&store_dir);
     }
