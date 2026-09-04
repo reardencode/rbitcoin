@@ -36,6 +36,15 @@ assert_ok "dry-run pins cargo-fuzz --target to rustc host (not musl)" \
 assert_ok "dry-run target is not musl" \
   bash -c 'grep -q CARGO_FUZZ_TARGET= <<<"$1" && ! grep -q musl <<<"$1"' _ "$out"
 
+# Pin/fetch tests land before the operator YAML commit; required CI already
+# runs this script.
+if [[ -x "$ROOT/scripts/core-functional/release_pin.test.sh" ]]; then
+  assert_ok "release_pin.test.sh" "$ROOT/scripts/core-functional/release_pin.test.sh"
+fi
+if [[ -x "$ROOT/scripts/core-functional/fetch-bitcoind.test.sh" ]]; then
+  assert_ok "fetch-bitcoind.test.sh" "$ROOT/scripts/core-functional/fetch-bitcoind.test.sh"
+fi
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "fuzz-run.test.sh: $PASS passed, $FAIL failed"
   exit 1

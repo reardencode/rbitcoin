@@ -70,6 +70,11 @@ Without it, the checker uses `scripts/core-functional/v31.1-tests.txt`
 
 `scripts/core-functional/inventory.toml`:
 
+Top-level `pin` / `core_commit` identify the Core tree. Optional `[release]`
+pins official `bitcoind` tarball SHA256s for differential fuzz
+(`scripts/core-functional/release_pin.py`, `fetch-bitcoind.sh`). The
+inventory checker only reads `[[test]]` rows and ignores `[release]`.
+
 | Field | Rule |
 |-------|------|
 | `name` | `*.py` basename, unique |
