@@ -957,6 +957,7 @@ async fn emit_sh_notes<W: AsyncWrite + Unpin>(
     let q = Arc::clone(query);
     let subs: Vec<[u8; 32]> = sh_subs.iter().copied().collect();
     let notes = tokio::task::spawn_blocking(move || {
+        let _g = BlockingRegion::enter();
         restatus_notes(&q, mempool.as_deref(), &subs, heights.as_deref())
     })
     .await

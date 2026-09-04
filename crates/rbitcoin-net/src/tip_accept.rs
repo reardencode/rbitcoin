@@ -8,7 +8,7 @@ use std::future::Future;
 use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
 use std::sync::mpsc::{self, SyncSender, TrySendError};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll, Waker};
 use std::thread;
 
@@ -63,12 +63,10 @@ pub(crate) fn run_on_tip_accept<R: Send>(f: impl FnOnce() -> R + Send) -> R {
 struct JobCell<R> {
     result: Mutex<Option<thread::Result<R>>>,
     waker: Mutex<Option<Waker>>,
-    cv: Condvar,
 }
 
 struct JoinOnDrop<R> {
     cell: Arc<JobCell<R>>,
-    taken: bool,
 }
 
 impl<R> Future for JoinOnDrop<R> {
@@ -77,7 +75,6 @@ impl<R> Future for JoinOnDrop<R> {
         let this = self.get_mut();
         let mut g = this.cell.result.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(r) = g.take() {
-            this.taken = true;
             return Poll::Ready(r);
         }
         *this.cell.waker.lock().unwrap_or_else(|p| p.into_inner()) = Some(cx.waker().clone());
@@ -85,21 +82,8 @@ impl<R> Future for JoinOnDrop<R> {
     }
 }
 
-impl<R> Drop for JoinOnDrop<R> {
-    fn drop(&mut self) {
-        if self.taken {
-            return;
-        }
-        let mut g = self.cell.result.lock().unwrap_or_else(|p| p.into_inner());
-        while g.is_none() {
-            g = self.cell.cv.wait(g).unwrap_or_else(|p| p.into_inner());
-        }
-    }
-}
-
 fn finish_cell<R>(cell: &JobCell<R>, r: thread::Result<R>) {
     *cell.result.lock().unwrap_or_else(|p| p.into_inner()) = Some(r);
-    cell.cv.notify_one();
     if let Some(w) = cell.waker.lock().unwrap_or_else(|p| p.into_inner()).take() {
         w.wake();
     }
@@ -110,7 +94,6 @@ pub(crate) async fn run_on_tip_accept_async<R: Send>(f: impl FnOnce() -> R + Sen
     let cell = Arc::new(JobCell {
         result: Mutex::new(None),
         waker: Mutex::new(None),
-        cv: Condvar::new(),
     });
     let cell_w = Arc::clone(&cell);
     let job = erase_lifetime(Box::new(move || {
@@ -127,7 +110,7 @@ pub(crate) async fn run_on_tip_accept_async<R: Send>(f: impl FnOnce() -> R + Sen
             Err(TrySendError::Disconnected(_)) => panic!("tip-accept thread"),
         }
     }
-    match (JoinOnDrop { cell, taken: false }).await {
+    match (JoinOnDrop { cell }).await {
         Ok(v) => v,
         Err(p) => panic::resume_unwind(p),
     }
@@ -173,5 +156,49 @@ mod tests {
             "spawned task must run on a tokio worker, got {caller:?}"
         );
         assert_eq!(name.as_deref(), Some(TIP_ACCEPT_THREAD_NAME));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn drop_join_does_not_park_worker() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Condvar;
+        use std::time::{Duration, Instant};
+
+        let started = Arc::new(AtomicBool::new(false));
+        let release = Arc::new((std::sync::Mutex::new(false), Condvar::new()));
+        let s2 = Arc::clone(&started);
+        let r2 = Arc::clone(&release);
+        let waiter = tokio::spawn(async move {
+            run_on_tip_accept_async(move || {
+                s2.store(true, Ordering::Release);
+                let (lock, cv) = &*r2;
+                let mut g = lock.lock().unwrap();
+                while !*g {
+                    g = cv.wait(g).unwrap();
+                }
+                1u8
+            })
+            .await
+        });
+        let t0 = Instant::now();
+        while !started.load(Ordering::Acquire) {
+            assert!(t0.elapsed() < Duration::from_secs(2), "job never started");
+            tokio::task::yield_now().await;
+        }
+        waiter.abort();
+        let progressed = tokio::time::timeout(Duration::from_millis(200), async {
+            tokio::task::yield_now().await;
+            1u8
+        })
+        .await;
+        assert!(
+            progressed.is_ok(),
+            "JoinOnDrop must not park the tokio worker"
+        );
+        {
+            let (lock, cv) = &*release;
+            *lock.lock().unwrap() = true;
+            cv.notify_one();
+        }
     }
 }

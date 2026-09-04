@@ -877,6 +877,10 @@ fn combined_txs(st: &AppState, sh: &[u8; 32], asof: Option<[u8; 32]>) -> Respons
 }
 
 pub async fn mempool_info(State(st): State<AppState>) -> Response {
+    spawn_join(move || mempool_info_sync(&st)).await
+}
+
+fn mempool_info_sync(st: &AppState) -> Response {
     let Some(mp) = st.mempool.as_ref() else {
         return Json(json!({
             "count": 0,
@@ -912,8 +916,11 @@ pub async fn mempool_info(State(st): State<AppState>) -> Response {
 }
 
 pub async fn fee_estimates(State(st): State<AppState>) -> Response {
+    spawn_join(move || fee_estimates_sync(&st)).await
+}
+
+fn fee_estimates_sync(st: &AppState) -> Response {
     let mut obj = serde_json::Map::new();
-    // One snapshot refresh + Arc load (not 11× independent graph walks).
     let pairs: Vec<(u32, f64)> = st
         .mempool
         .as_ref()
@@ -937,6 +944,10 @@ pub async fn fee_estimates(State(st): State<AppState>) -> Response {
 }
 
 pub async fn mempool_txids(State(st): State<AppState>) -> Response {
+    spawn_join(move || mempool_txids_sync(&st)).await
+}
+
+fn mempool_txids_sync(st: &AppState) -> Response {
     let Some(mp) = st.mempool.as_ref() else {
         return Json(json!([])).into_response();
     };

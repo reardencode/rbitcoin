@@ -11,6 +11,14 @@ before 1.0).
 
 ### Fixed
 
+- **Tip-follow reactor never parks on mempool `inner`:** INV/getdata/compact
+  use `try_read` (busy write skips that item). Accept commit, orphan
+  promote, package, and reorg strip no longer hold `inner` write across
+  Query or script verify. Compact fill clones matching bodies only, not
+  the live set. Dropping a `tip-accept` join detaches instead of
+  condvar-waiting on the worker. Esplora WS announce and mempool HTTP
+  enter `BlockingRegion` on `spawn_blocking` (same assert as P2P).
+
 - **Leftover hop-dump is not cleared by the next head-resolve batch:**
   `clear_leftover_miss` wiped `diag=1` at the start of every TipOnly
   resolve. Parallel `cargo test` failed `leftover_miss_dumps_probe_diag`;
