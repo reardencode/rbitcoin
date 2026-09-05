@@ -6,8 +6,16 @@
 
 use bitcoin::bip152::{BlockTransactions, BlockTransactionsRequest, HeaderAndShortIds, ShortId};
 use bitcoin::block::Header;
-use bitcoin::{Block, BlockHash, Transaction};
+use bitcoin::consensus::encode::deserialize;
+use bitcoin::p2p::message::NetworkMessage;
+use bitcoin::p2p::message_compact_blocks::{CmpctBlock, SendCmpct};
+use bitcoin::p2p::Magic;
+use bitcoin::{Block, BlockHash, Target, Transaction};
+use rbitcoin_consensus::{genesis_block, ChainParams};
 use std::collections::HashMap;
+
+use crate::error::NetError;
+use crate::v2::encode_v2_contents;
 
 /// Build siphash short-id → transaction map for compact fill (version 1 = txid, 2 = wtxid).
 pub fn shortid_map_from_txs<'a>(
@@ -30,6 +38,77 @@ fn short_id_for_tx(tx: &Transaction, version: u32, keys: (u64, u64)) -> ShortId 
         1 => ShortId::with_siphash_keys(&tx.compute_txid().to_raw_hash(), keys),
         _ => ShortId::with_siphash_keys(&tx.compute_wtxid().to_raw_hash(), keys),
     }
+}
+
+/// Empty-mempool missing indexes for a compact announcement.
+///
+/// `None` if prefilled indexes are malformed (Core disconnects; not a split).
+pub fn cmpct_missing_empty_mempool(hsi: &HeaderAndShortIds) -> Option<Vec<u64>> {
+    if !prefilled_indexes_ok(hsi) {
+        return None;
+    }
+    match try_reconstruct(hsi, &HashMap::new(), 2) {
+        Ok(_) => Some(Vec::new()),
+        Err(idx) => Some(idx),
+    }
+}
+
+/// Consensus-decode BIP152 `HeaderAndShortIds`.
+pub fn decode_cmpct_hsi(raw: &[u8]) -> Option<HeaderAndShortIds> {
+    deserialize(raw).ok()
+}
+
+/// BIP324 application contents for `cmpctblock`.
+pub fn encode_cmpctblock_v2(hsi: &HeaderAndShortIds) -> Result<Vec<u8>, NetError> {
+    encode_v2_contents(NetworkMessage::CmpctBlock(CmpctBlock {
+        compact_block: hsi.clone(),
+    }))
+}
+
+/// High-bandwidth BIP152 v2 `sendcmpct(1, 2)`.
+pub fn encode_sendcmpct_hb_v2() -> Result<Vec<u8>, NetError> {
+    encode_v2_contents(NetworkMessage::SendCmpct(SendCmpct {
+        send_compact: true,
+        version: 2,
+    }))
+}
+
+/// BIP324 `pong`.
+pub fn encode_pong_v2(nonce: u64) -> Result<Vec<u8>, NetError> {
+    encode_v2_contents(NetworkMessage::Pong(nonce))
+}
+
+/// Core v2 frame after we send `cmpctblock`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CmpctPeerFrame {
+    GetBlockTxn(Vec<u64>),
+    Ping(u64),
+    Other,
+}
+
+/// Classify decrypted application contents (regtest magic).
+pub fn classify_v2_cmpct_peer(contents: &[u8]) -> CmpctPeerFrame {
+    match crate::v2::parse_v2_contents(Magic::REGTEST, contents) {
+        Ok(frame) => match frame.decode().payload() {
+            NetworkMessage::GetBlockTxn(r) => {
+                CmpctPeerFrame::GetBlockTxn(r.txs_request.indexes.clone())
+            }
+            NetworkMessage::Ping(n) => CmpctPeerFrame::Ping(*n),
+            _ => CmpctPeerFrame::Other,
+        },
+        Err(_) => CmpctPeerFrame::Other,
+    }
+}
+
+/// Height-1 compact: prev is regtest genesis and header meets its own bits.
+pub fn cmpct_hsi_regtest_connectable(hsi: &HeaderAndShortIds) -> bool {
+    let genesis = genesis_block(&ChainParams::regtest());
+    if hsi.header.prev_blockhash != genesis.block_hash() {
+        return false;
+    }
+    hsi.header
+        .validate_pow(Target::from_compact(hsi.header.bits))
+        .is_ok()
 }
 
 /// Core: prefilled indexes must decode in-range. Out-of-range is a
@@ -489,5 +568,66 @@ mod tests {
             }],
         };
         assert!(!prefilled_indexes_ok(&oob));
+        assert!(cmpct_missing_empty_mempool(&oob).is_none());
+    }
+
+    fn mined_h1_two_tx_hsi() -> HeaderAndShortIds {
+        use rbitcoin_consensus::{genesis_block, mine_regtest_paying, ChainParams};
+        let genesis = genesis_block(&ChainParams::regtest());
+        let extra = spend(1);
+        let block = mine_regtest_paying(
+            genesis.block_hash(),
+            genesis.header.time + 600,
+            1,
+            ScriptBuf::from_bytes(vec![0x51]),
+            vec![extra],
+        );
+        HeaderAndShortIds::from_block(&block, 0x11, 2, &[]).unwrap()
+    }
+
+    fn cmpct_fixture_path(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name)
+    }
+
+    #[test]
+    fn classify_v2_ping_and_sendcmpct_encode() {
+        let ping = crate::v2::encode_v2_contents(NetworkMessage::Ping(7)).unwrap();
+        assert_eq!(classify_v2_cmpct_peer(&ping), CmpctPeerFrame::Ping(7));
+        let pong = encode_pong_v2(7).unwrap();
+        assert_eq!(classify_v2_cmpct_peer(&pong), CmpctPeerFrame::Other);
+        encode_sendcmpct_hb_v2().unwrap();
+        assert_eq!(classify_v2_cmpct_peer(&[]), CmpctPeerFrame::Other);
+    }
+
+    #[test]
+    fn cmpct_missing_empty_mempool_two_tx_is_index_1() {
+        let hsi = mined_h1_two_tx_hsi();
+        assert!(cmpct_hsi_regtest_connectable(&hsi));
+        assert_eq!(
+            cmpct_missing_empty_mempool(&hsi).as_deref(),
+            Some(&[1u64][..])
+        );
+        let raw = bitcoin::consensus::encode::serialize(&hsi);
+        assert_eq!(
+            cmpct_missing_empty_mempool(&decode_cmpct_hsi(&raw).unwrap()).as_deref(),
+            Some(&[1u64][..])
+        );
+        encode_cmpctblock_v2(&hsi).unwrap();
+    }
+
+    #[test]
+    fn cmpct_h1_two_tx_fixture_matches_mined() {
+        let expected = bitcoin::consensus::encode::serialize(&mined_h1_two_tx_hsi());
+        let path = cmpct_fixture_path("cmpct_h1_two_tx.bin");
+        let raw = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        assert_eq!(raw, expected);
+        let hsi = decode_cmpct_hsi(&raw).unwrap();
+        assert!(cmpct_hsi_regtest_connectable(&hsi));
+        assert_eq!(
+            cmpct_missing_empty_mempool(&hsi).as_deref(),
+            Some(&[1u64][..])
+        );
     }
 }

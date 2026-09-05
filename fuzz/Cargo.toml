@@ -62,3 +62,10 @@ path = "fuzz_targets/v2_session.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "cmpct_differential"
+path = "fuzz_targets/cmpct_differential.rs"
+test = false
+doc = false
+bench = false

@@ -11,8 +11,8 @@ use crate::msg_decode::decode_framed_offload;
 use crate::peer_dos::{PeerRateLimiter, OVERSIZE_BAN_SCORE, RATE_LIMIT_BAN_SCORE};
 use crate::peers::PingAction;
 use crate::v2::{
-    open_v2, read_v2_frame, write_v2_contents, write_v2_msg, write_v2_msg_offload, V2Reader,
-    V2Writer,
+    open_v2, read_v2_contents, read_v2_frame, write_v2_contents, write_v2_msg,
+    write_v2_msg_offload, V2Reader, V2Writer,
 };
 use bitcoin::bip152::{BlockTransactions, HeaderAndShortIds};
 use bitcoin::hashes::Hash;
@@ -282,7 +282,6 @@ pub struct V2PlainSession {
     reader: V2Reader,
     writer: V2Writer,
     tcp_shutdown: std::net::TcpStream,
-    magic: Magic,
 }
 
 impl V2PlainSession {
@@ -311,7 +310,6 @@ impl V2PlainSession {
             reader,
             writer,
             tcp_shutdown,
-            magic,
         })
     }
 
@@ -319,10 +317,12 @@ impl V2PlainSession {
         write_v2_contents(&mut self.writer, contents).await
     }
 
+    pub async fn read_contents(&mut self) -> Result<Vec<u8>, NetError> {
+        read_v2_contents(&mut self.reader).await
+    }
+
     pub async fn read_frame(&mut self) -> Result<(), NetError> {
-        read_v2_frame(&mut self.reader, self.magic)
-            .await
-            .map(|_| ())
+        self.read_contents().await.map(|_| ())
     }
 
     pub fn close(&mut self) {

@@ -51,7 +51,7 @@ if [[ "$BIN" == "block_differential" ]]; then
 elif [[ "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" ]]; then
   sanitizer="none"
   timeout=180
-elif [[ "$BIN" == "v2_session" ]]; then
+elif [[ "$BIN" == "v2_session" || "$BIN" == "cmpct_differential" ]]; then
   sanitizer="address"
   timeout=90
 fi
@@ -68,10 +68,10 @@ if [[ "${FUZZ_DRY_RUN:-}" == "1" ]]; then
   echo "FUZZ_TIMEOUT=$timeout"
   echo "CARGO_TARGET_DIR_UNSET=1"
   echo "RUSTC_WRAPPER=$WRAP"
-  if [[ "$BIN" == "block_differential" || "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" || "$BIN" == "v2_session" ]]; then
+  if [[ "$BIN" == "block_differential" || "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" || "$BIN" == "v2_session" || "$BIN" == "cmpct_differential" ]]; then
     echo "RBITCOIN_CORE_BITCOIND=${RBITCOIN_CORE_BITCOIND:-}"
   fi
-  if [[ "$BIN" == "v2_session" ]]; then
+  if [[ "$BIN" == "v2_session" || "$BIN" == "cmpct_differential" ]]; then
     echo "BITCOIND_LISTEN=1"
   fi
   exit 0
@@ -109,6 +109,27 @@ if [[ "$BIN" == "v2_session" ]]; then
     -max_total_time="${FUZZ_MAX_TOTAL_TIME:-120}" \
     -timeout="$timeout" \
     -max_len=65536
+fi
+
+if [[ "$BIN" == "cmpct_differential" ]]; then
+  export RBITCOIN_CORE_BITCOIND="$(./scripts/core-functional/fetch-bitcoind.sh)"
+  mkdir -p fuzz/corpus/cmpct_differential
+  cp crates/rbitcoin-net/tests/fixtures/cmpct_h1_two_tx.bin \
+    fuzz/corpus/cmpct_differential/
+  log="${TMPDIR:-/tmp}/rbtc-fuzz-cmpct.$$.log"
+  set +e
+  env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" cmpct_differential -- \
+    -max_total_time="${FUZZ_MAX_TOTAL_TIME:-120}" \
+    -timeout="$timeout" \
+    -max_len=65536 \
+    2>&1 | tee "$log"
+  st=${PIPESTATUS[0]}
+  set -e
+  if [[ "$st" -ne 0 ]]; then
+    exit "$st"
+  fi
+  fail_if_no_comparisons "$log"
+  exit 0
 fi
 
 if [[ "$BIN" != "block_differential" && "$BIN" != "block_spend_differential" && "$BIN" != "block_fork_differential" ]]; then

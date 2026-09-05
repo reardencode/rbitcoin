@@ -45,8 +45,14 @@ before 1.0).
   `-v2transport=1`), then encrypts fuzzed application contents on that
   session (`V2PlainSession`). Finding = our crash / ASan / failed
   handshake; Core dropping TCP on garbage is expected. Not a
-  `submitblock` accept/reject compare. Q-30 stays Open (compact P2P
-  later).
+  `submitblock` accept/reject compare. Q-30 stays Open.
+
+- **Q-30 compact reconstruct vs live Core:** nightly `cmpct_differential`
+  sends `sendcmpct` then a fuzzed BIP152 `cmpctblock` and compares
+  empty-mempool `try_reconstruct` missing indexes to Core `getblocktxn`.
+  Malformed compact that Core drops is skip. Not accept/reject; not a
+  two-node reorg. Q-30 stays Open (two-node compact reorg, then
+  script-mutating vs Core).
 
 ### Fixed
 

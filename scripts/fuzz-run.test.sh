@@ -45,6 +45,20 @@ assert_ok "v2_session dry-run prints CORE_BITCOIND" \
 assert_ok "v2_session dry-run BITCOIND_LISTEN=1" \
   grep -qx "BITCOIND_LISTEN=1" <<<"$out"
 
+out="$(FUZZ_DRY_RUN=1 "$RUN" cmpct_differential)"
+assert_ok "cmpct-differential dry-run bin" \
+  grep -qx "FUZZ_BIN=cmpct_differential" <<<"$out"
+assert_ok "cmpct-differential dry-run sanitizer address" \
+  grep -qx "FUZZ_SANITIZER=address" <<<"$out"
+assert_ok "cmpct-differential dry-run in-process (no -jobs)" \
+  grep -qx "FUZZ_JOBS=in-process" <<<"$out"
+assert_ok "cmpct-differential dry-run timeout 90" \
+  grep -qx "FUZZ_TIMEOUT=90" <<<"$out"
+assert_ok "cmpct-differential dry-run prints CORE_BITCOIND" \
+  grep -q "^RBITCOIN_CORE_BITCOIND=" <<<"$out"
+assert_ok "cmpct-differential dry-run BITCOIND_LISTEN=1" \
+  grep -qx "BITCOIND_LISTEN=1" <<<"$out"
+
 out="$(FUZZ_DRY_RUN=1 "$RUN")"
 assert_ok "dry-run default toolchain is nightly" \
   grep -qx "RUSTUP_TOOLCHAIN=nightly" <<<"$out"
@@ -117,6 +131,8 @@ echo "block-spend-differential: comparisons=1" >"$WORKDIR/spend.log"
 assert_ok "spend comparisons=1 pass" "$RUN" --check-log "$WORKDIR/spend.log"
 echo "block-fork-differential: comparisons=1" >"$WORKDIR/fork.log"
 assert_ok "fork comparisons=1 pass" "$RUN" --check-log "$WORKDIR/fork.log"
+echo "cmpct-differential: comparisons=1" >"$WORKDIR/cmpct.log"
+assert_ok "cmpct comparisons=1 pass" "$RUN" --check-log "$WORKDIR/cmpct.log"
 rm -rf "$WORKDIR"
 
 # Pin/fetch tests land before the operator YAML commit; required CI already
