@@ -1763,6 +1763,7 @@ impl MempoolHub {
             };
             let mut to_drop = Vec::new();
             for (id, tx, in_mp) in snaps {
+                utxo.note_spender(&tx);
                 let mut chain_coins = Vec::with_capacity(tx.input.len());
                 let mut missing = false;
                 for (i, inp) in tx.input.iter().enumerate() {
@@ -2661,6 +2662,7 @@ mod tests {
     }
 
     /// Non-coinbase, no BIP68 time-lock: no `block_tx_fks` and no create MTP.
+    /// A satisfied time-lock spend must survive `evict_after_reorg`.
     #[test]
     fn get_coin_skips_block_tx_fks_and_mtp_without_time_lock() {
         use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
@@ -2761,6 +2763,11 @@ mod tests {
         assert!(
             s.get_coin_create_mtp >= 1,
             "BIP68 time-lock spend must compute create MTP"
+        );
+        hub.evict_after_reorg();
+        assert!(
+            hub.get_live_meta(&timed.compute_txid()).is_some(),
+            "evict_after_reorg must not drop a still-valid BIP68 time lock"
         );
         let _ = std::fs::remove_dir_all(&mp);
         let _ = std::fs::remove_dir_all(&store_dir);
