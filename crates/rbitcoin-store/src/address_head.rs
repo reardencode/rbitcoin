@@ -1970,6 +1970,23 @@ mod tests {
             Some(v) => std::env::set_var("RBITCOIN_TX_HEAD_BITS", v),
             None => std::env::remove_var("RBITCOIN_TX_HEAD_BITS"),
         }
+        let prev_scale = std::env::var_os("RBITCOIN_HEAD_SCALE");
+        let prev_bits = std::env::var_os("RBITCOIN_TX_HEAD_BITS");
+        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+        std::env::set_var("RBITCOIN_TX_HEAD_BITS", "20");
+        assert_eq!(
+            bits_for_scale(),
+            20,
+            "TX_HEAD_BITS must widen OA under tiny header heads"
+        );
+        match prev_bits {
+            Some(v) => std::env::set_var("RBITCOIN_TX_HEAD_BITS", v),
+            None => std::env::remove_var("RBITCOIN_TX_HEAD_BITS"),
+        }
+        match prev_scale {
+            Some(v) => std::env::set_var("RBITCOIN_HEAD_SCALE", v),
+            None => std::env::remove_var("RBITCOIN_HEAD_SCALE"),
+        }
     }
 
     #[test]

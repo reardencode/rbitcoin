@@ -72,6 +72,13 @@ before 1.0).
 
 ### Fixed
 
+- **Nightly fork/cmpct-reorg/spend differential harness:** Core
+  `submitblock` of an equal-work sibling returns `inconclusive` (parked,
+  not tip). Side-submit treated that as fatal (`side submit` on the first
+  corpus item). Core-oracle jobs keep tiny **header** heads and set
+  `RBITCOIN_TX_HEAD_BITS=20` so rewind loops do not fill 16-bit `tx.head`
+  OA (probe-exhaust stays fail-closed).
+
 - **Tip-follow FeeFilter no longer panics on the reactor:** session handshake
   called `min_relay_sat_kvb()`, which took a blocking `inner` read after
   #320's `assert_not_reactor`. The overlay is an atomic; `rebroadcast_unbroadcast`

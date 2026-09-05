@@ -30,6 +30,13 @@ const CORE_SKIP: &[&str] = &[
 
 const CORE_DESYNC_SKIP: &[&str] = &["inconclusive", "bad-prevblk", "prev-blk-not-found"];
 const CORE_DUPLICATE_SKIP: &[&str] = &["duplicate", "duplicate-invalid", "duplicate-inconclusive"];
+/// Equal-work sibling is parked on Core (`inconclusive`) or already known.
+const CORE_SIDE_STORED: &[&str] = &[
+    "inconclusive",
+    "duplicate",
+    "duplicate-invalid",
+    "duplicate-inconclusive",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffVerdict {
@@ -175,7 +182,7 @@ pub fn setup_side_block(
     }
     match oracle.submitblock_hex(&hex) {
         OracleReply::NullAccept => Ok(()),
-        OracleReply::Reason(r) if CORE_DUPLICATE_SKIP.contains(&r.as_str()) => Ok(()),
+        OracleReply::Reason(r) if CORE_SIDE_STORED.contains(&r.as_str()) => Ok(()),
         _ => Err("side submit"),
     }
 }
@@ -186,7 +193,7 @@ pub fn submit_side_to_oracle(oracle: &dyn BlockOracle, block: &Block) -> Result<
     let hex = hex_encode(serialize(block));
     match oracle.submitblock_hex(&hex) {
         OracleReply::NullAccept => Ok(()),
-        OracleReply::Reason(r) if CORE_DUPLICATE_SKIP.contains(&r.as_str()) => Ok(()),
+        OracleReply::Reason(r) if CORE_SIDE_STORED.contains(&r.as_str()) => Ok(()),
         _ => Err("side submit"),
     }
 }
@@ -1252,8 +1259,17 @@ mod tests {
         assert_eq!(hub.tip_height(), Some(DIFF_TEST_PAD_HEIGHT + 1));
         assert_eq!(mock.submits.get(), 1);
 
+        let mock_inc = MockOracle::new(OracleReply::Reason("inconclusive".into()));
+        setup_side_block(&hub, &mock_inc, &side)
+            .expect("Core inconclusive is stored equal-work sibling");
+        assert_eq!(submit_side_to_oracle(&mock_inc, &side), Ok(()));
+
         let mock_rej = MockOracle::new(OracleReply::Reason("bad-txnmrklroot".into()));
         assert!(setup_side_block(&hub, &mock_rej, &side).is_err());
+        assert_eq!(
+            submit_side_to_oracle(&mock_rej, &side).unwrap_err(),
+            "side submit"
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
