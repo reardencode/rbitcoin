@@ -1107,6 +1107,21 @@ impl PeerHub {
         g.values().cloned().collect()
     }
 
+    /// Re-advertise BIP133 feefilter after IBD/minrelay change (skip block-relay / forcerelay).
+    pub fn queue_feefilter_all(&self, sat_kvb: i64) {
+        if self.is_forcerelay_perm() {
+            return;
+        }
+        for s in self.live_peers() {
+            if s.conn_type == PeerConnType::BlockRelay {
+                continue;
+            }
+            if let Some(tx) = s.writer() {
+                let _ = tx.send(NetworkMessage::FeeFilter(sat_kvb));
+            }
+        }
+    }
+
     pub fn snapshot(&self) -> Vec<PeerInfo> {
         let now = self.now_secs();
         let g = self.live.read().unwrap_or_else(|e| e.into_inner());

@@ -890,6 +890,9 @@ fn blocksonly_tx_and_inv_raise_ban() {
         let (dir, q) = tmp_store("blocksonly-tx");
         let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
         hub.ensure_genesis().unwrap();
+        let t = hub.tip_header().unwrap().time;
+        hub.clock.set_mock(i64::from(t) + 1);
+        assert!(!hub.in_ibd(), "blocksonly pin is not IBD");
         let mp = crate::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
         mp.set_relay_enabled(false);
         assert!(hub.attach_mempool(mp).is_ok());
@@ -6095,4 +6098,21 @@ fn new_pow_valid_compact_relays_to_hb_before_connect() {
         }
         let _ = std::fs::remove_dir_all(dir);
     });
+}
+
+#[test]
+fn outbound_feefilter_sats_ibd_even_when_relay_off() {
+    use std::sync::Arc;
+    let (dir, q) = tmp_store("ibd-ff");
+    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    hub.ensure_genesis().unwrap();
+    let mp = crate::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
+    mp.set_relay_enabled(false);
+    assert!(hub.attach_mempool(mp).is_ok());
+    assert!(hub.in_ibd(), "genesis tip is older than 24h");
+    assert_eq!(
+        outbound_feefilter_sats(&hub, None),
+        Some(crate::IBD_FEEFILTER_SAT_KVB as i64)
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }

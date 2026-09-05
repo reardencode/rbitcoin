@@ -56,6 +56,10 @@ fn reject_is_mutated(reason: &str) -> bool {
 /// Core `DEFAULT_MAX_TIP_AGE` (24h).
 pub const DEFAULT_MAX_TIP_AGE_SECS: u64 = 24 * 60 * 60;
 
+/// Core `FeeFilterRounder::round(MAX_MONEY)` with v31.1 default minrelay 100 sat/kvB
+/// (`p2p_ibd_txrelay.py` `MAX_FEE_FILTER`).
+pub const IBD_FEEFILTER_SAT_KVB: u64 = 9_936_506;
+
 /// Thread-safe chain façade used by peer sessions.
 pub struct ChainHub {
     pub query: Arc<Query>,
@@ -321,6 +325,21 @@ impl ChainHub {
             return true;
         };
         self.clock.now_secs().saturating_sub(u64::from(h.time)) > self.max_tip_age_secs()
+    }
+
+    /// Core `IsInitialBlockDownload`: tip too old **or** work below `-minimumchainwork`.
+    pub fn in_ibd(&self) -> bool {
+        !self.meets_minimum_chain_work() || self.tip_is_stale_for_ibd()
+    }
+
+    /// BIP133 feefilter we advertise: rounded MAX_MONEY while IBD, else minrelay.
+    pub fn feefilter_sat_kvb(&self) -> u64 {
+        if self.in_ibd() {
+            return IBD_FEEFILTER_SAT_KVB;
+        }
+        self.mempool()
+            .map(|m| m.min_relay_sat_kvb())
+            .unwrap_or(rbitcoin_consensus::policy::MIN_RELAY_FEE_RATE_SAT_PER_KVB)
     }
 
     /// Attach mempool once (same Query Arc as this hub).
@@ -2563,6 +2582,31 @@ mod tests {
             "tip at exactly max age must leave IBD"
         );
 
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn feefilter_sat_kvb_is_rounded_max_during_ibd() {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        assert!(hub.in_ibd(), "regtest genesis is older than 24h");
+        assert_eq!(hub.feefilter_sat_kvb(), IBD_FEEFILTER_SAT_KVB);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn feefilter_sat_kvb_is_min_relay_once_tip_is_fresh() {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let now = 1_700_000_000u32;
+        hub.clock.set_mock(i64::from(now));
+        hub.accept_block(mine(gen, now, 1)).unwrap();
+        assert!(!hub.in_ibd());
+        assert_eq!(
+            hub.feefilter_sat_kvb(),
+            rbitcoin_consensus::policy::MIN_RELAY_FEE_RATE_SAT_PER_KVB
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

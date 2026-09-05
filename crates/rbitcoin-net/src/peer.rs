@@ -68,6 +68,9 @@ pub const BAN_SCORE_THRESHOLD: u32 = 100;
 /// `-blocksonly` (relay off, no whitelist `relay`) or a block-relay-only
 /// session must not receive txs / tx invs (`p2p_blocksonly`).
 fn reject_unsolicited_tx(hub: &ChainHub, session: Option<&crate::peers::LivePeer>) -> bool {
+    if hub.in_ibd() {
+        return false;
+    }
     if session.is_some_and(|s| s.conn_type == crate::peers::PeerConnType::BlockRelay) {
         return true;
     }
@@ -717,16 +720,8 @@ pub async fn peer_session_with(
     if let Some(n) = keepalive {
         let _ = write_v2_msg(&mut writer, NetworkMessage::Ping(n)).await;
     }
-    let fee_sat = hub
-        .mempool()
-        .map(|m| m.min_relay_sat_kvb())
-        .unwrap_or(rbitcoin_consensus::policy::MIN_RELAY_FEE_RATE_SAT_PER_KVB);
-    let skip_feefilter = meta.session.as_ref().is_some_and(|s| {
-        s.conn_type == crate::peers::PeerConnType::BlockRelay
-            || s.hub().is_some_and(|h| h.is_forcerelay_perm())
-    }) || hub.mempool().is_none_or(|m| !m.relay_enabled());
-    if !skip_feefilter {
-        let _ = write_v2_msg(&mut writer, NetworkMessage::FeeFilter(fee_sat as i64)).await;
+    if let Some(fee_sat) = outbound_feefilter_sats(&hub, meta.session.as_deref()) {
+        let _ = write_v2_msg(&mut writer, NetworkMessage::FeeFilter(fee_sat)).await;
     }
 
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<NetworkMessage>();
@@ -1874,8 +1869,9 @@ async fn handle_peer_frame(
             let mut inv_tx_n = 0u64;
             let mut need_headers = false;
             let mut tx_inv_hex: Option<String> = None;
-            let relay = hub.mempool().map(|m| m.relay_enabled()).unwrap_or(false)
-                || session.is_some_and(|s| s.hub().is_some_and(|ph| ph.is_relay_perm()));
+            let relay = !hub.in_ibd()
+                && (hub.mempool().map(|m| m.relay_enabled()).unwrap_or(false)
+                    || session.is_some_and(|s| s.hub().is_some_and(|ph| ph.is_relay_perm())));
             for item in items.iter().take(MAX_INV_SIZE) {
                 match item {
                     Inventory::Block(h) | Inventory::WitnessBlock(h) => {
@@ -2370,6 +2366,10 @@ async fn handle_peer_frame(
             }
         }
         NetworkMessage::Tx(tx) => {
+            rbitcoin_log::info!("received: tx");
+            if hub.in_ibd() {
+                return Ok(());
+            }
             if reject_unsolicited_tx(hub, session) {
                 let id = session.map(|s| s.id).unwrap_or(0);
                 rbitcoin_log::info!(
@@ -2407,9 +2407,12 @@ async fn handle_peer_frame(
                             }
                         }
                         Err(rbitcoin_mempool::AcceptError::Duplicate(_)) => {}
-                        Err(rbitcoin_mempool::AcceptError::Orphaned(_)) => {}
-                        Err(rbitcoin_mempool::AcceptError::Policy("mempool full")) => {}
                         Err(e) => {
+                            let id = session.map(|s| s.id).unwrap_or(0);
+                            rbitcoin_log::info!(
+                                "{txid} (wtxid={}) from peer={id} was not accepted: {e}",
+                                tx.compute_wtxid()
+                            );
                             rbitcoin_log::debug!("txrelay: reject {txid}: {e}");
                         }
                     }
@@ -2906,6 +2909,27 @@ fn compact_header_low_work(hub: &ChainHub, header: &bitcoin::block::Header) -> b
     // `p2p_compactblocks.test_low_work_compactblocks`). Depth 5 is still
     // stored as headers-only (`test_compactblocks_not_at_tip`).
     tip.saturating_sub(ph.0) > 6
+}
+
+/// BIP133 feefilter to send after handshake. None = do not send (blocksonly,
+/// forcerelay, block-relay-only). IBD still sends rounded MAX_MONEY.
+pub(crate) fn outbound_feefilter_sats(
+    hub: &ChainHub,
+    session: Option<&crate::peers::LivePeer>,
+) -> Option<i64> {
+    if session.is_some_and(|s| {
+        s.conn_type == crate::peers::PeerConnType::BlockRelay
+            || s.hub().is_some_and(|h| h.is_forcerelay_perm())
+    }) {
+        return None;
+    }
+    if hub.in_ibd() {
+        return Some(hub.feefilter_sat_kvb() as i64);
+    }
+    if hub.mempool().is_none_or(|m| !m.relay_enabled()) {
+        return None;
+    }
+    Some(hub.feefilter_sat_kvb() as i64)
 }
 
 fn queue_out(
