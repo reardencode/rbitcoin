@@ -77,6 +77,12 @@ before 1.0).
 
 ### Fixed
 
+- **N-block reorg and BIP68 CSV-age differentials:** `compare_fork_n_one`
+  (side chain length 3 vs a 1-block stem) and `compare_csv_age_one`
+  (version-2 spend of a mature coin with relative-height `nSequence`)
+  vs Core `submitblock`. Nightly jobs land when the operator pushes
+  `fuzz.yml`.
+
 - **Differential fuzz mutates consensus fields:** leftover fuzzer bytes
   overlay extra-tx `nVersion` / `nLockTime` / `nSequence` / scriptSig /
   witness / taproot annex and same-block order. `script_differential`

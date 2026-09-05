@@ -195,7 +195,7 @@ findings 001–022, CI split, map-free README, …) live in
 
 | ID | Item | Resolution |
 |----|------|------------|
-| **Q-30** | Continuous differential fuzz | Nightly `fuzz.yml` (not a required PR check) feeds BIP324 parser (`v2_contents`) + live Core session (`v2_session`), header/block `submitblock` (height-1 / spend / fork), compact reconstruct vs Core `getblocktxn`, compact reorg via `drain_pending`, and script-mutating vs Core. Crashes → `docs/external_findings/` + named regression. JSON corpora stay static. |
+| **Q-30** | Continuous differential fuzz | Nightly `fuzz.yml` (not a required PR check) feeds BIP324 parser (`v2_contents`) + live Core session (`v2_session`), header/block `submitblock` (height-1 / spend / fork / N-reorg / BIP68 CSV-age), compact reconstruct vs Core `getblocktxn`, compact reorg via `drain_pending`, and script-mutating vs Core. Crashes → `docs/external_findings/` + named regression. JSON corpora stay static. |
 | **—** | Schema 20 indexes | Sealed `tx.head` MPHF+`.rel` → packed BDZ2; sealed SH MPHF → compact BDZ3. Occupied 18/19 `tx.head`/`scripthash*` **refused** (wipe those dirs, Class A kept). Empty 18/19 rewrite `meta` to 20. |
 | **—** | IBD main-loop cadence | Assign ≤50 ms (immediate if inflight empty); header locator poll ≤500 ms (empty path immediate); stall/relative-slow and work-path hygiene ≤1 s. Drain + confirm-offer stay event-driven. Full 2000-header continuation stays on the Headers event. |
 | **—** | Leftover hop-dump vs resolve-batch clear | `clear_leftover_miss` no longer wipes `diag=1`. Miss class is per-batch; dump is `take` only. Tests pin the parent txid (`leftover_probe_diag_recorded`). |

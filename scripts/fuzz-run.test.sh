@@ -145,6 +145,24 @@ assert_ok "cmpct-reorg-differential dry-run timeout 180" \
   grep -qx "FUZZ_TIMEOUT=180" <<<"$out"
 assert_ok "cmpct-reorg-differential dry-run prints CORE_BITCOIND" \
   grep -q "^RBITCOIN_CORE_BITCOIND=" <<<"$out"
+
+out="$(FUZZ_DRY_RUN=1 "$RUN" block_reorg_n_differential)"
+assert_ok "reorg-n-differential dry-run bin" \
+  grep -qx "FUZZ_BIN=block_reorg_n_differential" <<<"$out"
+assert_ok "reorg-n-differential dry-run sanitizer none" \
+  grep -qx "FUZZ_SANITIZER=none" <<<"$out"
+assert_ok "reorg-n-differential dry-run timeout 180" \
+  grep -qx "FUZZ_TIMEOUT=180" <<<"$out"
+assert_ok "reorg-n-differential dry-run tiny heads" \
+  grep -qx "RBITCOIN_HEAD_SCALE=tiny" <<<"$out"
+
+out="$(FUZZ_DRY_RUN=1 "$RUN" block_csv_differential)"
+assert_ok "csv-differential dry-run bin" \
+  grep -qx "FUZZ_BIN=block_csv_differential" <<<"$out"
+assert_ok "csv-differential dry-run sanitizer none" \
+  grep -qx "FUZZ_SANITIZER=none" <<<"$out"
+assert_ok "csv-differential dry-run timeout 180" \
+  grep -qx "FUZZ_TIMEOUT=180" <<<"$out"
 assert_ok "dry-run rustc wrapper" \
   grep -q "^RUSTC_WRAPPER=.*fuzz-rustc-allow-warnings.sh$" <<<"$out"
 wrap="$ROOT/scripts/fuzz-rustc-allow-warnings.sh"

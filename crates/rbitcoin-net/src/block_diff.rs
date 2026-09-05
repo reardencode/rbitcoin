@@ -65,6 +65,8 @@ pub trait BlockOracle {
 
 pub const DIFF_TEST_PAD_HEIGHT: u32 = 3;
 pub const DIFF_MATURE_PAD_HEIGHT: u32 = 100;
+/// Side-chain length vs a 1-block stem (deeper than the 2-block fork target).
+pub const DIFF_REORG_N: u32 = 3;
 /// Core `MAX_SCRIPT_SIZE` — truncate fuzzer scriptPubKey, do not skip.
 pub const SCRIPT_FUZZ_MAX: usize = 10_000;
 pub const DIFF_MUT_VERSION: u8 = 0x01;
@@ -557,6 +559,41 @@ pub fn prepare_script_candidate(tip: &DiffTip, mature: OutPoint, data: &[u8]) ->
     ))
 }
 
+/// Spend `mature` with BIP68 relative-height `nSequence` (tx version 2).
+pub fn prepare_csv_age_candidate(tip: &DiffTip, mature: OutPoint, data: &[u8]) -> Option<Block> {
+    if data.is_empty() {
+        return None;
+    }
+    let rel = if data.len() >= 2 {
+        u16::from_le_bytes([data[0], data[1]])
+    } else {
+        u16::from(data[0])
+    };
+    let mut spend = default_op_true_spend(mature, next_diff_cb_uniq());
+    spend.version = TxVersion::TWO;
+    spend.input[0].sequence = Sequence::from_consensus(u32::from(rel));
+    Some(mine_diff_paying(
+        tip.hash,
+        tip.time.saturating_add(REGTEST_BLOCK_SPACING),
+        tip.height.saturating_add(1),
+        ScriptBuf::from_bytes(vec![0x51]),
+        vec![spend],
+    ))
+}
+
+pub fn compare_csv_age_one(
+    hub: &ChainHub,
+    tip: &mut DiffTip,
+    oracle: &dyn BlockOracle,
+    mature: OutPoint,
+    data: &[u8],
+) -> CompareOne {
+    let Some(block) = prepare_csv_age_candidate(tip, mature, data) else {
+        return CompareOne::NotABlock;
+    };
+    compare_prepared(hub, tip, oracle, block)
+}
+
 pub fn is_core_connectivity_skip(reason: &str) -> bool {
     CORE_SKIP.contains(&reason)
 }
@@ -879,6 +916,97 @@ pub fn compare_fork_one(
             let _ = hub.rewind_to_height(base.fork_parent.height);
         }
         let _ = core_park_child(oracle, &child, stem);
+        let _ = restore_stem(hub, oracle, stem);
+        return CompareOne::Harness("oracle dead");
+    }
+    finish_reorg_compare(
+        hub,
+        oracle,
+        base.fork_parent.height,
+        stem,
+        &child,
+        ours,
+        &reply,
+    )
+}
+
+pub fn compare_fork_n_one(
+    hub: &ChainHub,
+    base: &DiffPad,
+    oracle: &dyn BlockOracle,
+    data: &[u8],
+    n: u32,
+) -> CompareOne {
+    let n = n.max(DIFF_REORG_N);
+    let Ok(parsed) = deserialize::<Block>(data) else {
+        return CompareOne::NotABlock;
+    };
+    if parsed.txdata.is_empty() {
+        return CompareOne::NotABlock;
+    }
+    let Some(stem) = base.bodies.last() else {
+        return CompareOne::Harness("no stem");
+    };
+    let mut side = mine_regtest_paying(
+        base.fork_parent.hash,
+        base.fork_parent.time.saturating_add(REGTEST_BLOCK_SPACING),
+        base.fork_parent.height.saturating_add(1),
+        ScriptBuf::from_bytes(vec![0x51, 0x51]),
+        Vec::new(),
+    );
+    if let Err(e) = setup_side_block(hub, oracle, &side) {
+        return CompareOne::Harness(e);
+    }
+    for i in 2..n {
+        let h = base.fork_parent.height.saturating_add(i);
+        let nxt = mine_empty_regtest(
+            side.block_hash(),
+            side.header.time.saturating_add(REGTEST_BLOCK_SPACING),
+            h,
+        );
+        match hub.accept_received_block(nxt.clone()) {
+            Ok(AcceptOutcome::Accepted { .. } | AcceptOutcome::AlreadyHave) => {}
+            _ => return CompareOne::Harness("side extend"),
+        }
+        if submit_known_block(
+            oracle,
+            &nxt,
+            CORE_DUPLICATE_SKIP,
+            "side extend submit",
+            false,
+        )
+        .is_err()
+        {
+            return CompareOne::Harness("side extend submit");
+        }
+        side = nxt;
+    }
+    let mut extra: Vec<Transaction> = parsed.txdata.into_iter().skip(1).collect();
+    apply_diff_field_mutations(&mut extra, mutation_ctrl(data));
+    let uniq = next_diff_cb_uniq();
+    for tx in extra.iter_mut() {
+        stamp_diff_out(tx, uniq);
+    }
+    let child = mine_diff_paying(
+        side.block_hash(),
+        side.header.time.saturating_add(REGTEST_BLOCK_SPACING),
+        base.fork_parent.height.saturating_add(n),
+        ScriptBuf::from_bytes(vec![0x51]),
+        extra,
+    );
+    let ours = match verdict_from_accept(hub.accept_received_block(child.clone())) {
+        Ok(v) => v,
+        Err(msg) => return CompareOne::Harness(msg),
+    };
+    let hex = hex_encode(serialize(&child));
+    let reply = oracle.submitblock_hex(&hex);
+    if matches!(reply, OracleReply::Dead)
+        || (matches!(reply, OracleReply::RpcError) && !oracle.liveness_ok())
+    {
+        if ours == DiffVerdict::Accept {
+            let _ = hub.rewind_to_height(base.fork_parent.height);
+        }
+        let _ = oracle.core_rewind_to_height(base.fork_parent.height);
         let _ = restore_stem(hub, oracle, stem);
         return CompareOne::Harness("oracle dead");
     }
@@ -1831,6 +1959,60 @@ mod tests {
             compare_fork_one(&hub, &base, &mock, b"junk"),
             CompareOne::NotABlock
         ));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn compare_fork_n_one_is_deeper_than_two_and_rewinds_stem() {
+        let (dir, hub, _g) = tmp_diff_hub();
+        let pad = mine_diff_pad(&hub, DIFF_TEST_PAD_HEIGHT).unwrap();
+        let base = mine_diff_stem(&hub, pad).unwrap();
+        let seed = serialize(&fork_child_seed_block());
+        let mock = MockOracle::new(OracleReply::NullAccept);
+        submit_pad_to_oracle(&mock, &base.bodies).unwrap();
+        let mock = MockOracle::new(OracleReply::NullAccept);
+        match compare_fork_n_one(&hub, &base, &mock, &seed, DIFF_REORG_N) {
+            CompareOne::Agreed { accept: true } => {}
+            other => panic!("n-reorg accept: {other:?}"),
+        }
+        assert_eq!(hub.tip_height(), Some(DIFF_TEST_PAD_HEIGHT + 1));
+        assert_eq!(hub.tip_hash(), Some(base.tip.hash));
+        assert!(DIFF_REORG_N > 2);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prepare_csv_age_candidate_version_two_relative_sequence() {
+        let dummy = DiffTip {
+            hash: BlockHash::from_byte_array([0x33; 32]),
+            time: 1,
+            height: DIFF_TEST_PAD_HEIGHT,
+        };
+        let mature = height1_mature_out();
+        let got = prepare_csv_age_candidate(&dummy, mature, &[5, 0]).unwrap();
+        assert_eq!(got.txdata[1].version, TxVersion::TWO);
+        assert_eq!(got.txdata[1].input[0].sequence, Sequence::from_consensus(5));
+        assert_eq!(got.txdata[1].input[0].previous_output, mature);
+        assert_eq!(got.header.prev_blockhash, dummy.hash);
+        assert!(prepare_csv_age_candidate(&dummy, mature, b"").is_none());
+    }
+
+    #[test]
+    fn compare_csv_age_one_short_lock_accepts_long_lock_rejects() {
+        let (dir, hub, _) = tmp_diff_hub();
+        let pad = mine_diff_pad(&hub, DIFF_MATURE_PAD_HEIGHT).unwrap();
+        let mut tip = pad.tip.clone();
+        let mock = MockOracle::new(OracleReply::NullAccept);
+        match compare_csv_age_one(&hub, &mut tip, &mock, pad.mature, &[1, 0]) {
+            CompareOne::Agreed { accept: true } => {}
+            other => panic!("csv rel=1: {other:?}"),
+        }
+        assert_eq!(hub.tip_height(), Some(DIFF_MATURE_PAD_HEIGHT));
+        let mock = MockOracle::new(OracleReply::Reason("non-BIP68-final".into()));
+        match compare_csv_age_one(&hub, &mut tip, &mock, pad.mature, &[200, 0]) {
+            CompareOne::Agreed { accept: false } => {}
+            other => panic!("csv rel=200: {other:?}"),
+        }
         let _ = fs::remove_dir_all(dir);
     }
 

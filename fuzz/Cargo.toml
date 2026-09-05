@@ -83,3 +83,17 @@ path = "fuzz_targets/cmpct_reorg_differential.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "block_reorg_n_differential"
+path = "fuzz_targets/block_reorg_n_differential.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "block_csv_differential"
+path = "fuzz_targets/block_csv_differential.rs"
+test = false
+doc = false
+bench = false
