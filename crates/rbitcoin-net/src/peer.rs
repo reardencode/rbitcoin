@@ -3,7 +3,7 @@
 use crate::cache::BlockCache;
 use crate::chain::{
     accept_block_header_nodos_log, ignoring_low_work_chain_log, received_getdata_wtx_log,
-    synchronizing_blockheaders_log, AcceptOutcome, ChainHub,
+    received_tx_log, synchronizing_blockheaders_log, AcceptOutcome, ChainHub,
 };
 use crate::codec::{FramedMessage, MAX_HEADERS_RESULTS, MAX_INV_SIZE, MAX_LOCATOR_SZ};
 use crate::error::NetError;
@@ -2406,7 +2406,7 @@ async fn handle_peer_frame(
             }
         }
         NetworkMessage::Tx(tx) => {
-            rbitcoin_log::info!("received: tx");
+            rbitcoin_log::trace!("{}", received_tx_log());
             if hub.in_ibd() {
                 return Ok(());
             }

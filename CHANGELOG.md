@@ -77,6 +77,10 @@ before 1.0).
 
 ### Fixed
 
+- **Inbound `tx` log is TRACE:** default INFO stays `ibd: progress`
+  (Q-36). `p2p_ibd_txrelay.py` still matches `received: tx` because
+  TestNode passes `-loglevel=trace`.
+
 - **Nightly fork/cmpct-reorg Core rewind:** `reconsiderblock(side)` resets
   **descendant** fail flags, so the first unique child becomes tip again and
   the next child is equal-work `inconclusive` (`core not at pad tip`). Do not
