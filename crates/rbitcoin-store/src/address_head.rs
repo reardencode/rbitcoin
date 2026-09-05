@@ -946,10 +946,6 @@ impl AddressHead {
         Ok(())
     }
 
-    pub fn insert_many_paced(&self, entries: &[([u8; 32], Fk)]) -> Result<(), StoreError> {
-        self.insert_many(entries)
-    }
-
     /// Alias of [`insert_many`] (historical archive name).
     #[inline]
     pub fn insert_many_sole(&self, entries: &[([u8; 32], Fk)]) -> Result<(), StoreError> {
