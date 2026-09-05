@@ -255,19 +255,21 @@ New features: add a high-level scenario; remove obsolete lower-level tests in th
 
 ## Core differential
 
-Nightly (not a required PR check) `fuzz.yml` runs five cargo-fuzz targets:
+Nightly (not a required PR check) `fuzz.yml` runs six cargo-fuzz targets:
 
 | Target | What | Oracle |
 |--------|------|--------|
 | `block_wire` | `check_block_wire` (ASan) | none |
 | `v2_contents` | BIP324 `parse_v2_contents` + `try_decode` (ASan) | none |
-| `block_differential` | height-1 `ChainHub::accept_received_block` vs Core `submitblock`, **accept vs reject only** | official **v31.1** `bitcoind` tarball (`scripts/core-functional/fetch-bitcoind.sh`) |
+| `v2_session` | BIP324 handshake + fuzzed application contents vs a live v31.1 `bitcoind` v2 peer (ASan on our process). Finding = our crash / ASan / failed handshake. Core TCP drop on garbage is expected, not a consensus split. **Not** accept/reject. | official **v31.1** `bitcoind` tarball (`scripts/core-functional/fetch-bitcoind.sh`), `-listen=1` |
+| `block_differential` | height-1 `ChainHub::accept_received_block` vs Core `submitblock`, **accept vs reject only** | same tarball |
 | `block_spend_differential` | height-101 spend of a mature pad coinbase, same path and oracle | same tarball |
 | `block_fork_differential` | 2-block heavier fork off the pad (sibling of a pad+1 stem), same path and oracle | same tarball |
 
 ```bash
 ./scripts/fuzz-run.sh                           # block_wire (ASan)
 ./scripts/fuzz-run.sh v2_contents               # BIP324 contents (ASan)
+./scripts/fuzz-run.sh v2_session                # live Core v2 peer, ASan, -timeout=90
 ./scripts/fuzz-run.sh block_differential        # fetch bitcoind, --sanitizer none
 ./scripts/fuzz-run.sh block_spend_differential  # 100-block pad, --sanitizer none, -timeout=180
 ./scripts/fuzz-run.sh block_fork_differential   # pad+stem, 2-block fork, --sanitizer none, -timeout=180
@@ -290,7 +292,11 @@ global `ChainParams::regtest()` is unchanged. Harness/oracle failure exits
 (reproducer). A red nightly is a **finding** (`docs/external_findings/`), not
 a test to green by changing production in the harness PR.
 
-Default `cargo test` does **not** download Core, bind RPC, or compile `fuzz/`.
+`v2_session` completes VERSION/VERACK on the encrypted session
+(`V2PlainSession`), then writes fuzzed application contents. It does not
+compare `submitblock` verdicts.
+
+Default `cargo test` does **not** download Core, bind RPC/P2P, or compile `fuzz/`.
 The official tarball is glibc; GitHub Actions `ubuntu-latest` runs it. A NixOS
 host cannot exec it without a foreign-glibc loader — that is CI-only, not a
 default-suite concern.
