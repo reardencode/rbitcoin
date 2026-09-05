@@ -30,9 +30,9 @@ const PROTOCOL_ASOF: &str = "1.4.2-asof";
 /// `blockchain.tweaks.subscribe [0, 1, false]`.
 const SERVER_VERSION: &str = concat!("rbitcoin-electrs ", env!("CARGO_PKG_VERSION"));
 
-/// One JSON-RPC request line. Junk is `Err`; must not panic.
-pub fn parse_electrum_request_line(line: &str) -> Result<Value, ()> {
-    serde_json::from_str(line).map_err(|_| ())
+/// One JSON-RPC request line. Junk is `None`; must not panic.
+pub fn parse_electrum_request_line(line: &str) -> Option<Value> {
+    serde_json::from_str(line).ok()
 }
 
 /// Tip-follow 5s DEBUG `tip: perf`: JSON-RPC request count this window.
@@ -511,8 +511,8 @@ where
                     continue;
                 }
                 let req: Value = match parse_electrum_request_line(&line) {
-                    Ok(v) => v,
-                    Err(()) => continue,
+                    Some(v) => v,
+                    None => continue,
                 };
                 let id = req.get("id").cloned().unwrap_or(Value::Null);
                 let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
@@ -1824,9 +1824,9 @@ mod tests {
 
     #[test]
     fn parse_electrum_request_line_junk_does_not_panic() {
-        assert!(parse_electrum_request_line("").is_err());
-        assert!(parse_electrum_request_line("{").is_err());
-        assert!(parse_electrum_request_line("not json {").is_err());
+        assert!(parse_electrum_request_line("").is_none());
+        assert!(parse_electrum_request_line("{").is_none());
+        assert!(parse_electrum_request_line("not json {").is_none());
         let v = parse_electrum_request_line(
             r#"{"id":1,"method":"server.version","params":["a","1.4"]}"#,
         )
