@@ -1,4 +1,4 @@
-//! Live Core JSON-RPC + bitcoind spawn for `block_differential`.
+//! Live Core JSON-RPC + bitcoind spawn for differential and v2 session fuzz.
 
 use rbitcoin_net::{
     basic_auth_b64, build_jsonrpc_http_request, parse_submitblock_json, split_http_body,
@@ -125,6 +125,91 @@ impl Drop for CoreChild {
     }
 }
 
+/// Argv for a listening BIP324 peer. RPC-only [`spawn_bitcoind`] stays `-listen=0`.
+pub fn bitcoind_p2p_args(datadir: &Path, rpcport: u16, p2pport: u16, cookie: &Path) -> Vec<String> {
+    vec![
+        "-regtest".into(),
+        "-server".into(),
+        "-listen=1".into(),
+        format!("-bind=127.0.0.1:{p2pport}"),
+        "-v2transport=1".into(),
+        "-whitelist=127.0.0.1".into(),
+        "-connect=0".into(),
+        "-discover=0".into(),
+        "-dnsseed=0".into(),
+        "-listenonion=0".into(),
+        "-printtoconsole=0".into(),
+        format!("-datadir={}", datadir.display()),
+        "-rpcbind=127.0.0.1".into(),
+        "-rpcallowip=127.0.0.1".into(),
+        format!("-rpcport={rpcport}"),
+        format!("-port={p2pport}"),
+        format!("-rpccookiefile={}", cookie.display()),
+    ]
+}
+
+pub fn spawn_bitcoind_p2p(
+    bin: &Path,
+    datadir: &Path,
+) -> Result<(CoreChild, std::net::SocketAddr), String> {
+    std::fs::create_dir_all(datadir).map_err(|e| e.to_string())?;
+    let rpcport = free_port()?;
+    let p2pport = rpcport.saturating_add(1);
+    let cookie = datadir.join(".cookie");
+    let child = Command::new(bin)
+        .args(bitcoind_p2p_args(datadir, rpcport, p2pport, &cookie))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("spawn bitcoind: {e}"))?;
+    let rpc = wait_bitcoind_rpc(cookie, rpcport)?;
+    let p2p = std::net::SocketAddr::from(([127, 0, 0, 1], p2pport));
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        if std::net::TcpStream::connect_timeout(&p2p, Duration::from_millis(200)).is_ok() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("bitcoind P2P never accepted".into());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok((
+        CoreChild {
+            rpc,
+            child: std::sync::Mutex::new(child),
+        },
+        p2p,
+    ))
+}
+
+fn wait_bitcoind_rpc(cookie: PathBuf, rpcport: u16) -> Result<CoreRpc, String> {
+    wait_for_file(&cookie, Instant::now() + Duration::from_secs(90))
+        .map_err(|_| "cookie file missing (datadir/.cookie)")?;
+    let creds = std::fs::read_to_string(&cookie).map_err(|e| e.to_string())?;
+    let (user, pass) = creds
+        .trim()
+        .split_once(':')
+        .ok_or_else(|| "cookie not user:pass".to_string())?;
+    let rpc = CoreRpc {
+        host: format!("127.0.0.1:{rpcport}"),
+        auth_b64: basic_auth_b64(user, pass),
+    };
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        if let Ok(body) = rpc.call("getblockcount", "[]") {
+            if json_result_u64(&body) == Some(0) {
+                return Ok(rpc);
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err("bitcoind RPC never reached getblockcount==0".into());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 pub fn spawn_bitcoind(bin: &Path, datadir: &Path) -> Result<CoreChild, String> {
     std::fs::create_dir_all(datadir).map_err(|e| e.to_string())?;
     let rpcport = free_port()?;
@@ -151,29 +236,7 @@ pub fn spawn_bitcoind(bin: &Path, datadir: &Path) -> Result<CoreChild, String> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("spawn bitcoind: {e}"))?;
-    wait_for_file(&cookie, Instant::now() + Duration::from_secs(90))
-        .map_err(|_| "cookie file missing (datadir/.cookie)")?;
-    let creds = std::fs::read_to_string(&cookie).map_err(|e| e.to_string())?;
-    let (user, pass) = creds
-        .trim()
-        .split_once(':')
-        .ok_or_else(|| "cookie not user:pass".to_string())?;
-    let rpc = CoreRpc {
-        host: format!("127.0.0.1:{rpcport}"),
-        auth_b64: basic_auth_b64(user, pass),
-    };
-    let deadline = Instant::now() + Duration::from_secs(90);
-    loop {
-        if let Ok(body) = rpc.call("getblockcount", "[]") {
-            if json_result_u64(&body) == Some(0) {
-                break;
-            }
-        }
-        if Instant::now() >= deadline {
-            return Err("bitcoind RPC never reached getblockcount==0".into());
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    let rpc = wait_bitcoind_rpc(cookie, rpcport)?;
     Ok(CoreChild {
         rpc,
         child: std::sync::Mutex::new(child),
@@ -183,6 +246,27 @@ pub fn spawn_bitcoind(bin: &Path, datadir: &Path) -> Result<CoreChild, String> {
 fn free_port() -> Result<u16, String> {
     let l = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     Ok(l.local_addr().map_err(|e| e.to_string())?.port())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn p2p_args_listen_v2_bind_whitelist() {
+        let datadir = Path::new("/tmp/rbtc-v2-session-args");
+        let cookie = datadir.join(".cookie");
+        let args = bitcoind_p2p_args(datadir, 18443, 18444, &cookie);
+        assert!(args.iter().any(|a| a == "-listen=1"));
+        assert!(!args.iter().any(|a| a == "-listen=0"));
+        assert!(args.iter().any(|a| a == "-bind=127.0.0.1:18444"));
+        assert!(args.iter().any(|a| a == "-v2transport=1"));
+        assert!(args.iter().any(|a| a == "-whitelist=127.0.0.1"));
+        assert!(args.iter().any(|a| a == "-connect=0"));
+        assert!(args.iter().any(|a| a == "-dnsseed=0"));
+        assert!(args.iter().any(|a| a == "-listenonion=0"));
+        assert!(args.iter().any(|a| a == "-port=18444"));
+    }
 }
 
 pub fn tmp_dir(prefix: &str) -> PathBuf {

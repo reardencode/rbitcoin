@@ -38,8 +38,15 @@ before 1.0).
 
 - **Q-30 BIP324 `v2_contents` ASan:** nightly libFuzzer feeds post-decrypt
   v2 application contents through `parse_v2_contents` + `try_decode`
-  (`--sanitizer address`, no `bitcoind`). Handshake/ciphertext vs a Core
-  v2 peer is later. Q-30 stays Open.
+  (`--sanitizer address`, no `bitcoind`). Q-30 stays Open.
+
+- **Q-30 BIP324 session vs live Core v2 peer:** nightly `v2_session`
+  completes VERSION/VERACK with official v31.1 `bitcoind` (`-listen=1`
+  `-v2transport=1`), then encrypts fuzzed application contents on that
+  session (`V2PlainSession`). Finding = our crash / ASan / failed
+  handshake; Core dropping TCP on garbage is expected. Not a
+  `submitblock` accept/reject compare. Q-30 stays Open (compact P2P
+  later).
 
 ### Fixed
 
