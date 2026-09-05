@@ -72,6 +72,14 @@ before 1.0).
 
 ### Fixed
 
+- **Nightly Core-oracle uniquify extra txs and `reconsiderblock`:** corpus
+  `tx[1]` still reused one spend txid after coinbase extraNonce, so BIP30
+  filled a 1024-slot OA page (spend probe-exhaust). Every extra tx gets an
+  output-script suffix. `invalidateblock` is sticky: unique fork/cmpct-reorg
+  children then hit `bad-prevblk` (`core not at pad tip`). Stem/side restore
+  `reconsiderblock`s before `submitblock`. Core-oracle jobs drop
+  `RBITCOIN_TX_HEAD_BITS=21` and use tiny 16-bit `tx.head`.
+
 - **Nightly Core-oracle coinbase extraNonce and RPC keep-alive:** same-height
   harness coinbases reused one txid, so rewind+reaccept BIP30-filled one
   1024-slot OA page (`block_spend` / `block_fork` probe-exhaust / `side
