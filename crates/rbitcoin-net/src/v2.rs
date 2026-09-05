@@ -425,6 +425,12 @@ pub fn parse_v2_contents(magic: Magic, contents: &[u8]) -> Result<FramedMessage,
     })
 }
 
+/// Parse BIP324 application contents with regtest magic, then try-decode.
+pub fn parse_v2_regtest(contents: &[u8]) -> Result<(), NetError> {
+    let frame = parse_v2_contents(Magic::from(bitcoin::Network::Regtest), contents)?;
+    frame.try_decode().map(|_| ())
+}
+
 fn map_protocol_error(e: ProtocolError) -> NetError {
     match e {
         // bip324 suggests RetryV1 on many hard closes — including peers that
@@ -852,5 +858,52 @@ mod tests {
             Err(NetError::MessageTooLarge(n)) => assert_eq!(n, too_big),
             other => panic!("expected MessageTooLarge({too_big}), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn truncated_v2_long_command_is_protocol() {
+        assert!(matches!(
+            parse_v2_contents(signet_magic(), &[0u8, b'v', b'e']),
+            Err(NetError::Protocol("truncated v2 long command"))
+        ));
+    }
+
+    fn v2_fixture_path(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name)
+    }
+
+    #[test]
+    fn v2_ping_fixture_matches_encode() {
+        let expected = encode_v2_contents(NetworkMessage::Ping(0xdead_beef)).unwrap();
+        let path = v2_fixture_path("v2_ping.bin");
+        let raw = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        assert_eq!(raw, expected);
+        parse_v2_regtest(&raw).unwrap();
+    }
+
+    #[test]
+    fn v2_verack_fixture_matches_encode() {
+        let expected = encode_v2_contents(NetworkMessage::Verack).unwrap();
+        let path = v2_fixture_path("v2_verack.bin");
+        let raw = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        assert_eq!(raw, expected);
+        parse_v2_regtest(&raw).unwrap();
+    }
+
+    #[test]
+    fn v2_sendaddrv2_fixture_matches_encode() {
+        let expected = encode_v2_contents(NetworkMessage::SendAddrV2).unwrap();
+        let path = v2_fixture_path("v2_sendaddrv2.bin");
+        let raw = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        assert_eq!(raw, expected);
+        parse_v2_regtest(&raw).unwrap();
+    }
+
+    #[test]
+    fn parse_v2_regtest_rejects_empty_and_unknown_short_id() {
+        assert!(parse_v2_regtest(&[]).is_err());
+        assert!(parse_v2_regtest(&[99u8, 1, b'd']).is_err());
     }
 }

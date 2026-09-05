@@ -255,17 +255,19 @@ New features: add a high-level scenario; remove obsolete lower-level tests in th
 
 ## Core differential
 
-Nightly (not a required PR check) `fuzz.yml` runs four cargo-fuzz targets:
+Nightly (not a required PR check) `fuzz.yml` runs five cargo-fuzz targets:
 
 | Target | What | Oracle |
 |--------|------|--------|
 | `block_wire` | `check_block_wire` (ASan) | none |
+| `v2_contents` | BIP324 `parse_v2_contents` + `try_decode` (ASan) | none |
 | `block_differential` | height-1 `ChainHub::accept_received_block` vs Core `submitblock`, **accept vs reject only** | official **v31.1** `bitcoind` tarball (`scripts/core-functional/fetch-bitcoind.sh`) |
 | `block_spend_differential` | height-101 spend of a mature pad coinbase, same path and oracle | same tarball |
 | `block_fork_differential` | 2-block heavier fork off the pad (sibling of a pad+1 stem), same path and oracle | same tarball |
 
 ```bash
 ./scripts/fuzz-run.sh                           # block_wire (ASan)
+./scripts/fuzz-run.sh v2_contents               # BIP324 contents (ASan)
 ./scripts/fuzz-run.sh block_differential        # fetch bitcoind, --sanitizer none
 ./scripts/fuzz-run.sh block_spend_differential  # 100-block pad, --sanitizer none, -timeout=180
 ./scripts/fuzz-run.sh block_fork_differential   # pad+stem, 2-block fork, --sanitizer none, -timeout=180

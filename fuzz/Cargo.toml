@@ -47,3 +47,10 @@ path = "fuzz_targets/block_fork_differential.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "v2_contents"
+path = "fuzz_targets/v2_contents.rs"
+test = false
+doc = false
+bench = false

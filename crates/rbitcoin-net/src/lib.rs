@@ -66,7 +66,7 @@ pub use service::{magic_for, magic_for_params, NetConfig, P2PHandle, P2PNode};
 pub use tx_relay::{
     ElectrumMempoolItem, MempoolAnnounce, MempoolHub, MempoolPerfSample, QueryUtxoProvider,
 };
-pub use v2::WireBytes;
+pub use v2::{parse_v2_regtest, WireBytes};
 pub use versionbits_warn::{
     active_unknown_bits, unknown_rules_warning, warn_period_threshold, warning_strings,
 };
