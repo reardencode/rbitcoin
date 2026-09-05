@@ -72,6 +72,12 @@ before 1.0).
 
 ### Fixed
 
+- **Nightly fork/cmpct-reorg/spend differential harness:** Core
+  `submitblock` of an equal-work sibling returns `inconclusive` (parked,
+  not tip). Side-submit treated that as fatal (`side submit` on the first
+  corpus item). OA `probe exhausted` on tiny `tx.head` is a harness skip,
+  not `ours=false core=true`.
+
 - **Tip-follow FeeFilter no longer panics on the reactor:** session handshake
   called `min_relay_sat_kvb()`, which took a blocking `inner` read after
   #320's `assert_not_reactor`. The overlay is an atomic; `rebroadcast_unbroadcast`
