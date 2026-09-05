@@ -517,7 +517,7 @@ fn put_spend_batch_pure_write_pwrite(
             continue;
         }
         poke_spent_page(&mut buf, g.off, &g.writes)?;
-        if txs.spent.write_body_abs_pwrite(g.off, &buf).is_err() {
+        if txs.spent.write_body_abs(g.off, &buf).is_err() {
             cold_group_edges(&mut cold, &g.writes);
         }
     }

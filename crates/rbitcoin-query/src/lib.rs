@@ -21,7 +21,9 @@ mod stamp;
 mod tx_precompute;
 mod wave_prevout;
 
-pub use combined_stage::{body_ok_reads, load_creates_once, reset_body_ok_reads, CombinedCreate};
+#[cfg(debug_assertions)]
+pub use combined_stage::{body_ok_reads, reset_body_ok_reads};
+pub use combined_stage::{load_creates_once, CombinedCreate};
 pub use resolved_wire::{BlockQueueWaveIntake, ResolvedWire};
 pub use soft_densify::{
     bq_assign_stop_bytes, soft_assign_restricted, soft_assign_stopped, soft_confirm_window_covered,
@@ -2769,27 +2771,6 @@ mod tests {
         assert_eq!(lp.pin_plan_n, 100);
         assert_eq!(lp.pin_new_n, 9);
         assert_eq!(confirm_load_stats::LastPinPhases::ms(2_000_000), 2);
-
-        // class_c counters are process-global; exercise the APIs without exact
-        // equality (parallel tests may sample/reset between).
-        class_c_phase_stats::STRONG_NS.store(11, AtomicOrdering::Relaxed);
-        class_c_phase_stats::add_sh_part(&class_c_phase_stats::SH_COLLECT_NS, 5);
-        class_c_phase_stats::TIP_NS.store(3, AtomicOrdering::Relaxed);
-        let _ = class_c_phase_stats::sample_and_reset();
-        let _ = class_c_phase_stats::sample_sh_sub_and_reset();
-        let _ = class_c_phase_stats::sample_sh_collect_src_and_reset();
-
-        wave_fill_stats::add_count(&wave_fill_stats::BODY_STORE, 2);
-        wave_fill_stats::add(&wave_fill_stats::BODY_STORE_NS, 9);
-        let _ = wave_fill_stats::sample_store_and_reset();
-
-        // I2 cold range/idx sample path (values race under parallel cargo test).
-        let _ = confirm_load_stats::sample_and_reset();
-        confirm_load_stats::COLD_RANGE_NS.store(1_000_000, AtomicOrdering::Relaxed);
-        confirm_load_stats::COLD_RANGE_N.store(3, AtomicOrdering::Relaxed);
-        confirm_load_stats::COLD_IDX_NS.store(2_000_000, AtomicOrdering::Relaxed);
-        confirm_load_stats::COLD_IDX_N.store(5, AtomicOrdering::Relaxed);
-        let _ = confirm_load_stats::sample_and_reset();
     }
 
     /// Disconnecting a confirmed block must emit an info/warn line (not debug).
@@ -2804,7 +2785,10 @@ mod tests {
         q.connect_block(Height(1), &h1, &[t1]).unwrap();
         assert_eq!(q.tip_height(), Some(Height(1)));
 
+        rbitcoin_log::capture_logs(true);
         q.disconnect_tip().unwrap();
+        let logs = rbitcoin_log::take_logs();
+        rbitcoin_log::capture_logs(false);
         assert_eq!(q.tip_height(), Some(Height(0)));
         let line = format_disconnect_tip_line(1, &hash1, 1);
         assert!(
@@ -2819,6 +2803,11 @@ mod tests {
         assert!(
             line.contains(&hash_disp),
             "disconnect line must name the leaving hash {hash_disp}: {line}"
+        );
+        assert!(
+            logs.iter()
+                .any(|(l, m)| { *l == rbitcoin_log::Level::Warn && m.contains(&line) }),
+            "disconnect_tip must emit the helper line at warn: {logs:?}"
         );
 
         q.disconnect_tip().unwrap();
@@ -4775,9 +4764,6 @@ mod tests {
         q.flush_for_shutdown().unwrap();
         q.flush_header_archive().unwrap();
 
-        // sample sh sub after work.
-        let _ = class_c_phase_stats::sample_sh_sub_and_reset();
-
         let _ = hashes;
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4946,7 +4932,6 @@ mod tests {
         use std::sync::Arc;
 
         let (dir, q) = temp_query("sh-collect-pin");
-        let _ = class_c_phase_stats::sample_sh_collect_src_and_reset();
 
         let script = vec![0x51, 0xaa, 0xbb];
         let expected_sh = script_hash(&script);
@@ -4970,10 +4955,6 @@ mod tests {
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].create_tx_fk, fk);
         assert_eq!(recs[0].scripthash, expected_sh);
-
-        // Process-global SH collect counters race under parallel cargo test;
-        // functional pin path is the gate (records above). Sample only for coverage.
-        let _ = class_c_phase_stats::sample_sh_collect_src_and_reset();
 
         // Without pin and without store row → cold path errors (NotFound).
         let mut recs2 = Vec::new();

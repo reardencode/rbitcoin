@@ -7,35 +7,52 @@ use crate::scripthash::ScriptHashTable;
 use crate::spender_table::SpenderTable;
 use crate::tx_table::{InputRecord, OutputRecord, TxRecord, TxTable};
 use rbitcoin_primitives::{schema_file_openable, Fk, Height, SCHEMA_VERSION, STORE_MAGIC};
-use std::cell::RefCell;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-thread_local! {
-    static TX_FULL_GETS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
-    static TXID_GET_MANY: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+#[cfg(debug_assertions)]
+mod io_spies {
+    use std::cell::RefCell;
+    thread_local! {
+        static TX_FULL_GETS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+        static TXID_GET_MANY: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub fn reset_tx_full_gets() {
+        TX_FULL_GETS.with(|c| c.borrow_mut().clear());
+    }
+
+    pub fn tx_full_gets() -> Vec<u64> {
+        TX_FULL_GETS.with(|c| c.borrow().clone())
+    }
+
+    pub fn reset_txid_get_many() {
+        TXID_GET_MANY.with(|c| c.borrow_mut().clear());
+    }
+
+    pub fn txid_get_many_fks() -> Vec<u64> {
+        TXID_GET_MANY.with(|c| c.borrow().clone())
+    }
+
+    pub fn note_tx_full(id: u64) {
+        TX_FULL_GETS.with(|c| c.borrow_mut().push(id));
+    }
+
+    pub fn note_txid_get_many(fks: &[rbitcoin_primitives::Fk]) {
+        TXID_GET_MANY.with(|c| {
+            let mut log = c.borrow_mut();
+            for fk in fks {
+                if let Some(id) = fk.get() {
+                    log.push(id);
+                }
+            }
+        });
+    }
 }
 
-/// Clear this-thread `get_tx_full` fk log (tests).
-pub fn reset_tx_full_gets() {
-    TX_FULL_GETS.with(|c| c.borrow_mut().clear());
-}
-
-/// Fks that called `get_tx_full` on this thread since the last reset (tests).
-pub fn tx_full_gets() -> Vec<u64> {
-    TX_FULL_GETS.with(|c| c.borrow().clone())
-}
-
-/// Clear this-thread `txids_get_many` fk log (tests).
-pub fn reset_txid_get_many() {
-    TXID_GET_MANY.with(|c| c.borrow_mut().clear());
-}
-
-/// Create fks passed to `txids_get_many` on this thread since the last reset (tests).
-pub fn txid_get_many_fks() -> Vec<u64> {
-    TXID_GET_MANY.with(|c| c.borrow().clone())
-}
+#[cfg(debug_assertions)]
+pub use io_spies::{reset_tx_full_gets, reset_txid_get_many, tx_full_gets, txid_get_many_fks};
 
 /// Sidecar in the hot `{datadir}/store`: `inwit.body` / `inwit.idx/` live under
 /// `{datadir-cold}/store`. Presence-only (path always comes from the operator).
@@ -560,8 +577,9 @@ impl Store {
         &self,
         fk: Fk,
     ) -> Result<(TxRecord, Vec<InputRecord>, Vec<OutputRecord>), StoreError> {
+        #[cfg(debug_assertions)]
         if let Some(id) = fk.get() {
-            TX_FULL_GETS.with(|c| c.borrow_mut().push(id));
+            io_spies::note_tx_full(id);
         }
         self.txs.get_full(fk)
     }
@@ -585,14 +603,8 @@ impl Store {
 
     /// Page-grouped `txid.body` identity for scattered create fks.
     pub fn txids_get_many(&self, fks: &[Fk]) -> Result<Vec<Option<[u8; 32]>>, StoreError> {
-        TXID_GET_MANY.with(|c| {
-            let mut log = c.borrow_mut();
-            for fk in fks {
-                if let Some(id) = fk.get() {
-                    log.push(id);
-                }
-            }
-        });
+        #[cfg(debug_assertions)]
+        io_spies::note_txid_get_many(fks);
         self.txs.txid_sidefile().get_many(fks)
     }
 

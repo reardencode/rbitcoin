@@ -24,8 +24,8 @@ use super::peer_io::{ibd_mono_ms, PeerCmd, PeerSlot};
 use super::state::{self, IbdWorkState};
 use super::status::LoopStats;
 use super::{
-    IbdConfig, CONTIG_DENSIFY_AHEAD, FAR_SCAN_BUDGET, PENDING_STALE, TIP_HOLE_IMMEDIATE_PEERS,
-    TIP_HOLE_MAX, TIP_HOLE_MAX_PEERS, TIP_HOLE_THIRD_PEER_AFTER,
+    IbdConfig, CONTIG_DENSIFY_AHEAD, FAR_SCAN_BUDGET, PENDING_STALE, TIP_HOLE_MAX,
+    TIP_HOLE_MAX_PEERS,
 };
 use crate::chain::ChainHub;
 use bitcoin::BlockHash;
@@ -525,29 +525,6 @@ pub(crate) fn contiguous_tip_holes(
     holes
 }
 
-/// Desired concurrent getdata peers for a tip-hole / park-race hash.
-pub(crate) fn tip_hole_peer_target(
-    already: usize,
-    second_peer_at: Option<Instant>,
-    now: Instant,
-) -> usize {
-    if already >= TIP_HOLE_MAX_PEERS {
-        return TIP_HOLE_MAX_PEERS;
-    }
-    if already >= TIP_HOLE_IMMEDIATE_PEERS {
-        let ready_for_third = second_peer_at
-            .map(|t| now.duration_since(t) >= TIP_HOLE_THIRD_PEER_AFTER)
-            .unwrap_or(false);
-        if ready_for_third {
-            TIP_HOLE_MAX_PEERS
-        } else {
-            TIP_HOLE_IMMEDIATE_PEERS
-        }
-    } else {
-        TIP_HOLE_IMMEDIATE_PEERS
-    }
-}
-
 /// Demote zombie `pending` (flag set, no **matching** body-queue wire) so getdata
 /// can re-issue.
 ///
@@ -819,7 +796,6 @@ pub(crate) fn cover_tip_holes(
         return 0;
     }
     let mut issued = 0u64;
-    let now = Instant::now();
 
     for &h in holes {
         if st.reorg.is_awaiting_held_tip(&h) {
@@ -843,12 +819,8 @@ pub(crate) fn cover_tip_holes(
                 avoid.insert(pid);
             }
         }
-        let (already, second_at) = st
-            .inflight
-            .get(&h)
-            .map(|e| (e.len(), e.second_peer_at))
-            .unwrap_or((0, None));
-        let want = tip_hole_peer_target(already, second_at, now);
+        let already = st.inflight.get(&h).map(|e| e.len()).unwrap_or(0);
+        let want = TIP_HOLE_MAX_PEERS;
         if already >= want {
             continue;
         }

@@ -5,14 +5,6 @@ use crate::U64Map;
 use std::time::Instant;
 
 impl Query {
-    /// Body for wire rebuild / RPC via `tx.idx`.
-    fn load_body_for_wire(
-        &self,
-        fk: Fk,
-    ) -> Result<(TxRecord, Vec<OutputRecord>, Vec<InputRecord>), QueryError> {
-        self.load_body_from_store(fk)
-    }
-
     fn load_body_from_store(
         &self,
         fk: Fk,
@@ -122,7 +114,7 @@ impl Query {
 
     /// Reconstruct a consensus `Transaction` from Class A rows (no stored raw).
     pub fn reconstruct_tx(&self, tx_fk: Fk) -> Result<Transaction, QueryError> {
-        let (rec, stored_outputs, mut stored_inputs) = self.load_body_for_wire(tx_fk)?;
+        let (rec, stored_outputs, mut stored_inputs) = self.load_body_from_store(tx_fk)?;
         let mut cache = U64Map::default();
         self.fill_input_prev_txids_cached(&mut stored_inputs, &mut cache)?;
         Ok(Self::transaction_from_class_a(
@@ -263,7 +255,7 @@ impl Query {
         }
         let mut rows = Vec::with_capacity(tx_fks.len());
         for &fk in tx_fks {
-            let (rec_tx, stored_outputs, mut stored_inputs) = self.load_body_for_wire(fk)?;
+            let (rec_tx, stored_outputs, mut stored_inputs) = self.load_body_from_store(fk)?;
             self.fill_input_prev_txids_cached(&mut stored_inputs, &mut prev_txid_cache)?;
             rows.push((rec_tx, stored_inputs, stored_outputs));
         }

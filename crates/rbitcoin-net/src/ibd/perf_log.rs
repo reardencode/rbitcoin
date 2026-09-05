@@ -2373,8 +2373,8 @@ mod tests {
         assert!(!line.contains("pin_res="), "{line}");
     }
 
-    /// Drive the remaining format_* optional branches (stamp_sub, head_loc,
-    /// lookup_sub, plan_batch head_rd / dens) so LCOV hits those arms.
+    /// Optional stamp_sub / head_loc / lookup_sub / plan_batch tokens on the
+    /// shipped `log_sample` DEBUG lines.
     #[test]
     fn format_info_and_debug_optional_subblocks() {
         let mut s = IbdPerfSample::default();
@@ -2449,7 +2449,20 @@ mod tests {
         s.stamp_struct_ms = 8;
         s.stamp_struct_txid_ms = 6;
         s.stamp_struct_walk_ms = 2;
-        let info = format_info(&s);
+        rbitcoin_log::init(Level::Debug);
+        rbitcoin_log::capture_logs(true);
+        log_sample(&s);
+        let logs = rbitcoin_log::take_logs();
+        let info = logs
+            .iter()
+            .find(|(_, m)| m.starts_with("ibd: perf "))
+            .map(|(_, m)| m.as_str())
+            .unwrap_or("");
+        let dbg = logs
+            .iter()
+            .find(|(_, m)| m.starts_with("ibd: perf_dbg "))
+            .map(|(_, m)| m.as_str())
+            .unwrap_or("");
         assert!(info.contains("stamp_sub("), "{info}");
         assert!(info.contains("struct_txid=6ms"), "{info}");
         assert!(info.contains("struct_walk=2ms"), "{info}");
@@ -2471,7 +2484,6 @@ mod tests {
             ),
             "{info}"
         );
-        let dbg = format_debug(&s);
         assert!(dbg.contains("plan_batch "), "{dbg}");
         assert!(dbg.contains("pin_txid=15/25"), "{dbg}");
         assert!(dbg.contains("us/pin_txid=133"), "{dbg}");
@@ -2488,13 +2500,20 @@ mod tests {
         s.arch_resolve_blocks = 0;
         s.arch_prep_head_keys = 0;
         s.arch_prep_age_hit_compact.clear();
-        let dbg2 = format_debug(&s);
+        log_sample(&s);
+        let logs2 = rbitcoin_log::take_logs();
+        let dbg2 = logs2
+            .iter()
+            .find(|(_, m)| m.starts_with("ibd: perf_dbg "))
+            .map(|(_, m)| m.as_str())
+            .unwrap_or("");
         assert!(dbg2.contains("plan_batch "), "{dbg2}");
-        // Empty compact string uses the 0:0:… default when head_rd runs with hit_n.
         s.arch_prep_probe_ms = 1;
-        s.arch_prep_head_keys = 0; // still enter outer if, but avg_* zero arms
-        let _ = format_debug(&s);
-        // read_proc_rss residual file_kb path exercised on Linux.
+        s.arch_prep_head_keys = 0;
+        log_sample(&s);
+        let _ = rbitcoin_log::take_logs();
+        rbitcoin_log::capture_logs(false);
+        rbitcoin_log::init(Level::Info);
         let rss = read_proc_rss();
         assert!(rss.rss_kb > 0 || cfg!(not(target_os = "linux")));
     }

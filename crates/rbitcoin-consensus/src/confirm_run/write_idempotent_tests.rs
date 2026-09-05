@@ -154,12 +154,6 @@ fn three_stage_write_filter_and_scripts_surface() {
     assert!(write_height_needed(None, 0));
     assert!(write_height_needed(None, 1));
 
-    // Load / scripts / write are separate public surfaces for IBD.
-    let _m = super::confirm_wire_load_phase;
-    let _s = super::confirm_scripts_phase;
-    let _w = super::confirm_write_phase;
-    let _sync = super::confirm_wire_run;
-
     use super::{confirm_scripts_phase, LoadedBatch, ScriptPreverified};
     let batch = LoadedBatch {
         prepared: Vec::new(),

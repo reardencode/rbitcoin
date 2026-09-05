@@ -356,11 +356,6 @@ impl VarTable {
         self.write_body_blob_bulk(abs_offset, data)
     }
 
-    /// Alias of [`Self::write_body_abs`] (historical name).
-    pub fn write_body_abs_pwrite(&self, abs_offset: u64, data: &[u8]) -> Result<(), StoreError> {
-        self.write_body_abs(abs_offset, data)
-    }
-
     /// Class A body payload write via bulk `WriteOp`. Falls back to plain pwrite
     /// when uring is unavailable.
     pub(crate) fn write_body_blob_bulk(
