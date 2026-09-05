@@ -379,6 +379,10 @@ mod tests {
     /// Serialize FORCE_REBUILD env mutations (parallel tests share process env).
     static FORCE_ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    fn lock_force_env() -> std::sync::MutexGuard<'static, ()> {
+        FORCE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn leftover_run_rec(sh0: u8, fk: u64) -> Vec<u8> {
         let mut rec = [0u8; 40];
         rec[..32].fill(sh0);
@@ -467,6 +471,7 @@ mod tests {
 
     #[test]
     fn direct_shindex_does_not_collect_runs_until_finalize() {
+        let _g = lock_force_env();
         let n = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -497,6 +502,7 @@ mod tests {
 
     #[test]
     fn finalize_sh_runs_durable_head_missing_hwm_keeps_seal() {
+        let _g = lock_force_env();
         let n = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -543,6 +549,7 @@ mod tests {
 
     #[test]
     fn finalize_sh_runs_empty_head_leftover_seal_is_wiped() {
+        let _g = lock_force_env();
         let n = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -576,7 +583,7 @@ mod tests {
 
     #[test]
     fn force_rebuild_recollects_class_a_not_empty_materialize() {
-        let _g = FORCE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_force_env();
         let n = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -608,6 +615,7 @@ mod tests {
 
     #[test]
     fn unsorted_shards_finalize_skips_catalog_runs() {
+        let _g = lock_force_env();
         let n = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -646,6 +654,7 @@ mod tests {
 
     #[test]
     fn scenario_direct_enter_does_not_collect() {
+        let _g = lock_force_env();
         let n = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -668,6 +677,7 @@ mod tests {
 
     #[test]
     fn scenario_fresh_ibd_tip_materialize() {
+        let _g = lock_force_env();
         let n = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -695,6 +705,7 @@ mod tests {
 
     #[test]
     fn tip_ready_after_materialize_skips_collect_and_finalize() {
+        let _g = lock_force_env();
         let n = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -731,6 +742,7 @@ mod tests {
 
     #[test]
     fn durable_head_hwm_lag_discards_leftover_run() {
+        let _g = lock_force_env();
         let n = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -798,6 +810,7 @@ mod tests {
 
     #[test]
     fn tip_mode_connect_advances_sh_watermarks() {
+        let _g = lock_force_env();
         let n = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -845,6 +858,7 @@ mod tests {
 
     #[test]
     fn include_hwm_covers_tip_without_seal_match() {
+        let _g = lock_force_env();
         let n = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -881,6 +895,7 @@ mod tests {
 
     #[test]
     fn finalize_sh_appends_unsorted_when_done_lags_before_any_shard() {
+        let _g = lock_force_env();
         let n = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -915,6 +930,7 @@ mod tests {
 
     #[test]
     fn finalize_sh_backfills_class_a_tail_when_shards_already_sealed() {
+        let _g = lock_force_env();
         let n = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
