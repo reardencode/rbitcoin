@@ -21,6 +21,11 @@ before 1.0).
 
 ### Fixed
 
+- **Mempool/script-verify fuzz no longer treats Core `max feerate exceeded`
+  as a consensus split:** v31.1 `testmempoolaccept` defaults to 0.10 BTC/kvB
+  (`max feerate`, not `max-fee`). Skip that policy reason and pass
+  `maxfeerate=0` so the oracle compares consensus.
+
 - **Tip-follow `getdata` that a peer never answers is retried:** inflight
   hashes sat in `requested` / `asked_blocks` with no timeout, so a serve-cap
   skip (or compact miss) stalled catch-up for the rest of the session.
