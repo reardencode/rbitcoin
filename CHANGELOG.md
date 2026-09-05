@@ -40,6 +40,10 @@ before 1.0).
   (not per-tx `get_tx_full`), off the session reactor. Host probe:
   `scripts/ibd-serve-bench.py`.
 
+- **Core functional `run` 66 → 67:** unmodified `p2p_leak` (no pre-verack
+  pong, VERSION `addrFrom` 0.0.0.0:0, sendaddrv2/wtxidrelay only for
+  nVersion ≥70016, obsolete version 31799 disconnect).
+
 - **Core functional `run` 65 → 66:** unmodified `p2p_timeouts` (mocktime
   VERSION/VERACK timeout, `-peertimeout=3`, ping-before-handshake logs).
 
