@@ -255,7 +255,7 @@ New features: add a high-level scenario; remove obsolete lower-level tests in th
 
 ## Core differential
 
-Nightly (not a required PR check) `fuzz.yml` runs eight cargo-fuzz targets:
+Nightly (not a required PR check) `fuzz.yml` runs nine cargo-fuzz targets:
 
 | Target | What | Oracle |
 |--------|------|--------|
@@ -267,6 +267,7 @@ Nightly (not a required PR check) `fuzz.yml` runs eight cargo-fuzz targets:
 | `block_spend_differential` | height-101 spend of a mature pad coinbase, same path and oracle | same tarball |
 | `script_differential` | height-101 same-block spend whose **executed scriptPubKey** is fuzzer-owned, same path and oracle | same tarball |
 | `block_fork_differential` | 2-block heavier fork off the pad (sibling of a pad+1 stem), same path and oracle | same tarball |
+| `cmpct_reorg_differential` | same fork child, but hub delivers **child then parent** through `drain_pending` (014/020); Core `submitblock`s parent then child. Accept vs reject of C / final tip | same tarball |
 
 ```bash
 ./scripts/fuzz-run.sh                           # block_wire (ASan)
@@ -277,6 +278,7 @@ Nightly (not a required PR check) `fuzz.yml` runs eight cargo-fuzz targets:
 ./scripts/fuzz-run.sh block_spend_differential  # 100-block pad, --sanitizer none, -timeout=180
 ./scripts/fuzz-run.sh script_differential       # mutate executed scriptPubKey, --sanitizer none, -timeout=180
 ./scripts/fuzz-run.sh block_fork_differential   # pad+stem, 2-block fork, --sanitizer none, -timeout=180
+./scripts/fuzz-run.sh cmpct_reorg_differential  # child-first drain_pending vs Core, --sanitizer none, -timeout=180
 ```
 
 `block_differential` prepares every candidate on **regtest genesis** (`prev`
@@ -309,6 +311,13 @@ compare `submitblock` verdicts.
 Core `getblocktxn`. Seed is a 2-tx compact (coinbase prefilled, one short-id
 → missing `[1]`). Disagreement panics. It does not compare accept/reject
 and does not drive a two-node reorg.
+
+`cmpct_reorg_differential` uses the same pad+stem and fork child as
+`block_fork_differential`, but the hub never `accept_received_block`s B or C.
+C then B enter `pending` and one `drain_pending` (child first); Core
+`submitblock`s B then C. ours Accept iff hub tip is C. After a compared
+verdict, both sides rewind to the pad and restore the stem. Not a live Core
+HB `cmpctblock` announce.
 
 Default `cargo test` does **not** download Core, bind RPC/P2P, or compile `fuzz/`.
 The official tarball is glibc; GitHub Actions `ubuntu-latest` runs it. A NixOS

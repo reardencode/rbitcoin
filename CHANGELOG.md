@@ -59,6 +59,12 @@ before 1.0).
   bytes. Accept vs reject only. JSON corpora stay static. Q-30 stays Open
   (two-node compact reorg later).
 
+- **Q-30 compact reorg via `drain_pending` vs Core:** nightly
+  `cmpct_reorg_differential` mines the same pad+stem fork as
+  `block_fork_differential`, but the hub inserts child then parent into
+  pending and drains once (014/020). Core `submitblock`s parent then child.
+  Accept vs reject of C / final tip only. **Q-30 Completed.**
+
 ### Fixed
 
 - **Tip-follow FeeFilter no longer panics on the reactor:** session handshake
