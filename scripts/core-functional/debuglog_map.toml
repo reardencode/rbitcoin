@@ -91,6 +91,10 @@ match = 'received: addr'
 emit = ['received: addr']
 
 [[rule]]
+match = 'received: tx'
+emit = ['received: tx']
+
+[[rule]]
 match = 'transaction sent in violation of protocol, disconnecting peer=(\d+)'
 emit = ['transaction sent in violation of protocol, disconnecting peer={1}']
 

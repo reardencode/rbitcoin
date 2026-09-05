@@ -29,6 +29,10 @@ run "p2p dial maps to Core trying v1 needle" \
   "2026-01-01T00:00:00Z DEBUG p2p: trying connection (outbound-full-relay) to 25.0.0.1:8333" \
   "trying v1 connection (outbound-full-relay) to 25.0.0.1:8333"
 
+run "received tx TRACE maps to Core needle" \
+  "2026-01-01T00:00:00Z TRACE received: tx" \
+  "received: tx"
+
 run "unmapped is empty" \
   "2026-01-01T00:00:00Z INFO something else" \
   ""

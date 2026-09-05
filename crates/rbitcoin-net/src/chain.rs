@@ -2087,6 +2087,11 @@ pub fn received_getdata_wtx_log(wtxid: impl std::fmt::Display, peer: u64) -> Str
     format!("received getdata for: wtx {wtxid} peer={peer}")
 }
 
+/// Core `p2p_ibd_txrelay.py` debug.log needle. Emit at **trace**.
+pub fn received_tx_log() -> &'static str {
+    "received: tx"
+}
+
 pub fn log_update_tip(height: u32, hash: &BlockHash, header: &Header, n_tx: usize) {
     let time = header.time;
     let ver = header.version.to_consensus();
@@ -2438,6 +2443,7 @@ mod tests {
             received_getdata_wtx_log("aabbccdd", 3),
             "received getdata for: wtx aabbccdd peer=3"
         );
+        assert_eq!(received_tx_log(), "received: tx");
         // Test formula: now=1_000_000, genesis=0 → variable = ceil(1e6/6e5)=2.
         assert_eq!(
             headers_download_timeout_secs(1_000_000, 0),
