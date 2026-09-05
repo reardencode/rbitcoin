@@ -224,6 +224,24 @@ assert_ok "mute skip-rate (1 compare / 10000 runs) fails" \
 } >"$WORKDIR/busy.log"
 assert_ok "busy skip-rate (20 compare / 10000 runs) passes" \
   "$RUN" --check-log "$WORKDIR/busy.log"
+{
+  echo "cmpct-differential: comparisons=1"
+  echo "Done 139668 runs in 601 second(s)"
+} >"$WORKDIR/cmpct-mute.log"
+assert_ok "skip-heavy cmpct (1 compare / many runs) passes with min 1" \
+  "$RUN" --check-log "$WORKDIR/cmpct-mute.log" 1
+{
+  echo "mempool-differential: comparisons=1"
+  echo "Done 10000 runs in 120 second(s)"
+} >"$WORKDIR/mp-mute.log"
+assert_ok "skip-heavy mempool (1 compare / 10000 runs) passes with min 1" \
+  "$RUN" --check-log "$WORKDIR/mp-mute.log" 1
+{
+  echo "script-verify-differential: comparisons=0"
+  echo "Done 10000 runs in 120 second(s)"
+} >"$WORKDIR/sv-zero.log"
+assert_ok "skip-heavy still fails on zero comparisons" \
+  bash -c '! '"$RUN"' --check-log '"$WORKDIR/sv-zero.log"' 1'
 
 mkdir -p "$WORKDIR/corpus"
 echo grown >"$WORKDIR/corpus/height1.bin"

@@ -268,6 +268,8 @@ Nightly (not a required PR check) `fuzz.yml` runs nine cargo-fuzz targets:
 | `script_differential` | height-101 same-block spend whose **executed scriptPubKey** is fuzzer-owned, same path and oracle | same tarball |
 | `block_fork_differential` | 2-block heavier fork off the pad (sibling of a pad+1 stem), same path and oracle | same tarball |
 | `cmpct_reorg_differential` | same fork child, but hub delivers **child then parent** through `drain_pending` (014/020); Core `submitblock`s parent then child. Accept vs reject of C / final tip | same tarball |
+| `mempool_differential` | `MempoolHub::test_accept` vs Core `testmempoolaccept`. **Consensus-class only** — Core standardness / fee / RBF / dust is skip (COMPAT) | same tarball, `-acceptnonstdtxn=1` |
+| `script_verify_differential` | `verify_tx_scripts_detached` vs Core `testmempoolaccept` of the parent+spend package. Same policy skip | same tarball, `-acceptnonstdtxn=1` |
 
 ```bash
 ./scripts/fuzz-run.sh                           # block_wire (ASan)
@@ -279,6 +281,8 @@ Nightly (not a required PR check) `fuzz.yml` runs nine cargo-fuzz targets:
 ./scripts/fuzz-run.sh script_differential       # mutate executed scriptPubKey, --sanitizer none, -timeout=180
 ./scripts/fuzz-run.sh block_fork_differential   # pad+stem, 2-block fork, --sanitizer none, -timeout=180
 ./scripts/fuzz-run.sh cmpct_reorg_differential  # child-first drain_pending vs Core, --sanitizer none, -timeout=180
+./scripts/fuzz-run.sh mempool_differential      # test_accept vs testmempoolaccept, --sanitizer none
+./scripts/fuzz-run.sh script_verify_differential # detached scripts vs testmempoolaccept package
 ```
 
 `block_differential` prepares every candidate on **regtest genesis** (`prev`
@@ -318,6 +322,20 @@ C then B enter `pending` and one `drain_pending` (child first); Core
 `submitblock`s B then C. ours Accept iff hub tip is C. After a compared
 verdict, both sides rewind to the pad and restore the stem. Not a live Core
 HB `cmpctblock` announce.
+
+`mempool_differential` and `script_verify_differential` use Core
+`testmempoolaccept`. Libre vs Core **policy** is skip (COMPAT), including
+`scriptpubkey` / `nonstandard` / non-mandatory script flags.
+`mandatory-script-verify-flag-failed` is consensus and is compared.
+RPC-only `bitcoind` is spawned with `-acceptnonstdtxn=1` (v31.1 regtest
+requires standardness by default) so the OP_TRUE pad spend compares
+consensus instead of bouncing at `IsStandardTx`.
+
+Skip-rate gate: `submitblock` diffs fail when `Done N runs` (N≥1000) and
+comparisons < 10. Skip-heavy jobs (`cmpct_differential`,
+`mempool_differential`, `script_verify_differential`) require ≥1
+comparison (seed proves the oracle); mutations that destroy wire or stay
+policy-skip are expected.
 
 ## P2P serve bench (host only)
 

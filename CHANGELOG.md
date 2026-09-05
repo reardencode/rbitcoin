@@ -86,6 +86,13 @@ before 1.0).
 
 ### Fixed
 
+- **Mempool/script-verify diffs skip Core standardness:** `scriptpubkey`,
+  `nonstandard`, and non-mandatory script flags join fee/dust/RBF as
+  COMPAT skip (not a consensus finding). RPC-only fuzz `bitcoind` uses
+  `-acceptnonstdtxn=1` so OP_TRUE pad spends compare consensus. Skip-heavy
+  jobs (`cmpct_differential`, mempool, script-verify) require ≥1
+  comparison when runs ≥1000, not 10.
+
 - **Weekly ~1h fuzz + compounding corpus cache:** `fuzz.yml` runs Sunday
   07:17 UTC with `-max_total_time=3600` (nightly stays 600s). Per-job
   corpus cache restore/save and crasher artifacts. New target jobs
@@ -125,7 +132,8 @@ before 1.0).
   into an existing corpus (does not overwrite grown inputs), prints and
   passes libFuzzer `-seed`, copies `fuzz/artifacts` into `fuzz/crashers`
   on failure, and fails Core-oracle jobs whose skip-rate is mute
-  (`Done N runs` with N≥1000 and fewer than 10 comparisons).
+  (`Done N runs` with N≥1000 and fewer than 10 comparisons; skip-heavy
+  cmpct/mempool/script-verify jobs need ≥1).
 
 - **Inbound `tx` log is TRACE:** default INFO stays `ibd: progress`
   (Q-36). `p2p_ibd_txrelay.py` still matches `received: tx` because

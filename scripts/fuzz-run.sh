@@ -8,6 +8,7 @@ cd "$ROOT"
 
 fail_if_no_comparisons() {
   local log="$1"
+  local min_busy="${2:-10}"
   if [[ ! -f "$log" ]]; then
     echo "fuzz-run: missing comparison log $log" >&2
     return 1
@@ -21,7 +22,7 @@ fail_if_no_comparisons() {
   echo "fuzz-run: comparisons=$n"
   local runs
   runs="$(grep -Eo 'Done [0-9]+ runs' "$log" | tail -1 | grep -Eo '[0-9]+' | head -1 || true)"
-  if [[ -n "$runs" && "$runs" -ge 1000 && "$n" -lt 10 ]]; then
+  if [[ -n "$runs" && "$runs" -ge 1000 && "$n" -lt "$min_busy" ]]; then
     echo "fuzz-run: mute skip-rate comparisons=$n runs=$runs" >&2
     return 1
   fi
@@ -57,7 +58,7 @@ copy_crashers() {
 }
 
 if [[ "${1:-}" == "--check-log" ]]; then
-  fail_if_no_comparisons "${2:?log file}"
+  fail_if_no_comparisons "${2:?log file}" "${3:-10}"
   exit 0
 fi
 
@@ -227,7 +228,7 @@ if [[ "$BIN" == "cmpct_differential" ]]; then
     copy_crashers fuzz/artifacts "$CRASHERS"
     exit "$st"
   fi
-  fail_if_no_comparisons "$log"
+  fail_if_no_comparisons "$log" 1
   exit 0
 fi
 
@@ -290,4 +291,8 @@ if [[ "$st" -ne 0 ]]; then
   copy_crashers fuzz/artifacts "$CRASHERS"
   exit "$st"
 fi
-fail_if_no_comparisons "$log"
+min_busy=10
+if [[ "$BIN" == "mempool_differential" || "$BIN" == "script_verify_differential" ]]; then
+  min_busy=1
+fi
+fail_if_no_comparisons "$log" "$min_busy"

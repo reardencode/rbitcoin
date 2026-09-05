@@ -291,27 +291,34 @@ fn wait_bitcoind_rpc(cookie: PathBuf, rpcport: u16) -> Result<CoreRpc, String> {
     }
 }
 
+/// RPC-only Core (no P2P). `-acceptnonstdtxn=1`: v31.1 regtest requires
+/// standardness by default; mempool/script-verify oracles compare consensus.
+pub fn bitcoind_rpc_args(datadir: &Path, rpcport: u16, p2pport: u16, cookie: &Path) -> Vec<String> {
+    vec![
+        "-regtest".into(),
+        "-server".into(),
+        "-listen=0".into(),
+        "-discover=0".into(),
+        "-dnsseed=0".into(),
+        "-listenonion=0".into(),
+        "-printtoconsole=0".into(),
+        "-acceptnonstdtxn=1".into(),
+        format!("-datadir={}", datadir.display()),
+        "-rpcbind=127.0.0.1".into(),
+        "-rpcallowip=127.0.0.1".into(),
+        format!("-rpcport={rpcport}"),
+        format!("-port={p2pport}"),
+        format!("-rpccookiefile={}", cookie.display()),
+    ]
+}
+
 pub fn spawn_bitcoind(bin: &Path, datadir: &Path) -> Result<CoreChild, String> {
     std::fs::create_dir_all(datadir).map_err(|e| e.to_string())?;
     let rpcport = free_port()?;
     let p2pport = rpcport.saturating_add(1);
     let cookie = datadir.join(".cookie");
     let child = Command::new(bin)
-        .args([
-            "-regtest",
-            "-server",
-            "-listen=0",
-            "-discover=0",
-            "-dnsseed=0",
-            "-listenonion=0",
-            "-printtoconsole=0",
-            &format!("-datadir={}", datadir.display()),
-            "-rpcbind=127.0.0.1",
-            "-rpcallowip=127.0.0.1",
-            &format!("-rpcport={rpcport}"),
-            &format!("-port={p2pport}"),
-            &format!("-rpccookiefile={}", cookie.display()),
-        ])
+        .args(bitcoind_rpc_args(datadir, rpcport, p2pport, &cookie))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -346,6 +353,18 @@ mod tests {
         assert!(args.iter().any(|a| a == "-connect=0"));
         assert!(args.iter().any(|a| a == "-dnsseed=0"));
         assert!(args.iter().any(|a| a == "-listenonion=0"));
+        assert!(args.iter().any(|a| a == "-port=18444"));
+    }
+
+    #[test]
+    fn rpc_args_listen_off_accept_nonstd() {
+        let datadir = Path::new("/tmp/rbtc-rpc-diff-args");
+        let cookie = datadir.join(".cookie");
+        let args = bitcoind_rpc_args(datadir, 18443, 18444, &cookie);
+        assert!(args.iter().any(|a| a == "-listen=0"));
+        assert!(!args.iter().any(|a| a == "-listen=1"));
+        assert!(args.iter().any(|a| a == "-acceptnonstdtxn=1"));
+        assert!(args.iter().any(|a| a == "-regtest"));
         assert!(args.iter().any(|a| a == "-port=18444"));
     }
 
