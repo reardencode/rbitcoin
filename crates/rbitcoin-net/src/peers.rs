@@ -123,6 +123,9 @@ pub struct LivePeer {
     /// Compact hashes whose first `blocktxn` reconstruct already failed
     /// (`p2p_compactblocks` `test_multiple_blocktxn_response`).
     failed_cmpct: Mutex<HashSet<BlockHash>>,
+    /// Heights of blocks we have requested from this peer and not yet received
+    /// (`getpeerinfo.inflight`).
+    inflight: Mutex<Vec<u32>>,
     /// Session writer. RPC/accept flushes tx INVs onto this (`p2p_blocksonly`).
     out_tx: Mutex<Option<mpsc::UnboundedSender<NetworkMessage>>>,
     /// Unix seconds when this session was registered (Core `m_connected`).
@@ -409,6 +412,20 @@ impl LivePeer {
         self.minfeefilter_sat_kvb.store(sat_kvb, Ordering::Relaxed);
     }
 
+    pub fn note_block_inflight(&self, height: u32) {
+        let mut g = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+        if !g.contains(&height) {
+            g.push(height);
+        }
+    }
+
+    pub fn clear_block_inflight(&self, height: u32) {
+        self.inflight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|h| *h != height);
+    }
+
     pub fn minfeefilter_sat_kvb(&self) -> u64 {
         self.minfeefilter_sat_kvb.load(Ordering::Relaxed)
     }
@@ -565,6 +582,11 @@ impl LivePeer {
             last_block: self.last_block.load(Ordering::Relaxed),
             last_transaction: self.last_transaction.load(Ordering::Relaxed),
             minfeefilter_sat_kvb: self.minfeefilter_sat_kvb.load(Ordering::Relaxed),
+            inflight: self
+                .inflight
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
             permissions: {
                 let mut p = Vec::new();
                 if let Some(h) = self.owner.upgrade() {
@@ -638,6 +660,8 @@ pub struct PeerInfo {
     pub minfeefilter_sat_kvb: u64,
     /// Core whitelist permission strings (`relay`, `noban`, …).
     pub permissions: Vec<String>,
+    /// Block heights in flight from this peer (`getpeerinfo.inflight`).
+    pub inflight: Vec<u32>,
 }
 
 /// Thread-safe session table + addnode remembered addrs.
@@ -1071,6 +1095,7 @@ impl PeerHub {
             wire_recv: Mutex::new(None),
             wire_sent: Mutex::new(None),
             failed_cmpct: Mutex::new(HashSet::new()),
+            inflight: Mutex::new(Vec::new()),
             out_tx: Mutex::new(None),
             connected_at: AtomicU64::new(connected_at),
             inv_gen_floor: AtomicU64::new(0),

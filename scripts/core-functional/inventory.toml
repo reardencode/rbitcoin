@@ -702,8 +702,7 @@ analog = "none"
 
 [[test]]
 name = "p2p_mutated_blocks.py"
-status = "skip"
-reason = "core-log"
+status = "run"
 
 [[test]]
 name = "p2p_net_deadlock.py"

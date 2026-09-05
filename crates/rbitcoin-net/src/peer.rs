@@ -2057,6 +2057,11 @@ async fn handle_peer_frame(
         }
         NetworkMessage::Block(block) => {
             let hash = block.block_hash();
+            if !block.check_merkle_root() {
+                rbitcoin_log::info!("Block mutated: bad-txnmrklroot, hashMerkleRoot mismatch");
+                punish_disconnect(ban_score, session);
+                return Ok(());
+            }
             if let Some(s) = session {
                 s.note_block_from_peer(hash);
                 s.note_best_known(hash);
@@ -2072,9 +2077,9 @@ async fn handle_peer_frame(
                     && !hub.knows_header(&prev)
                     && !pending_headers.contains_key(&prev)
                 {
-                    return Err(NetError::Protocol(
-                        "unrequested block with missing parent header",
-                    ));
+                    rbitcoin_log::info!("AcceptBlock FAILED (prev-blk-not-found)");
+                    punish_disconnect(ban_score, session);
+                    return Ok(());
                 }
                 if hub.unrequested_weaker_than_tip(&block.header) {
                     let _ = hub.ensure_header(&block.header);
@@ -2280,6 +2285,18 @@ async fn handle_peer_frame(
                                     version: 2,
                                 },
                             );
+                            if let Some(s) = session {
+                                let h = hub
+                                    .query
+                                    .height_of_hash(&hsi.header.prev_blockhash.to_byte_array())
+                                    .ok()
+                                    .flatten()
+                                    .map(|ht| ht.0.saturating_add(1))
+                                    .unwrap_or_else(|| {
+                                        hub.tip_height().unwrap_or(0).saturating_add(1)
+                                    });
+                                s.note_block_inflight(h);
+                            }
                             queue_out(
                                 out_tx,
                                 NetworkMessage::GetBlockTxn(GetBlockTxn {
@@ -2312,6 +2329,9 @@ async fn handle_peer_frame(
                                 requested_blocks.remove(&hash);
                                 maybe_select_hb_if_relay(hub, session);
                                 if let Some(s) = session {
+                                    if let Some(h) = hub.tip_height() {
+                                        s.clear_block_inflight(h);
+                                    }
                                     if let Some(ph) = s.hub() {
                                         ph.clear_cmpct_fill(hash);
                                     }
