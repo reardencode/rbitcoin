@@ -37,13 +37,11 @@ pub(crate) struct WorkStructureSizes {
 
 /// Outstanding getdata for one block hash (one or more peers).
 ///
-/// Near/far densify use a single peer. Tip-hole hashes race a second peer
-/// immediately and a third only after [`super::TIP_HOLE_THIRD_PEER_AFTER`].
+/// Near/far densify use a single peer. Tip-hole hashes race up to
+/// [`super::TIP_HOLE_MAX_PEERS`] immediately.
 #[derive(Debug, Clone)]
 pub(crate) struct InflightReq {
     pub peers: HashSet<usize>,
-    /// When the second peer was first attached (tip-hole third-peer timer).
-    pub second_peer_at: Option<Instant>,
     /// When this hash first entered global inflight (stale tip-hole re-get).
     pub started_at: Instant,
 }
@@ -52,7 +50,6 @@ impl Default for InflightReq {
     fn default() -> Self {
         Self {
             peers: HashSet::new(),
-            second_peer_at: None,
             started_at: Instant::now(),
         }
     }
@@ -64,7 +61,6 @@ impl InflightReq {
         peers.insert(peer);
         Self {
             peers,
-            second_peer_at: None,
             started_at: Instant::now(),
         }
     }
@@ -79,21 +75,12 @@ impl InflightReq {
 
     /// Returns true if `peer` was newly added.
     pub(crate) fn add_peer(&mut self, peer: usize) -> bool {
-        if !self.peers.insert(peer) {
-            return false;
-        }
-        if self.peers.len() == 2 {
-            self.second_peer_at.get_or_insert_with(Instant::now);
-        }
-        true
+        self.peers.insert(peer)
     }
 
     /// Remove `peer`. Returns true if no peers remain (caller should drop the hash).
     pub(crate) fn remove_peer(&mut self, peer: usize) -> bool {
         self.peers.remove(&peer);
-        if self.peers.len() < 2 {
-            self.second_peer_at = None;
-        }
         self.peers.is_empty()
     }
 }
@@ -101,7 +88,7 @@ impl InflightReq {
 /// Core mutable state for the IBD event loop.
 pub(crate) struct IbdWorkState {
     pub slots: Vec<PeerSlot>,
-    /// Unique hashes with outstanding getdata (1 peer normally; tip-hole races ≤3).
+    /// Unique hashes with outstanding getdata (1 peer normally; tip-hole races ≤4).
     pub inflight: HashMap<BlockHash, InflightReq>,
     /// Chain-order download path after local tip (front ≈ next to confirm).
     pub ordered: VecDeque<BlockHash>,
@@ -338,14 +325,11 @@ mod tests {
         let mut r = InflightReq::new(1);
         assert_eq!(r.len(), 1);
         assert!(r.contains_peer(1));
-        assert!(r.second_peer_at.is_none());
         assert!(r.add_peer(2));
         assert!(!r.add_peer(2)); // already present
         assert_eq!(r.len(), 2);
-        assert!(r.second_peer_at.is_some());
         assert!(!r.remove_peer(1));
         assert_eq!(r.len(), 1);
-        assert!(r.second_peer_at.is_none());
         assert!(r.remove_peer(2));
         assert_eq!(r.len(), 0);
     }
@@ -461,7 +445,6 @@ mod tests {
     fn inflight_default_and_known_headers_hygiene_prune() {
         let d = InflightReq::default();
         assert!(d.peers.is_empty());
-        assert!(d.second_peer_at.is_none());
         // started_at is Instant::now() — just ensure it is in the past/near now.
         assert!(d.started_at.elapsed().as_secs() < 5);
 

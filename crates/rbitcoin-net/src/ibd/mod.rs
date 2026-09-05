@@ -104,10 +104,6 @@ pub(crate) const TIP_HOLE_MAX: usize = 32;
 /// single slow peer cannot pin hole=1 for minutes (mainnet: tip stuck with
 /// hole=1, conf_blks=0, bq growing).
 pub(crate) const TIP_HOLE_MAX_PEERS: usize = 4;
-/// Immediate tip-hole race size — full race up front (no 10s third-peer delay).
-pub(crate) const TIP_HOLE_IMMEDIATE_PEERS: usize = 4;
-/// Kept for API/tests: extra peers beyond immediate (unused when IMMEDIATE==MAX).
-pub(crate) const TIP_HOLE_THIRD_PEER_AFTER: Duration = Duration::from_secs(5);
 /// Cap on IBD dial pool after getaddr learning (seeds + discovered).
 pub(crate) const MAX_PEER_POOL: usize = 256;
 /// Pending (framed, not Class A) longer than this → re-getdata.
@@ -1173,43 +1169,6 @@ mod peer_book_and_config_tests {
         let sess2 = PeerBookSession::new(None, &[sa(9)]);
         assert!(sess2.book().entry(&sa(9)).is_some());
         sess2.flush();
-    }
-}
-
-#[cfg(test)]
-mod tip_hole_race_tests {
-    use super::assign::tip_hole_peer_target;
-    use super::{TIP_HOLE_IMMEDIATE_PEERS, TIP_HOLE_MAX_PEERS};
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn tip_hole_targets_full_race_immediately() {
-        let now = Instant::now();
-        // Full multi-peer race for tip+1 — do not wait 10s while densify fills bq.
-        assert_eq!(tip_hole_peer_target(0, None, now), TIP_HOLE_IMMEDIATE_PEERS);
-        assert_eq!(tip_hole_peer_target(1, None, now), TIP_HOLE_IMMEDIATE_PEERS);
-        assert_eq!(
-            tip_hole_peer_target(TIP_HOLE_IMMEDIATE_PEERS - 1, None, now),
-            TIP_HOLE_IMMEDIATE_PEERS
-        );
-        assert_eq!(TIP_HOLE_IMMEDIATE_PEERS, TIP_HOLE_MAX_PEERS);
-    }
-
-    #[test]
-    fn tip_hole_caps_at_max_peers() {
-        let t0 = Instant::now();
-        assert_eq!(
-            tip_hole_peer_target(TIP_HOLE_MAX_PEERS, Some(t0), t0 + Duration::from_secs(60)),
-            TIP_HOLE_MAX_PEERS
-        );
-        assert_eq!(
-            tip_hole_peer_target(
-                TIP_HOLE_MAX_PEERS + 5,
-                Some(t0),
-                t0 + Duration::from_secs(60)
-            ),
-            TIP_HOLE_MAX_PEERS
-        );
     }
 }
 
