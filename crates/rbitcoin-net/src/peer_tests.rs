@@ -614,6 +614,53 @@ fn minchainwork_getheaders_empty_until_floor() {
 }
 
 #[test]
+fn empty_locator_getheaders_serves_stale_only_with_body() {
+    use bitcoin::p2p::message_blockdata::GetHeadersMessage;
+    use bitcoin::ScriptBuf;
+    use rbitcoin_consensus::mine_regtest_paying;
+
+    let (dir, q) = tmp_store("empty-loc-hdr");
+    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    hub.ensure_genesis().unwrap();
+    hub.generate_to_script(1, ScriptBuf::from_bytes(vec![0x51]), vec![])
+        .expect("height 1");
+    let tip = hub.tip_hash().unwrap();
+    let connected =
+        headers_reply_for_getheaders(&hub, &GetHeadersMessage::new(vec![], tip)).unwrap();
+    assert_eq!(
+        connected.len(),
+        1,
+        "empty locator + connected hashstop must return that header"
+    );
+
+    let t0 = hub.header_of(&tip).unwrap().time;
+    let pending = mine_regtest_paying(tip, t0 + 1, 2, ScriptBuf::from_bytes(vec![0x51]), vec![]);
+    hub.process_submitted_header(&pending.header).unwrap();
+    assert!(!hub.is_connected(&pending.block_hash()));
+    let header_only =
+        headers_reply_for_getheaders(&hub, &GetHeadersMessage::new(vec![], pending.block_hash()))
+            .unwrap();
+    assert!(
+        header_only.is_empty(),
+        "empty locator + header-only hashstop must not return headers"
+    );
+
+    hub.generate_to_script(1, ScriptBuf::from_bytes(vec![0x51]), vec![])
+        .expect("height 2");
+    let stale = hub.tip_hash().unwrap();
+    hub.invalidate_block(stale).unwrap();
+    assert!(!hub.is_connected(&stale));
+    let with_body =
+        headers_reply_for_getheaders(&hub, &GetHeadersMessage::new(vec![], stale)).unwrap();
+    assert_eq!(
+        with_body.len(),
+        1,
+        "empty locator + disconnected hashstop with a body must return that header"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn minchainwork_does_not_getdata_below_floor() {
     use bitcoin::ScriptBuf;
     use rbitcoin_primitives::Height;

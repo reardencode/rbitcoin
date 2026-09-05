@@ -3152,11 +3152,23 @@ pub(crate) fn headers_reply_for_getheaders(
     if gh.locator_hashes.is_empty() {
         let stop = gh.stop_hash;
         if stop.to_byte_array() != [0u8; 32] {
-            if !hub.stale_relay_allowed(&stop) {
-                return Ok(Vec::new());
-            }
-            if let Some(h) = hub.header_of(&stop) {
-                return Ok(vec![h]);
+            if hub.is_connected(&stop) {
+                if let Some(h) = hub.header_of(&stop) {
+                    return Ok(vec![h]);
+                }
+            } else if hub.stale_relay_allowed(&stop) {
+                let have_body = hub.cache.get_block(&stop).is_some()
+                    || hub
+                        .query
+                        .reconstruct_archived_block(&stop.to_byte_array())
+                        .ok()
+                        .flatten()
+                        .is_some();
+                if have_body {
+                    if let Some(h) = hub.header_of(&stop) {
+                        return Ok(vec![h]);
+                    }
+                }
             }
             return Ok(Vec::new());
         }
