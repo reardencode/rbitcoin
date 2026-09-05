@@ -13,37 +13,65 @@ use std::time::{Duration, Instant};
 pub struct CoreRpc {
     host: String,
     auth_b64: String,
+    stream: std::sync::Mutex<Option<TcpStream>>,
 }
 
 impl CoreRpc {
     pub fn call(&self, method: &str, params_json: &str) -> Result<String, String> {
         let req = build_jsonrpc_http_request(&self.host, &self.auth_b64, method, params_json);
-        let mut stream = TcpStream::connect(&self.host).map_err(|e| e.to_string())?;
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .map_err(|e| e.to_string())?;
-        stream.write_all(&req).map_err(|e| e.to_string())?;
-        let _ = stream.shutdown(std::net::Shutdown::Write);
-        let mut buf = Vec::new();
-        let mut tmp = [0u8; 4096];
-        loop {
-            match stream.read(&mut tmp) {
-                Ok(0) => break,
-                Ok(n) => {
-                    buf.extend_from_slice(&tmp[..n]);
-                    if let Ok(body) = split_http_body(&buf) {
-                        if http_body_complete(&buf, body) {
-                            return Ok(String::from_utf8_lossy(body).into_owned());
-                        }
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(e) => return Err(e.to_string()),
+        let mut slot = self.stream.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = slot.as_mut() {
+            match rpc_roundtrip(s, &req) {
+                Ok(body) => return Ok(body),
+                Err(_) => *slot = None,
             }
         }
-        let body = split_http_body(&buf).map_err(|_| "short http")?;
-        Ok(String::from_utf8_lossy(body).into_owned())
+        let mut s = TcpStream::connect(&self.host).map_err(|e| e.to_string())?;
+        s.set_read_timeout(Some(Duration::from_secs(10)))
+            .map_err(|e| e.to_string())?;
+        let _ = s.set_nodelay(true);
+        let body = rpc_roundtrip(&mut s, &req)?;
+        *slot = Some(s);
+        Ok(body)
     }
+}
+
+fn rpc_roundtrip(stream: &mut TcpStream, req: &[u8]) -> Result<String, String> {
+    stream.write_all(req).map_err(|e| e.to_string())?;
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 4096];
+    loop {
+        match stream.read(&mut tmp) {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(body) = rpc_http_body(&buf) {
+                    return Ok(String::from_utf8_lossy(body).into_owned());
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    let body = rpc_http_body(&buf).ok_or("short http")?;
+    Ok(String::from_utf8_lossy(body).into_owned())
+}
+
+fn rpc_http_body(raw: &[u8]) -> Option<&[u8]> {
+    let body = split_http_body(raw).ok()?;
+    if !http_body_complete(raw, body) {
+        return None;
+    }
+    let head_len = raw.len() - body.len();
+    let head = std::str::from_utf8(&raw[..head_len]).ok()?;
+    for line in head.split("\r\n") {
+        let l = line.to_ascii_lowercase();
+        if let Some(v) = l.strip_prefix("content-length:") {
+            let n = v.trim().parse::<usize>().ok()?;
+            return (body.len() >= n).then_some(&body[..n]);
+        }
+    }
+    Some(body)
 }
 
 fn http_body_complete(raw: &[u8], body: &[u8]) -> bool {
@@ -197,6 +225,7 @@ fn wait_bitcoind_rpc(cookie: PathBuf, rpcport: u16) -> Result<CoreRpc, String> {
     let rpc = CoreRpc {
         host: format!("127.0.0.1:{rpcport}"),
         auth_b64: basic_auth_b64(user, pass),
+        stream: std::sync::Mutex::new(None),
     };
     let deadline = Instant::now() + Duration::from_secs(90);
     loop {
@@ -268,6 +297,48 @@ mod tests {
         assert!(args.iter().any(|a| a == "-dnsseed=0"));
         assert!(args.iter().any(|a| a == "-listenonion=0"));
         assert!(args.iter().any(|a| a == "-port=18444"));
+    }
+
+    #[test]
+    fn core_rpc_reuses_one_tcp_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let th = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            for _ in 0..2 {
+                let mut buf = [0u8; 8192];
+                let mut n = 0;
+                loop {
+                    let k = s.read(&mut buf[n..]).expect("read");
+                    assert!(k > 0, "eof before http body");
+                    n += k;
+                    if split_http_body(&buf[..n]).is_ok() {
+                        break;
+                    }
+                }
+                let body = br#"{"result":0,"error":null,"id":1}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                );
+                s.write_all(resp.as_bytes()).unwrap();
+                s.write_all(body).unwrap();
+            }
+        });
+        let rpc = CoreRpc {
+            host: addr.to_string(),
+            auth_b64: basic_auth_b64("u", "p"),
+            stream: std::sync::Mutex::new(None),
+        };
+        assert!(rpc
+            .call("getblockcount", "[]")
+            .unwrap()
+            .contains("\"result\":0"));
+        assert!(rpc
+            .call("getblockcount", "[]")
+            .unwrap()
+            .contains("\"result\":0"));
+        th.join().unwrap();
     }
 }
 
