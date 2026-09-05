@@ -558,7 +558,13 @@ impl ActiveMempool {
 
         check_mempool_structural(tx, &chain_coins, tip)?;
 
-        let output_value: u64 = tx.output.iter().map(|o| o.value.to_sat()).sum();
+        let mut output_value = 0u64;
+        for o in &tx.output {
+            let v = o.value.to_sat();
+            output_value = output_value
+                .checked_add(v)
+                .ok_or(AcceptError::Policy("bad-txns-txouttotal-toolarge"))?;
+        }
         if output_value > input_value {
             return Err(AcceptError::Policy("negative fee"));
         }
@@ -1606,6 +1612,42 @@ mod tests {
                 script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
             }],
         }
+    }
+
+    #[test]
+    fn prepare_admit_output_sum_overflow_is_policy_not_panic() {
+        let dir = tmp_dir();
+        let (op, _, utxos) = chain_utxo(100_000);
+        let half = (u64::MAX / 2) + 2;
+        let tx = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: op,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![
+                TxOut {
+                    value: Amount::from_sat(half),
+                    script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+                },
+                TxOut {
+                    value: Amount::from_sat(half),
+                    script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+                },
+            ],
+        };
+        let mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let err = mp
+            .prepare_admit(&tx, &utxos, TIP_OK, 0, false)
+            .expect_err("overflowing output sum");
+        assert!(
+            matches!(err, AcceptError::Policy("bad-txns-txouttotal-toolarge")),
+            "got {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

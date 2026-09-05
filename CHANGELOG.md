@@ -21,10 +21,22 @@ before 1.0).
 
 ### Fixed
 
+- **Mempool accept no longer panics on overflowing output sums:** fuzzer
+  txs can have `u64` output totals that wrap `.sum()` in debug. Checked add
+  returns `bad-txns-txouttotal-toolarge`.
+
+- **Mempool/script-verify fuzz skips Core `mempool-script-verify-flag-failed`:**
+  v31.1 `PolicyScriptChecks` always runs STANDARD flags and uses that
+  prefix (not `non-mandatory-script-verify-flag-failed`). CLEANSTACK extra
+  items on OP_TRUE/SHA1 spends were reported as consensus splits.
+
+- **`testmempoolaccept` maxfeerate is a high cap, not `0`:** Core treats
+  `0` as `Some(CFeeRate(0))` and rejects any positive fee. Pad spends pay
+  ~1 BTC. Default 0.10 BTC/kvB remains skipped as `max feerate exceeded`.
+
 - **Mempool/script-verify fuzz no longer treats Core `max feerate exceeded`
   as a consensus split:** v31.1 `testmempoolaccept` defaults to 0.10 BTC/kvB
-  (`max feerate`, not `max-fee`). Skip that policy reason and pass
-  `maxfeerate=0` so the oracle compares consensus.
+  (`max feerate`, not `max-fee`). Skip that policy reason.
 
 - **Tip-follow `getdata` that a peer never answers is retried:** inflight
   hashes sat in `requested` / `asked_blocks` with no timeout, so a serve-cap

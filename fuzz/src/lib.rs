@@ -286,15 +286,17 @@ fn wait_bitcoind_rpc(cookie: PathBuf, rpcport: u16) -> Result<CoreRpc, String> {
     }
 }
 
-/// `testmempoolaccept` params: hex array + `maxfeerate=0` (no cap; default
-/// 0.10 BTC/kvB is policy, not consensus).
+/// `testmempoolaccept` params: hex array + a high `maxfeerate` (BTC/kvB).
+///
+/// Default is 0.10. Passing `0` is `Some(CFeeRate(0))` and rejects any
+/// positive fee (`max feerate exceeded`). Pad spends pay ~1 BTC.
 pub fn testmempoolaccept_params(hexs: &[&str]) -> String {
     let inner = hexs
         .iter()
         .map(|h| format!("\"{h}\""))
         .collect::<Vec<_>>()
         .join(",");
-    format!(r#"[[{inner}], 0]"#)
+    format!(r#"[[{inner}], 10000]"#)
 }
 
 /// RPC-only Core (no P2P). `-acceptnonstdtxn=1`: v31.1 regtest requires
@@ -376,10 +378,10 @@ mod tests {
 
     #[test]
     fn testmempoolaccept_params_disable_maxfeerate() {
-        assert_eq!(testmempoolaccept_params(&["ab"]), r#"[["ab"], 0]"#);
+        assert_eq!(testmempoolaccept_params(&["ab"]), r#"[["ab"], 10000]"#);
         assert_eq!(
             testmempoolaccept_params(&["aa", "bb"]),
-            r#"[["aa","bb"], 0]"#
+            r#"[["aa","bb"], 10000]"#
         );
     }
 
