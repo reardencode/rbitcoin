@@ -4605,6 +4605,32 @@ mod tests {
     }
 
     #[test]
+    fn witness_block_bytes_match_reconstruct_serialize() {
+        let (dir, q) = temp_query("witness-wire");
+        let mut prev = Fk::NULL;
+        let mut parent_hash: Option<[u8; 32]> = None;
+        let mut h1_hash = [0u8; 32];
+        for h in 0..2u32 {
+            let (header, ta) = coinbase_block(h, prev, parent_hash);
+            parent_hash = Some(header.hash);
+            let mut txs = vec![ta];
+            if h == 1 {
+                let mut t2 = coinbase_block(h + 100, Fk::NULL, None).1;
+                t2.tx.txid[30] = 0xee;
+                t2.inputs[0].witness = vec![vec![0x51]];
+                txs.push(t2);
+                h1_hash = header.hash;
+            }
+            prev = q.connect_block(Height(h), &header, &txs).unwrap();
+        }
+        let arch = q.reconstruct_archived_block(&h1_hash).unwrap().unwrap();
+        let via_ast = bitcoin::consensus::encode::serialize(&arch);
+        let via_direct = q.witness_block_bytes_by_hash(&h1_hash).unwrap().unwrap();
+        assert_eq!(via_direct, via_ast);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn reconstruct_span_batches_foreign_parent_txids() {
         let (dir, q) = temp_query("reconstruct-parent-batch");
         let (h0, ta0) = coinbase_block(0, Fk::NULL, None);

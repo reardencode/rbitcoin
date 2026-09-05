@@ -243,6 +243,52 @@ impl Query {
         Ok(())
     }
 
+    fn load_class_a_rows(
+        &self,
+        tx_fks: &[Fk],
+    ) -> Result<Vec<(TxRecord, Vec<InputRecord>, Vec<OutputRecord>)>, QueryError> {
+        let mut prev_txid_cache: U64Map<[u8; 32]> = U64Map::default();
+        if let Some((first, last)) = Self::contiguous_fk_run(tx_fks) {
+            let mut rows = self.store.get_tx_full_span(first, last)?;
+            if rows.len() != tx_fks.len() {
+                return Err(StoreError::Corrupt("invariant: span reconstruct length"));
+            }
+            for (i, (rec_tx, stored_inputs, _)) in rows.iter_mut().enumerate() {
+                if let Some(id) = tx_fks[i].get() {
+                    prev_txid_cache.insert(id, rec_tx.txid);
+                }
+                self.fill_input_prev_txids_cached(stored_inputs, &mut prev_txid_cache)?;
+            }
+            return Ok(rows);
+        }
+        let mut rows = Vec::with_capacity(tx_fks.len());
+        for &fk in tx_fks {
+            let (rec_tx, stored_outputs, mut stored_inputs) = self.load_body_for_wire(fk)?;
+            self.fill_input_prev_txids_cached(&mut stored_inputs, &mut prev_txid_cache)?;
+            rows.push((rec_tx, stored_inputs, stored_outputs));
+        }
+        Ok(rows)
+    }
+
+    /// Consensus block payload (header + witness txs) without a `bitcoin::Block` AST.
+    pub fn witness_block_bytes_by_hash(
+        &self,
+        hash: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, QueryError> {
+        let Some((header_fk, rec)) = self.get_header_by_hash(hash)? else {
+            return Ok(None);
+        };
+        let Some(tx_fks) = self.store.header_txs.get_list(header_fk)? else {
+            return Ok(None);
+        };
+        if tx_fks.is_empty() {
+            return Err(StoreError::Corrupt("block has no transactions"));
+        }
+        let header = self.wire_header_from_record_prev(&rec, None)?;
+        let rows = self.load_class_a_rows(&tx_fks)?;
+        Ok(Some(encode_witness_block(&header, &rows)))
+    }
+
     /// Consensus-encoded wire bytes for a stored tx (Electrum / RPC).
     pub fn tx_wire_bytes(&self, tx_fk: Fk) -> Result<Vec<u8>, QueryError> {
         use bitcoin::consensus::Encodable;
@@ -285,34 +331,14 @@ impl Query {
             return Err(StoreError::Corrupt("block has no transactions"));
         }
         let header = self.wire_header_from_record_prev(&rec, prev_hash)?;
-        let mut txdata = Vec::with_capacity(tx_fks.len());
-        let mut prev_txid_cache: U64Map<[u8; 32]> = U64Map::default();
-        if let Some((first, last)) = Self::contiguous_fk_run(&tx_fks) {
-            let rows = self.store.get_tx_full_span(first, last)?;
-            if rows.len() != tx_fks.len() {
-                return Err(StoreError::Corrupt("invariant: span reconstruct length"));
-            }
-            for (i, (rec_tx, mut stored_inputs, stored_outputs)) in rows.into_iter().enumerate() {
-                if let Some(id) = tx_fks[i].get() {
-                    prev_txid_cache.insert(id, rec_tx.txid);
-                }
-                self.fill_input_prev_txids_cached(&mut stored_inputs, &mut prev_txid_cache)?;
-                txdata.push(Self::transaction_from_class_a(
-                    rec_tx,
-                    stored_outputs,
-                    stored_inputs,
-                ));
-            }
-        } else {
-            for fk in tx_fks {
-                let (rec_tx, stored_outputs, mut stored_inputs) = self.load_body_for_wire(fk)?;
-                self.fill_input_prev_txids_cached(&mut stored_inputs, &mut prev_txid_cache)?;
-                txdata.push(Self::transaction_from_class_a(
-                    rec_tx,
-                    stored_outputs,
-                    stored_inputs,
-                ));
-            }
+        let rows = self.load_class_a_rows(&tx_fks)?;
+        let mut txdata = Vec::with_capacity(rows.len());
+        for (rec_tx, stored_inputs, stored_outputs) in rows {
+            txdata.push(Self::transaction_from_class_a(
+                rec_tx,
+                stored_outputs,
+                stored_inputs,
+            ));
         }
         Ok(Block { header, txdata })
     }
@@ -335,4 +361,57 @@ impl Query {
             Some(h) => Ok(Some(self.reconstruct_block_at_height(h)?)),
         }
     }
+}
+
+fn encode_witness_block(
+    header: &BlockHeader,
+    rows: &[(TxRecord, Vec<InputRecord>, Vec<OutputRecord>)],
+) -> Vec<u8> {
+    use bitcoin::consensus::encode::{Encodable, VarInt};
+    let mut out = Vec::new();
+    let _ = header.consensus_encode(&mut out);
+    let _ = VarInt(rows.len() as u64).consensus_encode(&mut out);
+    for (rec, ins, outs) in rows {
+        encode_class_a_tx(&mut out, rec, ins, outs);
+    }
+    out
+}
+
+fn encode_class_a_tx(
+    out: &mut Vec<u8>,
+    rec: &TxRecord,
+    ins: &[InputRecord],
+    outs: &[OutputRecord],
+) {
+    use bitcoin::consensus::encode::{Encodable, VarInt};
+    let _ = rec.version.consensus_encode(&mut *out);
+    let has_wit = ins.iter().any(|i| !i.witness.is_empty());
+    if has_wit {
+        out.push(0);
+        out.push(1);
+    }
+    let _ = VarInt(ins.len() as u64).consensus_encode(&mut *out);
+    for inp in ins {
+        out.extend_from_slice(&inp.prev_txid);
+        let _ = inp.prev_index.consensus_encode(&mut *out);
+        let _ = VarInt(inp.script_sig.len() as u64).consensus_encode(&mut *out);
+        out.extend_from_slice(&inp.script_sig);
+        let _ = inp.sequence.consensus_encode(&mut *out);
+    }
+    let _ = VarInt(outs.len() as u64).consensus_encode(&mut *out);
+    for o in outs {
+        let _ = (o.value as u64).consensus_encode(&mut *out);
+        let _ = VarInt(o.script.len() as u64).consensus_encode(&mut *out);
+        out.extend_from_slice(&o.script);
+    }
+    if has_wit {
+        for inp in ins {
+            let _ = VarInt(inp.witness.len() as u64).consensus_encode(&mut *out);
+            for w in &inp.witness {
+                let _ = VarInt(w.len() as u64).consensus_encode(&mut *out);
+                out.extend_from_slice(w);
+            }
+        }
+    }
+    let _ = rec.locktime.consensus_encode(&mut *out);
 }

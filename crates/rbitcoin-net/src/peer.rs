@@ -3240,10 +3240,19 @@ fn encode_served_witness_block(
     hash: &BlockHash,
 ) -> Result<Option<Vec<u8>>, NetError> {
     crate::reactor::assert_not_reactor("getdata reconstruct");
-    let Some(block) = block_for_peer(cache, query, hash)? else {
-        return Ok(None);
-    };
-    crate::v2::encode_v2_contents(NetworkMessage::Block(block)).map(Some)
+    if let Some(block) = cache.get_block(hash) {
+        return crate::v2::encode_v2_contents(NetworkMessage::Block(block)).map(Some);
+    }
+    match query.witness_block_bytes_by_hash(&hash.to_byte_array()) {
+        Ok(Some(payload)) => {
+            let mut contents = Vec::with_capacity(1 + payload.len());
+            contents.push(2);
+            contents.extend_from_slice(&payload);
+            Ok(Some(contents))
+        }
+        Ok(None) => Ok(None),
+        Err(e) => Err(NetError::Consensus(e.to_string())),
+    }
 }
 
 #[cfg(test)]
