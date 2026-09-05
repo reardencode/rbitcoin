@@ -237,17 +237,17 @@ fn default_op_true_spend(mature: OutPoint, uniq: u32) -> Transaction {
     }
 }
 
-fn next_diff_cb_nonce() -> u32 {
+fn next_diff_cb_uniq() -> u32 {
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
     N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// BIP34 extraNonce. Same-height coinbase txid + new create_fk fills one OA page.
-fn stamp_diff_coinbase(block: &mut Block, nonce: u32) {
-    if nonce == 0 || block.txdata.is_empty() || block.txdata[0].input.is_empty() {
+/// BIP34 extra-nonce. Same-height coinbase txid + new create_fk fills one OA page.
+fn stamp_diff_coinbase(block: &mut Block, uniq: u32) {
+    if uniq == 0 || block.txdata.is_empty() || block.txdata[0].input.is_empty() {
         return;
     }
-    let extra = nonce.to_le_bytes();
+    let extra = uniq.to_le_bytes();
     let ss = block.txdata[0].input[0].script_sig.as_bytes();
     if ss.len() + extra.len() <= 100 {
         let mut v = ss.to_vec();
@@ -274,7 +274,7 @@ fn mine_diff_paying(
     extra_txs: Vec<Transaction>,
 ) -> Block {
     let mut b = mine_regtest_paying(prev, time, height, script_pubkey, extra_txs);
-    stamp_diff_coinbase(&mut b, next_diff_cb_nonce());
+    stamp_diff_coinbase(&mut b, next_diff_cb_uniq());
     remine_diff_header(&mut b);
     b
 }
@@ -574,7 +574,7 @@ pub fn compare_one(
         tip.hash,
         tip.time.saturating_add(REGTEST_BLOCK_SPACING),
     );
-    stamp_diff_coinbase(&mut block, next_diff_cb_nonce());
+    stamp_diff_coinbase(&mut block, next_diff_cb_uniq());
     remine_diff_header(&mut block);
     compare_prepared(hub, tip, oracle, block)
 }
