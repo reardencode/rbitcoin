@@ -243,6 +243,20 @@ pub fn unsupported_before_verack_log(cmd: &str, peer: u64) -> String {
     format!("Unsupported message \"{cmd}\" prior to verack from peer={peer}")
 }
 
+/// Core `MIN_PEER_PROTO_VERSION` (31800).
+pub const MIN_PEER_PROTO_VERSION: i32 = 31800;
+
+pub fn obsolete_version_log(version: i32, peer: u64) -> String {
+    format!("using obsolete version {version}, disconnecting peer={peer}")
+}
+
+pub fn hidden_addr_from() -> Address {
+    Address::new(
+        &SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0),
+        ServiceFlags::NONE,
+    )
+}
+
 pub fn non_version_before_handshake_log(cmd: &str, peer: u64) -> String {
     format!("non-version message before version handshake. Message \"{cmd}\" from peer={peer}")
 }
@@ -626,7 +640,7 @@ async fn application_handshake(
     reader: &mut V2Reader,
     writer: &mut V2Writer,
     magic: Magic,
-    our_addr: SocketAddr,
+    _our_addr: SocketAddr,
     their_addr: SocketAddr,
     start_height: i32,
     inbound: bool,
@@ -644,7 +658,7 @@ async fn application_handshake(
         services,
         timestamp: now,
         receiver: Address::new(&their_addr, ServiceFlags::NONE),
-        sender: Address::new(&our_addr, services),
+        sender: hidden_addr_from(),
         nonce: our_nonce,
         user_agent: user_agent.to_string(),
         start_height,
@@ -684,7 +698,18 @@ async fn application_handshake(
         let cmd = command_label(&frame.command);
         let msg = frame.decode();
         match msg.payload() {
-            NetworkMessage::Version(v) => break v.clone(),
+            NetworkMessage::Version(v) => {
+                if (v.version as i32) < MIN_PEER_PROTO_VERSION {
+                    if let Some(s) = policy.session {
+                        rbitcoin_log::debug!("{}", obsolete_version_log(v.version as i32, s.id));
+                        if let Some(peers) = policy.peers {
+                            let _ = peers.disconnect_id(s.id);
+                        }
+                    }
+                    return Err(NetError::Protocol("obsolete version"));
+                }
+                break v.clone();
+            }
             other => {
                 if matches!(other, NetworkMessage::Verack) {
                     return Err(NetError::Protocol("verack before version"));
@@ -722,13 +747,11 @@ async fn application_handshake(
         }
     }
 
-    // BIP339: wtxidrelay MUST be sent after version and before verack when both
-    // sides speak ≥70016. Late (post-verack) messages are ignored/invalid.
+    // BIP339 / BIP155 feature negotiation starts at 70016 (`p2p_leak` pre-wtxid).
     if their_version.version >= 70016 {
         write_v2_msg(writer, NetworkMessage::WtxidRelay).await?;
+        write_v2_msg(writer, NetworkMessage::SendAddrV2).await?;
     }
-    // BIP155: advertise addrv2 before verack (`p2p_invalid_messages` wait_for_sendaddrv2).
-    write_v2_msg(writer, NetworkMessage::SendAddrV2).await?;
     write_v2_msg(writer, NetworkMessage::Verack).await?;
 
     loop {
@@ -737,11 +760,10 @@ async fn application_handshake(
         let msg = frame.decode();
         match msg.payload() {
             NetworkMessage::Verack => break,
-            NetworkMessage::Ping(n) => {
+            NetworkMessage::Ping(_) => {
                 if let Some(s) = policy.session {
                     rbitcoin_log::debug!("{}", ping_prior_to_verack_log(s.id));
                 }
-                write_v2_msg(writer, NetworkMessage::Pong(*n)).await?;
             }
             _ => {
                 if let Some(s) = policy.session {

@@ -4158,6 +4158,17 @@ fn handshake_disconnect_log_needles() {
         crate::peer::non_version_before_handshake_log("ping", 1),
         "non-version message before version handshake. Message \"ping\" from peer=1"
     );
+    assert_eq!(
+        crate::peer::obsolete_version_log(31799, 5),
+        "using obsolete version 31799, disconnecting peer=5"
+    );
+    assert_eq!(crate::peer::MIN_PEER_PROTO_VERSION, 31800);
+    let hidden = crate::peer::hidden_addr_from();
+    let zero = std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0);
+    assert_eq!(
+        hidden,
+        bitcoin::p2p::address::Address::new(&zero, bitcoin::p2p::ServiceFlags::NONE)
+    );
 }
 
 #[test]
