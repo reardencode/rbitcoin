@@ -144,6 +144,10 @@ echo "fuzz-run: seed=$SEED" >&2
 if [[ "$BIN" == "block_wire" ]]; then
   merge_seed fuzz/corpus/block_wire \
     crates/rbitcoin-consensus/tests/fixtures/signet_block_1.bin
+  merge_seed fuzz/corpus/block_wire \
+    crates/rbitcoin-consensus/tests/fixtures/mainnet_block_290329.bin
+  merge_seed fuzz/corpus/block_wire \
+    crates/rbitcoin-consensus/tests/fixtures/signet_block_90719.bin
   set +e
   env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" block_wire -- \
     -max_total_time="${FUZZ_MAX_TOTAL_TIME:-120}" \
@@ -242,6 +246,10 @@ export RBITCOIN_CORE_BITCOIND="$(./scripts/core-functional/fetch-bitcoind.sh)"
 if [[ "$BIN" == "block_differential" ]]; then
   merge_seed fuzz/corpus/block_differential \
     crates/rbitcoin-consensus/tests/fixtures/regtest_height1.bin height1.bin
+  merge_seed fuzz/corpus/block_differential \
+    crates/rbitcoin-consensus/tests/fixtures/mainnet_block_290329.bin
+  merge_seed fuzz/corpus/block_differential \
+    crates/rbitcoin-consensus/tests/fixtures/signet_block_1.bin
 elif [[ "$BIN" == "block_spend_differential" ]]; then
   merge_seed fuzz/corpus/block_spend_differential \
     crates/rbitcoin-consensus/tests/fixtures/regtest_height101_spend.bin spend.bin

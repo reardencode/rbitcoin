@@ -77,6 +77,11 @@ before 1.0).
 
 ### Fixed
 
+- **Q-31 fuzz seeds:** tiny existing `signet_block_*.bin` and
+  `mainnet_block_290329.bin` merge into `block_wire` / `block_differential`
+  corpora (copy-if-absent, remine onto regtest). Electrum hermetic packs
+  still Open.
+
 - **ASan parser jobs:** `addrv2_wire`, `inv_getdata_wire` (`parse_v2_regtest_named`),
   and `electrum_json` (`parse_electrum_request_line`). Junk must not panic.
   Nightly jobs wait on operator-pushed `fuzz.yml`.

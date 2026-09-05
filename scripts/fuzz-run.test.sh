@@ -235,6 +235,17 @@ assert_ok "merge does not overwrite grown corpus" \
 assert_ok "merge copies missing seed" \
   grep -qx seed "$WORKDIR/corpus/extra.bin"
 
+MAINNET="$ROOT/crates/rbitcoin-consensus/tests/fixtures/mainnet_block_290329.bin"
+SIGNET="$ROOT/crates/rbitcoin-consensus/tests/fixtures/signet_block_1.bin"
+assert_ok "Q-31 mainnet pack exists and is tiny" \
+  bash -c "test -f '$MAINNET' && test \"\$(wc -c < '$MAINNET')\" -lt 1000000"
+"$RUN" --merge-seed "$WORKDIR/corpus" "$MAINNET"
+"$RUN" --merge-seed "$WORKDIR/corpus" "$SIGNET"
+assert_ok "Q-31 mainnet pack merges as extra seed" \
+  test -f "$WORKDIR/corpus/mainnet_block_290329.bin"
+assert_ok "Q-31 signet pack merges as extra seed" \
+  test -f "$WORKDIR/corpus/signet_block_1.bin"
+
 mkdir -p "$WORKDIR/artifacts/block_differential"
 echo boom >"$WORKDIR/artifacts/block_differential/crash-abc"
 mkdir -p "$WORKDIR/crashers"
