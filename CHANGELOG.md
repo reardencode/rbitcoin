@@ -77,6 +77,12 @@ before 1.0).
 
 ### Fixed
 
+- **Differential fuzz mutates consensus fields:** leftover fuzzer bytes
+  overlay extra-tx `nVersion` / `nLockTime` / `nSequence` / scriptSig /
+  witness / taproot annex and same-block order. `script_differential`
+  reads a version+witness prefix (`0x80`); a bare `OP_TRUE` seed is
+  unchanged.
+
 - **Nightly fuzz corpus compounds:** `fuzz-run.sh` merges committed seeds
   into an existing corpus (does not overwrite grown inputs), prints and
   passes libFuzzer `-seed`, copies `fuzz/artifacts` into `fuzz/crashers`
