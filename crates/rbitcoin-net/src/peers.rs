@@ -11,6 +11,23 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
 
+/// Session writer payload: application messages or pre-encoded v2 block bytes.
+#[derive(Debug)]
+pub(crate) enum PeerOut {
+    Msg(NetworkMessage),
+    Encoded(Vec<u8>),
+}
+
+impl PeerOut {
+    #[cfg(test)]
+    pub(crate) fn expect_msg(self) -> NetworkMessage {
+        match self {
+            PeerOut::Msg(m) => m,
+            PeerOut::Encoded(_) => panic!("expected application message, got encoded block"),
+        }
+    }
+}
+
 /// How we classified the session (Core `connection_type`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PeerConnType {
@@ -127,7 +144,7 @@ pub struct LivePeer {
     /// (`getpeerinfo.inflight`).
     inflight: Mutex<Vec<u32>>,
     /// Session writer. RPC/accept flushes tx INVs onto this (`p2p_blocksonly`).
-    out_tx: Mutex<Option<mpsc::UnboundedSender<NetworkMessage>>>,
+    out_tx: Mutex<Option<mpsc::UnboundedSender<PeerOut>>>,
     /// Unix seconds when this session was registered (Core `m_connected`).
     connected_at: AtomicU64,
     /// Skip INV for mempool txs with `accept_gen < floor` (post-verack privacy).
@@ -388,11 +405,11 @@ impl LivePeer {
         self.ping_queued.store(true, Ordering::Relaxed);
     }
 
-    pub fn attach_out(&self, tx: mpsc::UnboundedSender<NetworkMessage>) {
+    pub(crate) fn attach_out(&self, tx: mpsc::UnboundedSender<PeerOut>) {
         *self.out_tx.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
     }
 
-    pub fn writer(&self) -> Option<mpsc::UnboundedSender<NetworkMessage>> {
+    pub(crate) fn writer(&self) -> Option<mpsc::UnboundedSender<PeerOut>> {
         self.out_tx
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1142,7 +1159,7 @@ impl PeerHub {
                 continue;
             }
             if let Some(tx) = s.writer() {
-                let _ = tx.send(NetworkMessage::FeeFilter(sat_kvb));
+                let _ = tx.send(PeerOut::Msg(NetworkMessage::FeeFilter(sat_kvb)));
             }
         }
     }

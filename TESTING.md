@@ -319,6 +319,19 @@ C then B enter `pending` and one `drain_pending` (child first); Core
 verdict, both sides rewind to the pad and restore the stem. Not a live Core
 HB `cmpctblock` announce.
 
+## P2P serve bench (host only)
+
+`scripts/ibd-serve-bench.py` is an IBD-shaped BIP324 client: `getheaders` then
+windowed `getdata` `MSG_WITNESS_BLOCK` (16 inflight). It does **not** run in
+CI and must not open a mainnet datadir in the agent VM.
+
+```bash
+python3 -m pip install --user cryptography
+python3 scripts/ibd-serve-bench.py --network mainnet --bytes 512M 127.0.0.1:8333
+```
+
+Compare client `throughput` with node DEBUG `p2p: serve` `wall_ns` / `bytes`.
+
 Default `cargo test` does **not** download Core, bind RPC/P2P, or compile `fuzz/`.
 The official tarball is glibc; GitHub Actions `ubuntu-latest` runs it. A NixOS
 host cannot exec it without a foreign-glibc loader — that is CI-only, not a

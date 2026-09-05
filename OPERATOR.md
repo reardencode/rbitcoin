@@ -420,6 +420,11 @@ Do **not** wipe `store/` for mempool slot/full errors.
 ## P2P transport
 
 - **BIP324 v2 only** — plaintext v1 peers disconnect (`peer does not speak BIP324 v2`).
+- **IBD `getdata` serve** reconstructs witness blocks from contiguous Class A
+  spans (`txout.body` + `inwit.body`), off the session reactor. DEBUG
+  `p2p: serve ntx= bytes= wall_ns=`. Host throughput probe:
+  `python3 scripts/ibd-serve-bench.py 127.0.0.1:8333` (needs `cryptography`
+  and a BIP324 client; see [`TESTING.md`](TESTING.md) § P2P serve bench).
 - **Discovery** queries Core DNS seeds for `NETWORK|WITNESS|P2P_V2`
   (`x809.<seed>` first; the bare seed name only if that returns nothing).
   Learned `addr` / `addrv2` is ingested only when the row advertises `P2P_V2`
