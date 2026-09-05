@@ -1303,14 +1303,8 @@ impl TxTable {
         if ids.len() != n {
             return Err(StoreError::Corrupt("invariant: txid.body span length"));
         }
-        self.body.advise_body_will_need(t0, tspan);
-        self.inwit.advise_body_will_need(i0, ispan);
-        let parallel = crate::file::distinct_unix_devices(
-            self.body.body_unix_device_id(),
-            self.inwit.body_unix_device_id(),
-        );
         let (txout_span, inwit_span) =
-            pread_two_spans(&self.body, t0, tspan, &self.inwit, i0, ispan, parallel)?;
+            pread_two_spans(&self.body, t0, tspan, &self.inwit, i0, ispan, true)?;
         let mut out = Vec::with_capacity(n);
         for i in 0..n {
             let (toff, tlen) = txout_ranges[i];

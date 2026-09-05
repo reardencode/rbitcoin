@@ -132,7 +132,7 @@ IOCP. Ring depth **128** (merge may grow). `RBITCOIN_IO=pread` forces libc.
 |------|------------|---------------------|
 | Head resolve stream | FdOnly **page-batched** head probe + FdOnly idx | uring/pread body prefix |
 | Pin outs | FdOnly `txout.idx` ranges | uring/pread `txout` bytes (4 KiB first page, extend if short) |
-| IBD **getdata serve** reconstruct | FdOnly `txout.idx` / `inwit.idx` ranges for a contiguous `header_txs` run | libc span pread of `txout.body` + `inwit.body` (not confirm `idx_body_pipeline`). `posix_fadvise(WILLNEED)` both ranges before pread; parallel preads only when `st_dev` differs (`--datadir-cold`) |
+| IBD **getdata serve** reconstruct | FdOnly `txout.idx` / `inwit.idx` ranges for a contiguous `header_txs` run | libc span pread of `txout.body` + `inwit.body` in parallel (not confirm `idx_body_pipeline`) |
 
 ---
 

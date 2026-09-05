@@ -159,10 +159,9 @@ before 1.0).
 
 ### Changed
 
-- **IBD `getdata` span IO:** `posix_fadvise(WILLNEED)` on `txout.body` and
-  `inwit.body` before the span preads; the two preads run in parallel only
-  when `st_dev` differs (`--datadir-cold`). BIP324 `write_v2_contents` takes
-  owned bytes (no extra `to_vec` on the serve writer).
+- **IBD `getdata` span IO:** `txout.body` and `inwit.body` span preads run
+  in parallel (SSD one volume, or `--datadir-cold` split). BIP324
+  `write_v2_contents` takes owned bytes (no extra `to_vec` on the serve writer).
 
 - **Historical `getdata` serve meters on `tip: perf`:** per-block DEBUG
   `p2p: serve` is gone. The 5s line adds

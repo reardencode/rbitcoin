@@ -714,54 +714,35 @@ impl TableFile {
     }
 
     pub fn advise_dont_need(&self, offset: u64, len: u64) {
-        #[cfg(target_os = "linux")]
-        self.posix_fadvise(offset, len, libc::POSIX_FADV_DONTNEED);
-        #[cfg(not(target_os = "linux"))]
-        let _ = (offset, len);
-    }
-
-    pub fn advise_will_need(&self, offset: u64, len: u64) {
-        #[cfg(target_os = "linux")]
-        self.posix_fadvise(offset, len, libc::POSIX_FADV_WILLNEED);
-        #[cfg(not(target_os = "linux"))]
-        let _ = (offset, len);
-    }
-
-    pub fn unix_device_id(&self) -> u64 {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            std::fs::metadata(&self.path).map(|m| m.dev()).unwrap_or(0)
-        }
-        #[cfg(not(unix))]
-        {
-            0
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    fn posix_fadvise(&self, offset: u64, len: u64, advice: libc::c_int) {
         if len == 0 {
             return;
         }
-        use std::os::unix::io::AsRawFd;
-        let file = self.file.lock().unwrap();
-        let fd = file.as_raw_fd();
-        let rc =
-            unsafe { libc::posix_fadvise(fd, offset as libc::off_t, len as libc::off_t, advice) };
-        if rc != 0 {
-            rbitcoin_log::trace!(
-                "store: posix_fadvise failed path={} off={offset} len={len}: {}",
-                self.path.display(),
-                std::io::Error::from_raw_os_error(rc)
-            );
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::io::AsRawFd;
+            let file = self.file.lock().unwrap();
+            let fd = file.as_raw_fd();
+            let rc = unsafe {
+                libc::posix_fadvise(
+                    fd,
+                    offset as libc::off_t,
+                    len as libc::off_t,
+                    libc::POSIX_FADV_DONTNEED,
+                )
+            };
+            if rc != 0 {
+                rbitcoin_log::trace!(
+                    "store: posix_fadvise(DONTNEED) failed path={} off={offset} len={len}: {}",
+                    self.path.display(),
+                    std::io::Error::from_raw_os_error(rc)
+                );
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (offset, len);
         }
     }
-}
-
-/// True when both `st_dev` values are known and differ (split NVMe/HDD).
-pub(crate) fn distinct_unix_devices(a: u64, b: u64) -> bool {
-    a != 0 && b != 0 && a != b
 }
 
 #[cfg(test)]
@@ -811,32 +792,6 @@ mod advise_tests {
             on_disk < 64 * 1024 * 1024,
             "SH-style grow must not punch a 64 MiB slab, got {on_disk}"
         );
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn distinct_unix_devices_requires_both_nonzero_and_unequal() {
-        assert!(!super::distinct_unix_devices(0, 0));
-        assert!(!super::distinct_unix_devices(0, 8));
-        assert!(!super::distinct_unix_devices(8, 0));
-        assert!(!super::distinct_unix_devices(8, 8));
-        assert!(super::distinct_unix_devices(8, 9));
-    }
-
-    #[test]
-    fn advise_will_need_is_best_effort() {
-        static N: AtomicU64 = AtomicU64::new(0);
-        let id = N.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("rbitcoin-advise-willneed-{id}"));
-        let _ = std::fs::remove_file(&path);
-        let f = TableFile::create(&path, TableKind::TxOut).unwrap();
-        let payload = vec![0xcdu8; 16 * 1024];
-        f.write_at(FILE_HEADER_LEN as u64, &payload).unwrap();
-        f.advise_will_need(FILE_HEADER_LEN as u64, payload.len() as u64);
-        f.advise_will_need(0, 0);
-        let mut buf = vec![0u8; payload.len()];
-        f.read_at(FILE_HEADER_LEN as u64, &mut buf).unwrap();
-        assert_eq!(buf, payload);
         let _ = std::fs::remove_file(&path);
     }
 
