@@ -412,19 +412,9 @@ fn spawn_inbound_accept(
                         tokio::sync::oneshot::channel::<tokio::task::AbortHandle>();
                     let h = tokio::spawn(async move {
                         let _session_slot = permit;
-                        let (ver, reader, writer, wire, tcp_shutdown) =
+                        let (_ver, reader, writer, wire, tcp_shutdown, sess) =
                             match inbound_connect_and_handshake(
-                                stream,
-                                magic,
-                                our,
-                                peer_addr,
-                                height,
-                                &ua,
-                                HandshakePolicy {
-                                    hub: Some(hub.as_ref()),
-                                    peers: Some(peers.as_ref()),
-                                    conn_type: PeerConnType::Inbound,
-                                },
+                                stream, magic, our, peer_addr, height, &ua, &peers, bind,
                             )
                             .await
                             {
@@ -436,8 +426,6 @@ fn spawn_inbound_accept(
                                     return;
                                 }
                             };
-                        let sess =
-                            peers.register(peer_addr, bind, &ver, true, PeerConnType::Inbound);
                         sess.attach_tcp_shutdown(tcp_shutdown);
                         if let Ok(ah) = ah_rx.await {
                             sess.set_session_abort(ah);
@@ -498,7 +486,7 @@ async fn prepare_outbound_session(
     let height = hub.tip_height().map(|h| h as i32).unwrap_or(0);
     // Core adds CNode before VERSION. Provisional row so getpeerinfo is non-empty
     // during handshake (p2p_handshake self-connect wait_until + assert_debug_log).
-    let provisional = peers.register_connecting(peer, bind, typ);
+    let provisional = peers.register_connecting(peer, bind, false, typ);
     let provisional_id = provisional.id;
     let handshake = connect_and_handshake_timed(
         HANDSHAKE_TIMEOUT,
@@ -512,6 +500,7 @@ async fn prepare_outbound_session(
         HandshakePolicy {
             hub: Some(hub.as_ref()),
             peers: Some(peers.as_ref()),
+            session: Some(provisional.as_ref()),
             conn_type: typ,
         },
     )
@@ -525,6 +514,9 @@ async fn prepare_outbound_session(
     };
     peers.unregister(provisional_id);
     let sess = peers.register_with_id(provisional_id, peer, bind, &ver, false, typ);
+    sess.mark_handshake_complete();
+    sess.note_recv("version", 100);
+    sess.note_recv("verack", 0);
     sess.attach_tcp_shutdown(tcp_shutdown);
     if let Some(mp) = hub.mempool() {
         sess.set_inv_gen_floor(mp.next_accept_gen());

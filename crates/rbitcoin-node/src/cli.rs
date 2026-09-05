@@ -692,6 +692,10 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
             }
             other if other.starts_with("--peertimeout=") => {
                 match other["--peertimeout=".len()..].parse() {
+                    Ok(0) => {
+                        eprintln!("Error: peertimeout must be a positive integer.");
+                        return ExitCode::from(1);
+                    }
                     Ok(n) => peer_timeout_secs = Some(n),
                     Err(e) => {
                         eprintln!("error: bad --peertimeout: {e}");
@@ -707,6 +711,10 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
                     return ExitCode::from(2);
                 }
                 match args[i].to_string_lossy().parse() {
+                    Ok(0) => {
+                        eprintln!("Error: peertimeout must be a positive integer.");
+                        return ExitCode::from(1);
+                    }
                     Ok(n) => peer_timeout_secs = Some(n),
                     Err(e) => {
                         eprintln!("error: bad --peertimeout: {e}");
@@ -1247,6 +1255,24 @@ mod tests {
             "0",
         ]);
         assert_exit(code, ExitCode::SUCCESS);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn peertimeout_zero_is_init_error() {
+        let dir = tmp_datadir();
+        let code = cli_main([
+            "rbitcoin-node",
+            "--smoke",
+            "--network",
+            "regtest",
+            "--datadir",
+            dir.to_str().unwrap(),
+            "--peertimeout=0",
+            "--log-level",
+            "error",
+        ]);
+        assert_exit(code, ExitCode::from(1));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

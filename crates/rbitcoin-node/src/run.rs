@@ -302,6 +302,9 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     )
     .map_err(|e| NodeError::Config(e))?;
     mempool.set_cluster_limits(config.limit_cluster_count, config.limit_cluster_size_kvb);
+    if let Some(secs) = config.peer_timeout_secs {
+        node.peers.set_peer_timeout_secs(secs);
+    }
     if config.whitelist.iter().any(|w| w.contains("noban")) {
         mempool.set_immediate_relay(true);
         node.peers.set_noban(true);

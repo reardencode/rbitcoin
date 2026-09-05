@@ -4146,6 +4146,18 @@ fn handshake_disconnect_log_needles() {
     let line = connected_to_self_log("127.0.0.1:18444");
     assert!(line.contains("connected to self"));
     assert!(line.contains("disconnecting"));
+    assert_eq!(
+        crate::peer::version_handshake_timeout_log(0),
+        "version handshake timeout, disconnecting peer=0"
+    );
+    assert_eq!(
+        crate::peer::ping_prior_to_verack_log(0),
+        "Unsupported message \"ping\" prior to verack from peer=0"
+    );
+    assert_eq!(
+        crate::peer::non_version_before_handshake_log("ping", 1),
+        "non-version message before version handshake. Message \"ping\" from peer=1"
+    );
 }
 
 #[test]

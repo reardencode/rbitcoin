@@ -159,6 +159,8 @@ pub struct LivePeer {
     /// Cloned std TCP fd for `Shutdown::Both` on `disconnectnode` so the far
     /// side sees EOF even if our session task is mid-frame.
     tcp_shutdown: Mutex<Option<std::net::TcpStream>>,
+    /// VERSION+VERACK finished. Connecting rows stay false (`p2p_timeouts`).
+    handshake_complete: AtomicBool,
 }
 
 impl LivePeer {
@@ -224,6 +226,18 @@ impl LivePeer {
 
     pub fn request_disconnect(&self) {
         self.stop.store(true, Ordering::SeqCst);
+    }
+
+    pub fn mark_handshake_complete(&self) {
+        self.handshake_complete.store(true, Ordering::Release);
+    }
+
+    pub fn handshake_complete(&self) -> bool {
+        self.handshake_complete.load(Ordering::Acquire)
+    }
+
+    pub fn connected_at_secs(&self) -> u64 {
+        self.connected_at.load(Ordering::Relaxed)
     }
 
     pub fn set_writer_abort(&self, handle: tokio::task::AbortHandle) {
@@ -710,6 +724,8 @@ pub struct PeerHub {
     /// Per-bind GetAddr response cache: bind → (cached_at_secs, addrs).
     addr_response_cache:
         Mutex<HashMap<SocketAddr, (u64, Vec<(u32, bitcoin::p2p::address::Address)>)>>,
+    /// Core `-peertimeout` seconds (VERSION/VERACK). Default 60.
+    peer_timeout_secs: AtomicU64,
 }
 
 impl PeerHub {
@@ -730,7 +746,16 @@ impl PeerHub {
             pending_outbound_nonces: Mutex::new(HashSet::new()),
             addrman: Mutex::new(None),
             addr_response_cache: Mutex::new(HashMap::new()),
+            peer_timeout_secs: AtomicU64::new(60),
         })
+    }
+
+    pub fn set_peer_timeout_secs(&self, secs: u64) {
+        self.peer_timeout_secs.store(secs.max(1), Ordering::Relaxed);
+    }
+
+    pub fn peer_timeout_secs(&self) -> u64 {
+        self.peer_timeout_secs.load(Ordering::Relaxed).max(1)
     }
 
     /// Attach the process addrman so inbound GetAddr can sample peers.
@@ -1009,7 +1034,26 @@ impl PeerHub {
 
     /// Session 50ms heartbeat: replace a stalling initial-headers-sync peer.
     pub(crate) fn on_session_heartbeat(&self) {
-        self.check_headers_sync_timeouts(self.now_secs());
+        let now = self.now_secs();
+        self.check_headers_sync_timeouts(now);
+        self.check_handshake_timeouts(now);
+    }
+
+    pub(crate) fn handshake_timed_out(&self, peer: &LivePeer, now: u64) -> bool {
+        if peer.handshake_complete() {
+            return false;
+        }
+        now.saturating_sub(peer.connected_at_secs()) >= self.peer_timeout_secs()
+    }
+
+    pub(crate) fn check_handshake_timeouts(&self, now: u64) {
+        let peers: Vec<Arc<LivePeer>> = self.live_peers();
+        for p in peers {
+            if self.handshake_timed_out(&p, now) {
+                rbitcoin_log::debug!("{}", crate::peer::version_handshake_timeout_log(p.id));
+                let _ = self.disconnect_id(p.id);
+            }
+        }
     }
 
     pub fn queue_pings(&self) {
@@ -1028,6 +1072,7 @@ impl PeerHub {
         self: &Arc<Self>,
         addr: SocketAddr,
         addrbind: SocketAddr,
+        inbound: bool,
         conn_type: PeerConnType,
     ) -> Arc<LivePeer> {
         use bitcoin::p2p::address::Address;
@@ -1043,7 +1088,14 @@ impl PeerHub {
             start_height: 0,
             relay: false,
         };
-        self.register(addr, addrbind, &ver, false, conn_type)
+        self.register_with_id(
+            self.next_id.fetch_add(1, Ordering::Relaxed),
+            addr,
+            addrbind,
+            &ver,
+            inbound,
+            conn_type,
+        )
     }
 
     pub fn register(
@@ -1055,7 +1107,11 @@ impl PeerHub {
         conn_type: PeerConnType,
     ) -> Arc<LivePeer> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.register_with_id(id, addr, addrbind, ver, inbound, conn_type)
+        let p = self.register_with_id(id, addr, addrbind, ver, inbound, conn_type);
+        p.mark_handshake_complete();
+        p.note_recv("version", 100);
+        p.note_recv("verack", 0);
+        p
     }
 
     pub fn register_with_id(
@@ -1121,10 +1177,8 @@ impl PeerHub {
             writer_abort: Mutex::new(None),
             session_abort: Mutex::new(None),
             tcp_shutdown: Mutex::new(None),
+            handshake_complete: AtomicBool::new(false),
         });
-        // Handshake already exchanged version + verack (+ maybe ping).
-        peer.note_recv("version", 100);
-        peer.note_recv("verack", 0);
         self.live
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -1503,6 +1557,43 @@ mod tests {
             other => panic!("expected EOF/reset after disconnect_id, got {other:?}"),
         }
         let _ = local.write(&[1]);
+    }
+
+    #[test]
+    fn connecting_peer_times_out_at_peertimeout() {
+        let hub = PeerHub::new();
+        hub.set_peer_timeout_secs(3);
+        hub.set_mock_now(1_700_000_000);
+        let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1);
+        let p = hub.register_connecting(a, a, true, PeerConnType::Inbound);
+        assert!(!p.handshake_complete());
+        hub.set_mock_now(1_700_000_002);
+        hub.on_session_heartbeat();
+        assert!(!p.stop.load(Ordering::SeqCst), "still inside peertimeout");
+        hub.set_mock_now(1_700_000_003);
+        hub.on_session_heartbeat();
+        assert!(
+            p.stop.load(Ordering::SeqCst),
+            "peertimeout must disconnect pre-verack"
+        );
+        assert!(
+            hub.get(p.id).is_none(),
+            "timed-out connecting peer is dropped"
+        );
+    }
+
+    #[test]
+    fn completed_handshake_survives_peertimeout() {
+        let hub = PeerHub::new();
+        hub.set_peer_timeout_secs(3);
+        hub.set_mock_now(1_700_000_000);
+        let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1);
+        let p = hub.register(a, a, &ver("/rbitcoin:0.1.0/"), true, PeerConnType::Inbound);
+        assert!(p.handshake_complete());
+        hub.set_mock_now(1_700_000_100);
+        hub.on_session_heartbeat();
+        assert!(!p.stop.load(Ordering::SeqCst));
+        assert!(hub.get(p.id).is_some());
     }
 
     #[test]

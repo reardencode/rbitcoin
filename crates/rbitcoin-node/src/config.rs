@@ -569,10 +569,15 @@ impl NodeConfig {
                         })?);
                 }
                 "peertimeout" | "peer_timeout" => {
-                    self.peer_timeout_secs = Some(
-                        val.parse()
-                            .map_err(|e| NodeError::Config(format!("conf peertimeout: {e}")))?,
-                    );
+                    let n: u64 = val
+                        .parse()
+                        .map_err(|e| NodeError::Config(format!("conf peertimeout: {e}")))?;
+                    if n == 0 {
+                        return Err(NodeError::Config(
+                            "peertimeout must be a positive integer.".into(),
+                        ));
+                    }
+                    self.peer_timeout_secs = Some(n);
                 }
                 "minimumchainwork" | "minimum_chain_work" => {
                     self.minimum_chain_work =

@@ -231,6 +231,22 @@ pub fn connected_to_self_log(addr: impl std::fmt::Display) -> String {
     format!("connected to self at {addr}, disconnecting")
 }
 
+pub fn version_handshake_timeout_log(peer: u64) -> String {
+    format!("version handshake timeout, disconnecting peer={peer}")
+}
+
+pub fn ping_prior_to_verack_log(peer: u64) -> String {
+    unsupported_before_verack_log("ping", peer)
+}
+
+pub fn unsupported_before_verack_log(cmd: &str, peer: u64) -> String {
+    format!("Unsupported message \"{cmd}\" prior to verack from peer={peer}")
+}
+
+pub fn non_version_before_handshake_log(cmd: &str, peer: u64) -> String {
+    format!("non-version message before version handshake. Message \"{cmd}\" from peer={peer}")
+}
+
 /// Core `ApproximateBestBlockDepth`: `(now - tip_time) / pow_target_spacing`.
 pub fn approximate_best_block_depth(hub: &ChainHub) -> i64 {
     let Some(h) = hub.tip_header() else {
@@ -270,6 +286,7 @@ impl Drop for LiveFollowDec {
 pub struct HandshakePolicy<'a> {
     pub hub: Option<&'a ChainHub>,
     pub peers: Option<&'a crate::peers::PeerHub>,
+    pub session: Option<&'a crate::peers::LivePeer>,
     pub conn_type: crate::peers::PeerConnType,
 }
 
@@ -278,6 +295,7 @@ impl HandshakePolicy<'static> {
         Self {
             hub: None,
             peers: None,
+            session: None,
             conn_type: crate::peers::PeerConnType::OutboundFullRelay,
         }
     }
@@ -385,7 +403,8 @@ pub(crate) async fn inbound_connect_and_handshake(
     their_addr: SocketAddr,
     start_height: i32,
     user_agent: &str,
-    policy: HandshakePolicy<'_>,
+    peers: &std::sync::Arc<crate::peers::PeerHub>,
+    bind: SocketAddr,
 ) -> Result<
     (
         VersionMessage,
@@ -393,21 +412,53 @@ pub(crate) async fn inbound_connect_and_handshake(
         V2Writer,
         crate::v2::WireBytes,
         std::net::TcpStream,
+        std::sync::Arc<crate::peers::LivePeer>,
     ),
     NetError,
 > {
-    connect_and_handshake_timed(
+    let (mut reader, mut writer, wire, tcp_shutdown) = open_v2(stream, magic, true).await?;
+    let sess =
+        peers.register_connecting(their_addr, bind, true, crate::peers::PeerConnType::Inbound);
+    if let Ok(clone) = tcp_shutdown.try_clone() {
+        sess.attach_tcp_shutdown(clone);
+    }
+    let policy = HandshakePolicy {
+        hub: None,
+        peers: Some(peers),
+        session: Some(sess.as_ref()),
+        conn_type: crate::peers::PeerConnType::Inbound,
+    };
+    let their_version = match tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
-        stream,
-        magic,
-        our_addr,
-        their_addr,
-        start_height,
-        true,
-        user_agent,
-        policy,
+        application_handshake(
+            &mut reader,
+            &mut writer,
+            magic,
+            our_addr,
+            their_addr,
+            start_height,
+            true,
+            user_agent,
+            policy,
+        ),
     )
     .await
+    {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            let _ = peers.disconnect_id(sess.id);
+            return Err(e);
+        }
+        Err(_) => {
+            rbitcoin_log::debug!("{}", version_handshake_timeout_log(sess.id));
+            let _ = peers.disconnect_id(sess.id);
+            return Err(NetError::Timeout);
+        }
+    };
+    sess.mark_handshake_complete();
+    sess.note_recv("version", 100);
+    sess.note_recv("verack", 0);
+    Ok((their_version, reader, writer, wire, tcp_shutdown, sess))
 }
 
 pub(crate) async fn connect_and_handshake_timed(
@@ -529,6 +580,37 @@ async fn run_feeler_inner(
     Ok(())
 }
 
+fn command_label(cmd: &[u8; 12]) -> String {
+    let n = cmd.iter().position(|&b| b == 0).unwrap_or(12);
+    String::from_utf8_lossy(&cmd[..n]).into_owned()
+}
+
+async fn read_handshake_frame(
+    reader: &mut V2Reader,
+    magic: Magic,
+    policy: &HandshakePolicy<'_>,
+) -> Result<FramedMessage, NetError> {
+    loop {
+        if let Some(s) = policy.session {
+            if s.stop.load(Ordering::Relaxed) {
+                return Err(NetError::Disconnected);
+            }
+            if let Some(peers) = policy.peers {
+                let now = peers.now_secs();
+                if peers.handshake_timed_out(s, now) {
+                    rbitcoin_log::debug!("{}", version_handshake_timeout_log(s.id));
+                    let _ = peers.disconnect_id(s.id);
+                    return Err(NetError::Timeout);
+                }
+            }
+        }
+        match tokio::time::timeout(Duration::from_millis(50), read_v2_frame(reader, magic)).await {
+            Ok(r) => return r,
+            Err(_) => continue,
+        }
+    }
+}
+
 /// Perform the version/verack exchange over an established BIP324 session.
 async fn application_handshake(
     reader: &mut V2Reader,
@@ -588,13 +670,17 @@ async fn application_handshake(
     }
 
     let their_version = loop {
-        let frame = read_v2_frame(reader, magic).await?;
+        let frame = read_handshake_frame(reader, magic, &policy).await?;
+        let cmd = command_label(&frame.command);
         let msg = frame.decode();
         match msg.payload() {
             NetworkMessage::Version(v) => break v.clone(),
             other => {
                 if matches!(other, NetworkMessage::Verack) {
                     return Err(NetError::Protocol("verack before version"));
+                }
+                if let Some(s) = policy.session {
+                    rbitcoin_log::debug!("{}", non_version_before_handshake_log(&cmd, s.id));
                 }
                 let _ = other;
             }
@@ -636,14 +722,22 @@ async fn application_handshake(
     write_v2_msg(writer, NetworkMessage::Verack).await?;
 
     loop {
-        let frame = read_v2_frame(reader, magic).await?;
+        let frame = read_handshake_frame(reader, magic, &policy).await?;
+        let cmd = command_label(&frame.command);
         let msg = frame.decode();
         match msg.payload() {
             NetworkMessage::Verack => break,
             NetworkMessage::Ping(n) => {
+                if let Some(s) = policy.session {
+                    rbitcoin_log::debug!("{}", ping_prior_to_verack_log(s.id));
+                }
                 write_v2_msg(writer, NetworkMessage::Pong(*n)).await?;
             }
-            _ => {}
+            _ => {
+                if let Some(s) = policy.session {
+                    rbitcoin_log::debug!("{}", unsupported_before_verack_log(&cmd, s.id));
+                }
+            }
         }
     }
 
