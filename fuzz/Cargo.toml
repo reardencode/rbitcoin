@@ -13,6 +13,7 @@ libfuzzer-sys = "0.4"
 rbitcoin-consensus = { path = "../crates/rbitcoin-consensus" }
 rbitcoin-net = { path = "../crates/rbitcoin-net" }
 rbitcoin-query = { path = "../crates/rbitcoin-query" }
+tokio = { version = "1", default-features = false, features = ["rt", "net", "time"] }
 
 [workspace]
 members = ["."]
@@ -51,6 +52,13 @@ bench = false
 [[bin]]
 name = "v2_contents"
 path = "fuzz_targets/v2_contents.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "v2_session"
+path = "fuzz_targets/v2_session.rs"
 test = false
 doc = false
 bench = false

@@ -381,6 +381,7 @@ dependencies = [
  "rbitcoin-consensus",
  "rbitcoin-net",
  "rbitcoin-query",
+ "tokio",
 ]
 
 [[package]]

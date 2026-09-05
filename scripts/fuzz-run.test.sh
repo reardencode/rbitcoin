@@ -31,6 +31,20 @@ assert_ok "v2_contents dry-run in-process (no -jobs)" \
 assert_ok "v2_contents dry-run timeout 10" \
   grep -qx "FUZZ_TIMEOUT=10" <<<"$out"
 
+out="$(FUZZ_DRY_RUN=1 "$RUN" v2_session)"
+assert_ok "v2_session dry-run bin" \
+  grep -qx "FUZZ_BIN=v2_session" <<<"$out"
+assert_ok "v2_session dry-run sanitizer address" \
+  grep -qx "FUZZ_SANITIZER=address" <<<"$out"
+assert_ok "v2_session dry-run in-process (no -jobs)" \
+  grep -qx "FUZZ_JOBS=in-process" <<<"$out"
+assert_ok "v2_session dry-run timeout 90" \
+  grep -qx "FUZZ_TIMEOUT=90" <<<"$out"
+assert_ok "v2_session dry-run prints CORE_BITCOIND" \
+  grep -q "^RBITCOIN_CORE_BITCOIND=" <<<"$out"
+assert_ok "v2_session dry-run BITCOIND_LISTEN=1" \
+  grep -qx "BITCOIND_LISTEN=1" <<<"$out"
+
 out="$(FUZZ_DRY_RUN=1 "$RUN")"
 assert_ok "dry-run default toolchain is nightly" \
   grep -qx "RUSTUP_TOOLCHAIN=nightly" <<<"$out"

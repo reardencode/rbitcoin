@@ -51,6 +51,9 @@ if [[ "$BIN" == "block_differential" ]]; then
 elif [[ "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" ]]; then
   sanitizer="none"
   timeout=180
+elif [[ "$BIN" == "v2_session" ]]; then
+  sanitizer="address"
+  timeout=90
 fi
 
 WRAP="$ROOT/scripts/fuzz-rustc-allow-warnings.sh"
@@ -65,8 +68,11 @@ if [[ "${FUZZ_DRY_RUN:-}" == "1" ]]; then
   echo "FUZZ_TIMEOUT=$timeout"
   echo "CARGO_TARGET_DIR_UNSET=1"
   echo "RUSTC_WRAPPER=$WRAP"
-  if [[ "$BIN" == "block_differential" || "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" ]]; then
+  if [[ "$BIN" == "block_differential" || "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" || "$BIN" == "v2_session" ]]; then
     echo "RBITCOIN_CORE_BITCOIND=${RBITCOIN_CORE_BITCOIND:-}"
+  fi
+  if [[ "$BIN" == "v2_session" ]]; then
+    echo "BITCOIND_LISTEN=1"
   fi
   exit 0
 fi
@@ -88,6 +94,18 @@ if [[ "$BIN" == "v2_contents" ]]; then
     crates/rbitcoin-net/tests/fixtures/v2_sendaddrv2.bin \
     fuzz/corpus/v2_contents/
   exec env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" v2_contents -- \
+    -max_total_time="${FUZZ_MAX_TOTAL_TIME:-120}" \
+    -timeout="$timeout" \
+    -max_len=65536
+fi
+
+if [[ "$BIN" == "v2_session" ]]; then
+  export RBITCOIN_CORE_BITCOIND="$(./scripts/core-functional/fetch-bitcoind.sh)"
+  mkdir -p fuzz/corpus/v2_session
+  cp crates/rbitcoin-net/tests/fixtures/v2_ping.bin \
+    crates/rbitcoin-net/tests/fixtures/v2_verack.bin \
+    fuzz/corpus/v2_session/
+  exec env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" v2_session -- \
     -max_total_time="${FUZZ_MAX_TOTAL_TIME:-120}" \
     -timeout="$timeout" \
     -max_len=65536
