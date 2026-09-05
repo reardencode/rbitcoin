@@ -617,6 +617,7 @@ pub fn is_core_mempool_policy_skip(reason: &str) -> bool {
         || r.contains("mempool-conflict")
         || r.contains("replacement")
         || r.contains("max-fee")
+        || r.contains("max feerate")
         || r.contains("absurdly-high-fee")
         || r.contains("policy")
         || r.contains("scriptpubkey")
@@ -1644,6 +1645,8 @@ mod tests {
             "mandatory-script-verify-flag-failed"
         ));
         assert!(!is_core_mempool_policy_skip("bad-txns-in-belowout"));
+        // Core v31.1 testmempoolaccept default maxfeerate (space, not max-fee).
+        assert!(is_core_mempool_policy_skip("max feerate exceeded"));
     }
 
     #[test]
@@ -1662,6 +1665,11 @@ mod tests {
         match compare_mempool_one(&hub, &pad.tip, &mock, pad.mature, &seed) {
             CompareOne::Skipped => {}
             other => panic!("scriptpubkey policy skip: {other:?}"),
+        }
+        let mock = MockOracle::new(OracleReply::Reason("max feerate exceeded".into()));
+        match compare_mempool_one(&hub, &pad.tip, &mock, pad.mature, &seed) {
+            CompareOne::Skipped => {}
+            other => panic!("max feerate policy skip: {other:?}"),
         }
         let mock = MockOracle::new(OracleReply::NullAccept);
         match compare_mempool_one(&hub, &pad.tip, &mock, pad.mature, &seed) {
@@ -1688,6 +1696,11 @@ mod tests {
         match compare_script_verify_one(&mock, mature, &dummy, &[0x51]) {
             CompareOne::Skipped => {}
             other => panic!("scriptpubkey policy skip: {other:?}"),
+        }
+        let mock = MockOracle::new(OracleReply::Reason("max feerate exceeded".into()));
+        match compare_script_verify_one(&mock, mature, &dummy, &[0x51]) {
+            CompareOne::Skipped => {}
+            other => panic!("max feerate policy skip: {other:?}"),
         }
         let mock = MockOracle::new(OracleReply::Reason("script-error".into()));
         match compare_script_verify_one(&mock, mature, &dummy, &[0x6a]) {

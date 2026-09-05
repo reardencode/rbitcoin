@@ -108,12 +108,7 @@ impl BlockOracle for CoreRpc {
     }
 
     fn testmempoolaccept_hexes(&self, hexs: &[&str]) -> OracleReply {
-        let inner = hexs
-            .iter()
-            .map(|h| format!("\"{h}\""))
-            .collect::<Vec<_>>()
-            .join(",");
-        let params = format!(r#"[[{inner}]]"#);
+        let params = testmempoolaccept_params(hexs);
         match self.call("testmempoolaccept", &params) {
             Ok(body) => match rbitcoin_net::parse_testmempoolaccept_json(&body) {
                 Ok(r) => r,
@@ -291,6 +286,17 @@ fn wait_bitcoind_rpc(cookie: PathBuf, rpcport: u16) -> Result<CoreRpc, String> {
     }
 }
 
+/// `testmempoolaccept` params: hex array + `maxfeerate=0` (no cap; default
+/// 0.10 BTC/kvB is policy, not consensus).
+pub fn testmempoolaccept_params(hexs: &[&str]) -> String {
+    let inner = hexs
+        .iter()
+        .map(|h| format!("\"{h}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(r#"[[{inner}], 0]"#)
+}
+
 /// RPC-only Core (no P2P). `-acceptnonstdtxn=1`: v31.1 regtest requires
 /// standardness by default; mempool/script-verify oracles compare consensus.
 pub fn bitcoind_rpc_args(datadir: &Path, rpcport: u16, p2pport: u16, cookie: &Path) -> Vec<String> {
@@ -366,6 +372,15 @@ mod tests {
         assert!(args.iter().any(|a| a == "-acceptnonstdtxn=1"));
         assert!(args.iter().any(|a| a == "-regtest"));
         assert!(args.iter().any(|a| a == "-port=18444"));
+    }
+
+    #[test]
+    fn testmempoolaccept_params_disable_maxfeerate() {
+        assert_eq!(testmempoolaccept_params(&["ab"]), r#"[["ab"], 0]"#);
+        assert_eq!(
+            testmempoolaccept_params(&["aa", "bb"]),
+            r#"[["aa","bb"], 0]"#
+        );
     }
 
     #[test]
