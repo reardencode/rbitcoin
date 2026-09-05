@@ -619,6 +619,15 @@ pub fn is_core_mempool_policy_skip(reason: &str) -> bool {
         || r.contains("max-fee")
         || r.contains("absurdly-high-fee")
         || r.contains("policy")
+        || r.contains("scriptpubkey")
+        || r.contains("nonstandard")
+        || r.contains("scriptsig")
+        || r.contains("bare-multisig")
+        || r.contains("datacarrier")
+        || r.contains("multi-op-return")
+        || r.contains("tx-size")
+        || r == "version"
+        || r.contains("non-mandatory")
 }
 
 fn mempool_ours_consensus(
@@ -1621,9 +1630,20 @@ mod tests {
         }
         assert!(is_core_mempool_policy_skip("dust"));
         assert!(is_core_mempool_policy_skip("min relay fee not met"));
+        assert!(is_core_mempool_policy_skip("scriptpubkey"));
+        assert!(is_core_mempool_policy_skip("nonstandard"));
+        assert!(is_core_mempool_policy_skip("bad-txns-nonstandard-inputs"));
+        assert!(is_core_mempool_policy_skip("scriptsig-not-pushonly"));
+        assert!(is_core_mempool_policy_skip("bare-multisig"));
+        assert!(is_core_mempool_policy_skip("tx-size"));
+        assert!(is_core_mempool_policy_skip("version"));
+        assert!(is_core_mempool_policy_skip(
+            "non-mandatory-script-verify-flag-failed"
+        ));
         assert!(!is_core_mempool_policy_skip(
             "mandatory-script-verify-flag-failed"
         ));
+        assert!(!is_core_mempool_policy_skip("bad-txns-in-belowout"));
     }
 
     #[test]
@@ -1637,6 +1657,11 @@ mod tests {
         match compare_mempool_one(&hub, &pad.tip, &mock, pad.mature, &seed) {
             CompareOne::Skipped => {}
             other => panic!("policy skip: {other:?}"),
+        }
+        let mock = MockOracle::new(OracleReply::Reason("scriptpubkey".into()));
+        match compare_mempool_one(&hub, &pad.tip, &mock, pad.mature, &seed) {
+            CompareOne::Skipped => {}
+            other => panic!("scriptpubkey policy skip: {other:?}"),
         }
         let mock = MockOracle::new(OracleReply::NullAccept);
         match compare_mempool_one(&hub, &pad.tip, &mock, pad.mature, &seed) {
@@ -1658,6 +1683,11 @@ mod tests {
         match compare_script_verify_one(&mock, mature, &dummy, &[0x51]) {
             CompareOne::Agreed { accept: true } => {}
             other => panic!("script-verify OP_TRUE: {other:?}"),
+        }
+        let mock = MockOracle::new(OracleReply::Reason("scriptpubkey".into()));
+        match compare_script_verify_one(&mock, mature, &dummy, &[0x51]) {
+            CompareOne::Skipped => {}
+            other => panic!("scriptpubkey policy skip: {other:?}"),
         }
         let mock = MockOracle::new(OracleReply::Reason("script-error".into()));
         match compare_script_verify_one(&mock, mature, &dummy, &[0x6a]) {
