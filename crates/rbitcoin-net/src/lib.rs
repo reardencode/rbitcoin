@@ -36,6 +36,11 @@ pub use chain::{
     synchronizing_blockheaders_log, AcceptOutcome, ChainHub, ChainTipInfo, TipEvent,
 };
 pub use codec::{MAX_HEADERS_RESULTS, MAX_INV_SIZE, MAX_LOCATOR_SZ, MAX_PROTOCOL_MESSAGE_LENGTH};
+pub use compact::{
+    classify_v2_cmpct_peer, cmpct_hsi_regtest_connectable, cmpct_missing_empty_mempool,
+    decode_cmpct_hsi, encode_cmpctblock_v2, encode_pong_v2, encode_sendcmpct_hb_v2,
+    prefilled_indexes_ok, try_reconstruct, CmpctPeerFrame,
+};
 pub use error::NetError;
 pub use eviction::{eviction_netgroup, select_inbound_eviction, InboundEvictCandidate};
 pub use ibd::{
@@ -66,7 +71,7 @@ pub use service::{magic_for, magic_for_params, NetConfig, P2PHandle, P2PNode};
 pub use tx_relay::{
     ElectrumMempoolItem, MempoolAnnounce, MempoolHub, MempoolPerfSample, QueryUtxoProvider,
 };
-pub use v2::{parse_v2_regtest, write_v2_contents, WireBytes};
+pub use v2::{encode_v2_contents, parse_v2_regtest, write_v2_contents, WireBytes};
 pub use versionbits_warn::{
     active_unknown_bits, unknown_rules_warning, warn_period_threshold, warning_strings,
 };

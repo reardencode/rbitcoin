@@ -536,6 +536,14 @@ pub async fn write_v2_msg_offload(
     write_v2_contents(writer, &contents).await
 }
 
+/// Next genuine application contents (skips decoy packets).
+pub async fn read_v2_contents<R>(reader: &mut V2SessionReader<R>) -> Result<Vec<u8>, NetError>
+where
+    R: AsyncRead + Unpin + Send,
+{
+    reader.read_genuine_contents(|_| {}).await
+}
+
 /// Read the next genuine application frame (skips decoy packets).
 ///
 /// Cancellation-safe (length/body state lives on [`V2SessionReader`]).
@@ -759,17 +767,13 @@ mod tests {
             let protocol = Protocol::new(magic_b, Role::Initiator, None, None, reader, wh)
                 .await
                 .expect("client handshake");
-            let (mut r, mut w) = protocol.into_split();
+            let (r, mut w) = protocol.into_split();
             let contents = encode_v2_contents(NetworkMessage::Ping(42)).unwrap();
             write_v2_contents(&mut w, &contents).await.unwrap();
-            loop {
-                let p = r.read().await.expect("client read");
-                if p.packet_type() == PacketType::Genuine {
-                    let frame = parse_v2_contents(magic, p.contents()).unwrap();
-                    assert!(matches!(frame.decode().payload(), NetworkMessage::Pong(42)));
-                    break;
-                }
-            }
+            let mut reader = V2SessionReader::from_protocol_reader(r);
+            let got = read_v2_contents(&mut reader).await.unwrap();
+            let frame = parse_v2_contents(magic, &got).unwrap();
+            assert!(matches!(frame.decode().payload(), NetworkMessage::Pong(42)));
             server_task.await.unwrap();
         };
 
