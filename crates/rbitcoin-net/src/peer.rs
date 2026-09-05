@@ -1659,14 +1659,21 @@ async fn handle_peer_frame(
                 return Ok(());
             }
             let headers = headers_reply_for_getheaders(hub, gh)?;
-            if let Some(s) = session {
-                if let Some(last) = headers.last() {
-                    s.note_best_header_sent(last.block_hash());
-                } else if let Some(tip) = hub.tip_hash() {
-                    s.note_best_header_sent(tip);
+            let withhold_stale = headers.is_empty()
+                && gh.locator_hashes.is_empty()
+                && gh.stop_hash.to_byte_array() != [0u8; 32]
+                && hub.header_of(&gh.stop_hash).is_some()
+                && !hub.stale_relay_allowed(&gh.stop_hash);
+            if !withhold_stale {
+                if let Some(s) = session {
+                    if let Some(last) = headers.last() {
+                        s.note_best_header_sent(last.block_hash());
+                    } else if let Some(tip) = hub.tip_hash() {
+                        s.note_best_header_sent(tip);
+                    }
                 }
+                queue_out(out_tx, NetworkMessage::Headers(headers))?;
             }
-            queue_out(out_tx, NetworkMessage::Headers(headers))?;
         }
         NetworkMessage::GetBlocks(gb) => {
             if gb.locator_hashes.len() > MAX_LOCATOR_SZ {
@@ -1697,6 +1704,9 @@ async fn handle_peer_frame(
                 match item {
                     Inventory::Block(h) | Inventory::WitnessBlock(h) => {
                         if inflight.is_some_and(|n| n.load(Ordering::SeqCst) >= MAX_SERVE_BLOCKS) {
+                            continue;
+                        }
+                        if !hub.stale_relay_allowed(h) {
                             continue;
                         }
                         if let Some(block) =
@@ -3118,6 +3128,18 @@ pub(crate) fn headers_reply_for_getheaders(
 ) -> Result<Vec<bitcoin::block::Header>, NetError> {
     if !hub.meets_minimum_chain_work() {
         return Ok(Vec::new());
+    }
+    if gh.locator_hashes.is_empty() {
+        let stop = gh.stop_hash;
+        if stop.to_byte_array() != [0u8; 32] {
+            if !hub.stale_relay_allowed(&stop) {
+                return Ok(Vec::new());
+            }
+            if let Some(h) = hub.header_of(&stop) {
+                return Ok(vec![h]);
+            }
+            return Ok(Vec::new());
+        }
     }
     headers_for_peer(hub.cache.as_ref(), hub.query.as_ref(), gh)
 }

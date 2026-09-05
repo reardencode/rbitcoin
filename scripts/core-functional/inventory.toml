@@ -619,9 +619,7 @@ analog = "no BIP37 bloom (filter*/mempool disconnect only; Core -peerbloomfilter
 
 [[test]]
 name = "p2p_fingerprint.py"
-status = "skip"
-reason = "rpc-missing"
-analog = "follow-up: stale-tip serve"
+status = "run"
 
 [[test]]
 name = "p2p_getaddr_caching.py"

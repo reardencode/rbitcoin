@@ -60,6 +60,10 @@ pub const DEFAULT_MAX_TIP_AGE_SECS: u64 = 24 * 60 * 60;
 /// (`p2p_ibd_txrelay.py` `MAX_FEE_FILTER`).
 pub const IBD_FEEFILTER_SAT_KVB: u64 = 9_936_506;
 
+/// Core `STALE_RELAY_AGE_LIMIT` (one month). Stale blocks older than this vs the
+/// best header are not served (`p2p_fingerprint`).
+pub const STALE_RELAY_AGE_LIMIT_SECS: u64 = 30 * 24 * 60 * 60;
+
 /// Thread-safe chain façade used by peer sessions.
 pub struct ChainHub {
     pub query: Arc<Query>,
@@ -330,6 +334,21 @@ impl ChainHub {
     /// Core `IsInitialBlockDownload`: tip too old **or** work below `-minimumchainwork`.
     pub fn in_ibd(&self) -> bool {
         !self.meets_minimum_chain_work() || self.tip_is_stale_for_ibd()
+    }
+
+    /// Core `StaleBlockRequestAllowed`: active-chain always; stale only if
+    /// best-header time minus block time is under one month.
+    pub fn stale_relay_allowed(&self, hash: &BlockHash) -> bool {
+        if self.is_connected(hash) {
+            return true;
+        }
+        let Some(hdr) = self.header_of(hash) else {
+            return false;
+        };
+        let Some(best) = self.tip_header() else {
+            return false;
+        };
+        u64::from(best.time).saturating_sub(u64::from(hdr.time)) < STALE_RELAY_AGE_LIMIT_SECS
     }
 
     /// BIP133 feefilter we advertise: rounded MAX_MONEY while IBD, else minrelay.
@@ -2607,6 +2626,30 @@ mod tests {
             hub.feefilter_sat_kvb(),
             rbitcoin_consensus::policy::MIN_RELAY_FEE_RATE_SAT_PER_KVB
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stale_relay_allowed_withholds_month_old_side_block() {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let t0 = 1_700_000_000u32;
+        hub.clock.set_mock(i64::from(t0));
+        let a = mine(gen, t0, 1);
+        hub.accept_block(a.clone()).unwrap();
+        let a_hash = a.block_hash();
+        hub.invalidate_block(a_hash).unwrap();
+        let t1 = t0 + STALE_RELAY_AGE_LIMIT_SECS as u32 + 1;
+        hub.clock.set_mock(i64::from(t1));
+        let c1 = mine(gen, t1, 1);
+        hub.accept_block(c1).unwrap();
+        assert!(!hub.is_connected(&a_hash));
+        assert!(
+            !hub.stale_relay_allowed(&a_hash),
+            "stale more than a month behind best header must not be served"
+        );
+        assert!(hub.stale_relay_allowed(&hub.tip_hash().unwrap()));
         let _ = std::fs::remove_dir_all(dir);
     }
 
