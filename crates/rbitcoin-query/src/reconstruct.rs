@@ -107,6 +107,19 @@ impl Query {
             .ok_or(StoreError::Corrupt("confirmed header missing body list"))
     }
 
+    fn contiguous_fk_run(fks: &[Fk]) -> Option<(u64, u64)> {
+        let first = fks.first()?.get()?;
+        if first == 0 {
+            return None;
+        }
+        for (i, fk) in fks.iter().enumerate() {
+            if fk.get() != Some(first + i as u64) {
+                return None;
+            }
+        }
+        Some((first, first + (fks.len() as u64).saturating_sub(1)))
+    }
+
     /// Reconstruct a consensus `Transaction` from Class A rows (no stored raw).
     pub fn reconstruct_tx(&self, tx_fk: Fk) -> Result<Transaction, QueryError> {
         let (rec, stored_outputs, mut stored_inputs) = self.load_body_for_wire(tx_fk)?;
@@ -241,14 +254,32 @@ impl Query {
         let header = self.wire_header_from_record_prev(&rec, prev_hash)?;
         let mut txdata = Vec::with_capacity(tx_fks.len());
         let mut prev_txid_cache: U64Map<[u8; 32]> = U64Map::default();
-        for fk in tx_fks {
-            let (rec_tx, stored_outputs, mut stored_inputs) = self.load_body_for_wire(fk)?;
-            self.fill_input_prev_txids_cached(&mut stored_inputs, &mut prev_txid_cache)?;
-            txdata.push(Self::transaction_from_class_a(
-                rec_tx,
-                stored_outputs,
-                stored_inputs,
-            ));
+        if let Some((first, last)) = Self::contiguous_fk_run(&tx_fks) {
+            let rows = self.store.get_tx_full_span(first, last)?;
+            if rows.len() != tx_fks.len() {
+                return Err(StoreError::Corrupt("invariant: span reconstruct length"));
+            }
+            for (i, (rec_tx, mut stored_inputs, stored_outputs)) in rows.into_iter().enumerate() {
+                if let Some(id) = tx_fks[i].get() {
+                    prev_txid_cache.insert(id, rec_tx.txid);
+                }
+                self.fill_input_prev_txids_cached(&mut stored_inputs, &mut prev_txid_cache)?;
+                txdata.push(Self::transaction_from_class_a(
+                    rec_tx,
+                    stored_outputs,
+                    stored_inputs,
+                ));
+            }
+        } else {
+            for fk in tx_fks {
+                let (rec_tx, stored_outputs, mut stored_inputs) = self.load_body_for_wire(fk)?;
+                self.fill_input_prev_txids_cached(&mut stored_inputs, &mut prev_txid_cache)?;
+                txdata.push(Self::transaction_from_class_a(
+                    rec_tx,
+                    stored_outputs,
+                    stored_inputs,
+                ));
+            }
         }
         Ok(Block { header, txdata })
     }

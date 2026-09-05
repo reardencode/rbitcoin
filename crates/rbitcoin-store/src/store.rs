@@ -566,6 +566,15 @@ impl Store {
         self.txs.get_full(fk)
     }
 
+    /// Contiguous `first..=last` Class A bodies: one txout span + one inwit span.
+    pub fn get_tx_full_span(
+        &self,
+        first: u64,
+        last: u64,
+    ) -> Result<Vec<(TxRecord, Vec<InputRecord>, Vec<OutputRecord>)>, StoreError> {
+        self.txs.get_full_span(first, last)
+    }
+
     /// Parent-prevout hot path: meta + outputs only (no input materialization).
     pub fn get_tx_meta_and_outputs(
         &self,

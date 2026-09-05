@@ -343,6 +343,19 @@ mod pending_head;
 pub use packed::*;
 pub(crate) use pending_head::PENDING_HEAD_CAP;
 
+fn span_rec(span: &[u8], span_off: u64, rec_off: u64, rec_len: u64) -> Result<&[u8], StoreError> {
+    let start = rec_off
+        .checked_sub(span_off)
+        .ok_or(StoreError::Corrupt("span record before span"))?;
+    let start = usize::try_from(start).map_err(|_| StoreError::Corrupt("span start"))?;
+    let len = usize::try_from(rec_len).map_err(|_| StoreError::Corrupt("span rec len"))?;
+    let end = start
+        .checked_add(len)
+        .ok_or(StoreError::Corrupt("span rec end"))?;
+    span.get(start..end)
+        .ok_or(StoreError::Corrupt("span record OOB"))
+}
+
 pub struct TxTable {
     /// `txout.body` — meta + outputs (hot).
     pub(crate) body: VarTable,
@@ -1228,6 +1241,60 @@ impl TxTable {
         let ins = decode_inwit_secret(&inwit, tx.input_count, Some(&self.secret))?;
         tx.txid = self.txids.get(fk)?;
         Ok((tx, ins, outs))
+    }
+
+    /// Contiguous create_fks `first..=last`: one libc span each of `txout.body`
+    /// and `inwit.body`, plus `txid.body` range. Not the confirm uring pipeline.
+    pub fn get_full_span(
+        &self,
+        first: u64,
+        last: u64,
+    ) -> Result<Vec<(TxRecord, Vec<InputRecord>, Vec<OutputRecord>)>, StoreError> {
+        if first == 0 {
+            return Err(StoreError::InvalidFk);
+        }
+        if last < first {
+            return Ok(Vec::new());
+        }
+        let n = (last - first + 1) as usize;
+        let txout_ranges = self.body.record_ranges(first, last)?;
+        let inwit_ranges = self.inwit.record_ranges(first, last)?;
+        if txout_ranges.len() != n || inwit_ranges.len() != n {
+            return Err(StoreError::Corrupt("invariant: full span range count"));
+        }
+        let (t0, _) = txout_ranges[0];
+        let (tn, tln) = txout_ranges[n - 1];
+        let tspan = tn
+            .checked_add(tln)
+            .and_then(|end| end.checked_sub(t0))
+            .ok_or(StoreError::Corrupt("txout span"))?;
+        let (i0, _) = inwit_ranges[0];
+        let (inn, iln) = inwit_ranges[n - 1];
+        let ispan = inn
+            .checked_add(iln)
+            .and_then(|end| end.checked_sub(i0))
+            .ok_or(StoreError::Corrupt("inwit span"))?;
+        let ids = self.txids.get_range(first, last)?;
+        if ids.len() != n {
+            return Err(StoreError::Corrupt("invariant: txid.body span length"));
+        }
+        self.body.with_bytes_at_pread(t0, tspan, |txout_span| {
+            self.inwit.with_bytes_at_pread(i0, ispan, |inwit_span| {
+                let mut out = Vec::with_capacity(n);
+                for i in 0..n {
+                    let (toff, tlen) = txout_ranges[i];
+                    let (ioff, ilen) = inwit_ranges[i];
+                    let traw = span_rec(txout_span, t0, toff, tlen)?;
+                    let iraw = span_rec(inwit_span, i0, ioff, ilen)?;
+                    let (mut tx, _ins, outs, _) =
+                        decode_packed_tx_with_spender_rels_secret(traw, Some(&self.secret))?;
+                    let ins = decode_inwit_secret(iraw, tx.input_count, Some(&self.secret))?;
+                    tx.txid = ids[i];
+                    out.push((tx, ins, outs));
+                }
+                Ok(out)
+            })
+        })
     }
 
     /// Meta + outputs only (one body IO; skips input materialization).

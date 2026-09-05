@@ -4565,6 +4565,46 @@ mod tests {
     }
 
     #[test]
+    fn reconstruct_archived_contiguous_skips_get_tx_full() {
+        let (dir, q) = temp_query("reconstruct-span");
+        let mut prev = Fk::NULL;
+        let mut parent_hash: Option<[u8; 32]> = None;
+        let mut h1_hash = [0u8; 32];
+        for h in 0..2u32 {
+            let (header, ta) = coinbase_block(h, prev, parent_hash);
+            parent_hash = Some(header.hash);
+            let mut txs = vec![ta];
+            if h == 1 {
+                let mut t2 = coinbase_block(h + 100, Fk::NULL, None).1;
+                t2.tx.txid[30] = 0xee;
+                txs.push(t2);
+                let mut t3 = coinbase_block(h + 200, Fk::NULL, None).1;
+                t3.tx.txid[30] = 0xef;
+                txs.push(t3);
+                h1_hash = header.hash;
+            }
+            prev = q.connect_block(Height(h), &header, &txs).unwrap();
+        }
+        rbitcoin_store::reset_tx_full_gets();
+        let arch = q.reconstruct_archived_block(&h1_hash).unwrap().unwrap();
+        assert_eq!(arch.txdata.len(), 3);
+        assert!(
+            rbitcoin_store::tx_full_gets().is_empty(),
+            "contiguous header_txs must span-load, not get_tx_full: {:?}",
+            rbitcoin_store::tx_full_gets()
+        );
+        let fks = q.block_tx_fks(Height(1)).unwrap();
+        for (tx, fk) in arch.txdata.iter().zip(fks.iter()) {
+            let via_full = q.reconstruct_tx(*fk).unwrap();
+            assert_eq!(
+                bitcoin::consensus::encode::serialize(tx),
+                bitcoin::consensus::encode::serialize(&via_full)
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn spend_edge_and_confirm_idempotent_path() {
         let (dir, q) = temp_query("spend-edge");
         // Parent coinbase then child spend in next block.
