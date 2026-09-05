@@ -174,13 +174,52 @@ impl Query {
     ///
     /// Schema v10 stamps create_fk and leaves soft prev_txid zero on disk. Prefer:
     /// 1. already-filled soft prev_txid
-    /// 2. confirm parent cache (sparse pin / body)
-    /// 3. store `body_txid` (deduped via `cache` across a block)
+    /// 2. same-block / prior-in-block cache
+    /// 3. one `txids_get_many` for remaining creates
     pub(crate) fn fill_input_prev_txids_cached(
         &self,
         inputs: &mut [InputRecord],
         cache: &mut U64Map<[u8; 32]>,
     ) -> Result<(), QueryError> {
+        let mut need: Vec<Fk> = Vec::new();
+        for inp in inputs.iter() {
+            if inp.is_coinbase() || inp.prev_txid != [0u8; 32] {
+                continue;
+            }
+            let Some(id) = inp.create_fk.get() else {
+                return Err(StoreError::Corrupt(
+                    "input missing create_fk for wire rebuild",
+                ));
+            };
+            if cache.get(&id).is_some() {
+                continue;
+            }
+            if !need.iter().any(|fk| fk.get() == Some(id)) {
+                need.push(Fk(id));
+            }
+        }
+        if !need.is_empty() {
+            let got = self.store.txids_get_many(&need)?;
+            if got.len() != need.len() {
+                return Err(StoreError::Corrupt("invariant: txids_get_many length"));
+            }
+            for (fk, txid) in need.iter().zip(got.into_iter()) {
+                let Some(id) = fk.get() else {
+                    continue;
+                };
+                let Some(txid) = txid else {
+                    return Err(StoreError::Corrupt(
+                        "wire rebuild: create identity missing from txid.body",
+                    ));
+                };
+                if txid == [0u8; 32] {
+                    return Err(StoreError::Corrupt(
+                        "wire rebuild: create identity still zero after txid.body",
+                    ));
+                }
+                cache.insert(id, txid);
+            }
+        }
         for inp in inputs.iter_mut() {
             if inp.is_coinbase() {
                 inp.prev_txid = [0u8; 32];
@@ -194,17 +233,11 @@ impl Query {
                     "input missing create_fk for wire rebuild",
                 ));
             };
-            if let Some(&txid) = cache.get(&id) {
-                inp.prev_txid = txid;
-                continue;
-            }
-            let txid = self.store.txs.body_txid(Fk(id))?;
-            if txid == [0u8; 32] {
+            let Some(&txid) = cache.get(&id) else {
                 return Err(StoreError::Corrupt(
-                    "wire rebuild: create identity still zero after txid.body",
+                    "wire rebuild: create identity not in prev_txid cache",
                 ));
-            }
-            cache.insert(id, txid);
+            };
             inp.prev_txid = txid;
         }
         Ok(())

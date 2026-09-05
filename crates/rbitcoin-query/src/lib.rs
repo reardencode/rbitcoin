@@ -4605,6 +4605,62 @@ mod tests {
     }
 
     #[test]
+    fn reconstruct_span_batches_foreign_parent_txids() {
+        let (dir, q) = temp_query("reconstruct-parent-batch");
+        let (h0, ta0) = coinbase_block(0, Fk::NULL, None);
+        let parent_txid = ta0.tx.txid;
+        let h0hash = h0.hash;
+        let prev = q.connect_block(Height(0), &h0, &[ta0]).unwrap();
+        let parent_fk = q.block_tx_fks(Height(0)).unwrap()[0];
+        let parent_id = parent_fk.get().unwrap();
+
+        let (h1, cb1) = coinbase_block(1, prev, Some(h0hash));
+        let mut foreign = coinbase_block(1, prev, Some(h0hash)).1;
+        foreign.tx.txid[31] = 0x5e;
+        foreign.tx.input_count = 2;
+        foreign.inputs = vec![
+            InputRecord {
+                prev_txid: parent_txid,
+                create_fk: parent_fk,
+                prev_index: 0,
+                sequence: u32::MAX,
+                script_sig: vec![],
+                witness: vec![],
+            },
+            InputRecord {
+                prev_txid: parent_txid,
+                create_fk: parent_fk,
+                prev_index: 0,
+                sequence: u32::MAX,
+                script_sig: vec![],
+                witness: vec![],
+            },
+        ];
+        foreign.outputs = vec![OutputRecord::unspent(49_0000_0000, vec![0x51])];
+        let h1hash = h1.hash;
+        q.connect_block(Height(1), &h1, &[cb1, foreign]).unwrap();
+        let h1_fks = q.block_tx_fks(Height(1)).unwrap();
+        let same_id = h1_fks[0].get().unwrap();
+
+        rbitcoin_store::reset_tx_full_gets();
+        rbitcoin_store::reset_txid_get_many();
+        let arch = q.reconstruct_archived_block(&h1hash).unwrap().unwrap();
+        assert_eq!(arch.txdata.len(), 2);
+        assert!(rbitcoin_store::tx_full_gets().is_empty());
+        let many = rbitcoin_store::txid_get_many_fks();
+        assert_eq!(
+            many.iter().filter(|&&id| id == parent_id).count(),
+            1,
+            "foreign parent once via txids_get_many: {many:?}"
+        );
+        assert!(
+            !many.contains(&same_id),
+            "same-block create must not hit get_many: {many:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn spend_edge_and_confirm_idempotent_path() {
         let (dir, q) = temp_query("spend-edge");
         // Parent coinbase then child spend in next block.
