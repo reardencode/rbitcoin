@@ -2,6 +2,7 @@
 
 use crate::chain::{AcceptOutcome, ChainHub};
 use crate::error::NetError;
+use crate::peer::{drain_pending_now, PendingBlocks};
 use bitcoin::absolute::LockTime;
 use bitcoin::consensus::encode::{deserialize, serialize};
 use bitcoin::transaction::Version as TxVersion;
@@ -13,8 +14,10 @@ use rbitcoin_consensus::{
     REGTEST_BLOCK_SPACING,
 };
 use rbitcoin_primitives::hex_encode;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 
 const CORE_SKIP: &[&str] = &[
     "bad-prevblk",
@@ -170,6 +173,17 @@ pub fn setup_side_block(
         Ok(AcceptOutcome::Accepted { .. }) => return Err("side became tip"),
         Err(_) => return Err("side reject"),
     }
+    match oracle.submitblock_hex(&hex) {
+        OracleReply::NullAccept => Ok(()),
+        OracleReply::Reason(r) if CORE_DUPLICATE_SKIP.contains(&r.as_str()) => Ok(()),
+        _ => Err("side submit"),
+    }
+}
+
+/// Core-only side submit. Hub must not `accept_received_block` the sibling
+/// before child-first `drain_pending` (014 / 020).
+pub fn submit_side_to_oracle(oracle: &dyn BlockOracle, block: &Block) -> Result<(), &'static str> {
+    let hex = hex_encode(serialize(block));
     match oracle.submitblock_hex(&hex) {
         OracleReply::NullAccept => Ok(()),
         OracleReply::Reason(r) if CORE_DUPLICATE_SKIP.contains(&r.as_str()) => Ok(()),
@@ -566,6 +580,76 @@ pub fn compare_fork_one(
     r
 }
 
+pub fn compare_cmpct_reorg_one(
+    hub: &ChainHub,
+    base: &DiffPad,
+    oracle: &dyn BlockOracle,
+    data: &[u8],
+) -> CompareOne {
+    let Ok(parsed) = deserialize::<Block>(data) else {
+        return CompareOne::NotABlock;
+    };
+    if parsed.txdata.is_empty() {
+        return CompareOne::NotABlock;
+    }
+    let Some(stem) = base.bodies.last() else {
+        return CompareOne::Harness("no stem");
+    };
+    let side = mine_regtest_paying(
+        base.fork_parent.hash,
+        base.fork_parent.time.saturating_add(REGTEST_BLOCK_SPACING),
+        base.fork_parent.height.saturating_add(1),
+        ScriptBuf::from_bytes(vec![0x51, 0x51]),
+        Vec::new(),
+    );
+    if let Err(e) = submit_side_to_oracle(oracle, &side) {
+        return CompareOne::Harness(e);
+    }
+    let extra: Vec<Transaction> = parsed.txdata.into_iter().skip(1).collect();
+    let child = mine_regtest_paying(
+        side.block_hash(),
+        side.header.time.saturating_add(REGTEST_BLOCK_SPACING),
+        base.fork_parent.height.saturating_add(2),
+        ScriptBuf::from_bytes(vec![0x51]),
+        extra,
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut pending = PendingBlocks::new();
+    pending.insert(child.block_hash(), child.clone());
+    pending.insert(side.block_hash(), side);
+    let mut headers = HashMap::new();
+    let mut requested = HashSet::new();
+    if drain_pending_now(hub, &tx, &mut pending, &mut headers, &mut requested, true).is_err() {
+        return CompareOne::Harness("drain");
+    }
+    let ours = if hub.tip_hash() == Some(child.block_hash()) {
+        DiffVerdict::Accept
+    } else {
+        DiffVerdict::Reject
+    };
+    let keep = base.fork_parent.height;
+    let hex = hex_encode(serialize(&child));
+    let reply = oracle.submitblock_hex(&hex);
+    if matches!(reply, OracleReply::Dead)
+        || (matches!(reply, OracleReply::RpcError) && !oracle.liveness_ok())
+    {
+        if ours == DiffVerdict::Accept {
+            let _ = hub.rewind_to_height(keep);
+        }
+        let _ = oracle.core_rewind_to_height(keep);
+        let _ = restore_stem(hub, oracle, stem);
+        return CompareOne::Harness("oracle dead");
+    }
+    let core = verdict_from_core_reply(&reply);
+    let r = combine(hub, oracle, keep, ours, core, &reply, &hex);
+    if hub.tip_height() == Some(base.fork_parent.height) {
+        if let Err(e) = restore_stem(hub, oracle, stem) {
+            return CompareOne::Harness(e);
+        }
+    }
+    r
+}
+
 fn compare_prepared(
     hub: &ChainHub,
     tip: &DiffTip,
@@ -665,6 +749,7 @@ mod tests {
 
     struct MockOracle {
         reply: OracleReply,
+        later: Option<OracleReply>,
         rewind: Cell<u32>,
         last_keep: Cell<u32>,
         submits: Cell<u32>,
@@ -675,18 +760,29 @@ mod tests {
         fn new(reply: OracleReply) -> Self {
             Self {
                 reply,
+                later: None,
                 rewind: Cell::new(0),
                 last_keep: Cell::new(u32::MAX),
                 submits: Cell::new(0),
                 live: true,
             }
         }
+
+        fn then(mut self, later: OracleReply) -> Self {
+            self.later = Some(later);
+            self
+        }
     }
 
     impl BlockOracle for MockOracle {
         fn submitblock_hex(&self, _hex: &str) -> OracleReply {
-            self.submits.set(self.submits.get() + 1);
-            self.reply.clone()
+            let n = self.submits.get();
+            self.submits.set(n + 1);
+            if n == 0 {
+                self.reply.clone()
+            } else {
+                self.later.clone().unwrap_or_else(|| self.reply.clone())
+            }
         }
         fn liveness_ok(&self) -> bool {
             self.live
@@ -905,6 +1001,7 @@ mod tests {
 
         let mock = MockOracle {
             reply: OracleReply::Dead,
+            later: None,
             rewind: Cell::new(0),
             last_keep: Cell::new(u32::MAX),
             submits: Cell::new(0),
@@ -1180,6 +1277,50 @@ mod tests {
 
         assert!(matches!(
             compare_fork_one(&hub, &base, &mock, b"junk"),
+            CompareOne::NotABlock
+        ));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn compare_cmpct_reorg_one_child_first_drain() {
+        let (dir, hub, _g) = tmp_diff_hub();
+        let pad = mine_diff_pad(&hub, DIFF_TEST_PAD_HEIGHT).unwrap();
+        let base = mine_diff_stem(&hub, pad).unwrap();
+        let stem = base.tip.hash;
+        let seed = serialize(&fork_child_seed_block());
+
+        let mock = MockOracle::new(OracleReply::NullAccept);
+        match compare_cmpct_reorg_one(&hub, &base, &mock, &seed) {
+            CompareOne::Agreed { accept: true } => {}
+            other => panic!("cmpct reorg accept: {other:?}"),
+        }
+        assert_eq!(hub.tip_height(), Some(DIFF_TEST_PAD_HEIGHT + 1));
+        assert_eq!(hub.tip_hash(), Some(stem));
+        assert_eq!(mock.last_keep.get(), DIFF_TEST_PAD_HEIGHT);
+
+        let bad_tx = Transaction {
+            version: TxVersion::ONE,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![bitcoin::TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let bad = serialize(&Block {
+            header: fork_child_seed_block().header,
+            txdata: vec![fork_child_seed_block().txdata[0].clone(), bad_tx],
+        });
+        let mock = MockOracle::new(OracleReply::NullAccept)
+            .then(OracleReply::Reason("bad-txns-vin-empty".into()));
+        match compare_cmpct_reorg_one(&hub, &base, &mock, &bad) {
+            CompareOne::Agreed { accept: false } => {}
+            other => panic!("cmpct reorg reject: {other:?}"),
+        }
+        assert_eq!(hub.tip_hash(), Some(stem));
+        assert!(matches!(
+            compare_cmpct_reorg_one(&hub, &base, &mock, b"junk"),
             CompareOne::NotABlock
         ));
         let _ = fs::remove_dir_all(dir);

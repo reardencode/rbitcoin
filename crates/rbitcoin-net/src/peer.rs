@@ -3015,8 +3015,7 @@ async fn drain_pending(
     Ok(())
 }
 
-#[cfg(test)]
-fn drain_pending_now(
+pub(crate) fn drain_pending_now(
     hub: &ChainHub,
     out: &mpsc::UnboundedSender<NetworkMessage>,
     pending_blocks: &mut PendingBlocks,
@@ -3057,17 +3056,19 @@ async fn drain_pending_once(
             };
             pending_headers.remove(&h);
             relay_new_pow_valid_block(hub, &block, session);
-            match hub.accept_received_block_async(block).await {
+            match hub.accept_received_block_async(block.clone()).await {
                 Ok(AcceptOutcome::Accepted { .. })
                 | Ok(AcceptOutcome::AlreadyHave)
                 | Ok(AcceptOutcome::IgnoredWeaker) => {
                     progress = true;
                 }
-                // Invalid or unconnectable body: reject the block, keep the
-                // peer. BIP-152 high-bandwidth (and getdata we solicited) can
-                // deliver PoW-valid-but-invalid blocks from honest Core peers
-                // that have not validated yet — never disconnect or ban-score
-                // for that (docs/external_findings/001-disconnect-on-invalid-block.md).
+                Err(NetError::Protocol("unknown parent")) => {
+                    pending_blocks.insert(h, block);
+                }
+                // Invalid body: reject the block, keep the peer. BIP-152
+                // high-bandwidth can deliver PoW-valid-but-invalid blocks
+                // from honest Core peers that have not validated yet
+                // (docs/external_findings/001-disconnect-on-invalid-block.md).
                 Err(e) if net_error_is_store_not_found(&e) => {
                     rbitcoin_log::warn!(
                         "p2p: accept dropped {} (store not found — keep session): {e}",
