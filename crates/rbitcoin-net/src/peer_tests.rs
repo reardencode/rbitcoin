@@ -1,7 +1,19 @@
 use super::*;
+use crate::peers::PeerOut;
 use rbitcoin_consensus::{ChainParams, Milestone};
 use rbitcoin_query::Query;
 use std::collections::{HashMap, HashSet};
+
+fn served_block(p: PeerOut) -> bitcoin::Block {
+    match p {
+        PeerOut::Encoded(bytes) => {
+            assert_eq!(bytes.first().copied(), Some(2), "v2 block short id");
+            bitcoin::consensus::encode::deserialize(&bytes[1..]).expect("served block payload")
+        }
+        PeerOut::Msg(NetworkMessage::Block(b)) => b,
+        other => panic!("expected served block, got {other:?}"),
+    }
+}
 
 fn tmp_store(label: &str) -> (std::path::PathBuf, Query) {
     let dir = std::env::temp_dir().join(format!(
@@ -317,7 +329,7 @@ fn header_getdata_is_compact_after_sendcmpct() {
         .await
         .unwrap();
     });
-    let msg = out_rx.try_recv().expect("getdata");
+    let msg = out_rx.try_recv().expect("getdata").expect_msg();
     match msg {
         NetworkMessage::GetData(inv) => {
             assert!(
@@ -403,7 +415,7 @@ fn submitheader_parent_p2p_child_header_getdatas_body() {
     });
     let want = b7.block_hash();
     let mut saw = false;
-    while let Ok(msg) = out_rx.try_recv() {
+    while let Ok(msg) = out_rx.try_recv().map(PeerOut::expect_msg) {
         match msg {
             NetworkMessage::GetData(inv) => {
                 saw |= inv.iter().any(|i| match i {
@@ -712,9 +724,9 @@ fn minchainwork_does_not_getdata_below_floor() {
         let mut cmpct_ver = 2u32;
         let mut ban = 0u32;
 
-        fn drain_getdata(rx: &mut mpsc::UnboundedReceiver<NetworkMessage>) -> Vec<BlockHash> {
+        fn drain_getdata(rx: &mut mpsc::UnboundedReceiver<PeerOut>) -> Vec<BlockHash> {
             let mut hashes = Vec::new();
-            while let Ok(m) = rx.try_recv() {
+            while let Ok(m) = rx.try_recv().map(PeerOut::expect_msg) {
                 if let NetworkMessage::GetData(inv) = m {
                     for i in inv {
                         match i {
@@ -1124,6 +1136,7 @@ fn blocksonly_sendraw_invs_unbroadcast_to_inbound() {
         match probe_rx
             .try_recv()
             .expect("unbroadcast INV without clock_due")
+            .expect_msg()
         {
             NetworkMessage::Inv(v) => {
                 assert_eq!(v, vec![Inventory::WTx(tx.compute_wtxid())]);
@@ -1156,7 +1169,11 @@ fn blocksonly_sendraw_invs_unbroadcast_to_inbound() {
         peers.request_all_tx_inv();
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
         queue_due_tx_invs(&hub, inbound.as_ref(), &HashMap::new(), &out_tx);
-        match out_rx.try_recv().expect("inbound must get wtx INV") {
+        match out_rx
+            .try_recv()
+            .expect("inbound must get wtx INV")
+            .expect_msg()
+        {
             NetworkMessage::Inv(v) => {
                 assert_eq!(v, vec![Inventory::WTx(tx.compute_wtxid())]);
             }
@@ -1197,7 +1214,11 @@ fn blocksonly_sendraw_invs_unbroadcast_to_inbound() {
         )
         .await
         .unwrap();
-        match out_rx.try_recv().expect("getdata must serve tx") {
+        match out_rx
+            .try_recv()
+            .expect("getdata must serve tx")
+            .expect_msg()
+        {
             NetworkMessage::Tx(got) => assert_eq!(got.compute_wtxid(), tx.compute_wtxid()),
             other => panic!("expected Tx, got {other:?}"),
         }
@@ -1452,7 +1473,7 @@ fn queue_due_tx_invs_idle_tick_does_not_clone_live_bodies() {
             "clock_due INV must use wtxid index, not list_live (got {})",
             flush.list_live
         );
-        match out_rx.try_recv().expect("clock_due must INV") {
+        match out_rx.try_recv().expect("clock_due must INV").expect_msg() {
             NetworkMessage::Inv(v) => {
                 assert_eq!(v, vec![Inventory::WTx(tx.compute_wtxid())]);
             }
@@ -1555,7 +1576,7 @@ fn queue_due_tx_invs_age_only_tick_does_not_rescan_live() {
         mp.note_mock_now(t0 + 30);
         queue_due_tx_invs(&hub, inbound.as_ref(), &HashMap::new(), &out_tx);
         let mut announced = 0u32;
-        while let Ok(msg) = out_rx.try_recv() {
+        while let Ok(msg) = out_rx.try_recv().map(PeerOut::expect_msg) {
             match msg {
                 NetworkMessage::Inv(v) => announced += v.len() as u32,
                 other => panic!("expected INV, got {other:?}"),
@@ -1693,7 +1714,7 @@ fn mocktime_jump_does_not_inv_or_serve_new_sendraw() {
         inbound.request_tx_inv();
         queue_due_tx_invs(&hub, inbound.as_ref(), &HashMap::new(), &out_tx);
         let mut announced = 0u32;
-        while let Ok(msg) = out_rx.try_recv() {
+        while let Ok(msg) = out_rx.try_recv().map(PeerOut::expect_msg) {
             match msg {
                 NetworkMessage::Inv(v) => {
                     announced += v.len() as u32;
@@ -1750,7 +1771,7 @@ fn mocktime_jump_does_not_inv_or_serve_new_sendraw() {
         )
         .await
         .unwrap();
-        match out_rx.try_recv().expect("GetData must reply") {
+        match out_rx.try_recv().expect("GetData must reply").expect_msg() {
             NetworkMessage::NotFound(v) => {
                 assert_eq!(v, vec![Inventory::WTx(fresh.compute_wtxid())]);
             }
@@ -1880,6 +1901,7 @@ fn blocksonly_relay_perm_tx_invs_other_inbound() {
         match inv_rx
             .try_recv()
             .expect("second inbound must get wtx INV from flush_tx_invs")
+            .expect_msg()
         {
             NetworkMessage::Inv(v) => {
                 assert_eq!(v, vec![Inventory::WTx(tx.compute_wtxid())]);
@@ -2225,7 +2247,7 @@ fn handle_peer_frame_control_and_inv_paths() {
         // Drain outbound: Pong(42) + empty Addr at least.
         let mut saw_pong = false;
         let mut saw_addr = false;
-        while let Ok(m) = out_rx.try_recv() {
+        while let Ok(m) = out_rx.try_recv().map(PeerOut::expect_msg) {
             match m {
                 NetworkMessage::Pong(n) => {
                     assert_eq!(n, 42);
@@ -2265,7 +2287,7 @@ fn handle_peer_frame_control_and_inv_paths() {
         )
         .await
         .unwrap();
-        let headers_msg = out_rx.try_recv().unwrap();
+        let headers_msg = out_rx.try_recv().unwrap().expect_msg();
         assert!(matches!(headers_msg, NetworkMessage::Headers(_)));
 
         // Inv for unknown block → GetHeaders (never getdata without a header).
@@ -2288,7 +2310,7 @@ fn handle_peer_frame_control_and_inv_paths() {
         )
         .await
         .unwrap();
-        match out_rx.try_recv().unwrap() {
+        match out_rx.try_recv().unwrap().expect_msg() {
             NetworkMessage::GetHeaders(gh) => {
                 assert!(
                     !gh.locator_hashes.is_empty() || gh.stop_hash == want_h,
@@ -2356,10 +2378,7 @@ fn handle_peer_frame_control_and_inv_paths() {
         )
         .await
         .unwrap();
-        match out_rx.try_recv().unwrap() {
-            NetworkMessage::Block(b) => assert_eq!(b.block_hash(), tip),
-            other => panic!("expected Block, got {other:?}"),
-        }
+        assert_eq!(served_block(out_rx.try_recv().unwrap()).block_hash(), tip);
 
         // CompactBlock getdata for tip.
         handle_peer_frame(
@@ -2381,7 +2400,7 @@ fn handle_peer_frame_control_and_inv_paths() {
         .await
         .unwrap();
         assert!(matches!(
-            out_rx.try_recv().unwrap(),
+            out_rx.try_recv().unwrap().expect_msg(),
             NetworkMessage::CmpctBlock(_)
         ));
 
@@ -2438,7 +2457,7 @@ fn handle_peer_frame_control_and_inv_paths() {
         .await
         .unwrap();
         assert!(matches!(
-            out_rx.try_recv().unwrap(),
+            out_rx.try_recv().unwrap().expect_msg(),
             NetworkMessage::BlockTxn(_)
         ));
 
@@ -2469,7 +2488,10 @@ fn handle_peer_frame_control_and_inv_paths() {
         .await
         .unwrap();
         assert!(
-            matches!(out_rx.try_recv().unwrap(), NetworkMessage::Block(_)),
+            matches!(
+                out_rx.try_recv().unwrap().expect_msg(),
+                NetworkMessage::Block(_)
+            ),
             "getblocktxn past depth 10 must send a full block"
         );
 
@@ -2598,7 +2620,7 @@ fn handle_peer_frame_control_and_inv_paths() {
         )
         .await
         .unwrap();
-        match out_rx.try_recv().unwrap() {
+        match out_rx.try_recv().unwrap().expect_msg() {
             NetworkMessage::GetHeaders(_) => {}
             other => panic!("expected GetHeaders for unknown inv, got {other:?}"),
         }
@@ -2643,10 +2665,7 @@ fn handle_peer_frame_control_and_inv_paths() {
         )
         .await
         .unwrap();
-        assert!(matches!(
-            out_rx.try_recv().unwrap(),
-            NetworkMessage::Block(_)
-        ));
+        let _ = served_block(out_rx.try_recv().unwrap());
 
         // Full Block message path: pending + drain_pending (AlreadyHave for tip).
         let gen_block2 = hub
@@ -2810,7 +2829,7 @@ fn handle_peer_frame_mempool_tx_and_inv_paths() {
         )
         .await
         .unwrap();
-        match out_rx.try_recv().unwrap() {
+        match out_rx.try_recv().unwrap().expect_msg() {
             NetworkMessage::GetData(v) => {
                 assert!(v.len() >= 1);
             }
@@ -2839,13 +2858,13 @@ fn handle_peer_frame_mempool_tx_and_inv_paths() {
         )
         .await
         .unwrap();
-        match out_rx.try_recv().unwrap() {
+        match out_rx.try_recv().unwrap().expect_msg() {
             NetworkMessage::NotFound(v) => {
                 assert_eq!(v.len(), 1);
             }
             other => panic!("expected NotFound, got {other:?}"),
         }
-        match out_rx.try_recv().unwrap() {
+        match out_rx.try_recv().unwrap().expect_msg() {
             NetworkMessage::NotFound(v) => {
                 assert_eq!(v.len(), 1);
             }
@@ -3086,7 +3105,7 @@ fn getdata_tx_notfound_unless_announced_or_reorg() {
         )
         .await
         .unwrap();
-        match out_rx.try_recv().unwrap() {
+        match out_rx.try_recv().unwrap().expect_msg() {
             NetworkMessage::NotFound(v) => {
                 assert_eq!(v, vec![Inventory::WTx(recent.compute_wtxid())]);
             }
@@ -3114,7 +3133,7 @@ fn getdata_tx_notfound_unless_announced_or_reorg() {
         )
         .await
         .unwrap();
-        match out_rx.try_recv().unwrap() {
+        match out_rx.try_recv().unwrap().expect_msg() {
             NetworkMessage::Tx(tx) => assert_eq!(tx.compute_wtxid(), recent.compute_wtxid()),
             other => panic!("announced recent must serve tx, got {other:?}"),
         }
@@ -3139,7 +3158,7 @@ fn getdata_tx_notfound_unless_announced_or_reorg() {
         )
         .await
         .unwrap();
-        match out_rx.try_recv().unwrap() {
+        match out_rx.try_recv().unwrap().expect_msg() {
             NetworkMessage::Tx(tx) => {
                 assert_eq!(tx.compute_wtxid(), disconnected.compute_wtxid())
             }
@@ -3194,7 +3213,7 @@ fn getdata_tx_notfound_unless_announced_or_reorg() {
         )
         .await
         .unwrap();
-        match out_rx.try_recv().unwrap() {
+        match out_rx.try_recv().unwrap().expect_msg() {
             NetworkMessage::NotFound(v) => {
                 assert_eq!(v, vec![Inventory::WTx(later.compute_wtxid())]);
             }
@@ -3296,10 +3315,10 @@ fn invalid_getdata_type0_still_serves_tip_block() {
         )
         .await
         .unwrap();
-        match out_rx.try_recv().expect("tip getdata must serve") {
-            NetworkMessage::Block(b) => assert_eq!(b.block_hash(), tip),
-            other => panic!("expected tip Block, got {other:?}"),
-        }
+        assert_eq!(
+            served_block(out_rx.try_recv().expect("tip getdata must serve")).block_hash(),
+            tip
+        );
         let _ = std::fs::remove_dir_all(dir);
     });
 }
@@ -3632,7 +3651,10 @@ fn drain_requests_missing_parent_of_pending_branch() {
     pb.insert(orphan.block_hash(), orphan);
     let mut ph = HashMap::new();
     drain_pending_now(&hub, &tx, &mut pb, &mut ph, &mut HashSet::new(), false).unwrap();
-    let msg = rx.try_recv().expect("getdata for missing parent");
+    let msg = rx
+        .try_recv()
+        .expect("getdata for missing parent")
+        .expect_msg();
     match msg {
         NetworkMessage::GetData(inv) => {
             assert!(
@@ -3746,9 +3768,9 @@ fn inv_of_already_asked_block_does_not_getdata() {
         }
     }
 
-    fn drain_block_getdata(rx: &mut mpsc::UnboundedReceiver<NetworkMessage>) -> Vec<BlockHash> {
+    fn drain_block_getdata(rx: &mut mpsc::UnboundedReceiver<PeerOut>) -> Vec<BlockHash> {
         let mut hashes = Vec::new();
-        while let Ok(m) = rx.try_recv() {
+        while let Ok(m) = rx.try_recv().map(PeerOut::expect_msg) {
             if let NetworkMessage::GetData(inv) = m {
                 for i in inv {
                     if let Inventory::Block(h)
@@ -4200,7 +4222,7 @@ fn addrfetch_post_handshake_queues_getaddr_not_getheaders() {
 
     let mut saw_getaddr = false;
     let mut saw_getheaders = false;
-    while let Ok(m) = out_rx.try_recv() {
+    while let Ok(m) = out_rx.try_recv().map(PeerOut::expect_msg) {
         match m {
             NetworkMessage::GetAddr => saw_getaddr = true,
             NetworkMessage::GetHeaders(_) => saw_getheaders = true,
@@ -4443,6 +4465,42 @@ fn try_queue_served_block_false_at_cap() {
     assert!(!queued);
     assert!(out_rx.try_recv().is_err());
     assert_eq!(n.load(Ordering::SeqCst), MAX_SERVE_BLOCKS);
+}
+
+#[test]
+fn encode_served_witness_block_panics_on_reactor() {
+    let h = BlockHash::from_byte_array([0u8; 32]);
+    let join = std::thread::Builder::new()
+        .name("tokio-rt-worker".into())
+        .spawn(move || {
+            let (dir, q) = tmp_store("serve-reactor");
+            let cache = BlockCache::new();
+            let r = encode_served_witness_block(&cache, &q, &h);
+            let _ = std::fs::remove_dir_all(dir);
+            r
+        })
+        .unwrap()
+        .join();
+    assert!(
+        join.is_err(),
+        "must panic on tokio-rt-worker without BlockingRegion"
+    );
+    let join_ok = std::thread::Builder::new()
+        .name("tokio-rt-worker".into())
+        .spawn(move || {
+            let _g = crate::reactor::BlockingRegion::enter();
+            let (dir, q) = tmp_store("serve-reactor-ok");
+            let cache = BlockCache::new();
+            let r = encode_served_witness_block(&cache, &q, &h);
+            let _ = std::fs::remove_dir_all(dir);
+            r
+        })
+        .unwrap()
+        .join();
+    assert!(
+        join_ok.is_ok(),
+        "BlockingRegion must allow reconstruct on worker name"
+    );
 }
 
 #[test]
@@ -4758,8 +4816,9 @@ fn getdata_skips_reconstruct_when_serve_inflight_at_cap() {
         .unwrap();
         let mut n_block = 0usize;
         while let Ok(msg) = out_rx.try_recv() {
-            if matches!(msg, NetworkMessage::Block(_)) {
-                n_block += 1;
+            match msg {
+                PeerOut::Encoded(_) | PeerOut::Msg(NetworkMessage::Block(_)) => n_block += 1,
+                _ => {}
             }
         }
         assert!(
@@ -4800,9 +4859,9 @@ fn catchup_headers_getdata_stays_in_serve_window() {
         }
     }
 
-    fn getdata_hashes(rx: &mut mpsc::UnboundedReceiver<NetworkMessage>) -> Vec<BlockHash> {
+    fn getdata_hashes(rx: &mut mpsc::UnboundedReceiver<PeerOut>) -> Vec<BlockHash> {
         let mut out = Vec::new();
-        while let Ok(msg) = rx.try_recv() {
+        while let Ok(msg) = rx.try_recv().map(PeerOut::expect_msg) {
             if let NetworkMessage::GetData(inv) = msg {
                 for i in inv {
                     match i {
@@ -4943,9 +5002,9 @@ fn catchup_compact_getdata_clears_requested_for_next_window() {
         }
     }
 
-    fn getdata_hashes(rx: &mut mpsc::UnboundedReceiver<NetworkMessage>) -> Vec<BlockHash> {
+    fn getdata_hashes(rx: &mut mpsc::UnboundedReceiver<PeerOut>) -> Vec<BlockHash> {
         let mut out = Vec::new();
-        while let Ok(msg) = rx.try_recv() {
+        while let Ok(msg) = rx.try_recv().map(PeerOut::expect_msg) {
             if let NetworkMessage::GetData(inv) = msg {
                 for i in inv {
                     match i {
@@ -5072,7 +5131,7 @@ fn queue_getheaders_from_hash_puts_it_first() {
     let start = BlockHash::from_byte_array([0xcd; 32]);
     let (tx, mut rx) = mpsc::unbounded_channel();
     queue_getheaders(&tx, &hub, None, false, Some(start)).unwrap();
-    match rx.try_recv().unwrap() {
+    match rx.try_recv().unwrap().expect_msg() {
         NetworkMessage::GetHeaders(gh) => {
             assert_eq!(gh.locator_hashes[0], start);
         }
@@ -5177,7 +5236,7 @@ fn full_headers_batch_continues_from_last_header() {
         .await
         .unwrap();
         let mut getheaders = Vec::new();
-        while let Ok(msg) = out_rx.try_recv() {
+        while let Ok(msg) = out_rx.try_recv().map(PeerOut::expect_msg) {
             if let NetworkMessage::GetHeaders(gh) = msg {
                 getheaders.push(gh.locator_hashes);
             }
@@ -5471,7 +5530,10 @@ fn compact_tip_announce_must_not_wrap_serve_inflight() {
         .await
         .unwrap();
         assert!(
-            matches!(out_rx.try_recv(), Ok(NetworkMessage::CmpctBlock(_))),
+            matches!(
+                out_rx.try_recv().map(PeerOut::expect_msg),
+                Ok(NetworkMessage::CmpctBlock(_))
+            ),
             "getdata MSG_CMPCT_BLOCK must still serve after a compact tip announce"
         );
         let _ = std::fs::remove_dir_all(dir);
@@ -5577,7 +5639,10 @@ fn compact_tip_announce_must_not_consume_serve_slots() {
         .await
         .unwrap();
         assert!(
-            matches!(out_rx.try_recv(), Ok(NetworkMessage::CmpctBlock(_))),
+            matches!(
+                out_rx.try_recv().map(PeerOut::expect_msg),
+                Ok(NetworkMessage::CmpctBlock(_))
+            ),
             "getdata MSG_CMPCT_BLOCK must still serve after a burst of compact announces"
         );
         let _ = std::fs::remove_dir_all(dir);
@@ -5665,7 +5730,7 @@ fn coinbase_compact_fills_without_mempool() {
             hub.has_block(&hash),
             "coinbase compact must connect without a mempool hub"
         );
-        while let Ok(msg) = out_rx.try_recv() {
+        while let Ok(msg) = out_rx.try_recv().map(PeerOut::expect_msg) {
             if matches!(msg, NetworkMessage::GetData(_)) {
                 panic!("coinbase compact must not fall back to getdata, got {msg:?}");
             }
@@ -6128,7 +6193,7 @@ fn new_pow_valid_compact_relays_to_hb_before_connect() {
         );
 
         let mut got = false;
-        while let Ok(msg) = b_rx.try_recv() {
+        while let Ok(msg) = b_rx.try_recv().map(PeerOut::expect_msg) {
             if let NetworkMessage::CmpctBlock(c) = msg {
                 assert_eq!(c.compact_block.header.block_hash(), hash);
                 got = true;
@@ -6138,7 +6203,7 @@ fn new_pow_valid_compact_relays_to_hb_before_connect() {
             got,
             "HB peer must get cmpctblock before/without successful connect"
         );
-        while let Ok(msg) = a_rx.try_recv() {
+        while let Ok(msg) = a_rx.try_recv().map(PeerOut::expect_msg) {
             if let NetworkMessage::CmpctBlock(c) = msg {
                 panic!(
                     "sender must not receive our compact announce, got {}",

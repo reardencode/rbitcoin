@@ -9,7 +9,7 @@ use crate::codec::{FramedMessage, MAX_HEADERS_RESULTS, MAX_INV_SIZE, MAX_LOCATOR
 use crate::error::NetError;
 use crate::msg_decode::decode_framed_offload;
 use crate::peer_dos::{PeerRateLimiter, OVERSIZE_BAN_SCORE, RATE_LIMIT_BAN_SCORE};
-use crate::peers::PingAction;
+use crate::peers::{PeerOut, PingAction};
 use crate::v2::{
     open_v2, read_v2_contents, read_v2_frame, write_v2_contents, write_v2_msg,
     write_v2_msg_offload, V2Reader, V2Writer,
@@ -724,19 +724,26 @@ pub async fn peer_session_with(
         let _ = write_v2_msg(&mut writer, NetworkMessage::FeeFilter(fee_sat)).await;
     }
 
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<NetworkMessage>();
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<PeerOut>();
     if let Some(s) = meta.session.as_ref() {
         s.attach_out(out_tx.clone());
     }
 
     let writer_session = meta.session.clone();
     let mut writer_task = tokio::spawn(async move {
-        while let Some(msg) = out_rx.recv().await {
-            let full = matches!(
-                msg,
-                NetworkMessage::Block(_) | NetworkMessage::CmpctBlock(_)
-            );
-            let err = write_v2_msg_offload(&mut writer, msg).await.is_err();
+        while let Some(out) = out_rx.recv().await {
+            let (full, err) = match out {
+                PeerOut::Msg(msg) => {
+                    let full = matches!(
+                        msg,
+                        NetworkMessage::Block(_) | NetworkMessage::CmpctBlock(_)
+                    );
+                    (full, write_v2_msg_offload(&mut writer, msg).await.is_err())
+                }
+                PeerOut::Encoded(bytes) => {
+                    (true, write_v2_contents(&mut writer, &bytes).await.is_err())
+                }
+            };
             if full {
                 if let Some(s) = &writer_session {
                     note_served_write(&s.serve_inflight);
@@ -1216,7 +1223,7 @@ pub(crate) fn should_poll_peer_headers(hub: &ChainHub, best_known: Option<BlockH
 
 /// Start Core initial headers-sync on this session if we are allowed to.
 fn maybe_queue_initial_getheaders(
-    out: &mpsc::UnboundedSender<NetworkMessage>,
+    out: &mpsc::UnboundedSender<PeerOut>,
     hub: &ChainHub,
     session: &crate::peers::LivePeer,
 ) -> bool {
@@ -1240,7 +1247,7 @@ fn maybe_queue_initial_getheaders(
 }
 
 fn maybe_queue_addrfetch_getaddr(
-    out: &mpsc::UnboundedSender<NetworkMessage>,
+    out: &mpsc::UnboundedSender<PeerOut>,
     session: &crate::peers::LivePeer,
 ) -> bool {
     if session.conn_type != crate::peers::PeerConnType::AddrFetch {
@@ -1256,7 +1263,7 @@ fn addrfetch_timed_out(session: &crate::peers::LivePeer) -> bool {
 }
 
 fn queue_getheaders(
-    out: &mpsc::UnboundedSender<NetworkMessage>,
+    out: &mpsc::UnboundedSender<PeerOut>,
     hub: &ChainHub,
     session: Option<&crate::peers::LivePeer>,
     mark_awaiting: bool,
@@ -1285,7 +1292,7 @@ fn getdata_use_compact(hub: &ChainHub, peer_cmpct_version: u32) -> bool {
 
 fn queue_block_getdata(
     hub: &ChainHub,
-    out: &mpsc::UnboundedSender<NetworkMessage>,
+    out: &mpsc::UnboundedSender<PeerOut>,
     requested_blocks: &mut HashSet<BlockHash>,
     want: &[BlockHash],
     compact: bool,
@@ -1460,7 +1467,7 @@ fn queue_due_tx_invs(
     hub: &ChainHub,
     session: &crate::peers::LivePeer,
     from_this_peer: &HashMap<bitcoin::Txid, ()>,
-    out_tx: &mpsc::UnboundedSender<NetworkMessage>,
+    out_tx: &mpsc::UnboundedSender<PeerOut>,
 ) {
     let Some(mp) = hub.mempool() else {
         return;
@@ -1564,7 +1571,7 @@ fn apply_cmpct_blocktxn(
 async fn handle_peer_frame(
     frame: FramedMessage,
     hub: &ChainHub,
-    out_tx: &mpsc::UnboundedSender<NetworkMessage>,
+    out_tx: &mpsc::UnboundedSender<PeerOut>,
     peer_wants_headers: &mut bool,
     peer_wtxid_relay: &mut bool,
     peer_send_cmpct: &mut bool,
@@ -1709,14 +1716,17 @@ async fn handle_peer_frame(
                         if !hub.stale_relay_allowed(h) {
                             continue;
                         }
-                        if let Some(block) =
-                            block_for_peer(hub.cache.as_ref(), hub.query.as_ref(), h)?
-                        {
-                            let _ = try_queue_served_block(
-                                out_tx,
-                                inflight,
-                                NetworkMessage::Block(block),
-                            )?;
+                        let query = Arc::clone(&hub.query);
+                        let cache = Arc::clone(&hub.cache);
+                        let hash = *h;
+                        let encoded = tokio::task::spawn_blocking(move || {
+                            let _g = crate::reactor::BlockingRegion::enter();
+                            encode_served_witness_block(cache.as_ref(), query.as_ref(), &hash)
+                        })
+                        .await
+                        .map_err(|_| NetError::Protocol("serve reconstruct join failed"))??;
+                        if let Some(bytes) = encoded {
+                            let _ = try_queue_served_encoded(out_tx, inflight, bytes)?;
                         }
                     }
                     Inventory::CompactBlock(h) => {
@@ -2962,11 +2972,13 @@ pub(crate) fn outbound_feefilter_sats(
     Some(hub.feefilter_sat_kvb() as i64)
 }
 
-fn queue_out(
-    out: &mpsc::UnboundedSender<NetworkMessage>,
-    msg: NetworkMessage,
-) -> Result<(), NetError> {
-    out.send(msg)
+fn queue_out(out: &mpsc::UnboundedSender<PeerOut>, msg: NetworkMessage) -> Result<(), NetError> {
+    out.send(PeerOut::Msg(msg))
+        .map_err(|_| NetError::Protocol("peer write half closed"))
+}
+
+fn queue_encoded(out: &mpsc::UnboundedSender<PeerOut>, bytes: Vec<u8>) -> Result<(), NetError> {
+    out.send(PeerOut::Encoded(bytes))
         .map_err(|_| NetError::Protocol("peer write half closed"))
 }
 
@@ -2974,7 +2986,7 @@ fn queue_out(
 ///
 /// `None` inflight (tests without a session) always queues.
 pub(crate) fn try_queue_served_block(
-    out: &mpsc::UnboundedSender<NetworkMessage>,
+    out: &mpsc::UnboundedSender<PeerOut>,
     inflight: Option<&AtomicUsize>,
     msg: NetworkMessage,
 ) -> Result<bool, NetError> {
@@ -2993,11 +3005,31 @@ pub(crate) fn try_queue_served_block(
     Ok(true)
 }
 
+fn try_queue_served_encoded(
+    out: &mpsc::UnboundedSender<PeerOut>,
+    inflight: Option<&AtomicUsize>,
+    bytes: Vec<u8>,
+) -> Result<bool, NetError> {
+    if let Some(n) = inflight {
+        if n.load(Ordering::SeqCst) >= MAX_SERVE_BLOCKS {
+            return Ok(false);
+        }
+        n.fetch_add(1, Ordering::SeqCst);
+        if let Err(e) = queue_encoded(out, bytes) {
+            note_served_write(n);
+            return Err(e);
+        }
+        return Ok(true);
+    }
+    queue_encoded(out, bytes)?;
+    Ok(true)
+}
+
 /// BIP152 high-bandwidth tip announce. Does **not** count on
 /// `serve_inflight` (that cap is reconstruct getdata). Writer still
 /// saturating-subs every `CmpctBlock`, so an unpaired decrement cannot wrap.
 fn queue_cmpct_tip_announce(
-    out: &mpsc::UnboundedSender<NetworkMessage>,
+    out: &mpsc::UnboundedSender<PeerOut>,
     msg: NetworkMessage,
 ) -> Result<(), NetError> {
     queue_out(out, msg)
@@ -3021,7 +3053,7 @@ fn pending_header_leaves(pending: &HashMap<BlockHash, bitcoin::block::Header>) -
 /// Try to accept pending blocks that connect to tip or form a better branch.
 async fn drain_pending(
     hub: &ChainHub,
-    out: &mpsc::UnboundedSender<NetworkMessage>,
+    out: &mpsc::UnboundedSender<PeerOut>,
     pending_blocks: &mut PendingBlocks,
     pending_headers: &mut HashMap<BlockHash, bitcoin::block::Header>,
     requested_blocks: &mut HashSet<BlockHash>,
@@ -3071,7 +3103,7 @@ async fn drain_pending(
 
 pub(crate) fn drain_pending_now(
     hub: &ChainHub,
-    out: &mpsc::UnboundedSender<NetworkMessage>,
+    out: &mpsc::UnboundedSender<PeerOut>,
     pending_blocks: &mut PendingBlocks,
     pending_headers: &mut HashMap<BlockHash, bitcoin::block::Header>,
     requested_blocks: &mut HashSet<BlockHash>,
@@ -3200,6 +3232,18 @@ fn block_for_peer(
         Ok(b) => Ok(b),
         Err(e) => Err(NetError::Consensus(e.to_string())),
     }
+}
+
+fn encode_served_witness_block(
+    cache: &BlockCache,
+    query: &Query,
+    hash: &BlockHash,
+) -> Result<Option<Vec<u8>>, NetError> {
+    crate::reactor::assert_not_reactor("getdata reconstruct");
+    let Some(block) = block_for_peer(cache, query, hash)? else {
+        return Ok(None);
+    };
+    crate::v2::encode_v2_contents(NetworkMessage::Block(block)).map(Some)
 }
 
 #[cfg(test)]
