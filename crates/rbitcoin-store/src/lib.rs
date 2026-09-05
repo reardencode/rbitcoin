@@ -129,10 +129,9 @@ pub use sorted_run::{
 pub use sp_tweaks::{SpTweaksTable, TWEAK_LEN};
 pub use sp_tweaks_uring::{load_tweak_wave, LoadedTweakTx, TweakWave};
 pub use spend_annotate_uring::{spend_ann_backend, SpendAnnBackend};
-pub use store::{
-    reset_tx_full_gets, reset_txid_get_many, tx_full_gets, txid_get_many_fks, Store, StoreLayout,
-    TxidResolveMode, INWIT_RELOC_NAME,
-};
+#[cfg(debug_assertions)]
+pub use store::{reset_tx_full_gets, reset_txid_get_many, tx_full_gets, txid_get_many_fks};
+pub use store::{Store, StoreLayout, TxidResolveMode, INWIT_RELOC_NAME};
 pub use store_secret::{StoreSecret, SECRET_FILE, SECRET_LEN};
 pub use tx_table::HeadResizeSizeSnapshot;
 pub use tx_table::{

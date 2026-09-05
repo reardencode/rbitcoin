@@ -10,25 +10,30 @@ use rbitcoin_store::{
     decode_packed_tx_outs_with_spender_rels_secret, decode_packed_tx_with_spender_rels_secret,
     IdxBodyJob, IdxBodyMode, Store, StoreError, StoreSecret,
 };
-use std::cell::Cell;
-
-thread_local! {
-    static BODY_OK_READS: Cell<u64> = const { Cell::new(0) };
+#[cfg(debug_assertions)]
+mod body_ok_spy {
+    use std::cell::Cell;
+    thread_local! {
+        static BODY_OK_READS: Cell<u64> = const { Cell::new(0) };
+    }
+    pub fn reset_body_ok_reads() {
+        BODY_OK_READS.with(|c| c.set(0));
+    }
+    pub fn body_ok_reads() -> u64 {
+        BODY_OK_READS.with(|c| c.get())
+    }
+    pub fn note() {
+        BODY_OK_READS.with(|c| c.set(c.get().saturating_add(1)));
+    }
 }
 
-/// Reset body-read counter for **this thread** (tests).
-pub fn reset_body_ok_reads() {
-    BODY_OK_READS.with(|c| c.set(0));
-}
-
-/// Snapshot body-read counter for **this thread**.
-pub fn body_ok_reads() -> u64 {
-    BODY_OK_READS.with(|c| c.get())
-}
+#[cfg(debug_assertions)]
+pub use body_ok_spy::{body_ok_reads, reset_body_ok_reads};
 
 #[inline]
 fn note_body_ok_read() {
-    BODY_OK_READS.with(|c| c.set(c.get().saturating_add(1)));
+    #[cfg(debug_assertions)]
+    body_ok_spy::note();
 }
 
 /// One create loaded for the combined path.
