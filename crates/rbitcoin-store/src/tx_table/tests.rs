@@ -2273,6 +2273,88 @@ fn put_full_aligns_record_starts_and_txid_prefix() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn get_full_span_matches_per_fk_get_full() {
+    let dir = tempfile_dir("span-vs-full");
+    let t = create_tiny(&dir);
+    let mut items = Vec::new();
+    for i in 0u8..3 {
+        let mut txid = [0u8; 32];
+        txid[0] = i.saturating_add(1);
+        items.push((
+            TxRecord {
+                txid,
+                version: 1,
+                locktime: 0,
+                input_start_fk: Fk::NULL,
+                input_count: 1,
+                output_start_fk: Fk::NULL,
+                output_count: 1,
+            },
+            vec![InputRecord::coinbase(
+                u32::MAX,
+                vec![i],
+                vec![vec![0x51, i]],
+            )],
+            vec![OutputRecord::unspent(100 + i as i64, vec![0x51])],
+        ));
+    }
+    let fks = t.put_full_batch_indexed(&items, true).unwrap();
+    let first = fks[0].get().unwrap();
+    let last = fks[2].get().unwrap();
+    let span = t.get_full_span(first, last).unwrap();
+    assert_eq!(span.len(), 3);
+    for (fk, got) in fks.iter().zip(span.iter()) {
+        let one = t.get_full(*fk).unwrap();
+        assert_eq!(got.0, one.0);
+        assert_eq!(got.1, one.1);
+        assert_eq!(got.2, one.2);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn pread_two_spans_parallel_matches_serial() {
+    let dir = tempfile_dir("span-pair");
+    let t = create_tiny(&dir);
+    let mut items = Vec::new();
+    for i in 0u8..4 {
+        let mut txid = [0u8; 32];
+        txid[0] = i.saturating_add(9);
+        items.push((
+            TxRecord {
+                txid,
+                version: 1,
+                locktime: 0,
+                input_start_fk: Fk::NULL,
+                input_count: 1,
+                output_start_fk: Fk::NULL,
+                output_count: 1,
+            },
+            vec![InputRecord::coinbase(u32::MAX, vec![0x02, i], vec![])],
+            vec![OutputRecord::unspent(i as i64 + 1, vec![0x00, i])],
+        ));
+    }
+    let fks = t.put_full_batch_indexed(&items, true).unwrap();
+    let first = fks[0].get().unwrap();
+    let last = fks[3].get().unwrap();
+    let txout_ranges = t.body.record_ranges(first, last).unwrap();
+    let inwit_ranges = t.inwit.record_ranges(first, last).unwrap();
+    let (t0, _) = txout_ranges[0];
+    let (tn, tln) = *txout_ranges.last().unwrap();
+    let tspan = tn + tln - t0;
+    let (i0, _) = inwit_ranges[0];
+    let (inn, iln) = *inwit_ranges.last().unwrap();
+    let ispan = inn + iln - i0;
+    let serial = pread_two_spans(&t.body, t0, tspan, &t.inwit, i0, ispan, false).unwrap();
+    let parallel = pread_two_spans(&t.body, t0, tspan, &t.inwit, i0, ispan, true).unwrap();
+    assert_eq!(serial, parallel);
+    assert!(!serial.0.is_empty());
+    assert!(!serial.1.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// BIP30 same-txid twice → duplicate fuse keys; seal must still succeed (dedup for build only).
 #[test]
 fn bip30_duplicate_txid_seal_succeeds_and_resolves() {

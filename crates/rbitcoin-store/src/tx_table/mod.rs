@@ -356,6 +356,31 @@ fn span_rec(span: &[u8], span_off: u64, rec_off: u64, rec_len: u64) -> Result<&[
         .ok_or(StoreError::Corrupt("span record OOB"))
 }
 
+fn pread_two_spans(
+    a: &VarTable,
+    a_off: u64,
+    a_len: u64,
+    b: &VarTable,
+    b_off: u64,
+    b_len: u64,
+    parallel: bool,
+) -> Result<(Vec<u8>, Vec<u8>), StoreError> {
+    if !parallel {
+        return Ok((a.pread_span(a_off, a_len)?, b.pread_span(b_off, b_len)?));
+    }
+    std::thread::scope(|s| {
+        let ta = s.spawn(|| a.pread_span(a_off, a_len));
+        let tb = s.spawn(|| b.pread_span(b_off, b_len));
+        let va = ta
+            .join()
+            .unwrap_or_else(|_| Err(StoreError::Corrupt("txout span thread")))?;
+        let vb = tb
+            .join()
+            .unwrap_or_else(|_| Err(StoreError::Corrupt("inwit span thread")))?;
+        Ok((va, vb))
+    })
+}
+
 pub struct TxTable {
     /// `txout.body` — meta + outputs (hot).
     pub(crate) body: VarTable,
@@ -1278,23 +1303,27 @@ impl TxTable {
         if ids.len() != n {
             return Err(StoreError::Corrupt("invariant: txid.body span length"));
         }
-        self.body.with_bytes_at_pread(t0, tspan, |txout_span| {
-            self.inwit.with_bytes_at_pread(i0, ispan, |inwit_span| {
-                let mut out = Vec::with_capacity(n);
-                for i in 0..n {
-                    let (toff, tlen) = txout_ranges[i];
-                    let (ioff, ilen) = inwit_ranges[i];
-                    let traw = span_rec(txout_span, t0, toff, tlen)?;
-                    let iraw = span_rec(inwit_span, i0, ioff, ilen)?;
-                    let (mut tx, _ins, outs, _) =
-                        decode_packed_tx_with_spender_rels_secret(traw, Some(&self.secret))?;
-                    let ins = decode_inwit_secret(iraw, tx.input_count, Some(&self.secret))?;
-                    tx.txid = ids[i];
-                    out.push((tx, ins, outs));
-                }
-                Ok(out)
-            })
-        })
+        self.body.advise_body_will_need(t0, tspan);
+        self.inwit.advise_body_will_need(i0, ispan);
+        let parallel = crate::file::distinct_unix_devices(
+            self.body.body_unix_device_id(),
+            self.inwit.body_unix_device_id(),
+        );
+        let (txout_span, inwit_span) =
+            pread_two_spans(&self.body, t0, tspan, &self.inwit, i0, ispan, parallel)?;
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let (toff, tlen) = txout_ranges[i];
+            let (ioff, ilen) = inwit_ranges[i];
+            let traw = span_rec(&txout_span, t0, toff, tlen)?;
+            let iraw = span_rec(&inwit_span, i0, ioff, ilen)?;
+            let (mut tx, _ins, outs, _) =
+                decode_packed_tx_with_spender_rels_secret(traw, Some(&self.secret))?;
+            let ins = decode_inwit_secret(iraw, tx.input_count, Some(&self.secret))?;
+            tx.txid = ids[i];
+            out.push((tx, ins, outs));
+        }
+        Ok(out)
     }
 
     /// Meta + outputs only (one body IO; skips input materialization).
