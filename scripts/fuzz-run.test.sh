@@ -64,6 +64,18 @@ assert_ok "dry-run default toolchain is nightly" \
   grep -qx "RUSTUP_TOOLCHAIN=nightly" <<<"$out"
 assert_ok "dry-run unsets CARGO_TARGET_DIR" \
   grep -qx "CARGO_TARGET_DIR_UNSET=1" <<<"$out"
+assert_ok "dry-run prints seed" \
+  grep -q "^FUZZ_SEED=" <<<"$out"
+assert_ok "dry-run corpus merge" \
+  grep -qx "FUZZ_CORPUS_MERGE=1" <<<"$out"
+assert_ok "dry-run skip-rate gate" \
+  grep -qx "FUZZ_SKIP_RATE=1" <<<"$out"
+assert_ok "dry-run crashers dir" \
+  grep -q "^FUZZ_CRASHERS=" <<<"$out"
+
+out="$(FUZZ_DRY_RUN=1 FUZZ_SEED=42 "$RUN")"
+assert_ok "dry-run honors FUZZ_SEED" \
+  grep -qx "FUZZ_SEED=42" <<<"$out"
 
 out="$(FUZZ_DRY_RUN=1 RUSTUP_TOOLCHAIN=nightly-2026-01-01 "$RUN")"
 assert_ok "dry-run honors an explicit RUSTUP_TOOLCHAIN" \
@@ -165,6 +177,37 @@ echo "script-differential: comparisons=1" >"$WORKDIR/script.log"
 assert_ok "script comparisons=1 pass" "$RUN" --check-log "$WORKDIR/script.log"
 echo "cmpct-reorg-differential: comparisons=1" >"$WORKDIR/cmpct-reorg.log"
 assert_ok "cmpct-reorg comparisons=1 pass" "$RUN" --check-log "$WORKDIR/cmpct-reorg.log"
+
+{
+  echo "block-differential: comparisons=1"
+  echo "Done 10000 runs in 120 second(s)"
+} >"$WORKDIR/mute.log"
+assert_ok "mute skip-rate (1 compare / 10000 runs) fails" \
+  bash -c '! '"$RUN"' --check-log '"$WORKDIR/mute.log"
+{
+  echo "block-differential: comparisons=20"
+  echo "Done 10000 runs in 120 second(s)"
+} >"$WORKDIR/busy.log"
+assert_ok "busy skip-rate (20 compare / 10000 runs) passes" \
+  "$RUN" --check-log "$WORKDIR/busy.log"
+
+mkdir -p "$WORKDIR/corpus"
+echo grown >"$WORKDIR/corpus/height1.bin"
+echo seed >"$WORKDIR/seed.bin"
+"$RUN" --merge-seed "$WORKDIR/corpus" "$WORKDIR/seed.bin" height1.bin
+assert_ok "merge does not overwrite grown corpus" \
+  grep -qx grown "$WORKDIR/corpus/height1.bin"
+"$RUN" --merge-seed "$WORKDIR/corpus" "$WORKDIR/seed.bin" extra.bin
+assert_ok "merge copies missing seed" \
+  grep -qx seed "$WORKDIR/corpus/extra.bin"
+
+mkdir -p "$WORKDIR/artifacts/block_differential"
+echo boom >"$WORKDIR/artifacts/block_differential/crash-abc"
+mkdir -p "$WORKDIR/crashers"
+"$RUN" --copy-crashers "$WORKDIR/artifacts" "$WORKDIR/crashers"
+assert_ok "copy-crashers copies artifact files" \
+  test -f "$WORKDIR/crashers/crash-abc"
+
 rm -rf "$WORKDIR"
 
 # Pin/fetch tests land before the operator YAML commit; required CI already
