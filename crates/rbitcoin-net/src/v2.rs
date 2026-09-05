@@ -504,13 +504,13 @@ pub async fn open_v2(
 /// Encrypt and send raw BIP324 application contents (short/long command + payload).
 pub async fn write_v2_contents<W>(
     writer: &mut ProtocolWriter<W>,
-    contents: &[u8],
+    contents: Vec<u8>,
 ) -> Result<(), NetError>
 where
     W: AsyncWrite + Unpin + Send,
 {
     writer
-        .write(&Payload::genuine(contents.to_vec()))
+        .write(&Payload::genuine(contents))
         .await
         .map_err(map_protocol_error)
 }
@@ -518,7 +518,7 @@ where
 /// Encrypt and send one application message.
 pub async fn write_v2_msg(writer: &mut V2Writer, payload: NetworkMessage) -> Result<(), NetError> {
     let contents = encode_v2_contents(payload)?;
-    write_v2_contents(writer, &contents).await
+    write_v2_contents(writer, contents).await
 }
 
 /// Like [`write_v2_msg`]; heavy payloads encode on the blocking pool before encrypt.
@@ -533,7 +533,7 @@ pub async fn write_v2_msg_offload(
     } else {
         encode_v2_contents(payload)?
     };
-    write_v2_contents(writer, &contents).await
+    write_v2_contents(writer, contents).await
 }
 
 /// Next genuine application contents (skips decoy packets).
@@ -769,7 +769,7 @@ mod tests {
                 .expect("client handshake");
             let (r, mut w) = protocol.into_split();
             let contents = encode_v2_contents(NetworkMessage::Ping(42)).unwrap();
-            write_v2_contents(&mut w, &contents).await.unwrap();
+            write_v2_contents(&mut w, contents).await.unwrap();
             let mut reader = V2SessionReader::from_protocol_reader(r);
             let got = read_v2_contents(&mut reader).await.unwrap();
             let frame = parse_v2_contents(magic, &got).unwrap();

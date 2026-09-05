@@ -159,6 +159,10 @@ before 1.0).
 
 ### Changed
 
+- **IBD `getdata` span IO:** `txout.body` and `inwit.body` span preads run
+  in parallel (SSD one volume, or `--datadir-cold` split). BIP324
+  `write_v2_contents` takes owned bytes (no extra `to_vec` on the serve writer).
+
 - **Historical `getdata` serve meters on `tip: perf`:** per-block DEBUG
   `p2p: serve` is gone. The 5s line adds
   `serve n= bytes= ntx= avg_us= max_us=` (reconstruct+encode; not BIP324 send).

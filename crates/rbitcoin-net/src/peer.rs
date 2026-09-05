@@ -317,7 +317,7 @@ impl V2PlainSession {
     }
 
     pub async fn write_contents(&mut self, contents: &[u8]) -> Result<(), NetError> {
-        write_v2_contents(&mut self.writer, contents).await
+        write_v2_contents(&mut self.writer, contents.to_vec()).await
     }
 
     pub async fn read_contents(&mut self) -> Result<Vec<u8>, NetError> {
@@ -741,7 +741,7 @@ pub async fn peer_session_with(
                     (full, write_v2_msg_offload(&mut writer, msg).await.is_err())
                 }
                 PeerOut::Encoded(bytes) => {
-                    (true, write_v2_contents(&mut writer, &bytes).await.is_err())
+                    (true, write_v2_contents(&mut writer, bytes).await.is_err())
                 }
             };
             if full {
