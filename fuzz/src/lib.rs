@@ -80,27 +80,29 @@ impl BlockOracle for CoreRpc {
     }
 
     fn core_rewind_to_height(&self, keep: u32) -> Result<(), &'static str> {
-        let keep = u64::from(keep);
-        for _ in 0..128 {
-            let body = self
-                .call("getblockcount", "[]")
-                .map_err(|_| "getblockcount")?;
-            match json_result_u64(&body) {
-                Some(n) if n == keep => return Ok(()),
-                Some(n) if n < keep => return Err("core below pad"),
-                Some(_) => {}
-                None => return Err("getblockcount"),
-            }
-            let hash_body = self
-                .call("getbestblockhash", "[]")
-                .map_err(|_| "getbestblockhash")?;
-            let Some(hash) = parse_submitblock_json(&hash_body).ok().flatten() else {
-                return Err("best hash");
-            };
-            let params = format!(r#"["{hash}"]"#);
-            let _ = self.call("invalidateblock", &params);
-        }
-        Err("core still above pad")
+        rbitcoin_net::rewind_oracle_until(
+            keep,
+            || {
+                let body = self
+                    .call("getblockcount", "[]")
+                    .map_err(|_| "getblockcount")?;
+                let n = json_result_u64(&body).ok_or("getblockcount")?;
+                let n = u32::try_from(n).map_err(|_| "getblockcount")?;
+                let hash_body = self
+                    .call("getbestblockhash", "[]")
+                    .map_err(|_| "getbestblockhash")?;
+                let hash = parse_submitblock_json(&hash_body)
+                    .ok()
+                    .flatten()
+                    .ok_or("best hash")?;
+                Ok((n, hash))
+            },
+            |hash| {
+                let params = format!(r#"["{hash}"]"#);
+                let _ = self.call("invalidateblock", &params);
+                Ok(())
+            },
+        )
     }
 }
 

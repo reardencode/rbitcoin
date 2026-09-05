@@ -72,6 +72,15 @@ before 1.0).
 
 ### Fixed
 
+- **Nightly Core-oracle rewind and default-spend uniqueness:** Core keeps
+  every `submitblock` body; `invalidateblock` of the tip can activate
+  another sibling at the **same** height, so rewind progress is a hash
+  change (no 128-step cap; same-hash is stuck). Default missing-tx[1]
+  spend appends a unique `OP_TRUE` script suffix so BIP30 does not fill
+  one 1024-slot OA probe chain (`mix_txid` is SHA256(secret‖txid) and
+  already spreads distinct txids). Core-oracle jobs use
+  `RBITCOIN_TX_HEAD_BITS=21`.
+
 - **Nightly fork/cmpct-reorg/spend differential harness:** Core
   `submitblock` of an equal-work sibling returns `inconclusive` (parked,
   not tip). Side-submit treated that as fatal (`side submit` on the first
