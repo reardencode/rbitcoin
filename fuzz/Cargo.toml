@@ -12,6 +12,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 rbitcoin-consensus = { path = "../crates/rbitcoin-consensus" }
 rbitcoin-net = { path = "../crates/rbitcoin-net" }
+rbitcoin-electrum = { path = "../crates/rbitcoin-electrum" }
 rbitcoin-query = { path = "../crates/rbitcoin-query" }
 tokio = { version = "1", default-features = false, features = ["rt", "net", "time"] }
 
@@ -108,6 +109,27 @@ bench = false
 [[bin]]
 name = "script_verify_differential"
 path = "fuzz_targets/script_verify_differential.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "addrv2_wire"
+path = "fuzz_targets/addrv2_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "inv_getdata_wire"
+path = "fuzz_targets/inv_getdata_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "electrum_json"
+path = "fuzz_targets/electrum_json.rs"
 test = false
 doc = false
 bench = false

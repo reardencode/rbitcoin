@@ -172,6 +172,23 @@ if [[ "$BIN" == "v2_contents" ]]; then
   exit 0
 fi
 
+if [[ "$BIN" == "addrv2_wire" || "$BIN" == "inv_getdata_wire" || "$BIN" == "electrum_json" ]]; then
+  mkdir -p "fuzz/corpus/$BIN"
+  if [[ "$BIN" == "electrum_json" && ! -e "fuzz/corpus/$BIN/ping.json" ]]; then
+    printf '%s\n' '{"id":1,"method":"server.ping","params":[]}' >"fuzz/corpus/$BIN/ping.json"
+  fi
+  set +e
+  env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" "$BIN" -- \
+    -max_total_time="${FUZZ_MAX_TOTAL_TIME:-120}" \
+    -timeout="$timeout" \
+    -max_len=65536 \
+    -seed="$SEED"
+  st=$?
+  set -e
+  finish_fuzz "$st"
+  exit 0
+fi
+
 if [[ "$BIN" == "v2_session" ]]; then
   export RBITCOIN_CORE_BITCOIND="$(./scripts/core-functional/fetch-bitcoind.sh)"
   merge_seed fuzz/corpus/v2_session crates/rbitcoin-net/tests/fixtures/v2_ping.bin

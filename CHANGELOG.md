@@ -77,6 +77,10 @@ before 1.0).
 
 ### Fixed
 
+- **ASan parser jobs:** `addrv2_wire`, `inv_getdata_wire` (`parse_v2_regtest_named`),
+  and `electrum_json` (`parse_electrum_request_line`). Junk must not panic.
+  Nightly jobs wait on operator-pushed `fuzz.yml`.
+
 - **Interpreter-only differential:** `verify_tx_scripts_detached` vs Core
   `testmempoolaccept` of the parent+spend package. No `submitblock` / remine
   per exec. Policy skips same as the mempool oracle.

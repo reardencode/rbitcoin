@@ -21,6 +21,12 @@ assert_ok() {
   fi
 }
 
+out="$(FUZZ_DRY_RUN=1 "$RUN" addrv2_wire)"
+assert_ok "addrv2_wire dry-run bin" \
+  grep -qx "FUZZ_BIN=addrv2_wire" <<<"$out"
+assert_ok "addrv2_wire dry-run sanitizer address" \
+  grep -qx "FUZZ_SANITIZER=address" <<<"$out"
+
 out="$(FUZZ_DRY_RUN=1 "$RUN" v2_contents)"
 assert_ok "v2_contents dry-run bin" \
   grep -qx "FUZZ_BIN=v2_contents" <<<"$out"

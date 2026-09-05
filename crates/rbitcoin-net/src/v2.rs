@@ -431,6 +431,18 @@ pub fn parse_v2_regtest(contents: &[u8]) -> Result<(), NetError> {
     frame.try_decode().map(|_| ())
 }
 
+/// Long-form v2 contents for `command` then `payload`. Must not panic.
+pub fn parse_v2_regtest_named(command: &str, payload: &[u8]) -> Result<(), NetError> {
+    let mut contents = Vec::with_capacity(1 + 12 + payload.len());
+    contents.push(0);
+    let mut cmd12 = [0u8; 12];
+    let n = command.len().min(12);
+    cmd12[..n].copy_from_slice(&command.as_bytes()[..n]);
+    contents.extend_from_slice(&cmd12);
+    contents.extend_from_slice(payload);
+    parse_v2_regtest(&contents)
+}
+
 fn map_protocol_error(e: ProtocolError) -> NetError {
     match e {
         // bip324 suggests RetryV1 on many hard closes — including peers that
@@ -662,6 +674,15 @@ mod tests {
             assert_ne!(contents[0], 0, "expected short id for {:?}", payload.cmd());
             let frame = parse_v2_contents(magic, &contents).unwrap();
             assert_eq!(frame.decode().payload().cmd(), payload.cmd());
+        }
+    }
+
+    #[test]
+    fn parse_v2_regtest_named_junk_does_not_panic() {
+        for cmd in ["addrv2", "inv", "getdata"] {
+            let _ = parse_v2_regtest_named(cmd, &[]);
+            let _ = parse_v2_regtest_named(cmd, &[0xff; 64]);
+            let _ = parse_v2_regtest_named(cmd, &[0x00, 0x01, 0x02]);
         }
     }
 
