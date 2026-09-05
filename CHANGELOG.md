@@ -77,6 +77,12 @@ before 1.0).
 
 ### Fixed
 
+- **Nightly fuzz corpus compounds:** `fuzz-run.sh` merges committed seeds
+  into an existing corpus (does not overwrite grown inputs), prints and
+  passes libFuzzer `-seed`, copies `fuzz/artifacts` into `fuzz/crashers`
+  on failure, and fails Core-oracle jobs whose skip-rate is mute
+  (`Done N runs` with N≥1000 and fewer than 10 comparisons).
+
 - **Inbound `tx` log is TRACE:** default INFO stays `ibd: progress`
   (Q-36). `p2p_ibd_txrelay.py` still matches `received: tx` because
   TestNode passes `-loglevel=trace`.
