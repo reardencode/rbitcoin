@@ -68,7 +68,6 @@ fn node_cli_and_surface_smoke() {
     assert!(Milestone { height: 10 }.skips_scripts_at(5));
     assert_eq!(rbitcoin_net::DEFAULT_IBD_TARGET_PEERS, 16);
     assert_eq!(node_rpc_path(), "/");
-    let _ = rbitcoin_net::local_service_flags();
     assert_eq!(rbitcoin_net::default_port(Network::Mainnet), 8333);
     assert_eq!(rbitcoin_net::default_port(Network::Regtest), 18444);
     assert!(rbitcoin_net::dns_seeds(Network::Mainnet).len() >= 3);

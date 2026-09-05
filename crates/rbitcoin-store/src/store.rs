@@ -52,9 +52,7 @@ mod io_spies {
 }
 
 #[cfg(debug_assertions)]
-pub use io_spies::{
-    reset_tx_full_gets, reset_txid_get_many, tx_full_gets, txid_get_many_fks,
-};
+pub use io_spies::{reset_tx_full_gets, reset_txid_get_many, tx_full_gets, txid_get_many_fks};
 
 /// Sidecar in the hot `{datadir}/store`: `inwit.body` / `inwit.idx/` live under
 /// `{datadir-cold}/store`. Presence-only (path always comes from the operator).

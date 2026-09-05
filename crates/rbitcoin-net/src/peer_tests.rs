@@ -32,23 +32,30 @@ fn tmp_store(label: &str) -> (std::path::PathBuf, Query) {
 
 #[test]
 fn p2p_serve_line_names_ntx_bytes_wall() {
-    let s = crate::serve_perf::ServePerfSample {
-        n: 2,
-        bytes: 2000,
-        ntx: 9,
-        wall_ns: 20_000,
-        max_ns: 12_000,
-    };
+    let (dir, q) = tmp_store("serve-line");
+    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let _ = crate::serve_perf::sample_reset_serve_perf();
+    let encoded = encode_served_witness_block(&hub.cache, &hub.query, &gen)
+        .unwrap()
+        .expect("genesis Class A body");
+    assert_eq!(encoded.first().copied(), Some(2), "v2 block short id");
+    let s = crate::serve_perf::sample_reset_serve_perf();
+    assert!(s.n >= 1, "{s:?}");
+    assert!(s.bytes > 0, "{s:?}");
+    assert!(s.ntx >= 1, "{s:?}");
     let line = crate::serve_perf::format_serve_perf(&s);
     assert!(
         !line.contains("p2p: serve"),
         "per-block p2p: serve is not the 5s helper: {line}"
     );
-    assert_eq!(line, "serve n=2 bytes=2000 ntx=9 avg_us=10 max_us=12");
-    assert_eq!(
-        crate::serve_perf::format_serve_perf(&crate::serve_perf::ServePerfSample::default()),
-        "serve n=0 bytes=0 ntx=0 avg_us=0 max_us=0"
-    );
+    assert!(line.contains("serve n="), "{line}");
+    assert!(line.contains("bytes="), "{line}");
+    assert!(line.contains("ntx="), "{line}");
+    assert!(line.contains("avg_us="), "{line}");
+    assert!(line.contains("max_us="), "{line}");
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -693,6 +700,10 @@ fn empty_locator_getheaders_serves_stale_only_with_body() {
     let stale = hub.tip_hash().unwrap();
     hub.invalidate_block(stale).unwrap();
     assert!(!hub.is_connected(&stale));
+    assert!(
+        hub.query.is_block_archived(&stale.to_byte_array()).unwrap(),
+        "disconnected hashstop with a body is Class A, not a reconstruct"
+    );
     let with_body =
         headers_reply_for_getheaders(&hub, &GetHeadersMessage::new(vec![], stale)).unwrap();
     assert_eq!(

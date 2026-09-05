@@ -353,10 +353,7 @@ mod tests {
 
     #[test]
     fn empty_keys_constructs_via_caller_dummy_only() {
-        // try_from_keys([]) uses size==0 geometry; may still succeed with empty
-        // reverse_order and zero stack — document current behavior.
-        let r = BinaryFuse8::try_from_keys(&[]);
-        // Either Ok (empty fingerprints path) or Err — both exercised for coverage.
-        let _ = r;
+        // size==0 geometry: empty reverse_order / zero stack still builds.
+        assert!(BinaryFuse8::try_from_keys(&[]).is_ok());
     }
 }

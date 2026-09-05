@@ -346,11 +346,31 @@ mod tests {
     fn log_at_respects_level() {
         let _g = lock_log_init();
         init(Level::Error);
-        // Should not panic; visual check not required.
+        assert!(!enabled(Level::Info));
+        assert!(enabled(Level::Error));
+        capture_logs(true);
         log_at(Level::Info, format_args!("hidden"));
         log_at(Level::Error, format_args!("shown {}", 1));
         log_at_style(Level::Error, Style::Bold, format_args!("bold shown"));
+        let logs = take_logs();
+        capture_logs(false);
         init(Level::Info);
+        assert!(
+            logs.iter()
+                .any(|(l, m)| *l == Level::Error && m.contains("shown 1")),
+            "{logs:?}"
+        );
+        assert!(
+            logs.iter()
+                .any(|(l, m)| *l == Level::Error && m.contains("bold shown")),
+            "{logs:?}"
+        );
+        // Capture is independent of enabled(); Info is recorded but not emitted.
+        assert!(
+            logs.iter()
+                .any(|(l, m)| *l == Level::Info && m.contains("hidden")),
+            "{logs:?}"
+        );
     }
 
     #[test]

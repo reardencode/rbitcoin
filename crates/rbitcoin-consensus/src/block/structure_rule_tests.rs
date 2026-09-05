@@ -1156,8 +1156,15 @@ fn assemble_full_mode_spend_and_bip68() {
         None,
         None,
     );
-    // Immature coinbase or spentness walk — either exercises Full arms.
-    let _ = r;
+    match r {
+        Err(ConsensusError::BadTx("coinbase immature")) => {}
+        Err(e) => {
+            panic!("Full assemble of a height-3 coinbase at height 4 must reject immature, got {e}")
+        }
+        Ok(_) => {
+            panic!("Full assemble of a height-3 coinbase at height 4 must reject immature, got Ok")
+        }
+    }
     let _ = std::fs::remove_dir_all(&path);
 }
 

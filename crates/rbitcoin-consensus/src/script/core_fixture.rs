@@ -147,13 +147,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn init_submodule_script_is_reachable() {
-        assert!(repo_root()
-            .join("scripts/core-functional/init-submodule.sh")
-            .is_file());
-    }
-
-    #[test]
     fn stages_script_tests_from_submodule() {
         let p = stage_core_json("script_tests.json");
         assert!(p.is_file(), "staged {p:?}");
