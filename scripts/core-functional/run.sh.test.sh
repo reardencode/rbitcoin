@@ -126,6 +126,29 @@ else
   PASS=$((PASS + 1))
 fi
 
+# --- p2p_timeouts has v1+v2 ALL_SCRIPTS twins; pass v2 only ---
+TESTS2="$WORKDIR/tests2"
+mkdir -p "$TESTS2"
+printf '# fake\n' >"$TESTS2/p2p_timeouts.py"
+INV2="$WORKDIR/inv2.toml"
+cat >"$INV2" <<'EOF'
+pin = "v31.1"
+core_commit = "9be056a8a72b624dae9623b2f7bded92c2a21c91"
+
+[[test]]
+name = "p2p_timeouts.py"
+status = "run"
+EOF
+DRY_TWIN="$("$RUN" --dry-run --inventory "$INV2" --tests-dir "$TESTS2" \
+  --config-out "$WORKDIR/config-twin.ini" p2p_timeouts.py 2>/dev/null || true)"
+if [[ "$DRY_TWIN" == *p2p_timeouts.py*v2transport* && "$DRY_TWIN" != *v1transport* ]]; then
+  echo "ok - p2p_timeouts dry-run is v2 twin only"
+  PASS=$((PASS + 1))
+else
+  echo "not ok - p2p_timeouts dry-run is v2 twin only (got: $DRY_TWIN)"
+  FAIL=$((FAIL + 1))
+fi
+
 # --- dry-run of a run name: v2transport + name ---
 DRY_OUT="$("$RUN" --dry-run --inventory "$INV" --tests-dir "$TESTS" \
   --config-out "$WORKDIR/config.ini" feature_help.py 2>/dev/null || true)"

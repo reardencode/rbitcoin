@@ -40,6 +40,9 @@ before 1.0).
   (not per-tx `get_tx_full`), off the session reactor. Host probe:
   `scripts/ibd-serve-bench.py`.
 
+- **Core functional `run` 65 → 66:** unmodified `p2p_timeouts` (mocktime
+  VERSION/VERACK timeout, `-peertimeout=3`, ping-before-handshake logs).
+
 - **Core functional `run` 62 → 65:** unmodified `p2p_ibd_txrelay` (IBD
   MAX_MONEY feefilter, no tx getdata/accept), `p2p_fingerprint` (month-old
   stale serve withhold), and `p2p_mutated_blocks` (`getpeerinfo.inflight`
