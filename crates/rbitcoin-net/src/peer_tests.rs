@@ -2722,6 +2722,9 @@ fn handle_peer_frame_mempool_tx_and_inv_paths() {
         let (dir, q) = tmp_store("handle-mp");
         let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
         hub.ensure_genesis().unwrap();
+        let t = hub.tip_header().unwrap().time;
+        hub.clock.set_mock(i64::from(t) + 1);
+        assert!(!hub.in_ibd(), "tx inv getdata pin is not IBD");
         let mp = crate::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
         // Enable relay so Inv for txs triggers getdata.
         mp.set_relay_enabled(true);
