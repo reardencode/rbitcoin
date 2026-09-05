@@ -110,6 +110,9 @@ const MAX_PENDING_BLOCKS: usize = 128;
 /// Max reconstructed full bodies queued on one session writer, and the
 /// matching catch-up `getdata` window (extra hashes stick in `requested`).
 pub(crate) const MAX_SERVE_BLOCKS: usize = 16;
+/// Drop inflight `getdata` hashes that the peer never sent so catch-up can
+/// ask again. `sync_blocks` is 60s; 120s headers poll is too late.
+pub(crate) const BLOCK_GETDATA_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// INV-origin txids this session sent us. Cap matches `announced_wtx` (clear on overflow).
 pub(crate) const FROM_THIS_PEER_CAP: usize = 50_000;
@@ -776,6 +779,7 @@ pub async fn peer_session_with(
     let mut pending_cmpct: HashMap<BlockHash, PendingCmpct> = HashMap::new();
     let mut from_this_peer: HashMap<bitcoin::Txid, ()> = HashMap::new();
     let mut requested_blocks: HashSet<BlockHash> = HashSet::new();
+    let mut requested_since: Option<std::time::Instant> = None;
     let mut ban_score: u32 = 0;
     let mut rate = PeerRateLimiter::default_limits();
     let mut tx_announce_rx = hub.mempool().map(|m| m.subscribe_announces());
@@ -824,6 +828,26 @@ pub async fn peer_session_with(
                         }
                         if let Some(ph) = s.hub() {
                             ph.on_session_heartbeat();
+                        }
+                        if maybe_expire_block_requests(
+                            hub.as_ref(),
+                            &mut requested_blocks,
+                            &mut requested_since,
+                            std::time::Instant::now(),
+                        ) {
+                            drain_pending(
+                                hub.as_ref(),
+                                &out_tx,
+                                &mut pending_blocks,
+                                &mut pending_headers,
+                                &mut requested_blocks,
+                                getdata_use_compact(hub.as_ref(), peer_cmpct_version),
+                                session.as_deref(),
+                            )
+                            .await?;
+                            if !requested_blocks.is_empty() {
+                                requested_since = Some(std::time::Instant::now());
+                            }
                         }
                         queue_due_tx_invs(hub.as_ref(), s, &from_this_peer, &out_tx);
                         let _ = maybe_queue_initial_getheaders(&out_tx, hub.as_ref(), s);
@@ -1087,6 +1111,7 @@ pub async fn peer_session_with(
                         }
                         continue;
                     }
+                    let n_req = requested_blocks.len();
                     handle_peer_frame(
                         frame,
                         hub.as_ref(),
@@ -1104,6 +1129,12 @@ pub async fn peer_session_with(
                         session.as_deref(),
                     )
                     .await?;
+                    let n_after = requested_blocks.len();
+                    if n_after == 0 {
+                        requested_since = None;
+                    } else if n_after < n_req || n_req == 0 {
+                        requested_since = Some(std::time::Instant::now());
+                    }
                     if ban_score >= BAN_SCORE_THRESHOLD {
                         rbitcoin_log::warn!(
                             "p2p: {peer_s} ban score {ban_score} ≥ {BAN_SCORE_THRESHOLD} — disconnect"
@@ -1288,6 +1319,30 @@ fn queue_getheaders(
 /// relay txs. `-blocksonly` keeps `MSG_WITNESS_BLOCK` (`p2p_compactblocks_blocksonly`).
 fn getdata_use_compact(hub: &ChainHub, peer_cmpct_version: u32) -> bool {
     peer_cmpct_version == 2 && hub.mempool().is_none_or(|m| m.relay_enabled())
+}
+
+/// Drop inflight body asks the peer never answered so `asked_blocks` cannot
+/// permanently skip the same hashes (`rpc_createmultisig` generate-149
+/// `sync_blocks` 60s).
+pub(crate) fn maybe_expire_block_requests(
+    hub: &ChainHub,
+    requested: &mut HashSet<BlockHash>,
+    since: &mut Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    if requested.is_empty() {
+        *since = None;
+        return false;
+    }
+    let start = *since.get_or_insert(now);
+    if now.saturating_duration_since(start) < BLOCK_GETDATA_TIMEOUT {
+        return false;
+    }
+    for h in requested.drain() {
+        hub.forget_asked_block(&h);
+    }
+    *since = None;
+    true
 }
 
 fn queue_block_getdata(

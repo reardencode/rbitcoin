@@ -177,6 +177,10 @@ impl ChainHub {
         g.insert(hash);
     }
 
+    pub fn forget_asked_block(&self, hash: &BlockHash) {
+        self.asked_blocks.write().unwrap().remove(hash);
+    }
+
     pub fn already_have_or_asked_block(&self, hash: &BlockHash) -> bool {
         self.is_connected(hash)
             || self.held_body(hash).is_some()

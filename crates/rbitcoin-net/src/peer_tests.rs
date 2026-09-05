@@ -4862,10 +4862,10 @@ fn getdata_skips_reconstruct_when_serve_inflight_at_cap() {
     });
 }
 
-/// Catch-up headers (genesis + 20) must not GetData more than the serve
-/// window. Requesting the whole path left hashes in `requested` that the
-/// peer never sent (overnight `sync_blocks` 60s: createmultisig 149,
-/// minchainwork 50, bip68 CSV 400).
+/// Catch-up headers (two serve windows + remainder) must not GetData more
+/// than the serve window. Requesting the whole path left hashes in
+/// `requested` that the peer never sent (overnight `sync_blocks` 60s:
+/// createmultisig 149, minchainwork 50, bip68 CSV 400).
 #[test]
 fn catchup_headers_getdata_stays_in_serve_window() {
     use bitcoin::consensus::encode::serialize;
@@ -4907,7 +4907,7 @@ fn catchup_headers_getdata_stays_in_serve_window() {
         out
     }
 
-    let n = MAX_SERVE_BLOCKS + 4;
+    let n = MAX_SERVE_BLOCKS * 2 + 4;
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
         let (src_dir, src_q) = tmp_store("catchup-gd-src");
@@ -4990,11 +4990,11 @@ fn catchup_headers_getdata_stays_in_serve_window() {
         let rest = getdata_hashes(&mut out_rx);
         assert_eq!(
             rest.len(),
-            n - MAX_SERVE_BLOCKS,
-            "after the window fills, remaining header-path bodies must be asked, got {}",
+            MAX_SERVE_BLOCKS,
+            "second catch-up getdata must stay in the serve window, got {}",
             rest.len()
         );
-        let want: HashSet<_> = headers[MAX_SERVE_BLOCKS..]
+        let want: HashSet<_> = headers[MAX_SERVE_BLOCKS..MAX_SERVE_BLOCKS * 2]
             .iter()
             .map(|h| h.block_hash())
             .collect();
@@ -5868,6 +5868,48 @@ async fn tip_burst_past_broadcast_capacity_still_syncs_peer() {
 
     na.shutdown().await;
     nb.shutdown().await;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn stale_getdata_requests_expire_so_catchup_can_retry() {
+    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+    }
+    let (dir, q) = tmp_store("getdata-expire");
+    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    hub.ensure_genesis().unwrap();
+    let hash = BlockHash::from_byte_array([0x11; 32]);
+    let mut requested = HashSet::new();
+    requested.insert(hash);
+    hub.note_asked_block(hash);
+    assert!(hub.already_have_or_asked_block(&hash));
+
+    let t0 = std::time::Instant::now();
+    let mut since = Some(t0);
+    assert!(
+        !maybe_expire_block_requests(
+            &hub,
+            &mut requested,
+            &mut since,
+            t0 + BLOCK_GETDATA_TIMEOUT - std::time::Duration::from_secs(1)
+        ),
+        "must not expire before BLOCK_GETDATA_TIMEOUT"
+    );
+    assert_eq!(requested.len(), 1);
+    assert!(hub.already_have_or_asked_block(&hash));
+
+    assert!(maybe_expire_block_requests(
+        &hub,
+        &mut requested,
+        &mut since,
+        t0 + BLOCK_GETDATA_TIMEOUT + std::time::Duration::from_millis(1)
+    ));
+    assert!(requested.is_empty());
+    assert!(
+        !hub.already_have_or_asked_block(&hash),
+        "expired getdata must leave asked_blocks so the same hashes can be re-asked"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
