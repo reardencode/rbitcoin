@@ -9,6 +9,15 @@ before 1.0).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Tip-follow `getdata` that a peer never answers is retried:** inflight
+  hashes sat in `requested` / `asked_blocks` with no timeout, so a serve-cap
+  skip (or compact miss) stalled catch-up for the rest of the session.
+  `rpc_createmultisig` `generate(149)` then 3-node `sync_blocks` 60s could
+  leave node0's tip off node1/node2. After 10s without a body, those hashes
+  are forgotten and the header path is asked again.
+
 ### Added
 
 - **IBD `getdata` serve reconstructs from Class A spans:** contiguous
