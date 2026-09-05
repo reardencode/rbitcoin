@@ -95,7 +95,7 @@ timeout=10
 if [[ "$BIN" == "block_differential" ]]; then
   sanitizer="none"
   timeout=90
-elif [[ "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" || "$BIN" == "script_differential" || "$BIN" == "cmpct_reorg_differential" ]]; then
+elif [[ "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" || "$BIN" == "script_differential" || "$BIN" == "cmpct_reorg_differential" || "$BIN" == "block_reorg_n_differential" || "$BIN" == "block_csv_differential" || "$BIN" == "mempool_differential" || "$BIN" == "script_verify_differential" ]]; then
   sanitizer="none"
   timeout=180
 elif [[ "$BIN" == "v2_session" || "$BIN" == "cmpct_differential" ]]; then
@@ -119,13 +119,13 @@ if [[ "${FUZZ_DRY_RUN:-}" == "1" ]]; then
   echo "FUZZ_CORPUS_MERGE=1"
   echo "FUZZ_SKIP_RATE=1"
   echo "FUZZ_CRASHERS=$CRASHERS"
-  if [[ "$BIN" == "block_differential" || "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" || "$BIN" == "script_differential" || "$BIN" == "cmpct_reorg_differential" || "$BIN" == "v2_session" || "$BIN" == "cmpct_differential" ]]; then
+  if [[ "$BIN" == "block_differential" || "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" || "$BIN" == "script_differential" || "$BIN" == "cmpct_reorg_differential" || "$BIN" == "block_reorg_n_differential" || "$BIN" == "block_csv_differential" || "$BIN" == "mempool_differential" || "$BIN" == "script_verify_differential" || "$BIN" == "v2_session" || "$BIN" == "cmpct_differential" ]]; then
     echo "RBITCOIN_CORE_BITCOIND=${RBITCOIN_CORE_BITCOIND:-}"
   fi
   if [[ "$BIN" == "v2_session" || "$BIN" == "cmpct_differential" ]]; then
     echo "BITCOIND_LISTEN=1"
   fi
-  if [[ "$BIN" == "block_differential" || "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" || "$BIN" == "script_differential" || "$BIN" == "cmpct_reorg_differential" ]]; then
+  if [[ "$BIN" == "block_differential" || "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" || "$BIN" == "script_differential" || "$BIN" == "cmpct_reorg_differential" || "$BIN" == "block_reorg_n_differential" || "$BIN" == "block_csv_differential" || "$BIN" == "mempool_differential" || "$BIN" == "script_verify_differential" ]]; then
     echo "RBITCOIN_HEAD_SCALE=${RBITCOIN_HEAD_SCALE:-tiny}"
   fi
   exit 0
@@ -144,6 +144,10 @@ echo "fuzz-run: seed=$SEED" >&2
 if [[ "$BIN" == "block_wire" ]]; then
   merge_seed fuzz/corpus/block_wire \
     crates/rbitcoin-consensus/tests/fixtures/signet_block_1.bin
+  merge_seed fuzz/corpus/block_wire \
+    crates/rbitcoin-consensus/tests/fixtures/mainnet_block_290329.bin
+  merge_seed fuzz/corpus/block_wire \
+    crates/rbitcoin-consensus/tests/fixtures/signet_block_90719.bin
   set +e
   env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" block_wire -- \
     -max_total_time="${FUZZ_MAX_TOTAL_TIME:-120}" \
@@ -162,6 +166,23 @@ if [[ "$BIN" == "v2_contents" ]]; then
   merge_seed fuzz/corpus/v2_contents crates/rbitcoin-net/tests/fixtures/v2_sendaddrv2.bin
   set +e
   env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" v2_contents -- \
+    -max_total_time="${FUZZ_MAX_TOTAL_TIME:-120}" \
+    -timeout="$timeout" \
+    -max_len=65536 \
+    -seed="$SEED"
+  st=$?
+  set -e
+  finish_fuzz "$st"
+  exit 0
+fi
+
+if [[ "$BIN" == "addrv2_wire" || "$BIN" == "inv_getdata_wire" || "$BIN" == "electrum_json" ]]; then
+  mkdir -p "fuzz/corpus/$BIN"
+  if [[ "$BIN" == "electrum_json" && ! -e "fuzz/corpus/$BIN/ping.json" ]]; then
+    printf '%s\n' '{"id":1,"method":"server.ping","params":[]}' >"fuzz/corpus/$BIN/ping.json"
+  fi
+  set +e
+  env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" "$BIN" -- \
     -max_total_time="${FUZZ_MAX_TOTAL_TIME:-120}" \
     -timeout="$timeout" \
     -max_len=65536 \
@@ -210,7 +231,7 @@ if [[ "$BIN" == "cmpct_differential" ]]; then
   exit 0
 fi
 
-if [[ "$BIN" != "block_differential" && "$BIN" != "block_spend_differential" && "$BIN" != "block_fork_differential" && "$BIN" != "script_differential" && "$BIN" != "cmpct_reorg_differential" ]]; then
+if [[ "$BIN" != "block_differential" && "$BIN" != "block_spend_differential" && "$BIN" != "block_fork_differential" && "$BIN" != "script_differential" && "$BIN" != "cmpct_reorg_differential" && "$BIN" != "block_reorg_n_differential" && "$BIN" != "block_csv_differential" && "$BIN" != "mempool_differential" && "$BIN" != "script_verify_differential" ]]; then
   echo "fuzz-run: unknown target $BIN" >&2
   exit 1
 fi
@@ -225,6 +246,10 @@ export RBITCOIN_CORE_BITCOIND="$(./scripts/core-functional/fetch-bitcoind.sh)"
 if [[ "$BIN" == "block_differential" ]]; then
   merge_seed fuzz/corpus/block_differential \
     crates/rbitcoin-consensus/tests/fixtures/regtest_height1.bin height1.bin
+  merge_seed fuzz/corpus/block_differential \
+    crates/rbitcoin-consensus/tests/fixtures/mainnet_block_290329.bin
+  merge_seed fuzz/corpus/block_differential \
+    crates/rbitcoin-consensus/tests/fixtures/signet_block_1.bin
 elif [[ "$BIN" == "block_spend_differential" ]]; then
   merge_seed fuzz/corpus/block_spend_differential \
     crates/rbitcoin-consensus/tests/fixtures/regtest_height101_spend.bin spend.bin
@@ -234,6 +259,18 @@ elif [[ "$BIN" == "script_differential" ]]; then
 elif [[ "$BIN" == "cmpct_reorg_differential" ]]; then
   merge_seed fuzz/corpus/cmpct_reorg_differential \
     crates/rbitcoin-consensus/tests/fixtures/regtest_fork_child.bin fork.bin
+elif [[ "$BIN" == "block_reorg_n_differential" ]]; then
+  merge_seed fuzz/corpus/block_reorg_n_differential \
+    crates/rbitcoin-consensus/tests/fixtures/regtest_fork_child.bin fork.bin
+elif [[ "$BIN" == "block_csv_differential" ]]; then
+  merge_seed fuzz/corpus/block_csv_differential \
+    crates/rbitcoin-consensus/tests/fixtures/script_op_true.bin rel.bin
+elif [[ "$BIN" == "mempool_differential" ]]; then
+  merge_seed fuzz/corpus/mempool_differential \
+    crates/rbitcoin-consensus/tests/fixtures/regtest_height101_spend.bin spend.bin
+elif [[ "$BIN" == "script_verify_differential" ]]; then
+  merge_seed fuzz/corpus/script_verify_differential \
+    crates/rbitcoin-consensus/tests/fixtures/script_op_true.bin op_true.bin
 else
   merge_seed fuzz/corpus/block_fork_differential \
     crates/rbitcoin-consensus/tests/fixtures/regtest_fork_child.bin fork.bin

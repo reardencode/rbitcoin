@@ -21,6 +21,12 @@ assert_ok() {
   fi
 }
 
+out="$(FUZZ_DRY_RUN=1 "$RUN" addrv2_wire)"
+assert_ok "addrv2_wire dry-run bin" \
+  grep -qx "FUZZ_BIN=addrv2_wire" <<<"$out"
+assert_ok "addrv2_wire dry-run sanitizer address" \
+  grep -qx "FUZZ_SANITIZER=address" <<<"$out"
+
 out="$(FUZZ_DRY_RUN=1 "$RUN" v2_contents)"
 assert_ok "v2_contents dry-run bin" \
   grep -qx "FUZZ_BIN=v2_contents" <<<"$out"
@@ -145,6 +151,34 @@ assert_ok "cmpct-reorg-differential dry-run timeout 180" \
   grep -qx "FUZZ_TIMEOUT=180" <<<"$out"
 assert_ok "cmpct-reorg-differential dry-run prints CORE_BITCOIND" \
   grep -q "^RBITCOIN_CORE_BITCOIND=" <<<"$out"
+
+out="$(FUZZ_DRY_RUN=1 "$RUN" block_reorg_n_differential)"
+assert_ok "reorg-n-differential dry-run bin" \
+  grep -qx "FUZZ_BIN=block_reorg_n_differential" <<<"$out"
+assert_ok "reorg-n-differential dry-run sanitizer none" \
+  grep -qx "FUZZ_SANITIZER=none" <<<"$out"
+assert_ok "reorg-n-differential dry-run timeout 180" \
+  grep -qx "FUZZ_TIMEOUT=180" <<<"$out"
+assert_ok "reorg-n-differential dry-run tiny heads" \
+  grep -qx "RBITCOIN_HEAD_SCALE=tiny" <<<"$out"
+
+out="$(FUZZ_DRY_RUN=1 "$RUN" block_csv_differential)"
+assert_ok "csv-differential dry-run bin" \
+  grep -qx "FUZZ_BIN=block_csv_differential" <<<"$out"
+assert_ok "csv-differential dry-run sanitizer none" \
+  grep -qx "FUZZ_SANITIZER=none" <<<"$out"
+assert_ok "csv-differential dry-run timeout 180" \
+  grep -qx "FUZZ_TIMEOUT=180" <<<"$out"
+
+out="$(FUZZ_DRY_RUN=1 "$RUN" mempool_differential)"
+assert_ok "mempool-differential dry-run bin" \
+  grep -qx "FUZZ_BIN=mempool_differential" <<<"$out"
+assert_ok "mempool-differential dry-run sanitizer none" \
+  grep -qx "FUZZ_SANITIZER=none" <<<"$out"
+
+out="$(FUZZ_DRY_RUN=1 "$RUN" script_verify_differential)"
+assert_ok "script-verify-differential dry-run bin" \
+  grep -qx "FUZZ_BIN=script_verify_differential" <<<"$out"
 assert_ok "dry-run rustc wrapper" \
   grep -q "^RUSTC_WRAPPER=.*fuzz-rustc-allow-warnings.sh$" <<<"$out"
 wrap="$ROOT/scripts/fuzz-rustc-allow-warnings.sh"
@@ -200,6 +234,17 @@ assert_ok "merge does not overwrite grown corpus" \
 "$RUN" --merge-seed "$WORKDIR/corpus" "$WORKDIR/seed.bin" extra.bin
 assert_ok "merge copies missing seed" \
   grep -qx seed "$WORKDIR/corpus/extra.bin"
+
+MAINNET="$ROOT/crates/rbitcoin-consensus/tests/fixtures/mainnet_block_290329.bin"
+SIGNET="$ROOT/crates/rbitcoin-consensus/tests/fixtures/signet_block_1.bin"
+assert_ok "Q-31 mainnet pack exists and is tiny" \
+  bash -c "test -f '$MAINNET' && test \"\$(wc -c < '$MAINNET')\" -lt 1000000"
+"$RUN" --merge-seed "$WORKDIR/corpus" "$MAINNET"
+"$RUN" --merge-seed "$WORKDIR/corpus" "$SIGNET"
+assert_ok "Q-31 mainnet pack merges as extra seed" \
+  test -f "$WORKDIR/corpus/mainnet_block_290329.bin"
+assert_ok "Q-31 signet pack merges as extra seed" \
+  test -f "$WORKDIR/corpus/signet_block_1.bin"
 
 mkdir -p "$WORKDIR/artifacts/block_differential"
 echo boom >"$WORKDIR/artifacts/block_differential/crash-abc"

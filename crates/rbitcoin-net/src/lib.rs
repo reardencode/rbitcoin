@@ -24,12 +24,15 @@ mod versionbits_warn;
 
 pub use block_diff::{
     basic_auth_b64, build_jsonrpc_http_request, check_diff_env, compare_cmpct_reorg_one,
-    compare_fork_one, compare_one, compare_script_one, compare_spend_one, diff_regtest_params,
-    genesis_diff_tip, is_core_connectivity_skip, mine_diff_pad, mine_diff_stem,
-    parse_submitblock_json, prepare_script_candidate, prepare_spend_candidate, rewind_oracle_until,
-    setup_side_block, split_http_body, submit_pad_to_oracle, submit_side_to_oracle,
-    verdict_from_accept, verdict_from_core_reply, wait_for_file, BlockOracle, CompareOne, DiffPad,
-    DiffTip, DiffVerdict, OracleReply, DIFF_MATURE_PAD_HEIGHT, DIFF_TEST_PAD_HEIGHT,
+    compare_csv_age_one, compare_fork_n_one, compare_fork_one, compare_mempool_one, compare_one,
+    compare_script_one, compare_script_verify_one, compare_spend_one, diff_regtest_params,
+    genesis_diff_tip, is_core_connectivity_skip, is_core_mempool_policy_skip, mine_diff_pad,
+    mine_diff_stem, parse_submitblock_json, parse_testmempoolaccept_json,
+    prepare_csv_age_candidate, prepare_script_candidate, prepare_spend_candidate,
+    rewind_oracle_until, setup_side_block, split_http_body, submit_pad_to_oracle,
+    submit_side_to_oracle, verdict_from_accept, verdict_from_core_reply, wait_for_file,
+    BlockOracle, CompareOne, DiffPad, DiffTip, DiffVerdict, OracleReply, DIFF_MATURE_PAD_HEIGHT,
+    DIFF_REORG_N, DIFF_TEST_PAD_HEIGHT,
 };
 pub use cache::BlockCache;
 pub use chain::{
@@ -75,7 +78,9 @@ pub use service::{magic_for, magic_for_params, NetConfig, P2PHandle, P2PNode};
 pub use tx_relay::{
     ElectrumMempoolItem, MempoolAnnounce, MempoolHub, MempoolPerfSample, QueryUtxoProvider,
 };
-pub use v2::{encode_v2_contents, parse_v2_regtest, write_v2_contents, WireBytes};
+pub use v2::{
+    encode_v2_contents, parse_v2_regtest, parse_v2_regtest_named, write_v2_contents, WireBytes,
+};
 pub use versionbits_warn::{
     active_unknown_bits, unknown_rules_warning, warn_period_threshold, warning_strings,
 };

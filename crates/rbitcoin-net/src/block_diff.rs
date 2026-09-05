@@ -61,12 +61,34 @@ pub trait BlockOracle {
     fn core_reconsider_block(&self, hash: &str) -> Result<(), &'static str>;
     fn core_invalidate_hash(&self, hash: &str) -> Result<(), &'static str>;
     fn core_precious_block(&self, hash: &str) -> Result<(), &'static str>;
+    /// Core `testmempoolaccept` on one hex tx. Default unused.
+    fn testmempoolaccept_hex(&self, hex: &str) -> OracleReply {
+        let _ = hex;
+        OracleReply::RpcError
+    }
+    fn testmempoolaccept_hexes(&self, hexs: &[&str]) -> OracleReply {
+        match hexs {
+            [h] => self.testmempoolaccept_hex(h),
+            _ => OracleReply::RpcError,
+        }
+    }
 }
 
 pub const DIFF_TEST_PAD_HEIGHT: u32 = 3;
 pub const DIFF_MATURE_PAD_HEIGHT: u32 = 100;
+/// Side-chain length vs a 1-block stem (deeper than the 2-block fork target).
+pub const DIFF_REORG_N: u32 = 3;
 /// Core `MAX_SCRIPT_SIZE` — truncate fuzzer scriptPubKey, do not skip.
 pub const SCRIPT_FUZZ_MAX: usize = 10_000;
+pub const DIFF_MUT_VERSION: u8 = 0x01;
+pub const DIFF_MUT_LOCKTIME: u8 = 0x02;
+pub const DIFF_MUT_SEQUENCE: u8 = 0x04;
+pub const DIFF_MUT_SCRIPT_SIG: u8 = 0x08;
+pub const DIFF_MUT_WITNESS: u8 = 0x10;
+pub const DIFF_MUT_ANNEX: u8 = 0x20;
+pub const DIFF_MUT_SHUFFLE: u8 = 0x40;
+/// `prepare_script_candidate` prefix: version + witness then scriptPubKey.
+pub const SCRIPT_FUZZ_CTRL: u8 = 0x80;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffTip {
@@ -294,6 +316,157 @@ fn stamp_diff_out(tx: &mut Transaction, uniq: u32) {
     tx.output[0].script_pubkey = ScriptBuf::from_bytes(spk);
 }
 
+fn ctrl_take<'a>(ctrl: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
+    if ctrl.len() < n {
+        return None;
+    }
+    let (h, t) = ctrl.split_at(n);
+    *ctrl = t;
+    Some(h)
+}
+
+fn ctrl_u8(ctrl: &mut &[u8]) -> Option<u8> {
+    let b = ctrl_take(ctrl, 1)?;
+    Some(b[0])
+}
+
+fn ctrl_u32_le(ctrl: &mut &[u8]) -> Option<u32> {
+    let b = ctrl_take(ctrl, 4)?;
+    Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+/// Overlay consensus fields on extra txs from fuzzer control bytes.
+pub fn apply_diff_field_mutations(txs: &mut [Transaction], mut ctrl: &[u8]) {
+    if txs.is_empty() {
+        return;
+    }
+    let Some(flags) = ctrl_u8(&mut ctrl) else {
+        return;
+    };
+    if flags & DIFF_MUT_VERSION != 0 {
+        if let Some(v) = ctrl_u32_le(&mut ctrl) {
+            let ver = TxVersion::non_standard(v as i32);
+            for tx in txs.iter_mut() {
+                tx.version = ver;
+            }
+        }
+    }
+    if flags & DIFF_MUT_LOCKTIME != 0 {
+        if let Some(n) = ctrl_u32_le(&mut ctrl) {
+            let lt = LockTime::from_consensus(n);
+            for tx in txs.iter_mut() {
+                tx.lock_time = lt;
+            }
+        }
+    }
+    if flags & DIFF_MUT_SEQUENCE != 0 {
+        if let Some(n) = ctrl_u32_le(&mut ctrl) {
+            let seq = Sequence::from_consensus(n);
+            for tx in txs.iter_mut() {
+                if let Some(i) = tx.input.first_mut() {
+                    i.sequence = seq;
+                }
+            }
+        }
+    }
+    if flags & DIFF_MUT_SCRIPT_SIG != 0 {
+        if let Some(n) = ctrl_u8(&mut ctrl) {
+            if let Some(bytes) = ctrl_take(&mut ctrl, n as usize) {
+                let ss = ScriptBuf::from_bytes(bytes.to_vec());
+                for tx in txs.iter_mut() {
+                    if let Some(i) = tx.input.first_mut() {
+                        i.script_sig = ss.clone();
+                    }
+                }
+            }
+        }
+    }
+    if flags & DIFF_MUT_WITNESS != 0 {
+        if let Some(n_items) = ctrl_u8(&mut ctrl) {
+            let mut items = Vec::new();
+            let mut ok = true;
+            for _ in 0..n_items {
+                let Some(n) = ctrl_u8(&mut ctrl) else {
+                    ok = false;
+                    break;
+                };
+                let Some(bytes) = ctrl_take(&mut ctrl, n as usize) else {
+                    ok = false;
+                    break;
+                };
+                items.push(bytes.to_vec());
+            }
+            if ok {
+                let refs: Vec<&[u8]> = items.iter().map(|v| v.as_slice()).collect();
+                let w = Witness::from_slice(&refs);
+                for tx in txs.iter_mut() {
+                    if let Some(i) = tx.input.first_mut() {
+                        i.witness = w.clone();
+                    }
+                }
+            }
+        }
+    }
+    if flags & DIFF_MUT_ANNEX != 0 {
+        if let Some(n) = ctrl_u8(&mut ctrl) {
+            if let Some(bytes) = ctrl_take(&mut ctrl, n as usize) {
+                let mut annex = vec![0x50];
+                annex.extend_from_slice(bytes);
+                for tx in txs.iter_mut() {
+                    if let Some(i) = tx.input.first_mut() {
+                        i.witness.push(annex.clone());
+                    }
+                }
+            }
+        }
+    }
+    if flags & DIFF_MUT_SHUFFLE != 0 {
+        if let Some(rot) = ctrl_u8(&mut ctrl) {
+            let n = txs.len();
+            if n > 1 {
+                let k = (rot as usize) % n;
+                txs.rotate_left(k);
+            }
+        }
+    }
+}
+
+fn mutation_ctrl(data: &[u8]) -> &[u8] {
+    const N: usize = 16;
+    if data.len() > N {
+        &data[data.len() - N..]
+    } else {
+        data
+    }
+}
+
+pub fn parse_script_fuzz_ctrl(data: &[u8]) -> (TxVersion, Witness, &[u8]) {
+    if data.first() != Some(&SCRIPT_FUZZ_CTRL) || data.len() < 7 {
+        return (TxVersion::ONE, Witness::new(), data);
+    }
+    let ver = i32::from_le_bytes([data[1], data[2], data[3], data[4]]);
+    let mut rest = &data[5..];
+    let Some(n_items) = ctrl_u8(&mut rest) else {
+        return (TxVersion::ONE, Witness::new(), data);
+    };
+    let mut items = Vec::new();
+    for _ in 0..n_items {
+        let Some(n) = ctrl_u8(&mut rest) else {
+            return (TxVersion::ONE, Witness::new(), data);
+        };
+        let Some(bytes) = ctrl_take(&mut rest, n as usize) else {
+            return (TxVersion::ONE, Witness::new(), data);
+        };
+        items.push(bytes.to_vec());
+    }
+    let refs: Vec<&[u8]> = items.iter().map(|v| v.as_slice()).collect();
+    (
+        TxVersion::non_standard(ver),
+        Witness::from_slice(&refs),
+        rest,
+    )
+}
+
 fn mine_diff_paying(
     prev: BlockHash,
     time: u32,
@@ -324,6 +497,7 @@ pub fn prepare_spend_candidate(tip: &DiffTip, mature: OutPoint, data: &[u8]) -> 
         spend.input[0].previous_output = mature;
     }
     let mut extra: Vec<Transaction> = parsed.txdata.into_iter().skip(2).collect();
+    apply_diff_field_mutations(&mut extra, mutation_ctrl(data));
     let uniq = next_diff_cb_uniq();
     stamp_diff_out(&mut spend, uniq);
     for tx in extra.iter_mut() {
@@ -346,13 +520,17 @@ pub fn prepare_script_candidate(tip: &DiffTip, mature: OutPoint, data: &[u8]) ->
     if data.is_empty() {
         return None;
     }
-    let script = if data.len() > SCRIPT_FUZZ_MAX {
-        &data[..SCRIPT_FUZZ_MAX]
+    let (version, witness, rest) = parse_script_fuzz_ctrl(data);
+    if rest.is_empty() {
+        return None;
+    }
+    let script = if rest.len() > SCRIPT_FUZZ_MAX {
+        &rest[..SCRIPT_FUZZ_MAX]
     } else {
-        data
+        rest
     };
     let tx1 = Transaction {
-        version: TxVersion::ONE,
+        version,
         lock_time: LockTime::ZERO,
         input: vec![TxIn {
             previous_output: mature,
@@ -366,7 +544,7 @@ pub fn prepare_script_candidate(tip: &DiffTip, mature: OutPoint, data: &[u8]) ->
         }],
     };
     let mut tx2 = Transaction {
-        version: TxVersion::ONE,
+        version,
         lock_time: LockTime::ZERO,
         input: vec![TxIn {
             previous_output: OutPoint {
@@ -375,7 +553,7 @@ pub fn prepare_script_candidate(tip: &DiffTip, mature: OutPoint, data: &[u8]) ->
             },
             script_sig: ScriptBuf::new(),
             sequence: Sequence::MAX,
-            witness: Witness::new(),
+            witness,
         }],
         output: vec![TxOut {
             value: Amount::from_sat(48_0000_0000),
@@ -390,6 +568,193 @@ pub fn prepare_script_candidate(tip: &DiffTip, mature: OutPoint, data: &[u8]) ->
         ScriptBuf::from_bytes(vec![0x51]),
         vec![tx1, tx2],
     ))
+}
+
+/// Spend `mature` with BIP68 relative-height `nSequence` (tx version 2).
+pub fn prepare_csv_age_candidate(tip: &DiffTip, mature: OutPoint, data: &[u8]) -> Option<Block> {
+    if data.is_empty() {
+        return None;
+    }
+    let rel = if data.len() >= 2 {
+        u16::from_le_bytes([data[0], data[1]])
+    } else {
+        u16::from(data[0])
+    };
+    let mut spend = default_op_true_spend(mature, next_diff_cb_uniq());
+    spend.version = TxVersion::TWO;
+    spend.input[0].sequence = Sequence::from_consensus(u32::from(rel));
+    Some(mine_diff_paying(
+        tip.hash,
+        tip.time.saturating_add(REGTEST_BLOCK_SPACING),
+        tip.height.saturating_add(1),
+        ScriptBuf::from_bytes(vec![0x51]),
+        vec![spend],
+    ))
+}
+
+pub fn compare_csv_age_one(
+    hub: &ChainHub,
+    tip: &mut DiffTip,
+    oracle: &dyn BlockOracle,
+    mature: OutPoint,
+    data: &[u8],
+) -> CompareOne {
+    let Some(block) = prepare_csv_age_candidate(tip, mature, data) else {
+        return CompareOne::NotABlock;
+    };
+    compare_prepared(hub, tip, oracle, block)
+}
+
+/// Libre policy vs Core is COMPAT, not a finding. Only consensus-class splits.
+pub fn is_core_mempool_policy_skip(reason: &str) -> bool {
+    let r = reason.to_ascii_lowercase();
+    r.contains("min relay")
+        || r.contains("minrelay")
+        || r.contains("dust")
+        || r.contains("insufficient fee")
+        || r.contains("too-long-mempool")
+        || r.contains("too-many-unconfirmed")
+        || r.contains("mempool-conflict")
+        || r.contains("replacement")
+        || r.contains("max-fee")
+        || r.contains("absurdly-high-fee")
+        || r.contains("policy")
+}
+
+fn mempool_ours_consensus(
+    r: Result<rbitcoin_mempool::AcceptResult, rbitcoin_mempool::AcceptError>,
+) -> Result<DiffVerdict, &'static str> {
+    use rbitcoin_mempool::AcceptError;
+    match r {
+        Ok(_) => Ok(DiffVerdict::Accept),
+        Err(
+            AcceptError::Policy(_)
+            | AcceptError::ClusterTooLarge { .. }
+            | AcceptError::PackageTooLarge { .. }
+            | AcceptError::PackageEmpty
+            | AcceptError::PackageNotTopo
+            | AcceptError::RbfInsufficient
+            | AcceptError::Orphaned(_)
+            | AcceptError::Duplicate(_),
+        ) => Ok(DiffVerdict::Skip),
+        Err(AcceptError::Durable(_)) => Err("harness"),
+        Err(_) => Ok(DiffVerdict::Reject),
+    }
+}
+
+pub fn parse_testmempoolaccept_json(body: &str) -> Result<OracleReply, &'static str> {
+    let body = body.trim();
+    if json_field_is_error_object(body) {
+        return Err("rpc error");
+    }
+    if body.contains("\"allowed\": false") || body.contains("\"allowed\":false") {
+        if let Some(r) = after_key(body, "reject-reason") {
+            if r.starts_with('"') {
+                if let Some(s) = json_quoted(r) {
+                    return Ok(OracleReply::Reason(s));
+                }
+            }
+        }
+        return Ok(OracleReply::Reason("rejected".into()));
+    }
+    if body.contains("\"allowed\": true") || body.contains("\"allowed\":true") {
+        return Ok(OracleReply::NullAccept);
+    }
+    Err("malformed")
+}
+
+pub fn compare_mempool_one(
+    hub: &ChainHub,
+    tip: &DiffTip,
+    oracle: &dyn BlockOracle,
+    mature: OutPoint,
+    data: &[u8],
+) -> CompareOne {
+    let Some(mp) = hub.mempool() else {
+        return CompareOne::Harness("no mempool");
+    };
+    let Some(block) = prepare_spend_candidate(tip, mature, data) else {
+        return CompareOne::NotABlock;
+    };
+    let Some(tx) = block.txdata.get(1).cloned() else {
+        return CompareOne::NotABlock;
+    };
+    let ours = match mempool_ours_consensus(mp.test_accept(&tx)) {
+        Ok(v) => v,
+        Err(msg) => return CompareOne::Harness(msg),
+    };
+    let hex = hex_encode(serialize(&tx));
+    let reply = oracle.testmempoolaccept_hex(&hex);
+    if matches!(reply, OracleReply::Dead)
+        || (matches!(reply, OracleReply::RpcError) && !oracle.liveness_ok())
+    {
+        return CompareOne::Harness("oracle dead");
+    }
+    let core = match &reply {
+        OracleReply::NullAccept => DiffVerdict::Accept,
+        OracleReply::Reason(r) if is_core_mempool_policy_skip(r) => DiffVerdict::Skip,
+        OracleReply::Reason(_) => DiffVerdict::Reject,
+        OracleReply::RpcError | OracleReply::Dead => DiffVerdict::Skip,
+    };
+    match (ours, core) {
+        (DiffVerdict::Accept, DiffVerdict::Accept) => CompareOne::Agreed { accept: true },
+        (DiffVerdict::Reject, DiffVerdict::Reject) => CompareOne::Agreed { accept: false },
+        (DiffVerdict::Skip, _) | (_, DiffVerdict::Skip) => CompareOne::Skipped,
+        (DiffVerdict::Accept, DiffVerdict::Reject) | (DiffVerdict::Reject, DiffVerdict::Accept) => {
+            CompareOne::Disagreed {
+                ours: ours == DiffVerdict::Accept,
+                core: core == DiffVerdict::Accept,
+                hex,
+            }
+        }
+    }
+}
+
+pub fn compare_script_verify_one(
+    oracle: &dyn BlockOracle,
+    mature: OutPoint,
+    tip: &DiffTip,
+    data: &[u8],
+) -> CompareOne {
+    let Some(block) = prepare_script_candidate(tip, mature, data) else {
+        return CompareOne::NotABlock;
+    };
+    if block.txdata.len() < 3 {
+        return CompareOne::NotABlock;
+    }
+    let tx1 = block.txdata[1].clone();
+    let tx2 = block.txdata[2].clone();
+    let prev = tx1.output[0].clone();
+    let ours = match rbitcoin_consensus::verify_tx_scripts_detached(vec![prev], tx2.clone()) {
+        Ok(()) => DiffVerdict::Accept,
+        Err(_) => DiffVerdict::Reject,
+    };
+    let hex1 = hex_encode(serialize(&tx1));
+    let hex2 = hex_encode(serialize(&tx2));
+    let reply = oracle.testmempoolaccept_hexes(&[&hex1, &hex2]);
+    if matches!(reply, OracleReply::Dead)
+        || (matches!(reply, OracleReply::RpcError) && !oracle.liveness_ok())
+    {
+        return CompareOne::Harness("oracle dead");
+    }
+    let core = match &reply {
+        OracleReply::NullAccept => DiffVerdict::Accept,
+        OracleReply::Reason(r) if is_core_mempool_policy_skip(r) => DiffVerdict::Skip,
+        OracleReply::Reason(_) => DiffVerdict::Reject,
+        OracleReply::RpcError | OracleReply::Dead => DiffVerdict::Skip,
+    };
+    match (ours, core) {
+        (DiffVerdict::Accept, DiffVerdict::Accept) => CompareOne::Agreed { accept: true },
+        (DiffVerdict::Reject, DiffVerdict::Reject) => CompareOne::Agreed { accept: false },
+        (DiffVerdict::Skip, _) | (_, DiffVerdict::Skip) => CompareOne::Skipped,
+        (DiffVerdict::Accept, DiffVerdict::Reject) | (DiffVerdict::Reject, DiffVerdict::Accept) => {
+            CompareOne::Disagreed {
+                ours: ours == DiffVerdict::Accept,
+                core: core == DiffVerdict::Accept,
+                hex: hex2,
+            }
+        }
+    }
 }
 
 pub fn is_core_connectivity_skip(reason: &str) -> bool {
@@ -601,6 +966,10 @@ pub fn compare_one(
     if block.txdata.is_empty() {
         return CompareOne::NotABlock;
     }
+    if block.txdata.len() > 1 {
+        let n = block.txdata.len();
+        apply_diff_field_mutations(&mut block.txdata[1..n], mutation_ctrl(data));
+    }
     let uniq = next_diff_cb_uniq();
     for tx in block.txdata.iter_mut().skip(1) {
         stamp_diff_out(tx, uniq);
@@ -685,6 +1054,7 @@ pub fn compare_fork_one(
         return CompareOne::Harness(e);
     }
     let mut extra: Vec<Transaction> = parsed.txdata.into_iter().skip(1).collect();
+    apply_diff_field_mutations(&mut extra, mutation_ctrl(data));
     let uniq = next_diff_cb_uniq();
     for tx in extra.iter_mut() {
         stamp_diff_out(tx, uniq);
@@ -709,6 +1079,97 @@ pub fn compare_fork_one(
             let _ = hub.rewind_to_height(base.fork_parent.height);
         }
         let _ = core_park_child(oracle, &child, stem);
+        let _ = restore_stem(hub, oracle, stem);
+        return CompareOne::Harness("oracle dead");
+    }
+    finish_reorg_compare(
+        hub,
+        oracle,
+        base.fork_parent.height,
+        stem,
+        &child,
+        ours,
+        &reply,
+    )
+}
+
+pub fn compare_fork_n_one(
+    hub: &ChainHub,
+    base: &DiffPad,
+    oracle: &dyn BlockOracle,
+    data: &[u8],
+    n: u32,
+) -> CompareOne {
+    let n = n.max(DIFF_REORG_N);
+    let Ok(parsed) = deserialize::<Block>(data) else {
+        return CompareOne::NotABlock;
+    };
+    if parsed.txdata.is_empty() {
+        return CompareOne::NotABlock;
+    }
+    let Some(stem) = base.bodies.last() else {
+        return CompareOne::Harness("no stem");
+    };
+    let mut side = mine_regtest_paying(
+        base.fork_parent.hash,
+        base.fork_parent.time.saturating_add(REGTEST_BLOCK_SPACING),
+        base.fork_parent.height.saturating_add(1),
+        ScriptBuf::from_bytes(vec![0x51, 0x51]),
+        Vec::new(),
+    );
+    if let Err(e) = setup_side_block(hub, oracle, &side) {
+        return CompareOne::Harness(e);
+    }
+    for i in 2..n {
+        let h = base.fork_parent.height.saturating_add(i);
+        let nxt = mine_empty_regtest(
+            side.block_hash(),
+            side.header.time.saturating_add(REGTEST_BLOCK_SPACING),
+            h,
+        );
+        match hub.accept_received_block(nxt.clone()) {
+            Ok(AcceptOutcome::Accepted { .. } | AcceptOutcome::AlreadyHave) => {}
+            _ => return CompareOne::Harness("side extend"),
+        }
+        if submit_known_block(
+            oracle,
+            &nxt,
+            CORE_DUPLICATE_SKIP,
+            "side extend submit",
+            false,
+        )
+        .is_err()
+        {
+            return CompareOne::Harness("side extend submit");
+        }
+        side = nxt;
+    }
+    let mut extra: Vec<Transaction> = parsed.txdata.into_iter().skip(1).collect();
+    apply_diff_field_mutations(&mut extra, mutation_ctrl(data));
+    let uniq = next_diff_cb_uniq();
+    for tx in extra.iter_mut() {
+        stamp_diff_out(tx, uniq);
+    }
+    let child = mine_diff_paying(
+        side.block_hash(),
+        side.header.time.saturating_add(REGTEST_BLOCK_SPACING),
+        base.fork_parent.height.saturating_add(n),
+        ScriptBuf::from_bytes(vec![0x51]),
+        extra,
+    );
+    let ours = match verdict_from_accept(hub.accept_received_block(child.clone())) {
+        Ok(v) => v,
+        Err(msg) => return CompareOne::Harness(msg),
+    };
+    let hex = hex_encode(serialize(&child));
+    let reply = oracle.submitblock_hex(&hex);
+    if matches!(reply, OracleReply::Dead)
+        || (matches!(reply, OracleReply::RpcError) && !oracle.liveness_ok())
+    {
+        if ours == DiffVerdict::Accept {
+            let _ = hub.rewind_to_height(base.fork_parent.height);
+        }
+        let _ = oracle.core_rewind_to_height(base.fork_parent.height);
         let _ = restore_stem(hub, oracle, stem);
         return CompareOne::Harness("oracle dead");
     }
@@ -749,6 +1210,7 @@ pub fn compare_cmpct_reorg_one(
         return CompareOne::Harness(e);
     }
     let mut extra: Vec<Transaction> = parsed.txdata.into_iter().skip(1).collect();
+    apply_diff_field_mutations(&mut extra, mutation_ctrl(data));
     let uniq = next_diff_cb_uniq();
     for tx in extra.iter_mut() {
         stamp_diff_out(tx, uniq);
@@ -981,7 +1443,7 @@ mod tests {
     use rbitcoin_query::Query;
     use std::cell::Cell;
     use std::fs;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct MockOracle {
@@ -1046,6 +1508,16 @@ mod tests {
         fn core_precious_block(&self, _hash: &str) -> Result<(), &'static str> {
             self.precious.set(self.precious.get() + 1);
             Ok(())
+        }
+        fn testmempoolaccept_hex(&self, hex: &str) -> OracleReply {
+            self.submitblock_hex(hex)
+        }
+        fn testmempoolaccept_hexes(&self, hexs: &[&str]) -> OracleReply {
+            match hexs {
+                [h] => self.testmempoolaccept_hex(h),
+                [_, h] => self.testmempoolaccept_hex(h),
+                _ => OracleReply::RpcError,
+            }
         }
     }
 
@@ -1128,6 +1600,70 @@ mod tests {
             "rpc error"
         );
         assert_eq!(parse_submitblock_json("not json").unwrap_err(), "malformed");
+    }
+
+    #[test]
+    fn parse_testmempoolaccept_json_allowed_and_policy() {
+        assert!(matches!(
+            parse_testmempoolaccept_json(
+                r#"{"result":[{"txid":"ab","allowed":true}],"error":null,"id":1}"#
+            )
+            .unwrap(),
+            OracleReply::NullAccept
+        ));
+        match parse_testmempoolaccept_json(
+            r#"{"result":[{"allowed":false,"reject-reason":"dust"}],"error":null}"#,
+        )
+        .unwrap()
+        {
+            OracleReply::Reason(r) => assert_eq!(r, "dust"),
+            other => panic!("{other:?}"),
+        }
+        assert!(is_core_mempool_policy_skip("dust"));
+        assert!(is_core_mempool_policy_skip("min relay fee not met"));
+        assert!(!is_core_mempool_policy_skip(
+            "mandatory-script-verify-flag-failed"
+        ));
+    }
+
+    #[test]
+    fn compare_mempool_one_skips_core_policy_and_agrees_consensus() {
+        let (dir, hub, _) = tmp_diff_hub();
+        let pad = mine_diff_pad(&hub, DIFF_MATURE_PAD_HEIGHT).unwrap();
+        let mp = crate::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
+        hub.attach_mempool(mp).ok();
+        let seed = serialize(&spend_seed_block());
+        let mock = MockOracle::new(OracleReply::Reason("dust".into()));
+        match compare_mempool_one(&hub, &pad.tip, &mock, pad.mature, &seed) {
+            CompareOne::Skipped => {}
+            other => panic!("policy skip: {other:?}"),
+        }
+        let mock = MockOracle::new(OracleReply::NullAccept);
+        match compare_mempool_one(&hub, &pad.tip, &mock, pad.mature, &seed) {
+            CompareOne::Agreed { accept: true } => {}
+            other => panic!("mempool accept: {other:?}"),
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn compare_script_verify_one_true_accepts_return_rejects() {
+        let dummy = DiffTip {
+            hash: BlockHash::from_byte_array([0x33; 32]),
+            time: 1,
+            height: DIFF_MATURE_PAD_HEIGHT,
+        };
+        let mature = height1_mature_out();
+        let mock = MockOracle::new(OracleReply::NullAccept);
+        match compare_script_verify_one(&mock, mature, &dummy, &[0x51]) {
+            CompareOne::Agreed { accept: true } => {}
+            other => panic!("script-verify OP_TRUE: {other:?}"),
+        }
+        let mock = MockOracle::new(OracleReply::Reason("script-error".into()));
+        match compare_script_verify_one(&mock, mature, &dummy, &[0x6a]) {
+            CompareOne::Agreed { accept: false } => {}
+            other => panic!("script-verify OP_RETURN: {other:?}"),
+        }
     }
 
     #[test]
@@ -1664,6 +2200,60 @@ mod tests {
     }
 
     #[test]
+    fn compare_fork_n_one_is_deeper_than_two_and_rewinds_stem() {
+        let (dir, hub, _g) = tmp_diff_hub();
+        let pad = mine_diff_pad(&hub, DIFF_TEST_PAD_HEIGHT).unwrap();
+        let base = mine_diff_stem(&hub, pad).unwrap();
+        let seed = serialize(&fork_child_seed_block());
+        let mock = MockOracle::new(OracleReply::NullAccept);
+        submit_pad_to_oracle(&mock, &base.bodies).unwrap();
+        let mock = MockOracle::new(OracleReply::NullAccept);
+        match compare_fork_n_one(&hub, &base, &mock, &seed, DIFF_REORG_N) {
+            CompareOne::Agreed { accept: true } => {}
+            other => panic!("n-reorg accept: {other:?}"),
+        }
+        assert_eq!(hub.tip_height(), Some(DIFF_TEST_PAD_HEIGHT + 1));
+        assert_eq!(hub.tip_hash(), Some(base.tip.hash));
+        assert!(DIFF_REORG_N > 2);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prepare_csv_age_candidate_version_two_relative_sequence() {
+        let dummy = DiffTip {
+            hash: BlockHash::from_byte_array([0x33; 32]),
+            time: 1,
+            height: DIFF_TEST_PAD_HEIGHT,
+        };
+        let mature = height1_mature_out();
+        let got = prepare_csv_age_candidate(&dummy, mature, &[5, 0]).unwrap();
+        assert_eq!(got.txdata[1].version, TxVersion::TWO);
+        assert_eq!(got.txdata[1].input[0].sequence, Sequence::from_consensus(5));
+        assert_eq!(got.txdata[1].input[0].previous_output, mature);
+        assert_eq!(got.header.prev_blockhash, dummy.hash);
+        assert!(prepare_csv_age_candidate(&dummy, mature, b"").is_none());
+    }
+
+    #[test]
+    fn compare_csv_age_one_short_lock_accepts_long_lock_rejects() {
+        let (dir, hub, _) = tmp_diff_hub();
+        let pad = mine_diff_pad(&hub, DIFF_MATURE_PAD_HEIGHT).unwrap();
+        let mut tip = pad.tip.clone();
+        let mock = MockOracle::new(OracleReply::NullAccept);
+        match compare_csv_age_one(&hub, &mut tip, &mock, pad.mature, &[1, 0]) {
+            CompareOne::Agreed { accept: true } => {}
+            other => panic!("csv rel=1: {other:?}"),
+        }
+        assert_eq!(hub.tip_height(), Some(DIFF_MATURE_PAD_HEIGHT));
+        let mock = MockOracle::new(OracleReply::Reason("non-BIP68-final".into()));
+        match compare_csv_age_one(&hub, &mut tip, &mock, pad.mature, &[200, 0]) {
+            CompareOne::Agreed { accept: false } => {}
+            other => panic!("csv rel=200: {other:?}"),
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn compare_cmpct_reorg_one_child_first_drain() {
         let (dir, hub, _g) = tmp_diff_hub();
         let pad = mine_diff_pad(&hub, DIFF_TEST_PAD_HEIGHT).unwrap();
@@ -1750,6 +2340,76 @@ mod tests {
             SCRIPT_FUZZ_MAX
         );
         assert!(prepare_script_candidate(&dummy, mature, b"").is_none());
+    }
+
+    #[test]
+    fn apply_diff_field_mutations_sets_consensus_fields() {
+        let mut a = default_op_true_spend(height1_mature_out(), 0);
+        let mut b = default_op_true_spend(height1_mature_out(), 1);
+        a.output[0].script_pubkey = ScriptBuf::from_bytes(vec![0x51]);
+        b.output[0].script_pubkey = ScriptBuf::from_bytes(vec![0x52]);
+        let mut txs = vec![a, b];
+        let mut ctrl = vec![
+            DIFF_MUT_VERSION
+                | DIFF_MUT_LOCKTIME
+                | DIFF_MUT_SEQUENCE
+                | DIFF_MUT_SCRIPT_SIG
+                | DIFF_MUT_WITNESS
+                | DIFF_MUT_ANNEX
+                | DIFF_MUT_SHUFFLE,
+        ];
+        ctrl.extend_from_slice(&2i32.to_le_bytes());
+        ctrl.extend_from_slice(&7u32.to_le_bytes());
+        ctrl.extend_from_slice(&0x0000_0001u32.to_le_bytes());
+        ctrl.push(1);
+        ctrl.push(0xae);
+        ctrl.push(1);
+        ctrl.push(3);
+        ctrl.extend_from_slice(&[0xaa, 0xbb, 0xcc]);
+        ctrl.push(2);
+        ctrl.extend_from_slice(&[0x11, 0x22]);
+        ctrl.push(1);
+        apply_diff_field_mutations(&mut txs, &ctrl);
+        assert_eq!(txs[0].output[0].script_pubkey.as_bytes(), &[0x52]);
+        assert_eq!(txs[1].output[0].script_pubkey.as_bytes(), &[0x51]);
+        assert_eq!(txs[0].version, TxVersion::TWO);
+        assert_eq!(txs[0].lock_time, LockTime::from_consensus(7));
+        assert_eq!(
+            txs[0].input[0].sequence,
+            Sequence::from_consensus(0x0000_0001)
+        );
+        assert_eq!(txs[0].input[0].script_sig.as_bytes(), &[0xae]);
+        let w: Vec<Vec<u8>> = txs[0].input[0].witness.iter().map(|s| s.to_vec()).collect();
+        assert_eq!(w[0], vec![0xaa, 0xbb, 0xcc]);
+        assert_eq!(w.last().unwrap()[0], 0x50);
+    }
+
+    #[test]
+    fn prepare_script_candidate_reads_version_and_witness_prefix() {
+        let dummy = DiffTip {
+            hash: BlockHash::from_byte_array([0x33; 32]),
+            time: 1,
+            height: DIFF_MATURE_PAD_HEIGHT,
+        };
+        let mature = height1_mature_out();
+        let mut data = vec![SCRIPT_FUZZ_CTRL];
+        data.extend_from_slice(&2i32.to_le_bytes());
+        data.push(1);
+        data.push(2);
+        data.extend_from_slice(&[0xde, 0xad]);
+        data.push(0x51);
+        let got = prepare_script_candidate(&dummy, mature, &data).unwrap();
+        assert_eq!(got.txdata[1].version, TxVersion::TWO);
+        assert_eq!(got.txdata[1].output[0].script_pubkey.as_bytes(), &[0x51]);
+        let wit: Vec<Vec<u8>> = got.txdata[2].input[0]
+            .witness
+            .iter()
+            .map(|s| s.to_vec())
+            .collect();
+        assert_eq!(wit, vec![vec![0xde, 0xad]]);
+        let plain = prepare_script_candidate(&dummy, mature, &[0x51]).unwrap();
+        assert_eq!(plain.txdata[1].version, TxVersion::ONE);
+        assert!(plain.txdata[2].input[0].witness.is_empty());
     }
 
     #[test]

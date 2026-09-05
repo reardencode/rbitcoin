@@ -30,6 +30,11 @@ const PROTOCOL_ASOF: &str = "1.4.2-asof";
 /// `blockchain.tweaks.subscribe [0, 1, false]`.
 const SERVER_VERSION: &str = concat!("rbitcoin-electrs ", env!("CARGO_PKG_VERSION"));
 
+/// One JSON-RPC request line. Junk is `None`; must not panic.
+pub fn parse_electrum_request_line(line: &str) -> Option<Value> {
+    serde_json::from_str(line).ok()
+}
+
 /// Tip-follow 5s DEBUG `tip: perf`: JSON-RPC request count this window.
 static METER_REQ: AtomicU64 = AtomicU64::new(0);
 /// Sum of dispatch walls (µs).
@@ -505,9 +510,9 @@ where
                 if line.trim().is_empty() {
                     continue;
                 }
-                let req: Value = match serde_json::from_str(&line) {
-                    Ok(v) => v,
-                    Err(_) => continue,
+                let req: Value = match parse_electrum_request_line(&line) {
+                    Some(v) => v,
+                    None => continue,
                 };
                 let id = req.get("id").cloned().unwrap_or(Value::Null);
                 let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
@@ -1816,6 +1821,18 @@ pub fn electrum_scripthash_hex(script: &[u8]) -> String {
 mod tests {
     use super::*;
     use rbitcoin_consensus::ChainParams;
+
+    #[test]
+    fn parse_electrum_request_line_junk_does_not_panic() {
+        assert!(parse_electrum_request_line("").is_none());
+        assert!(parse_electrum_request_line("{").is_none());
+        assert!(parse_electrum_request_line("not json {").is_none());
+        let v = parse_electrum_request_line(
+            r#"{"id":1,"method":"server.version","params":["a","1.4"]}"#,
+        )
+        .unwrap();
+        assert_eq!(v["method"], "server.version");
+    }
     use rbitcoin_query::Query;
     use std::collections::{HashMap, HashSet};
     use std::time::{SystemTime, UNIX_EPOCH};

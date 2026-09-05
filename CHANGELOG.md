@@ -77,6 +77,41 @@ before 1.0).
 
 ### Fixed
 
+- **Weekly ~1h fuzz + compounding corpus cache:** `fuzz.yml` runs Sunday
+  07:17 UTC with `-max_total_time=3600` (nightly stays 600s). Per-job
+  corpus cache restore/save and crasher artifacts. New target jobs
+  (N-reorg, CSV, mempool, script-verify, addrv2, inv/getdata, Electrum
+  JSON). **Operator must push this workflow** (GitHub App cannot).
+
+- **Q-31 fuzz seeds:** tiny existing `signet_block_*.bin` and
+  `mainnet_block_290329.bin` merge into `block_wire` / `block_differential`
+  corpora (copy-if-absent, remine onto regtest). Electrum hermetic packs
+  still Open.
+
+- **ASan parser jobs:** `addrv2_wire`, `inv_getdata_wire` (`parse_v2_regtest_named`),
+  and `electrum_json` (`parse_electrum_request_line`). Junk must not panic.
+  Nightly jobs wait on operator-pushed `fuzz.yml`.
+
+- **Interpreter-only differential:** `verify_tx_scripts_detached` vs Core
+  `testmempoolaccept` of the parent+spend package. No `submitblock` / remine
+  per exec. Policy skips same as the mempool oracle.
+
+- **Mempool differential vs Core `testmempoolaccept`:** same raw spend,
+  `MempoolHub::test_accept` vs Core. **Consensus-class only** — Libre
+  policy (dust, min-relay, RBF, cluster) is skip, not a finding (COMPAT).
+
+- **N-block reorg and BIP68 CSV-age differentials:** `compare_fork_n_one`
+  (side chain length 3 vs a 1-block stem) and `compare_csv_age_one`
+  (version-2 spend of a mature coin with relative-height `nSequence`)
+  vs Core `submitblock`. Nightly jobs land when the operator pushes
+  `fuzz.yml`.
+
+- **Differential fuzz mutates consensus fields:** leftover fuzzer bytes
+  overlay extra-tx `nVersion` / `nLockTime` / `nSequence` / scriptSig /
+  witness / taproot annex and same-block order. `script_differential`
+  reads a version+witness prefix (`0x80`); a bare `OP_TRUE` seed is
+  unchanged.
+
 - **Nightly fuzz corpus compounds:** `fuzz-run.sh` merges committed seeds
   into an existing corpus (does not overwrite grown inputs), prints and
   passes libFuzzer `-seed`, copies `fuzz/artifacts` into `fuzz/crashers`
