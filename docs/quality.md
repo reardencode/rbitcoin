@@ -33,8 +33,8 @@ died with that file. Close a Q-id by moving it to Completed in the same PR.
 
 Peer full-node notes (Hornet, satd) live in
 [`peer-clients.md`](./peer-clients.md). Ranked later-consideration items
-stay there; promote into Open only when scheduling a slice. **Q-30** already
-covers the highest-leverage steal (in-tree differential fuzz).
+stay there; promote into Open only when scheduling a slice. **Q-30** (Completed)
+was the highest-leverage steal (in-tree differential fuzz).
 
 ---
 
@@ -94,18 +94,17 @@ evidence (failed Core corpus, new dual path, red required CI, MSRV drift).
 
 | Rank | ID | Item | Tag | Done looks like |
 |-----:|----|------|-----|-----------------|
-| 1 | **Q-30** | Continuous differential fuzz | reliability | A nightly/weekly job that feeds BIP324 + header/block (and script) wire. Crashes → `docs/external_findings/` + named regression. **Today: `fuzz/` `block_wire` + `v2_contents` (ASan), `v2_session`, `cmpct_differential`, `script_differential` (mutating scriptPubKey vs Core `submitblock`), and three structure `submitblock` diffs vs official v31.1 `bitcoind` on nightly `fuzz.yml` (not a required PR check).** Still missing two-node compact reorg P2P. JSON corpora stay as static vectors. Findings 001–023 came from external review + fuzzamoto — that is not a substitute for the in-tree job. |
-| 2 | **Q-41** | Grow Core functional `run` set | test | Inventory `run` covers the wallet-client / P2P / mempool / buried-activation scripts we **claim**. **Today: 62 run / 205 skip (22 rpc-missing, 25 core-log, 68 no-wallet).** COMPAT-done leftovers are `rpc-dialect` (not `rpc-missing`). Next `run` candidates: `mempool_accept` type-check, `mining_basic` weight, `rpc_getblockfrompeer`. Product-never skips stay skip. Unlabeled PRs stay cargo-only; nightly green |
-| 3 | **Q-57** | Store publish / Class C flush / sidecar | store | `VarTable::published_meta` loads count/end `Acquire` (ARM cannot tear the pair). `ArrayTable` / `StrongTxTable` `flush_dirty` cannot lose a `set` in the write window (clear dirty then snapshot, or equivalent). fuse8 `decode_body` fails closed (`NeedsRewrite`) instead of indexing fingerprints OOB. Spender overflow walk bounded by `spenders.count()`. Sidecar meta / `.mphf` / SH `.idx` do not rename an unsynced empty file into place. `sorted_run` orphan GC cannot delete a live run (lock is a type, not a comment). **Today: `published_meta` seqlock Acquire landed.** `BinaryFuse8::contains` still indexes `fingerprints` without a closed length check. |
-| 4 | **Q-58** | Mempool persist order + eviction | mempool | `persist_all` writes body before claiming LIVE slots. Known-parent out-of-range vout hard-rejects (not orphan-forever). `worst_chunk` rate-tie does not strand descendants. `evict_to_budget` no-op iterations break (no spin). **Today: `evict_to_budget` breaks when a pass removes 0.** `persist_all` still writes meta/slots then body. |
-| 5 | **Q-59** | RPC / CLI honesty | ops | `submitblock` matches [`rpc.md`](./rpc.md) / COMPAT (all networks) or those docs say regtest-only. `gettxout include_mempool` hides mempool-spent confirmed outs. `sendrawtransaction` / `submitpackage` enforce or reject `maxfeerate` / `maxburnamount`. Conf `milestone=0` is not overwritten by the network default. `--minrelaytxfee` parse failure is an error (negatives rejected). `getmininginfo` `blockmintxfee` uses a feerate formatter. `getnetworkhashps` is not a dummy ~2 hashes/block (or is labeled). JSON-RPC batch is bounded under the work permit. **Today: `submitblock` is `require_regtest_miner` while COMPAT excepts it from regtest-only. `getnetworkhashps` still `2 * nblocks / dt`. `gettxout` does not hide mempool-spent confirmed outs. JSON-RPC array batch is unbounded.** |
-| 6 | **Q-60** | P2P caps + compact reconstruction | p2p | Compact-block prefilled indexes are strictly increasing and in-bounds. AddrMan has tried/new caps. `cmpct_fills` / `requested_blocks` prune on abandon/timeout. `announced_wtx` rolls instead of clear-all INV burst. Pending/held eviction is FIFO (`held_seq`), not `HashMap::keys().next()`. Esplora WS mempool-announce store IO uses `spawn_blocking` like REST (**landed**). IBD `disconnect_to` skips cloning the losing branch when there is no mempool. **Today: `prefilled_indexes_ok` + `held_seq` FIFO + WS `spawn_blocking` landed.** `announced_wtx` still `clear()` at 50k. AddrMan is an unbounded `HashMap`. |
-| 7 | **Q-48** | BIP331 rust-bitcoin package types | interop | Native BIP331 `NetworkMessage` when rust-bitcoin exposes it (**RB-007**). Packages today are RPC `submitpackage` / Esplora `POST /txs/package` only — no private P2P command. Blocked upstream — ranked below unblocked ops work. **After this:** Electrum 1.6 then 1.7 (`protocol_max` bump in the same work) — [`COMPAT.md`](../COMPAT.md) § Protocol versions |
-| 8 | **Q-31** | Hermetic tip fixtures | ops | Frozen signet/mainnet tip packs for offline consensus/Electrum regression (no live API). Unblocks Q-30 corpora |
-| 9 | **R-10** | Residual god-files | code | Peel **only** when a higher row needs a seam. Production leftover (2026-09-03 `wc -l`): `electrum/server` **5.8k**, `query/lib` **5.1k**, `chain` **3.9k**, `rpc/methods` **3.6k**, `scripthash` **3.5k**, `store` **3.4k**, `peer` **2.9k**, `ibd/perf_log` **2.9k**, `interpreter` **2.7k**. `sorted_run` peeled to **1.3k**. Further production peels wait for a real seam. **Q-54** may need a seam if a cap rule cannot match a god-file. |
-| 10 | **Q-54** | Grow ast-grep rules from `ibd-memory.md` | code | One rule per named cap that is easy to delete: `pending_blocks` 128, `held_bodies` 320, `MAX_SERVE_BLOCKS` 16, `follow_live` vs `max_outbound`. Each rule has `lint/ast-grep/fixtures/{good,bad}/`. Peel god-files (**R-10**) only if a rule needs a seam. |
-| 11 | **Q-55** | CRAP `--fail-regression` | test | Commit `crap_baseline.json` (`--format json --sort file`) from a green coverage artifact. PRs fail if a function’s CRAP rises. Still no `--fail-above 30` while clippy allows `cognitive_complexity`. |
-| 12 | **Q-56** | Miri islands beyond primitives | reliability | `cfg(miri)` tests for FFI-free helpers (scriptnum, pack_ud-style integers) that do not pull secp/store. Never workspace miri. |
+| 1 | **Q-41** | Grow Core functional `run` set | test | Inventory `run` covers the wallet-client / P2P / mempool / buried-activation scripts we **claim**. **Today: 62 run / 205 skip (22 rpc-missing, 25 core-log, 68 no-wallet).** COMPAT-done leftovers are `rpc-dialect` (not `rpc-missing`). Next `run` candidates: `mempool_accept` type-check, `mining_basic` weight, `rpc_getblockfrompeer`. Product-never skips stay skip. Unlabeled PRs stay cargo-only; nightly green |
+| 2 | **Q-57** | Store publish / Class C flush / sidecar | store | `VarTable::published_meta` loads count/end `Acquire` (ARM cannot tear the pair). `ArrayTable` / `StrongTxTable` `flush_dirty` cannot lose a `set` in the write window (clear dirty then snapshot, or equivalent). fuse8 `decode_body` fails closed (`NeedsRewrite`) instead of indexing fingerprints OOB. Spender overflow walk bounded by `spenders.count()`. Sidecar meta / `.mphf` / SH `.idx` do not rename an unsynced empty file into place. `sorted_run` orphan GC cannot delete a live run (lock is a type, not a comment). **Today: `published_meta` seqlock Acquire landed.** `BinaryFuse8::contains` still indexes `fingerprints` without a closed length check. |
+| 3 | **Q-58** | Mempool persist order + eviction | mempool | `persist_all` writes body before claiming LIVE slots. Known-parent out-of-range vout hard-rejects (not orphan-forever). `worst_chunk` rate-tie does not strand descendants. `evict_to_budget` no-op iterations break (no spin). **Today: `evict_to_budget` breaks when a pass removes 0.** `persist_all` still writes meta/slots then body. |
+| 4 | **Q-59** | RPC / CLI honesty | ops | `submitblock` matches [`rpc.md`](./rpc.md) / COMPAT (all networks) or those docs say regtest-only. `gettxout include_mempool` hides mempool-spent confirmed outs. `sendrawtransaction` / `submitpackage` enforce or reject `maxfeerate` / `maxburnamount`. Conf `milestone=0` is not overwritten by the network default. `--minrelaytxfee` parse failure is an error (negatives rejected). `getmininginfo` `blockmintxfee` uses a feerate formatter. `getnetworkhashps` is not a dummy ~2 hashes/block (or is labeled). JSON-RPC batch is bounded under the work permit. **Today: `submitblock` is `require_regtest_miner` while COMPAT excepts it from regtest-only. `getnetworkhashps` still `2 * nblocks / dt`. `gettxout` does not hide mempool-spent confirmed outs. JSON-RPC array batch is unbounded.** |
+| 5 | **Q-60** | P2P caps + compact reconstruction | p2p | Compact-block prefilled indexes are strictly increasing and in-bounds. AddrMan has tried/new caps. `cmpct_fills` / `requested_blocks` prune on abandon/timeout. `announced_wtx` rolls instead of clear-all INV burst. Pending/held eviction is FIFO (`held_seq`), not `HashMap::keys().next()`. Esplora WS mempool-announce store IO uses `spawn_blocking` like REST (**landed**). IBD `disconnect_to` skips cloning the losing branch when there is no mempool. **Today: `prefilled_indexes_ok` + `held_seq` FIFO + WS `spawn_blocking` landed.** `announced_wtx` still `clear()` at 50k. AddrMan is an unbounded `HashMap`. |
+| 6 | **Q-48** | BIP331 rust-bitcoin package types | interop | Native BIP331 `NetworkMessage` when rust-bitcoin exposes it (**RB-007**). Packages today are RPC `submitpackage` / Esplora `POST /txs/package` only — no private P2P command. Blocked upstream — ranked below unblocked ops work. **After this:** Electrum 1.6 then 1.7 (`protocol_max` bump in the same work) — [`COMPAT.md`](../COMPAT.md) § Protocol versions |
+| 7 | **Q-31** | Hermetic tip fixtures | ops | Frozen signet/mainnet tip packs for offline consensus/Electrum regression (no live API). Feeds nightly fuzz corpora |
+| 8 | **R-10** | Residual god-files | code | Peel **only** when a higher row needs a seam. Production leftover (2026-09-03 `wc -l`): `electrum/server` **5.8k**, `query/lib` **5.1k**, `chain` **3.9k**, `rpc/methods` **3.6k**, `scripthash` **3.5k**, `store` **3.4k**, `peer` **2.9k**, `ibd/perf_log` **2.9k**, `interpreter` **2.7k**. `sorted_run` peeled to **1.3k**. Further production peels wait for a real seam. **Q-54** may need a seam if a cap rule cannot match a god-file. |
+| 9 | **Q-54** | Grow ast-grep rules from `ibd-memory.md` | code | One rule per named cap that is easy to delete: `pending_blocks` 128, `held_bodies` 320, `MAX_SERVE_BLOCKS` 16, `follow_live` vs `max_outbound`. Each rule has `lint/ast-grep/fixtures/{good,bad}/`. Peel god-files (**R-10**) only if a rule needs a seam. |
+| 10 | **Q-55** | CRAP `--fail-regression` | test | Commit `crap_baseline.json` (`--format json --sort file`) from a green coverage artifact. PRs fail if a function’s CRAP rises. Still no `--fail-above 30` while clippy allows `cognitive_complexity`. |
+| 11 | **Q-56** | Miri islands beyond primitives | reliability | `cfg(miri)` tests for FFI-free helpers (scriptnum, pack_ud-style integers) that do not pull secp/store. Never workspace miri. |
 
 ### Still valid? (this reaudit)
 
@@ -119,14 +118,14 @@ remaining holes already have Open rows.
 
 | ID | Verdict |
 |----|---------|
-| **Q-30** | Keep rank 1. Three structure `submitblock` diffs + ASan `block_wire` / `v2_contents` + live Core `v2_session` + compact reconstruct vs `getblocktxn` + script-mutating vs Core landed; still not two-node compact reorg P2P. External fuzzamoto + finding 023 are not a substitute job. |
-| **Q-41** | Keep rank 2. 53 → **62** `run`. 205 skips; `rpc-missing` 22 + `core-log` 25 are the growth matching claimed surface. |
-| **Q-57** | Keep rank 3. Seqlock `published_meta` landed; fuse8 fingerprint OOB, flush_dirty window, sidecar rename, spender overflow bound, sorted_run GC lock type still open. |
-| **Q-58** | Keep rank 4. `evict_to_budget` no-op break landed. `persist_all` still meta/slots then body. |
-| **Q-59** | Keep rank 5. COMPAT vs `submitblock` regtest clamp, dummy `getnetworkhashps`, `gettxout` mempool-spent confirmed, unbounded JSON-RPC batch. |
-| **Q-60** | Keep rank 6. Prefill monotonic + `held_seq` + WS `spawn_blocking` landed. AddrMan caps and `announced_wtx` roll still open. |
-| **Q-48** | Keep, rank 7. Waits on rust-bitcoin (**RB-007**). |
-| **Q-31** | Keep. Useful for Q-30; not blocking operators. |
+| **Q-30** | **Closed.** Nightly job feeds BIP324 parser+session, header/block `submitblock`, compact reconstruct vs `getblocktxn`, compact reorg via `drain_pending`, and script-mutating. JSON corpora stay static. Live Core HB announce is not a leftover Open row. |
+| **Q-41** | Keep rank 1. 53 → **62** `run`. 205 skips; `rpc-missing` 22 + `core-log` 25 are the growth matching claimed surface. |
+| **Q-57** | Keep rank 2. Seqlock `published_meta` landed; fuse8 fingerprint OOB, flush_dirty window, sidecar rename, spender overflow bound, sorted_run GC lock type still open. |
+| **Q-58** | Keep rank 3. `evict_to_budget` no-op break landed. `persist_all` still meta/slots then body. |
+| **Q-59** | Keep rank 4. COMPAT vs `submitblock` regtest clamp, dummy `getnetworkhashps`, `gettxout` mempool-spent confirmed, unbounded JSON-RPC batch. |
+| **Q-60** | Keep rank 5. Prefill monotonic + `held_seq` + WS `spawn_blocking` landed. AddrMan caps and `announced_wtx` roll still open. |
+| **Q-48** | Keep, rank 6. Waits on rust-bitcoin (**RB-007**). |
+| **Q-31** | Keep. Feeds nightly fuzz corpora; not blocking operators. |
 | **R-10** | Keep last among peels. Largest production file is now `electrum/server` **5.8k** (tweaks subscribe). `sorted_run` peeled to **1.3k**. |
 | **Q-54** | Keep. ast-grep still three rules (`detached-tokio-spawn`, `mem-forget-or-leak`, `thread-spawn-dropped`). No named-cap rules from `ibd-memory.md`. |
 | **Q-55** | Keep. `scripts/coverage-crap.sh` exists; no committed `crap_baseline.json`. |
@@ -150,10 +149,10 @@ id is in **bold**. Do not start **R-11+** — new work is the next unused
 | R-id | Canonical | Where |
 |------|-----------|-------|
 | R-01–R-06 | **R-01–R-06** | Completed |
-| R-07 | **Q-30** | Open rank 1 |
+| R-07 | **Q-30** | Completed |
 | R-08 | **Q-20** | Completed |
 | R-09 | **Q-16** | Completed |
-| R-10 | **R-10** | Open rank 9 |
+| R-10 | **R-10** | Open rank 8 |
 
 Next unused Q-id is **Q-61**.
 
@@ -196,6 +195,7 @@ findings 001–022, CI split, map-free README, …) live in
 
 | ID | Item | Resolution |
 |----|------|------------|
+| **Q-30** | Continuous differential fuzz | Nightly `fuzz.yml` (not a required PR check) feeds BIP324 parser (`v2_contents`) + live Core session (`v2_session`), header/block `submitblock` (height-1 / spend / fork), compact reconstruct vs Core `getblocktxn`, compact reorg via `drain_pending`, and script-mutating vs Core. Crashes → `docs/external_findings/` + named regression. JSON corpora stay static. |
 | **—** | Schema 20 indexes | Sealed `tx.head` MPHF+`.rel` → packed BDZ2; sealed SH MPHF → compact BDZ3. Occupied 18/19 `tx.head`/`scripthash*` **refused** (wipe those dirs, Class A kept). Empty 18/19 rewrite `meta` to 20. |
 | **—** | IBD main-loop cadence | Assign ≤50 ms (immediate if inflight empty); header locator poll ≤500 ms (empty path immediate); stall/relative-slow and work-path hygiene ≤1 s. Drain + confirm-offer stay event-driven. Full 2000-header continuation stays on the Headers event. |
 | **—** | Leftover hop-dump vs resolve-batch clear | `clear_leftover_miss` no longer wipes `diag=1`. Miss class is per-batch; dump is `take` only. Tests pin the parent txid (`leftover_probe_diag_recorded`). |
@@ -266,7 +266,7 @@ included; tree at #318):
 | On-disk | **Schema 20** (Class A/C still 17 bytes; 18 = MPHF indexes; 19 = SH extent last page; 20 = BDZ2 `tx.head` + BDZ3 SH). Occupied 18/19 `tx.head`/`scripthash*` refused |
 | Confirm queues | **loadq=14 · scriptq=4 · writeq=14** (hardcoded) |
 | IBD confirm rate | Last instrumented fat-era number **6.4 blk/s** at #126 (2026-08-18). Not re-baselined after cadence / tip-accept / reactor-safe. Residual meters are named (`other=`) — **Q-50** closed |
-| Fuzz | **ASan `block_wire` + `v2_contents`; live Core `v2_session` + `cmpct_differential`; `script_differential`; three structure `submitblock` diffs** (breadth still Q-30) |
+| Fuzz | **ASan `block_wire` + `v2_contents`; live Core `v2_session` + `cmpct_differential`; `script_differential`; three structure `submitblock` diffs; compact reorg via `drain_pending`** (**Q-30** completed) |
 
 ### Grade board (subjective; 2026-09-03)
 
@@ -284,7 +284,7 @@ included; tree at #318):
 | Test reliability/speed | Strong | **Q-37** closed on CI-class; 2 s default-test rule remains |
 | Tip-follow mempool APIs | Strong | **R-01–R-04**; persist sidecars exist (Core persist script still skip → Q-41); INV tick no longer clones the mempool |
 | Wallet-client APIs | Strong | Last-slot SH join + serve-lean identity for Electrum/Esplora; Casa/Sparrow times stay host-only (`rbitcoin-bench`) |
-| Adversarial / findings | Medium–Strong | **001–023** closed; in-tree Core `submitblock` diffs + ASan `block_wire` / `v2_contents` + live Core `v2_session` + compact reconstruct + script-mutating; breadth is **Q-30**. Core functional is the active surface program (**Q-41**) |
+| Adversarial / findings | Medium–Strong | **001–023** closed; in-tree Core `submitblock` diffs + ASan `block_wire` / `v2_contents` + live Core `v2_session` + compact reconstruct + compact reorg drain + script-mutating (**Q-30** completed). Core functional is the active surface program (**Q-41**) |
 | Perf observability | Strong | Named residuals (`other=` / `drain_join=`) (**Q-50**). Default INFO is `ibd: progress` (**Q-36**) |
 
 ---
@@ -315,10 +315,10 @@ included; tree at #318):
 
 | Audience | Read |
 |----------|------|
-| Next quality slice | **Open**, rank 1 (**Q-30** fuzz). Active program: **Q-41** (Core functional `run` set). Folded store/mempool/RPC/P2P leftovers: **Q-57–Q-60**. Next unused Q-id remains **Q-61** |
+| Next quality slice | **Open**, rank 1 (**Q-41** Core functional `run` set). Folded store/mempool/RPC/P2P leftovers: **Q-57–Q-60**. Next unused Q-id remains **Q-61** |
 | Peer full nodes | [`peer-clients.md`](./peer-clients.md) — Hornet / satd notes; not a fourth backlog |
 | Release engineering | **Q-20**, **Q-21**, **Q-23** (completed) |
-| Security / adversarial | Protect Q-01–Q-02; next **Q-30** |
+| Security / adversarial | Protect Q-01–Q-02; **Q-30** completed |
 | Docs / README | Map is done; first hour is OPERATOR.md (**Q-34** closed) |
 | “Are we leading yet?” | North star + grade board |
 

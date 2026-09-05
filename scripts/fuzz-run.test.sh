@@ -117,6 +117,18 @@ assert_ok "fork-differential dry-run in-process (no -jobs)" \
   grep -qx "FUZZ_JOBS=in-process" <<<"$out"
 assert_ok "fork-differential dry-run timeout 180" \
   grep -qx "FUZZ_TIMEOUT=180" <<<"$out"
+
+out="$(FUZZ_DRY_RUN=1 "$RUN" cmpct_reorg_differential)"
+assert_ok "cmpct-reorg-differential dry-run bin" \
+  grep -qx "FUZZ_BIN=cmpct_reorg_differential" <<<"$out"
+assert_ok "cmpct-reorg-differential dry-run sanitizer none" \
+  grep -qx "FUZZ_SANITIZER=none" <<<"$out"
+assert_ok "cmpct-reorg-differential dry-run in-process (no -jobs)" \
+  grep -qx "FUZZ_JOBS=in-process" <<<"$out"
+assert_ok "cmpct-reorg-differential dry-run timeout 180" \
+  grep -qx "FUZZ_TIMEOUT=180" <<<"$out"
+assert_ok "cmpct-reorg-differential dry-run prints CORE_BITCOIND" \
+  grep -q "^RBITCOIN_CORE_BITCOIND=" <<<"$out"
 assert_ok "dry-run rustc wrapper" \
   grep -q "^RUSTC_WRAPPER=.*fuzz-rustc-allow-warnings.sh$" <<<"$out"
 wrap="$ROOT/scripts/fuzz-rustc-allow-warnings.sh"
@@ -147,6 +159,8 @@ echo "cmpct-differential: comparisons=1" >"$WORKDIR/cmpct.log"
 assert_ok "cmpct comparisons=1 pass" "$RUN" --check-log "$WORKDIR/cmpct.log"
 echo "script-differential: comparisons=1" >"$WORKDIR/script.log"
 assert_ok "script comparisons=1 pass" "$RUN" --check-log "$WORKDIR/script.log"
+echo "cmpct-reorg-differential: comparisons=1" >"$WORKDIR/cmpct-reorg.log"
+assert_ok "cmpct-reorg comparisons=1 pass" "$RUN" --check-log "$WORKDIR/cmpct-reorg.log"
 rm -rf "$WORKDIR"
 
 # Pin/fetch tests land before the operator YAML commit; required CI already

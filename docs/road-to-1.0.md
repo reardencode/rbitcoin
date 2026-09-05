@@ -59,7 +59,7 @@ live in [`quality.md`](./quality.md) **Q-41**. Owner:
 Peers and blocks should not crash the node. 0.5 has one nightly
 `block_wire` job. 1.0 wants continuous coverage of **headers, blocks,
 scripts, BIP324, compact blocks** — crashes become a numbered finding plus
-a regression. Open **Q-30**; frozen corpora **Q-31**.
+a regression. **Q-30** Completed; frozen corpora **Q-31**.
 
 ### Libraries other people can import
 

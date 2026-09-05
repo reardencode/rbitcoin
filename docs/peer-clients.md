@@ -6,8 +6,8 @@ docs). Analysis only at write time.
 **Owner of these notes:** this file. Ranked later-consideration items stay
 here. Do **not** copy the tables into [`quality.md`](./quality.md) Open.
 When an item becomes a real slice, give it the next unused Q-id in quality.md
-and link back. Existing Open rows (**Q-30**, **Q-41**) already cover the
-highest-leverage tests; this file is the source of the comparison, not a
+and link back. Existing Open row **Q-41** is the remaining high-leverage test
+program (**Q-30** Completed); this file is the source of the comparison, not a
 second backlog.
 
 Core / Fulcrum product contrasts stay in [`architecture.md`](./architecture.md).
@@ -63,8 +63,10 @@ contents are ASan (`v2_contents`); a live Core v2 session (`v2_session`)
 handshakes then writes fuzzed app contents (not a `submitblock` compare).
 Compact reconstruct vs Core `getblocktxn` (`cmpct_differential`) is landed.
 Script-mutating vs Core `submitblock` (`script_differential`) is landed
-(fuzzer bytes run as scriptPubKey; JSON corpora stay static). Two-node
-compact reorg P2P remains later Q-30. Fuzzamoto 001–023 stay as they were.
+(fuzzer bytes run as scriptPubKey; JSON corpora stay static). Compact reorg
+via child-first `drain_pending` vs Core (`cmpct_reorg_differential`) is
+landed. **Q-30** is Completed. Live Core HB `cmpctblock` announce is not a
+leftover Open row. Fuzzamoto 001–023 stay as they were.
 
 Their curated single-fault file (reason-string parity) is less useful; we
 already pin reject *class* in [`consensus-tests.md`](./consensus-tests.md).
@@ -204,7 +206,7 @@ only when scheduling a slice.
 
 | Rank | Item | Source | Lands in |
 |-----:|------|--------|----------|
-| 1 | Height-1 + spend-pad + 2-block fork vs v31.1 `bitcoind`; BIP324 `v2_contents` ASan + live Core `v2_session` + compact reconstruct vs `getblocktxn` + script-mutating vs Core (**landed**; two-node compact reorg later) | satd `block_differential` | **Q-30** / [`TESTING.md`](../TESTING.md) |
+| 1 | Height-1 + spend-pad + 2-block fork vs v31.1 `bitcoind`; BIP324 `v2_contents` ASan + live Core `v2_session` + compact reconstruct vs `getblocktxn` + script-mutating vs Core + compact reorg via `drain_pending` (**landed**; **Q-30** Completed) | satd `block_differential` | **Q-30** / [`TESTING.md`](../TESTING.md) |
 | 2 | One cross-surface scenario: Esplora `POST /tx` → Electrum history + RPC mempool | satd E2E | scenarios / Electrum–Esplora tests |
 | — | ~~Hornet spec.html vs consensus-tests.md gap hunt~~ **done 2026-09-04** (table in this file; pins in `structure_rule_tests` / `header.rs` / `consensus_rules`) | Hornet | this file + [`consensus-tests.md`](./consensus-tests.md) |
 | 4 | `/healthz` (and maybe `/readyz`) on the node listen; Prometheus later as a flag | satd | node / [`OPERATOR.md`](../OPERATOR.md) |

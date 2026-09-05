@@ -76,3 +76,10 @@ path = "fuzz_targets/script_differential.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "cmpct_reorg_differential"
+path = "fuzz_targets/cmpct_reorg_differential.rs"
+test = false
+doc = false
+bench = false
