@@ -330,7 +330,8 @@ python3 -m pip install --user cryptography
 python3 scripts/ibd-serve-bench.py --network mainnet --bytes 512M 127.0.0.1:8333
 ```
 
-Compare client `throughput` with node DEBUG `p2p: serve` `wall_ns` / `bytes`.
+Compare client `throughput` with node DEBUG `tip: perf` `serve bytes=` / `n=`
+(window reconstruct+encode; `avg_us` / `max_us` are per-block walls).
 
 Default `cargo test` does **not** download Core, bind RPC/P2P, or compile `fuzz/`.
 The official tarball is glibc; GitHub Actions `ubuntu-latest` runs it. A NixOS

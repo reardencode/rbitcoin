@@ -3234,10 +3234,6 @@ fn block_for_peer(
     }
 }
 
-fn format_p2p_serve_line(ntx: u32, bytes: usize, wall_ns: u128) -> String {
-    format!("p2p: serve ntx={ntx} bytes={bytes} wall_ns={wall_ns}")
-}
-
 fn payload_tx_count(payload: &[u8]) -> u32 {
     use bitcoin::consensus::Decodable;
     if payload.len() < 81 {
@@ -3254,17 +3250,18 @@ fn encode_served_witness_block(
     hash: &BlockHash,
 ) -> Result<Option<Vec<u8>>, NetError> {
     crate::reactor::assert_not_reactor("getdata reconstruct");
-    if let Some(block) = cache.get_block(hash) {
-        return crate::v2::encode_v2_contents(NetworkMessage::Block(block)).map(Some);
-    }
     let t0 = std::time::Instant::now();
+    if let Some(block) = cache.get_block(hash) {
+        let ntx = block.txdata.len() as u32;
+        let encoded = crate::v2::encode_v2_contents(NetworkMessage::Block(block))?;
+        let payload_len = encoded.len().saturating_sub(1);
+        crate::serve_perf::note_serve(ntx, payload_len, t0.elapsed().as_nanos());
+        return Ok(Some(encoded));
+    }
     match query.witness_block_bytes_by_hash(&hash.to_byte_array()) {
         Ok(Some(payload)) => {
             let ntx = payload_tx_count(&payload);
-            rbitcoin_log::debug!(
-                "{}",
-                format_p2p_serve_line(ntx, payload.len(), t0.elapsed().as_nanos())
-            );
+            crate::serve_perf::note_serve(ntx, payload.len(), t0.elapsed().as_nanos());
             let mut contents = Vec::with_capacity(1 + payload.len());
             contents.push(2);
             contents.extend_from_slice(&payload);

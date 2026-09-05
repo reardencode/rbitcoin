@@ -199,7 +199,7 @@ confirm does **not** spam this line per block — use the periodic IBD status be
 
 | Line | Level | Use |
 |------|-------|-----|
-| `tip: perf` | DEBUG | Every ~5s: follow peers, blocks this window, mempool accept/reject + wall µs, inv/getdata/announce, Esplora/Electrum req counts + avg/max µs |
+| `tip: perf` | DEBUG | Every ~5s: follow peers, blocks this window, mempool accept/reject + wall µs, inv/getdata/announce, Esplora/Electrum req counts + avg/max µs, historical block `serve n= bytes= ntx= avg_us= max_us=` |
 | `tip: accept` | INFO | Per accepted tip block: wall/load/script/class_a/class_c/SH plus lookup/struct/drain/mp_strip/other (not emitted on reject) |
 | `UpdateTip` | INFO | New best hash/height after connect |
 | `node: tip=…` | DEBUG | Same height change plus `follow_live` (use `UpdateTip` at info) |
@@ -421,8 +421,9 @@ Do **not** wipe `store/` for mempool slot/full errors.
 
 - **BIP324 v2 only** — plaintext v1 peers disconnect (`peer does not speak BIP324 v2`).
 - **IBD `getdata` serve** reconstructs witness blocks from contiguous Class A
-  spans (`txout.body` + `inwit.body`), off the session reactor. DEBUG
-  `p2p: serve ntx= bytes= wall_ns=`. Host throughput probe:
+  spans (`txout.body` + `inwit.body`), off the session reactor. Serve volume
+  is on DEBUG `tip: perf` (`serve n= bytes= ntx= avg_us= max_us=`), not a
+  per-block line. Host throughput probe:
   `python3 scripts/ibd-serve-bench.py 127.0.0.1:8333` (needs `cryptography`
   and a BIP324 client; see [`TESTING.md`](TESTING.md) § P2P serve bench).
 - **Discovery** queries Core DNS seeds for `NETWORK|WITNESS|P2P_V2`
