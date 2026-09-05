@@ -57,6 +57,8 @@ pub trait BlockOracle {
     fn submitblock_hex(&self, hex: &str) -> OracleReply;
     fn liveness_ok(&self) -> bool;
     fn core_rewind_to_height(&self, keep: u32) -> Result<(), &'static str>;
+    /// Undo `invalidateblock` (sticky). Unknown hash may error; callers ignore.
+    fn core_reconsider_block(&self, hash: &str) -> Result<(), &'static str>;
 }
 
 pub const DIFF_TEST_PAD_HEIGHT: u32 = 3;
@@ -169,33 +171,44 @@ pub fn mine_diff_stem(hub: &ChainHub, pad: DiffPad) -> Result<DiffPad, &'static 
     })
 }
 
+fn submit_known_block(
+    oracle: &dyn BlockOracle,
+    block: &Block,
+    stored: &[&str],
+    err: &'static str,
+) -> Result<(), &'static str> {
+    let hash = block.block_hash().to_string();
+    let _ = oracle.core_reconsider_block(&hash);
+    let hex = hex_encode(serialize(block));
+    match oracle.submitblock_hex(&hex) {
+        OracleReply::NullAccept => Ok(()),
+        OracleReply::Reason(r) if stored.contains(&r.as_str()) => {
+            if r == "duplicate-invalid" || r == "duplicate-inconclusive" {
+                oracle.core_reconsider_block(&hash)?;
+            }
+            Ok(())
+        }
+        _ => Err(err),
+    }
+}
+
 pub fn setup_side_block(
     hub: &ChainHub,
     oracle: &dyn BlockOracle,
     block: &Block,
 ) -> Result<(), &'static str> {
-    let hex = hex_encode(serialize(block));
     match hub.accept_received_block(block.clone()) {
         Ok(AcceptOutcome::IgnoredWeaker | AcceptOutcome::AlreadyHave) => {}
         Ok(AcceptOutcome::Accepted { .. }) => return Err("side became tip"),
         Err(_) => return Err("side reject"),
     }
-    match oracle.submitblock_hex(&hex) {
-        OracleReply::NullAccept => Ok(()),
-        OracleReply::Reason(r) if CORE_SIDE_STORED.contains(&r.as_str()) => Ok(()),
-        _ => Err("side submit"),
-    }
+    submit_known_block(oracle, block, CORE_SIDE_STORED, "side submit")
 }
 
 /// Core-only side submit. Hub must not `accept_received_block` the sibling
 /// before child-first `drain_pending` (014 / 020).
 pub fn submit_side_to_oracle(oracle: &dyn BlockOracle, block: &Block) -> Result<(), &'static str> {
-    let hex = hex_encode(serialize(block));
-    match oracle.submitblock_hex(&hex) {
-        OracleReply::NullAccept => Ok(()),
-        OracleReply::Reason(r) if CORE_SIDE_STORED.contains(&r.as_str()) => Ok(()),
-        _ => Err("side submit"),
-    }
+    submit_known_block(oracle, block, CORE_SIDE_STORED, "side submit")
 }
 
 pub fn submit_pad_to_oracle(
@@ -266,6 +279,16 @@ fn remine_diff_header(block: &mut Block) {
     prepare_regtest_candidate(block, prev, time);
 }
 
+fn stamp_diff_out(tx: &mut Transaction, uniq: u32) {
+    if uniq == 0 || tx.output.is_empty() {
+        return;
+    }
+    let extra = uniq.to_le_bytes();
+    let mut spk = tx.output[0].script_pubkey.to_bytes();
+    spk.extend_from_slice(&extra);
+    tx.output[0].script_pubkey = ScriptBuf::from_bytes(spk);
+}
+
 fn mine_diff_paying(
     prev: BlockHash,
     time: u32,
@@ -285,19 +308,22 @@ pub fn prepare_spend_candidate(tip: &DiffTip, mature: OutPoint, data: &[u8]) -> 
         return None;
     }
     let height = tip.height.saturating_add(1);
-    let mut spend = parsed.txdata.get(1).cloned().unwrap_or_else(|| {
-        static UNIQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
-        default_op_true_spend(
-            mature,
-            UNIQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        )
-    });
+    let mut spend = parsed
+        .txdata
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| default_op_true_spend(mature, 0));
     if spend.input.is_empty() {
         spend.input.push(default_spend_in(mature));
     } else {
         spend.input[0].previous_output = mature;
     }
-    let extra: Vec<Transaction> = parsed.txdata.into_iter().skip(2).collect();
+    let mut extra: Vec<Transaction> = parsed.txdata.into_iter().skip(2).collect();
+    let uniq = next_diff_cb_uniq();
+    stamp_diff_out(&mut spend, uniq);
+    for tx in extra.iter_mut() {
+        stamp_diff_out(tx, uniq);
+    }
     let mut txs = Vec::with_capacity(1 + extra.len());
     txs.push(spend);
     txs.extend(extra);
@@ -334,7 +360,7 @@ pub fn prepare_script_candidate(tip: &DiffTip, mature: OutPoint, data: &[u8]) ->
             script_pubkey: ScriptBuf::from_bytes(script.to_vec()),
         }],
     };
-    let tx2 = Transaction {
+    let mut tx2 = Transaction {
         version: TxVersion::ONE,
         lock_time: LockTime::ZERO,
         input: vec![TxIn {
@@ -351,6 +377,7 @@ pub fn prepare_script_candidate(tip: &DiffTip, mature: OutPoint, data: &[u8]) ->
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
+    stamp_diff_out(&mut tx2, next_diff_cb_uniq());
     Some(mine_diff_paying(
         tip.hash,
         tip.time.saturating_add(REGTEST_BLOCK_SPACING),
@@ -569,12 +596,16 @@ pub fn compare_one(
     if block.txdata.is_empty() {
         return CompareOne::NotABlock;
     }
+    let uniq = next_diff_cb_uniq();
+    for tx in block.txdata.iter_mut().skip(1) {
+        stamp_diff_out(tx, uniq);
+    }
     prepare_regtest_candidate(
         &mut block,
         tip.hash,
         tip.time.saturating_add(REGTEST_BLOCK_SPACING),
     );
-    stamp_diff_coinbase(&mut block, next_diff_cb_uniq());
+    stamp_diff_coinbase(&mut block, uniq);
     remine_diff_header(&mut block);
     compare_prepared(hub, tip, oracle, block)
 }
@@ -614,12 +645,7 @@ fn restore_stem(
         Ok(AcceptOutcome::Accepted { .. } | AcceptOutcome::AlreadyHave) => {}
         _ => return Err("stem restore"),
     }
-    let hex = hex_encode(serialize(stem));
-    match oracle.submitblock_hex(&hex) {
-        OracleReply::NullAccept => Ok(()),
-        OracleReply::Reason(r) if CORE_DUPLICATE_SKIP.contains(&r.as_str()) => Ok(()),
-        _ => Err("stem restore submit"),
-    }
+    submit_known_block(oracle, stem, CORE_DUPLICATE_SKIP, "stem restore submit")
 }
 
 pub fn compare_fork_one(
@@ -647,7 +673,11 @@ pub fn compare_fork_one(
     if let Err(e) = setup_side_block(hub, oracle, &side) {
         return CompareOne::Harness(e);
     }
-    let extra: Vec<Transaction> = parsed.txdata.into_iter().skip(1).collect();
+    let mut extra: Vec<Transaction> = parsed.txdata.into_iter().skip(1).collect();
+    let uniq = next_diff_cb_uniq();
+    for tx in extra.iter_mut() {
+        stamp_diff_out(tx, uniq);
+    }
     let child = mine_diff_paying(
         side.block_hash(),
         side.header.time.saturating_add(REGTEST_BLOCK_SPACING),
@@ -689,7 +719,11 @@ pub fn compare_cmpct_reorg_one(
     if let Err(e) = submit_side_to_oracle(oracle, &side) {
         return CompareOne::Harness(e);
     }
-    let extra: Vec<Transaction> = parsed.txdata.into_iter().skip(1).collect();
+    let mut extra: Vec<Transaction> = parsed.txdata.into_iter().skip(1).collect();
+    let uniq = next_diff_cb_uniq();
+    for tx in extra.iter_mut() {
+        stamp_diff_out(tx, uniq);
+    }
     let child = mine_diff_paying(
         side.block_hash(),
         side.header.time.saturating_add(REGTEST_BLOCK_SPACING),
@@ -837,6 +871,7 @@ mod tests {
         rewind: Cell<u32>,
         last_keep: Cell<u32>,
         submits: Cell<u32>,
+        reconsider: Cell<u32>,
         live: bool,
     }
 
@@ -848,6 +883,7 @@ mod tests {
                 rewind: Cell::new(0),
                 last_keep: Cell::new(u32::MAX),
                 submits: Cell::new(0),
+                reconsider: Cell::new(0),
                 live: true,
             }
         }
@@ -874,6 +910,10 @@ mod tests {
         fn core_rewind_to_height(&self, keep: u32) -> Result<(), &'static str> {
             self.rewind.set(self.rewind.get() + 1);
             self.last_keep.set(keep);
+            Ok(())
+        }
+        fn core_reconsider_block(&self, _hash: &str) -> Result<(), &'static str> {
+            self.reconsider.set(self.reconsider.get() + 1);
             Ok(())
         }
     }
@@ -1089,6 +1129,7 @@ mod tests {
             rewind: Cell::new(0),
             last_keep: Cell::new(u32::MAX),
             submits: Cell::new(0),
+            reconsider: Cell::new(0),
             live: false,
         };
         match compare_one(&hub, &mut tip, &mock, &raw) {
@@ -1384,6 +1425,26 @@ mod tests {
     }
 
     #[test]
+    fn prepare_spend_with_tx1_gets_unique_txid() {
+        let params = diff_regtest_params();
+        let g = genesis_block(&params);
+        let mature = height1_mature_out();
+        let dummy = DiffTip {
+            hash: g.block_hash(),
+            time: g.header.time,
+            height: DIFF_MATURE_PAD_HEIGHT,
+        };
+        let raw = serialize(&spend_seed_block());
+        let a = prepare_spend_candidate(&dummy, mature, &raw).unwrap();
+        let b = prepare_spend_candidate(&dummy, mature, &raw).unwrap();
+        assert_ne!(
+            a.txdata[1].compute_txid(),
+            b.txdata[1].compute_txid(),
+            "corpus tx[1] must not reuse one txid (BIP30 fills one OA probe chain)"
+        );
+    }
+
+    #[test]
     fn regtest_height101_spend_fixture() {
         let expected = serialize(&spend_seed_block());
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1421,6 +1482,10 @@ mod tests {
         setup_side_block(&hub, &mock, &side).unwrap();
         assert_eq!(hub.tip_height(), Some(DIFF_TEST_PAD_HEIGHT + 1));
         assert_eq!(mock.submits.get(), 1);
+        assert!(
+            mock.reconsider.get() >= 1,
+            "invalidateblock is sticky; reconsider before side submit"
+        );
 
         let mock_inc = MockOracle::new(OracleReply::Reason("inconclusive".into()));
         setup_side_block(&hub, &mock_inc, &side)

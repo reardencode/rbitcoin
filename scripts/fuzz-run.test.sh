@@ -91,8 +91,8 @@ assert_ok "spend-differential dry-run bin" \
   grep -qx "FUZZ_BIN=block_spend_differential" <<<"$out"
 assert_ok "spend-differential dry-run keeps tiny header heads" \
   grep -qx "RBITCOIN_HEAD_SCALE=tiny" <<<"$out"
-assert_ok "spend-differential dry-run widens tx.head OA (not 16-bit tiny)" \
-  grep -qx "RBITCOIN_TX_HEAD_BITS=21" <<<"$out"
+assert_ok "spend-differential dry-run uses tiny 16-bit tx.head (no BITS override)" \
+  test "$(grep -c '^RBITCOIN_TX_HEAD_BITS=' <<<"$out" || true)" = "0"
 assert_ok "spend-differential dry-run sanitizer none" \
   grep -qx "FUZZ_SANITIZER=none" <<<"$out"
 assert_ok "spend-differential dry-run in-process (no -jobs)" \
