@@ -3247,10 +3247,8 @@ pub(crate) fn headers_reply_for_getheaders(
                 let have_body = hub.cache.get_block(&stop).is_some()
                     || hub
                         .query
-                        .reconstruct_archived_block(&stop.to_byte_array())
-                        .ok()
-                        .flatten()
-                        .is_some();
+                        .is_block_archived(&stop.to_byte_array())
+                        .unwrap_or(false);
                 if have_body {
                     if let Some(h) = hub.header_of(&stop) {
                         return Ok(vec![h]);

@@ -9,6 +9,16 @@ before 1.0).
 
 ## [Unreleased]
 
+### Changed
+
+- **Release builds skip store/query IO spies:** `tx_full_gets` /
+  `body_ok_reads` increment only under `debug_assertions`, not on the
+  operator hot path.
+- **Tip-hole getdata races four peers immediately:** `IMMEDIATE` already
+  equalled `MAX`, so the 5s third-peer delay never ran.
+- **getheaders stale hashstop uses `is_block_archived`:** presence is the
+  Class A `header_txs` check IBD already uses, not a full archive reconstruct.
+
 ### Fixed
 
 - **Tip-follow `getdata` that a peer never answers is retried:** inflight
