@@ -629,6 +629,9 @@ pub fn is_core_mempool_policy_skip(reason: &str) -> bool {
         || r.contains("tx-size")
         || r == "version"
         || r.contains("non-mandatory")
+        // v31.1 PolicyScriptChecks (STANDARD flags) uses this prefix, not
+        // "non-mandatory-script-verify-flag-failed".
+        || r.contains("mempool-script-verify-flag")
 }
 
 fn mempool_ours_consensus(
@@ -711,6 +714,9 @@ pub fn compare_mempool_one(
         (DiffVerdict::Reject, DiffVerdict::Reject) => CompareOne::Agreed { accept: false },
         (DiffVerdict::Skip, _) | (_, DiffVerdict::Skip) => CompareOne::Skipped,
         (DiffVerdict::Accept, DiffVerdict::Reject) | (DiffVerdict::Reject, DiffVerdict::Accept) => {
+            if let OracleReply::Reason(r) = &reply {
+                eprintln!("diff: core reject-reason={r}");
+            }
             CompareOne::Disagreed {
                 ours: ours == DiffVerdict::Accept,
                 core: core == DiffVerdict::Accept,
@@ -758,6 +764,9 @@ pub fn compare_script_verify_one(
         (DiffVerdict::Reject, DiffVerdict::Reject) => CompareOne::Agreed { accept: false },
         (DiffVerdict::Skip, _) | (_, DiffVerdict::Skip) => CompareOne::Skipped,
         (DiffVerdict::Accept, DiffVerdict::Reject) | (DiffVerdict::Reject, DiffVerdict::Accept) => {
+            if let OracleReply::Reason(r) = &reply {
+                eprintln!("diff: core reject-reason={r}");
+            }
             CompareOne::Disagreed {
                 ours: ours == DiffVerdict::Accept,
                 core: core == DiffVerdict::Accept,
@@ -1332,11 +1341,16 @@ fn finish_reorg_compare(
             let _ = rewind(true);
             CompareOne::Harness(core_desync_msg(reason))
         }
-        (DiffVerdict::Accept, DiffVerdict::Reject) => CompareOne::Disagreed {
-            ours: true,
-            core: false,
-            hex,
-        },
+        (DiffVerdict::Accept, DiffVerdict::Reject) => {
+            if !reason.is_empty() {
+                eprintln!("diff: core reject-reason={reason}");
+            }
+            CompareOne::Disagreed {
+                ours: true,
+                core: false,
+                hex,
+            }
+        }
         (DiffVerdict::Reject, DiffVerdict::Reject) => CompareOne::Agreed { accept: false },
         (DiffVerdict::Reject, DiffVerdict::Accept) => {
             let _ = core_park_child(oracle, child, stem);
@@ -1409,11 +1423,16 @@ fn combine(
             let _ = oracle.core_rewind_to_height(keep);
             CompareOne::Harness("core not at pad tip")
         }
-        (DiffVerdict::Accept, DiffVerdict::Reject) => CompareOne::Disagreed {
-            ours: true,
-            core: false,
-            hex: hex.to_string(),
-        },
+        (DiffVerdict::Accept, DiffVerdict::Reject) => {
+            if !reason.is_empty() {
+                eprintln!("diff: core reject-reason={reason}");
+            }
+            CompareOne::Disagreed {
+                ours: true,
+                core: false,
+                hex: hex.to_string(),
+            }
+        }
         (DiffVerdict::Reject, DiffVerdict::Reject) => CompareOne::Agreed { accept: false },
         (DiffVerdict::Reject, DiffVerdict::Accept) => CompareOne::Disagreed {
             ours: false,
@@ -1647,6 +1666,12 @@ mod tests {
         assert!(!is_core_mempool_policy_skip("bad-txns-in-belowout"));
         // Core v31.1 testmempoolaccept default maxfeerate (space, not max-fee).
         assert!(is_core_mempool_policy_skip("max feerate exceeded"));
+        assert!(is_core_mempool_policy_skip(
+            "mempool-script-verify-flag-failed (Cleanstack)"
+        ));
+        assert!(is_core_mempool_policy_skip(
+            "mempool-script-verify-flag-failed (Extra items left on stack after execution)"
+        ));
     }
 
     #[test]
@@ -1670,6 +1695,13 @@ mod tests {
         match compare_mempool_one(&hub, &pad.tip, &mock, pad.mature, &seed) {
             CompareOne::Skipped => {}
             other => panic!("max feerate policy skip: {other:?}"),
+        }
+        let mock = MockOracle::new(OracleReply::Reason(
+            "mempool-script-verify-flag-failed (Cleanstack)".into(),
+        ));
+        match compare_mempool_one(&hub, &pad.tip, &mock, pad.mature, &seed) {
+            CompareOne::Skipped => {}
+            other => panic!("mempool-script-verify-flag skip: {other:?}"),
         }
         let mock = MockOracle::new(OracleReply::NullAccept);
         match compare_mempool_one(&hub, &pad.tip, &mock, pad.mature, &seed) {
@@ -1701,6 +1733,13 @@ mod tests {
         match compare_script_verify_one(&mock, mature, &dummy, &[0x51]) {
             CompareOne::Skipped => {}
             other => panic!("max feerate policy skip: {other:?}"),
+        }
+        let mock = MockOracle::new(OracleReply::Reason(
+            "mempool-script-verify-flag-failed (Cleanstack)".into(),
+        ));
+        match compare_script_verify_one(&mock, mature, &dummy, &[0x51]) {
+            CompareOne::Skipped => {}
+            other => panic!("mempool-script-verify-flag skip: {other:?}"),
         }
         let mock = MockOracle::new(OracleReply::Reason("script-error".into()));
         match compare_script_verify_one(&mock, mature, &dummy, &[0x6a]) {
