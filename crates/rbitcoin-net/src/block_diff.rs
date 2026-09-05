@@ -66,6 +66,12 @@ pub trait BlockOracle {
         let _ = hex;
         OracleReply::RpcError
     }
+    fn testmempoolaccept_hexes(&self, hexs: &[&str]) -> OracleReply {
+        match hexs {
+            [h] => self.testmempoolaccept_hex(h),
+            _ => OracleReply::RpcError,
+        }
+    }
 }
 
 pub const DIFF_TEST_PAD_HEIGHT: u32 = 3;
@@ -641,9 +647,6 @@ pub fn parse_testmempoolaccept_json(body: &str) -> Result<OracleReply, &'static 
     if json_field_is_error_object(body) {
         return Err("rpc error");
     }
-    if body.contains("\"allowed\": true") || body.contains("\"allowed\":true") {
-        return Ok(OracleReply::NullAccept);
-    }
     if body.contains("\"allowed\": false") || body.contains("\"allowed\":false") {
         if let Some(r) = after_key(body, "reject-reason") {
             if r.starts_with('"') {
@@ -653,6 +656,9 @@ pub fn parse_testmempoolaccept_json(body: &str) -> Result<OracleReply, &'static 
             }
         }
         return Ok(OracleReply::Reason("rejected".into()));
+    }
+    if body.contains("\"allowed\": true") || body.contains("\"allowed\":true") {
+        return Ok(OracleReply::NullAccept);
     }
     Err("malformed")
 }
@@ -699,6 +705,53 @@ pub fn compare_mempool_one(
                 ours: ours == DiffVerdict::Accept,
                 core: core == DiffVerdict::Accept,
                 hex,
+            }
+        }
+    }
+}
+
+pub fn compare_script_verify_one(
+    oracle: &dyn BlockOracle,
+    mature: OutPoint,
+    tip: &DiffTip,
+    data: &[u8],
+) -> CompareOne {
+    let Some(block) = prepare_script_candidate(tip, mature, data) else {
+        return CompareOne::NotABlock;
+    };
+    if block.txdata.len() < 3 {
+        return CompareOne::NotABlock;
+    }
+    let tx1 = block.txdata[1].clone();
+    let tx2 = block.txdata[2].clone();
+    let prev = tx1.output[0].clone();
+    let ours = match rbitcoin_consensus::verify_tx_scripts_detached(vec![prev], tx2.clone()) {
+        Ok(()) => DiffVerdict::Accept,
+        Err(_) => DiffVerdict::Reject,
+    };
+    let hex1 = hex_encode(serialize(&tx1));
+    let hex2 = hex_encode(serialize(&tx2));
+    let reply = oracle.testmempoolaccept_hexes(&[&hex1, &hex2]);
+    if matches!(reply, OracleReply::Dead)
+        || (matches!(reply, OracleReply::RpcError) && !oracle.liveness_ok())
+    {
+        return CompareOne::Harness("oracle dead");
+    }
+    let core = match &reply {
+        OracleReply::NullAccept => DiffVerdict::Accept,
+        OracleReply::Reason(r) if is_core_mempool_policy_skip(r) => DiffVerdict::Skip,
+        OracleReply::Reason(_) => DiffVerdict::Reject,
+        OracleReply::RpcError | OracleReply::Dead => DiffVerdict::Skip,
+    };
+    match (ours, core) {
+        (DiffVerdict::Accept, DiffVerdict::Accept) => CompareOne::Agreed { accept: true },
+        (DiffVerdict::Reject, DiffVerdict::Reject) => CompareOne::Agreed { accept: false },
+        (DiffVerdict::Skip, _) | (_, DiffVerdict::Skip) => CompareOne::Skipped,
+        (DiffVerdict::Accept, DiffVerdict::Reject) | (DiffVerdict::Reject, DiffVerdict::Accept) => {
+            CompareOne::Disagreed {
+                ours: ours == DiffVerdict::Accept,
+                core: core == DiffVerdict::Accept,
+                hex: hex2,
             }
         }
     }
@@ -1459,6 +1512,13 @@ mod tests {
         fn testmempoolaccept_hex(&self, hex: &str) -> OracleReply {
             self.submitblock_hex(hex)
         }
+        fn testmempoolaccept_hexes(&self, hexs: &[&str]) -> OracleReply {
+            match hexs {
+                [h] => self.testmempoolaccept_hex(h),
+                [_, h] => self.testmempoolaccept_hex(h),
+                _ => OracleReply::RpcError,
+            }
+        }
     }
 
     fn tmp_diff_hub() -> (std::path::PathBuf, ChainHub, DiffTip) {
@@ -1584,6 +1644,26 @@ mod tests {
             other => panic!("mempool accept: {other:?}"),
         }
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn compare_script_verify_one_true_accepts_return_rejects() {
+        let dummy = DiffTip {
+            hash: BlockHash::from_byte_array([0x33; 32]),
+            time: 1,
+            height: DIFF_MATURE_PAD_HEIGHT,
+        };
+        let mature = height1_mature_out();
+        let mock = MockOracle::new(OracleReply::NullAccept);
+        match compare_script_verify_one(&mock, mature, &dummy, &[0x51]) {
+            CompareOne::Agreed { accept: true } => {}
+            other => panic!("script-verify OP_TRUE: {other:?}"),
+        }
+        let mock = MockOracle::new(OracleReply::Reason("script-error".into()));
+        match compare_script_verify_one(&mock, mature, &dummy, &[0x6a]) {
+            CompareOne::Agreed { accept: false } => {}
+            other => panic!("script-verify OP_RETURN: {other:?}"),
+        }
     }
 
     #[test]

@@ -104,3 +104,10 @@ path = "fuzz_targets/mempool_differential.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "script_verify_differential"
+path = "fuzz_targets/script_verify_differential.rs"
+test = false
+doc = false
+bench = false

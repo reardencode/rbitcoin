@@ -104,7 +104,16 @@ impl BlockOracle for CoreRpc {
     }
 
     fn testmempoolaccept_hex(&self, hex: &str) -> OracleReply {
-        let params = format!(r#"[["{hex}"]]"#);
+        self.testmempoolaccept_hexes(&[hex])
+    }
+
+    fn testmempoolaccept_hexes(&self, hexs: &[&str]) -> OracleReply {
+        let inner = hexs
+            .iter()
+            .map(|h| format!("\"{h}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let params = format!(r#"[[{inner}]]"#);
         match self.call("testmempoolaccept", &params) {
             Ok(body) => match rbitcoin_net::parse_testmempoolaccept_json(&body) {
                 Ok(r) => r,

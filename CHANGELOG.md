@@ -77,6 +77,10 @@ before 1.0).
 
 ### Fixed
 
+- **Interpreter-only differential:** `verify_tx_scripts_detached` vs Core
+  `testmempoolaccept` of the parent+spend package. No `submitblock` / remine
+  per exec. Policy skips same as the mempool oracle.
+
 - **Mempool differential vs Core `testmempoolaccept`:** same raw spend,
   `MempoolHub::test_accept` vs Core. **Consensus-class only** — Libre
   policy (dust, min-relay, RBF, cluster) is skip, not a finding (COMPAT).
