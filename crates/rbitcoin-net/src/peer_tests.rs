@@ -31,6 +31,15 @@ fn tmp_store(label: &str) -> (std::path::PathBuf, Query) {
 }
 
 #[test]
+fn p2p_serve_line_names_ntx_bytes_wall() {
+    let line = format_p2p_serve_line(3, 1500, 12_000);
+    assert!(line.contains("p2p: serve"), "{line}");
+    assert!(line.contains("ntx=3"), "{line}");
+    assert!(line.contains("bytes=1500"), "{line}");
+    assert!(line.contains("wall_ns=12000"), "{line}");
+}
+
+#[test]
 fn store_not_found_is_soft_session_error() {
     assert!(net_error_is_store_not_found(&NetError::Consensus(
         "store: record not found".into()

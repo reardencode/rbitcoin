@@ -11,6 +11,11 @@ before 1.0).
 
 ### Added
 
+- **IBD `getdata` serve reconstructs from Class A spans:** contiguous
+  `header_txs` loads `txout.body` + `inwit.body` as libc sequential preads
+  (not per-tx `get_tx_full`), off the session reactor. DEBUG `p2p: serve`.
+  Host probe: `scripts/ibd-serve-bench.py`.
+
 - **Core functional `run` 62 → 65:** unmodified `p2p_ibd_txrelay` (IBD
   MAX_MONEY feefilter, no tx getdata/accept), `p2p_fingerprint` (month-old
   stale serve withhold), and `p2p_mutated_blocks` (`getpeerinfo.inflight`

@@ -3234,6 +3234,20 @@ fn block_for_peer(
     }
 }
 
+fn format_p2p_serve_line(ntx: u32, bytes: usize, wall_ns: u128) -> String {
+    format!("p2p: serve ntx={ntx} bytes={bytes} wall_ns={wall_ns}")
+}
+
+fn payload_tx_count(payload: &[u8]) -> u32 {
+    use bitcoin::consensus::Decodable;
+    if payload.len() < 81 {
+        return 0;
+    }
+    bitcoin::consensus::encode::VarInt::consensus_decode(&mut &payload[80..])
+        .map(|v| v.0 as u32)
+        .unwrap_or(0)
+}
+
 fn encode_served_witness_block(
     cache: &BlockCache,
     query: &Query,
@@ -3243,8 +3257,14 @@ fn encode_served_witness_block(
     if let Some(block) = cache.get_block(hash) {
         return crate::v2::encode_v2_contents(NetworkMessage::Block(block)).map(Some);
     }
+    let t0 = std::time::Instant::now();
     match query.witness_block_bytes_by_hash(&hash.to_byte_array()) {
         Ok(Some(payload)) => {
+            let ntx = payload_tx_count(&payload);
+            rbitcoin_log::debug!(
+                "{}",
+                format_p2p_serve_line(ntx, payload.len(), t0.elapsed().as_nanos())
+            );
             let mut contents = Vec::with_capacity(1 + payload.len());
             contents.push(2);
             contents.extend_from_slice(&payload);
