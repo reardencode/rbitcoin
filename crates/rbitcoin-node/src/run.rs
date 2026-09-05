@@ -6,8 +6,8 @@ use rbitcoin_electrum::{run_electrum, ElectrumConfig, TipNotify};
 use rbitcoin_esplora::{run_esplora, EsploraConfig};
 use rbitcoin_log::{debug, enabled, info, warn, Level};
 use rbitcoin_net::{
-    default_port, format_tip_perf_sizes, read_proc_rss, AddrMan, IbdConfig, MempoolHub, P2PNode,
-    PeerConnType, TipEvent, TipPerfSizes,
+    default_port, format_serve_perf, format_tip_perf_sizes, read_proc_rss, sample_reset_serve_perf,
+    AddrMan, IbdConfig, MempoolHub, P2PNode, PeerConnType, TipEvent, TipPerfSizes,
 };
 use rbitcoin_primitives::Network;
 use rbitcoin_query::{spawn_sh_writebehind, Query};
@@ -929,6 +929,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 let mp = mempool.sample_reset_perf();
                 let (esp_n, esp_us, esp_max) = rbitcoin_esplora::sample_reset_perf();
                 let (el_n, el_us, el_max) = rbitcoin_electrum::sample_reset_perf();
+                let serve = sample_reset_serve_perf();
                 let blks = std::mem::take(&mut window_blocks);
                 if enabled(Level::Debug) {
                     let live = mempool.live_count();
@@ -942,6 +943,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     };
                     let esp_avg = if esp_n > 0 { esp_us / esp_n } else { 0 };
                     let el_avg = if el_n > 0 { el_us / el_n } else { 0 };
+                    let serve_s = format_serve_perf(&serve);
                     let sizes = format_tip_perf_sizes(&TipPerfSizes {
                         rss: read_proc_rss(),
                         cache_bodies: node.hub.cache_body_count(),
@@ -956,7 +958,8 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                          accept_script_us={} accept_durable_us={} \
                          inv_tx={} getdata_tx={} announce={} \
                          esplora req={esp_n} avg_us={esp_avg} max_us={esp_max} \
-                         electrum req={el_n} avg_us={el_avg} max_us={el_max}",
+                         electrum req={el_n} avg_us={el_avg} max_us={el_max} \
+                         {serve_s}",
                         mp.accepts,
                         mp.rejects,
                         mp.accept_max_us,

@@ -13,8 +13,8 @@ before 1.0).
 
 - **IBD `getdata` serve reconstructs from Class A spans:** contiguous
   `header_txs` loads `txout.body` + `inwit.body` as libc sequential preads
-  (not per-tx `get_tx_full`), off the session reactor. DEBUG `p2p: serve`.
-  Host probe: `scripts/ibd-serve-bench.py`.
+  (not per-tx `get_tx_full`), off the session reactor. Host probe:
+  `scripts/ibd-serve-bench.py`.
 
 - **Core functional `run` 62 → 65:** unmodified `p2p_ibd_txrelay` (IBD
   MAX_MONEY feefilter, no tx getdata/accept), `p2p_fingerprint` (month-old
@@ -154,6 +154,10 @@ before 1.0).
   WARN is `trace` unless the path is empty.
 
 ### Changed
+
+- **Historical `getdata` serve meters on `tip: perf`:** per-block DEBUG
+  `p2p: serve` is gone. The 5s line adds
+  `serve n= bytes= ntx= avg_us= max_us=` (reconstruct+encode; not BIP324 send).
 
 - **Tip-follow accept/relay CPU:** the 50 ms session INV tick no longer
   walks every live wtxid/`accept_at` once any tx is 30 s old. Age-INV is an

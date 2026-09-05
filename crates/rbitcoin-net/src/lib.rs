@@ -15,6 +15,7 @@ mod peer_dos;
 mod peers;
 mod reactor;
 mod seeds;
+mod serve_perf;
 mod service;
 mod tip_accept;
 mod tx_relay;
@@ -69,6 +70,7 @@ pub use seeds::{
     required_seed_services, resolve_all_seeds, resolve_dns_seeds, resolve_fixed_seeds,
     seed_lookup_names, AddrMan, PeerEntry, PeerFlags,
 };
+pub use serve_perf::{format_serve_perf, sample_reset_serve_perf, ServePerfSample};
 pub use service::{magic_for, magic_for_params, NetConfig, P2PHandle, P2PNode};
 pub use tx_relay::{
     ElectrumMempoolItem, MempoolAnnounce, MempoolHub, MempoolPerfSample, QueryUtxoProvider,

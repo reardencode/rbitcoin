@@ -32,11 +32,33 @@ fn tmp_store(label: &str) -> (std::path::PathBuf, Query) {
 
 #[test]
 fn p2p_serve_line_names_ntx_bytes_wall() {
-    let line = format_p2p_serve_line(3, 1500, 12_000);
-    assert!(line.contains("p2p: serve"), "{line}");
-    assert!(line.contains("ntx=3"), "{line}");
-    assert!(line.contains("bytes=1500"), "{line}");
-    assert!(line.contains("wall_ns=12000"), "{line}");
+    let s = crate::serve_perf::ServePerfSample {
+        n: 2,
+        bytes: 2000,
+        ntx: 9,
+        wall_ns: 20_000,
+        max_ns: 12_000,
+    };
+    let line = crate::serve_perf::format_serve_perf(&s);
+    assert!(
+        !line.contains("p2p: serve"),
+        "per-block p2p: serve is not the 5s helper: {line}"
+    );
+    assert_eq!(line, "serve n=2 bytes=2000 ntx=9 avg_us=10 max_us=12");
+    assert_eq!(
+        crate::serve_perf::format_serve_perf(&crate::serve_perf::ServePerfSample::default()),
+        "serve n=0 bytes=0 ntx=0 avg_us=0 max_us=0"
+    );
+}
+
+#[test]
+fn serve_perf_note_is_sampled() {
+    crate::serve_perf::note_serve(3, 1500, 12_000);
+    let s = crate::serve_perf::sample_reset_serve_perf();
+    assert!(s.n >= 1, "{s:?}");
+    assert!(s.bytes >= 1500, "{s:?}");
+    assert!(s.ntx >= 3, "{s:?}");
+    assert!(s.max_ns >= 12_000, "{s:?}");
 }
 
 #[test]
