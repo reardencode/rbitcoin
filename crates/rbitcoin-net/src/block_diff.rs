@@ -221,14 +221,18 @@ fn default_spend_in(mature: OutPoint) -> TxIn {
     }
 }
 
-fn default_op_true_spend(mature: OutPoint) -> Transaction {
+fn default_op_true_spend(mature: OutPoint, uniq: u32) -> Transaction {
+    let mut spk = vec![0x51];
+    if uniq != 0 {
+        spk.extend_from_slice(&uniq.to_le_bytes());
+    }
     Transaction {
         version: TxVersion::ONE,
         lock_time: LockTime::ZERO,
         input: vec![default_spend_in(mature)],
         output: vec![TxOut {
             value: Amount::from_sat(49_0000_0000),
-            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            script_pubkey: ScriptBuf::from_bytes(spk),
         }],
     }
 }
@@ -239,11 +243,13 @@ pub fn prepare_spend_candidate(tip: &DiffTip, mature: OutPoint, data: &[u8]) -> 
         return None;
     }
     let height = tip.height.saturating_add(1);
-    let mut spend = parsed
-        .txdata
-        .get(1)
-        .cloned()
-        .unwrap_or_else(|| default_op_true_spend(mature));
+    let mut spend = parsed.txdata.get(1).cloned().unwrap_or_else(|| {
+        static UNIQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+        default_op_true_spend(
+            mature,
+            UNIQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        )
+    });
     if spend.input.is_empty() {
         spend.input.push(default_spend_in(mature));
     } else {
@@ -335,6 +341,33 @@ pub fn verdict_from_accept(
         Err(NetError::Protocol(_) | NetError::Consensus(_)) => Ok(DiffVerdict::Reject),
         Err(NetError::Io(_) | NetError::Timeout | NetError::Disconnected) => Err("harness"),
         Err(_) => Err("harness"),
+    }
+}
+
+/// Invalidate the current tip until `height == keep`.
+///
+/// Core keeps every `submitblock` body. Invalidating the tip can activate
+/// another already-submitted sibling at the **same** height, so progress is a
+/// **hash** change, not a height drop. Stop if one invalidate leaves the same
+/// tip hash (stuck). No 128-step cap.
+pub fn rewind_oracle_until(
+    keep: u32,
+    mut tip: impl FnMut() -> Result<(u32, String), &'static str>,
+    mut invalidate: impl FnMut(&str) -> Result<(), &'static str>,
+) -> Result<(), &'static str> {
+    loop {
+        let (n, hash) = tip()?;
+        if n == keep {
+            return Ok(());
+        }
+        if n < keep {
+            return Err("core below pad");
+        }
+        invalidate(&hash)?;
+        let (_, hash2) = tip()?;
+        if hash2 == hash {
+            return Err("invalidate no progress");
+        }
     }
 }
 
@@ -1111,6 +1144,62 @@ mod tests {
         assert_eq!(basic_auth_b64("user", "pass"), "dXNlcjpwYXNz");
     }
 
+    #[test]
+    fn rewind_oracle_until_drains_same_height_siblings() {
+        use std::cell::Cell;
+        let seq = Cell::new(0u32);
+        let tips = [(1u32, "aa"), (1u32, "bb"), (1u32, "cc"), (0u32, "gg")];
+        rewind_oracle_until(
+            0,
+            || {
+                let (h, hash) = tips[seq.get() as usize];
+                Ok((h, hash.into()))
+            },
+            |_| {
+                seq.set(seq.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(seq.get(), 3);
+    }
+
+    #[test]
+    fn rewind_oracle_until_stuck_same_hash() {
+        let err = rewind_oracle_until(0, || Ok((1, "aa".into())), |_| Ok(())).unwrap_err();
+        assert_eq!(err, "invalidate no progress");
+    }
+
+    #[test]
+    fn rewind_oracle_until_below_keep() {
+        let err = rewind_oracle_until(5, || Ok((3, "aa".into())), |_| Ok(())).unwrap_err();
+        assert_eq!(err, "core below pad");
+    }
+
+    #[test]
+    fn default_spend_without_tx1_gets_unique_txid() {
+        let params = diff_regtest_params();
+        let g = genesis_block(&params);
+        let mature = height1_mature_out();
+        let dummy = DiffTip {
+            hash: g.block_hash(),
+            time: g.header.time,
+            height: DIFF_MATURE_PAD_HEIGHT,
+        };
+        let raw = serialize(&mine_empty_regtest(
+            g.block_hash(),
+            g.header.time + REGTEST_BLOCK_SPACING,
+            1,
+        ));
+        let a = prepare_spend_candidate(&dummy, mature, &raw).unwrap();
+        let b = prepare_spend_candidate(&dummy, mature, &raw).unwrap();
+        assert_ne!(
+            a.txdata[1].compute_txid(),
+            b.txdata[1].compute_txid(),
+            "default spend must not reuse one txid (BIP30 fills one OA probe chain)"
+        );
+    }
+
     fn height1_mature_out() -> OutPoint {
         let params = diff_regtest_params();
         let g = genesis_block(&params);
@@ -1124,7 +1213,7 @@ mod tests {
     fn spend_seed_block() -> Block {
         let params = diff_regtest_params();
         let g = genesis_block(&params);
-        let spend = super::default_op_true_spend(height1_mature_out());
+        let spend = super::default_op_true_spend(height1_mature_out(), 0);
         mine_regtest_paying(
             g.block_hash(),
             g.header.time + REGTEST_BLOCK_SPACING,
@@ -1191,10 +1280,13 @@ mod tests {
             time: 1,
             height: DIFF_MATURE_PAD_HEIGHT,
         };
-        let mut spend = super::default_op_true_spend(OutPoint {
-            txid: bitcoin::Txid::from_byte_array([0x44; 32]),
-            vout: 7,
-        });
+        let mut spend = super::default_op_true_spend(
+            OutPoint {
+                txid: bitcoin::Txid::from_byte_array([0x44; 32]),
+                vout: 7,
+            },
+            0,
+        );
         spend.version = TxVersion::TWO;
         spend.input[0].script_sig = ScriptBuf::from_bytes(vec![0x51]);
         spend.input[0].sequence = Sequence::from_consensus(0xffff_fffe);
