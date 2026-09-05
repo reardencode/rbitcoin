@@ -19,6 +19,7 @@ pub(crate) enum PeerOut {
 }
 
 impl PeerOut {
+    #[cfg(test)]
     pub(crate) fn expect_msg(self) -> NetworkMessage {
         match self {
             PeerOut::Msg(m) => m,
