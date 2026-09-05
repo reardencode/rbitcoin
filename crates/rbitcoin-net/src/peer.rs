@@ -455,6 +455,16 @@ pub(crate) async fn inbound_connect_and_handshake(
             return Err(NetError::Timeout);
         }
     };
+    let id = sess.id;
+    peers.unregister(id);
+    let sess = peers.register_with_id(
+        id,
+        their_addr,
+        bind,
+        &their_version,
+        true,
+        crate::peers::PeerConnType::Inbound,
+    );
     sess.mark_handshake_complete();
     sess.note_recv("version", 100);
     sess.note_recv("verack", 0);
