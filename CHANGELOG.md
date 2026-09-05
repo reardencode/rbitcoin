@@ -72,6 +72,13 @@ before 1.0).
 
 ### Fixed
 
+- **Nightly Core-oracle coinbase extraNonce and RPC keep-alive:** same-height
+  harness coinbases reused one txid, so rewind+reaccept BIP30-filled one
+  1024-slot OA page (`block_spend` / `block_fork` probe-exhaust / `side
+  reject`). Candidates stamp a BIP34 extraNonce (scriptSig ≤100, else first
+  output). Core JSON-RPC uses one TCP connection (`Connection: keep-alive`)
+  so rewind after ~15k height-1 accepts does not burn ephemeral ports.
+
 - **Nightly Core-oracle rewind and default-spend uniqueness:** Core keeps
   every `submitblock` body; `invalidateblock` of the tip can activate
   another sibling at the **same** height, so rewind progress is a hash

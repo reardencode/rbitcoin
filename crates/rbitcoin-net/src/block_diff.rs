@@ -237,6 +237,48 @@ fn default_op_true_spend(mature: OutPoint, uniq: u32) -> Transaction {
     }
 }
 
+fn next_diff_cb_nonce() -> u32 {
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+    N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// BIP34 extraNonce. Same-height coinbase txid + new create_fk fills one OA page.
+fn stamp_diff_coinbase(block: &mut Block, nonce: u32) {
+    if nonce == 0 || block.txdata.is_empty() || block.txdata[0].input.is_empty() {
+        return;
+    }
+    let extra = nonce.to_le_bytes();
+    let ss = block.txdata[0].input[0].script_sig.as_bytes();
+    if ss.len() + extra.len() <= 100 {
+        let mut v = ss.to_vec();
+        v.extend_from_slice(&extra);
+        block.txdata[0].input[0].script_sig = ScriptBuf::from_bytes(v);
+    } else if let Some(out) = block.txdata[0].output.first_mut() {
+        let mut spk = out.script_pubkey.to_bytes();
+        spk.extend_from_slice(&extra);
+        out.script_pubkey = ScriptBuf::from_bytes(spk);
+    }
+}
+
+fn remine_diff_header(block: &mut Block) {
+    let prev = block.header.prev_blockhash;
+    let time = block.header.time;
+    prepare_regtest_candidate(block, prev, time);
+}
+
+fn mine_diff_paying(
+    prev: BlockHash,
+    time: u32,
+    height: u32,
+    script_pubkey: ScriptBuf,
+    extra_txs: Vec<Transaction>,
+) -> Block {
+    let mut b = mine_regtest_paying(prev, time, height, script_pubkey, extra_txs);
+    stamp_diff_coinbase(&mut b, next_diff_cb_nonce());
+    remine_diff_header(&mut b);
+    b
+}
+
 pub fn prepare_spend_candidate(tip: &DiffTip, mature: OutPoint, data: &[u8]) -> Option<Block> {
     let parsed: Block = deserialize(data).ok()?;
     if parsed.txdata.is_empty() {
@@ -259,7 +301,7 @@ pub fn prepare_spend_candidate(tip: &DiffTip, mature: OutPoint, data: &[u8]) -> 
     let mut txs = Vec::with_capacity(1 + extra.len());
     txs.push(spend);
     txs.extend(extra);
-    Some(mine_regtest_paying(
+    Some(mine_diff_paying(
         tip.hash,
         tip.time.saturating_add(REGTEST_BLOCK_SPACING),
         height,
@@ -309,7 +351,7 @@ pub fn prepare_script_candidate(tip: &DiffTip, mature: OutPoint, data: &[u8]) ->
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    Some(mine_regtest_paying(
+    Some(mine_diff_paying(
         tip.hash,
         tip.time.saturating_add(REGTEST_BLOCK_SPACING),
         tip.height.saturating_add(1),
@@ -482,7 +524,7 @@ pub fn build_jsonrpc_http_request(
 ) -> Vec<u8> {
     let body = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"{method}","params":{params_json}}}"#);
     let mut out = format!(
-        "POST / HTTP/1.1\r\nHost: {host}\r\nAuthorization: Basic {auth_b64}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: {host}\r\nAuthorization: Basic {auth_b64}\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: {}\r\n\r\n",
         body.len()
     )
     .into_bytes();
@@ -532,6 +574,8 @@ pub fn compare_one(
         tip.hash,
         tip.time.saturating_add(REGTEST_BLOCK_SPACING),
     );
+    stamp_diff_coinbase(&mut block, next_diff_cb_nonce());
+    remine_diff_header(&mut block);
     compare_prepared(hub, tip, oracle, block)
 }
 
@@ -604,7 +648,7 @@ pub fn compare_fork_one(
         return CompareOne::Harness(e);
     }
     let extra: Vec<Transaction> = parsed.txdata.into_iter().skip(1).collect();
-    let child = mine_regtest_paying(
+    let child = mine_diff_paying(
         side.block_hash(),
         side.header.time.saturating_add(REGTEST_BLOCK_SPACING),
         base.fork_parent.height.saturating_add(2),
@@ -646,7 +690,7 @@ pub fn compare_cmpct_reorg_one(
         return CompareOne::Harness(e);
     }
     let extra: Vec<Transaction> = parsed.txdata.into_iter().skip(1).collect();
-    let child = mine_regtest_paying(
+    let child = mine_diff_paying(
         side.block_hash(),
         side.header.time.saturating_add(REGTEST_BLOCK_SPACING),
         base.fork_parent.height.saturating_add(2),
@@ -768,8 +812,8 @@ fn rewind_agreed(hub: &ChainHub, oracle: &dyn BlockOracle, keep: u32, accept: bo
     if hub.rewind_to_height(keep).is_err() {
         return CompareOne::Harness("rewind failed");
     }
-    if oracle.core_rewind_to_height(keep).is_err() {
-        return CompareOne::Harness("core rewind failed");
+    if let Err(e) = oracle.core_rewind_to_height(keep) {
+        return CompareOne::Harness(e);
     }
     CompareOne::Agreed { accept }
 }
@@ -1121,7 +1165,7 @@ mod tests {
         let s = String::from_utf8(req.clone()).unwrap();
         assert!(s.contains("POST / HTTP/1.1"));
         assert!(s.contains("Authorization: Basic abc"));
-        assert!(s.contains("Connection: close"));
+        assert!(s.contains("Connection: keep-alive"));
         assert!(s.contains(r#""method":"submitblock""#));
         let body = split_http_body(&req).unwrap();
         assert!(std::str::from_utf8(body).unwrap().contains("submitblock"));
@@ -1197,6 +1241,33 @@ mod tests {
             a.txdata[1].compute_txid(),
             b.txdata[1].compute_txid(),
             "default spend must not reuse one txid (BIP30 fills one OA probe chain)"
+        );
+        assert_ne!(
+            a.txdata[0].compute_txid(),
+            b.txdata[0].compute_txid(),
+            "same-height coinbase must not reuse one txid (BIP30 fills one OA probe chain)"
+        );
+    }
+
+    #[test]
+    fn stamp_diff_coinbase_changes_txid_and_keeps_scriptsig_bound() {
+        let params = diff_regtest_params();
+        let g = genesis_block(&params);
+        let mut a = mine_empty_regtest(g.block_hash(), g.header.time + REGTEST_BLOCK_SPACING, 1);
+        let mut b = a.clone();
+        super::stamp_diff_coinbase(&mut a, 1);
+        super::stamp_diff_coinbase(&mut b, 2);
+        assert_ne!(a.txdata[0].compute_txid(), b.txdata[0].compute_txid());
+        assert!(a.txdata[0].input[0].script_sig.len() <= 100);
+        assert!(b.txdata[0].input[0].script_sig.len() <= 100);
+        let mut long = a.clone();
+        long.txdata[0].input[0].script_sig = ScriptBuf::from_bytes(vec![0x51; 98]);
+        let before = long.txdata[0].output[0].script_pubkey.clone();
+        super::stamp_diff_coinbase(&mut long, 3);
+        assert!(long.txdata[0].input[0].script_sig.len() <= 100);
+        assert_ne!(
+            long.txdata[0].output[0].script_pubkey.as_bytes(),
+            before.as_bytes()
         );
     }
 
