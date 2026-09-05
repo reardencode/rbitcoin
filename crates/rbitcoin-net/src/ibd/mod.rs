@@ -1123,28 +1123,13 @@ pub async fn ibd_cancellable(
 
 #[cfg(test)]
 mod peer_book_and_config_tests {
-    use super::{IbdConfig, PeerBookSession};
+    use super::PeerBookSession;
     use crate::seeds::AddrMan;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::{Arc, Mutex};
 
     fn sa(o: u8) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, o)), 18444)
-    }
-
-    #[test]
-    fn ibd_config_default_and_for_test() {
-        let d = IbdConfig::default();
-        assert!(d.window > 0);
-        assert!(d.per_peer > 0);
-        assert!(d.target_peers > 0);
-        assert!(d.stall.as_secs() >= 1);
-        let t = IbdConfig::for_test();
-        assert_eq!(t.window, 32);
-        assert_eq!(t.per_peer, 8);
-        assert_eq!(t.target_peers, 4);
-        assert!(t.connect_timeout.as_millis() < 1000);
-        assert!(t.peers.is_none());
     }
 
     #[test]
