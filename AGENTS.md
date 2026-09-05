@@ -154,6 +154,7 @@ No `-u` on push (that would retarget the branch remote away from `origin`).
 | **No post-green PR-cite** | After required checks are green, do **not** push a docs-only follow-up whose only change is inserting this PR's number into CHANGELOG / quality.md / similar. That wastes a full CI run. Cite in the **PR body**. Owner docs can omit the GitHub number, or pick it up later in a docs change that was already needed. |
 | **Do not** | Force-push `master`, merge a red PR, collapse `origin` to a single URL, skip polling because “tests passed locally,” or invent **empty commits** to poke Actions. |
 | **Workflow YAML** | App cannot push `.github/workflows/*`. Ask the operator to `git push`. |
+| **CodeQL in tests** | Alert that only fires in `#[cfg(test)]` / test modules: **stop**. Do **not** rename tests or shuffle literals to silence it. Ask the operator to **dismiss** the alert (App token cannot). Production / library CodeQL is a real finding — fix it. |
 
 #### Retrigger CI (no empty commits)
 
