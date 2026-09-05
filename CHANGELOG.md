@@ -77,6 +77,12 @@ before 1.0).
 
 ### Fixed
 
+- **Nightly fork/cmpct-reorg Core rewind:** `reconsiderblock(side)` resets
+  **descendant** fail flags, so the first unique child becomes tip again and
+  the next child is equal-work `inconclusive` (`core not at pad tip`). Do not
+  invalidate the side. After each child, `invalidateblock(child)` then
+  `preciousblock(stem)`. Side stays a valid parked sibling.
+
 - **Nightly Core-oracle uniquify extra txs and `reconsiderblock`:** corpus
   `tx[1]` still reused one spend txid after coinbase extraNonce, so BIP30
   filled a 1024-slot OA page (spend probe-exhaust). Every extra tx gets an

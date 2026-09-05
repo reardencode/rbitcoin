@@ -118,6 +118,25 @@ impl BlockOracle for CoreRpc {
         }
     }
 
+    fn core_invalidate_hash(&self, hash: &str) -> Result<(), &'static str> {
+        let params = format!(r#"["{hash}"]"#);
+        match self.call("invalidateblock", &params) {
+            Ok(_) => Ok(()),
+            Err(_) => Err("invalidate"),
+        }
+    }
+
+    fn core_precious_block(&self, hash: &str) -> Result<(), &'static str> {
+        let params = format!(r#"["{hash}"]"#);
+        match self.call("preciousblock", &params) {
+            Ok(body) => match parse_submitblock_json(&body) {
+                Ok(_) => Ok(()),
+                Err(_) => Err("precious"),
+            },
+            Err(_) => Err("precious"),
+        }
+    }
+
     fn core_rewind_to_height(&self, keep: u32) -> Result<(), &'static str> {
         rbitcoin_net::rewind_oracle_until(
             keep,

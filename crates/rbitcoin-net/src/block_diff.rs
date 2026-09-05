@@ -59,6 +59,8 @@ pub trait BlockOracle {
     fn core_rewind_to_height(&self, keep: u32) -> Result<(), &'static str>;
     /// Undo `invalidateblock` (sticky). Unknown hash may error; callers ignore.
     fn core_reconsider_block(&self, hash: &str) -> Result<(), &'static str>;
+    fn core_invalidate_hash(&self, hash: &str) -> Result<(), &'static str>;
+    fn core_precious_block(&self, hash: &str) -> Result<(), &'static str>;
 }
 
 pub const DIFF_TEST_PAD_HEIGHT: u32 = 3;
@@ -176,14 +178,17 @@ fn submit_known_block(
     block: &Block,
     stored: &[&str],
     err: &'static str,
+    uninvalidate: bool,
 ) -> Result<(), &'static str> {
     let hash = block.block_hash().to_string();
-    let _ = oracle.core_reconsider_block(&hash);
+    if uninvalidate {
+        let _ = oracle.core_reconsider_block(&hash);
+    }
     let hex = hex_encode(serialize(block));
     match oracle.submitblock_hex(&hex) {
         OracleReply::NullAccept => Ok(()),
         OracleReply::Reason(r) if stored.contains(&r.as_str()) => {
-            if r == "duplicate-invalid" || r == "duplicate-inconclusive" {
+            if uninvalidate && (r == "duplicate-invalid" || r == "duplicate-inconclusive") {
                 oracle.core_reconsider_block(&hash)?;
             }
             Ok(())
@@ -202,13 +207,13 @@ pub fn setup_side_block(
         Ok(AcceptOutcome::Accepted { .. }) => return Err("side became tip"),
         Err(_) => return Err("side reject"),
     }
-    submit_known_block(oracle, block, CORE_SIDE_STORED, "side submit")
+    submit_known_block(oracle, block, CORE_SIDE_STORED, "side submit", false)
 }
 
 /// Core-only side submit. Hub must not `accept_received_block` the sibling
 /// before child-first `drain_pending` (014 / 020).
 pub fn submit_side_to_oracle(oracle: &dyn BlockOracle, block: &Block) -> Result<(), &'static str> {
-    submit_known_block(oracle, block, CORE_SIDE_STORED, "side submit")
+    submit_known_block(oracle, block, CORE_SIDE_STORED, "side submit", false)
 }
 
 pub fn submit_pad_to_oracle(
@@ -645,7 +650,13 @@ fn restore_stem(
         Ok(AcceptOutcome::Accepted { .. } | AcceptOutcome::AlreadyHave) => {}
         _ => return Err("stem restore"),
     }
-    submit_known_block(oracle, stem, CORE_DUPLICATE_SKIP, "stem restore submit")
+    submit_known_block(
+        oracle,
+        stem,
+        CORE_DUPLICATE_SKIP,
+        "stem restore submit",
+        true,
+    )
 }
 
 pub fn compare_fork_one(
@@ -685,13 +696,31 @@ pub fn compare_fork_one(
         ScriptBuf::from_bytes(vec![0x51]),
         extra,
     );
-    let r = compare_prepared(hub, &base.fork_parent, oracle, child);
-    if hub.tip_height() == Some(base.fork_parent.height) {
-        if let Err(e) = restore_stem(hub, oracle, stem) {
-            return CompareOne::Harness(e);
+    let ours = match verdict_from_accept(hub.accept_received_block(child.clone())) {
+        Ok(v) => v,
+        Err(msg) => return CompareOne::Harness(msg),
+    };
+    let hex = hex_encode(serialize(&child));
+    let reply = oracle.submitblock_hex(&hex);
+    if matches!(reply, OracleReply::Dead)
+        || (matches!(reply, OracleReply::RpcError) && !oracle.liveness_ok())
+    {
+        if ours == DiffVerdict::Accept {
+            let _ = hub.rewind_to_height(base.fork_parent.height);
         }
+        let _ = core_park_child(oracle, &child, stem);
+        let _ = restore_stem(hub, oracle, stem);
+        return CompareOne::Harness("oracle dead");
     }
-    r
+    finish_reorg_compare(
+        hub,
+        oracle,
+        base.fork_parent.height,
+        stem,
+        &child,
+        ours,
+        &reply,
+    )
 }
 
 pub fn compare_cmpct_reorg_one(
@@ -745,27 +774,117 @@ pub fn compare_cmpct_reorg_one(
     } else {
         DiffVerdict::Reject
     };
-    let keep = base.fork_parent.height;
     let hex = hex_encode(serialize(&child));
     let reply = oracle.submitblock_hex(&hex);
     if matches!(reply, OracleReply::Dead)
         || (matches!(reply, OracleReply::RpcError) && !oracle.liveness_ok())
     {
         if ours == DiffVerdict::Accept {
-            let _ = hub.rewind_to_height(keep);
+            let _ = hub.rewind_to_height(base.fork_parent.height);
         }
-        let _ = oracle.core_rewind_to_height(keep);
+        let _ = core_park_child(oracle, &child, stem);
         let _ = restore_stem(hub, oracle, stem);
         return CompareOne::Harness("oracle dead");
     }
-    let core = verdict_from_core_reply(&reply);
-    let r = combine(hub, oracle, keep, ours, core, &reply, &hex);
-    if hub.tip_height() == Some(base.fork_parent.height) {
-        if let Err(e) = restore_stem(hub, oracle, stem) {
-            return CompareOne::Harness(e);
+    finish_reorg_compare(
+        hub,
+        oracle,
+        base.fork_parent.height,
+        stem,
+        &child,
+        ours,
+        &reply,
+    )
+}
+
+fn core_desync_msg(reason: &str) -> &'static str {
+    match reason {
+        "inconclusive" => "core inconclusive (not new tip)",
+        "bad-prevblk" => "core bad-prevblk",
+        "prev-blk-not-found" => "core prev-blk-not-found",
+        _ => "core not at pad tip",
+    }
+}
+
+fn core_park_child(
+    oracle: &dyn BlockOracle,
+    child: &Block,
+    stem: &Block,
+) -> Result<(), &'static str> {
+    let _ = oracle.core_invalidate_hash(&child.block_hash().to_string());
+    oracle.core_precious_block(&stem.block_hash().to_string())
+}
+
+fn finish_reorg_compare(
+    hub: &ChainHub,
+    oracle: &dyn BlockOracle,
+    pad_height: u32,
+    stem: &Block,
+    child: &Block,
+    ours: DiffVerdict,
+    reply: &OracleReply,
+) -> CompareOne {
+    let hex = hex_encode(serialize(child));
+    let reason = match reply {
+        OracleReply::Reason(s) => s.as_str(),
+        _ => "",
+    };
+    let core = verdict_from_core_reply(reply);
+    let rewind = |accepted: bool| -> Result<(), &'static str> {
+        if accepted {
+            hub.rewind_to_height(pad_height)
+                .map_err(|_| "rewind failed")?;
+        }
+        if accepted || core == DiffVerdict::Accept {
+            core_park_child(oracle, child, stem)?;
+        }
+        if hub.tip_height() == Some(pad_height) {
+            restore_stem(hub, oracle, stem)?;
+        }
+        Ok(())
+    };
+    match (ours, core) {
+        (DiffVerdict::Accept, DiffVerdict::Accept) => {
+            if let Err(e) = rewind(true) {
+                return CompareOne::Harness(e);
+            }
+            CompareOne::Agreed { accept: true }
+        }
+        (DiffVerdict::Accept, DiffVerdict::Skip) if CORE_DUPLICATE_SKIP.contains(&reason) => {
+            if let Err(e) = rewind(true) {
+                return CompareOne::Harness(e);
+            }
+            CompareOne::Agreed { accept: true }
+        }
+        (DiffVerdict::Accept, DiffVerdict::Skip) if CORE_DESYNC_SKIP.contains(&reason) => {
+            let _ = rewind(true);
+            CompareOne::Harness(core_desync_msg(reason))
+        }
+        (DiffVerdict::Accept, DiffVerdict::Reject) => CompareOne::Disagreed {
+            ours: true,
+            core: false,
+            hex,
+        },
+        (DiffVerdict::Reject, DiffVerdict::Reject) => CompareOne::Agreed { accept: false },
+        (DiffVerdict::Reject, DiffVerdict::Accept) => {
+            let _ = core_park_child(oracle, child, stem);
+            CompareOne::Disagreed {
+                ours: false,
+                core: true,
+                hex,
+            }
+        }
+        (DiffVerdict::Reject, DiffVerdict::Skip) => CompareOne::Skipped,
+        (DiffVerdict::Skip, DiffVerdict::Accept) => {
+            let _ = core_park_child(oracle, child, stem);
+            CompareOne::Harness("skip+accept")
+        }
+        (DiffVerdict::Skip, DiffVerdict::Reject | DiffVerdict::Skip) => CompareOne::Skipped,
+        (DiffVerdict::Accept, DiffVerdict::Skip) => {
+            let _ = rewind(true);
+            CompareOne::Skipped
         }
     }
-    r
 }
 
 fn compare_prepared(
@@ -872,6 +991,8 @@ mod tests {
         last_keep: Cell<u32>,
         submits: Cell<u32>,
         reconsider: Cell<u32>,
+        invalidate: Cell<u32>,
+        precious: Cell<u32>,
         live: bool,
     }
 
@@ -884,6 +1005,8 @@ mod tests {
                 last_keep: Cell::new(u32::MAX),
                 submits: Cell::new(0),
                 reconsider: Cell::new(0),
+                invalidate: Cell::new(0),
+                precious: Cell::new(0),
                 live: true,
             }
         }
@@ -914,6 +1037,14 @@ mod tests {
         }
         fn core_reconsider_block(&self, _hash: &str) -> Result<(), &'static str> {
             self.reconsider.set(self.reconsider.get() + 1);
+            Ok(())
+        }
+        fn core_invalidate_hash(&self, _hash: &str) -> Result<(), &'static str> {
+            self.invalidate.set(self.invalidate.get() + 1);
+            Ok(())
+        }
+        fn core_precious_block(&self, _hash: &str) -> Result<(), &'static str> {
+            self.precious.set(self.precious.get() + 1);
             Ok(())
         }
     }
@@ -1130,6 +1261,8 @@ mod tests {
             last_keep: Cell::new(u32::MAX),
             submits: Cell::new(0),
             reconsider: Cell::new(0),
+            invalidate: Cell::new(0),
+            precious: Cell::new(0),
             live: false,
         };
         match compare_one(&hub, &mut tip, &mock, &raw) {
@@ -1482,9 +1615,10 @@ mod tests {
         setup_side_block(&hub, &mock, &side).unwrap();
         assert_eq!(hub.tip_height(), Some(DIFF_TEST_PAD_HEIGHT + 1));
         assert_eq!(mock.submits.get(), 1);
-        assert!(
-            mock.reconsider.get() >= 1,
-            "invalidateblock is sticky; reconsider before side submit"
+        assert_eq!(
+            mock.reconsider.get(),
+            0,
+            "reconsider(side) revives invalidated unique children"
         );
 
         let mock_inc = MockOracle::new(OracleReply::Reason("inconclusive".into()));
@@ -1517,7 +1651,10 @@ mod tests {
         }
         assert_eq!(hub.tip_height(), Some(DIFF_TEST_PAD_HEIGHT + 1));
         assert_eq!(hub.tip_hash(), Some(base.tip.hash));
-        assert_eq!(mock.last_keep.get(), DIFF_TEST_PAD_HEIGHT);
+        assert!(
+            mock.invalidate.get() >= 1 && mock.precious.get() >= 1,
+            "Core rewind is invalidate(child)+precious(stem), not pad-walk"
+        );
 
         assert!(matches!(
             compare_fork_one(&hub, &base, &mock, b"junk"),
@@ -1541,7 +1678,10 @@ mod tests {
         }
         assert_eq!(hub.tip_height(), Some(DIFF_TEST_PAD_HEIGHT + 1));
         assert_eq!(hub.tip_hash(), Some(stem));
-        assert_eq!(mock.last_keep.get(), DIFF_TEST_PAD_HEIGHT);
+        assert!(
+            mock.invalidate.get() >= 1 && mock.precious.get() >= 1,
+            "Core rewind is invalidate(child)+precious(stem), not pad-walk"
+        );
 
         let bad_tx = Transaction {
             version: TxVersion::ONE,
