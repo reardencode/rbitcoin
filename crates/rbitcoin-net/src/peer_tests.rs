@@ -5270,6 +5270,23 @@ async fn outbound_handshake_timeout_after_silence() {
 }
 
 #[tokio::test]
+async fn outbound_regtest_plain_session_timeout_after_silence() {
+    use tokio::net::{TcpListener, TcpStream};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let stream = TcpStream::connect(addr).await.unwrap();
+    let _accepted = listener.accept().await.unwrap();
+    match V2PlainSession::outbound_regtest(stream, "/rbitcoin:test/", Duration::from_millis(50))
+        .await
+    {
+        Err(NetError::Timeout) => {}
+        Err(e) => panic!("expected Timeout, got {e}"),
+        Ok(_) => panic!("plain session succeeded on a silent peer"),
+    }
+}
+
+#[tokio::test]
 async fn feeler_handshake_timeout_after_silence() {
     use tokio::net::{TcpListener, TcpStream};
 

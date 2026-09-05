@@ -10,7 +10,10 @@ use crate::error::NetError;
 use crate::msg_decode::decode_framed_offload;
 use crate::peer_dos::{PeerRateLimiter, OVERSIZE_BAN_SCORE, RATE_LIMIT_BAN_SCORE};
 use crate::peers::PingAction;
-use crate::v2::{open_v2, read_v2_frame, write_v2_msg, write_v2_msg_offload, V2Reader, V2Writer};
+use crate::v2::{
+    open_v2, read_v2_frame, write_v2_contents, write_v2_msg, write_v2_msg_offload, V2Reader,
+    V2Writer,
+};
 use bitcoin::bip152::{BlockTransactions, HeaderAndShortIds};
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::address::Address;
@@ -271,6 +274,59 @@ impl HandshakePolicy<'static> {
             peers: None,
             conn_type: crate::peers::PeerConnType::OutboundFullRelay,
         }
+    }
+}
+
+/// Outbound BIP324 session after VERSION/VERACK with [`HandshakePolicy::plain`].
+pub struct V2PlainSession {
+    reader: V2Reader,
+    writer: V2Writer,
+    tcp_shutdown: std::net::TcpStream,
+    magic: Magic,
+}
+
+impl V2PlainSession {
+    /// Dial-side handshake on `stream`; `limit` bounds VERSION/VERACK.
+    pub async fn outbound_regtest(
+        stream: TcpStream,
+        user_agent: &str,
+        limit: Duration,
+    ) -> Result<Self, NetError> {
+        let our_addr = stream.local_addr()?;
+        let their_addr = stream.peer_addr()?;
+        let magic = Magic::REGTEST;
+        let (_ver, reader, writer, _wire, tcp_shutdown) = connect_and_handshake_timed(
+            limit,
+            stream,
+            magic,
+            our_addr,
+            their_addr,
+            0,
+            false,
+            user_agent,
+            HandshakePolicy::plain(),
+        )
+        .await?;
+        Ok(Self {
+            reader,
+            writer,
+            tcp_shutdown,
+            magic,
+        })
+    }
+
+    pub async fn write_contents(&mut self, contents: &[u8]) -> Result<(), NetError> {
+        write_v2_contents(&mut self.writer, contents).await
+    }
+
+    pub async fn read_frame(&mut self) -> Result<(), NetError> {
+        read_v2_frame(&mut self.reader, self.magic)
+            .await
+            .map(|_| ())
+    }
+
+    pub fn close(&mut self) {
+        let _ = self.tcp_shutdown.shutdown(std::net::Shutdown::Both);
     }
 }
 
