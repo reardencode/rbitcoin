@@ -528,7 +528,10 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     Arc::clone(&shutdown.flag),
                 );
             }
-            if !config.blocksonly && tip_meets_min_work(&config, &node.hub) {
+            if !config.blocksonly
+                && tip_meets_min_work(&config, &node.hub)
+                && !node.hub.tip_is_stale_for_ibd()
+            {
                 mempool.set_relay_enabled(true);
             }
             info!(
@@ -902,17 +905,21 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 }
                 h.connections
                     .store(node.follow_live_count() as u64, Ordering::Relaxed);
-                if !config.blocksonly
-                    && !mempool.relay_enabled()
-                    && tip_meets_min_work(&config, &node.hub)
-                {
-                    mempool.set_relay_enabled(true);
-                    info!("ibd: tip work now meets -minimumchainwork — enabling relay");
+                let minwork = tip_meets_min_work(&config, &node.hub);
+                let stale = node.hub.tip_is_stale_for_ibd();
+                h.initial_block_download
+                    .store(!minwork || stale, Ordering::SeqCst);
+                let want_relay = !config.blocksonly && minwork && !stale;
+                if want_relay != mempool.relay_enabled() {
+                    mempool.set_relay_enabled(want_relay);
+                    if want_relay {
+                        info!("ibd: leaving IBD — enabling tx relay");
+                    } else {
+                        info!("ibd: entering IBD — pausing tx relay");
+                    }
+                    node.peers
+                        .queue_feefilter_all(node.hub.feefilter_sat_kvb() as i64);
                 }
-                h.initial_block_download.store(
-                    !tip_meets_min_work(&config, &node.hub) || node.hub.tip_is_stale_for_ibd(),
-                    Ordering::SeqCst,
-                );
             }
             if matches!(wake, TipFollowWake::Stop) {
                 break;

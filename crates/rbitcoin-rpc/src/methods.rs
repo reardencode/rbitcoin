@@ -1139,6 +1139,7 @@ fn peerinfo_json(p: rbitcoin_net::PeerInfo) -> Value {
         "last_block": p.last_block,
         "last_transaction": p.last_transaction,
         "minfeefilter": sat_kvb_to_btc(p.minfeefilter_sat_kvb),
+        "inflight": p.inflight,
         "permissions": p.permissions,
     });
     if let Some(v) = p.pingtime {

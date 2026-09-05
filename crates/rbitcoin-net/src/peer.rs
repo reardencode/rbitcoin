@@ -68,6 +68,9 @@ pub const BAN_SCORE_THRESHOLD: u32 = 100;
 /// `-blocksonly` (relay off, no whitelist `relay`) or a block-relay-only
 /// session must not receive txs / tx invs (`p2p_blocksonly`).
 fn reject_unsolicited_tx(hub: &ChainHub, session: Option<&crate::peers::LivePeer>) -> bool {
+    if hub.in_ibd() {
+        return false;
+    }
     if session.is_some_and(|s| s.conn_type == crate::peers::PeerConnType::BlockRelay) {
         return true;
     }
@@ -717,16 +720,8 @@ pub async fn peer_session_with(
     if let Some(n) = keepalive {
         let _ = write_v2_msg(&mut writer, NetworkMessage::Ping(n)).await;
     }
-    let fee_sat = hub
-        .mempool()
-        .map(|m| m.min_relay_sat_kvb())
-        .unwrap_or(rbitcoin_consensus::policy::MIN_RELAY_FEE_RATE_SAT_PER_KVB);
-    let skip_feefilter = meta.session.as_ref().is_some_and(|s| {
-        s.conn_type == crate::peers::PeerConnType::BlockRelay
-            || s.hub().is_some_and(|h| h.is_forcerelay_perm())
-    }) || hub.mempool().is_none_or(|m| !m.relay_enabled());
-    if !skip_feefilter {
-        let _ = write_v2_msg(&mut writer, NetworkMessage::FeeFilter(fee_sat as i64)).await;
+    if let Some(fee_sat) = outbound_feefilter_sats(&hub, meta.session.as_deref()) {
+        let _ = write_v2_msg(&mut writer, NetworkMessage::FeeFilter(fee_sat)).await;
     }
 
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<NetworkMessage>();
@@ -1664,14 +1659,21 @@ async fn handle_peer_frame(
                 return Ok(());
             }
             let headers = headers_reply_for_getheaders(hub, gh)?;
-            if let Some(s) = session {
-                if let Some(last) = headers.last() {
-                    s.note_best_header_sent(last.block_hash());
-                } else if let Some(tip) = hub.tip_hash() {
-                    s.note_best_header_sent(tip);
+            let withhold_stale = headers.is_empty()
+                && gh.locator_hashes.is_empty()
+                && gh.stop_hash.to_byte_array() != [0u8; 32]
+                && hub.header_of(&gh.stop_hash).is_some()
+                && !hub.stale_relay_allowed(&gh.stop_hash);
+            if !withhold_stale {
+                if let Some(s) = session {
+                    if let Some(last) = headers.last() {
+                        s.note_best_header_sent(last.block_hash());
+                    } else if let Some(tip) = hub.tip_hash() {
+                        s.note_best_header_sent(tip);
+                    }
                 }
+                queue_out(out_tx, NetworkMessage::Headers(headers))?;
             }
-            queue_out(out_tx, NetworkMessage::Headers(headers))?;
         }
         NetworkMessage::GetBlocks(gb) => {
             if gb.locator_hashes.len() > MAX_LOCATOR_SZ {
@@ -1702,6 +1704,9 @@ async fn handle_peer_frame(
                 match item {
                     Inventory::Block(h) | Inventory::WitnessBlock(h) => {
                         if inflight.is_some_and(|n| n.load(Ordering::SeqCst) >= MAX_SERVE_BLOCKS) {
+                            continue;
+                        }
+                        if !hub.stale_relay_allowed(h) {
                             continue;
                         }
                         if let Some(block) =
@@ -1874,8 +1879,9 @@ async fn handle_peer_frame(
             let mut inv_tx_n = 0u64;
             let mut need_headers = false;
             let mut tx_inv_hex: Option<String> = None;
-            let relay = hub.mempool().map(|m| m.relay_enabled()).unwrap_or(false)
-                || session.is_some_and(|s| s.hub().is_some_and(|ph| ph.is_relay_perm()));
+            let relay = !hub.in_ibd()
+                && (hub.mempool().map(|m| m.relay_enabled()).unwrap_or(false)
+                    || session.is_some_and(|s| s.hub().is_some_and(|ph| ph.is_relay_perm())));
             for item in items.iter().take(MAX_INV_SIZE) {
                 match item {
                     Inventory::Block(h) | Inventory::WitnessBlock(h) => {
@@ -2051,6 +2057,11 @@ async fn handle_peer_frame(
         }
         NetworkMessage::Block(block) => {
             let hash = block.block_hash();
+            if !block.check_merkle_root() {
+                rbitcoin_log::info!("Block mutated: bad-txnmrklroot, hashMerkleRoot mismatch");
+                punish_disconnect(ban_score, session);
+                return Ok(());
+            }
             if let Some(s) = session {
                 s.note_block_from_peer(hash);
                 s.note_best_known(hash);
@@ -2066,9 +2077,9 @@ async fn handle_peer_frame(
                     && !hub.knows_header(&prev)
                     && !pending_headers.contains_key(&prev)
                 {
-                    return Err(NetError::Protocol(
-                        "unrequested block with missing parent header",
-                    ));
+                    rbitcoin_log::info!("AcceptBlock FAILED (prev-blk-not-found)");
+                    punish_disconnect(ban_score, session);
+                    return Ok(());
                 }
                 if hub.unrequested_weaker_than_tip(&block.header) {
                     let _ = hub.ensure_header(&block.header);
@@ -2274,6 +2285,18 @@ async fn handle_peer_frame(
                                     version: 2,
                                 },
                             );
+                            if let Some(s) = session {
+                                let h = hub
+                                    .query
+                                    .height_of_hash(&hsi.header.prev_blockhash.to_byte_array())
+                                    .ok()
+                                    .flatten()
+                                    .map(|ht| ht.0.saturating_add(1))
+                                    .unwrap_or_else(|| {
+                                        hub.tip_height().unwrap_or(0).saturating_add(1)
+                                    });
+                                s.note_block_inflight(h);
+                            }
                             queue_out(
                                 out_tx,
                                 NetworkMessage::GetBlockTxn(GetBlockTxn {
@@ -2306,6 +2329,9 @@ async fn handle_peer_frame(
                                 requested_blocks.remove(&hash);
                                 maybe_select_hb_if_relay(hub, session);
                                 if let Some(s) = session {
+                                    if let Some(h) = hub.tip_height() {
+                                        s.clear_block_inflight(h);
+                                    }
                                     if let Some(ph) = s.hub() {
                                         ph.clear_cmpct_fill(hash);
                                     }
@@ -2370,6 +2396,10 @@ async fn handle_peer_frame(
             }
         }
         NetworkMessage::Tx(tx) => {
+            rbitcoin_log::info!("received: tx");
+            if hub.in_ibd() {
+                return Ok(());
+            }
             if reject_unsolicited_tx(hub, session) {
                 let id = session.map(|s| s.id).unwrap_or(0);
                 rbitcoin_log::info!(
@@ -2407,9 +2437,12 @@ async fn handle_peer_frame(
                             }
                         }
                         Err(rbitcoin_mempool::AcceptError::Duplicate(_)) => {}
-                        Err(rbitcoin_mempool::AcceptError::Orphaned(_)) => {}
-                        Err(rbitcoin_mempool::AcceptError::Policy("mempool full")) => {}
                         Err(e) => {
+                            let id = session.map(|s| s.id).unwrap_or(0);
+                            rbitcoin_log::info!(
+                                "{txid} (wtxid={}) from peer={id} was not accepted: {e}",
+                                tx.compute_wtxid()
+                            );
                             rbitcoin_log::debug!("txrelay: reject {txid}: {e}");
                         }
                     }
@@ -2908,6 +2941,27 @@ fn compact_header_low_work(hub: &ChainHub, header: &bitcoin::block::Header) -> b
     tip.saturating_sub(ph.0) > 6
 }
 
+/// BIP133 feefilter to send after handshake. None = do not send (blocksonly,
+/// forcerelay, block-relay-only). IBD still sends rounded MAX_MONEY.
+pub(crate) fn outbound_feefilter_sats(
+    hub: &ChainHub,
+    session: Option<&crate::peers::LivePeer>,
+) -> Option<i64> {
+    if session.is_some_and(|s| {
+        s.conn_type == crate::peers::PeerConnType::BlockRelay
+            || s.hub().is_some_and(|h| h.is_forcerelay_perm())
+    }) {
+        return None;
+    }
+    if hub.in_ibd() {
+        return Some(hub.feefilter_sat_kvb() as i64);
+    }
+    if hub.mempool().is_none_or(|m| !m.relay_enabled()) {
+        return None;
+    }
+    Some(hub.feefilter_sat_kvb() as i64)
+}
+
 fn queue_out(
     out: &mpsc::UnboundedSender<NetworkMessage>,
     msg: NetworkMessage,
@@ -3094,6 +3148,30 @@ pub(crate) fn headers_reply_for_getheaders(
 ) -> Result<Vec<bitcoin::block::Header>, NetError> {
     if !hub.meets_minimum_chain_work() {
         return Ok(Vec::new());
+    }
+    if gh.locator_hashes.is_empty() {
+        let stop = gh.stop_hash;
+        if stop.to_byte_array() != [0u8; 32] {
+            if hub.is_connected(&stop) {
+                if let Some(h) = hub.header_of(&stop) {
+                    return Ok(vec![h]);
+                }
+            } else if hub.stale_relay_allowed(&stop) {
+                let have_body = hub.cache.get_block(&stop).is_some()
+                    || hub
+                        .query
+                        .reconstruct_archived_block(&stop.to_byte_array())
+                        .ok()
+                        .flatten()
+                        .is_some();
+                if have_body {
+                    if let Some(h) = hub.header_of(&stop) {
+                        return Ok(vec![h]);
+                    }
+                }
+            }
+            return Ok(Vec::new());
+        }
     }
     headers_for_peer(hub.cache.as_ref(), hub.query.as_ref(), gh)
 }

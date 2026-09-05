@@ -94,7 +94,7 @@ evidence (failed Core corpus, new dual path, red required CI, MSRV drift).
 
 | Rank | ID | Item | Tag | Done looks like |
 |-----:|----|------|-----|-----------------|
-| 1 | **Q-41** | Grow Core functional `run` set | test | Inventory `run` covers the wallet-client / P2P / mempool / buried-activation scripts we **claim**. **Today: 62 run / 205 skip (22 rpc-missing, 25 core-log, 68 no-wallet).** COMPAT-done leftovers are `rpc-dialect` (not `rpc-missing`). Next `run` candidates: `mempool_accept` type-check, `mining_basic` weight, `rpc_getblockfrompeer`. Product-never skips stay skip. Unlabeled PRs stay cargo-only; nightly green |
+| 1 | **Q-41** | Grow Core functional `run` set | test | Inventory `run` covers the wallet-client / P2P / mempool / buried-activation scripts we **claim**. **Today: 65 run / 202 skip (21 rpc-missing, 23 core-log, 68 no-wallet).** COMPAT-done leftovers are `rpc-dialect` (not `rpc-missing`). Next `run` candidates: `mempool_accept` type-check, `p2p_permissions`, `p2p_addr_selfannouncement`. Product-never skips stay skip. Unlabeled PRs stay cargo-only; nightly green |
 | 2 | **Q-57** | Store publish / Class C flush / sidecar | store | `VarTable::published_meta` loads count/end `Acquire` (ARM cannot tear the pair). `ArrayTable` / `StrongTxTable` `flush_dirty` cannot lose a `set` in the write window (clear dirty then snapshot, or equivalent). fuse8 `decode_body` fails closed (`NeedsRewrite`) instead of indexing fingerprints OOB. Spender overflow walk bounded by `spenders.count()`. Sidecar meta / `.mphf` / SH `.idx` do not rename an unsynced empty file into place. `sorted_run` orphan GC cannot delete a live run (lock is a type, not a comment). **Today: `published_meta` seqlock Acquire landed.** `BinaryFuse8::contains` still indexes `fingerprints` without a closed length check. |
 | 3 | **Q-58** | Mempool persist order + eviction | mempool | `persist_all` writes body before claiming LIVE slots. Known-parent out-of-range vout hard-rejects (not orphan-forever). `worst_chunk` rate-tie does not strand descendants. `evict_to_budget` no-op iterations break (no spin). **Today: `evict_to_budget` breaks when a pass removes 0.** `persist_all` still writes meta/slots then body. |
 | 4 | **Q-59** | RPC / CLI honesty | ops | `submitblock` matches [`rpc.md`](./rpc.md) / COMPAT (all networks) or those docs say regtest-only. `gettxout include_mempool` hides mempool-spent confirmed outs. `sendrawtransaction` / `submitpackage` enforce or reject `maxfeerate` / `maxburnamount`. Conf `milestone=0` is not overwritten by the network default. `--minrelaytxfee` parse failure is an error (negatives rejected). `getmininginfo` `blockmintxfee` uses a feerate formatter. `getnetworkhashps` is not a dummy ~2 hashes/block (or is labeled). JSON-RPC batch is bounded under the work permit. **Today: `submitblock` is `require_regtest_miner` while COMPAT excepts it from regtest-only. `getnetworkhashps` still `2 * nblocks / dt`. `gettxout` does not hide mempool-spent confirmed outs. JSON-RPC array batch is unbounded.** |
@@ -119,7 +119,7 @@ remaining holes already have Open rows.
 | ID | Verdict |
 |----|---------|
 | **Q-30** | **Closed.** Nightly job feeds BIP324 parser+session, header/block `submitblock`, compact reconstruct vs `getblocktxn`, compact reorg via `drain_pending`, and script-mutating. JSON corpora stay static. Live Core HB announce is not a leftover Open row. |
-| **Q-41** | Keep rank 1. 53 → **62** `run`. 205 skips; `rpc-missing` 22 + `core-log` 25 are the growth matching claimed surface. |
+| **Q-41** | Keep rank 1. 62 → **65** `run`. 202 skips; `rpc-missing` 21 + `core-log` 23 are the growth matching claimed surface. |
 | **Q-57** | Keep rank 2. Seqlock `published_meta` landed; fuse8 fingerprint OOB, flush_dirty window, sidecar rename, spender overflow bound, sorted_run GC lock type still open. |
 | **Q-58** | Keep rank 3. `evict_to_budget` no-op break landed. `persist_all` still meta/slots then body. |
 | **Q-59** | Keep rank 4. COMPAT vs `submitblock` regtest clamp, dummy `getnetworkhashps`, `gettxout` mempool-spent confirmed, unbounded JSON-RPC batch. |
@@ -218,7 +218,7 @@ findings 001–022, CI split, map-free README, …) live in
 | **Q-37** | Warm default suite ≤3 min | Required CI `test` **~85 s** (2026-08-17, ubuntu-24.04). Stretch &lt;2 min met on CI-class. Recorded in TESTING.md |
 | **—** | Docs map + one owner per fact | `docs/README.md`; folded store-format / startup-states / future-features / COVERAGE (`#81`) |
 | **—** | Tests assert behavior, not repo text | No `include_str!` of production `.rs` / CONTRIBUTING (`#85`) |
-| **—** | Core functional `run` set | **62** unmodified v31.1 scripts (was 53 at last reaudit, 9 at first green). Remaining growth is **Q-41** |
+| **—** | Core functional `run` set | **65** unmodified v31.1 scripts (was 62 at last reaudit, 9 at first green). Remaining growth is **Q-41** |
 | **Q-15 / Q-42–Q-46** | CLI, inbound config, RPC honesty, Libre-only, IO aliases | 2026-08-16 cruft program |
 | **R-01–R-06** | Mempool snapshot, `script_pool`, remine pads, TxGraph cache, llvm-cov pin, tip-follow store integrity | 2026-08-12. Wall leftover was **Q-37** (now closed) |
 | **Q-16 / Q-20 / Q-23** | Residual env, `cargo deny` CI, optional musl artifact | `env-knobs.md`; required `deny`; musl zip is GitHub Release only |
@@ -261,7 +261,7 @@ included; tree at #318):
 | Release | `nix build .#rbitcoin-musl` → static install |
 | Core corpora | **No allowlist** |
 | Findings 001–023 | All **fixed** |
-| Core functional | **62** unmodified v31.1 scripts `run`; 205 skip (68 `no-wallet`, 22 `rpc-missing`, 25 `core-log`, …) |
+| Core functional | **65** unmodified v31.1 scripts `run`; 202 skip (68 `no-wallet`, 21 `rpc-missing`, 23 `core-log`, …) |
 | Residual `RBITCOIN_*` in crates | Honored set listed in `env-knobs.md` (**Q-16** closed) |
 | On-disk | **Schema 20** (Class A/C still 17 bytes; 18 = MPHF indexes; 19 = SH extent last page; 20 = BDZ2 `tx.head` + BDZ3 SH). Occupied 18/19 `tx.head`/`scripthash*` refused |
 | Confirm queues | **loadq=14 · scriptq=4 · writeq=14** (hardcoded) |

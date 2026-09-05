@@ -614,6 +614,53 @@ fn minchainwork_getheaders_empty_until_floor() {
 }
 
 #[test]
+fn empty_locator_getheaders_serves_stale_only_with_body() {
+    use bitcoin::p2p::message_blockdata::GetHeadersMessage;
+    use bitcoin::ScriptBuf;
+    use rbitcoin_consensus::mine_regtest_paying;
+
+    let (dir, q) = tmp_store("empty-loc-hdr");
+    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    hub.ensure_genesis().unwrap();
+    hub.generate_to_script(1, ScriptBuf::from_bytes(vec![0x51]), vec![])
+        .expect("height 1");
+    let tip = hub.tip_hash().unwrap();
+    let connected =
+        headers_reply_for_getheaders(&hub, &GetHeadersMessage::new(vec![], tip)).unwrap();
+    assert_eq!(
+        connected.len(),
+        1,
+        "empty locator + connected hashstop must return that header"
+    );
+
+    let t0 = hub.header_of(&tip).unwrap().time;
+    let pending = mine_regtest_paying(tip, t0 + 1, 2, ScriptBuf::from_bytes(vec![0x51]), vec![]);
+    hub.process_submitted_header(&pending.header).unwrap();
+    assert!(!hub.is_connected(&pending.block_hash()));
+    let header_only =
+        headers_reply_for_getheaders(&hub, &GetHeadersMessage::new(vec![], pending.block_hash()))
+            .unwrap();
+    assert!(
+        header_only.is_empty(),
+        "empty locator + header-only hashstop must not return headers"
+    );
+
+    hub.generate_to_script(1, ScriptBuf::from_bytes(vec![0x51]), vec![])
+        .expect("height 2");
+    let stale = hub.tip_hash().unwrap();
+    hub.invalidate_block(stale).unwrap();
+    assert!(!hub.is_connected(&stale));
+    let with_body =
+        headers_reply_for_getheaders(&hub, &GetHeadersMessage::new(vec![], stale)).unwrap();
+    assert_eq!(
+        with_body.len(),
+        1,
+        "empty locator + disconnected hashstop with a body must return that header"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn minchainwork_does_not_getdata_below_floor() {
     use bitcoin::ScriptBuf;
     use rbitcoin_primitives::Height;
@@ -890,6 +937,9 @@ fn blocksonly_tx_and_inv_raise_ban() {
         let (dir, q) = tmp_store("blocksonly-tx");
         let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
         hub.ensure_genesis().unwrap();
+        let t = hub.tip_header().unwrap().time;
+        hub.clock.set_mock(i64::from(t) + 1);
+        assert!(!hub.in_ibd(), "blocksonly pin is not IBD");
         let mp = crate::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
         mp.set_relay_enabled(false);
         assert!(hub.attach_mempool(mp).is_ok());
@@ -2719,6 +2769,9 @@ fn handle_peer_frame_mempool_tx_and_inv_paths() {
         let (dir, q) = tmp_store("handle-mp");
         let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
         hub.ensure_genesis().unwrap();
+        let t = hub.tip_header().unwrap().time;
+        hub.clock.set_mock(i64::from(t) + 1);
+        assert!(!hub.in_ibd(), "tx inv getdata pin is not IBD");
         let mp = crate::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
         // Enable relay so Inv for txs triggers getdata.
         mp.set_relay_enabled(true);
@@ -6095,4 +6148,21 @@ fn new_pow_valid_compact_relays_to_hb_before_connect() {
         }
         let _ = std::fs::remove_dir_all(dir);
     });
+}
+
+#[test]
+fn outbound_feefilter_sats_ibd_even_when_relay_off() {
+    use std::sync::Arc;
+    let (dir, q) = tmp_store("ibd-ff");
+    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    hub.ensure_genesis().unwrap();
+    let mp = crate::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
+    mp.set_relay_enabled(false);
+    assert!(hub.attach_mempool(mp).is_ok());
+    assert!(hub.in_ibd(), "genesis tip is older than 24h");
+    assert_eq!(
+        outbound_feefilter_sats(&hub, None),
+        Some(crate::IBD_FEEFILTER_SAT_KVB as i64)
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }
