@@ -129,10 +129,8 @@ lists as done, but whose official script still fails on dialect, stay
 | `mempool_accept.py` | `rpc-dialect` | `testmempoolaccept` type-check (`-32602` vs Core `-3`) |
 | `mining_basic.py` | `rpc-dialect` | GBT selector shipped; `-blockmaxweight` leftover |
 | `rpc_blockchain.py` | `rpc-dialect` | `time`/`mediantime` shipped; prune / muhash later |
-| `rpc_estimatefee.py` | `rpc-dialect` | `estimatesmartfee` is 10-minute inclusion, not Core multi-horizon |
 | `rpc_gettxspendingprevout.py` | `rpc-dialect` | method shipped; field/error zoo |
 | `rpc_help.py` | `rpc-dialect` | `help` shipped; Core categories / converthelp |
-| `rpc_invalid_address_message.py` | `rpc-dialect` | `validateaddress` shipped; Core error text |
 | `rpc_packages.py` | `rpc-dialect` | `submitpackage` shipped; script field zoo |
 | `rpc_rawtransaction.py` | `rpc-dialect` | Class A always indexes; remaining type-check needles |
 | `rpc_validateaddress.py` | `rpc-dialect` | method shipped; Core error text |

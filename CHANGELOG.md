@@ -11,6 +11,11 @@ before 1.0).
 
 ### Added
 
+- **Core functional `run` 62 → 65:** unmodified `p2p_ibd_txrelay` (IBD
+  MAX_MONEY feefilter, no tx getdata/accept), `p2p_fingerprint` (month-old
+  stale serve withhold), and `p2p_mutated_blocks` (`getpeerinfo.inflight`
+  plus merkle-mutated / missing-parent disconnect).
+
 - **Tip-follow compact relay matches Core `NewPoWValidBlock`:** a
   reconstructed or received body whose header has valid PoW and extends
   the current tip is announced as `cmpctblock` to other high-bandwidth
