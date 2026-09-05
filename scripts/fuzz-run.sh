@@ -48,7 +48,7 @@ timeout=10
 if [[ "$BIN" == "block_differential" ]]; then
   sanitizer="none"
   timeout=90
-elif [[ "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" ]]; then
+elif [[ "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" || "$BIN" == "script_differential" ]]; then
   sanitizer="none"
   timeout=180
 elif [[ "$BIN" == "v2_session" || "$BIN" == "cmpct_differential" ]]; then
@@ -68,7 +68,7 @@ if [[ "${FUZZ_DRY_RUN:-}" == "1" ]]; then
   echo "FUZZ_TIMEOUT=$timeout"
   echo "CARGO_TARGET_DIR_UNSET=1"
   echo "RUSTC_WRAPPER=$WRAP"
-  if [[ "$BIN" == "block_differential" || "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" || "$BIN" == "v2_session" || "$BIN" == "cmpct_differential" ]]; then
+  if [[ "$BIN" == "block_differential" || "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" || "$BIN" == "script_differential" || "$BIN" == "v2_session" || "$BIN" == "cmpct_differential" ]]; then
     echo "RBITCOIN_CORE_BITCOIND=${RBITCOIN_CORE_BITCOIND:-}"
   fi
   if [[ "$BIN" == "v2_session" || "$BIN" == "cmpct_differential" ]]; then
@@ -132,7 +132,7 @@ if [[ "$BIN" == "cmpct_differential" ]]; then
   exit 0
 fi
 
-if [[ "$BIN" != "block_differential" && "$BIN" != "block_spend_differential" && "$BIN" != "block_fork_differential" ]]; then
+if [[ "$BIN" != "block_differential" && "$BIN" != "block_spend_differential" && "$BIN" != "block_fork_differential" && "$BIN" != "script_differential" ]]; then
   echo "fuzz-run: unknown target $BIN" >&2
   exit 1
 fi
@@ -149,6 +149,10 @@ elif [[ "$BIN" == "block_spend_differential" ]]; then
   mkdir -p fuzz/corpus/block_spend_differential
   cp crates/rbitcoin-consensus/tests/fixtures/regtest_height101_spend.bin \
     fuzz/corpus/block_spend_differential/spend.bin
+elif [[ "$BIN" == "script_differential" ]]; then
+  mkdir -p fuzz/corpus/script_differential
+  cp crates/rbitcoin-consensus/tests/fixtures/script_op_true.bin \
+    fuzz/corpus/script_differential/op_true.bin
 else
   mkdir -p fuzz/corpus/block_fork_differential
   cp crates/rbitcoin-consensus/tests/fixtures/regtest_fork_child.bin \
