@@ -77,6 +77,12 @@ before 1.0).
 
 ### Fixed
 
+- **Weekly ~1h fuzz + compounding corpus cache:** `fuzz.yml` runs Sunday
+  07:17 UTC with `-max_total_time=3600` (nightly stays 600s). Per-job
+  corpus cache restore/save and crasher artifacts. New target jobs
+  (N-reorg, CSV, mempool, script-verify, addrv2, inv/getdata, Electrum
+  JSON). **Operator must push this workflow** (GitHub App cannot).
+
 - **Q-31 fuzz seeds:** tiny existing `signet_block_*.bin` and
   `mainnet_block_290329.bin` merge into `block_wire` / `block_differential`
   corpora (copy-if-absent, remine onto regtest). Electrum hermetic packs
