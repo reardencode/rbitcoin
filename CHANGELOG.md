@@ -51,8 +51,13 @@ before 1.0).
   sends `sendcmpct` then a fuzzed BIP152 `cmpctblock` and compares
   empty-mempool `try_reconstruct` missing indexes to Core `getblocktxn`.
   Malformed compact that Core drops is skip. Not accept/reject; not a
-  two-node reorg. Q-30 stays Open (two-node compact reorg, then
-  script-mutating vs Core).
+  two-node reorg. Q-30 stays Open.
+
+- **Q-30 script-mutating vs Core `submitblock`:** nightly `script_differential`
+  spends the mature pad `OP_TRUE` coinbase into a fuzzer-owned scriptPubKey,
+  then spends that output in the same block so the interpreter runs the
+  bytes. Accept vs reject only. JSON corpora stay static. Q-30 stays Open
+  (two-node compact reorg later).
 
 ### Fixed
 

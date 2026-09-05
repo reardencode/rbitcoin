@@ -51,6 +51,8 @@ pub trait BlockOracle {
 
 pub const DIFF_TEST_PAD_HEIGHT: u32 = 3;
 pub const DIFF_MATURE_PAD_HEIGHT: u32 = 100;
+/// Core `MAX_SCRIPT_SIZE` — truncate fuzzer scriptPubKey, do not skip.
+pub const SCRIPT_FUZZ_MAX: usize = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffTip {
@@ -236,6 +238,56 @@ pub fn prepare_spend_candidate(tip: &DiffTip, mature: OutPoint, data: &[u8]) -> 
         height,
         ScriptBuf::from_bytes(vec![0x51]),
         txs,
+    ))
+}
+
+/// Height-n+1 block: spend mature OP_TRUE into `data` as scriptPubKey, then spend that.
+pub fn prepare_script_candidate(tip: &DiffTip, mature: OutPoint, data: &[u8]) -> Option<Block> {
+    if data.is_empty() {
+        return None;
+    }
+    let script = if data.len() > SCRIPT_FUZZ_MAX {
+        &data[..SCRIPT_FUZZ_MAX]
+    } else {
+        data
+    };
+    let tx1 = Transaction {
+        version: TxVersion::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: mature,
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(49_0000_0000),
+            script_pubkey: ScriptBuf::from_bytes(script.to_vec()),
+        }],
+    };
+    let tx2 = Transaction {
+        version: TxVersion::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: tx1.compute_txid(),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(48_0000_0000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    Some(mine_regtest_paying(
+        tip.hash,
+        tip.time.saturating_add(REGTEST_BLOCK_SPACING),
+        tip.height.saturating_add(1),
+        ScriptBuf::from_bytes(vec![0x51]),
+        vec![tx1, tx2],
     ))
 }
 
@@ -437,6 +489,19 @@ pub fn compare_spend_one(
     data: &[u8],
 ) -> CompareOne {
     let Some(block) = prepare_spend_candidate(tip, mature, data) else {
+        return CompareOne::NotABlock;
+    };
+    compare_prepared(hub, tip, oracle, block)
+}
+
+pub fn compare_script_one(
+    hub: &ChainHub,
+    tip: &mut DiffTip,
+    oracle: &dyn BlockOracle,
+    mature: OutPoint,
+    data: &[u8],
+) -> CompareOne {
+    let Some(block) = prepare_script_candidate(tip, mature, data) else {
         return CompareOne::NotABlock;
     };
     compare_prepared(hub, tip, oracle, block)
@@ -1129,5 +1194,63 @@ mod tests {
         assert_eq!(raw, expected);
         let b: Block = deserialize(&raw).unwrap();
         assert!(!b.txdata.is_empty());
+    }
+
+    #[test]
+    fn prepare_script_candidate_wires_same_block_script() {
+        let dummy = DiffTip {
+            hash: BlockHash::from_byte_array([0x33; 32]),
+            time: 1,
+            height: DIFF_MATURE_PAD_HEIGHT,
+        };
+        let mature = height1_mature_out();
+        let script = [0x51u8];
+        let got = prepare_script_candidate(&dummy, mature, &script).unwrap();
+        assert_eq!(got.header.prev_blockhash, dummy.hash);
+        assert_eq!(got.txdata.len(), 3);
+        assert_eq!(got.txdata[1].input[0].previous_output, mature);
+        assert_eq!(got.txdata[1].output[0].script_pubkey.as_bytes(), &script);
+        assert_eq!(
+            got.txdata[2].input[0].previous_output,
+            OutPoint {
+                txid: got.txdata[1].compute_txid(),
+                vout: 0,
+            }
+        );
+        assert!(got.txdata[2].input[0].script_sig.is_empty());
+        let long = vec![0x51; SCRIPT_FUZZ_MAX + 8];
+        let trunc = prepare_script_candidate(&dummy, mature, &long).unwrap();
+        assert_eq!(
+            trunc.txdata[1].output[0].script_pubkey.len(),
+            SCRIPT_FUZZ_MAX
+        );
+        assert!(prepare_script_candidate(&dummy, mature, b"").is_none());
+    }
+
+    #[test]
+    fn compare_script_one_true_accepts_return_rejects() {
+        let (dir, hub, _) = tmp_diff_hub();
+        let pad = mine_diff_pad(&hub, DIFF_MATURE_PAD_HEIGHT).unwrap();
+        let mut tip = pad.tip.clone();
+
+        let mock = MockOracle::new(OracleReply::NullAccept);
+        match compare_script_one(&hub, &mut tip, &mock, pad.mature, &[0x51]) {
+            CompareOne::Agreed { accept: true } => {}
+            other => panic!("OP_TRUE: {other:?}"),
+        }
+        assert_eq!(hub.tip_height(), Some(DIFF_MATURE_PAD_HEIGHT));
+        assert_eq!(mock.last_keep.get(), DIFF_MATURE_PAD_HEIGHT);
+
+        let mock = MockOracle::new(OracleReply::Reason("script-error".into()));
+        match compare_script_one(&hub, &mut tip, &mock, pad.mature, &[0x6a]) {
+            CompareOne::Agreed { accept: false } => {}
+            other => panic!("OP_RETURN: {other:?}"),
+        }
+        assert_eq!(hub.tip_height(), Some(DIFF_MATURE_PAD_HEIGHT));
+        assert!(matches!(
+            compare_script_one(&hub, &mut tip, &mock, pad.mature, b""),
+            CompareOne::NotABlock
+        ));
+        let _ = fs::remove_dir_all(dir);
     }
 }

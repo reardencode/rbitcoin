@@ -255,7 +255,7 @@ New features: add a high-level scenario; remove obsolete lower-level tests in th
 
 ## Core differential
 
-Nightly (not a required PR check) `fuzz.yml` runs seven cargo-fuzz targets:
+Nightly (not a required PR check) `fuzz.yml` runs eight cargo-fuzz targets:
 
 | Target | What | Oracle |
 |--------|------|--------|
@@ -265,6 +265,7 @@ Nightly (not a required PR check) `fuzz.yml` runs seven cargo-fuzz targets:
 | `cmpct_differential` | empty-mempool BIP152 `try_reconstruct` missing indexes vs Core `getblocktxn` on a fuzzed `cmpctblock` (ASan). Malformed compact that Core drops is skip. **Not** accept/reject; **not** two-node reorg. | same tarball, `-listen=1` |
 | `block_differential` | height-1 `ChainHub::accept_received_block` vs Core `submitblock`, **accept vs reject only** | same tarball |
 | `block_spend_differential` | height-101 spend of a mature pad coinbase, same path and oracle | same tarball |
+| `script_differential` | height-101 same-block spend whose **executed scriptPubKey** is fuzzer-owned, same path and oracle | same tarball |
 | `block_fork_differential` | 2-block heavier fork off the pad (sibling of a pad+1 stem), same path and oracle | same tarball |
 
 ```bash
@@ -274,6 +275,7 @@ Nightly (not a required PR check) `fuzz.yml` runs seven cargo-fuzz targets:
 ./scripts/fuzz-run.sh cmpct_differential        # compact missing indexes vs getblocktxn, ASan, -timeout=90
 ./scripts/fuzz-run.sh block_differential        # fetch bitcoind, --sanitizer none
 ./scripts/fuzz-run.sh block_spend_differential  # 100-block pad, --sanitizer none, -timeout=180
+./scripts/fuzz-run.sh script_differential       # mutate executed scriptPubKey, --sanitizer none, -timeout=180
 ./scripts/fuzz-run.sh block_fork_differential   # pad+stem, 2-block fork, --sanitizer none, -timeout=180
 ```
 
@@ -283,7 +285,11 @@ fixed; coinbase/version stay fuzzer-owned). After a compared accept, rbitcoin
 `block_spend_differential` mines a **byte-identical** 100-block empty pad
 (in-process, then `submitblock` each to Core — never Core `generate`), then
 prepares candidates that spend the height-1 `OP_TRUE` coinbase. After a
-compared accept, both sides rewind to height **100**. `block_fork_differential`
+compared accept, both sides rewind to height **100**. `script_differential`
+uses the same pad; the fuzzer bytes are the scriptPubKey of an intra-block
+output that a second tx spends (empty scriptSig), so the interpreter runs
+them. Seed `OP_TRUE` (`0x51`) must accept. JSON corpora stay as static
+vectors. `block_fork_differential`
 mines the same pad plus one empty **stem** at height 101, then compares a
 strictly heavier 2-block fork off height 100 (the first fork block is setup /
 hold only — equal-work Core `null` is not a compared verdict). After a compared
