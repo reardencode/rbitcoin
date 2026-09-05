@@ -75,8 +75,9 @@ before 1.0).
 - **Nightly fork/cmpct-reorg/spend differential harness:** Core
   `submitblock` of an equal-work sibling returns `inconclusive` (parked,
   not tip). Side-submit treated that as fatal (`side submit` on the first
-  corpus item). OA `probe exhausted` on tiny `tx.head` is a harness skip,
-  not `ours=false core=true`.
+  corpus item). Core-oracle jobs keep tiny **header** heads and set
+  `RBITCOIN_TX_HEAD_BITS=20` so rewind loops do not fill 16-bit `tx.head`
+  OA (probe-exhaust stays fail-closed).
 
 - **Tip-follow FeeFilter no longer panics on the reactor:** session handshake
   called `min_relay_sat_kvb()`, which took a blocking `inner` read after

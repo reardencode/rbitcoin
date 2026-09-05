@@ -332,7 +332,6 @@ pub fn verdict_from_accept(
     match r {
         Ok(AcceptOutcome::Accepted { .. }) => Ok(DiffVerdict::Accept),
         Ok(AcceptOutcome::AlreadyHave | AcceptOutcome::IgnoredWeaker) => Ok(DiffVerdict::Skip),
-        Err(NetError::Consensus(s)) if s.contains("probe exhausted") => Err("store capacity"),
         Err(NetError::Protocol(_) | NetError::Consensus(_)) => Ok(DiffVerdict::Reject),
         Err(NetError::Io(_) | NetError::Timeout | NetError::Disconnected) => Err("harness"),
         Err(_) => Err("harness"),
@@ -926,13 +925,6 @@ mod tests {
             DiffVerdict::Reject
         );
         assert!(verdict_from_accept(Err(NetError::Io(std::io::Error::other("x")))).is_err());
-        assert!(
-            verdict_from_accept(Err(NetError::Consensus(
-                "store: corrupt record: address head probe exhausted on insert".into()
-            )))
-            .is_err(),
-            "OA full is harness, not a consensus reject vs Core"
-        );
     }
 
     #[test]

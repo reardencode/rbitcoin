@@ -74,6 +74,10 @@ if [[ "${FUZZ_DRY_RUN:-}" == "1" ]]; then
   if [[ "$BIN" == "v2_session" || "$BIN" == "cmpct_differential" ]]; then
     echo "BITCOIND_LISTEN=1"
   fi
+  if [[ "$BIN" == "block_differential" || "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" || "$BIN" == "script_differential" || "$BIN" == "cmpct_reorg_differential" ]]; then
+    echo "RBITCOIN_HEAD_SCALE=${RBITCOIN_HEAD_SCALE:-tiny}"
+    echo "RBITCOIN_TX_HEAD_BITS=${RBITCOIN_TX_HEAD_BITS:-20}"
+  fi
   exit 0
 fi
 
@@ -138,6 +142,9 @@ if [[ "$BIN" != "block_differential" && "$BIN" != "block_spend_differential" && 
 fi
 
 export RBITCOIN_HEAD_SCALE="${RBITCOIN_HEAD_SCALE:-tiny}"
+# Tiny header heads (64 slots). tx.head tiny is 16-bit (~64k); rewind loops
+# fill in-page OA and probe-exhaust. 20-bit = 1M slots / 4 MiB.
+export RBITCOIN_TX_HEAD_BITS="${RBITCOIN_TX_HEAD_BITS:-20}"
 export RBITCOIN_IO="${RBITCOIN_IO:-fd}"
 export RBITCOIN_CORE_BITCOIND="$(./scripts/core-functional/fetch-bitcoind.sh)"
 
