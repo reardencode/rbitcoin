@@ -77,6 +77,10 @@ before 1.0).
 
 ### Fixed
 
+- **Mempool differential vs Core `testmempoolaccept`:** same raw spend,
+  `MempoolHub::test_accept` vs Core. **Consensus-class only** — Libre
+  policy (dust, min-relay, RBF, cluster) is skip, not a finding (COMPAT).
+
 - **N-block reorg and BIP68 CSV-age differentials:** `compare_fork_n_one`
   (side chain length 3 vs a 1-block stem) and `compare_csv_age_one`
   (version-2 spend of a mature coin with relative-height `nSequence`)

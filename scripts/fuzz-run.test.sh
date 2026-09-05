@@ -163,6 +163,12 @@ assert_ok "csv-differential dry-run sanitizer none" \
   grep -qx "FUZZ_SANITIZER=none" <<<"$out"
 assert_ok "csv-differential dry-run timeout 180" \
   grep -qx "FUZZ_TIMEOUT=180" <<<"$out"
+
+out="$(FUZZ_DRY_RUN=1 "$RUN" mempool_differential)"
+assert_ok "mempool-differential dry-run bin" \
+  grep -qx "FUZZ_BIN=mempool_differential" <<<"$out"
+assert_ok "mempool-differential dry-run sanitizer none" \
+  grep -qx "FUZZ_SANITIZER=none" <<<"$out"
 assert_ok "dry-run rustc wrapper" \
   grep -q "^RUSTC_WRAPPER=.*fuzz-rustc-allow-warnings.sh$" <<<"$out"
 wrap="$ROOT/scripts/fuzz-rustc-allow-warnings.sh"

@@ -97,3 +97,10 @@ path = "fuzz_targets/block_csv_differential.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "mempool_differential"
+path = "fuzz_targets/mempool_differential.rs"
+test = false
+doc = false
+bench = false

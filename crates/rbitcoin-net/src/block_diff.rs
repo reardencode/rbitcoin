@@ -61,6 +61,11 @@ pub trait BlockOracle {
     fn core_reconsider_block(&self, hash: &str) -> Result<(), &'static str>;
     fn core_invalidate_hash(&self, hash: &str) -> Result<(), &'static str>;
     fn core_precious_block(&self, hash: &str) -> Result<(), &'static str>;
+    /// Core `testmempoolaccept` on one hex tx. Default unused.
+    fn testmempoolaccept_hex(&self, hex: &str) -> OracleReply {
+        let _ = hex;
+        OracleReply::RpcError
+    }
 }
 
 pub const DIFF_TEST_PAD_HEIGHT: u32 = 3;
@@ -592,6 +597,111 @@ pub fn compare_csv_age_one(
         return CompareOne::NotABlock;
     };
     compare_prepared(hub, tip, oracle, block)
+}
+
+/// Libre policy vs Core is COMPAT, not a finding. Only consensus-class splits.
+pub fn is_core_mempool_policy_skip(reason: &str) -> bool {
+    let r = reason.to_ascii_lowercase();
+    r.contains("min relay")
+        || r.contains("minrelay")
+        || r.contains("dust")
+        || r.contains("insufficient fee")
+        || r.contains("too-long-mempool")
+        || r.contains("too-many-unconfirmed")
+        || r.contains("mempool-conflict")
+        || r.contains("replacement")
+        || r.contains("max-fee")
+        || r.contains("absurdly-high-fee")
+        || r.contains("policy")
+}
+
+fn mempool_ours_consensus(
+    r: Result<rbitcoin_mempool::AcceptResult, rbitcoin_mempool::AcceptError>,
+) -> Result<DiffVerdict, &'static str> {
+    use rbitcoin_mempool::AcceptError;
+    match r {
+        Ok(_) => Ok(DiffVerdict::Accept),
+        Err(
+            AcceptError::Policy(_)
+            | AcceptError::ClusterTooLarge { .. }
+            | AcceptError::PackageTooLarge { .. }
+            | AcceptError::PackageEmpty
+            | AcceptError::PackageNotTopo
+            | AcceptError::RbfInsufficient
+            | AcceptError::Orphaned(_)
+            | AcceptError::Duplicate(_),
+        ) => Ok(DiffVerdict::Skip),
+        Err(AcceptError::Durable(_)) => Err("harness"),
+        Err(_) => Ok(DiffVerdict::Reject),
+    }
+}
+
+pub fn parse_testmempoolaccept_json(body: &str) -> Result<OracleReply, &'static str> {
+    let body = body.trim();
+    if json_field_is_error_object(body) {
+        return Err("rpc error");
+    }
+    if body.contains("\"allowed\": true") || body.contains("\"allowed\":true") {
+        return Ok(OracleReply::NullAccept);
+    }
+    if body.contains("\"allowed\": false") || body.contains("\"allowed\":false") {
+        if let Some(r) = after_key(body, "reject-reason") {
+            if r.starts_with('"') {
+                if let Some(s) = json_quoted(r) {
+                    return Ok(OracleReply::Reason(s));
+                }
+            }
+        }
+        return Ok(OracleReply::Reason("rejected".into()));
+    }
+    Err("malformed")
+}
+
+pub fn compare_mempool_one(
+    hub: &ChainHub,
+    tip: &DiffTip,
+    oracle: &dyn BlockOracle,
+    mature: OutPoint,
+    data: &[u8],
+) -> CompareOne {
+    let Some(mp) = hub.mempool() else {
+        return CompareOne::Harness("no mempool");
+    };
+    let Some(block) = prepare_spend_candidate(tip, mature, data) else {
+        return CompareOne::NotABlock;
+    };
+    let Some(tx) = block.txdata.get(1).cloned() else {
+        return CompareOne::NotABlock;
+    };
+    let ours = match mempool_ours_consensus(mp.test_accept(&tx)) {
+        Ok(v) => v,
+        Err(msg) => return CompareOne::Harness(msg),
+    };
+    let hex = hex_encode(serialize(&tx));
+    let reply = oracle.testmempoolaccept_hex(&hex);
+    if matches!(reply, OracleReply::Dead)
+        || (matches!(reply, OracleReply::RpcError) && !oracle.liveness_ok())
+    {
+        return CompareOne::Harness("oracle dead");
+    }
+    let core = match &reply {
+        OracleReply::NullAccept => DiffVerdict::Accept,
+        OracleReply::Reason(r) if is_core_mempool_policy_skip(r) => DiffVerdict::Skip,
+        OracleReply::Reason(_) => DiffVerdict::Reject,
+        OracleReply::RpcError | OracleReply::Dead => DiffVerdict::Skip,
+    };
+    match (ours, core) {
+        (DiffVerdict::Accept, DiffVerdict::Accept) => CompareOne::Agreed { accept: true },
+        (DiffVerdict::Reject, DiffVerdict::Reject) => CompareOne::Agreed { accept: false },
+        (DiffVerdict::Skip, _) | (_, DiffVerdict::Skip) => CompareOne::Skipped,
+        (DiffVerdict::Accept, DiffVerdict::Reject) | (DiffVerdict::Reject, DiffVerdict::Accept) => {
+            CompareOne::Disagreed {
+                ours: ours == DiffVerdict::Accept,
+                core: core == DiffVerdict::Accept,
+                hex,
+            }
+        }
+    }
 }
 
 pub fn is_core_connectivity_skip(reason: &str) -> bool {
@@ -1280,7 +1390,7 @@ mod tests {
     use rbitcoin_query::Query;
     use std::cell::Cell;
     use std::fs;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct MockOracle {
@@ -1345,6 +1455,9 @@ mod tests {
         fn core_precious_block(&self, _hash: &str) -> Result<(), &'static str> {
             self.precious.set(self.precious.get() + 1);
             Ok(())
+        }
+        fn testmempoolaccept_hex(&self, hex: &str) -> OracleReply {
+            self.submitblock_hex(hex)
         }
     }
 
@@ -1427,6 +1540,50 @@ mod tests {
             "rpc error"
         );
         assert_eq!(parse_submitblock_json("not json").unwrap_err(), "malformed");
+    }
+
+    #[test]
+    fn parse_testmempoolaccept_json_allowed_and_policy() {
+        assert!(matches!(
+            parse_testmempoolaccept_json(
+                r#"{"result":[{"txid":"ab","allowed":true}],"error":null,"id":1}"#
+            )
+            .unwrap(),
+            OracleReply::NullAccept
+        ));
+        match parse_testmempoolaccept_json(
+            r#"{"result":[{"allowed":false,"reject-reason":"dust"}],"error":null}"#,
+        )
+        .unwrap()
+        {
+            OracleReply::Reason(r) => assert_eq!(r, "dust"),
+            other => panic!("{other:?}"),
+        }
+        assert!(is_core_mempool_policy_skip("dust"));
+        assert!(is_core_mempool_policy_skip("min relay fee not met"));
+        assert!(!is_core_mempool_policy_skip(
+            "mandatory-script-verify-flag-failed"
+        ));
+    }
+
+    #[test]
+    fn compare_mempool_one_skips_core_policy_and_agrees_consensus() {
+        let (dir, hub, _) = tmp_diff_hub();
+        let pad = mine_diff_pad(&hub, DIFF_MATURE_PAD_HEIGHT).unwrap();
+        let mp = crate::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
+        hub.attach_mempool(mp).ok();
+        let seed = serialize(&spend_seed_block());
+        let mock = MockOracle::new(OracleReply::Reason("dust".into()));
+        match compare_mempool_one(&hub, &pad.tip, &mock, pad.mature, &seed) {
+            CompareOne::Skipped => {}
+            other => panic!("policy skip: {other:?}"),
+        }
+        let mock = MockOracle::new(OracleReply::NullAccept);
+        match compare_mempool_one(&hub, &pad.tip, &mock, pad.mature, &seed) {
+            CompareOne::Agreed { accept: true } => {}
+            other => panic!("mempool accept: {other:?}"),
+        }
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

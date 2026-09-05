@@ -103,6 +103,17 @@ impl BlockOracle for CoreRpc {
         }
     }
 
+    fn testmempoolaccept_hex(&self, hex: &str) -> OracleReply {
+        let params = format!(r#"[["{hex}"]]"#);
+        match self.call("testmempoolaccept", &params) {
+            Ok(body) => match rbitcoin_net::parse_testmempoolaccept_json(&body) {
+                Ok(r) => r,
+                Err(_) => OracleReply::RpcError,
+            },
+            Err(_) => OracleReply::RpcError,
+        }
+    }
+
     fn liveness_ok(&self) -> bool {
         self.call("getblockcount", "[]").is_ok()
     }
