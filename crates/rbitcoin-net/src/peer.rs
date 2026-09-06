@@ -271,9 +271,6 @@ fn queue_addr_list(
     addrs: Vec<(u32, Address)>,
     v2: bool,
 ) -> Result<(), NetError> {
-    if addrs.is_empty() {
-        return Ok(());
-    }
     if v2 {
         let list: Vec<AddrV2Message> = addrs
             .into_iter()
@@ -282,9 +279,6 @@ fn queue_addr_list(
                 Some(addrv2_from_sock(t, sock))
             })
             .collect();
-        if list.is_empty() {
-            return Ok(());
-        }
         queue_out(out, NetworkMessage::AddrV2(list))
     } else {
         queue_out(out, NetworkMessage::Addr(addrs))
