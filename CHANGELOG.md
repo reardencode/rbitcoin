@@ -11,6 +11,9 @@ before 1.0).
 
 ### Changed
 
+- **RPC `help` / `getrpcinfo.methods` list every dispatched method**,
+  including `generate`, `mockscheduler`, `addpeeraddress`, and
+  `getnodeaddresses`.
 - **Display-order 32-byte hash hex** lives in `rbitcoin-primitives`
   (`display_hash_hex` / `parse_display_hash32`). RPC, Electrum, and Esplora
   call that pair instead of each reversing then encoding.

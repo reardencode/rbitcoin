@@ -661,6 +661,54 @@ fn hash_hex_display_matches_blockhash_display_and_reverses_parse() {
 }
 
 #[test]
+fn help_and_getrpcinfo_list_every_dispatched_method() {
+    let (ctx, dir) = ctx_empty();
+    let help = dispatch(&ctx, "help", vec![]).expect("help");
+    let help_text = help.as_str().expect("help string");
+    let info = dispatch(&ctx, "getrpcinfo", vec![]).expect("getrpcinfo");
+    let listed = info["methods"]
+        .as_array()
+        .expect("methods array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect::<Vec<_>>();
+    for name in [
+        "generate",
+        "mockscheduler",
+        "addpeeraddress",
+        "getnodeaddresses",
+    ] {
+        assert!(
+            help_text.lines().any(|l| l == name),
+            "help missing {name}: {help_text}"
+        );
+        assert!(
+            listed.contains(&name),
+            "getrpcinfo.methods missing {name}: {listed:?}"
+        );
+        let err = dispatch(&ctx, name, vec![]).err();
+        if let Some(e) = err {
+            assert_ne!(
+                e["message"].as_str(),
+                Some("Method not found"),
+                "{name} dispatched as missing"
+            );
+        }
+    }
+    for name in listed {
+        let err = dispatch(&ctx, name, vec![]).err();
+        if let Some(e) = err {
+            assert_ne!(
+                e["message"].as_str(),
+                Some("Method not found"),
+                "{name} in METHOD_LIST but dispatch misses it"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn all_methods_callable_empty_or_error() {
     let (ctx, dir) = ctx_empty();
     // Control / network always succeed on empty store.
