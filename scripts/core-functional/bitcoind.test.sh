@@ -134,7 +134,8 @@ OUTX="$("$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
   -whitelist=noban@127.0.0.1 -txindex -fastprune -limitclustercount=10 \
   -testactivationheight=csv@102 -permitbaremultisig=0 -maxconnections=8 \
   -minimumchainwork=0x65 -limitancestorcount=5 -blockversion=1337 -mocktime=1296688602 \
-  -maxtipage=3600 -blockmintxfee=0.00000001 -proxy=127.0.0.1:1 -deprecatedrpc=startingheight \
+  -maxtipage=3600 -blockmintxfee=0.00000001 -externalip=42.42.42.42 \
+  -proxy=127.0.0.1:1 -deprecatedrpc=startingheight \
   2>/dev/null)" || OUTX=""
 if printf '%s' "$OUTX" | grep -q -- "--testactivationheight=csv@102" \
   && printf '%s' "$OUTX" | grep -q -- "--whitelist=noban@127.0.0.1" \
@@ -146,6 +147,7 @@ if printf '%s' "$OUTX" | grep -q -- "--testactivationheight=csv@102" \
   && printf '%s' "$OUTX" | grep -q -- "--mocktime=1296688602" \
   && printf '%s' "$OUTX" | grep -q -- "--maxtipage=3600" \
   && printf '%s' "$OUTX" | grep -q -- "--blockmintxfee=0.00000001" \
+  && printf '%s' "$OUTX" | grep -q -- "--externalip=42.42.42.42" \
   && ! printf '%s' "$OUTX" | grep -q -- "limitancestor" \
   && ! printf '%s' "$OUTX" | grep -q -- "txindex" \
   && ! printf '%s' "$OUTX" | grep -q -- "fastprune" \

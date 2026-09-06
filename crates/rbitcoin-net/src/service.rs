@@ -512,9 +512,13 @@ async fn prepare_outbound_session(
             return Err(e);
         }
     };
+    let wants_addrv2 = provisional.wants_addrv2();
     peers.unregister(provisional_id);
     let sess = peers.register_with_id(provisional_id, peer, bind, &ver, false, typ);
     sess.mark_handshake_complete();
+    if wants_addrv2 {
+        sess.set_wants_addrv2();
+    }
     sess.note_recv("version", 100);
     sess.note_recv("verack", 0);
     sess.attach_tcp_shutdown(tcp_shutdown);

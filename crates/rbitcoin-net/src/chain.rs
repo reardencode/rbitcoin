@@ -118,6 +118,8 @@ pub struct ChainHub {
     /// `prefix[h] = work through height h` on the best chain. Process cache;
     /// rebuilt from wire headers when short, truncated on disconnect.
     chain_work_prefix: RwLock<Vec<Work>>,
+    /// Core `m_cached_finished_ibd`: once we leave IBD, stay out.
+    finished_ibd: AtomicBool,
 }
 
 /// One `getchaintips` row. Status is a Core-shaped string (`active`,
@@ -166,6 +168,7 @@ impl ChainHub {
             max_tip_age_secs: AtomicU64::new(DEFAULT_MAX_TIP_AGE_SECS),
             asked_blocks: RwLock::new(HashSet::new()),
             chain_work_prefix: RwLock::new(Vec::new()),
+            finished_ibd: AtomicBool::new(false),
         }
     }
 
@@ -336,8 +339,16 @@ impl ChainHub {
     }
 
     /// Core `IsInitialBlockDownload`: tip too old **or** work below `-minimumchainwork`.
+    /// Latches false after the first leave (Core `m_cached_finished_ibd`).
     pub fn in_ibd(&self) -> bool {
-        !self.meets_minimum_chain_work() || self.tip_is_stale_for_ibd()
+        if self.finished_ibd.load(Ordering::Acquire) {
+            return false;
+        }
+        let ibd = !self.meets_minimum_chain_work() || self.tip_is_stale_for_ibd();
+        if !ibd {
+            self.finished_ibd.store(true, Ordering::Release);
+        }
+        ibd
     }
 
     /// Core `StaleBlockRequestAllowed`: active-chain always; stale only if
@@ -2609,6 +2620,16 @@ mod tests {
         assert!(
             !hub.tip_is_stale_for_ibd(),
             "tip at exactly max age must leave IBD"
+        );
+        assert!(!hub.in_ibd(), "leaving IBD latches");
+        hub.clock.set_mock(i64::from(tip_time) + 3600 * 48);
+        assert!(
+            hub.tip_is_stale_for_ibd(),
+            "stale helper still follows clock"
+        );
+        assert!(
+            !hub.in_ibd(),
+            "Core m_cached_finished_ibd stays false after leave"
         );
 
         let _ = std::fs::remove_dir_all(dir);

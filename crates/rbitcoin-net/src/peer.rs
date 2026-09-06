@@ -16,7 +16,7 @@ use crate::v2::{
 };
 use bitcoin::bip152::{BlockTransactions, HeaderAndShortIds};
 use bitcoin::hashes::Hash;
-use bitcoin::p2p::address::Address;
+use bitcoin::p2p::address::{AddrV2, AddrV2Message, Address};
 use bitcoin::p2p::message::NetworkMessage;
 use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock, GetBlockTxn, SendCmpct};
@@ -250,6 +250,58 @@ pub fn obsolete_version_log(version: i32, peer: u64) -> String {
     format!("using obsolete version {version}, disconnecting peer={peer}")
 }
 
+pub fn advertising_address_log(addr_port: impl std::fmt::Display, peer: u64) -> String {
+    format!("Advertising address {addr_port} to peer={peer}")
+}
+
+fn addrv2_from_sock(now: u32, sock: SocketAddr) -> AddrV2Message {
+    AddrV2Message {
+        time: now,
+        services: local_service_flags(),
+        addr: match sock.ip() {
+            std::net::IpAddr::V4(v) => AddrV2::Ipv4(v),
+            std::net::IpAddr::V6(v) => AddrV2::Ipv6(v),
+        },
+        port: sock.port(),
+    }
+}
+
+fn queue_addr_list(
+    out: &mpsc::UnboundedSender<PeerOut>,
+    addrs: Vec<(u32, Address)>,
+    v2: bool,
+) -> Result<(), NetError> {
+    if addrs.is_empty() {
+        return Ok(());
+    }
+    if v2 {
+        let list: Vec<AddrV2Message> = addrs
+            .into_iter()
+            .filter_map(|(t, a)| {
+                let sock = a.socket_addr().ok()?;
+                Some(addrv2_from_sock(t, sock))
+            })
+            .collect();
+        if list.is_empty() {
+            return Ok(());
+        }
+        queue_out(out, NetworkMessage::AddrV2(list))
+    } else {
+        queue_out(out, NetworkMessage::Addr(addrs))
+    }
+}
+
+fn maybe_queue_local_addr(
+    _hub: &ChainHub,
+    session: &crate::peers::LivePeer,
+    out: &mpsc::UnboundedSender<PeerOut>,
+) -> Result<(), NetError> {
+    if let Some(msg) = session.take_self_announce_msg() {
+        queue_out(out, msg)?;
+    }
+    Ok(())
+}
+
 pub fn hidden_addr_from() -> Address {
     Address::new(
         &SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0),
@@ -470,6 +522,7 @@ pub(crate) async fn inbound_connect_and_handshake(
         }
     };
     let id = sess.id;
+    let wants_addrv2 = sess.wants_addrv2();
     peers.unregister(id);
     let sess = peers.register_with_id(
         id,
@@ -480,6 +533,9 @@ pub(crate) async fn inbound_connect_and_handshake(
         crate::peers::PeerConnType::Inbound,
     );
     sess.mark_handshake_complete();
+    if wants_addrv2 {
+        sess.set_wants_addrv2();
+    }
     sess.note_recv("version", 100);
     sess.note_recv("verack", 0);
     Ok((their_version, reader, writer, wire, tcp_shutdown, sess))
@@ -760,6 +816,11 @@ async fn application_handshake(
         let msg = frame.decode();
         match msg.payload() {
             NetworkMessage::Verack => break,
+            NetworkMessage::SendAddrV2 => {
+                if let Some(s) = policy.session {
+                    s.set_wants_addrv2();
+                }
+            }
             NetworkMessage::Ping(_) => {
                 if let Some(s) = policy.session {
                     rbitcoin_log::debug!("{}", ping_prior_to_verack_log(s.id));
@@ -856,6 +917,7 @@ pub async fn peer_session_with(
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<PeerOut>();
     if let Some(s) = meta.session.as_ref() {
         s.attach_out(out_tx.clone());
+        let _ = maybe_queue_local_addr(hub.as_ref(), s, &out_tx);
     }
 
     let writer_session = meta.session.clone();
@@ -976,6 +1038,7 @@ pub async fn peer_session_with(
                             }
                         }
                         queue_due_tx_invs(hub.as_ref(), s, &from_this_peer, &out_tx);
+                        let _ = maybe_queue_local_addr(hub.as_ref(), s, &out_tx);
                         let _ = maybe_queue_initial_getheaders(&out_tx, hub.as_ref(), s);
                         match s.pending_sendcmpct.swap(0, Ordering::Relaxed) {
                             1 => {
@@ -1791,6 +1854,7 @@ async fn handle_peer_frame(
         NetworkMessage::Ping(n) => {
             if let Some(s) = session {
                 queue_due_tx_invs(hub, s, from_this_peer, out_tx);
+                let _ = maybe_queue_local_addr(hub, s, out_tx);
                 // Noban headers-timeout reset: Core re-issues getheaders in the
                 // same SendMessages turn; hook the ping so the official test
                 // sees it before sync_with_ping returns.
@@ -1823,7 +1887,9 @@ async fn handle_peer_frame(
             *peer_wtxid_relay = true;
         }
         NetworkMessage::SendAddrV2 => {
-            // BIP155: we advertise sendaddrv2 pre-verack; inbound advertise is enough.
+            if let Some(s) = session {
+                s.set_wants_addrv2();
+            }
         }
         NetworkMessage::Addr(list) => {
             if session.is_some_and(|s| {
@@ -2650,14 +2716,18 @@ async fn handle_peer_frame(
             return Ok(());
         }
         NetworkMessage::GetAddr => {
+            if let Some(s) = session {
+                let _ = maybe_queue_local_addr(hub, s, out_tx);
+            }
             let bind = session
                 .map(|s| s.addrbind)
                 .unwrap_or_else(|| std::net::SocketAddr::from(([127, 0, 0, 1], 0)));
             let addrs = match session.and_then(|s| s.peer_hub()) {
-                Some(hub) => hub.addr_response_for_bind(bind),
+                Some(ph) => ph.addr_response_for_bind(bind),
                 None => Vec::new(),
             };
-            queue_out(out_tx, NetworkMessage::Addr(addrs))?;
+            let v2 = session.is_some_and(|s| s.wants_addrv2());
+            queue_addr_list(out_tx, addrs, v2)?;
         }
         NetworkMessage::Unknown { .. } => {}
         _ => {}

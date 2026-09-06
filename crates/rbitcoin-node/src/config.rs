@@ -131,6 +131,8 @@ pub struct NodeConfig {
     pub block_version: Option<i32>,
     /// Core `-blockmintxfee` as BTC/kvB text (`None` = default 1 sat/kvB).
     pub block_min_tx_fee_btc: Option<String>,
+    /// Core `-externalip` (self-announce / `getnetworkinfo.localaddresses`).
+    pub external_ips: Vec<std::net::IpAddr>,
 }
 
 impl Default for NodeConfig {
@@ -183,6 +185,7 @@ impl Default for NodeConfig {
             max_tip_age_secs: None,
             block_version: None,
             block_min_tx_fee_btc: None,
+            external_ips: Vec::new(),
         }
     }
 }
@@ -567,6 +570,17 @@ impl NodeConfig {
                         Some(val.parse().map_err(|e| {
                             NodeError::Config(format!("conf limitclustersize: {e}"))
                         })?);
+                }
+                "externalip" | "external_ip" => {
+                    if val.is_empty() {
+                        return Err(NodeError::Config(
+                            "conf externalip requires an address".into(),
+                        ));
+                    }
+                    let ip: std::net::IpAddr = val
+                        .parse()
+                        .map_err(|e| NodeError::Config(format!("conf externalip: {e}")))?;
+                    self.external_ips.push(ip);
                 }
                 "peertimeout" | "peer_timeout" => {
                     let n: u64 = val
