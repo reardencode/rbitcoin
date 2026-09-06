@@ -1332,6 +1332,21 @@ fn connection_count(ctx: &RpcContext) -> u64 {
     }
 }
 
+fn localaddresses_json(ctx: &RpcContext) -> Value {
+    let Some(hub) = ctx.peers.as_ref() else {
+        return json!([]);
+    };
+    json!(hub
+        .rpc_local_addresses()
+        .into_iter()
+        .map(|(address, port, score)| json!({
+            "address": address,
+            "port": port,
+            "score": score,
+        }))
+        .collect::<Vec<_>>())
+}
+
 fn getnetworkinfo(ctx: &RpcContext) -> Value {
     let (cin, cout) = if let Some(hub) = ctx.peers.as_ref() {
         let rows = hub.snapshot();
@@ -1358,7 +1373,7 @@ fn getnetworkinfo(ctx: &RpcContext) -> Value {
         "networks": [],
         "relayfee": MempoolHub::relay_fee_btc_per_kb(),
         "incrementalfee": MempoolHub::relay_fee_btc_per_kb(),
-        "localaddresses": [],
+        "localaddresses": localaddresses_json(ctx),
         "warnings": rpc_warnings(ctx),
     })
 }

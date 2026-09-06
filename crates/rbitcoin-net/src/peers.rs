@@ -1,13 +1,14 @@
 //! Live P2P session table for RPC (`getpeerinfo` / `addnode` / `disconnectnode`).
 
 use crate::error::NetError;
+use bitcoin::p2p::address::{AddrV2, AddrV2Message, Address};
 use bitcoin::p2p::message::NetworkMessage;
 use bitcoin::p2p::message_network::VersionMessage;
 use bitcoin::p2p::ServiceFlags;
 use bitcoin::{BlockHash, Wtxid};
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
 
@@ -159,6 +160,12 @@ pub struct LivePeer {
     /// Cloned std TCP fd for `Shutdown::Both` on `disconnectnode` so the far
     /// side sees EOF even if our session task is mid-frame.
     tcp_shutdown: Mutex<Option<std::net::TcpStream>>,
+    /// VERSION+VERACK finished. Connecting rows stay false (`p2p_timeouts`).
+    handshake_complete: AtomicBool,
+    /// Peer sent BIP155 `sendaddrv2` (use `addrv2` for self-announce / GETADDR).
+    wants_addrv2: AtomicBool,
+    /// Next self-announce unix seconds (`0` = never sent).
+    next_local_addr_send: AtomicU64,
 }
 
 impl LivePeer {
@@ -224,6 +231,80 @@ impl LivePeer {
 
     pub fn request_disconnect(&self) {
         self.stop.store(true, Ordering::SeqCst);
+    }
+
+    pub fn mark_handshake_complete(&self) {
+        self.handshake_complete.store(true, Ordering::Release);
+    }
+
+    pub fn handshake_complete(&self) -> bool {
+        self.handshake_complete.load(Ordering::Acquire)
+    }
+
+    pub fn set_wants_addrv2(&self) {
+        self.wants_addrv2.store(true, Ordering::Relaxed);
+    }
+
+    pub fn wants_addrv2(&self) -> bool {
+        self.wants_addrv2.load(Ordering::Relaxed)
+    }
+
+    /// Core `MaybeSendAddr` local-address timer (`AVG_LOCAL_ADDRESS_BROADCAST_INTERVAL`).
+    pub fn take_local_addr_due(&self, now: u64) -> Option<SocketAddr> {
+        const DAY: u64 = 24 * 60 * 60;
+        let hub = self.owner.upgrade()?;
+        let sock = hub.advertise_local_socket()?;
+        let prev = self.next_local_addr_send.load(Ordering::Relaxed);
+        if prev != 0 && now < prev {
+            return None;
+        }
+        let next = now.saturating_add(DAY).max(1);
+        self.next_local_addr_send
+            .compare_exchange(prev, next, Ordering::Relaxed, Ordering::Relaxed)
+            .ok()?;
+        Some(sock)
+    }
+
+    pub fn take_self_announce_msg(&self) -> Option<NetworkMessage> {
+        if matches!(
+            self.conn_type,
+            PeerConnType::Feeler | PeerConnType::BlockRelay | PeerConnType::AddrFetch
+        ) {
+            return None;
+        }
+        let sock = self.take_local_addr_due(self.clock_now())?;
+        rbitcoin_log::debug!("{}", crate::peer::advertising_address_log(sock, self.id));
+        let now = self.clock_now() as u32;
+        Some(if self.wants_addrv2() {
+            NetworkMessage::AddrV2(vec![AddrV2Message {
+                time: now,
+                services: crate::peer::local_service_flags(),
+                addr: match sock.ip() {
+                    IpAddr::V4(v) => AddrV2::Ipv4(v),
+                    IpAddr::V6(v) => AddrV2::Ipv6(v),
+                },
+                port: sock.port(),
+            }])
+        } else {
+            NetworkMessage::Addr(vec![(
+                now,
+                Address::new(&sock, crate::peer::local_service_flags()),
+            )])
+        })
+    }
+
+    pub fn queue_self_announce_if_due(&self) {
+        let Some(msg) = self.take_self_announce_msg() else {
+            return;
+        };
+        let g = self.out_tx.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(tx) = g.as_ref() {
+            let _ = tx.send(PeerOut::Msg(msg));
+        }
+    }
+
+    pub fn connected_at_secs(&self) -> u64 {
+        self.connected_at.load(Ordering::Relaxed)
     }
 
     pub fn set_writer_abort(&self, handle: tokio::task::AbortHandle) {
@@ -710,6 +791,19 @@ pub struct PeerHub {
     /// Per-bind GetAddr response cache: bind → (cached_at_secs, addrs).
     addr_response_cache:
         Mutex<HashMap<SocketAddr, (u64, Vec<(u32, bitcoin::p2p::address::Address)>)>>,
+    /// Core `-peertimeout` seconds (VERSION/VERACK). Default 60.
+    peer_timeout_secs: AtomicU64,
+    /// Core `-externalip` addresses we advertise (`getnetworkinfo.localaddresses`).
+    external_ips: Mutex<Vec<IpAddr>>,
+    /// P2P listen port used with `-externalip`.
+    listen_port: AtomicU16,
+}
+
+fn ip_is_advertisable(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v) => !(v.is_unspecified() || v.is_loopback() || v.is_private()),
+        IpAddr::V6(v) => !(v.is_unspecified() || v.is_loopback()),
+    }
 }
 
 impl PeerHub {
@@ -730,7 +824,53 @@ impl PeerHub {
             pending_outbound_nonces: Mutex::new(HashSet::new()),
             addrman: Mutex::new(None),
             addr_response_cache: Mutex::new(HashMap::new()),
+            peer_timeout_secs: AtomicU64::new(60),
+            external_ips: Mutex::new(Vec::new()),
+            listen_port: AtomicU16::new(0),
         })
+    }
+
+    pub fn set_peer_timeout_secs(&self, secs: u64) {
+        self.peer_timeout_secs.store(secs.max(1), Ordering::Relaxed);
+    }
+
+    pub fn set_external_ips(&self, ips: Vec<IpAddr>) {
+        *self.external_ips.lock().unwrap_or_else(|e| e.into_inner()) = ips;
+    }
+
+    pub fn set_listen_port(&self, port: u16) {
+        self.listen_port.store(port, Ordering::Relaxed);
+    }
+
+    /// Core `LOCAL_MANUAL` (`-externalip`) rows for `getnetworkinfo.localaddresses`.
+    pub fn rpc_local_addresses(&self) -> Vec<(String, u16, i32)> {
+        const LOCAL_MANUAL: i32 = 4;
+        let port = self.listen_port.load(Ordering::Relaxed);
+        if port == 0 {
+            return Vec::new();
+        }
+        let ips = self
+            .external_ips
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        ips.into_iter()
+            .map(|ip| (ip.to_string(), port, LOCAL_MANUAL))
+            .collect()
+    }
+
+    pub fn advertise_local_socket(&self) -> Option<SocketAddr> {
+        let port = self.listen_port.load(Ordering::Relaxed);
+        if port == 0 {
+            return None;
+        }
+        let g = self.external_ips.lock().unwrap_or_else(|e| e.into_inner());
+        let ip = g.iter().copied().find(ip_is_advertisable)?;
+        Some(SocketAddr::new(ip, port))
+    }
+
+    pub fn peer_timeout_secs(&self) -> u64 {
+        self.peer_timeout_secs.load(Ordering::Relaxed).max(1)
     }
 
     /// Attach the process addrman so inbound GetAddr can sample peers.
@@ -979,7 +1119,7 @@ impl PeerHub {
     }
 
     pub fn now_secs(&self) -> u64 {
-        let mock = self.mock_now.load(Ordering::Relaxed);
+        let mock = self.mock_now.load(Ordering::Acquire);
         if mock != 0 {
             return mock;
         }
@@ -998,10 +1138,11 @@ impl PeerHub {
     }
 
     pub fn set_mock_now(&self, ts: u64) {
-        self.mock_now.store(ts, Ordering::Relaxed);
+        self.mock_now.store(ts, Ordering::Release);
         let g = self.live.read().unwrap_or_else(|e| e.into_inner());
         for p in g.values() {
             p.request_tx_inv();
+            p.queue_self_announce_if_due();
         }
         drop(g);
         self.on_session_heartbeat();
@@ -1009,7 +1150,26 @@ impl PeerHub {
 
     /// Session 50ms heartbeat: replace a stalling initial-headers-sync peer.
     pub(crate) fn on_session_heartbeat(&self) {
-        self.check_headers_sync_timeouts(self.now_secs());
+        let now = self.now_secs();
+        self.check_headers_sync_timeouts(now);
+        self.check_handshake_timeouts(now);
+    }
+
+    pub(crate) fn handshake_timed_out(&self, peer: &LivePeer, now: u64) -> bool {
+        if peer.handshake_complete() {
+            return false;
+        }
+        now.saturating_sub(peer.connected_at_secs()) >= self.peer_timeout_secs()
+    }
+
+    pub(crate) fn check_handshake_timeouts(&self, now: u64) {
+        let peers: Vec<Arc<LivePeer>> = self.live_peers();
+        for p in peers {
+            if self.handshake_timed_out(&p, now) {
+                rbitcoin_log::debug!("{}", crate::peer::version_handshake_timeout_log(p.id));
+                let _ = self.disconnect_id(p.id);
+            }
+        }
     }
 
     pub fn queue_pings(&self) {
@@ -1028,6 +1188,7 @@ impl PeerHub {
         self: &Arc<Self>,
         addr: SocketAddr,
         addrbind: SocketAddr,
+        inbound: bool,
         conn_type: PeerConnType,
     ) -> Arc<LivePeer> {
         use bitcoin::p2p::address::Address;
@@ -1043,7 +1204,14 @@ impl PeerHub {
             start_height: 0,
             relay: false,
         };
-        self.register(addr, addrbind, &ver, false, conn_type)
+        self.register_with_id(
+            self.next_id.fetch_add(1, Ordering::Relaxed),
+            addr,
+            addrbind,
+            &ver,
+            inbound,
+            conn_type,
+        )
     }
 
     pub fn register(
@@ -1055,7 +1223,11 @@ impl PeerHub {
         conn_type: PeerConnType,
     ) -> Arc<LivePeer> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.register_with_id(id, addr, addrbind, ver, inbound, conn_type)
+        let p = self.register_with_id(id, addr, addrbind, ver, inbound, conn_type);
+        p.mark_handshake_complete();
+        p.note_recv("version", 100);
+        p.note_recv("verack", 0);
+        p
     }
 
     pub fn register_with_id(
@@ -1121,10 +1293,10 @@ impl PeerHub {
             writer_abort: Mutex::new(None),
             session_abort: Mutex::new(None),
             tcp_shutdown: Mutex::new(None),
+            handshake_complete: AtomicBool::new(false),
+            wants_addrv2: AtomicBool::new(false),
+            next_local_addr_send: AtomicU64::new(0),
         });
-        // Handshake already exchanged version + verack (+ maybe ping).
-        peer.note_recv("version", 100);
-        peer.note_recv("verack", 0);
         self.live
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -1503,6 +1675,43 @@ mod tests {
             other => panic!("expected EOF/reset after disconnect_id, got {other:?}"),
         }
         let _ = local.write(&[1]);
+    }
+
+    #[test]
+    fn connecting_peer_times_out_at_peertimeout() {
+        let hub = PeerHub::new();
+        hub.set_peer_timeout_secs(3);
+        hub.set_mock_now(1_700_000_000);
+        let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1);
+        let p = hub.register_connecting(a, a, true, PeerConnType::Inbound);
+        assert!(!p.handshake_complete());
+        hub.set_mock_now(1_700_000_002);
+        hub.on_session_heartbeat();
+        assert!(!p.stop.load(Ordering::SeqCst), "still inside peertimeout");
+        hub.set_mock_now(1_700_000_003);
+        hub.on_session_heartbeat();
+        assert!(
+            p.stop.load(Ordering::SeqCst),
+            "peertimeout must disconnect pre-verack"
+        );
+        assert!(
+            hub.get(p.id).is_none(),
+            "timed-out connecting peer is dropped"
+        );
+    }
+
+    #[test]
+    fn completed_handshake_survives_peertimeout() {
+        let hub = PeerHub::new();
+        hub.set_peer_timeout_secs(3);
+        hub.set_mock_now(1_700_000_000);
+        let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1);
+        let p = hub.register(a, a, &ver("/rbitcoin:0.1.0/"), true, PeerConnType::Inbound);
+        assert!(p.handshake_complete());
+        hub.set_mock_now(1_700_000_100);
+        hub.on_session_heartbeat();
+        assert!(!p.stop.load(Ordering::SeqCst));
+        assert!(hub.get(p.id).is_some());
     }
 
     #[test]

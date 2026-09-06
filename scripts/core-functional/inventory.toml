@@ -556,8 +556,7 @@ reason = "core-log"
 
 [[test]]
 name = "p2p_addr_selfannouncement.py"
-status = "skip"
-reason = "core-log"
+status = "run"
 
 [[test]]
 name = "p2p_addrfetch.py"
@@ -685,8 +684,7 @@ reason = "core-log"
 
 [[test]]
 name = "p2p_leak.py"
-status = "skip"
-reason = "core-log"
+status = "run"
 
 [[test]]
 name = "p2p_leak_tx.py"
@@ -777,8 +775,7 @@ analog = "no BIP37 bloom; script uses -peerbloomfilters with txreconciliation"
 
 [[test]]
 name = "p2p_timeouts.py"
-status = "skip"
-reason = "core-log"
+status = "run"
 
 [[test]]
 name = "p2p_tx_download.py"

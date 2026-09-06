@@ -40,6 +40,18 @@ before 1.0).
   (not per-tx `get_tx_full`), off the session reactor. Host probe:
   `scripts/ibd-serve-bench.py`.
 
+- **Core functional `run` 67 → 68:** unmodified `p2p_addr_selfannouncement`
+  (`-externalip` in `getnetworkinfo.localaddresses`, first addr message is
+  the self-announce, mocktime re-announce). `IsInitialBlockDownload` latches
+  false after the first leave (Core `m_cached_finished_ibd`).
+
+- **Core functional `run` 66 → 67:** unmodified `p2p_leak` (no pre-verack
+  pong, VERSION `addrFrom` 0.0.0.0:0, sendaddrv2/wtxidrelay only for
+  nVersion ≥70016, obsolete version 31799 disconnect).
+
+- **Core functional `run` 65 → 66:** unmodified `p2p_timeouts` (mocktime
+  VERSION/VERACK timeout, `-peertimeout=3`, ping-before-handshake logs).
+
 - **Core functional `run` 62 → 65:** unmodified `p2p_ibd_txrelay` (IBD
   MAX_MONEY feefilter, no tx getdata/accept), `p2p_fingerprint` (month-old
   stale serve withhold), and `p2p_mutated_blocks` (`getpeerinfo.inflight`

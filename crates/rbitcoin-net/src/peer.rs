@@ -16,7 +16,7 @@ use crate::v2::{
 };
 use bitcoin::bip152::{BlockTransactions, HeaderAndShortIds};
 use bitcoin::hashes::Hash;
-use bitcoin::p2p::address::Address;
+use bitcoin::p2p::address::{AddrV2, AddrV2Message, Address};
 use bitcoin::p2p::message::NetworkMessage;
 use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock, GetBlockTxn, SendCmpct};
@@ -231,6 +231,82 @@ pub fn connected_to_self_log(addr: impl std::fmt::Display) -> String {
     format!("connected to self at {addr}, disconnecting")
 }
 
+pub fn version_handshake_timeout_log(peer: u64) -> String {
+    format!("version handshake timeout, disconnecting peer={peer}")
+}
+
+pub fn ping_prior_to_verack_log(peer: u64) -> String {
+    unsupported_before_verack_log("ping", peer)
+}
+
+pub fn unsupported_before_verack_log(cmd: &str, peer: u64) -> String {
+    format!("Unsupported message \"{cmd}\" prior to verack from peer={peer}")
+}
+
+/// Core `MIN_PEER_PROTO_VERSION` (31800).
+pub const MIN_PEER_PROTO_VERSION: i32 = 31800;
+
+pub fn obsolete_version_log(version: i32, peer: u64) -> String {
+    format!("using obsolete version {version}, disconnecting peer={peer}")
+}
+
+pub fn advertising_address_log(addr_port: impl std::fmt::Display, peer: u64) -> String {
+    format!("Advertising address {addr_port} to peer={peer}")
+}
+
+fn addrv2_from_sock(now: u32, sock: SocketAddr) -> AddrV2Message {
+    AddrV2Message {
+        time: now,
+        services: local_service_flags(),
+        addr: match sock.ip() {
+            std::net::IpAddr::V4(v) => AddrV2::Ipv4(v),
+            std::net::IpAddr::V6(v) => AddrV2::Ipv6(v),
+        },
+        port: sock.port(),
+    }
+}
+
+fn queue_addr_list(
+    out: &mpsc::UnboundedSender<PeerOut>,
+    addrs: Vec<(u32, Address)>,
+    v2: bool,
+) -> Result<(), NetError> {
+    if v2 {
+        let list: Vec<AddrV2Message> = addrs
+            .into_iter()
+            .filter_map(|(t, a)| {
+                let sock = a.socket_addr().ok()?;
+                Some(addrv2_from_sock(t, sock))
+            })
+            .collect();
+        queue_out(out, NetworkMessage::AddrV2(list))
+    } else {
+        queue_out(out, NetworkMessage::Addr(addrs))
+    }
+}
+
+fn maybe_queue_local_addr(
+    _hub: &ChainHub,
+    session: &crate::peers::LivePeer,
+    out: &mpsc::UnboundedSender<PeerOut>,
+) -> Result<(), NetError> {
+    if let Some(msg) = session.take_self_announce_msg() {
+        queue_out(out, msg)?;
+    }
+    Ok(())
+}
+
+pub fn hidden_addr_from() -> Address {
+    Address::new(
+        &SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0),
+        ServiceFlags::NONE,
+    )
+}
+
+pub fn non_version_before_handshake_log(cmd: &str, peer: u64) -> String {
+    format!("non-version message before version handshake. Message \"{cmd}\" from peer={peer}")
+}
+
 /// Core `ApproximateBestBlockDepth`: `(now - tip_time) / pow_target_spacing`.
 pub fn approximate_best_block_depth(hub: &ChainHub) -> i64 {
     let Some(h) = hub.tip_header() else {
@@ -270,6 +346,7 @@ impl Drop for LiveFollowDec {
 pub struct HandshakePolicy<'a> {
     pub hub: Option<&'a ChainHub>,
     pub peers: Option<&'a crate::peers::PeerHub>,
+    pub session: Option<&'a crate::peers::LivePeer>,
     pub conn_type: crate::peers::PeerConnType,
 }
 
@@ -278,6 +355,7 @@ impl HandshakePolicy<'static> {
         Self {
             hub: None,
             peers: None,
+            session: None,
             conn_type: crate::peers::PeerConnType::OutboundFullRelay,
         }
     }
@@ -385,7 +463,8 @@ pub(crate) async fn inbound_connect_and_handshake(
     their_addr: SocketAddr,
     start_height: i32,
     user_agent: &str,
-    policy: HandshakePolicy<'_>,
+    peers: &std::sync::Arc<crate::peers::PeerHub>,
+    bind: SocketAddr,
 ) -> Result<
     (
         VersionMessage,
@@ -393,21 +472,67 @@ pub(crate) async fn inbound_connect_and_handshake(
         V2Writer,
         crate::v2::WireBytes,
         std::net::TcpStream,
+        std::sync::Arc<crate::peers::LivePeer>,
     ),
     NetError,
 > {
-    connect_and_handshake_timed(
+    let (mut reader, mut writer, wire, tcp_shutdown) = open_v2(stream, magic, true).await?;
+    let sess =
+        peers.register_connecting(their_addr, bind, true, crate::peers::PeerConnType::Inbound);
+    if let Ok(clone) = tcp_shutdown.try_clone() {
+        sess.attach_tcp_shutdown(clone);
+    }
+    let policy = HandshakePolicy {
+        hub: None,
+        peers: Some(peers),
+        session: Some(sess.as_ref()),
+        conn_type: crate::peers::PeerConnType::Inbound,
+    };
+    let their_version = match tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
-        stream,
-        magic,
-        our_addr,
-        their_addr,
-        start_height,
-        true,
-        user_agent,
-        policy,
+        application_handshake(
+            &mut reader,
+            &mut writer,
+            magic,
+            our_addr,
+            their_addr,
+            start_height,
+            true,
+            user_agent,
+            policy,
+        ),
     )
     .await
+    {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            let _ = peers.disconnect_id(sess.id);
+            return Err(e);
+        }
+        Err(_) => {
+            rbitcoin_log::debug!("{}", version_handshake_timeout_log(sess.id));
+            let _ = peers.disconnect_id(sess.id);
+            return Err(NetError::Timeout);
+        }
+    };
+    let id = sess.id;
+    let wants_addrv2 = sess.wants_addrv2();
+    peers.unregister(id);
+    let sess = peers.register_with_id(
+        id,
+        their_addr,
+        bind,
+        &their_version,
+        true,
+        crate::peers::PeerConnType::Inbound,
+    );
+    sess.mark_handshake_complete();
+    if wants_addrv2 {
+        sess.set_wants_addrv2();
+    }
+    sess.note_recv("version", 100);
+    sess.note_recv("verack", 0);
+    Ok((their_version, reader, writer, wire, tcp_shutdown, sess))
 }
 
 pub(crate) async fn connect_and_handshake_timed(
@@ -529,12 +654,43 @@ async fn run_feeler_inner(
     Ok(())
 }
 
+fn command_label(cmd: &[u8; 12]) -> String {
+    let n = cmd.iter().position(|&b| b == 0).unwrap_or(12);
+    String::from_utf8_lossy(&cmd[..n]).into_owned()
+}
+
+async fn read_handshake_frame(
+    reader: &mut V2Reader,
+    magic: Magic,
+    policy: &HandshakePolicy<'_>,
+) -> Result<FramedMessage, NetError> {
+    loop {
+        if let Some(s) = policy.session {
+            if s.stop.load(Ordering::Relaxed) {
+                return Err(NetError::Disconnected);
+            }
+            if let Some(peers) = policy.peers {
+                let now = peers.now_secs();
+                if peers.handshake_timed_out(s, now) {
+                    rbitcoin_log::debug!("{}", version_handshake_timeout_log(s.id));
+                    let _ = peers.disconnect_id(s.id);
+                    return Err(NetError::Timeout);
+                }
+            }
+        }
+        match tokio::time::timeout(Duration::from_millis(50), read_v2_frame(reader, magic)).await {
+            Ok(r) => return r,
+            Err(_) => continue,
+        }
+    }
+}
+
 /// Perform the version/verack exchange over an established BIP324 session.
 async fn application_handshake(
     reader: &mut V2Reader,
     writer: &mut V2Writer,
     magic: Magic,
-    our_addr: SocketAddr,
+    _our_addr: SocketAddr,
     their_addr: SocketAddr,
     start_height: i32,
     inbound: bool,
@@ -552,7 +708,7 @@ async fn application_handshake(
         services,
         timestamp: now,
         receiver: Address::new(&their_addr, ServiceFlags::NONE),
-        sender: Address::new(&our_addr, services),
+        sender: hidden_addr_from(),
         nonce: our_nonce,
         user_agent: user_agent.to_string(),
         start_height,
@@ -588,13 +744,28 @@ async fn application_handshake(
     }
 
     let their_version = loop {
-        let frame = read_v2_frame(reader, magic).await?;
+        let frame = read_handshake_frame(reader, magic, &policy).await?;
+        let cmd = command_label(&frame.command);
         let msg = frame.decode();
         match msg.payload() {
-            NetworkMessage::Version(v) => break v.clone(),
+            NetworkMessage::Version(v) => {
+                if (v.version as i32) < MIN_PEER_PROTO_VERSION {
+                    if let Some(s) = policy.session {
+                        rbitcoin_log::debug!("{}", obsolete_version_log(v.version as i32, s.id));
+                        if let Some(peers) = policy.peers {
+                            let _ = peers.disconnect_id(s.id);
+                        }
+                    }
+                    return Err(NetError::Protocol("obsolete version"));
+                }
+                break v.clone();
+            }
             other => {
                 if matches!(other, NetworkMessage::Verack) {
                     return Err(NetError::Protocol("verack before version"));
+                }
+                if let Some(s) = policy.session {
+                    rbitcoin_log::debug!("{}", non_version_before_handshake_log(&cmd, s.id));
                 }
                 let _ = other;
             }
@@ -626,24 +797,34 @@ async fn application_handshake(
         }
     }
 
-    // BIP339: wtxidrelay MUST be sent after version and before verack when both
-    // sides speak ≥70016. Late (post-verack) messages are ignored/invalid.
+    // BIP339 / BIP155 feature negotiation starts at 70016 (`p2p_leak` pre-wtxid).
     if their_version.version >= 70016 {
         write_v2_msg(writer, NetworkMessage::WtxidRelay).await?;
+        write_v2_msg(writer, NetworkMessage::SendAddrV2).await?;
     }
-    // BIP155: advertise addrv2 before verack (`p2p_invalid_messages` wait_for_sendaddrv2).
-    write_v2_msg(writer, NetworkMessage::SendAddrV2).await?;
     write_v2_msg(writer, NetworkMessage::Verack).await?;
 
     loop {
-        let frame = read_v2_frame(reader, magic).await?;
+        let frame = read_handshake_frame(reader, magic, &policy).await?;
+        let cmd = command_label(&frame.command);
         let msg = frame.decode();
         match msg.payload() {
             NetworkMessage::Verack => break,
-            NetworkMessage::Ping(n) => {
-                write_v2_msg(writer, NetworkMessage::Pong(*n)).await?;
+            NetworkMessage::SendAddrV2 => {
+                if let Some(s) = policy.session {
+                    s.set_wants_addrv2();
+                }
             }
-            _ => {}
+            NetworkMessage::Ping(_) => {
+                if let Some(s) = policy.session {
+                    rbitcoin_log::debug!("{}", ping_prior_to_verack_log(s.id));
+                }
+            }
+            _ => {
+                if let Some(s) = policy.session {
+                    rbitcoin_log::debug!("{}", unsupported_before_verack_log(&cmd, s.id));
+                }
+            }
         }
     }
 
@@ -730,6 +911,7 @@ pub async fn peer_session_with(
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<PeerOut>();
     if let Some(s) = meta.session.as_ref() {
         s.attach_out(out_tx.clone());
+        let _ = maybe_queue_local_addr(hub.as_ref(), s, &out_tx);
     }
 
     let writer_session = meta.session.clone();
@@ -850,6 +1032,7 @@ pub async fn peer_session_with(
                             }
                         }
                         queue_due_tx_invs(hub.as_ref(), s, &from_this_peer, &out_tx);
+                        let _ = maybe_queue_local_addr(hub.as_ref(), s, &out_tx);
                         let _ = maybe_queue_initial_getheaders(&out_tx, hub.as_ref(), s);
                         match s.pending_sendcmpct.swap(0, Ordering::Relaxed) {
                             1 => {
@@ -1665,6 +1848,7 @@ async fn handle_peer_frame(
         NetworkMessage::Ping(n) => {
             if let Some(s) = session {
                 queue_due_tx_invs(hub, s, from_this_peer, out_tx);
+                let _ = maybe_queue_local_addr(hub, s, out_tx);
                 // Noban headers-timeout reset: Core re-issues getheaders in the
                 // same SendMessages turn; hook the ping so the official test
                 // sees it before sync_with_ping returns.
@@ -1697,7 +1881,9 @@ async fn handle_peer_frame(
             *peer_wtxid_relay = true;
         }
         NetworkMessage::SendAddrV2 => {
-            // BIP155: we advertise sendaddrv2 pre-verack; inbound advertise is enough.
+            if let Some(s) = session {
+                s.set_wants_addrv2();
+            }
         }
         NetworkMessage::Addr(list) => {
             if session.is_some_and(|s| {
@@ -2524,14 +2710,18 @@ async fn handle_peer_frame(
             return Ok(());
         }
         NetworkMessage::GetAddr => {
+            if let Some(s) = session {
+                let _ = maybe_queue_local_addr(hub, s, out_tx);
+            }
             let bind = session
                 .map(|s| s.addrbind)
                 .unwrap_or_else(|| std::net::SocketAddr::from(([127, 0, 0, 1], 0)));
             let addrs = match session.and_then(|s| s.peer_hub()) {
-                Some(hub) => hub.addr_response_for_bind(bind),
+                Some(ph) => ph.addr_response_for_bind(bind),
                 None => Vec::new(),
             };
-            queue_out(out_tx, NetworkMessage::Addr(addrs))?;
+            let v2 = session.is_some_and(|s| s.wants_addrv2());
+            queue_addr_list(out_tx, addrs, v2)?;
         }
         NetworkMessage::Unknown { .. } => {}
         _ => {}

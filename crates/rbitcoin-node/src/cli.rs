@@ -72,6 +72,7 @@ where
     let mut max_tip_age_secs: Option<u64> = None;
     let mut block_version: Option<i32> = None;
     let mut block_min_tx_fee_btc: Option<String> = None;
+    let mut external_ips: Vec<std::net::IpAddr> = Vec::new();
 
     while i < args.len() {
         let a = args[i].to_string_lossy();
@@ -88,6 +89,7 @@ where
     [--testactivationheight name@height] [--persistmempool[=0|1]] [--whitelist SPEC] \\\n\
     [--blocksonly] [--minrelaytxfee BTC] [--permitbaremultisig[=0|1]] \\\n\
     [--limitclustercount N] [--limitclustersize KVB] [--peertimeout SECS] \\\n\
+    [--externalip IP] \\\n\
     [--minimumchainwork HEX] \\\n\
     [--max-run-secs N] [--log-level LEVEL] [--api-log PATH] [--uacomment STR] \\\n\
     [--no-seeds] [--smoke] [--inhibit-suspend]\n\n\
@@ -690,8 +692,37 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
                 seednodes.push(v);
                 i += 1;
             }
+            other if other.starts_with("--externalip=") => {
+                match other["--externalip=".len()..].parse() {
+                    Ok(ip) => external_ips.push(ip),
+                    Err(e) => {
+                        eprintln!("error: bad --externalip: {e}");
+                        return ExitCode::from(2);
+                    }
+                }
+                i += 1;
+            }
+            "--externalip" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: --externalip requires an address");
+                    return ExitCode::from(2);
+                }
+                match args[i].to_string_lossy().parse() {
+                    Ok(ip) => external_ips.push(ip),
+                    Err(e) => {
+                        eprintln!("error: bad --externalip: {e}");
+                        return ExitCode::from(2);
+                    }
+                }
+                i += 1;
+            }
             other if other.starts_with("--peertimeout=") => {
                 match other["--peertimeout=".len()..].parse() {
+                    Ok(0) => {
+                        eprintln!("Error: peertimeout must be a positive integer.");
+                        return ExitCode::from(1);
+                    }
                     Ok(n) => peer_timeout_secs = Some(n),
                     Err(e) => {
                         eprintln!("error: bad --peertimeout: {e}");
@@ -707,6 +738,10 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
                     return ExitCode::from(2);
                 }
                 match args[i].to_string_lossy().parse() {
+                    Ok(0) => {
+                        eprintln!("Error: peertimeout must be a positive integer.");
+                        return ExitCode::from(1);
+                    }
                     Ok(n) => peer_timeout_secs = Some(n),
                     Err(e) => {
                         eprintln!("error: bad --peertimeout: {e}");
@@ -1084,6 +1119,9 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
     if let Some(s) = block_min_tx_fee_btc {
         config.block_min_tx_fee_btc = Some(s);
     }
+    if !external_ips.is_empty() {
+        config.external_ips.extend(external_ips);
+    }
 
     // Unstable env is an input when CLI/conf omitted inbound — never set_var.
     config.absorb_inbound_env();
@@ -1247,6 +1285,24 @@ mod tests {
             "0",
         ]);
         assert_exit(code, ExitCode::SUCCESS);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn peertimeout_zero_is_init_error() {
+        let dir = tmp_datadir();
+        let code = cli_main([
+            "rbitcoin-node",
+            "--smoke",
+            "--network",
+            "regtest",
+            "--datadir",
+            dir.to_str().unwrap(),
+            "--peertimeout=0",
+            "--log-level",
+            "error",
+        ]);
+        assert_exit(code, ExitCode::from(1));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

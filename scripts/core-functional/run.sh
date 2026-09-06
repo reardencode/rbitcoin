@@ -71,13 +71,27 @@ else
 fi
 
 # Normalize to basenames with .py for the runner.
+# Core ALL_SCRIPTS lists some names as `foo.py --v1transport` and
+# `foo.py --v2transport`. test_runner startswith-matches `foo.py` to both.
+# We are BIP324 v2-only: pass the v2 token when the basename is one of those.
+V2_ONLY_TWIN=(p2p_timeouts.py)
 NORM=()
 for n in "${SELECTED[@]+"${SELECTED[@]}"}"; do
   base="$(basename "$n")"
   if [[ "$base" != *.py ]]; then
     base="${base}.py"
   fi
-  NORM+=("$base")
+  twin=0
+  for t in "${V2_ONLY_TWIN[@]}"; do
+    if [[ "$base" == "$t" ]]; then
+      NORM+=("$base --v2transport")
+      twin=1
+      break
+    fi
+  done
+  if [[ "$twin" -eq 0 ]]; then
+    NORM+=("$base")
+  fi
 done
 
 if [[ ${#NORM[@]} -eq 0 ]]; then

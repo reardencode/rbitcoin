@@ -2507,6 +2507,25 @@ fn getpeerinfo_empty_without_hub() {
 }
 
 #[test]
+fn getnetworkinfo_localaddresses_from_externalip() {
+    use rbitcoin_net::PeerHub;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    let (mut ctx, dir) = ctx_empty();
+    let hub = PeerHub::new();
+    hub.set_listen_port(18445);
+    hub.set_external_ips(vec![IpAddr::V4(Ipv4Addr::new(42, 42, 42, 42))]);
+    ctx.peers = Some(hub);
+    let info = dispatch(&ctx, "getnetworkinfo", vec![]).unwrap();
+    let addrs = info["localaddresses"].as_array().expect("array");
+    assert_eq!(addrs.len(), 1, "{info}");
+    assert_eq!(addrs[0]["address"], "42.42.42.42");
+    assert_eq!(addrs[0]["port"], 18445);
+    assert_eq!(addrs[0]["score"], 4);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn getpeerinfo_lists_registered_session() {
     use bitcoin::p2p::address::Address;
     use bitcoin::p2p::message_network::VersionMessage;

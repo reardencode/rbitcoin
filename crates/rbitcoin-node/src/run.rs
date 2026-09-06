@@ -302,6 +302,13 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     )
     .map_err(|e| NodeError::Config(e))?;
     mempool.set_cluster_limits(config.limit_cluster_count, config.limit_cluster_size_kvb);
+    if let Some(secs) = config.peer_timeout_secs {
+        node.peers.set_peer_timeout_secs(secs);
+    }
+    node.peers.set_listen_port(listen.port());
+    if !config.external_ips.is_empty() {
+        node.peers.set_external_ips(config.external_ips.clone());
+    }
     if config.whitelist.iter().any(|w| w.contains("noban")) {
         mempool.set_immediate_relay(true);
         node.peers.set_noban(true);
@@ -528,10 +535,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     Arc::clone(&shutdown.flag),
                 );
             }
-            if !config.blocksonly
-                && tip_meets_min_work(&config, &node.hub)
-                && !node.hub.tip_is_stale_for_ibd()
-            {
+            if !config.blocksonly && tip_meets_min_work(&config, &node.hub) && !node.hub.in_ibd() {
                 mempool.set_relay_enabled(true);
             }
             info!(
@@ -809,12 +813,8 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             .await
             {
                 Ok(h) => {
-                    h.initial_block_download.store(
-                        !tip_follow_ready
-                            || !tip_meets_min_work(&config, &node.hub)
-                            || node.hub.tip_is_stale_for_ibd(),
-                        Ordering::SeqCst,
-                    );
+                    h.initial_block_download
+                        .store(!tip_follow_ready || node.hub.in_ibd(), Ordering::SeqCst);
                     h.connections
                         .store(node.follow_live_count() as u64, Ordering::Relaxed);
                     info!(
@@ -906,10 +906,10 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 h.connections
                     .store(node.follow_live_count() as u64, Ordering::Relaxed);
                 let minwork = tip_meets_min_work(&config, &node.hub);
-                let stale = node.hub.tip_is_stale_for_ibd();
+                let ibd = node.hub.in_ibd();
                 h.initial_block_download
-                    .store(!minwork || stale, Ordering::SeqCst);
-                let want_relay = !config.blocksonly && minwork && !stale;
+                    .store(!minwork || ibd, Ordering::SeqCst);
+                let want_relay = !config.blocksonly && minwork && !ibd;
                 if want_relay != mempool.relay_enabled() {
                     mempool.set_relay_enabled(want_relay);
                     if want_relay {

@@ -4146,6 +4146,75 @@ fn handshake_disconnect_log_needles() {
     let line = connected_to_self_log("127.0.0.1:18444");
     assert!(line.contains("connected to self"));
     assert!(line.contains("disconnecting"));
+    assert_eq!(
+        crate::peer::version_handshake_timeout_log(0),
+        "version handshake timeout, disconnecting peer=0"
+    );
+    assert_eq!(
+        crate::peer::ping_prior_to_verack_log(0),
+        "Unsupported message \"ping\" prior to verack from peer=0"
+    );
+    assert_eq!(
+        crate::peer::non_version_before_handshake_log("ping", 1),
+        "non-version message before version handshake. Message \"ping\" from peer=1"
+    );
+    assert_eq!(
+        crate::peer::obsolete_version_log(31799, 5),
+        "using obsolete version 31799, disconnecting peer=5"
+    );
+    assert_eq!(crate::peer::MIN_PEER_PROTO_VERSION, 31800);
+    let hidden = crate::peer::hidden_addr_from();
+    let zero = std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0);
+    assert_eq!(
+        hidden,
+        bitcoin::p2p::address::Address::new(&zero, bitcoin::p2p::ServiceFlags::NONE)
+    );
+    assert_eq!(
+        crate::peer::advertising_address_log("42.42.42.42:18445", 3),
+        "Advertising address 42.42.42.42:18445 to peer=3"
+    );
+}
+
+#[test]
+fn externalip_is_advertised_once_then_after_a_day() {
+    use crate::peers::{PeerConnType, PeerHub};
+    use bitcoin::p2p::address::Address;
+    use bitcoin::p2p::message_network::VersionMessage;
+    use bitcoin::p2p::ServiceFlags;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let hub = PeerHub::new();
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+    let ver = VersionMessage {
+        version: 70016,
+        services: ServiceFlags::NETWORK,
+        timestamp: 0,
+        receiver: Address::new(&addr, ServiceFlags::NONE),
+        sender: Address::new(&addr, ServiceFlags::NONE),
+        nonce: 1,
+        user_agent: "/rbitcoin:test/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    let peer = hub.register(addr, addr, &ver, false, PeerConnType::OutboundFullRelay);
+    assert!(peer.take_local_addr_due(1_000).is_none());
+    hub.set_listen_port(18445);
+    hub.set_external_ips(vec![IpAddr::V4(Ipv4Addr::new(42, 42, 42, 42))]);
+    let first = peer
+        .take_local_addr_due(1_000)
+        .expect("initial self-announce");
+    assert_eq!(first.to_string(), "42.42.42.42:18445");
+    assert!(peer.take_local_addr_due(1_000).is_none());
+    assert!(peer.take_local_addr_due(1_000 + 24 * 3600 - 1).is_none());
+    let again = peer
+        .take_local_addr_due(1_000 + 24 * 3600)
+        .expect("daily self-announce");
+    assert_eq!(again.to_string(), "42.42.42.42:18445");
+    hub.set_external_ips(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
+    assert!(
+        peer.take_local_addr_due(1_000 + 48 * 3600).is_none(),
+        "loopback must not be advertised"
+    );
 }
 
 #[test]
