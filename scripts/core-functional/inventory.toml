@@ -556,8 +556,7 @@ reason = "core-log"
 
 [[test]]
 name = "p2p_addr_selfannouncement.py"
-status = "skip"
-reason = "core-log"
+status = "run"
 
 [[test]]
 name = "p2p_addrfetch.py"
