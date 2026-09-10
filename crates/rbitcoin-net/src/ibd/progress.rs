@@ -458,21 +458,10 @@ mod tests {
         use super::{claim_ready, tip_fetch_hole, work_chain_progress};
         use bitcoin::hashes::Hash;
         use bitcoin::BlockHash;
-        use rbitcoin_consensus::{ChainParams, Milestone};
-        use rbitcoin_query::Query;
+
         use std::collections::HashMap;
 
-        let dir = std::env::temp_dir().join(format!(
-            "rbitcoin-wcp-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-        let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("wcp");
         hub.ensure_genesis().unwrap();
 
         // tip=0 (genesis) → path_lo=1. Heights 1..3 missing from BQ.
@@ -547,21 +536,10 @@ mod tests {
         use super::{claim_ready, tip_fetch_hole};
         use bitcoin::hashes::Hash;
         use bitcoin::BlockHash;
-        use rbitcoin_consensus::{ChainParams, Milestone};
-        use rbitcoin_query::Query;
+
         use std::collections::HashMap;
 
-        let dir = std::env::temp_dir().join(format!(
-            "rbitcoin-taken-hole-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-        let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("taken-hole");
         hub.ensure_genesis().unwrap();
 
         let mut h2h = HashMap::new();

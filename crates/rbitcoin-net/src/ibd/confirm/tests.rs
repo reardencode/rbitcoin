@@ -52,31 +52,22 @@ fn prune_inflight_drops_below_wave_drain_fence_keeps_equal() {
 #[test]
 fn confirm_engine_pins_spend_of_just_written_pack() {
     use super::{spawn_confirm_engine, ConfirmEvent, ConfirmFeed};
-    use crate::chain::ChainHub;
+
     use crate::ibd::status::LoopStats;
     use bitcoin::absolute::LockTime;
     use bitcoin::script::ScriptBuf;
     use bitcoin::transaction::Version as TxVersion;
     use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
-    use rbitcoin_consensus::{mine_regtest_paying, pad_empty_from, ChainParams, Milestone};
-    use rbitcoin_query::Query;
+    use rbitcoin_consensus::{mine_regtest_paying, pad_empty_from, ChainParams};
+
     use std::sync::atomic::AtomicU32;
     use std::sync::Arc;
-    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant};
 
-    let dir = std::env::temp_dir().join(format!(
-        "rbitcoin-engine-187-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-    q.enter_direct_index_mode().unwrap();
+    let (dir, hub0) = crate::chain::tiny_regtest_hub_labeled("engine-187");
+    hub0.query.enter_direct_index_mode().unwrap();
     let params = ChainParams::regtest();
-    let hub = Arc::new(ChainHub::new(q, params.clone(), Milestone::NONE));
+    let hub = Arc::new(hub0);
     hub.ensure_genesis().unwrap();
     let genesis = hub.tip_hash().expect("genesis");
     let gen_time = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest)
@@ -1019,22 +1010,11 @@ fn confirm_queue_depths_content_snap_and_notes() {
 fn offer_confirm_ready_walks_height_map() {
     use super::super::body::BodyPresence;
     use super::offer_confirm_ready;
-    use rbitcoin_consensus::{ChainParams, Milestone};
-    use rbitcoin_query::Query;
+
     use std::collections::HashMap;
     use std::sync::atomic::AtomicU32;
 
-    let dir = std::env::temp_dir().join(format!(
-        "rbitcoin-offer-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-    let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("offer");
     hub.ensure_genesis().unwrap();
 
     let feed = ConfirmFeed::new();
@@ -1196,21 +1176,8 @@ fn thr_stats_all_stages_and_note_wire_prefer() {
 #[test]
 fn write_batch_is_stale_after_tip_moves() {
     use super::write_batch_is_stale;
-    use crate::chain::ChainHub;
-    use rbitcoin_consensus::{ChainParams, Milestone};
-    use rbitcoin_query::Query;
 
-    let dir = std::env::temp_dir().join(format!(
-        "rbitcoin-write-stale-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("write-stale");
     hub.ensure_genesis().unwrap();
     assert!(!write_batch_is_stale(&hub, 1), "tip+1 is live");
     assert!(

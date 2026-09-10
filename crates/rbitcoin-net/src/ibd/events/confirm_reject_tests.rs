@@ -294,16 +294,7 @@ fn confirm_reject_blacklist_surface() {
 
     // Merkle mismatch (corrupt Class A reconstruct) → soft re-get, not blacklist.
     // Drive clear_archived_body when a Query is present (production IBD path).
-    let dir = std::env::temp_dir().join(format!(
-        "rbitcoin-ev-merkle-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
-    let q = rbitcoin_query::Query::open_or_create_tiny(dir.join("store")).unwrap();
+    let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("ev-merkle");
     let hdr = rbitcoin_store::HeaderRecord {
         prev_fk: rbitcoin_primitives::Fk::NULL,
         version: 1,
@@ -413,7 +404,6 @@ fn confirm_reject_blacklist_surface() {
 /// Winner body only on BQ-by-hash (not held map / Class A) still reorgs.
 #[test]
 fn bad_prev_gathers_winner_via_bq_by_hash() {
-    use crate::chain::ChainHub;
     use bitcoin::absolute::LockTime;
     use bitcoin::block::{Header, Version};
     use bitcoin::consensus::serialize;
@@ -422,21 +412,8 @@ fn bad_prev_gathers_winner_via_bq_by_hash() {
     use bitcoin::{
         Amount, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut, Witness,
     };
-    use rbitcoin_consensus::{ChainParams, Milestone};
-    use rbitcoin_query::Query;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    let dir = std::env::temp_dir().join(format!(
-        "rbitcoin-badprev-bqhash-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("badprev-bqhash");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     let coinbase = |height: u32| {
@@ -532,7 +509,7 @@ fn bad_prev_gathers_winner_via_bq_by_hash() {
 #[test]
 fn exploration_apply_win_held_ext_only_in_bq() {
     use super::try_complete_awaiting_reorg;
-    use crate::chain::ChainHub;
+
     use bitcoin::absolute::LockTime;
     use bitcoin::block::{Header, Version};
     use bitcoin::consensus::serialize;
@@ -543,21 +520,8 @@ fn exploration_apply_win_held_ext_only_in_bq() {
         Amount, BlockHash, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut,
         Witness,
     };
-    use rbitcoin_consensus::{ChainParams, Milestone};
-    use rbitcoin_query::Query;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    let dir = std::env::temp_dir().join(format!(
-        "rbitcoin-explore-bq-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("explore-bq");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     let coinbase = |height: u32| {
@@ -668,7 +632,6 @@ fn exploration_apply_win_held_ext_only_in_bq() {
 /// Multi-hop with all path bodies already loadable → reorg without await.
 #[test]
 fn multi_hop_bad_prev_applies_when_full_path_bodies_ready() {
-    use crate::chain::ChainHub;
     use bitcoin::absolute::LockTime;
     use bitcoin::block::{Header, Version};
     use bitcoin::consensus::serialize;
@@ -679,21 +642,8 @@ fn multi_hop_bad_prev_applies_when_full_path_bodies_ready() {
         Amount, BlockHash, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut,
         Witness,
     };
-    use rbitcoin_consensus::{ChainParams, Milestone};
-    use rbitcoin_query::Query;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    let dir = std::env::temp_dir().join(format!(
-        "rbitcoin-multi-hop-ready-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("multi-hop-ready");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     let coinbase = |height: u32| {
@@ -789,7 +739,6 @@ fn multi_hop_bad_prev_applies_when_full_path_bodies_ready() {
 /// full LCA path then reorg.
 #[test]
 fn multi_hop_bad_prev_densifies_full_path_and_reorgs() {
-    use crate::chain::ChainHub;
     use bitcoin::absolute::LockTime;
     use bitcoin::block::{Header, Version};
     use bitcoin::consensus::serialize;
@@ -800,21 +749,8 @@ fn multi_hop_bad_prev_densifies_full_path_and_reorgs() {
         Amount, BlockHash, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut,
         Witness,
     };
-    use rbitcoin_consensus::{ChainParams, Milestone};
-    use rbitcoin_query::Query;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    let dir = std::env::temp_dir().join(format!(
-        "rbitcoin-multi-hop-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("multi-hop");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     let coinbase = |height: u32| {
@@ -935,7 +871,7 @@ fn confirmed_height_mids_blocked_while_densify_ahead_leaves_tip_hole() {
     use super::super::status::LoopStats;
     use super::super::IbdConfig;
     use super::apply_peer_event;
-    use crate::chain::ChainHub;
+
     use crate::seeds::AddrMan;
     use bitcoin::absolute::LockTime;
     use bitcoin::block::{Header, Version};
@@ -947,26 +883,15 @@ fn confirmed_height_mids_blocked_while_densify_ahead_leaves_tip_hole() {
         Amount, BlockHash, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut,
         Witness,
     };
-    use rbitcoin_consensus::{ChainParams, Milestone};
-    use rbitcoin_query::Query;
+
     use std::collections::HashSet;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::atomic::{AtomicU32, AtomicU64};
     use std::sync::Arc;
-    use std::time::{SystemTime, UNIX_EPOCH};
+
     use tokio::sync::mpsc;
 
-    let dir = std::env::temp_dir().join(format!(
-        "rbitcoin-mid-confirmed-hole-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("mid-confirmed-hole");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
 
@@ -1146,7 +1071,7 @@ fn zombie_pending_mid_at_confirmed_height_never_reget() {
     use super::super::peer_io::PeerSlot;
     use super::super::status::LoopStats;
     use super::super::IbdConfig;
-    use crate::chain::ChainHub;
+
     use bitcoin::absolute::LockTime;
     use bitcoin::block::{Header, Version};
     use bitcoin::hashes::Hash;
@@ -1156,26 +1081,15 @@ fn zombie_pending_mid_at_confirmed_height_never_reget() {
         Amount, BlockHash, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut,
         Witness,
     };
-    use rbitcoin_consensus::{ChainParams, Milestone};
-    use rbitcoin_query::Query;
+
     use std::collections::HashSet;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::atomic::AtomicU64;
     use std::sync::Arc;
-    use std::time::{SystemTime, UNIX_EPOCH};
+
     use tokio::sync::mpsc;
 
-    let dir = std::env::temp_dir().join(format!(
-        "rbitcoin-zombie-mid-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("zombie-mid");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
 
@@ -1304,7 +1218,6 @@ fn zombie_pending_mid_at_confirmed_height_never_reget() {
 /// Competing BadPrev with bodies available reorgs onto winning path (not soft-livelock).
 #[test]
 fn bad_prev_competing_path_reorgs_via_apply_confirm_reject() {
-    use crate::chain::ChainHub;
     use bitcoin::absolute::LockTime;
     use bitcoin::block::{Header, Version};
     use bitcoin::consensus::serialize;
@@ -1313,21 +1226,8 @@ fn bad_prev_competing_path_reorgs_via_apply_confirm_reject() {
     use bitcoin::{
         Amount, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut, Witness,
     };
-    use rbitcoin_consensus::{ChainParams, Milestone};
-    use rbitcoin_query::Query;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    let dir = std::env::temp_dir().join(format!(
-        "rbitcoin-badprev-reorg-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("badprev-reorg");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
 
@@ -1430,7 +1330,6 @@ fn bad_prev_competing_path_reorgs_via_apply_confirm_reject() {
 /// completes reorg via held gather (shipped apply_confirm_reject only).
 #[test]
 fn bad_prev_awaits_winner_body_then_reorgs_when_held() {
-    use crate::chain::ChainHub;
     use bitcoin::absolute::LockTime;
     use bitcoin::block::{Header, Version};
     use bitcoin::consensus::serialize;
@@ -1439,21 +1338,8 @@ fn bad_prev_awaits_winner_body_then_reorgs_when_held() {
     use bitcoin::{
         Amount, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut, Witness,
     };
-    use rbitcoin_consensus::{ChainParams, Milestone};
-    use rbitcoin_query::Query;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    let dir = std::env::temp_dir().join(format!(
-        "rbitcoin-badprev-await-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("badprev-await");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     let coinbase = |height: u32| {
@@ -1543,7 +1429,6 @@ fn bad_prev_awaits_winner_body_then_reorgs_when_held() {
 /// After take_raw the BQ row is gone; Reject must still classify via the wire Arc.
 #[test]
 fn bad_prev_after_take_raw_classifies() {
-    use crate::chain::ChainHub;
     use bitcoin::absolute::LockTime;
     use bitcoin::block::{Header, Version};
     use bitcoin::consensus::serialize;
@@ -1552,21 +1437,8 @@ fn bad_prev_after_take_raw_classifies() {
     use bitcoin::{
         Amount, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut, Witness,
     };
-    use rbitcoin_consensus::{ChainParams, Milestone};
-    use rbitcoin_query::Query;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    let dir = std::env::temp_dir().join(format!(
-        "rbitcoin-badprev-taken-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("badprev-taken");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     let coinbase = |height: u32| {
@@ -1664,7 +1536,6 @@ fn bad_prev_after_take_raw_classifies() {
 /// Tip+1 BadPrev must rewind taken_hi and evict the losing slot identity.
 #[test]
 fn bad_prev_evicts_slot_rewinds_taken() {
-    use crate::chain::ChainHub;
     use bitcoin::absolute::LockTime;
     use bitcoin::block::{Header, Version};
     use bitcoin::script::ScriptBuf;
@@ -1672,21 +1543,8 @@ fn bad_prev_evicts_slot_rewinds_taken() {
     use bitcoin::{
         Amount, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut, Witness,
     };
-    use rbitcoin_consensus::{ChainParams, Milestone};
-    use rbitcoin_query::Query;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    let dir = std::env::temp_dir().join(format!(
-        "rbitcoin-badprev-evict-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("badprev-evict");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     let coinbase = |height: u32| {
@@ -1788,8 +1646,7 @@ fn apply_peer_event_body_and_control_surface() {
     use crate::seeds::AddrMan;
     use bitcoin::block::{Header, Version};
     use bitcoin::CompactTarget;
-    use rbitcoin_consensus::{ChainParams, Milestone};
-    use rbitcoin_query::Query;
+
     use std::collections::HashSet;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::atomic::{AtomicU32, AtomicU64};
@@ -1831,17 +1688,7 @@ fn apply_peer_event_body_and_control_surface() {
         }
     }
 
-    let dir = std::env::temp_dir().join(format!(
-        "rbitcoin-ev-apply-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-    let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("ev-apply");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
 
@@ -2036,8 +1883,7 @@ fn apply_peer_event_repeat_headers_skips_ensure_header_fk() {
     use crate::seeds::AddrMan;
     use bitcoin::block::{Header, Version};
     use bitcoin::CompactTarget;
-    use rbitcoin_consensus::{ChainParams, Milestone};
-    use rbitcoin_query::Query;
+
     use std::collections::HashSet;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::atomic::{AtomicU32, AtomicU64};
@@ -2076,17 +1922,7 @@ fn apply_peer_event_repeat_headers_skips_ensure_header_fk() {
         }
     }
 
-    let dir = std::env::temp_dir().join(format!(
-        "rbitcoin-ev-hdr-repeat-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-    let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("ev-hdr-repeat");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     let mut st = IbdWorkState::new(vec![dummy_slot()], Some(gen), Some(0));
@@ -2132,22 +1968,11 @@ fn apply_peer_event_repeat_headers_skips_ensure_header_fk() {
 fn apply_confirm_events_accepted_and_reject() {
     use super::super::confirm::ConfirmEvent;
     use super::apply_confirm_events;
-    use rbitcoin_consensus::{ChainParams, Milestone};
-    use rbitcoin_query::Query;
+
     use std::sync::atomic::AtomicU32;
     use std::time::Instant;
 
-    let dir = std::env::temp_dir().join(format!(
-        "rbitcoin-ev-confirm-drain-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-    let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("ev-confirm-drain");
     hub.ensure_genesis().unwrap();
     let mut st = IbdWorkState::new(Vec::new(), hub.tip_hash(), Some(0));
     let acc = h(11);
@@ -2189,8 +2014,7 @@ fn apply_peer_event_block_framed_bq_horizon_and_headers_done() {
     use bitcoin::{
         Amount, Block, CompactTarget, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness,
     };
-    use rbitcoin_consensus::{ChainParams, Milestone};
-    use rbitcoin_query::Query;
+
     use std::collections::HashSet;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::atomic::{AtomicU32, AtomicU64};
@@ -2264,17 +2088,7 @@ fn apply_peer_event_block_framed_bq_horizon_and_headers_done() {
         v
     }
 
-    let dir = std::env::temp_dir().join(format!(
-        "rbitcoin-ev-block-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-    let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("ev-block");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
 
@@ -2455,8 +2269,7 @@ fn block_framed_raw_offers_body_queue_with_confirm_feed() {
         Amount, Block, BlockHash, CompactTarget, OutPoint, Sequence, Transaction, TxIn, TxOut,
         Witness,
     };
-    use rbitcoin_consensus::{ChainParams, Milestone};
-    use rbitcoin_query::Query;
+
     use std::collections::HashSet;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::atomic::{AtomicU32, AtomicU64};
@@ -2525,17 +2338,7 @@ fn block_framed_raw_offers_body_queue_with_confirm_feed() {
         b
     }
 
-    let dir = std::env::temp_dir().join(format!(
-        "rbitcoin-ev-framed-bq-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-    let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("ev-framed-bq");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
 
@@ -2602,8 +2405,7 @@ fn known_headers_re_admit_to_ordered_after_tip_drain() {
     use bitcoin::block::{Header, Version};
     use bitcoin::hashes::Hash;
     use bitcoin::{BlockHash, CompactTarget};
-    use rbitcoin_consensus::{ChainParams, Milestone};
-    use rbitcoin_query::Query;
+
     use std::collections::HashSet;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::atomic::{AtomicU32, AtomicU64};
@@ -2642,17 +2444,7 @@ fn known_headers_re_admit_to_ordered_after_tip_drain() {
         }
     }
 
-    let dir = std::env::temp_dir().join(format!(
-        "rbitcoin-ev-readmit-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-    let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("ev-readmit");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
 
@@ -2759,8 +2551,7 @@ fn path_slot_first_wins_chained_via_headers() {
     use crate::seeds::AddrMan;
     use bitcoin::block::{Header, Version};
     use bitcoin::CompactTarget;
-    use rbitcoin_consensus::{ChainParams, Milestone};
-    use rbitcoin_query::Query;
+
     use std::collections::HashSet;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::atomic::{AtomicU32, AtomicU64};
@@ -2802,17 +2593,7 @@ fn path_slot_first_wins_chained_via_headers() {
         }
     }
 
-    let dir = std::env::temp_dir().join(format!(
-        "rbitcoin-path-slot-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-    let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("path-slot");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     let write_next = AtomicU32::new(1);
@@ -2911,7 +2692,6 @@ fn path_slot_first_wins_chained_via_headers() {
 /// the losing fork stays selectable, ordered is reseeded.
 #[test]
 fn heavier_fork_invalid_mid_does_not_blacklist_weaker() {
-    use crate::chain::ChainHub;
     use bitcoin::absolute::LockTime;
     use bitcoin::block::{Header, Version};
     use bitcoin::script::ScriptBuf;
@@ -2919,21 +2699,8 @@ fn heavier_fork_invalid_mid_does_not_blacklist_weaker() {
     use bitcoin::{
         Amount, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut, Witness,
     };
-    use rbitcoin_consensus::{ChainParams, Milestone};
-    use rbitcoin_query::Query;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    let dir = std::env::temp_dir().join(format!(
-        "rbitcoin-heavier-invalid-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("heavier-invalid");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     let coinbase = |height: u32| {
@@ -3144,7 +2911,6 @@ fn heavier_fork_invalid_mid_does_not_blacklist_weaker() {
 /// Fully valid heavier fork: end on B, A bodies stay un-blacklisted.
 #[test]
 fn heavier_fork_valid_does_not_blacklist_loser() {
-    use crate::chain::ChainHub;
     use bitcoin::absolute::LockTime;
     use bitcoin::block::{Header, Version};
     use bitcoin::script::ScriptBuf;
@@ -3152,21 +2918,8 @@ fn heavier_fork_valid_does_not_blacklist_loser() {
     use bitcoin::{
         Amount, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut, Witness,
     };
-    use rbitcoin_consensus::{ChainParams, Milestone};
-    use rbitcoin_query::Query;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    let dir = std::env::temp_dir().join(format!(
-        "rbitcoin-heavier-valid-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("heavier-valid");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     let coinbase = |height: u32| {

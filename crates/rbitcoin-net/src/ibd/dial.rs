@@ -1013,19 +1013,7 @@ mod tests {
 
     #[test]
     fn request_headers_no_alive_returns_false() {
-        use rbitcoin_consensus::{ChainParams, Milestone};
-        use rbitcoin_query::Query;
-        let dir = std::env::temp_dir().join(format!(
-            "rbitcoin-dial-hdr-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-        let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("dial-hdr");
         let mut seq = 0u32;
         assert!(!request_headers(&[], &hub, &mut seq, &[]).unwrap());
         let mut dead = dummy_slot(1, addr(1), false);
