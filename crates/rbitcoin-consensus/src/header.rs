@@ -143,7 +143,6 @@ mod median_time_past_tests {
     use rbitcoin_primitives::{Fk, Height};
     use rbitcoin_query::{Query, TxApply};
     use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
-    use std::sync::Once;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -155,8 +154,6 @@ mod median_time_past_tests {
     }
 
     fn temp_q() -> (std::path::PathBuf, Query) {
-        static ONCE: Once = Once::new();
-        ONCE.call_once(|| {});
         let n = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()

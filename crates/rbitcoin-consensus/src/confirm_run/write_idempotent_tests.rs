@@ -476,10 +476,6 @@ fn empty_confirm_batch_rejected() {
     use crate::params::ChainParams;
     use rbitcoin_primitives::Height;
     use rbitcoin_query::Query;
-    use std::sync::Once;
-
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-confirm-empty-{}-{}",
         std::process::id(),
@@ -523,10 +519,6 @@ fn tip_plus_one_after_trailing_null_heal_is_not_notfound() {
     use crate::regtest_pad::{mine_empty_regtest, pad_empty_from};
     use rbitcoin_primitives::Height;
     use rbitcoin_query::Query;
-    use std::sync::Once;
-
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-confirm-tip1-heal-{}-{}",
         std::process::id(),
@@ -589,10 +581,6 @@ fn expected_bits_extending_height0_and_no_retarget() {
     use bitcoin::CompactTarget;
     use rbitcoin_primitives::Height;
     use rbitcoin_query::Query;
-    use std::sync::Once;
-
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-confirm-bits-{}-{}",
         std::process::id(),
@@ -693,10 +681,6 @@ fn expected_bits_extending_uses_header_plan_when_period_start_above_tip() {
     use rbitcoin_primitives::{Fk, Height};
     use rbitcoin_query::Query;
     use rbitcoin_store::HeaderRecord;
-    use std::sync::Once;
-
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-retarget-plan-{}-{}",
         std::process::id(),
@@ -836,9 +820,6 @@ fn script_wave_skips_preverified_txids() {
 
 fn tiny_query() -> (std::path::PathBuf, rbitcoin_query::Query) {
     use rbitcoin_query::Query;
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-pin-ensure-{}-{}",
         std::process::id(),
@@ -1117,10 +1098,6 @@ fn pin_for_wire_incomplete_outs_is_invariant_error() {
     use rbitcoin_primitives::Fk;
     use rbitcoin_query::{ArchiveWritePlan, Query};
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
-    use std::sync::Once;
-
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-pin-wire-outs-{}-{}",
         std::process::id(),
@@ -1244,10 +1221,6 @@ fn pin_takes_stamp_parent_vouts() {
     use rbitcoin_primitives::Fk;
     use rbitcoin_query::{ArchiveWritePlan, Query};
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
-    use std::sync::Once;
-
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-pin-take-vouts-{}-{}",
         std::process::id(),
@@ -1330,10 +1303,8 @@ fn pin_for_wire_create_pin_shares_script_bytes() {
     use rbitcoin_primitives::Fk;
     use rbitcoin_query::{ArchiveWritePlan, CreatePin, Query};
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
-    use std::sync::{Arc, Once};
+    use std::sync::Arc;
 
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-pin-createpin-share-{}-{}",
         std::process::id(),
@@ -1416,10 +1387,6 @@ fn pin_plan_edges_without_packed_ins() {
     use rbitcoin_query::{ArchiveWritePlan, CreatePin, Query, SpendEdge};
     use rbitcoin_store::{OutputRecord, TxRecord};
     use std::sync::Arc;
-    use std::sync::Once;
-
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-pin-edges-no-ins-{}-{}",
         std::process::id(),
@@ -1494,10 +1461,6 @@ fn pin_plan_empty_edges_is_invariant() {
     use rbitcoin_query::{ArchiveWritePlan, Query};
     use rbitcoin_store::{OutputRecord, TxRecord};
     use std::sync::Arc;
-    use std::sync::Once;
-
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-pin-empty-edges-{}-{}",
         std::process::id(),
@@ -1544,10 +1507,8 @@ fn pin_sparse_need_high_vout_only() {
     use rbitcoin_primitives::Fk;
     use rbitcoin_query::{ArchiveWritePlan, CreatePin, Query};
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
-    use std::sync::{Arc, Once};
+    use std::sync::Arc;
 
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-pin-sparse-high-{}-{}",
         std::process::id(),
@@ -1646,10 +1607,8 @@ fn pin_range_fill_does_not_count_as_cache_hit() {
     use rbitcoin_primitives::Fk;
     use rbitcoin_query::{ArchiveWritePlan, Query};
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
-    use std::sync::{Arc, Once};
+    use std::sync::Arc;
 
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-pin-hit-honest-{}-{}",
         std::process::id(),
@@ -1743,10 +1702,8 @@ fn pin_stamp_outs_is_cache_not_new() {
     use rbitcoin_primitives::Fk;
     use rbitcoin_query::{ArchiveWritePlan, CreatePin, Query};
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
-    use std::sync::{Arc, Once};
+    use std::sync::Arc;
 
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-pin-recent-outs-{}-{}",
         std::process::id(),
@@ -1830,10 +1787,8 @@ fn pin_recent_identity_without_outs_still_range_fills() {
     use rbitcoin_primitives::Fk;
     use rbitcoin_query::{ArchiveWritePlan, Query};
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
-    use std::sync::{Arc, Once};
+    use std::sync::Arc;
 
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-pin-recent-id-{}-{}",
         std::process::id(),
@@ -1931,10 +1886,8 @@ fn store_start_states_lookup_load_confirm() {
     use bitcoin::{Amount, Block, BlockHash, ScriptBuf, Sequence, TxMerkleNode, Witness};
     use rbitcoin_primitives::Height;
     use rbitcoin_query::Query;
-    use std::sync::{Arc, Once};
+    use std::sync::Arc;
 
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-start-states-{}-{}",
         std::process::id(),
@@ -2163,10 +2116,6 @@ fn structural_pinned_without_abs_is_invariant_error() {
     use rbitcoin_primitives::{Fk, Height};
     use rbitcoin_query::{BatchParents, OutPointSet, Query};
     use rbitcoin_store::{OutputRecord, TxRecord};
-    use std::sync::Once;
-
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-struct-pin-inv-{}-{}",
         std::process::id(),
@@ -2265,10 +2214,6 @@ fn direct_write_skips_create_pin_map_idx_without_recent() {
     use bitcoin::hashes::Hash;
     use rbitcoin_primitives::Height;
     use rbitcoin_query::Query;
-    use std::sync::Once;
-
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-direct-write-pins-{}-{}",
         std::process::id(),
@@ -2307,10 +2252,7 @@ fn one_shot_load_matches_stamp_then_load_from_plan() {
     use crate::{accept_and_connect_block, ChainParams, Milestone};
     use rbitcoin_primitives::Height;
     use rbitcoin_query::Query;
-    use std::sync::{Arc, Once};
-
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {});
+    use std::sync::Arc;
 
     fn open_q(tag: &str) -> (std::path::PathBuf, Query) {
         let path = std::env::temp_dir().join(format!(

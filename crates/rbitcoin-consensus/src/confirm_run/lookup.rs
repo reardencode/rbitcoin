@@ -794,11 +794,7 @@ mod tests {
     };
     use rbitcoin_query::IdMap;
     use rbitcoin_store::HeaderRecord;
-    use std::sync::Once;
-
     fn tmp_query() -> (std::path::PathBuf, Query) {
-        static ONCE: Once = Once::new();
-        ONCE.call_once(|| {});
         let path = std::env::temp_dir().join(format!(
             "rbitcoin-stamp-archived-{}-{}",
             std::process::id(),
