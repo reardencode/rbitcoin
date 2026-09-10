@@ -168,6 +168,132 @@ create/open/grow use positional `ReadFile`/`WriteFile` +
 Default `--datadir` is cwd-relative `datadir` via `Path::new(".").join("datadir")`
 (`./datadir` on Unix, `.\datadir` on Windows).
 
+### Low-priority service on a shared Linux host
+
+Initial block download (IBD) sustains CPU and storage work for a long time. On
+a workstation or multipurpose server, running the service at low priority can
+keep interactive work and latency-sensitive services responsive while letting
+rbitcoin use otherwise-idle resources. This is an opt-in host policy, not a
+performance setting: sync can slow substantially under contention, and an idle
+I/O class can starve while higher-priority storage work continues.
+
+For a regular systemd installation, create a service drop-in with
+`systemctl edit rbitcoin.service`:
+
+```ini
+[Service]
+Nice=19
+CPUWeight=10
+IOWeight=10
+IOSchedulingClass=idle
+```
+
+Apply it at a planned service restart. The equivalent NixOS override composes
+with the shipped module:
+
+```nix
+{
+  systemd.services.rbitcoin.serviceConfig = {
+    Nice = 19;
+    CPUWeight = 10;
+    IOWeight = 10;
+    IOSchedulingClass = "idle";
+  };
+}
+```
+
+These controls cover different layers:
+
+- `Nice=19` lowers CPU scheduling priority for every rbitcoin thread.
+- `CPUWeight=10` requests a smaller relative CPU share than sibling cgroups
+  with the default weight of 100 through the cgroup v2 CPU controller and the
+  standard fair scheduler.
+- `IOSchedulingClass=idle` requests the kernel's idle per-process I/O class.
+- `IOWeight=10` gives the service a smaller relative share through the cgroup
+  v2 I/O controller.
+
+Weights divide resources only when eligible cgroups compete; they are not
+bandwidth caps. On an otherwise idle host, these settings still allow rbitcoin
+to use the available CPU and storage. They do not limit process memory or
+network traffic. Add memory limits only from a separate, host-specific capacity
+plan; an undersized limit can terminate the node or make IBD impractically slow.
+
+I/O priority is also storage-stack dependent. Linux currently implements
+per-process I/O priorities in the `bfq` and `mq-deadline` schedulers; `none`
+does not make `IOSchedulingClass=idle` effective. `mq-deadline` honors that
+process class but does not implement cgroup weights. `IOWeight` needs BFQ group
+scheduling or a configured kernel I/O cost controller; accepting the systemd
+setting alone does not prove that the storage stack enforces it. rbitcoin uses
+multiple OS threads and bulk `io_uring` or positional I/O, but systemd places
+all service tasks in the same cgroup; the kernel and active device scheduler
+still decide how strongly these requests are separated from other workloads.
+
+#### Select the block-device I/O scheduler
+
+Identify every physical device that backs `dataDir` and `coldDataDir`; layered
+storage such as LVM, RAID, dm-crypt, or multi-device filesystems may involve
+more than the mount's immediate block device:
+
+```bash
+findmnt -no SOURCE --target /var/lib/rbitcoin-mainnet
+lsblk -o NAME,TYPE,PKNAME,MOUNTPOINTS
+cat /sys/block/nvme0n1/queue/scheduler
+```
+
+The active scheduler appears in brackets, for example:
+
+```text
+none [mq-deadline] kyber
+```
+
+When the goal is to honor the idle I/O class, `mq-deadline` is a conservative
+choice when the device offers it. BFQ also implements process priorities and
+cgroup weights, and may improve latency isolation, but its fairness machinery
+can reduce throughput or add overhead on fast devices. Do not prescribe BFQ
+solely because a device is rotational or NVMe; test the tradeoff on the actual
+host. If maximum throughput matters more than isolation, leaving `none` active
+may be correct even though process I/O priority will not apply.
+
+Test a supported scheduler until reboot:
+
+```bash
+echo mq-deadline | sudo tee /sys/block/nvme0n1/queue/scheduler
+```
+
+The scheduler is device-wide, so this changes policy for every workload using
+that device, not only rbitcoin. Persist it only after verifying the physical
+device and available scheduler. A udev rule should match a stable device
+identity rather than a probe-order name:
+
+```udev
+ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", \
+  ENV{ID_WWN}=="<device-WWN>", ATTR{queue/scheduler}="mq-deadline"
+```
+
+Check the property first with
+`udevadm info --query=property --name=/dev/nvme0n1`; use another stable property
+such as `ID_SERIAL` if the device exports no `ID_WWN`. NixOS can persist the
+same exact-device rule:
+
+```nix
+{
+  services.udev.extraRules = ''
+    ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", ENV{ID_WWN}=="<device-WWN>", ATTR{queue/scheduler}="mq-deadline"
+  '';
+}
+```
+
+Re-check `/sys/block/<device>/queue/scheduler` after reboot. See the kernel
+documentation for [block I/O priorities](https://docs.kernel.org/block/ioprio.html),
+[BFQ](https://docs.kernel.org/block/bfq-iosched.html), and
+[switching schedulers](https://kernel.org/doc/html/latest/block/switching-sched.html),
+plus systemd's
+[`systemd.exec`](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html)
+and
+[`systemd.resource-control`](https://www.freedesktop.org/software/systemd/man/latest/systemd.resource-control.html)
+manuals for the enforcement boundaries. The shipped `nixosModules` unit does
+not apply these settings.
+
 ## First hour (regtest)
 
 One loop: mine a block, one Electrum RPC, one Esplora GET. This is **regtest**,
