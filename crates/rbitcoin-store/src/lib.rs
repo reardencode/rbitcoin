@@ -89,9 +89,9 @@ pub use sorted_run::{
 pub use sp_tweaks::SpTweaksTable;
 pub use sp_tweaks_uring::load_tweak_wave;
 pub use spend_annotate_uring::{spend_ann_backend, SpendAnnBackend};
+pub use store::{keep_unspent_vout_subsequence, Store, StoreLayout};
 #[cfg(debug_assertions)]
 pub use store::{reset_tx_full_gets, reset_txid_get_many, tx_full_gets, txid_get_many_fks};
-pub use store::{Store, StoreLayout};
 pub use store_secret::StoreSecret;
 pub use tx_table::HeadResizeSizeSnapshot;
 pub(crate) use tx_table::SpendMetaBackend;

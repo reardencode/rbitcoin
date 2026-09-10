@@ -282,6 +282,26 @@ pub enum TxidResolveMode {
     TipThenAny,
 }
 
+/// Compact `items` to the in-order live vouts from [`Store::unspent_create_vouts`].
+pub fn keep_unspent_vout_subsequence<T>(
+    items: &mut Vec<T>,
+    live: &[u32],
+    vout: impl Fn(&T) -> u32,
+) {
+    if live.len() == items.len() {
+        return;
+    }
+    let mut i = 0;
+    items.retain(|item| {
+        if i < live.len() && live[i] == vout(item) {
+            i += 1;
+            true
+        } else {
+            false
+        }
+    });
+}
+
 impl Store {
     pub fn create(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
         Self::create_layout(StoreLayout::single(path.into()))
@@ -3217,6 +3237,21 @@ mod tests {
         }
         assert!(s.unspent_create_vouts_batch(&[]).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keep_unspent_vout_subsequence_keeps_in_order_subset() {
+        let mut v = vec![0u32, 1, 2, 3];
+        keep_unspent_vout_subsequence(&mut v, &[0, 2], |x| *x);
+        assert_eq!(v, vec![0, 2]);
+
+        let mut all = vec![5u32, 7];
+        keep_unspent_vout_subsequence(&mut all, &[5, 7], |x| *x);
+        assert_eq!(all, vec![5, 7]);
+
+        let mut none = vec![1u32, 2];
+        keep_unspent_vout_subsequence(&mut none, &[], |x| *x);
+        assert!(none.is_empty());
     }
 
     #[test]

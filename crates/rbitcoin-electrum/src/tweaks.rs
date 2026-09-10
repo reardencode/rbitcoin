@@ -33,34 +33,6 @@ fn keep_p2tr_value(value: u64, min_dust: u64) -> bool {
     min_dust == 0 || value > min_dust
 }
 
-/// Drop P2TR outs with `value <= min_dust` and txs that then have none.
-/// `min_dust == 0` is a no-op (serve 0-sat too). Height keys stay at encode.
-pub fn omit_dust_rows(rows: &mut Vec<ThinTweakRow>, min_dust: u64) {
-    if min_dust == 0 {
-        return;
-    }
-    rows.retain_mut(|r| {
-        r.p2tr.retain(|(_, _, v)| keep_p2tr_value(*v, min_dust));
-        !r.p2tr.is_empty()
-    });
-}
-
-/// `live` is an in-order subset of `items`' vouts (same as `unspent_create_vouts`).
-fn keep_live_subsequence<T>(items: &mut Vec<T>, live: &[u32], vout: impl Fn(&T) -> u32) {
-    if live.len() == items.len() {
-        return;
-    }
-    let mut i = 0;
-    items.retain(|item| {
-        if i < live.len() && live[i] == vout(item) {
-            i += 1;
-            true
-        } else {
-            false
-        }
-    });
-}
-
 /// End this RPC (`done`) when heights remain and the chunk budget has elapsed.
 pub fn seal_subscribe_chunk(elapsed: Duration, budget: Duration, more: bool) -> bool {
     more && elapsed >= budget
@@ -392,19 +364,25 @@ fn retain_unspent_taproot(
     let fks = query.block_tx_fks(height).map_err(|e| e.to_string())?;
     for fk in fks {
         let txid = query.store().txs.body_txid(fk).map_err(|e| e.to_string())?;
-        let Some(t) = tweaks.get_mut(&txid) else {
-            continue;
+        let drop = {
+            let Some(t) = tweaks.get_mut(&txid) else {
+                continue;
+            };
+            if !t.output_pubkeys.is_empty() {
+                let vouts: Vec<u32> = t.output_pubkeys.iter().map(|o| o.vout).collect();
+                let live = query
+                    .unspent_create_vouts(fk, &vouts)
+                    .map_err(|e| e.to_string())?;
+                rbitcoin_store::keep_unspent_vout_subsequence(&mut t.output_pubkeys, &live, |o| {
+                    o.vout
+                });
+            }
+            t.output_pubkeys.is_empty()
         };
-        if t.output_pubkeys.is_empty() {
-            continue;
+        if drop {
+            tweaks.remove(&txid);
         }
-        let vouts: Vec<u32> = t.output_pubkeys.iter().map(|o| o.vout).collect();
-        let live = query
-            .unspent_create_vouts(fk, &vouts)
-            .map_err(|e| e.to_string())?;
-        keep_live_subsequence(&mut t.output_pubkeys, &live, |o| o.vout);
     }
-    tweaks.retain(|_, t| !t.output_pubkeys.is_empty());
     Ok(())
 }
 
@@ -1160,34 +1138,46 @@ mod tests {
 
     #[test]
     fn omit_dust_default_drops_leq_1000_keeps_1001_and_empty_txs() {
-        let mut rows = vec![
+        let rows = vec![
             dust_row(1, vec![(0, [0x11; 32], 1000), (1, [0x22; 32], 1001)]),
             dust_row(2, vec![(0, [0x33; 32], 546)]),
             dust_row(3, vec![(0, [0x44; 32], 0)]),
         ];
-        omit_dust_rows(&mut rows, DEFAULT_TWEAKS_MIN_DUST);
-        assert_eq!(rows.len(), 1, "dust-only txs must leave the height map");
-        assert_eq!(rows[0].txid[0], 1);
-        assert_eq!(rows[0].p2tr, vec![(1, [0x22; 32], 1001)]);
+        let s = encode_thin_height_json(1, &rows, DEFAULT_TWEAKS_MIN_DUST);
+        let v: Value = serde_json::from_str(&s).unwrap();
+        let txs = v["1"].as_object().unwrap();
+        assert_eq!(txs.len(), 1, "dust-only txs must leave the height map");
+        let txid = rbitcoin_primitives::display_hash_hex(&rows[0].txid);
+        assert_eq!(txs[&txid]["output_pubkeys"].as_object().unwrap().len(), 1);
+        assert_eq!(txs[&txid]["output_pubkeys"]["1"][1], 1001);
     }
 
     #[test]
     fn omit_dust_546_matches_cake_electrs_leq() {
-        let mut rows = vec![
+        let rows = vec![
             dust_row(1, vec![(0, [0xaa; 32], 546)]),
             dust_row(2, vec![(0, [0xbb; 32], 547)]),
         ];
-        omit_dust_rows(&mut rows, 546);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].p2tr[0].2, 547);
+        let s = encode_thin_height_json(1, &rows, 546);
+        let v: Value = serde_json::from_str(&s).unwrap();
+        let txs = v["1"].as_object().unwrap();
+        assert_eq!(txs.len(), 1);
+        let txid = rbitcoin_primitives::display_hash_hex(&rows[1].txid);
+        assert_eq!(txs[&txid]["output_pubkeys"]["0"][1], 547);
     }
 
     #[test]
     fn omit_dust_zero_serves_every_value_including_zero() {
-        let mut rows = vec![dust_row(1, vec![(0, [0x11; 32], 0), (1, [0x22; 32], 1)])];
-        omit_dust_rows(&mut rows, 0);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].p2tr.len(), 2);
+        let rows = vec![dust_row(1, vec![(0, [0x11; 32], 0), (1, [0x22; 32], 1)])];
+        let s = encode_thin_height_json(1, &rows, 0);
+        let v: Value = serde_json::from_str(&s).unwrap();
+        let txs = v["1"].as_object().unwrap();
+        assert_eq!(txs.len(), 1);
+        let txid = rbitcoin_primitives::display_hash_hex(&rows[0].txid);
+        let outs = txs[&txid]["output_pubkeys"].as_object().unwrap();
+        assert_eq!(outs.len(), 2);
+        assert_eq!(outs["0"][1], 0);
+        assert_eq!(outs["1"][1], 1);
     }
 
     #[test]
