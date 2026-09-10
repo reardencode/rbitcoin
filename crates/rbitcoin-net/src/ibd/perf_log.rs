@@ -1960,6 +1960,43 @@ mod tests {
             !sizes.contains("recent="),
             "always-zero recent= occupancy: {sizes}"
         );
+        for line in [&info, &dbg] {
+            assert!(
+                !line.contains("thru="),
+                "parent-cache ready_through is always 0: {line}"
+            );
+        }
+        assert!(
+            !sizes.contains("load thru="),
+            "always-zero snapshot ready_through: {sizes}"
+        );
+        assert!(
+            !sizes.contains(" bodies="),
+            "always-zero snapshot bodies: {sizes}"
+        );
+        assert!(sizes.contains("plans="), "{sizes}");
+        s.load_ready_through = 200;
+        s.cache_bodies = 9;
+        let stuffed_info = format_info(&s);
+        let stuffed_dbg = format_debug(&s);
+        let stuffed_sizes = format_sizes(&s);
+        for line in [&stuffed_info, &stuffed_dbg] {
+            assert!(
+                !line.contains("thru="),
+                "stuffed ready_through must not print: {line}"
+            );
+        }
+        assert!(
+            !stuffed_sizes.contains("load thru="),
+            "stuffed ready_through must not print: {stuffed_sizes}"
+        );
+        assert!(
+            !stuffed_sizes.contains(" bodies="),
+            "stuffed cache_bodies must not print: {stuffed_sizes}"
+        );
+        assert!(stuffed_info.contains("load="), "{stuffed_info}");
+        assert!(stuffed_info.contains("script="), "{stuffed_info}");
+        assert!(stuffed_info.contains("write="), "{stuffed_info}");
     }
 
     #[test]
