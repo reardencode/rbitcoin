@@ -133,7 +133,7 @@ pub use wave_prevout::SpendEdge;
 /// Confirm load Class A / parent-pin window counters (IBD ~5s sampler).
 ///
 /// Accrued by wire pin (`pin_for_wire_batch`).
-/// Pair with [`Query::parent_cache_perf_snapshot`] for header-plan occupancy.
+/// Pair with [`Query::confirm_parent_cache`] header-plan occupancy.
 pub mod confirm_load_stats {
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -195,21 +195,17 @@ pub mod confirm_load_stats {
         pub parent_pin_ns: u64,
     }
 
-    static LAST_PIN_ADOPT_NS: AtomicU64 = AtomicU64::new(0);
     static LAST_PIN_PLAN_NS: AtomicU64 = AtomicU64::new(0);
     static LAST_PIN_COLD_NS: AtomicU64 = AtomicU64::new(0);
     static LAST_PIN_CONTRACT_NS: AtomicU64 = AtomicU64::new(0);
-    static LAST_PIN_PUBLISH_NS: AtomicU64 = AtomicU64::new(0);
     static LAST_PIN_PLAN_N: AtomicU64 = AtomicU64::new(0);
     static LAST_PIN_NEW_N: AtomicU64 = AtomicU64::new(0);
 
     #[derive(Debug, Clone, Copy, Default)]
     pub struct LastPinPhases {
-        pub adopt_ns: u64,
         pub plan_pin_ns: u64,
         pub cold_ns: u64,
         pub contract_ns: u64,
-        pub publish_ns: u64,
         pub pin_plan_n: u64,
         pub pin_new_n: u64,
     }
@@ -219,34 +215,40 @@ pub mod confirm_load_stats {
         pub fn ms(ns: u64) -> u64 {
             ns / 1_000_000
         }
+
+        /// Slow-load INFO `pin(...)` residual for one `pin_for_wire_batch`.
+        pub fn format_slow_pin(&self) -> String {
+            format!(
+                "pin(plan={}ms/n={} cold={}ms/n={} contract={}ms)",
+                Self::ms(self.plan_pin_ns),
+                self.pin_plan_n,
+                Self::ms(self.cold_ns),
+                self.pin_new_n,
+                Self::ms(self.contract_ns),
+            )
+        }
     }
 
     /// Overwrite last pin residual (one prep pin_for_wire_batch).
     pub fn note_last_pin(
-        adopt_ns: u64,
         plan_pin_ns: u64,
         cold_ns: u64,
         contract_ns: u64,
-        publish_ns: u64,
         pin_plan_n: u64,
         pin_new_n: u64,
     ) {
-        LAST_PIN_ADOPT_NS.store(adopt_ns, Ordering::Relaxed);
         LAST_PIN_PLAN_NS.store(plan_pin_ns, Ordering::Relaxed);
         LAST_PIN_COLD_NS.store(cold_ns, Ordering::Relaxed);
         LAST_PIN_CONTRACT_NS.store(contract_ns, Ordering::Relaxed);
-        LAST_PIN_PUBLISH_NS.store(publish_ns, Ordering::Relaxed);
         LAST_PIN_PLAN_N.store(pin_plan_n, Ordering::Relaxed);
         LAST_PIN_NEW_N.store(pin_new_n, Ordering::Relaxed);
     }
 
     pub fn last_pin_phases() -> LastPinPhases {
         LastPinPhases {
-            adopt_ns: LAST_PIN_ADOPT_NS.load(Ordering::Relaxed),
             plan_pin_ns: LAST_PIN_PLAN_NS.load(Ordering::Relaxed),
             cold_ns: LAST_PIN_COLD_NS.load(Ordering::Relaxed),
             contract_ns: LAST_PIN_CONTRACT_NS.load(Ordering::Relaxed),
-            publish_ns: LAST_PIN_PUBLISH_NS.load(Ordering::Relaxed),
             pin_plan_n: LAST_PIN_PLAN_N.load(Ordering::Relaxed),
             pin_new_n: LAST_PIN_NEW_N.load(Ordering::Relaxed),
         }

@@ -122,7 +122,7 @@ grep 'tip: perf' mainnet.log
 | `rss=` `anon=` `file=` `hwm=` | `/proc` process RSS (anon vs mmap file pages) |
 | `work` / `body` | IBD maps + body-presence sets |
 | `bq soft=n/win RAM=` | In-RAM body-queue count vs 1-min confirm window at tip rate + heap MiB (**raw only**) |
-| `conf_plans` / bq / conf pipe | Header plans + body-queue + confirm pipeline sizes (no process pin FIFO) |
+| `conf_plans` / `plans=` / bq / conf pipe | Header plans + body-queue + confirm pipeline sizes (no process pin FIFO). Sizes does not print parent-cache `load thru=` / `bodies=` (those snapshot slots were always 0) |
 | `conf loadq=` / `scriptq` / `writeq` | Real queue contents (loadq cap **14**) + pipeline-wide `parents=` + feed ready/inflight |
 | `txhead` | Segmented `tx.head.*` (open head + sealed heads/fuses; logical sizes) |
 | `sh` | SH catalog runs / tip heads |

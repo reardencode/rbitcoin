@@ -22,6 +22,12 @@ before 1.0).
 
 ### Changed
 
+- **`ibd: perf` / `ibd: sizes` drop leftover always-zero parent-cache slots:**
+  `thru=` / `load thru=` / `bodies=` on the sizes line were the four-zero
+  `parent_cache_perf_snapshot` tuple (only `plans=` is live). Slow-load INFO
+  `ibd: confirm load slow` no longer prints `adopt=` / `publish=` (production
+  `note_last_pin` always stored 0). Live lookup / load / scripts / write
+  timers stay.
 - **Head scale is open-time, not process env:** `StoreLayout::single` /
   `with_cold` are Mainnet; tests use `StoreLayout::tiny` /
   `Query::open_or_create_tiny`. `RBITCOIN_HEAD_SCALE`, cargo-test `/deps/`
