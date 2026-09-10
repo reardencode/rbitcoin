@@ -37,7 +37,8 @@ fn node_cli_and_surface_smoke() {
         let td = TestDatadir::new().unwrap();
         let cfg = NodeConfig::default()
             .with_datadir(td.path())
-            .with_network(net);
+            .with_network(net)
+            .with_tiny_heads();
         let handle = run_node(cfg).unwrap();
         assert_eq!(handle.network_name(), net.as_str());
         handle.shutdown().unwrap();

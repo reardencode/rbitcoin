@@ -28,6 +28,8 @@ before 1.0).
   sniffing, and `HeadScale::test_with` are gone. Tx-head rebuild seal bits /
   workers and idx soft-span are the same open options (production still reads
   `RBITCOIN_TX_HEAD_REBUILD_*` / `RBITCOIN_TX_IDX_SOFT_SPAN` once at open).
+  `NodeConfig` production `store_layout` is Mainnet; tests use
+  `with_tiny_heads()`; `--smoke` opens Tiny heads (CI / windows / macos).
 - **Store crate-root surface:** drop re-exports other crates never import
   (`AddressHead`, packed decode aliases, SH remap/slab Vec codecs, sorted-run
   catalog helpers, …). Tests use the remaining production insert/probe/decode

@@ -3,6 +3,7 @@ use bitcoin::hex::FromHex;
 use bitcoin::ScriptBuf;
 use rbitcoin_consensus::{ChainParams, Milestone};
 use rbitcoin_primitives::Network;
+use rbitcoin_store::HeadScale;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
@@ -156,6 +157,9 @@ pub struct NodeConfig {
     pub signet_block_time: Option<u64>,
     /// When true, open store and exit (CI / smoke).
     pub smoke: bool,
+    /// Head geometry at store open. Production default is Mainnet. Tests and
+    /// `--smoke` pass Tiny so they do not allocate multi‑GiB heads.
+    pub head_scale: HeadScale,
     /// Cap how long `run_p2p` idles after sync (None = forever). Used by tests.
     pub max_run_secs: Option<u64>,
     /// Build Class B scripthash index (Electrum/Esplora history). Default **off**.
@@ -210,6 +214,7 @@ impl Default for NodeConfig {
             signet_challenge: None,
             signet_block_time: None,
             smoke: false,
+            head_scale: HeadScale::Mainnet,
             max_run_secs: None,
             shindex: false,
             sptweaks: false,
@@ -264,6 +269,12 @@ impl NodeConfig {
         self
     }
 
+    /// Tiny heads for tests (64 header slots, 1 SH shard, 16-bit tx.head).
+    pub fn with_tiny_heads(mut self) -> Self {
+        self.head_scale = HeadScale::Tiny;
+        self
+    }
+
     pub fn store_path(&self) -> PathBuf {
         self.datadir.join("store")
     }
@@ -274,10 +285,14 @@ impl NodeConfig {
     }
 
     pub fn store_layout(&self) -> rbitcoin_store::StoreLayout {
-        match self.store_cold_path() {
-            Some(cold) => rbitcoin_store::StoreLayout::with_cold(self.store_path(), cold),
-            None => rbitcoin_store::StoreLayout::single(self.store_path()),
+        let mut layout = match self.head_scale {
+            HeadScale::Tiny => rbitcoin_store::StoreLayout::tiny(self.store_path()),
+            HeadScale::Mainnet => rbitcoin_store::StoreLayout::single(self.store_path()),
+        };
+        if let Some(cold) = self.store_cold_path() {
+            layout = layout.with_cold_dir(cold);
         }
+        layout
     }
 
     /// Durable mempool directory (`{datadir}/mempool/`).
@@ -830,6 +845,32 @@ mod tests {
             assert_eq!(p.to_str(), Some("./datadir"));
             assert_eq!(store.to_str(), Some("./datadir/store"));
         }
+    }
+
+    #[test]
+    fn store_layout_default_is_mainnet_tiny_builder_is_tiny() {
+        let mainnet = NodeConfig::default();
+        assert_eq!(mainnet.head_scale, HeadScale::Mainnet);
+        assert_eq!(mainnet.store_layout().head_scale, HeadScale::Mainnet);
+        assert_eq!(mainnet.store_layout().header_slots(), 1 << 22);
+        assert_eq!(mainnet.store_layout().sh_shard_count(), 64);
+        // Do not create those files in the default suite.
+
+        let tiny = NodeConfig::default().with_tiny_heads();
+        assert_eq!(tiny.head_scale, HeadScale::Tiny);
+        assert_eq!(tiny.store_layout().head_scale, HeadScale::Tiny);
+        assert_eq!(tiny.store_layout().header_slots(), 64);
+        assert_eq!(tiny.store_layout().sh_shard_count(), 1);
+
+        let dir = tmp();
+        let mut split = NodeConfig::default().with_datadir(&dir).with_tiny_heads();
+        split.datadir.cold = Some(dir.join("cold"));
+        assert_eq!(split.store_layout().head_scale, HeadScale::Tiny);
+        assert_eq!(
+            split.store_layout().cold_dir.as_deref(),
+            Some(dir.join("cold").join("store").as_path())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
