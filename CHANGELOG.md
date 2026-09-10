@@ -9,6 +9,15 @@ before 1.0).
 
 ## [Unreleased]
 
+### Added
+
+- **`--sptweaks-dust SATS`** (conf `sptweaks_dust=`): Electrum
+  `blockchain.tweaks.subscribe` omits P2TR `output_pubkeys` with
+  `value <= SATS` and drops txs that then have none. Default **1000**.
+  `0` serves every value. **546** matches Cake electrs `sp_min_dust`.
+  Index is unchanged (serve-time only). [`OPERATOR.md`](OPERATOR.md) /
+  [`COMPAT.md`](COMPAT.md).
+
 ### Fixed
 
 - **`cmpct_differential` fill vs Core extra-txn:** Core v31 latches IBD in

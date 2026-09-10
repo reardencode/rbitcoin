@@ -6,6 +6,7 @@
 //! resubscribes. kiss-bdk one-shot stops until it loops (kiss-bdk#10).
 //! Pre-taproot empty maps collapse into one notify (≤1024 keys).
 //! `historicalMode=false` omits confirmed-spent P2TR outs.
+//! Serve-time `--sptweaks-dust` omits P2TR outs with `value <=` the floor.
 
 use rbitcoin_consensus::{tweaks_for_height, ChainParams, TxTweak};
 #[cfg(test)]
@@ -21,6 +22,16 @@ use std::time::{Duration, Instant};
 /// Cake-compatible subscribe chunk: `done` at a wave boundary after this
 /// wall time so Cake resubscribes (persist lags one event; cake_wallet#3574).
 pub const SUBSCRIBE_CHUNK: Duration = Duration::from_secs(60);
+
+/// Omit served P2TR `output_pubkeys` with `value <=` this many sats.
+///
+/// `0` serves every value. Default **1000**. **546** matches Cake electrs
+/// `sp_min_dust`. Index still stores every eligible tweak.
+pub const DEFAULT_TWEAKS_MIN_DUST: u64 = 1000;
+
+fn keep_p2tr_value(value: u64, min_dust: u64) -> bool {
+    min_dust == 0 || value > min_dust
+}
 
 /// End this RPC (`done`) when heights remain and the chunk budget has elapsed.
 pub fn seal_subscribe_chunk(elapsed: Duration, budget: Duration, more: bool) -> bool {
@@ -64,8 +75,9 @@ pub fn height_map(
     chain: &ChainParams,
     h: u32,
     cut_through: bool,
+    min_dust: u64,
 ) -> Result<Value, String> {
-    let s = height_map_json(query, chain, h, cut_through)?;
+    let s = height_map_json(query, chain, h, cut_through, min_dust)?;
     serde_json::from_str(&s).map_err(|e| e.to_string())
 }
 
@@ -75,6 +87,7 @@ pub fn height_map_json(
     chain: &ChainParams,
     h: u32,
     cut_through: bool,
+    min_dust: u64,
 ) -> Result<String, String> {
     let tip = query.tip_height().map(|t| t.0);
     if tip.is_none_or(|t| h > t) || !chain.taproot_active_at(h) {
@@ -88,7 +101,7 @@ pub fn height_map_json(
     match query.load_thin_tweaks_range(Height(h), limits) {
         Ok(mut batch) if !batch.is_empty() => {
             let rows = batch.pop().map(|(_, r)| r).unwrap_or_default();
-            Ok(encode_thin_height_json(h, &rows))
+            Ok(encode_thin_height_json(h, &rows, min_dust))
         }
         Ok(_) => {
             let mut tweaks =
@@ -100,7 +113,7 @@ pub fn height_map_json(
             s.push('{');
             push_quoted_u32(&mut s, h);
             s.push(':');
-            push_height_object_json(&mut s, &tweaks);
+            push_height_object_json(&mut s, &tweaks, min_dust);
             s.push('}');
             Ok(s)
         }
@@ -114,8 +127,9 @@ pub fn height_notify_json(
     chain: &ChainParams,
     h: u32,
     cut_through: bool,
+    min_dust: u64,
 ) -> Result<String, String> {
-    let map = height_map_json(query, chain, h, cut_through)?;
+    let map = height_map_json(query, chain, h, cut_through, min_dust)?;
     Ok(wrap_height_notify(&map))
 }
 
@@ -193,6 +207,7 @@ pub fn first_subscribe_wave(
     start: u32,
     last: u32,
     limits: ThinTweakRangeLimits,
+    min_dust: u64,
 ) -> Result<FirstWave, String> {
     if start > last {
         return Ok(FirstWave {
@@ -211,7 +226,7 @@ pub fn first_subscribe_wave(
     let thin = load_thin_batch(query, start, last, limits)?;
     if thin.is_empty() {
         return Ok(FirstWave {
-            result_json: height_map_json(query, chain, start, limits.cut_through)?,
+            result_json: height_map_json(query, chain, start, limits.cut_through, min_dust)?,
             rest_notifies: Vec::new(),
             consumed: 1,
         });
@@ -220,10 +235,10 @@ pub fn first_subscribe_wave(
     debug_assert_eq!(*h0, start);
     let rest_notifies = thin[1..]
         .iter()
-        .map(|(h, rows)| thin_height_notify_json(*h, rows))
+        .map(|(h, rows)| thin_height_notify_json(*h, rows, min_dust))
         .collect();
     Ok(FirstWave {
-        result_json: encode_thin_height_json(*h0, rows0),
+        result_json: encode_thin_height_json(*h0, rows0, min_dust),
         rest_notifies,
         consumed: thin.len() as u32,
     })
@@ -255,6 +270,7 @@ pub fn remaining_notify_lines(
     start: u32,
     last: u32,
     limits: ThinTweakRangeLimits,
+    min_dust: u64,
 ) -> Result<NotifyWave, String> {
     if start > last {
         return Ok(NotifyWave {
@@ -272,7 +288,13 @@ pub fn remaining_notify_lines(
     let thin = load_thin_batch(query, start, last, limits)?;
     if thin.is_empty() {
         return Ok(NotifyWave {
-            lines: vec![height_notify_json(query, chain, start, limits.cut_through)?],
+            lines: vec![height_notify_json(
+                query,
+                chain,
+                start,
+                limits.cut_through,
+                min_dust,
+            )?],
             consumed: 1,
         });
     }
@@ -280,7 +302,7 @@ pub fn remaining_notify_lines(
     Ok(NotifyWave {
         lines: thin
             .into_iter()
-            .map(|(h, rows)| thin_height_notify_json(h, &rows))
+            .map(|(h, rows)| thin_height_notify_json(h, &rows, min_dust))
             .collect(),
         consumed,
     })
@@ -311,8 +333,8 @@ pub fn load_thin_batch(
 }
 
 /// Notify JSON for one thin-index height map.
-pub fn thin_height_notify_json(h: u32, rows: &[ThinTweakRow]) -> String {
-    wrap_height_notify(&encode_thin_height_json(h, rows))
+pub fn thin_height_notify_json(h: u32, rows: &[ThinTweakRow], min_dust: u64) -> String {
+    wrap_height_notify(&encode_thin_height_json(h, rows, min_dust))
 }
 
 fn empty_height_json(h: u32) -> String {
@@ -342,39 +364,56 @@ fn retain_unspent_taproot(
     let fks = query.block_tx_fks(height).map_err(|e| e.to_string())?;
     for fk in fks {
         let txid = query.store().txs.body_txid(fk).map_err(|e| e.to_string())?;
-        let Some(t) = tweaks.get_mut(&txid) else {
-            continue;
+        let drop = {
+            let Some(t) = tweaks.get_mut(&txid) else {
+                continue;
+            };
+            if !t.output_pubkeys.is_empty() {
+                let vouts: Vec<u32> = t.output_pubkeys.iter().map(|o| o.vout).collect();
+                let live = query
+                    .unspent_create_vouts(fk, &vouts)
+                    .map_err(|e| e.to_string())?;
+                rbitcoin_store::keep_unspent_vout_subsequence(&mut t.output_pubkeys, &live, |o| {
+                    o.vout
+                });
+            }
+            t.output_pubkeys.is_empty()
         };
-        if t.output_pubkeys.is_empty() {
-            continue;
+        if drop {
+            tweaks.remove(&txid);
         }
-        let vouts: Vec<u32> = t.output_pubkeys.iter().map(|o| o.vout).collect();
-        let live = query
-            .unspent_create_vouts(fk, &vouts)
-            .map_err(|e| e.to_string())?;
-        t.output_pubkeys
-            .retain(|o| live.iter().any(|v| *v == o.vout));
     }
-    tweaks.retain(|_, t| !t.output_pubkeys.is_empty());
     Ok(())
 }
 
-pub(crate) fn encode_thin_height_json(h: u32, rows: &[rbitcoin_query::ThinTweakRow]) -> String {
+pub(crate) fn encode_thin_height_json(
+    h: u32,
+    rows: &[rbitcoin_query::ThinTweakRow],
+    min_dust: u64,
+) -> String {
     let mut s = String::with_capacity(64 + rows.len() * 192);
     s.push('{');
     push_quoted_u32(&mut s, h);
     s.push_str(":{");
-    for (i, r) in rows.iter().enumerate() {
-        if i > 0 {
-            s.push(',');
-        }
-        s.push('"');
-        push_txid_display_hex(&mut s, &r.txid);
-        s.push_str("\":{\"tweak\":\"");
-        push_hex(&mut s, &r.tweak);
-        s.push_str("\",\"output_pubkeys\":{");
-        for (j, (vout, xonly, value)) in r.p2tr.iter().enumerate() {
-            if j > 0 {
+    let mut first_tx = true;
+    for r in rows {
+        let mut first_out = true;
+        for (vout, xonly, value) in &r.p2tr {
+            if !keep_p2tr_value(*value, min_dust) {
+                continue;
+            }
+            if first_out {
+                if !first_tx {
+                    s.push(',');
+                }
+                first_tx = false;
+                first_out = false;
+                s.push('"');
+                push_txid_display_hex(&mut s, &r.txid);
+                s.push_str("\":{\"tweak\":\"");
+                push_hex(&mut s, &r.tweak);
+                s.push_str("\",\"output_pubkeys\":{");
+            } else {
                 s.push(',');
             }
             s.push('"');
@@ -385,25 +424,39 @@ pub(crate) fn encode_thin_height_json(h: u32, rows: &[rbitcoin_query::ThinTweakR
             let _ = core::fmt::Write::write_fmt(&mut s, format_args!("{value}"));
             s.push(']');
         }
-        s.push_str("}}");
+        if !first_out {
+            s.push_str("}}");
+        }
     }
     s.push_str("}}");
     s
 }
 
-fn push_height_object_json(s: &mut String, tweaks: &std::collections::BTreeMap<[u8; 32], TxTweak>) {
+fn push_height_object_json(
+    s: &mut String,
+    tweaks: &std::collections::BTreeMap<[u8; 32], TxTweak>,
+    min_dust: u64,
+) {
     s.push('{');
-    for (i, (txid, t)) in tweaks.iter().enumerate() {
-        if i > 0 {
-            s.push(',');
-        }
-        s.push('"');
-        push_txid_display_hex(s, txid);
-        s.push_str("\":{\"tweak\":\"");
-        push_hex(s, &t.tweak);
-        s.push_str("\",\"output_pubkeys\":{");
-        for (j, o) in t.output_pubkeys.iter().enumerate() {
-            if j > 0 {
+    let mut first_tx = true;
+    for (txid, t) in tweaks {
+        let mut first_out = true;
+        for o in &t.output_pubkeys {
+            if !keep_p2tr_value(o.value, min_dust) {
+                continue;
+            }
+            if first_out {
+                if !first_tx {
+                    s.push(',');
+                }
+                first_tx = false;
+                first_out = false;
+                s.push('"');
+                push_txid_display_hex(s, txid);
+                s.push_str("\":{\"tweak\":\"");
+                push_hex(s, &t.tweak);
+                s.push_str("\",\"output_pubkeys\":{");
+            } else {
                 s.push(',');
             }
             s.push('"');
@@ -414,7 +467,9 @@ fn push_height_object_json(s: &mut String, tweaks: &std::collections::BTreeMap<[
             let _ = core::fmt::Write::write_fmt(s, format_args!("{}", o.value));
             s.push(']');
         }
-        s.push_str("}}");
+        if !first_out {
+            s.push_str("}}");
+        }
     }
     s.push('}');
 }
@@ -449,10 +504,15 @@ pub fn done_notify() -> Value {
 
 /// JSON-RPC **result** is the **first** height only. Further heights are
 /// notifications from the server loop.
-pub fn subscribe(query: &Query, params: &Value, chain: &ChainParams) -> Result<Value, String> {
+pub fn subscribe(
+    query: &Query,
+    params: &Value,
+    chain: &ChainParams,
+    min_dust: u64,
+) -> Result<Value, String> {
     let req = parse_req(params)?;
     let t0 = Instant::now();
-    let map = height_map(query, chain, req.start, !req.historical)?;
+    let map = height_map(query, chain, req.start, !req.historical, min_dust)?;
     rbitcoin_log::trace!(
         "electrum: tweaks h={} count={} result_keys={} wall_ms={}",
         req.start,
@@ -648,7 +708,15 @@ mod tests {
         }
 
         let chain = ChainParams::regtest();
-        let wave = first_subscribe_wave(&q, &chain, 1, 3, ThinTweakRangeLimits::default()).unwrap();
+        let wave = first_subscribe_wave(
+            &q,
+            &chain,
+            1,
+            3,
+            ThinTweakRangeLimits::default(),
+            DEFAULT_TWEAKS_MIN_DUST,
+        )
+        .unwrap();
         let result: Value = serde_json::from_str(&wave.result_json).unwrap();
         assert_eq!(result.as_object().unwrap().len(), 1);
         assert!(result.get("1").unwrap().as_object().unwrap().is_empty());
@@ -661,10 +729,21 @@ mod tests {
             assert!(v["params"][0][&h].as_object().unwrap().is_empty(), "{v}");
         }
         let thin1 = q.load_thin_tweaks(Height(1)).unwrap().expect("indexed");
-        assert_eq!(encode_thin_height_json(1, &thin1), wave.result_json);
+        assert_eq!(
+            encode_thin_height_json(1, &thin1, DEFAULT_TWEAKS_MIN_DUST),
+            wave.result_json
+        );
 
         let main = ChainParams::mainnet();
-        let pre = first_subscribe_wave(&q, &main, 0, 10, ThinTweakRangeLimits::default()).unwrap();
+        let pre = first_subscribe_wave(
+            &q,
+            &main,
+            0,
+            10,
+            ThinTweakRangeLimits::default(),
+            DEFAULT_TWEAKS_MIN_DUST,
+        )
+        .unwrap();
         assert_eq!(pre.consumed, 1);
         assert!(pre.rest_notifies.is_empty());
         let pre_v: Value = serde_json::from_str(&pre.result_json).unwrap();
@@ -731,8 +810,15 @@ mod tests {
             parent_hash = Some(hash);
         }
         let chain = ChainParams::mainnet();
-        let wave =
-            remaining_notify_lines(&q, &chain, 1, 7, ThinTweakRangeLimits::default()).unwrap();
+        let wave = remaining_notify_lines(
+            &q,
+            &chain,
+            1,
+            7,
+            ThinTweakRangeLimits::default(),
+            DEFAULT_TWEAKS_MIN_DUST,
+        )
+        .unwrap();
         assert_eq!(wave.consumed, 7);
         assert_eq!(wave.lines.len(), 1);
         let v: Value = serde_json::from_str(&wave.lines[0]).unwrap();
@@ -856,7 +942,7 @@ mod tests {
         tw[0] = 0x02;
         q.put_sp_tweaks_block(Height(1), fk1, &[Some(tw)]).unwrap();
         let chain = ChainParams::regtest();
-        let live = height_map_json(&q, &chain, 1, true).unwrap();
+        let live = height_map_json(&q, &chain, 1, true, DEFAULT_TWEAKS_MIN_DUST).unwrap();
         let live_v: Value = serde_json::from_str(&live).unwrap();
         assert_eq!(live_v["1"].as_object().unwrap().len(), 1);
 
@@ -899,13 +985,13 @@ mod tests {
         )
         .unwrap();
 
-        let cut = height_map_json(&q, &chain, 1, true).unwrap();
+        let cut = height_map_json(&q, &chain, 1, true, DEFAULT_TWEAKS_MIN_DUST).unwrap();
         let cut_v: Value = serde_json::from_str(&cut).unwrap();
         assert!(
             cut_v["1"].as_object().unwrap().is_empty(),
             "cut-through must omit spent p2tr, got {cut}"
         );
-        let hist = height_map_json(&q, &chain, 1, false).unwrap();
+        let hist = height_map_json(&q, &chain, 1, false, 0).unwrap();
         let hist_v: Value = serde_json::from_str(&hist).unwrap();
         assert_eq!(hist_v["1"].as_object().unwrap().len(), 1, "{hist}");
 
@@ -954,7 +1040,7 @@ mod tests {
             tweak,
             p2tr: vec![(1, [0x5f; 32], 5410)],
         };
-        let s = encode_thin_height_json(850_000, &[row]);
+        let s = encode_thin_height_json(850_000, &[row], 0);
         let v: Value = serde_json::from_str(&s).unwrap();
         let t = TxTweak {
             tweak,
@@ -1035,5 +1121,77 @@ mod tests {
             starts[1] < ends[0],
             "wave 1 load must start before wave 0 write returns"
         );
+    }
+
+    fn dust_row(txid0: u8, p2tr: Vec<(u32, [u8; 32], u64)>) -> ThinTweakRow {
+        let mut txid = [0u8; 32];
+        txid[0] = txid0;
+        let mut tweak = [0u8; 33];
+        tweak[0] = 0x02;
+        ThinTweakRow { txid, tweak, p2tr }
+    }
+
+    #[test]
+    fn default_tweaks_min_dust_is_1000() {
+        assert_eq!(DEFAULT_TWEAKS_MIN_DUST, 1000);
+    }
+
+    #[test]
+    fn omit_dust_default_drops_leq_1000_keeps_1001_and_empty_txs() {
+        let rows = vec![
+            dust_row(1, vec![(0, [0x11; 32], 1000), (1, [0x22; 32], 1001)]),
+            dust_row(2, vec![(0, [0x33; 32], 546)]),
+            dust_row(3, vec![(0, [0x44; 32], 0)]),
+        ];
+        let s = encode_thin_height_json(1, &rows, DEFAULT_TWEAKS_MIN_DUST);
+        let v: Value = serde_json::from_str(&s).unwrap();
+        let txs = v["1"].as_object().unwrap();
+        assert_eq!(txs.len(), 1, "dust-only txs must leave the height map");
+        let txid = rbitcoin_primitives::display_hash_hex(&rows[0].txid);
+        assert_eq!(txs[&txid]["output_pubkeys"].as_object().unwrap().len(), 1);
+        assert_eq!(txs[&txid]["output_pubkeys"]["1"][1], 1001);
+    }
+
+    #[test]
+    fn omit_dust_546_matches_cake_electrs_leq() {
+        let rows = vec![
+            dust_row(1, vec![(0, [0xaa; 32], 546)]),
+            dust_row(2, vec![(0, [0xbb; 32], 547)]),
+        ];
+        let s = encode_thin_height_json(1, &rows, 546);
+        let v: Value = serde_json::from_str(&s).unwrap();
+        let txs = v["1"].as_object().unwrap();
+        assert_eq!(txs.len(), 1);
+        let txid = rbitcoin_primitives::display_hash_hex(&rows[1].txid);
+        assert_eq!(txs[&txid]["output_pubkeys"]["0"][1], 547);
+    }
+
+    #[test]
+    fn omit_dust_zero_serves_every_value_including_zero() {
+        let rows = vec![dust_row(1, vec![(0, [0x11; 32], 0), (1, [0x22; 32], 1)])];
+        let s = encode_thin_height_json(1, &rows, 0);
+        let v: Value = serde_json::from_str(&s).unwrap();
+        let txs = v["1"].as_object().unwrap();
+        assert_eq!(txs.len(), 1);
+        let txid = rbitcoin_primitives::display_hash_hex(&rows[0].txid);
+        let outs = txs[&txid]["output_pubkeys"].as_object().unwrap();
+        assert_eq!(outs.len(), 2);
+        assert_eq!(outs["0"][1], 0);
+        assert_eq!(outs["1"][1], 1);
+    }
+
+    #[test]
+    fn encode_after_default_dust_omits_dust_tx_keeps_height_key() {
+        let rows = vec![
+            dust_row(1, vec![(0, [0x11; 32], 1000)]),
+            dust_row(2, vec![(1, [0x22; 32], 5410)]),
+        ];
+        let s = encode_thin_height_json(850_000, &rows, DEFAULT_TWEAKS_MIN_DUST);
+        let v: Value = serde_json::from_str(&s).unwrap();
+        let txs = v["850000"].as_object().unwrap();
+        assert_eq!(txs.len(), 1, "height key stays; dust-only tx is gone");
+        let txid = rbitcoin_primitives::display_hash_hex(&rows[1].txid);
+        assert!(txs.contains_key(&txid));
+        assert_eq!(txs[&txid]["output_pubkeys"]["1"][1], 5410);
     }
 }

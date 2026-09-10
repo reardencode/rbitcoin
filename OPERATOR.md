@@ -364,6 +364,7 @@ Routine knobs are **CLI / conf**, not required env vars. Clean smoke:
 | `--no-seeds` | `--noseeds` | seeds on |
 | `--shindex` | conf `shindex=1` | **off** — Class B scripthash (required for Electrum/Esplora) |
 | `--sptweaks` | conf `sptweaks=1` | **off** — thin BIP-352 tweak index (`sp_tweaks.*`) |
+| `--sptweaks-dust SATS` | conf `sptweaks_dust=` | **1000** — omit served P2TR outs with `value <= SATS` (`0` = serve all; **546** matches Cake electrs) |
 | `--electrum-listen ADDR` | | disabled (**requires** `--shindex`) |
 | `--esplora-listen ADDR` | | disabled (Esplora REST; **requires** `--shindex`) |
 | `--rpc-listen ADDR` | conf `rpc_listen` | disabled — Core-class JSON-RPC subset |
@@ -759,6 +760,12 @@ On disk (schema 17 dirs; leftover single files are unlinked on startup):
 sequential on a 4k-tx 9p block; witness stays in `inwit`). Indexed serve does
 **not** parent-peek (~40–80 blk/s vs ~1.5–3 naive on that VM).
 
+Serve-time **`--sptweaks-dust SATS`** (conf `sptweaks_dust=`) omits P2TR outs
+with `value <= SATS` and drops txs that then have none. Default **1000**.
+`0` serves every value. **`546` matches Cake electrs** `sp_min_dust`. This is
+not Core dust: P2TR at 1 sat/vB is about **330** sats; 546 is the P2PKH
+figure Cake’s server used. The index is unchanged — only the Electrum JSON.
+
 Tip follow writes 65 B-class records from already-pinned parents when the
 cursor is caught up. Reorg truncates with tip. Post-IBD backfill is a
 **one-core** completion machine: `txout` wave, then `inwit`/parent `txout`
@@ -814,7 +821,7 @@ proxy, or a public bind if the proxy sits elsewhere and you accept that risk).
 | Unconfirmed history/balance/mempool | from cluster mempool |
 | `transaction.get` | chain then mempool fallback |
 | `relayfee` / `estimatefee` / histogram | from Libre min + live mempool |
-| Silent Payments tweaks | `blockchain.tweaks.subscribe` — with `--sptweaks` index: multi-height load (default ≤128 heights / ≤16384 eligible txs per wave) then per-height notifies, **one TCP flush per wave**. Indexed JSON-RPC result shares the first wave's Class A `txout` span; remaining heights of that wave are notifies; further waves overlap the next load with the previous write. Class A join is **one sequential `txout` span** from first..=last eligible fk in the wave (not one body pread per eligible tx; `inwit` stays out). Pre-taproot: **one** notify with ≤1024 empty height keys (no store; Cake last key = progress). Cake `historicalMode=false` (param `[2]`): omit confirmed-spent P2TR outs. Without index / hole: naive per height (Class A + parent outs). **Not** request/response: JSON-RPC result is the **first** height (1-height probe `[0,1,false]` → `{"0": {}}`); further heights are notifications, then `{"message":"done"}` at a **wave boundary after 60s wall** (or when `count`/tip finishes first). Cake resubscribes; kiss-bdk one-shot stops until it loops. `server.features.genesis_hash` is the chain check. `server.version[0]` contains `electrs` (Cake probe). On 9p-class IO expect slower than local disk. |
+| Silent Payments tweaks | `blockchain.tweaks.subscribe` — with `--sptweaks` index: multi-height load (default ≤128 heights / ≤16384 eligible txs per wave) then per-height notifies, **one TCP flush per wave**. Indexed JSON-RPC result shares the first wave's Class A `txout` span; remaining heights of that wave are notifies; further waves overlap the next load with the previous write. Class A join is **one sequential `txout` span** from first..=last eligible fk in the wave (not one body pread per eligible tx; `inwit` stays out). Pre-taproot: **one** notify with ≤1024 empty height keys (no store; Cake last key = progress). Cake `historicalMode=false` (param `[2]`): omit confirmed-spent P2TR outs. `--sptweaks-dust` (default 1000; 546 = Cake electrs): omit P2TR outs with `value <=` the floor. Without index / hole: naive per height (Class A + parent outs). **Not** request/response: JSON-RPC result is the **first** height (1-height probe `[0,1,false]` → `{"0": {}}`); further heights are notifications, then `{"message":"done"}` at a **wave boundary after 60s wall** (or when `count`/tip finishes first). Cake resubscribes; kiss-bdk one-shot stops until it loops. `server.features.genesis_hash` is the chain check. `server.version[0]` contains `electrs` (Cake probe). On 9p-class IO expect slower than local disk. |
 
 ### API request log
 

@@ -130,6 +130,9 @@ pub struct ElectrumConfig {
     /// this wall time so Cake resubscribes. [`Duration::ZERO`] seals after
     /// wave 0 (tests). Default [`crate::tweaks::SUBSCRIBE_CHUNK`].
     pub tweaks_chunk: Duration,
+    /// Omit served P2TR outs with `value <=` this (sats). `0` serves all.
+    /// Default [`crate::tweaks::DEFAULT_TWEAKS_MIN_DUST`].
+    pub tweaks_min_dust: u64,
 }
 
 impl ElectrumConfig {
@@ -145,6 +148,7 @@ impl ElectrumConfig {
             max_scripthash_subs: DEFAULT_MAX_SCRIPTHASH_SUBS,
             max_broadcast_hex: DEFAULT_MAX_BROADCAST_HEX,
             tweaks_chunk: crate::tweaks::SUBSCRIBE_CHUNK,
+            tweaks_min_dust: crate::tweaks::DEFAULT_TWEAKS_MIN_DUST,
         }
     }
 
@@ -541,6 +545,7 @@ where
                         idle,
                         max_line,
                         config.tweaks_chunk,
+                        config.tweaks_min_dust,
                     )
                     .await?;
                     continue;
@@ -682,6 +687,7 @@ async fn serve_tweaks_subscribe<R, W>(
     idle: Duration,
     max_line: usize,
     chunk: Duration,
+    min_dust: u64,
 ) -> Result<(), std::io::Error>
 where
     R: AsyncBufReadExt + Unpin,
@@ -710,7 +716,13 @@ where
     let last = crate::tweaks::last_height(req.start, req.count, tip);
     let t0 = Instant::now();
     let Some(last) = last else {
-        let first = match crate::tweaks::height_map_json(query, chain, req.start, !req.historical) {
+        let first = match crate::tweaks::height_map_json(
+            query,
+            chain,
+            req.start,
+            !req.historical,
+            min_dust,
+        ) {
             Ok(v) => v,
             Err(e) => {
                 rbitcoin_log::api_call(
@@ -750,7 +762,7 @@ where
         let start_h = req.start;
         async move {
             tokio::task::spawn_blocking(move || {
-                crate::tweaks::first_subscribe_wave(&q, &c, start_h, last, limits)
+                crate::tweaks::first_subscribe_wave(&q, &c, start_h, last, limits, min_dust)
             })
             .await
             .unwrap_or_else(|e| Err(e.to_string()))
@@ -803,7 +815,7 @@ where
             let lim = limits;
             let last_h = last;
             tokio::task::spawn_blocking(move || {
-                crate::tweaks::remaining_notify_lines(&q, &c, batch_start, last_h, lim)
+                crate::tweaks::remaining_notify_lines(&q, &c, batch_start, last_h, lim, min_dust)
             })
         };
         let mut batch_start = next;
@@ -1522,7 +1534,9 @@ fn dispatch_pinned(
             Ok(Value::Array(arr))
         }
         "server.peers.subscribe" => Ok(json!([])),
-        "blockchain.tweaks.subscribe" => crate::tweaks::subscribe(query, params, chain),
+        "blockchain.tweaks.subscribe" => {
+            crate::tweaks::subscribe(query, params, chain, config.tweaks_min_dust)
+        }
         other => Err(format!("unknown method: {other}")),
     }
 }

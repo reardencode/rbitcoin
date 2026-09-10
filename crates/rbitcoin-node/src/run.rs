@@ -565,6 +565,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     let (electrum_handles, electrum_bridge) = start_electrum_if_ready(
         sh_tip_ready,
         config.listen.electrum,
+        config.sptweaks_dust,
         &shutdown,
         &node.hub,
         &params,
@@ -1234,6 +1235,7 @@ fn electrum_tip_notify(ev: TipEvent) -> Option<TipNotify> {
 async fn start_electrum_if_ready(
     sh_tip_ready: bool,
     addr: Option<SocketAddr>,
+    tweaks_min_dust: u64,
     shutdown: &Shutdown,
     hub: &ChainHub,
     params: &rbitcoin_consensus::ChainParams,
@@ -1254,7 +1256,8 @@ async fn start_electrum_if_ready(
         Arc::clone(&shutdown.flag),
         electrum_tip_notify,
     );
-    let ecfg = ElectrumConfig::for_params(addr, params);
+    let mut ecfg = ElectrumConfig::for_params(addr, params);
+    ecfg.tweaks_min_dust = tweaks_min_dust;
     let max_conn = ecfg.limits.max_connections;
     let max_line = ecfg.limits.max_request_bytes;
     let idle_secs = ecfg.limits.idle_timeout.as_secs();

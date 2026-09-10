@@ -369,33 +369,35 @@ impl Query {
                     "invariant: thin cut_through row/fk count",
                 ));
             }
-            let items: Vec<(Fk, Vec<u32>)> = out_rows
-                .iter()
-                .flatten()
-                .zip(elig_fks.iter().copied())
-                .map(|(row, fk)| (fk, row.p2tr.iter().map(|p| p.0).collect()))
-                .collect();
-            let live_rows = self.unspent_create_vouts_batch(&items)?;
-            if live_rows.len() != items.len() {
-                return Err(StoreError::Corrupt(
-                    "invariant: unspent_create_vouts_batch length",
-                ));
+            let ranges = self.store.tx_spent_range_batch(&elig_fks)?;
+            if ranges.len() != elig_fks.len() {
+                return Err(StoreError::Corrupt("invariant: spent_range_batch length"));
             }
-            let mut live_iter = live_rows.into_iter();
+            let mut i = 0usize;
+            let mut vouts = Vec::new();
             for rows in &mut out_rows {
-                let mut kept = Vec::with_capacity(rows.len());
-                for mut row in rows.drain(..) {
-                    let live = live_iter
-                        .next()
-                        .ok_or(StoreError::Corrupt("invariant: thin cut_through live rows"))?;
-                    if live.len() != row.p2tr.len() {
-                        row.p2tr.retain(|(v, _, _)| live.iter().any(|u| u == v));
-                    }
-                    if !row.p2tr.is_empty() {
-                        kept.push(row);
+                let mut w = 0;
+                for r in 0..rows.len() {
+                    vouts.clear();
+                    vouts.extend(rows[r].p2tr.iter().map(|p| p.0));
+                    let live = self
+                        .store
+                        .unspent_create_vouts(elig_fks[i], &vouts, ranges[i])?;
+                    i += 1;
+                    rbitcoin_store::keep_unspent_vout_subsequence(&mut rows[r].p2tr, &live, |p| {
+                        p.0
+                    });
+                    if !rows[r].p2tr.is_empty() {
+                        if w != r {
+                            rows.swap(w, r);
+                        }
+                        w += 1;
                     }
                 }
-                *rows = kept;
+                rows.truncate(w);
+            }
+            if i != elig_fks.len() {
+                return Err(StoreError::Corrupt("invariant: thin cut_through live rows"));
             }
         }
 

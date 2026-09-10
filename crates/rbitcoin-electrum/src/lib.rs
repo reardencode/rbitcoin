@@ -17,6 +17,7 @@ pub use server::{
     electrum_scripthash_hex, parse_electrum_request_line, run_electrum, sample_reset_perf,
     ElectrumConfig, ElectrumHandle, ServeLimits, TipNotify,
 };
+pub use tweaks::DEFAULT_TWEAKS_MIN_DUST;
 pub use unspent::{
     scripthash_mempool_stats_slot, scripthash_utxos_with_mempool_slot_in, MempoolShStats,
 };
