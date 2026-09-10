@@ -1006,7 +1006,6 @@ mod tests {
     use super::super::status::LoopStats;
     use super::*;
     use bitcoin::hashes::Hash;
-    use rbitcoin_consensus::{ChainParams, Milestone};
     use rbitcoin_query::Query;
     use std::collections::HashSet;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -1110,11 +1109,7 @@ mod tests {
     }
 
     fn tmp_hub() -> (rbitcoin_query::testutil::TempDir, ChainHub) {
-        let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("assign");
-        (
-            dir,
-            ChainHub::new(q, ChainParams::regtest(), Milestone::NONE),
-        )
+        crate::chain::tiny_regtest_hub_labeled("assign")
     }
 
     #[test]

@@ -22,6 +22,9 @@ before 1.0).
 
 ### Changed
 
+- **Tiny-regtest net hub fixture:** `tiny_regtest_hub` /
+  `tiny_regtest_hub_labeled` compose Tiny query + shipped `ChainHub::new`
+  with regtest params. `peer_tests` and named `tmp_hub` copies call it.
 - **Shared Tiny test fixtures:** `rbitcoin_store::testutil::{TempDir, tiny_store}`
   and `rbitcoin_query::testutil::tiny_query` own unique-path drop-clean Tiny
   opens. Named `tmp_dir` / `temp_query` / `tmp_hub` copies now use them.

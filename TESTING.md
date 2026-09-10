@@ -18,11 +18,11 @@
 - Put HOLD / wait hooks in a shipped function other tests also call (`confirm_scripts_phase`).
 - Assert process-global last-writer meters (`confirm_phase_stats`, `confirm_thr_stats::sample_and_reset`, `last_union_miss` / `last_plan_batch`) as the contract. Use pin/layout, error strings, or a pure formatter / local `AtomicU64`.
 - `std::env::set_var` without the crate lock (or pass the knob as an argument).
-- Bind a fixed port (use `:0`) or share a `/tmp` path (use `rbitcoin_store::testutil::TempDir` / `tiny_store`, `rbitcoin_query::testutil::tiny_query`, or `rbitcoin_test::TestDatadir`).
+- Bind a fixed port (use `:0`) or share a `/tmp` path (use `rbitcoin_store::testutil::TempDir` / `tiny_store`, `rbitcoin_query::testutil::tiny_query`, net `tiny_regtest_hub`, or `rbitcoin_test::TestDatadir`).
 
 Do **not** “fix” flakes with `RUST_TEST_THREADS=1`.
 
-Shared Tiny on-disk fixtures live in `rbitcoin_store::testutil` (`TempDir`, `tiny_store`) and `rbitcoin_query::testutil::tiny_query` — unique path, Tiny heads, drop-cleans. Do **not** roll your own `std::env::temp_dir()` + `create_dir_all` for a Tiny store/query. Node-level scenarios still use `rbitcoin-test` (`TestDatadir`, `mine`, `chain_fixture`).
+Shared Tiny on-disk fixtures live in `rbitcoin_store::testutil` (`TempDir`, `tiny_store`) and `rbitcoin_query::testutil::tiny_query` — unique path, Tiny heads, drop-cleans. Net tests that need a regtest `ChainHub` use `tiny_regtest_hub` / `tiny_regtest_hub_labeled` (Tiny query + shipped `ChainHub::new`). Do **not** roll your own `std::env::temp_dir()` + `create_dir_all` for a Tiny store/query. Node-level scenarios still use `rbitcoin-test` (`TestDatadir`, `mine`, `chain_fixture`).
 
 ### Third-party deps and compile cost (2026-08)
 
@@ -101,7 +101,7 @@ reads it; rustup users export it). Override coverage dir:
 | Anti-pattern | Prefer |
 |--------------|--------|
 | Thousands of SH catalog run files | Unsorted collect writes 64 prefix files; tests use tiny Class A |
-| Multi‑GiB / mainnet head scale under `cargo test` | `testutil::tiny_store` / `tiny_query` / `StoreLayout::tiny`; Mainnet only as a slot/shard/bit pin that does not create those files |
+| Multi‑GiB / mainnet head scale under `cargo test` | `testutil::tiny_store` / `tiny_query` / `tiny_regtest_hub` / `StoreLayout::tiny`; Mainnet only as a slot/shard/bit pin that does not create those files |
 | Remining 100-block maturity pads with `confirm_wire_run` | `pad_empty_from` / `build_mature_regtest_with_spend` **once per binary journey** (not once per skinny test) |
 | Wall-time multi-round microbenches in default suite | Deterministic structure / chunk-load asserts; demote wall arms to `#[ignore]` |
 
