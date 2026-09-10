@@ -1109,17 +1109,8 @@ mod tests {
         }
     }
 
-    fn tmp_hub() -> (std::path::PathBuf, ChainHub) {
-        let dir = std::env::temp_dir().join(format!(
-            "rbitcoin-assign-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
+    fn tmp_hub() -> (rbitcoin_query::testutil::TempDir, ChainHub) {
+        let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("assign");
         (
             dir,
             ChainHub::new(q, ChainParams::regtest(), Milestone::NONE),

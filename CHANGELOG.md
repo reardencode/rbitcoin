@@ -22,6 +22,11 @@ before 1.0).
 
 ### Changed
 
+- **Shared Tiny test fixtures:** `rbitcoin_store::testutil::{TempDir, tiny_store}`
+  and `rbitcoin_query::testutil::tiny_query` own unique-path drop-clean Tiny
+  opens. Named `tmp_dir` / `temp_query` / `tmp_hub` copies now use them.
+  Deleted Core JSON spot-check twins (`core_script_spot_*`,
+  `core_tx_spot_first_valid_accepts`); `*_all_rows` remains the corpus pin.
 - **`ibd: perf` / `ibd: sizes` drop leftover always-zero parent-cache slots:**
   `thru=` / `load thru=` / `bodies=` on the sizes line were the four-zero
   `parent_cache_perf_snapshot` tuple (only `plans=` is live). Slow-load INFO

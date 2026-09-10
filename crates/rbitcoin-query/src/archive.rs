@@ -967,18 +967,9 @@ mod tests {
     use crate::{Query, TxApply};
     use rbitcoin_primitives::Fk;
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn temp_query(label: &str) -> (std::path::PathBuf, Query) {
-        let n = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("rbitcoin-arch-{label}-{n}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create_tiny(&dir).unwrap();
-        (dir, q)
+    fn temp_query(label: &str) -> (crate::testutil::TempDir, Query) {
+        crate::testutil::tiny_query_labeled(label)
     }
 
     fn coinbase_apply(i: u64) -> TxApply {

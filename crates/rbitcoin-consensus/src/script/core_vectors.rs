@@ -704,23 +704,3 @@ fn core_script_tests_all_rows() {
         st.pass, st.ran
     );
 }
-
-/// Spot-check: known-valid empty scriptSig + DEPTH 0 EQUAL must accept.
-#[test]
-fn core_script_spot_valid_depth_equal() {
-    let flags = parse_flags("P2SH,STRICTENC");
-    let sig = assemble("").unwrap();
-    let pk = assemble("DEPTH 0 EQUAL").unwrap();
-    run_script_row(&sig, &pk, Witness::new(), Amount::ZERO, &flags)
-        .expect("DEPTH 0 EQUAL should OK");
-}
-
-/// Spot-check: known-invalid 0 EQUAL (false) must reject.
-#[test]
-fn core_script_spot_invalid_false() {
-    let flags = parse_flags("P2SH,STRICTENC");
-    let sig = assemble("").unwrap();
-    let pk = assemble("0 EQUAL").unwrap();
-    let got = run_script_row(&sig, &pk, Witness::new(), Amount::ZERO, &flags);
-    assert!(got.is_err(), "0 EQUAL should reject, got {got:?}");
-}

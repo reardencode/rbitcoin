@@ -1793,7 +1793,7 @@ mod tests {
     use bitcoin::transaction::Version as TxVersion;
     use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence};
     use rbitcoin_consensus::{mine_empty_regtest, mine_regtest_paying, Milestone};
-    use rbitcoin_query::Query;
+
     use std::cell::Cell;
     use std::fs;
     use std::sync::{Arc, Mutex};
@@ -1886,19 +1886,10 @@ mod tests {
         }
     }
 
-    fn tmp_diff_hub() -> (std::path::PathBuf, ChainHub, DiffTip) {
+    fn tmp_diff_hub() -> (rbitcoin_query::testutil::TempDir, ChainHub, DiffTip) {
         static LOCK: Mutex<()> = Mutex::new(());
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = std::env::temp_dir().join(format!(
-            "rbtc-diff-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = fs::create_dir_all(&dir);
-        let q = Query::open_or_create_tiny(dir.join("store")).expect("open");
+        let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("diff");
         let params = diff_regtest_params();
         let hub = ChainHub::new(q, params.clone(), Milestone::NONE);
         hub.ensure_genesis().unwrap();

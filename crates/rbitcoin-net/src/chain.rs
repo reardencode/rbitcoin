@@ -2495,18 +2495,8 @@ mod tests {
     use rbitcoin_query::Query;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn tmp_hub() -> (std::path::PathBuf, ChainHub) {
-        // Keep Class A/hash heads tiny in unit tests (avoid multi‑GiB sparse maps).
-        let dir = std::env::temp_dir().join(format!(
-            "rbitcoin-chain-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        let q = Query::open_or_create_tiny(dir.join("store")).expect("query open_or_create");
+    fn tmp_hub() -> (rbitcoin_query::testutil::TempDir, ChainHub) {
+        let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("chain");
         let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
         (dir, hub)
     }

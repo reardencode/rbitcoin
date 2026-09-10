@@ -145,15 +145,9 @@ pub fn secret_path(store_dir: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
-    fn temp_dir() -> PathBuf {
-        static N: AtomicU64 = AtomicU64::new(0);
-        let id = N.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("rbitcoin-secret-{id}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn temp_dir() -> crate::testutil::TempDir {
+        crate::testutil::TempDir::labeled("secret").unwrap()
     }
 
     #[test]

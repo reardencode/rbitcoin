@@ -685,20 +685,9 @@ mod tests {
         Amount, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut, Witness,
     };
     use rbitcoin_consensus::{ChainParams, Milestone};
-    use rbitcoin_query::Query;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn tmp_hub() -> (std::path::PathBuf, ChainHub) {
-        let dir = std::env::temp_dir().join(format!(
-            "rbitcoin-ibd-reorg-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        let q = Query::open_or_create_tiny(dir.join("store")).expect("query");
+    fn tmp_hub() -> (rbitcoin_query::testutil::TempDir, ChainHub) {
+        let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("ibd-reorg");
         let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
         (dir, hub)
     }

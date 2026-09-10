@@ -1635,17 +1635,8 @@ mod tests {
     use crate::head_resolve_pick::LeftoverMissOn;
     use crate::tx_table::{InputRecord, OutputRecord, TxRecord};
 
-    fn tmp() -> PathBuf {
-        let p = std::env::temp_dir().join(format!(
-            "rbitcoin-store-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&p);
-        p
+    fn tmp() -> crate::testutil::TempDir {
+        crate::testutil::TempDir::labeled("store").unwrap()
     }
 
     #[test]
@@ -1802,15 +1793,15 @@ mod tests {
         let dir = tmp();
         // Not a directory when path is a file.
         {
-            std::fs::write(&dir, b"x").unwrap();
+            let file = dir.join("not-a-dir");
+            std::fs::write(&file, b"x").unwrap();
             assert!(matches!(
-                Store::create_tiny(&dir),
+                Store::create_tiny(&file),
                 Err(StoreError::NotDirectory(_))
             ));
-            let _ = std::fs::remove_file(&dir);
         }
         assert!(matches!(
-            Store::open_tiny(&dir),
+            Store::open_tiny(dir.join("missing")),
             Err(StoreError::NotDirectory(_))
         ));
 

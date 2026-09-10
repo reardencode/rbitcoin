@@ -13,6 +13,7 @@ rbitcoin-consensus = { workspace = true }
 bitcoin = { workspace = true }
 
 [dev-dependencies]
+rbitcoin-store = { workspace = true }
 
 [lints]
 workspace = true

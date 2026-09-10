@@ -157,16 +157,9 @@ mod tests {
     use super::*;
     use crate::Query;
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
-    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
-    fn temp_query() -> (std::path::PathBuf, Query) {
-        static N: AtomicU64 = AtomicU64::new(0);
-        let id = N.fetch_add(1, AtomicOrdering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("rbitcoin-combined-q-{id}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-        (dir, q)
+    fn temp_query() -> (crate::testutil::TempDir, Query) {
+        crate::testutil::tiny_query_labeled("combined")
     }
 
     fn put_tx(q: &Query, seed: u8) -> Fk {
@@ -251,7 +244,7 @@ mod tests {
         assert_eq!(q.block_queue_stats().2, 0);
         // Restart: RAM queue is empty (by design — redownload, no double disk write).
         drop(q);
-        let q2 = Query::open_or_create_tiny(dir.join("store")).unwrap();
+        let q2 = Query::open_or_create_tiny(dir.path()).unwrap();
         assert!(!q2.block_queue_has_height(42));
         assert_eq!(q2.block_queue_stats().2, 0);
         let _ = std::fs::remove_dir_all(dir);

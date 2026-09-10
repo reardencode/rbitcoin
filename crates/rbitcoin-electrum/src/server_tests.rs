@@ -13,20 +13,11 @@ fn parse_electrum_request_line_junk_does_not_panic() {
 }
 use rbitcoin_query::Query;
 use std::collections::{HashMap, HashSet};
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
-fn tmp_store() -> (std::path::PathBuf, Query) {
-    let n = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("rbitcoin-electrum-ut-{n}"));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-    (dir, q)
+fn tmp_store() -> (rbitcoin_query::testutil::TempDir, Query) {
+    rbitcoin_query::testutil::tiny_query_labeled("electrum")
 }
 
 #[test]

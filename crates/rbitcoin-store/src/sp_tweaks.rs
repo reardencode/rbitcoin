@@ -649,17 +649,8 @@ mod tests {
     use std::fs;
     use std::io::{Read, Seek, SeekFrom, Write};
 
-    fn tmp_dir() -> PathBuf {
-        let p = std::env::temp_dir().join(format!(
-            "rbitcoin-sptweaks-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        fs::create_dir_all(&p).unwrap();
-        p
+    fn tmp_dir() -> crate::testutil::TempDir {
+        crate::testutil::TempDir::labeled("sptweaks").unwrap()
     }
 
     fn set_file_hwm(path: &Path, hwm: u64) {
