@@ -15,19 +15,8 @@ fn served_block(p: PeerOut) -> bitcoin::Block {
     }
 }
 
-fn tmp_store(label: &str) -> (std::path::PathBuf, Query) {
-    let dir = std::env::temp_dir().join(format!(
-        "rbitcoin-peer-{label}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let q = Query::open_or_create_tiny(&dir).unwrap();
-    (dir, q)
+fn tmp_store(label: &str) -> (rbitcoin_query::testutil::TempDir, Query) {
+    rbitcoin_query::testutil::tiny_query_labeled(label)
 }
 
 #[test]

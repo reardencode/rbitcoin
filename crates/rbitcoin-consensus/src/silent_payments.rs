@@ -635,7 +635,6 @@ mod tests {
     use rbitcoin_query::TxApply;
     use rbitcoin_store::{HeaderRecord, TxRecord};
     use serde_json::Value;
-    use std::path::PathBuf;
     use std::str::FromStr;
     fn hex_bytes(s: &str) -> Vec<u8> {
         rbitcoin_primitives::hex_decode(s).expect("hex")
@@ -799,18 +798,8 @@ mod tests {
         assert!(tweak_from_tx(&tx, &prev).is_none());
     }
 
-    fn tmp_store() -> (PathBuf, Query) {
-        let path = std::env::temp_dir().join(format!(
-            "rbitcoin-sp-tweaks-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        let q = Query::open_or_create_tiny(&path).expect("open store");
-        (path, q)
+    fn tmp_store() -> (rbitcoin_query::testutil::TempDir, Query) {
+        rbitcoin_query::testutil::tiny_query_labeled("sp-tweaks")
     }
 
     fn header(h: u32, prev_fk: Fk, prev_hash: Option<[u8; 32]>) -> HeaderRecord {

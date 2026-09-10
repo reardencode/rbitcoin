@@ -48,6 +48,7 @@ pub mod spend_annotate_uring;
 mod spender_table;
 mod store;
 mod store_secret;
+pub mod testutil;
 mod tx_head_mphf;
 mod tx_idx;
 mod tx_table;

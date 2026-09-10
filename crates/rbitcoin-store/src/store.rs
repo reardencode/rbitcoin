@@ -1635,17 +1635,27 @@ mod tests {
     use crate::head_resolve_pick::LeftoverMissOn;
     use crate::tx_table::{InputRecord, OutputRecord, TxRecord};
 
-    fn tmp() -> PathBuf {
-        let p = std::env::temp_dir().join(format!(
-            "rbitcoin-store-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&p);
-        p
+    fn tmp() -> crate::testutil::TempDir {
+        crate::testutil::TempDir::labeled("store").unwrap()
+    }
+
+    #[test]
+    fn shared_tiny_store_fixture_is_tiny_unique_and_drop_cleans() {
+        let path;
+        {
+            let (dir, store) = crate::testutil::tiny_store();
+            path = dir.path().to_path_buf();
+            assert!(path.is_dir(), "fixture must create {path:?}");
+            assert_eq!(store.headers.head_target_slots(), 64);
+            assert_eq!(store.head_scale(), HeadScale::Tiny);
+            let (dir2, store2) = crate::testutil::tiny_store();
+            assert_ne!(dir.path(), dir2.path(), "each open must be a unique path");
+            assert_eq!(store2.headers.head_target_slots(), 64);
+        }
+        assert!(
+            !path.exists(),
+            "drop must remove the Tiny store directory {path:?}"
+        );
     }
 
     #[test]
@@ -1783,15 +1793,15 @@ mod tests {
         let dir = tmp();
         // Not a directory when path is a file.
         {
-            std::fs::write(&dir, b"x").unwrap();
+            let file = dir.join("not-a-dir");
+            std::fs::write(&file, b"x").unwrap();
             assert!(matches!(
-                Store::create_tiny(&dir),
+                Store::create_tiny(&file),
                 Err(StoreError::NotDirectory(_))
             ));
-            let _ = std::fs::remove_file(&dir);
         }
         assert!(matches!(
-            Store::open_tiny(&dir),
+            Store::open_tiny(dir.join("missing")),
             Err(StoreError::NotDirectory(_))
         ));
 

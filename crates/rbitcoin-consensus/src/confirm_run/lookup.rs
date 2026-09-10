@@ -794,18 +794,8 @@ mod tests {
     };
     use rbitcoin_query::IdMap;
     use rbitcoin_store::HeaderRecord;
-    fn tmp_query() -> (std::path::PathBuf, Query) {
-        let path = std::env::temp_dir().join(format!(
-            "rbitcoin-stamp-archived-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        let q = Query::open_or_create_tiny(&path).unwrap();
-        (path, q)
+    fn tmp_query() -> (rbitcoin_query::testutil::TempDir, Query) {
+        rbitcoin_query::testutil::tiny_query_labeled("stamp-archived")
     }
 
     fn spend_block(prev: [u8; 32]) -> Block {

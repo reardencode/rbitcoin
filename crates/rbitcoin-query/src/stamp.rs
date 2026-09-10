@@ -233,18 +233,8 @@ mod tests {
     use crate::in_flight::InFlight;
     use rbitcoin_primitives::Fk;
 
-    fn tmp_store() -> (std::path::PathBuf, crate::Query) {
-        let path = std::env::temp_dir().join(format!(
-            "rbitcoin-stamp-skel-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        let q = crate::Query::open_or_create_tiny(&path).unwrap();
-        (path, q)
+    fn tmp_store() -> (crate::testutil::TempDir, crate::Query) {
+        crate::testutil::tiny_query_labeled("stamp")
     }
 
     fn pin(id: u64) -> CreatePin {

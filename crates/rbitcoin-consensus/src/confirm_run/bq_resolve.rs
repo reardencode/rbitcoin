@@ -417,18 +417,8 @@ mod tests {
         Amount, BlockHash, CompactTarget, OutPoint, ScriptBuf, Sequence, Target, Transaction, TxIn,
         TxMerkleNode, TxOut, Txid, Witness,
     };
-    fn tmp_query() -> (std::path::PathBuf, Query) {
-        let path = std::env::temp_dir().join(format!(
-            "rbitcoin-bq-resolve-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        let q = Query::open_or_create_tiny(&path).unwrap();
-        (path, q)
+    fn tmp_query() -> (rbitcoin_query::testutil::TempDir, Query) {
+        rbitcoin_query::testutil::tiny_query_labeled("bq-resolve")
     }
 
     fn take_emitted(q: &Query, wave: &BqResolveWave) {

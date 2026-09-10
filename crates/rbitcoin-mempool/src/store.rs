@@ -596,16 +596,9 @@ fn open_or_init_body(path: &Path) -> Result<(File, Vec<u8>), MempoolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn tmp_dir() -> PathBuf {
-        let n = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let p = std::env::temp_dir().join(format!("rbitcoin-mempool-test-{n}"));
-        let _ = fs::remove_dir_all(&p);
-        p
+    fn tmp_dir() -> rbitcoin_store::testutil::TempDir {
+        rbitcoin_store::testutil::TempDir::labeled("mempool").unwrap()
     }
 
     #[test]

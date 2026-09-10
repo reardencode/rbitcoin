@@ -5,6 +5,10 @@ use super::{
     WriteBatchVsTip,
 };
 
+fn tmp_query() -> (rbitcoin_query::testutil::TempDir, rbitcoin_query::Query) {
+    rbitcoin_query::testutil::tiny_query_labeled("write-idemp")
+}
+
 #[test]
 fn tx_head_drain_thread_is_named_and_reused() {
     use super::{submit_head_drain, HEAD_DRAIN_THREAD_NAME};
@@ -475,17 +479,7 @@ fn empty_confirm_batch_rejected() {
     use crate::milestone::Milestone;
     use crate::params::ChainParams;
     use rbitcoin_primitives::Height;
-    use rbitcoin_query::Query;
-    let path = std::env::temp_dir().join(format!(
-        "rbitcoin-confirm-empty-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create_tiny(&path).unwrap();
+    let (path, q) = tmp_query();
     let params = ChainParams::regtest();
     let none = ScriptPreverified::new();
     let err = match confirm_wire_load_phase(&q, &params, Milestone::NONE, &[], &none) {
@@ -518,17 +512,7 @@ fn tip_plus_one_after_trailing_null_heal_is_not_notfound() {
     use crate::params::ChainParams;
     use crate::regtest_pad::{mine_empty_regtest, pad_empty_from};
     use rbitcoin_primitives::Height;
-    use rbitcoin_query::Query;
-    let path = std::env::temp_dir().join(format!(
-        "rbitcoin-confirm-tip1-heal-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create_tiny(&path).unwrap();
+    let (path, q) = tmp_query();
     let params = ChainParams::regtest();
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
@@ -555,7 +539,7 @@ fn tip_plus_one_after_trailing_null_heal_is_not_notfound() {
     raw[8..16].copy_from_slice(&new_logical.to_le_bytes());
     std::fs::write(&conf, &raw).unwrap();
 
-    let q = Query::open_or_create_tiny(&path).unwrap();
+    let q = rbitcoin_query::Query::open_or_create_tiny(&path).unwrap();
     assert_eq!(q.tip_height().map(|h| h.0), Some(3));
     let nxt = mine_empty_regtest(tip, tip_time + 600, 4);
     let r = accept_and_connect_block(&q, &params, Height(4), &nxt, Milestone::NONE);
@@ -580,17 +564,7 @@ fn expected_bits_extending_height0_and_no_retarget() {
     use crate::params::ChainParams;
     use bitcoin::CompactTarget;
     use rbitcoin_primitives::Height;
-    use rbitcoin_query::Query;
-    let path = std::env::temp_dir().join(format!(
-        "rbitcoin-confirm-bits-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create_tiny(&path).unwrap();
+    let (path, q) = tmp_query();
     let params = ChainParams::regtest();
     let gbits = expected_bits_extending(
         &q,
@@ -679,18 +653,8 @@ fn expected_bits_extending_uses_header_plan_when_period_start_above_tip() {
     use crate::params::ChainParams;
     use bitcoin::CompactTarget;
     use rbitcoin_primitives::{Fk, Height};
-    use rbitcoin_query::Query;
     use rbitcoin_store::HeaderRecord;
-    let path = std::env::temp_dir().join(format!(
-        "rbitcoin-retarget-plan-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create_tiny(&path).unwrap();
+    let (path, q) = tmp_query();
     let params = ChainParams::mainnet();
     let interval = params.difficulty_adjustment_interval();
     assert_eq!(interval, 2016, "mainnet difficulty interval");
@@ -818,19 +782,8 @@ fn script_wave_skips_preverified_txids() {
     confirm_scripts_phase(batch).expect("preverified skip avoids bad script fail");
 }
 
-fn tiny_query() -> (std::path::PathBuf, rbitcoin_query::Query) {
-    use rbitcoin_query::Query;
-    let path = std::env::temp_dir().join(format!(
-        "rbitcoin-pin-ensure-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    let _ = std::fs::remove_dir_all(&path);
-    std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create_tiny(&path).unwrap();
+fn tiny_query() -> (rbitcoin_query::testutil::TempDir, rbitcoin_query::Query) {
+    let (path, q) = tmp_query();
     q.enter_direct_index_mode().unwrap();
     (path, q)
 }
@@ -1096,18 +1049,9 @@ fn pin_and_ensure_journey() {
 fn pin_for_wire_incomplete_outs_is_invariant_error() {
     use super::{pin_for_wire_batch, ParentPinStamp};
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{ArchiveWritePlan, Query};
+    use rbitcoin_query::ArchiveWritePlan;
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
-    let path = std::env::temp_dir().join(format!(
-        "rbitcoin-pin-wire-outs-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create_tiny(&path).unwrap();
+    let (path, q) = tmp_query();
     q.enter_direct_index_mode().unwrap();
 
     let parent_id = 77u64;
@@ -1219,18 +1163,9 @@ fn parent_pin_stamp_take_from_plan_moves_maps() {
 fn pin_takes_stamp_parent_vouts() {
     use super::{pin_for_wire_batch, ParentPinStamp};
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{ArchiveWritePlan, Query};
+    use rbitcoin_query::ArchiveWritePlan;
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
-    let path = std::env::temp_dir().join(format!(
-        "rbitcoin-pin-take-vouts-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create_tiny(&path).unwrap();
+    let (path, q) = tmp_query();
     let parent_tx = TxRecord {
         txid: [0x11u8; 32],
         version: 1,
@@ -1301,20 +1236,11 @@ fn pin_takes_stamp_parent_vouts() {
 fn pin_for_wire_create_pin_shares_script_bytes() {
     use super::{pin_for_wire_batch, ParentPinStamp};
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{ArchiveWritePlan, CreatePin, Query};
+    use rbitcoin_query::{ArchiveWritePlan, CreatePin};
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
     use std::sync::Arc;
 
-    let path = std::env::temp_dir().join(format!(
-        "rbitcoin-pin-createpin-share-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create_tiny(&path).unwrap();
+    let (path, q) = tmp_query();
     let script = vec![0x51u8; 4096];
     let parent_tx = TxRecord {
         txid: [0x41u8; 32],
@@ -1384,20 +1310,10 @@ fn pin_for_wire_create_pin_shares_script_bytes() {
 fn pin_plan_edges_without_packed_ins() {
     use super::{pin_for_wire_batch, ParentPinStamp};
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{ArchiveWritePlan, CreatePin, Query, SpendEdge};
+    use rbitcoin_query::{ArchiveWritePlan, CreatePin, SpendEdge};
     use rbitcoin_store::{OutputRecord, TxRecord};
     use std::sync::Arc;
-    let path = std::env::temp_dir().join(format!(
-        "rbitcoin-pin-edges-no-ins-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    let _ = std::fs::remove_dir_all(&path);
-    std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create_tiny(&path).unwrap();
+    let (path, q) = tmp_query();
     q.enter_direct_index_mode().unwrap();
 
     let parent_tx = TxRecord {
@@ -1458,20 +1374,10 @@ fn pin_plan_edges_without_packed_ins() {
 fn pin_plan_empty_edges_is_invariant() {
     use super::{pin_for_wire_batch, ParentPinStamp};
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{ArchiveWritePlan, Query};
+    use rbitcoin_query::ArchiveWritePlan;
     use rbitcoin_store::{OutputRecord, TxRecord};
     use std::sync::Arc;
-    let path = std::env::temp_dir().join(format!(
-        "rbitcoin-pin-empty-edges-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    let _ = std::fs::remove_dir_all(&path);
-    std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create_tiny(&path).unwrap();
+    let (path, q) = tmp_query();
     q.enter_direct_index_mode().unwrap();
     let pin = Arc::new((
         TxRecord {
@@ -1505,20 +1411,11 @@ fn pin_plan_empty_edges_is_invariant() {
 fn pin_sparse_need_high_vout_only() {
     use super::{pin_for_wire_batch, ParentPinStamp};
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{ArchiveWritePlan, CreatePin, Query};
+    use rbitcoin_query::{ArchiveWritePlan, CreatePin};
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
     use std::sync::Arc;
 
-    let path = std::env::temp_dir().join(format!(
-        "rbitcoin-pin-sparse-high-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create_tiny(&path).unwrap();
+    let (path, q) = tmp_query();
     q.enter_direct_index_mode().unwrap();
 
     let parent_tx = TxRecord {
@@ -1605,20 +1502,11 @@ fn pin_sparse_need_high_vout_only() {
 fn pin_range_fill_does_not_count_as_cache_hit() {
     use super::{pin_for_wire_batch, ParentPinStamp};
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{ArchiveWritePlan, Query};
+    use rbitcoin_query::ArchiveWritePlan;
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
     use std::sync::Arc;
 
-    let path = std::env::temp_dir().join(format!(
-        "rbitcoin-pin-hit-honest-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create_tiny(&path).unwrap();
+    let (path, q) = tmp_query();
     q.enter_direct_index_mode().unwrap();
 
     let mk_parent = |tag: u8| {
@@ -1700,20 +1588,11 @@ fn pin_range_fill_does_not_count_as_cache_hit() {
 fn pin_stamp_outs_is_cache_not_new() {
     use super::{pin_for_wire_batch, ParentPinStamp};
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{ArchiveWritePlan, CreatePin, Query};
+    use rbitcoin_query::{ArchiveWritePlan, CreatePin};
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
     use std::sync::Arc;
 
-    let path = std::env::temp_dir().join(format!(
-        "rbitcoin-pin-recent-outs-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create_tiny(&path).unwrap();
+    let (path, q) = tmp_query();
 
     let mut tid = [0u8; 32];
     tid[0] = 0x41;
@@ -1785,20 +1664,11 @@ fn pin_stamp_outs_is_cache_not_new() {
 fn pin_recent_identity_without_outs_still_range_fills() {
     use super::{pin_for_wire_batch, ParentPinStamp};
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{ArchiveWritePlan, Query};
+    use rbitcoin_query::ArchiveWritePlan;
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
     use std::sync::Arc;
 
-    let path = std::env::temp_dir().join(format!(
-        "rbitcoin-pin-recent-id-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create_tiny(&path).unwrap();
+    let (path, q) = tmp_query();
     q.enter_direct_index_mode().unwrap();
 
     let mut tid = [0u8; 32];
@@ -1885,19 +1755,9 @@ fn store_start_states_lookup_load_confirm() {
     use bitcoin::CompactTarget;
     use bitcoin::{Amount, Block, BlockHash, ScriptBuf, Sequence, TxMerkleNode, Witness};
     use rbitcoin_primitives::Height;
-    use rbitcoin_query::Query;
     use std::sync::Arc;
 
-    let path = std::env::temp_dir().join(format!(
-        "rbitcoin-start-states-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create_tiny(&path).unwrap();
+    let (path, q) = tmp_query();
     q.set_spend_index(true);
     let params = ChainParams::regtest();
     let ms = Milestone::NONE;
@@ -2114,18 +1974,9 @@ fn structural_pinned_without_abs_is_invariant_error() {
         Witness,
     };
     use rbitcoin_primitives::{Fk, Height};
-    use rbitcoin_query::{BatchParents, OutPointSet, Query};
+    use rbitcoin_query::{BatchParents, OutPointSet};
     use rbitcoin_store::{OutputRecord, TxRecord};
-    let path = std::env::temp_dir().join(format!(
-        "rbitcoin-struct-pin-inv-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create_tiny(&path).unwrap();
+    let (path, q) = tmp_query();
     q.enter_direct_index_mode().unwrap();
     let params = ChainParams::regtest();
 
@@ -2213,17 +2064,7 @@ fn direct_write_skips_create_pin_map_idx_without_recent() {
     use crate::{accept_and_connect_block, ChainParams, Milestone};
     use bitcoin::hashes::Hash;
     use rbitcoin_primitives::Height;
-    use rbitcoin_query::Query;
-    let path = std::env::temp_dir().join(format!(
-        "rbitcoin-direct-write-pins-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create_tiny(&path).unwrap();
+    let (path, q) = tmp_query();
     q.enter_direct_index_mode().unwrap();
     q.set_lookup_started_hi(Some(32));
     let params = ChainParams::regtest();
@@ -2251,22 +2092,10 @@ fn one_shot_load_matches_stamp_then_load_from_plan() {
     use crate::regtest_pad::mine_empty_regtest;
     use crate::{accept_and_connect_block, ChainParams, Milestone};
     use rbitcoin_primitives::Height;
-    use rbitcoin_query::Query;
     use std::sync::Arc;
 
-    fn open_q(tag: &str) -> (std::path::PathBuf, Query) {
-        let path = std::env::temp_dir().join(format!(
-            "rbitcoin-load-eq-{}-{}-{}",
-            tag,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        let q = Query::open_or_create_tiny(&path).unwrap();
-        (path, q)
+    fn open_q(_tag: &str) -> (rbitcoin_query::testutil::TempDir, rbitcoin_query::Query) {
+        tmp_query()
     }
 
     let params = ChainParams::regtest();

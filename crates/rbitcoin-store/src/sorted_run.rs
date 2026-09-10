@@ -761,16 +761,9 @@ pub fn list_runs(dir: &Path) -> Result<Vec<SortedRunPath>, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn tmp_dir() -> PathBuf {
-        let n = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let d = std::env::temp_dir().join(format!("rbitcoin-sorted-run-{n}"));
-        fs::create_dir_all(&d).unwrap();
-        d
+    fn tmp_dir() -> crate::testutil::TempDir {
+        crate::testutil::TempDir::labeled("sorted-run").unwrap()
     }
 
     fn rec(key: u8, tag: u8) -> [u8; 44] {

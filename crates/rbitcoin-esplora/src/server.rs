@@ -657,20 +657,11 @@ mod tests {
     use rbitcoin_primitives::{Fk, Height};
     use rbitcoin_query::{Query, TxApply};
     use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
-    use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
-    fn temp_query(label: &str) -> (std::path::PathBuf, Query) {
-        let n = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("rbitcoin-esplora-{label}-{n}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-        (dir, q)
+    fn temp_query(label: &str) -> (rbitcoin_query::testutil::TempDir, Query) {
+        rbitcoin_query::testutil::tiny_query_labeled(label)
     }
 
     fn coinbase(h: u32, prev: Fk, parent_hash: Option<[u8; 32]>) -> (HeaderRecord, TxApply) {

@@ -282,20 +282,9 @@ mod tests {
     use crate::address_head::HeadLayout;
     use crate::tx_table::TxTable;
     use rbitcoin_primitives::Fk;
-    use std::path::PathBuf;
 
-    fn tmp_dir() -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "rbitcoin-sp-uring-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn tmp_dir() -> crate::testutil::TempDir {
+        crate::testutil::TempDir::labeled("sp-uring").unwrap()
     }
 
     fn tiny_table(dir: &std::path::Path) -> TxTable {

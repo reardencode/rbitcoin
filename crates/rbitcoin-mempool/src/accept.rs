@@ -1436,23 +1436,9 @@ mod tests {
     use bitcoin::transaction::Version;
     use bitcoin::{Amount, ScriptBuf, Sequence, TxIn, Witness};
     use std::collections::{BTreeSet, HashMap};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn tmp_dir() -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let p = std::env::temp_dir().join(format!(
-            "rbitcoin-mempool-accept-{}-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed),
-            n
-        ));
-        let _ = std::fs::remove_dir_all(&p);
-        p
+    fn tmp_dir() -> rbitcoin_store::testutil::TempDir {
+        rbitcoin_store::testutil::TempDir::labeled("mempool-accept").unwrap()
     }
 
     /// Tip high enough that maturity/finality/BIP68 do not block normal test txs.
@@ -1989,7 +1975,8 @@ mod tests {
         let c = mp.graph.cluster_of(&pid).unwrap();
         assert_eq!(c.members.len(), 2);
         // Wrong order rejected.
-        let mut mp2 = ActiveMempool::open_or_create(tmp_dir()).unwrap();
+        let dir2 = tmp_dir();
+        let mut mp2 = ActiveMempool::open_or_create(&dir2).unwrap();
         let err = mp2
             .accept_package(&[child, parent], &utxos, TIP_OK)
             .unwrap_err();

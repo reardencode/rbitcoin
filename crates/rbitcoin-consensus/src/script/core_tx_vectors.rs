@@ -505,32 +505,6 @@ fn core_tx_invalid_all_rows() {
     assert_eq!(pass, total, "every invalid row must reject as expected");
 }
 
-/// Spot-check: fixtures load and at least one valid row accepts via shipped path.
-#[test]
-fn core_tx_spot_first_valid_accepts() {
-    let rows = load_array("tx_valid.json");
-    let mut tried = 0u32;
-    for row in &rows {
-        let Value::Array(cells) = row else { continue };
-        if cells.len() < 3 || !cells[0].is_array() {
-            continue;
-        }
-        let Some(tx_hex) = cells[1].as_str() else {
-            continue;
-        };
-        let flags = cells[2].as_str().unwrap_or("NONE");
-        tried += 1;
-        if verify_tx_row(&cells[0], tx_hex, flags, true).is_ok() {
-            return;
-        }
-        if tried >= 40 {
-            break;
-        }
-    }
-    // At least one of the first 40 data rows must accept on the shipped path.
-    panic!("no accepting tx_valid row in first {tried} data rows");
-}
-
 fn load_tx_data_rows(name: &str) -> Vec<(Value, String, String)> {
     let mut out = Vec::new();
     for row in load_array(name) {

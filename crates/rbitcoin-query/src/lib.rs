@@ -18,6 +18,7 @@ mod sh_builder;
 mod soft_densify;
 mod sp_tweaks;
 mod stamp;
+pub mod testutil;
 mod tx_precompute;
 mod wave_prevout;
 

@@ -412,18 +412,8 @@ mod tests {
     use super::*;
     use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
 
-    fn tmp_q() -> (std::path::PathBuf, Query) {
-        let path = std::env::temp_dir().join(format!(
-            "rbitcoin-q-sptweaks-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        let q = Query::open_or_create_tiny(&path).unwrap();
-        (path, q)
+    fn tmp_q() -> (crate::testutil::TempDir, Query) {
+        crate::testutil::tiny_query_labeled("sptweaks")
     }
 
     #[test]
