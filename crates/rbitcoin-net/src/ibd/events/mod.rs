@@ -794,7 +794,7 @@ fn note_confirm_stuck(st: &mut IbdWorkState) {
 
 /// Proactive most-work apply: header-work rewind only (no gathered `accept_branch`).
 fn try_apply_exploration(st: &mut IbdWorkState, hub: &crate::chain::ChainHub) -> bool {
-    if st.reorg.explore_tips().is_empty() && st.reorg.awaiting().is_none() {
+    if st.reorg.explore_tips().is_empty() {
         return false;
     }
     match super::reorg::maybe_rewind_to_best_work(st, hub) {

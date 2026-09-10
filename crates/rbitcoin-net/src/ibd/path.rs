@@ -580,7 +580,7 @@ mod tests {
             "winner is above the new tip — no side-channel gather; need={:?}",
             st.reorg.need_getdata()
         );
-        assert!(st.reorg.awaiting().is_none());
+
         assert_eq!(hub.query.lookup_taken_hi(), Some(0));
         let tips = work_path_tips(&st);
         assert!(

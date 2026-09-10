@@ -9,7 +9,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::{Block, BlockHash, CompactTarget, Target};
 use rbitcoin_log::{info, warn};
 use rbitcoin_primitives::Height;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Classification of tip+1 `unexpected previous header` (BadPrev).
 #[cfg(test)]
@@ -62,29 +62,19 @@ pub fn is_bad_prev_err(err: &str) -> bool {
     err.contains("unexpected previous header") || err.contains("unexpected previous")
 }
 
-/// Awaiting a missing body (e.g. winning sibling) before apply can run.
-#[derive(Debug, Clone)]
-pub struct AwaitingBodies {
-    /// Block we already hold (typically tip+1 on the winning path).
-    pub held_tip: Block,
-    /// Hashes still needed (e.g. winning sibling at tip height).
-    pub need: Vec<BlockHash>,
-}
-
 /// Process-local reorg state for one IBD run.
 ///
-/// Bodies for **side branches** are held by hash here: the body queue is
+/// Side-branch **presence** is held by hash here: the body queue is
 /// height-keyed first-wins, so a same-height competitor of the tip cannot
-/// live in BQ while the tip path occupies that height.
+/// live in BQ while the tip path occupies that height. Production only
+/// needs presence (`contains`); bodies are in Class A / BQ.
 #[derive(Debug, Default)]
 pub struct IbdReorgState {
     pub invalid: InvalidHashSet,
-    /// Side-branch / reorg-candidate bodies keyed by block hash.
-    held_bodies: HashMap<BlockHash, Block>,
-    /// Incomplete gather: need `need` hashes before applying `held_tip` path.
-    awaiting: Option<AwaitingBodies>,
+    /// Side-branch / reorg-candidate hashes we have already seen.
+    held_bodies: HashSet<BlockHash>,
     /// Proactive exploration: hashes densify should pull (same-height winner +
-    /// extensions) without waiting for BadPrev awaiting.
+    /// extensions).
     explore_need: Vec<BlockHash>,
     /// Candidate tips on an exploration path (for proactive most-work apply).
     explore_tips: Vec<BlockHash>,
@@ -102,30 +92,13 @@ impl IbdReorgState {
 
     pub fn hold_body(&mut self, block: Block) {
         let h = block.block_hash();
-        if self.held_bodies.len() >= Self::HELD_CAP && !self.held_bodies.contains_key(&h) {
-            // Drop an arbitrary older entry (HashMap iter order is arbitrary).
-            if let Some(k) = self.held_bodies.keys().next().copied() {
+        if self.held_bodies.len() >= Self::HELD_CAP && !self.held_bodies.contains(&h) {
+            if let Some(k) = self.held_bodies.iter().next().copied() {
                 self.held_bodies.remove(&k);
             }
         }
-        self.held_bodies.insert(h, block);
+        self.held_bodies.insert(h);
         self.explore_need.retain(|x| *x != h);
-    }
-
-    pub fn clear_awaiting(&mut self) {
-        self.awaiting = None;
-    }
-
-    pub fn awaiting(&self) -> Option<&AwaitingBodies> {
-        self.awaiting.as_ref()
-    }
-
-    /// True if `hash` is the held tip+1 of an incomplete reorg gather (do not
-    /// soft re-getdata / tip-hole race it — densify **mids** instead).
-    pub fn is_awaiting_held_tip(&self, hash: &BlockHash) -> bool {
-        self.awaiting
-            .as_ref()
-            .is_some_and(|a| a.held_tip.block_hash() == *hash)
     }
 
     /// Register hashes (and optional path tip) for exploration densify / apply.
@@ -161,30 +134,13 @@ impl IbdReorgState {
         self.explore_tips.clear();
     }
 
-    /// Hashes still needed for an incomplete **awaiting** gather (not explore).
-    pub fn awaiting_need_getdata(&self) -> Vec<BlockHash> {
-        self.awaiting
-            .as_ref()
-            .map(|a| {
-                a.need
-                    .iter()
-                    .filter(|h| !self.held_bodies.contains_key(*h))
-                    .copied()
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// Hashes densify/getdata should still pull for an incomplete reorg
-    /// (awaiting gather **or** proactive exploration).
+    /// Hashes densify/getdata should still pull for incomplete exploration.
     pub fn need_getdata(&self) -> Vec<BlockHash> {
-        let mut out = self.awaiting_need_getdata();
-        for h in &self.explore_need {
-            if !self.held_bodies.contains_key(h) && !out.contains(h) {
-                out.push(*h);
-            }
-        }
-        out
+        self.explore_need
+            .iter()
+            .copied()
+            .filter(|h| !self.held_bodies.contains(h))
+            .collect()
     }
 }
 
@@ -577,12 +533,6 @@ pub(crate) fn maybe_rewind_to_best_work(
             cands.push(h);
         }
     }
-    if let Some(a) = st.reorg.awaiting() {
-        let h = a.held_tip.block_hash();
-        if seen.insert(h) {
-            cands.push(h);
-        }
-    }
     for cand in cands {
         if st.reorg.invalid.contains(cand.to_byte_array()) {
             continue;
@@ -668,7 +618,6 @@ pub(crate) fn apply_header_rewind(
             let _ = hub.query.block_queue_dequeue_height(h);
         }
     }
-    st.reorg.clear_awaiting();
     st.reorg.clear_explore();
     st.confirm_quiesce = true;
     Ok(true)
@@ -828,7 +777,6 @@ mod tests {
     fn reorg_state_held_awaiting_need_getdata() {
         let mut st = IbdReorgState::new();
         assert!(st.need_getdata().is_empty());
-        assert!(st.awaiting().is_none());
         let gen = BlockHash::from_byte_array([0x11; 32]);
         let bits = CompactTarget::from_consensus(0x207f_ffff);
         let held = mine(gen, 1_300_000_000, 1);
@@ -854,9 +802,6 @@ mod tests {
         st.register_explore([eh], Some(eh));
         assert_eq!(st.need_getdata(), vec![eh]);
         st.hold_body(explore);
-        assert!(st.need_getdata().is_empty());
-        st.clear_awaiting();
-        assert!(st.awaiting().is_none());
         assert!(st.need_getdata().is_empty());
         let mut st_cap = IbdReorgState::new();
         let mut held_keys = Vec::new();

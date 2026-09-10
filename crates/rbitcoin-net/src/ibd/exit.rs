@@ -42,7 +42,6 @@ pub(crate) fn best_chain_remainder(st: &IbdWorkState, tip_h: u32) -> bool {
     !st.ordered.is_empty()
         || st.height_to_hash.keys().any(|&h| h > tip_h)
         || st.max_ready_height > tip_h
-        || st.reorg.awaiting().is_some()
         || on_path_inflight(st)
 }
 
