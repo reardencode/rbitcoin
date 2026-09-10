@@ -1649,6 +1649,25 @@ mod tests {
     }
 
     #[test]
+    fn shared_tiny_store_fixture_is_tiny_unique_and_drop_cleans() {
+        let path;
+        {
+            let (dir, store) = crate::testutil::tiny_store();
+            path = dir.path().to_path_buf();
+            assert!(path.is_dir(), "fixture must create {path:?}");
+            assert_eq!(store.headers.head_target_slots(), 64);
+            assert_eq!(store.head_scale(), HeadScale::Tiny);
+            let (dir2, store2) = crate::testutil::tiny_store();
+            assert_ne!(dir.path(), dir2.path(), "each open must be a unique path");
+            assert_eq!(store2.headers.head_target_slots(), 64);
+        }
+        assert!(
+            !path.exists(),
+            "drop must remove the Tiny store directory {path:?}"
+        );
+    }
+
+    #[test]
     fn open_time_scale_is_explicit_not_env_or_cargo_test_sniff() {
         // Production constructors are Mainnet even under `cargo test`.
         let mainnet = StoreLayout::single("/tmp/rbitcoin-scale-unused");
