@@ -72,6 +72,7 @@ pub(crate) use idx_body_pipeline::run_idx_body_pipeline;
 pub use idx_body_pipeline::{BodyMode as IdxBodyMode, IdxBodyJob};
 pub use int_map::{FkMap, FkSet, U32Map, U64IdentityHasher, U64Map, U64Set};
 pub use integrity::merkle_root_from_txids;
+pub use io_backend::{ReadIoBackend, WriteIoBackend};
 pub use point_table::PointRecord;
 pub use scripthash::{
     script_hash, sh_heads_insert_capped, ColdProgress, ScriptHashRecord, INCLUDE_HWM_NAME,
@@ -88,13 +89,12 @@ pub use sorted_run::{
 };
 pub use sp_tweaks::SpTweaksTable;
 pub use sp_tweaks_uring::load_tweak_wave;
-pub use spend_annotate_uring::{spend_ann_backend, SpendAnnBackend};
+pub use spend_annotate_uring::spend_ann_backend;
 pub use store::{keep_unspent_vout_subsequence, Store, StoreLayout};
 #[cfg(debug_assertions)]
 pub use store::{reset_tx_full_gets, reset_txid_get_many, tx_full_gets, txid_get_many_fks};
 pub use store_secret::StoreSecret;
 pub use tx_table::HeadResizeSizeSnapshot;
-pub(crate) use tx_table::SpendMetaBackend;
 pub use tx_table::{
     decode_inwit_secret, decode_packed_tx_outs_with_spender_rels,
     decode_packed_tx_outs_with_spender_rels_secret, decode_packed_tx_with_spender_rels_secret,

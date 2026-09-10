@@ -67,15 +67,6 @@ const CHUNK_CACHE_MAX: usize = 256;
 
 pub(crate) const HASH_HEAD_FULL: &str = "invariant: hash head full";
 
-/// Which hash-head file (drives mainnet pre-size).
-///
-/// Schema v5 removed the durable `point.head` spend multimap; spend edges live
-/// on create outputs. Roles here are only live open-hash tables.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HeadRole {
-    Header,
-}
-
 /// Disk pre-size policy for hash heads.
 ///
 /// Chosen at store create/open ([`crate::StoreLayout`]). Production default is
@@ -144,13 +135,11 @@ impl HeadOpenOpts {
 }
 
 impl HeadScale {
-    /// Default initial slots for a **single** hash-head file.
-    pub fn initial_slots(self, role: HeadRole) -> u64 {
+    /// Default initial slots for `header.head`.
+    pub fn initial_slots(self) -> u64 {
         match self {
             HeadScale::Tiny => DEFAULT_SLOTS,
-            HeadScale::Mainnet => match role {
-                HeadRole::Header => 1 << 22,
-            },
+            HeadScale::Mainnet => 1 << 22,
         }
     }
 
@@ -179,20 +168,17 @@ impl HeadScale {
     }
 }
 
-/// Effective initial slots for `role` (scale + optional per-role override).
+/// Effective initial slots for `header.head` (scale + optional env override).
 ///
 /// Override: `RBITCOIN_HEAD_SLOTS_HEADER` (decimal slot count, rounded up to
 /// power of two).
-pub fn initial_slots_for(role: HeadRole, scale: HeadScale) -> u64 {
-    let env_key = match role {
-        HeadRole::Header => "RBITCOIN_HEAD_SLOTS_HEADER",
-    };
-    if let Ok(s) = std::env::var(env_key) {
+pub fn initial_slots_for(scale: HeadScale) -> u64 {
+    if let Ok(s) = std::env::var("RBITCOIN_HEAD_SLOTS_HEADER") {
         if let Ok(n) = s.parse::<u64>() {
             return n.max(2).next_power_of_two();
         }
     }
-    scale.initial_slots(role)
+    scale.initial_slots()
 }
 
 /// Sorted/MPHF `scripthash.head/NN` + sharded body count (not a HashHead).
@@ -1135,8 +1121,8 @@ mod tests {
 
     #[test]
     fn mainnet_scale_slot_targets() {
-        assert_eq!(HeadScale::Tiny.initial_slots(HeadRole::Header), 64);
-        assert_eq!(HeadScale::Mainnet.initial_slots(HeadRole::Header), 1 << 22);
+        assert_eq!(HeadScale::Tiny.initial_slots(), 64);
+        assert_eq!(HeadScale::Mainnet.initial_slots(), 1 << 22);
         assert_eq!(HeadScale::Tiny.sh_main_shards(), 1);
         assert_eq!(HeadScale::Mainnet.sh_main_shards(), SH_MAIN_SHARDS_MAINNET);
         assert_eq!(sh_main_shard_count(HeadScale::Tiny), 1);
@@ -1268,23 +1254,14 @@ mod tests {
 
     #[test]
     fn head_scale_prefix_and_pack_helpers() {
-        assert_eq!(
-            HeadScale::Tiny.initial_slots(HeadRole::Header),
-            DEFAULT_SLOTS
-        );
-        assert_eq!(HeadScale::Mainnet.initial_slots(HeadRole::Header), 1 << 22);
+        assert_eq!(HeadScale::Tiny.initial_slots(), DEFAULT_SLOTS);
+        assert_eq!(HeadScale::Mainnet.initial_slots(), 1 << 22);
         assert_eq!(
             sh_main_shard_count(HeadScale::Mainnet),
             SH_MAIN_SHARDS_MAINNET
         );
-        assert_eq!(
-            initial_slots_for(HeadRole::Header, HeadScale::Tiny),
-            DEFAULT_SLOTS
-        );
-        assert_eq!(
-            initial_slots_for(HeadRole::Header, HeadScale::Mainnet),
-            1 << 22
-        );
+        assert_eq!(initial_slots_for(HeadScale::Tiny), DEFAULT_SLOTS);
+        assert_eq!(initial_slots_for(HeadScale::Mainnet), 1 << 22);
         let full = [0xABu8; 32];
         let p = head_key_prefix(&full);
         assert_eq!(&p[..], &full[..16]);

@@ -37,7 +37,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::{Block, Target};
 use rbitcoin_primitives::Height;
 use rbitcoin_query::{FkMap, Query, U32Map, U64Map, U64Set};
-use rbitcoin_store::{SpendAnnBackend, StoreError};
+use rbitcoin_store::{StoreError, WriteIoBackend};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -78,8 +78,8 @@ use write::{write_batch_vs_tip, write_height_needed, WriteBatchVsTip};
 
 /// Pure-write annotate backend from global `RBITCOIN_IO`.
 #[inline]
-fn spend_ann_backend_next() -> SpendAnnBackend {
-    rbitcoin_store::spend_annotate_uring::spend_ann_backend()
+fn spend_ann_backend_next() -> WriteIoBackend {
+    rbitcoin_store::spend_ann_backend()
 }
 
 /// One height resolved for the confirm wave (header + Class A body fks).

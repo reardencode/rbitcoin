@@ -393,24 +393,9 @@ pub struct TxTable {
     rebuild_workers: usize,
 }
 
-/// Backend for bulk structural 8-byte spender-meta reads on `tx.body`.
-///
-/// Selected via global `RBITCOIN_IO` (see [`crate::io_backend`]).
-/// Body peeks are never mmap'd.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpendMetaBackend {
-    /// io_uring pread_batch 9B peeks.
-    Uring,
-    /// libc pread_batch (no ring).
-    Pread,
-}
-
 /// Structural-meta backend from env hierarchy.
-pub fn spend_meta_backend() -> SpendMetaBackend {
-    match crate::io_backend::read_io_backend() {
-        crate::io_backend::ReadIoBackend::Uring => SpendMetaBackend::Uring,
-        crate::io_backend::ReadIoBackend::Pread => SpendMetaBackend::Pread,
-    }
+pub fn spend_meta_backend() -> crate::io_backend::ReadIoBackend {
+    crate::io_backend::read_io_backend()
 }
 
 impl TxTable {
@@ -1203,22 +1188,26 @@ impl TxTable {
     pub fn get_spender_meta_at_abs_batch_backend(
         &self,
         abs_offs: &[u64],
-        backend: SpendMetaBackend,
+        backend: crate::io_backend::ReadIoBackend,
     ) -> Result<Vec<Option<(Fk, u8)>>, StoreError> {
         if abs_offs.is_empty() {
             return Ok(Vec::new());
         }
         match backend {
-            SpendMetaBackend::Uring => match self.get_spender_meta_at_abs_batch_uring(abs_offs) {
-                Ok(v) => Ok(v),
-                Err(e) => {
-                    rbitcoin_log::debug!(
-                        "store: structural meta uring failed ({e}); pread fallback"
-                    );
-                    self.get_spender_meta_at_abs_batch_pread(abs_offs)
+            crate::io_backend::ReadIoBackend::Uring => {
+                match self.get_spender_meta_at_abs_batch_uring(abs_offs) {
+                    Ok(v) => Ok(v),
+                    Err(e) => {
+                        rbitcoin_log::debug!(
+                            "store: structural meta uring failed ({e}); pread fallback"
+                        );
+                        self.get_spender_meta_at_abs_batch_pread(abs_offs)
+                    }
                 }
-            },
-            SpendMetaBackend::Pread => self.get_spender_meta_at_abs_batch_pread(abs_offs),
+            }
+            crate::io_backend::ReadIoBackend::Pread => {
+                self.get_spender_meta_at_abs_batch_pread(abs_offs)
+            }
         }
     }
 
@@ -1306,7 +1295,7 @@ impl TxTable {
         spenders: &crate::spender_table::SpenderTable,
         abs_edges: &[(u64, Fk, u32, Fk)],
         known: &[(Fk, u8)],
-        backend: crate::spend_annotate_uring::SpendAnnBackend,
+        backend: crate::io_backend::WriteIoBackend,
     ) -> Result<Vec<(Fk, u32, Fk)>, StoreError> {
         crate::spend_annotate_uring::put_spend_batch_by_abs_meta_known(
             self, spenders, abs_edges, known, backend,

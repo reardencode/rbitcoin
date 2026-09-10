@@ -15,9 +15,9 @@ use rbitcoin_store::{
     take_raw_clone_n, unsorted_collect_workers, unsorted_done_last_fk, unsorted_pack_workers,
     unsorted_shard_dir, write_sorted_run, BlockQueue, ColdProgress, FkMap, FkSet, HeadOpenOpts,
     HeadResizeSizeSnapshot, HeadScale, HeaderRecord, HeightFence, IdxBodyJob, IdxBodyMode,
-    InputRecord, OutputRecord, PointRecord, QueuedBlockMeta, ScriptHashRecord, ShHeadValue,
-    SpTweaksTable, SpendAnnBackend, Store, StoreError, StoreLayout, StoreSecret, TakenRaw,
-    TxRecord, U32Map, U64IdentityHasher, U64Map, U64Set, INCLUDE_HWM_NAME, SH_HEADS_CAP,
+    InputRecord, OutputRecord, PointRecord, QueuedBlockMeta, ReadIoBackend, ScriptHashRecord,
+    ShHeadValue, SpTweaksTable, Store, StoreError, StoreLayout, StoreSecret, TakenRaw, TxRecord,
+    U32Map, U64IdentityHasher, U64Map, U64Set, WriteIoBackend, INCLUDE_HWM_NAME, SH_HEADS_CAP,
 };
 
 #[test]
@@ -49,7 +49,8 @@ fn crate_root_exports_cross_crate_names() {
     let _ = std::any::type_name::<OutputRecord>();
     let _ = std::any::type_name::<TxRecord>();
     let _ = std::any::type_name::<SpTweaksTable>();
-    let _ = std::any::type_name::<SpendAnnBackend>();
+    let _ = std::any::type_name::<ReadIoBackend>();
+    let _ = std::any::type_name::<WriteIoBackend>();
     let _ = std::any::type_name::<HeadResizeSizeSnapshot>();
     let _ = INCLUDE_HWM_NAME;
     let _ = SH_HEADS_CAP;

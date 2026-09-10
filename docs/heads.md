@@ -32,7 +32,7 @@ spk hash    ──► scripthash.head/NN.mphf+.val  sealed BDZ3 main (2-bit g + 
 | Sealed SH main | `scripthash.head/NN.mphf` + `.val` | Electrum **scripthash prefix** → pack8 locators. Compact BDZ3: packed 2-bit `g` FdOnly; occupancy RAM; tags/val FdOnly. | After tip bulk |
 | Ingest + L0/L1 ovf | `scripthash.ovf/ingest`, L0 `SHSR`, L1 MPHF, `ovf/body` | Same pack8 key for incremental / post-seal new keys | Tip; lookup ingest → L0 → L1 → main |
 
-`tx.head` is **not** a `HashHead`. `HeadRole` is only Header. Sorted/MPHF SH shards are `sh_main_shard_count` (tiny=1, mainnet=64), not a HashHead. Leftover 256-way `header.head/` is Layout refuse.
+`tx.head` is **not** a `HashHead`. Header slots come from `HeadScale` (`RBITCOIN_HEAD_SLOTS_HEADER` override). Sorted/MPHF SH shards are `sh_main_shard_count` (tiny=1, mainnet=64), not a HashHead. Leftover 256-way `header.head/` is Layout refuse.
 
 ## Lookup path (txid → create_fk)
 

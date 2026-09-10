@@ -1,6 +1,6 @@
 use crate::error::StoreError;
 use crate::file::{TableFile, FILE_HEADER_LEN};
-use crate::hashhead::{initial_slots_for, HashHead, HeadRole, HeadScale, HASH_HEAD_FULL};
+use crate::hashhead::{initial_slots_for, HashHead, HeadScale, HASH_HEAD_FULL};
 use bitcoin_hashes::{sha256, Hash, HashEngine};
 use rbitcoin_primitives::{Fk, TableKind};
 use std::path::{Path, PathBuf};
@@ -97,7 +97,7 @@ fn header_gen_path(base: &Path, i: usize) -> PathBuf {
 
 impl HeaderHead {
     fn create(base: PathBuf, scale: HeadScale) -> Result<Self, StoreError> {
-        let target_slots = initial_slots_for(HeadRole::Header, scale);
+        let target_slots = initial_slots_for(scale);
         let h = HashHead::create_with_slots(&base, target_slots)?;
         Ok(Self {
             base,
@@ -117,7 +117,7 @@ impl HeaderHead {
             ));
         }
         crate::hashhead::discard_grow_part(&base);
-        let target_slots = initial_slots_for(HeadRole::Header, scale);
+        let target_slots = initial_slots_for(scale);
         let mut gens = vec![HashHead::open(&base)?];
         let mut i = 1usize;
         loop {
@@ -606,7 +606,7 @@ mod tests {
         t.flush().unwrap();
         drop(t);
         std::fs::remove_file(dir.join("header.head")).unwrap();
-        let slots = initial_slots_for(HeadRole::Header, HeadScale::Tiny);
+        let slots = initial_slots_for(HeadScale::Tiny);
         let staging = tmp();
         let h = HashHead::create_with_slots(staging.join("header.head"), slots).unwrap();
         h.flush().unwrap();
