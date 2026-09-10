@@ -3024,7 +3024,7 @@ async fn on_tx(
                 Err(e) => match tx_accept_log(&e) {
                     TxAcceptLog::Silent => {}
                     TxAcceptLog::Park(missing) => {
-                        rbitcoin_log::debug!("txrelay: park {txid} orphans={}", mp.orphan_count());
+                        rbitcoin_log::debug!("txrelay: park {txid}");
                         queue_orphan_parent_getdata(mp, missing, out_tx)?;
                     }
                     TxAcceptLog::Reject => {
