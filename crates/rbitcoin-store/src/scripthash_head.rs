@@ -1,7 +1,7 @@
-//! Open-addressed head for hybrid scripthash: key[16] → value[16] (32 B slots).
+//! Open-addressed head for hybrid scripthash: key[16] → pack8 value (24 B slots).
 //!
 //! Key is the first 16 bytes of Electrum SHA256(spk). Public APIs take full 32 B
-//! hashes and truncate. Values are [`ShHeadValue`] encodings (two u64s).
+//! hashes and truncate. Values are [`ShHeadValue`] pack8 encodings.
 //!
 //! # Occupancy (startup)
 //!
@@ -13,8 +13,6 @@
 
 use crate::error::StoreError;
 use crate::file::{TableFile, FILE_HEADER_LEN};
-#[cfg(test)]
-use crate::hashhead::sh_main_shard_count;
 use crate::hashhead::HeadScale;
 use crate::scripthash_layout::{
     head_key_from_full, pack8_bytes, unpack8_bytes, ShHeadKey, ShHeadValue, SH_HEAD_KEY_LEN,
@@ -640,11 +638,6 @@ pub struct ShardedScriptHashHead {
 
 #[cfg(test)]
 impl ShardedScriptHashHead {
-    #[cfg(test)]
-    pub fn create_for_role(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
-        Self::create_sharded(path, sh_main_shard_count(HeadScale::Tiny), 64)
-    }
-
     pub fn create_sharded(
         path: impl Into<PathBuf>,
         shard_count: usize,
@@ -737,36 +730,11 @@ impl ShardedScriptHashHead {
         self.shards.len()
     }
 
-    /// Slot count of one main shard (overflow segment geometry = this size).
-    #[cfg(test)]
-    pub fn slots_per_shard(&self) -> u64 {
-        self.shards
-            .first()
-            .map(|s| s.state.lock().unwrap().slots)
-            .unwrap_or(64)
-    }
-
-    /// Total OA slots across all main shards.
-    #[cfg(test)]
-    pub fn total_slots(&self) -> u64 {
-        self.shards
-            .iter()
-            .map(|s| s.state.lock().unwrap().slots)
-            .sum()
-    }
-
     /// Shard index for a full Electrum scripthash (same as insert routing).
     #[inline]
     pub fn shard_index(&self, full: &[u8; 32]) -> usize {
         self.shard_of(full)
     }
-
-    /// Insert head values, applying **one shard at a time** (sorted within shard).
-    ///
-    /// When `flush_each_shard` is true (large materialize runs), flush the shard
-    /// file after its bucket so the working set does not keep every shard dirty
-    /// at once. Small runs skip the per-shard flush and rely on later table flush.
-    pub const SH_SEAL_LOAD: f64 = ScriptHashHead::SH_SEAL_LOAD;
 
     pub fn flush(&self) -> Result<(), StoreError> {
         for s in &self.shards {
