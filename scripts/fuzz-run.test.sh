@@ -68,8 +68,8 @@ assert_ok "store_reorg dry-run sanitizer address" \
   grep -qx "FUZZ_SANITIZER=address" <<<"$out"
 assert_ok "store_reorg dry-run no Core" \
   grep -qx "FUZZ_NO_CORE=1" <<<"$out"
-assert_ok "store_reorg dry-run tiny heads" \
-  grep -qx "RBITCOIN_HEAD_SCALE=tiny" <<<"$out"
+assert_ok "store_reorg dry-run does not export deleted RBITCOIN_HEAD_SCALE" \
+  test "$(grep -c 'RBITCOIN_HEAD_SCALE' <<<"$out" || true)" = "0"
 assert_ok "store_reorg ops seed" \
   test -s "$ROOT/crates/rbitcoin-net/tests/fixtures/store_reorg_ops.bin"
 
@@ -189,8 +189,8 @@ assert_ok "differential dry-run timeout 90" \
 out="$(FUZZ_DRY_RUN=1 "$RUN" block_spend_differential)"
 assert_ok "spend-differential dry-run bin" \
   grep -qx "FUZZ_BIN=block_spend_differential" <<<"$out"
-assert_ok "spend-differential dry-run keeps tiny header heads" \
-  grep -qx "RBITCOIN_HEAD_SCALE=tiny" <<<"$out"
+assert_ok "spend-differential dry-run does not export deleted RBITCOIN_HEAD_SCALE" \
+  test "$(grep -c 'RBITCOIN_HEAD_SCALE' <<<"$out" || true)" = "0"
 assert_ok "spend-differential dry-run uses tiny 16-bit tx.head (no BITS override)" \
   test "$(grep -c '^RBITCOIN_TX_HEAD_BITS=' <<<"$out" || true)" = "0"
 assert_ok "spend-differential dry-run sanitizer none" \
@@ -251,8 +251,8 @@ assert_ok "reorg-n-differential dry-run sanitizer none" \
   grep -qx "FUZZ_SANITIZER=none" <<<"$out"
 assert_ok "reorg-n-differential dry-run timeout 180" \
   grep -qx "FUZZ_TIMEOUT=180" <<<"$out"
-assert_ok "reorg-n-differential dry-run tiny heads" \
-  grep -qx "RBITCOIN_HEAD_SCALE=tiny" <<<"$out"
+assert_ok "reorg-n-differential dry-run does not export deleted RBITCOIN_HEAD_SCALE" \
+  test "$(grep -c 'RBITCOIN_HEAD_SCALE' <<<"$out" || true)" = "0"
 
 out="$(FUZZ_DRY_RUN=1 "$RUN" block_csv_differential)"
 assert_ok "csv-differential dry-run bin" \

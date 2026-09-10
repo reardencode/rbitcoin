@@ -84,7 +84,7 @@ fn mine(prev: BlockHash, time: u32, height: u32) -> Block {
 }
 
 async fn start_node(dir: &std::path::Path) -> P2PNode {
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     P2PNode::start(
         "127.0.0.1:0".parse().unwrap(),
         q,

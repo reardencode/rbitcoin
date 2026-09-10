@@ -49,7 +49,6 @@ for signet/mainnet sync. **Not** CLI.
 
 | Env | Use |
 |-----|-----|
-| `RBITCOIN_HEAD_SCALE` | Tiny heads under `cargo test` (honored if exported — do not set on operators) |
 | `RBITCOIN_TEST_*` | Node/store test fixtures (`TEST_DROP_STORE`, `TEST_NO_SUCH_CAP`) |
 | `RBITCOIN_CORE_DATA` | Directory of Core JSON corpora for consensus tests |
 
@@ -71,6 +70,7 @@ for signet/mainnet sync. **Not** CLI.
 | `RBITCOIN_SH_RECOLLECT_SPILL_BYTES` | Deleted; catalog recollect/spill is gone (unsorted shards) |
 | `RBITCOIN_SH_TARGET_RUN_BYTES` | Deleted; catalog recollect/spill is gone |
 | `RBITCOIN_SH_MERGE_FANIN` | Deleted; no fan-in reduce |
+| `RBITCOIN_HEAD_SCALE` | Deleted (was test-only). Tiny vs Mainnet is store open layout (`StoreLayout::tiny` / `single`). Do not reintroduce |
 
 ## Related
 

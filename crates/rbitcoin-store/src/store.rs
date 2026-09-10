@@ -1,5 +1,6 @@
 use crate::chain::{ConfirmedTable, HeaderTxsTable, StrongTxTable};
 use crate::error::StoreError;
+use crate::hashhead::{HeadOpenOpts, HeadRole, HeadScale};
 use crate::header_table::{HeaderRecord, HeaderTable};
 use crate::height_fence::{HeightFence, MtpRing};
 use crate::point_table::{self, PointRecord};
@@ -58,15 +59,22 @@ pub use io_spies::{reset_tx_full_gets, reset_txid_get_many, tx_full_gets, txid_g
 /// `{datadir-cold}/store`. Presence-only (path always comes from the operator).
 pub const INWIT_RELOC_NAME: &str = "inwit.reloc";
 
-/// Where a store’s files live.
+/// Where a store’s files live, plus open-time head geometry.
 ///
 /// `dir` is `{datadir}/store`. When `cold_dir` is set and distinct, Class A
 /// `inwit.body` + `inwit.idx/` live there (bulk / HDD). Everything else stays
 /// in `dir`.
+///
+/// [`Self::single`] / [`Self::with_cold`] are **Mainnet** scale (production).
+/// Tests use [`Self::tiny`]. Scale is not read from `RBITCOIN_HEAD_SCALE`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreLayout {
     pub dir: PathBuf,
     pub cold_dir: Option<PathBuf>,
+    pub head_scale: HeadScale,
+    pub tx_head_rebuild_seal_bits: Option<u32>,
+    pub tx_head_rebuild_workers: Option<usize>,
+    pub tx_idx_soft_span: Option<u64>,
 }
 
 impl StoreLayout {
@@ -74,6 +82,21 @@ impl StoreLayout {
         Self {
             dir: dir.into(),
             cold_dir: None,
+            head_scale: HeadScale::Mainnet,
+            tx_head_rebuild_seal_bits: None,
+            tx_head_rebuild_workers: None,
+            tx_idx_soft_span: None,
+        }
+    }
+
+    pub fn tiny(dir: impl Into<PathBuf>) -> Self {
+        Self {
+            dir: dir.into(),
+            cold_dir: None,
+            head_scale: HeadScale::Tiny,
+            tx_head_rebuild_seal_bits: None,
+            tx_head_rebuild_workers: None,
+            tx_idx_soft_span: None,
         }
     }
 
@@ -81,6 +104,59 @@ impl StoreLayout {
         Self {
             dir: dir.into(),
             cold_dir: Some(cold_dir.into()),
+            head_scale: HeadScale::Mainnet,
+            tx_head_rebuild_seal_bits: None,
+            tx_head_rebuild_workers: None,
+            tx_idx_soft_span: None,
+        }
+    }
+
+    pub fn with_cold_dir(mut self, cold_dir: impl Into<PathBuf>) -> Self {
+        self.cold_dir = Some(cold_dir.into());
+        self
+    }
+
+    pub fn with_head_scale(mut self, scale: HeadScale) -> Self {
+        self.head_scale = scale;
+        self
+    }
+
+    pub fn with_rebuild_seal_bits(mut self, bits: u32) -> Self {
+        self.tx_head_rebuild_seal_bits = Some(bits);
+        self
+    }
+
+    pub fn with_rebuild_workers(mut self, n: usize) -> Self {
+        self.tx_head_rebuild_workers = Some(n);
+        self
+    }
+
+    pub fn with_idx_soft_span(mut self, bytes: u64) -> Self {
+        self.tx_idx_soft_span = Some(bytes);
+        self
+    }
+
+    /// Header hash-head slot target (honors `RBITCOIN_HEAD_SLOTS_HEADER`).
+    pub fn header_slots(&self) -> u64 {
+        crate::hashhead::initial_slots_for(HeadRole::Header, self.head_scale)
+    }
+
+    /// SH main shard count for this scale (1 Tiny, 64 Mainnet).
+    pub fn sh_shard_count(&self) -> usize {
+        self.head_scale.sh_main_shards()
+    }
+
+    /// `tx.head` bits (honors `RBITCOIN_TX_HEAD_BITS`).
+    pub fn tx_head_bits(&self) -> u32 {
+        crate::address_head::bits_for_scale(self.head_scale)
+    }
+
+    pub fn open_opts(&self) -> HeadOpenOpts {
+        HeadOpenOpts {
+            scale: self.head_scale,
+            rebuild_seal_bits: self.tx_head_rebuild_seal_bits,
+            rebuild_workers: self.tx_head_rebuild_workers,
+            idx_soft_span: self.tx_idx_soft_span,
         }
     }
 
@@ -176,6 +252,7 @@ pub struct Store {
     path: PathBuf,
     /// `{datadir-cold}/store` when inwit is split; `None` = inwit in [`Self::path`].
     cold_path: Option<PathBuf>,
+    head_scale: HeadScale,
     pub headers: HeaderTable,
     pub txs: TxTable,
     /// Multi-spender overflow (`spent.ovf`). Sole spends live on create outputs.
@@ -210,16 +287,21 @@ impl Store {
         Self::create_layout(StoreLayout::single(path.into()))
     }
 
+    pub fn create_tiny(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
+        Self::create_layout(StoreLayout::tiny(path.into()))
+    }
+
     /// Create with an explicit `tx.head` geometry (tests / recovery).
     pub fn create_with_head_layout(
         path: impl Into<PathBuf>,
         head: crate::address_head::HeadLayout,
     ) -> Result<Self, StoreError> {
-        Self::create_layout_with_head(StoreLayout::single(path.into()), head)
+        Self::create_layout_with_head(StoreLayout::tiny(path.into()), head)
     }
 
     pub fn create_layout(layout: StoreLayout) -> Result<Self, StoreError> {
-        Self::create_layout_with_head(layout, crate::address_head::default_layout())
+        let head = crate::address_head::default_layout(layout.head_scale);
+        Self::create_layout_with_head(layout, head)
     }
 
     fn create_layout_with_head(
@@ -238,16 +320,17 @@ impl Store {
         }
         write_meta(&path)?;
         let inwit_dir = resolve_inwit_dir(&layout)?;
-        let txs = TxTable::create_with_head_layout_inwit(&path, &inwit_dir, head)?;
+        let opts = layout.open_opts();
+        let txs = TxTable::create_with_head_layout_inwit(&path, &inwit_dir, head, opts)?;
         if layout.is_split() {
             write_inwit_reloc(&path)?;
         }
         let cold_path = layout.is_split().then(|| inwit_dir);
         Ok(Self {
-            headers: HeaderTable::create(&path)?,
+            headers: HeaderTable::create_with_scale(&path, layout.head_scale)?,
             txs,
             spenders: SpenderTable::create(&path)?,
-            scripthash: ScriptHashTable::create(&path)?,
+            scripthash: ScriptHashTable::create_with_scale(&path, layout.head_scale)?,
             confirmed: ConfirmedTable::create(&path)?,
             strong_tx: StrongTxTable::create(&path)?,
             header_txs: HeaderTxsTable::create(&path)?,
@@ -255,11 +338,16 @@ impl Store {
             mtp_ring: std::sync::RwLock::new(MtpRing::empty()),
             path,
             cold_path,
+            head_scale: layout.head_scale,
         })
     }
 
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
         Self::open_layout(StoreLayout::single(path.into()))
+    }
+
+    pub fn open_tiny(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
+        Self::open_layout(StoreLayout::tiny(path.into()))
     }
 
     pub fn open_layout(layout: StoreLayout) -> Result<Self, StoreError> {
@@ -297,9 +385,9 @@ impl Store {
             );
         }
         let scripthash = if path.join("scripthash.body").exists() {
-            ScriptHashTable::open(&path)?
+            ScriptHashTable::open_with_scale(&path, layout.head_scale)?
         } else {
-            ScriptHashTable::create(&path)?
+            ScriptHashTable::create_with_scale(&path, layout.head_scale)?
         };
         // Schema 13/14→current: empty Class A + empty SH may rewrite meta. Packed
         // tx.body with creates, or a materialized SH index, is refused.
@@ -351,13 +439,13 @@ impl Store {
             rewrite_meta_current(&path)?;
         }
         let inwit_dir = resolve_inwit_dir(&layout)?;
-        let txs = TxTable::open_inwit(&path, &inwit_dir)?;
+        let txs = TxTable::open_inwit(&path, &inwit_dir, layout.open_opts())?;
         if layout.is_split() {
             write_inwit_reloc(&path)?;
         }
         let cold_path = layout.is_split().then(|| inwit_dir);
         let store = Self {
-            headers: HeaderTable::open(&path)?,
+            headers: HeaderTable::open_with_scale(&path, layout.head_scale)?,
             txs,
             spenders: SpenderTable::open(&path)?,
             scripthash,
@@ -368,6 +456,7 @@ impl Store {
             mtp_ring: std::sync::RwLock::new(MtpRing::empty()),
             path,
             cold_path,
+            head_scale: layout.head_scale,
         };
         store.rebuild_mtp_ring()?;
         Ok(store)
@@ -375,6 +464,14 @@ impl Store {
 
     pub fn open_or_create(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
         Self::open_or_create_layout(StoreLayout::single(path.into()))
+    }
+
+    pub fn open_or_create_tiny(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
+        Self::open_or_create_layout(StoreLayout::tiny(path.into()))
+    }
+
+    pub fn head_scale(&self) -> HeadScale {
+        self.head_scale
     }
 
     pub fn open_or_create_layout(layout: StoreLayout) -> Result<Self, StoreError> {
@@ -1551,6 +1648,47 @@ mod tests {
         p
     }
 
+    #[test]
+    fn open_time_scale_is_explicit_not_env_or_cargo_test_sniff() {
+        // Production constructors are Mainnet even under `cargo test`.
+        let mainnet = StoreLayout::single("/tmp/rbitcoin-scale-unused");
+        assert_eq!(mainnet.head_scale, HeadScale::Mainnet);
+        assert_eq!(mainnet.header_slots(), 1 << 22);
+        assert_eq!(mainnet.sh_shard_count(), 64);
+        assert_eq!(mainnet.tx_head_bits(), crate::address_head::MAINNET_BITS);
+        // Do not create those files in the default suite.
+
+        let tiny_layout = StoreLayout::tiny("/tmp/rbitcoin-scale-unused-tiny");
+        assert_eq!(tiny_layout.head_scale, HeadScale::Tiny);
+        assert_eq!(tiny_layout.header_slots(), 64);
+        assert_eq!(tiny_layout.sh_shard_count(), 1);
+        assert_eq!(tiny_layout.tx_head_bits(), crate::address_head::TINY_BITS);
+
+        let prev = std::env::var_os("RBITCOIN_HEAD_SCALE");
+        std::env::set_var("RBITCOIN_HEAD_SCALE", "mainnet");
+        let dir = tmp();
+        let s = Store::create_layout(StoreLayout::tiny(&dir)).unwrap();
+        assert_eq!(s.head_scale(), HeadScale::Tiny);
+        assert_eq!(s.headers.head_target_slots(), 64);
+        assert_eq!(s.scripthash.head_shard_count(), 1);
+        assert_eq!(s.txs.head_bits(), crate::address_head::TINY_BITS);
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+        let still_mainnet = StoreLayout::single("/tmp/rbitcoin-scale-unused-2");
+        assert_eq!(
+            still_mainnet.head_scale,
+            HeadScale::Mainnet,
+            "RBITCOIN_HEAD_SCALE must not win over explicit Mainnet open"
+        );
+        assert_eq!(still_mainnet.header_slots(), 1 << 22);
+        match prev {
+            Some(v) => std::env::set_var("RBITCOIN_HEAD_SCALE", v),
+            None => std::env::remove_var("RBITCOIN_HEAD_SCALE"),
+        }
+    }
+
     fn coinbase_item(
         txid: [u8; 32],
         outs: Vec<OutputRecord>,
@@ -1575,7 +1713,7 @@ mod tests {
     #[test]
     fn coinbase_fk_at_heights_matches_first_tx() {
         let dir = tmp();
-        let s = Store::create(&dir).unwrap();
+        let s = Store::create_tiny(&dir).unwrap();
         let hdr = HeaderRecord {
             prev_fk: Fk::NULL,
             version: 1,
@@ -1647,17 +1785,17 @@ mod tests {
         {
             std::fs::write(&dir, b"x").unwrap();
             assert!(matches!(
-                Store::create(&dir),
+                Store::create_tiny(&dir),
                 Err(StoreError::NotDirectory(_))
             ));
             let _ = std::fs::remove_file(&dir);
         }
         assert!(matches!(
-            Store::open(&dir),
+            Store::open_tiny(&dir),
             Err(StoreError::NotDirectory(_))
         ));
 
-        let s = Store::create(&dir).unwrap();
+        let s = Store::create_tiny(&dir).unwrap();
         assert_eq!(s.path(), dir.as_path());
         assert!(s.tip_height().is_none());
         assert_eq!(s.header_count(), 0);
@@ -1847,15 +1985,15 @@ mod tests {
         s.flush().unwrap();
         drop(s);
 
-        let s = Store::open(&dir).unwrap();
+        let s = Store::open_tiny(&dir).unwrap();
         assert_eq!(s.header_count(), 1);
-        let s2 = Store::open_or_create(&dir).unwrap();
+        let s2 = Store::open_or_create_tiny(&dir).unwrap();
         assert_eq!(s2.header_count(), 1);
         drop(s2);
 
         // open_or_create on fresh path
         let dir2 = tmp();
-        let s3 = Store::open_or_create(&dir2).unwrap();
+        let s3 = Store::open_or_create_tiny(&dir2).unwrap();
         assert_eq!(s3.header_count(), 0);
         drop(s3);
 
@@ -1906,7 +2044,7 @@ mod tests {
     fn open_schema13_empty_scripthash_upgrades_meta_to_14() {
         let dir = tmp();
         {
-            let s = Store::create(&dir).unwrap();
+            let s = Store::create_tiny(&dir).unwrap();
             assert!(!s.scripthash.has_durable_index());
             s.flush().unwrap();
         }
@@ -1932,13 +2070,13 @@ mod tests {
         write_store_meta_ver(&dir, 13);
         assert_eq!(read_store_meta_ver(&dir), 13);
 
-        let s = Store::open(&dir).unwrap();
+        let s = Store::open_tiny(&dir).unwrap();
         assert!(!s.scripthash.has_durable_index());
         drop(s);
         assert_eq!(read_store_meta_ver(&dir), SCHEMA_VERSION);
 
         // Re-open stays 14.
-        let s = Store::open(&dir).unwrap();
+        let s = Store::open_tiny(&dir).unwrap();
         assert_eq!(s.header_count(), 0);
         drop(s);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1947,7 +2085,7 @@ mod tests {
     #[test]
     fn put_full_and_inwit_prevouts_at() {
         let dir = tmp();
-        let s = Store::create(&dir).unwrap();
+        let s = Store::create_tiny(&dir).unwrap();
         let item = (
             TxRecord {
                 txid: [8u8; 32],
@@ -1975,7 +2113,7 @@ mod tests {
         use rbitcoin_primitives::TableKind;
         let dir = tmp();
         {
-            let s = Store::create(&dir).unwrap();
+            let s = Store::create_tiny(&dir).unwrap();
             s.flush().unwrap();
         }
         let path = dir.join("tx.body");
@@ -1983,7 +2121,7 @@ mod tests {
         f.write_at(FILE_HEADER_LEN as u64, &[0xABu8; 16]).unwrap();
         f.flush().unwrap();
         write_store_meta_ver(&dir, 14);
-        match Store::open(&dir) {
+        match Store::open_tiny(&dir) {
             Ok(_) => panic!("expected refuse for packed tx.body"),
             Err(StoreError::Corrupt(m)) => {
                 assert!(m.contains("packed Class A") || m.contains("tx.body"), "{m}");
@@ -1999,7 +2137,7 @@ mod tests {
     fn open_schema14_empty_scripthash_upgrades_meta_to_15() {
         let dir = tmp();
         {
-            let s = Store::create(&dir).unwrap();
+            let s = Store::create_tiny(&dir).unwrap();
             assert!(!s.scripthash.has_durable_index());
             s.flush().unwrap();
         }
@@ -2020,12 +2158,12 @@ mod tests {
         write_store_meta_ver(&dir, 14);
         assert_eq!(read_store_meta_ver(&dir), 14);
 
-        let s = Store::open(&dir).unwrap();
+        let s = Store::open_tiny(&dir).unwrap();
         assert!(!s.scripthash.has_durable_index());
         drop(s);
         assert_eq!(read_store_meta_ver(&dir), SCHEMA_VERSION);
 
-        let s = Store::open(&dir).unwrap();
+        let s = Store::open_tiny(&dir).unwrap();
         assert_eq!(s.header_count(), 0);
         drop(s);
         let _ = std::fs::remove_dir_all(&dir);
@@ -2036,7 +2174,7 @@ mod tests {
     fn open_schema14_with_materialized_scripthash_refused() {
         let dir = tmp();
         {
-            let s = Store::create(&dir).unwrap();
+            let s = Store::create_tiny(&dir).unwrap();
             let sh = [0xcdu8; 32];
             s.scripthash
                 .put_create(&crate::scripthash::ScriptHashRecord::from_fk(sh, Fk(1)))
@@ -2045,7 +2183,7 @@ mod tests {
             s.flush().unwrap();
         }
         write_store_meta_ver(&dir, 14);
-        match Store::open(&dir) {
+        match Store::open_tiny(&dir) {
             Ok(_) => panic!("expected refuse for schema 14 with durable SH"),
             Err(StoreError::Corrupt(m)) => {
                 assert!(
@@ -2065,7 +2203,7 @@ mod tests {
     fn open_schema13_with_materialized_scripthash_refused() {
         let dir = tmp();
         {
-            let s = Store::create(&dir).unwrap();
+            let s = Store::create_tiny(&dir).unwrap();
             let sh = [0xabu8; 32];
             s.scripthash
                 .put_create(&crate::scripthash::ScriptHashRecord::from_fk(sh, Fk(1)))
@@ -2074,7 +2212,7 @@ mod tests {
             s.flush().unwrap();
         }
         write_store_meta_ver(&dir, 13);
-        match Store::open(&dir) {
+        match Store::open_tiny(&dir) {
             Ok(_) => panic!("expected refuse for schema 13 with durable SH"),
             Err(StoreError::Corrupt(m)) => {
                 assert!(
@@ -2094,7 +2232,7 @@ mod tests {
     fn open_schema16_legacy_sh_runs_refused() {
         let dir = tmp();
         {
-            let s = Store::create(&dir).unwrap();
+            let s = Store::create_tiny(&dir).unwrap();
             s.flush().unwrap();
         }
         write_store_meta_ver(&dir, 16);
@@ -2103,7 +2241,7 @@ mod tests {
         let mut rec = [0u8; 40];
         rec[32..40].copy_from_slice(&1u64.to_le_bytes());
         crate::sorted_run::write_sorted_run(&runs.join("000001.run"), 32, 40, &rec).unwrap();
-        match Store::open(&dir) {
+        match Store::open_tiny(&dir) {
             Ok(_) => panic!("expected refuse for key_len=32 scripthash.runs"),
             Err(StoreError::Corrupt(m)) => {
                 assert_eq!(
@@ -2123,7 +2261,7 @@ mod tests {
         let dir = tmp();
         let sh = [0xabu8; 32];
         {
-            let s = Store::create(&dir).unwrap();
+            let s = Store::create_tiny(&dir).unwrap();
             s.scripthash
                 .put_create(&crate::scripthash::ScriptHashRecord::from_fk(sh, Fk(1)))
                 .unwrap();
@@ -2131,7 +2269,7 @@ mod tests {
             assert_eq!(s.scripthash.entries(&sh).unwrap().len(), 1);
         }
         write_store_meta_ver(&dir, 18);
-        match Store::open(&dir) {
+        match Store::open_tiny(&dir) {
             Ok(_) => panic!("expected refuse for schema-18 scripthash data"),
             Err(StoreError::Corrupt(m)) => {
                 assert_eq!(m, SCHEMA20_INDEX_REFUSE);
@@ -2146,12 +2284,12 @@ mod tests {
     fn open_schema17_empty_indexes_upgrades_meta_to_18() {
         let dir = tmp();
         {
-            let s = Store::create(&dir).unwrap();
+            let s = Store::create_tiny(&dir).unwrap();
             s.flush().unwrap();
         }
         write_store_meta_ver(&dir, 17);
         assert_eq!(read_store_meta_ver(&dir), 17);
-        let s = Store::open(&dir).unwrap();
+        let s = Store::open_tiny(&dir).unwrap();
         drop(s);
         assert_eq!(read_store_meta_ver(&dir), SCHEMA_VERSION);
         let _ = std::fs::remove_dir_all(&dir);
@@ -2161,7 +2299,7 @@ mod tests {
     fn open_schema17_with_scripthash_refused() {
         let dir = tmp();
         {
-            let s = Store::create(&dir).unwrap();
+            let s = Store::create_tiny(&dir).unwrap();
             s.scripthash
                 .put_create(&crate::scripthash::ScriptHashRecord::from_fk(
                     [0xabu8; 32],
@@ -2171,7 +2309,7 @@ mod tests {
             s.flush().unwrap();
         }
         write_store_meta_ver(&dir, 17);
-        match Store::open(&dir) {
+        match Store::open_tiny(&dir) {
             Ok(_) => panic!("expected refuse for schema-17 scripthash data"),
             Err(StoreError::Corrupt(m)) => {
                 assert_eq!(m, SCHEMA18_INDEX_REFUSE);
@@ -2186,13 +2324,13 @@ mod tests {
     fn open_schema17_with_tx_head_refused() {
         let dir = tmp();
         {
-            let s = Store::create(&dir).unwrap();
+            let s = Store::create_tiny(&dir).unwrap();
             let item = coinbase_item([0x22u8; 32], vec![OutputRecord::unspent(1, vec![0x51])]);
             s.put_tx_full_batch_indexed(&[item], true).unwrap();
             s.flush().unwrap();
         }
         write_store_meta_ver(&dir, 17);
-        match Store::open(&dir) {
+        match Store::open_tiny(&dir) {
             Ok(_) => panic!("expected refuse for schema-17 tx.head occupancy"),
             Err(StoreError::Corrupt(m)) => {
                 assert_eq!(m, SCHEMA18_INDEX_REFUSE);
@@ -2210,14 +2348,14 @@ mod tests {
     fn open_schema17_wiped_indexes_rebuilds_head_and_bumps_meta() {
         let dir = tmp();
         {
-            let s = Store::create(&dir).unwrap();
+            let s = Store::create_tiny(&dir).unwrap();
             let item = coinbase_item([0x22u8; 32], vec![OutputRecord::unspent(1, vec![0x51])]);
             s.put_tx_full_batch_indexed(&[item], true).unwrap();
             s.flush().unwrap();
         }
         crate::segmented_head::wipe_segmented_head_files(&dir);
         write_store_meta_ver(&dir, 17);
-        let s = Store::open(&dir).unwrap();
+        let s = Store::open_tiny(&dir).unwrap();
         assert_eq!(s.get_fk_by_txid(&[0x22u8; 32]).unwrap(), Some(Fk(1)));
         drop(s);
         assert_eq!(read_store_meta_ver(&dir), SCHEMA_VERSION);
@@ -2228,13 +2366,13 @@ mod tests {
     fn open_schema19_with_tx_head_refused() {
         let dir = tmp();
         {
-            let s = Store::create(&dir).unwrap();
+            let s = Store::create_tiny(&dir).unwrap();
             let item = coinbase_item([0x22u8; 32], vec![OutputRecord::unspent(1, vec![0x51])]);
             s.put_tx_full_batch_indexed(&[item], true).unwrap();
             s.flush().unwrap();
         }
         write_store_meta_ver(&dir, 19);
-        match Store::open(&dir) {
+        match Store::open_tiny(&dir) {
             Ok(_) => panic!("expected refuse for schema-19 tx.head occupancy"),
             Err(StoreError::Corrupt(m)) => {
                 assert_eq!(m, SCHEMA20_INDEX_REFUSE);
@@ -2250,13 +2388,13 @@ mod tests {
     fn open_schema18_with_tx_head_refused() {
         let dir = tmp();
         {
-            let s = Store::create(&dir).unwrap();
+            let s = Store::create_tiny(&dir).unwrap();
             let item = coinbase_item([0x33u8; 32], vec![OutputRecord::unspent(1, vec![0x51])]);
             s.put_tx_full_batch_indexed(&[item], true).unwrap();
             s.flush().unwrap();
         }
         write_store_meta_ver(&dir, 18);
-        match Store::open(&dir) {
+        match Store::open_tiny(&dir) {
             Ok(_) => panic!("expected refuse for schema-18 tx.head occupancy"),
             Err(StoreError::Corrupt(m)) => {
                 assert_eq!(m, SCHEMA20_INDEX_REFUSE);
@@ -2271,14 +2409,14 @@ mod tests {
     fn open_schema19_empty_tx_head_upgrades_and_rebuilds() {
         let dir = tmp();
         {
-            let s = Store::create(&dir).unwrap();
+            let s = Store::create_tiny(&dir).unwrap();
             let item = coinbase_item([0x22u8; 32], vec![OutputRecord::unspent(1, vec![0x51])]);
             s.put_tx_full_batch_indexed(&[item], true).unwrap();
             s.flush().unwrap();
         }
         crate::segmented_head::wipe_segmented_head_files(&dir);
         write_store_meta_ver(&dir, 19);
-        let s = Store::open(&dir).unwrap();
+        let s = Store::open_tiny(&dir).unwrap();
         assert_eq!(s.get_fk_by_txid(&[0x22u8; 32]).unwrap(), Some(Fk(1)));
         drop(s);
         assert_eq!(read_store_meta_ver(&dir), SCHEMA_VERSION);
@@ -2290,14 +2428,14 @@ mod tests {
         let dir = tmp();
         let sh = [0xcdu8; 32];
         {
-            let s = Store::create(&dir).unwrap();
+            let s = Store::create_tiny(&dir).unwrap();
             s.scripthash
                 .put_create(&crate::scripthash::ScriptHashRecord::from_fk(sh, Fk(1)))
                 .unwrap();
             s.flush().unwrap();
         }
         write_store_meta_ver(&dir, 19);
-        match Store::open(&dir) {
+        match Store::open_tiny(&dir) {
             Ok(_) => panic!("expected refuse for schema-19 scripthash data"),
             Err(StoreError::Corrupt(m)) => {
                 assert_eq!(m, SCHEMA20_INDEX_REFUSE);
@@ -2315,7 +2453,7 @@ mod tests {
         use rbitcoin_primitives::TableKind;
         let dir = tmp();
         {
-            let s = Store::create(&dir).unwrap();
+            let s = Store::create_tiny(&dir).unwrap();
             let item = coinbase_item([0x11u8; 32], vec![OutputRecord::unspent(1, vec![0x51])]);
             s.put_tx_full_batch_indexed(&[item], true).unwrap();
             s.flush().unwrap();
@@ -2328,7 +2466,7 @@ mod tests {
             f.write_at(FILE_HEADER_LEN as u64, &b).unwrap();
             f.flush().unwrap();
         }
-        match Store::open(&dir) {
+        match Store::open_tiny(&dir) {
             Ok(_) => panic!("expected refuse for 16-layout Class A with creates"),
             Err(StoreError::Corrupt(m)) => {
                 assert_eq!(
@@ -2344,7 +2482,7 @@ mod tests {
     #[test]
     fn class_a_v17_roundtrip_templates() {
         let dir = tmp();
-        let s = Store::create(&dir).unwrap();
+        let s = Store::create_tiny(&dir).unwrap();
         let p2pkh = {
             let mut sc = vec![0x76, 0xa9, 0x14];
             sc.extend_from_slice(&[0x11u8; 20]);
@@ -2465,7 +2603,7 @@ mod tests {
 
         s.flush().unwrap();
         drop(s);
-        let s2 = Store::open(&dir).unwrap();
+        let s2 = Store::open_tiny(&dir).unwrap();
         let (_, outs) = s2.get_tx_meta_and_outputs(fks[1]).unwrap();
         assert_eq!(outs[0].script, p2tr);
         let _ = std::fs::remove_dir_all(&dir);
@@ -2476,11 +2614,11 @@ mod tests {
     fn open_schema16_no_sh_runs_soft_opens() {
         let dir = tmp();
         {
-            let s = Store::create(&dir).unwrap();
+            let s = Store::create_tiny(&dir).unwrap();
             s.flush().unwrap();
         }
         write_store_meta_ver(&dir, 16);
-        let s = Store::open(&dir).unwrap();
+        let s = Store::open_tiny(&dir).unwrap();
         drop(s);
         assert_eq!(read_store_meta_ver(&dir), SCHEMA_VERSION);
         let _ = std::fs::remove_dir_all(&dir);
@@ -2494,7 +2632,7 @@ mod tests {
     fn class_c_barrier_pre_tip_only_does_not_advance_tip() {
         let dir = tmp();
         {
-            let s = Store::create(&dir).unwrap();
+            let s = Store::create_tiny(&dir).unwrap();
             // Genesis tip: height 0 → header fk 1, one strong tx.
             s.confirmed.set(Height(0), Fk(1)).unwrap();
             s.header_txs.put_range(Fk(1), Fk(1), 1).unwrap();
@@ -2513,7 +2651,7 @@ mod tests {
             assert_eq!(s.confirmed.tip_height(), Some(Height(1)));
             // Drop without flushing confirmed (kill mid-barrier).
         }
-        let s = Store::open(&dir).unwrap();
+        let s = Store::open_tiny(&dir).unwrap();
         // Durable tip must remain 0 — confirmed was not in pre_tip flush.
         assert_eq!(
             s.confirmed.tip_height(),
@@ -2539,7 +2677,7 @@ mod tests {
     fn class_c_barrier_full_flush_reopen_tip_with_strong() {
         let dir = tmp();
         {
-            let s = Store::create(&dir).unwrap();
+            let s = Store::create_tiny(&dir).unwrap();
             s.confirmed.set(Height(0), Fk(1)).unwrap();
             s.header_txs.put_range(Fk(1), Fk(1), 1).unwrap();
             s.strong_tx.set_strong(Fk(1), Fk(1)).unwrap();
@@ -2552,7 +2690,7 @@ mod tests {
             s.rebuild_height_fence().unwrap();
             s.flush_class_c_tip().unwrap();
         }
-        let s = Store::open(&dir).unwrap();
+        let s = Store::open_tiny(&dir).unwrap();
         assert_eq!(s.confirmed.tip_height(), Some(Height(1)));
         assert_eq!(s.confirmed.get(Height(1)).unwrap(), Some(Fk(2)));
         assert!(s.is_confirmed_strong(Fk(1)).unwrap());
@@ -2566,7 +2704,7 @@ mod tests {
     #[test]
     fn get_fk_by_txid_tip_hits_pending_before_head_drain() {
         let dir = tmp();
-        let s = Store::create(&dir).unwrap();
+        let s = Store::create_tiny(&dir).unwrap();
         s.confirmed.set(Height(0), Fk(1)).unwrap();
         s.header_txs.put_range(Fk(1), Fk(1), 1).unwrap();
         s.strong_tx.set_strong(Fk(1), Fk(1)).unwrap();
@@ -2592,7 +2730,7 @@ mod tests {
     #[test]
     fn fence_tip_height_lags_unextended_confirmed() {
         let dir = tmp();
-        let s = Store::create(&dir).unwrap();
+        let s = Store::create_tiny(&dir).unwrap();
         s.confirmed.set(Height(0), Fk(1)).unwrap();
         s.header_txs.put_range(Fk(1), Fk(1), 1).unwrap();
         s.rebuild_height_fence().unwrap();
@@ -2624,7 +2762,7 @@ mod tests {
     #[test]
     fn height_fence_extend_missing_header_txs_is_not_ok_hole() {
         let dir = tmp();
-        let s = Store::create(&dir).unwrap();
+        let s = Store::create_tiny(&dir).unwrap();
         s.confirmed.set(Height(0), Fk(1)).unwrap();
         s.header_txs.put_range(Fk(1), Fk(1), 1).unwrap();
         s.rebuild_height_fence().unwrap();
@@ -2651,7 +2789,7 @@ mod tests {
     #[test]
     fn tiponly_unknown_txid_miss_on_head() {
         let dir = tmp();
-        let s = Store::create(&dir).unwrap();
+        let s = Store::create_tiny(&dir).unwrap();
         let miss = [0x11u8; 32];
         let hits = s.get_fk_by_txid_batch(&[miss]).unwrap();
         assert!(hits[0].1.is_none());
@@ -2666,7 +2804,7 @@ mod tests {
     fn tiponly_unconnected_identity_miss_on_fence() {
         use crate::tx_table::OutputRecord;
         let dir = tmp();
-        let s = Store::create(&dir).unwrap();
+        let s = Store::create_tiny(&dir).unwrap();
         let txid = [0x22u8; 32];
         let rec = TxRecord {
             txid,
@@ -2702,7 +2840,7 @@ mod tests {
     #[test]
     fn tiponly_same_page_foreigner_records_probe_diag() {
         let dir = tmp();
-        let s = Store::create(&dir).unwrap();
+        let s = Store::create_tiny(&dir).unwrap();
         let a = [0xAAu8; 32];
         let rec = TxRecord {
             txid: a,
@@ -2769,7 +2907,7 @@ mod tests {
     #[test]
     fn open_head_page_uses_mix_txid_not_raw() {
         let dir = tmp();
-        let s = Store::create(&dir).unwrap();
+        let s = Store::create_tiny(&dir).unwrap();
         let bits = s.txs.head.bits();
         let mut txid = [0x11u8; 32];
         let mut found = false;
@@ -2797,7 +2935,7 @@ mod tests {
     #[test]
     fn tiponly_resolve_miss_does_not_dump_probe_diag() {
         let dir = tmp();
-        let s = Store::create(&dir).unwrap();
+        let s = Store::create_tiny(&dir).unwrap();
         let miss = [0xCCu8; 32];
         let hits = s.get_fk_by_txid_batch(&[miss]).unwrap();
         assert!(hits[0].1.is_none(), "unknown txid must miss");
@@ -2817,7 +2955,7 @@ mod tests {
     fn class_c_tip_without_strong_is_unrepairable_hazard() {
         let dir = tmp();
         {
-            let s = Store::create(&dir).unwrap();
+            let s = Store::create_tiny(&dir).unwrap();
             s.confirmed.set(Height(0), Fk(1)).unwrap();
             s.header_txs.put_range(Fk(1), Fk(1), 1).unwrap();
             s.strong_tx.set_strong(Fk(1), Fk(1)).unwrap();
@@ -2828,7 +2966,7 @@ mod tests {
             s.confirmed.set(Height(1), Fk(2)).unwrap();
             s.confirmed.flush().unwrap(); // tip durable without strong
         }
-        let s = Store::open(&dir).unwrap();
+        let s = Store::open_tiny(&dir).unwrap();
         assert_eq!(s.confirmed.tip_height(), Some(Height(1)));
         // No strong for height-1 txs; repair only clears ABOVE tip.
         assert_eq!(s.repair_class_c_above_tip().unwrap(), 0);
@@ -2844,7 +2982,7 @@ mod tests {
     fn class_c_disconnect_tip_first_mid_barrier_is_repairable() {
         let dir = tmp();
         {
-            let s = Store::create(&dir).unwrap();
+            let s = Store::create_tiny(&dir).unwrap();
             // Tip 0 + tip 1 fully durable.
             s.confirmed.set(Height(0), Fk(1)).unwrap();
             s.header_txs.put_range(Fk(1), Fk(1), 1).unwrap();
@@ -2861,7 +2999,7 @@ mod tests {
             s.flush_confirmed_only().unwrap();
             // Do not unstrong — simulate kill mid-disconnect.
         }
-        let s = Store::open(&dir).unwrap();
+        let s = Store::open_tiny(&dir).unwrap();
         assert_eq!(
             s.confirmed.tip_height(),
             Some(Height(0)),
@@ -2884,7 +3022,7 @@ mod tests {
     fn class_c_disconnect_full_sequence_reopen_clean() {
         let dir = tmp();
         {
-            let s = Store::create(&dir).unwrap();
+            let s = Store::create_tiny(&dir).unwrap();
             s.confirmed.set(Height(0), Fk(1)).unwrap();
             s.header_txs.put_range(Fk(1), Fk(1), 1).unwrap();
             s.strong_tx.set_strong(Fk(1), Fk(1)).unwrap();
@@ -2901,7 +3039,7 @@ mod tests {
             s.height_fence_pop_tip(Height(1));
             s.flush_class_c_after_disconnect_tip().unwrap();
         }
-        let s = Store::open(&dir).unwrap();
+        let s = Store::open_tiny(&dir).unwrap();
         assert_eq!(s.confirmed.tip_height(), Some(Height(0)));
         assert!(s.is_confirmed_strong(Fk(1)).unwrap());
         assert!(!s.strong_tx.is_strong(Fk(2)).unwrap());
@@ -2915,7 +3053,7 @@ mod tests {
     fn class_c_disconnect_unstrong_before_tip_is_unrepairable_hazard() {
         let dir = tmp();
         {
-            let s = Store::create(&dir).unwrap();
+            let s = Store::create_tiny(&dir).unwrap();
             s.confirmed.set(Height(0), Fk(1)).unwrap();
             s.header_txs.put_range(Fk(1), Fk(1), 1).unwrap();
             s.strong_tx.set_strong(Fk(1), Fk(1)).unwrap();
@@ -2930,7 +3068,7 @@ mod tests {
             s.strong_tx.flush().unwrap();
             // Tip still 1 on disk — kill before confirmed.truncate.
         }
-        let s = Store::open(&dir).unwrap();
+        let s = Store::open_tiny(&dir).unwrap();
         assert_eq!(s.confirmed.tip_height(), Some(Height(1)));
         // Tip-high + unstrong / no height: repair only clears ABOVE tip — no help.
         assert_eq!(s.repair_class_c_above_tip().unwrap(), 0);
@@ -2944,7 +3082,7 @@ mod tests {
     #[test]
     fn orphan_class_c_at_tip_height_not_confirmed_strong_and_repairable() {
         let dir = tmp();
-        let s = Store::create(&dir).unwrap();
+        let s = Store::create_tiny(&dir).unwrap();
         // Real tip body: txs 1..=2 under header 1.
         s.confirmed.set(Height(0), Fk(1)).unwrap();
         s.header_txs.put_range(Fk(1), Fk(1), 2).unwrap();
@@ -2976,7 +3114,7 @@ mod tests {
     fn repair_orphan_class_c_empty_tip_and_gapped_orphans() {
         let dir = tmp();
         {
-            let s = Store::create(&dir).unwrap();
+            let s = Store::create_tiny(&dir).unwrap();
             assert_eq!(s.repair_orphan_class_c().unwrap(), 0);
             // Tip body 1..=2; orphans 5 and 10 (non-adjacent → two clear runs).
             s.confirmed.set(Height(0), Fk(1)).unwrap();
@@ -3004,7 +3142,7 @@ mod tests {
     fn store_open_upgrade_missing_tables_and_unspent_no_range() {
         let dir = tmp();
         {
-            let s = Store::create(&dir).unwrap();
+            let s = Store::create_tiny(&dir).unwrap();
             let create = coinbase_item([20u8; 32], vec![OutputRecord::unspent(10, vec![0x51])]);
             let fk = s.put_tx_full_batch_indexed(&[create], true).unwrap()[0];
             s.flush().unwrap();
@@ -3018,7 +3156,7 @@ mod tests {
             let _ = std::fs::remove_file(dir.join("header_txs_first.body"));
             let _ = std::fs::remove_file(dir.join("header_txs_count.body"));
             let _ = std::fs::remove_file(dir.join("tx_height.body"));
-            let s = Store::open(&dir).unwrap();
+            let s = Store::open_tiny(&dir).unwrap();
             assert_eq!(s.get_tx(fk).unwrap().txid, [20u8; 32]);
             // unspent without body_range
             let u = s.unspent_create_vouts(fk, &[0], None).unwrap();
@@ -3044,7 +3182,7 @@ mod tests {
     #[test]
     fn unspent_create_vouts_batch_matches_serial() {
         let dir = tmp();
-        let s = Store::create(&dir).unwrap();
+        let s = Store::create_tiny(&dir).unwrap();
         let mut fks = Vec::new();
         for i in 1u8..=4 {
             let item = coinbase_item(
@@ -3074,7 +3212,7 @@ mod tests {
     #[test]
     fn resolve_txid_prefers_connected_over_newer_unconnected() {
         let dir = tmp();
-        let s = Store::create(&dir).unwrap();
+        let s = Store::create_tiny(&dir).unwrap();
         let txid = [0xABu8; 32];
         let rec = |lock| TxRecord {
             txid,
@@ -3278,7 +3416,7 @@ mod tests {
     #[test]
     fn schema17_create_does_not_write_archive_epoch() {
         let dir = tmp();
-        let s = Store::create(&dir).unwrap();
+        let s = Store::create_tiny(&dir).unwrap();
         assert!(
             !dir.join("archive_epoch").exists(),
             "unread leftover must not be created"
@@ -3294,7 +3432,7 @@ mod tests {
         std::fs::write(dir.join("wire").join("leftover"), b"x").unwrap();
         std::fs::write(dir.join("sp_tweaks.idx"), b"old-idx").unwrap();
         std::fs::write(dir.join("sp_tweaks.body"), b"old-body").unwrap();
-        let s = Store::open(&dir).unwrap();
+        let s = Store::open_tiny(&dir).unwrap();
         assert!(!dir.join("archive_epoch").exists());
         assert!(!dir.join("wire").exists());
         assert!(!dir.join("sp_tweaks.idx").is_file());
@@ -3306,7 +3444,7 @@ mod tests {
     #[test]
     fn schema16_create_does_not_write_tx_height_and_fence_has_reorg_holes() {
         let dir = tmp();
-        let s = Store::create(&dir).unwrap();
+        let s = Store::create_tiny(&dir).unwrap();
         assert!(
             !dir.join("tx_height.body").exists(),
             "schema 16 must not create tx_height.body"
@@ -3327,7 +3465,7 @@ mod tests {
         assert!(!dir.join("tx_height.body").exists());
         // Leftover 15 file is unlinked on open.
         std::fs::write(dir.join("tx_height.body"), b"junk").unwrap();
-        let s = Store::open(&dir).unwrap();
+        let s = Store::open_tiny(&dir).unwrap();
         assert!(!dir.join("tx_height.body").exists());
         assert_eq!(s.tx_height_get(Fk(5)).unwrap(), None);
         assert_eq!(s.tx_height_get(Fk(6)).unwrap(), Some(1));
@@ -3339,7 +3477,7 @@ mod tests {
         let root = tmp();
         let hot = root.join("hot");
         let cold = root.join("cold");
-        let s = Store::create_layout(StoreLayout::with_cold(&hot, &cold)).unwrap();
+        let s = Store::create_layout(StoreLayout::tiny(&hot).with_cold_dir(&cold)).unwrap();
         assert_eq!(s.path(), hot.as_path());
         assert_eq!(s.cold_path(), Some(cold.as_path()));
         assert!(hot.join("txout.body").is_file());
@@ -3350,7 +3488,7 @@ mod tests {
         assert!(cold.join("inwit.idx").is_dir());
         assert!(hot.join(INWIT_RELOC_NAME).is_file());
         drop(s);
-        let s = Store::open_layout(StoreLayout::with_cold(&hot, &cold)).unwrap();
+        let s = Store::open_layout(StoreLayout::tiny(&hot).with_cold_dir(&cold)).unwrap();
         assert_eq!(s.cold_path(), Some(cold.as_path()));
         let hot_n = dir_file_bytes(&hot);
         let cold_n = dir_file_bytes(&cold);
@@ -3364,8 +3502,8 @@ mod tests {
         let root = tmp();
         let hot = root.join("hot");
         let cold = root.join("cold");
-        Store::create_layout(StoreLayout::with_cold(&hot, &cold)).unwrap();
-        match Store::open(&hot) {
+        Store::create_layout(StoreLayout::tiny(&hot).with_cold_dir(&cold)).unwrap();
+        match Store::open_tiny(&hot) {
             Ok(_) => panic!("must refuse when inwit.reloc is present"),
             Err(err) => {
                 let msg = err.to_string();
@@ -3381,9 +3519,9 @@ mod tests {
         let root = tmp();
         let hot = root.join("hot");
         let cold = root.join("cold");
-        Store::create(&hot).unwrap();
+        Store::create_tiny(&hot).unwrap();
         std::fs::create_dir_all(&cold).unwrap();
-        match Store::open_layout(StoreLayout::with_cold(&hot, &cold)) {
+        match Store::open_layout(StoreLayout::tiny(&hot).with_cold_dir(&cold)) {
             Ok(_) => panic!("must refuse leftover inwit in hot"),
             Err(err) => {
                 let msg = err.to_string();
@@ -3399,10 +3537,10 @@ mod tests {
         let root = tmp();
         let hot = root.join("hot");
         let cold = root.join("cold");
-        Store::create(&hot).unwrap();
+        Store::create_tiny(&hot).unwrap();
         std::fs::create_dir_all(&cold).unwrap();
         std::fs::copy(hot.join("inwit.body"), cold.join("inwit.body")).unwrap();
-        match Store::open_layout(StoreLayout::with_cold(&hot, &cold)) {
+        match Store::open_layout(StoreLayout::tiny(&hot).with_cold_dir(&cold)) {
             Ok(_) => panic!("must refuse dual inwit copies"),
             Err(err) => {
                 let msg = err.to_string();
@@ -3417,7 +3555,7 @@ mod tests {
         let root = tmp();
         let hot = root.join("hot");
         let cold = root.join("cold");
-        let s = Store::create_layout(StoreLayout::with_cold(&hot, &cold)).unwrap();
+        let s = Store::create_layout(StoreLayout::tiny(&hot).with_cold_dir(&cold)).unwrap();
         let item = coinbase_item([9u8; 32], vec![OutputRecord::unspent(1, vec![0x51])]);
         let fks = s
             .txs
@@ -3428,7 +3566,7 @@ mod tests {
         assert!(range.1 > 0);
         s.flush().unwrap();
         drop(s);
-        let s = Store::open_or_create_layout(StoreLayout::with_cold(&hot, &cold)).unwrap();
+        let s = Store::open_or_create_layout(StoreLayout::tiny(&hot).with_cold_dir(&cold)).unwrap();
         assert_eq!(s.txs.count(), 1);
         let range = s.tx_inwit_range(fks[0]).unwrap();
         assert!(range.1 > 0);

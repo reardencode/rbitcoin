@@ -689,9 +689,6 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn tmp_hub() -> (std::path::PathBuf, ChainHub) {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let dir = std::env::temp_dir().join(format!(
             "rbitcoin-ibd-reorg-{}-{}",
             std::process::id(),
@@ -701,7 +698,7 @@ mod tests {
                 .as_nanos()
         ));
         let _ = std::fs::create_dir_all(&dir);
-        let q = Query::open_or_create(dir.join("store")).expect("query");
+        let q = Query::open_or_create_tiny(dir.join("store")).expect("query");
         let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
         (dir, hub)
     }

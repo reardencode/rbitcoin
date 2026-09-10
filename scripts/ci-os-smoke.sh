@@ -7,8 +7,6 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-export RBITCOIN_HEAD_SCALE="${RBITCOIN_HEAD_SCALE:-tiny}"
-
 # Substring filters (one cargo test each — libtest ANDs extra args).
 # Keep this list the platform-diff surface, not the whole store suite.
 STORE_PLATFORM_FILTERS=(
@@ -34,7 +32,6 @@ esac
 
 if [[ "${CI_OS_SMOKE_DRY_RUN:-}" == "1" ]]; then
   echo "smoke=store-platform+node-smoke"
-  echo "RBITCOIN_HEAD_SCALE=$RBITCOIN_HEAD_SCALE"
   echo "filters=${STORE_PLATFORM_FILTERS[*]}"
   echo "skip=${STORE_PLATFORM_SKIPS[*]:-}"
   exit 0

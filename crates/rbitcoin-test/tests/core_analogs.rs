@@ -29,7 +29,7 @@ use std::sync::Arc;
 fn analog_milestone_and_mempool_persist() {
     let params = ChainParams::regtest();
     let td = TestDatadir::new().unwrap();
-    let q = Query::open_or_create(td.store_path()).unwrap();
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
     let chain = build_mature_regtest_with_spend(&q, &params);
 
     let spend_block = &chain.blocks[chain.spend_height as usize];
@@ -133,7 +133,7 @@ fn analog_reconstruct_after_lost_head() {
     let store = td.store_path();
     let b1;
     {
-        let q = Query::open_or_create(&store).unwrap();
+        let q = Query::open_or_create_tiny(&store).unwrap();
         accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
         b1 = mine_regtest_block(genesis.block_hash(), genesis.header.time + 600, 1, vec![]);
         accept_and_connect_block(&q, &params, Height(1), &b1, Milestone::NONE).unwrap();
@@ -144,7 +144,7 @@ fn analog_reconstruct_after_lost_head() {
         // Drop `q` — RAM cache / process head is gone; Class A archive stays.
     }
 
-    let q2 = Query::open_or_create(&store).unwrap();
+    let q2 = Query::open_or_create_tiny(&store).unwrap();
     assert_eq!(q2.tip_height(), Some(Height(2)));
     assert_reconstruct_eq(&q2, 1, &b1);
     let rec = q2

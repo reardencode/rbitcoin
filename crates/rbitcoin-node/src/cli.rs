@@ -4,6 +4,7 @@ use crate::run::{run_node, run_p2p};
 use rbitcoin_consensus::{default_milestone_height, ChainParams};
 use rbitcoin_log::{self, error, info, warn, Level};
 use rbitcoin_primitives::Network;
+use rbitcoin_store::HeadScale;
 use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -1230,6 +1231,7 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
     }
 
     if acc.smoke {
+        config.head_scale = HeadScale::Tiny;
         match run_node(config) {
             Ok(handle) => {
                 info!(

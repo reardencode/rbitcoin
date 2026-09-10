@@ -37,7 +37,8 @@ fn node_cli_and_surface_smoke() {
         let td = TestDatadir::new().unwrap();
         let cfg = NodeConfig::default()
             .with_datadir(td.path())
-            .with_network(net);
+            .with_network(net)
+            .with_tiny_heads();
         let handle = run_node(cfg).unwrap();
         assert_eq!(handle.network_name(), net.as_str());
         handle.shutdown().unwrap();
@@ -319,7 +320,7 @@ fn workspace_bin(name: &str) -> std::path::PathBuf {
 fn store_error_and_corrupt_paths() {
     let td = TestDatadir::new().unwrap();
     let path = td.store_path();
-    let s = Store::create(&path).unwrap();
+    let s = Store::create_tiny(&path).unwrap();
     assert!(matches!(s.get_header(Fk::NULL), Err(StoreError::InvalidFk)));
     assert!(matches!(s.get_header(Fk(99)), Err(StoreError::NotFound)));
     // All-zero txid has no create head entry → NotFound (not InvalidFk).
@@ -345,30 +346,36 @@ fn store_error_and_corrupt_paths() {
     let file_path = td.path().join("notdir");
     std::fs::write(&file_path, b"x").unwrap();
     assert!(matches!(
-        Store::create(&file_path),
+        Store::create_tiny(&file_path),
         Err(StoreError::NotDirectory(_))
     ));
 
     let bad = td.path().join("badstore");
     std::fs::create_dir_all(&bad).unwrap();
     std::fs::write(bad.join("meta"), b"XXXX\x00\x00").unwrap();
-    assert!(matches!(Store::open(&bad), Err(StoreError::BadMagic)));
+    assert!(matches!(Store::open_tiny(&bad), Err(StoreError::BadMagic)));
 
     let bad2 = td.path().join("badschema");
     std::fs::create_dir_all(&bad2).unwrap();
     let mut meta = Vec::from(*b"RBT1");
     meta.extend_from_slice(&99u16.to_le_bytes());
     std::fs::write(bad2.join("meta"), meta).unwrap();
-    assert!(matches!(Store::open(&bad2), Err(StoreError::BadSchema(99))));
+    assert!(matches!(
+        Store::open_tiny(&bad2),
+        Err(StoreError::BadSchema(99))
+    ));
 
     let bad3 = td.path().join("shortmeta");
     std::fs::create_dir_all(&bad3).unwrap();
     std::fs::write(bad3.join("meta"), b"RB").unwrap();
-    assert!(matches!(Store::open(&bad3), Err(StoreError::Corrupt(_))));
+    assert!(matches!(
+        Store::open_tiny(&bad3),
+        Err(StoreError::Corrupt(_))
+    ));
 
     let parent_file = td.path().join("parent_is_file");
     std::fs::write(&parent_file, b"x").unwrap();
-    assert!(Store::create(parent_file.join("store")).is_err());
+    assert!(Store::create_tiny(parent_file.join("store")).is_err());
 
     assert!(HeaderRecord::decode(&[0u8; 10]).is_err());
     assert!(TxRecord::decode(&[0u8; 10]).is_err());
@@ -380,13 +387,13 @@ fn store_table_header_and_idx_corrupt() {
     let td = TestDatadir::new().unwrap();
     let store_dir = td.path().join("broken_kind");
     {
-        let s = Store::create(&store_dir).unwrap();
+        let s = Store::create_tiny(&store_dir).unwrap();
         s.flush().unwrap();
     }
     let mut hb = std::fs::read(store_dir.join("header.body")).unwrap();
     hb[6..8].copy_from_slice(&TableKind::TxOut.as_u16().to_le_bytes());
     std::fs::write(store_dir.join("header.body"), &hb).unwrap();
-    match Store::open(&store_dir) {
+    match Store::open_tiny(&store_dir) {
         Err(StoreError::BadKind { .. }) => {}
         Err(e) => panic!("expected BadKind, got {e}"),
         Ok(_) => panic!("expected BadKind"),
@@ -394,12 +401,12 @@ fn store_table_header_and_idx_corrupt() {
 
     let store_dir2 = td.path().join("broken_magic");
     {
-        Store::create(&store_dir2).unwrap().flush().unwrap();
+        Store::create_tiny(&store_dir2).unwrap().flush().unwrap();
     }
     let mut hb = std::fs::read(store_dir2.join("header.body")).unwrap();
     hb[0..4].copy_from_slice(b"XXXX");
     std::fs::write(store_dir2.join("header.body"), &hb).unwrap();
-    match Store::open(&store_dir2) {
+    match Store::open_tiny(&store_dir2) {
         Err(StoreError::BadMagic) => {}
         Err(e) => panic!("expected BadMagic, got {e}"),
         Ok(_) => panic!("expected BadMagic"),
@@ -407,12 +414,12 @@ fn store_table_header_and_idx_corrupt() {
 
     let store_dir3 = td.path().join("broken_schema");
     {
-        Store::create(&store_dir3).unwrap().flush().unwrap();
+        Store::create_tiny(&store_dir3).unwrap().flush().unwrap();
     }
     let mut hb = std::fs::read(store_dir3.join("header.body")).unwrap();
     hb[4..6].copy_from_slice(&123u16.to_le_bytes());
     std::fs::write(store_dir3.join("header.body"), &hb).unwrap();
-    match Store::open(&store_dir3) {
+    match Store::open_tiny(&store_dir3) {
         Err(StoreError::BadSchema(123)) => {}
         Err(e) => panic!("expected BadSchema, got {e}"),
         Ok(_) => panic!("expected BadSchema"),
@@ -420,14 +427,14 @@ fn store_table_header_and_idx_corrupt() {
 
     let sd = td.path().join("empty_head");
     {
-        Store::create(&sd).unwrap().flush().unwrap();
+        Store::create_tiny(&sd).unwrap().flush().unwrap();
     }
     let head = sd.join("header.head");
     let mut bytes = std::fs::read(&head).unwrap();
     bytes[8..16].copy_from_slice(&16u64.to_le_bytes());
     bytes.truncate(16);
     std::fs::write(&head, bytes).unwrap();
-    match Store::open(&sd) {
+    match Store::open_tiny(&sd) {
         Err(StoreError::Corrupt(_)) => {}
         Err(e) => panic!("expected Corrupt, got {e}"),
         Ok(_) => panic!("expected Corrupt"),
@@ -435,7 +442,7 @@ fn store_table_header_and_idx_corrupt() {
 
     let sd2 = td.path().join("bad_slots");
     {
-        Store::create(&sd2).unwrap().flush().unwrap();
+        Store::create_tiny(&sd2).unwrap().flush().unwrap();
     }
     let head = sd2.join("header.head");
     let mut bytes = std::fs::read(&head).unwrap();
@@ -443,7 +450,7 @@ fn store_table_header_and_idx_corrupt() {
     bytes.resize(logical as usize, 0);
     bytes[8..16].copy_from_slice(&logical.to_le_bytes());
     std::fs::write(&head, bytes).unwrap();
-    match Store::open(&sd2) {
+    match Store::open_tiny(&sd2) {
         Err(StoreError::Corrupt(_)) => {}
         Err(e) => panic!("expected Corrupt, got {e}"),
         Ok(_) => panic!("expected Corrupt"),
@@ -460,7 +467,7 @@ fn chain_connect_reorg_and_growth() {
     use rbitcoin_store::{InputRecord, OutputRecord};
 
     let td = TestDatadir::new().unwrap();
-    let q = Query::open_or_create(td.store_path()).unwrap();
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
 
     // Default hash head is 64 slots; 80 blocks (header keys) force header.head.g1.
     // Merkle root must match the Class A txid(s) so tip-window revalidate on reopen
@@ -516,7 +523,7 @@ fn chain_connect_reorg_and_growth() {
     q.flush().unwrap();
     drop(q);
 
-    let q = Query::open_or_create(td.store_path()).unwrap();
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
     assert_eq!(q.tip_height(), Some(Height(N - 1)));
     q.disconnect_tip().unwrap();
     assert_eq!(q.tip_height(), Some(Height(N - 2)));
@@ -552,7 +559,7 @@ fn resume_work_path_sees_archived_bodies_after_reopen() {
     let genesis = regtest_genesis();
 
     let hashes = {
-        let q = Query::open_or_create(td.store_path()).unwrap();
+        let q = Query::open_or_create_tiny(td.store_path()).unwrap();
         accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, ms).unwrap();
         let mut tip = genesis.block_hash();
         let mut tip_time = genesis.header.time;
@@ -573,7 +580,7 @@ fn resume_work_path_sees_archived_bodies_after_reopen() {
     };
 
     // Cold reopen — process-local ordered path is gone; store still has Class A.
-    let q2 = Query::open_or_create(td.store_path()).unwrap();
+    let q2 = Query::open_or_create_tiny(td.store_path()).unwrap();
     let tip_hash = genesis.block_hash().to_byte_array();
     let path = q2
         .resume_work_path_after_tip(tip_hash, 0, 64)
@@ -601,7 +608,7 @@ fn confirm_survives_partial_class_c_without_tip_advance() {
     use rbitcoin_test::mine::{mine_regtest_block, regtest_genesis, spend_anyone_can_spend};
 
     let td = TestDatadir::new().unwrap();
-    let q = Query::open_or_create(td.store_path()).unwrap();
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
     q.set_spend_index(true);
     q.set_tx_index(true);
     let ms = Milestone::NONE;
@@ -695,7 +702,7 @@ fn confirm_survives_partial_class_c_without_tip_advance() {
     q.flush().unwrap();
     drop(q);
 
-    let q2 = Query::open_or_create(td.store_path()).unwrap();
+    let q2 = Query::open_or_create_tiny(td.store_path()).unwrap();
     assert!(
         !q2.store().strong_tx.is_strong(fks2[0]).unwrap(),
         "open must repair strong bits above tip"
@@ -720,7 +727,7 @@ fn resume_tx_head_resolves_external_prev() {
 
     // Session 1: mine + confirm pad so coinbase is mature; leave spend unarchived.
     let (cb1, tip, tip_time, spend_h, b_spend) = {
-        let q = Query::open_or_create(td.store_path()).unwrap();
+        let q = Query::open_or_create_tiny(td.store_path()).unwrap();
         q.enter_direct_index_mode().unwrap();
         let genesis = regtest_genesis();
         accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, ms).unwrap();
@@ -748,7 +755,7 @@ fn resume_tx_head_resolves_external_prev() {
 
     // Session 2: reopen, archive spend (create_fk via head), confirm.
     {
-        let q = Query::open_or_create(td.store_path()).unwrap();
+        let q = Query::open_or_create_tiny(td.store_path()).unwrap();
         q.enter_direct_index_mode().unwrap();
         assert!(
             q.tx_fk_by_txid(cb1.as_byte_array()).unwrap().is_some(),
@@ -803,7 +810,7 @@ fn confirm_structural_rejects_already_spent_prevout() {
     use rbitcoin_test::mine::{mine_regtest_block, regtest_genesis, spend_anyone_can_spend};
 
     let td = TestDatadir::new().unwrap();
-    let q = Query::open_or_create(td.store_path()).unwrap();
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
     q.enter_direct_index_mode().unwrap();
     let ms = Milestone::NONE;
     let params = ChainParams::regtest();
@@ -865,7 +872,7 @@ fn confirm_batch_create_and_spend_parent_same_run() {
     use rbitcoin_test::mine::{mine_regtest_block, regtest_genesis, spend_anyone_can_spend};
 
     let td = TestDatadir::new().unwrap();
-    let q = Query::open_or_create(td.store_path()).unwrap();
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
     q.enter_direct_index_mode().unwrap();
     let ms = Milestone::NONE;
     let params = ChainParams::regtest();
@@ -933,7 +940,7 @@ fn confirm_spend_both_vouts_of_one_input_parent() {
     };
 
     let td = TestDatadir::new().unwrap();
-    let q = Query::open_or_create(td.store_path()).unwrap();
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
     q.enter_direct_index_mode().unwrap();
     let ms = Milestone::NONE;
     let params = ChainParams::regtest();
@@ -1064,7 +1071,7 @@ fn confirm_run_sequential_and_failed_no_spend_poison() {
     use rbitcoin_test::mine::{mine_regtest_block, regtest_genesis};
 
     let td = TestDatadir::new().unwrap();
-    let q = Query::open_or_create(td.store_path()).unwrap();
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
     q.enter_direct_index_mode().unwrap();
     let ms = Milestone { height: 0 };
     let params = ChainParams::regtest();
@@ -1111,7 +1118,7 @@ fn consensus_mature_chain_spend_reconstruct_and_scripthash() {
     use rbitcoin_store::{script_hash, InputRecord};
 
     let td = TestDatadir::new().unwrap();
-    let q = Query::open_or_create(td.store_path()).unwrap();
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
     let params = ChainParams::regtest();
 
     // ONE maturity pad for spend, reconstruct, and scripthash contracts.
@@ -1307,7 +1314,7 @@ fn consensus_mature_chain_spend_reconstruct_and_scripthash() {
     drop(q);
 
     // Reopen — reconstruct without RAM cache; durable SH must not duplicate.
-    let q = Query::open_or_create(td.store_path()).unwrap();
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
     assert_eq!(q.tip_height(), Some(Height(tip_h - 1)));
     let mut indexed = std::collections::HashSet::new();
     q.store()
@@ -1405,7 +1412,7 @@ fn three_stage_confirm_and_parent_pin_surface() {
     use rbitcoin_test::mine::{mine_regtest_block, regtest_genesis, spend_anyone_can_spend};
 
     let td = TestDatadir::new().unwrap();
-    let q = Query::open_or_create(td.store_path()).unwrap();
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
     q.enter_direct_index_mode().unwrap();
     let ms = Milestone::NONE;
     let params = ChainParams::regtest();
@@ -1477,7 +1484,7 @@ fn confirm_multi_block_spend_uses_header_plan_mtp() {
     use rbitcoin_test::mine::{mine_regtest_block, regtest_genesis, spend_anyone_can_spend};
 
     let td = TestDatadir::new().unwrap();
-    let q = Query::open_or_create(td.store_path()).unwrap();
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
     q.enter_direct_index_mode().unwrap();
     let ms = Milestone::NONE;
     let params = ChainParams::regtest();
@@ -1539,7 +1546,7 @@ fn confirm_load_ahead_of_write_does_not_badprev() {
     use rbitcoin_test::mine::{mine_regtest_block, regtest_genesis};
 
     let td = TestDatadir::new().unwrap();
-    let q = Query::open_or_create(td.store_path()).unwrap();
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
     q.enter_direct_index_mode().unwrap();
     let ms = Milestone::NONE;
     let params = ChainParams::regtest();
@@ -1617,7 +1624,7 @@ fn confirm_assemble_after_tip_gc_uses_store_for_mtp() {
     use rbitcoin_test::mine::{mine_regtest_block, regtest_genesis};
 
     let td = TestDatadir::new().unwrap();
-    let q = Query::open_or_create(td.store_path()).unwrap();
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
     q.enter_direct_index_mode().unwrap();
     let ms = Milestone::NONE;
     let params = ChainParams::regtest();
@@ -1665,7 +1672,7 @@ fn block_cache_and_mempool_hub_surface() {
     use std::sync::Arc;
 
     let td = TestDatadir::new().unwrap();
-    let q = Query::open_or_create(td.store_path()).unwrap();
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
     q.enter_direct_index_mode().unwrap();
     let params = ChainParams::regtest();
     let ms = Milestone::NONE;
@@ -1782,7 +1789,7 @@ fn unified_wire_pipeline_multi_block_to_tip() {
     };
 
     let td = TestDatadir::new().unwrap();
-    let q = Query::open_or_create(td.store_path()).unwrap();
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
     q.enter_direct_index_mode().unwrap();
     let params = ChainParams::regtest();
     let ms = Milestone::NONE;
@@ -1847,7 +1854,7 @@ fn wire_prep_external_parent_denserels_cold_class_a() {
     use rbitcoin_test::mine::split_anyone_can_spend;
 
     let td = TestDatadir::new().unwrap();
-    let q = Query::open_or_create(td.store_path()).unwrap();
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
     q.enter_direct_index_mode().unwrap();
     let params = ChainParams::regtest();
     let ms = Milestone::NONE;
@@ -1934,7 +1941,7 @@ fn wire_prep_already_archived_bodies_spend_annotate() {
     };
 
     let td = TestDatadir::new().unwrap();
-    let q = Query::open_or_create(td.store_path()).unwrap();
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
     q.enter_direct_index_mode().unwrap();
     let params = ChainParams::regtest();
     let ms = Milestone::NONE;
@@ -2007,7 +2014,7 @@ fn wire_prep_ahead_cross_batch_spend_fills_parent_layout() {
     };
 
     let td = TestDatadir::new().unwrap();
-    let q = Query::open_or_create(td.store_path()).unwrap();
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
     q.enter_direct_index_mode().unwrap();
     let params = ChainParams::regtest();
     let ms = Milestone::NONE;
@@ -2138,7 +2145,7 @@ fn unified_wire_pipeline_rejects_double_spend() {
     use rbitcoin_consensus::{accept_and_connect_block, confirm_wire_run, ChainParams, Milestone};
 
     let td = TestDatadir::new().unwrap();
-    let q = Query::open_or_create(td.store_path()).unwrap();
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
     q.enter_direct_index_mode().unwrap();
     let params = ChainParams::regtest();
     let ms = Milestone::NONE;

@@ -24,7 +24,7 @@ fn query_open_clears_strong_above_tip() {
     assert!(q.store().strong_tx.is_strong(leftover).unwrap());
     drop(q);
 
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     assert_eq!(
         q.tip_height(),
         Some(Height(0)),
@@ -45,7 +45,7 @@ fn temp_query(label: &str) -> (std::path::PathBuf, Query) {
     let dir = std::env::temp_dir().join(format!("rbitcoin-query-{label}-{n}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     (dir, q)
 }
 
@@ -918,7 +918,7 @@ fn sh_writebehind_recover_requeues_unapplied_heights() {
     assert_eq!(q.sh_indexed_through_height(), Some(0));
     q.store().flush_class_c_tip().unwrap();
     drop(q);
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     assert_eq!(q.sh_indexed_through_height(), Some(0));
     let sh = script_hash(&[0x51]);
     assert_eq!(

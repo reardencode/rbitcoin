@@ -789,7 +789,7 @@ mod tests {
 
     fn seed_table(n: u8) -> (PathBuf, TxTable, Vec<[u8; 32]>) {
         let dir = tmp("seed");
-        let t = TxTable::create(&dir).unwrap();
+        let t = TxTable::create_tiny(&dir).unwrap();
         let mut items = Vec::new();
         let mut txids = Vec::new();
         for i in 0..n {
@@ -822,7 +822,7 @@ mod tests {
     /// slots on page 0, so `n ≥ 1100` spans two OS pages.
     fn seed_table_n(n: u32) -> (PathBuf, TxTable, Vec<[u8; 32]>) {
         let dir = tmp("seed-n");
-        let t = TxTable::create(&dir).unwrap();
+        let t = TxTable::create_tiny(&dir).unwrap();
         let mut items = Vec::new();
         let mut txids = Vec::new();
         for i in 0..n {
@@ -995,7 +995,7 @@ mod tests {
     #[test]
     fn uring_pending_write_behind_does_not_nest_tls() {
         let dir = tmp("pending-uring");
-        let t = TxTable::create(&dir).unwrap();
+        let t = TxTable::create_tiny(&dir).unwrap();
         let mut tid = [0u8; 32];
         tid[0] = 0x51;
         let tx = TxRecord {
@@ -1220,7 +1220,7 @@ mod tests {
     #[test]
     fn miss_and_deepest_create_wins() {
         let dir = tmp("bip30");
-        let t = TxTable::create(&dir).unwrap();
+        let t = TxTable::create_tiny(&dir).unwrap();
         let txid = [0xcd; 32];
         let mk = |hint: u8| {
             (

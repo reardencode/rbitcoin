@@ -4,18 +4,11 @@ use crate::compact::{
     read_uleb128, script_kind_v17_disk_used, write_compact_size, write_uleb128,
 };
 use crate::error::StoreError;
+use crate::hashhead::HeadOpenOpts;
 use crate::segmented_head::SegmentedTxHead;
 use crate::var_table::VarTable;
 use rbitcoin_primitives::{Fk, TableKind};
 use std::path::Path;
-
-#[cfg(test)]
-thread_local! {
-    static TEST_REBUILD_SEAL_BITS: std::cell::Cell<Option<u32>> =
-        const { std::cell::Cell::new(None) };
-    static TEST_REBUILD_WORKERS: std::cell::Cell<Option<usize>> =
-        const { std::cell::Cell::new(None) };
-}
 
 /// Host RAM budget per parallel `tx.head` rebuild worker (not SH pack's 2 GiB).
 /// BDZ peel scratch + keys + g at the default 2²⁵ seal is ≈1 GiB peak.
@@ -396,6 +389,8 @@ pub struct TxTable {
     pub(crate) secret: crate::store_secret::StoreSecret,
     /// Unflushed head inserts (write-behind). Readers see published snapshot.
     pending_head: pending_head::PendingHeadInserts,
+    rebuild_seal_bits: u32,
+    rebuild_workers: usize,
 }
 
 /// Backend for bulk structural 8-byte spender-meta reads on `tx.body`.
@@ -420,12 +415,32 @@ pub fn spend_meta_backend() -> SpendMetaBackend {
 
 impl TxTable {
     pub fn create(dir: &Path) -> Result<Self, StoreError> {
-        Self::create_with_head_layout(dir, crate::address_head::default_layout())
+        Self::create_with_opts(dir, HeadOpenOpts::MAINNET)
+    }
+
+    pub fn create_tiny(dir: &Path) -> Result<Self, StoreError> {
+        Self::create_with_opts(dir, HeadOpenOpts::TINY)
+    }
+
+    pub fn create_with_opts(dir: &Path, opts: HeadOpenOpts) -> Result<Self, StoreError> {
+        Self::create_with_head_layout_opts(
+            dir,
+            crate::address_head::default_layout(opts.scale),
+            opts,
+        )
     }
 
     /// Create with an explicit head geometry (tests / recovery).
     pub fn create_with_head_layout(dir: &Path, layout: HeadLayout) -> Result<Self, StoreError> {
-        Self::create_with_head_layout_inwit(dir, dir, layout)
+        Self::create_with_head_layout_opts(dir, layout, HeadOpenOpts::TINY)
+    }
+
+    pub fn create_with_head_layout_opts(
+        dir: &Path,
+        layout: HeadLayout,
+        opts: HeadOpenOpts,
+    ) -> Result<Self, StoreError> {
+        Self::create_with_head_layout_inwit(dir, dir, layout, opts)
     }
 
     /// Create Class A stems; `inwit` may live in a different directory.
@@ -433,29 +448,123 @@ impl TxTable {
         dir: &Path,
         inwit_dir: &Path,
         layout: HeadLayout,
+        opts: HeadOpenOpts,
     ) -> Result<Self, StoreError> {
         if inwit_dir != dir {
             std::fs::create_dir_all(inwit_dir).map_err(|e| StoreError::io(inwit_dir, e))?;
         }
         let secret = crate::store_secret::StoreSecret::load_or_create(dir, true)?;
         let layout = HeadLayout::with_entry_bytes(layout.bits, 4)?;
+        let (seal_bits, workers, soft_span) = Self::resolve_open_opts(opts);
         Ok(Self {
-            body: VarTable::create(dir, "txout", TableKind::TxOut)?,
-            inwit: VarTable::create(inwit_dir, "inwit", TableKind::Inwit)?,
-            spent: VarTable::create(dir, "spent", TableKind::Spent)?,
+            body: Self::create_var(
+                dir,
+                "txout",
+                TableKind::TxOut,
+                opts.idx_soft_span,
+                soft_span,
+            )?,
+            inwit: Self::create_var(
+                inwit_dir,
+                "inwit",
+                TableKind::Inwit,
+                opts.idx_soft_span,
+                soft_span,
+            )?,
+            spent: Self::create_var(
+                dir,
+                "spent",
+                TableKind::Spent,
+                opts.idx_soft_span,
+                soft_span,
+            )?,
             head: SegmentedTxHead::create(dir, layout)?,
             txids: crate::txid_body::TxidBody::create(dir)?,
             secret,
             pending_head: pending_head::PendingHeadInserts::new(),
+            rebuild_seal_bits: seal_bits,
+            rebuild_workers: workers,
         })
     }
 
+    fn resolve_open_opts(opts: HeadOpenOpts) -> (u32, usize, u64) {
+        let seal_bits = opts
+            .rebuild_seal_bits
+            .map(|b| b.clamp(6, 26))
+            .unwrap_or_else(|| {
+                parse_rebuild_seal_bits(
+                    std::env::var("RBITCOIN_TX_HEAD_REBUILD_SEAL_BITS")
+                        .ok()
+                        .as_deref(),
+                )
+            });
+        let workers = opts
+            .rebuild_workers
+            .map(|n| n.clamp(1, 256))
+            .unwrap_or_else(|| {
+                if let Some(n) = parse_rebuild_workers(
+                    std::env::var("RBITCOIN_TX_HEAD_REBUILD_WORKERS")
+                        .ok()
+                        .as_deref(),
+                ) {
+                    n
+                } else {
+                    tx_head_rebuild_workers_for_free_ram(
+                        crate::sorted_run::logical_cpus(),
+                        crate::host_mem_available_bytes().unwrap_or(0),
+                    )
+                }
+            });
+        let soft_span = crate::tx_idx::resolve_soft_span(opts.idx_soft_span);
+        (seal_bits, workers, soft_span)
+    }
+
+    fn create_var(
+        dir: &Path,
+        stem: &str,
+        kind: TableKind,
+        explicit: Option<u64>,
+        resolved: u64,
+    ) -> Result<VarTable, StoreError> {
+        if explicit.is_some() {
+            VarTable::create_with_soft_span(dir, stem, kind, resolved)
+        } else {
+            VarTable::create(dir, stem, kind)
+        }
+    }
+
+    fn open_var(
+        dir: &Path,
+        stem: &str,
+        kind: TableKind,
+        explicit: Option<u64>,
+        resolved: u64,
+    ) -> Result<VarTable, StoreError> {
+        if explicit.is_some() {
+            VarTable::open_with_soft_span(dir, stem, kind, resolved)
+        } else {
+            VarTable::open(dir, stem, kind)
+        }
+    }
+
     pub fn open(dir: &Path) -> Result<Self, StoreError> {
-        Self::open_inwit(dir, dir)
+        Self::open_with_opts(dir, HeadOpenOpts::MAINNET)
+    }
+
+    pub fn open_tiny(dir: &Path) -> Result<Self, StoreError> {
+        Self::open_with_opts(dir, HeadOpenOpts::TINY)
+    }
+
+    pub fn open_with_opts(dir: &Path, opts: HeadOpenOpts) -> Result<Self, StoreError> {
+        Self::open_inwit(dir, dir, opts)
     }
 
     /// Open Class A stems; `inwit` may live in a different directory.
-    pub(crate) fn open_inwit(dir: &Path, inwit_dir: &Path) -> Result<Self, StoreError> {
+    pub(crate) fn open_inwit(
+        dir: &Path,
+        inwit_dir: &Path,
+        opts: HeadOpenOpts,
+    ) -> Result<Self, StoreError> {
         if dir.join("tx.body").exists() && !dir.join("txout.body").exists() {
             let legacy = VarTable::open(dir, "tx", TableKind::TxOut)?;
             if legacy.count() > 0 {
@@ -464,13 +573,26 @@ impl TxTable {
                 ));
             }
         }
+        let (seal_bits, workers, soft_span) = Self::resolve_open_opts(opts);
         let had_txout = dir.join("txout.body").exists();
         let had_inwit = inwit_dir.join("inwit.body").exists();
         let had_spent = dir.join("spent.body").exists();
         let body = if had_txout {
-            VarTable::open(dir, "txout", TableKind::TxOut)?
+            Self::open_var(
+                dir,
+                "txout",
+                TableKind::TxOut,
+                opts.idx_soft_span,
+                soft_span,
+            )?
         } else {
-            VarTable::create(dir, "txout", TableKind::TxOut)?
+            Self::create_var(
+                dir,
+                "txout",
+                TableKind::TxOut,
+                opts.idx_soft_span,
+                soft_span,
+            )?
         };
         if had_txout && body.count() > 0 && (!had_inwit || !had_spent) {
             return Err(StoreError::Corrupt(
@@ -482,14 +604,38 @@ impl TxTable {
             std::fs::create_dir_all(inwit_dir).map_err(|e| StoreError::io(inwit_dir, e))?;
         }
         let inwit = if had_inwit {
-            VarTable::open(inwit_dir, "inwit", TableKind::Inwit)?
+            Self::open_var(
+                inwit_dir,
+                "inwit",
+                TableKind::Inwit,
+                opts.idx_soft_span,
+                soft_span,
+            )?
         } else {
-            VarTable::create(inwit_dir, "inwit", TableKind::Inwit)?
+            Self::create_var(
+                inwit_dir,
+                "inwit",
+                TableKind::Inwit,
+                opts.idx_soft_span,
+                soft_span,
+            )?
         };
         let spent = if had_spent {
-            VarTable::open(dir, "spent", TableKind::Spent)?
+            Self::open_var(
+                dir,
+                "spent",
+                TableKind::Spent,
+                opts.idx_soft_span,
+                soft_span,
+            )?
         } else {
-            VarTable::create(dir, "spent", TableKind::Spent)?
+            Self::create_var(
+                dir,
+                "spent",
+                TableKind::Spent,
+                opts.idx_soft_span,
+                soft_span,
+            )?
         };
         let txids = if dir.join("txid.body").exists() {
             crate::txid_body::TxidBody::open(dir)?
@@ -541,7 +687,7 @@ impl TxTable {
             if mono.is_file() {
                 let _ = std::fs::remove_file(&mono);
             }
-            SegmentedTxHead::create(dir, crate::address_head::default_layout())?
+            SegmentedTxHead::create(dir, crate::address_head::default_layout(opts.scale))?
         } else {
             match SegmentedTxHead::open(dir) {
                 Ok(h) => {
@@ -556,7 +702,10 @@ impl TxTable {
                         drop(h);
                         crate::segmented_head::wipe_segmented_head_files(dir);
                         need_rebuild = n_bodies > 0;
-                        SegmentedTxHead::create(dir, crate::address_head::default_layout())?
+                        SegmentedTxHead::create(
+                            dir,
+                            crate::address_head::default_layout(opts.scale),
+                        )?
                     } else {
                         if n_bodies > 0 && h.occupied() == 0 {
                             need_rebuild = true;
@@ -572,7 +721,10 @@ impl TxTable {
                         );
                         crate::segmented_head::wipe_segmented_head_files(dir);
                         need_rebuild = true;
-                        SegmentedTxHead::create(dir, crate::address_head::default_layout())?
+                        SegmentedTxHead::create(
+                            dir,
+                            crate::address_head::default_layout(opts.scale),
+                        )?
                     } else {
                         return Err(e);
                     }
@@ -588,6 +740,8 @@ impl TxTable {
             txids,
             secret,
             pending_head: pending_head::PendingHeadInserts::new(),
+            rebuild_seal_bits: seal_bits,
+            rebuild_workers: workers,
         };
         if need_rebuild {
             let bits = t.head_bits();
@@ -595,8 +749,8 @@ impl TxTable {
             rbitcoin_log::info!(
                 "store: tx.head rebuild begin n={n_bodies} bits={bits} slots={slots} \
                  seal_bits={} workers={} free_GiB={} (segmented)",
-                Self::rebuild_seal_bits(),
-                Self::rebuild_workers(),
+                t.rebuild_seal_bits(),
+                t.rebuild_workers(),
                 crate::free_gib_label(),
             );
             let inserted = t.rebuild_head_from_bodies(|done, total, ins| {
@@ -1665,8 +1819,8 @@ impl TxTable {
         }
         let ranges = self.plan_head_rebuild_ranges()?;
         let n_jobs = ranges.len();
-        let workers = Self::rebuild_workers().min(n_jobs).max(1);
-        let seal_bits = Self::rebuild_seal_bits();
+        let workers = self.rebuild_workers().min(n_jobs).max(1);
+        let seal_bits = self.rebuild_seal_bits();
         rbitcoin_log::info!(
             "store: tx.head rebuild mphf n={n} seal_bits={seal_bits} ranges={n_jobs} \
              workers={workers} free_GiB={}",
@@ -1748,93 +1902,43 @@ impl TxTable {
         Ok((first, count, pubd))
     }
 
-    /// Parallel wipe-rebuild workers. Env `RBITCOIN_TX_HEAD_REBUILD_WORKERS`;
-    /// default min(CPUs, free RAM / 1 GiB). Not SH pack's 2 GiB cap.
-    pub fn rebuild_workers() -> usize {
-        #[cfg(test)]
-        if let Some(n) = TEST_REBUILD_WORKERS.with(std::cell::Cell::get) {
-            return n;
-        }
-        if let Some(n) = parse_rebuild_workers(
-            std::env::var("RBITCOIN_TX_HEAD_REBUILD_WORKERS")
-                .ok()
-                .as_deref(),
-        ) {
-            return n;
-        }
-        tx_head_rebuild_workers_for_free_ram(
-            crate::sorted_run::logical_cpus(),
-            crate::host_mem_available_bytes().unwrap_or(0),
-        )
+    /// Parallel wipe-rebuild workers captured at open (env or explicit opts).
+    pub fn rebuild_workers(&self) -> usize {
+        self.rebuild_workers
     }
 
-    /// Hold this thread's rebuild worker count for `f`.
-    #[cfg(test)]
-    pub fn test_with_rebuild_workers<R>(n: usize, f: impl FnOnce() -> R) -> R {
-        let n = n.clamp(1, 256);
-        let prev = TEST_REBUILD_WORKERS.with(|c| c.replace(Some(n)));
-        struct Restore(Option<usize>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                TEST_REBUILD_WORKERS.with(|c| c.set(self.0));
-            }
-        }
-        let _restore = Restore(prev);
-        f()
+    /// Rebuild MPHF range width captured at open: `2^bits` keys.
+    pub fn rebuild_seal_bits(&self) -> u32 {
+        self.rebuild_seal_bits
     }
 
-    /// Rebuild MPHF range width: `2^bits` keys. Default **25**; **26** is wider.
-    ///
-    /// Env `RBITCOIN_TX_HEAD_REBUILD_SEAL_BITS`. Operator: 25 or 26. Tests may
-    /// pin 6..=26 on the calling thread without mutating process env.
-    pub fn rebuild_seal_bits() -> u32 {
-        #[cfg(test)]
-        if let Some(b) = TEST_REBUILD_SEAL_BITS.with(std::cell::Cell::get) {
-            return b;
-        }
-        parse_rebuild_seal_bits(
-            std::env::var("RBITCOIN_TX_HEAD_REBUILD_SEAL_BITS")
-                .ok()
-                .as_deref(),
-        )
+    pub fn rebuild_seal_keys(&self) -> u64 {
+        1u64 << self.rebuild_seal_bits()
     }
+}
 
-    /// Hold this thread's rebuild seal bits for `f` (does not mutate process env).
-    #[cfg(test)]
-    pub fn test_with_rebuild_seal_bits<R>(bits: u32, f: impl FnOnce() -> R) -> R {
-        let bits = bits.clamp(6, 26);
-        let prev = TEST_REBUILD_SEAL_BITS.with(|c| c.replace(Some(bits)));
-        struct Restore(Option<u32>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                TEST_REBUILD_SEAL_BITS.with(|c| c.set(self.0));
-            }
-        }
-        let _restore = Restore(prev);
-        f()
+/// Class A cuts for a cold MPHF rebuild (`2^bits` keys, last range short).
+pub(crate) fn plan_rebuild_ranges(n: u64, seal_bits: u32) -> Vec<(u64, u64)> {
+    if n == 0 {
+        return Vec::new();
     }
-
-    pub fn rebuild_seal_keys() -> u64 {
-        1u64 << Self::rebuild_seal_bits()
+    let t = (1u64 << seal_bits.clamp(6, 26)).min(u64::from(u32::MAX));
+    let mut out = Vec::new();
+    let mut first = 1u64;
+    while first <= n {
+        let count = (n - first + 1).min(t);
+        out.push((first, count));
+        first += count;
     }
+    out
+}
 
+impl TxTable {
     /// Class A cuts for a cold MPHF rebuild (`2^bits` keys, last range short).
     ///
     /// Independent of live OA 80% load and of idx body soft-span.
     pub fn plan_head_rebuild_ranges(&self) -> Result<Vec<(u64, u64)>, StoreError> {
-        let n = self.count();
-        if n == 0 {
-            return Ok(Vec::new());
-        }
-        let t = Self::rebuild_seal_keys().min(u64::from(u32::MAX));
-        let mut out = Vec::new();
-        let mut first = 1u64;
-        while first <= n {
-            let count = (n - first + 1).min(t);
-            out.push((first, count));
-            first += count;
-        }
-        Ok(out)
+        Ok(plan_rebuild_ranges(self.count(), self.rebuild_seal_bits()))
     }
 
     fn backfill_head_inner(

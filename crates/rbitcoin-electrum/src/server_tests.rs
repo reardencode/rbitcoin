@@ -25,7 +25,7 @@ fn tmp_store() -> (std::path::PathBuf, Query) {
     let dir = std::env::temp_dir().join(format!("rbitcoin-electrum-ut-{n}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     (dir, q)
 }
 
@@ -873,9 +873,6 @@ async fn ping_overlaps_blocking_headers_on_one_worker() {
     use rbitcoin_primitives::Height;
     use std::sync::atomic::AtomicU64;
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let (dir, q) = tmp_store();
     let params = ChainParams::regtest();
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
@@ -2783,9 +2780,6 @@ fn scripthash_status_matches_get_history_row_order() {
     use rbitcoin_store::script_hash;
     use std::sync::Arc;
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let (dir, q) = tmp_store();
     let params = ChainParams::regtest();
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
@@ -2888,9 +2882,6 @@ fn dispatch_live_mempool_surfaces() {
     use rbitcoin_store::script_hash;
     use std::sync::Arc;
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let (dir, q) = tmp_store();
     let params = ChainParams::regtest();
 
@@ -3104,9 +3095,6 @@ fn listunspent_unused_sh_does_not_load_mempool_bodies() {
     use rbitcoin_primitives::Height;
     use std::sync::Arc;
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let (dir, q) = tmp_store();
     let params = ChainParams::regtest();
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
@@ -3394,9 +3382,6 @@ fn tweaks_rpc_result_is_first_height_only() {
     use rbitcoin_query::TxApply;
     use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let (dir, q) = tmp_store();
     let params = ChainParams::regtest();
     let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
@@ -3468,9 +3453,6 @@ async fn tweaks_subscribe_streams_heights_then_done() {
     use rbitcoin_query::TxApply;
     use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let (dir, q) = tmp_store();
     let mut prev = Fk::NULL;
     let mut parent_hash: Option<[u8; 32]> = None;
@@ -3575,9 +3557,6 @@ async fn tweaks_subscribe_zero_chunk_dones_after_wave0_then_resubscribe() {
     use rbitcoin_query::TxApply;
     use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let (dir, q) = tmp_store();
     let mut prev = Fk::NULL;
     let mut parent_hash: Option<[u8; 32]> = None;
@@ -3687,9 +3666,6 @@ async fn tweaks_subscribe_pre_taproot_collapses_empty_heights() {
     use rbitcoin_query::TxApply;
     use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let (dir, q) = tmp_store();
     let mut prev = Fk::NULL;
     let mut parent_hash: Option<[u8; 32]> = None;
@@ -3791,9 +3767,6 @@ fn tweaks_subscribe_matches_engine_on_p2wpkh_spend() {
     use rbitcoin_query::TxApply;
     use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let (dir, q) = tmp_store();
     let params = ChainParams::regtest();
     let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);

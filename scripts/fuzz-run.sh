@@ -179,7 +179,6 @@ if [[ "${FUZZ_DRY_RUN:-}" == "1" ]]; then
     echo "RBITCOIN_CORE_BITCOIND=${RBITCOIN_CORE_BITCOIND:-}"
   fi
   if [[ "$BIN" == "store_reorg" ]]; then
-    echo "RBITCOIN_HEAD_SCALE=${RBITCOIN_HEAD_SCALE:-tiny}"
     echo "FUZZ_NO_CORE=1"
   fi
   if [[ "$BIN" == "script_kernel_differential" ]]; then
@@ -188,9 +187,6 @@ if [[ "${FUZZ_DRY_RUN:-}" == "1" ]]; then
   fi
   if [[ "$BIN" == "v2_session" || "$BIN" == "cmpct_differential" || "$BIN" == "p2p_sequence_differential" ]]; then
     echo "BITCOIND_LISTEN=1"
-  fi
-  if [[ "$BIN" == "block_differential" || "$BIN" == "block_spend_differential" || "$BIN" == "block_fork_differential" || "$BIN" == "script_differential" || "$BIN" == "cmpct_reorg_differential" || "$BIN" == "block_reorg_n_differential" || "$BIN" == "block_csv_differential" || "$BIN" == "mempool_differential" || "$BIN" == "script_verify_differential" || "$BIN" == "p2p_sequence_differential" ]]; then
-    echo "RBITCOIN_HEAD_SCALE=${RBITCOIN_HEAD_SCALE:-tiny}"
   fi
   exit 0
 fi
@@ -328,7 +324,6 @@ if [[ "$BIN" == "cmpct_differential" ]]; then
 fi
 
 if [[ "$BIN" == "store_reorg" ]]; then
-  export RBITCOIN_HEAD_SCALE="${RBITCOIN_HEAD_SCALE:-tiny}"
   export RBITCOIN_IO="${RBITCOIN_IO:-fd}"
   merge_seed fuzz/corpus/store_reorg \
     crates/rbitcoin-net/tests/fixtures/store_reorg_ops.bin
@@ -378,7 +373,6 @@ if [[ "$BIN" == "script_kernel_differential" ]]; then
 fi
 
 if [[ "$BIN" == "p2p_sequence_differential" ]]; then
-  export RBITCOIN_HEAD_SCALE="${RBITCOIN_HEAD_SCALE:-tiny}"
   export RBITCOIN_IO="${RBITCOIN_IO:-fd}"
   export RBITCOIN_CORE_BITCOIND="$(./scripts/core-functional/fetch-bitcoind.sh)"
   merge_seed fuzz/corpus/p2p_sequence_differential \
@@ -407,10 +401,10 @@ if [[ "$BIN" != "block_differential" && "$BIN" != "block_spend_differential" && 
   exit 1
 fi
 
-export RBITCOIN_HEAD_SCALE="${RBITCOIN_HEAD_SCALE:-tiny}"
-# Tiny header heads (64 slots). tx.head tiny is 16-bit (~64k). Compared
-# candidates uniquify coinbase + extra txs so mix_txid values spread; do not
-# override RBITCOIN_TX_HEAD_BITS (that was a BIP30-chain workaround).
+# Tiny heads via Query::open_or_create_tiny (not RBITCOIN_HEAD_SCALE).
+# tx.head tiny is 16-bit (~64k). Compared candidates uniquify coinbase + extra
+# txs so mix_txid values spread; do not override RBITCOIN_TX_HEAD_BITS
+# (that was a BIP30-chain workaround).
 export RBITCOIN_IO="${RBITCOIN_IO:-fd}"
 export RBITCOIN_CORE_BITCOIND="$(./scripts/core-functional/fetch-bitcoind.sh)"
 

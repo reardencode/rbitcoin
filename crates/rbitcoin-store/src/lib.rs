@@ -63,6 +63,7 @@ pub use block_queue::{BlockQueue, QueuedBlockMeta, TakenRaw};
 pub use block_wire::block_wire_input_count;
 pub use error::StoreError;
 pub use file::ensure_nofile_budget;
+pub use hashhead::{HeadOpenOpts, HeadScale};
 pub use head_resolve_stats::{leftover_probe_diag_ready, leftover_probe_diag_recorded};
 pub use header_table::{block_header_hash, HeaderRecord};
 pub use height_fence::HeightFence;

@@ -7,6 +7,7 @@ use crate::compact::{
     SCRIPT_KIND_V17_P2A, SCRIPT_KIND_V17_P2PKH, SCRIPT_KIND_V17_P2SH, SCRIPT_KIND_V17_P2TR,
     SCRIPT_KIND_V17_P2WPKH, SCRIPT_KIND_V17_P2WSH, SCRIPT_KIND_V17_RAW,
 };
+use crate::hashhead::{HeadOpenOpts, HeadScale};
 use rbitcoin_primitives::{Fk, TableKind};
 use std::path::Path;
 
@@ -29,6 +30,20 @@ fn tiny_layout() -> HeadLayout {
 
 fn create_tiny(dir: &Path) -> TxTable {
     TxTable::create_with_head_layout(dir, tiny_layout()).unwrap()
+}
+
+fn rebuild_opts(bits: u32, workers: usize) -> HeadOpenOpts {
+    HeadOpenOpts::TINY
+        .with_rebuild_seal_bits(bits)
+        .with_rebuild_workers(workers)
+}
+
+fn create_tiny_rebuild(dir: &Path, bits: u32, workers: usize) -> TxTable {
+    TxTable::create_with_head_layout_opts(dir, tiny_layout(), rebuild_opts(bits, workers)).unwrap()
+}
+
+fn open_tiny_rebuild(dir: &Path, bits: u32, workers: usize) -> TxTable {
+    TxTable::open_with_opts(dir, rebuild_opts(bits, workers)).unwrap()
 }
 
 fn meta_only_items(recs: &[TxRecord]) -> Vec<(TxRecord, Vec<InputRecord>, Vec<OutputRecord>)> {
@@ -90,7 +105,7 @@ fn open_refuses_packed_tx_body_with_creates() {
         t.write_body_blob_bulk(prep.start, &prep.body_blob).unwrap();
         t.finish_prepared(prep).unwrap();
     }
-    match TxTable::open(&dir) {
+    match TxTable::open_tiny(&dir) {
         Ok(_) => panic!("packed tx.body must refuse"),
         Err(err) => assert!(format!("{err}").contains("packed tx.body"), "{err}"),
     }
@@ -115,7 +130,7 @@ fn open_refuses_txout_without_peer_stems() {
             .unwrap();
     }
     let _ = std::fs::remove_file(dir.join("inwit.body"));
-    match TxTable::open(&dir) {
+    match TxTable::open_tiny(&dir) {
         Ok(_) => panic!("missing inwit must refuse"),
         Err(err) => assert!(format!("{err}").contains("missing inwit/spent"), "{err}"),
     }
@@ -284,7 +299,7 @@ fn pending_head_reopen_backfills_lagging_head() {
         // No head insert, no pending (process kill).
         txid
     };
-    let t = TxTable::open(&dir).unwrap();
+    let t = TxTable::open_tiny(&dir).unwrap();
     assert_eq!(
         t.probe_body_match_fk(&txid).unwrap(),
         Some(Fk(1)),
@@ -324,7 +339,7 @@ fn open_repairs_body_leading_txid_count() {
         assert_eq!(t.txid_sidefile().count(), 3);
         assert_eq!(t.count(), 5);
     }
-    let t2 = TxTable::open(&dir).expect("open should repair skew");
+    let t2 = TxTable::open_tiny(&dir).expect("open should repair skew");
     assert_eq!(t2.count(), 3);
     assert_eq!(t2.txid_sidefile().count(), 3);
     // Kept prefix still readable.
@@ -1219,7 +1234,7 @@ fn missing_tx_head_rebuilds_from_bodies_on_open() {
         assert!(crate::segmented_head::head_meta_exists(&dir));
         crate::segmented_head::wipe_segmented_head_files(&dir);
 
-        let t = TxTable::open(&dir).unwrap();
+        let t = TxTable::open_tiny(&dir).unwrap();
         assert_eq!(t.count(), 20);
         assert!(crate::segmented_head::head_meta_exists(&dir));
         for i in 1..=20u64 {
@@ -1252,7 +1267,7 @@ fn missing_tx_head_with_no_bodies_creates_empty() {
             t.flush().unwrap();
         }
         crate::segmented_head::wipe_segmented_head_files(&dir);
-        let t = TxTable::open(&dir).unwrap();
+        let t = TxTable::open_tiny(&dir).unwrap();
         assert_eq!(t.count(), 0);
         assert!(crate::segmented_head::head_meta_exists(&dir));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1302,7 +1317,7 @@ fn head_leading_truncated_class_a_rebuilds_on_open() {
             let txids = crate::txid_body::TxidBody::open(&dir).unwrap();
             txids.truncate_to_count(15).unwrap();
         }
-        let t = TxTable::open(&dir).unwrap();
+        let t = TxTable::open_tiny(&dir).unwrap();
         assert_eq!(t.count(), 15);
         assert!(
             t.head.last_inserted_fk() <= t.count(),
@@ -2447,7 +2462,7 @@ fn reopen_mid_segment_then_seal_no_fuse_fn() {
         t.flush().unwrap();
     }
     // Reopen: open_keys must rebuild from Class A.
-    let t = TxTable::open(&dir).unwrap();
+    let t = TxTable::open_tiny(&dir).unwrap();
     assert_eq!(t.head.open_keys_len() as u64, half, "open keys rebuilt");
     // Fill past 819 so first segment seals.
     let more: Vec<TxRecord> = (half..900)
@@ -2522,7 +2537,7 @@ fn reopen_rewrites_legacy_v1_sealed_fuse_to_v2() {
     raw.extend_from_slice(&0u64.to_le_bytes());
     std::fs::write(&fuse_path, &raw).unwrap();
 
-    let t = TxTable::open(&dir).unwrap();
+    let t = TxTable::open_tiny(&dir).unwrap();
     assert!(
         t.head.sealed_fuse_rewrite_queue().is_empty(),
         "open must rewrite legacy fuses before returning"
@@ -2549,7 +2564,12 @@ fn fat_creates_do_not_roll_head_on_body_soft_span() {
     with_env_lock(|| {
         let dir = tempfile_dir("no-body-span-roll");
         let layout = HeadLayout::with_entry_bytes(14, 4).unwrap();
-        let t = TxTable::create_with_head_layout(&dir, layout).unwrap();
+        let t = TxTable::create_with_head_layout_opts(
+            &dir,
+            layout,
+            HeadOpenOpts::TINY.with_idx_soft_span(800),
+        )
+        .unwrap();
         let mk = |i: u64| {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&i.to_le_bytes());
@@ -2573,7 +2593,7 @@ fn fat_creates_do_not_roll_head_on_body_soft_span() {
             let outputs = vec![OutputRecord::unspent(1, vec![0x51; 32])];
             (tx, inputs, outputs)
         };
-        crate::tx_idx::test_with_soft_span_bytes(800, || {
+        {
             for i in 1..=12u64 {
                 t.put_full_batch_indexed(&[mk(i)], true).unwrap();
             }
@@ -2590,7 +2610,7 @@ fn fat_creates_do_not_roll_head_on_body_soft_span() {
                 txid[0..8].copy_from_slice(&i.to_le_bytes());
                 assert_eq!(t.probe_body_match_fk(&txid).unwrap(), Some(Fk(i)));
             }
-        });
+        }
         let _ = std::fs::remove_dir_all(&dir);
     });
 }
@@ -2637,7 +2657,7 @@ fn segmented_head_roll_and_lookup_via_tx_table() {
     let miss = [0xAAu8; 32];
     assert_eq!(t.probe_body_match_fk(&miss).unwrap(), None);
     t.flush().unwrap();
-    let t2 = TxTable::open(&dir).unwrap();
+    let t2 = TxTable::open_tiny(&dir).unwrap();
     for i in [1u64, 500, 820] {
         let mut txid = [0u8; 32];
         txid[0..8].copy_from_slice(&i.to_le_bytes());
@@ -2658,10 +2678,10 @@ fn segmented_head_roll_and_lookup_via_tx_table() {
 
 #[test]
 fn empty_occupancy_head_open_rebuilds_mphf_not_oa_backfill() {
-    TxTable::test_with_rebuild_seal_bits(6, || {
-        TxTable::test_with_rebuild_workers(2, || {
+    {
+        {
             let dir = tempfile_dir("empty-occ-rebuild");
-            let layout = crate::address_head::default_layout();
+            let layout = crate::address_head::default_layout(HeadScale::Tiny);
             {
                 let t = TxTable::create_with_head_layout(&dir, layout).unwrap();
                 let recs: Vec<TxRecord> = (0..65u64)
@@ -2686,7 +2706,7 @@ fn empty_occupancy_head_open_rebuilds_mphf_not_oa_backfill() {
             crate::segmented_head::wipe_segmented_head_files(&dir);
             crate::segmented_head::SegmentedTxHead::create(&dir, layout).unwrap();
             assert!(crate::segmented_head::head_meta_exists(&dir));
-            let t = TxTable::open(&dir).unwrap();
+            let t = open_tiny_rebuild(&dir, 6, 2);
             assert!(
                 t.head.sealed_segment_count() >= 2,
                 "empty occupancy must full-rebuild, sealed={}",
@@ -2697,17 +2717,17 @@ fn empty_occupancy_head_open_rebuilds_mphf_not_oa_backfill() {
             txid[0..8].copy_from_slice(&65u64.to_le_bytes());
             assert_eq!(t.probe_body_match_fk(&txid).unwrap(), Some(Fk(65)));
             let _ = std::fs::remove_dir_all(&dir);
-        });
-    });
+        }
+    }
 }
 
 #[test]
 fn rebuild_head_direct_mphf_empty_tail() {
-    TxTable::test_with_rebuild_seal_bits(6, || {
-        TxTable::test_with_rebuild_workers(2, || {
+    {
+        {
             let dir = tempfile_dir("rebuild-direct-mphf");
             {
-                let t = create_tiny(&dir);
+                let t = create_tiny_rebuild(&dir, 6, 2);
                 let recs: Vec<TxRecord> = (0..65u64)
                     .map(|i| {
                         let mut txid = [0u8; 32];
@@ -2728,7 +2748,7 @@ fn rebuild_head_direct_mphf_empty_tail() {
                 t.flush().unwrap();
             }
             crate::segmented_head::wipe_segmented_head_files(&dir);
-            let t = TxTable::open(&dir).unwrap();
+            let t = open_tiny_rebuild(&dir, 6, 2);
             assert!(
                 t.head.sealed_segment_count() >= 2,
                 "T=64, n=65 must seal two MPHF ranges, sealed={} segs={}",
@@ -2762,17 +2782,17 @@ fn rebuild_head_direct_mphf_empty_tail() {
                 assert_eq!(t.probe_body_match_fk(&txid).unwrap(), Some(Fk(i)), "fk={i}");
             }
             let _ = std::fs::remove_dir_all(&dir);
-        });
-    });
+        }
+    }
 }
 
 #[test]
 fn rebuild_head_direct_mphf_bip30_newest_first() {
-    TxTable::test_with_rebuild_seal_bits(6, || {
-        TxTable::test_with_rebuild_workers(2, || {
+    {
+        {
             let dir = tempfile_dir("rebuild-direct-bip30");
             {
-                let t = create_tiny(&dir);
+                let t = create_tiny_rebuild(&dir, 6, 2);
                 let mut shared = [0u8; 32];
                 shared[0..8].copy_from_slice(&1u64.to_le_bytes());
                 let r1 = TxRecord {
@@ -2807,7 +2827,7 @@ fn rebuild_head_direct_mphf_bip30_newest_first() {
                 t.flush().unwrap();
             }
             crate::segmented_head::wipe_segmented_head_files(&dir);
-            let t = TxTable::open(&dir).unwrap();
+            let t = open_tiny_rebuild(&dir, 6, 2);
             let mut shared = [0u8; 32];
             shared[0..8].copy_from_slice(&1u64.to_le_bytes());
             let all = t.get_all_by_txid(&shared).unwrap();
@@ -2815,8 +2835,8 @@ fn rebuild_head_direct_mphf_bip30_newest_first() {
             assert_eq!(all[0].0, Fk(2), "newest first {all:?}");
             assert_eq!(all[1].0, Fk(1));
             let _ = std::fs::remove_dir_all(&dir);
-        });
-    });
+        }
+    }
 }
 
 #[test]
@@ -2840,30 +2860,34 @@ fn plan_head_rebuild_ranges_chunks_seal_bits_not_oa_load() {
         .collect();
     t.put_full_batch_indexed(&meta_only_items(&recs), true)
         .unwrap();
-    TxTable::test_with_rebuild_seal_bits(6, || {
-        let ranges6 = t.plan_head_rebuild_ranges().unwrap();
-        assert_eq!(
-            ranges6,
-            vec![(1, 64), (65, 64), (129, 64), (193, 8)],
-            "bits=6 → T=64"
-        );
-    });
-    TxTable::test_with_rebuild_seal_bits(7, || {
-        let ranges7 = t.plan_head_rebuild_ranges().unwrap();
-        assert_eq!(
-            ranges7,
-            vec![(1, 128), (129, 72)],
-            "bits=7 → T=128 (knob is seal bits, not OA 80%)"
-        );
-    });
+    assert_eq!(t.count(), 200);
+    assert_eq!(
+        plan_rebuild_ranges(t.count(), 6),
+        vec![(1, 64), (65, 64), (129, 64), (193, 8)],
+        "bits=6 → T=64"
+    );
+    assert_eq!(
+        plan_rebuild_ranges(t.count(), 7),
+        vec![(1, 128), (129, 72)],
+        "bits=7 → T=128 (knob is seal bits, not OA 80%)"
+    );
+    let t6 = create_tiny_rebuild(&tempfile_dir("plan-seal-bits-6"), 6, 1);
+    assert_eq!(t6.rebuild_seal_bits(), 6);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn plan_head_rebuild_ranges_ignores_body_soft_span() {
-    TxTable::test_with_rebuild_seal_bits(8, || {
+    {
         let dir = tempfile_dir("plan-no-body-span");
-        let t = create_tiny(&dir);
+        let t = TxTable::create_with_head_layout_opts(
+            &dir,
+            tiny_layout(),
+            HeadOpenOpts::TINY
+                .with_rebuild_seal_bits(8)
+                .with_idx_soft_span(800),
+        )
+        .unwrap();
         let mk = |i: u64| {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&i.to_le_bytes());
@@ -2887,7 +2911,7 @@ fn plan_head_rebuild_ranges_ignores_body_soft_span() {
             let outputs = vec![OutputRecord::unspent(1, vec![0x51; 32])];
             (tx, inputs, outputs)
         };
-        crate::tx_idx::test_with_soft_span_bytes(800, || {
+        {
             for i in 1..=6u64 {
                 t.put_full_batch_indexed(&[mk(i)], true).unwrap();
             }
@@ -2897,9 +2921,9 @@ fn plan_head_rebuild_ranges_ignores_body_soft_span() {
                 vec![(1, 6)],
                 "rebuild cuts are 2^bits only, not body span, ranges={ranges:?}"
             );
-        });
+        }
         let _ = std::fs::remove_dir_all(&dir);
-    });
+    }
 }
 
 #[test]
@@ -2929,45 +2953,26 @@ fn parse_rebuild_workers_and_1gib_cap() {
 }
 
 #[test]
-fn rebuild_workers_override_is_thread_local() {
-    TxTable::test_with_rebuild_workers(3, || {
-        assert_eq!(TxTable::rebuild_workers(), 3);
-        let other = std::thread::spawn(TxTable::rebuild_workers)
-            .join()
-            .expect("join");
-        assert_eq!(TxTable::rebuild_workers(), 3);
-        assert_ne!(other, 3);
-    });
-}
-
-#[test]
-fn rebuild_seal_bits_override_is_thread_local() {
-    TxTable::test_with_rebuild_seal_bits(6, || {
-        assert_eq!(TxTable::rebuild_seal_bits(), 6);
-        let other = std::thread::spawn(TxTable::rebuild_seal_bits)
-            .join()
-            .expect("join");
-        assert_eq!(TxTable::rebuild_seal_bits(), 6);
-        assert_ne!(other, 6);
-    });
-}
-
-#[test]
-fn rebuild_seal_bits_override_restores_after_panic() {
-    TxTable::test_with_rebuild_seal_bits(7, || {
-        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            TxTable::test_with_rebuild_seal_bits(8, || panic!("rebuild-bits boom"));
-        }));
-        assert!(panicked.is_err());
-        assert_eq!(TxTable::rebuild_seal_bits(), 7);
-    });
+fn rebuild_opts_are_per_table() {
+    let dir_a = tempfile_dir("rebuild-opts-a");
+    let dir_b = tempfile_dir("rebuild-opts-b");
+    let a = create_tiny_rebuild(&dir_a, 6, 3);
+    let b = create_tiny(&dir_b);
+    assert_eq!(a.rebuild_workers(), 3);
+    assert_eq!(a.rebuild_seal_bits(), 6);
+    assert_ne!(b.rebuild_workers(), 3);
+    assert_ne!(b.rebuild_seal_bits(), 6);
+    let _ = std::fs::remove_dir_all(&dir_a);
+    let _ = std::fs::remove_dir_all(&dir_b);
 }
 
 #[test]
 fn refuse_legacy_mono_head_on_create() {
     let dir = tempfile_dir("legacy-mono");
     std::fs::write(dir.join("tx.head"), b"mono").unwrap();
-    let err = TxTable::create(&dir).err().expect("must refuse mono head");
+    let err = TxTable::create_tiny(&dir)
+        .err()
+        .expect("must refuse mono head");
     let s = format!("{err}");
     assert!(s.contains("legacy") || s.contains("reindex"), "{s}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -3023,7 +3028,7 @@ fn open_seals_unsealed_nontail_after_copied_roll() {
     );
     let copy = tempfile_dir("bg-seal-copy");
     copy_tree(&dir, &copy);
-    let t2 = TxTable::open(&copy).unwrap();
+    let t2 = TxTable::open_tiny(&copy).unwrap();
     assert!(
         t2.head.sealed_segment_count() >= 1,
         "open must rebuild keys and seal leftover nontail"
@@ -3370,9 +3375,14 @@ fn script_kind_v17_kind_ten_is_corrupt() {
 /// Fat inwit must not force a new `txout.idx` / `spent.idx` segment.
 #[test]
 fn idx_roll_independent_of_inwit_span() {
-    crate::tx_idx::test_with_soft_span_bytes(2048, || {
+    {
         let dir = tempfile_dir("idx-indep");
-        let t = create_tiny(&dir);
+        let t = TxTable::create_with_head_layout_opts(
+            &dir,
+            tiny_layout(),
+            HeadOpenOpts::TINY.with_idx_soft_span(2048),
+        )
+        .unwrap();
         let fat_script = vec![0x6au8; 1800];
         for i in 0..6u8 {
             let mut txid = [0u8; 32];
@@ -3417,7 +3427,7 @@ fn idx_roll_independent_of_inwit_span() {
         let raw_in = t.inwit.get_raw(Fk(6)).unwrap();
         assert!(raw_in.len() >= 1800, "len={}", raw_in.len());
         let _ = std::fs::remove_dir_all(&dir);
-    });
+    }
 }
 
 #[test]

@@ -937,7 +937,7 @@ mod tests {
 
     #[test]
     fn materialize_stage_ns_are_populated() {
-        crate::hashhead::HeadScale::test_with(crate::hashhead::HeadScale::Tiny, || {
+        {
             let dir = std::env::temp_dir().join(format!(
                 "rbitcoin-sh-stage-ns-{}-{}",
                 std::process::id(),
@@ -948,7 +948,7 @@ mod tests {
             ));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
-            let table = crate::scripthash::ScriptHashTable::create(&dir).unwrap();
+            let table = crate::scripthash::ScriptHashTable::create_tiny(&dir).unwrap();
             let n_shards = table.head_shard_count();
             let udir = dir.join("unsorted");
             fs::create_dir_all(&udir).unwrap();
@@ -978,7 +978,7 @@ mod tests {
                 "pack-only materialize must not alias head_fill to mphf"
             );
             let _ = std::fs::remove_dir_all(&dir);
-        });
+        }
     }
 
     #[test]

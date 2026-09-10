@@ -528,8 +528,8 @@ fn store_entry_in_page_buf(
 
 /// Bytes to pread for the full probe page of `txid`.
 ///
-/// Resolve address width for new creates.
-pub fn bits_for_scale() -> u32 {
+/// Resolve address width for new creates (`scale`, then `RBITCOIN_TX_HEAD_BITS`).
+pub fn bits_for_scale(scale: HeadScale) -> u32 {
     if let Ok(s) = std::env::var("RBITCOIN_TX_HEAD_BITS") {
         if let Ok(n) = s.parse::<u32>() {
             if (MIN_BITS..=MAX_BITS).contains(&n) {
@@ -540,14 +540,14 @@ pub fn bits_for_scale() -> u32 {
             );
         }
     }
-    match HeadScale::from_env() {
+    match scale {
         HeadScale::Tiny => TINY_BITS,
         HeadScale::Mainnet => MAINNET_BITS,
     }
 }
 
-pub fn default_layout() -> HeadLayout {
-    HeadLayout::new(bits_for_scale()).expect("default bits in range")
+pub fn default_layout(scale: HeadScale) -> HeadLayout {
+    HeadLayout::new(bits_for_scale(scale)).expect("default bits in range")
 }
 
 /// Legacy sidecar path (`tx.head.meta`) — only for best-effort cleanup of old datadirs.
@@ -1316,9 +1316,12 @@ mod tests {
     #[test]
     fn default_layout_is_fixed_segment_geometry() {
         // Capacity growth is segment roll, not bits-widen.
-        let layout = default_layout();
-        assert_eq!(layout.bits, bits_for_scale());
-        assert_eq!(default_layout().bits, bits_for_scale());
+        let layout = default_layout(HeadScale::Tiny);
+        assert_eq!(layout.bits, bits_for_scale(HeadScale::Tiny));
+        assert_eq!(
+            default_layout(HeadScale::Tiny).bits,
+            bits_for_scale(HeadScale::Tiny)
+        );
     }
 
     #[test]
@@ -1789,30 +1792,30 @@ mod tests {
         };
         assert_eq!(load_ratio(10, 0), 0.0);
         assert_eq!(((100u64 as f64) * HEAD_LOAD_START).floor() as u64, 80);
-        // bits_for_scale env out of range falls back
+        // bits_for_scale env out of range falls back to the explicit scale
         let prev = std::env::var_os("RBITCOIN_TX_HEAD_BITS");
         std::env::set_var("RBITCOIN_TX_HEAD_BITS", "999");
-        let _ = bits_for_scale();
+        assert_eq!(bits_for_scale(HeadScale::Tiny), TINY_BITS);
+        assert_eq!(bits_for_scale(HeadScale::Mainnet), MAINNET_BITS);
         match prev {
             Some(v) => std::env::set_var("RBITCOIN_TX_HEAD_BITS", v),
             None => std::env::remove_var("RBITCOIN_TX_HEAD_BITS"),
         }
-        let prev_scale = std::env::var_os("RBITCOIN_HEAD_SCALE");
         let prev_bits = std::env::var_os("RBITCOIN_TX_HEAD_BITS");
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
         std::env::set_var("RBITCOIN_TX_HEAD_BITS", "20");
         assert_eq!(
-            bits_for_scale(),
+            bits_for_scale(HeadScale::Tiny),
             20,
             "TX_HEAD_BITS must widen OA under tiny header heads"
+        );
+        assert_eq!(
+            bits_for_scale(HeadScale::Mainnet),
+            20,
+            "TX_HEAD_BITS wins over Mainnet scale default"
         );
         match prev_bits {
             Some(v) => std::env::set_var("RBITCOIN_TX_HEAD_BITS", v),
             None => std::env::remove_var("RBITCOIN_TX_HEAD_BITS"),
-        }
-        match prev_scale {
-            Some(v) => std::env::set_var("RBITCOIN_HEAD_SCALE", v),
-            None => std::env::remove_var("RBITCOIN_HEAD_SCALE"),
         }
     }
 
@@ -1848,9 +1851,10 @@ mod tests {
         assert_eq!(entry_file_off(3, 4), 12);
         assert_eq!(entry_bytes_for_bits(TINY_BITS), 4);
         assert_eq!(entry_bytes_for_bits(MAX_BITS), 8);
-        let layout = default_layout();
+        let layout = default_layout(HeadScale::Tiny);
         assert!((MIN_BITS..=MAX_BITS).contains(&layout.bits));
-        assert_eq!(default_layout().bits, layout.bits);
+        assert_eq!(default_layout(HeadScale::Tiny).bits, layout.bits);
+        assert_eq!(default_layout(HeadScale::Mainnet).bits, MAINNET_BITS);
         let roll_thr = ((100u64 as f64) * HEAD_LOAD_START).floor() as u64;
         assert_eq!(roll_thr, 80);
         assert!(81 >= roll_thr);

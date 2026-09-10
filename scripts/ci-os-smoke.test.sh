@@ -23,8 +23,8 @@ assert_ok() {
 out="$(CI_OS_SMOKE_DRY_RUN=1 "$RUN")"
 assert_ok "dry-run names store platform + node --smoke" \
   grep -qx "smoke=store-platform+node-smoke" <<<"$out"
-assert_ok "dry-run default HEAD_SCALE is tiny" \
-  grep -qx "RBITCOIN_HEAD_SCALE=tiny" <<<"$out"
+assert_ok "dry-run does not export deleted RBITCOIN_HEAD_SCALE" \
+  test "$(grep -c 'RBITCOIN_HEAD_SCALE' <<<"$out" || true)" = "0"
 assert_ok "dry-run lists TableFile advise tests" \
   grep -q "file::advise_tests" <<<"$out"
 assert_ok "dry-run has no skips off Windows" \
@@ -39,10 +39,6 @@ assert_ok "dry-run lists default session kind" \
   grep -q "uring_session::tests::default_kind_follows_os" <<<"$out"
 assert_ok "dry-run lists pool session tests" \
   grep -q "uring_session::tests::pool_" <<<"$out"
-
-out="$(CI_OS_SMOKE_DRY_RUN=1 RBITCOIN_HEAD_SCALE=tiny "$RUN")"
-assert_ok "dry-run honors RBITCOIN_HEAD_SCALE" \
-  grep -qx "RBITCOIN_HEAD_SCALE=tiny" <<<"$out"
 
 out="$(CI_OS_SMOKE_DRY_RUN=1 CI_OS_SMOKE_UNAME=MINGW64_NT-10.0-20348 "$RUN")"
 assert_ok "Windows dry-run skips concurrent grow/read abort" \

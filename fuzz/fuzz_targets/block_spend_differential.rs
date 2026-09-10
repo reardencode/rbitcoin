@@ -47,9 +47,8 @@ fn note_comparison() {
 
 fn base() -> &'static Base {
     BASE.get_or_init(|| {
-        let head = std::env::var("RBITCOIN_HEAD_SCALE").ok();
         let io = std::env::var("RBITCOIN_IO").ok();
-        if let Err(e) = check_diff_env(head.as_deref(), io.as_deref()) {
+        if let Err(e) = check_diff_env(None, io.as_deref()) {
             harness_failure(e);
         }
         let bin = std::env::var("RBITCOIN_CORE_BITCOIND").unwrap_or_default();
@@ -58,7 +57,7 @@ fn base() -> &'static Base {
         }
         let store = tmp_dir("rbtc-spend-diff-store");
         let core_dir = tmp_dir("rbtc-spend-diff-core");
-        let q = Query::open_or_create(store.join("store")).unwrap_or_else(|e| {
+        let q = Query::open_or_create_tiny(store.join("store")).unwrap_or_else(|e| {
             harness_failure(&format!("query open: {e}"));
         });
         let params = diff_regtest_params();

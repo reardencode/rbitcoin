@@ -495,7 +495,7 @@ mod tests {
     #[test]
     fn clean_header_chain_revalidate_no_shrink() {
         let dir = tmp();
-        let s = Store::create(&dir).unwrap();
+        let s = Store::create_tiny(&dir).unwrap();
         let mut parent_hash = [0u8; 32];
         let mut prev = Fk::NULL;
         for h in 0u32..4 {
@@ -517,7 +517,7 @@ mod tests {
     #[test]
     fn poison_prev_edge_shrinks_tip() {
         let dir = tmp();
-        let s = Store::create(&dir).unwrap();
+        let s = Store::create_tiny(&dir).unwrap();
         let g = hdr(Fk::NULL, [0u8; 32], 0);
         let g_fk = s.put_header(&g).unwrap();
         s.confirmed.set(Height(0), g_fk).unwrap();
@@ -542,7 +542,7 @@ mod tests {
     #[test]
     fn tip_seal_clamps_unsealed_extension() {
         let dir = tmp();
-        let s = Store::create(&dir).unwrap();
+        let s = Store::create_tiny(&dir).unwrap();
         let g = hdr(Fk::NULL, [0u8; 32], 0);
         let g_fk = s.put_header(&g).unwrap();
         s.confirmed.set(Height(0), g_fk).unwrap();
@@ -572,7 +572,7 @@ mod tests {
     #[test]
     fn merkle_mismatch_clears_body_and_shrinks() {
         let dir = tmp();
-        let s = Store::create(&dir).unwrap();
+        let s = Store::create_tiny(&dir).unwrap();
         let g = hdr(Fk::NULL, [0u8; 32], 0);
         let g_fk = s.put_header(&g).unwrap();
         s.confirmed.set(Height(0), g_fk).unwrap();
@@ -598,7 +598,7 @@ mod tests {
     #[test]
     fn tip_window_missing_strong_shrinks() {
         let dir = tmp();
-        let s = Store::create(&dir).unwrap();
+        let s = Store::create_tiny(&dir).unwrap();
         let mut parent_hash = [0u8; 32];
         let mut prev = Fk::NULL;
         let mut tip_tx = Fk::NULL;
@@ -642,7 +642,7 @@ mod tests {
     #[test]
     fn trailing_null_confirmed_slots_trimmed_in_one_open() {
         let dir = tmp();
-        let s = Store::create(&dir).unwrap();
+        let s = Store::create_tiny(&dir).unwrap();
         let mut parent_hash = [0u8; 32];
         let mut prev = Fk::NULL;
         for h in 0u32..4 {
@@ -669,7 +669,7 @@ mod tests {
         f.flush().unwrap();
         drop(f);
 
-        let s = Store::open(&dir).unwrap();
+        let s = Store::open_tiny(&dir).unwrap();
         assert_eq!(
             s.confirmed.tip_height(),
             Some(Height(23)),

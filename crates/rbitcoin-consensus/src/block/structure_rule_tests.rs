@@ -341,14 +341,6 @@ fn bip30_rejects_unspent_connected_sibling() {
     use rbitcoin_primitives::Fk;
     use rbitcoin_query::{BatchParents, FkMap, OutPointSet, Query, U32Map};
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
-    use std::sync::Once;
-
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-bip30-unspent-{}-{}",
         std::process::id(),
@@ -358,7 +350,7 @@ fn bip30_rejects_unspent_connected_sibling() {
             .unwrap_or(0)
     ));
     let _ = std::fs::remove_dir_all(&path);
-    let q = Query::open_or_create(&path).unwrap();
+    let q = Query::open_or_create_tiny(&path).unwrap();
     q.enter_direct_index_mode().unwrap();
 
     let first = coinbase(1);
@@ -1041,13 +1033,6 @@ fn assemble_full_mode_spend_and_bip68() {
     use super::{assemble_block_prevouts_mode, AssembleMode};
     use crate::accept_and_connect_block;
     use rbitcoin_query::{BatchParents, OutPointSet, Query, SpendEdges};
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-assemble-full-{}-{}",
         std::process::id(),
@@ -1057,7 +1042,7 @@ fn assemble_full_mode_spend_and_bip68() {
             .unwrap_or(0)
     ));
     std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create(&path).unwrap();
+    let q = Query::open_or_create_tiny(&path).unwrap();
     let params = ChainParams::regtest();
     let ms = Milestone::NONE;
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
@@ -1172,13 +1157,6 @@ fn assemble_full_mode_spend_and_bip68() {
 fn assemble_rejects_empty_and_fk_mismatch() {
     use super::assemble_block_prevouts;
     use rbitcoin_query::{BatchParents, OutPointSet, Query, SpendEdges};
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-assemble-{}-{}",
         std::process::id(),
@@ -1188,7 +1166,7 @@ fn assemble_rejects_empty_and_fk_mismatch() {
             .unwrap_or(0)
     ));
     std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create(&path).unwrap();
+    let q = Query::open_or_create_tiny(&path).unwrap();
     let ctx = ctx_h(1);
     let empty = block_with(vec![]);
     let parents = BatchParents::new();
@@ -1283,13 +1261,6 @@ fn assemble_pending_creates_is_txid_map_and_meters_flush() {
     use crate::confirm_phase_stats;
     use rbitcoin_primitives::Fk;
     use rbitcoin_query::{BatchParents, OutPointSet, Query, SpendEdges};
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-assemble-creates-{}-{}",
         std::process::id(),
@@ -1299,7 +1270,7 @@ fn assemble_pending_creates_is_txid_map_and_meters_flush() {
             .unwrap_or(0)
     ));
     std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create(&path).unwrap();
+    let q = Query::open_or_create_tiny(&path).unwrap();
     let ctx = ctx_h(1);
     let parents = BatchParents::new();
     let thin = SpendEdges::default();
@@ -1349,13 +1320,6 @@ fn optimistic_assemble_unstamped_parent_is_invariant() {
     use crate::accept_and_connect_block;
     use rbitcoin_primitives::Fk;
     use rbitcoin_query::{BatchParents, OutPointSet, Query, SpendEdges};
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-assemble-unstamped-{}-{}",
         std::process::id(),
@@ -1365,7 +1329,7 @@ fn optimistic_assemble_unstamped_parent_is_invariant() {
             .unwrap_or(0)
     ));
     std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create(&path).unwrap();
+    let q = Query::open_or_create_tiny(&path).unwrap();
     let params = ChainParams::regtest();
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
@@ -1445,13 +1409,6 @@ fn assemble_milestone_pin_still_rejects_bad_blk_sigops() {
     use rbitcoin_primitives::Fk;
     use rbitcoin_query::{BatchParents, OutPointSet, Query, SpendEdge, SpendEdges};
     use rbitcoin_store::{OutputRecord, TxRecord};
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-assemble-ms-sigops-{}-{}",
         std::process::id(),
@@ -1461,7 +1418,7 @@ fn assemble_milestone_pin_still_rejects_bad_blk_sigops() {
             .unwrap_or(0)
     ));
     std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create(&path).unwrap();
+    let q = Query::open_or_create_tiny(&path).unwrap();
     let ws = vec![0xacu8; 80_001];
     let h = sha256::Hash::hash(&ws);
     let mut spk = vec![0x00, 0x20];
@@ -1558,13 +1515,6 @@ fn n1_assemble_cold_why_reasons() {
     use rbitcoin_primitives::Fk;
     use rbitcoin_query::{BatchParents, Query};
     use rbitcoin_store::OutputRecord;
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-n1-cold-why-{}-{}",
         std::process::id(),
@@ -1574,7 +1524,7 @@ fn n1_assemble_cold_why_reasons() {
             .unwrap_or(0)
     ));
     std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create(&path).unwrap();
+    let q = Query::open_or_create_tiny(&path).unwrap();
     let params = ChainParams::regtest();
     let ms = Milestone::NONE;
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
@@ -1826,13 +1776,6 @@ fn already_archived_schema13_pin_identity_tip_follow() {
     };
     use rbitcoin_query::Query;
     use std::sync::Arc;
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-plan-none-pin-id-{}-{}",
         std::process::id(),
@@ -1842,7 +1785,7 @@ fn already_archived_schema13_pin_identity_tip_follow() {
             .unwrap_or(0)
     ));
     std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create(&path).unwrap();
+    let q = Query::open_or_create_tiny(&path).unwrap();
     q.set_spend_index(true);
     let params = ChainParams::regtest();
     let ms = Milestone::NONE;

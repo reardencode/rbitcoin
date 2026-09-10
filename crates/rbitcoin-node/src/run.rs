@@ -1619,6 +1619,13 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn tiny_regtest(dir: impl AsRef<std::path::Path>) -> NodeConfig {
+        NodeConfig::default()
+            .with_datadir(dir.as_ref())
+            .with_network(rbitcoin_primitives::Network::Regtest)
+            .with_tiny_heads()
+    }
+
     /// Perf (5s) and RPC-stop (50ms) ticks must still evaluate stale redial.
     /// A one-shot sleep in the same `select!` is reset on every such wake.
     #[test]
@@ -1919,7 +1926,7 @@ mod tests {
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("rbitcoin-tip-mode-{nanos}"));
         std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create(dir.join("store")).unwrap();
+        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
         q.enter_direct_index_mode().unwrap();
         assert_eq!(q.index_mode(), IndexMode::Direct);
         assert!(q.spend_index_enabled());
@@ -1948,7 +1955,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rbitcoin-tip-wb-{nanos}"));
         std::fs::create_dir_all(&dir).unwrap();
         let store = dir.join("store");
-        let q = Query::open_or_create(&store).unwrap();
+        let q = Query::open_or_create_tiny(&store).unwrap();
         seed_direct_chain(&q, 5);
         assert_eq!(q.index_mode(), IndexMode::Direct);
         let _ = q.finalize_sh_runs().unwrap();
@@ -1995,7 +2002,7 @@ mod tests {
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("rbitcoin-tip-collect-{nanos}"));
         std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create(dir.join("store")).unwrap();
+        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
         seed_direct_chain(&q, 4);
         assert_eq!(q.index_mode(), IndexMode::Direct);
         assert!(!q.store().scripthash.has_durable_index());
@@ -2020,7 +2027,7 @@ mod tests {
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("rbitcoin-tip-nosh-{nanos}"));
         std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create(dir.join("store")).unwrap();
+        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
         q.enter_direct_index_mode_sh(false).unwrap();
         assert!(!q.sh_index_enabled());
         assert!(!q.sh_run_enabled());
@@ -2047,7 +2054,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rbitcoin-tip-sh-off-{nanos}"));
         std::fs::create_dir_all(&dir).unwrap();
         let store = dir.join("store");
-        let q = Query::open_or_create(&store).unwrap();
+        let q = Query::open_or_create_tiny(&store).unwrap();
         q.enter_direct_index_mode_sh(true).unwrap();
         assert!(q.sh_index_enabled());
         let on = enter_tip_mode(&q, None, true);
@@ -2091,11 +2098,14 @@ mod tests {
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("rbitcoin-run-node-{nanos}"));
-        let cfg = NodeConfig::default()
-            .with_datadir(&dir)
-            .with_network(rbitcoin_primitives::Network::Regtest);
+        let cfg = tiny_regtest(&dir);
         let handle = run_node(cfg).expect("run_node");
         assert_eq!(handle.network_name(), "regtest");
+        assert_eq!(
+            handle.query.store().headers.head_target_slots(),
+            64,
+            "tiny_regtest must create Tiny header heads"
+        );
         assert!(handle.mempool.is_none());
         let _ = format!("{:?}", handle);
         handle.shutdown().expect("shutdown flush");
@@ -2109,10 +2119,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("rbitcoin-run-p2p-{nanos}"));
-        let mut cfg = NodeConfig::default()
-            .with_datadir(&dir)
-            .with_network(rbitcoin_primitives::Network::Regtest)
-            .with_p2p_listen("127.0.0.1:0".parse().unwrap());
+        let mut cfg = tiny_regtest(&dir).with_p2p_listen("127.0.0.1:0".parse().unwrap());
         cfg.listen.use_seeds = false;
         cfg.listen.connect.clear();
         cfg.max_run_secs = Some(0); // exit after catch-up / tip mode
@@ -2150,10 +2157,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("rbitcoin-run-p2p-el-{nanos}"));
-        let mut cfg = NodeConfig::default()
-            .with_datadir(&dir)
-            .with_network(rbitcoin_primitives::Network::Regtest)
-            .with_p2p_listen("127.0.0.1:0".parse().unwrap());
+        let mut cfg = tiny_regtest(&dir).with_p2p_listen("127.0.0.1:0".parse().unwrap());
         cfg.listen.use_seeds = false;
         cfg.listen.connect.clear();
         cfg.milestone_height = 100; // exercise milestone log branch
@@ -2174,10 +2178,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("rbitcoin-run-p2p-esp-{nanos}"));
-        let mut cfg = NodeConfig::default()
-            .with_datadir(&dir)
-            .with_network(rbitcoin_primitives::Network::Regtest)
-            .with_p2p_listen("127.0.0.1:0".parse().unwrap());
+        let mut cfg = tiny_regtest(&dir).with_p2p_listen("127.0.0.1:0".parse().unwrap());
         cfg.listen.use_seeds = false;
         cfg.listen.connect.clear();
         cfg.shindex = true;
@@ -2197,10 +2198,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("rbitcoin-run-p2p-conn-{nanos}"));
-        let mut cfg = NodeConfig::default()
-            .with_datadir(&dir)
-            .with_network(rbitcoin_primitives::Network::Regtest)
-            .with_p2p_listen("127.0.0.1:0".parse().unwrap());
+        let mut cfg = tiny_regtest(&dir).with_p2p_listen("127.0.0.1:0".parse().unwrap());
         cfg.listen.use_seeds = false;
         // Blackhole / closed port: connect fails fast under FOLLOW_CONNECT_SECS.
         cfg.listen.connect = vec!["127.0.0.1:1".parse().unwrap()];
@@ -2220,10 +2218,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("rbitcoin-run-p2p-asmap-miss-{nanos}"));
-        let mut cfg = NodeConfig::default()
-            .with_datadir(&dir)
-            .with_network(rbitcoin_primitives::Network::Regtest)
-            .with_p2p_listen("127.0.0.1:0".parse().unwrap());
+        let mut cfg = tiny_regtest(&dir).with_p2p_listen("127.0.0.1:0".parse().unwrap());
         cfg.listen.use_seeds = false;
         cfg.listen.connect.clear();
         cfg.asmap = Some(dir.join("no-such-asmap"));
@@ -2243,10 +2238,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rbitcoin-run-p2p-asmap-ok-{nanos}"));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("ip_asn.dat"), rbitcoin_net::TWO_PREFIX_ASMAP).unwrap();
-        let mut cfg = NodeConfig::default()
-            .with_datadir(&dir)
-            .with_network(rbitcoin_primitives::Network::Regtest)
-            .with_p2p_listen("127.0.0.1:0".parse().unwrap());
+        let mut cfg = tiny_regtest(&dir).with_p2p_listen("127.0.0.1:0".parse().unwrap());
         cfg.listen.use_seeds = false;
         cfg.listen.connect.clear();
         cfg.max_run_secs = Some(0);
@@ -2265,7 +2257,7 @@ mod tests {
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("rbitcoin-tip-leftover-{nanos}"));
         std::fs::create_dir_all(dir.join("store")).unwrap();
-        let q = Query::open_or_create(dir.join("store")).unwrap();
+        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
         q.enter_direct_index_mode().unwrap();
         // Empty store: finalize has no runs; still flips to tip.
         let g = enter_tip_mode(&q, None, true);
@@ -2283,12 +2275,11 @@ mod tests {
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("rbitcoin-handle-mp-{nanos}"));
-        let cfg = NodeConfig::default()
-            .with_datadir(&dir)
-            .with_network(rbitcoin_primitives::Network::Regtest);
+        let cfg = tiny_regtest(&dir);
         let mut handle = run_node(cfg).expect("run_node");
-        // Dual-open same store under /tmp for MempoolHub's Arc<Query> (flush only).
-        let q = Arc::new(Query::open_or_create(handle.config.store_path()).unwrap());
+        // Dual-open same store for MempoolHub's Arc<Query> (flush only).
+        // Same layout as run_node — Tiny here, Mainnet would mismatch.
+        let q = Arc::new(Query::open_or_create_layout(handle.config.store_layout()).unwrap());
         let mp = MempoolHub::open(handle.config.mempool_path(), q).expect("mempool");
         handle.mempool = Some(mp);
         let _ = format!("{:?}", handle);
@@ -2311,10 +2302,7 @@ mod tests {
         am.add("127.0.0.1:18445".parse().unwrap());
         am.save(&dir.join("peers")).unwrap();
 
-        let mut cfg = NodeConfig::default()
-            .with_datadir(&dir)
-            .with_network(rbitcoin_primitives::Network::Regtest)
-            .with_p2p_listen("127.0.0.1:0".parse().unwrap());
+        let mut cfg = tiny_regtest(&dir).with_p2p_listen("127.0.0.1:0".parse().unwrap());
         cfg.listen.use_seeds = false;
         // Peers file is loaded for bookkeeping; do not dial those addrs as --connect
         // (would stall IBD). Empty connect + no seeds → catch-up complete immediately.
@@ -2340,10 +2328,7 @@ mod tests {
         // Corrupt peers file → load error branch starts empty book.
         std::fs::write(dir.join("peers"), b"not-a-valid-peers-blob\xff\x00").unwrap();
 
-        let mut cfg = NodeConfig::default()
-            .with_datadir(&dir)
-            .with_network(rbitcoin_primitives::Network::Regtest)
-            .with_p2p_listen("127.0.0.1:0".parse().unwrap());
+        let mut cfg = tiny_regtest(&dir).with_p2p_listen("127.0.0.1:0".parse().unwrap());
         cfg.listen.use_seeds = false;
         cfg.listen.connect = vec!["127.0.0.1:1".parse().unwrap()];
         cfg.max_run_secs = Some(0);
@@ -2376,10 +2361,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("rbitcoin-run-p2p-seeds-{nanos}"));
-        let mut cfg = NodeConfig::default()
-            .with_datadir(&dir)
-            .with_network(rbitcoin_primitives::Network::Regtest)
-            .with_p2p_listen("127.0.0.1:0".parse().unwrap());
+        let mut cfg = tiny_regtest(&dir).with_p2p_listen("127.0.0.1:0".parse().unwrap());
         cfg.listen.use_seeds = true; // regtest: resolve_all_seeds → empty
         cfg.listen.connect.clear();
         cfg.max_run_secs = Some(0);
@@ -2401,10 +2383,7 @@ mod tests {
         // Hold a port so electrum bind fails.
         let held = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = held.local_addr().unwrap();
-        let mut cfg = NodeConfig::default()
-            .with_datadir(&dir)
-            .with_network(rbitcoin_primitives::Network::Regtest)
-            .with_p2p_listen("127.0.0.1:0".parse().unwrap());
+        let mut cfg = tiny_regtest(&dir).with_p2p_listen("127.0.0.1:0".parse().unwrap());
         cfg.listen.use_seeds = false;
         cfg.listen.connect.clear();
         cfg.shindex = true;

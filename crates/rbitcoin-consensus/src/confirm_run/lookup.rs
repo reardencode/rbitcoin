@@ -794,15 +794,7 @@ mod tests {
     };
     use rbitcoin_query::IdMap;
     use rbitcoin_store::HeaderRecord;
-    use std::sync::Once;
-
     fn tmp_query() -> (std::path::PathBuf, Query) {
-        static ONCE: Once = Once::new();
-        ONCE.call_once(|| {
-            if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-                std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-            }
-        });
         let path = std::env::temp_dir().join(format!(
             "rbitcoin-stamp-archived-{}-{}",
             std::process::id(),
@@ -812,7 +804,7 @@ mod tests {
                 .unwrap_or(0)
         ));
         std::fs::create_dir_all(&path).unwrap();
-        let q = Query::open_or_create(&path).unwrap();
+        let q = Query::open_or_create_tiny(&path).unwrap();
         (path, q)
     }
 

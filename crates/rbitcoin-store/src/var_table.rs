@@ -65,9 +65,45 @@ impl VarTable {
         })
     }
 
+    pub fn create_with_soft_span(
+        dir: &Path,
+        stem: &str,
+        body_kind: TableKind,
+        soft_span: u64,
+    ) -> Result<Self, StoreError> {
+        let body = TableFile::create(Self::body_path(dir, stem), body_kind)?;
+        let idx = TxIdx::create_with_soft_span(dir, stem, soft_span)?;
+        Ok(Self {
+            body,
+            idx,
+            count: AtomicU64::new(0),
+            published_body_end: AtomicU64::new(FILE_HEADER_LEN as u64),
+            publish_seq: AtomicU64::new(0),
+        })
+    }
+
     pub fn open(dir: &Path, stem: &str, body_kind: TableKind) -> Result<Self, StoreError> {
         let body = TableFile::open(Self::body_path(dir, stem), body_kind)?;
         let idx = TxIdx::open(dir, stem)?;
+        let count = idx.slot_count();
+        let body_end = body.logical_len().max(FILE_HEADER_LEN as u64);
+        Ok(Self {
+            body,
+            idx,
+            count: AtomicU64::new(count),
+            published_body_end: AtomicU64::new(body_end),
+            publish_seq: AtomicU64::new(0),
+        })
+    }
+
+    pub fn open_with_soft_span(
+        dir: &Path,
+        stem: &str,
+        body_kind: TableKind,
+        soft_span: u64,
+    ) -> Result<Self, StoreError> {
+        let body = TableFile::open(Self::body_path(dir, stem), body_kind)?;
+        let idx = TxIdx::open_with_soft_span(dir, stem, soft_span)?;
         let count = idx.slot_count();
         let body_end = body.logical_len().max(FILE_HEADER_LEN as u64);
         Ok(Self {
@@ -1010,8 +1046,8 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        crate::tx_idx::test_with_soft_span_bytes(128, || {
-            let t = VarTable::create(&dir, "tx", TableKind::TxOut).unwrap();
+        {
+            let t = VarTable::create_with_soft_span(&dir, "tx", TableKind::TxOut, 128).unwrap();
             // Each record ~100 B → soft 128 forces new segment often.
             for i in 0..12u8 {
                 put_batch(&t, 1, 128, |_j, buf| {
@@ -1034,10 +1070,10 @@ mod tests {
                 assert!(raw.len() >= 100);
             }
             drop(t);
-            let t = VarTable::open(&dir, "tx", TableKind::TxOut).unwrap();
+            let t = VarTable::open_with_soft_span(&dir, "tx", TableKind::TxOut, 128).unwrap();
             assert_eq!(t.count(), 12);
             assert_eq!(t.get_raw(Fk(12)).unwrap()[0], 11);
-        });
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

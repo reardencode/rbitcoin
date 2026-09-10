@@ -18,7 +18,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 async fn start_node(dir: &TempDir) -> P2PNode {
-    let q = Query::open_or_create(dir.path().join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.path().join("store")).unwrap();
     P2PNode::start(
         "127.0.0.1:0".parse().unwrap(),
         q,
@@ -405,7 +405,7 @@ async fn reorg_to_longer_branch() {
     use rbitcoin_net::{AcceptOutcome, ChainHub};
 
     let dir = TempDir::new().unwrap();
-    let q = Query::open_or_create(dir.path().join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.path().join("store")).unwrap();
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
 
     let genesis = regtest_genesis();
@@ -463,7 +463,7 @@ fn reorg_competing_spend_extends_without_multi_fail() {
     use rbitcoin_test::mine::spend_anyone_can_spend;
 
     let dir = TempDir::new().unwrap();
-    let q = Query::open_or_create(dir.path().join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.path().join("store")).unwrap();
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     let maturity = ChainParams::regtest().coinbase_maturity();
 
@@ -564,7 +564,7 @@ fn reorg_same_height_then_multi_block_branch() {
     use rbitcoin_net::{AcceptOutcome, ChainHub};
 
     let dir = TempDir::new().unwrap();
-    let q = Query::open_or_create(dir.path().join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.path().join("store")).unwrap();
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
 
     let genesis = regtest_genesis();
@@ -658,7 +658,7 @@ fn confirm_wire_idempotent_when_class_a_already_present() {
     use rbitcoin_primitives::Height as H;
 
     let dir = TempDir::new().unwrap();
-    let q = Query::open_or_create(dir.path().join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.path().join("store")).unwrap();
     q.enter_direct_index_mode().unwrap();
     let params = ChainParams::regtest();
     let ms = Milestone { height: 1_000_000 };
@@ -710,7 +710,8 @@ async fn node_run_p2p_short() {
     let mut cfg = NodeConfig::default()
         .with_datadir(node_dir.path())
         .with_network(Network::Regtest)
-        .with_p2p_listen("127.0.0.1:0".parse().unwrap());
+        .with_p2p_listen("127.0.0.1:0".parse().unwrap())
+        .with_tiny_heads();
     cfg.listen.connect = vec![seed_addr];
     cfg.listen.use_seeds = false;
     cfg.max_run_secs = Some(0); // sync then exit immediately
@@ -718,7 +719,7 @@ async fn node_run_p2p_short() {
     run_p2p(cfg).await.expect("run_p2p");
 
     // Reopen store — should have synced chain
-    let q = Query::open_or_create(node_dir.path().join("store")).unwrap();
+    let q = Query::open_or_create_tiny(node_dir.path().join("store")).unwrap();
     assert_eq!(q.tip_height(), Some(Height(3)));
 
     seed.shutdown().await;

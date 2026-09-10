@@ -977,7 +977,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rbitcoin-arch-{label}-{n}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create(&dir).unwrap();
+        let q = Query::open_or_create_tiny(&dir).unwrap();
         (dir, q)
     }
 

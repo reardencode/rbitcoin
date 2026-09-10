@@ -25,7 +25,7 @@ async fn read_line_timeout(reader: &mut BufReader<&mut TcpStream>, buf: &mut Str
 #[tokio::test]
 async fn electrum_server_version_history_balance() {
     let dir = TempDir::new().unwrap();
-    let q = Query::open_or_create(dir.path().join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.path().join("store")).unwrap();
     let params = ChainParams::regtest();
     let _chain = build_mature_regtest_with_spend(&q, &params);
     let _ = Milestone::NONE;
@@ -299,7 +299,7 @@ fn direct_indexes_then_sh_bulk_at_tip() {
     use rbitcoin_test::mine::{mine_regtest_block, regtest_genesis};
 
     let dir = TempDir::new().unwrap();
-    let q = Query::open_or_create(dir.path().join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.path().join("store")).unwrap();
     let params = ChainParams::regtest();
 
     // Direct IBD: live heads + spend annotations on confirm.

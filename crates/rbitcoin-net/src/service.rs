@@ -599,7 +599,7 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let q = rbitcoin_query::Query::open_or_create(&dir).unwrap();
+        let q = rbitcoin_query::Query::open_or_create_tiny(&dir).unwrap();
         let mut node = P2PNode::start(
             "127.0.0.1:0".parse().unwrap(),
             q,

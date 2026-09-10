@@ -78,83 +78,72 @@ pub enum HeadRole {
 
 /// Disk pre-size policy for hash heads.
 ///
-/// Override with `RBITCOIN_HEAD_SCALE=tiny|mainnet` (default **mainnet**).
-/// Integration tests set `tiny` so they do not allocate multi‑GiB sparse files.
+/// Chosen at store create/open ([`crate::StoreLayout`]). Production default is
+/// [`HeadScale::Mainnet`]. Tests pass [`HeadScale::Tiny`] so they do not
+/// allocate multi‑GiB sparse files. Not selected by process env, `cfg(test)`,
+/// or cargo-test `/deps/` sniffing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeadScale {
-    /// Minimal (64 slots) — unit/integration tests.
+    /// Minimal (64 header slots, 1 SH shard, 16-bit tx.head) — tests.
     Tiny,
     /// Full-mainnet IBD: `header.head` starts at 2²² slots (~96 MiB sparse).
     Mainnet,
 }
 
-/// True when this process is a `cargo test` binary (`target/*/deps/*`).
-fn running_as_cargo_test_binary() -> bool {
-    std::env::current_exe()
-        .ok()
-        .map(|p| {
-            let s = p.to_string_lossy();
-            // Unix + Windows deps layout for cargo test executables.
-            s.contains("/deps/") || s.contains("\\deps\\")
-        })
-        .unwrap_or(false)
+/// Open-time head knobs (scale plus rebuild / idx-span). Copy so table
+/// constructors can take them without cloning [`crate::StoreLayout`].
+///
+/// `None` on the optional fields means “read the documented unstable env at
+/// open” (`RBITCOIN_TX_HEAD_REBUILD_SEAL_BITS`, `RBITCOIN_TX_HEAD_REBUILD_WORKERS`,
+/// `RBITCOIN_TX_IDX_SOFT_SPAN`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeadOpenOpts {
+    pub scale: HeadScale,
+    pub rebuild_seal_bits: Option<u32>,
+    pub rebuild_workers: Option<usize>,
+    pub idx_soft_span: Option<u64>,
 }
 
-#[cfg(test)]
-thread_local! {
-    static TEST_HEAD_SCALE: std::cell::Cell<Option<HeadScale>> =
-        const { std::cell::Cell::new(None) };
+impl HeadOpenOpts {
+    pub const MAINNET: Self = Self {
+        scale: HeadScale::Mainnet,
+        rebuild_seal_bits: None,
+        rebuild_workers: None,
+        idx_soft_span: None,
+    };
+
+    pub const TINY: Self = Self {
+        scale: HeadScale::Tiny,
+        rebuild_seal_bits: None,
+        rebuild_workers: None,
+        idx_soft_span: None,
+    };
+
+    pub fn tiny() -> Self {
+        Self::TINY
+    }
+
+    pub fn mainnet() -> Self {
+        Self::MAINNET
+    }
+
+    pub fn with_rebuild_seal_bits(mut self, bits: u32) -> Self {
+        self.rebuild_seal_bits = Some(bits);
+        self
+    }
+
+    pub fn with_rebuild_workers(mut self, n: usize) -> Self {
+        self.rebuild_workers = Some(n);
+        self
+    }
+
+    pub fn with_idx_soft_span(mut self, bytes: u64) -> Self {
+        self.idx_soft_span = Some(bytes);
+        self
+    }
 }
 
 impl HeadScale {
-    /// Hold this thread's scale for `f` (does not mutate process env).
-    #[cfg(test)]
-    pub fn test_with<R>(scale: HeadScale, f: impl FnOnce() -> R) -> R {
-        let prev = TEST_HEAD_SCALE.with(|c| c.replace(Some(scale)));
-        struct Restore(Option<HeadScale>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                TEST_HEAD_SCALE.with(|c| c.set(self.0));
-            }
-        }
-        let _restore = Restore(prev);
-        f()
-    }
-
-    /// Resolve from `RBITCOIN_HEAD_SCALE` (`tiny`/`test`/`mainnet`/`full`).
-    ///
-    /// Default: [`HeadScale::Mainnet`] for normal binaries; [`HeadScale::Tiny`]
-    /// when this crate is under `cfg(test)` or the process is a cargo test binary.
-    /// Tests may pin a value with [`Self::test_with`] (thread-local).
-    pub fn from_env() -> Self {
-        #[cfg(test)]
-        if let Some(s) = TEST_HEAD_SCALE.with(std::cell::Cell::get) {
-            return s;
-        }
-        match std::env::var("RBITCOIN_HEAD_SCALE")
-            .map(|s| s.to_ascii_lowercase())
-            .ok()
-            .as_deref()
-        {
-            Some("tiny") | Some("test") | Some("small") => HeadScale::Tiny,
-            Some("mainnet") | Some("full") | Some("large") => HeadScale::Mainnet,
-            Some(other) => {
-                rbitcoin_log::warn!("store: unknown RBITCOIN_HEAD_SCALE={other:?}, using mainnet");
-                HeadScale::Mainnet
-            }
-            None => {
-                // Tiny for unit tests of this crate, and for cargo test binaries
-                // (they live under target/*/deps/; store is a non-test dep so
-                // cfg!(test) is false there — without this, 8 GiB mainnet heads).
-                if cfg!(test) || running_as_cargo_test_binary() {
-                    HeadScale::Tiny
-                } else {
-                    HeadScale::Mainnet
-                }
-            }
-        }
-    }
-
     /// Default initial slots for a **single** hash-head file.
     pub fn initial_slots(self, role: HeadRole) -> u64 {
         match self {
@@ -164,13 +153,37 @@ impl HeadScale {
             },
         }
     }
+
+    /// Sorted/MPHF `scripthash.head/NN` shard count (not a HashHead).
+    pub fn sh_main_shards(self) -> usize {
+        match self {
+            HeadScale::Tiny => 1,
+            HeadScale::Mainnet => SH_MAIN_SHARDS_MAINNET,
+        }
+    }
+
+    /// Ingest OA slots for `scripthash.ovf/ingest`.
+    pub fn ingest_oa_slots(self) -> u64 {
+        match self {
+            HeadScale::Tiny => 256,
+            HeadScale::Mainnet => 1 << 25,
+        }
+    }
+
+    /// Unique-key hint when `RBITCOIN_SH_UNIQUE_HINT` is unset.
+    pub fn sh_unique_hint(self) -> u64 {
+        match self {
+            HeadScale::Tiny => 4_096,
+            HeadScale::Mainnet => 2_000_000_000,
+        }
+    }
 }
 
-/// Effective initial slots for `role` (env scale + optional per-role override).
+/// Effective initial slots for `role` (scale + optional per-role override).
 ///
 /// Override: `RBITCOIN_HEAD_SLOTS_HEADER` (decimal slot count, rounded up to
 /// power of two).
-pub fn initial_slots_for(role: HeadRole) -> u64 {
+pub fn initial_slots_for(role: HeadRole, scale: HeadScale) -> u64 {
     let env_key = match role {
         HeadRole::Header => "RBITCOIN_HEAD_SLOTS_HEADER",
     };
@@ -179,17 +192,14 @@ pub fn initial_slots_for(role: HeadRole) -> u64 {
             return n.max(2).next_power_of_two();
         }
     }
-    HeadScale::from_env().initial_slots(role)
+    scale.initial_slots(role)
 }
 
 /// Sorted/MPHF `scripthash.head/NN` + sharded body count (not a HashHead).
 pub const SH_MAIN_SHARDS_MAINNET: usize = 64;
 
-pub fn sh_main_shard_count() -> usize {
-    match HeadScale::from_env() {
-        HeadScale::Tiny => 1,
-        HeadScale::Mainnet => SH_MAIN_SHARDS_MAINNET,
-    }
+pub fn sh_main_shard_count(scale: HeadScale) -> usize {
+    scale.sh_main_shards()
 }
 
 /// Append-only multi-fk list for a single 16-byte head key (prefix / BIP30).
@@ -1127,7 +1137,13 @@ mod tests {
     fn mainnet_scale_slot_targets() {
         assert_eq!(HeadScale::Tiny.initial_slots(HeadRole::Header), 64);
         assert_eq!(HeadScale::Mainnet.initial_slots(HeadRole::Header), 1 << 22);
-        assert_eq!(sh_main_shard_count(), 1);
+        assert_eq!(HeadScale::Tiny.sh_main_shards(), 1);
+        assert_eq!(HeadScale::Mainnet.sh_main_shards(), SH_MAIN_SHARDS_MAINNET);
+        assert_eq!(sh_main_shard_count(HeadScale::Tiny), 1);
+        assert_eq!(
+            sh_main_shard_count(HeadScale::Mainnet),
+            SH_MAIN_SHARDS_MAINNET
+        );
     }
 
     #[test]
@@ -1252,29 +1268,23 @@ mod tests {
 
     #[test]
     fn head_scale_prefix_and_pack_helpers() {
-        // Under unit tests default scale is Tiny.
-        assert_eq!(HeadScale::from_env(), HeadScale::Tiny);
-        HeadScale::test_with(HeadScale::Mainnet, || {
-            assert_eq!(HeadScale::from_env(), HeadScale::Mainnet);
-            let other = std::thread::spawn(HeadScale::from_env)
-                .join()
-                .expect("join");
-            assert_eq!(
-                other,
-                HeadScale::Tiny,
-                "sibling thread must keep cargo-test Tiny default"
-            );
-        });
-        assert_eq!(HeadScale::from_env(), HeadScale::Tiny);
         assert_eq!(
             HeadScale::Tiny.initial_slots(HeadRole::Header),
             DEFAULT_SLOTS
         );
         assert_eq!(HeadScale::Mainnet.initial_slots(HeadRole::Header), 1 << 22);
-        HeadScale::test_with(HeadScale::Mainnet, || {
-            assert_eq!(sh_main_shard_count(), SH_MAIN_SHARDS_MAINNET);
-        });
-        assert_eq!(initial_slots_for(HeadRole::Header), DEFAULT_SLOTS);
+        assert_eq!(
+            sh_main_shard_count(HeadScale::Mainnet),
+            SH_MAIN_SHARDS_MAINNET
+        );
+        assert_eq!(
+            initial_slots_for(HeadRole::Header, HeadScale::Tiny),
+            DEFAULT_SLOTS
+        );
+        assert_eq!(
+            initial_slots_for(HeadRole::Header, HeadScale::Mainnet),
+            1 << 22
+        );
         let full = [0xABu8; 32];
         let p = head_key_prefix(&full);
         assert_eq!(&p[..], &full[..16]);
@@ -1287,7 +1297,6 @@ mod tests {
         let (multi, fk) = unpack_value(42);
         assert!(!multi);
         assert_eq!(fk, Fk(42));
-        assert!(running_as_cargo_test_binary() || cfg!(test));
     }
 
     #[test]

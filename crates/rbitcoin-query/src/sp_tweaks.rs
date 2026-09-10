@@ -422,10 +422,7 @@ mod tests {
                 .unwrap_or(0)
         ));
         std::fs::create_dir_all(&path).unwrap();
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-        let q = Query::open_or_create(&path).unwrap();
+        let q = Query::open_or_create_tiny(&path).unwrap();
         (path, q)
     }
 

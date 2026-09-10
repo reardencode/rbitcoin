@@ -637,19 +637,6 @@ mod tests {
     use serde_json::Value;
     use std::path::PathBuf;
     use std::str::FromStr;
-    use std::sync::Once;
-
-    static HEAD_SCALE: Once = Once::new();
-
-    fn ensure_tiny_heads() {
-        HEAD_SCALE.call_once(|| {
-            if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-                // SAFETY: tests only.
-                std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-            }
-        });
-    }
-
     fn hex_bytes(s: &str) -> Vec<u8> {
         rbitcoin_primitives::hex_decode(s).expect("hex")
     }
@@ -813,7 +800,6 @@ mod tests {
     }
 
     fn tmp_store() -> (PathBuf, Query) {
-        ensure_tiny_heads();
         let path = std::env::temp_dir().join(format!(
             "rbitcoin-sp-tweaks-{}-{}",
             std::process::id(),
@@ -823,7 +809,7 @@ mod tests {
                 .unwrap_or(0)
         ));
         std::fs::create_dir_all(&path).unwrap();
-        let q = Query::open_or_create(&path).expect("open store");
+        let q = Query::open_or_create_tiny(&path).expect("open store");
         (path, q)
     }
 

@@ -59,7 +59,7 @@ fn four_shard_dir_table(dir: &std::path::Path) -> ScriptHashTable {
     )
     .unwrap();
     drop(ovf);
-    ScriptHashTable::open(dir).unwrap()
+    ScriptHashTable::open_tiny(dir).unwrap()
 }
 
 fn sh_prefix_key(shard: u8, i: u8) -> [u8; 32] {
@@ -70,9 +70,9 @@ fn sh_prefix_key(shard: u8, i: u8) -> [u8; 32] {
 
 #[test]
 fn sh_body_create_grows_64k_not_slab() {
-    HeadScale::test_with(HeadScale::Tiny, || {
+    {
         let dir = tmp();
-        let t = ScriptHashTable::create(&dir).unwrap();
+        let t = ScriptHashTable::create_tiny(&dir).unwrap();
         let sh = script_hash(&[0x01]);
         t.put_create(&rec(sh, 1, 0)).unwrap();
         t.put_create(&rec(sh, 2, 0)).unwrap();
@@ -98,12 +98,12 @@ fn sh_body_create_grows_64k_not_slab() {
             "ovf body {ovf_len} must stay under 128 KiB"
         );
         let _ = std::fs::remove_dir_all(&dir);
-    });
+    }
 }
 
 #[test]
 fn sh_bodies_are_split() {
-    HeadScale::test_with(HeadScale::Tiny, || {
+    {
         let dir = tmp();
         let t = four_shard_dir_table(&dir);
         assert_eq!(t.head_shard_count(), 4);
@@ -165,7 +165,7 @@ fn sh_bodies_are_split() {
         assert_eq!(ft.entries(&k_new).unwrap().len(), 8);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&file_dir);
-    });
+    }
 }
 
 #[test]
@@ -220,7 +220,7 @@ fn sh_body_orientation() {
         other => panic!("expected Layout, got {other:?}"),
     }
     let created = tmp();
-    let _t = ScriptHashTable::create(&created).unwrap();
+    let _t = ScriptHashTable::create_tiny(&created).unwrap();
     assert_eq!(
         detect_sh_body_layout(&created).unwrap(),
         ShBodyLayout::Sharded
@@ -257,7 +257,7 @@ fn script_hash_record_helpers_and_table_flush_open() {
     let _ = script_hash(&[0x00, 0x14]);
 
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0x99]);
     t.put_create(&rec(sh, 1, 0)).unwrap();
     let _ = t.put_create_batch(&[]);
@@ -265,7 +265,7 @@ fn script_hash_record_helpers_and_table_flush_open() {
     t.flush().unwrap();
     t.flush_async().unwrap();
     drop(t);
-    let t = ScriptHashTable::open(&dir).unwrap();
+    let t = ScriptHashTable::open_tiny(&dir).unwrap();
     assert_eq!(t.entries(&sh).unwrap().len(), 1);
     // for_each_live across table
     let mut n = 0u32;
@@ -283,7 +283,7 @@ fn script_hash_record_helpers_and_table_flush_open() {
 #[test]
 fn scripthash_thin_roundtrip() {
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0x51]);
     t.put_create(&rec(sh, 3, 0)).unwrap();
     let entries = t.entries(&sh).unwrap();
@@ -303,7 +303,7 @@ fn scripthash_thin_roundtrip() {
 #[test]
 fn incremental_absent_lands_on_ingest() {
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0x51]);
     t.put_create(&rec(sh, 3, 0)).unwrap();
     assert_eq!(t.entries(&sh).unwrap().len(), 1);
@@ -317,7 +317,7 @@ fn incremental_absent_lands_on_ingest() {
     );
     t.flush().unwrap();
     drop(t);
-    let t = ScriptHashTable::open(&dir).unwrap();
+    let t = ScriptHashTable::open_tiny(&dir).unwrap();
     assert_eq!(t.entries(&sh).unwrap().len(), 1);
     assert!(!dir.join("scripthash.head").exists());
     let _ = std::fs::remove_dir_all(&dir);
@@ -326,7 +326,7 @@ fn incremental_absent_lands_on_ingest() {
 #[test]
 fn put_create_uses_slabs_then_pages() {
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0x15]);
     for i in 1..=5u64 {
         t.put_create(&rec(sh, i, 0)).unwrap();
@@ -372,7 +372,7 @@ fn put_create_uses_slabs_then_pages() {
 #[test]
 fn promote_ladder_inline_to_paged() {
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0x52]);
     for i in 1..=5u64 {
         t.put_create(&rec(sh, i, i as u32)).unwrap();
@@ -394,7 +394,7 @@ fn promote_ladder_inline_to_paged() {
 #[test]
 fn put_create_batch_many_uses_pages() {
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0x53]);
     let recs: Vec<_> = (0..100u32).map(|v| rec(sh, u64::from(v) + 1, v)).collect();
     let n = t.put_create_batch(&recs).unwrap();
@@ -415,7 +415,7 @@ fn put_create_batch_many_uses_pages() {
 #[test]
 fn put_create_batch_chains() {
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0x51]);
     let recs: Vec<_> = (0..3u32).map(|v| rec(sh, u64::from(v) + 1, v)).collect();
     let n = t.put_create_batch(&recs).unwrap();
@@ -433,7 +433,7 @@ fn put_create_batch_chains() {
 fn put_create_batch_skips_leq_max_appends_higher() {
     use crate::scripthash_pages::SH_PAGE_STREAM_MAX;
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0xab]);
     // Fill past one delta page so last page holds the max.
     let n = SH_PAGE_STREAM_MAX + 5;
@@ -473,7 +473,7 @@ fn put_create_batch_skips_leq_max_appends_higher() {
 #[test]
 fn put_create_batch_append_uses_heads() {
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0x51]);
     let mut heads = HashMap::new();
     let recs: Vec<_> = (0..3u32).map(|v| rec(sh, u64::from(v) + 1, v)).collect();
@@ -511,7 +511,7 @@ fn dummy_sh_head_key(i: u64) -> [u8; 32] {
 #[test]
 fn put_create_batch_append_caps_heads_and_miss_still_writes() {
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let mut heads = HashMap::new();
     for i in 0..SH_HEADS_CAP as u64 {
         heads.insert(dummy_sh_head_key(i), ShHeadValue::Empty);
@@ -555,7 +555,7 @@ fn put_create_batch_append_caps_heads_and_miss_still_writes() {
 #[test]
 fn page_append_preserves_prefix_and_order() {
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0x7a]);
     let mut heads = HashMap::new();
     let first: Vec<_> = (1..=5u32).map(|v| rec(sh, u64::from(v), v)).collect();
@@ -602,7 +602,7 @@ fn page_append_preserves_prefix_and_order() {
 #[test]
 fn unlink_demotes_paged_to_inline() {
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0x54]);
     for i in 1..=3u64 {
         t.put_create(&rec(sh, i, i as u32)).unwrap();
@@ -621,42 +621,40 @@ fn unlink_demotes_paged_to_inline() {
 
 #[test]
 fn ingest_oa_slots_mainnet_is_2_25() {
-    HeadScale::test_with(HeadScale::Mainnet, || {
-        assert_eq!(ingest_oa_slots(), 1 << 25);
-        assert_eq!(SH_HEAD_VALUE_LEN, 8);
-        assert_eq!(crate::scripthash_layout::SH_HEAD_SLOT_SIZE, 24);
-    });
+    assert_eq!(HeadScale::Mainnet.ingest_oa_slots(), 1 << 25);
+    assert_eq!(SH_HEAD_VALUE_LEN, 8);
+    assert_eq!(crate::scripthash_layout::SH_HEAD_SLOT_SIZE, 24);
 }
 
 #[test]
 fn create_does_not_write_oa_stub() {
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
-    assert_eq!(t.head_shard_count(), crate::hashhead::sh_main_shard_count());
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    assert_eq!(t.head_shard_count(), 1);
     drop(t);
     assert!(
         !dir.join("scripthash.head.oa_stub").exists(),
         "create must not write leftover sharded OA stub"
     );
     std::fs::create_dir_all(dir.join("scripthash.head.oa_stub")).unwrap();
-    let t = ScriptHashTable::open(&dir).unwrap();
+    let t = ScriptHashTable::open_tiny(&dir).unwrap();
     assert!(
         !dir.join("scripthash.head.oa_stub").exists(),
         "open must unlink leftover oa_stub"
     );
-    assert_eq!(t.head_shard_count(), crate::hashhead::sh_main_shard_count());
+    assert_eq!(t.head_shard_count(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn leftover_live_oa_main_open_refuses() {
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     t.put_create(&rec(script_hash(&[0x01]), 1, 0)).unwrap();
     t.flush().unwrap();
     drop(t);
     ShardedScriptHashHead::create_sharded(dir.join("scripthash.head"), 1, 64).unwrap();
-    match ScriptHashTable::open(&dir) {
+    match ScriptHashTable::open_tiny(&dir) {
         Ok(_) => panic!("leftover OA main must refuse"),
         Err(StoreError::Layout(m)) => {
             assert!(m.contains("scripthash*"), "{m}");
@@ -670,14 +668,14 @@ fn leftover_live_oa_main_open_refuses() {
 #[test]
 fn leftover_oa_overflow_seg_open_refuses() {
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     t.put_create(&rec(script_hash(&[0x02]), 1, 0)).unwrap();
     t.flush().unwrap();
     drop(t);
     let ovf = dir.join("scripthash.ovf");
     std::fs::create_dir_all(&ovf).unwrap();
     std::fs::write(ovf.join("000000"), b"not-shsr").unwrap();
-    match ScriptHashTable::open(&dir) {
+    match ScriptHashTable::open_tiny(&dir) {
         Ok(_) => panic!("leftover OA ovf must refuse"),
         Err(StoreError::Layout(m)) => {
             assert!(m.contains("scripthash*"), "{m}");
@@ -690,7 +688,7 @@ fn leftover_oa_overflow_seg_open_refuses() {
 #[test]
 fn ingest_batch_update_and_new_keys() {
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh0 = script_hash(&[0xc0, 0, 0, 0x11]);
     t.put_create(&rec(sh0, 1, 0)).unwrap();
     let mut batch = vec![rec(sh0, 99_999, 1)];
@@ -710,14 +708,14 @@ fn ingest_batch_update_and_new_keys() {
 #[test]
 fn ingest_many_unique_keys_reopen() {
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     put_unique(&t, 0xa0, 80);
     let sh0 = script_hash(&[0xa0, 0, 0, 0x7e]);
     t.put_create(&rec(sh0, 10_000, 1)).unwrap();
     assert_eq!(t.entries(&sh0).unwrap().len(), 2);
     t.flush().unwrap();
     drop(t);
-    let t = ScriptHashTable::open(&dir).unwrap();
+    let t = ScriptHashTable::open_tiny(&dir).unwrap();
     assert_eq!(t.entries(&sh0).unwrap().len(), 2);
     assert!(!dir.join("scripthash.head").exists());
     let _ = std::fs::remove_dir_all(&dir);
@@ -728,7 +726,7 @@ fn ingest_many_unique_keys_reopen() {
 fn open_empty_alloc_v1_upgrades_to_v2() {
     let dir = tmp();
     {
-        let t = ScriptHashTable::create(&dir).unwrap();
+        let t = ScriptHashTable::create_tiny(&dir).unwrap();
         assert!(!t.has_durable_index());
         t.flush().unwrap();
     }
@@ -752,7 +750,7 @@ fn open_empty_alloc_v1_upgrades_to_v2() {
         1
     );
 
-    let t = ScriptHashTable::open(&dir).unwrap();
+    let t = ScriptHashTable::open_tiny(&dir).unwrap();
     assert!(!t.has_durable_index());
     drop(t);
     assert_eq!(
@@ -762,7 +760,7 @@ fn open_empty_alloc_v1_upgrades_to_v2() {
         "empty v1 must be rewritten to current alloc version"
     );
     // Reopen stays v2.
-    let t = ScriptHashTable::open(&dir).unwrap();
+    let t = ScriptHashTable::open_tiny(&dir).unwrap();
     t.put_create(&rec(script_hash(&[0x42]), 1, 0)).unwrap();
     assert_eq!(t.entries(&script_hash(&[0x42])).unwrap().len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
@@ -773,7 +771,7 @@ fn open_empty_alloc_v1_upgrades_to_v2() {
 fn open_durable_alloc_v1_refused() {
     let dir = tmp();
     {
-        let t = ScriptHashTable::create(&dir).unwrap();
+        let t = ScriptHashTable::create_tiny(&dir).unwrap();
         t.put_create(&rec(script_hash(&[0x99]), 7, 0)).unwrap();
         assert!(t.has_durable_index());
         t.flush().unwrap();
@@ -795,7 +793,7 @@ fn open_durable_alloc_v1_refused() {
     body.flush().unwrap();
     drop(body);
 
-    match ScriptHashTable::open(&dir) {
+    match ScriptHashTable::open_tiny(&dir) {
         Ok(_) => panic!("expected refuse for durable alloc v1"),
         Err(StoreError::Corrupt(m)) => {
             assert!(
@@ -813,7 +811,7 @@ fn open_durable_alloc_v1_refused() {
 fn open_wipes_legacy_fullsize_ovf_head() {
     let dir = tmp();
     {
-        let t = ScriptHashTable::create(&dir).unwrap();
+        let t = ScriptHashTable::create_tiny(&dir).unwrap();
         t.put_create(&rec(script_hash(&[0x01]), 1, 0)).unwrap();
         t.flush().unwrap();
     }
@@ -827,7 +825,7 @@ fn open_wipes_legacy_fullsize_ovf_head() {
         b"SHFUSE01",
     )
     .unwrap();
-    let t = ScriptHashTable::open(&dir).unwrap();
+    let t = ScriptHashTable::open_tiny(&dir).unwrap();
     assert!(!dir
         .join(crate::scripthash_overflow::LEGACY_OVERFLOW_HEAD)
         .exists());
@@ -838,7 +836,7 @@ fn open_wipes_legacy_fullsize_ovf_head() {
 #[test]
 fn freelist_reuses_page() {
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh1 = script_hash(&[0x61]);
     let sh2 = script_hash(&[0x62]);
     for i in 1..=3u64 {
@@ -871,7 +869,7 @@ fn freelist_reuses_page() {
 #[test]
 fn cold_install_sorted_main_and_global_ingest() {
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh_main = script_hash(&[0x10]);
     let sh_new = script_hash(&[0x99]);
     let mut session = t.bulk_session(16).unwrap();
@@ -921,7 +919,7 @@ fn cold_install_sorted_main_and_global_ingest() {
     );
     t.flush().unwrap();
     drop(t);
-    let t = ScriptHashTable::open(&dir).unwrap();
+    let t = ScriptHashTable::open_tiny(&dir).unwrap();
     assert_eq!(t.entries(&sh_main).unwrap().len(), 3);
     assert_eq!(t.entries(&sh_new).unwrap().len(), 2);
     assert!(matches!(t.key_home(&sh_main).unwrap(), KeyHome::Main));
@@ -931,9 +929,9 @@ fn cold_install_sorted_main_and_global_ingest() {
 
 #[test]
 fn reopen_after_ingest_seal_and_unlink_homes() {
-    HeadScale::test_with(HeadScale::Tiny, || {
+    {
         let dir = tmp();
-        let t = ScriptHashTable::create(&dir).unwrap();
+        let t = ScriptHashTable::create_tiny(&dir).unwrap();
         let sh_main = script_hash(&[0x10]);
         let mut session = t.bulk_session(8).unwrap();
         session.put_chain(sh_main, &[Fk(1)]).unwrap();
@@ -960,7 +958,7 @@ fn reopen_after_ingest_seal_and_unlink_homes() {
 
         t.flush().unwrap();
         drop(t);
-        let t = ScriptHashTable::open(&dir).unwrap();
+        let t = ScriptHashTable::open_tiny(&dir).unwrap();
         assert!(t.entries(&sh_main).unwrap().is_empty());
         assert!(t.entries(&first_new).unwrap().is_empty());
         assert!(matches!(t.key_home(&sh_main).unwrap(), KeyHome::Main));
@@ -969,14 +967,14 @@ fn reopen_after_ingest_seal_and_unlink_homes() {
             KeyHome::SealedOvf
         ));
         let _ = std::fs::remove_dir_all(&dir);
-    });
+    }
 }
 
 #[test]
 fn compact_merges_two_sealed_global_ovf_files() {
-    HeadScale::test_with(HeadScale::Tiny, || {
+    {
         let dir = tmp();
-        let t = ScriptHashTable::create(&dir).unwrap();
+        let t = ScriptHashTable::create_tiny(&dir).unwrap();
         let sh_main = script_hash(&[0x10]);
         let mut session = t.bulk_session(8).unwrap();
         session.put_chain(sh_main, &[Fk(1)]).unwrap();
@@ -1034,13 +1032,13 @@ fn compact_merges_two_sealed_global_ovf_files() {
         assert_eq!(t.sealed_ovf.lock().unwrap().len(), 1, "L1 frozen: L0 stays");
         assert_eq!(t.entries(&first_new).unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
-    });
+    }
 }
 
 #[test]
 fn bulk_session_packs_exact_class_from_count() {
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let mut session = t.bulk_session(16).unwrap();
     let cases: &[(u8, u32)] = &[(0x01, 1), (0x02, 2), (0x06, 6), (0x14, 20), (0x60, 600)];
     for &(tag, n) in cases {
@@ -1105,7 +1103,7 @@ fn bulk_session_packs_exact_class_from_count() {
 #[test]
 fn bulk_session_put_chain_roundtrip() {
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let mut session = t.bulk_session(100).unwrap();
     // Many distinct keys, mix of inline and slab.
     for i in 0..50u32 {
@@ -1132,7 +1130,7 @@ fn bulk_session_put_chain_roundtrip() {
     sh1[1] = 0xab;
     assert_eq!(t.entries(&sh1).unwrap().len(), 2);
     t.flush().unwrap();
-    let t2 = ScriptHashTable::open(&dir).unwrap();
+    let t2 = ScriptHashTable::open_tiny(&dir).unwrap();
     assert_eq!(t2.entry_count(), creates);
     assert_eq!(t2.entries(&sh0).unwrap().len(), 8);
     let _ = std::fs::remove_dir_all(&dir);
@@ -1142,7 +1140,7 @@ fn bulk_session_put_chain_roundtrip() {
 fn bulk_session_stream_megakey_caps_buf_at_page() {
     use crate::scripthash_pages::SH_PAGE_STREAM_MAX;
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let n = SH_PAGE_STREAM_MAX + 10;
     let mut sh = [0u8; 32];
     sh[0] = 0x42;
@@ -1182,7 +1180,7 @@ fn bulk_session_stream_megakey_caps_buf_at_page() {
 
 #[test]
 fn pack_one_shard() {
-    HeadScale::test_with(HeadScale::Tiny, || {
+    {
         let dir = tmp();
         let t = four_shard_dir_table(&dir);
         assert_eq!(t.head_shard_count(), 4);
@@ -1205,7 +1203,7 @@ fn pack_one_shard() {
         assert_eq!(t.entries(&k1).unwrap().len(), 1);
         assert!(t.head_value(&key(1, 0)).unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
-    });
+    }
 }
 
 fn shard0_key(i: u8) -> [u8; 32] {
@@ -1216,7 +1214,7 @@ fn shard0_key(i: u8) -> [u8; 32] {
 
 #[test]
 fn bulk_session_reuses_fk_scratch_across_keys() {
-    HeadScale::test_with(HeadScale::Tiny, || {
+    {
         let dir = tmp();
         let t = four_shard_table(&dir);
         let mut session = t.pack_shard_session(0).unwrap();
@@ -1232,12 +1230,12 @@ fn bulk_session_reuses_fk_scratch_across_keys() {
             session.fk_scratch_capacity()
         );
         let _ = std::fs::remove_dir_all(&dir);
-    });
+    }
 }
 
 #[test]
 fn pack_shard_session_inline_one_fk_does_not_grow_body() {
-    HeadScale::test_with(HeadScale::Tiny, || {
+    {
         let dir = tmp();
         let t = four_shard_table(&dir);
         let payload0 = payload_start(FILE_HEADER_LEN);
@@ -1258,12 +1256,12 @@ fn pack_shard_session_inline_one_fk_does_not_grow_body() {
         ));
         assert_eq!(t.entries(&shard0_key(1)).unwrap()[0].0, Fk(7));
         let _ = std::fs::remove_dir_all(&dir);
-    });
+    }
 }
 
 #[test]
 fn pack_shard_session_slab_flush_times_body_and_roundtrips() {
-    HeadScale::test_with(HeadScale::Tiny, || {
+    {
         let dir = tmp();
         let t = four_shard_table(&dir);
         let mut session = t.pack_shard_session(0).unwrap();
@@ -1292,14 +1290,14 @@ fn pack_shard_session_slab_flush_times_body_and_roundtrips() {
             assert_eq!(ents[1].0, Fk(base + 1));
         }
         let _ = std::fs::remove_dir_all(&dir);
-    });
+    }
 }
 
 #[test]
 fn create_fks_matches_entries() {
-    HeadScale::test_with(HeadScale::Tiny, || {
+    {
         let dir = tmp();
-        let t = ScriptHashTable::create(&dir).unwrap();
+        let t = ScriptHashTable::create_tiny(&dir).unwrap();
         let one = script_hash(&[0x01]);
         t.put_create(&rec(one, 7, 0)).unwrap();
         assert_eq!(
@@ -1341,12 +1339,12 @@ fn create_fks_matches_entries() {
                 .collect::<Vec<_>>()
         );
         let _ = std::fs::remove_dir_all(&dir);
-    });
+    }
 }
 
 #[test]
 fn bulk_dense_five_fks_use_class0_slab() {
-    HeadScale::test_with(HeadScale::Tiny, || {
+    {
         let dir = tmp();
         let t = four_shard_table(&dir);
         let k = shard0_key(1);
@@ -1365,12 +1363,12 @@ fn bulk_dense_five_fks_use_class0_slab() {
         }
         assert_eq!(t.entries(&k).unwrap().len(), 5);
         let _ = std::fs::remove_dir_all(&dir);
-    });
+    }
 }
 
 #[test]
 fn bulk_dense_over_cap_stays_slab_until_deltas_fill() {
-    HeadScale::test_with(HeadScale::Tiny, || {
+    {
         let dir = tmp();
         let t = four_shard_table(&dir);
         let k = shard0_key(2);
@@ -1393,12 +1391,12 @@ fn bulk_dense_over_cap_stays_slab_until_deltas_fill() {
         }
         assert_eq!(t.entries(&k).unwrap().len(), n as usize);
         let _ = std::fs::remove_dir_all(&dir);
-    });
+    }
 }
 
 #[test]
 fn bulk_reuses_page_align_gap_for_later_slab() {
-    HeadScale::test_with(HeadScale::Tiny, || {
+    {
         let dir = tmp();
         let t = four_shard_table(&dir);
         let payload0 = payload_start(FILE_HEADER_LEN);
@@ -1439,7 +1437,7 @@ fn bulk_reuses_page_align_gap_for_later_slab() {
         assert_eq!(t.entries(&mega).unwrap().len(), 2100);
         assert_eq!(t.entries(&small_b).unwrap().len(), 5);
         let _ = std::fs::remove_dir_all(&dir);
-    });
+    }
 }
 
 fn four_shard_table(dir: &std::path::Path) -> ScriptHashTable {
@@ -1461,13 +1459,13 @@ fn shared_body_table(dir: &std::path::Path) -> ScriptHashTable {
     )
     .unwrap();
     drop(body);
-    ScriptHashTable::open(dir).unwrap()
+    ScriptHashTable::open_tiny(dir).unwrap()
 }
 
 #[test]
 fn bulk_session_stream_small_key_still_slab() {
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let mut sh = [0u8; 32];
     sh[0] = 0x07;
     let mut session = t.bulk_session(1).unwrap();
@@ -1490,7 +1488,7 @@ fn bulk_session_stream_small_key_still_slab() {
 fn bulk_session_extent_last_page_splits_when_ver2_header_eats_stream() {
     use crate::scripthash_pages::SH_PAGE_EXTENT_STREAM_MAX;
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let n = SH_PAGE_EXTENT_STREAM_MAX + 8;
     let mut sh = [0u8; 32];
     sh[0] = 0x11;
@@ -1524,7 +1522,7 @@ fn bulk_session_extent_last_page_splits_when_ver2_header_eats_stream() {
 fn bulk_session_streamed_last_remainder_fits_ver2() {
     use crate::scripthash_pages::{SH_PAGE_EXTENT_STREAM_MAX, SH_PAGE_STREAM_MAX};
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let n = SH_PAGE_STREAM_MAX + SH_PAGE_EXTENT_STREAM_MAX + 8;
     let mut sh = [0u8; 32];
     sh[0] = 0x12;
@@ -1554,7 +1552,7 @@ fn bulk_session_streamed_last_remainder_fits_ver2() {
 fn bulk_session_megakey_page_chain_contiguous_once() {
     use crate::scripthash_pages::SH_PAGE_STREAM_MAX;
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     // Sequential FKs fill ~4080/page; this n spans two pages.
     let n = SH_PAGE_STREAM_MAX + 10;
     let mut sh = [0u8; 32];
@@ -1651,7 +1649,7 @@ fn extent_meta(t: &ScriptHashTable, sh: &[u8; 32]) -> (u64, u64, u32) {
 #[test]
 fn extent_append_links_tail_when_bump_moved() {
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let n = SH_PAGE_STREAM_MAX + SH_PAGE_EXTENT_STREAM_MAX - 1;
     let mut sh = [0u8; 32];
     sh[0] = 0x21;
@@ -1698,7 +1696,7 @@ fn extent_append_links_tail_when_bump_moved() {
 #[test]
 fn extent_append_glued_bumps_extent_n() {
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let n = SH_PAGE_STREAM_MAX + SH_PAGE_EXTENT_STREAM_MAX - 1;
     let mut sh = [0u8; 32];
     sh[0] = 0x22;
@@ -1726,7 +1724,7 @@ fn extent_append_glued_bumps_extent_n() {
 #[test]
 fn bulk_session_put_sorted_creates_dedups() {
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0x99]);
     let recs = vec![
         rec(sh, 1, 0),
@@ -1748,7 +1746,7 @@ fn reinit_clears_head_when_live_count_already_zero() {
     // Crash mid-finish: heads durable, alloc live_count still 0.
     // bulk_session must not hard-error; reinit then cold load.
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let mut sh = [0u8; 32];
     sh[0] = 0x7e;
     let mut session = t.bulk_session(1).unwrap();
@@ -1775,7 +1773,7 @@ fn reinit_clears_head_when_live_count_already_zero() {
 fn bulk_session_flushes_head_on_prefix_shard_boundary() {
     // Live OA image stays off-disk until shard boundary / finish.
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     const N: u32 = 80_000;
     // Unique 16 B head prefixes (head truncates full 32 B to 16 B).
     let key = |i: u32| {
@@ -1816,7 +1814,7 @@ fn bulk_session_flushes_head_on_prefix_shard_boundary() {
 #[test]
 fn cold_progress_and_resume_skips_complete_shards() {
     // 4-way head: fill shard 0, abandon, resume from progress, fill rest.
-    HeadScale::test_with(HeadScale::Tiny, || {
+    {
         let dir = tmp();
         let t = four_shard_dir_table(&dir);
         assert_eq!(t.head_shard_count(), 4);
@@ -1865,7 +1863,7 @@ fn cold_progress_and_resume_skips_complete_shards() {
         assert_eq!(t.entries(&key(0, 0)).unwrap().len(), 1);
         assert_eq!(t.entries(&key(3, 3)).unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
-    });
+    }
 }
 
 #[test]
@@ -1873,7 +1871,7 @@ fn live_session_does_not_size_from_create_count() {
     // Regression: bulk_session(total_recs) used to allocate create-count-sized
     // OA images. unique_hint=1000 must not allocate a multi-GiB table.
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let mut session = t.bulk_session(1_000).unwrap();
     let mut sh = [0u8; 32];
     sh[0] = 1;
@@ -1891,7 +1889,7 @@ fn live_session_does_not_size_from_create_count() {
 #[test]
 fn open_migrates_legacy_head_when_runs_present() {
     // Leftover live OA main is refused even when runs exist (wipe + rematerialize).
-    HeadScale::test_with(HeadScale::Mainnet, || {
+    {
         let dir = tmp();
         let body = TableFile::create(dir.join("scripthash.body"), TableKind::ScriptHash).unwrap();
         let payload0 = payload_start(FILE_HEADER_LEN);
@@ -1914,7 +1912,7 @@ fn open_migrates_legacy_head_when_runs_present() {
         let path = crate::sorted_run::next_run_path(&runs_dir, 1);
         crate::sorted_run::write_sorted_run(&path, 32, 40, &rec).unwrap();
 
-        match ScriptHashTable::open(&dir) {
+        match ScriptHashTable::open_tiny(&dir) {
             Ok(_) => panic!("leftover OA must refuse"),
             Err(StoreError::Layout(m)) => {
                 assert!(m.contains("scripthash*"), "{m}");
@@ -1922,12 +1920,12 @@ fn open_migrates_legacy_head_when_runs_present() {
             Err(e) => panic!("expected Layout, got {e}"),
         }
         let _ = std::fs::remove_dir_all(&dir);
-    });
+    }
 }
 
 #[test]
 fn open_refuses_legacy_head_without_runs() {
-    HeadScale::test_with(HeadScale::Mainnet, || {
+    {
         let dir = tmp();
         let body = TableFile::create(dir.join("scripthash.body"), TableKind::ScriptHash).unwrap();
         let payload0 = payload_start(FILE_HEADER_LEN);
@@ -1941,7 +1939,7 @@ fn open_refuses_legacy_head_without_runs() {
         write_alloc_header(&body, &state).unwrap();
         drop(body);
         ShardedScriptHashHead::create_sharded(dir.join("scripthash.head"), 16, 64).unwrap();
-        match ScriptHashTable::open(&dir) {
+        match ScriptHashTable::open_tiny(&dir) {
             Err(StoreError::Layout(m)) => {
                 assert!(m.contains("scripthash*"), "{m}");
             }
@@ -1949,13 +1947,13 @@ fn open_refuses_legacy_head_without_runs() {
             Err(e) => panic!("unexpected error: {e}"),
         }
         let _ = std::fs::remove_dir_all(&dir);
-    });
+    }
 }
 
 #[test]
 fn for_each_live_create_skips_unlinked() {
     let dir = tmp();
-    let t = ScriptHashTable::create(&dir).unwrap();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0x51]);
     let mut heads = HashMap::new();
     t.put_create_batch_append(&[rec(sh, 1, 0), rec(sh, 2, 0), rec(sh, 3, 0)], &mut heads)
@@ -2040,9 +2038,9 @@ fn decode_unsorted_file(path: &std::path::Path) -> Vec<ScriptHashRecord> {
 
 #[test]
 fn unsorted_collect_partitions_by_prefix_and_is_not_scripthash_sorted() {
-    HeadScale::test_with(HeadScale::Tiny, || {
+    {
         let dir = tmp();
-        let s = crate::Store::create(&dir).unwrap();
+        let s = crate::Store::create_tiny(&dir).unwrap();
         let n_shards = 4usize;
         let (low_script, high_script) = two_scripts_same_shard_reverse_hash(1, n_shards);
         let mut txid_lo = [0u8; 32];
@@ -2082,14 +2080,14 @@ fn unsorted_collect_partitions_by_prefix_and_is_not_scripthash_sorted() {
             "collect writes fk order, not scripthash order"
         );
         let _ = std::fs::remove_dir_all(&dir);
-    });
+    }
 }
 
 #[test]
 fn unsorted_materialize_four_shards_from_class_a_no_catalog_runs() {
-    HeadScale::test_with(HeadScale::Tiny, || {
+    {
         let dir = tmp();
-        let s = crate::Store::create(&dir).unwrap();
+        let s = crate::Store::create_tiny(&dir).unwrap();
         let n_shards = 4usize;
         let mut keys = Vec::new();
         for shard in 0..n_shards {
@@ -2120,12 +2118,12 @@ fn unsorted_materialize_four_shards_from_class_a_no_catalog_runs() {
             "unsorted path must not write catalog runs"
         );
         let _ = std::fs::remove_dir_all(&dir);
-    });
+    }
 }
 
 #[test]
 fn unsorted_pack_sorts_numeric_fk_and_keeps_all_creates() {
-    HeadScale::test_with(HeadScale::Tiny, || {
+    {
         let dir = tmp();
         let sh_dir = dir.join("sh4");
         std::fs::create_dir_all(&sh_dir).unwrap();
@@ -2202,14 +2200,14 @@ fn unsorted_pack_sorts_numeric_fk_and_keeps_all_creates() {
             "fk 256 must sort after 2, not as LE bytes"
         );
         let _ = std::fs::remove_dir_all(&dir);
-    });
+    }
 }
 
 #[test]
 fn unsorted_combined_skips_collect_when_done_and_resumes_unsealed() {
-    HeadScale::test_with(HeadScale::Tiny, || {
+    {
         let dir = tmp();
-        let s = crate::Store::create(&dir).unwrap();
+        let s = crate::Store::create_tiny(&dir).unwrap();
         let n_shards = 4usize;
         let mut keys = Vec::new();
         for shard in 0..n_shards {
@@ -2233,14 +2231,14 @@ fn unsorted_combined_skips_collect_when_done_and_resumes_unsealed() {
             assert_eq!(table.entries(k).unwrap().len(), 1);
         }
         let _ = std::fs::remove_dir_all(&dir);
-    });
+    }
 }
 
 #[test]
 fn unsorted_cancel_before_collect_is_cancelled() {
-    HeadScale::test_with(HeadScale::Tiny, || {
+    {
         let dir = tmp();
-        let s = crate::Store::create(&dir).unwrap();
+        let s = crate::Store::create_tiny(&dir).unwrap();
         s.put_tx_full_batch_indexed(&[class_a_coinbase([1u8; 32], vec![0x51])], true)
             .unwrap();
         let cancel = AtomicBool::new(true);
@@ -2256,14 +2254,14 @@ fn unsorted_cancel_before_collect_is_cancelled() {
         );
         assert!(!udir.join("DONE").is_file());
         let _ = std::fs::remove_dir_all(&dir);
-    });
+    }
 }
 
 #[test]
 fn unsorted_done_records_class_a_last_fk() {
-    HeadScale::test_with(HeadScale::Tiny, || {
+    {
         let dir = tmp();
-        let s = crate::Store::create(&dir).unwrap();
+        let s = crate::Store::create_tiny(&dir).unwrap();
         s.put_tx_full_batch_indexed(&[class_a_coinbase([1u8; 32], vec![0x51])], true)
             .unwrap();
         let n_shards = s.scripthash.head_shard_count();
@@ -2276,14 +2274,14 @@ fn unsorted_done_records_class_a_last_fk() {
             Some(s.txs.count())
         );
         let _ = std::fs::remove_dir_all(&dir);
-    });
+    }
 }
 
 #[test]
 fn unsorted_materialize_appends_when_done_lags_and_no_shards() {
-    HeadScale::test_with(HeadScale::Tiny, || {
+    {
         let dir = tmp();
-        let s = crate::Store::create(&dir).unwrap();
+        let s = crate::Store::create_tiny(&dir).unwrap();
         s.put_tx_full_batch_indexed(&[class_a_coinbase([1u8; 32], vec![0x51])], true)
             .unwrap();
         let n_shards = s.scripthash.head_shard_count();
@@ -2305,5 +2303,5 @@ fn unsorted_materialize_appends_when_done_lags_and_no_shards() {
             "Class A grown after DONE must be appended into unsorted before pack"
         );
         let _ = std::fs::remove_dir_all(&dir);
-    });
+    }
 }
