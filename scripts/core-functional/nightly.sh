@@ -12,6 +12,7 @@ cd "$ROOT"
 
 ./scripts/core-functional/init-submodule.sh
 "$HERE/bitcoind.test.sh"
+"$HERE/map_debuglog_test.sh"
 "$HERE/rpc_util_validateaddress.test.sh"
 "$HERE/check_inventory_test.sh"
 python3 "$HERE/check_inventory.py" \

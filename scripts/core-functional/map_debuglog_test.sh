@@ -33,6 +33,10 @@ run "received tx TRACE maps to Core needle" \
   "2026-01-01T00:00:00Z TRACE received: tx" \
   "received: tx"
 
+run "parked orphan DEBUG maps to Core was-not-accepted needle" \
+  "2026-01-01T00:00:00Z DEBUG txrelay: park 1111111111111111111111111111111111111111111111111111111111111111" \
+  "was not accepted"
+
 run "unmapped is empty" \
   "2026-01-01T00:00:00Z INFO something else" \
   ""

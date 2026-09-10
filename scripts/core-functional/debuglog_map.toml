@@ -123,6 +123,10 @@ match = 'received: tx'
 emit = ['received: tx']
 
 [[rule]]
+match = 'txrelay: park '
+emit = ['was not accepted']
+
+[[rule]]
 match = 'transaction sent in violation of protocol, disconnecting peer=(\d+)'
 emit = ['transaction sent in violation of protocol, disconnecting peer={1}']
 
