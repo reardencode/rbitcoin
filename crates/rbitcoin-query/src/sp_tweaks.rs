@@ -383,19 +383,26 @@ impl Query {
             }
             let mut live_iter = live_rows.into_iter();
             for rows in &mut out_rows {
-                let mut kept = Vec::with_capacity(rows.len());
-                for mut row in rows.drain(..) {
-                    let live = live_iter
-                        .next()
-                        .ok_or(StoreError::Corrupt("invariant: thin cut_through live rows"))?;
+                rows.retain_mut(|row| {
+                    let Some(live) = live_iter.next() else {
+                        return false;
+                    };
                     if live.len() != row.p2tr.len() {
-                        row.p2tr.retain(|(v, _, _)| live.iter().any(|u| u == v));
+                        let mut i = 0;
+                        row.p2tr.retain(|(v, _, _)| {
+                            if i < live.len() && live[i] == *v {
+                                i += 1;
+                                true
+                            } else {
+                                false
+                            }
+                        });
                     }
-                    if !row.p2tr.is_empty() {
-                        kept.push(row);
-                    }
-                }
-                *rows = kept;
+                    !row.p2tr.is_empty()
+                });
+            }
+            if live_iter.next().is_some() {
+                return Err(StoreError::Corrupt("invariant: thin cut_through live rows"));
             }
         }
 
