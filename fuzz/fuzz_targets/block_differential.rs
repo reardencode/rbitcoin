@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 
 use libfuzzer_sys::fuzz_target;
 use rbitcoin_consensus::Milestone;
-use rbitcoin_net::{
+use rbitcoin_fuzz::{
     check_diff_env, compare_one, diff_regtest_params, genesis_diff_tip, CompareOne, DiffTip,
 };
 use rbitcoin_query::Query;

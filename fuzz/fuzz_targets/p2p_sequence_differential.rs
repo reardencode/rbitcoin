@@ -8,12 +8,12 @@ use std::time::Duration;
 
 use libfuzzer_sys::fuzz_target;
 use rbitcoin_consensus::Milestone;
-use rbitcoin_fuzz::{parse_p2p_sequence, spawn_bitcoind_p2p, tmp_dir, CoreChild, P2pSeqKind};
-use rbitcoin_net::{
-    check_diff_env, classify_v2_cmpct_peer, compare_one, diff_regtest_params,
-    encode_getheaders_empty_v2, encode_ping_v2, encode_pong_v2, genesis_diff_tip, ChainHub,
-    CmpctPeerFrame, CompareOne, DiffTip, V2PlainSession,
+use rbitcoin_fuzz::{
+    check_diff_env, compare_one, diff_regtest_params, encode_getheaders_empty_v2, encode_ping_v2,
+    encode_pong_v2, genesis_diff_tip, CompareOne, DiffTip,
 };
+use rbitcoin_fuzz::{parse_p2p_sequence, spawn_bitcoind_p2p, tmp_dir, CoreChild, P2pSeqKind};
+use rbitcoin_net::{classify_v2_cmpct_peer, ChainHub, CmpctPeerFrame, V2PlainSession};
 use rbitcoin_query::Query;
 use tokio::net::TcpStream;
 use tokio::runtime::{Builder, Runtime};

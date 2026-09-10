@@ -113,15 +113,15 @@ assert_ok "cmpct-differential dry-run BITCOIND_LISTEN=1" \
 assert_ok "cmpct-differential dry-run dict" \
   grep -qx "FUZZ_DICT=fuzz/dict/cmpct.dict" <<<"$out"
 assert_ok "cmpct-differential two-tx seed" \
-  test -s "$ROOT/crates/rbitcoin-net/tests/fixtures/cmpct_fuzz_two_tx.bin"
+  test -s "$ROOT/fuzz/fixtures/cmpct_fuzz_two_tx.bin"
 assert_ok "cmpct-differential all-prefilled seed" \
-  test -s "$ROOT/crates/rbitcoin-net/tests/fixtures/cmpct_fuzz_all_prefilled.bin"
+  test -s "$ROOT/fuzz/fixtures/cmpct_fuzz_all_prefilled.bin"
 assert_ok "cmpct-differential fill seed" \
-  test -s "$ROOT/crates/rbitcoin-net/tests/fixtures/cmpct_fuzz_fill.bin"
+  test -s "$ROOT/fuzz/fixtures/cmpct_fuzz_fill.bin"
 assert_ok "cmpct-differential dup seed" \
-  test -s "$ROOT/crates/rbitcoin-net/tests/fixtures/cmpct_fuzz_dup.bin"
+  test -s "$ROOT/fuzz/fixtures/cmpct_fuzz_dup.bin"
 assert_ok "cmpct-differential raw seed" \
-  test -s "$ROOT/crates/rbitcoin-net/tests/fixtures/cmpct_fuzz_raw.bin"
+  test -s "$ROOT/fuzz/fixtures/cmpct_fuzz_raw.bin"
 
 out="$(FUZZ_DRY_RUN=1 FUZZ_WEEKDAY=6 "$RUN")"
 assert_ok "block_wire dry-run dict" \

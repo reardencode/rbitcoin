@@ -31,6 +31,10 @@ before 1.0).
 
 ### Changed
 
+- **Fuzz/differential harness is not compiled into the node:** `block_diff`
+  and compact recipe/v2 encode helpers live in the `fuzz` crate. Net still
+  exposes `ChainHub` accept, `try_reconstruct`, `encode_v2_contents`,
+  `drain_pending_now`, and `PendingBlocks`.
 - **Suggested-order 5 dead paths:** IBD awaiting-bodies / full-Block hold gone
   (presence-only hashes; most-work stays header rewind). Leftover SH
   16-byte head codec and `ShOverflowStack` test harness deleted (wipe +

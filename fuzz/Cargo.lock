@@ -420,7 +420,9 @@ dependencies = [
  "rbitcoin-consensus",
  "rbitcoin-electrum",
  "rbitcoin-net",
+ "rbitcoin-primitives",
  "rbitcoin-query",
+ "rbitcoin-store",
  "tokio",
 ]
 
@@ -444,6 +446,7 @@ dependencies = [
  "arc-swap",
  "bip324",
  "bitcoin",
+ "libc",
  "rbitcoin-consensus",
  "rbitcoin-log",
  "rbitcoin-mempool",

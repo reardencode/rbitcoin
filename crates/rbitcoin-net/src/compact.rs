@@ -4,26 +4,12 @@
 //! built from live mempool (and optional extra txs). On incomplete fill,
 //! returns missing absolute indexes for `getblocktxn`.
 
-use bitcoin::absolute::LockTime;
 use bitcoin::bip152::{BlockTransactions, BlockTransactionsRequest, HeaderAndShortIds, ShortId};
 use bitcoin::block::Header;
-use bitcoin::consensus::encode::deserialize;
-use bitcoin::hashes::{sha256, Hash};
 use bitcoin::p2p::message::NetworkMessage;
-use bitcoin::p2p::message_blockdata::GetHeadersMessage;
-use bitcoin::p2p::message_compact_blocks::{CmpctBlock, SendCmpct};
 use bitcoin::p2p::Magic;
-use bitcoin::{
-    Amount, Block, BlockHash, OutPoint, ScriptBuf, Sequence, Target, Transaction, TxIn, TxOut,
-    Txid, Witness,
-};
-use rbitcoin_consensus::{
-    genesis_block, grind_regtest_pow, mine_regtest_paying, ChainParams, REGTEST_BLOCK_SPACING,
-};
-use std::collections::{HashMap, HashSet};
-
-use crate::error::NetError;
-use crate::v2::encode_v2_contents;
+use bitcoin::{Block, BlockHash, Transaction};
+use std::collections::HashMap;
 
 /// Build siphash short-id → transaction map for compact fill (version 1 = txid, 2 = wtxid).
 pub fn shortid_map_from_txs<'a>(
@@ -49,46 +35,9 @@ fn short_id_for_tx(tx: &Transaction, version: u32, keys: (u64, u64)) -> ShortId 
 }
 
 /// Consensus-decode BIP152 `HeaderAndShortIds`.
-pub fn decode_cmpct_hsi(raw: &[u8]) -> Option<HeaderAndShortIds> {
-    deserialize(raw).ok()
-}
-
-/// BIP324 application contents for `cmpctblock`.
-pub fn encode_cmpctblock_v2(hsi: &HeaderAndShortIds) -> Result<Vec<u8>, NetError> {
-    encode_v2_contents(NetworkMessage::CmpctBlock(CmpctBlock {
-        compact_block: hsi.clone(),
-    }))
-}
-
-/// High-bandwidth BIP152 v2 `sendcmpct(1, 2)`.
-pub fn encode_sendcmpct_hb_v2() -> Result<Vec<u8>, NetError> {
-    encode_v2_contents(NetworkMessage::SendCmpct(SendCmpct {
-        send_compact: true,
-        version: 2,
-    }))
-}
-
-/// BIP324 `ping`.
-pub fn encode_ping_v2(nonce: u64) -> Result<Vec<u8>, NetError> {
-    encode_v2_contents(NetworkMessage::Ping(nonce))
-}
-
-/// BIP324 `pong`.
-pub fn encode_pong_v2(nonce: u64) -> Result<Vec<u8>, NetError> {
-    encode_v2_contents(NetworkMessage::Pong(nonce))
-}
-
-/// BIP324 `verack`.
-pub fn encode_verack_v2() -> Result<Vec<u8>, NetError> {
-    encode_v2_contents(NetworkMessage::Verack)
-}
-
-/// BIP324 `getheaders` with empty locator (Core stays connected).
-pub fn encode_getheaders_empty_v2() -> Result<Vec<u8>, NetError> {
-    encode_v2_contents(NetworkMessage::GetHeaders(GetHeadersMessage::new(
-        Vec::new(),
-        BlockHash::from_byte_array([0; 32]),
-    )))
+#[cfg(test)]
+fn decode_cmpct_hsi(raw: &[u8]) -> Option<HeaderAndShortIds> {
+    bitcoin::consensus::encode::deserialize(raw).ok()
 }
 
 /// Core v2 frame after we send `cmpctblock`.
@@ -113,165 +62,6 @@ pub fn classify_v2_cmpct_peer(contents: &[u8]) -> CmpctPeerFrame {
         },
         Err(_) => CmpctPeerFrame::Other,
     }
-}
-
-/// Height-1 compact: prev is regtest genesis and header meets its own bits.
-pub fn cmpct_hsi_regtest_connectable(hsi: &HeaderAndShortIds) -> bool {
-    let genesis = genesis_block(&ChainParams::regtest());
-    if hsi.header.prev_blockhash != genesis.block_hash() {
-        return false;
-    }
-    hsi.header
-        .validate_pow(Target::from_compact(hsi.header.bits))
-        .is_ok()
-}
-
-/// Decode a compact announcement and restamp a unique grinded height-1 header.
-pub fn prepare_cmpct_fuzz_hsi(data: &[u8]) -> Option<HeaderAndShortIds> {
-    let mut hsi = decode_cmpct_hsi(data)?;
-    let genesis = genesis_block(&ChainParams::regtest());
-    hsi.header.prev_blockhash = genesis.block_hash();
-    hsi.header.bits = genesis.header.bits;
-    let mix = sha256::Hash::hash(data);
-    let extra = u32::from_le_bytes(mix.to_byte_array()[..4].try_into().ok()?);
-    hsi.header.time = genesis
-        .header
-        .time
-        .saturating_add(REGTEST_BLOCK_SPACING)
-        .saturating_add(extra % 10_000);
-    grind_regtest_pow(&mut hsi.header);
-    cmpct_hsi_regtest_connectable(&hsi).then_some(hsi)
-}
-
-const CMPCT_FUZZ_RAW_REM: u8 = 7;
-const CMPCT_FUZZ_FLAG_FILL: u8 = 0x01;
-const CMPCT_FUZZ_FLAG_DUP: u8 = 0x02;
-const CMPCT_FUZZ_FLAG_CORRUPT: u8 = 0x04;
-
-/// Height-1 compact plus optional txs to offer Core before `cmpctblock`.
-pub struct CmpctFuzzCase {
-    pub hsi: HeaderAndShortIds,
-    pub fill_txs: Vec<Transaction>,
-}
-
-/// Structured recipe, or raw BIP152 bytes when `data[0] % 8 == 7`.
-pub fn prepare_cmpct_fuzz_case(data: &[u8]) -> Option<CmpctFuzzCase> {
-    if data.first().is_some_and(|b| b % 8 == CMPCT_FUZZ_RAW_REM) {
-        let hsi = prepare_cmpct_fuzz_hsi(data.get(1..).unwrap_or(&[]))?;
-        return Some(CmpctFuzzCase {
-            hsi,
-            fill_txs: Vec::new(),
-        });
-    }
-    Some(structured_cmpct_case(data))
-}
-
-/// Missing indexes using the case fill set (empty = mempool-cold).
-pub fn cmpct_missing_for_case(case: &CmpctFuzzCase) -> Option<Vec<u64>> {
-    if !prefilled_indexes_ok(&case.hsi) {
-        return None;
-    }
-    let avail = shortid_map_from_txs(&case.hsi.header, case.hsi.nonce, 2, &case.fill_txs);
-    match try_reconstruct(&case.hsi, &avail, 2) {
-        Ok(_) => Some(Vec::new()),
-        Err(idx) => Some(idx),
-    }
-}
-
-/// BIP324 application contents for `tx`.
-pub fn encode_tx_v2(tx: &Transaction) -> Result<Vec<u8>, NetError> {
-    encode_v2_contents(NetworkMessage::Tx(tx.clone()))
-}
-
-fn cmpct_fuzz_dummy_tx(mix: sha256::Hash, i: usize) -> Transaction {
-    let mut preimage = [0u8; 40];
-    preimage[..32].copy_from_slice(mix.as_byte_array());
-    preimage[32..].copy_from_slice(&(i as u64).to_le_bytes());
-    let id = sha256::Hash::hash(&preimage).to_byte_array();
-    Transaction {
-        version: bitcoin::transaction::Version::TWO,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint {
-                txid: Txid::from_byte_array(id),
-                vout: 0,
-            },
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::MAX,
-            witness: Witness::from_slice(&[id.to_vec()]),
-        }],
-        output: vec![TxOut {
-            value: Amount::from_sat(1_000),
-            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
-        }],
-    }
-}
-
-fn xor_first_short_id(hsi: &mut HeaderAndShortIds) {
-    let Some(sid) = hsi.short_ids.first_mut() else {
-        return;
-    };
-    let mut raw = [0u8; 6];
-    raw.copy_from_slice(sid.as_ref());
-    raw[0] ^= 0xff;
-    *sid = ShortId::from(raw);
-}
-
-fn structured_cmpct_case(data: &[u8]) -> CmpctFuzzCase {
-    let n_extra = usize::from(data.get(1).copied().unwrap_or(1) % 4);
-    let prefill_mask = data.get(2).copied().unwrap_or(0);
-    let flags = data.get(3).copied().unwrap_or(0);
-    let nonce = if data.len() >= 12 {
-        u64::from_le_bytes(data[4..12].try_into().expect("len >= 12"))
-    } else {
-        0x11
-    };
-    let mix = sha256::Hash::hash(data);
-    let mut extras: Vec<Transaction> = (0..n_extra).map(|i| cmpct_fuzz_dummy_tx(mix, i)).collect();
-    if flags & CMPCT_FUZZ_FLAG_DUP != 0 {
-        if let Some(last) = extras.last().cloned() {
-            extras.push(last);
-        }
-    }
-    let mut prefill = Vec::new();
-    for i in 0..n_extra {
-        if prefill_mask & (1 << i) != 0 {
-            prefill.push(i + 1);
-        }
-    }
-    let fill_txs = if flags & CMPCT_FUZZ_FLAG_FILL != 0 {
-        let mut seen = HashSet::new();
-        let mut out = Vec::new();
-        for (i, tx) in extras.iter().enumerate() {
-            let prefilled = i < n_extra && (prefill_mask & (1 << i)) != 0;
-            if !prefilled && seen.insert(tx.compute_txid()) {
-                out.push(tx.clone());
-            }
-        }
-        out
-    } else {
-        Vec::new()
-    };
-    let genesis = genesis_block(&ChainParams::regtest());
-    let extra_time = u32::from_le_bytes(mix.to_byte_array()[..4].try_into().unwrap_or([0; 4]));
-    let time = genesis
-        .header
-        .time
-        .saturating_add(REGTEST_BLOCK_SPACING)
-        .saturating_add(extra_time % 10_000);
-    let block = mine_regtest_paying(
-        genesis.block_hash(),
-        time,
-        1,
-        ScriptBuf::from_bytes(vec![0x51]),
-        extras,
-    );
-    let mut hsi = HeaderAndShortIds::from_block(&block, nonce, 2, &prefill)
-        .expect("prefill indexes in range");
-    if flags & CMPCT_FUZZ_FLAG_CORRUPT != 0 {
-        xor_first_short_id(&mut hsi);
-    }
-    CmpctFuzzCase { hsi, fill_txs }
 }
 
 /// Core: prefilled indexes must decode in-range. Out-of-range is a
@@ -754,24 +544,17 @@ mod tests {
     }
 
     #[test]
-    fn classify_v2_ping_and_sendcmpct_encode() {
+    fn classify_v2_ping_and_empty_other() {
         let ping = crate::v2::encode_v2_contents(NetworkMessage::Ping(7)).unwrap();
         assert_eq!(classify_v2_cmpct_peer(&ping), CmpctPeerFrame::Ping(7));
-        let ping2 = encode_ping_v2(7).unwrap();
-        assert_eq!(ping, ping2);
-        let pong = encode_pong_v2(7).unwrap();
+        let pong = crate::v2::encode_v2_contents(NetworkMessage::Pong(7)).unwrap();
         assert_eq!(classify_v2_cmpct_peer(&pong), CmpctPeerFrame::Pong(7));
-        encode_sendcmpct_hb_v2().unwrap();
-        encode_verack_v2().unwrap();
-        encode_getheaders_empty_v2().unwrap();
-        encode_tx_v2(&spend(1)).unwrap();
         assert_eq!(classify_v2_cmpct_peer(&[]), CmpctPeerFrame::Other);
     }
 
     #[test]
     fn try_reconstruct_empty_mempool_two_tx_is_index_1() {
         let hsi = mined_h1_two_tx_hsi();
-        assert!(cmpct_hsi_regtest_connectable(&hsi));
         assert_eq!(
             try_reconstruct(&hsi, &HashMap::new(), 2).unwrap_err(),
             vec![1]
@@ -779,27 +562,6 @@ mod tests {
         let raw = bitcoin::consensus::encode::serialize(&hsi);
         assert_eq!(
             try_reconstruct(&decode_cmpct_hsi(&raw).unwrap(), &HashMap::new(), 2).unwrap_err(),
-            vec![1]
-        );
-        encode_cmpctblock_v2(&hsi).unwrap();
-    }
-
-    #[test]
-    fn prepare_cmpct_fuzz_hsi_unique_connectable_headers() {
-        let mut hsi = mined_h1_two_tx_hsi();
-        let raw_a = bitcoin::consensus::encode::serialize(&hsi);
-        hsi.nonce = 0x22;
-        let raw_b = bitcoin::consensus::encode::serialize(&hsi);
-        let a = prepare_cmpct_fuzz_hsi(&raw_a).unwrap();
-        let b = prepare_cmpct_fuzz_hsi(&raw_b).unwrap();
-        assert!(cmpct_hsi_regtest_connectable(&a));
-        assert!(cmpct_hsi_regtest_connectable(&b));
-        let genesis = genesis_block(&ChainParams::regtest());
-        assert_eq!(a.header.prev_blockhash, genesis.block_hash());
-        assert_eq!(b.header.prev_blockhash, genesis.block_hash());
-        assert_ne!(a.header.block_hash(), b.header.block_hash());
-        assert_eq!(
-            try_reconstruct(&a, &HashMap::new(), 2).unwrap_err(),
             vec![1]
         );
     }
@@ -811,101 +573,9 @@ mod tests {
         let raw = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         assert_eq!(raw, expected);
         let hsi = decode_cmpct_hsi(&raw).unwrap();
-        assert!(cmpct_hsi_regtest_connectable(&hsi));
         assert_eq!(
             try_reconstruct(&hsi, &HashMap::new(), 2).unwrap_err(),
             vec![1]
-        );
-    }
-
-    #[test]
-    fn prepare_cmpct_fuzz_case_random_bytes_are_connectable() {
-        let a = prepare_cmpct_fuzz_case(&[0, 1, 0, 0, 9]).unwrap();
-        let b = prepare_cmpct_fuzz_case(&[0, 1, 0, 0, 10]).unwrap();
-        assert!(cmpct_hsi_regtest_connectable(&a.hsi));
-        assert!(cmpct_hsi_regtest_connectable(&b.hsi));
-        assert_ne!(a.hsi.header.block_hash(), b.hsi.header.block_hash());
-        assert!(a.fill_txs.is_empty());
-        assert_eq!(cmpct_missing_for_case(&a).as_deref(), Some(&[1u64][..]));
-        let two = prepare_cmpct_fuzz_case(&[0, 2, 0, 0]).unwrap();
-        assert_eq!(
-            cmpct_missing_for_case(&two).as_deref(),
-            Some(&[1u64, 2][..])
-        );
-        assert_ne!(two.hsi.short_ids[0], two.hsi.short_ids[1]);
-    }
-
-    #[test]
-    fn prepare_cmpct_fuzz_case_coinbase_only_has_no_missing() {
-        let case = prepare_cmpct_fuzz_case(&[0, 0, 0, 0]).unwrap();
-        assert!(case.hsi.short_ids.is_empty());
-        assert_eq!(cmpct_missing_for_case(&case).as_deref(), Some(&[][..]));
-        assert!(case.fill_txs.is_empty());
-    }
-
-    #[test]
-    fn prepare_cmpct_fuzz_case_fill_clears_short_id_slot() {
-        let case = prepare_cmpct_fuzz_case(&[0, 1, 0, 1]).unwrap();
-        assert_eq!(case.fill_txs.len(), 1);
-        assert_eq!(cmpct_missing_for_case(&case).as_deref(), Some(&[][..]));
-        assert_eq!(
-            try_reconstruct(&case.hsi, &HashMap::new(), 2).unwrap_err(),
-            vec![1]
-        );
-    }
-
-    #[test]
-    fn prepare_cmpct_fuzz_case_duplicate_short_id_requests_second_slot() {
-        let case = prepare_cmpct_fuzz_case(&[0, 1, 0, 3]).unwrap();
-        assert_eq!(case.fill_txs.len(), 1);
-        assert_eq!(cmpct_missing_for_case(&case).as_deref(), Some(&[2u64][..]));
-    }
-
-    #[test]
-    fn prepare_cmpct_fuzz_case_corrupt_short_id_stays_missing_with_fill() {
-        let case = prepare_cmpct_fuzz_case(&[0, 1, 0, 5]).unwrap();
-        assert_eq!(case.fill_txs.len(), 1);
-        assert_eq!(cmpct_missing_for_case(&case).as_deref(), Some(&[1u64][..]));
-    }
-
-    #[test]
-    fn prepare_cmpct_fuzz_case_raw_arm_uses_fixture() {
-        let mut raw = vec![7u8];
-        raw.extend_from_slice(&std::fs::read(cmpct_fixture_path("cmpct_h1_two_tx.bin")).unwrap());
-        let case = prepare_cmpct_fuzz_case(&raw).unwrap();
-        assert!(case.fill_txs.is_empty());
-        assert!(cmpct_hsi_regtest_connectable(&case.hsi));
-        assert_eq!(cmpct_missing_for_case(&case).as_deref(), Some(&[1u64][..]));
-    }
-
-    #[test]
-    fn prepare_cmpct_fuzz_case_raw_garbage_is_skip() {
-        assert!(prepare_cmpct_fuzz_case(&[7, 1, 2, 3]).is_none());
-    }
-
-    #[test]
-    fn cmpct_fuzz_recipe_fixtures_match_layout() {
-        assert_eq!(
-            std::fs::read(cmpct_fixture_path("cmpct_fuzz_two_tx.bin")).unwrap(),
-            [0, 1, 0, 0]
-        );
-        assert_eq!(
-            std::fs::read(cmpct_fixture_path("cmpct_fuzz_all_prefilled.bin")).unwrap(),
-            [0, 0, 0, 0]
-        );
-        assert_eq!(
-            std::fs::read(cmpct_fixture_path("cmpct_fuzz_fill.bin")).unwrap(),
-            [0, 1, 0, 1]
-        );
-        assert_eq!(
-            std::fs::read(cmpct_fixture_path("cmpct_fuzz_dup.bin")).unwrap(),
-            [0, 1, 0, 3]
-        );
-        let mut raw = vec![7u8];
-        raw.extend_from_slice(&std::fs::read(cmpct_fixture_path("cmpct_h1_two_tx.bin")).unwrap());
-        assert_eq!(
-            std::fs::read(cmpct_fixture_path("cmpct_fuzz_raw.bin")).unwrap(),
-            raw
         );
     }
 }

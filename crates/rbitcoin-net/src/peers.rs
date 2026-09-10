@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 
 /// Session writer payload: application messages or pre-encoded v2 block bytes.
 #[derive(Debug)]
-pub(crate) enum PeerOut {
+pub enum PeerOut {
     Msg(NetworkMessage),
     Encoded(Vec<u8>),
 }

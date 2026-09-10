@@ -135,13 +135,13 @@ pub(crate) const MAX_PENDING_BLOCKS_FOR_TEST: usize = MAX_PENDING_BLOCKS;
 /// Tip-follow decoded bodies waiting for a connectable parent. Cap 128;
 /// insert evicts the oldest hash (FIFO), not `HashMap::keys().next()`.
 #[derive(Default)]
-pub(crate) struct PendingBlocks {
+pub struct PendingBlocks {
     map: HashMap<BlockHash, bitcoin::Block>,
     fifo: VecDeque<BlockHash>,
 }
 
 impl PendingBlocks {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
@@ -159,7 +159,7 @@ impl PendingBlocks {
         self.map.keys()
     }
 
-    pub(crate) fn insert(&mut self, hash: BlockHash, block: bitcoin::Block) {
+    pub fn insert(&mut self, hash: BlockHash, block: bitcoin::Block) {
         stash_pending_block(self, hash, block);
     }
 
@@ -3670,7 +3670,7 @@ async fn drain_pending(
     Ok(())
 }
 
-pub(crate) fn drain_pending_now(
+pub fn drain_pending_now(
     hub: &ChainHub,
     out: &mpsc::UnboundedSender<PeerOut>,
     pending_blocks: &mut PendingBlocks,

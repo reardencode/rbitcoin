@@ -1,15 +1,28 @@
 //! Live Core JSON-RPC + bitcoind spawn for differential and v2 session fuzz.
 
+mod block_diff;
+mod cmpct_fuzz;
 mod p2p_seq;
 mod script_kernel;
 
+pub use block_diff::{
+    basic_auth_b64, build_jsonrpc_http_request, check_diff_env, compare_cmpct_reorg_one,
+    compare_csv_age_one, compare_fork_n_one, compare_fork_one, compare_mempool_one, compare_one,
+    compare_script_one, compare_script_verify_one, compare_spend_one, diff_regtest_params,
+    genesis_diff_tip, mine_diff_pad, mine_diff_stem, parse_submitblock_json,
+    parse_testmempoolaccept_json, rewind_oracle_until, split_http_body, store_reorg_apply,
+    store_reorg_corrupt_is_finding, store_reorg_recycle_hub, store_reorg_step,
+    submit_pad_to_oracle, wait_for_file, BlockOracle, CompareOne, DiffPad, DiffTip, OracleReply,
+    StoreReorgOp, DIFF_MATURE_PAD_HEIGHT, DIFF_REORG_N, DIFF_TEST_PAD_HEIGHT,
+};
+pub use cmpct_fuzz::{
+    cmpct_missing_for_case, encode_cmpctblock_v2, encode_getheaders_empty_v2, encode_ping_v2,
+    encode_pong_v2, encode_sendcmpct_hb_v2, encode_tx_v2, encode_verack_v2,
+    prepare_cmpct_fuzz_case, prepare_cmpct_fuzz_hsi, CmpctFuzzCase,
+};
 pub use p2p_seq::{p2p_sequence_ping_comparisons, parse_p2p_sequence, P2pSeqKind, P2pSeqStep};
 pub use script_kernel::{compare_script_kernel, kernel_forks, parse_kernel_input, KernelCmp};
 
-use rbitcoin_net::{
-    basic_auth_b64, build_jsonrpc_http_request, parse_submitblock_json, split_http_body,
-    wait_for_file, BlockOracle, OracleReply,
-};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -116,7 +129,7 @@ impl BlockOracle for CoreRpc {
     fn testmempoolaccept_hexes(&self, hexs: &[&str]) -> OracleReply {
         let params = testmempoolaccept_params(hexs);
         match self.call("testmempoolaccept", &params) {
-            Ok(body) => match rbitcoin_net::parse_testmempoolaccept_json(&body) {
+            Ok(body) => match parse_testmempoolaccept_json(&body) {
                 Ok(r) => r,
                 Err(_) => OracleReply::RpcError,
             },
@@ -159,7 +172,7 @@ impl BlockOracle for CoreRpc {
     }
 
     fn core_rewind_to_height(&self, keep: u32) -> Result<(), &'static str> {
-        rbitcoin_net::rewind_oracle_until(
+        rewind_oracle_until(
             keep,
             || {
                 let body = self

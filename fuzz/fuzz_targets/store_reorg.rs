@@ -7,9 +7,10 @@ use std::sync::Mutex;
 use libfuzzer_sys::fuzz_target;
 use rbitcoin_consensus::Milestone;
 use rbitcoin_fuzz::tmp_dir;
-use rbitcoin_net::{
-    check_diff_env, diff_regtest_params, store_reorg_apply, store_reorg_recycle_hub, ChainHub,
+use rbitcoin_fuzz::{
+    check_diff_env, diff_regtest_params, store_reorg_apply, store_reorg_recycle_hub,
 };
+use rbitcoin_net::ChainHub;
 use rbitcoin_query::Query;
 
 struct Base {
