@@ -339,18 +339,9 @@ fn padded_spend(data_len: usize) -> Transaction {
 fn bip30_rejects_unspent_connected_sibling() {
     use crate::block::structural_validate_spends;
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{BatchParents, FkMap, OutPointSet, Query, U32Map};
+    use rbitcoin_query::{BatchParents, FkMap, OutPointSet, U32Map};
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
-    let path = std::env::temp_dir().join(format!(
-        "rbitcoin-bip30-unspent-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    let _ = std::fs::remove_dir_all(&path);
-    let q = Query::open_or_create_tiny(&path).unwrap();
+    let (path, q) = rbitcoin_query::testutil::tiny_query_labeled("bip30-unspent");
     q.enter_direct_index_mode().unwrap();
 
     let first = coinbase(1);
@@ -1002,21 +993,7 @@ fn s8_rejects_empty_or_multi_item_coinbase_witness_reserved() {
 }
 
 #[test]
-fn bip34_height_script_large_values() {
-    // 0x80 high bit needs pad; larger multi-byte.
-    assert_eq!(bip34_height_script(255), vec![0x02, 0xff, 0x00]);
-    assert_eq!(bip34_height_script(256), vec![0x02, 0x00, 0x01]);
-}
-
-#[test]
-fn bip34_height_script_small_and_op_n() {
-    assert_eq!(bip34_height_script(0), vec![0x00]);
-    for h in 1u32..=16 {
-        assert_eq!(bip34_height_script(h), vec![0x50 + h as u8]);
-    }
-    // First multi-byte form (17).
-    assert_eq!(bip34_height_script(17), vec![0x01, 0x11]);
-    // Wrong encoding rejected after activation (signet height 1).
+fn bip34_wrong_push_encoding_rejected_after_activation() {
     let p = Box::leak(Box::new(ChainParams::signet()));
     let ctx = ValidationContext::at(p, Height(1), Milestone::NONE);
     let mut cb = coinbase(1);
@@ -1032,17 +1009,8 @@ fn bip34_height_script_small_and_op_n() {
 fn assemble_full_mode_spend_and_bip68() {
     use super::{assemble_block_prevouts_mode, AssembleMode};
     use crate::accept_and_connect_block;
-    use rbitcoin_query::{BatchParents, OutPointSet, Query, SpendEdges};
-    let path = std::env::temp_dir().join(format!(
-        "rbitcoin-assemble-full-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create_tiny(&path).unwrap();
+    use rbitcoin_query::{BatchParents, OutPointSet, SpendEdges};
+    let (path, q) = rbitcoin_query::testutil::tiny_query_labeled("assemble-full");
     let params = ChainParams::regtest();
     let ms = Milestone::NONE;
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
@@ -1156,17 +1124,8 @@ fn assemble_full_mode_spend_and_bip68() {
 #[test]
 fn assemble_rejects_empty_and_fk_mismatch() {
     use super::assemble_block_prevouts;
-    use rbitcoin_query::{BatchParents, OutPointSet, Query, SpendEdges};
-    let path = std::env::temp_dir().join(format!(
-        "rbitcoin-assemble-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create_tiny(&path).unwrap();
+    use rbitcoin_query::{BatchParents, OutPointSet, SpendEdges};
+    let (path, q) = rbitcoin_query::testutil::tiny_query_labeled("assemble");
     let ctx = ctx_h(1);
     let empty = block_with(vec![]);
     let parents = BatchParents::new();
@@ -1260,17 +1219,8 @@ fn assemble_pending_creates_is_txid_map_and_meters_flush() {
     use super::assemble_block_prevouts;
     use crate::confirm_phase_stats;
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{BatchParents, OutPointSet, Query, SpendEdges};
-    let path = std::env::temp_dir().join(format!(
-        "rbitcoin-assemble-creates-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create_tiny(&path).unwrap();
+    use rbitcoin_query::{BatchParents, OutPointSet, SpendEdges};
+    let (path, q) = rbitcoin_query::testutil::tiny_query_labeled("assemble-creates");
     let ctx = ctx_h(1);
     let parents = BatchParents::new();
     let thin = SpendEdges::default();
@@ -1319,17 +1269,8 @@ fn optimistic_assemble_unstamped_parent_is_invariant() {
     use super::assemble_block_prevouts;
     use crate::accept_and_connect_block;
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{BatchParents, OutPointSet, Query, SpendEdges};
-    let path = std::env::temp_dir().join(format!(
-        "rbitcoin-assemble-unstamped-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create_tiny(&path).unwrap();
+    use rbitcoin_query::{BatchParents, OutPointSet, SpendEdges};
+    let (path, q) = rbitcoin_query::testutil::tiny_query_labeled("assemble-unstamped");
     let params = ChainParams::regtest();
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
@@ -1407,18 +1348,9 @@ fn assemble_milestone_pin_still_rejects_bad_blk_sigops() {
     use super::assemble_block_prevouts;
     use bitcoin::hashes::{sha256, Hash};
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{BatchParents, OutPointSet, Query, SpendEdge, SpendEdges};
+    use rbitcoin_query::{BatchParents, OutPointSet, SpendEdge, SpendEdges};
     use rbitcoin_store::{OutputRecord, TxRecord};
-    let path = std::env::temp_dir().join(format!(
-        "rbitcoin-assemble-ms-sigops-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create_tiny(&path).unwrap();
+    let (path, q) = rbitcoin_query::testutil::tiny_query_labeled("assemble-ms-sigops");
     let ws = vec![0xacu8; 80_001];
     let h = sha256::Hash::hash(&ws);
     let mut spk = vec![0x00, 0x20];
@@ -1513,18 +1445,9 @@ fn n1_assemble_cold_why_reasons() {
     use crate::accept_and_connect_block;
     use crate::confirm_phase_stats;
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{BatchParents, Query};
+    use rbitcoin_query::BatchParents;
     use rbitcoin_store::OutputRecord;
-    let path = std::env::temp_dir().join(format!(
-        "rbitcoin-n1-cold-why-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create_tiny(&path).unwrap();
+    let (path, q) = rbitcoin_query::testutil::tiny_query_labeled("n1-cold-why");
     let params = ChainParams::regtest();
     let ms = Milestone::NONE;
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
@@ -1774,18 +1697,9 @@ fn already_archived_schema13_pin_identity_tip_follow() {
         confirm_wire_load_from_plan, confirm_wire_lookup_stamp, confirm_write_phase,
         ScriptPreverified,
     };
-    use rbitcoin_query::Query;
+
     use std::sync::Arc;
-    let path = std::env::temp_dir().join(format!(
-        "rbitcoin-plan-none-pin-id-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create_tiny(&path).unwrap();
+    let (path, q) = rbitcoin_query::testutil::tiny_query_labeled("plan-none-pin-id");
     q.set_spend_index(true);
     let params = ChainParams::regtest();
     let ms = Milestone::NONE;

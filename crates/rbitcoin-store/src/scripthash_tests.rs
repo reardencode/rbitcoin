@@ -9,17 +9,8 @@ use crate::scripthash_pages::{
 };
 use std::sync::atomic::AtomicBool;
 
-fn tmp() -> std::path::PathBuf {
-    let p = std::env::temp_dir().join(format!(
-        "rbitcoin-sh-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&p).unwrap();
-    p
+fn tmp() -> crate::testutil::TempDir {
+    crate::testutil::TempDir::labeled("sh").expect("temp dir")
 }
 
 fn four_shard_dir_table(dir: &std::path::Path) -> ScriptHashTable {

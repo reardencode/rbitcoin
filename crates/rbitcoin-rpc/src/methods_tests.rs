@@ -3,17 +3,12 @@ use bitcoin::consensus::{deserialize, encode::serialize_hex};
 use bitcoin::hashes::Hash;
 use bitcoin::{Address, Amount, Network as BtcNetwork, Txid};
 use rbitcoin_primitives::{Height, Network};
-use std::path::PathBuf;
+use rbitcoin_store::testutil::TempDir;
 use std::str::FromStr;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-fn ctx_empty() -> (RpcContext, PathBuf) {
-    let n = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("rbitcoin-rpc-meth-{n}"));
-    std::fs::create_dir_all(&dir).unwrap();
+fn ctx_empty() -> (RpcContext, TempDir) {
+    let dir = TempDir::labeled("rpc-meth").expect("temp dir");
     let q = Arc::new(Query::open_or_create_tiny(dir.join("store")).unwrap());
     let mp =
         MempoolHub::open_with_weight(dir.join("mempool"), Arc::clone(&q), 300_000_000).unwrap();
@@ -821,12 +816,7 @@ fn chain_methods_against_mined_regtest() {
     use rbitcoin_consensus::ChainParams;
     use rbitcoin_test::build_mature_regtest_with_spend;
 
-    let n = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("rbitcoin-rpc-chain-{n}"));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = rbitcoin_store::testutil::TempDir::labeled("rpc-chain").expect("temp dir");
     let q = Arc::new(Query::open_or_create_tiny(dir.join("store")).unwrap());
     let params = ChainParams::for_network(Network::Regtest);
     let chain = build_mature_regtest_with_spend(&q, &params);
@@ -1288,14 +1278,9 @@ impl RpcRegtest for TestMiner {
     }
 }
 
-fn ctx_regtest_hub() -> (RpcContext, PathBuf, Arc<rbitcoin_net::ChainHub>) {
+fn ctx_regtest_hub() -> (RpcContext, TempDir, Arc<rbitcoin_net::ChainHub>) {
     use rbitcoin_consensus::{ChainParams, Milestone};
-    let n = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("rbitcoin-rpc-gen-{n}"));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = TempDir::labeled("rpc-gen").expect("temp dir");
     let hub = Arc::new(rbitcoin_net::ChainHub::new(
         Query::open_or_create_tiny(dir.join("store")).unwrap(),
         ChainParams::regtest(),
@@ -2755,11 +2740,7 @@ async fn addnode_two_nodes_see_each_other() {
     use rbitcoin_net::P2PNode;
     use rbitcoin_query::Query;
 
-    let n = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("rbitcoin-rpc-2n-{n}"));
+    let dir = rbitcoin_store::testutil::TempDir::labeled("rpc-2n").expect("temp dir");
     std::fs::create_dir_all(dir.join("a")).unwrap();
     std::fs::create_dir_all(dir.join("b")).unwrap();
     let qa = Query::open_or_create_tiny(dir.join("a/store")).unwrap();
@@ -2822,12 +2803,7 @@ async fn addnode_two_nodes_see_each_other() {
 
 #[test]
 fn rpc_honesty_mempool_budget_and_network_identity() {
-    let n = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("rbitcoin-rpc-honest-{n}"));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = rbitcoin_store::testutil::TempDir::labeled("rpc-honest").expect("temp dir");
     let q = Arc::new(Query::open_or_create_tiny(dir.join("store")).unwrap());
     let mp = MempoolHub::open_with_weight(dir.join("mempool"), Arc::clone(&q), 50_000_000).unwrap();
     let ctx = RpcContext {
