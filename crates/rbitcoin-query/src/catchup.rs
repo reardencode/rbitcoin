@@ -398,7 +398,6 @@ mod tests {
         next_run_path, write_sorted_run, HeaderRecord, InputRecord, OutputRecord, TxRecord,
     };
     use std::sync::Mutex;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     /// Serialize FORCE_REBUILD env mutations (parallel tests share process env).
     static FORCE_ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -409,14 +408,7 @@ mod tests {
 
     #[test]
     fn query_index_products_follow_mode_and_flags() {
-        let n = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("rbitcoin-q-index-products-{n}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create_tiny(&dir).unwrap();
+        let (dir, q) = crate::testutil::tiny_query_labeled("q-index-products");
         q.set_spend_index(true);
         q.set_sh_index_enabled(true);
         assert!(
@@ -534,14 +526,7 @@ mod tests {
     #[test]
     fn direct_shindex_does_not_collect_runs_until_finalize() {
         let _g = lock_force_env();
-        let n = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("rbitcoin-q-sh-direct-no-runs-{n}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create_tiny(&dir).unwrap();
+        let (dir, q) = crate::testutil::tiny_query_labeled("q-sh-direct-no-runs");
         seed_direct_chain(&q, 4);
         assert!(q.sh_index_enabled());
         assert!(
@@ -565,14 +550,7 @@ mod tests {
     #[test]
     fn finalize_sh_runs_durable_head_missing_hwm_keeps_seal() {
         let _g = lock_force_env();
-        let n = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("rbitcoin-q-sh-hwm-{n}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create_tiny(&dir).unwrap();
+        let (dir, q) = crate::testutil::tiny_query_labeled("q-sh-hwm");
         q.enter_direct_index_mode().unwrap();
         seed_direct_chain(&q, 3);
         let n0 = q.finalize_sh_runs().unwrap();
@@ -612,14 +590,7 @@ mod tests {
     #[test]
     fn finalize_sh_runs_empty_head_leftover_seal_is_wiped() {
         let _g = lock_force_env();
-        let n = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("rbitcoin-q-sh-stale-{n}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create_tiny(&dir).unwrap();
+        let (dir, q) = crate::testutil::tiny_query_labeled("q-sh-stale");
         q.enter_direct_index_mode().unwrap();
         assert!(!q.store.scripthash.has_durable_index());
 
@@ -646,14 +617,7 @@ mod tests {
     #[test]
     fn force_rebuild_recollects_class_a_not_empty_materialize() {
         let _g = lock_force_env();
-        let n = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("rbitcoin-q-sh-force-recol-{n}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create_tiny(&dir).unwrap();
+        let (dir, q) = crate::testutil::tiny_query_labeled("q-sh-force-recol");
         seed_direct_chain(&q, 6);
         let _ = q.finalize_sh_runs().unwrap();
         assert!(q.store.scripthash.has_durable_index());
@@ -678,14 +642,7 @@ mod tests {
     #[test]
     fn unsorted_shards_finalize_skips_catalog_runs() {
         let _g = lock_force_env();
-        let n = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("rbitcoin-q-sh-unsorted-{n}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create_tiny(&dir).unwrap();
+        let (dir, q) = crate::testutil::tiny_query_labeled("q-sh-unsorted");
         seed_direct_chain(&q, 5);
         let n_mat = q.finalize_sh_runs().expect("unsorted-shards finalize");
         assert!(
@@ -717,14 +674,7 @@ mod tests {
     #[test]
     fn scenario_direct_enter_does_not_collect() {
         let _g = lock_force_env();
-        let n = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("rbitcoin-q-sh-scenario-direct-{n}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create_tiny(&dir).unwrap();
+        let (dir, q) = crate::testutil::tiny_query_labeled("q-sh-scenario-direct");
         seed_direct_chain(&q, 3);
         q.enter_direct_index_mode().unwrap();
         q.sh_run.refresh_seal();
@@ -740,14 +690,7 @@ mod tests {
     #[test]
     fn scenario_fresh_ibd_tip_materialize() {
         let _g = lock_force_env();
-        let n = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("rbitcoin-q-sh-scenario-fresh-{n}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create_tiny(&dir).unwrap();
+        let (dir, q) = crate::testutil::tiny_query_labeled("q-sh-scenario-fresh");
         seed_direct_chain(&q, 5);
         let n_mat = q.finalize_sh_runs().unwrap();
         assert!(
@@ -768,14 +711,7 @@ mod tests {
     #[test]
     fn tip_ready_after_materialize_skips_collect_and_finalize() {
         let _g = lock_force_env();
-        let n = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("rbitcoin-q-sh-tip-ready-{n}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create_tiny(&dir).unwrap();
+        let (dir, q) = crate::testutil::tiny_query_labeled("q-sh-tip-ready");
         seed_direct_chain(&q, 5);
         let n_mat = q.finalize_sh_runs().expect("materialize");
         assert!(n_mat > 0 || q.store.scripthash.has_durable_index());
@@ -805,14 +741,7 @@ mod tests {
     #[test]
     fn durable_head_hwm_lag_discards_leftover_run() {
         let _g = lock_force_env();
-        let n = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("rbitcoin-q-sh-hwm-lag-skip-{n}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create_tiny(&dir).unwrap();
+        let (dir, q) = crate::testutil::tiny_query_labeled("q-sh-hwm-lag-skip");
         seed_direct_chain(&q, 6);
         let n0 = q.finalize_sh_runs().unwrap();
         assert!(n0 > 0 || q.store.scripthash.has_durable_index());
@@ -873,14 +802,7 @@ mod tests {
     #[test]
     fn tip_mode_connect_advances_sh_watermarks() {
         let _g = lock_force_env();
-        let n = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("rbitcoin-q-sh-tip-wm-{n}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create_tiny(&dir).unwrap();
+        let (dir, q) = crate::testutil::tiny_query_labeled("q-sh-tip-wm");
         seed_direct_chain(&q, 3);
         let _ = q.finalize_sh_runs().unwrap();
         q.enter_tip_index_mode();
@@ -921,14 +843,7 @@ mod tests {
     #[test]
     fn include_hwm_covers_tip_without_seal_match() {
         let _g = lock_force_env();
-        let n = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("rbitcoin-q-sh-hwm-floor-{n}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create_tiny(&dir).unwrap();
+        let (dir, q) = crate::testutil::tiny_query_labeled("q-sh-hwm-floor");
         seed_direct_chain(&q, 4);
         let _ = q.finalize_sh_runs().unwrap();
         let tip_max = q.store.txs.count();
@@ -958,14 +873,7 @@ mod tests {
     #[test]
     fn finalize_sh_appends_unsorted_when_done_lags_before_any_shard() {
         let _g = lock_force_env();
-        let n = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("rbitcoin-q-sh-done-lag-{n}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create_tiny(&dir).unwrap();
+        let (dir, q) = crate::testutil::tiny_query_labeled("q-sh-done-lag");
         seed_direct_chain(&q, 3);
         let n_shards = q.store.scripthash.head_shard_count();
         let udir = rbitcoin_store::unsorted_shard_dir(q.store.path());
@@ -993,14 +901,7 @@ mod tests {
     #[test]
     fn finalize_sh_backfills_class_a_tail_when_shards_already_sealed() {
         let _g = lock_force_env();
-        let n = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("rbitcoin-q-sh-shard-lag-{n}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create_tiny(&dir).unwrap();
+        let (dir, q) = crate::testutil::tiny_query_labeled("q-sh-shard-lag");
         seed_direct_chain(&q, 3);
         let _ = q.finalize_sh_runs().unwrap();
         assert!(q.store.scripthash.has_durable_index());

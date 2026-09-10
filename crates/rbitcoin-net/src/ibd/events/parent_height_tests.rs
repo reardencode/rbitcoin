@@ -1,7 +1,6 @@
 //! Tests for super:: events helpers (peeled from events.rs).
 
 use super::parent_height;
-use crate::chain::ChainHub;
 use bitcoin::absolute::LockTime;
 use bitcoin::block::{Header, Version};
 use bitcoin::hashes::Hash;
@@ -11,10 +10,7 @@ use bitcoin::{
     Amount, Block, BlockHash, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut,
     Witness,
 };
-use rbitcoin_consensus::{ChainParams, Milestone};
-use rbitcoin_query::Query;
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 fn mine(prev: BlockHash, time: u32, height: u32) -> Block {
     let bits = CompactTarget::from_consensus(0x207f_ffff);
@@ -66,17 +62,7 @@ fn mine(prev: BlockHash, time: u32, height: u32) -> Block {
 /// Competing header attaches to confirmed tip−1 (not tip, not in RAM map).
 #[test]
 fn parent_height_resolves_confirmed_tip_minus_one() {
-    let dir = std::env::temp_dir().join(format!(
-        "rbitcoin-parent-h-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("parent-h");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     let p = mine(gen, 1_600_000_100, 1);

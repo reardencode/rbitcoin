@@ -22,7 +22,7 @@
 
 Do **not** “fix” flakes with `RUST_TEST_THREADS=1`.
 
-Shared Tiny on-disk fixtures live in `rbitcoin_store::testutil` (`TempDir`, `tiny_store`) and `rbitcoin_query::testutil::tiny_query` — unique path, Tiny heads, drop-cleans. Net tests that need a regtest `ChainHub` use `tiny_regtest_hub` / `tiny_regtest_hub_labeled` (Tiny query + shipped `ChainHub::new`). Do **not** roll your own `std::env::temp_dir()` + `create_dir_all` for a Tiny store/query. Node-level scenarios still use `rbitcoin-test` (`TestDatadir`, `mine`, `chain_fixture`).
+Shared Tiny on-disk fixtures live in `rbitcoin_store::testutil` (`TempDir`, `tiny_store`) and `rbitcoin_query::testutil::tiny_query` — unique path, Tiny heads, drop-cleans. Net tests that need a regtest `ChainHub` use `tiny_regtest_hub` / `tiny_regtest_hub_labeled` (Tiny query + shipped `ChainHub::new`), including IBD confirm-reject / path / progress / archive / dial / confirm tests. Do **not** roll your own `std::env::temp_dir()` + `create_dir_all` for a Tiny store/query. Node-level scenarios still use `rbitcoin-test` (`TestDatadir`, `mine`, `chain_fixture`).
 
 ### Third-party deps and compile cost (2026-08)
 

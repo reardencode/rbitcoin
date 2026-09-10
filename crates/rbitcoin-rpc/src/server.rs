@@ -448,7 +448,6 @@ fn authorized(auth: &RpcAuth, headers: &HeaderMap) -> bool {
 mod tests {
     use super::*;
     use rbitcoin_primitives::Network;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn basic_auth_header(auth: &RpcAuth) -> String {
         use base64::Engine;
@@ -495,19 +494,14 @@ mod tests {
 
     #[tokio::test]
     async fn rpc_smoke_getblockcount_and_help() {
-        let n = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("rbitcoin-rpc-srv-{n}"));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = rbitcoin_store::testutil::TempDir::labeled("rpc-srv").expect("temp dir");
         let q = Arc::new(Query::open_or_create_tiny(dir.join("store")).unwrap());
         let mp =
             MempoolHub::open_with_weight(dir.join("mempool"), Arc::clone(&q), 300_000_000).unwrap();
         mp.set_relay_enabled(true);
         let cfg = RpcConfig {
             listen: "127.0.0.1:0".parse().unwrap(),
-            datadir: dir.clone(),
+            datadir: dir.path().to_path_buf(),
             network: Network::Regtest,
             rpc_user: Some("testuser".into()),
             rpc_password: Some("testpass".into()),
@@ -620,19 +614,14 @@ mod tests {
 
     #[tokio::test]
     async fn jsonrpc_v2_batch_and_http_codes() {
-        let n = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("rbitcoin-rpc-v2-{n}"));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = rbitcoin_store::testutil::TempDir::labeled("rpc-v2").expect("temp dir");
         let q = Arc::new(Query::open_or_create_tiny(dir.join("store")).unwrap());
         let mp =
             MempoolHub::open_with_weight(dir.join("mempool"), Arc::clone(&q), 300_000_000).unwrap();
         mp.set_relay_enabled(true);
         let cfg = RpcConfig {
             listen: "127.0.0.1:0".parse().unwrap(),
-            datadir: dir.clone(),
+            datadir: dir.path().to_path_buf(),
             network: Network::Regtest,
             rpc_user: Some("testuser".into()),
             rpc_password: Some("testpass".into()),
@@ -706,18 +695,13 @@ mod tests {
 
     #[tokio::test]
     async fn rpc_work_queue_exceeded() {
-        let n = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("rbitcoin-rpc-wq-{n}"));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = rbitcoin_store::testutil::TempDir::labeled("rpc-wq").expect("temp dir");
         let q = Arc::new(Query::open_or_create_tiny(dir.join("store")).unwrap());
         let mp =
             MempoolHub::open_with_weight(dir.join("mempool"), Arc::clone(&q), 300_000_000).unwrap();
         let cfg = RpcConfig {
             listen: "127.0.0.1:0".parse().unwrap(),
-            datadir: dir.clone(),
+            datadir: dir.path().to_path_buf(),
             network: Network::Regtest,
             rpc_user: Some("testuser".into()),
             rpc_password: Some("testpass".into()),

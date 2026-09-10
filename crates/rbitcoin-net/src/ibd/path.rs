@@ -366,20 +366,8 @@ mod tests {
     #[test]
     fn seed_work_path_from_empty_and_genesis_store() {
         use super::seed_work_path_from_store;
-        use rbitcoin_consensus::{ChainParams, Milestone};
-        use rbitcoin_query::Query;
 
-        let dir = std::env::temp_dir().join(format!(
-            "rbitcoin-path-seed-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-        let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("path-seed");
         // Empty store: tip_hash is None → seed returns immediately.
         let mut st = IbdWorkState::new(Vec::new(), None, None);
         seed_work_path_from_store(&mut st, &hub);
@@ -406,20 +394,9 @@ mod tests {
             Amount, Block, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut,
             Witness,
         };
-        use rbitcoin_consensus::{prepare_block_for_archive, ChainParams, Milestone};
-        use rbitcoin_query::Query;
+        use rbitcoin_consensus::prepare_block_for_archive;
 
-        let dir = std::env::temp_dir().join(format!(
-            "rbitcoin-path-seed-arch-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-        let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("path-seed-arch");
         hub.ensure_genesis().unwrap();
         let gen = hub.tip_hash().unwrap();
 
@@ -517,20 +494,8 @@ mod tests {
             Amount, Block, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut,
             Witness,
         };
-        use rbitcoin_consensus::{ChainParams, Milestone};
-        use rbitcoin_query::Query;
 
-        let dir = std::env::temp_dir().join(format!(
-            "rbitcoin-path-seed-sib-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-        let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("path-seed-sib");
         hub.ensure_genesis().unwrap();
         let gen = hub.tip_hash().unwrap();
 

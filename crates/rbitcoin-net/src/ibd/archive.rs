@@ -302,8 +302,6 @@ mod class_a_rehydrate_tests {
         Amount, Block, BlockHash, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn,
         TxOut, Witness,
     };
-    use rbitcoin_consensus::{ChainParams, Milestone};
-    use rbitcoin_query::Query;
 
     fn mine(prev: BlockHash, time: u32, height: u32) -> Block {
         let mut ss = if height == 0 {
@@ -354,17 +352,7 @@ mod class_a_rehydrate_tests {
 
     #[test]
     fn class_a_rehydrate_makes_tip_plus_one_claim_ready() {
-        let dir = std::env::temp_dir().join(format!(
-            "rbitcoin-ca-rehydrate-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-        let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("ca-rehydrate");
         hub.ensure_genesis().unwrap();
         let gen = hub.tip_hash().unwrap();
         let time = 1_300_000_000u32;
