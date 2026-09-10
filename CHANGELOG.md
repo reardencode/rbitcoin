@@ -22,6 +22,12 @@ before 1.0).
 
 ### Changed
 
+- **Head scale is open-time, not process env:** `StoreLayout::single` /
+  `with_cold` are Mainnet; tests use `StoreLayout::tiny` /
+  `Query::open_or_create_tiny`. `RBITCOIN_HEAD_SCALE`, cargo-test `/deps/`
+  sniffing, and `HeadScale::test_with` are gone. Tx-head rebuild seal bits /
+  workers and idx soft-span are the same open options (production still reads
+  `RBITCOIN_TX_HEAD_REBUILD_*` / `RBITCOIN_TX_IDX_SOFT_SPAN` once at open).
 - **Store crate-root surface:** drop re-exports other crates never import
   (`AddressHead`, packed decode aliases, SH remap/slab Vec codecs, sorted-run
   catalog helpers, …). Tests use the remaining production insert/probe/decode

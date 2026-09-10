@@ -113,7 +113,7 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target/dev}"
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p rbitcoin-primitives --lib          # fast sanity
-cargo test -p rbitcoin-store --lib               # store (set RBITCOIN_HEAD_SCALE=tiny if you want CI-like heads)
+cargo test -p rbitcoin-store --lib               # store (tests pass Tiny at open; production default is Mainnet)
 cargo test --workspace                           # default suite — Linux / macOS; see table
 ./scripts/ci-os-smoke.sh                         # Windows/macOS PR surface
 ```
