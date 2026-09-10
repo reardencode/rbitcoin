@@ -2479,6 +2479,21 @@ fn spawn_confirmed_seed(query: Arc<Query>, confirmed: Arc<RwLock<HashSet<BlockHa
 
 use crate::most_work::{sum_work, work_better};
 
+/// Tiny-head regtest [`ChainHub`] for tests. Not an operator API.
+#[cfg(test)]
+pub(crate) fn tiny_regtest_hub() -> (rbitcoin_query::testutil::TempDir, ChainHub) {
+    tiny_regtest_hub_labeled("hub")
+}
+
+#[cfg(test)]
+pub(crate) fn tiny_regtest_hub_labeled(
+    label: &str,
+) -> (rbitcoin_query::testutil::TempDir, ChainHub) {
+    let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled(label);
+    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    (dir, hub)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2493,12 +2508,33 @@ mod tests {
     use rbitcoin_consensus::{confirm_scripts_phase, ChainParams, Milestone};
     use rbitcoin_mempool::UtxoProvider;
     use rbitcoin_query::Query;
+    use rbitcoin_store::HeadScale;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[test]
+    fn shared_tiny_regtest_hub_is_tiny_unique_regtest_and_drop_cleans() {
+        let path;
+        {
+            let (dir, hub) = super::tiny_regtest_hub();
+            path = dir.path().to_path_buf();
+            assert!(path.is_dir(), "fixture must create {path:?}");
+            assert_eq!(hub.query.store().headers.head_target_slots(), 64);
+            assert_eq!(hub.query.store().head_scale(), HeadScale::Tiny);
+            assert_eq!(hub.params.network, bitcoin::Network::Regtest);
+            assert_eq!(hub.milestone, Milestone::NONE);
+            let (dir2, hub2) = super::tiny_regtest_hub();
+            assert_ne!(dir.path(), dir2.path(), "each open must be a unique path");
+            assert_eq!(hub2.params.network, bitcoin::Network::Regtest);
+            assert_eq!(hub2.query.store().headers.head_target_slots(), 64);
+        }
+        assert!(
+            !path.exists(),
+            "drop must remove the Tiny hub directory {path:?}"
+        );
+    }
+
     fn tmp_hub() -> (rbitcoin_query::testutil::TempDir, ChainHub) {
-        let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("chain");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
-        (dir, hub)
+        super::tiny_regtest_hub_labeled("chain")
     }
 
     fn coinbase(height: u32) -> Transaction {

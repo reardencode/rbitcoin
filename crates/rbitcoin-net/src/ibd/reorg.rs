@@ -684,12 +684,9 @@ mod tests {
     use bitcoin::{
         Amount, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut, Witness,
     };
-    use rbitcoin_consensus::{ChainParams, Milestone};
 
     fn tmp_hub() -> (rbitcoin_query::testutil::TempDir, ChainHub) {
-        let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("ibd-reorg");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
-        (dir, hub)
+        crate::chain::tiny_regtest_hub_labeled("ibd-reorg")
     }
 
     fn coinbase(height: u32) -> Transaction {

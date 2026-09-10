@@ -15,14 +15,9 @@ fn served_block(p: PeerOut) -> bitcoin::Block {
     }
 }
 
-fn tmp_store(label: &str) -> (rbitcoin_query::testutil::TempDir, Query) {
-    rbitcoin_query::testutil::tiny_query_labeled(label)
-}
-
 #[test]
 fn p2p_serve_line_names_ntx_bytes_wall() {
-    let (dir, q) = tmp_store("serve-line");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("serve-line");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     let _ = crate::serve_perf::sample_reset_serve_perf();
@@ -98,8 +93,7 @@ fn from_this_peer_insert_caps_and_keeps_latest() {
 
 #[test]
 fn tip_follow_locator_empty_store_has_genesis_zero() {
-    let (dir, q) = tmp_store("empty");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("empty");
     let loc = tip_follow_locator(&hub);
     assert!(!loc.is_empty());
     assert_eq!(loc.last().unwrap().to_byte_array(), [0u8; 32]);
@@ -108,8 +102,7 @@ fn tip_follow_locator_empty_store_has_genesis_zero() {
 
 #[test]
 fn tip_follow_locator_includes_tip_after_genesis() {
-    let (dir, q) = tmp_store("gen");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("gen");
     hub.ensure_genesis().unwrap();
     let loc = tip_follow_locator(&hub);
     assert!(!loc.is_empty());
@@ -120,8 +113,7 @@ fn tip_follow_locator_includes_tip_after_genesis() {
 
 #[test]
 fn headers_sync_locator_from_unknown_starts_at_that_hash() {
-    let (dir, q) = tmp_store("loc-unk");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("loc-unk");
     hub.ensure_genesis().unwrap();
     let start = BlockHash::from_byte_array([0xab; 32]);
     let loc = headers_sync_locator(&hub, Some(start));
@@ -132,8 +124,7 @@ fn headers_sync_locator_from_unknown_starts_at_that_hash() {
 
 #[test]
 fn headers_sync_locator_from_mid_height_starts_there() {
-    let (dir, q) = tmp_store("loc-mid");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("loc-mid");
     hub.ensure_genesis().unwrap();
     let hashes = hub
         .generate_to_script(3, bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![])
@@ -146,8 +137,7 @@ fn headers_sync_locator_from_mid_height_starts_there() {
 
 #[test]
 fn should_poll_peer_headers_skips_behind_and_weaker_fork() {
-    let (dir, q) = tmp_store("poll-skip");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("poll-skip");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     assert!(should_poll_peer_headers(&hub, None));
@@ -212,7 +202,7 @@ fn rand_nonce_changes() {
 
 #[test]
 fn block_for_peer_empty_store_none() {
-    let (dir, q) = tmp_store("block-none");
+    let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("block-none");
     let cache = BlockCache::new();
     let miss = BlockHash::from_byte_array([0xab; 32]);
     assert!(block_for_peer(&cache, &q, &miss).unwrap().is_none());
@@ -238,8 +228,7 @@ fn tip_announce_headers_and_inv() {
         header,
         reorg_branch_len: 0,
     };
-    let (dir, q) = tmp_store("announce-msg");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("announce-msg");
     match tip_announce_decision(&hub, &ev, true, None, None, false) {
         TipAnnounce::Headers(h) => {
             assert_eq!(h.len(), 1);
@@ -266,8 +255,7 @@ fn tip_announce_headers_and_inv() {
 
 #[test]
 fn cmpct_announce_uses_generated_tip_body() {
-    let (dir, q) = tmp_store("cmpct-announce");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("cmpct-announce");
     hub.ensure_genesis().unwrap();
     let hashes = hub
         .generate_to_script(1, bitcoin::script::ScriptBuf::new(), vec![])
@@ -300,8 +288,7 @@ fn header_getdata_is_compact_after_sendcmpct() {
             payload: full[24..].to_vec(),
         }
     }
-    let (src_dir, src_q) = tmp_store("cmpct-gd-src");
-    let src = ChainHub::new(src_q, ChainParams::regtest(), Milestone::NONE);
+    let (src_dir, src) = crate::chain::tiny_regtest_hub_labeled("cmpct-gd-src");
     src.ensure_genesis().unwrap();
     src.generate_to_script(
         1,
@@ -312,8 +299,7 @@ fn header_getdata_is_compact_after_sendcmpct() {
     let hdr: Header = src.query.wire_header_at_height(Height(1)).unwrap();
     let hash = hdr.block_hash();
 
-    let (dir, q) = tmp_store("cmpct-gd-dst");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("cmpct-gd-dst");
     hub.ensure_genesis().unwrap();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel();
     let mut pending_headers = HashMap::new();
@@ -383,8 +369,7 @@ fn submitheader_parent_p2p_child_header_getdatas_body() {
         }
     }
 
-    let (dir, q) = tmp_store("tb-hdr-only");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("tb-hdr-only");
     hub.ensure_genesis().unwrap();
     let script = bitcoin::script::ScriptBuf::from_bytes(vec![0x51]);
     hub.generate_to_script(1, script.clone(), vec![]).unwrap();
@@ -464,8 +449,7 @@ fn tip_announce_inv_after_large_reorg_until_peer_catches_up() {
         Amount, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut, Witness,
     };
 
-    let (dir, q) = tmp_store("announce-reorg");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("announce-reorg");
     hub.ensure_genesis().unwrap();
     hub.generate_to_script(8, ScriptBuf::from_bytes(vec![0x51]), vec![])
         .unwrap();
@@ -603,8 +587,7 @@ fn minchainwork_getheaders_empty_until_floor() {
     use bitcoin::p2p::message_blockdata::GetHeadersMessage;
     use bitcoin::ScriptBuf;
 
-    let (dir, q) = tmp_store("minwork");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("minwork");
     hub.ensure_genesis().unwrap();
     let mut min = [0u8; 32];
     min[31] = 0x65; // 101
@@ -652,8 +635,7 @@ fn empty_locator_getheaders_serves_stale_only_with_body() {
     use bitcoin::ScriptBuf;
     use rbitcoin_consensus::mine_regtest_paying;
 
-    let (dir, q) = tmp_store("empty-loc-hdr");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("empty-loc-hdr");
     hub.ensure_genesis().unwrap();
     hub.generate_to_script(1, ScriptBuf::from_bytes(vec![0x51]), vec![])
         .expect("height 1");
@@ -720,15 +702,13 @@ fn minchainwork_does_not_getdata_below_floor() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("minwork-gd");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("minwork-gd");
         hub.ensure_genesis().unwrap();
         let mut min = [0u8; 32];
         min[31] = 0x65;
         hub.set_minimum_chain_work(Some(min));
 
-        let (dir2, q2) = tmp_store("minwork-src");
-        let src = ChainHub::new(q2, ChainParams::regtest(), Milestone::NONE);
+        let (dir2, src) = crate::chain::tiny_regtest_hub_labeled("minwork-src");
         src.ensure_genesis().unwrap();
         src.generate_to_script(50, ScriptBuf::from_bytes(vec![0x51]), vec![])
             .unwrap();
@@ -857,16 +837,14 @@ fn minchainwork_one_header_announces_ignore_height_14() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("minwork-h14");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("minwork-h14");
         hub.ensure_genesis().unwrap();
         // Core node1 `-minimumchainwork=0x1f` (15 blocks).
         let mut min = [0u8; 32];
         min[31] = 0x1f;
         hub.set_minimum_chain_work(Some(min));
 
-        let (dir2, q2) = tmp_store("minwork-h14-src");
-        let src = ChainHub::new(q2, ChainParams::regtest(), Milestone::NONE);
+        let (dir2, src) = crate::chain::tiny_regtest_hub_labeled("minwork-h14-src");
         src.ensure_genesis().unwrap();
         src.generate_to_script(14, ScriptBuf::from_bytes(vec![0x51]), vec![])
             .unwrap();
@@ -971,8 +949,7 @@ fn blocksonly_tx_and_inv_raise_ban() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("blocksonly-tx");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("blocksonly-tx");
         hub.ensure_genesis().unwrap();
         let t = hub.tip_header().unwrap().time;
         hub.clock.set_mock(i64::from(t) + 1);
@@ -1081,8 +1058,7 @@ fn blocksonly_sendraw_invs_unbroadcast_to_inbound() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("blocksonly-sendraw");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("blocksonly-sendraw");
         hub.ensure_genesis().unwrap();
         hub.generate_to_script(102, ScriptBuf::from_bytes(vec![0x51]), vec![])
             .expect("pad maturity");
@@ -1264,8 +1240,7 @@ fn relay_on_unbroadcast_keeps_inbound_age_gate() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("relay-on-unb");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("relay-on-unb");
         hub.ensure_genesis().unwrap();
         hub.generate_to_script(102, ScriptBuf::from_bytes(vec![0x51]), vec![])
             .expect("pad");
@@ -1336,8 +1311,7 @@ fn queue_due_skips_txs_accepted_before_peer_connected() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("tx-privacy-pre");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("tx-privacy-pre");
         hub.ensure_genesis().unwrap();
         hub.generate_to_script(102, ScriptBuf::from_bytes(vec![0x51]), vec![])
             .expect("pad");
@@ -1411,8 +1385,7 @@ fn queue_due_tx_invs_idle_tick_does_not_clone_live_bodies() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("inv-tick-noclone");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("inv-tick-noclone");
         hub.ensure_genesis().unwrap();
         hub.generate_to_script(102, ScriptBuf::from_bytes(vec![0x51]), vec![])
             .expect("pad maturity");
@@ -1521,8 +1494,7 @@ fn queue_due_tx_invs_age_only_tick_does_not_rescan_live() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("inv-tick-age-cursor");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("inv-tick-age-cursor");
         hub.ensure_genesis().unwrap();
         hub.generate_to_script(130, ScriptBuf::from_bytes(vec![0x51]), vec![])
             .expect("pad maturity");
@@ -1663,8 +1635,7 @@ fn mocktime_jump_does_not_inv_or_serve_new_sendraw() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("reorg-122");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("reorg-122");
         hub.ensure_genesis().unwrap();
         hub.generate_to_script(105, ScriptBuf::from_bytes(vec![0x51]), vec![])
             .expect("pad");
@@ -1819,8 +1790,7 @@ fn blocksonly_relay_perm_tx_invs_other_inbound() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("blocksonly-relay-perm");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("blocksonly-relay-perm");
         hub.ensure_genesis().unwrap();
         hub.generate_to_script(102, ScriptBuf::from_bytes(vec![0x51]), vec![])
             .expect("pad maturity");
@@ -1917,8 +1887,7 @@ fn blocksonly_relay_perm_tx_invs_other_inbound() {
 
 #[test]
 fn cmpct_helpers_without_mempool_and_queue_out_closed() {
-    let (dir, q) = tmp_store("cmpct-none");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("cmpct-none");
     hub.ensure_genesis().unwrap();
     let gen = hub
         .query
@@ -2054,8 +2023,7 @@ fn compact_child_of_invalid_disconnects_cached_same_stays() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("cmpct-bad-prev");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("cmpct-bad-prev");
         hub.ensure_genesis().unwrap();
         let tip = hub.tip_hash().unwrap();
         let failed = BlockHash::from_byte_array([0x11; 32]);
@@ -2194,8 +2162,7 @@ fn handle_peer_frame_control_and_inv_paths() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("handle-frame");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("handle-frame");
         hub.ensure_genesis().unwrap();
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
         let mut wants_headers = false;
@@ -2795,8 +2762,7 @@ fn sendaddrv2_after_verack_disconnects() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("sendaddrv2-after");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("sendaddrv2-after");
         hub.ensure_genesis().unwrap();
         let peers = crate::peers::PeerHub::new();
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
@@ -2926,8 +2892,7 @@ fn handle_peer_frame_mempool_tx_and_inv_paths() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("handle-mp");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("handle-mp");
         hub.ensure_genesis().unwrap();
         let t = hub.tip_header().unwrap().time;
         hub.clock.set_mock(i64::from(t) + 1);
@@ -3145,8 +3110,7 @@ fn parked_orphan_tx_is_not_logged_as_reject() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("orphan-log");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("orphan-log");
         hub.ensure_genesis().unwrap();
         let t = hub.tip_header().unwrap().time;
         hub.clock.set_mock(i64::from(t) + 1);
@@ -3245,8 +3209,7 @@ fn inv_of_parked_orphan_does_not_getdata() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("orphan-inv");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("orphan-inv");
         hub.ensure_genesis().unwrap();
         let t = hub.tip_header().unwrap().time;
         hub.clock.set_mock(i64::from(t) + 1);
@@ -3360,8 +3323,7 @@ fn parked_orphan_getdatas_missing_parent() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("orphan-parent-gd");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("orphan-parent-gd");
         hub.ensure_genesis().unwrap();
         let t = hub.tip_header().unwrap().time;
         hub.clock.set_mock(i64::from(t) + 1);
@@ -3461,8 +3423,7 @@ fn parked_orphan_on_tokio_worker_getdatas_parent() {
         .build()
         .unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("orphan-park-reactor");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("orphan-park-reactor");
         hub.ensure_genesis().unwrap();
         let t = hub.tip_header().unwrap().time;
         hub.clock.set_mock(i64::from(t) + 1);
@@ -3570,8 +3531,7 @@ fn getdata_tx_notfound_unless_announced_or_reorg() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("gd-privacy");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("gd-privacy");
         hub.ensure_genesis().unwrap();
         hub.generate_to_script(102, ScriptBuf::from_bytes(vec![0x51]), vec![])
             .expect("pad maturity");
@@ -3820,8 +3780,7 @@ fn invalid_getdata_type0_still_serves_tip_block() {
         .build()
         .unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("gd-type0");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("gd-type0");
         hub.ensure_genesis().unwrap();
         hub.generate_to_script(1, ScriptBuf::from_bytes(vec![0x51]), vec![])
             .expect("one block");
@@ -3903,8 +3862,7 @@ fn cmpct_helpers_with_mempool_live_and_blocktxn() {
         Amount, CompactTarget, OutPoint, Sequence, Transaction, TxIn, TxMerkleNode, TxOut, Witness,
     };
 
-    let (dir, q) = tmp_store("cmpct-mp");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("cmpct-mp");
     hub.ensure_genesis().unwrap();
     let mp = crate::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
     assert!(hub.attach_mempool(mp).is_ok());
@@ -3997,8 +3955,7 @@ fn p2p_side_chain_reorgs_via_held_bodies() {
         Amount, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut, Witness,
     };
 
-    let (dir, q) = tmp_store("pending-reorg");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("pending-reorg");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
 
@@ -4083,8 +4040,7 @@ fn p2p_side_chain_reorgs_via_held_bodies() {
 /// at a time after 19 tip-extends must become the new tip.
 #[test]
 fn sequential_submit_twenty_beats_nineteen() {
-    let (dir, q) = tmp_store("submit-20-vs-19");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("submit-20-vs-19");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     let coinbase = |height: u32| {
@@ -4177,8 +4133,7 @@ fn drain_requests_missing_parent_of_pending_branch() {
         Amount, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut, Witness,
     };
 
-    let (dir, q) = tmp_store("pending-missing-parent");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("pending-missing-parent");
     hub.ensure_genesis().unwrap();
     let missing_parent = BlockHash::from_byte_array([0x42; 32]);
     let bits = CompactTarget::from_consensus(0x207f_ffff);
@@ -4247,8 +4202,7 @@ fn drain_connects_pending_child_of_new_tip_after_reorg() {
         Amount, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut, Witness,
     };
 
-    let (dir, q) = tmp_store("pending-child-after-reorg");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("pending-child-after-reorg");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
     let coinbase = |height: u32| {
@@ -4355,16 +4309,14 @@ fn inv_of_already_asked_block_does_not_getdata() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (src_dir, src_q) = tmp_store("inv-asked-src");
-        let src = ChainHub::new(src_q, ChainParams::regtest(), Milestone::NONE);
+        let (src_dir, src) = crate::chain::tiny_regtest_hub_labeled("inv-asked-src");
         src.ensure_genesis().unwrap();
         src.generate_to_script(1, ScriptBuf::from_bytes(vec![0x51]), vec![])
             .unwrap();
         let hdr = src.query.wire_header_at_height(Height(1)).unwrap();
         let hash = hdr.block_hash();
 
-        let (dir, q) = tmp_store("inv-asked-dst");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("inv-asked-dst");
         hub.ensure_genesis().unwrap();
 
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
@@ -4454,8 +4406,7 @@ fn bloom_disabled_messages_request_disconnect() {
         }
     }
 
-    let (dir, q) = tmp_store("bloom-off");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("bloom-off");
     hub.ensure_genesis().unwrap();
     let (out_tx, _out_rx) = mpsc::unbounded_channel();
     let mut pending_headers = HashMap::new();
@@ -4532,8 +4483,7 @@ fn oversize_locator_request_disconnect() {
         }
     }
 
-    let (dir, q) = tmp_store("locator-oversize");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("locator-oversize");
     hub.ensure_genesis().unwrap();
     let (out_tx, _out_rx) = mpsc::unbounded_channel();
     let mut pending_headers = HashMap::new();
@@ -4769,8 +4719,7 @@ fn redundant_verack_is_ignored_and_logged() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("redundant-verack");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("redundant-verack");
         hub.ensure_genesis().unwrap();
         let (out_tx, _out_rx) = mpsc::unbounded_channel();
         let mut wants_headers = false;
@@ -4824,8 +4773,7 @@ fn addrfetch_post_handshake_queues_getaddr_not_getheaders() {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::atomic::Ordering;
 
-    let (dir, q) = tmp_store("addrfetch-getaddr");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("addrfetch-getaddr");
     hub.ensure_genesis().unwrap();
     let peers = crate::peers::PeerHub::new();
     // Tip older than 24h so try_start_headers_sync would otherwise start.
@@ -4899,8 +4847,7 @@ fn addrfetch_multi_addr_disconnects() {
         }
     }
 
-    let (dir, q) = tmp_store("addrfetch-multi");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("addrfetch-multi");
     hub.ensure_genesis().unwrap();
     let peers = crate::peers::PeerHub::new();
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
@@ -5114,7 +5061,7 @@ fn encode_served_witness_block_panics_on_reactor() {
     let join = std::thread::Builder::new()
         .name("tokio-rt-worker".into())
         .spawn(move || {
-            let (dir, q) = tmp_store("serve-reactor");
+            let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("serve-reactor");
             let cache = BlockCache::new();
             let r = encode_served_witness_block(&cache, &q, &h);
             let _ = std::fs::remove_dir_all(dir);
@@ -5130,7 +5077,7 @@ fn encode_served_witness_block_panics_on_reactor() {
         .name("tokio-rt-worker".into())
         .spawn(move || {
             let _g = crate::reactor::BlockingRegion::enter();
-            let (dir, q) = tmp_store("serve-reactor-ok");
+            let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("serve-reactor-ok");
             let cache = BlockCache::new();
             let r = encode_served_witness_block(&cache, &q, &h);
             let _ = std::fs::remove_dir_all(dir);
@@ -5177,8 +5124,7 @@ fn shorter_higher_work_fork_is_not_hopeless() {
     use bitcoin::{CompactTarget, TxMerkleNode};
     use rbitcoin_primitives::Height;
 
-    let (dir, q) = tmp_store("short-high-work-fork");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("short-high-work-fork");
     hub.ensure_genesis().unwrap();
     hub.generate_to_script(5, bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![])
         .unwrap();
@@ -5258,8 +5204,7 @@ fn connecting_ancient_weaker_headers_request_disconnect() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("ancient-fork-headers");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("ancient-fork-headers");
         hub.ensure_genesis().unwrap();
         hub.generate_to_script(300, bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![])
             .unwrap();
@@ -5386,8 +5331,7 @@ fn getdata_skips_reconstruct_when_serve_inflight_at_cap() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("serve-inflight-cap");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("serve-inflight-cap");
         hub.ensure_genesis().unwrap();
         let hashes = hub
             .generate_to_script(20, bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![])
@@ -5505,8 +5449,7 @@ fn catchup_headers_getdata_stays_in_serve_window() {
     let n = MAX_SERVE_BLOCKS * 2 + 4;
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (src_dir, src_q) = tmp_store("catchup-gd-src");
-        let src = ChainHub::new(src_q, ChainParams::regtest(), Milestone::NONE);
+        let (src_dir, src) = crate::chain::tiny_regtest_hub_labeled("catchup-gd-src");
         src.ensure_genesis().unwrap();
         src.generate_to_script(n as u32, bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![])
             .unwrap();
@@ -5515,8 +5458,7 @@ fn catchup_headers_getdata_stays_in_serve_window() {
             .collect();
         assert_eq!(headers.len(), n);
 
-        let (dir, q) = tmp_store("catchup-gd-dst");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("catchup-gd-dst");
         hub.ensure_genesis().unwrap();
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
         let mut pending_headers = HashMap::new();
@@ -5626,8 +5568,7 @@ fn catchup_child_before_parent_still_connects() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (src_dir, src_q) = tmp_store("catchup-ooo-src");
-        let src = ChainHub::new(src_q, ChainParams::regtest(), Milestone::NONE);
+        let (src_dir, src) = crate::chain::tiny_regtest_hub_labeled("catchup-ooo-src");
         src.ensure_genesis().unwrap();
         src.generate_to_script(2, bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![])
             .unwrap();
@@ -5637,8 +5578,7 @@ fn catchup_child_before_parent_still_connects() {
         let parent = headers[0].block_hash();
         let child = headers[1].block_hash();
 
-        let (dir, q) = tmp_store("catchup-ooo-dst");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("catchup-ooo-dst");
         hub.ensure_genesis().unwrap();
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
         let mut pending_headers = HashMap::new();
@@ -5776,8 +5716,7 @@ fn catchup_compact_getdata_clears_requested_for_next_window() {
     let n = MAX_SERVE_BLOCKS + 4;
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (src_dir, src_q) = tmp_store("catchup-cmpct-src");
-        let src = ChainHub::new(src_q, ChainParams::regtest(), Milestone::NONE);
+        let (src_dir, src) = crate::chain::tiny_regtest_hub_labeled("catchup-cmpct-src");
         src.ensure_genesis().unwrap();
         src.generate_to_script(n as u32, bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![])
             .unwrap();
@@ -5785,8 +5724,7 @@ fn catchup_compact_getdata_clears_requested_for_next_window() {
             .map(|h| src.query.wire_header_at_height(Height(h)).unwrap())
             .collect();
 
-        let (dir, q) = tmp_store("catchup-cmpct-dst");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("catchup-cmpct-dst");
         hub.ensure_genesis().unwrap();
         let mp = crate::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
         mp.set_relay_enabled(true);
@@ -5879,8 +5817,7 @@ fn catchup_compact_getdata_clears_requested_for_next_window() {
 
 #[test]
 fn queue_getheaders_from_hash_puts_it_first() {
-    let (dir, q) = tmp_store("gh-from");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("gh-from");
     hub.ensure_genesis().unwrap();
     let start = BlockHash::from_byte_array([0xcd; 32]);
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -5916,8 +5853,7 @@ fn full_headers_batch_continues_from_last_header() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("hdr-continue");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("hdr-continue");
         hub.ensure_genesis().unwrap();
         let unknown_prev = BlockHash::from_byte_array([0x11; 32]);
         let mut headers = Vec::with_capacity(MAX_HEADERS_RESULTS);
@@ -6016,8 +5952,7 @@ fn pending_header_walk_is_ram_then_one_store_lookup() {
     use bitcoin::{CompactTarget, TxMerkleNode};
     use std::time::Instant;
 
-    let (dir, q) = tmp_store("pending-walk");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("pending-walk");
     hub.ensure_genesis().unwrap();
     let genesis = hub.tip_hash().unwrap();
 
@@ -6212,8 +6147,7 @@ fn compact_tip_announce_must_not_wrap_serve_inflight() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("cmpct-ann-inflight");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("cmpct-ann-inflight");
         hub.ensure_genesis().unwrap();
         let hashes = hub
             .generate_to_script(1, bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![])
@@ -6316,8 +6250,7 @@ fn compact_tip_announce_must_not_consume_serve_slots() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("cmpct-ann-slots");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("cmpct-ann-slots");
         hub.ensure_genesis().unwrap();
         let hashes = hub
             .generate_to_script(1, bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![])
@@ -6419,8 +6352,7 @@ fn coinbase_compact_fills_without_mempool() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (src_dir, src_q) = tmp_store("cmpct-nomp-src");
-        let src = ChainHub::new(src_q, ChainParams::regtest(), Milestone::NONE);
+        let (src_dir, src) = crate::chain::tiny_regtest_hub_labeled("cmpct-nomp-src");
         src.ensure_genesis().unwrap();
         let hashes = src
             .generate_to_script(1, bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![])
@@ -6433,8 +6365,7 @@ fn coinbase_compact_fills_without_mempool() {
             .expect("src body");
         let hsi = HeaderAndShortIds::from_block(&block, 1, 2, &[0]).unwrap();
 
-        let (dir, q) = tmp_store("cmpct-nomp-dst");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("cmpct-nomp-dst");
         hub.ensure_genesis().unwrap();
         assert!(hub.mempool().is_none());
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
@@ -6487,8 +6418,7 @@ fn tip_event_for_announce_on_lagged_uses_current_hub_tip() {
     use bitcoin::ScriptBuf;
     use tokio::sync::broadcast;
 
-    let (dir, q) = tmp_store("lagged-tip-ev");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("lagged-tip-ev");
     hub.ensure_genesis().unwrap();
     hub.generate_to_script(80, ScriptBuf::from_bytes(vec![0x51]), vec![])
         .unwrap();
@@ -6635,8 +6565,7 @@ async fn tip_burst_past_broadcast_capacity_still_syncs_peer() {
 
 #[test]
 fn stale_getdata_requests_expire_so_catchup_can_retry() {
-    let (dir, q) = tmp_store("getdata-expire");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("getdata-expire");
     hub.ensure_genesis().unwrap();
     let hash = BlockHash::from_byte_array([0x11; 32]);
     let mut requested = HashSet::new();
@@ -6908,8 +6837,7 @@ fn new_pow_valid_compact_relays_to_hb_before_connect() {
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        let (dir, q) = tmp_store("npow-early-cmpct");
-        let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("npow-early-cmpct");
         hub.ensure_genesis().unwrap();
         hub.generate_to_script(102, ScriptBuf::from_bytes(vec![0x51]), vec![])
             .expect("pad");
@@ -7046,8 +6974,7 @@ fn new_pow_valid_compact_relays_to_hb_before_connect() {
 #[test]
 fn outbound_feefilter_sats_ibd_even_when_relay_off() {
     use std::sync::Arc;
-    let (dir, q) = tmp_store("ibd-ff");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("ibd-ff");
     hub.ensure_genesis().unwrap();
     let mp = crate::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
     mp.set_relay_enabled(false);
