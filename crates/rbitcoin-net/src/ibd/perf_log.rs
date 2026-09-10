@@ -277,9 +277,6 @@ pub(crate) struct IbdPerfSample {
     pub load_cold_range_body_ms: u64,
     pub load_cold_range_decode_ms: u64,
     pub load_body_tx_reads: u64,
-    pub load_ready_through: u32,
-    pub cache_bodies: usize,
-    pub cache_plans: usize,
     pub conf_ready: usize,
     pub conf_script_q: usize,
     pub conf_write_q: usize,
@@ -517,9 +514,6 @@ impl Default for IbdPerfSample {
             load_cold_range_body_ms: 0,
             load_cold_range_decode_ms: 0,
             load_body_tx_reads: 0,
-            load_ready_through: 0,
-            cache_bodies: 0,
-            cache_plans: 0,
             conf_ready: 0,
             conf_script_q: 0,
             conf_write_q: 0,
@@ -761,8 +755,6 @@ pub(crate) fn sample(
     hole: usize,
     peers: usize,
     headers_done: bool,
-    // (ready_through, ahead, parents, bodies, plans).
-    load: (u32, u32, usize, usize, usize),
     conf_ready: usize,
     conf_script_q: usize,
     conf_write_q: usize,
@@ -829,8 +821,6 @@ pub(crate) fn sample(
     let dens = rbitcoin_consensus::lookup_stage_stats::sample_and_reset();
     let arch_res = rbitcoin_query::archive_phase_stats::sample_and_reset();
     let head_res = rbitcoin_store::head_resolve_stats::sample_and_reset();
-    let (load_ready_through, _cache_ahead, _cache_parents, cache_bodies, cache_plans) = load;
-
     IbdPerfSample {
         inflight,
         inflight_cap,
@@ -953,9 +943,6 @@ pub(crate) fn sample(
         load_cold_range_body_ms: ns_ms(pw.cold_range_body_ns),
         load_cold_range_decode_ms: ns_ms(pw.cold_range_decode_ns),
         load_body_tx_reads: pw.body_tx,
-        load_ready_through,
-        cache_bodies,
-        cache_plans,
         conf_ready,
         conf_script_q,
         conf_write_q,
@@ -1422,10 +1409,7 @@ pub(crate) fn format_info(s: &IbdPerfSample) -> String {
         s.conf_script_q_cap,
         s.conf_write_q_cap,
     );
-    out.push_str(&format!(
-        " | {conf_q} thru={} sh_runs={}",
-        s.load_ready_through, s.sh_runs,
-    ));
+    out.push_str(&format!(" | {conf_q} sh_runs={}", s.sh_runs));
 
     out.push_str(&format!(
         " | loop {} conf={}ms assign={}ms",
@@ -1510,13 +1494,11 @@ pub(crate) fn format_debug(s: &IbdPerfSample) -> String {
     );
     let bq_mib = s.bq_bytes / (1024 * 1024);
     out.push_str(&format!(
-        " | bq soft={}/{} RAM={}MiB | {conf_q} | load thru={} bodies={} plans={} win_ms={} blks={} utxo_p={} uniq_p={} pin_cache={} pin_new={} body_io={}",
+        " | bq soft={}/{} RAM={}MiB | {conf_q} | plans={} win_ms={} blks={} utxo_p={} uniq_p={} pin_cache={} pin_new={} body_io={}",
         s.bq_count,
         s.bq_soft_stop,
         bq_mib,
-        s.load_ready_through,
-        s.cache_bodies,
-        s.cache_plans,
+        s.owned.conf_plans,
         s.load_win_ms,
         s.load_blocks,
         s.load_utxo_parents,
@@ -1960,6 +1942,61 @@ mod tests {
             !sizes.contains("recent="),
             "always-zero recent= occupancy: {sizes}"
         );
+        for line in [&info, &dbg] {
+            assert!(
+                !line.contains("thru="),
+                "parent-cache ready_through is always 0: {line}"
+            );
+        }
+        assert!(
+            !sizes.contains("load thru="),
+            "always-zero snapshot ready_through: {sizes}"
+        );
+        assert!(
+            !dbg.contains("load thru="),
+            "debug load occupancy must not print load thru=: {dbg}"
+        );
+        assert!(
+            !sizes.contains(" bodies="),
+            "always-zero snapshot bodies: {sizes}"
+        );
+        assert!(
+            !dbg.contains(" bodies="),
+            "debug load occupancy must not print bodies=: {dbg}"
+        );
+        assert!(dbg.contains("plans="), "{dbg}");
+        assert!(sizes.contains("conf_plans="), "{sizes}");
+        s.owned.conf_plans = 9;
+        let stuffed_info = format_info(&s);
+        let stuffed_dbg = format_debug(&s);
+        let stuffed_sizes = format_sizes(&s);
+        for line in [&stuffed_info, &stuffed_dbg] {
+            assert!(
+                !line.contains("thru="),
+                "stuffed plans must not revive thru=: {line}"
+            );
+        }
+        assert!(
+            !stuffed_sizes.contains("load thru="),
+            "stuffed plans must not revive load thru=: {stuffed_sizes}"
+        );
+        assert!(
+            !stuffed_dbg.contains("load thru="),
+            "stuffed plans must not revive load thru=: {stuffed_dbg}"
+        );
+        assert!(
+            !stuffed_sizes.contains(" bodies="),
+            "stuffed plans must not revive bodies=: {stuffed_sizes}"
+        );
+        assert!(
+            !stuffed_dbg.contains(" bodies="),
+            "stuffed plans must not revive bodies=: {stuffed_dbg}"
+        );
+        assert!(stuffed_dbg.contains("plans=9"), "{stuffed_dbg}");
+        assert!(stuffed_sizes.contains("conf_plans=9"), "{stuffed_sizes}");
+        assert!(stuffed_info.contains("load="), "{stuffed_info}");
+        assert!(stuffed_info.contains("script="), "{stuffed_info}");
+        assert!(stuffed_info.contains("write="), "{stuffed_info}");
     }
 
     #[test]
@@ -2061,7 +2098,6 @@ mod tests {
         s.conf_write_q = 2;
         s.conf_script_q_cap = 2;
         s.conf_write_q_cap = 2;
-        s.load_ready_through = 200;
         s.load_blocks = 32;
         s.load_pin_cache_body = 8;
         s.load_pin_new = 12;
@@ -2080,7 +2116,7 @@ mod tests {
         s.arch_write_head_ms = 2;
         let line = format_info(&s);
         assert!(line.contains("loadq<0/14 scriptq=1/2 writeq=2/2"), "{line}");
-        assert!(line.contains("thru=200"), "{line}");
+        assert!(!line.contains("thru="), "{line}");
         // pin_residency slot always 0 (process pin FIFO removed); pin_plan_cache label retired.
         assert!(!line.contains("pin_res="), "{line}");
         assert!(line.contains("pin_new=12"), "{line}");
@@ -2365,7 +2401,6 @@ mod tests {
         s.conf_write_q = 1;
         s.conf_script_q_cap = 2;
         s.conf_write_q_cap = 2;
-        s.load_ready_through = 200;
         s.load_blocks = 16;
         s.load_utxo_parents = 100;
         s.load_body_tx_reads = 200;
@@ -2403,7 +2438,7 @@ mod tests {
             line.contains("loadq<0/14 scriptq<0/2 writeq=1/2") || line.contains("loadq="),
             "{line}"
         );
-        assert!(line.contains("thru=200"), "{line}");
+        assert!(!line.contains("thru="), "{line}");
         assert!(line.contains("utxo_p=100"), "{line}");
         assert!(!line.contains("creates="), "{line}");
         assert!(line.contains("body_io=200"), "{line}");
@@ -2602,12 +2637,11 @@ mod tests {
             1,           // hole
             8,           // peers
             true,        // headers_done
-            (50, 10, 0, 0, 0),
-            0,         // ready
-            0,         // script_q
-            0,         // write_q
-            (0, 0, 0), // q hwm
-            1,         // sh_runs
+            0,           // ready
+            0,           // script_q
+            0,           // write_q
+            (0, 0, 0),   // q hwm
+            1,           // sh_runs
             work,
             owned,
             conf_pipe,

@@ -293,20 +293,33 @@ fn sampler_stats() {
     assert!(a.prep_head_fk_ns >= 10);
     assert!(a.prep_head_ns >= 10);
 
-    confirm_load_stats::note_last_pin(11, 22, 33, 44, 55, 100, 9);
+    confirm_load_stats::note_last_pin(22, 33, 44, 100, 9);
     let lp = confirm_load_stats::last_pin_phases();
-    if lp.adopt_ns != 11 {
-        confirm_load_stats::note_last_pin(11, 22, 33, 44, 55, 100, 9);
+    if lp.plan_pin_ns != 22 {
+        confirm_load_stats::note_last_pin(22, 33, 44, 100, 9);
     }
     let lp = confirm_load_stats::last_pin_phases();
-    assert_eq!(lp.adopt_ns, 11);
     assert_eq!(lp.plan_pin_ns, 22);
     assert_eq!(lp.cold_ns, 33);
     assert_eq!(lp.contract_ns, 44);
-    assert_eq!(lp.publish_ns, 55);
     assert_eq!(lp.pin_plan_n, 100);
     assert_eq!(lp.pin_new_n, 9);
     assert_eq!(confirm_load_stats::LastPinPhases::ms(2_000_000), 2);
+    let slow = lp.format_slow_pin();
+    assert!(!slow.contains("adopt="), "{slow}");
+    assert!(!slow.contains("publish="), "{slow}");
+    assert_eq!(slow, "pin(plan=0ms/n=100 cold=0ms/n=9 contract=0ms)");
+    let stuffed = confirm_load_stats::LastPinPhases {
+        plan_pin_ns: 1_000_000,
+        cold_ns: 2_000_000,
+        contract_ns: 3_000_000,
+        pin_plan_n: 7,
+        pin_new_n: 8,
+    };
+    let stuffed_line = stuffed.format_slow_pin();
+    assert!(!stuffed_line.contains("adopt="), "{stuffed_line}");
+    assert!(!stuffed_line.contains("publish="), "{stuffed_line}");
+    assert_eq!(stuffed_line, "pin(plan=1ms/n=7 cold=2ms/n=8 contract=3ms)");
 }
 
 /// Disconnecting a confirmed block must emit an info/warn line (not debug).
@@ -2057,7 +2070,7 @@ fn reconstruct_and_connect_error_arms() {
 
     let (h3, ta3) = coinbase_block(3, prev, Some(hashes[2]));
     q.commit_class_a_only(&h3, &[ta3]).unwrap();
-    let _ = q.parent_cache_perf_snapshot();
+    let _ = q.confirm_parent_cache().header_plan_count();
 
     // Archive empty batch.
     assert!(q.archive_prepared_owned(&mut []).unwrap().is_empty());

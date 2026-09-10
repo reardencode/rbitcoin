@@ -1890,21 +1890,13 @@ pub(crate) fn spawn_confirm_engine(
                         queues_load.note_script_send(prepared_n, wire, parents);
                         if work_ms > 2_000 {
                             let pin = rbitcoin_query::confirm_load_stats::last_pin_phases();
-                            let pms = rbitcoin_query::confirm_load_stats::LastPinPhases::ms;
                             info!(
                                 "ibd: confirm load slow batch={prepared_n} claim={} first={expect_h} \
                                  work_ms={work_ms} plan_stamp_ms={} \
-                                 pin(adopt={}ms plan={}ms/n={} cold={}ms/n={} contract={}ms publish={}ms) \
-                                 parents={}",
+                                 {} parents={}",
                                 heights_hashes.len(),
                                 plan_ns / 1_000_000,
-                                pms(pin.adopt_ns),
-                                pms(pin.plan_pin_ns),
-                                pin.pin_plan_n,
-                                pms(pin.cold_ns),
-                                pin.pin_new_n,
-                                pms(pin.contract_ns),
-                                pms(pin.publish_ns),
+                                pin.format_slow_pin(),
                                 parents,
                             );
                         }

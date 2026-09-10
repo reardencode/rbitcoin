@@ -390,11 +390,9 @@ pub(super) fn pin_for_wire_batch(
         confirm_load_stats::PIN_CONTRACT_NS.fetch_add(contract_ns, Ordering::Relaxed);
     }
     confirm_load_stats::note_last_pin(
-        0,
         plan_pin_ns,
         cold_range_batch_ns,
         contract_ns,
-        0,
         n_plan_pin,
         n_range_new,
     );

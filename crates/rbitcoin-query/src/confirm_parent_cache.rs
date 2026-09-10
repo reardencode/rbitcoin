@@ -134,6 +134,12 @@ impl ConfirmParentCache {
     }
 }
 
+impl crate::Query {
+    pub fn advance_parent_cache_tip(&self, tip: u32) {
+        self.confirm_parents.advance_tip(tip);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

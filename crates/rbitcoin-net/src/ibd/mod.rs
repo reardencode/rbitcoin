@@ -810,7 +810,6 @@ pub async fn ibd_cancellable(
                 .ready_hwm
                 .saturating_sub(prog.tip)
                 .saturating_add(st.inflight.len() as u32);
-            let parent_cache_snap = hub.query.parent_cache_perf_snapshot();
             let conf_q_hwm = confirm_queues.sample_hwm_and_reset();
             let mut conf_pipe = confirm_queues.content_snap();
             let (feed_ready, feed_inflight) = confirm_feed.size_snap();
@@ -829,7 +828,6 @@ pub async fn ibd_cancellable(
                 prog.tip_hole,
                 peers_n,
                 st.headers_done,
-                parent_cache_snap,
                 ready_n,
                 script_q,
                 write_q,
