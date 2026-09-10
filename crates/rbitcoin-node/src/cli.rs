@@ -27,6 +27,7 @@ struct CliAccum {
     shindex_set: bool,
     sptweaks: bool,
     sptweaks_set: bool,
+    sptweaks_dust: Option<u64>,
     rpc_listen: Option<SocketAddr>,
     rpc_user: Option<String>,
     rpc_password: Option<String>,
@@ -88,6 +89,7 @@ impl Default for CliAccum {
             shindex_set: false,
             sptweaks: false,
             sptweaks_set: false,
+            sptweaks_dust: None,
             rpc_listen: None,
             rpc_user: None,
             rpc_password: None,
@@ -150,7 +152,7 @@ where
                     "rbitcoin-node {} — usage:\n\
   rbitcoin-node [--conf FILE] [--datadir PATH] [--datadir-cold PATH] [--network NET] \\\n\
     [--listen ADDR] [--connect ADDR]... [--electrum-listen ADDR] [--esplora-listen ADDR] \\\n\
-    [--shindex] [--sptweaks] [--rpc-listen ADDR] [--rpcuser USER] [--rpcpassword PASS] \\\n\
+    [--shindex] [--sptweaks] [--sptweaks-dust SATS] [--rpc-listen ADDR] [--rpcuser USER] [--rpcpassword PASS] \\\n\
     [--milestone|--assumevalid-height HEIGHT] \\\n\
     [--maxoutbound|--max-outbound N] [--maxinbound N] [--maxconnections N] \\\n\
     [--mempool-size-mb|--maxmempool N] \\\n\
@@ -172,6 +174,7 @@ Mempool: --mempool-size-mb / --maxmempool (default ~300 MiB weight budget).\n\
 Peers: --maxoutbound (default 16 live download), --maxinbound (default 125), --maxconnections Core total (inbound = N-11).\n\
 Scripthash: --shindex (default off) builds Class B for Electrum/Esplora; both require it.\n\
 Silent payments: --sptweaks (default off) writes/serves the thin BIP-352 tweak index.\n\
+  --sptweaks-dust SATS omits served P2TR outs with value <= SATS (default 1000; 0 = all; 546 = Cake electrs).\n\
 RPC: --rpc-listen ADDR (default off); cookie under datadir/.cookie or --rpcuser/--rpcpassword.\n\
 Cold files: --datadir-cold PATH puts Class A inwit.body/idx under PATH/store (HDD).\n\
   Default (flag omitted): hot and cold files both live under --datadir.\n\
@@ -362,6 +365,31 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
             "--sptweaks" | "-sptweaks" => {
                 acc.sptweaks = true;
                 acc.sptweaks_set = true;
+                i += 1;
+            }
+            "--sptweaks-dust" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: --sptweaks-dust requires a satoshi amount");
+                    return ExitCode::from(2);
+                }
+                match args[i].to_string_lossy().parse::<u64>() {
+                    Ok(n) => acc.sptweaks_dust = Some(n),
+                    Err(e) => {
+                        eprintln!("error: bad --sptweaks-dust: {e}");
+                        return ExitCode::from(2);
+                    }
+                }
+                i += 1;
+            }
+            other if other.starts_with("--sptweaks-dust=") => {
+                match other["--sptweaks-dust=".len()..].parse::<u64>() {
+                    Ok(n) => acc.sptweaks_dust = Some(n),
+                    Err(e) => {
+                        eprintln!("error: bad --sptweaks-dust: {e}");
+                        return ExitCode::from(2);
+                    }
+                }
                 i += 1;
             }
             "--rpc-listen" => {
@@ -1108,6 +1136,9 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
     if acc.sptweaks_set {
         config.sptweaks = acc.sptweaks;
     }
+    if let Some(n) = acc.sptweaks_dust {
+        config.sptweaks_dust = n;
+    }
     if let Some(a) = acc.rpc_listen {
         config.rpc.listen = Some(a);
     }
@@ -1450,6 +1481,14 @@ mod tests {
         );
         assert_exit(
             cli_main(["rbitcoin-node", "--maxinbound", "nope"]),
+            ExitCode::from(2),
+        );
+        assert_exit(
+            cli_main(["rbitcoin-node", "--sptweaks-dust"]),
+            ExitCode::from(2),
+        );
+        assert_exit(
+            cli_main(["rbitcoin-node", "--sptweaks-dust", "nope"]),
             ExitCode::from(2),
         );
         // Bad conf path / invalid conf log_level.

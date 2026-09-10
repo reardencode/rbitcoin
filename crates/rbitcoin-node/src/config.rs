@@ -166,6 +166,9 @@ pub struct NodeConfig {
     pub shindex: bool,
     /// Persist / serve BIP-352 tweaks from `sp_tweaks.*`. Default **off**.
     pub sptweaks: bool,
+    /// Electrum tweaks: omit P2TR outs with `value <=` this (sats). `0` serves
+    /// all. Default [`rbitcoin_electrum::DEFAULT_TWEAKS_MIN_DUST`] (1000).
+    pub sptweaks_dust: u64,
     /// Skip script/prevout checks for blocks at or below this height (0 = off).
     pub milestone_height: u32,
     /// When true, ask systemd (if available) to block automatic suspend/idle.
@@ -218,6 +221,7 @@ impl Default for NodeConfig {
             max_run_secs: None,
             shindex: false,
             sptweaks: false,
+            sptweaks_dust: rbitcoin_electrum::DEFAULT_TWEAKS_MIN_DUST,
             milestone_height: 0,
             inhibit_suspend: false,
             conf_path: None,
@@ -459,7 +463,7 @@ impl NodeConfig {
     /// `maxinbound` / `max_inbound`, `maxconnections` (Core total → inbound N-11),
     /// `mempool_size_mb` / `maxmempool`,
     /// `log_level`, `api_log`, `asmap`, `electrum_listen`, `esplora_listen`,
-    /// `shindex`, `rpc_listen`, `rpcuser`, `rpcpassword`,
+    /// `shindex`, `sptweaks`, `sptweaks_dust`, `rpc_listen`, `rpcuser`, `rpcpassword`,
     /// `noseeds` / `no_seeds`, `signetchallenge`, and `signetblocktime`.
     pub fn merge_conf_file(&mut self, path: &Path) -> Result<(), NodeError> {
         let text = std::fs::read_to_string(path).map_err(|source| {
@@ -573,6 +577,11 @@ impl NodeConfig {
             "sptweaks" => {
                 self.sptweaks = parse_conf_bool(val)
                     .map_err(|e| NodeError::Config(format!("conf sptweaks: {e}")))?;
+            }
+            "sptweaks_dust" | "sptweaksdust" => {
+                self.sptweaks_dust = val
+                    .parse()
+                    .map_err(|e| NodeError::Config(format!("conf sptweaks_dust: {e}")))?;
             }
             "rpc_listen" | "rpclisten" => {
                 self.rpc.listen = Some(
@@ -1182,7 +1191,32 @@ mod tests {
         let mut cfg = NodeConfig::default().with_datadir(dir.join("d"));
         cfg.merge_conf_file(&conf).unwrap();
         assert!(cfg.sptweaks);
+        assert_eq!(
+            cfg.sptweaks_dust,
+            rbitcoin_electrum::DEFAULT_TWEAKS_MIN_DUST
+        );
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn sptweaks_dust_conf_parses_and_zero_serves_all() {
+        let dir = tmp();
+        std::fs::create_dir_all(&dir).unwrap();
+        let conf = dir.join("dust.conf");
+        std::fs::write(&conf, "sptweaks_dust=546\n").unwrap();
+        let mut cfg = NodeConfig::default().with_datadir(dir.join("d"));
+        cfg.merge_conf_file(&conf).unwrap();
+        assert_eq!(cfg.sptweaks_dust, 546);
+        let conf0 = dir.join("dust0.conf");
+        std::fs::write(&conf0, "sptweaks_dust=0\n").unwrap();
+        let mut cfg0 = NodeConfig::default().with_datadir(dir.join("d0"));
+        cfg0.merge_conf_file(&conf0).unwrap();
+        assert_eq!(cfg0.sptweaks_dust, 0);
+        let bad = dir.join("dust-bad.conf");
+        std::fs::write(&bad, "sptweaks_dust=nope\n").unwrap();
+        let mut cfg_bad = NodeConfig::default().with_datadir(dir.join("db"));
+        let err = cfg_bad.merge_conf_file(&bad).unwrap_err().to_string();
+        assert!(err.contains("sptweaks_dust"), "{err}");
     }
 
     #[test]

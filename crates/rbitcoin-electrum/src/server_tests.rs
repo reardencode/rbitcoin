@@ -30,6 +30,7 @@ fn config_helpers_and_param_parsers() {
     );
     assert!(cfg.banner.contains("rbitcoin"));
     assert_eq!(cfg.tweaks_chunk, crate::tweaks::SUBSCRIBE_CHUNK);
+    assert_eq!(cfg.tweaks_min_dust, crate::tweaks::DEFAULT_TWEAKS_MIN_DUST);
 
     let sh = electrum_scripthash_hex(&[0x51]);
     assert_eq!(sh.len(), 64);
