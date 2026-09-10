@@ -1943,49 +1943,6 @@ fn serve_mempool_getdata(
     Ok(false)
 }
 
-#[cfg(test)]
-async fn handle_peer_frame_for_test(
-    frame: FramedMessage,
-    hub: &ChainHub,
-    out_tx: &mpsc::UnboundedSender<PeerOut>,
-    peer_wants_headers: &mut bool,
-    peer_wtxid_relay: &mut bool,
-    peer_send_cmpct: &mut bool,
-    peer_cmpct_version: &mut u32,
-    pending_headers: &mut HashMap<BlockHash, bitcoin::block::Header>,
-    pending_blocks: &mut PendingBlocks,
-    pending_cmpct: &mut HashMap<BlockHash, PendingCmpct>,
-    from_this_peer: &mut HashMap<bitcoin::Txid, ()>,
-    requested_blocks: &mut HashSet<BlockHash>,
-    ban_score: &mut u32,
-    session: Option<&crate::peers::LivePeer>,
-) -> Result<(), NetError> {
-    let mut follow = PeerFollowState {
-        wants_headers: *peer_wants_headers,
-        wtxid_relay: *peer_wtxid_relay,
-        send_cmpct: *peer_send_cmpct,
-        cmpct_version: *peer_cmpct_version,
-        pending_headers: std::mem::take(pending_headers),
-        pending_blocks: std::mem::replace(pending_blocks, PendingBlocks::new()),
-        pending_cmpct: std::mem::take(pending_cmpct),
-        from_this_peer: std::mem::take(from_this_peer),
-        requested_blocks: std::mem::take(requested_blocks),
-        ban_score: *ban_score,
-    };
-    let r = handle_peer_frame(frame, hub, out_tx, &mut follow, session).await;
-    *peer_wants_headers = follow.wants_headers;
-    *peer_wtxid_relay = follow.wtxid_relay;
-    *peer_send_cmpct = follow.send_cmpct;
-    *peer_cmpct_version = follow.cmpct_version;
-    *pending_headers = follow.pending_headers;
-    *pending_blocks = follow.pending_blocks;
-    *pending_cmpct = follow.pending_cmpct;
-    *from_this_peer = follow.from_this_peer;
-    *requested_blocks = follow.requested_blocks;
-    *ban_score = follow.ban_score;
-    r
-}
-
 async fn handle_peer_frame(
     frame: FramedMessage,
     hub: &ChainHub,

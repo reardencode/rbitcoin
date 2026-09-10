@@ -22,6 +22,12 @@ before 1.0).
 
 ### Changed
 
+- **Suggested-order 4 test fixtures:** IBD Tiny+hub tests call
+  `tiny_regtest_hub_labeled`. RPC / query catchup / consensus structure-rule
+  leftover `temp_dir` inlines use `TempDir` / `tiny_query`. BIP34 encoding
+  twins live in `bip34_tests` only (structure-rule keeps the wrong-encoding
+  reject pin). Peer tests hold `PeerFollowState` and call `handle_peer_frame`;
+  the 11-arg unpacking shim is gone. SH tests use store `TempDir`.
 - **Tiny-regtest net hub fixture:** `tiny_regtest_hub` /
   `tiny_regtest_hub_labeled` compose Tiny query + shipped `ChainHub::new`
   with regtest params. `peer_tests` and named `tmp_hub` copies call it.

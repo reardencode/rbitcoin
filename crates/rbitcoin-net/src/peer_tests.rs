@@ -302,35 +302,28 @@ fn header_getdata_is_compact_after_sendcmpct() {
     let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("cmpct-gd-dst");
     hub.ensure_genesis().unwrap();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-    let mut pending_headers = HashMap::new();
-    let mut pending_blocks = PendingBlocks::new();
-    let mut pending_cmpct = HashMap::new();
-    let mut from_peer = HashMap::new();
-    let mut requested = HashSet::new();
-    let mut wants_headers = false;
-    let mut wtxid = false;
-    let mut send_cmpct = true;
-    let mut cmpct_ver = 2u32;
-    let mut ban = 0u32;
+    let mut follow = PeerFollowState {
+        wants_headers: false,
+        wtxid_relay: false,
+        send_cmpct: true,
+        cmpct_version: 2u32,
+        pending_headers: HashMap::new(),
+        pending_blocks: PendingBlocks::new(),
+        pending_cmpct: HashMap::new(),
+        from_this_peer: HashMap::new(),
+        requested_blocks: HashSet::new(),
+        ban_score: 0u32,
+    };
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     rt.block_on(async {
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::Headers(vec![hdr])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut requested,
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -385,35 +378,28 @@ fn submitheader_parent_p2p_child_header_getdatas_body() {
     assert!(!hub.is_connected(&b7.block_hash()));
 
     let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-    let mut pending_headers = HashMap::new();
-    let mut pending_blocks = PendingBlocks::new();
-    let mut pending_cmpct = HashMap::new();
-    let mut from_peer = HashMap::new();
-    let mut requested = HashSet::new();
-    let mut wants_headers = false;
-    let mut wtxid = false;
-    let mut send_cmpct = false;
-    let mut cmpct_ver = 2u32;
-    let mut ban = 0u32;
+    let mut follow = PeerFollowState {
+        wants_headers: false,
+        wtxid_relay: false,
+        send_cmpct: false,
+        cmpct_version: 2u32,
+        pending_headers: HashMap::new(),
+        pending_blocks: PendingBlocks::new(),
+        pending_cmpct: HashMap::new(),
+        from_this_peer: HashMap::new(),
+        requested_blocks: HashSet::new(),
+        ban_score: 0u32,
+    };
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     rt.block_on(async {
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::Headers(vec![b7.header])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut requested,
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -718,16 +704,18 @@ fn minchainwork_does_not_getdata_below_floor() {
         }
 
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_peer = HashMap::new();
-        let mut requested = HashSet::new();
-        let mut wants_headers = false;
-        let mut wtxid = false;
-        let mut send_cmpct = false;
-        let mut cmpct_ver = 2u32;
-        let mut ban = 0u32;
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: false,
+            send_cmpct: false,
+            cmpct_version: 2u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
 
         fn drain_getdata(rx: &mut mpsc::UnboundedReceiver<PeerOut>) -> Vec<BlockHash> {
             let mut hashes = Vec::new();
@@ -747,20 +735,11 @@ fn minchainwork_does_not_getdata_below_floor() {
         }
 
         // Core getheaders reply is a batch (not one header per tip).
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::Headers(hdrs[..49].to_vec())),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut requested,
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -779,20 +758,11 @@ fn minchainwork_does_not_getdata_below_floor() {
             "non-noban must not store a low-work headers tree"
         );
 
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::Headers(hdrs.clone())),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut requested,
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -854,33 +824,26 @@ fn minchainwork_one_header_announces_ignore_height_14() {
         }
 
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_peer = HashMap::new();
-        let mut requested = HashSet::new();
-        let mut wants_headers = false;
-        let mut wtxid = false;
-        let mut send_cmpct = false;
-        let mut cmpct_ver = 2u32;
-        let mut ban = 0u32;
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: false,
+            send_cmpct: false,
+            cmpct_version: 2u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
 
         // Official generate announces one header per mined tip.
         for hdr in &hdrs {
-            handle_peer_frame_for_test(
+            handle_peer_frame(
                 frame_for(NetworkMessage::Headers(vec![*hdr])),
                 &hub,
                 &out_tx,
-                &mut wants_headers,
-                &mut wtxid,
-                &mut send_cmpct,
-                &mut cmpct_ver,
-                &mut pending_headers,
-                &mut pending_blocks,
-                &mut pending_cmpct,
-                &mut from_peer,
-                &mut requested,
-                &mut ban,
+                &mut follow,
                 None,
             )
             .await
@@ -889,7 +852,7 @@ fn minchainwork_one_header_announces_ignore_height_14() {
         while out_rx.try_recv().is_ok() {}
         let last = hdrs[13].block_hash();
         assert_eq!(
-            announced_headers_height(&hub, &pending_headers, last),
+            announced_headers_height(&hub, &follow.pending_headers, last),
             14,
             "14 one-header announces must report Core ignore height=14"
         );
@@ -960,41 +923,35 @@ fn blocksonly_tx_and_inv_raise_ban() {
         assert!(reject_unsolicited_tx(&hub, None));
 
         let (out_tx, _out_rx) = mpsc::unbounded_channel();
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_peer = HashMap::new();
-        let mut requested = HashSet::new();
-        let mut wants_headers = false;
-        let mut wtxid = false;
-        let mut send_cmpct = false;
-        let mut cmpct_ver = 2u32;
-        let mut ban = 0u32;
-        handle_peer_frame_for_test(
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: false,
+            send_cmpct: false,
+            cmpct_version: 2u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
+        handle_peer_frame(
             frame_for(NetworkMessage::Tx(dummy_tx)),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut requested,
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
         .unwrap();
         assert!(
-            ban >= BAN_SCORE_THRESHOLD,
-            "blocksonly tx must disconnect, ban={ban}"
+            follow.ban_score >= BAN_SCORE_THRESHOLD,
+            "blocksonly tx must disconnect, ban={}",
+            follow.ban_score
         );
 
-        ban = 0;
-        handle_peer_frame_for_test(
+        follow.ban_score = 0;
+        handle_peer_frame(
             frame_for(NetworkMessage::Inv(vec![Inventory::WTx(
                 bitcoin::Wtxid::from_byte_array([
                     0x34, 0x12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -1003,23 +960,15 @@ fn blocksonly_tx_and_inv_raise_ban() {
             )])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut requested,
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
         .unwrap();
         assert!(
-            ban >= BAN_SCORE_THRESHOLD,
-            "blocksonly wtx inv must disconnect, ban={ban}"
+            follow.ban_score >= BAN_SCORE_THRESHOLD,
+            "blocksonly wtx inv must disconnect, ban={}",
+            follow.ban_score
         );
         let _ = std::fs::remove_dir_all(dir);
     });
@@ -1182,31 +1131,25 @@ fn blocksonly_sendraw_invs_unbroadcast_to_inbound() {
             "block-relay-only must not get tx INV"
         );
 
-        let mut wants_headers = false;
-        let mut wtxid = true;
-        let mut send_cmpct = false;
-        let mut cmpct_ver = 2u32;
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_peer = HashMap::new();
-        let mut ban = 0u32;
-        handle_peer_frame_for_test(
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: true,
+            send_cmpct: false,
+            cmpct_version: 2u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
+        handle_peer_frame(
             frame_for(NetworkMessage::GetData(vec![Inventory::WTx(
                 tx.compute_wtxid(),
             )])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             Some(inbound.as_ref()),
         )
         .await
@@ -1719,31 +1662,25 @@ fn mocktime_jump_does_not_inv_or_serve_new_sendraw() {
             "new sendraw must not INV inbound after mocktime jump"
         );
 
-        let mut wants_headers = false;
-        let mut wtxid = true;
-        let mut send_cmpct = false;
-        let mut cmpct_ver = 2u32;
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_peer = HashMap::new();
-        let mut ban = 0u32;
-        handle_peer_frame_for_test(
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: true,
+            send_cmpct: false,
+            cmpct_version: 2u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
+        handle_peer_frame(
             frame_for(NetworkMessage::GetData(vec![Inventory::WTx(
                 fresh.compute_wtxid(),
             )])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             Some(inbound.as_ref()),
         )
         .await
@@ -1840,36 +1777,30 @@ fn blocksonly_relay_perm_tx_invs_other_inbound() {
         let (inv_tx, mut inv_rx) = mpsc::unbounded_channel();
         first.attach_out(out_tx.clone());
         second.attach_out(inv_tx);
-        let mut wants_headers = false;
-        let mut wtxid = true;
-        let mut send_cmpct = false;
-        let mut cmpct_ver = 2u32;
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_first = HashMap::new();
-        let mut ban = 0u32;
-        handle_peer_frame_for_test(
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: true,
+            send_cmpct: false,
+            cmpct_version: 2u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
+        handle_peer_frame(
             frame_for(NetworkMessage::Tx(tx.clone())),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_first,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             Some(first.as_ref()),
         )
         .await
         .unwrap();
-        assert_eq!(ban, 0, "whitelist relay must not disconnect");
+        assert_eq!(follow.ban_score, 0, "whitelist relay must not disconnect");
         assert!(hub.mempool().unwrap().is_unbroadcast(&tx.compute_txid()));
-        assert!(from_first.contains_key(&tx.compute_txid()));
+        assert!(follow.from_this_peer.contains_key(&tx.compute_txid()));
         match inv_rx
             .try_recv()
             .expect("second inbound must get wtx INV from flush_tx_invs")
@@ -2030,16 +1961,18 @@ fn compact_child_of_invalid_disconnects_cached_same_stays() {
         hub.note_invalid_block(failed);
 
         let (out_tx, _out_rx) = mpsc::unbounded_channel();
-        let mut wants_headers = false;
-        let mut wtxid = false;
-        let mut send_cmpct = false;
-        let mut cmpct_ver = 2u32;
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_peer = HashMap::new();
-        let mut requested = HashSet::new();
-        let mut ban = 0u32;
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: false,
+            send_cmpct: false,
+            cmpct_version: 2u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
 
         let gen = hub
             .query
@@ -2050,56 +1983,41 @@ fn compact_child_of_invalid_disconnects_cached_same_stays() {
         cached.header.prev_blockhash = tip;
         // Same-hash cached invalid: header hash is the failed one.
         hub.note_invalid_block(cached.header.block_hash());
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::CmpctBlock(CmpctBlock {
                 compact_block: cached,
             })),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut requested,
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
         .unwrap();
-        assert_eq!(ban, 0, "cached invalid compact must stay connected");
+        assert_eq!(
+            follow.ban_score, 0,
+            "cached invalid compact must stay connected"
+        );
 
         let mut child = HeaderAndShortIds::from_block(&gen, 2, 2, &[0]).unwrap();
         child.header.prev_blockhash = failed;
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::CmpctBlock(CmpctBlock {
                 compact_block: child,
             })),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut requested,
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
         .unwrap();
         assert!(
-            ban >= BAN_SCORE_THRESHOLD,
+            follow.ban_score >= BAN_SCORE_THRESHOLD,
             "child of cached-invalid parent must disconnect"
         );
 
-        ban = 0;
+        follow.ban_score = 0;
         let bad_idx = HeaderAndShortIds {
             header: gen.header,
             nonce: 0,
@@ -2109,28 +2027,19 @@ fn compact_child_of_invalid_disconnects_cached_same_stays() {
                 tx: gen.txdata[0].clone(),
             }],
         };
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::CmpctBlock(CmpctBlock {
                 compact_block: bad_idx,
             })),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut requested,
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
         .unwrap();
         assert!(
-            ban >= BAN_SCORE_THRESHOLD,
+            follow.ban_score >= BAN_SCORE_THRESHOLD,
             "out-of-range prefilled index must disconnect"
         );
 
@@ -2165,15 +2074,18 @@ fn handle_peer_frame_control_and_inv_paths() {
         let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("handle-frame");
         hub.ensure_genesis().unwrap();
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        let mut wants_headers = false;
-        let mut wtxid = false;
-        let mut send_cmpct = false;
-        let mut cmpct_ver = 2u32;
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_peer = HashMap::new();
-        let mut ban = 0u32;
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: false,
+            send_cmpct: false,
+            cmpct_version: 2u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
 
         // SendHeaders / SendCmpct / WtxidRelay / Pong / GetAddr / Ping
         // (MemPool disconnects — covered by bloom_disabled_messages_request_disconnect.)
@@ -2189,29 +2101,14 @@ fn handle_peer_frame_control_and_inv_paths() {
             NetworkMessage::GetAddr,
             NetworkMessage::Ping(42),
         ] {
-            handle_peer_frame_for_test(
-                frame_for(msg),
-                &hub,
-                &out_tx,
-                &mut wants_headers,
-                &mut wtxid,
-                &mut send_cmpct,
-                &mut cmpct_ver,
-                &mut pending_headers,
-                &mut pending_blocks,
-                &mut pending_cmpct,
-                &mut from_peer,
-                &mut HashSet::new(),
-                &mut ban,
-                None,
-            )
-            .await
-            .unwrap();
+            handle_peer_frame(frame_for(msg), &hub, &out_tx, &mut follow, None)
+                .await
+                .unwrap();
         }
-        assert!(wants_headers);
-        assert!(wtxid);
-        assert!(send_cmpct);
-        assert_eq!(cmpct_ver, 2);
+        assert!(follow.wants_headers);
+        assert!(follow.wtxid_relay);
+        assert!(follow.send_cmpct);
+        assert_eq!(follow.cmpct_version, 2);
 
         // Drain outbound: Pong(42) + empty Addr at least.
         let mut saw_pong = false;
@@ -2238,20 +2135,11 @@ fn handle_peer_frame_control_and_inv_paths() {
             vec![hub.tip_hash().unwrap()],
             BlockHash::from_byte_array([0u8; 32]),
         );
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::GetHeaders(gh)),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -2261,20 +2149,11 @@ fn handle_peer_frame_control_and_inv_paths() {
 
         // Inv for unknown block → GetHeaders (never getdata without a header).
         let want_h = BlockHash::from_byte_array([0xee; 32]);
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::Inv(vec![Inventory::WitnessBlock(want_h)])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -2306,43 +2185,25 @@ fn handle_peer_frame_control_and_inv_paths() {
             bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 1,
         };
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::Headers(vec![child])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
         .unwrap();
-        assert!(pending_headers.contains_key(&child.block_hash()));
+        assert!(follow.pending_headers.contains_key(&child.block_hash()));
         let _ = out_rx.try_recv(); // GetData
 
         // GetData for known tip block (cache miss → reconstruct).
         let tip = hub.tip_hash().unwrap();
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::GetData(vec![Inventory::WitnessBlock(tip)])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -2350,20 +2211,11 @@ fn handle_peer_frame_control_and_inv_paths() {
         assert_eq!(served_block(out_rx.try_recv().unwrap()).block_hash(), tip);
 
         // CompactBlock getdata for tip.
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::GetData(vec![Inventory::CompactBlock(tip)])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -2375,7 +2227,7 @@ fn handle_peer_frame_control_and_inv_paths() {
 
         // GetBlockTxn with bad index → ban score.
         use bitcoin::bip152::BlockTransactionsRequest;
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::GetBlockTxn(GetBlockTxn {
                 txs_request: BlockTransactionsRequest {
                     block_hash: tip,
@@ -2384,25 +2236,16 @@ fn handle_peer_frame_control_and_inv_paths() {
             })),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
         .unwrap();
-        assert!(ban >= BAN_SCORE_THRESHOLD);
+        assert!(follow.ban_score >= BAN_SCORE_THRESHOLD);
 
         // GetBlockTxn good index 0 (coinbase).
-        ban = 0;
-        handle_peer_frame_for_test(
+        follow.ban_score = 0;
+        handle_peer_frame(
             frame_for(NetworkMessage::GetBlockTxn(GetBlockTxn {
                 txs_request: BlockTransactionsRequest {
                     block_hash: tip,
@@ -2411,16 +2254,7 @@ fn handle_peer_frame_control_and_inv_paths() {
             })),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -2433,7 +2267,7 @@ fn handle_peer_frame_control_and_inv_paths() {
         // Deeper than 10: full block, not blocktxn (`p2p_compactblocks` :635).
         hub.generate_to_script(12, ScriptBuf::from_bytes(vec![0x51]), vec![])
             .unwrap();
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::GetBlockTxn(GetBlockTxn {
                 txs_request: BlockTransactionsRequest {
                     block_hash: tip,
@@ -2442,16 +2276,7 @@ fn handle_peer_frame_control_and_inv_paths() {
             })),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -2465,7 +2290,7 @@ fn handle_peer_frame_control_and_inv_paths() {
         );
 
         // Unsolicited BlockTxn → mild ban.
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::BlockTxn(BlockTxn {
                 transactions: BlockTransactions {
                     block_hash: BlockHash::from_byte_array([0xdd; 32]),
@@ -2474,21 +2299,12 @@ fn handle_peer_frame_control_and_inv_paths() {
             })),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
         .unwrap();
-        assert!(ban >= 5);
+        assert!(follow.ban_score >= 5);
 
         // CmpctBlock without mempool → full getdata fallback.
         let gen_block = hub
@@ -2497,22 +2313,13 @@ fn handle_peer_frame_control_and_inv_paths() {
             .unwrap()
             .unwrap();
         let hsi = HeaderAndShortIds::from_block(&gen_block, 9, 2, &[]).unwrap();
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::CmpctBlock(CmpctBlock {
                 compact_block: hsi,
             })),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -2522,69 +2329,42 @@ fn handle_peer_frame_control_and_inv_paths() {
         let _ = out_rx.try_recv();
 
         // Unknown command (including the retired rbtpkg name) is a no-op.
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::Unknown {
                 command: bitcoin::p2p::message::CommandString::try_from("rbtpkg").unwrap(),
                 payload: vec![1, 2, 3],
             }),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
         .unwrap();
 
         // SendCmpct with unsupported version is ignored.
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::SendCmpct(SendCmpct {
                 send_compact: false,
                 version: 99,
             })),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
         .unwrap();
-        assert!(send_cmpct); // still true from earlier v2
-        assert_eq!(cmpct_ver, 2);
+        assert!(follow.send_cmpct); // still true from earlier v2
+        assert_eq!(follow.cmpct_version, 2);
 
         // Inventory::Block (non-witness) for unknown → GetHeaders.
         let want2 = BlockHash::from_byte_array([0xcc; 32]);
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::Inv(vec![Inventory::Block(want2)])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -2595,20 +2375,11 @@ fn handle_peer_frame_control_and_inv_paths() {
         }
 
         // Inv for known tip → no GetData.
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::Inv(vec![Inventory::WitnessBlock(tip)])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -2616,20 +2387,11 @@ fn handle_peer_frame_control_and_inv_paths() {
         assert!(out_rx.try_recv().is_err());
 
         // GetData Inventory::Block for tip (non-witness arm).
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::GetData(vec![Inventory::Block(tip)])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -2642,20 +2404,11 @@ fn handle_peer_frame_control_and_inv_paths() {
             .reconstruct_block_by_hash(&tip.to_byte_array())
             .unwrap()
             .unwrap();
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::Block(gen_block2)),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -2681,43 +2434,25 @@ fn handle_peer_frame_control_and_inv_paths() {
                 script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
             }],
         };
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::Tx(dummy_tx)),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
         .unwrap();
 
         // Catch-all unknown command.
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::Unknown {
                 command: bitcoin::p2p::message::CommandString::try_from("zzzzzz").unwrap(),
                 payload: vec![],
             }),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -2779,31 +2514,25 @@ fn sendaddrv2_after_verack_disconnects() {
         };
         let sess = peers.register(addr, addr, &ver, true, crate::peers::PeerConnType::Inbound);
         let (out_tx, _out_rx) = mpsc::unbounded_channel();
-        let mut wants_headers = false;
-        let mut wtxid = false;
-        let mut send_cmpct = false;
-        let mut cmpct_ver = 0u32;
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_peer = HashMap::new();
-        let mut ban = 0u32;
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: false,
+            send_cmpct: false,
+            cmpct_version: 0u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
 
         rbitcoin_log::capture_logs(true);
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::SendAddrV2),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             Some(sess.as_ref()),
         )
         .await
@@ -2811,7 +2540,7 @@ fn sendaddrv2_after_verack_disconnects() {
         let logs = rbitcoin_log::take_logs();
         rbitcoin_log::capture_logs(false);
         assert!(
-            ban >= BAN_SCORE_THRESHOLD,
+            follow.ban_score >= BAN_SCORE_THRESHOLD,
             "post-verack sendaddrv2 must disconnect"
         );
         assert!(
@@ -2829,22 +2558,13 @@ fn sendaddrv2_after_verack_disconnects() {
                 port: 8333 + i,
             });
         }
-        ban = 0;
+        follow.ban_score = 0;
         rbitcoin_log::capture_logs(true);
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::AddrV2(addrs)),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             Some(sess.as_ref()),
         )
         .await
@@ -2852,7 +2572,7 @@ fn sendaddrv2_after_verack_disconnects() {
         let logs = rbitcoin_log::take_logs();
         rbitcoin_log::capture_logs(false);
         assert!(
-            ban >= BAN_SCORE_THRESHOLD,
+            follow.ban_score >= BAN_SCORE_THRESHOLD,
             "oversized addrv2 must disconnect"
         );
         assert!(
@@ -2903,34 +2623,28 @@ fn handle_peer_frame_mempool_tx_and_inv_paths() {
         assert!(hub.attach_mempool(mp).is_ok());
 
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        let mut wants_headers = false;
-        let mut wtxid = false;
-        let mut send_cmpct = false;
-        let mut cmpct_ver = 2u32;
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_peer = HashMap::new();
-        let mut ban = 0u32;
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: false,
+            send_cmpct: false,
+            cmpct_version: 2u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
 
         let unknown_txid = bitcoin::Txid::from_byte_array([0x42; 32]);
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::Inv(vec![
                 Inventory::WitnessTransaction(unknown_txid),
                 Inventory::WTx(bitcoin::Wtxid::from_byte_array([0x43; 32])),
             ])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -2943,23 +2657,14 @@ fn handle_peer_frame_mempool_tx_and_inv_paths() {
         }
 
         // GetData for missing tx → notfound (Core ProcessGetData).
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::GetData(vec![
                 Inventory::WitnessTransaction(unknown_txid),
                 Inventory::WTx(bitcoin::Wtxid::from_byte_array([0x43; 32])),
             ])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -2991,26 +2696,17 @@ fn handle_peer_frame_mempool_tx_and_inv_paths() {
             }],
         };
         let junk_txid = junk.compute_txid();
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::Tx(junk)),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
         .unwrap();
         // Origin map is filled before accept result.
-        assert!(from_peer.contains_key(&junk_txid));
+        assert!(follow.from_this_peer.contains_key(&junk_txid));
 
         // Retired rbtpkg name with mempool + relay: still unknown, no admit
         // even when the payload is the old len-prefixed encoding.
@@ -3036,28 +2732,19 @@ fn handle_peer_frame_mempool_tx_and_inv_paths() {
         let mut payload = Vec::with_capacity(4 + raw.len());
         payload.extend_from_slice(&(raw.len() as u32).to_le_bytes());
         payload.extend_from_slice(&raw);
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::Unknown {
                 command: bitcoin::p2p::message::CommandString::try_from("rbtpkg").unwrap(),
                 payload,
             }),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
         .unwrap();
-        assert!(!from_peer.contains_key(&pkg_txid));
+        assert!(!follow.from_this_peer.contains_key(&pkg_txid));
         assert_eq!(hub.mempool().unwrap().live_count(), 0);
 
         let _ = std::fs::remove_dir_all(dir);
@@ -3136,30 +2823,24 @@ fn parked_orphan_tx_is_not_logged_as_reject() {
             }],
         };
         let (out_tx, _out_rx) = mpsc::unbounded_channel();
-        let mut wants_headers = false;
-        let mut wtxid = false;
-        let mut send_cmpct = false;
-        let mut cmpct_ver = 2u32;
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_peer = HashMap::new();
-        let mut ban = 0u32;
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: false,
+            send_cmpct: false,
+            cmpct_version: 2u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
         rbitcoin_log::capture_logs(true);
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::Tx(orphan.clone())),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -3237,29 +2918,23 @@ fn inv_of_parked_orphan_does_not_getdata() {
         let txid = orphan.compute_txid();
         let wtxid = orphan.compute_wtxid();
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        let mut wants_headers = false;
-        let mut wtxid_relay = true;
-        let mut send_cmpct = false;
-        let mut cmpct_ver = 2u32;
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_peer = HashMap::new();
-        let mut ban = 0u32;
-        handle_peer_frame_for_test(
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: true,
+            send_cmpct: false,
+            cmpct_version: 2u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
+        handle_peer_frame(
             frame_for(NetworkMessage::Tx(orphan)),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid_relay,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -3267,23 +2942,14 @@ fn inv_of_parked_orphan_does_not_getdata() {
         assert_eq!(hub.mempool().unwrap().orphan_count(), 1);
         while out_rx.try_recv().is_ok() {}
 
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::Inv(vec![
                 Inventory::WitnessTransaction(txid),
                 Inventory::WTx(wtxid),
             ])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid_relay,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -3350,29 +3016,23 @@ fn parked_orphan_getdatas_missing_parent() {
             }],
         };
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        let mut wants_headers = false;
-        let mut wtxid_relay = false;
-        let mut send_cmpct = false;
-        let mut cmpct_ver = 2u32;
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_peer = HashMap::new();
-        let mut ban = 0u32;
-        handle_peer_frame_for_test(
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: false,
+            send_cmpct: false,
+            cmpct_version: 2u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
+        handle_peer_frame(
             frame_for(NetworkMessage::Tx(orphan)),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid_relay,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -3452,29 +3112,23 @@ fn parked_orphan_on_tokio_worker_getdatas_parent() {
         let join = tokio::spawn(async move {
             let name = std::thread::current().name().unwrap_or("").to_string();
             let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-            let mut wants_headers = false;
-            let mut wtxid_relay = false;
-            let mut send_cmpct = false;
-            let mut cmpct_ver = 2u32;
-            let mut pending_headers = HashMap::new();
-            let mut pending_blocks = PendingBlocks::new();
-            let mut pending_cmpct = HashMap::new();
-            let mut from_peer = HashMap::new();
-            let mut ban = 0u32;
-            handle_peer_frame_for_test(
+            let mut follow = PeerFollowState {
+                wants_headers: false,
+                wtxid_relay: false,
+                send_cmpct: false,
+                cmpct_version: 2u32,
+                pending_headers: HashMap::new(),
+                pending_blocks: PendingBlocks::new(),
+                pending_cmpct: HashMap::new(),
+                from_this_peer: HashMap::new(),
+                requested_blocks: HashSet::new(),
+                ban_score: 0u32,
+            };
+            handle_peer_frame(
                 frame_for(NetworkMessage::Tx(orphan)),
                 &hub,
                 &out_tx,
-                &mut wants_headers,
-                &mut wtxid_relay,
-                &mut send_cmpct,
-                &mut cmpct_ver,
-                &mut pending_headers,
-                &mut pending_blocks,
-                &mut pending_cmpct,
-                &mut from_peer,
-                &mut HashSet::new(),
-                &mut ban,
+                &mut follow,
                 None,
             )
             .await
@@ -3606,32 +3260,26 @@ fn getdata_tx_notfound_unless_announced_or_reorg() {
         let sess = peers.register(addr, addr, &ver, true, crate::peers::PeerConnType::Inbound);
 
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        let mut wants_headers = false;
-        let mut wtxid = true;
-        let mut send_cmpct = false;
-        let mut cmpct_ver = 2u32;
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_peer = HashMap::new();
-        let mut ban = 0u32;
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: true,
+            send_cmpct: false,
+            cmpct_version: 2u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
 
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::GetData(vec![Inventory::WTx(
                 recent.compute_wtxid(),
             )])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             Some(sess.as_ref()),
         )
         .await
@@ -3644,22 +3292,13 @@ fn getdata_tx_notfound_unless_announced_or_reorg() {
         }
 
         sess.note_announced_wtx(recent.compute_wtxid());
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::GetData(vec![Inventory::WTx(
                 recent.compute_wtxid(),
             )])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             Some(sess.as_ref()),
         )
         .await
@@ -3669,22 +3308,13 @@ fn getdata_tx_notfound_unless_announced_or_reorg() {
             other => panic!("announced recent must serve tx, got {other:?}"),
         }
 
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::GetData(vec![Inventory::WTx(
                 disconnected.compute_wtxid(),
             )])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             Some(sess.as_ref()),
         )
         .await
@@ -3724,22 +3354,13 @@ fn getdata_tx_notfound_unless_announced_or_reorg() {
             .unwrap()
             .accept_tx(&later)
             .expect("accept later");
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::GetData(vec![Inventory::WTx(
                 later.compute_wtxid(),
             )])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             Some(sess.as_ref()),
         )
         .await
@@ -3787,57 +3408,42 @@ fn invalid_getdata_type0_still_serves_tip_block() {
         let tip = hub.tip_hash().expect("tip");
 
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        let mut wants_headers = false;
-        let mut wtxid = true;
-        let mut send_cmpct = false;
-        let mut cmpct_ver = 0u32;
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_peer = HashMap::new();
-        let mut ban = 0u32;
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: true,
+            send_cmpct: false,
+            cmpct_version: 0u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
 
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::GetData(vec![Inventory::Unknown {
                 inv_type: 0,
                 hash: [0u8; 32],
             }])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
         .unwrap();
-        assert_eq!(ban, 0, "type-0 getdata must not disconnect");
+        assert_eq!(follow.ban_score, 0, "type-0 getdata must not disconnect");
         assert!(
             out_rx.try_recv().is_err(),
             "type-0 getdata must not emit a reply"
         );
 
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::GetData(vec![Inventory::Block(tip)])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -4320,31 +3926,24 @@ fn inv_of_already_asked_block_does_not_getdata() {
         hub.ensure_genesis().unwrap();
 
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_peer = HashMap::new();
-        let mut requested = HashSet::new();
-        let mut wants_headers = false;
-        let mut wtxid = false;
-        let mut send_cmpct = false;
-        let mut cmpct_ver = 2u32;
-        let mut ban = 0u32;
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: false,
+            send_cmpct: false,
+            cmpct_version: 2u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
 
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::Headers(vec![hdr])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut requested,
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -4355,22 +3954,12 @@ fn inv_of_already_asked_block_does_not_getdata() {
 
         // Second peer: empty local requested set, same hub (asked_blocks).
         let (out_tx2, mut out_rx2) = mpsc::unbounded_channel();
-        let mut pending_headers2 = HashMap::new();
-        let mut requested2 = HashSet::new();
-        handle_peer_frame_for_test(
+        let mut follow2 = PeerFollowState::new();
+        handle_peer_frame(
             frame_for(NetworkMessage::Inv(vec![Inventory::WitnessBlock(hash)])),
             &hub,
             &out_tx2,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers2,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut requested2,
-            &mut ban,
+            &mut follow2,
             None,
         )
         .await
@@ -4409,15 +3998,18 @@ fn bloom_disabled_messages_request_disconnect() {
     let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("bloom-off");
     hub.ensure_genesis().unwrap();
     let (out_tx, _out_rx) = mpsc::unbounded_channel();
-    let mut pending_headers = HashMap::new();
-    let mut pending_blocks = PendingBlocks::new();
-    let mut pending_cmpct = HashMap::new();
-    let mut from_peer = HashMap::new();
-    let mut requested = HashSet::new();
-    let mut wants_headers = false;
-    let mut wtxid = false;
-    let mut send_cmpct = false;
-    let mut cmpct_ver = 2u32;
+    let mut follow = PeerFollowState {
+        wants_headers: false,
+        wtxid_relay: false,
+        send_cmpct: false,
+        cmpct_version: 2u32,
+        pending_headers: HashMap::new(),
+        pending_blocks: PendingBlocks::new(),
+        pending_cmpct: HashMap::new(),
+        from_this_peer: HashMap::new(),
+        requested_blocks: HashSet::new(),
+        ban_score: 0,
+    };
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -4434,30 +4026,16 @@ fn bloom_disabled_messages_request_disconnect() {
         }),
     ];
     for msg in msgs {
-        let mut ban = 0u32;
+        follow.ban_score = 0;
         rt.block_on(async {
-            handle_peer_frame_for_test(
-                frame_for(msg),
-                &hub,
-                &out_tx,
-                &mut wants_headers,
-                &mut wtxid,
-                &mut send_cmpct,
-                &mut cmpct_ver,
-                &mut pending_headers,
-                &mut pending_blocks,
-                &mut pending_cmpct,
-                &mut from_peer,
-                &mut requested,
-                &mut ban,
-                None,
-            )
-            .await
-            .unwrap();
+            handle_peer_frame(frame_for(msg), &hub, &out_tx, &mut follow, None)
+                .await
+                .unwrap();
         });
         assert!(
-            ban >= BAN_SCORE_THRESHOLD,
-            "bloom-off message must punish-disconnect (ban={ban})"
+            follow.ban_score >= BAN_SCORE_THRESHOLD,
+            "bloom-off message must punish-disconnect (ban={})",
+            follow.ban_score
         );
     }
     let _ = std::fs::remove_dir_all(dir);
@@ -4486,15 +4064,18 @@ fn oversize_locator_request_disconnect() {
     let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("locator-oversize");
     hub.ensure_genesis().unwrap();
     let (out_tx, _out_rx) = mpsc::unbounded_channel();
-    let mut pending_headers = HashMap::new();
-    let mut pending_blocks = PendingBlocks::new();
-    let mut pending_cmpct = HashMap::new();
-    let mut from_peer = HashMap::new();
-    let mut requested = HashSet::new();
-    let mut wants_headers = false;
-    let mut wtxid = false;
-    let mut send_cmpct = false;
-    let mut cmpct_ver = 2u32;
+    let mut follow = PeerFollowState {
+        wants_headers: false,
+        wtxid_relay: false,
+        send_cmpct: false,
+        cmpct_version: 2u32,
+        pending_headers: HashMap::new(),
+        pending_blocks: PendingBlocks::new(),
+        pending_cmpct: HashMap::new(),
+        from_this_peer: HashMap::new(),
+        requested_blocks: HashSet::new(),
+        ban_score: 0,
+    };
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -4511,58 +4092,35 @@ fn oversize_locator_request_disconnect() {
         NetworkMessage::GetHeaders(GetHeadersMessage::new(oversize.clone(), stop)),
         NetworkMessage::GetBlocks(GetBlocksMessage::new(oversize.clone(), stop)),
     ] {
-        let mut ban = 0u32;
+        follow.ban_score = 0;
         rt.block_on(async {
-            handle_peer_frame_for_test(
-                frame_for(msg),
-                &hub,
-                &out_tx,
-                &mut wants_headers,
-                &mut wtxid,
-                &mut send_cmpct,
-                &mut cmpct_ver,
-                &mut pending_headers,
-                &mut pending_blocks,
-                &mut pending_cmpct,
-                &mut from_peer,
-                &mut requested,
-                &mut ban,
-                None,
-            )
-            .await
-            .unwrap();
+            handle_peer_frame(frame_for(msg), &hub, &out_tx, &mut follow, None)
+                .await
+                .unwrap();
         });
         assert!(
-            ban >= BAN_SCORE_THRESHOLD,
-            "oversize locator must punish-disconnect (ban={ban})"
+            follow.ban_score >= BAN_SCORE_THRESHOLD,
+            "oversize locator must punish-disconnect (ban={})",
+            follow.ban_score
         );
     }
 
     // Exactly MAX_LOCATOR_SZ stays connected (ban untouched).
-    let mut ban = 0u32;
+    follow.ban_score = 0;
     rt.block_on(async {
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::GetHeaders(GetHeadersMessage::new(
                 within, stop,
             ))),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut requested,
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
         .unwrap();
     });
-    assert_eq!(ban, 0, "max-sized locator must not disconnect");
+    assert_eq!(follow.ban_score, 0, "max-sized locator must not disconnect");
 
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -4722,31 +4280,25 @@ fn redundant_verack_is_ignored_and_logged() {
         let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("redundant-verack");
         hub.ensure_genesis().unwrap();
         let (out_tx, _out_rx) = mpsc::unbounded_channel();
-        let mut wants_headers = false;
-        let mut wtxid = false;
-        let mut send_cmpct = false;
-        let mut cmpct_ver = 0u32;
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_peer = HashMap::new();
-        let mut ban = 0u32;
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: false,
+            send_cmpct: false,
+            cmpct_version: 0u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
 
         rbitcoin_log::capture_logs(true);
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::Verack),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -4759,7 +4311,7 @@ fn redundant_verack_is_ignored_and_logged() {
                 .any(|(_, m)| m.contains("ignoring redundant verack message")),
             "expected Core redundant-verack needle, got {logs:?}"
         );
-        assert_eq!(ban, 0, "redundant verack must not disconnect");
+        assert_eq!(follow.ban_score, 0, "redundant verack must not disconnect");
 
         let _ = std::fs::remove_dir_all(dir);
     });
@@ -4870,15 +4422,18 @@ fn addrfetch_multi_addr_disconnects() {
         crate::peers::PeerConnType::AddrFetch,
     );
     let (out_tx, _out_rx) = mpsc::unbounded_channel();
-    let mut wants_headers = false;
-    let mut wtxid = false;
-    let mut send_cmpct = false;
-    let mut cmpct_ver = 0u32;
-    let mut pending_headers = HashMap::new();
-    let mut pending_blocks = PendingBlocks::new();
-    let mut pending_cmpct = HashMap::new();
-    let mut from_peer = HashMap::new();
-    let mut ban = 0u32;
+    let mut follow = PeerFollowState {
+        wants_headers: false,
+        wtxid_relay: false,
+        send_cmpct: false,
+        cmpct_version: 0u32,
+        pending_headers: HashMap::new(),
+        pending_blocks: PendingBlocks::new(),
+        pending_cmpct: HashMap::new(),
+        from_this_peer: HashMap::new(),
+        requested_blocks: HashSet::new(),
+        ban_score: 0u32,
+    };
     let one = Address::new(
         &SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 0, 8)), 18444),
         ServiceFlags::NETWORK,
@@ -4888,20 +4443,11 @@ fn addrfetch_multi_addr_disconnects() {
         .build()
         .unwrap();
     rt.block_on(async {
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::Addr(vec![(1u32, one.clone())])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             Some(sess.as_ref()),
         )
         .await
@@ -4910,25 +4456,16 @@ fn addrfetch_multi_addr_disconnects() {
             !sess.stop.load(Ordering::SeqCst),
             "single addr must not disconnect"
         );
-        assert_eq!(ban, 0);
+        assert_eq!(follow.ban_score, 0);
 
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::Addr(vec![
                 (1u32, one.clone()),
                 (1u32, one.clone()),
             ])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban,
+            &mut follow,
             Some(sess.as_ref()),
         )
         .await
@@ -4945,27 +4482,18 @@ fn addrfetch_multi_addr_disconnects() {
             false,
             crate::peers::PeerConnType::AddrFetch,
         );
-        let mut ban2 = 0u32;
+        let mut follow2 = PeerFollowState::new();
         let v2 = AddrV2Message {
             time: 1,
             services: ServiceFlags::NETWORK,
             addr: AddrV2::Ipv4(Ipv4Addr::new(192, 0, 0, 8)),
             port: 18444,
         };
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::AddrV2(vec![v2.clone(), v2])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut HashSet::new(),
-            &mut ban2,
+            &mut follow2,
             Some(sess2.as_ref()),
         )
         .await
@@ -5237,35 +4765,28 @@ fn connecting_ancient_weaker_headers_request_disconnect() {
             crate::peers::PeerConnType::OutboundFullRelay,
         );
         let (out_tx, _out_rx) = mpsc::unbounded_channel();
-        let mut wants_headers = false;
-        let mut wtxid = false;
-        let mut send_cmpct = false;
-        let mut cmpct_ver = 2u32;
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_peer = HashMap::new();
-        let mut requested = HashSet::new();
-        let mut ban = 0u32;
-        handle_peer_frame_for_test(
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: false,
+            send_cmpct: false,
+            cmpct_version: 2u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
+        handle_peer_frame(
             frame_for(NetworkMessage::Headers(vec![side])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut requested,
-            &mut ban,
+            &mut follow,
             Some(sess.as_ref()),
         )
         .await
         .unwrap();
-        assert_eq!(ban, 0, "ancient fork must not ban-score");
+        assert_eq!(follow.ban_score, 0, "ancient fork must not ban-score");
         assert!(
             sess.stop.load(Ordering::SeqCst),
             "hopeless ancient advertised tip must disconnect"
@@ -5279,22 +4800,12 @@ fn connecting_ancient_weaker_headers_request_disconnect() {
             crate::peers::PeerConnType::OutboundFullRelay,
         );
         peers.set_noban(true);
-        let mut ban = 0u32;
-        let mut pending_headers = HashMap::new();
-        handle_peer_frame_for_test(
+        follow.ban_score = 0;
+        handle_peer_frame(
             frame_for(NetworkMessage::Headers(vec![side])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut requested,
-            &mut ban,
+            &mut follow,
             Some(sess_keep.as_ref()),
         )
         .await
@@ -5359,31 +4870,24 @@ fn getdata_skips_reconstruct_when_serve_inflight_at_cap() {
             crate::peers::PeerConnType::OutboundFullRelay,
         );
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        let mut wants_headers = false;
-        let mut wtxid = false;
-        let mut send_cmpct = false;
-        let mut cmpct_ver = 2u32;
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_peer = HashMap::new();
-        let mut requested = HashSet::new();
-        let mut ban = 0u32;
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: false,
+            send_cmpct: false,
+            cmpct_version: 2u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
         let inv: Vec<Inventory> = hashes.iter().map(|h| Inventory::WitnessBlock(*h)).collect();
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::GetData(inv)),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut requested,
-            &mut ban,
+            &mut follow,
             Some(sess.as_ref()),
         )
         .await
@@ -5461,31 +4965,24 @@ fn catchup_headers_getdata_stays_in_serve_window() {
         let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("catchup-gd-dst");
         hub.ensure_genesis().unwrap();
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_peer = HashMap::new();
-        let mut requested = HashSet::new();
-        let mut wants_headers = false;
-        let mut wtxid = false;
-        let mut send_cmpct = false;
-        let mut cmpct_ver = 2u32;
-        let mut ban = 0u32;
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: false,
+            send_cmpct: false,
+            cmpct_version: 2u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
 
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::Headers(headers.clone())),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut requested,
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -5497,7 +4994,7 @@ fn catchup_headers_getdata_stays_in_serve_window() {
             "catch-up getdata must match serve window, got {}",
             first.len()
         );
-        assert_eq!(requested.len(), MAX_SERVE_BLOCKS);
+        assert_eq!(follow.requested_blocks.len(), MAX_SERVE_BLOCKS);
 
         for h in &first {
             let block = src
@@ -5505,20 +5002,11 @@ fn catchup_headers_getdata_stays_in_serve_window() {
                 .reconstruct_archived_block(&h.to_byte_array())
                 .unwrap()
                 .expect("src body");
-            handle_peer_frame_for_test(
+            handle_peer_frame(
                 frame_for(NetworkMessage::Block(block)),
                 &hub,
                 &out_tx,
-                &mut wants_headers,
-                &mut wtxid,
-                &mut send_cmpct,
-                &mut cmpct_ver,
-                &mut pending_headers,
-                &mut pending_blocks,
-                &mut pending_cmpct,
-                &mut from_peer,
-                &mut requested,
-                &mut ban,
+                &mut follow,
                 None,
             )
             .await
@@ -5581,57 +5069,43 @@ fn catchup_child_before_parent_still_connects() {
         let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("catchup-ooo-dst");
         hub.ensure_genesis().unwrap();
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_peer = HashMap::new();
-        let mut requested = HashSet::new();
-        let mut wants_headers = false;
-        let mut wtxid = false;
-        let mut send_cmpct = false;
-        let mut cmpct_ver = 2u32;
-        let mut ban = 0u32;
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: false,
+            send_cmpct: false,
+            cmpct_version: 2u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
 
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::Headers(headers.clone())),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut requested,
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
         .unwrap();
         while out_rx.try_recv().is_ok() {}
-        assert!(requested.contains(&parent) && requested.contains(&child));
+        assert!(
+            follow.requested_blocks.contains(&parent) && follow.requested_blocks.contains(&child)
+        );
 
         let child_block = src
             .query
             .reconstruct_archived_block(&child.to_byte_array())
             .unwrap()
             .expect("child body");
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::Block(child_block)),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut requested,
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -5643,20 +5117,11 @@ fn catchup_child_before_parent_still_connects() {
             .reconstruct_archived_block(&parent.to_byte_array())
             .unwrap()
             .expect("parent body");
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::Block(parent_block)),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut requested,
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -5730,38 +5195,31 @@ fn catchup_compact_getdata_clears_requested_for_next_window() {
         mp.set_relay_enabled(true);
         assert!(hub.attach_mempool(mp).is_ok());
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_peer = HashMap::new();
-        let mut requested = HashSet::new();
-        let mut wants_headers = false;
-        let mut wtxid = false;
-        let mut send_cmpct = true;
-        let mut cmpct_ver = 2u32;
-        let mut ban = 0u32;
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: false,
+            send_cmpct: true,
+            cmpct_version: 2u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
 
-        handle_peer_frame_for_test(
+        handle_peer_frame(
             frame_for(NetworkMessage::Headers(headers.clone())),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut requested,
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
         .unwrap();
         let first = getdata_hashes(&mut out_rx);
         assert_eq!(first.len(), MAX_SERVE_BLOCKS);
-        assert_eq!(requested.len(), MAX_SERVE_BLOCKS);
+        assert_eq!(follow.requested_blocks.len(), MAX_SERVE_BLOCKS);
 
         for h in &first {
             let block = src
@@ -5770,31 +5228,22 @@ fn catchup_compact_getdata_clears_requested_for_next_window() {
                 .unwrap()
                 .expect("src body");
             let hsi = HeaderAndShortIds::from_block(&block, 1, 2, &[0]).unwrap();
-            handle_peer_frame_for_test(
+            handle_peer_frame(
                 frame_for(NetworkMessage::CmpctBlock(CmpctBlock {
                     compact_block: hsi,
                 })),
                 &hub,
                 &out_tx,
-                &mut wants_headers,
-                &mut wtxid,
-                &mut send_cmpct,
-                &mut cmpct_ver,
-                &mut pending_headers,
-                &mut pending_blocks,
-                &mut pending_cmpct,
-                &mut from_peer,
-                &mut requested,
-                &mut ban,
+                &mut follow,
                 None,
             )
             .await
             .unwrap();
         }
         assert!(
-            requested.len() < MAX_SERVE_BLOCKS,
+            follow.requested_blocks.len() < MAX_SERVE_BLOCKS,
             "compact accept must free requested slots, still {}",
-            requested.len()
+            follow.requested_blocks.len()
         );
         let rest = getdata_hashes(&mut out_rx);
         assert_eq!(
@@ -5897,30 +5346,23 @@ fn full_headers_batch_continues_from_last_header() {
             crate::peers::PeerConnType::OutboundFullRelay,
         );
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        let mut wants_headers = false;
-        let mut wtxid = false;
-        let mut send_cmpct = false;
-        let mut cmpct_ver = 2u32;
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_peer = HashMap::new();
-        let mut requested = HashSet::new();
-        let mut ban = 0u32;
-        handle_peer_frame_for_test(
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: false,
+            send_cmpct: false,
+            cmpct_version: 2u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
+        handle_peer_frame(
             frame_for(NetworkMessage::Headers(headers)),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut requested,
-            &mut ban,
+            &mut follow,
             Some(sess.as_ref()),
         )
         .await
@@ -6185,30 +5627,23 @@ fn compact_tip_announce_must_not_wrap_serve_inflight() {
         );
         while out_rx.try_recv().is_ok() {}
 
-        let mut wants_headers = false;
-        let mut wtxid = false;
-        let mut send_cmpct = true;
-        let mut cmpct_ver = 2u32;
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_peer = HashMap::new();
-        let mut requested = HashSet::new();
-        let mut ban = 0u32;
-        handle_peer_frame_for_test(
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: false,
+            send_cmpct: true,
+            cmpct_version: 2u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
+        handle_peer_frame(
             frame_for(NetworkMessage::GetData(vec![Inventory::CompactBlock(hash)])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut requested,
-            &mut ban,
+            &mut follow,
             Some(sess.as_ref()),
         )
         .await
@@ -6289,30 +5724,23 @@ fn compact_tip_announce_must_not_consume_serve_slots() {
         );
         while out_rx.try_recv().is_ok() {}
 
-        let mut wants_headers = false;
-        let mut wtxid = false;
-        let mut send_cmpct = true;
-        let mut cmpct_ver = 2u32;
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_peer = HashMap::new();
-        let mut requested = HashSet::new();
-        let mut ban = 0u32;
-        handle_peer_frame_for_test(
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: false,
+            send_cmpct: true,
+            cmpct_version: 2u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
+        handle_peer_frame(
             frame_for(NetworkMessage::GetData(vec![Inventory::CompactBlock(hash)])),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut requested,
-            &mut ban,
+            &mut follow,
             Some(sess.as_ref()),
         )
         .await
@@ -6369,32 +5797,25 @@ fn coinbase_compact_fills_without_mempool() {
         hub.ensure_genesis().unwrap();
         assert!(hub.mempool().is_none());
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_peer = HashMap::new();
-        let mut requested = HashSet::new();
-        let mut wants_headers = false;
-        let mut wtxid = false;
-        let mut send_cmpct = true;
-        let mut cmpct_ver = 2u32;
-        let mut ban = 0u32;
-        handle_peer_frame_for_test(
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: false,
+            send_cmpct: true,
+            cmpct_version: 2u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
+        handle_peer_frame(
             frame_for(NetworkMessage::CmpctBlock(CmpctBlock {
                 compact_block: hsi,
             })),
             &hub,
             &out_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut requested,
-            &mut ban,
+            &mut follow,
             None,
         )
         .await
@@ -6912,32 +6333,25 @@ fn new_pow_valid_compact_relays_to_hb_before_connect() {
         a.attach_out(a_tx.clone());
         b.attach_out(b_tx);
 
-        let mut wants_headers = false;
-        let mut wtxid = true;
-        let mut send_cmpct = true;
-        let mut cmpct_ver = 2u32;
-        let mut pending_headers = HashMap::new();
-        let mut pending_blocks = PendingBlocks::new();
-        let mut pending_cmpct = HashMap::new();
-        let mut from_peer = HashMap::new();
-        let mut requested = HashSet::new();
-        let mut ban = 0u32;
-        handle_peer_frame_for_test(
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: true,
+            send_cmpct: true,
+            cmpct_version: 2u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: HashMap::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
+        handle_peer_frame(
             frame_for(NetworkMessage::CmpctBlock(CmpctBlock {
                 compact_block: hsi,
             })),
             &hub,
             &a_tx,
-            &mut wants_headers,
-            &mut wtxid,
-            &mut send_cmpct,
-            &mut cmpct_ver,
-            &mut pending_headers,
-            &mut pending_blocks,
-            &mut pending_cmpct,
-            &mut from_peer,
-            &mut requested,
-            &mut ban,
+            &mut follow,
             Some(a.as_ref()),
         )
         .await
