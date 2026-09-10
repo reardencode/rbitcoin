@@ -251,7 +251,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rbitcoin-sh-force-{n}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let store = Store::open_or_create(&dir).unwrap();
+        let store = Store::open_or_create_tiny(&dir).unwrap();
         let b = ShRunBuilder::new(&dir);
         let runs_dir = dir.join("scripthash.runs");
         std::fs::create_dir_all(&runs_dir).unwrap();

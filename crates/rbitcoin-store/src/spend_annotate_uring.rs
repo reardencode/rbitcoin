@@ -704,7 +704,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rbitcoin-ann-known-{id}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let t = TxTable::create(&dir).unwrap();
+        let t = TxTable::create_tiny(&dir).unwrap();
         let s = SpenderTable::create(&dir).unwrap();
         (dir, t, s)
     }

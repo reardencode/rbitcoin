@@ -26,7 +26,7 @@ fn tmp_store(label: &str) -> (std::path::PathBuf, Query) {
     ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let q = Query::open_or_create(&dir).unwrap();
+    let q = Query::open_or_create_tiny(&dir).unwrap();
     (dir, q)
 }
 
@@ -143,9 +143,6 @@ fn headers_sync_locator_from_unknown_starts_at_that_hash() {
 
 #[test]
 fn headers_sync_locator_from_mid_height_starts_there() {
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let (dir, q) = tmp_store("loc-mid");
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
@@ -160,9 +157,6 @@ fn headers_sync_locator_from_mid_height_starts_there() {
 
 #[test]
 fn should_poll_peer_headers_skips_behind_and_weaker_fork() {
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let (dir, q) = tmp_store("poll-skip");
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
@@ -1096,10 +1090,6 @@ fn blocksonly_sendraw_invs_unbroadcast_to_inbound() {
         }
     }
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
-
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
         let (dir, q) = tmp_store("blocksonly-sendraw");
@@ -1283,9 +1273,6 @@ fn relay_on_unbroadcast_keeps_inbound_age_gate() {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use tokio::runtime::Builder;
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
         let (dir, q) = tmp_store("relay-on-unb");
@@ -1358,9 +1345,6 @@ fn queue_due_skips_txs_accepted_before_peer_connected() {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use tokio::runtime::Builder;
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
         let (dir, q) = tmp_store("tx-privacy-pre");
@@ -1436,9 +1420,6 @@ fn queue_due_tx_invs_idle_tick_does_not_clone_live_bodies() {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use tokio::runtime::Builder;
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
         let (dir, q) = tmp_store("inv-tick-noclone");
@@ -1549,9 +1530,6 @@ fn queue_due_tx_invs_age_only_tick_does_not_rescan_live() {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use tokio::runtime::Builder;
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
         let (dir, q) = tmp_store("inv-tick-age-cursor");
@@ -1694,9 +1672,6 @@ fn mocktime_jump_does_not_inv_or_serve_new_sendraw() {
         }
     }
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
         let (dir, q) = tmp_store("reorg-122");
@@ -1851,10 +1826,6 @@ fn blocksonly_relay_perm_tx_invs_other_inbound() {
             command,
             payload: full[24..].to_vec(),
         }
-    }
-
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
     }
 
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
@@ -3498,10 +3469,6 @@ fn getdata_tx_notfound_unless_announced_or_reorg() {
         }
     }
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
-
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
         let (dir, q) = tmp_store("gd-privacy");
@@ -3749,9 +3716,6 @@ fn invalid_getdata_type0_still_serves_tip_block() {
         }
     }
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -5114,9 +5078,6 @@ fn shorter_higher_work_fork_is_not_hopeless() {
     use bitcoin::{CompactTarget, TxMerkleNode};
     use rbitcoin_primitives::Height;
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let (dir, q) = tmp_store("short-high-work-fork");
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
@@ -5162,10 +5123,6 @@ fn connecting_ancient_weaker_headers_request_disconnect() {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::atomic::Ordering;
     use tokio::runtime::Builder;
-
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
 
     fn frame_for(msg: NetworkMessage) -> FramedMessage {
         use bitcoin::p2p::message::RawNetworkMessage;
@@ -5315,10 +5272,6 @@ fn getdata_skips_reconstruct_when_serve_inflight_at_cap() {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use tokio::runtime::Builder;
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
-
     fn frame_for(msg: NetworkMessage) -> FramedMessage {
         use bitcoin::p2p::message::RawNetworkMessage;
         let magic = Magic::from(Network::Regtest);
@@ -5419,10 +5372,6 @@ fn catchup_headers_getdata_stays_in_serve_window() {
     use bitcoin::Network;
     use rbitcoin_primitives::Height;
     use tokio::runtime::Builder;
-
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
 
     fn frame_for(msg: NetworkMessage) -> FramedMessage {
         use bitcoin::p2p::message::RawNetworkMessage;
@@ -5563,10 +5512,6 @@ fn catchup_child_before_parent_still_connects() {
     use rbitcoin_primitives::Height;
     use tokio::runtime::Builder;
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
-
     fn frame_for(msg: NetworkMessage) -> FramedMessage {
         use bitcoin::p2p::message::RawNetworkMessage;
         let magic = Magic::from(Network::Regtest);
@@ -5698,10 +5643,6 @@ fn catchup_compact_getdata_clears_requested_for_next_window() {
     use bitcoin::Network;
     use rbitcoin_primitives::Height;
     use tokio::runtime::Builder;
-
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
 
     fn frame_for(msg: NetworkMessage) -> FramedMessage {
         use bitcoin::p2p::message::RawNetworkMessage;
@@ -6157,10 +6098,6 @@ fn compact_tip_announce_must_not_wrap_serve_inflight() {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use tokio::runtime::Builder;
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
-
     fn frame_for(msg: NetworkMessage) -> FramedMessage {
         use bitcoin::p2p::message::RawNetworkMessage;
         let magic = Magic::from(Network::Regtest);
@@ -6265,10 +6202,6 @@ fn compact_tip_announce_must_not_consume_serve_slots() {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use tokio::runtime::Builder;
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
-
     fn frame_for(msg: NetworkMessage) -> FramedMessage {
         use bitcoin::p2p::message::RawNetworkMessage;
         let magic = Magic::from(Network::Regtest);
@@ -6371,10 +6304,6 @@ fn coinbase_compact_fills_without_mempool() {
     use bitcoin::consensus::encode::serialize;
     use bitcoin::Network;
     use tokio::runtime::Builder;
-
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
 
     fn frame_for(msg: NetworkMessage) -> FramedMessage {
         use bitcoin::p2p::message::RawNetworkMessage;
@@ -6543,8 +6472,8 @@ async fn tip_burst_past_broadcast_capacity_still_syncs_peer() {
     let dir = std::env::temp_dir().join(format!("rbitcoin-tip-burst-{n}"));
     std::fs::create_dir_all(dir.join("a")).unwrap();
     std::fs::create_dir_all(dir.join("b")).unwrap();
-    let qa = Query::open_or_create(dir.join("a/store")).unwrap();
-    let qb = Query::open_or_create(dir.join("b/store")).unwrap();
+    let qa = Query::open_or_create_tiny(dir.join("a/store")).unwrap();
+    let qb = Query::open_or_create_tiny(dir.join("b/store")).unwrap();
     let params = ChainParams::regtest();
     let mut na = P2PNode::start_with_agent(
         "127.0.0.1:0".parse().unwrap(),
@@ -6607,9 +6536,6 @@ async fn tip_burst_past_broadcast_capacity_still_syncs_peer() {
 
 #[test]
 fn stale_getdata_requests_expire_so_catchup_can_retry() {
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let (dir, q) = tmp_store("getdata-expire");
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
@@ -6660,8 +6586,8 @@ async fn disconnect_clears_far_side_getpeerinfo_within_5s() {
     let dir = std::env::temp_dir().join(format!("rbitcoin-disc-far-{n}"));
     std::fs::create_dir_all(dir.join("a")).unwrap();
     std::fs::create_dir_all(dir.join("b")).unwrap();
-    let qa = Query::open_or_create(dir.join("a/store")).unwrap();
-    let qb = Query::open_or_create(dir.join("b/store")).unwrap();
+    let qa = Query::open_or_create_tiny(dir.join("a/store")).unwrap();
+    let qb = Query::open_or_create_tiny(dir.join("b/store")).unwrap();
     let params = ChainParams::regtest();
     let mut na = P2PNode::start_with_agent(
         "127.0.0.1:0".parse().unwrap(),
@@ -6756,8 +6682,8 @@ async fn disconnect_after_tip_sync_clears_far_side_within_5s() {
     let dir = std::env::temp_dir().join(format!("rbitcoin-disc-tip-{n}"));
     std::fs::create_dir_all(dir.join("a")).unwrap();
     std::fs::create_dir_all(dir.join("b")).unwrap();
-    let qa = Query::open_or_create(dir.join("a/store")).unwrap();
-    let qb = Query::open_or_create(dir.join("b/store")).unwrap();
+    let qa = Query::open_or_create_tiny(dir.join("a/store")).unwrap();
+    let qb = Query::open_or_create_tiny(dir.join("b/store")).unwrap();
     let params = ChainParams::regtest();
     let mut na = P2PNode::start_with_agent(
         "127.0.0.1:0".parse().unwrap(),
@@ -6868,10 +6794,6 @@ fn new_pow_valid_compact_relays_to_hb_before_connect() {
     use rbitcoin_primitives::Height;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use tokio::runtime::Builder;
-
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
 
     fn frame_for(msg: NetworkMessage) -> FramedMessage {
         let magic = Magic::from(Network::Regtest);

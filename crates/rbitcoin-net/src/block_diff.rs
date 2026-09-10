@@ -1111,12 +1111,7 @@ fn json_quoted(rest: &str) -> Option<String> {
     None
 }
 
-pub fn check_diff_env(head: Option<&str>, io: Option<&str>) -> Result<(), &'static str> {
-    match head {
-        Some("tiny" | "test" | "small") => {}
-        Some(_) => return Err("RBITCOIN_HEAD_SCALE"),
-        None => return Err("RBITCOIN_HEAD_SCALE"),
-    }
+pub fn check_diff_env(_head: Option<&str>, io: Option<&str>) -> Result<(), &'static str> {
     match io {
         Some("fd" | "pread" | "libc" | "pwrite") => Ok(()),
         _ => Err("RBITCOIN_IO"),
@@ -1892,9 +1887,6 @@ mod tests {
     }
 
     fn tmp_diff_hub() -> (std::path::PathBuf, ChainHub, DiffTip) {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         static LOCK: Mutex<()> = Mutex::new(());
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!(
@@ -1906,7 +1898,7 @@ mod tests {
                 .as_nanos()
         ));
         let _ = fs::create_dir_all(&dir);
-        let q = Query::open_or_create(dir.join("store")).expect("open");
+        let q = Query::open_or_create_tiny(dir.join("store")).expect("open");
         let params = diff_regtest_params();
         let hub = ChainHub::new(q, params.clone(), Milestone::NONE);
         hub.ensure_genesis().unwrap();
@@ -2407,13 +2399,14 @@ mod tests {
 
     #[test]
     fn check_diff_env_table() {
-        assert!(check_diff_env(None, Some("fd")).is_err());
-        assert!(check_diff_env(Some("mainnet"), Some("fd")).is_err());
+        assert!(check_diff_env(None, Some("fd")).is_ok());
+        assert!(check_diff_env(Some("mainnet"), Some("fd")).is_ok());
         assert!(check_diff_env(Some("tiny"), Some("uring")).is_err());
         assert!(check_diff_env(Some("tiny"), Some("fd")).is_ok());
         assert!(check_diff_env(Some("test"), Some("pread")).is_ok());
         assert!(check_diff_env(Some("small"), Some("libc")).is_ok());
         assert!(check_diff_env(Some("tiny"), Some("pwrite")).is_ok());
+        assert!(check_diff_env(None, None).is_err());
     }
 
     #[test]

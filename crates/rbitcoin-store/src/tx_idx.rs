@@ -73,10 +73,35 @@ pub struct TxIdx {
     segments: RwLock<Arc<Vec<Segment>>>,
     /// Next file_id to allocate (monotone).
     next_file_id: std::sync::atomic::AtomicU32,
+    /// Soft body span before opening a new segment (captured at open).
+    soft_span: u64,
+}
+
+/// Resolve idx soft-span: explicit open-time value, else env, else default.
+pub fn resolve_soft_span(explicit: Option<u64>) -> u64 {
+    if let Some(v) = explicit.filter(|&v| v >= IDX_STRIDE) {
+        return v.min(HARD_SPAN);
+    }
+    if let Some(v) = std::env::var("RBITCOIN_TX_IDX_SOFT_SPAN")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&v: &u64| v >= IDX_STRIDE)
+    {
+        return v.min(HARD_SPAN);
+    }
+    DEFAULT_SOFT_SPAN.min(HARD_SPAN)
 }
 
 impl TxIdx {
     pub fn create(dir: &Path, stem: &str) -> Result<Self, StoreError> {
+        Self::create_with_soft_span(dir, stem, resolve_soft_span(None))
+    }
+
+    pub fn create_with_soft_span(
+        dir: &Path,
+        stem: &str,
+        soft_span: u64,
+    ) -> Result<Self, StoreError> {
         let dir = dir.to_path_buf();
         let stem = stem.to_string();
         ensure_idx_layout(&dir, &stem)?;
@@ -86,10 +111,15 @@ impl TxIdx {
             stem,
             segments: RwLock::new(Arc::new(Vec::new())),
             next_file_id: std::sync::atomic::AtomicU32::new(0),
+            soft_span: resolve_soft_span(Some(soft_span)),
         })
     }
 
     pub fn open(dir: &Path, stem: &str) -> Result<Self, StoreError> {
+        Self::open_with_soft_span(dir, stem, resolve_soft_span(None))
+    }
+
+    pub fn open_with_soft_span(dir: &Path, stem: &str, soft_span: u64) -> Result<Self, StoreError> {
         let dir = dir.to_path_buf();
         let stem = stem.to_string();
         ensure_idx_layout(&dir, &stem)?;
@@ -135,6 +165,7 @@ impl TxIdx {
             stem,
             segments: RwLock::new(Arc::new(segs)),
             next_file_id: std::sync::atomic::AtomicU32::new(max_id.saturating_add(1)),
+            soft_span: resolve_soft_span(Some(soft_span)),
         })
     }
 
@@ -201,22 +232,8 @@ impl TxIdx {
         Arc::clone(&self.segments.read().unwrap_or_else(|e| e.into_inner()))
     }
 
-    fn soft_span() -> u64 {
-        #[cfg(test)]
-        {
-            let o = test_soft_span_override();
-            if o >= IDX_STRIDE {
-                return o.min(HARD_SPAN);
-            }
-        }
-        if let Some(v) = std::env::var("RBITCOIN_TX_IDX_SOFT_SPAN")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .filter(|&v: &u64| v >= IDX_STRIDE)
-        {
-            return v.min(HARD_SPAN);
-        }
-        DEFAULT_SOFT_SPAN.min(HARD_SPAN)
+    fn soft_span(&self) -> u64 {
+        self.soft_span
     }
 
     /// Absolute body start for 1-based `id` (must be ≤ published count).
@@ -562,7 +579,7 @@ impl TxIdx {
                 ));
             }
         }
-        let soft = Self::soft_span();
+        let soft = self.soft_span();
 
         let mut i = 0usize;
         while i < starts.len() {
@@ -1234,13 +1251,6 @@ fn read_meta_buf(buf: &[u8]) -> Result<Vec<SegDesc>, StoreError> {
     Ok(out)
 }
 
-// Thread-local soft-span override (bytes). Non-zero wins over env so parallel
-// idx tests cannot steal each other's window. `tx.head` does not read this.
-#[cfg(test)]
-thread_local! {
-    static TEST_SOFT_SPAN_OVERRIDE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
 /// Serialize tests that mutate `RBITCOIN_TX_IDX_SOFT_SPAN` (process-global).
 #[cfg(test)]
 pub(crate) fn tests_soft_span_env_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -1249,45 +1259,40 @@ pub(crate) fn tests_soft_span_env_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[cfg(test)]
-pub(crate) fn test_soft_span_override() -> u64 {
-    TEST_SOFT_SPAN_OVERRIDE.with(std::cell::Cell::get)
-}
-
-/// Hold this thread's soft-span override for `f`, then restore.
-#[cfg(test)]
-pub(crate) fn test_with_soft_span_bytes<R>(bytes: u64, f: impl FnOnce() -> R) -> R {
-    let prev = TEST_SOFT_SPAN_OVERRIDE.with(|c| c.replace(bytes));
-    struct Restore(u64);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            TEST_SOFT_SPAN_OVERRIDE.with(|c| c.set(self.0));
-        }
-    }
-    let _restore = Restore(prev);
-    f()
-}
-
-/// Effective idx soft-span (override / env / default, stride + hard cap).
-#[cfg(test)]
-pub(crate) fn test_soft_span() -> u64 {
-    TxIdx::soft_span()
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn soft_span_override_is_thread_local() {
-        test_with_soft_span_bytes(48, || {
-            assert_eq!(test_soft_span(), 48);
-            let other = std::thread::spawn(test_soft_span).join().expect("join");
-            assert_eq!(test_soft_span(), 48, "holding thread keeps its override");
-            assert_ne!(
-                other, 48,
-                "sibling thread must not inherit this test's override (got {other})"
-            );
-        });
+    fn soft_span_is_per_instance() {
+        let dir_a = std::env::temp_dir().join(format!(
+            "rbitcoin-txidx-span-a-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let dir_b = std::env::temp_dir().join(format!(
+            "rbitcoin-txidx-span-b-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        let a = TxIdx::create_with_soft_span(&dir_a, "tx", 48).unwrap();
+        let b = TxIdx::create(&dir_b, "tx").unwrap();
+        assert_eq!(a.soft_span(), 48);
+        assert_ne!(
+            b.soft_span(),
+            48,
+            "sibling instance must keep default span (got {})",
+            b.soft_span()
+        );
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
     }
 
     /// Re-appending the same absolute starts after count advanced must fail
@@ -1367,8 +1372,8 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        test_with_soft_span_bytes(64, || {
-            let idx = TxIdx::create(&dir, "tx").unwrap();
+        {
+            let idx = TxIdx::create_with_soft_span(&dir, "tx", 64).unwrap();
             // Three batches that force rolls (span > 64).
             let s1 = [16u64, 24, 32, 40];
             idx.append_starts(0, &s1).unwrap();
@@ -1383,13 +1388,13 @@ mod tests {
             assert_eq!(len, (16 + 128) - 40);
             // Reopen.
             drop(idx);
-            let idx = TxIdx::open(&dir, "tx").unwrap();
+            let idx = TxIdx::open_with_soft_span(&dir, "tx", 64).unwrap();
             assert_eq!(idx.slot_count(), 6);
             assert_eq!(idx.record_start(6).unwrap(), 16 + 128 + 16);
             let ranges = idx.record_ranges(1, 6, 6, 16 + 128 + 16 + 8).unwrap();
             assert_eq!(ranges.len(), 6);
             assert_eq!(ranges[0].0, 16);
-        });
+        }
         // New layout lives under tx.idx/
         assert!(dir.join("tx.idx").join("meta").is_file());
         assert!(!dir.join("tx.idx.meta").exists());

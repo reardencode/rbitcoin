@@ -354,9 +354,6 @@ mod class_a_rehydrate_tests {
 
     #[test]
     fn class_a_rehydrate_makes_tip_plus_one_claim_ready() {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let dir = std::env::temp_dir().join(format!(
             "rbitcoin-ca-rehydrate-{}-{}",
             std::process::id(),
@@ -366,7 +363,7 @@ mod class_a_rehydrate_tests {
                 .as_nanos()
         ));
         let _ = std::fs::create_dir_all(&dir);
-        let q = Query::open_or_create(dir.join("store")).unwrap();
+        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
         let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
         hub.ensure_genesis().unwrap();
         let gen = hub.tip_hash().unwrap();

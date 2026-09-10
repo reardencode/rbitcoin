@@ -222,7 +222,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rbitcoin-node-gen-{n}"));
         std::fs::create_dir_all(&dir).unwrap();
         let hub = Arc::new(ChainHub::new(
-            Query::open_or_create(dir.join("store")).unwrap(),
+            Query::open_or_create_tiny(dir.join("store")).unwrap(),
             ChainParams::regtest(),
             Milestone::NONE,
         ));

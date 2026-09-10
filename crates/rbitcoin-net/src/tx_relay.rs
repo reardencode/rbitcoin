@@ -2442,11 +2442,8 @@ mod tests {
         use rbitcoin_primitives::Height;
         use rbitcoin_store::script_hash;
 
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let store_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let params = ChainParams::regtest();
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
@@ -2667,11 +2664,8 @@ mod tests {
         use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
         use rbitcoin_primitives::Height;
 
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let store_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let params = ChainParams::regtest();
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
@@ -2720,11 +2714,8 @@ mod tests {
         use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
         use rbitcoin_primitives::Height;
 
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let store_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let params = ChainParams::regtest();
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
@@ -2765,11 +2756,8 @@ mod tests {
         use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
         use rbitcoin_primitives::Height;
 
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let store_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let params = ChainParams::regtest();
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
@@ -2809,11 +2797,8 @@ mod tests {
         use rbitcoin_primitives::Height;
         use rbitcoin_store::script_hash;
 
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let store_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let params = ChainParams::regtest();
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
@@ -2920,11 +2905,8 @@ mod tests {
         use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
         use rbitcoin_primitives::Height;
 
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let store_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let params = ChainParams::regtest();
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
@@ -2970,11 +2952,8 @@ mod tests {
         use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
         use rbitcoin_primitives::Height;
 
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let store_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let params = ChainParams::regtest();
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
@@ -3019,7 +2998,7 @@ mod tests {
     fn remove_for_block_skipped_until_relay_then_purge() {
         let dir = tmp();
         let store_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let mp = MempoolHub::open(&dir, Arc::new(q)).unwrap();
         assert!(!mp.relay_enabled());
         let dummy = Txid::from_byte_array([9u8; 32]);
@@ -3053,7 +3032,7 @@ mod tests {
         // for isolation — hub Query path covered when store has txs.
         let dir = tmp();
         let store_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let hub = MempoolHub::open(&dir, Arc::new(q)).unwrap();
         assert!(!hub.relay_enabled());
         hub.set_relay_enabled(true);
@@ -3118,7 +3097,7 @@ mod tests {
         use bitcoin::hashes::Hash;
         let dir = tmp();
         let store_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let hub = MempoolHub::open(&dir, Arc::new(q)).unwrap();
         hub.set_relay_enabled(true);
         let tx = Transaction {
@@ -3160,11 +3139,8 @@ mod tests {
         use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
         use rbitcoin_primitives::Height;
 
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let store_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let params = ChainParams::regtest();
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
@@ -3271,7 +3247,7 @@ mod tests {
     fn take_parent_getdata_dedupes_caps_and_expires() {
         let dir = tmp();
         let store_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let hub = MempoolHub::open(&dir, Arc::new(q)).unwrap();
         let mut missing = Vec::new();
         for i in 0u8..20 {
@@ -3294,7 +3270,7 @@ mod tests {
     fn open_with_weight_and_package_empty() {
         let dir = tmp();
         let store_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let hub = MempoolHub::open_with_weight(&dir, Arc::new(q), 1_000_000).unwrap();
         hub.set_relay_enabled(true);
         assert!(matches!(
@@ -3309,7 +3285,7 @@ mod tests {
     fn accept_package_does_not_park_orphan_member() {
         let dir = tmp();
         let store_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let hub = MempoolHub::open(&dir, Arc::new(q)).unwrap();
         hub.set_relay_enabled(true);
         let tx = Transaction {
@@ -3342,7 +3318,7 @@ mod tests {
     #[test]
     fn query_utxo_provider_miss_is_none() {
         let store_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let provider = QueryUtxoProvider::new(&q);
         let op = OutPoint {
             txid: Txid::from_byte_array([0xcd; 32]),
@@ -3356,7 +3332,7 @@ mod tests {
     fn estimate_fee_percentiles_and_spent_outpoints_empty() {
         let dir = tmp();
         let store_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let hub = MempoolHub::open(&dir, Arc::new(q)).unwrap();
         // Empty → negative estimate for all targets.
         assert!(hub.estimate_fee_btc_per_kb(1) < 0.0);
@@ -3371,12 +3347,9 @@ mod tests {
 
     #[test]
     fn recent_accepts_ring_newest_first() {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let store_dir = tmp();
         let mp_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         // Empty store: still can accept nothing without parents — just open hub.
         let hub = MempoolHub::open(&mp_dir, Arc::new(q)).unwrap();
         assert!(hub.recent_accepts().is_empty());
@@ -3391,7 +3364,7 @@ mod tests {
 
         let store_dir = tmp();
         let mp_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let hub = MempoolHub::open(&mp_dir, Arc::new(q)).unwrap();
         hub.set_relay_enabled(true);
 
@@ -3421,7 +3394,7 @@ mod tests {
     fn fee_snapshot_bulk_and_estimate_share_table() {
         let store_dir = tmp();
         let mp_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let hub = MempoolHub::open(&mp_dir, Arc::new(q)).unwrap();
         hub.set_relay_enabled(true);
         // Empty pool: negative / unavailable for Electrum-style single target.
@@ -3443,7 +3416,7 @@ mod tests {
     fn histogram_and_estimate_share_one_chunks_rebuild() {
         let store_dir = tmp();
         let mp_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let hub = MempoolHub::open(&mp_dir, Arc::new(q)).unwrap();
         hub.set_relay_enabled(true);
         let _ = hub.take_chunks_rebuilds();
@@ -3464,12 +3437,9 @@ mod tests {
     /// Production accept must not run on a tokio worker (reactor starvation).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn accept_tx_refuses_tokio_worker() {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let store_dir = tmp();
         let mp_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let hub = MempoolHub::open(&mp_dir, Arc::new(q)).unwrap();
         hub.set_relay_enabled(true);
         let tx = Transaction {
@@ -3511,12 +3481,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn accept_tx_async_runs_off_reactor() {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let store_dir = tmp();
         let mp_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let hub = MempoolHub::open(&mp_dir, Arc::new(q)).unwrap();
         hub.set_relay_enabled(true);
         let tx = Transaction {
@@ -3550,12 +3517,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn try_contains_does_not_panic_on_tokio_worker() {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let store_dir = tmp();
         let mp_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let hub = MempoolHub::open(&mp_dir, Arc::new(q)).unwrap();
         hub.set_relay_enabled(true);
         let miss = Txid::from_byte_array([0u8; 32]);
@@ -3576,12 +3540,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn min_relay_sat_kvb_does_not_panic_on_tokio_worker() {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let store_dir = tmp();
         let mp_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let hub = MempoolHub::open(&mp_dir, Arc::new(q)).unwrap();
         hub.set_min_relay_sat_kvb(250);
         let join = tokio::spawn(async move {
@@ -3601,12 +3562,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn rebroadcast_unbroadcast_does_not_panic_on_tokio_worker() {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let store_dir = tmp();
         let mp_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let hub = MempoolHub::open(&mp_dir, Arc::new(q)).unwrap();
         hub.note_unbroadcast(Txid::from_byte_array([1u8; 32]));
         let join = tokio::spawn(async move {
@@ -3625,12 +3583,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn blocking_contains_refuses_tokio_worker() {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let store_dir = tmp();
         let mp_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let hub = MempoolHub::open(&mp_dir, Arc::new(q)).unwrap();
         let miss = Txid::from_byte_array([0u8; 32]);
         let join = tokio::spawn(async move {
@@ -3682,12 +3637,9 @@ mod tests {
             }
         }
 
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let store_dir = tmp();
         let mp_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let params = ChainParams::regtest();
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
@@ -3744,12 +3696,9 @@ mod tests {
             }
         }
 
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let store_dir = tmp();
         let mp_dir = tmp();
-        let q = Query::open_or_create(&store_dir).unwrap();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let hub = MempoolHub::open(&mp_dir, Arc::new(q)).unwrap();
         hub.set_relay_enabled(true);
         let entered = Arc::new(AtomicBool::new(false));

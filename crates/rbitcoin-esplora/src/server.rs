@@ -669,7 +669,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rbitcoin-esplora-{label}-{n}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create(dir.join("store")).unwrap();
+        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
         (dir, q)
     }
 
@@ -2264,9 +2264,6 @@ mod tests {
         use rbitcoin_net::MempoolHub;
         use rbitcoin_store::script_hash;
 
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let (dir, q) = temp_query("mp-tx-json");
         let mut prev = Fk::NULL;
         let mut parent_hash: Option<[u8; 32]> = None;

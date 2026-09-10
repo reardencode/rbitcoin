@@ -624,15 +624,12 @@ mod tests {
         use rbitcoin_query::Query;
         use std::time::{SystemTime, UNIX_EPOCH};
 
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let n = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("rbtc-overlay-csv-{n}"));
-        let q = Query::open_or_create(&dir).unwrap();
+        let q = Query::open_or_create_tiny(&dir).unwrap();
         let mut params = ChainParams::regtest();
         params.apply_test_activation_height("csv", 102).unwrap();
         let genesis = constants::genesis_block(Network::Regtest);
@@ -715,7 +712,7 @@ mod tests {
         );
 
         let dir2 = std::env::temp_dir().join(format!("rbtc-overlay-csv-lax-{n}"));
-        let q2 = Query::open_or_create(&dir2).unwrap();
+        let q2 = Query::open_or_create_tiny(&dir2).unwrap();
         let mut lax = ChainParams::regtest();
         lax.apply_test_activation_height("csv", 200).unwrap();
         crate::accept_and_connect_block(

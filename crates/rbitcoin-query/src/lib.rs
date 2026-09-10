@@ -1075,6 +1075,11 @@ impl Query {
         Self::open_or_create_layout(StoreLayout::single(store_path.as_ref().to_path_buf()))
     }
 
+    /// Tiny heads for tests (does not allocate Mainnet multi‑GiB files).
+    pub fn open_or_create_tiny(store_path: impl AsRef<Path>) -> Result<Self, QueryError> {
+        Self::open_or_create_layout(StoreLayout::tiny(store_path.as_ref().to_path_buf()))
+    }
+
     pub fn open_or_create_layout(layout: StoreLayout) -> Result<Self, QueryError> {
         let store = Store::open_or_create_layout(layout)?;
         // Core checkblocks-style tip window first so repair sees the final fence.

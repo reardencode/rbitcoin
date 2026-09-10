@@ -501,7 +501,7 @@ mod tests {
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("rbitcoin-rpc-srv-{n}"));
         std::fs::create_dir_all(&dir).unwrap();
-        let q = Arc::new(Query::open_or_create(dir.join("store")).unwrap());
+        let q = Arc::new(Query::open_or_create_tiny(dir.join("store")).unwrap());
         let mp =
             MempoolHub::open_with_weight(dir.join("mempool"), Arc::clone(&q), 300_000_000).unwrap();
         mp.set_relay_enabled(true);
@@ -626,7 +626,7 @@ mod tests {
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("rbitcoin-rpc-v2-{n}"));
         std::fs::create_dir_all(&dir).unwrap();
-        let q = Arc::new(Query::open_or_create(dir.join("store")).unwrap());
+        let q = Arc::new(Query::open_or_create_tiny(dir.join("store")).unwrap());
         let mp =
             MempoolHub::open_with_weight(dir.join("mempool"), Arc::clone(&q), 300_000_000).unwrap();
         mp.set_relay_enabled(true);
@@ -712,7 +712,7 @@ mod tests {
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("rbitcoin-rpc-wq-{n}"));
         std::fs::create_dir_all(&dir).unwrap();
-        let q = Arc::new(Query::open_or_create(dir.join("store")).unwrap());
+        let q = Arc::new(Query::open_or_create_tiny(dir.join("store")).unwrap());
         let mp =
             MempoolHub::open_with_weight(dir.join("mempool"), Arc::clone(&q), 300_000_000).unwrap();
         let cfg = RpcConfig {

@@ -2497,9 +2497,6 @@ mod tests {
 
     fn tmp_hub() -> (std::path::PathBuf, ChainHub) {
         // Keep Class A/hash heads tiny in unit tests (avoid multi‑GiB sparse maps).
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let dir = std::env::temp_dir().join(format!(
             "rbitcoin-chain-{}-{}",
             std::process::id(),
@@ -2509,7 +2506,7 @@ mod tests {
                 .as_nanos()
         ));
         let _ = std::fs::create_dir_all(&dir);
-        let q = Query::open_or_create(dir.join("store")).expect("query open_or_create");
+        let q = Query::open_or_create_tiny(dir.join("store")).expect("query open_or_create");
         let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
         (dir, hub)
     }
@@ -3682,9 +3679,6 @@ mod tests {
         use bitcoin::block::Version;
         use rbitcoin_consensus::mine_regtest_paying;
 
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let dir = std::env::temp_dir().join(format!(
             "rbitcoin-dersig-{}-{}",
             std::process::id(),
@@ -3694,7 +3688,7 @@ mod tests {
                 .as_nanos()
         ));
         let _ = std::fs::create_dir_all(&dir);
-        let q = Query::open_or_create(dir.join("store")).unwrap();
+        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
         let mut params = ChainParams::regtest();
         params.apply_test_activation_height("dersig", 102).unwrap();
         let hub = ChainHub::new(q, params, Milestone::NONE);
@@ -3731,9 +3725,6 @@ mod tests {
         use bitcoin::block::Version;
         use rbitcoin_consensus::mine_regtest_paying;
 
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let dir = std::env::temp_dir().join(format!(
             "rbitcoin-cltv-{}-{}",
             std::process::id(),
@@ -3743,7 +3734,7 @@ mod tests {
                 .as_nanos()
         ));
         let _ = std::fs::create_dir_all(&dir);
-        let q = Query::open_or_create(dir.join("store")).unwrap();
+        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
         let mut params = ChainParams::regtest();
         params.apply_test_activation_height("cltv", 111).unwrap();
         let hub = ChainHub::new(q, params, Milestone::NONE);

@@ -13,11 +13,11 @@ use rbitcoin_store::{
     materialize_sh_unsorted_from_class_a, merkle_root_from_txids, next_run_path, output_flags,
     script_hash, sh_heads_insert_capped, spend_ann_backend, spend_meta_backend, spent_abs,
     take_raw_clone_n, unsorted_collect_workers, unsorted_done_last_fk, unsorted_pack_workers,
-    unsorted_shard_dir, write_sorted_run, BlockQueue, ColdProgress, FkMap, FkSet,
-    HeadResizeSizeSnapshot, HeaderRecord, HeightFence, IdxBodyJob, IdxBodyMode, InputRecord,
-    OutputRecord, PointRecord, QueuedBlockMeta, ScriptHashRecord, ShHeadValue, SpTweaksTable,
-    SpendAnnBackend, Store, StoreError, StoreLayout, StoreSecret, TakenRaw, TxRecord, U32Map,
-    U64IdentityHasher, U64Map, U64Set, INCLUDE_HWM_NAME, SH_HEADS_CAP,
+    unsorted_shard_dir, write_sorted_run, BlockQueue, ColdProgress, FkMap, FkSet, HeadOpenOpts,
+    HeadResizeSizeSnapshot, HeadScale, HeaderRecord, HeightFence, IdxBodyJob, IdxBodyMode,
+    InputRecord, OutputRecord, PointRecord, QueuedBlockMeta, ScriptHashRecord, ShHeadValue,
+    SpTweaksTable, SpendAnnBackend, Store, StoreError, StoreLayout, StoreSecret, TakenRaw,
+    TxRecord, U32Map, U64IdentityHasher, U64Map, U64Set, INCLUDE_HWM_NAME, SH_HEADS_CAP,
 };
 
 #[test]
@@ -25,6 +25,8 @@ fn crate_root_exports_cross_crate_names() {
     let _ = std::any::type_name::<Store>();
     let _ = std::any::type_name::<StoreError>();
     let _ = std::any::type_name::<StoreLayout>();
+    let _ = std::any::type_name::<HeadScale>();
+    let _ = std::any::type_name::<HeadOpenOpts>();
     let _ = std::any::type_name::<StoreSecret>();
     let _ = std::any::type_name::<BlockQueue>();
     let _ = std::any::type_name::<QueuedBlockMeta>();

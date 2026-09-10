@@ -156,11 +156,7 @@ mod median_time_past_tests {
 
     fn temp_q() -> (std::path::PathBuf, Query) {
         static ONCE: Once = Once::new();
-        ONCE.call_once(|| {
-            if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-                std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-            }
-        });
+        ONCE.call_once(|| {});
         let n = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -168,7 +164,7 @@ mod median_time_past_tests {
         let dir = std::env::temp_dir().join(format!("rbitcoin-hdr-mtp-{n}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create(dir.join("store")).unwrap();
+        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
         (dir, q)
     }
 

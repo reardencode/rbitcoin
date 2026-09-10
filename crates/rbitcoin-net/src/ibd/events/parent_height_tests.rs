@@ -75,7 +75,7 @@ fn parent_height_resolves_confirmed_tip_minus_one() {
             .as_nanos()
     ));
     let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();

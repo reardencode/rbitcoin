@@ -47,16 +47,13 @@ pub const SH_HEAD_SHARD_COUNT_MISMATCH: &str =
 ///
 /// Override with `RBITCOIN_SH_UNIQUE_HINT`. Tiny/test scale uses a small default
 /// so unit tests do not allocate multi-GiB tables.
-pub fn sh_unique_hint_default() -> u64 {
+pub fn sh_unique_hint_default(scale: HeadScale) -> u64 {
     if let Ok(s) = std::env::var("RBITCOIN_SH_UNIQUE_HINT") {
         if let Ok(n) = s.parse::<u64>() {
             return n.max(1);
         }
     }
-    match HeadScale::from_env() {
-        HeadScale::Tiny => 4_096,
-        HeadScale::Mainnet => 2_000_000_000,
-    }
+    scale.sh_unique_hint()
 }
 
 /// Per-shard key capacity from a global unique hint (25% skew margin).
@@ -650,7 +647,7 @@ pub struct ShardedScriptHashHead {
 impl ShardedScriptHashHead {
     #[cfg(test)]
     pub fn create_for_role(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
-        Self::create_sharded(path, sh_main_shard_count(), 64)
+        Self::create_sharded(path, sh_main_shard_count(HeadScale::Tiny), 64)
     }
 
     pub fn create_sharded(
@@ -700,7 +697,7 @@ impl ShardedScriptHashHead {
             }
             // Mainnet expects 64-way. Leftover live OA at `scripthash.head` is
             // refused by [`crate::scripthash::ScriptHashTable::open`].
-            let expected = sh_main_shard_count();
+            let expected = sh_main_shard_count(HeadScale::Tiny);
             if expected > 1 && names.len() != expected {
                 return Err(StoreError::Corrupt(SH_HEAD_SHARD_COUNT_MISMATCH));
             }

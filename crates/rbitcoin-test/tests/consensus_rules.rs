@@ -16,7 +16,7 @@ use rbitcoin_test::{pad_empty_from, TestDatadir};
 
 fn regtest_q() -> (TestDatadir, Query, ChainParams) {
     let td = TestDatadir::new().unwrap();
-    let q = Query::open_or_create(td.store_path()).unwrap();
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
     let params = ChainParams::regtest();
     (td, q, params)
 }
@@ -430,7 +430,7 @@ fn grind_pow(block: &mut bitcoin::Block) {
 fn h7_rejects_header_hash_above_target() {
     let (_td, q, params) = {
         let td = TestDatadir::new().unwrap();
-        let q = Query::open_or_create(td.store_path()).unwrap();
+        let q = Query::open_or_create_tiny(td.store_path()).unwrap();
         let params = ChainParams::mainnet();
         (td, q, params)
     };

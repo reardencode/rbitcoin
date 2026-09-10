@@ -303,7 +303,7 @@ fn confirm_reject_blacklist_surface() {
             .as_nanos()
     ));
     let _ = std::fs::create_dir_all(&dir);
-    let q = rbitcoin_query::Query::open_or_create(dir.join("store")).unwrap();
+    let q = rbitcoin_query::Query::open_or_create_tiny(dir.join("store")).unwrap();
     let hdr = rbitcoin_store::HeaderRecord {
         prev_fk: rbitcoin_primitives::Fk::NULL,
         version: 1,
@@ -426,9 +426,6 @@ fn bad_prev_gathers_winner_via_bq_by_hash() {
     use rbitcoin_query::Query;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let dir = std::env::temp_dir().join(format!(
         "rbitcoin-badprev-bqhash-{}-{}",
         std::process::id(),
@@ -438,7 +435,7 @@ fn bad_prev_gathers_winner_via_bq_by_hash() {
             .as_nanos()
     ));
     let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
@@ -559,7 +556,7 @@ fn exploration_apply_win_held_ext_only_in_bq() {
             .as_nanos()
     ));
     let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
@@ -695,7 +692,7 @@ fn multi_hop_bad_prev_applies_when_full_path_bodies_ready() {
             .as_nanos()
     ));
     let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
@@ -816,7 +813,7 @@ fn multi_hop_bad_prev_densifies_full_path_and_reorgs() {
             .as_nanos()
     ));
     let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
@@ -959,9 +956,6 @@ fn confirmed_height_mids_blocked_while_densify_ahead_leaves_tip_hole() {
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::sync::mpsc;
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let dir = std::env::temp_dir().join(format!(
         "rbitcoin-mid-confirmed-hole-{}-{}",
         std::process::id(),
@@ -971,7 +965,7 @@ fn confirmed_height_mids_blocked_while_densify_ahead_leaves_tip_hole() {
             .as_nanos()
     ));
     let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
@@ -1171,9 +1165,6 @@ fn zombie_pending_mid_at_confirmed_height_never_reget() {
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::sync::mpsc;
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let dir = std::env::temp_dir().join(format!(
         "rbitcoin-zombie-mid-{}-{}",
         std::process::id(),
@@ -1183,7 +1174,7 @@ fn zombie_pending_mid_at_confirmed_height_never_reget() {
             .as_nanos()
     ));
     let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
@@ -1326,9 +1317,6 @@ fn bad_prev_competing_path_reorgs_via_apply_confirm_reject() {
     use rbitcoin_query::Query;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let dir = std::env::temp_dir().join(format!(
         "rbitcoin-badprev-reorg-{}-{}",
         std::process::id(),
@@ -1338,7 +1326,7 @@ fn bad_prev_competing_path_reorgs_via_apply_confirm_reject() {
             .as_nanos()
     ));
     let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
@@ -1455,9 +1443,6 @@ fn bad_prev_awaits_winner_body_then_reorgs_when_held() {
     use rbitcoin_query::Query;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let dir = std::env::temp_dir().join(format!(
         "rbitcoin-badprev-await-{}-{}",
         std::process::id(),
@@ -1467,7 +1452,7 @@ fn bad_prev_awaits_winner_body_then_reorgs_when_held() {
             .as_nanos()
     ));
     let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
@@ -1571,9 +1556,6 @@ fn bad_prev_after_take_raw_classifies() {
     use rbitcoin_query::Query;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let dir = std::env::temp_dir().join(format!(
         "rbitcoin-badprev-taken-{}-{}",
         std::process::id(),
@@ -1583,7 +1565,7 @@ fn bad_prev_after_take_raw_classifies() {
             .as_nanos()
     ));
     let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
@@ -1694,9 +1676,6 @@ fn bad_prev_evicts_slot_rewinds_taken() {
     use rbitcoin_query::Query;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let dir = std::env::temp_dir().join(format!(
         "rbitcoin-badprev-evict-{}-{}",
         std::process::id(),
@@ -1706,7 +1685,7 @@ fn bad_prev_evicts_slot_rewinds_taken() {
             .as_nanos()
     ));
     let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
@@ -1861,7 +1840,7 @@ fn apply_peer_event_body_and_control_surface() {
             .as_nanos()
     ));
     let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
@@ -2106,7 +2085,7 @@ fn apply_peer_event_repeat_headers_skips_ensure_header_fk() {
             .as_nanos()
     ));
     let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
@@ -2167,7 +2146,7 @@ fn apply_confirm_events_accepted_and_reject() {
             .as_nanos()
     ));
     let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
     let mut st = IbdWorkState::new(Vec::new(), hub.tip_hash(), Some(0));
@@ -2294,7 +2273,7 @@ fn apply_peer_event_block_framed_bq_horizon_and_headers_done() {
             .as_nanos()
     ));
     let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
@@ -2555,7 +2534,7 @@ fn block_framed_raw_offers_body_queue_with_confirm_feed() {
             .as_nanos()
     ));
     let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
@@ -2672,7 +2651,7 @@ fn known_headers_re_admit_to_ordered_after_tip_drain() {
             .as_nanos()
     ));
     let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
@@ -2832,7 +2811,7 @@ fn path_slot_first_wins_chained_via_headers() {
             .as_nanos()
     ));
     let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
@@ -2944,9 +2923,6 @@ fn heavier_fork_invalid_mid_does_not_blacklist_weaker() {
     use rbitcoin_query::Query;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let dir = std::env::temp_dir().join(format!(
         "rbitcoin-heavier-invalid-{}-{}",
         std::process::id(),
@@ -2956,7 +2932,7 @@ fn heavier_fork_invalid_mid_does_not_blacklist_weaker() {
             .as_nanos()
     ));
     let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
@@ -3180,9 +3156,6 @@ fn heavier_fork_valid_does_not_blacklist_loser() {
     use rbitcoin_query::Query;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let dir = std::env::temp_dir().join(format!(
         "rbitcoin-heavier-valid-{}-{}",
         std::process::id(),
@@ -3192,7 +3165,7 @@ fn heavier_fork_valid_does_not_blacklist_loser() {
             .as_nanos()
     ));
     let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();

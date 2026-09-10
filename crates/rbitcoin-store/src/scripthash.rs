@@ -284,6 +284,7 @@ pub struct ScriptHashTable {
     bodies: Vec<TableFile>,
     ovf_body: Option<TableFile>,
     n_shards: usize,
+    scale: HeadScale,
     /// Sealed MPHF main shards (set when a cold bulk shard is installed).
     /// Per-shard slot so Electrum `get` does not take a process-wide mutex.
     sorted_main: Box<[RwLock<Option<MphfHead>>]>,
@@ -372,11 +373,8 @@ fn ingest_path(dir: &Path) -> PathBuf {
     dir.join("scripthash.ovf").join("ingest")
 }
 
-fn ingest_oa_slots() -> u64 {
-    match HeadScale::from_env() {
-        HeadScale::Tiny => 256,
-        HeadScale::Mainnet => 1 << 25,
-    }
+fn ingest_oa_slots(scale: HeadScale) -> u64 {
+    scale.ingest_oa_slots()
 }
 
 fn sealed_ovf_path(dir: &Path, id: u32) -> PathBuf {
@@ -485,7 +483,7 @@ fn open_sealed_sorted_ovf(dir: &Path) -> Result<Vec<SortedHead>, StoreError> {
     Ok(out)
 }
 
-fn open_or_create_ingest(dir: &Path) -> Result<ScriptHashHead, StoreError> {
+fn open_or_create_ingest(dir: &Path, scale: HeadScale) -> Result<ScriptHashHead, StoreError> {
     let p = ingest_path(dir);
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent).map_err(|e| StoreError::io(parent, e))?;
@@ -493,7 +491,7 @@ fn open_or_create_ingest(dir: &Path) -> Result<ScriptHashHead, StoreError> {
     if p.exists() {
         ScriptHashHead::open(p)
     } else {
-        ScriptHashHead::create_with_slots(p, ingest_oa_slots())
+        ScriptHashHead::create_with_slots(p, ingest_oa_slots(scale))
     }
 }
 
@@ -758,7 +756,15 @@ enum KeyHome {
 
 impl ScriptHashTable {
     pub fn create(dir: &std::path::Path) -> Result<Self, StoreError> {
-        let n_shards = sh_main_shard_count().max(1);
+        Self::create_with_scale(dir, HeadScale::Mainnet)
+    }
+
+    pub fn create_tiny(dir: &std::path::Path) -> Result<Self, StoreError> {
+        Self::create_with_scale(dir, HeadScale::Tiny)
+    }
+
+    pub fn create_with_scale(dir: &std::path::Path, scale: HeadScale) -> Result<Self, StoreError> {
+        let n_shards = sh_main_shard_count(scale).max(1);
         let body_dir = sh_body_path(dir);
         std::fs::create_dir_all(&body_dir).map_err(|e| StoreError::io(&body_dir, e))?;
         let mut bodies = Vec::with_capacity(n_shards);
@@ -781,8 +787,9 @@ impl ScriptHashTable {
             bodies,
             ovf_body: Some(ovf),
             n_shards,
+            scale,
             sorted_main: wrap_sorted_slots((0..n_shards).map(|_| None).collect()),
-            ingest: Mutex::new(open_or_create_ingest(dir)?),
+            ingest: Mutex::new(open_or_create_ingest(dir, scale)?),
             sealed_ovf: Mutex::new(Vec::new()),
             ovf_l1: Mutex::new(None),
             l1_frozen_warned: AtomicBool::new(false),
@@ -793,12 +800,20 @@ impl ScriptHashTable {
     }
 
     pub fn open(dir: &std::path::Path) -> Result<Self, StoreError> {
+        Self::open_with_scale(dir, HeadScale::Mainnet)
+    }
+
+    pub fn open_tiny(dir: &std::path::Path) -> Result<Self, StoreError> {
+        Self::open_with_scale(dir, HeadScale::Tiny)
+    }
+
+    pub fn open_with_scale(dir: &std::path::Path, scale: HeadScale) -> Result<Self, StoreError> {
         let layout = detect_sh_body_layout(dir)?;
         if leftover_oa_overflow(dir) {
             return Err(StoreError::Layout(leftover_oa_wipe_msg()));
         }
         let head_path = dir.join("scripthash.head");
-        let expected = sh_main_shard_count();
+        let expected = sh_main_shard_count(scale);
         if leftover_live_oa_main(&head_path) && !sorted_main_present(dir, expected) {
             return Err(StoreError::Layout(leftover_oa_wipe_msg()));
         }
@@ -807,13 +822,14 @@ impl ScriptHashTable {
             ShBodyLayout::Shared => expected.max(1),
             ShBodyLayout::Sharded => sharded_body_n_shards(dir)?,
         };
-        Self::from_layout_and_n_shards(dir, layout, n_shards)
+        Self::from_layout_and_n_shards(dir, layout, n_shards, scale)
     }
 
     fn from_layout_and_n_shards(
         dir: &Path,
         layout: ShBodyLayout,
         n_shards: usize,
+        scale: HeadScale,
     ) -> Result<Self, StoreError> {
         let n_shards = n_shards.max(1);
         let (bodies, ovf_body, allocs, ovf_alloc, alloc_ver) = match layout {
@@ -854,8 +870,9 @@ impl ScriptHashTable {
             bodies,
             ovf_body,
             n_shards,
+            scale,
             sorted_main: wrap_sorted_slots(sorted_main),
-            ingest: Mutex::new(open_or_create_ingest(dir)?),
+            ingest: Mutex::new(open_or_create_ingest(dir, scale)?),
             sealed_ovf: Mutex::new(sealed_ovf),
             ovf_l1: Mutex::new(ovf_l1),
             l1_frozen_warned: AtomicBool::new(false),
@@ -1761,7 +1778,8 @@ impl ScriptHashTable {
             s.push(".occ");
             PathBuf::from(s)
         });
-        *self.ingest.lock().unwrap() = ScriptHashHead::create_with_slots(p, ingest_oa_slots())?;
+        *self.ingest.lock().unwrap() =
+            ScriptHashHead::create_with_slots(p, ingest_oa_slots(self.scale))?;
         self.maybe_compact_sealed_ovf()?;
         Ok(())
     }
@@ -2399,7 +2417,7 @@ impl ScriptHashTable {
         }
         let n_shards = self.n_shards.max(1);
         let hint = if unique_hint == 0 {
-            sh_unique_hint_default()
+            sh_unique_hint_default(self.scale)
         } else {
             unique_hint
         };
@@ -2458,7 +2476,7 @@ impl ScriptHashTable {
             body.set_logical_len(bump)?;
         }
         let n_shards = self.n_shards.max(1);
-        let hint = sh_unique_hint_default();
+        let hint = sh_unique_hint_default(self.scale);
         let key_budget = sh_per_shard_key_budget(hint, n_shards);
         Ok(ScriptHashBulkSession {
             table: self,
@@ -2509,7 +2527,7 @@ impl ScriptHashTable {
         // Remaining shards must be empty for live install.
 
         let hint = if unique_hint == 0 {
-            sh_unique_hint_default()
+            sh_unique_hint_default(self.scale)
         } else {
             unique_hint
         };

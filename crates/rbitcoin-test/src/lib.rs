@@ -11,21 +11,9 @@ pub use chain_fixture::{
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Once;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
-static TEST_HEAD_SCALE: Once = Once::new();
-
-/// Avoid multi‑GiB sparse hash heads in tests unless the operator set a scale.
-fn ensure_tiny_hash_heads() {
-    TEST_HEAD_SCALE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            // SAFETY: single-threaded once; tests only; key is process-local config.
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
-}
 
 /// Temporary directory removed on drop (replaces the `tempfile` crate).
 pub struct TempDir {
@@ -34,7 +22,6 @@ pub struct TempDir {
 
 impl TempDir {
     pub fn new() -> std::io::Result<Self> {
-        ensure_tiny_hash_heads();
         let n = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)

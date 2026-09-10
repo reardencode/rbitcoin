@@ -1919,7 +1919,7 @@ mod tests {
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("rbitcoin-tip-mode-{nanos}"));
         std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create(dir.join("store")).unwrap();
+        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
         q.enter_direct_index_mode().unwrap();
         assert_eq!(q.index_mode(), IndexMode::Direct);
         assert!(q.spend_index_enabled());
@@ -1948,7 +1948,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rbitcoin-tip-wb-{nanos}"));
         std::fs::create_dir_all(&dir).unwrap();
         let store = dir.join("store");
-        let q = Query::open_or_create(&store).unwrap();
+        let q = Query::open_or_create_tiny(&store).unwrap();
         seed_direct_chain(&q, 5);
         assert_eq!(q.index_mode(), IndexMode::Direct);
         let _ = q.finalize_sh_runs().unwrap();
@@ -1995,7 +1995,7 @@ mod tests {
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("rbitcoin-tip-collect-{nanos}"));
         std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create(dir.join("store")).unwrap();
+        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
         seed_direct_chain(&q, 4);
         assert_eq!(q.index_mode(), IndexMode::Direct);
         assert!(!q.store().scripthash.has_durable_index());
@@ -2020,7 +2020,7 @@ mod tests {
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("rbitcoin-tip-nosh-{nanos}"));
         std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create(dir.join("store")).unwrap();
+        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
         q.enter_direct_index_mode_sh(false).unwrap();
         assert!(!q.sh_index_enabled());
         assert!(!q.sh_run_enabled());
@@ -2047,7 +2047,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rbitcoin-tip-sh-off-{nanos}"));
         std::fs::create_dir_all(&dir).unwrap();
         let store = dir.join("store");
-        let q = Query::open_or_create(&store).unwrap();
+        let q = Query::open_or_create_tiny(&store).unwrap();
         q.enter_direct_index_mode_sh(true).unwrap();
         assert!(q.sh_index_enabled());
         let on = enter_tip_mode(&q, None, true);
@@ -2265,7 +2265,7 @@ mod tests {
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("rbitcoin-tip-leftover-{nanos}"));
         std::fs::create_dir_all(dir.join("store")).unwrap();
-        let q = Query::open_or_create(dir.join("store")).unwrap();
+        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
         q.enter_direct_index_mode().unwrap();
         // Empty store: finalize has no runs; still flips to tip.
         let g = enter_tip_mode(&q, None, true);
@@ -2288,7 +2288,7 @@ mod tests {
             .with_network(rbitcoin_primitives::Network::Regtest);
         let mut handle = run_node(cfg).expect("run_node");
         // Dual-open same store under /tmp for MempoolHub's Arc<Query> (flush only).
-        let q = Arc::new(Query::open_or_create(handle.config.store_path()).unwrap());
+        let q = Arc::new(Query::open_or_create_tiny(handle.config.store_path()).unwrap());
         let mp = MempoolHub::open(handle.config.mempool_path(), q).expect("mempool");
         handle.mempool = Some(mp);
         let _ = format!("{:?}", handle);

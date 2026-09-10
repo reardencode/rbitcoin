@@ -483,7 +483,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rbitcoin-esplora-utxo-json-{n}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create(dir.join("store")).unwrap();
+        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
 
         let mut prev = Fk::NULL;
         let mut parent_hash: Option<[u8; 32]> = None;
@@ -634,7 +634,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rbitcoin-esplora-prevout-{n}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create(dir.join("store")).unwrap();
+        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
 
         let mut merkle0 = [0u8; 32];
         merkle0[0] = 0xaa;

@@ -165,7 +165,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rbitcoin-combined-q-{id}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create(dir.join("store")).unwrap();
+        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
         (dir, q)
     }
 
@@ -251,7 +251,7 @@ mod tests {
         assert_eq!(q.block_queue_stats().2, 0);
         // Restart: RAM queue is empty (by design — redownload, no double disk write).
         drop(q);
-        let q2 = Query::open_or_create(dir.join("store")).unwrap();
+        let q2 = Query::open_or_create_tiny(dir.join("store")).unwrap();
         assert!(!q2.block_queue_has_height(42));
         assert_eq!(q2.block_queue_stats().2, 0);
         let _ = std::fs::remove_dir_all(dir);

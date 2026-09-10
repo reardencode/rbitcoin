@@ -594,9 +594,6 @@ mod tests {
         use rbitcoin_query::{Query, TxApply};
         use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
 
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let dir = std::env::temp_dir().join(format!(
             "rbitcoin-electrum-first-wave-{}-{}",
             std::process::id(),
@@ -606,7 +603,7 @@ mod tests {
                 .unwrap_or(0)
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create(&dir).unwrap();
+        let q = Query::open_or_create_tiny(&dir).unwrap();
         q.set_sptweaks_enabled(true, Height(0)).unwrap();
         let mut prev = Fk::NULL;
         let mut parent_hash: Option<[u8; 32]> = None;
@@ -682,9 +679,6 @@ mod tests {
         use rbitcoin_query::{Query, TxApply};
         use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
 
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let dir = std::env::temp_dir().join(format!(
             "rbitcoin-electrum-empty-wave-{}-{}",
             std::process::id(),
@@ -694,7 +688,7 @@ mod tests {
                 .unwrap_or(0)
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create(&dir).unwrap();
+        let q = Query::open_or_create_tiny(&dir).unwrap();
         q.set_sptweaks_enabled(true, Height(10_000)).unwrap();
         let mut prev = Fk::NULL;
         let mut parent_hash: Option<[u8; 32]> = None;
@@ -764,9 +758,6 @@ mod tests {
         use rbitcoin_query::TxApply;
         use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
 
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
         let dir = std::env::temp_dir().join(format!(
             "rbitcoin-electrum-cut-{}-{}",
             std::process::id(),
@@ -776,7 +767,7 @@ mod tests {
                 .unwrap_or(0)
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create(&dir).unwrap();
+        let q = Query::open_or_create_tiny(&dir).unwrap();
         q.set_sptweaks_enabled(true, Height(0)).unwrap();
         let secp = Secp256k1::new();
         let sk = SecretKey::from_slice(&[2u8; 32]).unwrap();

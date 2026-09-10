@@ -154,7 +154,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("rbtc-pad-{n}"));
-        let q = Query::open_or_create(&dir).unwrap();
+        let q = Query::open_or_create_tiny(&dir).unwrap();
         let params = ChainParams::regtest();
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();

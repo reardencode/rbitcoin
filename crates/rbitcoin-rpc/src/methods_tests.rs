@@ -14,7 +14,7 @@ fn ctx_empty() -> (RpcContext, PathBuf) {
         .as_nanos();
     let dir = std::env::temp_dir().join(format!("rbitcoin-rpc-meth-{n}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let q = Arc::new(Query::open_or_create(dir.join("store")).unwrap());
+    let q = Arc::new(Query::open_or_create_tiny(dir.join("store")).unwrap());
     let mp =
         MempoolHub::open_with_weight(dir.join("mempool"), Arc::clone(&q), 300_000_000).unwrap();
     mp.set_relay_enabled(true);
@@ -827,7 +827,7 @@ fn chain_methods_against_mined_regtest() {
         .as_nanos();
     let dir = std::env::temp_dir().join(format!("rbitcoin-rpc-chain-{n}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let q = Arc::new(Query::open_or_create(dir.join("store")).unwrap());
+    let q = Arc::new(Query::open_or_create_tiny(dir.join("store")).unwrap());
     let params = ChainParams::for_network(Network::Regtest);
     let chain = build_mature_regtest_with_spend(&q, &params);
     let mp =
@@ -961,9 +961,6 @@ fn mempool_txid_lookups_do_not_list_live() {
     use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
     use rbitcoin_primitives::Height;
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let (ctx, dir) = ctx_empty();
     let params = ChainParams::regtest();
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
@@ -1055,9 +1052,6 @@ fn mempool_graph_fields_follow_cluster_and_unbroadcast() {
     use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
     use rbitcoin_primitives::Height;
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let (ctx, dir) = ctx_empty();
     let params = ChainParams::regtest();
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
@@ -1303,7 +1297,7 @@ fn ctx_regtest_hub() -> (RpcContext, PathBuf, Arc<rbitcoin_net::ChainHub>) {
     let dir = std::env::temp_dir().join(format!("rbitcoin-rpc-gen-{n}"));
     std::fs::create_dir_all(&dir).unwrap();
     let hub = Arc::new(rbitcoin_net::ChainHub::new(
-        Query::open_or_create(dir.join("store")).unwrap(),
+        Query::open_or_create_tiny(dir.join("store")).unwrap(),
         ChainParams::regtest(),
         Milestone::NONE,
     ));
@@ -2768,8 +2762,8 @@ async fn addnode_two_nodes_see_each_other() {
     let dir = std::env::temp_dir().join(format!("rbitcoin-rpc-2n-{n}"));
     std::fs::create_dir_all(dir.join("a")).unwrap();
     std::fs::create_dir_all(dir.join("b")).unwrap();
-    let qa = Query::open_or_create(dir.join("a/store")).unwrap();
-    let qb = Query::open_or_create(dir.join("b/store")).unwrap();
+    let qa = Query::open_or_create_tiny(dir.join("a/store")).unwrap();
+    let qb = Query::open_or_create_tiny(dir.join("b/store")).unwrap();
     let params = ChainParams::regtest();
     let na = P2PNode::start_with_agent(
         "127.0.0.1:0".parse().unwrap(),
@@ -2834,7 +2828,7 @@ fn rpc_honesty_mempool_budget_and_network_identity() {
         .as_nanos();
     let dir = std::env::temp_dir().join(format!("rbitcoin-rpc-honest-{n}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let q = Arc::new(Query::open_or_create(dir.join("store")).unwrap());
+    let q = Arc::new(Query::open_or_create_tiny(dir.join("store")).unwrap());
     let mp = MempoolHub::open_with_weight(dir.join("mempool"), Arc::clone(&q), 50_000_000).unwrap();
     let ctx = RpcContext {
         query: q,
@@ -2947,9 +2941,6 @@ fn testmempoolaccept_rbf_does_not_evict_conflict() {
     use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
     use rbitcoin_primitives::Height;
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let (ctx, dir) = ctx_empty();
     let params = ChainParams::regtest();
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);

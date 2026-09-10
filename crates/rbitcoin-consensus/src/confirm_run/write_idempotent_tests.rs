@@ -479,11 +479,7 @@ fn empty_confirm_batch_rejected() {
     use std::sync::Once;
 
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
+    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-confirm-empty-{}-{}",
         std::process::id(),
@@ -493,7 +489,7 @@ fn empty_confirm_batch_rejected() {
             .unwrap_or(0)
     ));
     std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create(&path).unwrap();
+    let q = Query::open_or_create_tiny(&path).unwrap();
     let params = ChainParams::regtest();
     let none = ScriptPreverified::new();
     let err = match confirm_wire_load_phase(&q, &params, Milestone::NONE, &[], &none) {
@@ -530,11 +526,7 @@ fn tip_plus_one_after_trailing_null_heal_is_not_notfound() {
     use std::sync::Once;
 
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
+    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-confirm-tip1-heal-{}-{}",
         std::process::id(),
@@ -544,7 +536,7 @@ fn tip_plus_one_after_trailing_null_heal_is_not_notfound() {
             .unwrap_or(0)
     ));
     std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create(&path).unwrap();
+    let q = Query::open_or_create_tiny(&path).unwrap();
     let params = ChainParams::regtest();
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
@@ -571,7 +563,7 @@ fn tip_plus_one_after_trailing_null_heal_is_not_notfound() {
     raw[8..16].copy_from_slice(&new_logical.to_le_bytes());
     std::fs::write(&conf, &raw).unwrap();
 
-    let q = Query::open_or_create(&path).unwrap();
+    let q = Query::open_or_create_tiny(&path).unwrap();
     assert_eq!(q.tip_height().map(|h| h.0), Some(3));
     let nxt = mine_empty_regtest(tip, tip_time + 600, 4);
     let r = accept_and_connect_block(&q, &params, Height(4), &nxt, Milestone::NONE);
@@ -600,11 +592,7 @@ fn expected_bits_extending_height0_and_no_retarget() {
     use std::sync::Once;
 
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
+    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-confirm-bits-{}-{}",
         std::process::id(),
@@ -614,7 +602,7 @@ fn expected_bits_extending_height0_and_no_retarget() {
             .unwrap_or(0)
     ));
     std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create(&path).unwrap();
+    let q = Query::open_or_create_tiny(&path).unwrap();
     let params = ChainParams::regtest();
     let gbits = expected_bits_extending(
         &q,
@@ -708,11 +696,7 @@ fn expected_bits_extending_uses_header_plan_when_period_start_above_tip() {
     use std::sync::Once;
 
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
+    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-retarget-plan-{}-{}",
         std::process::id(),
@@ -722,7 +706,7 @@ fn expected_bits_extending_uses_header_plan_when_period_start_above_tip() {
             .unwrap_or(0)
     ));
     std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create(&path).unwrap();
+    let q = Query::open_or_create_tiny(&path).unwrap();
     let params = ChainParams::mainnet();
     let interval = params.difficulty_adjustment_interval();
     assert_eq!(interval, 2016, "mainnet difficulty interval");
@@ -854,11 +838,7 @@ fn tiny_query() -> (std::path::PathBuf, rbitcoin_query::Query) {
     use rbitcoin_query::Query;
     use std::sync::Once;
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
+    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-pin-ensure-{}-{}",
         std::process::id(),
@@ -869,7 +849,7 @@ fn tiny_query() -> (std::path::PathBuf, rbitcoin_query::Query) {
     ));
     let _ = std::fs::remove_dir_all(&path);
     std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create(&path).unwrap();
+    let q = Query::open_or_create_tiny(&path).unwrap();
     q.enter_direct_index_mode().unwrap();
     (path, q)
 }
@@ -1140,11 +1120,7 @@ fn pin_for_wire_incomplete_outs_is_invariant_error() {
     use std::sync::Once;
 
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
+    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-pin-wire-outs-{}-{}",
         std::process::id(),
@@ -1154,7 +1130,7 @@ fn pin_for_wire_incomplete_outs_is_invariant_error() {
             .unwrap_or(0)
     ));
     std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create(&path).unwrap();
+    let q = Query::open_or_create_tiny(&path).unwrap();
     q.enter_direct_index_mode().unwrap();
 
     let parent_id = 77u64;
@@ -1271,11 +1247,7 @@ fn pin_takes_stamp_parent_vouts() {
     use std::sync::Once;
 
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
+    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-pin-take-vouts-{}-{}",
         std::process::id(),
@@ -1285,7 +1257,7 @@ fn pin_takes_stamp_parent_vouts() {
             .unwrap_or(0)
     ));
     std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create(&path).unwrap();
+    let q = Query::open_or_create_tiny(&path).unwrap();
     let parent_tx = TxRecord {
         txid: [0x11u8; 32],
         version: 1,
@@ -1361,11 +1333,7 @@ fn pin_for_wire_create_pin_shares_script_bytes() {
     use std::sync::{Arc, Once};
 
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
+    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-pin-createpin-share-{}-{}",
         std::process::id(),
@@ -1375,7 +1343,7 @@ fn pin_for_wire_create_pin_shares_script_bytes() {
             .unwrap_or(0)
     ));
     std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create(&path).unwrap();
+    let q = Query::open_or_create_tiny(&path).unwrap();
     let script = vec![0x51u8; 4096];
     let parent_tx = TxRecord {
         txid: [0x41u8; 32],
@@ -1451,11 +1419,7 @@ fn pin_plan_edges_without_packed_ins() {
     use std::sync::Once;
 
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
+    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-pin-edges-no-ins-{}-{}",
         std::process::id(),
@@ -1466,7 +1430,7 @@ fn pin_plan_edges_without_packed_ins() {
     ));
     let _ = std::fs::remove_dir_all(&path);
     std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create(&path).unwrap();
+    let q = Query::open_or_create_tiny(&path).unwrap();
     q.enter_direct_index_mode().unwrap();
 
     let parent_tx = TxRecord {
@@ -1533,11 +1497,7 @@ fn pin_plan_empty_edges_is_invariant() {
     use std::sync::Once;
 
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
+    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-pin-empty-edges-{}-{}",
         std::process::id(),
@@ -1548,7 +1508,7 @@ fn pin_plan_empty_edges_is_invariant() {
     ));
     let _ = std::fs::remove_dir_all(&path);
     std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create(&path).unwrap();
+    let q = Query::open_or_create_tiny(&path).unwrap();
     q.enter_direct_index_mode().unwrap();
     let pin = Arc::new((
         TxRecord {
@@ -1587,11 +1547,7 @@ fn pin_sparse_need_high_vout_only() {
     use std::sync::{Arc, Once};
 
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
+    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-pin-sparse-high-{}-{}",
         std::process::id(),
@@ -1601,7 +1557,7 @@ fn pin_sparse_need_high_vout_only() {
             .unwrap_or(0)
     ));
     std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create(&path).unwrap();
+    let q = Query::open_or_create_tiny(&path).unwrap();
     q.enter_direct_index_mode().unwrap();
 
     let parent_tx = TxRecord {
@@ -1693,11 +1649,7 @@ fn pin_range_fill_does_not_count_as_cache_hit() {
     use std::sync::{Arc, Once};
 
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
+    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-pin-hit-honest-{}-{}",
         std::process::id(),
@@ -1707,7 +1659,7 @@ fn pin_range_fill_does_not_count_as_cache_hit() {
             .unwrap_or(0)
     ));
     std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create(&path).unwrap();
+    let q = Query::open_or_create_tiny(&path).unwrap();
     q.enter_direct_index_mode().unwrap();
 
     let mk_parent = |tag: u8| {
@@ -1794,11 +1746,7 @@ fn pin_stamp_outs_is_cache_not_new() {
     use std::sync::{Arc, Once};
 
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
+    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-pin-recent-outs-{}-{}",
         std::process::id(),
@@ -1808,7 +1756,7 @@ fn pin_stamp_outs_is_cache_not_new() {
             .unwrap_or(0)
     ));
     std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create(&path).unwrap();
+    let q = Query::open_or_create_tiny(&path).unwrap();
 
     let mut tid = [0u8; 32];
     tid[0] = 0x41;
@@ -1885,11 +1833,7 @@ fn pin_recent_identity_without_outs_still_range_fills() {
     use std::sync::{Arc, Once};
 
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
+    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-pin-recent-id-{}-{}",
         std::process::id(),
@@ -1899,7 +1843,7 @@ fn pin_recent_identity_without_outs_still_range_fills() {
             .unwrap_or(0)
     ));
     std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create(&path).unwrap();
+    let q = Query::open_or_create_tiny(&path).unwrap();
     q.enter_direct_index_mode().unwrap();
 
     let mut tid = [0u8; 32];
@@ -1990,11 +1934,7 @@ fn store_start_states_lookup_load_confirm() {
     use std::sync::{Arc, Once};
 
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
+    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-start-states-{}-{}",
         std::process::id(),
@@ -2004,7 +1944,7 @@ fn store_start_states_lookup_load_confirm() {
             .unwrap_or(0)
     ));
     std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create(&path).unwrap();
+    let q = Query::open_or_create_tiny(&path).unwrap();
     q.set_spend_index(true);
     let params = ChainParams::regtest();
     let ms = Milestone::NONE;
@@ -2226,11 +2166,7 @@ fn structural_pinned_without_abs_is_invariant_error() {
     use std::sync::Once;
 
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
+    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-struct-pin-inv-{}-{}",
         std::process::id(),
@@ -2240,7 +2176,7 @@ fn structural_pinned_without_abs_is_invariant_error() {
             .unwrap_or(0)
     ));
     std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create(&path).unwrap();
+    let q = Query::open_or_create_tiny(&path).unwrap();
     q.enter_direct_index_mode().unwrap();
     let params = ChainParams::regtest();
 
@@ -2332,11 +2268,7 @@ fn direct_write_skips_create_pin_map_idx_without_recent() {
     use std::sync::Once;
 
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
+    ONCE.call_once(|| {});
     let path = std::env::temp_dir().join(format!(
         "rbitcoin-direct-write-pins-{}-{}",
         std::process::id(),
@@ -2346,7 +2278,7 @@ fn direct_write_skips_create_pin_map_idx_without_recent() {
             .unwrap_or(0)
     ));
     std::fs::create_dir_all(&path).unwrap();
-    let q = Query::open_or_create(&path).unwrap();
+    let q = Query::open_or_create_tiny(&path).unwrap();
     q.enter_direct_index_mode().unwrap();
     q.set_lookup_started_hi(Some(32));
     let params = ChainParams::regtest();
@@ -2378,11 +2310,7 @@ fn one_shot_load_matches_stamp_then_load_from_plan() {
     use std::sync::{Arc, Once};
 
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-        }
-    });
+    ONCE.call_once(|| {});
 
     fn open_q(tag: &str) -> (std::path::PathBuf, Query) {
         let path = std::env::temp_dir().join(format!(
@@ -2395,7 +2323,7 @@ fn one_shot_load_matches_stamp_then_load_from_plan() {
                 .unwrap_or(0)
         ));
         std::fs::create_dir_all(&path).unwrap();
-        let q = Query::open_or_create(&path).unwrap();
+        let q = Query::open_or_create_tiny(&path).unwrap();
         (path, q)
     }
 

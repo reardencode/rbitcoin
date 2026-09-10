@@ -1,6 +1,6 @@
 use crate::error::StoreError;
 use crate::file::{TableFile, FILE_HEADER_LEN};
-use crate::hashhead::{initial_slots_for, HashHead, HeadRole, HASH_HEAD_FULL};
+use crate::hashhead::{initial_slots_for, HashHead, HeadRole, HeadScale, HASH_HEAD_FULL};
 use bitcoin_hashes::{sha256, Hash, HashEngine};
 use rbitcoin_primitives::{Fk, TableKind};
 use std::path::{Path, PathBuf};
@@ -96,8 +96,8 @@ fn header_gen_path(base: &Path, i: usize) -> PathBuf {
 }
 
 impl HeaderHead {
-    fn create(base: PathBuf) -> Result<Self, StoreError> {
-        let target_slots = initial_slots_for(HeadRole::Header);
+    fn create(base: PathBuf, scale: HeadScale) -> Result<Self, StoreError> {
+        let target_slots = initial_slots_for(HeadRole::Header, scale);
         let h = HashHead::create_with_slots(&base, target_slots)?;
         Ok(Self {
             base,
@@ -106,7 +106,7 @@ impl HeaderHead {
         })
     }
 
-    fn open(base: PathBuf, body_count: u64) -> Result<Self, StoreError> {
+    fn open(base: PathBuf, body_count: u64, scale: HeadScale) -> Result<Self, StoreError> {
         if base.is_dir() {
             return Err(StoreError::Layout(HEADER_HEAD_DIR_REFUSE.to_string()));
         }
@@ -117,7 +117,7 @@ impl HeaderHead {
             ));
         }
         crate::hashhead::discard_grow_part(&base);
-        let target_slots = initial_slots_for(HeadRole::Header);
+        let target_slots = initial_slots_for(HeadRole::Header, scale);
         let mut gens = vec![HashHead::open(&base)?];
         let mut i = 1usize;
         loop {
@@ -214,8 +214,16 @@ pub struct HeaderTable {
 
 impl HeaderTable {
     pub fn create(dir: &std::path::Path) -> Result<Self, StoreError> {
+        Self::create_with_scale(dir, HeadScale::Mainnet)
+    }
+
+    pub fn create_tiny(dir: &std::path::Path) -> Result<Self, StoreError> {
+        Self::create_with_scale(dir, HeadScale::Tiny)
+    }
+
+    pub fn create_with_scale(dir: &std::path::Path, scale: HeadScale) -> Result<Self, StoreError> {
         let body = TableFile::create(dir.join("header.body"), TableKind::Header)?;
-        let head = HeaderHead::create(dir.join("header.head"))?;
+        let head = HeaderHead::create(dir.join("header.head"), scale)?;
         Ok(Self {
             body,
             head,
@@ -225,19 +233,31 @@ impl HeaderTable {
     }
 
     pub fn open(dir: &std::path::Path) -> Result<Self, StoreError> {
+        Self::open_with_scale(dir, HeadScale::Mainnet)
+    }
+
+    pub fn open_tiny(dir: &std::path::Path) -> Result<Self, StoreError> {
+        Self::open_with_scale(dir, HeadScale::Tiny)
+    }
+
+    pub fn open_with_scale(dir: &std::path::Path, scale: HeadScale) -> Result<Self, StoreError> {
         let body = TableFile::open(dir.join("header.body"), TableKind::Header)?;
         let body_len = body.logical_len().saturating_sub(FILE_HEADER_LEN as u64);
         if body_len % HEADER_RECORD_LEN as u64 != 0 {
             return Err(StoreError::Corrupt("header body size"));
         }
         let count = body_len / HEADER_RECORD_LEN as u64;
-        let head = HeaderHead::open(dir.join("header.head"), count)?;
+        let head = HeaderHead::open(dir.join("header.head"), count, scale)?;
         Ok(Self {
             body,
             head,
             count: std::sync::atomic::AtomicU64::new(count),
             put_lock: Mutex::new(()),
         })
+    }
+
+    pub fn head_target_slots(&self) -> u64 {
+        self.head.target_slots
     }
 
     /// Write gate: at most one body row per full block hash (I1).
@@ -369,7 +389,7 @@ mod tests {
     #[test]
     fn header_put_get_by_hash_open_flush() {
         let dir = tmp();
-        let t = HeaderTable::create(&dir).unwrap();
+        let t = HeaderTable::create_tiny(&dir).unwrap();
         let h1 = [1u8; 32];
         let h2 = [2u8; 32];
         let fk1 = t.ensure(&sample(h1)).unwrap();
@@ -389,7 +409,7 @@ mod tests {
         t.flush().unwrap();
         t.flush_async().unwrap();
         drop(t);
-        let t = HeaderTable::open(&dir).unwrap();
+        let t = HeaderTable::open_tiny(&dir).unwrap();
         assert_eq!(t.count(), 2);
         assert_eq!(t.get_by_hash(&h2).unwrap().unwrap().1.nonce, 7);
         // Shrink OS file below HWM so open clamps logical to a non-record size.
@@ -404,7 +424,7 @@ mod tests {
                 .unwrap();
         }
         assert!(matches!(
-            HeaderTable::open(&dir),
+            HeaderTable::open_tiny(&dir),
             Err(StoreError::Corrupt(_))
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -436,7 +456,7 @@ mod tests {
     #[test]
     fn ensure_rejects_duplicate_hash_with_divergent_prev_and_false_parent_edge() {
         let dir = tmp();
-        let t = HeaderTable::create(&dir).unwrap();
+        let t = HeaderTable::create_tiny(&dir).unwrap();
 
         // G (null prev, synthetic hash) → A → B → C (real linked hashes).
         let g = sample([0x11; 32]);
@@ -494,7 +514,7 @@ mod tests {
     #[test]
     fn header_head_rolls_generation_when_gen0_is_full() {
         let dir = tmp();
-        let t = HeaderTable::create(&dir).unwrap();
+        let t = HeaderTable::create_tiny(&dir).unwrap();
         let mut hashes = Vec::new();
         for i in 0u32..80 {
             let mut hash = [0u8; 32];
@@ -551,7 +571,7 @@ mod tests {
             use std::os::unix::fs::MetadataExt;
             old.metadata().unwrap().ino()
         };
-        let t = HeaderTable::open(&dir).unwrap();
+        let t = HeaderTable::open_tiny(&dir).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
@@ -581,19 +601,19 @@ mod tests {
     #[test]
     fn header_head_empty_target_sized_gen0_with_body_is_layout_refuse() {
         let dir = tmp();
-        let t = HeaderTable::create(&dir).unwrap();
+        let t = HeaderTable::create_tiny(&dir).unwrap();
         t.ensure(&sample([0x44; 32])).unwrap();
         t.flush().unwrap();
         drop(t);
         std::fs::remove_file(dir.join("header.head")).unwrap();
-        let slots = initial_slots_for(HeadRole::Header);
+        let slots = initial_slots_for(HeadRole::Header, HeadScale::Tiny);
         let staging = tmp();
         let h = HashHead::create_with_slots(staging.join("header.head"), slots).unwrap();
         h.flush().unwrap();
         drop(h);
         std::fs::rename(staging.join("header.head"), dir.join("header.head")).unwrap();
         let _ = std::fs::remove_dir_all(&staging);
-        let err = match HeaderTable::open(&dir) {
+        let err = match HeaderTable::open_tiny(&dir) {
             Err(e) => e,
             Ok(_) => panic!("expected Layout refuse for empty target-sized header.head"),
         };
@@ -611,14 +631,14 @@ mod tests {
     #[test]
     fn header_head_directory_is_layout_refuse() {
         let dir = tmp();
-        let t = HeaderTable::create(&dir).unwrap();
+        let t = HeaderTable::create_tiny(&dir).unwrap();
         drop(t);
         let head = dir.join("header.head");
         std::fs::remove_file(&head).unwrap();
         std::fs::create_dir(&head).unwrap();
         std::fs::write(head.join("00"), b"x").unwrap();
         std::fs::write(head.join("01"), b"y").unwrap();
-        let err = match HeaderTable::open(&dir) {
+        let err = match HeaderTable::open_tiny(&dir) {
             Err(e) => e,
             Ok(_) => panic!("expected Layout refuse for sharded header.head dir"),
         };
@@ -634,7 +654,7 @@ mod tests {
     #[test]
     fn ensure_same_hash_twice_is_idempotent() {
         let dir = tmp();
-        let t = HeaderTable::create(&dir).unwrap();
+        let t = HeaderTable::create_tiny(&dir).unwrap();
         let h = sample([7u8; 32]);
         let fk1 = t.ensure(&h).unwrap();
         let mut h2 = h.clone();

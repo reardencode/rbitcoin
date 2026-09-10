@@ -64,9 +64,6 @@ fn confirm_engine_pins_spend_of_just_written_pack() {
     use std::sync::Arc;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let dir = std::env::temp_dir().join(format!(
         "rbitcoin-engine-187-{}-{}",
         std::process::id(),
@@ -76,7 +73,7 @@ fn confirm_engine_pins_spend_of_just_written_pack() {
             .as_nanos()
     ));
     let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     q.enter_direct_index_mode().unwrap();
     let params = ChainParams::regtest();
     let hub = Arc::new(ChainHub::new(q, params.clone(), Milestone::NONE));
@@ -1036,7 +1033,7 @@ fn offer_confirm_ready_walks_height_map() {
             .as_nanos()
     ));
     let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
 
@@ -1203,9 +1200,6 @@ fn write_batch_is_stale_after_tip_moves() {
     use rbitcoin_consensus::{ChainParams, Milestone};
     use rbitcoin_query::Query;
 
-    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
-        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
-    }
     let dir = std::env::temp_dir().join(format!(
         "rbitcoin-write-stale-{}-{}",
         std::process::id(),
@@ -1215,7 +1209,7 @@ fn write_batch_is_stale_after_tip_moves() {
             .as_nanos()
     ));
     let _ = std::fs::create_dir_all(&dir);
-    let q = Query::open_or_create(dir.join("store")).unwrap();
+    let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
     assert!(!write_batch_is_stale(&hub, 1), "tip+1 is live");

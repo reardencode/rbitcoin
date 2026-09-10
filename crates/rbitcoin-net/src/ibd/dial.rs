@@ -1024,7 +1024,7 @@ mod tests {
                 .as_nanos()
         ));
         let _ = std::fs::create_dir_all(&dir);
-        let q = Query::open_or_create(dir.join("store")).unwrap();
+        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
         let hub = crate::chain::ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
         let mut seq = 0u32;
         assert!(!request_headers(&[], &hub, &mut seq, &[]).unwrap());
