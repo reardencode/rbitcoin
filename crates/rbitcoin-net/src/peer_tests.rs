@@ -1827,10 +1827,12 @@ fn cmpct_helpers_without_mempool_and_queue_out_closed() {
         .unwrap();
     let hsi = HeaderAndShortIds::from_block(&gen, 0xabc, 2, &[]).unwrap();
     assert!(
-        try_fill_cmpct(&hub, &hsi, 2).is_some(),
+        matches!(
+            try_reconstruct_cmpct(&hub, &hsi, 2),
+            Some(CmpctReconstruct::Block(_))
+        ),
         "coinbase-only compact fills from prefilled txs without a mempool"
     );
-    assert!(try_cmpct_missing(&hub, &hsi, 2).is_none());
     assert!(hub.mempool().is_none());
 
     // Closed channel → Protocol error.
@@ -3522,12 +3524,14 @@ fn cmpct_helpers_with_mempool_live_and_blocktxn() {
 
     let hsi = HeaderAndShortIds::from_block(&block, 0xbeef, 2, &[]).unwrap();
     // Mempool present but empty live → Some(missing) not None.
-    let missing = try_cmpct_missing(&hub, &hsi, 2).expect("mempool present");
+    let missing = match try_reconstruct_cmpct(&hub, &hsi, 2) {
+        Some(CmpctReconstruct::Missing(m)) => m,
+        other => panic!("expected missing, got {other:?}"),
+    };
     assert_eq!(missing, vec![1]); // spend short-id missing
-    assert!(try_fill_cmpct(&hub, &hsi, 2).is_none());
     let mp = hub.mempool().unwrap();
     let _ = mp.sample_reset_perf();
-    let _ = try_fill_cmpct(&hub, &hsi, 2);
+    let _ = try_reconstruct_cmpct(&hub, &hsi, 2);
     let fill = mp.sample_reset_perf();
     assert_eq!(
         fill.list_live, 0,
@@ -4185,7 +4189,7 @@ fn handshake_disconnect_log_needles() {
         "version handshake timeout, disconnecting peer=0"
     );
     assert_eq!(
-        crate::peer::v2_handshake_timeout_log(0),
+        crate::v2::v2_handshake_timeout_log(0),
         "V2 handshake timeout, disconnecting peer=0"
     );
     assert_eq!(

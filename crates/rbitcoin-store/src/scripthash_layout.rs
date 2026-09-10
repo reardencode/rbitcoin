@@ -21,8 +21,6 @@ pub const SH_HEAD_KEY_LEN: usize = 16;
 pub const SH_HEAD_VALUE_LEN: usize = 8;
 /// On-disk head slot size.
 pub const SH_HEAD_SLOT_SIZE: usize = SH_HEAD_KEY_LEN + SH_HEAD_VALUE_LEN;
-/// High bit marks non-inline head value (paged). Same value as [`SH_FLAG_BIT`].
-pub const SH_SLAB_MARKER: u64 = 1u64 << 63;
 /// Alloc header magic after the RBT1 file header.
 pub const SH_ALLOC_MAGIC: [u8; 4] = *b"SHAL";
 /// v3 = schema 15 (slabs + combined RBT1/SHAL prefix). v2 = schema-14 pages. v1 = schema-13.

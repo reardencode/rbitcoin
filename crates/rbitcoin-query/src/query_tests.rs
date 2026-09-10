@@ -1601,7 +1601,7 @@ fn connect_chain_query_surface() {
     }
     assert_eq!(q.tip_height(), Some(Height(3)));
     assert!(q.tip_header_fk().unwrap().is_some());
-    assert!(q.is_header_archived(&hashes[2]).unwrap());
+    assert!(q.get_header_by_hash(&hashes[2]).unwrap().is_some());
     assert!(q.is_block_archived(&hashes[2]).unwrap());
     assert!(q.archived_block_count().unwrap() >= 4);
 
@@ -1648,7 +1648,6 @@ fn connect_chain_query_surface() {
     );
     assert_eq!(out.value, 50_0000_0000);
     assert!(!q.is_outpoint_spent(&tx.txid, 0).unwrap());
-    assert!(!q.is_outpoint_spent_create(fks[0], 0).unwrap());
     assert_eq!(q.unspent_create_vouts(fks[0], &[0]).unwrap(), vec![0]);
 
     // Merkle proof for coinbase.
@@ -1721,7 +1720,7 @@ fn connect_chain_query_surface() {
     let (orphan, _) = coinbase_block(99, Fk::NULL, None);
     let ofk = q.ensure_header(&orphan).unwrap();
     assert_eq!(q.ensure_header(&orphan).unwrap(), ofk);
-    assert!(q.is_header_archived(&orphan.hash).unwrap());
+    assert!(q.get_header_by_hash(&orphan.hash).unwrap().is_some());
     assert!(!q.is_block_archived(&orphan.hash).unwrap());
 
     q.flush_header_archive().unwrap();
@@ -1731,9 +1730,6 @@ fn connect_chain_query_surface() {
     // backfill helpers on small chain.
     let n = q.backfill_tx_index(|_, _, _| {}).unwrap();
     let _ = n;
-    let (heights, txs) = q.backfill_point_spends(|_, _, _, _| {}).unwrap();
-    assert!(heights >= 1);
-    let _ = txs;
 
     // header_tx_fks / get_header_by_hash / put paths.
     let (hfk, hrec) = q.get_header_by_hash(&hashes[1]).unwrap().unwrap();
@@ -2245,10 +2241,6 @@ fn spend_edge_and_confirm_idempotent_path() {
     let h1hash = h1.hash;
     q.connect_block(Height(1), &h1, &[cb1, child]).unwrap();
 
-    // mark_spends / collect edges via backfill probe path.
-    let (h_walked, txs) = q.backfill_point_spends(|_, _, _, _| {}).unwrap();
-    assert!(h_walked >= 1);
-    let _ = txs;
     // Parent should show a spender eventually when spend index on.
     let _ = q.spenders(&parent_txid, 0).unwrap();
 
@@ -2351,10 +2343,6 @@ fn confirm_run_non_tip_and_tx_runs() {
     let outs = q.tx_output_run_class_a(fks[0], &tx).unwrap();
     assert_eq!(outs.len(), 1);
 
-    // collect_spend_edges for coinbase → empty (no non-cb inputs).
-    let edges = q.collect_spend_edges(fks[0], true).unwrap();
-    assert!(edges.is_empty());
-
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2418,15 +2406,9 @@ fn confirm_noncontiguous_fks_and_mark_spends() {
     let h1hash = h1.hash;
     q.connect_block(Height(1), &h1, &[cb1, child]).unwrap();
 
-    // mark_spends_for_tx on the child (non-coinbase → edges).
     let fks = q.block_tx_fks(Height(1)).unwrap();
     assert!(fks.len() >= 2);
-    // Child is last
-    let child_fk = fks[fks.len() - 1];
-    q.mark_spends_for_tx(child_fk, false).unwrap();
-    q.mark_spends_for_tx(child_fk, true).unwrap(); // probe path
-    let edges = q.collect_spend_edges(child_fk, true).unwrap();
-    assert!(!edges.is_empty() || edges.is_empty()); // may already exist after connect
+    let _ = q.spenders(&parent_txid, 0).unwrap();
 
     // Non-contiguous tx_fks: use first and last only (if 2+)
     let (fk, _) = q.get_header_by_hash(&h1hash).unwrap().unwrap();

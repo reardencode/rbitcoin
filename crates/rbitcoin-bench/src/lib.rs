@@ -19,7 +19,6 @@
 
 mod electrum;
 mod esplora;
-mod hex;
 mod jsonrpc;
 mod out;
 mod progress;

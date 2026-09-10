@@ -46,9 +46,10 @@ fn node_cli_and_surface_smoke() {
     assert!(Network::parse("nope").is_err());
     assert_eq!(Network::parse("REGTEST").unwrap(), Network::Regtest);
     assert!(!VERSION.is_empty());
-    for k in 1u16..=11 {
+    for k in [1u16, 2, 3, 7, 8, 9, 10, 11] {
         assert_eq!(TableKind::from_u16(k).unwrap().as_u16(), k);
     }
+    assert!(TableKind::from_u16(4).is_none());
     assert!(TableKind::from_u16(99).is_none());
     assert!(Fk::NULL.is_null());
     assert_eq!(Height::GENESIS.next(), Some(Height(1)));

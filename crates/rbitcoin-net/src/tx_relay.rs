@@ -1436,14 +1436,6 @@ impl MempoolHub {
         self.mark_fee_dirty();
     }
 
-    fn note_fee_flow_confirm(&self, weight: u64, fee_sat: u64) {
-        let rate = rbitcoin_consensus::policy::fee_rate_sat_per_kvb(fee_sat, weight);
-        if let Ok(mut m) = self.fee_flow.lock() {
-            m.note_confirm(weight, rate, Instant::now());
-        }
-        self.mark_fee_dirty();
-    }
-
     fn mark_fee_dirty(&self) {
         self.fee_dirty.store(true, Ordering::Release);
     }
@@ -1707,7 +1699,6 @@ impl MempoolHub {
                 if let Some(e) = g.graph.get(tid) {
                     let rate = e.fee_rate_sat_per_kvb();
                     self.push_confirm_memory(rate);
-                    self.note_fee_flow_confirm(e.weight, e.fee_sat);
                 }
             }
             g.remove_live_txids(txids).unwrap_or(0)

@@ -7,8 +7,8 @@ use rbitcoin_store::HeadScale;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-/// Default max concurrent inbound P2P sessions (Core-ish).
-pub const DEFAULT_MAX_INBOUND: u32 = 125;
+/// Default max concurrent inbound P2P sessions (same as net `DEFAULT_MAX_INBOUND`).
+pub const DEFAULT_MAX_INBOUND: u32 = rbitcoin_net::DEFAULT_MAX_INBOUND as u32;
 
 /// Core `-maxconnections=N` reserves this many slots for outbound full/block-relay
 /// peers plus one feeler (`10 + 1`). Inbound capacity is `N - reserve`.

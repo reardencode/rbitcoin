@@ -1358,13 +1358,6 @@ impl Query {
             .has_confirmed_strong_spender_at(txid, vout, tip)?)
     }
 
-    /// Spentness by known create fk (confirm pin path — no head probe).
-    pub fn is_outpoint_spent_create(&self, create_fk: Fk, vout: u32) -> Result<bool, QueryError> {
-        Ok(self
-            .store
-            .has_confirmed_strong_spender_create(create_fk, vout, None)?)
-    }
-
     /// Unspent subset of vouts on a create (batch; store uses tx.idx when needed).
     pub fn unspent_create_vouts(
         &self,
@@ -1788,11 +1781,6 @@ impl Query {
         self.store.txs.head_occupied()
     }
 
-    /// Highest fence-connected create_fk (`0` if no confirmed run).
-    pub fn tx_fence_max_connected_fk(&self) -> u64 {
-        self.store.fence_max_connected_fk()
-    }
-
     /// Thin scripthash create row count (diagnostic / tip-mode logs).
     pub fn scripthash_entry_count(&self) -> u64 {
         self.store.scripthash.entry_count()
@@ -1804,75 +1792,6 @@ impl Query {
     /// often 0 even with full spend annotations — do **not** treat as “points empty.”
     pub fn point_edge_count(&self) -> u64 {
         self.store.spender_list_count()
-    }
-
-    /// Rewrite durable spend annotations for every confirmed non-coinbase input.
-    ///
-    /// **Not** part of tip entry: Direct IBD already annotates on confirm.
-    /// Manual recovery only (corrupt/partial annotations). Prefer reindex when
-    /// spentness is wrong at scale. When multi-list count is 0, uses bulk
-    /// `put_spend_batch` without probe; otherwise probes for idempotency.
-    ///
-    /// `on_progress(height, tip, txs_so_far, edges_so_far)`.
-    /// Returns `(heights_walked, txs_touched)`.
-    pub fn backfill_point_spends(
-        &self,
-        mut on_progress: impl FnMut(u32, u32, u64, u64),
-    ) -> Result<(u32, u64), QueryError> {
-        let Some(tip) = self.tip_height() else {
-            return Ok((0, 0));
-        };
-        let probe = self.point_edge_count() > 0;
-        let mut txs = 0u64;
-        let mut edges_total = 0u64;
-        const EDGE_BATCH: usize = 8192;
-        const PROGRESS_EVERY: u32 = 10_000;
-        let mut edge_batch: Vec<([u8; 32], u32, Fk, u32)> = Vec::with_capacity(EDGE_BATCH);
-        let mut last_log = 0u32;
-
-        let flush_batch = |batch: &mut Vec<([u8; 32], u32, Fk, u32)>| -> Result<(), QueryError> {
-            if batch.is_empty() {
-                return Ok(());
-            }
-            self.store.put_spend_batch(batch)?;
-            batch.clear();
-            Ok(())
-        };
-
-        for h in 0..=tip.0 {
-            let height = Height(h);
-            let fks = match self.block_tx_fks(height) {
-                Ok(f) => f,
-                Err(StoreError::NotFound) => continue,
-                Err(e) => return Err(e),
-            };
-            for fk in fks {
-                if probe {
-                    self.mark_spends_for_tx(fk, true)?;
-                } else {
-                    let mut edges = self.collect_spend_edges(fk, false)?;
-                    edges_total += edges.len() as u64;
-                    if edge_batch.len() + edges.len() > EDGE_BATCH && !edge_batch.is_empty() {
-                        flush_batch(&mut edge_batch)?;
-                    }
-                    if edges.len() >= EDGE_BATCH {
-                        self.store.put_spend_batch(&edges)?;
-                    } else {
-                        edge_batch.append(&mut edges);
-                        if edge_batch.len() >= EDGE_BATCH {
-                            flush_batch(&mut edge_batch)?;
-                        }
-                    }
-                }
-                txs += 1;
-            }
-            if h - last_log >= PROGRESS_EVERY || h == tip.0 {
-                on_progress(h, tip.0, txs, edges_total + edge_batch.len() as u64);
-                last_log = h;
-            }
-        }
-        flush_batch(&mut edge_batch)?;
-        Ok((tip.0.saturating_add(1), txs))
     }
 
     pub fn tip_height(&self) -> Option<Height> {
@@ -2023,11 +1942,6 @@ impl Query {
         out_index: u32,
     ) -> Result<Vec<PointRecord>, QueryError> {
         self.store.spenders_raw(out_txid, out_index)
-    }
-
-    /// True if this header hash has a Class A row (may not be confirmed on tip).
-    pub fn is_header_archived(&self, hash: &[u8; 32]) -> Result<bool, QueryError> {
-        Ok(self.get_header_by_hash(hash)?.is_some())
     }
 
     /// True if the full block body is in Class A (`header_txs` present).

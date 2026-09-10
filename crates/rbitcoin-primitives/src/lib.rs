@@ -208,18 +208,12 @@ pub enum TableKind {
     Header = 2,
     /// Class A outputs body (`txout.body`); was `Tx` through schema 14.
     TxOut = 3,
-    Input = 4,
-    Output = 5,
-    /// Legacy id (v4 point multimap); new stores use [`TableKind::Spender`].
-    Point = 6,
     StrongTx = 7,
     Confirmed = 8,
     ArrayLink = 9,
     HashHead = 10,
     /// Electrum scripthash multimap (SHA256(scriptPubKey)).
     ScriptHash = 11,
-    /// Class C: tx_fk-1 → create height+1 (0 = unset). Maturity without UTXO.
-    TxHeight = 12,
     /// Multi-spender list nodes (16 B: spending_tx_fk | next).
     Spender = 13,
     /// Dense create_fk-ordered txid sidefile (`txid.body`).
@@ -238,15 +232,13 @@ impl TableKind {
             1 => Some(TableKind::Meta),
             2 => Some(TableKind::Header),
             3 => Some(TableKind::TxOut),
-            4 => Some(TableKind::Input),
-            5 => Some(TableKind::Output),
-            6 => Some(TableKind::Point),
+            // 4, 5, 6 reserved (retired Input / Output / Point)
             7 => Some(TableKind::StrongTx),
             8 => Some(TableKind::Confirmed),
             9 => Some(TableKind::ArrayLink),
             10 => Some(TableKind::HashHead),
             11 => Some(TableKind::ScriptHash),
-            12 => Some(TableKind::TxHeight),
+            // 12 reserved (retired TxHeight)
             13 => Some(TableKind::Spender),
             14 => Some(TableKind::TxidBody),
             15 => Some(TableKind::SpTweaks),
@@ -297,10 +289,14 @@ mod tests {
 
     #[test]
     fn table_kind_roundtrip() {
-        for v in 1u16..=17 {
+        for v in [1u16, 2, 3, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17] {
             let k = TableKind::from_u16(v).expect("kind");
             assert_eq!(k.as_u16(), v);
         }
+        assert!(TableKind::from_u16(4).is_none());
+        assert!(TableKind::from_u16(5).is_none());
+        assert!(TableKind::from_u16(6).is_none());
+        assert!(TableKind::from_u16(12).is_none());
         assert!(TableKind::from_u16(0).is_none());
         assert!(TableKind::from_u16(99).is_none());
         assert_eq!(TableKind::TxOut.as_u16(), 3);

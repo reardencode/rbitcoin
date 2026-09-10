@@ -712,6 +712,7 @@ name = "rbitcoin-bench"
 version = "0.6.99"
 dependencies = [
  "bitcoin",
+ "rbitcoin-primitives",
  "serde_json",
  "tokio",
 ]

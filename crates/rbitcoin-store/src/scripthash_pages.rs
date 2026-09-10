@@ -624,7 +624,6 @@ mod tests {
         assert_eq!(SH_PAGE_HEADER_LEN, 8);
         assert_eq!(SH_PAGE_FK_CAP, 511);
         assert_eq!(SH_FLAG_BIT, 1u64 << 63);
-        assert_eq!(SH_FLAG_BIT, crate::scripthash_layout::SH_SLAB_MARKER);
     }
 
     #[test]

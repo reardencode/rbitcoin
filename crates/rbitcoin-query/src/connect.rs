@@ -569,61 +569,6 @@ impl Query {
         }
     }
 
-    /// Append point multimap edges for all non-coinbase inputs of `tx_fk`.
-    pub(crate) fn mark_spends_for_tx(
-        &self,
-        tx_fk: Fk,
-        probe_existing: bool,
-    ) -> Result<(), QueryError> {
-        let edges = self.collect_spend_edges(tx_fk, probe_existing)?;
-        if edges.is_empty() {
-            return Ok(());
-        }
-        if edges.len() == 1 {
-            let (txid, vout, sfk, idx) = edges[0];
-            self.store.put_spend(&txid, vout, sfk, idx)?;
-        } else {
-            self.store.put_spend_batch(&edges)?;
-        }
-        Ok(())
-    }
-
-    /// Collect durable point edges for one tx (optionally skipping existing).
-    pub(crate) fn collect_spend_edges(
-        &self,
-        tx_fk: Fk,
-        probe_existing: bool,
-    ) -> Result<Vec<([u8; 32], u32, Fk, u32)>, QueryError> {
-        let tx = self.store.get_tx(tx_fk)?;
-        if tx.input_count == 0 {
-            return Ok(Vec::new());
-        }
-        let inputs = self.tx_input_run_class_a(tx_fk, &tx)?;
-        let mut edges = Vec::with_capacity(inputs.len());
-        for (i, inp) in inputs.iter().enumerate() {
-            if inp.is_coinbase() {
-                continue;
-            }
-            let prev_txid = self.resolve_prev_txid(inp)?;
-            if prev_txid == [0u8; 32] {
-                continue;
-            }
-            let in_idx = i as u32;
-            if probe_existing {
-                let already = self
-                    .store
-                    .spenders_raw(&prev_txid, inp.prev_index)?
-                    .iter()
-                    .any(|p| p.spending_tx_fk == tx_fk && p.spending_input_index == in_idx);
-                if already {
-                    continue;
-                }
-            }
-            edges.push((prev_txid, inp.prev_index, tx_fk, in_idx));
-        }
-        Ok(edges)
-    }
-
     /// Collect thin scripthash create pointers for one tx's outputs (no spend marks).
     ///
     /// Source order (first hit wins):
