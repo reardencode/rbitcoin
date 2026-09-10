@@ -38,11 +38,6 @@ const CHUNK_CACHE_MAX: usize = 256;
 
 pub(crate) const SH_HEAD_FULL: &str = "invariant: scripthash head full";
 
-/// Corrupt message when on-disk SH head shard count ≠ current layout (e.g. 16-way vs 64-way).
-#[cfg(test)]
-pub const SH_HEAD_SHARD_COUNT_MISMATCH: &str =
-    "scripthash head shard count mismatch (reindex; expected 64-way mainnet layout)";
-
 /// Default unique-key hint for cold live OA pre-size (mainnet ~2e9).
 ///
 /// Override with `RBITCOIN_SH_UNIQUE_HINT`. Tiny/test scale uses a small default
@@ -694,12 +689,6 @@ impl ShardedScriptHashHead {
             names.sort();
             if names.is_empty() {
                 return Err(StoreError::Corrupt("sharded scripthash head empty"));
-            }
-            // Mainnet expects 64-way. Leftover live OA at `scripthash.head` is
-            // refused by [`crate::scripthash::ScriptHashTable::open`].
-            let expected = sh_main_shard_count(HeadScale::Tiny);
-            if expected > 1 && names.len() != expected {
-                return Err(StoreError::Corrupt(SH_HEAD_SHARD_COUNT_MISMATCH));
             }
             let mut shards = Vec::with_capacity(names.len());
             for (i, name) in names.iter().enumerate() {
