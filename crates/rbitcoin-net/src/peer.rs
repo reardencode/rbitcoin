@@ -235,10 +235,6 @@ pub fn version_handshake_timeout_log(peer: u64) -> String {
     format!("version handshake timeout, disconnecting peer={peer}")
 }
 
-pub fn v2_handshake_timeout_log(peer: u64) -> String {
-    crate::v2::v2_handshake_timeout_log(peer)
-}
-
 /// Core `MAX_ADDR_TO_SEND` (addr / addrv2).
 pub const MAX_ADDR_TO_SEND: usize = 1000;
 
@@ -1662,28 +1658,24 @@ fn mempool_shortid_txs(
         .unwrap_or_default()
 }
 
-/// Reconstruct a compact block from prefilled txs plus mempool short-ids.
-/// Coinbase-only compact has no short-ids; an empty mempool map still fills.
-fn try_fill_cmpct(hub: &ChainHub, hsi: &HeaderAndShortIds, version: u32) -> Option<Block> {
-    let live = mempool_shortid_txs(hub, &hsi.header, hsi.nonce, version, &hsi.short_ids);
-    let avail = crate::compact::shortid_map_from_txs(&hsi.header, hsi.nonce, version, live.iter());
-    crate::compact::try_reconstruct(hsi, &avail, version).ok()
+#[derive(Debug)]
+enum CmpctReconstruct {
+    Block(Block),
+    Missing(Vec<u64>),
 }
 
-/// Absolute indexes still missing after mempool fill (for `getblocktxn`).
-///
-/// Returns `None` when there is no mempool hub (caller should full-getdata).
-/// Returns `Some(empty)` only when reconstruct claimed success with no txs
-/// (degenerate); peer path treats empty as getdata fallback.
-fn try_cmpct_missing(hub: &ChainHub, hsi: &HeaderAndShortIds, version: u32) -> Option<Vec<u64>> {
-    if hub.mempool().is_none() {
-        return None;
-    }
+/// One reconstruct: full block, getblocktxn indexes, or no mempool (`None` → getdata).
+fn try_reconstruct_cmpct(
+    hub: &ChainHub,
+    hsi: &HeaderAndShortIds,
+    version: u32,
+) -> Option<CmpctReconstruct> {
     let live = mempool_shortid_txs(hub, &hsi.header, hsi.nonce, version, &hsi.short_ids);
     let avail = crate::compact::shortid_map_from_txs(&hsi.header, hsi.nonce, version, live.iter());
     match crate::compact::try_reconstruct(hsi, &avail, version) {
-        Ok(_) => Some(Vec::new()),
-        Err(m) => Some(m),
+        Ok(block) => Some(CmpctReconstruct::Block(block)),
+        Err(_) if hub.mempool().is_none() => None,
+        Err(m) => Some(CmpctReconstruct::Missing(m)),
     }
 }
 
@@ -2703,93 +2695,101 @@ async fn on_cmpctblock(
             }
         } else if hub.has_block(&hash) {
             take_requested_block(hub, &mut follow.requested_blocks, &hash);
-        } else if let Some(block) = try_fill_cmpct(hub, &hsi, 2) {
-            follow.requested_blocks.remove(&hash);
-            follow.pending_cmpct.remove(&hash);
-            relay_new_pow_valid_block(hub, &block, session);
-            match hub.accept_received_block_async(block.clone()).await {
-                Ok(AcceptOutcome::Accepted { .. }) => {
-                    hub.forget_asked_block(&hash);
-                    maybe_select_hb_if_relay(hub, session);
+        } else {
+            match try_reconstruct_cmpct(hub, &hsi, 2) {
+                Some(CmpctReconstruct::Block(block)) => {
+                    follow.requested_blocks.remove(&hash);
+                    follow.pending_cmpct.remove(&hash);
+                    relay_new_pow_valid_block(hub, &block, session);
+                    match hub.accept_received_block_async(block.clone()).await {
+                        Ok(AcceptOutcome::Accepted { .. }) => {
+                            hub.forget_asked_block(&hash);
+                            maybe_select_hb_if_relay(hub, session);
+                        }
+                        Err(e) if net_error_needs_parent(&e) => {
+                            hub.forget_asked_block(&hash);
+                            follow.pending_blocks.insert(hash, block);
+                            maybe_select_hb_if_relay(hub, session);
+                        }
+                        Ok(_) => {
+                            hub.forget_asked_block(&hash);
+                        }
+                        _ => {
+                            if !hub.knows_header(&hsi.header.prev_blockhash) {
+                                let _ = queue_getheaders(out_tx, hub, session, true, None);
+                            }
+                        }
+                    }
+                    drain_pending(
+                        hub,
+                        out_tx,
+                        &mut follow.pending_blocks,
+                        &mut follow.pending_headers,
+                        &mut follow.requested_blocks,
+                        getdata_use_compact(hub, follow.cmpct_version),
+                        session,
+                    )
+                    .await?;
                 }
-                Err(e) if net_error_needs_parent(&e) => {
-                    hub.forget_asked_block(&hash);
-                    follow.pending_blocks.insert(hash, block);
-                    maybe_select_hb_if_relay(hub, session);
-                }
-                Ok(_) => {
-                    hub.forget_asked_block(&hash);
-                }
-                _ => {
-                    if !hub.knows_header(&hsi.header.prev_blockhash) {
-                        let _ = queue_getheaders(out_tx, hub, session, true, None);
+                Some(CmpctReconstruct::Missing(missing)) => {
+                    if missing.is_empty() {
+                        queue_out(
+                            out_tx,
+                            NetworkMessage::GetData(vec![Inventory::WitnessBlock(hash)]),
+                        )?;
+                    } else if follow.pending_cmpct.len() >= MAX_PENDING_CMPCT
+                        && !follow.pending_cmpct.contains_key(&hash)
+                    {
+                        follow.ban_score = follow.ban_score.saturating_add(10);
+                        queue_out(
+                            out_tx,
+                            NetworkMessage::GetData(vec![Inventory::WitnessBlock(hash)]),
+                        )?;
+                    } else {
+                        let inbound = session.is_some_and(|s| s.inbound);
+                        let may_fill = session
+                            .and_then(|s| s.peer_hub())
+                            .is_none_or(|ph| ph.try_cmpct_fill_slot(hash, inbound));
+                        if !may_fill {
+                            // Parallel inbound slot already taken
+                            // (`p2p_compactblocks` :929).
+                        } else {
+                            follow.pending_cmpct.insert(
+                                hash,
+                                PendingCmpct {
+                                    hsi: hsi.clone(),
+                                    missing: missing.clone(),
+                                    version: 2,
+                                },
+                            );
+                            if let Some(s) = session {
+                                let h = hub
+                                    .query
+                                    .height_of_hash(&hsi.header.prev_blockhash.to_byte_array())
+                                    .ok()
+                                    .flatten()
+                                    .map(|ht| ht.0.saturating_add(1))
+                                    .unwrap_or_else(|| {
+                                        hub.tip_height().unwrap_or(0).saturating_add(1)
+                                    });
+                                s.note_block_inflight(h);
+                            }
+                            queue_out(
+                                out_tx,
+                                NetworkMessage::GetBlockTxn(GetBlockTxn {
+                                    txs_request: crate::compact::missing_request(hash, &missing),
+                                }),
+                            )?;
+                        }
                     }
                 }
-            }
-            drain_pending(
-                hub,
-                out_tx,
-                &mut follow.pending_blocks,
-                &mut follow.pending_headers,
-                &mut follow.requested_blocks,
-                getdata_use_compact(hub, follow.cmpct_version),
-                session,
-            )
-            .await?;
-        } else if let Some(missing) = try_cmpct_missing(hub, &hsi, 2) {
-            if missing.is_empty() {
-                queue_out(
-                    out_tx,
-                    NetworkMessage::GetData(vec![Inventory::WitnessBlock(hash)]),
-                )?;
-            } else if follow.pending_cmpct.len() >= MAX_PENDING_CMPCT
-                && !follow.pending_cmpct.contains_key(&hash)
-            {
-                follow.ban_score = follow.ban_score.saturating_add(10);
-                queue_out(
-                    out_tx,
-                    NetworkMessage::GetData(vec![Inventory::WitnessBlock(hash)]),
-                )?;
-            } else {
-                let inbound = session.is_some_and(|s| s.inbound);
-                let may_fill = session
-                    .and_then(|s| s.peer_hub())
-                    .is_none_or(|ph| ph.try_cmpct_fill_slot(hash, inbound));
-                if !may_fill {
-                    // Parallel inbound slot already taken
-                    // (`p2p_compactblocks` :929).
-                } else {
-                    follow.pending_cmpct.insert(
-                        hash,
-                        PendingCmpct {
-                            hsi: hsi.clone(),
-                            missing: missing.clone(),
-                            version: 2,
-                        },
-                    );
-                    if let Some(s) = session {
-                        let h = hub
-                            .query
-                            .height_of_hash(&hsi.header.prev_blockhash.to_byte_array())
-                            .ok()
-                            .flatten()
-                            .map(|ht| ht.0.saturating_add(1))
-                            .unwrap_or_else(|| hub.tip_height().unwrap_or(0).saturating_add(1));
-                        s.note_block_inflight(h);
-                    }
+                None => {
                     queue_out(
                         out_tx,
-                        NetworkMessage::GetBlockTxn(GetBlockTxn {
-                            txs_request: crate::compact::missing_request(hash, &missing),
-                        }),
+                        NetworkMessage::GetData(vec![Inventory::WitnessBlock(hash)]),
                     )?;
                 }
             }
-        } else {
-            queue_out(
-                out_tx,
-                NetworkMessage::GetData(vec![Inventory::WitnessBlock(hash)]),
-            )?;
         }
     }
     Ok(())

@@ -405,34 +405,6 @@ impl Query {
         Ok(header_fks)
     }
 
-    /// Filter already-archived headers (store **read**). Returns items that still
-    /// need Class A, plus the header_fk list for the caller's result order.
-    ///
-    /// Used by IBD prep after structure decode.
-    pub fn archive_filter_need_bodies(
-        &self,
-        items: &mut [(Fk, HeaderRecord, Vec<TxApply>)],
-    ) -> Result<(Vec<Fk>, Vec<(Fk, Vec<TxApply>)>), QueryError> {
-        let mut header_fks = Vec::with_capacity(items.len());
-        let mut need: Vec<(Fk, Vec<TxApply>)> = Vec::with_capacity(items.len());
-        let mut seen_headers = crate::FkSet::default();
-        for (fk, _header, txs) in items.iter_mut() {
-            header_fks.push(*fk);
-            if !seen_headers.insert(*fk) {
-                let _ = std::mem::take(txs);
-                continue;
-            }
-            if self.store.header_txs.has_body(*fk)? {
-                let _ = std::mem::take(txs);
-                continue;
-            }
-            if !txs.is_empty() {
-                need.push((*fk, std::mem::take(txs)));
-            }
-        }
-        Ok((header_fks, need))
-    }
-
     /// Header-only need-body filter (IBD wire planner). No [`TxApply`].
     pub fn archive_filter_need_header_fks(&self, header_fks: &[Fk]) -> Result<Vec<Fk>, QueryError> {
         let mut need = Vec::with_capacity(header_fks.len());
@@ -2317,7 +2289,7 @@ mod tests {
         // filter_need empties txs when has_body — plan may be empty. Force a
         // non-empty plan by planning against a fresh need then swapping ranges.
         if plan2.is_empty() {
-            // Production path: archive_filter_need_bodies clears need → empty plan.
+            // Production path: archive_filter_need_header_fks / has_body clears need → empty plan.
             // Commit empty is no-op.
             assert!(!q.archive_commit_plan(plan2).unwrap());
         } else {

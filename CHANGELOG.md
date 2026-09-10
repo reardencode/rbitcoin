@@ -31,6 +31,15 @@ before 1.0).
 
 ### Changed
 
+- **Suggested-order 5 dead paths:** IBD awaiting-bodies / full-Block hold gone
+  (presence-only hashes; most-work stays header rewind). Leftover SH
+  16-byte head codec and `ShOverflowStack` test harness deleted (wipe +
+  leftover-OA refuse stay). Test-only page-RMW, `HeadRole`,
+  `repair_orphan_class_c`, and 1:1 spend IO aliases gone. One
+  `RBITCOIN_IO` token parse. Compact reconstructs once. Query
+  `archive_filter_need_bodies` / unused pubs, unread fee-flow confirm/evict
+  EMA, last-log capture beside `capture_logs`, bench-private hex, and
+  retired `TableKind` variants deleted.
 - **Suggested-order 4 test fixtures:** IBD Tiny+hub tests call
   `tiny_regtest_hub_labeled`. RPC / query catchup / consensus structure-rule
   leftover `temp_dir` inlines use `TempDir` / `tiny_query`. BIP34 encoding

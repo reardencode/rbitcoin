@@ -61,12 +61,6 @@ impl fmt::Display for Level {
 /// Global max enabled level. 0 = off; default [`Level::Info`].
 static MAX_LEVEL: AtomicU8 = AtomicU8::new(Level::Info as u8);
 
-#[cfg(test)]
-thread_local! {
-    static LAST_LOG: std::cell::RefCell<Option<(Level, String)>> =
-        const { std::cell::RefCell::new(None) };
-}
-
 thread_local! {
     static CAPTURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static CAPTURED: std::cell::RefCell<Vec<(Level, String)>> =
@@ -84,16 +78,6 @@ pub fn capture_logs(on: bool) {
 /// Drain lines recorded after [`capture_logs`]`(true)`.
 pub fn take_logs() -> Vec<(Level, String)> {
     CAPTURED.with(|c| std::mem::take(&mut *c.borrow_mut()))
-}
-
-#[cfg(test)]
-fn take_last_log_record(level: Level, args: fmt::Arguments<'_>) {
-    LAST_LOG.with(|c| *c.borrow_mut() = Some((level, args.to_string())));
-}
-
-#[cfg(test)]
-pub(crate) fn take_last_log() -> Option<(Level, String)> {
-    LAST_LOG.with(|c| c.borrow_mut().take())
 }
 
 /// Set the maximum log level (inclusive).
@@ -202,8 +186,6 @@ pub fn log_at(level: Level, args: fmt::Arguments<'_>) {
 /// Write one log line with optional style. Bold is applied only when stderr is
 /// an interactive terminal so redirected logs stay clean ASCII.
 pub fn log_at_style(level: Level, style: Style, args: fmt::Arguments<'_>) {
-    #[cfg(test)]
-    take_last_log_record(level, args);
     if CAPTURE.with(|c| c.get()) {
         CAPTURED.with(|c| c.borrow_mut().push((level, args.to_string())));
     }

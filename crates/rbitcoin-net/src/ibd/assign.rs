@@ -143,13 +143,12 @@ pub(crate) fn prune_satisfied_inflight(
 /// is live. Off-path leftovers otherwise sat in inflight forever (mainnet
 /// 08:16:23 / 04:14).
 pub(crate) fn prune_off_path_inflight(st: &mut IbdWorkState) {
-    let await_need: HashSet<BlockHash> = st.reorg.awaiting_need_getdata().into_iter().collect();
     let drop: Vec<BlockHash> = st
         .inflight
         .keys()
         .copied()
         .filter(|h| {
-            if st.ordered_set.contains(h) || await_need.contains(h) {
+            if st.ordered_set.contains(h) {
                 return false;
             }
             if let Some(&ht) = st.hash_height.get(h) {
@@ -650,10 +649,6 @@ pub(crate) fn contiguous_tip_holes(
         if st.body.is_rejected(&hash) {
             break;
         }
-        // Reorg gather holds tip+1 — not a fetch hole for that hash (mids densify).
-        if st.reorg.is_awaiting_held_tip(&hash) {
-            break;
-        }
         if claim_ready(hub, &mut st.body, ht, &hash) {
             break;
         }
@@ -935,9 +930,6 @@ pub(crate) fn cover_tip_holes(
     let mut issued = 0u64;
 
     for &h in holes {
-        if st.reorg.is_awaiting_held_tip(&h) {
-            continue;
-        }
         let ht = st.hash_height.get(&h).copied();
         if let Some(ht) = ht {
             if super::progress::claim_ready(hub, &mut st.body, ht, &h) {

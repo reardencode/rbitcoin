@@ -1,12 +1,10 @@
-//! Process-local fee flow meter (EMA of admit/confirm/evict WU/s per bucket).
+//! Process-local fee flow meter (EMA of admit WU/s per bucket).
 
 use crate::fee_est::{bucket_count, bucket_index};
 use std::time::Instant;
 
 /// Admit EMA half-life (seconds).
 pub const ADMIT_HALF_LIFE_SECS: f64 = 150.0;
-/// Confirm EMA half-life (seconds) — spikier.
-pub const CONFIRM_HALF_LIFE_SECS: f64 = 420.0;
 /// Warm after this many wall seconds.
 pub const WARM_AFTER_SECS: f64 = 60.0;
 /// Warm after this many admit events.
@@ -16,8 +14,6 @@ pub const WARM_AFTER_ADMITS: u64 = 32;
 #[derive(Debug, Clone)]
 pub struct FeeFlowMeter {
     admit_wu_s: Vec<f64>,
-    confirm_wu_s: Vec<f64>,
-    evict_wu_s: Vec<f64>,
     last: Instant,
     start: Instant,
     admit_events: u64,
@@ -34,8 +30,6 @@ impl FeeFlowMeter {
         let n = bucket_count();
         Self {
             admit_wu_s: vec![0.0; n],
-            confirm_wu_s: vec![0.0; n],
-            evict_wu_s: vec![0.0; n],
             last: now,
             start: now,
             admit_events: 0,
@@ -61,43 +55,13 @@ impl FeeFlowMeter {
     }
 
     pub fn note_admit(&mut self, weight_wu: u64, rate_sat_per_kvb: u64, now: Instant) {
-        self.observe(weight_wu, rate_sat_per_kvb, now, true, false, false);
-    }
-
-    pub fn note_confirm(&mut self, weight_wu: u64, rate_sat_per_kvb: u64, now: Instant) {
-        self.observe(weight_wu, rate_sat_per_kvb, now, false, true, false);
-    }
-
-    pub fn note_evict(&mut self, weight_wu: u64, rate_sat_per_kvb: u64, now: Instant) {
-        self.observe(weight_wu, rate_sat_per_kvb, now, false, false, true);
-    }
-
-    fn observe(
-        &mut self,
-        weight_wu: u64,
-        rate_sat_per_kvb: u64,
-        now: Instant,
-        is_admit: bool,
-        is_confirm: bool,
-        is_evict: bool,
-    ) {
         let dt = now.duration_since(self.last).as_secs_f64().max(1e-3);
         self.decay_to(now);
         let i = bucket_index(rate_sat_per_kvb).min(self.admit_wu_s.len().saturating_sub(1));
         let sample = weight_wu as f64 / dt;
-        if is_admit {
-            let alpha = 1.0 - (-std::f64::consts::LN_2 * dt / ADMIT_HALF_LIFE_SECS).exp();
-            self.admit_wu_s[i] = self.admit_wu_s[i] * (1.0 - alpha) + sample * alpha;
-            self.admit_events = self.admit_events.saturating_add(1);
-        }
-        if is_confirm {
-            let alpha = 1.0 - (-std::f64::consts::LN_2 * dt / CONFIRM_HALF_LIFE_SECS).exp();
-            self.confirm_wu_s[i] = self.confirm_wu_s[i] * (1.0 - alpha) + sample * alpha;
-        }
-        if is_evict {
-            let alpha = 1.0 - (-std::f64::consts::LN_2 * dt / ADMIT_HALF_LIFE_SECS).exp();
-            self.evict_wu_s[i] = self.evict_wu_s[i] * (1.0 - alpha) + sample * alpha;
-        }
+        let alpha = 1.0 - (-std::f64::consts::LN_2 * dt / ADMIT_HALF_LIFE_SECS).exp();
+        self.admit_wu_s[i] = self.admit_wu_s[i] * (1.0 - alpha) + sample * alpha;
+        self.admit_events = self.admit_events.saturating_add(1);
     }
 
     fn decay_to(&mut self, now: Instant) {
@@ -107,13 +71,6 @@ impl FeeFlowMeter {
         }
         let factor_a = (-std::f64::consts::LN_2 * dt / ADMIT_HALF_LIFE_SECS).exp();
         for v in &mut self.admit_wu_s {
-            *v *= factor_a;
-        }
-        let factor_c = (-std::f64::consts::LN_2 * dt / CONFIRM_HALF_LIFE_SECS).exp();
-        for v in &mut self.confirm_wu_s {
-            *v *= factor_c;
-        }
-        for v in &mut self.evict_wu_s {
             *v *= factor_a;
         }
         self.last = now;

@@ -46,7 +46,7 @@ use dial::{
 };
 use events::{
     apply_confirm_events, apply_peer_event, disconnect_all_peers,
-    drain_ready_peer_and_archive_events, try_complete_awaiting_reorg, update_confirm_lag,
+    drain_ready_peer_and_archive_events, update_confirm_lag,
 };
 use exit::{
     all_peers_dead_action, best_chain_remainder, empty_path_header_fan, header_lag_behind_peers,
@@ -505,11 +505,6 @@ pub async fn ibd_cancellable(
             cadence.mark_assign(now_cadence);
         }
 
-        if st.reorg.awaiting().is_some() && try_complete_awaiting_reorg(&mut st, hub.as_ref()) {
-            last_progress = Instant::now();
-            confirm_feed.clear();
-        }
-
         offer_confirm_ready(
             &confirm_feed,
             &st.height_to_hash,
@@ -592,11 +587,7 @@ pub async fn ibd_cancellable(
         }
 
         // Hard reset only when ordered is empty — a full queue still waiting on getdata is not stalled.
-        // Explore leftover inflight is not idle-block; a live awaiting gather is.
-        if last_progress.elapsed() > cfg.stall.saturating_mul(6)
-            && path_drained(&st)
-            && st.reorg.awaiting().is_none()
-        {
+        if last_progress.elapsed() > cfg.stall.saturating_mul(6) && path_drained(&st) {
             let tip_now = hub.tip_height().unwrap_or(0);
             let mut rebuilt = 0usize;
             for (_ht, h) in path_hashes_above_tip(&st, tip_now) {

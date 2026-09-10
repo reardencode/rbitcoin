@@ -1326,7 +1326,7 @@ impl PeerHub {
                 let line = if p.v2_transport_ready() {
                     crate::peer::version_handshake_timeout_log(p.id)
                 } else {
-                    crate::peer::v2_handshake_timeout_log(p.id)
+                    crate::v2::v2_handshake_timeout_log(p.id)
                 };
                 rbitcoin_log::debug!("{}", line);
                 let _ = self.disconnect_id(p.id);

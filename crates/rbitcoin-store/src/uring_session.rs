@@ -817,10 +817,6 @@ pub const KIND_SPEND_META_READ: u8 = 5;
 pub const KIND_SPEND_META_WRITE: u8 = 6;
 pub const KIND_SPEND_PAGE_READ: u8 = 7;
 pub const KIND_SPEND_PAGE_WRITE: u8 = 8;
-#[cfg(test)]
-pub const KIND_RMW_READ: u8 = 9;
-#[cfg(test)]
-pub const KIND_RMW_WRITE: u8 = 10;
 /// SP-tweak machine: `txout.body` pread.
 pub const KIND_SP_TXOUT: u8 = 12;
 /// SP-tweak machine: `inwit.body` pread (P2TR only).
@@ -998,8 +994,6 @@ mod tests {
             KIND_SPEND_META_WRITE,
             KIND_SPEND_PAGE_READ,
             KIND_SPEND_PAGE_WRITE,
-            KIND_RMW_READ,
-            KIND_RMW_WRITE,
             KIND_SP_TXOUT,
             KIND_SP_INWIT,
             KIND_SP_PARENT,

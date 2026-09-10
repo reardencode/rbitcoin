@@ -2,19 +2,13 @@
 //!
 //! Head key = first 16 B of SHA256(spk). Value = pack8 (8 B).
 //!
-//! **Schema 15:** Empty / Inline (≤2 FKs) / **Slab** `{class,used,off}` /
-//! **Paged** (megakey first+last 4 KiB page offs).
-//! Bit 63 of each value word is a flag; payload in low 63 bits. See
-//! [`crate::scripthash_pages`] for page buffer layout.
+//! **Schema 18:** Empty / Inline (1 FK) / **Slab** `{class,used,off}` /
+//! **Paged** (megakey last 4 KiB page off) / **Extent** (mode 11).
+//! See [`crate::scripthash_pages`] for page buffer layout.
 //!
-//! Schema-13 slab packing (`w0` flagged, `w1` clear) still decodes as paged;
-//! store open refuses a durable pre-15 SH index.
+//! Store open refuses a durable pre-15 SH index.
 
 use crate::error::StoreError;
-use crate::scripthash_pages::{
-    sh_decode_paged_head, sh_decode_slab_head, sh_encode_paged_head, sh_encode_slab_head,
-    sh_head_value_mode, sh_word_payload, ShHeadValueMode,
-};
 use rbitcoin_primitives::Fk;
 
 /// Body / page entry: create Class A fk only.
@@ -27,8 +21,6 @@ pub const SH_HEAD_KEY_LEN: usize = 16;
 pub const SH_HEAD_VALUE_LEN: usize = 8;
 /// On-disk head slot size.
 pub const SH_HEAD_SLOT_SIZE: usize = SH_HEAD_KEY_LEN + SH_HEAD_VALUE_LEN;
-/// High bit marks non-inline head value (paged). Same value as [`SH_FLAG_BIT`].
-pub const SH_SLAB_MARKER: u64 = 1u64 << 63;
 /// Alloc header magic after the RBT1 file header.
 pub const SH_ALLOC_MAGIC: [u8; 4] = *b"SHAL";
 /// v3 = schema 15 (slabs + combined RBT1/SHAL prefix). v2 = schema-14 pages. v1 = schema-13.
@@ -67,7 +59,7 @@ pub const fn slab_bytes(class: u8) -> u64 {
     16u64 << class
 }
 
-/// Durable head value for one scripthash key (16 B on disk).
+/// Durable head value for one scripthash key (pack8, 8 B on disk).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ShHeadValue {
     Empty,
@@ -113,81 +105,6 @@ impl ShHeadValue {
 
     pub fn is_slab(&self) -> bool {
         matches!(self, ShHeadValue::Slab { .. })
-    }
-
-    pub fn encode(&self) -> [u8; 16] {
-        let mut out = [0u8; 16];
-        match self {
-            ShHeadValue::Empty => {}
-            ShHeadValue::Inline { entries, used } => {
-                let w0 = if *used >= 1 { entries[0].0 } else { 0 };
-                debug_assert_eq!(w0 & SH_SLAB_MARKER, 0, "fk must not set flag bit");
-                out[0..8].copy_from_slice(&w0.to_le_bytes());
-                out[8..16].copy_from_slice(&0u64.to_le_bytes());
-            }
-            ShHeadValue::Slab { class, used, off } => {
-                out = sh_encode_slab_head(*class, *used, *off)
-                    .expect("slab head encode (fields validated at write)");
-            }
-            ShHeadValue::Paged {
-                first_page,
-                last_page,
-            } => {
-                out = sh_encode_paged_head(*first_page, *last_page)
-                    .expect("paged head encode (offs validated at write)");
-            }
-            ShHeadValue::Extent { last_page } => {
-                out = sh_encode_paged_head(*last_page, *last_page)
-                    .expect("extent 16 B encode uses last as first (durable path is pack8)");
-            }
-        }
-        out
-    }
-
-    pub fn decode(buf: &[u8]) -> Result<Self, StoreError> {
-        if buf.len() < 16 {
-            return Err(StoreError::Corrupt("short scripthash head value"));
-        }
-        let w0 = u64::from_le_bytes(buf[0..8].try_into().unwrap());
-        let w1 = u64::from_le_bytes(buf[8..16].try_into().unwrap());
-        if w0 == 0 && w1 == 0 {
-            return Ok(ShHeadValue::Empty);
-        }
-        // Schema-14 paged: w0 flagged, w1 clear, both payloads non-zero page offs.
-        // Do **not** sniff "legacy slab" from offset shape: large `scripthash.body`
-        // page offsets (e.g. class<<32 | 4096) collide with schema-13 packing and
-        // false-positive mid warm-apply. Schema-13 stores with a durable SH index
-        // are refused at store open (`meta`); empty-SH 13→14 upgrades wipe/rebuild.
-        match sh_head_value_mode(w0, w1)? {
-            ShHeadValueMode::Empty => Ok(ShHeadValue::Empty),
-            ShHeadValueMode::Inline => {
-                let e0 = Fk(sh_word_payload(w0));
-                if e0.is_null() {
-                    return Err(StoreError::Corrupt("inline null first fk"));
-                }
-                if sh_word_payload(w1) != 0 {
-                    return Err(StoreError::Corrupt("schema 18 inline holds one fk"));
-                }
-                Ok(ShHeadValue::inline_one(e0))
-            }
-            ShHeadValueMode::Slab => {
-                let (class, used, off) = sh_decode_slab_head(
-                    buf.try_into()
-                        .map_err(|_| StoreError::Corrupt("short scripthash head value"))?,
-                )?;
-                Ok(ShHeadValue::Slab { class, used, off })
-            }
-            ShHeadValueMode::Paged => {
-                let (first, last) = sh_decode_paged_head(
-                    buf.try_into()
-                        .map_err(|_| StoreError::Corrupt("short scripthash head value"))?,
-                )?;
-                Ok(ShHeadValue::Paged {
-                    first_page: first,
-                    last_page: last,
-                })
-            }
-        }
     }
 
     pub fn inline_one(fk: Fk) -> Self {
@@ -327,50 +244,26 @@ mod tests {
     fn head_value_roundtrip_inline_paged() {
         let e0 = Fk(3);
         let inline = ShHeadValue::inline_one(e0);
-        assert_eq!(ShHeadValue::decode(&inline.encode()).unwrap(), inline);
-
-        let one = ShHeadValue::inline_one(e0);
-        assert_eq!(ShHeadValue::decode(&one.encode()).unwrap(), one);
+        assert_eq!(unpack8(pack8(&inline).unwrap()).unwrap(), inline);
 
         let paged = ShHeadValue::paged(4096, 8192);
-        assert_eq!(ShHeadValue::decode(&paged.encode()).unwrap(), paged);
+        match unpack8(pack8(&paged).unwrap()).unwrap() {
+            ShHeadValue::Paged {
+                first_page: 0,
+                last_page: 8192,
+            } => {}
+            other => panic!("{other:?}"),
+        }
 
         let slab = ShHeadValue::slab(1, 5, 4096);
-        assert_eq!(ShHeadValue::decode(&slab.encode()).unwrap(), slab);
+        assert_eq!(unpack8(pack8(&slab).unwrap()).unwrap(), slab);
         assert_eq!(slab.used(), 5);
         assert!(slab.is_slab());
         assert!(!slab.is_paged());
 
-        assert!(ShHeadValue::decode(&ShHeadValue::Empty.encode())
+        assert!(unpack8(pack8(&ShHeadValue::Empty).unwrap())
             .unwrap()
             .is_empty());
-    }
-
-    #[test]
-    fn paged_offsets_that_look_like_legacy_slab_still_decode() {
-        // Regression: body offs such as (10<<32)|4096 used to trip a slab sniffer
-        // and abort warm apply on multi‑GiB scripthash.body.
-        let first = (10u64 << 32) | 4096;
-        let last = first + 4096;
-        let paged = ShHeadValue::paged(first, last);
-        let got = ShHeadValue::decode(&paged.encode()).unwrap();
-        assert_eq!(got, paged);
-        // Historical slab packing shape also decodes as paged (open refuses schema-13
-        // durable SH; no per-slot dual-read).
-        let mut slab_shaped = [0u8; 16];
-        let w0 = SH_SLAB_MARKER | (1u64 << 32) | 5;
-        slab_shaped[0..8].copy_from_slice(&w0.to_le_bytes());
-        slab_shaped[8..16].copy_from_slice(&4112u64.to_le_bytes());
-        match ShHeadValue::decode(&slab_shaped).unwrap() {
-            ShHeadValue::Paged {
-                first_page,
-                last_page,
-            } => {
-                assert_eq!(first_page, (1u64 << 32) | 5);
-                assert_eq!(last_page, 4112);
-            }
-            other => panic!("expected paged, got {other:?}"),
-        }
     }
 
     #[test]
@@ -439,10 +332,6 @@ mod tests {
     #[test]
     fn layout_error_paths() {
         assert!(Fk::NULL.is_null());
-        assert!(matches!(
-            ShHeadValue::decode(&[0u8; 8]),
-            Err(StoreError::Corrupt(_))
-        ));
         let one = ShHeadValue::inline_one(Fk(9));
         assert_eq!(one.inline_fks(), vec![Fk(9)]);
         assert!(ShHeadValue::Empty.inline_entries().is_empty());
@@ -458,15 +347,11 @@ mod tests {
         assert!(!one.is_paged());
         let two = ShHeadValue::slab(0, 2, 4096);
         assert_eq!(two.used(), 2);
-        // used=0 inline encodes as empty words.
         let zero_inline = ShHeadValue::Inline {
             entries: [Fk::NULL; SH_INLINE_CAP],
             used: 0,
         };
-        assert_eq!(
-            ShHeadValue::decode(&zero_inline.encode()).unwrap(),
-            ShHeadValue::Empty
-        );
+        assert!(matches!(pack8(&zero_inline), Err(StoreError::Corrupt(_))));
         let paged = ShHeadValue::paged(4096, 8192);
         assert_eq!(paged.used(), u32::MAX);
         assert!(paged.is_paged());
@@ -480,20 +365,15 @@ mod tests {
     }
 
     #[test]
-    fn decode_inline_null_fk_errors() {
-        // Non-zero first word with payload 0 (null fk) after mode decode.
-        // Word without flag, payload 0 → null first.
-        let mut bad = [0u8; 16];
-        // w0 = 0 is empty; use payload that mode treats as inline with null.
-        // Inline mode: non-zero words without slab/page flags.
-        // First fk payload 0 with second non-zero is invalid.
-        bad[0..8].copy_from_slice(&0u64.to_le_bytes());
-        bad[8..16].copy_from_slice(&3u64.to_le_bytes());
-        // w0==0 && w1!=0: may be mode-dependent; exercise decode.
-        let _ = ShHeadValue::decode(&bad);
-
-        // Explicit null first via payload 0 in a non-empty-looking layout is
-        // hard without sh_head_value_mode; at least hit short-buffer again.
-        assert!(ShHeadValue::decode(&[0u8; 15]).is_err());
+    fn unpack8_bad_mode_errors() {
+        let slab_used_inline = (1u64 << SH8_MODE_SHIFT) | (4096 & SH8_OFF_MASK);
+        assert!(matches!(
+            unpack8(slab_used_inline),
+            Err(StoreError::Corrupt(_))
+        ));
+        assert!(matches!(
+            unpack8(2u64 << SH8_MODE_SHIFT),
+            Err(StoreError::Corrupt(_))
+        ));
     }
 }

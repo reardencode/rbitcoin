@@ -53,16 +53,6 @@ pub struct WriteOp<'a> {
     pub result: i32,
 }
 
-/// One page RMW slot for [`page_rmw_pipelined`]: pread into `buf`, apply, pwrite.
-///
-/// Test / reusable primitive only — production `tx.head` insert uses other paths.
-#[cfg(test)]
-pub struct PageRmw<'a> {
-    pub fd: IoHandle,
-    pub offset: u64,
-    pub buf: &'a mut [u8],
-}
-
 static URING_MODE: AtomicU8 = AtomicU8::new(0); // 0 unknown, 1 on, 2 off
 static WORKERS: AtomicUsize = AtomicUsize::new(0);
 static URING_FAIL_LOGGED: AtomicBool = AtomicBool::new(false);
@@ -101,15 +91,14 @@ pub fn io_uring_enabled() -> bool {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum IoToken {
+pub(crate) enum IoToken {
     Uring,
     Pool,
     Iocp,
     Pread,
 }
 
-fn parse_io_token() -> Option<IoToken> {
-    let s = std::env::var("RBITCOIN_IO").ok()?;
+pub(crate) fn parse_io_token_str(s: &str) -> Option<IoToken> {
     match s.trim().to_ascii_lowercase().as_str() {
         "uring" | "io_uring" => Some(IoToken::Uring),
         "pool" => Some(IoToken::Pool),
@@ -117,6 +106,12 @@ fn parse_io_token() -> Option<IoToken> {
         "pread" | "fd" | "libc" | "pwrite" => Some(IoToken::Pread),
         _ => None,
     }
+}
+
+fn parse_io_token() -> Option<IoToken> {
+    std::env::var("RBITCOIN_IO")
+        .ok()
+        .and_then(|s| parse_io_token_str(&s))
 }
 
 /// Backend [`crate::uring_session::UringSession::try_open`] should open.
@@ -251,35 +246,6 @@ fn test_note_pwrite_wave(n: usize) {
 #[cfg(test)]
 pub fn test_take_pwrite_waves() -> Vec<usize> {
     PWRITE_WAVES.with(|c| std::mem::take(&mut *c.borrow_mut()))
-}
-
-/// Pipelined page RMW on the thread-local ring:
-///
-/// 1. Submit page preads (fill ring up to DEFAULT_ENTRIES).
-/// 2. On each read CQE: run `apply(page_index, buf)` — mutate in place; return
-///    `true` if the page is dirty and needs write-back.
-/// 3. Immediately submit dirty pages for pwrite; keep free slots filled with
-///    more reads when work remains.
-///
-/// Returns `false` if io_uring is unavailable or the ring path fails (caller
-/// should fall back). `apply` is only invoked after a successful full-page read.
-/// When `apply` returns `false` (clean / abort), that page is not written.
-///
-/// On non-Linux or `RBITCOIN_IO=pread`, returns `false` immediately.
-///
-/// Reusable primitive for tests; `tx.head` insert is a separate production path.
-#[cfg(test)]
-pub fn page_rmw_pipelined(
-    pages: &mut [PageRmw<'_>],
-    apply: impl FnMut(usize, &mut [u8]) -> bool,
-) -> bool {
-    if pages.is_empty() {
-        return true;
-    }
-    if !io_uring_enabled() {
-        return false;
-    }
-    page_rmw_pipelined_uring(pages, apply)
 }
 
 /// Thread-local bulk ring via [`crate::uring_session::with_thread_local`].
@@ -598,179 +564,6 @@ fn finish_pwrite_wave(ops: &mut [WriteOp<'_>]) -> bool {
     !any_fail
 }
 
-#[cfg(test)]
-fn rmw_ud(kind: u8, epoch: u16, i: usize) -> u64 {
-    crate::uring_session::pack_ud(kind, epoch, i as u32)
-}
-
-#[cfg(test)]
-fn page_rmw_pipelined_uring(
-    pages: &mut [PageRmw<'_>],
-    mut apply: impl FnMut(usize, &mut [u8]) -> bool,
-) -> bool {
-    with_bulk_session(|session| page_rmw_on_session(session, pages, &mut apply)).unwrap_or(false)
-}
-
-#[cfg(test)]
-fn page_rmw_on_session(
-    session: &mut crate::uring_session::UringSession,
-    pages: &mut [PageRmw<'_>],
-    apply: &mut dyn FnMut(usize, &mut [u8]) -> bool,
-) -> bool {
-    if session.begin_batch().is_err() {
-        return false;
-    }
-    let epoch = session.epoch();
-    let n = pages.len();
-    // 0 = need read, 1 = read in flight, 2 = need write, 3 = write in flight, 4 = done
-    let mut state = vec![0u8; n];
-    let mut need_read = n;
-    let mut need_write = 0usize;
-    let mut done = 0usize;
-    let mut next_read = 0usize;
-
-    while done < n {
-        let mut submitted = false;
-
-        if need_write > 0 && session.free_sq() > 0 {
-            for i in 0..n {
-                if session.free_sq() == 0 {
-                    break;
-                }
-                if state[i] != 2 {
-                    continue;
-                }
-                if pages[i].buf.is_empty() {
-                    state[i] = 4;
-                    need_write -= 1;
-                    done += 1;
-                    continue;
-                }
-                let fd = pages[i].fd;
-                let offset = pages[i].offset;
-                if session
-                    .push_pwrite(
-                        fd,
-                        offset,
-                        pages[i].buf,
-                        rmw_ud(crate::uring_session::KIND_RMW_WRITE, epoch, i),
-                    )
-                    .is_err()
-                {
-                    break;
-                }
-                state[i] = 3;
-                need_write -= 1;
-                submitted = true;
-            }
-        }
-
-        while need_read > 0 && session.free_sq() > 0 && next_read < n {
-            while next_read < n && state[next_read] != 0 {
-                next_read += 1;
-            }
-            if next_read >= n {
-                break;
-            }
-            let i = next_read;
-            if pages[i].buf.is_empty() {
-                state[i] = 4;
-                need_read -= 1;
-                done += 1;
-                next_read += 1;
-                continue;
-            }
-            let fd = pages[i].fd;
-            let offset = pages[i].offset;
-            if session
-                .push_pread(
-                    fd,
-                    offset,
-                    pages[i].buf,
-                    rmw_ud(crate::uring_session::KIND_RMW_READ, epoch, i),
-                )
-                .is_err()
-            {
-                break;
-            }
-            state[i] = 1;
-            need_read -= 1;
-            next_read += 1;
-            submitted = true;
-        }
-
-        if submitted {
-            session.sync_submission();
-        }
-
-        if session.in_flight() == 0 {
-            break;
-        }
-
-        let mut events = match session.harvest_ready() {
-            Ok(c) => c,
-            Err(_) => {
-                let _ = session.drain_all();
-                return false;
-            }
-        };
-        if events.is_empty() {
-            if session.submit_and_wait_one().is_err() {
-                let _ = session.drain_all();
-                return false;
-            }
-            events = match session.harvest_ready() {
-                Ok(c) => c,
-                Err(_) => {
-                    let _ = session.drain_all();
-                    return false;
-                }
-            };
-            if events.is_empty() {
-                continue;
-            }
-        } else if session.submit().is_err() {
-            let _ = session.drain_all();
-            return false;
-        }
-
-        for (ud, res) in events {
-            let (kind, _ep, slot) = crate::uring_session::unpack_ud(ud);
-            let i = slot as usize;
-            if i >= n {
-                continue;
-            }
-            if kind == crate::uring_session::KIND_RMW_WRITE {
-                if res < 0 || res as usize != pages[i].buf.len() {
-                    let _ = session.drain_all();
-                    return false;
-                }
-                state[i] = 4;
-                done += 1;
-            } else if kind == crate::uring_session::KIND_RMW_READ {
-                if res < 0 || res as usize != pages[i].buf.len() {
-                    let _ = session.drain_all();
-                    return false;
-                }
-                let dirty = apply(i, pages[i].buf);
-                if dirty {
-                    state[i] = 2;
-                    need_write += 1;
-                } else {
-                    state[i] = 4;
-                    done += 1;
-                }
-            } else {
-                let _ = session.drain_all();
-                return false;
-            }
-        }
-    }
-
-    let _ = session.drain_all();
-    done == n && need_read == 0 && need_write == 0
-}
-
 fn pread_batch_fallback(ops: &mut [ReadOp<'_>]) {
     for op in ops.iter_mut() {
         op.result = i32::MIN;
@@ -844,53 +637,6 @@ fn pwrite_one(op: &mut WriteOp<'_>) {
     op.result = got as i32;
 }
 
-/// Sequential page RMW (pread → apply → pwrite). Test helper when io_uring is off.
-#[cfg(test)]
-pub fn page_rmw_serial(
-    pages: &mut [PageRmw<'_>],
-    mut apply: impl FnMut(usize, &mut [u8]) -> bool,
-) -> bool {
-    for (i, page) in pages.iter_mut().enumerate() {
-        if page.buf.is_empty() {
-            continue;
-        }
-        let fd = page.fd;
-        let offset = page.offset;
-        let len = page.buf.len();
-        let read_ok = {
-            let mut ro = ReadOp {
-                fd,
-                offset,
-                buf: page.buf,
-                result: i32::MIN,
-            };
-            pread_one(&mut ro);
-            ro.result >= 0 && ro.result as usize == len
-        };
-        if !read_ok {
-            return false;
-        }
-        let dirty = apply(i, page.buf);
-        if !dirty {
-            continue;
-        }
-        let write_ok = {
-            let mut wo = WriteOp {
-                fd,
-                offset,
-                buf: page.buf,
-                result: i32::MIN,
-            };
-            pwrite_one(&mut wo);
-            wo.result >= 0 && wo.result as usize == len
-        };
-        if !write_ok {
-            return false;
-        }
-    }
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -922,7 +668,7 @@ mod tests {
         assert!(finish_pwrite_wave(&mut ops));
     }
 
-    /// Dense surface: empty ops, empty bufs, serial RMW, multi-worker fallback,
+    /// Dense surface: empty ops, empty bufs, multi-worker fallback,
     /// workers/io_uring helpers (without racing env with parallel tests for mode).
     #[test]
     fn bulk_io_edges_empty_serial_rmw_workers() {
@@ -933,8 +679,6 @@ mod tests {
         // Empty batches
         pread_batch(&mut []);
         pwrite_batch(&mut []);
-        assert!(page_rmw_pipelined(&mut [], |_, _| true));
-        assert!(page_rmw_serial(&mut [], |_, _| true));
 
         let dir = std::env::temp_dir().join(format!(
             "rbitcoin-bulk-edge-{}",
@@ -949,12 +693,7 @@ mod tests {
         let data: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
         f.write_all(&data).unwrap();
         f.flush().unwrap();
-        // Read+write so serial page RMW pwrite succeeds.
-        let f = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-            .unwrap();
+        let f = std::fs::File::open(&path).unwrap();
         let fd = crate::io_handle::IoHandle::from_file(&f);
 
         // Empty bufs
@@ -993,46 +732,6 @@ mod tests {
             assert_eq!(op.result, 64, "result={}", op.result);
         }
         assert_eq!(&bufs[0][..], &data[0..64]);
-
-        // Serial page RMW with clean (apply false) + dirty pages
-        let mut p0 = vec![0u8; 32];
-        let mut p1 = vec![0u8; 32];
-        let mut p_empty: Vec<u8> = vec![];
-        let mut pages = [
-            PageRmw {
-                fd,
-                offset: 0,
-                buf: &mut p0,
-            },
-            PageRmw {
-                fd,
-                offset: 32,
-                buf: &mut p1,
-            },
-            PageRmw {
-                fd,
-                offset: 64,
-                buf: &mut p_empty,
-            },
-        ];
-        assert!(page_rmw_serial(&mut pages, |i, buf| {
-            if i == 0 {
-                buf[0] ^= 0xff;
-                true
-            } else {
-                false // clean — no write
-            }
-        }));
-        // Verify dirty page written
-        let mut check = [0u8; 1];
-        let mut ro = ReadOp {
-            fd,
-            offset: 0,
-            buf: &mut check,
-            result: i32::MIN,
-        };
-        pread_one(&mut ro);
-        assert_eq!(check[0], data[0] ^ 0xff);
 
         // pread_one short read past EOF
         let mut past = [0u8; 16];
@@ -1265,41 +964,6 @@ mod tests {
         assert_eq!(&got[0..50], &d0[..]);
         assert_eq!(&got[50..100], &d1[..]);
         assert_eq!(&got[100..150], &d2[..]);
-
-        // Page RMW pipeline: read → flip byte → write-back.
-        let mut pages_data: Vec<Vec<u8>> = (0..3).map(|_| vec![0u8; 50]).collect();
-        let mut pages: Vec<PageRmw<'_>> = pages_data
-            .iter_mut()
-            .enumerate()
-            .map(|(i, b)| PageRmw {
-                fd,
-                offset: (i * 50) as u64,
-                buf: b.as_mut_slice(),
-            })
-            .collect();
-        let rmw_ok = if io_uring_enabled() {
-            page_rmw_pipelined(&mut pages, |_i, buf| {
-                for b in buf.iter_mut() {
-                    *b = b.wrapping_add(10);
-                }
-                true
-            })
-        } else {
-            page_rmw_serial(&mut pages, |_i, buf| {
-                for b in buf.iter_mut() {
-                    *b = b.wrapping_add(10);
-                }
-                true
-            })
-        };
-        assert!(rmw_ok);
-        drop(pages);
-        let mut got2 = vec![0u8; 150];
-        let n2 = fd.pread(0, &mut got2);
-        assert_eq!(n2, 150);
-        assert_eq!(got2[0], 11);
-        assert_eq!(got2[50], 12);
-        assert_eq!(got2[100], 13);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

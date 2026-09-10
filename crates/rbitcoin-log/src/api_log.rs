@@ -164,10 +164,12 @@ mod tests {
     #[test]
     fn api_stderr_line_is_trace() {
         let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = crate::take_last_log();
+        crate::capture_logs(true);
         api_call("electrum", "127.0.0.1:1", "server.ping", "[]", 3, None);
-        let (level, msg) = crate::take_last_log().expect("api_call stderr");
-        assert_eq!(level, crate::Level::Trace, "{msg}");
+        let logs = crate::take_logs();
+        crate::capture_logs(false);
+        let (level, msg) = logs.last().expect("api_call stderr");
+        assert_eq!(*level, crate::Level::Trace, "{msg}");
         assert!(msg.contains("api: electrum"), "{msg}");
         assert!(msg.contains("server.ping"), "{msg}");
     }

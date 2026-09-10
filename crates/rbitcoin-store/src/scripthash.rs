@@ -1,8 +1,8 @@
 //! Class B scripthash multimap (Electrum: SHA256(scriptPubKey)).
 //!
-//! Hybrid layout (schema 15): head key = 16 B hash prefix; value = two u64s
-//! (≤2 inline, geometric **slab**, or megakey first/last **4 KiB page** offs).
-//! Body slabs pack ULEB128 fk deltas; vouts expanded from Class A at query.
+//! Hybrid layout: head key = 16 B hash prefix; value = pack8 (inline / slab /
+//! paged / extent). Body slabs pack ULEB128 fk deltas; vouts expanded from
+//! Class A at query.
 
 use crate::compact::uleb128_len;
 use crate::error::StoreError;

@@ -81,8 +81,9 @@ pub const MAX_PACKAGE_COUNT: usize = 25;
 pub const MAX_PACKAGE_WEIGHT: u64 = 404_000;
 /// Default mempool weight budget (WU) — ~75 MvB class; eviction by worst chunk.
 pub const DEFAULT_MAX_MEMPOOL_WEIGHT: u64 = 300_000_000;
-/// Incremental relay feerate for RBF (same as Libre min: 0.1 sat/vB = 100 sat/kvB).
-pub const INCREMENTAL_RELAY_FEE_RATE_SAT_PER_KVB: u64 = 100;
+/// Incremental relay feerate for RBF (same as Libre min).
+pub const INCREMENTAL_RELAY_FEE_RATE_SAT_PER_KVB: u64 =
+    rbitcoin_consensus::policy::MIN_RELAY_FEE_RATE_SAT_PER_KVB;
 /// Pure replace-by-fee-rate ratio (Libre Relay v27.1+): **1.25×** = 5/4.
 pub const RBFR_RATIO_NUM: u64 = 5;
 pub const RBFR_RATIO_DEN: u64 = 4;

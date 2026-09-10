@@ -730,7 +730,7 @@ fn multi_hop_bad_prev_applies_when_full_path_bodies_ready() {
     );
     assert_eq!(st.height_to_hash.get(&1), Some(&w1.block_hash()));
     assert_eq!(st.height_to_hash.get(&3), Some(&w3.block_hash()));
-    assert!(st.reorg.awaiting().is_none());
+
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -843,7 +843,7 @@ fn multi_hop_bad_prev_densifies_full_path_and_reorgs() {
     assert_eq!(st.height_to_hash.get(&1), Some(&w1.block_hash()));
     assert_eq!(st.height_to_hash.get(&2), Some(&w2.block_hash()));
     assert_eq!(st.height_to_hash.get(&3), Some(&w3.block_hash()));
-    assert!(st.reorg.awaiting().is_none());
+
     assert!(st.reorg.need_getdata().is_empty());
     assert!(
         !st.body.is_missing(&w3.block_hash()),
@@ -1421,7 +1421,7 @@ fn bad_prev_awaits_winner_body_then_reorgs_when_held() {
     );
     assert_eq!(st.height_to_hash.get(&1), Some(&win.block_hash()));
     assert_eq!(st.height_to_hash.get(&2), Some(&ext.block_hash()));
-    assert!(st.reorg.awaiting().is_none());
+
     assert!(st.reorg.need_getdata().is_empty());
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -1527,7 +1527,7 @@ fn bad_prev_after_take_raw_classifies() {
     assert_eq!(hub.tip_height(), Some(0));
     assert_eq!(st.height_to_hash.get(&1), Some(&win.block_hash()));
     assert_eq!(st.height_to_hash.get(&2), Some(&ext.block_hash()));
-    assert!(st.reorg.awaiting().is_none());
+
     assert!(st.reorg.need_getdata().is_empty());
     assert!(!st.body.is_rejected(&ext.block_hash()));
     let _ = std::fs::remove_dir_all(dir);
@@ -1631,7 +1631,7 @@ fn bad_prev_evicts_slot_rewinds_taken() {
         !st.body.is_missing(&ext.block_hash()),
         "BadPrev must not mark_missing the winning-path hash"
     );
-    assert!(st.reorg.awaiting().is_none());
+
     assert!(st.reorg.need_getdata().is_empty());
     let _ = std::fs::remove_dir_all(dir);
 }

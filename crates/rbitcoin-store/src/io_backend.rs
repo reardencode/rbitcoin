@@ -30,19 +30,21 @@ pub enum WriteIoBackend {
 }
 
 fn parse_read_token(s: &str) -> Option<ReadIoBackend> {
-    match s.trim().to_ascii_lowercase().as_str() {
-        "uring" | "io_uring" | "pool" | "iocp" => Some(ReadIoBackend::Uring),
-        "pread" | "fd" | "libc" | "pwrite" => Some(ReadIoBackend::Pread),
-        _ => None,
-    }
+    Some(match crate::bulk_io::parse_io_token_str(s)? {
+        crate::bulk_io::IoToken::Uring
+        | crate::bulk_io::IoToken::Pool
+        | crate::bulk_io::IoToken::Iocp => ReadIoBackend::Uring,
+        crate::bulk_io::IoToken::Pread => ReadIoBackend::Pread,
+    })
 }
 
 fn parse_write_token(s: &str) -> Option<WriteIoBackend> {
-    match s.trim().to_ascii_lowercase().as_str() {
-        "uring" | "io_uring" | "pool" | "iocp" => Some(WriteIoBackend::Uring),
-        "pwrite" | "pread" | "fd" | "libc" => Some(WriteIoBackend::Pwrite),
-        _ => None,
-    }
+    Some(match crate::bulk_io::parse_io_token_str(s)? {
+        crate::bulk_io::IoToken::Uring
+        | crate::bulk_io::IoToken::Pool
+        | crate::bulk_io::IoToken::Iocp => WriteIoBackend::Uring,
+        crate::bulk_io::IoToken::Pread => WriteIoBackend::Pwrite,
+    })
 }
 
 fn global_read_from_env() -> Option<ReadIoBackend> {

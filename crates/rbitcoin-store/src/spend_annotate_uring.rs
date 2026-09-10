@@ -290,24 +290,10 @@ fn next_ready(
     None
 }
 
-/// Annotate backend for pure-write path (Class A body never mmap'd).
-///
-/// Selected via global `RBITCOIN_IO` (see [`crate::io_backend`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpendAnnBackend {
-    /// Page-RMW via io_uring (pread page, poke 8 B slots, pwrite page).
-    Uring,
-    /// Page-RMW via libc pread + pwrite (positional, no ring).
-    Pwrite,
-}
-
 /// Resolve pure-write annotate backend from env hierarchy.
 #[inline]
-pub fn spend_ann_backend() -> SpendAnnBackend {
-    match crate::io_backend::write_io_backend() {
-        crate::io_backend::WriteIoBackend::Uring => SpendAnnBackend::Uring,
-        crate::io_backend::WriteIoBackend::Pwrite => SpendAnnBackend::Pwrite,
-    }
+pub fn spend_ann_backend() -> crate::io_backend::WriteIoBackend {
+    crate::io_backend::write_io_backend()
 }
 
 /// Decision from structural snapshot + spend_fk (no body read).
@@ -454,7 +440,7 @@ pub fn put_spend_batch_by_abs_meta_known(
     spenders: &SpenderTable,
     abs_edges: &[(u64, Fk, u32, Fk)],
     known: &[(Fk, u8)],
-    backend: SpendAnnBackend,
+    backend: crate::io_backend::WriteIoBackend,
 ) -> Result<Vec<(Fk, u32, Fk)>, StoreError> {
     if abs_edges.is_empty() {
         return Ok(Vec::new());
@@ -493,8 +479,12 @@ pub fn put_spend_batch_by_abs_meta_known(
     }
 
     match backend {
-        SpendAnnBackend::Uring => put_spend_batch_pure_write_uring(txs, &writes, cold),
-        SpendAnnBackend::Pwrite => put_spend_batch_pure_write_pwrite(txs, &writes, cold),
+        crate::io_backend::WriteIoBackend::Uring => {
+            put_spend_batch_pure_write_uring(txs, &writes, cold)
+        }
+        crate::io_backend::WriteIoBackend::Pwrite => {
+            put_spend_batch_pure_write_pwrite(txs, &writes, cold)
+        }
     }
 }
 
@@ -741,7 +731,10 @@ mod tests {
 
     #[test]
     fn pure_write_known_null_mmap_and_uring() {
-        for backend in [SpendAnnBackend::Uring, SpendAnnBackend::Pwrite] {
+        for backend in [
+            crate::io_backend::WriteIoBackend::Uring,
+            crate::io_backend::WriteIoBackend::Pwrite,
+        ] {
             let (dir, t, spenders) = temp_table();
             let (cfk, off, _len) = put_one(&t);
             let abs = crate::tx_table::spent_abs(off, 0);
@@ -785,7 +778,7 @@ mod tests {
             &spenders,
             &[(abs, cfk, 0, Fk(55))],
             &[(field, flags)],
-            SpendAnnBackend::Uring,
+            crate::io_backend::WriteIoBackend::Uring,
         )
         .unwrap();
         assert!(cold.is_empty());
@@ -837,7 +830,7 @@ mod tests {
             &spenders,
             &[(abs, cfk, 0, sfk)],
             &[(field, flags)],
-            SpendAnnBackend::Pwrite,
+            crate::io_backend::WriteIoBackend::Pwrite,
         )
         .unwrap();
         // Second time with known field==sfk → skip
@@ -846,7 +839,7 @@ mod tests {
             &spenders,
             &[(abs, cfk, 0, sfk)],
             &[(sfk, 0)],
-            SpendAnnBackend::Pwrite,
+            crate::io_backend::WriteIoBackend::Pwrite,
         )
         .unwrap();
         let bulk2 = t.get_spender_meta_at_abs_batch(&[abs]).unwrap();
@@ -857,7 +850,10 @@ mod tests {
     /// Two vouts on one page: both land; a third slot on that page is unchanged.
     #[test]
     fn pure_write_two_vouts_same_page_preserves_neighbor() {
-        for backend in [SpendAnnBackend::Uring, SpendAnnBackend::Pwrite] {
+        for backend in [
+            crate::io_backend::WriteIoBackend::Uring,
+            crate::io_backend::WriteIoBackend::Pwrite,
+        ] {
             let (dir, t, spenders) = temp_table();
             let (cfk, off, _len) = put_n_outs(&t, 3, 0x22);
             let abs0 = crate::tx_table::spent_abs(off, 0);
@@ -923,7 +919,10 @@ mod tests {
     /// Vouts whose abs straddle a 4 KiB page both persist.
     #[test]
     fn pure_write_two_pages_both_land() {
-        for backend in [SpendAnnBackend::Uring, SpendAnnBackend::Pwrite] {
+        for backend in [
+            crate::io_backend::WriteIoBackend::Uring,
+            crate::io_backend::WriteIoBackend::Pwrite,
+        ] {
             let (dir, t, spenders) = temp_table();
             // 512 × 8 B from file offset 16 crosses 4096 (slot 510 starts at 4096).
             let (cfk, off, _len) = put_n_outs(&t, 512, 0x33);
@@ -970,7 +969,7 @@ mod tests {
             &spenders,
             &[(abs0, cfk, 0, Fk(3)), (abs2, cfk, 2, Fk(4))],
             &[k0, k2],
-            SpendAnnBackend::Uring,
+            crate::io_backend::WriteIoBackend::Uring,
         )
         .unwrap();
         assert!(cold.is_empty());

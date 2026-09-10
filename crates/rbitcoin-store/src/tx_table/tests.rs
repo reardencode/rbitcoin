@@ -1416,10 +1416,10 @@ fn get_output_spender_metas_at_one_walk() {
     );
     // Both backends must agree.
     let mmap = t
-        .get_spender_meta_at_abs_batch_backend(&abs, SpendMetaBackend::Pread)
+        .get_spender_meta_at_abs_batch_backend(&abs, crate::io_backend::ReadIoBackend::Pread)
         .unwrap();
     let uring = t
-        .get_spender_meta_at_abs_batch_backend(&abs, SpendMetaBackend::Uring)
+        .get_spender_meta_at_abs_batch_backend(&abs, crate::io_backend::ReadIoBackend::Uring)
         .unwrap();
     assert_eq!(mmap, bulk);
     assert_eq!(uring, bulk);

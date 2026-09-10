@@ -1,6 +1,6 @@
 use crate::chain::{ConfirmedTable, HeaderTxsTable, StrongTxTable};
 use crate::error::StoreError;
-use crate::hashhead::{HeadOpenOpts, HeadRole, HeadScale};
+use crate::hashhead::{HeadOpenOpts, HeadScale};
 use crate::header_table::{HeaderRecord, HeaderTable};
 use crate::height_fence::{HeightFence, MtpRing};
 use crate::point_table::{self, PointRecord};
@@ -138,7 +138,7 @@ impl StoreLayout {
 
     /// Header hash-head slot target (honors `RBITCOIN_HEAD_SLOTS_HEADER`).
     pub fn header_slots(&self) -> u64 {
-        crate::hashhead::initial_slots_for(HeadRole::Header, self.head_scale)
+        crate::hashhead::initial_slots_for(self.head_scale)
     }
 
     /// SH main shard count for this scale (1 Tiny, 64 Mainnet).
@@ -1041,7 +1041,7 @@ impl Store {
     pub fn get_spender_meta_at_abs_batch_backend(
         &self,
         abs_offs: &[u64],
-        backend: crate::SpendMetaBackend,
+        backend: crate::io_backend::ReadIoBackend,
     ) -> Result<Vec<Option<(Fk, u8)>>, StoreError> {
         self.txs
             .get_spender_meta_at_abs_batch_backend(abs_offs, backend)
@@ -1055,7 +1055,7 @@ impl Store {
         &self,
         abs_edges: &[(u64, Fk, u32, Fk)],
         known: &[(Fk, u8)],
-        backend: crate::spend_annotate_uring::SpendAnnBackend,
+        backend: crate::io_backend::WriteIoBackend,
     ) -> Result<Vec<(Fk, u32, Fk)>, StoreError> {
         self.txs
             .put_spend_batch_by_abs_meta_known(&self.spenders, abs_edges, known, backend)
@@ -1327,11 +1327,6 @@ impl Store {
     /// Class A+C copies (not in `confirmed[h]` header_txs). Point rows stay;
     /// they remain invisible to [`Self::spenders`] until re-confirm.
     pub fn repair_class_c_above_tip(&self) -> Result<u64, StoreError> {
-        self.repair_strong_not_on_fence()
-    }
-
-    /// Same as [`Self::repair_class_c_above_tip`] (fence is the only height oracle).
-    pub fn repair_orphan_class_c(&self) -> Result<u64, StoreError> {
         self.repair_strong_not_on_fence()
     }
 
@@ -3108,7 +3103,7 @@ mod tests {
     }
 
     /// Orphan Class C at tip height (second body not in confirmed header_txs)
-    /// must not count as confirmed-strong, and repair_orphan_class_c clears it.
+    /// must not count as confirmed-strong, and repair_class_c_above_tip clears it.
     #[test]
     fn orphan_class_c_at_tip_height_not_confirmed_strong_and_repairable() {
         let dir = tmp();
@@ -3130,22 +3125,22 @@ mod tests {
         );
         assert!(!s.is_confirmed_strong(Fk(4)).unwrap());
 
-        let n = s.repair_orphan_class_c().unwrap();
+        let n = s.repair_class_c_above_tip().unwrap();
         assert!(n >= 2, "cleared={n}");
         assert!(!s.strong_tx.is_strong(Fk(3)).unwrap());
         assert_eq!(s.tx_height_get(Fk(3)).unwrap(), None);
         assert!(s.is_confirmed_strong(Fk(1)).unwrap());
-        assert_eq!(s.repair_orphan_class_c().unwrap(), 0);
+        assert_eq!(s.repair_class_c_above_tip().unwrap(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// No tip → repair is a no-op; gapped orphans clear as separate runs.
     #[test]
-    fn repair_orphan_class_c_empty_tip_and_gapped_orphans() {
+    fn repair_class_c_above_tip_empty_tip_and_gapped_orphans() {
         let dir = tmp();
         {
             let s = Store::create_tiny(&dir).unwrap();
-            assert_eq!(s.repair_orphan_class_c().unwrap(), 0);
+            assert_eq!(s.repair_class_c_above_tip().unwrap(), 0);
             // Tip body 1..=2; orphans 5 and 10 (non-adjacent → two clear runs).
             s.confirmed.set(Height(0), Fk(1)).unwrap();
             s.header_txs.put_range(Fk(1), Fk(1), 2).unwrap();
@@ -3154,7 +3149,7 @@ mod tests {
             s.strong_tx.set_strong(Fk(5), Fk(99)).unwrap();
             s.strong_tx.set_strong(Fk(10), Fk(99)).unwrap();
             s.flush_class_c_tip().unwrap();
-            let n = s.repair_orphan_class_c().unwrap();
+            let n = s.repair_class_c_above_tip().unwrap();
             assert_eq!(n, 2, "cleared gapped orphans");
             assert!(!s.strong_tx.is_strong(Fk(5)).unwrap());
             assert!(!s.strong_tx.is_strong(Fk(10)).unwrap());
