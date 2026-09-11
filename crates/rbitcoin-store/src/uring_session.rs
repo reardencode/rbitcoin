@@ -662,14 +662,20 @@ impl UringSession {
         loop {
             let inflight = match &self.backend {
                 SessionBackend::Pool(pool) => pool.inflight(),
-                _ => 0,
+                #[cfg(target_os = "linux")]
+                SessionBackend::Uring(_) => 0,
+                #[cfg(windows)]
+                SessionBackend::Iocp(_) => 0,
             };
             if inflight == 0 {
                 let uds = match &mut self.backend {
                     SessionBackend::Pool(pool) => {
                         pool.harvest_ready().into_iter().map(|(ud, _)| ud).collect()
                     }
-                    _ => Vec::new(),
+                    #[cfg(target_os = "linux")]
+                    SessionBackend::Uring(_) => Vec::new(),
+                    #[cfg(windows)]
+                    SessionBackend::Iocp(_) => Vec::new(),
                 };
                 return self.apply_drain_cqes(uds);
             }
@@ -679,7 +685,10 @@ impl UringSession {
                     let _ = pool.wait_one_cqe_timeout(DRAIN_WINDOW);
                     pool.harvest_ready().into_iter().map(|(ud, _)| ud).collect()
                 }
-                _ => Vec::new(),
+                #[cfg(target_os = "linux")]
+                SessionBackend::Uring(_) => Vec::new(),
+                #[cfg(windows)]
+                SessionBackend::Iocp(_) => Vec::new(),
             };
             self.apply_drain_cqes(uds)?;
             let completed = before.saturating_sub(self.pending.len());
