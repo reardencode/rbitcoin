@@ -1245,3 +1245,100 @@ fn plan_epoch_stale_after_clear() {
     );
     assert!(!feed.plan_epoch_stale(99), "unknown height is not stale");
 }
+
+#[test]
+fn write_session_fault_is_engine_fault_and_requeue_puts_ready() {
+    use rbitcoin_consensus::ConsensusError;
+    use rbitcoin_store::StoreError;
+
+    let undrained = ConsensusError::Store(StoreError::Corrupt("invariant: io_uring undrained"));
+    assert_eq!(
+        super::ConfirmRejectClass::from_consensus(&undrained),
+        super::ConfirmRejectClass::EngineFault
+    );
+    let leftover = ConsensusError::Store(StoreError::Corrupt("invariant: io_uring leftover cqe"));
+    assert_eq!(
+        super::ConfirmRejectClass::from_consensus(&leftover),
+        super::ConfirmRejectClass::EngineFault
+    );
+    let io = ConsensusError::Store(StoreError::io("/tmp/x", std::io::Error::other("disk")));
+    assert_eq!(
+        super::ConfirmRejectClass::from_consensus(&io),
+        super::ConfirmRejectClass::EngineFault
+    );
+
+    let feed = ConfirmFeed::new();
+    let hash = bitcoin::BlockHash::from_byte_array([1u8; 32]);
+    {
+        let mut g = feed.inner.lock().unwrap();
+        g.inflight.insert(10);
+    }
+    feed.requeue_hashes(std::iter::once((10, hash)));
+    let g = feed.inner.lock().unwrap();
+    assert!(g.ready.contains_key(&10));
+    assert!(!g.inflight.contains(&10));
+}
+
+#[test]
+fn requeue_on_uring_recover_credits_then_skips_non_fault() {
+    let (_d, q) = rbitcoin_query::testutil::tiny_query_labeled("requeue-uring");
+    let feed = ConfirmFeed::new();
+    let hash = bitcoin::BlockHash::from_byte_array([3u8; 32]);
+    {
+        let mut g = feed.inner.lock().unwrap();
+        g.inflight.insert(7);
+    }
+    assert!(super::requeue_on_uring_recover(
+        &q,
+        &feed,
+        true,
+        "test",
+        std::iter::once((7, hash)),
+    ));
+    {
+        let g = feed.inner.lock().unwrap();
+        assert!(g.ready.contains_key(&7));
+        assert!(!g.inflight.contains(&7));
+    }
+    assert!(!super::requeue_on_uring_recover(
+        &q,
+        &feed,
+        false,
+        "test",
+        std::iter::empty(),
+    ));
+    assert_eq!(
+        q.uring_recover("again"),
+        rbitcoin_query::UringRecover::Exhausted
+    );
+}
+
+#[test]
+fn lookup_fault_policy_io_halt() {
+    use super::{LookupFaultAction, LookupFaultPolicy};
+    use rbitcoin_consensus::ConsensusError;
+    use rbitcoin_store::StoreError;
+
+    let mut p = LookupFaultPolicy::default();
+    let bp = ConsensusError::Store(StoreError::BudgetFull("io_uring SQ"));
+    assert_eq!(p.on_err(&bp), LookupFaultAction::Ignore);
+    let io = ConsensusError::Store(StoreError::io("/tmp/x", std::io::Error::other("disk")));
+    for _ in 0..7 {
+        assert_eq!(p.on_err(&io), LookupFaultAction::Warn);
+    }
+    assert_eq!(p.on_err(&io), LookupFaultAction::RejectEngineFault);
+    p.on_success();
+    assert_eq!(p.on_err(&io), LookupFaultAction::Warn);
+}
+
+#[test]
+fn lookup_ready_hash_none_when_missing() {
+    let feed = ConfirmFeed::new();
+    assert!(super::lookup_ready_hash(&feed, 10).is_none());
+    let h = bitcoin::BlockHash::from_byte_array([2u8; 32]);
+    {
+        let mut g = feed.inner.lock().unwrap();
+        g.ready.insert(10, (h, None));
+    }
+    assert_eq!(super::lookup_ready_hash(&feed, 10), Some(h));
+}

@@ -60,6 +60,12 @@ impl From<StoreError> for ConsensusError {
     }
 }
 
+impl ConsensusError {
+    pub fn is_uring_session_fault(&self) -> bool {
+        matches!(self, ConsensusError::Store(se) if se.is_uring_session_fault())
+    }
+}
+
 /// Core `SCRIPT_VERIFY_*` parenthetical for `*-script-verify-flag-failed (…)`.
 pub fn script_flag_paren(token: &str) -> &str {
     let inner = token.split(" txid=").next().unwrap_or(token);
@@ -155,6 +161,20 @@ mod tests {
             ConsensusError::from(StoreError::Cancelled("stop")),
             ConsensusError::Cancelled
         ));
+    }
+
+    #[test]
+    fn uring_session_fault_covers_leftover_and_submit() {
+        for m in [
+            "invariant: io_uring leftover cqe",
+            "io_uring submit failed",
+            "invariant: io_uring undrained",
+        ] {
+            let e = ConsensusError::Store(StoreError::Corrupt(m));
+            assert!(e.is_uring_session_fault(), "{m}");
+        }
+        assert!(!ConsensusError::Store(StoreError::NotFound).is_uring_session_fault());
+        assert!(!ConsensusError::PrevoutSpent.is_uring_session_fault());
     }
 
     #[test]

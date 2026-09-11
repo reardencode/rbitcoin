@@ -36,6 +36,47 @@ fn query_open_clears_strong_above_tip() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn uring_recover_credit_gap() {
+    assert!(uring_recover_credit(None, 0));
+    assert!(!uring_recover_credit(Some(0), 0));
+    assert!(!uring_recover_credit(Some(0), 144));
+    assert!(!uring_recover_credit(Some(0), 999));
+    assert!(uring_recover_credit(Some(0), 1000));
+    assert!(uring_recover_credit(Some(100), 1100));
+}
+
+#[test]
+fn uring_recover_credit_once_per_window_does_not_repair() {
+    let (_d, q) = temp_query("uring-recover");
+    let leftover = Fk(99);
+    q.store().strong_tx.set_strong(leftover, Fk(1)).unwrap();
+    q.store().flush_class_c_tip().unwrap();
+    assert!(q.store().strong_tx.is_strong(leftover).unwrap());
+    assert_eq!(q.uring_recover("test"), UringRecover::Recovered);
+    assert!(
+        q.store().strong_tx.is_strong(leftover).unwrap(),
+        "in-process recover must not mutate Class C; leftover strong waits for open repair"
+    );
+    q.store().strong_tx.set_strong(leftover, Fk(1)).unwrap();
+    q.store().flush_class_c_tip().unwrap();
+    assert_eq!(q.uring_recover("again"), UringRecover::Exhausted);
+}
+
+#[test]
+fn uring_recover_cas_second_claim_at_same_tip_is_exhausted() {
+    let (_d, q) = temp_query("uring-recover-cas");
+    assert_eq!(q.uring_recover("a"), UringRecover::Recovered);
+    assert_eq!(q.uring_recover("b"), UringRecover::Exhausted);
+}
+
+#[test]
+fn uring_recover_or_abort_takes_credit() {
+    let (_d, q) = temp_query("uring-recover-or-abort");
+    q.uring_recover_or_abort("test");
+    assert_eq!(q.uring_recover("again"), UringRecover::Exhausted);
+}
+
 fn temp_query(label: &str) -> (crate::testutil::TempDir, Query) {
     crate::testutil::tiny_query_labeled(label)
 }

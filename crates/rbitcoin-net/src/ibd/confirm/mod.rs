@@ -296,6 +296,11 @@ impl ConfirmFeed {
         self.cv.notify_one();
     }
 
+    pub(crate) fn requeue_hashes(&self, items: impl IntoIterator<Item = (u32, BlockHash)>) {
+        let batch: Vec<_> = items.into_iter().map(|(h, ha)| (h, ha, None)).collect();
+        self.requeue_wire(&batch);
+    }
+
     /// Write (or permanent reject) finished — height may be re-offered only after
     /// tip moves past it (or a future requeue path).
     pub(crate) fn finish(&self, heights: impl IntoIterator<Item = u32>) {
@@ -383,6 +388,9 @@ impl ConfirmRejectClass {
         {
             return Self::Cascade;
         }
+        if rbitcoin_store::StoreError::is_uring_session_fault_msg(&s) {
+            return Self::EngineFault;
+        }
         if s.contains("parent create_fk unresolved")
             || s.contains("spend annotate missing pin denserels")
             || s.contains("corrupt record")
@@ -421,6 +429,7 @@ impl ConfirmRejectClass {
             | ConsensusError::BadHeader(_)
             | ConsensusError::MissingPrevout => Self::ConsensusInvalid,
             ConsensusError::Store(StoreError::Cancelled(_)) => Self::Cancelled,
+            ConsensusError::Store(e) if e.is_uring_session_fault() => Self::EngineFault,
             ConsensusError::Store(StoreError::Io { .. }) => Self::EngineFault,
             ConsensusError::Store(StoreError::Corrupt(m)) => Self::from_err_str(m),
             ConsensusError::Store(_) => Self::EngineFault,
@@ -468,6 +477,68 @@ impl ConfirmRejectClass {
             self
         }
     }
+}
+
+fn requeue_on_uring_recover(
+    query: &rbitcoin_query::Query,
+    feed: &ConfirmFeed,
+    session_fault: bool,
+    reason: &'static str,
+    heights: impl IntoIterator<Item = (u32, BlockHash)>,
+) -> bool {
+    if !session_fault {
+        return false;
+    }
+    query.uring_recover_or_abort(reason);
+    feed.requeue_hashes(heights);
+    true
+}
+
+pub(crate) fn lookup_ready_hash(feed: &ConfirmFeed, height: u32) -> Option<BlockHash> {
+    feed.inner
+        .lock()
+        .ok()
+        .and_then(|g| g.ready.get(&height).map(|(h, _)| *h))
+}
+
+const LOOKUP_FAULT_HALT_AFTER: u32 = 8;
+
+#[derive(Debug, Default)]
+pub(crate) struct LookupFaultPolicy {
+    consecutive: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LookupFaultAction {
+    Ignore,
+    Warn,
+    RejectEngineFault,
+}
+
+impl LookupFaultPolicy {
+    pub(crate) fn on_success(&mut self) {
+        self.consecutive = 0;
+    }
+
+    pub(crate) fn on_err(&mut self, e: &rbitcoin_consensus::ConsensusError) -> LookupFaultAction {
+        use rbitcoin_consensus::ConsensusError;
+        let backpressure = matches!(e, ConsensusError::Store(se) if se.is_io_backpressure());
+        if backpressure {
+            return LookupFaultAction::Ignore;
+        }
+        self.consecutive = self.consecutive.saturating_add(1);
+        if self.consecutive >= LOOKUP_FAULT_HALT_AFTER {
+            LookupFaultAction::RejectEngineFault
+        } else {
+            LookupFaultAction::Warn
+        }
+    }
+}
+
+static LOOKUP_WAVE_FAULTS: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn take_lookup_wave_faults() -> u64 {
+    LOOKUP_WAVE_FAULTS.swap(0, Ordering::Relaxed)
 }
 
 pub(crate) enum ConfirmEvent {
@@ -1445,7 +1516,19 @@ pub(crate) fn spawn_confirm_engine(
                             feed_wb.finish(heights_hashes.iter().map(|(h, _)| *h));
                             continue;
                         }
-                        // Reset load-ahead so reserved create fks / last_loaded do not drift.
+                        if requeue_on_uring_recover(
+                            &hub_wb.query,
+                            &feed_wb,
+                            e.is_uring_session_fault(),
+                            "ibd-confirm-write",
+                            meta.iter().copied(),
+                        ) {
+                            load_ahead_reset_wb.store(true, Ordering::Release);
+                            warn!(
+                                "ibd: confirm write uring recover @ {height} batch_parts={parts}: {e}"
+                            );
+                            continue;
+                        }
                         load_ahead_reset_wb.store(true, Ordering::Release);
                         feed_wb.finish(heights_hashes.iter().map(|(h, _)| *h));
                         loop_stats_wb
@@ -1454,12 +1537,13 @@ pub(crate) fn spawn_confirm_engine(
                         warn!(
                             "ibd: confirm write reject @ {height} batch_parts={parts}: {e}"
                         );
+                        let class = ConfirmRejectClass::from_consensus(&e);
                         let _ = emit_confirm_reject(
                             &event_tx_wb,
                             &feed_wb,
                             height,
                             hash,
-                            ConfirmRejectClass::from_consensus(&e),
+                            class,
                             msg,
                             heights_hashes.len(),
                         );
@@ -1528,6 +1612,18 @@ pub(crate) fn spawn_confirm_engine(
                     {
                         info!("ibd: confirm scripts aborted: {msg}");
                         return false;
+                    }
+                    if requeue_on_uring_recover(
+                        &hub_sc.query,
+                        &feed_sc,
+                        e.is_uring_session_fault(),
+                        "ibd-confirm-scripts",
+                        meta.heights_hashes.iter().map(|(h, raw)| {
+                            (*h, BlockHash::from_byte_array(*raw))
+                        }),
+                    ) {
+                        warn!("ibd: confirm scripts uring recover @ {}: {e}", meta.first_h);
+                        return true;
                     }
                     let (height, hash) = meta
                         .heights_hashes
@@ -1698,6 +1794,19 @@ pub(crate) fn spawn_confirm_engine(
                             let _ = scripts.join();
                             return;
                         }
+                        if requeue_on_uring_recover(
+                            &hub_load.query,
+                            &feed_load,
+                            e.is_uring_session_fault(),
+                            "ibd-confirm-load",
+                            wire_batch.iter().map(|(h, ha, _)| (*h, *ha)),
+                        ) {
+                            warn!(
+                                "ibd: confirm load stamp uring recover {first} @ {expect_h}: {e}",
+                                first = wire_batch[0].1
+                            );
+                            continue;
+                        }
                         let first_hash = wire_batch[0].1;
                         if wire_batch.len() > 1 {
                             let tail: Vec<(u32, BlockHash, Option<bitcoin::Block>)> =
@@ -1840,6 +1949,18 @@ pub(crate) fn spawn_confirm_engine(
                             let _ = scripts.join();
                             return;
                         }
+                        if requeue_on_uring_recover(
+                            &hub_load.query,
+                            &feed_load,
+                            rbitcoin_store::StoreError::is_uring_session_fault_msg(&msg),
+                            "ibd-confirm-load",
+                            heights_hashes.iter().copied(),
+                        ) {
+                            warn!(
+                                "ibd: confirm load uring recover {first_hash} @ {expect_h}: {e}"
+                            );
+                            continue;
+                        }
                         if heights_hashes.len() > 1 {
                             let tail: Vec<(u32, BlockHash, Option<bitcoin::Block>)> =
                                 heights_hashes
@@ -1882,6 +2003,7 @@ pub(crate) fn spawn_confirm_engine(
         .expect("spawn ibd-confirm-load");
 
     let queues_lookup = Arc::clone(&queues);
+    let event_tx_lookup = event_tx.clone();
     let lookup_join = std::thread::Builder::new()
         .name("ibd-confirm-lookup".into())
         .spawn(move || {
@@ -1889,6 +2011,7 @@ pub(crate) fn spawn_confirm_engine(
             let queues_lookup = queues_lookup;
             let stats = hub.query.confirm_stats_arc();
             let mut disco_seen = 0u64;
+            let mut lookup_faults = LookupFaultPolicy::default();
             loop {
                 if feed.stopped() {
                     break;
@@ -1946,6 +2069,7 @@ pub(crate) fn spawn_confirm_engine(
                         max_inputs,
                     ) {
                         Ok(wave) if !wave.items.is_empty() => {
+                            lookup_faults.on_success();
                             did = true;
                             let counts: Vec<u32> = wave
                                 .items
@@ -2006,17 +2130,47 @@ pub(crate) fn spawn_confirm_engine(
                             }
                             feed.notify();
                         }
-                        Ok(_) => {}
+                        Ok(_) => {
+                            lookup_faults.on_success();
+                        }
                         Err(e) => {
-                            let backpressure = matches!(
-                                &e,
-                                rbitcoin_consensus::ConsensusError::Store(se)
-                                    if se.is_io_backpressure()
-                            );
-                            if backpressure {
-                                debug!("ibd: bq resolve wave: {e}");
+                            if e.is_uring_session_fault() {
+                                hub.query.uring_recover_or_abort("ibd-confirm-lookup");
+                                lookup_faults.on_success();
+                                warn!("ibd: bq resolve wave uring recover: {e}");
                             } else {
-                                warn!("ibd: bq resolve wave: {e}");
+                                match lookup_faults.on_err(&e) {
+                                    LookupFaultAction::Ignore => {
+                                        debug!("ibd: bq resolve wave: {e}");
+                                    }
+                                    LookupFaultAction::Warn => {
+                                        LOOKUP_WAVE_FAULTS.fetch_add(1, Ordering::Relaxed);
+                                        warn!("ibd: bq resolve wave: {e}");
+                                    }
+                                    LookupFaultAction::RejectEngineFault => {
+                                        LOOKUP_WAVE_FAULTS.fetch_add(1, Ordering::Relaxed);
+                                        warn!("ibd: bq resolve wave halt: {e}");
+                                        let height = wave_h.first().copied().unwrap_or(path_lo);
+                                        match lookup_ready_hash(&feed, height) {
+                                            Some(hash) => {
+                                                let _ = emit_confirm_reject(
+                                                    &event_tx_lookup,
+                                                    &feed,
+                                                    height,
+                                                    hash,
+                                                    ConfirmRejectClass::EngineFault,
+                                                    e.to_string(),
+                                                    1,
+                                                );
+                                            }
+                                            None => {
+                                                warn!(
+                                                    "ibd: bq resolve wave halt skip emit @{height} (no ready hash)"
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

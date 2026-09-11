@@ -102,3 +102,6 @@ pub use tx_table::{
     OutputRecord, TxRecord,
 };
 pub(crate) use uring_session::IoCtx;
+pub use uring_session::{
+    abort_uring_unusable, note_uring_recover, uring_recover_count, uring_slow_drain_count,
+};

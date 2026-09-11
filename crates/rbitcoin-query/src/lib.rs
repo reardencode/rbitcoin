@@ -59,6 +59,20 @@ pub use confirm_stats::{
 
 pub type QueryError = StoreError;
 
+/// Result of [`Query::uring_recover`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UringRecover {
+    Recovered,
+    Exhausted,
+}
+
+pub(crate) fn uring_recover_credit(last_tip: Option<u32>, tip: u32) -> bool {
+    match last_tip {
+        None => true,
+        Some(last) => tip.saturating_sub(last) >= Query::URING_RECOVER_MIN_TIP_GAP,
+    }
+}
+
 /// Cheap process-owned cache occupancy for IBD `ibd: sizes` (O(1) lens + brief locks).
 ///
 /// `conf_plans` is header plan occupancy in ConfirmParentCache. Pipeline pins /
@@ -270,6 +284,8 @@ pub struct Query {
     disconnect_gen: AtomicU64,
     /// Confirm / archive / load window meters (`ibd: perf`). One instance per Query.
     confirm_stats: Arc<ConfirmStats>,
+    /// Tip height of last in-process io_uring recover (`u32::MAX` = none).
+    uring_recover_tip: AtomicU32,
 }
 
 /// In-process hash→height map for the confirmed tip chain (~33 MiB raw at 1e6 tips).
@@ -357,6 +373,7 @@ impl Query {
             disconnect_height: AtomicU32::new(0),
             disconnect_gen: AtomicU64::new(0),
             confirm_stats: Arc::new(ConfirmStats::default()),
+            uring_recover_tip: AtomicU32::new(u32::MAX),
         };
         if let Some(tip) = q.tip_height() {
             let _ = q.ensure_height_by_hash_index(tip);
@@ -1014,6 +1031,40 @@ impl Query {
 
     pub fn tip_height(&self) -> Option<Height> {
         self.store.tip_height()
+    }
+
+    /// Minimum tip advance between in-process io_uring recovers.
+    pub const URING_RECOVER_MIN_TIP_GAP: u32 = 1000;
+
+    pub fn uring_recover(&self, reason: &'static str) -> UringRecover {
+        let tip = self.tip_height().map(|h| h.0).unwrap_or(0);
+        loop {
+            let last = self.uring_recover_tip.load(AtomicOrdering::Acquire);
+            let last_opt = if last == u32::MAX { None } else { Some(last) };
+            if !uring_recover_credit(last_opt, tip) {
+                return UringRecover::Exhausted;
+            }
+            if self
+                .uring_recover_tip
+                .compare_exchange(last, tip, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
+                .is_ok()
+            {
+                rbitcoin_store::note_uring_recover();
+                rbitcoin_log::warn!("ibd: uring recover tip={tip} reason={reason}");
+                return UringRecover::Recovered;
+            }
+        }
+    }
+
+    /// Take recover credit, or abort. Returns only after a credited recover.
+    pub fn uring_recover_or_abort(&self, reason: &'static str) {
+        match self.uring_recover(reason) {
+            UringRecover::Recovered => {}
+            UringRecover::Exhausted => {
+                let msg = format!("recover credit exhausted on {reason}");
+                rbitcoin_store::abort_uring_unusable(&msg);
+            }
+        }
     }
 
     /// Highest height on the RAM fence. Not the in-flight prune HWM

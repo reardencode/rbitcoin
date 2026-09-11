@@ -252,10 +252,13 @@ pub fn confirm_write_phase(
     })();
 
     let t_join = Instant::now();
-    let drain_res = drain.join();
+    let (drain_res, restore) = drain.join_restore();
     let drain_join_ns = t_join.elapsed().as_nanos() as u64;
     if drain_join_ns > 0 {
         rbitcoin_query::note_confirm(&query.confirm_stats().write_drain_join_ns, drain_join_ns);
+    }
+    if drain_res.is_err() {
+        query.store().txs.head_note_pending(&restore);
     }
     let (out, n_blocks, structural_ns, struct_ph, class_c_ns, spend_ann_ns) = overlap?;
     drain_res.map_err(ConsensusError::from)?;

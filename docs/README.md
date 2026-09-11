@@ -31,7 +31,7 @@ quality backlog).
 | [`architecture.md`](./architecture.md) | Why this node is different (Core / Fulcrum contrasts). No stage-IO table copy. |
 | [`concurrency.md`](./concurrency.md) | Writer roles, publish order, body-queue, pins. Links invariants for leftover union. |
 | [`invariants.md`](./invariants.md) | Confirm stage IO (the **only** copy), leftover union, store start states S0–S4, no silent fallbacks. |
-| [`crash-recovery.md`](./crash-recovery.md) | Tip-as-commit write order, kill-9, open repair. |
+| [`crash-recovery.md`](./crash-recovery.md) | Tip-as-commit write order, kill-9, open repair, in-process uring recover. |
 | [`ibd-memory.md`](./ibd-memory.md) | Process RAM vs page cache; body-queue soft assign; production evict APIs. |
 | [`io-modality.md`](./io-modality.md) | `RBITCOIN_IO`, fd vs uring, TLS harvest, do-not-flatten machines, host A/B. |
 | [`heads.md`](./heads.md) | Which head file / module (tx / header / SH). |

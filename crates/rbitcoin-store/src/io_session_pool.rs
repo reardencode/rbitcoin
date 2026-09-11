@@ -87,6 +87,10 @@ impl PoolEngine {
         }
     }
 
+    pub(crate) fn inflight(&self) -> usize {
+        self.cq.inflight.load(Ordering::Acquire)
+    }
+
     pub(crate) fn push_pread(
         &self,
         handle: IoHandle,
@@ -182,13 +186,6 @@ impl PoolEngine {
             }
         }
         !q.is_empty()
-    }
-
-    pub(crate) fn wait_idle(&self) {
-        let mut q = self.cq.cqes.lock().unwrap_or_else(|e| e.into_inner());
-        while self.cq.inflight.load(Ordering::Acquire) != 0 {
-            q = self.cq.cqe_cv.wait(q).unwrap_or_else(|e| e.into_inner());
-        }
     }
 }
 
