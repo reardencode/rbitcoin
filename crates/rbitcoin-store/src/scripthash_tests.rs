@@ -1904,17 +1904,8 @@ fn open_migrates_legacy_head_when_runs_present() {
     // Leftover live OA main is refused even when runs exist (wipe + rematerialize).
     {
         let dir = tmp();
-        let body = TableFile::create(dir.join("scripthash.body"), TableKind::ScriptHash).unwrap();
-        let payload0 = payload_start(FILE_HEADER_LEN);
-        body.ensure_capacity(payload0).unwrap();
-        body.set_logical_len(payload0).unwrap();
-        let state = AllocState {
-            live_count: 0,
-            bump: payload0,
-            free_head: [0; SH_MAX_CLASS as usize + 1],
-        };
-        write_alloc_header(&body, &state).unwrap();
-        drop(body);
+        let _t = ScriptHashTable::create_tiny(&dir).unwrap();
+        drop(_t);
         ShardedScriptHashHead::create_sharded(dir.join("scripthash.head"), 16, 64).unwrap();
 
         let runs_dir = dir.join("scripthash.runs");
