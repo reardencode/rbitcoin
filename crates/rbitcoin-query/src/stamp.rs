@@ -29,6 +29,7 @@ pub struct BatchParentIds {
 }
 
 impl BatchParentIds {
+    #[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
     pub fn get(&self, txid: &[u8; 32]) -> Option<(Fk, (u64, u64), Option<(u64, u64)>)> {
         let &(fk, body) = self.ids.get(txid)?;
         let spent = fk.get().and_then(|id| self.spent.get(&id).copied());

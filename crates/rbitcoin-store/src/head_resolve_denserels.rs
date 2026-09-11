@@ -37,7 +37,7 @@ use std::time::Instant;
 pub fn resolve_fk_and_range_batch(
     table: &TxTable,
     txids: &[[u8; 32]],
-) -> Result<Vec<([u8; 32], Option<(Fk, (u64, u64))>)>, StoreError> {
+) -> Result<Vec<crate::tx_table::TxidFkRange>, StoreError> {
     resolve_fk_and_range_batch_opts(table, txids, None, false)
 }
 
@@ -51,7 +51,7 @@ pub fn resolve_fk_and_range_batch_with_tip(
     heights: &HeightFence,
     txids: &[[u8; 32]],
     tip_only: bool,
-) -> Result<Vec<([u8; 32], Option<(Fk, (u64, u64))>)>, StoreError> {
+) -> Result<Vec<crate::tx_table::TxidFkRange>, StoreError> {
     resolve_fk_and_range_batch_opts(table, txids, Some(heights), tip_only)
 }
 
@@ -206,7 +206,7 @@ fn resolve_fk_and_range_batch_opts(
     txids: &[[u8; 32]],
     heights: Option<&HeightFence>,
     tip_only: bool,
-) -> Result<Vec<([u8; 32], Option<(Fk, (u64, u64))>)>, StoreError> {
+) -> Result<Vec<crate::tx_table::TxidFkRange>, StoreError> {
     if txids.is_empty() {
         crate::head_resolve_stats::clear_leftover_miss();
         return Ok(Vec::new());
@@ -256,7 +256,7 @@ fn resolve_fk_and_range_core(
     heights: Option<&HeightFence>,
     tip_only: bool,
     session: Option<&mut UringSession>,
-) -> Result<Vec<([u8; 32], Option<(Fk, (u64, u64))>)>, StoreError> {
+) -> Result<Vec<crate::tx_table::TxidFkRange>, StoreError> {
     crate::head_resolve_stats::add_keys(txids.len() as u64);
 
     let mixed: Vec<[u8; 32]> = txids.iter().map(|t| table.secret.mix_txid(t)).collect();
@@ -389,7 +389,7 @@ fn resolve_fk_and_range_pread(
     txids: &[[u8; 32]],
     heights: Option<&HeightFence>,
     tip_only: bool,
-) -> Result<Vec<([u8; 32], Option<(Fk, (u64, u64))>)>, StoreError> {
+) -> Result<Vec<crate::tx_table::TxidFkRange>, StoreError> {
     resolve_fk_and_range_core(table, txids, heights, tip_only, None)
 }
 
@@ -597,6 +597,7 @@ fn unfinished_mask(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)] // IO/session args stay unbundled
 /// Sidefile ID (at most two page-grouped shots) then BIP30 match + batched idx.
 ///
 /// Shot A is the first four cands of unfinished keys; shot B is the rest only
@@ -726,6 +727,7 @@ fn id_idx_wave(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // IO/session args stay unbundled
 /// Apply idx ranges for identity picks. `connected` is set only when a range
 /// exists — never before idx. Missing range after a chosen fk is Corrupt.
 fn record_chosen_idx_ranges(
@@ -765,7 +767,7 @@ fn resolve_fk_and_range_uring(
     txids: &[[u8; 32]],
     heights: Option<&HeightFence>,
     tip_only: bool,
-) -> Result<Vec<([u8; 32], Option<(Fk, (u64, u64))>)>, StoreError> {
+) -> Result<Vec<crate::tx_table::TxidFkRange>, StoreError> {
     uring_session::with_thread_local(uring_session::DEFAULT_ENTRIES, |session| {
         resolve_fk_and_range_core(table, txids, heights, tip_only, Some(session))
     })?
@@ -858,7 +860,7 @@ mod tests {
         let mut pread_hits = 0u32;
         match map_uring_resolve(Err(err), || {
             pread_hits += 1;
-            Ok(Vec::<([u8; 32], Option<(Fk, (u64, u64))>)>::new())
+            Ok(Vec::<crate::tx_table::TxidFkRange>::new())
         }) {
             Err(StoreError::Corrupt("invariant: io_uring unexpected cqe")) => {}
             other => panic!("Corrupt must propagate, got {other:?}"),

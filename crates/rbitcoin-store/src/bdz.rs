@@ -673,6 +673,7 @@ fn load_g_page(
     Ok(need)
 }
 
+#[allow(clippy::too_many_arguments)] // IO/session args stay unbundled
 fn stream_or_load_pages(
     file: &File,
     path: &Path,
@@ -706,6 +707,7 @@ fn stream_or_load_pages(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // IO/session args stay unbundled
 fn stream_g_pages(
     session: &mut crate::uring_session::UringSession,
     file: &File,
@@ -1675,9 +1677,10 @@ mod tests {
             32,
         )
         .expect("pool");
-        let mut ctx = crate::IoCtx::held(&mut session);
-        let got = fd.index_batch(&batch_keys, &mut ctx).unwrap();
-        drop(ctx);
+        let got = {
+            let mut ctx = crate::IoCtx::held(&mut session);
+            fd.index_batch(&batch_keys, &mut ctx).unwrap()
+        };
         session.drain_all().unwrap();
         assert_eq!(got, want);
         let _ = std::fs::remove_dir_all(&dir);

@@ -428,6 +428,7 @@ impl SharedParentPin {
         });
     }
 
+    #[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
     /// Single-snap apply for free-pin Occupied path: outs widen and/or layout
     /// merge from one outs load + one layout load (no double compose when no-op).
     fn apply_pin_delta(
@@ -529,6 +530,7 @@ impl BatchParents {
         p.apply_meta_only(coinbase, body_range, &spender_rels);
     }
 
+    #[allow(clippy::too_many_arguments)] // IO/session args stay unbundled
     /// Insert / merge one parent (prep pin hot path).
     ///
     /// Pure batch HashMap. Merge only if the same batch already holds a partial
@@ -984,6 +986,7 @@ impl BatchParents {
         }
     }
 
+    #[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
     pub fn get_parent_outs_needed(
         &self,
         fk: Fk,

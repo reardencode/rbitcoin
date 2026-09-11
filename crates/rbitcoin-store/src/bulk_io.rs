@@ -729,53 +729,54 @@ mod tests {
         let mut b0 = [0u8; 50];
         let mut b1 = [0u8; 50];
         let mut b2 = [0u8; 50];
-        let mut ops = [
-            ReadOp {
-                fd,
-                offset: 0,
-                buf: &mut b0[..],
-                result: i32::MIN,
-            },
-            ReadOp {
-                fd,
-                offset: 50,
-                buf: &mut b1[..],
-                result: i32::MIN,
-            },
-            ReadOp {
-                fd,
-                offset: 100,
-                buf: &mut b2[..],
-                result: i32::MIN,
-            },
-        ];
-        pread_batch(&mut ops);
-        for op in &ops {
-            assert!(op.result >= 50, "result={}", op.result);
+        {
+            let mut ops = [
+                ReadOp {
+                    fd,
+                    offset: 0,
+                    buf: &mut b0[..],
+                    result: i32::MIN,
+                },
+                ReadOp {
+                    fd,
+                    offset: 50,
+                    buf: &mut b1[..],
+                    result: i32::MIN,
+                },
+                ReadOp {
+                    fd,
+                    offset: 100,
+                    buf: &mut b2[..],
+                    result: i32::MIN,
+                },
+            ];
+            pread_batch(&mut ops);
+            for op in &ops {
+                assert!(op.result >= 50, "result={}", op.result);
+            }
         }
-        drop(ops);
         assert_eq!(&b0[..], &data[0..50]);
         assert_eq!(&b1[..], &data[50..100]);
         assert_eq!(&b2[..], &data[100..150]);
 
         // Many small reads (stress completion mapping).
         let mut bufs: Vec<[u8; 1]> = (0..120).map(|_| [0u8; 1]).collect();
-        let mut ops: Vec<ReadOp<'_>> = Vec::new();
-        // Build via raw pointers after collecting mut refs carefully.
-        let mut slices: Vec<&mut [u8]> = bufs.iter_mut().map(|b| &mut b[..]).collect();
-        for (i, sl) in slices.iter_mut().enumerate() {
-            ops.push(ReadOp {
-                fd,
-                offset: i as u64,
-                buf: *sl,
-                result: i32::MIN,
-            });
+        {
+            let mut slices: Vec<&mut [u8]> = bufs.iter_mut().map(|b| &mut b[..]).collect();
+            let mut ops: Vec<ReadOp<'_>> = Vec::new();
+            for (i, sl) in slices.iter_mut().enumerate() {
+                ops.push(ReadOp {
+                    fd,
+                    offset: i as u64,
+                    buf: sl,
+                    result: i32::MIN,
+                });
+            }
+            pread_batch(&mut ops);
+            for (i, op) in ops.iter().enumerate() {
+                assert_eq!(op.result, 1, "i={i}");
+            }
         }
-        pread_batch(&mut ops);
-        for (i, op) in ops.iter().enumerate() {
-            assert_eq!(op.result, 1, "i={i}");
-        }
-        drop(ops);
         for (i, b) in bufs.iter().enumerate() {
             assert_eq!(b[0], data[i], "i={i}");
         }
@@ -854,14 +855,15 @@ mod tests {
         let f = std::fs::File::open(&path).unwrap();
         let fd = crate::io_handle::IoHandle::from_file(&f);
         let mut b = [0u8; 5];
-        let mut ops = [ReadOp {
-            fd,
-            offset: 0,
-            buf: &mut b[..],
-            result: i32::MIN,
-        }];
-        pread_batch_fallback(&mut ops);
-        drop(ops);
+        {
+            let mut ops = [ReadOp {
+                fd,
+                offset: 0,
+                buf: &mut b[..],
+                result: i32::MIN,
+            }];
+            pread_batch_fallback(&mut ops);
+        }
         assert_eq!(&b, b"hello");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -956,24 +958,25 @@ mod tests {
             let base = (wave * 64) as usize;
             let mut b0 = [0u8; 32];
             let mut b1 = [0u8; 32];
-            let mut ops = [
-                ReadOp {
-                    fd,
-                    offset: base as u64,
-                    buf: &mut b0[..],
-                    result: i32::MIN,
-                },
-                ReadOp {
-                    fd,
-                    offset: (base + 32) as u64,
-                    buf: &mut b1[..],
-                    result: i32::MIN,
-                },
-            ];
-            pread_batch(&mut ops);
-            assert_eq!(ops[0].result, 32, "wave={wave}");
-            assert_eq!(ops[1].result, 32, "wave={wave}");
-            drop(ops);
+            {
+                let mut ops = [
+                    ReadOp {
+                        fd,
+                        offset: base as u64,
+                        buf: &mut b0[..],
+                        result: i32::MIN,
+                    },
+                    ReadOp {
+                        fd,
+                        offset: (base + 32) as u64,
+                        buf: &mut b1[..],
+                        result: i32::MIN,
+                    },
+                ];
+                pread_batch(&mut ops);
+                assert_eq!(ops[0].result, 32, "wave={wave}");
+                assert_eq!(ops[1].result, 32, "wave={wave}");
+            }
             assert_eq!(&b0[..], &data[base..base + 32], "wave={wave}");
             assert_eq!(&b1[..], &data[base + 32..base + 64], "wave={wave}");
 
@@ -1028,21 +1031,22 @@ mod tests {
         let fd = crate::io_handle::IoHandle::from_file(&f);
 
         let mut bufs: Vec<[u8; 1]> = (0..N).map(|_| [0u8; 1]).collect();
-        let mut slices: Vec<&mut [u8]> = bufs.iter_mut().map(|b| &mut b[..]).collect();
-        let mut ops: Vec<ReadOp<'_>> = Vec::with_capacity(N);
-        for (i, sl) in slices.iter_mut().enumerate() {
-            ops.push(ReadOp {
-                fd,
-                offset: i as u64,
-                buf: *sl,
-                result: i32::MIN,
-            });
+        {
+            let mut slices: Vec<&mut [u8]> = bufs.iter_mut().map(|b| &mut b[..]).collect();
+            let mut ops: Vec<ReadOp<'_>> = Vec::with_capacity(N);
+            for (i, sl) in slices.iter_mut().enumerate() {
+                ops.push(ReadOp {
+                    fd,
+                    offset: i as u64,
+                    buf: sl,
+                    result: i32::MIN,
+                });
+            }
+            pread_batch(&mut ops);
+            for (i, op) in ops.iter().enumerate() {
+                assert_eq!(op.result, 1, "i={i} result={}", op.result);
+            }
         }
-        pread_batch(&mut ops);
-        for (i, op) in ops.iter().enumerate() {
-            assert_eq!(op.result, 1, "i={i} result={}", op.result);
-        }
-        drop(ops);
         for (i, b) in bufs.iter().enumerate() {
             assert_eq!(b[0], data[i], "i={i}");
         }
@@ -1051,31 +1055,32 @@ mod tests {
         let mut b0 = [0u8; 1];
         let mut empty: [u8; 0] = [];
         let mut b1 = [0u8; 1];
-        let mut ops2 = [
-            ReadOp {
-                fd,
-                offset: 0,
-                buf: &mut b0[..],
-                result: i32::MIN,
-            },
-            ReadOp {
-                fd,
-                offset: 0,
-                buf: &mut empty[..],
-                result: i32::MIN,
-            },
-            ReadOp {
-                fd,
-                offset: 1,
-                buf: &mut b1[..],
-                result: i32::MIN,
-            },
-        ];
-        pread_batch(&mut ops2);
-        assert_eq!(ops2[0].result, 1);
-        assert_eq!(ops2[1].result, 0);
-        assert_eq!(ops2[2].result, 1);
-        drop(ops2);
+        {
+            let mut ops2 = [
+                ReadOp {
+                    fd,
+                    offset: 0,
+                    buf: &mut b0[..],
+                    result: i32::MIN,
+                },
+                ReadOp {
+                    fd,
+                    offset: 0,
+                    buf: &mut empty[..],
+                    result: i32::MIN,
+                },
+                ReadOp {
+                    fd,
+                    offset: 1,
+                    buf: &mut b1[..],
+                    result: i32::MIN,
+                },
+            ];
+            pread_batch(&mut ops2);
+            assert_eq!(ops2[0].result, 1);
+            assert_eq!(ops2[1].result, 0);
+            assert_eq!(ops2[2].result, 1);
+        }
         assert_eq!(b0[0], data[0]);
         assert_eq!(b1[0], data[1]);
 

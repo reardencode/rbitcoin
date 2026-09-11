@@ -58,6 +58,7 @@ fn wave_join_is_dense(elig_count: usize, first_id: u64, last_id: u64) -> bool {
     elig_count.saturating_mul(4) >= span
 }
 
+#[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
 fn thin_join_txids_and_ranges(
     store: &Store,
     elig_fks: &[Fk],
@@ -169,6 +170,7 @@ impl Query {
         t.put_block(height, records)
     }
 
+    #[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
     /// Consecutive heights: one body pwrite + one idx pwrite. Same checks as
     /// [`Self::put_sp_tweaks_block`] on each item; no-op if the first is not next.
     pub fn put_sp_tweaks_blocks(

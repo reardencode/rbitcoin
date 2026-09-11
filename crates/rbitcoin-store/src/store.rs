@@ -695,7 +695,7 @@ impl Store {
         &self,
         first: u64,
         last: u64,
-    ) -> Result<Vec<(TxRecord, Vec<InputRecord>, Vec<OutputRecord>)>, StoreError> {
+    ) -> Result<Vec<crate::tx_table::PackedTx>, StoreError> {
         self.txs.get_full_span(first, last)
     }
 
@@ -768,10 +768,7 @@ impl Store {
     /// `pin` is `(TxRecord, outs)`.
     pub fn put_tx_full_batch_from_pins(
         &self,
-        items: &[(
-            std::sync::Arc<(TxRecord, Vec<OutputRecord>)>,
-            Vec<InputRecord>,
-        )],
+        items: &[crate::tx_table::PinInItem],
         index: bool,
     ) -> Result<Vec<Fk>, StoreError> {
         self.txs.put_full_batch_from_pins(items, index)
@@ -915,7 +912,7 @@ impl Store {
     pub fn get_fk_by_txid_batch(
         &self,
         txids: &[[u8; 32]],
-    ) -> Result<Vec<([u8; 32], Option<(Fk, (u64, u64))>)>, StoreError> {
+    ) -> Result<Vec<crate::tx_table::TxidFkRange>, StoreError> {
         self.get_fk_by_txid_batch_mode(txids, TxidResolveMode::TipOnly)
     }
 
@@ -928,7 +925,7 @@ impl Store {
         &self,
         txids: &[[u8; 32]],
         mode: TxidResolveMode,
-    ) -> Result<Vec<([u8; 32], Option<(Fk, (u64, u64))>)>, StoreError> {
+    ) -> Result<Vec<crate::tx_table::TxidFkRange>, StoreError> {
         // Snapshot: leftover IO is 0.4–2s. Holding the fence read lock blocks
         // `height_fence_extend`. Confirm extends before `set_many`, so tip
         // cannot publish while this clone is in flight. Clone is Arc (COW on
@@ -956,15 +953,8 @@ impl Store {
     /// See [`TxTable::get_outs_by_range_batch`].
     pub fn get_outs_by_range_batch(
         &self,
-        items: &[(Fk, (u64, u64), [u8; 32], Vec<u32>)],
-    ) -> Result<
-        (
-            Vec<Option<(TxRecord, Vec<(u32, OutputRecord)>, Vec<(u32, u32)>)>>,
-            u64,
-            u64,
-        ),
-        StoreError,
-    > {
+        items: &[crate::tx_table::OutsByRangeJob],
+    ) -> Result<crate::tx_table::OutsByRangeOut, StoreError> {
         self.txs.get_outs_by_range_batch(items)
     }
 

@@ -61,6 +61,7 @@ use lookup::confirm_archive_kind;
 use lookup::known_create_txid_lookup;
 #[cfg(test)]
 use lookup::ConfirmArchiveKind;
+use lookup::WireBlockIn;
 pub use lookup::{
     confirm_wire_load_from_plan, confirm_wire_lookup_stamp, ParentPinStamp, PlanStampOutcome,
 };
@@ -207,14 +208,7 @@ pub fn confirm_wire_load_phase(
     confirm_wire_load_phase_pipelined(query, params, milestone, blocks, preverified, None)
 }
 
-fn wire_blocks_to_arcs(
-    query: &Query,
-    blocks: &[(Height, Block)],
-) -> Vec<(
-    Height,
-    Arc<Block>,
-    Option<Arc<[rbitcoin_query::TxPrecompute]>>,
-)> {
+fn wire_blocks_to_arcs(query: &Query, blocks: &[(Height, Block)]) -> Vec<WireBlockIn> {
     let t = Instant::now();
     let arcs = blocks
         .iter()
@@ -283,11 +277,7 @@ pub fn confirm_wire_run_preverified(
     if blocks.is_empty() {
         return Err(ConsensusError::BadBlock("empty confirm batch"));
     }
-    let arcs: Vec<(
-        Height,
-        Arc<Block>,
-        Option<Arc<[rbitcoin_query::TxPrecompute]>>,
-    )> = {
+    let arcs: Vec<WireBlockIn> = {
         let t = Instant::now();
         let arcs = blocks
             .iter()
@@ -354,6 +344,7 @@ impl ScriptOkBatch {
         self.batch_parents.len()
     }
 
+    #[allow(clippy::result_large_err)] // public error enum
     /// Absorb another script-ok batch for write batch (FIFO drain).
     ///
     /// Scripts enqueue height-ordered tip extensions; write drains the channel

@@ -433,6 +433,7 @@ impl V2PlainSession {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 /// Open BIP324 v2 transport + perform the version/verack exchange.
 ///
 /// Returns the peer's version and the encrypted read/write halves. All further
@@ -475,6 +476,7 @@ pub async fn connect_and_handshake(
 /// Core VERSION/VERACK bound: 60s from TCP connect/accept. Timeout drops the stream.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 pub(crate) async fn inbound_connect_and_handshake(
     stream: TcpStream,
     magic: Magic,
@@ -576,6 +578,7 @@ pub(crate) async fn inbound_connect_and_handshake(
     Ok((their_version, reader, writer, wire, tcp_shutdown, sess))
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 pub(crate) async fn connect_and_handshake_timed(
     limit: Duration,
     stream: TcpStream,
@@ -726,6 +729,7 @@ async fn read_handshake_frame(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 /// Perform the version/verack exchange over an established BIP324 session.
 async fn application_handshake(
     reader: &mut V2Reader,

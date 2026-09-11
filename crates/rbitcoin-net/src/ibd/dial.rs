@@ -223,6 +223,7 @@ pub(crate) struct DialBatchResult {
     pub attempted: Vec<SocketAddr>,
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 /// Dial up to `count` ranked candidates from `book`. `already` is exclude
 /// (slots + cooldown). `occupied` is live addrs whose netgroups are skipped
 /// while unused-group candidates remain.

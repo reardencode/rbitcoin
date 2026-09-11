@@ -545,6 +545,7 @@ impl Query {
         )
     }
 
+    #[allow(clippy::too_many_arguments)] // IO/session args stay unbundled
     fn finish_archive_plan(
         &self,
         work: Vec<PlanRow>,

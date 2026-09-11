@@ -404,6 +404,7 @@ pub(crate) fn collect_unsorted_covering_class_a(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // IO/session args stay unbundled
 fn collect_unsorted_from_txs(
     txs: &TxTable,
     dir: &Path,

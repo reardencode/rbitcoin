@@ -928,6 +928,7 @@ impl MempoolHub {
         Some(g.graph.iter().map(|(txid, e)| (*txid, e.wtxid)).collect())
     }
 
+    #[allow(clippy::type_complexity)] // packed row / pin / script-hash tuple is the on-disk shape
     /// Newly age-due INVs after `seen` (`(due_secs, accept_gen)` cursor).
     /// Session tick: `try_lock` — busy skip.
     pub fn try_age_inv_since(
@@ -2145,6 +2146,7 @@ impl MempoolHub {
         txs.iter().map(|tx| self.accept_tx(tx)).collect()
     }
 
+    #[allow(clippy::type_complexity)] // packed row / pin / script-hash tuple is the on-disk shape
     /// `getmempoolcluster` payload from the live graph.
     pub fn cluster_rpc(&self, txid: &Txid) -> Option<(u64, usize, Vec<(i64, u64, Vec<Txid>)>)> {
         let deltas = self.fee_deltas.lock().unwrap().clone();

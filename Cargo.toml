@@ -70,17 +70,6 @@ warnings = "deny"
 unexpected_cfgs = { level = "deny", check-cfg = ['cfg(coverage)'] }
 
 # Clippy: CI is `clippy --workspace --all-targets -- -D warnings`.
-# Correctness/suspicious stay on. This allow list is **debt**: empty it;
-# any leftover lint is `#[allow(clippy::…)]` on the item with a reason
-# (`docs/code-shape.md`). Do not add a new workspace allow.
+# No workspace allow list. A leftover lint is `#[allow(clippy::…)]` on
+# the item with a reason (`docs/code-shape.md`).
 [workspace.lints.clippy]
-too_many_arguments = "allow"
-type_complexity = "allow"
-# Common style under -D warnings (stable clippy); not correctness.
-drop_non_drop = "allow"
-explicit_auto_deref = "allow"
-result_large_err = "allow"
-# Large match/pipeline helpers and benches trip these without benefit.
-# rustc/clippy 1.95 (nixos-26.05) style noise — allow rather than drive-by refactors.
-cognitive_complexity = "allow"
-large_enum_variant = "allow"

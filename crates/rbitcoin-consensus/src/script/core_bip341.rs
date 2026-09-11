@@ -189,7 +189,7 @@ fn core_bip341_wallet_vectors_all_rows() {
                     }
                     tx.input[idx].witness = wit;
                     let job = taproot_job(tx, prevouts.clone());
-                    let tx_ref: &Transaction = &*job.tx;
+                    let tx_ref: &Transaction = &job.tx;
                     match script::verify_input(&job, idx, tx_ref, &mut None, job.pre()) {
                         Ok(()) => pass += 1,
                         Err(e) => {

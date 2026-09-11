@@ -389,12 +389,12 @@ mod bip341_tests {
             pre: std::sync::OnceLock::new(),
         };
         let mut cache = SighashCache::new(&*job.tx);
-        assert!(verify(&job, 0, &*job.tx, &mut cache).is_err());
+        assert!(verify(&job, 0, &job.tx, &mut cache).is_err());
 
         let mut job2 = job;
         job2.tx.input[0].witness = Witness::from_slice(&[vec![0u8; 10]]);
         let mut cache2 = SighashCache::new(&*job2.tx);
-        assert!(verify(&job2, 0, &*job2.tx, &mut cache2).is_err());
+        assert!(verify(&job2, 0, &job2.tx, &mut cache2).is_err());
     }
 
     #[test]

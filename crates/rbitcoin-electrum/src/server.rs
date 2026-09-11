@@ -354,6 +354,7 @@ impl ElectrumConn {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 async fn handle_client<S>(
     stream: S,
     peer: SocketAddr,
@@ -673,6 +674,7 @@ where
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 /// Tweaks stream: JSON-RPC result = first height, then one notify per
 /// following height, then `{"message":"done"}`. Honor `count` through tip.
 /// Answer `server.ping` while computing.
@@ -1121,6 +1123,7 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 #[cfg(test)]
 fn dispatch(
     method: &str,
@@ -1164,6 +1167,7 @@ fn dispatch_with_join(
     )
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 fn sh_at_view<T>(
     query: &Query,
     pinned: Option<&ChainView>,
@@ -1190,6 +1194,7 @@ fn sh_at_view<T>(
     live_fn(query, sh_join)
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 fn dispatch_pinned(
     method: &str,
     params: &Value,

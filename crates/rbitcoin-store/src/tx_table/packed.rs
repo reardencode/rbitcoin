@@ -580,7 +580,7 @@ pub(super) fn check_trailing_zero_pad(raw: &[u8], logical_end: usize) -> Result<
 pub fn decode_packed_tx_with_spender_rels_secret(
     raw: &[u8],
     secret: Option<&crate::store_secret::StoreSecret>,
-) -> Result<(TxRecord, Vec<InputRecord>, Vec<OutputRecord>, Vec<u32>), StoreError> {
+) -> Result<super::PackedTxRels, StoreError> {
     let (meta, outputs, rels) = decode_packed_tx_outs_with_spender_rels_secret(raw, secret)?;
     Ok((meta, Vec::new(), outputs, rels))
 }
@@ -730,7 +730,7 @@ pub fn decode_packed_tx_need_outs_with_spender_rels_secret(
     raw: &[u8],
     need_vouts: &[u32],
     secret: Option<&crate::store_secret::StoreSecret>,
-) -> Result<(TxRecord, Vec<(u32, OutputRecord)>, Vec<(u32, u32)>), StoreError> {
+) -> Result<super::SparseOutsRow, StoreError> {
     let (meta, mut off) = TxRecord::decode_body_meta(raw)?;
     let n_out = meta.output_count;
     // Empty need → all vouts (full materialize path without a second full decode).

@@ -864,6 +864,7 @@ pub struct PeerInfo {
     pub mapped_as: Option<u32>,
 }
 
+#[allow(clippy::type_complexity)] // packed row / pin / script-hash tuple is the on-disk shape
 /// Thread-safe session table + addnode remembered addrs.
 pub struct PeerHub {
     next_id: AtomicU64,

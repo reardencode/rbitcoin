@@ -101,6 +101,12 @@ pub(crate) struct WriteStageSample {
     pub dequeue_ns: u64,
 }
 
+type WriteInvTok = (
+    &'static str,
+    fn(&WriteStageSample) -> u64,
+    fn(&WriteStageSample) -> u64,
+);
+
 impl WriteStageSample {
     /// Sum of the exclusive write inventory tokens (ms).
     pub fn stage_ms(&self) -> u64 {
@@ -111,7 +117,7 @@ impl WriteStageSample {
 
     /// Exclusive write inventory: one row per token (`write=` = this sum).
     /// `format_info` / `format_debug` emit `{name}` from this table.
-    const INVENTORY: &'static [(&'static str, fn(&Self) -> u64, fn(&Self) -> u64)] = &[
+    const INVENTORY: &'static [WriteInvTok] = &[
         ("class_a", |s| s.class_a_ms, |s| s.class_a_ns),
         ("ensure", |s| s.ensure_ms, |s| s.ensure_ns),
         ("struct", |s| s.structural_ms, |s| s.structural_ns),
@@ -748,6 +754,7 @@ pub fn format_tip_perf_sizes(s: &TipPerfSizes) -> String {
     )
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 /// Sample every counter once and reset atomics.
 pub(crate) fn sample(
     loop_stats: &LoopStats,

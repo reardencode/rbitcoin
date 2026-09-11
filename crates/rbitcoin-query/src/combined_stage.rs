@@ -36,6 +36,7 @@ fn note_body_ok_read() {
     body_ok_spy::note();
 }
 
+#[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
 /// One create loaded for the combined path.
 #[derive(Debug, Clone)]
 pub struct CombinedCreate {

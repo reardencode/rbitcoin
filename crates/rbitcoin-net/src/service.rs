@@ -314,6 +314,7 @@ fn push_session_task(bag: &Mutex<Vec<JoinHandle<()>>>, h: JoinHandle<()>) {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 fn spawn_inbound_accept(
     listener: TcpListener,
     local_addr: SocketAddr,
@@ -430,6 +431,7 @@ struct PreparedOutbound {
     id: u64,
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 async fn prepare_outbound_session(
     peer: SocketAddr,
     magic: Magic,
@@ -521,6 +523,7 @@ async fn run_prepared_outbound(prepared: PreparedOutbound) -> Result<(), NetErro
     out
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 async fn run_outbound_session_with_abort(
     peer: SocketAddr,
     magic: Magic,

@@ -53,6 +53,18 @@ impl ParentPinStamp {
     }
 }
 
+pub(super) type WireBlockIn = (
+    Height,
+    Arc<Block>,
+    Option<Arc<[rbitcoin_query::TxPrecompute]>>,
+);
+type LookupPhaseOut = (
+    Option<rbitcoin_query::ArchiveWritePlan>,
+    Vec<BodyMeta>,
+    Vec<Arc<Block>>,
+    u64,
+);
+
 /// Lookup-stage output: structure + plan batch (create_fk + parent body ranges).
 ///
 /// **No `tx.body` denserels on lookup.** Load denserels by range from
@@ -78,11 +90,7 @@ pub fn confirm_wire_lookup_stamp(
     query: &Query,
     params: &ChainParams,
     milestone: Milestone,
-    blocks: &[(
-        Height,
-        Arc<Block>,
-        Option<Arc<[rbitcoin_query::TxPrecompute]>>,
-    )],
+    blocks: &[WireBlockIn],
     pipeline: Option<&WireLoadPipeline>,
 ) -> Result<PlanStampOutcome, ConsensusError> {
     let t0 = Instant::now();
@@ -280,21 +288,9 @@ pub(super) fn wire_lookup_phase(
     query: &Query,
     params: &ChainParams,
     milestone: Milestone,
-    blocks: &[(
-        Height,
-        Arc<Block>,
-        Option<Arc<[rbitcoin_query::TxPrecompute]>>,
-    )],
+    blocks: &[WireBlockIn],
     pipeline: Option<&WireLoadPipeline>,
-) -> Result<
-    (
-        Option<rbitcoin_query::ArchiveWritePlan>,
-        Vec<BodyMeta>,
-        Vec<Arc<Block>>,
-        u64,
-    ),
-    ConsensusError,
-> {
+) -> Result<LookupPhaseOut, ConsensusError> {
     if blocks.is_empty() {
         return Err(ConsensusError::BadBlock("empty confirm batch"));
     }

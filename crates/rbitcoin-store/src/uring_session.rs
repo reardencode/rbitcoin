@@ -250,6 +250,7 @@ pub(crate) fn forced_session_kind() -> Option<SessionKind> {
     FORCED_KIND.with(|c| c.get())
 }
 
+#[allow(clippy::large_enum_variant)] // uring vs pool vs iocp backends
 enum SessionBackend {
     #[cfg(target_os = "linux")]
     Uring(io_uring::IoUring),
