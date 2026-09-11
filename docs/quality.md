@@ -29,7 +29,11 @@ This is not a security audit. Numbers are order-of-magnitude.
 
 Former `algo-review.md` items that are still worth doing are **Q-57–Q-60**.
 Inventory tables, gotchas, and micro-opts were not a second backlog — they
-died with that file. Close a Q-id by moving it to Completed in the same PR.
+died with that file. The 2026-09-07 crate-complexity inventory is **not
+in git**. The simplification program landed (Completed). Dual-path and
+probe rules are What to protect / [`invariants.md`](./invariants.md).
+Do not restore a dated crate table as a second backlog. Close a Q-id by
+moving it to Completed in the same PR.
 
 Peer full-node notes (Hornet, satd) live in
 [`peer-clients.md`](./peer-clients.md). Ranked later-consideration items
@@ -197,6 +201,7 @@ findings 001–022, CI split, map-free README, …) live in
 
 | ID | Item | Resolution |
 |----|------|------------|
+| **—** | 2026-09 crate simplification | Suggested-order 1–10: crate-root `pub` graph (X-04); dead meters then instance `ConfirmStats` (X-01); `HeadScale` / `StoreLayout::tiny` (X-02); Tiny `testutil` (X-06); per-crate dead paths; fuzz in `fuzz/` (X-07); CLI/conf share `apply_kv` (X-05); leftover index refuse; one assemble path (C-06); one Class A planner (Q-06); remainder C-19 / I-22 / SH-04 / S-11 / C-13 / Q-09 / Q-18; TLS IO probes (X-03); archive-prep one helper (C-03); TxApply conversion in `testutil::FixtureChain` (Q-21). Clippy allow-list re-enable is later batch work, not an Open Q-id. |
 | **Q-61** | 0.6.0 readability (code shape) | Display-hash owner (`display_hash_hex` / `parse_display_hash32`); CLI `CliAccum` / `apply_kv`; RPC `METHOD_LIST` catalog so `help` / `getrpcinfo` list every dispatched method; Electrum/Esplora `sh_at_view`; `PeerFollowState` + `PendingSendCmpct` + shared mempool GetData; `CatchUp` + named `run_p2p` phases + shared hub-tip bridge. IBD confirm events drain through `apply_confirm_events` (call sites kept); Headers apply is named stages; dead `ConfirmEvent::Reject.wire` dropped. `ChainHub` holds `HeldBodies` under one `RwLock` (cap 320, lowest first-seen seq evicted); `Invalidated` / `HeaderTips` / `MiningKnobs` are named types. Query SH write-behind is `ShWriteBehind` (locks unchanged); `IndexMode` names archive-spend / SH-enqueue products; `TxTable::probe_body_match_fk` is the body-txid head probe. Mempool `scan_conflicts_and_parents` / `evict_worst_chunks` / hub `admit_staged` (write-lock re-check kept). One-shot confirm load is stamp + load_from_plan; pin stages named; `ScriptVerifyFlags` on script jobs. Confirm reject class (`SoftMerkle` / `SoftRetarget` / `BadPrev` / `Permanent`) is set at the sender; `NetError::{SideBlock, UnknownParent, Mutated, BadPrev}` and `AcceptError::Duplicate` are matched by type. Wire/log English unchanged except `StoreError::Unavailable` prints `io_uring unavailable` (not `corrupt record:`). Stretch closed. |
 | **Q-30** | Continuous differential fuzz | Nightly `fuzz.yml` (not a required PR check) feeds BIP324 parser (`v2_contents`) + live Core session (`v2_session`), header/block `submitblock` (height-1 / spend / fork / N-reorg / BIP68 CSV-age), compact reconstruct vs Core `getblocktxn`, compact reorg via `drain_pending`, and script-mutating vs Core. Crashes → `docs/external_findings/` + named regression. JSON corpora stay static. |
 | **—** | Schema 20 indexes | Sealed `tx.head` MPHF+`.rel` → packed BDZ2; sealed SH MPHF → compact BDZ3. Occupied 18/19 `tx.head`/`scripthash*` **refused** (wipe those dirs, Class A kept). Empty 18/19 rewrite `meta` to 20. |
@@ -281,7 +286,7 @@ included; tree at #318):
 | Code modularity | Medium | Inline tests peeled from `peer` / `methods` / `scripthash`. Production leftover: `electrum/server` **5.8k** (**R-10**) |
 | Cross-platform | Medium (honest) | Completion session ports Darwin/Windows store IO. CI snapshots: musl + CRT-static Windows + system-dylib Darwin |
 | Docs consistency | Strong | One map (`docs/README.md`); AGENTS slim; comments-as-smell + no repo-text tests |
-| Contributor onboarding | Strong | how-we-plan + TDD + inventory; first hour is OPERATOR.md (Q-34) |
+| Contributor onboarding | Strong | how-we-plan + TDD; first hour is OPERATOR.md (Q-34) |
 | CI fidelity | Strong | Split gates; `test` ~85 s; Core functional nightly extra |
 | Dead / stub surface | Strong | Node RPC is a real subset; chaininfo disk/progress real (Q-47). `getnetworkhashps` is labeled dummy 2-work-per-block |
 | Test reliability/speed | Strong | **Q-37** closed on CI-class; 2 s default-test rule remains |
@@ -311,6 +316,12 @@ included; tree at #318):
   4072 B stream); chunkers share `sh_page_chunk_ranges`.
 - Sealed fuse8 fingerprints stay RAM; BDZ `g` is FdOnly.
 - Schema 17 leftover regenerate for optional `sp_tweaks` files (not a Class A wipe).
+- One Class A planner (`archive_class_a_from_wire`); TxApply→dummy `Block`
+  only in `rbitcoin_query::testutil`.
+- Instance `ConfirmStats` / session IO stats; no process-global confirm
+  meters and no TLS `test_take_*` probes.
+- `HeadScale` is open-time `StoreLayout`; production default Mainnet.
+- CLI and conf share `apply_kv`. Fuzz harness lives in `fuzz/`.
 
 ---
 

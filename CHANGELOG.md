@@ -69,6 +69,11 @@ before 1.0).
   `block_from_applies` live in `rbitcoin_query::testutil`. Production
   `Query` no longer converts TxApply to a dummy Block (`connect_block` /
   `commit_class_a_only` / `archive_prepared_*` gone).
+- **Dated crate-complexity inventory removed:** the 2026-09 program is
+  [`docs/quality.md`](docs/quality.md) Completed. Dual-path / probe
+  rules live in What to protect, [`docs/invariants.md`](docs/invariants.md),
+  [`CONTRIBUTING.md`](CONTRIBUTING.md) principle 11, and
+  [`TESTING.md`](TESTING.md).
 - **RPC / CLI honesty (Q-59 slice):** `submitblock` uses the live chain hub
   on all networks (same receive path as P2P; `generate*` / `setmocktime`
   stay regtest-only). `--minrelaytxfee` / `--blockmintxfee` reject garbage

@@ -214,9 +214,10 @@ That is **not** the operator binary (`nix build .#rbitcoin-musl`). Details:
     the allowlist in the owner crate rustdoc and then unused `pub` on
     **that** surface is intentional. `#[cfg(test)]` on production items
     is a smell: tests drive the shipped function (principle 8), not a
-    second test-only wrapper or `*_for_test` backdoor. A tiny
-    `#[cfg(test)]` observer of a production counter is allowed only when
-    the contract is otherwise unobservable. Fuzz-only `pub` is the same
+    second test-only wrapper or `*_for_test` backdoor. IO-shape pins use
+    session/table instance stats or on-disk file state, not thread-local
+    `test_take_*` probes on the hot path. A tiny `#[cfg(test)]` take on
+    those instance counters is fine. Fuzz-only `pub` is the same
     smell — prefer the in-crate `pub(crate)` graph or the published
     **binary** surface (`rbitcoin-node` / CLI) even if the harness pays
     a little extra setup, rather than exporting helpers solely for
