@@ -53,7 +53,7 @@ pub fn verify_tx_scripts_detached_forks(
         );
         crate::script::verify_job_all_inputs(&job)
     })
-    .unwrap_or_else(|| Err(ConsensusError::BadBlock("script worker disconnected")))
+    .unwrap_or(Err(ConsensusError::BadBlock("script worker disconnected")))
 }
 
 pub use block::{

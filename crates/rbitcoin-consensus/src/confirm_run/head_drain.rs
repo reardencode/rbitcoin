@@ -130,7 +130,7 @@ where
                     thread::current().name().unwrap_or("").to_string(),
                 ));
             }
-            let r = panic::catch_unwind(AssertUnwindSafe(work)).unwrap_or_else(|_| {
+            let r = panic::catch_unwind(AssertUnwindSafe(work)).unwrap_or({
                 Err(StoreError::Corrupt(
                     "tx.head write-behind drain thread panicked",
                 ))

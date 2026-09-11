@@ -12,7 +12,7 @@ pub fn electrum_scripthash_hex(spk: &[u8]) -> String {
     let h = sha256::Hash::hash(spk).to_byte_array();
     let mut rev = h;
     rev.reverse();
-    hex_encode(&rev)
+    hex_encode(rev)
 }
 
 pub const CORPUS_HOT: &str = include_str!("../corpora/hot.txt");

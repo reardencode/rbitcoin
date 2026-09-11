@@ -117,7 +117,7 @@ mod tests {
     #[test]
     fn roundtrip() {
         let data = [0u8, 1, 0xab, 0xff];
-        assert_eq!(encode(&data), "0001abff");
+        assert_eq!(encode(data), "0001abff");
         assert_eq!(decode("0001abff").unwrap(), data);
         assert_eq!(decode("0001ABFF").unwrap(), data);
         assert_eq!(decode("0x0a").unwrap(), vec![0x0a]);

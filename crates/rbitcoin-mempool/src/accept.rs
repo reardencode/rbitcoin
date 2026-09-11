@@ -828,7 +828,7 @@ impl ActiveMempool {
         for (i, inp) in tx.input.iter().enumerate() {
             let op = inp.previous_output;
             if let Some(creator) = self.graph.creator(&op) {
-                if self.bodies.get(&creator).is_none() {
+                if !self.bodies.contains_key(&creator) {
                     return Err(AcceptError::Durable("parent body missing".into()));
                 }
             } else if prep.chain_coins.get(i).and_then(|c| c.as_ref()).is_none() {
@@ -2472,7 +2472,7 @@ mod tests {
     fn accept_error_display_and_reject_paths() {
         use std::error::Error;
         let errs = [
-            AcceptError::Policy("x".into()),
+            AcceptError::Policy("x"),
             AcceptError::MissingPrevout(OutPoint {
                 txid: Txid::from_byte_array([1; 32]),
                 vout: 0,

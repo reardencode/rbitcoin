@@ -1136,7 +1136,7 @@ fn head_primary_slot_stable_and_ordered() {
     assert_eq!(sa, t.head_primary_slot(&a));
     // Distinct keys almost always land on distinct primary slots at tiny scale.
     assert_ne!(sa, sb);
-    let mut keys = vec![b, a];
+    let mut keys = [b, a];
     keys.sort_unstable_by_key(|k| t.head_primary_slot(k));
     assert!(t.head_primary_slot(&keys[0]) <= t.head_primary_slot(&keys[1]));
     let _ = std::fs::remove_dir_all(&dir);
@@ -1811,8 +1811,6 @@ fn address_head_get_by_txid() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Production API surface: abs spender meta, get_all, head snapshot, flushes.
-
 /// Dense encode/decode + error-arm coverage for packed Class A helpers.
 #[test]
 fn packed_encode_decode_flags_and_error_arms() {
@@ -2030,9 +2028,7 @@ fn packed_encode_decode_flags_and_error_arms() {
     {
         let mut bad = vec![output_flags::EMPTY_SCRIPT];
         // uleb128 of value that exceeds i64::MAX: 0xFF… with enough bytes
-        for _ in 0..10 {
-            bad.push(0xff);
-        }
+        bad.extend(std::iter::repeat_n(0xff, 10));
         bad.push(0x01);
         assert!(matches!(
             OutputRecord::decode_at(&bad),

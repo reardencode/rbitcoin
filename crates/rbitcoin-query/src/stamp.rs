@@ -155,8 +155,7 @@ pub fn stamp_external_parents(
         if !after_skel.is_empty() {
             return Err(rbitcoin_store::StoreError::Corrupt(
                 "archive: parent create_fk unresolved (contiguous batch required)",
-            )
-            .into());
+            ));
         }
         stamp.head_need_n = 0;
         stats.note_pin_txid(stamp.pin_txid_n, stamp.pin_txid_ns);
@@ -339,15 +338,14 @@ pub fn fill_missing_parent_ranges(
     let mut body_filled = U64Set::default();
     if !need_body.is_empty() {
         let filled = store.tx_body_range_batch(&need_body)?;
-        for (fk, row) in need_body.into_iter().zip(filled.into_iter()) {
+        for (fk, row) in need_body.into_iter().zip(filled) {
             let Some(id) = fk.get() else {
                 continue;
             };
             let Some(range) = row else {
                 return Err(rbitcoin_store::StoreError::Corrupt(
                     "archive: external parent body_range missing after create_fk stamp",
-                )
-                .into());
+                ));
             };
             if let Some(e) = idents.get_mut(&id) {
                 e.body = Some(range);
@@ -357,7 +355,7 @@ pub fn fill_missing_parent_ranges(
     }
     if !need_spent.is_empty() {
         let filled = store.tx_spent_range_batch(&need_spent)?;
-        for (fk, row) in need_spent.into_iter().zip(filled.into_iter()) {
+        for (fk, row) in need_spent.into_iter().zip(filled) {
             let Some(id) = fk.get() else {
                 continue;
             };
@@ -370,8 +368,7 @@ pub fn fill_missing_parent_ranges(
                 None if body_filled.contains(&id) => {
                     return Err(rbitcoin_store::StoreError::Corrupt(
                         "archive: external parent spent_range missing after create_fk stamp",
-                    )
-                    .into());
+                    ));
                 }
                 None => {}
             }

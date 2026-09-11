@@ -505,7 +505,7 @@ fn put_create_batch_append_uses_heads() {
     let (n, _t) = t.put_create_batch_append(&recs, &mut heads).unwrap();
     assert_eq!(n, 3);
     assert_eq!(t.entries(&sh).unwrap().len(), 3);
-    assert!(heads.get(&sh).is_some());
+    assert!(heads.contains_key(&sh));
     let more = vec![rec(sh, 10, 9)];
     let (n2, _) = t.put_create_batch_append(&more, &mut heads).unwrap();
     assert_eq!(n2, 1);
@@ -1989,7 +1989,7 @@ fn two_scripts_same_shard_reverse_hash(shard: usize, n_shards: usize) -> (Vec<u8
             }
         }
     }
-    found.sort_by(|a, b| a.1.cmp(&b.1));
+    found.sort_by_key(|a| a.1);
     assert!(
         found.len() >= 2,
         "need two scripts in shard {shard}/{n_shards}"

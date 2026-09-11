@@ -647,7 +647,7 @@ impl Query {
         }
         let ranges = self.store.tx_spent_range_batch(&uniq)?;
         let mut range_by_fk = HashMap::new();
-        for (fk, range) in uniq.iter().zip(ranges.into_iter()) {
+        for (fk, range) in uniq.iter().zip(ranges) {
             if let Some(range) = range {
                 range_by_fk.insert(*fk, range);
             }
@@ -963,7 +963,7 @@ impl Query {
             ));
         }
         let mut by_fk = HashMap::new();
-        for (fk, txid) in fks.iter().zip(txids.into_iter()) {
+        for (fk, txid) in fks.iter().zip(txids) {
             let Some(txid) = txid else {
                 return Err(StoreError::Corrupt(
                     "invariant: SH create missing txid.body",

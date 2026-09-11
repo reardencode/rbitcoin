@@ -2060,7 +2060,7 @@ impl ChainHub {
             let reason = rbitcoin_consensus::block_reject_reason(&e);
             rbitcoin_log::info!(
                 "{}",
-                rbitcoin_consensus::block_reject_log_line(&hash, &reason)
+                rbitcoin_consensus::block_reject_log_line(hash, &reason)
             );
             if reject_is_mutated(&reason) {
                 NetError::Mutated(reason)
@@ -3268,7 +3268,7 @@ mod tests {
         assert!(hub.accept_branch(&[b2.clone(), b3_bad]).is_err());
         // Linked tip extension via branch.
         assert!(matches!(
-            hub.accept_branch(&[b2.clone()]).unwrap(),
+            hub.accept_branch(std::slice::from_ref(&b2)).unwrap(),
             AcceptOutcome::Accepted { height: 2 }
         ));
 
@@ -3748,7 +3748,7 @@ mod tests {
         let err = hub.accept_block(block).expect_err("v2 at height 102");
         let s = err.to_string();
         assert!(s.contains("bad-version(0x00000002)"), "shipped reject: {s}");
-        let line = rbitcoin_consensus::block_reject_log_line(&hash, "bad-version(0x00000002)");
+        let line = rbitcoin_consensus::block_reject_log_line(hash, "bad-version(0x00000002)");
         assert_eq!(line, format!("{hash}, bad-version(0x00000002)"));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -3794,7 +3794,7 @@ mod tests {
         let err = hub.accept_block(block).expect_err("v3 at height 111");
         let s = err.to_string();
         assert!(s.contains("bad-version(0x00000003)"), "shipped reject: {s}");
-        let line = rbitcoin_consensus::block_reject_log_line(&hash, "bad-version(0x00000003)");
+        let line = rbitcoin_consensus::block_reject_log_line(hash, "bad-version(0x00000003)");
         assert_eq!(line, format!("{hash}, bad-version(0x00000003)"));
         let _ = std::fs::remove_dir_all(dir);
     }

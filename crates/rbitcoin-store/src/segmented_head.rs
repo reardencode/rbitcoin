@@ -597,12 +597,12 @@ impl SegmentedTxHead {
                 };
                 let mut pass_i: Vec<usize> = Vec::new();
                 let mut pass_keys: Vec<[u8; 32]> = Vec::new();
-                for i in 0..n {
+                for (i, key) in mixed.iter().enumerate() {
                     if !key_on(i) {
                         continue;
                     }
                     pass_i.push(i);
-                    pass_keys.push(mixed[i]);
+                    pass_keys.push(*key);
                 }
                 if pass_keys.is_empty() {
                     continue;
@@ -1045,7 +1045,7 @@ fn build_seal_publish(
     let t0 = Instant::now();
     let fuse = SealedFuse8::build(&grouped.keys)?;
     fuse.write_to(&segment_fuse_path(dir, file_id))?;
-    let pack = TxHeadMphf::write_grouped(&segment_head_path(dir, file_id), grouped)?;
+    let pack = TxHeadMphf::write_grouped(segment_head_path(dir, file_id), grouped)?;
     let fuse_bytes = fuse.fingerprint_bytes();
     rbitcoin_log::info!(
         "store: tx.head seal done file_id={file_id} count={count} fuse_keys_unique={unique_n} \

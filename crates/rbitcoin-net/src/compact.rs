@@ -123,7 +123,7 @@ pub fn try_reconstruct(
 
     let mut short_i = 0usize;
     let mut missing = Vec::new();
-    for abs in 0..total {
+    for (abs, slot) in slots.iter_mut().enumerate() {
         if prefilled_set.contains(&abs) {
             continue;
         }
@@ -142,7 +142,7 @@ pub fn try_reconstruct(
                     missing.push(abs as u64);
                     continue;
                 }
-                slots[abs] = Some(cands[0].clone());
+                *slot = Some(cands[0].clone());
             }
             Some(cands) if cands.len() > 1 => {
                 // Ambiguous short-id collision — request from peer.
@@ -225,7 +225,7 @@ pub fn apply_block_transactions(
 
     let mut short_i = 0usize;
     let mut still_missing = Vec::new();
-    for abs in 0..total {
+    for (abs, slot) in slots.iter_mut().enumerate() {
         if prefilled_set.contains(&abs) {
             continue;
         }
@@ -234,7 +234,7 @@ pub fn apply_block_transactions(
             if !placed.insert(txid) {
                 return Err(missing.to_vec());
             }
-            slots[abs] = Some((*tx).clone());
+            *slot = Some((*tx).clone());
             // Still consume the corresponding short_id slot.
             if short_i < hsi.short_ids.len() {
                 short_i += 1;
@@ -254,7 +254,7 @@ pub fn apply_block_transactions(
                     still_missing.push(abs as u64);
                     continue;
                 }
-                slots[abs] = Some(cands[0].clone());
+                *slot = Some(cands[0].clone());
             }
             _ => still_missing.push(abs as u64),
         }

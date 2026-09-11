@@ -499,7 +499,7 @@ impl Query {
                 continue;
             }
             if block.txdata.len() != txids.len() {
-                return Err(StoreError::Corrupt("txid count mismatch").into());
+                return Err(StoreError::Corrupt("txid count mismatch"));
             }
             let first_tx_fk = Fk(next_tx);
             let n_txs = block.txdata.len() as u32;
@@ -508,8 +508,7 @@ impl Query {
                 if !seen_in_block.insert(*txid) {
                     return Err(StoreError::Corrupt(
                         "duplicate txid in block body (consensus violation)",
-                    )
-                    .into());
+                    ));
                 }
                 let tx_fk = Fk(next_tx);
                 next_tx += 1;
@@ -1591,7 +1590,7 @@ mod tests {
             plan_applies(&q, &same, 1, &crate::InFlight::new(), None).expect("same header");
         assert_eq!(plan_same.planned_fks, vec![Fk(1), Fk(2)]);
         assert!(
-            plan_same.external_parent_vouts.get(&1).is_none(),
+            !plan_same.external_parent_vouts.contains_key(&1),
             "same-header create must not be in parent_vouts"
         );
 

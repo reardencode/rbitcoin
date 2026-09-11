@@ -612,9 +612,9 @@ impl TableFile {
         if new_cap <= self.file_cap.load(Ordering::Acquire) {
             return Ok(());
         }
-        if try_fallocate(&file, new_cap).is_err() {
-            set_file_len(&file, &self.path, new_cap)?;
-        } else if file.metadata().map(|m| m.len()).unwrap_or(0) < new_cap {
+        if try_fallocate(&file, new_cap).is_err()
+            || file.metadata().map(|m| m.len()).unwrap_or(0) < new_cap
+        {
             set_file_len(&file, &self.path, new_cap)?;
         }
         drop(file);
@@ -1270,8 +1270,8 @@ pub fn ensure_nofile_budget_at_least(want_soft: u64) -> (u64, u64) {
             );
             return (0, 0);
         }
-        let hard = rlim.rlim_max as u64;
-        let soft = rlim.rlim_cur as u64;
+        let hard = rlim.rlim_max;
+        let soft = rlim.rlim_cur;
         let hard_cap = if hard == u64::MAX || rlim.rlim_max == libc::RLIM_INFINITY {
             want_soft.max(soft)
         } else {

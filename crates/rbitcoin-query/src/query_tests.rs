@@ -242,7 +242,8 @@ fn replace_tip_same_height(
     let (mut h, t) = coinbase_block(height, prev_fk, Some(parent_hash));
     h.nonce = h.nonce.wrapping_add(nonce_delta);
     rehash_header(&mut h, &parent_hash);
-    q.connect_block(Height(height), &h, &[t.clone()]).unwrap();
+    q.connect_block(Height(height), &h, std::slice::from_ref(&t))
+        .unwrap();
     (h, t)
 }
 

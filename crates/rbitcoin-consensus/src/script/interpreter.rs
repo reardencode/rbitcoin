@@ -2357,10 +2357,7 @@ mod success_and_disabled_tests {
     #[test]
     fn stack_size_limit_on_2dup() {
         // MAX_STACK_SIZE is typically 1000; push 999 ones then 2DUP overflows.
-        let mut script = Vec::new();
-        for _ in 0..999 {
-            script.push(0x51);
-        }
+        let mut script = vec![0x51; 999];
         script.push(0x6e); // OP_2DUP
         let err = eval(&script, SigVersion::WitnessV0).unwrap_err();
         assert!(
@@ -2374,16 +2371,9 @@ mod success_and_disabled_tests {
     /// stack). 201 TOALTSTACK (op budget) + 799 OP_1 + one PushBytes = 1001.
     #[test]
     fn stack_and_altstack_share_max_size_on_pushdata() {
-        let mut script = Vec::new();
-        for _ in 0..201 {
-            script.push(0x51); // OP_1 (not an op-count opcode)
-        }
-        for _ in 0..201 {
-            script.push(0x6b); // OP_TOALTSTACK
-        }
-        for _ in 0..799 {
-            script.push(0x51);
-        }
+        let mut script = vec![0x51; 201];
+        script.extend(std::iter::repeat_n(0x6b, 201)); // OP_TOALTSTACK
+        script.extend(std::iter::repeat_n(0x51, 799));
         script.extend_from_slice(&[0x01, 0x01]); // PushBytes, not OP_1
         let err = eval(&script, SigVersion::WitnessV0).unwrap_err();
         assert!(format!("{err}").contains("stack size"), "got {err}");
@@ -2465,8 +2455,8 @@ mod minimal_data_tests {
         assert!(!check_minimal_push(&[0x81], 0x01));
         assert!(check_minimal_push(&[0x00], 0x01)); // one zero byte is fine
         assert!(check_minimal_push(&[0x11], 0x01)); // 17 as direct push
-        assert!(check_minimal_push(&vec![0u8; 76], 0x4c)); // PUSHDATA1 for 76
-        assert!(!check_minimal_push(&vec![0u8; 76], 0x4d));
+        assert!(check_minimal_push(&[0u8; 76], 0x4c)); // PUSHDATA1 for 76
+        assert!(!check_minimal_push(&[0u8; 76], 0x4d));
     }
 
     #[test]

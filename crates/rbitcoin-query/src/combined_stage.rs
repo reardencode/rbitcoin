@@ -90,7 +90,7 @@ pub fn load_creates_once(
     }
     let secret: &StoreSecret = store.txs.store_secret();
     let mut out = Vec::with_capacity(jobs.len());
-    for (i, (fk, job)) in fks.iter().zip(jobs.into_iter()).enumerate() {
+    for (i, (fk, job)) in fks.iter().zip(jobs).enumerate() {
         if !job.ok {
             continue;
         }

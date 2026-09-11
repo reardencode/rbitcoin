@@ -702,7 +702,7 @@ mod tests {
         let mut progress = Progress::start("casa test", 3);
         let out = electrum_casa(
             &mut c,
-            &[sh.clone()],
+            std::slice::from_ref(&sh),
             &CasaOpts {
                 warmup: 1,
                 passes: 2,

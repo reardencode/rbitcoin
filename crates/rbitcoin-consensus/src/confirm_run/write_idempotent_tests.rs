@@ -544,7 +544,7 @@ fn tip_plus_one_after_trailing_null_heal_is_not_notfound() {
     let mut raw = std::fs::read(&conf).unwrap();
     assert!(raw.len() >= 16);
     let logical = u64::from_le_bytes(raw[8..16].try_into().unwrap());
-    let extra = vec![0u8; 20 * 8];
+    let extra = [0u8; 20 * 8];
     let new_logical = logical + extra.len() as u64;
     if (raw.len() as u64) < new_logical {
         raw.resize(new_logical as usize, 0);
@@ -1704,7 +1704,7 @@ fn pin_recent_identity_without_outs_still_range_fills() {
     let fks = q
         .store()
         .txs
-        .put_full_batch_indexed(&[parent.clone()], true)
+        .put_full_batch_indexed(std::slice::from_ref(&parent), true)
         .unwrap();
     let range = q.store().tx_body_range(fks[0]).unwrap();
 

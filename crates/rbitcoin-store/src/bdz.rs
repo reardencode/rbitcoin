@@ -1266,8 +1266,8 @@ impl CompactRank {
         let n_supers = (m as usize).div_ceil(RANK_SUPER_BITS as usize);
         let mut supers = vec![0u32; n_supers + 1];
         let mut acc = 0u32;
-        for i in 0..n_supers {
-            supers[i] = acc;
+        for (i, slot) in supers.iter_mut().enumerate().take(n_supers) {
+            *slot = acc;
             let bit0 = i * RANK_SUPER_BITS as usize;
             let bit1 = ((i + 1) * RANK_SUPER_BITS as usize).min(m as usize);
             acc += popcount_range(&occ, bit0, bit1);

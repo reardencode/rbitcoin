@@ -381,25 +381,19 @@ fn command_from_12(cmd12: &[u8; 12]) -> Result<String, NetError> {
 /// Encode a P2P application message as BIP324 packet contents (short/long type + payload).
 pub fn encode_v2_contents(payload: NetworkMessage) -> Result<Vec<u8>, NetError> {
     match &payload {
-        NetworkMessage::Inv(v) | NetworkMessage::GetData(v) | NetworkMessage::NotFound(v) => {
-            if v.len() > MAX_INV_SIZE {
-                return Err(NetError::MessageTooLarge(v.len()));
-            }
+        NetworkMessage::Inv(v) | NetworkMessage::GetData(v) | NetworkMessage::NotFound(v)
+            if v.len() > MAX_INV_SIZE =>
+        {
+            return Err(NetError::MessageTooLarge(v.len()));
         }
-        NetworkMessage::Headers(h) => {
-            if h.len() > MAX_HEADERS_RESULTS {
-                return Err(NetError::MessageTooLarge(h.len()));
-            }
+        NetworkMessage::Headers(h) if h.len() > MAX_HEADERS_RESULTS => {
+            return Err(NetError::MessageTooLarge(h.len()));
         }
-        NetworkMessage::GetHeaders(gh) => {
-            if gh.locator_hashes.len() > MAX_LOCATOR_SZ {
-                return Err(NetError::MessageTooLarge(gh.locator_hashes.len()));
-            }
+        NetworkMessage::GetHeaders(gh) if gh.locator_hashes.len() > MAX_LOCATOR_SZ => {
+            return Err(NetError::MessageTooLarge(gh.locator_hashes.len()));
         }
-        NetworkMessage::GetBlocks(gb) => {
-            if gb.locator_hashes.len() > MAX_LOCATOR_SZ {
-                return Err(NetError::MessageTooLarge(gb.locator_hashes.len()));
-            }
+        NetworkMessage::GetBlocks(gb) if gb.locator_hashes.len() > MAX_LOCATOR_SZ => {
+            return Err(NetError::MessageTooLarge(gb.locator_hashes.len()));
         }
         _ => {}
     }

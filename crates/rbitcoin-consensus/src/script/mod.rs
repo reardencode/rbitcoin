@@ -590,7 +590,7 @@ pub(crate) mod crypto {
         fn bip66_encoding_edge_cases() {
             assert!(!is_valid_signature_encoding(&[]));
             assert!(!is_valid_signature_encoding(&[0x30; 8])); // too short
-            assert!(!is_valid_signature_encoding(&vec![0x30; 74])); // too long
+            assert!(!is_valid_signature_encoding(&[0x30; 74])); // too long
             let mut bad = valid_der_sig();
             bad[0] = 0x31;
             assert!(!is_valid_signature_encoding(&bad));

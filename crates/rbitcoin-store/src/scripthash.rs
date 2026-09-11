@@ -1671,7 +1671,7 @@ impl ScriptHashTable {
         if recs.is_empty() {
             return Ok(());
         }
-        recs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        recs.sort_unstable_by_key(|a| a.0);
         let id = {
             let g = self.sealed_ovf.lock().unwrap();
             g.len() as u32
@@ -1745,7 +1745,7 @@ impl ScriptHashTable {
             }
             g.iter().map(|h| h.path().to_path_buf()).collect()
         };
-        recs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        recs.sort_unstable_by_key(|a| a.0);
         for w in recs.windows(2) {
             if w[1].0 == w[0].0 {
                 return Err(StoreError::Corrupt(
@@ -2505,7 +2505,7 @@ impl ScriptHashTable {
         bump: u64,
     ) -> Result<(), StoreError> {
         let mut recs = recs.to_vec();
-        recs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        recs.sort_unstable_by_key(|a| a.0);
         recs.dedup_by(|a, b| a.0 == b.0);
         let n_shards = self.n_shards;
         let path = sorted_main_shard_path(&self.store_dir, shard, n_shards);
@@ -3182,7 +3182,7 @@ impl<'a> ScriptHashBulkSession<'a> {
         if self.active_shard.is_some() {
             let t0 = std::time::Instant::now();
             let mut recs = std::mem::take(&mut self.recs);
-            recs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            recs.sort_unstable_by_key(|a| a.0);
             recs.dedup_by(|a, b| a.0 == b.0);
             let keys = recs.len() as u64;
             if !recs.is_empty() {

@@ -2355,7 +2355,8 @@ fn chain_view_status_includes_blockhash() {
         }],
         outputs: vec![OutputRecord::unspent(1, vec![0x51])],
     };
-    q.connect_block(Height(0), &h0, &[t0.clone()]).unwrap();
+    q.connect_block(Height(0), &h0, std::slice::from_ref(&t0))
+        .unwrap();
     let prev_fk = q.tip_header_fk().unwrap().unwrap();
     let mut h1 = h0.clone();
     h1.prev_fk = prev_fk;
@@ -2371,7 +2372,8 @@ fn chain_view_status_includes_blockhash() {
     );
     let mut t1 = t0;
     t1.tx.txid[5] = 0xaa;
-    q.connect_block(Height(1), &h1, &[t1.clone()]).unwrap();
+    q.connect_block(Height(1), &h1, std::slice::from_ref(&t1))
+        .unwrap();
     let sh = script_hash(&[0x51]);
     let hist_a = q.scripthash_history(&sh).unwrap();
     let status_a = scripthash_status(Some(&q), &hist_a).unwrap();

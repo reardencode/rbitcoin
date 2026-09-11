@@ -1473,9 +1473,9 @@ impl Query {
             }
             memo.insert(fk.0, (own + best_child_w, best_depth.saturating_add(1)));
         }
-        memo.get(&root.0).copied().ok_or_else(|| {
-            StoreError::Corrupt("resume_subtree_score: root missing after walk".into())
-        })
+        memo.get(&root.0).copied().ok_or(StoreError::Corrupt(
+            "resume_subtree_score: root missing after walk",
+        ))
     }
 
     /// Flush header rows + Class A body associations (IBD writer durability).
