@@ -263,7 +263,6 @@ pub async fn ws_upgrade(ws: WebSocketUpgrade, State(st): State<AppState>) -> Res
         .into_response()
 }
 
-#[allow(clippy::cognitive_complexity)] // Esplora WS session dispatch
 async fn handle_socket(socket: WebSocket, st: AppState, _permit: OwnedSemaphorePermit) {
     let (mut sink, mut stream) = socket.split();
     let mut conn = ConnState::new();
@@ -324,36 +323,35 @@ async fn handle_socket(socket: WebSocket, st: AppState, _permit: OwnedSemaphoreP
                 }
             }
             frame = stream.next() => {
-                match frame {
-                    Some(Ok(Message::Text(text))) => {
-                        if text.len() > st.max_ws_message_bytes {
-                            let _ = send_error(&mut sink, "message too large").await;
-                            break;
-                        }
-                        match parse_client_msg(text.as_str()) {
-                            Ok(msg) => {
-                                if handle_client_msg(&st, &mut conn, msg, &mut sink).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                if send_error(&mut sink, &e).await.is_err() {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    Some(Ok(Message::Ping(p))) => {
-                        if sink.send(Message::Pong(p)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Ok(_)) => {}
-                    Some(Err(_)) => break,
+                if handle_ws_frame(&st, &mut conn, frame, &mut sink).await.is_err() {
+                    break;
                 }
             }
         }
+    }
+}
+
+async fn handle_ws_frame(
+    st: &AppState,
+    conn: &mut ConnState,
+    frame: Option<Result<Message, axum::Error>>,
+    sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+) -> Result<(), ()> {
+    match frame {
+        Some(Ok(Message::Text(text))) => {
+            if text.len() > st.max_ws_message_bytes {
+                let _ = send_error(sink, "message too large").await;
+                return Err(());
+            }
+            match parse_client_msg(text.as_str()) {
+                Ok(msg) => handle_client_msg(st, conn, msg, sink).await,
+                Err(e) => send_error(sink, &e).await,
+            }
+        }
+        Some(Ok(Message::Ping(p))) => sink.send(Message::Pong(p)).await.map_err(|_| ()),
+        Some(Ok(Message::Close(_))) | None => Err(()),
+        Some(Ok(_)) => Ok(()),
+        Some(Err(_)) => Err(()),
     }
 }
 
