@@ -101,10 +101,10 @@ pub fn confirm_wire_lookup_stamp(
             pipeline.and_then(|p| p.skeleton.as_ref()),
         )?,
     };
-    lookup_stage_stats::BLOCKS.fetch_add(blocks.len() as u64, Ordering::Relaxed);
-    lookup_stage_stats::HEAD_NS.fetch_add(plan_ns, Ordering::Relaxed);
+    rbitcoin_query::note_confirm(&query.confirm_stats().lookup_blocks, blocks.len() as u64);
+    rbitcoin_query::note_confirm(&query.confirm_stats().lookup_head_ns, plan_ns);
     let work_ns = t0.elapsed().as_nanos() as u64;
-    lookup_stage_stats::TOTAL_NS.fetch_add(work_ns, Ordering::Relaxed);
+    rbitcoin_query::note_confirm(&query.confirm_stats().lookup_total_ns, work_ns);
     Ok(PlanStampOutcome {
         plan,
         parent_pin,
@@ -159,8 +159,14 @@ pub(super) fn stamp_parent_pin_archived(
     let empty = rbitcoin_query::InFlight::new();
     let ifo = in_flight.unwrap_or(&empty);
     let need_vec: Vec<[u8; 32]> = need_external.into_keys().collect();
-    let ext = rbitcoin_query::stamp_external_parents(query.store(), &need_vec, ifo, skeleton)
-        .map_err(ConsensusError::from)?;
+    let ext = rbitcoin_query::stamp_external_parents(
+        query.store(),
+        &need_vec,
+        ifo,
+        skeleton,
+        query.confirm_stats(),
+    )
+    .map_err(ConsensusError::from)?;
     let mut stamp = ParentPinStamp {
         resolved: HashMap::with_capacity_and_hasher(
             ext.resolved.len().saturating_add(same_batch.len()),
@@ -185,8 +191,13 @@ pub(super) fn stamp_parent_pin_archived(
     // Identities are stamped from wire prev_txid at insert time — never soft-fill
     // from txid.body here (that would be a dual path after lookup promised identity).
     if skeleton.is_none() {
-        rbitcoin_query::fill_missing_parent_ranges(query.store(), ifo, &mut stamp.idents)
-            .map_err(ConsensusError::from)?;
+        rbitcoin_query::fill_missing_parent_ranges(
+            query.store(),
+            ifo,
+            &mut stamp.idents,
+            query.confirm_stats(),
+        )
+        .map_err(ConsensusError::from)?;
     }
     for ident in stamp.idents.values() {
         if ident.txid == [0u8; 32] {
@@ -234,7 +245,10 @@ pub fn confirm_wire_load_from_plan(
         p.freeze_after_pin();
     }
 
-    confirm_phase_stats::LOAD_NS.fetch_add(t_load.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    rbitcoin_query::note_confirm(
+        &query.confirm_stats().load_ns,
+        t_load.elapsed().as_nanos() as u64,
+    );
 
     let prepared = assemble_run(
         query,
@@ -255,6 +269,7 @@ pub fn confirm_wire_load_from_plan(
             batch_parents,
             script_preverified: preverified.clone(),
             archive_plan: plan,
+            stats: query.confirm_stats_arc(),
         },
         work_ns,
     })
@@ -312,6 +327,7 @@ pub(super) fn wire_lookup_phase(
             block.as_ref(),
             &ctx,
             caller_pres.as_ref().map(Arc::clone),
+            Some(query.confirm_stats()),
         )?;
         let txids: Vec<[u8; 32]> = pres.iter().map(|p| p.txid).collect();
         struct_ns = struct_ns.saturating_add(t_struct.elapsed().as_nanos() as u64);
@@ -473,18 +489,20 @@ pub(super) fn wire_lookup_phase(
     let batch_ns = t_batch.elapsed().as_nanos() as u64;
     // plan_ns for HEAD_NS: filter + batch (legacy “lookup wall” without struct/prepare).
     let plan_ns = filter_ns.saturating_add(batch_ns);
-    plan_stamp_sub_stats::note(struct_ns, prepare_ns, filter_ns, batch_ns);
+    query
+        .confirm_stats()
+        .note_stamp(struct_ns, prepare_ns, filter_ns, batch_ns);
     if struct_ns > 0 {
-        confirm_phase_stats::PREP_STRUCT_NS.fetch_add(struct_ns, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().phase_prep_struct_ns, struct_ns);
     }
     if header_ns > 0 {
-        confirm_phase_stats::PREP_HEADER_NS.fetch_add(header_ns, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().phase_prep_header_ns, header_ns);
     }
     if prepare_ns > 0 {
-        confirm_phase_stats::PREP_PREPARE_NS.fetch_add(prepare_ns, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().phase_prep_prepare_ns, prepare_ns);
     }
     if plan_ns > 0 {
-        confirm_phase_stats::PREP_FILTER_PLAN_NS.fetch_add(plan_ns, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().phase_prep_filter_plan_ns, plan_ns);
     }
     Ok((plan, metas, wire_blocks, plan_ns))
 }
@@ -525,233 +543,6 @@ pub(super) fn create_fks_from_header_ranges(
         by_header.insert(hid, slice);
     }
     by_header
-}
-
-/// Stamp-phase sub-walls for lookup_thr diagnosis (structure / prepare / filter / batch).
-///
-/// Batch is the archive plan_batch wall (assign+collect+inflight+head_fk+stamp+finish
-/// already timed in `archive_phase_stats`). `head_fk` = leftover TipOnly
-/// `get_fk_by_txid_batch`. Window sum is [`sample_and_reset`].
-pub mod plan_stamp_sub_stats {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    #[cfg(test)]
-    mod exclusive {
-        use std::cell::Cell;
-        use std::sync::Mutex;
-        static LOCK: Mutex<()> = Mutex::new(());
-        thread_local! {
-            static HELD: Cell<bool> = const { Cell::new(false) };
-        }
-        pub fn with<R>(f: impl FnOnce() -> R) -> R {
-            if HELD.with(Cell::get) {
-                return f();
-            }
-            let _g = LOCK.lock().unwrap_or_else(|p| p.into_inner());
-            HELD.with(|h| h.set(true));
-            let r = f();
-            HELD.with(|h| h.set(false));
-            r
-        }
-    }
-    #[cfg(not(test))]
-    mod exclusive {
-        #[inline]
-        pub fn with<R>(f: impl FnOnce() -> R) -> R {
-            f()
-        }
-    }
-
-    #[cfg(test)]
-    pub fn with_exclusive<R>(f: impl FnOnce() -> R) -> R {
-        exclusive::with(f)
-    }
-
-    static STRUCT_NS: AtomicU64 = AtomicU64::new(0);
-    static STRUCT_TXID_NS: AtomicU64 = AtomicU64::new(0);
-    static STRUCT_WTXID_NS: AtomicU64 = AtomicU64::new(0);
-    static STRUCT_WALK_NS: AtomicU64 = AtomicU64::new(0);
-    static PREPARE_NS: AtomicU64 = AtomicU64::new(0);
-    static FILTER_NS: AtomicU64 = AtomicU64::new(0);
-    static BATCH_NS: AtomicU64 = AtomicU64::new(0);
-
-    /// Split of [`validate_block_structure_hashed`]: txid encode, wtxid encode, other walks.
-    pub fn note_struct_parts(txid_ns: u64, wtxid_ns: u64, walk_ns: u64) {
-        exclusive::with(|| {
-            if txid_ns > 0 {
-                STRUCT_TXID_NS.fetch_add(txid_ns, Ordering::Relaxed);
-            }
-            if wtxid_ns > 0 {
-                STRUCT_WTXID_NS.fetch_add(wtxid_ns, Ordering::Relaxed);
-            }
-            if walk_ns > 0 {
-                STRUCT_WALK_NS.fetch_add(walk_ns, Ordering::Relaxed);
-            }
-        });
-    }
-
-    pub fn note(struct_ns: u64, prepare_ns: u64, filter_ns: u64, batch_ns: u64) {
-        exclusive::with(|| {
-            if struct_ns > 0 {
-                STRUCT_NS.fetch_add(struct_ns, Ordering::Relaxed);
-            }
-            if prepare_ns > 0 {
-                PREPARE_NS.fetch_add(prepare_ns, Ordering::Relaxed);
-            }
-            if filter_ns > 0 {
-                FILTER_NS.fetch_add(filter_ns, Ordering::Relaxed);
-            }
-            if batch_ns > 0 {
-                BATCH_NS.fetch_add(batch_ns, Ordering::Relaxed);
-            }
-        });
-    }
-
-    #[derive(Debug, Default, Clone, Copy)]
-    pub struct Sample {
-        pub struct_ns: u64,
-        pub struct_txid_ns: u64,
-        pub struct_wtxid_ns: u64,
-        pub struct_walk_ns: u64,
-        pub prepare_ns: u64,
-        pub filter_ns: u64,
-        pub batch_ns: u64,
-    }
-
-    pub fn sample_and_reset() -> Sample {
-        exclusive::with(|| Sample {
-            struct_ns: STRUCT_NS.swap(0, Ordering::Relaxed),
-            struct_txid_ns: STRUCT_TXID_NS.swap(0, Ordering::Relaxed),
-            struct_wtxid_ns: STRUCT_WTXID_NS.swap(0, Ordering::Relaxed),
-            struct_walk_ns: STRUCT_WALK_NS.swap(0, Ordering::Relaxed),
-            prepare_ns: PREPARE_NS.swap(0, Ordering::Relaxed),
-            filter_ns: FILTER_NS.swap(0, Ordering::Relaxed),
-            batch_ns: BATCH_NS.swap(0, Ordering::Relaxed),
-        })
-    }
-}
-
-/// Accumulators for the **lookup** pipeline stage (plan+stamp + denserels ensure).
-pub mod lookup_stage_stats {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    pub static BLOCKS: AtomicU64 = AtomicU64::new(0);
-    pub static PARENTS: AtomicU64 = AtomicU64::new(0);
-    pub static ALREADY: AtomicU64 = AtomicU64::new(0);
-    pub static COLD: AtomicU64 = AtomicU64::new(0);
-    pub static UNRESOLVED: AtomicU64 = AtomicU64::new(0);
-    pub static TOTAL_NS: AtomicU64 = AtomicU64::new(0);
-    pub static COLLECT_NS: AtomicU64 = AtomicU64::new(0);
-    pub static HEAD_NS: AtomicU64 = AtomicU64::new(0);
-    pub static COLD_IO_NS: AtomicU64 = AtomicU64::new(0);
-    /// Lookup-wave `consensus_decode` of still-raw BQ payloads.
-    pub static DECODE_NS: AtomicU64 = AtomicU64::new(0);
-    /// Lookup-wave `TxPrecompute::from_tx` / `from_tx_connect` after decode.
-    pub static PRECOMPUTE_NS: AtomicU64 = AtomicU64::new(0);
-    /// Lookup-wave TipOnly `get_fk_by_txid_batch` + slot sort. Not load stamp.
-    pub static WAVE_HEAD_NS: AtomicU64 = AtomicU64::new(0);
-    /// Lookup-wave `tx_spent_range_batch` for TipOnly hits.
-    pub static WAVE_SPENT_NS: AtomicU64 = AtomicU64::new(0);
-
-    pub fn note(
-        blocks: u64,
-        parents: u64,
-        already: u64,
-        cold: u64,
-        unresolved: u64,
-        total_ns: u64,
-        collect_ns: u64,
-        head_ns: u64,
-        cold_io_ns: u64,
-    ) {
-        if blocks > 0 {
-            BLOCKS.fetch_add(blocks, Ordering::Relaxed);
-        }
-        if parents > 0 {
-            PARENTS.fetch_add(parents, Ordering::Relaxed);
-        }
-        if already > 0 {
-            ALREADY.fetch_add(already, Ordering::Relaxed);
-        }
-        if cold > 0 {
-            COLD.fetch_add(cold, Ordering::Relaxed);
-        }
-        if unresolved > 0 {
-            UNRESOLVED.fetch_add(unresolved, Ordering::Relaxed);
-        }
-        if total_ns > 0 {
-            TOTAL_NS.fetch_add(total_ns, Ordering::Relaxed);
-        }
-        if collect_ns > 0 {
-            COLLECT_NS.fetch_add(collect_ns, Ordering::Relaxed);
-        }
-        if head_ns > 0 {
-            HEAD_NS.fetch_add(head_ns, Ordering::Relaxed);
-        }
-        if cold_io_ns > 0 {
-            COLD_IO_NS.fetch_add(cold_io_ns, Ordering::Relaxed);
-        }
-    }
-
-    /// Accrue lookup-wave decode / precompute / key-collect / TipOnly head / spent.idx.
-    pub fn note_wave_decode(
-        decode_ns: u64,
-        precompute_ns: u64,
-        collect_ns: u64,
-        head_ns: u64,
-        spent_ns: u64,
-    ) {
-        if decode_ns > 0 {
-            DECODE_NS.fetch_add(decode_ns, Ordering::Relaxed);
-        }
-        if precompute_ns > 0 {
-            PRECOMPUTE_NS.fetch_add(precompute_ns, Ordering::Relaxed);
-        }
-        if collect_ns > 0 {
-            COLLECT_NS.fetch_add(collect_ns, Ordering::Relaxed);
-        }
-        if head_ns > 0 {
-            WAVE_HEAD_NS.fetch_add(head_ns, Ordering::Relaxed);
-        }
-        if spent_ns > 0 {
-            WAVE_SPENT_NS.fetch_add(spent_ns, Ordering::Relaxed);
-        }
-    }
-
-    #[derive(Debug, Default, Clone, Copy)]
-    pub struct Sample {
-        pub blocks: u64,
-        pub parents: u64,
-        pub already: u64,
-        pub cold: u64,
-        pub unresolved: u64,
-        pub total_ns: u64,
-        pub collect_ns: u64,
-        pub head_ns: u64,
-        pub cold_io_ns: u64,
-        pub decode_ns: u64,
-        pub precompute_ns: u64,
-        pub wave_head_ns: u64,
-        pub wave_spent_ns: u64,
-    }
-
-    pub fn sample_and_reset() -> Sample {
-        Sample {
-            blocks: BLOCKS.swap(0, Ordering::Relaxed),
-            parents: PARENTS.swap(0, Ordering::Relaxed),
-            already: ALREADY.swap(0, Ordering::Relaxed),
-            cold: COLD.swap(0, Ordering::Relaxed),
-            unresolved: UNRESOLVED.swap(0, Ordering::Relaxed),
-            total_ns: TOTAL_NS.swap(0, Ordering::Relaxed),
-            collect_ns: COLLECT_NS.swap(0, Ordering::Relaxed),
-            head_ns: HEAD_NS.swap(0, Ordering::Relaxed),
-            cold_io_ns: COLD_IO_NS.swap(0, Ordering::Relaxed),
-            decode_ns: DECODE_NS.swap(0, Ordering::Relaxed),
-            precompute_ns: PRECOMPUTE_NS.swap(0, Ordering::Relaxed),
-            wave_head_ns: WAVE_HEAD_NS.swap(0, Ordering::Relaxed),
-            wave_spent_ns: WAVE_SPENT_NS.swap(0, Ordering::Relaxed),
-        }
-    }
 }
 
 /// Lookup-side identity fill: plan RAM first, else `txid.body` (lookup may read
@@ -852,6 +643,7 @@ mod tests {
             &[parent_txid],
             &rbitcoin_query::InFlight::new(),
             Some(&skel),
+            q.confirm_stats(),
         )
         .expect("shared helper");
 

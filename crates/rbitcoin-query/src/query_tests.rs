@@ -258,49 +258,36 @@ fn spend_op_true(
 
 #[test]
 fn sampler_stats() {
-    // Process-global IBD samplers race under parallel `cargo test`. Prefer
-    // last-writer overwrite checks and accumulate lower-bounds over exact
-    // equality on counters other tests may also bump.
-    let _ = confirm_load_stats::sample_and_reset();
-
-    let _ = archive_phase_stats::sample_and_reset();
-    archive_phase_stats::note_resolve_counts(1, 2, 3, 4, 5, 6);
-    let last = archive_phase_stats::last_plan_batch();
-    // last_plan_batch is last-writer; re-note immediately before read if raced.
-    if last.head_need != 3 {
-        archive_phase_stats::note_resolve_counts(1, 2, 3, 4, 5, 6);
-    }
-    let last = archive_phase_stats::last_plan_batch();
+    let (_d, q) = crate::testutil::tiny_query_labeled("sampler-stats");
+    let st = q.confirm_stats();
+    st.note_resolve_counts(1, 2, 3, 4, 5, 6);
+    let last = st.last_plan_batch();
     assert_eq!(last.head_need, 3);
     assert_eq!(last.head_hit, 4);
-    archive_phase_stats::note_prep_plan(1, 2, 3, 10, 6, 7);
-    archive_phase_stats::note_prep_batch(10, 1, 2, 3, 4, 1);
-    archive_phase_stats::note_write_commit(20, 1, 2, 3, 4, 5, 1);
-    archive_phase_stats::note_write_flush(8);
-    let a = archive_phase_stats::sample_and_reset();
+    st.note_prep_plan(1, 2, 3, 10, 6, 7);
+    st.note_prep_batch(10, 1, 2, 3, 4, 1);
+    st.note_write_commit(20, 1, 2, 3, 4, 5, 1);
+    st.note_write_flush(8);
+    let a = st.take_window();
     assert!(a.prep_phases_sum_ns() > 0);
     assert!(a.write_phases_sum_ns() > 0);
-    assert!(a.blocks >= 1);
-    assert!(a.prep_head_fk_ns >= 10);
-    assert!(a.prep_head_ns >= 10);
+    assert!(a.arch_blocks >= 1);
+    assert!(a.arch_prep_head_fk_ns >= 10);
+    assert!(a.arch_prep_head_ns >= 10);
 
-    confirm_load_stats::note_last_pin(22, 33, 44, 100, 9);
-    let lp = confirm_load_stats::last_pin_phases();
-    if lp.plan_pin_ns != 22 {
-        confirm_load_stats::note_last_pin(22, 33, 44, 100, 9);
-    }
-    let lp = confirm_load_stats::last_pin_phases();
+    st.note_last_pin(22, 33, 44, 100, 9);
+    let lp = st.last_pin_phases();
     assert_eq!(lp.plan_pin_ns, 22);
     assert_eq!(lp.cold_ns, 33);
     assert_eq!(lp.contract_ns, 44);
     assert_eq!(lp.pin_plan_n, 100);
     assert_eq!(lp.pin_new_n, 9);
-    assert_eq!(confirm_load_stats::LastPinPhases::ms(2_000_000), 2);
+    assert_eq!(LastPinPhases::ms(2_000_000), 2);
     let slow = lp.format_slow_pin();
     assert!(!slow.contains("adopt="), "{slow}");
     assert!(!slow.contains("publish="), "{slow}");
     assert_eq!(slow, "pin(plan=0ms/n=100 cold=0ms/n=9 contract=0ms)");
-    let stuffed = confirm_load_stats::LastPinPhases {
+    let stuffed = LastPinPhases {
         plan_pin_ns: 1_000_000,
         cold_ns: 2_000_000,
         contract_ns: 3_000_000,
@@ -626,16 +613,16 @@ fn chain_view_run_not_found_on_empty() {
 /// Finish-path stamp-only notes must not wipe leftover_n for the fail pack.
 #[test]
 fn leftover_last_plan_batch_survives_stamp_only_note() {
-    archive_phase_stats::with_exclusive(|| {
-        archive_phase_stats::note_resolve_counts(1, 1, 7, 3, 0, 0);
-        archive_phase_stats::note_resolve_counts(0, 0, 0, 0, 5, 6);
-        let last = archive_phase_stats::last_plan_batch();
-        assert_eq!(
-            last.head_need, 7,
-            "stamp-only note_resolve_counts must not clobber leftover LAST"
-        );
-        assert_eq!(last.head_hit, 3);
-    });
+    let (_d, q) = crate::testutil::tiny_query_labeled("last-plan-batch");
+    let st = q.confirm_stats();
+    st.note_resolve_counts(1, 1, 7, 3, 0, 0);
+    st.note_resolve_counts(0, 0, 0, 0, 5, 6);
+    let last = st.last_plan_batch();
+    assert_eq!(
+        last.head_need, 7,
+        "stamp-only note_resolve_counts must not clobber leftover LAST"
+    );
+    assert_eq!(last.head_hit, 3);
 }
 
 /// Tip commit (`confirm_block`) must publish `confirmed[]` without waiting
@@ -695,13 +682,19 @@ fn sh_writebehind_does_not_seed_until_release() {
         1,
         "pending records must still be visible before release"
     );
-    let written0 = class_c_phase_stats::SH_WRITTEN_N.load(std::sync::atomic::Ordering::Relaxed);
+    let written0 = q
+        .confirm_stats()
+        .sh_written_n
+        .load(std::sync::atomic::Ordering::Relaxed);
 
     q.release_sh_writebehind(Height(0));
     q.apply_sh_pending().unwrap();
     assert_eq!(q.sh_indexed_through_height(), Some(0));
     assert_eq!(q.scripthash_history(&sh).unwrap().len(), 1);
-    let written1 = class_c_phase_stats::SH_WRITTEN_N.load(std::sync::atomic::Ordering::Relaxed);
+    let written1 = q
+        .confirm_stats()
+        .sh_written_n
+        .load(std::sync::atomic::Ordering::Relaxed);
     assert!(
         written1 >= written0,
         "release+apply must be allowed to write durable SH"
@@ -2726,4 +2719,24 @@ fn resume_work_path_from_loser_tip_explores_heavier_sibling() {
         "must continue winner chain: {path:?}"
     );
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Two Query engines must not steal each other's lookup/load/scripts/write window.
+#[test]
+fn two_confirm_stats_windows_do_not_steal() {
+    let (_d1, q1) = crate::testutil::tiny_query_labeled("stats-iso-a");
+    let (_d2, q2) = crate::testutil::tiny_query_labeled("stats-iso-b");
+    q1.confirm_stats().add_load_ns(1_000);
+    q1.confirm_stats().add_script_ns(2_000);
+    q1.confirm_stats().add_class_a_ns(3_000);
+    let a = q1.confirm_stats().take_window();
+    let b = q2.confirm_stats().take_window();
+    assert_eq!(a.load_ns, 1_000);
+    assert_eq!(a.script_ns, 2_000);
+    assert_eq!(a.class_a_ns, 3_000);
+    assert_eq!(b.load_ns, 0);
+    assert_eq!(b.script_ns, 0);
+    assert_eq!(b.class_a_ns, 0);
+    let a2 = q1.confirm_stats().take_window();
+    assert_eq!(a2.load_ns, 0);
 }

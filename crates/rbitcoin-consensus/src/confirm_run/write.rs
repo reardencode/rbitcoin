@@ -98,8 +98,8 @@ pub(super) fn write_batch_vs_tip(
 /// same stage before structural/annotate — single ordered commit era.
 /// **Class A never leads tip** (no dual-track archive-ahead / body DONTNEED lead).
 ///
-/// Accrues window timers in [`confirm_phase_stats`] and snapshots the last batch
-/// for slow-write logs via [`confirm_phase_stats::last_write_phases`].
+/// Accrues window timers on [`Query::confirm_stats`] and snapshots the last batch
+/// for slow-write logs via [`rbitcoin_query::ConfirmStats::last_write_phases`].
 pub fn confirm_write_phase(
     query: &Query,
     params: &ChainParams,
@@ -185,16 +185,16 @@ pub fn confirm_write_phase(
         ensure_ns = ensure_ns.saturating_add(t_ens.elapsed().as_nanos() as u64);
     }
     if class_a_ns > 0 {
-        confirm_phase_stats::CLASS_A_NS.fetch_add(class_a_ns, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().class_a_ns, class_a_ns);
     }
     if ensure_ns > 0 {
-        confirm_phase_stats::ENSURE_LAYOUT_NS.fetch_add(ensure_ns, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().ensure_layout_ns, ensure_ns);
     }
     if plan_take_ns > 0 {
-        confirm_phase_stats::WRITE_PLAN_TAKE_NS.fetch_add(plan_take_ns, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().write_plan_take_ns, plan_take_ns);
     }
     if create_map_ns > 0 {
-        confirm_phase_stats::WRITE_CREATE_MAP_NS.fetch_add(create_map_ns, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().write_create_map_ns, create_map_ns);
     }
 
     // Drain write-behind tx.head overlapping structural + Class C (one inserter).
@@ -204,7 +204,7 @@ pub fn confirm_write_phase(
     let drain = super::head_drain::submit_head_insert(query.store(), queued);
     let head_sub_ns = t_head.elapsed().as_nanos() as u64;
     if head_sub_ns > 0 {
-        confirm_phase_stats::WRITE_HEAD_SUB_NS.fetch_add(head_sub_ns, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().write_head_sub_ns, head_sub_ns);
     }
 
     let overlap = (|| -> Result<_, ConsensusError> {
@@ -223,18 +223,21 @@ pub fn confirm_write_phase(
         let structural_ns = t_struct.elapsed().as_nanos() as u64;
 
         let n_blocks = batch.prepared.len();
-        let cc0 = confirm_phase_stats::CLASS_C_NS.load(Ordering::Relaxed);
+        let cc0 = query.confirm_stats().class_c_ns.load(Ordering::Relaxed);
         let t_cc = Instant::now();
         let out = class_c_commit(query, &mut batch.prepared, &write_create_pins)?;
         let class_c_wall_ns = t_cc.elapsed().as_nanos() as u64;
-        // Tables only (strong+tip), matching CLASS_C_NS — not join wall / SH.
-        let class_c_ns = confirm_phase_stats::CLASS_C_NS
+        let class_c_ns = query
+            .confirm_stats()
+            .class_c_ns
             .load(Ordering::Relaxed)
             .saturating_sub(cc0);
         let class_c_join_ns = class_c_wall_ns.saturating_sub(class_c_ns);
         if class_c_join_ns > 0 {
-            confirm_phase_stats::WRITE_CLASS_C_JOIN_NS
-                .fetch_add(class_c_join_ns, Ordering::Relaxed);
+            rbitcoin_query::note_confirm(
+                &query.confirm_stats().write_class_c_join_ns,
+                class_c_join_ns,
+            );
         }
 
         let spend_ann_ns = post_commit(query, &annotate)?;
@@ -252,7 +255,7 @@ pub fn confirm_write_phase(
     let drain_res = drain.join();
     let drain_join_ns = t_join.elapsed().as_nanos() as u64;
     if drain_join_ns > 0 {
-        confirm_phase_stats::WRITE_DRAIN_JOIN_NS.fetch_add(drain_join_ns, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().write_drain_join_ns, drain_join_ns);
     }
     let (out, n_blocks, structural_ns, struct_ph, class_c_ns, spend_ann_ns) = overlap?;
     drain_res.map_err(ConsensusError::from)?;
@@ -274,24 +277,26 @@ pub fn confirm_write_phase(
     }
     let tweak_ns = t_tweak.elapsed().as_nanos() as u64;
     if tweak_ns > 0 {
-        confirm_phase_stats::TWEAK_NS.fetch_add(tweak_ns, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().tweak_ns, tweak_ns);
     }
 
     // No tip GC of sparse pins (dropped with ScriptOkBatch).
-    confirm_phase_stats::BLOCKS.fetch_add(n_blocks as u64, Ordering::Relaxed);
-    confirm_phase_stats::note_last_write(confirm_phase_stats::LastWritePhases {
-        n_blocks: n_blocks as u32,
-        wall_ns: t_wall.elapsed().as_nanos() as u64,
-        class_a_ns,
-        ensure_ns,
-        structural_ns,
-        spent_ns: struct_ph.spent_ns,
-        create_h_ns: struct_ph.create_h_ns,
-        bip68_ns: struct_ph.bip68_ns,
-        class_c_ns,
-        spend_ann_ns,
-        tweak_ns,
-    });
+    rbitcoin_query::note_confirm(&query.confirm_stats().phase_blocks, n_blocks as u64);
+    query
+        .confirm_stats()
+        .note_last_write(rbitcoin_query::LastWritePhases {
+            n_blocks: n_blocks as u32,
+            wall_ns: t_wall.elapsed().as_nanos() as u64,
+            class_a_ns,
+            ensure_ns,
+            structural_ns,
+            spent_ns: struct_ph.spent_ns,
+            create_h_ns: struct_ph.create_h_ns,
+            bip68_ns: struct_ph.bip68_ns,
+            class_c_ns,
+            spend_ann_ns,
+            tweak_ns,
+        });
     Ok(out)
 }
 

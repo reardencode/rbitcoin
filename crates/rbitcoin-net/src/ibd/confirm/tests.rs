@@ -786,17 +786,16 @@ fn queue_load_send_saturates_wire_and_parents() {
 #[test]
 fn thr_stats_add_is_local() {
     use super::confirm_thr_stats;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
-    let a = AtomicU64::new(0);
-    confirm_thr_stats::add(&a, Duration::from_millis(5));
-    confirm_thr_stats::add(&a, Duration::from_millis(20));
-    assert!(a.load(Ordering::Relaxed) >= 25_000_000);
-    let before = a.load(Ordering::Relaxed);
-    confirm_thr_stats::add(&a, Duration::ZERO);
+    let stats = rbitcoin_query::ConfirmStats::default();
+    confirm_thr_stats::add_write_work(&stats, Duration::from_millis(5));
+    confirm_thr_stats::add_write_work(&stats, Duration::from_millis(20));
+    let w = stats.take_window();
+    assert!(w.thr_write_work_ns >= 25_000_000);
+    confirm_thr_stats::add_write_work(&stats, Duration::ZERO);
     assert_eq!(
-        a.load(Ordering::Relaxed),
-        before,
+        stats.take_window().thr_write_work_ns,
+        0,
         "zero duration is a no-op"
     );
     assert_eq!(
@@ -807,7 +806,8 @@ fn thr_stats_add_is_local() {
 
 #[test]
 fn stamp_reject_names_leftover_unresolved() {
-    let msg = stamp_reject_operator_msg("missing prevout");
+    let msg =
+        stamp_reject_operator_msg("missing prevout", &rbitcoin_query::ConfirmStats::default());
     assert!(msg.contains("missing prevout"), "{msg}");
     assert!(msg.contains("unresolved"), "{msg}");
     assert!(msg.contains("leftover_n="), "{msg}");
@@ -817,7 +817,10 @@ fn stamp_reject_names_leftover_unresolved() {
         "must not look like store wipe: {msg}"
     );
     assert_eq!(
-        stamp_reject_operator_msg("unexpected previous header"),
+        stamp_reject_operator_msg(
+            "unexpected previous header",
+            &rbitcoin_query::ConfirmStats::default(),
+        ),
         "unexpected previous header"
     );
 }

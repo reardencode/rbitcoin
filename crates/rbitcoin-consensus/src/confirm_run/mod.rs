@@ -26,7 +26,6 @@ use crate::block::{
     assemble_block_prevouts, block_has_witness, structural_validate_spends, ScriptCheckJob,
     ValidationContext,
 };
-use crate::confirm_phase_stats;
 use crate::error::ConsensusError;
 use crate::header::{
     check_header_version_and_future_time, median_time_past_times, validate_header,
@@ -60,8 +59,6 @@ use head_drain::{submit_head_drain, HEAD_DRAIN_THREAD_NAME};
 #[cfg(test)]
 use lookup::confirm_archive_kind;
 use lookup::known_create_txid_lookup;
-pub use lookup::lookup_stage_stats;
-pub use lookup::plan_stamp_sub_stats;
 #[cfg(test)]
 use lookup::ConfirmArchiveKind;
 pub use lookup::{
@@ -161,6 +158,7 @@ pub struct LoadedBatch {
     script_preverified: ScriptPreverified,
     /// Planned Class A write from wire lookup/load (committed in write stage).
     pub archive_plan: Option<rbitcoin_query::ArchiveWritePlan>,
+    stats: Arc<rbitcoin_query::ConfirmStats>,
 }
 
 /// Script-verified batch ready for ordered commit (Class A + structural + C).
@@ -227,7 +225,7 @@ fn wire_blocks_to_arcs(
         .collect();
     let ns = t.elapsed().as_nanos() as u64;
     if ns > 0 {
-        confirm_phase_stats::PREP_WIRE_ARC_NS.fetch_add(ns, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().phase_prep_wire_arc_ns, ns);
     }
     arcs
 }
@@ -297,7 +295,7 @@ pub fn confirm_wire_run_preverified(
             .collect();
         let ns = t.elapsed().as_nanos() as u64;
         if ns > 0 {
-            confirm_phase_stats::PREP_WIRE_ARC_NS.fetch_add(ns, Ordering::Relaxed);
+            rbitcoin_query::note_confirm(&query.confirm_stats().phase_prep_wire_arc_ns, ns);
         }
         arcs
     };

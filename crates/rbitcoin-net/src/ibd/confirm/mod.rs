@@ -1086,10 +1086,10 @@ pub(crate) fn format_stamp_reject_missing_prevout(
     s
 }
 
-pub(crate) fn stamp_reject_operator_msg(err: &str) -> String {
+pub(crate) fn stamp_reject_operator_msg(err: &str, stats: &rbitcoin_query::ConfirmStats) -> String {
     if err == "missing prevout" {
-        let last = rbitcoin_query::archive_phase_stats::last_plan_batch();
-        let miss = rbitcoin_query::archive_phase_stats::last_union_miss();
+        let last = stats.last_plan_batch();
+        let miss = stats.last_union_miss();
         format_stamp_reject_missing_prevout(
             last.head_need,
             last.head_hit,
@@ -1166,86 +1166,56 @@ fn drain_script_ok_write_queue(
 /// pole when scriptq is empty. These timers include **wait** (claim, recv, send
 /// block) so a 5s window can show who is busy vs idle.
 pub(crate) mod confirm_thr_stats {
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
-    static LOOKUP_CLAIM_NS: AtomicU64 = AtomicU64::new(0);
-    static LOOKUP_STAMP_NS: AtomicU64 = AtomicU64::new(0);
-    static LOOKUP_OTHER_NS: AtomicU64 = AtomicU64::new(0);
-    static LOOKUP_SEND_WAIT_NS: AtomicU64 = AtomicU64::new(0);
-
-    static LOAD_RECV_WAIT_NS: AtomicU64 = AtomicU64::new(0);
-    static LOAD_PACK_NS: AtomicU64 = AtomicU64::new(0);
-    static LOAD_CLONE_NS: AtomicU64 = AtomicU64::new(0);
-    static LOAD_STAMP_NS: AtomicU64 = AtomicU64::new(0);
-    static LOAD_PIN_NS: AtomicU64 = AtomicU64::new(0);
-    static LOAD_ASM_NS: AtomicU64 = AtomicU64::new(0);
-    static LOAD_PRUNE_NS: AtomicU64 = AtomicU64::new(0);
-    static LOAD_SEND_WAIT_NS: AtomicU64 = AtomicU64::new(0);
-
-    static SCRIPT_RECV_WAIT_NS: AtomicU64 = AtomicU64::new(0);
-    static SCRIPT_WORK_NS: AtomicU64 = AtomicU64::new(0);
-    static SCRIPT_SEND_WAIT_NS: AtomicU64 = AtomicU64::new(0);
-
-    static WRITE_RECV_WAIT_NS: AtomicU64 = AtomicU64::new(0);
-    static WRITE_WORK_NS: AtomicU64 = AtomicU64::new(0);
-
     #[inline]
-    pub(crate) fn add(a: &AtomicU64, d: Duration) {
-        let ns = d.as_nanos() as u64;
-        if ns > 0 {
-            a.fetch_add(ns, Ordering::Relaxed);
-        }
+    pub fn add_lookup_claim(stats: &rbitcoin_query::ConfirmStats, d: Duration) {
+        rbitcoin_query::note_confirm_dur(&stats.thr_lookup_claim_ns, d);
+    }
+    #[inline]
+    pub fn add_lookup_stamp(stats: &rbitcoin_query::ConfirmStats, d: Duration) {
+        rbitcoin_query::note_confirm_dur(&stats.thr_lookup_stamp_ns, d);
+    }
+    #[inline]
+    pub fn add_lookup_other(stats: &rbitcoin_query::ConfirmStats, d: Duration) {
+        rbitcoin_query::note_confirm_dur(&stats.thr_lookup_other_ns, d);
+    }
+    #[inline]
+    pub fn add_lookup_send_wait(stats: &rbitcoin_query::ConfirmStats, d: Duration) {
+        rbitcoin_query::note_confirm_dur(&stats.thr_lookup_send_wait_ns, d);
     }
 
     #[inline]
-    pub fn add_lookup_claim(d: Duration) {
-        add(&LOOKUP_CLAIM_NS, d);
+    pub fn add_load_recv_wait(stats: &rbitcoin_query::ConfirmStats, d: Duration) {
+        rbitcoin_query::note_confirm_dur(&stats.thr_load_recv_wait_ns, d);
     }
     #[inline]
-    pub fn add_lookup_stamp(d: Duration) {
-        add(&LOOKUP_STAMP_NS, d);
+    pub fn add_load_pack(stats: &rbitcoin_query::ConfirmStats, d: Duration) {
+        rbitcoin_query::note_confirm_dur(&stats.thr_load_pack_ns, d);
     }
     #[inline]
-    pub fn add_lookup_other(d: Duration) {
-        add(&LOOKUP_OTHER_NS, d);
+    pub fn add_load_clone(stats: &rbitcoin_query::ConfirmStats, d: Duration) {
+        rbitcoin_query::note_confirm_dur(&stats.thr_load_clone_ns, d);
     }
     #[inline]
-    pub fn add_lookup_send_wait(d: Duration) {
-        add(&LOOKUP_SEND_WAIT_NS, d);
-    }
-
-    #[inline]
-    pub fn add_load_recv_wait(d: Duration) {
-        add(&LOAD_RECV_WAIT_NS, d);
+    pub fn add_load_stamp(stats: &rbitcoin_query::ConfirmStats, d: Duration) {
+        rbitcoin_query::note_confirm_dur(&stats.thr_load_stamp_ns, d);
     }
     #[inline]
-    pub fn add_load_pack(d: Duration) {
-        add(&LOAD_PACK_NS, d);
+    pub fn add_load_pin(stats: &rbitcoin_query::ConfirmStats, d: Duration) {
+        rbitcoin_query::note_confirm_dur(&stats.thr_load_pin_ns, d);
     }
     #[inline]
-    pub fn add_load_clone(d: Duration) {
-        add(&LOAD_CLONE_NS, d);
+    pub fn add_load_asm(stats: &rbitcoin_query::ConfirmStats, d: Duration) {
+        rbitcoin_query::note_confirm_dur(&stats.thr_load_asm_ns, d);
     }
     #[inline]
-    pub fn add_load_stamp(d: Duration) {
-        add(&LOAD_STAMP_NS, d);
+    pub fn add_load_prune(stats: &rbitcoin_query::ConfirmStats, d: Duration) {
+        rbitcoin_query::note_confirm_dur(&stats.thr_load_prune_ns, d);
     }
     #[inline]
-    pub fn add_load_pin(d: Duration) {
-        add(&LOAD_PIN_NS, d);
-    }
-    #[inline]
-    pub fn add_load_asm(d: Duration) {
-        add(&LOAD_ASM_NS, d);
-    }
-    #[inline]
-    pub fn add_load_prune(d: Duration) {
-        add(&LOAD_PRUNE_NS, d);
-    }
-    #[inline]
-    pub fn add_load_send_wait(d: Duration) {
-        add(&LOAD_SEND_WAIT_NS, d);
+    pub fn add_load_send_wait(stats: &rbitcoin_query::ConfirmStats, d: Duration) {
+        rbitcoin_query::note_confirm_dur(&stats.thr_load_send_wait_ns, d);
     }
 
     /// Script occupancy is per-batch wave wall on `ibd-confirm`, not steal-pool join.
@@ -1255,68 +1225,25 @@ pub(crate) mod confirm_thr_stats {
     }
 
     #[inline]
-    pub fn add_script_recv_wait(d: Duration) {
-        add(&SCRIPT_RECV_WAIT_NS, d);
+    pub fn add_script_recv_wait(stats: &rbitcoin_query::ConfirmStats, d: Duration) {
+        rbitcoin_query::note_confirm_dur(&stats.thr_script_recv_wait_ns, d);
     }
     #[inline]
-    pub fn add_script_work(d: Duration) {
-        add(&SCRIPT_WORK_NS, d);
+    pub fn add_script_work(stats: &rbitcoin_query::ConfirmStats, d: Duration) {
+        rbitcoin_query::note_confirm_dur(&stats.thr_script_work_ns, d);
     }
     #[inline]
-    pub fn add_script_send_wait(d: Duration) {
-        add(&SCRIPT_SEND_WAIT_NS, d);
+    pub fn add_script_send_wait(stats: &rbitcoin_query::ConfirmStats, d: Duration) {
+        rbitcoin_query::note_confirm_dur(&stats.thr_script_send_wait_ns, d);
     }
 
     #[inline]
-    pub fn add_write_recv_wait(d: Duration) {
-        add(&WRITE_RECV_WAIT_NS, d);
+    pub fn add_write_recv_wait(stats: &rbitcoin_query::ConfirmStats, d: Duration) {
+        rbitcoin_query::note_confirm_dur(&stats.thr_write_recv_wait_ns, d);
     }
     #[inline]
-    pub fn add_write_work(d: Duration) {
-        add(&WRITE_WORK_NS, d);
-    }
-
-    #[derive(Debug, Default, Clone, Copy)]
-    pub struct Sample {
-        pub lookup_claim_ns: u64,
-        pub lookup_stamp_ns: u64,
-        pub lookup_other_ns: u64,
-        pub lookup_send_wait_ns: u64,
-        pub load_recv_wait_ns: u64,
-        pub load_pack_ns: u64,
-        pub load_clone_ns: u64,
-        pub load_stamp_ns: u64,
-        pub load_pin_ns: u64,
-        pub load_asm_ns: u64,
-        pub load_prune_ns: u64,
-        pub load_send_wait_ns: u64,
-        pub script_recv_wait_ns: u64,
-        pub script_work_ns: u64,
-        pub script_send_wait_ns: u64,
-        pub write_recv_wait_ns: u64,
-        pub write_work_ns: u64,
-    }
-
-    pub fn sample_and_reset() -> Sample {
-        Sample {
-            lookup_claim_ns: LOOKUP_CLAIM_NS.swap(0, Ordering::Relaxed),
-            lookup_stamp_ns: LOOKUP_STAMP_NS.swap(0, Ordering::Relaxed),
-            lookup_other_ns: LOOKUP_OTHER_NS.swap(0, Ordering::Relaxed),
-            lookup_send_wait_ns: LOOKUP_SEND_WAIT_NS.swap(0, Ordering::Relaxed),
-            load_recv_wait_ns: LOAD_RECV_WAIT_NS.swap(0, Ordering::Relaxed),
-            load_pack_ns: LOAD_PACK_NS.swap(0, Ordering::Relaxed),
-            load_clone_ns: LOAD_CLONE_NS.swap(0, Ordering::Relaxed),
-            load_stamp_ns: LOAD_STAMP_NS.swap(0, Ordering::Relaxed),
-            load_pin_ns: LOAD_PIN_NS.swap(0, Ordering::Relaxed),
-            load_asm_ns: LOAD_ASM_NS.swap(0, Ordering::Relaxed),
-            load_prune_ns: LOAD_PRUNE_NS.swap(0, Ordering::Relaxed),
-            load_send_wait_ns: LOAD_SEND_WAIT_NS.swap(0, Ordering::Relaxed),
-            script_recv_wait_ns: SCRIPT_RECV_WAIT_NS.swap(0, Ordering::Relaxed),
-            script_work_ns: SCRIPT_WORK_NS.swap(0, Ordering::Relaxed),
-            script_send_wait_ns: SCRIPT_SEND_WAIT_NS.swap(0, Ordering::Relaxed),
-            write_recv_wait_ns: WRITE_RECV_WAIT_NS.swap(0, Ordering::Relaxed),
-            write_work_ns: WRITE_WORK_NS.swap(0, Ordering::Relaxed),
-        }
+    pub fn add_write_work(stats: &rbitcoin_query::ConfirmStats, d: Duration) {
+        rbitcoin_query::note_confirm_dur(&stats.thr_write_work_ns, d);
     }
 }
 
@@ -1370,6 +1297,7 @@ pub(crate) fn spawn_confirm_engine(
         .name("ibd-confirm-write".into())
         .spawn(move || {
             info!("ibd: confirm write on dedicated OS thread");
+            let stats = hub_wb.query.confirm_stats_arc();
             // Non-contig leftover already note_write_recv'd; write it next iter.
             let mut leftover: Option<rbitcoin_consensus::ScriptOkBatch> = None;
             loop {
@@ -1399,7 +1327,7 @@ pub(crate) fn spawn_confirm_engine(
                     },
                 );
                 leftover = next_left;
-                confirm_thr_stats::add_write_recv_wait(t_recv.elapsed());
+                confirm_thr_stats::add_write_recv_wait(&stats, t_recv.elapsed());
                 if feed_wb.stopped() || hub_wb.query.confirm_cancelled() {
                     break;
                 }
@@ -1451,14 +1379,13 @@ pub(crate) fn spawn_confirm_engine(
                         feed_wb.finish(heights_hashes.iter().map(|(h, _)| *h));
                         let deq_ns = t_deq.elapsed().as_nanos() as u64;
                         if deq_ns > 0 {
-                            rbitcoin_consensus::confirm_phase_stats::WRITE_DEQUEUE_NS
-                                .fetch_add(deq_ns, std::sync::atomic::Ordering::Relaxed);
+                            rbitcoin_query::note_confirm(&stats.write_dequeue_ns, deq_ns);
                         }
                         let elapsed = t0.elapsed();
-                        confirm_thr_stats::add_write_work(elapsed);
+                        confirm_thr_stats::add_write_work(&stats, elapsed);
                         if elapsed.as_millis() > 2_000 {
-                            let p = rbitcoin_consensus::confirm_phase_stats::last_write_phases();
-                            let ms = rbitcoin_consensus::confirm_phase_stats::LastWritePhases::ms;
+                            let p = stats.last_write_phases();
+                            let ms = rbitcoin_query::LastWritePhases::ms;
                             info!(
                                 "ibd: confirm write slow batch={n} parts={parts} first={first_h} wall={:?} \
                                  class_a={}ms ensure={}ms struct={}ms spent={}ms create_h={}ms \
@@ -1477,7 +1404,7 @@ pub(crate) fn spawn_confirm_engine(
                         }
                     }
                     Err(e) => {
-                        confirm_thr_stats::add_write_work(t0.elapsed());
+                        confirm_thr_stats::add_write_work(&stats, t0.elapsed());
                         let msg = e.to_string();
                         if matches!(e, rbitcoin_consensus::ConsensusError::Cancelled)
                             || feed_wb.stopped()
@@ -1552,10 +1479,11 @@ pub(crate) fn spawn_confirm_engine(
         .name("ibd-confirm".into())
         .spawn(move || {
             info!("ibd: confirm scripts on dedicated OS thread (publish waves; steal pool verifies)");
+            let stats = hub_sc.query.confirm_stats_arc();
             rbitcoin_consensus::drive_script_waves_with(
                 &mat_rx,
                 |batch, wait| {
-                    confirm_thr_stats::add_script_recv_wait(wait);
+                    confirm_thr_stats::add_script_recv_wait(&stats, wait);
                     q_sc.note_script_recv(
                         batch.len(),
                         batch.approx_wire_bytes(),
@@ -1567,6 +1495,7 @@ pub(crate) fn spawn_confirm_engine(
                         .confirm_ns
                         .fetch_add(outcome.work_ns, Ordering::Relaxed);
                     confirm_thr_stats::add_script_work(
+                        &stats,
                         confirm_thr_stats::script_work_from_verify_ns(outcome.work_ns),
                     );
                     let script_ms = outcome.work_ns / 1_000_000;
@@ -1579,7 +1508,7 @@ pub(crate) fn spawn_confirm_engine(
                         info!("ibd: confirm write channel closed");
                         return false;
                     }
-                    confirm_thr_stats::add_script_send_wait(t_send.elapsed());
+                    confirm_thr_stats::add_script_send_wait(&stats, t_send.elapsed());
                     q_sc.note_write_send(wb, ww, parents);
                     if script_ms > 2_000 || mat_ms > 2_000 {
                         info!(
@@ -1592,7 +1521,7 @@ pub(crate) fn spawn_confirm_engine(
                     !feed_sc.stopped() && !hub_sc.query.confirm_cancelled()
                 },
                 |e, meta, dropped| {
-                    confirm_thr_stats::add_script_work(Duration::ZERO);
+                    confirm_thr_stats::add_script_work(&stats, Duration::ZERO);
                     let msg = e.to_string();
                     if matches!(e, rbitcoin_consensus::ConsensusError::Cancelled)
                         || feed_sc.stopped()
@@ -1645,6 +1574,7 @@ pub(crate) fn spawn_confirm_engine(
                 "ibd: confirm load on dedicated OS thread (claim resolve-complete → stamp+pin)"
             );
             let mut lookup_ahead = LoadAheadState::new(&hub_load);
+            let stats = hub_load.query.confirm_stats_arc();
             loop {
                 if feed_load.stopped() || hub_load.query.confirm_cancelled() {
                     break;
@@ -1654,7 +1584,7 @@ pub(crate) fn spawn_confirm_engine(
                     lookup_ahead.clear_all(&hub_load);
                 }
                 lookup_ahead.apply_disconnect(&hub_load);
-                confirm_thr_stats::add_load_prune(t_hygiene.elapsed());
+                confirm_thr_stats::add_load_prune(&stats, t_hygiene.elapsed());
                 if feed_load.stopped() {
                     drop(mat_tx);
                     rbitcoin_consensus::unpark_script_publisher();
@@ -1665,12 +1595,12 @@ pub(crate) fn spawn_confirm_engine(
                 let lb = match load_rx.recv_timeout(Duration::from_millis(20)) {
                     Ok(b) => b,
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        confirm_thr_stats::add_load_recv_wait(t_recv.elapsed());
+                        confirm_thr_stats::add_load_recv_wait(&stats, t_recv.elapsed());
                         continue;
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                 };
-                confirm_thr_stats::add_load_pack(t_recv.elapsed());
+                confirm_thr_stats::add_load_pack(&stats, t_recv.elapsed());
                 let drop_below = lb.drop_inflight_below;
                 let n = lb.items.len();
                 let wire: usize = lb.items.iter().map(|(_, _, w)| w.block.total_size()).sum();
@@ -1711,7 +1641,7 @@ pub(crate) fn spawn_confirm_engine(
                     if drop_below.is_some() {
                         let t_prune = Instant::now();
                         lookup_ahead.drop_inflight_below(drop_below);
-                        confirm_thr_stats::add_load_prune(t_prune.elapsed());
+                        confirm_thr_stats::add_load_prune(&stats, t_prune.elapsed());
                     }
                     continue;
                 }
@@ -1742,7 +1672,7 @@ pub(crate) fn spawn_confirm_engine(
                         Arc::clone(&w.pres),
                     )
                 }));
-                confirm_thr_stats::add_load_clone(t_clone.elapsed());
+                confirm_thr_stats::add_load_clone(&stats, t_clone.elapsed());
                 let t_stamp = Instant::now();
                 let plan_res = {
                     let pipe =
@@ -1755,7 +1685,7 @@ pub(crate) fn spawn_confirm_engine(
                         if use_pipe { Some(&pipe) } else { None },
                     )
                 };
-                confirm_thr_stats::add_load_stamp(t_stamp.elapsed());
+                confirm_thr_stats::add_load_stamp(&stats, t_stamp.elapsed());
                 let stamped = match plan_res {
                     Ok(s) => s,
                     Err(e) => {
@@ -1784,7 +1714,7 @@ pub(crate) fn spawn_confirm_engine(
                         loop_stats_load
                             .confirm_reject_stops
                             .fetch_add(1, Ordering::Relaxed);
-                        let log_msg = stamp_reject_operator_msg(&msg);
+                        let log_msg = stamp_reject_operator_msg(&msg, &stats);
                         let (if_l, if_n, _) = lookup_ahead.in_flight.size_snapshot();
                         let drain_fk = hub_load.query.head_drain_fk();
                         let fence_h = hub_load.query.fence_tip_height();
@@ -1823,7 +1753,7 @@ pub(crate) fn spawn_confirm_engine(
                 if drop_below.is_some() {
                     let t_prune = Instant::now();
                     lookup_ahead.drop_inflight_below(drop_below);
-                    confirm_thr_stats::add_load_prune(t_prune.elapsed());
+                    confirm_thr_stats::add_load_prune(&stats, t_prune.elapsed());
                 }
                 let pipe = lookup_ahead.pipeline_for(expect_h, store_path_lo, parent_ids);
                 let plan_ns = stamped.work_ns;
@@ -1847,19 +1777,19 @@ pub(crate) fn spawn_confirm_engine(
                     stats: &loop_stats_load,
                 };
 
-                let pin0 = rbitcoin_consensus::confirm_phase_stats::LOAD_NS
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                let asm0 = rbitcoin_consensus::confirm_phase_stats::CONNECT_NS
-                    .load(std::sync::atomic::Ordering::Relaxed);
+                let pin0 = stats.load_ns.load(std::sync::atomic::Ordering::Relaxed);
+                let asm0 = stats.connect_ns.load(std::sync::atomic::Ordering::Relaxed);
                 let mat_res = hub_load.confirm_wire_load_from_plan(stamped, Some(&pipe));
-                let pin_d = rbitcoin_consensus::confirm_phase_stats::LOAD_NS
+                let pin_d = stats
+                    .load_ns
                     .load(std::sync::atomic::Ordering::Relaxed)
                     .saturating_sub(pin0);
-                let asm_d = rbitcoin_consensus::confirm_phase_stats::CONNECT_NS
+                let asm_d = stats
+                    .connect_ns
                     .load(std::sync::atomic::Ordering::Relaxed)
                     .saturating_sub(asm0);
-                confirm_thr_stats::add_load_pin(Duration::from_nanos(pin_d));
-                confirm_thr_stats::add_load_asm(Duration::from_nanos(asm_d));
+                confirm_thr_stats::add_load_pin(&stats, Duration::from_nanos(pin_d));
+                confirm_thr_stats::add_load_asm(&stats, Duration::from_nanos(asm_d));
                 drop(_live_guard);
 
                 if feed_load.stopped() || hub_load.query.confirm_cancelled() {
@@ -1886,10 +1816,10 @@ pub(crate) fn spawn_confirm_engine(
                             return;
                         }
                         rbitcoin_consensus::unpark_script_publisher();
-                        confirm_thr_stats::add_load_send_wait(t_send.elapsed());
+                        confirm_thr_stats::add_load_send_wait(&stats, t_send.elapsed());
                         queues_load.note_script_send(prepared_n, wire, parents);
                         if work_ms > 2_000 {
-                            let pin = rbitcoin_query::confirm_load_stats::last_pin_phases();
+                            let pin = stats.last_pin_phases();
                             info!(
                                 "ibd: confirm load slow batch={prepared_n} claim={} first={expect_h} \
                                  work_ms={work_ms} plan_stamp_ms={} \
@@ -1957,6 +1887,7 @@ pub(crate) fn spawn_confirm_engine(
         .spawn(move || {
             info!("ibd: confirm lookup on dedicated OS thread (in-order BQ take → loadq)");
             let queues_lookup = queues_lookup;
+            let stats = hub.query.confirm_stats_arc();
             let mut disco_seen = 0u64;
             loop {
                 if feed.stopped() {
@@ -1984,8 +1915,8 @@ pub(crate) fn spawn_confirm_engine(
                         break;
                     }
                     let (_gg, _) = feed.cv.wait_timeout(g, Duration::from_millis(20)).unwrap();
-                    confirm_thr_stats::add_lookup_send_wait(t_wait.elapsed());
-                    confirm_thr_stats::add_lookup_claim(t_wait.elapsed());
+                    confirm_thr_stats::add_lookup_send_wait(&stats, t_wait.elapsed());
+                    confirm_thr_stats::add_lookup_claim(&stats, t_wait.elapsed());
                     continue;
                 }
                 let run_max = if feed.single_block() {
@@ -2002,7 +1933,7 @@ pub(crate) fn spawn_confirm_engine(
                 let wave_h = hub
                     .query
                     .block_queue_unresolved_heights(path_lo, &skip, max_blocks);
-                confirm_thr_stats::add_lookup_other(t_sel.elapsed());
+                confirm_thr_stats::add_lookup_other(&stats, t_sel.elapsed());
                 let mut did = false;
                 if !wave_h.is_empty() {
                     let t_wave = Instant::now();
@@ -2031,11 +1962,11 @@ pub(crate) fn spawn_confirm_engine(
                                 Ok(k) => k,
                                 Err(e) => {
                                     warn!("ibd: load-batch has_body probe: {e}");
-                                    confirm_thr_stats::add_lookup_other(t_kind.elapsed());
+                                    confirm_thr_stats::add_lookup_other(&stats, t_kind.elapsed());
                                     continue;
                                 }
                             };
-                            confirm_thr_stats::add_lookup_other(t_kind.elapsed());
+                            confirm_thr_stats::add_lookup_other(&stats, t_kind.elapsed());
                             let parts = split_wave_into_load_batches_kind(
                                 &counts,
                                 &kinds,
@@ -2071,7 +2002,7 @@ pub(crate) fn spawn_confirm_engine(
                                     break;
                                 }
                                 queues_lookup.note_load_send(n, wire);
-                                confirm_thr_stats::add_lookup_send_wait(t_send.elapsed());
+                                confirm_thr_stats::add_lookup_send_wait(&stats, t_send.elapsed());
                             }
                             feed.notify();
                         }
@@ -2089,7 +2020,7 @@ pub(crate) fn spawn_confirm_engine(
                             }
                         }
                     }
-                    confirm_thr_stats::add_lookup_stamp(t_wave.elapsed());
+                    confirm_thr_stats::add_lookup_stamp(&stats, t_wave.elapsed());
                 }
                 if !did {
                     let t_wait = Instant::now();
@@ -2098,8 +2029,8 @@ pub(crate) fn spawn_confirm_engine(
                         break;
                     }
                     let (_gg, _) = feed.cv.wait_timeout(g, Duration::from_millis(20)).unwrap();
-                    confirm_thr_stats::add_lookup_send_wait(t_wait.elapsed());
-                    confirm_thr_stats::add_lookup_claim(t_wait.elapsed());
+                    confirm_thr_stats::add_lookup_send_wait(&stats, t_wait.elapsed());
+                    confirm_thr_stats::add_lookup_claim(&stats, t_wait.elapsed());
                 }
             }
             feed.notify();

@@ -632,12 +632,18 @@ impl Query {
         let need_vec: Vec<[u8; 32]> = need_external.iter().copied().collect();
         let collect_ns = t_collect.elapsed().as_nanos() as u64;
 
-        let ext = crate::stamp_external_parents(&self.store, &need_vec, in_flight, skeleton)?;
+        let ext = crate::stamp_external_parents(
+            &self.store,
+            &need_vec,
+            in_flight,
+            skeleton,
+            self.confirm_stats(),
+        )?;
         let inflight_ns = ext.inflight_ns;
         let head_fk_ns = ext.head_fk_ns;
         let resolved = ext.resolved;
         let mut external_parents = ext.idents;
-        crate::archive_phase_stats::note_resolve_counts(
+        self.confirm_stats().note_resolve_counts(
             n_headers,
             need_vec.len() as u64,
             ext.head_need_n,
@@ -761,7 +767,12 @@ impl Query {
             vouts.dedup();
         }
         if prestamp_parents && skeleton.is_none() {
-            crate::fill_missing_parent_ranges(&self.store, in_flight, &mut external_parents)?;
+            crate::fill_missing_parent_ranges(
+                &self.store,
+                in_flight,
+                &mut external_parents,
+                self.confirm_stats(),
+            )?;
         }
 
         let t_finish = Instant::now();
@@ -777,8 +788,9 @@ impl Query {
         // heuristics were dead work that cost O(headers) RwLock gets per plan.
         let finish_ns = t_finish.elapsed().as_nanos() as u64;
 
-        crate::archive_phase_stats::note_resolve_counts(0, 0, 0, 0, batch_stamp, resolved_stamp);
-        crate::archive_phase_stats::note_prep_plan(
+        self.confirm_stats()
+            .note_resolve_counts(0, 0, 0, 0, batch_stamp, resolved_stamp);
+        self.confirm_stats().note_prep_plan(
             assign_ns,
             collect_ns,
             inflight_ns,
@@ -809,7 +821,7 @@ impl Query {
     /// already archived, this is a no-op and returns `Ok(false)` — no second
     /// body append / fk mismatch. Returns `Ok(true)` when body was appended.
     ///
-    /// Phase walls go to [`crate::archive_phase_stats`] (body vs head split).
+    /// Phase walls go to [`Query::confirm_stats`] (body vs head split).
     ///
     /// Drains write-behind `tx.head` before return. Confirm write uses
     /// [`Self::archive_commit_plan_defer_head`] to overlap drain with Class C.
@@ -885,7 +897,7 @@ impl Query {
         let htxs_ns = t.elapsed().as_nanos() as u64;
 
         let total_ns = t0.elapsed().as_nanos() as u64;
-        crate::archive_phase_stats::note_write_commit(
+        self.confirm_stats().note_write_commit(
             total_ns,
             reserve_ns,
             body_ns,
@@ -1038,33 +1050,37 @@ mod tests {
     fn archive_phase_stats_cover_plan_and_commit_wall() {
         // Exclusive lock so a parallel sample_and_reset cannot steal this
         // window (llvm-cov / cargo test --workspace).
-        crate::archive_phase_stats::with_exclusive(|| {
-            let _ = crate::archive_phase_stats::sample_and_reset();
+        {
             let (dir, q) = temp_query("arch-phases");
+            let _ = q.confirm_stats().take_window();
             let mut need = vec![(Fk(1), vec![coinbase_apply(1), coinbase_apply(2)])];
             let plan = q
                 .archive_plan_batch_from_store(&mut need, 1, &crate::InFlight::new(), None)
                 .unwrap();
             assert_eq!(plan.planned_fks.len(), 2);
             q.archive_commit_plan(plan).unwrap();
-            let s = crate::archive_phase_stats::sample_and_reset();
-            // Counts always fire; Instant slices can be 0 ns on a coarse clock.
+            let s = q.confirm_stats().take_window();
             assert!(
-                s.blocks >= 1 || s.prep_assign_ns > 0 || s.prep_stamp_ns > 0,
+                s.arch_blocks >= 1 || s.arch_prep_assign_ns > 0 || s.arch_prep_stamp_ns > 0,
                 "plan noted"
             );
-            assert!(s.write_blocks >= 1 || s.write_total_ns > 0, "commit total");
-            assert!(s.write_blocks >= 1 || s.write_body_ns > 0, "body put timed");
-            let wsum = s.write_phases_sum_ns();
-            // Sequential Instant slices: sum ≤ total + small clock noise.
             assert!(
-                wsum <= s.write_total_ns.saturating_add(200_000),
+                s.arch_write_blocks >= 1 || s.arch_write_total_ns > 0,
+                "commit total"
+            );
+            assert!(
+                s.arch_write_blocks >= 1 || s.arch_write_body_ns > 0,
+                "body put timed"
+            );
+            let wsum = s.write_phases_sum_ns();
+            assert!(
+                wsum <= s.arch_write_total_ns.saturating_add(200_000),
                 "write sum {} ≫ total {}",
                 wsum,
-                s.write_total_ns
+                s.arch_write_total_ns
             );
             let _ = std::fs::remove_dir_all(&dir);
-        });
+        }
     }
 
     #[test]
@@ -1624,9 +1640,9 @@ mod tests {
     #[test]
     fn plan_batch_one_fill_missing_when_parents_already_stamped() {
         use std::sync::atomic::Ordering;
-        crate::archive_phase_stats::with_exclusive(|| {
-            let _ = crate::archive_phase_stats::FILL_MISSING_N.swap(0, Ordering::Relaxed);
+        {
             let (dir, q) = temp_query("plan-one-fill-missing");
+            let _ = q.confirm_stats().fill_missing_n.swap(0, Ordering::Relaxed);
             use rbitcoin_primitives::Height;
             use rbitcoin_store::HeaderRecord;
             let parent = coinbase_apply(1);
@@ -1642,7 +1658,7 @@ mod tests {
             };
             q.connect_block(Height::GENESIS, &ph, &[parent]).unwrap();
             let spent = q.store.txs.spent_range(Fk(1)).expect("spent.idx");
-            let _ = crate::archive_phase_stats::FILL_MISSING_N.swap(0, Ordering::Relaxed);
+            let _ = q.confirm_stats().fill_missing_n.swap(0, Ordering::Relaxed);
             let mut need = vec![(Fk(2), vec![child_spend(parent_txid, 0xcd)])];
             let plan = q
                 .archive_plan_batch_from_store(&mut need, 2, &crate::InFlight::new(), None)
@@ -1658,12 +1674,12 @@ mod tests {
                 Some(spent)
             );
             assert_eq!(
-                crate::archive_phase_stats::FILL_MISSING_N.swap(0, Ordering::Relaxed),
+                q.confirm_stats().fill_missing_n.swap(0, Ordering::Relaxed),
                 1,
                 "stamp_external fill_missing is enough when packed adds no new fks"
             );
             let _ = std::fs::remove_dir_all(&dir);
-        });
+        }
     }
 
     /// Packed reconstruct already has create_fk: still idx-fill (not in need).
@@ -1794,9 +1810,14 @@ mod tests {
         };
         q.connect_block(Height::GENESIS, &ph, &[parent]).unwrap();
         let spent = q.store.txs.spent_range(Fk(1)).expect("spent.idx");
-        let helper =
-            crate::stamp_external_parents(q.store(), &[parent_txid], &crate::InFlight::new(), None)
-                .expect("stamp archived parent");
+        let helper = crate::stamp_external_parents(
+            q.store(),
+            &[parent_txid],
+            &crate::InFlight::new(),
+            None,
+            q.confirm_stats(),
+        )
+        .expect("stamp archived parent");
         assert_eq!(helper.resolved.get(&parent_txid), Some(&Fk(1)));
         assert!(helper
             .idents
@@ -1996,8 +2017,8 @@ mod tests {
         };
         let child = child_spend(parent_txid, 0x44);
         let mut need = vec![(Fk(1), vec![child])];
-        crate::archive_phase_stats::with_exclusive(|| {
-            let _ = crate::archive_phase_stats::sample_and_reset();
+        {
+            let _ = q.confirm_stats().take_window();
             let err = q
                 .archive_plan_batch_from_store(&mut need, 1, &crate::InFlight::new(), None)
                 .expect_err("bq parent_hits map is not a stamp source");
@@ -2005,10 +2026,10 @@ mod tests {
                 err.to_string().contains("parent create_fk unresolved"),
                 "got: {err}"
             );
-            let mix = crate::archive_phase_stats::sample_and_reset();
+            let mix = q.confirm_stats().take_window();
             assert_eq!(mix.pin_txid_n, 0);
             assert!(mix.head_need > 0, "bq-map-only parent must leftover");
-        });
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2032,8 +2053,8 @@ mod tests {
         };
         let child = child_spend(parent_txid, 0x66);
         let mut need = vec![(Fk(1), vec![child])];
-        crate::archive_phase_stats::with_exclusive(|| {
-            let _ = crate::archive_phase_stats::sample_and_reset();
+        {
+            let _ = q.confirm_stats().take_window();
             let plan = q
                 .archive_plan_batch_from_store(&mut need, 1, &crate::InFlight::new(), Some(&skel))
                 .expect("skeleton stamp");
@@ -2043,10 +2064,10 @@ mod tests {
                 Some((3000, 24))
             );
             assert_eq!(plan.external_parent_txid(66), Some(parent_txid));
-            let mix = crate::archive_phase_stats::sample_and_reset();
+            let mix = q.confirm_stats().take_window();
             assert_eq!(mix.pin_txid_n, 1, "skeleton hits use the id_cache meter");
             assert_eq!(mix.head_need, 0, "skeleton must skip leftover TipOnly");
-        });
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2074,6 +2095,7 @@ mod tests {
             &[parent_txid],
             &crate::InFlight::new(),
             Some(&skel),
+            q.confirm_stats(),
         )
         .expect("shared helper");
         assert_eq!(helper.resolved.get(&parent_txid), Some(&Fk(88)));
@@ -2125,10 +2147,16 @@ mod tests {
         let mut log = crate::InFlight::new();
         log.note_pins([(Fk(93), &pin)], None);
         let ifo = &log;
-        crate::archive_phase_stats::with_exclusive(|| {
-            let _ = crate::archive_phase_stats::sample_and_reset();
-            let helper = crate::stamp_external_parents(q.store(), &[parent_txid], ifo, None)
-                .expect("inflight stamp");
+        {
+            let _ = q.confirm_stats().take_window();
+            let helper = crate::stamp_external_parents(
+                q.store(),
+                &[parent_txid],
+                ifo,
+                None,
+                q.confirm_stats(),
+            )
+            .expect("inflight stamp");
             assert_eq!(helper.head_need_n, 0, "inflight hit must skip leftover");
             let got = helper
                 .idents
@@ -2143,9 +2171,9 @@ mod tests {
                 .archive_plan_batch_from_store(&mut need, 1, ifo, None)
                 .expect("S0 inflight");
             assert_eq!(plan.packed[0].1[0].create_fk, Fk(93));
-            let mix = crate::archive_phase_stats::sample_and_reset();
+            let mix = q.confirm_stats().take_window();
             assert_eq!(mix.head_need, 0, "plan path must skip leftover too");
-        });
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2167,14 +2195,14 @@ mod tests {
             .unwrap();
         q.on_load_pack().unwrap();
 
-        crate::archive_phase_stats::with_exclusive(|| {
-            let _ = crate::archive_phase_stats::sample_and_reset();
+        {
+            let _ = q.confirm_stats().take_window();
             let mut need_b = vec![(Fk(2), vec![child_spend(parent_txid, 0xec)])];
             let plan_b = q
                 .archive_plan_batch_from_store(&mut need_b, 2, &empty, None)
                 .expect("TipOnly must stamp after fence");
             assert_eq!(plan_b.packed[0].1[0].create_fk, parent_fk);
-        });
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

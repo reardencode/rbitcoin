@@ -234,7 +234,7 @@ pub fn confirm_bq_resolve_wave_capped(
             max_blocks,
         ) {
             stats.work_ns = t0.elapsed().as_nanos() as u64;
-            lookup_stage_stats::note_wave_decode(
+            query.confirm_stats().note_wave_decode(
                 stats.decode_ns,
                 stats.precompute_ns,
                 stats.collect_ns,
@@ -374,7 +374,7 @@ pub fn confirm_bq_resolve_wave_capped(
     }
     stats.heights = items.len() as u32;
     stats.work_ns = t0.elapsed().as_nanos() as u64;
-    lookup_stage_stats::note_wave_decode(
+    query.confirm_stats().note_wave_decode(
         stats.decode_ns,
         stats.precompute_ns,
         stats.collect_ns,
@@ -1035,6 +1035,7 @@ mod tests {
             &[g],
             &rbitcoin_query::InFlight::new(),
             Some(&wave.parent_ids),
+            q.confirm_stats(),
         )
         .expect("stamp helper after wave");
         assert_eq!(

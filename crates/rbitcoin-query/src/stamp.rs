@@ -105,6 +105,7 @@ pub fn stamp_external_parents(
     need: &[[u8; 32]],
     in_flight: &InFlight,
     skeleton: Option<&BatchParentIds>,
+    stats: &crate::ConfirmStats,
 ) -> Result<ExternalParentStamp, QueryError> {
     let mut stamp = ExternalParentStamp {
         resolved: TxidFkMap::with_capacity_and_hasher(need.len() / 2, Default::default()),
@@ -158,8 +159,8 @@ pub fn stamp_external_parents(
             .into());
         }
         stamp.head_need_n = 0;
-        crate::archive_phase_stats::note_pin_txid(stamp.pin_txid_n, stamp.pin_txid_ns);
-        crate::archive_phase_stats::note_recent(stamp.recent_n, stamp.recent_ns);
+        stats.note_pin_txid(stamp.pin_txid_n, stamp.pin_txid_ns);
+        stats.note_recent(stamp.recent_n, stamp.recent_ns);
         return Ok(stamp);
     }
     let mut need_head: Vec<[u8; 32]> = still_need.into_iter().copied().collect();
@@ -194,7 +195,7 @@ pub fn stamp_external_parents(
                 }
             }
         }
-        crate::archive_phase_stats::note_leftover_mix(0, age0, age3, age_n);
+        stats.note_leftover_mix(0, age0, age3, age_n);
     }
     {
         let mut miss_n = 0u64;
@@ -213,17 +214,17 @@ pub fn stamp_external_parents(
             let (miss_on, miss_cands) = rbitcoin_store::head_resolve_stats::take_leftover_miss()
                 .map(|(on, n)| (Some(on.as_str()), n))
                 .unwrap_or((None, 0));
-            crate::archive_phase_stats::note_union_miss(tid, miss_n, pending, miss_on, miss_cands);
+            stats.note_union_miss(tid, miss_n, pending, miss_on, miss_cands);
             store.diagnose_leftover_probe(&tid);
         } else {
-            crate::archive_phase_stats::note_union_miss([0u8; 32], 0, false, None, 0);
+            stats.note_union_miss([0u8; 32], 0, false, None, 0);
         }
     }
     stamp.head_fk_ns = t_head.elapsed().as_nanos() as u64;
-    crate::archive_phase_stats::note_pin_txid(stamp.pin_txid_n, stamp.pin_txid_ns);
-    crate::archive_phase_stats::note_recent(stamp.recent_n, stamp.recent_ns);
+    stats.note_pin_txid(stamp.pin_txid_n, stamp.pin_txid_ns);
+    stats.note_recent(stamp.recent_n, stamp.recent_ns);
 
-    fill_missing_parent_ranges(store, in_flight, &mut stamp.idents)?;
+    fill_missing_parent_ranges(store, in_flight, &mut stamp.idents, stats)?;
     Ok(stamp)
 }
 
@@ -270,7 +271,8 @@ mod tests {
             need_vouts: U64Map::default(),
         };
         let empty = InFlight::new();
-        let st = stamp_external_parents(q.store(), &[txid], &empty, Some(&skel)).unwrap();
+        let st = stamp_external_parents(q.store(), &[txid], &empty, Some(&skel), q.confirm_stats())
+            .unwrap();
         assert_eq!(st.head_need_n, 0);
         assert_eq!(st.resolved.get(&txid), Some(&Fk(7)));
         assert_eq!(st.idents.get(&7).and_then(|e| e.body), Some((10, 20)));
@@ -285,7 +287,8 @@ mod tests {
         let mut inflight = InFlight::new();
         inflight.note_pins([(Fk(42), &p)], Some(1));
         let txid = p.0.txid;
-        let st = stamp_external_parents(q.store(), &[txid], &inflight, None).unwrap();
+        let st =
+            stamp_external_parents(q.store(), &[txid], &inflight, None, q.confirm_stats()).unwrap();
         assert_eq!(st.head_need_n, 0);
         assert_eq!(st.resolved.get(&txid), Some(&Fk(42)));
         let _ = std::fs::remove_dir_all(&dir);
@@ -298,7 +301,9 @@ mod tests {
         txid[0] = 0x22;
         let skel = BatchParentIds::default();
         let empty = InFlight::new();
-        let err = stamp_external_parents(q.store(), &[txid], &empty, Some(&skel)).unwrap_err();
+        let err =
+            stamp_external_parents(q.store(), &[txid], &empty, Some(&skel), q.confirm_stats())
+                .unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("parent create_fk unresolved"), "got: {msg}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -314,8 +319,9 @@ pub fn fill_missing_parent_ranges(
     store: &Store,
     in_flight: &InFlight,
     idents: &mut U64Map<ParentIdent>,
+    stats: &crate::ConfirmStats,
 ) -> Result<(), QueryError> {
-    crate::archive_phase_stats::note_fill_missing();
+    stats.note_fill_missing();
     let mut need_body: Vec<Fk> = Vec::new();
     let mut need_spent: Vec<Fk> = Vec::new();
     for (&id, ident) in idents.iter() {

@@ -165,6 +165,7 @@ fn three_stage_write_filter_and_scripts_surface() {
         batch_parents: rbitcoin_query::BatchParents::new(),
         script_preverified: ScriptPreverified::new(),
         archive_plan: None,
+        stats: std::sync::Arc::new(rbitcoin_query::ConfirmStats::default()),
     };
     assert!(batch.is_empty());
     assert_eq!(batch.approx_wire_bytes(), 0);
@@ -210,6 +211,7 @@ fn empty_loaded_batch() -> super::LoadedBatch {
         batch_parents: rbitcoin_query::BatchParents::new(),
         script_preverified: super::ScriptPreverified::new(),
         archive_plan: None,
+        stats: std::sync::Arc::new(rbitcoin_query::ConfirmStats::default()),
     }
 }
 
@@ -303,6 +305,7 @@ fn loaded_at(
         batch_parents: rbitcoin_query::BatchParents::new(),
         script_preverified: super::ScriptPreverified::new(),
         archive_plan: None,
+        stats: std::sync::Arc::new(rbitcoin_query::ConfirmStats::default()),
     }
 }
 
@@ -589,6 +592,7 @@ fn expected_bits_extending_height0_and_no_retarget() {
         batch_parents: rbitcoin_query::BatchParents::new(),
         script_preverified: ScriptPreverified::new(),
         archive_plan: None,
+        stats: std::sync::Arc::new(rbitcoin_query::ConfirmStats::default()),
     };
     let ok = confirm_scripts_phase(loaded).unwrap();
     assert!(ok.batch.is_empty());
@@ -778,6 +782,7 @@ fn script_wave_skips_preverified_txids() {
         batch_parents: rbitcoin_query::BatchParents::new(),
         script_preverified: pre,
         archive_plan: None,
+        stats: std::sync::Arc::new(rbitcoin_query::ConfirmStats::default()),
     };
     confirm_scripts_phase(batch).expect("preverified skip avoids bad script fail");
 }
@@ -1573,7 +1578,7 @@ fn pin_range_fill_does_not_count_as_cache_hit() {
     fill_edges_from_packed(&mut plan);
     let (_parents, _) =
         pin_for_wire_batch(&q, Some(&plan), &mut parent_pin, &[], &[], None).expect("range-fill 3");
-    let lp = rbitcoin_query::confirm_load_stats::last_pin_phases();
+    let lp = q.confirm_stats().last_pin_phases();
     assert_eq!(lp.pin_new_n, 3);
     assert_eq!(
         lp.pin_plan_n, 0,
@@ -1650,7 +1655,7 @@ fn pin_stamp_outs_is_cache_not_new() {
     fill_edges_from_packed(&mut plan);
     let (_parents, _) = pin_for_wire_batch(&q, Some(&plan), &mut parent_pin, &[], &[], None)
         .expect("stamp-carried outs must cover");
-    let lp = rbitcoin_query::confirm_load_stats::last_pin_phases();
+    let lp = q.confirm_stats().last_pin_phases();
     assert_eq!(lp.pin_plan_n, 1);
     assert_eq!(
         lp.pin_new_n, 0,
@@ -1725,7 +1730,7 @@ fn pin_recent_identity_without_outs_still_range_fills() {
     fill_edges_from_packed(&mut plan);
     let (_parents, _) = pin_for_wire_batch(&q, Some(&plan), &mut parent_pin, &[], &[], None)
         .expect("identity-only stamp still range-fills");
-    let lp = rbitcoin_query::confirm_load_stats::last_pin_phases();
+    let lp = q.confirm_stats().last_pin_phases();
     assert_eq!(lp.pin_new_n, 1);
     assert_eq!(
         lp.pin_plan_n, 0,

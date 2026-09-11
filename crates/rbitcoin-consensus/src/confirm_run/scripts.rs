@@ -17,6 +17,7 @@ const SCRIPT_WAVES_MAX: usize = 4;
 fn take_script_jobs(
     prepared: &mut [Prepared],
     preverified: &ScriptPreverified,
+    stats: &rbitcoin_query::ConfirmStats,
 ) -> Vec<ScriptCheckJob> {
     let mut jobs = Vec::new();
     let mut n_skip = 0u64;
@@ -36,14 +37,14 @@ fn take_script_jobs(
         p.jobs.shrink_to_fit();
     }
     if n_skip > 0 {
-        confirm_phase_stats::SCRIPT_SKIP_MEMPOOL.fetch_add(n_skip, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&stats.script_skip_mempool, n_skip);
     }
-    confirm_phase_stats::SCRIPT_JOBS.fetch_add(jobs.len() as u64, Ordering::Relaxed);
+    rbitcoin_query::note_confirm(&stats.script_jobs, jobs.len() as u64);
     jobs
 }
 
 fn outcome_from(batch: LoadedBatch, work_ns: u64) -> ConfirmScriptOutcome {
-    confirm_phase_stats::SCRIPT_NS.fetch_add(work_ns, Ordering::Relaxed);
+    rbitcoin_query::note_confirm(&batch.stats.script_ns, work_ns);
     ConfirmScriptOutcome {
         batch: ScriptOkBatch {
             prepared: batch.prepared,
@@ -70,7 +71,7 @@ impl Inflight {
     ) -> Result<Self, (ConsensusError, ScriptsBatchMeta)> {
         let t0 = Instant::now();
         let meta = ScriptsBatchMeta::from_batch(&batch, mat_ns);
-        let jobs = take_script_jobs(&mut batch.prepared, &batch.script_preverified);
+        let jobs = take_script_jobs(&mut batch.prepared, &batch.script_preverified, &batch.stats);
         let wave = match start_for_each_owned(jobs, verify_one_script_job) {
             Ok(w) => w,
             Err(e) => return Err((e, meta)),

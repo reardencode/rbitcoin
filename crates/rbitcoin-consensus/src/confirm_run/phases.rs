@@ -185,8 +185,10 @@ pub(super) fn assemble_run(
             Some(block),
             Some(&meta.pres),
         )?;
-        confirm_phase_stats::CONNECT_NS
-            .fetch_add(t_connect.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(
+            &query.confirm_stats().connect_ns,
+            t_connect.elapsed().as_nanos() as u64,
+        );
 
         time_window.push(block.header.time);
         if time_window.len() > 11 {
@@ -261,16 +263,32 @@ pub(super) fn structural_run(
         tot.bip68_ns = tot.bip68_ns.saturating_add(ph.bip68_ns);
     }
     // Window counters (may race with sampler; last-write uses `tot` instead).
-    confirm_phase_stats::STRUCTURAL_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    confirm_phase_stats::STRUCTURAL_SPENT_NS.fetch_add(tot.spent_ns, Ordering::Relaxed);
-    confirm_phase_stats::STRUCTURAL_SPENT_ABS_NS.fetch_add(tot.spent_abs_ns, Ordering::Relaxed);
-    confirm_phase_stats::STRUCTURAL_SPENT_STRONG_NS
-        .fetch_add(tot.spent_strong_ns, Ordering::Relaxed);
-    confirm_phase_stats::STRUCTURAL_SPENT_COLD_NS.fetch_add(tot.spent_cold_ns, Ordering::Relaxed);
-    confirm_phase_stats::STRUCTURAL_SPENT_PENDING_NS
-        .fetch_add(tot.spent_pending_ns, Ordering::Relaxed);
-    confirm_phase_stats::STRUCTURAL_CREATE_H_NS.fetch_add(tot.create_h_ns, Ordering::Relaxed);
-    confirm_phase_stats::STRUCTURAL_BIP68_NS.fetch_add(tot.bip68_ns, Ordering::Relaxed);
+    rbitcoin_query::note_confirm(
+        &query.confirm_stats().structural_ns,
+        t0.elapsed().as_nanos() as u64,
+    );
+    rbitcoin_query::note_confirm(&query.confirm_stats().structural_spent_ns, tot.spent_ns);
+    rbitcoin_query::note_confirm(
+        &query.confirm_stats().structural_spent_abs_ns,
+        tot.spent_abs_ns,
+    );
+    rbitcoin_query::note_confirm(
+        &query.confirm_stats().structural_spent_strong_ns,
+        tot.spent_strong_ns,
+    );
+    rbitcoin_query::note_confirm(
+        &query.confirm_stats().structural_spent_cold_ns,
+        tot.spent_cold_ns,
+    );
+    rbitcoin_query::note_confirm(
+        &query.confirm_stats().structural_spent_pending_ns,
+        tot.spent_pending_ns,
+    );
+    rbitcoin_query::note_confirm(
+        &query.confirm_stats().structural_create_h_ns,
+        tot.create_h_ns,
+    );
+    rbitcoin_query::note_confirm(&query.confirm_stats().structural_bip68_ns, tot.bip68_ns);
     Ok(tot)
 }
 
@@ -279,13 +297,10 @@ pub(super) fn class_c_commit(
     prepared: &mut [Prepared],
     write_create_pins: &FkMap<rbitcoin_query::CreatePin>,
 ) -> Result<Vec<rbitcoin_primitives::Fk>, ConsensusError> {
-    use rbitcoin_query::class_c_phase_stats::{STRONG_NS, TIP_NS};
     use std::sync::atomic::Ordering as QOrd;
 
-    // CLASS_C_NS = strong + tip only (not join wall). SH runs in parallel and
-    // has its own SCRIPTHASH_NS / SH_* meters — do not fold SH into class_c.
-    let strong0 = STRONG_NS.load(QOrd::Relaxed);
-    let tip0 = TIP_NS.load(QOrd::Relaxed);
+    let strong0 = query.confirm_stats().strong_ns.load(QOrd::Relaxed);
+    let tip0 = query.confirm_stats().tip_ns.load(QOrd::Relaxed);
     let items: Vec<rbitcoin_query::ConfirmPrepared> = prepared
         .iter_mut()
         .map(|p| rbitcoin_query::ConfirmPrepared {
@@ -302,9 +317,20 @@ pub(super) fn class_c_commit(
     let out = query
         .confirm_blocks_run_with_create_pins(&items, pins)
         .map_err(ConsensusError::from)?;
-    let strong_d = STRONG_NS.load(QOrd::Relaxed).saturating_sub(strong0);
-    let tip_d = TIP_NS.load(QOrd::Relaxed).saturating_sub(tip0);
-    confirm_phase_stats::CLASS_C_NS.fetch_add(strong_d.saturating_add(tip_d), Ordering::Relaxed);
+    let strong_d = query
+        .confirm_stats()
+        .strong_ns
+        .load(QOrd::Relaxed)
+        .saturating_sub(strong0);
+    let tip_d = query
+        .confirm_stats()
+        .tip_ns
+        .load(QOrd::Relaxed)
+        .saturating_sub(tip0);
+    rbitcoin_query::note_confirm(
+        &query.confirm_stats().class_c_ns,
+        strong_d.saturating_add(tip_d),
+    );
     Ok(out)
 }
 
@@ -336,16 +362,20 @@ pub(super) fn post_commit(
             )));
         }
         let ann_ns = t_ann.elapsed().as_nanos() as u64;
-        confirm_phase_stats::SPEND_ANN_NS.fetch_add(ann_ns, Ordering::Relaxed);
-        confirm_phase_stats::SPEND_ANN_N.fetch_add(abs_edges.len() as u64, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().spend_ann_ns, ann_ns);
+        rbitcoin_query::note_confirm(&query.confirm_stats().spend_ann_n, abs_edges.len() as u64);
         let _ = backend;
-        confirm_phase_stats::SPEND_ANNOTATE_RANGED
-            .fetch_add(abs_edges.len() as u64, Ordering::Relaxed);
-        confirm_phase_stats::SPEND_ANN_PREAD_SKIP
-            .fetch_add(abs_edges.len() as u64, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(
+            &query.confirm_stats().spend_annotate_ranged,
+            abs_edges.len() as u64,
+        );
+        rbitcoin_query::note_confirm(
+            &query.confirm_stats().spend_ann_pread_skip,
+            abs_edges.len() as u64,
+        );
     }
     let spend_ann_ns = t_spent.elapsed().as_nanos() as u64;
-    confirm_phase_stats::UTXO_APPLY_NS.fetch_add(spend_ann_ns, Ordering::Relaxed);
+    rbitcoin_query::note_confirm(&query.confirm_stats().utxo_apply_ns, spend_ann_ns);
     Ok(spend_ann_ns)
 }
 
