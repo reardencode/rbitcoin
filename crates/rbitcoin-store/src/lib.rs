@@ -146,7 +146,11 @@ pub use tx_table::{
 };
 pub use txid_body::{TxidBody, TXID_BODY_HEADER, TXID_ENTRY_LEN};
 pub use uring_session::{
+<<<<<<< HEAD
     abort_uring_unusable, drop_thread_local, note_uring_recover, uring_recover_count,
     uring_slow_drain_count, with_forced_session_kind, with_thread_local, IoCtx, SessionKind,
     UringSession, DEFAULT_ENTRIES,
+=======
+    abort_uring_unusable, note_uring_recover, uring_recover_count, uring_slow_drain_count,
+>>>>>>> 4df33c02 (store: drain budget uses elapsed time; Drop does not abort)
 };

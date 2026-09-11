@@ -52,12 +52,8 @@ impl StoreError {
     }
 
     pub fn is_uring_session_fault_msg(m: &str) -> bool {
-        m.contains("io_uring undrained")
-            || m.contains("io_uring wait timeout")
-            || m.contains("io_uring session poisoned")
-            || m.contains("io_uring unexpected cqe")
-            || m.contains("io_uring cq overflow")
-            || m.contains("io_uring submit_and_wait failed")
+        let s = m.to_ascii_lowercase();
+        s.contains("io_uring") && !s.contains("linux-only") && !s.contains("unavailable")
     }
 }
 
@@ -163,11 +159,14 @@ mod tests {
             "invariant: io_uring unexpected cqe",
             "invariant: io_uring cq overflow",
             "io_uring submit_and_wait failed",
+            "invariant: io_uring leftover cqe",
+            "io_uring submit failed",
         ] {
             assert!(StoreError::Corrupt(m).is_uring_session_fault(), "{m}");
         }
         assert!(!StoreError::BudgetFull("io_uring SQ").is_uring_session_fault());
         assert!(!StoreError::Unavailable.is_uring_session_fault());
+        assert!(!StoreError::Corrupt("io_uring is Linux-only").is_uring_session_fault());
         assert!(!StoreError::Corrupt("broken").is_uring_session_fault());
         assert!(!StoreError::Io {
             path: PathBuf::from("/tmp/x"),
