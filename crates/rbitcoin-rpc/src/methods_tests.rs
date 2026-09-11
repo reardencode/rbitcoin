@@ -1433,6 +1433,54 @@ fn miniwallet_raw_scan_and_gettxout() {
 }
 
 #[test]
+fn gettxout_include_mempool_hides_mempool_spent_confirmed() {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::consensus::encode::serialize;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
+
+    let (ctx, dir, _hub) = ctx_regtest_hub();
+    dispatch(&ctx, "generate", vec![json!(101)]).unwrap();
+    let hash1 = dispatch(&ctx, "getblockhash", vec![json!(1)]).unwrap();
+    let blk = dispatch(&ctx, "getblock", vec![hash1, json!(2)]).unwrap();
+    let cb_txid = blk["tx"][0]["txid"].as_str().unwrap();
+    let cb_val =
+        (blk["tx"][0]["vout"][0]["value"].as_f64().unwrap() * 100_000_000.0).round() as u64;
+    let spend = Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from_byte_array(parse_hash32_display(cb_txid).unwrap()),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(cb_val - 1_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    dispatch(
+        &ctx,
+        "sendrawtransaction",
+        vec![json!(hex_encode(serialize(&spend)))],
+    )
+    .unwrap();
+    let hidden = dispatch(&ctx, "gettxout", vec![json!(cb_txid), json!(0)]).unwrap();
+    assert!(
+        hidden.is_null(),
+        "default include_mempool must hide mempool-spent confirmed out: {hidden}"
+    );
+    let shown = dispatch(&ctx, "gettxout", vec![json!(cb_txid), json!(0), json!(false)]).unwrap();
+    assert_eq!(shown["coinbase"], true, "{shown}");
+    assert!(shown["confirmations"].as_u64().unwrap() >= 1, "{shown}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn scantxoutset_txout_fallback_without_shindex() {
     let (ctx, dir, _hub) = ctx_regtest_hub();
     ctx.query.set_sh_index_enabled(false);
