@@ -140,7 +140,7 @@ OUTX="$("$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
 if printf '%s' "$OUTX" | grep -q -- "--testactivationheight=csv@102" \
   && printf '%s' "$OUTX" | grep -q -- "--whitelist=noban@127.0.0.1" \
   && printf '%s' "$OUTX" | grep -q -- "--limitclustercount=10" \
-  && printf '%s' "$OUTX" | grep -q -- "--permitbaremultisig=0" \
+  && ! printf '%s' "$OUTX" | grep -q -- "permitbaremultisig" \
   && printf '%s' "$OUTX" | grep -q -- "--maxconnections=8" \
   && printf '%s' "$OUTX" | grep -q -- "--minimumchainwork=0x65" \
   && printf '%s' "$OUTX" | grep -q -- "--blockversion=1337" \

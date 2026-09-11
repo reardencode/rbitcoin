@@ -137,13 +137,13 @@ fn blockchain_empty_store() {
 }
 
 #[test]
-fn getmempoolinfo_permitbaremultisig_follows_ctx() {
+fn getmempoolinfo_permitbaremultisig_is_always_true() {
     let (mut ctx, dir) = ctx_empty();
     ctx.permit_bare_multisig = false;
     let mem = dispatch(&ctx, "getmempoolinfo", vec![]).unwrap();
     assert_eq!(
-        mem["permitbaremultisig"], false,
-        "getmempoolinfo must honor -permitbaremultisig=0"
+        mem["permitbaremultisig"], true,
+        "Libre has no Core IsStandard bare-multisig gate"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
