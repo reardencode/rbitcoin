@@ -26,6 +26,7 @@ fn exit_success(c: ExitCode) -> bool {
 
 // ─── Lifecycle / CLI / surface smoke (collapsed) ────────────────────────────
 
+#[allow(clippy::cognitive_complexity)] // one fixture, many CLI/surface arms
 #[test]
 fn node_cli_and_surface_smoke() {
     // Networks + run_node lifecycle
@@ -1114,6 +1115,7 @@ fn confirm_run_sequential_and_failed_no_spend_poison() {
 /// - scripthash history / balance / listunspent for OP_TRUE
 /// - disconnect tip restores spent coinbase UTXO
 /// - locator/headers + service flags
+#[allow(clippy::cognitive_complexity)] // one fixture, many confirm/SH arms
 #[test]
 fn consensus_mature_chain_spend_reconstruct_and_scripthash() {
     use bitcoin::p2p::ServiceFlags;
@@ -1666,6 +1668,7 @@ fn confirm_assemble_after_tip_gc_uses_store_for_mtp() {
 }
 
 /// BlockCache + MempoolHub public surfaces used by P2P tip mode / Electrum.
+#[allow(clippy::cognitive_complexity)] // one fixture, many cache/hub arms
 #[test]
 fn block_cache_and_mempool_hub_surface() {
     use bitcoin::hashes::Hash;

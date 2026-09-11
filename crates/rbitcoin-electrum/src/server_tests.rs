@@ -21,6 +21,7 @@ fn tmp_store() -> (rbitcoin_query::testutil::TempDir, Query) {
     rbitcoin_query::testutil::tiny_query_labeled("electrum")
 }
 
+#[allow(clippy::cognitive_complexity)] // one fixture, many parser arms
 #[test]
 fn config_helpers_and_param_parsers() {
     let params = ChainParams::regtest();
@@ -330,6 +331,7 @@ fn negotiate_protocol_intersection_and_asof_dialect() {
         .contains("unsupported"));
 }
 
+#[allow(clippy::cognitive_complexity)] // one fixture, many dispatch arms
 #[test]
 fn dispatch_static_methods_and_errors() {
     let (dir, q) = tmp_store();

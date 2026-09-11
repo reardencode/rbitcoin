@@ -1289,6 +1289,7 @@ fn scripthash_history_expands_creates_via_load_creates_once() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[allow(clippy::cognitive_complexity)] // one fixture, many error arms
 #[test]
 fn scripthash_join_includes_spend_and_keeps_sibling_utxo() {
     let (dir, q) = temp_query("sh-join-spend");
@@ -1620,6 +1621,7 @@ fn scripthash_join_slot_reuses_class_a_until_tip() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[allow(clippy::cognitive_complexity)] // one fixture, many query surface arms
 #[test]
 fn connect_chain_query_surface() {
     let (dir, q) = temp_query("connect");
@@ -1792,6 +1794,7 @@ fn connect_chain_query_surface() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[allow(clippy::cognitive_complexity)] // one fixture, many helper arms
 #[test]
 fn index_mode_helpers_and_batch_helpers() {
     assert!(IndexMode::Direct.is_direct());
@@ -1874,6 +1877,7 @@ fn index_mode_helpers_and_batch_helpers() {
     assert!(bp2.get_parent_outs_needed(Fk(2), &[9]).is_none());
 }
 
+#[allow(clippy::cognitive_complexity)] // one fixture, many error arms
 #[test]
 fn reconstruct_and_connect_error_arms() {
     let (dir, q) = temp_query("reconstruct");

@@ -2427,6 +2427,7 @@ mod tests {
 
     /// One 8-coinbase pad covers reorg-reaccept, unbroadcast persist, SH reopen,
     /// live accept/fee/package, unknown-SH delta, and accept-stage meters.
+    #[allow(clippy::cognitive_complexity)] // one fixture, many mempool journey arms
     #[test]
     fn hub_live_journey() {
         use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};

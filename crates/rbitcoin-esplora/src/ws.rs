@@ -263,6 +263,7 @@ pub async fn ws_upgrade(ws: WebSocketUpgrade, State(st): State<AppState>) -> Res
         .into_response()
 }
 
+#[allow(clippy::cognitive_complexity)] // Esplora WS session dispatch
 async fn handle_socket(socket: WebSocket, st: AppState, _permit: OwnedSemaphorePermit) {
     let (mut sink, mut stream) = socket.split();
     let mut conn = ConnState::new();

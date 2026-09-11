@@ -3177,6 +3177,7 @@ fn testmempoolaccept_missing_inputs_is_missingorspent() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[allow(clippy::cognitive_complexity)] // one fixture, many decode arms
 #[test]
 fn decode_rpc_subset() {
     use bitcoin::absolute::LockTime;

@@ -1077,6 +1077,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[allow(clippy::cognitive_complexity)] // one fixture, many error arms
     #[test]
     fn var_table_surface_helpers_and_errors() {
         let dir = std::env::temp_dir().join(format!(

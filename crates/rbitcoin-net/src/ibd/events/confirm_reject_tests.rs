@@ -2708,6 +2708,7 @@ fn path_slot_first_wins_chained_via_headers() {
 
 /// Consensus-invalid mid-path on a heavier fork: only that hash is blacklisted,
 /// the losing fork stays selectable, ordered is reseeded.
+#[allow(clippy::cognitive_complexity)] // one fixture, many fork/blacklist arms
 #[test]
 fn heavier_fork_invalid_mid_does_not_blacklist_weaker() {
     use bitcoin::absolute::LockTime;

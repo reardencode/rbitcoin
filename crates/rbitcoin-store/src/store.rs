@@ -1843,6 +1843,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[allow(clippy::cognitive_complexity)] // one fixture, many error arms
     #[test]
     fn store_create_open_archive_spend_and_meta_errors() {
         let dir = tmp();

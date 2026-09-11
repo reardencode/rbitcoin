@@ -181,6 +181,7 @@ mod tests {
     use super::*;
 
     /// all_peers_dead + catchup_complete edge matrix (mid-chain / caught-up / tip-0).
+    #[allow(clippy::cognitive_complexity)] // one fixture, many exit arms
     #[test]
     fn exit_and_catchup_complete_surface() {
         // Mid-chain, all dead, no redial → give up.
@@ -293,6 +294,7 @@ mod tests {
     }
 
     /// Empty-headers lag WARN/reget cadence (mainnet log flood regression).
+    #[allow(clippy::cognitive_complexity)] // one fixture, many lag cadence arms
     #[test]
     fn empty_headers_lag_rate_limits() {
         assert!(should_log_empty_headers_lag(1));

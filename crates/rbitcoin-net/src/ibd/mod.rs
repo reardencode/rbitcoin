@@ -222,6 +222,7 @@ impl Drop for PeerBookSession {
     }
 }
 
+#[allow(clippy::cognitive_complexity)] // IBD confirm OS pipeline
 pub async fn ibd_cancellable(
     hub: Arc<ChainHub>,
     magic: Magic,

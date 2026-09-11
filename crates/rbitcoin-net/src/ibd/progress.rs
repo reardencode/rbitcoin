@@ -409,6 +409,7 @@ mod tests {
         assert!(soft_assign_restricted(over));
     }
 
+    #[allow(clippy::cognitive_complexity)] // one fixture, many progress arms
     #[test]
     fn pct_tip_hole_and_format_surface() {
         assert_eq!(ibd_pct(0, 100), 0);

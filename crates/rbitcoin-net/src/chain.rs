@@ -3283,6 +3283,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[allow(clippy::cognitive_complexity)] // one fixture, many reorg arms
     #[test]
     fn accept_received_reorgs_to_longer_held_fork() {
         let (dir, hub) = tmp_hub();

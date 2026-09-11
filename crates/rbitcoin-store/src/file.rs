@@ -1049,6 +1049,7 @@ mod advise_tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    #[allow(clippy::cognitive_complexity)] // one fixture, many error arms
     #[test]
     fn load_store_u32_u64_zero_range_trailing_and_open_errors() {
         static N: AtomicU64 = AtomicU64::new(0);

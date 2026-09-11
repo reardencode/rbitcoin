@@ -804,6 +804,7 @@ mod chain_table_tests {
         p
     }
 
+    #[allow(clippy::cognitive_complexity)] // one fixture, many chain surface arms
     #[test]
     fn confirmed_tx_height_header_txs_surface() {
         let dir = tmp();

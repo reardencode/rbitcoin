@@ -2468,6 +2468,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[allow(clippy::cognitive_complexity)] // one fixture, many reject arms
     #[test]
     fn accept_error_display_and_reject_paths() {
         use std::error::Error;

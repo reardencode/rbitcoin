@@ -245,6 +245,7 @@ fn denserels_by_stamped_range(
 /// **txout body by range** from [`ParentPinStamp`] (lookup-stamped). Load never
 /// reads head / `tx.idx` / `txid.body`. Load **copies** lookup-stamped
 /// `spent_range` onto pins. Write [`ensure_spend_abs_layouts`] is holes-only.
+#[allow(clippy::cognitive_complexity)] // pin denserels + abs meta for wire batch
 pub(super) fn pin_for_wire_batch(
     query: &Query,
     plan: Option<&rbitcoin_query::ArchiveWritePlan>,

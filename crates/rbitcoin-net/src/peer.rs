@@ -730,6 +730,7 @@ async fn read_handshake_frame(
 }
 
 #[allow(clippy::too_many_arguments)] // call-site args stay unbundled
+#[allow(clippy::cognitive_complexity)] // version/verack exchange
 /// Perform the version/verack exchange over an established BIP324 session.
 async fn application_handshake(
     reader: &mut V2Reader,

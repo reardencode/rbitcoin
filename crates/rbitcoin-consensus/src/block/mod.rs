@@ -1254,6 +1254,7 @@ pub(crate) struct SpendAnnotateJob {
 }
 
 #[allow(clippy::too_many_arguments)] // call-site args stay unbundled
+#[allow(clippy::cognitive_complexity)] // spentness / maturity / BIP68 walk
 /// **Spentness:** pin denserels → abs + bulk 8-byte meta. Sparse durable-**spent**
 /// set (not unspent). Missing abs / short meta is hard `Err`. **Multi-list** after
 /// reorg annotate is a protocol cold walk (`has_confirmed_strong_spender_create`)

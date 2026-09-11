@@ -355,6 +355,7 @@ impl ElectrumConn {
 }
 
 #[allow(clippy::too_many_arguments)] // call-site args stay unbundled
+#[allow(clippy::cognitive_complexity)] // Electrum session dispatch
 async fn handle_client<S>(
     stream: S,
     peer: SocketAddr,
