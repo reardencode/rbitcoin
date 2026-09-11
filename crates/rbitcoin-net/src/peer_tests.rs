@@ -5980,14 +5980,13 @@ async fn tip_burst_past_broadcast_capacity_still_syncs_peer() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    na.shutdown().await;
+    nb.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(
         peer_tip, want,
         "peer must catch tip after Lagged burst within ~10s (not headers_poll 120s)"
     );
-
-    na.shutdown().await;
-    nb.shutdown().await;
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
