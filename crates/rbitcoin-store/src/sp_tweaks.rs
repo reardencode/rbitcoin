@@ -547,6 +547,7 @@ impl SpTweaksTable {
         Ok(Some(Self::decode_records(&buf, n_tx)?))
     }
 
+    #[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
     /// Eligible tweaks only: `(tx_index_in_block, tweak)`. Not indexed → `None`.
     pub fn get_eligible(
         &self,
@@ -559,6 +560,7 @@ impl SpTweaksTable {
         }
     }
 
+    #[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
     /// Contiguous eligible tweaks from `start`. `n_tx[i]` is `header_txs` count
     /// at `start + i`. Missing first height → `None`. Index hole → prefix.
     pub fn get_eligible_range(

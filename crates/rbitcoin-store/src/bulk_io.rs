@@ -708,6 +708,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[allow(clippy::drop_non_drop)] // ends IoCtx/ReadOp borrows so drain can run
+    #[allow(clippy::explicit_auto_deref)] // ReadOp buf reborrow from slot list
     #[test]
     fn pread_batch_roundtrip_tmpfile() {
         let dir = std::env::temp_dir().join(format!(
@@ -767,7 +769,7 @@ mod tests {
             ops.push(ReadOp {
                 fd,
                 offset: i as u64,
-                buf: *sl,
+                buf: sl,
                 result: i32::MIN,
             });
         }
@@ -837,6 +839,7 @@ mod tests {
         });
     }
 
+    #[allow(clippy::drop_non_drop)] // ends IoCtx/ReadOp borrows so drain can run
     #[test]
     fn pread_batch_fallback_matches() {
         let dir = std::env::temp_dir().join(format!(
@@ -929,6 +932,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[allow(clippy::drop_non_drop)] // ends IoCtx/ReadOp borrows so drain can run
     /// Multiple sequential waves on one thread reuse the TL ring and match
     /// libc pread for identical ranges (batch identity under reuse).
     #[test]
@@ -1002,6 +1006,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[allow(clippy::drop_non_drop)] // ends IoCtx/ReadOp borrows so drain can run
+    #[allow(clippy::explicit_auto_deref)] // ReadOp buf reborrow from slot list
     /// Forces multi-fill of the ring (N > RING_ENTRIES) and checks every byte —
     /// exercises pipelined refill, not just a single wave.
     #[test]
@@ -1034,7 +1040,7 @@ mod tests {
             ops.push(ReadOp {
                 fd,
                 offset: i as u64,
-                buf: *sl,
+                buf: sl,
                 result: i32::MIN,
             });
         }

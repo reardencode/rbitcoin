@@ -144,6 +144,7 @@ pub(crate) fn maybe_attach_view(resp: Response, view: Option<ChainView>) -> Resp
     }
 }
 
+#[allow(clippy::result_large_err)] // public error enum
 pub(crate) fn pin_or_reject(
     query: &Query,
     kind: ChainViewKind,

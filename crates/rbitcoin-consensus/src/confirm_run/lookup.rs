@@ -67,6 +67,7 @@ pub struct PlanStampOutcome {
     wire_blocks: Vec<Arc<Block>>,
 }
 
+#[allow(clippy::type_complexity)] // packed row / pin / script-hash tuple is the on-disk shape
 /// IBD **lookup** stage: structure + stamp create_fk + parent body ranges.
 ///
 /// May read `tx.head`, `tx.idx`, `txid.body`. **Never** denserels-decode `tx.body`.
@@ -275,6 +276,7 @@ pub fn confirm_wire_load_from_plan(
     })
 }
 
+#[allow(clippy::type_complexity)] // packed row / pin / script-hash tuple is the on-disk shape
 /// Structure + prepare + plan_batch only (stamp create_fk). Shared by lookup stage.
 pub(super) fn wire_lookup_phase(
     query: &Query,

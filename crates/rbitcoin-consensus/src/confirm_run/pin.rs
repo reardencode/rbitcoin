@@ -157,6 +157,7 @@ fn fill_pins(
     plan_by_id
 }
 
+#[allow(clippy::type_complexity)] // packed row / pin / script-hash tuple is the on-disk shape
 fn denserels_by_stamped_range(
     query: &Query,
     parent_pin: &ParentPinStamp,

@@ -133,6 +133,7 @@ pub fn backfill_sp_tweaks(query: &Query, params: &ChainParams) -> Result<u32, Co
     backfill_sp_tweaks_cancellable(query, params, None)
 }
 
+#[allow(clippy::type_complexity)] // packed row / pin / script-hash tuple is the on-disk shape
 /// Like [`backfill_sp_tweaks`], stopping when `cancel` is set (process exit).
 pub fn backfill_sp_tweaks_cancellable(
     query: &Query,
@@ -300,6 +301,7 @@ pub fn tweaks_for_height(
     Ok(out)
 }
 
+#[allow(clippy::type_complexity)] // packed row / pin / script-hash tuple is the on-disk shape
 /// Tweaks-wire `TxTweak` from a stored 33-byte tweak + this tx’s packed outs.
 ///
 /// No parent IO. `Some(tweak)` with missing packed outs is corrupt.

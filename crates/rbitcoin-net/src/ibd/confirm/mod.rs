@@ -638,6 +638,7 @@ pub(crate) struct LoadBatch {
     pub epoch: u64,
 }
 
+#[allow(clippy::type_complexity)] // packed row / pin / script-hash tuple is the on-disk shape
 /// Stamp inputs for one loadq run. Lookup `pres` must ride through (`Some`);
 /// load must not drop it and `from_tx` again.
 pub(crate) fn load_stamp_items(
@@ -1121,6 +1122,7 @@ impl ConfirmQueueDepths {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 /// Operator line for load stamp reject. Stamp-stage `missing prevout` is the
 /// leftover TipOnly miss remapped from `parent create_fk unresolved` — name
 /// that so a race is not logged as a bare invalid-block.

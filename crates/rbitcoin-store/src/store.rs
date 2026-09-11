@@ -690,6 +690,7 @@ impl Store {
         self.txs.get_full(fk)
     }
 
+    #[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
     /// Contiguous `first..=last` Class A bodies: one txout span + one inwit span.
     pub fn get_tx_full_span(
         &self,
@@ -763,6 +764,7 @@ impl Store {
         self.txs.put_full_batch_indexed(items, index)
     }
 
+    #[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
     /// Append Class A rows from shared pin Arc + inputs (no outs reclone).
     ///
     /// `pin` is `(TxRecord, outs)`.
@@ -907,6 +909,7 @@ impl Store {
         self.resolve_txid(txid, TxidResolveMode::TipOnly)
     }
 
+    #[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
     /// Batch head resolve for plan stamp: txid → (fk, body_range).
     ///
     /// Confirm uses **`TipOnly`**: unconnected first-hits are dropped; a connected
@@ -919,6 +922,7 @@ impl Store {
         self.get_fk_by_txid_batch_mode(txids, TxidResolveMode::TipOnly)
     }
 
+    #[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
     /// Batch resolve with explicit mode (RPC may use [`TxidResolveMode::TipThenAny`]).
     ///
     /// Uses the same hot/cold probe machine as [`TxTable::get_fk_by_txid_batch`]:
@@ -951,6 +955,7 @@ impl Store {
         crate::head_resolve_denserels::diagnose_and_note_leftover_probe(&self.txs, txid);
     }
 
+    #[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
     /// Sparse outs by known `txout` ranges (prep; skips idx).
     ///
     /// See [`TxTable::get_outs_by_range_batch`].

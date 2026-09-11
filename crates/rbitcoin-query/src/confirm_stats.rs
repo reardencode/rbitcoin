@@ -492,6 +492,7 @@ impl ConfirmStats {
         add(&self.arch_prep_blocks, blocks);
     }
 
+    #[allow(clippy::too_many_arguments)] // IO/session args stay unbundled
     pub fn note_write_commit(
         &self,
         total_ns: u64,
@@ -590,6 +591,7 @@ impl ConfirmStats {
         add(&self.stamp_struct_walk_ns, walk_ns);
     }
 
+    #[allow(clippy::too_many_arguments)] // IO/session args stay unbundled
     pub fn note_lookup(
         &self,
         blocks: u64,

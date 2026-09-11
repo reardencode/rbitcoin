@@ -514,6 +514,7 @@ pub(crate) async fn spawn_join(f: impl FnOnce() -> Response + Send + 'static) ->
     }
 }
 
+#[allow(clippy::result_large_err)] // public error enum
 fn sh_pin(
     st: &AppState,
     asof: Option<[u8; 32]>,
@@ -521,6 +522,7 @@ fn sh_pin(
     pin_or_reject(&st.query, ChainViewKind::ScriptHash, asof)
 }
 
+#[allow(clippy::result_large_err)] // public error enum
 fn sh_at_view<T>(
     st: &AppState,
     asof: Option<[u8; 32]>,

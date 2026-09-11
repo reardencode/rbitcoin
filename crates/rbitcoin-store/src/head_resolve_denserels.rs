@@ -30,6 +30,7 @@ use crate::uring_session::{self, UringSession};
 use rbitcoin_primitives::Fk;
 use std::time::Instant;
 
+#[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
 /// Stamp short-circuit: **txids → (fk, body_range)** via one TLS uring machine.
 ///
 /// Probe (head pages) → depth-first identity → idx body_range. Prep denserels
@@ -41,6 +42,7 @@ pub fn resolve_fk_and_range_batch(
     resolve_fk_and_range_batch_opts(table, txids, None, false)
 }
 
+#[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
 /// Like [`resolve_fk_and_range_batch`], but prefer a **connected** Class A row
 /// (height fence hit). Unconnected hot hits do **not** skip the cold wave.
 ///
@@ -201,6 +203,7 @@ fn diagnose_txid_probe(
     })
 }
 
+#[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
 fn resolve_fk_and_range_batch_opts(
     table: &TxTable,
     txids: &[[u8; 32]],
@@ -250,6 +253,7 @@ fn add_wave_cands(n_cands: &mut [usize], cands: &[Vec<Fk>]) -> u64 {
     n
 }
 
+#[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
 fn resolve_fk_and_range_core(
     table: &TxTable,
     txids: &[[u8; 32]],
@@ -384,6 +388,7 @@ fn resolve_fk_and_range_core(
         .collect())
 }
 
+#[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
 fn resolve_fk_and_range_pread(
     table: &TxTable,
     txids: &[[u8; 32]],
@@ -597,6 +602,7 @@ fn unfinished_mask(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)] // IO/session args stay unbundled
 /// Sidefile ID (at most two page-grouped shots) then BIP30 match + batched idx.
 ///
 /// Shot A is the first four cands of unfinished keys; shot B is the rest only
@@ -726,6 +732,7 @@ fn id_idx_wave(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // IO/session args stay unbundled
 /// Apply idx ranges for identity picks. `connected` is set only when a range
 /// exists — never before idx. Missing range after a chosen fk is Corrupt.
 fn record_chosen_idx_ranges(
@@ -760,6 +767,7 @@ fn record_chosen_idx_ranges(
     Ok(())
 }
 
+#[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
 fn resolve_fk_and_range_uring(
     table: &TxTable,
     txids: &[[u8; 32]],

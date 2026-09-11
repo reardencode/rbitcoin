@@ -673,6 +673,7 @@ fn load_g_page(
     Ok(need)
 }
 
+#[allow(clippy::too_many_arguments)] // IO/session args stay unbundled
 fn stream_or_load_pages(
     file: &File,
     path: &Path,
@@ -706,6 +707,7 @@ fn stream_or_load_pages(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // IO/session args stay unbundled
 fn stream_g_pages(
     session: &mut crate::uring_session::UringSession,
     file: &File,
@@ -1644,6 +1646,7 @@ mod tests {
         assert_eq!(scatter_g_words(g_bits, &verts, &rot), want);
     }
 
+    #[allow(clippy::drop_non_drop)] // ends IoCtx/ReadOp borrows so drain can run
     #[test]
     fn assigned_packed_fd_index_batch_held_matches_ram() {
         let dir = std::env::temp_dir().join(format!(

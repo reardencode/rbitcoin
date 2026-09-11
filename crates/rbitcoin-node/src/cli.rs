@@ -8,6 +8,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+#[allow(clippy::large_enum_variant)] // uring vs pool vs iocp backends
 /// CLI parse result before log init / datadir open / run.
 #[derive(Debug)]
 pub(crate) enum OperatorArgs {

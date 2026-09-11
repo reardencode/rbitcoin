@@ -48,6 +48,7 @@ pub fn bq_resolve_wave_stop_after(
     n_blocks >= hard_max_blocks || sum_inputs > soft_max_inputs
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 /// Hold a short wave while the BQ is fat so lookup does not mint one layer
 /// per newly fetched block.
 ///

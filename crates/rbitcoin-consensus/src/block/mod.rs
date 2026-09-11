@@ -889,7 +889,7 @@ impl ScriptCheckJob {
     fn job_pre(&self) -> &JobPre {
         self.pre.get_or_init(|| {
             JobPre::Owned(std::sync::Arc::new(rbitcoin_query::TxPrecompute::from_tx(
-                &*self.tx,
+                &self.tx,
             )))
         })
     }
@@ -938,6 +938,8 @@ impl AsmPrevoutAcc {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
+#[allow(clippy::type_complexity)] // packed row / pin / script-hash tuple is the on-disk shape
 /// Sequential assemble: resolve prevout **content**, build script jobs, collect spends.
 ///
 /// Confirm IBD path: no durable spentness / maturity / BIP68 create-height
@@ -1251,6 +1253,7 @@ pub(crate) struct SpendAnnotateJob {
     pub spend_fk: rbitcoin_primitives::Fk,
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 /// **Spentness:** pin denserels → abs + bulk 8-byte meta. Sparse durable-**spent**
 /// set (not unspent). Missing abs / short meta is hard `Err`. **Multi-list** after
 /// reorg annotate is a protocol cold walk (`has_confirmed_strong_spender_create`)
@@ -1621,7 +1624,7 @@ fn mtp_at(query: &Query, height: Height, cache: &mut U32Map<u32>) -> Result<u32,
 /// input is a pure ACS spend (empty scriptSig + empty witness + OP_TRUE spk).
 #[inline]
 fn job_needs_script_check(job: &ScriptCheckJob) -> bool {
-    let tx: &bitcoin::Transaction = &*job.tx;
+    let tx: &bitcoin::Transaction = &job.tx;
     for (i, prev) in job.prevouts.iter().enumerate() {
         if !is_anyone_can_spend(prev.script_pubkey.as_script()) {
             return true;
@@ -1754,6 +1757,7 @@ pub fn sequence_locks_satisfied(
     true
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 fn resolve_prevout(
     block: &Block,
     op: OutPoint,

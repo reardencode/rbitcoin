@@ -66,6 +66,7 @@ const CTRL_DRAIN_TIME_BUDGET: Duration = Duration::from_millis(5);
 /// bytes are not stranded behind headers. Soft wall so cancel/assign still run.
 const BODY_DRAIN_TIME_BUDGET: Duration = Duration::from_millis(40);
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 /// Non-blocking drain of archive results + peer events.
 ///
 /// **Priority:** body (`BlockFramed`/…) → headers.
@@ -562,6 +563,7 @@ pub(crate) fn apply_confirm_events(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 pub(crate) fn apply_confirm_reject(
     st: &mut IbdWorkState,
     height: u32,

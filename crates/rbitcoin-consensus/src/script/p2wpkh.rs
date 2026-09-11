@@ -155,20 +155,20 @@ mod tests {
     #[test]
     fn witness_shape_errors() {
         let job = job_with_witness(&[]);
-        let pre = crate::TxPrecompute::from_tx(&*job.tx);
-        assert!(verify(&job, 0, &*job.tx, &pre).is_err());
+        let pre = crate::TxPrecompute::from_tx(&job.tx);
+        assert!(verify(&job, 0, &job.tx, &pre).is_err());
 
         let job = job_with_witness(&[&[0x01]]);
-        let pre = crate::TxPrecompute::from_tx(&*job.tx);
-        assert!(verify(&job, 0, &*job.tx, &pre).is_err());
+        let pre = crate::TxPrecompute::from_tx(&job.tx);
+        assert!(verify(&job, 0, &job.tx, &pre).is_err());
 
         let job = job_with_witness(&[&[], &[0x02; 33]]);
-        let pre = crate::TxPrecompute::from_tx(&*job.tx);
-        assert!(verify(&job, 0, &*job.tx, &pre).is_err());
+        let pre = crate::TxPrecompute::from_tx(&job.tx);
+        assert!(verify(&job, 0, &job.tx, &pre).is_err());
 
         let job = job_with_witness(&[&[0x30, 0x01, 0x01, 0x01], &[0x02; 33]]);
-        let pre = crate::TxPrecompute::from_tx(&*job.tx);
-        let err = verify(&job, 0, &*job.tx, &pre).unwrap_err();
+        let pre = crate::TxPrecompute::from_tx(&job.tx);
+        let err = verify(&job, 0, &job.tx, &pre).unwrap_err();
         assert!(format!("{err}").contains("p2wpkh"));
 
         let redeem = {
@@ -177,7 +177,7 @@ mod tests {
             r
         };
         let job = job_with_witness(&[&[0x01]]);
-        let pre = crate::TxPrecompute::from_tx(&*job.tx);
-        assert!(verify_with_keyhash(&job, 0, &*job.tx, &[0u8; 20], &redeem, &pre).is_err());
+        let pre = crate::TxPrecompute::from_tx(&job.tx);
+        assert!(verify_with_keyhash(&job, 0, &job.tx, &[0u8; 20], &redeem, &pre).is_err());
     }
 }

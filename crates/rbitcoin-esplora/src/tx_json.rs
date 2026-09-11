@@ -185,6 +185,7 @@ pub fn build_tx_json_from_tx(
     )
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 fn tx_json_from_wire(
     query: &Query,
     wire: &Transaction,

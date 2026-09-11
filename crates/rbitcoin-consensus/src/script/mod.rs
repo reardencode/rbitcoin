@@ -47,7 +47,7 @@ pub(crate) use classify::is_anyone_can_spend;
 /// `vin=` so IBD logs name the failing spend (batch-first height alone is not enough).
 pub(crate) fn verify_job_all_inputs(job: &ScriptCheckJob) -> Result<(), ConsensusError> {
     // JobTx may be shared wire Arc — always take &Transaction (not &JobTx).
-    let tx: &Transaction = &*job.tx;
+    let tx: &Transaction = &job.tx;
     let n = job.prevouts.len();
     if n == 0 {
         return Ok(());
@@ -721,9 +721,9 @@ mod verify_routing_tests {
             pre: std::sync::OnceLock::new(),
         };
         let cache = bitcoin::sighash::SighashCache::new(&*job2.tx);
-        let pre = crate::TxPrecompute::from_tx(&*job2.tx);
+        let pre = crate::TxPrecompute::from_tx(&job2.tx);
         let mut cache_slot = Some(cache);
-        assert!(verify_input(&job2, 0, &*job2.tx, &mut cache_slot, &pre).is_err());
+        assert!(verify_input(&job2, 0, &job2.tx, &mut cache_slot, &pre).is_err());
     }
 
     #[test]

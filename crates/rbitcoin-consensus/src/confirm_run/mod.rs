@@ -207,6 +207,7 @@ pub fn confirm_wire_load_phase(
     confirm_wire_load_phase_pipelined(query, params, milestone, blocks, preverified, None)
 }
 
+#[allow(clippy::type_complexity)] // packed row / pin / script-hash tuple is the on-disk shape
 fn wire_blocks_to_arcs(
     query: &Query,
     blocks: &[(Height, Block)],
@@ -265,6 +266,7 @@ pub fn confirm_wire_run(
     confirm_wire_run_preverified(query, params, milestone, blocks, &ScriptPreverified::new())
 }
 
+#[allow(clippy::type_complexity)] // packed row / pin / script-hash tuple is the on-disk shape
 /// Like [`confirm_wire_run`] with mempool script preverified set.
 ///
 /// **Tip-follow / one-shot:** lookup stamp (create_fk + parent body ranges;
@@ -354,6 +356,7 @@ impl ScriptOkBatch {
         self.batch_parents.len()
     }
 
+    #[allow(clippy::result_large_err)] // public error enum
     /// Absorb another script-ok batch for write batch (FIFO drain).
     ///
     /// Scripts enqueue height-ordered tip extensions; write drains the channel

@@ -130,7 +130,7 @@ mod tests {
             pre: std::sync::OnceLock::new(),
         };
         let mut cache = SighashCache::new(&*job.tx);
-        let err = verify(&job, 0, &*job.tx, &mut cache).unwrap_err();
+        let err = verify(&job, 0, &job.tx, &mut cache).unwrap_err();
         assert!(format!("{err}").contains("p2pkh"));
     }
 }

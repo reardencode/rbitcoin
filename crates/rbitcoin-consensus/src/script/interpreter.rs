@@ -212,6 +212,7 @@ impl<'a> EvalContext<'a> {
         )
     }
 
+    #[allow(clippy::too_many_arguments)] // call-site args stay unbundled
     #[cfg(test)]
     pub(crate) fn new_with_flags(
         tx: &'a Transaction,
@@ -238,6 +239,7 @@ impl<'a> EvalContext<'a> {
         )
     }
 
+    #[allow(clippy::too_many_arguments)] // call-site args stay unbundled
     fn from_eval_parts(
         tx: &'a Transaction,
         input_index: usize,

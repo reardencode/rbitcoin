@@ -224,22 +224,22 @@ mod tests {
         cache: &mut SighashCache<&Transaction>,
         pre: &crate::TxPrecompute,
     ) -> Option<Result<(), ConsensusError>> {
-        match p2sh_script_sig_stack(job, 0, &*job.tx) {
+        match p2sh_script_sig_stack(job, 0, &job.tx) {
             Err(e) => Some(Err(e)),
-            Ok(items) => try_p2sh_nested_segwit(job, 0, &*job.tx, cache, pre, &items),
+            Ok(items) => try_p2sh_nested_segwit(job, 0, &job.tx, cache, pre, &items),
         }
     }
 
     fn verify_legacy(job: &ScriptCheckJob) -> Result<(), ConsensusError> {
-        let stack = p2sh_script_sig_stack(job, 0, &*job.tx)?;
-        verify_p2sh_legacy(job, 0, &*job.tx, stack)
+        let stack = p2sh_script_sig_stack(job, 0, &job.tx)?;
+        verify_p2sh_legacy(job, 0, &job.tx, stack)
     }
 
     fn stack_for(ss: ScriptBuf) -> Result<Vec<Vec<u8>>, ConsensusError> {
         let mut tx = dummy_tx();
         tx.input[0].script_sig = ss;
         let job = job_for(tx, p2sh_spk(&[0x51]), true);
-        p2sh_script_sig_stack(&job, 0, &*job.tx)
+        p2sh_script_sig_stack(&job, 0, &job.tx)
     }
 
     #[test]
@@ -348,7 +348,7 @@ mod tests {
         tx.input[0].witness = Witness::from_slice(&[vec![0u8; 64], vec![0x02; 33]]);
         let job = job_for(tx.clone(), p2sh_spk(&redeem), true);
         let mut cache = SighashCache::new(&*job.tx);
-        let r = try_nested(&job, &mut cache, &crate::TxPrecompute::from_tx(&*job.tx));
+        let r = try_nested(&job, &mut cache, &crate::TxPrecompute::from_tx(&job.tx));
         match r {
             Some(Err(e)) => {
                 let msg = format!("{e}");
@@ -377,7 +377,7 @@ mod tests {
         // Empty witness — must not succeed via legacy truthy-top.
         let job = job_for(tx.clone(), p2sh_spk(&redeem), true);
         let mut cache = SighashCache::new(&*job.tx);
-        let r = try_nested(&job, &mut cache, &crate::TxPrecompute::from_tx(&*job.tx));
+        let r = try_nested(&job, &mut cache, &crate::TxPrecompute::from_tx(&job.tx));
         match r {
             Some(Err(e)) => {
                 assert!(format!("{e}").contains("WITNESS_MALLEATED_P2SH"), "got {e}");
@@ -403,7 +403,7 @@ mod tests {
         tx.input[0].script_sig = ScriptBuf::from_bytes(ss);
         let job = job_for(tx.clone(), p2sh_spk(&redeem), true);
         let mut cache = SighashCache::new(&*job.tx);
-        let r = try_nested(&job, &mut cache, &crate::TxPrecompute::from_tx(&*job.tx));
+        let r = try_nested(&job, &mut cache, &crate::TxPrecompute::from_tx(&job.tx));
         match r {
             Some(Err(e)) => {
                 assert!(
@@ -430,7 +430,7 @@ mod tests {
         let job = job_for(tx.clone(), p2sh_spk(&redeem), false);
         let mut cache = SighashCache::new(&*job.tx);
         assert!(
-            try_nested(&job, &mut cache, &crate::TxPrecompute::from_tx(&*job.tx)).is_none(),
+            try_nested(&job, &mut cache, &crate::TxPrecompute::from_tx(&job.tx)).is_none(),
             "without witness_active nested must not fire"
         );
     }
@@ -446,7 +446,7 @@ mod tests {
         let job = job_for(tx.clone(), p2sh_spk(&redeem), true);
         let mut cache = SighashCache::new(&*job.tx);
         assert!(
-            try_nested(&job, &mut cache, &crate::TxPrecompute::from_tx(&*job.tx)).is_none(),
+            try_nested(&job, &mut cache, &crate::TxPrecompute::from_tx(&job.tx)).is_none(),
             "non-witness multi-push must not enter nested gate"
         );
         assert!(verify_legacy(&job).is_ok());
@@ -466,7 +466,7 @@ mod tests {
         tx.input[0].script_sig = ScriptBuf::from_bytes(ss);
         let job = job_for(tx.clone(), p2sh_spk(&redeem), true);
         let mut cache = SighashCache::new(&*job.tx);
-        let r = try_nested(&job, &mut cache, &crate::TxPrecompute::from_tx(&*job.tx));
+        let r = try_nested(&job, &mut cache, &crate::TxPrecompute::from_tx(&job.tx));
         assert!(matches!(r, Some(Ok(()))), "v1-in-P2SH ACS, got {r:?}");
     }
 
@@ -509,7 +509,7 @@ mod tests {
             pre: std::sync::OnceLock::new(),
         };
         let mut cache = SighashCache::new(&*job.tx);
-        let r = try_nested(&job, &mut cache, &crate::TxPrecompute::from_tx(&*job.tx));
+        let r = try_nested(&job, &mut cache, &crate::TxPrecompute::from_tx(&job.tx));
         assert!(matches!(r, Some(Err(_))));
 
         // Wrong redeem hash
@@ -541,7 +541,7 @@ mod tests {
         };
         let mut cache2 = SighashCache::new(&*job2.tx);
         assert!(matches!(
-            try_nested(&job2, &mut cache2, &crate::TxPrecompute::from_tx(&*job2.tx)),
+            try_nested(&job2, &mut cache2, &crate::TxPrecompute::from_tx(&job2.tx)),
             Some(Err(_))
         ));
 
@@ -583,7 +583,7 @@ mod tests {
         };
         let mut c3 = SighashCache::new(&*job3.tx);
         assert!(matches!(
-            try_nested(&job3, &mut c3, &crate::TxPrecompute::from_tx(&*job3.tx)),
+            try_nested(&job3, &mut c3, &crate::TxPrecompute::from_tx(&job3.tx)),
             Some(Err(_))
         ));
         // wrong hash
@@ -615,7 +615,7 @@ mod tests {
         };
         let mut c4 = SighashCache::new(&*job4.tx);
         assert!(matches!(
-            try_nested(&job4, &mut c4, &crate::TxPrecompute::from_tx(&*job4.tx)),
+            try_nested(&job4, &mut c4, &crate::TxPrecompute::from_tx(&job4.tx)),
             Some(Err(_))
         ));
 
@@ -649,7 +649,7 @@ mod tests {
             pre: std::sync::OnceLock::new(),
         };
         let mut c5 = SighashCache::new(&*job5.tx);
-        assert!(try_nested(&job5, &mut c5, &crate::TxPrecompute::from_tx(&*job5.tx)).is_none());
+        assert!(try_nested(&job5, &mut c5, &crate::TxPrecompute::from_tx(&job5.tx)).is_none());
 
         // Legacy wrong spk / hash / empty
         assert!(verify_legacy(&job3).is_err());
@@ -755,7 +755,7 @@ mod tests {
         // Empty witness → p2wsh fails, but nested path reached scripthash copy + call.
         let mut c = SighashCache::new(&*job.tx);
         assert!(matches!(
-            try_nested(&job, &mut c, &crate::TxPrecompute::from_tx(&*job.tx)),
+            try_nested(&job, &mut c, &crate::TxPrecompute::from_tx(&job.tx)),
             Some(Err(_))
         ));
 
@@ -796,7 +796,7 @@ mod tests {
         };
         let mut cache = SighashCache::new(&*job2.tx);
         assert!(matches!(
-            try_nested(&job2, &mut cache, &crate::TxPrecompute::from_tx(&*job2.tx)),
+            try_nested(&job2, &mut cache, &crate::TxPrecompute::from_tx(&job2.tx)),
             Some(Err(_))
         ));
 

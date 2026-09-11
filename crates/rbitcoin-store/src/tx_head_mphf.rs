@@ -293,6 +293,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[allow(clippy::drop_non_drop)] // ends IoCtx/ReadOp borrows so drain can run
     /// Held-session leftover `KIND_BULK_PREAD` must not be harvested as a BDZ
     /// g-page CQE (`bdz g page bad slot`). Drain the foreign SQE first.
     #[test]

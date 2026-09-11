@@ -111,6 +111,7 @@ impl WriteStageSample {
 
     /// Exclusive write inventory: one row per token (`write=` = this sum).
     /// `format_info` / `format_debug` emit `{name}` from this table.
+    #[allow(clippy::type_complexity)] // name + ms/ns getters
     const INVENTORY: &'static [(&'static str, fn(&Self) -> u64, fn(&Self) -> u64)] = &[
         ("class_a", |s| s.class_a_ms, |s| s.class_a_ns),
         ("ensure", |s| s.ensure_ms, |s| s.ensure_ns),
@@ -748,6 +749,7 @@ pub fn format_tip_perf_sizes(s: &TipPerfSizes) -> String {
     )
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 /// Sample every counter once and reset atomics.
 pub(crate) fn sample(
     loop_stats: &LoopStats,

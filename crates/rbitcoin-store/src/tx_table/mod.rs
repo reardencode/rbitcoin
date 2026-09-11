@@ -950,6 +950,7 @@ impl TxTable {
         &self.secret
     }
 
+    #[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
     /// Batch head resolve for plan stamp: **txid → (create_fk, body_range)**.
     ///
     /// Short-circuit of the Shape A denserels machine
@@ -970,6 +971,7 @@ impl TxTable {
         crate::head_resolve_denserels::resolve_fk_and_range_batch(self, txids)
     }
 
+    #[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
     /// Sparse outs by known `txout` body ranges (prep pin after plan stamp).
     ///
     /// Each job is `(create_fk, body_range, known_txid, need_vouts)`.
@@ -1365,6 +1367,7 @@ impl TxTable {
         Ok((tx, ins, outs))
     }
 
+    #[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
     /// Contiguous create_fks `first..=last`: one libc span each of `txout.body`
     /// and `inwit.body`, plus `txid.body` range. Not the confirm uring pipeline.
     pub fn get_full_span(
@@ -1534,6 +1537,7 @@ impl TxTable {
         Ok(fks)
     }
 
+    #[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
     /// Like [`Self::put_full_batch_indexed`], but outs live in a shared pin Arc
     /// (tx + outs + denserels). Encode borrows pin fields — no outs deep clone.
     pub fn put_full_batch_from_pins(
@@ -1598,6 +1602,7 @@ impl TxTable {
         Ok(fks)
     }
 
+    #[allow(clippy::too_many_arguments)] // IO/session args stay unbundled
     /// Encode and write `txout` + `inwit` + `spent` bodies as one pwrite wave.
     ///
     /// Order is still body → idx → HWM per stem. Not the spend-annotate machine.
@@ -1745,6 +1750,7 @@ impl TxTable {
         Ok(inserted)
     }
 
+    #[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
     /// Rebuild sealed MPHF+fuse8 from Class A (`txid.body`), no historical OA.
     ///
     /// Range width is [`Self::rebuild_seal_keys`] (default 2²⁵). Remainder is

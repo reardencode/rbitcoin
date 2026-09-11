@@ -887,6 +887,7 @@ impl AddressHead {
         Ok(out)
     }
 
+    #[allow(clippy::too_many_arguments)] // IO/session args stay unbundled
     /// Stream unique probe pages on a held session: ≤[`PROBE_PAGES_IN_FLIGHT`]
     /// page buffers, fill ring, hop keys on CQE, reuse slot.
     fn probe_pages_streaming_on_session(

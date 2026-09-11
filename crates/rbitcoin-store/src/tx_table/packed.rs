@@ -576,6 +576,7 @@ pub(super) fn check_trailing_zero_pad(raw: &[u8], logical_end: usize) -> Result<
     Ok(())
 }
 
+#[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
 /// Decode `txout` with optional de-obfuscation of scriptPubKey.
 pub fn decode_packed_tx_with_spender_rels_secret(
     raw: &[u8],
@@ -720,6 +721,7 @@ pub fn visit_packed_script_hashes(
     Ok(())
 }
 
+#[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
 /// Sparse pin decode: only materialize `need_vouts` scripts + denserel slots.
 ///
 /// Walks the full packed layout (inputs skipped, non-need outs skipped without

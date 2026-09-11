@@ -115,10 +115,10 @@ mod tests {
             },
             pre: std::sync::OnceLock::new(),
         };
-        assert!(verify(&job, 0, &*job.tx).is_err());
+        assert!(verify(&job, 0, &job.tx).is_err());
 
         let mut job2 = job;
         job2.tx.input[0].witness = Witness::from_slice(&[vec![0x51]]); // OP_TRUE script
-        assert!(verify_with_scripthash(&job2, 0, &*job2.tx, &[0u8; 32]).is_err());
+        assert!(verify_with_scripthash(&job2, 0, &job2.tx, &[0u8; 32]).is_err());
     }
 }
