@@ -1112,12 +1112,8 @@ impl Query {
         Ok(self.store.header_txs.get_list(header_fk)?)
     }
 
+    /// Load tx row from Class A store.
     pub fn get_tx(&self, fk: Fk) -> Result<TxRecord, QueryError> {
-        self.get_tx_class_a(fk)
-    }
-
-    /// Load tx row from Class A store (no process pin FIFO).
-    pub fn get_tx_class_a(&self, fk: Fk) -> Result<TxRecord, QueryError> {
         self.store.get_tx(fk)
     }
 
