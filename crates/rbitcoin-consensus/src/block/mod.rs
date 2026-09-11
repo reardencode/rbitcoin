@@ -1283,53 +1283,7 @@ pub(crate) fn structural_validate_spends(
     let mut create_height_by_fk: FkMap<u32> =
         FkMap::with_capacity_and_hasher(spends.len().min(256), BuildHasherDefault::default());
     let maturity = ctx.params.coinbase_maturity();
-
-    // BIP30: after BIP34, skipped. Before that, a connected instance with any
-    // unspent output may not be overwritten — except mainnet 91842 / 91880.
-    // Just-archived self is unconnected (not a hit); only a live sibling is.
-    if !ctx.params.bip34_active_at(ctx.height.0)
-        && !ctx.params.is_bip30_repeat(ctx.height.0, block.block_hash())
-    {
-        let create_txids: Vec<[u8; 32]> = block
-            .txdata
-            .iter()
-            .map(|tx| tx.compute_txid().to_byte_array())
-            .collect();
-        let hits = query
-            .store()
-            .get_fk_by_txid_batch(&create_txids)
-            .map_err(ConsensusError::from)?;
-        for (_txid, row) in hits {
-            let Some((old_fk, _)) = row else {
-                continue;
-            };
-            // Connected instance at *this* height is ourselves (re-validate /
-            // already-confirmed fixture). BIP30 is an earlier unspent sibling.
-            if query
-                .store()
-                .tx_height_get(old_fk)
-                .map_err(ConsensusError::from)?
-                == Some(ctx.height.0)
-            {
-                continue;
-            }
-            let rec = query.store().get_tx(old_fk).map_err(ConsensusError::from)?;
-            let mut unspent = false;
-            for v in 0..rec.output_count {
-                let spent = query
-                    .store()
-                    .has_confirmed_strong_spender_create(old_fk, v, None)
-                    .map_err(ConsensusError::from)?;
-                if !spent {
-                    unspent = true;
-                    break;
-                }
-            }
-            if unspent {
-                return Err(ConsensusError::BadTx("bad-txns-BIP30"));
-            }
-        }
-    }
+    reject_bip30_unspent_overwrite(query, block, ctx)?;
 
     // On-disk spender meta is authority; pin only supplies abs. No cold body walk.
     let t_spent = Instant::now();
@@ -1608,6 +1562,61 @@ pub(crate) fn structural_validate_spends(
 
 /// MTP for write structural. Prefers assemble-carried `prev_mtp` (seeded into
 /// `cache`). Misses go to durable headers only — never `get_header_plan`.
+/// BIP30: after BIP34, skipped. Before that, a connected instance with any
+/// unspent output may not be overwritten — except mainnet 91842 / 91880.
+/// Just-archived self is unconnected (not a hit); only a live sibling is.
+fn reject_bip30_unspent_overwrite(
+    query: &Query,
+    block: &Block,
+    ctx: &ValidationContext<'_>,
+) -> Result<(), ConsensusError> {
+    if ctx.params.bip34_active_at(ctx.height.0)
+        || ctx.params.is_bip30_repeat(ctx.height.0, block.block_hash())
+    {
+        return Ok(());
+    }
+    let create_txids: Vec<[u8; 32]> = block
+        .txdata
+        .iter()
+        .map(|tx| tx.compute_txid().to_byte_array())
+        .collect();
+    let hits = query
+        .store()
+        .get_fk_by_txid_batch(&create_txids)
+        .map_err(ConsensusError::from)?;
+    for (_txid, row) in hits {
+        let Some((old_fk, _)) = row else {
+            continue;
+        };
+        // Connected instance at *this* height is ourselves (re-validate /
+        // already-confirmed fixture). BIP30 is an earlier unspent sibling.
+        if query
+            .store()
+            .tx_height_get(old_fk)
+            .map_err(ConsensusError::from)?
+            == Some(ctx.height.0)
+        {
+            continue;
+        }
+        let rec = query.store().get_tx(old_fk).map_err(ConsensusError::from)?;
+        let mut unspent = false;
+        for v in 0..rec.output_count {
+            let spent = query
+                .store()
+                .has_confirmed_strong_spender_create(old_fk, v, None)
+                .map_err(ConsensusError::from)?;
+            if !spent {
+                unspent = true;
+                break;
+            }
+        }
+        if unspent {
+            return Err(ConsensusError::BadTx("bad-txns-BIP30"));
+        }
+    }
+    Ok(())
+}
+
 fn mtp_at(query: &Query, height: Height, cache: &mut U32Map<u32>) -> Result<u32, ConsensusError> {
     if let Some(&t) = cache.get(&height.0) {
         return Ok(t);

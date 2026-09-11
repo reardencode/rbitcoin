@@ -291,6 +291,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[allow(clippy::cognitive_complexity)] // one fixture, many window/byte cases
     #[test]
     fn block_queue_soft_free_bytes_and_confirm_window() {
         use crate::soft_densify::BQ_SOFT_CONFIRM_SECS;

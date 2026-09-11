@@ -1811,6 +1811,7 @@ fn address_head_get_by_txid() {
 }
 
 /// Dense encode/decode + error-arm coverage for packed Class A helpers.
+#[allow(clippy::cognitive_complexity)] // one fixture, many error arms
 #[test]
 fn packed_encode_decode_flags_and_error_arms() {
     // TxRecord short

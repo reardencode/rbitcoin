@@ -788,34 +788,7 @@ async fn application_handshake(
         write_v2_msg(writer, NetworkMessage::Version(version.clone())).await?;
     }
 
-    let their_version = loop {
-        let frame = read_handshake_frame(reader, magic, &policy).await?;
-        let cmd = command_label(&frame.command);
-        let msg = frame.decode();
-        match msg.payload() {
-            NetworkMessage::Version(v) => {
-                if (v.version as i32) < MIN_PEER_PROTO_VERSION {
-                    if let Some(s) = policy.session {
-                        rbitcoin_log::debug!("{}", obsolete_version_log(v.version as i32, s.id));
-                        if let Some(peers) = policy.peers {
-                            let _ = peers.disconnect_id(s.id);
-                        }
-                    }
-                    return Err(NetError::Protocol("obsolete version"));
-                }
-                break v.clone();
-            }
-            other => {
-                if matches!(other, NetworkMessage::Verack) {
-                    return Err(NetError::Protocol("verack before version"));
-                }
-                if let Some(s) = policy.session {
-                    rbitcoin_log::debug!("{}", non_version_before_handshake_log(&cmd, s.id));
-                }
-                let _ = other;
-            }
-        }
-    };
+    let their_version = read_peer_version(reader, magic, &policy).await?;
 
     if inbound {
         if let Some(peers) = policy.peers {
@@ -848,13 +821,62 @@ async fn application_handshake(
         write_v2_msg(writer, NetworkMessage::SendAddrV2).await?;
     }
     write_v2_msg(writer, NetworkMessage::Verack).await?;
+    wait_peer_verack(reader, magic, &policy).await?;
 
+    nonce_guard.clear = false;
+    if let Some(peers) = policy.peers {
+        if !inbound {
+            peers.clear_outbound_nonce(our_nonce);
+        }
+    }
+
+    Ok(their_version)
+}
+
+async fn read_peer_version(
+    reader: &mut V2Reader,
+    magic: Magic,
+    policy: &HandshakePolicy<'_>,
+) -> Result<VersionMessage, NetError> {
     loop {
-        let frame = read_handshake_frame(reader, magic, &policy).await?;
+        let frame = read_handshake_frame(reader, magic, policy).await?;
         let cmd = command_label(&frame.command);
         let msg = frame.decode();
         match msg.payload() {
-            NetworkMessage::Verack => break,
+            NetworkMessage::Version(v) => {
+                if (v.version as i32) < MIN_PEER_PROTO_VERSION {
+                    if let Some(s) = policy.session {
+                        rbitcoin_log::debug!("{}", obsolete_version_log(v.version as i32, s.id));
+                        if let Some(peers) = policy.peers {
+                            let _ = peers.disconnect_id(s.id);
+                        }
+                    }
+                    return Err(NetError::Protocol("obsolete version"));
+                }
+                return Ok(v.clone());
+            }
+            NetworkMessage::Verack => return Err(NetError::Protocol("verack before version")),
+            other => {
+                if let Some(s) = policy.session {
+                    rbitcoin_log::debug!("{}", non_version_before_handshake_log(&cmd, s.id));
+                }
+                let _ = other;
+            }
+        }
+    }
+}
+
+async fn wait_peer_verack(
+    reader: &mut V2Reader,
+    magic: Magic,
+    policy: &HandshakePolicy<'_>,
+) -> Result<(), NetError> {
+    loop {
+        let frame = read_handshake_frame(reader, magic, policy).await?;
+        let cmd = command_label(&frame.command);
+        let msg = frame.decode();
+        match msg.payload() {
+            NetworkMessage::Verack => return Ok(()),
             NetworkMessage::SendAddrV2 => {
                 if let Some(s) = policy.session {
                     s.set_wants_addrv2();
@@ -872,15 +894,6 @@ async fn application_handshake(
             }
         }
     }
-
-    nonce_guard.clear = false;
-    if let Some(peers) = policy.peers {
-        if !inbound {
-            peers.clear_outbound_nonce(our_nonce);
-        }
-    }
-
-    Ok(their_version)
 }
 
 fn framed_cmd(frame: &FramedMessage) -> String {

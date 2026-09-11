@@ -1929,6 +1929,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::cognitive_complexity)] // one fixture, many log token arms
     #[test]
     fn format_lines_omit_never_written_inventory_tokens() {
         let mut s = IbdPerfSample::default();
@@ -2037,6 +2038,7 @@ mod tests {
         assert!(stuffed_info.contains("write="), "{stuffed_info}");
     }
 
+    #[allow(clippy::cognitive_complexity)] // one fixture, many log token arms
     #[test]
     fn format_info_has_stable_tokens() {
         let mut s = IbdPerfSample::default();
@@ -2288,6 +2290,7 @@ mod tests {
 
     /// Optional stamp_sub / head_loc / lookup_sub / plan_batch tokens on the
     /// shipped `log_sample` DEBUG lines.
+    #[allow(clippy::cognitive_complexity)] // one fixture, many log token arms
     #[test]
     fn format_info_and_debug_optional_subblocks() {
         let mut s = IbdPerfSample::default();
@@ -2430,6 +2433,7 @@ mod tests {
         assert!(rss.rss_kb > 0 || cfg!(not(target_os = "linux")));
     }
 
+    #[allow(clippy::cognitive_complexity)] // one fixture, many log token arms
     #[test]
     fn format_debug_has_detail_tokens() {
         let mut s = IbdPerfSample::default();
@@ -2528,6 +2532,7 @@ mod tests {
         assert!(line.contains("ca_body_us/blk="), "{line}");
     }
 
+    #[allow(clippy::cognitive_complexity)] // one fixture, many log token arms
     #[test]
     fn format_sizes_has_rss_and_structure_tokens() {
         let mut s = IbdPerfSample::default();

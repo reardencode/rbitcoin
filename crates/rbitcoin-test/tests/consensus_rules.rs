@@ -453,6 +453,7 @@ fn h7_rejects_header_hash_above_target() {
     );
 }
 
+#[allow(clippy::cognitive_complexity)] // one fixture, many boundary arms
 #[test]
 fn header_and_spending_boundaries() {
     use bitcoin::absolute::LockTime;

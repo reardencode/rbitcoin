@@ -149,6 +149,7 @@ pub fn run_node(config: NodeConfig) -> Result<NodeHandle, NodeError> {
 /// Cleanly exits on **SIGTERM** / **SIGINT** (`kill <pid>` or Ctrl+C): flushes the store
 /// and aborts peer tasks (runtime `shutdown_timeout` so leftover sessions cannot
 /// hold the process).
+#[allow(clippy::cognitive_complexity)] // node bring-up / P2P follow loop
 pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     let handle = run_node(config.clone())?;
     let params = config.chain_params()?;

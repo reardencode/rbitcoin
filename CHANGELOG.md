@@ -76,6 +76,9 @@ before 1.0).
   [`TESTING.md`](TESTING.md). Clippy: no workspace `allow` list; leftover
   lints are site-local with a reason
   ([`docs/code-shape.md`](docs/code-shape.md)).
+- **Clippy `cognitive_complexity`:** workspace `warn` (nursery).
+  Core-faithful loops and dense surface tests keep a site allow. Do not
+  peel **R-10** to silence. [`docs/code-shape.md`](docs/code-shape.md).
 - **RPC / CLI honesty (Q-59 slice):** `submitblock` uses the live chain hub
   on all networks (same receive path as P2P; `generate*` / `setmocktime`
   stay regtest-only). `--minrelaytxfee` / `--blockmintxfee` reject garbage

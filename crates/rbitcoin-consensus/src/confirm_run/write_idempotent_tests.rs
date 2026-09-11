@@ -32,6 +32,7 @@ fn head_insert_join_restore_empty_ok() {
 }
 
 /// Batch append: contiguous heights merge; gap returns Err(other).
+#[allow(clippy::cognitive_complexity)] // one fixture, many error arms
 #[test]
 fn script_ok_append_contiguous_and_gap() {
     use super::{Prepared, ScriptOkBatch};

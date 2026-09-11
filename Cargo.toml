@@ -72,4 +72,6 @@ unexpected_cfgs = { level = "deny", check-cfg = ['cfg(coverage)'] }
 # Clippy: CI is `clippy --workspace --all-targets -- -D warnings`.
 # No workspace allow list. A leftover lint is `#[allow(clippy::…)]` on
 # the item with a reason (`docs/code-shape.md`).
+# Nursery opt-in: Core-faithful loops fail CI unless site-allowed.
 [workspace.lints.clippy]
+cognitive_complexity = "warn"

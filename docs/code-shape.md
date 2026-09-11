@@ -80,10 +80,11 @@ Complexity still drops because the types got better, not because clippy
 denied a Core-faithful loop. That is a **site** allow on that function, not
 a standing workspace `cognitive_complexity` allow.
 
-The workspace allow list is empty. `cognitive_complexity` stays clippy’s
-nursery default (allow) until a later opt-in warn + site allows on
-Core-faithful loops. Do not turn ast-grep into a second clippy
-([`quality.md`](./quality.md) Won't-fix).
+The workspace allow list is empty. `cognitive_complexity` is workspace
+`warn` (nursery opt-in). A leftover Core-faithful loop or dense surface
+test is a **site** allow — do not peel **R-10**, flatten io_uring, or
+split `interpreter.rs` to silence it. Do not turn ast-grep into a second
+clippy ([`quality.md`](./quality.md) Won't-fix).
 
 ---
 

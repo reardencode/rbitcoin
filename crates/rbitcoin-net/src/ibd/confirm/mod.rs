@@ -1667,7 +1667,9 @@ pub(crate) fn spawn_confirm_engine(
     let load_ahead_reset_load = Arc::clone(&load_ahead_reset);
     let load_join = std::thread::Builder::new()
         .name("ibd-confirm-load".into())
-        .spawn(move || {
+        .spawn(
+            #[allow(clippy::cognitive_complexity)] // confirm load OS pipeline
+            move || {
             info!(
                 "ibd: confirm load on dedicated OS thread (claim resolve-complete → stamp+pin)"
             );

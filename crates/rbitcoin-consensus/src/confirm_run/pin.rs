@@ -157,6 +157,60 @@ fn fill_pins(
     plan_by_id
 }
 
+fn apply_plan_pins(
+    parent_vouts: &U64Map<Vec<u32>>,
+    plan_by_id: &U64Map<CreatePin>,
+    parent_pin: &ParentPinStamp,
+    batch_parents: &mut rbitcoin_query::BatchParents,
+    still_need: &mut U64Map<Vec<u32>>,
+) -> u64 {
+    let mut n_plan_pin = 0u64;
+    for (id, need) in parent_vouts {
+        let fk = rbitcoin_primitives::Fk(*id);
+        if !need.is_empty() && batch_parents.pin_covered(fk, need) {
+            if let Some(pin) = plan_by_id.get(id) {
+                let (tx, _outs) = pin.as_ref();
+                let cb = if tx.input_count != 1 {
+                    Some(false)
+                } else {
+                    None
+                };
+                let plan_range = parent_pin.body_range(*id);
+                if cb.is_some() || plan_range.is_some() {
+                    batch_parents.refresh_pin_meta(fk, cb, plan_range, Vec::new());
+                }
+            }
+            n_plan_pin = n_plan_pin.saturating_add(1);
+            continue;
+        }
+        if let Some(pin) = plan_by_id.get(id) {
+            let (tx, outs) = pin.as_ref();
+            if !need.iter().all(|&v| outs.get(v as usize).is_some()) {
+                still_need.insert(*id, need.clone());
+                continue;
+            }
+            let cb = if tx.input_count != 1 {
+                Some(false)
+            } else {
+                None
+            };
+            let plan_range = parent_pin.body_range(*id);
+            batch_parents.insert_create_pin(
+                fk,
+                std::sync::Arc::clone(pin),
+                need.clone(),
+                cb,
+                plan_range,
+                Vec::new(),
+            );
+            n_plan_pin = n_plan_pin.saturating_add(1);
+        } else {
+            still_need.insert(*id, need.clone());
+        }
+    }
+    n_plan_pin
+}
+
 #[allow(clippy::type_complexity)] // packed row / pin / script-hash tuple is the on-disk shape
 fn denserels_by_stamped_range(
     query: &Query,
@@ -295,52 +349,15 @@ pub(super) fn pin_for_wire_batch(
         rbitcoin_query::note_confirm(&query.confirm_stats().thin_ns, thin_ns);
     }
     let mut still_need: U64Map<Vec<u32>> = U64Map::default();
-    let mut n_plan_pin = 0u64;
 
     let t_plan = Instant::now();
-    for (id, need) in &parent_vouts {
-        let fk = rbitcoin_primitives::Fk(*id);
-        if !need.is_empty() && batch_parents.pin_covered(fk, need) {
-            if let Some(pin) = plan_by_id.get(id) {
-                let (tx, _outs) = pin.as_ref();
-                let cb = if tx.input_count != 1 {
-                    Some(false)
-                } else {
-                    None
-                };
-                let plan_range = parent_pin.body_range(*id);
-                if cb.is_some() || plan_range.is_some() {
-                    batch_parents.refresh_pin_meta(fk, cb, plan_range, Vec::new());
-                }
-            }
-            n_plan_pin = n_plan_pin.saturating_add(1);
-            continue;
-        }
-        if let Some(pin) = plan_by_id.get(id) {
-            let (tx, outs) = pin.as_ref();
-            if !need.iter().all(|&v| outs.get(v as usize).is_some()) {
-                still_need.insert(*id, need.clone());
-                continue;
-            }
-            let cb = if tx.input_count != 1 {
-                Some(false)
-            } else {
-                None
-            };
-            let plan_range = parent_pin.body_range(*id);
-            batch_parents.insert_create_pin(
-                fk,
-                std::sync::Arc::clone(pin),
-                need.clone(),
-                cb,
-                plan_range,
-                Vec::new(),
-            );
-            n_plan_pin = n_plan_pin.saturating_add(1);
-        } else {
-            still_need.insert(*id, need.clone());
-        }
-    }
+    let n_plan_pin = apply_plan_pins(
+        &parent_vouts,
+        &plan_by_id,
+        parent_pin,
+        &mut batch_parents,
+        &mut still_need,
+    );
     let plan_pin_ns = t_plan.elapsed().as_nanos() as u64;
 
     let (n_range_new, cold_range_batch_ns) =
