@@ -11,3 +11,20 @@ description = "Minimal leveled stderr logger (timestamps, no external deps)"
 
 [lints]
 workspace = true
+
+# Nested fuzz/ is a cargo-fuzz workspace so bitcoinconsensus stays out of the
+# product graph. These targets exist so `cargo fmt --all` still formats it;
+# required-features keeps cargo test / clippy from compiling those files.
+[features]
+fmt-fuzz-anchor = []
+
+[[test]]
+name = "fmt_fuzz_lib"
+path = "../../fuzz/src/lib.rs"
+required-features = ["fmt-fuzz-anchor"]
+
+[[test]]
+name = "fmt_fuzz_targets"
+path = "tests/fmt_fuzz_targets.rs"
+required-features = ["fmt-fuzz-anchor"]
+

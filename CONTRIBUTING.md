@@ -110,7 +110,7 @@ You can also run the script yourself before the first consensus test:
 
 ```bash
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target/dev}"
-cargo fmt --all
+cargo fmt --all                            # includes nested fuzz/ crate
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p rbitcoin-primitives --lib          # fast sanity
 cargo test -p rbitcoin-store --lib               # store (tests pass Tiny at open; production default is Mainnet)
@@ -241,7 +241,7 @@ Humans who want the same gates offline (Nix optional; rustup 1.95 is enough):
 ```bash
 # nix develop   # Linux only — pin via flake.lock; or rustup + rust-toolchain.toml
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target/dev}"
-cargo fmt --all -- --check
+cargo fmt --all -- --check                 # includes nested fuzz/ crate
 # rustc warnings are denied via workspace.lints (+ RUSTFLAGS=-Dwarnings in the Nix shell)
 cargo build --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings

@@ -424,6 +424,9 @@ fi
 if [[ -x "$ROOT/scripts/core-functional/fetch-bitcoind.test.sh" ]]; then
   assert_ok "fetch-bitcoind.test.sh" "$ROOT/scripts/core-functional/fetch-bitcoind.test.sh"
 fi
+if [[ -x "$ROOT/scripts/fmt.test.sh" ]]; then
+  assert_ok "fmt.test.sh" "$ROOT/scripts/fmt.test.sh"
+fi
 
 if [[ "$FAIL" -ne 0 ]]; then
   echo "fuzz-run.test.sh: $PASS passed, $FAIL failed"
