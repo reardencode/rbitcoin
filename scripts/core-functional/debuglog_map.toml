@@ -127,6 +127,10 @@ match = 'txrelay: park '
 emit = ['was not accepted']
 
 [[rule]]
+match = 'Error: configuration error: (.+)$'
+emit = ['Error: {1}']
+
+[[rule]]
 match = 'transaction sent in violation of protocol, disconnecting peer=(\d+)'
 emit = ['transaction sent in violation of protocol, disconnecting peer={1}']
 

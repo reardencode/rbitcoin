@@ -37,6 +37,14 @@ run "parked orphan DEBUG maps to Core was-not-accepted needle" \
   "2026-01-01T00:00:00Z DEBUG txrelay: park 1111111111111111111111111111111111111111111111111111111111111111" \
   "was not accepted"
 
+run "CLI InitError drops configuration error prefix (peertimeout)" \
+  "Error: configuration error: peertimeout must be a positive integer." \
+  "Error: peertimeout must be a positive integer."
+
+run "CLI InitError drops configuration error prefix (minchainwork)" \
+  "Error: configuration error: Invalid minimum work specified (test), must be up to 64 hex digits" \
+  "Error: Invalid minimum work specified (test), must be up to 64 hex digits"
+
 run "unmapped is empty" \
   "2026-01-01T00:00:00Z INFO something else" \
   ""

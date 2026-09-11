@@ -21,7 +21,7 @@ import sys
 import threading
 from pathlib import Path
 
-from map_debuglog import apply_line, load_rules
+from map_debuglog import apply_line, load_rules, map_error_stderr
 from rpc_proxy import RpcProxy, esplora_port, node_rpc_port
 from rpc_util import register_utility
 from rpc_wallet import register_wallet
@@ -667,7 +667,7 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
         elif errs:
-            print("\n".join(errs), file=sys.stderr)
+            print("\n".join(map_error_stderr(errs, rules)), file=sys.stderr)
     return int(rc) if rc is not None else 1
 
 

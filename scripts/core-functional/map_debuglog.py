@@ -35,6 +35,21 @@ def apply_line(line: str, rules: list[tuple[re.Pattern[str], list[str]]]) -> lis
     return emitted
 
 
+def map_error_stderr(
+    lines: list[str], rules: list[tuple[re.Pattern[str], list[str]]]
+) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for ln in lines:
+        mapped = [m for m in apply_line(ln, rules) if m.startswith("Error:")]
+        chosen = mapped if mapped else [ln]
+        for c in chosen:
+            if c not in seen:
+                seen.add(c)
+                out.append(c)
+    return out
+
+
 def main() -> int:
     import argparse
 
