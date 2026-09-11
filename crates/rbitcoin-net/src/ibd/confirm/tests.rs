@@ -1256,16 +1256,21 @@ fn write_store_fault_uring_requeues_then_aborts() {
 
     let undrained = ConsensusError::Store(StoreError::Corrupt("invariant: io_uring undrained"));
     assert_eq!(
-        classify_write_store_fault(&undrained, UringRecover::Recovered),
+        classify_write_store_fault(&undrained, Some(UringRecover::Recovered)),
         WriteStoreFault::Requeue
     );
     assert_eq!(
-        classify_write_store_fault(&undrained, UringRecover::Exhausted),
+        classify_write_store_fault(&undrained, Some(UringRecover::Exhausted)),
         WriteStoreFault::Abort
+    );
+    let leftover = ConsensusError::Store(StoreError::Corrupt("invariant: io_uring leftover cqe"));
+    assert_eq!(
+        classify_write_store_fault(&leftover, Some(UringRecover::Recovered)),
+        WriteStoreFault::Requeue
     );
     let io = ConsensusError::Store(StoreError::io("/tmp/x", std::io::Error::other("disk")));
     assert_eq!(
-        classify_write_store_fault(&io, UringRecover::Recovered),
+        classify_write_store_fault(&io, None),
         WriteStoreFault::Reject(super::ConfirmRejectClass::EngineFault)
     );
 
@@ -1276,10 +1281,7 @@ fn write_store_fault_uring_requeues_then_aborts() {
         let mut g = feed.inner.lock().unwrap();
         g.inflight.insert(10);
     }
-    assert_eq!(
-        apply_write_store_fault(&feed, &[(10, raw)], WriteStoreFault::Requeue, &reset),
-        WriteStoreFault::Requeue
-    );
+    apply_write_store_fault(&feed, &[(10, raw)], WriteStoreFault::Requeue, &reset);
     assert!(reset.load(std::sync::atomic::Ordering::Acquire));
     let g = feed.inner.lock().unwrap();
     assert!(g.ready.contains_key(&10));
@@ -1296,32 +1298,37 @@ fn lookup_fault_policy_recover_abort_and_io_halt() {
     let mut p = LookupFaultPolicy::default();
     let uring = ConsensusError::Store(StoreError::Corrupt("invariant: io_uring undrained"));
     assert_eq!(
-        p.on_err(&uring, UringRecover::Recovered),
+        p.on_err(&uring, Some(UringRecover::Recovered)),
         LookupFaultAction::RecoverContinue
     );
     assert_eq!(
-        p.on_err(&uring, UringRecover::Exhausted),
+        p.on_err(&uring, Some(UringRecover::Exhausted)),
         LookupFaultAction::Abort
     );
-    let bp = ConsensusError::Store(StoreError::BudgetFull("io_uring SQ"));
+    let leftover = ConsensusError::Store(StoreError::Corrupt("invariant: io_uring leftover cqe"));
     assert_eq!(
-        p.on_err(&bp, UringRecover::Recovered),
-        LookupFaultAction::Ignore
+        p.on_err(&leftover, Some(UringRecover::Recovered)),
+        LookupFaultAction::RecoverContinue
     );
+    let bp = ConsensusError::Store(StoreError::BudgetFull("io_uring SQ"));
+    assert_eq!(p.on_err(&bp, None), LookupFaultAction::Ignore);
     let io = ConsensusError::Store(StoreError::io("/tmp/x", std::io::Error::other("disk")));
     for _ in 0..7 {
-        assert_eq!(
-            p.on_err(&io, UringRecover::Recovered),
-            LookupFaultAction::Warn
-        );
+        assert_eq!(p.on_err(&io, None), LookupFaultAction::Warn);
     }
-    assert_eq!(
-        p.on_err(&io, UringRecover::Recovered),
-        LookupFaultAction::RejectEngineFault
-    );
+    assert_eq!(p.on_err(&io, None), LookupFaultAction::RejectEngineFault);
     p.on_success();
-    assert_eq!(
-        p.on_err(&io, UringRecover::Recovered),
-        LookupFaultAction::Warn
-    );
+    assert_eq!(p.on_err(&io, None), LookupFaultAction::Warn);
+}
+
+#[test]
+fn lookup_ready_hash_none_when_missing() {
+    let feed = ConfirmFeed::new();
+    assert!(super::lookup_ready_hash(&feed, 10).is_none());
+    let h = bitcoin::BlockHash::from_byte_array([2u8; 32]);
+    {
+        let mut g = feed.inner.lock().unwrap();
+        g.ready.insert(10, (h, None));
+    }
+    assert_eq!(super::lookup_ready_hash(&feed, 10), Some(h));
 }
