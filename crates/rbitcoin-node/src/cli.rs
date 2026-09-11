@@ -1,138 +1,12 @@
-use crate::config::NodeConfig;
+use crate::config::{ConfApply, NodeConfig};
 use crate::inhibit::SuspendInhibit;
 use crate::run::{run_node, run_p2p};
-use rbitcoin_consensus::{default_milestone_height, ChainParams};
+use rbitcoin_consensus::default_milestone_height;
 use rbitcoin_log::{self, error, info, warn, Level};
-use rbitcoin_primitives::Network;
 use rbitcoin_store::HeadScale;
 use std::ffi::OsString;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
-
-struct CliAccum {
-    datadir: PathBuf,
-    datadir_set: bool,
-    datadir_cold: Option<PathBuf>,
-    datadir_cold_set: bool,
-    network: Network,
-    network_set: bool,
-    signet_challenge: Option<bitcoin::ScriptBuf>,
-    signet_block_time: Option<u64>,
-    smoke: bool,
-    listen: Vec<SocketAddr>,
-    electrum_listen: Option<SocketAddr>,
-    esplora_listen: Option<SocketAddr>,
-    shindex: bool,
-    shindex_set: bool,
-    sptweaks: bool,
-    sptweaks_set: bool,
-    sptweaks_dust: Option<u64>,
-    rpc_listen: Option<SocketAddr>,
-    rpc_user: Option<String>,
-    rpc_password: Option<String>,
-    rpc_work_queue: Option<usize>,
-    connect: Vec<SocketAddr>,
-    seednodes: Vec<String>,
-    use_seeds: bool,
-    seeds_set: bool,
-    milestone_height: u32,
-    milestone_set: bool,
-    max_outbound: u32,
-    max_outbound_set: bool,
-    max_inbound: u32,
-    max_inbound_set: bool,
-    max_run_secs: Option<u64>,
-    mempool_size_mb: Option<u64>,
-    inhibit_suspend: bool,
-    conf_path: Option<PathBuf>,
-    log_level_cli: Option<Option<Level>>,
-    api_log: Option<PathBuf>,
-    asmap: Option<PathBuf>,
-    uacomments: Vec<String>,
-    test_activation_heights: Vec<(String, u32)>,
-    persist_mempool: Option<bool>,
-    whitelist: Vec<String>,
-    blocksonly: Option<bool>,
-    min_relay_fee_btc: Option<String>,
-    mempool_expiry_hours: Option<u64>,
-    startup_notify: Option<String>,
-    alert_notify: Option<String>,
-    permit_bare_multisig: Option<bool>,
-    limit_cluster_count: Option<u32>,
-    limit_cluster_size_kvb: Option<u32>,
-    peer_timeout_secs: Option<u64>,
-    minimum_chain_work: Option<[u8; 32]>,
-    mock_time: Option<i64>,
-    max_tip_age_secs: Option<u64>,
-    block_version: Option<i32>,
-    block_min_tx_fee_btc: Option<String>,
-    external_ips: Vec<std::net::IpAddr>,
-}
-
-impl Default for CliAccum {
-    fn default() -> Self {
-        Self {
-            datadir: NodeConfig::default_datadir(),
-            datadir_set: false,
-            datadir_cold: None,
-            datadir_cold_set: false,
-            network: Network::Mainnet,
-            network_set: false,
-            signet_challenge: None,
-            signet_block_time: None,
-            smoke: false,
-            listen: Vec::new(),
-            electrum_listen: None,
-            esplora_listen: None,
-            shindex: false,
-            shindex_set: false,
-            sptweaks: false,
-            sptweaks_set: false,
-            sptweaks_dust: None,
-            rpc_listen: None,
-            rpc_user: None,
-            rpc_password: None,
-            rpc_work_queue: None,
-            connect: Vec::new(),
-            seednodes: Vec::new(),
-            use_seeds: true,
-            seeds_set: false,
-            milestone_height: 0,
-            milestone_set: false,
-            max_outbound: 16,
-            max_outbound_set: false,
-            max_inbound: crate::config::DEFAULT_MAX_INBOUND,
-            max_inbound_set: false,
-            max_run_secs: None,
-            mempool_size_mb: None,
-            inhibit_suspend: false,
-            conf_path: None,
-            log_level_cli: None,
-            api_log: None,
-            asmap: None,
-            uacomments: Vec::new(),
-            test_activation_heights: Vec::new(),
-            persist_mempool: None,
-            whitelist: Vec::new(),
-            blocksonly: None,
-            min_relay_fee_btc: None,
-            mempool_expiry_hours: None,
-            startup_notify: None,
-            alert_notify: None,
-            permit_bare_multisig: None,
-            limit_cluster_count: None,
-            limit_cluster_size_kvb: None,
-            peer_timeout_secs: None,
-            minimum_chain_work: None,
-            mock_time: None,
-            max_tip_age_secs: None,
-            block_version: None,
-            block_min_tx_fee_btc: None,
-            external_ips: Vec::new(),
-        }
-    }
-}
 
 /// Process entry used by `main` and high-level scenarios.
 pub fn cli_main<I, T>(args: I) -> ExitCode
@@ -142,7 +16,10 @@ where
 {
     let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
     let mut i = 1usize;
-    let mut acc = CliAccum::default();
+    let mut smoke = false;
+    let mut conf_path: Option<PathBuf> = None;
+    let mut log_level_cli: Option<Option<Level>> = None;
+    let mut kvs: Vec<(String, String)> = Vec::new();
 
     while i < args.len() {
         let a = args[i].to_string_lossy();
@@ -190,872 +67,80 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
                 return ExitCode::SUCCESS;
             }
             "--smoke" => {
-                acc.smoke = true;
+                smoke = true;
                 i += 1;
             }
-            "--no-seeds" | "--noseeds" => {
-                acc.use_seeds = false;
-                acc.seeds_set = true;
-                i += 1;
-            }
-            "--inhibit-suspend" => {
-                acc.inhibit_suspend = true;
-                i += 1;
-            }
-            "--conf" => {
-                i += 1;
-                if i >= args.len() {
+            "--conf" => match take_arg(&args, &mut i, "--conf") {
+                Ok(v) => conf_path = Some(PathBuf::from(v)),
+                Err(c) => return c,
+            },
+            other if other.starts_with("--conf=") => {
+                let v = &other["--conf=".len()..];
+                if v.is_empty() {
                     eprintln!("error: --conf requires a path");
                     return ExitCode::from(2);
                 }
-                acc.conf_path = Some(PathBuf::from(&args[i]));
-                i += 1;
-            }
-            "--datadir" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --datadir requires a value");
-                    return ExitCode::from(2);
-                }
-                acc.datadir = PathBuf::from(&args[i]);
-                acc.datadir_set = true;
-                i += 1;
-            }
-            "--datadir-cold" | "--datadir_cold" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --datadir-cold requires a value");
-                    return ExitCode::from(2);
-                }
-                acc.datadir_cold = Some(PathBuf::from(&args[i]));
-                acc.datadir_cold_set = true;
-                i += 1;
-            }
-            "--network" | "--chain" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --network requires a value");
-                    return ExitCode::from(2);
-                }
-                match Network::parse(&args[i].to_string_lossy()) {
-                    Ok(n) => {
-                        acc.network = n;
-                        acc.network_set = true;
-                    }
-                    Err(e) => {
-                        eprintln!("error: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--signetchallenge" | "--signet-challenge" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --signetchallenge requires hexadecimal script bytes");
-                    return ExitCode::from(2);
-                }
-                match crate::config::parse_signet_challenge(&args[i].to_string_lossy()) {
-                    Ok(challenge) => acc.signet_challenge = Some(challenge),
-                    Err(e) => {
-                        eprintln!("error: bad --signetchallenge: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--signetblocktime" | "--signet-block-time" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --signetblocktime requires seconds");
-                    return ExitCode::from(2);
-                }
-                match args[i].to_string_lossy().parse::<u64>() {
-                    Ok(n) if n > 0 => acc.signet_block_time = Some(n),
-                    Ok(_) => {
-                        eprintln!("error: --signetblocktime must be greater than zero");
-                        return ExitCode::from(2);
-                    }
-                    Err(e) => {
-                        eprintln!("error: bad --signetblocktime: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--listen" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --listen requires a value");
-                    return ExitCode::from(2);
-                }
-                match args[i].to_string_lossy().parse::<SocketAddr>() {
-                    Ok(a) => acc.listen.push(a),
-                    Err(e) => {
-                        eprintln!("error: bad --listen: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--connect" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --connect requires a value");
-                    return ExitCode::from(2);
-                }
-                match args[i].to_string_lossy().parse::<SocketAddr>() {
-                    Ok(a) => acc.connect.push(a),
-                    Err(e) => {
-                        eprintln!("error: bad --connect: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--seednode" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --seednode requires a value");
-                    return ExitCode::from(2);
-                }
-                let v = args[i].to_string_lossy().into_owned();
-                if v.is_empty() {
-                    eprintln!("error: --seednode requires a value");
-                    return ExitCode::from(2);
-                }
-                acc.seednodes.push(v);
-                i += 1;
-            }
-            "--electrum-listen" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --electrum-listen requires a value");
-                    return ExitCode::from(2);
-                }
-                match args[i].to_string_lossy().parse::<SocketAddr>() {
-                    Ok(a) => acc.electrum_listen = Some(a),
-                    Err(e) => {
-                        eprintln!("error: bad --electrum-listen: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--esplora-listen" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --esplora-listen requires a value");
-                    return ExitCode::from(2);
-                }
-                match args[i].to_string_lossy().parse::<SocketAddr>() {
-                    Ok(a) => acc.esplora_listen = Some(a),
-                    Err(e) => {
-                        eprintln!("error: bad --esplora-listen: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--shindex" | "-shindex" => {
-                acc.shindex = true;
-                acc.shindex_set = true;
-                i += 1;
-            }
-            "--sptweaks" | "-sptweaks" => {
-                acc.sptweaks = true;
-                acc.sptweaks_set = true;
-                i += 1;
-            }
-            "--sptweaks-dust" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --sptweaks-dust requires a satoshi amount");
-                    return ExitCode::from(2);
-                }
-                match args[i].to_string_lossy().parse::<u64>() {
-                    Ok(n) => acc.sptweaks_dust = Some(n),
-                    Err(e) => {
-                        eprintln!("error: bad --sptweaks-dust: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            other if other.starts_with("--sptweaks-dust=") => {
-                match other["--sptweaks-dust=".len()..].parse::<u64>() {
-                    Ok(n) => acc.sptweaks_dust = Some(n),
-                    Err(e) => {
-                        eprintln!("error: bad --sptweaks-dust: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--rpc-listen" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --rpc-listen requires a value");
-                    return ExitCode::from(2);
-                }
-                match args[i].to_string_lossy().parse::<SocketAddr>() {
-                    Ok(a) => acc.rpc_listen = Some(a),
-                    Err(e) => {
-                        eprintln!("error: bad --rpc-listen: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--rpcuser" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --rpcuser requires a value");
-                    return ExitCode::from(2);
-                }
-                acc.rpc_user = Some(args[i].to_string_lossy().into_owned());
-                i += 1;
-            }
-            "--rpcpassword" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --rpcpassword requires a value");
-                    return ExitCode::from(2);
-                }
-                acc.rpc_password = Some(args[i].to_string_lossy().into_owned());
-                i += 1;
-            }
-            other if other.starts_with("--rpcworkqueue=") => {
-                match other["--rpcworkqueue=".len()..].parse::<usize>() {
-                    Ok(n) if n > 0 => acc.rpc_work_queue = Some(n),
-                    _ => {
-                        eprintln!("error: bad --rpcworkqueue");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--rpcworkqueue" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --rpcworkqueue requires a depth");
-                    return ExitCode::from(2);
-                }
-                match args[i].to_string_lossy().parse::<usize>() {
-                    Ok(n) if n > 0 => acc.rpc_work_queue = Some(n),
-                    _ => {
-                        eprintln!("error: bad --rpcworkqueue");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--mempool-size-mb" | "--maxmempool" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --mempool-size-mb requires a number");
-                    return ExitCode::from(2);
-                }
-                match args[i].to_string_lossy().parse::<u64>() {
-                    Ok(n) if n > 0 => acc.mempool_size_mb = Some(n),
-                    Ok(_) => {
-                        eprintln!("error: --mempool-size-mb must be >= 1");
-                        return ExitCode::from(2);
-                    }
-                    Err(e) => {
-                        eprintln!("error: bad --mempool-size-mb: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--milestone" | "--assumevalid-height" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --milestone requires a height");
-                    return ExitCode::from(2);
-                }
-                match args[i].to_string_lossy().parse::<u32>() {
-                    Ok(h) => {
-                        acc.milestone_height = h;
-                        acc.milestone_set = true;
-                    }
-                    Err(e) => {
-                        eprintln!("error: bad --milestone: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--max-outbound" | "--maxoutbound" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --max-outbound requires a number");
-                    return ExitCode::from(2);
-                }
-                match args[i].to_string_lossy().parse::<u32>() {
-                    Ok(n) if n > 0 => {
-                        acc.max_outbound = n;
-                        acc.max_outbound_set = true;
-                    }
-                    Ok(_) => {
-                        eprintln!("error: --max-outbound must be >= 1");
-                        return ExitCode::from(2);
-                    }
-                    Err(e) => {
-                        eprintln!("error: bad --max-outbound: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--max-inbound" | "--maxinbound" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --maxinbound requires a number");
-                    return ExitCode::from(2);
-                }
-                match args[i].to_string_lossy().parse::<u32>() {
-                    Ok(n) if n > 0 => {
-                        acc.max_inbound = n;
-                        acc.max_inbound_set = true;
-                    }
-                    Ok(_) => {
-                        eprintln!("error: --maxinbound must be >= 1");
-                        return ExitCode::from(2);
-                    }
-                    Err(e) => {
-                        eprintln!("error: bad --maxinbound: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--maxconnections" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --maxconnections requires a number");
-                    return ExitCode::from(2);
-                }
-                match args[i].to_string_lossy().parse::<u32>() {
-                    Ok(n) if n > 0 => {
-                        acc.max_inbound = crate::config::inbound_from_maxconnections(n);
-                        acc.max_inbound_set = true;
-                    }
-                    Ok(_) => {
-                        eprintln!("error: --maxconnections must be >= 1");
-                        return ExitCode::from(2);
-                    }
-                    Err(e) => {
-                        eprintln!("error: bad --maxconnections: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--max-run-secs" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --max-run-secs requires a number");
-                    return ExitCode::from(2);
-                }
-                match args[i].to_string_lossy().parse::<u64>() {
-                    Ok(n) => acc.max_run_secs = Some(n),
-                    Err(e) => {
-                        eprintln!("error: bad --max-run-secs: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--uacomment" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --uacomment requires a value");
-                    return ExitCode::from(2);
-                }
-                acc.uacomments.push(args[i].to_string_lossy().into_owned());
-                i += 1;
-            }
-            other if other.starts_with("--uacomment=") => {
-                acc.uacomments
-                    .push(other["--uacomment=".len()..].to_string());
-                i += 1;
-            }
-            "--testactivationheight" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --testactivationheight requires name@height");
-                    return ExitCode::from(2);
-                }
-                let spec = args[i].to_string_lossy();
-                match ChainParams::parse_test_activation_height(&spec) {
-                    Ok((n, h)) => acc.test_activation_heights.push((n.to_string(), h)),
-                    Err(e) => {
-                        eprintln!("error: --testactivationheight: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            other if other.starts_with("--testactivationheight=") => {
-                let spec = &other["--testactivationheight=".len()..];
-                match ChainParams::parse_test_activation_height(spec) {
-                    Ok((n, h)) => acc.test_activation_heights.push((n.to_string(), h)),
-                    Err(e) => {
-                        eprintln!("error: --testactivationheight: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--blocksonly" => {
-                acc.blocksonly = Some(true);
-                i += 1;
-            }
-            other if other.starts_with("--blocksonly=") => {
-                match parse_cli_bool(&other["--blocksonly=".len()..]) {
-                    Some(b) => acc.blocksonly = Some(b),
-                    None => {
-                        eprintln!("error: bad --blocksonly value");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--persistmempool" => {
-                acc.persist_mempool = Some(true);
-                i += 1;
-            }
-            other if other.starts_with("--persistmempool=") => {
-                match parse_cli_bool(&other["--persistmempool=".len()..]) {
-                    Some(b) => acc.persist_mempool = Some(b),
-                    None => {
-                        eprintln!("error: bad --persistmempool value");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--permitbaremultisig" => {
-                acc.permit_bare_multisig = Some(true);
-                i += 1;
-            }
-            other if other.starts_with("--permitbaremultisig=") => {
-                match parse_cli_bool(&other["--permitbaremultisig=".len()..]) {
-                    Some(b) => acc.permit_bare_multisig = Some(b),
-                    None => {
-                        eprintln!("error: bad --permitbaremultisig value");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            other if other.starts_with("--whitelist=") => {
-                let v = &other["--whitelist=".len()..];
-                if !v.is_empty() {
-                    acc.whitelist.push(v.to_string());
-                }
-                i += 1;
-            }
-            "--whitelist" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --whitelist requires a value");
-                    return ExitCode::from(2);
-                }
-                acc.whitelist.push(args[i].to_string_lossy().into_owned());
-                i += 1;
-            }
-            other if other.starts_with("--minrelaytxfee=") => {
-                acc.min_relay_fee_btc = Some(other["--minrelaytxfee=".len()..].to_string());
-                i += 1;
-            }
-            "--minrelaytxfee" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --minrelaytxfee requires a value");
-                    return ExitCode::from(2);
-                }
-                acc.min_relay_fee_btc = Some(args[i].to_string_lossy().into_owned());
-                i += 1;
-            }
-            other if other.starts_with("--mempoolexpiry=") => {
-                match other["--mempoolexpiry=".len()..].parse::<u64>() {
-                    Ok(n) => acc.mempool_expiry_hours = Some(n.max(1)),
-                    Err(e) => {
-                        eprintln!("error: bad --mempoolexpiry: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--mempoolexpiry" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --mempoolexpiry requires a value");
-                    return ExitCode::from(2);
-                }
-                match args[i].to_string_lossy().parse::<u64>() {
-                    Ok(n) => acc.mempool_expiry_hours = Some(n.max(1)),
-                    Err(e) => {
-                        eprintln!("error: bad --mempoolexpiry: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            other if other.starts_with("--startupnotify=") => {
-                acc.startup_notify = Some(other["--startupnotify=".len()..].to_string());
-                i += 1;
-            }
-            "--startupnotify" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --startupnotify requires a value");
-                    return ExitCode::from(2);
-                }
-                acc.startup_notify = Some(args[i].to_string_lossy().into_owned());
-                i += 1;
-            }
-            other if other.starts_with("--alertnotify=") => {
-                acc.alert_notify = Some(other["--alertnotify=".len()..].to_string());
-                i += 1;
-            }
-            "--alertnotify" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --alertnotify requires a value");
-                    return ExitCode::from(2);
-                }
-                acc.alert_notify = Some(args[i].to_string_lossy().into_owned());
-                i += 1;
-            }
-            other if other.starts_with("--limitclustercount=") => {
-                match other["--limitclustercount=".len()..].parse() {
-                    Ok(n) => acc.limit_cluster_count = Some(n),
-                    Err(e) => {
-                        eprintln!("error: bad --limitclustercount: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--limitclustercount" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --limitclustercount requires a number");
-                    return ExitCode::from(2);
-                }
-                match args[i].to_string_lossy().parse() {
-                    Ok(n) => acc.limit_cluster_count = Some(n),
-                    Err(e) => {
-                        eprintln!("error: bad --limitclustercount: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            other if other.starts_with("--limitclustersize=") => {
-                match other["--limitclustersize=".len()..].parse() {
-                    Ok(n) => acc.limit_cluster_size_kvb = Some(n),
-                    Err(e) => {
-                        eprintln!("error: bad --limitclustersize: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--limitclustersize" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --limitclustersize requires a number");
-                    return ExitCode::from(2);
-                }
-                match args[i].to_string_lossy().parse() {
-                    Ok(n) => acc.limit_cluster_size_kvb = Some(n),
-                    Err(e) => {
-                        eprintln!("error: bad --limitclustersize: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            other if other.starts_with("--seednode=") => {
-                let v = other["--seednode=".len()..].to_string();
-                if v.is_empty() {
-                    eprintln!("error: --seednode requires a value");
-                    return ExitCode::from(2);
-                }
-                acc.seednodes.push(v);
-                i += 1;
-            }
-            other if other.starts_with("--externalip=") => {
-                match other["--externalip=".len()..].parse() {
-                    Ok(ip) => acc.external_ips.push(ip),
-                    Err(e) => {
-                        eprintln!("error: bad --externalip: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--externalip" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --externalip requires an address");
-                    return ExitCode::from(2);
-                }
-                match args[i].to_string_lossy().parse() {
-                    Ok(ip) => acc.external_ips.push(ip),
-                    Err(e) => {
-                        eprintln!("error: bad --externalip: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            other if other.starts_with("--peertimeout=") => {
-                match other["--peertimeout=".len()..].parse() {
-                    Ok(0) => {
-                        eprintln!("Error: peertimeout must be a positive integer.");
-                        return ExitCode::from(1);
-                    }
-                    Ok(n) => acc.peer_timeout_secs = Some(n),
-                    Err(e) => {
-                        eprintln!("error: bad --peertimeout: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--peertimeout" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --peertimeout requires a number");
-                    return ExitCode::from(2);
-                }
-                match args[i].to_string_lossy().parse() {
-                    Ok(0) => {
-                        eprintln!("Error: peertimeout must be a positive integer.");
-                        return ExitCode::from(1);
-                    }
-                    Ok(n) => acc.peer_timeout_secs = Some(n),
-                    Err(e) => {
-                        eprintln!("error: bad --peertimeout: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            other if other.starts_with("--mocktime=") => {
-                match other["--mocktime=".len()..].parse::<i64>() {
-                    Ok(n) if n >= 0 => acc.mock_time = Some(n),
-                    _ => {
-                        eprintln!("error: bad --mocktime");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--mocktime" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --mocktime requires a unix time");
-                    return ExitCode::from(2);
-                }
-                match args[i].to_string_lossy().parse::<i64>() {
-                    Ok(n) if n >= 0 => acc.mock_time = Some(n),
-                    _ => {
-                        eprintln!("error: bad --mocktime");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            other if other.starts_with("--maxtipage=") => {
-                match other["--maxtipage=".len()..].parse::<i64>() {
-                    Ok(n) if n >= 0 => acc.max_tip_age_secs = Some(n as u64),
-                    _ => {
-                        eprintln!("error: bad --maxtipage");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--maxtipage" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --maxtipage requires a number of seconds");
-                    return ExitCode::from(2);
-                }
-                match args[i].to_string_lossy().parse::<i64>() {
-                    Ok(n) if n >= 0 => acc.max_tip_age_secs = Some(n as u64),
-                    _ => {
-                        eprintln!("error: bad --maxtipage");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            other if other.starts_with("--blockversion=") => {
-                match other["--blockversion=".len()..].parse::<i32>() {
-                    Ok(n) => acc.block_version = Some(n),
-                    Err(e) => {
-                        eprintln!("error: bad --blockversion: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--blockversion" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --blockversion requires an integer");
-                    return ExitCode::from(2);
-                }
-                match args[i].to_string_lossy().parse::<i32>() {
-                    Ok(n) => acc.block_version = Some(n),
-                    Err(e) => {
-                        eprintln!("error: bad --blockversion: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            other if other.starts_with("--blockmintxfee=") => {
-                acc.block_min_tx_fee_btc = Some(other["--blockmintxfee=".len()..].to_string());
-                i += 1;
-            }
-            "--blockmintxfee" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --blockmintxfee requires a value");
-                    return ExitCode::from(2);
-                }
-                acc.block_min_tx_fee_btc = Some(args[i].to_string_lossy().into_owned());
-                i += 1;
-            }
-            other if other.starts_with("--minimumchainwork=") => {
-                match crate::config::parse_minimum_chain_work(&other["--minimumchainwork=".len()..])
-                {
-                    Ok(w) => acc.minimum_chain_work = Some(w),
-                    Err(e) => {
-                        eprintln!("Error: {e}");
-                        return ExitCode::from(1);
-                    }
-                }
-                i += 1;
-            }
-            "--minimumchainwork" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --minimumchainwork requires a hex value");
-                    return ExitCode::from(2);
-                }
-                match crate::config::parse_minimum_chain_work(&args[i].to_string_lossy()) {
-                    Ok(w) => acc.minimum_chain_work = Some(w),
-                    Err(e) => {
-                        eprintln!("Error: {e}");
-                        return ExitCode::from(1);
-                    }
-                }
-                i += 1;
-            }
-            other if other.starts_with("--maxconnections=") => {
-                match other["--maxconnections=".len()..].parse::<u32>() {
-                    Ok(n) if n > 0 => {
-                        acc.max_inbound = crate::config::inbound_from_maxconnections(n);
-                        acc.max_inbound_set = true;
-                    }
-                    Ok(_) => {
-                        eprintln!("error: --maxconnections must be >= 1");
-                        return ExitCode::from(2);
-                    }
-                    Err(e) => {
-                        eprintln!("error: bad --maxconnections: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            other if other.starts_with("--maxinbound=") || other.starts_with("--max-inbound=") => {
-                let raw = other.split_once('=').map(|(_, v)| v).unwrap_or("");
-                match raw.parse::<u32>() {
-                    Ok(n) if n > 0 => {
-                        acc.max_inbound = n;
-                        acc.max_inbound_set = true;
-                    }
-                    Ok(_) => {
-                        eprintln!("error: --maxinbound must be >= 1");
-                        return ExitCode::from(2);
-                    }
-                    Err(e) => {
-                        eprintln!("error: bad --maxinbound: {e}");
-                        return ExitCode::from(2);
-                    }
-                }
-                i += 1;
-            }
-            "--api-log" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --api-log requires a path");
-                    return ExitCode::from(2);
-                }
-                acc.api_log = Some(PathBuf::from(&args[i]));
-                i += 1;
-            }
-            "--asmap" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("error: --asmap requires a path");
-                    return ExitCode::from(2);
-                }
-                acc.asmap = Some(PathBuf::from(&args[i]));
-                i += 1;
-            }
-            "--log-level" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!(
-                        "error: --log-level requires a value (error|warn|info|debug|trace|off)"
-                    );
-                    return ExitCode::from(2);
-                }
-                let raw = args[i].to_string_lossy();
-                if raw.eq_ignore_ascii_case("off") || raw.eq_ignore_ascii_case("none") {
-                    acc.log_level_cli = Some(None);
-                } else if let Some(l) = Level::parse(&raw) {
-                    acc.log_level_cli = Some(Some(l));
-                } else {
-                    eprintln!(
-                        "error: bad --log-level `{raw}` (use error|warn|info|debug|trace|off)"
-                    );
-                    return ExitCode::from(2);
-                }
-                i += 1;
-            }
-            other => {
-                eprintln!("error: unknown argument `{other}`");
-                return ExitCode::from(2);
-            }
+                conf_path = Some(PathBuf::from(v));
+                i += 1;
+            }
+            "--log-level" => match take_arg(&args, &mut i, "--log-level") {
+                Ok(raw) => match parse_log_level(&raw) {
+                    Ok(v) => log_level_cli = Some(v),
+                    Err(c) => return c,
+                },
+                Err(c) => return c,
+            },
+            other if other.starts_with("--log-level=") => {
+                match parse_log_level(&other["--log-level=".len()..]) {
+                    Ok(v) => log_level_cli = Some(v),
+                    Err(c) => return c,
+                }
+                i += 1;
+            }
+            other => match parse_cli_flag(&args, &mut i, other) {
+                Ok(Some(kv)) => kvs.push(kv),
+                Ok(None) => {}
+                Err(c) => return c,
+            },
         }
     }
 
-    // Conf file first (if any); CLI flags below override.
     let mut config = NodeConfig::default();
-    if let Some(ref cp) = acc.conf_path {
+    if let Some(ref cp) = conf_path {
         if let Err(e) = config.merge_conf_file(cp) {
-            // Logging not ready; stderr is fine.
             eprintln!("error: {e}");
             return ExitCode::from(2);
         }
+        config.conf_path = Some(cp.clone());
     }
-    if !acc.uacomments.is_empty() {
-        config.uacomments.extend(acc.uacomments);
+
+    let mut saw_listen = false;
+    let mut saw_connect = false;
+    let mut saw_seednode = false;
+    for (key, val) in kvs {
+        if key == "listen" && !saw_listen {
+            config.listen.p2p = None;
+            config.listen.p2p_extra.clear();
+            saw_listen = true;
+        }
+        if key == "connect" && !saw_connect {
+            config.listen.connect.clear();
+            saw_connect = true;
+        }
+        if key == "seednode" && !saw_seednode {
+            config.listen.seednodes.clear();
+            saw_seednode = true;
+        }
+        match config.apply_kv(&key, &val) {
+            Ok(ConfApply::Applied) => {}
+            Ok(ConfApply::Unknown(k)) => {
+                eprintln!("error: unknown argument `--{k}`");
+                return ExitCode::from(2);
+            }
+            Err(e) => return cli_apply_err(e),
+        }
     }
-    // Validate UA before any log init so feature_uacomment can fullmatch stderr.
+
     if let Err(e) =
         rbitcoin_primitives::rbitcoin_subversion(env!("CARGO_PKG_VERSION"), &config.uacomments)
     {
@@ -1063,21 +148,15 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
         return ExitCode::from(1);
     }
 
-    // Logging: CLI --log-level > conf log_level > RBITCOIN_LOG / RUST_LOG > Info.
-    match acc.log_level_cli {
+    match log_level_cli {
         Some(Some(level)) => rbitcoin_log::init(level),
         Some(None) => rbitcoin_log::init_off(),
         None => {
             if let Some(ref raw) = config.conf_log_level {
-                if raw.eq_ignore_ascii_case("off") || raw.eq_ignore_ascii_case("none") {
-                    rbitcoin_log::init_off();
-                } else if let Some(l) = Level::parse(raw) {
-                    rbitcoin_log::init(l);
-                } else {
-                    eprintln!(
-                        "error: conf log_level `{raw}` invalid (use error|warn|info|debug|trace|off)"
-                    );
-                    return ExitCode::from(2);
+                match parse_log_level(raw) {
+                    Ok(Some(l)) => rbitcoin_log::init(l),
+                    Ok(None) => rbitcoin_log::init_off(),
+                    Err(c) => return c,
                 }
             } else if !rbitcoin_log::init_from_env() {
                 rbitcoin_log::init(Level::Info);
@@ -1085,12 +164,6 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
         }
     }
 
-    if let Some(p) = acc.api_log {
-        config.api_log = Some(p);
-    }
-    if let Some(p) = acc.asmap {
-        config.asmap = Some(p);
-    }
     if let Some(ref p) = config.api_log {
         if let Err(e) = rbitcoin_log::init_api_log(p) {
             eprintln!("error: --api-log {}: {e}", p.display());
@@ -1099,144 +172,15 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
         rbitcoin_log::info!("api-log: {}", p.display());
     }
 
-    // 256-way sharded heads need 1k+ FDs; raise soft NOFILE before store open.
     let (soft, hard) = rbitcoin_store::ensure_nofile_budget();
     if soft > 0 {
         rbitcoin_log::debug!("node: RLIMIT_NOFILE soft={soft} hard={hard}");
     }
 
-    if acc.datadir_set {
-        config.datadir.path = acc.datadir;
-    }
-    if acc.datadir_cold_set {
-        config.datadir.cold = acc.datadir_cold;
-    }
-    if acc.network_set {
-        config.network = acc.network;
-    }
-    if let Some(challenge) = acc.signet_challenge {
-        config.signet_challenge = Some(challenge);
-    }
-    if acc.signet_block_time.is_some() {
-        config.signet_block_time = acc.signet_block_time;
-    }
-    if let Some((first, rest)) = acc.listen.split_first() {
-        config.listen.p2p = Some(*first);
-        config.listen.p2p_extra.extend(rest.iter().copied());
-    }
-    if let Some(a) = acc.electrum_listen {
-        config.listen.electrum = Some(a);
-    }
-    if let Some(a) = acc.esplora_listen {
-        config.listen.esplora = Some(a);
-    }
-    if acc.shindex_set {
-        config.shindex = acc.shindex;
-    }
-    if acc.sptweaks_set {
-        config.sptweaks = acc.sptweaks;
-    }
-    if let Some(n) = acc.sptweaks_dust {
-        config.sptweaks_dust = n;
-    }
-    if let Some(a) = acc.rpc_listen {
-        config.rpc.listen = Some(a);
-    }
-    if let Some(u) = acc.rpc_user {
-        config.rpc.user = Some(u);
-    }
-    if let Some(p) = acc.rpc_password {
-        config.rpc.password = Some(p);
-    }
-    if let Some(n) = acc.rpc_work_queue {
-        config.rpc.work_queue = Some(n);
-    }
-    if !acc.connect.is_empty() {
-        config.listen.connect = acc.connect;
-    }
-    if !acc.seednodes.is_empty() {
-        config.listen.seednodes = acc.seednodes;
-    }
-    if acc.seeds_set {
-        config.listen.use_seeds = acc.use_seeds;
-    }
-    config.smoke = acc.smoke;
-    // Milestone: CLI > conf > network default (assumevalid-style).
-    if acc.milestone_set {
-        config.milestone_height = acc.milestone_height;
-    } else if config.milestone_height == 0 {
+    if config.milestone_height == 0 {
         config.milestone_height = default_milestone_height(config.network);
     }
-    if acc.max_outbound_set {
-        config.listen.max_outbound = acc.max_outbound;
-    }
-    if acc.max_inbound_set {
-        config.listen.max_inbound = acc.max_inbound;
-        config.listen.max_inbound_explicit = true;
-    }
-    config.inhibit_suspend = acc.inhibit_suspend;
-    // Map MiB → weight units (1 MiB ≈ 1e6 WU for budget purposes).
-    if let Some(mb) = acc.mempool_size_mb {
-        config.mempool.max_weight = mb.saturating_mul(1_000_000);
-    }
-    if !acc.test_activation_heights.is_empty() {
-        config
-            .test_activation_heights
-            .extend(acc.test_activation_heights);
-    }
-    if let Some(b) = acc.persist_mempool {
-        config.mempool.persist = b;
-    }
-    if !acc.whitelist.is_empty() {
-        config.whitelist.extend(acc.whitelist);
-    }
-    if let Some(b) = acc.blocksonly {
-        config.mempool.blocksonly = b;
-    }
-    if let Some(s) = acc.min_relay_fee_btc {
-        config.mempool.min_relay_fee_btc = Some(s);
-    }
-    if let Some(h) = acc.mempool_expiry_hours {
-        config.mempool.expiry_hours = Some(h);
-    }
-    if let Some(s) = acc.startup_notify {
-        config.startup_notify = Some(s);
-    }
-    if let Some(s) = acc.alert_notify {
-        config.alert_notify = Some(s);
-    }
-    if let Some(b) = acc.permit_bare_multisig {
-        config.mempool.permit_bare_multisig = b;
-    }
-    if let Some(n) = acc.limit_cluster_count {
-        config.mempool.limit_cluster_count = Some(n);
-    }
-    if let Some(n) = acc.limit_cluster_size_kvb {
-        config.mempool.limit_cluster_size_kvb = Some(n);
-    }
-    if let Some(n) = acc.peer_timeout_secs {
-        config.listen.peer_timeout_secs = Some(n);
-    }
-    if let Some(w) = acc.minimum_chain_work {
-        config.minimum_chain_work = Some(w);
-    }
-    if let Some(t) = acc.mock_time {
-        config.mock_time = Some(t);
-    }
-    if let Some(n) = acc.max_tip_age_secs {
-        config.max_tip_age_secs = Some(n);
-    }
-    if let Some(v) = acc.block_version {
-        config.block_version = Some(v);
-    }
-    if let Some(s) = acc.block_min_tx_fee_btc {
-        config.block_min_tx_fee_btc = Some(s);
-    }
-    if !acc.external_ips.is_empty() {
-        config.listen.external_ips.extend(acc.external_ips);
-    }
-
-    // Unstable env is an input when CLI/conf omitted inbound — never set_var.
+    config.smoke = smoke;
     config.absorb_inbound_env();
 
     let _suspend_inhibit = if config.inhibit_suspend {
@@ -1252,16 +196,13 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
     } else {
         None
     };
-    if acc.max_run_secs.is_some() {
-        config.max_run_secs = acc.max_run_secs;
-    }
 
     if let Err(e) = config.ensure_datadir() {
         error!("{e}");
         return ExitCode::FAILURE;
     }
 
-    if acc.smoke {
+    if smoke {
         config.head_scale = HeadScale::Tiny;
         match run_node(config) {
             Ok(handle) => {
@@ -1269,7 +210,7 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
                     "rbitcoin-node {} on {} datadir={}",
                     env!("CARGO_PKG_VERSION"),
                     handle.network_name(),
-                    handle.config.datadir.display()
+                    handle.config.datadir.path().display()
                 );
                 if std::env::var_os("RBITCOIN_TEST_DROP_STORE").is_some() {
                     let _ = std::fs::remove_dir_all(handle.config.store_path());
@@ -1306,15 +247,120 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
                 ExitCode::FAILURE
             }
         };
-        // Peer sessions can still be in spawn_blocking / CPU header walks
-        // after `clean exit`. Dropping the runtime would wait on them.
         rt.shutdown_timeout(std::time::Duration::from_secs(2));
         code
     }
 }
 
-/// Tokio runtime for `run_p2p`: cap `spawn_blocking` at nCPU (min 4).
-/// Default `Runtime::new()` allows 512 blocking threads.
+fn take_arg(args: &[OsString], i: &mut usize, flag: &str) -> Result<String, ExitCode> {
+    *i += 1;
+    if *i >= args.len() {
+        eprintln!("error: {flag} requires a value");
+        return Err(ExitCode::from(2));
+    }
+    let v = args[*i].to_string_lossy().into_owned();
+    *i += 1;
+    Ok(v)
+}
+
+fn parse_log_level(raw: &str) -> Result<Option<Level>, ExitCode> {
+    if raw.eq_ignore_ascii_case("off") || raw.eq_ignore_ascii_case("none") {
+        Ok(None)
+    } else if let Some(l) = Level::parse(raw) {
+        Ok(Some(l))
+    } else {
+        eprintln!("error: bad --log-level `{raw}` (use error|warn|info|debug|trace|off)");
+        Err(ExitCode::from(2))
+    }
+}
+
+fn is_bool_key(key: &str) -> bool {
+    matches!(
+        key,
+        "shindex"
+            | "sptweaks"
+            | "blocksonly"
+            | "blocks_only"
+            | "persistmempool"
+            | "persist_mempool"
+            | "permitbaremultisig"
+            | "permit_bare_multisig"
+            | "noseeds"
+            | "no_seeds"
+            | "inhibit_suspend"
+            | "inhibitsuspend"
+    )
+}
+
+fn looks_like_flag(s: &str) -> bool {
+    s.starts_with("--") || matches!(s, "-h" | "-V" | "-shindex" | "-sptweaks")
+}
+
+fn parse_cli_flag(
+    args: &[OsString],
+    i: &mut usize,
+    flag: &str,
+) -> Result<Option<(String, String)>, ExitCode> {
+    let rest = if let Some(r) = flag.strip_prefix("--") {
+        r
+    } else if matches!(flag, "-shindex" | "-sptweaks") {
+        &flag[1..]
+    } else {
+        eprintln!("error: unknown argument `{flag}`");
+        return Err(ExitCode::from(2));
+    };
+    if rest.is_empty() {
+        eprintln!("error: unknown argument `{flag}`");
+        return Err(ExitCode::from(2));
+    }
+    let (name, eq_val) = match rest.split_once('=') {
+        Some((n, v)) => (n, Some(v)),
+        None => (rest, None),
+    };
+    let key = name.replace('-', "_");
+    if key == "smoke" || key == "help" || key == "version" || key == "conf" || key == "log_level" {
+        eprintln!("error: unknown argument `{flag}`");
+        return Err(ExitCode::from(2));
+    }
+    let val = if let Some(v) = eq_val {
+        *i += 1;
+        v.to_string()
+    } else if is_bool_key(&key) {
+        *i += 1;
+        "1".to_string()
+    } else {
+        *i += 1;
+        if *i >= args.len() {
+            eprintln!("error: --{name} requires a value");
+            return Err(ExitCode::from(2));
+        }
+        let next = args[*i].to_string_lossy().into_owned();
+        if looks_like_flag(&next) {
+            eprintln!("error: --{name} requires a value");
+            return Err(ExitCode::from(2));
+        }
+        *i += 1;
+        next
+    };
+    Ok(Some((key, val)))
+}
+
+fn cli_apply_err(e: crate::error::NodeError) -> ExitCode {
+    let s = e.to_string();
+    if s.contains("peertimeout must be a positive integer")
+        || s.contains("minimumchainwork")
+        || s.contains("must be hexadecimal")
+        || s.contains("minimum chain")
+        || s.contains("Invalid minimum work")
+    {
+        eprintln!("Error: {e}");
+        ExitCode::from(1)
+    } else {
+        eprintln!("error: {e}");
+        ExitCode::from(2)
+    }
+}
+
 fn blocking_pool_size() -> usize {
     std::thread::available_parallelism()
         .map(|p| p.get())
@@ -1330,18 +376,11 @@ fn node_tokio_runtime() -> std::io::Result<tokio::runtime::Runtime> {
         .build()
 }
 
-fn parse_cli_bool(v: &str) -> Option<bool> {
-    match v {
-        "" | "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::OPERATOR_ENV_TEST_LOCK;
+    use rbitcoin_primitives::Network;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn tmp_datadir() -> PathBuf {

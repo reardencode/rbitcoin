@@ -31,6 +31,10 @@ before 1.0).
 
 ### Changed
 
+- **CLI and conf share one setter:** `--key[=value]` and conf `key=value` both
+  run `NodeConfig::apply_kv` (conf then CLI). `CliAccum` and the field copy
+  are gone. `--smoke` / `--help` / `--version` / `--conf` / `--log-level` stay
+  CLI-only. `DatadirOpts` is a path field plus `path()` (no Deref).
 - **Fuzz/differential harness is not compiled into the node:** `block_diff`
   and compact recipe/v2 encode helpers live in the `fuzz` crate. Net still
   exposes `ChainHub` accept, `try_reconstruct`, `encode_v2_contents`,

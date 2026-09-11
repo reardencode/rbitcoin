@@ -23,8 +23,7 @@ pub fn inbound_from_maxconnections(total: u32) -> u32 {
 
 /// Process datadir (Class A store, cookie, debug.log, mempool).
 ///
-/// `Deref`/`DerefMut` to [`PathBuf`] so `config.datadir.join` / `.display()`
-/// keep working. Cold store is [`Self::cold`].
+/// Cold store is [`Self::cold`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DatadirOpts {
     pub path: PathBuf,
@@ -32,34 +31,15 @@ pub struct DatadirOpts {
     pub cold: Option<PathBuf>,
 }
 
-impl std::ops::Deref for DatadirOpts {
-    type Target = PathBuf;
-    fn deref(&self) -> &PathBuf {
+impl DatadirOpts {
+    pub fn path(&self) -> &Path {
         &self.path
-    }
-}
-
-impl std::ops::DerefMut for DatadirOpts {
-    fn deref_mut(&mut self) -> &mut PathBuf {
-        &mut self.path
     }
 }
 
 impl From<PathBuf> for DatadirOpts {
     fn from(path: PathBuf) -> Self {
         Self { path, cold: None }
-    }
-}
-
-impl PartialEq<PathBuf> for DatadirOpts {
-    fn eq(&self, other: &PathBuf) -> bool {
-        self.path == *other
-    }
-}
-
-impl AsRef<std::path::Path> for DatadirOpts {
-    fn as_ref(&self) -> &std::path::Path {
-        self.path.as_ref()
     }
 }
 
@@ -280,7 +260,7 @@ impl NodeConfig {
     }
 
     pub fn store_path(&self) -> PathBuf {
-        self.datadir.join("store")
+        self.datadir.path().join("store")
     }
 
     /// Cold store directory (`{datadir-cold}/store`) when `--datadir-cold` is set.
@@ -301,7 +281,7 @@ impl NodeConfig {
 
     /// Durable mempool directory (`{datadir}/mempool/`).
     pub fn mempool_path(&self) -> PathBuf {
-        self.datadir.join("mempool")
+        self.datadir.path().join("mempool")
     }
 
     pub fn milestone(&self) -> Milestone {
@@ -334,7 +314,7 @@ impl NodeConfig {
     }
 
     pub fn validate(&self) -> Result<(), NodeError> {
-        if self.datadir.as_os_str().is_empty() {
+        if self.datadir.path().as_os_str().is_empty() {
             return Err(NodeError::Config("datadir must not be empty".into()));
         }
         if let Some(cold) = &self.datadir.cold {
@@ -392,25 +372,26 @@ impl NodeConfig {
 
     /// Path for Core-style RPC cookie (`{datadir}/.cookie`).
     pub fn rpc_cookie_path(&self) -> PathBuf {
-        self.datadir.join(".cookie")
+        self.datadir.path().join(".cookie")
     }
 
     /// Create `{datadir}` and standard subdirs (`store`, `mempool`) if missing.
     pub fn ensure_datadir(&self) -> Result<(), NodeError> {
         self.validate()?;
-        let created_root = !self.datadir.exists();
-        std::fs::create_dir_all(&self.datadir).map_err(|source| NodeError::Datadir {
+        let root = self.datadir.path();
+        let created_root = !root.exists();
+        std::fs::create_dir_all(root).map_err(|source| NodeError::Datadir {
             path: self.datadir.path.clone(),
             source,
         })?;
-        if self.datadir.exists() && !self.datadir.is_dir() {
+        if root.exists() && !root.is_dir() {
             return Err(NodeError::Config(format!(
                 "datadir is not a directory: {}",
-                self.datadir.display()
+                root.display()
             )));
         }
         for sub in ["store", "mempool"] {
-            let p = self.datadir.join(sub);
+            let p = root.join(sub);
             std::fs::create_dir_all(&p).map_err(|source| NodeError::Datadir { path: p, source })?;
         }
         if let Some(cold) = &self.datadir.cold {
@@ -435,7 +416,7 @@ impl NodeConfig {
             }
         }
         if created_root {
-            rbitcoin_log::info!("node: created datadir {}", self.datadir.display());
+            rbitcoin_log::info!("node: created datadir {}", self.datadir.path().display());
         }
         Ok(())
     }
@@ -542,10 +523,14 @@ impl NodeConfig {
                 );
             }
             "listen" => {
-                self.listen.p2p = Some(
-                    val.parse()
-                        .map_err(|e| NodeError::Config(format!("conf listen: {e}")))?,
-                );
+                let addr: SocketAddr = val
+                    .parse()
+                    .map_err(|e| NodeError::Config(format!("conf listen: {e}")))?;
+                if self.listen.p2p.is_none() {
+                    self.listen.p2p = Some(addr);
+                } else {
+                    self.listen.p2p_extra.push(addr);
+                }
             }
             "connect" => {
                 self.listen.connect.push(
@@ -678,14 +663,22 @@ impl NodeConfig {
                     .map_err(|e| NodeError::Config(format!("conf milestone: {e}")))?;
             }
             "maxoutbound" | "max_outbound" => {
-                self.listen.max_outbound = val
+                let n: u32 = val
                     .parse()
                     .map_err(|e| NodeError::Config(format!("conf maxoutbound: {e}")))?;
+                if n == 0 {
+                    return Err(NodeError::Config("conf maxoutbound must be >= 1".into()));
+                }
+                self.listen.max_outbound = n;
             }
             "maxinbound" | "max_inbound" => {
-                self.listen.max_inbound = val
+                let n: u32 = val
                     .parse()
                     .map_err(|e| NodeError::Config(format!("conf maxinbound: {e}")))?;
+                if n == 0 {
+                    return Err(NodeError::Config("conf maxinbound must be >= 1".into()));
+                }
+                self.listen.max_inbound = n;
                 self.listen.max_inbound_explicit = true;
             }
             "maxconnections" => {
@@ -726,6 +719,62 @@ impl NodeConfig {
                     return Err(NodeError::Config("conf asmap requires a path".into()));
                 }
                 self.asmap = Some(PathBuf::from(val));
+            }
+            "rpcworkqueue" | "rpc_work_queue" => {
+                let n: usize = val
+                    .parse()
+                    .map_err(|e| NodeError::Config(format!("conf rpcworkqueue: {e}")))?;
+                if n == 0 {
+                    return Err(NodeError::Config("conf rpcworkqueue must be >= 1".into()));
+                }
+                self.rpc.work_queue = Some(n);
+            }
+            "max_run_secs" | "maxrunsecs" => {
+                self.max_run_secs = Some(
+                    val.parse()
+                        .map_err(|e| NodeError::Config(format!("conf max_run_secs: {e}")))?,
+                );
+            }
+            "inhibit_suspend" | "inhibitsuspend" => {
+                self.inhibit_suspend = parse_conf_bool(val)
+                    .map_err(|e| NodeError::Config(format!("conf inhibit_suspend: {e}")))?;
+            }
+            "mocktime" | "mock_time" => {
+                let n: i64 = val
+                    .parse()
+                    .map_err(|e| NodeError::Config(format!("conf mocktime: {e}")))?;
+                if n < 0 {
+                    return Err(NodeError::Config("conf mocktime must be >= 0".into()));
+                }
+                self.mock_time = Some(n);
+            }
+            "maxtipage" | "max_tip_age" => {
+                let n: i64 = val
+                    .parse()
+                    .map_err(|e| NodeError::Config(format!("conf maxtipage: {e}")))?;
+                if n < 0 {
+                    return Err(NodeError::Config("conf maxtipage must be >= 0".into()));
+                }
+                self.max_tip_age_secs = Some(n as u64);
+            }
+            "blockversion" | "block_version" => {
+                self.block_version = Some(
+                    val.parse()
+                        .map_err(|e| NodeError::Config(format!("conf blockversion: {e}")))?,
+                );
+            }
+            "blockmintxfee" | "block_min_tx_fee" => {
+                if val.is_empty() {
+                    return Err(NodeError::Config(
+                        "conf blockmintxfee requires a value".into(),
+                    ));
+                }
+                self.block_min_tx_fee_btc = Some(val.to_string());
+            }
+            "alertnotify" | "alert_notify" => {
+                if !val.is_empty() {
+                    self.alert_notify = Some(val.to_string());
+                }
             }
             "noseeds" | "no_seeds" => self.listen.use_seeds = !is_conf_true(val),
             "regtest" if is_conf_true(val) => self.network = Network::Regtest,
@@ -827,7 +876,7 @@ mod tests {
             c.apply_kv("datadir", "/tmp/rb-apply-kv").unwrap(),
             ConfApply::Applied
         );
-        assert_eq!(c.datadir, PathBuf::from("/tmp/rb-apply-kv"));
+        assert_eq!(c.datadir.path(), Path::new("/tmp/rb-apply-kv"));
         match c.apply_kv("not-a-real-key", "1").unwrap() {
             ConfApply::Unknown(k) => assert_eq!(k, "not-a-real-key"),
             other => panic!("{other:?}"),
@@ -838,7 +887,7 @@ mod tests {
     fn default_datadir_is_native_cwd_relative() {
         let p = NodeConfig::default_datadir();
         assert_eq!(p, PathBuf::from(".").join("datadir"));
-        assert_eq!(NodeConfig::default().datadir, p);
+        assert_eq!(NodeConfig::default().datadir.path(), p.as_path());
         let store = p.join("store");
         #[cfg(windows)]
         {
