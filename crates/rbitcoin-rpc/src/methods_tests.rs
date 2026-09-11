@@ -1803,6 +1803,12 @@ fn getblocktemplate_requires_segwit_and_shapes_empty_and_one_tx() {
     assert_eq!(info["pooledtx"], 0);
     let min_fee = info["blockmintxfee"].as_f64().expect("blockmintxfee");
     assert!((min_fee - 1e-8).abs() < 1e-15, "blockmintxfee={min_fee}");
+    assert_eq!(
+        info["blockmintxfee"],
+        sat_btc_json(1),
+        "blockmintxfee must be sat_btc_json (BTC/kvB), got {}",
+        info["blockmintxfee"]
+    );
 
     dispatch(&ctx, "generate", vec![json!(100)]).unwrap();
     let hash1 = dispatch(&ctx, "getblockhash", vec![json!(1)]).unwrap();

@@ -295,17 +295,6 @@ pub(crate) fn json_i64(v: &Value) -> Option<i64> {
         .or_else(|| v.as_u64().and_then(|n| i64::try_from(n).ok()))
 }
 
-/// Exact BTC amount (8 decimals) so Core `Decimal` compares match sat/kvB.
-pub(crate) fn json_btc_amount(sat: u64) -> Value {
-    let whole = sat / 100_000_000;
-    let frac = sat % 100_000_000;
-    let s = format!("{whole}.{frac:08}");
-    match s.parse::<serde_json::Number>() {
-        Ok(n) => Value::Number(n),
-        Err(_) => json!(sat as f64 / 100_000_000.0),
-    }
-}
-
 /// Core `getblock` verbosity: integer, or bool (`false` → 0, `true` → 1).
 pub(crate) fn opt_verbosity(params: &RpcParams, index: usize, name: &str) -> Result<u32, Value> {
     match params.get(index, name) {
@@ -672,7 +661,10 @@ pub(crate) fn method_help(m: &str) -> String {
              without connecting. rules must include segwit. longpollid waits \
              for a new tip or mempool/priority change. No BIP9 testdummy."
             .into(),
-        "getmininginfo" => "getmininginfo\nTip height, difficulty, pooledtx. All networks.".into(),
+        "getmininginfo" => {
+            "getmininginfo\nTip height, difficulty, pooledtx, blockmintxfee (BTC/kvB). All networks."
+                .into()
+        }
         "getnetworkhashps" => "getnetworkhashps (nblocks) (height)\n\
              Dummy 2-work-per-block / elapsed seconds — not Core chainwork hashrate. \
              Useful on regtest (2 work/block). See docs/rpc.md."
