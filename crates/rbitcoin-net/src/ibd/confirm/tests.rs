@@ -1281,3 +1281,83 @@ fn plan_epoch_stale_after_clear() {
     );
     assert!(!feed.plan_epoch_stale(99), "unknown height is not stale");
 }
+
+#[test]
+fn write_store_fault_uring_requeues_then_aborts() {
+    use super::{apply_write_store_fault, classify_write_store_fault, WriteStoreFault};
+    use rbitcoin_consensus::ConsensusError;
+    use rbitcoin_query::UringRecover;
+    use rbitcoin_store::StoreError;
+    use std::sync::atomic::AtomicBool;
+
+    let undrained = ConsensusError::Store(StoreError::Corrupt("invariant: io_uring undrained"));
+    assert_eq!(
+        classify_write_store_fault(&undrained, UringRecover::Recovered),
+        WriteStoreFault::Requeue
+    );
+    assert_eq!(
+        classify_write_store_fault(&undrained, UringRecover::Exhausted),
+        WriteStoreFault::Abort
+    );
+    let io = ConsensusError::Store(StoreError::io("/tmp/x", std::io::Error::other("disk")));
+    assert_eq!(
+        classify_write_store_fault(&io, UringRecover::Recovered),
+        WriteStoreFault::Reject(super::ConfirmRejectClass::EngineFault)
+    );
+
+    let feed = ConfirmFeed::new();
+    let reset = AtomicBool::new(false);
+    let raw = [1u8; 32];
+    {
+        let mut g = feed.inner.lock().unwrap();
+        g.inflight.insert(10);
+    }
+    assert_eq!(
+        apply_write_store_fault(&feed, &[(10, raw)], WriteStoreFault::Requeue, &reset),
+        WriteStoreFault::Requeue
+    );
+    assert!(reset.load(std::sync::atomic::Ordering::Acquire));
+    let g = feed.inner.lock().unwrap();
+    assert!(g.ready.contains_key(&10));
+    assert!(!g.inflight.contains(&10));
+}
+
+#[test]
+fn lookup_fault_policy_recover_abort_and_io_halt() {
+    use super::{LookupFaultAction, LookupFaultPolicy};
+    use rbitcoin_consensus::ConsensusError;
+    use rbitcoin_query::UringRecover;
+    use rbitcoin_store::StoreError;
+
+    let mut p = LookupFaultPolicy::default();
+    let uring = ConsensusError::Store(StoreError::Corrupt("invariant: io_uring undrained"));
+    assert_eq!(
+        p.on_err(&uring, UringRecover::Recovered),
+        LookupFaultAction::RecoverContinue
+    );
+    assert_eq!(
+        p.on_err(&uring, UringRecover::Exhausted),
+        LookupFaultAction::Abort
+    );
+    let bp = ConsensusError::Store(StoreError::BudgetFull("io_uring SQ"));
+    assert_eq!(
+        p.on_err(&bp, UringRecover::Recovered),
+        LookupFaultAction::Ignore
+    );
+    let io = ConsensusError::Store(StoreError::io("/tmp/x", std::io::Error::other("disk")));
+    for _ in 0..7 {
+        assert_eq!(
+            p.on_err(&io, UringRecover::Recovered),
+            LookupFaultAction::Warn
+        );
+    }
+    assert_eq!(
+        p.on_err(&io, UringRecover::Recovered),
+        LookupFaultAction::RejectEngineFault
+    );
+    p.on_success();
+    assert_eq!(
+        p.on_err(&io, UringRecover::Recovered),
+        LookupFaultAction::Warn
+    );
+}
