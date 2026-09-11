@@ -82,13 +82,7 @@ pub fn format_duration(d: Duration) -> String {
 }
 
 pub fn format_progress(label: &str, done: u64, total: u64, elapsed: Duration) -> String {
-    // Zero total is 100% complete, not `checked_div` None.
-    #[allow(clippy::manual_checked_ops)]
-    let pct = if total == 0 {
-        100
-    } else {
-        done.saturating_mul(100) / total
-    };
+    let pct = done.saturating_mul(100).checked_div(total).unwrap_or(100);
     let left = if done == 0 || done >= total {
         "0s".to_string()
     } else {
@@ -110,13 +104,9 @@ pub fn should_emit(done: u64, total: u64, last_done: u64, since_last: Duration) 
         return true;
     }
     let bucket = |n: u64| {
-        // Zero total is the last bucket, not `checked_div` None.
-        #[allow(clippy::manual_checked_ops)]
-        if total == 0 {
-            PCT_STEPS
-        } else {
-            n.saturating_mul(PCT_STEPS) / total
-        }
+        n.saturating_mul(PCT_STEPS)
+            .checked_div(total)
+            .unwrap_or(PCT_STEPS)
     };
     if bucket(done) > bucket(last_done) {
         return true;
@@ -154,5 +144,17 @@ mod tests {
         assert!(should_emit(5, 100, 0, Duration::from_secs(1)));
         assert!(should_emit(3, 100, 2, Duration::from_secs(15)));
         assert!(!should_emit(3, 100, 3, Duration::from_secs(15)));
+    }
+
+    #[test]
+    fn zero_total_is_complete_and_last_bucket() {
+        let s = format_progress("casa", 0, 0, Duration::from_secs(1));
+        assert!(s.contains("0/0 (100%)"), "{s}");
+        assert!(s.contains("left 0s"), "{s}");
+        let extra = format_progress("casa", 3, 0, Duration::from_secs(1));
+        assert!(extra.contains("3/0 (100%)"), "{extra}");
+        assert!(should_emit(0, 0, 0, Duration::from_secs(0)));
+        assert!(!should_emit(1, 0, 0, Duration::from_secs(1)));
+        assert!(should_emit(1, 0, 0, Duration::from_secs(15)));
     }
 }
