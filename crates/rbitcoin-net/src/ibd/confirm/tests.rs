@@ -1345,3 +1345,46 @@ fn lookup_ready_hash_none_when_missing() {
     }
     assert_eq!(super::lookup_ready_hash(&feed, 10), Some(h));
 }
+
+#[test]
+fn confirm_write_session_fault_recovers_even_when_has_block() {
+    use super::{confirm_write_err_action, ConfirmWriteErrAction};
+    assert_eq!(
+        confirm_write_err_action(true, true),
+        ConfirmWriteErrAction::UringRecover
+    );
+    assert_eq!(
+        confirm_write_err_action(true, false),
+        ConfirmWriteErrAction::UringRecover
+    );
+    assert_eq!(
+        confirm_write_err_action(false, true),
+        ConfirmWriteErrAction::AlreadyCommitted
+    );
+    assert_eq!(
+        confirm_write_err_action(false, false),
+        ConfirmWriteErrAction::Reject
+    );
+}
+
+#[test]
+fn load_session_fault_after_note_lookup_ok_clears_speculative_fks() {
+    use super::LoadAheadState;
+    use rbitcoin_query::ArchiveWritePlan;
+
+    let (_dir, hub) = crate::chain::tiny_regtest_hub_labeled("load-fk-reset");
+    let mut st = LoadAheadState::new(&hub);
+    let body0 = hub.query.tx_body_count();
+    let durable = body0.saturating_add(1).max(1);
+    let mut plan = ArchiveWritePlan::empty();
+    plan.planned_fks = vec![Fk(body0.saturating_add(10).max(10))];
+    st.note_lookup_ok(&plan, 1, [1u8; 32]);
+    let pin = test_pin(body0.saturating_add(10).max(10));
+    st.in_flight
+        .note_pins(std::iter::once((plan.planned_fks[0], &pin)), Some(1));
+    assert!(st.next_tx_start > durable);
+    assert!(st.in_flight.entry_count() > 0);
+    st.on_uring_recover(&hub);
+    assert_eq!(st.next_tx_start, durable);
+    assert_eq!(st.in_flight.entry_count(), 0);
+}
