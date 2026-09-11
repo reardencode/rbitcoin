@@ -177,30 +177,38 @@ fn path_uses_sh_view(path: &str) -> bool {
 
 /// COMPAT.md: `?asof=` only on tx status/outspend(s) and address/scripthash
 /// `/`, `/utxo`, `/txs`, `/txs/chain` (not `/txs/mempool`).
-#[allow(clippy::match_like_matches_macro)] // route table is a match, not a one-line predicate
 fn path_accepts_asof(path: &str) -> bool {
     let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    match segs.as_slice() {
-        ["tx", _, "status"] | ["tx", _, "outspends"] | ["tx", _, "outspend", _] => true,
-        ["address", _] | ["scripthash", _] => true,
-        ["address", _, "utxo"] | ["scripthash", _, "utxo"] => true,
-        ["address", _, "txs"] | ["scripthash", _, "txs"] => true,
-        ["address", _, "txs", "chain"] | ["scripthash", _, "txs", "chain"] => true,
-        ["address", _, "txs", "chain", _] | ["scripthash", _, "txs", "chain", _] => true,
-        _ => false,
-    }
+    matches!(
+        segs.as_slice(),
+        ["tx", _, "status"]
+            | ["tx", _, "outspends"]
+            | ["tx", _, "outspend", _]
+            | ["address", _]
+            | ["scripthash", _]
+            | ["address", _, "utxo"]
+            | ["scripthash", _, "utxo"]
+            | ["address", _, "txs"]
+            | ["scripthash", _, "txs"]
+            | ["address", _, "txs", "chain"]
+            | ["scripthash", _, "txs", "chain"]
+            | ["address", _, "txs", "chain", _]
+            | ["scripthash", _, "txs", "chain", _]
+    )
 }
 
-#[allow(clippy::match_like_matches_macro)] // route table is a match, not a one-line predicate
 fn path_never_pins(path: &str) -> bool {
     let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    match segs.as_slice() {
-        ["mempool"] | ["mempool", _] => true,
-        ["fee-estimates"] => true,
-        ["tx"] | ["txs", "package"] => true,
-        ["address", _, "txs", "mempool"] | ["scripthash", _, "txs", "mempool"] => true,
-        _ => false,
-    }
+    matches!(
+        segs.as_slice(),
+        ["mempool"]
+            | ["mempool", _]
+            | ["fee-estimates"]
+            | ["tx"]
+            | ["txs", "package"]
+            | ["address", _, "txs", "mempool"]
+            | ["scripthash", _, "txs", "mempool"]
+    )
 }
 
 async fn stamp_chain_view_mw(State(st): State<AppState>, req: Request, next: Next) -> Response {
