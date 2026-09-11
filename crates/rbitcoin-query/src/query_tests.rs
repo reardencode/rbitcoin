@@ -2727,3 +2727,23 @@ fn resume_work_path_from_loser_tip_explores_heavier_sibling() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Two Query engines must not steal each other's lookup/load/scripts/write window.
+#[test]
+fn two_confirm_stats_windows_do_not_steal() {
+    let (_d1, q1) = crate::testutil::tiny_query_labeled("stats-iso-a");
+    let (_d2, q2) = crate::testutil::tiny_query_labeled("stats-iso-b");
+    q1.confirm_stats().add_load_ns(1_000);
+    q1.confirm_stats().add_script_ns(2_000);
+    q1.confirm_stats().add_class_a_ns(3_000);
+    let a = q1.confirm_stats().take_window();
+    let b = q2.confirm_stats().take_window();
+    assert_eq!(a.load_ns, 1_000);
+    assert_eq!(a.script_ns, 2_000);
+    assert_eq!(a.class_a_ns, 3_000);
+    assert_eq!(b.load_ns, 0);
+    assert_eq!(b.script_ns, 0);
+    assert_eq!(b.class_a_ns, 0);
+    let a2 = q1.confirm_stats().take_window();
+    assert_eq!(a2.load_ns, 0);
+}
