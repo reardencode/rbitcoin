@@ -53,8 +53,8 @@ opens a new one. `submit_and_wait_one` shares the drain budget (slow-log at
 5 s, poison at the hard cap). `drain_all` on every TLS session (Linux, pool,
 IOCP) waits while CQEs keep arriving; after 5 s it logs `store: io_uring
 drain slow`. Zero completions for `RBITCOIN_URING_DRAIN_HARD_SECS` (default
-120) abort **explicit** `drain_all` (buffers still pinned). Session `Drop`
-and `DrainOnDrop` wait the same budget then poison without aborting so a
+120) abort **explicit** `drain_all` / `DrainOnDrop` (buffers still pinned).
+Session `Drop` waits the same budget then poisons without aborting so a
 stalled device cannot `abort` from a destructor. There is **no** runtime
 switch to `pread`. Drain before SQE buffers drop (spend annotate
 `DrainOnDrop`). Per-op short/errno on a live session still libc-completes
