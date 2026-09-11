@@ -290,6 +290,50 @@ printf 'regtest=1\nport=+18444\n' >"$CONF_PORT/bitcoin.conf"
 assert_fail_msg "conf port +18444" "Error: Invalid port specified in -port: '+18444'" \
   env RBITCOIN_NODE="$FAKE" "$SHIM" --print-cmd -datadir="$CONF_PORT" -regtest
 
+# InitError FULL_TEXT: production prints `Error: configuration error: …`;
+# the shim must emit Core's line (no extra prefix). Fake node, no cargo.
+FAKE_INIT="$WORKDIR/rbitcoin-node-initerr"
+printf '%s\n' '#!/bin/sh' \
+  'echo "Error: configuration error: peertimeout must be a positive integer."' \
+  'exit 1' >"$FAKE_INIT"
+chmod +x "$FAKE_INIT"
+INIT_DD="$WORKDIR/initerr-peertimeout"
+mkdir -p "$INIT_DD"
+printf 'regtest=1\n' >"$INIT_DD/bitcoin.conf"
+INIT_OUT=""
+if INIT_OUT="$(RBITCOIN_NODE="$FAKE_INIT" "$SHIM" -datadir="$INIT_DD" -regtest 2>&1)"; then
+  echo "not ok - peertimeout InitError maps to Core (expected failure)"
+  FAIL=$((FAIL + 1))
+elif printf '%s' "$INIT_OUT" | grep -q -- "Error: peertimeout must be a positive integer." \
+  && ! printf '%s' "$INIT_OUT" | grep -q -- "configuration error"; then
+  echo "ok - peertimeout InitError maps to Core"
+  PASS=$((PASS + 1))
+else
+  echo "not ok - peertimeout InitError maps to Core (got: $INIT_OUT)"
+  FAIL=$((FAIL + 1))
+fi
+
+FAKE_MCW="$WORKDIR/rbitcoin-node-minchainwork"
+printf '%s\n' '#!/bin/sh' \
+  'echo "Error: configuration error: Invalid minimum work specified (test), must be up to 64 hex digits"' \
+  'exit 1' >"$FAKE_MCW"
+chmod +x "$FAKE_MCW"
+MCW_DD="$WORKDIR/initerr-minchainwork"
+mkdir -p "$MCW_DD"
+printf 'regtest=1\n' >"$MCW_DD/bitcoin.conf"
+MCW_OUT=""
+if MCW_OUT="$(RBITCOIN_NODE="$FAKE_MCW" "$SHIM" -datadir="$MCW_DD" -regtest 2>&1)"; then
+  echo "not ok - minchainwork InitError maps to Core (expected failure)"
+  FAIL=$((FAIL + 1))
+elif printf '%s' "$MCW_OUT" | grep -q -- "Error: Invalid minimum work specified (test), must be up to 64 hex digits" \
+  && ! printf '%s' "$MCW_OUT" | grep -q -- "configuration error"; then
+  echo "ok - minchainwork InitError maps to Core"
+  PASS=$((PASS + 1))
+else
+  echo "not ok - minchainwork InitError maps to Core (got: $MCW_OUT)"
+  FAIL=$((FAIL + 1))
+fi
+
 # feature_port.py: Core-shaped Bound to lines in debug.log for -listen/-port.
 PORT_DD="$WORKDIR/port-bound"
 mkdir -p "$PORT_DD"
