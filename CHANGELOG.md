@@ -31,6 +31,10 @@ before 1.0).
 
 ### Changed
 
+- **Esplora outspend omits `vin`:** `/tx/:txid/outspend/:vout` and
+  `/outspends` no longer emit always-zero `vin`. `PointRecord` /
+  `put_spend` / `put_spend_batch` no longer take a dummy spending input
+  index (`spent.body` never stored it). [`COMPAT.md`](COMPAT.md).
 - **Leftover index layouts refuse on open:** fuse8 **v1** sealed filters, flat
   `tx.head.meta`, flat `*.idx.meta`, Shared (file) `scripthash.body`, and pack8
   **Paged** (mode 10) fail closed with a one-line wipe/rebuild message (Class A
