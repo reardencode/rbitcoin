@@ -1485,7 +1485,11 @@ fn gettxout_include_mempool_hides_mempool_spent_confirmed() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-fn mature_coinbase_spend_hex(ctx: &RpcContext, keep_sat: u64) -> (String, Transaction) {
+fn mature_coinbase_spend(
+    ctx: &RpcContext,
+    keep_sat: u64,
+    script: ScriptBuf,
+) -> (String, Transaction) {
     use bitcoin::absolute::LockTime;
     use bitcoin::consensus::encode::serialize;
     use bitcoin::transaction::Version as TxVersion;
@@ -1508,10 +1512,14 @@ fn mature_coinbase_spend_hex(ctx: &RpcContext, keep_sat: u64) -> (String, Transa
         }],
         output: vec![TxOut {
             value: Amount::from_sat(keep_sat),
-            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            script_pubkey: script,
         }],
     };
     (hex_encode(serialize(&spend)), spend)
+}
+
+fn mature_coinbase_spend_hex(ctx: &RpcContext, keep_sat: u64) -> (String, Transaction) {
+    mature_coinbase_spend(ctx, keep_sat, ScriptBuf::from_bytes(vec![0x51]))
 }
 
 #[test]
@@ -1553,6 +1561,49 @@ fn sendrawtransaction_maxfeerate_default_rejects_huge_fee() {
         over["message"].as_str().unwrap_or("").contains("1BTC/kvB"),
         "{over}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn sendrawtransaction_maxburnamount_default_rejects_op_return() {
+    let (ctx, dir, _hub) = ctx_regtest_hub();
+    let (hex, spend) = mature_coinbase_spend(
+        &ctx,
+        50_0000_0000 - 1_000,
+        ScriptBuf::from_bytes(vec![0x6a]),
+    );
+    let e = dispatch(&ctx, "sendrawtransaction", vec![json!(hex.clone())]).unwrap_err();
+    assert!(
+        e["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("maxburnamount"),
+        "{e}"
+    );
+    let pkg = dispatch(&ctx, "submitpackage", vec![json!([hex.clone()])]).unwrap();
+    assert_eq!(pkg["package_msg"], "transaction failed", "{pkg}");
+    let err = pkg["tx-results"]
+        .as_object()
+        .and_then(|m| m.values().next())
+        .and_then(|v| v["error"].as_str())
+        .unwrap_or("");
+    assert!(err.contains("maxburnamount"), "{pkg}");
+    ctx.mempool
+        .as_ref()
+        .unwrap()
+        .accept_tx(&spend)
+        .expect("P2P/admit path is not capped by RPC maxburnamount");
+    let ok = dispatch(
+        &ctx,
+        "sendrawtransaction",
+        named(json!({
+            "hexstring": hex,
+            "maxfeerate": 0,
+            "maxburnamount": 50
+        })),
+    )
+    .unwrap();
+    assert!(ok.as_str().is_some(), "{ok}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -361,15 +361,41 @@ fn rpc_tx_fee_exceeds_max(ctx: &RpcContext, tx: &Transaction, max_sat_kvb: u64) 
     fee_exceeds_max(fee, tx.weight().to_wu(), max_sat_kvb)
 }
 
+/// RPC-submit `maxburnamount` (BTC). Omitted → 0. Sum of unspendable output values vs cap.
+fn opt_maxburn_sat(params: &RpcParams, index: usize) -> Result<u64, Value> {
+    match params.get(index, "maxburnamount") {
+        None | Some(Value::Null) => Ok(0),
+        Some(v) => amount_sat_from_json(v),
+    }
+}
+
+fn unspendable_output_sat(tx: &Transaction) -> u64 {
+    tx.output
+        .iter()
+        .filter(|o| crate::blockstats::is_unspendable(o.script_pubkey.as_bytes()))
+        .map(|o| o.value.to_sat())
+        .sum()
+}
+
+fn burn_exceeds_max(tx: &Transaction, max_burn_sat: u64) -> bool {
+    unspendable_output_sat(tx) > max_burn_sat
+}
+
+const MAX_BURN_MSG: &str = "Unspendable output exceeds maximum configured by user (maxburnamount)";
+
 pub(crate) fn sendrawtransaction(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
-    params.reject_unknown(&["hexstring", "maxfeerate"])?;
+    params.reject_unknown(&["hexstring", "maxfeerate", "maxburnamount"])?;
     let hex = params.req_str(0, "hexstring")?;
     let max_feerate = opt_maxfeerate_sat_kvb(params, 1)?;
+    let max_burn = opt_maxburn_sat(params, 2)?;
     let tx = decode_tx_hex(hex)?;
     let mp = ctx
         .mempool
         .as_ref()
         .ok_or_else(|| rpc_error(ERR_MISC, "mempool not available"))?;
+    if burn_exceeds_max(&tx, max_burn) {
+        return Err(rpc_error(ERR_INVALID_PARAMETER, MAX_BURN_MSG));
+    }
     if rpc_tx_fee_exceeds_max(ctx, &tx, max_feerate) {
         return Err(rpc_error(ERR_VERIFY_REJECTED, "max-fee-exceeded"));
     }
@@ -877,6 +903,8 @@ pub(crate) fn getmempoolfeeratediagram(
 
 pub(crate) fn submitpackage(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["package", "maxfeerate", "maxburnamount"])?;
+    let max_feerate = opt_maxfeerate_sat_kvb(params, 1)?;
+    let max_burn = opt_maxburn_sat(params, 2)?;
     let arr = params
         .get_array(0, "package")
         .ok_or_else(|| rpc_error(ERR_INVALID_PARAMS, "package array required"))?;
@@ -897,14 +925,35 @@ pub(crate) fn submitpackage(ctx: &RpcContext, params: &RpcParams) -> Result<Valu
             .ok_or_else(|| rpc_error(ERR_INVALID_PARAMS, "package hex required"))?;
         txs.push(decode_tx_hex(hex)?);
     }
-    let results = mp.submit_package_rpc(&txs);
     let mut tx_results = serde_json::Map::new();
     let mut replaced = Vec::new();
     let mut all_ok = true;
-    for (tx, r) in txs.iter().zip(results.iter()) {
+    for tx in &txs {
         let wtxid = hash_hex_display(&tx.compute_wtxid().to_byte_array());
         let txid = hash_hex_display(&tx.compute_txid().to_byte_array());
-        match r {
+        if burn_exceeds_max(tx, max_burn) {
+            all_ok = false;
+            tx_results.insert(
+                wtxid,
+                json!({
+                    "txid": txid,
+                    "error": MAX_BURN_MSG,
+                }),
+            );
+            continue;
+        }
+        if rpc_tx_fee_exceeds_max(ctx, tx, max_feerate) {
+            all_ok = false;
+            tx_results.insert(
+                wtxid,
+                json!({
+                    "txid": txid,
+                    "error": "max-fee-exceeded",
+                }),
+            );
+            continue;
+        }
+        match mp.accept_tx(tx) {
             Ok(ok) => {
                 mp.note_unbroadcast(ok.txid);
                 for old in &ok.replaced {
@@ -920,7 +969,7 @@ pub(crate) fn submitpackage(ctx: &RpcContext, params: &RpcParams) -> Result<Valu
                 );
             }
             Err(e) => {
-                let reason = accept_reject_reason(e);
+                let reason = accept_reject_reason(&e);
                 if reason == "txn-already-in-mempool" {
                     tx_results.insert(wtxid, json!({ "txid": txid }));
                     continue;
