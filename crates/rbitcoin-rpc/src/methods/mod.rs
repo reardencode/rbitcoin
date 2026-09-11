@@ -673,6 +673,10 @@ pub(crate) fn method_help(m: &str) -> String {
              for a new tip or mempool/priority change. No BIP9 testdummy."
             .into(),
         "getmininginfo" => "getmininginfo\nTip height, difficulty, pooledtx. All networks.".into(),
+        "getnetworkhashps" => "getnetworkhashps (nblocks) (height)\n\
+             Dummy 2-work-per-block / elapsed seconds — not Core chainwork hashrate. \
+             Useful on regtest (2 work/block). See docs/rpc.md."
+            .into(),
         "prioritisetransaction" => {
             "prioritisetransaction txid dummy fee_delta\nLocal mining fee delta (sat). dummy must be 0."
                 .into()

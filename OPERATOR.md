@@ -369,6 +369,27 @@ Routine knobs are **CLI / conf**, not required env vars. Clean smoke:
 | `--esplora-listen ADDR` | | disabled (Esplora REST; **requires** `--shindex`) |
 | `--rpc-listen ADDR` | conf `rpc_listen` | disabled — Core-class JSON-RPC subset |
 | `--rpcuser` / `--rpcpassword` | conf `rpcuser`/`rpcpassword` | unset — else cookie `{datadir}/.cookie` |
+| `--rpcworkqueue N` | conf `rpcworkqueue=` | unset — unlimited in-flight RPC |
+| `--minrelaytxfee BTC` | same | unset — Libre default 100 sat/kvB; `0` = no floor; garbage/negatives fail start |
+| `--mempoolexpiry HOURS` | same | unset — hub default; min 1 |
+| `--blocksonly` | same | off |
+| `--persistmempool[=0\|1]` | same | on |
+| `--whitelist SPEC` | same | empty |
+| `--limitclustercount N` | same | unset — hub default |
+| `--limitclustersize KVB` | same | unset — hub default |
+| `--peertimeout SECS` | same | unset — net default; `0` is InitError |
+| `--externalip IP` | same | empty — `getnetworkinfo.localaddresses` |
+| `--seednode HOST` | same | extra seeds (repeatable) |
+| `--mocktime UNIX` | same | unset — wall clock; `0` allowed |
+| `--maxtipage SECS` | same | unset — hub IBD-age |
+| `--blockversion N` | same | unset — generate/template version overlay |
+| `--blockmintxfee BTC` | same | unset — template min tx fee; garbage/negatives fail start |
+| `--alertnotify CMD` | same | unset — `%s` = warning; fires once |
+| `--startupnotify CMD` | same | unset |
+| `--testactivationheight name@H` | same | empty — buried deployment overlay |
+| `--minimumchainwork HEX` | same | unset |
+| `--uacomment STR` | same | empty — BIP14 subversion |
+| `--max-run-secs N` | conf `max_run_secs=` | unset — process exit after N seconds |
 | `--inhibit-suspend` | | off |
 
 Conf file: simple `key=value` lines (`#` comments). CLI overrides conf. Example:

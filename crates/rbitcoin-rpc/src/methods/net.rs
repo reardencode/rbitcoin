@@ -176,7 +176,6 @@ pub(crate) fn addconnection(ctx: &RpcContext, params: &RpcParams) -> Result<Valu
 }
 
 /// Core `addpeeraddress` (hidden): insert into addrman + durable peers file.
-/// Core `addpeeraddress` (hidden): insert into addrman + durable peers file.
 pub(crate) fn addpeeraddress(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["address", "port", "tried"])?;
     let address = params.req_str(0, "address")?;
@@ -198,7 +197,6 @@ pub(crate) fn addpeeraddress(ctx: &RpcContext, params: &RpcParams) -> Result<Val
     Ok(json!({ "success": true }))
 }
 
-/// Core `getnodeaddresses`: sample from addrman (`count=0` → all).
 /// Core `getnodeaddresses`: sample from addrman (`count=0` → all).
 pub(crate) fn getnodeaddresses(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["count", "network"])?;
