@@ -1374,6 +1374,88 @@ mod tests {
     }
 
     #[test]
+    fn flag_matrix_cli_equals_conf_apply_kv() {
+        let _g = OPERATOR_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut cfg = crate::config::NodeConfig::default();
+        assert_eq!(
+            cfg.apply_kv("network", "regtest").unwrap(),
+            crate::config::ConfApply::Applied
+        );
+        assert_eq!(cfg.network, Network::Regtest);
+        assert_eq!(
+            cfg.apply_kv("chain", "signet").unwrap(),
+            crate::config::ConfApply::Applied
+        );
+        assert_eq!(cfg.network, Network::Signet);
+
+        let dir = tmp_datadir();
+        assert_exit(
+            cli_main([
+                "rbitcoin-node",
+                "--smoke",
+                "--network=regtest",
+                "--datadir",
+                dir.to_str().unwrap(),
+                "--noseeds=1",
+                "--log-level",
+                "error",
+                "--milestone",
+                "0",
+            ]),
+            ExitCode::SUCCESS,
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir = tmp_datadir();
+        assert_exit(
+            cli_main([
+                "rbitcoin-node",
+                "--smoke",
+                "--chain=regtest",
+                "--datadir",
+                dir.to_str().unwrap(),
+                "--no-seeds",
+                "--log-level",
+                "error",
+                "--milestone",
+                "0",
+            ]),
+            ExitCode::SUCCESS,
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir = tmp_datadir();
+        let conf = dir.join("node.conf");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&conf, "network=testnet\n").unwrap();
+        let smoke = dir.join("smoke");
+        assert_exit(
+            cli_main([
+                "rbitcoin-node",
+                "--smoke",
+                "--conf",
+                conf.to_str().unwrap(),
+                "--network=regtest",
+                "--datadir",
+                smoke.to_str().unwrap(),
+                "--no-seeds",
+                "--log-level",
+                "error",
+                "--milestone",
+                "0",
+            ]),
+            ExitCode::SUCCESS,
+        );
+        assert!(
+            smoke.join("store").exists(),
+            "CLI datadir must win over conf"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn testactivationheight_cli_smoke_regtest() {
         let _g = OPERATOR_ENV_TEST_LOCK
             .lock()
