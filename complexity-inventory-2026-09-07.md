@@ -1,19 +1,15 @@
 # Excess-complexity inventory — every crate (2026-09-07)
 
-**Not in git.** Working document for a simplification program. Audited on
-`ibd/reorg-reject-policy`; refreshed against `origin/master` `6e1037c1` after
-[#395](https://github.com/reardencode/rbitcoin/pull/395) (structured cmpct
-fuzz recipe), [#396](https://github.com/reardencode/rbitcoin/pull/396) (the
-audited IBD branch, merged unchanged),
-[#397](https://github.com/reardencode/rbitcoin/pull/397) (decode RPC subset +
-store-bench docs),
-[#411](https://github.com/reardencode/rbitcoin/pull/411) (X-06 Tiny fixtures),
-[#412](https://github.com/reardencode/rbitcoin/pull/412) (N-04 Tiny-regtest hub),
-and
-[#414](https://github.com/reardencode/rbitcoin/pull/414) (suggested-order 4 leftovers).
-Resolved rows are marked **done (#N)**; #395 grew X-07 / N-13 and #397
-reshaped A-08. ~190k first-party Rust LOC across 14 crates (inline tests
-included).
+Working document for a simplification program. Audited on
+`ibd/reorg-reject-policy`; refreshed 2026-09-11 against `origin/master`
+after **#426** (C-06) / **#427** (Q-06) merged. Remainder §16 is this
+branch. Earlier landmarks: [#395](https://github.com/reardencode/rbitcoin/pull/395)
+(cmpct fuzz recipe), [#396](https://github.com/reardencode/rbitcoin/pull/396),
+[#397](https://github.com/reardencode/rbitcoin/pull/397),
+[#411](https://github.com/reardencode/rbitcoin/pull/411)–[#414](https://github.com/reardencode/rbitcoin/pull/414)
+(X-06), [#420](https://github.com/reardencode/rbitcoin/pull/420) (X-01 steps 2–3,
+merged). Resolved rows are marked **done (#N)**. ~190k first-party Rust LOC
+across 14 crates (inline tests included).
 
 Method: every crate read against its owner docs (`AGENTS.md`, `docs/quality.md`
 Won't-fix / Open, `docs/io-modality.md`, `docs/heads.md`, `docs/invariants.md`,
@@ -48,7 +44,7 @@ per-crate items exist.
 
 | ID | Item | Evidence | Proposal | LOC | Trade-off | Conf. |
 |----|------|----------|----------|-----|-----------|-------|
-| **X-01** | **Process-global perf counters → instance-owned stats** **step 1 done (#405+#410); steps 2–3 PR #420** | ~160 distinct `pub static … AtomicU64` names across `query/lib.rs` (104 statics; 5 `*_stats` modules), `consensus/lib.rs` (75, `confirm_phase_stats` ~506 lines), `confirm_run/lookup.rs` (20), `ibd/confirm/mod.rs` (17), `store/head_resolve_stats.rs` (13), `segmented_head.rs`, `serve_perf.rs`. Each is hand-mirrored into a `Sample` struct + `sample_and_reset()` listing every field again. Because they are process-global, tests need a `#[cfg(test)] exclusive::with` mutex (`query/lib.rs:425–448`, `confirm_run/lookup.rs:565–579`) and a `#[cfg(not(test))]` no-op twin. `ibd/perf_log.rs` (2.9k) is mostly the consumer of these. Never-incremented: `COLD_DECODE_NS`, `COLD_IDX_N/NS`, `PIN_ADOPT_NS`, `PIN_PUBLISH_NS`, `PARENT_CACHE_HITS`, `FULL_TX_READS`, `MISSING_PARENTS`, `HEADER_NS`, `BODY_DECODE_NS`, `CACHE_PUT_NS`, `EDGE_*`, `PIN_NEW_META_NS`, `CREATES` (query); `RECONSTRUCT_NS`, `RECONSTRUCT_WIRE_NS`, `WRITE_RECENT_*`, `ASM_PREV_*`, `SPEND_ANNOTATE_IDX/SKIP`, `RESOLVE_NS`, `UNPIN_NS`, `CACHE_TIP_NS`, `SPEND_ANN_PREAD` (consensus); `HeadLookupStats` (store) never read; pstore `0,0,0` still passed and printed (`ibd/confirm/mod.rs:71`, `perf_log.rs:1878`). | (1) Delete every never-written counter and its `Sample` field/format token (I-05, C-01, Q-01–Q-03, S-02). (2) Replace the remaining statics with one `ConfirmStats` struct owned by the confirm engine and passed by `&`; `Sample` becomes `std::mem::take`. Deletes the test mutex + `cfg(not(test))` twins. (3) Table-drive `perf_log` formatting from a `&[(name, fn(&Sample)->u64)]` list so adding a meter is one line. Keep every **live** named lookup/load/scripts/write timer (AGENTS.md rule). | ~900–1,400 (≈300 dead counters + ≈600–1,000 boilerplate) | `ibd: perf` / `ibd: sizes` DEBUG token set shrinks — note in CHANGELOG; do not drop live stage tokens. Passing a stats handle through confirm APIs is churn across consensus/net/query. | high (dead) / medium (restructure) |
+| **X-01** | **Process-global perf counters → instance-owned stats** **done (#405+#410+#420)** | ~160 distinct `pub static … AtomicU64` names across `query/lib.rs` (104 statics; 5 `*_stats` modules), `consensus/lib.rs` (75, `confirm_phase_stats` ~506 lines), `confirm_run/lookup.rs` (20), `ibd/confirm/mod.rs` (17), `store/head_resolve_stats.rs` (13), `segmented_head.rs`, `serve_perf.rs`. Each is hand-mirrored into a `Sample` struct + `sample_and_reset()` listing every field again. Because they are process-global, tests need a `#[cfg(test)] exclusive::with` mutex (`query/lib.rs:425–448`, `confirm_run/lookup.rs:565–579`) and a `#[cfg(not(test))]` no-op twin. `ibd/perf_log.rs` (2.9k) is mostly the consumer of these. Never-incremented: `COLD_DECODE_NS`, `COLD_IDX_N/NS`, `PIN_ADOPT_NS`, `PIN_PUBLISH_NS`, `PARENT_CACHE_HITS`, `FULL_TX_READS`, `MISSING_PARENTS`, `HEADER_NS`, `BODY_DECODE_NS`, `CACHE_PUT_NS`, `EDGE_*`, `PIN_NEW_META_NS`, `CREATES` (query); `RECONSTRUCT_NS`, `RECONSTRUCT_WIRE_NS`, `WRITE_RECENT_*`, `ASM_PREV_*`, `SPEND_ANNOTATE_IDX/SKIP`, `RESOLVE_NS`, `UNPIN_NS`, `CACHE_TIP_NS`, `SPEND_ANN_PREAD` (consensus); `HeadLookupStats` (store) never read; pstore `0,0,0` still passed and printed (`ibd/confirm/mod.rs:71`, `perf_log.rs:1878`). | (1) Delete every never-written counter and its `Sample` field/format token (I-05, C-01, Q-01–Q-03, S-02). (2) Replace the remaining statics with one `ConfirmStats` struct owned by the confirm engine and passed by `&`; `Sample` becomes `std::mem::take`. Deletes the test mutex + `cfg(not(test))` twins. (3) Table-drive `perf_log` formatting from a `&[(name, fn(&Sample)->u64)]` list so adding a meter is one line. Keep every **live** named lookup/load/scripts/write timer (AGENTS.md rule). | ~900–1,400 (≈300 dead counters + ≈600–1,000 boilerplate) | `ibd: perf` / `ibd: sizes` DEBUG token set shrinks — note in CHANGELOG; do not drop live stage tokens. Passing a stats handle through confirm APIs is churn across consensus/net/query. | high (dead) / medium (restructure) |
 | **X-02** | **`HeadScale` is ambient env + cargo-test detection + thread-local** | `store/hashhead.rs:91–155`: `running_as_cargo_test_binary()` sniffs `/deps/` in `current_exe`; `RBITCOIN_HEAD_SCALE` env; `#[cfg(test)] TEST_HEAD_SCALE` thread-local; `HeadScale::from_env()` called from `scripthash.rs:376`, `scripthash_head.rs:70`, `hashhead.rs:182,189`. ~140 test sites do `if env::var_os("RBITCOIN_HEAD_SCALE").is_none() { set_var(...,"tiny") }` (peer_tests 44, write_idempotent_tests 36, tx_relay 32, server_tests 18, …). Same shape: `TEST_SOFT_SPAN_OVERRIDE` (`tx_idx.rs:1246`), `TEST_REBUILD_SEAL_BITS` / `TEST_REBUILD_WORKERS` (`tx_table/mod.rs:14–16`), `TEST_FORCE_SESSION_FALSE` (`bulk_io.rs:334`). | Make scale (and rebuild workers / seal bits / soft span) fields of `StoreLayout`/open options with `Mainnet` default; tests construct `StoreLayout::tiny()`. Delete env sniffing, cargo-test detection, thread-locals, and all ~140 `set_var` sites. Keep `RBITCOIN_HEAD_SCALE` only if an operator needs it (env-knobs.md says tests only → delete). | ~350–500 | Explicit parameter threads through `Query::open` / `ChainHub::new` call sites (mechanical). Removes a real production hazard (a binary under a `deps/` path silently gets 64-slot heads). | high |
 | **X-03** | **Test-only probes/hooks in production store code** | `test_take_pwrite_waves`, `test_take_head_page_writes`, `test_take_last_sqe_rw_flags`, `test_take_last_sqe_lens`, `test_zero_live_count_keep_head`, `take_g_page_preads`, `pread_count`/`reset_pread_count`, `note_sh_page_chain_io` (`#[cfg(test)]` counter incremented on the hot path, `scripthash.rs:580–600`), `#[cfg(debug_assertions)] pub use store::{reset_tx_full_gets,…}` (`store/lib.rs:132`), `#[cfg(any(test, debug_assertions))] take_raw_clone_n`. 58 `#[cfg(test)] pub` items in non-test files; CONTRIBUTING.md checklist says "public API preferred over `#[cfg(test)]` white-box access". | Where the assertion is about IO shape (SQE lens / flags / page writes), assert through the session's returned `Stats`/`Sample` (X-01 makes that natural) or through observable file state; delete the thread-local probes. Where a probe has no contract behind it, delete the test. | ~150–250 | Some IO-shape pins become slightly less direct; a few tests become black-box. | high |
 | **X-04** | **`pub` surface far wider than cross-crate use** | Re-exports in `lib.rs` with **zero** users outside their crate: store ≈140 names (`AddressHead`, `SegmentedTxHead`, `UringSession`, `IoHandle`, `SortedHead*`, all slab/page codecs, `decode_packed_tx*` ×6, …), net ≈90 (`NetConfig`, `P2PHandle`, `PeerRateLimiter`, `DialRequest`, `LivePeer`, fuzz encoders, …), consensus ≈40 (`confirm_bq_resolve_wave`, `drive_script_waves`, `block_to_apply*`, `validate_block_structure_*` ×3, …), query ≈17, mempool ≈40 constants/helpers, rpc ≈18, electrum 11, esplora 10. `pub fn` counts: store 1,059, net 779, query 361. | Mechanical pass: everything not imported by another crate becomes `pub(crate)`; then let `-D warnings` (dead_code) report what is truly dead and delete it. Do the pass per crate, lowest first. | ~200–400 direct; unlocks rustc dead-code detection for everything below | Out-of-tree consumers: none in tree (fuzz crate needs a `pub` list — see N-07/N-13). | high |
@@ -127,7 +123,7 @@ Real layer, not a pass-through: BQ + resolved wire, stamp/`InFlight`/`BatchParen
 | Q-03 | `ConfirmLoadStats` test-only scaffolding | `confirm_load.rs:14–46`; `note` is `#[cfg(test)]` (`lib.rs:369–402`); no outside user. | Delete; fold remaining `confirm_load.rs` into `confirm_parent_cache.rs`. | ~80–100 | none | high |
 | Q-04 | Micro-modules | `wave_prevout.rs` (10), `resolved_wire.rs` (23), `confirm_load.rs` (61), `run_builder_core.rs` (99, used only by `sh_builder`). | Fold into their sole consumers. | ~30–50 | none | medium-high |
 | Q-05 | `archive_filter_need_bodies` dead  **done (#415)** | `archive.rs:412` def; only a test comment `:2329`; IBD uses `archive_filter_need_header_fks` (`lookup.rs:415`); doc claims "used by IBD prep" (false). | Delete + fix comment. | ~25–40 | none | high |
-| Q-06 | Dual Class A planners (wire vs `TxApply`/store)  **done (this PR)** | IBD and Class A-without-tip use `archive_plan_batch_from_wire` + fill packed ins. `archive_plan_batch_from_store` deleted. `commit_class_a_only` converts TxApply fixtures to wire. | — | — | Stamp pins retargeted onto from_wire. Packed-ins pin is `commit_class_a_only_writes_packed_ins_from_wire`. | high |
+| Q-06 | Dual Class A planners (wire vs `TxApply`/store)  **done (#427)** | IBD and `commit_class_a_block`/`_run` plan with `archive_class_a_from_wire` (from_wire + fill). `archive_plan_batch_from_store` deleted. `commit_class_a_only` still converts TxApply fixtures (**Q-21** remainder). | — | — | Packed-ins pin is `commit_class_a_only_writes_packed_ins_from_wire`. | high |
 | Q-07 | `archive`/`catchup`/`connect` are not three confirms | Roles: Class A plan/commit; `IndexMode` + SH finalize; Class C tip + SH enqueue/disconnect. | Rustdoc only. | ~0–20 | Do not collapse. | high (not excess) |
 | Q-08 | Three parent structures are three jobs | `BatchParents` (batch outs), `InFlight` (tip-ahead creates), `ConfirmParentCache` (header plans only). | Rename `ConfirmParentCache` → `HeaderPlanCache`. | 0 | Merging would violate plan/batch-only pins. | high (not excess) |
 | Q-09 | `tx_precompute` not duplicated | Consensus `block/tx_precompute.rs` is tests only re-exporting query's type. | Move tests; delete empty consensus module. | ~65 (file) | none | high |
@@ -142,6 +138,7 @@ Real layer, not a pass-through: BQ + resolved wire, stamp/`InFlight`/`BatchParen
 | Q-18 | `get_tx` / `get_tx_class_a` alias | `lib.rs:2052–2059`, comment about removed pin FIFO. | One name. | ~5 | none | high |
 | Q-19 | `FkMap`/`U64Map` re-exported through query | `batch_parents.rs:31`; consensus imports from query though store owns them. | Import from store. | ~5 | none | high |
 | Q-20 | Layering vs `confirm_run` | Consensus orchestrates; query owns structures + store IO. | keep | 0 | — | high |
+| Q-21 | Class A-without-tip dummy `Block` adapter  **partial (#427)** | `commit_class_a_block` / `_run` already have a `Block` and now call `archive_class_a_from_wire` (no TxApply round-trip). Confirm write calls `fill_packed_ins_from_blocks` directly. Remainder: `commit_class_a_only` / `archive_prepared_with_fks` still convert `TxApply` → dummy `Block` (`tx_apply_to_tx` / `block_from_applies`) for ~50 electrum/esplora/query_tests fixtures. Archive tests use `plan_applies` (same conversion) then shipped `from_wire`. | TxApply fixtures convert in the **test module** (or `rbitcoin-test`), not in `Query`. Delete `tx_apply_to_tx`. | ~80–120 | Witness/script_sig must round-trip (already pinned by `commit_class_a_only_writes_packed_ins_from_wire`). | high |
 
 ---
 
@@ -153,10 +150,10 @@ Pinned `bitcoin` resolves to **0.32.102** (`Cargo.toml` says `0.32.101`; `docs/r
 |----|------|----------|----------|-----|-----------|-------|
 | C-01 | Never-incremented `confirm_phase_stats` meters | `lib.rs:93–598` (65 statics); dead list in X-01; live examples `ASM_PREVOUT_NS` (`block/mod.rs:1444`), `LOAD_NS` (`lookup.rs:252`). | Delete dead statics + sample slots (X-01). | ~80–120 | none | high |
 | C-02 | `lib.rs` = meters + thin wrappers | ~506 meters, ~180 wrappers, ~280 tests, ~80 re-exports; `mod coverage_tests` (`:795`) exists to paint lines. | After C-01 move stats out; delete wrappers in C-03. | ~50–100 | import churn in `perf_log`. | high |
-| C-03 | Thin / test-only pub APIs | `check_block_wire` (only `structure_rule_tests.rs:38,42`); `confirm_bq_resolve_wave` (only `bq_resolve.rs` tests `:883,:987`); `prepare_block_for_archive_new` (one prod caller + one test); `validate_block_structure_precomputed` (one caller); `verify_tx_scripts_detached_forks` (one caller); `commit_class_a_block`/`_run` (only `rbitcoin-test`, see Q-06). Variant explosion in the `confirm_run` re-export list (`lib.rs:604–615`): `_capped`/`_with_ids`, `_phase`/`_phase_async`/`_pipelined`/`_from_plan`, `drive_script_waves`/`_with`, `confirm_wire_run`/`_preverified`. | Un-export/inline; keep one entry per stage with an options struct where two variants are both live. | ~60–120 | Low; `check_block_wire` may want `pub(crate)` for fuzz. | high |
+| C-03 | Thin / test-only pub APIs | `check_block_wire` (structure_rule_tests + fuzz-useful); `confirm_bq_resolve_wave_capped` (bq_resolve tests); `prepare_block_for_archive` / `_new` / `_with_txids` (Class A fixtures + write_idempotent); `validate_block_structure_precomputed`; `verify_tx_scripts_detached_forks`; `commit_class_a_block`/`_run` (rbitcoin-test only). Confirm_run re-export list still `_capped`/`_with_ids`, `_phase`/`_phase_async`/`_pipelined`/`_from_plan`, `drive_script_waves`/`_with`, `confirm_wire_run`/`_preverified`. | Un-export/inline; one entry per live stage. See **C-19**. | ~60–120 | `check_block_wire` may stay `pub(crate)` for fuzz. | high |
 | C-04 | Typed script fast paths (`p2pkh`/`p2wpkh`/`p2wsh`/`p2tr`/`nested`) | Single dispatch (`script/mod.rs:86–168`); P2PKH bare fallback only on scriptSig shape error (`:135–140`, Core parity). Prod sizes small; tests dominate (`p2tr` 159/934, `nested` 157/688). | **Keep.** Collapsing to interpreter-only is a second consensus rewrite. Optional: document host A/B. | 0 | HIGH if removed. | high (not excess) |
 | C-05 | Duplicated SPK template predicates | `script/classify.rs:57–80` vs `silent_payments.rs:473–508` vs `block/mod.rs:389–398` (sigops) vs `core_vectors.rs:513`. | One `spk` helper set used by silent-payments and sigops. | ~35–50 | BIP352 eligibility must stay exact. | high |
-| C-06 | `AssembleMode::Full` + `validate_block_connect` dual assemble  **done (this PR)** | Optimistic assemble + `structural_validate_spends` only. Connect tests use `accept_and_connect_block`. | — | — | Immature pin is `c5_immature_coinbase_spend_rejected`. | high |
+| C-06 | `AssembleMode::Full` + `validate_block_connect` dual assemble  **done (#426)** | Optimistic assemble + `structural_validate_spends` only. Connect tests use `accept_and_connect_block`. `verify_scripts_pool` deleted; ACS skip pinned on shipped `verify_one_script_job`. | — | — | Immature pin is `c5_immature_coinbase_spend_rejected`. Remainder **C-19**: `try_for_each_parallel` still `#[cfg(test)]`. | high |
 | C-07 | `confirm_run` vs `ibd/confirm` | Layered (stages vs threads/queues). `bq_resolve.rs` ≈431 prod / 1,053 test; one TipOnly wave. | none for architecture. | 0 | — | high (not excess) |
 | C-08 | `script_pool.rs` | ≈443 prod / 752 test; 11 `unsafe`; Won't-fix says no coordinators. | Keep; trim over-covered steal/unpark permutation tests after LCOV check. | 0 prod; ~100–300 test | HIGH if swapped for rayon. | high |
 | C-09 | `silent_payments.rs` | ≈624 prod / 777 test; crypto here, index in store, serve in query. | C-05 only. | ~30–40 | — | high |
@@ -169,6 +166,7 @@ Pinned `bitcoin` resolves to **0.32.102** (`Cargo.toml` says `0.32.101`; `docs/r
 | C-16 | Doc pin drift | `rust-bitcoin-limitations.md` 0.32.101 vs lock 0.32.102. | Fix doc. | docs | none | high |
 | C-17 | `error.rs` variants | all live. | none | 0 | — | high |
 | C-18 | `convert.rs` | on hot/test paths. | none | 0 | — | high |
+| C-19 | C-06 leftover: `#[cfg(test)]` script-pool twins  **partial (#426)** | `verify_scripts_pool` deleted; ACS skip is `verify_one_script_job`. Remainder: `try_for_each_parallel` is still `#[cfg(test)]` (`script_pool.rs`) because steal-permutation tests call blocking `run_wave(false)`. Production IBD uses `start_for_each_owned`; silent-payments uses `try_for_each_parallel_idle`. | Retarget steal tests onto `start_for_each_owned` / `try_for_each_parallel_idle`; delete `try_for_each_parallel`. Do **not** keep `#[cfg(test)]` production fns to paint lines. | ~20–40 + test retarget | Coverage of deleted wrappers is expected; CI coverage job is the gate. | high |
 
 **Not excess (checked):** `interpreter.rs` opcode match (R-10), local sighash/DER-lax/BIP143 midstates (RB-002/003/004/009 still needed), in-tree engine vs `bitcoinconsensus` (RB-008), Core vector runners, `params`/`policy`/`header`/`clock`.
 
@@ -205,7 +203,7 @@ Shipped pipeline: `run.rs` → `sync_cancellable`; IBD dials own peers; raw fram
 |----|------|----------|----------|-----|-----------|-------|
 | I-01 | Dead `AwaitingBodies` / `set_awaiting` state machine  **done (#415)** | `set_awaiting` callers are only inside `#[cfg(test)] mod tests` (`assign.rs` tests start `:1004`, callers `:1243,2026,2194,2554`; `exit.rs` tests start `:180`, caller `:463`; `reorg.rs` tests start `:907`, caller `:1445`). Production branches on it at `mod.rs:519`, `exit.rs:45`, `assign.rs:146/654/938`; `try_complete_awaiting_reorg` (`events/mod.rs:820–825`) is an alias of `try_apply_exploration`. | Delete `AwaitingBodies`, `set_awaiting`, `awaiting()`, `awaiting_need_getdata`, `is_awaiting_held_tip`, the gates, and the main-loop poll (I-19). | ~150 prod + ~400 test | Reorg behavior unchanged (header rewind stays). | high |
 | I-02 | `held_bodies: HashMap<BlockHash, Block>` but only `contains_key` is read in production  **done (#415)** | Write `events/mod.rs:402` `hold_body` (decodes a full Block); `get_held` only in tests; `need_getdata` (`reorg.rs:206–214`) uses presence only; comment `reorg.rs:174–178` admits it. | `HashSet<BlockHash>` (or drop the hold entirely). RAM-positive. | ~80 prod + ~200 test | Not ContigPark/archive-sticky. | high |
-| I-03 | `#[cfg(test)]` body-gather / `accept_branch` stack in `reorg.rs` | `candidate_from_blocks`, `rank_candidates`, `apply_reorg_branch`, `try_apply_best_candidate`, `classify_bad_prev`, `note_disconnected_heavier`, `header_hashes_to_best_ancestor`, `shortest_heavier_*`, `candidate_header_work_better` — all cfg(test) (`reorg.rs:14–38, 219+, 286+, 316+, 608+`). Shipped path is `consider_disconnected_heavier`/`maybe_rewind_to_best_work`/`apply_header_rewind`. | Delete; move any still-valuable most-work assertions onto the rewind API. | ~256 prod-section + up to ~500 of the 980-line test mod | Coverage dip → thinner pins on the rewind path. | high |
+| I-03 | `#[cfg(test)]` body-gather / `accept_branch` stack in `reorg.rs`  **done (#415 / already gone)** | `candidate_from_blocks` / `apply_reorg_branch` / `try_apply_best_candidate` are gone. Shipped path is header rewind. | — | — | `classify_bad_prev` kept as I-14 pin helper. | high |
 | I-04 | IBD `held_bodies` vs tip `HeldBodies` naming | Different products; after I-02 rename IBD set to `explore_have`. | rename | ~0–50 | none | high |
 | I-05 | Always-zero perf meters on the IBD surface | `IbdPerfSample` has **239** fields; `RECONSTRUCT_*`, `WRITE_RECENT_*` never `fetch_add`; `docs/ibd-memory.md:129` already says `pstore=`/`recent=` stay 0; format paths still emit `recon_ms`/`wf_body_store`/`sh_collect_pin` via `append_nz` (`perf_log.rs:1401+, 1656+`). | Delete with X-01. | ~400–700 perf_log + ~50–100 consensus | DEBUG token set shrinks; keep live inventory. | high |
 | I-06 | `perf_log.rs` machinery  **done (#420 write-stage table)** | 2,869 (≈2,023 prod); `WriteStageSample::stage_ms`/`stage_ns` duplicate field lists (`:111–146`); `sample()` pulls 17 `sample_*` helpers; three hand-rolled formatters. | Table-driven tokens (X-01 step 3). | ~300–500 | Macro opacity; log-contract tests. | medium |
@@ -235,7 +233,7 @@ Shipped pipeline: `run.rs` → `sync_cancellable`; IBD dials own peers; raw fram
 | ID | Item | Evidence | Proposal | LOC | Trade-off | Conf. |
 |----|------|----------|----------|-----|-----------|-------|
 | A-01 | ~~COMPAT says decode RPCs "done"; node rejects them~~ **done (#397)** | Node now ships `methods/decode.rs` (66 lines: `decoderawtransaction`, `decodescript`, `validateaddress` subset); `COMPAT.md:63`, `docs/rpc.md`, `core-functional.md`, `inventory.toml` describe the node/proxy split. Never-list shrank to `createrawtransaction` / `signrawtransactionwithkey` / `createmultisig` / `combinerawtransaction` / `deriveaddresses` / `gettxoutsetinfo`. | — | — | Proxy still owns Core wrap/miniscript/`error_locations`; `rpc_decodescript.py` stays `run` via proxy. | — |
-| A-02 | Seven `METHOD_LIST` methods undocumented | `getnettotals`, `ping`, `addpeeraddress`, `getnodeaddresses`, `estimaterawfee`, `getnetworkhashps`, `mockscheduler` (`methods/mod.rs:545–608`) absent from `docs/rpc.md`; five are used by `run` scripts; `getnettotals` has no `run` script; `getnetworkhashps` is the Q-59 dummy. | Document all; optionally delete `getnettotals`. | 0 (docs) / ~65 | Q-59 says label or fix `getnetworkhashps`, not delete. | high |
+| A-02 | Seven `METHOD_LIST` methods undocumented  **done (#424)** | `docs/rpc.md` names `getnettotals`, `ping`, `addpeeraddress`, `getnodeaddresses`, `estimaterawfee`, `getnetworkhashps` (dummy 2-work-per-block), `mockscheduler`. | — | — | Q-59 rest **done (#428)**. | high |
 | A-03 | Electrum surface = COMPAT 1.4.2 (+asof) | dispatch `server.rs:1196–1525`; stubs `donation_address`, `peers.subscribe` are client-probed. | none | 0 | — | high (not excess) |
 | A-04 | No graphical-explorer Esplora endpoints exist | routes `esplora/server.rs:374–451`. | none | 0 | — | high |
 | A-05 | Auth/limits not triple-copied | RPC alone has cookie/Basic; Electrum+Esplora share `ServeLimits`. | none | 0 | — | high |
@@ -253,7 +251,7 @@ Shipped pipeline: `run.rs` → `sync_cancellable`; IBD dials own peers; raw fram
 | A-17 | `blockstats.rs` 573 | `rpc_getblockstats.py` is `run`; helpers `pub` but file-local (`PER_UTXO_OVERHEAD`, `truncated_median`, …). | visibility only. | 0 | none | high |
 | A-18 | `RpcParams` named-arg boilerplate | Core dialect tax (`reject_unknown` chain 24 / mempool 25 / mine 31 / net 12). | none | 0 | — | high |
 | A-19 | Over-abstraction | `RpcRegtest` has two impls; no one-impl traits. | none | 0 | — | high |
-| A-20 | `submitblock` regtest clamp vs docs | `mine.rs:965–967` vs `rpc.md:93`, `COMPAT.md:64` — Q-59. | fix impl (adds code). | 0 | — | high (not deletion) |
+| A-20 | `submitblock` regtest clamp vs docs  **done (#424)** | Live `ChainHub` on all networks (same receive path as P2P). | — | — | `generate*` / `setmocktime` stay regtest-only. | high |
 | A-21 | Test harness duplication | **done (#414)** RPC leftover `temp_dir` inlines use `TempDir`. Electrum `tmp_store` / Esplora `temp_query` wrap `tiny_query` (#411). | `run_electrum` / `http_get` stay production vs protocol-local. | leftover protocol clients | WS/subscribe timing flake | medium |
 | A-22 | Crate-public helpers used only internally | `post_rpc`, `basic_auth_header` (tests only), `EsploraScriptFields`, `PER_UTXO_OVERHEAD`, … | X-04. | 0 | none | high |
 | A-23 | Duplicate rustdoc lines | `net.rs:201–202`, `mempool.rs:61–62`. | delete | 2 | none | high |
@@ -284,14 +282,14 @@ Shipped pipeline: `run.rs` → `sync_cancellable`; IBD dials own peers; raw fram
 | ID | Item | Evidence | Proposal | LOC | Trade-off | Conf. |
 |----|------|----------|----------|-----|-----------|-------|
 | D-01 | CLI `CliAccum` vs conf `apply_kv`  **done (#418)** | See X-05. | — | ~400–600 | high harness risk | high/medium |
-| D-02 | OPERATOR flag table lags shipped CLI | `OPERATOR.md:113–138` omits `--permitbaremultisig`, `--mempoolexpiry`, `--alertnotify`, `--startupnotify`, `--mocktime`, `--maxtipage`, `--blockversion`, `--blockmintxfee`, `--rpcworkqueue`, `--seednode`, cluster limits (all in `cli.rs` help `156–162`). | Document (or delete flags nobody drives — D-03). | docs | Q-59 honesty | high |
-| D-03 | `--permitbaremultisig` is display-only | stored `config.rs:110`; RPC echoes it; admit never reads it (Libre). | Label "reported only" or reject `=0`. Do not add Core standardness. | ~0–80 | harness expects the key | high |
+| D-02 | OPERATOR flag table lags shipped CLI  **done (#424)** | OPERATOR documents shipped knobs; `--permitbaremultisig` is not a node flag. | — | — | — | high |
+| D-03 | `--permitbaremultisig` is display-only  **done (#424)** | Flag deleted. `getmempoolinfo.permitbaremultisig` is always `true`. Core-functional shim still ignores `-permitbaremultisig`. | — | — | Do not add Core standardness. | high |
 | D-04 | Electrum/Esplora start/shutdown glue | `run.rs:1235–1331` parallel bodies; shutdown `928–947`. | one `ServiceStart` table for the two SH services. | ~40–80 | SH-ready gating | medium |
 | D-05 | `inhibit.rs` | small, used. | none | 0 | — | high |
 | D-06 | `regtest_rpc.rs` | `RpcRegtest` adapter, not a second server. | optional move next to hub. | 0 | — | high |
 | D-07 | `run_p2p` ≈1,617 prod + 815 test | orchestration; `TipModeGates`/`CatchUp` already named. | peel only for a seam. | 0 | R-10 | high |
 | D-08 | Over-exported node types | `SuspendInhibit`, `HubRegtest`, `*Opts`, `NodeError`, `NodeHandle`, `inbound_from_maxconnections`, `ConfApply`, `parse_minimum_chain_work`. | `pub(crate)` except what `rbitcoin-test` uses. | ~0–10 | none | high |
-| D-09 | `--minrelaytxfee` parse failure silently ignored | `run.rs:298–301`. | error out (Q-59). | 0 | — | high |
+| D-09 | `--minrelaytxfee` parse failure silently ignored  **done (#424)** | Garbage and negatives fail at config parse (`0` is still no floor). | — | — | — | high |
 
 ---
 
@@ -343,9 +341,10 @@ Suggested order (each a worktree PR, Red→Green→Refactor per `docs/how-we-pla
 5. **Per-crate dead paths**: I-01/I-02/I-03/I-19, SH-01/SH-02/SH-03/SH-08/SH-09/SH-11, S-01/S-03/S-05–S-09, Q-05/Q-14, N-01/N-06/N-14, M-02, L-02, T-02, X-09.
 6. **X-07** move `block_diff` + fuzz encoders to `fuzz/` (check coverage scope first).
 7. **X-05** node config (write the flag-matrix test first).
-8. **X-01 step 2–3** instance-owned stats + table-driven `perf_log`.
-9. **Product-gated** (need a SCHEMA/COMPAT decision, listed not scheduled): S-04/S-12/SH-06/SH-07 leftover index refuse **done (#422)**. S-15 Esplora `vin` omit **done (#423)**. C-06 Full assemble **done (#426, stacked base)**. Q-06 store planner **done (this PR)**. Remaining: A-02/A-20/D-02/D-03 doc honesty (Q-59). A-01 and S-13 landed in #397.
-10. **X-08** re-enable clippy lints in batches once the above lands.
+8. **X-01 step 2–3** instance-owned stats + table-driven `perf_log`. **Done (#420 merged).**
+9. **Product-gated** SCHEMA/COMPAT + honesty dual paths: S-04/S-12/SH-06/SH-07 leftover index refuse **done (#422)**. S-15 Esplora `vin` omit **done (#423)**. A-02/A-20/D-02/D-03/D-09 Q-59 honesty **done (#424)**; Q-59 rest **done (#428)**. C-06 Full assemble **done (#426)**. Q-06 one planner **done (#427)**. A-01 and S-13 landed in #397.
+10. **Before X-08 remainder** — §16. Dual-path / `#[cfg(test)]` production forks / leftover dead that the program named but did not schedule, plus C-06's cfg(test) wrappers.
+11. **X-08** re-enable clippy lints in batches once the remainder lands.
 
 ---
 
@@ -364,10 +363,10 @@ No proposal flattens an io_uring machine, splits the interpreter opcode match, r
 
 ---
 
-## 15. Completed-items inventory (working doc; not in git)
+## 15. Completed-items inventory
 
-Status vs current `origin/master` `6e1037c1` (Merge #414). GitHub numbers
-are the PRs that landed the work. This file stays untracked.
+Status vs current `origin/master` (Merge #427). GitHub numbers
+are the PRs that landed the work.
 
 | ID | What shipped | PR | Notes |
 |----|--------------|----|-------|
@@ -413,11 +412,12 @@ are the PRs that landed the work. This file stays untracked.
 | **X-09** | `TableKind::{Input,Output,Point,TxHeight}` deleted; `from_u16` returns None for 4/5/6/12. Incremental relay aliases `MIN_RELAY`. Node `DEFAULT_MAX_INBOUND` aliases net. | #415 | — |
 | **X-07 / N-07 / N-13** | `block_diff` + compact recipe/v2 encode helpers live in `fuzz/`. Net keeps shipped accept/reconstruct/v2/`drain_pending_now`/`PendingBlocks`. Recipe fixtures under `fuzz/fixtures/`. `cargo fmt --all` visits `fuzz/` via rbitcoin-log fmt-anchor tests. | [#416](https://github.com/reardencode/rbitcoin/pull/416) merged `90f57239` | Fuzz crate is not a coverage member. |
 | **X-05 / D-01** | CLI `--key[=value]` and conf share `apply_kv` (conf then CLI). `CliAccum` copy gone. `DatadirOpts::path()`. `--smoke`/`--help`/`--log-level` CLI-only. Explicit `--milestone 0` sticks (`operator_config_from_args`). | [#418](https://github.com/reardencode/rbitcoin/pull/418) merged `f7a38b60` | — |
-| **X-01 steps 2–3 / I-06** | Confirm/query/IBD window meters on `Query` as `ConfirmStats`; note via `&`; `perf_log::sample` take-and-reset that instance. `exclusive::with` twins gone. Write-stage inventory is one name+extractor table. Live lookup/load/scripts/write tokens stay. Store head-resolve window meters remain process-global. | [#420](https://github.com/reardencode/rbitcoin/pull/420) | Do not merge unless asked. |
+| **X-01 steps 2–3 / I-06** | Confirm/query/IBD window meters on `Query` as `ConfirmStats`; note via `&`; `perf_log::sample` take-and-reset that instance. `exclusive::with` twins gone. Write-stage inventory is one name+extractor table. Live lookup/load/scripts/write tokens stay. Store head-resolve window meters remain process-global. | [#420](https://github.com/reardencode/rbitcoin/pull/420) merged `0d80e48e` parent | — |
 | **S-04 / S-12 / SH-06 / SH-07** | Leftover **index** layouts refuse on open: fuse8 v1, flat `*.idx.meta`, Shared file `scripthash.body`, pack8 Paged (mode 10). One-line wipe/rebuild; Class A kept. No always-probe / flat rename / Shared read. | [#422](https://github.com/reardencode/rbitcoin/pull/422) | — |
 | **S-15** | `PointRecord.spending_input_index` and ignored `put_spend` input-index arg deleted. Esplora `/outspend(s)` omit `vin`. COMPAT documents explorer gap. | [#423](https://github.com/reardencode/rbitcoin/pull/423) | — |
-| **C-06** | `AssembleMode::Full` + `validate_block_connect` deleted. Confirm is optimistic assemble then `structural_validate_spends`. Connect tests use `accept_and_connect_block`. | #426 | Stacked base for Q-06. |
-| **Q-06** | `archive_plan_batch_from_store` deleted. One planner: `archive_plan_batch_from_wire` + fill packed ins. Class A-without-tip still does not advance tip. | this PR | Cite GitHub number after merge. |
+| **A-02 / A-20 / D-02 / D-03 / D-09** | `submitblock` live hub all networks; `--minrelaytxfee` garbage/negatives error; `--permitbaremultisig` gone; METHOD_LIST leftovers + dummy `getnetworkhashps` documented. | [#424](https://github.com/reardencode/rbitcoin/pull/424) merged `3eccac25` | Q-59 rest (`gettxout` mempool-spent, JSON-RPC batch cap, `maxfeerate`/`maxburnamount`) **done (#428)**. |
+| **C-06** | `AssembleMode::Full` + `validate_block_connect` deleted. Confirm is optimistic assemble then `structural_validate_spends`. Connect tests use `accept_and_connect_block`. `verify_scripts_pool` deleted. | [#426](https://github.com/reardencode/rbitcoin/pull/426) merged | **C-19** (`try_for_each_parallel`) landed in this remainder branch. |
+| **Q-06** | `archive_plan_batch_from_store` deleted. `commit_class_a_block`/`_run` call `archive_class_a_from_wire`. Confirm write fills packed ins on the plan. | [#427](https://github.com/reardencode/rbitcoin/pull/427) merged | Remainder **Q-21**: `commit_class_a_only` still converts TxApply. |
 
 Suggested-order progress:
 
@@ -428,6 +428,52 @@ Suggested-order progress:
 5. Per-crate dead paths — done ([#415](https://github.com/reardencode/rbitcoin/pull/415) merged `f113974f`).
 6. **X-07** fuzz out of net — done ([#416](https://github.com/reardencode/rbitcoin/pull/416) merged `90f57239`).
 7. **X-05** node config — done ([#418](https://github.com/reardencode/rbitcoin/pull/418) merged `f7a38b60`).
-8. **X-01 steps 2–3** ConfirmStats + table-driven `perf_log` — PR [#420](https://github.com/reardencode/rbitcoin/pull/420) required checks green (not merged).
-9. Product-gated SCHEMA/COMPAT rows — leftover index refuse (#422), S-15 `vin` omit (#423), **C-06** Full assemble (#426), **Q-06** one Class A planner (this PR). Remaining: A-02/A-20/D-02/D-03.
-10. **X-08** clippy batches — not started.
+8. **X-01 steps 2–3** ConfirmStats + table-driven `perf_log` — done ([#420](https://github.com/reardencode/rbitcoin/pull/420) merged).
+9. Product-gated SCHEMA/COMPAT + honesty — leftover index refuse (#422), S-15 `vin` omit (#423), Q-59 (#424 + #428), **C-06** (#426), **Q-06** (#427). Suggested-order step 9 complete.
+10. **Before X-08 remainder** — §16. Remainder PR (this work): C-19, I-22, I-07, SH-04/05, SH-10/12 already gone, S-11/14/17, C-13, C-16, Q-09/C-11, Q-18. Skipped: **X-03**, **C-03**, **Q-21** (~150 `connect_block` TxApply fixtures).
+11. **X-08** clippy batches — not started.
+
+---
+
+## 16. Before X-08 remainder (2026-09-11)
+
+Suggested-order **1–9 is the program** (#426/#427 merged). This remainder PR
+lands the Should rows plus **C-19** / **Q-09**. **Do not** treat quality.md Open
+(Q-41, Q-57–Q-60, R-10 god-files) as this inventory.
+
+X-08 re-enables clippy `allow`s. Remaining Must before that: **X-03** (store
+IO probes), **C-03** (confirm_run pub explosion), **Q-21** (`commit_class_a_only`
+TxApply→dummy Block; ~150 `connect_block` fixtures).
+
+### Must (same sins the program opened with)
+
+| ID | Why it is this program | Contract |
+|----|------------------------|----------|
+| **X-03** | Section 1 leftover. Store `test_take_*` / `take_g_page_preads` / `note_sh_page_chain_io` / `TEST_FORCE_SESSION_FALSE` are `#[cfg(test)]` probes on IO paths. | Assert through session stats or file state; delete thread-local probes. |
+| **C-19** | **done (remainder PR):** `try_for_each_parallel` deleted. Steal tests use `try_for_each_parallel_idle`; idle-vs-foreground uses `start_for_each_owned`. `run_wave` is idle-only. | — |
+| **C-03** | Thin confirm_run / `prepare_block_for_archive*` / `check_block_wire` / `confirm_bq_resolve_wave*` still pub. Same “one entry per live path” rule as C-06/Q-06. | Un-export or inline; keep one options struct where two variants are both live. |
+| **Q-21** | **partial (#427):** Block APIs (`commit_class_a_block`/`_run`) call `archive_class_a_from_wire`. Remainder: `commit_class_a_only` still converts TxApply → dummy Block in production `Query` (~150 `connect_block` sites). | Conversion in tests / `rbitcoin-test`. Delete `tx_apply_to_tx`. Skipped this PR (call-site balloon). |
+
+### Should (high-confidence dead / honesty, small)
+
+| ID | Item |
+|----|------|
+| **I-22** | **done:** startup log is `body queue: in-process`. |
+| **I-07** | **done:** `bq_pipeline_saturated` (no unused pending_len); `drain_ready_peer_and_body_events`; `buf_ahead` (operator token was already `buf_ahead=`); assign no longer takes write-next; `BodyPresence::pending_len` deleted. `archive_write_next` Atomic still used for densify window in events. |
+| **SH-04 / SH-05** | **done:** `contains_create` / `put_create` / `put_create_batch` deleted. Tests call `create_fks` / `put_create_batch_append`. |
+| **SH-10 / SH-12** | **already gone:** no `ScriptHashHead::get_many`; no `sh_page_count_for_entries` / `page_alloc_bytes_for_n_fks`. |
+| **S-11 / S-14 / S-17** | **done:** `Store::put_spend_create_at` / `Store::create_with_head_layout` deleted (tests call `point_table::put_spend_on_create_at` / `create_layout_with_head`). Probe sample/snapshot deleted. `flush_class_c_pre_tip` is private. `TxTable::create_with_head_layout` stays (in-crate opener). |
+| **C-13** | **done:** `rbitcoin-test::pad_empty_from` delegates to consensus. |
+| **C-16** | **done:** limitations doc names lock 0.32.102. |
+| **Q-09 / C-11** | **done:** consensus `block/tx_precompute.rs` deleted. Connect-only bip143 pin is `script::verify_routing_tests::from_tx_connect_bip143_fails_closed_without_midstate`. |
+| **Q-18** | **done:** `Query::get_tx` is the one name. |
+
+### Not this remainder
+
+- **C-05** SPK predicate duplication — consensus correctness, not an unused twin.
+- **A-08 / A-09 / A-11** — two wallet JSON schemas (keep) / Esplora address wrappers (optional).
+- **N-09** MiningHub extract — only if a quality.md Q-row needs the seam (R-10).
+- **N-05** long peer_tests twins — medium; flaky timing.
+- **Q-04** micro-module fold — readability, not a dual path.
+- quality.md **Q-41 / Q-57–Q-60 / Q-54–Q-56 / R-10**.
+
