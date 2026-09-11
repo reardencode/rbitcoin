@@ -11,6 +11,12 @@ before 1.0).
 
 ### Fixed
 
+- **IBD session-fault resume:** after Class C, a uring session fault on spend
+  annotate or `tx.head` drain finishes annotate+drain on the write thread
+  (tip `connect_at` retries `finish_post_commit`; IBD does the same in place
+  when every hash is connected). Load recover after `note_lookup_ok` rebuilds
+  create-fk HWM from durable Class A (`clear_all`) so retried plans are not
+  stamped past an abandoned pack.
 - **IBD io_uring drain stall:** `drain_all` no longer returns after 5 s with
   leftover SQEs (that freed in-flight buffers). Every TLS session waits while
   CQEs arrive; a 120 s zero-completion stall aborts explicit drain (session

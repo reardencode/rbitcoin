@@ -176,8 +176,8 @@ impl LoadAheadState {
         self.next_tx_start = hub.query.tx_body_count().saturating_add(1).max(1);
     }
 
-    /// Load session-fault after `note_lookup_ok` must drop speculative FKs
-    /// before requeue (`sync_body_hwm` uses `max` and will not roll down).
+    /// Drop speculative FKs after load uring recover (`requeue_on_uring_recover`
+    /// already ran on this thread). `sync_body_hwm` uses `max` and will not roll down.
     fn on_uring_recover(&mut self, hub: &ChainHub) {
         self.clear_all(hub);
     }
@@ -485,25 +485,21 @@ impl ConfirmRejectClass {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ConfirmWriteErrAction {
-    AlreadyCommitted,
-    UringRecover,
-    Reject,
-}
-
-/// Session-fault recover wins over `has_block`: Class C can commit before
-/// spend annotate / `tx.head` drain finishes.
-pub(crate) fn confirm_write_err_action(
-    is_session_fault: bool,
-    already_on_chain: bool,
-) -> ConfirmWriteErrAction {
-    if is_session_fault {
-        ConfirmWriteErrAction::UringRecover
-    } else if already_on_chain {
-        ConfirmWriteErrAction::AlreadyCommitted
-    } else {
-        ConfirmWriteErrAction::Reject
+/// Class C already committed: finish annotate + head drain here.
+/// Requeue through lookup/load cannot work — those heights are stale vs tip.
+fn finish_connected_write_after_session_fault(
+    query: &rbitcoin_query::Query,
+    items: &[(u32, [u8; 32])],
+) -> Result<(), rbitcoin_consensus::ConsensusError> {
+    query.uring_recover_or_abort("ibd-confirm-write");
+    loop {
+        match rbitcoin_consensus::finish_post_commit_hashes(query, items) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.is_uring_session_fault() => {
+                query.uring_recover_or_abort("ibd-confirm-write");
+            }
+            Err(e) => return Err(e),
+        }
     }
 }
 
@@ -1578,8 +1574,9 @@ pub(crate) fn spawn_confirm_engine(
                     }
                     Err(e) => {
                         confirm_thr_stats::add_write_work(t0.elapsed());
-                        let msg = e.to_string();
-                        if matches!(e, rbitcoin_consensus::ConsensusError::Cancelled)
+                        let mut err = e;
+                        let msg = err.to_string();
+                        if matches!(err, rbitcoin_consensus::ConsensusError::Cancelled)
                             || feed_wb.stopped()
                         {
                             info!("ibd: confirm write aborted: {msg}");
@@ -1589,53 +1586,95 @@ pub(crate) fn spawn_confirm_engine(
                             .first()
                             .map(|(h, raw)| (*h, BlockHash::from_byte_array(*raw)))
                             .unwrap_or((first_h, BlockHash::from_byte_array([0u8; 32])));
-                        if write_batch_is_stale_plan(&hub_wb, &feed_wb, height) {
+                        let mut skip_stale = false;
+                        if err.is_uring_session_fault() {
+                            let all_connected = heights_hashes.iter().all(|(_, raw)| {
+                                hub_wb.is_connected(&BlockHash::from_byte_array(*raw))
+                            });
+                            if all_connected {
+                                match finish_connected_write_after_session_fault(
+                                    &hub_wb.query,
+                                    &heights_hashes,
+                                ) {
+                                    Ok(()) => {
+                                        if let Err(e) = hub_wb.note_confirmed_tip(&meta) {
+                                            warn!("ibd: confirm write note tip: {e}");
+                                        }
+                                        for (h, raw) in &heights_hashes {
+                                            let ha = BlockHash::from_byte_array(*raw);
+                                            if let Err(e) =
+                                                hub_wb.query.block_queue_dequeue_height(*h)
+                                            {
+                                                rbitcoin_log::debug!(
+                                                    "ibd: block_queue dequeue h={h}: {e}"
+                                                );
+                                            }
+                                            loop_stats_wb
+                                                .confirm_blocks
+                                                .fetch_add(1, Ordering::Relaxed);
+                                            accepted_wb.fetch_add(1, Ordering::SeqCst);
+                                            if event_tx_wb
+                                                .send(ConfirmEvent::Accepted { hash: ha })
+                                                .is_err()
+                                            {
+                                                feed_wb.finish(
+                                                    heights_hashes.iter().map(|(hh, _)| *hh),
+                                                );
+                                                return;
+                                            }
+                                        }
+                                        feed_wb.finish(heights_hashes.iter().map(|(h, _)| *h));
+                                        continue;
+                                    }
+                                    Err(e2) => {
+                                        err = e2;
+                                        skip_stale = true;
+                                    }
+                                }
+                            } else if requeue_on_uring_recover(
+                                &hub_wb.query,
+                                &feed_wb,
+                                true,
+                                "ibd-confirm-write",
+                                meta.iter().copied(),
+                            ) {
+                                load_ahead_reset_wb.store(true, Ordering::Release);
+                                warn!(
+                                    "ibd: confirm write uring recover @ {height} batch_parts={parts}: {err}"
+                                );
+                                continue;
+                            }
+                        }
+                        let msg = err.to_string();
+                        if !skip_stale && write_batch_is_stale_plan(&hub_wb, &feed_wb, height) {
                             debug!(
-                                "ibd: confirm write drop stale batch first={height} (tip moved)"
+                                "ibd: confirm write drop stale batch first={height} ({msg})"
                             );
                             feed_wb.finish(heights_hashes.iter().map(|(h, _)| *h));
                             continue;
                         }
-                        let already_on_chain = hub_wb.has_block(&hash)
-                            || (msg.contains("prevout already spent")
-                                && heights_hashes.iter().all(|(_, raw)| {
-                                    hub_wb.has_block(&BlockHash::from_byte_array(*raw))
-                                }));
-                        match confirm_write_err_action(e.is_uring_session_fault(), already_on_chain)
+                        if !skip_stale
+                            && (hub_wb.has_block(&hash)
+                                || (msg.contains("prevout already spent")
+                                    && heights_hashes.iter().all(|(_, raw)| {
+                                        hub_wb.has_block(&BlockHash::from_byte_array(*raw))
+                                    })))
                         {
-                            ConfirmWriteErrAction::UringRecover => {
-                                let _ = requeue_on_uring_recover(
-                                    &hub_wb.query,
-                                    &feed_wb,
-                                    true,
-                                    "ibd-confirm-write",
-                                    meta.iter().copied(),
-                                );
-                                load_ahead_reset_wb.store(true, Ordering::Release);
-                                warn!(
-                                    "ibd: confirm write uring recover @ {height} batch_parts={parts}: {e}"
-                                );
-                                continue;
-                            }
-                            ConfirmWriteErrAction::AlreadyCommitted => {
-                                debug!(
-                                    "ibd: confirm write skip already-committed @{height} ({msg})"
-                                );
-                                for (_, raw) in &heights_hashes {
-                                    let h = BlockHash::from_byte_array(*raw);
-                                    if hub_wb.has_block(&h) {
-                                        loop_stats_wb
-                                            .confirm_blocks
-                                            .fetch_add(1, Ordering::Relaxed);
-                                        accepted_wb.fetch_add(1, Ordering::SeqCst);
-                                        let _ =
-                                            event_tx_wb.send(ConfirmEvent::Accepted { hash: h });
-                                    }
+                            debug!(
+                                "ibd: confirm write skip already-committed @{height} ({msg})"
+                            );
+                            for (_, raw) in &heights_hashes {
+                                let h = BlockHash::from_byte_array(*raw);
+                                if hub_wb.has_block(&h) {
+                                    loop_stats_wb
+                                        .confirm_blocks
+                                        .fetch_add(1, Ordering::Relaxed);
+                                    accepted_wb.fetch_add(1, Ordering::SeqCst);
+                                    let _ = event_tx_wb.send(ConfirmEvent::Accepted { hash: h });
                                 }
-                                feed_wb.finish(heights_hashes.iter().map(|(h, _)| *h));
-                                continue;
                             }
-                            ConfirmWriteErrAction::Reject => {}
+                            feed_wb.finish(heights_hashes.iter().map(|(h, _)| *h));
+                            continue;
                         }
                         load_ahead_reset_wb.store(true, Ordering::Release);
                         feed_wb.finish(heights_hashes.iter().map(|(h, _)| *h));
@@ -1643,9 +1682,9 @@ pub(crate) fn spawn_confirm_engine(
                             .confirm_reject_stops
                             .fetch_add(1, Ordering::Relaxed);
                         warn!(
-                            "ibd: confirm write reject @ {height} batch_parts={parts}: {e}"
+                            "ibd: confirm write reject @ {height} batch_parts={parts}: {err}"
                         );
-                        let class = ConfirmRejectClass::from_consensus(&e);
+                        let class = ConfirmRejectClass::from_consensus(&err);
                         let _ = emit_confirm_reject(
                             &event_tx_wb,
                             &feed_wb,

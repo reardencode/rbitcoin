@@ -109,8 +109,12 @@ pub fn confirm_write_phase(
     let tip = query.tip_height().map(|h| h.0);
     match write_batch_vs_tip(tip, batch.prepared.iter().map(|p| p.height.0)) {
         WriteBatchVsTip::AllOld => {
-            let hashes: Vec<[u8; 32]> = batch.prepared.iter().map(|p| p.hash).collect();
-            finish_post_commit_hashes(query, &hashes)?;
+            let items: Vec<(u32, [u8; 32])> = batch
+                .prepared
+                .iter()
+                .map(|p| (p.height.0, p.hash))
+                .collect();
+            finish_post_commit_hashes(query, &items)?;
             return Ok(Vec::new());
         }
         WriteBatchVsTip::SpansTip => {
@@ -307,50 +311,69 @@ pub fn confirm_write_phase(
 /// Replay spend annotate + `tx.head` drain after Class C already committed.
 ///
 /// Session-fault retry must not skip this: `height_of_hash` matching is not
-/// "write finished." `post_commit` is idempotent (`decide_annotate` Skip).
+/// "write finished."
 pub(crate) fn finish_post_commit(
     query: &Query,
+    height: u32,
     hash: &[u8; 32],
 ) -> Result<(), ConsensusError> {
-    finish_post_commit_hashes(query, std::slice::from_ref(hash))
+    finish_post_commit_hashes(query, &[(height, *hash)])
 }
 
-fn finish_post_commit_hashes(
+/// IBD write-thread in-place retry: `(height, hash)` must already be connected
+/// at that height.
+pub fn finish_post_commit_hashes(
     query: &Query,
-    hashes: &[[u8; 32]],
+    items: &[(u32, [u8; 32])],
 ) -> Result<(), ConsensusError> {
     let queued = query.store().txs.take_pending_queued();
+    if queued.is_empty() && !query.spend_index_enabled() {
+        return Ok(());
+    }
     let drain_max_fk = queued.iter().filter_map(|(_, fk)| fk.get()).max();
-    let drain = super::head_drain::submit_head_insert(query.store(), queued);
+    let drain = if queued.is_empty() {
+        None
+    } else {
+        Some(super::head_drain::submit_head_insert(query.store(), queued))
+    };
 
     let annotate_res = (|| -> Result<(), ConsensusError> {
         if !query.spend_index_enabled() {
             return Ok(());
         }
         let mut jobs = Vec::new();
-        for hash in hashes {
-            jobs.extend(annotate_jobs_from_connected_hash(query, hash)?);
+        for &(height, hash) in items {
+            jobs.extend(annotate_jobs_from_connected_hash(query, height, &hash)?);
         }
         post_commit(query, &jobs)?;
         Ok(())
     })();
 
-    let (drain_res, restore) = drain.join_restore();
-    if drain_res.is_err() {
-        query.store().txs.head_note_pending(&restore);
-    }
-    annotate_res?;
-    drain_res.map_err(ConsensusError::from)?;
-    if let Some(fk) = drain_max_fk {
-        query.note_head_drain_fk(fk);
+    if let Some(drain) = drain {
+        let (drain_res, restore) = drain.join_restore();
+        if drain_res.is_err() {
+            query.store().txs.head_note_pending(&restore);
+        }
+        annotate_res?;
+        drain_res.map_err(ConsensusError::from)?;
+        if let Some(fk) = drain_max_fk {
+            query.note_head_drain_fk(fk);
+        }
+    } else {
+        annotate_res?;
     }
     Ok(())
 }
 
 fn annotate_jobs_from_connected_hash(
     query: &Query,
+    height: u32,
     hash: &[u8; 32],
 ) -> Result<Vec<crate::block::SpendAnnotateJob>, ConsensusError> {
+    match query.height_of_hash(hash).map_err(ConsensusError::from)? {
+        Some(h) if h.0 == height => {}
+        _ => return Ok(Vec::new()),
+    }
     let Some((hfk, _)) = query
         .get_header_by_hash(hash)
         .map_err(ConsensusError::from)?
