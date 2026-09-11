@@ -21,6 +21,15 @@ fn tx_head_drain_thread_is_named_and_reused() {
     assert_eq!(id1, id2, "drain must keep one OS thread across batches");
 }
 
+#[test]
+fn head_insert_join_restore_empty_ok() {
+    use super::submit_head_insert;
+    let (_d, q) = tmp_query();
+    let (r, queued) = submit_head_insert(q.store(), Vec::new()).join_restore();
+    assert_eq!(r.unwrap(), 0);
+    assert!(queued.is_empty());
+}
+
 /// Batch append: contiguous heights merge; gap returns Err(other).
 #[test]
 fn script_ok_append_contiguous_and_gap() {
