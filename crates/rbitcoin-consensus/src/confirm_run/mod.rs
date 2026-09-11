@@ -57,7 +57,7 @@ pub use bq_resolve::{
     BQ_RESOLVE_WAVE_MAX_INPUTS, BQ_RESOLVE_WAVE_MIN_INPUTS,
 };
 #[cfg(test)]
-use head_drain::{submit_head_drain, HEAD_DRAIN_THREAD_NAME};
+use head_drain::{submit_head_drain, submit_head_insert, HEAD_DRAIN_THREAD_NAME};
 #[cfg(test)]
 use lookup::confirm_archive_kind;
 use lookup::known_create_txid_lookup;
