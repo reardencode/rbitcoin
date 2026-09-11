@@ -501,7 +501,7 @@ mod coverage_tests {
             tx,
             crate::block::ScriptVerifyFlags::buried(true, true, true, true, true),
         );
-        crate::block::verify_scripts_pool(&[job]).unwrap();
+        crate::block::verify_one_script_job(&job).unwrap();
     }
 
     #[test]

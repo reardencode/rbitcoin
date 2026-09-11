@@ -416,9 +416,8 @@ fn witness_p2wsh_and_nested_p2sh() {
 }
 
 #[test]
-fn verify_scripts_pool_empty_and_anyone_can_spend() {
-    use super::{verify_scripts_pool, ScriptCheckJob};
-    assert!(verify_scripts_pool(&[]).is_ok());
+fn verify_one_script_job_skips_anyone_can_spend() {
+    use super::{verify_one_script_job, ScriptCheckJob};
     let job = ScriptCheckJob::new(
         vec![TxOut {
             value: Amount::from_sat(1),
@@ -443,7 +442,7 @@ fn verify_scripts_pool_empty_and_anyone_can_spend() {
         },
         crate::block::ScriptVerifyFlags::buried(true, true, true, true, true),
     );
-    assert!(verify_scripts_pool(&[job]).is_ok());
+    assert!(verify_one_script_job(&job).is_ok());
 }
 
 #[test]

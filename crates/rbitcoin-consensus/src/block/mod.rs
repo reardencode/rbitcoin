@@ -1614,14 +1614,6 @@ fn mtp_at(query: &Query, height: Height, cache: &mut U32Map<u32>) -> Result<u32,
     Ok(t)
 }
 
-/// Parallel script checks for an owned job slice (unit tests / coverage).
-///
-/// Confirm IBD uses `start_for_each_owned` on the scripts stage, not this.
-#[cfg(test)]
-pub fn verify_scripts_pool(jobs: &[ScriptCheckJob]) -> Result<(), ConsensusError> {
-    crate::script_pool::try_for_each_parallel(jobs, verify_one_script_job)
-}
-
 /// Whether this job can skip `verify_job_all_inputs`.
 ///
 /// OP_TRUE scriptPubKey alone is **not** sufficient: Core still
