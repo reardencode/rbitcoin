@@ -1213,6 +1213,10 @@ mod tests {
         assert_eq!(st, 200, "{body}");
         let os: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(os["spent"], false);
+        assert!(
+            os.get("vin").is_none(),
+            "outspend vin is an explorer gap: {os}"
+        );
 
         let (st, body) = http_get(addr, &format!("/tx/{txid0}/outspends")).await;
         assert_eq!(st, 200, "{body}");

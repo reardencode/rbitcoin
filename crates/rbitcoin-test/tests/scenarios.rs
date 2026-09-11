@@ -326,7 +326,7 @@ fn store_error_and_corrupt_paths() {
     assert!(matches!(s.get_header(Fk(99)), Err(StoreError::NotFound)));
     // All-zero txid has no create head entry → NotFound (not InvalidFk).
     assert!(matches!(
-        s.put_spend(&[0u8; 32], 0, Fk::NULL, 0),
+        s.put_spend(&[0u8; 32], 0, Fk::NULL),
         Err(StoreError::NotFound | StoreError::InvalidFk)
     ));
     let _ = format!("{}", StoreError::BadMagic);

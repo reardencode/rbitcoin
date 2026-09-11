@@ -826,7 +826,6 @@ impl Store {
         out_txid: &[u8; 32],
         out_index: u32,
         spending_tx_fk: Fk,
-        _spending_input_index: u32,
     ) -> Result<Fk, StoreError> {
         let create_fk = if let Some(fk) = self.txs.queued_pending_fk(out_txid) {
             fk
@@ -841,14 +840,10 @@ impl Store {
     }
 
     /// Bulk annotate by out_txid (resolves each create via `tx.head`).
-    /// Tuple: `(out_txid, vout, spending_tx_fk, input_index_ignored)`.
-    pub fn put_spend_batch(
-        &self,
-        edges: &[([u8; 32], u32, Fk, u32)],
-    ) -> Result<Vec<Fk>, StoreError> {
+    pub fn put_spend_batch(&self, edges: &[([u8; 32], u32, Fk)]) -> Result<Vec<Fk>, StoreError> {
         let mut out = Vec::with_capacity(edges.len());
-        for &(txid, vout, spend_fk, _) in edges {
-            self.put_spend(&txid, vout, spend_fk, 0)?;
+        for &(txid, vout, spend_fk) in edges {
+            self.put_spend(&txid, vout, spend_fk)?;
             out.push(spend_fk);
         }
         Ok(out)
@@ -1296,7 +1291,6 @@ impl Store {
                     out_txid: *out_txid,
                     out_index,
                     spending_tx_fk,
-                    spending_input_index: 0,
                     next: Fk::NULL,
                 });
                 Ok(true)
@@ -2023,8 +2017,8 @@ mod tests {
             vec![OutputRecord::unspent(1, vec![0x51])],
         );
         let spend3_fk = s.put_tx_full_batch_indexed(&[spend3], true).unwrap()[0];
-        s.put_spend(&[10u8; 32], 0, spend3_fk, 0).unwrap();
-        s.put_spend_batch(&[([10u8; 32], 1, spend_fk, 0)]).unwrap();
+        s.put_spend(&[10u8; 32], 0, spend3_fk).unwrap();
+        s.put_spend_batch(&[([10u8; 32], 1, spend_fk)]).unwrap();
         s.put_spend_create(create_fk, 1, spend2_fk).unwrap();
         let (soff, slen) = s.tx_spent_range(create_fk).unwrap();
         s.put_spend_create_at(create_fk, 1, spend3_fk, soff, slen)

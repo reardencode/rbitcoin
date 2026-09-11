@@ -498,7 +498,6 @@ fn outspend_json(
     Ok(json!({
         "spent": true,
         "txid": block_hash_hex(&spend_txid),
-        "vin": p.spending_input_index,
         "status": status,
     }))
 }
@@ -1108,7 +1107,7 @@ pub async fn post_tx_package(State(st): State<AppState>, body: Bytes) -> Respons
 
 #[cfg(test)]
 mod pure_helper_tests {
-    use super::{block_summary_json, resolve_address_sh};
+    use super::{block_summary_json, outspend_json, resolve_address_sh};
     use bitcoin::Network;
     use rbitcoin_primitives::{Fk, Height};
     use rbitcoin_query::{Query, TxApply};
@@ -1172,6 +1171,53 @@ mod pure_helper_tests {
             summary["weight"].as_u64().unwrap(),
             summary["size"].as_u64().unwrap().saturating_mul(4),
             "witness block weight is not 4×stripped size"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn outspend_json_spent_omits_vin() {
+        let (dir, q) = temp_query();
+        let _hash = seed_genesis(&q);
+        let create_fk = q.tx_fk_by_txid(&[0xcb; 32]).unwrap().unwrap();
+        let spend = (
+            TxRecord {
+                txid: [0x11; 32],
+                version: 1,
+                locktime: 0,
+                input_start_fk: Fk::NULL,
+                input_count: 1,
+                output_start_fk: Fk::NULL,
+                output_count: 1,
+            },
+            vec![InputRecord {
+                prev_txid: [0xcb; 32],
+                create_fk,
+                prev_index: 0,
+                sequence: u32::MAX,
+                script_sig: vec![],
+                witness: vec![],
+            }],
+            vec![OutputRecord::unspent(1, vec![0x51])],
+        );
+        let spend_fk = q.store().put_tx_full_batch_indexed(&[spend], true).unwrap()[0];
+        q.store().put_spend_create(create_fk, 0, spend_fk).unwrap();
+        let view = q.pin_chain_view().unwrap().expect("tip");
+        q.store()
+            .header_txs
+            .put_range(view.header_fk, create_fk, 2)
+            .unwrap();
+        q.store()
+            .strong_tx
+            .set_strong(spend_fk, view.header_fk)
+            .unwrap();
+        q.store().rebuild_height_fence().unwrap();
+        let v = outspend_json(&q, &[0xcb; 32], 0, Some(&view)).unwrap();
+        assert_eq!(v["spent"], true, "{v}");
+        assert!(v.get("txid").is_some(), "{v}");
+        assert!(
+            v.get("vin").is_none(),
+            "outspend vin is an explorer gap, not stored: {v}"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

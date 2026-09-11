@@ -51,7 +51,7 @@ pub struct ArchiveWritePlan {
     pub per_header_ranges: Vec<(Fk, Fk, u32)>,
     /// Pin-time spend edges (create_fk stamped). Survives freeze; packed ins do not.
     pub edges: crate::SpendEdges,
-    pub spends: Vec<([u8; 32], u32, Fk, u32)>,
+    pub spends: Vec<([u8; 32], u32, Fk)>,
     /// Creates from **this** batch only (txid→fk for in-flight / publish).
     pub batch_creates: Vec<([u8; 32], Fk)>,
     /// External parent identity stamped at lookup (`txid` + optional body/spent/pin).
@@ -218,7 +218,7 @@ impl ArchiveWritePlan {
         self.per_header_ranges = new_ranges;
         self.edges.retain(|id, _| keep_fks.contains(id));
         self.spends
-            .retain(|(_, _, spend_fk, _)| spend_fk.get().is_some_and(|id| keep_fks.contains(&id)));
+            .retain(|(_, _, spend_fk)| spend_fk.get().is_some_and(|id| keep_fks.contains(&id)));
         self.batch_creates
             .retain(|(_, fk)| fk.get().is_some_and(|id| keep_fks.contains(&id)));
         // body_est is an upper bound; leave as-is (overestimate is safe for reserve).
@@ -602,7 +602,7 @@ impl Query {
         use std::collections::HashSet;
         use std::time::Instant;
 
-        let mut spends: Vec<([u8; 32], u32, Fk, u32)> = Vec::new();
+        let mut spends: Vec<([u8; 32], u32, Fk)> = Vec::new();
         let archive_spends = self.writes_archive_spends();
         let index_tx = self.tx_index_enabled();
 
@@ -726,7 +726,7 @@ impl Query {
                     }
                 }
                 if archive_spends {
-                    spends.push((inp.prev_txid, inp.prev_index, tx_fk, i as u32));
+                    spends.push((inp.prev_txid, inp.prev_index, tx_fk));
                 }
                 if inp.prev_index == u32::MAX {
                     tx_edges.push(crate::SpendEdge {
@@ -2360,7 +2360,7 @@ mod tests {
             (dummy_pin(3), Vec::new()),
         ];
         plan.batch_pin = vec![dummy_pin(1), dummy_pin(2), dummy_pin(3)];
-        plan.spends = vec![([0u8; 32], 0, Fk(1), 0), ([0u8; 32], 0, Fk(3), 0)];
+        plan.spends = vec![([0u8; 32], 0, Fk(1)), ([0u8; 32], 0, Fk(3))];
         // Header 10 already has body; 20 needs body.
         let keep = plan
             .retain_headers_needing_body(|hfk| Ok(hfk == Fk(10)))

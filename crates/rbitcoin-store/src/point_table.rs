@@ -16,8 +16,6 @@ pub struct PointRecord {
     pub out_txid: [u8; 32],
     pub out_index: u32,
     pub spending_tx_fk: Fk,
-    /// Always 0 in v5 (input index no longer stored).
-    pub spending_input_index: u32,
     pub next: Fk,
 }
 

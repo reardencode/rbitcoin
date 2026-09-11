@@ -2035,7 +2035,7 @@ fn reconstruct_and_connect_error_arms() {
         .put_tx_full_batch_indexed(&[(trec, vec![], vec![])], true)
         .unwrap()[0];
     // put_spend needs real create - skip if fails
-    let _ = q.put_spend(&[1u8; 32], 0, fks0[0], 0);
+    let _ = q.put_spend(&[1u8; 32], 0, fks0[0]);
     let _ = q.spenders(&[1u8; 32], 0);
     let _ = q.spenders_raw(&[1u8; 32], 0);
 

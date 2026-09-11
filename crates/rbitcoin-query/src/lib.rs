@@ -1130,10 +1130,8 @@ impl Query {
         out_txid: &[u8; 32],
         out_index: u32,
         spending_tx_fk: Fk,
-        spending_input_index: u32,
     ) -> Result<Fk, QueryError> {
-        self.store
-            .put_spend(out_txid, out_index, spending_tx_fk, spending_input_index)
+        self.store.put_spend(out_txid, out_index, spending_tx_fk)
     }
 
     /// Strong (best-chain confirmed) spenders only.

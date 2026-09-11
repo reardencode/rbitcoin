@@ -31,6 +31,12 @@ surfaces). Those need reverse indexes and explorer-only APIs we deliberately
 omit. Block/tx **by full id** and address/**exact** scripthash history exist so
 wallets and APIs can verify and sync—not so we become mempool.space.
 
+**Product gap:** `/tx/:txid/outspend/:vout` and `/outspends` omit Blockstream
+`vin` (spending input index). `spent.body` stores only `spending_tx_fk`; vin
+is not on disk. Serving it would cold-read the spending tx’s `inwit`. Full
+`/tx/:txid` JSON still has `vin[]`. Explorer flow-graphs that need outspend
+`vin` are out of scope until that is a product goal.
+
 ## Intentional differences
 
 | Area | This node | Bitcoin Core |
@@ -169,7 +175,7 @@ via reverse proxy; app `ServeLimits` always on (same model as Electrum).
 | Tip | done | `/blocks/tip/height`, `/blocks/tip/hash`. REST stamps `X-Bitcoin-Chain-Tip` / `X-Bitcoin-Chain-Tip-Height` (CORS-exposed): **live tip** for block/tx/header routes; **SH watermark** for `/address/` and `/scripthash/` so wallet JSON matches the SH join. Empty chain omits them (existing 503). If the pin dies mid-request: **503** `chain view moved`. |
 | Blocks list | done | `/blocks`, `/blocks/:start_height` (10 summaries, newest-first) |
 | Block | done | `/block/:hash` JSON, `/raw`, `/status`, `/header`, `/txids`, `/txid/:i`, `/txs[/:start]`. JSON `bits` is the compact-target **u32** (Esplora schema, not Core hex). `size` / `weight` are BIP144 total size and BIP141 weight (witness included). |
-| Tx | done | `/tx/:txid` full JSON, `/hex`, `/raw`, `/status`, Electrum `/merkle-proof`, BIP37 `/merkleblock-proof`, `/outspend(s)`. Mempool-only txs (not in Class A) use the wire body from the mempool hub (`vin`/`vout`/`size`/`weight`/`fee`, `status.confirmed` false). `?asof=<hash>` on `/status` and `/outspend(s)`: confirmed/spent as of that ancestor; 404 if not on chain. |
+| Tx | done | `/tx/:txid` full JSON, `/hex`, `/raw`, `/status`, Electrum `/merkle-proof`, BIP37 `/merkleblock-proof`, `/outspend(s)` (**no** `vin` on outspend — explorer gap above). Mempool-only txs (not in Class A) use the wire body from the mempool hub (`vin`/`vout`/`size`/`weight`/`fee`, `status.confirmed` false). `?asof=<hash>` on `/status` and `/outspend(s)`: confirmed/spent as of that ancestor; 404 if not on chain. |
 | Address / scripthash | done | stats + `/utxo` + `/txs` + `/txs/mempool` + `/txs/chain[/:last_seen_txid]`; `/utxo` matches Electrum listunspent (mempool funding + drop mempool-spent confirmed); `/txs` and `/txs/mempool` use full Esplora tx JSON for mempool-only rows (wire from the hub). Last **one** SH join reused across sequential REST calls until SH-view **hash** changes; concurrent different SHs re-join. Needs SH finalize. Stamp is visible SH (durable + pending write-behind), matching live tip while jobs sit in RAM. `?asof=<hash>` on `/`, `/utxo`, `/txs`, `/txs/chain`: confirmed join at that ancestor **at or behind visible SH**, **no** mempool; headers are the asof hash; 404 if not on chain or ahead of visible SH. |
 | Mempool / fees | done | `/mempool`, `/mempool/txids`, `/mempool/recent` (accept-order ring), `/fee-estimates` |
 | `POST /tx` | done | broadcast via mempool hub; **503** if hub absent |

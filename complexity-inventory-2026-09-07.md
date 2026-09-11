@@ -78,7 +78,7 @@ per-crate items exist.
 | S-12 | Flat `*.idx.meta` soft-migrate  **done (index-refuse)** | `ensure_idx_layout` refuses leftover flat `*.idx.meta`; no rename. Operator places files under `{stem}.idx/`. | — | — | SCHEMA/OPERATOR. | high |
 | S-13 | ~~Docs describe a deleted `rbitcoin-store-bench`~~ **done (#397)** | `io-modality.md` and `reproducible-builds.md` no longer name the binary. | — | docs | none | — |
 | S-14 | Probe-depth sample API only tested | `address_head.rs:112–120`; warn log at `:148–155,941` is the live part. | Keep warn; delete/`pub(crate)` sample+snapshot. | ~20–40 | none | high |
-| S-15 | `PointRecord.spending_input_index` always 0 | `point_table.rs:19–20`; `store.rs:712,1182`; Esplora emits it as `vin` (`handlers.rs:501`). | Drop the field and the ignored `put_spend` arg; Esplora `vin` needs a real source or removal. | ~10–30 store; product decision for API | Esplora `vin` currently wrong. | high |
+| S-15 | `PointRecord.spending_input_index` always 0  **done (this PR)** | Field and ignored `put_spend` arg deleted. Esplora `/outspend(s)` omit `vin`. COMPAT documents explorer gap (cold `inwit` to recover). | — | — | COMPAT product gap. | high |
 | S-16 | Pool / IOCP / uring backends | `uring_session.rs` shared harvest contract (`:105–123, 290–527`); pool 225, iocp 306. | **Keep.** Optional later: Windows on pool (perf/platform call). | 0 | — | high (not excess) |
 | S-17 | `flush_class_c_pre_tip` needlessly `pub` | `store.rs:1302`; only caller `:1324`. | `fn`. | 0 | none | high |
 | S-18 | Re-export sprawl of head internals | `lib.rs:59–65`, `:137–146` (six `decode_packed_tx*`). | X-04 pass. | ~30 | none | high |
@@ -344,7 +344,7 @@ Suggested order (each a worktree PR, Red→Green→Refactor per `docs/how-we-pla
 6. **X-07** move `block_diff` + fuzz encoders to `fuzz/` (check coverage scope first).
 7. **X-05** node config (write the flag-matrix test first).
 8. **X-01 step 2–3** instance-owned stats + table-driven `perf_log`.
-9. **Product-gated** (need a SCHEMA/COMPAT decision, listed not scheduled): S-04 fuse v1 refuse, S-12 flat idx refuse, SH-06 Shared body refuse, SH-07 Paged refuse **done (index-refuse PR)**. Remaining: Q-06 store planner as test support, C-06 `AssembleMode::Full`, S-15 Esplora `vin`, A-02/A-20/D-02/D-03 doc honesty (Q-59). A-01 and S-13 landed in #397.
+9. **Product-gated** (need a SCHEMA/COMPAT decision, listed not scheduled): S-04 fuse v1 refuse, S-12 flat idx refuse, SH-06 Shared body refuse, SH-07 Paged refuse **done (#422)**. S-15 Esplora `vin` omit **done (this PR)**. Remaining: Q-06 store planner as test support, C-06 `AssembleMode::Full`, A-02/A-20/D-02/D-03 doc honesty (Q-59). A-01 and S-13 landed in #397.
 10. **X-08** re-enable clippy lints in batches once the above lands.
 
 ---
@@ -414,7 +414,8 @@ are the PRs that landed the work. This file stays untracked.
 | **X-07 / N-07 / N-13** | `block_diff` + compact recipe/v2 encode helpers live in `fuzz/`. Net keeps shipped accept/reconstruct/v2/`drain_pending_now`/`PendingBlocks`. Recipe fixtures under `fuzz/fixtures/`. `cargo fmt --all` visits `fuzz/` via rbitcoin-log fmt-anchor tests. | [#416](https://github.com/reardencode/rbitcoin/pull/416) merged `90f57239` | Fuzz crate is not a coverage member. |
 | **X-05 / D-01** | CLI `--key[=value]` and conf share `apply_kv` (conf then CLI). `CliAccum` copy gone. `DatadirOpts::path()`. `--smoke`/`--help`/`--log-level` CLI-only. Explicit `--milestone 0` sticks (`operator_config_from_args`). | [#418](https://github.com/reardencode/rbitcoin/pull/418) merged `f7a38b60` | — |
 | **X-01 steps 2–3 / I-06** | Confirm/query/IBD window meters on `Query` as `ConfirmStats`; note via `&`; `perf_log::sample` take-and-reset that instance. `exclusive::with` twins gone. Write-stage inventory is one name+extractor table. Live lookup/load/scripts/write tokens stay. Store head-resolve window meters remain process-global. | [#420](https://github.com/reardencode/rbitcoin/pull/420) | Do not merge unless asked. |
-| **S-04 / S-12 / SH-06 / SH-07** | Leftover **index** layouts refuse on open: fuse8 v1, flat `*.idx.meta`, Shared file `scripthash.body`, pack8 Paged (mode 10). One-line wipe/rebuild; Class A kept. No always-probe / flat rename / Shared read. | this PR | Cite GitHub number after merge. |
+| **S-04 / S-12 / SH-06 / SH-07** | Leftover **index** layouts refuse on open: fuse8 v1, flat `*.idx.meta`, Shared file `scripthash.body`, pack8 Paged (mode 10). One-line wipe/rebuild; Class A kept. No always-probe / flat rename / Shared read. | [#422](https://github.com/reardencode/rbitcoin/pull/422) | — |
+| **S-15** | `PointRecord.spending_input_index` and ignored `put_spend` input-index arg deleted. Esplora `/outspend(s)` omit `vin`. COMPAT documents explorer gap. | this PR | Cite GitHub number after merge. |
 
 Suggested-order progress:
 
@@ -426,5 +427,5 @@ Suggested-order progress:
 6. **X-07** fuzz out of net — done ([#416](https://github.com/reardencode/rbitcoin/pull/416) merged `90f57239`).
 7. **X-05** node config — done ([#418](https://github.com/reardencode/rbitcoin/pull/418) merged `f7a38b60`).
 8. **X-01 steps 2–3** ConfirmStats + table-driven `perf_log` — PR [#420](https://github.com/reardencode/rbitcoin/pull/420) required checks green (not merged).
-9. Product-gated SCHEMA rows — **S-04 / S-12 / SH-06 / SH-07** leftover index layouts refuse (this PR). Remaining: Q-06, C-06, S-15, A-02/A-20/D-02/D-03.
+9. Product-gated SCHEMA/COMPAT rows — **S-04 / S-12 / SH-06 / SH-07** leftover index refuse (#422). **S-15** outspend `vin` omit (this PR). Remaining: Q-06, C-06, A-02/A-20/D-02/D-03.
 10. **X-08** clippy batches — not started.
