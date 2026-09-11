@@ -12,6 +12,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+pub use mine::submit_received_block;
+
 pub(crate) fn sat_kvb_to_btc(sat_kvb: u64) -> f64 {
     sat_kvb as f64 / 100_000_000.0
 }

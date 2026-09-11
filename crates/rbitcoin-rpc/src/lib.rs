@@ -8,7 +8,7 @@ mod methods;
 mod server;
 
 pub use auth::RpcAuth;
-pub use methods::{RpcActive, RpcRegtest, SubmitBlockOutcome};
+pub use methods::{submit_received_block, RpcActive, RpcRegtest, SubmitBlockOutcome};
 pub use server::{run_rpc, RpcConfig, RpcHandle};
 
 /// Root HTTP path for the node RPC endpoint.

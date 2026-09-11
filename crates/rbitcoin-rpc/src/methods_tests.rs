@@ -1200,76 +1200,7 @@ impl RpcRegtest for TestMiner {
     }
 
     fn submit_block(&self, block: Block) -> SubmitBlockOutcome {
-        use bitcoin::Target;
-        let hash = block.block_hash();
-        if self.0.is_block_invalid(&hash) {
-            return SubmitBlockOutcome::Rejected("duplicate-invalid".into());
-        }
-        let target = Target::from_compact(block.header.bits);
-        if block.header.validate_pow(target).is_err() {
-            return SubmitBlockOutcome::Rejected("high-hash".into());
-        }
-        let prev = block.header.prev_blockhash.to_byte_array();
-        let known = self
-            .0
-            .query
-            .get_header_by_hash(&prev)
-            .ok()
-            .flatten()
-            .is_some()
-            || self
-                .0
-                .held_body(&BlockHash::from_byte_array(prev))
-                .is_some();
-        if !known {
-            return SubmitBlockOutcome::Rejected("prev-blk-not-found".into());
-        }
-        match self.0.accept_received_block(block.clone()) {
-            Ok(rbitcoin_net::AcceptOutcome::Accepted { .. }) => SubmitBlockOutcome::Accepted,
-            Ok(rbitcoin_net::AcceptOutcome::AlreadyHave) => SubmitBlockOutcome::Duplicate,
-            Ok(rbitcoin_net::AcceptOutcome::IgnoredWeaker) => SubmitBlockOutcome::IgnoredWeaker,
-            Err(e) => {
-                let s = e.to_string();
-                let s = s.strip_prefix("consensus: ").unwrap_or(s.as_str());
-                let s = s.strip_prefix("protocol: ").unwrap_or(s);
-                let mapped = if s.contains("unknown parent")
-                    || s.contains("BadPrev")
-                    || s.contains("unexpected previous")
-                {
-                    "prev-blk-not-found".to_string()
-                } else if s.contains("pow invalid")
-                    || s.contains("InvalidPow")
-                    || s.contains("high-hash")
-                {
-                    "high-hash".to_string()
-                } else {
-                    [
-                        "bad-txns-nonfinal",
-                        "bad-txns-duplicate",
-                        "bad-txns-inputs-missingorspent",
-                        "bad-txns-in-belowout",
-                        "bad-cb-missing",
-                        "bad-blk-length",
-                        "bad-diffbits",
-                        "time-too-old",
-                        "time-too-new",
-                        "bad-txnmrklroot",
-                    ]
-                    .into_iter()
-                    .find(|n| s.contains(n))
-                    .map(|n| n.to_string())
-                    .unwrap_or_else(|| s.to_string())
-                };
-                if mapped != "bad-txnmrklroot"
-                    && mapped != "high-hash"
-                    && mapped != "prev-blk-not-found"
-                {
-                    self.0.note_invalid_block(hash);
-                    let _ = self.0.ensure_header(&block.header);
-                }
-                SubmitBlockOutcome::Rejected(mapped)
-            }
-        }
+        crate::submit_received_block(&self.0, block)
     }
 
     fn set_mock_time(&self, timestamp: i64) -> Result<(), String> {
