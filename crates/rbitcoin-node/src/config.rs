@@ -151,6 +151,8 @@ pub struct NodeConfig {
     pub sptweaks_dust: u64,
     /// Skip script/prevout checks for blocks at or below this height (0 = off).
     pub milestone_height: u32,
+    /// Set when conf or CLI applied `milestone` / `assumevalid_height` (including 0).
+    pub milestone_explicit: bool,
     /// When true, ask systemd (if available) to block automatic suspend/idle.
     pub inhibit_suspend: bool,
     /// Optional conf file path that was loaded (for diagnostics).
@@ -203,6 +205,7 @@ impl Default for NodeConfig {
             sptweaks: false,
             sptweaks_dust: rbitcoin_electrum::DEFAULT_TWEAKS_MIN_DUST,
             milestone_height: 0,
+            milestone_explicit: false,
             inhibit_suspend: false,
             conf_path: None,
             conf_log_level: None,
@@ -661,6 +664,7 @@ impl NodeConfig {
                 self.milestone_height = val
                     .parse()
                     .map_err(|e| NodeError::Config(format!("conf milestone: {e}")))?;
+                self.milestone_explicit = true;
             }
             "maxoutbound" | "max_outbound" => {
                 let n: u32 = val

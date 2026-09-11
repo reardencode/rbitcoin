@@ -8,8 +8,19 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-/// Process entry used by `main` and high-level scenarios.
-pub fn cli_main<I, T>(args: I) -> ExitCode
+/// CLI parse result before log init / datadir open / run.
+#[derive(Debug)]
+pub(crate) enum OperatorArgs {
+    Help,
+    Version,
+    Ready {
+        config: NodeConfig,
+        log_level_cli: Option<Option<Level>>,
+    },
+}
+
+/// Assemble [`NodeConfig`] from argv (conf then CLI `apply_kv`). Does not open the store.
+pub(crate) fn operator_config_from_args<I, T>(args: I) -> Result<OperatorArgs, ExitCode>
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString>,
@@ -60,11 +71,11 @@ Advanced debug/IO knobs remain RBITCOIN_* env (not required for normal sync; pre
 IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
                     env!("CARGO_PKG_VERSION")
                 );
-                return ExitCode::SUCCESS;
+                return Ok(OperatorArgs::Help);
             }
             "--version" | "-V" => {
                 eprintln!("rbitcoin-node {}", env!("CARGO_PKG_VERSION"));
-                return ExitCode::SUCCESS;
+                return Ok(OperatorArgs::Version);
             }
             "--smoke" => {
                 smoke = true;
@@ -72,13 +83,13 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
             }
             "--conf" => match take_arg(&args, &mut i, "--conf") {
                 Ok(v) => conf_path = Some(PathBuf::from(v)),
-                Err(c) => return c,
+                Err(c) => return Err(c),
             },
             other if other.starts_with("--conf=") => {
                 let v = &other["--conf=".len()..];
                 if v.is_empty() {
                     eprintln!("error: --conf requires a path");
-                    return ExitCode::from(2);
+                    return Err(ExitCode::from(2));
                 }
                 conf_path = Some(PathBuf::from(v));
                 i += 1;
@@ -86,21 +97,21 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
             "--log-level" => match take_arg(&args, &mut i, "--log-level") {
                 Ok(raw) => match parse_log_level(&raw) {
                     Ok(v) => log_level_cli = Some(v),
-                    Err(c) => return c,
+                    Err(c) => return Err(c),
                 },
-                Err(c) => return c,
+                Err(c) => return Err(c),
             },
             other if other.starts_with("--log-level=") => {
                 match parse_log_level(&other["--log-level=".len()..]) {
                     Ok(v) => log_level_cli = Some(v),
-                    Err(c) => return c,
+                    Err(c) => return Err(c),
                 }
                 i += 1;
             }
             other => match parse_cli_flag(&args, &mut i, other) {
                 Ok(Some(kv)) => kvs.push(kv),
                 Ok(None) => {}
-                Err(c) => return c,
+                Err(c) => return Err(c),
             },
         }
     }
@@ -109,7 +120,7 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
     if let Some(ref cp) = conf_path {
         if let Err(e) = config.merge_conf_file(cp) {
             eprintln!("error: {e}");
-            return ExitCode::from(2);
+            return Err(ExitCode::from(2));
         }
         config.conf_path = Some(cp.clone());
     }
@@ -135,9 +146,9 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
             Ok(ConfApply::Applied) => {}
             Ok(ConfApply::Unknown(k)) => {
                 eprintln!("error: unknown argument `--{k}`");
-                return ExitCode::from(2);
+                return Err(ExitCode::from(2));
             }
-            Err(e) => return cli_apply_err(e),
+            Err(e) => return Err(cli_apply_err(e)),
         }
     }
 
@@ -145,8 +156,34 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
         rbitcoin_primitives::rbitcoin_subversion(env!("CARGO_PKG_VERSION"), &config.uacomments)
     {
         eprintln!("{e}");
-        return ExitCode::from(1);
+        return Err(ExitCode::from(1));
     }
+
+    if !config.milestone_explicit {
+        config.milestone_height = default_milestone_height(config.network);
+    }
+    config.smoke = smoke;
+    config.absorb_inbound_env();
+    Ok(OperatorArgs::Ready {
+        config,
+        log_level_cli,
+    })
+}
+
+/// Process entry used by `main` and high-level scenarios.
+pub fn cli_main<I, T>(args: I) -> ExitCode
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    let (mut config, log_level_cli) = match operator_config_from_args(args) {
+        Ok(OperatorArgs::Help | OperatorArgs::Version) => return ExitCode::SUCCESS,
+        Ok(OperatorArgs::Ready {
+            config,
+            log_level_cli,
+        }) => (config, log_level_cli),
+        Err(c) => return c,
+    };
 
     match log_level_cli {
         Some(Some(level)) => rbitcoin_log::init(level),
@@ -177,12 +214,6 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
         rbitcoin_log::debug!("node: RLIMIT_NOFILE soft={soft} hard={hard}");
     }
 
-    if config.milestone_height == 0 {
-        config.milestone_height = default_milestone_height(config.network);
-    }
-    config.smoke = smoke;
-    config.absorb_inbound_env();
-
     let _suspend_inhibit = if config.inhibit_suspend {
         match SuspendInhibit::try_start("rbitcoin-node running (IBD / tip follow)") {
             Some(g) => Some(g),
@@ -202,7 +233,7 @@ IBD: up to 1024 concurrent getdata, max 16 in transit per peer.",
         return ExitCode::FAILURE;
     }
 
-    if smoke {
+    if config.smoke {
         config.head_scale = HeadScale::Tiny;
         match run_node(config) {
             Ok(handle) => {
@@ -410,6 +441,50 @@ mod tests {
     fn help_and_version_exit_success() {
         assert_exit(cli_main(["rbitcoin-node", "--help"]), ExitCode::SUCCESS);
         assert_exit(cli_main(["rbitcoin-node", "-V"]), ExitCode::SUCCESS);
+    }
+
+    fn ready_config<I, T>(args: I) -> NodeConfig
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString>,
+    {
+        match operator_config_from_args(args) {
+            Ok(OperatorArgs::Ready { config, .. }) => config,
+            other => panic!("expected assembled config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explicit_milestone_zero_sticks_on_mainnet() {
+        use rbitcoin_consensus::{default_milestone_height, Milestone};
+
+        let omitted = ready_config(["rbitcoin-node"]);
+        assert_eq!(omitted.network, Network::Mainnet);
+        assert_eq!(
+            omitted.milestone_height,
+            default_milestone_height(Network::Mainnet)
+        );
+        assert!(omitted.milestone().skips_scripts_at(1));
+
+        let cli0 = ready_config(["rbitcoin-node", "--milestone", "0"]);
+        assert_eq!(cli0.network, Network::Mainnet);
+        assert_eq!(cli0.milestone_height, 0);
+        assert_eq!(cli0.milestone(), Milestone::NONE);
+        assert!(!cli0.milestone().skips_scripts_at(1));
+
+        let alias0 = ready_config(["rbitcoin-node", "--assumevalid-height=0"]);
+        assert_eq!(alias0.milestone_height, 0);
+        assert_eq!(alias0.milestone(), Milestone::NONE);
+
+        let dir = tmp_datadir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let conf = dir.join("m.conf");
+        std::fs::write(&conf, "milestone=0\n").unwrap();
+        let from_conf = ready_config(["rbitcoin-node", "--conf", conf.to_str().unwrap()]);
+        assert_eq!(from_conf.network, Network::Mainnet);
+        assert_eq!(from_conf.milestone_height, 0);
+        assert_eq!(from_conf.milestone(), Milestone::NONE);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
