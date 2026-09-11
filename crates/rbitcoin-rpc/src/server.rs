@@ -66,6 +66,7 @@ struct AppState {
     ctx: Arc<RpcContext>,
     auth: RpcAuth,
     work_queue: Option<Arc<tokio::sync::Semaphore>>,
+    work_queue_limit: Option<usize>,
 }
 
 /// Start Core-class JSON-RPC on `config.listen` (plain HTTP; TLS via reverse proxy).
@@ -122,14 +123,13 @@ pub async fn run_rpc(
         .local_addr()
         .map_err(|e| format!("rpc local_addr: {e}"))?;
 
-    let work_queue = config
-        .work_queue
-        .filter(|n| *n > 0)
-        .map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
+    let work_queue_limit = config.work_queue.filter(|n| *n > 0);
+    let work_queue = work_queue_limit.map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
     let state = AppState {
         ctx,
         auth: auth.clone(),
         work_queue,
+        work_queue_limit,
     };
     let app = Router::new().route("/", post(rpc_post)).with_state(state);
 
@@ -197,6 +197,15 @@ async fn rpc_post(State(state): State<AppState>, headers: HeaderMap, body: Bytes
             return parse_error_response();
         }
     };
+    if let Some(n) = state.work_queue_limit {
+        if parsed.as_array().is_some_and(|a| a.len() > n) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Work queue depth exceeded\n",
+            )
+                .into_response();
+        }
+    }
     let ctx = Arc::clone(&state.ctx);
     let joined = tokio::task::spawn_blocking(move || {
         let _g = BlockingRegion::enter();
@@ -720,6 +729,29 @@ mod tests {
         .await;
         assert_eq!(st, 200, "{body:?}");
         assert_eq!(body.unwrap()["result"], 0);
+
+        let batch = serde_json::json!([
+            {"jsonrpc":"1.0","id":1,"method":"getblockcount"},
+            {"jsonrpc":"1.0","id":2,"method":"getblockcount"}
+        ]);
+        let (st, body) = post_raw(
+            handle.local_addr,
+            &handle.auth,
+            batch.to_string().as_bytes(),
+        )
+        .await;
+        assert_eq!(
+            st, 500,
+            "batch longer than rpcworkqueue must not run: {body:?}"
+        );
+        let text = match &body {
+            Some(serde_json::Value::String(s)) => s.as_str(),
+            Some(v) => {
+                panic!("expected plain work-queue error, got JSON {v}");
+            }
+            None => "",
+        };
+        assert!(text.contains("Work queue depth exceeded"), "{body:?}");
         handle.shutdown().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
