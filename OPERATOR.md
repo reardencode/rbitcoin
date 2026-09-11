@@ -179,7 +179,7 @@ I/O class can starve while higher-priority storage work continues.
 
 Idle `IOSchedulingClass` (and some filesystems, including bcachefs) can
 starve `io_uring` completions. Expect `store: io_uring drain slow` then at most
-one recover per ~1000 heights. If the node aborts (`store: io_uring unusable`),
+one recover per ~1000 heights. If the node aborts (`store: completion session unusable`),
 restart as-is or with `RBITCOIN_IO=pread`. There is no mid-IBD libc fallback.
 
 For a regular systemd installation, create a service drop-in with
