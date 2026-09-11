@@ -202,7 +202,8 @@ thread_local! {
     static DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
-/// SQE count on the thread-local session (0 if none).
+/// SQE count on the TLS slot (`with_thread_local` tests). Prefer
+/// [`UringSession::take_sqe_n`] when the test already holds the session.
 #[cfg(test)]
 pub fn tls_take_sqe_n() -> u64 {
     SESSION.with(|cell| {
