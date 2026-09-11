@@ -341,12 +341,16 @@ mod tests {
         assert!(h.is_empty());
         assert!(h.get(&key(1)).unwrap().is_none());
         let paged = ShHeadValue::paged(4096, 8192);
-        let h = MphfHead::write_pack8(&base, &[(key(1), pack8(&paged).unwrap())]).unwrap();
+        match pack8(&paged) {
+            Err(StoreError::Corrupt(m)) => {
+                assert_eq!(m, crate::scripthash_layout::INDEX_REFUSE_PAGED_SH);
+            }
+            other => panic!("pack8 Paged must refuse, got {other:?}"),
+        }
+        let extent = ShHeadValue::extent(8192);
+        let h = MphfHead::write_pack8(&base, &[(key(1), pack8(&extent).unwrap())]).unwrap();
         match h.get(&key(1)).unwrap().unwrap() {
-            ShHeadValue::Paged {
-                first_page: 0,
-                last_page: 8192,
-            } => {}
+            ShHeadValue::Extent { last_page: 8192 } => {}
             other => panic!("{other:?}"),
         }
         let _ = std::fs::remove_dir_all(&dir);

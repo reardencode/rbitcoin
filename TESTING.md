@@ -31,7 +31,7 @@ Shared Tiny on-disk fixtures live in `rbitcoin_store::testutil` (`TempDir`, `tin
 | **mimalloc** only on product bins (`rbitcoin-node`, `rbitcoin-cli`) | Store **lib** tests no longer compile `libmimalloc-sys`/`cc`. Production still uses mimalloc on node/cli. |
 | **rayon removed** from consensus | Parallel scripts use in-crate `script_pool` (`rbtc-scripts` steal). Drops rayon + crossbeam from the consensus graph. |
 | **xorf + bincode + serde** removed from store | Sealed fuse8 is in-tree (`binary_fuse8` + hand LE layout **v2**). Drops a serde-heavy path from store rebuilds. |
-| **fuse8 v1 → v2 on open** | Legacy fuse files soft-migrate (always-probe + rewrite from Class A); **do not** wipe `tx.head` for fuse payload-only changes. |
+| **fuse8 v1 on open** | Leftover v1 fuse **refuses**; wipe `store/tx.head` (Class A kept). Current writes are v2. |
 
 Host forensics and `cargo bench` one-offs are **not** in the default compile
 graph (`scripts/check_default_targets.test.sh`). Optional **client** comparison

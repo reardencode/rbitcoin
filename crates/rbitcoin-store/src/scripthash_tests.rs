@@ -139,21 +139,11 @@ fn sh_bodies_are_split() {
         assert_eq!(t.entries(&k_new).unwrap().len(), 8);
 
         let file_dir = tmp();
-        let ft = shared_body_table(&file_dir);
-        assert_eq!(ft.body_layout(), ShBodyLayout::Shared);
-        {
-            let mut s = ft.bulk_session(16).unwrap();
-            s.put_chain(k0, &ents).unwrap();
-            s.put_chain(k2, &ents).unwrap();
-            s.finish().unwrap();
+        match shared_body_table(&file_dir) {
+            Err(StoreError::Corrupt(m)) => assert_eq!(m, INDEX_REFUSE_SHARED_SH_BODY),
+            Ok(_) => panic!("Shared file body must refuse ScriptHashTable::open"),
+            Err(other) => panic!("expected INDEX_REFUSE_SHARED_SH_BODY, got {other}"),
         }
-        for i in 1..=8u64 {
-            ft.put_create(&rec(k_new, i, 0)).unwrap();
-        }
-        assert!(ft.bodies[0].logical_len() > payload0);
-        assert!(ft.ovf_body.is_none());
-        assert_eq!(ft.entries(&k0).unwrap().len(), 8);
-        assert_eq!(ft.entries(&k_new).unwrap().len(), 8);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&file_dir);
     }
@@ -163,10 +153,10 @@ fn sh_bodies_are_split() {
 fn sh_body_orientation() {
     let file_dir = tmp();
     TableFile::create(file_dir.join("scripthash.body"), TableKind::ScriptHash).unwrap();
-    assert_eq!(
-        detect_sh_body_layout(&file_dir).unwrap(),
-        ShBodyLayout::Shared
-    );
+    match detect_sh_body_layout(&file_dir) {
+        Err(StoreError::Corrupt(m)) => assert_eq!(m, INDEX_REFUSE_SHARED_SH_BODY),
+        other => panic!("Shared file body must refuse, got {other:?}"),
+    }
 
     let dir_dir = tmp();
     std::fs::create_dir_all(dir_dir.join("scripthash.body")).unwrap();
@@ -195,11 +185,8 @@ fn sh_body_orientation() {
     )
     .unwrap();
     match detect_sh_body_layout(&mixed) {
-        Err(StoreError::Layout(m)) => {
-            assert!(m.contains("scripthash*"), "{m}");
-            assert!(m.contains("wipe"), "{m}");
-        }
-        other => panic!("expected Layout, got {other:?}"),
+        Err(StoreError::Corrupt(m)) => assert_eq!(m, INDEX_REFUSE_SHARED_SH_BODY),
+        other => panic!("mixed file body must refuse Shared, got {other:?}"),
     }
 
     let no_ovf = tmp();
@@ -228,6 +215,41 @@ fn sh_body_orientation() {
 
 fn rec(sh: [u8; 32], tx: u64, _vout: u32) -> ScriptHashRecord {
     ScriptHashRecord::from_fk(sh, Fk(tx))
+}
+
+#[test]
+fn open_refuses_pack8_paged_mode_10_on_ingest() {
+    let dir = tmp();
+    {
+        let t = ScriptHashTable::create_tiny(&dir).unwrap();
+        t.put_create(&rec([0x11u8; 32], 1, 0)).unwrap();
+    }
+    let ingest = dir.join("scripthash.ovf").join("ingest");
+    plant_pack8_mode10(&ingest);
+    match ScriptHashTable::open_tiny(&dir) {
+        Err(StoreError::Corrupt(m)) => {
+            assert_eq!(m, crate::scripthash_layout::INDEX_REFUSE_PAGED_SH);
+        }
+        Ok(_) => panic!("Paged pack8 must refuse ScriptHashTable::open"),
+        Err(other) => panic!("expected INDEX_REFUSE_PAGED_SH, got {other}"),
+    }
+}
+
+fn plant_pack8_mode10(ingest: &std::path::Path) {
+    let mut bytes = std::fs::read(ingest).unwrap();
+    let hdr = crate::file::FILE_HEADER_LEN;
+    let slot = crate::scripthash_layout::SH_HEAD_SLOT_SIZE;
+    let key_len = crate::scripthash_layout::SH_HEAD_KEY_LEN;
+    let mode10 = ((2u64 << 62) | 4096u64).to_le_bytes();
+    let mut i = hdr;
+    while i + slot <= bytes.len() {
+        let val = &bytes[i + key_len..i + slot];
+        if val.iter().any(|&b| b != 0) {
+            bytes[i + key_len..i + slot].copy_from_slice(&mode10);
+        }
+        i += slot;
+    }
+    std::fs::write(ingest, &bytes).unwrap();
 }
 
 fn put_unique(t: &ScriptHashTable, tag: u8, n: u32) {
@@ -1435,7 +1457,7 @@ fn four_shard_table(dir: &std::path::Path) -> ScriptHashTable {
     four_shard_dir_table(dir)
 }
 
-fn shared_body_table(dir: &std::path::Path) -> ScriptHashTable {
+fn shared_body_table(dir: &std::path::Path) -> Result<ScriptHashTable, StoreError> {
     let body = TableFile::create(dir.join("scripthash.body"), TableKind::ScriptHash).unwrap();
     let payload0 = payload_start(FILE_HEADER_LEN);
     body.ensure_capacity(payload0).unwrap();
@@ -1450,7 +1472,7 @@ fn shared_body_table(dir: &std::path::Path) -> ScriptHashTable {
     )
     .unwrap();
     drop(body);
-    ScriptHashTable::open_tiny(dir).unwrap()
+    ScriptHashTable::open_tiny(dir)
 }
 
 #[test]
@@ -1882,17 +1904,8 @@ fn open_migrates_legacy_head_when_runs_present() {
     // Leftover live OA main is refused even when runs exist (wipe + rematerialize).
     {
         let dir = tmp();
-        let body = TableFile::create(dir.join("scripthash.body"), TableKind::ScriptHash).unwrap();
-        let payload0 = payload_start(FILE_HEADER_LEN);
-        body.ensure_capacity(payload0).unwrap();
-        body.set_logical_len(payload0).unwrap();
-        let state = AllocState {
-            live_count: 0,
-            bump: payload0,
-            free_head: [0; SH_MAX_CLASS as usize + 1],
-        };
-        write_alloc_header(&body, &state).unwrap();
-        drop(body);
+        let _t = ScriptHashTable::create_tiny(&dir).unwrap();
+        drop(_t);
         ShardedScriptHashHead::create_sharded(dir.join("scripthash.head"), 16, 64).unwrap();
 
         let runs_dir = dir.join("scripthash.runs");
@@ -1918,17 +1931,8 @@ fn open_migrates_legacy_head_when_runs_present() {
 fn open_refuses_legacy_head_without_runs() {
     {
         let dir = tmp();
-        let body = TableFile::create(dir.join("scripthash.body"), TableKind::ScriptHash).unwrap();
-        let payload0 = payload_start(FILE_HEADER_LEN);
-        body.ensure_capacity(payload0).unwrap();
-        body.set_logical_len(payload0).unwrap();
-        let state = AllocState {
-            live_count: 0,
-            bump: payload0,
-            free_head: [0; SH_MAX_CLASS as usize + 1],
-        };
-        write_alloc_header(&body, &state).unwrap();
-        drop(body);
+        let _t = ScriptHashTable::create_tiny(&dir).unwrap();
+        drop(_t);
         ShardedScriptHashHead::create_sharded(dir.join("scripthash.head"), 16, 64).unwrap();
         match ScriptHashTable::open_tiny(&dir) {
             Err(StoreError::Layout(m)) => {

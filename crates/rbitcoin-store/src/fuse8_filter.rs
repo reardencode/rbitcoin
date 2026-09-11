@@ -10,9 +10,8 @@
 //! | **1** | Historical: bincode of xorf `BinaryFuse8` (pre in-tree port) — **not** decoded |
 //! | **2** | Explicit LE: seed u64 · seg_len u32 · seg_mask u32 · seg_count_len u32 · fp_len u64 · fps |
 //!
-//! Opening a v1 file does **not** fail the whole store: callers get
-//! [`SealedFuse8::always_probe`] + a rewrite flag so the operator can migrate
-//! fuse payloads without wiping `tx.head`.
+//! Opening a v1 file **refuses** the store. Wipe `store/tx.head` (and
+//! `store/scripthash*` if SH overflow fuses are v1); Class A is kept.
 
 use crate::binary_fuse8::BinaryFuse8;
 use crate::error::StoreError;
@@ -26,17 +25,14 @@ pub const VERSION_V1: u32 = 1;
 /// Explicit LE body (in-tree BinaryFuse8).
 pub const VERSION_V2: u32 = 2;
 
+/// One-line operator refuse for leftover fuse8 v1.
+pub const INDEX_REFUSE_FUSE8_V1: &str = "index refuses fuse8 v1; wipe store/tx.head and store/scripthash* then restart (Class A kept; tx.head rebuilds, SH rematerializes with --shindex)";
+
 /// Result of opening a sealed fuse file.
 #[derive(Clone, Debug)]
 pub enum FuseFileOpen {
-    /// Current format; safe to use as a membership gate.
+    /// Current v2 format; safe to use as a membership gate.
     Ready(SealedFuse8),
-    /// Legacy or unreadable BF8R body. `gate` always returns true (probe the head).
-    /// Caller should rebuild fuse keys and [`SealedFuse8::write_to`] as v2.
-    NeedsRewrite {
-        gate: SealedFuse8,
-        reason: &'static str,
-    },
 }
 
 /// On-disk / in-memory sealed fuse for one head segment.
@@ -65,38 +61,26 @@ impl SealedFuse8 {
         })
     }
 
-    /// Temporary gate during fuse format migration: never skip a sealed probe.
-    #[inline]
-    pub fn always_probe() -> Self {
-        Self { filter: None }
-    }
-
-    #[inline]
-    pub fn is_always_probe(&self) -> bool {
-        self.filter.is_none()
-    }
-
     /// Membership test (no FN for keys passed to [`Self::build`]).
-    /// Always-probe gates return true for every key.
     #[inline]
     pub fn contains(&self, key: u64) -> bool {
-        match &self.filter {
-            Some(f) => f.contains(key),
-            None => true,
-        }
+        self.filter
+            .as_ref()
+            .map(|f| f.contains(key))
+            .unwrap_or(false)
     }
 
-    /// Fingerprint array length (bytes); 0 for always-probe.
+    /// Fingerprint array length (bytes).
     pub fn fingerprint_bytes(&self) -> usize {
         self.filter.as_ref().map(|f| f.len()).unwrap_or(0)
     }
 
-    /// Write current (v2) layout. Panics not used — always-probe must not be written.
+    /// Write current (v2) layout.
     pub fn write_to(&self, path: &Path) -> Result<(), StoreError> {
         let filter = self
             .filter
             .as_ref()
-            .ok_or(StoreError::Corrupt("fuse8 write always-probe placeholder"))?;
+            .ok_or(StoreError::Corrupt("fuse8 write missing filter"))?;
         let body = encode_body(filter);
         let mut f = File::create(path).map_err(|e| StoreError::io(path, e))?;
         f.write_all(MAGIC).map_err(|e| StoreError::io(path, e))?;
@@ -109,16 +93,14 @@ impl SealedFuse8 {
         Ok(())
     }
 
-    /// Strict open: only Ready v2. Prefer [`open_file`] when migration is allowed.
     pub fn read_from(path: &Path) -> Result<Self, StoreError> {
         match open_file(path)? {
             FuseFileOpen::Ready(f) => Ok(f),
-            FuseFileOpen::NeedsRewrite { reason, .. } => Err(StoreError::Corrupt(reason)),
         }
     }
 }
 
-/// Open a BF8R fuse file, classifying legacy v1 for soft migration.
+/// Open a BF8R fuse file. v1 and unreadable v2 refuse (no always-probe).
 pub fn open_file(path: &Path) -> Result<FuseFileOpen, StoreError> {
     let mut f = File::open(path).map_err(|e| StoreError::io(path, e))?;
     let mut hdr = [0u8; 16];
@@ -134,18 +116,12 @@ pub fn open_file(path: &Path) -> Result<FuseFileOpen, StoreError> {
         .map_err(|e| StoreError::io(path, e))?;
 
     match ver {
-        VERSION_V1 => Ok(FuseFileOpen::NeedsRewrite {
-            gate: SealedFuse8::always_probe(),
-            reason: "fuse8 v1 (xorf/bincode) — rewrite as v2",
-        }),
+        VERSION_V1 => Err(StoreError::Corrupt(INDEX_REFUSE_FUSE8_V1)),
         VERSION_V2 => match decode_body(&payload) {
             Ok(filter) => Ok(FuseFileOpen::Ready(SealedFuse8 {
                 filter: Some(filter),
             })),
-            Err(_) => Ok(FuseFileOpen::NeedsRewrite {
-                gate: SealedFuse8::always_probe(),
-                reason: "fuse8 v2 body unreadable — rewrite",
-            }),
+            Err(_) => Err(StoreError::Corrupt("fuse8 v2 body unreadable")),
         },
         _ => Err(StoreError::Corrupt("tx.head fuse version")),
     }
@@ -271,51 +247,40 @@ mod tests {
     }
 
     #[test]
-    fn v1_opens_as_needs_rewrite_always_probe() {
+    fn v1_opens_as_index_refuse() {
         let dir = tmp();
         let path = dir.join("legacy.fuse8");
-        // Minimal v1 envelope: magic + version 1 + empty body (historical xorf path).
         let mut raw = Vec::from(*MAGIC);
         raw.extend_from_slice(&VERSION_V1.to_le_bytes());
         raw.extend_from_slice(&0u64.to_le_bytes());
         std::fs::write(&path, &raw).unwrap();
-        match open_file(&path).unwrap() {
-            FuseFileOpen::NeedsRewrite { gate, reason } => {
-                assert!(gate.is_always_probe());
-                assert!(gate.contains(0xdead));
-                assert!(reason.contains("v1"));
+        match open_file(&path) {
+            Err(StoreError::Corrupt(m)) => {
+                assert_eq!(m, INDEX_REFUSE_FUSE8_V1);
+                assert!(m.contains("wipe store/tx.head"));
+                assert!(m.contains("Class A kept"));
             }
-            FuseFileOpen::Ready(_) => panic!("v1 must not decode as ready"),
+            other => panic!("v1 must refuse, got {other:?}"),
         }
-        // Strict read_from still fails so accidental uses stay loud.
-        assert!(SealedFuse8::read_from(&path).is_err());
+        match SealedFuse8::read_from(&path) {
+            Err(StoreError::Corrupt(m)) => assert_eq!(m, INDEX_REFUSE_FUSE8_V1),
+            other => panic!("read_from v1 must refuse, got {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn always_probe_must_not_write() {
-        let dir = tmp();
-        let path = dir.join("nope.fuse8");
-        assert!(SealedFuse8::always_probe().write_to(&path).is_err());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn v2_unreadable_body_needs_rewrite() {
+    fn v2_unreadable_body_is_corrupt() {
         let dir = tmp();
         let path = dir.join("badv2.fuse8");
         let mut raw = Vec::from(*MAGIC);
         raw.extend_from_slice(&VERSION_V2.to_le_bytes());
-        // body_len claims 4 bytes but payload is empty / short after header.
         raw.extend_from_slice(&4u64.to_le_bytes());
-        raw.extend_from_slice(&[0u8; 4]); // too short for full v2 fields
+        raw.extend_from_slice(&[0u8; 4]);
         std::fs::write(&path, &raw).unwrap();
-        match open_file(&path).unwrap() {
-            FuseFileOpen::NeedsRewrite { gate, reason } => {
-                assert!(gate.is_always_probe());
-                assert!(reason.contains("v2") || reason.contains("unreadable"));
-            }
-            FuseFileOpen::Ready(_) => panic!("short v2 body must not be Ready"),
+        match open_file(&path) {
+            Err(StoreError::Corrupt(m)) => assert!(m.contains("unreadable"), "{m}"),
+            other => panic!("short v2 body must be Corrupt, got {other:?}"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -389,9 +354,7 @@ mod tests {
             FuseFileOpen::Ready(g) => {
                 assert!(g.contains(10));
                 assert!(g.contains(50));
-                assert!(!g.is_always_probe());
             }
-            FuseFileOpen::NeedsRewrite { .. } => panic!("fresh v2 must be Ready"),
         }
         // Empty keys path builds dummy.
         let empty = SealedFuse8::build(&[]).unwrap();

@@ -314,8 +314,6 @@ const SH_L1_FROZEN_WARN: &str =
 /// How `scripthash.body` is oriented on disk (schema 17 variant).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShBodyLayout {
-    /// Single `scripthash.body` file (legacy 17).
-    Shared,
     /// `scripthash.body/NN` + `scripthash.ovf/body`.
     Sharded,
 }
@@ -342,13 +340,15 @@ fn sh_body_layout_wipe_msg() -> String {
         .into()
 }
 
-/// Detect file vs directory SH body. Does not rewrite either orientation.
+/// Leftover single-file `scripthash.body` (schema 17 Shared).
+pub const INDEX_REFUSE_SHARED_SH_BODY: &str = "index refuses Shared (file) scripthash.body; wipe store/scripthash* then restart (Class A kept; SH rematerializes with --shindex)";
+
+/// Detect directory SH body. File (Shared) leftovers refuse.
 pub fn detect_sh_body_layout(dir: &Path) -> Result<ShBodyLayout, StoreError> {
     let body = sh_body_path(dir);
     let ovf = sh_ovf_body_path(dir);
     match (body.is_file(), body.is_dir()) {
-        (true, false) if ovf.exists() => Err(StoreError::Layout(sh_body_layout_wipe_msg())),
-        (true, false) => Ok(ShBodyLayout::Shared),
+        (true, false) => Err(StoreError::Corrupt(INDEX_REFUSE_SHARED_SH_BODY)),
         (false, true) if ovf.is_file() => Ok(ShBodyLayout::Sharded),
         (false, true) => Err(StoreError::Layout(sh_body_layout_wipe_msg())),
         (false, false) => Err(StoreError::Layout(sh_body_layout_wipe_msg())),
@@ -818,10 +818,7 @@ impl ScriptHashTable {
             return Err(StoreError::Layout(leftover_oa_wipe_msg()));
         }
         unlink_leftover_oa_stub(dir);
-        let n_shards = match layout {
-            ShBodyLayout::Shared => expected.max(1),
-            ShBodyLayout::Sharded => sharded_body_n_shards(dir)?,
-        };
+        let n_shards = sharded_body_n_shards(dir)?;
         Self::from_layout_and_n_shards(dir, layout, n_shards, scale)
     }
 
@@ -832,33 +829,24 @@ impl ScriptHashTable {
         scale: HeadScale,
     ) -> Result<Self, StoreError> {
         let n_shards = n_shards.max(1);
-        let (bodies, ovf_body, allocs, ovf_alloc, alloc_ver) = match layout {
-            ShBodyLayout::Shared => {
-                let f = TableFile::open(sh_body_path(dir), TableKind::ScriptHash)?;
-                sh_set_body_grow(&f);
-                let (state, ver) = read_alloc_header(&f)?;
-                (vec![f], None, vec![Mutex::new(state)], None, ver)
+        let mut bodies = Vec::with_capacity(n_shards);
+        let mut allocs = Vec::with_capacity(n_shards);
+        let mut alloc_ver = SH_ALLOC_VERSION;
+        for i in 0..n_shards {
+            let f = TableFile::open(sh_shard_body_path(dir, i), TableKind::ScriptHash)?;
+            sh_set_body_grow(&f);
+            let (state, v) = read_alloc_header(&f)?;
+            if i == 0 {
+                alloc_ver = v;
             }
-            ShBodyLayout::Sharded => {
-                let mut bodies = Vec::with_capacity(n_shards);
-                let mut allocs = Vec::with_capacity(n_shards);
-                let mut ver = SH_ALLOC_VERSION;
-                for i in 0..n_shards {
-                    let f = TableFile::open(sh_shard_body_path(dir, i), TableKind::ScriptHash)?;
-                    sh_set_body_grow(&f);
-                    let (state, v) = read_alloc_header(&f)?;
-                    if i == 0 {
-                        ver = v;
-                    }
-                    bodies.push(f);
-                    allocs.push(Mutex::new(state));
-                }
-                let ovf = TableFile::open(sh_ovf_body_path(dir), TableKind::ScriptHash)?;
-                sh_set_body_grow(&ovf);
-                let (ost, _) = read_alloc_header(&ovf)?;
-                (bodies, Some(ovf), allocs, Some(Mutex::new(ost)), ver)
-            }
-        };
+            bodies.push(f);
+            allocs.push(Mutex::new(state));
+        }
+        let ovf = TableFile::open(sh_ovf_body_path(dir), TableKind::ScriptHash)?;
+        sh_set_body_grow(&ovf);
+        let (ost, _) = read_alloc_header(&ovf)?;
+        let ovf_body = Some(ovf);
+        let ovf_alloc = Some(Mutex::new(ost));
         wipe_legacy_fullsize_overflow(dir)?;
         let sorted_main = open_sorted_main_shards(dir, n_shards)?;
         let sealed_ovf = open_sealed_sorted_ovf(dir)?;
@@ -907,17 +895,11 @@ impl ScriptHashTable {
     }
 
     fn shard_body(&self, si: usize) -> &TableFile {
-        match self.layout {
-            ShBodyLayout::Shared => &self.bodies[0],
-            ShBodyLayout::Sharded => &self.bodies[si],
-        }
+        &self.bodies[si]
     }
 
     fn shard_alloc(&self, si: usize) -> &Mutex<AllocState> {
-        match self.layout {
-            ShBodyLayout::Shared => &self.allocs[0],
-            ShBodyLayout::Sharded => &self.allocs[si],
-        }
+        &self.allocs[si]
     }
 
     fn ovf_alloc_mutex(&self) -> &Mutex<AllocState> {
@@ -1083,53 +1065,38 @@ impl ScriptHashTable {
             ));
         }
         let payload0 = payload_start(FILE_HEADER_LEN);
-        match self.layout {
-            ShBodyLayout::Shared => {
-                let bump = progress.body_bump.max(payload0);
-                let state = AllocState {
-                    live_count: progress.live_count,
-                    bump,
-                    free_head: [0; SH_MAX_CLASS as usize + 1],
-                };
-                *self.allocs[0].lock().unwrap() = state;
-                write_alloc_header(self.body(), &state)?;
-                self.body().set_logical_len(bump)?;
+        let sealed: Vec<bool> = self
+            .sorted_main
+            .iter()
+            .map(|s| s.read().unwrap().is_some())
+            .collect();
+        let empty = AllocState {
+            live_count: 0,
+            bump: payload0,
+            free_head: [0; SH_MAX_CLASS as usize + 1],
+        };
+        for i in 0..n {
+            if sealed.get(i).copied().unwrap_or(false) {
+                continue;
             }
-            ShBodyLayout::Sharded => {
-                let sealed: Vec<bool> = self
-                    .sorted_main
-                    .iter()
-                    .map(|s| s.read().unwrap().is_some())
-                    .collect();
-                let empty = AllocState {
-                    live_count: 0,
-                    bump: payload0,
-                    free_head: [0; SH_MAX_CLASS as usize + 1],
-                };
-                for i in 0..n {
-                    if sealed.get(i).copied().unwrap_or(false) {
-                        continue;
-                    }
 
-                    *self.allocs[i].lock().unwrap() = empty;
-                    write_alloc_header(&self.bodies[i], &empty)?;
-                    self.bodies[i].set_logical_len(payload0)?;
-                    let p = sorted_main_shard_path(&self.store_dir, i, n);
-                    let _ = std::fs::remove_file(&p);
-                    let _ = std::fs::remove_file(scripthash_mphf::mphf_path(&p));
-                    let _ = std::fs::remove_file(scripthash_mphf::val_path(&p));
-                    let mut idx = p.clone().into_os_string();
-                    idx.push(".idx");
-                    let _ = std::fs::remove_file(idx);
-                    let mut part = p.into_os_string();
-                    part.push(".part");
-                    let part = PathBuf::from(part);
-                    let _ = std::fs::remove_file(&part);
-                    let mut part_idx = part.into_os_string();
-                    part_idx.push(".idx");
-                    let _ = std::fs::remove_file(part_idx);
-                }
-            }
+            *self.allocs[i].lock().unwrap() = empty;
+            write_alloc_header(&self.bodies[i], &empty)?;
+            self.bodies[i].set_logical_len(payload0)?;
+            let p = sorted_main_shard_path(&self.store_dir, i, n);
+            let _ = std::fs::remove_file(&p);
+            let _ = std::fs::remove_file(scripthash_mphf::mphf_path(&p));
+            let _ = std::fs::remove_file(scripthash_mphf::val_path(&p));
+            let mut idx = p.clone().into_os_string();
+            idx.push(".idx");
+            let _ = std::fs::remove_file(idx);
+            let mut part = p.into_os_string();
+            part.push(".part");
+            let part = PathBuf::from(part);
+            let _ = std::fs::remove_file(&part);
+            let mut part_idx = part.into_os_string();
+            part_idx.push(".idx");
+            let _ = std::fs::remove_file(part_idx);
         }
         Ok(())
     }
@@ -1355,10 +1322,7 @@ impl ScriptHashTable {
                 let Some(h) = g.as_ref() else {
                     continue;
                 };
-                let body = match self.layout {
-                    ShBodyLayout::Shared => &self.bodies[0],
-                    ShBodyLayout::Sharded => &self.bodies[si],
-                };
+                let body = &self.bodies[si];
                 h.for_each_occupied(|_k, val| {
                     let entries = self.collect_entries_from(body, &val)?;
                     for fk in entries {
@@ -2818,10 +2782,7 @@ impl<'a> ScriptHashBulkSession<'a> {
         }
         self.finish_key()?;
         self.flush_body()?;
-        let persist_live = match self.table.layout {
-            ShBodyLayout::Shared => self.committed_live_count.saturating_add(self.live_count),
-            ShBodyLayout::Sharded => self.live_count,
-        };
+        let persist_live = self.live_count;
         self.persist_session_alloc(persist_live, self.bump)?;
         let pack = ShShardPack {
             recs: std::mem::take(&mut self.recs),
@@ -3105,7 +3066,7 @@ impl<'a> ScriptHashBulkSession<'a> {
             "store: scripthash live shard start id={si} key_budget={} (stream recs)",
             self.key_budget
         );
-        if !self.pack_only && self.table.layout == ShBodyLayout::Sharded {
+        if !self.pack_only {
             let payload0 = payload_start(FILE_HEADER_LEN);
             let a = self.table.shard_alloc(si).lock().unwrap();
             let bump = a.bump.max(payload0);
@@ -3282,10 +3243,7 @@ impl<'a> ScriptHashBulkSession<'a> {
                 let sealed = MphfHead::write_pack8(&path, &recs)?;
                 self.table.install_sorted_main(si, sealed);
             }
-            let shard_live = match self.table.layout {
-                ShBodyLayout::Shared => self.live_count,
-                ShBodyLayout::Sharded => self.live_count.saturating_sub(self.committed_live_count),
-            };
+            let shard_live = self.live_count.saturating_sub(self.committed_live_count);
             self.persist_session_alloc(shard_live, self.bump)?;
             self.committed_bump = self.bump;
             self.committed_live_count = self.live_count;
@@ -3323,10 +3281,7 @@ impl<'a> ScriptHashBulkSession<'a> {
             self.finished = true;
             return;
         }
-        let (live, bump) = match self.table.layout {
-            ShBodyLayout::Shared => (self.committed_live_count, self.committed_bump),
-            ShBodyLayout::Sharded => (0, self.shard_start_bump),
-        };
+        let (live, bump) = (0, self.shard_start_bump);
         let _ = self.persist_session_alloc(live, bump);
         self.active_shard = None;
         self.bump = self.committed_bump;
@@ -3347,12 +3302,6 @@ impl<'a> ScriptHashBulkSession<'a> {
     /// Returns `(creates, keys, body_flush_ns, head_fill_ns)`.
     pub fn finish(mut self) -> Result<(u64, u64, u64, u64), StoreError> {
         self.flush_active_shard()?;
-        if self.table.layout == ShBodyLayout::Shared {
-            let live = self.live_count;
-            let bump = self.bump;
-            self.active_shard = None;
-            self.persist_session_alloc(live, bump)?;
-        }
         ColdProgress::clear(&self.progress_dir);
         self.finished = true;
         Ok((
@@ -3372,10 +3321,7 @@ impl Drop for ScriptHashBulkSession<'_> {
         self.recs.clear();
         self.body_buf.clear();
         self.open_key = None;
-        let (live, bump) = match self.table.layout {
-            ShBodyLayout::Shared => (self.committed_live_count, self.committed_bump),
-            ShBodyLayout::Sharded => (0, self.shard_start_bump),
-        };
+        let (live, bump) = (0, self.shard_start_bump);
         let _ = self.persist_session_alloc(live, bump);
         self.active_shard = None;
     }

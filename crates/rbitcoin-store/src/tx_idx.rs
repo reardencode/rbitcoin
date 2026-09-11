@@ -11,8 +11,8 @@
 //!     …
 //! ```
 //!
-//! **Migration:** flat `tx.idx.meta` + `tx.idx.NNNNNN` are renamed into `tx.idx/`
-//! on open (same meta bytes).
+//! Leftover flat `tx.idx.meta` + `tx.idx.NNNNNN` **refuse** on open (place files
+//! under `{stem}.idx/` then restart; Class A bodies are kept).
 //!
 //! ```text
 //! abs_start = body_base + (u32_le[i] as u64) * STRIDE
@@ -36,6 +36,9 @@ pub const DEFAULT_SOFT_SPAN: u64 = 16 << 30;
 
 /// Hard max: `u32::MAX` stride units × 8.
 pub const HARD_SPAN: u64 = (u32::MAX as u64) * IDX_STRIDE;
+
+/// Leftover flat `{stem}.idx.meta` beside or instead of `{stem}.idx/`.
+pub const INDEX_REFUSE_FLAT_IDX: &str = "index refuses flat *.idx.meta; place files under store/{stem}.idx/ (meta + NNNNNN segments) then restart (Class A kept)";
 
 /// Open-time refuse when published starts are not strictly monotone
 /// (already-written double-append / clone window).
@@ -1093,59 +1096,18 @@ fn flat_meta_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}.idx.meta"))
 }
 
-fn flat_segment_path(dir: &Path, stem: &str, file_id: u32) -> PathBuf {
-    dir.join(format!("{stem}.idx.{file_id:06}"))
-}
-
-/// Ensure `tx.idx/` exists; migrate flat `tx.idx.meta` + segment files if present.
+/// Ensure `tx.idx/` exists. Leftover flat `{stem}.idx.meta` refuses.
 fn ensure_idx_layout(dir: &Path, stem: &str) -> Result<(), StoreError> {
     let root = idx_root(dir, stem);
     let new_meta = meta_path(dir, stem);
+    let flat_meta = flat_meta_path(dir, stem);
+    if flat_meta.is_file() {
+        return Err(StoreError::Corrupt(INDEX_REFUSE_FLAT_IDX));
+    }
     if new_meta.is_file() {
         return Ok(());
     }
-    let flat_meta = flat_meta_path(dir, stem);
     std::fs::create_dir_all(&root).map_err(|e| StoreError::io(&root, e))?;
-    if !flat_meta.is_file() {
-        return Ok(());
-    }
-    // Read flat meta before rename so we know which segment files to move.
-    let descs =
-        read_meta_buf(&std::fs::read(&flat_meta).map_err(|e| StoreError::io(&flat_meta, e))?)?;
-    let mut moved = 0u32;
-    for d in &descs {
-        let src = flat_segment_path(dir, stem, d.file_id);
-        let dst = segment_path(dir, stem, d.file_id);
-        if src.is_file() {
-            std::fs::rename(&src, &dst).map_err(|e| StoreError::io(&dst, e))?;
-            moved = moved.saturating_add(1);
-        }
-    }
-    // Catch any leftover flat segments (e.g. empty trailing file).
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        let prefix = format!("{stem}.idx.");
-        for ent in rd.flatten() {
-            let name = ent.file_name();
-            let s = name.to_string_lossy();
-            if s == format!("{stem}.idx.meta") {
-                continue;
-            }
-            if let Some(rest) = s.strip_prefix(&prefix) {
-                if rest.chars().all(|c| c.is_ascii_digit()) && rest.len() == 6 {
-                    let dst = root.join(rest);
-                    if !dst.exists() && ent.path().is_file() {
-                        let _ = std::fs::rename(ent.path(), &dst);
-                        moved = moved.saturating_add(1);
-                    }
-                }
-            }
-        }
-    }
-    std::fs::rename(&flat_meta, &new_meta).map_err(|e| StoreError::io(&new_meta, e))?;
-    rbitcoin_log::info!(
-        "store: migrated {stem}.idx layout → {}/ (segments_moved={moved})",
-        root.display()
-    );
     Ok(())
 }
 
@@ -1249,13 +1211,6 @@ fn read_meta_buf(buf: &[u8]) -> Result<Vec<SegDesc>, StoreError> {
         });
     }
     Ok(out)
-}
-
-/// Serialize tests that mutate `RBITCOIN_TX_IDX_SOFT_SPAN` (process-global).
-#[cfg(test)]
-pub(crate) fn tests_soft_span_env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static SOFT_SPAN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    SOFT_SPAN_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 #[cfg(test)]
@@ -1402,7 +1357,7 @@ mod tests {
     }
 
     #[test]
-    fn migrates_flat_idx_layout_on_open() {
+    fn refuses_flat_idx_layout_on_open() {
         let dir = std::env::temp_dir().join(format!(
             "rbitcoin-txidx-migrate-{}",
             std::time::SystemTime::now()
@@ -1412,10 +1367,8 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let _env = tests_soft_span_env_lock();
-        std::env::set_var("RBITCOIN_TX_IDX_SOFT_SPAN", "64");
         {
-            let idx = TxIdx::create(&dir, "tx").unwrap();
+            let idx = TxIdx::create_with_soft_span(&dir, "tx", 64).unwrap();
             idx.append_starts(0, &[16u64, 24, 32, 40]).unwrap();
             idx.append_starts(4, &[16 + 128, 16 + 128 + 16]).unwrap();
             idx.flush().unwrap();
@@ -1438,13 +1391,15 @@ mod tests {
         assert!(meta_flat.is_file());
         assert!(!dir.join("tx.idx").join("meta").exists());
 
-        let idx = TxIdx::open(&dir, "tx").unwrap();
-        assert_eq!(idx.slot_count(), 6);
-        assert_eq!(idx.record_start(1).unwrap(), 16);
-        assert!(dir.join("tx.idx").join("meta").is_file());
-        assert!(!meta_flat.exists());
-        std::env::remove_var("RBITCOIN_TX_IDX_SOFT_SPAN");
-        drop(_env);
+        match TxIdx::open(&dir, "tx") {
+            Err(StoreError::Corrupt(m)) => {
+                assert_eq!(m, INDEX_REFUSE_FLAT_IDX);
+                assert!(m.contains("Class A kept"), "{m}");
+            }
+            Ok(_) => panic!("flat idx must refuse TxIdx::open"),
+            Err(other) => panic!("expected INDEX_REFUSE_FLAT_IDX, got {other}"),
+        }
+        assert!(meta_flat.is_file(), "flat files left for operator to move");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

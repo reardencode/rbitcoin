@@ -22,7 +22,7 @@ format code:
 
 | Option | When |
 |--------|------|
-| **Soft migrate** | Payload-only (e.g. fuse8 v1→v2): open legacy, `warn!`, rewrite on open or next seal — **not** “recreate whole table” |
+| **Soft migrate** | Payload-only: open legacy, `warn!`, rewrite on open or next seal — **not** “recreate whole table”. fuse8 v1 is **not** this (explicit refuse). |
 | **`SCHEMA_VERSION` bump** | Class A / OA / body layout change, or anything that cannot soft-open prior files |
 | **Explicit refuse** | Hard error with a one-line wipe/reindex message (which files) |
 
@@ -49,7 +49,16 @@ head rebuild cannot trip the refuse).
 Empty 18/19 indexes rewrite `meta` to 20 **before** `ScriptHashTable::open` /
 `TxTable::open`. `meta=20` is BDZ3 SH (no schema-20 SH was written as BDZ1).  
 **18→19 open (19 binary):** Rewrite `meta` to 19 even with populated `tx.head` / `scripthash*`.
-Mode 10 paged heads stay readable; new megakeys write mode 11.  
+A **20** binary refuses leftover pack8 Paged (mode 10).  
+**Schema-20 leftover index layouts (occupied `meta=20`):** fuse8 **v1**, flat `tx.head.meta`, flat `*.idx.meta`, Shared file `scripthash.body`, and pack8 **Paged** (mode 10) **refuse** (no always-probe, no rename, no Shared read). Errors:
+
+```text
+index refuses fuse8 v1; wipe store/tx.head and store/scripthash* then restart (Class A kept; tx.head rebuilds, SH rematerializes with --shindex)
+index refuses flat tx.head.meta; wipe store/tx.head then restart (Class A kept; tx.head rebuilds)
+index refuses flat *.idx.meta; place files under store/{stem}.idx/ (meta + NNNNNN segments) then restart (Class A kept)
+index refuses Shared (file) scripthash.body; wipe store/scripthash* then restart (Class A kept; SH rematerializes with --shindex)
+index refuses pack8 Paged (mode 10) scripthash heads; wipe store/scripthash* then restart (Class A kept; SH rematerializes with --shindex)
+```  
 **Endianness:** little-endian for all multi-byte integers.
 
 Older versions and migration notes live in [`SCHEMA_HISTORY.md`](./SCHEMA_HISTORY.md).
@@ -64,8 +73,8 @@ Older versions and migration notes live in [`SCHEMA_HISTORY.md`](./SCHEMA_HISTOR
 |--------|----------------|
 | Class A | Split `txout` / `inwit` / `spent`; thin LAYOUT17 meta; kinds **0–9**; 8 B spent slots; `spent.ovf` |
 | Identity | Dense `txid.body` (32 B/fk); segmented `tx.head` (25-bit + fuse8 v2) |
-| Idx | Per-stem `*.idx/` directories; **u32 stride-8**; hard span `2^32 × 8` ≈ 32 GiB; soft roll default 16 GiB |
-| Class B | SH runs `key_len=40` unique `(sh, create_fk)`; megakey pages ULEB deltas (`ver=1`); body **file** or **dir** orientation (not a version bump). Slab **class** is the byte allocation (32…2048); `used` is the fk count and may exceed the old geometric `slab_cap(class)` when the ULEB stream fits. Decode `used` fks from the payload. |
+| Idx | Per-stem `*.idx/` directories; **u32 stride-8**; hard span `2^32 × 8` ≈ 32 GiB; soft roll default 16 GiB. Flat `*.idx.meta` **refused**. |
+| Class B | SH runs `key_len=40` unique `(sh, create_fk)`; megakey pages ULEB deltas (`ver=1`); body **dir** (sharded). Leftover file body **refused**. Slab **class** is the byte allocation (32…2048); `used` is the fk count and may exceed the old geometric `slab_cap(class)` when the ULEB stream fits. Decode `used` fks from the payload. |
 | Class C | `confirmed[]` + `header_txs_*`; no `tx_height.body`; `strong_tx` bitset |
 | Tweaks | Segmented `sp_tweaks.idx/` + `sp_tweaks.body/` (`off:u32`, body `0`/`33`) |
 | Secret | `store.secret` XOR of scripts/witness; `mix_txid` for **open** `tx.head` page-local probes (not shard-by-txid). Sealed MPHF/fuse use the same mixed u64. |
@@ -461,7 +470,7 @@ bits-widen / shadow-resize path. Module map: [`docs/heads.md`](./docs/heads.md).
 | Entry | LE **relative** create id; **0 = empty**; `fk = first_fk + rel − 1` |
 | Capacity | Segment ends at **80% of head slots** (`max_keys`) → open next OA, seal previous on a sidecar. Idx 16 GiB soft-span does **not** cut `tx.head`. |
 | Seal filter | **Binary fuse8** (~9 bits/key, no false negatives, FP ≈ 0.39%) built **once on seal**; open segment has **no** filter |
-| Fuse file | `BF8R` + **version** + body. **v2** = in-tree LE layout (current). **v1** = historical xorf+bincode (open migrates to v2 from Class A; does **not** wipe head) |
+| Fuse file | `BF8R` + **version** + body. **v2** = in-tree LE layout (current). **v1** = historical xorf+bincode — **refused** (wipe `store/tx.head` and `store/scripthash*`; Class A kept) |
 | Probe | Open OA: page-local double-hash (1024 slots/page); one 4 KiB load. Sealed: RAM fuse skip, then unique 4 KiB packed BDZ `g` pages (not loaded into process heap); MPHF output is `rel−1` |
 | Insert | First empty in-page (or same relative id idempotent); second same-txid goes **deeper** |
 | Lookup | Pin by txid → **hot** (open + ages ≤3) → ID/idx → **cold** (ages ≥4) if needed; fuse-gate sealed; body-verify ([`docs/heads.md`](./docs/heads.md)) |
@@ -565,7 +574,7 @@ and the frozen-L1 warning is ~4.7 years. That is not a calendar guarantee.
 | Empty | no creates | `0` |
 | Inline | 1 create_tx_fk | mode `00`, fk |
 | **Slab** | 2–256 fks | mode `01`, off/used/class |
-| **Paged** | schema-18 megakey leftover | mode `10`, last page off |
+| **Paged** | schema-18 megakey leftover | mode `10` — **refused** on open |
 | **Extent** | ≥257 fks (new megakeys) | mode `11`, last page off |
 
 Schema-13 slab packing (`w0` flagged, `w1` clear) still decodes as paged;
@@ -573,19 +582,16 @@ store open refuses a durable pre-15 SH index (no dual-read of 4 KiB pages as s
 
 ### Body (schema 15 layout; 17 orientation)
 
-Schema 17 has two **body orientations**. `SCHEMA_VERSION` stays 17. Open
-detects files; it does **not** rewrite a file body into a directory.
+Schema 17 had two **body orientations**. A **20** binary writes and opens only
+the directory variant. A leftover file `scripthash.body` **refuses**.
 
 | On disk | Meaning |
 |---------|---------|
-| file `scripthash.body` | **Shared:** one TableFile, one writer (legacy 17) |
+| file `scripthash.body` | **Shared (legacy):** **refused** — wipe `store/scripthash*` |
 | dir `scripthash.body/NN` + file `scripthash.ovf/body` | **Sharded:** one TableFile per main shard + one ovf body |
 | file **and** dir, or dir without `ovf/body` | **Refuse** `Layout` — wipe `store/scripthash*` and rematerialize |
 
-New `Store::create` writes the dir variant. An old 17 binary that
-`TableFile::open("scripthash.body")` on a directory fails that open
-(not a silent misread). ColdProgress `SHCOLDP1` bytes are unchanged:
-`body_bump` is the shared HWM on the file variant. On the dir variant
+New `Store::create` writes the dir variant. ColdProgress `SHCOLDP1`:
 `next_shard` is the **lowest unsealed** main shard (holes after it
 stay); sealed `scripthash.head/NN.mphf`+`.val` is the per-shard commit. Overflow
 compact still merges **heads only** — all ovf keys share
@@ -602,7 +608,7 @@ compact still merges **heads only** — all ovf keys share
   `extent_n:u32` + reserved (stream starts at 24, max 4072 B). Last-page chunks
   use that cap; `ver=1` intermediates still fill 4088 B. Mode 11 pack8 stores **last**
   page off; that page holds `(extent_base, extent_n)`. Query span-reads `extent_n`
-  pages then linked-walks a 4 KiB tail. Mode 10 / `ver=1` is a linked walk only.
+  pages then linked-walks a 4 KiB tail. Mode 10 pack8 is **refused** on open.
   `ver=0` with `n_fks>0` is a leftover raw-u64 page — rematerialize. Last-page
   append only. Megakeys never relocate.
 - SH shard bodies and `scripthash.ovf/body` grow in **64 KiB** steps (`GrowPolicy::Align64k`).
