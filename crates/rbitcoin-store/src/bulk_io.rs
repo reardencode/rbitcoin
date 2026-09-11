@@ -1086,4 +1086,59 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Poisoned session `begin_batch` is batch-false, not process `URING_MODE=2`.
+    #[test]
+    fn poisoned_session_batch_false_does_not_disable_uring() {
+        if !io_uring_enabled() {
+            return;
+        }
+        let mut session = crate::uring_session::UringSession::try_open(32).expect("session");
+        session.poison();
+        let dir = std::env::temp_dir().join(format!(
+            "rbitcoin-mid-wave-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("blob");
+        {
+            let f = std::fs::OpenOptions::new()
+                .create_new(true)
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            f.set_len(8).unwrap();
+        }
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let fd = crate::io_handle::IoHandle::from_file(&f);
+        let payload = [0xABu8; 4];
+        let mut ops = [WriteOp {
+            fd,
+            offset: 0,
+            buf: &payload[..],
+            result: i32::MIN,
+        }];
+        assert!(
+            !pwrite_batch_on_session(&mut session, &mut ops, 1),
+            "poisoned begin_batch must be batch-false"
+        );
+        assert!(
+            io_uring_enabled(),
+            "mid-wave session false must not store URING_MODE=2"
+        );
+        pwrite_batch_fallback(&mut ops);
+        assert_eq!(ops[0].result, 4);
+        let mut got = [0u8; 4];
+        assert_eq!(fd.pread(0, &mut got), 4);
+        assert_eq!(got, payload);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
