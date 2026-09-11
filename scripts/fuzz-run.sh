@@ -295,15 +295,15 @@ fi
 if [[ "$BIN" == "cmpct_differential" ]]; then
   export RBITCOIN_CORE_BITCOIND="$(./scripts/core-functional/fetch-bitcoind.sh)"
   merge_seed fuzz/corpus/cmpct_differential \
-    crates/rbitcoin-net/tests/fixtures/cmpct_fuzz_two_tx.bin
+    fuzz/fixtures/cmpct_fuzz_two_tx.bin
   merge_seed fuzz/corpus/cmpct_differential \
-    crates/rbitcoin-net/tests/fixtures/cmpct_fuzz_all_prefilled.bin
+    fuzz/fixtures/cmpct_fuzz_all_prefilled.bin
   merge_seed fuzz/corpus/cmpct_differential \
-    crates/rbitcoin-net/tests/fixtures/cmpct_fuzz_fill.bin
+    fuzz/fixtures/cmpct_fuzz_fill.bin
   merge_seed fuzz/corpus/cmpct_differential \
-    crates/rbitcoin-net/tests/fixtures/cmpct_fuzz_dup.bin
+    fuzz/fixtures/cmpct_fuzz_dup.bin
   merge_seed fuzz/corpus/cmpct_differential \
-    crates/rbitcoin-net/tests/fixtures/cmpct_fuzz_raw.bin
+    fuzz/fixtures/cmpct_fuzz_raw.bin
   log="${TMPDIR:-/tmp}/rbtc-fuzz-cmpct.$$.log"
   set +e
   env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" cmpct_differential -- \

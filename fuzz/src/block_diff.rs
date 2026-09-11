@@ -1,8 +1,5 @@
 //! Verdict-only block differential vs Core `submitblock`. Not a node RPC.
 
-use crate::chain::{AcceptOutcome, ChainHub};
-use crate::error::NetError;
-use crate::peer::{drain_pending_now, PendingBlocks};
 use bitcoin::absolute::LockTime;
 use bitcoin::consensus::encode::{deserialize, serialize};
 use bitcoin::hashes::Hash;
@@ -15,6 +12,7 @@ use rbitcoin_consensus::{
     genesis_block, mine_empty_regtest, mine_regtest_paying, prepare_regtest_candidate, ChainParams,
     REGTEST_BLOCK_SPACING,
 };
+use rbitcoin_net::{drain_pending_now, AcceptOutcome, ChainHub, NetError, PendingBlocks};
 use rbitcoin_primitives::hex_encode;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -840,10 +838,10 @@ pub fn is_core_mempool_policy_skip(reason: &str) -> bool {
         || r.contains("mempool-script-verify-flag")
 }
 
-fn mempool_ours_consensus(
-    r: Result<rbitcoin_mempool::AcceptResult, rbitcoin_mempool::AcceptError>,
+fn mempool_ours_consensus<T>(
+    r: Result<T, rbitcoin_net::AcceptError>,
 ) -> Result<DiffVerdict, &'static str> {
-    use rbitcoin_mempool::AcceptError;
+    use rbitcoin_net::AcceptError;
     match r {
         Ok(_) => Ok(DiffVerdict::Accept),
         Err(
@@ -1899,7 +1897,7 @@ mod tests {
 
     fn height1_bytes() -> Vec<u8> {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../rbitcoin-consensus/tests/fixtures/regtest_height1.bin");
+            .join("../crates/rbitcoin-consensus/tests/fixtures/regtest_height1.bin");
         fs::read(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
     }
 
@@ -2002,7 +2000,7 @@ mod tests {
     fn compare_mempool_one_skips_core_policy_and_agrees_consensus() {
         let (dir, hub, _) = tmp_diff_hub();
         let pad = mine_diff_pad(&hub, DIFF_MATURE_PAD_HEIGHT).unwrap();
-        let mp = crate::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
+        let mp = rbitcoin_net::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
         hub.attach_mempool(mp).ok();
         let seed = serialize(&spend_seed_block());
         let mock = MockOracle::new(OracleReply::Reason("dust".into()));
@@ -2646,7 +2644,7 @@ mod tests {
     fn regtest_height101_spend_fixture() {
         let expected = serialize(&spend_seed_block());
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../rbitcoin-consensus/tests/fixtures/regtest_height101_spend.bin");
+            .join("../crates/rbitcoin-consensus/tests/fixtures/regtest_height101_spend.bin");
         let raw = fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         assert_eq!(raw, expected);
         let b: Block = deserialize(&raw).unwrap();
@@ -3014,7 +3012,7 @@ mod tests {
     fn regtest_fork_child_fixture() {
         let expected = serialize(&fork_child_seed_block());
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../rbitcoin-consensus/tests/fixtures/regtest_fork_child.bin");
+            .join("../crates/rbitcoin-consensus/tests/fixtures/regtest_fork_child.bin");
         let raw = fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         assert_eq!(raw, expected);
         let b: Block = deserialize(&raw).unwrap();

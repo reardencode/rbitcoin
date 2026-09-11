@@ -7,12 +7,12 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use libfuzzer_sys::fuzz_target;
-use rbitcoin_fuzz::{spawn_bitcoind_p2p, tmp_dir, CoreChild};
-use rbitcoin_net::{
-    classify_v2_cmpct_peer, cmpct_missing_for_case, encode_cmpctblock_v2, encode_pong_v2,
-    encode_sendcmpct_hb_v2, encode_tx_v2, prepare_cmpct_fuzz_case, BlockOracle, CmpctPeerFrame,
-    NetError, V2PlainSession,
+use rbitcoin_fuzz::{
+    cmpct_missing_for_case, encode_cmpctblock_v2, encode_pong_v2, encode_sendcmpct_hb_v2,
+    encode_tx_v2, prepare_cmpct_fuzz_case, BlockOracle,
 };
+use rbitcoin_fuzz::{spawn_bitcoind_p2p, tmp_dir, CoreChild};
+use rbitcoin_net::{classify_v2_cmpct_peer, CmpctPeerFrame, NetError, V2PlainSession};
 use tokio::net::TcpStream;
 use tokio::runtime::{Builder, Runtime};
 

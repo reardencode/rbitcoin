@@ -1097,7 +1097,13 @@ mod tests {
 
     #[test]
     fn v2_sendcmpct_fixture_matches_encode() {
-        let expected = crate::encode_sendcmpct_hb_v2().unwrap();
+        let expected = encode_v2_contents(NetworkMessage::SendCmpct(
+            bitcoin::p2p::message_compact_blocks::SendCmpct {
+                send_compact: true,
+                version: 2,
+            },
+        ))
+        .unwrap();
         let path = v2_fixture_path("v2_sendcmpct.bin");
         let raw = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         assert_eq!(raw, expected);
@@ -1106,7 +1112,14 @@ mod tests {
 
     #[test]
     fn v2_getheaders_fixture_matches_encode() {
-        let expected = crate::encode_getheaders_empty_v2().unwrap();
+        use bitcoin::hashes::Hash;
+        let expected = encode_v2_contents(NetworkMessage::GetHeaders(
+            bitcoin::p2p::message_blockdata::GetHeadersMessage::new(
+                Vec::new(),
+                bitcoin::BlockHash::from_byte_array([0; 32]),
+            ),
+        ))
+        .unwrap();
         let path = v2_fixture_path("v2_getheaders.bin");
         let raw = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         assert_eq!(raw, expected);
