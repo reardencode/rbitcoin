@@ -60,15 +60,15 @@ product, error codes, our mempool files). First green was 9 scripts; **71**
 unmodified v31.1 scripts `run` now. Remaining growth is claimed
 wallet-client / P2P / mempool / buried-activation scripts, not the
 product-never skips (`no-wallet`, prune, v1). Labeled dummy
-`getnetworkhashps` and remaining Q-59 holes (`gettxout` mempool-spent,
-unbounded JSON-RPC batch) live in [`quality.md`](./quality.md)
-**Q-41**. Owner: [`core-functional.md`](./core-functional.md).
+`getnetworkhashps` is documented in [`rpc.md`](./rpc.md). Remaining
+claimed-surface `run` growth is [`quality.md`](./quality.md) **Q-41**.
+Owner: [`core-functional.md`](./core-functional.md).
 
 | Done | Step |
 |:----:|------|
 | [x] | Harness + inventory + nightly / labeled `core-functional` job |
 | [x] | 71 unmodified v31.1 scripts `run` (was 9) |
-| [ ] | Claimed COMPAT-done surface is `run` or an explicit dialect/differ note (**Q-41**, **Q-59**) |
+| [ ] | Claimed COMPAT-done surface is `run` or an explicit dialect/differ note (**Q-41**) |
 
 ### Fuzz until junk input is boring
 

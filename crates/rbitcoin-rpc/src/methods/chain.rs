@@ -500,6 +500,17 @@ pub(crate) fn gettxout(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Va
     {
         return Ok(Value::Null);
     }
+    if include_mempool {
+        if let Some(mp) = ctx.mempool.as_ref() {
+            let op = bitcoin::OutPoint {
+                txid: Txid::from_byte_array(want),
+                vout: n,
+            };
+            if mp.spends_outpoint(&op) {
+                return Ok(Value::Null);
+            }
+        }
+    }
     let out = ctx
         .query
         .tx_output_at_fk(fk, n)

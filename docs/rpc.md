@@ -24,6 +24,7 @@ Esplora** (with `--shindex`) for address/script history.
 | `--rpcuser` / `--rpcpassword` | unset | HTTP Basic credentials |
 | Cookie | **on** when listen set and no user/pass | `{datadir}/.cookie` as `user:password` |
 | `--shindex` | **off** | Class B scripthash (Electrum/Esplora only; RPC by height/hash/txid does not need it) |
+| `--rpcworkqueue N` | **unset** | Unlimited in-flight HTTP RPC and unlimited JSON-RPC array batch. When set, a batch with more than N methods is HTTP 500 `Work queue depth exceeded` (same as a full queue) |
 
 TLS is external (reverse proxy). Non-loopback binds still use cookie or user/pass
 (always authenticated).
@@ -91,21 +92,21 @@ still wait for durable SH when shindex is on.
 | `decoderawtransaction` | All networks. Decode hex. Optional `iswitness`: `false` refuses a BIP141 marker (`-22 TX decode failed`). Extra trailing bytes also `-22`. `scriptSig.asm` is rust-bitcoin, not Core `ScriptToAsmStr` sighash suffixes. Coinbase vin is `txid`/`vout`/`scriptSig` (not Core's `coinbase` key). |
 | `decodescript` | All networks. `asm`, Core-style `type`, `hex`, and `address` when `Address::from_script` succeeds. No `p2sh` wrap, `segwit` wrap, or `desc` / miniscript. |
 | `validateaddress` | All networks. Valid: `isvalid`, `address`, `scriptPubKey`, `isscript`, `iswitness`, plus `witness_version` / `witness_program` when segwit. Invalid (parse fail or wrong chain): `{isvalid: false}` only — no `error` / `error_locations`. |
-| `sendrawtransaction` / `testmempoolaccept` | Relay must be enabled. `sendrawtransaction` is live accept. `testmempoolaccept` is dry-run (`MempoolHub::test_accept`: prepare + scripts + RBF/cluster checks, no commit / announce / RBF eviction / orphan park). |
+| `sendrawtransaction` / `testmempoolaccept` | Relay must be enabled. `sendrawtransaction` is live accept. `testmempoolaccept` is dry-run (`MempoolHub::test_accept`: prepare + scripts + RBF/cluster checks, no commit / announce / RBF eviction / orphan park). RPC-submit only: `maxfeerate` default **0.10 BTC/kvB** (`0` unlimited; `>1` is a parameter error `1BTC/kvB`); over-cap is `max-fee-exceeded` before admit. `maxburnamount` default **0** (valued unspendable / OP_RETURN outs). P2P `accept_tx` does not apply these caps. |
 | `estimatesmartfee` | **10-minute inclusion frontier** — not Core historical multi-horizon. See [`mempool-fee-estimation.md`](./mempool-fee-estimation.md). |
 | `estimaterawfee` | Same 10-minute frontier product as `estimatesmartfee` (Core RPC name for harness scripts). Not Core historical `estimaterawfee` buckets. |
 | `getnetworkhashps` | Dummy **2-work-per-block / elapsed** over `nblocks` (default 120) ending at `height` (default tip). **Not** Core `GetNetworkHashPS` (nBits / chainwork). Matches regtest 2 work/block. |
 | `generatetoaddress` / `generatetodescriptor` / `generateblock` / `generate` | **Regtest only.** Mine through `ChainHub::accept_block` (same confirm as P2P). First generated block includes `select_block_txs`, then `remove_for_block`. `generatetodescriptor` accepts `raw(HEX)`, `addr(ADDRESS)`, or a bare address. |
-| `getblocktemplate` / `getmininginfo` | All networks. Template from `select_block_txs`. `rules` must include `segwit`. Proposal validates without connecting and returns Core reject needles (`bad-cb-missing`, `bad-diffbits`, `time-too-old`, …). Version is `VERSIONBITS_TOP_BITS` only (no testdummy). `longpollid` waits until the tip or mempool update counter changes. |
+| `getblocktemplate` / `getmininginfo` | All networks. Template from `select_block_txs`. `rules` must include `segwit`. Proposal validates without connecting and returns Core reject needles (`bad-cb-missing`, `bad-diffbits`, `time-too-old`, …). Version is `VERSIONBITS_TOP_BITS` only (no testdummy). `longpollid` waits until the tip or mempool update counter changes. `getmininginfo.blockmintxfee` is 8-decimal BTC/kvB (`sat_btc_json`, same helper as mempool fees). |
 | `prioritisetransaction` / `getprioritisedtransactions` | All networks. Local mining fee delta (sat). Dummy must be 0. Selector honors modified fee. |
 | `getmempoolcluster` | All networks. Cluster weight / chunks from the live graph (modified fees). Same prefix-maximal chunks as mining selection. |
 | `getmempoolancestors` / `getmempooldescendants` | All networks. Exclusive walks of the live cluster graph. `verbose` reuses `getmempoolentry` fields. |
 | `getmempoolfeeratediagram` | All networks. Mining chunks as `{weight, fee}` points (decreasing feerate). |
-| `submitpackage` | All networks. Sequential `accept_tx` (parent can stay if the child fails). No package-level feerate (a 0-fee CPFP parent is rejected on its own min-relay). `package_msg` / `tx-results` / `replaced-transactions`. |
+| `submitpackage` | All networks. Sequential `accept_tx` (parent can stay if the child fails). No package-level feerate (a 0-fee CPFP parent is rejected on its own min-relay). `package_msg` / `tx-results` / `replaced-transactions`. Per-tx RPC `maxfeerate` / `maxburnamount` (same defaults as sendraw) before admit. |
 | `gettxspendingprevout` | All networks. Live mempool spender of each `{txid,vout}`. |
 | `submitblock` | All networks. Same `ChainHub::accept_received_block` as a P2P `block` message: tip-extend, or hold by hash + most-work `accept_branch`. |
 | `scantxoutset` | All networks. `raw(HEX)` over Class A unspent outputs. MiniWallet on-ramp. Not Core coins-DB / HD-range scan. |
-| `gettxout` | All networks. Class A + mempool. |
+| `gettxout` | All networks. Class A + mempool. Default `include_mempool=true` returns `null` for a confirmed out spent by a live mempool tx. `include_mempool=false` still returns the confirmed coin. |
 | `getindexinfo` | All networks. Reports `txindex` synced at tip — we reconstruct by txid from Class A (no separate index flag). |
 | `getchaintips` | All networks. Active + archive `valid-fork` + held `valid-headers` + header-only (`submitheader` / P2P headers). Invalid body after a known header marks that branch `invalid`. |
 | `getdeploymentinfo` | All networks. Buried deployments from `ChainParams` including `-testactivationheight`. `active` follows Core `DeploymentActiveAfter` (true for the *next* block). No BIP9 / testdummy. |

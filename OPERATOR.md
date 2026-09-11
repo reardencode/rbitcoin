@@ -374,7 +374,7 @@ Routine knobs are **CLI / conf**, not required env vars. Clean smoke:
 | `--esplora-listen ADDR` | | disabled (Esplora REST; **requires** `--shindex`) |
 | `--rpc-listen ADDR` | conf `rpc_listen` | disabled — Core-class JSON-RPC subset |
 | `--rpcuser` / `--rpcpassword` | conf `rpcuser`/`rpcpassword` | unset — else cookie `{datadir}/.cookie` |
-| `--rpcworkqueue N` | conf `rpcworkqueue=` | unset — unlimited in-flight RPC |
+| `--rpcworkqueue N` | conf `rpcworkqueue=` | unset — unlimited in-flight RPC and unlimited JSON-RPC array batch. When set, a batch with more than N methods is the same HTTP 500 as a full work queue |
 | `--minrelaytxfee BTC` | same | unset — Libre default 100 sat/kvB; `0` = no floor; garbage/negatives fail start |
 | `--mempoolexpiry HOURS` | same | unset — hub default; min 1 |
 | `--blocksonly` | same | off |

@@ -239,14 +239,166 @@ pub(crate) fn getrawtransaction(ctx: &RpcContext, params: &RpcParams) -> Result<
     ))
 }
 
+/// Core `DEFAULT_MAX_RAW_TX_FEE_RATE`: 0.10 BTC/kvB (sat/kvB).
+const DEFAULT_MAX_RAW_TX_FEE_SAT_KVB: u64 = 10_000_000;
+/// Core `ParseFeeRate`: values above 1 BTC/kvB are an RPC parameter error.
+const MAX_ALLOWED_FEERATE_SAT_KVB: u64 = 100_000_000;
+
+fn parse_rpc_btc_to_sat(s: &str) -> Result<u64, Value> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err(rpc_error(ERR_INVALID_PARAMETER, "Invalid amount"));
+    }
+    if s.starts_with('-') {
+        return Err(rpc_error(ERR_INVALID_PARAMETER, "Amount out of range"));
+    }
+    let (whole_s, frac_s) = match s.split_once('.') {
+        Some((w, f)) => (w, f),
+        None => (s, ""),
+    };
+    let whole: u64 = if whole_s.is_empty() {
+        0
+    } else {
+        whole_s
+            .parse()
+            .map_err(|_| rpc_error(ERR_INVALID_PARAMETER, "Invalid amount"))?
+    };
+    if frac_s.len() > 8 {
+        return Err(rpc_error(ERR_INVALID_PARAMETER, "Invalid amount"));
+    }
+    let mut frac = frac_s.to_string();
+    while frac.len() < 8 {
+        frac.push('0');
+    }
+    let frac_n: u64 = if frac.is_empty() {
+        0
+    } else {
+        frac.parse()
+            .map_err(|_| rpc_error(ERR_INVALID_PARAMETER, "Invalid amount"))?
+    };
+    Ok(whole.saturating_mul(100_000_000).saturating_add(frac_n))
+}
+
+fn amount_sat_from_json(v: &Value) -> Result<u64, Value> {
+    match v {
+        Value::Number(n) => {
+            if let Some(u) = n.as_u64() {
+                return Ok(u.saturating_mul(100_000_000));
+            }
+            if let Some(i) = n.as_i64() {
+                if i < 0 {
+                    return Err(rpc_error(ERR_INVALID_PARAMETER, "Amount out of range"));
+                }
+                return Ok((i as u64).saturating_mul(100_000_000));
+            }
+            parse_rpc_btc_to_sat(&n.to_string())
+        }
+        Value::String(s) => parse_rpc_btc_to_sat(s),
+        _ => Err(rpc_error(
+            ERR_TYPE_ERROR,
+            "Amount is not a number or string",
+        )),
+    }
+}
+
+/// RPC-submit `maxfeerate` (BTC/kvB). Omitted → 0.10. `0` → unlimited. `>1` → param error.
+///
+/// Wallet protection on `sendrawtransaction` / `testmempoolaccept` / `submitpackage`
+/// only. P2P `accept_tx` does not read this cap.
+fn opt_maxfeerate_sat_kvb(params: &RpcParams, index: usize) -> Result<u64, Value> {
+    match params.get(index, "maxfeerate") {
+        None | Some(Value::Null) => Ok(DEFAULT_MAX_RAW_TX_FEE_SAT_KVB),
+        Some(v) => {
+            let sat = amount_sat_from_json(v)?;
+            if sat > MAX_ALLOWED_FEERATE_SAT_KVB {
+                return Err(rpc_error(
+                    ERR_INVALID_PARAMETER,
+                    "Fee rates larger than 1BTC/kvB are not allowed",
+                ));
+            }
+            Ok(sat)
+        }
+    }
+}
+
+fn fee_exceeds_max(fee_sat: u64, weight: u64, max_sat_kvb: u64) -> bool {
+    if max_sat_kvb == 0 {
+        return false;
+    }
+    let vsize = rbitcoin_consensus::policy::get_virtual_size(weight);
+    let max_fee = max_sat_kvb.saturating_mul(vsize) / 1000;
+    fee_sat > max_fee
+}
+
+fn prevout_value_sat(ctx: &RpcContext, op: &OutPoint) -> Option<u64> {
+    if let Some(mp) = ctx.mempool.as_ref() {
+        if let Some(parent) = mp.get_tx(&op.txid) {
+            return parent
+                .output
+                .get(op.vout as usize)
+                .map(|o| o.value.to_sat());
+        }
+    }
+    let want = op.txid.to_byte_array();
+    let (fk, _) = ctx.query.get_tx_by_txid(&want).ok().flatten()?;
+    let out = ctx.query.tx_output_at_fk(fk, op.vout).ok()?;
+    u64::try_from(out.value).ok()
+}
+
+fn tx_fee_sat_from_prevouts(ctx: &RpcContext, tx: &Transaction) -> Option<u64> {
+    let mut in_sum = 0u64;
+    for inp in &tx.input {
+        in_sum = in_sum.saturating_add(prevout_value_sat(ctx, &inp.previous_output)?);
+    }
+    let out_sum: u64 = tx.output.iter().map(|o| o.value.to_sat()).sum();
+    in_sum.checked_sub(out_sum)
+}
+
+fn rpc_tx_fee_exceeds_max(ctx: &RpcContext, tx: &Transaction, max_sat_kvb: u64) -> bool {
+    let Some(fee) = tx_fee_sat_from_prevouts(ctx, tx) else {
+        return false;
+    };
+    fee_exceeds_max(fee, tx.weight().to_wu(), max_sat_kvb)
+}
+
+/// RPC-submit `maxburnamount` (BTC). Omitted → 0. Sum of unspendable output values vs cap.
+fn opt_maxburn_sat(params: &RpcParams, index: usize) -> Result<u64, Value> {
+    match params.get(index, "maxburnamount") {
+        None | Some(Value::Null) => Ok(0),
+        Some(v) => amount_sat_from_json(v),
+    }
+}
+
+fn unspendable_output_sat(tx: &Transaction) -> u64 {
+    tx.output
+        .iter()
+        .filter(|o| crate::blockstats::is_unspendable(o.script_pubkey.as_bytes()))
+        .map(|o| o.value.to_sat())
+        .sum()
+}
+
+fn burn_exceeds_max(tx: &Transaction, max_burn_sat: u64) -> bool {
+    unspendable_output_sat(tx) > max_burn_sat
+}
+
+const MAX_BURN_MSG: &str = "Unspendable output exceeds maximum configured by user (maxburnamount)";
+
 pub(crate) fn sendrawtransaction(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
-    params.reject_unknown(&["hexstring", "maxfeerate"])?;
+    params.reject_unknown(&["hexstring", "maxfeerate", "maxburnamount"])?;
     let hex = params.req_str(0, "hexstring")?;
+    let max_feerate = opt_maxfeerate_sat_kvb(params, 1)?;
+    let max_burn = opt_maxburn_sat(params, 2)?;
     let tx = decode_tx_hex(hex)?;
     let mp = ctx
         .mempool
         .as_ref()
         .ok_or_else(|| rpc_error(ERR_MISC, "mempool not available"))?;
+    if burn_exceeds_max(&tx, max_burn) {
+        return Err(rpc_error(ERR_INVALID_PARAMETER, MAX_BURN_MSG));
+    }
+    if rpc_tx_fee_exceeds_max(ctx, &tx, max_feerate) {
+        return Err(rpc_error(ERR_VERIFY_REJECTED, "max-fee-exceeded"));
+    }
     // `-blocksonly` leaves P2P relay off but RPC still accepts
     // (`p2p_blocksonly.py` sendrawtransaction).
     match mp.accept_tx(&tx) {
@@ -356,6 +508,7 @@ pub(crate) fn accept_reject_details(
 
 pub(crate) fn testmempoolaccept(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["rawtxs", "maxfeerate"])?;
+    let max_feerate = opt_maxfeerate_sat_kvb(params, 1)?;
     let arr = params
         .get_array(0, "rawtxs")
         .ok_or_else(|| rpc_error(ERR_INVALID_PARAMS, "rawtxs array required"))?;
@@ -386,6 +539,15 @@ pub(crate) fn testmempoolaccept(ctx: &RpcContext, params: &RpcParams) -> Result<
         match mp.test_accept(&tx) {
             Ok(r) => {
                 let wtxid = hash_hex_display(&tx.compute_wtxid().to_byte_array());
+                if fee_exceeds_max(r.fee_sat, r.weight, max_feerate) {
+                    out.push(json!({
+                        "txid": txid,
+                        "wtxid": wtxid,
+                        "allowed": false,
+                        "reject-reason": "max-fee-exceeded",
+                    }));
+                    continue;
+                }
                 out.push(json!({
                     "txid": txid,
                     "wtxid": wtxid,
@@ -741,6 +903,8 @@ pub(crate) fn getmempoolfeeratediagram(
 
 pub(crate) fn submitpackage(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["package", "maxfeerate", "maxburnamount"])?;
+    let max_feerate = opt_maxfeerate_sat_kvb(params, 1)?;
+    let max_burn = opt_maxburn_sat(params, 2)?;
     let arr = params
         .get_array(0, "package")
         .ok_or_else(|| rpc_error(ERR_INVALID_PARAMS, "package array required"))?;
@@ -761,14 +925,35 @@ pub(crate) fn submitpackage(ctx: &RpcContext, params: &RpcParams) -> Result<Valu
             .ok_or_else(|| rpc_error(ERR_INVALID_PARAMS, "package hex required"))?;
         txs.push(decode_tx_hex(hex)?);
     }
-    let results = mp.submit_package_rpc(&txs);
     let mut tx_results = serde_json::Map::new();
     let mut replaced = Vec::new();
     let mut all_ok = true;
-    for (tx, r) in txs.iter().zip(results.iter()) {
+    for tx in &txs {
         let wtxid = hash_hex_display(&tx.compute_wtxid().to_byte_array());
         let txid = hash_hex_display(&tx.compute_txid().to_byte_array());
-        match r {
+        if burn_exceeds_max(tx, max_burn) {
+            all_ok = false;
+            tx_results.insert(
+                wtxid,
+                json!({
+                    "txid": txid,
+                    "error": MAX_BURN_MSG,
+                }),
+            );
+            continue;
+        }
+        if rpc_tx_fee_exceeds_max(ctx, tx, max_feerate) {
+            all_ok = false;
+            tx_results.insert(
+                wtxid,
+                json!({
+                    "txid": txid,
+                    "error": "max-fee-exceeded",
+                }),
+            );
+            continue;
+        }
+        match mp.accept_tx(tx) {
             Ok(ok) => {
                 mp.note_unbroadcast(ok.txid);
                 for old in &ok.replaced {
@@ -784,7 +969,7 @@ pub(crate) fn submitpackage(ctx: &RpcContext, params: &RpcParams) -> Result<Valu
                 );
             }
             Err(e) => {
-                let reason = accept_reject_reason(e);
+                let reason = accept_reject_reason(&e);
                 if reason == "txn-already-in-mempool" {
                     tx_results.insert(wtxid, json!({ "txid": txid }));
                     continue;

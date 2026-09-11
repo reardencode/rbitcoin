@@ -905,6 +905,7 @@ pub(crate) fn gbt_chain_txout(ctx: &RpcContext, op: &OutPoint) -> Option<bitcoin
     })
 }
 
+/// Tip height, difficulty, pooledtx, and `blockmintxfee` (BTC/kvB, `sat_btc_json`).
 pub(crate) fn getmininginfo(ctx: &RpcContext) -> Result<Value, Value> {
     let tip = ctx.query.tip_height().map(|h| h.0).unwrap_or(0);
     let pooledtx = ctx
@@ -932,7 +933,7 @@ pub(crate) fn getmininginfo(ctx: &RpcContext) -> Result<Value, Value> {
         .as_ref()
         .map(|c| c.block_min_tx_fee_sat_kvb())
         .unwrap_or(1);
-    m.insert("blockmintxfee".into(), json_btc_amount(min_sat));
+    m.insert("blockmintxfee".into(), sat_btc_json(min_sat as i64));
     m.insert("chain".into(), json!(chain_name(ctx.network)));
     m.insert("bits".into(), json!(format!("{bits:08x}")));
     m.insert("target".into(), json!(format!("{target:064x}")));
