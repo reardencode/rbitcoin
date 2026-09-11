@@ -118,7 +118,7 @@ Location: `crates/rbitcoin-test/tests/consensus_rules.rs` (connect-path header
 walks) and `crates/rbitcoin-consensus/src/header.rs` (`median_time_past_tests`:
 version floors and exact +2h).
 
-## C. Connect — `connect_block_prevouts` / `validate_block_connect`
+## C. Connect — `accept_and_connect_block` / `structural_validate_spends`
 
 | ID | Rule | Error signal | Test |
 |----|------|--------------|------|

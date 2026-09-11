@@ -11,9 +11,7 @@
 
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
-use rbitcoin_consensus::{
-    accept_and_connect_block, validate_block_connect, ChainParams, Milestone, ValidationContext,
-};
+use rbitcoin_consensus::{accept_and_connect_block, grind_regtest_pow, ChainParams, Milestone};
 use rbitcoin_net::MempoolHub;
 use rbitcoin_primitives::Height;
 use rbitcoin_query::Query;
@@ -109,8 +107,9 @@ fn analog_milestone_and_mempool_persist() {
         }],
     });
     phantom.header.merkle_root = phantom.compute_merkle_root().unwrap();
-    let ctx = ValidationContext::at(&params, Height(h + 1), ms_hi);
-    let err = validate_block_connect(q, &phantom, &ctx, None).expect_err("prevout must fail");
+    grind_regtest_pow(&mut phantom.header);
+    let err = accept_and_connect_block(q, &params, Height(h + 1), &phantom, ms_hi)
+        .expect_err("prevout must fail");
     let msg = err.to_string().to_lowercase();
     assert!(
         msg.contains("prev")

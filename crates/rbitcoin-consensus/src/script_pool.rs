@@ -1,6 +1,6 @@
 //! Lightweight parallel script-check pool (replaces rayon on the hot path).
 //!
-//! Production: (1) [`try_for_each_parallel`] steals **chunks** of indices on
+//! Production: (1) [`start_for_each_owned`] steals **chunks** of jobs on
 //! the process-wide `rbtc-scripts-*` workers; (2) [`spawn_detached`] /
 //! [`run_detached_join`] for mempool accept; (3) [`try_for_each_parallel_idle`]
 //! publishes a **background** wave claimed only when no foreground wave and no
@@ -332,6 +332,7 @@ pub(crate) fn start_for_each_owned<T: Sync>(
 /// Steal workers (`rbtc-scripts-*`) claim indices. Must not be called from a
 /// steal worker (hard refuse — same-pool wait would deadlock). On first error,
 /// workers stop claiming; in-flight units may still finish.
+#[cfg(test)]
 pub(crate) fn try_for_each_parallel<T, F>(items: &[T], f: F) -> Result<(), ConsensusError>
 where
     T: Sync,
