@@ -1336,7 +1336,6 @@ fn generate_refuses_on_mainnet() {
         "generatetoaddress",
         "generateblock",
         "generate",
-        "submitblock",
         "setmocktime",
     ] {
         let e = match m {
@@ -1353,6 +1352,26 @@ fn generate_refuses_on_mainnet() {
             "{m} must refuse on mainnet: {e}"
         );
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn submitblock_not_regtest_only() {
+    use bitcoin::consensus::encode::serialize;
+    use rbitcoin_consensus::mine_regtest_paying;
+
+    let (mut ctx, dir, hub) = ctx_regtest_hub();
+    ctx.network = Network::Mainnet;
+    ctx.regtest = None;
+    let (_, script) = p2wpkh_regtest();
+    let prev = hub.tip_hash().unwrap();
+    let time = hub.tip_header().unwrap().time + 1;
+    let good = mine_regtest_paying(prev, time, 1, script, vec![]);
+    let good_hex = rbitcoin_primitives::hex_encode(serialize(&good));
+    let r = dispatch(&ctx, "submitblock", vec![json!(good_hex)])
+        .unwrap_or_else(|e| panic!("submitblock on mainnet must not be regtest-only: {e}"));
+    assert!(r.is_null(), "good submitblock on mainnet: {r}");
+    assert_eq!(dispatch(&ctx, "getblockcount", vec![]).unwrap(), json!(1));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
