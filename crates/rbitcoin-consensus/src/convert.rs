@@ -118,59 +118,6 @@ fn tx_to_apply(tx: &Transaction, txid: [u8; 32]) -> Result<TxApply, ConsensusErr
     })
 }
 
-/// Class A ins from wire + stamped spend edges (write-time encode).
-pub(crate) fn input_records_from_wire(
-    tx: &Transaction,
-    spend_fk: Fk,
-    edges: &[rbitcoin_query::SpendEdge],
-) -> Result<Vec<InputRecord>, ConsensusError> {
-    if tx.input.len() != edges.len() {
-        return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
-            "invariant: write encode spends/tx input mismatch",
-        )));
-    }
-    let mut out = Vec::with_capacity(tx.input.len());
-    for (inp, e) in tx.input.iter().zip(edges.iter()) {
-        if e.spend_fk != spend_fk {
-            return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
-                "invariant: write encode spend_fk mismatch",
-            )));
-        }
-        let is_cb = inp.previous_output.is_null()
-            || (inp.previous_output.txid.to_byte_array() == [0u8; 32]
-                && inp.previous_output.vout == u32::MAX);
-        if is_cb {
-            out.push(InputRecord::coinbase(
-                inp.sequence.to_consensus_u32(),
-                inp.script_sig.to_bytes(),
-                inp.witness.to_vec(),
-            ));
-            continue;
-        }
-        if e.create_fk.is_null() {
-            return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
-                "invariant: write encode missing create_fk",
-            )));
-        }
-        if e.prev_txid != inp.previous_output.txid.to_byte_array()
-            || e.vout != inp.previous_output.vout
-        {
-            return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
-                "invariant: write encode edge/wire prevout mismatch",
-            )));
-        }
-        out.push(InputRecord {
-            prev_txid: inp.previous_output.txid.to_byte_array(),
-            create_fk: e.create_fk,
-            prev_index: inp.previous_output.vout,
-            sequence: inp.sequence.to_consensus_u32(),
-            script_sig: inp.script_sig.to_bytes(),
-            witness: inp.witness.to_vec(),
-        });
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,7 +152,7 @@ mod tests {
             spend_fk: Fk(9),
             create_fk: Fk::NULL,
         }];
-        let ins = input_records_from_wire(&tx, Fk(9), &edges).unwrap();
+        let ins = rbitcoin_query::input_records_from_wire(&tx, Fk(9), &edges).unwrap();
         assert_eq!(ins, apply.inputs);
     }
 
@@ -299,11 +246,12 @@ mod tests {
             spend_fk: Fk(9),
             create_fk: Fk(5),
         };
-        let ok = input_records_from_wire(&tx, Fk(9), &[edge([1u8; 32], 3)]).unwrap();
+        let ok =
+            rbitcoin_query::input_records_from_wire(&tx, Fk(9), &[edge([1u8; 32], 3)]).unwrap();
         assert_eq!(ok[0].prev_txid, [1u8; 32]);
         assert_eq!(ok[0].prev_index, 3);
         for bad in [edge([2u8; 32], 3), edge([1u8; 32], 4)] {
-            let err = input_records_from_wire(&tx, Fk(9), &[bad])
+            let err = rbitcoin_query::input_records_from_wire(&tx, Fk(9), &[bad])
                 .expect_err("mismatched edge must not encode");
             assert!(
                 format!("{err}").contains("edge/wire prevout"),

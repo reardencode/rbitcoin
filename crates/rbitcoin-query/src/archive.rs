@@ -1,8 +1,7 @@
 //! Class A archive write path.
 //!
 //! Split for IBD dual-thread (prep/write may overlap with a small plan queue):
-//! - **Plan** ([`Query::archive_plan_batch_from_wire`] IBD;
-//!   [`Query::archive_plan_batch_from_store`] TxApply tests):
+//! - **Plan** ([`Query::archive_plan_batch_from_wire`]):
 //!   store **reads** — assign create fks (optionally from a reserved HWM),
 //!   in-flight planned creates + `tx.head` resolve, stamp inputs.
 //!   Head-miss parents use **fk-only** head resolve (no denserels on plan stamp);
@@ -89,6 +88,60 @@ impl ArchiveWritePlan {
 
     pub fn is_empty(&self) -> bool {
         self.packed.is_empty()
+    }
+
+    /// Fill empty packed ins from wire txs + [`Self::edges`] (IBD write encode).
+    ///
+    /// No-op when every packed row already has ins. `blocks` must match
+    /// [`Self::per_header_ranges`] order and tx counts.
+    pub fn fill_packed_ins_from_blocks(
+        &mut self,
+        blocks: &[&bitcoin::Block],
+    ) -> Result<(), StoreError> {
+        if self.packed.is_empty() || self.packed.iter().all(|(_, ins)| !ins.is_empty()) {
+            return Ok(());
+        }
+        if blocks.len() != self.per_header_ranges.len() {
+            return Err(StoreError::Corrupt(
+                "invariant: write encode prepared/wire length",
+            ));
+        }
+        let mut i = 0usize;
+        for ((_, _, n), block) in self.per_header_ranges.iter().zip(blocks.iter()) {
+            if block.txdata.len() != *n as usize {
+                return Err(StoreError::Corrupt(
+                    "invariant: write encode tx_fks/txdata length",
+                ));
+            }
+            for tx in &block.txdata {
+                let fk = *self.planned_fks.get(i).ok_or(StoreError::Corrupt(
+                    "invariant: write encode packed shorter than planned_fks",
+                ))?;
+                let Some(id) = fk.get() else {
+                    return Err(StoreError::Corrupt(
+                        "invariant: write encode null planned fk",
+                    ));
+                };
+                let empty = [];
+                let eds = self.edges.get(&id).map(|v| v.as_slice()).unwrap_or(&empty);
+                let ins = input_records_from_wire(tx, fk, eds)?;
+                if i >= self.packed.len() {
+                    return Err(StoreError::Corrupt(
+                        "invariant: write encode packed shorter than planned_fks",
+                    ));
+                }
+                if self.packed[i].1.is_empty() {
+                    self.packed[i].1 = ins;
+                }
+                i += 1;
+            }
+        }
+        if i != self.packed.len() {
+            return Err(StoreError::Corrupt(
+                "invariant: write encode packed/tx count mismatch",
+            ));
+        }
+        Ok(())
     }
 
     /// Wire `prev_txid` known for this create_fk at plan stamp (RAM only).
@@ -269,12 +322,102 @@ struct PlanRow {
     ins_est: u64,
 }
 
-fn plan_in_from_record(inp: &InputRecord) -> PlanIn {
-    PlanIn {
-        prev_txid: inp.prev_txid,
-        prev_index: inp.prev_index,
-        is_coinbase: inp.is_coinbase(),
+/// Class A ins from wire + stamped spend edges (write-time encode).
+pub fn input_records_from_wire(
+    tx: &bitcoin::Transaction,
+    spend_fk: Fk,
+    edges: &[crate::SpendEdge],
+) -> Result<Vec<InputRecord>, StoreError> {
+    if tx.input.len() != edges.len() {
+        return Err(StoreError::Corrupt(
+            "invariant: write encode spends/tx input mismatch",
+        ));
     }
+    let mut out = Vec::with_capacity(tx.input.len());
+    for (inp, e) in tx.input.iter().zip(edges.iter()) {
+        if e.spend_fk != spend_fk {
+            return Err(StoreError::Corrupt(
+                "invariant: write encode spend_fk mismatch",
+            ));
+        }
+        let is_cb = inp.previous_output.is_null()
+            || (inp.previous_output.txid.to_byte_array() == [0u8; 32]
+                && inp.previous_output.vout == u32::MAX);
+        if is_cb {
+            out.push(InputRecord::coinbase(
+                inp.sequence.to_consensus_u32(),
+                inp.script_sig.to_bytes(),
+                inp.witness.to_vec(),
+            ));
+            continue;
+        }
+        if e.create_fk.is_null() {
+            return Err(StoreError::Corrupt(
+                "invariant: write encode missing create_fk",
+            ));
+        }
+        if e.prev_txid != inp.previous_output.txid.to_byte_array()
+            || e.vout != inp.previous_output.vout
+        {
+            return Err(StoreError::Corrupt(
+                "invariant: write encode edge/wire prevout mismatch",
+            ));
+        }
+        out.push(InputRecord {
+            prev_txid: inp.previous_output.txid.to_byte_array(),
+            create_fk: e.create_fk,
+            prev_index: inp.previous_output.vout,
+            sequence: inp.sequence.to_consensus_u32(),
+            script_sig: inp.script_sig.to_bytes(),
+            witness: inp.witness.to_vec(),
+        });
+    }
+    Ok(out)
+}
+
+fn tx_apply_to_tx(ta: &TxApply) -> bitcoin::Transaction {
+    bitcoin::Transaction {
+        version: bitcoin::transaction::Version(ta.tx.version),
+        lock_time: bitcoin::absolute::LockTime::from_consensus(ta.tx.locktime),
+        input: ta
+            .inputs
+            .iter()
+            .map(|inp| bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint {
+                    txid: bitcoin::Txid::from_byte_array(inp.prev_txid),
+                    vout: inp.prev_index,
+                },
+                script_sig: bitcoin::script::ScriptBuf::from_bytes(inp.script_sig.clone()),
+                sequence: bitcoin::Sequence::from_consensus(inp.sequence),
+                witness: bitcoin::Witness::from_slice(&inp.witness),
+            })
+            .collect(),
+        output: ta
+            .outputs
+            .iter()
+            .map(|o| bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(o.value.max(0) as u64),
+                script_pubkey: bitcoin::script::ScriptBuf::from_bytes(o.script.clone()),
+            })
+            .collect(),
+    }
+}
+
+fn block_from_applies(txs: &[TxApply]) -> (bitcoin::Block, Vec<[u8; 32]>) {
+    let txids: Vec<[u8; 32]> = txs.iter().map(|t| t.tx.txid).collect();
+    let txdata: Vec<bitcoin::Transaction> = txs.iter().map(tx_apply_to_tx).collect();
+    let block = bitcoin::Block {
+        header: bitcoin::block::Header {
+            version: bitcoin::block::Version::ONE,
+            prev_blockhash: bitcoin::BlockHash::from_byte_array([0; 32]),
+            merkle_root: bitcoin::TxMerkleNode::from_byte_array([0; 32]),
+            time: 1,
+            bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
+            nonce: 0,
+        },
+        txdata,
+    };
+    (block, txids)
 }
 
 fn plan_in_from_txin(inp: &bitcoin::TxIn) -> PlanIn {
@@ -325,7 +468,8 @@ impl Query {
     /// set tip / fence / strong.
     ///
     /// Crash and `plan=None` tests. Not a production IBD API — confirm write
-    /// uses [`Self::archive_plan_batch_from_store`] + [`Self::archive_commit_plan`].
+    /// uses [`Self::archive_plan_batch_from_wire`] + fill packed ins +
+    /// [`Self::archive_commit_plan`].
     ///
     pub fn commit_class_a_only(
         &self,
@@ -393,16 +537,51 @@ impl Query {
             }
         }
         if !need.is_empty() {
-            let start = self.store.txs.count().saturating_add(1);
-            let plan = self.archive_plan_batch_from_store(
-                &mut need,
-                start,
-                &crate::InFlight::new(),
-                None,
-            )?;
-            self.archive_commit_plan(plan)?;
+            let mut wires: Vec<(Fk, bitcoin::Block, Vec<[u8; 32]>)> =
+                Vec::with_capacity(need.len());
+            for (fk, txs) in need {
+                let (block, txids) = block_from_applies(&txs);
+                wires.push((fk, block, txids));
+            }
+            let refs: Vec<(Fk, &bitcoin::Block, &[[u8; 32]])> = wires
+                .iter()
+                .map(|(fk, b, ids)| (*fk, b, ids.as_slice()))
+                .collect();
+            self.archive_class_a_from_wire(&refs)?;
         }
         Ok(header_fks)
+    }
+
+    /// Class A plan + fill packed ins + commit from wire blocks. Does not set tip.
+    pub fn archive_class_a_from_wire(
+        &self,
+        items: &[(Fk, &bitcoin::Block, &[[u8; 32]])],
+    ) -> Result<(), QueryError> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let mut need = Vec::with_capacity(items.len());
+        for &(fk, block, txids) in items {
+            if self.store.header_txs.has_body(fk)? {
+                continue;
+            }
+            if !block.txdata.is_empty() {
+                need.push((fk, block, txids));
+            }
+        }
+        if need.is_empty() {
+            return Ok(());
+        }
+        let start = self.store.txs.count().saturating_add(1);
+        let mut plan =
+            self.archive_plan_batch_from_wire(&need, start, &crate::InFlight::new(), None)?;
+        if plan.is_empty() {
+            return Ok(());
+        }
+        let blocks: Vec<&bitcoin::Block> = need.iter().map(|(_, b, _)| *b).collect();
+        plan.fill_packed_ins_from_blocks(&blocks)?;
+        self.archive_commit_plan(plan)?;
+        Ok(())
     }
 
     /// Header-only need-body filter (IBD wire planner). No [`TxApply`].
@@ -419,95 +598,6 @@ impl Query {
             need.push(fk);
         }
         Ok(need)
-    }
-
-    /// **Prep / read path:** assign create fks, identity resolve, stamp
-    /// inputs. No Class A body/head writes (those are [`Self::archive_commit_plan`]).
-    ///
-    /// IBD prep keeps a local reserved HWM: after each successful non-empty plan,
-    /// advance to `planned_fks.last()+1` so the next plan batch can be planned
-    /// while a prior batch is still committing (ordered writer preserves match).
-    ///
-    /// `in_flight`: create txid→fk from prior plans that are queued/committing
-    /// but not yet in head. Required for queue depth &gt; 1 when a later
-    /// batch spends a prior batch's creates.
-    ///
-    /// Remaining externals take a TipOnly batch — they are not an invariant miss.
-    /// Pipeline parent store is outs only (pin), not a create_fk source.
-    pub fn archive_plan_batch_from_store(
-        &self,
-        need: &mut [(Fk, Vec<TxApply>)],
-        next_tx_start: u64,
-        in_flight: &crate::InFlight,
-        skeleton: Option<&crate::BatchParentIds>,
-    ) -> Result<ArchiveWritePlan, QueryError> {
-        use std::collections::{HashMap, HashSet};
-        use std::time::Instant;
-
-        self.on_load_pack()?;
-        if need.is_empty() {
-            return Ok(ArchiveWritePlan::empty());
-        }
-
-        let mut next_tx = next_tx_start.max(1);
-        let n_headers = need.iter().filter(|(_, t)| !t.is_empty()).count() as u64;
-
-        let t_assign = Instant::now();
-        let mut batch_map: HashMap<[u8; 32], Fk> = HashMap::new();
-        let mut work: Vec<PlanRow> = Vec::new();
-        let mut per_header_ranges: Vec<(Fk, Fk, u32)> = Vec::with_capacity(need.len());
-
-        for (header_fk, txs) in need.iter_mut() {
-            if txs.is_empty() {
-                continue;
-            }
-            // Same block hash must not reach here twice: caller drops duplicates
-            // mid-pipeline / has_body. Fresh contiguous create fks for this body.
-            let first_tx_fk = Fk(next_tx);
-            let n_txs = txs.len() as u32;
-            let mut seen_in_block: HashSet<[u8; 32]> = HashSet::with_capacity(txs.len());
-            for ta in txs.drain(..) {
-                let n_in = ta.inputs.len() as u32;
-                let n_out = ta.outputs.len() as u32;
-                if !seen_in_block.insert(ta.tx.txid) {
-                    return Err(StoreError::Corrupt(
-                        "duplicate txid in block body (consensus violation)",
-                    )
-                    .into());
-                }
-                let tx_fk = Fk(next_tx);
-                next_tx += 1;
-
-                let mut tx = ta.tx;
-                tx.input_start_fk = Fk::NULL;
-                tx.input_count = n_in;
-                tx.output_start_fk = Fk::NULL;
-                tx.output_count = n_out;
-
-                batch_map.insert(tx.txid, tx_fk);
-                let ins: Vec<PlanIn> = ta.inputs.iter().map(plan_in_from_record).collect();
-                let ins_est = ta.inputs.iter().map(|x| x.encoded_len() as u64).sum();
-                work.push(PlanRow {
-                    tx_fk,
-                    tx,
-                    ins,
-                    outs: ta.outputs,
-                    packed_ins: ta.inputs,
-                    ins_est,
-                });
-            }
-            per_header_ranges.push((*header_fk, first_tx_fk, n_txs));
-        }
-        let assign_ns = t_assign.elapsed().as_nanos() as u64;
-        self.finish_archive_plan(
-            work,
-            batch_map,
-            per_header_ranges,
-            n_headers,
-            assign_ns,
-            in_flight,
-            skeleton,
-        )
     }
 
     /// IBD stamp: CreatePin + SpendEdges from wire txs. Packed ins stay empty.
@@ -982,6 +1072,31 @@ mod tests {
         }
     }
 
+    fn plan_applies(
+        q: &Query,
+        need: &[(Fk, Vec<TxApply>)],
+        next: u64,
+        in_flight: &crate::InFlight,
+        skeleton: Option<&crate::BatchParentIds>,
+    ) -> Result<crate::ArchiveWritePlan, crate::QueryError> {
+        let wires: Vec<(Fk, bitcoin::Block, Vec<[u8; 32]>)> = need
+            .iter()
+            .filter(|(_, txs)| !txs.is_empty())
+            .map(|(fk, txs)| {
+                let (b, ids) = super::block_from_applies(txs);
+                (*fk, b, ids)
+            })
+            .collect();
+        let refs: Vec<(Fk, &bitcoin::Block, &[[u8; 32]])> = wires
+            .iter()
+            .map(|(fk, b, ids)| (*fk, b, ids.as_slice()))
+            .collect();
+        let mut plan = q.archive_plan_batch_from_wire(&refs, next, in_flight, skeleton)?;
+        let blocks: Vec<&bitcoin::Block> = wires.iter().map(|(_, b, _)| b).collect();
+        plan.fill_packed_ins_from_blocks(&blocks)?;
+        Ok(plan)
+    }
+
     #[test]
     fn commit_class_a_only_does_not_advance_tip() {
         use rbitcoin_store::HeaderRecord;
@@ -1005,15 +1120,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn commit_class_a_only_writes_packed_ins_from_wire() {
+        use rbitcoin_store::HeaderRecord;
+
+        let (dir, q) = temp_query("class-a-packed-ins");
+        let header = HeaderRecord {
+            prev_fk: Fk::NULL,
+            version: 1,
+            timestamp: 1,
+            bits: 1,
+            nonce: 1,
+            merkle_root: [1u8; 32],
+            hash: [3u8; 32],
+        };
+        let ta = coinbase_apply(1);
+        let sig = ta.inputs[0].script_sig.clone();
+        let hfk = q.commit_class_a_only(&header, &[ta]).unwrap();
+        assert!(q.store().header_txs.has_body(hfk).unwrap());
+        let (_tx, ins, _outs) = q.store().get_tx_full(Fk(1)).unwrap();
+        assert_eq!(ins.len(), 1, "write fill must persist packed ins");
+        assert_eq!(ins[0].script_sig, sig);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// batch_pin Arc denserels match encode+decode layout (PR-A/B pin handoff).
     #[test]
     fn plan_batch_pin_arc_denserels_match_layout() {
         use std::sync::Arc;
         let (dir, q) = temp_query("batch-pin-arc");
-        let mut need = vec![(Fk(1), vec![coinbase_apply(1), coinbase_apply(2)])];
-        let plan = q
-            .archive_plan_batch_from_store(&mut need, 1, &crate::InFlight::new(), None)
-            .unwrap();
+        let need = vec![(Fk(1), vec![coinbase_apply(1), coinbase_apply(2)])];
+        let plan = plan_applies(&q, &need, 1, &crate::InFlight::new(), None).unwrap();
         assert_eq!(plan.batch_pin.len(), plan.planned_fks.len());
         assert_eq!(plan.batch_pin.len(), plan.packed.len());
         // packed pin half and batch_pin share the same Arc (no outs double-store).
@@ -1053,10 +1190,8 @@ mod tests {
         {
             let (dir, q) = temp_query("arch-phases");
             let _ = q.confirm_stats().take_window();
-            let mut need = vec![(Fk(1), vec![coinbase_apply(1), coinbase_apply(2)])];
-            let plan = q
-                .archive_plan_batch_from_store(&mut need, 1, &crate::InFlight::new(), None)
-                .unwrap();
+            let need = vec![(Fk(1), vec![coinbase_apply(1), coinbase_apply(2)])];
+            let plan = plan_applies(&q, &need, 1, &crate::InFlight::new(), None).unwrap();
             assert_eq!(plan.planned_fks.len(), 2);
             q.archive_commit_plan(plan).unwrap();
             let s = q.confirm_stats().take_window();
@@ -1089,33 +1224,29 @@ mod tests {
         // Seed one body so count starts at 1.
         let seed = vec![(Fk(1), vec![coinbase_apply(1)])];
         // Need a real header_fk path: plan only needs Vec<(Fk, Vec<TxApply>)>.
-        let mut need0 = seed;
-        let p0 = q
-            .archive_plan_batch_from_store(
-                &mut need0,
-                q.tx_body_count() + 1,
-                &crate::InFlight::new(),
-                None,
-            )
-            .unwrap();
+        let need0 = seed;
+        let p0 = plan_applies(
+            &q,
+            &need0,
+            q.tx_body_count() + 1,
+            &crate::InFlight::new(),
+            None,
+        )
+        .unwrap();
         q.archive_commit_plan(p0).unwrap();
         assert_eq!(q.tx_body_count(), 1);
 
         // Reserve two plans as prep would with write queue depth 2.
         let empty = crate::InFlight::new();
         let mut next = q.tx_body_count() + 1;
-        let mut need_a = vec![(Fk(10), vec![coinbase_apply(10), coinbase_apply(11)])];
-        let plan_a = q
-            .archive_plan_batch_from_store(&mut need_a, next, &empty, None)
-            .unwrap();
+        let need_a = vec![(Fk(10), vec![coinbase_apply(10), coinbase_apply(11)])];
+        let plan_a = plan_applies(&q, &need_a, next, &empty, None).unwrap();
         assert_eq!(plan_a.planned_fks, vec![Fk(2), Fk(3)]);
         next = plan_a.planned_fks.last().unwrap().0 + 1;
         assert_eq!(next, 4);
 
-        let mut need_b = vec![(Fk(20), vec![coinbase_apply(20)])];
-        let plan_b = q
-            .archive_plan_batch_from_store(&mut need_b, next, &empty, None)
-            .unwrap();
+        let need_b = vec![(Fk(20), vec![coinbase_apply(20)])];
+        let plan_b = plan_applies(&q, &need_b, next, &empty, None).unwrap();
         assert_eq!(plan_b.planned_fks, vec![Fk(4)]);
         // Durable count still 1 until commit.
         assert_eq!(q.tx_body_count(), 1);
@@ -1133,11 +1264,9 @@ mod tests {
     #[test]
     fn overlap_plan_resolves_parent_via_inflight_creates() {
         let (dir, q) = temp_query("inflight-parent");
-        let mut need_a = vec![(Fk(1), vec![coinbase_apply(1)])];
+        let need_a = vec![(Fk(1), vec![coinbase_apply(1)])];
         let empty = crate::InFlight::new();
-        let plan_a = q
-            .archive_plan_batch_from_store(&mut need_a, 1, &empty, None)
-            .unwrap();
+        let plan_a = plan_applies(&q, &need_a, 1, &empty, None).unwrap();
         assert_eq!(plan_a.planned_fks, vec![Fk(1)]);
         let parent_txid = plan_a.batch_creates[0].0;
         let parent_fk = plan_a.batch_creates[0].1;
@@ -1165,12 +1294,10 @@ mod tests {
             }],
             outputs: vec![OutputRecord::unspent(1, vec![0x51])],
         };
-        let mut need_b = vec![(Fk(2), vec![child])];
+        let need_b = vec![(Fk(2), vec![child])];
 
         // Without in_flight → unresolved.
-        let err = q
-            .archive_plan_batch_from_store(&mut need_b, 2, &empty, None)
-            .unwrap_err();
+        let err = plan_applies(&q, &need_b, 2, &empty, None).unwrap_err();
         assert!(
             err.to_string().contains("create_fk unresolved"),
             "expected unresolved without inflight, got {err}"
@@ -1197,7 +1324,7 @@ mod tests {
             }],
             outputs: vec![OutputRecord::unspent(1, vec![0x51])],
         };
-        let mut need_b = vec![(Fk(2), vec![child])];
+        let need_b = vec![(Fk(2), vec![child])];
         let mut inflight = crate::InFlight::new();
         inflight.note_pins(
             plan_a
@@ -1207,9 +1334,8 @@ mod tests {
                 .map(|(fk, pin)| (*fk, pin)),
             None,
         );
-        let plan_b = q
-            .archive_plan_batch_from_store(&mut need_b, 2, &inflight, None)
-            .expect("inflight parent resolve");
+        let plan_b =
+            plan_applies(&q, &need_b, 2, &inflight, None).expect("inflight parent resolve");
         assert_eq!(plan_b.planned_fks, vec![Fk(2)]);
         assert_eq!(
             plan_b.packed[0].1[0].create_fk, parent_fk,
@@ -1251,11 +1377,9 @@ mod tests {
     #[test]
     fn inflight_binds_parent_after_commit_before_prune() {
         let (dir, q) = temp_query("inflight-n-minus-1");
-        let mut need_a = vec![(Fk(1), vec![coinbase_apply(1)])];
+        let need_a = vec![(Fk(1), vec![coinbase_apply(1)])];
         let empty = crate::InFlight::new();
-        let plan_a = q
-            .archive_plan_batch_from_store(&mut need_a, 1, &empty, None)
-            .unwrap();
+        let plan_a = plan_applies(&q, &need_a, 1, &empty, None).unwrap();
         let parent_txid = plan_a.batch_creates[0].0;
         let parent_fk = plan_a.batch_creates[0].1;
         let mut log = crate::InFlight::new();
@@ -1270,9 +1394,8 @@ mod tests {
         q.archive_commit_plan(plan_a).unwrap();
         assert_eq!(q.store().tx_height_get(parent_fk).unwrap(), None);
 
-        let mut need_b = vec![(Fk(2), vec![child_spend(parent_txid, 0xef)])];
-        let plan_b = q
-            .archive_plan_batch_from_store(&mut need_b, 2, &log, None)
+        let need_b = vec![(Fk(2), vec![child_spend(parent_txid, 0xef)])];
+        let plan_b = plan_applies(&q, &need_b, 2, &log, None)
             .expect("in-flight must stamp n−1 without leftover");
         assert_eq!(plan_b.packed[0].1[0].create_fk, parent_fk);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1281,11 +1404,9 @@ mod tests {
     #[test]
     fn leftover_keeps_prev_pack_after_drain_done() {
         let (dir, q) = temp_query("leftover-keep-prev");
-        let mut need_a = vec![(Fk(1), vec![coinbase_apply(1)])];
+        let need_a = vec![(Fk(1), vec![coinbase_apply(1)])];
         let empty = crate::InFlight::new();
-        let plan_a = q
-            .archive_plan_batch_from_store(&mut need_a, 1, &empty, None)
-            .unwrap();
+        let plan_a = plan_applies(&q, &need_a, 1, &empty, None).unwrap();
         let parent_txid = plan_a.batch_creates[0].0;
         let parent_fk = plan_a.batch_creates[0].1;
         let header_fk = plan_a.per_header_ranges[0].0;
@@ -1316,9 +1437,8 @@ mod tests {
             }],
             outputs: vec![OutputRecord::unspent(1, vec![0x51])],
         };
-        let mut need_b = vec![(Fk(2), vec![child])];
-        let plan_b = q
-            .archive_plan_batch_from_store(&mut need_b, 2, &empty, None)
+        let need_b = vec![(Fk(2), vec![child])];
+        let plan_b = plan_applies(&q, &need_b, 2, &empty, None)
             .expect("height-1 child must bind prev pack after drain HWM");
         assert_eq!(plan_b.packed[0].1[0].create_fk, parent_fk);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1364,11 +1484,9 @@ mod tests {
     #[test]
     fn inflight_binds_after_drain_before_fence() {
         let (dir, q) = temp_query("inflight-drain-before-fence");
-        let mut need_a = vec![(Fk(1), vec![coinbase_apply(1)])];
+        let need_a = vec![(Fk(1), vec![coinbase_apply(1)])];
         let empty = crate::InFlight::new();
-        let plan_a = q
-            .archive_plan_batch_from_store(&mut need_a, 1, &empty, None)
-            .unwrap();
+        let plan_a = plan_applies(&q, &need_a, 1, &empty, None).unwrap();
         let parent_txid = plan_a.batch_creates[0].0;
         let parent_fk = plan_a.batch_creates[0].1;
         let mut log = crate::InFlight::new();
@@ -1392,9 +1510,8 @@ mod tests {
             log.get_create_fk(&parent_txid).is_some(),
             "fence missing: prune must keep"
         );
-        let mut need_b = vec![(Fk(2), vec![child_spend(parent_txid, 0xee)])];
-        let plan_b = q
-            .archive_plan_batch_from_store(&mut need_b, 2, &log, None)
+        let need_b = vec![(Fk(2), vec![child_spend(parent_txid, 0xee)])];
+        let plan_b = plan_applies(&q, &need_b, 2, &log, None)
             .expect("in-flight binds after drain, before fence");
         assert_eq!(plan_b.packed[0].1[0].create_fk, parent_fk);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1404,11 +1521,9 @@ mod tests {
     #[test]
     fn leftover_tiponly_after_fence_clears_pending() {
         let (dir, q) = temp_query("leftover-fence-clears-pending");
-        let mut need_a = vec![(Fk(1), vec![coinbase_apply(1)])];
+        let need_a = vec![(Fk(1), vec![coinbase_apply(1)])];
         let empty = crate::InFlight::new();
-        let plan_a = q
-            .archive_plan_batch_from_store(&mut need_a, 1, &empty, None)
-            .unwrap();
+        let plan_a = plan_applies(&q, &need_a, 1, &empty, None).unwrap();
         let parent_txid = plan_a.batch_creates[0].0;
         let parent_fk = plan_a.batch_creates[0].1;
         let header_fk = plan_a.per_header_ranges[0].0;
@@ -1418,9 +1533,8 @@ mod tests {
             .unwrap();
         q.on_load_pack().unwrap();
 
-        let mut need_b = vec![(Fk(2), vec![child_spend(parent_txid, 0xed)])];
-        let plan_b = q
-            .archive_plan_batch_from_store(&mut need_b, 2, &empty, None)
+        let need_b = vec![(Fk(2), vec![child_spend(parent_txid, 0xed)])];
+        let plan_b = plan_applies(&q, &need_b, 2, &empty, None)
             .expect("TipOnly must stamp after fence, without leftover pending");
         assert_eq!(plan_b.packed[0].1[0].create_fk, parent_fk);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1432,8 +1546,8 @@ mod tests {
         let (dir, q) = temp_query("leftover-miss-diag");
         let empty = crate::InFlight::new();
         let ghost = [0xDDu8; 32];
-        let mut need = vec![(Fk(1), vec![child_spend(ghost, 0xaa)])];
-        let _ = q.archive_plan_batch_from_store(&mut need, 1, &empty, None);
+        let need = vec![(Fk(1), vec![child_spend(ghost, 0xaa)])];
+        let _ = plan_applies(&q, &need, 1, &empty, None);
         assert!(
             rbitcoin_store::leftover_probe_diag_recorded(&ghost),
             "leftover miss must hop-dump this parent"
@@ -1445,11 +1559,9 @@ mod tests {
     #[test]
     fn inflight_binds_after_fence_before_drain() {
         let (dir, q) = temp_query("inflight-fence-before-drain");
-        let mut need_a = vec![(Fk(1), vec![coinbase_apply(1)])];
+        let need_a = vec![(Fk(1), vec![coinbase_apply(1)])];
         let empty = crate::InFlight::new();
-        let plan_a = q
-            .archive_plan_batch_from_store(&mut need_a, 1, &empty, None)
-            .unwrap();
+        let plan_a = plan_applies(&q, &need_a, 1, &empty, None).unwrap();
         let parent_txid = plan_a.batch_creates[0].0;
         let parent_fk = plan_a.batch_creates[0].1;
         let header_fk = plan_a.per_header_ranges[0].0;
@@ -1476,9 +1588,8 @@ mod tests {
             log.get_create_fk(&parent_txid).is_some(),
             "drain_fk 0: prune must keep"
         );
-        let mut need_b = vec![(Fk(2), vec![child_spend(parent_txid, 0xec)])];
-        let plan_b = q
-            .archive_plan_batch_from_store(&mut need_b, 2, &log, None)
+        let need_b = vec![(Fk(2), vec![child_spend(parent_txid, 0xec)])];
+        let plan_b = plan_applies(&q, &need_b, 2, &log, None)
             .expect("in-flight binds after fence, before drain");
         assert_eq!(plan_b.packed[0].1[0].create_fk, parent_fk);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1570,10 +1681,9 @@ mod tests {
             }],
             outputs: vec![OutputRecord::unspent(1, vec![0x51])],
         };
-        let mut need = vec![(Fk(2), vec![child])];
-        let plan = q
-            .archive_plan_batch_from_store(&mut need, 2, &crate::InFlight::new(), None)
-            .expect("parent via head");
+        let need = vec![(Fk(2), vec![child])];
+        let plan =
+            plan_applies(&q, &need, 2, &crate::InFlight::new(), None).expect("parent via head");
         assert_eq!(plan.planned_fks, vec![Fk(2)]);
         assert_eq!(plan.packed[0].1[0].create_fk, Fk(1));
         assert_eq!(plan.batch_creates.len(), 1);
@@ -1608,23 +1718,21 @@ mod tests {
         let parent = coinbase_apply(1);
         let parent_txid = parent.tx.txid;
         let child = child_spend(parent_txid, 0xcd);
-        let mut same = vec![(Fk(1), vec![parent.clone(), child.clone()])];
-        let plan_same = q
-            .archive_plan_batch_from_store(&mut same, 1, &crate::InFlight::new(), None)
-            .expect("same header");
+        let same = vec![(Fk(1), vec![parent.clone(), child.clone()])];
+        let plan_same =
+            plan_applies(&q, &same, 1, &crate::InFlight::new(), None).expect("same header");
         assert_eq!(plan_same.planned_fks, vec![Fk(1), Fk(2)]);
         assert!(
             plan_same.external_parent_vouts.get(&1).is_none(),
             "same-header create must not be in parent_vouts"
         );
 
-        let mut cross = vec![
+        let cross = vec![
             (Fk(10), vec![parent]),
             (Fk(11), vec![child_spend(parent_txid, 0xce)]),
         ];
-        let plan_cross = q
-            .archive_plan_batch_from_store(&mut cross, 1, &crate::InFlight::new(), None)
-            .expect("cross height");
+        let plan_cross =
+            plan_applies(&q, &cross, 1, &crate::InFlight::new(), None).expect("cross height");
         assert_eq!(
             plan_cross
                 .external_parent_vouts
@@ -1659,10 +1767,9 @@ mod tests {
             q.connect_block(Height::GENESIS, &ph, &[parent]).unwrap();
             let spent = q.store.txs.spent_range(Fk(1)).expect("spent.idx");
             let _ = q.confirm_stats().fill_missing_n.swap(0, Ordering::Relaxed);
-            let mut need = vec![(Fk(2), vec![child_spend(parent_txid, 0xcd)])];
-            let plan = q
-                .archive_plan_batch_from_store(&mut need, 2, &crate::InFlight::new(), None)
-                .expect("parent via head");
+            let need = vec![(Fk(2), vec![child_spend(parent_txid, 0xcd)])];
+            let plan =
+                plan_applies(&q, &need, 2, &crate::InFlight::new(), None).expect("parent via head");
             assert_eq!(plan.packed[0].1[0].create_fk, Fk(1));
             assert!(plan
                 .external_parents
@@ -1703,10 +1810,9 @@ mod tests {
         let spent = q.store.txs.spent_range(Fk(1)).expect("spent.idx");
         let mut child = child_spend(parent_txid, 0xcf);
         child.inputs[0].create_fk = Fk(1);
-        let mut need = vec![(Fk(2), vec![child])];
-        let plan = q
-            .archive_plan_batch_from_store(&mut need, 2, &crate::InFlight::new(), None)
-            .expect("prestamp parent");
+        let need = vec![(Fk(2), vec![child])];
+        let plan =
+            plan_applies(&q, &need, 2, &crate::InFlight::new(), None).expect("prestamp parent");
         assert_eq!(plan.packed[0].1[0].create_fk, Fk(1));
         assert!(
             plan.external_parents
@@ -1764,10 +1870,9 @@ mod tests {
             }],
             outputs: vec![OutputRecord::unspent(1, vec![0x51])],
         };
-        let mut need = vec![(Fk(2), vec![child])];
-        let plan = q
-            .archive_plan_batch_from_store(&mut need, 2, ifo, None)
-            .expect("parent via creates-only in_flight");
+        let need = vec![(Fk(2), vec![child])];
+        let plan =
+            plan_applies(&q, &need, 2, ifo, None).expect("parent via creates-only in_flight");
         assert_eq!(plan.packed[0].1[0].create_fk, Fk(1));
         assert!(
             plan.external_parents
@@ -1861,10 +1966,8 @@ mod tests {
         let (dir, q) = temp_query("plan-spend-edges");
         let parent = coinbase_apply(1);
         let parent_txid = parent.tx.txid;
-        let mut need = vec![(Fk(1), vec![parent, child_spend(parent_txid, 0xee)])];
-        let plan = q
-            .archive_plan_batch_from_store(&mut need, 1, &crate::InFlight::new(), None)
-            .expect("plan");
+        let need = vec![(Fk(1), vec![parent, child_spend(parent_txid, 0xee)])];
+        let plan = plan_applies(&q, &need, 1, &crate::InFlight::new(), None).expect("plan");
         assert_eq!(plan.planned_fks, vec![Fk(1), Fk(2)]);
         let cb = plan.edges.get(&1).expect("coinbase edges");
         assert_eq!(cb.len(), 1);
@@ -1945,11 +2048,11 @@ mod tests {
     #[test]
     fn plan_batch_from_wire_skips_tx_apply() {
         let (dir, q) = temp_query("plan-from-wire");
-        let (block, txids, _script_sig) = wire_parent_child_big_script_sig();
+        let (block, txids, script_sig) = wire_parent_child_big_script_sig();
         let parent_spk = block.txdata[0].output[0].script_pubkey.to_bytes();
         let child_spk = block.txdata[1].output[0].script_pubkey.to_bytes();
         let parent_txid = txids[0];
-        let plan = q
+        let mut plan = q
             .archive_plan_batch_from_wire(
                 &[(Fk(1), &block, txids.as_slice())],
                 1,
@@ -1962,6 +2065,10 @@ mod tests {
             plan.packed.iter().all(|(_, ins)| ins.is_empty()),
             "wire planner must not clone script_sig into packed ins"
         );
+        plan.fill_packed_ins_from_blocks(&[&block])
+            .expect("write fill");
+        assert_eq!(plan.packed[1].1[0].script_sig, script_sig);
+        assert_eq!(plan.packed[1].1[0].create_fk, Fk(1));
         assert_eq!(plan.batch_pin.len(), 2);
         assert_eq!(plan.batch_pin[0].1[0].script, parent_spk);
         assert_eq!(plan.batch_pin[1].1[0].script, child_spk);
@@ -1987,10 +2094,8 @@ mod tests {
     fn plan_packed_and_batch_pin_share_create_pin_arc() {
         use std::sync::Arc;
         let (dir, q) = temp_query("shared-create-pin");
-        let mut need = vec![(Fk(1), vec![coinbase_apply(1)])];
-        let plan = q
-            .archive_plan_batch_from_store(&mut need, 1, &crate::InFlight::new(), None)
-            .unwrap();
+        let need = vec![(Fk(1), vec![coinbase_apply(1)])];
+        let plan = plan_applies(&q, &need, 1, &crate::InFlight::new(), None).unwrap();
         assert_eq!(plan.packed.len(), 1);
         assert_eq!(plan.batch_pin.len(), 1);
         assert!(
@@ -2008,7 +2113,7 @@ mod tests {
     /// BQ-ahead facts live on the published layer. A leftover hits map is not
     /// a stamp source (shipped IBD already passes `None`).
     #[test]
-    fn archive_plan_batch_from_store_bq_hits_map_is_not_stamp_source() {
+    fn plan_batch_from_wire_bq_hits_map_is_not_stamp_source() {
         let (dir, q) = temp_query("bq-hits-not-stamp");
         let parent_txid = {
             let mut t = [0u8; 32];
@@ -2016,11 +2121,10 @@ mod tests {
             t
         };
         let child = child_spend(parent_txid, 0x44);
-        let mut need = vec![(Fk(1), vec![child])];
+        let need = vec![(Fk(1), vec![child])];
         {
             let _ = q.confirm_stats().take_window();
-            let err = q
-                .archive_plan_batch_from_store(&mut need, 1, &crate::InFlight::new(), None)
+            let err = plan_applies(&q, &need, 1, &crate::InFlight::new(), None)
                 .expect_err("bq parent_hits map is not a stamp source");
             assert!(
                 err.to_string().contains("parent create_fk unresolved"),
@@ -2035,7 +2139,7 @@ mod tests {
 
     /// Published union supplies create_fk + range with no pin, BQ hits, or head row.
     #[test]
-    fn archive_plan_batch_from_store_hits_skeleton() {
+    fn plan_batch_from_wire_hits_skeleton() {
         use crate::{BatchParentIds, IdMap};
         use std::sync::Arc;
         let (dir, q) = temp_query("skeleton-ids-stamp");
@@ -2052,11 +2156,10 @@ mod tests {
             need_vouts: crate::U64Map::default(),
         };
         let child = child_spend(parent_txid, 0x66);
-        let mut need = vec![(Fk(1), vec![child])];
+        let need = vec![(Fk(1), vec![child])];
         {
             let _ = q.confirm_stats().take_window();
-            let plan = q
-                .archive_plan_batch_from_store(&mut need, 1, &crate::InFlight::new(), Some(&skel))
+            let plan = plan_applies(&q, &need, 1, &crate::InFlight::new(), Some(&skel))
                 .expect("skeleton stamp");
             assert_eq!(plan.packed[0].1[0].create_fk, Fk(66));
             assert_eq!(
@@ -2106,10 +2209,9 @@ mod tests {
         assert_eq!(helper.idents.get(&88).map(|p| p.txid), Some(parent_txid));
 
         let child = child_spend(parent_txid, 0x72);
-        let mut need = vec![(Fk(1), vec![child])];
-        let plan = q
-            .archive_plan_batch_from_store(&mut need, 1, &crate::InFlight::new(), Some(&skel))
-            .expect("S0 plan");
+        let need = vec![(Fk(1), vec![child])];
+        let plan =
+            plan_applies(&q, &need, 1, &crate::InFlight::new(), Some(&skel)).expect("S0 plan");
         assert_eq!(plan.packed[0].1[0].create_fk, Fk(88));
         assert_eq!(
             plan.external_parents.get(&88).and_then(|p| p.body),
@@ -2166,10 +2268,8 @@ mod tests {
             assert!(Arc::ptr_eq(got, &pin));
 
             let child = child_spend(parent_txid, 0x94);
-            let mut need = vec![(Fk(1), vec![child])];
-            let plan = q
-                .archive_plan_batch_from_store(&mut need, 1, ifo, None)
-                .expect("S0 inflight");
+            let need = vec![(Fk(1), vec![child])];
+            let plan = plan_applies(&q, &need, 1, ifo, None).expect("S0 inflight");
             assert_eq!(plan.packed[0].1[0].create_fk, Fk(93));
             let mix = q.confirm_stats().take_window();
             assert_eq!(mix.head_need, 0, "plan path must skip leftover too");
@@ -2181,11 +2281,9 @@ mod tests {
     #[test]
     fn leftover_tiponly_after_commit_skips_when_connected() {
         let (dir, q) = temp_query("tiponly-after-commit");
-        let mut need_a = vec![(Fk(1), vec![coinbase_apply(1)])];
+        let need_a = vec![(Fk(1), vec![coinbase_apply(1)])];
         let empty = crate::InFlight::new();
-        let plan_a = q
-            .archive_plan_batch_from_store(&mut need_a, 1, &empty, None)
-            .unwrap();
+        let plan_a = plan_applies(&q, &need_a, 1, &empty, None).unwrap();
         let parent_txid = plan_a.batch_creates[0].0;
         let parent_fk = plan_a.batch_creates[0].1;
         let header_fk = plan_a.per_header_ranges[0].0;
@@ -2197,10 +2295,9 @@ mod tests {
 
         {
             let _ = q.confirm_stats().take_window();
-            let mut need_b = vec![(Fk(2), vec![child_spend(parent_txid, 0xec)])];
-            let plan_b = q
-                .archive_plan_batch_from_store(&mut need_b, 2, &empty, None)
-                .expect("TipOnly must stamp after fence");
+            let need_b = vec![(Fk(2), vec![child_spend(parent_txid, 0xec)])];
+            let plan_b =
+                plan_applies(&q, &need_b, 2, &empty, None).expect("TipOnly must stamp after fence");
             assert_eq!(plan_b.packed[0].1[0].create_fk, parent_fk);
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -2211,10 +2308,8 @@ mod tests {
     #[test]
     fn freeze_after_pin_then_append_preserves_fk_order() {
         let (dir, q) = temp_query("freeze-append");
-        let mut need_a = vec![(Fk(1), vec![coinbase_apply(1)])];
-        let mut plan_a = q
-            .archive_plan_batch_from_store(&mut need_a, 1, &crate::InFlight::new(), None)
-            .unwrap();
+        let need_a = vec![(Fk(1), vec![coinbase_apply(1)])];
+        let mut plan_a = plan_applies(&q, &need_a, 1, &crate::InFlight::new(), None).unwrap();
         // Simulate residual stamp staging (must not survive freeze/append).
         plan_a
             .external_parents
@@ -2242,10 +2337,8 @@ mod tests {
             "in-flight still has txid→fk after freeze"
         );
 
-        let mut need_b = vec![(Fk(2), vec![coinbase_apply(2), coinbase_apply(3)])];
-        let mut plan_b = q
-            .archive_plan_batch_from_store(&mut need_b, 2, &crate::InFlight::new(), None)
-            .unwrap();
+        let need_b = vec![(Fk(2), vec![coinbase_apply(2), coinbase_apply(3)])];
+        let mut plan_b = plan_applies(&q, &need_b, 2, &crate::InFlight::new(), None).unwrap();
         plan_b
             .external_parents
             .insert(88, crate::ParentIdent::with_body([0u8; 32], (0, 1)));
@@ -2289,15 +2382,15 @@ mod tests {
             hash: [2u8; 32],
         };
         let hfk = q.ensure_header(&header).unwrap();
-        let mut need = vec![(hfk, vec![coinbase_apply(42)])];
-        let plan = q
-            .archive_plan_batch_from_store(
-                &mut need,
-                q.tx_body_count() + 1,
-                &crate::InFlight::new(),
-                None,
-            )
-            .unwrap();
+        let need = vec![(hfk, vec![coinbase_apply(42)])];
+        let plan = plan_applies(
+            &q,
+            &need,
+            q.tx_body_count() + 1,
+            &crate::InFlight::new(),
+            None,
+        )
+        .unwrap();
         assert!(!plan.is_empty());
         assert!(q.archive_commit_plan(plan).unwrap(), "first commit appends");
         let n = q.tx_body_count();
@@ -2305,15 +2398,15 @@ mod tests {
         assert!(q.store().header_txs.has_body(hfk).unwrap());
 
         // Rebuild a plan as if lookup incorrectly re-planned the same header.
-        let mut need2 = vec![(hfk, vec![coinbase_apply(42)])];
-        let plan2 = q
-            .archive_plan_batch_from_store(
-                &mut need2,
-                q.tx_body_count() + 1,
-                &crate::InFlight::new(),
-                None,
-            )
-            .unwrap();
+        let need2 = vec![(hfk, vec![coinbase_apply(42)])];
+        let plan2 = plan_applies(
+            &q,
+            &need2,
+            q.tx_body_count() + 1,
+            &crate::InFlight::new(),
+            None,
+        )
+        .unwrap();
         // filter_need empties txs when has_body — plan may be empty. Force a
         // non-empty plan by planning against a fresh need then swapping ranges.
         if plan2.is_empty() {

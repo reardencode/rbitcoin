@@ -1319,40 +1319,41 @@ mod tests {
     /// Leftover TipOnly must not resurrect an abandoned (disconnected) Class A row.
     #[test]
     fn load_leftover_disconnected_parent_is_not_tipthenany() {
-        use rbitcoin_query::TxApply;
-        use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
         let (path, q) = tmp_query();
         let params = ChainParams::regtest();
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
         let b1 = mine_empty_regtest(genesis.block_hash(), genesis.header.time + 600, 1);
         accept_and_connect_block(&q, &params, Height(1), &b1, Milestone::NONE).unwrap();
-        let cb1 = b1.txdata[0].compute_txid().to_byte_array();
+        let cb1 = b1.txdata[0].compute_txid();
         q.disconnect_tip().unwrap();
         let _ = params;
-        let child = TxApply {
-            tx: TxRecord {
-                txid: [0x22; 32],
-                version: 1,
-                locktime: 0,
-                input_start_fk: rbitcoin_primitives::Fk::NULL,
-                input_count: 1,
-                output_start_fk: rbitcoin_primitives::Fk::NULL,
-                output_count: 1,
-            },
-            inputs: vec![InputRecord {
-                prev_txid: cb1,
-                create_fk: rbitcoin_primitives::Fk::NULL,
-                prev_index: 0,
-                sequence: u32::MAX,
-                script_sig: vec![],
-                witness: vec![],
+        let child = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::ONE,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint { txid: cb1, vout: 0 },
+                script_sig: bitcoin::script::ScriptBuf::new(),
+                sequence: bitcoin::Sequence::MAX,
+                witness: bitcoin::Witness::new(),
             }],
-            outputs: vec![OutputRecord::unspent(1, vec![0x51])],
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(1),
+                script_pubkey: bitcoin::script::ScriptBuf::from_bytes(vec![0x51]),
+            }],
         };
-        let mut need = vec![(rbitcoin_primitives::Fk(1), vec![child])];
+        let txids = vec![child.compute_txid().to_byte_array()];
+        let block = bitcoin::Block {
+            header: b1.header,
+            txdata: vec![child],
+        };
         let err = q
-            .archive_plan_batch_from_store(&mut need, 1, &rbitcoin_query::InFlight::new(), None)
+            .archive_plan_batch_from_wire(
+                &[(rbitcoin_primitives::Fk(1), &block, txids.as_slice())],
+                1,
+                &rbitcoin_query::InFlight::new(),
+                None,
+            )
             .expect_err("disconnected leftover must not TipThenAny-fill");
         let msg = err.to_string();
         assert!(msg.contains("parent create_fk unresolved"), "got: {msg}");

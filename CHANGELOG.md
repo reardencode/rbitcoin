@@ -43,6 +43,9 @@ before 1.0).
   gone. Confirm is optimistic assemble then `structural_validate_spends`
   (spentness, coinbase maturity, BIP68). Connect tests use
   `accept_and_connect_block`. [`docs/invariants.md`](docs/invariants.md).
+- **One Class A planner:** `archive_plan_batch_from_store` is gone. IBD and
+  Class A-without-tip fixtures plan with `archive_plan_batch_from_wire`;
+  write fills packed ins from the wire block + spend edges.
 - **RPC / CLI honesty (Q-59 slice):** `submitblock` uses the live chain hub
   on all networks (same receive path as P2P; `generate*` / `setmocktime`
   stay regtest-only). `--minrelaytxfee` / `--blockmintxfee` reject garbage
