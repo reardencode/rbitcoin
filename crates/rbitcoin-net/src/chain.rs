@@ -2036,7 +2036,7 @@ impl ChainHub {
             .mempool()
             .map(|mp| mp.script_preverified_txids())
             .unwrap_or_default();
-        tip_accept_stats_reset();
+        tip_accept_stats_reset(&self.query);
         let t_wall = std::time::Instant::now();
         let now = self.clock.now_secs();
         rbitcoin_consensus::with_now(now, || {
@@ -2279,13 +2279,8 @@ pub fn log_update_tip(height: u32, hash: &BlockHash, header: &Header, n_tx: usiz
 }
 
 /// Clear confirm + Class C SH meters before a tip-follow accept sample window.
-fn tip_accept_stats_reset() {
-    let _ = rbitcoin_consensus::confirm_phase_stats::sample_and_reset();
-    let _ = rbitcoin_consensus::lookup_stage_stats::sample_and_reset();
-    let _ = rbitcoin_consensus::confirm_phase_stats::WRITE_DRAIN_JOIN_NS
-        .swap(0, std::sync::atomic::Ordering::Relaxed);
-    let _ = rbitcoin_query::class_c_phase_stats::sample_and_reset();
-    let _ = rbitcoin_query::class_c_phase_stats::sample_tip_sh_and_reset();
+fn tip_accept_stats_reset(query: &Query) {
+    let _ = query.confirm_stats().take_window();
 }
 
 /// Inputs for pure tip-accept SH line (unit-tested).
@@ -2313,7 +2308,7 @@ pub struct TipAcceptShInput {
     /// `remove_for_block_spent` after confirm (not inside confirm_write).
     pub mp_strip_ns: u64,
     pub sh_lag: u32,
-    pub sh: rbitcoin_query::class_c_phase_stats::TipShSnap,
+    pub sh: rbitcoin_query::TipShSnap,
 }
 
 /// Format `tip: accept …` body (no log level). Pure for tests.
@@ -2378,29 +2373,29 @@ pub fn format_tip_accept_sh_line(i: &TipAcceptShInput) -> String {
 
 /// Sample meters after tip accept and emit INFO `tip: accept …` (SH breakdown).
 fn log_tip_accept_sh(query: &Query, height: u32, n_tx: usize, wall_ns: u64, mp_strip_ns: u64) {
-    let (
-        connect_ns,
-        script_ns,
-        _class_c_ns,
-        strong_ns,
-        _sh_sum,
-        tip_ns,
-        spend_ns,
-        _blks,
-        load_ns,
-        _spend_ranged,
-        structural_ns,
-        _struct_spent,
-        _struct_create_h,
-        _struct_bip68,
-    ) = rbitcoin_consensus::confirm_phase_stats::sample_and_reset();
-    let lookup_ns = rbitcoin_consensus::lookup_stage_stats::sample_and_reset().total_ns;
-    let drain_ns = rbitcoin_consensus::confirm_phase_stats::WRITE_DRAIN_JOIN_NS
-        .swap(0, std::sync::atomic::Ordering::Relaxed);
-    let sh = rbitcoin_query::class_c_phase_stats::sample_tip_sh_and_reset();
-    let ca = rbitcoin_query::archive_phase_stats::sample_and_reset();
-    let tweak_ns = rbitcoin_consensus::confirm_phase_stats::TWEAK_NS
-        .swap(0, std::sync::atomic::Ordering::Relaxed);
+    let w = query.confirm_stats().take_window();
+    let connect_ns = w.connect_ns;
+    let script_ns = w.script_ns;
+    let strong_ns = w.strong_ns;
+    let tip_ns = w.tip_ns;
+    let spend_ns = w.utxo_apply_ns;
+    let load_ns = w.load_ns;
+    let structural_ns = w.structural_ns;
+    let lookup_ns = w.lookup_total_ns;
+    let drain_ns = w.write_drain_join_ns;
+    let tweak_ns = w.tweak_ns;
+    let sh = rbitcoin_query::TipShSnap {
+        collect_ns: w.sh_collect_ns,
+        sort_ns: w.sh_sort_ns,
+        seed_ns: w.sh_seed_ns,
+        body_ns: w.sh_body_ns,
+        head_ns: w.sh_head_ns,
+        pin: w.sh_collect_pin,
+        cold: w.sh_collect_cold,
+        creates: w.sh_create_n,
+        unique: w.sh_unique_n,
+        written: w.sh_written_n,
+    };
     // class_c = strong + tip only (parallel SH is not Class C table time).
     let class_c_tables_ns = strong_ns.saturating_add(tip_ns);
     let line = format_tip_accept_sh_line(&TipAcceptShInput {
@@ -2409,7 +2404,7 @@ fn log_tip_accept_sh(query: &Query, height: u32, n_tx: usize, wall_ns: u64, mp_s
         wall_ns,
         load_ns: load_ns.saturating_add(connect_ns),
         script_ns,
-        class_a_ns: ca.write_total_ns,
+        class_a_ns: w.arch_write_total_ns,
         class_c_ns: class_c_tables_ns,
         spend_ns,
         strong_ns,
@@ -2985,7 +2980,7 @@ mod tests {
             drain_ns: 10_000_000,
             mp_strip_ns: 20_000_000,
             sh_lag: 2,
-            sh: rbitcoin_query::class_c_phase_stats::TipShSnap {
+            sh: rbitcoin_query::TipShSnap {
                 collect_ns: 20_000_000,
                 sort_ns: 5_000_000,
                 seed_ns: 800_000_000,
@@ -3563,7 +3558,10 @@ mod tests {
         assert!(in_mp(&mp), "pre-connect: tx must be in mempool overlay");
         assert!(!in_hist(), "pre-connect: tx must not be confirmed history");
 
-        let cold0 = rbitcoin_query::class_c_phase_stats::SH_COLLECT_COLD
+        let cold0 = hub
+            .query
+            .confirm_stats()
+            .sh_collect_cold
             .load(std::sync::atomic::Ordering::Relaxed);
         let block = hub
             .assemble_block_to_script(spk, vec![spend])
@@ -3572,7 +3570,10 @@ mod tests {
             AcceptOutcome::Accepted { height } => assert_eq!(height, 101),
             other => panic!("expected Accepted, got {other:?}"),
         }
-        let cold1 = rbitcoin_query::class_c_phase_stats::SH_COLLECT_COLD
+        let cold1 = hub
+            .query
+            .confirm_stats()
+            .sh_collect_cold
             .load(std::sync::atomic::Ordering::Relaxed);
         assert_eq!(
             cold1, cold0,

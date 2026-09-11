@@ -4,8 +4,8 @@ use super::{
     apply_witness_commitment, bip16_active_from_prev_mtp, bip34_height_script, block_subsidy,
     check_tx_local, is_p2sh_script, is_p2wpkh_program, is_p2wsh_program, last_script_push,
     merkle_root_bytes, script_sigop_count, validate_block_structure,
-    validate_block_structure_hashed, validate_block_structure_with_pres, witness_commitment_script,
-    ScriptCheckJob, ValidationContext, BIP16_EXCEPTION_MAINNET, MAX_BLOCK_STRIPPED_SIZE,
+    validate_block_structure_with_pres, witness_commitment_script, ScriptCheckJob,
+    ValidationContext, BIP16_EXCEPTION_MAINNET, MAX_BLOCK_STRIPPED_SIZE,
 };
 use crate::error::ConsensusError;
 use crate::milestone::Milestone;
@@ -110,50 +110,57 @@ fn block_with(txs: Vec<Transaction>) -> Block {
 /// `stamp_sub struct=` split: hash-encode vs extra walks (no algorithm change).
 #[test]
 fn structure_meters_split_txid_wtxid_walk() {
-    crate::plan_stamp_sub_stats::with_exclusive(|| {
-        let _ = crate::plan_stamp_sub_stats::sample_and_reset();
-        let mut spend = non_coinbase_spend(1);
-        spend.input[0].witness = Witness::from_slice(&[&[0x01]]);
-        let mut b = block_with(vec![coinbase(1), spend]);
-        apply_witness_commitment(&mut b);
-        validate_block_structure_hashed(&b, &ctx_h(1)).expect("witness block structure");
-        let s = crate::plan_stamp_sub_stats::sample_and_reset();
-        assert!(s.struct_txid_ns > 0, "one-pass hash must be metered: {s:?}");
-        assert!(
-            s.struct_walk_ns > 0,
-            "weight/sigops walks must be metered: {s:?}"
-        );
-    });
+    let stats = rbitcoin_query::ConfirmStats::default();
+    let mut spend = non_coinbase_spend(1);
+    spend.input[0].witness = Witness::from_slice(&[&[0x01]]);
+    let mut b = block_with(vec![coinbase(1), spend]);
+    apply_witness_commitment(&mut b);
+    validate_block_structure_with_pres(&b, &ctx_h(1), None, Some(&stats))
+        .expect("witness block structure");
+    let s = stats.take_window();
+    assert!(
+        s.stamp_struct_txid_ns > 0,
+        "one-pass hash must be metered: {s:?}"
+    );
+    assert!(
+        s.stamp_struct_walk_ns > 0,
+        "weight/sigops walks must be metered: {s:?}"
+    );
 }
 
 #[test]
 fn structure_with_pres_skips_from_tx() {
     use rbitcoin_query::TxPrecompute;
-    crate::plan_stamp_sub_stats::with_exclusive(|| {
-        let mut spend = non_coinbase_spend(1);
-        spend.input[0].witness = Witness::from_slice(&[&[0x01]]);
-        let mut b = block_with(vec![coinbase(1), spend]);
-        apply_witness_commitment(&mut b);
-        let pres: std::sync::Arc<[TxPrecompute]> = b
-            .txdata
-            .iter()
-            .map(TxPrecompute::from_tx)
-            .collect::<Vec<_>>()
-            .into();
-        let _ = crate::plan_stamp_sub_stats::sample_and_reset();
-        let out =
-            validate_block_structure_with_pres(&b, &ctx_h(1), Some(std::sync::Arc::clone(&pres)))
-                .expect("stashed pres must still enforce merkle");
-        assert_eq!(out.len(), pres.len());
-        assert_eq!(out[0].txid, pres[0].txid);
-        assert!(
-            std::sync::Arc::ptr_eq(&out, &pres),
-            "with_pres must keep the caller Arc"
-        );
-        let s = crate::plan_stamp_sub_stats::sample_and_reset();
-        assert_eq!(s.struct_txid_ns, 0, "with_pres must not from_tx: {s:?}");
-        assert!(s.struct_walk_ns > 0, "merkle/weight still run: {s:?}");
-    });
+    let stats = rbitcoin_query::ConfirmStats::default();
+    let mut spend = non_coinbase_spend(1);
+    spend.input[0].witness = Witness::from_slice(&[&[0x01]]);
+    let mut b = block_with(vec![coinbase(1), spend]);
+    apply_witness_commitment(&mut b);
+    let pres: std::sync::Arc<[TxPrecompute]> = b
+        .txdata
+        .iter()
+        .map(TxPrecompute::from_tx)
+        .collect::<Vec<_>>()
+        .into();
+    let out = validate_block_structure_with_pres(
+        &b,
+        &ctx_h(1),
+        Some(std::sync::Arc::clone(&pres)),
+        Some(&stats),
+    )
+    .expect("stashed pres must still enforce merkle");
+    assert_eq!(out.len(), pres.len());
+    assert_eq!(out[0].txid, pres[0].txid);
+    assert!(
+        std::sync::Arc::ptr_eq(&out, &pres),
+        "with_pres must keep the caller Arc"
+    );
+    let s = stats.take_window();
+    assert_eq!(
+        s.stamp_struct_txid_ns, 0,
+        "with_pres must not from_tx: {s:?}"
+    );
+    assert!(s.stamp_struct_walk_ns > 0, "merkle/weight still run: {s:?}");
 }
 
 /// Confirm assemble must Arc-share lookup/structure pres, not `Arc::new(p.clone())`.

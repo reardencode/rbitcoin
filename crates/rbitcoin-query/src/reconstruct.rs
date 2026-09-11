@@ -9,11 +9,13 @@ impl Query {
         &self,
         fk: Fk,
     ) -> Result<(TxRecord, Vec<OutputRecord>, Vec<InputRecord>), QueryError> {
-        use crate::wave_fill_stats::{self as wf, add as wf_add, add_count as wf_count};
         let t0 = Instant::now();
-        wf_count(&wf::BODY_STORE, 1);
+        crate::note_confirm(&self.confirm_stats().wf_body_store, 1);
         let (tx, inputs, outs) = self.store.get_tx_full(fk)?;
-        wf_add(&wf::BODY_STORE_NS, t0.elapsed().as_nanos() as u64);
+        crate::note_confirm(
+            &self.confirm_stats().wf_body_store_ns,
+            t0.elapsed().as_nanos() as u64,
+        );
         Ok((tx, outs, inputs))
     }
 

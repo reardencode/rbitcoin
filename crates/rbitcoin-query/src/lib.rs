@@ -7,6 +7,7 @@ mod chain_view;
 mod combined_stage;
 mod confirm_load;
 mod confirm_parent_cache;
+mod confirm_stats;
 mod connect;
 mod id_map;
 mod in_flight;
@@ -49,7 +50,12 @@ use rbitcoin_store::{
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering as AtomicOrdering};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+
+pub use confirm_stats::{
+    add as note_confirm, add_dur as note_confirm_dur, ConfirmStats, ConfirmWindow, LastPinPhases,
+    LastPlanBatch, LastUnionMiss, LastWritePhases, TipShSnap,
+};
 
 pub type QueryError = StoreError;
 
@@ -290,42 +296,6 @@ pub mod confirm_load_stats {
 pub mod archive_phase_stats {
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    /// Test builds: serialize note_* + [`sample_and_reset`] so a coverage
-    /// worker cannot steal this thread's window. Re-entrant on the same thread
-    /// so [`with_exclusive`] can wrap a plan+commit+sample.
-    #[cfg(test)]
-    mod exclusive {
-        use std::cell::Cell;
-        use std::sync::Mutex;
-        static LOCK: Mutex<()> = Mutex::new(());
-        thread_local! {
-            static HELD: Cell<bool> = const { Cell::new(false) };
-        }
-        pub fn with<R>(f: impl FnOnce() -> R) -> R {
-            if HELD.with(Cell::get) {
-                return f();
-            }
-            let _g = LOCK.lock().unwrap_or_else(|p| p.into_inner());
-            HELD.with(|h| h.set(true));
-            let r = f();
-            HELD.with(|h| h.set(false));
-            r
-        }
-    }
-    #[cfg(not(test))]
-    mod exclusive {
-        #[inline]
-        pub fn with<R>(f: impl FnOnce() -> R) -> R {
-            f()
-        }
-    }
-
-    /// Hold the test stats lock across drain → work → sample (integration pins).
-    #[cfg(test)]
-    pub fn with_exclusive<R>(f: impl FnOnce() -> R) -> R {
-        exclusive::with(f)
-    }
-
     /// Headers (blocks) planned this window.
     pub static BLOCKS: AtomicU64 = AtomicU64::new(0);
     pub static EXT_NEED: AtomicU64 = AtomicU64::new(0);
@@ -448,7 +418,7 @@ pub mod archive_phase_stats {
     }
 
     pub fn sample_and_reset() -> Sample {
-        exclusive::with(sample_and_reset_inner)
+        sample_and_reset_inner()
     }
 
     fn sample_and_reset_inner() -> Sample {
@@ -528,7 +498,7 @@ pub mod archive_phase_stats {
         batch_stamp: u64,
         resolved_stamp: u64,
     ) {
-        exclusive::with(|| {
+        {
             add(&BLOCKS, blocks);
             add(&EXT_NEED, ext_need);
             add(&HEAD_NEED, head_need);
@@ -541,43 +511,43 @@ pub mod archive_phase_stats {
                 LAST_HEAD_NEED.store(head_need, Ordering::Relaxed);
                 LAST_HEAD_HIT.store(head_hit, Ordering::Relaxed);
             }
-        });
+        }
     }
 
     #[inline]
     pub fn note_fill_missing() {
-        exclusive::with(|| {
+        {
             FILL_MISSING_N.fetch_add(1, Ordering::Relaxed);
-        });
+        }
     }
 
     /// Leftover TipOnly pending hits + winner age buckets (load stamp).
     #[inline]
     pub fn note_leftover_mix(pend: u64, age0: u64, age3: u64, age_n: u64) {
-        exclusive::with(|| {
+        {
             add(&LEFTOVER_PEND, pend);
             add(&LEFTOVER_AGE0, age0);
             add(&LEFTOVER_AGE3, age3);
             add(&LEFTOVER_AGE_N, age_n);
-        });
+        }
     }
 
     /// Live-pin `txid → (fk, range)` hits this plan batch.
     #[inline]
     pub fn note_pin_txid(n: u64, ns: u64) {
-        exclusive::with(|| {
+        {
             add(&PIN_TXID_N, n);
             add(&PIN_TXID_NS, ns);
-        });
+        }
     }
 
     /// Recent-create ring hits this plan batch.
     #[inline]
     pub fn note_recent(n: u64, ns: u64) {
-        exclusive::with(|| {
+        {
             add(&RECENT_N, n);
             add(&RECENT_NS, ns);
-        });
+        }
     }
 
     /// Lookup sub-phases for one plan batch (`archive_plan_batch_from_store`).
@@ -592,7 +562,7 @@ pub mod archive_phase_stats {
         stamp_ns: u64,
         finish_ns: u64,
     ) {
-        exclusive::with(|| {
+        {
             add(&PREP_ASSIGN_NS, assign_ns);
             add(&PREP_COLLECT_NS, collect_ns);
             add(&PREP_INFLIGHT_NS, inflight_ns);
@@ -600,7 +570,7 @@ pub mod archive_phase_stats {
             add(&PREP_HEAD_NS, head_fk_ns);
             add(&PREP_STAMP_NS, stamp_ns);
             add(&PREP_FINISH_NS, finish_ns);
-        });
+        }
     }
 
     // Last leftover mix (overwrite when head_need > 0). Stamp-reject leftover_n
@@ -718,14 +688,14 @@ pub mod archive_phase_stats {
         qwait_ns: u64,
         blocks: u64,
     ) {
-        exclusive::with(|| {
+        {
             add(&PREP_TOTAL_NS, total_ns);
             add(&PREP_STRUCT_NS, struct_ns);
             add(&PREP_FILTER_NS, filter_ns);
             add(&PREP_PUBLISH_NS, publish_ns);
             add(&PREP_QWAIT_NS, qwait_ns);
             add(&PREP_BLOCKS, blocks);
-        });
+        }
     }
 
     /// Commit path sub-phases (`archive_commit_plan`).
@@ -739,7 +709,7 @@ pub mod archive_phase_stats {
         htxs_ns: u64,
         blocks: u64,
     ) {
-        exclusive::with(|| {
+        {
             add(&WRITE_TOTAL_NS, total_ns);
             add(&WRITE_RESERVE_NS, reserve_ns);
             add(&WRITE_BODY_NS, body_ns);
@@ -747,16 +717,16 @@ pub mod archive_phase_stats {
             add(&WRITE_SPEND_NS, spend_ns);
             add(&WRITE_HTXS_NS, htxs_ns);
             add(&WRITE_BLOCKS, blocks);
-        });
+        }
     }
 
     #[inline]
     pub fn note_write_flush(ns: u64) {
-        exclusive::with(|| {
+        {
             add(&WRITE_FLUSH_NS, ns);
             // Include flush in write total so phases_sum ≈ total.
             add(&WRITE_TOTAL_NS, ns);
-        });
+        }
     }
 }
 
@@ -836,16 +806,6 @@ pub mod class_c_phase_stats {
         )
     }
 
-    /// Accrue a SH substep and the aggregate `SCRIPTHASH_NS` wall (same window).
-    #[inline]
-    pub(crate) fn add_sh_part(part: &AtomicU64, ns: u64) {
-        if ns == 0 {
-            return;
-        }
-        part.fetch_add(ns, Ordering::Relaxed);
-        SCRIPTHASH_NS.fetch_add(ns, Ordering::Relaxed);
-    }
-
     /// Snapshot for tip-follow accept logs (does **not** reset). Prefer sample_* after.
     #[derive(Clone, Debug, Default, PartialEq, Eq)]
     pub struct TipShSnap {
@@ -915,20 +875,6 @@ pub mod wave_fill_stats {
             BODY_STORE.swap(0, Ordering::Relaxed),
             BODY_STORE_NS.swap(0, Ordering::Relaxed),
         )
-    }
-
-    #[inline]
-    pub(crate) fn add(part: &AtomicU64, ns: u64) {
-        if ns > 0 {
-            part.fetch_add(ns, Ordering::Relaxed);
-        }
-    }
-
-    #[inline]
-    pub(crate) fn add_count(part: &AtomicU64, n: u64) {
-        if n > 0 {
-            part.fetch_add(n, Ordering::Relaxed);
-        }
     }
 }
 
@@ -1063,6 +1009,8 @@ pub struct Query {
     disconnect_height: AtomicU32,
     /// Bumped on each [`Self::disconnect_tip`]. Load drops in-flight layers.
     disconnect_gen: AtomicU64,
+    /// Confirm / archive / load window meters (`ibd: perf`). One instance per Query.
+    confirm_stats: Arc<ConfirmStats>,
 }
 
 /// In-process hash→height map for the confirmed tip chain (~33 MiB raw at 1e6 tips).
@@ -1149,12 +1097,23 @@ impl Query {
             head_drain_fk: AtomicU64::new(0),
             disconnect_height: AtomicU32::new(0),
             disconnect_gen: AtomicU64::new(0),
+            confirm_stats: Arc::new(ConfirmStats::default()),
         };
         if let Some(tip) = q.tip_height() {
             let _ = q.ensure_height_by_hash_index(tip);
         }
         q.recover_sh_writebehind()?;
         Ok(q)
+    }
+
+    #[inline]
+    pub fn confirm_stats(&self) -> &ConfirmStats {
+        &self.confirm_stats
+    }
+
+    #[inline]
+    pub fn confirm_stats_arc(&self) -> Arc<ConfirmStats> {
+        Arc::clone(&self.confirm_stats)
     }
 
     /// After `head_insert_many` returned these fks (inclusive max).

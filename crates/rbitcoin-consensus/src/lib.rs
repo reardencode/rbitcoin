@@ -727,7 +727,6 @@ mod coverage_tests {
     use rbitcoin_primitives::Height;
     use rbitcoin_query::Query;
     use std::path::PathBuf;
-    use std::sync::atomic::Ordering;
     fn temp_store() -> (PathBuf, Query) {
         let path = std::env::temp_dir().join(format!(
             "rbitcoin-consensus-cov-{}-{}",
@@ -791,8 +790,10 @@ mod coverage_tests {
 
     #[test]
     fn last_write_phase_stats() {
-        use confirm_phase_stats::*;
-        note_last_write(LastWritePhases {
+        use rbitcoin_query::{note_confirm, ConfirmStats, LastWritePhases};
+        use std::sync::atomic::Ordering;
+        let st = ConfirmStats::default();
+        st.note_last_write(LastWritePhases {
             n_blocks: 2,
             wall_ns: 3_000_000,
             class_a_ns: 500_000,
@@ -805,81 +806,47 @@ mod coverage_tests {
             spend_ann_ns: 300_000,
             tweak_ns: 2_500_000,
         });
-        let p = last_write_phases();
+        let p = st.last_write_phases();
         assert_eq!(p.n_blocks, 2);
         assert_eq!(LastWritePhases::ms(p.wall_ns), 3);
-        assert_eq!(LastWritePhases::ms(p.class_a_ns), 0); // 500_000 ns → 0 ms
+        assert_eq!(LastWritePhases::ms(p.class_a_ns), 0);
         assert_eq!(p.class_a_ns, 500_000);
         assert_eq!(p.tweak_ns, 2_500_000);
         assert_eq!(LastWritePhases::ms(p.tweak_ns), 2);
-        TWEAK_NS.store(42, Ordering::Relaxed);
-        assert_eq!(sample_tweak_and_reset(), 42);
-        assert_eq!(sample_tweak_and_reset(), 0);
-        WRITE_PLAN_TAKE_NS.store(11, Ordering::Relaxed);
-        WRITE_CREATE_MAP_NS.store(22, Ordering::Relaxed);
-        WRITE_HEAD_SUB_NS.store(33, Ordering::Relaxed);
-        assert_eq!(sample_write_pins_and_reset(), (11, 22, 33));
-        assert_eq!(sample_write_pins_and_reset(), (0, 0, 0));
-        CONNECT_NS.store(1, Ordering::Relaxed);
-        SCRIPT_NS.store(1, Ordering::Relaxed);
-        CLASS_C_NS.store(1, Ordering::Relaxed);
-        CLASS_A_NS.store(9, Ordering::Relaxed);
-        ENSURE_LAYOUT_NS.store(11, Ordering::Relaxed);
-        UTXO_APPLY_NS.store(1, Ordering::Relaxed);
-        BLOCKS.store(1, Ordering::Relaxed);
-        LOAD_NS.store(1, Ordering::Relaxed);
-        SPEND_ANNOTATE_RANGED.store(1, Ordering::Relaxed);
-        STRUCTURAL_NS.store(1, Ordering::Relaxed);
-        STRUCTURAL_SPENT_NS.store(1, Ordering::Relaxed);
-        STRUCTURAL_CREATE_H_NS.store(1, Ordering::Relaxed);
-        STRUCTURAL_BIP68_NS.store(1, Ordering::Relaxed);
-        let s = sample_and_reset();
-        assert_eq!(s.0, 1);
-        assert_eq!(s.1, 1);
-        let (ca, en) = sample_class_a_ensure_and_reset();
-        assert_eq!((ca, en), (9, 11));
-        // Drain prep residual (other tests may have accrued), then set known values.
-        let _ = sample_prep_residual_and_reset();
-        let _ = sample_assemble_and_reset();
-        let _ = sample_ensure_mix_and_reset();
-        PREP_WIRE_ARC_NS.store(3, Ordering::Relaxed);
-        PREP_STRUCT_NS.store(4, Ordering::Relaxed);
-        PREP_HEADER_NS.store(5, Ordering::Relaxed);
-        PREP_PREPARE_NS.store(6, Ordering::Relaxed);
-        PREP_FILTER_PLAN_NS.store(7, Ordering::Relaxed);
-        assert_eq!(sample_prep_residual_and_reset(), (3, 4, 5, 6, 7));
-        ASM_PREVOUT_NS.store(10, Ordering::Relaxed);
-        ASM_SIGOP_NS.store(20, Ordering::Relaxed);
-        ASM_FINAL_NS.store(30, Ordering::Relaxed);
-        ASM_JOB_NS.store(40, Ordering::Relaxed);
-        assert_eq!(sample_assemble_and_reset(), (10, 20, 30, 40));
-        // I3 assemble prevout path detail.
-        let _ = sample_assemble_prevout_detail_and_reset();
-        ASM_IN_N.store(100, Ordering::Relaxed);
-        ASM_PREV_BATCH_N.store(80, Ordering::Relaxed);
-        ASM_PREV_SAME_N.store(5, Ordering::Relaxed);
-        ASM_PREV_COLD_N.store(5, Ordering::Relaxed);
-        assert_eq!(sample_assemble_prevout_detail_and_reset(), (100, 80, 5, 5));
-        let _ = sample_assemble_cold_why_and_reset();
-        ASM_PREV_COLD_NULL_FK_N.store(1, Ordering::Relaxed);
-        ASM_PREV_COLD_NOT_PIN_N.store(2, Ordering::Relaxed);
-        ASM_PREV_COLD_TXID_MISMATCH_N.store(3, Ordering::Relaxed);
-        ASM_PREV_COLD_VOUT_MISS_N.store(4, Ordering::Relaxed);
-        assert_eq!(sample_assemble_cold_why_and_reset(), (1, 2, 3, 4));
-        ENSURE_RES_HIT.store(8, Ordering::Relaxed);
-        ENSURE_COLD_N.store(9, Ordering::Relaxed);
-        assert_eq!(sample_ensure_mix_and_reset(), (8, 9));
-        // Drain again; do **not** require zeros — other parallel `#[test]`s may
-        // `note_*` into the same process-global atomics between samples.
-        let _ = sample_and_reset();
-        let _ = sample_class_a_ensure_and_reset();
-        let _ = sample_prep_residual_and_reset();
-        let _ = sample_assemble_and_reset();
-        let _ = sample_assemble_prevout_detail_and_reset();
-        let _ = sample_assemble_cold_why_and_reset();
-        let _ = sample_ensure_mix_and_reset();
-        let _ = sample_spend_ann_and_reset();
-        let _ = sample_spend_meta_and_reset();
+        st.tweak_ns.store(42, Ordering::Relaxed);
+        assert_eq!(st.tweak_ns.swap(0, Ordering::Relaxed), 42);
+        assert_eq!(st.tweak_ns.swap(0, Ordering::Relaxed), 0);
+        note_confirm(&st.write_plan_take_ns, 11);
+        note_confirm(&st.write_create_map_ns, 22);
+        note_confirm(&st.write_head_sub_ns, 33);
+        let w = st.take_window();
+        assert_eq!(
+            (
+                w.write_plan_take_ns,
+                w.write_create_map_ns,
+                w.write_head_sub_ns
+            ),
+            (11, 22, 33)
+        );
+        assert_eq!(st.take_window().write_plan_take_ns, 0);
+        st.connect_ns.store(1, Ordering::Relaxed);
+        st.script_ns.store(1, Ordering::Relaxed);
+        st.class_a_ns.store(9, Ordering::Relaxed);
+        st.ensure_layout_ns.store(11, Ordering::Relaxed);
+        st.phase_prep_wire_arc_ns.store(3, Ordering::Relaxed);
+        st.asm_prevout_ns.store(10, Ordering::Relaxed);
+        st.asm_in_n.store(100, Ordering::Relaxed);
+        st.ensure_res_hit.store(8, Ordering::Relaxed);
+        let w = st.take_window();
+        assert_eq!(w.connect_ns, 1);
+        assert_eq!(w.script_ns, 1);
+        assert_eq!(w.class_a_ns, 9);
+        assert_eq!(w.ensure_layout_ns, 11);
+        assert_eq!(w.phase_prep_wire_arc_ns, 3);
+        assert_eq!(w.asm_prevout_ns, 10);
+        assert_eq!(w.asm_in_n, 100);
+        assert_eq!(w.ensure_res_hit, 8);
+        assert_eq!(st.take_window().connect_ns, 0);
     }
 
     #[test]

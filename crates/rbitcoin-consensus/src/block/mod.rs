@@ -1,3 +1,4 @@
+#[cfg(test)]
 use crate::confirm_phase_stats;
 use crate::error::ConsensusError;
 use crate::milestone::Milestone;
@@ -11,7 +12,6 @@ use rbitcoin_query::{FkMap, Query, TxidHasher, U32Map, U64Map};
 use std::borrow::Borrow;
 use std::hash::BuildHasherDefault;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -115,7 +115,7 @@ pub fn validate_block_structure_precomputed(
     block: &Block,
     ctx: &ValidationContext<'_>,
 ) -> Result<Vec<TxPrecompute>, ConsensusError> {
-    Ok(validate_block_structure_with_pres(block, ctx, None)?.to_vec())
+    Ok(validate_block_structure_with_pres(block, ctx, None, None)?.to_vec())
 }
 
 /// Like [`validate_block_structure_precomputed`], reusing lookup-stashed pres
@@ -125,6 +125,7 @@ pub fn validate_block_structure_with_pres(
     block: &Block,
     ctx: &ValidationContext<'_>,
     pres: Option<Arc<[TxPrecompute]>>,
+    stats: Option<&rbitcoin_query::ConfirmStats>,
 ) -> Result<Arc<[TxPrecompute]>, ConsensusError> {
     if block.txdata.is_empty() {
         return Err(ConsensusError::BadBlock("no transactions"));
@@ -231,7 +232,9 @@ pub fn validate_block_structure_with_pres(
         check_witness_commitment_with_wtxids(block, &non_cb)?;
     }
 
-    crate::plan_stamp_sub_stats::note_struct_parts(txid_ns, 0, walk_ns);
+    if let Some(stats) = stats {
+        stats.note_struct_parts(txid_ns, 0, walk_ns);
+    }
 
     // BIP325 signet solution is not checked here — tip confirm only.
 
@@ -1013,32 +1016,18 @@ struct AsmPrevoutAcc {
 }
 
 impl AsmPrevoutAcc {
-    fn flush(&self) {
-        let add = |a: &std::sync::atomic::AtomicU64, v: u64| {
-            if v > 0 {
-                a.fetch_add(v, Ordering::Relaxed);
-            }
-        };
-        add(&confirm_phase_stats::ASM_IN_N, self.in_n);
-        add(&confirm_phase_stats::ASM_PREV_SAME_N, self.same_n);
-        add(&confirm_phase_stats::ASM_PREV_BATCH_N, self.batch_n);
-        add(&confirm_phase_stats::ASM_PREV_COLD_N, self.cold_n);
-        add(
-            &confirm_phase_stats::ASM_PREV_COLD_NULL_FK_N,
-            self.cold_null_fk_n,
-        );
-        add(
-            &confirm_phase_stats::ASM_PREV_COLD_NOT_PIN_N,
-            self.cold_not_pin_n,
-        );
-        add(
-            &confirm_phase_stats::ASM_PREV_COLD_TXID_MISMATCH_N,
+    fn flush(&self, stats: &rbitcoin_query::ConfirmStats) {
+        rbitcoin_query::note_confirm(&stats.asm_in_n, self.in_n);
+        rbitcoin_query::note_confirm(&stats.asm_prev_same_n, self.same_n);
+        rbitcoin_query::note_confirm(&stats.asm_prev_batch_n, self.batch_n);
+        rbitcoin_query::note_confirm(&stats.asm_prev_cold_n, self.cold_n);
+        rbitcoin_query::note_confirm(&stats.asm_prev_cold_null_fk_n, self.cold_null_fk_n);
+        rbitcoin_query::note_confirm(&stats.asm_prev_cold_not_pin_n, self.cold_not_pin_n);
+        rbitcoin_query::note_confirm(
+            &stats.asm_prev_cold_txid_mismatch_n,
             self.cold_txid_mismatch_n,
         );
-        add(
-            &confirm_phase_stats::ASM_PREV_COLD_VOUT_MISS_N,
-            self.cold_vout_miss_n,
-        );
+        rbitcoin_query::note_confirm(&stats.asm_prev_cold_vout_miss_n, self.cold_vout_miss_n);
     }
 }
 
@@ -1194,8 +1183,6 @@ fn assemble_block_prevouts_mode(
     let mut coinbase_height_cache: FkMap<Option<u32>> =
         FkMap::with_capacity_and_hasher(64, Default::default());
 
-    use crate::confirm_phase_stats;
-    use std::sync::atomic::Ordering;
     use std::time::Instant;
 
     // BIP113: caller prev_mtp (same as header MTP — no second walk).
@@ -1421,11 +1408,11 @@ fn assemble_block_prevouts_mode(
         }
     }
 
-    acc.flush();
-    confirm_phase_stats::ASM_PREVOUT_NS.fetch_add(clk_prev, Ordering::Relaxed);
-    confirm_phase_stats::ASM_SIGOP_NS.fetch_add(clk_sig, Ordering::Relaxed);
-    confirm_phase_stats::ASM_FINAL_NS.fetch_add(clk_fin, Ordering::Relaxed);
-    confirm_phase_stats::ASM_JOB_NS.fetch_add(clk_job, Ordering::Relaxed);
+    acc.flush(query.confirm_stats());
+    rbitcoin_query::note_confirm(&query.confirm_stats().asm_prevout_ns, clk_prev);
+    rbitcoin_query::note_confirm(&query.confirm_stats().asm_sigop_ns, clk_sig);
+    rbitcoin_query::note_confirm(&query.confirm_stats().asm_final_ns, clk_fin);
+    rbitcoin_query::note_confirm(&query.confirm_stats().asm_job_ns, clk_job);
     Ok((script_jobs, spends, fees))
 }
 
@@ -1614,8 +1601,8 @@ pub(crate) fn structural_validate_spends(
             .get_spender_meta_at_abs_batch_backend(&abs_offs, meta_backend)
             .map_err(ConsensusError::from)?;
         let meta_ns = t_meta.elapsed().as_nanos() as u64;
-        confirm_phase_stats::SPEND_META_NS.fetch_add(meta_ns, Ordering::Relaxed);
-        confirm_phase_stats::SPEND_META_N.fetch_add(abs_offs.len() as u64, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().spend_meta_ns, meta_ns);
+        rbitcoin_query::note_confirm(&query.confirm_stats().spend_meta_n, abs_offs.len() as u64);
         let _ = meta_backend;
         if metas.len() != abs_jobs.len() {
             return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(

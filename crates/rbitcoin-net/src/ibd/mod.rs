@@ -828,6 +828,7 @@ pub async fn ibd_cancellable(
                 owned_sizes,
                 conf_pipe,
                 rss,
+                hub.query.confirm_stats(),
             );
             perf_log::log_sample(&perf);
 

@@ -105,34 +105,32 @@ pub(crate) struct WriteStageSample {
 impl WriteStageSample {
     /// Sum of the exclusive write inventory tokens (ms).
     pub fn stage_ms(&self) -> u64 {
-        self.class_a_ms
-            .saturating_add(self.ensure_ms)
-            .saturating_add(self.structural_ms)
-            .saturating_add(self.class_c_ms)
-            .saturating_add(self.sh_ms)
-            .saturating_add(self.utxo_ms)
-            .saturating_add(self.tweak_ms)
-            .saturating_add(self.pins_ms)
-            .saturating_add(self.head_sub_ms)
-            .saturating_add(self.class_c_join_ms)
-            .saturating_add(self.drain_join_ms)
-            .saturating_add(self.dequeue_ms)
+        Self::INVENTORY
+            .iter()
+            .fold(0, |acc, (_, ms, _)| acc.saturating_add(ms(self)))
     }
+
+    /// Exclusive write inventory: one row per token (`write=` = this sum).
+    const INVENTORY: &'static [(&'static str, fn(&Self) -> u64, fn(&Self) -> u64)] = &[
+        ("class_a", |s| s.class_a_ms, |s| s.class_a_ns),
+        ("ensure", |s| s.ensure_ms, |s| s.ensure_ns),
+        ("struct", |s| s.structural_ms, |s| s.structural_ns),
+        ("class_c", |s| s.class_c_ms, |s| s.class_c_ns),
+        ("sh", |s| s.sh_ms, |s| s.sh_ns),
+        ("spend", |s| s.utxo_ms, |s| s.utxo_apply_ns),
+        ("tweaks", |s| s.tweak_ms, |s| s.tweak_ns),
+        ("pins", |s| s.pins_ms, |s| s.pins_ns),
+        ("head_sub", |s| s.head_sub_ms, |s| s.head_sub_ns),
+        ("class_c_join", |s| s.class_c_join_ms, |s| s.class_c_join_ns),
+        ("drain_join", |s| s.drain_join_ms, |s| s.drain_join_ns),
+        ("dequeue", |s| s.dequeue_ms, |s| s.dequeue_ns),
+    ];
 
     /// Same inventory in nanoseconds (`format_debug` us/blk write=).
     pub fn stage_ns(&self) -> u64 {
-        self.class_a_ns
-            .saturating_add(self.ensure_ns)
-            .saturating_add(self.structural_ns)
-            .saturating_add(self.class_c_ns)
-            .saturating_add(self.sh_ns)
-            .saturating_add(self.utxo_apply_ns)
-            .saturating_add(self.tweak_ns)
-            .saturating_add(self.pins_ns)
-            .saturating_add(self.head_sub_ns)
-            .saturating_add(self.class_c_join_ns)
-            .saturating_add(self.drain_join_ns)
-            .saturating_add(self.dequeue_ns)
+        Self::INVENTORY
+            .iter()
+            .fold(0, |acc, (_, _, ns)| acc.saturating_add(ns(self)))
     }
 }
 
@@ -764,62 +762,74 @@ pub(crate) fn sample(
     owned: ProcessOwnedSizes,
     conf_pipe: ConfirmPipelineSizes,
     rss: ProcRss,
+    stats: &rbitcoin_query::ConfirmStats,
 ) -> IbdPerfSample {
     let (bq_bytes, bq_count, bq_soft_stop) = bq;
     let hot = loop_stats.sample_and_reset();
-    let thr = super::confirm::confirm_thr_stats::sample_and_reset();
-    let stamp_sub = rbitcoin_consensus::plan_stamp_sub_stats::sample_and_reset();
-    let (
-        connect_ns,
-        script_ns,
-        class_c_ns,
-        strong_ns,
-        sh_ns,
-        tip_ns,
-        utxo_apply_ns,
-        phase_blks,
-        load_ns,
-        spend_ranged,
-        structural_ns,
-        structural_spent_ns,
-        structural_create_h_ns,
-        structural_bip68_ns,
-    ) = rbitcoin_consensus::confirm_phase_stats::sample_and_reset();
-    let (class_a_ns, ensure_ns) =
-        rbitcoin_consensus::confirm_phase_stats::sample_class_a_ensure_and_reset();
-    let (drain_join_ns, dequeue_ns) =
-        rbitcoin_consensus::confirm_phase_stats::sample_write_residuals_and_reset();
-    let (pins_take_ns, pins_map_ns, head_sub_ns) =
-        rbitcoin_consensus::confirm_phase_stats::sample_write_pins_and_reset();
+    let w = stats.take_window();
+    let connect_ns = w.connect_ns;
+    let script_ns = w.script_ns;
+    let class_c_ns = w.class_c_ns;
+    let strong_ns = w.strong_ns;
+    let sh_ns = w.scripthash_ns;
+    let tip_ns = w.tip_ns;
+    let utxo_apply_ns = w.utxo_apply_ns;
+    let phase_blks = w.phase_blocks;
+    let load_ns = w.load_ns;
+    let spend_ranged = w.spend_annotate_ranged;
+    let structural_ns = w.structural_ns;
+    let structural_spent_ns = w.structural_spent_ns;
+    let structural_create_h_ns = w.structural_create_h_ns;
+    let structural_bip68_ns = w.structural_bip68_ns;
+    let class_a_ns = w.class_a_ns;
+    let ensure_ns = w.ensure_layout_ns;
+    let drain_join_ns = w.write_drain_join_ns;
+    let dequeue_ns = w.write_dequeue_ns;
+    let pins_take_ns = w.write_plan_take_ns;
+    let pins_map_ns = w.write_create_map_ns;
+    let head_sub_ns = w.write_head_sub_ns;
     let pins_ns = pins_take_ns.saturating_add(pins_map_ns);
-    let class_c_join_ns = rbitcoin_consensus::confirm_phase_stats::sample_class_c_join_and_reset();
-    let tweak_ns = rbitcoin_consensus::confirm_phase_stats::sample_tweak_and_reset();
-    let (spent_abs_ns, spent_strong_ns, spent_cold_ns, spent_pending_ns) =
-        rbitcoin_consensus::confirm_phase_stats::sample_spent_sub_and_reset();
-    let (script_jobs, script_skip) =
-        rbitcoin_consensus::confirm_phase_stats::sample_script_mix_and_reset();
-    let (ann_ns, ann_n, ann_pread_skip) =
-        rbitcoin_consensus::confirm_phase_stats::sample_spend_ann_and_reset();
-    let (meta_ns, meta_n) = rbitcoin_consensus::confirm_phase_stats::sample_spend_meta_and_reset();
-    let (ensure_res_hit, ensure_cold_n) =
-        rbitcoin_consensus::confirm_phase_stats::sample_ensure_mix_and_reset();
-    let (asm_prevout_ns, asm_sigop_ns, asm_final_ns, asm_job_ns) =
-        rbitcoin_consensus::confirm_phase_stats::sample_assemble_and_reset();
-    let (asm_in_n, asm_prev_batch_n, asm_prev_same_n, asm_prev_cold_n) =
-        rbitcoin_consensus::confirm_phase_stats::sample_assemble_prevout_detail_and_reset();
-    let (asm_cold_null_fk_n, asm_cold_not_pin_n, asm_cold_txid_mismatch_n, asm_cold_vout_miss_n) =
-        rbitcoin_consensus::confirm_phase_stats::sample_assemble_cold_why_and_reset();
-    let (prep_wire_arc_ns, prep_struct_ns, prep_header_ns, prep_prepare_ns, prep_filter_plan_ns) =
-        rbitcoin_consensus::confirm_phase_stats::sample_prep_residual_and_reset();
-    let (sh_collect, sh_sort, sh_seed, sh_body, sh_head) =
-        rbitcoin_query::class_c_phase_stats::sample_sh_sub_and_reset();
-    let (sh_collect_pin, sh_collect_cold) =
-        rbitcoin_query::class_c_phase_stats::sample_sh_collect_src_and_reset();
-    let (wf_body_store, wf_store_body_ns) =
-        rbitcoin_query::wave_fill_stats::sample_store_and_reset();
-    let pw = rbitcoin_query::confirm_load_stats::sample_and_reset();
-    let dens = rbitcoin_consensus::lookup_stage_stats::sample_and_reset();
-    let arch_res = rbitcoin_query::archive_phase_stats::sample_and_reset();
+    let class_c_join_ns = w.write_class_c_join_ns;
+    let tweak_ns = w.tweak_ns;
+    let spent_abs_ns = w.structural_spent_abs_ns;
+    let spent_strong_ns = w.structural_spent_strong_ns;
+    let spent_cold_ns = w.structural_spent_cold_ns;
+    let spent_pending_ns = w.structural_spent_pending_ns;
+    let script_jobs = w.script_jobs;
+    let script_skip = w.script_skip_mempool;
+    let ann_ns = w.spend_ann_ns;
+    let ann_n = w.spend_ann_n;
+    let ann_pread_skip = w.spend_ann_pread_skip;
+    let meta_ns = w.spend_meta_ns;
+    let meta_n = w.spend_meta_n;
+    let ensure_res_hit = w.ensure_res_hit;
+    let ensure_cold_n = w.ensure_cold_n;
+    let asm_prevout_ns = w.asm_prevout_ns;
+    let asm_sigop_ns = w.asm_sigop_ns;
+    let asm_final_ns = w.asm_final_ns;
+    let asm_job_ns = w.asm_job_ns;
+    let asm_in_n = w.asm_in_n;
+    let asm_prev_batch_n = w.asm_prev_batch_n;
+    let asm_prev_same_n = w.asm_prev_same_n;
+    let asm_prev_cold_n = w.asm_prev_cold_n;
+    let asm_cold_null_fk_n = w.asm_prev_cold_null_fk_n;
+    let asm_cold_not_pin_n = w.asm_prev_cold_not_pin_n;
+    let asm_cold_txid_mismatch_n = w.asm_prev_cold_txid_mismatch_n;
+    let asm_cold_vout_miss_n = w.asm_prev_cold_vout_miss_n;
+    let prep_wire_arc_ns = w.phase_prep_wire_arc_ns;
+    let prep_struct_ns = w.phase_prep_struct_ns;
+    let prep_header_ns = w.phase_prep_header_ns;
+    let prep_prepare_ns = w.phase_prep_prepare_ns;
+    let prep_filter_plan_ns = w.phase_prep_filter_plan_ns;
+    let sh_collect = w.sh_collect_ns;
+    let sh_sort = w.sh_sort_ns;
+    let sh_seed = w.sh_seed_ns;
+    let sh_body = w.sh_body_ns;
+    let sh_head = w.sh_head_ns;
+    let sh_collect_pin = w.sh_collect_pin;
+    let sh_collect_cold = w.sh_collect_cold;
+    let wf_body_store = w.wf_body_store;
+    let wf_store_body_ns = w.wf_body_store_ns;
     let head_res = rbitcoin_store::head_resolve_stats::sample_and_reset();
     IbdPerfSample {
         inflight,
@@ -925,24 +935,24 @@ pub(crate) fn sample(
         sh_head_ms: ns_ms(sh_head),
         sh_collect_pin,
         sh_collect_cold,
-        load_win_ms: ns_ms(pw.ns),
-        load_blocks: pw.blocks,
-        load_utxo_parents: pw.utxo_parents,
-        load_parent_unique: pw.parent_unique,
-        load_pin_cache_body: pw.pin_cache_body,
-        load_pin_plan: pw.pin_plan,
-        load_pin_new: pw.pin_new,
-        load_pin_body_ms: ns_ms(pw.pin_body_ns),
-        load_plan_pin_ms: ns_ms(pw.plan_pin_ns),
-        load_pin_range_fill_ms: ns_ms(pw.pin_range_fill_ns),
-        load_pin_recent_outs_ms: ns_ms(pw.pin_recent_outs_ns),
-        load_pin_contract_ms: ns_ms(pw.pin_contract_ns),
-        load_cold_io_ms: ns_ms(pw.cold_io_ns),
-        load_cold_range_ms: ns_ms(pw.cold_range_ns),
-        load_cold_range_n: pw.cold_range_n,
-        load_cold_range_body_ms: ns_ms(pw.cold_range_body_ns),
-        load_cold_range_decode_ms: ns_ms(pw.cold_range_decode_ns),
-        load_body_tx_reads: pw.body_tx,
+        load_win_ms: ns_ms(w.load_win_ns),
+        load_blocks: w.load_blocks,
+        load_utxo_parents: w.utxo_parents,
+        load_parent_unique: w.parent_unique,
+        load_pin_cache_body: w.pin_cache_body,
+        load_pin_plan: w.pin_plan,
+        load_pin_new: w.pin_new,
+        load_pin_body_ms: ns_ms(w.pin_body_ns),
+        load_plan_pin_ms: ns_ms(w.plan_pin_ns),
+        load_pin_range_fill_ms: ns_ms(w.pin_range_fill_ns),
+        load_pin_recent_outs_ms: ns_ms(w.pin_recent_outs_ns),
+        load_pin_contract_ms: ns_ms(w.pin_contract_ns),
+        load_cold_io_ms: ns_ms(w.cold_io_ns),
+        load_cold_range_ms: ns_ms(w.cold_range_ns),
+        load_cold_range_n: w.cold_range_n,
+        load_cold_range_body_ms: ns_ms(w.cold_range_body_ns),
+        load_cold_range_decode_ms: ns_ms(w.cold_range_decode_ns),
+        load_body_tx_reads: w.body_tx_reads,
         conf_ready,
         conf_script_q,
         conf_write_q,
@@ -950,74 +960,74 @@ pub(crate) fn sample(
         conf_write_q_cap: super::confirm::write_queue_cap(),
         conf_script_q_hwm: conf_q_hwm.1,
         conf_write_q_hwm: conf_q_hwm.2,
-        thr_lookup_claim_ms: ns_ms(thr.lookup_claim_ns),
-        thr_lookup_stamp_ms: ns_ms(thr.lookup_stamp_ns),
-        thr_lookup_other_ms: ns_ms(thr.lookup_other_ns),
-        thr_lookup_send_wait_ms: ns_ms(thr.lookup_send_wait_ns),
-        stamp_struct_ms: ns_ms(stamp_sub.struct_ns),
-        stamp_struct_txid_ms: ns_ms(stamp_sub.struct_txid_ns),
-        stamp_struct_walk_ms: ns_ms(stamp_sub.struct_walk_ns),
-        stamp_prepare_ms: ns_ms(stamp_sub.prepare_ns),
-        stamp_filter_ms: ns_ms(stamp_sub.filter_ns),
-        stamp_batch_ms: ns_ms(stamp_sub.batch_ns),
-        stamp_batch_assign_ms: ns_ms(arch_res.prep_assign_ns),
-        stamp_batch_collect_ms: ns_ms(arch_res.prep_collect_ns),
-        stamp_batch_head_ms: ns_ms(arch_res.prep_head_ns),
-        stamp_batch_head_fk_ms: ns_ms(arch_res.prep_head_fk_ns),
-        stamp_batch_stamp_ms: ns_ms(arch_res.prep_stamp_ns),
-        stamp_batch_finish_ms: ns_ms(arch_res.prep_finish_ns),
-        thr_load_recv_wait_ms: ns_ms(thr.load_recv_wait_ns),
-        thr_load_pack_ms: ns_ms(thr.load_pack_ns),
-        thr_load_clone_ms: ns_ms(thr.load_clone_ns),
-        thr_load_stamp_ms: ns_ms(thr.load_stamp_ns),
-        thr_load_pin_ms: ns_ms(thr.load_pin_ns),
-        thr_load_asm_ms: ns_ms(thr.load_asm_ns),
-        thr_load_prune_ms: ns_ms(thr.load_prune_ns),
-        thr_load_send_wait_ms: ns_ms(thr.load_send_wait_ns),
+        thr_lookup_claim_ms: ns_ms(w.thr_lookup_claim_ns),
+        thr_lookup_stamp_ms: ns_ms(w.thr_lookup_stamp_ns),
+        thr_lookup_other_ms: ns_ms(w.thr_lookup_other_ns),
+        thr_lookup_send_wait_ms: ns_ms(w.thr_lookup_send_wait_ns),
+        stamp_struct_ms: ns_ms(w.stamp_struct_ns),
+        stamp_struct_txid_ms: ns_ms(w.stamp_struct_txid_ns),
+        stamp_struct_walk_ms: ns_ms(w.stamp_struct_walk_ns),
+        stamp_prepare_ms: ns_ms(w.stamp_prepare_ns),
+        stamp_filter_ms: ns_ms(w.stamp_filter_ns),
+        stamp_batch_ms: ns_ms(w.stamp_batch_ns),
+        stamp_batch_assign_ms: ns_ms(w.arch_prep_assign_ns),
+        stamp_batch_collect_ms: ns_ms(w.arch_prep_collect_ns),
+        stamp_batch_head_ms: ns_ms(w.arch_prep_head_ns),
+        stamp_batch_head_fk_ms: ns_ms(w.arch_prep_head_fk_ns),
+        stamp_batch_stamp_ms: ns_ms(w.arch_prep_stamp_ns),
+        stamp_batch_finish_ms: ns_ms(w.arch_prep_finish_ns),
+        thr_load_recv_wait_ms: ns_ms(w.thr_load_recv_wait_ns),
+        thr_load_pack_ms: ns_ms(w.thr_load_pack_ns),
+        thr_load_clone_ms: ns_ms(w.thr_load_clone_ns),
+        thr_load_stamp_ms: ns_ms(w.thr_load_stamp_ns),
+        thr_load_pin_ms: ns_ms(w.thr_load_pin_ns),
+        thr_load_asm_ms: ns_ms(w.thr_load_asm_ns),
+        thr_load_prune_ms: ns_ms(w.thr_load_prune_ns),
+        thr_load_send_wait_ms: ns_ms(w.thr_load_send_wait_ns),
         script_jobs,
         script_skip,
-        thr_script_recv_wait_ms: ns_ms(thr.script_recv_wait_ns),
-        thr_script_work_ms: ns_ms(thr.script_work_ns),
-        thr_script_send_wait_ms: ns_ms(thr.script_send_wait_ns),
-        thr_write_recv_wait_ms: ns_ms(thr.write_recv_wait_ns),
-        thr_write_work_ms: ns_ms(thr.write_work_ns),
-        plan_blks: dens.blocks,
-        plan_ms: ns_ms(dens.total_ns),
-        plan_collect_ms: ns_ms(dens.collect_ns),
-        plan_head_ms: ns_ms(dens.head_ns),
-        plan_cold_io_ms: ns_ms(dens.cold_io_ns),
-        lookup_decode_ms: ns_ms(dens.decode_ns),
-        lookup_precompute_ms: ns_ms(dens.precompute_ns),
-        lookup_wave_head_ms: ns_ms(dens.wave_head_ns),
+        thr_script_recv_wait_ms: ns_ms(w.thr_script_recv_wait_ns),
+        thr_script_work_ms: ns_ms(w.thr_script_work_ns),
+        thr_script_send_wait_ms: ns_ms(w.thr_script_send_wait_ns),
+        thr_write_recv_wait_ms: ns_ms(w.thr_write_recv_wait_ns),
+        thr_write_work_ms: ns_ms(w.thr_write_work_ns),
+        plan_blks: w.lookup_blocks,
+        plan_ms: ns_ms(w.lookup_total_ns),
+        plan_collect_ms: ns_ms(w.lookup_collect_ns),
+        plan_head_ms: ns_ms(w.lookup_head_ns),
+        plan_cold_io_ms: ns_ms(w.lookup_cold_io_ns),
+        lookup_decode_ms: ns_ms(w.lookup_decode_ns),
+        lookup_precompute_ms: ns_ms(w.lookup_precompute_ns),
+        lookup_wave_head_ms: ns_ms(w.lookup_wave_head_ns),
         lookup_wave_head_probe_ms: ns_ms(head_res.probe_ns),
         lookup_wave_head_io_ms: ns_ms(head_res.body_ns.saturating_add(head_res.idx_ns)),
         lookup_wave_head_preads: head_res.body_lookups,
-        lookup_wave_spent_ms: ns_ms(dens.wave_spent_ns),
-        plan_parents: dens.parents,
-        plan_already: dens.already,
-        plan_cold: dens.cold,
-        plan_same_batch: dens.unresolved,
-        load_thin_ms: ns_ms(pw.thin_ns),
-        load_parent_pin_ms: ns_ms(pw.parent_pin_ns),
-        arch_ext_need: arch_res.ext_need,
-        arch_head_need: arch_res.head_need,
-        arch_head_hit: arch_res.head_hit,
-        leftover_pend: arch_res.leftover_pend,
-        leftover_cdf0_pct: arch_res.leftover_cdf0_pct,
-        leftover_cdf3_pct: arch_res.leftover_cdf3_pct,
-        leftover_age_n: arch_res.leftover_age_n,
-        arch_pin_txid: arch_res.pin_txid_n,
-        arch_pin_txid_ms: ns_ms(arch_res.pin_txid_ns),
-        arch_recent_n: arch_res.recent_n,
-        arch_recent_ms: ns_ms(arch_res.recent_ns),
-        arch_batch_stamp: arch_res.batch_stamp,
-        arch_resolve_ns: arch_res.resolve_ns,
-        arch_resolve_blocks: arch_res.blocks,
-        arch_prep_assign_ms: ns_ms(arch_res.prep_assign_ns),
-        arch_prep_collect_ms: ns_ms(arch_res.prep_collect_ns),
-        arch_prep_inflight_ms: ns_ms(arch_res.prep_inflight_ns),
-        arch_prep_head_ms: ns_ms(arch_res.prep_head_ns),
-        arch_prep_head_fk_ms: ns_ms(arch_res.prep_head_fk_ns),
+        lookup_wave_spent_ms: ns_ms(w.lookup_wave_spent_ns),
+        plan_parents: w.lookup_parents,
+        plan_already: w.lookup_already,
+        plan_cold: w.lookup_cold,
+        plan_same_batch: w.lookup_unresolved,
+        load_thin_ms: ns_ms(w.thin_ns),
+        load_parent_pin_ms: ns_ms(w.parent_pin_ns),
+        arch_ext_need: w.ext_need,
+        arch_head_need: w.head_need,
+        arch_head_hit: w.head_hit,
+        leftover_pend: w.leftover_pend,
+        leftover_cdf0_pct: w.leftover_cdf0_pct,
+        leftover_cdf3_pct: w.leftover_cdf3_pct,
+        leftover_age_n: w.leftover_age_n,
+        arch_pin_txid: w.pin_txid_n,
+        arch_pin_txid_ms: ns_ms(w.pin_txid_ns),
+        arch_recent_n: w.recent_n,
+        arch_recent_ms: ns_ms(w.recent_ns),
+        arch_batch_stamp: w.batch_stamp,
+        arch_resolve_ns: w.resolve_ns(),
+        arch_resolve_blocks: w.arch_blocks,
+        arch_prep_assign_ms: ns_ms(w.arch_prep_assign_ns),
+        arch_prep_collect_ms: ns_ms(w.arch_prep_collect_ns),
+        arch_prep_inflight_ms: ns_ms(w.arch_prep_inflight_ns),
+        arch_prep_head_ms: ns_ms(w.arch_prep_head_ns),
+        arch_prep_head_fk_ms: ns_ms(w.arch_prep_head_fk_ns),
         arch_prep_probe_ms: ns_ms(head_res.probe_ns),
         arch_prep_idx_ms: ns_ms(head_res.idx_ns),
         arch_prep_body_txid_ms: ns_ms(head_res.body_ns),
@@ -1035,16 +1045,16 @@ pub(crate) fn sample(
         arch_prep_age_hit_compact: head_res.age_hit_compact(),
         arch_prep_age_hit_n: head_res.age_hit_n(),
         arch_prep_body_lookups: head_res.body_lookups,
-        arch_prep_stamp_ms: ns_ms(arch_res.prep_stamp_ns),
-        arch_prep_finish_ms: ns_ms(arch_res.prep_finish_ns),
-        arch_write_total_ms: ns_ms(arch_res.write_total_ns),
-        arch_write_reserve_ms: ns_ms(arch_res.write_reserve_ns),
-        arch_write_body_ms: ns_ms(arch_res.write_body_ns),
-        arch_write_head_ms: ns_ms(arch_res.write_head_ns),
-        arch_write_spend_ms: ns_ms(arch_res.write_spend_ns),
-        arch_write_htxs_ms: ns_ms(arch_res.write_htxs_ns),
-        arch_write_flush_ms: ns_ms(arch_res.write_flush_ns),
-        arch_write_blocks: arch_res.write_blocks,
+        arch_prep_stamp_ms: ns_ms(w.arch_prep_stamp_ns),
+        arch_prep_finish_ms: ns_ms(w.arch_prep_finish_ns),
+        arch_write_total_ms: ns_ms(w.arch_write_total_ns),
+        arch_write_reserve_ms: ns_ms(w.arch_write_reserve_ns),
+        arch_write_body_ms: ns_ms(w.arch_write_body_ns),
+        arch_write_head_ms: ns_ms(w.arch_write_head_ns),
+        arch_write_spend_ms: ns_ms(w.arch_write_spend_ns),
+        arch_write_htxs_ms: ns_ms(w.arch_write_htxs_ns),
+        arch_write_flush_ms: ns_ms(w.arch_write_flush_ns),
+        arch_write_blocks: w.arch_write_blocks,
         rss_kb: rss.rss_kb,
         rss_anon_kb: rss.anon_kb,
         rss_file_kb: rss.file_kb,
@@ -2646,6 +2656,7 @@ mod tests {
             owned,
             conf_pipe,
             rss,
+            &rbitcoin_query::ConfirmStats::default(),
         );
         assert_eq!(s.inflight, 4);
         assert_eq!(s.peers, 8);

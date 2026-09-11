@@ -16,7 +16,7 @@
 `cargo test` / `cargo llvm-cov test` run **one process per test binary**. Do not:
 
 - Put HOLD / wait hooks in a shipped function other tests also call (`confirm_scripts_phase`).
-- Assert process-global last-writer meters (`confirm_phase_stats`, `confirm_thr_stats::sample_and_reset`, `last_union_miss` / `last_plan_batch`) as the contract. Use pin/layout, error strings, or a pure formatter / local `AtomicU64`.
+- Assert process-global last-writer meters as the contract. Confirm / query / IBD window meters are instance-owned (`Query::confirm_stats`, take-and-reset). Pin two engines, not crate-root atomics. Store head-resolve window meters and `last_union_miss` / leftover probe diag remain process-global; use pin/layout, error strings, or a pure formatter.
 - `std::env::set_var` without the crate lock (or pass the knob as an argument).
 - Bind a fixed port (use `:0`) or share a `/tmp` path (use `rbitcoin_store::testutil::TempDir` / `tiny_store`, `rbitcoin_query::testutil::tiny_query`, net `tiny_regtest_hub`, or `rbitcoin_test::TestDatadir`).
 

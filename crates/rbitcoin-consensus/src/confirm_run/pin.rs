@@ -114,6 +114,7 @@ fn fill_pins(
     batch_pin_by_id: &U64Map<&CreatePin>,
     parent_pin: &ParentPinStamp,
     in_flight: Option<&rbitcoin_query::InFlight>,
+    stats: &rbitcoin_query::ConfirmStats,
 ) -> U64Map<CreatePin> {
     let mut plan_by_id: U64Map<CreatePin> = U64Map::default();
     if let Some(ifo) = in_flight {
@@ -151,9 +152,7 @@ fn fill_pins(
     }
     let recent_outs_ns = t_recent.elapsed().as_nanos() as u64;
     if recent_outs_ns > 0 {
-        use rbitcoin_query::confirm_load_stats;
-        use std::sync::atomic::Ordering;
-        confirm_load_stats::PIN_RECENT_OUTS_NS.fetch_add(recent_outs_ns, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&stats.pin_recent_outs_ns, recent_outs_ns);
     }
     plan_by_id
 }
@@ -164,8 +163,6 @@ fn denserels_by_stamped_range(
     still_need: &mut U64Map<Vec<u32>>,
     batch_parents: &mut rbitcoin_query::BatchParents,
 ) -> Result<(u64, u64), ConsensusError> {
-    use rbitcoin_query::confirm_load_stats;
-    use std::sync::atomic::Ordering;
     let mut range_jobs: Vec<(rbitcoin_primitives::Fk, (u64, u64), [u8; 32], Vec<u32>)> = Vec::new();
     let pending = std::mem::take(still_need);
     for (id, need) in pending {
@@ -191,18 +188,18 @@ fn denserels_by_stamped_range(
         .map_err(ConsensusError::from)?;
     let rng_ns = body_ns.saturating_add(dec_ns);
     if rng_ns > 0 {
-        confirm_load_stats::COLD_IO_NS.fetch_add(rng_ns, Ordering::Relaxed);
-        confirm_load_stats::COLD_RANGE_NS.fetch_add(rng_ns, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().cold_io_ns, rng_ns);
+        rbitcoin_query::note_confirm(&query.confirm_stats().cold_range_ns, rng_ns);
     }
     if body_ns > 0 {
-        confirm_load_stats::COLD_RANGE_BODY_NS.fetch_add(body_ns, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().cold_range_body_ns, body_ns);
     }
     if dec_ns > 0 {
-        confirm_load_stats::COLD_RANGE_DECODE_NS.fetch_add(dec_ns, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().cold_range_decode_ns, dec_ns);
     }
-    confirm_load_stats::COLD_RANGE_N.fetch_add(n_range, Ordering::Relaxed);
-    confirm_load_stats::BODY_TX_READS.fetch_add(n_range, Ordering::Relaxed);
-    confirm_load_stats::PIN_NEW.fetch_add(n_range, Ordering::Relaxed);
+    rbitcoin_query::note_confirm(&query.confirm_stats().cold_range_n, n_range);
+    rbitcoin_query::note_confirm(&query.confirm_stats().body_tx_reads, n_range);
+    rbitcoin_query::note_confirm(&query.confirm_stats().pin_new, n_range);
     let t_range_fill = Instant::now();
     for ((fk, range, _tid, need), row) in range_jobs.into_iter().zip(decoded.into_iter()) {
         let Some(id) = fk.get() else {
@@ -236,7 +233,7 @@ fn denserels_by_stamped_range(
     }
     let range_fill_ns = t_range_fill.elapsed().as_nanos() as u64;
     if range_fill_ns > 0 {
-        confirm_load_stats::PIN_RANGE_FILL_NS.fetch_add(range_fill_ns, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().pin_range_fill_ns, range_fill_ns);
     }
     Ok((n_range, rng_ns))
 }
@@ -255,9 +252,6 @@ pub(super) fn pin_for_wire_batch(
     wire_blocks: &[Arc<Block>],
     in_flight: Option<&rbitcoin_query::InFlight>,
 ) -> Result<(rbitcoin_query::BatchParents, rbitcoin_query::SpendEdges), ConsensusError> {
-    use rbitcoin_query::confirm_load_stats;
-    use std::sync::atomic::Ordering;
-
     let t_pin = Instant::now();
     let t_thin = Instant::now();
 
@@ -286,12 +280,18 @@ pub(super) fn pin_for_wire_batch(
         }
     }
 
-    let plan_by_id = fill_pins(&parent_vouts, &batch_pin_by_id, parent_pin, in_flight);
+    let plan_by_id = fill_pins(
+        &parent_vouts,
+        &batch_pin_by_id,
+        parent_pin,
+        in_flight,
+        query.confirm_stats(),
+    );
 
     let mut batch_parents = rbitcoin_query::BatchParents::with_capacity(parent_vouts.len());
     let thin_ns = t_thin.elapsed().as_nanos() as u64;
     if thin_ns > 0 {
-        confirm_load_stats::THIN_NS.fetch_add(thin_ns, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().thin_ns, thin_ns);
     }
     let mut still_need: U64Map<Vec<u32>> = U64Map::default();
     let mut n_plan_pin = 0u64;
@@ -376,20 +376,20 @@ pub(super) fn pin_for_wire_batch(
 
     let n_unique = parent_vouts.len() as u64;
     if n_unique > 0 {
-        confirm_load_stats::PARENT_UNIQUE.fetch_add(n_unique, Ordering::Relaxed);
-        confirm_load_stats::UTXO_PARENTS.fetch_add(n_unique, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().parent_unique, n_unique);
+        rbitcoin_query::note_confirm(&query.confirm_stats().utxo_parents, n_unique);
     }
     if n_plan_pin > 0 {
-        confirm_load_stats::PIN_PLAN.fetch_add(n_plan_pin, Ordering::Relaxed);
-        confirm_load_stats::PIN_CACHE_BODY.fetch_add(n_plan_pin, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().pin_plan, n_plan_pin);
+        rbitcoin_query::note_confirm(&query.confirm_stats().pin_cache_body, n_plan_pin);
     }
     if plan_pin_ns > 0 {
-        confirm_load_stats::PLAN_PIN_NS.fetch_add(plan_pin_ns, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().plan_pin_ns, plan_pin_ns);
     }
     if contract_ns > 0 {
-        confirm_load_stats::PIN_CONTRACT_NS.fetch_add(contract_ns, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().pin_contract_ns, contract_ns);
     }
-    confirm_load_stats::note_last_pin(
+    query.confirm_stats().note_last_pin(
         plan_pin_ns,
         cold_range_batch_ns,
         contract_ns,
@@ -398,13 +398,13 @@ pub(super) fn pin_for_wire_batch(
     );
     let pin_ns = t_pin.elapsed().as_nanos() as u64;
     if pin_ns > 0 {
-        confirm_load_stats::PARENT_PIN_NS.fetch_add(pin_ns, Ordering::Relaxed);
-        confirm_load_stats::PIN_BODY_NS.fetch_add(pin_ns, Ordering::Relaxed);
-        confirm_load_stats::NS.fetch_add(pin_ns, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().parent_pin_ns, pin_ns);
+        rbitcoin_query::note_confirm(&query.confirm_stats().pin_body_ns, pin_ns);
+        rbitcoin_query::note_confirm(&query.confirm_stats().load_win_ns, pin_ns);
     }
     let n_blks = metas.len() as u64;
     if n_blks > 0 {
-        confirm_load_stats::BLOCKS.fetch_add(n_blks, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().load_blocks, n_blks);
     }
 
     Ok((batch_parents, spend_edges))
@@ -485,7 +485,7 @@ pub(super) fn ensure_spend_abs_layouts(
         }
         still.insert(*id, need_v.clone());
     }
-    confirm_phase_stats::ENSURE_RES_HIT.fetch_add(ensure_res, Ordering::Relaxed);
+    rbitcoin_query::note_confirm(&query.confirm_stats().ensure_res_hit, ensure_res);
 
     // Class A denserels body for remainder only — must not re-load pin denserels hits.
     if !still.is_empty() {
@@ -493,7 +493,7 @@ pub(super) fn ensure_spend_abs_layouts(
             .keys()
             .map(|id| rbitcoin_primitives::Fk(*id))
             .collect();
-        confirm_phase_stats::ENSURE_COLD_N.fetch_add(fks.len() as u64, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().ensure_cold_n, fks.len() as u64);
         let loaded = rbitcoin_query::load_creates_once(query.store(), &fks, IdxBodyMode::Outs)
             .map_err(ConsensusError::from)?;
         let secret = query.store().txs.store_secret();

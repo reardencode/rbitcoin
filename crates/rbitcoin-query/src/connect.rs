@@ -166,8 +166,10 @@ impl Query {
             confirmed_pairs.push((item.height, item.header_fk));
             out.push(item.header_fk);
         }
-        crate::class_c_phase_stats::STRONG_NS
-            .fetch_add(t_strong.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        crate::note_confirm(
+            &self.confirm_stats().strong_ns,
+            t_strong.elapsed().as_nanos() as u64,
+        );
 
         // Fence first: missing header_txs is Corrupt. Publishing confirmed[]
         // before extend would leave tip ahead of height_of (leftover TipOnly hole).
@@ -183,8 +185,10 @@ impl Query {
         // callers dequeue the body queue. Kill after this returns → tip durable;
         // kill before → BQ still holds blocks for re-drive.
         self.store.flush_class_c_tip()?;
-        crate::class_c_phase_stats::TIP_NS
-            .fetch_add(t_tip.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        crate::note_confirm(
+            &self.confirm_stats().tip_ns,
+            t_tip.elapsed().as_nanos() as u64,
+        );
 
         self.enqueue_sh_pending(items, create_pins)?;
 
@@ -203,7 +207,6 @@ impl Query {
         if !self.enqueues_sh_writebehind() {
             return Ok(());
         }
-        use crate::class_c_phase_stats::{self as sh_stats, add_sh_part};
         let through = self.sh_indexed_through_height();
         let mut jobs = Vec::new();
         for item in items {
@@ -217,8 +220,8 @@ impl Query {
                 let pin = create_pins.and_then(|m| m.get(&fk));
                 self.collect_scripthash_creates(fk, &mut records, pin)?;
             }
-            add_sh_part(
-                &sh_stats::SH_COLLECT_NS,
+            self.confirm_stats().add_sh_part(
+                &self.confirm_stats().sh_collect_ns,
                 t_collect.elapsed().as_nanos() as u64,
             );
             jobs.push(ShPendingJob {
@@ -395,8 +398,6 @@ impl Query {
     }
 
     fn apply_sh_job_inner(&self, job: &ShPendingJob) -> Result<bool, QueryError> {
-        use crate::class_c_phase_stats::{self as sh_stats, add_sh_part};
-
         let _appender = self.sh.appender.lock().unwrap();
         if !self.enqueues_sh_writebehind() {
             return Ok(false);
@@ -414,12 +415,12 @@ impl Query {
         let sh_creates = &job.records;
 
         if !sh_creates.is_empty() {
-            sh_stats::SH_CREATE_N.fetch_add(sh_creates.len() as u64, Ordering::Relaxed);
+            crate::note_confirm(&self.confirm_stats().sh_create_n, sh_creates.len() as u64);
             let mut uniq = std::collections::HashSet::with_capacity(sh_creates.len());
             for r in sh_creates {
                 uniq.insert(r.scripthash);
             }
-            sh_stats::SH_UNIQUE_N.fetch_add(uniq.len() as u64, Ordering::Relaxed);
+            crate::note_confirm(&self.confirm_stats().sh_unique_n, uniq.len() as u64);
         }
 
         let mut tip_sh_max_fk = 0u64;
@@ -432,11 +433,12 @@ impl Query {
                 .store
                 .scripthash
                 .put_create_batch_append(sh_creates, &mut heads)?;
-            sh_stats::SH_WRITTEN_N.fetch_add(n as u64, Ordering::Relaxed);
-            add_sh_part(&sh_stats::SH_SORT_NS, timing.sort_ns);
-            add_sh_part(&sh_stats::SH_SEED_NS, timing.seed_ns);
-            add_sh_part(&sh_stats::SH_BODY_NS, timing.body_ns);
-            add_sh_part(&sh_stats::SH_HEAD_NS, timing.head_ns);
+            crate::note_confirm(&self.confirm_stats().sh_written_n, n as u64);
+            let st = self.confirm_stats();
+            st.add_sh_part(&st.sh_sort_ns, timing.sort_ns);
+            st.add_sh_part(&st.sh_seed_ns, timing.seed_ns);
+            st.add_sh_part(&st.sh_body_ns, timing.body_ns);
+            st.add_sh_part(&st.sh_head_ns, timing.head_ns);
         }
 
         self.set_sh_indexed_through_height(Some(job.height.0));
@@ -583,25 +585,24 @@ impl Query {
         out: &mut Vec<ScriptHashRecord>,
         write_pin: Option<&CreatePin>,
     ) -> Result<(), QueryError> {
-        use std::sync::atomic::Ordering;
         if let Some(pin) = write_pin {
             let (_tx, outputs) = pin.as_ref();
             for o in outputs.iter() {
                 out.push(ScriptHashRecord::from_fk(script_hash(&o.script), tx_fk));
             }
-            crate::class_c_phase_stats::SH_COLLECT_PIN.fetch_add(1, Ordering::Relaxed);
+            crate::note_confirm(&self.confirm_stats().sh_collect_pin, 1);
             return Ok(());
         }
         let tx = self.get_tx_class_a(tx_fk)?;
         if tx.output_count == 0 {
-            crate::class_c_phase_stats::SH_COLLECT_COLD.fetch_add(1, Ordering::Relaxed);
+            crate::note_confirm(&self.confirm_stats().sh_collect_cold, 1);
             return Ok(());
         }
         let outputs = self.tx_output_run_class_a(tx_fk, &tx)?;
         for o in outputs.iter() {
             out.push(ScriptHashRecord::from_fk(script_hash(&o.script), tx_fk));
         }
-        crate::class_c_phase_stats::SH_COLLECT_COLD.fetch_add(1, Ordering::Relaxed);
+        crate::note_confirm(&self.confirm_stats().sh_collect_cold, 1);
         Ok(())
     }
 

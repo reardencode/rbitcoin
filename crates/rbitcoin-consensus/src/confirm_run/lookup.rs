@@ -101,10 +101,10 @@ pub fn confirm_wire_lookup_stamp(
             pipeline.and_then(|p| p.skeleton.as_ref()),
         )?,
     };
-    lookup_stage_stats::BLOCKS.fetch_add(blocks.len() as u64, Ordering::Relaxed);
-    lookup_stage_stats::HEAD_NS.fetch_add(plan_ns, Ordering::Relaxed);
+    rbitcoin_query::note_confirm(&query.confirm_stats().lookup_blocks, blocks.len() as u64);
+    rbitcoin_query::note_confirm(&query.confirm_stats().lookup_head_ns, plan_ns);
     let work_ns = t0.elapsed().as_nanos() as u64;
-    lookup_stage_stats::TOTAL_NS.fetch_add(work_ns, Ordering::Relaxed);
+    rbitcoin_query::note_confirm(&query.confirm_stats().lookup_total_ns, work_ns);
     Ok(PlanStampOutcome {
         plan,
         parent_pin,
@@ -159,8 +159,14 @@ pub(super) fn stamp_parent_pin_archived(
     let empty = rbitcoin_query::InFlight::new();
     let ifo = in_flight.unwrap_or(&empty);
     let need_vec: Vec<[u8; 32]> = need_external.into_keys().collect();
-    let ext = rbitcoin_query::stamp_external_parents(query.store(), &need_vec, ifo, skeleton)
-        .map_err(ConsensusError::from)?;
+    let ext = rbitcoin_query::stamp_external_parents(
+        query.store(),
+        &need_vec,
+        ifo,
+        skeleton,
+        query.confirm_stats(),
+    )
+    .map_err(ConsensusError::from)?;
     let mut stamp = ParentPinStamp {
         resolved: HashMap::with_capacity_and_hasher(
             ext.resolved.len().saturating_add(same_batch.len()),
@@ -185,8 +191,13 @@ pub(super) fn stamp_parent_pin_archived(
     // Identities are stamped from wire prev_txid at insert time — never soft-fill
     // from txid.body here (that would be a dual path after lookup promised identity).
     if skeleton.is_none() {
-        rbitcoin_query::fill_missing_parent_ranges(query.store(), ifo, &mut stamp.idents)
-            .map_err(ConsensusError::from)?;
+        rbitcoin_query::fill_missing_parent_ranges(
+            query.store(),
+            ifo,
+            &mut stamp.idents,
+            query.confirm_stats(),
+        )
+        .map_err(ConsensusError::from)?;
     }
     for ident in stamp.idents.values() {
         if ident.txid == [0u8; 32] {
@@ -234,7 +245,10 @@ pub fn confirm_wire_load_from_plan(
         p.freeze_after_pin();
     }
 
-    confirm_phase_stats::LOAD_NS.fetch_add(t_load.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    rbitcoin_query::note_confirm(
+        &query.confirm_stats().load_ns,
+        t_load.elapsed().as_nanos() as u64,
+    );
 
     let prepared = assemble_run(
         query,
@@ -255,6 +269,7 @@ pub fn confirm_wire_load_from_plan(
             batch_parents,
             script_preverified: preverified.clone(),
             archive_plan: plan,
+            stats: query.confirm_stats_arc(),
         },
         work_ns,
     })
@@ -312,6 +327,7 @@ pub(super) fn wire_lookup_phase(
             block.as_ref(),
             &ctx,
             caller_pres.as_ref().map(Arc::clone),
+            Some(query.confirm_stats()),
         )?;
         let txids: Vec<[u8; 32]> = pres.iter().map(|p| p.txid).collect();
         struct_ns = struct_ns.saturating_add(t_struct.elapsed().as_nanos() as u64);
@@ -473,18 +489,20 @@ pub(super) fn wire_lookup_phase(
     let batch_ns = t_batch.elapsed().as_nanos() as u64;
     // plan_ns for HEAD_NS: filter + batch (legacy “lookup wall” without struct/prepare).
     let plan_ns = filter_ns.saturating_add(batch_ns);
-    plan_stamp_sub_stats::note(struct_ns, prepare_ns, filter_ns, batch_ns);
+    query
+        .confirm_stats()
+        .note_stamp(struct_ns, prepare_ns, filter_ns, batch_ns);
     if struct_ns > 0 {
-        confirm_phase_stats::PREP_STRUCT_NS.fetch_add(struct_ns, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().phase_prep_struct_ns, struct_ns);
     }
     if header_ns > 0 {
-        confirm_phase_stats::PREP_HEADER_NS.fetch_add(header_ns, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().phase_prep_header_ns, header_ns);
     }
     if prepare_ns > 0 {
-        confirm_phase_stats::PREP_PREPARE_NS.fetch_add(prepare_ns, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().phase_prep_prepare_ns, prepare_ns);
     }
     if plan_ns > 0 {
-        confirm_phase_stats::PREP_FILTER_PLAN_NS.fetch_add(plan_ns, Ordering::Relaxed);
+        rbitcoin_query::note_confirm(&query.confirm_stats().phase_prep_filter_plan_ns, plan_ns);
     }
     Ok((plan, metas, wire_blocks, plan_ns))
 }
@@ -535,38 +553,6 @@ pub(super) fn create_fks_from_header_ranges(
 pub mod plan_stamp_sub_stats {
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    #[cfg(test)]
-    mod exclusive {
-        use std::cell::Cell;
-        use std::sync::Mutex;
-        static LOCK: Mutex<()> = Mutex::new(());
-        thread_local! {
-            static HELD: Cell<bool> = const { Cell::new(false) };
-        }
-        pub fn with<R>(f: impl FnOnce() -> R) -> R {
-            if HELD.with(Cell::get) {
-                return f();
-            }
-            let _g = LOCK.lock().unwrap_or_else(|p| p.into_inner());
-            HELD.with(|h| h.set(true));
-            let r = f();
-            HELD.with(|h| h.set(false));
-            r
-        }
-    }
-    #[cfg(not(test))]
-    mod exclusive {
-        #[inline]
-        pub fn with<R>(f: impl FnOnce() -> R) -> R {
-            f()
-        }
-    }
-
-    #[cfg(test)]
-    pub fn with_exclusive<R>(f: impl FnOnce() -> R) -> R {
-        exclusive::with(f)
-    }
-
     static STRUCT_NS: AtomicU64 = AtomicU64::new(0);
     static STRUCT_TXID_NS: AtomicU64 = AtomicU64::new(0);
     static STRUCT_WTXID_NS: AtomicU64 = AtomicU64::new(0);
@@ -577,34 +563,30 @@ pub mod plan_stamp_sub_stats {
 
     /// Split of [`validate_block_structure_hashed`]: txid encode, wtxid encode, other walks.
     pub fn note_struct_parts(txid_ns: u64, wtxid_ns: u64, walk_ns: u64) {
-        exclusive::with(|| {
-            if txid_ns > 0 {
-                STRUCT_TXID_NS.fetch_add(txid_ns, Ordering::Relaxed);
-            }
-            if wtxid_ns > 0 {
-                STRUCT_WTXID_NS.fetch_add(wtxid_ns, Ordering::Relaxed);
-            }
-            if walk_ns > 0 {
-                STRUCT_WALK_NS.fetch_add(walk_ns, Ordering::Relaxed);
-            }
-        });
+        if txid_ns > 0 {
+            STRUCT_TXID_NS.fetch_add(txid_ns, Ordering::Relaxed);
+        }
+        if wtxid_ns > 0 {
+            STRUCT_WTXID_NS.fetch_add(wtxid_ns, Ordering::Relaxed);
+        }
+        if walk_ns > 0 {
+            STRUCT_WALK_NS.fetch_add(walk_ns, Ordering::Relaxed);
+        }
     }
 
     pub fn note(struct_ns: u64, prepare_ns: u64, filter_ns: u64, batch_ns: u64) {
-        exclusive::with(|| {
-            if struct_ns > 0 {
-                STRUCT_NS.fetch_add(struct_ns, Ordering::Relaxed);
-            }
-            if prepare_ns > 0 {
-                PREPARE_NS.fetch_add(prepare_ns, Ordering::Relaxed);
-            }
-            if filter_ns > 0 {
-                FILTER_NS.fetch_add(filter_ns, Ordering::Relaxed);
-            }
-            if batch_ns > 0 {
-                BATCH_NS.fetch_add(batch_ns, Ordering::Relaxed);
-            }
-        });
+        if struct_ns > 0 {
+            STRUCT_NS.fetch_add(struct_ns, Ordering::Relaxed);
+        }
+        if prepare_ns > 0 {
+            PREPARE_NS.fetch_add(prepare_ns, Ordering::Relaxed);
+        }
+        if filter_ns > 0 {
+            FILTER_NS.fetch_add(filter_ns, Ordering::Relaxed);
+        }
+        if batch_ns > 0 {
+            BATCH_NS.fetch_add(batch_ns, Ordering::Relaxed);
+        }
     }
 
     #[derive(Debug, Default, Clone, Copy)]
@@ -619,7 +601,7 @@ pub mod plan_stamp_sub_stats {
     }
 
     pub fn sample_and_reset() -> Sample {
-        exclusive::with(|| Sample {
+        Sample {
             struct_ns: STRUCT_NS.swap(0, Ordering::Relaxed),
             struct_txid_ns: STRUCT_TXID_NS.swap(0, Ordering::Relaxed),
             struct_wtxid_ns: STRUCT_WTXID_NS.swap(0, Ordering::Relaxed),
@@ -627,7 +609,7 @@ pub mod plan_stamp_sub_stats {
             prepare_ns: PREPARE_NS.swap(0, Ordering::Relaxed),
             filter_ns: FILTER_NS.swap(0, Ordering::Relaxed),
             batch_ns: BATCH_NS.swap(0, Ordering::Relaxed),
-        })
+        }
     }
 }
 
@@ -852,6 +834,7 @@ mod tests {
             &[parent_txid],
             &rbitcoin_query::InFlight::new(),
             Some(&skel),
+            q.confirm_stats(),
         )
         .expect("shared helper");
 
