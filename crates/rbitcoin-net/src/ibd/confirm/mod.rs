@@ -483,15 +483,12 @@ pub(crate) enum WriteStoreFault {
 
 pub(crate) fn classify_write_store_fault(
     e: &rbitcoin_consensus::ConsensusError,
-    recover: rbitcoin_query::UringRecover,
+    recover: Option<rbitcoin_query::UringRecover>,
 ) -> WriteStoreFault {
-    use rbitcoin_consensus::ConsensusError;
-    match e {
-        ConsensusError::Store(se) if se.is_uring_session_fault() => match recover {
-            rbitcoin_query::UringRecover::Recovered => WriteStoreFault::Requeue,
-            rbitcoin_query::UringRecover::Exhausted => WriteStoreFault::Abort,
-        },
-        other => WriteStoreFault::Reject(ConfirmRejectClass::from_consensus(other)),
+    match recover {
+        Some(rbitcoin_query::UringRecover::Recovered) => WriteStoreFault::Requeue,
+        Some(rbitcoin_query::UringRecover::Exhausted) => WriteStoreFault::Abort,
+        None => WriteStoreFault::Reject(ConfirmRejectClass::from_consensus(e)),
     }
 }
 
@@ -500,7 +497,7 @@ pub(crate) fn apply_write_store_fault(
     heights: &[(u32, [u8; 32])],
     action: WriteStoreFault,
     load_ahead_reset: &AtomicBool,
-) -> WriteStoreFault {
+) {
     match action {
         WriteStoreFault::Requeue => {
             load_ahead_reset.store(true, Ordering::Release);
@@ -509,15 +506,42 @@ pub(crate) fn apply_write_store_fault(
                 .map(|(h, raw)| (*h, BlockHash::from_byte_array(*raw), None))
                 .collect();
             feed.requeue_wire(&batch);
-            WriteStoreFault::Requeue
         }
-        WriteStoreFault::Abort => WriteStoreFault::Abort,
-        WriteStoreFault::Reject(class) => {
+        WriteStoreFault::Abort => {}
+        WriteStoreFault::Reject(_) => {
             load_ahead_reset.store(true, Ordering::Release);
             feed.finish(heights.iter().map(|(h, _)| *h));
-            WriteStoreFault::Reject(class)
         }
     }
+}
+
+fn try_uring_recover(
+    query: &rbitcoin_query::Query,
+    e: &rbitcoin_consensus::ConsensusError,
+    reason: &'static str,
+) -> Option<rbitcoin_query::UringRecover> {
+    if !e.is_uring_session_fault() {
+        return None;
+    }
+    Some(query.uring_recover(reason))
+}
+
+fn try_uring_recover_msg(
+    query: &rbitcoin_query::Query,
+    msg: &str,
+    reason: &'static str,
+) -> Option<rbitcoin_query::UringRecover> {
+    if !rbitcoin_store::StoreError::is_uring_session_fault_msg(msg) {
+        return None;
+    }
+    Some(query.uring_recover(reason))
+}
+
+pub(crate) fn lookup_ready_hash(feed: &ConfirmFeed, height: u32) -> Option<BlockHash> {
+    feed.inner
+        .lock()
+        .ok()
+        .and_then(|g| g.ready.get(&height).map(|(h, _)| *h))
 }
 
 const LOOKUP_FAULT_HALT_AFTER: u32 = 8;
@@ -544,27 +568,27 @@ impl LookupFaultPolicy {
     pub(crate) fn on_err(
         &mut self,
         e: &rbitcoin_consensus::ConsensusError,
-        recover: rbitcoin_query::UringRecover,
+        recover: Option<rbitcoin_query::UringRecover>,
     ) -> LookupFaultAction {
         use rbitcoin_consensus::ConsensusError;
         let backpressure = matches!(e, ConsensusError::Store(se) if se.is_io_backpressure());
         if backpressure {
             return LookupFaultAction::Ignore;
         }
-        if matches!(e, ConsensusError::Store(se) if se.is_uring_session_fault()) {
-            return match recover {
-                rbitcoin_query::UringRecover::Recovered => {
-                    self.consecutive = 0;
-                    LookupFaultAction::RecoverContinue
+        match recover {
+            Some(rbitcoin_query::UringRecover::Recovered) => {
+                self.consecutive = 0;
+                LookupFaultAction::RecoverContinue
+            }
+            Some(rbitcoin_query::UringRecover::Exhausted) => LookupFaultAction::Abort,
+            None => {
+                self.consecutive = self.consecutive.saturating_add(1);
+                if self.consecutive >= LOOKUP_FAULT_HALT_AFTER {
+                    LookupFaultAction::RejectEngineFault
+                } else {
+                    LookupFaultAction::Warn
                 }
-                rbitcoin_query::UringRecover::Exhausted => LookupFaultAction::Abort,
-            };
-        }
-        self.consecutive = self.consecutive.saturating_add(1);
-        if self.consecutive >= LOOKUP_FAULT_HALT_AFTER {
-            LookupFaultAction::RejectEngineFault
-        } else {
-            LookupFaultAction::Warn
+            }
         }
     }
 }
@@ -1624,28 +1648,15 @@ pub(crate) fn spawn_confirm_engine(
                             feed_wb.finish(heights_hashes.iter().map(|(h, _)| *h));
                             continue;
                         }
-                        let recover = if matches!(
-                            &e,
-                            rbitcoin_consensus::ConsensusError::Store(se)
-                                if se.is_uring_session_fault()
-                        ) {
-                            match hub_wb.query.uring_recover("ibd-confirm-write") {
-                                Ok(r) => r,
-                                Err(re) => {
-                                    warn!("ibd: confirm write uring recover: {re}");
-                                    rbitcoin_query::UringRecover::Exhausted
-                                }
-                            }
-                        } else {
-                            rbitcoin_query::UringRecover::Exhausted
-                        };
+                        let recover = try_uring_recover(&hub_wb.query, &e, "ibd-confirm-write");
                         let action = classify_write_store_fault(&e, recover);
-                        match apply_write_store_fault(
+                        apply_write_store_fault(
                             &feed_wb,
                             &heights_hashes,
                             action,
                             &load_ahead_reset_wb,
-                        ) {
+                        );
+                        match action {
                             WriteStoreFault::Requeue => {
                                 warn!(
                                     "ibd: confirm write uring recover @ {height} batch_parts={parts}: {e}"
@@ -1738,6 +1749,27 @@ pub(crate) fn spawn_confirm_engine(
                     {
                         info!("ibd: confirm scripts aborted: {msg}");
                         return false;
+                    }
+                    if let Some(r) = try_uring_recover(&hub_sc.query, &e, "ibd-confirm-scripts") {
+                        match r {
+                            rbitcoin_query::UringRecover::Recovered => {
+                                let req: Vec<(u32, BlockHash, Option<bitcoin::Block>)> = meta
+                                    .heights_hashes
+                                    .iter()
+                                    .map(|(h, raw)| {
+                                        (*h, BlockHash::from_byte_array(*raw), None)
+                                    })
+                                    .collect();
+                                feed_sc.requeue_wire(&req);
+                                warn!("ibd: confirm scripts uring recover @ {}: {e}", meta.first_h);
+                                return true;
+                            }
+                            rbitcoin_query::UringRecover::Exhausted => {
+                                rbitcoin_store::abort_uring_unusable(
+                                    "recover credit exhausted on ibd-confirm-scripts",
+                                );
+                            }
+                        }
                     }
                     let (height, hash) = meta
                         .heights_hashes
@@ -1907,6 +1939,30 @@ pub(crate) fn spawn_confirm_engine(
                             let _ = scripts.join();
                             return;
                         }
+                        if let Some(r) =
+                            try_uring_recover(&hub_load.query, &e, "ibd-confirm-load")
+                        {
+                            match r {
+                                rbitcoin_query::UringRecover::Recovered => {
+                                    let req: Vec<(u32, BlockHash, Option<bitcoin::Block>)> =
+                                        wire_batch
+                                            .iter()
+                                            .map(|(h, ha, _)| (*h, *ha, None))
+                                            .collect();
+                                    feed_load.requeue_wire(&req);
+                                    warn!(
+                                        "ibd: confirm load stamp uring recover {first} @ {expect_h}: {e}",
+                                        first = wire_batch[0].1
+                                    );
+                                    continue;
+                                }
+                                rbitcoin_query::UringRecover::Exhausted => {
+                                    rbitcoin_store::abort_uring_unusable(
+                                        "recover credit exhausted on ibd-confirm-load",
+                                    );
+                                }
+                            }
+                        }
                         let first_hash = wire_batch[0].1;
                         if wire_batch.len() > 1 {
                             let tail: Vec<(u32, BlockHash, Option<bitcoin::Block>)> =
@@ -2056,6 +2112,31 @@ pub(crate) fn spawn_confirm_engine(
                             rbitcoin_consensus::unpark_script_publisher();
                             let _ = scripts.join();
                             return;
+                        }
+                        if let Some(r) = try_uring_recover_msg(
+                            &hub_load.query,
+                            &msg,
+                            "ibd-confirm-load",
+                        ) {
+                            match r {
+                                rbitcoin_query::UringRecover::Recovered => {
+                                    let req: Vec<(u32, BlockHash, Option<bitcoin::Block>)> =
+                                        heights_hashes
+                                            .iter()
+                                            .map(|(h, ha)| (*h, *ha, None))
+                                            .collect();
+                                    feed_load.requeue_wire(&req);
+                                    warn!(
+                                        "ibd: confirm load uring recover {first_hash} @ {expect_h}: {e}"
+                                    );
+                                    continue;
+                                }
+                                rbitcoin_query::UringRecover::Exhausted => {
+                                    rbitcoin_store::abort_uring_unusable(
+                                        "recover credit exhausted on ibd-confirm-load",
+                                    );
+                                }
+                            }
                         }
                         if heights_hashes.len() > 1 {
                             let tail: Vec<(u32, BlockHash, Option<bitcoin::Block>)> =
@@ -2229,21 +2310,8 @@ pub(crate) fn spawn_confirm_engine(
                             lookup_faults.on_success();
                         }
                         Err(e) => {
-                            let recover = if matches!(
-                                &e,
-                                rbitcoin_consensus::ConsensusError::Store(se)
-                                    if se.is_uring_session_fault()
-                            ) {
-                                match hub.query.uring_recover("ibd-confirm-lookup") {
-                                    Ok(r) => r,
-                                    Err(re) => {
-                                        warn!("ibd: bq resolve wave uring recover: {re}");
-                                        rbitcoin_query::UringRecover::Exhausted
-                                    }
-                                }
-                            } else {
-                                rbitcoin_query::UringRecover::Recovered
-                            };
+                            let recover =
+                                try_uring_recover(&hub.query, &e, "ibd-confirm-lookup");
                             match lookup_faults.on_err(&e, recover) {
                                 LookupFaultAction::Ignore => {
                                     debug!("ibd: bq resolve wave: {e}");
@@ -2264,21 +2332,24 @@ pub(crate) fn spawn_confirm_engine(
                                     LOOKUP_WAVE_FAULTS.fetch_add(1, Ordering::Relaxed);
                                     warn!("ibd: bq resolve wave halt: {e}");
                                     let height = wave_h.first().copied().unwrap_or(path_lo);
-                                    let hash = feed
-                                        .inner
-                                        .lock()
-                                        .ok()
-                                        .and_then(|g| g.ready.get(&height).map(|(h, _)| *h))
-                                        .unwrap_or_else(|| BlockHash::from_byte_array([0u8; 32]));
-                                    let _ = emit_confirm_reject(
-                                        &event_tx_lookup,
-                                        &feed,
-                                        height,
-                                        hash,
-                                        ConfirmRejectClass::EngineFault,
-                                        e.to_string(),
-                                        1,
-                                    );
+                                    match lookup_ready_hash(&feed, height) {
+                                        Some(hash) => {
+                                            let _ = emit_confirm_reject(
+                                                &event_tx_lookup,
+                                                &feed,
+                                                height,
+                                                hash,
+                                                ConfirmRejectClass::EngineFault,
+                                                e.to_string(),
+                                                1,
+                                            );
+                                        }
+                                        None => {
+                                            warn!(
+                                                "ibd: bq resolve wave halt skip emit @{height} (no ready hash)"
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }

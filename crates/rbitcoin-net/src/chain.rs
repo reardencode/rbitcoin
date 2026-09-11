@@ -2039,15 +2039,28 @@ impl ChainHub {
         tip_accept_stats_reset();
         let t_wall = std::time::Instant::now();
         let now = self.clock.now_secs();
-        rbitcoin_consensus::with_now(now, || {
-            accept_and_connect_block_preverified(
+        let _ = rbitcoin_consensus::with_now(now, || loop {
+            match accept_and_connect_block_preverified(
                 &self.query,
                 &self.params,
                 Height(height),
                 &block,
                 self.milestone,
                 &preverified,
-            )
+            ) {
+                Ok(fk) => return Ok(fk),
+                Err(e) if e.is_uring_session_fault() => {
+                    match self.query.uring_recover("tip-connect") {
+                        rbitcoin_query::UringRecover::Recovered => continue,
+                        rbitcoin_query::UringRecover::Exhausted => {
+                            rbitcoin_store::abort_uring_unusable(
+                                "recover credit exhausted on tip-connect",
+                            );
+                        }
+                    }
+                }
+                Err(e) => return Err(e),
+            }
         })
         .map_err(|e| {
             let reason = rbitcoin_consensus::block_reject_reason(&e);

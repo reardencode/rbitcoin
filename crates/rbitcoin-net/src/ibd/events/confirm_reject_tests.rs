@@ -133,7 +133,11 @@ fn confirm_reject_class_matches_substring_table() {
         ConfirmRejectClass::EngineFault
     );
     assert_eq!(
-        ConfirmRejectClass::from_err_str("invariant: io_uring wait timeout"),
+        ConfirmRejectClass::from_err_str("invariant: io_uring leftover cqe"),
+        ConfirmRejectClass::EngineFault
+    );
+    assert_eq!(
+        ConfirmRejectClass::from_err_str("io_uring submit failed"),
         ConfirmRejectClass::EngineFault
     );
 }
