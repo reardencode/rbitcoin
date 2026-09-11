@@ -2,7 +2,9 @@
 
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, Block, BlockHash, Txid};
-use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
+use rbitcoin_consensus::{
+    accept_and_connect_block, pad_empty_from as consensus_pad, ChainParams, Milestone,
+};
 use rbitcoin_primitives::Height;
 use rbitcoin_query::Query;
 
@@ -75,7 +77,7 @@ pub fn build_mature_regtest_with_spend(query: &Query, params: &ChainParams) -> M
     }
 }
 
-/// Fast empty pad via [`accept_and_connect_block`] (not per-height wire confirm).
+/// Fast empty pad via [`rbitcoin_consensus::pad_empty_from`].
 ///
 /// Mines heights `from_h..=last` on top of `tip` / `tip_time`. Prefer this for
 /// coinbase-maturity padding instead of looping `confirm_wire_run`.
@@ -84,20 +86,12 @@ pub fn build_mature_regtest_with_spend(query: &Query, params: &ChainParams) -> M
 pub fn pad_empty_from(
     query: &Query,
     params: &ChainParams,
-    mut tip: BlockHash,
-    mut tip_time: u32,
+    tip: BlockHash,
+    tip_time: u32,
     from_h: u32,
     last: u32,
 ) -> (BlockHash, u32) {
-    assert!(from_h <= last);
-    let ms = Milestone::NONE;
-    for h in from_h..=last {
-        let b = mine_regtest_block(tip, tip_time + 600, h, vec![]);
-        accept_and_connect_block(query, params, Height(h), &b, ms).unwrap();
-        tip = b.block_hash();
-        tip_time = b.header.time;
-    }
-    query.apply_sh_pending().unwrap();
+    let (tip, tip_time, _) = consensus_pad(query, params, tip, tip_time, from_h, last, 0);
     (tip, tip_time)
 }
 
