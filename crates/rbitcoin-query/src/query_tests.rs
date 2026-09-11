@@ -70,6 +70,13 @@ fn uring_recover_cas_second_claim_at_same_tip_is_exhausted() {
     assert_eq!(q.uring_recover("b"), UringRecover::Exhausted);
 }
 
+#[test]
+fn uring_recover_or_abort_takes_credit() {
+    let (_d, q) = temp_query("uring-recover-or-abort");
+    q.uring_recover_or_abort("test");
+    assert_eq!(q.uring_recover("again"), UringRecover::Exhausted);
+}
+
 fn temp_query(label: &str) -> (crate::testutil::TempDir, Query) {
     crate::testutil::tiny_query_labeled(label)
 }

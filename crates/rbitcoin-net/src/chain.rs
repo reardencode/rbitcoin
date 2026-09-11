@@ -2050,14 +2050,8 @@ impl ChainHub {
             ) {
                 Ok(fk) => return Ok(fk),
                 Err(e) if e.is_uring_session_fault() => {
-                    match self.query.uring_recover("tip-connect") {
-                        rbitcoin_query::UringRecover::Recovered => continue,
-                        rbitcoin_query::UringRecover::Exhausted => {
-                            rbitcoin_store::abort_uring_unusable(
-                                "recover credit exhausted on tip-connect",
-                            );
-                        }
-                    }
+                    self.query.uring_recover_or_abort("tip-connect");
+                    continue;
                 }
                 Err(e) => return Err(e),
             }
