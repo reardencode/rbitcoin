@@ -81,6 +81,7 @@ pub use scripts::{
     scripts_stage_from_load_channel, ScriptsBatchMeta, ScriptsPhaseHandle,
 };
 pub use write::confirm_write_phase;
+pub(crate) use write::finish_post_commit;
 #[cfg(test)]
 use write::{write_batch_vs_tip, write_height_needed, WriteBatchVsTip};
 

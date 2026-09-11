@@ -661,6 +661,7 @@ pub fn accept_and_connect_block_preverified(
                 .get_header_by_hash(&hash)
                 .map_err(ConsensusError::from)?
             {
+                confirm_run::finish_post_commit(query, &hash)?;
                 return Ok(fk);
             }
         }

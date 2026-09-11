@@ -2643,3 +2643,119 @@ fn one_shot_load_matches_stamp_then_load_from_plan() {
     let _ = std::fs::remove_dir_all(&path_a);
     let _ = std::fs::remove_dir_all(&path_b);
 }
+
+/// Class C can commit (`height_of_hash` matches) while spend annotate is still
+/// missing. Retry must finish annotate, not take the already-at-height `Ok`.
+#[test]
+fn already_at_height_retries_post_commit_spend_annotate() {
+    use crate::{accept_and_connect_block_preverified, ChainParams, Milestone, ScriptPreverified};
+    use bitcoin::hashes::Hash;
+    use bitcoin::{block::Header, Block, BlockHash, CompactTarget, TxMerkleNode};
+    use rbitcoin_primitives::{Fk, Height};
+    use rbitcoin_query::testutil::FixtureChain;
+    use rbitcoin_query::TxApply;
+    use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
+
+    let (path, q) = tmp_query();
+    q.set_spend_index(false);
+
+    let h0 = HeaderRecord {
+        prev_fk: Fk::NULL,
+        version: 1,
+        timestamp: 1,
+        bits: 0x207fffff,
+        nonce: 0,
+        merkle_root: [0xab; 32],
+        hash: [0xab; 32],
+    };
+    let mut txid0 = [0u8; 32];
+    txid0[31] = 0xcb;
+    let ta0 = TxApply {
+        tx: TxRecord {
+            txid: txid0,
+            version: 1,
+            locktime: 0,
+            input_start_fk: Fk::NULL,
+            input_count: 1,
+            output_start_fk: Fk::NULL,
+            output_count: 1,
+        },
+        inputs: vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])],
+        outputs: vec![OutputRecord::unspent(50_0000_0000, vec![0x51])],
+    };
+    let hfk0 = q.connect_block(Height(0), &h0, &[ta0]).unwrap();
+    let create_fk = q.block_tx_fks(Height(0)).unwrap()[0];
+
+    let hash1 = rbitcoin_store::block_header_hash(1, &h0.hash, &[0x11; 32], 2, 0x207fffff, 1);
+    let h1 = HeaderRecord {
+        prev_fk: hfk0,
+        version: 1,
+        timestamp: 2,
+        bits: 0x207fffff,
+        nonce: 1,
+        merkle_root: [0x11; 32],
+        hash: hash1,
+    };
+    let mut spend_txid = [0u8; 32];
+    spend_txid[0] = 0x11;
+    spend_txid[31] = 0xcd;
+    let ta1 = TxApply {
+        tx: TxRecord {
+            txid: spend_txid,
+            version: 1,
+            locktime: 0,
+            input_start_fk: Fk::NULL,
+            input_count: 1,
+            output_start_fk: Fk::NULL,
+            output_count: 1,
+        },
+        inputs: vec![InputRecord {
+            prev_txid: txid0,
+            create_fk,
+            prev_index: 0,
+            sequence: u32::MAX,
+            script_sig: vec![],
+            witness: vec![],
+        }],
+        outputs: vec![OutputRecord::unspent(49_0000_0000, vec![0x51])],
+    };
+    q.connect_block(Height(1), &h1, &[ta1]).unwrap();
+    let spend_fk = q.block_tx_fks(Height(1)).unwrap()[0];
+
+    let (multi, field) = q.store().txs.get_output_spender_meta(create_fk, 0).unwrap();
+    assert!(!multi);
+    assert!(
+        field.is_null(),
+        "spend_index off: Class C must not spend-annotate"
+    );
+    q.set_spend_index(true);
+
+    let block1 = Block {
+        header: Header {
+            version: bitcoin::block::Version::from_consensus(1),
+            prev_blockhash: BlockHash::from_byte_array(h0.hash),
+            merkle_root: TxMerkleNode::from_byte_array(h1.merkle_root),
+            time: 2,
+            bits: CompactTarget::from_consensus(0x207fffff),
+            nonce: 1,
+        },
+        txdata: vec![],
+    };
+    assert_eq!(block1.block_hash().to_byte_array(), hash1);
+    assert_eq!(q.height_of_hash(&hash1).unwrap(), Some(Height(1)));
+
+    accept_and_connect_block_preverified(
+        &q,
+        &ChainParams::regtest(),
+        Height(1),
+        &block1,
+        Milestone::NONE,
+        &ScriptPreverified::new(),
+    )
+    .expect("already-at-height retry");
+
+    let (multi2, field2) = q.store().txs.get_output_spender_meta(create_fk, 0).unwrap();
+    assert!(!multi2);
+    assert_eq!(field2, spend_fk, "post_commit must annotate after Class C");
+    let _ = std::fs::remove_dir_all(&path);
+}
