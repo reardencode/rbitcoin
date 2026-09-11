@@ -98,8 +98,8 @@ pub(super) fn write_batch_vs_tip(
 /// same stage before structural/annotate — single ordered commit era.
 /// **Class A never leads tip** (no dual-track archive-ahead / body DONTNEED lead).
 ///
-/// Accrues window timers in [`confirm_phase_stats`] and snapshots the last batch
-/// for slow-write logs via [`confirm_phase_stats::last_write_phases`].
+/// Accrues window timers on [`Query::confirm_stats`] and snapshots the last batch
+/// for slow-write logs via [`rbitcoin_query::ConfirmStats::last_write_phases`].
 pub fn confirm_write_phase(
     query: &Query,
     params: &ChainParams,

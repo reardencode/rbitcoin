@@ -1224,7 +1224,6 @@ fn assemble_rejects_empty_and_fk_mismatch() {
 #[test]
 fn assemble_pending_creates_is_txid_map_and_meters_flush() {
     use super::assemble_block_prevouts;
-    use crate::confirm_phase_stats;
     use rbitcoin_primitives::Fk;
     use rbitcoin_query::{BatchParents, OutPointSet, SpendEdges};
     let (path, q) = rbitcoin_query::testutil::tiny_query_labeled("assemble-creates");
@@ -1241,8 +1240,7 @@ fn assemble_pending_creates_is_txid_map_and_meters_flush() {
         .collect();
     let bh = b.header.block_hash().to_byte_array();
     let bip16 = bip16_active_from_prev_mtp(ctx.params, ctx.height.0, &bh, 0);
-    let _ = confirm_phase_stats::sample_assemble_and_reset();
-    let _ = confirm_phase_stats::sample_assemble_prevout_detail_and_reset();
+    let _ = q.confirm_stats().take_window();
     assemble_block_prevouts(
         &q,
         &b,
@@ -1262,11 +1260,10 @@ fn assemble_pending_creates_is_txid_map_and_meters_flush() {
     .expect("coinbase-only assemble");
     assert_eq!(creates.len(), 1, "one create fk per tx, not per vout");
     assert_eq!(creates.get(&tids[0]), Some(&Fk(1)));
-    let (in_n, batch_n, same_n, ..) =
-        confirm_phase_stats::sample_assemble_prevout_detail_and_reset();
-    assert_eq!(in_n, 0, "coinbase has no prevouts");
-    assert_eq!(batch_n, 0);
-    assert_eq!(same_n, 0);
+    let w = q.confirm_stats().take_window();
+    assert_eq!(w.asm_in_n, 0, "coinbase has no prevouts");
+    assert_eq!(w.asm_prev_batch_n, 0);
+    assert_eq!(w.asm_prev_same_n, 0);
     let _ = std::fs::remove_dir_all(&path);
 }
 

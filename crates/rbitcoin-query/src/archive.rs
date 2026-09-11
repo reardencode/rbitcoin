@@ -821,7 +821,7 @@ impl Query {
     /// already archived, this is a no-op and returns `Ok(false)` — no second
     /// body append / fk mismatch. Returns `Ok(true)` when body was appended.
     ///
-    /// Phase walls go to [`crate::archive_phase_stats`] (body vs head split).
+    /// Phase walls go to [`Query::confirm_stats`] (body vs head split).
     ///
     /// Drains write-behind `tx.head` before return. Confirm write uses
     /// [`Self::archive_commit_plan_defer_head`] to overlap drain with Class C.

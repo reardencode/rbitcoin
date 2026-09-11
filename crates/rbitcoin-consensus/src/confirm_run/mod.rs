@@ -59,8 +59,6 @@ use head_drain::{submit_head_drain, HEAD_DRAIN_THREAD_NAME};
 #[cfg(test)]
 use lookup::confirm_archive_kind;
 use lookup::known_create_txid_lookup;
-pub use lookup::lookup_stage_stats;
-pub use lookup::plan_stamp_sub_stats;
 #[cfg(test)]
 use lookup::ConfirmArchiveKind;
 pub use lookup::{

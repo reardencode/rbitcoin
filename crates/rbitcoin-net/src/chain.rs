@@ -2299,7 +2299,7 @@ pub struct TipAcceptShInput {
     pub tip_ns: u64,
     /// BIP-352 tip write-through (`index_sp_tweaks_batch`). Zero when `--sptweaks` is off.
     pub tweak_ns: u64,
-    /// Lookup stamp (`lookup_stage_stats::TOTAL_NS`).
+    /// Lookup stamp (`ConfirmWindow::lookup_total_ns`).
     pub lookup_ns: u64,
     /// Write structural (spentness / maturity / BIP68).
     pub structural_ns: u64,

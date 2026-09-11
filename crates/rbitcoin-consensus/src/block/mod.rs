@@ -1002,7 +1002,7 @@ pub(crate) type TxidMap<V> = std::collections::HashMap<[u8; 32], V, BuildHasherD
 /// Pack-local create fk by parent txid (not per-vout — fk is per tx).
 pub(crate) type PendingCreates = TxidMap<rbitcoin_primitives::Fk>;
 
-/// Block-local prevout path counts; flush to [`confirm_phase_stats`] once.
+/// Block-local prevout path counts; flush to [`Query::confirm_stats`] once.
 #[derive(Default)]
 struct AsmPrevoutAcc {
     in_n: u64,

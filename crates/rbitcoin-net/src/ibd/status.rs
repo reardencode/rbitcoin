@@ -11,7 +11,7 @@ use std::time::Instant;
 ///
 /// **Live confirm:** `confirm_ns` accrues when a **script** batch finishes.
 /// It is **script-stage work only** (not lookup stamp, not load pin/assemble, not write).
-/// Lookup/load/write walls live in `confirm_phase_stats` (sampled by `perf_log`).
+/// Lookup/load/write walls live on `Query::confirm_stats` (sampled by `perf_log`).
 /// During lookup/load claim, [`Self::confirm_live`] shows in-progress stage wall.
 pub(crate) struct LoopStats {
     /// Pure script-stage wall for completed script batches (excludes lookup/load/write).

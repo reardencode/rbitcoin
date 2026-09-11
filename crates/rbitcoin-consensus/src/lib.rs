@@ -85,297 +85,18 @@ use rbitcoin_primitives::Height;
 use rbitcoin_query::{Query, TxApply};
 use rbitcoin_store::HeaderRecord;
 
-/// Confirm the next tip block if its body is already archived.
-///
-/// IBD diagnostics: wall time spent in each phase (nanoseconds; reset by the sampler).
+/// Test-only assemble cold-why / batch TLS (window meters live on Query).
+#[cfg(test)]
 pub mod confirm_phase_stats {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    /// Optimistic assemble (prevout content + jobs; no durable spentness).
-    pub static CONNECT_NS: AtomicU64 = AtomicU64::new(0);
-    pub static SCRIPT_NS: AtomicU64 = AtomicU64::new(0);
-    /// Script jobs submitted to the pool this window.
-    pub static SCRIPT_JOBS: AtomicU64 = AtomicU64::new(0);
-    /// Script jobs skipped because mempool already verified the tx (tip follow).
-    pub static SCRIPT_SKIP_MEMPOOL: AtomicU64 = AtomicU64::new(0);
-    /// Post-script durable spentness + maturity + BIP68 + subsidy (write).
-    pub static STRUCTURAL_NS: AtomicU64 = AtomicU64::new(0);
-    /// Durable spentness probes only (subset of structural).
-    pub static STRUCTURAL_SPENT_NS: AtomicU64 = AtomicU64::new(0);
-    /// Spent sub: pin abs collect + bulk 8-byte on-disk meta pread.
-    pub static STRUCTURAL_SPENT_ABS_NS: AtomicU64 = AtomicU64::new(0);
-    /// Spent sub: `is_confirmed_strong_at` on non-null spender fields.
-    pub static STRUCTURAL_SPENT_STRONG_NS: AtomicU64 = AtomicU64::new(0);
-    /// Spent sub: cold unspent_create_vouts / null-create path.
-    pub static STRUCTURAL_SPENT_COLD_NS: AtomicU64 = AtomicU64::new(0);
-    /// Spent sub: order-sensitive pending_spent gate (CPU).
-    pub static STRUCTURAL_SPENT_PENDING_NS: AtomicU64 = AtomicU64::new(0);
-    /// Create-height + coinbase maturity resolve (subset of structural).
-    pub static STRUCTURAL_CREATE_H_NS: AtomicU64 = AtomicU64::new(0);
-    /// BIP68 relative locks + coin MTP (subset of structural; write path).
-    pub static STRUCTURAL_BIP68_NS: AtomicU64 = AtomicU64::new(0);
-    /// Non-SH Class C **tables** only: strong/height + tip set/flush.
-    ///
-    /// **Not** the join wall of `confirm_blocks_run` (which is dominated by
-    /// parallel SH on tip mode). SH time lives in query `SCRIPTHASH_NS` / `SH_*`.
-    pub static CLASS_C_NS: AtomicU64 = AtomicU64::new(0);
-    /// Write-stage Class A append (`archive_commit_plan`) wall.
-    ///
-    /// Body/head/header_txs. Also mirrored in
-    /// [`rbitcoin_query::archive_phase_stats`] write_* subtimers.
-    pub static CLASS_A_NS: AtomicU64 = AtomicU64::new(0);
-    /// Write-stage BIP-352 thin tweak index (`index_sp_tweaks_batch`) wall.
-    ///
-    /// Zero when `--sptweaks` is off. Not inside `UTXO_APPLY_NS` / `spend=`.
-    pub static TWEAK_NS: AtomicU64 = AtomicU64::new(0);
-    /// Write-stage denserels/abs ensure after Class A (fill planned + ensure spends).
-    pub static ENSURE_LAYOUT_NS: AtomicU64 = AtomicU64::new(0);
-    /// `class_c_commit` wall minus tables (`flush` / SH join).
-    pub static WRITE_CLASS_C_JOIN_NS: AtomicU64 = AtomicU64::new(0);
-    /// Residual wait on `head_insert_queued` join after Class C / annotate.
-    pub static WRITE_DRAIN_JOIN_NS: AtomicU64 = AtomicU64::new(0);
-    /// Write-thread body-queue dequeue after a successful confirm.
-    pub static WRITE_DEQUEUE_NS: AtomicU64 = AtomicU64::new(0);
-    /// Clone `planned_fks` + pin Arcs before Class A (`pins=` take=).
-    pub static WRITE_PLAN_TAKE_NS: AtomicU64 = AtomicU64::new(0);
-    /// `write_create_pins` FkMap insert after Class A (`pins=` map=).
-    pub static WRITE_CREATE_MAP_NS: AtomicU64 = AtomicU64::new(0);
-    /// `take_pending_queued` + `submit_head_insert` (`head_sub=`).
-    pub static WRITE_HEAD_SUB_NS: AtomicU64 = AtomicU64::new(0);
-    /// Ensure path: creates filled from pin layout (no Class A body IO).
-    pub static ENSURE_RES_HIT: AtomicU64 = AtomicU64::new(0);
-    /// Ensure path: cold denserels body loads.
-    pub static ENSURE_COLD_N: AtomicU64 = AtomicU64::new(0);
-    /// Assemble subtimers (ns; inside CONNECT_NS).
-    pub static ASM_PREVOUT_NS: AtomicU64 = AtomicU64::new(0);
-    pub static ASM_SIGOP_NS: AtomicU64 = AtomicU64::new(0);
-    pub static ASM_FINAL_NS: AtomicU64 = AtomicU64::new(0);
-    pub static ASM_JOB_NS: AtomicU64 = AtomicU64::new(0);
-    /// Non-coinbase inputs resolved in `resolve_prevout` (for us/in).
-    pub static ASM_IN_N: AtomicU64 = AtomicU64::new(0);
-    pub static ASM_PREV_BATCH_N: AtomicU64 = AtomicU64::new(0);
-    pub static ASM_PREV_SAME_N: AtomicU64 = AtomicU64::new(0);
-    pub static ASM_PREV_COLD_N: AtomicU64 = AtomicU64::new(0);
-    /// Cold success with **no** `prev_fk_hint` (thin + pending + head miss at assemble).
-    pub static ASM_PREV_COLD_NULL_FK_N: AtomicU64 = AtomicU64::new(0);
-    /// Cold success: had fk, batch pin miss (pin did not cover parent/vout).
-    pub static ASM_PREV_COLD_NOT_PIN_N: AtomicU64 = AtomicU64::new(0);
-    /// Cold success: batch pin had a row but **parent txid ≠ wire prev_txid**.
-    pub static ASM_PREV_COLD_TXID_MISMATCH_N: AtomicU64 = AtomicU64::new(0);
-    /// Cold success: parent create is in BatchParents but **needed vout** missing.
-    pub static ASM_PREV_COLD_VOUT_MISS_N: AtomicU64 = AtomicU64::new(0);
-    /// Post–Class C durable spend annotation batch.
-    ///
-    /// Historical name `UTXO_APPLY_NS` / log field `spend=` ms — this is **not** a
-    /// light-UTXO map apply (Catchup removed). Wall time for all annotate paths.
-    pub static UTXO_APPLY_NS: AtomicU64 = AtomicU64::new(0);
-    /// Annotate edges via abs pin denserels (pure-write known meta).
-    /// Historical name: formerly also counted ranged body walks (removed on Direct write).
-    pub static SPEND_ANNOTATE_RANGED: AtomicU64 = AtomicU64::new(0);
-    /// Pure-write annotate wall (ns) / edge count (backend is uring or pwrite).
-    pub static SPEND_ANN_NS: AtomicU64 = AtomicU64::new(0);
-    pub static SPEND_ANN_N: AtomicU64 = AtomicU64::new(0);
-    /// Edges annotated without body pread (should equal all annotate edges).
-    pub static SPEND_ANN_PREAD_SKIP: AtomicU64 = AtomicU64::new(0);
-    /// Structural spent meta bulk read wall (ns) / peek count.
-    pub static SPEND_META_NS: AtomicU64 = AtomicU64::new(0);
-    pub static SPEND_META_N: AtomicU64 = AtomicU64::new(0);
-    /// Prep pre-assemble wall on the prep/load thread.
-    ///
-    /// Wire path: structure + plan Class A + pin parents (stops before assemble).
-    /// Full prep wall ≈ `LOAD_NS` + [`CONNECT_NS`] (assemble).
-    pub static LOAD_NS: AtomicU64 = AtomicU64::new(0);
-    /// Wire load sub: `Arc::new(block.clone())` (target for Arc handoff).
-    pub static PREP_WIRE_ARC_NS: AtomicU64 = AtomicU64::new(0);
-    /// Wire load sub: structure + softfork shape checks.
-    pub static PREP_STRUCT_NS: AtomicU64 = AtomicU64::new(0);
-    /// Wire load sub: header validate/put + parent-cache header plan seed.
-    pub static PREP_HEADER_NS: AtomicU64 = AtomicU64::new(0);
-    /// Wire load sub: `prepare_block_for_archive` (tx apply packing).
-    pub static PREP_PREPARE_NS: AtomicU64 = AtomicU64::new(0);
-    /// Wire load sub: filter need + plan batch + meta/tx_fks wiring (not pin).
-    pub static PREP_FILTER_PLAN_NS: AtomicU64 = AtomicU64::new(0);
-    pub static BLOCKS: AtomicU64 = AtomicU64::new(0);
+    use std::cell::Cell;
 
-    static LAST_WRITE_N: AtomicU64 = AtomicU64::new(0);
-    static LAST_WRITE_CLASS_A_NS: AtomicU64 = AtomicU64::new(0);
-    static LAST_WRITE_ENSURE_NS: AtomicU64 = AtomicU64::new(0);
-    static LAST_WRITE_STRUCTURAL_NS: AtomicU64 = AtomicU64::new(0);
-    static LAST_WRITE_SPENT_NS: AtomicU64 = AtomicU64::new(0);
-    static LAST_WRITE_CREATE_H_NS: AtomicU64 = AtomicU64::new(0);
-    static LAST_WRITE_BIP68_NS: AtomicU64 = AtomicU64::new(0);
-    static LAST_WRITE_CLASS_C_NS: AtomicU64 = AtomicU64::new(0);
-    static LAST_WRITE_SPEND_ANN_NS: AtomicU64 = AtomicU64::new(0);
-    static LAST_WRITE_TWEAK_NS: AtomicU64 = AtomicU64::new(0);
-    static LAST_WRITE_WALL_NS: AtomicU64 = AtomicU64::new(0);
-
-    /// Snapshot of the most recent successful [`super::confirm_write_phase`].
-    #[derive(Debug, Clone, Copy, Default)]
-    pub struct LastWritePhases {
-        pub n_blocks: u32,
-        pub wall_ns: u64,
-        /// Class A append (`archive_commit_plan`).
-        pub class_a_ns: u64,
-        /// fill planned layout + ensure denserels/abs for spends.
-        pub ensure_ns: u64,
-        pub structural_ns: u64,
-        pub spent_ns: u64,
-        pub create_h_ns: u64,
-        pub bip68_ns: u64,
-        pub class_c_ns: u64,
-        pub spend_ann_ns: u64,
-        /// BIP-352 thin tweak index (`index_sp_tweaks_batch`) after annotate.
-        pub tweak_ns: u64,
-    }
-
-    impl LastWritePhases {
-        #[inline]
-        pub fn ms(ns: u64) -> u64 {
-            ns / 1_000_000
-        }
-    }
-
-    /// Record per-batch write phases (called from write stage; overwrites prior).
-    pub fn note_last_write(p: LastWritePhases) {
-        LAST_WRITE_N.store(u64::from(p.n_blocks), Ordering::Relaxed);
-        LAST_WRITE_WALL_NS.store(p.wall_ns, Ordering::Relaxed);
-        LAST_WRITE_CLASS_A_NS.store(p.class_a_ns, Ordering::Relaxed);
-        LAST_WRITE_ENSURE_NS.store(p.ensure_ns, Ordering::Relaxed);
-        LAST_WRITE_STRUCTURAL_NS.store(p.structural_ns, Ordering::Relaxed);
-        LAST_WRITE_SPENT_NS.store(p.spent_ns, Ordering::Relaxed);
-        LAST_WRITE_CREATE_H_NS.store(p.create_h_ns, Ordering::Relaxed);
-        LAST_WRITE_BIP68_NS.store(p.bip68_ns, Ordering::Relaxed);
-        LAST_WRITE_CLASS_C_NS.store(p.class_c_ns, Ordering::Relaxed);
-        LAST_WRITE_SPEND_ANN_NS.store(p.spend_ann_ns, Ordering::Relaxed);
-        LAST_WRITE_TWEAK_NS.store(p.tweak_ns, Ordering::Relaxed);
-    }
-
-    pub fn last_write_phases() -> LastWritePhases {
-        LastWritePhases {
-            n_blocks: LAST_WRITE_N.load(Ordering::Relaxed) as u32,
-            wall_ns: LAST_WRITE_WALL_NS.load(Ordering::Relaxed),
-            class_a_ns: LAST_WRITE_CLASS_A_NS.load(Ordering::Relaxed),
-            ensure_ns: LAST_WRITE_ENSURE_NS.load(Ordering::Relaxed),
-            structural_ns: LAST_WRITE_STRUCTURAL_NS.load(Ordering::Relaxed),
-            spent_ns: LAST_WRITE_SPENT_NS.load(Ordering::Relaxed),
-            create_h_ns: LAST_WRITE_CREATE_H_NS.load(Ordering::Relaxed),
-            bip68_ns: LAST_WRITE_BIP68_NS.load(Ordering::Relaxed),
-            class_c_ns: LAST_WRITE_CLASS_C_NS.load(Ordering::Relaxed),
-            spend_ann_ns: LAST_WRITE_SPEND_ANN_NS.load(Ordering::Relaxed),
-            tweak_ns: LAST_WRITE_TWEAK_NS.load(Ordering::Relaxed),
-        }
-    }
-
-    /// Spent subtimers (on-disk abs pread / strong / cold / pending). Sample + reset.
-    ///
-    /// Sum may be ≤ [`STRUCTURAL_SPENT_NS`] (setup residual). Authority remains
-    /// durable Class A meta — these only rank the probe.
-    #[inline]
-    pub fn sample_spent_sub_and_reset() -> (u64, u64, u64, u64) {
-        (
-            STRUCTURAL_SPENT_ABS_NS.swap(0, Ordering::Relaxed),
-            STRUCTURAL_SPENT_STRONG_NS.swap(0, Ordering::Relaxed),
-            STRUCTURAL_SPENT_COLD_NS.swap(0, Ordering::Relaxed),
-            STRUCTURAL_SPENT_PENDING_NS.swap(0, Ordering::Relaxed),
-        )
-    }
-
-    /// Sample and reset write-only Class A + ensure layout windows.
-    #[inline]
-    pub fn sample_class_a_ensure_and_reset() -> (u64, u64) {
-        (
-            CLASS_A_NS.swap(0, Ordering::Relaxed),
-            ENSURE_LAYOUT_NS.swap(0, Ordering::Relaxed),
-        )
-    }
-
-    /// `(drain_join, dequeue)` residual write walls.
-    #[inline]
-    pub fn sample_write_residuals_and_reset() -> (u64, u64) {
-        (
-            WRITE_DRAIN_JOIN_NS.swap(0, Ordering::Relaxed),
-            WRITE_DEQUEUE_NS.swap(0, Ordering::Relaxed),
-        )
-    }
-
-    /// `(plan_take, create_map, head_sub)` write-other classification walls.
-    #[inline]
-    pub fn sample_write_pins_and_reset() -> (u64, u64, u64) {
-        (
-            WRITE_PLAN_TAKE_NS.swap(0, Ordering::Relaxed),
-            WRITE_CREATE_MAP_NS.swap(0, Ordering::Relaxed),
-            WRITE_HEAD_SUB_NS.swap(0, Ordering::Relaxed),
-        )
-    }
-
-    /// Sample and reset Class C join/flush residual.
-    #[inline]
-    pub fn sample_class_c_join_and_reset() -> u64 {
-        WRITE_CLASS_C_JOIN_NS.swap(0, Ordering::Relaxed)
-    }
-
-    /// Sample and reset write-stage SP tweak index wall.
-    #[inline]
-    pub fn sample_tweak_and_reset() -> u64 {
-        TWEAK_NS.swap(0, Ordering::Relaxed)
-    }
-
-    /// `(ensure_res_hit, ensure_cold_n)` for write ensure mix.
-    #[inline]
-    pub fn sample_ensure_mix_and_reset() -> (u64, u64) {
-        (
-            ENSURE_RES_HIT.swap(0, Ordering::Relaxed),
-            ENSURE_COLD_N.swap(0, Ordering::Relaxed),
-        )
-    }
-
-    /// Assemble subtimers (ns): `(prevout, sigop, finality, job_build)`.
-    #[inline]
-    pub fn sample_assemble_and_reset() -> (u64, u64, u64, u64) {
-        (
-            ASM_PREVOUT_NS.swap(0, Ordering::Relaxed),
-            ASM_SIGOP_NS.swap(0, Ordering::Relaxed),
-            ASM_FINAL_NS.swap(0, Ordering::Relaxed),
-            ASM_JOB_NS.swap(0, Ordering::Relaxed),
-        )
-    }
-
-    /// Prevout path counts: `(in_n, batch_n, same_n, cold_n)`.
-    #[inline]
-    pub fn sample_assemble_prevout_detail_and_reset() -> (u64, u64, u64, u64) {
-        (
-            ASM_IN_N.swap(0, Ordering::Relaxed),
-            ASM_PREV_BATCH_N.swap(0, Ordering::Relaxed),
-            ASM_PREV_SAME_N.swap(0, Ordering::Relaxed),
-            ASM_PREV_COLD_N.swap(0, Ordering::Relaxed),
-        )
-    }
-
-    /// N1 cold-reason counts: `(null_fk, not_pin, txid_mismatch, vout_miss)`.
-    ///
-    /// Sum should equal [`ASM_PREV_COLD_N`] for the same window (successful cold
-    /// resolves only — failures do not increment).
-    #[inline]
-    pub fn sample_assemble_cold_why_and_reset() -> (u64, u64, u64, u64) {
-        (
-            ASM_PREV_COLD_NULL_FK_N.swap(0, Ordering::Relaxed),
-            ASM_PREV_COLD_NOT_PIN_N.swap(0, Ordering::Relaxed),
-            ASM_PREV_COLD_TXID_MISMATCH_N.swap(0, Ordering::Relaxed),
-            ASM_PREV_COLD_VOUT_MISS_N.swap(0, Ordering::Relaxed),
-        )
-    }
-
-    // Thread-local N1 cold-why / batch / cold path counts for unit tests.
-    // Process-global atomics race under parallel cargo test; N1 samples these TLS
-    // counters updated only by this thread's resolve_prevout (cfg(test)).
-    #[cfg(test)]
     thread_local! {
-        static TL_COLD_WHY: std::cell::Cell<(u64, u64, u64, u64)> =
-            const { std::cell::Cell::new((0, 0, 0, 0)) };
-        static TL_BATCH_N: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-        static TL_COLD_N: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        static TL_COLD_WHY: Cell<(u64, u64, u64, u64)> =
+            const { Cell::new((0, 0, 0, 0)) };
+        static TL_BATCH_N: Cell<u64> = const { Cell::new(0) };
+        static TL_COLD_N: Cell<u64> = const { Cell::new(0) };
     }
 
-    #[cfg(test)]
     #[inline]
     pub fn tl_note_cold_why_null_fk() {
         TL_COLD_WHY.with(|c| {
@@ -384,7 +105,6 @@ pub mod confirm_phase_stats {
         });
         TL_COLD_N.with(|c| c.set(c.get() + 1));
     }
-    #[cfg(test)]
     #[inline]
     pub fn tl_note_cold_why_not_pin() {
         TL_COLD_WHY.with(|c| {
@@ -393,7 +113,6 @@ pub mod confirm_phase_stats {
         });
         TL_COLD_N.with(|c| c.set(c.get() + 1));
     }
-    #[cfg(test)]
     #[inline]
     pub fn tl_note_cold_why_txid_mismatch() {
         TL_COLD_WHY.with(|c| {
@@ -402,7 +121,6 @@ pub mod confirm_phase_stats {
         });
         TL_COLD_N.with(|c| c.set(c.get() + 1));
     }
-    #[cfg(test)]
     #[inline]
     pub fn tl_note_cold_why_vout_miss() {
         TL_COLD_WHY.with(|c| {
@@ -411,114 +129,19 @@ pub mod confirm_phase_stats {
         });
         TL_COLD_N.with(|c| c.set(c.get() + 1));
     }
-    #[cfg(test)]
     #[inline]
     pub fn tl_note_batch_hit() {
         TL_BATCH_N.with(|c| c.set(c.get() + 1));
     }
-    #[cfg(test)]
     #[inline]
     pub fn sample_tl_assemble_cold_why_and_reset() -> (u64, u64, u64, u64) {
         TL_COLD_WHY.with(|c| c.replace((0, 0, 0, 0)))
     }
-    #[cfg(test)]
     #[inline]
     pub fn sample_tl_batch_cold_n_and_reset() -> (u64, u64) {
         let b = TL_BATCH_N.with(|c| c.replace(0));
         let cold = TL_COLD_N.with(|c| c.replace(0));
         (b, cold)
-    }
-
-    /// Wire-prep residual subtimers (ns): `(wire_arc, struct, header, prepare, filter_plan)`.
-    ///
-    /// [`crate::confirm_wire_lookup_stamp`] owns these for both IBD TipOnly stamp
-    /// and one-shot [`crate::confirm_wire_load_phase_pipelined`]. Header PoW /
-    /// prev checks are `PREP_HEADER_NS` (not folded into `PREP_STRUCT_NS`).
-    /// These sit inside [`LOAD_NS`] but outside pin (confirm_load_stats). Pin and
-    /// assemble remain separate (`PARENT_PIN_NS` / [`CONNECT_NS`]).
-    #[inline]
-    pub fn sample_prep_residual_and_reset() -> (u64, u64, u64, u64, u64) {
-        (
-            PREP_WIRE_ARC_NS.swap(0, Ordering::Relaxed),
-            PREP_STRUCT_NS.swap(0, Ordering::Relaxed),
-            PREP_HEADER_NS.swap(0, Ordering::Relaxed),
-            PREP_PREPARE_NS.swap(0, Ordering::Relaxed),
-            PREP_FILTER_PLAN_NS.swap(0, Ordering::Relaxed),
-        )
-    }
-
-    /// Sample and reset all confirm phases.
-    ///
-    /// Returns
-    /// `(connect, script, class_c, strong, scripthash, tip, utxo_apply, blocks,
-    ///   load, spend_ranged, structural, structural_spent, structural_create_h,
-    ///   structural_bip68)`.
-    /// `class_c` is **strong+tip tables only** (not SH join wall; SH is
-    /// `scripthash`). `strong` / `scripthash` / `tip` come from
-    /// [`rbitcoin_query::class_c_phase_stats`].
-    /// `connect` is **load assemble**, not write structural — see `structural`.
-    #[allow(clippy::type_complexity)]
-    pub fn sample_and_reset() -> (
-        u64,
-        u64,
-        u64,
-        u64,
-        u64,
-        u64,
-        u64,
-        u64,
-        u64,
-        u64,
-        u64,
-        u64,
-        u64,
-        u64,
-    ) {
-        let (strong, sh, tip) = rbitcoin_query::class_c_phase_stats::sample_and_reset();
-        (
-            CONNECT_NS.swap(0, Ordering::Relaxed),
-            SCRIPT_NS.swap(0, Ordering::Relaxed),
-            CLASS_C_NS.swap(0, Ordering::Relaxed),
-            strong,
-            sh,
-            tip,
-            UTXO_APPLY_NS.swap(0, Ordering::Relaxed),
-            BLOCKS.swap(0, Ordering::Relaxed),
-            LOAD_NS.swap(0, Ordering::Relaxed),
-            SPEND_ANNOTATE_RANGED.swap(0, Ordering::Relaxed),
-            STRUCTURAL_NS.swap(0, Ordering::Relaxed),
-            STRUCTURAL_SPENT_NS.swap(0, Ordering::Relaxed),
-            STRUCTURAL_CREATE_H_NS.swap(0, Ordering::Relaxed),
-            STRUCTURAL_BIP68_NS.swap(0, Ordering::Relaxed),
-        )
-    }
-
-    /// `(jobs, mempool_skips)`.
-    #[inline]
-    pub fn sample_script_mix_and_reset() -> (u64, u64) {
-        (
-            SCRIPT_JOBS.swap(0, Ordering::Relaxed),
-            SCRIPT_SKIP_MEMPOOL.swap(0, Ordering::Relaxed),
-        )
-    }
-
-    /// Pure-write annotate: (ann_ns, ann_n, pread_skip).
-    #[inline]
-    pub fn sample_spend_ann_and_reset() -> (u64, u64, u64) {
-        (
-            SPEND_ANN_NS.swap(0, Ordering::Relaxed),
-            SPEND_ANN_N.swap(0, Ordering::Relaxed),
-            SPEND_ANN_PREAD_SKIP.swap(0, Ordering::Relaxed),
-        )
-    }
-
-    /// Structural meta: (meta_ns, meta_n).
-    #[inline]
-    pub fn sample_spend_meta_and_reset() -> (u64, u64) {
-        (
-            SPEND_META_NS.swap(0, Ordering::Relaxed),
-            SPEND_META_N.swap(0, Ordering::Relaxed),
-        )
     }
 }
 
@@ -530,9 +153,9 @@ pub use confirm_run::{
     confirm_bq_resolve_wave_capped, confirm_scripts_phase, confirm_wire_load_from_plan,
     confirm_wire_load_phase, confirm_wire_load_phase_pipelined, confirm_wire_lookup_stamp,
     confirm_wire_run, confirm_wire_run_preverified, confirm_write_phase, drive_script_waves_with,
-    lookup_stage_stats, plan_stamp_sub_stats, take_wave_items_for_load, ConfirmLoadOutcome,
-    ConfirmScriptOutcome, LoadedBatch, PlanStampOutcome, ScriptOkBatch, ScriptPreverified,
-    WireLoadPipeline, BQ_RESOLVE_WAVE_MAX_BLOCKS, BQ_RESOLVE_WAVE_MAX_INPUTS,
+    take_wave_items_for_load, ConfirmLoadOutcome, ConfirmScriptOutcome, LoadedBatch,
+    PlanStampOutcome, ScriptOkBatch, ScriptPreverified, WireLoadPipeline,
+    BQ_RESOLVE_WAVE_MAX_BLOCKS, BQ_RESOLVE_WAVE_MAX_INPUTS,
 };
 
 /// Wake the IBD scripts publisher (`ibd-confirm`) after `scriptq` send or close.
