@@ -45,7 +45,7 @@ where
     [--maxoutbound|--max-outbound N] [--maxinbound N] [--maxconnections N] \\\n\
     [--mempool-size-mb|--maxmempool N] \\\n\
     [--testactivationheight name@height] [--persistmempool[=0|1]] [--whitelist SPEC] \\\n\
-    [--blocksonly] [--minrelaytxfee BTC] [--permitbaremultisig[=0|1]] \\\n\
+    [--blocksonly] [--minrelaytxfee BTC] \\\n\
     [--limitclustercount N] [--limitclustersize KVB] [--peertimeout SECS] \\\n\
     [--externalip IP] \\\n\
     [--minimumchainwork HEX] \\\n\
@@ -314,8 +314,6 @@ fn is_bool_key(key: &str) -> bool {
             | "blocks_only"
             | "persistmempool"
             | "persist_mempool"
-            | "permitbaremultisig"
-            | "permit_bare_multisig"
             | "noseeds"
             | "no_seeds"
             | "inhibit_suspend"
@@ -585,7 +583,6 @@ mod tests {
             "--testactivationheight=csv@102",
             "--testactivationheight=dersig@50",
             "--whitelist=noban@127.0.0.1",
-            "--permitbaremultisig=0",
             "--limitclustercount=10",
             "--minimumchainwork=0x65",
             "--no-seeds",

@@ -566,7 +566,6 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     )
                     .unwrap_or_else(|_| format!("/rbitcoin:{}/", env!("CARGO_PKG_VERSION"))),
                 ),
-                permit_bare_multisig: config.mempool.permit_bare_multisig,
                 alert_notify: config.alert_notify.clone(),
             };
             let miner: Option<Arc<dyn RpcRegtest>> = if config.network == Network::Regtest {

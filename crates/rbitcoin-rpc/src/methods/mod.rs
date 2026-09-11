@@ -68,8 +68,6 @@ pub struct RpcContext {
     pub addrman: Option<Arc<std::sync::Mutex<rbitcoin_net::AddrMan>>>,
     /// Core `getrpcinfo.logpath` (`{datadir}/debug.log`).
     pub logpath: String,
-    /// Core `-permitbaremultisig` (default true). `getmempoolinfo`.
-    pub permit_bare_multisig: bool,
     /// Core `-alertnotify` (`%s` = warning). Fired once when warnings appear.
     pub alert_notify: Option<String>,
     /// Latches after the first alertnotify invocation.

@@ -33,7 +33,7 @@ fn ctx_empty() -> (RpcContext, TempDir) {
 
         logpath: String::new(),
         active: std::sync::Arc::new(std::sync::Mutex::new(RpcActive::default())),
-        permit_bare_multisig: true,
+
         alert_notify: None,
         alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
@@ -138,8 +138,7 @@ fn blockchain_empty_store() {
 
 #[test]
 fn getmempoolinfo_permitbaremultisig_is_always_true() {
-    let (mut ctx, dir) = ctx_empty();
-    ctx.permit_bare_multisig = false;
+    let (ctx, dir) = ctx_empty();
     let mem = dispatch(&ctx, "getmempoolinfo", vec![]).unwrap();
     assert_eq!(
         mem["permitbaremultisig"], true,
@@ -796,7 +795,7 @@ fn all_methods_callable_empty_or_error() {
 
         logpath: String::new(),
         active: std::sync::Arc::new(std::sync::Mutex::new(RpcActive::default())),
-        permit_bare_multisig: true,
+
         alert_notify: None,
         alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
@@ -843,7 +842,7 @@ fn chain_methods_against_mined_regtest() {
 
         logpath: String::new(),
         active: std::sync::Arc::new(std::sync::Mutex::new(RpcActive::default())),
-        permit_bare_multisig: true,
+
         alert_notify: None,
         alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
@@ -1241,7 +1240,7 @@ fn ctx_regtest_hub() -> (RpcContext, TempDir, Arc<rbitcoin_net::ChainHub>) {
 
         logpath: String::new(),
         active: std::sync::Arc::new(std::sync::Mutex::new(RpcActive::default())),
-        permit_bare_multisig: true,
+
         alert_notify: None,
         alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
@@ -2776,7 +2775,7 @@ fn rpc_honesty_mempool_budget_and_network_identity() {
 
         logpath: String::new(),
         active: std::sync::Arc::new(std::sync::Mutex::new(RpcActive::default())),
-        permit_bare_multisig: true,
+
         alert_notify: None,
         alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };

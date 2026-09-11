@@ -64,7 +64,6 @@ FORWARD_FLAGS = frozenset(
         "mempoolexpiry",
         "startupnotify",
         "alertnotify",
-        "permitbaremultisig",
         "limitclustercount",
         "limitclustersize",
         "peertimeout",
@@ -95,6 +94,8 @@ IGNORE_FLAGS = frozenset(
         "nologratelimit",
         "print-cmd",
         "acceptnonstdtxn",
+        # Libre has no Core IsStandard bare-multisig gate.
+        "permitbaremultisig",
         "peerblockfilters",
         # No BIP37 bloom product; node always disconnects on filter*/mempool.
         # Ignore so Core tests may still pass -peerbloomfilters[=0|1] on argv.

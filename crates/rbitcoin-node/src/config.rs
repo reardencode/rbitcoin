@@ -124,7 +124,6 @@ pub struct MempoolOpts {
     pub expiry_hours: Option<u64>,
     pub limit_cluster_count: Option<u32>,
     pub limit_cluster_size_kvb: Option<u32>,
-    pub permit_bare_multisig: bool,
     pub blocksonly: bool,
 }
 
@@ -137,7 +136,6 @@ impl Default for MempoolOpts {
             expiry_hours: None,
             limit_cluster_count: None,
             limit_cluster_size_kvb: None,
-            permit_bare_multisig: true,
             blocksonly: false,
         }
     }
@@ -656,10 +654,7 @@ impl NodeConfig {
                     self.startup_notify = Some(val.to_string());
                 }
             }
-            "permitbaremultisig" | "permit_bare_multisig" => {
-                self.mempool.permit_bare_multisig = parse_conf_bool(val)
-                    .map_err(|e| NodeError::Config(format!("conf permitbaremultisig: {e}")))?;
-            }
+
             "limitclustercount" | "limit_cluster_count" => {
                 self.mempool.limit_cluster_count = Some(
                     val.parse()
@@ -1428,7 +1423,6 @@ mod tests {
         let plain = NodeConfig::default();
         assert!(plain.mempool.persist);
         assert!(!plain.mempool.blocksonly);
-        assert!(plain.mempool.permit_bare_multisig);
         assert!(plain.test_activation_heights.is_empty());
         assert_eq!(
             NodeConfig {
