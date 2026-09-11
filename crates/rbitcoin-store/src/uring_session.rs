@@ -19,7 +19,7 @@
 use crate::error::StoreError;
 use crate::io_handle::IoHandle;
 use crate::io_session_pool::PoolEngine;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::time::Duration;
 
@@ -886,6 +886,28 @@ pub(crate) fn require_full_cqe(res: i32, want: usize, path: &Path) -> Result<(),
     }
     Ok(())
 }
+
+thread_local! {
+    static TLS_SESSION: RefCell<Option<UringSession>> = const { RefCell::new(None) };
+    static TLS_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Drain and drop this OS thread's TLS completion session.
+pub fn drop_thread_local() {
+    TLS_SESSION.with(|cell| {
+        if let Some(mut old) = cell.borrow_mut().take() {
+            let _ = old.drain_all();
+            drop(old);
+        }
+    });
+}
+
+pub fn note_uring_recover() {
+    URING_METERS
+        .recover_n
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Run `f` with this **OS thread's** long-lived io_uring session.
 ///
 /// - Opens once on first use; reopens only if `min_entries` exceeds the current
@@ -904,23 +926,14 @@ pub fn with_thread_local<R>(
     let min_entries = min_entries.max(32).min(4096);
 
     {
-        use std::cell::{Cell, RefCell};
-
-        thread_local! {
-            static SESSION: RefCell<Option<UringSession>> = const { RefCell::new(None) };
-            static DEPTH: Cell<u32> = const { Cell::new(0) };
-        }
-
         // Gate once; TLS open uses try_open to avoid recursive enabled() probe.
         if !crate::bulk_io::io_uring_enabled() {
             return Err(StoreError::Unavailable);
         }
 
-        DEPTH.with(|depth| {
+        TLS_DEPTH.with(|depth| {
             let d = depth.get();
             if d != 0 {
-                // Hard error: nested temp rings caused plan head_fk regression
-                // (probe + record_range under the plan machine). Fail loud.
                 panic!(
                     "nested thread-local io_uring (depth={d}); \
                      fold IO into the outer with_thread_local machine \
@@ -931,11 +944,11 @@ pub fn with_thread_local<R>(
             struct DepthGuard;
             impl Drop for DepthGuard {
                 fn drop(&mut self) {
-                    DEPTH.with(|depth| depth.set(0));
+                    TLS_DEPTH.with(|depth| depth.set(0));
                 }
             }
             let _guard = DepthGuard;
-            let out = SESSION.with(|cell| -> Result<R, StoreError> {
+            let out = TLS_SESSION.with(|cell| -> Result<R, StoreError> {
                 let mut slot = cell.borrow_mut();
                 let need_open = match slot.as_ref() {
                     None => true,
@@ -1057,6 +1070,7 @@ pub(crate) struct UringMeters {
     pub cq_overflow: std::sync::atomic::AtomicU64,
     pub idx_range_missing: std::sync::atomic::AtomicU64,
     pub slow_drain: std::sync::atomic::AtomicU64,
+    pub recover_n: std::sync::atomic::AtomicU64,
 }
 
 static URING_METERS: UringMeters = UringMeters {
@@ -1066,6 +1080,7 @@ static URING_METERS: UringMeters = UringMeters {
     cq_overflow: std::sync::atomic::AtomicU64::new(0),
     idx_range_missing: std::sync::atomic::AtomicU64::new(0),
     slow_drain: std::sync::atomic::AtomicU64::new(0),
+    recover_n: std::sync::atomic::AtomicU64::new(0),
 };
 
 #[derive(Clone, Copy)]
@@ -1454,6 +1469,16 @@ mod tests {
         let entries2 = with_thread_local(DEFAULT_ENTRIES, |s| s.entries()).unwrap();
         assert_eq!(entries, entries2);
         assert!(entries >= DEFAULT_ENTRIES);
+    }
+
+    #[test]
+    fn drop_thread_local_clears_tls_slot() {
+        if !crate::bulk_io::io_uring_enabled() {
+            return;
+        }
+        let _ = with_thread_local(DEFAULT_ENTRIES, |s| s.entries());
+        drop_thread_local();
+        let _ = with_thread_local(DEFAULT_ENTRIES, |s| s.entries());
     }
 
     /// `drain_all` must wait until in-flight SQEs complete (not only harvest-ready).
