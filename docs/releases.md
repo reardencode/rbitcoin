@@ -170,6 +170,4 @@ SECURITY support window and schema-freeze language.
 ## Operator follow-ups (not agent-mergeable)
 
 - Required check **`release-extra`** on protected branches.
-- Workflow YAML on this branch may need an operator `git push` (GitHub App
-  cannot write `.github/workflows/*`).
 - Retry artifacts only: Actions → **release** → Run workflow (no tag).

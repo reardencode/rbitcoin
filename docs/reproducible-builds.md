@@ -114,8 +114,6 @@ same three snapshots on that tag and attaches them to a GitHub Release:
 | `rbitcoin-*-aarch64-darwin` + `SHA256SUMS.darwin` | Ad-hoc codesign; not notarized |
 
 `workflow_dispatch` on that workflow builds artifacts only (no Release).
-Creating or changing `.github/workflows/release.yml` may need an operator
-push (GitHub App tokens often cannot write workflow files).
 
 **Byte-identity gate** (`./scripts/repro-check.sh`) still forces two clean
 `--rebuild`s — use it for release verification, not every commit.

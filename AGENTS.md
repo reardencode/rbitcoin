@@ -134,15 +134,16 @@ Label **`core-functional`** when the PR touches the Core functional harness
 GitHub App SSH key. The App token from `~/.config/rbitcoin-grok/gh-login.sh`
 (~1h) is HTTPS-only.
 
-`gh pr create` / `gh pr checks` talk to the API. `git fetch origin` works
-here. Bot **push** must use an **explicit HTTPS URL**. Do **not**
-`git remote set-url origin`. Do **not** `git push origin` as the bot.
+`gh pr create` / `gh pr checks` / `gh issue comment` / `gh run rerun` talk
+to the API. `git fetch origin` works here. Bot **push** must use an
+**explicit HTTPS URL**. Do **not** `git remote set-url origin`. Do **not**
+`git push origin` as the bot.
 
-The App token **cannot** create or update `.github/workflows/*` (GitHub
-`workflows` permission). If the commit set touches workflow YAML, **stop
-and ask the operator to push** that branch. Do not strip the workflow
-diff to sneak a push. Non-workflow commits on an already-pushed branch
-are fine.
+Installation write: `contents`, `pull_requests`, `issues`, `workflows`,
+`actions`. Push `.github/workflows/*` with the rest of the topic branch.
+Do not strip a workflow diff to sneak a push. `gh run rerun` is in-band.
+Read: `checks`, `security_events`, `secret_scanning_alerts`, and the other
+listed reads. CodeQL **dismiss** stays operator (`security_events` is read).
 
 ```bash
 ~/.config/rbitcoin-grok/gh-login.sh
@@ -161,25 +162,24 @@ No `-u` on push (that would retarget the branch remote away from `origin`).
 | **Done** | Required checks green **and** the PR is up for review. Do not merge unless asked. |
 | **No post-green PR-cite** | After required checks are green, do **not** push a docs-only follow-up whose only change is inserting this PR's number into CHANGELOG / quality.md / similar. That wastes a full CI run. Cite in the **PR body**. Owner docs can omit the GitHub number, or pick it up later in a docs change that was already needed. |
 | **Do not** | Force-push `master`, merge a red PR, collapse `origin` to a single URL, skip polling because “tests passed locally,” or invent **empty commits** to poke Actions. |
-| **Workflow YAML** | App cannot push `.github/workflows/*`. Ask the operator to `git push`. |
-| **CodeQL in tests** | Alert that only fires in `#[cfg(test)]` / test modules: **stop**. Do **not** rename tests or shuffle literals to silence it. Ask the operator to **dismiss** the alert (App token cannot). Production / library CodeQL is a real finding — fix it. |
+| **Workflow YAML** | Push with the topic branch (`workflows:write`). |
+| **CodeQL in tests** | Alert that only fires in `#[cfg(test)]` / test modules: **stop**. Do **not** rename tests or shuffle literals to silence it. Ask the operator to **dismiss** (`security_events` is read). Production / library CodeQL is a real finding — fix it. |
 
 #### Retrigger CI (no empty commits)
 
 When required checks are green locally and CI only needs a re-run (flake,
-stale run, App cannot `gh run rerun`):
+stale run):
 
 | OK | Not OK |
 |----|--------|
-| GitHub Actions UI **Re-run failed jobs** / **Re-run all jobs** | Empty commit whose only purpose is to wake Actions |
-| `gh run rerun <id> [--failed]` when the token allows it | Noise commits (“ci: bump”, “trigger”) with no product/test change; docs-only follow-up whose only change is this PR's `#N` after checks are already green |
+| `gh run rerun <id> [--failed]` | Empty commit whose only purpose is to wake Actions |
+| GitHub Actions UI **Re-run failed jobs** / **Re-run all jobs** | Noise commits (“ci: bump”, “trigger”) with no product/test change; docs-only follow-up whose only change is this PR's `#N` after checks are already green |
 | Amend the tip commit (or rebase) and **force-push the topic branch** with `--force-with-lease` over HTTPS | Force-push `master` / `main` |
 
 ```bash
-# Prefer API when the App/token can write Actions:
 gh run rerun <run-id> --failed
 
-# Else: amend tip (no empty commit) and lease-force the topic branch only:
+# If the API rejects: amend tip (no empty commit) and lease-force the topic branch only:
 git commit --amend --no-edit   # or fold a real fix into the tip
 git push --force-with-lease https://github.com/reardencode/rbitcoin.git HEAD:<area>/<short-name>
 ```

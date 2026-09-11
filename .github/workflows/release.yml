@@ -8,9 +8,6 @@
 # Triggers:
 #   - push of tag v*.*.* (publishes the Release)
 #   - workflow_dispatch (build artifacts only; no tag → no Release)
-#
-# Operator push of this workflow file may be required (GitHub App cannot
-# always create `.github/workflows/*`).
 
 name: release
 
