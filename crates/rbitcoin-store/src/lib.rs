@@ -101,4 +101,5 @@ pub use tx_table::{
     encode_packed_tx, encode_packed_tx_with_secret, spend_meta_backend, spent_abs, InputRecord,
     OutputRecord, TxRecord,
 };
+pub use uring_session::abort_uring_unusable;
 pub(crate) use uring_session::IoCtx;

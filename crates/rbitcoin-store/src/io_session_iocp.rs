@@ -198,7 +198,7 @@ impl IocpEngine {
 
     pub(crate) fn wait_idle(&mut self) -> Result<(), StoreError> {
         // Caller harvests until pending is empty; one long wait then drain.
-        self.poll(50);
+        self.poll(100);
         Ok(())
     }
 
