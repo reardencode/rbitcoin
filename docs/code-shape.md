@@ -67,11 +67,22 @@ Do not invent a failing test for a pure move that is already pinned.
 
 ## Lint
 
-Workspace `cognitive_complexity` stays **allow**. Complexity drops because
-the types got better, not because clippy denied a Core-faithful loop.
-Crate-level `too_many_arguments` on API crates (RPC / Electrum / Esplora)
-is allowed after those dispatch bags become structs. Do not turn ast-grep
-into a second clippy ([`quality.md`](./quality.md) Won't-fix).
+CI is `cargo clippy --workspace --all-targets -- -D warnings`.
+
+**Goal:** no `[workspace.lints.clippy]` `= "allow"`. A lint that is wrong
+for one item is `#[allow(clippy::lint)]` on **that item**, with a one-line
+reason (Core-faithful opcode loop, wire layout, dispatch bag,
+`result_large_err` on a public error enum, …). Do not add a new workspace
+or crate-wide allow. Do not peel **R-10**, flatten an io_uring machine, or
+split `interpreter.rs` to silence a lint.
+
+Complexity still drops because the types got better, not because clippy
+denied a Core-faithful loop. That is a **site** allow on that function, not
+a standing workspace `cognitive_complexity` allow.
+
+Today’s workspace list is debt. Re-enable in batches (style first:
+`collapsible_if`, `needless_return`, `redundant_*`, `manual_*`). Do not
+turn ast-grep into a second clippy ([`quality.md`](./quality.md) Won't-fix).
 
 ---
 
