@@ -21,6 +21,42 @@ pub fn inbound_from_maxconnections(total: u32) -> u32 {
         .max(1)
 }
 
+/// Parse Core BTC/kvB (`0.00000001`) to sat/kvB. Negatives and junk fail.
+pub(crate) fn parse_btc_to_sat(s: &str) -> Result<u64, &'static str> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("empty");
+    }
+    if s.starts_with('-') {
+        return Err("must be non-negative");
+    }
+    let (whole_s, frac_s) = match s.split_once('.') {
+        Some((w, f)) => (w, f),
+        None => (s, ""),
+    };
+    if whole_s.is_empty() && frac_s.is_empty() {
+        return Err("invalid");
+    }
+    let whole: u64 = if whole_s.is_empty() {
+        0
+    } else {
+        whole_s.parse().map_err(|_| "invalid")?
+    };
+    let mut frac = frac_s.to_string();
+    if frac.len() > 8 {
+        frac.truncate(8);
+    }
+    while frac.len() < 8 {
+        frac.push('0');
+    }
+    let frac_n: u64 = if frac.is_empty() {
+        0
+    } else {
+        frac.parse().map_err(|_| "invalid")?
+    };
+    Ok(whole.saturating_mul(100_000_000).saturating_add(frac_n))
+}
+
 /// Process datadir (Class A store, cookie, debug.log, mempool).
 ///
 /// Cold store is [`Self::cold`].
@@ -605,6 +641,8 @@ impl NodeConfig {
                         "conf minrelaytxfee requires a value".into(),
                     ));
                 }
+                parse_btc_to_sat(val)
+                    .map_err(|e| NodeError::Config(format!("conf minrelaytxfee: {e}")))?;
                 self.mempool.min_relay_fee_btc = Some(val.to_string());
             }
             "mempoolexpiry" | "mempool_expiry" => {
@@ -773,6 +811,8 @@ impl NodeConfig {
                         "conf blockmintxfee requires a value".into(),
                     ));
                 }
+                parse_btc_to_sat(val)
+                    .map_err(|e| NodeError::Config(format!("conf blockmintxfee: {e}")))?;
                 self.block_min_tx_fee_btc = Some(val.to_string());
             }
             "alertnotify" | "alert_notify" => {
