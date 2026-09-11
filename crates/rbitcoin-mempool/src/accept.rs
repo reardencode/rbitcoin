@@ -1087,6 +1087,19 @@ impl ActiveMempool {
         Ok(())
     }
 
+    /// Remove `txid` and live mempool txs that spend it (1p1c child-fail rollback).
+    pub fn remove_txid_tree(&mut self, txid: &Txid) {
+        let n_out = self
+            .get_tx(txid)
+            .map(|tx| tx.output.len() as u32)
+            .unwrap_or(0);
+        let spent: Vec<OutPoint> = (0..n_out)
+            .map(|vout| OutPoint { txid: *txid, vout })
+            .collect();
+        let _ = self.evict_conflicts_with(&spent);
+        let _ = self.remove_txid(txid);
+    }
+
     /// Remove all txs that appear in a confirmed block (coinbase ignored if present).
     ///
     /// Missing mempool entries are skipped (already not in pool). Returns how many removed.
@@ -2731,6 +2744,37 @@ mod tests {
             .expect_err("invalid parent");
         assert!(matches!(err, AcceptError::MissingPrevout(_)), "got {err}");
         assert_eq!(mp.orphan_count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_txid_tree_evicts_parent_and_spenders() {
+        let dir = tmp_dir();
+        let (op, txout, utxos) = chain_utxo(100_000);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let parent = spend_tx(op, txout.value.to_sat() - 1_000);
+        let parent_id = parent.compute_txid();
+        mp.accept_tx(&parent, &utxos, TIP_OK).unwrap();
+        let child = spend_tx(
+            OutPoint {
+                txid: parent_id,
+                vout: 0,
+            },
+            500,
+        );
+        let child_id = child.compute_txid();
+        mp.accept_tx(&child, &utxos, TIP_OK).unwrap();
+        assert!(mp.graph.contains(&parent_id));
+        assert!(mp.graph.contains(&child_id));
+        mp.remove_txid_tree(&parent_id);
+        assert!(
+            !mp.graph.contains(&parent_id),
+            "parent must leave the mempool"
+        );
+        assert!(
+            !mp.graph.contains(&child_id),
+            "spenders of the parent must leave with it"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

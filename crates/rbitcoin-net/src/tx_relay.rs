@@ -1309,7 +1309,7 @@ impl MempoolHub {
 
     fn rollback_1p1c_parent(&self, txid: &Txid) {
         let mut g = self.lock_write();
-        let _ = g.remove_txid(txid);
+        g.remove_txid_tree(txid);
     }
 
     fn note_if_accept_failure(&self, tx: &Transaction, e: &AcceptError) {
