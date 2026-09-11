@@ -651,7 +651,15 @@ pub(crate) fn method_help(m: &str) -> String {
              Happy path: isvalid, scriptPubKey, isscript, iswitness. Invalid is \
              {isvalid:false} only (no error_locations)."
             .into(),
-        "gettxout" => "gettxout txid n (include_mempool) — Class A + mempool.".into(),
+        "gettxout" => "gettxout txid n (include_mempool)\n\
+             Class A + mempool. Default include_mempool hides confirmed outs spent by a live mempool tx."
+            .into(),
+        "sendrawtransaction" => {
+            "sendrawtransaction hexstring (maxfeerate) (maxburnamount)\n\
+             RPC submit only. Default maxfeerate 0.10 BTC/kvB (0 unlimited; >1 BTC/kvB is a parameter error). \
+             Default maxburnamount 0. P2P relay is not capped."
+                .into()
+        }
         "getchaintips" => "getchaintips — active + held/archive side tips + headers-only.".into(),
         "getdeploymentinfo" => {
             "getdeploymentinfo (blockhash)\nBuried deployments from ChainParams. No BIP9.".into()

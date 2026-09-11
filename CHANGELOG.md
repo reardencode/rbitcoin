@@ -39,6 +39,15 @@ before 1.0).
 
 ### Changed
 
+- **RPC / CLI honesty (Q-59 rest):** `gettxout` default `include_mempool`
+  returns `null` when a live mempool tx spends the confirmed out.
+  `sendrawtransaction` / `testmempoolaccept` / `submitpackage` enforce
+  Core-shaped `maxfeerate` (default 0.10 BTC/kvB, `0` unlimited, `>1`
+  BTC/kvB is a parameter error) and `maxburnamount` (default 0) **on RPC
+  submit only** — P2P `accept_tx` is not capped. JSON-RPC array batches
+  longer than `--rpcworkqueue N` (when set) are HTTP 500; unset stays
+  unlimited. `getmininginfo.blockmintxfee` is `sat_btc_json` BTC/kvB.
+  [`docs/rpc.md`](docs/rpc.md) / [`OPERATOR.md`](OPERATOR.md).
 - **One assemble path:** `AssembleMode::Full` and `validate_block_connect` are
   gone. Confirm is optimistic assemble then `structural_validate_spends`
   (spentness, coinbase maturity, BIP68). Connect tests use
