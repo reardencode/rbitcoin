@@ -2024,19 +2024,24 @@ impl Query {
     /// Minimum tip advance between in-process io_uring recovers.
     pub const URING_RECOVER_MIN_TIP_GAP: u32 = 1000;
 
-    pub fn uring_recover(&self, reason: &'static str) -> Result<UringRecover, QueryError> {
+    pub fn uring_recover(&self, reason: &'static str) -> UringRecover {
         let tip = self.tip_height().map(|h| h.0).unwrap_or(0);
-        let last = self.uring_recover_tip.load(AtomicOrdering::Acquire);
-        let last_opt = if last == u32::MAX { None } else { Some(last) };
-        if !uring_recover_credit(last_opt, tip) {
-            return Ok(UringRecover::Exhausted);
+        loop {
+            let last = self.uring_recover_tip.load(AtomicOrdering::Acquire);
+            let last_opt = if last == u32::MAX { None } else { Some(last) };
+            if !uring_recover_credit(last_opt, tip) {
+                return UringRecover::Exhausted;
+            }
+            if self
+                .uring_recover_tip
+                .compare_exchange(last, tip, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
+                .is_ok()
+            {
+                rbitcoin_store::note_uring_recover();
+                rbitcoin_log::warn!("ibd: uring recover tip={tip} reason={reason}");
+                return UringRecover::Recovered;
+            }
         }
-        let n = self.store.repair_class_c_above_tip()?;
-        rbitcoin_store::drop_thread_local();
-        self.uring_recover_tip.store(tip, AtomicOrdering::Release);
-        rbitcoin_store::note_uring_recover();
-        rbitcoin_log::warn!("ibd: uring recover tip={tip} n={n} reason={reason}");
-        Ok(UringRecover::Recovered)
     }
 
     /// Highest height on the RAM fence. Not the in-flight prune HWM
