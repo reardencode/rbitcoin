@@ -277,6 +277,14 @@ impl SegmentedTxHead {
     }
 
     #[cfg(test)]
+    pub(crate) fn take_open_page_writes(&self) -> u64 {
+        self.segments_snapshot()
+            .last()
+            .and_then(|s| s.head.as_ref().map(|h| h.take_page_writes()))
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
     pub(crate) fn take_sealed_g_page_preads(&self) -> u64 {
         self.segments_snapshot()
             .iter()

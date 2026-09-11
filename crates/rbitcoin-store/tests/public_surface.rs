@@ -12,12 +12,12 @@ use rbitcoin_store::{
     leftover_probe_diag_recorded, list_materialize_claims, list_runs, load_tweak_wave,
     materialize_sh_unsorted_from_class_a, merkle_root_from_txids, next_run_path, output_flags,
     script_hash, sh_heads_insert_capped, spend_ann_backend, spend_meta_backend, spent_abs,
-    take_raw_clone_n, unsorted_collect_workers, unsorted_done_last_fk, unsorted_pack_workers,
-    unsorted_shard_dir, write_sorted_run, BlockQueue, ColdProgress, FkMap, FkSet, HeadOpenOpts,
-    HeadResizeSizeSnapshot, HeadScale, HeaderRecord, HeightFence, IdxBodyJob, IdxBodyMode,
-    InputRecord, OutputRecord, PointRecord, QueuedBlockMeta, ReadIoBackend, ScriptHashRecord,
-    ShHeadValue, SpTweaksTable, Store, StoreError, StoreLayout, StoreSecret, TakenRaw, TxRecord,
-    U32Map, U64IdentityHasher, U64Map, U64Set, WriteIoBackend, INCLUDE_HWM_NAME, SH_HEADS_CAP,
+    unsorted_collect_workers, unsorted_done_last_fk, unsorted_pack_workers, unsorted_shard_dir,
+    write_sorted_run, BlockQueue, ColdProgress, FkMap, FkSet, HeadOpenOpts, HeadResizeSizeSnapshot,
+    HeadScale, HeaderRecord, HeightFence, IdxBodyJob, IdxBodyMode, InputRecord, OutputRecord,
+    PointRecord, QueuedBlockMeta, ReadIoBackend, ScriptHashRecord, ShHeadValue, SpTweaksTable,
+    Store, StoreError, StoreLayout, StoreSecret, TakenRaw, TxRecord, U32Map, U64IdentityHasher,
+    U64Map, U64Set, WriteIoBackend, INCLUDE_HWM_NAME, SH_HEADS_CAP,
 };
 
 #[test]
@@ -83,7 +83,6 @@ fn crate_root_exports_cross_crate_names() {
     let _ = list_runs;
     let _ = materialize_sh_unsorted_from_class_a;
     let _ = output_flags::MULTI_SPENDER;
-    let _ = take_raw_clone_n;
     let _ = unsorted_collect_workers;
     let _ = unsorted_done_last_fk;
     let _ = unsorted_pack_workers;

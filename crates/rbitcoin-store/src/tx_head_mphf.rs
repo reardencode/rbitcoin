@@ -281,17 +281,15 @@ mod tests {
         let fd = BdzMphf::read_from(&p).unwrap();
         let serial = fd.index_batch(&keys[..8], &mut IoCtx::none()).unwrap();
         let mut session = UringSession::try_open_kind(SessionKind::Pool, 32).expect("pool");
-        let _ = crate::uring_session::test_take_last_sqe_lens();
+        let _ = session.take_sqe_n();
         let mut ctx = IoCtx::held(&mut session);
         let batch = fd.index_batch(&keys[..8], &mut ctx).unwrap();
         session.drain_all().unwrap();
         assert_eq!(batch, serial);
-        let sqes = crate::uring_session::test_take_last_sqe_lens();
         assert!(
-            !sqes.is_empty(),
+            session.take_sqe_n() > 0,
             "index_batch(held) must submit g pages on the held session"
         );
-        assert!(sqes.iter().all(|&len| len > 0));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

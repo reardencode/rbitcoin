@@ -12,49 +12,6 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-#[cfg(debug_assertions)]
-mod io_spies {
-    use std::cell::RefCell;
-    thread_local! {
-        static TX_FULL_GETS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
-        static TXID_GET_MANY: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
-    }
-
-    pub fn reset_tx_full_gets() {
-        TX_FULL_GETS.with(|c| c.borrow_mut().clear());
-    }
-
-    pub fn tx_full_gets() -> Vec<u64> {
-        TX_FULL_GETS.with(|c| c.borrow().clone())
-    }
-
-    pub fn reset_txid_get_many() {
-        TXID_GET_MANY.with(|c| c.borrow_mut().clear());
-    }
-
-    pub fn txid_get_many_fks() -> Vec<u64> {
-        TXID_GET_MANY.with(|c| c.borrow().clone())
-    }
-
-    pub fn note_tx_full(id: u64) {
-        TX_FULL_GETS.with(|c| c.borrow_mut().push(id));
-    }
-
-    pub fn note_txid_get_many(fks: &[rbitcoin_primitives::Fk]) {
-        TXID_GET_MANY.with(|c| {
-            let mut log = c.borrow_mut();
-            for fk in fks {
-                if let Some(id) = fk.get() {
-                    log.push(id);
-                }
-            }
-        });
-    }
-}
-
-#[cfg(debug_assertions)]
-pub use io_spies::{reset_tx_full_gets, reset_txid_get_many, tx_full_gets, txid_get_many_fks};
-
 /// Sidecar in the hot `{datadir}/store`: `inwit.body` / `inwit.idx/` live under
 /// `{datadir-cold}/store`. Presence-only (path always comes from the operator).
 pub const INWIT_RELOC_NAME: &str = "inwit.reloc";
@@ -267,6 +224,10 @@ pub struct Store {
     height_fence: std::sync::RwLock<HeightFence>,
     /// BIP113 window at the fence tip (extend O(1); pop rebuilds).
     mtp_ring: std::sync::RwLock<MtpRing>,
+    #[cfg(debug_assertions)]
+    tx_full_log: std::sync::Mutex<Vec<u64>>,
+    #[cfg(debug_assertions)]
+    txid_get_many_log: std::sync::Mutex<Vec<u64>>,
 }
 
 /// How txid → Class A fk picks among rows with the same txid.
@@ -351,6 +312,10 @@ impl Store {
             path,
             cold_path,
             head_scale: layout.head_scale,
+            #[cfg(debug_assertions)]
+            tx_full_log: std::sync::Mutex::new(Vec::new()),
+            #[cfg(debug_assertions)]
+            txid_get_many_log: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -469,6 +434,10 @@ impl Store {
             path,
             cold_path,
             head_scale: layout.head_scale,
+            #[cfg(debug_assertions)]
+            tx_full_log: std::sync::Mutex::new(Vec::new()),
+            #[cfg(debug_assertions)]
+            txid_get_many_log: std::sync::Mutex::new(Vec::new()),
         };
         store.rebuild_mtp_ring()?;
         Ok(store)
@@ -681,6 +650,34 @@ impl Store {
         self.txs.get(fk)
     }
 
+    pub fn reset_tx_full_gets(&self) {
+        #[cfg(debug_assertions)]
+        self.tx_full_log.lock().unwrap().clear();
+    }
+
+    pub fn tx_full_gets(&self) -> Vec<u64> {
+        #[cfg(debug_assertions)]
+        {
+            return self.tx_full_log.lock().unwrap().clone();
+        }
+        #[cfg(not(debug_assertions))]
+        Vec::new()
+    }
+
+    pub fn reset_txid_get_many(&self) {
+        #[cfg(debug_assertions)]
+        self.txid_get_many_log.lock().unwrap().clear();
+    }
+
+    pub fn txid_get_many_fks(&self) -> Vec<u64> {
+        #[cfg(debug_assertions)]
+        {
+            return self.txid_get_many_log.lock().unwrap().clone();
+        }
+        #[cfg(not(debug_assertions))]
+        Vec::new()
+    }
+
     /// Full Class A body by fk: zip `txout` + `inwit`.
     pub fn get_tx_full(
         &self,
@@ -688,7 +685,7 @@ impl Store {
     ) -> Result<(TxRecord, Vec<InputRecord>, Vec<OutputRecord>), StoreError> {
         #[cfg(debug_assertions)]
         if let Some(id) = fk.get() {
-            io_spies::note_tx_full(id);
+            self.tx_full_log.lock().unwrap().push(id);
         }
         self.txs.get_full(fk)
     }
@@ -713,7 +710,14 @@ impl Store {
     /// Page-grouped `txid.body` identity for scattered create fks.
     pub fn txids_get_many(&self, fks: &[Fk]) -> Result<Vec<Option<[u8; 32]>>, StoreError> {
         #[cfg(debug_assertions)]
-        io_spies::note_txid_get_many(fks);
+        {
+            let mut log = self.txid_get_many_log.lock().unwrap();
+            for fk in fks {
+                if let Some(id) = fk.get() {
+                    log.push(id);
+                }
+            }
+        }
         self.txs.txid_sidefile().get_many(fks)
     }
 

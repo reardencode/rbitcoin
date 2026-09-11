@@ -55,26 +55,6 @@ pub const PROBE_CANDS_INLINE: usize = 8;
 /// Max bytes of one head page load (1024 × 8 B). 4 B entries use half.
 pub const PROBE_REGION_BYTES: usize = (PAGE_SLOTS as usize) * 8;
 
-#[cfg(test)]
-thread_local! {
-    static HEAD_PAGE_WRITES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-fn test_note_head_page_write() {
-    HEAD_PAGE_WRITES.with(|c| c.set(c.get().saturating_add(1)));
-}
-
-/// Drain counted dirty-page write-backs from [`AddressHead::insert_many_in_place`].
-#[cfg(test)]
-pub fn test_take_head_page_writes() -> u64 {
-    HEAD_PAGE_WRITES.with(|c| {
-        let n = c.get();
-        c.set(0);
-        n
-    })
-}
-
 /// Concurrent probe page preads on a held plan TLS session (matches ring depth).
 /// One buffer per in-flight slot — hop keys on CQE, then reuse.
 const PROBE_PAGES_IN_FLIGHT: usize = crate::uring_session::DEFAULT_ENTRIES as usize;
@@ -579,6 +559,7 @@ pub fn decode_layout_ext(ext: &[u8; 16]) -> Result<(HeadLayout, u64), StoreError
 pub struct AddressHead {
     file: TableFile,
     layout: HeadLayout,
+    page_writes: AtomicU64,
 }
 
 impl AddressHead {
@@ -604,7 +585,11 @@ impl AddressHead {
         file.set_logical_len(need)?;
         file.zero_range(0, body_bytes)?;
         remove_legacy_meta_sidecar(&path);
-        Ok(Self { file, layout })
+        Ok(Self {
+            file,
+            layout,
+            page_writes: AtomicU64::new(0),
+        })
     }
 
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
@@ -629,7 +614,17 @@ impl AddressHead {
             ));
         }
         remove_legacy_meta_sidecar(&path);
-        Ok(Self { file, layout })
+        Ok(Self {
+            file,
+            layout,
+            page_writes: AtomicU64::new(0),
+        })
+    }
+
+    /// Dirty probe-page write-backs since last take (instance stats).
+    #[cfg(test)]
+    pub fn take_page_writes(&self) -> u64 {
+        self.page_writes.swap(0, Ordering::Relaxed)
     }
 
     pub fn bits(&self) -> u32 {
@@ -803,8 +798,7 @@ impl AddressHead {
             if dirty {
                 let off = self.entry_off(page_base);
                 self.file.write_at(off, &buf[..n])?;
-                #[cfg(test)]
-                test_note_head_page_write();
+                self.page_writes.fetch_add(1, Ordering::Relaxed);
             }
             i = j;
         }
@@ -1474,7 +1468,7 @@ mod tests {
         insert_one(&h, &txid, Fk(9)).unwrap();
         let serial = probe_one(&h, &txid).unwrap();
         let mut session = UringSession::try_open_kind(SessionKind::Pool, 32).expect("pool");
-        let _ = crate::uring_session::test_take_last_sqe_lens();
+        let _ = session.take_sqe_n();
         let mut ctx = IoCtx::held(&mut session);
         let batch = h
             .probe_fks_batch_ctx(&[txid], &mut ctx)
@@ -1482,9 +1476,8 @@ mod tests {
         session.drain_all().unwrap();
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0], serial);
-        let sqes = crate::uring_session::test_take_last_sqe_lens();
         assert!(
-            !sqes.is_empty(),
+            session.take_sqe_n() > 0,
             "probe_fks_batch_ctx(held) must submit on the held session"
         );
         let _ = std::fs::remove_file(&path);

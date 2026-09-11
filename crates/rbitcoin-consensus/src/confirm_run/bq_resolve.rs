@@ -846,7 +846,7 @@ mod tests {
         }
         // win = 0.2 * 60 = 12; ready=8 > 6 → hold the 1-block tail
         let _ = q.block_queue_update_soft_pressure(Some(0.2));
-        let _ = rbitcoin_store::take_raw_clone_n();
+        let _ = q.block_queue_take_raw_clone_n();
         let st = resolve_wave(&q, &params, Milestone::NONE, &[8]).stats;
         assert_eq!(st.heights, 0, "fat BQ must not mint a 1-block layer");
         assert_eq!(
@@ -855,7 +855,7 @@ mod tests {
         );
         assert_eq!(st.precompute_ns, 0, "hold must not TxPrecompute::from_tx");
         assert_eq!(
-            rbitcoin_store::take_raw_clone_n(),
+            q.block_queue_take_raw_clone_n(),
             0,
             "hold must not clone raw payload"
         );
@@ -950,7 +950,7 @@ mod tests {
             q.block_queue_mark_resolve_complete(h).unwrap();
         }
         let _ = q.block_queue_update_soft_pressure(Some(3.0));
-        let _ = rbitcoin_store::take_raw_clone_n();
+        let _ = q.block_queue_take_raw_clone_n();
         let st = resolve_wave(&q, &params, Milestone::NONE, &[15]).stats;
         assert_eq!(
             st.heights, 0,
@@ -958,7 +958,7 @@ mod tests {
         );
         assert_eq!(st.decode_ns, 0);
         assert_eq!(st.precompute_ns, 0);
-        assert_eq!(rbitcoin_store::take_raw_clone_n(), 0);
+        assert_eq!(q.block_queue_take_raw_clone_n(), 0);
         assert!(q.block_queue_has_height(15));
         assert!(
             q.lookup_started_hi().is_none(),

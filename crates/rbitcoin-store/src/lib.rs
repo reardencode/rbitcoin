@@ -58,8 +58,6 @@ mod var_table;
 
 pub use crate::compact::output_flags;
 pub use address_head::{is_probe_exhausted_error, is_store_corrupt_display};
-#[cfg(any(test, debug_assertions))]
-pub use block_queue::take_raw_clone_n;
 pub use block_queue::{BlockQueue, QueuedBlockMeta, TakenRaw};
 pub use block_wire::block_wire_input_count;
 pub use error::StoreError;
@@ -91,8 +89,6 @@ pub use sp_tweaks::SpTweaksTable;
 pub use sp_tweaks_uring::load_tweak_wave;
 pub use spend_annotate_uring::spend_ann_backend;
 pub use store::{keep_unspent_vout_subsequence, Store, StoreLayout};
-#[cfg(debug_assertions)]
-pub use store::{reset_tx_full_gets, reset_txid_get_many, tx_full_gets, txid_get_many_fks};
 pub use store_secret::StoreSecret;
 pub use tx_table::HeadResizeSizeSnapshot;
 pub use tx_table::{

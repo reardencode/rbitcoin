@@ -420,7 +420,7 @@ mod tests {
         let b = [0x22u8; 32];
         t.append_batch(0, &[a, b]).unwrap();
         let mut session = UringSession::try_open_kind(SessionKind::Pool, 32).expect("pool");
-        let _ = crate::uring_session::test_take_last_sqe_lens();
+        let _ = session.take_sqe_n();
         let (map, pages) = t
             .get_many_page_grouped_on_session(&[Fk(1), Fk(2)], &mut session)
             .expect("session identity");
@@ -428,9 +428,8 @@ mod tests {
         assert_eq!(pages, 1);
         assert_eq!(map.get(&1), Some(&a));
         assert_eq!(map.get(&2), Some(&b));
-        let sqes = crate::uring_session::test_take_last_sqe_lens();
         assert!(
-            !sqes.is_empty(),
+            session.take_sqe_n() > 0,
             "get_many_page_grouped_on_session must submit on the held session"
         );
         let _ = std::fs::remove_dir_all(&dir);

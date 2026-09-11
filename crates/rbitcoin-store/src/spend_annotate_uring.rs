@@ -772,7 +772,8 @@ mod tests {
         let abs = crate::tx_table::spent_abs(off, 0);
         let bulk = t.get_spender_meta_at_abs_batch(&[abs]).unwrap();
         let (field, flags) = bulk[0].unwrap();
-        let _ = uring_session::test_take_last_sqe_rw_flags();
+        let _ = uring_session::tls_take_sqe_n();
+        let _ = uring_session::tls_take_sqe_rw_nonzero();
         let cold = put_spend_batch_by_abs_meta_known(
             &t,
             &spenders,
@@ -782,15 +783,10 @@ mod tests {
         )
         .unwrap();
         assert!(cold.is_empty());
-        let sqe_flags = uring_session::test_take_last_sqe_rw_flags();
-        assert!(
-            !sqe_flags.is_empty(),
-            "uring spend annotate must push at least one SQE"
-        );
-        assert!(
-            sqe_flags.iter().all(|&f| f == 0),
-            "annotate SQEs must not set RWF_DONTCACHE; got {sqe_flags:?}"
-        );
+        let n = uring_session::tls_take_sqe_n();
+        let nz = uring_session::tls_take_sqe_rw_nonzero();
+        assert!(n > 0, "uring spend annotate must push at least one SQE");
+        assert_eq!(nz, 0, "annotate SQEs must not set RWF_DONTCACHE");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -963,7 +959,8 @@ mod tests {
         let abs2 = crate::tx_table::spent_abs(off, 2);
         let k0 = t.get_spender_meta_at_abs_batch(&[abs0]).unwrap()[0].unwrap();
         let k2 = t.get_spender_meta_at_abs_batch(&[abs2]).unwrap()[0].unwrap();
-        let _ = uring_session::test_take_last_sqe_lens();
+        let _ = uring_session::tls_take_sqe_n();
+        let _ = uring_session::tls_take_max_pwrite_len();
         let cold = put_spend_batch_by_abs_meta_known(
             &t,
             &spenders,
@@ -973,17 +970,14 @@ mod tests {
         )
         .unwrap();
         assert!(cold.is_empty());
-        let lens = uring_session::test_take_last_sqe_lens();
         assert!(
-            !lens.is_empty(),
+            uring_session::tls_take_sqe_n() > 0,
             "uring spend annotate must push at least one SQE"
         );
-        // Page 0 is clipped past the 16 B file header; the write is the published
-        // page window (here the whole 3-slot spent record), never one 9 B SQE per vout.
-        let writes: Vec<u32> = lens.into_iter().filter(|&n| n != META_LEN as u32).collect();
+        let max_w = uring_session::tls_take_max_pwrite_len();
         assert!(
-            writes.iter().any(|&n| n >= 3 * META_LEN as u32),
-            "expected a page-window write covering both slots; sqe lens={writes:?} (9 B-only is the old path)"
+            max_w >= 3 * META_LEN as u32,
+            "expected a page-window write covering both slots; max pwrite={max_w} (9 B-only is the old path)"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -977,13 +977,12 @@ mod tests {
             crate::uring_session::SessionKind::Pool,
             || {
                 let (dir, t, txids) = seed_table(16);
-                let _ = crate::uring_session::test_take_last_sqe_lens();
+                let _ = crate::uring_session::tls_take_sqe_n();
                 let pread = resolve_fk_and_range_pread(&t, &txids, None, false).unwrap();
                 let via = resolve_fk_and_range_batch(&t, &txids).unwrap();
                 assert_eq!(pread, via);
-                let sqes = crate::uring_session::test_take_last_sqe_lens();
                 assert!(
-                    !sqes.is_empty(),
+                    crate::uring_session::tls_take_sqe_n() > 0,
                     "pool resolve must push probe/idx SQEs on the held session"
                 );
                 let _ = std::fs::remove_dir_all(&dir);

@@ -1599,13 +1599,13 @@ fn bulk_session_megakey_page_chain_contiguous_once() {
     for (i, (_, e)) in got.iter().enumerate() {
         assert_eq!(e.create_tx_fk, Fk(i as u64 + 1));
     }
-    reset_sh_page_chain_ios();
+    let _ = t.take_page_ios();
     let got2 = t.entries(&sh).unwrap();
     assert_eq!(got2.len(), n);
+    let ios = t.take_page_ios();
     assert!(
-        sh_page_chain_ios() <= 2,
-        "contiguous two-page chain should span-read, ios={}",
-        sh_page_chain_ios()
+        ios <= 2,
+        "contiguous two-page chain should span-read, ios={ios}"
     );
     let (first, last, extent_n) = match t.head_value(&sh).unwrap().unwrap() {
         ShHeadValue::Extent { last_page } => {
@@ -1700,13 +1700,10 @@ fn extent_append_links_tail_when_bump_moved() {
     );
     assert_ne!(last1, last0);
     assert_eq!(t.entries(&sh).unwrap().len(), n + 1);
-    reset_sh_page_chain_ios();
+    let _ = t.take_page_ios();
     assert_eq!(t.entries(&sh).unwrap().len(), n + 1);
-    assert!(
-        sh_page_chain_ios() >= 3,
-        "span + tail read, ios={}",
-        sh_page_chain_ios()
-    );
+    let ios = t.take_page_ios();
+    assert!(ios >= 3, "span + tail read, ios={ios}");
     let extra2: Vec<_> = ((n as u64 + 2)..=(n as u64 + 1 + SH_PAGE_EXTENT_STREAM_MAX as u64))
         .map(|i| rec(sh, i, 0))
         .collect();
@@ -1736,13 +1733,10 @@ fn extent_append_glued_bumps_extent_n() {
     assert_eq!(n1, 3, "glued HWM grows extent_n in place");
     assert_eq!(last, base + 2 * SH_PAGE_SIZE as u64);
     assert_eq!(t.entries(&sh).unwrap().len(), n + 1);
-    reset_sh_page_chain_ios();
+    let _ = t.take_page_ios();
     assert_eq!(t.entries(&sh).unwrap().len(), n + 1);
-    assert!(
-        sh_page_chain_ios() <= 2,
-        "glued grow stays one span, ios={}",
-        sh_page_chain_ios()
-    );
+    let ios = t.take_page_ios();
+    assert!(ios <= 2, "glued grow stays one span, ios={ios}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

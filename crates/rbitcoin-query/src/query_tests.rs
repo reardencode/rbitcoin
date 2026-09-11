@@ -1274,14 +1274,14 @@ fn scripthash_history_expands_creates_via_load_creates_once() {
     assert_eq!(utxos.len(), 5);
     assert!(utxos.iter().all(|u| u.tx_pos == 0));
 
-    rbitcoin_store::reset_tx_full_gets();
+    q.store().reset_tx_full_gets();
     let scanned = q.scan_unspent_scripts(&[vec![0x51]]).unwrap();
     assert_eq!(scanned.len(), 5);
     assert!(scanned.iter().all(|u| u.coinbase));
     assert!(
-        rbitcoin_store::tx_full_gets().is_empty(),
+        q.store().tx_full_gets().is_empty(),
         "shindex coinbase from create fk, not get_tx_full: {:?}",
-        rbitcoin_store::tx_full_gets()
+        q.store().tx_full_gets()
     );
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -1460,11 +1460,11 @@ fn scripthash_listunspent_identity_skips_spent_creates() {
 
     let sh = script_hash(&[0x51]);
     let keep = create_fks[2];
-    rbitcoin_store::reset_txid_get_many();
+    q.store().reset_txid_get_many();
     let utxos = q.scripthash_listunspent(&sh).unwrap();
     assert_eq!(utxos.len(), 1);
     assert_eq!(utxos[0].tx_hash, create_txids[2]);
-    let ids = rbitcoin_store::txid_get_many_fks();
+    let ids = q.store().txid_get_many_fks();
     assert!(
         ids.iter().all(|fk| *fk == keep.0),
         "listunspent txid.body only for unspent create, not spent {:?}: {:?}",
@@ -1674,10 +1674,10 @@ fn connect_chain_query_surface() {
     assert!(q.tx_fk_by_txid(&tx.txid).unwrap().is_some());
     let inp = q.tx_input_at_fk(fks[0], &tx, 0).unwrap();
     assert!(inp.is_coinbase());
-    rbitcoin_store::reset_tx_full_gets();
+    q.store().reset_tx_full_gets();
     let out = q.tx_output_at_fk(fks[0], 0).unwrap();
     assert!(
-        rbitcoin_store::tx_full_gets().is_empty(),
+        q.store().tx_full_gets().is_empty(),
         "tx_output_at_fk is outs-only (no inwit zip)"
     );
     assert_eq!(out.value, 50_0000_0000);
@@ -2150,13 +2150,13 @@ fn reconstruct_archived_contiguous_skips_get_tx_full() {
         }
         prev = q.connect_block(Height(h), &header, &txs).unwrap();
     }
-    rbitcoin_store::reset_tx_full_gets();
+    q.store().reset_tx_full_gets();
     let arch = q.reconstruct_archived_block(&h1_hash).unwrap().unwrap();
     assert_eq!(arch.txdata.len(), 3);
     assert!(
-        rbitcoin_store::tx_full_gets().is_empty(),
+        q.store().tx_full_gets().is_empty(),
         "contiguous header_txs must span-load, not get_tx_full: {:?}",
-        rbitcoin_store::tx_full_gets()
+        q.store().tx_full_gets()
     );
     let fks = q.block_tx_fks(Height(1)).unwrap();
     for (tx, fk) in arch.txdata.iter().zip(fks.iter()) {
@@ -2233,12 +2233,12 @@ fn reconstruct_span_batches_foreign_parent_txids() {
     let h1_fks = q.block_tx_fks(Height(1)).unwrap();
     let same_id = h1_fks[0].get().unwrap();
 
-    rbitcoin_store::reset_tx_full_gets();
-    rbitcoin_store::reset_txid_get_many();
+    q.store().reset_tx_full_gets();
+    q.store().reset_txid_get_many();
     let arch = q.reconstruct_archived_block(&h1hash).unwrap().unwrap();
     assert_eq!(arch.txdata.len(), 2);
-    assert!(rbitcoin_store::tx_full_gets().is_empty());
-    let many = rbitcoin_store::txid_get_many_fks();
+    assert!(q.store().tx_full_gets().is_empty());
+    let many = q.store().txid_get_many_fks();
     assert_eq!(
         many.iter().filter(|&&id| id == parent_id).count(),
         1,
