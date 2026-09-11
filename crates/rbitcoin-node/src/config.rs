@@ -888,6 +888,29 @@ mod tests {
     }
 
     #[test]
+    fn minrelaytxfee_garbage_and_negative_are_config_errors() {
+        let mut c = NodeConfig::default();
+        let bad = c.apply_kv("minrelaytxfee", "nope").unwrap_err();
+        assert!(
+            format!("{bad}").contains("minrelaytxfee"),
+            "garbage must name the knob: {bad}"
+        );
+        let neg = c.apply_kv("minrelaytxfee", "-0.0001").unwrap_err();
+        assert!(
+            format!("{neg}").contains("minrelaytxfee"),
+            "negative must name the knob: {neg}"
+        );
+        assert_eq!(
+            c.apply_kv("minrelaytxfee", "0").unwrap(),
+            ConfApply::Applied
+        );
+        assert_eq!(
+            c.apply_kv("minrelaytxfee", "0.00000001").unwrap(),
+            ConfApply::Applied
+        );
+    }
+
+    #[test]
     fn default_datadir_is_native_cwd_relative() {
         let p = NodeConfig::default_datadir();
         assert_eq!(p, PathBuf::from(".").join("datadir"));
