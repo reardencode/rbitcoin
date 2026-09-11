@@ -507,7 +507,7 @@ impl Query {
     /// Confirm / spentness: connected instance only (height fence Some).
     pub fn tx_fk_by_txid_tip(&self, txid: &[u8; 32]) -> Result<Option<Fk>, QueryError> {
         if self.tx_index_enabled() {
-            return Ok(self.store.get_fk_by_txid_tip(txid)?);
+            return self.store.get_fk_by_txid_tip(txid);
         }
         Ok(None)
     }
@@ -588,9 +588,7 @@ impl Query {
         vout: u32,
         tip: Option<u32>,
     ) -> Result<bool, QueryError> {
-        Ok(self
-            .store
-            .has_confirmed_strong_spender_at(txid, vout, tip)?)
+        self.store.has_confirmed_strong_spender_at(txid, vout, tip)
     }
 
     /// Unspent subset of vouts on a create (batch; store uses tx.idx when needed).
@@ -599,7 +597,7 @@ impl Query {
         create_fk: Fk,
         vouts: &[u32],
     ) -> Result<Vec<u32>, QueryError> {
-        Ok(self.store.unspent_create_vouts(create_fk, vouts, None)?)
+        self.store.unspent_create_vouts(create_fk, vouts, None)
     }
 
     /// Batch [`Self::unspent_create_vouts`]: one `spent.idx` walk across creates.
@@ -607,7 +605,7 @@ impl Query {
         &self,
         items: &[(Fk, Vec<u32>)],
     ) -> Result<Vec<Vec<u32>>, QueryError> {
-        Ok(self.store.unspent_create_vouts_batch(items)?)
+        self.store.unspent_create_vouts_batch(items)
     }
 
     /// Enable/disable txid hash-head inserts on archive (default on). Off under
@@ -777,14 +775,14 @@ impl Query {
         let n_inputs = rbitcoin_store::block_wire_input_count(payload);
         let owned = payload.to_vec();
         let mut g = self.block_queue.lock().unwrap();
-        Ok(g.enqueue_vec(height, hash, header_fk, owned, n_inputs)?)
+        g.enqueue_vec(height, hash, header_fk, owned, n_inputs)
     }
 
     /// Remove RAM queue entry after combined confirm-write (or permanent drop).
     pub fn block_queue_dequeue_height(&self, height: u32) -> Result<usize, QueryError> {
         let mut g = self.block_queue.lock().unwrap();
         g.resolved.remove(&height);
-        Ok(g.dequeue_height(height)?)
+        g.dequeue_height(height)
     }
 
     /// Index-only queue entries (no payload clone). Empty after restart.
@@ -897,7 +895,7 @@ impl Query {
     /// Lookup finished TipOnly for this height (even if some keys missed).
     pub fn block_queue_mark_resolve_complete(&self, height: u32) -> Result<(), QueryError> {
         let mut g = self.block_queue.lock().unwrap();
-        Ok(g.mark_resolve_complete(height)?)
+        g.mark_resolve_complete(height)
     }
 
     pub fn block_queue_is_resolve_complete(&self, height: u32) -> bool {
@@ -960,7 +958,7 @@ impl Query {
         heights: &[u32],
     ) -> Result<usize, QueryError> {
         let mut g = self.block_queue.lock().unwrap();
-        Ok(g.mark_resolve_complete_wave(heights)?)
+        g.mark_resolve_complete_wave(heights)
     }
 
     /// Cheap process-owned cache sizes for the IBD `ibd: sizes` line.
@@ -1115,7 +1113,7 @@ impl Query {
                 return Ok(Some(fks));
             }
         }
-        Ok(self.store.header_txs.get_list(header_fk)?)
+        self.store.header_txs.get_list(header_fk)
     }
 
     /// Load tx row from Class A store.
@@ -1222,7 +1220,7 @@ impl Query {
         let Some((fk, _)) = self.get_header_by_hash(hash)? else {
             return Ok(false);
         };
-        Ok(self.store.header_txs.has_body(fk)?)
+        self.store.header_txs.has_body(fk)
     }
 
     /// Drop Class A body association for `hash` (header row kept; txs not freed).
@@ -1242,7 +1240,7 @@ impl Query {
 
     /// Total headers with a Class A body on disk (durable, any prior run).
     pub fn archived_block_count(&self) -> Result<u64, QueryError> {
-        Ok(self.store.archived_block_count()?)
+        self.store.archived_block_count()
     }
 
     /// Rebuild the post-tip work path from durable headers + Class A bodies.
@@ -1480,7 +1478,7 @@ impl Query {
 
     /// Flush header rows + Class A body associations (IBD writer durability).
     pub fn flush_header_archive(&self) -> Result<(), QueryError> {
-        Ok(self.store.flush_header_archive()?)
+        self.store.flush_header_archive()
     }
 
     /// Ensure a header row exists (no txs). Idempotent by full block hash.
@@ -1491,7 +1489,7 @@ impl Query {
     pub fn ensure_header(&self, header: &HeaderRecord) -> Result<Fk, QueryError> {
         // Store gate is authoritative (lock + uniqueness + prev integrity).
         // Skip confirm-parent-cache short-circuit so we never bypass ensure.
-        Ok(self.store.put_header(header)?)
+        self.store.put_header(header)
     }
 
     pub fn flush(&self) -> Result<(), QueryError> {

@@ -408,9 +408,7 @@ fn verify_tx_row(
 
     // Core: BADTX / CheckTransaction failures reject the tx (no script verify).
     // Harness for expect_ok=false requires Err; for expect_ok=true requires Ok.
-    if let Err(e) = check_transaction_struct(&tx) {
-        return Err(e);
-    }
+    check_transaction_struct(&tx)?;
 
     let mut prevouts = Vec::with_capacity(tx.input.len());
     for vin in &tx.input {

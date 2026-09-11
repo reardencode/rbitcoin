@@ -177,6 +177,7 @@ fn path_uses_sh_view(path: &str) -> bool {
 
 /// COMPAT.md: `?asof=` only on tx status/outspend(s) and address/scripthash
 /// `/`, `/utxo`, `/txs`, `/txs/chain` (not `/txs/mempool`).
+#[allow(clippy::match_like_matches_macro)] // route table is a match, not a one-line predicate
 fn path_accepts_asof(path: &str) -> bool {
     let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     match segs.as_slice() {
@@ -190,6 +191,7 @@ fn path_accepts_asof(path: &str) -> bool {
     }
 }
 
+#[allow(clippy::match_like_matches_macro)] // route table is a match, not a one-line predicate
 fn path_never_pins(path: &str) -> bool {
     let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     match segs.as_slice() {

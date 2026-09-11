@@ -927,6 +927,7 @@ fn confirm_batch_create_and_spend_parent_same_run() {
 /// Mainnet @546 shape:
 /// - height H: 1-in / 2-out parent
 /// - height H+1: tx spends both parent vouts (2-in/2-out), then same-block chain
+///
 /// IBD multi-block `confirm_wire_run` under Direct (live heads + spend batch).
 #[test]
 fn confirm_spend_both_vouts_of_one_input_parent() {
@@ -1456,7 +1457,6 @@ fn three_stage_confirm_and_parent_pin_surface() {
 
     // SCRIPTS
     let ok = confirm_scripts_phase(mat.batch).expect("scripts");
-    assert!(ok.work_ns > 0 || true);
 
     // WRITE
     let fks = confirm_write_phase(&q, &params, ms, ok.batch).expect("write");

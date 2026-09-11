@@ -321,7 +321,9 @@ mod tests {
         assert_eq!(MAX_HEADERS_RESULTS, 2_000);
         assert_eq!(MAX_LOCATOR_SZ, 101);
         // Stricter than rust-bitcoin's 5MB
-        assert!(MAX_PROTOCOL_MESSAGE_LENGTH < bitcoin::p2p::message::MAX_MSG_SIZE);
+        const {
+            assert!(MAX_PROTOCOL_MESSAGE_LENGTH < bitcoin::p2p::message::MAX_MSG_SIZE);
+        }
     }
 
     #[test]

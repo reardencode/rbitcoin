@@ -1096,10 +1096,9 @@ fn get_outs_denserels_by_range_sparse_need() {
         .unwrap()[0];
     let range = t.body.record_range(fk).unwrap();
     // Only need vout 1 — skip allocating big scripts on 0 and 2.
-    let (rows, body_ns, dec_ns) = t
+    let (rows, _, _) = t
         .get_outs_by_range_batch(&[(fk, range, want_txid, vec![1])])
         .unwrap();
-    assert!(body_ns > 0 || dec_ns > 0 || true); // timers fire or tiny fixture
     let (got, live, sparse) = rows[0].as_ref().expect("range denserels");
     assert_eq!(got.txid, want_txid);
     assert_eq!(live.len(), 1);

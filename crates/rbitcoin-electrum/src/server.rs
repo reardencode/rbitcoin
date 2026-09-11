@@ -1821,7 +1821,7 @@ fn scripthash_status_full_slot(
         .scripthash_history_slot(sh, slot)
         .map_err(|e| e.to_string())?;
     append_mempool_history(&mut hist, mp, sh);
-    Ok(scripthash_status(Some(query), &hist)?)
+    scripthash_status(Some(query), &hist)
 }
 
 /// Helper to compute electrum scripthash hex (reversed) from script bytes.

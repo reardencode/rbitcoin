@@ -80,6 +80,12 @@ pub struct WireBytes {
     pub sent: Arc<AtomicU64>,
 }
 
+impl Default for WireBytes {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WireBytes {
     pub fn new() -> Self {
         Self {

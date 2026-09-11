@@ -110,7 +110,9 @@ mod tests {
     #[test]
     fn max_inbound_env_default() {
         // Do not mutate env in parallel tests; just check parse of default path.
-        assert!(DEFAULT_MAX_INBOUND >= 1);
+        const {
+            assert!(DEFAULT_MAX_INBOUND >= 1);
+        }
         assert_eq!(RATE_LIMIT_BAN_SCORE, 50);
         assert_eq!(OVERSIZE_BAN_SCORE, 100);
     }

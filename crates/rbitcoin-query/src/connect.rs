@@ -214,8 +214,8 @@ impl Query {
                 continue;
             }
             let t_collect = std::time::Instant::now();
-            let mut records: Vec<ScriptHashRecord> = Vec::new();
-            records.reserve(item.tx_fks.len().saturating_mul(2));
+            let mut records: Vec<ScriptHashRecord> =
+                Vec::with_capacity(item.tx_fks.len().saturating_mul(2));
             for &fk in &item.tx_fks {
                 let pin = create_pins.and_then(|m| m.get(&fk));
                 self.collect_scripthash_creates(fk, &mut records, pin)?;

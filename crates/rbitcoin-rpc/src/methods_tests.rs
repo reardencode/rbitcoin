@@ -905,7 +905,7 @@ fn chain_methods_against_mined_regtest() {
         } else {
             assert_eq!(blk["height"], tip_h);
             assert_eq!(blk["hash"], best_s);
-            assert!(blk["tx"].as_array().unwrap().len() >= 1);
+            assert!(!blk["tx"].as_array().unwrap().is_empty());
         }
     }
     let _ = dispatch(&ctx, "getdifficulty", vec![]).unwrap();

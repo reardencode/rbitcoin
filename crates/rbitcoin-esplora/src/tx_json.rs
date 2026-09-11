@@ -616,7 +616,7 @@ mod tests {
         let v = vout_fields(&spk, 50_000, Network::Bitcoin);
         assert_eq!(v["value"], 50_000);
         assert_eq!(v["scriptpubkey_type"], "v0_p2wpkh");
-        assert!(v["scriptpubkey"].as_str().unwrap().len() > 0);
+        assert!(!v["scriptpubkey"].as_str().unwrap().is_empty());
         assert!(v.get("scriptpubkey_address").is_some());
     }
 

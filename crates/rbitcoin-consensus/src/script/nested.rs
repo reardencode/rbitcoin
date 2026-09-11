@@ -43,9 +43,7 @@ pub(crate) fn try_p2sh_nested_segwit(
         return None;
     }
     let redeem = items.last().unwrap().as_slice();
-    let Some((version, program)) = classify::witness_program(Script::from_bytes(redeem)) else {
-        return None;
-    };
+    let (version, program) = classify::witness_program(Script::from_bytes(redeem))?;
 
     // Core: scriptSig must be exactly CScript() << redeem (minimal single push).
     let canonical = minimal_push_encoding(redeem);

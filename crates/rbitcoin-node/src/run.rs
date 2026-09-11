@@ -775,7 +775,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             }
 
             let stagnant = last_tip_change.elapsed() >= Duration::from_secs(STALE_TIP_SECS);
-            if !stagnant || config.listen.connect.is_empty() == false || !config.listen.use_seeds {
+            if !stagnant || !config.listen.connect.is_empty() || !config.listen.use_seeds {
                 continue;
             }
             if addrman.is_empty() || shutdown.requested() {
