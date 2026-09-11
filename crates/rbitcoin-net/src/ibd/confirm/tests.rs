@@ -1283,78 +1283,88 @@ fn plan_epoch_stale_after_clear() {
 }
 
 #[test]
-fn write_store_fault_uring_requeues_then_aborts() {
-    use super::{apply_write_store_fault, classify_write_store_fault, WriteStoreFault};
+fn write_session_fault_is_engine_fault_and_requeue_puts_ready() {
     use rbitcoin_consensus::ConsensusError;
-    use rbitcoin_query::UringRecover;
     use rbitcoin_store::StoreError;
-    use std::sync::atomic::AtomicBool;
 
     let undrained = ConsensusError::Store(StoreError::Corrupt("invariant: io_uring undrained"));
     assert_eq!(
-        classify_write_store_fault(&undrained, Some(UringRecover::Recovered)),
-        WriteStoreFault::Requeue
-    );
-    assert_eq!(
-        classify_write_store_fault(&undrained, Some(UringRecover::Exhausted)),
-        WriteStoreFault::Abort
+        super::ConfirmRejectClass::from_consensus(&undrained),
+        super::ConfirmRejectClass::EngineFault
     );
     let leftover = ConsensusError::Store(StoreError::Corrupt("invariant: io_uring leftover cqe"));
     assert_eq!(
-        classify_write_store_fault(&leftover, Some(UringRecover::Recovered)),
-        WriteStoreFault::Requeue
+        super::ConfirmRejectClass::from_consensus(&leftover),
+        super::ConfirmRejectClass::EngineFault
     );
     let io = ConsensusError::Store(StoreError::io("/tmp/x", std::io::Error::other("disk")));
     assert_eq!(
-        classify_write_store_fault(&io, None),
-        WriteStoreFault::Reject(super::ConfirmRejectClass::EngineFault)
+        super::ConfirmRejectClass::from_consensus(&io),
+        super::ConfirmRejectClass::EngineFault
     );
 
     let feed = ConfirmFeed::new();
-    let reset = AtomicBool::new(false);
-    let raw = [1u8; 32];
+    let hash = bitcoin::BlockHash::from_byte_array([1u8; 32]);
     {
         let mut g = feed.inner.lock().unwrap();
         g.inflight.insert(10);
     }
-    apply_write_store_fault(&feed, &[(10, raw)], WriteStoreFault::Requeue, &reset);
-    assert!(reset.load(std::sync::atomic::Ordering::Acquire));
+    feed.requeue_hashes(std::iter::once((10, hash)));
     let g = feed.inner.lock().unwrap();
     assert!(g.ready.contains_key(&10));
     assert!(!g.inflight.contains(&10));
 }
 
 #[test]
-fn lookup_fault_policy_recover_abort_and_io_halt() {
+fn requeue_on_uring_recover_credits_then_skips_non_fault() {
+    let (_d, q) = rbitcoin_query::testutil::tiny_query_labeled("requeue-uring");
+    let feed = ConfirmFeed::new();
+    let hash = bitcoin::BlockHash::from_byte_array([3u8; 32]);
+    {
+        let mut g = feed.inner.lock().unwrap();
+        g.inflight.insert(7);
+    }
+    assert!(super::requeue_on_uring_recover(
+        &q,
+        &feed,
+        true,
+        "test",
+        std::iter::once((7, hash)),
+    ));
+    {
+        let g = feed.inner.lock().unwrap();
+        assert!(g.ready.contains_key(&7));
+        assert!(!g.inflight.contains(&7));
+    }
+    assert!(!super::requeue_on_uring_recover(
+        &q,
+        &feed,
+        false,
+        "test",
+        std::iter::empty(),
+    ));
+    assert_eq!(
+        q.uring_recover("again"),
+        rbitcoin_query::UringRecover::Exhausted
+    );
+}
+
+#[test]
+fn lookup_fault_policy_io_halt() {
     use super::{LookupFaultAction, LookupFaultPolicy};
     use rbitcoin_consensus::ConsensusError;
-    use rbitcoin_query::UringRecover;
     use rbitcoin_store::StoreError;
 
     let mut p = LookupFaultPolicy::default();
-    let uring = ConsensusError::Store(StoreError::Corrupt("invariant: io_uring undrained"));
-    assert_eq!(
-        p.on_err(&uring, Some(UringRecover::Recovered)),
-        LookupFaultAction::RecoverContinue
-    );
-    assert_eq!(
-        p.on_err(&uring, Some(UringRecover::Exhausted)),
-        LookupFaultAction::Abort
-    );
-    let leftover = ConsensusError::Store(StoreError::Corrupt("invariant: io_uring leftover cqe"));
-    assert_eq!(
-        p.on_err(&leftover, Some(UringRecover::Recovered)),
-        LookupFaultAction::RecoverContinue
-    );
     let bp = ConsensusError::Store(StoreError::BudgetFull("io_uring SQ"));
-    assert_eq!(p.on_err(&bp, None), LookupFaultAction::Ignore);
+    assert_eq!(p.on_err(&bp), LookupFaultAction::Ignore);
     let io = ConsensusError::Store(StoreError::io("/tmp/x", std::io::Error::other("disk")));
     for _ in 0..7 {
-        assert_eq!(p.on_err(&io, None), LookupFaultAction::Warn);
+        assert_eq!(p.on_err(&io), LookupFaultAction::Warn);
     }
-    assert_eq!(p.on_err(&io, None), LookupFaultAction::RejectEngineFault);
+    assert_eq!(p.on_err(&io), LookupFaultAction::RejectEngineFault);
     p.on_success();
-    assert_eq!(p.on_err(&io, None), LookupFaultAction::Warn);
+    assert_eq!(p.on_err(&io), LookupFaultAction::Warn);
 }
 
 #[test]

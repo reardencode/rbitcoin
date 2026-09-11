@@ -2044,6 +2044,17 @@ impl Query {
         }
     }
 
+    /// Take recover credit, or abort. Returns only after a credited recover.
+    pub fn uring_recover_or_abort(&self, reason: &'static str) {
+        match self.uring_recover(reason) {
+            UringRecover::Recovered => {}
+            UringRecover::Exhausted => {
+                let msg = format!("recover credit exhausted on {reason}");
+                rbitcoin_store::abort_uring_unusable(&msg);
+            }
+        }
+    }
+
     /// Highest height on the RAM fence. Not the in-flight prune HWM
     /// ([`Self::drain_and_fence_hi`] — drain can lag this).
     pub fn fence_tip_height(&self) -> Option<u32> {
