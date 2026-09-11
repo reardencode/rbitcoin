@@ -197,6 +197,42 @@ impl<'a> IoCtx<'a> {
 
 thread_local! {
     static FORCED_KIND: Cell<Option<SessionKind>> = const { Cell::new(None) };
+    static SESSION: std::cell::RefCell<Option<UringSession>> =
+        const { std::cell::RefCell::new(None) };
+    static DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+/// SQE count on the thread-local session (0 if none).
+#[cfg(test)]
+pub fn tls_take_sqe_n() -> u64 {
+    SESSION.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .map(|s| s.take_sqe_n())
+            .unwrap_or(0)
+    })
+}
+
+/// Nonzero-rw_flags SQE count on the thread-local session (0 if none).
+#[cfg(test)]
+pub fn tls_take_sqe_rw_nonzero() -> u64 {
+    SESSION.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .map(|s| s.take_sqe_rw_nonzero())
+            .unwrap_or(0)
+    })
+}
+
+/// Largest pwrite SQE on the thread-local session (0 if none).
+#[cfg(test)]
+pub fn tls_take_max_pwrite_len() -> u32 {
+    SESSION.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .map(|s| s.take_max_pwrite_len())
+            .unwrap_or(0)
+    })
 }
 
 /// Run `f` with TLS / `try_open` opening `kind` (does not nest a session).
@@ -232,6 +268,9 @@ pub struct UringSession {
     /// Set on undrained leftover, unexpected CQE, CQ overflow, or wait timeout.
     /// Push and [`Self::begin_batch`] fail closed; [`with_thread_local`] drops the TLS ring.
     poisoned: bool,
+    sqe_n: u64,
+    sqe_rw_nonzero: u64,
+    max_pwrite_len: u32,
 }
 
 impl UringSession {
@@ -306,7 +345,35 @@ impl UringSession {
             epoch: 0,
             kind,
             poisoned: false,
+            sqe_n: 0,
+            sqe_rw_nonzero: 0,
+            max_pwrite_len: 0,
         })
+    }
+
+    fn note_sqe(&mut self, rw_flags: i32) {
+        self.sqe_n = self.sqe_n.saturating_add(1);
+        if rw_flags != 0 {
+            self.sqe_rw_nonzero = self.sqe_rw_nonzero.saturating_add(1);
+        }
+    }
+
+    /// SQEs pushed since last take (instance stats, not a TLS probe).
+    #[cfg(test)]
+    pub fn take_sqe_n(&mut self) -> u64 {
+        std::mem::take(&mut self.sqe_n)
+    }
+
+    /// SQEs with nonzero `rw_flags` since last take.
+    #[cfg(test)]
+    pub fn take_sqe_rw_nonzero(&mut self) -> u64 {
+        std::mem::take(&mut self.sqe_rw_nonzero)
+    }
+
+    /// Largest pwrite SQE length since last take.
+    #[cfg(test)]
+    pub fn take_max_pwrite_len(&mut self) -> u32 {
+        std::mem::take(&mut self.max_pwrite_len)
     }
 
     pub fn kind(&self) -> SessionKind {
@@ -384,8 +451,7 @@ impl UringSession {
         user_data: u64,
         rw_flags: i32,
     ) -> Result<(), StoreError> {
-        #[cfg(test)]
-        test_note_sqe(rw_flags, buf.len() as u32);
+        self.note_sqe(rw_flags);
         #[cfg(not(target_os = "linux"))]
         let _ = rw_flags;
         if buf.is_empty() {
@@ -446,8 +512,8 @@ impl UringSession {
         user_data: u64,
         rw_flags: i32,
     ) -> Result<(), StoreError> {
-        #[cfg(test)]
-        test_note_sqe(rw_flags, buf.len() as u32);
+        self.note_sqe(rw_flags);
+        self.max_pwrite_len = self.max_pwrite_len.max(buf.len() as u32);
         #[cfg(not(target_os = "linux"))]
         let _ = rw_flags;
         if buf.is_empty() {
@@ -987,13 +1053,6 @@ pub fn with_thread_local<R>(
     let min_entries = min_entries.max(32).min(4096);
 
     {
-        use std::cell::{Cell, RefCell};
-
-        thread_local! {
-            static SESSION: RefCell<Option<UringSession>> = const { RefCell::new(None) };
-            static DEPTH: Cell<u32> = const { Cell::new(0) };
-        }
-
         // Gate once; TLS open uses try_open to avoid recursive enabled() probe.
         if !crate::bulk_io::io_uring_enabled() {
             return Err(StoreError::Unavailable);
@@ -1060,33 +1119,6 @@ pub fn with_thread_local<R>(
             out
         })
     }
-}
-
-// Test hook: last SQE rw_flags + buffer lengths from push_*_flags.
-#[cfg(test)]
-thread_local! {
-    static LAST_SQE_RW_FLAGS: std::cell::RefCell<Vec<i32>> =
-        std::cell::RefCell::new(Vec::new());
-    static LAST_SQE_LENS: std::cell::RefCell<Vec<u32>> =
-        std::cell::RefCell::new(Vec::new());
-}
-
-#[cfg(test)]
-fn test_note_sqe(rw_flags: i32, len: u32) {
-    LAST_SQE_RW_FLAGS.with(|c| c.borrow_mut().push(rw_flags));
-    LAST_SQE_LENS.with(|c| c.borrow_mut().push(len));
-}
-
-/// Drain recorded SQE rw_flags (tests only).
-#[cfg(test)]
-pub fn test_take_last_sqe_rw_flags() -> Vec<i32> {
-    LAST_SQE_RW_FLAGS.with(|c| std::mem::take(&mut *c.borrow_mut()))
-}
-
-/// Drain recorded SQE buffer lengths (tests only).
-#[cfg(test)]
-pub fn test_take_last_sqe_lens() -> Vec<u32> {
-    LAST_SQE_LENS.with(|c| std::mem::take(&mut *c.borrow_mut()))
 }
 
 /// Kind byte for [`pack_ud`]. Distinct per machine so a leftover CQE cannot

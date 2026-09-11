@@ -375,51 +375,6 @@ pub fn input_records_from_wire(
     Ok(out)
 }
 
-fn tx_apply_to_tx(ta: &TxApply) -> bitcoin::Transaction {
-    bitcoin::Transaction {
-        version: bitcoin::transaction::Version(ta.tx.version),
-        lock_time: bitcoin::absolute::LockTime::from_consensus(ta.tx.locktime),
-        input: ta
-            .inputs
-            .iter()
-            .map(|inp| bitcoin::TxIn {
-                previous_output: bitcoin::OutPoint {
-                    txid: bitcoin::Txid::from_byte_array(inp.prev_txid),
-                    vout: inp.prev_index,
-                },
-                script_sig: bitcoin::script::ScriptBuf::from_bytes(inp.script_sig.clone()),
-                sequence: bitcoin::Sequence::from_consensus(inp.sequence),
-                witness: bitcoin::Witness::from_slice(&inp.witness),
-            })
-            .collect(),
-        output: ta
-            .outputs
-            .iter()
-            .map(|o| bitcoin::TxOut {
-                value: bitcoin::Amount::from_sat(o.value.max(0) as u64),
-                script_pubkey: bitcoin::script::ScriptBuf::from_bytes(o.script.clone()),
-            })
-            .collect(),
-    }
-}
-
-fn block_from_applies(txs: &[TxApply]) -> (bitcoin::Block, Vec<[u8; 32]>) {
-    let txids: Vec<[u8; 32]> = txs.iter().map(|t| t.tx.txid).collect();
-    let txdata: Vec<bitcoin::Transaction> = txs.iter().map(tx_apply_to_tx).collect();
-    let block = bitcoin::Block {
-        header: bitcoin::block::Header {
-            version: bitcoin::block::Version::ONE,
-            prev_blockhash: bitcoin::BlockHash::from_byte_array([0; 32]),
-            merkle_root: bitcoin::TxMerkleNode::from_byte_array([0; 32]),
-            time: 1,
-            bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
-            nonce: 0,
-        },
-        txdata,
-    };
-    (block, txids)
-}
-
 fn plan_in_from_txin(inp: &bitcoin::TxIn) -> PlanIn {
     use bitcoin::hashes::Hash;
     let is_coinbase = inp.previous_output.is_null()
@@ -464,94 +419,6 @@ fn tx_record_from_wire(tx: &bitcoin::Transaction, txid: [u8; 32]) -> TxRecord {
 }
 
 impl Query {
-    /// Class A only (header + bodies + `tx.head` / `header_txs`). Does **not**
-    /// set tip / fence / strong.
-    ///
-    /// Crash and `plan=None` tests. Not a production IBD API — confirm write
-    /// uses [`Self::archive_plan_batch_from_wire`] + fill packed ins +
-    /// [`Self::archive_commit_plan`].
-    ///
-    pub fn commit_class_a_only(
-        &self,
-        header: &HeaderRecord,
-        txs: &[TxApply],
-    ) -> Result<Fk, QueryError> {
-        let mut items = vec![(header.clone(), txs.to_vec())];
-        let mut out = self.archive_prepared_owned(&mut items)?;
-        Ok(out.pop().expect("one archive result"))
-    }
-
-    /// Class A for a **contiguous** prepared run (same-batch parent resolve).
-    ///
-    /// Crash / `plan=None` tests. Not a production IBD API.
-    pub fn commit_class_a_batch(
-        &self,
-        items: &mut [(HeaderRecord, Vec<TxApply>)],
-    ) -> Result<Vec<Fk>, QueryError> {
-        self.archive_prepared_owned(items)
-    }
-
-    /// Plan + commit Class A for prepared blocks (no tip / Class C).
-    pub(crate) fn archive_prepared_owned(
-        &self,
-        items: &mut [(HeaderRecord, Vec<TxApply>)],
-    ) -> Result<Vec<Fk>, QueryError> {
-        if items.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut with_fk: Vec<(Fk, HeaderRecord, Vec<TxApply>)> = Vec::with_capacity(items.len());
-        for (header, txs) in items.iter_mut() {
-            let fk = if let Some((fk, _)) = self.get_header_by_hash(&header.hash)? {
-                fk
-            } else {
-                self.store.put_header(header)?
-            };
-            with_fk.push((fk, header.clone(), std::mem::take(txs)));
-        }
-        self.archive_prepared_with_fks(&mut with_fk)
-    }
-
-    /// **Idempotent** Class A commit when `header_fk` is already known.
-    pub(crate) fn archive_prepared_with_fks(
-        &self,
-        items: &mut [(Fk, HeaderRecord, Vec<TxApply>)],
-    ) -> Result<Vec<Fk>, QueryError> {
-        if items.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut header_fks = Vec::with_capacity(items.len());
-        let mut need: Vec<(Fk, Vec<TxApply>)> = Vec::with_capacity(items.len());
-        let mut seen_headers = crate::FkSet::default();
-        for (fk, _header, txs) in items.iter_mut() {
-            header_fks.push(*fk);
-            if !seen_headers.insert(*fk) {
-                let _ = std::mem::take(txs);
-                continue;
-            }
-            if self.store.header_txs.has_body(*fk)? {
-                let _ = std::mem::take(txs);
-                continue;
-            }
-            if !txs.is_empty() {
-                need.push((*fk, std::mem::take(txs)));
-            }
-        }
-        if !need.is_empty() {
-            let mut wires: Vec<(Fk, bitcoin::Block, Vec<[u8; 32]>)> =
-                Vec::with_capacity(need.len());
-            for (fk, txs) in need {
-                let (block, txids) = block_from_applies(&txs);
-                wires.push((fk, block, txids));
-            }
-            let refs: Vec<(Fk, &bitcoin::Block, &[[u8; 32]])> = wires
-                .iter()
-                .map(|(fk, b, ids)| (*fk, b, ids.as_slice()))
-                .collect();
-            self.archive_class_a_from_wire(&refs)?;
-        }
-        Ok(header_fks)
-    }
-
     /// Class A plan + fill packed ins + commit from wire blocks. Does not set tip.
     pub fn archive_class_a_from_wire(
         &self,
@@ -1038,6 +905,7 @@ impl Query {
 
 #[cfg(test)]
 mod tests {
+    use crate::testutil::FixtureChain;
     use crate::{Query, TxApply};
     use rbitcoin_primitives::Fk;
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
@@ -1083,7 +951,7 @@ mod tests {
             .iter()
             .filter(|(_, txs)| !txs.is_empty())
             .map(|(fk, txs)| {
-                let (b, ids) = super::block_from_applies(txs);
+                let (b, ids) = crate::testutil::block_from_applies(txs);
                 (*fk, b, ids)
             })
             .collect();

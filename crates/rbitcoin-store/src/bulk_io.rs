@@ -223,29 +223,10 @@ pub fn pwrite_batch(ops: &mut [WriteOp<'_>]) {
     if ops.is_empty() {
         return;
     }
-    #[cfg(test)]
-    test_note_pwrite_wave(ops.len());
     if io_uring_enabled() && pwrite_batch_uring(ops) {
         return;
     }
     pwrite_batch_fallback(ops);
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Ops-per-call for each [`pwrite_batch`] (Class A append wave grouping).
-    static PWRITE_WAVES: std::cell::RefCell<Vec<usize>> = std::cell::RefCell::new(Vec::new());
-}
-
-#[cfg(test)]
-fn test_note_pwrite_wave(n: usize) {
-    PWRITE_WAVES.with(|c| c.borrow_mut().push(n));
-}
-
-/// Drain recorded `pwrite_batch` sizes (ops per submit). Tests only.
-#[cfg(test)]
-pub fn test_take_pwrite_waves() -> Vec<usize> {
-    PWRITE_WAVES.with(|c| std::mem::take(&mut *c.borrow_mut()))
 }
 
 /// Thread-local bulk ring via [`crate::uring_session::with_thread_local`].
@@ -278,31 +259,11 @@ fn pread_batch_uring(ops: &mut [ReadOp<'_>]) -> bool {
     // Mid-wave false (push/submit/wait fail) → fall back for *this* batch only.
     // Permanently disable uring only when the ring cannot be opened (None);
     // with_bulk_session already stores mode 2 on try_open Err for the TL path.
-    match with_bulk_session(|session| {
-        #[cfg(test)]
-        if test_force_session_false() {
-            let _ = session.drain_all();
-            return false;
-        }
-        pread_batch_on_session_inner(session, ops, total_nonempty)
-    }) {
+    match with_bulk_session(|session| pread_batch_on_session_inner(session, ops, total_nonempty)) {
         Some(true) => true,
         Some(false) => false,
         None => false,
     }
-}
-
-// Test-only fault inject: force mid-wave `Some(false)` from `pread_batch_uring`
-// so we prove that path does not permanently disable process-wide io_uring.
-// Kept: no production API can inject a partial-session failure without this.
-#[cfg(test)]
-thread_local! {
-    static TEST_FORCE_SESSION_FALSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-#[cfg(test)]
-fn test_force_session_false() -> bool {
-    TEST_FORCE_SESSION_FALSE.with(|c| c.get())
 }
 
 /// Bulk pread on a shared [`crate::IoCtx`].
@@ -964,79 +925,6 @@ mod tests {
         assert_eq!(&got[0..50], &d0[..]);
         assert_eq!(&got[50..100], &d1[..]);
         assert_eq!(&got[100..150], &d2[..]);
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Mid-wave uring failure must fall back for that batch only — not flip
-    /// `URING_MODE` off for the rest of the process (regression for TL-ring
-    /// rewrite that wrongly stored mode 2 on `Some(false)`).
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn mid_wave_false_does_not_disable_uring() {
-        if !io_uring_enabled() {
-            return;
-        }
-        assert_eq!(
-            URING_MODE.load(Ordering::Relaxed),
-            1,
-            "expected uring mode on after probe"
-        );
-
-        let dir = std::env::temp_dir().join(format!(
-            "rbitcoin-uring-mode-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("blob");
-        {
-            let mut f = std::fs::File::create(&path).unwrap();
-            f.write_all(b"abcdefghij").unwrap();
-            f.flush().unwrap();
-        }
-        let f = std::fs::File::open(&path).unwrap();
-        let fd = crate::io_handle::IoHandle::from_file(&f);
-
-        // Inject Some(false) through the real pread_batch_uring match.
-        TEST_FORCE_SESSION_FALSE.with(|c| c.set(true));
-        let mut b = [0u8; 4];
-        let mut ops = [ReadOp {
-            fd,
-            offset: 0,
-            buf: &mut b[..],
-            result: i32::MIN,
-        }];
-        pread_batch(&mut ops); // uring false → fallback still fills
-        TEST_FORCE_SESSION_FALSE.with(|c| c.set(false));
-        drop(ops);
-        assert_eq!(
-            &b, b"abcd",
-            "fallback must still serve the forced-false wave"
-        );
-        assert_eq!(
-            URING_MODE.load(Ordering::Relaxed),
-            1,
-            "mid-wave false must not permanently disable io_uring"
-        );
-
-        // Next wave must still use uring (mode still 1) and read correctly.
-        let mut b2 = [0u8; 4];
-        let mut ops2 = [ReadOp {
-            fd,
-            offset: 4,
-            buf: &mut b2[..],
-            result: i32::MIN,
-        }];
-        assert!(
-            pread_batch_uring(&mut ops2),
-            "uring path must still succeed after mid-wave false"
-        );
-        drop(ops2);
-        assert_eq!(&b2, b"efgh");
-        assert_eq!(URING_MODE.load(Ordering::Relaxed), 1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

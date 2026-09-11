@@ -259,6 +259,7 @@ mod tests {
     use bitcoin::hashes::Hash;
     use bitcoin::BlockHash;
 
+    use rbitcoin_query::testutil::FixtureChain;
     fn h(n: u8) -> BlockHash {
         let mut b = [0u8; 32];
         b[0] = n;

@@ -58,6 +58,22 @@ before 1.0).
 - **One Class A planner:** `archive_plan_batch_from_store` is gone. IBD and
   Class A-without-tip fixtures plan with `archive_plan_batch_from_wire`;
   write fills packed ins from the wire block + spend edges.
+- **Store IO probes (X-03):** SQE counts, page writes, SH page IOs, and BQ
+  raw clones live on the session/table/queue that did the IO. TLS
+  `test_take_*` / `TEST_FORCE_SESSION_FALSE` / crate-root `take_raw_clone_n`
+  are gone.
+- **Archive-prep twins (C-03):** `prepare_block_for_archive` is the one
+  CPU-side Class A helper; `_new` is private; `_with_txids` deleted;
+  `validate_block_structure_precomputed` is crate-private.
+- **Class A fixture conversion (Q-21):** `tx_apply_to_tx` /
+  `block_from_applies` live in `rbitcoin_query::testutil`. Production
+  `Query` no longer converts TxApply to a dummy Block (`connect_block` /
+  `commit_class_a_only` / `archive_prepared_*` gone).
+- **Dated crate-complexity inventory removed:** the 2026-09 program is
+  [`docs/quality.md`](docs/quality.md) Completed. Dual-path / probe
+  rules live in What to protect, [`docs/invariants.md`](docs/invariants.md),
+  [`CONTRIBUTING.md`](CONTRIBUTING.md) principle 11, and
+  [`TESTING.md`](TESTING.md).
 - **RPC / CLI honesty (Q-59 slice):** `submitblock` uses the live chain hub
   on all networks (same receive path as P2P; `generate*` / `setmocktime`
   stay regtest-only). `--minrelaytxfee` / `--blockmintxfee` reject garbage

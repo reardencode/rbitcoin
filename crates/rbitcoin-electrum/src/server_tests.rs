@@ -1,5 +1,6 @@
 use super::*;
 use rbitcoin_consensus::ChainParams;
+use rbitcoin_query::testutil::FixtureChain;
 
 #[test]
 fn parse_electrum_request_line_junk_does_not_panic() {

@@ -24,7 +24,11 @@ with `Err(…Corrupt("invariant: …"))` (and `debug_assert!` where useful). Do
 pin identity; unpinned wire-corrected create_fk spentness; load-stage `txid.body`
 identity fill after lookup promised stamp; `ColdPinMode` Allow/Forbid cold denserels
 split on load (load is range **outs** only); denserels-as-spender-abs (schema 15
-abs is `spent_off+9×vout` only).
+abs is `spent_off+9×vout` only); `AssembleMode::Full` / `validate_block_connect`
+(confirm is optimistic assemble then `structural_validate_spends`);
+`archive_plan_batch_from_store` and production `Query` TxApply→dummy `Block`
+(`tx_apply_to_tx` / `connect_block` / `commit_class_a_only` are
+`rbitcoin_query::testutil::FixtureChain` only).
 
 ## Failure style
 

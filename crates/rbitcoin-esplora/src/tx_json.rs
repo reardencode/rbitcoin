@@ -411,6 +411,7 @@ fn last_push_data(script: &[u8]) -> Option<&[u8]> {
 mod tests {
     use super::*;
 
+    use rbitcoin_query::testutil::FixtureChain;
     #[test]
     fn last_push_data_direct_and_pushdata() {
         // OP_1 (non-push) clears last.
@@ -622,9 +623,7 @@ mod tests {
     #[test]
     fn build_tx_json_prevout_is_outs_only_and_txid_from_body() {
         use rbitcoin_query::TxApply;
-        use rbitcoin_store::{
-            reset_tx_full_gets, tx_full_gets, HeaderRecord, InputRecord, OutputRecord, TxRecord,
-        };
+        use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
         use std::time::{SystemTime, UNIX_EPOCH};
 
         let n = SystemTime::now()
@@ -744,13 +743,13 @@ mod tests {
         q.connect_block(Height(2), &h2, &[ta2]).unwrap();
         let spend2_fk = q.block_tx_fks(Height(2)).unwrap()[0];
 
-        reset_tx_full_gets();
+        q.store().reset_tx_full_gets();
         let v = build_tx_json(&q, spend2_fk, Network::Regtest).unwrap();
         let parent_id = spend1_fk.get().unwrap();
         assert!(
-            !tx_full_gets().contains(&parent_id),
+            !q.store().tx_full_gets().contains(&parent_id),
             "parent prevout must not zip inwit: {:?}",
-            tx_full_gets()
+            q.store().tx_full_gets()
         );
         assert_eq!(v["txid"], block_hash_hex(&spend2_txid));
         assert_eq!(v["vin"][0]["prevout"]["value"].as_i64(), Some(49_0000_0000));

@@ -1587,6 +1587,7 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use rbitcoin_query::testutil::FixtureChain;
     fn tiny_regtest(dir: impl AsRef<std::path::Path>) -> NodeConfig {
         NodeConfig::default()
             .with_datadir(dir.as_ref())

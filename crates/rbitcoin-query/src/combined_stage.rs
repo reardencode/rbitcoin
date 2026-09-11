@@ -508,11 +508,11 @@ mod tests {
                 .unwrap();
         }
         let asked: Vec<u32> = (0..64).collect();
-        let _ = rbitcoin_store::take_raw_clone_n();
+        let _ = q.block_queue_take_raw_clone_n();
         let intake = q.block_queue_wave_intake(&asked);
         assert_eq!(intake.raw.len(), 64, "all still-raw heights classified");
         assert_eq!(
-            rbitcoin_store::take_raw_clone_n(),
+            q.block_queue_take_raw_clone_n(),
             0,
             "wave_intake must not clone raw payloads for the asked set"
         );
@@ -520,7 +520,7 @@ mod tests {
             assert!(q.block_queue_raw_payload(h).unwrap().is_some());
         }
         assert_eq!(
-            rbitcoin_store::take_raw_clone_n(),
+            q.block_queue_take_raw_clone_n(),
             16,
             "only the decode prefix may clone"
         );

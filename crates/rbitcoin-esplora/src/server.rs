@@ -660,6 +660,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
+    use rbitcoin_query::testutil::FixtureChain;
     fn temp_query(label: &str) -> (rbitcoin_query::testutil::TempDir, Query) {
         rbitcoin_query::testutil::tiny_query_labeled(label)
     }

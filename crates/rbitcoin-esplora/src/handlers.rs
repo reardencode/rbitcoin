@@ -1110,6 +1110,7 @@ mod pure_helper_tests {
     use super::{block_summary_json, outspend_json, resolve_address_sh};
     use bitcoin::Network;
     use rbitcoin_primitives::{Fk, Height};
+    use rbitcoin_query::testutil::FixtureChain;
     use rbitcoin_query::{Query, TxApply};
     use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
 

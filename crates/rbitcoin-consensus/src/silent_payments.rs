@@ -632,6 +632,7 @@ mod tests {
     use bitcoin::script::ScriptBuf;
     use bitcoin::transaction::Version as TxVersion;
     use bitcoin::{Amount, Sequence, TxIn};
+    use rbitcoin_query::testutil::FixtureChain;
     use rbitcoin_query::TxApply;
     use rbitcoin_store::{HeaderRecord, TxRecord};
     use serde_json::Value;

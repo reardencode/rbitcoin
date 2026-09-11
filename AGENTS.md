@@ -42,7 +42,9 @@ Class B insert geometry: [`SCHEMA.md`](SCHEMA.md) (Class B). Stage IO (the
 only Allowed/Forbidden table): [`docs/invariants.md`](docs/invariants.md).
 
 Do **not** reintroduce CreateResidency, OutFifo, ContigPark, archive sticky,
-process pin FIFO, or map epochs.
+process pin FIFO, or map epochs. Do **not** add thread-local `test_take_*`
+IO probes (session/table stats or file state). TxApply→dummy `Block`
+conversion is `rbitcoin_query::testutil` only.
 
 On-disk format change: [`SCHEMA.md`](SCHEMA.md) (soft migrate / `SCHEMA_VERSION`
 bump / explicit refuse). Same commit as the format code. Do not surprise an

@@ -836,6 +836,12 @@ impl Query {
         Ok(g.raw_payload(height))
     }
 
+    /// Take-and-reset BQ raw-payload clone count (instance stats).
+    pub fn block_queue_take_raw_clone_n(&self) -> u64 {
+        let g = self.block_queue.lock().unwrap();
+        g.take_raw_clone_n()
+    }
+
     /// Payload for a block **hash** if present on the RAM queue (any height).
     ///
     /// Used by most-work reorg gather for same-height competitors that cannot

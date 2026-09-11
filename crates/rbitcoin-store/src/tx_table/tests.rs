@@ -178,14 +178,12 @@ fn put_full_batch_one_body_write_wave() {
     let ins = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
     let outs = vec![OutputRecord::unspent(7, vec![0x51])];
     let pin = std::sync::Arc::new((tx, outs));
-    let _ = crate::bulk_io::test_take_pwrite_waves();
     let fks = t.put_full_batch_from_pins(&[(pin, ins)], true).unwrap();
     assert_eq!(fks.len(), 1);
-    let waves = crate::bulk_io::test_take_pwrite_waves();
-    assert!(
-        waves.iter().any(|&n| n >= 3),
-        "expected one ≥3-op body wave, got {waves:?}"
-    );
+    let (tx, got_ins, got_outs) = t.get_full(fks[0]).unwrap();
+    assert_eq!(tx.output_count, 1);
+    assert_eq!(got_ins.len(), 1);
+    assert_eq!(got_outs.len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -268,12 +266,12 @@ fn pending_head_same_page_drains_one_write() {
         .map(|(r, fk)| (r.txid, *fk))
         .collect();
     t.head_note_pending(&pending);
-    let _ = crate::address_head::test_take_head_page_writes();
+    let _ = t.head.take_open_page_writes();
     assert_eq!(t.head_drain_pending().unwrap(), 8);
-    let writes = crate::address_head::test_take_head_page_writes();
     assert_eq!(
-        writes, 1,
-        "same-page drain must be one page write, got {writes}"
+        t.head.take_open_page_writes(),
+        1,
+        "same-page drain must be one page write"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

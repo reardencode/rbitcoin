@@ -1357,12 +1357,12 @@ fn getblock_verbosity_1_txids_skip_reconstruct() {
     let (ctx, dir, _hub) = ctx_regtest_hub();
     let hashes = dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
     let best = hashes.as_array().unwrap()[0].clone();
-    rbitcoin_store::reset_tx_full_gets();
+    ctx.query.store().reset_tx_full_gets();
     let v1 = dispatch(&ctx, "getblock", vec![best.clone(), json!(1)]).unwrap();
     assert!(
-        rbitcoin_store::tx_full_gets().is_empty(),
+        ctx.query.store().tx_full_gets().is_empty(),
         "verbosity 1 must not zip inwit: {:?}",
-        rbitcoin_store::tx_full_gets()
+        ctx.query.store().tx_full_gets()
     );
     let txs = v1["tx"].as_array().unwrap();
     assert_eq!(txs.len(), 1);
@@ -1395,12 +1395,12 @@ fn miniwallet_raw_scan_and_gettxout() {
     assert_eq!(hashes.as_array().unwrap().len(), 2);
     assert_eq!(dispatch(&ctx, "getblockcount", vec![]).unwrap(), json!(2));
 
-    rbitcoin_store::reset_tx_full_gets();
+    ctx.query.store().reset_tx_full_gets();
     let scan = dispatch(&ctx, "scantxoutset", vec![json!("start"), json!([desc])]).unwrap();
     assert!(
-        rbitcoin_store::tx_full_gets().is_empty(),
+        ctx.query.store().tx_full_gets().is_empty(),
         "scantxoutset shindex must not zip inwit: {:?}",
-        rbitcoin_store::tx_full_gets()
+        ctx.query.store().tx_full_gets()
     );
     assert_eq!(scan["success"], true);
     assert_eq!(scan["height"], 2);
@@ -2489,12 +2489,12 @@ fn getblockstats_coinbase_only_and_op_return_match_helper() {
     .unwrap();
     dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
     let tip_hash = dispatch(&ctx, "getbestblockhash", vec![]).unwrap();
-    rbitcoin_store::reset_tx_full_gets();
+    ctx.query.store().reset_tx_full_gets();
     let v1 = dispatch(&ctx, "getblock", vec![tip_hash.clone(), json!(1)]).unwrap();
     assert!(
-        rbitcoin_store::tx_full_gets().is_empty(),
+        ctx.query.store().tx_full_gets().is_empty(),
         "verbosity 1 2-tx block: {:?}",
-        rbitcoin_store::tx_full_gets()
+        ctx.query.store().tx_full_gets()
     );
     let v1txs = v1["tx"].as_array().unwrap();
     assert_eq!(v1txs.len(), 2);

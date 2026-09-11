@@ -17,12 +17,13 @@
 
 - Put HOLD / wait hooks in a shipped function other tests also call (`confirm_scripts_phase`).
 - Assert process-global last-writer meters as the contract. Confirm / query / IBD window meters are instance-owned (`Query::confirm_stats`, take-and-reset). Pin two engines, not crate-root atomics. Store head-resolve window meters and `last_union_miss` / leftover probe diag remain process-global; use pin/layout, error strings, or a pure formatter.
+- Thread-local `test_take_*` IO probes on store hot paths (assert session/table instance stats or file state).
 - `std::env::set_var` without the crate lock (or pass the knob as an argument).
 - Bind a fixed port (use `:0`) or share a `/tmp` path (use `rbitcoin_store::testutil::TempDir` / `tiny_store`, `rbitcoin_query::testutil::tiny_query`, net `tiny_regtest_hub`, or `rbitcoin_test::TestDatadir`).
 
 Do **not** “fix” flakes with `RUST_TEST_THREADS=1`.
 
-Shared Tiny on-disk fixtures live in `rbitcoin_store::testutil` (`TempDir`, `tiny_store`) and `rbitcoin_query::testutil::tiny_query` — unique path, Tiny heads, drop-cleans. Net tests that need a regtest `ChainHub` use `tiny_regtest_hub` / `tiny_regtest_hub_labeled` (Tiny query + shipped `ChainHub::new`), including IBD confirm-reject / path / progress / archive / dial / confirm tests. Do **not** roll your own `std::env::temp_dir()` + `create_dir_all` for a Tiny store/query. Node-level scenarios still use `rbitcoin-test` (`TestDatadir`, `mine`, `chain_fixture`).
+Shared Tiny on-disk fixtures live in `rbitcoin_store::testutil` (`TempDir`, `tiny_store`) and `rbitcoin_query::testutil::tiny_query` — unique path, Tiny heads, drop-cleans. Net tests that need a regtest `ChainHub` use `tiny_regtest_hub` / `tiny_regtest_hub_labeled` (Tiny query + shipped `ChainHub::new`), including IBD confirm-reject / path / progress / archive / dial / confirm tests. Do **not** roll your own `std::env::temp_dir()` + `create_dir_all` for a Tiny store/query. Node-level scenarios still use `rbitcoin-test` (`TestDatadir`, `mine`, `chain_fixture`). Class A TxApply fixtures call `rbitcoin_query::testutil::FixtureChain` (`connect_block` / `commit_class_a_only`), which converts once then uses shipped `archive_class_a_from_wire`. Do not put dummy-Block conversion on production `Query`.
 
 ### Third-party deps and compile cost (2026-08)
 

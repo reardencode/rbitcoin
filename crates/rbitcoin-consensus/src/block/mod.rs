@@ -111,7 +111,7 @@ pub fn validate_block_structure_hashed(
 }
 
 /// Structure checks plus per-tx [`TxPrecompute`] (one walk: txid/wtxid/weight/common SHA256).
-pub fn validate_block_structure_precomputed(
+pub(crate) fn validate_block_structure_precomputed(
     block: &Block,
     ctx: &ValidationContext<'_>,
 ) -> Result<Vec<TxPrecompute>, ConsensusError> {

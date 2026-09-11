@@ -22,23 +22,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Payload clones from [`BlockQueue::raw_payloads`] / [`BlockQueue::raw_payload`].
-/// Debug/test only — wave intake must not bump this for the whole asked set.
-/// `cfg(test)` so `--release` `cargo test` (Windows/macOS store smoke) compiles.
-#[cfg(any(test, debug_assertions))]
-static RAW_CLONE_N: AtomicU64 = AtomicU64::new(0);
-
-/// Take-and-reset raw payload clone count (debug builds / unit tests).
-#[cfg(any(test, debug_assertions))]
-pub fn take_raw_clone_n() -> u64 {
-    RAW_CLONE_N.swap(0, Ordering::Relaxed)
-}
-
-#[cfg(any(test, debug_assertions))]
-fn note_raw_clone() {
-    RAW_CLONE_N.fetch_add(1, Ordering::Relaxed);
-}
-
 /// Raw row removed by [`BlockQueue::take_raw`] (lookup consume).
 #[derive(Debug, Clone)]
 pub struct TakenRaw {
@@ -107,6 +90,7 @@ pub struct BlockQueue {
     /// First-wins height → id. Height APIs must not walk `index.values()`.
     height_to_id: HashMap<u32, u64>,
     bytes: u64,
+    raw_clones: AtomicU64,
 }
 
 #[derive(Debug, Clone)]
@@ -132,11 +116,17 @@ impl BlockQueue {
             index: BTreeMap::new(),
             height_to_id: HashMap::new(),
             bytes: 0,
+            raw_clones: AtomicU64::new(0),
         })
     }
 
     pub fn bytes(&self) -> u64 {
         self.bytes
+    }
+
+    /// Take-and-reset raw payload clone count (instance stats).
+    pub fn take_raw_clone_n(&self) -> u64 {
+        self.raw_clones.swap(0, Ordering::Relaxed)
     }
 
     pub fn count(&self) -> usize {
@@ -393,8 +383,7 @@ impl BlockQueue {
     pub fn raw_payload(&self, height: u32) -> Option<Vec<u8>> {
         match self.entry_for_height(height).map(|e| &e.body) {
             Some(QueuedBody::Raw(v)) => {
-                #[cfg(any(test, debug_assertions))]
-                note_raw_clone();
+                self.raw_clones.fetch_add(1, Ordering::Relaxed);
                 Some(v.clone())
             }
             _ => None,
@@ -413,8 +402,7 @@ impl BlockQueue {
                 continue;
             }
             if let QueuedBody::Raw(v) = &e.body {
-                #[cfg(any(test, debug_assertions))]
-                note_raw_clone();
+                self.raw_clones.fetch_add(1, Ordering::Relaxed);
                 out.push((e.height, v.clone()));
             }
         }
@@ -779,15 +767,15 @@ mod tests {
         for h in 0..8u32 {
             q.enqueue(h, [h as u8; 32], 1, &[h as u8; 8]).unwrap();
         }
-        let _ = take_raw_clone_n();
+        let _ = q.take_raw_clone_n();
         assert!(q.has_raw(3));
-        assert_eq!(take_raw_clone_n(), 0);
+        assert_eq!(q.take_raw_clone_n(), 0);
         assert_eq!(q.raw_payload(3).unwrap().len(), 8);
-        assert_eq!(take_raw_clone_n(), 1);
+        assert_eq!(q.take_raw_clone_n(), 1);
         let _ = q.promote_wave(&[(3, 16)]).unwrap();
         assert!(!q.has_raw(3));
         assert!(q.raw_payload(3).is_none());
-        assert_eq!(take_raw_clone_n(), 0);
+        assert_eq!(q.take_raw_clone_n(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -141,6 +141,7 @@ mod median_time_past_tests {
     use super::*;
     use bitcoin::block::Version;
     use rbitcoin_primitives::{Fk, Height};
+    use rbitcoin_query::testutil::FixtureChain;
     use rbitcoin_query::{Query, TxApply};
     use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
     use std::time::{SystemTime, UNIX_EPOCH};

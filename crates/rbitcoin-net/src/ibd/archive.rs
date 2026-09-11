@@ -302,6 +302,7 @@ mod class_a_rehydrate_tests {
         Amount, Block, BlockHash, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn,
         TxOut, Witness,
     };
+    use rbitcoin_query::testutil::FixtureChain;
 
     fn mine(prev: BlockHash, time: u32, height: u32) -> Block {
         let mut ss = if height == 0 {
