@@ -31,6 +31,15 @@ before 1.0).
 
 ### Changed
 
+- **RPC / CLI honesty (Q-59 slice):** `submitblock` uses the live chain hub
+  on all networks (same receive path as P2P; `generate*` / `setmocktime`
+  stay regtest-only). `--minrelaytxfee` / `--blockmintxfee` reject garbage
+  and negatives at config parse (`0` is still no floor).
+  `--permitbaremultisig` is gone; `getmempoolinfo.permitbaremultisig` is
+  always `true` (Libre has no Core `IsStandard` bare-multisig gate). The
+  Core-functional `bitcoind` shim still ignores `-permitbaremultisig`.
+  `getnetworkhashps` is labeled dummy 2-work-per-block / elapsed (not Core
+  chainwork hashrate). [`docs/rpc.md`](docs/rpc.md) / [`OPERATOR.md`](OPERATOR.md).
 - **Esplora outspend omits `vin`:** `/tx/:txid/outspend/:vout` and
   `/outspends` no longer emit always-zero `vin`. `PointRecord` /
   `put_spend` / `put_spend_batch` no longer take a dummy spending input

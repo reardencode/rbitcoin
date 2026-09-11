@@ -416,7 +416,7 @@ reason = "no-zmq"
 name = "mempool_accept.py"
 status = "skip"
 reason = "rpc-dialect"
-analog = "official: after permitbaremultisig + incrementalrelayfee, testmempoolaccept(rawtxs='ff00baar') is -32602 'rawtxs array required' not -3 'JSON value of type string is not of expected type array' (mempool_accept.py:98); Core type-check / reject-reason zoo later"
+analog = "official: after incrementalrelayfee, testmempoolaccept(rawtxs='ff00baar') is -32602 'rawtxs array required' not -3 'JSON value of type string is not of expected type array' (mempool_accept.py:98); Core type-check / reject-reason zoo later. -permitbaremultisig is shim-ignored (Libre has no Core IsStandard bare-multisig gate)."
 
 [[test]]
 name = "mempool_accept_wtxid.py"

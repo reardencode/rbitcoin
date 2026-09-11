@@ -18,7 +18,7 @@ pub(crate) fn getmempoolinfo(ctx: &RpcContext) -> Result<Value, Value> {
             "minrelaytxfee": MempoolHub::relay_fee_btc_per_kb(),
             "incrementalrelayfee": MempoolHub::relay_fee_btc_per_kb(),
             "unbroadcastcount": 0,
-            "permitbaremultisig": ctx.permit_bare_multisig,
+            "permitbaremultisig": true,
             "optimal": true,
             "orphanage": { "size": 0, "bytes": 0 },
         }));
@@ -44,7 +44,7 @@ pub(crate) fn getmempoolinfo(ctx: &RpcContext) -> Result<Value, Value> {
         "incrementalrelayfee": MempoolHub::relay_fee_btc_per_kb(),
         "relay_enabled": mp.relay_enabled(),
         "unbroadcastcount": mp.unbroadcast_count(),
-        "permitbaremultisig": ctx.permit_bare_multisig,
+        "permitbaremultisig": true,
         "optimal": true,
         "orphanage": {
             "size": orphan_size,

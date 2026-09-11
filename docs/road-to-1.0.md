@@ -59,9 +59,9 @@ functional harness **or** an explicit “we differ on purpose” note (fee
 product, error codes, our mempool files). First green was 9 scripts; **71**
 unmodified v31.1 scripts `run` now. Remaining growth is claimed
 wallet-client / P2P / mempool / buried-activation scripts, not the
-product-never skips (`no-wallet`, prune, v1). Dummy RPC numbers that we
-still ship (`getnetworkhashps`, `submitblock` COMPAT vs regtest clamp)
-are **Q-59**. Inventory counts live in [`quality.md`](./quality.md)
+product-never skips (`no-wallet`, prune, v1). Labeled dummy
+`getnetworkhashps` and remaining Q-59 holes (`gettxout` mempool-spent,
+unbounded JSON-RPC batch) live in [`quality.md`](./quality.md)
 **Q-41**. Owner: [`core-functional.md`](./core-functional.md).
 
 | Done | Step |

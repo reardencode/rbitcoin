@@ -12,6 +12,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+pub use mine::submit_received_block;
+
 pub(crate) fn sat_kvb_to_btc(sat_kvb: u64) -> f64 {
     sat_kvb as f64 / 100_000_000.0
 }
@@ -66,8 +68,6 @@ pub struct RpcContext {
     pub addrman: Option<Arc<std::sync::Mutex<rbitcoin_net::AddrMan>>>,
     /// Core `getrpcinfo.logpath` (`{datadir}/debug.log`).
     pub logpath: String,
-    /// Core `-permitbaremultisig` (default true). `getmempoolinfo`.
-    pub permit_bare_multisig: bool,
     /// Core `-alertnotify` (`%s` = warning). Fired once when warnings appear.
     pub alert_notify: Option<String>,
     /// Latches after the first alertnotify invocation.
@@ -673,6 +673,10 @@ pub(crate) fn method_help(m: &str) -> String {
              for a new tip or mempool/priority change. No BIP9 testdummy."
             .into(),
         "getmininginfo" => "getmininginfo\nTip height, difficulty, pooledtx. All networks.".into(),
+        "getnetworkhashps" => "getnetworkhashps (nblocks) (height)\n\
+             Dummy 2-work-per-block / elapsed seconds — not Core chainwork hashrate. \
+             Useful on regtest (2 work/block). See docs/rpc.md."
+            .into(),
         "prioritisetransaction" => {
             "prioritisetransaction txid dummy fee_delta\nLocal mining fee delta (sat). dummy must be 0."
                 .into()

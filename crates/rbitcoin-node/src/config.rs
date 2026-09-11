@@ -21,6 +21,42 @@ pub fn inbound_from_maxconnections(total: u32) -> u32 {
         .max(1)
 }
 
+/// Parse Core BTC/kvB (`0.00000001`) to sat/kvB. Negatives and junk fail.
+pub(crate) fn parse_btc_to_sat(s: &str) -> Result<u64, &'static str> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("empty");
+    }
+    if s.starts_with('-') {
+        return Err("must be non-negative");
+    }
+    let (whole_s, frac_s) = match s.split_once('.') {
+        Some((w, f)) => (w, f),
+        None => (s, ""),
+    };
+    if whole_s.is_empty() && frac_s.is_empty() {
+        return Err("invalid");
+    }
+    let whole: u64 = if whole_s.is_empty() {
+        0
+    } else {
+        whole_s.parse().map_err(|_| "invalid")?
+    };
+    let mut frac = frac_s.to_string();
+    if frac.len() > 8 {
+        frac.truncate(8);
+    }
+    while frac.len() < 8 {
+        frac.push('0');
+    }
+    let frac_n: u64 = if frac.is_empty() {
+        0
+    } else {
+        frac.parse().map_err(|_| "invalid")?
+    };
+    Ok(whole.saturating_mul(100_000_000).saturating_add(frac_n))
+}
+
 /// Process datadir (Class A store, cookie, debug.log, mempool).
 ///
 /// Cold store is [`Self::cold`].
@@ -88,7 +124,6 @@ pub struct MempoolOpts {
     pub expiry_hours: Option<u64>,
     pub limit_cluster_count: Option<u32>,
     pub limit_cluster_size_kvb: Option<u32>,
-    pub permit_bare_multisig: bool,
     pub blocksonly: bool,
 }
 
@@ -101,7 +136,6 @@ impl Default for MempoolOpts {
             expiry_hours: None,
             limit_cluster_count: None,
             limit_cluster_size_kvb: None,
-            permit_bare_multisig: true,
             blocksonly: false,
         }
     }
@@ -605,6 +639,8 @@ impl NodeConfig {
                         "conf minrelaytxfee requires a value".into(),
                     ));
                 }
+                parse_btc_to_sat(val)
+                    .map_err(|e| NodeError::Config(format!("conf minrelaytxfee: {e}")))?;
                 self.mempool.min_relay_fee_btc = Some(val.to_string());
             }
             "mempoolexpiry" | "mempool_expiry" => {
@@ -618,10 +654,7 @@ impl NodeConfig {
                     self.startup_notify = Some(val.to_string());
                 }
             }
-            "permitbaremultisig" | "permit_bare_multisig" => {
-                self.mempool.permit_bare_multisig = parse_conf_bool(val)
-                    .map_err(|e| NodeError::Config(format!("conf permitbaremultisig: {e}")))?;
-            }
+
             "limitclustercount" | "limit_cluster_count" => {
                 self.mempool.limit_cluster_count = Some(
                     val.parse()
@@ -773,6 +806,8 @@ impl NodeConfig {
                         "conf blockmintxfee requires a value".into(),
                     ));
                 }
+                parse_btc_to_sat(val)
+                    .map_err(|e| NodeError::Config(format!("conf blockmintxfee: {e}")))?;
                 self.block_min_tx_fee_btc = Some(val.to_string());
             }
             "alertnotify" | "alert_notify" => {
@@ -885,6 +920,29 @@ mod tests {
             ConfApply::Unknown(k) => assert_eq!(k, "not-a-real-key"),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn minrelaytxfee_garbage_and_negative_are_config_errors() {
+        let mut c = NodeConfig::default();
+        let bad = c.apply_kv("minrelaytxfee", "nope").unwrap_err();
+        assert!(
+            format!("{bad}").contains("minrelaytxfee"),
+            "garbage must name the knob: {bad}"
+        );
+        let neg = c.apply_kv("minrelaytxfee", "-0.0001").unwrap_err();
+        assert!(
+            format!("{neg}").contains("minrelaytxfee"),
+            "negative must name the knob: {neg}"
+        );
+        assert_eq!(
+            c.apply_kv("minrelaytxfee", "0").unwrap(),
+            ConfApply::Applied
+        );
+        assert_eq!(
+            c.apply_kv("minrelaytxfee", "0.00000001").unwrap(),
+            ConfApply::Applied
+        );
     }
 
     #[test]
@@ -1365,7 +1423,6 @@ mod tests {
         let plain = NodeConfig::default();
         assert!(plain.mempool.persist);
         assert!(!plain.mempool.blocksonly);
-        assert!(plain.mempool.permit_bare_multisig);
         assert!(plain.test_activation_heights.is_empty());
         assert_eq!(
             NodeConfig {

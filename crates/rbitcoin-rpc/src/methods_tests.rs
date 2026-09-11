@@ -33,7 +33,7 @@ fn ctx_empty() -> (RpcContext, TempDir) {
 
         logpath: String::new(),
         active: std::sync::Arc::new(std::sync::Mutex::new(RpcActive::default())),
-        permit_bare_multisig: true,
+
         alert_notify: None,
         alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
@@ -137,13 +137,21 @@ fn blockchain_empty_store() {
 }
 
 #[test]
-fn getmempoolinfo_permitbaremultisig_follows_ctx() {
-    let (mut ctx, dir) = ctx_empty();
-    ctx.permit_bare_multisig = false;
+fn getnetworkhashps_help_labels_dummy_work() {
+    let h = super::method_help("getnetworkhashps");
+    assert!(
+        h.contains("2-work-per-block") && h.contains("not Core"),
+        "dummy hashrate must be labeled: {h}"
+    );
+}
+
+#[test]
+fn getmempoolinfo_permitbaremultisig_is_always_true() {
+    let (ctx, dir) = ctx_empty();
     let mem = dispatch(&ctx, "getmempoolinfo", vec![]).unwrap();
     assert_eq!(
-        mem["permitbaremultisig"], false,
-        "getmempoolinfo must honor -permitbaremultisig=0"
+        mem["permitbaremultisig"], true,
+        "Libre has no Core IsStandard bare-multisig gate"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -796,7 +804,7 @@ fn all_methods_callable_empty_or_error() {
 
         logpath: String::new(),
         active: std::sync::Arc::new(std::sync::Mutex::new(RpcActive::default())),
-        permit_bare_multisig: true,
+
         alert_notify: None,
         alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
@@ -843,7 +851,7 @@ fn chain_methods_against_mined_regtest() {
 
         logpath: String::new(),
         active: std::sync::Arc::new(std::sync::Mutex::new(RpcActive::default())),
-        permit_bare_multisig: true,
+
         alert_notify: None,
         alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
@@ -1200,76 +1208,7 @@ impl RpcRegtest for TestMiner {
     }
 
     fn submit_block(&self, block: Block) -> SubmitBlockOutcome {
-        use bitcoin::Target;
-        let hash = block.block_hash();
-        if self.0.is_block_invalid(&hash) {
-            return SubmitBlockOutcome::Rejected("duplicate-invalid".into());
-        }
-        let target = Target::from_compact(block.header.bits);
-        if block.header.validate_pow(target).is_err() {
-            return SubmitBlockOutcome::Rejected("high-hash".into());
-        }
-        let prev = block.header.prev_blockhash.to_byte_array();
-        let known = self
-            .0
-            .query
-            .get_header_by_hash(&prev)
-            .ok()
-            .flatten()
-            .is_some()
-            || self
-                .0
-                .held_body(&BlockHash::from_byte_array(prev))
-                .is_some();
-        if !known {
-            return SubmitBlockOutcome::Rejected("prev-blk-not-found".into());
-        }
-        match self.0.accept_received_block(block.clone()) {
-            Ok(rbitcoin_net::AcceptOutcome::Accepted { .. }) => SubmitBlockOutcome::Accepted,
-            Ok(rbitcoin_net::AcceptOutcome::AlreadyHave) => SubmitBlockOutcome::Duplicate,
-            Ok(rbitcoin_net::AcceptOutcome::IgnoredWeaker) => SubmitBlockOutcome::IgnoredWeaker,
-            Err(e) => {
-                let s = e.to_string();
-                let s = s.strip_prefix("consensus: ").unwrap_or(s.as_str());
-                let s = s.strip_prefix("protocol: ").unwrap_or(s);
-                let mapped = if s.contains("unknown parent")
-                    || s.contains("BadPrev")
-                    || s.contains("unexpected previous")
-                {
-                    "prev-blk-not-found".to_string()
-                } else if s.contains("pow invalid")
-                    || s.contains("InvalidPow")
-                    || s.contains("high-hash")
-                {
-                    "high-hash".to_string()
-                } else {
-                    [
-                        "bad-txns-nonfinal",
-                        "bad-txns-duplicate",
-                        "bad-txns-inputs-missingorspent",
-                        "bad-txns-in-belowout",
-                        "bad-cb-missing",
-                        "bad-blk-length",
-                        "bad-diffbits",
-                        "time-too-old",
-                        "time-too-new",
-                        "bad-txnmrklroot",
-                    ]
-                    .into_iter()
-                    .find(|n| s.contains(n))
-                    .map(|n| n.to_string())
-                    .unwrap_or_else(|| s.to_string())
-                };
-                if mapped != "bad-txnmrklroot"
-                    && mapped != "high-hash"
-                    && mapped != "prev-blk-not-found"
-                {
-                    self.0.note_invalid_block(hash);
-                    let _ = self.0.ensure_header(&block.header);
-                }
-                SubmitBlockOutcome::Rejected(mapped)
-            }
-        }
+        crate::submit_received_block(&self.0, block)
     }
 
     fn set_mock_time(&self, timestamp: i64) -> Result<(), String> {
@@ -1310,7 +1249,7 @@ fn ctx_regtest_hub() -> (RpcContext, TempDir, Arc<rbitcoin_net::ChainHub>) {
 
         logpath: String::new(),
         active: std::sync::Arc::new(std::sync::Mutex::new(RpcActive::default())),
-        permit_bare_multisig: true,
+
         alert_notify: None,
         alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
@@ -1336,7 +1275,6 @@ fn generate_refuses_on_mainnet() {
         "generatetoaddress",
         "generateblock",
         "generate",
-        "submitblock",
         "setmocktime",
     ] {
         let e = match m {
@@ -1353,6 +1291,26 @@ fn generate_refuses_on_mainnet() {
             "{m} must refuse on mainnet: {e}"
         );
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn submitblock_not_regtest_only() {
+    use bitcoin::consensus::encode::serialize;
+    use rbitcoin_consensus::mine_regtest_paying;
+
+    let (mut ctx, dir, hub) = ctx_regtest_hub();
+    ctx.network = Network::Mainnet;
+    ctx.regtest = None;
+    let (_, script) = p2wpkh_regtest();
+    let prev = hub.tip_hash().unwrap();
+    let time = hub.tip_header().unwrap().time + 1;
+    let good = mine_regtest_paying(prev, time, 1, script, vec![]);
+    let good_hex = rbitcoin_primitives::hex_encode(serialize(&good));
+    let r = dispatch(&ctx, "submitblock", vec![json!(good_hex)])
+        .unwrap_or_else(|e| panic!("submitblock on mainnet must not be regtest-only: {e}"));
+    assert!(r.is_null(), "good submitblock on mainnet: {r}");
+    assert_eq!(dispatch(&ctx, "getblockcount", vec![]).unwrap(), json!(1));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2826,7 +2784,7 @@ fn rpc_honesty_mempool_budget_and_network_identity() {
 
         logpath: String::new(),
         active: std::sync::Arc::new(std::sync::Mutex::new(RpcActive::default())),
-        permit_bare_multisig: true,
+
         alert_notify: None,
         alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
