@@ -69,10 +69,10 @@ warnings = "deny"
 # `#[cfg(not(coverage))]` and stay out of the first-party LCOV denominator.
 unexpected_cfgs = { level = "deny", check-cfg = ['cfg(coverage)'] }
 
-# Clippy: CI runs `clippy … -- -D warnings`. Correctness/suspicious stay on (default
-# deny via clippy). Allow style/complexity noise that would otherwise require
-# drive-by refactors across store/query hot paths. Prefer fixing real bugs over
-# expanding this list without cause.
+# Clippy: CI is `clippy --workspace --all-targets -- -D warnings`.
+# Correctness/suspicious stay on. This allow list is **debt**: empty it;
+# any leftover lint is `#[allow(clippy::…)]` on the item with a reason
+# (`docs/code-shape.md`). Do not add a new workspace allow.
 [workspace.lints.clippy]
 too_many_arguments = "allow"
 type_complexity = "allow"

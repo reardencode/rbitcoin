@@ -202,8 +202,9 @@ That is **not** the operator binary (`nix build .#rbitcoin-musl`). Details:
     handlers; boolean products become enums or methods; compose (has-a)
     instead of a 30-field god struct; one owner per algorithm. Do not split
     Core-faithful opcode loops or io_uring machines to beat a line count.
-    Full rules and extract policy: [`docs/code-shape.md`](./docs/code-shape.md).
-    Named 0.6.0 extracts (**Q-61**) are Completed; residual peels:
+    Full rules, extract policy, and clippy allows:
+    [`docs/code-shape.md`](./docs/code-shape.md). Named 0.6.0 extracts
+    (**Q-61**) are Completed; residual peels:
     [`docs/quality.md`](./docs/quality.md) **R-10**.
 11. **Crate visibility is the production graph.** `pub` and crate-root
     `pub use` exist only for names another crate actually imports, or for

@@ -73,7 +73,9 @@ before 1.0).
   [`docs/quality.md`](docs/quality.md) Completed. Dual-path / probe
   rules live in What to protect, [`docs/invariants.md`](docs/invariants.md),
   [`CONTRIBUTING.md`](CONTRIBUTING.md) principle 11, and
-  [`TESTING.md`](TESTING.md).
+  [`TESTING.md`](TESTING.md). Clippy: no workspace `allow` list; leftover
+  lints are site-local with a reason
+  ([`docs/code-shape.md`](docs/code-shape.md)).
 - **RPC / CLI honesty (Q-59 slice):** `submitblock` uses the live chain hub
   on all networks (same receive path as P2P; `generate*` / `setmocktime`
   stay regtest-only). `--minrelaytxfee` / `--blockmintxfee` reject garbage
