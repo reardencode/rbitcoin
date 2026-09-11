@@ -262,17 +262,11 @@ pub fn confirm_write_phase(
 ///
 /// Session-fault retry must not skip this: `height_of_hash` matching is not
 /// "write finished." `post_commit` is idempotent (`decide_annotate` Skip).
-pub(crate) fn finish_post_commit(
-    query: &Query,
-    hash: &[u8; 32],
-) -> Result<(), ConsensusError> {
+pub(crate) fn finish_post_commit(query: &Query, hash: &[u8; 32]) -> Result<(), ConsensusError> {
     finish_post_commit_hashes(query, std::slice::from_ref(hash))
 }
 
-fn finish_post_commit_hashes(
-    query: &Query,
-    hashes: &[[u8; 32]],
-) -> Result<(), ConsensusError> {
+fn finish_post_commit_hashes(query: &Query, hashes: &[[u8; 32]]) -> Result<(), ConsensusError> {
     let queued = query.store().txs.take_pending_queued();
     let drain_max_fk = queued.iter().filter_map(|(_, fk)| fk.get()).max();
     let drain = super::head_drain::submit_head_insert(query.store(), queued);

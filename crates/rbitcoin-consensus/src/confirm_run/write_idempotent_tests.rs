@@ -179,6 +179,12 @@ fn three_stage_write_filter_and_scripts_surface() {
     assert!(batch.is_empty());
     assert_eq!(batch.approx_wire_bytes(), 0);
     assert_eq!(batch.parent_count(), 0);
+    let cur = std::thread::current();
+    let name = cur.name().unwrap_or("").to_string();
+    assert!(
+        !name.starts_with("rbtc-scripts"),
+        "confirm_scripts_phase must run on the caller, got {name}"
+    );
     let ok = confirm_scripts_phase(batch).expect("empty scripts ok");
     assert!(ok.batch.prepared.is_empty());
     assert!(ok.batch.wire_blocks.is_empty());
@@ -255,6 +261,12 @@ fn drive_script_waves_ordered_without_coordinator_threads() {
                 &rx,
                 |_, _| {},
                 |ok, meta| {
+                    let cur = thread::current();
+                    let name = cur.name().unwrap_or("").to_string();
+                    assert!(
+                        !name.starts_with("rbtc-scripts"),
+                        "script publisher must not be a steal worker, got {name}"
+                    );
                     heights_w.lock().unwrap().push(meta.first_h);
                     assert!(ok.batch.is_empty());
                     true
