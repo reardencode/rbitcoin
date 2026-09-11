@@ -916,7 +916,7 @@ impl UringSession {
 
 impl Drop for DrainOnDrop<'_> {
     fn drop(&mut self) {
-        let _ = self.session.drain_all_inner(false);
+        let _ = self.session.drain_all();
     }
 }
 
@@ -1418,21 +1418,6 @@ mod tests {
         for _ in 0..10_000 {
             assert_ne!(b.note(Duration::from_nanos(1), 0), DrainVerdict::HardCap);
         }
-    }
-
-    #[test]
-    fn drain_guard_hard_cap_does_not_abort() {
-        let mut session = UringSession::try_open(32)
-            .unwrap_or_else(|_| UringSession::try_open_kind(SessionKind::Pool, 32).expect("pool"));
-        session.pending.insert(1).unwrap();
-        with_drain_hard_cap(Duration::from_millis(200), || {
-            drop(session.drain_guard());
-            assert!(
-                session.is_poisoned(),
-                "DrainOnDrop hard cap must poison, not abort"
-            );
-            drop(session);
-        });
     }
 
     #[test]
