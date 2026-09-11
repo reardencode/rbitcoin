@@ -137,6 +137,15 @@ fn blockchain_empty_store() {
 }
 
 #[test]
+fn getnetworkhashps_help_labels_dummy_work() {
+    let h = super::method_help("getnetworkhashps");
+    assert!(
+        h.contains("2-work-per-block") && h.contains("not Core"),
+        "dummy hashrate must be labeled: {h}"
+    );
+}
+
+#[test]
 fn getmempoolinfo_permitbaremultisig_is_always_true() {
     let (ctx, dir) = ctx_empty();
     let mem = dispatch(&ctx, "getmempoolinfo", vec![]).unwrap();
