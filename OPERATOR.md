@@ -177,6 +177,11 @@ rbitcoin use otherwise-idle resources. This is an opt-in host policy, not a
 performance setting: sync can slow substantially under contention, and an idle
 I/O class can starve while higher-priority storage work continues.
 
+Idle `IOSchedulingClass` (and some filesystems, including bcachefs) can
+starve `io_uring` completions. Expect `store: io_uring drain slow` then at most
+one recover per ~1000 heights. If the node aborts (`store: io_uring unusable`),
+restart as-is or with `RBITCOIN_IO=pread`. There is no mid-IBD libc fallback.
+
 For a regular systemd installation, create a service drop-in with
 `systemctl edit rbitcoin.service`:
 
@@ -512,7 +517,8 @@ Full modality matrix: [`docs/io-modality.md`](docs/io-modality.md).
 when available). Table transport is always **fd pread/pwrite**. Compact Class C
 is L2 write-behind; see [`docs/io-modality.md`](docs/io-modality.md). Per-path
 env overrides are **removed**. If `uring` is selected but setup fails, demote to
-**pread** / **pwrite**.
+**pread** / **pwrite**. If a live ring stops completing (`drain slow`, then abort),
+restart with **`RBITCOIN_IO=pread`** — the process does not switch backends itself.
 
 | Env | Values | Note |
 |-----|--------|------|
