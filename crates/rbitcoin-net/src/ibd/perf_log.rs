@@ -1079,21 +1079,17 @@ fn ns_ms(ns: u64) -> u64 {
     ns / 1_000_000
 }
 
+fn div_or_0(n: u64, d: u64) -> u64 {
+    n.checked_div(d).unwrap_or(0)
+}
+
 fn pin_txid_pct(s: &IbdPerfSample) -> u64 {
     let tot = s.arch_pin_txid.saturating_add(s.arch_head_need);
-    if tot == 0 {
-        0
-    } else {
-        (100 * s.arch_pin_txid) / tot
-    }
+    div_or_0(100 * s.arch_pin_txid, tot)
 }
 
 fn us_pin_txid(s: &IbdPerfSample) -> u64 {
-    if s.arch_pin_txid == 0 {
-        0
-    } else {
-        s.arch_pin_txid_ms.saturating_mul(1000) / s.arch_pin_txid
-    }
+    div_or_0(s.arch_pin_txid_ms.saturating_mul(1000), s.arch_pin_txid)
 }
 
 /// Append ` key=value` only when `v != 0` (keeps DEBUG free of ghost columns).
@@ -1322,11 +1318,7 @@ pub(crate) fn format_info(s: &IbdPerfSample) -> String {
     let pin_hit_pct = {
         let hits = s.load_pin_cache_body;
         let tot = hits.saturating_add(s.load_pin_new);
-        if tot > 0 {
-            (100 * hits) / tot
-        } else {
-            0
-        }
+        div_or_0(100 * hits, tot)
     };
     let plan_pin_ms = if s.load_plan_pin_ms > 0 {
         s.load_plan_pin_ms
@@ -1340,16 +1332,8 @@ pub(crate) fn format_info(s: &IbdPerfSample) -> String {
     } else {
         cold_io_ms
     };
-    let pin_cold_us_per = if s.load_pin_new > 0 {
-        (cold_for_us.saturating_mul(1000)) / s.load_pin_new
-    } else {
-        0
-    };
-    let asm_prev_us_per_in = if s.asm_in_n > 0 {
-        (s.asm_prevout_ms.saturating_mul(1000)) / s.asm_in_n
-    } else {
-        0
-    };
+    let pin_cold_us_per = div_or_0(cold_for_us.saturating_mul(1000), s.load_pin_new);
+    let asm_prev_us_per_in = div_or_0(s.asm_prevout_ms.saturating_mul(1000), s.asm_in_n);
     let plan_batch = plan_batch_ms(s);
     let pre_assemble = s.load_ms;
     let pin_budget_ms = s.load_parent_pin_ms;
@@ -1539,11 +1523,7 @@ pub(crate) fn format_debug(s: &IbdPerfSample) -> String {
     out.push_str(&format!(" sh_runs={}", s.sh_runs));
 
     if s.arch_ext_need > 0 || s.arch_prep_assign_ms > 0 {
-        let resolve_us_blk = if s.arch_resolve_blocks > 0 {
-            (s.arch_resolve_ns / s.arch_resolve_blocks) / 1000
-        } else {
-            0
-        };
+        let resolve_us_blk = div_or_0(s.arch_resolve_ns, s.arch_resolve_blocks) / 1000;
         out.push_str(&format!(
             " | plan_batch assign={} collect={} inflight={} pin_txid={}/{} pin_txid_ms={} \
              us/pin_txid={} recent={} recent_ms={} head_fk={} head={} \
@@ -1573,32 +1553,12 @@ pub(crate) fn format_debug(s: &IbdPerfSample) -> String {
             || s.arch_prep_body_txid_ms > 0
             || s.arch_prep_head_keys > 0
         {
-            let avg_cands = if s.arch_prep_head_keys > 0 {
-                s.arch_prep_head_cands / s.arch_prep_head_keys
-            } else {
-                0
-            };
-            let avg_lookups = if s.arch_prep_head_keys > 0 {
-                s.arch_prep_body_lookups / s.arch_prep_head_keys
-            } else {
-                0
-            };
+            let avg_cands = div_or_0(s.arch_prep_head_cands, s.arch_prep_head_keys);
+            let avg_lookups = div_or_0(s.arch_prep_body_lookups, s.arch_prep_head_keys);
             let hit_rank_avg = s.arch_prep_hit_rank_avg_x100 as f64 / 100.0;
-            let probe_us_key = if s.arch_prep_head_keys > 0 {
-                (s.arch_prep_probe_ms * 1000) / s.arch_prep_head_keys
-            } else {
-                0
-            };
-            let idx_us_key = if s.arch_prep_head_keys > 0 {
-                (s.arch_prep_idx_ms * 1000) / s.arch_prep_head_keys
-            } else {
-                0
-            };
-            let body_us_key = if s.arch_prep_head_keys > 0 {
-                (s.arch_prep_body_txid_ms * 1000) / s.arch_prep_head_keys
-            } else {
-                0
-            };
+            let probe_us_key = div_or_0(s.arch_prep_probe_ms * 1000, s.arch_prep_head_keys);
+            let idx_us_key = div_or_0(s.arch_prep_idx_ms * 1000, s.arch_prep_head_keys);
+            let body_us_key = div_or_0(s.arch_prep_body_txid_ms * 1000, s.arch_prep_head_keys);
             out.push_str(&format!(
                 " head_rd(probe={} idx={} body={} keys={} cands={} lookups={} \
                  avg_cands={} avg_lookups={} hit_rank_avg={hit_rank_avg:.2} hit_n={} miss_peeks={} \
@@ -1634,16 +1594,8 @@ pub(crate) fn format_debug(s: &IbdPerfSample) -> String {
         }
     }
     if s.arch_write_blocks > 0 || s.arch_write_total_ms > 0 {
-        let ca_head_us_blk = if s.arch_write_blocks > 0 {
-            (s.arch_write_head_ms * 1000) / s.arch_write_blocks
-        } else {
-            0
-        };
-        let ca_body_us_blk = if s.arch_write_blocks > 0 {
-            (s.arch_write_body_ms * 1000) / s.arch_write_blocks
-        } else {
-            0
-        };
+        let ca_head_us_blk = div_or_0(s.arch_write_head_ms * 1000, s.arch_write_blocks);
+        let ca_body_us_blk = div_or_0(s.arch_write_body_ms * 1000, s.arch_write_blocks);
         out.push_str(&format!(
             " | class_a_commit total={} body={} head={} htxs={} reserve={} spend={} flush={} blks={} \
              ca_head_us/blk={} ca_body_us/blk={}",
@@ -1686,11 +1638,7 @@ pub(crate) fn format_sizes(s: &IbdPerfSample) -> String {
     let load_wire_mib = cp.load_wire_bytes / (1024 * 1024);
     let script_wire_mib = cp.script_wire_bytes / (1024 * 1024);
     let write_wire_mib = cp.write_wire_bytes / (1024 * 1024);
-    let file_pct = if s.rss_kb > 0 {
-        (100 * s.rss_file_kb) / s.rss_kb
-    } else {
-        0
-    };
+    let file_pct = div_or_0(100 * s.rss_file_kb, s.rss_kb);
     let bq_mib = s.bq_bytes / (1024 * 1024);
     let if_mib = o.inflight_bytes / (1024 * 1024);
     let h2h_mib = (o.h2h_keys as u64).saturating_mul(48) / (1024 * 1024);

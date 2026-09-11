@@ -94,7 +94,7 @@ pub(crate) fn empty_path_header_fan(st: &IbdWorkState, tip_h: u32, alive: usize)
     if on_path_inflight(st) {
         return 1.min(alive);
     }
-    alive.min(4).max(1)
+    alive.clamp(1, 4)
 }
 
 /// Clear `headers_done` so empty-path `getheaders` can resume.

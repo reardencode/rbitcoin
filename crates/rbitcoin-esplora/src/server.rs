@@ -1816,7 +1816,7 @@ mod tests {
                     .filter_map(|t| t.get("txid").and_then(|x| x.as_str()))
                     .collect();
                 assert!(
-                    txids.iter().any(|t| *t == pay_hex.as_str()),
+                    txids.contains(&pay_hex.as_str()),
                     "block-transactions should include confirmed pay {pay_hex}, got {txids:?}"
                 );
                 saw_block_txs = true;

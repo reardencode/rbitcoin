@@ -616,7 +616,7 @@ pub fn host_mem_available_bytes() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
         let text = std::fs::read_to_string("/proc/meminfo").ok()?;
-        return mem_available_from_meminfo(&text);
+        mem_available_from_meminfo(&text)
     }
     #[cfg(target_os = "macos")]
     {

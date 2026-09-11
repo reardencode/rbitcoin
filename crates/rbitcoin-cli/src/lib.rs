@@ -213,7 +213,7 @@ fn format_result(v: &Value) -> String {
 }
 
 fn dispatch_call(cfg: &CliConfig) -> Result<String, String> {
-    let cmd = cfg.command.as_deref().ok_or_else(|| usage())?;
+    let cmd = cfg.command.as_deref().ok_or_else(usage)?;
     if cmd == "help" {
         return Ok(usage());
     }

@@ -198,10 +198,8 @@ impl IbdWorkState {
     /// [`Self::try_set_path_slot`] (first-wins, prev-anchored).
     pub(crate) fn record_height(&mut self, hash: BlockHash, ht: u32) {
         if let Some(old) = self.hash_height.insert(hash, ht) {
-            if old != ht {
-                if self.height_to_hash.get(&old) == Some(&hash) {
-                    self.height_to_hash.remove(&old);
-                }
+            if old != ht && self.height_to_hash.get(&old) == Some(&hash) {
+                self.height_to_hash.remove(&old);
             }
         }
         self.height_to_hash.insert(ht, hash);

@@ -82,6 +82,8 @@ pub fn format_duration(d: Duration) -> String {
 }
 
 pub fn format_progress(label: &str, done: u64, total: u64, elapsed: Duration) -> String {
+    // Zero total is 100% complete, not `checked_div` None.
+    #[allow(clippy::manual_checked_ops)]
     let pct = if total == 0 {
         100
     } else {
@@ -108,6 +110,8 @@ pub fn should_emit(done: u64, total: u64, last_done: u64, since_last: Duration) 
         return true;
     }
     let bucket = |n: u64| {
+        // Zero total is the last bucket, not `checked_div` None.
+        #[allow(clippy::manual_checked_ops)]
         if total == 0 {
             PCT_STEPS
         } else {

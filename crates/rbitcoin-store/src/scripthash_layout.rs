@@ -296,7 +296,7 @@ mod tests {
         ));
         assert_eq!(pack8(&ShHeadValue::Empty).unwrap(), 0);
         assert!(pack8(&ShHeadValue::inline_one(Fk(0))).is_ok());
-        assert!(unpack8(1u64 << 62 | 1).is_err() || matches!(unpack8(1u64 << 62 | 1), Ok(_)));
+        assert!(unpack8(1u64 << 62 | 1).is_err() || unpack8(1u64 << 62 | 1).is_ok());
     }
 
     #[test]

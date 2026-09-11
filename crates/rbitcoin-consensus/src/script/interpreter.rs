@@ -1035,7 +1035,7 @@ fn op_checkmultisig(
 ) -> Result<(), ConsensusError> {
     // Pop order matches Core: n, n keys (top=last), m, m sigs (top=last), dummy.
     let n = scriptnum_decode(&pop(stack)?, ctx.minimal_data)?;
-    if n < 0 || n > MAX_PUBKEYS_PER_MULTISIG {
+    if !(0..=MAX_PUBKEYS_PER_MULTISIG).contains(&n) {
         return Err(ConsensusError::Script("multisig n".into()));
     }
     *op_count += n as usize;
@@ -1568,10 +1568,8 @@ fn scriptnum_is_minimal(vch: &[u8]) -> bool {
     }
     // If the most-significant-byte (excluding sign bit) is zero, not minimal —
     // unless the second-most-significant-byte has the high bit set (±255 edge).
-    if vch[vch.len() - 1] & 0x7f == 0 {
-        if vch.len() <= 1 || (vch[vch.len() - 2] & 0x80) == 0 {
-            return false;
-        }
+    if vch[vch.len() - 1] & 0x7f == 0 && (vch.len() <= 1 || (vch[vch.len() - 2] & 0x80) == 0) {
+        return false;
     }
     true
 }
@@ -1737,7 +1735,7 @@ mod success_and_disabled_tests {
         script.push(0xad); // CHECKSIGVERIFY
                            // May error on empty verify or invalid key — either covers tapscript arms
         let r = eval(&script, SigVersion::TapScript);
-        assert!(r.is_err() || matches!(r, Ok(_)));
+        assert!(r.is_err() || r.is_ok());
     }
 
     #[test]

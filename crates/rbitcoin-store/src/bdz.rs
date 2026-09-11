@@ -265,7 +265,7 @@ impl BdzMphf {
                     pread_exact(file, path, *off, &mut buf)?;
                     return Ok(u32::from_le_bytes(buf));
                 }
-                let nbytes = ((*g_bits as usize) + 7) / 8;
+                let nbytes = (*g_bits as usize).div_ceil(8);
                 let mut buf = vec![0u8; nbytes.max(1)];
                 pread_exact(file, path, *off, &mut buf)?;
                 Ok(unpack_g_at(&buf, 0, *g_bits))
@@ -325,7 +325,8 @@ impl BdzMphf {
                 compact: None,
             });
         }
-        let m = ((u64::from(n) * GAMMA_NUM + GAMMA_DEN - 1) / GAMMA_DEN)
+        let m = (u64::from(n) * GAMMA_NUM)
+            .div_ceil(GAMMA_DEN)
             .max(u64::from(n) + 3)
             .max(3) as u32;
         let mut rng = 0x9e37_79b9_7f4a_7c15u64;
@@ -1169,7 +1170,8 @@ fn assign_g(
 }
 
 fn compact_vertex_count(n: u32) -> u32 {
-    let m = ((u64::from(n) * GAMMA_NUM + GAMMA_DEN - 1) / GAMMA_DEN)
+    let m = (u64::from(n) * GAMMA_NUM)
+        .div_ceil(GAMMA_DEN)
         .max(u64::from(n) + 3)
         .max(3);
     let m = m.div_ceil(3) * 3;

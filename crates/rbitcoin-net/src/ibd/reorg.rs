@@ -317,7 +317,7 @@ fn connecting_hashes_heavier_disconnected_n(
     let Some(join) = parent_hash_of(hub, path[0])? else {
         return Ok(Some(path));
     };
-    if join == tip || path.iter().any(|h| *h == tip) {
+    if join == tip || path.contains(&tip) {
         return Ok(None);
     }
     // `has_block` can lag the published tip. If join is on the best chain and

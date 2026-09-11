@@ -695,11 +695,17 @@ fn pipeline_parents_meter_prep_and_write() {
 /// Contiguous claim + skip already-confirmed (pure claim helper).
 #[test]
 fn claim_feed_wave_and_skip_confirmed() {
-    let run = claim_feed_run(101, 32, 200, |h| h >= 101 && h < 101 + 40, |_| false);
+    let run = claim_feed_run(101, 32, 200, |h| (101..101 + 40).contains(&h), |_| false);
     assert_eq!(run.len(), 32);
     assert_eq!(run[0], 101);
     assert_eq!(*run.last().unwrap(), 132);
-    let run = claim_feed_run(10, 32, 200, |h| h >= 10 && h <= 50, |h| h == 10 || h == 11);
+    let run = claim_feed_run(
+        10,
+        32,
+        200,
+        |h| (10..=50).contains(&h),
+        |h| h == 10 || h == 11,
+    );
     assert_eq!(run.first().copied(), Some(12));
     assert_eq!(run.len(), 32);
 }

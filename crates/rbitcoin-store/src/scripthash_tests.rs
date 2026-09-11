@@ -101,7 +101,7 @@ fn sh_bodies_are_split() {
         assert_eq!(t.body_layout(), ShBodyLayout::Sharded);
         let k0 = sh_prefix_key(0, 0);
         let k2 = sh_prefix_key(2, 0);
-        let ents: Vec<Fk> = (1..=8).map(|i| Fk(i)).collect();
+        let ents: Vec<Fk> = (1..=8).map(Fk).collect();
         {
             let mut s = t.bulk_session(16).unwrap();
             s.put_chain(k0, &ents).unwrap();
@@ -1069,7 +1069,7 @@ fn bulk_session_packs_exact_class_from_count() {
     for &(tag, n) in cases {
         let mut sh = [0u8; 32];
         sh[0] = tag;
-        let ents: Vec<_> = (1..=u64::from(n)).map(|i| Fk(i)).collect();
+        let ents: Vec<_> = (1..=u64::from(n)).map(Fk).collect();
         session.put_chain(sh, &ents).unwrap();
     }
     let (creates, keys, _, _) = session.finish().unwrap();
@@ -1517,7 +1517,7 @@ fn bulk_session_extent_last_page_splits_when_ver2_header_eats_stream() {
     let n = SH_PAGE_EXTENT_STREAM_MAX + 8;
     let mut sh = [0u8; 32];
     sh[0] = 0x11;
-    let ents: Vec<_> = (1..=n as u64).map(|i| Fk(i)).collect();
+    let ents: Vec<_> = (1..=n as u64).map(Fk).collect();
     let mut session = t.bulk_session(1).unwrap();
     session.put_chain(sh, &ents).unwrap();
     let (creates, keys, _, _) = session.finish().unwrap();
@@ -1551,7 +1551,7 @@ fn bulk_session_streamed_last_remainder_fits_ver2() {
     let n = SH_PAGE_STREAM_MAX + SH_PAGE_EXTENT_STREAM_MAX + 8;
     let mut sh = [0u8; 32];
     sh[0] = 0x12;
-    let ents: Vec<_> = (1..=n as u64).map(|i| Fk(i)).collect();
+    let ents: Vec<_> = (1..=n as u64).map(Fk).collect();
     let mut session = t.bulk_session(1).unwrap();
     session.put_chain(sh, &ents).unwrap();
     let (creates, keys, _, _) = session.finish().unwrap();
@@ -1583,7 +1583,7 @@ fn bulk_session_megakey_page_chain_contiguous_once() {
     let mut sh = [0u8; 32];
     sh[0] = 0x10;
     sh[1] = 0xee;
-    let ents: Vec<_> = (1..=n as u64).map(|i| Fk(i)).collect();
+    let ents: Vec<_> = (1..=n as u64).map(Fk).collect();
     let mut sh_next = [0u8; 32];
     sh_next[0] = 0x10;
     sh_next[1] = 0xef;
@@ -1679,7 +1679,7 @@ fn extent_append_links_tail_when_bump_moved() {
     let mut sh = [0u8; 32];
     sh[0] = 0x21;
     sh[1] = 0xaa;
-    let ents: Vec<_> = (1..=n as u64).map(|i| Fk(i)).collect();
+    let ents: Vec<_> = (1..=n as u64).map(Fk).collect();
     let mut sh_gap = [0u8; 32];
     sh_gap[0] = 0x21;
     sh_gap[1] = 0xab;
@@ -1722,7 +1722,7 @@ fn extent_append_glued_bumps_extent_n() {
     let n = SH_PAGE_STREAM_MAX + SH_PAGE_EXTENT_STREAM_MAX - 1;
     let mut sh = [0u8; 32];
     sh[0] = 0x22;
-    let ents: Vec<_> = (1..=n as u64).map(|i| Fk(i)).collect();
+    let ents: Vec<_> = (1..=n as u64).map(Fk).collect();
     let mut session = t.bulk_session(1).unwrap();
     session.put_chain(sh, &ents).unwrap();
     let _ = session.finish().unwrap();

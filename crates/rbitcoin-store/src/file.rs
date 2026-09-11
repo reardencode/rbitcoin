@@ -1297,7 +1297,7 @@ pub fn ensure_nofile_budget_at_least(want_soft: u64) -> (u64, u64) {
                  if open fails with EMFILE"
             );
         }
-        return (soft, hard);
+        (soft, hard)
     }
     #[cfg(not(unix))]
     {

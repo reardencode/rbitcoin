@@ -2219,7 +2219,7 @@ async fn serve_getdata(
                         let _ =
                             try_queue_served_block(out_tx, inflight, NetworkMessage::Block(block))?;
                     } else {
-                        let ver = (follow.cmpct_version).max(1).min(2);
+                        let ver = follow.cmpct_version.clamp(1, 2);
                         if let Ok(hsi) =
                             HeaderAndShortIds::from_block(&block, rand_nonce(), ver, &[0])
                         {
@@ -3004,7 +3004,7 @@ fn on_bloom_forbidden(
     session: Option<&crate::peers::LivePeer>,
 ) -> Result<(), NetError> {
     punish_disconnect(&mut follow.ban_score, session);
-    return Ok(());
+    Ok(())
 }
 
 fn on_getaddr(
@@ -3115,8 +3115,7 @@ fn peer_has_header(
 /// BIP152 compact tip announcement (coinbase prefilled) from an in-RAM body.
 fn cmpct_announce_from_block(block: &Block, cmpct_version: u32) -> Option<NetworkMessage> {
     let nonce = rand_nonce();
-    let hsi =
-        HeaderAndShortIds::from_block(block, nonce, cmpct_version.max(1).min(2), &[0]).ok()?;
+    let hsi = HeaderAndShortIds::from_block(block, nonce, cmpct_version.clamp(1, 2), &[0]).ok()?;
     Some(NetworkMessage::CmpctBlock(CmpctBlock {
         compact_block: hsi,
     }))

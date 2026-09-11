@@ -145,7 +145,7 @@ fn finish_drain_hard_cap(pending: usize) -> Result<(), StoreError> {
     #[cfg(test)]
     {
         let _ = reason;
-        return Err(StoreError::Corrupt("invariant: io_uring undrained"));
+        Err(StoreError::Corrupt("invariant: io_uring undrained"))
     }
     #[cfg(not(test))]
     abort_uring_unusable(&reason);
@@ -296,7 +296,7 @@ impl UringSession {
 
     /// Open an explicit backend (tests + probe).
     pub fn try_open_kind(kind: SessionKind, entries: u32) -> Result<Self, StoreError> {
-        let entries = entries.max(32).min(4096);
+        let entries = entries.clamp(32, 4096);
         let backend = match kind {
             SessionKind::Uring => {
                 #[cfg(target_os = "linux")]
@@ -1050,7 +1050,7 @@ pub fn with_thread_local<R>(
     min_entries: u32,
     f: impl FnOnce(&mut UringSession) -> R,
 ) -> Result<R, StoreError> {
-    let min_entries = min_entries.max(32).min(4096);
+    let min_entries = min_entries.clamp(32, 4096);
 
     {
         // Gate once; TLS open uses try_open to avoid recursive enabled() probe.
