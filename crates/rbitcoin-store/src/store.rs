@@ -311,14 +311,6 @@ impl Store {
         Self::create_layout(StoreLayout::tiny(path.into()))
     }
 
-    /// Create with an explicit `tx.head` geometry (tests / recovery).
-    pub fn create_with_head_layout(
-        path: impl Into<PathBuf>,
-        head: crate::address_head::HeadLayout,
-    ) -> Result<Self, StoreError> {
-        Self::create_layout_with_head(StoreLayout::tiny(path.into()), head)
-    }
-
     pub fn create_layout(layout: StoreLayout) -> Result<Self, StoreError> {
         let head = crate::address_head::default_layout(layout.head_scale);
         Self::create_layout_with_head(layout, head)
@@ -798,25 +790,6 @@ impl Store {
             create_tx_fk,
             out_index,
             spending_tx_fk,
-        )
-    }
-
-    /// Annotate spend using a cache-held body range (no `tx.idx` / `tx.head` reads).
-    pub fn put_spend_create_at(
-        &self,
-        create_tx_fk: Fk,
-        out_index: u32,
-        spending_tx_fk: Fk,
-        body_off: u64,
-        body_len: u64,
-    ) -> Result<(), StoreError> {
-        point_table::put_spend_on_create_at(
-            &self.txs,
-            &self.spenders,
-            create_tx_fk,
-            out_index,
-            spending_tx_fk,
-            Some((body_off, body_len)),
         )
     }
 
@@ -1405,7 +1378,7 @@ impl Store {
     /// Order: `strong_tx` → `header_txs`. Used so a mid-barrier kill can leave
     /// strong durable **above** tip (repairable) without advancing tip. Prefer
     /// [`Self::flush_class_c_tip`] for the full barrier.
-    pub fn flush_class_c_pre_tip(&self) -> Result<(), StoreError> {
+    fn flush_class_c_pre_tip(&self) -> Result<(), StoreError> {
         // Tip-as-commit: never flush confirmed here.
         // Headers first so conf tip cannot reference a non-durable header_fk.
         self.headers.flush()?;
@@ -1648,6 +1621,13 @@ mod tests {
         crate::testutil::TempDir::labeled("store").unwrap()
     }
 
+    fn sh_put_create(s: &Store, rec: crate::scripthash::ScriptHashRecord) {
+        let mut heads = std::collections::HashMap::new();
+        s.scripthash
+            .put_create_batch_append(std::slice::from_ref(&rec), &mut heads)
+            .unwrap();
+    }
+
     #[test]
     fn open_tiny_reopen_still_works() {
         let dir = tmp();
@@ -1687,12 +1667,10 @@ mod tests {
         let dir = tmp();
         {
             let s = Store::create_tiny(&dir).unwrap();
-            s.scripthash
-                .put_create(&crate::scripthash::ScriptHashRecord::from_fk(
-                    [0x11u8; 32],
-                    Fk(1),
-                ))
-                .unwrap();
+            sh_put_create(
+                &s,
+                crate::scripthash::ScriptHashRecord::from_fk([0x11u8; 32], Fk(1)),
+            );
             s.flush().unwrap();
         }
         let ingest = dir.join("scripthash.ovf").join("ingest");
@@ -2021,11 +1999,25 @@ mod tests {
         s.put_spend_batch(&[([10u8; 32], 1, spend_fk)]).unwrap();
         s.put_spend_create(create_fk, 1, spend2_fk).unwrap();
         let (soff, slen) = s.tx_spent_range(create_fk).unwrap();
-        s.put_spend_create_at(create_fk, 1, spend3_fk, soff, slen)
-            .unwrap();
+        point_table::put_spend_on_create_at(
+            &s.txs,
+            &s.spenders,
+            create_fk,
+            1,
+            spend3_fk,
+            Some((soff, slen)),
+        )
+        .unwrap();
         // Re-annotate vout1 (already multi).
-        s.put_spend_create_at(create_fk, 1, spend_fk, soff, slen)
-            .unwrap();
+        point_table::put_spend_on_create_at(
+            &s.txs,
+            &s.spenders,
+            create_fk,
+            1,
+            spend_fk,
+            Some((soff, slen)),
+        )
+        .unwrap();
 
         // Class C: confirm spenders + heights. Body list must include spend_fk
         // (membership is part of is_confirmed_strong).
@@ -2269,9 +2261,7 @@ mod tests {
         {
             let s = Store::create_tiny(&dir).unwrap();
             let sh = [0xcdu8; 32];
-            s.scripthash
-                .put_create(&crate::scripthash::ScriptHashRecord::from_fk(sh, Fk(1)))
-                .unwrap();
+            sh_put_create(&s, crate::scripthash::ScriptHashRecord::from_fk(sh, Fk(1)));
             assert!(s.scripthash.has_durable_index());
             s.flush().unwrap();
         }
@@ -2298,9 +2288,7 @@ mod tests {
         {
             let s = Store::create_tiny(&dir).unwrap();
             let sh = [0xabu8; 32];
-            s.scripthash
-                .put_create(&crate::scripthash::ScriptHashRecord::from_fk(sh, Fk(1)))
-                .unwrap();
+            sh_put_create(&s, crate::scripthash::ScriptHashRecord::from_fk(sh, Fk(1)));
             assert!(s.scripthash.has_durable_index());
             s.flush().unwrap();
         }
@@ -2355,9 +2343,7 @@ mod tests {
         let sh = [0xabu8; 32];
         {
             let s = Store::create_tiny(&dir).unwrap();
-            s.scripthash
-                .put_create(&crate::scripthash::ScriptHashRecord::from_fk(sh, Fk(1)))
-                .unwrap();
+            sh_put_create(&s, crate::scripthash::ScriptHashRecord::from_fk(sh, Fk(1)));
             s.flush().unwrap();
             assert_eq!(s.scripthash.entries(&sh).unwrap().len(), 1);
         }
@@ -2393,12 +2379,10 @@ mod tests {
         let dir = tmp();
         {
             let s = Store::create_tiny(&dir).unwrap();
-            s.scripthash
-                .put_create(&crate::scripthash::ScriptHashRecord::from_fk(
-                    [0xabu8; 32],
-                    Fk(1),
-                ))
-                .unwrap();
+            sh_put_create(
+                &s,
+                crate::scripthash::ScriptHashRecord::from_fk([0xabu8; 32], Fk(1)),
+            );
             s.flush().unwrap();
         }
         write_store_meta_ver(&dir, 17);
@@ -2522,9 +2506,7 @@ mod tests {
         let sh = [0xcdu8; 32];
         {
             let s = Store::create_tiny(&dir).unwrap();
-            s.scripthash
-                .put_create(&crate::scripthash::ScriptHashRecord::from_fk(sh, Fk(1)))
-                .unwrap();
+            sh_put_create(&s, crate::scripthash::ScriptHashRecord::from_fk(sh, Fk(1)));
             s.flush().unwrap();
         }
         write_store_meta_ver(&dir, 19);
@@ -3397,8 +3379,11 @@ mod tests {
 
         let dir = tmp();
         // bits=8 → 256 slots, seal ~204 keys. Five segments ⇒ oldest age ≥4.
-        let s = Store::create_with_head_layout(&dir, HeadLayout::with_entry_bytes(8, 4).unwrap())
-            .unwrap();
+        let s = Store::create_layout_with_head(
+            StoreLayout::tiny(&dir),
+            HeadLayout::with_entry_bytes(8, 4).unwrap(),
+        )
+        .unwrap();
         let txid = [0xCDu8; 32];
         let old = put_one(&s, txid, 1);
         let n = 204u32.saturating_mul(5);
