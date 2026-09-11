@@ -4,54 +4,13 @@ use super::phases::{class_c_commit, post_commit, structural_run};
 use super::*;
 
 /// Fill empty packed ins from wire + plan.edges (C encode-at-write).
-///
-/// No-op when every packed row already has ins (unit tests / pre-C3).
 fn fill_packed_ins_from_wire(
     plan: &mut rbitcoin_query::ArchiveWritePlan,
-    prepared: &[Prepared],
     wire_blocks: &[Arc<Block>],
 ) -> Result<(), ConsensusError> {
-    if plan.packed.is_empty() || plan.packed.iter().all(|(_, ins)| !ins.is_empty()) {
-        return Ok(());
-    }
-    if prepared.len() != wire_blocks.len() {
-        return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
-            "invariant: write encode prepared/wire length",
-        )));
-    }
-    let mut i = 0usize;
-    for (p, block) in prepared.iter().zip(wire_blocks.iter()) {
-        if p.tx_fks.len() != block.txdata.len() {
-            return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
-                "invariant: write encode tx_fks/txdata length",
-            )));
-        }
-        for (fk, tx) in p.tx_fks.iter().zip(block.txdata.iter()) {
-            let Some(id) = fk.get() else {
-                return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
-                    "invariant: write encode null planned fk",
-                )));
-            };
-            let empty = [];
-            let eds = plan.edges.get(&id).map(|v| v.as_slice()).unwrap_or(&empty);
-            let ins = crate::convert::input_records_from_wire(tx, *fk, eds)?;
-            if i >= plan.packed.len() {
-                return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
-                    "invariant: write encode packed shorter than planned_fks",
-                )));
-            }
-            if plan.packed[i].1.is_empty() {
-                plan.packed[i].1 = ins;
-            }
-            i += 1;
-        }
-    }
-    if i != plan.packed.len() {
-        return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
-            "invariant: write encode packed/tx count mismatch",
-        )));
-    }
-    Ok(())
+    let blocks: Vec<&Block> = wire_blocks.iter().map(|b| b.as_ref()).collect();
+    plan.fill_packed_ins_from_blocks(&blocks)
+        .map_err(ConsensusError::from)
 }
 
 pub(super) fn write_height_needed(tip: Option<u32>, height: u32) -> bool {
@@ -128,7 +87,7 @@ pub fn confirm_write_phase(
     let mut create_map_ns = 0u64;
     if let Some(mut plan) = batch.archive_plan.take() {
         if !plan.is_empty() {
-            fill_packed_ins_from_wire(&mut plan, &batch.prepared, &batch.wire_blocks)?;
+            fill_packed_ins_from_wire(&mut plan, &batch.wire_blocks)?;
             let t_take = Instant::now();
             let planned_fks = plan.planned_fks.clone();
             let pins = if query.index_mode().is_tip() {

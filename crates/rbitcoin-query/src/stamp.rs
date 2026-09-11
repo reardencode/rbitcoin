@@ -2,7 +2,7 @@
 //!
 //! IBD load passes a lookup-filled [`BatchParentIds`] and never leftover-probes.
 //! plan=None / S0 (`skeleton = None`) is in-flight → leftover TipOnly.
-//! One function for S0 plan (`archive_plan_batch_from_store`) and plan=None
+//! One function for S0 plan (`archive_plan_batch_from_wire`) and plan=None
 //! rehydrate. In-flight holds CreatePins until load drops map rows below a
 //! lookup-wave drain+fence snapshot taken before TipOnly.
 

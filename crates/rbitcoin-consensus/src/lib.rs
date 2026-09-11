@@ -236,7 +236,8 @@ pub fn accept_and_connect_block_preverified(
 
 /// Class A only (no tip / Class C). Crash and `plan=None` tests.
 ///
-/// Not a production IBD API — confirm write uses `archive_plan_batch` + commit.
+/// Not a production IBD API — confirm write uses `archive_plan_batch_from_wire`
+/// + fill packed ins + commit.
 pub fn commit_class_a_block(
     query: &Query,
     params: &ChainParams,

@@ -127,7 +127,7 @@ Real layer, not a pass-through: BQ + resolved wire, stamp/`InFlight`/`BatchParen
 | Q-03 | `ConfirmLoadStats` test-only scaffolding | `confirm_load.rs:14–46`; `note` is `#[cfg(test)]` (`lib.rs:369–402`); no outside user. | Delete; fold remaining `confirm_load.rs` into `confirm_parent_cache.rs`. | ~80–100 | none | high |
 | Q-04 | Micro-modules | `wave_prevout.rs` (10), `resolved_wire.rs` (23), `confirm_load.rs` (61), `run_builder_core.rs` (99, used only by `sh_builder`). | Fold into their sole consumers. | ~30–50 | none | medium-high |
 | Q-05 | `archive_filter_need_bodies` dead  **done (#415)** | `archive.rs:412` def; only a test comment `:2329`; IBD uses `archive_filter_need_header_fks` (`lookup.rs:415`); doc claims "used by IBD prep" (false). | Delete + fix comment. | ~25–40 | none | high |
-| Q-06 | Dual Class A planners (wire vs `TxApply`/store) | `archive_plan_batch_from_wire` (`archive.rs:545`, IBD) vs `archive_plan_batch_from_store` (`:465`) feeding `commit_class_a_*` — whose only callers are `rbitcoin-test/tests/scenarios.rs` (14) + `integration_multinode.rs` (1). Consensus `commit_class_a_block` doc says "Not a production IBD API" (`consensus/lib.rs:693–708`, ignores `height`/`milestone`). | Make the store/TxApply planner and `commit_class_a_{block,run}` test-support (move to `rbitcoin-test` or `#[cfg(test)]`-gated helper), or build fixtures via the wire planner. Do not merge into consensus. | ~200–400 | Crash/plan=None fixtures depend on it; extract shared stamp core first. | medium |
+| Q-06 | Dual Class A planners (wire vs `TxApply`/store)  **done (this PR)** | IBD and Class A-without-tip use `archive_plan_batch_from_wire` + fill packed ins. `archive_plan_batch_from_store` deleted. `commit_class_a_only` converts TxApply fixtures to wire. | — | — | Stamp pins retargeted onto from_wire. Packed-ins pin is `commit_class_a_only_writes_packed_ins_from_wire`. | high |
 | Q-07 | `archive`/`catchup`/`connect` are not three confirms | Roles: Class A plan/commit; `IndexMode` + SH finalize; Class C tip + SH enqueue/disconnect. | Rustdoc only. | ~0–20 | Do not collapse. | high (not excess) |
 | Q-08 | Three parent structures are three jobs | `BatchParents` (batch outs), `InFlight` (tip-ahead creates), `ConfirmParentCache` (header plans only). | Rename `ConfirmParentCache` → `HeaderPlanCache`. | 0 | Merging would violate plan/batch-only pins. | high (not excess) |
 | Q-09 | `tx_precompute` not duplicated | Consensus `block/tx_precompute.rs` is tests only re-exporting query's type. | Move tests; delete empty consensus module. | ~65 (file) | none | high |
@@ -344,7 +344,7 @@ Suggested order (each a worktree PR, Red→Green→Refactor per `docs/how-we-pla
 6. **X-07** move `block_diff` + fuzz encoders to `fuzz/` (check coverage scope first).
 7. **X-05** node config (write the flag-matrix test first).
 8. **X-01 step 2–3** instance-owned stats + table-driven `perf_log`.
-9. **Product-gated** (need a SCHEMA/COMPAT decision, listed not scheduled): S-04/S-12/SH-06/SH-07 leftover index refuse **done (#422)**. S-15 Esplora `vin` omit **done (#423)**. C-06 Full assemble **done (this PR)**. Remaining: Q-06 store planner as test support, A-02/A-20/D-02/D-03 doc honesty (Q-59). A-01 and S-13 landed in #397.
+9. **Product-gated** (need a SCHEMA/COMPAT decision, listed not scheduled): S-04/S-12/SH-06/SH-07 leftover index refuse **done (#422)**. S-15 Esplora `vin` omit **done (#423)**. C-06 Full assemble **done (#426, stacked base)**. Q-06 store planner **done (this PR)**. Remaining: A-02/A-20/D-02/D-03 doc honesty (Q-59). A-01 and S-13 landed in #397.
 10. **X-08** re-enable clippy lints in batches once the above lands.
 
 ---
@@ -416,7 +416,8 @@ are the PRs that landed the work. This file stays untracked.
 | **X-01 steps 2–3 / I-06** | Confirm/query/IBD window meters on `Query` as `ConfirmStats`; note via `&`; `perf_log::sample` take-and-reset that instance. `exclusive::with` twins gone. Write-stage inventory is one name+extractor table. Live lookup/load/scripts/write tokens stay. Store head-resolve window meters remain process-global. | [#420](https://github.com/reardencode/rbitcoin/pull/420) | Do not merge unless asked. |
 | **S-04 / S-12 / SH-06 / SH-07** | Leftover **index** layouts refuse on open: fuse8 v1, flat `*.idx.meta`, Shared file `scripthash.body`, pack8 Paged (mode 10). One-line wipe/rebuild; Class A kept. No always-probe / flat rename / Shared read. | [#422](https://github.com/reardencode/rbitcoin/pull/422) | — |
 | **S-15** | `PointRecord.spending_input_index` and ignored `put_spend` input-index arg deleted. Esplora `/outspend(s)` omit `vin`. COMPAT documents explorer gap. | [#423](https://github.com/reardencode/rbitcoin/pull/423) | — |
-| **C-06** | `AssembleMode::Full` + `validate_block_connect` deleted. Confirm is optimistic assemble then `structural_validate_spends`. Connect tests use `accept_and_connect_block`. | this PR | Cite GitHub number after merge. |
+| **C-06** | `AssembleMode::Full` + `validate_block_connect` deleted. Confirm is optimistic assemble then `structural_validate_spends`. Connect tests use `accept_and_connect_block`. | #426 | Stacked base for Q-06. |
+| **Q-06** | `archive_plan_batch_from_store` deleted. One planner: `archive_plan_batch_from_wire` + fill packed ins. Class A-without-tip still does not advance tip. | this PR | Cite GitHub number after merge. |
 
 Suggested-order progress:
 
@@ -428,5 +429,5 @@ Suggested-order progress:
 6. **X-07** fuzz out of net — done ([#416](https://github.com/reardencode/rbitcoin/pull/416) merged `90f57239`).
 7. **X-05** node config — done ([#418](https://github.com/reardencode/rbitcoin/pull/418) merged `f7a38b60`).
 8. **X-01 steps 2–3** ConfirmStats + table-driven `perf_log` — PR [#420](https://github.com/reardencode/rbitcoin/pull/420) required checks green (not merged).
-9. Product-gated SCHEMA/COMPAT rows — leftover index refuse (#422), S-15 `vin` omit (#423), **C-06** Full assemble (this PR). Remaining: Q-06, A-02/A-20/D-02/D-03.
+9. Product-gated SCHEMA/COMPAT rows — leftover index refuse (#422), S-15 `vin` omit (#423), **C-06** Full assemble (#426), **Q-06** one Class A planner (this PR). Remaining: A-02/A-20/D-02/D-03.
 10. **X-08** clippy batches — not started.
