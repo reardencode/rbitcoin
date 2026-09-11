@@ -64,9 +64,7 @@ pub use block::{
 pub(crate) use block::{validate_block_structure_hashed, TxPrecompute};
 pub use clock::{with_now, NodeClock};
 pub use convert::header_to_record;
-pub(crate) use convert::{
-    block_to_apply, block_to_apply_with_txids, block_to_apply_with_txids_prev,
-};
+pub(crate) use convert::{block_to_apply, block_to_apply_with_txids_prev};
 pub use error::{block_reject_log_line, block_reject_reason, script_flag_paren, ConsensusError};
 pub use header::{expected_next_bits, median_time_past, validate_header};
 pub use milestone::Milestone;
@@ -328,7 +326,7 @@ pub fn prepare_block_for_archive(
     prepare_block_for_archive_new(query, params, block)
 }
 
-pub fn prepare_block_for_archive_new(
+fn prepare_block_for_archive_new(
     query: &Query,
     params: &ChainParams,
     block: &Block,
@@ -337,21 +335,6 @@ pub fn prepare_block_for_archive_new(
     let (_, txs) =
         block_to_apply_with_txids_prev(header.prev_fk, &block.header, &block.txdata, &txids)?;
     Ok((header, txs))
-}
-
-/// Confirm wire plan: encode `TxApply` from **already-computed** structure txids.
-///
-/// Callers that already ran [`validate_block_structure_hashed`] must use this so
-/// the confirm pipeline hashes each create **exactly once**.
-pub fn prepare_block_for_archive_with_txids(
-    query: &Query,
-    block: &Block,
-    txids: &[[u8; 32]],
-) -> Result<(HeaderRecord, Vec<TxApply>), ConsensusError> {
-    if block.txdata.len() != txids.len() {
-        return Err(ConsensusError::BadBlock("txid count mismatch"));
-    }
-    block_to_apply_with_txids(query, &block.header, &block.txdata, txids)
 }
 
 #[cfg(test)]
@@ -564,7 +547,6 @@ mod coverage_tests {
         let b1 = mine_regtest(genesis.block_hash(), genesis.header.time + 600, 1, vec![]);
         // prepare helpers stay (CPU-side); confirm is sole Class A.
         let (_hr, _txs) = prepare_block_for_archive(&q, &params, &b1).unwrap();
-        let (_hr2, _txs2) = prepare_block_for_archive_new(&q, &params, &b1).unwrap();
         accept_and_connect_block(&q, &params, Height(1), &b1, ms).unwrap();
         // already-have prepare after connect
         let _ = prepare_block_for_archive(&q, &params, &b1).unwrap();
