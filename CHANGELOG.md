@@ -39,6 +39,9 @@ before 1.0).
 
 ### Changed
 
+- **IBD worker log:** startup no longer claims a dedicated archive prep/writer
+  pair. Body queue is in-process; confirm is lookup+load+scripts+write OS
+  threads.
 - **RPC / CLI honesty (Q-59 rest):** `gettxout` default `include_mempool`
   returns `null` when a live mempool tx spends the confirmed out.
   `sendrawtransaction` / `testmempoolaccept` / `submitpackage` enforce

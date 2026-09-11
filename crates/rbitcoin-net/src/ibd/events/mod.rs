@@ -1,4 +1,4 @@
-//! Peer / archive event drain and apply (IBD main loop).
+//! Peer / body event drain and apply (IBD main loop).
 
 use super::assign::clear_hash_inflight;
 use super::assign_plan::{
@@ -73,7 +73,7 @@ const BODY_DRAIN_TIME_BUDGET: Duration = Duration::from_millis(40);
 /// Headers remain budgeted so apply cannot livelock.
 ///
 /// Archive-job dual-track is gone: sole Class A path is body queue → confirm.
-pub(crate) fn drain_ready_peer_and_archive_events(
+pub(crate) fn drain_ready_peer_and_body_events(
     st: &mut IbdWorkState,
     hub: &ChainHub,
     body_rx: &mut mpsc::UnboundedReceiver<PeerEvent>,

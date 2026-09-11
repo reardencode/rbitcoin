@@ -145,7 +145,7 @@ pub(crate) struct IbdPerfSample {
     /// Soft densify confirm-window target (block count ≈ 1 min tip rate).
     pub bq_soft_stop: u32,
     /// Claim-ready HWM (+ inflight) ahead of tip — densify headroom (not a progress lead token).
-    pub arch_ahead: u32,
+    pub buf_ahead: u32,
     pub hole: usize,
     pub peers: usize,
     pub headers_done: bool,
@@ -424,7 +424,7 @@ impl Default for IbdPerfSample {
             bq_bytes: 0,
             bq_count: 0,
             bq_soft_stop: 0,
-            arch_ahead: 0,
+            buf_ahead: 0,
             hole: 0,
             peers: 0,
             headers_done: false,
@@ -755,7 +755,7 @@ pub(crate) fn sample(
     inflight_cap: usize,
     // In-RAM block queue: (bytes, count, soft_stop_n).
     bq: (u64, usize, u32),
-    arch_ahead: u32,
+    buf_ahead: u32,
     hole: usize,
     peers: usize,
     headers_done: bool,
@@ -843,7 +843,7 @@ pub(crate) fn sample(
         bq_bytes,
         bq_count,
         bq_soft_stop,
-        arch_ahead,
+        buf_ahead,
         hole,
         peers,
         headers_done,
@@ -1178,7 +1178,7 @@ pub(crate) fn format_info(s: &IbdPerfSample) -> String {
         s.bq_count,
         s.bq_soft_stop,
         bq_mib,
-        s.arch_ahead,
+        s.buf_ahead,
         s.hole,
         s.peers,
     );
@@ -2089,7 +2089,7 @@ mod tests {
         s.bq_count = 7;
         s.bq_bytes = 128 * 1024 * 1024;
         s.bq_soft_stop = 180;
-        s.arch_ahead = 224;
+        s.buf_ahead = 224;
         s.hole = 0;
         s.peers = 16;
         s.phase_blks = 32;
@@ -2721,7 +2721,7 @@ mod tests {
             4,           // inflight
             256,         // cap
             (0, 0, 256), // bq bytes/count/soft_stop
-            100,         // arch_ahead
+            100,         // buf_ahead
             1,           // hole
             8,           // peers
             true,        // headers_done

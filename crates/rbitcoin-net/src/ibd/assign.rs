@@ -178,13 +178,7 @@ pub(crate) fn inflight_add_peer(
 
 /// True when soft BQ confirm window is already covered and getdata inflight
 /// is low → Critical (tip race only, skip densify walk).
-///
-/// High `pending` alone is **not** saturated — pending means we already hold wire.
-pub(crate) fn archive_pipeline_saturated(
-    _pending_len: usize,
-    inflight_len: usize,
-    bq_confirm_window_covered: bool,
-) -> bool {
+pub(crate) fn bq_pipeline_saturated(inflight_len: usize, bq_confirm_window_covered: bool) -> bool {
     inflight_len < 16 && bq_confirm_window_covered
 }
 
@@ -197,7 +191,6 @@ pub(crate) fn assign_work_ordered(
     hub: &ChainHub,
     cfg: &IbdConfig,
     loop_stats: &LoopStats,
-    _archive_write_next: u32,
     depth: AssignDepth,
     tip_rate_blocks_per_s: Option<f64>,
 ) {
@@ -1114,7 +1107,7 @@ mod tests {
         st.confirm_stuck_since = Instant::now().checked_sub(Duration::from_secs(60));
         let stats = LoopStats::default();
         let cfg = IbdConfig::for_test();
-        assign_work_ordered(&mut st, &hub, &cfg, &stats, 1, AssignDepth::Full, None);
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
         assert!(
             st.inflight.is_empty(),
             "gate must issue no getdata while tip+1 is unconfirmable; inflight={:?}",
@@ -1168,7 +1161,7 @@ mod tests {
         st.slots.iter_mut().for_each(|s| s.alive = false);
         let stats = LoopStats::default();
         let cfg = IbdConfig::for_test();
-        assign_work_ordered(&mut st, &hub, &cfg, &stats, 1, AssignDepth::Full, None);
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1236,12 +1229,12 @@ mod tests {
 
     #[test]
     fn scale_and_saturated_helpers() {
-        assert!(!archive_pipeline_saturated(0, 20, false));
-        assert!(!archive_pipeline_saturated(96, 0, false));
-        assert!(!archive_pipeline_saturated(0, 0, false));
-        assert!(archive_pipeline_saturated(0, 0, true));
-        assert!(archive_pipeline_saturated(200, 15, true));
-        assert!(!archive_pipeline_saturated(0, 32, true));
+        assert!(!bq_pipeline_saturated(20, false));
+        assert!(!bq_pipeline_saturated(0, false));
+        assert!(!bq_pipeline_saturated(0, false));
+        assert!(bq_pipeline_saturated(0, true));
+        assert!(bq_pipeline_saturated(15, true));
+        assert!(!bq_pipeline_saturated(32, true));
     }
 
     #[test]
@@ -1648,15 +1641,7 @@ mod tests {
         st.inflight.insert(hung, req);
         st.slots[0].in_flight.insert(hung);
         seed_ewma(&mut st.slots[1], 1_000_000);
-        assign_work_ordered(
-            &mut st,
-            &hub,
-            &cfg,
-            &stats,
-            path_lo,
-            AssignDepth::Full,
-            None,
-        );
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
         let peers = &st.inflight[&hung].peers;
         assert!(
             peers.contains(&1) && !peers.contains(&0),
@@ -1694,15 +1679,7 @@ mod tests {
         st.slots[0].in_flight.insert(hung);
         st.slots[0].rate.note_rx(ibd_mono_ms().max(1));
         seed_ewma(&mut st.slots[1], 1_000_000);
-        assign_work_ordered(
-            &mut st,
-            &hub,
-            &cfg,
-            &stats,
-            path_lo,
-            AssignDepth::Full,
-            None,
-        );
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
         assert!(
             st.inflight[&hung].contains_peer(0),
             "live rx must not be stolen; peers={:?}",
@@ -1733,15 +1710,7 @@ mod tests {
         req.started_at = Instant::now() - Duration::from_secs(31);
         st.inflight.insert(hung, req);
         st.slots[0].in_flight.insert(hung);
-        assign_work_ordered(
-            &mut st,
-            &hub,
-            &cfg,
-            &stats,
-            path_lo,
-            AssignDepth::Full,
-            None,
-        );
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
         assert!(
             st.inflight[&hung].contains_peer(0),
             "solo hung densify has no faster peer to steal to"
@@ -1782,15 +1751,7 @@ mod tests {
         st.slots[1].rate.note_rx(ibd_mono_ms().max(1));
         seed_ewma(&mut st.slots[1], 1_000_000);
         st.densify_scan_lo = 90;
-        assign_work_ordered(
-            &mut st,
-            &hub,
-            &cfg,
-            &stats,
-            path_lo,
-            AssignDepth::Full,
-            None,
-        );
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
         assert!(
             !st.inflight.contains_key(&hung),
             "hung hash cleared when faster peer has no slot"
@@ -1824,15 +1785,7 @@ mod tests {
         seed_ewma(&mut st.slots[1], 10_000_000);
         seed_ewma(&mut st.slots[2], 1_000_000);
         st.densify_scan_lo = 40;
-        assign_work_ordered(
-            &mut st,
-            &hub,
-            &cfg,
-            &stats,
-            path_lo,
-            AssignDepth::Full,
-            None,
-        );
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
         let want = h(40);
         assert!(
             st.inflight.get(&want).is_some_and(|r| r.contains_peer(1)),
@@ -1868,15 +1821,7 @@ mod tests {
         }
         st.densify_scan_lo = 40;
         let before_keys: HashSet<_> = st.inflight.keys().copied().collect();
-        assign_work_ordered(
-            &mut st,
-            &hub,
-            &cfg,
-            &stats,
-            path_lo,
-            AssignDepth::Full,
-            None,
-        );
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
         let after_keys: HashSet<_> = st.inflight.keys().copied().collect();
         assert_eq!(after_keys, before_keys, "no new densify when peers at cap");
         assert_eq!(
@@ -1908,15 +1853,7 @@ mod tests {
         seed_ewma(&mut st.slots[1], 15_000_000);
         seed_ewma(&mut st.slots[2], 5_000_000);
         st.densify_scan_lo = 33;
-        assign_work_ordered(
-            &mut st,
-            &hub,
-            &cfg,
-            &stats,
-            path_lo,
-            AssignDepth::Full,
-            None,
-        );
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
         assert_eq!(
             st.slots[1].in_flight.len(),
             16,
@@ -1971,7 +1908,7 @@ mod tests {
             !super::super::progress::claim_ready(&hub, &mut st.body, 2, &want2),
             "zombie pending must not be claim-ready"
         );
-        assign_work_ordered(&mut st, &hub, &cfg, &stats, 1, AssignDepth::Full, None);
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
         assert!(
             st.inflight.contains_key(&want2),
             "densify must re-get zombie pending at ht=2; inflight={:?}",
@@ -2021,7 +1958,7 @@ mod tests {
             !super::super::progress::claim_ready(&hub, &mut st.body, 2, &want2),
             "wrong BQ at ht=2 must not be claim-ready for want2"
         );
-        assign_work_ordered(&mut st, &hub, &cfg, &stats, 1, AssignDepth::Full, None);
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
         assert!(
             st.inflight.contains_key(&want2),
             "densify must re-get correct work-path hash at ht=2; inflight={:?}",
@@ -2062,7 +1999,7 @@ mod tests {
         assert!(!hub.query.block_queue_has_hash(&need.to_byte_array()));
         st.reorg.register_explore([need], None);
         st.body.mark_missing(need);
-        assign_work_ordered(&mut st, &hub, &cfg, &stats, 1, AssignDepth::Full, None);
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
         assert!(
             st.inflight.contains_key(&need),
             "reorg need must getdata by hash despite wrong BQ height occupant; inflight={:?}",
@@ -2107,7 +2044,7 @@ mod tests {
         }
 
         // Under free floor — full densify ahead.
-        assign_work_ordered(&mut st, &hub, &cfg, &stats, 1, AssignDepth::Full, None);
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
 
         let far: Vec<u32> = st
             .inflight
@@ -2178,7 +2115,7 @@ mod tests {
         let path_lo = 1u32;
         let band_hi = path_lo + win - 1;
 
-        assign_work_ordered(&mut st, &hub, &cfg, &stats, 1, AssignDepth::Full, rate);
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, rate);
 
         let issued_hts: Vec<u32> = st
             .inflight
@@ -2231,7 +2168,7 @@ mod tests {
         assert!(hub.query.block_queue_stats().1 < BQ_SOFT_FREE_BYTES);
 
         // Rate would only allow 6 if restricted — must still densify past that.
-        assign_work_ordered(&mut st, &hub, &cfg, &stats, 1, AssignDepth::Full, Some(0.1));
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, Some(0.1));
 
         let issued_hts: Vec<u32> = st
             .inflight
@@ -2272,7 +2209,7 @@ mod tests {
                 .unwrap();
             st.body.mark_pending(h(ht));
         }
-        assign_work_ordered(&mut st, &hub, &cfg, &stats, 1, AssignDepth::Full, None);
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
         assert!(
             st.densify_scan_lo >= 41,
             "BQ-ready 1..=40 must bump scan_lo; scan_lo={}",
@@ -2364,7 +2301,7 @@ mod tests {
         assert!(hub.query.block_queue_stats().1 >= 2048);
         assert_eq!(hub.query.block_queue_max_height(), Some(500));
 
-        assign_work_ordered(&mut st, &hub, &cfg, &stats, 1, AssignDepth::Full, Some(5.0));
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, Some(5.0));
 
         let issued_hts: Vec<u32> = st
             .inflight
@@ -2399,7 +2336,7 @@ mod tests {
         st.reorg.register_explore([need], None);
         st.body.mark_missing(need);
         assert_eq!(st.reorg.need_getdata(), vec![need]);
-        assign_work_ordered(&mut st, &hub, &cfg, &stats, 1, AssignDepth::Full, None);
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
         assert!(
             st.inflight.contains_key(&need),
             "reorg need_getdata must be issued as getdata"
@@ -2427,12 +2364,12 @@ mod tests {
             st.body.mark_missing(hash);
         }
 
-        assign_work_ordered(&mut st, &hub, &cfg, &stats, 1, AssignDepth::Critical, None);
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Critical, None);
         let after_crit = st.inflight.len();
         assert!(after_crit > 0, "critical should still issue tip/race");
 
         let n_before = st.inflight.len();
-        assign_work_ordered(&mut st, &hub, &cfg, &stats, 1, AssignDepth::Full, None);
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
         assert!(st.inflight.len() <= n_before + 8);
 
         let hashes: Vec<_> = st.inflight.keys().copied().collect();
@@ -2454,7 +2391,7 @@ mod tests {
             st.body.mark_missing(hash);
         }
 
-        assign_work_ordered(&mut st, &hub, &cfg, &stats, 1, AssignDepth::Full, None);
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
         assert!(st.inflight.len() > 0);
         assert!(stats.assign_issued.load(Ordering::Relaxed) > 0);
 
@@ -2464,7 +2401,7 @@ mod tests {
             st.slots[0].in_flight.insert(hash);
         }
         let n_full = st.inflight.len();
-        assign_work_ordered(&mut st, &hub, &cfg, &stats, 5, AssignDepth::Full, None);
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
         assert!(st.inflight.len() <= n_full + 2);
 
         st.inflight.clear();
@@ -2479,7 +2416,7 @@ mod tests {
             st.slots[0].in_flight.insert(hash);
             inflight_add_peer(&mut st.inflight, hash, 0);
         }
-        assign_work_ordered(&mut st, &hub, &cfg, &stats, 1, AssignDepth::Full, None);
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
         assert!(st.slots[1].in_flight.len() > 0 || st.inflight.len() > cfg.per_peer);
 
         // Claim-ready: pending **with** body-queue wire (not Class A alone).
@@ -2496,7 +2433,7 @@ mod tests {
         st.slots.iter_mut().for_each(|s| s.in_flight.clear());
         st.max_ready_height = 12;
         st.max_ordered_height = 12;
-        assign_work_ordered(&mut st, &hub, &cfg, &stats, 13, AssignDepth::Full, None);
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
         assert!(
             st.inflight.is_empty(),
             "claim-ready tip band must not re-get; inflight={:?}",
