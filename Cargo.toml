@@ -79,12 +79,8 @@ type_complexity = "allow"
 # Common style under -D warnings (stable clippy); not correctness.
 drop_non_drop = "allow"
 explicit_auto_deref = "allow"
-items_after_test_module = "allow"
-incompatible_msrv = "allow"
 result_large_err = "allow"
 # Large match/pipeline helpers and benches trip these without benefit.
 # rustc/clippy 1.95 (nixos-26.05) style noise — allow rather than drive-by refactors.
-field_reassign_with_default = "allow"
-io_other_error = "allow"
 cognitive_complexity = "allow"
 large_enum_variant = "allow"

@@ -227,6 +227,74 @@ pub fn stamp_external_parents(
     Ok(stamp)
 }
 
+/// Idx body_range and spent_range for stamped create_fks with no in-flight outs.
+///
+/// Body miss after identity is `Corrupt`. Spent miss after a **store** body fill
+/// is `Corrupt`. RAM-only identity (in-flight outs, no `spent.idx` row) leaves
+/// spent unset — write ensure still stamps those holes.
+pub fn fill_missing_parent_ranges(
+    store: &Store,
+    in_flight: &InFlight,
+    idents: &mut U64Map<ParentIdent>,
+    stats: &crate::ConfirmStats,
+) -> Result<(), QueryError> {
+    stats.note_fill_missing();
+    let mut need_body: Vec<Fk> = Vec::new();
+    let mut need_spent: Vec<Fk> = Vec::new();
+    for (&id, ident) in idents.iter() {
+        if in_flight.get_out(id).is_some() {
+            continue;
+        }
+        let fk = Fk(id);
+        if ident.body.is_none() {
+            need_body.push(fk);
+        }
+        if ident.spent.is_none() {
+            need_spent.push(fk);
+        }
+    }
+    let mut body_filled = U64Set::default();
+    if !need_body.is_empty() {
+        let filled = store.tx_body_range_batch(&need_body)?;
+        for (fk, row) in need_body.into_iter().zip(filled) {
+            let Some(id) = fk.get() else {
+                continue;
+            };
+            let Some(range) = row else {
+                return Err(rbitcoin_store::StoreError::Corrupt(
+                    "archive: external parent body_range missing after create_fk stamp",
+                ));
+            };
+            if let Some(e) = idents.get_mut(&id) {
+                e.body = Some(range);
+            }
+            body_filled.insert(id);
+        }
+    }
+    if !need_spent.is_empty() {
+        let filled = store.tx_spent_range_batch(&need_spent)?;
+        for (fk, row) in need_spent.into_iter().zip(filled) {
+            let Some(id) = fk.get() else {
+                continue;
+            };
+            match row {
+                Some(sr) => {
+                    if let Some(e) = idents.get_mut(&id) {
+                        e.spent = Some(sr);
+                    }
+                }
+                None if body_filled.contains(&id) => {
+                    return Err(rbitcoin_store::StoreError::Corrupt(
+                        "archive: external parent spent_range missing after create_fk stamp",
+                    ));
+                }
+                None => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,72 +375,4 @@ mod tests {
         assert!(msg.contains("parent create_fk unresolved"), "got: {msg}");
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
-
-/// Idx body_range and spent_range for stamped create_fks with no in-flight outs.
-///
-/// Body miss after identity is `Corrupt`. Spent miss after a **store** body fill
-/// is `Corrupt`. RAM-only identity (in-flight outs, no `spent.idx` row) leaves
-/// spent unset — write ensure still stamps those holes.
-pub fn fill_missing_parent_ranges(
-    store: &Store,
-    in_flight: &InFlight,
-    idents: &mut U64Map<ParentIdent>,
-    stats: &crate::ConfirmStats,
-) -> Result<(), QueryError> {
-    stats.note_fill_missing();
-    let mut need_body: Vec<Fk> = Vec::new();
-    let mut need_spent: Vec<Fk> = Vec::new();
-    for (&id, ident) in idents.iter() {
-        if in_flight.get_out(id).is_some() {
-            continue;
-        }
-        let fk = Fk(id);
-        if ident.body.is_none() {
-            need_body.push(fk);
-        }
-        if ident.spent.is_none() {
-            need_spent.push(fk);
-        }
-    }
-    let mut body_filled = U64Set::default();
-    if !need_body.is_empty() {
-        let filled = store.tx_body_range_batch(&need_body)?;
-        for (fk, row) in need_body.into_iter().zip(filled) {
-            let Some(id) = fk.get() else {
-                continue;
-            };
-            let Some(range) = row else {
-                return Err(rbitcoin_store::StoreError::Corrupt(
-                    "archive: external parent body_range missing after create_fk stamp",
-                ));
-            };
-            if let Some(e) = idents.get_mut(&id) {
-                e.body = Some(range);
-            }
-            body_filled.insert(id);
-        }
-    }
-    if !need_spent.is_empty() {
-        let filled = store.tx_spent_range_batch(&need_spent)?;
-        for (fk, row) in need_spent.into_iter().zip(filled) {
-            let Some(id) = fk.get() else {
-                continue;
-            };
-            match row {
-                Some(sr) => {
-                    if let Some(e) = idents.get_mut(&id) {
-                        e.spent = Some(sr);
-                    }
-                }
-                None if body_filled.contains(&id) => {
-                    return Err(rbitcoin_store::StoreError::Corrupt(
-                        "archive: external parent spent_range missing after create_fk stamp",
-                    ));
-                }
-                None => {}
-            }
-        }
-    }
-    Ok(())
 }
