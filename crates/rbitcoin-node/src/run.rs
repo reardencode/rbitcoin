@@ -208,7 +208,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         "rbitcoin-node starting version={} network={} datadir={}{} tip={start_tip} io={}",
         env!("CARGO_PKG_VERSION"),
         config.network.as_str(),
-        config.datadir.display(),
+        config.datadir.path().display(),
         config
             .datadir
             .cold
@@ -343,7 +343,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         );
     }
 
-    let peers_path = config.datadir.join("peers");
+    let peers_path = config.datadir.path().join("peers");
     let mut addrman = match AddrMan::load(&peers_path) {
         Ok(am) => {
             if !am.is_empty() {
@@ -363,7 +363,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             AddrMan::new()
         }
     };
-    let asmap = load_asmap(config.datadir.as_ref(), config.asmap.as_deref());
+    let asmap = load_asmap(config.datadir.path(), config.asmap.as_deref());
     addrman.set_asmap(asmap.clone());
     node.peers.set_asmap(asmap);
     for c in &config.listen.connect {
