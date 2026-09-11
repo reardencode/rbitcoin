@@ -1474,9 +1474,85 @@ fn gettxout_include_mempool_hides_mempool_spent_confirmed() {
         hidden.is_null(),
         "default include_mempool must hide mempool-spent confirmed out: {hidden}"
     );
-    let shown = dispatch(&ctx, "gettxout", vec![json!(cb_txid), json!(0), json!(false)]).unwrap();
+    let shown = dispatch(
+        &ctx,
+        "gettxout",
+        vec![json!(cb_txid), json!(0), json!(false)],
+    )
+    .unwrap();
     assert_eq!(shown["coinbase"], true, "{shown}");
     assert!(shown["confirmations"].as_u64().unwrap() >= 1, "{shown}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn mature_coinbase_spend_hex(ctx: &RpcContext, keep_sat: u64) -> (String, Transaction) {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::consensus::encode::serialize;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
+    dispatch(ctx, "generate", vec![json!(101)]).unwrap();
+    let hash1 = dispatch(ctx, "getblockhash", vec![json!(1)]).unwrap();
+    let blk = dispatch(ctx, "getblock", vec![hash1, json!(2)]).unwrap();
+    let cb_txid = blk["tx"][0]["txid"].as_str().unwrap();
+    let spend = Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from_byte_array(parse_hash32_display(cb_txid).unwrap()),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(keep_sat),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    (hex_encode(serialize(&spend)), spend)
+}
+
+#[test]
+fn sendrawtransaction_maxfeerate_default_rejects_huge_fee() {
+    let (ctx, dir, _hub) = ctx_regtest_hub();
+    let (hex, spend) = mature_coinbase_spend_hex(&ctx, 1_000);
+    let e = dispatch(&ctx, "sendrawtransaction", vec![json!(hex.clone())]).unwrap_err();
+    assert!(
+        e["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("max-fee-exceeded"),
+        "{e}"
+    );
+    let tma = dispatch(&ctx, "testmempoolaccept", vec![json!([hex.clone()])]).unwrap();
+    assert_eq!(tma[0]["allowed"], false, "{tma}");
+    assert_eq!(tma[0]["reject-reason"], "max-fee-exceeded", "{tma}");
+    let tma0 = dispatch(
+        &ctx,
+        "testmempoolaccept",
+        vec![json!([hex.clone()]), json!(0)],
+    )
+    .unwrap();
+    assert_eq!(tma0[0]["allowed"], true, "{tma0}");
+    ctx.mempool
+        .as_ref()
+        .unwrap()
+        .accept_tx(&spend)
+        .expect("P2P/admit path is not capped by RPC maxfeerate");
+    let ok = dispatch(
+        &ctx,
+        "sendrawtransaction",
+        vec![json!(hex.clone()), json!(0)],
+    )
+    .unwrap();
+    assert!(ok.as_str().is_some(), "{ok}");
+    let over = dispatch(&ctx, "sendrawtransaction", vec![json!(hex), json!(2)]).unwrap_err();
+    assert!(
+        over["message"].as_str().unwrap_or("").contains("1BTC/kvB"),
+        "{over}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
