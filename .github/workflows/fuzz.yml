@@ -1,7 +1,6 @@
 # Nightly (~10 min) and weekly (~1h) libFuzzer. Not a required PR check.
 # Product rustc stays 1.95; this job uses nightly only to drive cargo-fuzz.
 #
-# Operator must push this workflow file (GitHub App cannot).
 # Single cron: Sunday uses fuzz-run.sh default 3600s; other days 600s.
 # workflow_dispatch.inputs.duration overrides when set.
 
