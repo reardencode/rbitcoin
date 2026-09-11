@@ -36,6 +36,34 @@ fn query_open_clears_strong_above_tip() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn uring_recover_credit_gap() {
+    assert!(uring_recover_credit(None, 0));
+    assert!(!uring_recover_credit(Some(0), 0));
+    assert!(!uring_recover_credit(Some(0), 144));
+    assert!(!uring_recover_credit(Some(0), 999));
+    assert!(uring_recover_credit(Some(0), 1000));
+    assert!(uring_recover_credit(Some(100), 1100));
+}
+
+#[test]
+fn uring_recover_clears_leftover_strong_once_per_window() {
+    let (_d, q) = temp_query("uring-recover");
+    let leftover = Fk(99);
+    q.store().strong_tx.set_strong(leftover, Fk(1)).unwrap();
+    q.store().flush_class_c_tip().unwrap();
+    assert!(q.store().strong_tx.is_strong(leftover).unwrap());
+    assert_eq!(q.uring_recover("test").unwrap(), UringRecover::Recovered);
+    assert!(!q.store().strong_tx.is_strong(leftover).unwrap());
+    q.store().strong_tx.set_strong(leftover, Fk(1)).unwrap();
+    q.store().flush_class_c_tip().unwrap();
+    assert_eq!(q.uring_recover("again").unwrap(), UringRecover::Exhausted);
+    assert!(
+        q.store().strong_tx.is_strong(leftover).unwrap(),
+        "Exhausted must not run a second repair"
+    );
+}
+
 fn temp_query(label: &str) -> (crate::testutil::TempDir, Query) {
     crate::testutil::tiny_query_labeled(label)
 }
