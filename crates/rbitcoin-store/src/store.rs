@@ -1655,6 +1655,80 @@ mod tests {
     }
 
     #[test]
+    fn open_tiny_reopen_still_works() {
+        let dir = tmp();
+        {
+            let s = Store::create_tiny(&dir).unwrap();
+            s.flush().unwrap();
+        }
+        let s = Store::open_tiny(&dir).unwrap();
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_refuses_shared_file_scripthash_body() {
+        let dir = tmp();
+        {
+            let s = Store::create_tiny(&dir).unwrap();
+            s.flush().unwrap();
+        }
+        let body = dir.join("scripthash.body");
+        std::fs::remove_dir_all(&body).unwrap();
+        crate::file::TableFile::create(&body, rbitcoin_primitives::TableKind::ScriptHash).unwrap();
+        match Store::open_tiny(&dir) {
+            Err(StoreError::Corrupt(m)) => {
+                assert_eq!(m, crate::scripthash::INDEX_REFUSE_SHARED_SH_BODY);
+                assert!(m.contains("Class A kept"), "{m}");
+            }
+            Ok(_) => panic!("Shared scripthash.body must refuse Store::open"),
+            Err(other) => panic!("expected INDEX_REFUSE_SHARED_SH_BODY, got {other}"),
+        }
+        assert!(dir.join("txout.body").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_refuses_pack8_paged_mode_10() {
+        let dir = tmp();
+        {
+            let s = Store::create_tiny(&dir).unwrap();
+            s.scripthash
+                .put_create(&crate::scripthash::ScriptHashRecord::from_fk(
+                    [0x11u8; 32],
+                    Fk(1),
+                ))
+                .unwrap();
+            s.flush().unwrap();
+        }
+        let ingest = dir.join("scripthash.ovf").join("ingest");
+        let mut bytes = std::fs::read(&ingest).unwrap();
+        let hdr = crate::file::FILE_HEADER_LEN;
+        let slot = crate::scripthash_layout::SH_HEAD_SLOT_SIZE;
+        let key_len = crate::scripthash_layout::SH_HEAD_KEY_LEN;
+        let mode10 = ((2u64 << 62) | 4096u64).to_le_bytes();
+        let mut i = hdr;
+        while i + slot <= bytes.len() {
+            let val = &bytes[i + key_len..i + slot];
+            if val.iter().any(|&b| b != 0) {
+                bytes[i + key_len..i + slot].copy_from_slice(&mode10);
+            }
+            i += slot;
+        }
+        std::fs::write(&ingest, &bytes).unwrap();
+        match Store::open_tiny(&dir) {
+            Err(StoreError::Corrupt(m)) => {
+                assert_eq!(m, crate::scripthash_layout::INDEX_REFUSE_PAGED_SH);
+                assert!(m.contains("Class A kept"), "{m}");
+            }
+            Ok(_) => panic!("Paged pack8 must refuse Store::open"),
+            Err(other) => panic!("expected INDEX_REFUSE_PAGED_SH, got {other}"),
+        }
+        assert!(dir.join("txout.body").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn shared_tiny_store_fixture_is_tiny_unique_and_drop_cleans() {
         let path;
         {

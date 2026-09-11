@@ -103,7 +103,7 @@ RAM fence (~15 MiB at 1M blocks), not a file.
 | Class C create-height | (RAM fence) | no IO |
 | Class A body/idx **linear append** | always | **pwrite** (three stems + three idx) |
 | SH unsorted collect (Class A) | libc `pread` | Sequential coalesced **16 MiB** `txout.body` spans (nCPU workers). Not TLS uring: one large positional read per span, not a completion machine. Writes are libc `pwrite`. |
-| SH Electrum/Esplora join | `RBITCOIN_IO` | Query-thread session: waved `idx_body_pipeline` on **`txout.body`**, optional page-grouped **`txid.body`** (history: creates+spenders; listunspent: unspent creates; balance/`/address` stats: none), `get_spender_meta_at_abs_batch` on **`spent.body`**. Megakey **extent**: one span pread of `extent_n` pages, then linked 4 KiB tail. Schema-18 mode 10 leftovers: linked 4 KiB walk. Does **not** share a confirm TLS ring. |
+| SH Electrum/Esplora join | `RBITCOIN_IO` | Query-thread session: waved `idx_body_pipeline` on **`txout.body`**, optional page-grouped **`txid.body`** (history: creates+spenders; listunspent: unspent creates; balance/`/address` stats: none), `get_spender_meta_at_abs_batch` on **`spent.body`**. Megakey **extent**: one span pread of `extent_n` pages, then linked 4 KiB tail. Schema-18 mode 10 leftovers **refuse** on open. Does **not** share a confirm TLS ring. |
 | SP-tweak backfill | `RBITCOIN_IO` | idx ranges **before** TLS ring; uring/pread `txout.body`, then `inwit` + parent `txout` for P2TR only. Writes are **not** the load ring: batched `sp_tweaks` body+idx pwrite (not per-tx CQEs). |
 
 Default: Linux uring if the ring opens else pool; Darwin pool; Windows

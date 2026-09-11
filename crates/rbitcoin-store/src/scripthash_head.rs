@@ -154,6 +154,7 @@ fn scan_occupied(file: &TableFile, slots: u64) -> Result<u64, StoreError> {
                 .try_into()
                 .unwrap();
             if !is_empty_slot(&k, &v) {
+                unpack8_bytes(&v)?;
                 occupied += 1;
             }
         }
@@ -201,12 +202,12 @@ impl ScriptHashHead {
                 "scripthash head slots not power of two",
             ));
         }
-        let (occupied, occ_known) = if let Some(occ) = load_occ_sidecar(file.path()) {
-            (occ, true)
-        } else if body <= OCC_SCAN_BYTE_CAP {
-            // Tiny heads (tests / early scale): scan once and seal sidecar.
+        let (occupied, occ_known) = if body <= OCC_SCAN_BYTE_CAP {
+            // Tiny heads: always walk slots so leftover pack8 Paged refuses on open.
             let occ = scan_occupied(&file, slots)?;
             let _ = store_occ_sidecar(file.path(), occ);
+            (occ, true)
+        } else if let Some(occ) = load_occ_sidecar(file.path()) {
             (occ, true)
         } else {
             // Multi‑GiB mainnet shard without sidecar: do **not** read every slot.

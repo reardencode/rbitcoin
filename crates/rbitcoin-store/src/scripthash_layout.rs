@@ -142,6 +142,9 @@ impl ShHeadValue {
     }
 }
 
+/// Leftover pack8 mode 10 (schema-18 Paged megakey).
+pub const INDEX_REFUSE_PAGED_SH: &str = "index refuses pack8 Paged (mode 10) scripthash heads; wipe store/scripthash* then restart (Class A kept; SH rematerializes with --shindex)";
+
 const SH8_MODE_SHIFT: u32 = 62;
 const SH8_OFF_MASK: u64 = (1u64 << 40) - 1;
 const SH8_USED_SHIFT: u32 = 40;
@@ -170,12 +173,7 @@ pub fn pack8(v: &ShHeadValue) -> Result<u64, StoreError> {
                 | ((u64::from(*used) & SH8_USED_MASK) << SH8_USED_SHIFT)
                 | ((u64::from(*class) & SH8_CLASS_MASK) << SH8_CLASS_SHIFT))
         }
-        ShHeadValue::Paged { last_page, .. } => {
-            if *last_page > SH8_PAYLOAD62 || *last_page == 0 {
-                return Err(StoreError::Corrupt("sh pack8: last_page overflow"));
-            }
-            Ok((2u64 << SH8_MODE_SHIFT) | *last_page)
-        }
+        ShHeadValue::Paged { .. } => Err(StoreError::Corrupt(INDEX_REFUSE_PAGED_SH)),
         ShHeadValue::Extent { last_page } => {
             if *last_page > SH8_PAYLOAD62 || *last_page == 0 {
                 return Err(StoreError::Corrupt("sh pack8: last_page overflow"));
@@ -210,13 +208,7 @@ pub fn unpack8(w: u64) -> Result<ShHeadValue, StoreError> {
             }
             Ok(ShHeadValue::slab(class, used, off))
         }
-        2 => {
-            let last = w & SH8_PAYLOAD62;
-            if last == 0 {
-                return Err(StoreError::Corrupt("sh unpack8: null last_page"));
-            }
-            Ok(ShHeadValue::paged(0, last))
-        }
+        2 => Err(StoreError::Corrupt(INDEX_REFUSE_PAGED_SH)),
         3 => {
             let last = w & SH8_PAYLOAD62;
             if last == 0 {
@@ -247,12 +239,14 @@ mod tests {
         assert_eq!(unpack8(pack8(&inline).unwrap()).unwrap(), inline);
 
         let paged = ShHeadValue::paged(4096, 8192);
-        match unpack8(pack8(&paged).unwrap()).unwrap() {
-            ShHeadValue::Paged {
-                first_page: 0,
-                last_page: 8192,
-            } => {}
-            other => panic!("{other:?}"),
+        match pack8(&paged) {
+            Err(StoreError::Corrupt(m)) => assert_eq!(m, INDEX_REFUSE_PAGED_SH),
+            other => panic!("pack8 Paged must refuse, got {other:?}"),
+        }
+        let mode10 = (2u64 << SH8_MODE_SHIFT) | 8192;
+        match unpack8(mode10) {
+            Err(StoreError::Corrupt(m)) => assert_eq!(m, INDEX_REFUSE_PAGED_SH),
+            other => panic!("unpack8 mode 10 must refuse, got {other:?}"),
         }
 
         let slab = ShHeadValue::slab(1, 5, 4096);
@@ -296,14 +290,10 @@ mod tests {
         let got = unpack8(pack8(&slab).unwrap()).unwrap();
         assert_eq!(got, slab);
         let paged = ShHeadValue::paged(4096, 8192);
-        let got = unpack8(pack8(&paged).unwrap()).unwrap();
-        match got {
-            ShHeadValue::Paged {
-                first_page: 0,
-                last_page: 8192,
-            } => {}
-            other => panic!("{other:?}"),
-        }
+        assert!(matches!(
+            pack8(&paged),
+            Err(StoreError::Corrupt(m)) if m == INDEX_REFUSE_PAGED_SH
+        ));
         assert_eq!(pack8(&ShHeadValue::Empty).unwrap(), 0);
         assert!(pack8(&ShHeadValue::inline_one(Fk(0))).is_ok());
         assert!(unpack8(1u64 << 62 | 1).is_err() || matches!(unpack8(1u64 << 62 | 1), Ok(_)));
@@ -371,9 +361,9 @@ mod tests {
             unpack8(slab_used_inline),
             Err(StoreError::Corrupt(_))
         ));
-        assert!(matches!(
-            unpack8(2u64 << SH8_MODE_SHIFT),
-            Err(StoreError::Corrupt(_))
-        ));
+        match unpack8(2u64 << SH8_MODE_SHIFT) {
+            Err(StoreError::Corrupt(m)) => assert_eq!(m, INDEX_REFUSE_PAGED_SH),
+            other => panic!("mode 10 must be INDEX_REFUSE_PAGED_SH, got {other:?}"),
+        }
     }
 }

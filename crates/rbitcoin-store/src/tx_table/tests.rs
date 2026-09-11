@@ -2502,10 +2502,10 @@ fn reopen_mid_segment_then_seal_no_fuse_fn() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Legacy fuse8 v1 → v2 rewrite on open (minimal seal: 820 creates @ bits=10).
+/// Leftover fuse8 v1 on a sealed segment: shipped open refuses (Class A kept).
 #[test]
-fn reopen_rewrites_legacy_v1_sealed_fuse_to_v2() {
-    let dir = tempfile_dir("fuse-v1-rewrite");
+fn reopen_refuses_legacy_v1_sealed_fuse() {
+    let dir = tempfile_dir("fuse-v1-refuse");
     let layout = HeadLayout::with_entry_bytes(10, 4).unwrap();
     {
         let t = TxTable::create_with_head_layout(&dir, layout).unwrap();
@@ -2537,24 +2537,14 @@ fn reopen_rewrites_legacy_v1_sealed_fuse_to_v2() {
     raw.extend_from_slice(&0u64.to_le_bytes());
     std::fs::write(&fuse_path, &raw).unwrap();
 
-    let t = TxTable::open_tiny(&dir).unwrap();
-    assert!(
-        t.head.sealed_fuse_rewrite_queue().is_empty(),
-        "open must rewrite legacy fuses before returning"
-    );
-    let bytes = std::fs::read(&fuse_path).unwrap();
-    assert_eq!(&bytes[0..4], b"BF8R");
-    let ver = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-    assert_eq!(ver, 2, "fuse must be rewritten as v2");
-    for i in [1u64, 100, 400, 819] {
-        let mut txid = [0u8; 32];
-        txid[0..8].copy_from_slice(&i.to_le_bytes());
-        assert_eq!(
-            t.probe_body_match_fk(&txid).unwrap(),
-            Some(Fk(i)),
-            "fk={i} after fuse migrate"
-        );
+    match TxTable::open_tiny(&dir) {
+        Err(StoreError::Corrupt(m)) => {
+            assert_eq!(m, crate::fuse8_filter::INDEX_REFUSE_FUSE8_V1);
+        }
+        Ok(_) => panic!("v1 fuse must refuse TxTable::open"),
+        Err(other) => panic!("v1 fuse must refuse with INDEX_REFUSE_FUSE8_V1, got {other}"),
     }
+    assert!(dir.join("txout.body").exists(), "Class A body kept");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

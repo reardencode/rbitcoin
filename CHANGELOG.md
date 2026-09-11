@@ -31,6 +31,12 @@ before 1.0).
 
 ### Changed
 
+- **Leftover index layouts refuse on open:** fuse8 **v1** sealed filters, flat
+  `tx.head.meta`, flat `*.idx.meta`, Shared (file) `scripthash.body`, and pack8
+  **Paged** (mode 10) fail closed with a one-line wipe/rebuild message (Class A
+  kept). No always-probe fuse rewrite, no flat-idx/head rename, no Shared body
+  read. Shared SH read/write arms deleted.
+  [`SCHEMA.md`](SCHEMA.md) / [`OPERATOR.md`](OPERATOR.md#schema-upgrade).
 - **CLI and conf share one setter:** `--key[=value]` and conf `key=value` both
   run `NodeConfig::apply_kv` (conf then CLI). `CliAccum` and the field copy
   are gone. `--smoke` / `--help` / `--version` / `--conf` / `--log-level` stay

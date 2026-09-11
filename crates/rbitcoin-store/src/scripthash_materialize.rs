@@ -2,11 +2,10 @@
 //! then in-place unique-sort + pack + seal `head/NN`.
 //!
 //! Sharded bodies: each pack worker writes `body/NN` and seals `head/NN` itself.
-//! Shared body: one writer, prefix `SHCOLDP1` HWM.
 
 use crate::error::StoreError;
 use crate::io_handle::IoHandle;
-use crate::scripthash::{ColdProgress, ScriptHashTable, ShBodyLayout, ShShardPack};
+use crate::scripthash::{ColdProgress, ScriptHashTable, ShShardPack};
 use crate::scripthash_head::prefix_shard_of;
 use crate::scripthash_layout::SH_HEAD_KEY_LEN;
 use crate::store::Store;
@@ -113,7 +112,7 @@ fn seal_shard(
     max_fk.fetch_max(pack.max_fk, Ordering::Relaxed);
     let creates = pack.creates;
     let t_mphf = Instant::now();
-    let bump = table.publish_packed_shard(shard, pack)?;
+    table.publish_packed_shard(shard, pack)?;
     progress
         .mphf_ns
         .fetch_add(t_mphf.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -121,19 +120,10 @@ fn seal_shard(
         .creates_published
         .fetch_add(creates, Ordering::Relaxed);
     progress.shards_published.fetch_add(1, Ordering::Relaxed);
-    match table.body_layout() {
-        ShBodyLayout::Shared => ColdProgress {
-            next_shard: (shard as u32).saturating_add(1),
-            body_bump: bump,
-            live_count: progress.creates_published.load(Ordering::Relaxed),
-            keys_written: progress.keys_packed.load(Ordering::Relaxed),
-        }
-        .store(table.store_dir())?,
-        ShBodyLayout::Sharded => table.store_sharded_cold_progress(
-            progress.keys_packed.load(Ordering::Relaxed),
-            progress.creates_published.load(Ordering::Relaxed),
-        )?,
-    }
+    table.store_sharded_cold_progress(
+        progress.keys_packed.load(Ordering::Relaxed),
+        progress.creates_published.load(Ordering::Relaxed),
+    )?;
     Ok(())
 }
 

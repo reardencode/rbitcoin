@@ -579,11 +579,30 @@ When the 20 index refuse fires, the log line is:
 schema 20 refuses schema-18/19 tx.head/scripthash; wipe store/tx.head and store/scripthash* then restart (Class A kept; tx.head rebuilds, SH rematerializes with --shindex)
 ```
 
+A **schema-20** datadir can still refuse leftover **index** layouts (fuse8 v1,
+flat `*.idx.meta`, Shared file `scripthash.body`, pack8 Paged mode 10). The
+line is one of:
+
+```text
+index refuses fuse8 v1; wipe store/tx.head and store/scripthash* then restart (Class A kept; tx.head rebuilds, SH rematerializes with --shindex)
+index refuses flat tx.head.meta; wipe store/tx.head then restart (Class A kept; tx.head rebuilds)
+index refuses flat *.idx.meta; place files under store/{stem}.idx/ (meta + NNNNNN segments) then restart (Class A kept)
+index refuses Shared (file) scripthash.body; wipe store/scripthash* then restart (Class A kept; SH rematerializes with --shindex)
+index refuses pack8 Paged (mode 10) scripthash heads; wipe store/scripthash* then restart (Class A kept; SH rematerializes with --shindex)
+```
+
 Copy-paste (node stopped with SIGTERM):
 
 ```bash
 DATADIR=/path/to/datadir
+# fuse8 v1 / Shared SH body / Paged SH heads (same dirs as schema-20 index refuse):
 rm -rf "$DATADIR/store/tx.head" "$DATADIR/store/scripthash"*
+# leftover flat idx only (keep Class A bodies). If store/txout.idx/ already exists,
+# delete the flat siblings; otherwise move them into the directory:
+#   mkdir -p "$DATADIR/store/txout.idx"
+#   mv "$DATADIR/store/txout.idx.meta" "$DATADIR/store/txout.idx/meta"
+#   mv "$DATADIR/store/txout.idx."[0-9][0-9][0-9][0-9][0-9][0-9] "$DATADIR/store/txout.idx/"
+# same for inwit.idx and spent.idx
 ```
 
 Keep Class A (`txout` / `inwit` / `spent` + idx, `txid.body`, headers) and

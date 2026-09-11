@@ -1,6 +1,6 @@
 //! Segmented Class A `tx.head`: fixed-bits open-address tables + seal-time fuse8.
 //!
-//! Layout (after on-open migration from flat files):
+//! Layout:
 //! ```text
 //! store/
 //!   tx.head/
@@ -10,8 +10,7 @@
 //!     …
 //! ```
 //!
-//! **Migration:** flat `tx.head.meta` + `tx.head.NNNNNN`(+`.fuse8`) rename into
-//! `tx.head/` on open.
+//! Leftover flat `tx.head.meta` **refuses** (wipe `store/tx.head`; Class A kept).
 //!
 //! **Relative fks:** slot stores `rel` where `0` = empty and
 //! `fk = first_fk + rel - 1` (1-based relative within the segment).
@@ -52,8 +51,6 @@ struct Segment {
     fuse: Option<SealedFuse8>,
     /// Mixed fuse key + rel while open (for seal). Empty when sealed.
     open_keys: Mutex<Vec<(u64, u32)>>,
-    /// Sealed fuse is always-probe (legacy v1 / unreadable body); rewrite as v2.
-    fuse_needs_rewrite: bool,
 }
 
 pub(crate) struct SealPublish {
@@ -127,25 +124,16 @@ impl SegmentedTxHead {
                 }
                 (Some(Arc::new(head)), None)
             };
-            let (fuse, fuse_needs_rewrite) = if sealed {
+            let fuse = if sealed {
                 let fp = segment_fuse_path(&dir, d.file_id);
                 if !fp.exists() {
                     return Err(StoreError::Corrupt("tx.head sealed segment missing fuse8"));
                 }
                 match open_file(&fp)? {
-                    FuseFileOpen::Ready(f) => (Some(f), false),
-                    FuseFileOpen::NeedsRewrite { gate, reason } => {
-                        rbitcoin_log::warn!(
-                            "store: tx.head fuse migrate file_id={} path={} ({reason}) — \
-                             using always-probe until Class A rewrite to fuse8 v2",
-                            d.file_id,
-                            fp.display()
-                        );
-                        (Some(gate), true)
-                    }
+                    FuseFileOpen::Ready(f) => Some(f),
                 }
             } else {
-                (None, false)
+                None
             };
             max_id = max_id.max(d.file_id);
             segs.push(Arc::new(Segment {
@@ -157,7 +145,6 @@ impl SegmentedTxHead {
                 pack,
                 fuse,
                 open_keys: Mutex::new(Vec::new()),
-                fuse_needs_rewrite,
             }));
         }
         let unsealed_nontail = segs
@@ -332,28 +319,14 @@ impl SegmentedTxHead {
     }
 
     /// On-disk path for a segment's sealed fuse file.
+    #[cfg(test)]
     pub fn fuse_path_for_file_id(&self, file_id: u32) -> PathBuf {
         segment_fuse_path(&self.dir, file_id)
     }
 
-    /// Sealed segments whose fuse is legacy (v1) or unreadable: `(file_id, first_fk, count)`.
-    ///
-    /// Used after open to rebuild fuse8 **v2** from Class A without wiping `tx.head`.
-    pub fn sealed_fuse_rewrite_queue(&self) -> Vec<(u32, u64, u64)> {
-        self.segments_snapshot()
-            .iter()
-            .filter(|s| s.sealed && s.fuse_needs_rewrite)
-            .map(|s| (s.file_id, s.first_fk, s.count.load(Ordering::Relaxed)))
-            .collect()
-    }
-
-    /// Install a rebuilt v2 fuse for a sealed segment (after rewriting `.fuse8` on disk).
+    /// Install a rebuilt v2 fuse for a sealed segment.
+    #[cfg(test)]
     pub fn install_sealed_fuse(&self, file_id: u32, fuse: SealedFuse8) -> Result<(), StoreError> {
-        if fuse.is_always_probe() {
-            return Err(StoreError::Corrupt(
-                "tx.head install_sealed_fuse: always-probe not durable",
-            ));
-        }
         let _g = self.write.lock().unwrap_or_else(|e| e.into_inner());
         let mut guard = self.segments.write().unwrap_or_else(|e| e.into_inner());
         let mut new_list = (**guard).clone();
@@ -376,7 +349,6 @@ impl SegmentedTxHead {
                 pack: s.pack.clone(),
                 fuse: Some(fuse),
                 open_keys: Mutex::new(Vec::new()),
-                fuse_needs_rewrite: false,
             });
             found = true;
             break;
@@ -750,7 +722,6 @@ impl SegmentedTxHead {
             pack: None,
             fuse: None,
             open_keys: Mutex::new(Vec::new()),
-            fuse_needs_rewrite: false,
         });
         {
             let mut guard = self.segments.write().unwrap_or_else(|e| e.into_inner());
@@ -836,7 +807,6 @@ impl SegmentedTxHead {
                 pack: Some(Arc::new(p.pack)),
                 fuse: Some(p.fuse),
                 open_keys: Mutex::new(Vec::new()),
-                fuse_needs_rewrite: false,
             });
             found = true;
             break;
@@ -1012,7 +982,6 @@ impl SegmentedTxHead {
                 pack: Some(Arc::new(p.pack)),
                 fuse: Some(p.fuse),
                 open_keys: Mutex::new(Vec::new()),
-                fuse_needs_rewrite: false,
             }));
         }
         {
@@ -1142,63 +1111,21 @@ fn refuse_legacy_mono_head(dir: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// Ensure `tx.head/` exists; migrate flat `tx.head.meta` + segment/fuse files.
+/// Leftover flat `tx.head.meta` (pre-directory layout).
+pub const INDEX_REFUSE_FLAT_HEAD: &str = "index refuses flat tx.head.meta; wipe store/tx.head then restart (Class A kept; tx.head rebuilds)";
+
+/// Ensure `tx.head/` exists. Leftover flat `tx.head.meta` refuses.
 fn ensure_head_layout(dir: &Path) -> Result<(), StoreError> {
     let root = head_root(dir);
     let new_meta = meta_path(dir);
+    let flat_meta = dir.join("tx.head.meta");
+    if flat_meta.is_file() {
+        return Err(StoreError::Corrupt(INDEX_REFUSE_FLAT_HEAD));
+    }
     if new_meta.is_file() {
         return Ok(());
     }
     std::fs::create_dir_all(&root).map_err(|e| StoreError::io(&root, e))?;
-    let flat_meta = dir.join("tx.head.meta");
-    if !flat_meta.is_file() {
-        return Ok(());
-    }
-    let buf = std::fs::read(&flat_meta).map_err(|e| StoreError::io(&flat_meta, e))?;
-    let (_bits, descs) = read_meta_buf(&buf)?;
-    let mut moved = 0u32;
-    for d in &descs {
-        let src = dir.join(format!("tx.head.{:06}", d.file_id));
-        let dst = segment_head_path(dir, d.file_id);
-        if src.is_file() {
-            std::fs::rename(&src, &dst).map_err(|e| StoreError::io(&dst, e))?;
-            moved = moved.saturating_add(1);
-        }
-        let fsrc = dir.join(format!("tx.head.{:06}.fuse8", d.file_id));
-        let fdst = segment_fuse_path(dir, d.file_id);
-        if fsrc.is_file() {
-            std::fs::rename(&fsrc, &fdst).map_err(|e| StoreError::io(&fdst, e))?;
-        }
-    }
-    // Leftover flat segments not listed (shouldn't happen; best-effort).
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        for ent in rd.flatten() {
-            let name = ent.file_name();
-            let s = name.to_string_lossy();
-            if s == "tx.head.meta" {
-                continue;
-            }
-            if let Some(rest) = s.strip_prefix("tx.head.") {
-                let base = rest.strip_suffix(".fuse8").unwrap_or(rest);
-                if base.chars().all(|c| c.is_ascii_digit()) && base.len() == 6 {
-                    let dst = if rest.ends_with(".fuse8") {
-                        root.join(format!("{base}.fuse8"))
-                    } else {
-                        root.join(base)
-                    };
-                    if !dst.exists() && ent.path().is_file() {
-                        let _ = std::fs::rename(ent.path(), &dst);
-                        moved = moved.saturating_add(1);
-                    }
-                }
-            }
-        }
-    }
-    std::fs::rename(&flat_meta, &new_meta).map_err(|e| StoreError::io(&new_meta, e))?;
-    rbitcoin_log::info!(
-        "store: migrated tx.head layout → {}/ (segments_moved={moved})",
-        root.display()
-    );
     Ok(())
 }
 
@@ -1332,7 +1259,7 @@ mod tests {
     }
 
     #[test]
-    fn migrates_flat_head_layout_on_open() {
+    fn refuses_flat_head_layout_on_open() {
         let dir = tmp();
         let layout = HeadLayout::with_entry_bytes(10, 4).unwrap();
         {
@@ -1361,11 +1288,15 @@ mod tests {
         assert!(dir.join("tx.head.meta").is_file());
         assert!(!dir.join("tx.head").join("meta").exists());
 
-        let h = SegmentedTxHead::open(&dir).unwrap();
-        let cands = h.probe_candidates(&mixed(7)).unwrap();
-        assert!(cands.iter().any(|f| f.0 == 7), "cands={cands:?}");
-        assert!(dir.join("tx.head").join("meta").is_file());
-        assert!(!dir.join("tx.head.meta").exists());
+        match SegmentedTxHead::open(&dir) {
+            Err(StoreError::Corrupt(m)) => {
+                assert_eq!(m, INDEX_REFUSE_FLAT_HEAD);
+                assert!(m.contains("Class A kept"), "{m}");
+            }
+            Ok(_) => panic!("flat tx.head.meta must refuse open"),
+            Err(other) => panic!("expected INDEX_REFUSE_FLAT_HEAD, got {other}"),
+        }
+        assert!(dir.join("tx.head.meta").is_file());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1538,9 +1469,6 @@ mod tests {
             h.flush().unwrap();
             assert!(h.sealed_segment_count() >= 1);
             let fuse = SealedFuse8::build(&[1u64, 2, 3]).unwrap();
-            assert!(h
-                .install_sealed_fuse(0, SealedFuse8::always_probe())
-                .is_err());
             assert!(h.install_sealed_fuse(999_999, fuse.clone()).is_err());
             let open_id = h
                 .segments_snapshot()
@@ -1550,7 +1478,6 @@ mod tests {
                 .expect("open tail");
             assert!(h.install_sealed_fuse(open_id, fuse.clone()).is_err());
             h.install_sealed_fuse(0, fuse).unwrap();
-            assert!(h.sealed_fuse_rewrite_queue().is_empty());
             let p = h.fuse_path_for_file_id(0);
             assert!(p.to_string_lossy().contains("000000.fuse8"));
             assert!(h.replace_open_keys_for(open_id, vec![1, 2, 3]).is_err());
@@ -1567,20 +1494,19 @@ mod tests {
             h.flush().unwrap();
         }
 
-        // Same pad: overwrite fuse as v1 → soft-open queues rewrite (always-probe).
+        // Same pad: leftover v1 fuse refuses open.
         let fuse_path = dir.join("tx.head").join("000000.fuse8");
         let mut raw = Vec::from(*b"BF8R");
         raw.extend_from_slice(&1u32.to_le_bytes());
         raw.extend_from_slice(&0u64.to_le_bytes());
         std::fs::write(&fuse_path, &raw).unwrap();
-        let h2 = SegmentedTxHead::open(&dir).unwrap();
-        let q = h2.sealed_fuse_rewrite_queue();
-        assert!(
-            q.iter().any(|(id, _, _)| *id == 0),
-            "file_id 0 should need fuse rewrite: {q:?}"
-        );
-        let cands = h2.probe_candidates(&mixed(1)).unwrap();
-        assert!(cands.iter().any(|f| f.0 == 1));
+        match SegmentedTxHead::open(&dir) {
+            Err(StoreError::Corrupt(m)) => {
+                assert_eq!(m, crate::fuse8_filter::INDEX_REFUSE_FUSE8_V1);
+            }
+            Ok(_) => panic!("v1 fuse must refuse SegmentedTxHead::open"),
+            Err(other) => panic!("expected INDEX_REFUSE_FUSE8_V1, got {other}"),
+        }
 
         // Same suite budget: count-only roll + mono refuse without extra full pads.
         let dir_roll = tmp();
