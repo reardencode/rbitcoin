@@ -49,11 +49,20 @@ if the session is poisoned or leftover cannot drain (probe / idx / BDZ
 g-pages / rel preads share the ring). Held idx fill fails closed on that
 error (no libc fallback on a dirty ring). Undrained / unexpected /
 wait-timeout **poisons** the session and drops the TLS ring so the next wave
-opens a new one. `submit_and_wait_one` is capped (5 s). Drain before SQE
+opens a new one. `submit_and_wait_one` is capped (5 s). `drain_all` on every
+TLS session (Linux, pool, IOCP) waits while CQEs keep arriving; after 5 s it
+logs `store: io_uring drain slow`. Zero completions for
+`RBITCOIN_URING_DRAIN_HARD_SECS` (default 120) abort the process (buffers still
+pinned). There is **no** runtime switch to `pread`. Drain before SQE
 buffers drop (spend annotate `DrainOnDrop`). Per-op short/errno on a live
 session still libc-completes that op; libc fail is `StoreError::io`.
 `RBITCOIN_IO=pread` is the only whole-batch pread fallback (session
-unavailable also falls back).
+unavailable also falls back; operator restart after a drain abort).
+
+IBD write/lookup: a session fault after a successful drain recovers once per
+1000-height window (`repair_class_c_above_tip`, drop this thread's ring,
+requeue the same BQ bodies). A second stall in that window aborts and names
+`RBITCOIN_IO=pread`.
 
 ### Do not flatten custom machines
 

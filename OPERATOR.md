@@ -257,7 +257,8 @@ Full modality matrix: [`docs/io-modality.md`](docs/io-modality.md).
 when available). Table transport is always **fd pread/pwrite**. Compact Class C
 is L2 write-behind; see [`docs/io-modality.md`](docs/io-modality.md). Per-path
 env overrides are **removed**. If `uring` is selected but setup fails, demote to
-**pread** / **pwrite**.
+**pread** / **pwrite**. If a live ring stops completing (`drain slow`, then abort),
+restart with **`RBITCOIN_IO=pread`** — the process does not switch backends itself.
 
 | Env | Values | Note |
 |-----|--------|------|
