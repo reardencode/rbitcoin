@@ -122,6 +122,20 @@ fn confirm_reject_class_matches_substring_table() {
         ))),
         ConfirmRejectClass::EngineFault
     );
+    assert_eq!(
+        ConfirmRejectClass::from_consensus(&ConsensusError::Store(StoreError::Corrupt(
+            "invariant: io_uring undrained"
+        ))),
+        ConfirmRejectClass::EngineFault
+    );
+    assert_eq!(
+        ConfirmRejectClass::from_err_str("invariant: io_uring undrained"),
+        ConfirmRejectClass::EngineFault
+    );
+    assert_eq!(
+        ConfirmRejectClass::from_err_str("invariant: io_uring wait timeout"),
+        ConfirmRejectClass::EngineFault
+    );
 }
 
 /// `body.rejected ⊆ consensus-invalid set` — Cascade / SoftWire / EngineFault
