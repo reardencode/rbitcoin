@@ -201,7 +201,7 @@ pub fn confirm_write_phase(
     let t_head = Instant::now();
     let queued = query.store().txs.take_pending_queued();
     let drain_max_fk = queued.iter().filter_map(|(_, fk)| fk.get()).max();
-    let drain = super::head_drain::submit_head_insert(query.store(), queued);
+    let drain = super::head_drain::submit_head_insert(query.store(), queued.clone());
     let head_sub_ns = t_head.elapsed().as_nanos() as u64;
     if head_sub_ns > 0 {
         rbitcoin_query::note_confirm(&query.confirm_stats().write_head_sub_ns, head_sub_ns);
@@ -256,6 +256,9 @@ pub fn confirm_write_phase(
     let drain_join_ns = t_join.elapsed().as_nanos() as u64;
     if drain_join_ns > 0 {
         rbitcoin_query::note_confirm(&query.confirm_stats().write_drain_join_ns, drain_join_ns);
+    }
+    if drain_res.is_err() {
+        query.store().txs.head_note_pending(&queued);
     }
     let (out, n_blocks, structural_ns, struct_ph, class_c_ns, spend_ann_ns) = overlap?;
     drain_res.map_err(ConsensusError::from)?;

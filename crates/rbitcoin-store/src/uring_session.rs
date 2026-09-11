@@ -909,6 +909,18 @@ pub fn note_uring_recover() {
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
+pub fn uring_slow_drain_count() -> u64 {
+    URING_METERS
+        .slow_drain
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn uring_recover_count() -> u64 {
+    URING_METERS
+        .recover_n
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Run `f` with this **OS thread's** long-lived io_uring session.
 ///
 /// - Opens once on first use; reopens only if `min_entries` exceeds the current
