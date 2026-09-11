@@ -18,6 +18,24 @@ pub const TX_HEAD_REBUILD_WORKER_FREE_RAM_BYTES: u64 = 1024 * 1024 * 1024;
 /// pread (not TLS uring); 16 MiB matches Class A locality.
 pub const SCRIPT_HASH_COLLECT_SPAN: u64 = 16 * 1024 * 1024;
 
+/// Stamp short-circuit row: txid → optional (create fk, txout body range).
+pub(crate) type TxidFkRange = ([u8; 32], Option<(Fk, (u64, u64))>);
+/// Sparse denserels-load row: meta + live outs + spender rels.
+pub(crate) type SparseOutsRow = (TxRecord, Vec<(u32, OutputRecord)>, Vec<(u32, u32)>);
+/// Full Class A body: meta + inputs + outputs.
+pub(crate) type PackedTx = (TxRecord, Vec<InputRecord>, Vec<OutputRecord>);
+/// Packed txout decode including spender rels.
+pub(crate) type PackedTxRels = (TxRecord, Vec<InputRecord>, Vec<OutputRecord>, Vec<u32>);
+/// Shared pin Arc + inputs (Class A append without outs clone).
+pub(crate) type PinInItem = (
+    std::sync::Arc<(TxRecord, Vec<OutputRecord>)>,
+    Vec<InputRecord>,
+);
+/// Prep denserels job: create fk, body range, known txid, need-vouts.
+pub(crate) type OutsByRangeJob = (Fk, (u64, u64), [u8; 32], Vec<u32>);
+/// `(rows, body_ns, decode_ns)` from [`TxTable::get_outs_by_range_batch`].
+pub(crate) type OutsByRangeOut = (Vec<Option<SparseOutsRow>>, u64, u64);
+
 pub(crate) fn parse_rebuild_seal_bits(raw: Option<&str>) -> u32 {
     raw.and_then(|s| s.parse::<u32>().ok())
         .map(|b| b.clamp(6, 26))
@@ -950,7 +968,6 @@ impl TxTable {
         &self.secret
     }
 
-    #[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
     /// Batch head resolve for plan stamp: **txid → (create_fk, body_range)**.
     ///
     /// Short-circuit of the Shape A denserels machine
@@ -961,17 +978,13 @@ impl TxTable {
     ///
     /// BIP30: deepest matching create wins (probe order deepest-first).
     /// Timers: [`crate::head_resolve_stats`] probe / idx / body.
-    pub fn get_fk_by_txid_batch(
-        &self,
-        txids: &[[u8; 32]],
-    ) -> Result<Vec<([u8; 32], Option<(Fk, (u64, u64))>)>, StoreError> {
+    pub fn get_fk_by_txid_batch(&self, txids: &[[u8; 32]]) -> Result<Vec<TxidFkRange>, StoreError> {
         if txids.is_empty() {
             return Ok(Vec::new());
         }
         crate::head_resolve_denserels::resolve_fk_and_range_batch(self, txids)
     }
 
-    #[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
     /// Sparse outs by known `txout` body ranges (prep pin after plan stamp).
     ///
     /// Each job is `(create_fk, body_range, known_txid, need_vouts)`.
@@ -984,15 +997,8 @@ impl TxTable {
     /// `Some((tx, live (vout,out), sparse denserels (vout,rel)))` (N2.0 timers).
     pub fn get_outs_by_range_batch(
         &self,
-        items: &[(Fk, (u64, u64), [u8; 32], Vec<u32>)],
-    ) -> Result<
-        (
-            Vec<Option<(TxRecord, Vec<(u32, OutputRecord)>, Vec<(u32, u32)>)>>,
-            u64, /* body_ns */
-            u64, /* decode_ns */
-        ),
-        StoreError,
-    > {
+        items: &[OutsByRangeJob],
+    ) -> Result<OutsByRangeOut, StoreError> {
         use crate::idx_body_pipeline::{run_idx_body_pipeline_backend, BodyMode, IdxBodyJob};
         use std::time::Instant;
         if items.is_empty() {
@@ -1367,14 +1373,9 @@ impl TxTable {
         Ok((tx, ins, outs))
     }
 
-    #[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
     /// Contiguous create_fks `first..=last`: one libc span each of `txout.body`
     /// and `inwit.body`, plus `txid.body` range. Not the confirm uring pipeline.
-    pub fn get_full_span(
-        &self,
-        first: u64,
-        last: u64,
-    ) -> Result<Vec<(TxRecord, Vec<InputRecord>, Vec<OutputRecord>)>, StoreError> {
+    pub fn get_full_span(&self, first: u64, last: u64) -> Result<Vec<PackedTx>, StoreError> {
         if first == 0 {
             return Err(StoreError::InvalidFk);
         }
@@ -1537,15 +1538,11 @@ impl TxTable {
         Ok(fks)
     }
 
-    #[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
     /// Like [`Self::put_full_batch_indexed`], but outs live in a shared pin Arc
     /// (tx + outs + denserels). Encode borrows pin fields — no outs deep clone.
     pub fn put_full_batch_from_pins(
         &self,
-        items: &[(
-            std::sync::Arc<(TxRecord, Vec<OutputRecord>)>,
-            Vec<InputRecord>,
-        )],
+        items: &[PinInItem],
         index: bool,
     ) -> Result<Vec<Fk>, StoreError> {
         if items.is_empty() {
@@ -1750,7 +1747,6 @@ impl TxTable {
         Ok(inserted)
     }
 
-    #[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
     /// Rebuild sealed MPHF+fuse8 from Class A (`txid.body`), no historical OA.
     ///
     /// Range width is [`Self::rebuild_seal_keys`] (default 2²⁵). Remainder is
@@ -1780,11 +1776,10 @@ impl TxTable {
             .map(|(i, (first, count))| (i as u32, first, count))
             .collect();
         let next = std::sync::atomic::AtomicUsize::new(0);
-        let slots: Vec<
-            std::sync::Mutex<
-                Option<Result<(u64, u64, crate::segmented_head::SealPublish), StoreError>>,
-            >,
-        > = (0..n_jobs).map(|_| std::sync::Mutex::new(None)).collect();
+        type SealSlot = std::sync::Mutex<
+            Option<Result<(u64, u64, crate::segmented_head::SealPublish), StoreError>>,
+        >;
+        let slots: Vec<SealSlot> = (0..n_jobs).map(|_| std::sync::Mutex::new(None)).collect();
         std::thread::scope(|scope| {
             for _ in 0..workers {
                 let jobs = &jobs;

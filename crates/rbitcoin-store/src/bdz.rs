@@ -1646,7 +1646,6 @@ mod tests {
         assert_eq!(scatter_g_words(g_bits, &verts, &rot), want);
     }
 
-    #[allow(clippy::drop_non_drop)] // ends IoCtx/ReadOp borrows so drain can run
     #[test]
     fn assigned_packed_fd_index_batch_held_matches_ram() {
         let dir = std::env::temp_dir().join(format!(
@@ -1678,9 +1677,10 @@ mod tests {
             32,
         )
         .expect("pool");
-        let mut ctx = crate::IoCtx::held(&mut session);
-        let got = fd.index_batch(&batch_keys, &mut ctx).unwrap();
-        drop(ctx);
+        let got = {
+            let mut ctx = crate::IoCtx::held(&mut session);
+            fd.index_batch(&batch_keys, &mut ctx).unwrap()
+        };
         session.drain_all().unwrap();
         assert_eq!(got, want);
         let _ = std::fs::remove_dir_all(&dir);

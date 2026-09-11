@@ -52,24 +52,19 @@ fn recv_job(jobs: &Mutex<VecDeque<Job>>, cv: &Condvar) -> Job {
     }
 }
 
-#[allow(clippy::type_complexity)] // packed row / pin / script-hash tuple is the on-disk shape
+type HeadInsert = ([u8; 32], rbitcoin_primitives::Fk);
+
 pub(crate) struct HeadDrainHandle {
     rx: Option<Receiver<Result<u64, StoreError>>>,
-    restore: Option<Arc<Mutex<Option<Vec<([u8; 32], rbitcoin_primitives::Fk)>>>>>,
+    restore: Option<Arc<Mutex<Option<Vec<HeadInsert>>>>>,
     #[cfg(test)]
     named: Arc<Mutex<Option<(ThreadId, String)>>>,
 }
 
 impl HeadDrainHandle {
-    #[allow(clippy::type_complexity)] // packed row / pin / script-hash tuple is the on-disk shape
     /// Join and, on insert failure, return the batch so the write thread can
     /// put it back on pending-head (no clone on the success path).
-    pub(crate) fn join_restore(
-        mut self,
-    ) -> (
-        Result<u64, StoreError>,
-        Vec<([u8; 32], rbitcoin_primitives::Fk)>,
-    ) {
+    pub(crate) fn join_restore(mut self) -> (Result<u64, StoreError>, Vec<HeadInsert>) {
         let r = self.recv_result();
         let queued = self
             .restore

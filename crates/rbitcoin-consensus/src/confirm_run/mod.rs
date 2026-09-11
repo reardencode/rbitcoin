@@ -61,6 +61,7 @@ use lookup::confirm_archive_kind;
 use lookup::known_create_txid_lookup;
 #[cfg(test)]
 use lookup::ConfirmArchiveKind;
+use lookup::WireBlockIn;
 pub use lookup::{
     confirm_wire_load_from_plan, confirm_wire_lookup_stamp, ParentPinStamp, PlanStampOutcome,
 };
@@ -207,15 +208,7 @@ pub fn confirm_wire_load_phase(
     confirm_wire_load_phase_pipelined(query, params, milestone, blocks, preverified, None)
 }
 
-#[allow(clippy::type_complexity)] // packed row / pin / script-hash tuple is the on-disk shape
-fn wire_blocks_to_arcs(
-    query: &Query,
-    blocks: &[(Height, Block)],
-) -> Vec<(
-    Height,
-    Arc<Block>,
-    Option<Arc<[rbitcoin_query::TxPrecompute]>>,
-)> {
+fn wire_blocks_to_arcs(query: &Query, blocks: &[(Height, Block)]) -> Vec<WireBlockIn> {
     let t = Instant::now();
     let arcs = blocks
         .iter()
@@ -266,7 +259,6 @@ pub fn confirm_wire_run(
     confirm_wire_run_preverified(query, params, milestone, blocks, &ScriptPreverified::new())
 }
 
-#[allow(clippy::type_complexity)] // packed row / pin / script-hash tuple is the on-disk shape
 /// Like [`confirm_wire_run`] with mempool script preverified set.
 ///
 /// **Tip-follow / one-shot:** lookup stamp (create_fk + parent body ranges;
@@ -285,11 +277,7 @@ pub fn confirm_wire_run_preverified(
     if blocks.is_empty() {
         return Err(ConsensusError::BadBlock("empty confirm batch"));
     }
-    let arcs: Vec<(
-        Height,
-        Arc<Block>,
-        Option<Arc<[rbitcoin_query::TxPrecompute]>>,
-    )> = {
+    let arcs: Vec<WireBlockIn> = {
         let t = Instant::now();
         let arcs = blocks
             .iter()

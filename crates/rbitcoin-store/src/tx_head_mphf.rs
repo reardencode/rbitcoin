@@ -293,7 +293,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[allow(clippy::drop_non_drop)] // ends IoCtx/ReadOp borrows so drain can run
     /// Held-session leftover `KIND_BULK_PREAD` must not be harvested as a BDZ
     /// g-page CQE (`bdz g page bad slot`). Drain the foreign SQE first.
     #[test]
@@ -337,13 +336,14 @@ mod tests {
             "foreign SQE must still be pending when BDZ starts"
         );
 
-        let mut ctx = IoCtx::held(&mut session);
-        let batch = fd_mphf
-            .index_batch(&keys[..8], &mut ctx)
-            .unwrap_or_else(|e| {
-                panic!("held index_batch with leftover KIND_BULK_PREAD must drain, not {e}")
-            });
-        drop(ctx);
+        let batch = {
+            let mut ctx = IoCtx::held(&mut session);
+            fd_mphf
+                .index_batch(&keys[..8], &mut ctx)
+                .unwrap_or_else(|e| {
+                    panic!("held index_batch with leftover KIND_BULK_PREAD must drain, not {e}")
+                })
+        };
         session.drain_all().unwrap();
         assert_eq!(batch, serial);
         assert_eq!(session.in_flight(), 0);
