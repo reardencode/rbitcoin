@@ -71,6 +71,7 @@ use phases::{check_bip34, expected_bits_extending, post_commit};
 use pin::{ensure_spend_abs_layouts, pin_for_wire_batch};
 pub use scripts::{confirm_scripts_phase, drive_script_waves_with};
 pub use write::confirm_write_phase;
+pub(crate) use write::finish_post_commit;
 #[cfg(test)]
 use write::{write_batch_vs_tip, write_height_needed, WriteBatchVsTip};
 

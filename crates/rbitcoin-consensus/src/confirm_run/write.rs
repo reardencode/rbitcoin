@@ -57,7 +57,11 @@ pub fn confirm_write_phase(
 ) -> Result<Vec<rbitcoin_primitives::Fk>, ConsensusError> {
     let tip = query.tip_height().map(|h| h.0);
     match write_batch_vs_tip(tip, batch.prepared.iter().map(|p| p.height.0)) {
-        WriteBatchVsTip::AllOld => return Ok(Vec::new()),
+        WriteBatchVsTip::AllOld => {
+            let hashes: Vec<[u8; 32]> = batch.prepared.iter().map(|p| p.hash).collect();
+            finish_post_commit_hashes(query, &hashes)?;
+            return Ok(Vec::new());
+        }
         WriteBatchVsTip::SpansTip => {
             return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
                 "invariant: write batch spans tip",
@@ -252,6 +256,124 @@ pub fn confirm_write_phase(
             tweak_ns,
         });
     Ok(out)
+}
+
+/// Replay spend annotate + `tx.head` drain after Class C already committed.
+///
+/// Session-fault retry must not skip this: `height_of_hash` matching is not
+/// "write finished." `post_commit` is idempotent (`decide_annotate` Skip).
+pub(crate) fn finish_post_commit(
+    query: &Query,
+    hash: &[u8; 32],
+) -> Result<(), ConsensusError> {
+    finish_post_commit_hashes(query, std::slice::from_ref(hash))
+}
+
+fn finish_post_commit_hashes(
+    query: &Query,
+    hashes: &[[u8; 32]],
+) -> Result<(), ConsensusError> {
+    let queued = query.store().txs.take_pending_queued();
+    let drain_max_fk = queued.iter().filter_map(|(_, fk)| fk.get()).max();
+    let drain = super::head_drain::submit_head_insert(query.store(), queued);
+
+    let annotate_res = (|| -> Result<(), ConsensusError> {
+        if !query.spend_index_enabled() {
+            return Ok(());
+        }
+        let mut jobs = Vec::new();
+        for hash in hashes {
+            jobs.extend(annotate_jobs_from_connected_hash(query, hash)?);
+        }
+        post_commit(query, &jobs)?;
+        Ok(())
+    })();
+
+    let (drain_res, restore) = drain.join_restore();
+    if drain_res.is_err() {
+        query.store().txs.head_note_pending(&restore);
+    }
+    annotate_res?;
+    drain_res.map_err(ConsensusError::from)?;
+    if let Some(fk) = drain_max_fk {
+        query.note_head_drain_fk(fk);
+    }
+    Ok(())
+}
+
+fn annotate_jobs_from_connected_hash(
+    query: &Query,
+    hash: &[u8; 32],
+) -> Result<Vec<crate::block::SpendAnnotateJob>, ConsensusError> {
+    let Some((hfk, _)) = query
+        .get_header_by_hash(hash)
+        .map_err(ConsensusError::from)?
+    else {
+        return Ok(Vec::new());
+    };
+    let Some(tx_fks) = query
+        .store()
+        .header_txs
+        .get_list(hfk)
+        .map_err(ConsensusError::from)?
+    else {
+        return Ok(Vec::new());
+    };
+    let mut jobs = Vec::new();
+    for &spend_fk in &tx_fks {
+        let (_meta, ins, _outs) = query
+            .store()
+            .get_tx_full(spend_fk)
+            .map_err(ConsensusError::from)?;
+        for inp in ins {
+            if inp.is_coinbase() {
+                continue;
+            }
+            let create_fk = if inp.create_fk.is_null() {
+                query
+                    .store()
+                    .get_fk_by_txid_tip(&inp.prev_txid)
+                    .map_err(ConsensusError::from)?
+                    .unwrap_or(rbitcoin_primitives::Fk::NULL)
+            } else {
+                inp.create_fk
+            };
+            if create_fk.is_null() {
+                continue;
+            }
+            let (off, len) = query
+                .store()
+                .tx_spent_range(create_fk)
+                .map_err(ConsensusError::from)?;
+            let abs = rbitcoin_store::spent_abs(off, inp.prev_index);
+            if abs.saturating_add(rbitcoin_store::OutputRecord::SPENT_SLOT_LEN as u64)
+                > off.saturating_add(len)
+            {
+                return Err(ConsensusError::Store(StoreError::Corrupt(
+                    "invariant: finish_post_commit spent slot OOB",
+                )));
+            }
+            let (multi, field) = query
+                .store()
+                .txs
+                .get_output_spender_meta(create_fk, inp.prev_index)
+                .map_err(ConsensusError::from)?;
+            let flags = if multi {
+                rbitcoin_store::output_flags::MULTI_SPENDER
+            } else {
+                0
+            };
+            jobs.push(crate::block::SpendAnnotateJob {
+                abs,
+                field,
+                flags,
+                create_fk,
+                vout: inp.prev_index,
+                spend_fk,
+            });
+        }
+    }
+    Ok(jobs)
 }
 
 /// After Class A commit, set body_range (+ spent.idx) for **pinned** creates
