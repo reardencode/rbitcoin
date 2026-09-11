@@ -593,7 +593,7 @@ impl Query {
             crate::note_confirm(&self.confirm_stats().sh_collect_pin, 1);
             return Ok(());
         }
-        let tx = self.get_tx_class_a(tx_fk)?;
+        let tx = self.get_tx(tx_fk)?;
         if tx.output_count == 0 {
             crate::note_confirm(&self.confirm_stats().sh_collect_cold, 1);
             return Ok(());

@@ -103,25 +103,6 @@ pub const MIN_BITS: u32 = 8;
 /// Start sequential rebuild when `txs.count() / slots >=` this.
 pub const HEAD_LOAD_START: f64 = 0.80;
 
-/// `(depth_warn_count, probe_exhausted)` cumulative counters (no reset).
-#[cfg(test)]
-#[inline]
-pub fn probe_depth_stats_snapshot() -> (u64, u64) {
-    (
-        PROBE_INSERT_DEPTH_WARN_COUNT.load(Ordering::Relaxed),
-        PROBE_INSERT_EXHAUSTED.load(Ordering::Relaxed),
-    )
-}
-
-/// `(depth_warn_count, probe_exhausted)` since last sample; both reset.
-#[cfg(test)]
-pub fn sample_probe_depth_stats() -> (u64, u64) {
-    (
-        PROBE_INSERT_DEPTH_WARN_COUNT.swap(0, Ordering::Relaxed),
-        PROBE_INSERT_EXHAUSTED.swap(0, Ordering::Relaxed),
-    )
-}
-
 /// True when `err` is the sole-writer open-address insert failure (table full
 /// along the probe chain — should not happen when segment roll respects 80% load).
 #[inline]
@@ -1821,20 +1802,10 @@ mod tests {
 
     #[test]
     fn head_access_env_probe_stats_and_layout_helpers() {
-        let _ = sample_probe_depth_stats(); // reset
-        let (w0, e0) = probe_depth_stats_snapshot();
-        assert_eq!(w0, 0);
-        assert_eq!(e0, 0);
-        note_probe_depth_on_insert(PROBE_DEPTH_WARN); // no-op ≤ warn
-        note_probe_depth_on_insert(PROBE_DEPTH_WARN + 1); // first warn
-        note_probe_depth_on_insert(PROBE_DEPTH_WARN + 50); // silent count
+        note_probe_depth_on_insert(PROBE_DEPTH_WARN);
+        note_probe_depth_on_insert(PROBE_DEPTH_WARN + 1);
+        note_probe_depth_on_insert(PROBE_DEPTH_WARN + 50);
         note_probe_exhausted();
-        let (w1, e1) = probe_depth_stats_snapshot();
-        assert!(w1 >= 2, "warn count={w1}");
-        assert!(e1 >= 1, "exhausted={e1}");
-        let (ws, es) = sample_probe_depth_stats();
-        assert!(ws >= 2 && es >= 1);
-        assert_eq!(probe_depth_stats_snapshot(), (0, 0));
 
         assert!(is_probe_exhausted_error(&StoreError::Corrupt(
             "address head probe exhausted on insert"

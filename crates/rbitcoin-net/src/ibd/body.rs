@@ -123,10 +123,6 @@ impl BodyPresence {
         self.known.len()
     }
 
-    pub(crate) fn pending_len(&self) -> usize {
-        self.pending_since.len()
-    }
-
     pub(crate) fn size_snapshot(&self) -> BodyPresenceSizes {
         BodyPresenceSizes {
             known: self.known.len(),
@@ -200,7 +196,7 @@ mod tests {
         assert!(!body.is_pending(&h(3)));
         assert!(!body.is_known_archived(&h(3)));
 
-        assert_eq!(body.pending_len(), 1);
+        assert_eq!(body.size_snapshot().pending, 1);
         assert_eq!(body.known_len(), 1);
 
         let hash = h(4);

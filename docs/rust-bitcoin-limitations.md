@@ -4,8 +4,8 @@ Living list. Add a row when we wrap, cast around, reimplement, or refuse a
 rust-bitcoin (or secp-via-rust-bitcoin) API because **Bitcoin Core consensus**
 requires something else.
 
-**Pinned crate:** `bitcoin` **0.32.x** (workspace `Cargo.toml` / lock; currently
-`0.32.101` range). Update the pin note when the workspace bumps.
+**Pinned crate:** `bitcoin` **0.32.x** (workspace `Cargo.toml` `0.32.101` range;
+lock **0.32.102**). Update the pin note when the workspace bumps.
 
 **Not this doc:** Core corpus harness rows in `core_vectors.rs` /
 `core_tx_vectors.rs` — every fixture row must pass (no allowlist). See

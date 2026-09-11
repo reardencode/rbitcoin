@@ -2371,7 +2371,7 @@ fn confirm_run_non_tip_and_tx_runs() {
 
     // Full packed body input/output runs.
     let fks = q.block_tx_fks(Height(0)).unwrap();
-    let tx = q.get_tx_class_a(fks[0]).unwrap();
+    let tx = q.get_tx(fks[0]).unwrap();
     let ins = q.tx_input_run_class_a(fks[0], &tx).unwrap();
     assert_eq!(ins.len(), 1);
     let outs = q.tx_output_run_class_a(fks[0], &tx).unwrap();

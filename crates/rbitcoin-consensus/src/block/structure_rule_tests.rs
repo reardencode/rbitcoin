@@ -1444,7 +1444,7 @@ fn n1_assemble_cold_why_reasons() {
     // ── batch hit: no cold ────────────────────────────────────────
     {
         let mut parents = BatchParents::new();
-        let rec = q.get_tx_class_a(last_cb_fk).expect("class a");
+        let rec = q.get_tx(last_cb_fk).expect("class a");
         let out = OutputRecord::unspent(50_0000_0000, vec![0x51]);
         parents.put_resolved(last_cb_fk, rec, &[(0, out)], &[0], Some(true));
         // Ensure pin txid matches wire.
@@ -1478,7 +1478,7 @@ fn n1_assemble_cold_why_reasons() {
     // ── txid_mismatch: pin present with wrong identity → hard invariant ─
     {
         let mut parents = BatchParents::new();
-        let mut rec = q.get_tx_class_a(last_cb_fk).expect("class a");
+        let mut rec = q.get_tx(last_cb_fk).expect("class a");
         rec.txid = [0xee; 32]; // wrong identity
         let out = OutputRecord::unspent(50_0000_0000, vec![0x51]);
         parents.put_resolved(last_cb_fk, rec, &[(0, out)], &[0], Some(true));
@@ -1510,7 +1510,7 @@ fn n1_assemble_cold_why_reasons() {
     // ── vout_miss: parent in batch, needed vout not sparse-pinned → invariant ─
     {
         let mut parents = BatchParents::new();
-        let rec = q.get_tx_class_a(last_cb_fk).expect("class a");
+        let rec = q.get_tx(last_cb_fk).expect("class a");
         // Pin only vout 1 (does not exist on spend of vout 0).
         let out = OutputRecord::unspent(1, vec![0x51]);
         parents.put_resolved(last_cb_fk, rec, &[(1, out)], &[1], Some(true));

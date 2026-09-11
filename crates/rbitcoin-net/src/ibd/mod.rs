@@ -37,7 +37,7 @@ use archive::{rehydrate_block_queue_into_confirm, rehydrate_class_a_into_body_qu
 use assign_plan::want_headers_beyond_soft_cap;
 use confirm::{offer_confirm_ready, spawn_confirm_engine, ConfirmEvent, ConfirmFeed};
 
-use assign::{archive_pipeline_saturated, assign_work_ordered, AssignDepth};
+use assign::{assign_work_ordered, bq_pipeline_saturated, AssignDepth};
 use cadence::IbdLoopCadence;
 use dial::{
     alive_dial_addrs, apply_dial_result, dial_batch, dial_blocked_addrs,
@@ -45,8 +45,8 @@ use dial::{
     redial_want, request_headers,
 };
 use events::{
-    apply_confirm_events, apply_peer_event, disconnect_all_peers,
-    drain_ready_peer_and_archive_events, update_confirm_lag,
+    apply_confirm_events, apply_peer_event, disconnect_all_peers, drain_ready_peer_and_body_events,
+    update_confirm_lag,
 };
 use exit::{
     all_peers_dead_action, best_chain_remainder, empty_path_header_fan, header_lag_behind_peers,
@@ -257,7 +257,7 @@ pub async fn ibd_cancellable(
             .map(|n| n.get())
             .unwrap_or(1);
         info!(
-            "ibd: tokio worker threads≈{workers} (peer decode: blocking pool; archive: 1 OS prep + 1 OS writer; confirm: lookup+load+scripts+write OS threads)"
+            "ibd: tokio worker threads≈{workers} (peer decode: blocking pool; body queue: in-process; confirm: lookup+load+scripts+write OS threads)"
         );
     }
     let mut peer_sess = PeerBookSession::new(cfg.peers.clone(), peers);
@@ -438,7 +438,7 @@ pub async fn ibd_cancellable(
             break;
         }
 
-        if !drain_ready_peer_and_archive_events(
+        if !drain_ready_peer_and_body_events(
             &mut st,
             hub.as_ref(),
             &mut body_rx,
@@ -478,12 +478,7 @@ pub async fn ibd_cancellable(
                 bq_bytes,
                 tip_rate_opt,
             );
-            let write_next = archive_write_next.load(Ordering::Relaxed);
-            let depth = if archive_pipeline_saturated(
-                st.body.pending_len(),
-                st.inflight.len(),
-                bq_window_covered,
-            ) {
+            let depth = if bq_pipeline_saturated(st.inflight.len(), bq_window_covered) {
                 AssignDepth::Critical
             } else {
                 AssignDepth::Full
@@ -494,7 +489,6 @@ pub async fn ibd_cancellable(
                 hub.as_ref(),
                 &cfg,
                 &loop_stats,
-                write_next,
                 depth,
                 tip_rate_opt,
             );
@@ -523,7 +517,7 @@ pub async fn ibd_cancellable(
             &mut last_progress,
             Some(confirm_feed.as_ref()),
         );
-        if !drain_ready_peer_and_archive_events(
+        if !drain_ready_peer_and_body_events(
             &mut st,
             hub.as_ref(),
             &mut body_rx,
@@ -1109,14 +1103,14 @@ mod peer_book_and_config_tests {
 
 #[cfg(test)]
 mod archive_sat_tests {
-    use super::assign::archive_pipeline_saturated;
+    use super::assign::bq_pipeline_saturated;
 
     #[test]
-    fn archive_pipeline_saturated_gates_full_assign() {
-        assert!(!archive_pipeline_saturated(0, 0, false));
-        assert!(!archive_pipeline_saturated(200, 32, true));
-        assert!(!archive_pipeline_saturated(96, 0, false));
-        assert!(archive_pipeline_saturated(0, 0, true));
-        assert!(archive_pipeline_saturated(200, 15, true));
+    fn bq_pipeline_saturated_gates_full_assign() {
+        assert!(!bq_pipeline_saturated(0, false));
+        assert!(!bq_pipeline_saturated(32, true));
+        assert!(!bq_pipeline_saturated(0, false));
+        assert!(bq_pipeline_saturated(0, true));
+        assert!(bq_pipeline_saturated(15, true));
     }
 }

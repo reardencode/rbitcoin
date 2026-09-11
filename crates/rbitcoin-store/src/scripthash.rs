@@ -1388,15 +1388,6 @@ impl ScriptHashTable {
     ///
     /// Sorted-chain invariant: max is the last entry of the last page (or max
     /// inline FK). Never walks earlier pages.
-    fn last_create_fk_for_key(
-        &self,
-        scripthash: &[u8; 32],
-        val: &ShHeadValue,
-    ) -> Result<Option<Fk>, StoreError> {
-        let home = self.key_home(scripthash)?;
-        self.last_create_fk_on(self.body_for(scripthash, home), val)
-    }
-
     fn last_create_fk_on(
         &self,
         body: &TableFile,
@@ -1418,52 +1409,6 @@ impl ScriptHashTable {
                 sh_page_last_fk(&page)
             }
         }
-    }
-
-    pub fn contains_create(
-        &self,
-        scripthash: &[u8; 32],
-        create_tx_fk: Fk,
-    ) -> Result<bool, StoreError> {
-        if create_tx_fk.is_null() {
-            return Ok(false);
-        }
-        let Some(val) = self.head_value(scripthash)? else {
-            return Ok(false);
-        };
-        // Sorted chains: present iff create_tx_fk ≤ max and (equal max or in chain).
-        // Equality to max is enough for common re-queue of last create; lower may
-        // still need a walk for exact contains — keep full walk for API accuracy.
-        match self.last_create_fk_for_key(scripthash, &val)? {
-            None => Ok(false),
-            Some(max) if create_tx_fk.0 > max.0 => Ok(false),
-            Some(max) if create_tx_fk.0 == max.0 => Ok(true),
-            Some(_) => Ok(self.create_fks(scripthash)?.contains(&create_tx_fk)),
-        }
-    }
-
-    /// Append a create (idempotent: `fk ≤ max` existing is a no-op).
-    pub fn put_create(&self, rec: &ScriptHashRecord) -> Result<(), StoreError> {
-        if rec.create_tx_fk.is_null() {
-            return Err(StoreError::InvalidFk);
-        }
-        let mut heads = HashMap::new();
-        if let Some(v) = self.head_value(&rec.scripthash)? {
-            heads.insert(rec.scripthash, v);
-        }
-        let _ = self.put_create_batch_append(std::slice::from_ref(rec), &mut heads)?;
-        Ok(())
-    }
-
-    /// Bulk append. Re-queued FKs `≤` durable max are skipped; only higher FKs
-    /// are written. Returns how many were written.
-    pub fn put_create_batch(&self, recs: &[ScriptHashRecord]) -> Result<usize, StoreError> {
-        if recs.is_empty() {
-            return Ok(0);
-        }
-        let mut heads = HashMap::new();
-        let (n, _) = self.put_create_batch_append(recs, &mut heads)?;
-        Ok(n)
     }
 
     /// Forward-append creates. Process-local `heads` map.

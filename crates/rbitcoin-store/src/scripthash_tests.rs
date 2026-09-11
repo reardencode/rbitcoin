@@ -65,8 +65,8 @@ fn sh_body_create_grows_64k_not_slab() {
         let dir = tmp();
         let t = ScriptHashTable::create_tiny(&dir).unwrap();
         let sh = script_hash(&[0x01]);
-        t.put_create(&rec(sh, 1, 0)).unwrap();
-        t.put_create(&rec(sh, 2, 0)).unwrap();
+        put_create(&t, rec(sh, 1, 0));
+        put_create(&t, rec(sh, 2, 0));
         t.flush().unwrap();
         drop(t);
         for e in std::fs::read_dir(dir.join("scripthash.body")).unwrap() {
@@ -125,7 +125,7 @@ fn sh_bodies_are_split() {
         assert_eq!(t.bodies[3].logical_len(), payload0);
         let k_new = sh_prefix_key(1, 0);
         for i in 1..=8u64 {
-            t.put_create(&rec(k_new, i, 0)).unwrap();
+            put_create(&t, rec(k_new, i, 0));
         }
         let ovf_len = t.ovf_body.as_ref().unwrap().logical_len();
         assert!(ovf_len > payload0, "ovf ingest slab must land in ovf/body");
@@ -217,12 +217,25 @@ fn rec(sh: [u8; 32], tx: u64, _vout: u32) -> ScriptHashRecord {
     ScriptHashRecord::from_fk(sh, Fk(tx))
 }
 
+fn put_create(t: &ScriptHashTable, rec: ScriptHashRecord) {
+    let mut heads = HashMap::new();
+    t.put_create_batch_append(std::slice::from_ref(&rec), &mut heads)
+        .unwrap();
+}
+
+fn put_create_batch(t: &ScriptHashTable, recs: impl AsRef<[ScriptHashRecord]>) -> usize {
+    let mut heads = HashMap::new();
+    t.put_create_batch_append(recs.as_ref(), &mut heads)
+        .unwrap()
+        .0
+}
+
 #[test]
 fn open_refuses_pack8_paged_mode_10_on_ingest() {
     let dir = tmp();
     {
         let t = ScriptHashTable::create_tiny(&dir).unwrap();
-        t.put_create(&rec([0x11u8; 32], 1, 0)).unwrap();
+        put_create(&t, rec([0x11u8; 32], 1, 0));
     }
     let ingest = dir.join("scripthash.ovf").join("ingest");
     plant_pack8_mode10(&ingest);
@@ -255,7 +268,7 @@ fn plant_pack8_mode10(ingest: &std::path::Path) {
 fn put_unique(t: &ScriptHashTable, tag: u8, n: u32) {
     for i in 0..n {
         let sh = script_hash(&[tag, (i & 0xff) as u8, (i >> 8) as u8, 0x7e]);
-        t.put_create(&rec(sh, u64::from(i) + 1, 0)).unwrap();
+        put_create(t, rec(sh, u64::from(i) + 1, 0));
     }
 }
 
@@ -272,8 +285,8 @@ fn script_hash_record_helpers_and_table_flush_open() {
     let dir = tmp();
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0x99]);
-    t.put_create(&rec(sh, 1, 0)).unwrap();
-    let _ = t.put_create_batch(&[]);
+    put_create(&t, rec(sh, 1, 0));
+    let _ = put_create_batch(&t, &[] as &[ScriptHashRecord]);
     assert_eq!(t.entry_count(), 1);
     t.flush().unwrap();
     t.flush_async().unwrap();
@@ -298,13 +311,13 @@ fn scripthash_thin_roundtrip() {
     let dir = tmp();
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0x51]);
-    t.put_create(&rec(sh, 3, 0)).unwrap();
+    put_create(&t, rec(sh, 3, 0));
     let entries = t.entries(&sh).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].1.create_tx_fk, Fk(3));
-    t.put_create(&rec(sh, 3, 0)).unwrap();
+    put_create(&t, rec(sh, 3, 0));
     assert_eq!(t.entries(&sh).unwrap().len(), 1);
-    t.put_create(&rec(sh, 4, 1)).unwrap();
+    put_create(&t, rec(sh, 4, 1));
     assert_eq!(t.entries(&sh).unwrap().len(), 2);
     assert!(t.unlink_create(&sh, Fk(4), 1).unwrap());
     assert_eq!(t.entries(&sh).unwrap().len(), 1);
@@ -318,7 +331,7 @@ fn incremental_absent_lands_on_ingest() {
     let dir = tmp();
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0x51]);
-    t.put_create(&rec(sh, 3, 0)).unwrap();
+    put_create(&t, rec(sh, 3, 0));
     assert_eq!(t.entries(&sh).unwrap().len(), 1);
     assert!(
         t.ingest.lock().unwrap().get(&sh).unwrap().is_some(),
@@ -342,7 +355,7 @@ fn put_create_uses_slabs_then_pages() {
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0x15]);
     for i in 1..=5u64 {
-        t.put_create(&rec(sh, i, 0)).unwrap();
+        put_create(&t, rec(sh, i, 0));
     }
     match t.head_value(&sh).unwrap().unwrap() {
         ShHeadValue::Slab { class, used, off } => {
@@ -354,7 +367,7 @@ fn put_create_uses_slabs_then_pages() {
     }
     assert_eq!(t.entries(&sh).unwrap().len(), 5);
     for i in 6..=9u64 {
-        t.put_create(&rec(sh, i, 0)).unwrap();
+        put_create(&t, rec(sh, i, 0));
     }
     match t.head_value(&sh).unwrap().unwrap() {
         ShHeadValue::Slab { class, used, .. } => {
@@ -364,12 +377,12 @@ fn put_create_uses_slabs_then_pages() {
         other => panic!("expected class-2 slab, got {other:?}"),
     }
     assert_eq!(
-        t.put_create_batch(&[rec(sh, 9, 0), rec(sh, 5, 0)]).unwrap(),
+        put_create_batch(&t, [rec(sh, 9, 0), rec(sh, 5, 0)]),
         0,
         "fk ≤ max is a skip"
     );
     let rest: Vec<_> = (10..=257u64).map(|i| rec(sh, i, 0)).collect();
-    assert_eq!(t.put_create_batch(&rest).unwrap(), 248);
+    assert_eq!(put_create_batch(&t, rest), 248);
     match t.head_value(&sh).unwrap().unwrap() {
         ShHeadValue::Extent { last_page } => {
             assert!(last_page > 0);
@@ -377,8 +390,8 @@ fn put_create_uses_slabs_then_pages() {
         other => panic!("expected page chain at 257, got {other:?}"),
     }
     assert_eq!(t.entries(&sh).unwrap().len(), 257);
-    assert!(t.contains_create(&sh, Fk(257)).unwrap());
-    assert!(!t.contains_create(&sh, Fk(258)).unwrap());
+    assert!(t.create_fks(&sh).unwrap().contains(&Fk(257)));
+    assert!(!t.create_fks(&sh).unwrap().contains(&Fk(258)));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -388,7 +401,7 @@ fn promote_ladder_inline_to_paged() {
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0x52]);
     for i in 1..=5u64 {
-        t.put_create(&rec(sh, i, i as u32)).unwrap();
+        put_create(&t, rec(sh, i, i as u32));
     }
     assert_eq!(t.entries(&sh).unwrap().len(), 5);
     let v = t.head_value(&sh).unwrap().unwrap();
@@ -410,7 +423,7 @@ fn put_create_batch_many_uses_pages() {
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0x53]);
     let recs: Vec<_> = (0..100u32).map(|v| rec(sh, u64::from(v) + 1, v)).collect();
-    let n = t.put_create_batch(&recs).unwrap();
+    let n = put_create_batch(&t, recs);
     assert_eq!(n, 100);
     let v = t.head_value(&sh).unwrap().unwrap();
     match v {
@@ -431,10 +444,10 @@ fn put_create_batch_chains() {
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0x51]);
     let recs: Vec<_> = (0..3u32).map(|v| rec(sh, u64::from(v) + 1, v)).collect();
-    let n = t.put_create_batch(&recs).unwrap();
+    let n = put_create_batch(&t, &recs);
     assert_eq!(n, 3);
     assert_eq!(t.entries(&sh).unwrap().len(), 3);
-    let n2 = t.put_create_batch(&recs).unwrap();
+    let n2 = put_create_batch(&t, &recs);
     assert_eq!(n2, 0);
     assert_eq!(t.entries(&sh).unwrap().len(), 3);
     let _ = std::fs::remove_dir_all(&dir);
@@ -451,10 +464,12 @@ fn put_create_batch_skips_leq_max_appends_higher() {
     // Fill past one delta page so last page holds the max.
     let n = SH_PAGE_STREAM_MAX + 5;
     let first: Vec<_> = (1..=n as u64).map(|i| rec(sh, i, 0)).collect();
-    assert_eq!(t.put_create_batch(&first).unwrap(), n);
+    assert_eq!(put_create_batch(&t, first), n);
     assert_eq!(t.entries(&sh).unwrap().len(), n);
+    let val = t.head_value(&sh).unwrap().unwrap();
+    let home = t.key_home(&sh).unwrap();
     let max = t
-        .last_create_fk_for_key(&sh, &t.head_value(&sh).unwrap().unwrap())
+        .last_create_fk_on(t.body_for(&sh, home), &val)
         .unwrap()
         .unwrap();
     assert_eq!(max, Fk(n as u64));
@@ -468,7 +483,7 @@ fn put_create_batch_skips_leq_max_appends_higher() {
         rec(sh, n as u64 + 3, 0),
         rec(sh, n as u64 + 2, 0), // unsorted in batch
     ];
-    let written = t.put_create_batch(&batch).unwrap();
+    let written = put_create_batch(&t, batch);
     assert_eq!(written, 3, "only fks > max must be written");
     let got = t.entries(&sh).unwrap();
     assert_eq!(got.len(), n + 3);
@@ -476,10 +491,7 @@ fn put_create_batch_skips_leq_max_appends_higher() {
         assert_eq!(e.create_tx_fk.0, (i as u64) + 1);
     }
     // Only-lower batch is no-op.
-    assert_eq!(
-        t.put_create_batch(&[rec(sh, 1, 0), rec(sh, 2, 0)]).unwrap(),
-        0
-    );
+    assert_eq!(put_create_batch(&t, [rec(sh, 1, 0), rec(sh, 2, 0)]), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -618,7 +630,7 @@ fn unlink_demotes_paged_to_inline() {
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0x54]);
     for i in 1..=3u64 {
-        t.put_create(&rec(sh, i, i as u32)).unwrap();
+        put_create(&t, rec(sh, i, i as u32));
     }
     assert!(matches!(
         t.head_value(&sh).unwrap().unwrap(),
@@ -663,7 +675,7 @@ fn create_does_not_write_oa_stub() {
 fn leftover_live_oa_main_open_refuses() {
     let dir = tmp();
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
-    t.put_create(&rec(script_hash(&[0x01]), 1, 0)).unwrap();
+    put_create(&t, rec(script_hash(&[0x01]), 1, 0));
     t.flush().unwrap();
     drop(t);
     ShardedScriptHashHead::create_sharded(dir.join("scripthash.head"), 1, 64).unwrap();
@@ -682,7 +694,7 @@ fn leftover_live_oa_main_open_refuses() {
 fn leftover_oa_overflow_seg_open_refuses() {
     let dir = tmp();
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
-    t.put_create(&rec(script_hash(&[0x02]), 1, 0)).unwrap();
+    put_create(&t, rec(script_hash(&[0x02]), 1, 0));
     t.flush().unwrap();
     drop(t);
     let ovf = dir.join("scripthash.ovf");
@@ -703,13 +715,13 @@ fn ingest_batch_update_and_new_keys() {
     let dir = tmp();
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh0 = script_hash(&[0xc0, 0, 0, 0x11]);
-    t.put_create(&rec(sh0, 1, 0)).unwrap();
+    put_create(&t, rec(sh0, 1, 0));
     let mut batch = vec![rec(sh0, 99_999, 1)];
     for i in 0..20u32 {
         let sh = script_hash(&[0xc1, (i & 0xff) as u8, 0x22, 0x33]);
         batch.push(rec(sh, 10_000 + u64::from(i), 0));
     }
-    assert_eq!(t.put_create_batch(&batch).unwrap(), 21);
+    assert_eq!(put_create_batch(&t, batch), 21);
     assert_eq!(t.entries(&sh0).unwrap().len(), 2);
     assert!(t.ingest.lock().unwrap().get(&sh0).unwrap().is_some());
     let mut n = 0u64;
@@ -724,7 +736,7 @@ fn ingest_many_unique_keys_reopen() {
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
     put_unique(&t, 0xa0, 80);
     let sh0 = script_hash(&[0xa0, 0, 0, 0x7e]);
-    t.put_create(&rec(sh0, 10_000, 1)).unwrap();
+    put_create(&t, rec(sh0, 10_000, 1));
     assert_eq!(t.entries(&sh0).unwrap().len(), 2);
     t.flush().unwrap();
     drop(t);
@@ -774,7 +786,7 @@ fn open_empty_alloc_v1_upgrades_to_v2() {
     );
     // Reopen stays v2.
     let t = ScriptHashTable::open_tiny(&dir).unwrap();
-    t.put_create(&rec(script_hash(&[0x42]), 1, 0)).unwrap();
+    put_create(&t, rec(script_hash(&[0x42]), 1, 0));
     assert_eq!(t.entries(&script_hash(&[0x42])).unwrap().len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -785,7 +797,7 @@ fn open_durable_alloc_v1_refused() {
     let dir = tmp();
     {
         let t = ScriptHashTable::create_tiny(&dir).unwrap();
-        t.put_create(&rec(script_hash(&[0x99]), 7, 0)).unwrap();
+        put_create(&t, rec(script_hash(&[0x99]), 7, 0));
         assert!(t.has_durable_index());
         t.flush().unwrap();
     }
@@ -825,7 +837,7 @@ fn open_wipes_legacy_fullsize_ovf_head() {
     let dir = tmp();
     {
         let t = ScriptHashTable::create_tiny(&dir).unwrap();
-        t.put_create(&rec(script_hash(&[0x01]), 1, 0)).unwrap();
+        put_create(&t, rec(script_hash(&[0x01]), 1, 0));
         t.flush().unwrap();
     }
     std::fs::write(
@@ -853,7 +865,7 @@ fn freelist_reuses_page() {
     let sh1 = script_hash(&[0x61]);
     let sh2 = script_hash(&[0x62]);
     for i in 1..=3u64 {
-        t.put_create(&rec(sh1, i, i as u32)).unwrap();
+        put_create(&t, rec(sh1, i, i as u32));
     }
     let off1 = match t.head_value(&sh1).unwrap().unwrap() {
         ShHeadValue::Slab { off, class, .. } => {
@@ -866,7 +878,7 @@ fn freelist_reuses_page() {
         t.unlink_create(&sh1, Fk(i), i as u32).unwrap();
     }
     for i in 1..=3u64 {
-        t.put_create(&rec(sh2, 10 + i, i as u32)).unwrap();
+        put_create(&t, rec(sh2, 10 + i, i as u32));
     }
     let off2 = match t.head_value(&sh2).unwrap().unwrap() {
         ShHeadValue::Slab { off, class, .. } => {
@@ -912,17 +924,17 @@ fn cold_install_sorted_main_and_global_ingest() {
         "main shards must not write a fuse"
     );
 
-    t.put_create(&rec(sh_main, 3, 0)).unwrap();
+    put_create(&t, rec(sh_main, 3, 0));
     assert_eq!(t.entries(&sh_main).unwrap().len(), 3);
     assert!(matches!(t.key_home(&sh_main).unwrap(), KeyHome::Main));
 
-    t.put_create(&rec(sh_new, 10, 0)).unwrap();
+    put_create(&t, rec(sh_new, 10, 0));
     assert_eq!(t.entries(&sh_new).unwrap().len(), 1);
     assert!(matches!(t.key_home(&sh_new).unwrap(), KeyHome::Ingest));
     // First create of a never-seen key must still miss on main (prove Absent).
     // Later hits live on ingest and must not touch the main page.
     t.reset_sorted_main_preads();
-    t.put_create(&rec(sh_new, 11, 0)).unwrap();
+    put_create(&t, rec(sh_new, 11, 0));
     assert_eq!(t.entries(&sh_new).unwrap().len(), 2);
     assert!(matches!(t.key_home(&sh_new).unwrap(), KeyHome::Ingest));
     assert_eq!(
@@ -956,7 +968,7 @@ fn reopen_after_ingest_seal_and_unlink_homes() {
             if i == 0 {
                 first_new = sh;
             }
-            t.put_create(&rec(sh, 1000 + u64::from(i), 0)).unwrap();
+            put_create(&t, rec(sh, 1000 + u64::from(i), 0));
         }
         assert_eq!(t.sealed_ovf.lock().unwrap().len(), 1);
         assert!(matches!(
@@ -1000,7 +1012,7 @@ fn compact_merges_two_sealed_global_ovf_files() {
             if i == 0 {
                 first_new = sh;
             }
-            t.put_create(&rec(sh, 1000 + u64::from(i), 0)).unwrap();
+            put_create(&t, rec(sh, 1000 + u64::from(i), 0));
         }
         assert_eq!(t.sealed_ovf.lock().unwrap().len(), 1, "first ingest seal");
         for i in 0..210u32 {
@@ -1008,7 +1020,7 @@ fn compact_merges_two_sealed_global_ovf_files() {
             if i == 0 {
                 second_new = sh;
             }
-            t.put_create(&rec(sh, 2000 + u64::from(i), 0)).unwrap();
+            put_create(&t, rec(sh, 2000 + u64::from(i), 0));
         }
         assert_eq!(t.sealed_ovf.lock().unwrap().len(), 2, "second ingest seal");
 
@@ -1038,7 +1050,7 @@ fn compact_merges_two_sealed_global_ovf_files() {
 
         for i in 0..210u32 {
             let sh = script_hash(&[0xa3, (i & 0xff) as u8, (i >> 8) as u8, 0x03]);
-            t.put_create(&rec(sh, 3000 + u64::from(i), 0)).unwrap();
+            put_create(&t, rec(sh, 3000 + u64::from(i), 0));
         }
         assert_eq!(t.sealed_ovf.lock().unwrap().len(), 1);
         t.compact_sealed_ovf().unwrap();
@@ -1312,7 +1324,7 @@ fn create_fks_matches_entries() {
         let dir = tmp();
         let t = ScriptHashTable::create_tiny(&dir).unwrap();
         let one = script_hash(&[0x01]);
-        t.put_create(&rec(one, 7, 0)).unwrap();
+        put_create(&t, rec(one, 7, 0));
         assert_eq!(
             t.create_fks(&one).unwrap(),
             t.entries(&one)
@@ -1324,8 +1336,8 @@ fn create_fks_matches_entries() {
         assert_eq!(t.create_fks(&one).unwrap(), vec![Fk(7)]);
 
         let two = script_hash(&[0x02]);
-        t.put_create(&rec(two, 1, 0)).unwrap();
-        t.put_create(&rec(two, 2, 0)).unwrap();
+        put_create(&t, rec(two, 1, 0));
+        put_create(&t, rec(two, 2, 0));
         assert_eq!(t.create_fks(&two).unwrap(), vec![Fk(1), Fk(2)]);
         assert_eq!(
             t.create_fks(&two).unwrap(),
@@ -1338,7 +1350,7 @@ fn create_fks_matches_entries() {
 
         let mega = script_hash(&[0x03]);
         let recs: Vec<_> = (1..=600u64).map(|i| rec(mega, i, 0)).collect();
-        t.put_create_batch(&recs).unwrap();
+        put_create_batch(&t, recs);
         let fks = t.create_fks(&mega).unwrap();
         assert_eq!(fks.len(), 600);
         assert_eq!(fks.first().copied(), Some(Fk(1)));
@@ -1628,7 +1640,7 @@ fn bulk_session_megakey_page_chain_contiguous_once() {
     // Tip-path multi-page (write_new_page_chain) also round-trips same size.
     let sh2 = script_hash(&[0xef]);
     let recs: Vec<_> = (1..=n as u32).map(|v| rec(sh2, u64::from(v), v)).collect();
-    assert_eq!(t.put_create_batch(&recs).unwrap(), n);
+    assert_eq!(put_create_batch(&t, recs), n);
     assert_eq!(t.entries(&sh2).unwrap().len(), n);
     match t.head_value(&sh2).unwrap().unwrap() {
         ShHeadValue::Extent { last_page } => {
@@ -1677,7 +1689,7 @@ fn extent_append_links_tail_when_bump_moved() {
     let _ = session.finish().unwrap();
     let (base, last0, n0) = extent_meta(&t, &sh);
     assert_eq!(n0, 2);
-    t.put_create(&rec(sh, n as u64 + 1, 0)).unwrap();
+    put_create(&t, rec(sh, n as u64 + 1, 0));
     let (base2, last1, n1) = extent_meta(&t, &sh);
     assert_eq!(base2, base);
     assert_eq!(n1, 2, "tail must not bump extent_n");
@@ -1698,7 +1710,7 @@ fn extent_append_links_tail_when_bump_moved() {
     let extra2: Vec<_> = ((n as u64 + 2)..=(n as u64 + 1 + SH_PAGE_EXTENT_STREAM_MAX as u64))
         .map(|i| rec(sh, i, 0))
         .collect();
-    assert_eq!(t.put_create_batch(&extra2).unwrap(), extra2.len());
+    assert_eq!(put_create_batch(&t, &extra2), extra2.len());
     let (_, last2, n2) = extent_meta(&t, &sh);
     assert_eq!(n2, 2);
     assert_ne!(last2, last1, "second overflow adds another linked page");
@@ -1719,7 +1731,7 @@ fn extent_append_glued_bumps_extent_n() {
     let _ = session.finish().unwrap();
     let (base, _, n0) = extent_meta(&t, &sh);
     assert_eq!(n0, 2);
-    t.put_create(&rec(sh, n as u64 + 1, 0)).unwrap();
+    put_create(&t, rec(sh, n as u64 + 1, 0));
     let (_, last, n1) = extent_meta(&t, &sh);
     assert_eq!(n1, 3, "glued HWM grows extent_n in place");
     assert_eq!(last, base + 2 * SH_PAGE_SIZE as u64);

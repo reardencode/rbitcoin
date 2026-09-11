@@ -780,6 +780,37 @@ mod verify_routing_tests {
     }
 
     #[test]
+    fn from_tx_connect_bip143_fails_closed_without_midstate() {
+        let tx = Transaction {
+            version: bitcoin::transaction::Version::ONE,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([0x11; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::from_slice(&[vec![0x30; 71], vec![0x02; 33]]),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let pre = crate::TxPrecompute::from_tx_connect(&tx);
+        let wscript = bitcoin::script::Script::from_bytes(&[0x51]);
+        let amt = Amount::from_sat(50_000);
+        let err = crypto::bip143_p2wsh_signature_hash(&tx, 0, wscript, amt, 0x01, &pre)
+            .expect_err("connect-only precompute must not sighash");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invariant: sighash midstate missing"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
     fn annotate_preserves_non_script_and_existing_txid() {
         let tx = Transaction {
             version: bitcoin::transaction::Version::TWO,

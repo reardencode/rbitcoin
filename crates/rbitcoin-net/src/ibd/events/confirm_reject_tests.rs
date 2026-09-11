@@ -1043,7 +1043,7 @@ fn confirmed_height_mids_blocked_while_densify_ahead_leaves_tip_hole() {
 
     let stats = LoopStats::default();
     let cfg = IbdConfig::for_test();
-    assign_work_ordered(&mut st, &hub, &cfg, &stats, 3, AssignDepth::Full, None);
+    assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
     assert!(
         st.inflight.contains_key(&w1.block_hash()),
         "assign must getdata new tip+1 W1; inflight={:?}",
@@ -1212,7 +1212,7 @@ fn zombie_pending_mid_at_confirmed_height_never_reget() {
     );
     let stats = LoopStats::default();
     let cfg = IbdConfig::for_test();
-    assign_work_ordered(&mut st, &hub, &cfg, &stats, 3, AssignDepth::Full, None);
+    assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
 
     // Desired contract: demote zombie mid and re-getdata (same as tip-hole
     // cover does for tip+1 zombies). Today assign 1b skip_download's the mid
@@ -1660,7 +1660,7 @@ fn bad_prev_evicts_slot_rewinds_taken() {
 fn apply_peer_event_body_and_control_surface() {
     use super::super::peer_io::{PeerEvent, PeerSlot};
     use super::super::state::InflightReq;
-    use super::{apply_peer_event, drain_ready_peer_and_archive_events, inject_learned_addrs};
+    use super::{apply_peer_event, drain_ready_peer_and_body_events, inject_learned_addrs};
     use crate::seeds::AddrMan;
     use bitcoin::block::{Header, Version};
     use bitcoin::CompactTarget;
@@ -1874,7 +1874,7 @@ fn apply_peer_event_body_and_control_surface() {
     let (body_tx, mut body_rx) = mpsc::unbounded_channel();
     let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel();
     let stats = super::super::status::LoopStats::default();
-    let ok = drain_ready_peer_and_archive_events(
+    let ok = drain_ready_peer_and_body_events(
         &mut st,
         &hub,
         &mut body_rx,
@@ -2022,7 +2022,7 @@ fn apply_confirm_events_accepted_and_reject() {
 #[test]
 fn apply_peer_event_block_framed_bq_horizon_and_headers_done() {
     use super::super::peer_io::{PeerEvent, PeerSlot};
-    use super::{apply_peer_event, drain_ready_peer_and_archive_events, inject_learned_addrs};
+    use super::{apply_peer_event, drain_ready_peer_and_body_events, inject_learned_addrs};
     use crate::seeds::AddrMan;
     use bitcoin::absolute::LockTime;
     use bitcoin::block::{Header, Version};
@@ -2248,7 +2248,7 @@ fn apply_peer_event_block_framed_bq_horizon_and_headers_done() {
         })
         .unwrap();
     let stats = super::super::status::LoopStats::default();
-    drain_ready_peer_and_archive_events(
+    drain_ready_peer_and_body_events(
         &mut st,
         &hub,
         &mut body_rx,
