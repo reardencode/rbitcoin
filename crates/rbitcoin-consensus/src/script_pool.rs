@@ -161,7 +161,7 @@ static STEAL_WAVES_LOCKS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static STEAL_CLAIMS: AtomicUsize = AtomicUsize::new(0);
 /// When true, [`Wave::claim_chunk`] increments [`STEAL_CLAIMS`]. Off by default
-/// so parallel `try_for_each_parallel` tests do not inflate the counter.
+/// so parallel idle-wave tests do not inflate the counter.
 #[cfg(test)]
 static STEAL_CLAIMS_ON: AtomicBool = AtomicBool::new(false);
 /// Serialize the two 256-job steal tests so they do not share [`STEAL_CLAIMS`].
@@ -329,29 +329,19 @@ pub(crate) fn start_for_each_owned<T: Sync>(
 
 /// Parallel map over `items` until the first error (or all succeed).
 ///
-/// Steal workers (`rbtc-scripts-*`) claim indices. Must not be called from a
-/// steal worker (hard refuse — same-pool wait would deadlock). On first error,
-/// workers stop claiming; in-flight units may still finish.
-#[cfg(test)]
-pub(crate) fn try_for_each_parallel<T, F>(items: &[T], f: F) -> Result<(), ConsensusError>
-where
-    T: Sync,
-    F: Fn(&T) -> Result<(), ConsensusError> + Sync,
-{
-    run_wave(items, f, false)
-}
-
-/// Like [`try_for_each_parallel`], but workers claim only when no foreground
-/// wave and no detached job are waiting (mempool / block scripts win).
+/// Workers claim only when no foreground wave and no detached job are waiting
+/// (mempool / block scripts win). Must not be called from a steal worker
+/// (hard refuse — same-pool wait would deadlock). On first error, workers stop
+/// claiming; in-flight units may still finish.
 pub(crate) fn try_for_each_parallel_idle<T, F>(items: &[T], f: F) -> Result<(), ConsensusError>
 where
     T: Sync,
     F: Fn(&T) -> Result<(), ConsensusError> + Sync,
 {
-    run_wave(items, f, true)
+    run_wave(items, f)
 }
 
-fn run_wave<T, F>(items: &[T], f: F, background: bool) -> Result<(), ConsensusError>
+fn run_wave<T, F>(items: &[T], f: F) -> Result<(), ConsensusError>
 where
     T: Sync,
     F: Fn(&T) -> Result<(), ConsensusError> + Sync,
@@ -394,26 +384,18 @@ where
         done: Mutex::new(false),
         done_cv: Condvar::new(),
     });
-    if background {
+    {
         let mut g = WAVES_BG.lock().unwrap_or_else(|p| p.into_inner());
         g.push(Arc::clone(&wave));
         publish_waves_bg(&g);
-    } else {
-        let mut g = WAVES.lock().unwrap_or_else(|p| p.into_inner());
-        g.push(Arc::clone(&wave));
-        publish_waves(&g);
     }
     wake_steal_workers();
     wave.wait_done();
 
-    if background {
+    {
         let mut g = WAVES_BG.lock().unwrap_or_else(|p| p.into_inner());
         g.retain(|w| !Arc::ptr_eq(w, &wave));
         publish_waves_bg(&g);
-    } else {
-        let mut g = WAVES.lock().unwrap_or_else(|p| p.into_inner());
-        g.retain(|w| !Arc::ptr_eq(w, &wave));
-        publish_waves(&g);
     }
 
     let err = wave
@@ -687,7 +669,7 @@ mod tests {
     fn parallel_all_ok_and_counts() {
         let items: Vec<u32> = (0..64).collect();
         let hits = AtomicUsize::new(0);
-        try_for_each_parallel(&items, |_| {
+        try_for_each_parallel_idle(&items, |_| {
             hits.fetch_add(1, Ordering::Relaxed);
             Ok(())
         })
@@ -698,7 +680,7 @@ mod tests {
     #[test]
     fn parallel_first_error_surfaces() {
         let items: Vec<u32> = (0..32).collect();
-        let err = try_for_each_parallel(&items, |&i| {
+        let err = try_for_each_parallel_idle(&items, |&i| {
             if i == 7 {
                 Err(ConsensusError::BadBlock("boom"))
             } else {
@@ -712,8 +694,8 @@ mod tests {
     #[test]
     fn empty_and_single() {
         let empty: Vec<u32> = vec![];
-        try_for_each_parallel(&empty, |_| Ok(())).unwrap();
-        try_for_each_parallel(&[1u32], |_| Ok(())).unwrap();
+        try_for_each_parallel_idle(&empty, |_| Ok(())).unwrap();
+        try_for_each_parallel_idle(&[1u32], |_| Ok(())).unwrap();
     }
 
     #[test]
@@ -826,13 +808,13 @@ mod tests {
         let hits2 = Arc::clone(&hits);
         let wave = thread::spawn(move || {
             let items: Vec<u32> = (0..64).collect();
-            try_for_each_parallel(&items, |_| {
+            try_for_each_parallel_idle(&items, |_| {
                 hits2.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             })
         });
         let start = Instant::now();
-        while waves_snap().load().is_empty() {
+        while waves_bg_snap().load().is_empty() {
             assert!(
                 start.elapsed() < Duration::from_secs(2),
                 "wave was not published"
@@ -850,7 +832,7 @@ mod tests {
         let before = worker_spawn_count();
         let items: Vec<u32> = (0..32).collect();
         let names = Mutex::new(Vec::new());
-        try_for_each_parallel(&items, |_| {
+        try_for_each_parallel_idle(&items, |_| {
             names
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
@@ -874,7 +856,7 @@ mod tests {
             let hits = Arc::clone(&a_hits);
             thread::spawn(move || {
                 let items: Vec<u32> = (0..16).collect();
-                try_for_each_parallel(&items, |_| {
+                try_for_each_parallel_idle(&items, |_| {
                     hits.fetch_add(1, Ordering::Relaxed);
                     Ok(())
                 })
@@ -884,7 +866,7 @@ mod tests {
             let hits = Arc::clone(&b_hits);
             thread::spawn(move || {
                 let items: Vec<u32> = (0..16).collect();
-                try_for_each_parallel(&items, |_| {
+                try_for_each_parallel_idle(&items, |_| {
                     hits.fetch_add(1, Ordering::Relaxed);
                     Ok(())
                 })
@@ -905,7 +887,7 @@ mod tests {
         STEAL_CLAIMS_ON.store(true, Ordering::Relaxed);
         let items: Vec<u32> = (0..256).collect();
         let hits: Vec<AtomicUsize> = (0..256).map(|_| AtomicUsize::new(0)).collect();
-        try_for_each_parallel(&items, |&i| {
+        try_for_each_parallel_idle(&items, |&i| {
             hits[i as usize].fetch_add(1, Ordering::Relaxed);
             Ok(())
         })
@@ -930,7 +912,7 @@ mod tests {
         STEAL_WAVES_LOCKS.store(0, Ordering::Relaxed);
         let items: Vec<u32> = (0..256).collect();
         let hits = AtomicUsize::new(0);
-        try_for_each_parallel(&items, |_| {
+        try_for_each_parallel_idle(&items, |_| {
             hits.fetch_add(1, Ordering::Relaxed);
             Ok(())
         })
@@ -945,29 +927,6 @@ mod tests {
 
     #[test]
     fn try_for_each_from_script_worker_is_refused() {
-        let got =
-            run_detached_join(|| try_for_each_parallel(&[1u32, 2], |_| Ok(()))).expect("join");
-        let err = got.expect_err("must refuse nested wait");
-        assert!(
-            format!("{err}").contains("try_for_each from a script worker"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn try_for_each_idle_all_ok() {
-        let items: Vec<u32> = (0..64).collect();
-        let hits = AtomicUsize::new(0);
-        try_for_each_parallel_idle(&items, |_| {
-            hits.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        })
-        .unwrap();
-        assert_eq!(hits.load(Ordering::Relaxed), 64);
-    }
-
-    #[test]
-    fn try_for_each_idle_from_script_worker_is_refused() {
         let got =
             run_detached_join(|| try_for_each_parallel_idle(&[1u32, 2], |_| Ok(()))).expect("join");
         let err = got.expect_err("must refuse nested wait");
@@ -1021,10 +980,17 @@ mod tests {
         assert_eq!(idle_hits.load(Ordering::Relaxed), 64);
     }
 
+    static FG_HITS: AtomicUsize = AtomicUsize::new(0);
+    fn count_fg(_: &u32) -> Result<(), ConsensusError> {
+        FG_HITS.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
     #[test]
     fn idle_wave_does_not_starve_foreground_wave() {
         let occupy = OccupyGate::occupy_all();
 
+        FG_HITS.store(0, Ordering::Relaxed);
         let fg_done = Arc::new(AtomicBool::new(false));
         let items: Vec<u32> = (0..64).collect();
         let fg_wait = Arc::clone(&fg_done);
@@ -1042,21 +1008,19 @@ mod tests {
             })
         });
         thread::sleep(Duration::from_millis(20));
-        let fg_hits = Arc::new(AtomicUsize::new(0));
-        let fg_hits2 = Arc::clone(&fg_hits);
         let fg_flag = Arc::clone(&fg_done);
         let fg = thread::spawn(move || {
-            let items: Vec<u32> = (0..32).collect();
-            let r = try_for_each_parallel(&items, |_| {
-                fg_hits2.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            });
+            let r = match start_for_each_owned((0..32u32).collect(), count_fg) {
+                Ok(Some(w)) => w.finish(),
+                Ok(None) => Ok(()),
+                Err(e) => Err(e),
+            };
             fg_flag.store(true, Ordering::SeqCst);
             r
         });
         occupy.release();
         fg.join().expect("fg thread").expect("fg ok");
-        assert_eq!(fg_hits.load(Ordering::Relaxed), 32);
+        assert_eq!(FG_HITS.load(Ordering::Relaxed), 32);
         idle.join().expect("idle thread").expect("idle ok");
     }
 
@@ -1070,7 +1034,7 @@ mod tests {
         }));
         std::panic::set_hook(prev);
         assert!(panicked.is_err());
-        try_for_each_parallel(&[1u32, 2, 3, 4], |_| Ok(())).unwrap();
+        try_for_each_parallel_idle(&[1u32, 2, 3, 4], |_| Ok(())).unwrap();
     }
 
     static HOLD_JOBS: AtomicBool = AtomicBool::new(false);
