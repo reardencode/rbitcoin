@@ -383,6 +383,9 @@ impl ConfirmRejectClass {
         {
             return Self::Cascade;
         }
+        if rbitcoin_store::StoreError::is_uring_session_fault_msg(&s) {
+            return Self::EngineFault;
+        }
         if s.contains("parent create_fk unresolved")
             || s.contains("spend annotate missing pin denserels")
             || s.contains("corrupt record")
@@ -421,6 +424,7 @@ impl ConfirmRejectClass {
             | ConsensusError::BadHeader(_)
             | ConsensusError::MissingPrevout => Self::ConsensusInvalid,
             ConsensusError::Store(StoreError::Cancelled(_)) => Self::Cancelled,
+            ConsensusError::Store(e) if e.is_uring_session_fault() => Self::EngineFault,
             ConsensusError::Store(StoreError::Io { .. }) => Self::EngineFault,
             ConsensusError::Store(StoreError::Corrupt(m)) => Self::from_err_str(m),
             ConsensusError::Store(_) => Self::EngineFault,
