@@ -3,16 +3,6 @@
 use super::phases::{class_c_commit, post_commit, structural_run};
 use super::*;
 
-/// Fill empty packed ins from wire + plan.edges (C encode-at-write).
-fn fill_packed_ins_from_wire(
-    plan: &mut rbitcoin_query::ArchiveWritePlan,
-    wire_blocks: &[Arc<Block>],
-) -> Result<(), ConsensusError> {
-    let blocks: Vec<&Block> = wire_blocks.iter().map(|b| b.as_ref()).collect();
-    plan.fill_packed_ins_from_blocks(&blocks)
-        .map_err(ConsensusError::from)
-}
-
 pub(super) fn write_height_needed(tip: Option<u32>, height: u32) -> bool {
     match tip {
         None => true,
@@ -87,7 +77,9 @@ pub fn confirm_write_phase(
     let mut create_map_ns = 0u64;
     if let Some(mut plan) = batch.archive_plan.take() {
         if !plan.is_empty() {
-            fill_packed_ins_from_wire(&mut plan, &batch.wire_blocks)?;
+            let blocks: Vec<&Block> = batch.wire_blocks.iter().map(|b| b.as_ref()).collect();
+            plan.fill_packed_ins_from_blocks(&blocks)
+                .map_err(ConsensusError::from)?;
             let t_take = Instant::now();
             let planned_fks = plan.planned_fks.clone();
             let pins = if query.index_mode().is_tip() {

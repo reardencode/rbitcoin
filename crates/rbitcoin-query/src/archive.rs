@@ -537,7 +537,6 @@ impl Query {
             }
         }
         if !need.is_empty() {
-            let start = self.store.txs.count().saturating_add(1);
             let mut wires: Vec<(Fk, bitcoin::Block, Vec<[u8; 32]>)> =
                 Vec::with_capacity(need.len());
             for (fk, txs) in need {
@@ -548,13 +547,41 @@ impl Query {
                 .iter()
                 .map(|(fk, b, ids)| (*fk, b, ids.as_slice()))
                 .collect();
-            let mut plan =
-                self.archive_plan_batch_from_wire(&refs, start, &crate::InFlight::new(), None)?;
-            let blocks: Vec<&bitcoin::Block> = wires.iter().map(|(_, b, _)| b).collect();
-            plan.fill_packed_ins_from_blocks(&blocks)?;
-            self.archive_commit_plan(plan)?;
+            self.archive_class_a_from_wire(&refs)?;
         }
         Ok(header_fks)
+    }
+
+    /// Class A plan + fill packed ins + commit from wire blocks. Does not set tip.
+    pub fn archive_class_a_from_wire(
+        &self,
+        items: &[(Fk, &bitcoin::Block, &[[u8; 32]])],
+    ) -> Result<(), QueryError> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let mut need = Vec::with_capacity(items.len());
+        for &(fk, block, txids) in items {
+            if self.store.header_txs.has_body(fk)? {
+                continue;
+            }
+            if !block.txdata.is_empty() {
+                need.push((fk, block, txids));
+            }
+        }
+        if need.is_empty() {
+            return Ok(());
+        }
+        let start = self.store.txs.count().saturating_add(1);
+        let mut plan =
+            self.archive_plan_batch_from_wire(&need, start, &crate::InFlight::new(), None)?;
+        if plan.is_empty() {
+            return Ok(());
+        }
+        let blocks: Vec<&bitcoin::Block> = need.iter().map(|(_, b, _)| *b).collect();
+        plan.fill_packed_ins_from_blocks(&blocks)?;
+        self.archive_commit_plan(plan)?;
+        Ok(())
     }
 
     /// Header-only need-body filter (IBD wire planner). No [`TxApply`].

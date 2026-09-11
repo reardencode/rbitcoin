@@ -64,7 +64,9 @@ pub use block::{
 pub(crate) use block::{validate_block_structure_hashed, TxPrecompute};
 pub use clock::{with_now, NodeClock};
 pub use convert::header_to_record;
-pub(crate) use convert::{block_to_apply, block_to_apply_with_txids};
+pub(crate) use convert::{
+    block_to_apply, block_to_apply_with_txids, block_to_apply_with_txids_prev,
+};
 pub use error::{block_reject_log_line, block_reject_reason, script_flag_paren, ConsensusError};
 pub use header::{expected_next_bits, median_time_past, validate_header};
 pub use milestone::Milestone;
@@ -81,7 +83,7 @@ pub use silent_payments::{
 
 use bitcoin::hashes::Hash;
 use bitcoin::{Block, Target};
-use rbitcoin_primitives::Height;
+use rbitcoin_primitives::{Fk, Height};
 use rbitcoin_query::{Query, TxApply};
 use rbitcoin_store::HeaderRecord;
 
@@ -234,6 +236,34 @@ pub fn accept_and_connect_block_preverified(
         )))
 }
 
+fn class_a_header_and_txids(
+    query: &Query,
+    params: &ChainParams,
+    block: &Block,
+) -> Result<(HeaderRecord, Vec<[u8; 32]>), ConsensusError> {
+    let ctx = ValidationContext::archive_structure(params);
+    let txids = validate_block_structure_hashed(block, &ctx)?;
+    let target = Target::from_compact(block.header.bits);
+    if target > params.pow_limit {
+        return Err(ConsensusError::BadHeader("target above pow limit"));
+    }
+    block
+        .header
+        .validate_pow(target)
+        .map_err(|_| ConsensusError::InvalidPow)?;
+    let prev = block.header.prev_blockhash;
+    let prev_fk = if prev.to_byte_array() == [0u8; 32] {
+        Fk::NULL
+    } else {
+        query
+            .get_header_by_hash(prev.as_byte_array())
+            .map_err(ConsensusError::from)?
+            .map(|(fk, _)| fk)
+            .ok_or(ConsensusError::BadPrev)?
+    };
+    Ok((header_to_record(prev_fk, &block.header), txids))
+}
+
 /// Class A only (no tip / Class C). Crash and `plan=None` tests.
 ///
 /// Not a production IBD API — confirm write uses `archive_plan_batch_from_wire`
@@ -246,9 +276,10 @@ pub fn commit_class_a_block(
     milestone: Milestone,
 ) -> Result<(), ConsensusError> {
     let _ = (height, milestone);
-    let (header_rec, txs) = prepare_block_for_archive(query, params, block)?;
+    let (header, txids) = class_a_header_and_txids(query, params, block)?;
+    let fk = query.ensure_header(&header).map_err(ConsensusError::from)?;
     query
-        .commit_class_a_only(&header_rec, &txs)
+        .archive_class_a_from_wire(&[(fk, block, txids.as_slice())])
         .map_err(ConsensusError::from)?;
     Ok(())
 }
@@ -264,14 +295,18 @@ pub fn commit_class_a_run(
     milestone: Milestone,
 ) -> Result<(), ConsensusError> {
     let _ = milestone;
-    let mut items = Vec::with_capacity(blocks.len());
+    let mut owned: Vec<(Fk, &Block, Vec<[u8; 32]>)> = Vec::with_capacity(blocks.len());
     for (_, block) in blocks {
-        let (header, txs) = prepare_block_for_archive(query, params, block)?;
-        query.ensure_header(&header).map_err(ConsensusError::from)?;
-        items.push((header, txs));
+        let (header, txids) = class_a_header_and_txids(query, params, block)?;
+        let fk = query.ensure_header(&header).map_err(ConsensusError::from)?;
+        owned.push((fk, block, txids));
     }
+    let refs: Vec<(Fk, &Block, &[[u8; 32]])> = owned
+        .iter()
+        .map(|(fk, b, ids)| (*fk, *b, ids.as_slice()))
+        .collect();
     query
-        .commit_class_a_batch(&mut items)
+        .archive_class_a_from_wire(&refs)
         .map_err(ConsensusError::from)?;
     Ok(())
 }
@@ -298,27 +333,10 @@ pub fn prepare_block_for_archive_new(
     params: &ChainParams,
     block: &Block,
 ) -> Result<(HeaderRecord, Vec<TxApply>), ConsensusError> {
-    // Height-gated soft forks (BIP34 / pre-segwit witness ban) deferred to confirm.
-    let ctx = ValidationContext::archive_structure(params);
-    let txids = validate_block_structure_hashed(block, &ctx)?;
-    let target = Target::from_compact(block.header.bits);
-    if target > params.pow_limit {
-        return Err(ConsensusError::BadHeader("target above pow limit"));
-    }
-    block
-        .header
-        .validate_pow(target)
-        .map_err(|_| ConsensusError::InvalidPow)?;
-    let prev = block.header.prev_blockhash;
-    if prev.to_byte_array() != [0u8; 32]
-        && query
-            .get_header_by_hash(prev.as_byte_array())
-            .map_err(ConsensusError::from)?
-            .is_none()
-    {
-        return Err(ConsensusError::BadPrev);
-    }
-    block_to_apply_with_txids(query, &block.header, &block.txdata, &txids)
+    let (header, txids) = class_a_header_and_txids(query, params, block)?;
+    let (_, txs) =
+        block_to_apply_with_txids_prev(header.prev_fk, &block.header, &block.txdata, &txids)?;
+    Ok((header, txs))
 }
 
 /// Confirm wire plan: encode `TxApply` from **already-computed** structure txids.
