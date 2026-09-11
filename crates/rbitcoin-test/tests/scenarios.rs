@@ -9,6 +9,7 @@ use rbitcoin_cli::cli_main as cli_cli_main;
 use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
 use rbitcoin_node::{cli_main as node_cli_main, run_node, NodeConfig};
 use rbitcoin_primitives::{Fk, Height, Network, TableKind, VERSION};
+use rbitcoin_query::testutil::FixtureChain;
 use rbitcoin_query::Query;
 use rbitcoin_rpc::node_rpc_path;
 use rbitcoin_store::{HeaderRecord, Store, StoreError, TxRecord};

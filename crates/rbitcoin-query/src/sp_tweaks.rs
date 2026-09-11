@@ -414,6 +414,7 @@ mod tests {
     use super::*;
     use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
 
+    use crate::testutil::FixtureChain;
     fn tmp_q() -> (crate::testutil::TempDir, Query) {
         crate::testutil::tiny_query_labeled("sptweaks")
     }

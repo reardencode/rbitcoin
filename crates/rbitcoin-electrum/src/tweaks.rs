@@ -572,6 +572,7 @@ fn param_bool(params: &Value, idx: usize) -> Option<bool> {
 mod tests {
     use super::*;
 
+    use rbitcoin_query::testutil::FixtureChain;
     #[test]
     fn cake_probe_fixture_is_empty_height_map() {
         let raw = include_str!(concat!(

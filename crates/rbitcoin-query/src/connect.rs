@@ -641,22 +641,6 @@ impl Query {
         Ok(outs)
     }
 
-    /// Connect a block at `height` (genesis or tip+1): Class A then confirm Class C.
-    ///
-    /// Cheap store fixture (HeaderRecord + TxApply). Not `confirm_wire_run`.
-    /// Drains SH write-behind so fixture reads see creates immediately.
-    pub fn connect_block(
-        &self,
-        height: Height,
-        header: &HeaderRecord,
-        txs: &[TxApply],
-    ) -> Result<Fk, QueryError> {
-        self.commit_class_a_only(header, txs)?;
-        let fk = self.confirm_block(height, &header.hash)?;
-        self.apply_sh_pending()?;
-        Ok(fk)
-    }
-
     /// Disconnect the current tip (Class C + scripthash create unlink; archive remains).
     ///
     /// Durable point edges remain for archive history; strong bits cleared below.

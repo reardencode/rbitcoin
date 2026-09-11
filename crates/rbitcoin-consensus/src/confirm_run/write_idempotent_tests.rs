@@ -4,6 +4,7 @@ use super::{
     confirm_archive_kind, write_batch_vs_tip, write_height_needed, ConfirmArchiveKind,
     WriteBatchVsTip,
 };
+use rbitcoin_query::testutil::FixtureChain;
 
 fn tmp_query() -> (rbitcoin_query::testutil::TempDir, rbitcoin_query::Query) {
     rbitcoin_query::testutil::tiny_query_labeled("write-idemp")

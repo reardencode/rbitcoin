@@ -1,4 +1,5 @@
 use super::*;
+use crate::testutil::FixtureChain;
 use rbitcoin_store::{InputRecord, OutputRecord};
 
 #[test]
@@ -2094,7 +2095,7 @@ fn reconstruct_and_connect_error_arms() {
     let _ = q.confirm_parent_cache().header_plan_count();
 
     // Archive empty batch.
-    assert!(q.archive_prepared_owned(&mut []).unwrap().is_empty());
+    q.archive_class_a_from_wire(&[]).unwrap();
 
     // No head for random txid → NotFound.
     let fake = TxRecord {

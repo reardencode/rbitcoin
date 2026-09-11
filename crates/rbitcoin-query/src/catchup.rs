@@ -393,6 +393,7 @@ impl Query {
 mod tests {
     use super::*;
     use crate::sh_builder::{load_seal, sh_force_rebuild, store_seal};
+    use crate::testutil::FixtureChain;
     use rbitcoin_primitives::{Fk, Height};
     use rbitcoin_store::{
         next_run_path, write_sorted_run, HeaderRecord, InputRecord, OutputRecord, TxRecord,

@@ -411,6 +411,7 @@ fn last_push_data(script: &[u8]) -> Option<&[u8]> {
 mod tests {
     use super::*;
 
+    use rbitcoin_query::testutil::FixtureChain;
     #[test]
     fn last_push_data_direct_and_pushdata() {
         // OP_1 (non-push) clears last.
