@@ -3449,12 +3449,12 @@ mod tests {
             .probe_candidates_batch_cold(&mixed, &[true])
             .unwrap();
         assert!(
-            hot[0].iter().any(|f| *f == new) && !hot[0].iter().any(|f| *f == old),
+            hot[0].contains(&new) && !hot[0].contains(&old),
             "open∪sealed_hot={:?} new={new:?} old={old:?}",
             hot[0]
         );
         assert!(
-            cold[0].iter().any(|f| *f == old) && !cold[0].iter().any(|f| *f == new),
+            cold[0].contains(&old) && !cold[0].contains(&new),
             "cold={:?} old={old:?} new={new:?}",
             cold[0]
         );

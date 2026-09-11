@@ -463,7 +463,7 @@ fn collect_unsorted_from_txs(
     }
 
     let work_span = last.saturating_sub(first.saturating_sub(1));
-    let workers = workers.max(1).min(256);
+    let workers = workers.clamp(1, 256);
     let by_size = work_span.div_ceil(CLASS_A_CHUNK_FKS).max(1) as usize;
     let n_chunks = by_size.max(workers.min(work_span as usize).max(1));
     let chunk_span = work_span.div_ceil(n_chunks as u64).max(1);

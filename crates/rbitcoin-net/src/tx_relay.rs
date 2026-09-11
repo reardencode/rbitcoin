@@ -870,11 +870,9 @@ impl MempoolHub {
         let mut n = 0usize;
         let mut g = self.lock_write();
         for t in kill.iter().rev() {
-            if g.graph.get(t).is_some() {
-                if g.remove_txid(t).is_ok() {
-                    self.unindex_txid(t);
-                    n += 1;
-                }
+            if g.graph.get(t).is_some() && g.remove_txid(t).is_ok() {
+                self.unindex_txid(t);
+                n += 1;
             }
         }
         if n > 0 {
@@ -2545,7 +2543,7 @@ mod tests {
             let parent = spend_true(cbs[3], 1_000, spk.clone());
             let pr = hub.accept_tx(&parent).expect("accept parent");
             assert_eq!(pr.txid, parent.compute_txid());
-            assert!(matches!(ann_rx.try_recv(), Ok(_)));
+            assert!(ann_rx.try_recv().is_ok());
             let recent = hub.recent_accepts();
             assert_eq!(recent.len(), 1);
             assert_eq!(recent[0].txid, parent.compute_txid());

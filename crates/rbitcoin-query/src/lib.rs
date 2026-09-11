@@ -1285,7 +1285,7 @@ impl Query {
             return Ok(Vec::new());
         }
 
-        let skip = |h: [u8; 32]| exclude.iter().any(|x| *x == h);
+        let skip = |h: [u8; 32]| exclude.contains(&h);
 
         let mut children: U64Map<Vec<(Fk, [u8; 32])>> = U64Map::default();
         for id in 1..=n {

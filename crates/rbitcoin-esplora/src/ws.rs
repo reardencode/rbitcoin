@@ -284,11 +284,10 @@ async fn handle_socket(socket: WebSocket, st: AppState, _permit: OwnedSemaphoreP
                 if let Some(msg) = tip {
                     match msg {
                         Ok(ev) => {
-                            if conn.want_blocks {
-                                if send_json(&mut sink, &tip_push_json(&ev)).await.is_err() {
+                            if conn.want_blocks
+                                && send_json(&mut sink, &tip_push_json(&ev)).await.is_err() {
                                     break;
                                 }
-                            }
                             if on_tip(&st, &mut conn, &ev, &mut sink).await.is_err() {
                                 break;
                             }

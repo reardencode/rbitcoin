@@ -187,7 +187,7 @@ pub fn validate_block_structure_with_pres(
 
     {
         let cb_ss = block.txdata[0].input[0].script_sig.as_bytes().len();
-        if cb_ss < 2 || cb_ss > 100 {
+        if !(2..=100).contains(&cb_ss) {
             return Err(ConsensusError::BadBlock("bad-cb-length"));
         }
     }

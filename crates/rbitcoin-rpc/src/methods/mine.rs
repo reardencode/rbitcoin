@@ -508,7 +508,7 @@ pub(crate) fn mocktime_i64(v: &Value) -> Result<i64, Value> {
             "timestamp must be an integer",
         ));
     };
-    if i < 0 || i > 9_223_372_036 {
+    if !(0..=9_223_372_036).contains(&i) {
         return Err(rpc_error(
             ERR_INVALID_PARAMETER,
             format!("Mocktime must be in the range [0, 9223372036], not {i}."),

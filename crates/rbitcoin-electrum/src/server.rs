@@ -1470,7 +1470,7 @@ fn dispatch_pinned(
             let proof = query
                 .merkle_proof(Height(height), &txid)
                 .map_err(|e| e.to_string())?;
-            let merkle: Vec<String> = proof.merkle.iter().map(|h| hash_hex_rev(h)).collect();
+            let merkle: Vec<String> = proof.merkle.iter().map(hash_hex_rev).collect();
             Ok(json!({
                 "block_height": proof.block_height,
                 "merkle": merkle,

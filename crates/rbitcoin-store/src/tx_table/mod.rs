@@ -1119,7 +1119,7 @@ impl TxTable {
                 flags & !output_flags::MULTI_SPENDER
             };
             let meta = encode_spent_slot_v17(new_flags, new_field)?;
-            if let Err(_) = self.spent.write_body_abs(abs, &meta) {
+            if self.spent.write_body_abs(abs, &meta).is_err() {
                 cold.push((create_fk, vout, spend_fk));
             }
         }

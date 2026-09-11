@@ -46,7 +46,7 @@ pub fn sample_reset_serve_perf() -> ServePerfSample {
 
 /// `serve n= bytes= ntx= avg_us= max_us=` — reconstruct+encode, not BIP324 send.
 pub fn format_serve_perf(s: &ServePerfSample) -> String {
-    let avg_us = if s.n == 0 { 0 } else { s.wall_ns / s.n / 1_000 };
+    let avg_us = s.wall_ns.checked_div(s.n).unwrap_or(0) / 1_000;
     let max_us = s.max_ns / 1_000;
     format!(
         "serve n={} bytes={} ntx={} avg_us={} max_us={}",

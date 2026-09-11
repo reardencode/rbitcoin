@@ -135,11 +135,10 @@ impl LoopSample {
         Self::ms(self.status_scan_ns)
     }
     pub(crate) fn confirm_us_per_block(&self) -> u64 {
-        if self.confirm_blocks == 0 {
-            0
-        } else {
-            (self.confirm_ns / self.confirm_blocks) / 1000
-        }
+        self.confirm_ns
+            .checked_div(self.confirm_blocks)
+            .unwrap_or(0)
+            / 1000
     }
     /// Which phase dominated wall time this window (for one-glance diagnosis).
     pub(crate) fn dominant(&self) -> &'static str {

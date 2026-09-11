@@ -234,7 +234,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         config.mempool.max_weight,
         config.mempool.persist,
     )
-    .map_err(|e| NodeError::Config(e))?;
+    .map_err(NodeError::Config)?;
     mempool.set_cluster_limits(
         config.mempool.limit_cluster_count,
         config.mempool.limit_cluster_size_kvb,
@@ -706,15 +706,12 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 if enabled(Level::Debug) {
                     let live = mempool.live_count();
                     let follow_live = node.follow_live_count();
-                    let acc_avg = if mp.accepts + mp.rejects > 0 {
-                        mp.accept_us / (mp.accepts + mp.rejects)
-                    } else if mp.accept_us > 0 {
-                        mp.accept_us
-                    } else {
-                        0
-                    };
-                    let esp_avg = if esp_n > 0 { esp_us / esp_n } else { 0 };
-                    let el_avg = if el_n > 0 { el_us / el_n } else { 0 };
+                    let acc_avg = mp
+                        .accept_us
+                        .checked_div(mp.accepts + mp.rejects)
+                        .unwrap_or(mp.accept_us);
+                    let esp_avg = esp_us.checked_div(esp_n).unwrap_or(0);
+                    let el_avg = el_us.checked_div(el_n).unwrap_or(0);
                     let serve_s = format_serve_perf(&serve);
                     let sizes = format_tip_perf_sizes(&TipPerfSizes {
                         rss: read_proc_rss(),

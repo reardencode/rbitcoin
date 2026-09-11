@@ -45,7 +45,7 @@ pub fn script_sigop_count(script: &[u8], accurate: bool) -> u64 {
         } else if opcode == 0xac || opcode == 0xad {
             n = n.saturating_add(1);
         } else if opcode == 0xae || opcode == 0xaf {
-            if accurate && last_opcode >= 0x51 && last_opcode <= 0x60 {
+            if accurate && (0x51..=0x60).contains(&last_opcode) {
                 n = n.saturating_add(u64::from(last_opcode - 0x50));
             } else {
                 n = n.saturating_add(20);
