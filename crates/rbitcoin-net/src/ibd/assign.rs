@@ -869,7 +869,7 @@ fn steal_hung_densify(
         if faster.is_empty() {
             continue;
         }
-        faster.sort_by(|&a, &b| peer_bps(&st.slots, b).cmp(&peer_bps(&st.slots, a)));
+        faster.sort_by_key(|&b| std::cmp::Reverse(peer_bps(&st.slots, b)));
         let dest = faster
             .into_iter()
             .find(|&pid| peer_has_slot(st, pid, densify_caps.get(&pid).copied().unwrap_or(1)));

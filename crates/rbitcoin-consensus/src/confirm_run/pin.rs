@@ -201,7 +201,7 @@ fn denserels_by_stamped_range(
     rbitcoin_query::note_confirm(&query.confirm_stats().body_tx_reads, n_range);
     rbitcoin_query::note_confirm(&query.confirm_stats().pin_new, n_range);
     let t_range_fill = Instant::now();
-    for ((fk, range, _tid, need), row) in range_jobs.into_iter().zip(decoded.into_iter()) {
+    for ((fk, range, _tid, need), row) in range_jobs.into_iter().zip(decoded) {
         let Some(id) = fk.get() else {
             continue;
         };
@@ -462,7 +462,7 @@ pub(super) fn ensure_spend_abs_layouts(
                 .store()
                 .tx_spent_range_batch(&spent_fks)
                 .map_err(ConsensusError::from)?;
-            for (fk, opt) in spent_fks.iter().zip(spent.into_iter()) {
+            for (fk, opt) in spent_fks.iter().zip(spent) {
                 if let Some(sr) = opt {
                     batch_parents.set_spent_range_only(*fk, sr);
                 }
@@ -558,7 +558,7 @@ pub(super) fn ensure_spend_abs_layouts(
                 .store()
                 .tx_spent_range_batch(&spent_fks)
                 .map_err(ConsensusError::from)?;
-            for (fk, opt) in spent_fks.iter().zip(spent.into_iter()) {
+            for (fk, opt) in spent_fks.iter().zip(spent) {
                 if let Some(sr) = opt {
                     batch_parents.set_spent_range_only(*fk, sr);
                 }

@@ -201,7 +201,7 @@ impl Query {
         }
         let refs: Vec<(Height, &[Option<[u8; 33]>])> =
             items.iter().map(|(h, _, r)| (*h, r.as_slice())).collect();
-        t.put_blocks(&refs).map_err(Into::into)
+        t.put_blocks(&refs)
     }
 
     pub fn truncate_sp_tweaks_through_tip(&self, tip: Option<Height>) -> Result<(), QueryError> {
@@ -403,7 +403,7 @@ impl Query {
 
         Ok(plans
             .into_iter()
-            .zip(out_rows.into_iter())
+            .zip(out_rows)
             .map(|(p, rows)| (p.height, rows))
             .collect())
     }

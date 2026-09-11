@@ -2240,7 +2240,7 @@ impl MempoolHub {
                 fee: e.fee_sat as i64,
             });
         }
-        out.sort_by(|a, b| a.txid.cmp(&b.txid));
+        out.sort_by_key(|a| a.txid);
         out
     }
 

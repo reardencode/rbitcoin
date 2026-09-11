@@ -292,7 +292,7 @@ pub(super) fn fill_planned_create_layout_after_commit(
         .store()
         .tx_spent_range_batch(&need_spent)
         .map_err(ConsensusError::from)?;
-    for (fk, spent_r) in need_spent.iter().zip(spent.into_iter()) {
+    for (fk, spent_r) in need_spent.iter().zip(spent) {
         if let Some(sr) = spent_r {
             batch_parents.set_spent_range_only(*fk, sr);
         }

@@ -186,7 +186,7 @@ mod tests {
         let txid = tx.compute_txid().to_byte_array();
         // Mismatch paths.
         assert!(matches!(
-            block_to_apply_with_txids_prev(Fk::NULL, &header, &[tx.clone()], &[]),
+            block_to_apply_with_txids_prev(Fk::NULL, &header, std::slice::from_ref(&tx), &[]),
             Err(ConsensusError::BadBlock(_))
         ));
         assert!(matches!(

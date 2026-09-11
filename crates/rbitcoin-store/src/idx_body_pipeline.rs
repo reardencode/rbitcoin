@@ -106,7 +106,7 @@ pub fn run_idx_body_pipeline_backend(
     // Contiguous runs still use record_range_batch (page-aligned collect_starts).
     if !need_fk.is_empty() {
         let ranges = table.record_range_batch(&need_fk)?;
-        for (slot, r) in need_slot.into_iter().zip(ranges.into_iter()) {
+        for (slot, r) in need_slot.into_iter().zip(ranges) {
             jobs[slot].range = r;
         }
     }

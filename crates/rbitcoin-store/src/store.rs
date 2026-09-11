@@ -298,7 +298,7 @@ impl Store {
         if layout.is_split() {
             write_inwit_reloc(&path)?;
         }
-        let cold_path = layout.is_split().then(|| inwit_dir);
+        let cold_path = layout.is_split().then_some(inwit_dir);
         Ok(Self {
             headers: HeaderTable::create_with_scale(&path, layout.head_scale)?,
             txs,
@@ -420,7 +420,7 @@ impl Store {
         if layout.is_split() {
             write_inwit_reloc(&path)?;
         }
-        let cold_path = layout.is_split().then(|| inwit_dir);
+        let cold_path = layout.is_split().then_some(inwit_dir);
         let store = Self {
             headers: HeaderTable::open_with_scale(&path, layout.head_scale)?,
             txs,
@@ -1838,7 +1838,7 @@ mod tests {
         let non_fks = s
             .put_tx_full_batch_indexed(&[(non_tx, non_in, non_out)], false)
             .unwrap();
-        let fks = vec![cb_fks[0], non_fks[0]];
+        let fks = [cb_fks[0], non_fks[0]];
         assert_eq!(fks.len(), 2);
         s.header_txs.put_range(hfk, fks[0], 2).unwrap();
         s.confirmed.set(Height(0), hfk).unwrap();
@@ -2538,7 +2538,7 @@ mod tests {
             s.flush().unwrap();
         }
         {
-            let f = TableFile::open(&dir.join("txout.body"), TableKind::TxOut).unwrap();
+            let f = TableFile::open(dir.join("txout.body"), TableKind::TxOut).unwrap();
             let mut b = [0u8; 1];
             f.read_at(FILE_HEADER_LEN as u64, &mut b).unwrap();
             b[0] &= !0x80;

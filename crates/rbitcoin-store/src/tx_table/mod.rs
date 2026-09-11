@@ -366,10 +366,10 @@ fn pread_two_spans(
         let tb = s.spawn(|| b.pread_span(b_off, b_len));
         let va = ta
             .join()
-            .unwrap_or_else(|_| Err(StoreError::Corrupt("txout span thread")))?;
+            .unwrap_or(Err(StoreError::Corrupt("txout span thread")))?;
         let vb = tb
             .join()
-            .unwrap_or_else(|_| Err(StoreError::Corrupt("inwit span thread")))?;
+            .unwrap_or(Err(StoreError::Corrupt("inwit span thread")))?;
         Ok((va, vb))
     })
 }
@@ -1466,8 +1466,7 @@ impl TxTable {
             }
             let span_len = span_hi.saturating_sub(span_lo);
             self.body.with_bytes_at_pread(span_lo, span_len, |buf| {
-                for k in i..j {
-                    let (off, len) = ranges[k];
+                for (k, &(off, len)) in ranges.iter().enumerate().take(j).skip(i) {
                     let rel = (off.saturating_sub(span_lo)) as usize;
                     let end = rel.saturating_add(len as usize);
                     if end > buf.len() {

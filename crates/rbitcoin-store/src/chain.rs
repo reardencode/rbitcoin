@@ -376,7 +376,7 @@ impl StrongTxTable {
     pub fn set_unstrong(&self, tx_fk: Fk) -> Result<(), StoreError> {
         let id = tx_fk.get().ok_or(StoreError::InvalidFk)?;
         let n = self.n_bits.load(std::sync::atomic::Ordering::Acquire);
-        if id - 1 >= n {
+        if id > n {
             return Ok(());
         }
         self.set_bit(id - 1, false)
@@ -414,7 +414,7 @@ impl StrongTxTable {
             return Ok(0);
         }
         let n = self.allocated_bits();
-        if start_fk - 1 >= n {
+        if start_fk > n {
             return Ok(0);
         }
         let start_bit = start_fk - 1;

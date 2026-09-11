@@ -507,7 +507,7 @@ fn chunk_parent_ids_vouts_are_per_chunk() {
     let b = chunk_parent_ids(&wave, &chunk1);
     assert_eq!(a.need_vouts.get(&7).map(|v| v.as_slice()), Some(&[0][..]));
     assert!(
-        b.need_vouts.get(&7).is_none(),
+        !b.need_vouts.contains_key(&7),
         "chunk that does not spend the parent must not list its vout"
     );
     assert!(

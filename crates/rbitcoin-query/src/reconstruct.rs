@@ -197,7 +197,7 @@ impl Query {
             if got.len() != need.len() {
                 return Err(StoreError::Corrupt("invariant: txids_get_many length"));
             }
-            for (fk, txid) in need.iter().zip(got.into_iter()) {
+            for (fk, txid) in need.iter().zip(got) {
                 let Some(id) = fk.get() else {
                     continue;
                 };

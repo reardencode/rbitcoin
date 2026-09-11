@@ -993,7 +993,7 @@ mod tests {
             Duration::from_secs(30),
             45_000,
         );
-        assert!(cooldown.get(&a).is_none());
+        assert!(!cooldown.contains_key(&a));
         assert!(inflight.contains_key(&h));
     }
 
@@ -1008,7 +1008,7 @@ mod tests {
             now,
             Duration::from_secs(30),
         );
-        assert!(cooldown.get(&addr(13)).is_none());
+        assert!(!cooldown.contains_key(&addr(13)));
     }
 
     #[test]

@@ -124,7 +124,7 @@ pub fn utxo_list_json(query: &Query, list: &[ScriptHashUtxo]) -> Result<Value, Q
         })
         .collect();
     serde_json::to_value(rows)
-        .map_err(|_| rbitcoin_store::StoreError::Corrupt("invariant: utxo json").into())
+        .map_err(|_| rbitcoin_store::StoreError::Corrupt("invariant: utxo json"))
 }
 
 /// Confirmed history rows → Esplora tx JSON using join fks (no `tx.head`).

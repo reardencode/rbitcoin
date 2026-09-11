@@ -1352,7 +1352,7 @@ pub(crate) fn structural_validate_spends(
         .map_err(ConsensusError::from)?;
     let height_by_id: U64Map<u32> = unique_create_fks
         .iter()
-        .zip(durable_heights.into_iter())
+        .zip(durable_heights)
         .filter_map(|(fk, h)| {
             let id = fk.get()?;
             let h = h.or_else(|| run_create_height.get(fk).copied())?;
@@ -1406,7 +1406,7 @@ pub(crate) fn structural_validate_spends(
             .map_err(ConsensusError::from)?;
         let field_h_by_id: U64Map<u32> = field_fks
             .iter()
-            .zip(field_heights.into_iter())
+            .zip(field_heights)
             .filter_map(|(fk, h)| Some((fk.get()?, h?)))
             .collect();
         for (i, &(id, vout, abs, sfk)) in abs_jobs.iter().enumerate() {

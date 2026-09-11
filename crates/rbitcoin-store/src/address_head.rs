@@ -769,7 +769,7 @@ impl AddressHead {
         let page_slots = page_slot_count(bits);
         let es_u = es as usize;
 
-        entries.sort_by(|a, b| page_base_for_txid(&a.0, bits).cmp(&page_base_for_txid(&b.0, bits)));
+        entries.sort_by_key(|a| page_base_for_txid(&a.0, bits));
 
         let mut buf = [0u8; PROBE_REGION_BYTES];
         let mut i = 0;
@@ -1765,7 +1765,7 @@ mod tests {
             }
         };
         assert_eq!(load_ratio(10, 0), 0.0);
-        assert_eq!(((100u64 as f64) * HEAD_LOAD_START).floor() as u64, 80);
+        assert_eq!((100_f64 * HEAD_LOAD_START).floor() as u64, 80);
         // bits_for_scale env out of range falls back to the explicit scale
         let prev = std::env::var_os("RBITCOIN_TX_HEAD_BITS");
         std::env::set_var("RBITCOIN_TX_HEAD_BITS", "999");
@@ -1819,7 +1819,7 @@ mod tests {
         assert!((MIN_BITS..=MAX_BITS).contains(&layout.bits));
         assert_eq!(default_layout(HeadScale::Tiny).bits, layout.bits);
         assert_eq!(default_layout(HeadScale::Mainnet).bits, MAINNET_BITS);
-        let roll_thr = ((100u64 as f64) * HEAD_LOAD_START).floor() as u64;
+        let roll_thr = (100_f64 * HEAD_LOAD_START).floor() as u64;
         assert_eq!(roll_thr, 80);
         assert!(81 >= roll_thr);
         let ext = encode_layout_ext(layout, 7);

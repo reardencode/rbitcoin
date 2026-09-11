@@ -404,15 +404,13 @@ pub(super) fn xor_script_kind_v17_payload(
     };
     match kind {
         SCRIPT_KIND_V17_EMPTY | SCRIPT_KIND_V17_OP_TRUE | SCRIPT_KIND_V17_P2A => {}
-        SCRIPT_KIND_V17_P2PKH | SCRIPT_KIND_V17_P2SH | SCRIPT_KIND_V17_P2WPKH => {
-            if disk.len() >= 20 {
-                secret.xor_bytes(0, &mut disk[..20]);
-            }
+        SCRIPT_KIND_V17_P2PKH | SCRIPT_KIND_V17_P2SH | SCRIPT_KIND_V17_P2WPKH
+            if disk.len() >= 20 =>
+        {
+            secret.xor_bytes(0, &mut disk[..20]);
         }
-        SCRIPT_KIND_V17_P2WSH | SCRIPT_KIND_V17_P2TR => {
-            if disk.len() >= 32 {
-                secret.xor_bytes(0, &mut disk[..32]);
-            }
+        SCRIPT_KIND_V17_P2WSH | SCRIPT_KIND_V17_P2TR if disk.len() >= 32 => {
+            secret.xor_bytes(0, &mut disk[..32]);
         }
         SCRIPT_KIND_V17_RAW | SCRIPT_KIND_V17_OP_RETURN_PUSH => {
             if let Ok((slen, n)) = read_compact_size(disk) {
@@ -672,7 +670,7 @@ pub fn scan_packed_p2tr_outs(
         let mut o = off + 1;
         let (v, n) = read_uleb128(&raw[o..])?;
         o += n;
-        let value = if v > i64::MAX as u64 { 0 } else { v as u64 };
+        let value = if v > i64::MAX as u64 { 0 } else { v };
         let used = crate::compact::script_kind_v17_disk_used(kind, &raw[o..])?;
         if kind == crate::compact::SCRIPT_KIND_V17_P2TR && used == 32 {
             let mut xonly = [0u8; 32];

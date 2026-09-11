@@ -81,10 +81,10 @@ impl MphfHead {
     pub fn flush(&self) -> Result<(), StoreError> {
         self.val_file
             .sync_data()
-            .map_err(|e| StoreError::io(&val_path(&self.base), e))?;
+            .map_err(|e| StoreError::io(val_path(&self.base), e))?;
         self.mphf_file
             .sync_data()
-            .map_err(|e| StoreError::io(&mphf_path(&self.base), e))
+            .map_err(|e| StoreError::io(mphf_path(&self.base), e))
     }
 
     pub fn write_pack8(
@@ -176,7 +176,7 @@ impl MphfHead {
         let w = pack8(value)?;
         let off = slot.saturating_mul(8);
         pwrite_file(&self.val_file, off, &w.to_le_bytes())
-            .map_err(|e| StoreError::io(&val_path(&self.base), e))?;
+            .map_err(|e| StoreError::io(val_path(&self.base), e))?;
         Ok(true)
     }
 
@@ -204,7 +204,7 @@ impl MphfHead {
         let mut tag = [0u8; 8];
         self.preads.fetch_add(1, Ordering::Relaxed);
         pread_file_exact(&self.mphf_file, self.tags_off + slot * 8, &mut tag)
-            .map_err(|e| StoreError::io(&mphf_path(&self.base), e))?;
+            .map_err(|e| StoreError::io(mphf_path(&self.base), e))?;
         if u64::from_le_bytes(tag) != ku {
             return Ok(None);
         }
@@ -215,7 +215,7 @@ impl MphfHead {
         let mut buf = [0u8; 8];
         self.preads.fetch_add(1, Ordering::Relaxed);
         pread_file_exact(&self.val_file, slot * 8, &mut buf)
-            .map_err(|e| StoreError::io(&val_path(&self.base), e))?;
+            .map_err(|e| StoreError::io(val_path(&self.base), e))?;
         unpack8(u64::from_le_bytes(buf))
     }
 }

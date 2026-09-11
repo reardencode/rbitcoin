@@ -1051,7 +1051,7 @@ mod tests {
             // Each record ~100 B → soft 128 forces new segment often.
             for i in 0..12u8 {
                 put_batch(&t, 1, 128, |_j, buf| {
-                    buf.extend_from_slice(&vec![i; 100]);
+                    buf.extend_from_slice(&[i; 100]);
                 })
                 .unwrap();
             }

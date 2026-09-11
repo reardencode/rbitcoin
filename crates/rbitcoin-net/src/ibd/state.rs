@@ -369,7 +369,7 @@ mod tests {
 
         // Height change removes stale inverse.
         st.record_height(tip, 11);
-        assert!(st.height_to_hash.get(&10).is_none());
+        assert!(!st.height_to_hash.contains_key(&10));
         assert_eq!(st.height_to_hash.get(&11), Some(&tip));
 
         // Seed a bloated ordered deque with middle ghosts so hygiene compacts.
@@ -447,8 +447,8 @@ mod tests {
         st.ordered.push_back(h(4));
         st.clear_path_above(2);
         assert_eq!(st.height_to_hash.get(&2), Some(&h(2)));
-        assert!(st.height_to_hash.get(&3).is_none());
-        assert!(st.height_to_hash.get(&4).is_none());
+        assert!(!st.height_to_hash.contains_key(&3));
+        assert!(!st.height_to_hash.contains_key(&4));
         assert!(!st.ordered_set.contains(&h(3)));
         assert!(!st.ordered_set.contains(&h(4)));
     }

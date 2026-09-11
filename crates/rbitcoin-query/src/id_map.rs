@@ -97,7 +97,7 @@ mod tests {
         let mut other = prefix;
         other[8] = 0xaa;
         let build = BuildHasherDefault::<OutPointHasher>::default();
-        let hash_of = |txid: [u8; 32], vout: u32| build.hash_one(&(txid, vout));
+        let hash_of = |txid: [u8; 32], vout: u32| build.hash_one((txid, vout));
         assert_ne!(
             hash_of(prefix, 0),
             hash_of(prefix, 1),
