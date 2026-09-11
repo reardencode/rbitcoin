@@ -345,20 +345,57 @@ fn prevout_value_sat(ctx: &RpcContext, op: &OutPoint) -> Option<u64> {
     u64::try_from(out.value).ok()
 }
 
-fn tx_fee_sat_from_prevouts(ctx: &RpcContext, tx: &Transaction) -> Option<u64> {
+#[derive(Debug)]
+enum TxFeeLook {
+    Fee(u64),
+    MissingPrevout,
+    Overflow,
+}
+
+fn fold_tx_fee_sat(
+    in_vals: impl IntoIterator<Item = Option<u64>>,
+    out_sum: Option<u64>,
+) -> TxFeeLook {
     let mut in_sum = 0u64;
-    for inp in &tx.input {
-        in_sum = in_sum.saturating_add(prevout_value_sat(ctx, &inp.previous_output)?);
+    for v in in_vals {
+        let Some(v) = v else {
+            return TxFeeLook::MissingPrevout;
+        };
+        in_sum = match in_sum.checked_add(v) {
+            Some(s) => s,
+            None => return TxFeeLook::Overflow,
+        };
     }
-    let out_sum: u64 = tx.output.iter().map(|o| o.value.to_sat()).sum();
-    in_sum.checked_sub(out_sum)
+    let Some(out_sum) = out_sum else {
+        return TxFeeLook::Overflow;
+    };
+    match in_sum.checked_sub(out_sum) {
+        Some(fee) => TxFeeLook::Fee(fee),
+        None => TxFeeLook::Overflow,
+    }
+}
+
+fn tx_output_sum_sat(tx: &Transaction) -> Option<u64> {
+    tx.output
+        .iter()
+        .try_fold(0u64, |a, o| a.checked_add(o.value.to_sat()))
+}
+
+fn tx_fee_sat_from_prevouts(ctx: &RpcContext, tx: &Transaction) -> TxFeeLook {
+    fold_tx_fee_sat(
+        tx.input
+            .iter()
+            .map(|inp| prevout_value_sat(ctx, &inp.previous_output)),
+        tx_output_sum_sat(tx),
+    )
 }
 
 fn rpc_tx_fee_exceeds_max(ctx: &RpcContext, tx: &Transaction, max_sat_kvb: u64) -> bool {
-    let Some(fee) = tx_fee_sat_from_prevouts(ctx, tx) else {
-        return false;
-    };
-    fee_exceeds_max(fee, tx.weight().to_wu(), max_sat_kvb)
+    match tx_fee_sat_from_prevouts(ctx, tx) {
+        TxFeeLook::Fee(fee) => fee_exceeds_max(fee, tx.weight().to_wu(), max_sat_kvb),
+        TxFeeLook::Overflow => max_sat_kvb != 0,
+        TxFeeLook::MissingPrevout => false,
+    }
 }
 
 /// RPC-submit `maxburnamount` (BTC). Omitted → 0. Sum of unspendable output values vs cap.
@@ -1028,4 +1065,34 @@ pub(crate) fn gettxspendingprevout(ctx: &RpcContext, params: &RpcParams) -> Resu
         out.push(row);
     }
     Ok(json!(out))
+}
+
+#[cfg(test)]
+mod fee_look_tests {
+    use super::{fold_tx_fee_sat, TxFeeLook};
+
+    #[test]
+    fn overflow_in_sum_is_overflow_not_missing() {
+        let half = (u64::MAX / 2) + 2;
+        match fold_tx_fee_sat([Some(half), Some(half)], Some(0)) {
+            TxFeeLook::Overflow => {}
+            other => panic!("expected Overflow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_prevout_is_not_overflow() {
+        match fold_tx_fee_sat([Some(50), None], Some(1)) {
+            TxFeeLook::MissingPrevout => {}
+            other => panic!("expected MissingPrevout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn known_fee_subtracts() {
+        match fold_tx_fee_sat([Some(50_000), Some(25_000)], Some(74_000)) {
+            TxFeeLook::Fee(1_000) => {}
+            other => panic!("expected Fee(1000), got {other:?}"),
+        }
+    }
 }
