@@ -57,11 +57,10 @@ use rbitcoin_query::ProcessOwnedSizes;
 
 /// Write-stage tokens that must sum to `write=` / [`write_stage_ms`].
 ///
-/// Inventory: `class_a` + `ensure` + `struct` + `class_c` + `sh` + `spend`
-/// + `tweaks` + `pins` + `head_sub` + `drain_join` + `dequeue`. `other=` is
-/// write-thread work minus this inventory.
-/// Subtimers (spent_sub, ann, class_a_sub, pins take/map) stay on the outer
-/// sample until a later nest.
+/// Exclusive names live in [`WriteStageSample::INVENTORY`]; `format_info` /
+/// `format_debug` emit from that table. Nested mix (ensure pin/cold, struct
+/// spent/create_h/bip68, pins take/map, spend `r=`) is not exclusive.
+/// `other=` is write-thread work minus this inventory.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct WriteStageSample {
     /// `archive_commit_plan`
@@ -111,6 +110,7 @@ impl WriteStageSample {
     }
 
     /// Exclusive write inventory: one row per token (`write=` = this sum).
+    /// `format_info` / `format_debug` emit `{name}` from this table.
     const INVENTORY: &'static [(&'static str, fn(&Self) -> u64, fn(&Self) -> u64)] = &[
         ("class_a", |s| s.class_a_ms, |s| s.class_a_ns),
         ("ensure", |s| s.ensure_ms, |s| s.ensure_ns),
@@ -295,7 +295,7 @@ pub(crate) struct IbdPerfSample {
     pub stamp_prepare_ms: u64,
     pub stamp_filter_ms: u64,
     pub stamp_batch_ms: u64,
-    /// plan_batch internals (from archive_phase_stats).
+    /// plan_batch internals (from ConfirmWindow archive prep).
     pub stamp_batch_assign_ms: u64,
     pub stamp_batch_collect_ms: u64,
     /// head_fk + head_dens (legacy total).
@@ -1119,6 +1119,45 @@ fn write_stage_ms(s: &IbdPerfSample) -> u64 {
     s.write.stage_ms()
 }
 
+/// INFO write inventory (`{name}={}ms`) plus nested mix extras.
+fn append_write_inventory_info(out: &mut String, s: &IbdPerfSample) {
+    for (name, ms, _) in WriteStageSample::INVENTORY {
+        let v = ms(&s.write);
+        match *name {
+            "ensure" => out.push_str(&format!(
+                " {name}={v}ms(pin={} cold={})",
+                s.ensure_res_hit, s.ensure_cold_n
+            )),
+            "struct" => out.push_str(&format!(
+                " {name}={v}ms(spent={} create_h={} bip68={})",
+                s.structural_spent_ms, s.structural_create_h_ms, s.structural_bip68_ms
+            )),
+            "pins" => out.push_str(&format!(
+                " {name}={v}ms(take={} map={})",
+                s.pins_take_ms, s.pins_map_ms
+            )),
+            _ => out.push_str(&format!(" {name}={v}ms")),
+        }
+    }
+}
+
+/// DEBUG write inventory (`{name}={{us/blk}}`) plus nested mix extras.
+fn append_write_inventory_debug(out: &mut String, s: &IbdPerfSample, us: impl Fn(u64) -> u64) {
+    for (name, _, ns) in WriteStageSample::INVENTORY {
+        let v = us(ns(&s.write));
+        match *name {
+            "struct" => out.push_str(&format!(
+                " {name}={v} spent={} create_h={} bip68={}",
+                us(s.structural_spent_ns),
+                us(s.structural_create_h_ns),
+                us(s.structural_bip68_ns),
+            )),
+            "spend" => out.push_str(&format!(" {name}={v}(r={})", s.spend_ranged)),
+            _ => out.push_str(&format!(" {name}={v}")),
+        }
+    }
+}
+
 /// Stable DEBUG meter line (unified load→scripts→write).
 pub(crate) fn format_info(s: &IbdPerfSample) -> String {
     let bq_mib = s.bq_bytes / (1024 * 1024);
@@ -1363,36 +1402,16 @@ pub(crate) fn format_info(s: &IbdPerfSample) -> String {
         out.push_str(&format!(" pin_win={}ms", s.load_win_ms));
     }
 
+    out.push_str(" | write");
+    append_write_inventory_info(&mut out, s);
     out.push_str(&format!(
-        " | write class_a={}ms ensure={}ms(pin={} cold={}) struct={}ms(spent={} create_h={} bip68={}) \
-         spent_sub(abs={} strong={} cold={} pending={}) \
-         class_c={}ms class_c_join={}ms sh={}ms spend={}ms tweaks={}ms \
-         pins={}ms(take={} map={}) head_sub={}ms drain_join={}ms dequeue={}ms other={}ms \
+        " spent_sub(abs={} strong={} cold={} pending={}) other={}ms \
          ann={}ms/n={} pread_skip={} \
          meta={}ms/n={}",
-        s.write.class_a_ms,
-        s.write.ensure_ms,
-        s.ensure_res_hit,
-        s.ensure_cold_n,
-        s.write.structural_ms,
-        s.structural_spent_ms,
-        s.structural_create_h_ms,
-        s.structural_bip68_ms,
         s.spent_abs_ms,
         s.spent_strong_ms,
         s.spent_cold_ms,
         s.spent_pending_ms,
-        s.write.class_c_ms,
-        s.write.class_c_join_ms,
-        s.write.sh_ms,
-        s.write.utxo_ms,
-        s.write.tweak_ms,
-        s.write.pins_ms,
-        s.pins_take_ms,
-        s.pins_map_ms,
-        s.write.head_sub_ms,
-        s.write.drain_join_ms,
-        s.write.dequeue_ms,
         s.thr_write_work_ms.saturating_sub(write_stage_ms(s)),
         s.ann_ms,
         s.ann_n,
@@ -1450,30 +1469,14 @@ pub(crate) fn format_debug(s: &IbdPerfSample) -> String {
     // (parallel with strong — sum may exceed join wall by ~strong).
     let write_ns = s.write.stage_ns();
     let mut out = format!(
-        "ibd: perf_dbg us/blk load={} (pre_asm={} assemble={}) script={} write={} \
-         class_a={} ensure={} struct={} spent={} create_h={} bip68={} class_c={} sh={} \
-         spend={}(r={}) tweaks={} pins={} head_sub={} drain_join={} dequeue={}",
+        "ibd: perf_dbg us/blk load={} (pre_asm={} assemble={}) script={} write={}",
         us(prep_ns),
         us(s.load_ns),
         us(s.connect_ns),
         us(s.script_ns),
         us(write_ns),
-        us(s.write.class_a_ns),
-        us(s.write.ensure_ns),
-        us(s.write.structural_ns),
-        us(s.structural_spent_ns),
-        us(s.structural_create_h_ns),
-        us(s.structural_bip68_ns),
-        us(s.write.class_c_ns),
-        us(s.write.sh_ns),
-        us(s.write.utxo_apply_ns),
-        s.spend_ranged,
-        us(s.write.tweak_ns),
-        us(s.write.pins_ns),
-        us(s.write.head_sub_ns),
-        us(s.write.drain_join_ns),
-        us(s.write.dequeue_ns),
     );
+    append_write_inventory_debug(&mut out, s, us);
     append_nz(&mut out, "strong_us", us(s.strong_ns));
     append_nz(&mut out, "tip_us", us(s.tip_ns));
     if s.wf_body_store > 0 || s.wf_store_body_ms > 0 {
@@ -1843,6 +1846,63 @@ mod tests {
         assert!(line.contains("drain_join=0ms"), "{line}");
         assert!(line.contains("dequeue=0ms"), "{line}");
         assert!(line.contains("other=0ms"), "{line}");
+    }
+
+    #[test]
+    fn write_inventory_names_emit_in_table_order() {
+        let mut write = WriteStageSample::default();
+        write.class_a_ms = 1;
+        write.class_a_ns = 1_000_000;
+        write.ensure_ms = 2;
+        write.ensure_ns = 2_000_000;
+        write.structural_ms = 3;
+        write.structural_ns = 3_000_000;
+        write.class_c_ms = 4;
+        write.class_c_ns = 4_000_000;
+        write.sh_ms = 5;
+        write.sh_ns = 5_000_000;
+        write.utxo_ms = 6;
+        write.utxo_apply_ns = 6_000_000;
+        write.tweak_ms = 7;
+        write.tweak_ns = 7_000_000;
+        write.pins_ms = 8;
+        write.pins_ns = 8_000_000;
+        write.head_sub_ms = 9;
+        write.head_sub_ns = 9_000_000;
+        write.class_c_join_ms = 10;
+        write.class_c_join_ns = 10_000_000;
+        write.drain_join_ms = 11;
+        write.drain_join_ns = 11_000_000;
+        write.dequeue_ms = 12;
+        write.dequeue_ns = 12_000_000;
+        let mut s = IbdPerfSample::default();
+        s.phase_blks = 1;
+        s.write = write;
+        let info = format_info(&s);
+        let write_at = info
+            .find(" | write ")
+            .unwrap_or_else(|| panic!("no write section: {info}"));
+        let write_sec = &info[write_at..];
+        let mut last = 0usize;
+        for (name, ms, _) in WriteStageSample::INVENTORY {
+            let tok = format!("{name}={}ms", ms(&s.write));
+            let pos = write_sec
+                .find(&tok)
+                .unwrap_or_else(|| panic!("format_info missing {tok}: {write_sec}"));
+            assert!(pos >= last, "{name} out of INVENTORY order in {write_sec}");
+            last = pos;
+        }
+        let dbg = format_debug(&s);
+        let us = |ns: u64| (ns / s.phase_blks.max(1)) / 1000;
+        last = 0;
+        for (name, _, ns) in WriteStageSample::INVENTORY {
+            let tok = format!("{name}={}", us(ns(&s.write)));
+            let pos = dbg
+                .find(&tok)
+                .unwrap_or_else(|| panic!("format_debug missing {tok}: {dbg}"));
+            assert!(pos >= last, "{name} out of INVENTORY order in {dbg}");
+            last = pos;
+        }
     }
 
     #[test]
