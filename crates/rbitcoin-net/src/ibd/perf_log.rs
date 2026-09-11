@@ -1772,6 +1772,7 @@ pub(crate) fn log_sample(s: &IbdPerfSample) {
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)] // fixtures set a few fields on Default
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;

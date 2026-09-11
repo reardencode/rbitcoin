@@ -74,7 +74,7 @@ fn store_not_found_is_soft_session_error() {
     )));
     assert!(!net_error_is_store_not_found(&NetError::Timeout));
     assert!(!net_error_is_store_not_found(&NetError::Io(
-        std::io::Error::new(std::io::ErrorKind::Other, "x")
+        std::io::Error::other("x")
     )));
 }
 

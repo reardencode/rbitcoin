@@ -1579,6 +1579,17 @@ pub(crate) async fn tip_follow_next_wake(
     }
 }
 
+/// Parse Core `-seednode` host or host:port using the chain default P2P port.
+fn resolve_seednode(raw: &str, network: Network) -> Result<SocketAddr, String> {
+    if let Ok(a) = raw.parse::<SocketAddr>() {
+        return Ok(a);
+    }
+    let ip: std::net::IpAddr = raw
+        .parse()
+        .map_err(|e| format!("bad seednode address: {e}"))?;
+    Ok(SocketAddr::new(ip, default_port(network)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2364,15 +2375,4 @@ mod tests {
         drop(held);
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
-
-/// Parse Core `-seednode` host or host:port using the chain default P2P port.
-fn resolve_seednode(raw: &str, network: Network) -> Result<SocketAddr, String> {
-    if let Ok(a) = raw.parse::<SocketAddr>() {
-        return Ok(a);
-    }
-    let ip: std::net::IpAddr = raw
-        .parse()
-        .map_err(|e| format!("bad seednode address: {e}"))?;
-    Ok(SocketAddr::new(ip, default_port(network)))
 }

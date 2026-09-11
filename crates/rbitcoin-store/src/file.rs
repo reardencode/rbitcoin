@@ -745,6 +745,107 @@ impl TableFile {
     }
 }
 
+pub const NOFILE_SOFT_TARGET: u64 = 16_384;
+
+/// Process-wide lock for multi-thread table stress tests.
+#[cfg(test)]
+pub(crate) static TEST_MMAP_STRESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub fn ensure_nofile_budget() -> (u64, u64) {
+    ensure_nofile_budget_at_least(NOFILE_SOFT_TARGET)
+}
+
+pub fn ensure_nofile_budget_at_least(want_soft: u64) -> (u64, u64) {
+    #[cfg(unix)]
+    {
+        let mut rlim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) } != 0 {
+            rbitcoin_log::warn!(
+                "store: getrlimit(NOFILE) failed: {}",
+                std::io::Error::last_os_error()
+            );
+            return (0, 0);
+        }
+        let hard = rlim.rlim_max;
+        let soft = rlim.rlim_cur;
+        let hard_cap = if hard == u64::MAX || rlim.rlim_max == libc::RLIM_INFINITY {
+            want_soft.max(soft)
+        } else {
+            hard
+        };
+        let target = want_soft.min(hard_cap).max(soft);
+        if target > soft {
+            rlim.rlim_cur = target as libc::rlim_t;
+            if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) } != 0 {
+                rbitcoin_log::warn!(
+                    "store: setrlimit(NOFILE) soft {soft}→{target} failed (hard={hard}): {}",
+                    std::io::Error::last_os_error()
+                );
+                return (soft, hard);
+            }
+            rbitcoin_log::debug!("store: raised RLIMIT_NOFILE soft {soft}→{target} (hard={hard})");
+            return (target, hard);
+        }
+        if soft < want_soft {
+            rbitcoin_log::warn!(
+                "store: RLIMIT_NOFILE soft={soft} hard={hard} below target {want_soft}; \
+                 sharded heads need ~1k+ FDs — raise hard limit (ulimit -n / LimitNOFILE) \
+                 if open fails with EMFILE"
+            );
+        }
+        (soft, hard)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = want_soft;
+        (0, 0)
+    }
+}
+
+fn try_fallocate(file: &File, len: u64) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        let rc = unsafe { libc::fallocate(file.as_raw_fd(), 0, 0, len as i64) };
+        if rc == 0 {
+            return Ok(());
+        }
+        Err(std::io::Error::last_os_error())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (file, len);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "fallocate unavailable",
+        ))
+    }
+}
+
+fn try_punch_hole(file: &File, offset: u64, len: u64) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        const PUNCH: i32 = 0x02 | 0x01;
+        let rc = unsafe { libc::fallocate(file.as_raw_fd(), PUNCH, offset as i64, len as i64) };
+        if rc == 0 {
+            return Ok(());
+        }
+        Err(std::io::Error::last_os_error())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (file, offset, len);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "punch hole unavailable",
+        ))
+    }
+}
+
 #[cfg(test)]
 mod advise_tests {
     use super::*;
@@ -1243,106 +1344,5 @@ mod advise_tests {
         let (s2, _) = ensure_nofile_budget_at_least(64);
         assert!(s2 >= 64 || cfg!(not(unix)) || soft == 0);
         let _ = std::fs::remove_file(&path);
-    }
-}
-
-pub const NOFILE_SOFT_TARGET: u64 = 16_384;
-
-/// Process-wide lock for multi-thread table stress tests.
-#[cfg(test)]
-pub(crate) static TEST_MMAP_STRESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-pub fn ensure_nofile_budget() -> (u64, u64) {
-    ensure_nofile_budget_at_least(NOFILE_SOFT_TARGET)
-}
-
-pub fn ensure_nofile_budget_at_least(want_soft: u64) -> (u64, u64) {
-    #[cfg(unix)]
-    {
-        let mut rlim = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) } != 0 {
-            rbitcoin_log::warn!(
-                "store: getrlimit(NOFILE) failed: {}",
-                std::io::Error::last_os_error()
-            );
-            return (0, 0);
-        }
-        let hard = rlim.rlim_max;
-        let soft = rlim.rlim_cur;
-        let hard_cap = if hard == u64::MAX || rlim.rlim_max == libc::RLIM_INFINITY {
-            want_soft.max(soft)
-        } else {
-            hard
-        };
-        let target = want_soft.min(hard_cap).max(soft);
-        if target > soft {
-            rlim.rlim_cur = target as libc::rlim_t;
-            if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) } != 0 {
-                rbitcoin_log::warn!(
-                    "store: setrlimit(NOFILE) soft {soft}→{target} failed (hard={hard}): {}",
-                    std::io::Error::last_os_error()
-                );
-                return (soft, hard);
-            }
-            rbitcoin_log::debug!("store: raised RLIMIT_NOFILE soft {soft}→{target} (hard={hard})");
-            return (target, hard);
-        }
-        if soft < want_soft {
-            rbitcoin_log::warn!(
-                "store: RLIMIT_NOFILE soft={soft} hard={hard} below target {want_soft}; \
-                 sharded heads need ~1k+ FDs — raise hard limit (ulimit -n / LimitNOFILE) \
-                 if open fails with EMFILE"
-            );
-        }
-        (soft, hard)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = want_soft;
-        (0, 0)
-    }
-}
-
-fn try_fallocate(file: &File, len: u64) -> std::io::Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::io::AsRawFd;
-        let rc = unsafe { libc::fallocate(file.as_raw_fd(), 0, 0, len as i64) };
-        if rc == 0 {
-            return Ok(());
-        }
-        Err(std::io::Error::last_os_error())
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (file, len);
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "fallocate unavailable",
-        ))
-    }
-}
-
-fn try_punch_hole(file: &File, offset: u64, len: u64) -> std::io::Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::io::AsRawFd;
-        const PUNCH: i32 = 0x02 | 0x01;
-        let rc = unsafe { libc::fallocate(file.as_raw_fd(), PUNCH, offset as i64, len as i64) };
-        if rc == 0 {
-            return Ok(());
-        }
-        Err(std::io::Error::last_os_error())
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (file, offset, len);
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "punch hole unavailable",
-        ))
     }
 }

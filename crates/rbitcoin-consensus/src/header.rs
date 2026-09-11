@@ -136,6 +136,93 @@ pub fn median_time_past_store(query: &Query, height: Height) -> Result<u32, Cons
 
 pub use rbitcoin_primitives::median_time_past_times;
 
+/// Expected `nBits` for a new header at `height`.
+///
+/// `header_time` is the candidate block's timestamp (Core `pblock->GetBlockTime()`).
+pub fn expected_next_bits(
+    query: &Query,
+    params: &ChainParams,
+    height: Height,
+    header_time: u32,
+) -> Result<CompactTarget, ConsensusError> {
+    if height.0 == 0 {
+        let g = crate::params::genesis_block(params);
+        return Ok(g.header.bits);
+    }
+
+    let interval = params.difficulty_adjustment_interval();
+    let prev_height = Height(height.0 - 1);
+    let (_fk, prev_rec) = query
+        .header_at_height(prev_height)?
+        .ok_or(ConsensusError::BadPrev)?;
+    let prev_bits = CompactTarget::from_consensus(prev_rec.bits);
+
+    if !height.0.is_multiple_of(interval) {
+        return min_difficulty_or_walk(
+            query,
+            params,
+            height,
+            prev_bits,
+            prev_rec.timestamp,
+            header_time,
+        );
+    }
+    if params.no_pow_retargeting() {
+        return Ok(prev_bits);
+    }
+
+    let first_height = Height(height.0 - interval);
+    let (_fk, first_rec) = query
+        .header_at_height(first_height)?
+        .ok_or(ConsensusError::BadHeader("missing retarget first header"))?;
+
+    let timespan = prev_rec.timestamp.saturating_sub(first_rec.timestamp) as u64;
+    Ok(CompactTarget::from_next_work_required(
+        prev_bits,
+        timespan,
+        &params.btc,
+    ))
+}
+
+pub(crate) fn min_difficulty_or_walk(
+    query: &Query,
+    params: &ChainParams,
+    height: Height,
+    prev_bits: CompactTarget,
+    prev_time: u32,
+    header_time: u32,
+) -> Result<CompactTarget, ConsensusError> {
+    if !params.allow_min_difficulty_blocks() {
+        return Ok(prev_bits);
+    }
+    let limit = params.pow_limit.to_compact_lossy();
+    let spacing = params.btc.pow_target_spacing;
+    if u64::from(header_time) > u64::from(prev_time).saturating_add(spacing.saturating_mul(2)) {
+        return Ok(limit);
+    }
+    let interval = params.difficulty_adjustment_interval();
+    let mut h = height.0 - 1;
+    let mut bits = prev_bits;
+    while !h.is_multiple_of(interval) && bits == limit {
+        if h == 0 {
+            break;
+        }
+        h -= 1;
+        bits = CompactTarget::from_consensus(header_bits_at(query, Height(h))?);
+    }
+    Ok(bits)
+}
+
+fn header_bits_at(query: &Query, height: Height) -> Result<u32, ConsensusError> {
+    if let Some((_fk, rec)) = query.header_at_height(height)? {
+        return Ok(rec.bits);
+    }
+    if let Some(plan) = query.confirm_parent_cache().get_header_plan(height.0) {
+        return Ok(plan.header_rec.bits);
+    }
+    Err(ConsensusError::BadPrev)
+}
+
 #[cfg(test)]
 mod median_time_past_tests {
     use super::*;
@@ -445,91 +532,4 @@ mod median_time_past_tests {
             check_header_version_and_future_time(&main, Height(bip65), &mh).unwrap();
         });
     }
-}
-
-/// Expected `nBits` for a new header at `height`.
-///
-/// `header_time` is the candidate block's timestamp (Core `pblock->GetBlockTime()`).
-pub fn expected_next_bits(
-    query: &Query,
-    params: &ChainParams,
-    height: Height,
-    header_time: u32,
-) -> Result<CompactTarget, ConsensusError> {
-    if height.0 == 0 {
-        let g = crate::params::genesis_block(params);
-        return Ok(g.header.bits);
-    }
-
-    let interval = params.difficulty_adjustment_interval();
-    let prev_height = Height(height.0 - 1);
-    let (_fk, prev_rec) = query
-        .header_at_height(prev_height)?
-        .ok_or(ConsensusError::BadPrev)?;
-    let prev_bits = CompactTarget::from_consensus(prev_rec.bits);
-
-    if !height.0.is_multiple_of(interval) {
-        return min_difficulty_or_walk(
-            query,
-            params,
-            height,
-            prev_bits,
-            prev_rec.timestamp,
-            header_time,
-        );
-    }
-    if params.no_pow_retargeting() {
-        return Ok(prev_bits);
-    }
-
-    let first_height = Height(height.0 - interval);
-    let (_fk, first_rec) = query
-        .header_at_height(first_height)?
-        .ok_or(ConsensusError::BadHeader("missing retarget first header"))?;
-
-    let timespan = prev_rec.timestamp.saturating_sub(first_rec.timestamp) as u64;
-    Ok(CompactTarget::from_next_work_required(
-        prev_bits,
-        timespan,
-        &params.btc,
-    ))
-}
-
-pub(crate) fn min_difficulty_or_walk(
-    query: &Query,
-    params: &ChainParams,
-    height: Height,
-    prev_bits: CompactTarget,
-    prev_time: u32,
-    header_time: u32,
-) -> Result<CompactTarget, ConsensusError> {
-    if !params.allow_min_difficulty_blocks() {
-        return Ok(prev_bits);
-    }
-    let limit = params.pow_limit.to_compact_lossy();
-    let spacing = params.btc.pow_target_spacing;
-    if u64::from(header_time) > u64::from(prev_time).saturating_add(spacing.saturating_mul(2)) {
-        return Ok(limit);
-    }
-    let interval = params.difficulty_adjustment_interval();
-    let mut h = height.0 - 1;
-    let mut bits = prev_bits;
-    while !h.is_multiple_of(interval) && bits == limit {
-        if h == 0 {
-            break;
-        }
-        h -= 1;
-        bits = CompactTarget::from_consensus(header_bits_at(query, Height(h))?);
-    }
-    Ok(bits)
-}
-
-fn header_bits_at(query: &Query, height: Height) -> Result<u32, ConsensusError> {
-    if let Some((_fk, rec)) = query.header_at_height(height)? {
-        return Ok(rec.bits);
-    }
-    if let Some(plan) = query.confirm_parent_cache().get_header_plan(height.0) {
-        return Ok(plan.header_rec.bits);
-    }
-    Err(ConsensusError::BadPrev)
 }
