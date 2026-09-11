@@ -196,6 +196,13 @@ impl IocpEngine {
         Ok(())
     }
 
+    pub(crate) fn wait_one_cqe_timeout(&mut self, timeout_ms: u32) -> bool {
+        if self.ready.is_empty() {
+            self.poll(timeout_ms);
+        }
+        !self.ready.is_empty()
+    }
+
     pub(crate) fn wait_idle(&mut self) -> Result<(), StoreError> {
         // Caller harvests until pending is empty; one long wait then drain.
         self.poll(100);
