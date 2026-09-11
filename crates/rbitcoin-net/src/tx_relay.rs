@@ -3328,7 +3328,7 @@ mod tests {
         assert!(hub.estimate_fee_btc_per_kb(5) < 0.0);
         assert!(hub.estimate_fee_btc_per_kb(100) < 0.0);
         assert!(hub.spent_outpoints().is_empty());
-        assert!(hub.contains(&Txid::from_byte_array([0u8; 32])) == false);
+        assert!(!hub.contains(&Txid::from_byte_array([0u8; 32])));
         assert!(hub.get_tx(&Txid::from_byte_array([0u8; 32])).is_none());
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&store_dir);

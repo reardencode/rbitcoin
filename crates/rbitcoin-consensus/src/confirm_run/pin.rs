@@ -128,7 +128,7 @@ fn fill_pins(
             }
         }
     }
-    for (id, _need) in parent_vouts {
+    for id in parent_vouts.keys() {
         if plan_by_id.contains_key(id) {
             continue;
         }
@@ -345,7 +345,7 @@ pub(super) fn pin_for_wire_batch(
     let (n_range_new, cold_range_batch_ns) =
         denserels_by_stamped_range(query, parent_pin, &mut still_need, &mut batch_parents)?;
 
-    for (id, _) in &parent_vouts {
+    for id in parent_vouts.keys() {
         if let Some(sr) = parent_pin.spent_range(*id) {
             batch_parents.set_spent_range_only(rbitcoin_primitives::Fk(*id), sr);
         }

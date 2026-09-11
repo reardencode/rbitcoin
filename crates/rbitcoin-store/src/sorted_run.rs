@@ -1103,8 +1103,10 @@ mod tests {
 
     #[test]
     fn catalog_policy_is_durable() {
-        assert!(RunWritePolicy::CATALOG.durable);
-        assert!(RunWritePolicy::CATALOG.drop_cache);
+        const {
+            assert!(RunWritePolicy::CATALOG.durable);
+            assert!(RunWritePolicy::CATALOG.drop_cache);
+        }
     }
 
     #[test]

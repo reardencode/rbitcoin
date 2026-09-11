@@ -46,7 +46,7 @@ impl Query {
     pub fn block_txid_at(&self, height: Height, index: usize) -> Result<[u8; 32], QueryError> {
         let fks = self.block_tx_fks(height)?;
         let fk = *fks.get(index).ok_or(StoreError::NotFound)?;
-        Ok(self.store.txs.body_txid(fk)?)
+        self.store.txs.body_txid(fk)
     }
 
     pub fn merkle_proof(&self, height: Height, txid: &[u8; 32]) -> Result<MerkleProof, QueryError> {

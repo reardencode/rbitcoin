@@ -2478,7 +2478,7 @@ fn known_headers_re_admit_to_ordered_after_tip_drain() {
         &hub,
         PeerEvent::Headers {
             peer: 1,
-            headers: vec![hdr.clone()],
+            headers: vec![hdr],
         },
         &write_next,
         &mut book,
@@ -2525,7 +2525,7 @@ fn known_headers_re_admit_to_ordered_after_tip_drain() {
         &hub,
         PeerEvent::Headers {
             peer: 1,
-            headers: vec![hdr.clone()],
+            headers: vec![hdr],
         },
         &write_next,
         &mut book,

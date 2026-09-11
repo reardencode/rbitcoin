@@ -784,9 +784,6 @@ fn queue_load_send_saturates_wire_and_parents() {
     assert_eq!(c.script_blocks, 2);
     // recv must not underflow
     q.note_script_recv(1, half, half);
-    let c2 = q.content_snap();
-    assert!(c2.script_wire_bytes <= usize::MAX);
-    assert!(c2.script_parents <= usize::MAX);
 }
 
 #[test]

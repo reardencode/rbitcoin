@@ -69,7 +69,7 @@ fn script_ok_append_contiguous_and_gap() {
     assert!(a.append_contiguous(b).is_ok());
     assert_eq!(a.len(), 2);
     let gap = batch_one(13);
-    let err = a.append_contiguous(gap).err().expect("gap");
+    let err = a.append_contiguous(gap).expect_err("gap");
     assert_eq!(err.len(), 1);
     assert_eq!(a.len(), 2);
     // Contiguous continue after gap reject.
@@ -106,7 +106,7 @@ fn script_ok_append_contiguous_and_gap() {
     let mut good = batch_one(60);
     let mut bad = batch_one(61);
     bad.wire_blocks.clear();
-    let err = good.append_contiguous(bad).err().expect("len mismatch");
+    let err = good.append_contiguous(bad).expect_err("len mismatch");
     assert_eq!(err.len(), 1);
 
     // archive_plan merge: Some+Some concatenates; mixed polarity is leftover.
@@ -120,8 +120,7 @@ fn script_ok_append_contiguous_and_gap() {
     only_other.archive_plan = None;
     let err = with_plan
         .append_contiguous(only_other)
-        .err()
-        .expect("Some+None polarity");
+        .expect_err("Some+None polarity");
     assert_eq!(err.len(), 1);
     assert_eq!(with_plan.len(), 2);
     assert!(with_plan.archive_plan.is_some());
@@ -130,8 +129,7 @@ fn script_ok_append_contiguous_and_gap() {
     has.archive_plan = Some(rbitcoin_query::ArchiveWritePlan::empty());
     let err = no_plan
         .append_contiguous(has)
-        .err()
-        .expect("None+Some polarity");
+        .expect_err("None+Some polarity");
     assert_eq!(err.len(), 1);
     assert_eq!(no_plan.len(), 1);
     assert!(no_plan.archive_plan.is_none());

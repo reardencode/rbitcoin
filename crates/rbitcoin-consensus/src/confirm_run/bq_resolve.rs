@@ -755,8 +755,10 @@ mod tests {
         assert_eq!(BQ_RESOLVE_WAVE_MAX_INPUTS, 64_000);
         assert_eq!(BQ_RESOLVE_WAVE_MIN_INPUTS, 8000);
         assert_eq!(BQ_RESOLVE_WAVE_MAX_KEYS, 256_000);
-        assert!(BQ_RESOLVE_WAVE_MAX_BLOCKS >= 144 * 4);
-        assert!(BQ_RESOLVE_WAVE_MAX_INPUTS >= BQ_RESOLVE_WAVE_MIN_INPUTS * 8);
+        const {
+            assert!(BQ_RESOLVE_WAVE_MAX_BLOCKS >= 144 * 4);
+            assert!(BQ_RESOLVE_WAVE_MAX_INPUTS >= BQ_RESOLVE_WAVE_MIN_INPUTS * 8);
+        }
         // Include-overshoot: take the crossing block, then stop.
         assert!(!bq_resolve_wave_stop_after(63_900, 1, 64_000, 1080));
         assert!(bq_resolve_wave_stop_after(64_100, 2, 64_000, 1080));

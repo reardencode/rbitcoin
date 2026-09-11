@@ -2011,7 +2011,7 @@ fn on_ping(
     n: u64,
 ) -> Result<(), NetError> {
     if let Some(s) = session {
-        queue_due_tx_invs(hub, s, &mut follow.from_this_peer, out_tx);
+        queue_due_tx_invs(hub, s, &follow.from_this_peer, out_tx);
         let _ = maybe_queue_local_addr(hub, s, out_tx);
         // Noban headers-timeout reset: Core re-issues getheaders in the
         // same SendMessages turn; hook the ping so the official test
@@ -2241,7 +2241,7 @@ async fn serve_getdata(
             Inventory::Transaction(txid) | Inventory::WitnessTransaction(txid) => {
                 let tx = hub.mempool().and_then(|mp| mp.try_get_tx(txid));
                 if !serve_mempool_getdata(hub, out_tx, session, tx)? && hub.mempool().is_some() {
-                    notfound.push(item.clone());
+                    notfound.push(*item);
                 }
             }
             Inventory::WTx(wtxid) => {
@@ -2259,7 +2259,7 @@ async fn serve_getdata(
                         continue;
                     }
                 }
-                notfound.push(item.clone());
+                notfound.push(*item);
             }
             _ => {}
         }
@@ -2459,7 +2459,7 @@ fn on_headers(
             punish_disconnect(&mut follow.ban_score, session);
             return Ok(());
         }
-        let connecting = header_announcement_connects(hub, &mut follow.pending_headers, prev);
+        let connecting = header_announcement_connects(hub, &follow.pending_headers, prev);
         for hdr in headers.iter().take(n) {
             let hash = hdr.block_hash();
             if let Some(s) = session {
@@ -2482,9 +2482,9 @@ fn on_headers(
             // Core `chain_start.nHeight + headers.size()`. One-header
             // tip announces still accumulate via `follow.pending_headers`
             // (`p2p_headers_sync_with_minchainwork` height=14).
-            let announced_h = announced_headers_height(hub, &mut follow.pending_headers, last);
+            let announced_h = announced_headers_height(hub, &follow.pending_headers, last);
             let noban = session.is_some_and(|s| s.peer_hub().is_some_and(|ph| ph.is_noban()));
-            let work_cmp = announced_work_cmp(hub, &mut follow.pending_headers, last);
+            let work_cmp = announced_work_cmp(hub, &follow.pending_headers, last);
             let our_tip = hub.tip_height().unwrap_or(0);
             if announced_tip_is_hopeless(our_tip, announced_h, work_cmp) && !noban {
                 rbitcoin_log::info!(
@@ -2495,9 +2495,9 @@ fn on_headers(
                 }
                 return Ok(());
             }
-            if !header_path_meets_minwork(hub, &mut follow.pending_headers, last) {
+            if !header_path_meets_minwork(hub, &follow.pending_headers, last) {
                 if noban {
-                    persist_pending_header_path(hub, &mut follow.pending_headers, last);
+                    persist_pending_header_path(hub, &follow.pending_headers, last);
                     rbitcoin_log::info!("{}", synchronizing_blockheaders_log(announced_h));
                 } else {
                     rbitcoin_log::info!("{}", ignoring_low_work_chain_log(announced_h));
@@ -2505,7 +2505,7 @@ fn on_headers(
                 // Core: do not download bodies until the chain meets
                 // `-minimumchainwork` (`p2p_headers_sync_with_minchainwork`).
             } else {
-                persist_pending_header_path(hub, &mut follow.pending_headers, last);
+                persist_pending_header_path(hub, &follow.pending_headers, last);
                 rbitcoin_log::info!("{}", synchronizing_blockheaders_log(announced_h));
                 let mut want = fetchable_header_path_bodies(
                     hub,
@@ -2577,7 +2577,7 @@ async fn on_block(
     follow.pending_cmpct.remove(&hash);
     follow.requested_blocks.remove(&hash);
     follow.pending_headers.entry(hash).or_insert(block.header);
-    if !any_header_path_meets_minwork(hub, &mut follow.pending_headers, hash) {
+    if !any_header_path_meets_minwork(hub, &follow.pending_headers, hash) {
         follow.pending_blocks.insert(hash, block.clone());
         return Ok(());
     }
@@ -2655,7 +2655,7 @@ async fn on_cmpctblock(
         let _ = queue_getheaders(out_tx, hub, session, true, None);
     }
     follow.pending_headers.entry(hash).or_insert(hsi.header);
-    if !any_header_path_meets_minwork(hub, &mut follow.pending_headers, hash) {
+    if !any_header_path_meets_minwork(hub, &follow.pending_headers, hash) {
         // Below -minimumchainwork: keep header, do not reconstruct/accept.
     } else {
         let mut ancestors: Vec<BlockHash> = fetchable_header_path_bodies(

@@ -452,14 +452,12 @@ fn collect_height_band(
         return out;
     }
     let hi = hi.min(st.max_ordered_height.max(lo));
-    let mut walked = 0usize;
     let mut prefix = lo;
     let mut tracking = true;
-    for ht in lo..=hi {
+    for (walked, ht) in (lo..=hi).enumerate() {
         if out.len() >= cap || walked >= FAR_SCAN_BUDGET {
             break;
         }
-        walked += 1;
         let need = need_hash_at(st, hub, ht);
         if tracking {
             if need.is_none() && densify_prefix_filled(st, hub, ht) {
@@ -2392,7 +2390,7 @@ mod tests {
         }
 
         assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
-        assert!(st.inflight.len() > 0);
+        assert!(!st.inflight.is_empty());
         assert!(stats.assign_issued.load(Ordering::Relaxed) > 0);
 
         for ht in 20u32..20 + cfg.window as u32 {
@@ -2417,7 +2415,7 @@ mod tests {
             inflight_add_peer(&mut st.inflight, hash, 0);
         }
         assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
-        assert!(st.slots[1].in_flight.len() > 0 || st.inflight.len() > cfg.per_peer);
+        assert!(!st.slots[1].in_flight.is_empty() || st.inflight.len() > cfg.per_peer);
 
         // Claim-ready: pending **with** body-queue wire (not Class A alone).
         // Zombie pending without BQ is a tip fetch hole (cover_tip_holes re-gets).

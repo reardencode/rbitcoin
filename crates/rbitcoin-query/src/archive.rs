@@ -898,7 +898,7 @@ impl Query {
         if inp.create_fk.is_null() {
             return Err(StoreError::Corrupt("input missing create_fk for prev_txid"));
         }
-        Ok(self.store.txs.body_txid(inp.create_fk)?)
+        self.store.txs.body_txid(inp.create_fk)
     }
 }
 

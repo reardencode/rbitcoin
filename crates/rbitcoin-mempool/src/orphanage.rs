@@ -283,8 +283,10 @@ mod tests {
         assert_eq!(ORPHAN_RESERVED_WEIGHT_PER_PEER, 404_000);
         assert_eq!(DEFAULT_ORPHAN_MAX_WEIGHT, 404_000 * 25);
         // ~10 MiB class weight budget for unique orphans.
-        assert!(DEFAULT_ORPHAN_MAX_WEIGHT > 10_000_000);
-        assert!(DEFAULT_ORPHAN_MAX_WEIGHT < 11_000_000);
+        const {
+            assert!(DEFAULT_ORPHAN_MAX_WEIGHT > 10_000_000);
+            assert!(DEFAULT_ORPHAN_MAX_WEIGHT < 11_000_000);
+        }
     }
 
     #[test]

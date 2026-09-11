@@ -35,7 +35,7 @@
 //!   on steal workers.
 //! - **write** = Class A + ensure + structural + class_c + spend + tweaks
 //!   + `pins=` / `head_sub=` / `drain_join=` / `dequeue=`.
-//!   `other=` is write-thread work minus that inventory.
+//!     `other=` is write-thread work minus that inventory.
 //!
 //! **Inventory rule:** new work on lookup / load / scripts / write (or a sidecar
 //! the write thread joins) must add a named token here in the **same commit**.

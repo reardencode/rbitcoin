@@ -2653,7 +2653,7 @@ fn handle_peer_frame_mempool_tx_and_inv_paths() {
         .unwrap();
         match out_rx.try_recv().unwrap().expect_msg() {
             NetworkMessage::GetData(v) => {
-                assert!(v.len() >= 1);
+                assert!(!v.is_empty());
             }
             other => panic!("expected GetData for unknown txs, got {other:?}"),
         }
@@ -3642,7 +3642,9 @@ fn p2p_side_chain_reorgs_via_held_bodies() {
     );
     assert_eq!(hub.tip_hash().unwrap(), long[3].block_hash());
     assert!(hub.held_body(&long[3].block_hash()).is_none());
-    assert!(MAX_PENDING_BLOCKS_FOR_TEST >= 128);
+    const {
+        assert!(MAX_PENDING_BLOCKS_FOR_TEST >= 128);
+    }
     let _ = std::fs::remove_dir_all(dir);
 }
 

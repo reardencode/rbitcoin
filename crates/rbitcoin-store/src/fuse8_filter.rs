@@ -336,8 +336,8 @@ mod tests {
         m[16] = 4;
         m[24] = 8;
         let k = fuse_key_from_mixed(&m);
-        assert_eq!(k, 1u64 ^ 2u64 << 0 ^ 4u64 << 0 ^ 8u64); // LE quarters xor
-                                                            // All-zero → zero.
+        assert_eq!(k, 1u64 ^ 2u64 ^ 4u64 ^ 8u64); // LE quarters xor
+                                                  // All-zero → zero.
         assert_eq!(fuse_key_from_mixed(&[0u8; 32]), 0);
     }
 

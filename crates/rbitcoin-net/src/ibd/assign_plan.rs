@@ -130,10 +130,7 @@ pub(crate) fn should_enqueue_header(
     if in_ordered || inflight || pending || rejected || has_block {
         return false;
     }
-    match (height, tip_h) {
-        (Some(ht), Some(tip)) if ht <= tip => false,
-        _ => true,
-    }
+    !matches!((height, tip_h), (Some(ht), Some(tip)) if ht <= tip)
 }
 
 #[cfg(test)]

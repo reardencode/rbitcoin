@@ -46,10 +46,10 @@ pub(crate) fn rehydrate_block_queue_into_confirm(
         // Heights above tip always keep wire — even if has_block/known looks set
         // (stale RAM or Class A ahead of tip must not erase confirm payload).
         // No tip yet → keep every height (including 0).
-        let at_or_below_tip = match tip_opt {
-            Some(tip) if qb.height != u32::MAX && qb.height <= tip => true,
-            _ => false,
-        };
+        let at_or_below_tip = matches!(
+            tip_opt,
+            Some(tip) if qb.height != u32::MAX && qb.height <= tip
+        );
         if at_or_below_tip {
             let _ = hub.query.block_queue_dequeue_height(qb.height);
             dropped_done = dropped_done.saturating_add(1);

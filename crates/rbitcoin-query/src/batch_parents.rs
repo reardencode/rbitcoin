@@ -1738,7 +1738,7 @@ mod tests {
             None,
             Vec::new(),
         );
-        let _ = bp.get_parent_txout_parts(Fk(8), 0, |_, _, _| ()).unwrap();
+        bp.get_parent_txout_parts(Fk(8), 0, |_, _, _| ()).unwrap();
         assert_eq!(bp.sticky_outs.borrow().as_ref().map(|(id, _)| *id), Some(8));
     }
 

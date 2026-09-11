@@ -2122,7 +2122,7 @@ fn reconstruct_and_connect_error_arms() {
 
     // tip_header_fk empty chain.
     assert!(q.tip_header_fk().unwrap().is_none());
-    assert!(q.locator_hashes().unwrap().len() >= 1);
+    assert!(!q.locator_hashes().unwrap().is_empty());
     assert!(q
         .headers_after_locator(&[], BlockHash::from_byte_array([0; 32]), 5)
         .unwrap()

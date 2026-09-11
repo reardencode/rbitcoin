@@ -2108,11 +2108,8 @@ impl ChainHub {
 
     fn disconnect_to(&self, keep_height: u32) -> Result<(), NetError> {
         let mut disconnected_txs: Vec<Transaction> = Vec::new();
-        loop {
-            let tip = match self.query.tip_height() {
-                Some(h) => h.0,
-                None => break,
-            };
+        while let Some(h) = self.query.tip_height() {
+            let tip = h.0;
             if tip <= keep_height {
                 break;
             }
@@ -3236,8 +3233,7 @@ mod tests {
 
         // Header then accept (confirm is sole Class A).
         hub.ensure_header(&b1.header).unwrap();
-        let fk = hub.ensure_header_fk(&b1.header).unwrap();
-        assert!(fk.0 > 0 || fk.0 == 0); // Fk may be 0 on some layouts
+        hub.ensure_header_fk(&b1.header).unwrap();
         assert!(hub.confirm_wire_load_phase(&[]).unwrap().is_none());
         let acc = hub.accept_block(b1.clone()).unwrap();
         assert!(matches!(acc, AcceptOutcome::Accepted { height: 1 }));
@@ -4168,10 +4164,9 @@ mod tests {
             branch.push(b);
         }
         assert_eq!(branch.len(), 99);
-        assert!(
-            crate::peer::MAX_PENDING_BLOCKS_FOR_TEST >= 99,
-            "pending cap must allow 99-block reorg assembly"
-        );
+        const {
+            assert!(crate::peer::MAX_PENDING_BLOCKS_FOR_TEST >= 99);
+        }
         let out = hub.accept_branch(&branch).unwrap();
         assert!(
             matches!(out, AcceptOutcome::Accepted { height: 100 }),
