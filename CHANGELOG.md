@@ -21,22 +21,21 @@ before 1.0).
 ### Fixed
 
 - **IBD session-fault resume:** after Class C, a uring session fault on spend
-  annotate or `tx.head` drain retries annotate+drain instead of treating
-  `height_of_hash` / `has_block` as write-finished. Load recover after
-  `note_lookup_ok` rebuilds create-fk HWM from durable Class A (`clear_all`)
-  so retried plans are not stamped past an abandoned pack.
+  annotate or `tx.head` drain finishes annotate+drain on the write thread
+  (tip `connect_at` retries `finish_post_commit`; IBD does the same in place
+  when every hash is connected). Load recover after `note_lookup_ok` rebuilds
+  create-fk HWM from durable Class A (`clear_all`) so retried plans are not
+  stamped past an abandoned pack.
 - **1p1c child-fail rollback:** rolling back a below-min-relay parent also
   evicts mempool txs that spend it (a concurrent spender in that window
   cannot stay).
-- **`DrainOnDrop`:** a drain-guard hard cap poisons like session `Drop`
-  (no `abort`). Explicit `drain_all` stays fail-closed.
 - **RPC `maxfeerate`:** prevout-sum overflow is over-cap (reject), not
   fail-open. Missing prevouts still skip the cap so `accept_tx` can say
   missing-inputs.
 - **IBD io_uring drain stall:** `drain_all` no longer returns after 5 s with
   leftover SQEs (that freed in-flight buffers). Every TLS session waits while
   CQEs arrive; a 120 s zero-completion stall aborts explicit drain (session
-  `Drop` / `DrainOnDrop` do not abort). Write/lookup/load/scripts and tip-connect recover once
+  `Drop` does not abort). Write/lookup/load/scripts and tip-connect recover once
   per 1000 heights (credit only; Class C leftover waits for open repair)
   instead of a 19h warn loop. Restart with `RBITCOIN_IO=pread` if completions
   cannot complete. [`OPERATOR.md`](OPERATOR.md)

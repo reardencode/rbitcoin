@@ -153,8 +153,8 @@ pub use confirm_run::{
     confirm_bq_resolve_wave_capped, confirm_scripts_phase, confirm_wire_load_from_plan,
     confirm_wire_load_phase, confirm_wire_load_phase_pipelined, confirm_wire_lookup_stamp,
     confirm_wire_run, confirm_wire_run_preverified, confirm_write_phase, drive_script_waves_with,
-    take_wave_items_for_load, ConfirmLoadOutcome, ConfirmScriptOutcome, LoadedBatch,
-    PlanStampOutcome, ScriptOkBatch, ScriptPreverified, WireLoadPipeline,
+    finish_post_commit_hashes, take_wave_items_for_load, ConfirmLoadOutcome, ConfirmScriptOutcome,
+    LoadedBatch, PlanStampOutcome, ScriptOkBatch, ScriptPreverified, WireLoadPipeline,
     BQ_RESOLVE_WAVE_MAX_BLOCKS, BQ_RESOLVE_WAVE_MAX_INPUTS,
 };
 
@@ -205,7 +205,7 @@ pub fn accept_and_connect_block_preverified(
                 .get_header_by_hash(&hash)
                 .map_err(ConsensusError::from)?
             {
-                confirm_run::finish_post_commit(query, &hash)?;
+                confirm_run::finish_post_commit(query, height.0, &hash)?;
                 return Ok(fk);
             }
         }

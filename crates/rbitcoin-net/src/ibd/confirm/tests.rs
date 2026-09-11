@@ -1346,25 +1346,117 @@ fn lookup_ready_hash_none_when_missing() {
     assert_eq!(super::lookup_ready_hash(&feed, 10), Some(h));
 }
 
+/// Post-Class-C session fault: write thread finishes annotate in place
+/// (stale-plan would drop; requeue cannot). Then BQ dequeue like `Ok`.
 #[test]
-fn confirm_write_session_fault_recovers_even_when_has_block() {
-    use super::{confirm_write_err_action, ConfirmWriteErrAction};
-    assert_eq!(
-        confirm_write_err_action(true, true),
-        ConfirmWriteErrAction::UringRecover
+fn write_session_fault_after_class_c_finishes_annotate_in_place() {
+    use super::{finish_connected_write_after_session_fault, write_batch_is_stale};
+    use bitcoin::hashes::Hash;
+    use bitcoin::BlockHash;
+    use rbitcoin_primitives::{Fk, Height};
+    use rbitcoin_query::testutil::FixtureChain;
+    use rbitcoin_query::TxApply;
+    use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
+
+    let (_dir, hub) = crate::chain::tiny_regtest_hub_labeled("write-fault-c");
+    hub.query.set_spend_index(false);
+
+    let h0 = HeaderRecord {
+        prev_fk: Fk::NULL,
+        version: 1,
+        timestamp: 1,
+        bits: 0x207fffff,
+        nonce: 0,
+        merkle_root: [0xab; 32],
+        hash: [0xab; 32],
+    };
+    let mut txid0 = [0u8; 32];
+    txid0[31] = 0xcb;
+    let ta0 = TxApply {
+        tx: TxRecord {
+            txid: txid0,
+            version: 1,
+            locktime: 0,
+            input_start_fk: Fk::NULL,
+            input_count: 1,
+            output_start_fk: Fk::NULL,
+            output_count: 1,
+        },
+        inputs: vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])],
+        outputs: vec![OutputRecord::unspent(50_0000_0000, vec![0x51])],
+    };
+    let hfk0 = hub.query.connect_block(Height(0), &h0, &[ta0]).unwrap();
+    let create_fk = hub.query.block_tx_fks(Height(0)).unwrap()[0];
+
+    let hash1 = rbitcoin_store::block_header_hash(1, &h0.hash, &[0x11; 32], 2, 0x207fffff, 1);
+    let h1 = HeaderRecord {
+        prev_fk: hfk0,
+        version: 1,
+        timestamp: 2,
+        bits: 0x207fffff,
+        nonce: 1,
+        merkle_root: [0x11; 32],
+        hash: hash1,
+    };
+    let mut spend_txid = [0u8; 32];
+    spend_txid[0] = 0x11;
+    spend_txid[31] = 0xcd;
+    let ta1 = TxApply {
+        tx: TxRecord {
+            txid: spend_txid,
+            version: 1,
+            locktime: 0,
+            input_start_fk: Fk::NULL,
+            input_count: 1,
+            output_start_fk: Fk::NULL,
+            output_count: 1,
+        },
+        inputs: vec![InputRecord {
+            prev_txid: txid0,
+            create_fk,
+            prev_index: 0,
+            sequence: u32::MAX,
+            script_sig: vec![],
+            witness: vec![],
+        }],
+        outputs: vec![OutputRecord::unspent(49_0000_0000, vec![0x51])],
+    };
+    hub.query.connect_block(Height(1), &h1, &[ta1]).unwrap();
+    let spend_fk = hub.query.block_tx_fks(Height(1)).unwrap()[0];
+    let (multi, field) = hub
+        .query
+        .store()
+        .txs
+        .get_output_spender_meta(create_fk, 0)
+        .unwrap();
+    assert!(!multi);
+    assert!(field.is_null());
+    hub.query.set_spend_index(true);
+
+    assert!(
+        write_batch_is_stale(&hub, 1),
+        "tip already at height 1; requeue/stale would drop this batch"
     );
-    assert_eq!(
-        confirm_write_err_action(true, false),
-        ConfirmWriteErrAction::UringRecover
-    );
-    assert_eq!(
-        confirm_write_err_action(false, true),
-        ConfirmWriteErrAction::AlreadyCommitted
-    );
-    assert_eq!(
-        confirm_write_err_action(false, false),
-        ConfirmWriteErrAction::Reject
-    );
+    assert!(hub.is_connected(&BlockHash::from_byte_array(hash1)));
+
+    let hfk1 = hub.query.get_header_by_hash(&hash1).unwrap().unwrap().0;
+    hub.query
+        .block_queue_offer(1, hash1, hfk1.0, &[0u8; 80])
+        .unwrap();
+    assert!(hub.query.block_queue_has_height(1));
+
+    finish_connected_write_after_session_fault(&hub.query, &[(1, hash1)]).expect("in-place finish");
+
+    let (multi2, field2) = hub
+        .query
+        .store()
+        .txs
+        .get_output_spender_meta(create_fk, 0)
+        .unwrap();
+    assert!(!multi2);
+    assert_eq!(field2, spend_fk);
+    assert_eq!(hub.query.block_queue_dequeue_height(1).unwrap(), 1);
+    assert!(!hub.query.block_queue_has_height(1));
 }
 
 #[test]
