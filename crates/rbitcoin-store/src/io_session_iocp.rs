@@ -189,13 +189,6 @@ impl IocpEngine {
         self.ready.drain(..).collect()
     }
 
-    pub(crate) fn wait_one_cqe(&mut self) -> Result<(), StoreError> {
-        if self.ready.is_empty() {
-            self.poll(u32::MAX);
-        }
-        Ok(())
-    }
-
     pub(crate) fn wait_one_cqe_timeout(&mut self, timeout_ms: u32) -> bool {
         if self.ready.is_empty() {
             self.poll(timeout_ms);

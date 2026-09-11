@@ -49,6 +49,7 @@ enum WaitOneWindow {
     Ready,
     TimedOut,
     Idle,
+    #[cfg(target_os = "linux")]
     Enter(StoreError),
 }
 
@@ -512,6 +513,7 @@ impl UringSession {
                     self.poisoned = true;
                     return Err(StoreError::Corrupt("invariant: io_uring wait timeout"));
                 }
+                #[cfg(target_os = "linux")]
                 WaitOneWindow::Enter(err) => {
                     self.poisoned = true;
                     return Err(err);
