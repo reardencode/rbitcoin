@@ -58,8 +58,8 @@ pub fn verify_tx_scripts_detached_forks(
 
 pub use block::{
     bip34_height_script, bip68_active_for_tx, block_has_witness, block_subsidy, check_block_wire,
-    is_final_tx, sequence_locks_satisfied, tx_gbt_sigops, validate_block_connect,
-    validate_block_structure, witness_commitment_script, ValidationContext,
+    is_final_tx, sequence_locks_satisfied, tx_gbt_sigops, validate_block_structure,
+    witness_commitment_script, ValidationContext,
 };
 pub(crate) use block::{validate_block_structure_hashed, TxPrecompute};
 pub use clock::{with_now, NodeClock};
@@ -165,8 +165,8 @@ pub use script_pool::unpark_script_publisher;
 ///
 /// **Same path as IBD confirm:** structure + header checks, then Class A
 /// archive, then [`confirm_wire_run`] (lookup → load pin denserels → scripts →
-/// structural → Class C → abs spend annotate). No empty-pin
-/// [`validate_block_connect`] and no separate `put_spend_batch_by_create`.
+/// structural → Class C → abs spend annotate). No separate
+/// `put_spend_batch_by_create`.
 ///
 /// Idempotent when `height` is already confirmed for this block hash.
 /// Full script verify (no mempool skip) — use

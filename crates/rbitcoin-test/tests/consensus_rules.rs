@@ -6,8 +6,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::{Amount, BlockHash, CompactTarget};
 use rbitcoin_consensus::{
     accept_and_connect_block, block_subsidy, expected_next_bits, genesis_block, median_time_past,
-    validate_block_connect, validate_header, ChainParams, Checkpoint, ConsensusError, Milestone,
-    ValidationContext,
+    validate_header, ChainParams, Checkpoint, ConsensusError, Milestone,
 };
 use rbitcoin_primitives::Height;
 use rbitcoin_query::Query;
@@ -330,13 +329,12 @@ fn c1_non_coinbase_empty_outputs_rejected() {
     };
     time += 600;
     let bad = mine_regtest_block(tip, time, h + 1, vec![empty_out]);
-    let ctx = ValidationContext::at(&params, Height(h + 1), Milestone::NONE);
-    // Structure may pass; connect must reject.
-    let err = validate_block_connect(&q, &bad, &ctx, None).unwrap_err();
+    let err = accept_and_connect_block(&q, &params, Height(h + 1), &bad, Milestone::NONE);
     assert!(
-        matches!(err, ConsensusError::BadTx(s) if s.contains("no outputs")),
+        matches!(err, Err(ConsensusError::BadTx(s)) if s.contains("no outputs")),
         "{err:?}"
     );
+    assert_eq!(q.tip_height(), Some(Height(h)));
 }
 
 /// Core requires topological order: a same-block spend may only reference an

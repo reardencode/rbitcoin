@@ -1011,123 +1011,6 @@ fn bip34_wrong_push_encoding_rejected_after_activation() {
     assert_bad_block(err, "bip34");
 }
 
-/// Full assemble mode: spentness probe + maturity (legacy path).
-#[test]
-fn assemble_full_mode_spend_and_bip68() {
-    use super::{assemble_block_prevouts_mode, AssembleMode};
-    use crate::accept_and_connect_block;
-    use rbitcoin_query::{BatchParents, OutPointSet, SpendEdges};
-    let (path, q) = rbitcoin_query::testutil::tiny_query_labeled("assemble-full");
-    let params = ChainParams::regtest();
-    let ms = Milestone::NONE;
-    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
-    accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, ms).unwrap();
-    let mut tip = genesis.block_hash();
-    let mut tip_time = genesis.header.time;
-    let mut last_cb = genesis.txdata[0].compute_txid();
-    for h in 1u32..=3 {
-        let bits = CompactTarget::from_consensus(0x207f_ffff);
-        let mut block = Block {
-            header: Header {
-                version: Version::from_consensus(4),
-                prev_blockhash: tip,
-                merkle_root: TxMerkleNode::from_byte_array([0; 32]),
-                time: tip_time + 600,
-                bits,
-                nonce: 0,
-            },
-            txdata: vec![coinbase(h)],
-        };
-        block.header.merkle_root = block.compute_merkle_root().unwrap();
-        let target = bitcoin::Target::from_compact(bits);
-        for nonce in 0..u32::MAX {
-            block.header.nonce = nonce;
-            if block.header.validate_pow(target).is_ok() {
-                break;
-            }
-        }
-        last_cb = block.txdata[0].compute_txid();
-        accept_and_connect_block(&q, &params, Height(h), &block, ms).unwrap();
-        tip = block.block_hash();
-        tip_time = block.header.time;
-    }
-    let spend = Transaction {
-        version: TxVersion::TWO,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint {
-                txid: last_cb,
-                vout: 0,
-            },
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        output: vec![TxOut {
-            value: Amount::from_sat(50_0000_0000 - 1000),
-            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
-        }],
-    };
-    let bits = CompactTarget::from_consensus(0x207f_ffff);
-    let mut block = Block {
-        header: Header {
-            version: Version::from_consensus(4),
-            prev_blockhash: tip,
-            merkle_root: TxMerkleNode::from_byte_array([0; 32]),
-            time: tip_time + 600,
-            bits,
-            nonce: 0,
-        },
-        txdata: vec![coinbase(4), spend],
-    };
-    block.header.merkle_root = block.compute_merkle_root().unwrap();
-    let target = bitcoin::Target::from_compact(bits);
-    for nonce in 0..u32::MAX {
-        block.header.nonce = nonce;
-        if block.header.validate_pow(target).is_ok() {
-            break;
-        }
-    }
-    let ctx = ctx_h(4);
-    let parents = BatchParents::new();
-    let thin = SpendEdges::default();
-    let mut spent = OutPointSet::default();
-    let mut creates = super::PendingCreates::default();
-    let create_txids: Vec<[u8; 32]> = block
-        .txdata
-        .iter()
-        .map(|t| t.compute_txid().to_byte_array())
-        .collect();
-    let bh = block.header.block_hash().to_byte_array();
-    let r = assemble_block_prevouts_mode(
-        &q,
-        &block,
-        &ctx,
-        None,
-        &mut spent,
-        &mut creates,
-        AssembleMode::Full,
-        &parents,
-        &thin,
-        &create_txids,
-        0,
-        &bh,
-        bip16_active_from_prev_mtp(ctx.params, ctx.height.0, &bh, 0),
-        None,
-        None,
-    );
-    match r {
-        Err(ConsensusError::BadTx("coinbase immature")) => {}
-        Err(e) => {
-            panic!("Full assemble of a height-3 coinbase at height 4 must reject immature, got {e}")
-        }
-        Ok(_) => {
-            panic!("Full assemble of a height-3 coinbase at height 4 must reject immature, got Ok")
-        }
-    }
-    let _ = std::fs::remove_dir_all(&path);
-}
-
 #[test]
 fn assemble_rejects_empty_and_fk_mismatch() {
     use super::assemble_block_prevouts;
@@ -1503,7 +1386,6 @@ fn n1_assemble_cold_why_reasons() {
     };
     let empty_block = block_with(vec![coinbase(4)]);
     let txid_index = super::TxidMap::<usize>::default();
-    let mut cb_cache: rbitcoin_query::FkMap<Option<u32>> = rbitcoin_query::FkMap::default();
 
     // Thread-local N1 counters (process-global atomics race under parallel cargo test).
     let _ = confirm_phase_stats::sample_tl_assemble_cold_why_and_reset();
@@ -1521,17 +1403,13 @@ fn n1_assemble_cold_why_reasons() {
     {
         let parents = BatchParents::new();
         let err = resolve_prevout(
-            &q,
             &empty_block,
             op,
             &dummy_in,
             None,
             &txid_index,
             0,
-            &mut cb_cache,
             &parents,
-            4,
-            false,
             false,
             false,
             true,
@@ -1546,17 +1424,13 @@ fn n1_assemble_cold_why_reasons() {
     {
         let parents = BatchParents::new();
         let err = resolve_prevout(
-            &q,
             &empty_block,
             op,
             &dummy_in,
             Some(last_cb_fk),
             &txid_index,
             0,
-            &mut cb_cache,
             &parents,
-            4,
-            false,
             false,
             false,
             true,
@@ -1581,17 +1455,13 @@ fn n1_assemble_cold_why_reasons() {
             parent_txid
         );
         resolve_prevout(
-            &q,
             &empty_block,
             op,
             &dummy_in,
             Some(last_cb_fk),
             &txid_index,
             0,
-            &mut cb_cache,
             &parents,
-            4,
-            false,
             false,
             false,
             true,
@@ -1613,17 +1483,13 @@ fn n1_assemble_cold_why_reasons() {
         let out = OutputRecord::unspent(50_0000_0000, vec![0x51]);
         parents.put_resolved(last_cb_fk, rec, &[(0, out)], &[0], Some(true));
         let err = match resolve_prevout(
-            &q,
             &empty_block,
             op,
             &dummy_in,
             Some(last_cb_fk),
             &txid_index,
             0,
-            &mut cb_cache,
             &parents,
-            4,
-            false,
             false,
             false,
             true,
@@ -1653,17 +1519,13 @@ fn n1_assemble_cold_why_reasons() {
             .get_parent_txout_parts(last_cb_fk, 0, |_, _, _| ())
             .is_none());
         let err = match resolve_prevout(
-            &q,
             &empty_block,
             op,
             &dummy_in,
             Some(last_cb_fk),
             &txid_index,
             0,
-            &mut cb_cache,
             &parents,
-            4,
-            false,
             false,
             false,
             true,

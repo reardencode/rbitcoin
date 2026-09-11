@@ -156,7 +156,7 @@ Pinned `bitcoin` resolves to **0.32.102** (`Cargo.toml` says `0.32.101`; `docs/r
 | C-03 | Thin / test-only pub APIs | `check_block_wire` (only `structure_rule_tests.rs:38,42`); `confirm_bq_resolve_wave` (only `bq_resolve.rs` tests `:883,:987`); `prepare_block_for_archive_new` (one prod caller + one test); `validate_block_structure_precomputed` (one caller); `verify_tx_scripts_detached_forks` (one caller); `commit_class_a_block`/`_run` (only `rbitcoin-test`, see Q-06). Variant explosion in the `confirm_run` re-export list (`lib.rs:604–615`): `_capped`/`_with_ids`, `_phase`/`_phase_async`/`_pipelined`/`_from_plan`, `drive_script_waves`/`_with`, `confirm_wire_run`/`_preverified`. | Un-export/inline; keep one entry per stage with an options struct where two variants are both live. | ~60–120 | Low; `check_block_wire` may want `pub(crate)` for fuzz. | high |
 | C-04 | Typed script fast paths (`p2pkh`/`p2wpkh`/`p2wsh`/`p2tr`/`nested`) | Single dispatch (`script/mod.rs:86–168`); P2PKH bare fallback only on scriptSig shape error (`:135–140`, Core parity). Prod sizes small; tests dominate (`p2tr` 159/934, `nested` 157/688). | **Keep.** Collapsing to interpreter-only is a second consensus rewrite. Optional: document host A/B. | 0 | HIGH if removed. | high (not excess) |
 | C-05 | Duplicated SPK template predicates | `script/classify.rs:57–80` vs `silent_payments.rs:473–508` vs `block/mod.rs:389–398` (sigops) vs `core_vectors.rs:513`. | One `spk` helper set used by silent-payments and sigops. | ~35–50 | BIP352 eligibility must stay exact. | high |
-| C-06 | `AssembleMode::Full` + `validate_block_connect` dual assemble | `block/mod.rs:682–689, 1253–1375`; production confirm is `Optimistic` (`:1122`); `validate_block_connect` (`:615–680`) used by `rbitcoin-test` `consensus_rules`/`core_analogs` only. | Drive those tests through Optimistic + `structural_validate_spends`; delete `Full`. | ~80–150 | **HIGH** — maturity/BIP68 timing; needs red/green on the consensus_rules suite. | medium |
+| C-06 | `AssembleMode::Full` + `validate_block_connect` dual assemble  **done (this PR)** | Optimistic assemble + `structural_validate_spends` only. Connect tests use `accept_and_connect_block`. | — | — | Immature pin is `c5_immature_coinbase_spend_rejected`. | high |
 | C-07 | `confirm_run` vs `ibd/confirm` | Layered (stages vs threads/queues). `bq_resolve.rs` ≈431 prod / 1,053 test; one TipOnly wave. | none for architecture. | 0 | — | high (not excess) |
 | C-08 | `script_pool.rs` | ≈443 prod / 752 test; 11 `unsafe`; Won't-fix says no coordinators. | Keep; trim over-covered steal/unpark permutation tests after LCOV check. | 0 prod; ~100–300 test | HIGH if swapped for rayon. | high |
 | C-09 | `silent_payments.rs` | ≈624 prod / 777 test; crypto here, index in store, serve in query. | C-05 only. | ~30–40 | — | high |
@@ -344,7 +344,7 @@ Suggested order (each a worktree PR, Red→Green→Refactor per `docs/how-we-pla
 6. **X-07** move `block_diff` + fuzz encoders to `fuzz/` (check coverage scope first).
 7. **X-05** node config (write the flag-matrix test first).
 8. **X-01 step 2–3** instance-owned stats + table-driven `perf_log`.
-9. **Product-gated** (need a SCHEMA/COMPAT decision, listed not scheduled): S-04 fuse v1 refuse, S-12 flat idx refuse, SH-06 Shared body refuse, SH-07 Paged refuse **done (#422)**. S-15 Esplora `vin` omit **done (this PR)**. Remaining: Q-06 store planner as test support, C-06 `AssembleMode::Full`, A-02/A-20/D-02/D-03 doc honesty (Q-59). A-01 and S-13 landed in #397.
+9. **Product-gated** (need a SCHEMA/COMPAT decision, listed not scheduled): S-04/S-12/SH-06/SH-07 leftover index refuse **done (#422)**. S-15 Esplora `vin` omit **done (#423)**. C-06 Full assemble **done (this PR)**. Remaining: Q-06 store planner as test support, A-02/A-20/D-02/D-03 doc honesty (Q-59). A-01 and S-13 landed in #397.
 10. **X-08** re-enable clippy lints in batches once the above lands.
 
 ---
@@ -415,7 +415,8 @@ are the PRs that landed the work. This file stays untracked.
 | **X-05 / D-01** | CLI `--key[=value]` and conf share `apply_kv` (conf then CLI). `CliAccum` copy gone. `DatadirOpts::path()`. `--smoke`/`--help`/`--log-level` CLI-only. Explicit `--milestone 0` sticks (`operator_config_from_args`). | [#418](https://github.com/reardencode/rbitcoin/pull/418) merged `f7a38b60` | — |
 | **X-01 steps 2–3 / I-06** | Confirm/query/IBD window meters on `Query` as `ConfirmStats`; note via `&`; `perf_log::sample` take-and-reset that instance. `exclusive::with` twins gone. Write-stage inventory is one name+extractor table. Live lookup/load/scripts/write tokens stay. Store head-resolve window meters remain process-global. | [#420](https://github.com/reardencode/rbitcoin/pull/420) | Do not merge unless asked. |
 | **S-04 / S-12 / SH-06 / SH-07** | Leftover **index** layouts refuse on open: fuse8 v1, flat `*.idx.meta`, Shared file `scripthash.body`, pack8 Paged (mode 10). One-line wipe/rebuild; Class A kept. No always-probe / flat rename / Shared read. | [#422](https://github.com/reardencode/rbitcoin/pull/422) | — |
-| **S-15** | `PointRecord.spending_input_index` and ignored `put_spend` input-index arg deleted. Esplora `/outspend(s)` omit `vin`. COMPAT documents explorer gap. | this PR | Cite GitHub number after merge. |
+| **S-15** | `PointRecord.spending_input_index` and ignored `put_spend` input-index arg deleted. Esplora `/outspend(s)` omit `vin`. COMPAT documents explorer gap. | [#423](https://github.com/reardencode/rbitcoin/pull/423) | — |
+| **C-06** | `AssembleMode::Full` + `validate_block_connect` deleted. Confirm is optimistic assemble then `structural_validate_spends`. Connect tests use `accept_and_connect_block`. | this PR | Cite GitHub number after merge. |
 
 Suggested-order progress:
 
@@ -427,5 +428,5 @@ Suggested-order progress:
 6. **X-07** fuzz out of net — done ([#416](https://github.com/reardencode/rbitcoin/pull/416) merged `90f57239`).
 7. **X-05** node config — done ([#418](https://github.com/reardencode/rbitcoin/pull/418) merged `f7a38b60`).
 8. **X-01 steps 2–3** ConfirmStats + table-driven `perf_log` — PR [#420](https://github.com/reardencode/rbitcoin/pull/420) required checks green (not merged).
-9. Product-gated SCHEMA/COMPAT rows — **S-04 / S-12 / SH-06 / SH-07** leftover index refuse (#422). **S-15** outspend `vin` omit (this PR). Remaining: Q-06, C-06, A-02/A-20/D-02/D-03.
+9. Product-gated SCHEMA/COMPAT rows — leftover index refuse (#422), S-15 `vin` omit (#423), **C-06** Full assemble (this PR). Remaining: Q-06, A-02/A-20/D-02/D-03.
 10. **X-08** clippy batches — not started.

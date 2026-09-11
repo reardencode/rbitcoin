@@ -88,8 +88,9 @@ not head/idx.
 | Reorg | Disconnect outside confirm; connect tip+1 with normal pipeline | — |
 
 RPC, Electrum, and standalone tools may still use store cold paths.
-`validate_block_connect` remains a no-write unit-test helper only (empty pin →
-structural cold spentness).
+Connect tests use `accept_and_connect_block` (same pipeline as IBD).
+Spentness / maturity / BIP68 run in `structural_validate_spends` after
+optimistic assemble.
 
 ## Process open (before P2P / confirm)
 

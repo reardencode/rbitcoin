@@ -31,6 +31,10 @@ before 1.0).
 
 ### Changed
 
+- **One assemble path:** `AssembleMode::Full` and `validate_block_connect` are
+  gone. Confirm is optimistic assemble then `structural_validate_spends`
+  (spentness, coinbase maturity, BIP68). Connect tests use
+  `accept_and_connect_block`. [`docs/invariants.md`](docs/invariants.md).
 - **RPC / CLI honesty (Q-59 slice):** `submitblock` uses the live chain hub
   on all networks (same receive path as P2P; `generate*` / `setmocktime`
   stay regtest-only). `--minrelaytxfee` / `--blockmintxfee` reject garbage
