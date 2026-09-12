@@ -328,7 +328,9 @@ fn collect_plan_need_external(
     carried_need: Option<&[[u8; 32]]>,
 ) -> Vec<[u8; 32]> {
     use std::collections::HashSet;
-    let mut need_external: HashSet<[u8; 32]> = HashSet::new();
+    use std::hash::BuildHasherDefault;
+    let mut need_external: HashSet<[u8; 32], BuildHasherDefault<crate::TxidHasher>> =
+        HashSet::with_hasher(BuildHasherDefault::default());
     if let Some(keys) = carried_need {
         for &prev in keys {
             if prev == [0u8; 32] || batch_map.contains_key(&prev) {

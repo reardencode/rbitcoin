@@ -152,15 +152,8 @@ pub(super) fn stamp_parent_pin_archived(
                 need_external.insert(prev, ());
             }
         }
-        for m in metas {
-            if !params.bip34_active_at(m.height.0) {
-                for p in m.pres.iter() {
-                    need_external.insert(p.txid, ());
-                }
-            }
-        }
     } else {
-        for (m, block) in metas.iter().zip(wire_blocks.iter()) {
+        for block in wire_blocks {
             for tx in &block.txdata {
                 for inp in &tx.input {
                     if inp.previous_output.is_null() {
@@ -175,10 +168,12 @@ pub(super) fn stamp_parent_pin_archived(
                     }
                 }
             }
-            if !params.bip34_active_at(m.height.0) {
-                for p in m.pres.iter() {
-                    need_external.insert(p.txid, ());
-                }
+        }
+    }
+    for m in metas {
+        if !params.bip34_active_at(m.height.0) {
+            for p in m.pres.iter() {
+                need_external.insert(p.txid, ());
             }
         }
     }
@@ -451,27 +446,15 @@ pub(super) fn wire_lookup_phase(
             need.push((*fk, wire_blocks[i].as_ref(), metas[i].txids.as_slice()));
         }
         let plan = match pipeline {
-            Some(p) => {
-                let mut carried = p.carried_need.clone();
-                if p.skeleton.is_some() {
-                    for m in &metas {
-                        if !params.bip34_active_at(m.height.0) {
-                            for ptx in m.pres.iter() {
-                                carried.push(ptx.txid);
-                            }
-                        }
-                    }
-                }
-                query
-                    .archive_plan_batch_from_wire(
-                        &need,
-                        p.next_tx_start.max(1),
-                        p.in_flight,
-                        p.skeleton.as_ref(),
-                        p.skeleton.is_some().then_some(carried.as_slice()),
-                    )
-                    .map_err(ConsensusError::from)?
-            }
+            Some(p) => query
+                .archive_plan_batch_from_wire(
+                    &need,
+                    p.next_tx_start.max(1),
+                    p.in_flight,
+                    p.skeleton.as_ref(),
+                    p.skeleton.is_some().then_some(p.carried_need.as_slice()),
+                )
+                .map_err(ConsensusError::from)?,
             None => query
                 .archive_plan_batch_from_wire(
                     &need,
