@@ -1543,13 +1543,21 @@ impl TxTable {
 
     /// Like [`Self::put_full_batch_indexed`], but outs live in a shared pin Arc
     /// (tx + outs + denserels). Encode borrows pin fields — no outs deep clone.
+    ///
+    /// `spent_overlay` is per-item `(vout, spend_fk)` sole spenders written into
+    /// the Class A spent stem. Empty slice = all zeros. Non-empty must be one
+    /// inner vec per item.
     pub fn put_full_batch_from_pins(
         &self,
         items: &[PinInItem],
         index: bool,
+        spent_overlay: &[Vec<(u32, Fk)>],
     ) -> Result<Vec<Fk>, StoreError> {
         if items.is_empty() {
             return Ok(Vec::new());
+        }
+        if !spent_overlay.is_empty() && spent_overlay.len() != items.len() {
+            return Err(StoreError::Corrupt("spent overlay length"));
         }
         let est_out: usize = items
             .iter()
@@ -1573,6 +1581,16 @@ impl TxTable {
         if self.inwit.count() != base || self.spent.count() != base {
             return Err(StoreError::Corrupt("Class A stem count mismatch on append"));
         }
+        for (i, (pin, _)) in items.iter().enumerate() {
+            let n_out = pin.as_ref().1.len() as u32;
+            let pairs = spent_overlay.get(i).map(|v| v.as_slice()).unwrap_or(&[]);
+            for &(vout, fk) in pairs {
+                if vout >= n_out {
+                    return Err(StoreError::Corrupt("spent overlay vout"));
+                }
+                encode_spent_slot_v17(0, fk)?;
+            }
+        }
         let fks = self.append_stems_one_wave(
             items.len(),
             est_out,
@@ -1586,7 +1604,9 @@ impl TxTable {
             |i, buf| encode_inwit_with_secret(&items[i].1, buf, Some(&self.secret)),
             |i, buf| {
                 let (_tx, outs) = items[i].0.as_ref();
-                encode_spent_zeros(outs.len() as u32, buf);
+                let pairs = spent_overlay.get(i).map(|v| v.as_slice()).unwrap_or(&[]);
+                encode_spent_slots(outs.len() as u32, pairs, buf)
+                    .expect("spent overlay prechecked");
             },
         )?;
         let ids: Vec<[u8; 32]> = items.iter().map(|(pin, _)| pin.0.txid).collect();

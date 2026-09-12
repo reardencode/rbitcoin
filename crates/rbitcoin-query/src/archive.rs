@@ -831,9 +831,9 @@ impl Query {
         let reserve_ns = t.elapsed().as_nanos() as u64;
 
         let t = Instant::now();
-        let got_tx_fks = self
-            .store
-            .put_tx_full_batch_from_pins(&plan.packed, /*index=*/ false)?;
+        let got_tx_fks =
+            self.store
+                .put_tx_full_batch_from_pins(&plan.packed, /*index=*/ false, &[])?;
         let body_ns = t.elapsed().as_nanos() as u64;
         if got_tx_fks.len() != plan.packed.len() {
             return Err(StoreError::Corrupt("tx put_full_batch length"));

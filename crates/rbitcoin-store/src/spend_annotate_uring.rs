@@ -868,6 +868,69 @@ mod tests {
     }
 
     #[test]
+    fn class_a_same_batch_slot_annotate_is_skip() {
+        let (dir, t, spenders) = temp_table();
+        let tx = TxRecord {
+            txid: [0x21; 32],
+            version: 1,
+            locktime: 0,
+            input_start_fk: Fk::NULL,
+            input_count: 1,
+            output_start_fk: Fk::NULL,
+            output_count: 2,
+        };
+        let pin = std::sync::Arc::new((
+            tx,
+            vec![
+                OutputRecord::unspent(7, vec![0x51]),
+                OutputRecord::unspent(8, vec![0x52]),
+            ],
+        ));
+        let ins = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
+        let sfk = Fk(9);
+        let fks = t
+            .put_full_batch_from_pins(&[(pin, ins)], false, &[vec![(0u32, sfk)]])
+            .unwrap();
+        let cfk = fks[0];
+        let (off, _) = t.spent_range(cfk).unwrap();
+        let abs = crate::tx_table::spent_abs(off, 0);
+        let bulk = t.get_spender_meta_at_abs_batch(&[abs]).unwrap();
+        assert_eq!(bulk[0].unwrap().0, sfk);
+        let _ = uring_session::tls_take_sqe_n();
+        let cold = put_spend_batch_by_abs_meta_known(
+            &t,
+            &spenders,
+            &[(abs, cfk, 0, sfk)],
+            &[(sfk, 0)],
+            crate::io_backend::WriteIoBackend::Pwrite,
+        )
+        .unwrap();
+        assert!(cold.is_empty());
+        if crate::bulk_io::io_uring_enabled() {
+            let cold_u = put_spend_batch_by_abs_meta_known(
+                &t,
+                &spenders,
+                &[(abs, cfk, 0, sfk)],
+                &[(sfk, 0)],
+                crate::io_backend::WriteIoBackend::Uring,
+            )
+            .unwrap();
+            assert!(cold_u.is_empty());
+            assert_eq!(
+                uring_session::tls_take_sqe_n(),
+                0,
+                "Skip must not page-RMW spent.body"
+            );
+        }
+        let bulk2 = t.get_spender_meta_at_abs_batch(&[abs]).unwrap();
+        assert_eq!(bulk2[0].unwrap().0, sfk);
+        let abs1 = crate::tx_table::spent_abs(off, 1);
+        let neighbor = t.get_spender_meta_at_abs_batch(&[abs1]).unwrap();
+        assert!(neighbor[0].unwrap().0.is_null());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn pure_write_multi_repeat_same_spend_fk_skips() {
         let (dir, t, spenders) = temp_table();
         let (cfk, off, _len) = put_one(&t);

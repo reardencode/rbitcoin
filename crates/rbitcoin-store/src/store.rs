@@ -789,13 +789,16 @@ impl Store {
 
     /// Append Class A rows from shared pin Arc + inputs (no outs reclone).
     ///
-    /// `pin` is `(TxRecord, outs)`.
+    /// `pin` is `(TxRecord, outs)`. `spent_overlay` is per-item `(vout, spend_fk)`
+    /// (empty = all zeros).
     pub fn put_tx_full_batch_from_pins(
         &self,
         items: &[crate::tx_table::PinInItem],
         index: bool,
+        spent_overlay: &[Vec<(u32, Fk)>],
     ) -> Result<Vec<Fk>, StoreError> {
-        self.txs.put_full_batch_from_pins(items, index)
+        self.txs
+            .put_full_batch_from_pins(items, index, spent_overlay)
     }
 
     pub fn get_tx_by_txid(&self, txid: &[u8; 32]) -> Result<Option<(Fk, TxRecord)>, StoreError> {
