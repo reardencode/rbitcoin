@@ -213,6 +213,14 @@ fn reject_is_mutated(reason: &str) -> bool {
         || reason.contains("wtxid count")
 }
 
+fn accept_err_is_mutated(e: &NetError) -> bool {
+    match e {
+        NetError::Mutated(_) => true,
+        NetError::ConnectFailed { msg, .. } | NetError::Consensus(msg) => reject_is_mutated(msg),
+        _ => false,
+    }
+}
+
 /// Core `DEFAULT_MAX_TIP_AGE` (24h).
 pub const DEFAULT_MAX_TIP_AGE_SECS: u64 = 24 * 60 * 60;
 
@@ -889,6 +897,28 @@ impl ChainHub {
     pub fn note_invalid_block(&self, hash: BlockHash) {
         self.invalidated.set.write().unwrap().insert(hash);
         self.drop_held(hash);
+    }
+
+    /// Core `BLOCK_FAILED` vs `BLOCK_MUTATED`. A reconstructed compact with the
+    /// right header hash and wrong txs must not poison later getdata of that hash.
+    fn remember_failed_accept(&self, offered: BlockHash, e: &NetError) {
+        let hash = e
+            .failing_block_hash()
+            .map(BlockHash::from_byte_array)
+            .unwrap_or(offered);
+        if accept_err_is_mutated(e) {
+            self.drop_held(hash);
+            return;
+        }
+        if e.failing_block_hash().is_some() {
+            self.note_invalid_block(hash);
+            return;
+        }
+        if let NetError::Consensus(s) = e {
+            if !s.to_ascii_lowercase().contains("not found") {
+                self.note_invalid_block(hash);
+            }
+        }
     }
 
     /// True if we have a header row (best chain, header-only tip, or held body).
@@ -1832,18 +1862,7 @@ impl ChainHub {
                 None => Ok(AcceptOutcome::IgnoredWeaker),
             },
             Err(e) => {
-                // Core `BLOCK_FAILED`: remember consensus-invalid hashes even
-                // when the header was never persisted (compact reconstruct).
-                // Mutated bodies (merkle / witness commitment) keep the hash
-                // acceptable so a later honest reconstruct can connect
-                // (`p2p_compactblocks` stalling-peer invalid compact).
-                if let Some(h) = e.failing_block_hash() {
-                    self.note_invalid_block(BlockHash::from_byte_array(h));
-                } else if let NetError::Consensus(s) = &e {
-                    if !s.to_ascii_lowercase().contains("not found") {
-                        self.note_invalid_block(hash);
-                    }
-                }
+                self.remember_failed_accept(hash, &e);
                 Err(e)
             }
         }
@@ -2050,15 +2069,8 @@ impl ChainHub {
             Ok(other) => Ok(Some(other)),
             Err(NetError::Protocol(s)) if s.contains("branch parent not on chain") => Ok(None),
             Err(e) => {
-                if let Some(h) = e.failing_block_hash() {
-                    self.note_invalid_block(BlockHash::from_byte_array(h));
-                } else if let (NetError::Consensus(s), Some(tip)) =
-                    (&e, branch.last().map(Block::block_hash))
-                {
-                    if !s.to_ascii_lowercase().contains("not found") {
-                        self.note_invalid_block(tip);
-                    }
-                }
+                let offered = branch[branch.len() - 1].block_hash();
+                self.remember_failed_accept(offered, &e);
                 Err(e)
             }
         }
@@ -4499,6 +4511,66 @@ mod tests {
             }
             other => panic!("expected invalidated refuse, got {other:?}"),
         }
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn mutated_compact_child_of_held_sibling_is_not_block_failed() {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let stale = mine(gen, 1_300_060_000, 1);
+        hub.accept_block(stale.clone()).unwrap();
+        let winner = mine_distinct(gen, 1_300_060_001, 1, &[stale.block_hash()]);
+        assert!(matches!(
+            hub.accept_received_block(winner.clone()).unwrap(),
+            AcceptOutcome::IgnoredWeaker
+        ));
+
+        let honest = mine(
+            winner.block_hash(),
+            winner.header.time.saturating_add(600),
+            2,
+        );
+        let mut mutated = honest.clone();
+        mutated.txdata[0].output[0].script_pubkey = ScriptBuf::from_bytes(vec![0x52]);
+        assert_eq!(mutated.block_hash(), honest.block_hash());
+        assert_ne!(
+            mutated.compute_merkle_root().unwrap(),
+            mutated.header.merkle_root
+        );
+
+        let err = hub
+            .accept_received_block(mutated)
+            .expect_err("mutated merkle must reject");
+        match &err {
+            NetError::Mutated(s) | NetError::Consensus(s) => {
+                assert!(
+                    s.contains("merkle") || s.contains("bad-txnmrklroot"),
+                    "got {s}"
+                );
+            }
+            NetError::ConnectFailed { msg, hash } => {
+                assert!(
+                    msg.contains("merkle") || msg.contains("bad-txnmrklroot"),
+                    "got {msg}"
+                );
+                assert_eq!(*hash, honest.block_hash().to_byte_array());
+            }
+            other => panic!("expected mutated reject, got {other:?}"),
+        }
+        assert!(
+            !hub.is_block_invalid(&honest.block_hash()),
+            "BLOCK_MUTATED must not cache the header hash as BLOCK_FAILED"
+        );
+        assert_eq!(hub.tip_hash(), Some(stale.block_hash()));
+
+        assert!(matches!(
+            hub.accept_received_block(honest.clone()).unwrap(),
+            AcceptOutcome::Accepted { height: 2 }
+        ));
+        assert_eq!(hub.tip_hash(), Some(honest.block_hash()));
 
         let _ = std::fs::remove_dir_all(dir);
     }

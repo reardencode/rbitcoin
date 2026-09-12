@@ -26,6 +26,14 @@ before 1.0).
 
 ### Fixed
 
+- **Mutated compact on a held fork is not `BLOCK_FAILED`:** `accept_branch`
+  wraps a merkle/`bad-txnmrklroot` connect fail as `ConnectFailed`, which
+  was cached as consensus-invalid. A later honest `getdata` of that hash
+  was refused and peers advertising the winning chain were banned (mainnet
+  966500/966501, 2026-09-11). Drop the mutated body; keep the hash acceptable.
+  True consensus rejects (`bad-txns-inputs-missingorspent`) still mark
+  `BLOCK_FAILED`.
+
 - **`p2p_timeouts.py --v2transport`:** VERSION handshake timeout needles are
   logged for every connecting peer (id order) before TCP teardown, and a
   pre-verack ping does not skip the `peer=0` line. Core's `assert_debug_log`
