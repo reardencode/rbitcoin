@@ -1605,12 +1605,13 @@ impl ChainHub {
                 }
 
                 if new_height == tip_h {
-                    let cur = self
-                        .block_at_height(tip_h)?
-                        .ok_or(NetError::Protocol("missing current tip block"))?;
+                    let cur_work = self
+                        .tip_header()
+                        .ok_or(NetError::Protocol("missing current tip header"))?
+                        .work();
                     let precious = *self.precious.read().unwrap() == Some(hash);
-                    if block.header.work() > cur.header.work()
-                        || (block.header.work() == cur.header.work() && precious)
+                    if block.header.work() > cur_work
+                        || (block.header.work() == cur_work && precious)
                     {
                         self.disconnect_to(parent_h.0)?;
                         self.connect_at(new_height, block)?;
@@ -3544,6 +3545,11 @@ mod tests {
         let b1 = mine(gen, 1_300_001_000, 1);
         hub.accept_block(b1.clone()).unwrap();
         assert_eq!(hub.tip_height(), Some(1));
+        assert_eq!(
+            hub.tip_header().expect("tip header").work(),
+            b1.header.work(),
+            "equal-height compare uses header work, not a body reconstruct"
+        );
 
         // Competing tip at same height with more work reorgs (or IgnoredWeaker if equal).
         // Mine many nonces for a sibling of b1 with higher work is hard on regtest
