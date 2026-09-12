@@ -534,6 +534,230 @@ async fn electrum_leftover_mempool_does_not_double_count() {
 }
 
 #[tokio::test]
+async fn electrum_asof_hides_later_spend() {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::hashes::Hash;
+    use bitcoin::script::ScriptBuf;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
+    use rbitcoin_consensus::{accept_and_connect_block, Milestone};
+    use rbitcoin_primitives::Height;
+
+    const ASOF: &str = "1.4.2-asof";
+    let dir = TempDir::new().unwrap();
+    let q = Query::open_or_create_tiny(dir.path().join("store")).unwrap();
+    let params = ChainParams::regtest();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+    let (tip, tip_time, coinbase_txids) = rbitcoin_consensus::pad_empty_from(
+        &q,
+        &params,
+        genesis.block_hash(),
+        genesis.header.time,
+        1,
+        101,
+        1,
+    );
+    let create_spk = ScriptBuf::from_bytes(vec![0x52]);
+    let value = 50_0000_0000 - 1_000;
+    let create = Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: coinbase_txids[0],
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(value),
+            script_pubkey: create_spk.clone(),
+        }],
+    };
+    let create_blk = rbitcoin_consensus::mine_regtest_paying(
+        tip,
+        tip_time + 600,
+        102,
+        ScriptBuf::from_bytes(vec![0x51]),
+        vec![create.clone()],
+    );
+    accept_and_connect_block(&q, &params, Height(102), &create_blk, Milestone::NONE).unwrap();
+
+    let spend = Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: create.compute_txid(),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(value - 1_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x53]),
+        }],
+    };
+    let spend_blk = rbitcoin_consensus::mine_regtest_paying(
+        create_blk.block_hash(),
+        create_blk.header.time + 600,
+        103,
+        ScriptBuf::from_bytes(vec![0x51]),
+        vec![spend.clone()],
+    );
+    accept_and_connect_block(&q, &params, Height(103), &spend_blk, Milestone::NONE).unwrap();
+    q.apply_sh_pending().unwrap();
+
+    let sh = electrum_scripthash_hex(create_spk.as_bytes());
+    let tag_create = format!(
+        "asof:{}",
+        rbitcoin_primitives::display_hash_hex(&create_blk.block_hash().to_byte_array())
+    );
+    let tag_spend = format!(
+        "asof:{}",
+        rbitcoin_primitives::display_hash_hex(&spend_blk.block_hash().to_byte_array())
+    );
+    let create_hex = rbitcoin_primitives::display_hash_hex(&create.compute_txid().to_byte_array());
+    let spend_hex = rbitcoin_primitives::display_hash_hex(&spend.compute_txid().to_byte_array());
+
+    let q = Arc::new(q);
+    let (tip_tx, _) = broadcast::channel(4);
+    let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+    let handle = run_electrum(cfg, q, params, tip_tx, None)
+        .await
+        .expect("electrum listen");
+    let mut stream = TcpStream::connect(handle.local_addr).await.unwrap();
+
+    let denied = rpc(
+        &mut stream,
+        1,
+        "blockchain.scripthash.get_balance",
+        json!([sh.clone(), tag_create.clone()]),
+    )
+    .await;
+    let denied_msg = denied["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        denied_msg.contains("1.4.2-asof"),
+        "asof tag before handshake: {denied}"
+    );
+
+    let ver = rpc(&mut stream, 2, "server.version", json!(["test", ASOF])).await;
+    assert_eq!(ver["result"][1], ASOF, "{ver}");
+    let locked = rpc(&mut stream, 3, "server.version", json!(["test", "1.4"])).await;
+    assert_eq!(locked["result"][1], ASOF, "{locked}");
+
+    let bal0 = rpc(
+        &mut stream,
+        4,
+        "blockchain.scripthash.get_balance",
+        json!([sh.clone(), tag_create.clone()]),
+    )
+    .await;
+    assert_eq!(bal0["result"]["confirmed"], value, "{bal0}");
+    assert_eq!(bal0["result"]["unconfirmed"], 0, "{bal0}");
+
+    let utxo0 = rpc(
+        &mut stream,
+        5,
+        "blockchain.scripthash.listunspent",
+        json!([sh.clone(), tag_create.clone()]),
+    )
+    .await;
+    let utxo0_rows = utxo0["result"].as_array().unwrap();
+    assert_eq!(utxo0_rows.len(), 1, "{utxo0}");
+    assert_eq!(utxo0_rows[0]["tx_hash"], create_hex);
+
+    let hist0 = rpc(
+        &mut stream,
+        6,
+        "blockchain.scripthash.get_history",
+        json!([sh.clone(), tag_create.clone()]),
+    )
+    .await;
+    let hist0_rows = hist0["result"].as_array().unwrap();
+    assert_eq!(hist0_rows.len(), 1, "{hist0}");
+    assert_eq!(hist0_rows[0]["tx_hash"], create_hex);
+
+    let bal1 = rpc(
+        &mut stream,
+        7,
+        "blockchain.scripthash.get_balance",
+        json!([sh.clone(), tag_spend.clone()]),
+    )
+    .await;
+    assert_eq!(bal1["result"]["confirmed"], 0, "{bal1}");
+
+    let utxo1 = rpc(
+        &mut stream,
+        8,
+        "blockchain.scripthash.listunspent",
+        json!([sh.clone(), tag_spend.clone()]),
+    )
+    .await;
+    assert!(utxo1["result"].as_array().unwrap().is_empty(), "{utxo1}");
+
+    let hist1 = rpc(
+        &mut stream,
+        9,
+        "blockchain.scripthash.get_history",
+        json!([sh.clone(), tag_spend]),
+    )
+    .await;
+    let hist1_rows = hist1["result"].as_array().unwrap();
+    assert_eq!(hist1_rows.len(), 2, "{hist1}");
+    assert!(
+        hist1_rows.iter().any(|r| r["tx_hash"] == spend_hex),
+        "spend missing at asof spend: {hist1}"
+    );
+
+    let get_later = rpc(
+        &mut stream,
+        10,
+        "blockchain.transaction.get",
+        json!([spend_hex.clone(), tag_create.clone()]),
+    )
+    .await;
+    let later_msg = get_later["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        later_msg.contains("tx not found"),
+        "asof create must hide later spend tx: {get_later}"
+    );
+
+    let merkle_later = rpc(
+        &mut stream,
+        11,
+        "blockchain.transaction.get_merkle",
+        json!([spend_hex, 103, tag_create]),
+    )
+    .await;
+    let merkle_msg = merkle_later["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        merkle_msg.contains("asof not on chain"),
+        "merkle height above asof pin: {merkle_later}"
+    );
+
+    let unknown = rpc(
+        &mut stream,
+        12,
+        "blockchain.scripthash.get_balance",
+        json!([sh, format!("asof:{}", "ee".repeat(32))]),
+    )
+    .await;
+    let unknown_msg = unknown["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        unknown_msg.contains("asof not on chain"),
+        "unknown asof: {unknown}"
+    );
+
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn electrum_max_connections_rejects_extra_client() {
     use tokio::io::AsyncReadExt;
     let dir = TempDir::new().unwrap();
