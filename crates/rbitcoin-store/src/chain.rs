@@ -132,7 +132,8 @@ pub struct StrongTxTable {
     n_bits: std::sync::atomic::AtomicU64,
     /// L2 byte image (`None` = pure L0).
     data: std::sync::RwLock<Option<Vec<u8>>>,
-    dirty: std::sync::atomic::AtomicBool,
+    /// `0` = clean. Nonzero generation: a bit `set` raced persist if CAS fails.
+    dirty_epoch: std::sync::atomic::AtomicU64,
     /// Min bit index mutated since last flush (`u64::MAX` = none).
     dirty_lo_bit: std::sync::atomic::AtomicU64,
     /// Body byte length last flushed to disk (L2).
@@ -147,7 +148,7 @@ impl StrongTxTable {
             bits: crate::file::TableFile::create(dir.join("strong_tx.body"), TableKind::StrongTx)?,
             n_bits: std::sync::atomic::AtomicU64::new(0),
             data: std::sync::RwLock::new(Some(Vec::new())),
-            dirty: std::sync::atomic::AtomicBool::new(false),
+            dirty_epoch: std::sync::atomic::AtomicU64::new(0),
             dirty_lo_bit: std::sync::atomic::AtomicU64::new(u64::MAX),
             disk_bytes: std::sync::atomic::AtomicU64::new(0),
             last_flush_bytes: std::sync::atomic::AtomicU64::new(0),
@@ -169,7 +170,7 @@ impl StrongTxTable {
             bits,
             n_bits: std::sync::atomic::AtomicU64::new(n_bits),
             data: std::sync::RwLock::new(data),
-            dirty: std::sync::atomic::AtomicBool::new(false),
+            dirty_epoch: std::sync::atomic::AtomicU64::new(0),
             dirty_lo_bit: std::sync::atomic::AtomicU64::new(u64::MAX),
             disk_bytes: std::sync::atomic::AtomicU64::new(body),
             last_flush_bytes: std::sync::atomic::AtomicU64::new(0),
@@ -178,7 +179,7 @@ impl StrongTxTable {
 
     fn mark_dirty_bit(&self, bit: u64) {
         use std::sync::atomic::Ordering;
-        self.dirty.store(true, Ordering::Release);
+        crate::array_table::dirty_epoch_bump(&self.dirty_epoch);
         let mut cur = self.dirty_lo_bit.load(Ordering::Relaxed);
         while bit < cur {
             match self.dirty_lo_bit.compare_exchange_weak(
@@ -521,7 +522,8 @@ impl StrongTxTable {
         let Some(ref v) = *guard else {
             return Ok(());
         };
-        if !self.dirty.load(Ordering::Acquire) {
+        let e0 = self.dirty_epoch.load(Ordering::Acquire);
+        if e0 == 0 {
             return Ok(());
         }
         let body_len = v.len() as u64;
@@ -543,17 +545,13 @@ impl StrongTxTable {
                     .write_at(crate::file::FILE_HEADER_LEN as u64 + disk, &suffix)?;
             }
             self.disk_bytes.store(body_len, Ordering::Release);
-            self.dirty.store(false, Ordering::Release);
-            self.dirty_lo_bit.store(u64::MAX, Ordering::Release);
+            if crate::array_table::dirty_epoch_try_clean(&self.dirty_epoch, e0) {
+                self.dirty_lo_bit.store(u64::MAX, Ordering::Release);
+            }
             self.last_flush_bytes.store(n, Ordering::Release);
             return Ok(());
         }
 
-        // In-prefix bit mutate: write from first dirty byte through end only.
-        // Tip Class C almost always dirties only the high bits (new creates);
-        // rewriting the full ~40 MiB image every batch was wasteful. Same-size
-        // mid-file tear risk is limited to the dirty suffix; tip-last barrier
-        // still keeps tip unadvanced until this flush completes.
         let from = dirty_byte.min(body_len);
         let suffix = v[from as usize..].to_vec();
         drop(guard);
@@ -567,8 +565,9 @@ impl StrongTxTable {
             self.bits.set_logical_len(logical)?;
         }
         self.disk_bytes.store(body_len, Ordering::Release);
-        self.dirty.store(false, Ordering::Release);
-        self.dirty_lo_bit.store(u64::MAX, Ordering::Release);
+        if crate::array_table::dirty_epoch_try_clean(&self.dirty_epoch, e0) {
+            self.dirty_lo_bit.store(u64::MAX, Ordering::Release);
+        }
         self.last_flush_bytes.store(n, Ordering::Release);
         Ok(())
     }
@@ -654,6 +653,38 @@ mod strong_tests {
             Some(v) => std::env::set_var("RBITCOIN_CLASS_C_INRAM_MAX_MB", v),
             None => std::env::remove_var("RBITCOIN_CLASS_C_INRAM_MAX_MB"),
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_set_strong_during_flush_persists() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomOrd};
+        use std::sync::Arc;
+        let dir = tmp();
+        let t = Arc::new(StrongTxTable::create(&dir).unwrap());
+        t.set_strong_range(Fk(1), 80_000, Fk(1)).unwrap();
+        t.flush().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let flush_t = {
+            let t = Arc::clone(&t);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(AtomOrd::Relaxed) {
+                    t.flush_dirty().unwrap();
+                }
+            })
+        };
+        for _ in 0..2_000 {
+            t.set_unstrong(Fk(1)).unwrap();
+            t.set_strong(Fk(1), Fk(1)).unwrap();
+        }
+        stop.store(true, AtomOrd::Relaxed);
+        flush_t.join().unwrap();
+        let want = t.is_strong(Fk(1)).unwrap();
+        t.flush().unwrap();
+        drop(t);
+        let t = StrongTxTable::open(&dir).unwrap();
+        assert_eq!(t.is_strong(Fk(1)).unwrap(), want);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

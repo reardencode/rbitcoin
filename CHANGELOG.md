@@ -20,6 +20,13 @@ before 1.0).
 
 ### Fixed
 
+- **Class C `flush_dirty`:** packed dirty-epoch (`0` = clean). Snapshot stays under the `data` read lock; persist IO is unlocked; CAS `e0→0` so a racing `set` is not marked clean. Wrap of `u64::MAX` stays dirty (never publishes 0).
+- **fuse8:** `decode_body` refuses fingerprint arrays shorter than `hash_of_hash` geometry. `contains` is unchanged.
+- **Spender overflow:** `for_each_spender_create` stops after `spenders.count()` hops (`Corrupt` on a cycle).
+- **Index seal:** `meta` / `.mphf` / SH `.idx` install is sibling tmp + `sync_all` then rename (empty truncate of the live name is not a seal).
+- **`list_runs`:** catalog scan does not unlink. Residual `*.run` files are discarded with the leftover dir (open-time SH `key_len` and leftover-run **count** do not delete).
+- **Mempool persist order:** admit `persist_all` writes body, then LIVE slots, then meta. A crash after a grown body and before new slots loses admits; it does not claim LIVE ranges past durable `tx.body`. Packed compact uses tmp+`sync_all`+rename, then meta only, so packed body cannot mix with old slots.
+- **Worst-chunk eviction:** `evict_worst_chunk_once` uses `remove_txid_tree` so a parent-only chunk cannot leave a child without its mempool parent.
 - **Same-block coinbase maturity:** a later tx in the same block that spends
   the coinbase is `coinbase immature` (Core `nHeight < coinbaseHeight + 100`).
   Assemble already maps this block’s txids (`txid_index`); parent index 0
@@ -39,6 +46,13 @@ before 1.0).
 - **RPC `maxfeerate`:** prevout-sum overflow is over-cap (reject), not
   fail-open. Missing prevouts still skip the cap so `accept_tx` can say
   missing-inputs.
+- **P2P caps (Q-60):** AddrMan learned/`peers`/`addpeeraddress` stay at 4096
+  (evict incompat, then failed last-connect, then oldest new). `--connect` /
+  DNS inject may exceed when only tried addrs remain. Shutdown `merge_from`
+  trims to 4096 (tried first). `announced_wtx` and `from_this_peer`
+  insertion-order FIFO-roll at 50k instead of `clear()`. Compact `cmpct_fills`
+  decrement on reconstruct fail, getdata expire, and unregister (Accepted still
+  clears the hash).
 - **IBD io_uring drain stall:** `drain_all` no longer returns after 5 s with
   leftover SQEs (that freed in-flight buffers). Every TLS session waits while
   CQEs arrive; a 120 s zero-completion stall aborts explicit drain (session

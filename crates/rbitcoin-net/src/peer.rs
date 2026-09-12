@@ -9,7 +9,7 @@ use crate::codec::{FramedMessage, MAX_HEADERS_RESULTS, MAX_INV_SIZE, MAX_LOCATOR
 use crate::error::NetError;
 use crate::msg_decode::decode_framed_offload;
 use crate::peer_dos::{PeerRateLimiter, OVERSIZE_BAN_SCORE, RATE_LIMIT_BAN_SCORE};
-use crate::peers::{PeerOut, PingAction};
+use crate::peers::{CappedSet, PeerOut, PingAction};
 use crate::v2::{
     open_v2, open_v2_with_wire, read_v2_contents, read_v2_frame, write_v2_contents, write_v2_msg,
     write_v2_msg_offload, V2Reader, V2Writer,
@@ -114,19 +114,8 @@ pub(crate) const MAX_SERVE_BLOCKS: usize = 16;
 /// ask again. `sync_blocks` is 60s; 120s headers poll is too late.
 pub(crate) const BLOCK_GETDATA_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// INV-origin txids this session sent us. Cap matches `announced_wtx` (clear on overflow).
+/// INV-origin txids this session sent us. Cap matches `announced_wtx` (FIFO roll).
 pub(crate) const FROM_THIS_PEER_CAP: usize = 50_000;
-
-pub(crate) fn insert_capped_txid(
-    map: &mut HashMap<bitcoin::Txid, ()>,
-    txid: bitcoin::Txid,
-    cap: usize,
-) {
-    if map.len() >= cap {
-        map.clear();
-    }
-    map.insert(txid, ());
-}
 
 /// Test/assert surface for the tip-follow pending-body cap (equals production).
 #[cfg(test)]
@@ -992,6 +981,7 @@ async fn on_heartbeat(
         &mut follow.requested_blocks,
         requested_since,
         std::time::Instant::now(),
+        session,
     ) {
         drain_pending(
             hub,
@@ -1596,6 +1586,7 @@ pub(crate) fn maybe_expire_block_requests(
     requested: &mut HashSet<BlockHash>,
     since: &mut Option<std::time::Instant>,
     now: std::time::Instant,
+    session: Option<&crate::peers::LivePeer>,
 ) -> bool {
     if requested.is_empty() {
         *since = None;
@@ -1607,6 +1598,9 @@ pub(crate) fn maybe_expire_block_requests(
     }
     for h in requested.drain() {
         hub.forget_asked_block(&h);
+        if let Some(s) = session {
+            s.release_cmpct_taken(h);
+        }
     }
     *since = None;
     true
@@ -1703,7 +1697,7 @@ pub fn flush_tx_invs(hub: &ChainHub, peers: &crate::peers::PeerHub) {
     for s in rows {
         s.request_tx_inv();
         if let Some(out) = s.writer() {
-            queue_due_tx_invs(hub, s.as_ref(), &HashMap::new(), &out);
+            queue_due_tx_invs(hub, s.as_ref(), &CappedSet::new(), &out);
         }
     }
 }
@@ -1748,7 +1742,7 @@ pub fn force_announce_txid(hub: &ChainHub, peers: &crate::peers::PeerHub, txid: 
 fn tx_inv_candidate_ok(
     mp: &crate::tx_relay::MempoolHub,
     session: &crate::peers::LivePeer,
-    from_this_peer: &HashMap<bitcoin::Txid, ()>,
+    from_this_peer: &CappedSet<bitcoin::Txid>,
     txid: bitcoin::Txid,
     w: bitcoin::Wtxid,
     clock_due: bool,
@@ -1796,7 +1790,7 @@ fn tx_inv_candidate_ok(
 fn queue_due_tx_invs(
     hub: &ChainHub,
     session: &crate::peers::LivePeer,
-    from_this_peer: &HashMap<bitcoin::Txid, ()>,
+    from_this_peer: &CappedSet<bitcoin::Txid>,
     out_tx: &mpsc::UnboundedSender<PeerOut>,
 ) {
     let Some(mp) = hub.mempool() else {
@@ -1907,7 +1901,7 @@ struct PeerFollowState {
     pending_headers: HashMap<BlockHash, bitcoin::block::Header>,
     pending_blocks: PendingBlocks,
     pending_cmpct: HashMap<BlockHash, PendingCmpct>,
-    from_this_peer: HashMap<bitcoin::Txid, ()>,
+    from_this_peer: CappedSet<bitcoin::Txid>,
     requested_blocks: HashSet<BlockHash>,
     ban_score: u32,
 }
@@ -1922,7 +1916,7 @@ impl PeerFollowState {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0,
         }
@@ -2763,10 +2757,7 @@ async fn on_cmpctblock(
                             NetworkMessage::GetData(vec![Inventory::WitnessBlock(hash)]),
                         )?;
                     } else {
-                        let inbound = session.is_some_and(|s| s.inbound);
-                        let may_fill = session
-                            .and_then(|s| s.peer_hub())
-                            .is_none_or(|ph| ph.try_cmpct_fill_slot(hash, inbound));
+                        let may_fill = session.is_none_or(|s| s.try_cmpct_fill(hash));
                         if !may_fill {
                             // Parallel inbound slot already taken
                             // (`p2p_compactblocks` :929).
@@ -2854,6 +2845,9 @@ async fn on_blocktxn(
                     }
                     Ok(_) => {
                         take_requested_block(hub, &mut follow.requested_blocks, &hash);
+                        if let Some(s) = session {
+                            s.release_cmpct_taken(hash);
+                        }
                         drain_pending(
                             hub,
                             out_tx,
@@ -2869,6 +2863,9 @@ async fn on_blocktxn(
                         take_requested_block(hub, &mut follow.requested_blocks, &hash);
                         follow.pending_blocks.insert(hash, block);
                         maybe_select_hb_if_relay(hub, session);
+                        if let Some(s) = session {
+                            s.release_cmpct_taken(hash);
+                        }
                         drain_pending(
                             hub,
                             out_tx,
@@ -2887,6 +2884,7 @@ async fn on_blocktxn(
                         rbitcoin_log::info!("previous compact block reconstruction attempt failed");
                         if let Some(s) = session {
                             s.note_failed_cmpct(hash);
+                            s.release_cmpct_taken(hash);
                         }
                         follow.ban_score = follow.ban_score.saturating_add(10);
                         queue_out(
@@ -2900,6 +2898,7 @@ async fn on_blocktxn(
                 rbitcoin_log::info!("previous compact block reconstruction attempt failed");
                 if let Some(s) = session {
                     s.note_failed_cmpct(hash);
+                    s.release_cmpct_taken(hash);
                 }
                 follow.ban_score = follow.ban_score.saturating_add(10);
                 queue_out(
@@ -2972,7 +2971,7 @@ async fn on_tx(
             || session.is_some_and(|s| s.peer_hub().is_some_and(|ph| ph.is_relay_perm()))
         {
             let txid = tx.compute_txid();
-            insert_capped_txid(&mut follow.from_this_peer, txid, FROM_THIS_PEER_CAP);
+            follow.from_this_peer.insert(txid, FROM_THIS_PEER_CAP);
             match mp.accept_tx_async(tx.clone()).await {
                 Ok(r) => {
                     if let Some(s) = session {

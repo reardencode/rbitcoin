@@ -6,7 +6,8 @@ use bitcoin::p2p::message::NetworkMessage;
 use bitcoin::p2p::message_network::VersionMessage;
 use bitcoin::p2p::ServiceFlags;
 use bitcoin::{BlockHash, Wtxid};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::Hash;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -26,6 +27,58 @@ impl PeerOut {
             PeerOut::Msg(m) => m,
             PeerOut::Encoded(_) => panic!("expected application message, got encoded block"),
         }
+    }
+}
+
+/// Insertion-order set that drops the oldest key at `cap` (INV / origin skip).
+/// Re-insert of a live key is a no-op; it does not refresh FIFO position.
+#[derive(Debug)]
+pub(crate) struct CappedSet<T> {
+    set: HashSet<T>,
+    fifo: VecDeque<T>,
+}
+
+impl<T> CappedSet<T> {
+    pub(crate) fn new() -> Self {
+        Self {
+            set: HashSet::new(),
+            fifo: VecDeque::new(),
+        }
+    }
+
+    pub(crate) fn contains(&self, item: &T) -> bool
+    where
+        T: Eq + Hash,
+    {
+        self.set.contains(item)
+    }
+
+    pub(crate) fn contains_key(&self, item: &T) -> bool
+    where
+        T: Eq + Hash,
+    {
+        self.contains(item)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.set.len()
+    }
+
+    pub(crate) fn insert(&mut self, item: T, cap: usize)
+    where
+        T: Eq + Hash + Copy,
+    {
+        if cap == 0 || self.set.contains(&item) {
+            return;
+        }
+        if self.set.len() >= cap {
+            if let Some(old) = self.fifo.pop_front() {
+                self.set.remove(&old);
+            }
+        }
+        self.set.insert(item);
+        self.fifo.push_back(item);
     }
 }
 
@@ -133,7 +186,9 @@ pub struct LivePeer {
     awaiting_headers: AtomicBool,
     /// Wtxids we INV'd to this peer. GetData for a live mempool tx is
     /// answered only if announced here or the tx is reorg-servable.
-    announced_wtx: Mutex<HashSet<Wtxid>>,
+    announced_wtx: Mutex<CappedSet<Wtxid>>,
+    /// Compact fill slots taken by this session (hub-global `cmpct_fills`).
+    taken_cmpct: Mutex<Vec<BlockHash>>,
     /// Mempool sequence at last tx INV (Core `m_last_inv_sequence`, starts at 1).
     last_inv_sequence: AtomicU64,
     /// Queued tx INV hashes not yet sent (Core `m_tx_inventory_to_send`).
@@ -506,11 +561,10 @@ impl LivePeer {
     }
 
     pub fn note_announced_wtx(&self, wtxid: Wtxid) {
-        let mut g = self.announced_wtx.lock().unwrap_or_else(|e| e.into_inner());
-        if g.len() >= 50_000 {
-            g.clear();
-        }
-        g.insert(wtxid);
+        self.announced_wtx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(wtxid, 50_000);
     }
 
     pub fn has_announced_wtx(&self, wtxid: &Wtxid) -> bool {
@@ -518,6 +572,43 @@ impl LivePeer {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .contains(wtxid)
+    }
+
+    pub(crate) fn try_cmpct_fill(&self, hash: BlockHash) -> bool {
+        let Some(ph) = self.peer_hub() else {
+            return true;
+        };
+        if !ph.try_cmpct_fill_slot(hash, self.inbound) {
+            return false;
+        }
+        self.taken_cmpct
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(hash);
+        true
+    }
+
+    pub(crate) fn release_cmpct_taken(&self, hash: BlockHash) {
+        let mut g = self.taken_cmpct.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(i) = g.iter().position(|h| *h == hash) else {
+            return;
+        };
+        g.remove(i);
+        drop(g);
+        if let Some(ph) = self.peer_hub() {
+            ph.release_cmpct_fill(hash, self.inbound);
+        }
+    }
+
+    fn release_all_cmpct(&self) {
+        let taken =
+            std::mem::take(&mut *self.taken_cmpct.lock().unwrap_or_else(|e| e.into_inner()));
+        let Some(ph) = self.peer_hub() else {
+            return;
+        };
+        for h in taken {
+            ph.release_cmpct_fill(h, self.inbound);
+        }
     }
 
     pub fn last_inv_sequence(&self) -> u64 {
@@ -1039,7 +1130,7 @@ impl PeerHub {
         let mut book = am.lock().unwrap_or_else(|e| e.into_inner());
         for a in list {
             if let Ok(sock) = a.socket_addr() {
-                book.add(sock);
+                book.add_learned(sock, crate::seeds::MAX_ADDR_MAN);
             }
         }
     }
@@ -1147,6 +1238,21 @@ impl PeerHub {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&hash);
+    }
+
+    pub fn release_cmpct_fill(&self, hash: BlockHash, inbound: bool) {
+        let mut g = self.cmpct_fills.lock().unwrap_or_else(|e| e.into_inner());
+        let Some((n_in, has_out)) = g.get_mut(&hash) else {
+            return;
+        };
+        if inbound {
+            *n_in = n_in.saturating_sub(1);
+        } else {
+            *has_out = false;
+        }
+        if *n_in == 0 && !*has_out {
+            g.remove(&hash);
+        }
     }
 
     pub fn set_noban(&self, v: bool) {
@@ -1429,7 +1535,8 @@ impl PeerHub {
             sync_started: AtomicBool::new(false),
             headers_sync_timeout: AtomicU64::new(0),
             awaiting_headers: AtomicBool::new(false),
-            announced_wtx: Mutex::new(HashSet::new()),
+            announced_wtx: Mutex::new(CappedSet::new()),
+            taken_cmpct: Mutex::new(Vec::new()),
             last_inv_sequence: AtomicU64::new(1),
             inv_to_send: AtomicU32::new(0),
             last_tx_inv_now: AtomicU64::new(0),
@@ -1477,6 +1584,7 @@ impl PeerHub {
             .unwrap_or_else(|e| e.into_inner())
             .remove(&id);
         if let Some(p) = removed {
+            p.release_all_cmpct();
             self.end_headers_sync(&p);
         }
     }
@@ -2052,6 +2160,55 @@ mod tests {
     }
 
     #[test]
+    fn announced_wtx_rolls_oldest_at_cap() {
+        use bitcoin::hashes::Hash;
+        let hub = PeerHub::new();
+        let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+        let p = hub.register(a, a, &ver("/rbitcoin:0.1.0/"), true, PeerConnType::Inbound);
+        let wtxid_n = |i: u32| {
+            let mut b = [0u8; 32];
+            b[..4].copy_from_slice(&i.to_le_bytes());
+            Wtxid::from_byte_array(b)
+        };
+        for i in 0..=50_000 {
+            p.note_announced_wtx(wtxid_n(i));
+        }
+        assert!(!p.has_announced_wtx(&wtxid_n(0)));
+        assert!(p.has_announced_wtx(&wtxid_n(1)));
+        assert!(p.has_announced_wtx(&wtxid_n(50_000)));
+    }
+
+    #[test]
+    fn cmpct_fill_release_one_inbound_keeps_other() {
+        let hub = PeerHub::new();
+        let h = BlockHash::from_byte_array([0x11; 32]);
+        assert!(hub.try_cmpct_fill_slot(h, true));
+        assert!(hub.try_cmpct_fill_slot(h, true));
+        assert!(!hub.try_cmpct_fill_slot(h, true));
+        hub.release_cmpct_fill(h, true);
+        assert!(hub.try_cmpct_fill_slot(h, true));
+        assert!(!hub.try_cmpct_fill_slot(h, true));
+        hub.release_cmpct_fill(h, true);
+        hub.release_cmpct_fill(h, true);
+        assert!(hub.try_cmpct_fill_slot(h, true));
+        assert!(hub.try_cmpct_fill_slot(h, true));
+        assert!(!hub.try_cmpct_fill_slot(h, true));
+    }
+
+    #[test]
+    fn unregister_releases_cmpct_fill() {
+        let hub = PeerHub::new();
+        let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+        let p = hub.register(a, a, &ver("/rbitcoin:0.1.0/"), true, PeerConnType::Inbound);
+        let h = BlockHash::from_byte_array([0x22; 32]);
+        assert!(p.try_cmpct_fill(h));
+        hub.unregister(p.id);
+        assert!(hub.try_cmpct_fill_slot(h, true));
+        assert!(hub.try_cmpct_fill_slot(h, true));
+        assert!(!hub.try_cmpct_fill_slot(h, true));
+    }
+
+    #[test]
     fn skip_announce_of_block_this_peer_sent() {
         let hub = PeerHub::new();
         let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
@@ -2325,7 +2482,10 @@ mod tests {
         for i in 0..n {
             let a = (i >> 8) as u8;
             let b = (i & 0xff) as u8;
-            am.add(SocketAddr::from(([a, b, 1, 1], 8333)));
+            am.add_with_flags(
+                SocketAddr::from(([a, b, 1, 1], 8333)),
+                crate::seeds::PeerFlags::empty(),
+            );
         }
         am
     }

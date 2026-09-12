@@ -23,8 +23,21 @@ use crate::error::StoreError;
 use crate::file::{TableFile, FILE_HEADER_LEN};
 use rbitcoin_primitives::TableKind;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
+
+/// Packed dirty generation: `0` is clean. `set` bumps; flush CASes back to `0`.
+pub(crate) fn dirty_epoch_bump(epoch: &AtomicU64) {
+    let _ = epoch.fetch_update(Ordering::Release, Ordering::Relaxed, |e| {
+        Some(e.wrapping_add(1).max(1))
+    });
+}
+
+pub(crate) fn dirty_epoch_try_clean(epoch: &AtomicU64, e0: u64) -> bool {
+    epoch
+        .compare_exchange(e0, 0, Ordering::Release, Ordering::Relaxed)
+        .is_ok()
+}
 
 const ELEM: u64 = 8;
 
@@ -49,7 +62,8 @@ pub struct ArrayTable {
     len: AtomicU64,
     /// `Some` = L2 authoritative image; `None` = L0 fd-only path.
     data: RwLock<Option<Vec<u64>>>,
-    dirty: AtomicBool,
+    /// `0` = clean. Nonzero generation: a `set` raced persist if CAS fails.
+    dirty_epoch: AtomicU64,
     /// Min index mutated since last flush (`u64::MAX` = none).
     dirty_lo: AtomicU64,
     /// Element count last successfully flushed to disk (L2).
@@ -63,7 +77,7 @@ impl ArrayTable {
             file,
             len: AtomicU64::new(0),
             data: RwLock::new(Some(Vec::new())),
-            dirty: AtomicBool::new(false),
+            dirty_epoch: AtomicU64::new(0),
             dirty_lo: AtomicU64::new(u64::MAX),
             disk_len: AtomicU64::new(0),
         })
@@ -93,7 +107,7 @@ impl ArrayTable {
             file,
             len: AtomicU64::new(n),
             data: RwLock::new(data),
-            dirty: AtomicBool::new(false),
+            dirty_epoch: AtomicU64::new(0),
             dirty_lo: AtomicU64::new(u64::MAX),
             disk_len: AtomicU64::new(n),
         })
@@ -108,7 +122,7 @@ impl ArrayTable {
     }
 
     fn mark_dirty_index(&self, index: u64) {
-        self.dirty.store(true, Ordering::Release);
+        dirty_epoch_bump(&self.dirty_epoch);
         let mut cur = self.dirty_lo.load(Ordering::Relaxed);
         while index < cur {
             match self.dirty_lo.compare_exchange_weak(
@@ -240,12 +254,19 @@ impl ArrayTable {
             .unwrap_or(0)
     }
 
+    fn note_flush_clean(&self, e0: u64) {
+        if dirty_epoch_try_clean(&self.dirty_epoch, e0) {
+            self.dirty_lo.store(u64::MAX, Ordering::Release);
+        }
+    }
+
     pub fn flush_dirty(&self) -> Result<(), StoreError> {
         let guard = self.data.read().unwrap_or_else(|e| e.into_inner());
         let Some(ref v) = *guard else {
             return Ok(());
         };
-        if !self.dirty.load(Ordering::Acquire) {
+        let e0 = self.dirty_epoch.load(Ordering::Acquire);
+        if e0 == 0 {
             return Ok(());
         }
         let n = v.len() as u64;
@@ -253,26 +274,21 @@ impl ArrayTable {
         let dirty_lo = self.dirty_lo.load(Ordering::Acquire);
 
         if n < disk {
-            // Truncate: shrink HWM only — published prefix of length n stays.
             drop(guard);
             let logical = FILE_HEADER_LEN as u64 + n * ELEM;
             self.file.set_logical_len(logical)?;
             self.disk_len.store(n, Ordering::Release);
-            self.dirty.store(false, Ordering::Release);
-            self.dirty_lo.store(u64::MAX, Ordering::Release);
+            self.note_flush_clean(e0);
             return Ok(());
         }
 
         if n == disk && dirty_lo >= disk {
             drop(guard);
-            self.dirty.store(false, Ordering::Release);
-            self.dirty_lo.store(u64::MAX, Ordering::Release);
+            self.note_flush_clean(e0);
             return Ok(());
         }
 
         if dirty_lo >= disk && n > disk {
-            // Pure append: write only new slots, then extend HWM.
-            // Complete-or-fail: pwrite suffix fully before publish.
             let start = disk as usize;
             let mut bytes = vec![0u8; ((n - disk) as usize) * 8];
             for (i, &val) in v[start..].iter().enumerate() {
@@ -284,13 +300,10 @@ impl ArrayTable {
             debug_assert_eq!(self.file.logical_len(), logical);
             let _ = logical;
             self.disk_len.store(n, Ordering::Release);
-            self.dirty.store(false, Ordering::Release);
-            self.dirty_lo.store(u64::MAX, Ordering::Release);
+            self.note_flush_clean(e0);
             return Ok(());
         }
 
-        // In-prefix mutate: write from first dirty index through end only
-        // (confirmed tip extension almost always dirties only the high slots).
         let from = dirty_lo.min(n);
         let mut bytes = vec![0u8; ((n - from) as usize) * 8];
         for (i, &val) in v[from as usize..].iter().enumerate() {
@@ -305,8 +318,7 @@ impl ArrayTable {
             self.file.set_logical_len(logical)?;
         }
         self.disk_len.store(n, Ordering::Release);
-        self.dirty.store(false, Ordering::Release);
-        self.dirty_lo.store(u64::MAX, Ordering::Release);
+        self.note_flush_clean(e0);
         Ok(())
     }
 
@@ -335,6 +347,14 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn dirty_epoch_bump_from_max_stays_dirty() {
+        let e = AtomicU64::new(u64::MAX);
+        dirty_epoch_bump(&e);
+        assert_ne!(e.load(Ordering::Acquire), 0);
+        assert_eq!(e.load(Ordering::Acquire), 1);
     }
 
     #[test]
@@ -501,6 +521,44 @@ mod tests {
             Some(v) => std::env::set_var("RBITCOIN_CLASS_C_INRAM_MAX_MB", v),
             None => std::env::remove_var("RBITCOIN_CLASS_C_INRAM_MAX_MB"),
         }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn concurrent_set_during_flush_persists_new() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomOrd};
+        use std::sync::Arc;
+        let path = tmp_path();
+        let _ = std::fs::remove_file(&path);
+        let t = Arc::new(ArrayTable::create(&path, TableKind::Confirmed).unwrap());
+        let n = 32_768u64;
+        let pairs: Vec<(u64, u64)> = (0..n).map(|i| (i, i)).collect();
+        t.set_many(&pairs).unwrap();
+        t.flush().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let flush_t = {
+            let t = Arc::clone(&t);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(AtomOrd::Relaxed) {
+                    t.flush_dirty().unwrap();
+                }
+            })
+        };
+        for i in 1..2_000u64 {
+            t.set(0, i).unwrap();
+        }
+        stop.store(true, AtomOrd::Relaxed);
+        flush_t.join().unwrap();
+        let want = t.get(0).unwrap();
+        t.flush().unwrap();
+        drop(t);
+        let t = ArrayTable::open(&path, TableKind::Confirmed).unwrap();
+        assert_eq!(
+            t.get(0).unwrap(),
+            want,
+            "set that races flush must still persist"
+        );
         let _ = std::fs::remove_file(&path);
     }
 }

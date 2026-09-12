@@ -8,7 +8,8 @@
 //! # Concurrency invariant (`runs_io`)
 //!
 //! Callers **must** hold the per-family `runs_io` mutex across list + delete.
-//! [`list_runs`] may **delete** uncataloged `*.run` files (orphan cleanup).
+//! [`list_runs`] is a catalog scan (no unlink). Residual files go with
+//! `clear_runs_dir` / discard, not listing.
 
 use crate::error::StoreError;
 use std::cmp::Ordering;
@@ -678,14 +679,11 @@ fn open_and_check_against_entry(
     Ok(run)
 }
 
-/// List runs in `dir` (sorted by seq / name).
+/// List cataloged runs in `dir` (sorted by seq / name). Does **not** delete.
 ///
 /// When `MANIFEST` exists it is the **authoritative** set: only listed runs are
-/// returned; orphans are removed best-effort; missing listed files are warned.
-/// Without a manifest, falls back to a directory scan and rebuilds the catalog.
-///
-/// **Must** be called under the family's `runs_io` lock whenever concurrent
-/// writers/mergers/materialize may touch the same directory (see module docs).
+/// returned; missing listed files are warned. Without a manifest, falls back
+/// to a directory scan and rebuilds the catalog.
 pub fn list_runs(dir: &Path) -> Result<Vec<SortedRunPath>, StoreError> {
     if !dir.exists() {
         return Ok(Vec::new());
@@ -693,9 +691,7 @@ pub fn list_runs(dir: &Path) -> Result<Vec<SortedRunPath>, StoreError> {
 
     if let Some(mf) = load_manifest(dir)? {
         let mut out = Vec::with_capacity(mf.entries.len());
-        let mut listed_seqs = std::collections::HashSet::with_capacity(mf.entries.len());
         for e in &mf.entries {
-            listed_seqs.insert(e.seq);
             let path = next_run_path(dir, e.seq);
             match open_and_check_against_entry(&path, e) {
                 Ok(r) => out.push(r),
@@ -713,26 +709,9 @@ pub fn list_runs(dir: &Path) -> Result<Vec<SortedRunPath>, StoreError> {
                 }
             }
         }
-        // Orphan `*.run` files not in the catalog (e.g. merge inputs left after a
-        // successful MANIFEST commit, or a crash between write and catalog).
-        // Safe only for true leftovers: claimed materialize files use `*.run.mat`
-        // and are not scanned here. Deleting an in-flight claim would drop data.
-        for p in scan_run_paths(dir)? {
-            let Some(seq) = seq_from_path(&p) else {
-                continue;
-            };
-            if !listed_seqs.contains(&seq) {
-                rbitcoin_log::debug!(
-                    "store: removing orphan sorted run not in MANIFEST {}",
-                    p.display()
-                );
-                let _ = fs::remove_file(&p);
-            }
-        }
         return Ok(out);
     }
 
-    // Legacy / empty: scan directory, heal by writing MANIFEST.
     let paths = scan_run_paths(dir)?;
     let mut out = Vec::with_capacity(paths.len());
     for p in paths {
@@ -838,7 +817,7 @@ mod tests {
     }
 
     #[test]
-    fn list_runs_ignores_orphan_not_in_manifest() {
+    fn list_runs_does_not_delete_orphan_not_in_manifest() {
         let d = tmp_dir();
         write_sorted_run(&d.join("000001.run"), 32, 44, &rec(1, 1)).unwrap();
         let orphan = d.join("000099.run");
@@ -846,7 +825,7 @@ mod tests {
         let runs = list_runs(&d).unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].seq(), Some(1));
-        assert!(!orphan.exists(), "orphan should be removed");
+        assert!(orphan.exists(), "scan must not GC");
         let _ = fs::remove_dir_all(&d);
     }
 

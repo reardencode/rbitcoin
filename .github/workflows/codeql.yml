@@ -20,8 +20,10 @@ name: codeql
 on:
   push:
     branches: [master, main]
+  # No `branches:` filter: stacked PRs target topic bases, but the
+  # `code_scanning` ruleset still evaluates every layer against the stack
+  # trunk (`master`). Missing `refs/pull/N/merge` SARIF blocks the stack.
   pull_request:
-    branches: [master, main]
   schedule:
     # Weekly full scan (catches issues that miss PR diffs); offset from top of hour.
     - cron: "23 5 * * 1"

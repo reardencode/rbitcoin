@@ -2333,6 +2333,34 @@ mod tests {
     }
 
     #[test]
+    fn open_does_not_gc_uncataloged_sh_run() {
+        let dir = tmp();
+        {
+            let s = Store::create_tiny(&dir).unwrap();
+            s.flush().unwrap();
+        }
+        let runs = dir.join("scripthash.runs");
+        std::fs::create_dir_all(&runs).unwrap();
+        let mut rec = [0u8; 40];
+        rec[32..40].copy_from_slice(&1u64.to_le_bytes());
+        crate::sorted_run::write_sorted_run(&runs.join("000001.run"), 40, 40, &rec).unwrap();
+        let orphan = runs.join("000099.run");
+        crate::sorted_run::write_sorted_run_file_with_policy(
+            &orphan,
+            40,
+            40,
+            &rec,
+            crate::sorted_run::RunWritePolicy::CATALOG,
+        )
+        .unwrap();
+        assert!(orphan.exists());
+        crate::scripthash::sh_run_catalog_key_len_ok(&dir).unwrap();
+        Store::open_tiny(&dir).unwrap();
+        assert!(orphan.exists(), "open-time catalog check must not GC");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn open_schema18_occupied_scripthash_refused() {
         let dir = tmp();
         let sh = [0xabu8; 32];

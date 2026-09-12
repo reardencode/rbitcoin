@@ -159,9 +159,7 @@ before a unique one; `--connect` skips the filter. Map path and load
 warnings: [`OPERATOR.md`](../OPERATOR.md) § P2P. Inbound protect stays
 prefix groups (asmap is outbound-only).
 
-Still 1.0: AddrMan tried/new **caps** so the book cannot grow without bound;
-`announced_wtx` must roll instead of `clear()` at 50k (INV burst). Those
-leftovers are **Q-60**. Dedicated Core `anchors.dat` can wait if
+Still 1.0: Dedicated Core `anchors.dat` can wait if
 `{datadir}/peers` already ranks last-good outbounds. Tor can wait.
 
 | Done | Step |
@@ -171,7 +169,7 @@ leftovers are **Q-60**. Dedicated Core `anchors.dat` can wait if
 | [x] | `{datadir}/peers` persist + rank last-good / fast |
 | [x] | Compact prefill monotonic; held FIFO; getdata retry on unanswered |
 | [x] | IBD / tip-follow outbound diversity (asmap ASN or prefix); stale evict prefers duplicate groups (**Q-60**) |
-| [ ] | AddrMan caps + `announced_wtx` roll (**Q-60**) |
+| [x] | AddrMan 4096 cap + `announced_wtx` / `from_this_peer` FIFO roll; `cmpct_fills` release on fail/expire/unregister (**Q-60**) |
 
 ### Fee estimates that match inclusion
 
@@ -193,13 +191,13 @@ When the rest is true, tag 1.0 so **every 1.x.x opens a 1.0.0 store**.
 Older-than-1.0 or corrupt files can still refuse with a one-line message.
 
 Do not freeze while Class C / sidecar / fuse8 can lose a `set` or index
-OOB (**Q-57**), or while mempool persist claims LIVE slots before the body
-is durable (**Q-58**). Schema 20 is the current bytes; 0.x may still bump.
+OOB (**Q-57**). Mempool persist writes body before LIVE slots (**Q-58**).
+Schema 20 is the current bytes; 0.x may still bump.
 
 | Done | Step |
 |:----:|------|
 | [x] | No silent wipe; refuse names the dirs ([`SCHEMA.md`](../SCHEMA.md)) |
-| [ ] | Q-57 / Q-58 fail-closed on the durable path |
+| [x] | Q-57 / Q-58 fail-closed on the durable path |
 | [ ] | Tag 1.0.0; `SECURITY.md` names a 1.0.x window |
 
 ---

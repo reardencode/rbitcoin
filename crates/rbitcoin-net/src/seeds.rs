@@ -269,6 +269,9 @@ pub struct PeerEntry {
     pub flags: PeerFlags,
 }
 
+/// Hard cap for learned / `peers` file / addrv2 (not `--connect` / DNS inject).
+pub const MAX_ADDR_MAN: usize = 4096;
+
 /// Peer book: seeds, learned addrs, and dial ranking.
 #[derive(Debug, Default, Clone)]
 pub struct AddrMan {
@@ -310,11 +313,16 @@ impl AddrMan {
         if self.by_addr.contains_key(&addr) {
             return;
         }
+        if self.order.len() >= MAX_ADDR_MAN {
+            let _ = self.evict_oldest_new();
+        }
         self.by_addr.insert(addr, PeerFlags::empty());
         self.order.push(addr);
     }
 
     /// Insert or keep existing; never clears known flags when already present.
+    ///
+    /// Uncapped so `load` can keep tried-first then trim. `merge_from` trims.
     pub fn add_with_flags(&mut self, addr: SocketAddr, flags: PeerFlags) {
         if let Some(f) = self.by_addr.get_mut(&addr) {
             // Union: remember the best information we have.
@@ -325,21 +333,42 @@ impl AddrMan {
         self.order.push(addr);
     }
 
-    /// Insert a newly learned addr, evicting a last-resort entry if `cap` is full.
+    /// Insert a newly learned addr, evicting last-resort then oldest new at `cap`.
     ///
-    /// Returns true when `addr` is now in the book. Duplicates, and a full book
-    /// of only preferred/slow (not failed/incompat) addrs, return false.
+    /// Returns true when `addr` is now in the book. Duplicates, an already
+    /// over-cap book (`add` exceed), and a full book of only tried addrs
+    /// return false. Never exceeds `cap`.
     pub fn add_learned(&mut self, addr: SocketAddr, cap: usize) -> bool {
-        if self.by_addr.contains_key(&addr) {
+        if self.by_addr.contains_key(&addr) || cap == 0 {
             return false;
         }
-        if cap == 0 {
+        if self.order.len() > cap {
             return false;
         }
-        if self.order.len() >= cap && !self.evict_for_learn() {
+        if self.order.len() == cap && !self.evict_for_learn() {
             return false;
         }
-        self.add(addr);
+        self.by_addr.insert(addr, PeerFlags::empty());
+        self.order.push(addr);
+        true
+    }
+
+    fn evict_one(&mut self, addr: SocketAddr) {
+        self.by_addr.remove(&addr);
+        self.last_attempt.remove(&addr);
+        self.order.retain(|a| *a != addr);
+    }
+
+    fn evict_oldest_new(&mut self) -> bool {
+        let victim = self
+            .order
+            .iter()
+            .copied()
+            .find(|a| !self.flags(a).has_connected());
+        let Some(addr) = victim else {
+            return false;
+        };
+        self.evict_one(addr);
         true
     }
 
@@ -355,20 +384,45 @@ impl AddrMan {
                     .copied()
                     .find(|a| self.flags(a).failed_last_connect())
             });
-        let Some(addr) = victim else {
-            return false;
-        };
-        self.by_addr.remove(&addr);
-        self.last_attempt.remove(&addr);
-        self.order.retain(|a| *a != addr);
-        true
+        if let Some(addr) = victim {
+            self.evict_one(addr);
+            return true;
+        }
+        self.evict_oldest_new()
+    }
+
+    fn trim_to_cap(&mut self, cap: usize) {
+        if self.order.len() <= cap {
+            return;
+        }
+        let mut keep: Vec<SocketAddr> = self
+            .order
+            .iter()
+            .copied()
+            .filter(|a| self.flags(a).has_connected())
+            .collect();
+        keep.extend(
+            self.order
+                .iter()
+                .copied()
+                .filter(|a| !self.flags(a).has_connected()),
+        );
+        keep.truncate(cap);
+        let keep_set: HashSet<SocketAddr> = keep.iter().copied().collect();
+        self.order = keep;
+        self.by_addr.retain(|a, _| keep_set.contains(a));
+        self.last_attempt.retain(|a, _| keep_set.contains(a));
     }
 
     /// Merge another book into this one (flag bits OR'd for shared addrs).
+    ///
+    /// `add_with_flags` is uncapped so `load` can keep tried-first then trim.
+    /// This path is not load: trim after the union.
     pub fn merge_from(&mut self, other: &AddrMan) {
         for e in other.entries() {
             self.add_with_flags(e.addr, e.flags);
         }
+        self.trim_to_cap(MAX_ADDR_MAN);
         self.sort_order_ipv4_first();
     }
 
@@ -641,6 +695,7 @@ impl AddrMan {
             // Empty or comment-only without magic — treat as empty book.
             return Ok(Self::new());
         }
+        am.trim_to_cap(MAX_ADDR_MAN);
         am.sort_order_ipv4_first();
         Ok(am)
     }
@@ -675,6 +730,18 @@ mod tests {
 
     fn addr(o: u8) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, o)), 8333)
+    }
+
+    fn addr_n(i: u32) -> SocketAddr {
+        SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(
+                10,
+                ((i >> 16) & 0xff) as u8,
+                ((i >> 8) & 0xff) as u8,
+                (i & 0xff) as u8,
+            )),
+            8333,
+        )
     }
 
     #[test]
@@ -902,6 +969,119 @@ mod tests {
         assert_eq!(am.len(), 3);
         assert!(am.entry(&addr(9)).is_none());
         assert!(!am.add_learned(addr(1), 3));
+    }
+
+    #[test]
+    fn add_learned_evicts_oldest_new_when_at_cap() {
+        let mut am = AddrMan::new();
+        for i in 1..=3 {
+            am.add(addr(i));
+        }
+        assert!(am.add_learned(addr(9), 3));
+        assert_eq!(am.len(), 3);
+        assert!(am.entry(&addr(9)).is_some());
+        assert!(
+            am.entry(&addr(1)).is_none(),
+            "oldest new is evicted after incompat/failed"
+        );
+        assert!(am.entry(&addr(2)).is_some());
+        assert!(am.entry(&addr(3)).is_some());
+    }
+
+    #[test]
+    fn add_keeps_tried_and_may_exceed_cap() {
+        let mut am = AddrMan::new();
+        for i in 0..MAX_ADDR_MAN {
+            let a = addr_n(i as u32);
+            am.add(a);
+            am.note_connected(a);
+        }
+        let extra = addr_n(MAX_ADDR_MAN as u32);
+        am.add(extra);
+        assert_eq!(am.len(), MAX_ADDR_MAN + 1);
+        assert!(am.entry(&extra).is_some());
+        assert!(am.entry(&addr_n(0)).is_some());
+        assert!(!am.add_learned(addr_n(MAX_ADDR_MAN as u32 + 1), MAX_ADDR_MAN));
+        assert_eq!(am.len(), MAX_ADDR_MAN + 1);
+        assert!(am.entry(&extra).is_some());
+    }
+
+    #[test]
+    fn add_evicts_oldest_new_at_cap() {
+        let mut am = AddrMan::new();
+        for i in 0..MAX_ADDR_MAN {
+            am.add(addr_n(i as u32));
+        }
+        let extra = addr_n(MAX_ADDR_MAN as u32);
+        am.add(extra);
+        assert_eq!(am.len(), MAX_ADDR_MAN);
+        assert!(am.entry(&extra).is_some());
+        assert!(am.entry(&addr_n(0)).is_none());
+        assert!(am.entry(&addr_n(1)).is_some());
+    }
+
+    #[test]
+    fn merge_from_trims_to_cap_keeping_tried() {
+        let mut a = AddrMan::new();
+        for i in 0..MAX_ADDR_MAN {
+            let x = addr_n(i as u32);
+            a.add(x);
+            a.note_connected(x);
+        }
+        let mut b = AddrMan::new();
+        for i in 0..8 {
+            b.add(addr_n(MAX_ADDR_MAN as u32 + i));
+        }
+        a.merge_from(&b);
+        assert_eq!(a.len(), MAX_ADDR_MAN);
+        assert!(
+            a.entry(&addr_n(0)).is_some(),
+            "tried addrs must survive merge trim"
+        );
+        assert!(
+            a.entry(&addr_n(MAX_ADDR_MAN as u32)).is_none(),
+            "extra new from the other book must not grow past cap"
+        );
+    }
+
+    #[test]
+    fn load_trims_tried_then_new_to_cap() {
+        let dir = std::env::temp_dir().join(format!(
+            "rbitcoin-peers-cap-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("peers");
+        let mut body = String::from("rbitcoin-peers-v1\n");
+        let n_tried = 2000u32;
+        let n_total = 5000u32;
+        for i in 0..n_tried {
+            body.push_str(&format!("{} 0x01\n", addr_n(i)));
+        }
+        for i in n_tried..n_total {
+            body.push_str(&format!("{} 0x00\n", addr_n(i)));
+        }
+        std::fs::write(&path, body).unwrap();
+        let loaded = AddrMan::load(&path).unwrap();
+        assert_eq!(loaded.len(), MAX_ADDR_MAN);
+        for i in 0..n_tried {
+            assert!(
+                loaded.entry(&addr_n(i)).is_some(),
+                "tried {i} must survive trim"
+            );
+            assert!(loaded.flags(&addr_n(i)).has_connected());
+        }
+        let n_new_kept = MAX_ADDR_MAN - n_tried as usize;
+        assert!(loaded.entry(&addr_n(n_tried)).is_some());
+        assert!(loaded
+            .entry(&addr_n(n_tried + n_new_kept as u32 - 1))
+            .is_some());
+        assert!(loaded.entry(&addr_n(n_total - 1)).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

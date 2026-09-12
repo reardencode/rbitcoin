@@ -376,19 +376,19 @@ impl BdzMphf {
             return Err(StoreError::Corrupt("bdz mphf: write requires RAM g"));
         };
         let g_bits = g_bits_for_modulus(self.modulus);
-        let mut f = std::fs::File::create(path).map_err(|e| StoreError::io(path, e))?;
-        let mut hdr = [0u8; HEADER_LEN2 as usize];
-        hdr[0..4].copy_from_slice(MAGIC2);
-        hdr[4..8].copy_from_slice(&VERSION.to_le_bytes());
-        hdr[8..12].copy_from_slice(&self.n.to_le_bytes());
-        hdr[12..16].copy_from_slice(&self.m.to_le_bytes());
-        hdr[16..24].copy_from_slice(&self.seed.to_le_bytes());
-        hdr[24..28].copy_from_slice(&self.modulus.to_le_bytes());
-        hdr[28..32].copy_from_slice(&g_bits.to_le_bytes());
-        f.write_all(&hdr).map_err(|e| StoreError::io(path, e))?;
-        pack_g_write(g, g_bits, &mut f).map_err(|e| StoreError::io(path, e))?;
-        f.sync_all().map_err(|e| StoreError::io(path, e))?;
-        Ok(())
+        crate::file::write_synced_tmp_file(path, |f| {
+            let mut hdr = [0u8; HEADER_LEN2 as usize];
+            hdr[0..4].copy_from_slice(MAGIC2);
+            hdr[4..8].copy_from_slice(&VERSION.to_le_bytes());
+            hdr[8..12].copy_from_slice(&self.n.to_le_bytes());
+            hdr[12..16].copy_from_slice(&self.m.to_le_bytes());
+            hdr[16..24].copy_from_slice(&self.seed.to_le_bytes());
+            hdr[24..28].copy_from_slice(&self.modulus.to_le_bytes());
+            hdr[28..32].copy_from_slice(&g_bits.to_le_bytes());
+            f.write_all(&hdr).map_err(|e| StoreError::io(path, e))?;
+            pack_g_write(g, g_bits, f).map_err(|e| StoreError::io(path, e))?;
+            Ok(())
+        })
     }
 
     #[cfg(test)]
@@ -547,22 +547,22 @@ impl BdzMphf {
         let Some(rank) = self.compact.as_ref() else {
             return Err(StoreError::Corrupt("bdz mphf: compact write"));
         };
-        let mut f = std::fs::File::create(path).map_err(|e| StoreError::io(path, e))?;
-        let mut hdr = [0u8; HEADER_LEN3 as usize];
-        hdr[0..4].copy_from_slice(MAGIC3);
-        hdr[4..8].copy_from_slice(&VERSION.to_le_bytes());
-        hdr[8..12].copy_from_slice(&self.n.to_le_bytes());
-        hdr[12..16].copy_from_slice(&self.m.to_le_bytes());
-        hdr[16..24].copy_from_slice(&self.seed.to_le_bytes());
-        hdr[24..28].copy_from_slice(&0u32.to_le_bytes());
-        hdr[28..32].copy_from_slice(&COMPACT_G_BITS.to_le_bytes());
-        f.write_all(&hdr).map_err(|e| StoreError::io(path, e))?;
-        if self.n > 0 {
-            pack_g_write(g, COMPACT_G_BITS, &mut f).map_err(|e| StoreError::io(path, e))?;
-            write_occ(&rank.occ, rank.m, &mut f).map_err(|e| StoreError::io(path, e))?;
-        }
-        f.sync_all().map_err(|e| StoreError::io(path, e))?;
-        Ok(())
+        crate::file::write_synced_tmp_file(path, |f| {
+            let mut hdr = [0u8; HEADER_LEN3 as usize];
+            hdr[0..4].copy_from_slice(MAGIC3);
+            hdr[4..8].copy_from_slice(&VERSION.to_le_bytes());
+            hdr[8..12].copy_from_slice(&self.n.to_le_bytes());
+            hdr[12..16].copy_from_slice(&self.m.to_le_bytes());
+            hdr[16..24].copy_from_slice(&self.seed.to_le_bytes());
+            hdr[24..28].copy_from_slice(&0u32.to_le_bytes());
+            hdr[28..32].copy_from_slice(&COMPACT_G_BITS.to_le_bytes());
+            f.write_all(&hdr).map_err(|e| StoreError::io(path, e))?;
+            if self.n > 0 {
+                pack_g_write(g, COMPACT_G_BITS, f).map_err(|e| StoreError::io(path, e))?;
+                write_occ(&rank.occ, rank.m, f).map_err(|e| StoreError::io(path, e))?;
+            }
+            Ok(())
+        })
     }
 
     pub fn read_compact_from(path: &Path) -> Result<Self, StoreError> {
@@ -1747,6 +1747,12 @@ mod tests {
         assert!(fd.index(miss).unwrap() < keys.len() as u32);
         let _ = fd.take_g_page_preads();
         assert_eq!(fd.index(keys[0]).unwrap(), ram.index(keys[0]).unwrap());
+        let empty = dir.join("empty.mphf");
+        std::fs::File::create(&empty).unwrap();
+        assert!(matches!(
+            BdzMphf::read_compact_from(&empty),
+            Err(StoreError::Corrupt(_))
+        ));
         assert!(fd.take_g_page_preads() >= 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
