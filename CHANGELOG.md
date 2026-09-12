@@ -46,6 +46,12 @@ before 1.0).
 - **RPC `maxfeerate`:** prevout-sum overflow is over-cap (reject), not
   fail-open. Missing prevouts still skip the cap so `accept_tx` can say
   missing-inputs.
+- **P2P caps (Q-60):** AddrMan learned/`peers`/`addpeeraddress` stay at 4096
+  (evict incompat, then failed last-connect, then oldest new). `--connect` /
+  DNS inject may exceed when only tried addrs remain. `announced_wtx` and
+  `from_this_peer` FIFO-roll at 50k instead of `clear()`. Compact `cmpct_fills`
+  decrement on reconstruct fail, getdata expire, and unregister (Accepted
+  still clears the hash).
 - **IBD io_uring drain stall:** `drain_all` no longer returns after 5 s with
   leftover SQEs (that freed in-flight buffers). Every TLS session waits while
   CQEs arrive; a 120 s zero-completion stall aborts explicit drain (session

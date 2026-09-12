@@ -159,9 +159,7 @@ before a unique one; `--connect` skips the filter. Map path and load
 warnings: [`OPERATOR.md`](../OPERATOR.md) § P2P. Inbound protect stays
 prefix groups (asmap is outbound-only).
 
-Still 1.0: AddrMan tried/new **caps** so the book cannot grow without bound;
-`announced_wtx` must roll instead of `clear()` at 50k (INV burst). Those
-leftovers are **Q-60**. Dedicated Core `anchors.dat` can wait if
+Still 1.0: Dedicated Core `anchors.dat` can wait if
 `{datadir}/peers` already ranks last-good outbounds. Tor can wait.
 
 | Done | Step |
@@ -171,7 +169,7 @@ leftovers are **Q-60**. Dedicated Core `anchors.dat` can wait if
 | [x] | `{datadir}/peers` persist + rank last-good / fast |
 | [x] | Compact prefill monotonic; held FIFO; getdata retry on unanswered |
 | [x] | IBD / tip-follow outbound diversity (asmap ASN or prefix); stale evict prefers duplicate groups (**Q-60**) |
-| [ ] | AddrMan caps + `announced_wtx` roll (**Q-60**) |
+| [x] | AddrMan 4096 cap + `announced_wtx` / `from_this_peer` FIFO roll; `cmpct_fills` release on fail/expire/unregister (**Q-60**) |
 
 ### Fee estimates that match inclusion
 
