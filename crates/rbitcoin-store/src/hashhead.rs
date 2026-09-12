@@ -10,7 +10,7 @@
 //! packed value sets the high bit and points at a multi-list (`.mlt` sibling file):
 //! `create_fk:u64 | next:u64`.
 //!
-//! **IBD write path:** chunk-coalesced insert_many (128 slots ≈ 3 KiB RMW) under
+//! **IBD write path:** chunk-coalesced `insert_many_file` (128 slots ≈ 3 KiB RMW) under
 //! fd pread/pwrite. Probe walks reuse the same chunk cache so
 //! a hop is not one pread per open-address step.
 
@@ -508,6 +508,7 @@ impl HashHead {
     }
 
     /// Single-key insert (convenience; batch path is [`Self::insert_many`]).
+    #[cfg(test)]
     pub fn insert(&self, key: &[u8; 32], fk: Fk) -> Result<Option<Fk>, StoreError> {
         debug_assert!(!fk.is_null());
         let mut prev = None;
@@ -515,10 +516,12 @@ impl HashHead {
         Ok(prev)
     }
 
+    #[cfg(test)]
     pub fn insert_many(&self, entries: &[([u8; 32], Fk)]) -> Result<(), StoreError> {
         self.insert_many_with(entries, |_| {})
     }
 
+    #[cfg(test)]
     fn insert_many_with(
         &self,
         entries: &[([u8; 32], Fk)],
