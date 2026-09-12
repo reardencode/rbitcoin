@@ -2420,7 +2420,10 @@ impl Query {
     /// Recursive DFS stack-overflowed (SIGSEGV) on mid-IBD restart; a fresh memo
     /// per call was O(depth²) on long header bands (each path step re-walked the
     /// remaining chain).
-    fn resume_subtree_score(
+    ///
+    /// Gray (`on_stack`) nodes are not re-pushed: a `prev_fk` cycle used to spin
+    /// the IBD thread after `resume seed walk start` with no further log.
+    pub(crate) fn resume_subtree_score(
         store: &rbitcoin_store::Store,
         children: &U64Map<Vec<(Fk, [u8; 32])>>,
         root: Fk,
@@ -2431,23 +2434,29 @@ impl Query {
             return Ok(v);
         }
         // false = first visit (push children), true = children done (fold).
+        let mut on_stack: U64Set = U64Set::default();
         let mut stack: Vec<(Fk, bool)> = Vec::with_capacity(256);
         stack.push((root, false));
         while let Some((fk, children_done)) = stack.pop() {
             if memo.contains_key(&fk.0) {
+                on_stack.remove(&fk.0);
                 continue;
             }
             if !children_done {
+                if !on_stack.insert(fk.0) {
+                    continue;
+                }
                 stack.push((fk, true));
                 if let Some(kids) = children.get(&fk.0) {
                     for &(ck, _) in kids {
-                        if !memo.contains_key(&ck.0) {
+                        if !memo.contains_key(&ck.0) && !on_stack.contains(&ck.0) {
                             stack.push((ck, false));
                         }
                     }
                 }
                 continue;
             }
+            on_stack.remove(&fk.0);
             let rec = store.get_header(fk)?;
             let own = Target::from_compact(CompactTarget::from_consensus(rec.bits)).to_work();
             let mut best_child_w = bitcoin::Work::from_be_bytes([0u8; 32]);
