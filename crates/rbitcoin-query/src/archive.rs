@@ -1921,16 +1921,10 @@ mod tests {
         assert_eq!(edges[0].vout, 0);
         assert_eq!(edges[0].spend_fk, Fk(2));
         assert_eq!(edges[0].create_fk, Fk(1));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn archive_commit_encodes_same_batch_spent_slot() {
-        let (dir, q) = temp_query("commit-same-batch-spent");
-        let parent = coinbase_apply(1);
-        let parent_txid = parent.tx.txid;
-        let need = vec![(Fk(1), vec![parent, child_spend(parent_txid, 0xee)])];
-        let plan = plan_applies(&q, &need, 1, &crate::InFlight::new(), None).expect("plan");
+        let overlay = plan.same_batch_spent_overlay();
+        assert_eq!(overlay.len(), 2);
+        assert_eq!(overlay[0], vec![(0, Fk(2))]);
+        assert!(overlay[1].is_empty());
         q.archive_commit_plan(plan).unwrap();
         let (off, _) = q.store().tx_spent_range(Fk(1)).unwrap();
         let abs0 = rbitcoin_store::spent_abs(off, 0);
@@ -1940,20 +1934,6 @@ mod tests {
         let cabs = rbitcoin_store::spent_abs(coff, 0);
         let cbulk = q.store().get_spender_meta_at_abs_batch(&[cabs]).unwrap();
         assert!(cbulk[0].unwrap().0.is_null());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn same_batch_overlay_skips_coinbase_and_unspent_child() {
-        let (dir, q) = temp_query("overlay-skip-coinbase");
-        let parent = coinbase_apply(1);
-        let parent_txid = parent.tx.txid;
-        let need = vec![(Fk(1), vec![parent, child_spend(parent_txid, 0xee)])];
-        let plan = plan_applies(&q, &need, 1, &crate::InFlight::new(), None).expect("plan");
-        let overlay = plan.same_batch_spent_overlay();
-        assert_eq!(overlay.len(), 2);
-        assert_eq!(overlay[0], vec![(0, Fk(2))]);
-        assert!(overlay[1].is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
