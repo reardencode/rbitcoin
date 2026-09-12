@@ -606,7 +606,18 @@ async fn tx_status(
                     Err(e) => store_err(e),
                 }
             }
-            Ok(None) => not_found(),
+            Ok(None) => {
+                if asof.is_some() {
+                    return not_found();
+                }
+                use bitcoin::hashes::Hash;
+                let tid = bitcoin::Txid::from_byte_array(txid);
+                if st.mempool.as_ref().is_some_and(|m| m.contains(&tid)) {
+                    Json(json!({ "confirmed": false })).into_response()
+                } else {
+                    not_found()
+                }
+            }
             Err(e) => store_err(e),
         }
     })
@@ -2348,6 +2359,31 @@ mod tests {
         assert!(full.get("size").is_some());
         assert!(full.get("weight").is_some());
         assert_eq!(full["status"]["confirmed"], false);
+
+        let (st, body) = http_get(addr, &format!("/tx/{txid_hex}/status")).await;
+        assert_eq!(st, 200, "GET /tx status mempool-only: {body}");
+        let status: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(status["confirmed"], false);
+
+        let cb0 = block_hash_hex(&coinbase_txids[0]);
+        let (st, body) = http_get(addr, &format!("/tx/{cb0}/outspend/0")).await;
+        assert_eq!(st, 200, "mempool-spent confirmed coin: {body}");
+        let os: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(os["spent"], true, "{os}");
+        assert_eq!(os["txid"], txid_hex);
+        assert_eq!(os["status"]["confirmed"], false);
+
+        let (st, body) = http_get(addr, &format!("/tx/{txid_hex}/outspend/0")).await;
+        assert_eq!(st, 200, "mempool-only create outspend: {body}");
+        let os: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(os["spent"], false, "{os}");
+
+        let hash0 = q.header_at_height(Height(0)).unwrap().unwrap().1.hash;
+        let asof0 = block_hash_hex(&hash0);
+        let (st, _, body) = http_get_raw(addr, &format!("/tx/{cb0}/outspend/0?asof={asof0}")).await;
+        assert_eq!(st, 200, "asof outspend: {body}");
+        let os: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(os["spent"], false, "asof omits mempool spend: {os}");
 
         let (st, hex_body) = http_get(addr, &format!("/tx/{txid_hex}/hex")).await;
         assert_eq!(st, 200, "{hex_body}");
