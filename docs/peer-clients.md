@@ -107,7 +107,7 @@ reject (or the Core-equivalent edge). Tests live in the suites named in
 | **H01** | Parent hash is a valid header | `header_and_spending_boundaries` (`validate_header` height 1) | `h2_rejects_bad_prev_link` |
 | **H02** | Header hash `<=` claimed target | same journey (regtest grind) | `h7_rejects_header_hash_above_target` (mainnet bits, nonce misses) |
 | **H03** | `nBits` matches difficulty adjust | same journey | `h5_regtest_rejects_wrong_bits`; testnet 20 min min-diff: `testnet_min_difficulty_after_20_minute_gap` |
-| **H04** | `time > MTP(11)` | journey: `mtp+1` accepts | journey + `h3_rejects_timestamp_not_after_mtp`: `time == mtp` rejects |
+| **H04** | `time > MTP(11)` | journey: `mtp+1` accepts | journey: `time == mtp` rejects |
 | **H05** | `time <= now + 2h` | `h8_timestamp_exactly_two_hours_accepts_plus_one_rejects` (`now+7200`) | same test (`now+7201`); `h8_rejects_timestamp_too_far_in_future` |
 | **H06** | Version not retired by BIP34/66/65 | `h9_version_floors_at_bip34_66_65` (v2 @ BIP34, v3 @ BIP66, v4 @ BIP65 / regtest h=1) | same test (v1 @ BIP34, v2 @ BIP66, v3 @ BIP65 / regtest v3) |
 | **L01** | ≥1 transaction | `s1_rejects_empty_txdata` (coinbase accepts) | same (`txdata` empty) |
@@ -131,14 +131,14 @@ reject (or the Core-equivalent edge). Tests live in the suites named in
 | **C06** | Commitment ⇒ 32-byte nonce | `s8_accepts_witness_commitment_with_reserved_value` | `s8_rejects_empty_or_multi_item_coinbase_witness_reserved` |
 | **C07** | Commitment matches witness merkle + nonce | same accept test (`apply_witness_commitment`) | `s8_rejects_wrong_witness_commitment` |
 | **S01** | BIP30 unique unspent creates | every connecting block; exception table `is_bip30_repeat_matches_core` (91842 / 91880) | `bip30_rejects_unspent_connected_sibling` |
-| **S02** | Prevout exists *(merged into S03 in `spec.h`)* | journey OP_TRUE spend of height-1 coinbase | journey: random txid → `MissingPrevout`; `c8_same_block_child_before_parent_rejected` |
-| **S03** | Prevout still unspent | journey first spend | journey second spend of same outpoint; `c2_same_block_double_spend_rejected` |
+| **S02** | Prevout exists *(merged into S03 in `spec.h`)* | journey OP_TRUE spend of height-1 coinbase | journey: random txid → `MissingPrevout`; journey child-before-parent same-block |
+| **S03** | Prevout still unspent | journey first spend | journey second spend of same outpoint; journey same-block two spends |
 | **S04** | Sigop **cost** `<= 80_000` | `s11_rejects_excessive_legacy_sigops` (20 000×CHECKSIG) | same (`20_001` → cost 80 004); `sigop_cost_tests::*` (P2SH/witness) |
-| **S05** | Coinbase `<=` subsidy + fees | journey exact 50 BTC empty pads; `p1_block_subsidy_halvings` | journey `subsidy+1` sat; `c7_coinbase_excess_subsidy_rejected` |
-| **S06** | Tx `out <= in` | journey `in==out` (zero fee) | journey `in+1`; `c6_value_in_less_than_out_rejected` |
+| **S05** | Coinbase `<=` subsidy + fees | journey exact 50 BTC empty pads; `p1_block_subsidy_halvings` | journey `subsidy+1` sat |
+| **S06** | Tx `out <= in` | journey `in==out` (zero fee) | journey `in+1` |
 | **S07** | Scripts succeed | journey anyone-can-spend `OP_TRUE`; Core `script_tests` / `tx_valid` | Core `tx_invalid` / `script_tests` reject rows |
 | **S08** | BIP68 relative finality | journey `nSequence=10` at height 101; `bip68_height_relative_lock` | journey `nSequence=200` at 101; `finality_tests` 109/110 edge |
-| **S09** | Coinbase maturity 100 | journey spend at height 101 (`created+100`) | journey spend at height 100; `c5_immature_coinbase_spend_rejected` |
+| **S09** | Coinbase maturity 100 | journey spend at height 101 (`created+100`) | journey spend at height 100 |
 
 Connect-path journey: `rbitcoin-test` `header_and_spending_boundaries`.
 
