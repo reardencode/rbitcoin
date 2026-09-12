@@ -322,6 +322,43 @@ struct PlanRow {
     ins_est: u64,
 }
 
+fn collect_plan_need_external(
+    work: &[PlanRow],
+    batch_map: &std::collections::HashMap<[u8; 32], Fk>,
+    carried_need: Option<&[[u8; 32]]>,
+) -> Vec<[u8; 32]> {
+    use std::collections::HashSet;
+    let mut need_external: HashSet<[u8; 32]> = HashSet::new();
+    if let Some(keys) = carried_need {
+        for &prev in keys {
+            if prev == [0u8; 32] || batch_map.contains_key(&prev) {
+                continue;
+            }
+            need_external.insert(prev);
+        }
+        return need_external.into_iter().collect();
+    }
+    for row in work {
+        for (i, inp) in row.ins.iter().enumerate() {
+            if inp.is_coinbase {
+                continue;
+            }
+            if row
+                .packed_ins
+                .get(i)
+                .is_some_and(|r| !r.create_fk.is_null())
+            {
+                continue;
+            }
+            if batch_map.contains_key(&inp.prev_txid) || inp.prev_txid == [0u8; 32] {
+                continue;
+            }
+            need_external.insert(inp.prev_txid);
+        }
+    }
+    need_external.into_iter().collect()
+}
+
 /// Class A ins from wire + stamped spend edges (write-time encode).
 pub fn input_records_from_wire(
     tx: &bitcoin::Transaction,
@@ -559,7 +596,6 @@ impl Query {
         skeleton: Option<&crate::BatchParentIds>,
         carried_need: Option<&[[u8; 32]]>,
     ) -> Result<ArchiveWritePlan, QueryError> {
-        use std::collections::HashSet;
         use std::time::Instant;
 
         let mut spends: Vec<([u8; 32], u32, Fk)> = Vec::new();
@@ -567,40 +603,7 @@ impl Query {
         let index_tx = self.tx_index_enabled();
 
         let t_collect = Instant::now();
-        let need_vec: Vec<[u8; 32]> = if let Some(keys) = carried_need {
-            let mut need_external: HashSet<[u8; 32]> = HashSet::new();
-            for &prev in keys {
-                if prev == [0u8; 32] || batch_map.contains_key(&prev) {
-                    continue;
-                }
-                need_external.insert(prev);
-            }
-            need_external.into_iter().collect()
-        } else {
-            let mut need_external: HashSet<[u8; 32]> = HashSet::new();
-            for row in &work {
-                for (i, inp) in row.ins.iter().enumerate() {
-                    if inp.is_coinbase {
-                        continue;
-                    }
-                    if row
-                        .packed_ins
-                        .get(i)
-                        .is_some_and(|r| !r.create_fk.is_null())
-                    {
-                        continue;
-                    }
-                    if batch_map.contains_key(&inp.prev_txid) {
-                        continue;
-                    }
-                    if inp.prev_txid == [0u8; 32] {
-                        continue;
-                    }
-                    need_external.insert(inp.prev_txid);
-                }
-            }
-            need_external.into_iter().collect()
-        };
+        let need_vec = collect_plan_need_external(&work, &batch_map, carried_need);
         let collect_ns = t_collect.elapsed().as_nanos() as u64;
 
         let ext = crate::stamp_external_parents(
