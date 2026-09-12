@@ -216,6 +216,65 @@ fn config_helpers_and_param_parsers() {
 }
 
 #[test]
+fn history_row_json_omits_fee_on_confirmed_genesis() {
+    use rbitcoin_primitives::Fk;
+    let genesis = rbitcoin_query::ScriptHashHistoryItem {
+        height: 0,
+        txid: [1u8; 32],
+        tx_fk: Fk(1),
+        fee: None,
+    };
+    let v = history_row_json(&genesis);
+    assert!(
+        v.get("fee").is_none(),
+        "confirmed genesis must omit fee: {v}"
+    );
+    assert_eq!(v["height"], 0);
+
+    let mempool = rbitcoin_query::ScriptHashHistoryItem {
+        height: 0,
+        txid: [2u8; 32],
+        tx_fk: Fk::NULL,
+        fee: Some(123),
+    };
+    let v = history_row_json(&mempool);
+    assert_eq!(v["fee"], 123);
+
+    let child = rbitcoin_query::ScriptHashHistoryItem {
+        height: -1,
+        txid: [3u8; 32],
+        tx_fk: Fk::NULL,
+        fee: Some(9),
+    };
+    let v = history_row_json(&child);
+    assert_eq!(v["fee"], 9);
+    assert_eq!(v["height"], -1);
+
+    let conf = rbitcoin_query::ScriptHashHistoryItem {
+        height: 10,
+        txid: [4u8; 32],
+        tx_fk: Fk(2),
+        fee: None,
+    };
+    let v = history_row_json(&conf);
+    assert!(v.get("fee").is_none(), "{v}");
+}
+
+#[test]
+fn drop_unsubscribed_status_clears_idle_hashes() {
+    let mut last = HashMap::new();
+    let gone = [1u8; 32];
+    let keep = [2u8; 32];
+    last.insert(gone, "x".into());
+    last.insert(keep, "y".into());
+    let mut subs = HashSet::new();
+    subs.insert(keep);
+    drop_unsubscribed_status(&mut last, &subs);
+    assert_eq!(last.get(&keep), Some(&"y".to_string()));
+    assert!(!last.contains_key(&gone));
+}
+
+#[test]
 fn restatus_notes_scans_intermediate_tick_heights() {
     use rbitcoin_primitives::{Fk, Height};
     use rbitcoin_query::TxApply;
@@ -2997,7 +3056,10 @@ fn dispatch_live_mempool_surfaces() {
         );
     }
     for r in hist.as_array().unwrap() {
-        if r["height"].as_i64().unwrap() > 0 {
+        let tx_hash = r["tx_hash"].as_str().unwrap();
+        if mem_rows.iter().any(|m| m["tx_hash"] == tx_hash) {
+            assert!(r.get("fee").is_some(), "unconfirmed history needs fee: {r}");
+        } else {
             assert!(r.get("fee").is_none(), "confirmed history has no fee: {r}");
         }
     }

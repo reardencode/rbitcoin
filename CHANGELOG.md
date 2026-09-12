@@ -22,8 +22,9 @@ before 1.0).
 
 - **Electrum 1.4 leftover:** `blockchain.scripthash.unsubscribe` returns whether
   the connection was watching (frees the per-connection cap). `get_history`
-  unconfirmed rows include `fee`. `listunspent` mempool height is `-1` when
-  a parent is still in the mempool (otherwise `0`).
+  unconfirmed rows include `fee`; confirmed rows (including genesis height 0)
+  omit it. `listunspent` mempool height is `-1` when a parent is still in the
+  mempool (otherwise `0`).
 - **Packed P2TR scan:** `scan_packed_p2tr_outs` fails closed on an output
   value above `i64::MAX` (`Corrupt("output value too large")`), matching
   `OutputRecord::decode_at_secret`.
