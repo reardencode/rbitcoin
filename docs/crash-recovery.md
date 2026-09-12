@@ -52,8 +52,9 @@ Open revalidation runs in `Query::open_or_create` **before** P2P can extend tip.
 ## Spends (v5: annotation on create outputs)
 
 - Sole spender: 8 B slot on **`spent.body`**. Multi: `MULTI_SPENDER` + `spent.ovf` list.
+- Class A may write same-batch sole `spend_fk` into the spent stem (creates in that append wave). Historical parents stay zero until annotate **after tip**.
 - Annotations may remain after disconnect / for non-strong spenders.
-- Best-chain spentness: annotation + `is_confirmed_strong(spender)`.
+- Best-chain spentness: annotation + `is_confirmed_strong(spender)`. Same-batch pre-fill is not strong until this batch's Class C.
 - Kill-safe: stale/non-strong fields do not false-positive if filter is applied.
 - No `point.head` (v4 open-hash multimap removed).
 - Class A is **three stems** (`txout` / `inwit` / `spent`); bare-meta puts are rejected. Packed `tx.body` with creates is refused on open.
