@@ -110,8 +110,7 @@ fn group_body_peeks(windows: &[(u64, u64)]) -> Vec<(u64, u64, Vec<usize>)> {
     let (mut glo, mut ghi) = pages(windows[0].0, windows[0].1);
     let mut min_off = windows[0].0;
     let mut max_end = windows[0].0.saturating_add(windows[0].1);
-    for i in 1..windows.len() {
-        let (off, len) = windows[i];
+    for (i, &(off, len)) in windows.iter().enumerate().skip(1) {
         let (plo, phi) = pages(off, len);
         let new_hi = ghi.max(phi);
         if plo <= ghi && new_hi.saturating_sub(glo) < BODY_GROUP_MAX_PAGES {
@@ -277,8 +276,10 @@ pub fn run_idx_body_pipeline_backend(
             len: jobs[i].body.len(),
         })
         .collect();
-    let mut stats = IdxBodyIoStats::default();
-    stats.body_sqe_n = pread_grouped_peeks(jobs, &dests, body_fd, body_path, backend, true)?;
+    let mut stats = IdxBodyIoStats {
+        body_sqe_n: pread_grouped_peeks(jobs, &dests, body_fd, body_path, backend, true)?,
+        ..Default::default()
+    };
     if mode == BodyMode::Outs {
         let (extend_n, extend_sqe) = extend_truncated_txout_jobs(table, jobs, backend)?;
         stats.extend_n = extend_n;
