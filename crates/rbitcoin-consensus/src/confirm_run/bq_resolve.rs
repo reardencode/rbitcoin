@@ -1070,6 +1070,11 @@ mod tests {
             next_tx_start: q.tx_body_count().saturating_add(1).max(1),
             in_flight: &inflight,
             skeleton: Some(wave.parent_ids.clone()),
+            carried_need: wave
+                .items
+                .iter()
+                .flat_map(|(_, _, w)| w.spend_keys.iter().map(|&(t, _)| t))
+                .collect(),
         };
         let items = [(Height(1), std::sync::Arc::new(b1), None)];
         let stamped =
@@ -1199,6 +1204,7 @@ mod tests {
                 next_tx_start: q.tx_body_count().saturating_add(1).max(1),
                 in_flight: &log,
                 skeleton: None,
+                carried_need: Vec::new(),
             };
             let items = [(Height(1), std::sync::Arc::new(b1), None)];
             crate::confirm_wire_lookup_stamp(&q, &params, Milestone::NONE, &items, Some(&pipe))
@@ -1286,6 +1292,7 @@ mod tests {
                 next_tx_start: q.tx_body_count().saturating_add(1).max(1),
                 in_flight: &log,
                 skeleton: None,
+                carried_need: Vec::new(),
             };
             let items = [(Height(1), std::sync::Arc::new(b1), None)];
             crate::confirm_wire_lookup_stamp(&q, &params, Milestone::NONE, &items, Some(&pipe))
@@ -1373,6 +1380,7 @@ mod tests {
                 &[(rbitcoin_primitives::Fk(1), &block, txids.as_slice())],
                 1,
                 &rbitcoin_query::InFlight::new(),
+                None,
                 None,
             )
             .expect_err("disconnected leftover must not TipThenAny-fill");

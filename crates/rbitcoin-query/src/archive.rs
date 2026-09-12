@@ -441,7 +441,7 @@ impl Query {
         }
         let start = self.store.txs.count().saturating_add(1);
         let mut plan =
-            self.archive_plan_batch_from_wire(&need, start, &crate::InFlight::new(), None)?;
+            self.archive_plan_batch_from_wire(&need, start, &crate::InFlight::new(), None, None)?;
         if plan.is_empty() {
             return Ok(());
         }
@@ -477,6 +477,7 @@ impl Query {
         next_tx_start: u64,
         in_flight: &crate::InFlight,
         skeleton: Option<&crate::BatchParentIds>,
+        carried_need: Option<&[[u8; 32]]>,
     ) -> Result<ArchiveWritePlan, QueryError> {
         use std::collections::{HashMap, HashSet};
         use std::time::Instant;
@@ -542,6 +543,7 @@ impl Query {
             assign_ns,
             in_flight,
             skeleton,
+            carried_need,
         )
     }
 
@@ -555,6 +557,7 @@ impl Query {
         assign_ns: u64,
         in_flight: &crate::InFlight,
         skeleton: Option<&crate::BatchParentIds>,
+        carried_need: Option<&[[u8; 32]]>,
     ) -> Result<ArchiveWritePlan, QueryError> {
         use std::collections::HashSet;
         use std::time::Instant;
@@ -564,29 +567,40 @@ impl Query {
         let index_tx = self.tx_index_enabled();
 
         let t_collect = Instant::now();
-        let mut need_external: HashSet<[u8; 32]> = HashSet::new();
-        for row in &work {
-            for (i, inp) in row.ins.iter().enumerate() {
-                if inp.is_coinbase {
+        let need_vec: Vec<[u8; 32]> = if let Some(keys) = carried_need {
+            let mut need_external: HashSet<[u8; 32]> = HashSet::new();
+            for &prev in keys {
+                if prev == [0u8; 32] || batch_map.contains_key(&prev) {
                     continue;
                 }
-                if row
-                    .packed_ins
-                    .get(i)
-                    .is_some_and(|r| !r.create_fk.is_null())
-                {
-                    continue;
-                }
-                if batch_map.contains_key(&inp.prev_txid) {
-                    continue;
-                }
-                if inp.prev_txid == [0u8; 32] {
-                    continue;
-                }
-                need_external.insert(inp.prev_txid);
+                need_external.insert(prev);
             }
-        }
-        let need_vec: Vec<[u8; 32]> = need_external.iter().copied().collect();
+            need_external.into_iter().collect()
+        } else {
+            let mut need_external: HashSet<[u8; 32]> = HashSet::new();
+            for row in &work {
+                for (i, inp) in row.ins.iter().enumerate() {
+                    if inp.is_coinbase {
+                        continue;
+                    }
+                    if row
+                        .packed_ins
+                        .get(i)
+                        .is_some_and(|r| !r.create_fk.is_null())
+                    {
+                        continue;
+                    }
+                    if batch_map.contains_key(&inp.prev_txid) {
+                        continue;
+                    }
+                    if inp.prev_txid == [0u8; 32] {
+                        continue;
+                    }
+                    need_external.insert(inp.prev_txid);
+                }
+            }
+            need_external.into_iter().collect()
+        };
         let collect_ns = t_collect.elapsed().as_nanos() as u64;
 
         let ext = crate::stamp_external_parents(
@@ -959,7 +973,24 @@ mod tests {
             .iter()
             .map(|(fk, b, ids)| (*fk, b, ids.as_slice()))
             .collect();
-        let mut plan = q.archive_plan_batch_from_wire(&refs, next, in_flight, skeleton)?;
+        let carried: Vec<[u8; 32]> = need
+            .iter()
+            .flat_map(|(_, txs)| {
+                txs.iter().flat_map(|ta| {
+                    ta.inputs.iter().filter_map(|inp| {
+                        (inp.prev_index != u32::MAX && inp.prev_txid != [0u8; 32])
+                            .then_some(inp.prev_txid)
+                    })
+                })
+            })
+            .collect();
+        let mut plan = q.archive_plan_batch_from_wire(
+            &refs,
+            next,
+            in_flight,
+            skeleton,
+            skeleton.is_some().then_some(carried.as_slice()),
+        )?;
         let blocks: Vec<&bitcoin::Block> = wires.iter().map(|(_, b, _)| b).collect();
         plan.fill_packed_ins_from_blocks(&blocks)?;
         Ok(plan)
@@ -1926,6 +1957,7 @@ mod tests {
                 1,
                 &crate::InFlight::new(),
                 None,
+                None,
             )
             .expect("wire plan");
         assert_eq!(plan.planned_fks, vec![Fk(1), Fk(2)]);
@@ -2039,6 +2071,57 @@ mod tests {
             assert_eq!(mix.pin_txid_n, 1, "skeleton hits use the id_cache meter");
             assert_eq!(mix.head_need, 0, "skeleton must skip leftover TipOnly");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plan_batch_skeleton_empty_carried_does_not_walk_ins() {
+        use crate::{BatchParentIds, IdMap};
+        use std::sync::Arc;
+        let (dir, q) = temp_query("skeleton-carried-not-ins");
+        let parent_txid = {
+            let mut t = [0u8; 32];
+            t[0] = 0x55;
+            t
+        };
+        let mut m = IdMap::default();
+        m.insert(parent_txid, (Fk(66), (3000, 24)));
+        let skel = BatchParentIds {
+            ids: Arc::new(m),
+            spent: Arc::new(crate::U64Map::default()),
+            need_vouts: crate::U64Map::default(),
+        };
+        let child = child_spend(parent_txid, 0x66);
+        let (block, txids) = crate::testutil::block_from_applies(std::slice::from_ref(&child));
+        let err = q
+            .archive_plan_batch_from_wire(
+                &[(Fk(1), &block, txids.as_slice())],
+                1,
+                &crate::InFlight::new(),
+                Some(&skel),
+                Some(&[]),
+            )
+            .expect_err("empty carried_need must not collect PlanIn prevs");
+        assert!(
+            err.to_string().contains("parent create_fk unresolved"),
+            "got: {err}"
+        );
+        let plan = q
+            .archive_plan_batch_from_wire(
+                &[(Fk(1), &block, txids.as_slice())],
+                1,
+                &crate::InFlight::new(),
+                Some(&skel),
+                Some(&[parent_txid][..]),
+            )
+            .expect("carried key stamps without a second input walk");
+        let inp = plan
+            .edges
+            .values()
+            .flatten()
+            .find(|e| e.vout != u32::MAX)
+            .expect("spend");
+        assert_eq!(inp.create_fk, Fk(66));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

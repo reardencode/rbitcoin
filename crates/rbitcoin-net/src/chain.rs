@@ -3240,6 +3240,7 @@ mod tests {
                 next_tx_start,
                 in_flight: &inflight,
                 skeleton: None,
+                carried_need: Vec::new(),
             };
             hub.confirm_wire_load_phase_pipelined(&batch1, Some(&pipe))
                 .expect("prep1")
@@ -3285,6 +3286,7 @@ mod tests {
                 next_tx_start,
                 in_flight: &inflight,
                 skeleton: None,
+                carried_need: Vec::new(),
             };
             hub.confirm_wire_load_phase_pipelined(&batch2, Some(&pipe))
                 .expect("prep2 err")

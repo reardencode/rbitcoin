@@ -3,9 +3,10 @@
 //! **Primary height-ordered pipeline** (raw wire → validated tip):
 //! ```text
 //! LOOKUP STAGE (ibd-confirm-lookup OS thread):
-//!   wire Block → structure → stamp create_fk (Class A planned only)
+//!   BQ decode + TipOnly parent ids (no structure / plan_batch)
 //! LOAD STAGE (ibd-confirm-load OS thread):
-//!   pin denserels once → assemble (uses intake wire; **no Class-A wire rebuild**)
+//!   structure + plan_batch (binds carried BQ keys) + pin denserels → assemble
+//!   (uses intake wire; **no Class-A wire rebuild**)
 //! SCRIPTS STAGE (`ibd-confirm` OS thread publishes waves; `rbtc-scripts-*` steal):
 //!   pure CPU verify — no Query, no disk. No coordinator threads.
 //! WRITE STAGE (ibd-confirm-write OS thread, FIFO):
@@ -145,6 +146,8 @@ pub struct WireLoadPipeline<'a> {
     pub in_flight: &'a rbitcoin_query::InFlight,
     /// Lookup-filled parent identity for this load batch (IBD skeleton).
     pub skeleton: Option<rbitcoin_query::BatchParentIds>,
+    /// External prev_txids from the BQ input walk (IBD skeleton stamp; no second wire collect).
+    pub carried_need: Vec<[u8; 32]>,
 }
 
 /// Wire + assemble complete; script jobs still attached (not yet verified).

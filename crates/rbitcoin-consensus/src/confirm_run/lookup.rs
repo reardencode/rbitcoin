@@ -79,13 +79,13 @@ pub struct PlanStampOutcome {
     wire_blocks: Vec<Arc<Block>>,
 }
 
-/// IBD **lookup** stage: structure + stamp create_fk + parent body ranges.
+/// IBD **load** stage: structure + stamp create_fk + parent body ranges.
 ///
 /// May read `tx.head`, `tx.idx`, `txid.body`. **Never** denserels-decode `tx.body`.
-/// Parent create_fk: in-flight → skeleton → leftover TipOnly (plan=None).
-/// Wire blocks are `Arc` so IBD resolve can decode once and hand off without
-/// cloning full `Block` payloads into stamp. `pres` is lookup `TxPrecompute`
-/// when the caller already hashed (loadq); `None` hashes here.
+/// Parent create_fk: in-flight → skeleton (carried BQ keys) → leftover TipOnly
+/// (plan=None). Wire blocks are `Arc` so IBD resolve can decode once and hand
+/// off without cloning full `Block` payloads into stamp. `pres` is lookup
+/// `TxPrecompute` when the caller already hashed (loadq); `None` hashes here.
 pub fn confirm_wire_lookup_stamp(
     query: &Query,
     params: &ChainParams,
@@ -107,6 +107,7 @@ pub fn confirm_wire_lookup_stamp(
             &wire_blocks,
             ifo,
             pipeline.and_then(|p| p.skeleton.as_ref()),
+            pipeline.map(|p| p.carried_need.as_slice()),
         )?,
     };
     rbitcoin_query::note_confirm(&query.confirm_stats().lookup_blocks, blocks.len() as u64);
@@ -131,6 +132,7 @@ pub(super) fn stamp_parent_pin_archived(
     wire_blocks: &[Arc<Block>],
     in_flight: Option<&rbitcoin_query::InFlight>,
     skeleton: Option<&rbitcoin_query::BatchParentIds>,
+    carried_need: Option<&[[u8; 32]]>,
 ) -> Result<ParentPinStamp, ConsensusError> {
     let mut same_batch: HashMap<[u8; 32], u64> = HashMap::new();
     for m in metas {
@@ -141,26 +143,42 @@ pub(super) fn stamp_parent_pin_archived(
         }
     }
     let mut need_external: HashMap<[u8; 32], ()> = HashMap::new();
-    for (m, block) in metas.iter().zip(wire_blocks.iter()) {
-        for tx in &block.txdata {
-            for inp in &tx.input {
-                if inp.previous_output.is_null() {
-                    continue;
-                }
-                let prev = inp.previous_output.txid.to_byte_array();
-                if same_batch.contains_key(&prev) {
-                    continue;
-                }
-                if prev != [0u8; 32] {
-                    need_external.insert(prev, ());
+    if skeleton.is_some() {
+        for &prev in carried_need.unwrap_or(&[]) {
+            if same_batch.contains_key(&prev) {
+                continue;
+            }
+            if prev != [0u8; 32] {
+                need_external.insert(prev, ());
+            }
+        }
+        for m in metas {
+            if !params.bip34_active_at(m.height.0) {
+                for p in m.pres.iter() {
+                    need_external.insert(p.txid, ());
                 }
             }
         }
-        // BIP30 (pre-BIP34): same head wave as parents. TipOnly returns a
-        // connected sibling if this create would overwrite a live txid.
-        if !params.bip34_active_at(m.height.0) {
+    } else {
+        for (m, block) in metas.iter().zip(wire_blocks.iter()) {
             for tx in &block.txdata {
-                need_external.insert(tx.compute_txid().to_byte_array(), ());
+                for inp in &tx.input {
+                    if inp.previous_output.is_null() {
+                        continue;
+                    }
+                    let prev = inp.previous_output.txid.to_byte_array();
+                    if same_batch.contains_key(&prev) {
+                        continue;
+                    }
+                    if prev != [0u8; 32] {
+                        need_external.insert(prev, ());
+                    }
+                }
+            }
+            if !params.bip34_active_at(m.height.0) {
+                for p in m.pres.iter() {
+                    need_external.insert(p.txid, ());
+                }
             }
         }
     }
@@ -433,19 +451,33 @@ pub(super) fn wire_lookup_phase(
             need.push((*fk, wire_blocks[i].as_ref(), metas[i].txids.as_slice()));
         }
         let plan = match pipeline {
-            Some(p) => query
-                .archive_plan_batch_from_wire(
-                    &need,
-                    p.next_tx_start.max(1),
-                    p.in_flight,
-                    p.skeleton.as_ref(),
-                )
-                .map_err(ConsensusError::from)?,
+            Some(p) => {
+                let mut carried = p.carried_need.clone();
+                if p.skeleton.is_some() {
+                    for m in &metas {
+                        if !params.bip34_active_at(m.height.0) {
+                            for ptx in m.pres.iter() {
+                                carried.push(ptx.txid);
+                            }
+                        }
+                    }
+                }
+                query
+                    .archive_plan_batch_from_wire(
+                        &need,
+                        p.next_tx_start.max(1),
+                        p.in_flight,
+                        p.skeleton.as_ref(),
+                        p.skeleton.is_some().then_some(carried.as_slice()),
+                    )
+                    .map_err(ConsensusError::from)?
+            }
             None => query
                 .archive_plan_batch_from_wire(
                     &need,
                     query.tx_body_count().saturating_add(1).max(1),
                     &rbitcoin_query::InFlight::new(),
+                    None,
                     None,
                 )
                 .map_err(ConsensusError::from)?,
@@ -649,10 +681,11 @@ mod tests {
         let stamp = stamp_parent_pin_archived(
             &q,
             &params,
-            &[meta],
+            std::slice::from_ref(&meta),
             &[std::sync::Arc::new(spend_block(parent_txid))],
             None,
             Some(&skel),
+            Some(&[parent_txid][..]),
         )
         .expect("archived stamp");
         assert_eq!(
@@ -664,6 +697,20 @@ mod tests {
             helper.idents.get(&88).map(|p| p.txid)
         );
         assert_eq!(stamp.resolved.get(&parent_txid), Some(&88));
+        let empty_wire = stamp_parent_pin_archived(
+            &q,
+            &params,
+            std::slice::from_ref(&meta),
+            &[std::sync::Arc::new(spend_block(parent_txid))],
+            None,
+            Some(&skel),
+            Some(&[]),
+        )
+        .expect("empty carried_need skips wire inputs");
+        assert!(
+            !empty_wire.resolved.contains_key(&parent_txid),
+            "skeleton stamp must not re-walk wire inputs"
+        );
         let _ = std::fs::remove_dir_all(&path);
     }
 

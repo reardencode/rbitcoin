@@ -76,6 +76,7 @@ impl LoadAheadState {
         path_lo: u32,
         store_path_lo: u32,
         skeleton: Option<rbitcoin_query::BatchParentIds>,
+        carried_need: Vec<[u8; 32]>,
     ) -> WireLoadPipeline<'_> {
         let parent_hash = if path_lo == store_path_lo {
             None
@@ -90,6 +91,7 @@ impl LoadAheadState {
             next_tx_start: self.next_tx_start,
             in_flight: &self.in_flight,
             skeleton,
+            carried_need,
         }
     }
 
@@ -1885,10 +1887,22 @@ pub(crate) fn spawn_confirm_engine(
                     )
                 }));
                 confirm_thr_stats::add_load_clone(&stats, t_clone.elapsed());
+                let mut carried_need = Vec::new();
+                for (_, _, w) in &wire_batch {
+                    for &(txid, _) in w.spend_keys.iter() {
+                        if txid != [0u8; 32] {
+                            carried_need.push(txid);
+                        }
+                    }
+                }
                 let t_stamp = Instant::now();
                 let plan_res = {
-                    let pipe =
-                        lookup_ahead.pipeline_for(expect_h, store_path_lo, parent_ids.clone());
+                    let pipe = lookup_ahead.pipeline_for(
+                        expect_h,
+                        store_path_lo,
+                        parent_ids.clone(),
+                        carried_need,
+                    );
                     rbitcoin_consensus::confirm_wire_lookup_stamp(
                         &hub_load.query,
                         &hub_load.params,
@@ -1977,7 +1991,12 @@ pub(crate) fn spawn_confirm_engine(
                     lookup_ahead.drop_inflight_below(drop_below);
                     confirm_thr_stats::add_load_prune(&stats, t_prune.elapsed());
                 }
-                let pipe = lookup_ahead.pipeline_for(expect_h, store_path_lo, parent_ids);
+                let pipe = lookup_ahead.pipeline_for(
+                    expect_h,
+                    store_path_lo,
+                    parent_ids,
+                    Vec::new(),
+                );
                 let plan_ns = stamped.work_ns;
                 let heights_hashes: Vec<(u32, BlockHash)> = wire_batch
                     .iter()
