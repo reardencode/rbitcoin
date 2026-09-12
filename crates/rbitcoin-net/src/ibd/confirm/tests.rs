@@ -1317,7 +1317,7 @@ fn write_session_fault_is_engine_fault_and_requeue_puts_ready() {
 
 #[test]
 fn requeue_on_uring_recover_credits_then_skips_non_fault() {
-    let (_d, q) = rbitcoin_query::testutil::tiny_query_labeled("requeue-uring");
+    let (_d, hub) = crate::chain::tiny_regtest_hub_labeled("requeue-uring");
     let feed = ConfirmFeed::new();
     let hash = bitcoin::BlockHash::from_byte_array([3u8; 32]);
     {
@@ -1325,7 +1325,7 @@ fn requeue_on_uring_recover_credits_then_skips_non_fault() {
         g.inflight.insert(7);
     }
     assert!(super::requeue_on_uring_recover(
-        &q,
+        &hub.query,
         &feed,
         true,
         "test",
@@ -1337,14 +1337,14 @@ fn requeue_on_uring_recover_credits_then_skips_non_fault() {
         assert!(!g.inflight.contains(&7));
     }
     assert!(!super::requeue_on_uring_recover(
-        &q,
+        &hub.query,
         &feed,
         false,
         "test",
         std::iter::empty(),
     ));
     assert_eq!(
-        q.uring_recover("again"),
+        hub.query.uring_recover("again"),
         rbitcoin_query::UringRecover::Exhausted
     );
 }
@@ -1387,7 +1387,6 @@ fn write_session_fault_after_class_c_finishes_annotate_in_place() {
     use bitcoin::hashes::Hash;
     use bitcoin::BlockHash;
     use rbitcoin_primitives::{Fk, Height};
-    use rbitcoin_query::testutil::FixtureChain;
     use rbitcoin_query::TxApply;
     use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
 

@@ -1821,11 +1821,7 @@ fn bad_prev_evicts_slot_rewinds_taken() {
 /// Post-lookup reject must rewind `lookup_taken_hi` so densify can re-intake.
 #[test]
 fn post_lookup_reject_rewinds_taken_hi() {
-    use crate::chain::ChainHub;
-    use rbitcoin_consensus::{ChainParams, Milestone};
-
-    let (_dir, q) = rbitcoin_query::testutil::tiny_query_labeled("taken-hi-rewind");
-    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let (_dir, hub) = crate::chain::tiny_regtest_hub_labeled("taken-hi-rewind");
     hub.ensure_genesis().unwrap();
     let tip = hub.tip_height();
     assert_eq!(tip, Some(0));

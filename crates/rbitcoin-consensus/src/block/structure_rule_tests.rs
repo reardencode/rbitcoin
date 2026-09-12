@@ -1442,7 +1442,24 @@ fn optimistic_assemble_unstamped_parent_is_invariant() {
 #[test]
 fn accept_rejects_same_block_coinbase_spend() {
     use crate::{accept_and_connect_block, mine_empty_regtest, prepare_regtest_candidate};
-    let (_dir, q) = rbitcoin_query::testutil::tiny_query_labeled("same-block-cb");
+    use rbitcoin_query::Query;
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+            std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+        }
+    });
+    let path = std::env::temp_dir().join(format!(
+        "rbitcoin-same-block-cb-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&path).unwrap();
+    let q = Query::open_or_create(&path).unwrap();
     let params = ChainParams::regtest();
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
@@ -1473,6 +1490,7 @@ fn accept_rejects_same_block_coinbase_spend() {
         ConsensusError::BadTx("coinbase immature") => {}
         other => panic!("expected coinbase immature, got {other}"),
     }
+    let _ = std::fs::remove_dir_all(&path);
 }
 
 #[test]

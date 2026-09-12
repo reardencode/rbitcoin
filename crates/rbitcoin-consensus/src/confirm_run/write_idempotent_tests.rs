@@ -20,7 +20,7 @@ fn tx_head_drain_thread_is_named_and_reused() {
 #[test]
 fn head_insert_join_restore_empty_ok() {
     use super::submit_head_insert;
-    let (_d, q) = tmp_query();
+    let (_d, q) = tiny_query();
     let (r, queued) = submit_head_insert(q.store(), Vec::new()).join_restore();
     assert_eq!(r.unwrap(), 0);
     assert!(queued.is_empty());
@@ -2652,11 +2652,10 @@ fn already_at_height_retries_post_commit_spend_annotate() {
     use bitcoin::hashes::Hash;
     use bitcoin::{block::Header, Block, BlockHash, CompactTarget, TxMerkleNode};
     use rbitcoin_primitives::{Fk, Height};
-    use rbitcoin_query::testutil::FixtureChain;
     use rbitcoin_query::TxApply;
     use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
 
-    let (path, q) = tmp_query();
+    let (path, q) = tiny_query();
     q.set_spend_index(false);
 
     let h0 = HeaderRecord {

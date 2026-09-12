@@ -2506,6 +2506,25 @@ fn spawn_confirmed_seed(query: Arc<Query>, confirmed: Arc<RwLock<HashSet<BlockHa
 use crate::most_work::{sum_work, work_better};
 
 #[cfg(test)]
+pub(crate) fn tiny_regtest_hub_labeled(label: &str) -> (std::path::PathBuf, ChainHub) {
+    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "rbitcoin-{label}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let _ = std::fs::create_dir_all(&dir);
+    let q = Query::open_or_create(dir.join("store")).expect("query open_or_create");
+    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    (dir, hub)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use bitcoin::absolute::LockTime;
