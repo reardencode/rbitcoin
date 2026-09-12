@@ -1957,41 +1957,10 @@ pub(crate) fn spawn_confirm_engine(
                         lookup_ahead.note_lookup_ok(p, lh, raw);
                     }
                 } else {
-                    let pairs = match stamped.archived_create_pairs() {
-                        Ok(p) => p,
-                        Err(e) => {
-                            let msg = e.to_string();
-                            let first_hash = wire_batch[0].1;
-                            load_fail_rewind_wave(
-                                &feed_load,
-                                &hub_load,
-                                &mut lookup_ahead,
-                                expect_h,
-                                wire_batch.iter().skip(1).filter_map(|(h, ha, w)| {
-                                    (!hub_load.has_block(ha)).then_some((*h, *ha, w.block.as_ref()))
-                                }),
-                            );
-                            loop_stats_load
-                                .confirm_reject_stops
-                                .fetch_add(1, Ordering::Relaxed);
-                            let log_msg = stamp_reject_operator_msg(&msg, &stats);
-                            warn!(
-                                "ibd: confirm load stamp reject {first_hash} @ {expect_h}: {log_msg}"
-                            );
-                            let _ = emit_confirm_reject(
-                                &event_tx_load,
-                                &feed_load,
-                                expect_h,
-                                first_hash,
-                                ConfirmRejectClass::from_consensus(&e),
-                                log_msg,
-                                wire_batch.len(),
-                            );
-                            std::thread::sleep(Duration::from_millis(50));
-                            continue;
-                        }
-                    };
-                    lookup_ahead.note_archived_creates(pairs, stamped.last_height_hash());
+                    lookup_ahead.note_archived_creates(
+                        stamped.archived_create_pairs(),
+                        stamped.last_height_hash(),
+                    );
                 }
                 if drop_below.is_some() {
                     let t_prune = Instant::now();

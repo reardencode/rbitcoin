@@ -77,16 +77,15 @@ pub struct PlanStampOutcome {
     pub work_ns: u64,
     metas: Vec<BodyMeta>,
     wire_blocks: Vec<Arc<Block>>,
+    archived_pairs: Vec<([u8; 32], rbitcoin_primitives::Fk)>,
 }
 
 impl PlanStampOutcome {
     /// Create identity already on the stamp (`pres` txids + planned/archived fks).
     ///
     /// plan=None in-flight publish uses this instead of re-reading `txid.body`.
-    pub fn archived_create_pairs(
-        &self,
-    ) -> Result<Vec<([u8; 32], rbitcoin_primitives::Fk)>, ConsensusError> {
-        archived_create_pairs(&self.metas)
+    pub fn archived_create_pairs(&self) -> Vec<([u8; 32], rbitcoin_primitives::Fk)> {
+        self.archived_pairs.clone()
     }
 
     pub fn last_height_hash(&self) -> Option<(u32, [u8; 32])> {
@@ -99,6 +98,9 @@ pub(super) fn archived_create_pairs(
 ) -> Result<Vec<([u8; 32], rbitcoin_primitives::Fk)>, ConsensusError> {
     let mut pairs = Vec::new();
     for m in metas {
+        if m.tx_fks.is_empty() {
+            continue;
+        }
         if m.tx_fks.len() != m.txids.len() {
             return Err(ConsensusError::Store(StoreError::Corrupt(
                 "invariant: archived stamp tx_fks/txids length",
@@ -133,17 +135,21 @@ pub fn confirm_wire_lookup_stamp(
     let (mut plan, metas, wire_blocks, plan_ns) =
         wire_lookup_phase(query, params, milestone, blocks, pipeline)?;
     let ifo = pipeline.map(|p| p.in_flight);
-    let parent_pin = match plan.as_mut() {
-        Some(p) => ParentPinStamp::take_from_plan(p),
-        None => stamp_parent_pin_archived(
-            query,
-            params,
-            &metas,
-            &wire_blocks,
-            ifo,
-            pipeline.and_then(|p| p.skeleton.as_ref()),
-            pipeline.map(|p| p.carried_need.as_slice()),
-        )?,
+    let (parent_pin, archived_pairs) = match plan.as_mut() {
+        Some(p) => (ParentPinStamp::take_from_plan(p), Vec::new()),
+        None => {
+            let pairs = archived_create_pairs(&metas)?;
+            let pin = stamp_parent_pin_archived(
+                query,
+                params,
+                &metas,
+                &wire_blocks,
+                ifo,
+                pipeline.and_then(|p| p.skeleton.as_ref()),
+                pipeline.map(|p| p.carried_need.as_slice()),
+            )?;
+            (pin, pairs)
+        }
     };
     rbitcoin_query::note_confirm(&query.confirm_stats().lookup_blocks, blocks.len() as u64);
     rbitcoin_query::note_confirm(&query.confirm_stats().lookup_head_ns, plan_ns);
@@ -155,6 +161,7 @@ pub fn confirm_wire_lookup_stamp(
         work_ns,
         metas,
         wire_blocks,
+        archived_pairs,
     })
 }
 
@@ -798,13 +805,26 @@ mod tests {
 
     #[test]
     fn archived_create_pairs_len_mismatch_is_corrupt() {
-        let meta = meta_with(vec![[1u8; 32]], vec![]);
+        let meta = meta_with(vec![[1u8; 32], [2u8; 32]], vec![rbitcoin_primitives::Fk(1)]);
         match archived_create_pairs(std::slice::from_ref(&meta)) {
             Err(ConsensusError::Store(StoreError::Corrupt(m))) => {
                 assert_eq!(m, "invariant: archived stamp tx_fks/txids length");
             }
             other => panic!("expected length Corrupt, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn archived_create_pairs_header_txs_hole_is_skip() {
+        let hole = meta_with(vec![[1u8; 32]], vec![]);
+        assert!(archived_create_pairs(std::slice::from_ref(&hole))
+            .expect("empty tx_fks is a header_txs hole")
+            .is_empty());
+        let tid = [9u8; 32];
+        let fk = rbitcoin_primitives::Fk(7);
+        let pairs = archived_create_pairs(&[hole, meta_with(vec![tid], vec![fk])])
+            .expect("hole then match");
+        assert_eq!(pairs, vec![(tid, fk)]);
     }
 
     #[test]
@@ -838,7 +858,7 @@ mod tests {
         let stamped = confirm_wire_lookup_stamp(&q, &params, Milestone::NONE, &items, None)
             .expect("already-archived stamp");
         assert!(stamped.plan.is_none(), "S1 plan=None");
-        let pairs = stamped.archived_create_pairs().expect("pairs from metas");
+        let pairs = stamped.archived_create_pairs();
         assert_eq!(pairs.len(), stamped.metas[0].txids.len());
         assert_eq!(pairs[0].0, stamped.metas[0].txids[0]);
         assert_eq!(pairs[0].1, stamped.metas[0].tx_fks[0]);
