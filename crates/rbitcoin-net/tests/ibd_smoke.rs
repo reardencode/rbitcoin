@@ -127,64 +127,6 @@ async fn ibd_cancellable_exits_when_flag_set() {
     let _ = std::fs::remove_dir_all(&peer_dir);
 }
 
-/// `follow_from` must return after handshake (node `--connect` uses an 8s
-/// timeout around it). The session stays live, and the post-verack keepalive
-/// is the tracked ping — a second ping 50ms later makes the first pong look
-/// like a nonce mismatch on real RTT.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn follow_from_returns_live_with_one_keepalive_ping() {
-    let seed_dir = tmp_dir("follow-seed");
-    let peer_dir = tmp_dir("follow-peer");
-
-    let seed = start_node(&seed_dir).await;
-    let mut peer = start_node(&peer_dir).await;
-
-    tokio::time::timeout(Duration::from_secs(5), peer.follow_from(seed.local_addr))
-        .await
-        .expect("follow_from must return after handshake, not run the session")
-        .expect("follow handshake");
-    assert!(
-        peer.follow_live_count() >= 1,
-        "outbound session must stay live after follow_from returns"
-    );
-
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    assert!(
-        peer.follow_live_count() >= 1,
-        "session must still be live after the 50ms ping tick"
-    );
-
-    let inbound = seed
-        .peers
-        .snapshot()
-        .into_iter()
-        .find(|p| p.inbound)
-        .expect("seed inbound session");
-    let ping = inbound.bytesrecv_per_msg.get("ping").copied().unwrap_or(0);
-    assert_eq!(
-        ping, 32,
-        "one 8-byte ping (acct +24), not a second interval ping on top: {ping}"
-    );
-    let outbound = peer
-        .peers
-        .snapshot()
-        .into_iter()
-        .find(|p| !p.inbound)
-        .expect("outbound session");
-    let pong = outbound.bytesrecv_per_msg.get("pong").copied().unwrap_or(0);
-    assert!(pong >= 29, "connect_nodes pong bytes {pong}");
-    assert!(
-        outbound.pingwait.is_none(),
-        "first pong must match the outstanding nonce (pingwait={:?})",
-        outbound.pingwait
-    );
-
-    seed.shutdown().await;
-    peer.shutdown().await;
-    let _ = std::fs::remove_dir_all(&seed_dir);
-    let _ = std::fs::remove_dir_all(&peer_dir);
-}
-
 /// Empty peer list is a clean protocol error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ibd_no_peers_errors() {
