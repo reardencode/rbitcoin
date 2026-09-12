@@ -3062,31 +3062,63 @@ mod tests {
     #[test]
     fn evict_worst_chunk_does_not_strand_child() {
         let dir = tmp_dir();
-        let (op, _, utxos) = chain_utxo(100_000);
-        let parent = spend_tx(op, 99_000);
+        let parent_op = OutPoint {
+            txid: Txid::from_byte_array([0xab; 32]),
+            vout: 0,
+        };
+        let dear_op = OutPoint {
+            txid: Txid::from_byte_array([0xcd; 32]),
+            vout: 0,
+        };
+        let parent_out = TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        };
+        let dear_out = TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        };
+        let mut map = HashMap::new();
+        map.insert(parent_op, coin(parent_out.clone()));
+        map.insert(dear_op, coin(dear_out));
+        let utxos = MapUtxoProvider { map };
+        let parent = spend_tx(parent_op, 99_000);
         let parent_id = parent.compute_txid();
         let child = spend_tx(
             OutPoint {
                 txid: parent_id,
                 vout: 0,
             },
-            50_000,
+            1_000,
         );
         let child_id = child.compute_txid();
+        let dear = spend_tx(dear_op, 10_000);
+        let dear_id = dear.compute_txid();
         let mut mp = ActiveMempool::open_or_create_with_limit(&dir, 10_000_000).unwrap();
         mp.accept_tx(&parent, &utxos, TIP_OK).unwrap();
         mp.accept_tx(&child, &utxos, TIP_OK).unwrap();
-        assert!(mp.graph.contains(&parent_id));
-        assert!(mp.graph.contains(&child_id));
-        let w = mp.graph.total_weight();
-        mp.max_weight = w.saturating_sub(1);
-        mp.evict_to_budget(None).unwrap();
-        if mp.graph.contains(&child_id) {
-            assert!(
-                mp.graph.contains(&parent_id),
-                "child must not remain without its mempool parent"
-            );
-        }
+        mp.accept_tx(&dear, &utxos, TIP_OK).unwrap();
+        let (_, chunk) = mp.graph.worst_chunk().expect("non-empty");
+        assert!(
+            chunk.txids.contains(&parent_id),
+            "parent must be the worst-chunk loser, chunk={:?}",
+            chunk.txids
+        );
+        let n = mp.evict_worst_chunk_once(None).unwrap();
+        assert!(n >= 1, "parent-as-worst must evict");
+        assert!(
+            !mp.graph.contains(&child_id) || mp.graph.contains(&parent_id),
+            "child must not remain without its mempool parent"
+        );
+        assert!(
+            !mp.graph.contains(&parent_id),
+            "parent was the worst chunk and must be gone"
+        );
+        assert!(
+            !mp.graph.contains(&child_id),
+            "remove_txid_tree must drop the child when the parent is gone"
+        );
+        assert!(mp.graph.contains(&dear_id), "higher-rate cluster must stay");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
