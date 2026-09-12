@@ -33,8 +33,8 @@ pub(crate) type PinInItem = (
 );
 /// Prep denserels job: create fk, body range, known txid, need-vouts.
 pub(crate) type OutsByRangeJob = (Fk, (u64, u64), [u8; 32], Vec<u32>);
-/// `(rows, body_ns, decode_ns, extend_n)` from [`TxTable::get_outs_by_range_batch`].
-pub(crate) type OutsByRangeOut = (Vec<Option<SparseOutsRow>>, u64, u64, u64);
+/// `(rows, body_ns, decode_ns, extend_n, body_sqe_n)` from [`TxTable::get_outs_by_range_batch`].
+pub(crate) type OutsByRangeOut = (Vec<Option<SparseOutsRow>>, u64, u64, u64, u64);
 
 pub(crate) fn parse_rebuild_seal_bits(raw: Option<&str>) -> u32 {
     raw.and_then(|s| s.parse::<u32>().ok())
@@ -994,7 +994,7 @@ impl TxTable {
     ///   allocated (N2.1). First-page Outs peek is 4 KiB; full-span extend runs
     ///   only when a needed vout (or every out, if need is empty) is past that page.
     ///
-    /// Returns `(rows, body_ns, decode_ns, extend_n)` where each row is
+    /// Returns `(rows, body_ns, decode_ns, extend_n, body_sqe_n)` where each row is
     /// `Some((tx, live (vout,out), sparse denserels (vout,rel)))` (N2.0 timers).
     pub fn get_outs_by_range_batch(
         &self,
@@ -1003,7 +1003,7 @@ impl TxTable {
         use crate::idx_body_pipeline::{run_idx_body_pipeline_backend, BodyMode, IdxBodyJob};
         use std::time::Instant;
         if items.is_empty() {
-            return Ok((Vec::new(), 0, 0, 0));
+            return Ok((Vec::new(), 0, 0, 0, 0));
         }
         let mut jobs: Vec<IdxBodyJob> = items
             .iter()
@@ -1041,7 +1041,7 @@ impl TxTable {
             }
         }
         let decode_ns = t_dec.elapsed().as_nanos() as u64;
-        Ok((out, body_ns, decode_ns, io.extend_n))
+        Ok((out, body_ns, decode_ns, io.extend_n, io.body_sqe_n))
     }
 
     /// Bulk `body_range` for many fks (confirm load / reconstruct).

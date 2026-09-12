@@ -75,11 +75,134 @@ impl IdxBodyJob {
     }
 }
 
-/// Body-wave IO counts for `ibd: perf` (extend / later page-grouped SQEs).
+/// Body-wave IO counts for `ibd: perf` (extend / page-grouped SQEs).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct IdxBodyIoStats {
     /// Second-wave Outs jobs that pread the remainder of the idx span.
     pub extend_n: u64,
+    /// Body `ReadOp`s submitted (first wave + extend), after page grouping.
+    pub body_sqe_n: u64,
+}
+
+const BODY_OS_PAGE: u64 = crate::tx_table::BODY_PAGE_SIZE;
+/// Cap a coalesced span at two OS pages (one straddle). Do not chain into SH-sized reads.
+const BODY_GROUP_MAX_PAGES: u64 = 2;
+
+/// Offset-sorted `[off, off+len)` windows → `(page_off, span_len, window indices)`.
+///
+/// Jobs that share an OS page (or a two-page straddle) become one SQE. Adjacent
+/// disjoint pages stay split.
+fn group_body_peeks(windows: &[(u64, u64)]) -> Vec<(u64, u64, Vec<usize>)> {
+    let mut groups = Vec::new();
+    if windows.is_empty() {
+        return groups;
+    }
+    let pages = |off: u64, len: u64| -> (u64, u64) {
+        let lo = off / BODY_OS_PAGE;
+        let hi = if len == 0 {
+            lo
+        } else {
+            off.saturating_add(len).saturating_sub(1) / BODY_OS_PAGE
+        };
+        (lo, hi)
+    };
+    let mut start = 0usize;
+    let (mut glo, mut ghi) = pages(windows[0].0, windows[0].1);
+    let mut min_off = windows[0].0;
+    let mut max_end = windows[0].0.saturating_add(windows[0].1);
+    for i in 1..windows.len() {
+        let (off, len) = windows[i];
+        let (plo, phi) = pages(off, len);
+        let new_hi = ghi.max(phi);
+        if plo <= ghi && new_hi.saturating_sub(glo) < BODY_GROUP_MAX_PAGES {
+            ghi = new_hi;
+            max_end = max_end.max(off.saturating_add(len));
+            continue;
+        }
+        let page_off = (min_off / BODY_OS_PAGE) * BODY_OS_PAGE;
+        groups.push((
+            page_off,
+            max_end.saturating_sub(page_off),
+            (start..i).collect(),
+        ));
+        start = i;
+        glo = plo;
+        ghi = phi;
+        min_off = off;
+        max_end = off.saturating_add(len);
+    }
+    let page_off = (min_off / BODY_OS_PAGE) * BODY_OS_PAGE;
+    groups.push((
+        page_off,
+        max_end.saturating_sub(page_off),
+        (start..windows.len()).collect(),
+    ));
+    groups
+}
+
+struct PeekDest {
+    job: usize,
+    off: u64,
+    dest: usize,
+    len: usize,
+}
+
+fn pread_grouped_peeks(
+    jobs: &mut [IdxBodyJob],
+    dests: &[PeekDest],
+    body_fd: crate::io_handle::IoHandle,
+    body_path: &std::path::Path,
+    backend: ReadIoBackend,
+    mark_ok: bool,
+) -> Result<u64, StoreError> {
+    if dests.is_empty() {
+        return Ok(0);
+    }
+    let windows: Vec<(u64, u64)> = dests.iter().map(|d| (d.off, d.len as u64)).collect();
+    let groups = group_body_peeks(&windows);
+    let mut bufs: Vec<Vec<u8>> = groups
+        .iter()
+        .map(|(_, len, _)| vec![0u8; *len as usize])
+        .collect();
+    // SAFETY: each bufs[g] is a distinct allocation owned until after pread.
+    let mut ops: Vec<ReadOp<'_>> = Vec::with_capacity(groups.len());
+    for (g, (page_off, len, _)) in groups.iter().enumerate() {
+        let ptr = bufs[g].as_mut_ptr();
+        let slice = unsafe { std::slice::from_raw_parts_mut(ptr, *len as usize) };
+        ops.push(ReadOp {
+            fd: body_fd,
+            offset: *page_off,
+            buf: slice,
+            result: i32::MIN,
+        });
+    }
+    bulk_io::pread_batch_backend(&mut ops, backend);
+    for (g, ((page_off, _, members), ro)) in groups.iter().zip(ops.iter()).enumerate() {
+        if ro.result < 0 {
+            return Err(StoreError::io(
+                body_path,
+                std::io::Error::from_raw_os_error(-ro.result),
+            ));
+        }
+        let got = ro.result as usize;
+        let buf = &bufs[g];
+        for &wi in members {
+            let d = &dests[wi];
+            let rel = d.off.saturating_sub(*page_off) as usize;
+            let need_end = rel.saturating_add(d.len);
+            if got < need_end || rel + d.len > buf.len() {
+                if !mark_ok {
+                    jobs[d.job].ok = false;
+                }
+                continue;
+            }
+            jobs[d.job].body[d.dest..d.dest + d.len].copy_from_slice(&buf[rel..rel + d.len]);
+            if mark_ok {
+                jobs[d.job].ok = true;
+            }
+        }
+    }
+    Ok(groups.len() as u64)
 }
 
 /// Resolve idx (FdOnly pread) then body (backend from env). Mutates `jobs` in place.
@@ -145,38 +268,21 @@ pub fn run_idx_body_pipeline_backend(
 
     submitted.sort_unstable_by_key(|&i| jobs[i].range.map(|(o, _)| o).unwrap_or(0));
 
-    // Body bulk: one uring/pread SQE per job (distinct buffers). Idx was already
-    // page-coalesced above; body peeks are short and rarely share a page.
-    // SAFETY: each jobs[i].body is a distinct allocation; submitted unique.
-    let mut read_ops: Vec<ReadOp<'_>> = Vec::with_capacity(submitted.len());
-    for &i in &submitted {
-        let off = jobs[i].range.unwrap().0;
-        let len = jobs[i].body.len();
-        let ptr = jobs[i].body.as_mut_ptr();
-        let slice = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
-        // Confirm load/pin: leave pages cacheable for write-stage meta + annotate RMW.
-        read_ops.push(ReadOp {
-            fd: body_fd,
-            offset: off,
-            buf: slice,
-            result: i32::MIN,
-        });
-    }
-    bulk_io::pread_batch_backend(&mut read_ops, backend);
-    for (ro, &i) in read_ops.iter().zip(submitted.iter()) {
-        if ro.result < 0 {
-            return Err(StoreError::io(
-                body_path,
-                std::io::Error::from_raw_os_error(-ro.result),
-            ));
-        }
-        if ro.result as usize == jobs[i].body.len() {
-            jobs[i].ok = true;
-        }
-    }
+    let dests: Vec<PeekDest> = submitted
+        .iter()
+        .map(|&i| PeekDest {
+            job: i,
+            off: jobs[i].range.unwrap().0,
+            dest: 0,
+            len: jobs[i].body.len(),
+        })
+        .collect();
     let mut stats = IdxBodyIoStats::default();
+    stats.body_sqe_n = pread_grouped_peeks(jobs, &dests, body_fd, body_path, backend, true)?;
     if mode == BodyMode::Outs {
-        stats.extend_n = extend_truncated_txout_jobs(table, jobs, backend)?;
+        let (extend_n, extend_sqe) = extend_truncated_txout_jobs(table, jobs, backend)?;
+        stats.extend_n = extend_n;
+        stats.body_sqe_n = stats.body_sqe_n.saturating_add(extend_sqe);
     }
     Ok(stats)
 }
@@ -188,7 +294,7 @@ fn extend_truncated_txout_jobs(
     table: &VarTable,
     jobs: &mut [IdxBodyJob],
     backend: ReadIoBackend,
-) -> Result<u64, StoreError> {
+) -> Result<(u64, u64), StoreError> {
     let mut rest: Vec<(usize, usize)> = Vec::new();
     let body_pub = table.body_published_len();
     for (i, j) in jobs.iter_mut().enumerate() {
@@ -213,39 +319,33 @@ fn extend_truncated_txout_jobs(
         rest.push((i, have));
     }
     if rest.is_empty() {
-        return Ok(0);
+        return Ok((0, 0));
     }
     let extend_n = rest.len() as u64;
-    let body_fd = table.body_read_fd();
-    let body_path = table.body_file_path();
-    // SAFETY: each jobs[i].body[have..] is a distinct allocation remainder.
-    let mut ops: Vec<ReadOp<'_>> = Vec::with_capacity(rest.len());
-    for &(i, have) in &rest {
-        let off = jobs[i].range.unwrap().0.saturating_add(have as u64);
-        let len = jobs[i].body.len().saturating_sub(have);
-        let ptr = unsafe { jobs[i].body.as_mut_ptr().add(have) };
-        let slice = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
-        ops.push(ReadOp {
-            fd: body_fd,
-            offset: off,
-            buf: slice,
-            result: i32::MIN,
-        });
-    }
-    bulk_io::pread_batch_backend(&mut ops, backend);
-    for (ro, &(i, have)) in ops.iter().zip(rest.iter()) {
-        if ro.result < 0 {
-            return Err(StoreError::io(
-                body_path,
-                std::io::Error::from_raw_os_error(-ro.result),
-            ));
-        }
-        let want = jobs[i].body.len().saturating_sub(have);
-        if ro.result as usize != want {
-            jobs[i].ok = false;
-        }
-    }
-    Ok(extend_n)
+    rest.sort_unstable_by_key(|&(i, have)| {
+        jobs[i]
+            .range
+            .map(|(o, _)| o.saturating_add(have as u64))
+            .unwrap_or(0)
+    });
+    let dests: Vec<PeekDest> = rest
+        .iter()
+        .map(|&(i, have)| PeekDest {
+            job: i,
+            off: jobs[i].range.unwrap().0.saturating_add(have as u64),
+            dest: have,
+            len: jobs[i].body.len().saturating_sub(have),
+        })
+        .collect();
+    let sqe = pread_grouped_peeks(
+        jobs,
+        &dests,
+        table.body_read_fd(),
+        table.body_file_path(),
+        backend,
+        false,
+    )?;
+    Ok((extend_n, sqe))
 }
 
 #[cfg(test)]
@@ -310,6 +410,52 @@ mod tests {
         assert_eq!(j.range, Some((16, 8)));
         let (dir, t) = temp_tx();
         run_idx_body_pipeline(&t.body, &mut [], BodyMode::Full).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn group_body_peeks_same_page_merges() {
+        let g = group_body_peeks(&[(0, 91), (91, 91)]);
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].2, vec![0, 1]);
+        assert_eq!(g[0].0, 0);
+    }
+
+    #[test]
+    fn group_body_peeks_distinct_pages_split() {
+        let g = group_body_peeks(&[(0, 91), (8192, 91)]);
+        assert_eq!(g.len(), 2);
+    }
+
+    #[test]
+    fn group_body_peeks_straddle_pulls_same_pages() {
+        let g = group_body_peeks(&[(0, 91), (4000, 2000)]);
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].2, vec![0, 1]);
+    }
+
+    #[test]
+    fn group_body_peeks_caps_straddle_chain_at_two_pages() {
+        let g = group_body_peeks(&[(100, 4096), (4196, 4096)]);
+        assert_eq!(g.len(), 2);
+    }
+
+    #[test]
+    fn pipeline_outs_coalesces_same_page_peeks() {
+        let (dir, t) = temp_tx();
+        let fks = put_n(&t, 8);
+        let mut jobs: Vec<IdxBodyJob> = fks.iter().map(|fk| IdxBodyJob::new(fk.0, None)).collect();
+        let stats = run_idx_body_pipeline(&t.body, &mut jobs, BodyMode::Outs).unwrap();
+        assert!(stats.body_sqe_n >= 1);
+        assert!(
+            stats.body_sqe_n < jobs.len() as u64,
+            "sqe={} jobs={}",
+            stats.body_sqe_n,
+            jobs.len()
+        );
+        for j in &jobs {
+            assert!(j.ok, "id={}", j.id);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

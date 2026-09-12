@@ -282,6 +282,8 @@ pub(crate) struct IbdPerfSample {
     pub load_cold_range_decode_ms: u64,
     /// Outs second-wave full-span extends (jobs whose need missed the first 4 KiB).
     pub load_cold_range_extend_n: u64,
+    /// Body pread SQEs after page grouping (first wave + extend).
+    pub load_cold_range_body_sqe_n: u64,
     pub load_body_tx_reads: u64,
     pub conf_ready: usize,
     pub conf_script_q: usize,
@@ -523,6 +525,7 @@ impl Default for IbdPerfSample {
             load_cold_range_body_ms: 0,
             load_cold_range_decode_ms: 0,
             load_cold_range_extend_n: 0,
+            load_cold_range_body_sqe_n: 0,
             load_body_tx_reads: 0,
             conf_ready: 0,
             conf_script_q: 0,
@@ -969,6 +972,7 @@ pub(crate) fn sample(
         load_cold_range_body_ms: ns_ms(w.cold_range_body_ns),
         load_cold_range_decode_ms: ns_ms(w.cold_range_decode_ns),
         load_cold_range_extend_n: w.cold_range_extend_n,
+        load_cold_range_body_sqe_n: w.cold_range_body_sqe_n,
         load_body_tx_reads: w.body_tx_reads,
         conf_ready,
         conf_script_q,
@@ -1362,7 +1366,7 @@ pub(crate) fn format_info(s: &IbdPerfSample) -> String {
          assemble={}ms(prevout={} us/in={} batch_n={} same_n={} cold_n={} \
          cold_why(null_fk={} not_pin={} mismatch={} vout_miss={}) \
          sigop={} final={} job={}) \
-         pin(thin={}ms plan={}ms/n={} cold_range={}ms(body={} dec={})/n={} extend={} cold_io={}ms us/new={} \
+         pin(thin={}ms plan={}ms/n={} cold_range={}ms(body={} dec={})/n={} extend={} sqe={} cold_io={}ms us/new={} \
          recent_outs={}ms range_fill={}ms contract={}ms) \
          pin_hit%={} pin_plan={} pin_new={} body_io={}",
         s.load_blocks,
@@ -1396,6 +1400,7 @@ pub(crate) fn format_info(s: &IbdPerfSample) -> String {
         s.load_cold_range_decode_ms,
         s.load_cold_range_n,
         s.load_cold_range_extend_n,
+        s.load_cold_range_body_sqe_n,
         cold_io_ms,
         pin_cold_us_per,
         s.load_pin_recent_outs_ms,
@@ -2284,7 +2289,7 @@ mod tests {
         s.load_cold_range_decode_ms = 400;
         let line = format_info(&s);
         assert!(
-            line.contains("cold_range=1200ms(body=800 dec=400)/n=4000 extend=0"),
+            line.contains("cold_range=1200ms(body=800 dec=400)/n=4000 extend=0 sqe=0"),
             "{line}"
         );
         assert!(!line.contains("cold_idx="), "{line}");

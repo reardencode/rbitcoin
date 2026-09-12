@@ -1491,7 +1491,7 @@ mod tests {
             .insert(pid, crate::ParentIdent::with_body(parent_txid, range));
 
         let known = plan.external_parent_txid(pid).expect("reverse map");
-        let (rows, _body_ns, _dec_ns, _extend_n) = q
+        let (rows, _body_ns, _dec_ns, _extend_n, _sqe_n) = q
             .store
             .get_outs_by_range_batch(&[(parent_fk, range, known, vec![0])])
             .unwrap();

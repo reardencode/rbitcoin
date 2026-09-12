@@ -827,7 +827,7 @@ fn get_fk_by_txid_batch_multi_cand_then_outs() {
     let multi = batch.iter().find(|(id, _)| *id == txid).unwrap();
     let (fk, range) = multi.1.expect("multi-cand hit");
     assert_eq!(fk, fk_new);
-    let (outs_rows, _, _, _) = t
+    let (outs_rows, _, _, _, _) = t
         .get_outs_by_range_batch(&[(fk, range, txid, vec![0])])
         .unwrap();
     let (tx, outs, dens) = outs_rows[0].as_ref().expect("outs for winner");
@@ -839,7 +839,7 @@ fn get_fk_by_txid_batch_multi_cand_then_outs() {
     let single = batch.iter().find(|(id, _)| *id == solo).unwrap();
     let (fk_s, range_s) = single.1.expect("single-cand hit");
     assert_eq!(fk_s, fk_solo);
-    let (solo_rows, _, _, _) = t
+    let (solo_rows, _, _, _, _) = t
         .get_outs_by_range_batch(&[(fk_s, range_s, solo, vec![0])])
         .unwrap();
     let (tx_s, outs_s, _) = solo_rows[0].as_ref().expect("single outs");
@@ -1103,7 +1103,7 @@ fn get_outs_denserels_by_range_sparse_need() {
         .unwrap()[0];
     let range = t.body.record_range(fk).unwrap();
     // Only need vout 1 — skip allocating big scripts on 0 and 2.
-    let (rows, _, _, _) = t
+    let (rows, _, _, _, _) = t
         .get_outs_by_range_batch(&[(fk, range, want_txid, vec![1])])
         .unwrap();
     let (got, live, sparse) = rows[0].as_ref().expect("range denserels");
@@ -1150,7 +1150,7 @@ fn get_outs_by_range_batch_skips_extend_when_need_in_first_page() {
         .unwrap()[0];
     let range = t.body.record_range(fk).unwrap();
     assert!(range.1 > 4096);
-    let (rows, _, _, extend_n) = t
+    let (rows, _, _, extend_n, _) = t
         .get_outs_by_range_batch(&[(fk, range, txid, vec![0])])
         .unwrap();
     assert_eq!(extend_n, 0);
@@ -1159,7 +1159,7 @@ fn get_outs_by_range_batch_skips_extend_when_need_in_first_page() {
     assert_eq!(live.len(), 1);
     assert_eq!(live[0].0, 0);
     assert_eq!(sparse.len(), 1);
-    let (_, _, _, extend_all) = t
+    let (_, _, _, extend_all, _) = t
         .get_outs_by_range_batch(&[(fk, range, txid, vec![])])
         .unwrap();
     assert_eq!(extend_all, 1);

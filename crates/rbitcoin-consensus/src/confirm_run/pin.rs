@@ -237,7 +237,7 @@ fn denserels_by_stamped_range(
         return Ok((0, 0));
     }
     let n_range = range_jobs.len() as u64;
-    let (decoded, body_ns, dec_ns, extend_n) = query
+    let (decoded, body_ns, dec_ns, extend_n, body_sqe_n) = query
         .store()
         .get_outs_by_range_batch(&range_jobs)
         .map_err(ConsensusError::from)?;
@@ -254,6 +254,7 @@ fn denserels_by_stamped_range(
     }
     rbitcoin_query::note_confirm(&query.confirm_stats().cold_range_n, n_range);
     rbitcoin_query::note_confirm(&query.confirm_stats().cold_range_extend_n, extend_n);
+    rbitcoin_query::note_confirm(&query.confirm_stats().cold_range_body_sqe_n, body_sqe_n);
     rbitcoin_query::note_confirm(&query.confirm_stats().body_tx_reads, n_range);
     rbitcoin_query::note_confirm(&query.confirm_stats().pin_new, n_range);
     let t_range_fill = Instant::now();
