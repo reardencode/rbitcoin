@@ -5,7 +5,7 @@ use crate::graph::{TxEntry, TxGraph};
 use crate::orphanage::Orphanage;
 use crate::store::Mempool;
 use bitcoin::consensus::encode::serialize;
-use bitcoin::{OutPoint, Transaction, TxOut, Txid};
+use bitcoin::{OutPoint, Transaction, TxOut, Txid, Wtxid};
 use rbitcoin_consensus::policy::{self, PolicyResult};
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::time::Instant;
@@ -270,6 +270,8 @@ fn verify_tx_scripts(tx: &Transaction, prevouts: Vec<TxOut>) -> Result<(), Accep
 /// re-checks and durable-commits.
 #[derive(Debug, Clone)]
 pub struct PreparedAdmit {
+    pub txid: Txid,
+    pub wtxid: Wtxid,
     pub fee_sat: u64,
     /// `prioritisetransaction` delta applied at prepare (min-relay / RBF).
     pub fee_delta: i64,
@@ -543,14 +545,25 @@ impl ActiveMempool {
         Ok(None)
     }
 
-    fn scan_conflicts_and_parents(&self, tx: &Transaction) -> Result<ConflictScan, AcceptError> {
-        let txid = tx.compute_txid();
+    fn scan_conflicts_and_parents(
+        &self,
+        txid: Txid,
+        tx: &Transaction,
+        chain_coins: &[Option<Coin>],
+    ) -> Result<ConflictScan, AcceptError> {
         let mut scan = ConflictScan {
             direct_conflicts: BTreeSet::new(),
             parent_txids: BTreeSet::new(),
         };
-        for inp in &tx.input {
-            let _ = self.note_conflict_and_parent(txid, inp.previous_output, Some(&mut scan))?;
+        for (i, inp) in tx.input.iter().enumerate() {
+            let op = inp.previous_output;
+            if let Some(creator) = self.note_conflict_and_parent(txid, op, Some(&mut scan))? {
+                if !self.bodies.contains_key(&creator) {
+                    return Err(AcceptError::Durable("parent body missing".into()));
+                }
+            } else if chain_coins.get(i).and_then(|c| c.as_ref()).is_none() {
+                return Err(AcceptError::MissingPrevout(op));
+            }
         }
         Ok(scan)
     }
@@ -572,8 +585,9 @@ impl ActiveMempool {
             return Err(AcceptError::Coinbase);
         }
         let txid = tx.compute_txid();
+        let wtxid = tx.compute_wtxid();
         if let Some(live) = self.graph.get(&txid) {
-            if live.wtxid == tx.compute_wtxid() {
+            if live.wtxid == wtxid {
                 return Err(AcceptError::Duplicate(txid));
             }
             // Same txid, different witness (Core testmempoolaccept /
@@ -668,6 +682,8 @@ impl ActiveMempool {
         }
 
         Ok(PreparedAdmit {
+            txid,
+            wtxid,
             fee_sat,
             fee_delta,
             weight,
@@ -718,8 +734,8 @@ impl ActiveMempool {
         tx: &Transaction,
         prep: PreparedAdmit,
     ) -> Result<AcceptResult, AcceptError> {
-        let (conflict_set, fee_sat, weight) = self.plan_after_script(tx, prep)?;
-        let txid = tx.compute_txid();
+        let (conflict_set, fee_sat, weight) = self.plan_after_script(tx, &prep)?;
+        let txid = prep.txid;
 
         let mut replaced_scripthashes: Vec<[u8; 32]> = Vec::new();
         for c in &conflict_set {
@@ -750,7 +766,7 @@ impl ActiveMempool {
 
         let entry = TxEntry {
             txid,
-            wtxid: tx.compute_wtxid(),
+            wtxid: prep.wtxid,
             fee_sat,
             weight,
             slot,
@@ -792,9 +808,9 @@ impl ActiveMempool {
         tx: &Transaction,
         prep: PreparedAdmit,
     ) -> Result<AcceptResult, AcceptError> {
-        let (conflict_set, fee_sat, weight) = self.plan_after_script(tx, prep)?;
+        let (conflict_set, fee_sat, weight) = self.plan_after_script(tx, &prep)?;
         Ok(AcceptResult {
-            txid: tx.compute_txid(),
+            txid: prep.txid,
             fee_sat,
             weight,
             slot: 0,
@@ -806,11 +822,11 @@ impl ActiveMempool {
     fn plan_after_script(
         &self,
         tx: &Transaction,
-        prep: PreparedAdmit,
+        prep: &PreparedAdmit,
     ) -> Result<(BTreeSet<Txid>, u64, u64), AcceptError> {
-        let txid = tx.compute_txid();
+        let txid = prep.txid;
         if let Some(live) = self.graph.get(&txid) {
-            if live.wtxid == tx.compute_wtxid() {
+            if live.wtxid == prep.wtxid {
                 return Err(AcceptError::Duplicate(txid));
             }
             return Err(AcceptError::Policy("txn-same-nonwitness-data-in-mempool"));
@@ -824,17 +840,7 @@ impl ActiveMempool {
             return Err(AcceptError::Orphaned { txid, missing });
         }
 
-        let scan = self.scan_conflicts_and_parents(tx)?;
-        for (i, inp) in tx.input.iter().enumerate() {
-            let op = inp.previous_output;
-            if let Some(creator) = self.graph.creator(&op) {
-                if !self.bodies.contains_key(&creator) {
-                    return Err(AcceptError::Durable("parent body missing".into()));
-                }
-            } else if prep.chain_coins.get(i).and_then(|c| c.as_ref()).is_none() {
-                return Err(AcceptError::MissingPrevout(op));
-            }
-        }
+        let scan = self.scan_conflicts_and_parents(txid, tx, &prep.chain_coins)?;
 
         let fee_sat = prep.fee_sat;
         let weight = prep.weight;
@@ -2266,6 +2272,41 @@ mod tests {
         mp.commit_after_script(&tx, prep)
             .expect("commit uses prep.chain_coins");
         assert!(mp.graph.contains(&tx.compute_txid()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prepare_admit_stashes_txid() {
+        let dir = tmp_dir();
+        let (op, _, utxos) = chain_utxo(100_000);
+        let tx = spend_tx(op, 99_000);
+        let mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let prep = mp
+            .prepare_admit(&tx, &utxos, TIP_OK, 0, true, None)
+            .unwrap();
+        assert_eq!(prep.txid, tx.compute_txid());
+        assert_eq!(prep.wtxid, tx.compute_wtxid());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn commit_after_script_parent_body_missing_is_durable() {
+        let dir = tmp_dir();
+        let (op, _, utxos) = chain_utxo(100_000);
+        let parent = spend_tx(op, 90_000);
+        let pid = parent.compute_txid();
+        let child = spend_tx(OutPoint { txid: pid, vout: 0 }, 80_000);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        mp.accept_tx(&parent, &utxos, TIP_OK).unwrap();
+        let prep = mp
+            .prepare_admit(&child, &utxos, TIP_OK, 0, true, None)
+            .unwrap();
+        mp.bodies.remove(&pid);
+        let err = mp.commit_after_script(&child, prep).unwrap_err();
+        assert!(
+            matches!(err, AcceptError::Durable(ref s) if s == "parent body missing"),
+            "got {err}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
