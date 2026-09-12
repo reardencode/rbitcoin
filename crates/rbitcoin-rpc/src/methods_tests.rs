@@ -1518,6 +1518,31 @@ fn gettxout_disconnected_archive_row_is_null() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn gettxout_leftover_is_connected_not_unconfirmed() {
+    let (ctx, dir, _hub) = ctx_regtest_hub();
+    let (hex, spend) = mature_coinbase_spend_hex(&ctx, 50_0000_0000 - 1_000);
+    dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
+    ctx.mempool.as_ref().unwrap().set_relay_enabled(false);
+    dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
+    let tid = spend.compute_txid();
+    assert!(
+        ctx.mempool.as_ref().unwrap().contains(&tid),
+        "relay off must leave the confirmed tx in the hub"
+    );
+    let txid = hash_hex_display(&tid.to_byte_array());
+    let utxo = dispatch(&ctx, "gettxout", vec![json!(txid), json!(0)]).unwrap();
+    assert_ne!(
+        utxo["confirmations"], 0,
+        "default include_mempool must not treat a tip-connected leftover as mempool-only: {utxo}"
+    );
+    assert!(
+        utxo["confirmations"].as_u64().unwrap() >= 1,
+        "leftover must use the connected path: {utxo}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn mature_coinbase_spend(
     ctx: &RpcContext,
     keep_sat: u64,
