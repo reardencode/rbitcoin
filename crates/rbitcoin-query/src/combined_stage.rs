@@ -510,6 +510,11 @@ mod tests {
         let _ = q.block_queue_take_raw_clone_n();
         let intake = q.block_queue_wave_intake(&asked);
         assert_eq!(intake.raw.len(), 64, "all still-raw heights classified");
+        assert_eq!(intake.raw[0].0, 0);
+        assert_eq!(
+            intake.raw[0].2, 1,
+            "enqueue header_fk rides the intake stamp"
+        );
         assert_eq!(
             q.block_queue_take_raw_clone_n(),
             0,
@@ -566,7 +571,7 @@ mod tests {
         let intake2 = q.block_queue_wave_intake(&[7, 8]);
         assert_eq!(intake2.resolved.len(), 1);
         assert_eq!(intake2.raw.len(), 1);
-        assert_eq!(intake2.raw[0], (8, 0));
+        assert_eq!(intake2.raw[0], (8, 0, 2));
         q.block_queue_drop_resolved_from(7);
         assert!(q.block_queue_resolved(7).is_none());
         assert_eq!(q.block_queue_dequeue_height(8).unwrap(), 1);

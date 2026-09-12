@@ -727,7 +727,8 @@ pub(crate) fn load_stamp_items(
 /// Split a lookup-wave into load-sized batch lengths.
 ///
 /// Stops on [`pack_stop_after`] (soft 8000 / hard 144) and when `has_body` flips.
-/// `has_body` is per height, same order as `input_counts`. Empty skips the kind split.
+/// `has_body` is per height from BQ `header_fk` + Class A range (not hash-head).
+/// Empty skips the kind split.
 pub(crate) fn split_wave_into_load_batches_kind(
     input_counts: &[u32],
     has_body: &[bool],
@@ -2200,7 +2201,7 @@ pub(crate) fn spawn_confirm_engine(
                             let kinds: Vec<bool> = match wave
                                 .items
                                 .iter()
-                                .map(|(_, hash, _)| hub.query.is_block_archived(hash))
+                                .map(|(_, _, w)| hub.query.header_has_class_a_body(w.header_fk))
                                 .collect::<Result<Vec<_>, _>>()
                             {
                                 Ok(k) => k,

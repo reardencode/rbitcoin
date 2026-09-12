@@ -11,6 +11,8 @@ pub struct ResolvedWire {
     pub pres: Arc<[TxPrecompute]>,
     /// Σ `tx.input.len()` (enqueue CompactSize or decode). Load-split uses this.
     pub n_inputs: u32,
+    /// Class A header row from BQ enqueue. Load-split kinds via `has_body(fk)`.
+    pub header_fk: u64,
 }
 
 impl ResolvedWire {
@@ -25,18 +27,19 @@ impl ResolvedWire {
             block,
             pres,
             n_inputs,
+            header_fk: 0,
         }
     }
 }
 
 /// One mutex snapshot of unresolved heights: still-raw vs already promoted.
 ///
-/// `raw` is **(height, n_inputs)** — no payload clone. Lookup packs/holds
-/// from the stamped count; decode clones via
+/// `raw` is **(height, n_inputs, header_fk)** — no payload clone. Lookup
+/// packs/holds from the stamped count; decode clones via
 /// [`crate::Query::block_queue_raw_payload`] only for heights it emits.
 #[derive(Clone, Debug, Default)]
 pub struct BlockQueueWaveIntake {
-    pub raw: Vec<(u32, u32)>,
+    pub raw: Vec<(u32, u32, u64)>,
     pub resolved: Vec<(u32, ResolvedWire)>,
 }
 
@@ -65,7 +68,10 @@ mod tests {
             block: Arc::clone(&wire.block),
             pres: Arc::clone(&wire.pres),
             n_inputs: 9,
+            header_fk: 7,
         };
         assert_eq!(stamped.n_inputs, 9);
+        assert_eq!(stamped.header_fk, 7);
+        assert_eq!(wire.header_fk, 0);
     }
 }

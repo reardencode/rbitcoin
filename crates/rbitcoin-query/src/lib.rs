@@ -917,7 +917,11 @@ impl Query {
             if let Some(w) = g.resolved.get(&h) {
                 out.resolved.push((h, w.clone()));
             } else if g.has_raw(h) {
-                out.raw.push((h, g.input_count_at(h).unwrap_or(0)));
+                out.raw.push((
+                    h,
+                    g.input_count_at(h).unwrap_or(0),
+                    g.header_fk_at(h).unwrap_or(0),
+                ));
             }
         }
         out
@@ -1218,6 +1222,16 @@ impl Query {
     /// "confirmed or archived" should check the confirmed set / tip first.
     pub fn is_block_archived(&self, hash: &[u8; 32]) -> Result<bool, QueryError> {
         let Some((fk, _)) = self.get_header_by_hash(hash)? else {
+            return Ok(false);
+        };
+        self.header_has_class_a_body(fk.0)
+    }
+
+    /// Class A body present for this header fk (no hash-head probe).
+    ///
+    /// Load-split uses BQ-stamped `header_fk`. `0` is never archived.
+    pub fn header_has_class_a_body(&self, header_fk: u64) -> Result<bool, QueryError> {
+        let Some(fk) = Fk::new(header_fk) else {
             return Ok(false);
         };
         self.store.header_txs.has_body(fk)
