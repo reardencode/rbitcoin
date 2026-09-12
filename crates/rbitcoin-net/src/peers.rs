@@ -1427,17 +1427,22 @@ impl PeerHub {
     }
 
     pub(crate) fn check_handshake_timeouts(&self, now: u64) {
-        let peers: Vec<Arc<LivePeer>> = self.live_peers();
-        for p in peers {
-            if self.handshake_timed_out(&p, now) {
-                let line = if p.v2_transport_ready() {
-                    crate::peer::version_handshake_timeout_log(p.id)
-                } else {
-                    crate::v2::v2_handshake_timeout_log(p.id)
-                };
-                rbitcoin_log::debug!("{}", line);
-                let _ = self.disconnect_id(p.id);
-            }
+        let mut timed_out: Vec<Arc<LivePeer>> = self
+            .live_peers()
+            .into_iter()
+            .filter(|p| self.handshake_timed_out(p, now))
+            .collect();
+        timed_out.sort_unstable_by_key(|p| p.id);
+        for p in &timed_out {
+            let line = if p.v2_transport_ready() {
+                crate::peer::version_handshake_timeout_log(p.id)
+            } else {
+                crate::v2::v2_handshake_timeout_log(p.id)
+            };
+            rbitcoin_log::debug!("{}", line);
+        }
+        for p in timed_out {
+            let _ = self.disconnect_id(p.id);
         }
     }
 
@@ -2113,6 +2118,73 @@ mod tests {
             logs.iter()
                 .any(|(_, m)| m.contains("version handshake timeout, disconnecting peer=0")),
             "expected version handshake timeout after v2 ready, got {logs:?}"
+        );
+    }
+
+    #[test]
+    fn p2p_timeouts_v2_logs_all_three_connecting_peer_ids() {
+        rbitcoin_log::capture_logs(true);
+        let hub = PeerHub::new();
+        hub.set_peer_timeout_secs(3);
+        hub.set_mock_now(1_700_000_000);
+        let addr = |p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p);
+        let peers: Vec<_> = (1..=3)
+            .map(|p| {
+                let s = hub.register_connecting(addr(p), addr(p), true, PeerConnType::Inbound);
+                s.mark_v2_transport_ready();
+                s
+            })
+            .collect();
+        assert_eq!(peers.iter().map(|p| p.id).collect::<Vec<_>>(), [0, 1, 2]);
+        hub.set_mock_now(1_700_000_003);
+        let logs = rbitcoin_log::take_logs();
+        rbitcoin_log::capture_logs(false);
+        let got: Vec<u64> = logs
+            .iter()
+            .filter_map(|(_, m)| {
+                [0u64, 1, 2].into_iter().find(|id| {
+                    m.contains(&format!(
+                        "version handshake timeout, disconnecting peer={id}"
+                    ))
+                })
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![0, 1, 2],
+            "timeout needles before TCP close, id order, got {logs:?}"
+        );
+    }
+
+    #[test]
+    fn handshake_timeout_tick_logs_when_stop_already_set() {
+        rbitcoin_log::capture_logs(true);
+        let hub = PeerHub::new();
+        hub.set_peer_timeout_secs(3);
+        hub.set_mock_now(1_700_000_000);
+        let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1);
+        let p = hub.register_connecting(a, a, true, PeerConnType::Inbound);
+        p.mark_v2_transport_ready();
+        p.request_disconnect();
+        let _ = rbitcoin_log::take_logs();
+        hub.mock_now.store(1_700_000_003, Ordering::Release);
+        let policy = crate::peer::HandshakePolicy {
+            hub: None,
+            peers: Some(&hub),
+            session: Some(p.as_ref()),
+            conn_type: PeerConnType::Inbound,
+        };
+        let err = crate::peer::fail_if_handshake_timed_out(&policy);
+        let logs = rbitcoin_log::take_logs();
+        rbitcoin_log::capture_logs(false);
+        assert!(
+            matches!(err, Err(crate::error::NetError::Timeout)),
+            "got {err:?}"
+        );
+        assert!(
+            logs.iter()
+                .any(|(_, m)| m.contains("version handshake timeout, disconnecting peer=0")),
+            "pre-verack ping vs mocktime must still log the needle, got {logs:?}"
         );
     }
 

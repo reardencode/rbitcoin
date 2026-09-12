@@ -20,6 +20,11 @@ before 1.0).
 
 ### Fixed
 
+- **`p2p_timeouts.py --v2transport`:** VERSION handshake timeout needles are
+  logged for every connecting peer (id order) before TCP teardown, and a
+  pre-verack ping does not skip the `peer=0` line. Core's `assert_debug_log`
+  uses `timeout=0`.
+
 - **Electrum 1.4 leftover:** `blockchain.scripthash.unsubscribe` returns whether
   the connection was watching (frees the per-connection cap). `get_history`
   unconfirmed rows include `fee`; confirmed rows (including genesis height 0)
