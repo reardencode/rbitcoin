@@ -1710,8 +1710,7 @@ fn try_reconstruct_cmpct(
     version: u32,
 ) -> Option<CmpctReconstruct> {
     let owned = mempool_shortid_avail(hub, &hsi.header, hsi.nonce, version, &hsi.short_ids);
-    let avail = crate::compact::borrow_owned_shortids(&owned);
-    match crate::compact::try_reconstruct(hsi, &avail, version) {
+    match crate::compact::try_reconstruct(hsi, &owned, version) {
         Ok(block) => Some(CmpctReconstruct::Block(block)),
         Err(_) if hub.mempool().is_none() => None,
         Err(m) => Some(CmpctReconstruct::Missing(m)),
@@ -1915,8 +1914,7 @@ fn apply_cmpct_blocktxn(
         pc.version,
         &pc.hsi.short_ids,
     );
-    let avail = crate::compact::borrow_owned_shortids(&owned);
-    crate::compact::apply_block_transactions(&pc.hsi, &pc.missing, bt, &avail, pc.version)
+    crate::compact::apply_block_transactions(&pc.hsi, &pc.missing, bt, &owned, pc.version)
         .map_err(|_| ())
 }
 

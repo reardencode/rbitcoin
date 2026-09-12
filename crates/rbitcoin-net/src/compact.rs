@@ -9,6 +9,7 @@ use bitcoin::block::Header;
 use bitcoin::p2p::message::NetworkMessage;
 use bitcoin::p2p::Magic;
 use bitcoin::{Block, BlockHash, Transaction};
+use std::borrow::Borrow;
 use std::collections::HashMap;
 
 /// Build siphash short-id → transaction map for compact fill (version 1 = txid, 2 = wtxid).
@@ -32,16 +33,6 @@ fn short_id_for_tx(tx: &Transaction, version: u32, keys: (u64, u64)) -> ShortId 
         1 => ShortId::with_siphash_keys(&tx.compute_txid().to_raw_hash(), keys),
         _ => ShortId::with_siphash_keys(&tx.compute_wtxid().to_raw_hash(), keys),
     }
-}
-
-/// Borrow an owned matching map for reconstruct without hashing the clones.
-pub(crate) fn borrow_owned_shortids(
-    owned: &HashMap<ShortId, Vec<Transaction>>,
-) -> HashMap<ShortId, Vec<&Transaction>> {
-    owned
-        .iter()
-        .map(|(k, v)| (*k, v.iter().collect()))
-        .collect()
 }
 
 /// Consensus-decode BIP152 `HeaderAndShortIds`.
@@ -107,9 +98,9 @@ pub fn prefilled_absolute_indexes(hsi: &HeaderAndShortIds) -> Vec<(usize, &Trans
 ///
 /// On success returns the block. On failure returns absolute indexes still missing
 /// (for `BlockTransactionsRequest`).
-pub fn try_reconstruct(
+pub fn try_reconstruct<T: Borrow<Transaction>>(
     hsi: &HeaderAndShortIds,
-    available: &HashMap<ShortId, Vec<&Transaction>>,
+    available: &HashMap<ShortId, Vec<T>>,
     version: u32,
 ) -> Result<Block, Vec<u64>> {
     let n_short = hsi.short_ids.len();
@@ -145,14 +136,14 @@ pub fn try_reconstruct(
         short_i += 1;
         match available.get(&sid) {
             Some(cands) if cands.len() == 1 => {
-                let txid = cands[0].compute_txid();
+                let txid = cands[0].borrow().compute_txid();
                 // Repeat short-id / same candidate in two slots → duplicate
                 // txid block. Mark missing so getblocktxn / getdata can recover.
                 if !placed.insert(txid) {
                     missing.push(abs as u64);
                     continue;
                 }
-                *slot = Some(cands[0].clone());
+                *slot = Some(cands[0].borrow().clone());
             }
             Some(cands) if cands.len() > 1 => {
                 // Ambiguous short-id collision — request from peer.
@@ -198,11 +189,11 @@ pub fn missing_request(block_hash: BlockHash, missing: &[u64]) -> BlockTransacti
 /// `txn.transactions` holds the txs in the same order as the request indexes.
 /// Provided txs are placed by absolute index (not re-matched by short-id alone),
 /// so collisions cannot undo a successful `getblocktxn` response.
-pub fn apply_block_transactions(
+pub fn apply_block_transactions<T: Borrow<Transaction>>(
     hsi: &HeaderAndShortIds,
     missing: &[u64],
     txn: &BlockTransactions,
-    available: &HashMap<ShortId, Vec<&Transaction>>,
+    available: &HashMap<ShortId, Vec<T>>,
     version: u32,
 ) -> Result<Block, Vec<u64>> {
     if txn.transactions.len() != missing.len() {
@@ -259,12 +250,12 @@ pub fn apply_block_transactions(
         short_i += 1;
         match available.get(&sid) {
             Some(cands) if cands.len() == 1 => {
-                let txid = cands[0].compute_txid();
+                let txid = cands[0].borrow().compute_txid();
                 if !placed.insert(txid) {
                     still_missing.push(abs as u64);
                     continue;
                 }
-                *slot = Some(cands[0].clone());
+                *slot = Some(cands[0].borrow().clone());
             }
             _ => still_missing.push(abs as u64),
         }
@@ -298,6 +289,10 @@ mod tests {
     use bitcoin::{
         Amount, BlockHash, CompactTarget, OutPoint, Sequence, TxIn, TxMerkleNode, TxOut, Witness,
     };
+
+    fn empty_avail() -> HashMap<ShortId, Vec<&'static Transaction>> {
+        HashMap::new()
+    }
 
     fn dummy_header() -> Header {
         Header {
@@ -390,8 +385,7 @@ mod tests {
             "rehashing clones must miss a caller short-id"
         );
 
-        let avail = borrow_owned_shortids(&owned);
-        let recon = try_reconstruct(&hsi, &avail, 2).expect("matching short-id must place body");
+        let recon = try_reconstruct(&hsi, &owned, 2).expect("matching short-id must place body");
         assert_eq!(recon.txdata[1].compute_txid(), b1.compute_txid());
     }
 
@@ -515,9 +509,11 @@ mod tests {
             short_ids: vec![],
             prefilled_txs: vec![],
         };
-        assert!(try_reconstruct(&hsi, &HashMap::new(), 2)
-            .unwrap_err()
-            .is_empty());
+        assert!(
+            try_reconstruct(&hsi, &HashMap::<ShortId, Vec<&Transaction>>::new(), 2)
+                .unwrap_err()
+                .is_empty()
+        );
         assert!(apply_block_transactions(
             &hsi,
             &[],
@@ -525,7 +521,7 @@ mod tests {
                 block_hash: BlockHash::from_byte_array([0; 32]),
                 transactions: vec![],
             },
-            &HashMap::new(),
+            &HashMap::<ShortId, Vec<&Transaction>>::new(),
             2
         )
         .unwrap_err()
@@ -597,12 +593,12 @@ mod tests {
     fn try_reconstruct_empty_mempool_two_tx_is_index_1() {
         let hsi = mined_h1_two_tx_hsi();
         assert_eq!(
-            try_reconstruct(&hsi, &HashMap::new(), 2).unwrap_err(),
+            try_reconstruct(&hsi, &empty_avail(), 2).unwrap_err(),
             vec![1]
         );
         let raw = bitcoin::consensus::encode::serialize(&hsi);
         assert_eq!(
-            try_reconstruct(&decode_cmpct_hsi(&raw).unwrap(), &HashMap::new(), 2).unwrap_err(),
+            try_reconstruct(&decode_cmpct_hsi(&raw).unwrap(), &empty_avail(), 2).unwrap_err(),
             vec![1]
         );
     }
@@ -615,7 +611,7 @@ mod tests {
         assert_eq!(raw, expected);
         let hsi = decode_cmpct_hsi(&raw).unwrap();
         assert_eq!(
-            try_reconstruct(&hsi, &HashMap::new(), 2).unwrap_err(),
+            try_reconstruct(&hsi, &empty_avail(), 2).unwrap_err(),
             vec![1]
         );
     }
