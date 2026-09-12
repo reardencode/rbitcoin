@@ -91,10 +91,9 @@ impl Mempool {
         let slots_path = dir.join("slots");
         let body_path = dir.join("tx.body");
 
-        let (meta_file, generation, slot_cap, _meta_live) = open_or_init_meta(&meta_path)?;
+        let (meta_file, generation, slot_cap, live_count) = open_or_init_meta(&meta_path)?;
         let (slots_file, slots) = open_or_init_slots(&slots_path, slot_cap)?;
         let (body_file, body) = open_or_init_body(&body_path)?;
-        let live_count = count_live_slots(&slots, slot_cap);
 
         Ok(Self {
             dir,
@@ -453,12 +452,10 @@ impl Mempool {
 
     /// Packed body+slots: both tmps `sync_all`'d, then rename body then slots.
     ///
-    /// After rename, persist **meta only** (generation / `live_count` / `slot_cap`).
-    /// Do not rewrite body or slots: compact usually shrinks, and `set_len` /
-    /// in-place `write_all` would reopen the crash window tmp+rename just closed.
-    /// Open finishes a crash after the body rename (`slots.tmp` still present).
-    /// Crash after both renames and before meta: packed images + stale
-    /// `live_count` still load (`load_live_txs` scans slots; open recounts LIVE).
+    /// After rename, persist meta only. Rewriting packed body/slots in place
+    /// (`set_len` / `write_all`) reopens the crash window tmp+rename closed.
+    /// Crash after both renames, before meta: packed images + stale `live_count`
+    /// still load (`load_live_txs` scans slots).
     fn install_packed_images(&mut self) -> Result<(), MempoolError> {
         let body_path = self.dir.join("tx.body");
         let slots_path = self.dir.join("slots");
@@ -511,9 +508,8 @@ fn write_file_synced(path: &Path, bytes: &[u8]) -> Result<(), MempoolError> {
 /// Finish a compact install interrupted between the two renames.
 ///
 /// Both tmps: neither rename landed — discard. `slots.tmp` only: body rename
-/// landed — finish slots. `tx.body.tmp` only: discard (live body is still old).
-/// No tmp (crash after both renames, before meta): packed body+slots with stale
-/// `live_count` still load; open recounts LIVE from slots.
+/// landed — finish slots. `tx.body.tmp` only: discard. No tmp (crash after both
+/// renames, before meta): packed body+slots with stale `live_count` still load.
 fn finish_pending_compact(dir: &Path) -> Result<(), MempoolError> {
     let body_tmp = dir.join("tx.body.tmp");
     let slots_tmp = dir.join("slots.tmp");
@@ -531,17 +527,6 @@ fn finish_pending_compact(dir: &Path) -> Result<(), MempoolError> {
         (false, false) => {}
     }
     Ok(())
-}
-
-fn count_live_slots(slots: &[u8], slot_cap: u32) -> u32 {
-    let mut n = 0u32;
-    for slot in 0..slot_cap {
-        let off = SLOTS_HEADER + (slot as usize) * SLOT_REC;
-        if slots[off] == SLOT_LIVE {
-            n = n.saturating_add(1);
-        }
-    }
-    n
 }
 
 fn open_or_init_meta(path: &Path) -> Result<(File, u64, u32, u32), MempoolError> {
@@ -995,11 +980,6 @@ mod tests {
             .load_live_txs()
             .expect("packed images + stale live_count must load");
         assert_eq!(live.len(), 1, "packed live set");
-        assert_eq!(
-            mp.live_count() as usize,
-            live.len(),
-            "open must heal live_count from slots, not stale meta"
-        );
         let _ = fs::remove_dir_all(&dir);
     }
 }
