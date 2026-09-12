@@ -20,7 +20,7 @@ use rbitcoin_primitives::Fk;
 pub enum BodyMode {
     /// Full record (txout or inwit).
     Full,
-    /// `txout` first page (outs / pin).
+    /// `txout` outs / pin: starting OS page, or full span if need is likely to spill.
     Outs,
     /// Leading ≤32 body bytes (retired; tests only).
     Prefix33,
@@ -82,11 +82,39 @@ pub struct IdxBodyIoStats {
     pub extend_n: u64,
     /// Body `ReadOp`s submitted (first wave + extend), after page grouping.
     pub body_sqe_n: u64,
+    /// First-wave Outs jobs that pread the full idx span (spill guess).
+    pub guess_full_n: u64,
 }
 
 const BODY_OS_PAGE: u64 = crate::tx_table::BODY_PAGE_SIZE;
 /// Cap a coalesced span at two OS pages (one straddle). Do not chain into SH-sized reads.
 const BODY_GROUP_MAX_PAGES: u64 = 2;
+/// Typical packed out (P2TR-ish) for the first-wave spill guess.
+const OUTS_GUESS_PER_VOUT: u64 = 40;
+
+/// First-wave Outs pread length.
+///
+/// Records are 8-aligned, not OS-page aligned. `room` is bytes from `off` to
+/// the next OS page. Empty need uses the idx span; sparse need uses
+/// `(max_vout+1)*40`. If that estimate is likely to spill, read the full span;
+/// otherwise only the remainder of this page.
+pub(crate) fn outs_first_wave_len(off: u64, full_len: u64, need_vouts: &[u32]) -> u64 {
+    if full_len == 0 {
+        return 0;
+    }
+    let room = BODY_OS_PAGE - (off % BODY_OS_PAGE);
+    let est = if need_vouts.is_empty() {
+        full_len
+    } else {
+        let k = u64::from(need_vouts.iter().copied().max().unwrap_or(0));
+        k.saturating_add(1).saturating_mul(OUTS_GUESS_PER_VOUT)
+    };
+    if est > room {
+        full_len
+    } else {
+        full_len.min(room)
+    }
+}
 
 /// Offset-sorted `[off, off+len)` windows → `(page_off, span_len, window indices)`.
 ///
@@ -248,15 +276,25 @@ pub fn run_idx_body_pipeline_backend(
     let body_path = table.body_file_path();
 
     let mut submitted: Vec<usize> = Vec::new();
+    let mut guess_full_n = 0u64;
     for (i, j) in jobs.iter_mut().enumerate() {
         j.ok = false;
         j.body.clear();
         let Some((off, full_len)) = j.range else {
             continue;
         };
-        let want = mode.body_len(full_len);
+        let want = match mode {
+            BodyMode::Outs => outs_first_wave_len(off, full_len, &j.need_vouts),
+            other => other.body_len(full_len),
+        };
         if want == 0 || off.saturating_add(want) > body_pub {
             continue;
+        }
+        if mode == BodyMode::Outs {
+            let room = BODY_OS_PAGE - (off % BODY_OS_PAGE);
+            if want == full_len && full_len > room {
+                guess_full_n = guess_full_n.saturating_add(1);
+            }
         }
         j.body.resize(want as usize, 0);
         submitted.push(i);
@@ -278,6 +316,7 @@ pub fn run_idx_body_pipeline_backend(
         .collect();
     let mut stats = IdxBodyIoStats {
         body_sqe_n: pread_grouped_peeks(jobs, &dests, body_fd, body_path, backend, true)?,
+        guess_full_n,
         ..Default::default()
     };
     if mode == BodyMode::Outs {
@@ -288,9 +327,9 @@ pub fn run_idx_body_pipeline_backend(
     Ok(stats)
 }
 
-/// Second wave: when a 4 KiB Outs read does not cover needed outputs, pread the
-/// remainder of the idx span. Empty need walks every out; sparse need skips
-/// extend when the first page already contains those vouts.
+/// Second wave: when the first-wave peek does not cover needed outputs, pread
+/// the remainder of the idx span. Empty need walks every out; sparse need
+/// skips extend when the peek already contains those vouts.
 fn extend_truncated_txout_jobs(
     table: &VarTable,
     jobs: &mut [IdxBodyJob],
@@ -357,6 +396,31 @@ mod tests {
     };
     use rbitcoin_primitives::Fk;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn outs_first_wave_page_aligned_k0_stays_first_page() {
+        assert_eq!(outs_first_wave_len(0, 8000, &[0]), 4096);
+    }
+
+    #[test]
+    fn outs_first_wave_full_when_k_times_40_exceeds_room() {
+        assert_eq!(outs_first_wave_len(0, 8000, &[120]), 8000);
+    }
+
+    #[test]
+    fn outs_first_wave_k0_near_page_end_guesses_full() {
+        assert_eq!(outs_first_wave_len(4064, 8000, &[0]), 8000);
+    }
+
+    #[test]
+    fn outs_first_wave_k0_fits_remainder_peeks_only_this_page() {
+        assert_eq!(outs_first_wave_len(3840, 8000, &[0]), 256);
+    }
+
+    #[test]
+    fn outs_first_wave_empty_need_full_when_span_crosses_page() {
+        assert_eq!(outs_first_wave_len(0, 6000, &[]), 6000);
+    }
 
     fn temp_tx() -> (std::path::PathBuf, TxTable) {
         static N: AtomicU64 = AtomicU64::new(0);
@@ -480,9 +544,11 @@ mod tests {
         let (_off, full_len) = t.body.record_range(fk).unwrap();
         assert!(full_len > 4096, "fixture must exceed first-page cap");
         let mut jobs = vec![IdxBodyJob::new(fk.0, None)];
-        run_idx_body_pipeline(&t.body, &mut jobs, BodyMode::Outs).unwrap();
+        let stats = run_idx_body_pipeline(&t.body, &mut jobs, BodyMode::Outs).unwrap();
         assert!(jobs[0].ok);
         assert_eq!(jobs[0].body.len() as u64, full_len);
+        assert_eq!(stats.extend_n, 0);
+        assert_eq!(stats.guess_full_n, 1);
         let (meta, decoded, _) =
             crate::tx_table::decode_packed_tx_outs_with_spender_rels(&jobs[0].body).unwrap();
         assert_eq!(meta.output_count, 1);
@@ -509,6 +575,144 @@ mod tests {
         (tx, inputs, outs)
     }
 
+    fn pad_until_page_room(t: &TxTable, room_lo: u64, room_hi: u64) {
+        assert!(room_lo >= 1 && room_hi < BODY_OS_PAGE && room_lo <= room_hi);
+        let mut salt = 0u8;
+        for _ in 0..64 {
+            let cur = t.body.body_published_len();
+            let into = cur % BODY_OS_PAGE;
+            let room = if into == 0 {
+                BODY_OS_PAGE
+            } else {
+                BODY_OS_PAGE - into
+            };
+            if into != 0 && room >= room_lo && room <= room_hi {
+                return;
+            }
+            salt = salt.wrapping_add(1);
+            let mut txid = [0u8; 32];
+            txid[0] = 0x11;
+            txid[1] = salt;
+            let script_len = if room > room_hi.saturating_add(32) {
+                (room - room_hi).saturating_sub(16).clamp(1, 4000) as usize
+            } else {
+                1
+            };
+            let tx = TxRecord {
+                txid,
+                version: 1,
+                locktime: 0,
+                input_start_fk: Fk::NULL,
+                input_count: 1,
+                output_start_fk: Fk::NULL,
+                output_count: 1,
+            };
+            let inputs = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
+            let outs = vec![OutputRecord::unspent(1, vec![0x51; script_len])];
+            t.put_full_batch_indexed(&[(tx, inputs, outs)], true)
+                .unwrap();
+        }
+        let cur = t.body.body_published_len();
+        panic!(
+            "pad miss into={} room={} want {room_lo}..={room_hi}",
+            cur % BODY_OS_PAGE,
+            BODY_OS_PAGE - (cur % BODY_OS_PAGE)
+        );
+    }
+
+    #[test]
+    fn pipeline_outs_guess_full_when_late_vout_likely_spills() {
+        let (dir, t) = temp_tx();
+        let (tx, inputs, outs) = fat_many_outs(120);
+        let fk = t
+            .put_full_batch_indexed(&[(tx, inputs, outs)], true)
+            .unwrap()[0];
+        let (off, full_len) = t.body.record_range(fk).unwrap();
+        assert!(full_len > 4096, "fixture must exceed first-page cap");
+        assert_eq!(outs_first_wave_len(off, full_len, &[119]), full_len);
+        let mut jobs = vec![IdxBodyJob::new(fk.0, None)];
+        jobs[0].need_vouts = vec![119];
+        let stats = run_idx_body_pipeline(&t.body, &mut jobs, BodyMode::Outs).unwrap();
+        assert!(jobs[0].ok);
+        assert_eq!(jobs[0].body.len() as u64, full_len);
+        assert_eq!(stats.extend_n, 0);
+        assert_eq!(stats.guess_full_n, 1);
+        let (_meta, live, _) =
+            crate::tx_table::decode_packed_tx_need_outs_with_spender_rels_secret(
+                &jobs[0].body,
+                &[119],
+                None,
+            )
+            .unwrap();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].0, 119);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pipeline_outs_guess_full_when_body_starts_near_page_end() {
+        let (dir, t) = temp_tx();
+        pad_until_page_room(&t, 8, 32);
+        let (tx, inputs, outs) = fat_many_outs(80);
+        let fk = t
+            .put_full_batch_indexed(&[(tx, inputs, outs)], true)
+            .unwrap()[0];
+        let (off, full_len) = t.body.record_range(fk).unwrap();
+        let room = BODY_OS_PAGE - (off % BODY_OS_PAGE);
+        assert!(room < 40, "room={room}");
+        assert!(full_len > 4096);
+        assert_eq!(outs_first_wave_len(off, full_len, &[0]), full_len);
+        let mut jobs = vec![IdxBodyJob::new(fk.0, None)];
+        jobs[0].need_vouts = vec![0];
+        let stats = run_idx_body_pipeline(&t.body, &mut jobs, BodyMode::Outs).unwrap();
+        assert!(jobs[0].ok);
+        assert_eq!(jobs[0].body.len() as u64, full_len);
+        assert_eq!(stats.extend_n, 0);
+        assert_eq!(stats.guess_full_n, 1);
+        let (_meta, live, _) =
+            crate::tx_table::decode_packed_tx_need_outs_with_spender_rels_secret(
+                &jobs[0].body,
+                &[0],
+                None,
+            )
+            .unwrap();
+        assert_eq!(live.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pipeline_outs_peeks_page_remainder_when_k0_fits() {
+        let (dir, t) = temp_tx();
+        pad_until_page_room(&t, 200, 400);
+        let (tx, inputs, outs) = fat_many_outs(80);
+        let fk = t
+            .put_full_batch_indexed(&[(tx, inputs, outs)], true)
+            .unwrap()[0];
+        let (off, full_len) = t.body.record_range(fk).unwrap();
+        let room = BODY_OS_PAGE - (off % BODY_OS_PAGE);
+        assert!((200..=400).contains(&room), "room={room}");
+        assert!(full_len > 4096);
+        let want = outs_first_wave_len(off, full_len, &[0]);
+        assert_eq!(want, room);
+        assert!(want < full_len);
+        let mut jobs = vec![IdxBodyJob::new(fk.0, None)];
+        jobs[0].need_vouts = vec![0];
+        let stats = run_idx_body_pipeline(&t.body, &mut jobs, BodyMode::Outs).unwrap();
+        assert!(jobs[0].ok);
+        assert_eq!(jobs[0].body.len() as u64, want);
+        assert_eq!(stats.extend_n, 0);
+        assert_eq!(stats.guess_full_n, 0);
+        let (_meta, live, _) =
+            crate::tx_table::decode_packed_tx_need_outs_with_spender_rels_secret(
+                &jobs[0].body,
+                &[0],
+                None,
+            )
+            .unwrap();
+        assert_eq!(live.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn pipeline_outs_skips_extend_when_need_fits_first_page() {
         let (dir, t) = temp_tx();
@@ -516,14 +720,18 @@ mod tests {
         let fk = t
             .put_full_batch_indexed(&[(tx, inputs, outs)], true)
             .unwrap()[0];
-        let (_off, full_len) = t.body.record_range(fk).unwrap();
+        let (off, full_len) = t.body.record_range(fk).unwrap();
         assert!(full_len > 4096, "fixture must exceed first-page cap");
         let mut jobs = vec![IdxBodyJob::new(fk.0, None)];
         jobs[0].need_vouts = vec![0];
         let stats = run_idx_body_pipeline(&t.body, &mut jobs, BodyMode::Outs).unwrap();
         assert!(jobs[0].ok);
-        assert_eq!(jobs[0].body.len(), 4096);
+        assert_eq!(
+            jobs[0].body.len() as u64,
+            outs_first_wave_len(off, full_len, &[0])
+        );
         assert_eq!(stats.extend_n, 0);
+        assert_eq!(stats.guess_full_n, 0);
         let (meta, live, _) = crate::tx_table::decode_packed_tx_need_outs_with_spender_rels_secret(
             &jobs[0].body,
             &[0],
@@ -551,6 +759,7 @@ mod tests {
         assert!(jobs[0].ok);
         assert_eq!(jobs[0].body.len() as u64, full_len);
         assert_eq!(stats.extend_n, 1);
+        assert_eq!(stats.guess_full_n, 0);
         let (_meta, live, _) =
             crate::tx_table::decode_packed_tx_need_outs_with_spender_rels_secret(
                 &jobs[0].body,

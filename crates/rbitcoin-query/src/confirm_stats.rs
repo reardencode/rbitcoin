@@ -196,6 +196,7 @@ confirm_window! {
     cold_range_decode_ns,
     cold_range_extend_n,
     cold_range_body_sqe_n,
+    cold_range_guess_full_n,
     body_tx_reads,
     thin_ns,
     parent_pin_ns,
