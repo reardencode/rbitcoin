@@ -23,8 +23,8 @@
 //! height order. Steal workers unpark the publisher when a wave completes.
 
 use crate::block::{
-    assemble_block_prevouts, block_has_witness, structural_validate_spends, ScriptCheckJob,
-    ValidationContext,
+    assemble_block_prevouts, block_has_witness_from_pres, structural_validate_spends,
+    ScriptCheckJob, ValidationContext,
 };
 use crate::error::ConsensusError;
 use crate::header::{

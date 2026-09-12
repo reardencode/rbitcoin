@@ -1,11 +1,12 @@
 //! structure_rule_tests (peeled from block.rs).
 
 use super::{
-    apply_witness_commitment, bip16_active_from_prev_mtp, bip34_height_script, block_subsidy,
-    check_tx_local, is_p2sh_script, is_p2wpkh_program, is_p2wsh_program, last_script_push,
-    merkle_root_bytes, script_sigop_count, validate_block_structure,
-    validate_block_structure_with_pres, witness_commitment_script, ScriptCheckJob,
-    ValidationContext, BIP16_EXCEPTION_MAINNET, MAX_BLOCK_STRIPPED_SIZE,
+    apply_witness_commitment, bip16_active_from_prev_mtp, bip34_height_script, block_has_witness,
+    block_has_witness_from_pres, block_subsidy, check_tx_local, is_p2sh_script, is_p2wpkh_program,
+    is_p2wsh_program, last_script_push, merkle_root_bytes, script_sigop_count,
+    validate_block_structure, validate_block_structure_with_pres, witness_commitment_script,
+    ScriptCheckJob, TxPrecompute, ValidationContext, BIP16_EXCEPTION_MAINNET,
+    MAX_BLOCK_STRIPPED_SIZE,
 };
 use crate::error::ConsensusError;
 use crate::milestone::Milestone;
@@ -2042,5 +2043,29 @@ fn s18_rejects_non_coinbase_null_prevout() {
     assert_bad_tx(
         validate_block_structure(&block_with(vec![coinbase(0), mixed]), &ctx_h(0)).unwrap_err(),
         "prevout-null",
+    );
+}
+
+#[test]
+fn pres_has_witness_matches_block_walk() {
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let gpres: Vec<TxPrecompute> = genesis.txdata.iter().map(TxPrecompute::from_tx).collect();
+    assert_eq!(
+        block_has_witness_from_pres(&gpres),
+        block_has_witness(&genesis)
+    );
+    assert!(!block_has_witness(&genesis));
+
+    let mut wit = genesis.txdata[0].clone();
+    wit.input[0].witness = Witness::from_slice(&[vec![0x01]]);
+    let block = Block {
+        header: genesis.header,
+        txdata: vec![wit],
+    };
+    let wpres: Vec<TxPrecompute> = block.txdata.iter().map(TxPrecompute::from_tx).collect();
+    assert!(block_has_witness(&block));
+    assert_eq!(
+        block_has_witness_from_pres(&wpres),
+        block_has_witness(&block)
     );
 }

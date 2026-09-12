@@ -135,10 +135,7 @@ pub(super) fn assemble_run(
             }
         }
 
-        if params.bip34_active_at(height.0) {
-            check_bip34(block, height.0)?;
-        }
-        if block_has_witness(block) && !params.segwit_active_at(height.0) {
+        if block_has_witness_from_pres(&meta.pres) && !params.segwit_active_at(height.0) {
             return Err(ConsensusError::BadBlock("unexpected witness before segwit"));
         }
 
@@ -363,6 +360,7 @@ pub(super) fn post_commit(
     Ok(spend_ann_ns)
 }
 
+#[cfg(test)]
 pub(super) fn check_bip34(block: &Block, height: u32) -> Result<(), ConsensusError> {
     crate::block::check_bip34_coinbase(&block.txdata[0], height)
 }
