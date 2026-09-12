@@ -158,7 +158,7 @@ itself changed.
 | Concern | Choice | Why |
 |---------|--------|-----|
 | Class A body | **Split** `txout` (thin meta + template outs) + `inwit` + `spent` (8 B×n_out) | Pin/SH read outs only; annotate isolates scripts |
-| Class A identity | Dense **`txid.body`** sidefile (32 B header + 32 B/txid by create_fk) | Fixed `fk → offset`; head-resolve multi-cand without Prefix33 body peeks |
+| Class A identity | Dense **`txid.body`** sidefile (32 B header + 32 B/txid by create_fk) | Fixed `fk → offset`; head-resolve multi-cand via sidefile, not body peeks |
 | Non-coinbase prevout | On-disk **`create_fk:u64` + CompactSize vout** | Smaller than `prev_txid[32]`; archive stamps fk once; wire fills soft `prev_txid` from sidefile/create |
 | Txid → create | Segmented keyless **`tx.head.*`** (25-bit OA open + MPHF/fuse sealed) | Open page from `mix_txid`; seal-time value-assigned MPHF + fuse8; **txid.body** verifies identity |
 | Spentness | Annotation on **create output** (+ rare multi-list) | No multi-GiB `point.head` open-hash |
@@ -315,8 +315,9 @@ spent.body Ss:  8 B × out_count  (flags + u56 field). Multi overflow → spent.
 
 Empty inwit / zero-out spent: **8-byte zero pad** so idx starts stay strictly monotone.
 Pin / SH / Electrum tweaks read **`txout` only**. Annotate RMW is on **`spent`** (`abs = Ss + 8×vout`).
-Reconstruct zips `txout` + `inwit`. First-page Outs reads are 4 KiB; truncated outs extend
-to the full idx span.
+Reconstruct zips `txout` + `inwit`. First-wave Outs reads stay on the starting
+OS page unless `(max_need+1)×40` (empty need: the idx span) is likely to spill;
+then the first wave is the full idx span. Extend still covers a missed need.
 
 Packed `tx.body` (schema 13–14: 32 B meta | inputs+witness | outputs) is **refused** if it contains creates.
 

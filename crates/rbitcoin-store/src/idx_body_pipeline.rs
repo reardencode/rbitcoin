@@ -20,21 +20,8 @@ use rbitcoin_primitives::Fk;
 pub enum BodyMode {
     /// Full record (txout or inwit).
     Full,
-    /// `txout` first page (outs / pin).
+    /// `txout` outs / pin: starting OS page, or full span if need is likely to spill.
     Outs,
-    /// Leading ≤32 body bytes (retired; tests only).
-    Prefix33,
-}
-
-impl BodyMode {
-    #[inline]
-    fn body_len(self, range_len: u64) -> u64 {
-        match self {
-            BodyMode::Full => range_len,
-            BodyMode::Outs => range_len.min(4096),
-            BodyMode::Prefix33 => range_len.min(32),
-        }
-    }
 }
 
 /// One cold Class A layout + body job.
@@ -51,6 +38,8 @@ pub struct IdxBodyJob {
     pub body: Vec<u8>,
     /// True when body pread completed for the expected length.
     pub ok: bool,
+    /// Sparse Outs need (sorted unique). Empty = all outs (SH / ensure).
+    pub need_vouts: Vec<u32>,
 }
 
 impl IdxBodyJob {
@@ -60,6 +49,7 @@ impl IdxBodyJob {
             range,
             body: Vec::new(),
             ok: false,
+            need_vouts: Vec::new(),
         }
     }
 
@@ -72,6 +62,218 @@ impl IdxBodyJob {
     }
 }
 
+/// Body-wave IO counts for `ibd: perf` (extend / page-grouped SQEs).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct IdxBodyIoStats {
+    /// Second-wave Outs jobs that pread the remainder of the idx span.
+    pub extend_n: u64,
+    /// Body `ReadOp`s submitted (first wave + extend), after page grouping.
+    pub body_sqe_n: u64,
+    /// First-wave Outs jobs that pread the full idx span (spill guess).
+    pub guess_full_n: u64,
+}
+
+const BODY_OS_PAGE: u64 = crate::tx_table::BODY_PAGE_SIZE;
+/// Cap a coalesced span at two OS pages (one straddle). Do not chain into SH-sized reads.
+const BODY_GROUP_MAX_PAGES: u64 = 2;
+/// Typical packed out (P2TR-ish) for the first-wave spill guess.
+const OUTS_GUESS_PER_VOUT: u64 = 40;
+
+/// First-wave Outs pread length.
+///
+/// Records are 8-aligned, not OS-page aligned. `room` is bytes from `off` to
+/// the next OS page. Empty need uses the idx span; sparse need uses
+/// `(max_vout+1)*40`. If that estimate is likely to spill, read the full span;
+/// otherwise only the remainder of this page.
+pub(crate) fn outs_first_wave_len(off: u64, full_len: u64, need_vouts: &[u32]) -> u64 {
+    if full_len == 0 {
+        return 0;
+    }
+    let room = BODY_OS_PAGE - (off % BODY_OS_PAGE);
+    let est = if need_vouts.is_empty() {
+        full_len
+    } else {
+        let k = u64::from(need_vouts.iter().copied().max().unwrap_or(0));
+        k.saturating_add(1).saturating_mul(OUTS_GUESS_PER_VOUT)
+    };
+    if est > room {
+        full_len
+    } else {
+        full_len.min(room)
+    }
+}
+
+/// Offset-sorted `[off, off+len)` windows → `(page_off, span_len, window indices)`.
+///
+/// Jobs that share an OS page (or a two-page straddle) become one SQE. Adjacent
+/// disjoint pages stay split. A singleton group preads the job window; only a
+/// merged group uses a page-span bounce buffer.
+fn group_body_peeks(windows: &[(u64, u64)]) -> Vec<(u64, u64, Vec<usize>)> {
+    let mut groups = Vec::new();
+    if windows.is_empty() {
+        return groups;
+    }
+    let pages = |off: u64, len: u64| -> (u64, u64) {
+        let lo = off / BODY_OS_PAGE;
+        let hi = if len == 0 {
+            lo
+        } else {
+            off.saturating_add(len).saturating_sub(1) / BODY_OS_PAGE
+        };
+        (lo, hi)
+    };
+    let mut start = 0usize;
+    let (mut glo, mut ghi) = pages(windows[0].0, windows[0].1);
+    let mut min_off = windows[0].0;
+    let mut max_end = windows[0].0.saturating_add(windows[0].1);
+    for (i, &(off, len)) in windows.iter().enumerate().skip(1) {
+        let (plo, phi) = pages(off, len);
+        let new_hi = ghi.max(phi);
+        if plo <= ghi && new_hi.saturating_sub(glo) < BODY_GROUP_MAX_PAGES {
+            ghi = new_hi;
+            max_end = max_end.max(off.saturating_add(len));
+            continue;
+        }
+        let page_off = (min_off / BODY_OS_PAGE) * BODY_OS_PAGE;
+        groups.push((
+            page_off,
+            max_end.saturating_sub(page_off),
+            (start..i).collect(),
+        ));
+        start = i;
+        glo = plo;
+        ghi = phi;
+        min_off = off;
+        max_end = off.saturating_add(len);
+    }
+    let page_off = (min_off / BODY_OS_PAGE) * BODY_OS_PAGE;
+    groups.push((
+        page_off,
+        max_end.saturating_sub(page_off),
+        (start..windows.len()).collect(),
+    ));
+    groups
+}
+
+struct PeekDest {
+    job: usize,
+    off: u64,
+    dest: usize,
+    len: usize,
+}
+
+/// Singleton group → job window (`off`, `len`). Merged group → page-span bounce.
+fn group_sqe(
+    page_off: u64,
+    span: u64,
+    members: &[usize],
+    dests: &[PeekDest],
+) -> (u64, u64, Option<usize>) {
+    if let [wi] = members {
+        let d = &dests[*wi];
+        (d.off, d.len as u64, Some(*wi))
+    } else {
+        (page_off, span, None)
+    }
+}
+
+fn pread_grouped_peeks(
+    jobs: &mut [IdxBodyJob],
+    dests: &[PeekDest],
+    body_fd: crate::io_handle::IoHandle,
+    body_path: &std::path::Path,
+    backend: ReadIoBackend,
+    mark_ok: bool,
+) -> Result<u64, StoreError> {
+    if dests.is_empty() {
+        return Ok(0);
+    }
+    let windows: Vec<(u64, u64)> = dests.iter().map(|d| (d.off, d.len as u64)).collect();
+    let groups = group_body_peeks(&windows);
+    let mut bounce: Vec<Option<Vec<u8>>> = groups
+        .iter()
+        .map(|(_, span, members)| {
+            if members.len() == 1 {
+                None
+            } else {
+                Some(vec![0u8; *span as usize])
+            }
+        })
+        .collect();
+    // SAFETY: each SQE buffer is a distinct job.body slice (singleton) or bounce
+    // allocation (merged). Dest windows do not overlap jobs in one wave.
+    let mut ops: Vec<ReadOp<'_>> = Vec::with_capacity(groups.len());
+    for (g, (page_off, span, members)) in groups.iter().enumerate() {
+        let (off, len, direct) = group_sqe(*page_off, *span, members, dests);
+        let slice = if let Some(wi) = direct {
+            let d = &dests[wi];
+            let body = &mut jobs[d.job].body;
+            let ptr = body[d.dest..d.dest + d.len].as_mut_ptr();
+            // SAFETY: dest window is this job's body slice for this wave only.
+            unsafe { std::slice::from_raw_parts_mut(ptr, d.len) }
+        } else {
+            let Some(buf) = bounce[g].as_mut() else {
+                return Err(StoreError::Corrupt(
+                    "invariant: merged body peek missing bounce",
+                ));
+            };
+            let ptr = buf.as_mut_ptr();
+            // SAFETY: bounce[g] is unique to this merged group until after pread.
+            unsafe { std::slice::from_raw_parts_mut(ptr, len as usize) }
+        };
+        ops.push(ReadOp {
+            fd: body_fd,
+            offset: off,
+            buf: slice,
+            result: i32::MIN,
+        });
+    }
+    bulk_io::pread_batch_backend(&mut ops, backend);
+    for (g, ((page_off, _, members), ro)) in groups.iter().zip(ops.iter()).enumerate() {
+        if ro.result < 0 {
+            return Err(StoreError::io(
+                body_path,
+                std::io::Error::from_raw_os_error(-ro.result),
+            ));
+        }
+        let got = ro.result as usize;
+        if let [wi] = members.as_slice() {
+            let d = &dests[*wi];
+            if got < d.len {
+                if !mark_ok {
+                    jobs[d.job].ok = false;
+                }
+                continue;
+            }
+            if mark_ok {
+                jobs[d.job].ok = true;
+            }
+            continue;
+        }
+        let Some(buf) = bounce[g].as_ref() else {
+            return Err(StoreError::Corrupt(
+                "invariant: merged body peek missing bounce",
+            ));
+        };
+        for &wi in members {
+            let d = &dests[wi];
+            let rel = d.off.saturating_sub(*page_off) as usize;
+            let need_end = rel.saturating_add(d.len);
+            if got < need_end || rel + d.len > buf.len() {
+                if !mark_ok {
+                    jobs[d.job].ok = false;
+                }
+                continue;
+            }
+            jobs[d.job].body[d.dest..d.dest + d.len].copy_from_slice(&buf[rel..rel + d.len]);
+            if mark_ok {
+                jobs[d.job].ok = true;
+            }
+        }
+    }
+    Ok(groups.len() as u64)
+}
+
 /// Resolve idx (FdOnly pread) then body (backend from env). Mutates `jobs` in place.
 ///
 /// Jobs with invalid / OOB ids are left `ok = false` without failing the batch
@@ -80,7 +282,7 @@ pub fn run_idx_body_pipeline(
     table: &VarTable,
     jobs: &mut [IdxBodyJob],
     mode: BodyMode,
-) -> Result<(), StoreError> {
+) -> Result<IdxBodyIoStats, StoreError> {
     run_idx_body_pipeline_backend(table, jobs, mode, io_backend::read_io_backend())
 }
 
@@ -90,9 +292,9 @@ pub fn run_idx_body_pipeline_backend(
     jobs: &mut [IdxBodyJob],
     mode: BodyMode,
     backend: ReadIoBackend,
-) -> Result<(), StoreError> {
+) -> Result<IdxBodyIoStats, StoreError> {
     if jobs.is_empty() {
-        return Ok(());
+        return Ok(IdxBodyIoStats::default());
     }
     let mut need_fk: Vec<Fk> = Vec::new();
     let mut need_slot: Vec<usize> = Vec::new();
@@ -116,67 +318,65 @@ pub fn run_idx_body_pipeline_backend(
     let body_path = table.body_file_path();
 
     let mut submitted: Vec<usize> = Vec::new();
+    let mut guess_full_n = 0u64;
     for (i, j) in jobs.iter_mut().enumerate() {
         j.ok = false;
         j.body.clear();
         let Some((off, full_len)) = j.range else {
             continue;
         };
-        let want = mode.body_len(full_len);
+        let want = match mode {
+            BodyMode::Outs => outs_first_wave_len(off, full_len, &j.need_vouts),
+            BodyMode::Full => full_len,
+        };
         if want == 0 || off.saturating_add(want) > body_pub {
             continue;
+        }
+        if mode == BodyMode::Outs {
+            let room = BODY_OS_PAGE - (off % BODY_OS_PAGE);
+            if want == full_len && full_len > room {
+                guess_full_n = guess_full_n.saturating_add(1);
+            }
         }
         j.body.resize(want as usize, 0);
         submitted.push(i);
     }
     if submitted.is_empty() {
-        return Ok(());
+        return Ok(IdxBodyIoStats::default());
     }
 
     submitted.sort_unstable_by_key(|&i| jobs[i].range.map(|(o, _)| o).unwrap_or(0));
 
-    // Body bulk: one uring/pread SQE per job (distinct buffers). Idx was already
-    // page-coalesced above; body peeks are short and rarely share a page.
-    // SAFETY: each jobs[i].body is a distinct allocation; submitted unique.
-    let mut read_ops: Vec<ReadOp<'_>> = Vec::with_capacity(submitted.len());
-    for &i in &submitted {
-        let off = jobs[i].range.unwrap().0;
-        let len = jobs[i].body.len();
-        let ptr = jobs[i].body.as_mut_ptr();
-        let slice = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
-        // Confirm load/pin: leave pages cacheable for write-stage meta + annotate RMW.
-        read_ops.push(ReadOp {
-            fd: body_fd,
-            offset: off,
-            buf: slice,
-            result: i32::MIN,
-        });
-    }
-    bulk_io::pread_batch_backend(&mut read_ops, backend);
-    for (ro, &i) in read_ops.iter().zip(submitted.iter()) {
-        if ro.result < 0 {
-            return Err(StoreError::io(
-                body_path,
-                std::io::Error::from_raw_os_error(-ro.result),
-            ));
-        }
-        if ro.result as usize == jobs[i].body.len() {
-            jobs[i].ok = true;
-        }
-    }
+    let dests: Vec<PeekDest> = submitted
+        .iter()
+        .map(|&i| PeekDest {
+            job: i,
+            off: jobs[i].range.unwrap().0,
+            dest: 0,
+            len: jobs[i].body.len(),
+        })
+        .collect();
+    let mut stats = IdxBodyIoStats {
+        body_sqe_n: pread_grouped_peeks(jobs, &dests, body_fd, body_path, backend, true)?,
+        guess_full_n,
+        ..Default::default()
+    };
     if mode == BodyMode::Outs {
-        extend_truncated_txout_jobs(table, jobs, backend)?;
+        let (extend_n, extend_sqe) = extend_truncated_txout_jobs(table, jobs, backend)?;
+        stats.extend_n = extend_n;
+        stats.body_sqe_n = stats.body_sqe_n.saturating_add(extend_sqe);
     }
-    Ok(())
+    Ok(stats)
 }
 
-/// Second wave: when a 4 KiB Outs read does not cover every output, pread the
-/// remainder of the idx span. Common txs stay on the first page.
+/// Second wave: when the first-wave peek does not cover needed outputs, pread
+/// the remainder of the idx span. Empty need walks every out; sparse need
+/// skips extend when the peek already contains those vouts.
 fn extend_truncated_txout_jobs(
     table: &VarTable,
     jobs: &mut [IdxBodyJob],
     backend: ReadIoBackend,
-) -> Result<(), StoreError> {
+) -> Result<(u64, u64), StoreError> {
     let mut rest: Vec<(usize, usize)> = Vec::new();
     let body_pub = table.body_published_len();
     for (i, j) in jobs.iter_mut().enumerate() {
@@ -189,7 +389,7 @@ fn extend_truncated_txout_jobs(
         if (j.body.len() as u64) >= full_len {
             continue;
         }
-        if crate::tx_table::txout_first_page_complete(&j.body) {
+        if crate::tx_table::txout_first_page_covers_need(&j.body, &j.need_vouts) {
             continue;
         }
         if off.saturating_add(full_len) > body_pub {
@@ -201,38 +401,33 @@ fn extend_truncated_txout_jobs(
         rest.push((i, have));
     }
     if rest.is_empty() {
-        return Ok(());
+        return Ok((0, 0));
     }
-    let body_fd = table.body_read_fd();
-    let body_path = table.body_file_path();
-    // SAFETY: each jobs[i].body[have..] is a distinct allocation remainder.
-    let mut ops: Vec<ReadOp<'_>> = Vec::with_capacity(rest.len());
-    for &(i, have) in &rest {
-        let off = jobs[i].range.unwrap().0.saturating_add(have as u64);
-        let len = jobs[i].body.len().saturating_sub(have);
-        let ptr = unsafe { jobs[i].body.as_mut_ptr().add(have) };
-        let slice = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
-        ops.push(ReadOp {
-            fd: body_fd,
-            offset: off,
-            buf: slice,
-            result: i32::MIN,
-        });
-    }
-    bulk_io::pread_batch_backend(&mut ops, backend);
-    for (ro, &(i, have)) in ops.iter().zip(rest.iter()) {
-        if ro.result < 0 {
-            return Err(StoreError::io(
-                body_path,
-                std::io::Error::from_raw_os_error(-ro.result),
-            ));
-        }
-        let want = jobs[i].body.len().saturating_sub(have);
-        if ro.result as usize != want {
-            jobs[i].ok = false;
-        }
-    }
-    Ok(())
+    let extend_n = rest.len() as u64;
+    rest.sort_unstable_by_key(|&(i, have)| {
+        jobs[i]
+            .range
+            .map(|(o, _)| o.saturating_add(have as u64))
+            .unwrap_or(0)
+    });
+    let dests: Vec<PeekDest> = rest
+        .iter()
+        .map(|&(i, have)| PeekDest {
+            job: i,
+            off: jobs[i].range.unwrap().0.saturating_add(have as u64),
+            dest: have,
+            len: jobs[i].body.len().saturating_sub(have),
+        })
+        .collect();
+    let sqe = pread_grouped_peeks(
+        jobs,
+        &dests,
+        table.body_read_fd(),
+        table.body_file_path(),
+        backend,
+        false,
+    )?;
+    Ok((extend_n, sqe))
 }
 
 #[cfg(test)]
@@ -243,6 +438,71 @@ mod tests {
     };
     use rbitcoin_primitives::Fk;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn outs_first_wave_page_aligned_k0_stays_first_page() {
+        assert_eq!(outs_first_wave_len(0, 8000, &[0]), 4096);
+    }
+
+    #[test]
+    fn outs_first_wave_full_when_k_times_40_exceeds_room() {
+        assert_eq!(outs_first_wave_len(0, 8000, &[120]), 8000);
+    }
+
+    #[test]
+    fn outs_first_wave_k0_near_page_end_guesses_full() {
+        assert_eq!(outs_first_wave_len(4064, 8000, &[0]), 8000);
+    }
+
+    #[test]
+    fn outs_first_wave_k0_fits_remainder_peeks_only_this_page() {
+        assert_eq!(outs_first_wave_len(3840, 8000, &[0]), 256);
+    }
+
+    #[test]
+    fn outs_first_wave_empty_need_full_when_span_crosses_page() {
+        assert_eq!(outs_first_wave_len(0, 6000, &[]), 6000);
+    }
+
+    #[test]
+    fn group_sqe_singleton_is_job_window_not_page_span() {
+        let dests = [PeekDest {
+            job: 0,
+            off: 4000,
+            dest: 0,
+            len: 96,
+        }];
+        let g = group_body_peeks(&[(4000, 96)]);
+        assert_eq!(g.len(), 1);
+        let (off, len, direct) = group_sqe(g[0].0, g[0].1, &g[0].2, &dests);
+        assert_eq!(off, 4000);
+        assert_eq!(len, 96);
+        assert_eq!(direct, Some(0));
+    }
+
+    #[test]
+    fn group_sqe_merged_stays_page_span() {
+        let dests = [
+            PeekDest {
+                job: 0,
+                off: 0,
+                dest: 0,
+                len: 91,
+            },
+            PeekDest {
+                job: 1,
+                off: 91,
+                dest: 0,
+                len: 91,
+            },
+        ];
+        let g = group_body_peeks(&[(0, 91), (91, 91)]);
+        assert_eq!(g.len(), 1);
+        let (off, len, direct) = group_sqe(g[0].0, g[0].1, &g[0].2, &dests);
+        assert_eq!(off, 0);
+        assert!(len >= 182);
+        assert!(direct.is_none());
+    }
 
     fn temp_tx() -> (std::path::PathBuf, TxTable) {
         static N: AtomicU64 = AtomicU64::new(0);
@@ -301,6 +561,52 @@ mod tests {
     }
 
     #[test]
+    fn group_body_peeks_same_page_merges() {
+        let g = group_body_peeks(&[(0, 91), (91, 91)]);
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].2, vec![0, 1]);
+        assert_eq!(g[0].0, 0);
+    }
+
+    #[test]
+    fn group_body_peeks_distinct_pages_split() {
+        let g = group_body_peeks(&[(0, 91), (8192, 91)]);
+        assert_eq!(g.len(), 2);
+    }
+
+    #[test]
+    fn group_body_peeks_straddle_pulls_same_pages() {
+        let g = group_body_peeks(&[(0, 91), (4000, 2000)]);
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].2, vec![0, 1]);
+    }
+
+    #[test]
+    fn group_body_peeks_caps_straddle_chain_at_two_pages() {
+        let g = group_body_peeks(&[(100, 4096), (4196, 4096)]);
+        assert_eq!(g.len(), 2);
+    }
+
+    #[test]
+    fn pipeline_outs_coalesces_same_page_peeks() {
+        let (dir, t) = temp_tx();
+        let fks = put_n(&t, 8);
+        let mut jobs: Vec<IdxBodyJob> = fks.iter().map(|fk| IdxBodyJob::new(fk.0, None)).collect();
+        let stats = run_idx_body_pipeline(&t.body, &mut jobs, BodyMode::Outs).unwrap();
+        assert!(stats.body_sqe_n >= 1);
+        assert!(
+            stats.body_sqe_n < jobs.len() as u64,
+            "sqe={} jobs={}",
+            stats.body_sqe_n,
+            jobs.len()
+        );
+        for j in &jobs {
+            assert!(j.ok, "id={}", j.id);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn pipeline_outs_extends_past_first_page() {
         let (dir, t) = temp_tx();
         let tx = TxRecord {
@@ -320,13 +626,231 @@ mod tests {
         let (_off, full_len) = t.body.record_range(fk).unwrap();
         assert!(full_len > 4096, "fixture must exceed first-page cap");
         let mut jobs = vec![IdxBodyJob::new(fk.0, None)];
-        run_idx_body_pipeline(&t.body, &mut jobs, BodyMode::Outs).unwrap();
+        let stats = run_idx_body_pipeline(&t.body, &mut jobs, BodyMode::Outs).unwrap();
         assert!(jobs[0].ok);
         assert_eq!(jobs[0].body.len() as u64, full_len);
+        assert_eq!(stats.extend_n, 0);
+        assert_eq!(stats.guess_full_n, 1);
         let (meta, decoded, _) =
             crate::tx_table::decode_packed_tx_outs_with_spender_rels(&jobs[0].body).unwrap();
         assert_eq!(meta.output_count, 1);
         assert_eq!(decoded[0].script.len(), 6000);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn fat_many_outs(n_out: u32) -> (TxRecord, Vec<InputRecord>, Vec<OutputRecord>) {
+        let tx = TxRecord {
+            txid: [0x5au8; 32],
+            version: 1,
+            locktime: 0,
+            input_start_fk: Fk::NULL,
+            input_count: 1,
+            output_start_fk: Fk::NULL,
+            output_count: n_out,
+        };
+        let inputs = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
+        let mut outs = Vec::with_capacity(n_out as usize);
+        outs.push(OutputRecord::unspent(1, vec![0x51]));
+        for _ in 1..n_out {
+            outs.push(OutputRecord::unspent(1, vec![0x51; 64]));
+        }
+        (tx, inputs, outs)
+    }
+
+    fn pad_until_page_room(t: &TxTable, room_lo: u64, room_hi: u64) {
+        assert!(room_lo >= 1 && room_hi < BODY_OS_PAGE && room_lo <= room_hi);
+        let mut salt = 0u8;
+        for _ in 0..64 {
+            let cur = t.body.body_published_len();
+            let into = cur % BODY_OS_PAGE;
+            let room = if into == 0 {
+                BODY_OS_PAGE
+            } else {
+                BODY_OS_PAGE - into
+            };
+            if into != 0 && room >= room_lo && room <= room_hi {
+                return;
+            }
+            salt = salt.wrapping_add(1);
+            let mut txid = [0u8; 32];
+            txid[0] = 0x11;
+            txid[1] = salt;
+            let script_len = if room > room_hi.saturating_add(32) {
+                (room - room_hi).saturating_sub(16).clamp(1, 4000) as usize
+            } else {
+                1
+            };
+            let tx = TxRecord {
+                txid,
+                version: 1,
+                locktime: 0,
+                input_start_fk: Fk::NULL,
+                input_count: 1,
+                output_start_fk: Fk::NULL,
+                output_count: 1,
+            };
+            let inputs = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
+            let outs = vec![OutputRecord::unspent(1, vec![0x51; script_len])];
+            t.put_full_batch_indexed(&[(tx, inputs, outs)], true)
+                .unwrap();
+        }
+        let cur = t.body.body_published_len();
+        panic!(
+            "pad miss into={} room={} want {room_lo}..={room_hi}",
+            cur % BODY_OS_PAGE,
+            BODY_OS_PAGE - (cur % BODY_OS_PAGE)
+        );
+    }
+
+    #[test]
+    fn pipeline_outs_guess_full_when_late_vout_likely_spills() {
+        let (dir, t) = temp_tx();
+        let (tx, inputs, outs) = fat_many_outs(120);
+        let fk = t
+            .put_full_batch_indexed(&[(tx, inputs, outs)], true)
+            .unwrap()[0];
+        let (off, full_len) = t.body.record_range(fk).unwrap();
+        assert!(full_len > 4096, "fixture must exceed first-page cap");
+        assert_eq!(outs_first_wave_len(off, full_len, &[119]), full_len);
+        let mut jobs = vec![IdxBodyJob::new(fk.0, None)];
+        jobs[0].need_vouts = vec![119];
+        let stats = run_idx_body_pipeline(&t.body, &mut jobs, BodyMode::Outs).unwrap();
+        assert!(jobs[0].ok);
+        assert_eq!(jobs[0].body.len() as u64, full_len);
+        assert_eq!(stats.extend_n, 0);
+        assert_eq!(stats.guess_full_n, 1);
+        let (_meta, live, _) =
+            crate::tx_table::decode_packed_tx_need_outs_with_spender_rels_secret(
+                &jobs[0].body,
+                &[119],
+                None,
+            )
+            .unwrap();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].0, 119);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pipeline_outs_guess_full_when_body_starts_near_page_end() {
+        let (dir, t) = temp_tx();
+        pad_until_page_room(&t, 8, 32);
+        let (tx, inputs, outs) = fat_many_outs(80);
+        let fk = t
+            .put_full_batch_indexed(&[(tx, inputs, outs)], true)
+            .unwrap()[0];
+        let (off, full_len) = t.body.record_range(fk).unwrap();
+        let room = BODY_OS_PAGE - (off % BODY_OS_PAGE);
+        assert!(room < 40, "room={room}");
+        assert!(full_len > 4096);
+        assert_eq!(outs_first_wave_len(off, full_len, &[0]), full_len);
+        let mut jobs = vec![IdxBodyJob::new(fk.0, None)];
+        jobs[0].need_vouts = vec![0];
+        let stats = run_idx_body_pipeline(&t.body, &mut jobs, BodyMode::Outs).unwrap();
+        assert!(jobs[0].ok);
+        assert_eq!(jobs[0].body.len() as u64, full_len);
+        assert_eq!(stats.extend_n, 0);
+        assert_eq!(stats.guess_full_n, 1);
+        let (_meta, live, _) =
+            crate::tx_table::decode_packed_tx_need_outs_with_spender_rels_secret(
+                &jobs[0].body,
+                &[0],
+                None,
+            )
+            .unwrap();
+        assert_eq!(live.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pipeline_outs_peeks_page_remainder_when_k0_fits() {
+        let (dir, t) = temp_tx();
+        pad_until_page_room(&t, 200, 400);
+        let (tx, inputs, outs) = fat_many_outs(80);
+        let fk = t
+            .put_full_batch_indexed(&[(tx, inputs, outs)], true)
+            .unwrap()[0];
+        let (off, full_len) = t.body.record_range(fk).unwrap();
+        let room = BODY_OS_PAGE - (off % BODY_OS_PAGE);
+        assert!((200..=400).contains(&room), "room={room}");
+        assert!(full_len > 4096);
+        let want = outs_first_wave_len(off, full_len, &[0]);
+        assert_eq!(want, room);
+        assert!(want < full_len);
+        let mut jobs = vec![IdxBodyJob::new(fk.0, None)];
+        jobs[0].need_vouts = vec![0];
+        let stats = run_idx_body_pipeline(&t.body, &mut jobs, BodyMode::Outs).unwrap();
+        assert!(jobs[0].ok);
+        assert_eq!(jobs[0].body.len() as u64, want);
+        assert_eq!(stats.extend_n, 0);
+        assert_eq!(stats.guess_full_n, 0);
+        let (_meta, live, _) =
+            crate::tx_table::decode_packed_tx_need_outs_with_spender_rels_secret(
+                &jobs[0].body,
+                &[0],
+                None,
+            )
+            .unwrap();
+        assert_eq!(live.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pipeline_outs_skips_extend_when_need_fits_first_page() {
+        let (dir, t) = temp_tx();
+        let (tx, inputs, outs) = fat_many_outs(80);
+        let fk = t
+            .put_full_batch_indexed(&[(tx, inputs, outs)], true)
+            .unwrap()[0];
+        let (off, full_len) = t.body.record_range(fk).unwrap();
+        assert!(full_len > 4096, "fixture must exceed first-page cap");
+        let mut jobs = vec![IdxBodyJob::new(fk.0, None)];
+        jobs[0].need_vouts = vec![0];
+        let stats = run_idx_body_pipeline(&t.body, &mut jobs, BodyMode::Outs).unwrap();
+        assert!(jobs[0].ok);
+        assert_eq!(
+            jobs[0].body.len() as u64,
+            outs_first_wave_len(off, full_len, &[0])
+        );
+        assert_eq!(stats.extend_n, 0);
+        assert_eq!(stats.guess_full_n, 0);
+        let (meta, live, _) = crate::tx_table::decode_packed_tx_need_outs_with_spender_rels_secret(
+            &jobs[0].body,
+            &[0],
+            None,
+        )
+        .unwrap();
+        assert_eq!(meta.output_count, 80);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].0, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pipeline_outs_extends_when_need_past_first_page() {
+        let (dir, t) = temp_tx();
+        let (tx, inputs, outs) = fat_many_outs(80);
+        let fk = t
+            .put_full_batch_indexed(&[(tx, inputs, outs)], true)
+            .unwrap()[0];
+        let (_off, full_len) = t.body.record_range(fk).unwrap();
+        assert!(full_len > 4096, "fixture must exceed first-page cap");
+        let mut jobs = vec![IdxBodyJob::new(fk.0, None)];
+        jobs[0].need_vouts = vec![79];
+        let stats = run_idx_body_pipeline(&t.body, &mut jobs, BodyMode::Outs).unwrap();
+        assert!(jobs[0].ok);
+        assert_eq!(jobs[0].body.len() as u64, full_len);
+        assert_eq!(stats.extend_n, 1);
+        assert_eq!(stats.guess_full_n, 0);
+        let (_meta, live, _) =
+            crate::tx_table::decode_packed_tx_need_outs_with_spender_rels_secret(
+                &jobs[0].body,
+                &[79],
+                None,
+            )
+            .unwrap();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].0, 79);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -386,19 +910,12 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_prefix33_and_denserels_modes() {
+    fn pipeline_outs_decodes_denserels() {
         let (dir, t) = temp_tx();
         let fks = put_n(&t, 5);
         let mut jobs: Vec<IdxBodyJob> = fks.iter().map(|fk| IdxBodyJob::new(fk.0, None)).collect();
-        run_idx_body_pipeline(&t.body, &mut jobs, BodyMode::Prefix33).unwrap();
+        run_idx_body_pipeline(&t.body, &mut jobs, BodyMode::Outs).unwrap();
         for j in &jobs {
-            assert!(j.ok);
-            assert!(j.body.len() <= 32);
-            assert!(!j.body.is_empty());
-        }
-        let mut jobs2: Vec<IdxBodyJob> = fks.iter().map(|fk| IdxBodyJob::new(fk.0, None)).collect();
-        run_idx_body_pipeline(&t.body, &mut jobs2, BodyMode::Outs).unwrap();
-        for j in &jobs2 {
             assert!(j.ok);
             let (_tx, outs, rels) =
                 crate::tx_table::decode_packed_tx_outs_with_spender_rels(&j.body).unwrap();
@@ -492,22 +1009,11 @@ mod tests {
             assert_eq!(j.range, ranges[i]);
         }
 
-        // Wave 3: Prefix33 head-resolve style
-        let mut jobs3: Vec<IdxBodyJob> = fks.iter().map(|fk| IdxBodyJob::new(fk.0, None)).collect();
-        let t2 = Instant::now();
-        run_idx_body_pipeline(&t.body, &mut jobs3, BodyMode::Prefix33).unwrap();
-        let prefix_us = t2.elapsed().as_micros();
-        for j in &jobs3 {
-            assert!(j.ok);
-            assert!(j.body.len() <= 32 && !j.body.is_empty());
-        }
-
         eprintln!(
-            "synthetic_cold_batch: n={} cold_full={}us preknown_full={}us prefix33={}us uring={}",
+            "synthetic_cold_batch: n={} cold_full={}us preknown_full={}us uring={}",
             fks.len(),
             cold_us,
             warm_us,
-            prefix_us,
             crate::bulk_io::io_uring_enabled()
         );
         let _ = std::fs::remove_dir_all(&dir);

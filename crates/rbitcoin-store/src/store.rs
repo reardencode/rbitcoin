@@ -978,7 +978,7 @@ impl Store {
         jobs: &mut [crate::IdxBodyJob],
         mode: crate::IdxBodyMode,
     ) -> Result<(), StoreError> {
-        crate::run_idx_body_pipeline(&self.txs.body, jobs, mode)
+        crate::run_idx_body_pipeline(&self.txs.body, jobs, mode).map(|_| ())
     }
 
     pub fn idx_inwit_pipeline(
@@ -986,7 +986,7 @@ impl Store {
         jobs: &mut [crate::IdxBodyJob],
         mode: crate::IdxBodyMode,
     ) -> Result<(), StoreError> {
-        crate::run_idx_body_pipeline(&self.txs.inwit, jobs, mode)
+        crate::run_idx_body_pipeline(&self.txs.inwit, jobs, mode).map(|_| ())
     }
 
     /// Bulk 8-byte spender meta at absolute `spent.body` offsets.
