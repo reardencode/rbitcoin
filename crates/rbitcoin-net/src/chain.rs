@@ -1054,7 +1054,7 @@ impl ChainHub {
                 return Err(NetError::Consensus("invalid proof of work".into()));
             }
         }
-        let rec = header_to_record(prev_fk, header);
+        let rec = header_to_record(prev_fk, header, header.block_hash().to_byte_array());
         let fk = self
             .query
             .ensure_header(&rec)

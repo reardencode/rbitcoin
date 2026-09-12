@@ -379,7 +379,7 @@ pub(super) fn wire_lookup_phase(
         } else {
             metas[i - 1].header_fk
         };
-        let header_rec = crate::header_to_record(prev_fk, &block.header);
+        let header_rec = crate::header_to_record(prev_fk, &block.header, hash);
         prepare_ns = prepare_ns.saturating_add(t_prep.elapsed().as_nanos() as u64);
         let t_put = Instant::now();
         let header_fk = if let Some((fk, _)) = query

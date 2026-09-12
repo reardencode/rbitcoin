@@ -260,7 +260,8 @@ fn class_a_header_and_txids(
             .map(|(fk, _)| fk)
             .ok_or(ConsensusError::BadPrev)?
     };
-    Ok((header_to_record(prev_fk, &block.header), txids))
+    let hash = block.header.block_hash().to_byte_array();
+    Ok((header_to_record(prev_fk, &block.header, hash), txids))
 }
 
 /// Class A only (no tip / Class C). Crash and `plan=None` tests.
