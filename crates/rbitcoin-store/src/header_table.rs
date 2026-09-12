@@ -1,6 +1,6 @@
 use crate::error::StoreError;
 use crate::file::{TableFile, FILE_HEADER_LEN};
-use crate::hashhead::{initial_slots_for, HashHead, HeadScale, HASH_HEAD_FULL};
+use crate::hashhead::{initial_slots_for, HashHead, HeadScale};
 use bitcoin_hashes::{sha256, Hash, HashEngine};
 use rbitcoin_primitives::{Fk, TableKind};
 use std::path::{Path, PathBuf};
@@ -154,24 +154,24 @@ impl HeaderHead {
         Ok(out)
     }
 
-    fn insert(&self, key: &[u8; 32], fk: Fk) -> Result<Option<Fk>, StoreError> {
-        loop {
-            let last = {
+    fn insert_many(&self, entries: &[([u8; 32], Fk)]) -> Result<(), StoreError> {
+        let mut rest: Vec<([u8; 32], Fk)> = entries.to_vec();
+        while !rest.is_empty() {
+            let leftover = {
+                let last = {
+                    let gens = self.gens.read().unwrap_or_else(|e| e.into_inner());
+                    gens.len().saturating_sub(1)
+                };
                 let gens = self.gens.read().unwrap_or_else(|e| e.into_inner());
-                gens.len().saturating_sub(1)
+                gens[last].insert_many_file(&rest, |_| {})?
             };
-            let err = {
-                let gens = self.gens.read().unwrap_or_else(|e| e.into_inner());
-                match gens[last].insert(key, fk) {
-                    Ok(prev) => return Ok(prev),
-                    Err(e) => e,
-                }
-            };
-            match err {
-                StoreError::Corrupt(HASH_HEAD_FULL) => self.roll()?,
-                e => return Err(e),
+            if leftover.is_empty() {
+                return Ok(());
             }
+            self.roll()?;
+            rest = leftover;
         }
+        Ok(())
     }
 
     fn roll(&self) -> Result<(), StoreError> {
@@ -269,40 +269,89 @@ impl HeaderTable {
     ///
     /// Lookup + insert hold [`Self::put_lock`] (I4).
     pub fn ensure(&self, rec: &HeaderRecord) -> Result<Fk, StoreError> {
-        let _g = self.put_lock.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((fk, _)) = self.get_by_hash_unlocked(&rec.hash)? {
-            return Ok(fk);
-        }
-        if !rec.prev_fk.is_null() {
-            let parent = self.get(rec.prev_fk)?;
-            let expect = block_header_hash(
-                rec.version,
-                &parent.hash,
-                &rec.merkle_root,
-                rec.timestamp,
-                rec.bits,
-                rec.nonce,
-            );
-            if expect != rec.hash {
-                return Err(StoreError::Corrupt(
-                    "header prev_fk does not match block hash (false parent edge)",
-                ));
-            }
-        }
-        self.put_unlocked(rec)
+        let mut fks = self.ensure_batch(std::slice::from_ref(rec))?;
+        fks.pop().ok_or(StoreError::Corrupt("ensure_batch empty"))
     }
 
-    fn put_unlocked(&self, rec: &HeaderRecord) -> Result<Fk, StoreError> {
+    /// Batch [`Self::ensure`]: one `put_lock`, one `header.body` write, chunked head insert.
+    ///
+    /// Output fks align with `recs`. Duplicate hashes in the batch share one body row.
+    pub fn ensure_batch(&self, recs: &[HeaderRecord]) -> Result<Vec<Fk>, StoreError> {
         use std::sync::atomic::Ordering;
-        // body → count → head (allocate-then-publish).
+        if recs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let _g = self.put_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out = Vec::with_capacity(recs.len());
+        let mut fresh: Vec<(Fk, HeaderRecord)> = Vec::new();
+        let mut seen: Vec<([u8; 32], Fk)> = Vec::new();
+        let mut next = self.count.load(Ordering::Acquire);
+        for rec in recs {
+            if let Some((_, fk)) = seen.iter().rev().find(|(h, _)| *h == rec.hash) {
+                out.push(*fk);
+                continue;
+            }
+            if let Some((fk, _)) = self.get_by_hash_unlocked(&rec.hash)? {
+                seen.push((rec.hash, fk));
+                out.push(fk);
+                continue;
+            }
+            if !rec.prev_fk.is_null() {
+                let parent = self.parent_for_batch(rec.prev_fk, &fresh)?;
+                Self::check_parent_edge(rec, &parent)?;
+            }
+            next = next.saturating_add(1);
+            let fk = Fk(next);
+            let mut stored = rec.clone();
+            stored.prev_fk = rec.prev_fk;
+            fresh.push((fk, stored));
+            seen.push((rec.hash, fk));
+            out.push(fk);
+        }
+        if fresh.is_empty() {
+            return Ok(out);
+        }
         let base = self.count.load(Ordering::Acquire);
-        let fk = Fk(base + 1);
         let offset = FILE_HEADER_LEN as u64 + base * HEADER_RECORD_LEN as u64;
-        let bytes = rec.encode();
-        self.body.write_at(offset, &bytes)?;
-        self.count.store(base + 1, Ordering::Release);
-        self.head.insert(&rec.hash, fk)?;
-        Ok(fk)
+        let mut blob = Vec::with_capacity(fresh.len().saturating_mul(HEADER_RECORD_LEN));
+        let mut head_entries: Vec<([u8; 32], Fk)> = Vec::with_capacity(fresh.len());
+        for (fk, rec) in &fresh {
+            blob.extend_from_slice(&rec.encode());
+            head_entries.push((rec.hash, *fk));
+        }
+        self.body.write_at(offset, &blob)?;
+        self.count
+            .store(base.saturating_add(fresh.len() as u64), Ordering::Release);
+        self.head.insert_many(&head_entries)?;
+        Ok(out)
+    }
+
+    fn parent_for_batch(
+        &self,
+        prev_fk: Fk,
+        fresh: &[(Fk, HeaderRecord)],
+    ) -> Result<HeaderRecord, StoreError> {
+        if let Some((_, rec)) = fresh.iter().rev().find(|(fk, _)| *fk == prev_fk) {
+            return Ok(rec.clone());
+        }
+        self.get(prev_fk)
+    }
+
+    fn check_parent_edge(rec: &HeaderRecord, parent: &HeaderRecord) -> Result<(), StoreError> {
+        let expect = block_header_hash(
+            rec.version,
+            &parent.hash,
+            &rec.merkle_root,
+            rec.timestamp,
+            rec.bits,
+            rec.nonce,
+        );
+        if expect != rec.hash {
+            return Err(StoreError::Corrupt(
+                "header prev_fk does not match block hash (false parent edge)",
+            ));
+        }
+        Ok(())
     }
 
     pub fn get(&self, fk: Fk) -> Result<HeaderRecord, StoreError> {
@@ -450,6 +499,70 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ensure_batch_linked_headers_roundtrip() {
+        let dir = tmp();
+        let t = HeaderTable::create_tiny(&dir).unwrap();
+        let g = sample([0x10; 32]);
+        let a = linked_child(&g, Fk(1), 1);
+        let b = linked_child(&a, Fk(2), 2);
+        let fks = t.ensure_batch(&[g.clone(), a.clone(), b.clone()]).unwrap();
+        assert_eq!(fks, vec![Fk(1), Fk(2), Fk(3)]);
+        assert_eq!(t.count(), 3);
+        assert_eq!(t.get_by_hash(&g.hash).unwrap().unwrap().0, Fk(1));
+        assert_eq!(t.get_by_hash(&b.hash).unwrap().unwrap().0, Fk(3));
+        drop(t);
+        let t = HeaderTable::open_tiny(&dir).unwrap();
+        assert_eq!(t.count(), 3);
+        assert_eq!(t.get_by_hash(&a.hash).unwrap().unwrap().1.nonce, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ensure_batch_duplicate_hash_is_one_row() {
+        let dir = tmp();
+        let t = HeaderTable::create_tiny(&dir).unwrap();
+        let g = sample([0x21; 32]);
+        let fks = t.ensure_batch(&[g.clone(), g.clone()]).unwrap();
+        assert_eq!(fks[0], fks[1]);
+        assert_eq!(t.count(), 1);
+        let again = t.ensure_batch(&[g]).unwrap();
+        assert_eq!(again[0], fks[0]);
+        assert_eq!(t.count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ensure_batch_false_parent_writes_nothing() {
+        let dir = tmp();
+        let t = HeaderTable::create_tiny(&dir).unwrap();
+        let g = sample([0x31; 32]);
+        let a = linked_child(&g, Fk(1), 1);
+        let honest = linked_child(&a, Fk(2), 2);
+        let mut lying = honest.clone();
+        lying.prev_fk = Fk(1);
+        let err = t.ensure_batch(&[g.clone(), a.clone(), lying]).unwrap_err();
+        assert!(
+            matches!(err, StoreError::Corrupt(_)),
+            "false parent edge must be rejected, got {err}"
+        );
+        assert_eq!(t.count(), 0, "failed batch must not append");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ensure_batch_parent_in_batch_assigns_prev_fk() {
+        let dir = tmp();
+        let t = HeaderTable::create_tiny(&dir).unwrap();
+        let g = sample([0x41; 32]);
+        let a = linked_child(&g, Fk(1), 7);
+        let fks = t.ensure_batch(&[g, a.clone()]).unwrap();
+        assert_eq!(fks, vec![Fk(1), Fk(2)]);
+        assert_eq!(t.get(Fk(2)).unwrap().prev_fk, Fk(1));
+        assert_eq!(t.get(Fk(2)).unwrap().hash, a.hash);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Production failure shape: same full hash as an older block, but `prev_fk`
     /// points at a tip-extension header. Without the write gate this plants a
     /// false child edge that resume walks as "headers past tip".
@@ -533,6 +646,36 @@ mod tests {
         assert_eq!(first.1.hash, hashes[0]);
         assert_eq!(last.1.hash, hashes[79]);
         assert_eq!(t.ensure(&sample(hashes[0])).unwrap(), first.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ensure_batch_rolls_generation_when_gen0_is_full() {
+        let dir = tmp();
+        let t = HeaderTable::create_tiny(&dir).unwrap();
+        let recs: Vec<HeaderRecord> = (0u32..80)
+            .map(|i| {
+                let mut hash = [0u8; 32];
+                hash[0..4].copy_from_slice(&i.to_le_bytes());
+                hash[4] = 0xa5;
+                sample(hash)
+            })
+            .collect();
+        let fks = t.ensure_batch(&recs).unwrap();
+        assert_eq!(fks.len(), 80);
+        assert_eq!(t.count(), 80);
+        assert!(
+            dir.join("header.head.g1").is_file(),
+            "tiny 64-slot gen0 must roll header.head.g1"
+        );
+        assert_eq!(t.get_by_hash(&recs[0].hash).unwrap().unwrap().0, Fk(1));
+        assert_eq!(t.get_by_hash(&recs[79].hash).unwrap().unwrap().0, Fk(80));
+        drop(t);
+        let t = HeaderTable::open_tiny(&dir).unwrap();
+        assert_eq!(
+            t.get_by_hash(&recs[40].hash).unwrap().unwrap().1.hash,
+            recs[40].hash
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

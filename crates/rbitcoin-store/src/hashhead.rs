@@ -515,7 +515,6 @@ impl HashHead {
         Ok(prev)
     }
 
-    #[cfg(test)]
     pub fn insert_many(&self, entries: &[([u8; 32], Fk)]) -> Result<(), StoreError> {
         self.insert_many_with(entries, |_| {})
     }
@@ -525,36 +524,43 @@ impl HashHead {
         entries: &[([u8; 32], Fk)],
         on_prev: impl FnMut(Option<Fk>),
     ) -> Result<(), StoreError> {
-        if entries.is_empty() {
-            return Ok(());
+        let leftover = self.insert_many_file(entries, on_prev)?;
+        if leftover.is_empty() {
+            Ok(())
+        } else {
+            Err(StoreError::Corrupt(HASH_HEAD_FULL))
         }
-
-        self.insert_many_file(entries, on_prev)
     }
 
     /// Slot-sorted, chunk-buffered apply (pread → mutate → pwrite dirty chunks).
     ///
     /// When the table is **empty**, builds the open-addressing table in RAM and
     /// writes it in one sequential pass. Does not grow an occupied table.
-    fn insert_many_file(
+    /// Returns unapplied pairs when this gen hits [`HASH_HEAD_FULL`].
+    pub(crate) fn insert_many_file(
         &self,
         entries: &[([u8; 32], Fk)],
         mut on_prev: impl FnMut(Option<Fk>),
-    ) -> Result<(), StoreError> {
+    ) -> Result<Vec<([u8; 32], Fk)>, StoreError> {
         if entries.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         let occupied = self.state.lock().unwrap().occupied;
+        let slots_now = self.state.lock().unwrap().slots;
+        let cap = Self::max_occupied(slots_now);
         if occupied == 0 {
-            return self.bulk_fill_empty(entries, on_prev);
+            let n = (entries.len() as u64).min(cap) as usize;
+            if n == 0 {
+                return Ok(entries.to_vec());
+            }
+            self.bulk_fill_empty(&entries[..n], on_prev)?;
+            return Ok(entries[n..].to_vec());
         }
 
         let mut work: Vec<([u8; 32], Fk)> = entries.to_vec();
-        let slots_now = self.state.lock().unwrap().slots;
         work.sort_unstable_by_key(|(k, _)| Self::hash_slot(&head_key_prefix(k), slots_now));
 
-        let cap = Self::max_occupied(slots_now);
         let mut i = 0usize;
         let mut cache = SlotPageCache::new(self, slots_now);
         while i < work.len() {
@@ -562,29 +568,34 @@ impl HashHead {
             debug_assert!(!fk.is_null());
             if self.state.lock().unwrap().occupied >= cap && self.get(&key)?.is_none() {
                 cache.flush()?;
-                return Err(StoreError::Corrupt(HASH_HEAD_FULL));
+                return Ok(work[i..].to_vec());
             }
             match cache.try_insert_merge(&key, fk)? {
                 InsertResult::Done { prev, new_slot } => {
                     if new_slot {
                         let mut state = self.state.lock().unwrap();
-                        if state.occupied >= cap {
-                            cache.flush()?;
-                            return Err(StoreError::Corrupt(HASH_HEAD_FULL));
-                        }
                         state.occupied = state.occupied.saturating_add(1);
+                        let full = state.occupied >= cap;
+                        drop(state);
+                        on_prev(prev);
+                        i += 1;
+                        if full {
+                            cache.flush()?;
+                            return Ok(work[i..].to_vec());
+                        }
+                    } else {
+                        on_prev(prev);
+                        i += 1;
                     }
-                    on_prev(prev);
-                    i += 1;
                 }
                 InsertResult::NeedRehash => {
                     cache.flush()?;
-                    return Err(StoreError::Corrupt(HASH_HEAD_FULL));
+                    return Ok(work[i..].to_vec());
                 }
             }
         }
         cache.flush()?;
-        Ok(())
+        Ok(Vec::new())
     }
 
     /// Place `entries` into a currently-empty slot table (caller reserved capacity).

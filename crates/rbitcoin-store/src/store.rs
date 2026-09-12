@@ -624,6 +624,11 @@ impl Store {
         self.headers.ensure(rec)
     }
 
+    /// Batch [`Self::put_header`] (one body write + chunked `header.head` insert).
+    pub fn put_headers(&self, recs: &[HeaderRecord]) -> Result<Vec<Fk>, StoreError> {
+        self.headers.ensure_batch(recs)
+    }
+
     pub fn get_header(&self, fk: Fk) -> Result<HeaderRecord, StoreError> {
         self.headers.get(fk)
     }
