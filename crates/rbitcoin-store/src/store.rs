@@ -228,6 +228,8 @@ pub struct Store {
     tx_full_log: std::sync::Mutex<Vec<u64>>,
     #[cfg(debug_assertions)]
     txid_get_many_log: std::sync::Mutex<Vec<u64>>,
+    #[cfg(debug_assertions)]
+    spent_range_batch_log: std::sync::Mutex<Vec<u64>>,
 }
 
 /// How txid → Class A fk picks among rows with the same txid.
@@ -316,6 +318,8 @@ impl Store {
             tx_full_log: std::sync::Mutex::new(Vec::new()),
             #[cfg(debug_assertions)]
             txid_get_many_log: std::sync::Mutex::new(Vec::new()),
+            #[cfg(debug_assertions)]
+            spent_range_batch_log: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -442,6 +446,8 @@ impl Store {
             tx_full_log: std::sync::Mutex::new(Vec::new()),
             #[cfg(debug_assertions)]
             txid_get_many_log: std::sync::Mutex::new(Vec::new()),
+            #[cfg(debug_assertions)]
+            spent_range_batch_log: std::sync::Mutex::new(Vec::new()),
         };
         store.rebuild_mtp_ring()?;
         Ok(store)
@@ -677,6 +683,20 @@ impl Store {
         #[cfg(debug_assertions)]
         {
             return self.txid_get_many_log.lock().unwrap().clone();
+        }
+        #[cfg(not(debug_assertions))]
+        Vec::new()
+    }
+
+    pub fn reset_spent_range_batch(&self) {
+        #[cfg(debug_assertions)]
+        self.spent_range_batch_log.lock().unwrap().clear();
+    }
+
+    pub fn spent_range_batch_fks(&self) -> Vec<u64> {
+        #[cfg(debug_assertions)]
+        {
+            return self.spent_range_batch_log.lock().unwrap().clone();
         }
         #[cfg(not(debug_assertions))]
         Vec::new()
@@ -971,6 +991,15 @@ impl Store {
     }
 
     pub fn tx_spent_range_batch(&self, fks: &[Fk]) -> Result<Vec<Option<(u64, u64)>>, StoreError> {
+        #[cfg(debug_assertions)]
+        {
+            let mut log = self.spent_range_batch_log.lock().unwrap();
+            for fk in fks {
+                if let Some(id) = fk.get() {
+                    log.push(id);
+                }
+            }
+        }
         self.txs.spent_range_batch(fks)
     }
 

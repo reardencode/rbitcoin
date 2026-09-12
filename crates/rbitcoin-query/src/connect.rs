@@ -593,12 +593,11 @@ impl Query {
             crate::note_confirm(&self.confirm_stats().sh_collect_pin, 1);
             return Ok(());
         }
-        let tx = self.get_tx(tx_fk)?;
-        if tx.output_count == 0 {
+        let outputs = self.tx_output_run_class_a(tx_fk)?;
+        if outputs.is_empty() {
             crate::note_confirm(&self.confirm_stats().sh_collect_cold, 1);
             return Ok(());
         }
-        let outputs = self.tx_output_run_class_a(tx_fk, &tx)?;
         for o in outputs.iter() {
             out.push(ScriptHashRecord::from_fk(script_hash(&o.script), tx_fk));
         }
@@ -624,18 +623,13 @@ impl Query {
 
     /// Output run from store (keyed by known create fk — no txid lookup).
     ///
-    /// Preferred for packed Class A (works with `tx.head` off). Callers that only
-    /// have a [`TxRecord`] must resolve create fk first (UTXO / head / scan).
+    /// Outs-only Class A (`get_tx_meta_and_outputs`); does not zip `inwit`.
     pub(crate) fn tx_output_run_class_a(
         &self,
         create_fk: Fk,
-        tx: &TxRecord,
     ) -> Result<Vec<OutputRecord>, QueryError> {
-        if tx.output_count == 0 {
-            return Ok(Vec::new());
-        }
-        let (_, _, outs) = self.store.get_tx_full(create_fk)?;
-        if outs.len() as u32 != tx.output_count {
+        let (meta, outs) = self.store.get_tx_meta_and_outputs(create_fk)?;
+        if outs.len() as u32 != meta.output_count {
             return Err(StoreError::Corrupt("packed output count mismatch"));
         }
         Ok(outs)
@@ -683,14 +677,11 @@ impl Query {
 
         let mut touched_sh: Vec<[u8; 32]> = Vec::new();
         for &tx_fk in &tx_fks {
-            let tx = self.store.get_tx(tx_fk)?;
-            if tx.output_count > 0 {
-                let outputs = self.tx_output_run_class_a(tx_fk, &tx)?;
-                for (i, o) in outputs.iter().enumerate() {
-                    let sh = script_hash(&o.script);
-                    let _ = self.store.scripthash.unlink_create(&sh, tx_fk, i as u32)?;
-                    touched_sh.push(sh);
-                }
+            let outputs = self.tx_output_run_class_a(tx_fk)?;
+            for (i, o) in outputs.iter().enumerate() {
+                let sh = script_hash(&o.script);
+                let _ = self.store.scripthash.unlink_create(&sh, tx_fk, i as u32)?;
+                touched_sh.push(sh);
             }
         }
         if !touched_sh.is_empty() {

@@ -267,6 +267,8 @@ pub struct ChainHub {
     chain_work_prefix: RwLock<Vec<Work>>,
     /// Core `m_cached_finished_ibd`: once we leave IBD, stay out.
     finished_ibd: AtomicBool,
+    #[cfg(test)]
+    block_at_height_calls: AtomicU64,
 }
 
 /// One `getchaintips` row. Status is a Core-shaped string (`active`,
@@ -311,6 +313,8 @@ impl ChainHub {
             asked_blocks: RwLock::new(HashSet::new()),
             chain_work_prefix: RwLock::new(Vec::new()),
             finished_ibd: AtomicBool::new(false),
+            #[cfg(test)]
+            block_at_height_calls: AtomicU64::new(0),
         }
     }
 
@@ -2155,15 +2159,18 @@ impl ChainHub {
     }
 
     fn disconnect_to(&self, keep_height: u32) -> Result<(), NetError> {
+        let mp = self.mempool().cloned();
         let mut disconnected_txs: Vec<Transaction> = Vec::new();
         while let Some(h) = self.query.tip_height() {
             let tip = h.0;
             if tip <= keep_height {
                 break;
             }
-            if let Ok(Some(b)) = self.block_at_height(tip) {
-                for tx in b.txdata.iter().skip(1) {
-                    disconnected_txs.push(tx.clone());
+            if mp.is_some() {
+                if let Ok(Some(b)) = self.block_at_height(tip) {
+                    for tx in b.txdata.iter().skip(1) {
+                        disconnected_txs.push(tx.clone());
+                    }
                 }
             }
             if let Some(th) = self.tip_hash() {
@@ -2174,7 +2181,7 @@ impl ChainHub {
                 .map_err(|e| NetError::Consensus(e.to_string()))?;
         }
         self.cache.truncate_to_height(keep_height);
-        if let Some(mp) = self.mempool() {
+        if let Some(mp) = mp {
             if !disconnected_txs.is_empty() {
                 let n = mp.reorg_reaccept(&disconnected_txs);
                 if n > 0 {
@@ -2184,8 +2191,6 @@ impl ChainHub {
                     );
                 }
             }
-            // Even when the disconnected blocks were empty, mempool txs that
-            // spend now-immature coinbases must leave (`mempool_reorg`).
             mp.evict_after_reorg();
         }
         self.query
@@ -2203,6 +2208,16 @@ impl ChainHub {
     }
 
     #[cfg(test)]
+    pub(crate) fn reset_block_at_height_calls(&self) {
+        self.block_at_height_calls.store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn block_at_height_calls(&self) -> u64 {
+        self.block_at_height_calls.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_poison_chain_work_prefix_last(&self) {
         let mut p = self.chain_work_prefix.write().unwrap();
         if let Some(last) = p.last_mut() {
@@ -2211,6 +2226,8 @@ impl ChainHub {
     }
 
     fn block_at_height(&self, height: u32) -> Result<Option<Block>, NetError> {
+        #[cfg(test)]
+        self.block_at_height_calls.fetch_add(1, Ordering::Relaxed);
         if let Some(h) = self.cache.hash_at_height(height) {
             if let Some(b) = self.cache.get_block(&h) {
                 return Ok(Some(b));
@@ -3042,6 +3059,44 @@ mod tests {
             "prefix must be rebuilt from the winner, not the poisoned loser"
         );
         assert_ne!(hub.chain_work().unwrap(), Work::from_be_bytes([0xff; 32]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn disconnect_to_without_mempool_skips_block_at_height() {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let b1 = mine(gen, 1_300_040_000, 1);
+        hub.accept_block(b1).unwrap();
+        assert!(hub.mempool().is_none());
+        hub.reset_block_at_height_calls();
+        hub.rewind_to_height(0).unwrap();
+        assert_eq!(
+            hub.block_at_height_calls(),
+            0,
+            "IBD disconnect must not reconstruct the losing branch"
+        );
+        assert_eq!(hub.tip_height(), Some(0));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn disconnect_to_with_mempool_still_harvests() {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let b1 = mine(gen, 1_300_040_100, 1);
+        hub.accept_block(b1).unwrap();
+        let mp = crate::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
+        assert!(hub.attach_mempool(mp).is_ok());
+        hub.reset_block_at_height_calls();
+        hub.rewind_to_height(0).unwrap();
+        assert!(
+            hub.block_at_height_calls() >= 1,
+            "tip-mode reorg still reconstructs for reorg_reaccept"
+        );
+        assert_eq!(hub.tip_height(), Some(0));
         let _ = std::fs::remove_dir_all(dir);
     }
 

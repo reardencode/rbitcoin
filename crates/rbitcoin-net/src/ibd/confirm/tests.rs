@@ -46,6 +46,35 @@ fn prune_inflight_drops_below_wave_drain_fence_keeps_equal() {
     assert_eq!(log.pack_count(), 0);
 }
 
+#[test]
+fn note_archived_creates_from_pairs_does_not_need_store() {
+    use super::LoadAheadState;
+
+    let (_dir, hub) = crate::chain::tiny_regtest_hub_labeled("note-archived-pairs");
+    hub.ensure_genesis().unwrap();
+    let mut st = LoadAheadState::new(&hub);
+    let tid = [7u8; 32];
+    let last = [3u8; 32];
+    st.note_archived_creates(vec![(tid, Fk(9))], Some((4, last)));
+    assert_eq!(st.in_flight.get_create_fk(&tid), Some(Fk(9)));
+    assert_eq!(st.last_loaded, Some((4, last)));
+    assert_eq!(st.next_tx_start, 10);
+
+    let start = st.next_tx_start;
+    st.note_archived_creates(Vec::new(), Some((5, [8u8; 32])));
+    assert_eq!(
+        st.in_flight.get_create_fk(&tid),
+        Some(Fk(9)),
+        "empty pairs must not invent or drop identity"
+    );
+    assert_eq!(st.next_tx_start, start);
+    assert_eq!(
+        st.last_loaded,
+        Some((4, last)),
+        "header_txs hole (no pairs) must not advance last_loaded"
+    );
+}
+
 /// Mainnet 187: first pack writes (drain+fence), next pack spends those creates.
 /// Stamp skips body_range when in-flight still has CreatePin outs; pin needs
 /// those outs. Drive the shipped confirm engine (not a source-order pin).

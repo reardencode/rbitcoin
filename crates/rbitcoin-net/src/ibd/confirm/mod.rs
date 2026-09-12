@@ -125,33 +125,11 @@ impl LoadAheadState {
         self.publish_mem_stats();
     }
 
-    /// Publish already-archived create txid→fk for tip-ahead stamp (plan=None packs).
-    ///
-    /// Without this, lookup(N+k) cannot resolve parents in N..N+k-1 that already
-    /// have Class A body but are mid-head-insert / not yet head-probeable, and
-    /// stamp fails with `parent create_fk unresolved` (permanent tip blacklist).
-    fn note_archived_creates(&mut self, hub: &ChainHub, heights_hashes: &[(u32, BlockHash)]) {
-        let mut pairs: Vec<([u8; 32], rbitcoin_primitives::Fk)> = Vec::new();
-        let mut max_fk = 0u64;
-        for &(h, hash) in heights_hashes {
-            let Ok(Some((hfk, _))) = hub.query.get_header_by_hash(&hash.to_byte_array()) else {
-                continue;
-            };
-            let Ok(Some(fks)) = hub.query.store().header_txs.get_list(hfk) else {
-                continue;
-            };
-            for fk in fks {
-                let Some(id) = fk.get() else { continue };
-                max_fk = max_fk.max(id);
-                let Ok(tid) = hub.query.store().txs.body_txid(fk) else {
-                    continue;
-                };
-                if tid != [0u8; 32] {
-                    pairs.push((tid, fk));
-                }
-            }
-            let _ = h;
-        }
+    fn note_archived_creates(
+        &mut self,
+        pairs: Vec<([u8; 32], rbitcoin_primitives::Fk)>,
+        last: Option<(u32, [u8; 32])>,
+    ) {
         if pairs.is_empty() {
             return;
         }
@@ -162,11 +140,10 @@ impl LoadAheadState {
         {
             self.next_tx_start = last_id.saturating_add(1).max(1);
         }
-        let _ = max_fk;
-        let max_height = heights_hashes.iter().map(|(h, _)| *h).max();
+        let max_height = last.map(|(h, _)| h);
         self.in_flight.note_creates(pairs, max_height);
-        if let Some(&(h, hash)) = heights_hashes.last() {
-            self.last_loaded = Some((h, hash.to_byte_array()));
+        if let Some((h, hash)) = last {
+            self.last_loaded = Some((h, hash));
         }
         self.publish_mem_stats();
     }
@@ -1980,11 +1957,10 @@ pub(crate) fn spawn_confirm_engine(
                         lookup_ahead.note_lookup_ok(p, lh, raw);
                     }
                 } else {
-                    let hh: Vec<(u32, BlockHash)> = wire_batch
-                        .iter()
-                        .map(|(h, ha, _)| (*h, *ha))
-                        .collect();
-                    lookup_ahead.note_archived_creates(&hub_load, &hh);
+                    lookup_ahead.note_archived_creates(
+                        stamped.archived_create_pairs(),
+                        stamped.last_height_hash(),
+                    );
                 }
                 if drop_below.is_some() {
                     let t_prune = Instant::now();
