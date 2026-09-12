@@ -292,7 +292,7 @@ fn write_idx(path: &Path, idx: &[(ShHeadKey, u64)]) -> Result<(), StoreError> {
         buf[off..off + 8].copy_from_slice(&rec_off.to_le_bytes());
         off += 8;
     }
-    std::fs::write(path, buf).map_err(|e| StoreError::io(path, e))?;
+    crate::file::write_synced_tmp_rename(path, &buf)?;
     Ok(())
 }
 

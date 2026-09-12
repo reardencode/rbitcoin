@@ -1130,15 +1130,7 @@ fn write_meta(dir: &Path, stem: &str, descs: &[SegDesc]) -> Result<(), StoreErro
         buf.extend_from_slice(&d.file_id.to_le_bytes());
         buf.extend_from_slice(&0u32.to_le_bytes());
     }
-    // Atomic replace: write sibling temp then rename over `meta` (never unlink first).
-    // Use an explicit sibling name so we never collide with a segment file named `tmp`.
-    let tmp = path.with_file_name("meta.tmp");
-    std::fs::write(&tmp, &buf).map_err(|e| StoreError::io(&tmp, e))?;
-    // Best-effort durability of temp before rename (crash mid-rename keeps old meta).
-    if let Ok(f) = std::fs::File::open(&tmp) {
-        let _ = f.sync_data();
-    }
-    std::fs::rename(&tmp, &path).map_err(|e| StoreError::io(&path, e))?;
+    crate::file::write_synced_tmp_rename(&path, &buf)?;
     Ok(())
 }
 

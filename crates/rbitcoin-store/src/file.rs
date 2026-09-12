@@ -32,6 +32,7 @@ use crate::error::StoreError;
 use crate::io_handle::IoHandle;
 use rbitcoin_primitives::{schema_file_openable, TableKind, SCHEMA_VERSION, STORE_MAGIC};
 use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
@@ -39,6 +40,48 @@ use std::sync::Mutex;
 // needs_sync: set on durable-payload writes; cleared after sync_data.
 
 pub const FILE_HEADER_LEN: usize = 16;
+
+/// Sibling `{filename}.tmp` next to `path` (keeps compound suffixes like `.idx`).
+pub(crate) fn tmp_sidecar_path(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("file"))
+        .to_os_string();
+    name.push(".tmp");
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(name),
+        _ => PathBuf::from(name),
+    }
+}
+
+/// Write `bytes` to a sibling tmp, `sync_all`, then rename over `path`.
+pub(crate) fn write_synced_tmp_rename(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+    write_synced_tmp_file(path, |f| {
+        f.write_all(bytes).map_err(|e| StoreError::io(path, e))
+    })
+}
+
+/// Stream `write` into a sibling tmp, `sync_all`, then rename over `path`.
+///
+/// The durable name is not created or truncated until rename.
+pub(crate) fn write_synced_tmp_file<F>(path: &Path, write: F) -> Result<(), StoreError>
+where
+    F: FnOnce(&mut File) -> Result<(), StoreError>,
+{
+    let tmp = tmp_sidecar_path(path);
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| StoreError::io(parent, e))?;
+        }
+    }
+    {
+        let mut f = File::create(&tmp).map_err(|e| StoreError::io(&tmp, e))?;
+        write(&mut f)?;
+        f.sync_all().map_err(|e| StoreError::io(&tmp, e))?;
+    }
+    std::fs::rename(&tmp, path).map_err(|e| StoreError::io(path, e))?;
+    Ok(())
+}
 
 /// Trailing-header tables (`tx.head`): 16-byte store identity + 16-byte layout
 /// extension (bits / entry_bytes / generation). Slots still start at file offset 0
@@ -1345,5 +1388,22 @@ mod advise_tests {
         let (s2, _) = ensure_nofile_budget_at_least(64);
         assert!(s2 >= 64 || cfg!(not(unix)) || soft == 0);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn write_synced_tmp_rename_installs_dest_only() {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let id = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("rbitcoin-sync-rename-{id}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("seal.idx");
+        let tmp = tmp_sidecar_path(&dest);
+        assert!(!dest.exists());
+        write_synced_tmp_rename(&dest, b"sealed").unwrap();
+        assert!(dest.exists());
+        assert!(!tmp.exists());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"sealed");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

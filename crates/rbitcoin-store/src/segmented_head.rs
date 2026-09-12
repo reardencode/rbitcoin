@@ -1191,9 +1191,7 @@ fn write_meta(dir: &Path, bits: u32, segs: &[(u64, u64, u32, u32)]) -> Result<()
         buf.extend_from_slice(&flags.to_le_bytes());
         buf.extend_from_slice(&0u64.to_le_bytes());
     }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, &buf).map_err(|e| StoreError::io(&tmp, e))?;
-    std::fs::rename(&tmp, &path).map_err(|e| StoreError::io(&path, e))?;
+    crate::file::write_synced_tmp_rename(&path, &buf)?;
     Ok(())
 }
 

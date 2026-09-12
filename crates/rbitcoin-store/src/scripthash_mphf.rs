@@ -107,24 +107,20 @@ impl MphfHead {
             val[slot * 8..slot * 8 + 8].copy_from_slice(&w.to_le_bytes());
         }
         let mp = mphf_path(base);
-        mphf.write_compact_to(&mp)?;
+        let staging = crate::file::tmp_sidecar_path(&mp);
+        mphf.write_compact_to(&staging)?;
         {
             let mut f = OpenOptions::new()
                 .append(true)
-                .open(&mp)
-                .map_err(|e| StoreError::io(&mp, e))?;
-            f.write_all(&tags).map_err(|e| StoreError::io(&mp, e))?;
-            f.sync_all().map_err(|e| StoreError::io(&mp, e))?;
+                .open(&staging)
+                .map_err(|e| StoreError::io(&staging, e))?;
+            f.write_all(&tags)
+                .map_err(|e| StoreError::io(&staging, e))?;
+            f.sync_all().map_err(|e| StoreError::io(&staging, e))?;
         }
+        std::fs::rename(&staging, &mp).map_err(|e| StoreError::io(&mp, e))?;
         let vp = val_path(base);
-        std::fs::write(&vp, &val).map_err(|e| StoreError::io(&vp, e))?;
-        {
-            let f = OpenOptions::new()
-                .write(true)
-                .open(&vp)
-                .map_err(|e| StoreError::io(&vp, e))?;
-            f.sync_all().map_err(|e| StoreError::io(&vp, e))?;
-        }
+        crate::file::write_synced_tmp_rename(&vp, &val)?;
         Self::open(base)
     }
 
