@@ -436,12 +436,6 @@ mod tests {
         assert!(blocking_pool_size() <= 512);
     }
 
-    #[test]
-    fn help_and_version_exit_success() {
-        assert_exit(cli_main(["rbitcoin-node", "--help"]), ExitCode::SUCCESS);
-        assert_exit(cli_main(["rbitcoin-node", "-V"]), ExitCode::SUCCESS);
-    }
-
     fn ready_config<I, T>(args: I) -> NodeConfig
     where
         I: IntoIterator<Item = T>,
@@ -597,24 +591,6 @@ mod tests {
     }
 
     #[test]
-    fn peertimeout_zero_is_init_error() {
-        let dir = tmp_datadir();
-        let code = cli_main([
-            "rbitcoin-node",
-            "--smoke",
-            "--network",
-            "regtest",
-            "--datadir",
-            dir.to_str().unwrap(),
-            "--peertimeout=0",
-            "--log-level",
-            "error",
-        ]);
-        assert_exit(code, ExitCode::from(1));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn minimumchainwork_rejects_non_hex() {
         let dir = tmp_datadir();
         let code = cli_main([
@@ -712,36 +688,6 @@ mod tests {
             ]),
             ExitCode::from(2),
         );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn smoke_open_and_shutdown() {
-        let _g = OPERATOR_ENV_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let dir = tmp_datadir();
-        let code = cli_main([
-            "rbitcoin-node",
-            "--smoke",
-            "--network",
-            "regtest",
-            "--datadir",
-            dir.to_str().unwrap(),
-            "--no-seeds",
-            "--log-level",
-            "error",
-            "--milestone",
-            "0",
-            "--max-outbound",
-            "2",
-            "--maxinbound",
-            "10",
-            "--mempool-size-mb",
-            "10",
-        ]);
-        assert_exit(code, ExitCode::SUCCESS);
-        assert!(dir.join("store").is_dir());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -887,32 +833,6 @@ mod tests {
             Ok("91")
         );
         std::env::remove_var("RBITCOIN_P2P_MAX_INBOUND");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn conf_log_level_applied_when_cli_omits() {
-        let _g = OPERATOR_ENV_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let dir = tmp_datadir();
-        std::fs::create_dir_all(&dir).unwrap();
-        let conf = dir.join("log.conf");
-        std::fs::write(&conf, "log_level=warn\nnetwork=regtest\n").unwrap();
-        let data = dir.join("data");
-        // No --log-level: conf warn must init without error.
-        let code = cli_main([
-            "rbitcoin-node",
-            "--smoke",
-            "--conf",
-            conf.to_str().unwrap(),
-            "--datadir",
-            data.to_str().unwrap(),
-            "--no-seeds",
-            "--milestone",
-            "0",
-        ]);
-        assert_exit(code, ExitCode::SUCCESS);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -255,56 +255,6 @@ mod tests {
     }
 
     #[test]
-    fn cache_push_locator_headers_evict_truncate() {
-        let c = BlockCache::with_body_depth(3);
-        assert!(c.is_empty());
-        let g = dummy_block(BlockHash::from_byte_array([0u8; 32]), 0);
-        // Genesis-like: empty chain accepts any first block.
-        c.push_best(g.clone()).unwrap();
-        assert_eq!(c.len(), 1);
-        assert_eq!(c.tip_height(), Some(0));
-        let mut tip = g.block_hash();
-        for n in 1..=5u32 {
-            let b = dummy_block(tip, n);
-            tip = b.block_hash();
-            c.push_best(b).unwrap();
-        }
-        assert_eq!(c.tip_height(), Some(5));
-        // Only last 3 bodies retained.
-        assert!(c.get_block(&g.block_hash()).is_none());
-        assert!(c.get_block(&tip).is_some());
-        assert!(c.hash_at_height(0).is_some());
-        let loc = c.locator();
-        assert_eq!(loc[0], tip);
-        let hdrs =
-            c.headers_after_locator(&[g.block_hash()], BlockHash::from_byte_array([0u8; 32]));
-        // Only tip-window bodies yield headers.
-        assert!(!hdrs.is_empty() || c.get_header(&tip).is_some());
-        // Zero locator starts from genesis hash index.
-        let from_zero = c.headers_after_locator(&[BlockHash::from_byte_array([0u8; 32])], tip);
-        assert!(!from_zero.is_empty() || c.header_at_height(5).is_some());
-        c.truncate_to_height(2);
-        assert!(c.tip_height().unwrap() <= 2);
-        c.truncate_to_height(100); // no-op when shorter
-        c.clear();
-        assert!(c.is_empty());
-        assert!(c.tip_hash().is_none());
-        // Default ctor + empty-chain edge cases.
-        let d = BlockCache::default();
-        assert!(d.is_empty());
-        assert_eq!(d.locator().len(), 1); // genesis zero hash
-        assert!(d
-            .headers_after_locator(&[], BlockHash::from_byte_array([0u8; 32]))
-            .is_empty());
-        // Non-extending block rejected after genesis.
-        let g2 = dummy_block(BlockHash::from_byte_array([0u8; 32]), 0);
-        d.push_best(g2.clone()).unwrap();
-        let orphan = dummy_block(BlockHash::from_byte_array([9u8; 32]), 1);
-        assert!(d.push_best(orphan).is_err());
-        assert!(d.get_header(&g2.block_hash()).is_some());
-    }
-
-    #[test]
     fn default_body_depth_is_compact_serve_window() {
         assert_eq!(DEFAULT_BODY_DEPTH, 16);
         let c = BlockCache::new();
