@@ -2253,6 +2253,10 @@ impl MempoolHub {
 
     /// Unconfirmed delta for Electrum balance (sats): +mempool outputs − spent confirmed.
     ///
+    /// Skips txs already connected on the tip (`tx_fk_by_txid_tip`) so a leftover
+    /// live entry after IBD / `-blocksonly` (`remove_for_block` is a no-op while
+    /// relay is off) cannot double-count confirmed value.
+    ///
     /// Uses [`MempoolShIndex`] (same as `scripthash_mempool`). A full-graph walk
     /// plus chain `get_txout` per input is ~1.5 s per empty Cake key on a live
     /// mainnet mempool.
@@ -2266,6 +2270,15 @@ impl MempoolHub {
         let mut delta = 0i64;
         let provider = self.utxo_provider();
         for txid in want {
+            if self
+                .query
+                .tx_fk_by_txid_tip(&txid.to_byte_array())
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                continue;
+            }
             let Some(tx) = g.get_tx(&txid) else { continue };
             for (vout, o) in tx.output.iter().enumerate() {
                 if script_hash(o.script_pubkey.as_bytes()) != *scripthash {
