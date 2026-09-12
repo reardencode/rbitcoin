@@ -484,22 +484,31 @@ fn chunk_parent_ids_vouts_are_per_chunk() {
         .map(TxPrecompute::from_tx)
         .collect::<Vec<_>>()
         .into();
-    let chunk0 = [(
-        1u32,
-        [1u8; 32],
-        ResolvedWire::new(Arc::new(spend), pres_spend),
-    )];
-    let chunk1 = [(
-        2u32,
-        [2u8; 32],
-        ResolvedWire::new(Arc::new(empty), pres_empty),
-    )];
+    let mut wire0 = ResolvedWire::new(Arc::new(spend), pres_spend);
+    wire0.spend_keys = Arc::from([(parent, 0)]);
+    let mut wire1 = ResolvedWire::new(Arc::new(empty), pres_empty);
+    wire1.spend_keys = Arc::from([(parent, 1)]);
+    let chunk0 = [(1u32, [1u8; 32], wire0)];
+    let chunk1 = [(2u32, [2u8; 32], wire1)];
     let a = chunk_parent_ids(&wave, &chunk0);
     let b = chunk_parent_ids(&wave, &chunk1);
     assert_eq!(a.need_vouts.get(&7).map(|v| v.as_slice()), Some(&[0][..]));
+    assert_eq!(
+        b.need_vouts.get(&7).map(|v| v.as_slice()),
+        Some(&[1][..]),
+        "chunk maps differ when carried vouts differ"
+    );
+    let ignored_wire = chunk_parent_ids(
+        &wave,
+        &[(3u32, [3u8; 32], {
+            let mut w = chunk0[0].2.clone();
+            w.spend_keys = Arc::from([]);
+            w
+        })],
+    );
     assert!(
-        !b.need_vouts.contains_key(&7),
-        "chunk that does not spend the parent must not list its vout"
+        !ignored_wire.need_vouts.contains_key(&7),
+        "empty spend_keys must not walk ResolvedWire.block inputs"
     );
     assert!(
         Arc::ptr_eq(&a.ids, &b.ids),

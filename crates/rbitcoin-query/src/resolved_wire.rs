@@ -13,6 +13,8 @@ pub struct ResolvedWire {
     pub n_inputs: u32,
     /// Class A header row from BQ enqueue. Load-split kinds via `has_body(fk)`.
     pub header_fk: u64,
+    /// External `(prev_txid, vout)` from the BQ input walk (no coinbase / same-wave creates).
+    pub spend_keys: Arc<[([u8; 32], u32)]>,
 }
 
 impl ResolvedWire {
@@ -28,6 +30,7 @@ impl ResolvedWire {
             pres,
             n_inputs,
             header_fk: 0,
+            spend_keys: Arc::from([]),
         }
     }
 }
@@ -69,9 +72,11 @@ mod tests {
             pres: Arc::clone(&wire.pres),
             n_inputs: 9,
             header_fk: 7,
+            spend_keys: Arc::from([([0x11u8; 32], 3)]),
         };
         assert_eq!(stamped.n_inputs, 9);
         assert_eq!(stamped.header_fk, 7);
         assert_eq!(wire.header_fk, 0);
+        assert_eq!(stamped.spend_keys.as_ref(), &[([0x11u8; 32], 3)]);
     }
 }

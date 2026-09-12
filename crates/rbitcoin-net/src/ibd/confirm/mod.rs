@@ -766,26 +766,17 @@ pub(crate) fn split_wave_into_load_batches_kind(
     out
 }
 
-/// Per-chunk need-vouts for a load batch (shared wave ids/spent).
+/// Per-chunk need-vouts from carried spend keys ∩ wave ids (no wire input walk).
 pub(crate) fn chunk_parent_ids(
     wave: &rbitcoin_query::BatchParentIds,
     items: &[(u32, [u8; 32], rbitcoin_query::ResolvedWire)],
 ) -> rbitcoin_query::BatchParentIds {
     let mut need_vouts: rbitcoin_query::U64Map<Vec<u32>> = rbitcoin_query::U64Map::default();
     for (_, _, w) in items {
-        for tx in &w.block.txdata {
-            for inp in &tx.input {
-                if inp.previous_output.is_null() {
-                    continue;
-                }
-                let prev = inp.previous_output.txid.to_byte_array();
-                if let Some((fk, _)) = wave.ids.get(&prev) {
-                    if let Some(id) = fk.get() {
-                        need_vouts
-                            .entry(id)
-                            .or_default()
-                            .push(inp.previous_output.vout);
-                    }
+        for &(prev, vout) in w.spend_keys.iter() {
+            if let Some((fk, _)) = wave.ids.get(&prev) {
+                if let Some(id) = fk.get() {
+                    need_vouts.entry(id).or_default().push(vout);
                 }
             }
         }

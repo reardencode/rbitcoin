@@ -125,6 +125,8 @@ pub struct BqResolveWaveStats {
 }
 
 /// Push external prev_txids (+ pre-BIP34 create txids) into the wave set.
+///
+/// Returns per-input `(prev_txid, vout)` for load-chunk need-vouts (same skips).
 fn push_resolve_keys(
     params: &ChainParams,
     height: u32,
@@ -132,8 +134,9 @@ fn push_resolve_keys(
     pres: &[TxPrecompute],
     skip: &HashSet<[u8; 32], BuildHasherDefault<TxidHasher>>,
     keys: &mut HashSet<[u8; 32], BuildHasherDefault<TxidHasher>>,
-) {
+) -> Vec<([u8; 32], u32)> {
     let bip34 = params.bip34_active_at(height);
+    let mut spends = Vec::new();
     for (tx, p) in block.txdata.iter().zip(pres.iter()) {
         for inp in &tx.input {
             if inp.previous_output.is_null() {
@@ -144,11 +147,13 @@ fn push_resolve_keys(
                 continue;
             }
             keys.insert(prev);
+            spends.push((prev, inp.previous_output.vout));
         }
         if !bip34 && !skip.contains(&p.txid) {
             keys.insert(p.txid);
         }
     }
+    spends
 }
 
 fn decode_bq_block(payload: &[u8]) -> Option<Block> {
@@ -289,6 +294,7 @@ pub fn confirm_bq_resolve_wave_capped(
                     pres: Arc::clone(&pres),
                     n_inputs: n_inputs_at.get(&h).copied().unwrap_or(0),
                     header_fk: header_fk_at.get(&h).copied().unwrap_or(0),
+                    spend_keys: Arc::from([]),
                 },
             ));
             (block, pres)
@@ -299,7 +305,7 @@ pub fn confirm_bq_resolve_wave_capped(
         for p in pres.iter() {
             wave_creates.insert(p.txid);
         }
-        push_resolve_keys(
+        let spends = push_resolve_keys(
             params,
             h,
             block.as_ref(),
@@ -307,6 +313,9 @@ pub fn confirm_bq_resolve_wave_capped(
             &wave_creates,
             &mut all_keys,
         );
+        if let Some((_, _, w)) = wires.last_mut() {
+            w.spend_keys = Arc::from(spends);
+        }
         stats.collect_ns = stats
             .collect_ns
             .saturating_add(t_col.elapsed().as_nanos() as u64);
@@ -589,9 +598,20 @@ mod tests {
         let mut keys: HashSet<[u8; 32], BuildHasherDefault<TxidHasher>> =
             HashSet::with_hasher(BuildHasherDefault::default());
         let skip = HashSet::with_hasher(BuildHasherDefault::default());
-        push_resolve_keys(&params, height, &block, &pres, &skip, &mut keys);
+        let spends = push_resolve_keys(&params, height, &block, &pres, &skip, &mut keys);
         assert_eq!(keys.len(), 1);
         assert!(keys.contains(&prev.to_byte_array()));
+        assert_eq!(
+            spends,
+            vec![(prev.to_byte_array(), 0), (prev.to_byte_array(), 1),]
+        );
+        let mut skip_same = HashSet::with_hasher(BuildHasherDefault::default());
+        skip_same.insert(prev.to_byte_array());
+        let mut keys2: HashSet<[u8; 32], BuildHasherDefault<TxidHasher>> =
+            HashSet::with_hasher(BuildHasherDefault::default());
+        let skipped = push_resolve_keys(&params, height, &block, &pres, &skip_same, &mut keys2);
+        assert!(keys2.is_empty());
+        assert!(skipped.is_empty(), "same-wave creates are not spend keys");
     }
 
     #[test]
