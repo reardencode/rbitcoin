@@ -1553,10 +1553,18 @@ impl ChainHub {
 
     /// Accept a block that extends the tip, or reorg to a stronger competing tip / branch.
     pub fn accept_block(&self, block: Block) -> Result<AcceptOutcome, NetError> {
-        crate::tip_accept::run_on_tip_accept(|| self.accept_block_inner(Arc::new(block)))
+        crate::tip_accept::run_on_tip_accept(|| self.accept_incoming(Arc::new(block), false))
     }
 
     fn accept_block_inner(&self, block: Arc<Block>) -> Result<AcceptOutcome, NetError> {
+        self.accept_incoming(block, false)
+    }
+
+    fn accept_incoming(
+        &self,
+        block: Arc<Block>,
+        hold_unconnected: bool,
+    ) -> Result<AcceptOutcome, NetError> {
         let hash = block.block_hash();
         if self.tip_hash() == Some(hash) || self.has_block(&hash) {
             return Ok(AcceptOutcome::AlreadyHave);
@@ -1596,11 +1604,17 @@ impl ChainHub {
                     .height_of_hash(&prev.to_byte_array())
                     .map_err(|e| NetError::Consensus(e.to_string()))?
                 else {
+                    if hold_unconnected {
+                        self.hold_body(block);
+                    }
                     return Err(NetError::UnknownParent);
                 };
 
                 let new_height = parent_h.0.saturating_add(1);
                 if new_height > tip_h {
+                    if hold_unconnected {
+                        self.hold_body(block);
+                    }
                     return Err(NetError::Protocol("gap above tip"));
                 }
 
@@ -1609,17 +1623,22 @@ impl ChainHub {
                         .tip_header()
                         .ok_or(NetError::Protocol("missing current tip header"))?
                         .work();
+                    let new_work = block.header.work();
                     let precious = *self.precious.read().unwrap() == Some(hash);
-                    if block.header.work() > cur_work
-                        || (block.header.work() == cur_work && precious)
-                    {
+                    if new_work > cur_work || (new_work == cur_work && precious) {
                         self.disconnect_to(parent_h.0)?;
                         self.connect_at(new_height, block)?;
                         return Ok(AcceptOutcome::Accepted { height: new_height });
                     }
+                    if hold_unconnected {
+                        self.hold_body(block);
+                    }
                     return Ok(AcceptOutcome::IgnoredWeaker);
                 }
 
+                if hold_unconnected {
+                    self.hold_body(block);
+                }
                 Err(NetError::SideBlock)
             }
         }
@@ -1791,7 +1810,7 @@ impl ChainHub {
     fn accept_received_block_inner(&self, block: Block) -> Result<AcceptOutcome, NetError> {
         let hash = block.block_hash();
         let block = Arc::new(block);
-        match self.accept_block_inner(Arc::clone(&block)) {
+        match self.accept_incoming(block, true) {
             Ok(AcceptOutcome::Accepted { height }) => {
                 self.held_bodies.write().unwrap().remove(&hash);
                 match self.try_apply_held()? {
@@ -1803,21 +1822,15 @@ impl ChainHub {
                 self.held_bodies.write().unwrap().remove(&hash);
                 Ok(AcceptOutcome::AlreadyHave)
             }
-            Ok(AcceptOutcome::IgnoredWeaker) => {
-                self.hold_body(block);
-                match self.try_apply_held()? {
-                    Some(o) => Ok(o),
-                    None => Ok(AcceptOutcome::IgnoredWeaker),
-                }
-            }
+            Ok(AcceptOutcome::IgnoredWeaker) => match self.try_apply_held()? {
+                Some(o) => Ok(o),
+                None => Ok(AcceptOutcome::IgnoredWeaker),
+            },
             Err(NetError::SideBlock | NetError::UnknownParent)
-            | Err(NetError::Protocol("gap above tip")) => {
-                self.hold_body(block);
-                match self.try_apply_held()? {
-                    Some(o) => Ok(o),
-                    None => Ok(AcceptOutcome::IgnoredWeaker),
-                }
-            }
+            | Err(NetError::Protocol("gap above tip")) => match self.try_apply_held()? {
+                Some(o) => Ok(o),
+                None => Ok(AcceptOutcome::IgnoredWeaker),
+            },
             Err(e) => {
                 // Core `BLOCK_FAILED`: remember consensus-invalid hashes even
                 // when the header was never persisted (compact reconstruct).
@@ -2062,14 +2075,15 @@ impl ChainHub {
         );
         let hash = block.block_hash();
         let header = block.header;
+        tip_accept_stats_reset(&self.query);
+        let t_wall = std::time::Instant::now();
         let t_pres = std::time::Instant::now();
         let (pres, preverified) = match self.mempool() {
             Some(mp) => mp.tip_script_pres(&block.txdata),
             None => rbitcoin_query::pres_for_tip(&block.txdata, true, |_| false),
         };
         let pres_ns = t_pres.elapsed().as_nanos() as u64;
-        tip_accept_stats_reset(&self.query);
-        let t_wall = std::time::Instant::now();
+        debug_assert_eq!(pres.len(), block.txdata.len());
         let now = self.clock.now_secs();
         let _ = rbitcoin_consensus::with_now(now, || loop {
             match accept_and_connect_block_preverified(
@@ -2101,7 +2115,6 @@ impl ChainHub {
                 NetError::Consensus(reason)
             }
         })?;
-        debug_assert_eq!(pres.len(), block.txdata.len());
         self.header_tips.write().unwrap().remove(&hash);
         let t_mp = std::time::Instant::now();
         if let Some(mp) = self.mempool() {
