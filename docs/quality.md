@@ -145,7 +145,7 @@ finding 023.
 
 R-ids were the 2026-08-12 ranked slice. Canonical Open/Completed/Won't-fix
 id is in **bold**. Do not start **R-11+** — new work is the next unused
-**Q-id (Q-62+)**.
+**Q-id (Q-63+)**.
 
 | R-id | Canonical | Where |
 |------|-----------|-------|
@@ -155,7 +155,7 @@ id is in **bold**. Do not start **R-11+** — new work is the next unused
 | R-09 | **Q-16** | Completed |
 | R-10 | **R-10** | Open rank 4 |
 
-Next unused Q-id is **Q-62**.
+Next unused Q-id is **Q-63**.
 
 ---
 
@@ -196,6 +196,7 @@ findings 001–022, CI split, map-free README, …) live in
 
 | ID | Item | Resolution |
 |----|------|------------|
+| **Q-62** | IBD load `txout.body` read bandwidth | Need-aware Outs extend: first 4 KiB peek is complete when every `need_vouts` `skip_at`s in-page (empty need still walks all outs). Overlapping body peeks in one uring wave share one OS-page SQE (cap two pages). `ibd: perf` `cold_range` `extend=` / `sqe=`. Random 4 KiB parent faults, spent page-RMW, and leftover TipOnly stay as designed (no coins cache, no persist-in-flight). |
 | **Q-57** | Store publish / Class C flush / sidecar | `published_meta` Acquire. `ArrayTable` / `StrongTxTable` `flush_dirty` packed dirty-epoch (`0`=clean; snapshot under read; CAS `e0→0`; wrap of `u64::MAX` stays dirty). fuse8 `decode_body` refuses fingerprint arrays shorter than `hash_of_hash` geometry (`contains` unchanged). Leftover fuse8 v1 refuses open. `for_each_spender_create` hops ≤ `spenders.count()`. Seal/install of `meta` / `.mphf` / SH `.idx` is tmp + `sync_all` then rename. `list_runs` is a scan (open-time SH `key_len` and leftover-run count do not delete). |
 | **Q-58** | Mempool persist order + eviction | Admit `persist_all` writes body then LIVE slots then meta. Compact writes `tx.body.tmp`/`slots.tmp`, `sync_all` both, rename body then slots, then persist **meta only** (open finishes a leftover `slots.tmp`; packed images + stale `live_count` still load). Known-parent OOB vout is `MissingPrevout`. `evict_to_budget` no-op break. `evict_worst_chunk_once` uses `remove_txid_tree` so a parent-only worst chunk cannot leave a child. |
 | **Q-59** | RPC / CLI honesty | `submitblock` all-networks via `ChainHub`. `--minrelaytxfee` garbage/negatives fail start. `getnetworkhashps` labeled dummy 2-work-per-block. `gettxout include_mempool` hides mempool-spent confirmed outs. RPC-submit `maxfeerate` (default 0.10 BTC/kvB, `0` unlimited) / `maxburnamount` (default 0) on sendraw / testmempoolaccept / submitpackage; P2P `accept_tx` uncapped. JSON-RPC array batch `len > --rpcworkqueue` is HTTP 500 when the permit is set. `getmininginfo.blockmintxfee` is `sat_btc_json` BTC/kvB. |
@@ -238,7 +239,7 @@ findings 001–022, CI split, map-free README, …) live in
 | Do | Do not |
 |----|--------|
 | Close work by **moving the Open row into Completed** in the same edit as the landing change | Leave `Status: fixed` in Open, or start a second table |
-| New item: next unused **Q-id (Q-62+)** inserted at an explicit rank | Fill historical gaps (Q-06–Q-09, Q-17–Q-19, Q-26–Q-29) or start **R-11+** |
+| New item: next unused **Q-id (Q-63+)** inserted at an explicit rank | Fill historical gaps (Q-06–Q-09, Q-17–Q-19, Q-26–Q-29) or start **R-11+** |
 | Retire a row to **Won't fix** when the product will not do it | Leave dead Open rows “for completeness” |
 | God-file peels when a higher Open row needs a seam (**R-10**) | Split `interpreter.rs` opcode `match` / io_uring machines / MPHF to beat a line count |
 | Suite: no new remine-100 / default test **&gt;2 s** without justification ([TESTING.md](../TESTING.md)) | Time the full workspace as a planning spike |
@@ -328,7 +329,7 @@ included; tree at #318):
 
 | Audience | Read |
 |----------|------|
-| Next quality slice | **Open**, rank 1 (**Q-41** Core functional `run` set). **Q-61** named extracts are Completed. Folded leftovers **Q-57–Q-60** are Completed. Residual peels: **R-10**. Next unused Q-id is **Q-62** |
+| Next quality slice | **Open**, rank 1 (**Q-41** Core functional `run` set). **Q-61** named extracts and **Q-62** IBD load IO are Completed. Folded leftovers **Q-57–Q-60** are Completed. Residual peels: **R-10**. Next unused Q-id is **Q-63** |
 | Peer full nodes | [`peer-clients.md`](./peer-clients.md) — Hornet / satd notes; not a fourth backlog |
 | Release engineering | **Q-20**, **Q-21**, **Q-23** (completed) |
 | Security / adversarial | Protect Q-01–Q-02; **Q-30** completed |
