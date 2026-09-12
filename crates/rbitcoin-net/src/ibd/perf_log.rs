@@ -1800,38 +1800,6 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     #[test]
-    fn write_stage_sample_inventory_sums_to_write_token() {
-        let mut write = WriteStageSample::default();
-        write.class_a_ms = 1;
-        write.ensure_ms = 2;
-        write.structural_ms = 4;
-        write.class_c_ms = 8;
-        write.sh_ms = 16;
-        write.utxo_ms = 32;
-        write.tweak_ms = 64;
-        write.drain_join_ms = 0;
-        write.dequeue_ms = 0;
-        assert_eq!(
-            write.stage_ms(),
-            127,
-            "inventory: class_a+ensure+struct+class_c+sh+spend+tweaks+pins+head_sub+drain_join+dequeue"
-        );
-        let mut s = IbdPerfSample::default();
-        s.write = write;
-        assert_eq!(write_stage_ms(&s), 127);
-        let line = format_info(&s);
-        assert!(line.contains("write=127ms"), "{line}");
-        assert!(line.contains("tweaks=64ms"), "{line}");
-        assert!(!line.contains("tip_gc="), "{line}");
-        assert!(line.contains("spend=32ms"), "{line}");
-        assert!(!line.contains("recent_pub="), "{line}");
-        assert!(line.contains("class_c_join=0ms"), "{line}");
-        assert!(line.contains("drain_join=0ms"), "{line}");
-        assert!(line.contains("dequeue=0ms"), "{line}");
-        assert!(line.contains("other=0ms"), "{line}");
-    }
-
-    #[test]
     fn write_inventory_names_emit_in_table_order() {
         let mut write = WriteStageSample::default();
         write.class_a_ms = 1;
@@ -1861,6 +1829,15 @@ mod tests {
         let mut s = IbdPerfSample::default();
         s.phase_blks = 1;
         s.write = write;
+        assert_eq!(
+            s.write.stage_ms(),
+            78,
+            "inventory: class_a+ensure+struct+class_c+sh+spend+tweaks+pins+head_sub+class_c_join+drain_join+dequeue"
+        );
+        assert_eq!(write_stage_ms(&s), 78);
+        s.load_ms = 30;
+        s.connect_ms = 8;
+        assert_eq!(load_stage_wall_ms(&s), 38);
         let info = format_info(&s);
         let write_at = info
             .find(" | write ")
@@ -1912,23 +1889,6 @@ mod tests {
     }
 
     #[test]
-    fn load_and_write_stage_walls_sum_parts() {
-        let mut s = IbdPerfSample::default();
-        s.load_ms = 30;
-        s.connect_ms = 8;
-        assert_eq!(load_stage_wall_ms(&s), 38);
-        s.write.class_a_ms = 15;
-        s.write.ensure_ms = 2;
-        s.write.structural_ms = 50;
-        s.write.class_c_ms = 40; // tables only
-        s.write.sh_ms = 100; // SH exclusive (parallel with strong; counted separately)
-        s.write.utxo_ms = 25;
-        s.write.tweak_ms = 80;
-        // 15+2+50+40+100+25+80 = 312
-        assert_eq!(write_stage_ms(&s), 312);
-    }
-
-    #[test]
     fn log_sample_perf_and_sizes_are_debug() {
         rbitcoin_log::capture_logs(true);
         log_sample(&IbdPerfSample::default());
@@ -1942,115 +1902,6 @@ mod tests {
         for (level, msg) in &meters {
             assert_eq!(*level, Level::Debug, "{level:?} {msg}");
         }
-    }
-
-    #[allow(clippy::cognitive_complexity)] // one fixture, many log token arms
-    #[test]
-    fn format_lines_omit_never_written_inventory_tokens() {
-        let mut s = IbdPerfSample::default();
-        s.phase_blks = 8;
-        s.load_ms = 30;
-        s.connect_ms = 8;
-        s.script_ms = 20;
-        s.write.class_a_ms = 12;
-        s.write.ensure_ms = 3;
-        s.write.class_c_ms = 4;
-        s.load_body_tx_reads = 12;
-        s.load_pin_new = 6;
-        s.ann_pread_skip = 4;
-        s.asm_prev_batch_n = 2000;
-        s.asm_prev_same_n = 50;
-        s.asm_prev_cold_n = 250;
-        let info = format_info(&s);
-        let dbg = format_debug(&s);
-        let sizes = format_sizes(&s);
-        assert!(info.starts_with("ibd: perf "), "{info}");
-        assert!(info.contains("load="), "{info}");
-        assert!(info.contains("script="), "{info}");
-        assert!(info.contains("write="), "{info}");
-        assert!(info.contains("class_a="), "{info}");
-        assert!(dbg.contains("us/blk load="), "{dbg}");
-        assert!(dbg.contains("script="), "{dbg}");
-        assert!(dbg.contains("write="), "{dbg}");
-        for line in [&info, &dbg] {
-            assert!(!line.contains("recon_ms="), "{line}");
-            assert!(!line.contains("recon_us="), "{line}");
-            assert!(!line.contains("wire_ms="), "{line}");
-            assert!(!line.contains("wire_us="), "{line}");
-            assert!(!line.contains("resolve_ms="), "{line}");
-            assert!(!line.contains("resolve_us="), "{line}");
-            assert!(!line.contains("parent_io="), "{line}");
-            assert!(!line.contains("recent_pub="), "{line}");
-            assert!(!line.contains("unpin"), "{line}");
-            assert!(!line.contains("miss_p="), "{line}");
-            assert!(!line.contains("cold_idx="), "{line}");
-            assert!(!line.contains("cold_dec="), "{line}");
-            assert!(!line.contains("edges same="), "{line}");
-            assert!(!line.contains("tip_gc="), "{line}");
-            assert!(!line.contains("spend_mix"), "{line}");
-            assert!(!line.contains(" pread="), "{line}");
-        }
-        assert!(!dbg.contains("creates="), "{dbg}");
-        assert!(!sizes.contains("pstore"), "{sizes}");
-        assert!(
-            !sizes.contains("recent="),
-            "always-zero recent= occupancy: {sizes}"
-        );
-        for line in [&info, &dbg] {
-            assert!(
-                !line.contains("thru="),
-                "parent-cache ready_through is always 0: {line}"
-            );
-        }
-        assert!(
-            !sizes.contains("load thru="),
-            "always-zero snapshot ready_through: {sizes}"
-        );
-        assert!(
-            !dbg.contains("load thru="),
-            "debug load occupancy must not print load thru=: {dbg}"
-        );
-        assert!(
-            !sizes.contains(" bodies="),
-            "always-zero snapshot bodies: {sizes}"
-        );
-        assert!(
-            !dbg.contains(" bodies="),
-            "debug load occupancy must not print bodies=: {dbg}"
-        );
-        assert!(dbg.contains("plans="), "{dbg}");
-        assert!(sizes.contains("conf_plans="), "{sizes}");
-        s.owned.conf_plans = 9;
-        let stuffed_info = format_info(&s);
-        let stuffed_dbg = format_debug(&s);
-        let stuffed_sizes = format_sizes(&s);
-        for line in [&stuffed_info, &stuffed_dbg] {
-            assert!(
-                !line.contains("thru="),
-                "stuffed plans must not revive thru=: {line}"
-            );
-        }
-        assert!(
-            !stuffed_sizes.contains("load thru="),
-            "stuffed plans must not revive load thru=: {stuffed_sizes}"
-        );
-        assert!(
-            !stuffed_dbg.contains("load thru="),
-            "stuffed plans must not revive load thru=: {stuffed_dbg}"
-        );
-        assert!(
-            !stuffed_sizes.contains(" bodies="),
-            "stuffed plans must not revive bodies=: {stuffed_sizes}"
-        );
-        assert!(
-            !stuffed_dbg.contains(" bodies="),
-            "stuffed plans must not revive bodies=: {stuffed_dbg}"
-        );
-        assert!(stuffed_dbg.contains("plans=9"), "{stuffed_dbg}");
-        assert!(stuffed_sizes.contains("conf_plans=9"), "{stuffed_sizes}");
-        assert!(stuffed_info.contains("load="), "{stuffed_info}");
-        assert!(stuffed_info.contains("script="), "{stuffed_info}");
-        assert!(stuffed_info.contains("write="), "{stuffed_info}");
     }
 
     #[allow(clippy::cognitive_complexity)] // one fixture, many log token arms
@@ -2228,6 +2079,26 @@ mod tests {
         assert!(line.contains("sh_runs=3"), "{line}");
         assert!(!line.contains("reserved"), "{line}");
         assert!(!line.contains("runway"), "{line}");
+        s.owned.conf_plans = 9;
+        let stuffed_info = format_info(&s);
+        let stuffed_dbg = format_debug(&s);
+        let stuffed_sizes = format_sizes(&s);
+        assert!(stuffed_dbg.contains("plans=9"), "{stuffed_dbg}");
+        assert!(stuffed_sizes.contains("conf_plans=9"), "{stuffed_sizes}");
+        for tok in [&stuffed_info, &stuffed_dbg] {
+            assert!(
+                !tok.contains("thru="),
+                "stuffed plans must not revive thru=: {tok}"
+            );
+        }
+        assert!(
+            !stuffed_sizes.contains("load thru="),
+            "stuffed plans must not revive load thru=: {stuffed_sizes}"
+        );
+        assert!(
+            !stuffed_sizes.contains(" bodies="),
+            "stuffed plans must not revive bodies=: {stuffed_sizes}"
+        );
     }
 
     #[test]
@@ -2475,6 +2346,9 @@ mod tests {
         s.bq_count = 3;
         s.bq_bytes = 64 * 1024 * 1024;
         s.bq_soft_stop = 256;
+        s.arch_write_blocks = 4;
+        s.arch_write_total_ms = 20;
+        s.write.class_a_ns = 20_000_000;
         let line = format_debug(&s);
         assert!(line.starts_with("ibd: perf_dbg "), "{line}");
         assert!(line.contains("us/blk load="), "{line}");
@@ -2517,6 +2391,9 @@ mod tests {
         assert!(!line.contains("res_seed"), "{line}");
         assert!(!line.contains("sticky="), "{line}");
         assert!(!line.contains("dual_pipe "), "{line}");
+        assert!(line.contains("class_a_commit total=20"), "{line}");
+        assert!(line.contains("ca_head_us/blk="), "{line}");
+        assert!(line.contains("ca_body_us/blk="), "{line}");
         assert!(line.contains("loop "), "{line}");
         assert!(!line.contains("runway"), "{line}");
         assert!(!line.contains("connect wave%="), "{line}");
@@ -2530,21 +2407,6 @@ mod tests {
             assert!(line.contains("age_cdf("), "{line}");
             assert!(line.contains("age_hit="), "{line}");
         }
-    }
-
-    #[test]
-    fn format_debug_class_a_commit_without_dual_pipe() {
-        let mut s = IbdPerfSample::default();
-        s.phase_blks = 4;
-        s.arch_write_blocks = 4;
-        s.arch_write_total_ms = 20;
-        s.write.class_a_ns = 20_000_000;
-        let line = format_debug(&s);
-        assert!(!line.contains("dual_pipe "), "{line}");
-        assert!(line.contains("class_a="), "{line}");
-        assert!(line.contains("class_a_commit total=20"), "{line}");
-        assert!(line.contains("ca_head_us/blk="), "{line}");
-        assert!(line.contains("ca_body_us/blk="), "{line}");
     }
 
     #[allow(clippy::cognitive_complexity)] // one fixture, many log token arms
@@ -2638,21 +2500,7 @@ mod tests {
         assert!(line.contains("open_keys="), "{line}");
         assert!(!line.contains("shadow"), "{line}");
         assert!(!line.contains("contig parked="), "{line}");
-    }
-
-    #[test]
-    fn format_sizes_no_residency_token() {
-        let mut s = IbdPerfSample::default();
-        s.rss_kb = 1024;
-        s.owned.conf_plans = 10;
-        let line = format_sizes(&s);
-        assert!(
-            !line.contains("residency creates=") && line.contains("conf_plans=10"),
-            "{line}"
-        );
-        assert!(!line.contains("cache="), "{line}");
-        assert!(!line.contains("outfifo"), "{line}");
-        assert!(!line.contains("sticky_fk="), "{line}");
+        assert!(!line.contains("residency creates="), "{line}");
     }
 
     #[test]

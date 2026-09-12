@@ -1431,6 +1431,36 @@ fn three_stage_confirm_and_parent_pin_surface() {
     assert_eq!(q.tip_height(), Some(Height(spend_h)));
     assert!(q.is_outpoint_spent(cb1.as_byte_array(), 0).unwrap());
 
+    let write = q.confirm_stats().last_write_phases();
+    assert!(
+        write.n_blocks as usize >= run.len(),
+        "write meter must name the batch: {write:?}"
+    );
+    assert!(write.wall_ns > 0, "write wall must move: {write:?}");
+    let pin = q.confirm_stats().last_pin_phases();
+    assert!(
+        pin.pin_plan_n > 0 || pin.pin_new_n > 0,
+        "load pin meter must move: {pin:?}"
+    );
+    let w = q.confirm_stats().take_window();
+    assert!(
+        w.phase_blocks >= run.len() as u64,
+        "phase_blocks must count the run: {}",
+        w.phase_blocks
+    );
+    assert!(
+        w.load_blocks >= run.len() as u64,
+        "load_blocks must count the run: {}",
+        w.load_blocks
+    );
+    assert!(
+        w.script_jobs > 0 || w.script_ns > 0 || w.script_skip_mempool > 0,
+        "script meter must move: jobs={} ns={} skip={}",
+        w.script_jobs,
+        w.script_ns,
+        w.script_skip_mempool
+    );
+
     // Tip advance prunes plans/headers ≤ tip (body LRU retains under budget).
     q.advance_parent_cache_tip(spend_h);
     // Combined load entry on empty: reject empty.

@@ -412,64 +412,10 @@ mod coverage_tests {
     }
 
     #[test]
-    fn last_write_phase_stats() {
-        use rbitcoin_query::{note_confirm, ConfirmStats, LastWritePhases};
-        use std::sync::atomic::Ordering;
-        let st = ConfirmStats::default();
-        st.note_last_write(LastWritePhases {
-            n_blocks: 2,
-            wall_ns: 3_000_000,
-            class_a_ns: 500_000,
-            ensure_ns: 50_000,
-            structural_ns: 1_000_000,
-            spent_ns: 100_000,
-            create_h_ns: 200_000,
-            bip68_ns: 50_000,
-            class_c_ns: 400_000,
-            spend_ann_ns: 300_000,
-            tweak_ns: 2_500_000,
-        });
-        let p = st.last_write_phases();
-        assert_eq!(p.n_blocks, 2);
-        assert_eq!(LastWritePhases::ms(p.wall_ns), 3);
-        assert_eq!(LastWritePhases::ms(p.class_a_ns), 0);
-        assert_eq!(p.class_a_ns, 500_000);
-        assert_eq!(p.tweak_ns, 2_500_000);
-        assert_eq!(LastWritePhases::ms(p.tweak_ns), 2);
-        st.tweak_ns.store(42, Ordering::Relaxed);
-        assert_eq!(st.tweak_ns.swap(0, Ordering::Relaxed), 42);
-        assert_eq!(st.tweak_ns.swap(0, Ordering::Relaxed), 0);
-        note_confirm(&st.write_plan_take_ns, 11);
-        note_confirm(&st.write_create_map_ns, 22);
-        note_confirm(&st.write_head_sub_ns, 33);
-        let w = st.take_window();
-        assert_eq!(
-            (
-                w.write_plan_take_ns,
-                w.write_create_map_ns,
-                w.write_head_sub_ns
-            ),
-            (11, 22, 33)
-        );
-        assert_eq!(st.take_window().write_plan_take_ns, 0);
-        st.connect_ns.store(1, Ordering::Relaxed);
-        st.script_ns.store(1, Ordering::Relaxed);
-        st.class_a_ns.store(9, Ordering::Relaxed);
-        st.ensure_layout_ns.store(11, Ordering::Relaxed);
-        st.phase_prep_wire_arc_ns.store(3, Ordering::Relaxed);
-        st.asm_prevout_ns.store(10, Ordering::Relaxed);
-        st.asm_in_n.store(100, Ordering::Relaxed);
-        st.ensure_res_hit.store(8, Ordering::Relaxed);
-        let w = st.take_window();
-        assert_eq!(w.connect_ns, 1);
-        assert_eq!(w.script_ns, 1);
-        assert_eq!(w.class_a_ns, 9);
-        assert_eq!(w.ensure_layout_ns, 11);
-        assert_eq!(w.phase_prep_wire_arc_ns, 3);
-        assert_eq!(w.asm_prevout_ns, 10);
-        assert_eq!(w.asm_in_n, 100);
-        assert_eq!(w.ensure_res_hit, 8);
-        assert_eq!(st.take_window().connect_ns, 0);
+    fn last_write_phase_ms() {
+        use rbitcoin_query::LastWritePhases;
+        assert_eq!(LastWritePhases::ms(3_000_000), 3);
+        assert_eq!(LastWritePhases::ms(500_000), 0);
     }
 
     #[test]

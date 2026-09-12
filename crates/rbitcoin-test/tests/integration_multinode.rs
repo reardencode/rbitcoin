@@ -72,6 +72,11 @@ async fn two_node_header_and_block_sync() {
         // IBD confirm writes Class C tip; RAM BlockCache may stay cold.
         assert_eq!(peer.query.tip_height(), Some(Height(8)));
         assert_eq!(peer.hub.tip_hash().unwrap(), seed.hub.tip_hash().unwrap());
+        let write = peer.query.confirm_stats().last_write_phases();
+        assert!(
+            write.n_blocks >= 1,
+            "IBD write meter must move on the peer: {write:?}"
+        );
 
         seed.shutdown().await;
         peer.shutdown().await;
