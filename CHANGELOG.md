@@ -111,7 +111,12 @@ before 1.0).
 
 ### Changed
 
-- **IBD worker log:** startup no longer claims a dedicated archive prep/writer
+- **Journey-first tests:** `header_and_spending_boundaries` is the one connect
+  pin for MTP, immature coinbase, `in < out`, subsidy+1, same-block double
+  spend, and parent/child order (skinny remine twins removed). Electrum TCP
+  journeys cover confirmed history `fee` omit, scripthash subscribe notify,
+  subscribe cap/unsubscribe, leftover mempool, and connection/idle caps.
+
   pair. Body queue is in-process; confirm is lookup+load+scripts+write OS
   threads.
 - **RPC / CLI honesty (Q-59 rest):** `gettxout` default `include_mempool`
