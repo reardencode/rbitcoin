@@ -27,11 +27,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
 /// Packed dirty generation: `0` is clean. `set` bumps; flush CASes back to `0`.
+pub(crate) fn dirty_epoch_next(e: u64) -> u64 {
+    e.wrapping_add(1).max(1)
+}
+
 pub(crate) fn dirty_epoch_bump(epoch: &AtomicU64) {
-    let prev = epoch.fetch_add(1, Ordering::Release);
-    if prev == u64::MAX {
-        epoch.store(1, Ordering::Release);
-    }
+    let _ = epoch.fetch_update(Ordering::Release, Ordering::Relaxed, |e| {
+        Some(dirty_epoch_next(e))
+    });
 }
 
 pub(crate) fn dirty_epoch_try_clean(epoch: &AtomicU64, e0: u64) -> bool {
@@ -348,6 +351,18 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn dirty_epoch_next_never_returns_clean() {
+        assert_eq!(dirty_epoch_next(0), 1);
+        assert_eq!(dirty_epoch_next(1), 2);
+        assert_eq!(dirty_epoch_next(u64::MAX - 1), u64::MAX);
+        assert_eq!(dirty_epoch_next(u64::MAX), 1);
+        let e = AtomicU64::new(u64::MAX);
+        dirty_epoch_bump(&e);
+        assert_ne!(e.load(Ordering::Acquire), 0);
+        assert_eq!(e.load(Ordering::Acquire), 1);
     }
 
     #[test]
