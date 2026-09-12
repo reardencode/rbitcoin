@@ -85,6 +85,7 @@ impl Mempool {
     pub fn open_or_create(dir: impl Into<PathBuf>) -> Result<Self, MempoolError> {
         let dir = dir.into();
         fs::create_dir_all(&dir).map_err(|e| MempoolError::io(&dir, e))?;
+        finish_pending_compact(&dir)?;
 
         let meta_path = dir.join("meta");
         let slots_path = dir.join("slots");
@@ -289,7 +290,7 @@ impl Mempool {
         self.body = new_body;
         self.slots = new_slots;
         self.live_count = next_slot;
-        self.persist_all()?;
+        self.install_packed_images()?;
         self.dirty_ops = 0;
         Ok((self.live_count, logical))
     }
@@ -402,20 +403,26 @@ impl Mempool {
         Ok(logical as u64)
     }
 
-    /// Write meta + slots + body images to sidecar files (no fsync).
+    /// Write body, then LIVE slots, then meta (no fsync).
+    ///
+    /// Append-safe: a crash after a grown body and before new slots loses admits;
+    /// old LIVE ranges stay a prefix of the new body. Packed compact must not
+    /// use this order (see [`Self::install_packed_images`]).
     fn persist_all(&mut self) -> Result<(), MempoolError> {
         let meta_path = self.dir.join("meta");
         let slots_path = self.dir.join("slots");
         let body_path = self.dir.join("tx.body");
 
-        let mut meta = [0u8; META_LEN];
-        write_meta_bytes(&mut meta, self.generation, self.slot_cap, self.live_count);
-        self.meta_file
+        let logical = body_logical_len(&self.body)?;
+        self.body_file
+            .set_len(logical as u64)
+            .map_err(|e| MempoolError::io(&body_path, e))?;
+        self.body_file
             .seek(SeekFrom::Start(0))
-            .map_err(|e| MempoolError::io(&meta_path, e))?;
-        self.meta_file
-            .write_all(&meta)
-            .map_err(|e| MempoolError::io(&meta_path, e))?;
+            .map_err(|e| MempoolError::io(&body_path, e))?;
+        self.body_file
+            .write_all(&self.body[..logical])
+            .map_err(|e| MempoolError::io(&body_path, e))?;
 
         let slots_need = self.slots.len() as u64;
         self.slots_file
@@ -428,17 +435,47 @@ impl Mempool {
             .write_all(&self.slots)
             .map_err(|e| MempoolError::io(&slots_path, e))?;
 
-        // Persist only published logical body (not spare capacity).
-        let logical = body_logical_len(&self.body)?;
-        self.body_file
-            .set_len(logical as u64)
-            .map_err(|e| MempoolError::io(&body_path, e))?;
-        self.body_file
+        let mut meta = [0u8; META_LEN];
+        write_meta_bytes(&mut meta, self.generation, self.slot_cap, self.live_count);
+        self.meta_file
             .seek(SeekFrom::Start(0))
+            .map_err(|e| MempoolError::io(&meta_path, e))?;
+        self.meta_file
+            .write_all(&meta)
+            .map_err(|e| MempoolError::io(&meta_path, e))?;
+        Ok(())
+    }
+
+    /// Packed body+slots: both tmps `sync_all`'d, then rename body then slots.
+    ///
+    /// Open finishes a crash after the body rename (`slots.tmp` still present).
+    fn install_packed_images(&mut self) -> Result<(), MempoolError> {
+        let body_path = self.dir.join("tx.body");
+        let slots_path = self.dir.join("slots");
+        let body_tmp = self.dir.join("tx.body.tmp");
+        let slots_tmp = self.dir.join("slots.tmp");
+        let logical = body_logical_len(&self.body)?;
+        write_file_synced(&body_tmp, &self.body[..logical])?;
+        write_file_synced(&slots_tmp, &self.slots)?;
+        fs::rename(&body_tmp, &body_path).map_err(|e| MempoolError::io(&body_path, e))?;
+        fs::rename(&slots_tmp, &slots_path).map_err(|e| MempoolError::io(&slots_path, e))?;
+        self.reopen_body_slots()?;
+        self.persist_all()
+    }
+
+    fn reopen_body_slots(&mut self) -> Result<(), MempoolError> {
+        let body_path = self.dir.join("tx.body");
+        let slots_path = self.dir.join("slots");
+        self.body_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&body_path)
             .map_err(|e| MempoolError::io(&body_path, e))?;
-        self.body_file
-            .write_all(&self.body[..logical])
-            .map_err(|e| MempoolError::io(&body_path, e))?;
+        self.slots_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&slots_path)
+            .map_err(|e| MempoolError::io(&slots_path, e))?;
         Ok(())
     }
 }
@@ -452,6 +489,32 @@ fn body_logical_len(body: &[u8]) -> Result<usize, MempoolError> {
         return Err(MempoolError::Corrupt("body logical len"));
     }
     Ok(n)
+}
+
+fn write_file_synced(path: &Path, bytes: &[u8]) -> Result<(), MempoolError> {
+    let mut f = File::create(path).map_err(|e| MempoolError::io(path, e))?;
+    f.write_all(bytes).map_err(|e| MempoolError::io(path, e))?;
+    f.sync_all().map_err(|e| MempoolError::io(path, e))?;
+    Ok(())
+}
+
+fn finish_pending_compact(dir: &Path) -> Result<(), MempoolError> {
+    let body_tmp = dir.join("tx.body.tmp");
+    let slots_tmp = dir.join("slots.tmp");
+    match (body_tmp.exists(), slots_tmp.exists()) {
+        (true, true) => {
+            let _ = fs::remove_file(&body_tmp);
+            let _ = fs::remove_file(&slots_tmp);
+        }
+        (false, true) => {
+            fs::rename(&slots_tmp, dir.join("slots")).map_err(|e| MempoolError::io(dir, e))?;
+        }
+        (true, false) => {
+            let _ = fs::remove_file(&body_tmp);
+        }
+        (false, false) => {}
+    }
+    Ok(())
 }
 
 fn open_or_init_meta(path: &Path) -> Result<(File, u64, u32, u32), MempoolError> {
@@ -599,6 +662,24 @@ mod tests {
 
     fn tmp_dir() -> rbitcoin_store::testutil::TempDir {
         rbitcoin_store::testutil::TempDir::labeled("mempool").unwrap()
+    }
+
+    fn tiny_raw() -> Vec<u8> {
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint::null(),
+                script_sig: bitcoin::ScriptBuf::new(),
+                sequence: bitcoin::Sequence::MAX,
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(1),
+                script_pubkey: bitcoin::ScriptBuf::new(),
+            }],
+        };
+        bitcoin::consensus::encode::serialize(&tx)
     }
 
     #[test]
@@ -780,6 +861,95 @@ mod tests {
         assert_eq!(mp.live_count(), tiny + 1);
         // Must not be the old Corrupt message.
         assert!(!format!("{:?}", MempoolError::Full).contains("corrupt"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persist_new_body_old_slots_reopens() {
+        let dir = tmp_dir();
+        let mut mp = Mempool::open_or_create(&dir).unwrap();
+        let raw = tiny_raw();
+        let t1 = Txid::from_byte_array([0x01; 32]);
+        mp.append_live_tx(&raw, &t1, 1, 400)
+            .unwrap();
+        mp.flush().unwrap();
+        let slots_first = fs::read(dir.join("slots")).unwrap();
+        let t2 = Txid::from_byte_array([0x02; 32]);
+        mp.append_live_tx(&raw, &t2, 1, 400)
+            .unwrap();
+        mp.flush().unwrap();
+        drop(mp);
+        fs::write(dir.join("slots"), &slots_first).unwrap();
+        let mp = Mempool::open_or_create(&dir).unwrap();
+        let live = mp.load_live_txs().expect("new body + old slots must load");
+        assert!(live.len() <= 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_slots_old_short_body_is_corrupt() {
+        let dir = tmp_dir();
+        let mut mp = Mempool::open_or_create(&dir).unwrap();
+        let raw = tiny_raw();
+        let t1 = Txid::from_byte_array([0x01; 32]);
+        mp.append_live_tx(&raw, &t1, 1, 400)
+            .unwrap();
+        mp.flush().unwrap();
+        let body_first = fs::read(dir.join("tx.body")).unwrap();
+        let t2 = Txid::from_byte_array([0x02; 32]);
+        mp.append_live_tx(&raw, &t2, 1, 400)
+            .unwrap();
+        mp.flush().unwrap();
+        drop(mp);
+        fs::write(dir.join("tx.body"), body_first).unwrap();
+        let mp = Mempool::open_or_create(&dir).unwrap();
+        match mp.load_live_txs() {
+            Err(MempoolError::Corrupt(m)) => {
+                assert!(m.contains("live slot body range"), "{m}");
+            }
+            other => panic!("expected live slot body range, got {other:?}"),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compact_crash_after_body_rename_finishes_slots() {
+        let dir = tmp_dir();
+        let mut mp = Mempool::open_or_create(&dir).unwrap();
+        let raw = tiny_raw();
+        let t1 = Txid::from_byte_array([0x01; 32]);
+        mp.append_live_tx(&raw, &t1, 1, 400)
+            .unwrap();
+        mp.flush().unwrap();
+        let slots_unpacked = fs::read(dir.join("slots")).unwrap();
+        mp.mark_slot_dead(0).unwrap();
+        let t2 = Txid::from_byte_array([0x02; 32]);
+        mp.append_live_tx(&raw, &t2, 1, 400)
+            .unwrap();
+        mp.flush().unwrap();
+        mp.compact().unwrap();
+        let slots_packed = fs::read(dir.join("slots")).unwrap();
+        drop(mp);
+        fs::write(dir.join("slots"), &slots_unpacked).unwrap();
+        fs::write(dir.join("slots.tmp"), &slots_packed).unwrap();
+        let mp = Mempool::open_or_create(&dir).unwrap();
+        assert!(!dir.join("slots.tmp").exists());
+        mp.load_live_txs().expect("open must finish slots.tmp");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compact_both_tmps_discarded_on_open() {
+        let dir = tmp_dir();
+        let mut mp = Mempool::open_or_create(&dir).unwrap();
+        mp.flush().unwrap();
+        drop(mp);
+        fs::copy(dir.join("tx.body"), dir.join("tx.body.tmp")).unwrap();
+        fs::copy(dir.join("slots"), dir.join("slots.tmp")).unwrap();
+        let mp = Mempool::open_or_create(&dir).unwrap();
+        assert!(!dir.join("tx.body.tmp").exists());
+        assert!(!dir.join("slots.tmp").exists());
+        mp.load_live_txs().unwrap();
         let _ = fs::remove_dir_all(&dir);
     }
 }
