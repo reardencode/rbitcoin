@@ -501,6 +501,7 @@ pub(super) fn ensure_spend_abs_layouts(
         .copied()
         .filter(|&id| batch_parents.contains(rbitcoin_primitives::Fk(id)))
         .collect();
+    let first_stamped: U64Set = first.iter().copied().collect();
     stamp_spent_ranges(query, batch_parents, first)?;
 
     let mut ensure_res = 0u64;
@@ -585,6 +586,9 @@ pub(super) fn ensure_spend_abs_layouts(
             .keys()
             .copied()
             .filter(|&id| {
+                if first_stamped.contains(&id) {
+                    return false;
+                }
                 let fk = rbitcoin_primitives::Fk(id);
                 batch_parents.contains(fk) && !batch_parents.has_abs_layout(fk)
             })
