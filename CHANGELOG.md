@@ -23,6 +23,9 @@ before 1.0).
 - **Same-block coinbase maturity:** a later tx in the same block that spends
   the coinbase is `coinbase immature` (Core `nHeight < coinbaseHeight + 100`).
   Structural spentness used to skip NULL (same-block) creates.
+- **IBD `lookup_taken_hi` rewind:** merkle/witness SoftWire, Cascade,
+  EngineFault, and ConsensusInvalid rewind the lookup consume high-water to
+  the confirmed tip so densify can re-getdata. Previously only BadPrev did.
 - **IBD session-fault resume:** after Class C, a uring session fault on spend
   annotate or `tx.head` drain finishes annotate+drain on the write thread
   (tip `connect_at` retries `finish_post_commit`; IBD does the same in place
