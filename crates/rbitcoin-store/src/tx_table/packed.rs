@@ -726,10 +726,9 @@ pub fn visit_packed_script_hashes(
 
 /// Sparse pin decode: only materialize `need_vouts` scripts + denserel slots.
 ///
-/// Walks the full packed layout (inputs skipped, non-need outs skipped without
-/// script alloc). Returns `(meta, live outs as (vout, rec), sparse denserels
-/// as (vout, rel))`. `need_vouts` should be sorted unique; empty = all outs
-/// (same as full denserels decode).
+/// Non-empty `need_vouts` (sorted unique) walks through the last needed vout
+/// and returns; later outs and trailing pad are not required. Empty need
+/// walks every out and checks trailing zero pad (same as full denserels).
 pub fn decode_packed_tx_need_outs_with_spender_rels_secret(
     raw: &[u8],
     need_vouts: &[u32],
@@ -761,6 +760,9 @@ pub fn decode_packed_tx_need_outs_with_spender_rels_secret(
             sparse.push((vout, rel));
             if !take_all {
                 need_i = need_i.saturating_add(1);
+                if need_i == need_vouts.len() {
+                    return Ok((meta, live, sparse));
+                }
             }
         } else {
             off += OutputRecord::skip_at(&raw[off..])?;
@@ -841,5 +843,61 @@ mod scan_p2tr_tests {
         let meta_n = TxRecord::decode_body_meta(&raw).unwrap().1;
         let dec = OutputRecord::decode_at_secret(&raw[meta_n..], None).unwrap_err();
         assert!(format!("{dec}").contains("output value too large"), "{dec}");
+    }
+
+    fn three_out_packed() -> (Vec<u8>, usize) {
+        let tx = TxRecord {
+            txid: [0x11u8; 32],
+            version: 1,
+            locktime: 0,
+            input_start_fk: Fk::NULL,
+            input_count: 1,
+            output_start_fk: Fk::NULL,
+            output_count: 3,
+        };
+        let inputs = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
+        let outputs = vec![
+            OutputRecord::unspent(1, vec![0x51]),
+            OutputRecord::unspent(2, vec![0x52; 80]),
+            OutputRecord::unspent(3, vec![0x53; 80]),
+        ];
+        let mut raw = Vec::new();
+        encode_packed_tx(&tx, &inputs, &outputs, &mut raw);
+        let (_, mut off) = TxRecord::decode_body_meta(&raw).unwrap();
+        off += OutputRecord::skip_at(&raw[off..]).unwrap();
+        (raw, off)
+    }
+
+    #[test]
+    fn decode_packed_tx_need_outs_truncated_after_last_need() {
+        let (raw, after_vout0) = three_out_packed();
+        let truncated = &raw[..after_vout0];
+        let (meta, live, sparse) =
+            decode_packed_tx_need_outs_with_spender_rels_secret(truncated, &[0], None).unwrap();
+        assert_eq!(meta.output_count, 3);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].0, 0);
+        assert_eq!(live[0].1.script, vec![0x51]);
+        assert_eq!(sparse.len(), 1);
+        assert_eq!(sparse[0].0, 0);
+        let empty_need = decode_packed_tx_need_outs_with_spender_rels_secret(truncated, &[], None);
+        assert!(
+            empty_need.is_err(),
+            "empty need still requires a full outs walk"
+        );
+    }
+
+    #[test]
+    fn decode_packed_tx_need_outs_empty_need_still_pad_checks() {
+        let (mut raw, _) = three_out_packed();
+        raw.push(0x01);
+        let err = decode_packed_tx_need_outs_with_spender_rels_secret(&raw, &[], None).unwrap_err();
+        assert!(format!("{err}").contains("trailing non-zero"), "{err}");
+        let (meta, live, _) =
+            decode_packed_tx_need_outs_with_spender_rels_secret(&raw[..raw.len() - 1], &[0], None)
+                .unwrap();
+        assert_eq!(meta.output_count, 3);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].0, 0);
     }
 }
