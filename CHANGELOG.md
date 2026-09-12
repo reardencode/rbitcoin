@@ -13,9 +13,11 @@ before 1.0).
 
 - **IBD io_uring drain stall:** `drain_all` no longer returns after 5 s with
   leftover SQEs (that freed in-flight buffers). Every TLS session waits while
-  CQEs arrive; a 120 s zero-completion stall aborts. Write/lookup recover once
-  per 1000 heights instead of a 19h warn loop. Restart with `RBITCOIN_IO=pread`
-  if completions cannot complete. [`OPERATOR.md`](OPERATOR.md)
+  CQEs arrive; a 120 s zero-completion stall aborts explicit drain (session
+  `Drop` does not abort). Write/lookup/load/scripts and tip-connect recover once
+  per 1000 heights (credit only; Class C leftover waits for open repair)
+  instead of a 19h warn loop. Restart with `RBITCOIN_IO=pread` if completions
+  cannot complete. [`OPERATOR.md`](OPERATOR.md)
   / [`docs/io-modality.md`](docs/io-modality.md).
 
 ## [0.6.0] — 2026-09-08
