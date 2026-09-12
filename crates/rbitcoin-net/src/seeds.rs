@@ -989,6 +989,23 @@ mod tests {
     }
 
     #[test]
+    fn add_learned_fills_past_getaddr_cache_pct() {
+        // Core p2p_getaddr_caching: getnodeaddresses(0) must be >
+        // MAX_ADDR_TO_SEND / (MAX_PCT_ADDR_TO_SEND/100) so a GetAddr
+        // reply can still be 1000 (23% of the book).
+        const NEED: usize = 1000 * 100 / 23;
+        let mut am = AddrMan::new();
+        for i in 0..=NEED {
+            assert!(
+                am.add_learned(addr_n(i as u32), MAX_ADDR_MAN),
+                "MAX_ADDR_MAN={} rejected insert {i} (need len > {NEED})",
+                MAX_ADDR_MAN
+            );
+        }
+        assert!(am.len() > NEED, "len={} need > {NEED}", am.len());
+    }
+
+    #[test]
     fn add_keeps_tried_and_may_exceed_cap() {
         let mut am = AddrMan::new();
         for i in 0..MAX_ADDR_MAN {
