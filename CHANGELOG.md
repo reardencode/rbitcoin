@@ -26,6 +26,16 @@ before 1.0).
 
 ### Fixed
 
+- **Compact reconstruct merkle-checks before `Ok`:** a unique short-id (or
+  `blocktxn`) fill is not a block until the txs match the compact header
+  merkle (BIP152 `FinishBlock`). Empty missing → `getdata`, not
+  `accept_branch`. `cmpct_wtxid_shortid_collision_held_fork_journey` is a
+  pre-ground v2 48-bit collision (orphan unique-match on a held fork).
+  Defense in depth: a merkle/`bad-txnmrklroot` that still reaches
+  `accept_branch` is not cached `BLOCK_FAILED` (ConnectFailed wrap used to
+  poison the hash; mainnet 966500/966501, 2026-09-11). True consensus
+  rejects (`bad-txns-inputs-missingorspent`) still mark `BLOCK_FAILED`.
+
 - **`p2p_timeouts.py --v2transport`:** VERSION handshake timeout needles are
   logged for every connecting peer (id order) before TCP teardown, and a
   pre-verack ping does not skip the `peer=0` line. Core's `assert_debug_log`

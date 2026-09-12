@@ -96,8 +96,9 @@ pub fn prefilled_absolute_indexes(hsi: &HeaderAndShortIds) -> Vec<(usize, &Trans
 
 /// Attempt to reconstruct a full block from compact data + available txs.
 ///
-/// On success returns the block. On failure returns absolute indexes still missing
-/// (for `BlockTransactionsRequest`).
+/// On success the txs merkle to `hsi.header`. Incomplete fill returns the
+/// remaining absolute indexes (`getblocktxn`). A complete fill that does not
+/// merkle (wrong unique short-id body) returns an empty vec (`getdata`).
 pub fn try_reconstruct<T: Borrow<Transaction>>(
     hsi: &HeaderAndShortIds,
     available: &HashMap<ShortId, Vec<T>>,
@@ -169,10 +170,7 @@ pub fn try_reconstruct<T: Borrow<Transaction>>(
     // for validation. Prefer version 2. If coinbase has no witness but block needs
     // it, accept_block will fail structure — caller falls back to getdata.
     let _ = version;
-    Ok(Block {
-        header: hsi.header,
-        txdata,
-    })
+    finish_reconstructed(hsi.header, txdata)
 }
 
 /// Build a `getblocktxn` request for missing absolute indexes.
@@ -189,6 +187,7 @@ pub fn missing_request(block_hash: BlockHash, missing: &[u64]) -> BlockTransacti
 /// `txn.transactions` holds the txs in the same order as the request indexes.
 /// Provided txs are placed by absolute index (not re-matched by short-id alone),
 /// so collisions cannot undo a successful `getblocktxn` response.
+/// Completes only when the filled txs merkle to `hsi.header`.
 pub fn apply_block_transactions<T: Borrow<Transaction>>(
     hsi: &HeaderAndShortIds,
     missing: &[u64],
@@ -273,10 +272,16 @@ pub fn apply_block_transactions<T: Borrow<Transaction>>(
         }
     }
     let _ = version;
-    Ok(Block {
-        header: hsi.header,
-        txdata,
-    })
+    finish_reconstructed(hsi.header, txdata)
+}
+
+/// BIP152: filled slots must merkle to the compact header (empty → getdata).
+fn finish_reconstructed(header: Header, txdata: Vec<Transaction>) -> Result<Block, Vec<u64>> {
+    let block = Block { header, txdata };
+    if !block.check_merkle_root() {
+        return Err(Vec::new());
+    }
+    Ok(block)
 }
 
 #[cfg(test)]
@@ -303,6 +308,17 @@ mod tests {
             bits: CompactTarget::from_consensus(0x207fffff),
             nonce: 0,
         }
+    }
+
+    fn sealed_block(txdata: Vec<Transaction>) -> Block {
+        let mut header = dummy_header();
+        header.merkle_root = Block {
+            header,
+            txdata: txdata.clone(),
+        }
+        .compute_merkle_root()
+        .expect("non-empty");
+        Block { header, txdata }
     }
 
     fn coinbase() -> Transaction {
@@ -346,10 +362,7 @@ mod tests {
     fn reconstruct_full_from_mempool_map() {
         let b1 = spend(1);
         let b2 = spend(2);
-        let block = Block {
-            header: dummy_header(),
-            txdata: vec![coinbase(), b1.clone(), b2.clone()],
-        };
+        let block = sealed_block(vec![coinbase(), b1.clone(), b2.clone()]);
         let hsi = HeaderAndShortIds::from_block(&block, 0xdead_beef, 2, &[]).unwrap();
         // Available: both non-coinbase from "mempool"
         let avail = shortid_map_from_txs(&block.header, hsi.nonce, 2, [&b1, &b2]);
@@ -362,10 +375,7 @@ mod tests {
     #[test]
     fn reconstruct_fill_keeps_matching_shortid_not_rehash() {
         let b1 = spend(1);
-        let block = Block {
-            header: dummy_header(),
-            txdata: vec![coinbase(), b1.clone()],
-        };
+        let block = sealed_block(vec![coinbase(), b1.clone()]);
         let mut hsi = HeaderAndShortIds::from_block(&block, 0xdead_beef, 2, &[]).unwrap();
         let keys = ShortId::calculate_siphash_keys(&block.header, hsi.nonce);
         let hashed = short_id_for_tx(&b1, 2, keys);
@@ -424,12 +434,45 @@ mod tests {
     }
 
     #[test]
+    fn unique_shortid_wrong_body_is_not_a_block() {
+        let b1 = spend(8);
+        let block = sealed_block(vec![coinbase(), b1.clone()]);
+        let hsi = HeaderAndShortIds::from_block(&block, 4, 2, &[]).unwrap();
+        let keys = ShortId::calculate_siphash_keys(&block.header, hsi.nonce);
+        let sid = short_id_for_tx(&b1, 2, keys);
+        let mut avail: HashMap<ShortId, Vec<&Transaction>> = HashMap::new();
+        let wrong = spend(9);
+        avail.insert(sid, vec![&wrong]);
+        let missing = try_reconstruct(&hsi, &avail, 2).expect_err("wrong unique fill");
+        assert!(
+            missing.is_empty(),
+            "merkle-mutated fill must getdata (empty missing), got {missing:?}"
+        );
+    }
+
+    #[test]
+    fn apply_blocktxn_wrong_body_is_not_a_block() {
+        let b1 = spend(10);
+        let block = sealed_block(vec![coinbase(), b1]);
+        let hsi = HeaderAndShortIds::from_block(&block, 5, 2, &[]).unwrap();
+        let empty: HashMap<ShortId, Vec<&Transaction>> = HashMap::new();
+        let missing = try_reconstruct(&hsi, &empty, 2).unwrap_err();
+        let txn = BlockTransactions {
+            block_hash: block.block_hash(),
+            transactions: vec![spend(11)],
+        };
+        let err = apply_block_transactions(&hsi, &missing, &txn, &empty, 2)
+            .expect_err("wrong blocktxn body");
+        assert!(
+            err.is_empty(),
+            "merkle-mutated blocktxn must getdata, got {err:?}"
+        );
+    }
+
+    #[test]
     fn apply_blocktxn_completes() {
         let b1 = spend(4);
-        let block = Block {
-            header: dummy_header(),
-            txdata: vec![coinbase(), b1.clone()],
-        };
+        let block = sealed_block(vec![coinbase(), b1.clone()]);
         let hsi = HeaderAndShortIds::from_block(&block, 2, 2, &[]).unwrap();
         let empty: HashMap<ShortId, Vec<&Transaction>> = HashMap::new();
         let missing = try_reconstruct(&hsi, &empty, 2).unwrap_err();
@@ -452,10 +495,7 @@ mod tests {
     fn partial_mempool_plus_blocktxn() {
         let b1 = spend(5);
         let b2 = spend(6);
-        let block = Block {
-            header: dummy_header(),
-            txdata: vec![coinbase(), b1.clone(), b2.clone()],
-        };
+        let block = sealed_block(vec![coinbase(), b1.clone(), b2.clone()]);
         let hsi = HeaderAndShortIds::from_block(&block, 3, 2, &[]).unwrap();
         // Only b1 in "mempool"
         let avail = shortid_map_from_txs(&block.header, hsi.nonce, 2, [&b1]);
@@ -473,10 +513,7 @@ mod tests {
     #[test]
     fn version1_txid_shortids_fill() {
         let b1 = spend(7);
-        let block = Block {
-            header: dummy_header(),
-            txdata: vec![coinbase(), b1.clone()],
-        };
+        let block = sealed_block(vec![coinbase(), b1.clone()]);
         let hsi = HeaderAndShortIds::from_block(&block, 4, 1, &[]).unwrap();
         let avail = shortid_map_from_txs(&block.header, hsi.nonce, 1, [&b1]);
         let recon = try_reconstruct(&hsi, &avail, 1).expect("v1 fill");
@@ -614,5 +651,164 @@ mod tests {
             try_reconstruct(&hsi, &empty_avail(), 2).unwrap_err(),
             vec![1]
         );
+    }
+
+    /// Compact siphash nonce for `cmpct_wtxid_shortid_collision_*.bin`.
+    const COLLISION_CMPCT_NONCE: u64 = 0x0C01_115E;
+    const COLLISION_STALE_TIME: u32 = 1_300_060_000;
+    const COLLISION_WINNER_TIME: u32 = 1_300_060_001;
+
+    fn collision_parents() -> (Block, Block) {
+        use rbitcoin_consensus::{genesis_block, mine_empty_regtest, ChainParams};
+        let genesis = genesis_block(&ChainParams::regtest());
+        let stale = mine_empty_regtest(genesis.block_hash(), COLLISION_STALE_TIME, 1);
+        let mut winner = mine_empty_regtest(genesis.block_hash(), COLLISION_WINNER_TIME, 1);
+        if winner.block_hash() == stale.block_hash() {
+            winner = mine_empty_regtest(genesis.block_hash(), COLLISION_WINNER_TIME + 1, 1);
+        }
+        assert_ne!(stale.block_hash(), winner.block_hash());
+        (stale, winner)
+    }
+
+    fn load_wtxid_shortid_collision() -> (Block, Transaction) {
+        let block_raw = std::fs::read(cmpct_fixture_path(
+            "cmpct_wtxid_shortid_collision_block.bin",
+        ))
+        .expect("cmpct_wtxid_shortid_collision_block.bin");
+        let collider_raw = std::fs::read(cmpct_fixture_path(
+            "cmpct_wtxid_shortid_collision_collider.bin",
+        ))
+        .expect("cmpct_wtxid_shortid_collision_collider.bin");
+        (
+            bitcoin::consensus::encode::deserialize(&block_raw).expect("block"),
+            bitcoin::consensus::encode::deserialize(&collider_raw).expect("collider"),
+        )
+    }
+
+    fn collision_hsi(block: &Block, collider: &Transaction) -> HeaderAndShortIds {
+        assert_eq!(block.txdata.len(), 2);
+        let block_tx = &block.txdata[1];
+        assert_ne!(block_tx.compute_txid(), collider.compute_txid());
+        assert_ne!(block_tx.compute_wtxid(), collider.compute_wtxid());
+        let keys = ShortId::calculate_siphash_keys(&block.header, COLLISION_CMPCT_NONCE);
+        let sid_block = ShortId::with_siphash_keys(&block_tx.compute_wtxid().to_raw_hash(), keys);
+        let sid_col = ShortId::with_siphash_keys(&collider.compute_wtxid().to_raw_hash(), keys);
+        assert_eq!(
+            sid_block, sid_col,
+            "fixture must be a v2 short-id collision"
+        );
+        let hsi = HeaderAndShortIds::from_block(block, COLLISION_CMPCT_NONCE, 2, &[]).unwrap();
+        assert_eq!(hsi.short_ids, vec![sid_block]);
+        hsi
+    }
+
+    fn assert_collider_fill_getdata<T: std::borrow::Borrow<Transaction>>(
+        hsi: &HeaderAndShortIds,
+        avail: &HashMap<ShortId, Vec<T>>,
+    ) {
+        let missing = try_reconstruct(hsi, avail, 2).expect_err("collider unique fill");
+        assert!(
+            missing.is_empty(),
+            "48-bit unique fill must getdata, got {missing:?}"
+        );
+    }
+
+    fn mutated_collision_body(block: &Block, collider: &Transaction) -> Block {
+        let mutated = Block {
+            header: block.header,
+            txdata: vec![block.txdata[0].clone(), collider.clone()],
+        };
+        assert_eq!(mutated.block_hash(), block.block_hash());
+        assert!(!mutated.check_merkle_root());
+        mutated
+    }
+
+    fn assert_mutated_not_block_failed(
+        hub: &crate::chain::ChainHub,
+        mutated: Block,
+        hash: bitcoin::BlockHash,
+    ) {
+        use crate::error::NetError;
+        let err = hub
+            .accept_received_block(mutated)
+            .expect_err("v0.6.0 would accept this reconstructed body");
+        match &err {
+            NetError::Mutated(s) | NetError::Consensus(s) => {
+                assert!(
+                    s.contains("merkle") || s.contains("bad-txnmrklroot"),
+                    "got {s}"
+                );
+            }
+            NetError::ConnectFailed { msg, hash: h } => {
+                assert!(
+                    msg.contains("merkle") || msg.contains("bad-txnmrklroot"),
+                    "got {msg}"
+                );
+                assert_eq!(*h, hash.to_byte_array());
+            }
+            other => panic!("expected mutated reject, got {other:?}"),
+        }
+        assert!(
+            !hub.is_block_invalid(&hash),
+            "short-id collision reconstruct must not BLOCK_FAILED the header"
+        );
+    }
+
+    /// Pre-ground v2 48-bit wtxid short-id collision: orphan unique-match on a held fork.
+    #[test]
+    fn cmpct_wtxid_shortid_collision_held_fork_journey() {
+        use crate::chain::AcceptOutcome;
+        use rbitcoin_consensus::mine_empty_regtest;
+        use std::sync::Arc;
+
+        let (block, collider) = load_wtxid_shortid_collision();
+        let (stale, winner) = collision_parents();
+        assert_eq!(block.header.prev_blockhash, winner.block_hash());
+        let hsi = collision_hsi(&block, &collider);
+        let sid = hsi.short_ids[0];
+        let mut avail: HashMap<ShortId, Vec<&Transaction>> = HashMap::new();
+        avail.insert(sid, vec![&collider]);
+        assert_collider_fill_getdata(&hsi, &avail);
+        let mutated = mutated_collision_body(&block, &collider);
+
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("cmpct-sid-col");
+        hub.ensure_genesis().unwrap();
+        hub.accept_block(stale.clone()).unwrap();
+        assert!(matches!(
+            hub.accept_received_block(winner.clone()).unwrap(),
+            AcceptOutcome::IgnoredWeaker
+        ));
+        assert!(hub.held_body(&winner.block_hash()).is_some());
+
+        let mp = crate::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
+        assert!(hub.attach_mempool(Arc::clone(&mp)).is_ok());
+        assert!(matches!(
+            mp.accept_tx(&collider),
+            Err(crate::AcceptError::Orphaned { .. })
+        ));
+        let owned = mp
+            .try_clone_matching_shortids(&hsi.header, hsi.nonce, 2, &hsi.short_ids)
+            .expect("mempool read");
+        let fill = owned.get(&sid).expect("orphan collider must unique-match");
+        assert_eq!(fill.len(), 1);
+        assert_eq!(fill[0].compute_wtxid(), collider.compute_wtxid());
+        assert_collider_fill_getdata(&hsi, &owned);
+
+        assert_mutated_not_block_failed(&hub, mutated, block.block_hash());
+        assert_eq!(hub.tip_hash(), Some(stale.block_hash()));
+
+        let honest = mine_empty_regtest(
+            winner.block_hash(),
+            winner.header.time.saturating_add(601),
+            2,
+        );
+        assert!(matches!(
+            hub.accept_received_block(honest.clone()).unwrap(),
+            AcceptOutcome::Accepted { height: 2 }
+        ));
+        assert_eq!(hub.tip_hash(), Some(honest.block_hash()));
+        assert!(!hub.is_block_invalid(&block.block_hash()));
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
