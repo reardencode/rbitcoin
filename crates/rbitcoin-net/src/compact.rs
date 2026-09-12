@@ -652,4 +652,145 @@ mod tests {
             vec![1]
         );
     }
+
+    /// Compact siphash nonce for `cmpct_wtxid_shortid_collision_*.bin`.
+    const COLLISION_CMPCT_NONCE: u64 = 0x0C01_115E;
+    const COLLISION_STALE_TIME: u32 = 1_300_060_000;
+    const COLLISION_WINNER_TIME: u32 = 1_300_060_001;
+
+    fn collision_parents() -> (Block, Block) {
+        use rbitcoin_consensus::{genesis_block, mine_empty_regtest, ChainParams};
+        let genesis = genesis_block(&ChainParams::regtest());
+        let stale = mine_empty_regtest(genesis.block_hash(), COLLISION_STALE_TIME, 1);
+        let mut winner = mine_empty_regtest(genesis.block_hash(), COLLISION_WINNER_TIME, 1);
+        if winner.block_hash() == stale.block_hash() {
+            winner = mine_empty_regtest(genesis.block_hash(), COLLISION_WINNER_TIME + 1, 1);
+        }
+        assert_ne!(stale.block_hash(), winner.block_hash());
+        (stale, winner)
+    }
+
+    fn load_wtxid_shortid_collision() -> (Block, Transaction) {
+        let block_raw = std::fs::read(cmpct_fixture_path(
+            "cmpct_wtxid_shortid_collision_block.bin",
+        ))
+        .expect("cmpct_wtxid_shortid_collision_block.bin");
+        let collider_raw = std::fs::read(cmpct_fixture_path(
+            "cmpct_wtxid_shortid_collision_collider.bin",
+        ))
+        .expect("cmpct_wtxid_shortid_collision_collider.bin");
+        (
+            bitcoin::consensus::encode::deserialize(&block_raw).expect("block"),
+            bitcoin::consensus::encode::deserialize(&collider_raw).expect("collider"),
+        )
+    }
+
+    /// Pre-ground v2 48-bit wtxid short-id collision: orphan unique-match on a held fork.
+    #[test]
+    fn cmpct_wtxid_shortid_collision_held_fork_journey() {
+        use crate::chain::AcceptOutcome;
+        use crate::error::NetError;
+        use rbitcoin_consensus::mine_empty_regtest;
+        use std::sync::Arc;
+
+        let (block, collider) = load_wtxid_shortid_collision();
+        let (stale, winner) = collision_parents();
+        assert_eq!(block.header.prev_blockhash, winner.block_hash());
+        assert_eq!(block.txdata.len(), 2);
+        let block_tx = &block.txdata[1];
+        assert_ne!(block_tx.compute_txid(), collider.compute_txid());
+        assert_ne!(block_tx.compute_wtxid(), collider.compute_wtxid());
+
+        let keys = ShortId::calculate_siphash_keys(&block.header, COLLISION_CMPCT_NONCE);
+        let sid_block = ShortId::with_siphash_keys(&block_tx.compute_wtxid().to_raw_hash(), keys);
+        let sid_col = ShortId::with_siphash_keys(&collider.compute_wtxid().to_raw_hash(), keys);
+        assert_eq!(
+            sid_block, sid_col,
+            "fixture must be a v2 short-id collision"
+        );
+
+        let hsi = HeaderAndShortIds::from_block(&block, COLLISION_CMPCT_NONCE, 2, &[]).unwrap();
+        assert_eq!(hsi.short_ids, vec![sid_block]);
+        let mut avail: HashMap<ShortId, Vec<&Transaction>> = HashMap::new();
+        avail.insert(sid_col, vec![&collider]);
+        let missing = try_reconstruct(&hsi, &avail, 2).expect_err("collider unique fill");
+        assert!(
+            missing.is_empty(),
+            "48-bit unique fill must getdata, got {missing:?}"
+        );
+        let mutated = Block {
+            header: block.header,
+            txdata: vec![block.txdata[0].clone(), collider.clone()],
+        };
+        assert_eq!(mutated.block_hash(), block.block_hash());
+        assert!(!mutated.check_merkle_root());
+
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("cmpct-sid-col");
+        hub.ensure_genesis().unwrap();
+        hub.accept_block(stale.clone()).unwrap();
+        assert!(matches!(
+            hub.accept_received_block(winner.clone()).unwrap(),
+            AcceptOutcome::IgnoredWeaker
+        ));
+        assert!(hub.held_body(&winner.block_hash()).is_some());
+
+        let mp = crate::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
+        assert!(hub.attach_mempool(Arc::clone(&mp)).is_ok());
+        assert!(matches!(
+            mp.accept_tx(&collider),
+            Err(crate::AcceptError::Orphaned { .. })
+        ));
+        let owned = mp
+            .try_clone_matching_shortids(&hsi.header, hsi.nonce, 2, &hsi.short_ids)
+            .expect("mempool read");
+        let fill = owned
+            .get(&sid_col)
+            .expect("orphan collider must unique-match");
+        assert_eq!(fill.len(), 1);
+        assert_eq!(fill[0].compute_wtxid(), collider.compute_wtxid());
+        let missing = try_reconstruct(&hsi, &owned, 2).expect_err("hub fill");
+        assert!(
+            missing.is_empty(),
+            "hub unique-match of collider must getdata, got {missing:?}"
+        );
+
+        let err = hub
+            .accept_received_block(mutated)
+            .expect_err("v0.6.0 would accept this reconstructed body");
+        match &err {
+            NetError::Mutated(s) | NetError::Consensus(s) => {
+                assert!(
+                    s.contains("merkle") || s.contains("bad-txnmrklroot"),
+                    "got {s}"
+                );
+            }
+            NetError::ConnectFailed { msg, hash } => {
+                assert!(
+                    msg.contains("merkle") || msg.contains("bad-txnmrklroot"),
+                    "got {msg}"
+                );
+                assert_eq!(*hash, block.block_hash().to_byte_array());
+            }
+            other => panic!("expected mutated reject, got {other:?}"),
+        }
+        assert!(
+            !hub.is_block_invalid(&block.block_hash()),
+            "short-id collision reconstruct must not BLOCK_FAILED the header"
+        );
+        assert_eq!(hub.tip_hash(), Some(stale.block_hash()));
+
+        let honest = mine_empty_regtest(
+            winner.block_hash(),
+            winner.header.time.saturating_add(601),
+            2,
+        );
+        assert!(matches!(
+            hub.accept_received_block(honest.clone()).unwrap(),
+            AcceptOutcome::Accepted { height: 2 }
+        ));
+        assert_eq!(hub.tip_hash(), Some(honest.block_hash()));
+        assert!(!hub.is_block_invalid(&block.block_hash()));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
