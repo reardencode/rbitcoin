@@ -1121,6 +1121,54 @@ fn pin_and_ensure_journey() {
         "same-header create is wire-valued, not pinned"
     );
 
+    let ghost = Fk(42);
+    let mut bp_ghost = BatchParents::new();
+    bp_ghost.insert_owned(
+        ghost,
+        rec_tx(0x42, 1),
+        vec![(0, OutputRecord::unspent(1, vec![0x51]))],
+        vec![0],
+        Some(true),
+        None,
+        Vec::new(),
+    );
+    assert!(bp_ghost.contains(ghost));
+    assert!(!bp_ghost.has_abs_layout(ghost));
+    let prepared_ghost = [Prepared {
+        height: Height(1),
+        header_fk: Fk(1),
+        tx_fks: vec![Fk(4)],
+        jobs: vec![],
+        spends: vec![([0x42u8; 32], 0, Fk(4), ghost)],
+        fees: 0,
+        check_scripts: false,
+        time: 1,
+        bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
+        hash: [6u8; 32],
+        txids: vec![],
+        prev_mtp: 0,
+    }];
+    q.store().reset_spent_range_batch();
+    let err = ensure_spend_abs_layouts(&q, &mut bp_ghost, &prepared_ghost)
+        .expect_err("pin without spent.idx cannot invent abs");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("invariant")
+            && (msg.contains("ensure denserels") || msg.contains("abs incomplete")),
+        "unexpected err: {msg}"
+    );
+    let ghost_spent: Vec<u64> = q
+        .store()
+        .spent_range_batch_fks()
+        .into_iter()
+        .filter(|&id| id == 42)
+        .collect();
+    assert_eq!(
+        ghost_spent.len(),
+        1,
+        "pinned spent.idx miss must not pay a second batch: {ghost_spent:?}"
+    );
+
     let _ = std::fs::remove_dir_all(&path);
 }
 

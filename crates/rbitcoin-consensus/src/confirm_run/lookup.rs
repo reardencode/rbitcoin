@@ -863,6 +863,21 @@ mod tests {
         assert_eq!(pairs[0].0, stamped.metas[0].txids[0]);
         assert_eq!(pairs[0].1, stamped.metas[0].tx_fks[0]);
         assert_eq!(stamped.last_height_hash(), Some((1, stamped.metas[0].hash)));
+
+        let hfk = stamped.metas[0].header_fk;
+        let first_fk = stamped.metas[0].tx_fks[0];
+        q.store()
+            .header_txs
+            .put_range(hfk, first_fk, 2)
+            .expect("tamper list length");
+        match confirm_wire_lookup_stamp(&q, &params, Milestone::NONE, &items, None) {
+            Err(ConsensusError::Store(StoreError::Corrupt(m))) => {
+                assert_eq!(m, "invariant: archived stamp tx_fks/txids length");
+            }
+            Err(e) => panic!("populated list/wire mismatch must be length Corrupt, got {e}"),
+            Ok(_) => panic!("populated list/wire mismatch must fail stamp"),
+        }
+
         let _ = std::fs::remove_dir_all(&path);
     }
 }

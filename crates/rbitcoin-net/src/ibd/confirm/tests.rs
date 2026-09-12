@@ -59,6 +59,20 @@ fn note_archived_creates_from_pairs_does_not_need_store() {
     assert_eq!(st.in_flight.get_create_fk(&tid), Some(Fk(9)));
     assert_eq!(st.last_loaded, Some((4, last)));
     assert_eq!(st.next_tx_start, 10);
+
+    let start = st.next_tx_start;
+    st.note_archived_creates(Vec::new(), Some((5, [8u8; 32])));
+    assert_eq!(
+        st.in_flight.get_create_fk(&tid),
+        Some(Fk(9)),
+        "empty pairs must not invent or drop identity"
+    );
+    assert_eq!(st.next_tx_start, start);
+    assert_eq!(
+        st.last_loaded,
+        Some((4, last)),
+        "header_txs hole (no pairs) must not advance last_loaded"
+    );
 }
 
 /// Mainnet 187: first pack writes (drain+fence), next pack spends those creates.
