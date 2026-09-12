@@ -13,7 +13,6 @@ use bitcoin::{
 };
 use rbitcoin_consensus::{ChainParams, Milestone};
 use rbitcoin_net::{IbdConfig, P2PNode};
-use rbitcoin_primitives::Height;
 use rbitcoin_query::Query;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -96,39 +95,6 @@ fn seed_chain(node: &P2PNode, blocks: u32) {
         time = b.header.time;
         node.ingest_block(h, b).unwrap();
     }
-}
-
-/// Two-node IBD: seed has 6 blocks; peer syncs tip via public sync API.
-///
-/// Ignored in default suite: full confirm pipeline under parallel load can stall
-/// on plan claim (multi-minute hang). Covered by `integration_multinode` two-node
-/// when run in isolation / `scripts/integration.sh`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "full IBD smoke; run via scripts/integration.sh or -- --ignored"]
-async fn short_regtest_ibd_two_node() {
-    let seed_dir = tmp_dir("seed");
-    let peer_dir = tmp_dir("peer");
-
-    let seed = start_node(&seed_dir).await;
-    seed_chain(&seed, 6);
-    assert_eq!(seed.query.tip_height(), Some(Height(6)));
-
-    let peer = start_node(&peer_dir).await;
-    let mut cfg = IbdConfig::for_test();
-    cfg.target_peers = 1;
-    cfg.window = 16;
-    let n = peer.sync(&[seed.local_addr], cfg).await.expect("ibd sync");
-    assert!(n >= 6, "accepted={n}");
-    peer.wait_height(6, Duration::from_secs(15))
-        .await
-        .expect("tip height");
-    assert_eq!(peer.query.tip_height(), Some(Height(6)));
-    assert_eq!(peer.hub.tip_hash().unwrap(), seed.hub.tip_hash().unwrap());
-
-    seed.shutdown().await;
-    peer.shutdown().await;
-    let _ = std::fs::remove_dir_all(&seed_dir);
-    let _ = std::fs::remove_dir_all(&peer_dir);
 }
 
 /// Cancel flag exits IBD cooperatively without hanging.
@@ -248,35 +214,4 @@ async fn ibd_unreachable_peer_errors() {
     );
     node.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// Longer short chain (12 blocks) exercises multi-batch archive + confirm.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "full IBD smoke 12-block; run via scripts/integration.sh or -- --ignored"]
-async fn short_regtest_ibd_twelve_blocks() {
-    let seed_dir = tmp_dir("seed12");
-    let peer_dir = tmp_dir("peer12");
-
-    let seed = start_node(&seed_dir).await;
-    seed_chain(&seed, 12);
-    assert_eq!(seed.query.tip_height(), Some(Height(12)));
-
-    let peer = start_node(&peer_dir).await;
-    let mut cfg = IbdConfig::for_test();
-    cfg.target_peers = 1;
-    cfg.window = 32;
-    let n = peer
-        .sync(&[seed.local_addr], cfg)
-        .await
-        .expect("ibd sync 12");
-    assert!(n >= 12, "accepted={n}");
-    peer.wait_height(12, Duration::from_secs(30))
-        .await
-        .expect("tip 12");
-    assert_eq!(peer.hub.tip_hash().unwrap(), seed.hub.tip_hash().unwrap());
-
-    seed.shutdown().await;
-    peer.shutdown().await;
-    let _ = std::fs::remove_dir_all(&seed_dir);
-    let _ = std::fs::remove_dir_all(&peer_dir);
 }

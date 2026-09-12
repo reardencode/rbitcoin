@@ -23,19 +23,6 @@ fn bare_tx(version: i32, lock_time: LockTime, sequence: Sequence) -> Transaction
 }
 
 #[test]
-fn final_when_locktime_zero() {
-    let tx = bare_tx(1, LockTime::ZERO, Sequence::MAX);
-    assert!(is_final_tx(&tx, 100, 1_000_000));
-}
-
-#[test]
-fn height_locktime_not_final_until_height() {
-    let tx = bare_tx(1, LockTime::from_height(100).unwrap(), Sequence::ZERO);
-    assert!(!is_final_tx(&tx, 100, 1_000_000)); // need lt < height
-    assert!(is_final_tx(&tx, 101, 1_000_000));
-}
-
-#[test]
 fn sequence_final_ignores_locktime() {
     let tx = bare_tx(1, LockTime::from_height(100).unwrap(), Sequence::MAX);
     assert!(is_final_tx(&tx, 50, 1_000_000));

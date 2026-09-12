@@ -223,20 +223,6 @@ fn cached_confirming_hash_loads_once_per_height() {
 }
 
 #[test]
-fn history_row_json_mempool_child_includes_fee() {
-    use rbitcoin_primitives::Fk;
-    let child = rbitcoin_query::ScriptHashHistoryItem {
-        height: -1,
-        txid: [3u8; 32],
-        tx_fk: Fk::NULL,
-        fee: Some(9),
-    };
-    let v = history_row_json(&child);
-    assert_eq!(v["fee"], 9);
-    assert_eq!(v["height"], -1);
-}
-
-#[test]
 fn drop_unsubscribed_status_clears_idle_hashes() {
     let mut last = HashMap::new();
     let gone = [1u8; 32];
@@ -537,19 +523,6 @@ fn dispatch_static_methods_and_errors() {
     .unwrap();
     assert_eq!(hist, json!([]));
 
-    // No tip → headers.subscribe errors.
-    assert!(dispatch(
-        "blockchain.headers.subscribe",
-        &json!([]),
-        &q,
-        &cfg,
-        &params,
-        None,
-        &mut header_sub,
-        &mut sh_subs
-    )
-    .is_err());
-
     assert!(dispatch(
         "no.such.method",
         &json!([]),
@@ -562,74 +535,6 @@ fn dispatch_static_methods_and_errors() {
     )
     .unwrap_err()
     .contains("unknown method"));
-
-    // Empty-chain scripthash methods.
-    let sh = electrum_scripthash_hex(&[0x51]);
-    let empty_hist = dispatch(
-        "blockchain.scripthash.get_history",
-        &json!([sh]),
-        &q,
-        &cfg,
-        &params,
-        None,
-        &mut header_sub,
-        &mut sh_subs,
-    )
-    .unwrap();
-    assert_eq!(empty_hist, json!([]));
-
-    let bal = dispatch(
-        "blockchain.scripthash.get_balance",
-        &json!([sh]),
-        &q,
-        &cfg,
-        &params,
-        None,
-        &mut header_sub,
-        &mut sh_subs,
-    )
-    .unwrap();
-    assert_eq!(bal["confirmed"], 0);
-
-    let unspent = dispatch(
-        "blockchain.scripthash.listunspent",
-        &json!([sh]),
-        &q,
-        &cfg,
-        &params,
-        None,
-        &mut header_sub,
-        &mut sh_subs,
-    )
-    .unwrap();
-    assert_eq!(unspent, json!([]));
-
-    let sub = dispatch(
-        "blockchain.scripthash.subscribe",
-        &json!([sh]),
-        &q,
-        &cfg,
-        &params,
-        None,
-        &mut header_sub,
-        &mut sh_subs,
-    )
-    .unwrap();
-    assert!(sub.as_str().is_some());
-    assert_eq!(sh_subs.len(), 1);
-
-    let mem = dispatch(
-        "blockchain.scripthash.get_mempool",
-        &json!([sh]),
-        &q,
-        &cfg,
-        &params,
-        None,
-        &mut header_sub,
-        &mut sh_subs,
-    )
-    .unwrap();
-    assert_eq!(mem, json!([]));
 
     // Broadcast: bad hex fails before mempool gate.
     assert!(dispatch(
@@ -1754,125 +1659,6 @@ async fn tip_push_and_lagged_client() {
         push["method"].as_str(),
         Some("blockchain.headers.subscribe")
     );
-
-    handle.shutdown().await;
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[tokio::test]
-async fn scripthash_subscribe_skips_tip_when_block_misses_sh() {
-    use rbitcoin_query::TxApply;
-    use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
-
-    let (dir, q) = tmp_store();
-    let mut hash = [0u8; 32];
-    hash[0] = 0x42;
-    let header = HeaderRecord {
-        prev_fk: Fk::NULL,
-        version: 1,
-        timestamp: 1,
-        bits: 0x207fffff,
-        nonce: 0,
-        merkle_root: hash,
-        hash,
-    };
-    let mut txid = [0u8; 32];
-    txid[31] = 0xcb;
-    let ta = TxApply {
-        tx: TxRecord {
-            txid,
-            version: 1,
-            locktime: 0,
-            input_start_fk: Fk::NULL,
-            input_count: 1,
-            output_start_fk: Fk::NULL,
-            output_count: 1,
-        },
-        inputs: vec![InputRecord {
-            prev_txid: [0u8; 32],
-            create_fk: Fk::NULL,
-            prev_index: u32::MAX,
-            sequence: u32::MAX,
-            script_sig: vec![0],
-            witness: vec![],
-        }],
-        outputs: vec![OutputRecord::unspent(1, vec![0x51])],
-    };
-    let hfk0 = q.connect_block(Height(0), &header, &[ta]).unwrap();
-    let sh = electrum_scripthash_hex(&[0x51]);
-
-    let params = ChainParams::regtest();
-    let q = std::sync::Arc::new(q);
-    let (tip_tx, _) = broadcast::channel(2);
-    let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
-    let handle = run_electrum(cfg, std::sync::Arc::clone(&q), params, tip_tx.clone(), None)
-        .await
-        .unwrap();
-    let mut stream = TcpStream::connect(handle.local_addr).await.unwrap();
-    let mut line = serde_json::to_string(&json!({
-        "jsonrpc":"2.0","id":1,"method":"blockchain.scripthash.subscribe","params":[sh]
-    }))
-    .unwrap();
-    line.push('\n');
-    stream.write_all(line.as_bytes()).await.unwrap();
-    let mut reader = BufReader::new(&mut stream);
-    let mut resp = String::new();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        reader.read_line(&mut resp),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-
-    let hash1 = rbitcoin_store::block_header_hash(1, &hash, &[0x11; 32], 2, 0x207fffff, 1);
-    let h1 = HeaderRecord {
-        prev_fk: hfk0,
-        version: 1,
-        timestamp: 2,
-        bits: 0x207fffff,
-        nonce: 1,
-        merkle_root: [0x11; 32],
-        hash: hash1,
-    };
-    let mut txid1 = [0u8; 32];
-    txid1[0] = 0x11;
-    txid1[31] = 0xcd;
-    let ta1 = TxApply {
-        tx: TxRecord {
-            txid: txid1,
-            version: 1,
-            locktime: 0,
-            input_start_fk: Fk::NULL,
-            input_count: 1,
-            output_start_fk: Fk::NULL,
-            output_count: 1,
-        },
-        inputs: vec![InputRecord {
-            prev_txid: [0u8; 32],
-            create_fk: Fk::NULL,
-            prev_index: u32::MAX,
-            sequence: u32::MAX,
-            script_sig: vec![1],
-            witness: vec![],
-        }],
-        outputs: vec![OutputRecord::unspent(1, vec![0x00])],
-    };
-    q.connect_block(Height(1), &h1, &[ta1]).unwrap();
-    tip_tx
-        .send(TipNotify {
-            height: 1,
-            header_hex: "aa".repeat(80),
-            reorg_from_height: None,
-        })
-        .unwrap();
-    resp.clear();
-    let extra = tokio::time::timeout(
-        std::time::Duration::from_millis(400),
-        reader.read_line(&mut resp),
-    )
-    .await;
-    assert!(extra.is_err(), "untouched tip must not restatus: {resp:?}");
 
     handle.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);

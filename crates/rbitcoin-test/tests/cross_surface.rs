@@ -230,6 +230,69 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
         }
     }
 
+    let child_spk = ScriptBuf::from_bytes(vec![0x53]);
+    let child = Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: spend.compute_txid(),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(50_0000_0000 - 2_000),
+            script_pubkey: child_spk.clone(),
+        }],
+    };
+    let mut child_raw = Vec::new();
+    child.consensus_encode(&mut child_raw).unwrap();
+    let child_hex = rbitcoin_primitives::hex_encode(&child_raw);
+    let child_txid = child.compute_txid().to_string();
+    let (st, body) = http_post(esplora_addr, "/tx", &child_hex).await;
+    assert_eq!(st, 200, "POST /tx child: {body}");
+    assert_eq!(body, child_txid);
+
+    let child_sh = electrum_scripthash_hex(child_spk.as_bytes());
+    let child_hist = electrum_rpc(
+        &mut el,
+        4,
+        "blockchain.scripthash.get_history",
+        json!([child_sh.clone()]),
+    )
+    .await;
+    let child_row = child_hist["result"]
+        .as_array()
+        .expect("child history array")
+        .iter()
+        .find(|r| r["tx_hash"] == child_txid)
+        .unwrap_or_else(|| panic!("child history missing {child_txid}: {child_hist}"));
+    assert_eq!(child_row["height"], -1, "{child_row}");
+    let child_fee = child_row["fee"].as_i64().expect("mempool child fee");
+    assert!(child_fee > 0, "mempool child fee: {child_row}");
+
+    let child_mem = electrum_rpc(
+        &mut el,
+        5,
+        "blockchain.scripthash.get_mempool",
+        json!([child_sh]),
+    )
+    .await;
+    let child_mem_row = child_mem["result"]
+        .as_array()
+        .expect("child mempool array")
+        .iter()
+        .find(|r| r["tx_hash"] == child_txid)
+        .unwrap_or_else(|| panic!("get_mempool missing child {child_txid}: {child_mem}"));
+    assert_eq!(
+        child_mem_row["fee"].as_i64(),
+        Some(child_fee),
+        "{child_mem_row}"
+    );
+
     let _ = jsonrpc(rpc_addr, "stop", json!([])).await;
     let stopped = tokio::time::timeout(Duration::from_secs(15), node).await;
     match stopped {

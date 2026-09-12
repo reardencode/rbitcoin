@@ -886,6 +886,7 @@ dependencies = [
  "rbitcoin-cli",
  "rbitcoin-consensus",
  "rbitcoin-electrum",
+ "rbitcoin-esplora",
  "rbitcoin-net",
  "rbitcoin-node",
  "rbitcoin-primitives",
