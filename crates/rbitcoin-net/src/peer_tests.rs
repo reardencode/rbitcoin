@@ -4654,12 +4654,12 @@ fn announced_tip_is_hopeless_less_and_288_behind() {
 }
 
 #[test]
-fn shorter_higher_work_fork_is_not_hopeless() {
+fn claimed_hard_bits_without_pow_does_not_getdata() {
     use bitcoin::block::{Header, Version};
     use bitcoin::{CompactTarget, TxMerkleNode};
     use rbitcoin_primitives::Height;
 
-    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("short-high-work-fork");
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("claimed-hard-bits");
     hub.ensure_genesis().unwrap();
     hub.generate_to_script(5, bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![])
         .unwrap();
@@ -4686,6 +4686,70 @@ fn shorter_higher_work_fork_is_not_hopeless() {
     assert!(
         want.is_empty(),
         "must not getdata a shorter path that only looks higher-work via claimed nBits"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn pending_header_hole_does_not_getdata() {
+    use bitcoin::block::{Header, Version};
+    use bitcoin::{CompactTarget, TxMerkleNode};
+
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("pending-hole");
+    hub.ensure_genesis().unwrap();
+    hub.generate_to_script(2, bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![])
+        .unwrap();
+    let orphan = Header {
+        version: Version::from_consensus(4),
+        prev_blockhash: BlockHash::from_byte_array([0x11; 32]),
+        merkle_root: TxMerkleNode::from_byte_array([0x5b; 32]),
+        time: 1_300_000_000,
+        bits: CompactTarget::from_consensus(0x207f_ffff),
+        nonce: 0,
+    };
+    let tip = orphan.block_hash();
+    let mut pending = HashMap::new();
+    pending.insert(tip, orphan);
+    let want =
+        fetchable_header_path_bodies(&hub, &pending, tip, &PendingBlocks::new(), &HashSet::new());
+    assert!(want.is_empty(), "a path we cannot walk must not getdata");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn shorter_higher_work_fork_still_getdata() {
+    use bitcoin::block::{Header, Version};
+    use bitcoin::{CompactTarget, TxMerkleNode};
+    use rbitcoin_primitives::Height;
+
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("short-high-work-fork");
+    hub.ensure_genesis().unwrap();
+    hub.generate_to_script(5, bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![])
+        .unwrap();
+    let gen = hub.query.wire_header_at_height(Height(0)).unwrap();
+    let mut hard = Header {
+        version: Version::from_consensus(4),
+        prev_blockhash: gen.block_hash(),
+        merkle_root: TxMerkleNode::from_byte_array([0x5c; 32]),
+        time: gen.time.saturating_add(600),
+        bits: CompactTarget::from_consensus(0x1f7f_ffff),
+        nonce: 0,
+    };
+    rbitcoin_consensus::grind_regtest_pow(&mut hard);
+    let tip = hard.block_hash();
+    let mut pending = HashMap::new();
+    pending.insert(tip, hard);
+    assert_eq!(
+        announced_work_cmp(&hub, &pending, tip),
+        Some(std::cmp::Ordering::Greater),
+        "one harder-than-regtest header must outwork five easy blocks"
+    );
+    let want =
+        fetchable_header_path_bodies(&hub, &pending, tip, &PendingBlocks::new(), &HashSet::new());
+    assert_eq!(
+        want,
+        vec![tip],
+        "legitimate shorter higher-work path still fetches"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

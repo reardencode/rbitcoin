@@ -3473,7 +3473,7 @@ fn fetchable_header_path_bodies(
     if !header_path_meets_minwork(hub, pending, tip) {
         return Vec::new();
     }
-    if !pending_path_claimed_pow_ok(hub, pending, tip) {
+    if work_of_header_path(hub, pending, tip).is_none() {
         return Vec::new();
     }
     if matches!(
@@ -3483,30 +3483,6 @@ fn fetchable_header_path_bodies(
         return Vec::new();
     }
     missing_blocks_on_header_path(hub, pending, tip, pending_blocks, requested)
-}
-
-fn pending_path_claimed_pow_ok(
-    hub: &ChainHub,
-    pending: &HashMap<BlockHash, bitcoin::block::Header>,
-    tip: BlockHash,
-) -> bool {
-    let mut h = tip;
-    for _ in 0..10_000 {
-        if hub.is_connected(&h) {
-            return true;
-        }
-        let Some(hdr) = pending.get(&h) else {
-            return true;
-        };
-        if !hub.header_claimed_pow_ok(hdr) {
-            return false;
-        }
-        h = hdr.prev_blockhash;
-        if h.to_byte_array() == [0u8; 32] {
-            return true;
-        }
-    }
-    true
 }
 
 /// Bodies on `tip`'s header path that we have not connected, stashed, or asked for.
