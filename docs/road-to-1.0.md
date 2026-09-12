@@ -193,13 +193,13 @@ When the rest is true, tag 1.0 so **every 1.x.x opens a 1.0.0 store**.
 Older-than-1.0 or corrupt files can still refuse with a one-line message.
 
 Do not freeze while Class C / sidecar / fuse8 can lose a `set` or index
-OOB (**Q-57**), or while mempool persist claims LIVE slots before the body
-is durable (**Q-58**). Schema 20 is the current bytes; 0.x may still bump.
+OOB (**Q-57**). Mempool persist writes body before LIVE slots (**Q-58**).
+Schema 20 is the current bytes; 0.x may still bump.
 
 | Done | Step |
 |:----:|------|
 | [x] | No silent wipe; refuse names the dirs ([`SCHEMA.md`](../SCHEMA.md)) |
-| [ ] | Q-57 / Q-58 fail-closed on the durable path |
+| [x] | Q-57 / Q-58 fail-closed on the durable path |
 | [ ] | Tag 1.0.0; `SECURITY.md` names a 1.0.x window |
 
 ---
