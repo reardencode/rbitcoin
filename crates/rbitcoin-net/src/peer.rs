@@ -1685,13 +1685,13 @@ struct PendingCmpct {
 }
 
 /// Clone only mempool bodies whose short-ids appear in `hsi` (never `list_live`).
-fn mempool_shortid_txs(
+fn mempool_shortid_avail(
     hub: &ChainHub,
     header: &bitcoin::block::Header,
     nonce: u64,
     version: u32,
     short_ids: &[bitcoin::bip152::ShortId],
-) -> Vec<Transaction> {
+) -> HashMap<bitcoin::bip152::ShortId, Vec<Transaction>> {
     hub.mempool()
         .and_then(|mp| mp.try_clone_matching_shortids(header, nonce, version, short_ids))
         .unwrap_or_default()
@@ -1709,8 +1709,8 @@ fn try_reconstruct_cmpct(
     hsi: &HeaderAndShortIds,
     version: u32,
 ) -> Option<CmpctReconstruct> {
-    let live = mempool_shortid_txs(hub, &hsi.header, hsi.nonce, version, &hsi.short_ids);
-    let avail = crate::compact::shortid_map_from_txs(&hsi.header, hsi.nonce, version, live.iter());
+    let owned = mempool_shortid_avail(hub, &hsi.header, hsi.nonce, version, &hsi.short_ids);
+    let avail = crate::compact::borrow_owned_shortids(&owned);
     match crate::compact::try_reconstruct(hsi, &avail, version) {
         Ok(block) => Some(CmpctReconstruct::Block(block)),
         Err(_) if hub.mempool().is_none() => None,
@@ -1908,15 +1908,14 @@ fn apply_cmpct_blocktxn(
     pc: &PendingCmpct,
     bt: &BlockTransactions,
 ) -> Result<Block, ()> {
-    let live = mempool_shortid_txs(
+    let owned = mempool_shortid_avail(
         hub,
         &pc.hsi.header,
         pc.hsi.nonce,
         pc.version,
         &pc.hsi.short_ids,
     );
-    let avail =
-        crate::compact::shortid_map_from_txs(&pc.hsi.header, pc.hsi.nonce, pc.version, live.iter());
+    let avail = crate::compact::borrow_owned_shortids(&owned);
     crate::compact::apply_block_transactions(&pc.hsi, &pc.missing, bt, &avail, pc.version)
         .map_err(|_| ())
 }

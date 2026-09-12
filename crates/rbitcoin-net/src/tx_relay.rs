@@ -2016,6 +2016,9 @@ impl MempoolHub {
 
     /// Compact fill: siphash live txid/wtxid, clone **matching** bodies only.
     ///
+    /// Keys are the siphashes already computed here — callers must not
+    /// `compute_txid` / `compute_wtxid` the clones again.
+    ///
     /// `None` if a writer holds `inner` (reconstruct without mempool this round).
     pub fn try_clone_matching_shortids(
         &self,
@@ -2023,15 +2026,15 @@ impl MempoolHub {
         nonce: u64,
         version: u32,
         short_ids: &[bitcoin::bip152::ShortId],
-    ) -> Option<Vec<Transaction>> {
+    ) -> Option<HashMap<bitcoin::bip152::ShortId, Vec<Transaction>>> {
         use bitcoin::bip152::ShortId;
         let needed: std::collections::HashSet<ShortId> = short_ids.iter().copied().collect();
         if needed.is_empty() {
-            return Some(Vec::new());
+            return Some(HashMap::new());
         }
         let g = self.inner.try_read().ok()?;
         let keys = ShortId::calculate_siphash_keys(header, nonce);
-        let mut out = Vec::new();
+        let mut out: HashMap<ShortId, Vec<Transaction>> = HashMap::new();
         for (txid, e) in g.graph.iter() {
             let sid = if version == 1 {
                 ShortId::with_siphash_keys(&txid.to_raw_hash(), keys)
@@ -2040,7 +2043,7 @@ impl MempoolHub {
             };
             if needed.contains(&sid) {
                 if let Some(tx) = g.get_tx(txid) {
-                    out.push(tx.clone());
+                    out.entry(sid).or_default().push(tx.clone());
                 }
             }
         }
@@ -2051,7 +2054,7 @@ impl MempoolHub {
                 ShortId::with_siphash_keys(&tx.compute_wtxid().to_raw_hash(), keys)
             };
             if needed.contains(&sid) {
-                out.push(tx.clone());
+                out.entry(sid).or_default().push(tx.clone());
             }
         }
         Some(out)
@@ -3146,8 +3149,9 @@ mod tests {
         let got = hub
             .try_clone_matching_shortids(&genesis.header, nonce, 2, &[sid])
             .expect("read lock");
-        assert_eq!(got.len(), 1, "orphan must fill compact short-id");
-        assert_eq!(got[0].compute_txid(), tx.compute_txid());
+        let bodies = got.get(&sid).expect("orphan must fill compact short-id");
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0].compute_txid(), tx.compute_txid());
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&store_dir);
     }

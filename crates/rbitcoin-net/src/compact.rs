@@ -34,6 +34,16 @@ fn short_id_for_tx(tx: &Transaction, version: u32, keys: (u64, u64)) -> ShortId 
     }
 }
 
+/// Borrow an owned matching map for reconstruct without hashing the clones.
+pub(crate) fn borrow_owned_shortids(
+    owned: &HashMap<ShortId, Vec<Transaction>>,
+) -> HashMap<ShortId, Vec<&Transaction>> {
+    owned
+        .iter()
+        .map(|(k, v)| (*k, v.iter().collect()))
+        .collect()
+}
+
 /// Consensus-decode BIP152 `HeaderAndShortIds`.
 #[cfg(test)]
 fn decode_cmpct_hsi(raw: &[u8]) -> Option<HeaderAndShortIds> {
@@ -352,6 +362,37 @@ mod tests {
         assert_eq!(recon.txdata.len(), 3);
         assert_eq!(recon.txdata[1].compute_txid(), b1.compute_txid());
         assert_eq!(recon.txdata[2].compute_txid(), b2.compute_txid());
+    }
+
+    #[test]
+    fn reconstruct_fill_keeps_matching_shortid_not_rehash() {
+        let b1 = spend(1);
+        let block = Block {
+            header: dummy_header(),
+            txdata: vec![coinbase(), b1.clone()],
+        };
+        let mut hsi = HeaderAndShortIds::from_block(&block, 0xdead_beef, 2, &[]).unwrap();
+        let keys = ShortId::calculate_siphash_keys(&block.header, hsi.nonce);
+        let hashed = short_id_for_tx(&b1, 2, keys);
+        let fake = ShortId::with_siphash_keys(
+            &bitcoin::hashes::sha256d::Hash::from_byte_array([0xab; 32]),
+            keys,
+        );
+        assert_ne!(fake, hashed, "caller key must differ from clone siphash");
+        hsi.short_ids[0] = fake;
+
+        let mut owned: HashMap<ShortId, Vec<Transaction>> = HashMap::new();
+        owned.insert(fake, vec![b1.clone()]);
+
+        let rehashed = shortid_map_from_txs(&block.header, hsi.nonce, 2, owned.values().flatten());
+        assert!(
+            try_reconstruct(&hsi, &rehashed, 2).is_err(),
+            "rehashing clones must miss a caller short-id"
+        );
+
+        let avail = borrow_owned_shortids(&owned);
+        let recon = try_reconstruct(&hsi, &avail, 2).expect("matching short-id must place body");
+        assert_eq!(recon.txdata[1].compute_txid(), b1.compute_txid());
     }
 
     #[test]
