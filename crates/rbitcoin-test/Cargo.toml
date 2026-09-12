@@ -16,6 +16,7 @@ rbitcoin-consensus = { workspace = true }
 rbitcoin-net = { workspace = true }
 rbitcoin-rpc = { workspace = true }
 rbitcoin-electrum = { workspace = true }
+rbitcoin-esplora = { workspace = true }
 rbitcoin-cli = { workspace = true }
 rbitcoin-node = { workspace = true }
 bitcoin = { workspace = true }
