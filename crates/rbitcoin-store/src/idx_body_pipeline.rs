@@ -106,7 +106,8 @@ pub(crate) fn outs_first_wave_len(off: u64, full_len: u64, need_vouts: &[u32]) -
 /// Offset-sorted `[off, off+len)` windows → `(page_off, span_len, window indices)`.
 ///
 /// Jobs that share an OS page (or a two-page straddle) become one SQE. Adjacent
-/// disjoint pages stay split.
+/// disjoint pages stay split. A singleton group preads the job window; only a
+/// merged group uses a page-span bounce buffer.
 fn group_body_peeks(windows: &[(u64, u64)]) -> Vec<(u64, u64, Vec<usize>)> {
     let mut groups = Vec::new();
     if windows.is_empty() {
@@ -161,6 +162,21 @@ struct PeekDest {
     len: usize,
 }
 
+/// Singleton group → job window (`off`, `len`). Merged group → page-span bounce.
+fn group_sqe(
+    page_off: u64,
+    span: u64,
+    members: &[usize],
+    dests: &[PeekDest],
+) -> (u64, u64, Option<usize>) {
+    if let [wi] = members {
+        let d = &dests[*wi];
+        (d.off, d.len as u64, Some(*wi))
+    } else {
+        (page_off, span, None)
+    }
+}
+
 fn pread_grouped_peeks(
     jobs: &mut [IdxBodyJob],
     dests: &[PeekDest],
@@ -174,18 +190,40 @@ fn pread_grouped_peeks(
     }
     let windows: Vec<(u64, u64)> = dests.iter().map(|d| (d.off, d.len as u64)).collect();
     let groups = group_body_peeks(&windows);
-    let mut bufs: Vec<Vec<u8>> = groups
+    let mut bounce: Vec<Option<Vec<u8>>> = groups
         .iter()
-        .map(|(_, len, _)| vec![0u8; *len as usize])
+        .map(|(_, span, members)| {
+            if members.len() == 1 {
+                None
+            } else {
+                Some(vec![0u8; *span as usize])
+            }
+        })
         .collect();
-    // SAFETY: each bufs[g] is a distinct allocation owned until after pread.
+    // SAFETY: each SQE buffer is a distinct job.body slice (singleton) or bounce
+    // allocation (merged). Dest windows do not overlap jobs in one wave.
     let mut ops: Vec<ReadOp<'_>> = Vec::with_capacity(groups.len());
-    for (g, (page_off, len, _)) in groups.iter().enumerate() {
-        let ptr = bufs[g].as_mut_ptr();
-        let slice = unsafe { std::slice::from_raw_parts_mut(ptr, *len as usize) };
+    for (g, (page_off, span, members)) in groups.iter().enumerate() {
+        let (off, len, direct) = group_sqe(*page_off, *span, members, dests);
+        let slice = if let Some(wi) = direct {
+            let d = &dests[wi];
+            let body = &mut jobs[d.job].body;
+            let ptr = body[d.dest..d.dest + d.len].as_mut_ptr();
+            // SAFETY: dest window is this job's body slice for this wave only.
+            unsafe { std::slice::from_raw_parts_mut(ptr, d.len) }
+        } else {
+            let Some(buf) = bounce[g].as_mut() else {
+                return Err(StoreError::Corrupt(
+                    "invariant: merged body peek missing bounce",
+                ));
+            };
+            let ptr = buf.as_mut_ptr();
+            // SAFETY: bounce[g] is unique to this merged group until after pread.
+            unsafe { std::slice::from_raw_parts_mut(ptr, len as usize) }
+        };
         ops.push(ReadOp {
             fd: body_fd,
-            offset: *page_off,
+            offset: off,
             buf: slice,
             result: i32::MIN,
         });
@@ -199,7 +237,24 @@ fn pread_grouped_peeks(
             ));
         }
         let got = ro.result as usize;
-        let buf = &bufs[g];
+        if let [wi] = members.as_slice() {
+            let d = &dests[*wi];
+            if got < d.len {
+                if !mark_ok {
+                    jobs[d.job].ok = false;
+                }
+                continue;
+            }
+            if mark_ok {
+                jobs[d.job].ok = true;
+            }
+            continue;
+        }
+        let Some(buf) = bounce[g].as_ref() else {
+            return Err(StoreError::Corrupt(
+                "invariant: merged body peek missing bounce",
+            ));
+        };
         for &wi in members {
             let d = &dests[wi];
             let rel = d.off.saturating_sub(*page_off) as usize;
@@ -407,6 +462,46 @@ mod tests {
     #[test]
     fn outs_first_wave_empty_need_full_when_span_crosses_page() {
         assert_eq!(outs_first_wave_len(0, 6000, &[]), 6000);
+    }
+
+    #[test]
+    fn group_sqe_singleton_is_job_window_not_page_span() {
+        let dests = [PeekDest {
+            job: 0,
+            off: 4000,
+            dest: 0,
+            len: 96,
+        }];
+        let g = group_body_peeks(&[(4000, 96)]);
+        assert_eq!(g.len(), 1);
+        let (off, len, direct) = group_sqe(g[0].0, g[0].1, &g[0].2, &dests);
+        assert_eq!(off, 4000);
+        assert_eq!(len, 96);
+        assert_eq!(direct, Some(0));
+    }
+
+    #[test]
+    fn group_sqe_merged_stays_page_span() {
+        let dests = [
+            PeekDest {
+                job: 0,
+                off: 0,
+                dest: 0,
+                len: 91,
+            },
+            PeekDest {
+                job: 1,
+                off: 91,
+                dest: 0,
+                len: 91,
+            },
+        ];
+        let g = group_body_peeks(&[(0, 91), (91, 91)]);
+        assert_eq!(g.len(), 1);
+        let (off, len, direct) = group_sqe(g[0].0, g[0].1, &g[0].2, &dests);
+        assert_eq!(off, 0);
+        assert!(len >= 182);
+        assert!(direct.is_none());
     }
 
     fn temp_tx() -> (std::path::PathBuf, TxTable) {
