@@ -30,6 +30,11 @@ pub(crate) fn seed_work_path_from_store(st: &mut IbdWorkState, hub: &ChainHub) {
             return;
         }
     };
+    info!(
+        "ibd: resume seed graph n={} (store walk {:?})",
+        path.len(),
+        t0.elapsed()
+    );
     if path.is_empty() {
         return;
     }

@@ -53,6 +53,20 @@ use std::sync::{Condvar, Mutex};
 
 pub type QueryError = StoreError;
 
+/// Result of [`Query::uring_recover`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UringRecover {
+    Recovered,
+    Exhausted,
+}
+
+pub(crate) fn uring_recover_credit(last_tip: Option<u32>, tip: u32) -> bool {
+    match last_tip {
+        None => true,
+        Some(last) => tip.saturating_sub(last) >= Query::URING_RECOVER_MIN_TIP_GAP,
+    }
+}
+
 /// Cheap process-owned cache occupancy for IBD `ibd: sizes` (O(1) lens + brief locks).
 ///
 /// `conf_plans` is header plan occupancy in ConfirmParentCache. Pipeline pins /
@@ -1184,6 +1198,8 @@ pub struct Query {
     disconnect_height: AtomicU32,
     /// Bumped on each [`Self::disconnect_tip`]. Load drops in-flight layers.
     disconnect_gen: AtomicU64,
+    /// Tip height of last in-process io_uring recover (`u32::MAX` = none).
+    uring_recover_tip: AtomicU32,
 }
 
 /// In-process hash→height map for the confirmed tip chain (~33 MiB raw at 1e6 tips).
@@ -1265,6 +1281,7 @@ impl Query {
             head_drain_fk: AtomicU64::new(0),
             disconnect_height: AtomicU32::new(0),
             disconnect_gen: AtomicU64::new(0),
+            uring_recover_tip: AtomicU32::new(u32::MAX),
         };
         if let Some(tip) = q.tip_height() {
             let _ = q.ensure_height_by_hash_index(tip);
@@ -2004,6 +2021,40 @@ impl Query {
         self.store.tip_height()
     }
 
+    /// Minimum tip advance between in-process io_uring recovers.
+    pub const URING_RECOVER_MIN_TIP_GAP: u32 = 1000;
+
+    pub fn uring_recover(&self, reason: &'static str) -> UringRecover {
+        let tip = self.tip_height().map(|h| h.0).unwrap_or(0);
+        loop {
+            let last = self.uring_recover_tip.load(AtomicOrdering::Acquire);
+            let last_opt = if last == u32::MAX { None } else { Some(last) };
+            if !uring_recover_credit(last_opt, tip) {
+                return UringRecover::Exhausted;
+            }
+            if self
+                .uring_recover_tip
+                .compare_exchange(last, tip, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
+                .is_ok()
+            {
+                rbitcoin_store::note_uring_recover();
+                rbitcoin_log::warn!("ibd: uring recover tip={tip} reason={reason}");
+                return UringRecover::Recovered;
+            }
+        }
+    }
+
+    /// Take recover credit, or abort. Returns only after a credited recover.
+    pub fn uring_recover_or_abort(&self, reason: &'static str) {
+        match self.uring_recover(reason) {
+            UringRecover::Recovered => {}
+            UringRecover::Exhausted => {
+                let msg = format!("recover credit exhausted on {reason}");
+                rbitcoin_store::abort_uring_unusable(&msg);
+            }
+        }
+    }
+
     /// Highest height on the RAM fence. Not the in-flight prune HWM
     /// ([`Self::drain_and_fence_hi`] — drain can lag this).
     pub fn fence_tip_height(&self) -> Option<u32> {
@@ -2369,7 +2420,10 @@ impl Query {
     /// Recursive DFS stack-overflowed (SIGSEGV) on mid-IBD restart; a fresh memo
     /// per call was O(depth²) on long header bands (each path step re-walked the
     /// remaining chain).
-    fn resume_subtree_score(
+    ///
+    /// Gray (`on_stack`) nodes are not re-pushed: a `prev_fk` cycle used to spin
+    /// the IBD thread after `resume seed walk start` with no further log.
+    pub(crate) fn resume_subtree_score(
         store: &rbitcoin_store::Store,
         children: &U64Map<Vec<(Fk, [u8; 32])>>,
         root: Fk,
@@ -2380,23 +2434,29 @@ impl Query {
             return Ok(v);
         }
         // false = first visit (push children), true = children done (fold).
+        let mut on_stack: U64Set = U64Set::default();
         let mut stack: Vec<(Fk, bool)> = Vec::with_capacity(256);
         stack.push((root, false));
         while let Some((fk, children_done)) = stack.pop() {
             if memo.contains_key(&fk.0) {
+                on_stack.remove(&fk.0);
                 continue;
             }
             if !children_done {
+                if !on_stack.insert(fk.0) {
+                    continue;
+                }
                 stack.push((fk, true));
                 if let Some(kids) = children.get(&fk.0) {
                     for &(ck, _) in kids {
-                        if !memo.contains_key(&ck.0) {
+                        if !memo.contains_key(&ck.0) && !on_stack.contains(&ck.0) {
                             stack.push((ck, false));
                         }
                     }
                 }
                 continue;
             }
+            on_stack.remove(&fk.0);
             let rec = store.get_header(fk)?;
             let own = Target::from_compact(CompactTarget::from_consensus(rec.bits)).to_work();
             let mut best_child_w = bitcoin::Work::from_be_bytes([0u8; 32]);

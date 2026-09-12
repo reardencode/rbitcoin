@@ -42,6 +42,19 @@ impl StoreError {
     pub fn is_io_backpressure(&self) -> bool {
         matches!(self, StoreError::BudgetFull(m) if m.contains("SQ"))
     }
+
+    /// Completion-session failure (not on-disk corruption, not SQ backpressure).
+    pub fn is_uring_session_fault(&self) -> bool {
+        match self {
+            StoreError::Corrupt(m) => Self::is_uring_session_fault_msg(m),
+            _ => false,
+        }
+    }
+
+    pub fn is_uring_session_fault_msg(m: &str) -> bool {
+        let s = m.to_ascii_lowercase();
+        s.contains("io_uring") && !s.contains("linux-only") && !s.contains("unavailable")
+    }
 }
 
 impl fmt::Display for StoreError {
@@ -135,5 +148,30 @@ mod tests {
             sq
         );
         assert!(!StoreError::Corrupt("broken").is_io_backpressure());
+    }
+
+    #[test]
+    fn uring_session_fault_strings() {
+        for m in [
+            "invariant: io_uring undrained",
+            "invariant: io_uring wait timeout",
+            "invariant: io_uring session poisoned",
+            "invariant: io_uring unexpected cqe",
+            "invariant: io_uring cq overflow",
+            "io_uring submit_and_wait failed",
+            "invariant: io_uring leftover cqe",
+            "io_uring submit failed",
+        ] {
+            assert!(StoreError::Corrupt(m).is_uring_session_fault(), "{m}");
+        }
+        assert!(!StoreError::BudgetFull("io_uring SQ").is_uring_session_fault());
+        assert!(!StoreError::Unavailable.is_uring_session_fault());
+        assert!(!StoreError::Corrupt("io_uring is Linux-only").is_uring_session_fault());
+        assert!(!StoreError::Corrupt("broken").is_uring_session_fault());
+        assert!(!StoreError::Io {
+            path: PathBuf::from("/tmp/x"),
+            source: io::Error::other("disk"),
+        }
+        .is_uring_session_fault());
     }
 }

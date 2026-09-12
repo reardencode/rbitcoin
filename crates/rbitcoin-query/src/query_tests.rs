@@ -37,6 +37,47 @@ fn query_open_clears_strong_above_tip() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn uring_recover_credit_gap() {
+    assert!(uring_recover_credit(None, 0));
+    assert!(!uring_recover_credit(Some(0), 0));
+    assert!(!uring_recover_credit(Some(0), 144));
+    assert!(!uring_recover_credit(Some(0), 999));
+    assert!(uring_recover_credit(Some(0), 1000));
+    assert!(uring_recover_credit(Some(100), 1100));
+}
+
+#[test]
+fn uring_recover_credit_once_per_window_does_not_repair() {
+    let (_d, q) = temp_query("uring-recover");
+    let leftover = Fk(99);
+    q.store().strong_tx.set_strong(leftover, Fk(1)).unwrap();
+    q.store().flush_class_c_tip().unwrap();
+    assert!(q.store().strong_tx.is_strong(leftover).unwrap());
+    assert_eq!(q.uring_recover("test"), UringRecover::Recovered);
+    assert!(
+        q.store().strong_tx.is_strong(leftover).unwrap(),
+        "in-process recover must not mutate Class C; leftover strong waits for open repair"
+    );
+    q.store().strong_tx.set_strong(leftover, Fk(1)).unwrap();
+    q.store().flush_class_c_tip().unwrap();
+    assert_eq!(q.uring_recover("again"), UringRecover::Exhausted);
+}
+
+#[test]
+fn uring_recover_cas_second_claim_at_same_tip_is_exhausted() {
+    let (_d, q) = temp_query("uring-recover-cas");
+    assert_eq!(q.uring_recover("a"), UringRecover::Recovered);
+    assert_eq!(q.uring_recover("b"), UringRecover::Exhausted);
+}
+
+#[test]
+fn uring_recover_or_abort_takes_credit() {
+    let (_d, q) = temp_query("uring-recover-or-abort");
+    q.uring_recover_or_abort("test");
+    assert_eq!(q.uring_recover("again"), UringRecover::Exhausted);
+}
+
 fn temp_query(label: &str) -> (std::path::PathBuf, Query) {
     let n = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -920,6 +961,54 @@ fn disconnect_tip_waits_for_sh_appender() {
         "disconnect must take sh_appender, waited {waited:?}"
     );
     assert!(q.tip_height().is_none());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn disconnect_tip_unlinks_megakey_sh_and_truncates_tweaks() {
+    use rbitcoin_store::ShHeadValue;
+    let (dir, q) = temp_query("sh-megakey-reorg");
+    q.set_sptweaks_enabled(true, Height(0)).unwrap();
+    let (h0, t0) = coinbase_block(0, Fk::NULL, None);
+    let hash0 = h0.hash;
+    let fk0 = q.connect_block(Height(0), &h0, &[t0]).unwrap();
+    q.put_sp_tweaks_block(Height(0), fk0, &[None]).unwrap();
+
+    let prev = q.tip_header_fk().unwrap().unwrap();
+    let (h1, mut cb) = coinbase_block(1, prev, Some(hash0));
+    let hot = vec![0x99u8];
+    cb.outputs = vec![OutputRecord::unspent(1, hot.clone())];
+    let mut txs = Vec::with_capacity(257);
+    txs.push(cb);
+    for i in 1..257u16 {
+        let mut t = coinbase_block(1, prev, Some(hash0)).1;
+        t.tx.txid[28] = 0xee;
+        t.tx.txid[29] = (i >> 8) as u8;
+        t.tx.txid[30] = i as u8;
+        t.outputs = vec![OutputRecord::unspent(1, hot.clone())];
+        txs.push(t);
+    }
+    let fk1 = q.connect_block(Height(1), &h1, &txs).unwrap();
+    q.put_sp_tweaks_block(Height(1), fk1, &vec![None; txs.len()])
+        .unwrap();
+    assert_eq!(q.sptweaks_next_height(), Some(Height(2)));
+
+    let sh = script_hash(&[0x99]);
+    match q.store().scripthash.head_value(&sh).unwrap().unwrap() {
+        ShHeadValue::Extent { .. } => {}
+        other => panic!("expected extent megakey after 257 creates, got {other:?}"),
+    }
+    assert_eq!(q.scripthash_history(&sh).unwrap().len(), 257);
+
+    q.disconnect_tip().unwrap();
+    assert_eq!(q.tip_height(), Some(Height(0)));
+    assert!(
+        q.scripthash_history(&sh).unwrap().is_empty(),
+        "disconnected megakey creates must not remain in SH"
+    );
+    assert_eq!(q.sptweaks_next_height(), Some(Height(1)));
+    assert!(q.load_thin_tweaks(Height(1)).unwrap().is_none());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2769,5 +2858,26 @@ fn resume_work_path_from_loser_tip_explores_heavier_sibling() {
         path.len() >= 2 && path[1].hash == w2.hash,
         "must continue winner chain: {path:?}"
     );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// False `prev_fk` can cycle the child map. Resume seed used to spin forever
+/// re-pushing gray nodes (one CPU, no disk, no `ordered=` log).
+#[test]
+fn resume_subtree_score_prev_fk_cycle_terminates() {
+    let (dir, q) = temp_query("resume-cycle");
+    let (g, _) = coinbase_block(0, Fk::NULL, None);
+    let gfk = q.put_header(&g).unwrap();
+    let (a, _) = coinbase_block(1, gfk, Some(g.hash));
+    let afk = q.put_header(&a).unwrap();
+    let mut children: crate::U64Map<Vec<(Fk, [u8; 32])>> = crate::U64Map::default();
+    children.insert(gfk.0, vec![(afk, a.hash)]);
+    children.insert(afk.0, vec![(gfk, g.hash)]);
+    let mut memo = crate::U64Map::default();
+    let (_w, d) = crate::Query::resume_subtree_score(q.store(), &children, gfk, &mut memo)
+        .expect("cycle must not hang");
+    assert!(memo.contains_key(&gfk.0));
+    assert!(memo.contains_key(&afk.0));
+    assert!(d >= 1);
     let _ = std::fs::remove_dir_all(dir);
 }

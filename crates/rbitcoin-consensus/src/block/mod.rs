@@ -1272,6 +1272,9 @@ fn assemble_block_prevouts_mode(
                     if pj >= ti {
                         return Err(ConsensusError::MissingPrevout);
                     }
+                    if pj == 0 {
+                        return Err(ConsensusError::BadTx("coinbase immature"));
+                    }
                 }
                 // Thin create_fk is a promise (identity matches wire prev_txid).
                 // Do not treat thin as a soft spentness hint. Same-block (pj < ti)

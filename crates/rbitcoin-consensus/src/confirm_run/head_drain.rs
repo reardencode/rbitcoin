@@ -7,9 +7,7 @@ use rbitcoin_store::StoreError;
 use std::collections::VecDeque;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::mpsc::{self, Receiver};
-#[cfg(test)]
-use std::sync::Arc;
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 #[cfg(test)]
 use std::thread::ThreadId;
@@ -56,13 +54,27 @@ fn recv_job(jobs: &Mutex<VecDeque<Job>>, cv: &Condvar) -> Job {
 
 pub(crate) struct HeadDrainHandle {
     rx: Option<Receiver<Result<u64, StoreError>>>,
+    restore: Option<Arc<Mutex<Option<Vec<([u8; 32], rbitcoin_primitives::Fk)>>>>>,
     #[cfg(test)]
     named: Arc<Mutex<Option<(ThreadId, String)>>>,
 }
 
 impl HeadDrainHandle {
-    pub(crate) fn join(mut self) -> Result<u64, StoreError> {
-        self.recv_result()
+    /// Join and, on insert failure, return the batch so the write thread can
+    /// put it back on pending-head (no clone on the success path).
+    pub(crate) fn join_restore(
+        mut self,
+    ) -> (
+        Result<u64, StoreError>,
+        Vec<([u8; 32], rbitcoin_primitives::Fk)>,
+    ) {
+        let r = self.recv_result();
+        let queued = self
+            .restore
+            .take()
+            .and_then(|a| a.lock().unwrap_or_else(|p| p.into_inner()).take())
+            .unwrap_or_default();
+        (r, queued)
     }
 
     fn recv_result(&mut self) -> Result<u64, StoreError> {
@@ -129,6 +141,7 @@ where
     pool.cv.notify_one();
     HeadDrainHandle {
         rx: Some(rx),
+        restore: None,
         #[cfg(test)]
         named,
     }
@@ -155,5 +168,15 @@ pub(crate) fn submit_head_insert(
     batch: Vec<([u8; 32], rbitcoin_primitives::Fk)>,
 ) -> HeadDrainHandle {
     let ptr = SendStorePtr::from_store(store);
-    submit_head_drain(move || ptr.insert(&batch))
+    let restore = Arc::new(Mutex::new(None));
+    let restore_job = Arc::clone(&restore);
+    let mut handle = submit_head_drain(move || match ptr.insert(&batch) {
+        Ok(n) => Ok(n),
+        Err(e) => {
+            *restore_job.lock().unwrap_or_else(|p| p.into_inner()) = Some(batch);
+            Err(e)
+        }
+    });
+    handle.restore = Some(restore);
+    handle
 }

@@ -463,6 +463,9 @@ pub(crate) struct IbdPerfSample {
     pub owned: ProcessOwnedSizes,
     /// Confirm load/scripts/write queue contents + feed.
     pub conf_pipe: ConfirmPipelineSizes,
+    pub uring_recover_n: u64,
+    pub uring_slow_drain: u64,
+    pub lookup_faults: u64,
 }
 
 impl Default for IbdPerfSample {
@@ -707,6 +710,9 @@ impl Default for IbdPerfSample {
             work: WorkStructureSizes::default(),
             owned: ProcessOwnedSizes::default(),
             conf_pipe: ConfirmPipelineSizes::default(),
+            uring_recover_n: 0,
+            uring_slow_drain: 0,
+            lookup_faults: 0,
         }
     }
 }
@@ -1195,6 +1201,9 @@ pub(crate) fn sample(
         work,
         owned,
         conf_pipe,
+        uring_recover_n: rbitcoin_store::uring_recover_count(),
+        uring_slow_drain: rbitcoin_store::uring_slow_drain_count(),
+        lookup_faults: super::confirm::take_lookup_wave_faults(),
     }
 }
 
@@ -1333,6 +1342,9 @@ pub(crate) fn format_info(s: &IbdPerfSample) -> String {
         s.conf_write_q_hwm,
         s.conf_write_q_cap,
     ));
+    append_nz(&mut out, "uring_recover", s.uring_recover_n);
+    append_nz(&mut out, "slow_drain", s.uring_slow_drain);
+    append_nz(&mut out, "lookup_faults", s.lookup_faults);
     let _ = thr_lookup_wait;
     if s.stamp_struct_ms > 0
         || s.stamp_prepare_ms > 0
@@ -2141,8 +2153,14 @@ mod tests {
         s.dominant = "confirm";
         s.live = Some((100, 32, 8000, 1500));
         s.confirm_reject_stops = 2;
+        s.uring_recover_n = 1;
+        s.uring_slow_drain = 2;
+        s.lookup_faults = 3;
         let line = format_info(&s);
         assert!(line.starts_with("ibd: perf "), "{line}");
+        assert!(line.contains("uring_recover=1"), "{line}");
+        assert!(line.contains("slow_drain=2"), "{line}");
+        assert!(line.contains("lookup_faults=3"), "{line}");
         assert!(line.contains("inflight=3/256"), "{line}");
         assert!(!line.contains("body_soft="), "{line}");
         assert!(!line.contains("body_pend="), "{line}");

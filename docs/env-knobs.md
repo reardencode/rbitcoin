@@ -34,6 +34,7 @@ for signet/mainnet sync. **Not** CLI.
 | `RBITCOIN_SH_FORCE_REBUILD` | off | Sticky SH rebuild (also in OPERATOR) |
 | `RBITCOIN_SH_MERGE_WORKERS` | min(n-cpu, free-RAM/2 GiB) | Unsorted SH pack (`1` = serial). Unset = auto (see [`ibd-memory.md`](./ibd-memory.md)) |
 | `RBITCOIN_P2P_MAX_INBOUND` | 125 | Only if `--maxinbound` / conf omitted |
+| `RBITCOIN_URING_DRAIN_HARD_SECS` | 120 | `drain_all` zero-CQE abort (Linux/pool/IOCP). Raise if completions are slow but still arriving |
 
 ## Hardcoded (no env)
 

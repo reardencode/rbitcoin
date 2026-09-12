@@ -124,6 +124,7 @@ published idx window.
 | `invariant: confirm batch mixed archived` | S3 | One stamp/load list spans need-body and already-bodied | Split at the `has_body` change (IBD lookup) or call one-shot twice. Do not hitchhike `get_list` on `plan=Some` |
 | `put_full_batch fk mismatch` | S4 cascade | Tip-ahead plan after tip+1 reject | Soft requeue for fk mismatch / connect height not tip+1 |
 | `parent create_fk unresolved` | S2 | Skeleton / in-flight miss | **Engine fault.** Requeue once, then halt IBD. Do not blacklist. |
+| Lookup 8 consecutive non-session `Io` | live | Read-side store IO | **EngineFault** reject: `apply_engine_fault_reject` **dequeues** that height's body-queue payload and requeues the hash once; a second occurrence on the same hash **halts** IBD. Session-fault recover does **not** dequeue. Do not emit a reject when the feed has no ready hash. |
 | false PrevoutSpent | identity | schema-13 zero pin id | plan reverse map / lookup `txid.body` only |
 
 ## Why there is no leftover pending map

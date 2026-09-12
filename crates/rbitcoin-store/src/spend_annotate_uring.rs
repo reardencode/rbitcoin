@@ -336,9 +336,33 @@ fn decide_annotate(
         let meta = encode_spent_slot_v17(flags | output_flags::MULTI_SPENDER, e2)?;
         return Ok(AnnotateOp::Write(meta));
     }
+    if multi_list_contains(spenders, field, spend_fk)? {
+        return Ok(AnnotateOp::Skip);
+    }
     let e = spenders.append(spend_fk, field)?;
     let meta = encode_spent_slot_v17(flags | output_flags::MULTI_SPENDER, e)?;
     Ok(AnnotateOp::Write(meta))
+}
+
+fn multi_list_contains(
+    spenders: &SpenderTable,
+    head: Fk,
+    spend_fk: Fk,
+) -> Result<bool, StoreError> {
+    let mut cur = head;
+    let mut n = 0u32;
+    while let Some(id) = cur.get() {
+        n = n.saturating_add(1);
+        if n > 1_000_000 {
+            return Err(StoreError::Corrupt("invariant: spender multi-list cycle"));
+        }
+        let (sfk, next) = spenders.get(Fk(id))?;
+        if sfk == spend_fk {
+            return Ok(true);
+        }
+        cur = next;
+    }
+    Ok(false)
 }
 
 /// One RMW window on `spent.body` (usually one 4 KiB page, clipped to the
@@ -851,6 +875,46 @@ mod tests {
         .unwrap();
         let bulk2 = t.get_spender_meta_at_abs_batch(&[abs]).unwrap();
         assert_eq!(bulk2[0].unwrap().0, sfk);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pure_write_multi_repeat_same_spend_fk_skips() {
+        let (dir, t, spenders) = temp_table();
+        let (cfk, off, _len) = put_one(&t);
+        let abs = crate::tx_table::spent_abs(off, 0);
+        let a = Fk(11);
+        let b = Fk(12);
+        let known0 = t.get_spender_meta_at_abs_batch(&[abs]).unwrap()[0].unwrap();
+        put_spend_batch_by_abs_meta_known(
+            &t,
+            &spenders,
+            &[(abs, cfk, 0, a)],
+            &[known0],
+            SpendAnnBackend::Pwrite,
+        )
+        .unwrap();
+        let known1 = t.get_spender_meta_at_abs_batch(&[abs]).unwrap()[0].unwrap();
+        put_spend_batch_by_abs_meta_known(
+            &t,
+            &spenders,
+            &[(abs, cfk, 0, b)],
+            &[known1],
+            SpendAnnBackend::Pwrite,
+        )
+        .unwrap();
+        let (field, flags) = t.get_spender_meta_at_abs_batch(&[abs]).unwrap()[0].unwrap();
+        assert_ne!(flags & output_flags::MULTI_SPENDER, 0);
+        let n0 = spenders.count();
+        put_spend_batch_by_abs_meta_known(
+            &t,
+            &spenders,
+            &[(abs, cfk, 0, b)],
+            &[(field, flags)],
+            SpendAnnBackend::Pwrite,
+        )
+        .unwrap();
+        assert_eq!(spenders.count(), n0, "repeat must not append a list node");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
