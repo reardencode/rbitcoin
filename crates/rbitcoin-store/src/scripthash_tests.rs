@@ -527,6 +527,36 @@ fn sh_heads_insert_capped_caps_and_keeps_latest() {
     assert!(heads.contains_key(&last), "latest insert must stay");
 }
 
+#[test]
+fn append_after_zero_live_count_keeps_sealed_home() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let sh = script_hash(&[0x7e]);
+    let mut session = t.bulk_session(1).unwrap();
+    session.put_chain(sh, &[Fk(1)]).unwrap();
+    let _ = session.finish().unwrap();
+    assert!(matches!(t.key_home(&sh).unwrap(), KeyHome::Main));
+    t.test_zero_live_count_keep_head().unwrap();
+    assert_eq!(t.entry_count(), 0);
+    assert!(!t.head_is_empty());
+    put_create(&t, rec(sh, 2, 0));
+    assert!(
+        matches!(t.key_home(&sh).unwrap(), KeyHome::Main),
+        "crash mid-finish (live_count=0, heads occupied) must still probe sealed main"
+    );
+    let fks: Vec<_> = t
+        .entries(&sh)
+        .unwrap()
+        .into_iter()
+        .map(|(_, r)| r.create_tx_fk)
+        .collect();
+    assert!(
+        fks.contains(&Fk(1)) && fks.contains(&Fk(2)),
+        "append must not dual-home ingest over sealed rows: {fks:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn dummy_sh_head_key(i: u64) -> [u8; 32] {
     let mut k = [0xEE; 32];
     k[..8].copy_from_slice(&i.to_le_bytes());
@@ -1042,6 +1072,12 @@ fn compact_merges_two_sealed_global_ovf_files() {
             t.key_home(&first_new).unwrap(),
             KeyHome::SealedOvf
         ));
+        let mut walked = 0u64;
+        t.for_each_live_create(|_| walked += 1).unwrap();
+        assert_eq!(
+            walked, 421,
+            "occupancy walk must include compacted overflow L1"
+        );
 
         t.compact_sealed_ovf().unwrap();
         assert!(t.ovf_l1.lock().unwrap().is_some());
