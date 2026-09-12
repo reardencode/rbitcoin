@@ -757,6 +757,83 @@ async fn electrum_asof_hides_later_spend() {
     handle.shutdown().await;
 }
 
+/// Cake isolate: JSON-RPC result is the first height, then one notification
+/// per following height, then `{"message":"done"}`. A multi-height result is
+/// treated as one event; no `done` leaves the isolate pinging forever.
+#[tokio::test]
+async fn electrum_tweaks_subscribe_streams_then_done() {
+    use rbitcoin_consensus::{accept_and_connect_block, Milestone};
+    use rbitcoin_primitives::Height;
+
+    let dir = TempDir::new().unwrap();
+    let q = Query::open_or_create_tiny(dir.path().join("store")).unwrap();
+    let params = ChainParams::regtest();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+    let _ = rbitcoin_consensus::pad_empty_from(
+        &q,
+        &params,
+        genesis.block_hash(),
+        genesis.header.time,
+        1,
+        4,
+        0,
+    );
+
+    let q = Arc::new(q);
+    let (tip_tx, _) = broadcast::channel(4);
+    let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+    let handle = run_electrum(cfg, q, params, tip_tx, None)
+        .await
+        .expect("electrum listen");
+    let mut stream = TcpStream::connect(handle.local_addr).await.unwrap();
+
+    let req = json!({
+        "jsonrpc":"2.0","id":"scan",
+        "method":"blockchain.tweaks.subscribe",
+        "params":[1, 3, false]
+    });
+    let mut line = serde_json::to_string(&req).unwrap();
+    line.push('\n');
+    stream.write_all(line.as_bytes()).await.unwrap();
+    let mut reader = BufReader::new(&mut stream);
+    let mut resp = String::new();
+
+    read_line_timeout(&mut reader, &mut resp, "tweaks result").await;
+    let result: Value = serde_json::from_str(&resp).unwrap();
+    assert_eq!(result["id"], "scan");
+    let map = result["result"].as_object().expect("result map");
+    assert_eq!(
+        map.len(),
+        1,
+        "JSON-RPC result must be one height, got {map:?}"
+    );
+    assert!(map.contains_key("1"), "{map:?}");
+
+    read_line_timeout(&mut reader, &mut resp, "tweaks 2").await;
+    let n2: Value = serde_json::from_str(&resp).unwrap();
+    assert_eq!(n2["method"], "blockchain.tweaks.subscribe");
+    let p2 = n2["params"][0].as_object().expect("notify 2");
+    assert_eq!(p2.len(), 1);
+    assert!(p2.contains_key("2"), "{p2:?}");
+
+    read_line_timeout(&mut reader, &mut resp, "tweaks 3").await;
+    let n3: Value = serde_json::from_str(&resp).unwrap();
+    assert_eq!(n3["method"], "blockchain.tweaks.subscribe");
+    let p3 = n3["params"][0].as_object().expect("notify 3");
+    assert_eq!(p3.len(), 1);
+    assert!(p3.contains_key("3"), "{p3:?}");
+
+    read_line_timeout(&mut reader, &mut resp, "tweaks done").await;
+    let done: Value = serde_json::from_str(&resp).unwrap();
+    assert_eq!(done["method"], "blockchain.tweaks.subscribe");
+    assert_eq!(done["params"][0]["message"], "done");
+
+    drop(reader);
+
+    handle.shutdown().await;
+}
+
 #[tokio::test]
 async fn electrum_max_connections_rejects_extra_client() {
     use tokio::io::AsyncReadExt;
