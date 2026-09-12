@@ -71,7 +71,6 @@ level peers cannot ignore.
 
 Not Open, not Completed — see **Won't fix** for retired Q-ids.
 
-- Multi-OS operator binaries before Linux IBD/tip is boringly solid
 - 100% line-coverage theater (gate is **≥90%** LCOV + property-focused tests)
 - Rewriting secp256k1 / rust-bitcoin / tokio “to reduce deps”
 - Flattening purpose-built io_uring machines to batched `pread` (see [`io-modality.md`](./io-modality.md))
