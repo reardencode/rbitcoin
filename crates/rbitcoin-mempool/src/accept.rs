@@ -992,8 +992,8 @@ impl ActiveMempool {
                 continue;
             }
             if self.graph.contains(t) {
-                self.remove_txid(t)?;
-                removed += 1;
+                let gone = self.remove_txid_tree(t);
+                removed = removed.saturating_add(gone.len());
             }
         }
         Ok(removed)
@@ -3056,6 +3056,37 @@ mod tests {
         let n = mp.evict_to_budget(Some(id)).unwrap();
         assert_eq!(n, 0, "protecting the only live tx is a no-op pass");
         assert_eq!(mp.live_count(), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn evict_worst_chunk_does_not_strand_child() {
+        let dir = tmp_dir();
+        let (op, _, utxos) = chain_utxo(100_000);
+        let parent = spend_tx(op, 99_000);
+        let parent_id = parent.compute_txid();
+        let child = spend_tx(
+            OutPoint {
+                txid: parent_id,
+                vout: 0,
+            },
+            50_000,
+        );
+        let child_id = child.compute_txid();
+        let mut mp = ActiveMempool::open_or_create_with_limit(&dir, 10_000_000).unwrap();
+        mp.accept_tx(&parent, &utxos, TIP_OK).unwrap();
+        mp.accept_tx(&child, &utxos, TIP_OK).unwrap();
+        assert!(mp.graph.contains(&parent_id));
+        assert!(mp.graph.contains(&child_id));
+        let w = mp.graph.total_weight();
+        mp.max_weight = w.saturating_sub(1);
+        mp.evict_to_budget(None).unwrap();
+        if mp.graph.contains(&child_id) {
+            assert!(
+                mp.graph.contains(&parent_id),
+                "child must not remain without its mempool parent"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
