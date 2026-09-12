@@ -1230,6 +1230,43 @@ fn optimistic_assemble_unstamped_parent_is_invariant() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
+/// Same-block coinbase spend is always immature (Core: nHeight < coinbaseHeight + 100).
+#[test]
+fn accept_rejects_same_block_coinbase_spend() {
+    use crate::{accept_and_connect_block, mine_empty_regtest, prepare_regtest_candidate};
+    let (_dir, q) = rbitcoin_query::testutil::tiny_query_labeled("same-block-cb");
+    let params = ChainParams::regtest();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+    let mut block = mine_empty_regtest(genesis.block_hash(), genesis.header.time + 600, 1);
+    let cb_val = block.txdata[0].output[0].value;
+    let spend = Transaction {
+        version: TxVersion::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: block.txdata[0].compute_txid(),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: cb_val,
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    block.txdata.push(spend);
+    prepare_regtest_candidate(&mut block, genesis.block_hash(), genesis.header.time + 600);
+    let err = accept_and_connect_block(&q, &params, Height(1), &block, Milestone::NONE)
+        .expect_err("same-block coinbase spend must be immature");
+    match err {
+        ConsensusError::BadTx("coinbase immature") => {}
+        other => panic!("expected coinbase immature, got {other}"),
+    }
+}
+
 #[test]
 fn assemble_milestone_pin_still_rejects_bad_blk_sigops() {
     use super::assemble_block_prevouts;

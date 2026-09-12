@@ -20,6 +20,13 @@ before 1.0).
 
 ### Fixed
 
+- **Same-block coinbase maturity:** a later tx in the same block that spends
+  the coinbase is `coinbase immature` (Core `nHeight < coinbaseHeight + 100`).
+  Assemble already maps this block’s txids (`txid_index`); parent index 0
+  is the coinbase. Durable maturity still uses `create_fk == first_tx_fk`.
+- **IBD `lookup_taken_hi` rewind:** merkle/witness SoftWire, Cascade,
+  EngineFault, and ConsensusInvalid rewind the lookup consume high-water to
+  the confirmed tip so densify can re-getdata. Previously only BadPrev did.
 - **IBD session-fault resume:** after Class C, a uring session fault on spend
   annotate or `tx.head` drain finishes annotate+drain on the write thread
   (tip `connect_at` retries `finish_post_commit`; IBD does the same in place
