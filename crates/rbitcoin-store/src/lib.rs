@@ -146,14 +146,7 @@ pub use tx_table::{
 };
 pub use txid_body::{TxidBody, TXID_BODY_HEADER, TXID_ENTRY_LEN};
 pub use uring_session::{
-    abort_uring_unusable, drop_thread_local, note_uring_recover, with_forced_session_kind,
-    with_thread_local, IoCtx, SessionKind, UringSession, DEFAULT_ENTRIES,
-};
-<<<<<<< HEAD
-=======
-pub(crate) use uring_session::IoCtx;
-pub use uring_session::{
     abort_uring_unusable, drop_thread_local, note_uring_recover, uring_recover_count,
-    uring_slow_drain_count,
+    uring_slow_drain_count, with_forced_session_kind, with_thread_local, IoCtx, SessionKind,
+    UringSession, DEFAULT_ENTRIES,
 };
->>>>>>> 81923366 (net,consensus: recover or abort on io_uring session faults)
