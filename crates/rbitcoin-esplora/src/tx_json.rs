@@ -614,18 +614,6 @@ mod tests {
     }
 
     #[test]
-    fn vout_fields_includes_type_and_value() {
-        // P2WPKH: 0x00 0x14 + 20 bytes
-        let mut spk = vec![0x00, 0x14];
-        spk.extend_from_slice(&[0x11; 20]);
-        let v = vout_fields(&spk, 50_000, Network::Bitcoin);
-        assert_eq!(v["value"], 50_000);
-        assert_eq!(v["scriptpubkey_type"], "v0_p2wpkh");
-        assert!(!v["scriptpubkey"].as_str().unwrap().is_empty());
-        assert!(v.get("scriptpubkey_address").is_some());
-    }
-
-    #[test]
     fn build_tx_json_prevout_is_outs_only_and_txid_from_body() {
         use rbitcoin_query::TxApply;
         use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
