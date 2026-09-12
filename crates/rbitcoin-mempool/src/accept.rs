@@ -1088,7 +1088,9 @@ impl ActiveMempool {
     }
 
     /// Remove `txid` and live mempool txs that spend it (1p1c child-fail rollback).
-    pub fn remove_txid_tree(&mut self, txid: &Txid) {
+    ///
+    /// Returns every txid dropped (spenders first, then `txid` if it was live).
+    pub fn remove_txid_tree(&mut self, txid: &Txid) -> Vec<Txid> {
         let n_out = self
             .get_tx(txid)
             .map(|tx| tx.output.len() as u32)
@@ -1096,8 +1098,11 @@ impl ActiveMempool {
         let spent: Vec<OutPoint> = (0..n_out)
             .map(|vout| OutPoint { txid: *txid, vout })
             .collect();
-        let _ = self.evict_conflicts_with(&spent);
-        let _ = self.remove_txid(txid);
+        let mut gone = self.evict_conflicts_with(&spent);
+        if self.remove_txid(txid).is_ok() {
+            gone.push(*txid);
+        }
+        gone
     }
 
     /// Remove all txs that appear in a confirmed block (coinbase ignored if present).
@@ -2766,7 +2771,11 @@ mod tests {
         mp.accept_tx(&child, &utxos, TIP_OK).unwrap();
         assert!(mp.graph.contains(&parent_id));
         assert!(mp.graph.contains(&child_id));
-        mp.remove_txid_tree(&parent_id);
+        let gone = mp.remove_txid_tree(&parent_id);
+        assert!(
+            gone.contains(&parent_id) && gone.contains(&child_id),
+            "tree remove must report parent and spender, got {gone:?}"
+        );
         assert!(
             !mp.graph.contains(&parent_id),
             "parent must leave the mempool"

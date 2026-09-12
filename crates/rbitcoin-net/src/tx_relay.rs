@@ -1308,8 +1308,25 @@ impl MempoolHub {
     }
 
     fn rollback_1p1c_parent(&self, txid: &Txid) {
-        let mut g = self.lock_write();
-        g.remove_txid_tree(txid);
+        let gone = {
+            let mut g = self.lock_write();
+            g.remove_txid_tree(txid)
+        };
+        self.unindex_evicted(&gone);
+    }
+
+    /// Drop hub relay / sh / fee-delta / template state for txs already
+    /// removed from the live graph (`remove_for_block_spent`, 1p1c rollback).
+    fn unindex_evicted(&self, gone: &[Txid]) {
+        if gone.is_empty() {
+            return;
+        }
+        self.note_template_update();
+        let mut deltas = self.fee_deltas.lock().unwrap();
+        for tid in gone {
+            self.unindex_txid(tid);
+            deltas.remove(tid);
+        }
     }
 
     fn note_if_accept_failure(&self, tx: &Transaction, e: &AcceptError) {
@@ -1710,12 +1727,7 @@ impl MempoolHub {
             g.erase_orphans_for_block(txids);
         }
         if n > 0 {
-            self.note_template_update();
-            let mut deltas = self.fee_deltas.lock().unwrap();
-            for tid in txids {
-                self.unindex_txid(tid);
-                deltas.remove(tid);
-            }
+            self.unindex_evicted(txids);
         }
         n
     }
@@ -1733,14 +1745,7 @@ impl MempoolHub {
         let mut g = self.lock_write();
         let gone = g.evict_conflicts_with(spent);
         drop(g);
-        if !gone.is_empty() {
-            self.note_template_update();
-            let mut deltas = self.fee_deltas.lock().unwrap();
-            for tid in &gone {
-                self.unindex_txid(tid);
-                deltas.remove(tid);
-            }
-        }
+        self.unindex_evicted(&gone);
         n + gone.len()
     }
 
@@ -3231,6 +3236,124 @@ mod tests {
             "1-sat sibling must not ride 1p1c promote at floor 0"
         );
         assert_eq!(hub.orphan_count(), 0);
+        let _ = std::fs::remove_dir_all(&mp);
+        let _ = std::fs::remove_dir_all(&store_dir);
+    }
+
+    /// Concurrent spender of a 1p1c parent is published before rollback.
+    /// Graph eviction must also unindex relay maps / template (same as
+    /// `remove_for_block_spent`).
+    #[test]
+    fn rollback_1p1c_unindexes_published_spenders() {
+        use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
+        use rbitcoin_primitives::Height;
+
+        let store_dir = tmp();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
+        let params = ChainParams::regtest();
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+        let (_tip, _tip_time, cbs) = rbitcoin_consensus::pad_empty_from(
+            &q,
+            &params,
+            genesis.block_hash(),
+            genesis.header.time,
+            1,
+            102,
+            1,
+        );
+        let q = Arc::new(q);
+        let spk = ScriptBuf::from_bytes(vec![0x51]);
+        let mp = tmp();
+        let hub = MempoolHub::open(&mp, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        hub.set_min_relay_sat_kvb(50_000);
+        let parent = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: cbs[0],
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![
+                TxOut {
+                    value: Amount::from_sat(25_0000_0000),
+                    script_pubkey: spk.clone(),
+                },
+                TxOut {
+                    value: Amount::from_sat(25_0000_0000 - 200),
+                    script_pubkey: spk.clone(),
+                },
+            ],
+        };
+        let parent_id = parent.compute_txid();
+        assert!(
+            matches!(
+                hub.accept_tx(&parent),
+                Err(AcceptError::Policy("min relay fee"))
+            ),
+            "parent alone below min-relay"
+        );
+        let child = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: parent_id,
+                    vout: 1,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: spk.clone(),
+            }],
+        };
+        hub.accept_tx(&child)
+            .expect("hub 1p1c must admit parent+child");
+        let sib = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: parent_id,
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(25_0000_0000 - 10_000),
+                script_pubkey: spk,
+            }],
+        };
+        let sib_id = sib.compute_txid();
+        let sib_w = sib.compute_wtxid();
+        hub.accept_tx(&sib).expect("paying sibling of live parent");
+        assert!(hub.contains(&sib_id));
+        assert!(hub.relay_seq_of(&sib_w).is_some());
+        assert!(hub.accept_time_txid(&sib_id).is_some());
+        let tmpl = hub.template_updates();
+        hub.rollback_1p1c_parent(&parent_id);
+        assert!(!hub.contains(&parent_id));
+        assert!(!hub.contains(&sib_id));
+        assert!(
+            hub.relay_seq_of(&sib_w).is_none(),
+            "published spender must leave wtxid/relay maps"
+        );
+        assert!(hub.accept_time_txid(&sib_id).is_none());
+        assert!(
+            hub.template_updates() > tmpl,
+            "template must bump like remove_for_block_spent"
+        );
         let _ = std::fs::remove_dir_all(&mp);
         let _ = std::fs::remove_dir_all(&store_dir);
     }
