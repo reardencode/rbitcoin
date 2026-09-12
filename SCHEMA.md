@@ -612,7 +612,9 @@ compact still merges **heads only** — all ovf keys share
   `extent_n:u32` + reserved (stream starts at 24, max 4072 B). Last-page chunks
   use that cap; `ver=1` intermediates still fill 4088 B. Mode 11 pack8 stores **last**
   page off; that page holds `(extent_base, extent_n)`. Query span-reads `extent_n`
-  pages then linked-walks a 4 KiB tail. Mode 10 pack8 is **refused** on open.
+  pages then linked-walks a 4 KiB tail. Span pread is capped at 64 MiB; a larger
+  or past-EOF `extent_n` falls back to the linked walk so disconnect/unlink can
+  still rewrite the chain. Mode 10 pack8 is **refused** on open.
   `ver=0` with `n_fks>0` is a leftover raw-u64 page — rematerialize. Last-page
   append only. Megakeys never relocate.
 - SH shard bodies and `scripthash.ovf/body` grow in **64 KiB** steps (`GrowPolicy::Align64k`).
@@ -631,9 +633,10 @@ typical multi-use; page chains only for megakeys. Query expand is waved
 `idx_body_pipeline` (`txout` outs) + `txid.body` page-grouped identity +
 `spent.body` 8 B batch peeks on the process `RBITCOIN_IO` session (not one
 serial pread per create). Megakey **extent** (`pack8` mode 11): span-read
-`extent_n` pages from `extent_base` on the last page, then linked-walk any
-4 KiB tail. Mode 10 leftovers are a linked walk (no `last = first + (n−1)×4096`
-guess). Cost for busy wallets is still dominated by
+`extent_n` pages from `extent_base` on the last page (capped at 64 MiB; larger
+falls back to linked walk), then linked-walk any 4 KiB tail. Mode 10 leftovers
+are a linked walk (no `last = first + (n−1)×4096` guess). Cost for busy wallets
+is still dominated by
 Class A + spend joins, not SH pointer chasing.
 
 ---

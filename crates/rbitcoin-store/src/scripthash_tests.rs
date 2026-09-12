@@ -5,7 +5,8 @@ use crate::scripthash_materialize::{
     materialize_sh_from_unsorted, unsorted_done_last_fk, unsorted_shard_path, UNSORTED_SHARD_DIR,
 };
 use crate::scripthash_pages::{
-    sh_page_as_array, sh_page_extent, SH_PAGE_EXTENT_STREAM_MAX, SH_PAGE_SIZE, SH_PAGE_STREAM_MAX,
+    sh_page_as_array, sh_page_as_array_mut, sh_page_extent, sh_page_set_extent,
+    SH_PAGE_EXTENT_STREAM_MAX, SH_PAGE_SIZE, SH_PAGE_STREAM_MAX,
 };
 use std::sync::atomic::AtomicBool;
 
@@ -651,6 +652,35 @@ fn page_append_preserves_prefix_and_order() {
         other => panic!("expected extent megakey, got {other:?}"),
     }
     assert_eq!(t.entries(&sh2).unwrap().len(), 600);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn extent_span_over_cap_still_unlinks() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let sh = script_hash(&[0x7c]);
+    let mut heads = HashMap::new();
+    let many: Vec<_> = (1..=600u32).map(|v| rec(sh, u64::from(v), v)).collect();
+    let (nm, _) = t.put_create_batch_append(&many, &mut heads).unwrap();
+    assert_eq!(nm, 600);
+    let last_page = match t.head_value(&sh).unwrap().unwrap() {
+        ShHeadValue::Extent { last_page } => last_page,
+        other => panic!("expected extent megakey, got {other:?}"),
+    };
+
+    let mut page = [0u8; SH_PAGE_SIZE];
+    t.ovf_file().read_at(last_page, &mut page).unwrap();
+    let arr = sh_page_as_array_mut(&mut page).unwrap();
+    let (base, n) = sh_page_extent(arr).unwrap().expect("ver=2 last page");
+    let over = (64 * 1024 * 1024 / SH_PAGE_SIZE as u64) as u32 + 1;
+    assert!(over > n, "stamp must exceed the real page count {n}");
+    sh_page_set_extent(arr, base, over).unwrap();
+    t.ovf_file().write_at(last_page, &page).unwrap();
+
+    assert_eq!(t.entries(&sh).unwrap().len(), 600);
+    assert!(t.unlink_create(&sh, Fk(600), 600).unwrap());
+    assert_eq!(t.entries(&sh).unwrap().len(), 599);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
