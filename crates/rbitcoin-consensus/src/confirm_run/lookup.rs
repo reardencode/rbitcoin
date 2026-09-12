@@ -79,6 +79,41 @@ pub struct PlanStampOutcome {
     wire_blocks: Vec<Arc<Block>>,
 }
 
+impl PlanStampOutcome {
+    /// Create identity already on the stamp (`pres` txids + planned/archived fks).
+    ///
+    /// plan=None in-flight publish uses this instead of re-reading `txid.body`.
+    pub fn archived_create_pairs(
+        &self,
+    ) -> Result<Vec<([u8; 32], rbitcoin_primitives::Fk)>, ConsensusError> {
+        archived_create_pairs(&self.metas)
+    }
+
+    pub fn last_height_hash(&self) -> Option<(u32, [u8; 32])> {
+        self.metas.last().map(|m| (m.height.0, m.hash))
+    }
+}
+
+pub(super) fn archived_create_pairs(
+    metas: &[BodyMeta],
+) -> Result<Vec<([u8; 32], rbitcoin_primitives::Fk)>, ConsensusError> {
+    let mut pairs = Vec::new();
+    for m in metas {
+        if m.tx_fks.len() != m.txids.len() {
+            return Err(ConsensusError::Store(StoreError::Corrupt(
+                "invariant: archived stamp tx_fks/txids length",
+            )));
+        }
+        for (tid, fk) in m.txids.iter().zip(m.tx_fks.iter()) {
+            if fk.is_null() || *tid == [0u8; 32] {
+                continue;
+            }
+            pairs.push((*tid, *fk));
+        }
+    }
+    Ok(pairs)
+}
+
 /// IBD **load** stage: structure + stamp create_fk + parent body ranges.
 ///
 /// May read `tx.head`, `tx.idx`, `txid.body`. **Never** denserels-decode `tx.body`.
@@ -734,6 +769,80 @@ mod tests {
             plan.batch_pin[0].1[0].script, want,
             "CreatePin outs from wire script_pubkey"
         );
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    fn empty_header_rec() -> HeaderRecord {
+        HeaderRecord {
+            prev_fk: rbitcoin_primitives::Fk::NULL,
+            version: 1,
+            timestamp: 1,
+            bits: 1,
+            nonce: 1,
+            merkle_root: [0u8; 32],
+            hash: [0u8; 32],
+        }
+    }
+
+    fn meta_with(txids: Vec<[u8; 32]>, tx_fks: Vec<rbitcoin_primitives::Fk>) -> BodyMeta {
+        BodyMeta {
+            height: Height(1),
+            hash: [2u8; 32],
+            header_fk: rbitcoin_primitives::Fk(1),
+            header_rec: empty_header_rec(),
+            tx_fks,
+            txids,
+            pres: std::sync::Arc::from(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn archived_create_pairs_len_mismatch_is_corrupt() {
+        let meta = meta_with(vec![[1u8; 32]], vec![]);
+        match archived_create_pairs(std::slice::from_ref(&meta)) {
+            Err(ConsensusError::Store(StoreError::Corrupt(m))) => {
+                assert_eq!(m, "invariant: archived stamp tx_fks/txids length");
+            }
+            other => panic!("expected length Corrupt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn archived_create_pairs_from_stamp_metas() {
+        let tid = [9u8; 32];
+        let fk = rbitcoin_primitives::Fk(7);
+        let meta = meta_with(vec![tid], vec![fk]);
+        let pairs = archived_create_pairs(std::slice::from_ref(&meta)).expect("match");
+        assert_eq!(pairs, vec![(tid, fk)]);
+        let blank = meta_with(vec![[0u8; 32]], vec![rbitcoin_primitives::Fk(1)]);
+        assert!(archived_create_pairs(std::slice::from_ref(&blank))
+            .expect("zero txid skipped")
+            .is_empty());
+    }
+
+    #[test]
+    fn plan_none_stamp_archived_pairs_match_metas() {
+        use crate::accept_and_connect_block;
+        use crate::regtest_pad::mine_empty_regtest;
+        use rbitcoin_query::testutil::FixtureChain;
+
+        let (path, q) = tmp_query();
+        let params = ChainParams::regtest();
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+        let b1 = mine_empty_regtest(genesis.block_hash(), genesis.header.time + 600, 1);
+        let (header, txs) =
+            crate::prepare_block_for_archive(&q, &params, &b1).expect("archive prep");
+        q.commit_class_a_only(&header, &txs).expect("Class A only");
+        let items = [(Height(1), Arc::new(b1), None)];
+        let stamped = confirm_wire_lookup_stamp(&q, &params, Milestone::NONE, &items, None)
+            .expect("already-archived stamp");
+        assert!(stamped.plan.is_none(), "S1 plan=None");
+        let pairs = stamped.archived_create_pairs().expect("pairs from metas");
+        assert_eq!(pairs.len(), stamped.metas[0].txids.len());
+        assert_eq!(pairs[0].0, stamped.metas[0].txids[0]);
+        assert_eq!(pairs[0].1, stamped.metas[0].tx_fks[0]);
+        assert_eq!(stamped.last_height_hash(), Some((1, stamped.metas[0].hash)));
         let _ = std::fs::remove_dir_all(&path);
     }
 }
