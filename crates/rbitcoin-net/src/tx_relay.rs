@@ -2266,19 +2266,23 @@ impl MempoolHub {
         if want.is_empty() {
             return 0;
         }
+        let want: Vec<Txid> = want
+            .into_iter()
+            .filter(|txid| {
+                self.query
+                    .tx_fk_by_txid_tip(&txid.to_byte_array())
+                    .ok()
+                    .flatten()
+                    .is_none()
+            })
+            .collect();
+        if want.is_empty() {
+            return 0;
+        }
         let g = self.lock_read();
         let mut delta = 0i64;
         let provider = self.utxo_provider();
         for txid in want {
-            if self
-                .query
-                .tx_fk_by_txid_tip(&txid.to_byte_array())
-                .ok()
-                .flatten()
-                .is_some()
-            {
-                continue;
-            }
             let Some(tx) = g.get_tx(&txid) else { continue };
             for (vout, o) in tx.output.iter().enumerate() {
                 if script_hash(o.script_pubkey.as_bytes()) != *scripthash {
