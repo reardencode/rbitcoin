@@ -1810,6 +1810,19 @@ fn append_mempool_history(
     }
 }
 
+fn cached_confirming_hash(
+    height: u32,
+    cache: &mut HashMap<u32, [u8; 32]>,
+    load: impl FnOnce(u32) -> Result<[u8; 32], String>,
+) -> Result<[u8; 32], String> {
+    if let Some(h) = cache.get(&height) {
+        return Ok(*h);
+    }
+    let h = load(height)?;
+    cache.insert(height, h);
+    Ok(h)
+}
+
 fn scripthash_status(
     query: Option<&Query>,
     hist: &[rbitcoin_query::ScriptHashHistoryItem],
@@ -1819,18 +1832,22 @@ fn scripthash_status(
     }
     use bitcoin::hashes::{sha256, Hash as _};
     let mut s = String::new();
+    let mut by_height = HashMap::new();
     for i in hist {
         if i.height > 0 {
             let q = query.ok_or_else(|| "status preimage needs a chain query".to_string())?;
-            let (_, rec) = q
-                .header_at_height(Height(i.height as u32))
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| "header missing for confirmed history row".to_string())?;
+            let hash = cached_confirming_hash(i.height as u32, &mut by_height, |h| {
+                let (_, rec) = q
+                    .header_at_height(Height(h))
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "header missing for confirmed history row".to_string())?;
+                Ok(rec.hash)
+            })?;
             s.push_str(&format!(
                 "{}:{}:{}:",
                 txid_hex(&i.txid),
                 i.height,
-                hash_hex_rev(&rec.hash)
+                hash_hex_rev(&hash)
             ));
         } else {
             s.push_str(&format!("{}:{}:", txid_hex(&i.txid), i.height));

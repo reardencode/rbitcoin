@@ -206,6 +206,23 @@ fn config_helpers_and_param_parsers() {
 }
 
 #[test]
+fn cached_confirming_hash_loads_once_per_height() {
+    let mut cache = HashMap::new();
+    let mut loads = 0u32;
+    let mut load = |h: u32| {
+        loads += 1;
+        Ok::<_, String>([h as u8; 32])
+    };
+    let a = cached_confirming_hash(7, &mut cache, &mut load).unwrap();
+    let b = cached_confirming_hash(7, &mut cache, &mut load).unwrap();
+    let c = cached_confirming_hash(8, &mut cache, &mut load).unwrap();
+    assert_eq!(a, [7u8; 32]);
+    assert_eq!(b, [7u8; 32]);
+    assert_eq!(c, [8u8; 32]);
+    assert_eq!(loads, 2, "same height must not load twice");
+}
+
+#[test]
 fn history_row_json_mempool_child_includes_fee() {
     use rbitcoin_primitives::Fk;
     let child = rbitcoin_query::ScriptHashHistoryItem {
