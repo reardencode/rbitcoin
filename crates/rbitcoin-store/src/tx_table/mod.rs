@@ -354,6 +354,7 @@ mod pending_head;
 mod spent_off;
 pub use packed::*;
 pub(crate) use pending_head::PENDING_HEAD_CAP;
+pub(crate) use spent_off::unlink_leftover_spent_idx;
 
 fn span_rec(span: &[u8], span_off: u64, rec_off: u64, rec_len: u64) -> Result<&[u8], StoreError> {
     let start = rec_off
@@ -626,15 +627,7 @@ impl TxTable {
             VarTable::create_body_only(dir, "spent", TableKind::Spent)?
         };
         let spent_off = spent_off::SpentOff::load(dir)?;
-        let mut n_spent_claim: Option<u64> = None;
-        if spent_off::spent_idx_leftover_present(dir) {
-            if let Ok(idx) = crate::tx_idx::TxIdx::open(dir, "spent") {
-                let n = idx.slot_count();
-                let _ = spent_off.sample_from_idx(&idx);
-                n_spent_claim = Some(n);
-            }
-            spent_off::unlink_leftover_spent_idx(dir)?;
-        }
+        spent_off::unlink_leftover_spent_idx(dir)?;
         let txids = if dir.join("txid.body").exists() {
             crate::txid_body::TxidBody::open(dir)?
         } else {
@@ -643,11 +636,10 @@ impl TxTable {
         let n_bodies = body.count();
         let n_txids = txids.count();
         let n_inwit = inwit.count();
-        let n_spent = n_spent_claim.unwrap_or(n_bodies);
-        if n_txids != n_bodies || n_inwit != n_bodies || n_spent != n_bodies {
-            let n = n_bodies.min(n_txids).min(n_inwit).min(n_spent);
+        if n_txids != n_bodies || n_inwit != n_bodies {
+            let n = n_bodies.min(n_txids).min(n_inwit);
             rbitcoin_log::warn!(
-                "store: Class A count skew txout={n_bodies} inwit={n_inwit} spent={n_spent} \
+                "store: Class A count skew txout={n_bodies} inwit={n_inwit} \
                  txid.body={n_txids} — truncating to {n}"
             );
             if n_bodies > n {

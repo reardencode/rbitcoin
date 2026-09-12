@@ -4,7 +4,6 @@ use super::packed::spent_record_len;
 use super::TxRecord;
 use crate::error::StoreError;
 use crate::file::{TableFile, FILE_HEADER_LEN};
-use crate::tx_idx::TxIdx;
 use crate::var_table::VarTable;
 use rbitcoin_primitives::{Fk, TableKind};
 use std::path::{Path, PathBuf};
@@ -19,11 +18,7 @@ pub(super) struct SpentOff {
     ckpts: Mutex<Vec<u64>>,
 }
 
-pub(super) fn spent_idx_leftover_present(dir: &Path) -> bool {
-    dir.join("spent.idx").exists() || dir.join("spent.idx.meta").is_file()
-}
-
-pub(super) fn unlink_leftover_spent_idx(dir: &Path) -> Result<bool, StoreError> {
+pub(crate) fn unlink_leftover_spent_idx(dir: &Path) -> Result<bool, StoreError> {
     let mut dropped = false;
     let root = dir.join("spent.idx");
     if root.exists() {
@@ -91,30 +86,6 @@ impl SpentOff {
         }
         *me.ckpts.lock().unwrap_or_else(|e| e.into_inner()) = ckpts;
         Ok(me)
-    }
-
-    pub(super) fn sample_from_idx(&self, idx: &TxIdx) -> Result<(), StoreError> {
-        let count = idx.slot_count();
-        if count == 0 {
-            self.ckpts.lock().unwrap_or_else(|e| e.into_inner()).clear();
-            return Ok(());
-        }
-        let mut ids = Vec::new();
-        let mut fk = 1u64;
-        while fk <= count {
-            ids.push(fk);
-            fk = fk.saturating_add(SPENT_OFF_STRIDE);
-        }
-        let starts = idx.record_starts_batch_bulk(&ids, crate::io_backend::read_io_backend())?;
-        let mut ckpts = Vec::with_capacity(ids.len());
-        for s in starts {
-            let Some(off) = s else {
-                return Err(StoreError::Corrupt("spent.idx checkpoint missing"));
-            };
-            ckpts.push(off);
-        }
-        *self.ckpts.lock().unwrap_or_else(|e| e.into_inner()) = ckpts;
-        Ok(())
     }
 
     pub(super) fn note_starts(&self, base_count: u64, starts: &[u64]) {

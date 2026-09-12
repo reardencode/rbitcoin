@@ -581,7 +581,7 @@ counts, ingest OA, and refuse lines: [`SCHEMA.md`](./SCHEMA.md) and
 
 ## Schema upgrade
 
-Live bytes: [`SCHEMA.md`](./SCHEMA.md) (`SCHEMA_VERSION = 20`). This section is
+Live bytes: [`SCHEMA.md`](./SCHEMA.md) (`SCHEMA_VERSION = 21`). This section is
 the operator copy-paste only — do not treat it as a second layout map.
 
 Open **never silently wipes** a populated store (policy:
@@ -591,14 +591,15 @@ names the dirs. Corrupt files are **not** repaired in-process.
 
 | Incoming `meta` | What this binary does |
 |-----------------|------------------------|
-| **20** | Open (SH is compact `BDZ3`). |
-| **19** or **18**, empty `tx.head` and no `scripthash*` data | Rewrite `meta` to 20, then open. |
+| **21** | Open. |
+| **20** | Unlink leftover `spent.idx`, rewrite `meta` to 21, then open. |
+| **19** or **18**, empty `tx.head` and no `scripthash*` data | Rewrite `meta` to 21, then open. |
 | **19** or **18**, occupied `tx.head` or any `scripthash*` | **Refuse.** Wipe `store/tx.head` and `store/scripthash*`, keep Class A, restart. |
-| **17**, empty `tx.head` and no `scripthash*` data | Rewrite `meta` to 20, then open. |
+| **17**, empty `tx.head` and no `scripthash*` data | Rewrite `meta` to 21, then open. |
 | **17**, populated `tx.head` or any `scripthash*` | **Refuse.** Wipe those index dirs, keep Class A, restart. |
 | Older than 17 with creates / leftover catalogs | **Refuse.** The error names files; often a full datadir wipe + IBD. Details: SCHEMA.md **13/14→17**, **15→17**, **16→17**. |
 
-A **19 binary** refuses 20 `meta` (do not downgrade in place).
+A **20 binary** refuses 21 `meta` (do not downgrade in place). A **19 binary** refuses 20+ `meta`.
 
 When the 20 index refuse fires, the log line is:
 

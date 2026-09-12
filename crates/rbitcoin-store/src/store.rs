@@ -334,6 +334,10 @@ impl Store {
             return Err(StoreError::NotDirectory(path));
         }
         let meta_ver = check_meta(&path)?;
+        crate::tx_table::unlink_leftover_spent_idx(&path)?;
+        if meta_ver == 20 && SCHEMA_VERSION >= 21 {
+            rewrite_meta_current(&path)?;
+        }
         if (meta_ver == 18 || meta_ver == 19) && SCHEMA_VERSION >= 20 {
             if crate::segmented_head::SegmentedTxHead::disk_occupied(&path)
                 || scripthash_index_data_present(&path)
@@ -2116,6 +2120,32 @@ mod tests {
     fn read_store_meta_ver(dir: &Path) -> u16 {
         let bytes = std::fs::read(dir.join("meta")).unwrap();
         u16::from_le_bytes([bytes[4], bytes[5]])
+    }
+
+    #[test]
+    fn open_schema20_unlinks_spent_idx_and_rewrites_meta() {
+        let dir = tmp();
+        {
+            let s = Store::create_tiny(&dir).unwrap();
+            s.flush().unwrap();
+        }
+        crate::tx_idx::TxIdx::create(&dir, "spent").unwrap();
+        assert!(dir.join("spent.idx").is_dir());
+        write_store_meta_ver(&dir, 20);
+        assert_eq!(read_store_meta_ver(&dir), 20);
+
+        let s = Store::open_tiny(&dir).unwrap();
+        drop(s);
+        assert!(
+            !dir.join("spent.idx").exists(),
+            "schema 21 open must unlink leftover spent.idx"
+        );
+        assert_eq!(read_store_meta_ver(&dir), SCHEMA_VERSION);
+        assert_eq!(SCHEMA_VERSION, 21);
+        let s = Store::open_tiny(&dir).unwrap();
+        drop(s);
+        assert_eq!(read_store_meta_ver(&dir), SCHEMA_VERSION);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Schema 13 with empty SH is layout-compatible: open succeeds and meta
