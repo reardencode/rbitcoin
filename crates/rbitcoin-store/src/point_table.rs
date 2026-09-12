@@ -96,8 +96,14 @@ where
         let _ = visit(field)?;
         return Ok(());
     }
+    let cap = spenders.count();
     let mut cur = Some(field);
+    let mut steps = 0u64;
     while let Some(fk) = cur {
+        steps = steps.saturating_add(1);
+        if steps > cap {
+            return Err(StoreError::Corrupt("invariant: spender multi-list cycle"));
+        }
         let (spend_tx, next) = spenders.get(fk)?;
         if !visit(spend_tx)? {
             return Ok(());
@@ -208,6 +214,29 @@ mod tests {
         })
         .unwrap();
         assert_eq!(one, Some(s1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn for_each_spender_create_cycle_is_corrupt() {
+        let dir = tmp();
+        let layout = HeadLayout::new(crate::address_head::TINY_BITS).unwrap();
+        let txs = TxTable::create_with_head_layout(&dir, layout).unwrap();
+        let spenders = SpenderTable::create(&dir).unwrap();
+        let create = put_create(&txs, [1u8; 32], 1);
+        let s1 = put_create(&txs, [2u8; 32], 1);
+        let s2 = put_create(&txs, [3u8; 32], 1);
+        put_spend_on_create(&txs, &spenders, create, 0, s1).unwrap();
+        put_spend_on_create(&txs, &spenders, create, 0, s2).unwrap();
+        let (_multi, head) = txs.get_output_spender_meta(create, 0).unwrap();
+        let (_sfk, older) = spenders.get(head).unwrap();
+        spenders.overwrite_next(older, head).unwrap();
+        match for_each_spender_create(&txs, &spenders, create, 0, |_| Ok(true)) {
+            Err(StoreError::Corrupt(m)) => {
+                assert!(m.contains("cycle"), "{m}");
+            }
+            other => panic!("expected cycle Corrupt, got {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
