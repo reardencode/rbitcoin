@@ -8,6 +8,8 @@ use bitcoin::consensus::encode::{Encodable, VarInt};
 use bitcoin::hashes::{sha256, sha256d, Hash};
 use bitcoin::{Transaction, TxOut};
 use rbitcoin_primitives::script_sigop_count;
+use std::collections::HashSet;
+use std::sync::Arc;
 
 /// Job-local hash cache: this tx's ids plus Core-style common midstates.
 #[derive(Clone, Debug)]
@@ -153,6 +155,32 @@ impl TxPrecompute {
         self.sha_amounts = Some(sha256::Hash::from_engine(enc_amt).to_byte_array());
         self.sha_scriptpubkeys = Some(sha256::Hash::from_engine(enc_spk).to_byte_array());
     }
+}
+
+/// Tip-follow precompute: `from_tx_connect` for live mempool txs, `from_tx` otherwise.
+///
+/// `live_empty` is the no-mempool / empty-graph path — all `from_tx`, no probe.
+pub fn pres_for_tip(
+    txs: &[Transaction],
+    live_empty: bool,
+    is_live: impl Fn([u8; 32]) -> bool,
+) -> (Arc<[TxPrecompute]>, HashSet<[u8; 32]>) {
+    if live_empty {
+        let v: Vec<TxPrecompute> = txs.iter().map(TxPrecompute::from_tx).collect();
+        return (Arc::from(v), HashSet::new());
+    }
+    let mut skip = HashSet::new();
+    let mut v = Vec::with_capacity(txs.len());
+    for tx in txs {
+        let c = TxPrecompute::from_tx_connect(tx);
+        if is_live(c.txid) {
+            skip.insert(c.txid);
+            v.push(c);
+        } else {
+            v.push(TxPrecompute::from_tx(tx));
+        }
+    }
+    (Arc::from(v), skip)
 }
 
 fn enc(w: &mut impl bitcoin::io::Write, v: &impl Encodable) -> usize {
@@ -336,6 +364,38 @@ mod tests {
             TxPrecompute::from_tx_connect(&tx).wtxid,
             tx.compute_wtxid().to_byte_array()
         );
+    }
+
+    #[test]
+    fn pres_for_tip_connects_live_and_hashes_the_rest() {
+        let live = p2wpkh_like();
+        let other = legacy_1in();
+        let live_id = live.compute_txid().to_byte_array();
+        let (pres, skip) =
+            super::pres_for_tip(&[live.clone(), other.clone()], false, |tid| tid == live_id);
+        assert_eq!(pres.len(), 2);
+        assert_eq!(pres[0].txid, live_id);
+        assert_eq!(
+            pres[0].sha_prevouts, None,
+            "live tx must skip sighash midstates"
+        );
+        assert_eq!(
+            pres[1].sha_prevouts,
+            Some(oracle_sha_prevouts(&other)),
+            "non-live must keep midstates"
+        );
+        assert_eq!(skip.len(), 1);
+        assert!(skip.contains(&live_id));
+    }
+
+    #[test]
+    fn pres_for_tip_empty_live_set_uses_from_tx() {
+        let tx = p2wpkh_like();
+        let (pres, skip) = super::pres_for_tip(&[tx.clone()], true, |_| {
+            panic!("empty live-set must not probe")
+        });
+        assert!(skip.is_empty());
+        assert_eq!(pres[0].sha_prevouts, Some(oracle_sha_prevouts(&tx)));
     }
 
     #[test]

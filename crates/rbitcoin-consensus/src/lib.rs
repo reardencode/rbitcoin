@@ -186,6 +186,7 @@ pub fn accept_and_connect_block(
         Arc::new(block.clone()),
         milestone,
         &ScriptPreverified::new(),
+        None,
     )
 }
 
@@ -198,6 +199,7 @@ pub fn accept_and_connect_block_preverified(
     block: Arc<Block>,
     milestone: Milestone,
     preverified: &ScriptPreverified,
+    pres: Option<Arc<[rbitcoin_query::TxPrecompute]>>,
 ) -> Result<rbitcoin_primitives::Fk, ConsensusError> {
     let hash = block.block_hash().to_byte_array();
     if let Some(h) = query.height_of_hash(&hash).map_err(ConsensusError::from)? {
@@ -218,7 +220,7 @@ pub fn accept_and_connect_block_preverified(
         query,
         params,
         milestone,
-        &[(height, block, None)],
+        &[(height, block, pres)],
         preverified,
     )?;
     if let Some(fk) = fks.into_iter().next() {

@@ -2057,12 +2057,12 @@ impl ChainHub {
         );
         let hash = block.block_hash();
         let header = block.header;
-        // Reorg disconnect is done before connect; confirm pipeline is tip+1 only.
-        // Live mempool txs already had scripts run at accept — skip re-verify.
-        let preverified = self
-            .mempool()
-            .map(|mp| mp.script_preverified_txids())
-            .unwrap_or_default();
+        let t_pres = std::time::Instant::now();
+        let (pres, preverified) = match self.mempool() {
+            Some(mp) => mp.tip_script_pres(&block.txdata),
+            None => rbitcoin_query::pres_for_tip(&block.txdata, true, |_| false),
+        };
+        let pres_ns = t_pres.elapsed().as_nanos() as u64;
         tip_accept_stats_reset(&self.query);
         let t_wall = std::time::Instant::now();
         let now = self.clock.now_secs();
@@ -2074,6 +2074,7 @@ impl ChainHub {
                 Arc::clone(&block),
                 self.milestone,
                 &preverified,
+                Some(std::sync::Arc::clone(&pres)),
             ) {
                 Ok(fk) => return Ok(fk),
                 Err(e) if e.is_uring_session_fault() => {
@@ -2095,6 +2096,7 @@ impl ChainHub {
                 NetError::Consensus(reason)
             }
         })?;
+        debug_assert_eq!(pres.len(), block.txdata.len());
         self.header_tips.write().unwrap().remove(&hash);
         let t_mp = std::time::Instant::now();
         if let Some(mp) = self.mempool() {
@@ -2120,7 +2122,7 @@ impl ChainHub {
         // UpdateTip). IBD bulk confirm uses note_confirmed_tip without this line;
         // IBD retains periodic progress/perf status instead.
         log_update_tip(height, &hash, &header, n_tx);
-        log_tip_accept_sh(&self.query, height, n_tx, wall_ns, mp_strip_ns);
+        log_tip_accept_sh(&self.query, height, n_tx, wall_ns, mp_strip_ns, pres_ns);
         let event = TipEvent {
             height,
             hash,
@@ -2356,6 +2358,8 @@ pub struct TipAcceptShInput {
     pub drain_ns: u64,
     /// `remove_for_block_spent` after confirm (not inside confirm_write).
     pub mp_strip_ns: u64,
+    /// Tip `TxPrecompute` / mempool intersect before confirm.
+    pub pres_ns: u64,
     pub sh_lag: u32,
     pub sh: rbitcoin_query::TipShSnap,
 }
@@ -2375,6 +2379,7 @@ pub fn format_tip_accept_sh_line(i: &TipAcceptShInput) -> String {
     let structural_ms = i.structural_ns / 1_000_000;
     let drain_ms = i.drain_ns / 1_000_000;
     let mp_strip_ms = i.mp_strip_ns / 1_000_000;
+    let pres_ms = i.pres_ns / 1_000_000;
     let named = i
         .load_ns
         .saturating_add(i.script_ns)
@@ -2386,7 +2391,8 @@ pub fn format_tip_accept_sh_line(i: &TipAcceptShInput) -> String {
         .saturating_add(i.lookup_ns)
         .saturating_add(i.structural_ns)
         .saturating_add(i.drain_ns)
-        .saturating_add(i.mp_strip_ns);
+        .saturating_add(i.mp_strip_ns)
+        .saturating_add(i.pres_ns);
     let other_ms = i.wall_ns.saturating_sub(named) / 1_000_000;
     let sh = &i.sh;
     let sh_ms = sh.total_sh_ns() / 1_000_000;
@@ -2408,7 +2414,7 @@ pub fn format_tip_accept_sh_line(i: &TipAcceptShInput) -> String {
          (collect={coll_ms} sort={sort_ms} seed={seed_ms} body={body_ms} head={head_ms} \
          pin={pin} cold={cold} creates={creates} unique={unique} written={written}) \
          spend={spend_ms}ms tweaks={tweak_ms}ms lookup={lookup_ms}ms struct={structural_ms}ms \
-         drain={drain_ms}ms mp_strip={mp_strip_ms}ms other={other_ms}ms sh/wall={sh_ratio}%",
+         drain={drain_ms}ms mp_strip={mp_strip_ms}ms pres={pres_ms}ms other={other_ms}ms sh/wall={sh_ratio}%",
         h = i.height,
         n_tx = i.n_tx,
         sh_lag = i.sh_lag,
@@ -2421,7 +2427,14 @@ pub fn format_tip_accept_sh_line(i: &TipAcceptShInput) -> String {
 }
 
 /// Sample meters after tip accept and emit INFO `tip: accept …` (SH breakdown).
-fn log_tip_accept_sh(query: &Query, height: u32, n_tx: usize, wall_ns: u64, mp_strip_ns: u64) {
+fn log_tip_accept_sh(
+    query: &Query,
+    height: u32,
+    n_tx: usize,
+    wall_ns: u64,
+    mp_strip_ns: u64,
+    pres_ns: u64,
+) {
     let w = query.confirm_stats().take_window();
     let connect_ns = w.connect_ns;
     let script_ns = w.script_ns;
@@ -2463,6 +2476,7 @@ fn log_tip_accept_sh(query: &Query, height: u32, n_tx: usize, wall_ns: u64, mp_s
         structural_ns,
         drain_ns,
         mp_strip_ns,
+        pres_ns,
         sh_lag: query.sh_lag_heights(),
         sh,
     });
@@ -3076,6 +3090,7 @@ mod tests {
             structural_ns: 40_000_000,
             drain_ns: 10_000_000,
             mp_strip_ns: 20_000_000,
+            pres_ns: 3_000_000,
             sh_lag: 2,
             sh: rbitcoin_query::TipShSnap {
                 collect_ns: 20_000_000,
@@ -3110,7 +3125,8 @@ mod tests {
         assert!(line.contains("struct=40ms"), "{line}");
         assert!(line.contains("drain=10ms"), "{line}");
         assert!(line.contains("mp_strip=20ms"), "{line}");
-        // 2500 - (100+200+50+7+1725+80+400+300+40+10+20) = -432 → 0
+        assert!(line.contains("pres=3ms"), "{line}");
+        // 2500 - (100+200+50+7+1725+80+400+300+40+10+20+3) = -435 → 0
         assert!(line.contains("other=0ms"), "{line}");
         assert!(line.contains("sh/wall=69%"), "{line}");
     }
