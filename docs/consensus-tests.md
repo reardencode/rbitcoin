@@ -105,7 +105,7 @@ Location: `crates/rbitcoin-consensus/src/block/structure_rule_tests.rs`.
 |----|------|--------------|------|
 | H1 | Genesis hash matches params | `BadHeader("genesis hash mismatch")` | `h1_rejects_wrong_genesis_hash` |
 | H2 | `prev` links to height−1 | `BadPrev` | `h2_rejects_bad_prev_link` |
-| H3 | `time > median_time_past` | `timestamp <= median-time-past` | `h3_rejects_timestamp_not_after_mtp` |
+| H3 | `time > median_time_past` | `timestamp <= median-time-past` | `header_and_spending_boundaries` (`time==mtp` / `mtp+1`) |
 | H4 | Checkpoint hash at height | `checkpoint mismatch` | `h4_rejects_checkpoint_mismatch` |
 | H5 | `bits == expected_next_bits` | `incorrect proof of work bits` | `h5_regtest_rejects_wrong_bits` (regtest: must equal prev) |
 | H6 | Target ≤ `pow_limit` | `target above pow limit` | `h6_target_above_pow_limit_is_detectable` |

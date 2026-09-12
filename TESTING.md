@@ -227,7 +227,11 @@ Prefer **one high-level scenario** per behavior cluster. Delete lower-level test
 | `consensus_rules` (test binary) | Consensus | Focused reject paths for structure/header/connect rules we own — see [`docs/consensus-tests.md`](./docs/consensus-tests.md). Hornet-mapped subset: `./scripts/test-hornet-rules.sh` |
 | `core_analogs::analog_milestone_and_mempool_persist` | Consensus | Milestone skip-below/check-above, missing prevout under high milestone, mempool persist (one pad) |
 | `scripthash_index_history_balance_and_reorg` | Query | Electrum index + reorg spend clear |
-| `electrum_server_version_history_balance` | Electrum | One mature pad: version/history/balance/headers **and** ping/features/tx/errors |
+| `electrum_server_version_history_balance` | Electrum | One mature pad: version/history/balance/headers, ping/features/tx/errors, confirmed history omits `fee`, scripthash subscribe notify |
+| `electrum_scripthash_sub_cap_unsubscribe_frees_slot` | Electrum | Per-connection subscribe cap + unsubscribe frees a slot |
+| `electrum_leftover_mempool_does_not_double_count` | Electrum | Relay-off leftover is confirmed, not a second mempool UTXO |
+| `electrum_max_connections_rejects_extra_client` | Electrum | TCP cap drops the extra client |
+| `electrum_idle_timeout_disconnects_quiet_client` | Electrum | Idle timeout closes a quiet socket |
 | `two_node_header_and_block_sync` | P2P (**default + multinode CI**) | Seeder → peer 8-block IBD. **Not** re-run under `coverage.sh`. |
 | `serve_after_restart_via_reconstruct` | P2P (**multinode job only**) | Cold serve via reconstruct |
 | `ibd_skips_dead_peer` | P2P (**multinode job only**) | Live seeder + `127.0.0.1:1` |

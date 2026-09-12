@@ -5,8 +5,8 @@
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, BlockHash, CompactTarget};
 use rbitcoin_consensus::{
-    accept_and_connect_block, block_subsidy, expected_next_bits, genesis_block, median_time_past,
-    validate_header, ChainParams, Checkpoint, ConsensusError, Milestone,
+    accept_and_connect_block, expected_next_bits, genesis_block, median_time_past, validate_header,
+    ChainParams, Checkpoint, ConsensusError, Milestone,
 };
 use rbitcoin_primitives::Height;
 use rbitcoin_query::Query;
@@ -59,39 +59,6 @@ fn h2_rejects_bad_prev_link() {
     assert!(
         matches!(err, ConsensusError::BadPrev),
         "expected BadPrev, got {err:?}"
-    );
-}
-
-#[test]
-fn h3_rejects_timestamp_not_after_mtp() {
-    let (_td, q, params) = regtest_q();
-    let g = regtest_genesis();
-    accept_and_connect_block(&q, &params, Height::GENESIS, &g, Milestone::NONE).unwrap();
-    // Build 11 blocks with increasing times so MTP is well-defined.
-    let mut tip = g.block_hash();
-    let mut time = g.header.time;
-    for h in 1..=11u32 {
-        time += 600;
-        let b = mine_regtest_block(tip, time, h, vec![]);
-        accept_and_connect_block(&q, &params, Height(h), &b, Milestone::NONE).unwrap();
-        tip = b.block_hash();
-    }
-    let mtp = median_time_past(&q, Height(11)).unwrap();
-    let mut bad = mine_regtest_block(tip, mtp, 12, vec![]); // time == mtp → reject
-                                                            // ensure bits match expected (regtest copies prev)
-    let expected = expected_next_bits(&q, &params, Height(12), bad.header.time).unwrap();
-    bad.header.bits = expected;
-    let target = bitcoin::Target::from_compact(expected);
-    for nonce in 0..u32::MAX {
-        bad.header.nonce = nonce;
-        if bad.header.validate_pow(target).is_ok() {
-            break;
-        }
-    }
-    let err = validate_header(&q, &params, Height(12), &bad.header).unwrap_err();
-    assert!(
-        matches!(err, ConsensusError::BadHeader(s) if s.contains("median-time")),
-        "{err:?}"
     );
 }
 
@@ -179,117 +146,6 @@ fn h8_rejects_timestamp_too_far_in_future() {
 // ─── Connect / economic rules ───────────────────────────────────────────────
 
 #[test]
-fn c2_same_block_double_spend_rejected() {
-    let (_td, q, params) = regtest_q();
-    connect_genesis(&q, &params);
-    let g = regtest_genesis();
-    let b1 = mine_regtest_block(g.block_hash(), g.header.time + 600, 1, vec![]);
-    accept_and_connect_block(&q, &params, Height(1), &b1, Milestone::NONE).unwrap();
-    let cb_txid = b1.txdata[0].compute_txid();
-
-    // Two spends of the same coinbase output in one block.
-    let s1 = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(25_0000_0000));
-    let s2 = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(24_0000_0000));
-    // Need maturity first
-    let maturity = params.coinbase_maturity();
-    let mut tip = b1.block_hash();
-    let mut time = b1.header.time;
-    let mut h = 1u32;
-    while h < maturity {
-        h += 1;
-        time += 600;
-        let b = mine_regtest_block(tip, time, h, vec![]);
-        accept_and_connect_block(&q, &params, Height(h), &b, Milestone::NONE).unwrap();
-        tip = b.block_hash();
-    }
-    time += 600;
-    let bad = mine_regtest_block(tip, time, h + 1, vec![s1, s2]);
-    let err = accept_and_connect_block(&q, &params, Height(h + 1), &bad, Milestone::NONE);
-    assert!(
-        matches!(
-            err,
-            Err(ConsensusError::BadTx(s)) if s.contains("double spend")
-        ),
-        "{err:?}"
-    );
-}
-
-#[test]
-fn c5_immature_coinbase_spend_rejected() {
-    let (_td, q, params) = regtest_q();
-    connect_genesis(&q, &params);
-    let g = regtest_genesis();
-    let b1 = mine_regtest_block(g.block_hash(), g.header.time + 600, 1, vec![]);
-    accept_and_connect_block(&q, &params, Height(1), &b1, Milestone::NONE).unwrap();
-    let cb_txid = b1.txdata[0].compute_txid();
-    let spend = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(49_0000_0000));
-    // Spend at height 2 — far below maturity (100 on regtest).
-    let bad = mine_regtest_block(b1.block_hash(), b1.header.time + 600, 2, vec![spend]);
-    let err = accept_and_connect_block(&q, &params, Height(2), &bad, Milestone::NONE);
-    assert!(
-        matches!(err, Err(ConsensusError::BadTx(s)) if s.contains("immature")),
-        "{err:?}"
-    );
-}
-
-#[test]
-fn c6_value_in_less_than_out_rejected() {
-    let (_td, q, params) = regtest_q();
-    connect_genesis(&q, &params);
-    let g = regtest_genesis();
-    let b1 = mine_regtest_block(g.block_hash(), g.header.time + 600, 1, vec![]);
-    accept_and_connect_block(&q, &params, Height(1), &b1, Milestone::NONE).unwrap();
-    let maturity = params.coinbase_maturity();
-    let mut tip = b1.block_hash();
-    let mut time = b1.header.time;
-    let mut h = 1u32;
-    while h < maturity {
-        h += 1;
-        time += 600;
-        let b = mine_regtest_block(tip, time, h, vec![]);
-        accept_and_connect_block(&q, &params, Height(h), &b, Milestone::NONE).unwrap();
-        tip = b.block_hash();
-    }
-    let cb_txid = b1.txdata[0].compute_txid();
-    // Output more than the 50 BTC coinbase.
-    let over = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(51_0000_0000));
-    time += 600;
-    let bad = mine_regtest_block(tip, time, h + 1, vec![over]);
-    let err = accept_and_connect_block(&q, &params, Height(h + 1), &bad, Milestone::NONE);
-    assert!(
-        matches!(err, Err(ConsensusError::BadTx(s)) if s.contains("in < out")),
-        "{err:?}"
-    );
-}
-
-#[test]
-fn c7_coinbase_excess_subsidy_rejected() {
-    let (_td, q, params) = regtest_q();
-    connect_genesis(&q, &params);
-    let g = regtest_genesis();
-    // Height 1: subsidy 50 BTC, no fees — claim 51 BTC in coinbase.
-    let mut b1 = mine_regtest_block(g.block_hash(), g.header.time + 600, 1, vec![]);
-    b1.txdata[0].output[0].value = Amount::from_sat(51_0000_0000);
-    b1.header.merkle_root = b1.compute_merkle_root().unwrap();
-    let target = bitcoin::Target::from_compact(b1.header.bits);
-    for nonce in 0..u32::MAX {
-        b1.header.nonce = nonce;
-        if b1.header.validate_pow(target).is_ok() {
-            break;
-        }
-    }
-    let err = accept_and_connect_block(&q, &params, Height(1), &b1, Milestone::NONE);
-    assert!(
-        matches!(
-            err,
-            Err(ConsensusError::BadBlock(s)) if s.contains("coinbase excess")
-        ),
-        "{err:?}"
-    );
-    assert_eq!(block_subsidy(1, &params), 50_0000_0000);
-}
-
-#[test]
 fn c1_non_coinbase_empty_outputs_rejected() {
     use bitcoin::absolute::LockTime;
     use bitcoin::script::ScriptBuf;
@@ -335,82 +191,6 @@ fn c1_non_coinbase_empty_outputs_rejected() {
         "{err:?}"
     );
     assert_eq!(q.tip_height(), Some(Height(h)));
-}
-
-/// Core requires topological order: a same-block spend may only reference an
-/// *earlier* tx in the block. Child-before-parent is invalid
-/// (`docs/external_findings/005-non-topological-block-accepted.md`).
-#[test]
-fn c8_same_block_child_before_parent_rejected() {
-    let (_td, q, params) = regtest_q();
-    connect_genesis(&q, &params);
-    let g = regtest_genesis();
-    let b1 = mine_regtest_block(g.block_hash(), g.header.time + 600, 1, vec![]);
-    accept_and_connect_block(&q, &params, Height(1), &b1, Milestone::NONE).unwrap();
-    let maturity = params.coinbase_maturity();
-    let mut tip = b1.block_hash();
-    let mut time = b1.header.time;
-    let mut h = 1u32;
-    while h < maturity {
-        h += 1;
-        time += 600;
-        let b = mine_regtest_block(tip, time, h, vec![]);
-        accept_and_connect_block(&q, &params, Height(h), &b, Milestone::NONE).unwrap();
-        tip = b.block_hash();
-    }
-    let cb_txid = b1.txdata[0].compute_txid();
-    // Parent spends matured coinbase; child spends parent.
-    let parent = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(49_0000_0000));
-    let parent_txid = parent.compute_txid();
-    let child = spend_anyone_can_spend(parent_txid, 0, Amount::from_sat(48_0000_0000));
-
-    time += 600;
-    // Child first, parent second — Core: bad-txns-inputs-missingorspent.
-    let bad = mine_regtest_block(tip, time, h + 1, vec![child, parent]);
-    let err = accept_and_connect_block(&q, &params, Height(h + 1), &bad, Milestone::NONE);
-    assert!(
-        err.is_err(),
-        "child-before-parent must not become tip: {err:?}"
-    );
-    let e = err.unwrap_err();
-    // MissingPrevout / BadTx / Store misclassification are all "reject"; after
-    // 002, prefer consensus-shaped errors — any Err is enough for the 005 pin.
-    let _ = e;
-    assert_eq!(
-        q.tip_height(),
-        Some(Height(h)),
-        "tip must not advance on non-topological block"
-    );
-}
-
-/// Parent-before-child same-block spend must still connect (topo happy path).
-#[test]
-fn c8_same_block_parent_before_child_ok() {
-    let (_td, q, params) = regtest_q();
-    connect_genesis(&q, &params);
-    let g = regtest_genesis();
-    let b1 = mine_regtest_block(g.block_hash(), g.header.time + 600, 1, vec![]);
-    accept_and_connect_block(&q, &params, Height(1), &b1, Milestone::NONE).unwrap();
-    let maturity = params.coinbase_maturity();
-    let mut tip = b1.block_hash();
-    let mut time = b1.header.time;
-    let mut h = 1u32;
-    while h < maturity {
-        h += 1;
-        time += 600;
-        let b = mine_regtest_block(tip, time, h, vec![]);
-        accept_and_connect_block(&q, &params, Height(h), &b, Milestone::NONE).unwrap();
-        tip = b.block_hash();
-    }
-    let cb_txid = b1.txdata[0].compute_txid();
-    let parent = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(49_0000_0000));
-    let parent_txid = parent.compute_txid();
-    let child = spend_anyone_can_spend(parent_txid, 0, Amount::from_sat(48_0000_0000));
-    time += 600;
-    let good = mine_regtest_block(tip, time, h + 1, vec![parent, child]);
-    accept_and_connect_block(&q, &params, Height(h + 1), &good, Milestone::NONE)
-        .expect("parent-before-child same-block must connect");
-    assert_eq!(q.tip_height(), Some(Height(h + 1)));
 }
 
 fn grind_pow(block: &mut bitcoin::Block) {
@@ -555,13 +335,35 @@ fn header_and_spending_boundaries() {
         "subsidy+1: {err:?}"
     );
 
-    let mut good_spend = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(50_0000_0000));
-    good_spend.version = TxVersion::TWO;
-    good_spend.lock_time = LockTime::from_height(100).unwrap();
-    good_spend.input[0].sequence = Sequence::from_consensus(10);
-    let good = mine_regtest_block(tip, time, 101, vec![good_spend]);
-    accept_and_connect_block(&q, &params, Height(101), &good, Milestone::NONE)
-        .expect("exact subsidy, in==out, OP_TRUE, seq=10, mature, locktime 100");
+    let s1 = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(25_0000_0000));
+    let s2 = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(24_0000_0000));
+    let dup = mine_regtest_block(tip, time, 101, vec![s1, s2]);
+    let err = accept_and_connect_block(&q, &params, Height(101), &dup, Milestone::NONE);
+    assert!(
+        matches!(err, Err(ConsensusError::BadTx(s)) if s.contains("double spend")),
+        "same-block double spend: {err:?}"
+    );
+    assert_eq!(q.tip_height(), Some(Height(100)));
+
+    let parent = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(49_0000_0000));
+    let child = spend_anyone_can_spend(parent.compute_txid(), 0, Amount::from_sat(48_0000_0000));
+    let bad_order = mine_regtest_block(tip, time, 101, vec![child, parent]);
+    let err = accept_and_connect_block(&q, &params, Height(101), &bad_order, Milestone::NONE);
+    assert!(
+        err.is_err(),
+        "child-before-parent must not become tip: {err:?}"
+    );
+    assert_eq!(q.tip_height(), Some(Height(100)));
+
+    let mut parent = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(50_0000_0000));
+    parent.version = TxVersion::TWO;
+    parent.lock_time = LockTime::from_height(100).unwrap();
+    parent.input[0].sequence = Sequence::from_consensus(10);
+    let child = spend_anyone_can_spend(parent.compute_txid(), 0, Amount::from_sat(49_0000_0000));
+    let good = mine_regtest_block(tip, time, 101, vec![parent, child]);
+    accept_and_connect_block(&q, &params, Height(101), &good, Milestone::NONE).expect(
+        "parent-before-child, exact subsidy, in==out, OP_TRUE, seq=10, mature, locktime 100",
+    );
     assert_eq!(q.tip_height(), Some(Height(101)));
 
     let spent_again = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(1));
