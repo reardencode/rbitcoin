@@ -1272,6 +1272,9 @@ fn assemble_block_prevouts_mode(
                     if pj >= ti {
                         return Err(ConsensusError::MissingPrevout);
                     }
+                    if pj == 0 {
+                        return Err(ConsensusError::BadTx("coinbase immature"));
+                    }
                 }
                 // Thin create_fk is a promise (identity matches wire prev_txid).
                 // Do not treat thin as a soft spentness hint. Same-block (pj < ti)
@@ -1733,16 +1736,12 @@ pub(crate) fn structural_validate_spends(
     let spent_cold_ns = multi_list_ns;
 
     let t_pending = Instant::now();
-    let coinbase_txid = block.txdata[0].compute_txid().to_byte_array();
     for &(prev_txid, vout, _spend_fk, create_fk) in spends {
         let key = (prev_txid, vout);
         if pending_spent.contains(&key) {
             return Err(ConsensusError::PrevoutSpent);
         }
         let spent = if create_fk.is_null() {
-            if prev_txid == coinbase_txid {
-                return Err(ConsensusError::BadTx("coinbase immature"));
-            }
             false
         } else if let Some(id) = create_fk.get() {
             durable_spent.contains(&(id, vout))
