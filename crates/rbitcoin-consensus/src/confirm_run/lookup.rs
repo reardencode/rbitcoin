@@ -333,20 +333,13 @@ pub(super) fn wire_lookup_phase(
                 return Err(ConsensusError::BadPrev);
             }
             if path_lo == store_path_lo {
-                validate_header(query, params, *height, &block.header)?;
+                validate_header_hashed(query, params, *height, &block.header, hash)?;
             } else {
                 let expect_prev = pipeline.and_then(|p| p.parent_hash).unwrap_or([0u8; 32]);
                 if block.header.prev_blockhash.to_byte_array() != expect_prev {
                     return Err(ConsensusError::BadPrev);
                 }
-                let target = bitcoin::Target::from_compact(block.header.bits);
-                if target > params.pow_limit {
-                    return Err(ConsensusError::BadHeader("target above pow limit"));
-                }
-                block
-                    .header
-                    .validate_pow(target)
-                    .map_err(|_| ConsensusError::InvalidPow)?;
+                pow_hash_meets_target(hash, block.header.bits, params.pow_limit)?;
             }
         } else {
             // Prev wire hash already on metas[i-1] — no rehash.
@@ -354,14 +347,7 @@ pub(super) fn wire_lookup_phase(
             if block.header.prev_blockhash.to_byte_array() != prev_hash {
                 return Err(ConsensusError::BadPrev);
             }
-            let target = bitcoin::Target::from_compact(block.header.bits);
-            if target > params.pow_limit {
-                return Err(ConsensusError::BadHeader("target above pow limit"));
-            }
-            block
-                .header
-                .validate_pow(target)
-                .map_err(|_| ConsensusError::InvalidPow)?;
+            pow_hash_meets_target(hash, block.header.bits, params.pow_limit)?;
         }
         header_ns = header_ns.saturating_add(t_header.elapsed().as_nanos() as u64);
 

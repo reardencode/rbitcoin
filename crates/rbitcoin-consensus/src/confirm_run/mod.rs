@@ -28,12 +28,13 @@ use crate::block::{
 };
 use crate::error::ConsensusError;
 use crate::header::{
-    check_header_version_and_future_time, median_time_past_times, validate_header,
+    check_header_version_and_future_time, median_time_past_times, pow_hash_meets_target,
+    validate_header_hashed,
 };
 use crate::milestone::Milestone;
 use crate::params::{genesis_block, ChainParams};
 use bitcoin::hashes::Hash;
-use bitcoin::{Block, Target};
+use bitcoin::Block;
 use rbitcoin_primitives::Height;
 use rbitcoin_query::{FkMap, Query, U32Map, U64Map, U64Set};
 use rbitcoin_store::{StoreError, WriteIoBackend};

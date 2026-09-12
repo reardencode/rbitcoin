@@ -13,10 +13,27 @@ pub fn validate_header(
     height: Height,
     header: &Header,
 ) -> Result<(), ConsensusError> {
-    let hash = header.block_hash();
+    validate_header_hashed(
+        query,
+        params,
+        height,
+        header,
+        header.block_hash().to_byte_array(),
+    )
+}
+
+/// [`validate_header`] using a caller-computed header hash (lookup already hashed).
+pub(crate) fn validate_header_hashed(
+    query: &Query,
+    params: &ChainParams,
+    height: Height,
+    header: &Header,
+    hash: [u8; 32],
+) -> Result<(), ConsensusError> {
+    let hash_bh = bitcoin::BlockHash::from_byte_array(hash);
 
     if height.0 == 0 {
-        if !check_genesis_hash(params, hash) {
+        if !check_genesis_hash(params, hash_bh) {
             return Err(ConsensusError::BadHeader("genesis hash mismatch"));
         }
     } else {
@@ -36,7 +53,7 @@ pub fn validate_header(
     }
 
     if let Some(cp) = params.checkpoint_at(height) {
-        if cp != hash {
+        if cp != hash_bh {
             return Err(ConsensusError::BadHeader("checkpoint mismatch"));
         }
     }
@@ -46,14 +63,22 @@ pub fn validate_header(
         return Err(ConsensusError::BadHeader("incorrect proof of work bits"));
     }
 
-    let target = Target::from_compact(header.bits);
-    if target > params.pow_limit {
+    pow_hash_meets_target(hash, header.bits, params.pow_limit)
+}
+
+/// POW vs a **caller-computed** header hash (no second SHA256d).
+pub(crate) fn pow_hash_meets_target(
+    hash: [u8; 32],
+    bits: CompactTarget,
+    pow_limit: Target,
+) -> Result<(), ConsensusError> {
+    let target = Target::from_compact(bits);
+    if target > pow_limit {
         return Err(ConsensusError::BadHeader("target above pow limit"));
     }
-    header
-        .validate_pow(target)
-        .map_err(|_| ConsensusError::InvalidPow)?;
-
+    if !target.is_met_by(bitcoin::BlockHash::from_byte_array(hash)) {
+        return Err(ConsensusError::InvalidPow);
+    }
     Ok(())
 }
 
@@ -232,6 +257,23 @@ mod median_time_past_tests {
     use rbitcoin_query::{Query, TxApply};
     use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn pow_hash_meets_target_meet_miss_and_limit() {
+        let rt = ChainParams::regtest();
+        let easy = CompactTarget::from_consensus(0x207f_ffff);
+        pow_hash_meets_target([0u8; 32], easy, rt.pow_limit).unwrap();
+        let mainnet_bits = CompactTarget::from_consensus(0x1d00_ffff);
+        let miss = pow_hash_meets_target([0xff; 32], mainnet_bits, Target::MAX_ATTAINABLE_MAINNET)
+            .unwrap_err();
+        assert!(matches!(miss, ConsensusError::InvalidPow), "{miss:?}");
+        let err =
+            pow_hash_meets_target([0u8; 32], easy, ChainParams::mainnet().pow_limit).unwrap_err();
+        assert!(
+            matches!(err, ConsensusError::BadHeader(s) if s.contains("pow limit")),
+            "{err:?}"
+        );
+    }
 
     #[test]
     fn mtp_times_picks_middle_of_sorted() {

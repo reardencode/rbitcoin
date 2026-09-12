@@ -102,17 +102,9 @@ pub(super) fn assemble_run(
                 if block.header.bits != expected {
                     return Err(ConsensusError::BadHeader("incorrect proof of work bits"));
                 }
-                let target = Target::from_compact(block.header.bits);
-                if target > params.pow_limit {
-                    return Err(ConsensusError::BadHeader("target above pow limit"));
-                }
-                block
-                    .header
-                    .validate_pow(target)
-                    .map_err(|_| ConsensusError::InvalidPow)?;
             } else {
                 prev_mtp = 0;
-                validate_header(query, params, height, &block.header)?;
+                validate_header_hashed(query, params, height, &block.header, block_hash)?;
             }
         } else {
             let prev = &prepared[i - 1];
@@ -141,14 +133,6 @@ pub(super) fn assemble_run(
             if block.header.bits != expected {
                 return Err(ConsensusError::BadHeader("incorrect proof of work bits"));
             }
-            let target = Target::from_compact(block.header.bits);
-            if target > params.pow_limit {
-                return Err(ConsensusError::BadHeader("target above pow limit"));
-            }
-            block
-                .header
-                .validate_pow(target)
-                .map_err(|_| ConsensusError::InvalidPow)?;
         }
 
         if params.bip34_active_at(height.0) {
