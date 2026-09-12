@@ -599,7 +599,7 @@ fn page_append_preserves_prefix_and_order() {
 #[test]
 fn extent_span_over_cap_still_unlinks() {
     let dir = tmp();
-    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let t = ScriptHashTable::create(&dir).unwrap();
     let sh = script_hash(&[0x7c]);
     let mut heads = HashMap::new();
     let many: Vec<_> = (1..=600u32).map(|v| rec(sh, u64::from(v), v)).collect();

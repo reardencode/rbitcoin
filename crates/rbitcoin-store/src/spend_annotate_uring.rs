@@ -891,7 +891,7 @@ mod tests {
             &spenders,
             &[(abs, cfk, 0, a)],
             &[known0],
-            crate::io_backend::WriteIoBackend::Pwrite,
+            SpendAnnBackend::Pwrite,
         )
         .unwrap();
         let known1 = t.get_spender_meta_at_abs_batch(&[abs]).unwrap()[0].unwrap();
@@ -900,7 +900,7 @@ mod tests {
             &spenders,
             &[(abs, cfk, 0, b)],
             &[known1],
-            crate::io_backend::WriteIoBackend::Pwrite,
+            SpendAnnBackend::Pwrite,
         )
         .unwrap();
         let (field, flags) = t.get_spender_meta_at_abs_batch(&[abs]).unwrap()[0].unwrap();
@@ -911,7 +911,7 @@ mod tests {
             &spenders,
             &[(abs, cfk, 0, b)],
             &[(field, flags)],
-            crate::io_backend::WriteIoBackend::Pwrite,
+            SpendAnnBackend::Pwrite,
         )
         .unwrap();
         assert_eq!(spenders.count(), n0, "repeat must not append a list node");
