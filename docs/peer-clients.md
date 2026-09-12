@@ -117,7 +117,7 @@ reject (or the Core-equivalent edge). Tests live in the suites named in
 | **L04** | First tx is the only coinbase | `s2_rejects_non_coinbase_first` (coinbase then spend accepts) | same; `s3_rejects_second_coinbase` |
 | **L05** | Legacy sigop **count** `<= 20_000` | `s11_rejects_excessive_legacy_sigops` (`20_000`) | same (`20_001`) |
 | **L06** | ≥1 input | `s15_rejects_empty_vin` (one input accepts) | same (empty `vin` on non-coinbase) |
-| **L07** | ≥1 output | `s13_rejects_coinbase_empty_vout` (one output accepts) | same; `c1_non_coinbase_empty_outputs_rejected` |
+| **L07** | ≥1 output | `s13_rejects_coinbase_empty_vout` (one output accepts); journey non-coinbase empty `vout` | same (coinbase empty `vout`); journey `no outputs` |
 | **L08** | Tx stripped size `<= 1_000_000` | `s16_tx_stripped_size_1_000_000_accepts_1_000_001_rejects` | same (`check_tx_local`) |
 | **L09** | Output amounts non-negative | `s10_rejects_vout_toolarge` (`Amount::ZERO`) | rust-bitcoin `Amount` is `u64` — negative is unrepresentable |
 | **L10** | Output sum `<= 21e6` BTC | `s10_rejects_vout_toolarge` (exactly `MAX_MONEY`) | same (`MAX_MONEY+1`); `s10_rejects_txouttotal_toolarge` |
