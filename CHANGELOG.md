@@ -20,6 +20,9 @@ before 1.0).
 
 ### Fixed
 
+- **Same-block coinbase maturity:** a later tx in the same block that spends
+  the coinbase is `coinbase immature` (Core `nHeight < coinbaseHeight + 100`).
+  Structural spentness used to skip NULL (same-block) creates.
 - **IBD session-fault resume:** after Class C, a uring session fault on spend
   annotate or `tx.head` drain finishes annotate+drain on the write thread
   (tip `connect_at` retries `finish_post_commit`; IBD does the same in place
