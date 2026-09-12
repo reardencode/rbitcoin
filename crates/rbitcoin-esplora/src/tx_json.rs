@@ -88,7 +88,7 @@ pub fn utxo_list_json(query: &Query, list: &[ScriptHashUtxo]) -> Result<Value, Q
         query,
         list.iter()
             .filter(|u| !u.create_tx_fk.is_null())
-            .map(|u| u.height),
+            .filter_map(|u| u32::try_from(u.height).ok()),
     )?;
     let rows: Vec<EsploraUtxo> = list
         .iter()
@@ -106,7 +106,8 @@ pub fn utxo_list_json(query: &Query, list: &[ScriptHashUtxo]) -> Result<Value, Q
                     },
                 };
             }
-            let (block_hash, block_time) = match by_h.get(&u.height) {
+            let height = u32::try_from(u.height).unwrap_or(0);
+            let (block_hash, block_time) = match by_h.get(&height) {
                 Some((h, t)) => (Some(h.clone()), Some(*t)),
                 None => (None, None),
             };
@@ -116,7 +117,7 @@ pub fn utxo_list_json(query: &Query, list: &[ScriptHashUtxo]) -> Result<Value, Q
                 value: u.value,
                 status: EsploraUtxoStatus {
                     confirmed: true,
-                    block_height: Some(u.height),
+                    block_height: Some(height),
                     block_hash,
                     block_time,
                 },
@@ -563,11 +564,14 @@ mod tests {
                 .iter()
                 .find(|r| {
                     r["vout"] == u.tx_pos
-                        && r["status"]["block_height"].as_u64() == Some(u64::from(u.height))
+                        && r["status"]["block_height"].as_u64() == Some(u.height as u64)
                         && r["value"] == u.value
                 })
                 .expect("row");
-            let (_fk, rec) = q.header_at_height(Height(u.height)).unwrap().unwrap();
+            let (_fk, rec) = q
+                .header_at_height(Height(u.height as u32))
+                .unwrap()
+                .unwrap();
             assert_eq!(row["status"]["confirmed"], true);
             assert_eq!(row["status"]["block_hash"], block_hash_hex(&rec.hash));
             assert_eq!(row["status"]["block_time"], rec.timestamp);

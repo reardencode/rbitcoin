@@ -27,13 +27,15 @@ pub struct ScriptHashOutpoint {
     pub create_height: u32,
 }
 
-/// Electrum `blockchain.scripthash.get_history` row (confirmed only in v1).
+/// Electrum `blockchain.scripthash.get_history` row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScriptHashHistoryItem {
     pub height: i64,
     pub txid: [u8; 32],
     /// Class A create fk when known (confirmed SH join). `NULL` for mempool-only rows.
     pub tx_fk: rbitcoin_primitives::Fk,
+    /// Electrum 1.4 `fee` on unconfirmed rows (`height` 0 or `-1`). Confirmed: `None`.
+    pub fee: Option<i64>,
 }
 
 /// Sort order for [`apply_history_filter`].
@@ -200,6 +202,7 @@ fn history_items_from_joined(
             height,
             txid,
             tx_fk,
+            fee: None,
         })
         .collect();
     apply_history_filter(&items, filter)
@@ -215,7 +218,8 @@ pub struct ScriptHashBalance {
 pub struct ScriptHashUtxo {
     pub tx_hash: [u8; 32],
     pub tx_pos: u32,
-    pub height: u32,
+    /// Confirmed: block height. Mempool: `0` (confirmed parents) or `-1` (unconfirmed parent).
+    pub height: i64,
     pub value: i64,
     pub create_tx_fk: rbitcoin_primitives::Fk,
 }
@@ -578,7 +582,7 @@ impl Query {
             out.push(ScriptHashUtxo {
                 tx_hash: rec.out.txid,
                 tx_pos: rec.out.vout,
-                height: rec.out.create_height,
+                height: i64::from(rec.out.create_height),
                 value: rec.out.value,
                 create_tx_fk: rec.out.create_tx_fk,
             });
@@ -1058,8 +1062,11 @@ impl Query {
         for spk in scripts {
             let sh = script_hash(spk);
             for u in self.scripthash_listunspent(&sh)? {
+                let Ok(height) = u32::try_from(u.height) else {
+                    continue;
+                };
                 let coinbase = {
-                    let fks = self.block_tx_fks(Height(u.height))?;
+                    let fks = self.block_tx_fks(Height(height))?;
                     fks.first().copied() == Some(u.create_tx_fk)
                 };
                 if u.value < 0 {
@@ -1068,7 +1075,7 @@ impl Query {
                 out.push(ScanUtxo {
                     txid: u.tx_hash,
                     vout: u.tx_pos,
-                    height: u.height,
+                    height,
                     value: u.value as u64,
                     script: spk.clone(),
                     coinbase,
@@ -1192,6 +1199,7 @@ mod history_filter_tests {
             height,
             txid,
             tx_fk: Fk::NULL,
+            fee: None,
         }
     }
 

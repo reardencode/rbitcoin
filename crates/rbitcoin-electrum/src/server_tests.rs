@@ -155,6 +155,7 @@ fn config_helpers_and_param_parsers() {
             height: 1,
             txid: [1u8; 32],
             tx_fk: Fk::NULL,
+            fee: None,
         }],
     )
     .unwrap_err();
@@ -169,6 +170,7 @@ fn config_helpers_and_param_parsers() {
             height: 1,
             txid: [1u8; 32],
             tx_fk: Fk::NULL,
+            fee: None,
         }],
     )
     .unwrap_err();
@@ -211,6 +213,65 @@ fn config_helpers_and_param_parsers() {
         take_new_status(&mut last, &subs, sh, "bb".into()).unwrap(),
         "bb"
     );
+}
+
+#[test]
+fn history_row_json_omits_fee_on_confirmed_genesis() {
+    use rbitcoin_primitives::Fk;
+    let genesis = rbitcoin_query::ScriptHashHistoryItem {
+        height: 0,
+        txid: [1u8; 32],
+        tx_fk: Fk(1),
+        fee: None,
+    };
+    let v = history_row_json(&genesis);
+    assert!(
+        v.get("fee").is_none(),
+        "confirmed genesis must omit fee: {v}"
+    );
+    assert_eq!(v["height"], 0);
+
+    let mempool = rbitcoin_query::ScriptHashHistoryItem {
+        height: 0,
+        txid: [2u8; 32],
+        tx_fk: Fk::NULL,
+        fee: Some(123),
+    };
+    let v = history_row_json(&mempool);
+    assert_eq!(v["fee"], 123);
+
+    let child = rbitcoin_query::ScriptHashHistoryItem {
+        height: -1,
+        txid: [3u8; 32],
+        tx_fk: Fk::NULL,
+        fee: Some(9),
+    };
+    let v = history_row_json(&child);
+    assert_eq!(v["fee"], 9);
+    assert_eq!(v["height"], -1);
+
+    let conf = rbitcoin_query::ScriptHashHistoryItem {
+        height: 10,
+        txid: [4u8; 32],
+        tx_fk: Fk(2),
+        fee: None,
+    };
+    let v = history_row_json(&conf);
+    assert!(v.get("fee").is_none(), "{v}");
+}
+
+#[test]
+fn drop_unsubscribed_status_clears_idle_hashes() {
+    let mut last = HashMap::new();
+    let gone = [1u8; 32];
+    let keep = [2u8; 32];
+    last.insert(gone, "x".into());
+    last.insert(keep, "y".into());
+    let mut subs = HashSet::new();
+    subs.insert(keep);
+    drop_unsubscribed_status(&mut last, &subs);
+    assert_eq!(last.get(&keep), Some(&"y".to_string()));
+    assert!(!last.contains_key(&gone));
 }
 
 #[test]
@@ -2846,6 +2907,7 @@ fn scripthash_status_matches_get_history_row_order() {
             height: r["height"].as_i64().unwrap(),
             txid: param_txid(&json!([r["tx_hash"].as_str().unwrap()]), 0).unwrap(),
             tx_fk: Fk::NULL,
+            fee: r["fee"].as_i64(),
         })
         .collect();
     let expected = scripthash_status(Some(q_arc.as_ref()), &rows).unwrap();
@@ -2977,6 +3039,30 @@ fn dispatch_live_mempool_surfaces() {
     )
     .unwrap();
     assert!(!mem.as_array().unwrap().is_empty());
+    let mem_rows = mem.as_array().unwrap();
+    for m in mem_rows {
+        let tx_hash = m["tx_hash"].as_str().unwrap();
+        let fee = m["fee"].as_i64().expect("get_mempool fee");
+        let hist_row = hist
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["tx_hash"] == tx_hash)
+            .expect("get_history must include mempool tx");
+        assert_eq!(
+            hist_row["fee"].as_i64(),
+            Some(fee),
+            "get_history unconfirmed fee: {hist_row}"
+        );
+    }
+    for r in hist.as_array().unwrap() {
+        let tx_hash = r["tx_hash"].as_str().unwrap();
+        if mem_rows.iter().any(|m| m["tx_hash"] == tx_hash) {
+            assert!(r.get("fee").is_some(), "unconfirmed history needs fee: {r}");
+        } else {
+            assert!(r.get("fee").is_none(), "confirmed history has no fee: {r}");
+        }
+    }
 
     let sub = dispatch(
         "blockchain.scripthash.subscribe",
@@ -3076,6 +3162,109 @@ fn dispatch_live_mempool_surfaces() {
     let st = scripthash_status_full(&q_arc, &mp, &sh_bytes).unwrap();
     assert!(!st.is_empty());
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Electrum 1.4: mempool UTXO height is `-1` when a parent is still unconfirmed.
+#[test]
+fn listunspent_mempool_child_height_is_minus_one() {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::script::ScriptBuf;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
+    use rbitcoin_consensus::{accept_and_connect_block, Milestone};
+    use rbitcoin_net::MempoolHub;
+    use rbitcoin_primitives::Height;
+    use std::sync::Arc;
+
+    if std::env::var_os("RBITCOIN_HEAD_SCALE").is_none() {
+        std::env::set_var("RBITCOIN_HEAD_SCALE", "tiny");
+    }
+    let (dir, q) = tmp_store();
+    let params = ChainParams::regtest();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+    let (_tip, _tip_time, coinbase_txids) = rbitcoin_consensus::pad_empty_from(
+        &q,
+        &params,
+        genesis.block_hash(),
+        genesis.header.time,
+        1,
+        103,
+        2,
+    );
+    let q_arc = Arc::new(q);
+    let mp = MempoolHub::open(dir.join("mempool"), Arc::clone(&q_arc)).unwrap();
+    mp.set_relay_enabled(true);
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+    let parent = Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: coinbase_txids[0],
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(50_0000_0000 - 1_000),
+            script_pubkey: spk.clone(),
+        }],
+    };
+    mp.accept_tx(&parent).expect("accept parent");
+    let child = Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: parent.compute_txid(),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(50_0000_0000 - 1_000 - 2_000),
+            script_pubkey: spk.clone(),
+        }],
+    };
+    mp.accept_tx(&child).expect("accept child");
+
+    let sh = electrum_scripthash_hex(spk.as_bytes());
+    let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+    let mut header_sub = false;
+    let mut sh_subs = HashSet::new();
+    let unspent = dispatch(
+        "blockchain.scripthash.listunspent",
+        &json!([sh]),
+        &q_arc,
+        &cfg,
+        &params,
+        Some(&mp),
+        &mut header_sub,
+        &mut sh_subs,
+    )
+    .unwrap();
+    let parent_hex = rbitcoin_primitives::display_hash_hex(&parent.compute_txid().to_byte_array());
+    let child_hex = rbitcoin_primitives::display_hash_hex(&child.compute_txid().to_byte_array());
+    let rows = unspent.as_array().unwrap();
+    assert!(
+        rows.iter().all(|r| r["tx_hash"] != parent_hex),
+        "child spend must drop the parent UTXO: {unspent}"
+    );
+    let child_row = rows
+        .iter()
+        .find(|r| r["tx_hash"] == child_hex)
+        .unwrap_or_else(|| panic!("child UTXO missing: {unspent}"));
+    assert_eq!(
+        child_row["height"].as_i64(),
+        Some(-1),
+        "unconfirmed parent → height -1: {child_row}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3260,6 +3449,77 @@ fn scripthash_sub_cap_enforced() {
         &mut sh_subs,
     )
     .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn scripthash_unsubscribe_frees_cap_slot() {
+    let (dir, q) = tmp_store();
+    let params = ChainParams::regtest();
+    let mut cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+    cfg.max_scripthash_subs = 2;
+    let mut header_sub = false;
+    let mut sh_subs = HashSet::new();
+    let h1 = "11".repeat(32);
+    let h2 = "22".repeat(32);
+    let h3 = "33".repeat(32);
+    dispatch(
+        "blockchain.scripthash.subscribe",
+        &json!([h1.clone()]),
+        &q,
+        &cfg,
+        &params,
+        None,
+        &mut header_sub,
+        &mut sh_subs,
+    )
+    .unwrap();
+    dispatch(
+        "blockchain.scripthash.subscribe",
+        &json!([h2]),
+        &q,
+        &cfg,
+        &params,
+        None,
+        &mut header_sub,
+        &mut sh_subs,
+    )
+    .unwrap();
+    let none = dispatch(
+        "blockchain.scripthash.unsubscribe",
+        &json!([h3.clone()]),
+        &q,
+        &cfg,
+        &params,
+        None,
+        &mut header_sub,
+        &mut sh_subs,
+    )
+    .unwrap();
+    assert_eq!(none, json!(false), "never subscribed");
+    let dropped = dispatch(
+        "blockchain.scripthash.unsubscribe",
+        &json!([h1]),
+        &q,
+        &cfg,
+        &params,
+        None,
+        &mut header_sub,
+        &mut sh_subs,
+    )
+    .unwrap();
+    assert_eq!(dropped, json!(true));
+    dispatch(
+        "blockchain.scripthash.subscribe",
+        &json!([h3]),
+        &q,
+        &cfg,
+        &params,
+        None,
+        &mut header_sub,
+        &mut sh_subs,
+    )
+    .expect("unsubscribe must free a cap slot");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

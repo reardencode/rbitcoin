@@ -633,6 +633,7 @@ where
                         }
                     }
                 };
+                drop_unsubscribed_status(&mut last_sent_status, &conn.sh_subs);
                 let wall_ms = t0.elapsed().as_millis() as u64;
                 meter_dispatch_wall(t0.elapsed().as_micros() as u64);
                 let params_s = serde_json::to_string(&params_v).unwrap_or_else(|_| "[]".into());
@@ -956,13 +957,20 @@ fn tick_scan(seen: Option<u32>, now: Option<u32>) -> Option<Option<Vec<u32>>> {
     }
 }
 
+fn drop_unsubscribed_status(
+    last_sent: &mut HashMap<[u8; 32], String>,
+    sh_subs: &HashSet<[u8; 32]>,
+) {
+    last_sent.retain(|k, _| sh_subs.contains(k));
+}
+
 fn take_new_status(
     last_sent: &mut HashMap<[u8; 32], String>,
     sh_subs: &HashSet<[u8; 32]>,
     sh: [u8; 32],
     status: String,
 ) -> Option<String> {
-    last_sent.retain(|k, _| sh_subs.contains(k));
+    drop_unsubscribed_status(last_sent, sh_subs);
     if last_sent.get(&sh) == Some(&status) {
         return None;
     }
@@ -1057,6 +1065,7 @@ fn method_stays_on_worker(method: &str) -> bool {
             | "server.features"
             | "server.peers.subscribe"
             | "blockchain.relayfee"
+            | "blockchain.scripthash.unsubscribe"
     )
 }
 
@@ -1298,15 +1307,7 @@ fn dispatch_pinned(
                     append_mempool_history(&mut hist, mp, &sh);
                 }
             }
-            let arr: Vec<Value> = hist
-                .iter()
-                .map(|i| {
-                    json!({
-                        "height": i.height,
-                        "tx_hash": txid_hex(&i.txid),
-                    })
-                })
-                .collect();
+            let arr: Vec<Value> = hist.iter().map(history_row_json).collect();
             Ok(Value::Array(arr))
         }
         "blockchain.scripthash.get_balance" => {
@@ -1401,6 +1402,10 @@ fn dispatch_pinned(
                 scripthash_status(Some(query), &hist)?
             };
             Ok(json!(status))
+        }
+        "blockchain.scripthash.unsubscribe" => {
+            let sh = param_scripthash(params, 0)?;
+            Ok(json!(sh_subs.remove(&sh)))
         }
         "blockchain.scripthash.get_mempool" => {
             let sh = param_scripthash(params, 0)?;
@@ -1765,6 +1770,17 @@ fn hash_hex_rev(h: &[u8; 32]) -> String {
     rbitcoin_primitives::display_hash_hex(h)
 }
 
+fn history_row_json(i: &rbitcoin_query::ScriptHashHistoryItem) -> Value {
+    let mut row = json!({
+        "height": i.height,
+        "tx_hash": txid_hex(&i.txid),
+    });
+    if let Some(fee) = i.fee {
+        row["fee"] = json!(fee);
+    }
+    row
+}
+
 fn append_mempool_history(
     hist: &mut Vec<rbitcoin_query::ScriptHashHistoryItem>,
     mp: &MempoolHub,
@@ -1778,6 +1794,7 @@ fn append_mempool_history(
             height: item.height,
             txid: item.txid,
             tx_fk: Fk::NULL,
+            fee: Some(item.fee),
         });
     }
 }

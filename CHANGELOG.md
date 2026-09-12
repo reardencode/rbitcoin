@@ -20,6 +20,14 @@ before 1.0).
 
 ### Fixed
 
+- **Electrum 1.4 leftover:** `blockchain.scripthash.unsubscribe` returns whether
+  the connection was watching (frees the per-connection cap). `get_history`
+  unconfirmed rows include `fee`; confirmed rows (including genesis height 0)
+  omit it. `listunspent` mempool height is `-1` when a parent is still in the
+  mempool (otherwise `0`).
+- **Packed P2TR scan:** `scan_packed_p2tr_outs` fails closed on an output
+  value above `i64::MAX` (`Corrupt("output value too large")`), matching
+  `OutputRecord::decode_at_secret`.
 - **Class C `flush_dirty`:** packed dirty-epoch (`0` = clean). Snapshot stays under the `data` read lock; persist IO is unlocked; CAS `e0→0` so a racing `set` is not marked clean. Wrap of `u64::MAX` stays dirty (never publishes 0).
 - **fuse8:** `decode_body` refuses fingerprint arrays shorter than `hash_of_hash` geometry. `contains` is unchanged.
 - **Spender overflow:** `for_each_spender_create` stops after `spenders.count()` hops (`Corrupt` on a cycle).

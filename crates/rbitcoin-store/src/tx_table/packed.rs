@@ -670,7 +670,11 @@ pub fn scan_packed_p2tr_outs(
         let mut o = off + 1;
         let (v, n) = read_uleb128(&raw[o..])?;
         o += n;
-        let value = if v > i64::MAX as u64 { 0 } else { v };
+        let value = if v > i64::MAX as u64 {
+            return Err(StoreError::Corrupt("output value too large"));
+        } else {
+            v
+        };
         let used = crate::compact::script_kind_v17_disk_used(kind, &raw[o..])?;
         if kind == crate::compact::SCRIPT_KIND_V17_P2TR && used == 32 {
             let mut xonly = [0u8; 32];
@@ -793,4 +797,49 @@ pub struct HeadResizeSizeSnapshot {
     pub open_keys_bytes: u64,
     /// Class C L2 images (strong_tx + confirmed + header_txs).
     pub class_c_l2_bytes: u64,
+}
+
+#[cfg(test)]
+mod scan_p2tr_tests {
+    use super::*;
+    use crate::compact::{write_uleb128, SCRIPT_KIND_V17_P2TR};
+
+    fn packed_p2tr_body(value: u64) -> Vec<u8> {
+        let meta = TxRecord {
+            txid: [0u8; 32],
+            version: 2,
+            locktime: 0,
+            input_start_fk: Fk::NULL,
+            input_count: 0,
+            output_start_fk: Fk::NULL,
+            output_count: 1,
+        };
+        let mut raw = Vec::new();
+        meta.encode_body_meta_into(&mut raw);
+        raw.push(SCRIPT_KIND_V17_P2TR);
+        write_uleb128(&mut raw, value);
+        raw.extend_from_slice(&[0u8; 32]);
+        raw
+    }
+
+    #[test]
+    fn scan_packed_p2tr_outs_ok_value() {
+        let raw = packed_p2tr_body(50_000);
+        let rows = scan_packed_p2tr_outs(&raw, None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, 0);
+        assert_eq!(rows[0].2, 50_000);
+        OutputRecord::decode_at_secret(&raw[TxRecord::decode_body_meta(&raw).unwrap().1..], None)
+            .unwrap();
+    }
+
+    #[test]
+    fn scan_packed_p2tr_outs_overflow_is_corrupt() {
+        let raw = packed_p2tr_body(i64::MAX as u64 + 1);
+        let err = scan_packed_p2tr_outs(&raw, None).unwrap_err();
+        assert!(format!("{err}").contains("output value too large"), "{err}");
+        let meta_n = TxRecord::decode_body_meta(&raw).unwrap().1;
+        let dec = OutputRecord::decode_at_secret(&raw[meta_n..], None).unwrap_err();
+        assert!(format!("{dec}").contains("output value too large"), "{dec}");
+    }
 }
