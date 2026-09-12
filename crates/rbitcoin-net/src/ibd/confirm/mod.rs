@@ -518,6 +518,20 @@ fn requeue_on_uring_recover(
     true
 }
 
+/// Stamp/pin fail: drop speculative fks, stale in-channel loadq, keep tail wire.
+fn load_fail_rewind_wave(
+    feed: &ConfirmFeed,
+    hub: &ChainHub,
+    lookup_ahead: &mut LoadAheadState,
+    first_h: u32,
+    tail: &[(u32, BlockHash, Option<bitcoin::Block>)],
+) {
+    lookup_ahead.clear_all(hub);
+    feed.finish(std::iter::once(first_h));
+    feed.clear();
+    feed.requeue_wire(tail);
+}
+
 pub(crate) fn lookup_ready_hash(feed: &ConfirmFeed, height: u32) -> Option<BlockHash> {
     feed.inner
         .lock()
@@ -1885,18 +1899,20 @@ pub(crate) fn spawn_confirm_engine(
                             continue;
                         }
                         let first_hash = wire_batch[0].1;
-                        if wire_batch.len() > 1 {
-                            let tail: Vec<(u32, BlockHash, Option<bitcoin::Block>)> =
-                                wire_batch
-                                    .iter()
-                                    .skip(1)
-                                    .filter(|(_, ha, _)| !hub_load.has_block(ha))
-                                    .map(|(h, ha, _)| (*h, *ha, None))
-                                    .collect();
-                            feed_load.requeue_wire(&tail);
-                        }
-                        feed_load.finish(std::iter::once(expect_h));
-                        lookup_ahead.clear_all(&hub_load);
+                        let tail: Vec<(u32, BlockHash, Option<bitcoin::Block>)> =
+                            wire_batch
+                                .iter()
+                                .skip(1)
+                                .filter(|(_, ha, _)| !hub_load.has_block(ha))
+                                .map(|(h, ha, w)| (*h, *ha, Some((*w.block).clone())))
+                                .collect();
+                        load_fail_rewind_wave(
+                            &feed_load,
+                            &hub_load,
+                            &mut lookup_ahead,
+                            expect_h,
+                            &tail,
+                        );
                         loop_stats_load
                             .confirm_reject_stops
                             .fetch_add(1, Ordering::Relaxed);
@@ -1948,7 +1964,6 @@ pub(crate) fn spawn_confirm_engine(
                     .map(|(h, ha, _)| (*h, *ha))
                     .collect();
                 let first_hash = heights_hashes[0].1;
-                let _ = wire_batch;
 
                 struct LiveGuard<'a> {
                     stats: &'a LoopStats,
@@ -2039,17 +2054,20 @@ pub(crate) fn spawn_confirm_engine(
                             );
                             continue;
                         }
-                        if heights_hashes.len() > 1 {
-                            let tail: Vec<(u32, BlockHash, Option<bitcoin::Block>)> =
-                                heights_hashes
-                                    .iter()
-                                    .skip(1)
-                                    .filter(|(_, ha)| !hub_load.has_block(ha))
-                                    .map(|(h, ha)| (*h, *ha, None))
-                                    .collect();
-                            feed_load.requeue_wire(&tail);
-                        }
-                        feed_load.finish(std::iter::once(expect_h));
+                        let tail: Vec<(u32, BlockHash, Option<bitcoin::Block>)> =
+                            wire_batch
+                                .iter()
+                                .skip(1)
+                                .filter(|(_, ha, _)| !hub_load.has_block(ha))
+                                .map(|(h, ha, w)| (*h, *ha, Some((*w.block).clone())))
+                                .collect();
+                        load_fail_rewind_wave(
+                            &feed_load,
+                            &hub_load,
+                            &mut lookup_ahead,
+                            expect_h,
+                            &tail,
+                        );
                         loop_stats_load
                             .confirm_reject_stops
                             .fetch_add(1, Ordering::Relaxed);
@@ -2068,6 +2086,7 @@ pub(crate) fn spawn_confirm_engine(
                             break;
                         }
                         std::thread::sleep(Duration::from_millis(10));
+                        continue;
                     }
                 }
                 // Body HWM only — in-flight drop is the marked last-batch path above.

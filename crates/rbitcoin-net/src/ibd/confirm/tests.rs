@@ -1460,6 +1460,50 @@ fn write_session_fault_after_class_c_finishes_annotate_in_place() {
 }
 
 #[test]
+fn load_fail_rewind_keeps_tail_wire_and_clears_lookup() {
+    use super::{load_fail_rewind_wave, ConfirmFeed, LoadAheadState};
+    use rbitcoin_query::ArchiveWritePlan;
+
+    let (_dir, hub) = crate::chain::tiny_regtest_hub_labeled("load-fail-rewind");
+    hub.ensure_genesis().unwrap();
+    let mut st = LoadAheadState::new(&hub);
+    let body0 = hub.query.tx_body_count();
+    let mut plan = ArchiveWritePlan::empty();
+    plan.planned_fks = vec![Fk(body0.saturating_add(10).max(10))];
+    st.note_lookup_ok(&plan, 10, [1u8; 32]);
+    let pin = test_pin(body0.saturating_add(10).max(10));
+    st.in_flight
+        .note_pins(std::iter::once((plan.planned_fks[0], &pin)), Some(10));
+    assert!(st.in_flight.entry_count() > 0);
+
+    let feed = ConfirmFeed::new();
+    {
+        let mut g = feed.inner.lock().unwrap();
+        g.inflight.insert(10);
+        g.inflight.insert(11);
+    }
+    let body = rbitcoin_consensus::genesis_block(&hub.params);
+    let tail = vec![(11, bh(2), Some(body))];
+    load_fail_rewind_wave(&feed, &hub, &mut st, 10, &tail);
+    assert_eq!(
+        st.in_flight.entry_count(),
+        0,
+        "pin/stamp fail must clear_all"
+    );
+    assert_eq!(
+        feed.epoch(),
+        1,
+        "epoch bump drops in-channel same-wave loadq"
+    );
+    let g = feed.inner.lock().unwrap();
+    assert!(!g.ready.contains_key(&10));
+    assert!(
+        g.ready.get(&11).is_some_and(|e| e.1.is_some()),
+        "tail must requeue with bodies (BQ already taken)"
+    );
+}
+
+#[test]
 fn load_session_fault_after_note_lookup_ok_clears_speculative_fks() {
     use super::LoadAheadState;
     use rbitcoin_query::ArchiveWritePlan;
