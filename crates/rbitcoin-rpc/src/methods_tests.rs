@@ -2737,14 +2737,6 @@ fn testmempoolaccept_script_reject_maps_cltv_parens() {
 }
 
 #[test]
-fn getpeerinfo_empty_without_hub() {
-    let (ctx, dir) = ctx_empty();
-    let r = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
-    assert_eq!(r, json!([]));
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
 fn getnetworkinfo_localaddresses_from_externalip() {
     use rbitcoin_net::PeerHub;
     use std::net::{IpAddr, Ipv4Addr};
@@ -2772,6 +2764,7 @@ fn getpeerinfo_lists_registered_session() {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     let (mut ctx, dir) = ctx_empty();
+    assert_eq!(dispatch(&ctx, "getpeerinfo", vec![]).unwrap(), json!([]));
     let hub = PeerHub::new();
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
     let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18445);

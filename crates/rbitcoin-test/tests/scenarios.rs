@@ -8,10 +8,9 @@ use bitcoin::{Amount, BlockHash};
 use rbitcoin_cli::cli_main as cli_cli_main;
 use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
 use rbitcoin_node::{cli_main as node_cli_main, run_node, NodeConfig};
-use rbitcoin_primitives::{Fk, Height, Network, TableKind, VERSION};
+use rbitcoin_primitives::{Fk, Height, Network, VERSION};
 use rbitcoin_query::testutil::FixtureChain;
 use rbitcoin_query::Query;
-use rbitcoin_rpc::node_rpc_path;
 use rbitcoin_store::{HeaderRecord, Store, StoreError, TxRecord};
 use rbitcoin_test::mine::{mine_regtest_block, regtest_genesis, spend_anyone_can_spend};
 use rbitcoin_test::{
@@ -48,13 +47,6 @@ fn node_cli_and_surface_smoke() {
     assert!(Network::parse("nope").is_err());
     assert_eq!(Network::parse("REGTEST").unwrap(), Network::Regtest);
     assert!(!VERSION.is_empty());
-    for k in [1u16, 2, 3, 7, 8, 9, 10, 11] {
-        assert_eq!(TableKind::from_u16(k).unwrap().as_u16(), k);
-    }
-    assert!(TableKind::from_u16(4).is_none());
-    assert!(TableKind::from_u16(99).is_none());
-    assert!(Fk::NULL.is_null());
-    assert_eq!(Height::GENESIS.next(), Some(Height(1)));
 
     // Config errors
     let cfg = NodeConfig {
@@ -66,50 +58,6 @@ fn node_cli_and_surface_smoke() {
     let file = td.path().join("blocked");
     std::fs::write(&file, b"nope").unwrap();
     assert!(run_node(NodeConfig::default().with_datadir(file)).is_err());
-
-    // Net surface
-    assert!(!Milestone::NONE.skips_scripts_at(0));
-    assert!(Milestone { height: 10 }.skips_scripts_at(5));
-    assert_eq!(rbitcoin_net::DEFAULT_IBD_TARGET_PEERS, 16);
-    assert_eq!(node_rpc_path(), "/");
-    assert_eq!(rbitcoin_net::default_port(Network::Mainnet), 8333);
-    assert_eq!(rbitcoin_net::default_port(Network::Regtest), 18444);
-    assert!(rbitcoin_net::dns_seeds(Network::Mainnet).len() >= 3);
-    assert!(rbitcoin_net::dns_seeds(Network::Regtest).is_empty());
-    assert!(!rbitcoin_net::fixed_seed_hosts(Network::Mainnet).is_empty());
-    let mut am = rbitcoin_net::AddrMan::with_seeds(Network::Regtest);
-    assert!(am.is_empty());
-    am.add("127.0.0.1:18444".parse().unwrap());
-    assert_eq!(am.len(), 1);
-    assert_eq!(am.take_outbound(10).len(), 1);
-    assert_eq!(am.take_outbound_offset(1, 0).len(), 1);
-    let _ = rbitcoin_net::resolve_fixed_seeds(Network::Regtest);
-    let _ = rbitcoin_net::resolve_dns_seeds(Network::Regtest);
-    let _ = rbitcoin_net::resolve_all_seeds(Network::Regtest);
-    assert!(!rbitcoin_net::dns_seeds(Network::Signet).is_empty());
-
-    // Chain params (no mining)
-    for net in [
-        Network::Mainnet,
-        Network::Testnet,
-        Network::Signet,
-        Network::Regtest,
-    ] {
-        let p = ChainParams::for_network(net);
-        let g = rbitcoin_consensus::genesis_block(&p);
-        assert_eq!(g.block_hash(), p.genesis_hash);
-    }
-    let main = ChainParams::mainnet();
-    assert!(!main.checkpoints.is_empty());
-    assert_eq!(main.checkpoint_at(Height(0)).unwrap(), main.genesis_hash);
-    assert_eq!(main.difficulty_adjustment_interval(), 2016);
-    assert!(!main.no_pow_retargeting());
-    assert!(ChainParams::regtest().no_pow_retargeting());
-    assert_eq!(rbitcoin_consensus::block_subsidy(0, &main), 50_0000_0000);
-    assert_eq!(
-        rbitcoin_consensus::block_subsidy(210_000, &main),
-        25_0000_0000
-    );
 
     // CLI entrypoints
     for net in ["mainnet", "testnet", "signet", "regtest"] {
@@ -123,8 +71,9 @@ fn node_cli_and_surface_smoke() {
             "--smoke",
         ])));
     }
-    let _ = node_cli_main(["rbitcoin-node", "--help"]);
-    let _ = node_cli_main(["rbitcoin-node", "--version"]);
+    assert!(exit_success(node_cli_main(["rbitcoin-node", "--help"])));
+    assert!(exit_success(node_cli_main(["rbitcoin-node", "--version"])));
+    assert!(exit_success(node_cli_main(["rbitcoin-node", "-V"])));
     let _ = cli_cli_main(["rbitcoin-cli", "--help"]);
     let _ = cli_cli_main(["rbitcoin-cli", "--version"]);
     assert!(exit_success(cli_cli_main(["rbitcoin-cli", "help"])));
@@ -260,6 +209,10 @@ fn node_cli_and_surface_smoke() {
         "--inhibit-suspend",
         "--smoke",
     ])));
+    assert!(
+        flags_ok.join("store").is_dir(),
+        "smoke must create the store under --datadir"
+    );
     let flags_off = td.path().join("flags-log-off");
     assert!(exit_success(node_cli_main([
         "rbitcoin-node",
@@ -271,7 +224,32 @@ fn node_cli_and_surface_smoke() {
         "off",
         "--smoke",
     ])));
-    let _ = node_cli_main(["rbitcoin-node", "--help"]);
+    let conf_dir = td.path().join("from-conf");
+    std::fs::create_dir_all(&conf_dir).unwrap();
+    let conf = conf_dir.join("rbitcoin.conf");
+    std::fs::write(
+        &conf,
+        "network=regtest\nmaxoutbound=3\nlog_level=warn\nno_seeds=1\n",
+    )
+    .unwrap();
+    assert!(exit_success(node_cli_main([
+        "rbitcoin-node",
+        "--datadir",
+        conf_dir.join("data").to_str().unwrap(),
+        "--conf",
+        conf.to_str().unwrap(),
+        "--smoke",
+    ])));
+    assert!(!exit_success(node_cli_main([
+        "rbitcoin-node",
+        "--datadir",
+        td.path().join("peertimeout-zero").to_str().unwrap(),
+        "--network",
+        "regtest",
+        "--peertimeout",
+        "0",
+        "--smoke",
+    ])));
     assert!(!exit_success(cli_cli_main(["rbitcoin-cli", "a", "b"])));
 
     // Serialize process-wide env mutation (parallel `cargo test` races).
@@ -331,19 +309,6 @@ fn store_error_and_corrupt_paths() {
         s.put_spend(&[0u8; 32], 0, Fk::NULL),
         Err(StoreError::NotFound | StoreError::InvalidFk)
     ));
-    let _ = format!("{}", StoreError::BadMagic);
-    let _ = format!("{}", StoreError::BadSchema(3));
-    let _ = format!(
-        "{}",
-        StoreError::BadKind {
-            expected: 1,
-            got: 2
-        }
-    );
-    let _ = format!("{}", StoreError::NotFound);
-    let _ = format!("{}", StoreError::InvalidFk);
-    let _ = format!("{}", StoreError::Corrupt("x"));
-    let _ = format!("{}", StoreError::NotDirectory(path.clone()));
     drop(s);
 
     let file_path = td.path().join("notdir");

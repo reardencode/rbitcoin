@@ -143,56 +143,6 @@ fn h8_rejects_timestamp_too_far_in_future() {
     );
 }
 
-// ─── Connect / economic rules ───────────────────────────────────────────────
-
-#[test]
-fn c1_non_coinbase_empty_outputs_rejected() {
-    use bitcoin::absolute::LockTime;
-    use bitcoin::script::ScriptBuf;
-    use bitcoin::transaction::Version as TxVersion;
-    use bitcoin::{OutPoint, Sequence, Transaction, TxIn, Witness};
-
-    let (_td, q, params) = regtest_q();
-    connect_genesis(&q, &params);
-    let g = regtest_genesis();
-    let b1 = mine_regtest_block(g.block_hash(), g.header.time + 600, 1, vec![]);
-    accept_and_connect_block(&q, &params, Height(1), &b1, Milestone::NONE).unwrap();
-    let maturity = params.coinbase_maturity();
-    let mut tip = b1.block_hash();
-    let mut time = b1.header.time;
-    let mut h = 1u32;
-    while h < maturity {
-        h += 1;
-        time += 600;
-        let b = mine_regtest_block(tip, time, h, vec![]);
-        accept_and_connect_block(&q, &params, Height(h), &b, Milestone::NONE).unwrap();
-        tip = b.block_hash();
-    }
-    let cb_txid = b1.txdata[0].compute_txid();
-    let empty_out = Transaction {
-        version: TxVersion::ONE,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint {
-                txid: cb_txid,
-                vout: 0,
-            },
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        output: vec![],
-    };
-    time += 600;
-    let bad = mine_regtest_block(tip, time, h + 1, vec![empty_out]);
-    let err = accept_and_connect_block(&q, &params, Height(h + 1), &bad, Milestone::NONE);
-    assert!(
-        matches!(err, Err(ConsensusError::BadTx(s)) if s.contains("no outputs")),
-        "{err:?}"
-    );
-    assert_eq!(q.tip_height(), Some(Height(h)));
-}
-
 fn grind_pow(block: &mut bitcoin::Block) {
     let target = bitcoin::Target::from_compact(block.header.bits);
     for nonce in 0..u32::MAX {
@@ -352,6 +302,16 @@ fn header_and_spending_boundaries() {
     assert!(
         err.is_err(),
         "child-before-parent must not become tip: {err:?}"
+    );
+    assert_eq!(q.tip_height(), Some(Height(100)));
+
+    let mut empty_out = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(1));
+    empty_out.output.clear();
+    let empty_block = mine_regtest_block(tip, time, 101, vec![empty_out]);
+    let err = accept_and_connect_block(&q, &params, Height(101), &empty_block, Milestone::NONE);
+    assert!(
+        matches!(err, Err(ConsensusError::BadTx(s)) if s.contains("no outputs")),
+        "non-coinbase empty vout: {err:?}"
     );
     assert_eq!(q.tip_height(), Some(Height(100)));
 

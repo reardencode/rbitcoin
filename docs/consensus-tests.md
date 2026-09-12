@@ -90,7 +90,7 @@ header version/time, `finality_tests`, `sigop_cost_tests`,
 | S10 | Output value / sum ≤ MAX_MONEY | `toolarge` | `s10_rejects_vout_toolarge` |
 | S11 | Legacy sigops cost ≤ 80_000 | `bad-blk-sigops` | `s11_rejects_excessive_legacy_sigops` (20_000 accept / 20_001 reject) |
 | S12 | Connect: P2SH + witness sigops (BIP16/BIP141); P2SH scriptSig opcode `> OP_16` → 0; witness sigops only when segwit is active | `bad-blk-sigops` | `sigop_cost_tests::*` + `p2sh_sigops_non_push_scriptsig_is_zero` + `witness_sigops_gated_on_segwit` |
-| S13 | Every tx including coinbase has ≥1 output | `no outputs` | `s13_rejects_coinbase_empty_vout` |
+| S13 | Every tx including coinbase has ≥1 output | `no outputs` | `s13_rejects_coinbase_empty_vout`; `header_and_spending_boundaries` (non-coinbase empty `vout`) |
 | S14 | Stripped size ≤ 1_000_000 | `block stripped size too large` | `s14_stripped_size_1_000_000_accepts_1_000_001_rejects` |
 | S15 | Every tx has ≥1 input | `no inputs` | `s15_rejects_empty_vin` |
 | S16 | Tx stripped size ≤ 1_000_000 | `bad-txns-oversize` | `s16_tx_stripped_size_1_000_000_accepts_1_000_001_rejects` |

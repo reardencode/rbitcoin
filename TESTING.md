@@ -215,7 +215,7 @@ Prefer **one high-level scenario** per behavior cluster. Delete lower-level test
 
 | ID | Layer | Description |
 |----|-------|-------------|
-| `node_cli_and_surface_smoke` | Lifecycle/CLI | Networks, config errors, CLI flags (incl. log-level/mempool/electrum/inhibit), params, net surface |
+| `node_cli_and_surface_smoke` | Lifecycle/CLI | Networks, `run_node`, config errors, CLI flags (incl. `--conf`, `--peertimeout=0`, log-level/mempool/electrum/inhibit), help/version |
 | `three_stage_confirm_and_parent_pin_surface` | Consensus+query | Split load→scripts→write; parent pin; load ready timeout/cancel |
 | `block_cache_and_mempool_hub_surface` | Net | BlockCache locator/eviction + MempoolHub accept/remove/reorg on mature chain |
 | `store_error_and_corrupt_paths` | Store | Error/corrupt surfaces |
