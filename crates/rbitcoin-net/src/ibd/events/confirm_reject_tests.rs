@@ -2003,22 +2003,30 @@ fn apply_peer_event_repeat_headers_skips_ensure_header_fk() {
     let write_next = AtomicU32::new(1);
     let mut book = AddrMan::new();
     let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 1, 0, 99)), 18444);
-    let hdr = dummy_header(gen, 1);
-    let hash = hdr.block_hash();
+    let h1 = dummy_header(gen, 1);
+    let h2 = dummy_header(h1.block_hash(), 2);
+    let h3 = dummy_header(h2.block_hash(), 3);
+    let hash1 = h1.block_hash();
+    let hash2 = h2.block_hash();
+    let hash3 = h3.block_hash();
+    let before = hub.query.store().header_count();
     apply_peer_event(
         &mut st,
         &hub,
         PeerEvent::Headers {
             peer: 1,
-            headers: vec![hdr],
+            headers: vec![h1, h2, h3],
         },
         &write_next,
         &mut book,
         local,
         None,
     );
-    assert!(st.known_headers.contains(&hash));
-    assert!(st.header_fks.contains_key(&hash));
+    assert_eq!(hub.query.store().header_count(), before + 3);
+    assert!(st.known_headers.contains(&hash1));
+    assert!(st.header_fks.contains_key(&hash1));
+    assert!(st.header_fks.contains_key(&hash2));
+    assert!(st.header_fks.contains_key(&hash3));
     let fks = st.header_fks.len();
     let n_headers = hub.query.store().header_count();
     apply_peer_event(
@@ -2026,7 +2034,7 @@ fn apply_peer_event_repeat_headers_skips_ensure_header_fk() {
         &hub,
         PeerEvent::Headers {
             peer: 1,
-            headers: vec![hdr],
+            headers: vec![h1, h2, h3],
         },
         &write_next,
         &mut book,

@@ -220,6 +220,7 @@ fn on_headers_batch(
 ) -> usize {
     let mut added = 0usize;
     let mut batch_prev: Option<(BlockHash, u32)> = None;
+    let mut to_ensure: Vec<bitcoin::block::Header> = Vec::new();
     for hdr in headers {
         let hash = hdr.block_hash();
         let prev = hdr.prev_blockhash;
@@ -229,12 +230,17 @@ fn on_headers_batch(
             batch_prev = Some((hash, h));
         }
         if !already_known && !st.header_fks.contains_key(&hash) {
-            if let Ok(fk) = hub.ensure_header_fk(&hdr) {
-                st.header_fks.insert(hash, fk);
-            }
+            to_ensure.push(hdr);
         }
         if try_enqueue_ordered_header(st, hub, hash, prev) {
             added += 1;
+        }
+    }
+    if !to_ensure.is_empty() {
+        if let Ok(fks) = hub.ensure_headers_batch(&to_ensure) {
+            for (hdr, fk) in to_ensure.iter().zip(fks) {
+                st.header_fks.insert(hdr.block_hash(), fk);
+            }
         }
     }
     added

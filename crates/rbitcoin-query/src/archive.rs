@@ -183,6 +183,35 @@ impl ArchiveWritePlan {
         Self::create_in_header_ranges(&self.per_header_ranges, spend, create_id)
     }
 
+    /// Per-packed-row `(vout, spend_fk)` for creates in this plan (Class A overlay).
+    ///
+    /// Coinbase / external parents are omitted — those slots stay zero until
+    /// annotate after tip.
+    pub fn same_batch_spent_overlay(&self) -> Vec<Vec<(u32, Fk)>> {
+        let mut overlay: Vec<Vec<(u32, Fk)>> = vec![Vec::new(); self.packed.len()];
+        if overlay.is_empty() {
+            return overlay;
+        }
+        let mut idx: crate::U64Map<usize> = crate::U64Map::default();
+        for (i, fk) in self.planned_fks.iter().enumerate() {
+            if let Some(id) = fk.get() {
+                idx.insert(id, i);
+            }
+        }
+        for eds in self.edges.values() {
+            for e in eds {
+                let Some(cid) = e.create_fk.get() else {
+                    continue;
+                };
+                let Some(&i) = idx.get(&cid) else {
+                    continue;
+                };
+                overlay[i].push((e.vout, e.spend_fk));
+            }
+        }
+        overlay
+    }
+
     /// Drop stamp staging (ranges + txid reverse) after pin.
     ///
     /// Sparse need-vouts already live in [`crate::BatchParents`]; commit never
@@ -831,9 +860,12 @@ impl Query {
         let reserve_ns = t.elapsed().as_nanos() as u64;
 
         let t = Instant::now();
-        let got_tx_fks = self
-            .store
-            .put_tx_full_batch_from_pins(&plan.packed, /*index=*/ false)?;
+        let overlay = plan.same_batch_spent_overlay();
+        let got_tx_fks = self.store.put_tx_full_batch_from_pins(
+            &plan.packed,
+            /*index=*/ false,
+            &overlay,
+        )?;
         let body_ns = t.elapsed().as_nanos() as u64;
         if got_tx_fks.len() != plan.packed.len() {
             return Err(StoreError::Corrupt("tx put_full_batch length"));
@@ -1889,6 +1921,19 @@ mod tests {
         assert_eq!(edges[0].vout, 0);
         assert_eq!(edges[0].spend_fk, Fk(2));
         assert_eq!(edges[0].create_fk, Fk(1));
+        let overlay = plan.same_batch_spent_overlay();
+        assert_eq!(overlay.len(), 2);
+        assert_eq!(overlay[0], vec![(0, Fk(2))]);
+        assert!(overlay[1].is_empty());
+        q.archive_commit_plan(plan).unwrap();
+        let (off, _) = q.store().tx_spent_range(Fk(1)).unwrap();
+        let abs0 = rbitcoin_store::spent_abs(off, 0);
+        let bulk = q.store().get_spender_meta_at_abs_batch(&[abs0]).unwrap();
+        assert_eq!(bulk[0].unwrap().0, Fk(2));
+        let (coff, _) = q.store().tx_spent_range(Fk(2)).unwrap();
+        let cabs = rbitcoin_store::spent_abs(coff, 0);
+        let cbulk = q.store().get_spender_meta_at_abs_batch(&[cabs]).unwrap();
+        assert!(cbulk[0].unwrap().0.is_null());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

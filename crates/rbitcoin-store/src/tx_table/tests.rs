@@ -153,7 +153,9 @@ fn put_full_batch_from_pins_roundtrip() {
     let ins = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
     let outs = vec![OutputRecord::unspent(7, vec![0x51])];
     let pin = std::sync::Arc::new((tx, outs));
-    let fks = t.put_full_batch_from_pins(&[(pin, ins)], true).unwrap();
+    let fks = t
+        .put_full_batch_from_pins(&[(pin, ins)], true, &[])
+        .unwrap();
     let (got, gins, gouts) = t.get_full(fks[0]).unwrap();
     assert_eq!(got.txid, [3u8; 32]);
     assert_eq!(gins.len(), 1);
@@ -179,7 +181,9 @@ fn put_full_batch_one_body_write_wave() {
     let outs = vec![OutputRecord::unspent(7, vec![0x51])];
     let pin = std::sync::Arc::new((tx, outs));
     let _ = crate::uring_session::tls_take_max_batch_pwrite_n();
-    let fks = t.put_full_batch_from_pins(&[(pin, ins)], true).unwrap();
+    let fks = t
+        .put_full_batch_from_pins(&[(pin, ins)], true, &[])
+        .unwrap();
     assert_eq!(fks.len(), 1);
     let (tx, got_ins, got_outs) = t.get_full(fks[0]).unwrap();
     assert_eq!(tx.output_count, 1);
@@ -191,6 +195,67 @@ fn put_full_batch_one_body_write_wave() {
             "Class A body stems must be one pwrite_batch (≥3 SQEs in one begin_batch)"
         );
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn put_full_batch_from_pins_same_batch_spent_slot() {
+    let dir = tempfile_dir("same-batch-spent");
+    let t = create_tiny(&dir);
+    let parent_tx = TxRecord {
+        txid: [1u8; 32],
+        version: 1,
+        locktime: 0,
+        input_start_fk: Fk::NULL,
+        input_count: 1,
+        output_start_fk: Fk::NULL,
+        output_count: 2,
+    };
+    let child_tx = TxRecord {
+        txid: [2u8; 32],
+        version: 1,
+        locktime: 0,
+        input_start_fk: Fk::NULL,
+        input_count: 1,
+        output_start_fk: Fk::NULL,
+        output_count: 1,
+    };
+    let parent_pin = std::sync::Arc::new((
+        parent_tx,
+        vec![
+            OutputRecord::unspent(7, vec![0x51]),
+            OutputRecord::unspent(8, vec![0x52]),
+        ],
+    ));
+    let child_pin = std::sync::Arc::new((child_tx, vec![OutputRecord::unspent(5, vec![0x51])]));
+    let parent_ins = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
+    let child_ins = vec![InputRecord {
+        prev_txid: [1u8; 32],
+        create_fk: Fk(1),
+        prev_index: 0,
+        sequence: u32::MAX,
+        script_sig: vec![0x01],
+        witness: vec![],
+    }];
+    let overlay = [vec![(0u32, Fk(2))], vec![]];
+    let fks = t
+        .put_full_batch_from_pins(
+            &[(parent_pin, parent_ins), (child_pin, child_ins)],
+            false,
+            &overlay,
+        )
+        .unwrap();
+    assert_eq!(fks, vec![Fk(1), Fk(2)]);
+    let (off, _len) = t.spent_range(fks[0]).unwrap();
+    let abs0 = spent_abs(off, 0);
+    let abs1 = spent_abs(off, 1);
+    let bulk = t.get_spender_meta_at_abs_batch(&[abs0, abs1]).unwrap();
+    assert_eq!(bulk[0].unwrap().0, Fk(2));
+    assert!(bulk[1].unwrap().0.is_null());
+    let (coff, _) = t.spent_range(fks[1]).unwrap();
+    let cabs = spent_abs(coff, 0);
+    let cbulk = t.get_spender_meta_at_abs_batch(&[cabs]).unwrap();
+    assert!(cbulk[0].unwrap().0.is_null());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3341,6 +3406,47 @@ fn spent_slot_v17_fk_at_2pow56_is_corrupt() {
 #[test]
 fn spent_slot_v17_len_constant_is_eight() {
     assert_eq!(OutputRecord::SPENT_SLOT_LEN, 8);
+}
+
+#[test]
+fn encode_spent_slots_overlays_one_vout() {
+    let mut buf = Vec::new();
+    encode_spent_slots(3, &[(1, Fk(9))], &mut buf).unwrap();
+    assert_eq!(buf.len(), 24);
+    let (f0, field0) = decode_spent_slot_v17(&buf[0..8]).unwrap();
+    assert_eq!(f0, 0);
+    assert!(field0.is_null());
+    let (f1, field1) = decode_spent_slot_v17(&buf[8..16]).unwrap();
+    assert_eq!(f1, 0);
+    assert_eq!(field1, Fk(9));
+    let (f2, field2) = decode_spent_slot_v17(&buf[16..24]).unwrap();
+    assert_eq!(f2, 0);
+    assert!(field2.is_null());
+}
+
+#[test]
+fn encode_spent_slots_empty_matches_zeros() {
+    let mut a = Vec::new();
+    let mut b = Vec::new();
+    encode_spent_zeros(4, &mut a);
+    encode_spent_slots(4, &[], &mut b).unwrap();
+    assert_eq!(a, b);
+}
+
+#[test]
+fn encode_spent_slots_vout_oob_is_corrupt() {
+    let mut buf = Vec::new();
+    match encode_spent_slots(1, &[(1, Fk(2))], &mut buf) {
+        Err(StoreError::Corrupt(m)) => assert!(m.contains("vout"), "{m}"),
+        other => panic!("expected Corrupt vout, got {other:?}"),
+    }
+}
+
+#[test]
+fn encode_spent_slots_duplicate_vout_last_wins() {
+    let mut buf = Vec::new();
+    encode_spent_slots(1, &[(0, Fk(1)), (0, Fk(2))], &mut buf).unwrap();
+    assert_eq!(decode_spent_slot_v17(&buf).unwrap().1, Fk(2));
 }
 
 #[test]

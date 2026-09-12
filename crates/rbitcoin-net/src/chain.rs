@@ -1058,12 +1058,79 @@ impl ChainHub {
     /// exist. Never write `prev_fk = NULL` for a missing parent (that created
     /// millions of orphan rows and false resume edges on mainnet).
     pub fn ensure_header_fk(&self, header: &Header) -> Result<Fk, NetError> {
-        let prev_fk = if header.prev_blockhash.to_byte_array() == [0u8; 32] {
+        let prev_fk = self.header_sync_prev_fk(header, &HashMap::new())?;
+        let rec = header_to_record(prev_fk, header, header.block_hash().to_byte_array());
+        let fk = self
+            .query
+            .ensure_header(&rec)
+            .map_err(|e| NetError::Consensus(e.to_string()))?;
+        self.note_header_tip(header);
+        Ok(fk)
+    }
+
+    /// Persist a headers-message batch (one store `ensure_batch`).
+    ///
+    /// Fail closed: missing parent is the same error as [`Self::ensure_header_fk`].
+    /// Output fks align with `headers`.
+    pub fn ensure_headers_batch(&self, headers: &[Header]) -> Result<Vec<Fk>, NetError> {
+        if headers.is_empty() {
+            return Ok(Vec::new());
+        }
+        if headers.len() == 1 {
+            return Ok(vec![self.ensure_header_fk(&headers[0])?]);
+        }
+        let mut out = vec![Fk::NULL; headers.len()];
+        let mut recs: Vec<(usize, rbitcoin_store::HeaderRecord)> = Vec::new();
+        let mut in_batch: HashMap<[u8; 32], Fk> = HashMap::new();
+        let mut next = self.query.store().header_count();
+        for (i, header) in headers.iter().enumerate() {
+            let hash = header.block_hash().to_byte_array();
+            if let Some((fk, _)) = self
+                .query
+                .get_header_by_hash(&hash)
+                .map_err(|e| NetError::Consensus(e.to_string()))?
+            {
+                out[i] = fk;
+                in_batch.insert(hash, fk);
+                continue;
+            }
+            let prev_fk = self.header_sync_prev_fk(header, &in_batch)?;
+            next = next.saturating_add(1);
+            let fk = Fk(next);
+            in_batch.insert(hash, fk);
+            recs.push((i, header_to_record(prev_fk, header, hash)));
+            out[i] = fk;
+        }
+        if !recs.is_empty() {
+            let only: Vec<_> = recs.iter().map(|(_, r)| r.clone()).collect();
+            let got = self
+                .query
+                .ensure_headers(&only)
+                .map_err(|e| NetError::Consensus(e.to_string()))?;
+            for ((i, _), fk) in recs.iter().zip(got) {
+                out[*i] = fk;
+            }
+        }
+        for header in headers {
+            self.note_header_tip(header);
+        }
+        Ok(out)
+    }
+
+    fn header_sync_prev_fk(
+        &self,
+        header: &Header,
+        in_batch: &HashMap<[u8; 32], Fk>,
+    ) -> Result<Fk, NetError> {
+        let prev_bytes = header.prev_blockhash.to_byte_array();
+        let prev_fk = if prev_bytes == [0u8; 32] {
             Fk::NULL
+        } else if let Some(&fk) = in_batch.get(&prev_bytes) {
+            fk
         } else {
             match self
                 .query
-                .get_header_by_hash(header.prev_blockhash.as_byte_array())
+                .get_header_by_hash(&prev_bytes)
                 .map_err(|e| NetError::Consensus(e.to_string()))?
             {
                 Some((fk, _)) => fk,
@@ -1074,7 +1141,7 @@ impl ChainHub {
                 }
             }
         };
-        if header.prev_blockhash.to_byte_array() != [0u8; 32] {
+        if prev_bytes != [0u8; 32] {
             let parent = header.prev_blockhash.to_byte_array();
             if let Some(ph) = self.query.height_of_hash(&parent).ok().flatten() {
                 validate_header(
@@ -1088,13 +1155,7 @@ impl ChainHub {
                 return Err(NetError::Consensus("invalid proof of work".into()));
             }
         }
-        let rec = header_to_record(prev_fk, header, header.block_hash().to_byte_array());
-        let fk = self
-            .query
-            .ensure_header(&rec)
-            .map_err(|e| NetError::Consensus(e.to_string()))?;
-        self.note_header_tip(header);
-        Ok(fk)
+        Ok(prev_fk)
     }
 
     /// Contiguous tip-extension slice for one-shot load (owned Block).
@@ -3165,6 +3226,47 @@ mod tests {
             AcceptOutcome::Accepted { height: 2 }
         ));
         assert_eq!(hub.tip_height(), Some(2));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ensure_headers_batch_chain_and_missing_parent() {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let b1 = mine(gen, 1_300_000_000, 1);
+        let b2 = mine(b1.block_hash(), 1_300_000_600, 2);
+        let b3 = mine(b2.block_hash(), 1_300_001_200, 3);
+        let before = hub.query.store().header_count();
+        let fks = hub
+            .ensure_headers_batch(&[b1.header, b2.header, b3.header])
+            .unwrap();
+        assert_eq!(fks.len(), 3);
+        assert_eq!(hub.query.store().header_count(), before + 3);
+        assert_eq!(
+            hub.query
+                .get_header_by_hash(&b2.header.block_hash().to_byte_array())
+                .unwrap()
+                .unwrap()
+                .0,
+            fks[1]
+        );
+        let mut orphan = b1.header;
+        orphan.prev_blockhash = BlockHash::from_byte_array([0x9e; 32]);
+        rbitcoin_consensus::grind_regtest_pow(&mut orphan);
+        let err = hub.ensure_headers_batch(&[orphan]).unwrap_err();
+        assert!(err.to_string().contains("header parent unknown"), "{err}");
+        let b4 = mine(b3.block_hash(), 1_300_001_800, 4);
+        let mut bad = b4.header;
+        bad.prev_blockhash = BlockHash::from_byte_array([0x9e; 32]);
+        rbitcoin_consensus::grind_regtest_pow(&mut bad);
+        let after_ok = hub.query.store().header_count();
+        assert!(hub
+            .ensure_headers_batch(&[b4.header, bad])
+            .unwrap_err()
+            .to_string()
+            .contains("header parent unknown"));
+        assert_eq!(hub.query.store().header_count(), after_ok);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
