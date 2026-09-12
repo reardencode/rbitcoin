@@ -216,7 +216,7 @@ Prefer **one high-level scenario** per behavior cluster. Delete lower-level test
 | ID | Layer | Description |
 |----|-------|-------------|
 | `node_cli_and_surface_smoke` | Lifecycle/CLI | Networks, `run_node`, config errors, CLI flags (incl. `--conf`, `--peertimeout=0`, log-level/mempool/electrum/inhibit), help/version |
-| `three_stage_confirm_and_parent_pin_surface` | Consensus+query | Split load→scripts→write; parent pin; load ready timeout/cancel |
+| `three_stage_confirm_and_parent_pin_surface` | Consensus+query | Split load→scripts→write; parent pin; load ready timeout/cancel; instance-owned `last_write` / `last_pin` / `take_window` meters |
 | `block_cache_and_mempool_hub_surface` | Net | BlockCache locator/eviction + MempoolHub accept/remove/reorg on mature chain |
 | `store_error_and_corrupt_paths` | Store | Error/corrupt surfaces |
 | `store_table_header_and_idx_corrupt` | Store | Table header/head corrupt open |
@@ -235,7 +235,7 @@ Prefer **one high-level scenario** per behavior cluster. Delete lower-level test
 | `electrum_max_connections_rejects_extra_client` | Electrum | TCP cap drops the extra client |
 | `electrum_idle_timeout_disconnects_quiet_client` | Electrum | Idle timeout closes a quiet socket |
 | `esplora_broadcast_visible_in_rpc_and_electrum` | Node + Electrum + Esplora + RPC | One `run_p2p` datadir: Esplora `POST /tx` parent and mempool child appear in `getrawmempool` and Electrum mempool/history (`fee` on unconfirmed, including child `height = -1`) |
-| `two_node_header_and_block_sync` | P2P (**default + multinode CI**) | Seeder → peer 8-block IBD. **Not** re-run under `coverage.sh`. |
+| `two_node_header_and_block_sync` | P2P (**default + multinode CI**) | Seeder → peer 8-block IBD; peer `last_write` meter. **Not** re-run under `coverage.sh`. |
 | `p2p_timeout_getaddr_and_keepalive_ping` | P2P (**default**) | One pad: v1-magic inbound drops at `peertimeout=1`, AddrFetch `getaddr`/`addrv2`, one keepalive ping/pong |
 | `badprev_orphan_does_not_blacklist_then_reorg_reconstructs` | P2P/chain (default) | Orphan whose prev is not on the tip is held (not `BLOCK_FAILED`); winner branch reconstructs |
 | `serve_after_restart_via_reconstruct` | P2P (**multinode job only**) | Cold serve via reconstruct |
