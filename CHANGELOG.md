@@ -25,13 +25,14 @@ before 1.0).
   unconfirmed rows include `fee`; confirmed rows (including genesis height 0)
   omit it. `listunspent` mempool height is `-1` when a parent is still in the
   mempool (otherwise `0`).
-- **Wallet overlay leftover:** Electrum `get_balance` / `listunspent` skip
-  mempool txs already connected on the tip, so IBD / `-blocksonly` (relay
-  off, `remove_for_block` is a no-op) cannot double-count confirmed value.
-  Esplora `GET /tx/:txid/status` returns `{confirmed: false}` for mempool-only
-  txs; live `/outspend(s)` overlay mempool spends (`?asof=` still omits them).
-  `gettxout` uses the connected instance (`tx_fk_by_txid_tip`), so a
-  disconnected archive row is `null` rather than tip+1 confirmations.
+- **Wallet overlay leftover:** Electrum `get_balance` / `listunspent` /
+  `get_mempool` skip mempool txs already confirmed for that scripthash, so
+  IBD / `-blocksonly` (relay off, `remove_for_block` is a no-op) cannot
+  double-count confirmed value. Esplora `GET /tx/:txid/status` returns
+  `{confirmed: false}` for mempool-only txs; live `/outspend(s)` overlay
+  mempool spends (`?asof=` still omits them). `gettxout` uses the connected
+  instance (`tx_fk_by_txid_tip`): a leftover still in the hub is confirmed,
+  not `confirmations: 0`; a disconnected archive row is `null`.
 - **Packed P2TR scan:** `scan_packed_p2tr_outs` fails closed on an output
   value above `i64::MAX` (`Corrupt("output value too large")`), matching
   `OutputRecord::decode_at_secret`.

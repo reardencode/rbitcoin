@@ -3338,6 +3338,7 @@ fn confirmed_leftover_mempool_does_not_double_count() {
     let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
     let mut header_sub = false;
     let mut sh_subs = HashSet::new();
+    let want = rbitcoin_primitives::display_hash_hex(&parent.compute_txid().to_byte_array());
     let bal = dispatch(
         "blockchain.scripthash.get_balance",
         &json!([sh]),
@@ -3367,10 +3368,31 @@ fn confirmed_leftover_mempool_does_not_double_count() {
     )
     .unwrap();
     let rows = unspent.as_array().unwrap();
-    let want = rbitcoin_primitives::display_hash_hex(&parent.compute_txid().to_byte_array());
     let hits: Vec<_> = rows.iter().filter(|u| u["tx_hash"] == want).collect();
     assert_eq!(hits.len(), 1, "duplicate confirmed+mempool UTXO: {unspent}");
     assert!(hits[0]["height"].as_i64().unwrap() > 0, "{hits:?}");
+
+    let mem = dispatch(
+        "blockchain.scripthash.get_mempool",
+        &json!([sh]),
+        &q_arc,
+        &cfg,
+        &params,
+        Some(&mp),
+        &mut header_sub,
+        &mut sh_subs,
+    )
+    .unwrap();
+    let mem_hits: Vec<_> = mem
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|u| u["tx_hash"] == want)
+        .collect();
+    assert!(
+        mem_hits.is_empty(),
+        "get_mempool must skip leftover already in confirmed history: {mem}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

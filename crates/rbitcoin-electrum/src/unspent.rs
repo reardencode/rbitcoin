@@ -15,7 +15,7 @@ pub fn scripthash_utxos_with_mempool_slot(
     slot: &mut Option<ShJoinSlot>,
 ) -> Result<Vec<ScriptHashUtxo>, QueryError> {
     let mut out = query.scripthash_listunspent_slot(sh, slot)?;
-    overlay_mempool_utxos(query, &mut out, mempool, sh)?;
+    overlay_mempool_utxos(&mut out, mempool, sh);
     Ok(out)
 }
 
@@ -28,18 +28,17 @@ pub fn scripthash_utxos_with_mempool_slot_in(
     view: &ChainView,
 ) -> Result<Vec<ScriptHashUtxo>, QueryError> {
     let mut out = query.scripthash_listunspent_slot_in(sh, slot, view)?;
-    overlay_mempool_utxos(query, &mut out, mempool, sh)?;
+    overlay_mempool_utxos(&mut out, mempool, sh);
     Ok(out)
 }
 
 fn overlay_mempool_utxos(
-    query: &Query,
     out: &mut Vec<ScriptHashUtxo>,
     mempool: Option<&MempoolHub>,
     sh: &[u8; 32],
-) -> Result<(), QueryError> {
+) {
     let Some(mp) = mempool else {
-        return Ok(());
+        return;
     };
     out.retain(|x| {
         let op = OutPoint {
@@ -49,7 +48,7 @@ fn overlay_mempool_utxos(
         !mp.spends_outpoint(&op)
     });
     for item in mp.scripthash_mempool(sh) {
-        if query.tx_fk_by_txid_tip(&item.txid)?.is_some() {
+        if out.iter().any(|u| u.tx_hash == item.txid) {
             continue;
         }
         let tid = bitcoin::Txid::from_byte_array(item.txid);
@@ -76,7 +75,6 @@ fn overlay_mempool_utxos(
             });
         }
     }
-    Ok(())
 }
 
 /// Esplora `mempool_stats` for a scripthash (same funding/spend loops as listunspent).
