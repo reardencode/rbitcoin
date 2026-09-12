@@ -2179,6 +2179,14 @@ impl ChainHub {
         self.chain_work_prefix.read().unwrap().len()
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_poison_chain_work_prefix_last(&self) {
+        let mut p = self.chain_work_prefix.write().unwrap();
+        if let Some(last) = p.last_mut() {
+            *last = Work::from_be_bytes([0xff; 32]);
+        }
+    }
+
     fn block_at_height(&self, height: u32) -> Result<Option<Block>, NetError> {
         if let Some(h) = self.cache.hash_at_height(height) {
             if let Some(b) = self.cache.get_block(&h) {
@@ -2962,18 +2970,31 @@ mod tests {
         let (dir, hub) = tmp_hub();
         hub.ensure_genesis().unwrap();
         let gen = hub.tip_hash().unwrap();
-        let b1 = mine(gen, 1_300_030_000, 1);
-        hub.accept_block(b1.clone()).unwrap();
-        let b2 = mine(b1.block_hash(), 1_300_030_100, 2);
-        hub.accept_block(b2).unwrap();
+        let a1 = mine(gen, 1_300_030_000, 1);
+        hub.accept_block(a1.clone()).unwrap();
+        let a2 = mine(a1.block_hash(), 1_300_030_100, 2);
+        hub.accept_block(a2.clone()).unwrap();
         let _ = hub.chain_work().unwrap();
         assert_eq!(hub.test_chain_work_prefix_len(), 3);
-        hub.rewind_to_height(0).unwrap();
+        hub.test_poison_chain_work_prefix_last();
+        hub.rewind_to_height(1).unwrap();
         assert_eq!(
             hub.test_chain_work_prefix_len(),
-            1,
+            2,
             "equal-length reorg must not keep the losing branch's prefix"
         );
+        let b2 = mine_distinct(a1.block_hash(), 1_300_030_200, 2, &[a2.block_hash()]);
+        hub.accept_block(b2).unwrap();
+        let mut acc = Work::from_be_bytes([0u8; 32]);
+        for h in 0..=2 {
+            acc = acc + hub.query.wire_header_at_height(Height(h)).unwrap().work();
+        }
+        assert_eq!(
+            hub.chain_work().unwrap(),
+            acc,
+            "prefix must be rebuilt from the winner, not the poisoned loser"
+        );
+        assert_ne!(hub.chain_work().unwrap(), Work::from_be_bytes([0xff; 32]));
         let _ = std::fs::remove_dir_all(dir);
     }
 

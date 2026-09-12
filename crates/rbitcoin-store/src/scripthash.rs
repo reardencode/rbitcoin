@@ -1456,7 +1456,6 @@ impl ScriptHashTable {
 
         let t_seed = std::time::Instant::now();
         // Cold body (no prior creates): skip N head gets — empty table probes.
-        // Crash mid-finish can leave head slots occupied with live_count == 0.
         if self.entry_count() > 0 || !self.head_is_empty() {
             let mut missing: Vec<[u8; 32]> = Vec::new();
             {

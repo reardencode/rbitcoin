@@ -35,10 +35,13 @@ before 1.0).
   `keep_height+1` so the next most-work compare is rebuilt from the new branch.
 - **Header anti-DoS:** `ensure_header` runs POW / nBits / MTP when the parent is
   on the best chain (claimed POW otherwise). Pending ranking and getdata skip
-  headers whose claimed nBits the hash does not meet.
-- **IBD stamp/pin fail:** requeue the rest of the wave **with bodies**,
-  `clear_all` in-flight identity, and bump the feed epoch so the next loadq
-  chunk of the same wave is stale.
+  headers whose claimed nBits the hash does not meet, and fail closed on a
+  pending-header hole.
+- **IBD stamp/pin fail:** re-offer the rest of the wave into the **body
+  queue** (lookup never reads `feed.ready` wire), `clear_all` in-flight
+  identity, rewind `lookup_taken_hi` to the confirmed tip, and bump the feed
+  epoch so later same-wave loadq chunks are stale (those chunks re-offer on
+  drop).
 - **IBD session-fault resume:** after Class C, a uring session fault on spend
   annotate or `tx.head` drain finishes annotate+drain on the write thread
   (tip `connect_at` retries `finish_post_commit`; IBD does the same in place
