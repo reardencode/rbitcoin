@@ -48,6 +48,7 @@ is not on disk. Serving it would cold-read the spending tx’s `inwit`. Full
 | Admission policy | **Libre-relay-class** (0.1 sat/vB, no dust, full RBF) | Standardness + policy knobs |
 | Compact blocks | BIP152 **v2** receive + reconstruct + `getblocktxn` serve | v1/v2 high-bandwidth |
 | WTx inventory | BIP339 when peer also sends `wtxidrelay` | BIP339 |
+| GetAddr | Core `MAX_ADDR_TO_SEND` / `MAX_PCT_ADDR_TO_SEND` (**1000** / **23%**), 24h per-bind cache. Named copies in `rbitcoin-net` — do not “improve” without a named reason to diverge. `MAX_ADDR_MAN` (8192) is **our** HashMap DoS cap and must stay above `1000/0.23` | Core new/tried buckets (~80k); same 1000 / 23% |
 | Package submit | RPC `submitpackage` / Esplora `POST /txs/package` (no P2P package command) | BIP331 wire |
 | Pruning / GUI | Not supported | Supported |
 | Mining template RPC | `getblocktemplate` / `getmininginfo` / `prioritisetransaction` (selector; no stratum) | GBT + stratum / pool stack |

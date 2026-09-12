@@ -224,8 +224,16 @@ pub fn version_handshake_timeout_log(peer: u64) -> String {
     format!("version handshake timeout, disconnecting peer={peer}")
 }
 
-/// Core `MAX_ADDR_TO_SEND` (addr / addrv2).
+/// Copied from Core `src/net_processing.cpp` `MAX_ADDR_TO_SEND`.
+/// Max addresses in one ADDR / addrv2. Interop copy — do not change without
+/// a named reason to diverge (see COMPAT.md).
 pub const MAX_ADDR_TO_SEND: usize = 1000;
+
+/// Copied from Core `src/net_processing.cpp` `MAX_PCT_ADDR_TO_SEND`.
+/// GetAddr returns at most this percent of AddrMan (then `MAX_ADDR_TO_SEND`).
+/// Interop copy — do not change without a named reason to diverge
+/// (see COMPAT.md).
+pub const MAX_PCT_ADDR_TO_SEND: usize = 23;
 
 pub fn sendaddrv2_after_verack_log(peer: u64) -> String {
     format!("sendaddrv2 received after verack, disconnecting peer={peer}")
@@ -692,27 +700,44 @@ fn command_label(cmd: &[u8; 12]) -> String {
     String::from_utf8_lossy(&cmd[..n]).into_owned()
 }
 
+pub(crate) fn fail_if_handshake_timed_out(policy: &HandshakePolicy<'_>) -> Result<(), NetError> {
+    let Some(s) = policy.session else {
+        return Ok(());
+    };
+    let Some(peers) = policy.peers else {
+        return Ok(());
+    };
+    if !peers.handshake_timed_out(s, peers.now_secs()) {
+        return Ok(());
+    }
+    let line = if s.v2_transport_ready() {
+        version_handshake_timeout_log(s.id)
+    } else {
+        crate::v2::v2_handshake_timeout_log(s.id)
+    };
+    rbitcoin_log::debug!("{}", line);
+    let _ = peers.disconnect_id(s.id);
+    Err(NetError::Timeout)
+}
+
 async fn read_handshake_frame(
     reader: &mut V2Reader,
     magic: Magic,
     policy: &HandshakePolicy<'_>,
 ) -> Result<FramedMessage, NetError> {
     loop {
+        fail_if_handshake_timed_out(policy)?;
         if let Some(s) = policy.session {
             if s.stop.load(Ordering::Relaxed) {
                 return Err(NetError::Disconnected);
             }
-            if let Some(peers) = policy.peers {
-                let now = peers.now_secs();
-                if peers.handshake_timed_out(s, now) {
-                    rbitcoin_log::debug!("{}", version_handshake_timeout_log(s.id));
-                    let _ = peers.disconnect_id(s.id);
-                    return Err(NetError::Timeout);
-                }
-            }
         }
         match tokio::time::timeout(Duration::from_millis(50), read_v2_frame(reader, magic)).await {
-            Ok(r) => return r,
+            Ok(Ok(frame)) => return Ok(frame),
+            Ok(Err(e)) => {
+                fail_if_handshake_timed_out(policy)?;
+                return Err(e);
+            }
             Err(_) => continue,
         }
     }
@@ -850,6 +875,7 @@ async fn read_peer_version(
                     rbitcoin_log::debug!("{}", non_version_before_handshake_log(&cmd, s.id));
                 }
                 let _ = other;
+                fail_if_handshake_timed_out(policy)?;
             }
         }
     }
@@ -875,11 +901,13 @@ async fn wait_peer_verack(
                 if let Some(s) = policy.session {
                     rbitcoin_log::debug!("{}", ping_prior_to_verack_log(s.id));
                 }
+                fail_if_handshake_timed_out(policy)?;
             }
             _ => {
                 if let Some(s) = policy.session {
                     rbitcoin_log::debug!("{}", unsupported_before_verack_log(&cmd, s.id));
                 }
+                fail_if_handshake_timed_out(policy)?;
             }
         }
     }
