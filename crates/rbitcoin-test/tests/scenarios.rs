@@ -1760,7 +1760,7 @@ fn block_cache_and_mempool_hub_surface() {
         script_hash(&[0x51])
     };
     assert!(hub.scripthash_mempool(&sh).is_empty());
-    assert_eq!(hub.scripthash_unconfirmed_delta(&sh), 0);
+    assert_eq!(hub.scripthash_unconfirmed_delta(&sh).unwrap(), 0);
 
     let spend = spend_anyone_can_spend(cb1_txid, 0, Amount::from_sat(49_0000_0000));
     let r = hub
@@ -1770,7 +1770,10 @@ fn block_cache_and_mempool_hub_surface() {
     assert!(hub.get_tx(&r.txid).is_some());
     assert_eq!(hub.live_count(), 1);
     assert!(!hub.list_live().is_empty());
-    assert!(!hub.scripthash_mempool(&sh).is_empty() || hub.scripthash_unconfirmed_delta(&sh) != 0);
+    assert!(
+        !hub.scripthash_mempool(&sh).is_empty()
+            || hub.scripthash_unconfirmed_delta(&sh).unwrap() != 0
+    );
     hub.flush().unwrap();
     let _ = hub.compact();
     assert_eq!(hub.remove_for_block(&[r.txid]), 1);
