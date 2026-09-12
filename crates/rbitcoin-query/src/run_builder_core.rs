@@ -1,6 +1,6 @@
 //! Shared leftover-run dir helpers (SEAL + discard). Not a catalog spill path.
 
-use rbitcoin_store::{list_materialize_claims, list_runs};
+use rbitcoin_store::{list_materialize_claims, list_runs_gc, RunsIoGuard};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -30,8 +30,9 @@ impl RunControl {
 /// Includes incomplete materialize claims (`*.run.mat`) so tip-entry leftover
 /// detection sees crash mid-old-k-way state.
 pub fn on_disk_run_count(runs_dir: &Path, runs_io: &Mutex<()>) -> usize {
-    let _io = runs_io.lock().unwrap();
-    let catalog = list_runs(runs_dir).map(|r| r.len()).unwrap_or(0);
+    let held = runs_io.lock().unwrap();
+    let io = RunsIoGuard::holding(&held);
+    let catalog = list_runs_gc(&io, runs_dir).map(|r| r.len()).unwrap_or(0);
     let claims = list_materialize_claims(runs_dir)
         .map(|r| r.len())
         .unwrap_or(0);
