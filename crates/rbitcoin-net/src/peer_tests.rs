@@ -156,14 +156,15 @@ fn should_poll_peer_headers_skips_behind_and_weaker_fork() {
         should_poll_peer_headers(&hub, Some(BlockHash::from_byte_array([0xee; 32]))),
         "unknown best-known still poll until we can classify the branch"
     );
-    let fork = bitcoin::block::Header {
+    let mut fork = bitcoin::block::Header {
         version: bitcoin::block::Version::from_consensus(4),
         prev_blockhash: gen,
         merkle_root: bitcoin::TxMerkleNode::from_byte_array([0x22; 32]),
-        time: 1,
+        time: 1_300_000_000,
         bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
         nonce: 99,
     };
+    rbitcoin_consensus::grind_regtest_pow(&mut fork);
     hub.ensure_header(&fork).unwrap();
     assert!(
         !should_poll_peer_headers(&hub, Some(fork.block_hash())),
@@ -4675,21 +4676,16 @@ fn shorter_higher_work_fork_is_not_hopeless() {
     let mut pending = HashMap::new();
     pending.insert(tip, hard);
     let work_cmp = announced_work_cmp(&hub, &pending, tip);
-    assert_eq!(
+    assert_ne!(
         work_cmp,
         Some(std::cmp::Ordering::Greater),
-        "one mainnet-diff header must outwork 300 regtest blocks"
-    );
-    let announced_h = announced_headers_height(&hub, &pending, tip);
-    assert!(
-        !announced_tip_is_hopeless(hub.tip_height().unwrap(), announced_h, work_cmp),
-        "shorter higher-work path must not be hopeless"
+        "claimed mainnet nBits without POW must not outwork the tip"
     );
     let want =
         fetchable_header_path_bodies(&hub, &pending, tip, &PendingBlocks::new(), &HashSet::new());
     assert!(
-        !want.is_empty(),
-        "must not skip bodies on a shorter higher-work path"
+        want.is_empty(),
+        "must not getdata a shorter path that only looks higher-work via claimed nBits"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
