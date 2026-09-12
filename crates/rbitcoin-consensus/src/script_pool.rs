@@ -691,6 +691,25 @@ mod tests {
         assert!(format!("{err}").contains("boom"));
     }
 
+    fn boom_at_seven(i: &u32) -> Result<(), ConsensusError> {
+        if *i == 7 {
+            Err(ConsensusError::BadBlock("boom"))
+        } else {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn owned_wave_first_error_surfaces() {
+        let _gate = STEAL_TEST.lock().unwrap_or_else(|p| p.into_inner());
+        let err = match start_for_each_owned((0..32u32).collect(), boom_at_seven) {
+            Ok(Some(w)) => w.finish().expect_err("owned wave must fail"),
+            Ok(None) => panic!("expected a published owned wave"),
+            Err(e) => e,
+        };
+        assert!(format!("{err}").contains("boom"));
+    }
+
     #[test]
     fn empty_and_single() {
         let empty: Vec<u32> = vec![];

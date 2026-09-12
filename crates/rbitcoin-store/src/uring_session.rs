@@ -202,7 +202,8 @@ thread_local! {
     static DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
-/// SQE count on the thread-local session (0 if none).
+/// SQE count on the TLS slot (`with_thread_local` tests). Prefer
+/// [`UringSession::take_sqe_n`] when the test already holds the session.
 #[cfg(test)]
 pub fn tls_take_sqe_n() -> u64 {
     SESSION.with(|cell| {
@@ -231,6 +232,17 @@ pub fn tls_take_max_pwrite_len() -> u32 {
         cell.borrow_mut()
             .as_mut()
             .map(|s| s.take_max_pwrite_len())
+            .unwrap_or(0)
+    })
+}
+
+/// Largest pwrite count in one `begin_batch` window on the TLS session (0 if none).
+#[cfg(test)]
+pub fn tls_take_max_batch_pwrite_n() -> u32 {
+    SESSION.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .map(|s| s.take_max_batch_pwrite_n())
             .unwrap_or(0)
     })
 }
@@ -272,6 +284,10 @@ pub struct UringSession {
     sqe_n: u64,
     sqe_rw_nonzero: u64,
     max_pwrite_len: u32,
+    /// Pwrite SQEs in the current [`Self::begin_batch`] window.
+    batch_pwrite_n: u32,
+    /// Largest pwrite count in one begin_batch window since last take.
+    max_batch_pwrite_n: u32,
 }
 
 impl UringSession {
@@ -349,6 +365,8 @@ impl UringSession {
             sqe_n: 0,
             sqe_rw_nonzero: 0,
             max_pwrite_len: 0,
+            batch_pwrite_n: 0,
+            max_batch_pwrite_n: 0,
         })
     }
 
@@ -375,6 +393,14 @@ impl UringSession {
     #[cfg(test)]
     pub fn take_max_pwrite_len(&mut self) -> u32 {
         std::mem::take(&mut self.max_pwrite_len)
+    }
+
+    /// Largest number of pwrite SQEs in one [`Self::begin_batch`] window since last take.
+    #[cfg(test)]
+    pub fn take_max_batch_pwrite_n(&mut self) -> u32 {
+        self.max_batch_pwrite_n = self.max_batch_pwrite_n.max(self.batch_pwrite_n);
+        self.batch_pwrite_n = 0;
+        std::mem::take(&mut self.max_batch_pwrite_n)
     }
 
     pub fn kind(&self) -> SessionKind {
@@ -428,6 +454,8 @@ impl UringSession {
             self.drain_all()?;
         }
         self.check_live()?;
+        self.max_batch_pwrite_n = self.max_batch_pwrite_n.max(self.batch_pwrite_n);
+        self.batch_pwrite_n = 0;
         self.epoch = self.epoch.wrapping_add(1);
         Ok(())
     }
@@ -515,6 +543,7 @@ impl UringSession {
     ) -> Result<(), StoreError> {
         self.note_sqe(rw_flags);
         self.max_pwrite_len = self.max_pwrite_len.max(buf.len() as u32);
+        self.batch_pwrite_n = self.batch_pwrite_n.saturating_add(1);
         #[cfg(not(target_os = "linux"))]
         let _ = rw_flags;
         if buf.is_empty() {

@@ -1345,3 +1345,138 @@ fn lookup_ready_hash_none_when_missing() {
     }
     assert_eq!(super::lookup_ready_hash(&feed, 10), Some(h));
 }
+
+/// Post-Class-C session fault: write thread finishes annotate in place
+/// (stale-plan would drop; requeue cannot). Then BQ dequeue like `Ok`.
+#[test]
+fn write_session_fault_after_class_c_finishes_annotate_in_place() {
+    use super::{finish_connected_write_after_session_fault, write_batch_is_stale};
+    use bitcoin::hashes::Hash;
+    use bitcoin::BlockHash;
+    use rbitcoin_primitives::{Fk, Height};
+    use rbitcoin_query::testutil::FixtureChain;
+    use rbitcoin_query::TxApply;
+    use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
+
+    let (_dir, hub) = crate::chain::tiny_regtest_hub_labeled("write-fault-c");
+    hub.query.set_spend_index(false);
+
+    let h0 = HeaderRecord {
+        prev_fk: Fk::NULL,
+        version: 1,
+        timestamp: 1,
+        bits: 0x207fffff,
+        nonce: 0,
+        merkle_root: [0xab; 32],
+        hash: [0xab; 32],
+    };
+    let mut txid0 = [0u8; 32];
+    txid0[31] = 0xcb;
+    let ta0 = TxApply {
+        tx: TxRecord {
+            txid: txid0,
+            version: 1,
+            locktime: 0,
+            input_start_fk: Fk::NULL,
+            input_count: 1,
+            output_start_fk: Fk::NULL,
+            output_count: 1,
+        },
+        inputs: vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])],
+        outputs: vec![OutputRecord::unspent(50_0000_0000, vec![0x51])],
+    };
+    let hfk0 = hub.query.connect_block(Height(0), &h0, &[ta0]).unwrap();
+    let create_fk = hub.query.block_tx_fks(Height(0)).unwrap()[0];
+
+    let hash1 = rbitcoin_store::block_header_hash(1, &h0.hash, &[0x11; 32], 2, 0x207fffff, 1);
+    let h1 = HeaderRecord {
+        prev_fk: hfk0,
+        version: 1,
+        timestamp: 2,
+        bits: 0x207fffff,
+        nonce: 1,
+        merkle_root: [0x11; 32],
+        hash: hash1,
+    };
+    let mut spend_txid = [0u8; 32];
+    spend_txid[0] = 0x11;
+    spend_txid[31] = 0xcd;
+    let ta1 = TxApply {
+        tx: TxRecord {
+            txid: spend_txid,
+            version: 1,
+            locktime: 0,
+            input_start_fk: Fk::NULL,
+            input_count: 1,
+            output_start_fk: Fk::NULL,
+            output_count: 1,
+        },
+        inputs: vec![InputRecord {
+            prev_txid: txid0,
+            create_fk,
+            prev_index: 0,
+            sequence: u32::MAX,
+            script_sig: vec![],
+            witness: vec![],
+        }],
+        outputs: vec![OutputRecord::unspent(49_0000_0000, vec![0x51])],
+    };
+    hub.query.connect_block(Height(1), &h1, &[ta1]).unwrap();
+    let spend_fk = hub.query.block_tx_fks(Height(1)).unwrap()[0];
+    let (multi, field) = hub
+        .query
+        .store()
+        .txs
+        .get_output_spender_meta(create_fk, 0)
+        .unwrap();
+    assert!(!multi);
+    assert!(field.is_null());
+    hub.query.set_spend_index(true);
+
+    assert!(
+        write_batch_is_stale(&hub, 1),
+        "tip already at height 1; requeue/stale would drop this batch"
+    );
+    assert!(hub.is_connected(&BlockHash::from_byte_array(hash1)));
+
+    let hfk1 = hub.query.get_header_by_hash(&hash1).unwrap().unwrap().0;
+    hub.query
+        .block_queue_offer(1, hash1, hfk1.0, &[0u8; 80])
+        .unwrap();
+    assert!(hub.query.block_queue_has_height(1));
+
+    finish_connected_write_after_session_fault(&hub.query, &[(1, hash1)]).expect("in-place finish");
+
+    let (multi2, field2) = hub
+        .query
+        .store()
+        .txs
+        .get_output_spender_meta(create_fk, 0)
+        .unwrap();
+    assert!(!multi2);
+    assert_eq!(field2, spend_fk);
+    assert_eq!(hub.query.block_queue_dequeue_height(1).unwrap(), 1);
+    assert!(!hub.query.block_queue_has_height(1));
+}
+
+#[test]
+fn load_session_fault_after_note_lookup_ok_clears_speculative_fks() {
+    use super::LoadAheadState;
+    use rbitcoin_query::ArchiveWritePlan;
+
+    let (_dir, hub) = crate::chain::tiny_regtest_hub_labeled("load-fk-reset");
+    let mut st = LoadAheadState::new(&hub);
+    let body0 = hub.query.tx_body_count();
+    let durable = body0.saturating_add(1).max(1);
+    let mut plan = ArchiveWritePlan::empty();
+    plan.planned_fks = vec![Fk(body0.saturating_add(10).max(10))];
+    st.note_lookup_ok(&plan, 1, [1u8; 32]);
+    let pin = test_pin(body0.saturating_add(10).max(10));
+    st.in_flight
+        .note_pins(std::iter::once((plan.planned_fks[0], &pin)), Some(1));
+    assert!(st.next_tx_start > durable);
+    assert!(st.in_flight.entry_count() > 0);
+    st.on_uring_recover(&hub);
+    assert_eq!(st.next_tx_start, durable);
+    assert_eq!(st.in_flight.entry_count(), 0);
+}

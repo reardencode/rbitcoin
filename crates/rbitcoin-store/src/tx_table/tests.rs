@@ -178,12 +178,19 @@ fn put_full_batch_one_body_write_wave() {
     let ins = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
     let outs = vec![OutputRecord::unspent(7, vec![0x51])];
     let pin = std::sync::Arc::new((tx, outs));
+    let _ = crate::uring_session::tls_take_max_batch_pwrite_n();
     let fks = t.put_full_batch_from_pins(&[(pin, ins)], true).unwrap();
     assert_eq!(fks.len(), 1);
     let (tx, got_ins, got_outs) = t.get_full(fks[0]).unwrap();
     assert_eq!(tx.output_count, 1);
     assert_eq!(got_ins.len(), 1);
     assert_eq!(got_outs.len(), 1);
+    if crate::bulk_io::io_uring_enabled() {
+        assert!(
+            crate::uring_session::tls_take_max_batch_pwrite_n() >= 3,
+            "Class A body stems must be one pwrite_batch (≥3 SQEs in one begin_batch)"
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
