@@ -77,7 +77,7 @@ reads it; rustup users export it). Override coverage dir:
 |------|---------|----------|
 | **Default** (CI / human local full suite) | `cargo test --workspace` | Crate unit tests + scenarios + electrum + consensus_rules + **8-block** `two_node` IBD + hub reorgs. Reconstruct / dead-peer are the **multinode** job. Agents use targeted `-p` tests locally; this suite runs on the PR. |
 | **CI multinode job** | named filters + `--ignored` job-only cases | 8-block IBD, reconstruct, slim dead-peer |
-| **Heavy multi-node / IBD** | `./scripts/integration.sh` or `-- --ignored` on `integration_multinode` / `ibd_smoke` | Multi-hop, tip-follow, 48-block dual seeder, mesh, `run_p2p` |
+| **Heavy multi-node / IBD** | `./scripts/integration.sh` or `-- --ignored` on `integration_multinode` | Multi-hop, tip-follow, 48-block dual seeder, mesh, `run_p2p` |
 
 ### Suite speed budgets (default tier)
 
@@ -221,20 +221,20 @@ Prefer **one high-level scenario** per behavior cluster. Delete lower-level test
 | `store_error_and_corrupt_paths` | Store | Error/corrupt surfaces |
 | `store_table_header_and_idx_corrupt` | Store | Table header/head corrupt open |
 | `chain_connect_reorg_and_growth` | Query | Synthetic growth + disconnect (header gen roll) |
-| `consensus_mature_chain_spend_and_reconstruct` | Consensus+query | **One** mature mine: spend, local prev_fk, double-spend, reopen reconstruct |
+| `consensus_mature_chain_spend_reconstruct_and_scripthash` | Consensus+query | **One** mature mine: spend, local prev_fk, double-spend, reopen reconstruct, SH history/balance |
 | `ibd_parallel_archive_idempotent_confirm_without_tx_head` | Query+consensus | Out-of-order archive, re-archive idempotent, head-off prevout+maturity |
 | `resume_head_off_warms_cache_for_external_prev` | Query+consensus | Resume head-off: warm Class A cache fixes external-prev missing prevout |
 | `consensus_rules` (test binary) | Consensus | Focused reject paths for structure/header/connect rules we own — see [`docs/consensus-tests.md`](./docs/consensus-tests.md). Hornet-mapped subset: `./scripts/test-hornet-rules.sh` |
 | `core_analogs::analog_milestone_and_mempool_persist` | Consensus | Milestone skip-below/check-above, missing prevout under high milestone, mempool persist (one pad) |
-| `scripthash_index_history_balance_and_reorg` | Query | Electrum index + reorg spend clear |
-| `electrum_server_version_history_balance` | Electrum | One mature pad: version/history/balance/headers, ping/features/tx/errors, confirmed history omits `fee`, scripthash subscribe notify |
+| `electrum_server_version_history_balance` | Electrum | One mature pad: version/history/balance/headers, ping/features/tx/errors, confirmed history omits `fee`, scripthash subscribe notify, skip restatus when a new block misses the SH |
 | `electrum_scripthash_sub_cap_unsubscribe_frees_slot` | Electrum | Per-connection subscribe cap + unsubscribe frees a slot |
 | `electrum_leftover_mempool_does_not_double_count` | Electrum | Relay-off leftover is confirmed, not a second mempool UTXO |
-| `electrum_asof_hides_later_spend` | Electrum | TCP `1.4.2-asof`: later spend hidden at create-block `asof:`; spend-block asof shows it |
+| `electrum_and_esplora_asof_hides_later_spend` | Electrum + Esplora | One pad: TCP `1.4.2-asof` plus HTTP `?asof=` hide a later spend; unknown asof errors; `GET /tx` `v0_p2wpkh` vout |
+| `electrum_empty_chain_headers_subscribe_and_empty_scripthash` | Electrum | Empty store: `headers.subscribe` errors; scripthash history/balance/unspent/mempool empty |
 | `electrum_tweaks_subscribe_streams_then_done` | Electrum | Cake `tweaks.subscribe`: one-height result, per-height notifies, then `done` |
 | `electrum_max_connections_rejects_extra_client` | Electrum | TCP cap drops the extra client |
 | `electrum_idle_timeout_disconnects_quiet_client` | Electrum | Idle timeout closes a quiet socket |
-| `esplora_broadcast_visible_in_rpc_and_electrum` | Node + Electrum + Esplora + RPC | One `run_p2p` datadir: Esplora `POST /tx` appears in `getrawmempool` and Electrum mempool/history (`fee` on unconfirmed) |
+| `esplora_broadcast_visible_in_rpc_and_electrum` | Node + Electrum + Esplora + RPC | One `run_p2p` datadir: Esplora `POST /tx` parent and mempool child appear in `getrawmempool` and Electrum mempool/history (`fee` on unconfirmed, including child `height = -1`) |
 | `two_node_header_and_block_sync` | P2P (**default + multinode CI**) | Seeder → peer 8-block IBD. **Not** re-run under `coverage.sh`. |
 | `serve_after_restart_via_reconstruct` | P2P (**multinode job only**) | Cold serve via reconstruct |
 | `ibd_skips_dead_peer` | P2P (**multinode job only**) | Live seeder + `127.0.0.1:1` |
