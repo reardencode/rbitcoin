@@ -66,7 +66,7 @@ fn overlay_mempool_utxos(
             out.push(ScriptHashUtxo {
                 tx_hash: item.txid,
                 tx_pos: vout as u32,
-                height: 0,
+                height: item.height,
                 value: o.value.to_sat() as i64,
                 create_tx_fk: Fk::NULL,
             });

@@ -1057,6 +1057,7 @@ fn method_stays_on_worker(method: &str) -> bool {
             | "server.features"
             | "server.peers.subscribe"
             | "blockchain.relayfee"
+            | "blockchain.scripthash.unsubscribe"
     )
 }
 
@@ -1301,10 +1302,18 @@ fn dispatch_pinned(
             let arr: Vec<Value> = hist
                 .iter()
                 .map(|i| {
-                    json!({
-                        "height": i.height,
-                        "tx_hash": txid_hex(&i.txid),
-                    })
+                    if i.height <= 0 {
+                        json!({
+                            "height": i.height,
+                            "tx_hash": txid_hex(&i.txid),
+                            "fee": i.fee.unwrap_or(0),
+                        })
+                    } else {
+                        json!({
+                            "height": i.height,
+                            "tx_hash": txid_hex(&i.txid),
+                        })
+                    }
                 })
                 .collect();
             Ok(Value::Array(arr))
@@ -1401,6 +1410,10 @@ fn dispatch_pinned(
                 scripthash_status(Some(query), &hist)?
             };
             Ok(json!(status))
+        }
+        "blockchain.scripthash.unsubscribe" => {
+            let sh = param_scripthash(params, 0)?;
+            Ok(json!(sh_subs.remove(&sh)))
         }
         "blockchain.scripthash.get_mempool" => {
             let sh = param_scripthash(params, 0)?;
@@ -1778,6 +1791,7 @@ fn append_mempool_history(
             height: item.height,
             txid: item.txid,
             tx_fk: Fk::NULL,
+            fee: Some(item.fee),
         });
     }
 }
