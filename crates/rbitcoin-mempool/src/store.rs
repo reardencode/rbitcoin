@@ -870,13 +870,11 @@ mod tests {
         let mut mp = Mempool::open_or_create(&dir).unwrap();
         let raw = tiny_raw();
         let t1 = Txid::from_byte_array([0x01; 32]);
-        mp.append_live_tx(&raw, &t1, 1, 400)
-            .unwrap();
+        mp.append_live_tx(&raw, &t1, 1, 400).unwrap();
         mp.flush().unwrap();
         let slots_first = fs::read(dir.join("slots")).unwrap();
         let t2 = Txid::from_byte_array([0x02; 32]);
-        mp.append_live_tx(&raw, &t2, 1, 400)
-            .unwrap();
+        mp.append_live_tx(&raw, &t2, 1, 400).unwrap();
         mp.flush().unwrap();
         drop(mp);
         fs::write(dir.join("slots"), &slots_first).unwrap();
@@ -892,13 +890,11 @@ mod tests {
         let mut mp = Mempool::open_or_create(&dir).unwrap();
         let raw = tiny_raw();
         let t1 = Txid::from_byte_array([0x01; 32]);
-        mp.append_live_tx(&raw, &t1, 1, 400)
-            .unwrap();
+        mp.append_live_tx(&raw, &t1, 1, 400).unwrap();
         mp.flush().unwrap();
         let body_first = fs::read(dir.join("tx.body")).unwrap();
         let t2 = Txid::from_byte_array([0x02; 32]);
-        mp.append_live_tx(&raw, &t2, 1, 400)
-            .unwrap();
+        mp.append_live_tx(&raw, &t2, 1, 400).unwrap();
         mp.flush().unwrap();
         drop(mp);
         fs::write(dir.join("tx.body"), body_first).unwrap();
@@ -918,14 +914,12 @@ mod tests {
         let mut mp = Mempool::open_or_create(&dir).unwrap();
         let raw = tiny_raw();
         let t1 = Txid::from_byte_array([0x01; 32]);
-        mp.append_live_tx(&raw, &t1, 1, 400)
-            .unwrap();
+        mp.append_live_tx(&raw, &t1, 1, 400).unwrap();
         mp.flush().unwrap();
         let slots_unpacked = fs::read(dir.join("slots")).unwrap();
         mp.mark_slot_dead(0).unwrap();
         let t2 = Txid::from_byte_array([0x02; 32]);
-        mp.append_live_tx(&raw, &t2, 1, 400)
-            .unwrap();
+        mp.append_live_tx(&raw, &t2, 1, 400).unwrap();
         mp.flush().unwrap();
         mp.compact().unwrap();
         let slots_packed = fs::read(dir.join("slots")).unwrap();
