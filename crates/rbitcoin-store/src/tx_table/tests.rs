@@ -754,7 +754,7 @@ fn bulk_body_range_matches_sequential() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Shape A: multi-cand Prefix33 select + one denserels for winner (outs present).
+/// Shape A: multi-cand `txid.body` select + one denserels for winner (outs present).
 ///
 /// Two creates of the same txid (foreigner + real); deepest wins; denserels
 /// decode returns outs for pin without a second denserels wave on wrong cands.

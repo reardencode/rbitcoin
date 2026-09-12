@@ -22,19 +22,6 @@ pub enum BodyMode {
     Full,
     /// `txout` outs / pin: starting OS page, or full span if need is likely to spill.
     Outs,
-    /// Leading ≤32 body bytes (retired; tests only).
-    Prefix33,
-}
-
-impl BodyMode {
-    #[inline]
-    fn body_len(self, range_len: u64) -> u64 {
-        match self {
-            BodyMode::Full => range_len,
-            BodyMode::Outs => range_len.min(4096),
-            BodyMode::Prefix33 => range_len.min(32),
-        }
-    }
 }
 
 /// One cold Class A layout + body job.
@@ -285,7 +272,7 @@ pub fn run_idx_body_pipeline_backend(
         };
         let want = match mode {
             BodyMode::Outs => outs_first_wave_len(off, full_len, &j.need_vouts),
-            other => other.body_len(full_len),
+            BodyMode::Full => full_len,
         };
         if want == 0 || off.saturating_add(want) > body_pub {
             continue;
@@ -828,19 +815,12 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_prefix33_and_denserels_modes() {
+    fn pipeline_outs_decodes_denserels() {
         let (dir, t) = temp_tx();
         let fks = put_n(&t, 5);
         let mut jobs: Vec<IdxBodyJob> = fks.iter().map(|fk| IdxBodyJob::new(fk.0, None)).collect();
-        run_idx_body_pipeline(&t.body, &mut jobs, BodyMode::Prefix33).unwrap();
+        run_idx_body_pipeline(&t.body, &mut jobs, BodyMode::Outs).unwrap();
         for j in &jobs {
-            assert!(j.ok);
-            assert!(j.body.len() <= 32);
-            assert!(!j.body.is_empty());
-        }
-        let mut jobs2: Vec<IdxBodyJob> = fks.iter().map(|fk| IdxBodyJob::new(fk.0, None)).collect();
-        run_idx_body_pipeline(&t.body, &mut jobs2, BodyMode::Outs).unwrap();
-        for j in &jobs2 {
             assert!(j.ok);
             let (_tx, outs, rels) =
                 crate::tx_table::decode_packed_tx_outs_with_spender_rels(&j.body).unwrap();
@@ -934,22 +914,11 @@ mod tests {
             assert_eq!(j.range, ranges[i]);
         }
 
-        // Wave 3: Prefix33 head-resolve style
-        let mut jobs3: Vec<IdxBodyJob> = fks.iter().map(|fk| IdxBodyJob::new(fk.0, None)).collect();
-        let t2 = Instant::now();
-        run_idx_body_pipeline(&t.body, &mut jobs3, BodyMode::Prefix33).unwrap();
-        let prefix_us = t2.elapsed().as_micros();
-        for j in &jobs3 {
-            assert!(j.ok);
-            assert!(j.body.len() <= 32 && !j.body.is_empty());
-        }
-
         eprintln!(
-            "synthetic_cold_batch: n={} cold_full={}us preknown_full={}us prefix33={}us uring={}",
+            "synthetic_cold_batch: n={} cold_full={}us preknown_full={}us uring={}",
             fks.len(),
             cold_us,
             warm_us,
-            prefix_us,
             crate::bulk_io::io_uring_enabled()
         );
         let _ = std::fs::remove_dir_all(&dir);

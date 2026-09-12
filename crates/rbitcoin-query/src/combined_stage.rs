@@ -128,7 +128,7 @@ pub fn load_creates_once(
                     ));
                 }
             }
-            IdxBodyMode::Outs | IdxBodyMode::Prefix33 => {
+            IdxBodyMode::Outs => {
                 if let Ok((tx, outs, rels)) =
                     decode_packed_tx_outs_with_spender_rels_secret(&job.body, Some(secret))
                 {
