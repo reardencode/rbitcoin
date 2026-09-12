@@ -660,7 +660,8 @@ pub(crate) fn confirm_batch_max_inputs() -> u32 {
     CONFIRM_BATCH_INPUTS_DEFAULT
 }
 
-/// Σ `tx.input.len()` over a decoded block (confirm pack work meter).
+/// Σ `tx.input.len()` over a decoded block (test oracle for stamped `n_inputs`).
+#[cfg(test)]
 pub(crate) fn block_input_count(block: &bitcoin::Block) -> u32 {
     block
         .txdata
@@ -2193,7 +2194,7 @@ pub(crate) fn spawn_confirm_engine(
                             let counts: Vec<u32> = wave
                                 .items
                                 .iter()
-                                .map(|(_, _, w)| block_input_count(w.block.as_ref()))
+                                .map(|(_, _, w)| w.n_inputs)
                                 .collect();
                             let t_kind = Instant::now();
                             let kinds: Vec<bool> = match wave

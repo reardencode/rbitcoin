@@ -351,10 +351,7 @@ fn last_sent_load_batch_carries_wave_drain_fence() {
         (
             h,
             [h as u8; 32],
-            ResolvedWire {
-                block: Arc::new(genesis.clone()),
-                pres: Arc::clone(&pres),
-            },
+            ResolvedWire::new(Arc::new(genesis.clone()), Arc::clone(&pres)),
         )
     };
     let items: Vec<_> = (1..=5).map(mk).collect();
@@ -490,18 +487,12 @@ fn chunk_parent_ids_vouts_are_per_chunk() {
     let chunk0 = [(
         1u32,
         [1u8; 32],
-        ResolvedWire {
-            block: Arc::new(spend),
-            pres: pres_spend,
-        },
+        ResolvedWire::new(Arc::new(spend), pres_spend),
     )];
     let chunk1 = [(
         2u32,
         [2u8; 32],
-        ResolvedWire {
-            block: Arc::new(empty),
-            pres: pres_empty,
-        },
+        ResolvedWire::new(Arc::new(empty), pres_empty),
     )];
     let a = chunk_parent_ids(&wave, &chunk0);
     let b = chunk_parent_ids(&wave, &chunk1);
@@ -531,14 +522,7 @@ fn load_recv_is_lookup_order() {
             .map(TxPrecompute::from_tx)
             .collect::<Vec<_>>()
             .into();
-        (
-            h,
-            [h as u8; 32],
-            ResolvedWire {
-                block: Arc::new(genesis),
-                pres,
-            },
-        )
+        (h, [h as u8; 32], ResolvedWire::new(Arc::new(genesis), pres))
     };
     tx.send(LoadBatch {
         items: vec![mk(1), mk(2)],
@@ -578,10 +562,7 @@ fn load_stamp_items_keep_pres() {
         items: vec![(
             1,
             [1u8; 32],
-            ResolvedWire {
-                block: Arc::new(genesis),
-                pres: Arc::clone(&pres),
-            },
+            ResolvedWire::new(Arc::new(genesis), Arc::clone(&pres)),
         )],
         parent_ids: None,
         drop_inflight_below: None,
@@ -639,6 +620,7 @@ fn block_input_count_sums_tx_inputs() {
     use bitcoin::{
         Amount, Block, CompactTarget, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness,
     };
+    use rbitcoin_query::{ResolvedWire, TxPrecompute};
     let mk_tx = |n_in: usize| Transaction {
         version: TxVersion::ONE,
         lock_time: LockTime::ZERO,
@@ -671,6 +653,14 @@ fn block_input_count_sums_tx_inputs() {
         txdata: vec![mk_tx(1), mk_tx(3), mk_tx(2)],
     };
     assert_eq!(super::block_input_count(&block), 6);
+    let pres: Arc<[TxPrecompute]> = block
+        .txdata
+        .iter()
+        .map(TxPrecompute::from_tx)
+        .collect::<Vec<_>>()
+        .into();
+    let wire = ResolvedWire::new(Arc::new(block), pres);
+    assert_eq!(wire.n_inputs, 6);
 }
 
 /// Parent entry meters accumulate and drain with send/recv (no budget gate).

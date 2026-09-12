@@ -426,10 +426,7 @@ mod tests {
             },
             txdata: vec![],
         };
-        let wire = ResolvedWire {
-            block: Arc::new(block),
-            pres: Arc::from(Vec::new()),
-        };
+        let wire = ResolvedWire::new(Arc::new(block), Arc::from(Vec::new()));
         q.block_queue_promote_wave(vec![(7, wire, 64)]).unwrap();
         q.block_queue_mark_resolve_complete(7).unwrap();
         assert!(q.block_queue_is_resolve_complete(7));
@@ -551,10 +548,7 @@ mod tests {
             },
             txdata: vec![],
         };
-        let wire = ResolvedWire {
-            block: Arc::new(block),
-            pres: Arc::from(Vec::new()),
-        };
+        let wire = ResolvedWire::new(Arc::new(block), Arc::from(Vec::new()));
         let intake = q.block_queue_wave_intake(&[7, 8]);
         assert_eq!(intake.raw.len(), 2);
         assert!(intake.resolved.is_empty());

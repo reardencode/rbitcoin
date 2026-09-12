@@ -191,13 +191,7 @@ pub fn confirm_bq_resolve_wave_capped(
         .collect();
     let mut resolved_by_h: HashMap<u32, ResolvedWire> = HashMap::new();
     for (h, wire) in intake.resolved {
-        let n = wire
-            .block
-            .txdata
-            .iter()
-            .map(|tx| tx.input.len() as u32)
-            .fold(0u32, u32::saturating_add);
-        n_inputs_at.insert(h, n);
+        n_inputs_at.insert(h, wire.n_inputs);
         resolved_by_h.insert(h, wire);
     }
 
@@ -291,6 +285,7 @@ pub fn confirm_bq_resolve_wave_capped(
                 ResolvedWire {
                     block: Arc::clone(&block),
                     pres: Arc::clone(&pres),
+                    n_inputs: n_inputs_at.get(&h).copied().unwrap_or(0),
                 },
             ));
             (block, pres)
