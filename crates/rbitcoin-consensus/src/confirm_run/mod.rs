@@ -63,9 +63,9 @@ use lookup::confirm_archive_kind;
 use lookup::known_create_txid_lookup;
 #[cfg(test)]
 use lookup::ConfirmArchiveKind;
-use lookup::WireBlockIn;
 pub use lookup::{
     confirm_wire_load_from_plan, confirm_wire_lookup_stamp, ParentPinStamp, PlanStampOutcome,
+    WireBlockIn,
 };
 use phases::assemble_run;
 #[cfg(test)]
@@ -263,7 +263,11 @@ pub fn confirm_wire_run(
     milestone: Milestone,
     blocks: &[(Height, Block)],
 ) -> Result<Vec<rbitcoin_primitives::Fk>, ConsensusError> {
-    confirm_wire_run_preverified(query, params, milestone, blocks, &ScriptPreverified::new())
+    let arcs: Vec<WireBlockIn> = blocks
+        .iter()
+        .map(|(h, b)| (*h, Arc::new(b.clone()), None))
+        .collect();
+    confirm_wire_run_preverified(query, params, milestone, &arcs, &ScriptPreverified::new())
 }
 
 /// Like [`confirm_wire_run`] with mempool script preverified set.
@@ -278,25 +282,13 @@ pub fn confirm_wire_run_preverified(
     query: &Query,
     params: &ChainParams,
     milestone: Milestone,
-    blocks: &[(Height, Block)],
+    blocks: &[WireBlockIn],
     preverified: &ScriptPreverified,
 ) -> Result<Vec<rbitcoin_primitives::Fk>, ConsensusError> {
     if blocks.is_empty() {
         return Err(ConsensusError::BadBlock("empty confirm batch"));
     }
-    let arcs: Vec<WireBlockIn> = {
-        let t = Instant::now();
-        let arcs = blocks
-            .iter()
-            .map(|(h, b)| (*h, Arc::new(b.clone()), None))
-            .collect();
-        let ns = t.elapsed().as_nanos() as u64;
-        if ns > 0 {
-            rbitcoin_query::note_confirm(&query.confirm_stats().phase_prep_wire_arc_ns, ns);
-        }
-        arcs
-    };
-    let stamped = confirm_wire_lookup_stamp(query, params, milestone, &arcs, None)?;
+    let stamped = confirm_wire_lookup_stamp(query, params, milestone, blocks, None)?;
     let mat = confirm_wire_load_from_plan(query, params, milestone, stamped, None, preverified)?;
     let ok = confirm_scripts_phase(mat.batch)?;
     confirm_write_phase(query, params, milestone, ok.batch)

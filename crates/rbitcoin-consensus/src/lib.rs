@@ -84,6 +84,7 @@ use bitcoin::Block;
 use rbitcoin_primitives::{Fk, Height};
 use rbitcoin_query::{Query, TxApply};
 use rbitcoin_store::HeaderRecord;
+use std::sync::Arc;
 
 /// Test-only assemble cold-why / batch TLS (window meters live on Query).
 #[cfg(test)]
@@ -154,7 +155,7 @@ pub use confirm_run::{
     confirm_wire_load_phase, confirm_wire_load_phase_pipelined, confirm_wire_lookup_stamp,
     confirm_wire_run, confirm_wire_run_preverified, confirm_write_phase, drive_script_waves_with,
     finish_post_commit_hashes, take_wave_items_for_load, ConfirmLoadOutcome, ConfirmScriptOutcome,
-    LoadedBatch, PlanStampOutcome, ScriptOkBatch, ScriptPreverified, WireLoadPipeline,
+    LoadedBatch, PlanStampOutcome, ScriptOkBatch, ScriptPreverified, WireBlockIn, WireLoadPipeline,
     BQ_RESOLVE_WAVE_MAX_BLOCKS, BQ_RESOLVE_WAVE_MAX_INPUTS,
 };
 
@@ -182,7 +183,7 @@ pub fn accept_and_connect_block(
         query,
         params,
         height,
-        block,
+        Arc::new(block.clone()),
         milestone,
         &ScriptPreverified::new(),
     )
@@ -194,7 +195,7 @@ pub fn accept_and_connect_block_preverified(
     query: &Query,
     params: &ChainParams,
     height: Height,
-    block: &Block,
+    block: Arc<Block>,
     milestone: Milestone,
     preverified: &ScriptPreverified,
 ) -> Result<rbitcoin_primitives::Fk, ConsensusError> {
@@ -217,7 +218,7 @@ pub fn accept_and_connect_block_preverified(
         query,
         params,
         milestone,
-        &[(height, block.clone())],
+        &[(height, block, None)],
         preverified,
     )?;
     if let Some(fk) = fks.into_iter().next() {

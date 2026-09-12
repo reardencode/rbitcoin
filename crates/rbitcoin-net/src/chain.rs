@@ -36,7 +36,7 @@ pub struct TipEvent {
 
 /// Never-confirmed side-branch bodies plus first-seen seq (equal-work FIFO).
 struct HeldBodies {
-    by_hash: HashMap<BlockHash, (Block, u64)>,
+    by_hash: HashMap<BlockHash, (Arc<Block>, u64)>,
     next_seq: u64,
 }
 
@@ -52,7 +52,7 @@ impl HeldBodies {
     }
 
     fn get(&self, hash: &BlockHash) -> Option<&Block> {
-        self.by_hash.get(hash).map(|(b, _)| b)
+        self.by_hash.get(hash).map(|(b, _)| b.as_ref())
     }
 
     fn len(&self) -> usize {
@@ -68,18 +68,18 @@ impl HeldBodies {
     }
 
     fn blocks(&self) -> impl Iterator<Item = &Block> + '_ {
-        self.by_hash.values().map(|(b, _)| b)
+        self.by_hash.values().map(|(b, _)| b.as_ref())
     }
 
     fn entries(&self) -> impl Iterator<Item = (BlockHash, &Block)> + '_ {
-        self.by_hash.iter().map(|(h, (b, _))| (*h, b))
+        self.by_hash.iter().map(|(h, (b, _))| (*h, b.as_ref()))
     }
 
     fn seq(&self, hash: BlockHash) -> u64 {
         self.by_hash.get(&hash).map(|(_, s)| *s).unwrap_or(u64::MAX)
     }
 
-    fn insert(&mut self, block: Block) {
+    fn insert(&mut self, block: Arc<Block>) {
         let hash = block.block_hash();
         if self.by_hash.contains_key(&hash) {
             return;
@@ -566,7 +566,7 @@ impl ChainHub {
         if genesis.block_hash() != self.params.genesis_hash {
             return Err(NetError::Protocol("genesis hash mismatch with params"));
         }
-        self.connect_at(0, genesis)?;
+        self.connect_at(0, Arc::new(genesis))?;
         Ok(())
     }
 
@@ -1306,8 +1306,9 @@ impl ChainHub {
                 script_pubkey.clone(),
                 txs,
             );
-            match self.accept_block_inner(block.clone())? {
-                AcceptOutcome::Accepted { .. } => hashes.push(block.block_hash()),
+            let hash = block.block_hash();
+            match self.accept_block_inner(Arc::new(block))? {
+                AcceptOutcome::Accepted { .. } => hashes.push(hash),
                 other => {
                     return Err(NetError::Consensus(format!(
                         "generate did not extend tip: {other:?}"
@@ -1552,10 +1553,10 @@ impl ChainHub {
 
     /// Accept a block that extends the tip, or reorg to a stronger competing tip / branch.
     pub fn accept_block(&self, block: Block) -> Result<AcceptOutcome, NetError> {
-        crate::tip_accept::run_on_tip_accept(|| self.accept_block_inner(block))
+        crate::tip_accept::run_on_tip_accept(|| self.accept_block_inner(Arc::new(block)))
     }
 
-    fn accept_block_inner(&self, block: Block) -> Result<AcceptOutcome, NetError> {
+    fn accept_block_inner(&self, block: Arc<Block>) -> Result<AcceptOutcome, NetError> {
         let hash = block.block_hash();
         if self.tip_hash() == Some(hash) || self.has_block(&hash) {
             return Ok(AcceptOutcome::AlreadyHave);
@@ -1649,7 +1650,7 @@ impl ChainHub {
         let fork_h = if fork_prev.to_byte_array() == [0u8; 32] {
             if self.tip_height().is_none() {
                 for (i, b) in blocks.iter().enumerate() {
-                    self.connect_at(i as u32, b.clone())?;
+                    self.connect_at(i as u32, Arc::new(b.clone()))?;
                 }
                 let h = (blocks.len() - 1) as u32;
                 return Ok(AcceptOutcome::Accepted { height: h });
@@ -1715,7 +1716,7 @@ impl ChainHub {
         self.announce_reorg_len
             .store(blocks.len() as u32, Ordering::Relaxed);
         for (i, b) in blocks.iter().enumerate() {
-            if let Err(e) = self.connect_at(base + i as u32, b.clone()) {
+            if let Err(e) = self.connect_at(base + i as u32, Arc::new(b.clone())) {
                 self.announce_reorg_len.store(0, Ordering::Relaxed);
                 // Mid-branch connect fail: restore pre-attempt tip (not leave LCA).
                 if let Some(fh) = fork_height {
@@ -1725,7 +1726,7 @@ impl ChainHub {
                         )));
                     }
                     for (j, ob) in old_path.iter().enumerate() {
-                        if let Err(re) = self.connect_at(base + j as u32, ob.clone()) {
+                        if let Err(re) = self.connect_at(base + j as u32, Arc::new(ob.clone())) {
                             return Err(NetError::Consensus(format!(
                                 "reorg connect failed ({e}); tip restore failed: {re}"
                             )));
@@ -1788,7 +1789,8 @@ impl ChainHub {
 
     fn accept_received_block_inner(&self, block: Block) -> Result<AcceptOutcome, NetError> {
         let hash = block.block_hash();
-        match self.accept_block_inner(block.clone()) {
+        let block = Arc::new(block);
+        match self.accept_block_inner(Arc::clone(&block)) {
             Ok(AcceptOutcome::Accepted { height }) => {
                 self.held_bodies.write().unwrap().remove(&hash);
                 match self.try_apply_held()? {
@@ -1886,15 +1888,15 @@ impl ChainHub {
 
     /// Park a disconnected body without running [`Self::try_apply_held`].
     pub fn hold_unconnected_body(&self, block: Block) {
-        self.hold_body(block);
+        self.hold_body(Arc::new(block));
     }
 
-    fn hold_body(&self, block: Block) {
+    fn hold_body(&self, block: Arc<Block>) {
         let hash = block.block_hash();
         if self.is_connected(&hash) {
             return;
         }
-        if let Some(h) = self.held_body_height(&block) {
+        if let Some(h) = self.held_body_height(block.as_ref()) {
             if let Some(tip) = self.tip_height() {
                 if tip.saturating_sub(h) > HeldBodies::STALE_BELOW {
                     return;
@@ -2048,7 +2050,7 @@ impl ChainHub {
         }
     }
 
-    fn connect_at(&self, height: u32, block: Block) -> Result<(), NetError> {
+    fn connect_at(&self, height: u32, block: Arc<Block>) -> Result<(), NetError> {
         debug_assert!(
             crate::tip_accept::on_tip_accept_thread(),
             "connect_at must run on tip-accept"
@@ -2069,7 +2071,7 @@ impl ChainHub {
                 &self.query,
                 &self.params,
                 Height(height),
-                &block,
+                Arc::clone(&block),
                 self.milestone,
                 &preverified,
             ) {
@@ -2112,7 +2114,8 @@ impl ChainHub {
         let wall_ns = t_wall.elapsed().as_nanos() as u64;
         self.confirmed.write().unwrap().insert(hash);
         let n_tx = block.txdata.len();
-        let _ = self.cache.push_best(block);
+        let owned = Arc::try_unwrap(block).unwrap_or_else(|a| (*a).clone());
+        let _ = self.cache.push_best(owned);
         // Tip-follow / wire accept path: log every accepted tip block (Core-like
         // UpdateTip). IBD bulk confirm uses note_confirmed_tip without this line;
         // IBD retains periodic progress/perf status instead.

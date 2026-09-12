@@ -53,7 +53,7 @@ impl ParentPinStamp {
     }
 }
 
-pub(super) type WireBlockIn = (
+pub type WireBlockIn = (
     Height,
     Arc<Block>,
     Option<Arc<[rbitcoin_query::TxPrecompute]>>,
@@ -718,6 +718,10 @@ mod tests {
         let items = [(Height(1), Arc::new(b1), Some(Arc::clone(&pres)))];
         let stamped = confirm_wire_lookup_stamp(&q, &params, Milestone::NONE, &items, None)
             .expect("coinbase-only stamp");
+        assert!(
+            Arc::ptr_eq(&stamped.wire_blocks[0], &items[0].1),
+            "stamp must share caller Arc<Block>"
+        );
         assert_eq!(stamped.metas[0].pres.len(), pres.len());
         assert_eq!(stamped.metas[0].pres[0].txid, pres[0].txid);
         let plan = stamped.plan.as_ref().expect("new body plans");
