@@ -7,7 +7,7 @@ use crate::cache::BlockCache;
 use crate::error::NetError;
 use bitcoin::block::Header;
 use bitcoin::hashes::Hash;
-use bitcoin::{Block, BlockHash, ScriptBuf, Target, Transaction, Work};
+use bitcoin::{Block, BlockHash, ScriptBuf, Target, Transaction, Txid, Work};
 use rbitcoin_consensus::{
     accept_and_connect_block_preverified, confirm_wire_load_from_plan as consensus_load_from_plan,
     confirm_wire_load_phase_pipelined, confirm_write_phase, genesis_block, header_to_record,
@@ -2050,6 +2050,10 @@ impl ChainHub {
         }
     }
 
+    fn strip_txids_from_pres(pres: &[rbitcoin_query::TxPrecompute]) -> Vec<Txid> {
+        pres.iter().map(|p| Txid::from_byte_array(p.txid)).collect()
+    }
+
     fn connect_at(&self, height: u32, block: Arc<Block>) -> Result<(), NetError> {
         debug_assert!(
             crate::tip_accept::on_tip_accept_thread(),
@@ -2100,7 +2104,7 @@ impl ChainHub {
         self.header_tips.write().unwrap().remove(&hash);
         let t_mp = std::time::Instant::now();
         if let Some(mp) = self.mempool() {
-            let ids: Vec<_> = block.txdata.iter().map(|t| t.compute_txid()).collect();
+            let ids = Self::strip_txids_from_pres(&pres);
             let spent: Vec<_> = block
                 .txdata
                 .iter()
@@ -2618,6 +2622,18 @@ mod tests {
                 script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
             }],
         }
+    }
+
+    #[test]
+    fn strip_txids_from_pres_match_compute_txid() {
+        let a = coinbase(1);
+        let b = coinbase(2);
+        let pres: Vec<_> = [&a, &b]
+            .into_iter()
+            .map(rbitcoin_query::TxPrecompute::from_tx)
+            .collect();
+        let got = ChainHub::strip_txids_from_pres(&pres);
+        assert_eq!(got, vec![a.compute_txid(), b.compute_txid()]);
     }
 
     fn mine(prev: BlockHash, time: u32, height: u32) -> Block {
