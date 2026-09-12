@@ -13,7 +13,9 @@ pub struct ResolvedWire {
     pub n_inputs: u32,
     /// Class A header row from BQ enqueue. Load-split kinds via `has_body(fk)`.
     pub header_fk: u64,
-    /// External `(prev_txid, vout)` from the BQ input walk (no coinbase / same-wave creates).
+    /// External `(prev_txid, vout)` from the BQ input walk (no coinbase).
+    /// Same-wave creates stay here so a later load chunk can in-flight bind;
+    /// TipOnly / `need_vouts` ∩ wave ids still drop them.
     pub spend_keys: Arc<[([u8; 32], u32)]>,
 }
 

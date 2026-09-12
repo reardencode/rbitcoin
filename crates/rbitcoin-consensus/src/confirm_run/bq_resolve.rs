@@ -124,9 +124,10 @@ pub struct BqResolveWaveStats {
     pub spent_ns: u64,
 }
 
-/// Push external prev_txids (+ pre-BIP34 create txids) into the wave set.
+/// Push external prev_txids (+ pre-BIP34 create txids) into the wave TipOnly set.
 ///
-/// Returns per-input `(prev_txid, vout)` for load-chunk need-vouts (same skips).
+/// Spend keys record every non-coinbase prev (including same-wave creates) so
+/// a later load chunk can bind in-flight. TipOnly `keys` still omit `skip`.
 fn push_resolve_keys(
     params: &ChainParams,
     height: u32,
@@ -143,11 +144,13 @@ fn push_resolve_keys(
                 continue;
             }
             let prev = inp.previous_output.txid.to_byte_array();
-            if prev == [0u8; 32] || skip.contains(&prev) {
+            if prev == [0u8; 32] {
                 continue;
             }
-            keys.insert(prev);
             spends.push((prev, inp.previous_output.vout));
+            if !skip.contains(&prev) {
+                keys.insert(prev);
+            }
         }
         if !bip34 && !skip.contains(&p.txid) {
             keys.insert(p.txid);
@@ -610,8 +613,12 @@ mod tests {
         let mut keys2: HashSet<[u8; 32], BuildHasherDefault<TxidHasher>> =
             HashSet::with_hasher(BuildHasherDefault::default());
         let skipped = push_resolve_keys(&params, height, &block, &pres, &skip_same, &mut keys2);
-        assert!(keys2.is_empty());
-        assert!(skipped.is_empty(), "same-wave creates are not spend keys");
+        assert!(keys2.is_empty(), "same-wave creates are not TipOnly need");
+        assert_eq!(
+            skipped,
+            vec![(prev.to_byte_array(), 0), (prev.to_byte_array(), 1),],
+            "spend_keys must still carry same-wave prevs for in-flight stamp"
+        );
     }
 
     #[test]
@@ -647,6 +654,15 @@ mod tests {
         assert!(
             wave.stats.hits >= 1,
             "archived genesis parent must still TipOnly-hit"
+        );
+        let h1 = h1_create.to_byte_array();
+        assert!(
+            wave.parent_ids.get(&h1).is_none(),
+            "same-wave create is not a TipOnly skeleton id"
+        );
+        assert!(
+            wave.items[1].2.spend_keys.iter().any(|&(t, _)| t == h1),
+            "h=2 spend_keys must name the same-wave parent so load stamp can in-flight bind"
         );
         let _ = std::fs::remove_dir_all(&path);
     }
