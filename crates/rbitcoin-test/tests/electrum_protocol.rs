@@ -719,7 +719,7 @@ async fn electrum_asof_hides_later_spend() {
         &mut stream,
         10,
         "blockchain.transaction.get",
-        json!([spend_hex, tag_create]),
+        json!([spend_hex.clone(), tag_create.clone()]),
     )
     .await;
     let later_msg = get_later["error"]["message"].as_str().unwrap_or("");
@@ -728,9 +728,22 @@ async fn electrum_asof_hides_later_spend() {
         "asof create must hide later spend tx: {get_later}"
     );
 
-    let unknown = rpc(
+    let merkle_later = rpc(
         &mut stream,
         11,
+        "blockchain.transaction.get_merkle",
+        json!([spend_hex, 103, tag_create]),
+    )
+    .await;
+    let merkle_msg = merkle_later["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        merkle_msg.contains("asof not on chain"),
+        "merkle height above asof pin: {merkle_later}"
+    );
+
+    let unknown = rpc(
+        &mut stream,
+        12,
         "blockchain.scripthash.get_balance",
         json!([sh, format!("asof:{}", "ee".repeat(32))]),
     )
