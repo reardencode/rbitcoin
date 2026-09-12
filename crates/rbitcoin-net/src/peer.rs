@@ -3446,7 +3446,10 @@ fn work_of_header_path(
                 std::iter::once(base).chain(extra),
             ));
         }
-        let hdr = pending.get(&h)?;
+        let hdr = pending.get(&h).copied().or_else(|| hub.header_of(&h))?;
+        if !hub.header_claimed_pow_ok(&hdr) {
+            return None;
+        }
         extra.push(hdr.work());
         h = hdr.prev_blockhash;
         if h.to_byte_array() == [0u8; 32] {
@@ -3467,6 +3470,9 @@ fn fetchable_header_path_bodies(
     requested: &HashSet<BlockHash>,
 ) -> Vec<BlockHash> {
     if !header_path_meets_minwork(hub, pending, tip) {
+        return Vec::new();
+    }
+    if work_of_header_path(hub, pending, tip).is_none() {
         return Vec::new();
     }
     if matches!(

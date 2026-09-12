@@ -1748,14 +1748,16 @@ fn apply_peer_event_body_and_control_surface() {
         }
     }
     fn dummy_header(prev: BlockHash, n: u8) -> Header {
-        Header {
+        let mut h = Header {
             version: Version::from_consensus(4),
             prev_blockhash: prev,
             merkle_root: bitcoin::TxMerkleNode::from_byte_array([n; 32]),
             time: 1_300_000_000 + u32::from(n),
             bits: CompactTarget::from_consensus(0x207fffff),
             nonce: u32::from(n),
-        }
+        };
+        rbitcoin_consensus::grind_regtest_pow(&mut h);
+        h
     }
 
     let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("ev-apply");
@@ -1982,14 +1984,16 @@ fn apply_peer_event_repeat_headers_skips_ensure_header_fk() {
         }
     }
     fn dummy_header(prev: BlockHash, n: u8) -> Header {
-        Header {
+        let mut h = Header {
             version: Version::from_consensus(4),
             prev_blockhash: prev,
             merkle_root: bitcoin::TxMerkleNode::from_byte_array([n; 32]),
             time: 1_300_000_000 + u32::from(n),
             bits: CompactTarget::from_consensus(0x207fffff),
             nonce: u32::from(n),
-        }
+        };
+        rbitcoin_consensus::grind_regtest_pow(&mut h);
+        h
     }
 
     let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("ev-hdr-repeat");
@@ -2150,6 +2154,7 @@ fn apply_peer_event_block_framed_bq_horizon_and_headers_done() {
             txdata: vec![coinbase(height)],
         };
         b.header.merkle_root = b.compute_merkle_root().unwrap();
+        rbitcoin_consensus::grind_regtest_pow(&mut b.header);
         b
     }
     fn ser(b: &Block) -> Vec<u8> {
@@ -2405,6 +2410,7 @@ fn block_framed_raw_offers_body_queue_with_confirm_feed() {
             txdata: vec![coinbase(height)],
         };
         b.header.merkle_root = b.compute_merkle_root().unwrap();
+        rbitcoin_consensus::grind_regtest_pow(&mut b.header);
         b
     }
 
@@ -2504,14 +2510,16 @@ fn known_headers_re_admit_to_ordered_after_tip_drain() {
         }
     }
     fn dummy_header(prev: BlockHash, n: u32) -> Header {
-        Header {
+        let mut h = Header {
             version: Version::from_consensus(4),
             prev_blockhash: prev,
             merkle_root: bitcoin::TxMerkleNode::from_byte_array([n as u8; 32]),
             time: 1_300_000_000 + n,
             bits: CompactTarget::from_consensus(0x207fffff),
             nonce: n,
-        }
+        };
+        rbitcoin_consensus::grind_regtest_pow(&mut h);
+        h
     }
 
     let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("ev-readmit");
@@ -2653,14 +2661,16 @@ fn path_slot_first_wins_chained_via_headers() {
         }
     }
     fn dummy_header(prev: BlockHash, n: u8) -> Header {
-        Header {
+        let mut h = Header {
             version: Version::from_consensus(4),
             prev_blockhash: prev,
             merkle_root: bitcoin::TxMerkleNode::from_byte_array([n; 32]),
             time: 1_300_000_000 + u32::from(n),
             bits: CompactTarget::from_consensus(0x207fffff),
             nonce: u32::from(n),
-        }
+        };
+        rbitcoin_consensus::grind_regtest_pow(&mut h);
+        h
     }
 
     let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("path-slot");

@@ -7,11 +7,11 @@ use crate::cache::BlockCache;
 use crate::error::NetError;
 use bitcoin::block::Header;
 use bitcoin::hashes::Hash;
-use bitcoin::{Block, BlockHash, ScriptBuf, Transaction, Work};
+use bitcoin::{Block, BlockHash, ScriptBuf, Target, Transaction, Work};
 use rbitcoin_consensus::{
     accept_and_connect_block_preverified, confirm_wire_load_from_plan as consensus_load_from_plan,
     confirm_wire_load_phase_pipelined, confirm_write_phase, genesis_block, header_to_record,
-    mine_regtest_paying, ChainParams, Milestone, PlanStampOutcome, ScriptOkBatch,
+    mine_regtest_paying, validate_header, ChainParams, Milestone, PlanStampOutcome, ScriptOkBatch,
     ScriptPreverified, WireLoadPipeline,
 };
 use rbitcoin_log::info;
@@ -380,10 +380,19 @@ impl ChainHub {
         *self.minimum_chain_work.write().unwrap() = w;
     }
 
+    /// Claimed nBits meet `pow_limit` and the hash meets that target.
+    pub(crate) fn header_claimed_pow_ok(&self, header: &Header) -> bool {
+        let target = Target::from_compact(header.bits);
+        target <= self.params.pow_limit && header.validate_pow(target).is_ok()
+    }
+
     /// Work of `header` hanging off a known parent (tip-extend, header-only
     /// chain, or side), else just the header's own work.
     pub fn work_with_header(&self, header: &Header) -> Work {
-        let mut extra = vec![header.work()];
+        let mut extra = Vec::new();
+        if self.header_claimed_pow_ok(header) {
+            extra.push(header.work());
+        }
         let mut prev = header.prev_blockhash;
         for _ in 0..10_000 {
             if prev.to_byte_array() == [0u8; 32] {
@@ -404,7 +413,9 @@ impl ChainHub {
             let Some(hdr) = self.header_of(&prev) else {
                 return crate::most_work::sum_work(extra.into_iter());
             };
-            extra.push(hdr.work());
+            if self.header_claimed_pow_ok(&hdr) {
+                extra.push(hdr.work());
+            }
             prev = hdr.prev_blockhash;
         }
         crate::most_work::sum_work(extra.into_iter())
@@ -1029,6 +1040,20 @@ impl ChainHub {
                 }
             }
         };
+        if header.prev_blockhash.to_byte_array() != [0u8; 32] {
+            let parent = header.prev_blockhash.to_byte_array();
+            if let Some(ph) = self.query.height_of_hash(&parent).ok().flatten() {
+                validate_header(
+                    self.query.as_ref(),
+                    &self.params,
+                    Height(ph.0.saturating_add(1)),
+                    header,
+                )
+                .map_err(|e| NetError::Consensus(e.to_string()))?;
+            } else if !self.header_claimed_pow_ok(header) {
+                return Err(NetError::Consensus("invalid proof of work".into()));
+            }
+        }
         let rec = header_to_record(prev_fk, header);
         let fk = self
             .query
@@ -2142,7 +2167,24 @@ impl ChainHub {
         }
         self.query
             .drop_sh_pending_from(Height(keep_height.saturating_add(1)));
+        self.chain_work_prefix
+            .write()
+            .unwrap()
+            .truncate(keep_height as usize + 1);
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_chain_work_prefix_len(&self) -> usize {
+        self.chain_work_prefix.read().unwrap().len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_poison_chain_work_prefix_last(&self) {
+        let mut p = self.chain_work_prefix.write().unwrap();
+        if let Some(last) = p.last_mut() {
+            *last = Work::from_be_bytes([0xff; 32]);
+        }
     }
 
     fn block_at_height(&self, height: u32) -> Result<Option<Block>, NetError> {
@@ -2919,6 +2961,54 @@ mod tests {
         assert!(
             hub.unrequested_weaker_than_tip(&fork.header),
             "genesis-fork at height 1 is weaker than tip 2"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn disconnect_truncates_chain_work_prefix_to_keep_height() {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let a1 = mine(gen, 1_300_030_000, 1);
+        hub.accept_block(a1.clone()).unwrap();
+        let a2 = mine(a1.block_hash(), 1_300_030_100, 2);
+        hub.accept_block(a2.clone()).unwrap();
+        let _ = hub.chain_work().unwrap();
+        assert_eq!(hub.test_chain_work_prefix_len(), 3);
+        hub.test_poison_chain_work_prefix_last();
+        hub.rewind_to_height(1).unwrap();
+        assert_eq!(
+            hub.test_chain_work_prefix_len(),
+            2,
+            "equal-length reorg must not keep the losing branch's prefix"
+        );
+        let b2 = mine_distinct(a1.block_hash(), 1_300_030_200, 2, &[a2.block_hash()]);
+        hub.accept_block(b2).unwrap();
+        let mut acc = Work::from_be_bytes([0u8; 32]);
+        for h in 0..=2 {
+            acc = acc + hub.query.wire_header_at_height(Height(h)).unwrap().work();
+        }
+        assert_eq!(
+            hub.chain_work().unwrap(),
+            acc,
+            "prefix must be rebuilt from the winner, not the poisoned loser"
+        );
+        assert_ne!(hub.chain_work().unwrap(), Work::from_be_bytes([0xff; 32]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ensure_header_rejects_claimed_hard_bits_without_pow() {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let mut bad = mine(gen, 1_300_031_000, 1).header;
+        bad.bits = CompactTarget::from_consensus(0x1d00ffff);
+        bad.nonce = 0;
+        assert!(
+            hub.ensure_header(&bad).is_err(),
+            "persist must not accept nBits/POW that confirm would reject"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

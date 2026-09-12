@@ -1344,6 +1344,19 @@ impl ScriptHashTable {
                 })?;
             }
         }
+        {
+            let g = self.ovf_l1.lock().unwrap();
+            if let Some(l1) = g.as_ref() {
+                let body = self.ovf_file();
+                l1.head.for_each_occupied(|_k, val| {
+                    let entries = self.collect_entries_from(body, &val)?;
+                    for fk in entries {
+                        f(fk);
+                    }
+                    Ok(())
+                })?;
+            }
+        }
         self.ingest.lock().unwrap().for_each_occupied(|_key, val| {
             let entries = self.collect_entries_from(self.ovf_file(), &val)?;
             for fk in entries {
@@ -1443,7 +1456,7 @@ impl ScriptHashTable {
 
         let t_seed = std::time::Instant::now();
         // Cold body (no prior creates): skip N head gets — empty table probes.
-        if self.entry_count() > 0 {
+        if self.entry_count() > 0 || !self.head_is_empty() {
             let mut missing: Vec<[u8; 32]> = Vec::new();
             {
                 let mut seen_miss = std::collections::HashSet::new();
@@ -1724,8 +1737,8 @@ impl ScriptHashTable {
         }
     }
 
-    /// K-way merge of sealed global ovf heads. Body offs unchanged. Readers
-    /// keep the old `Vec` until this lock is released after rename.
+    /// K-way merge of sealed global ovf heads. Body offs unchanged. Install L1
+    /// before dropping L0 so locate_head never sees both empty.
     pub fn compact_sealed_ovf(&self) -> Result<(), StoreError> {
         if self.ovf_l1.lock().unwrap().is_some() {
             self.warn_l1_frozen();
@@ -1777,12 +1790,12 @@ impl ScriptHashTable {
             fp.push(".fuse8");
             fuse.write_to(&PathBuf::from(fp))?;
         }
+        *self.ovf_l1.lock().unwrap() = Some(OvfL1 { head, fuse });
         let old = {
             let mut g = self.sealed_ovf.lock().unwrap();
             std::mem::take(&mut *g)
         };
         drop(old);
-        *self.ovf_l1.lock().unwrap() = Some(OvfL1 { head, fuse });
         for p in old_paths {
             let _ = std::fs::remove_file(&p);
             let mut idx = p.as_os_str().to_os_string();

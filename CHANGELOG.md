@@ -34,6 +34,21 @@ before 1.0).
 - **IBD `lookup_taken_hi` rewind:** merkle/witness SoftWire, Cascade,
   EngineFault, and ConsensusInvalid rewind the lookup consume high-water to
   the confirmed tip so densify can re-getdata. Previously only BadPrev did.
+- **SH overflow compact / tip append:** `compact_sealed_ovf` installs L1
+  before dropping L0 so `locate_head` never sees both empty. Occupancy walk
+  includes compacted L1. Tip append probes sealed heads when `live_count == 0`
+  but head slots are still occupied (crash mid-finish).
+- **Equal-length reorg work:** `disconnect_to` truncates `chain_work_prefix` to
+  `keep_height+1` so the next most-work compare is rebuilt from the new branch.
+- **Header anti-DoS:** `ensure_header` runs POW / nBits / MTP when the parent is
+  on the best chain (claimed POW otherwise). Pending ranking and getdata skip
+  headers whose claimed nBits the hash does not meet, and fail closed on a
+  pending-header hole.
+- **IBD stamp/pin fail:** re-offer the rest of the wave into the **body
+  queue** (lookup never reads `feed.ready` wire), `clear_all` in-flight
+  identity, rewind `lookup_taken_hi` to the confirmed tip, and bump the feed
+  epoch so later same-wave loadq chunks are stale (those chunks re-offer on
+  drop).
 - **IBD session-fault resume:** after Class C, a uring session fault on spend
   annotate or `tx.head` drain finishes annotate+drain on the write thread
   (tip `connect_at` retries `finish_post_commit`; IBD does the same in place

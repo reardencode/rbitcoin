@@ -1460,6 +1460,97 @@ fn write_session_fault_after_class_c_finishes_annotate_in_place() {
 }
 
 #[test]
+fn load_fail_rewind_reoffers_tail_to_bq() {
+    use super::{load_fail_rewind_wave, ConfirmFeed, LoadAheadState};
+    use bitcoin::consensus::encode::serialize;
+    use rbitcoin_query::ArchiveWritePlan;
+    use std::collections::HashSet;
+
+    let (_dir, hub) = crate::chain::tiny_regtest_hub_labeled("load-fail-rewind");
+    hub.ensure_genesis().unwrap();
+    let mut st = LoadAheadState::new(&hub);
+    let body0 = hub.query.tx_body_count();
+    let mut plan = ArchiveWritePlan::empty();
+    plan.planned_fks = vec![Fk(body0.saturating_add(10).max(10))];
+    st.note_lookup_ok(&plan, 10, [1u8; 32]);
+    let pin = test_pin(body0.saturating_add(10).max(10));
+    st.in_flight
+        .note_pins(std::iter::once((plan.planned_fks[0], &pin)), Some(10));
+    assert!(st.in_flight.entry_count() > 0);
+
+    let feed = ConfirmFeed::new();
+    {
+        let mut g = feed.inner.lock().unwrap();
+        g.inflight.insert(10);
+        g.inflight.insert(11);
+    }
+    let prev = hub.tip_hash().unwrap();
+    let body = rbitcoin_consensus::mine_empty_regtest(prev, 1_300_000_000, 1);
+    let hash = body.block_hash();
+    hub.query.set_lookup_taken_hi(Some(11));
+    load_fail_rewind_wave(&feed, &hub, &mut st, 10, std::iter::once((11, hash, &body)));
+    assert_eq!(
+        st.in_flight.entry_count(),
+        0,
+        "pin/stamp fail must clear_all"
+    );
+    assert_eq!(
+        feed.epoch(),
+        1,
+        "epoch bump drops in-channel same-wave loadq"
+    );
+    assert_eq!(
+        hub.query.lookup_taken_hi(),
+        hub.tip_height(),
+        "lookup must be able to select BQ heights again"
+    );
+    assert!(
+        hub.query.block_queue_has_height(11),
+        "tail wire belongs on the body queue, not feed.ready"
+    );
+    assert_eq!(
+        hub.query.block_queue_payload(11).unwrap().as_deref(),
+        Some(serialize(&body).as_slice())
+    );
+    let skip = HashSet::new();
+    assert_eq!(
+        hub.query.block_queue_unresolved_heights(11, &skip, 4),
+        vec![11],
+        "taken_hi rewind + BQ offer must make the tail claimable"
+    );
+    let g = feed.inner.lock().unwrap();
+    assert!(!g.ready.contains_key(&10));
+    assert!(
+        !g.ready.contains_key(&11),
+        "production lookup does not read feed.ready wire"
+    );
+}
+
+#[test]
+fn stale_loadq_reoffers_decoded_bodies_to_bq() {
+    use super::reoffer_blocks_to_body_queue;
+    use bitcoin::consensus::encode::serialize;
+
+    let (_dir, hub) = crate::chain::tiny_regtest_hub_labeled("stale-loadq-bq");
+    hub.ensure_genesis().unwrap();
+    let prev = hub.tip_hash().unwrap();
+    let body = rbitcoin_consensus::mine_empty_regtest(prev, 1_300_000_100, 1);
+    let hash = body.block_hash();
+    hub.query.set_lookup_taken_hi(Some(12));
+    reoffer_blocks_to_body_queue(&hub, std::iter::once((12, hash, &body)));
+    assert!(hub.query.block_queue_has_height(12));
+    assert_eq!(
+        hub.query.block_queue_payload(12).unwrap().as_deref(),
+        Some(serialize(&body).as_slice())
+    );
+    assert_eq!(
+        hub.query.lookup_taken_hi(),
+        Some(12),
+        "stale drop restores BQ only; stamp/pin fail already rewound taken_hi"
+    );
+}
+
+#[test]
 fn load_session_fault_after_note_lookup_ok_clears_speculative_fks() {
     use super::LoadAheadState;
     use rbitcoin_query::ArchiveWritePlan;
