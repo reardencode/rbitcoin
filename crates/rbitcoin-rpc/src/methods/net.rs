@@ -192,9 +192,12 @@ pub(crate) fn addpeeraddress(ctx: &RpcContext, params: &RpcParams) -> Result<Val
         return Err(rpc_error(ERR_MISC, "addrman not available"));
     };
     // RAM-only: do not rewrite peers on every call (p2p_getaddr_caching fills
-    // 10k addresses). The node still persists addrman on shutdown / catch-up.
-    am.lock().unwrap_or_else(|e| e.into_inner()).add(addr);
-    Ok(json!({ "success": true }))
+    // via this RPC). The node still persists addrman on shutdown / catch-up.
+    let added = am
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .add_learned(addr, rbitcoin_net::MAX_ADDR_MAN);
+    Ok(json!({ "success": added }))
 }
 
 /// Core `getnodeaddresses`: sample from addrman (`count=0` → all).

@@ -1,5 +1,5 @@
 use super::*;
-use crate::peers::PeerOut;
+use crate::peers::{CappedSet, PeerOut};
 use rbitcoin_consensus::{ChainParams, Milestone};
 use rbitcoin_query::Query;
 use std::collections::{HashMap, HashSet};
@@ -81,13 +81,20 @@ fn store_not_found_is_soft_session_error() {
 #[test]
 fn from_this_peer_insert_caps_and_keeps_latest() {
     use bitcoin::hashes::Hash;
-    let mut m = HashMap::new();
+    let mut m = CappedSet::new();
     let cap = 4usize;
     for i in 0u8..6 {
         insert_capped_txid(&mut m, bitcoin::Txid::from_byte_array([i; 32]), cap);
         assert!(m.len() <= cap, "len {}", m.len());
     }
+    assert_eq!(m.len(), cap);
     assert!(m.contains_key(&bitcoin::Txid::from_byte_array([5u8; 32])));
+    assert!(m.contains_key(&bitcoin::Txid::from_byte_array([2u8; 32])));
+    assert!(
+        !m.contains_key(&bitcoin::Txid::from_byte_array([0u8; 32])),
+        "oldest origin txid must roll off"
+    );
+    assert!(!m.contains_key(&bitcoin::Txid::from_byte_array([1u8; 32])));
     assert_eq!(FROM_THIS_PEER_CAP, 50_000);
 }
 
@@ -310,7 +317,7 @@ fn header_getdata_is_compact_after_sendcmpct() {
         pending_headers: HashMap::new(),
         pending_blocks: PendingBlocks::new(),
         pending_cmpct: HashMap::new(),
-        from_this_peer: HashMap::new(),
+        from_this_peer: CappedSet::new(),
         requested_blocks: HashSet::new(),
         ban_score: 0u32,
     };
@@ -386,7 +393,7 @@ fn submitheader_parent_p2p_child_header_getdatas_body() {
         pending_headers: HashMap::new(),
         pending_blocks: PendingBlocks::new(),
         pending_cmpct: HashMap::new(),
-        from_this_peer: HashMap::new(),
+        from_this_peer: CappedSet::new(),
         requested_blocks: HashSet::new(),
         ban_score: 0u32,
     };
@@ -712,7 +719,7 @@ fn minchainwork_does_not_getdata_below_floor() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
@@ -832,7 +839,7 @@ fn minchainwork_one_header_announces_ignore_height_14() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
@@ -931,7 +938,7 @@ fn blocksonly_tx_and_inv_raise_ban() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
@@ -1114,7 +1121,7 @@ fn blocksonly_sendraw_invs_unbroadcast_to_inbound() {
 
         peers.request_all_tx_inv();
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        queue_due_tx_invs(&hub, inbound.as_ref(), &HashMap::new(), &out_tx);
+        queue_due_tx_invs(&hub, inbound.as_ref(), &CappedSet::new(), &out_tx);
         match out_rx
             .try_recv()
             .expect("inbound must get wtx INV")
@@ -1125,7 +1132,7 @@ fn blocksonly_sendraw_invs_unbroadcast_to_inbound() {
             }
             other => panic!("expected WTx inv, got {other:?}"),
         }
-        queue_due_tx_invs(&hub, block_relay.as_ref(), &HashMap::new(), &out_tx);
+        queue_due_tx_invs(&hub, block_relay.as_ref(), &CappedSet::new(), &out_tx);
         assert!(
             out_rx.try_recv().is_err(),
             "block-relay-only must not get tx INV"
@@ -1139,7 +1146,7 @@ fn blocksonly_sendraw_invs_unbroadcast_to_inbound() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
@@ -1228,7 +1235,7 @@ fn relay_on_unbroadcast_keeps_inbound_age_gate() {
         };
         let inbound = peers.register(addr, addr, &ver, true, crate::peers::PeerConnType::Inbound);
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        queue_due_tx_invs(&hub, inbound.as_ref(), &HashMap::new(), &out_tx);
+        queue_due_tx_invs(&hub, inbound.as_ref(), &CappedSet::new(), &out_tx);
         assert!(
             out_rx.try_recv().is_err(),
             "relay-on inbound must wait 30s even for unbroadcast"
@@ -1303,7 +1310,7 @@ fn queue_due_skips_txs_accepted_before_peer_connected() {
         inbound.set_inv_gen_floor(mp.next_accept_gen());
         assert!(mp.tx_inv_due(&early.compute_wtxid()), "age elapsed");
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        queue_due_tx_invs(&hub, inbound.as_ref(), &HashMap::new(), &out_tx);
+        queue_due_tx_invs(&hub, inbound.as_ref(), &CappedSet::new(), &out_tx);
         assert!(
             out_rx.try_recv().is_err(),
             "must not INV a tx accepted before this peer connected"
@@ -1374,7 +1381,7 @@ fn queue_due_tx_invs_idle_tick_does_not_clone_live_bodies() {
         };
         let inbound = peers.register(addr, addr, &ver, true, crate::peers::PeerConnType::Inbound);
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        queue_due_tx_invs(&hub, inbound.as_ref(), &HashMap::new(), &out_tx);
+        queue_due_tx_invs(&hub, inbound.as_ref(), &CappedSet::new(), &out_tx);
         let idle = mp.sample_reset_perf();
         assert_eq!(
             idle.list_live, 0,
@@ -1394,7 +1401,7 @@ fn queue_due_tx_invs_idle_tick_does_not_clone_live_bodies() {
             crate::peers::PeerConnType::OutboundFullRelay,
         );
         peers.request_all_tx_inv();
-        queue_due_tx_invs(&hub, outbound.as_ref(), &HashMap::new(), &out_tx);
+        queue_due_tx_invs(&hub, outbound.as_ref(), &CappedSet::new(), &out_tx);
         let flush = mp.sample_reset_perf();
         assert_eq!(
             flush.list_live, 0,
@@ -1489,7 +1496,7 @@ fn queue_due_tx_invs_age_only_tick_does_not_rescan_live() {
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
         let _ = mp.sample_reset_perf();
         for _ in 0..20 {
-            queue_due_tx_invs(&hub, inbound.as_ref(), &HashMap::new(), &out_tx);
+            queue_due_tx_invs(&hub, inbound.as_ref(), &CappedSet::new(), &out_tx);
         }
         let young = mp.sample_reset_perf();
         assert_eq!(young.list_live_wtxids, 0, "young idle must not list wtxids");
@@ -1498,7 +1505,7 @@ fn queue_due_tx_invs_age_only_tick_does_not_rescan_live() {
 
         peers.set_mock_now(t0 + 30);
         mp.note_mock_now(t0 + 30);
-        queue_due_tx_invs(&hub, inbound.as_ref(), &HashMap::new(), &out_tx);
+        queue_due_tx_invs(&hub, inbound.as_ref(), &CappedSet::new(), &out_tx);
         let mut announced = 0u32;
         while let Ok(msg) = out_rx.try_recv().map(PeerOut::expect_msg) {
             match msg {
@@ -1509,7 +1516,7 @@ fn queue_due_tx_invs_age_only_tick_does_not_rescan_live() {
         assert_eq!(announced, n, "inbound must INV every tx once it is 30s old");
         let _ = mp.sample_reset_perf();
         for _ in 0..20 {
-            queue_due_tx_invs(&hub, inbound.as_ref(), &HashMap::new(), &out_tx);
+            queue_due_tx_invs(&hub, inbound.as_ref(), &CappedSet::new(), &out_tx);
         }
         let idle = mp.sample_reset_perf();
         assert_eq!(
@@ -1632,7 +1639,7 @@ fn mocktime_jump_does_not_inv_or_serve_new_sendraw() {
         hub.mempool().unwrap().note_mock_now(t0 + 300);
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
         inbound.request_tx_inv();
-        queue_due_tx_invs(&hub, inbound.as_ref(), &HashMap::new(), &out_tx);
+        queue_due_tx_invs(&hub, inbound.as_ref(), &CappedSet::new(), &out_tx);
         let mut announced = 0u32;
         while let Ok(msg) = out_rx.try_recv().map(PeerOut::expect_msg) {
             match msg {
@@ -1656,7 +1663,7 @@ fn mocktime_jump_does_not_inv_or_serve_new_sendraw() {
         // Leftover request_tx_inv / inv_flush after the new accept must
         // not INV the fresh tx to inbound.
         inbound.request_tx_inv();
-        queue_due_tx_invs(&hub, inbound.as_ref(), &HashMap::new(), &out_tx);
+        queue_due_tx_invs(&hub, inbound.as_ref(), &CappedSet::new(), &out_tx);
         assert!(
             out_rx.try_recv().is_err(),
             "new sendraw must not INV inbound after mocktime jump"
@@ -1670,7 +1677,7 @@ fn mocktime_jump_does_not_inv_or_serve_new_sendraw() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
@@ -1785,7 +1792,7 @@ fn blocksonly_relay_perm_tx_invs_other_inbound() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
@@ -1971,7 +1978,7 @@ fn compact_child_of_invalid_disconnects_cached_same_stays() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
@@ -2084,7 +2091,7 @@ fn handle_peer_frame_control_and_inv_paths() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
@@ -2524,7 +2531,7 @@ fn sendaddrv2_after_verack_disconnects() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
@@ -2633,7 +2640,7 @@ fn handle_peer_frame_mempool_tx_and_inv_paths() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
@@ -2833,7 +2840,7 @@ fn parked_orphan_tx_is_not_logged_as_reject() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
@@ -2928,7 +2935,7 @@ fn inv_of_parked_orphan_does_not_getdata() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
@@ -3026,7 +3033,7 @@ fn parked_orphan_getdatas_missing_parent() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
@@ -3122,7 +3129,7 @@ fn parked_orphan_on_tokio_worker_getdatas_parent() {
                 pending_headers: HashMap::new(),
                 pending_blocks: PendingBlocks::new(),
                 pending_cmpct: HashMap::new(),
-                from_this_peer: HashMap::new(),
+                from_this_peer: CappedSet::new(),
                 requested_blocks: HashSet::new(),
                 ban_score: 0u32,
             };
@@ -3270,7 +3277,7 @@ fn getdata_tx_notfound_unless_announced_or_reorg() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
@@ -3418,7 +3425,7 @@ fn invalid_getdata_type0_still_serves_tip_block() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
@@ -3940,7 +3947,7 @@ fn inv_of_already_asked_block_does_not_getdata() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
@@ -4012,7 +4019,7 @@ fn bloom_disabled_messages_request_disconnect() {
         pending_headers: HashMap::new(),
         pending_blocks: PendingBlocks::new(),
         pending_cmpct: HashMap::new(),
-        from_this_peer: HashMap::new(),
+        from_this_peer: CappedSet::new(),
         requested_blocks: HashSet::new(),
         ban_score: 0,
     };
@@ -4078,7 +4085,7 @@ fn oversize_locator_request_disconnect() {
         pending_headers: HashMap::new(),
         pending_blocks: PendingBlocks::new(),
         pending_cmpct: HashMap::new(),
-        from_this_peer: HashMap::new(),
+        from_this_peer: CappedSet::new(),
         requested_blocks: HashSet::new(),
         ban_score: 0,
     };
@@ -4294,7 +4301,7 @@ fn redundant_verack_is_ignored_and_logged() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
@@ -4436,7 +4443,7 @@ fn addrfetch_multi_addr_disconnects() {
         pending_headers: HashMap::new(),
         pending_blocks: PendingBlocks::new(),
         pending_cmpct: HashMap::new(),
-        from_this_peer: HashMap::new(),
+        from_this_peer: CappedSet::new(),
         requested_blocks: HashSet::new(),
         ban_score: 0u32,
     };
@@ -4779,7 +4786,7 @@ fn connecting_ancient_weaker_headers_request_disconnect() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
@@ -4884,7 +4891,7 @@ fn getdata_skips_reconstruct_when_serve_inflight_at_cap() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
@@ -4979,7 +4986,7 @@ fn catchup_headers_getdata_stays_in_serve_window() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
@@ -5083,7 +5090,7 @@ fn catchup_child_before_parent_still_connects() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
@@ -5209,7 +5216,7 @@ fn catchup_compact_getdata_clears_requested_for_next_window() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
@@ -5360,7 +5367,7 @@ fn full_headers_batch_continues_from_last_header() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
@@ -5641,7 +5648,7 @@ fn compact_tip_announce_must_not_wrap_serve_inflight() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
@@ -5738,7 +5745,7 @@ fn compact_tip_announce_must_not_consume_serve_slots() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
@@ -5811,7 +5818,7 @@ fn coinbase_compact_fills_without_mempool() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
@@ -6006,7 +6013,8 @@ fn stale_getdata_requests_expire_so_catchup_can_retry() {
             &hub,
             &mut requested,
             &mut since,
-            t0 + BLOCK_GETDATA_TIMEOUT - std::time::Duration::from_secs(1)
+            t0 + BLOCK_GETDATA_TIMEOUT - std::time::Duration::from_secs(1),
+            None,
         ),
         "must not expire before BLOCK_GETDATA_TIMEOUT"
     );
@@ -6017,13 +6025,60 @@ fn stale_getdata_requests_expire_so_catchup_can_retry() {
         &hub,
         &mut requested,
         &mut since,
-        t0 + BLOCK_GETDATA_TIMEOUT + std::time::Duration::from_millis(1)
+        t0 + BLOCK_GETDATA_TIMEOUT + std::time::Duration::from_millis(1),
+        None,
     ));
     assert!(requested.is_empty());
     assert!(
         !hub.already_have_or_asked_block(&hash),
         "expired getdata must leave asked_blocks so the same hashes can be re-asked"
     );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn stale_getdata_expire_releases_cmpct_fill() {
+    use crate::peers::{PeerConnType, PeerHub};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("getdata-expire-cmpct");
+    hub.ensure_genesis().unwrap();
+    let hash = BlockHash::from_byte_array([0x33; 32]);
+    let peers = PeerHub::new();
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+    let session = peers.register(
+        addr,
+        addr,
+        &bitcoin::p2p::message_network::VersionMessage {
+            version: 70016,
+            services: bitcoin::p2p::ServiceFlags::NETWORK,
+            timestamp: 0,
+            receiver: bitcoin::p2p::address::Address::new(&addr, bitcoin::p2p::ServiceFlags::NONE),
+            sender: bitcoin::p2p::address::Address::new(&addr, bitcoin::p2p::ServiceFlags::NONE),
+            nonce: 1,
+            user_agent: "/rbitcoin:0.1.0/".into(),
+            start_height: 0,
+            relay: true,
+        },
+        true,
+        PeerConnType::Inbound,
+    );
+    assert!(peers.try_cmpct_fill_slot(hash, true));
+    session.note_cmpct_taken(hash, true);
+    let mut requested = HashSet::new();
+    requested.insert(hash);
+    hub.note_asked_block(hash);
+    let t0 = std::time::Instant::now();
+    let mut since = Some(t0);
+    assert!(maybe_expire_block_requests(
+        &hub,
+        &mut requested,
+        &mut since,
+        t0 + BLOCK_GETDATA_TIMEOUT + std::time::Duration::from_millis(1),
+        Some(&session),
+    ));
+    assert!(peers.try_cmpct_fill_slot(hash, true));
+    assert!(peers.try_cmpct_fill_slot(hash, true));
+    assert!(!peers.try_cmpct_fill_slot(hash, true));
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -6346,7 +6401,7 @@ fn new_pow_valid_compact_relays_to_hb_before_connect() {
             pending_headers: HashMap::new(),
             pending_blocks: PendingBlocks::new(),
             pending_cmpct: HashMap::new(),
-            from_this_peer: HashMap::new(),
+            from_this_peer: CappedSet::new(),
             requested_blocks: HashSet::new(),
             ban_score: 0u32,
         };
