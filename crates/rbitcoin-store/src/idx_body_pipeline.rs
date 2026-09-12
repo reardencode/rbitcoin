@@ -51,6 +51,8 @@ pub struct IdxBodyJob {
     pub body: Vec<u8>,
     /// True when body pread completed for the expected length.
     pub ok: bool,
+    /// Sparse Outs need (sorted unique). Empty = all outs (SH / ensure).
+    pub need_vouts: Vec<u32>,
 }
 
 impl IdxBodyJob {
@@ -60,6 +62,7 @@ impl IdxBodyJob {
             range,
             body: Vec::new(),
             ok: false,
+            need_vouts: Vec::new(),
         }
     }
 
@@ -72,6 +75,13 @@ impl IdxBodyJob {
     }
 }
 
+/// Body-wave IO counts for `ibd: perf` (extend / later page-grouped SQEs).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct IdxBodyIoStats {
+    /// Second-wave Outs jobs that pread the remainder of the idx span.
+    pub extend_n: u64,
+}
+
 /// Resolve idx (FdOnly pread) then body (backend from env). Mutates `jobs` in place.
 ///
 /// Jobs with invalid / OOB ids are left `ok = false` without failing the batch
@@ -80,7 +90,7 @@ pub fn run_idx_body_pipeline(
     table: &VarTable,
     jobs: &mut [IdxBodyJob],
     mode: BodyMode,
-) -> Result<(), StoreError> {
+) -> Result<IdxBodyIoStats, StoreError> {
     run_idx_body_pipeline_backend(table, jobs, mode, io_backend::read_io_backend())
 }
 
@@ -90,9 +100,9 @@ pub fn run_idx_body_pipeline_backend(
     jobs: &mut [IdxBodyJob],
     mode: BodyMode,
     backend: ReadIoBackend,
-) -> Result<(), StoreError> {
+) -> Result<IdxBodyIoStats, StoreError> {
     if jobs.is_empty() {
-        return Ok(());
+        return Ok(IdxBodyIoStats::default());
     }
     let mut need_fk: Vec<Fk> = Vec::new();
     let mut need_slot: Vec<usize> = Vec::new();
@@ -130,7 +140,7 @@ pub fn run_idx_body_pipeline_backend(
         submitted.push(i);
     }
     if submitted.is_empty() {
-        return Ok(());
+        return Ok(IdxBodyIoStats::default());
     }
 
     submitted.sort_unstable_by_key(|&i| jobs[i].range.map(|(o, _)| o).unwrap_or(0));
@@ -164,19 +174,21 @@ pub fn run_idx_body_pipeline_backend(
             jobs[i].ok = true;
         }
     }
+    let mut stats = IdxBodyIoStats::default();
     if mode == BodyMode::Outs {
-        extend_truncated_txout_jobs(table, jobs, backend)?;
+        stats.extend_n = extend_truncated_txout_jobs(table, jobs, backend)?;
     }
-    Ok(())
+    Ok(stats)
 }
 
-/// Second wave: when a 4 KiB Outs read does not cover every output, pread the
-/// remainder of the idx span. Common txs stay on the first page.
+/// Second wave: when a 4 KiB Outs read does not cover needed outputs, pread the
+/// remainder of the idx span. Empty need walks every out; sparse need skips
+/// extend when the first page already contains those vouts.
 fn extend_truncated_txout_jobs(
     table: &VarTable,
     jobs: &mut [IdxBodyJob],
     backend: ReadIoBackend,
-) -> Result<(), StoreError> {
+) -> Result<u64, StoreError> {
     let mut rest: Vec<(usize, usize)> = Vec::new();
     let body_pub = table.body_published_len();
     for (i, j) in jobs.iter_mut().enumerate() {
@@ -189,7 +201,7 @@ fn extend_truncated_txout_jobs(
         if (j.body.len() as u64) >= full_len {
             continue;
         }
-        if crate::tx_table::txout_first_page_complete(&j.body) {
+        if crate::tx_table::txout_first_page_covers_need(&j.body, &j.need_vouts) {
             continue;
         }
         if off.saturating_add(full_len) > body_pub {
@@ -201,8 +213,9 @@ fn extend_truncated_txout_jobs(
         rest.push((i, have));
     }
     if rest.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
+    let extend_n = rest.len() as u64;
     let body_fd = table.body_read_fd();
     let body_path = table.body_file_path();
     // SAFETY: each jobs[i].body[have..] is a distinct allocation remainder.
@@ -232,7 +245,7 @@ fn extend_truncated_txout_jobs(
             jobs[i].ok = false;
         }
     }
-    Ok(())
+    Ok(extend_n)
 }
 
 #[cfg(test)]
@@ -327,6 +340,79 @@ mod tests {
             crate::tx_table::decode_packed_tx_outs_with_spender_rels(&jobs[0].body).unwrap();
         assert_eq!(meta.output_count, 1);
         assert_eq!(decoded[0].script.len(), 6000);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn fat_many_outs(n_out: u32) -> (TxRecord, Vec<InputRecord>, Vec<OutputRecord>) {
+        let tx = TxRecord {
+            txid: [0x5au8; 32],
+            version: 1,
+            locktime: 0,
+            input_start_fk: Fk::NULL,
+            input_count: 1,
+            output_start_fk: Fk::NULL,
+            output_count: n_out,
+        };
+        let inputs = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
+        let mut outs = Vec::with_capacity(n_out as usize);
+        outs.push(OutputRecord::unspent(1, vec![0x51]));
+        for _ in 1..n_out {
+            outs.push(OutputRecord::unspent(1, vec![0x51; 64]));
+        }
+        (tx, inputs, outs)
+    }
+
+    #[test]
+    fn pipeline_outs_skips_extend_when_need_fits_first_page() {
+        let (dir, t) = temp_tx();
+        let (tx, inputs, outs) = fat_many_outs(80);
+        let fk = t
+            .put_full_batch_indexed(&[(tx, inputs, outs)], true)
+            .unwrap()[0];
+        let (_off, full_len) = t.body.record_range(fk).unwrap();
+        assert!(full_len > 4096, "fixture must exceed first-page cap");
+        let mut jobs = vec![IdxBodyJob::new(fk.0, None)];
+        jobs[0].need_vouts = vec![0];
+        let stats = run_idx_body_pipeline(&t.body, &mut jobs, BodyMode::Outs).unwrap();
+        assert!(jobs[0].ok);
+        assert_eq!(jobs[0].body.len(), 4096);
+        assert_eq!(stats.extend_n, 0);
+        let (meta, live, _) = crate::tx_table::decode_packed_tx_need_outs_with_spender_rels_secret(
+            &jobs[0].body,
+            &[0],
+            None,
+        )
+        .unwrap();
+        assert_eq!(meta.output_count, 80);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].0, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pipeline_outs_extends_when_need_past_first_page() {
+        let (dir, t) = temp_tx();
+        let (tx, inputs, outs) = fat_many_outs(80);
+        let fk = t
+            .put_full_batch_indexed(&[(tx, inputs, outs)], true)
+            .unwrap()[0];
+        let (_off, full_len) = t.body.record_range(fk).unwrap();
+        assert!(full_len > 4096, "fixture must exceed first-page cap");
+        let mut jobs = vec![IdxBodyJob::new(fk.0, None)];
+        jobs[0].need_vouts = vec![79];
+        let stats = run_idx_body_pipeline(&t.body, &mut jobs, BodyMode::Outs).unwrap();
+        assert!(jobs[0].ok);
+        assert_eq!(jobs[0].body.len() as u64, full_len);
+        assert_eq!(stats.extend_n, 1);
+        let (_meta, live, _) =
+            crate::tx_table::decode_packed_tx_need_outs_with_spender_rels_secret(
+                &jobs[0].body,
+                &[79],
+                None,
+            )
+            .unwrap();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].0, 79);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

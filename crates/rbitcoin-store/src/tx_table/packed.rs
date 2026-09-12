@@ -585,21 +585,29 @@ pub fn decode_packed_tx_with_spender_rels_secret(
     Ok((meta, Vec::new(), outputs, rels))
 }
 
-/// True when `raw` contains a complete `txout` meta+outs walk (first-page probe).
+/// True when every `need_vouts` entry `skip_at`s inside `raw`.
 ///
-/// Used by [`crate::idx_body_pipeline`] to decide whether a 4 KiB Outs read must
-/// be extended to the full idx span.
-pub fn txout_first_page_complete(raw: &[u8]) -> bool {
+/// Empty need is all outs. Stops after the last needed vout so a truncated
+/// first page can skip a full-span extend.
+pub fn txout_first_page_covers_need(raw: &[u8], need_vouts: &[u32]) -> bool {
     let Ok((meta, mut off)) = TxRecord::decode_body_meta(raw) else {
         return false;
     };
-    for _ in 0..meta.output_count {
+    let take_all = need_vouts.is_empty();
+    let mut need_i = 0usize;
+    for vout in 0..meta.output_count {
+        if !take_all && need_i == need_vouts.len() {
+            return true;
+        }
         match OutputRecord::skip_at(&raw[off..]) {
             Ok(n) => off += n,
             Err(_) => return false,
         }
+        if !take_all && need_i < need_vouts.len() && need_vouts[need_i] == vout {
+            need_i = need_i.saturating_add(1);
+        }
     }
-    true
+    take_all || need_i == need_vouts.len()
 }
 
 /// Prevout edges from an `inwit.body` payload (`in_count` from `txout` meta).
@@ -885,6 +893,8 @@ mod scan_p2tr_tests {
             empty_need.is_err(),
             "empty need still requires a full outs walk"
         );
+        assert!(txout_first_page_covers_need(truncated, &[0]));
+        assert!(!txout_first_page_covers_need(truncated, &[]));
     }
 
     #[test]

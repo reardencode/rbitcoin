@@ -315,8 +315,8 @@ spent.body Ss:  8 B × out_count  (flags + u56 field). Multi overflow → spent.
 
 Empty inwit / zero-out spent: **8-byte zero pad** so idx starts stay strictly monotone.
 Pin / SH / Electrum tweaks read **`txout` only**. Annotate RMW is on **`spent`** (`abs = Ss + 8×vout`).
-Reconstruct zips `txout` + `inwit`. First-page Outs reads are 4 KiB; truncated outs extend
-to the full idx span.
+Reconstruct zips `txout` + `inwit`. First-page Outs reads are 4 KiB; extend to the
+full idx span only when a needed vout (empty need: every out) is not in that page.
 
 Packed `tx.body` (schema 13–14: 32 B meta | inputs+witness | outputs) is **refused** if it contains creates.
 

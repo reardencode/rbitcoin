@@ -827,7 +827,7 @@ fn get_fk_by_txid_batch_multi_cand_then_outs() {
     let multi = batch.iter().find(|(id, _)| *id == txid).unwrap();
     let (fk, range) = multi.1.expect("multi-cand hit");
     assert_eq!(fk, fk_new);
-    let (outs_rows, _, _) = t
+    let (outs_rows, _, _, _) = t
         .get_outs_by_range_batch(&[(fk, range, txid, vec![0])])
         .unwrap();
     let (tx, outs, dens) = outs_rows[0].as_ref().expect("outs for winner");
@@ -839,7 +839,7 @@ fn get_fk_by_txid_batch_multi_cand_then_outs() {
     let single = batch.iter().find(|(id, _)| *id == solo).unwrap();
     let (fk_s, range_s) = single.1.expect("single-cand hit");
     assert_eq!(fk_s, fk_solo);
-    let (solo_rows, _, _) = t
+    let (solo_rows, _, _, _) = t
         .get_outs_by_range_batch(&[(fk_s, range_s, solo, vec![0])])
         .unwrap();
     let (tx_s, outs_s, _) = solo_rows[0].as_ref().expect("single outs");
@@ -1103,7 +1103,7 @@ fn get_outs_denserels_by_range_sparse_need() {
         .unwrap()[0];
     let range = t.body.record_range(fk).unwrap();
     // Only need vout 1 — skip allocating big scripts on 0 and 2.
-    let (rows, _, _) = t
+    let (rows, _, _, _) = t
         .get_outs_by_range_batch(&[(fk, range, want_txid, vec![1])])
         .unwrap();
     let (got, live, sparse) = rows[0].as_ref().expect("range denserels");
@@ -1120,6 +1120,49 @@ fn get_outs_denserels_by_range_sparse_need() {
     )
     .unwrap();
     assert_eq!(full.1.len(), 3);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn get_outs_by_range_batch_skips_extend_when_need_in_first_page() {
+    let dir = tempfile_dir("range-need-first-page");
+    let t = create_tiny(&dir);
+    let mut txid = [0u8; 32];
+    txid[0] = 0x5a;
+    let n_out = 80u32;
+    let tx = TxRecord {
+        txid,
+        version: 1,
+        locktime: 0,
+        input_start_fk: Fk::NULL,
+        input_count: 1,
+        output_start_fk: Fk::NULL,
+        output_count: n_out,
+    };
+    let inputs = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
+    let mut outputs = Vec::with_capacity(n_out as usize);
+    outputs.push(OutputRecord::unspent(1, vec![0x51]));
+    for _ in 1..n_out {
+        outputs.push(OutputRecord::unspent(1, vec![0x51; 64]));
+    }
+    let fk = t
+        .put_full_batch_indexed(&[(tx, inputs, outputs)], true)
+        .unwrap()[0];
+    let range = t.body.record_range(fk).unwrap();
+    assert!(range.1 > 4096);
+    let (rows, _, _, extend_n) = t
+        .get_outs_by_range_batch(&[(fk, range, txid, vec![0])])
+        .unwrap();
+    assert_eq!(extend_n, 0);
+    let (got, live, sparse) = rows[0].as_ref().expect("range denserels");
+    assert_eq!(got.txid, txid);
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].0, 0);
+    assert_eq!(sparse.len(), 1);
+    let (_, _, _, extend_all) = t
+        .get_outs_by_range_batch(&[(fk, range, txid, vec![])])
+        .unwrap();
+    assert_eq!(extend_all, 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
