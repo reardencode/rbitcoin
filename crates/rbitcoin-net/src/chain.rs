@@ -7,7 +7,7 @@ use crate::cache::BlockCache;
 use crate::error::NetError;
 use bitcoin::block::Header;
 use bitcoin::hashes::Hash;
-use bitcoin::{Block, BlockHash, ScriptBuf, Target, Transaction, Work};
+use bitcoin::{Block, BlockHash, ScriptBuf, Target, Transaction, Txid, Work};
 use rbitcoin_consensus::{
     accept_and_connect_block_preverified, confirm_wire_load_from_plan as consensus_load_from_plan,
     confirm_wire_load_phase_pipelined, confirm_write_phase, genesis_block, header_to_record,
@@ -36,7 +36,7 @@ pub struct TipEvent {
 
 /// Never-confirmed side-branch bodies plus first-seen seq (equal-work FIFO).
 struct HeldBodies {
-    by_hash: HashMap<BlockHash, (Block, u64)>,
+    by_hash: HashMap<BlockHash, (Arc<Block>, u64)>,
     next_seq: u64,
 }
 
@@ -52,7 +52,7 @@ impl HeldBodies {
     }
 
     fn get(&self, hash: &BlockHash) -> Option<&Block> {
-        self.by_hash.get(hash).map(|(b, _)| b)
+        self.by_hash.get(hash).map(|(b, _)| b.as_ref())
     }
 
     fn len(&self) -> usize {
@@ -68,18 +68,18 @@ impl HeldBodies {
     }
 
     fn blocks(&self) -> impl Iterator<Item = &Block> + '_ {
-        self.by_hash.values().map(|(b, _)| b)
+        self.by_hash.values().map(|(b, _)| b.as_ref())
     }
 
     fn entries(&self) -> impl Iterator<Item = (BlockHash, &Block)> + '_ {
-        self.by_hash.iter().map(|(h, (b, _))| (*h, b))
+        self.by_hash.iter().map(|(h, (b, _))| (*h, b.as_ref()))
     }
 
     fn seq(&self, hash: BlockHash) -> u64 {
         self.by_hash.get(&hash).map(|(_, s)| *s).unwrap_or(u64::MAX)
     }
 
-    fn insert(&mut self, block: Block) {
+    fn insert(&mut self, block: Arc<Block>) {
         let hash = block.block_hash();
         if self.by_hash.contains_key(&hash) {
             return;
@@ -566,7 +566,7 @@ impl ChainHub {
         if genesis.block_hash() != self.params.genesis_hash {
             return Err(NetError::Protocol("genesis hash mismatch with params"));
         }
-        self.connect_at(0, genesis)?;
+        self.connect_at(0, Arc::new(genesis))?;
         Ok(())
     }
 
@@ -1306,8 +1306,9 @@ impl ChainHub {
                 script_pubkey.clone(),
                 txs,
             );
-            match self.accept_block_inner(block.clone())? {
-                AcceptOutcome::Accepted { .. } => hashes.push(block.block_hash()),
+            let hash = block.block_hash();
+            match self.accept_block_inner(Arc::new(block))? {
+                AcceptOutcome::Accepted { .. } => hashes.push(hash),
                 other => {
                     return Err(NetError::Consensus(format!(
                         "generate did not extend tip: {other:?}"
@@ -1552,10 +1553,18 @@ impl ChainHub {
 
     /// Accept a block that extends the tip, or reorg to a stronger competing tip / branch.
     pub fn accept_block(&self, block: Block) -> Result<AcceptOutcome, NetError> {
-        crate::tip_accept::run_on_tip_accept(|| self.accept_block_inner(block))
+        crate::tip_accept::run_on_tip_accept(|| self.accept_incoming(Arc::new(block), false))
     }
 
-    fn accept_block_inner(&self, block: Block) -> Result<AcceptOutcome, NetError> {
+    fn accept_block_inner(&self, block: Arc<Block>) -> Result<AcceptOutcome, NetError> {
+        self.accept_incoming(block, false)
+    }
+
+    fn accept_incoming(
+        &self,
+        block: Arc<Block>,
+        hold_unconnected: bool,
+    ) -> Result<AcceptOutcome, NetError> {
         let hash = block.block_hash();
         if self.tip_hash() == Some(hash) || self.has_block(&hash) {
             return Ok(AcceptOutcome::AlreadyHave);
@@ -1595,29 +1604,41 @@ impl ChainHub {
                     .height_of_hash(&prev.to_byte_array())
                     .map_err(|e| NetError::Consensus(e.to_string()))?
                 else {
+                    if hold_unconnected {
+                        self.hold_body(block);
+                    }
                     return Err(NetError::UnknownParent);
                 };
 
                 let new_height = parent_h.0.saturating_add(1);
                 if new_height > tip_h {
+                    if hold_unconnected {
+                        self.hold_body(block);
+                    }
                     return Err(NetError::Protocol("gap above tip"));
                 }
 
                 if new_height == tip_h {
-                    let cur = self
-                        .block_at_height(tip_h)?
-                        .ok_or(NetError::Protocol("missing current tip block"))?;
+                    let cur_work = self
+                        .tip_header()
+                        .ok_or(NetError::Protocol("missing current tip header"))?
+                        .work();
+                    let new_work = block.header.work();
                     let precious = *self.precious.read().unwrap() == Some(hash);
-                    if block.header.work() > cur.header.work()
-                        || (block.header.work() == cur.header.work() && precious)
-                    {
+                    if new_work > cur_work || (new_work == cur_work && precious) {
                         self.disconnect_to(parent_h.0)?;
                         self.connect_at(new_height, block)?;
                         return Ok(AcceptOutcome::Accepted { height: new_height });
                     }
+                    if hold_unconnected {
+                        self.hold_body(block);
+                    }
                     return Ok(AcceptOutcome::IgnoredWeaker);
                 }
 
+                if hold_unconnected {
+                    self.hold_body(block);
+                }
                 Err(NetError::SideBlock)
             }
         }
@@ -1649,7 +1670,7 @@ impl ChainHub {
         let fork_h = if fork_prev.to_byte_array() == [0u8; 32] {
             if self.tip_height().is_none() {
                 for (i, b) in blocks.iter().enumerate() {
-                    self.connect_at(i as u32, b.clone())?;
+                    self.connect_at(i as u32, Arc::new(b.clone()))?;
                 }
                 let h = (blocks.len() - 1) as u32;
                 return Ok(AcceptOutcome::Accepted { height: h });
@@ -1715,7 +1736,7 @@ impl ChainHub {
         self.announce_reorg_len
             .store(blocks.len() as u32, Ordering::Relaxed);
         for (i, b) in blocks.iter().enumerate() {
-            if let Err(e) = self.connect_at(base + i as u32, b.clone()) {
+            if let Err(e) = self.connect_at(base + i as u32, Arc::new(b.clone())) {
                 self.announce_reorg_len.store(0, Ordering::Relaxed);
                 // Mid-branch connect fail: restore pre-attempt tip (not leave LCA).
                 if let Some(fh) = fork_height {
@@ -1725,7 +1746,7 @@ impl ChainHub {
                         )));
                     }
                     for (j, ob) in old_path.iter().enumerate() {
-                        if let Err(re) = self.connect_at(base + j as u32, ob.clone()) {
+                        if let Err(re) = self.connect_at(base + j as u32, Arc::new(ob.clone())) {
                             return Err(NetError::Consensus(format!(
                                 "reorg connect failed ({e}); tip restore failed: {re}"
                             )));
@@ -1788,7 +1809,8 @@ impl ChainHub {
 
     fn accept_received_block_inner(&self, block: Block) -> Result<AcceptOutcome, NetError> {
         let hash = block.block_hash();
-        match self.accept_block_inner(block.clone()) {
+        let block = Arc::new(block);
+        match self.accept_incoming(block, true) {
             Ok(AcceptOutcome::Accepted { height }) => {
                 self.held_bodies.write().unwrap().remove(&hash);
                 match self.try_apply_held()? {
@@ -1800,21 +1822,15 @@ impl ChainHub {
                 self.held_bodies.write().unwrap().remove(&hash);
                 Ok(AcceptOutcome::AlreadyHave)
             }
-            Ok(AcceptOutcome::IgnoredWeaker) => {
-                self.hold_body(block);
-                match self.try_apply_held()? {
-                    Some(o) => Ok(o),
-                    None => Ok(AcceptOutcome::IgnoredWeaker),
-                }
-            }
+            Ok(AcceptOutcome::IgnoredWeaker) => match self.try_apply_held()? {
+                Some(o) => Ok(o),
+                None => Ok(AcceptOutcome::IgnoredWeaker),
+            },
             Err(NetError::SideBlock | NetError::UnknownParent)
-            | Err(NetError::Protocol("gap above tip")) => {
-                self.hold_body(block);
-                match self.try_apply_held()? {
-                    Some(o) => Ok(o),
-                    None => Ok(AcceptOutcome::IgnoredWeaker),
-                }
-            }
+            | Err(NetError::Protocol("gap above tip")) => match self.try_apply_held()? {
+                Some(o) => Ok(o),
+                None => Ok(AcceptOutcome::IgnoredWeaker),
+            },
             Err(e) => {
                 // Core `BLOCK_FAILED`: remember consensus-invalid hashes even
                 // when the header was never persisted (compact reconstruct).
@@ -1886,15 +1902,15 @@ impl ChainHub {
 
     /// Park a disconnected body without running [`Self::try_apply_held`].
     pub fn hold_unconnected_body(&self, block: Block) {
-        self.hold_body(block);
+        self.hold_body(Arc::new(block));
     }
 
-    fn hold_body(&self, block: Block) {
+    fn hold_body(&self, block: Arc<Block>) {
         let hash = block.block_hash();
         if self.is_connected(&hash) {
             return;
         }
-        if let Some(h) = self.held_body_height(&block) {
+        if let Some(h) = self.held_body_height(block.as_ref()) {
             if let Some(tip) = self.tip_height() {
                 if tip.saturating_sub(h) > HeldBodies::STALE_BELOW {
                     return;
@@ -2048,30 +2064,36 @@ impl ChainHub {
         }
     }
 
-    fn connect_at(&self, height: u32, block: Block) -> Result<(), NetError> {
+    fn strip_txids_from_pres(pres: &[rbitcoin_query::TxPrecompute]) -> Vec<Txid> {
+        pres.iter().map(|p| Txid::from_byte_array(p.txid)).collect()
+    }
+
+    fn connect_at(&self, height: u32, block: Arc<Block>) -> Result<(), NetError> {
         debug_assert!(
             crate::tip_accept::on_tip_accept_thread(),
             "connect_at must run on tip-accept"
         );
         let hash = block.block_hash();
         let header = block.header;
-        // Reorg disconnect is done before connect; confirm pipeline is tip+1 only.
-        // Live mempool txs already had scripts run at accept — skip re-verify.
-        let preverified = self
-            .mempool()
-            .map(|mp| mp.script_preverified_txids())
-            .unwrap_or_default();
         tip_accept_stats_reset(&self.query);
         let t_wall = std::time::Instant::now();
+        let t_pres = std::time::Instant::now();
+        let (pres, preverified) = match self.mempool() {
+            Some(mp) => mp.tip_script_pres(&block.txdata),
+            None => rbitcoin_query::pres_for_tip(&block.txdata, true, |_| false),
+        };
+        let pres_ns = t_pres.elapsed().as_nanos() as u64;
+        debug_assert_eq!(pres.len(), block.txdata.len());
         let now = self.clock.now_secs();
         let _ = rbitcoin_consensus::with_now(now, || loop {
             match accept_and_connect_block_preverified(
                 &self.query,
                 &self.params,
                 Height(height),
-                &block,
+                Arc::clone(&block),
                 self.milestone,
                 &preverified,
+                Some(std::sync::Arc::clone(&pres)),
             ) {
                 Ok(fk) => return Ok(fk),
                 Err(e) if e.is_uring_session_fault() => {
@@ -2096,7 +2118,7 @@ impl ChainHub {
         self.header_tips.write().unwrap().remove(&hash);
         let t_mp = std::time::Instant::now();
         if let Some(mp) = self.mempool() {
-            let ids: Vec<_> = block.txdata.iter().map(|t| t.compute_txid()).collect();
+            let ids = Self::strip_txids_from_pres(&pres);
             let spent: Vec<_> = block
                 .txdata
                 .iter()
@@ -2112,12 +2134,13 @@ impl ChainHub {
         let wall_ns = t_wall.elapsed().as_nanos() as u64;
         self.confirmed.write().unwrap().insert(hash);
         let n_tx = block.txdata.len();
-        let _ = self.cache.push_best(block);
+        let owned = Arc::try_unwrap(block).unwrap_or_else(|a| (*a).clone());
+        let _ = self.cache.push_best(owned);
         // Tip-follow / wire accept path: log every accepted tip block (Core-like
         // UpdateTip). IBD bulk confirm uses note_confirmed_tip without this line;
         // IBD retains periodic progress/perf status instead.
         log_update_tip(height, &hash, &header, n_tx);
-        log_tip_accept_sh(&self.query, height, n_tx, wall_ns, mp_strip_ns);
+        log_tip_accept_sh(&self.query, height, n_tx, wall_ns, mp_strip_ns, pres_ns);
         let event = TipEvent {
             height,
             hash,
@@ -2353,6 +2376,8 @@ pub struct TipAcceptShInput {
     pub drain_ns: u64,
     /// `remove_for_block_spent` after confirm (not inside confirm_write).
     pub mp_strip_ns: u64,
+    /// Tip `TxPrecompute` / mempool intersect before confirm.
+    pub pres_ns: u64,
     pub sh_lag: u32,
     pub sh: rbitcoin_query::TipShSnap,
 }
@@ -2372,6 +2397,7 @@ pub fn format_tip_accept_sh_line(i: &TipAcceptShInput) -> String {
     let structural_ms = i.structural_ns / 1_000_000;
     let drain_ms = i.drain_ns / 1_000_000;
     let mp_strip_ms = i.mp_strip_ns / 1_000_000;
+    let pres_ms = i.pres_ns / 1_000_000;
     let named = i
         .load_ns
         .saturating_add(i.script_ns)
@@ -2383,7 +2409,8 @@ pub fn format_tip_accept_sh_line(i: &TipAcceptShInput) -> String {
         .saturating_add(i.lookup_ns)
         .saturating_add(i.structural_ns)
         .saturating_add(i.drain_ns)
-        .saturating_add(i.mp_strip_ns);
+        .saturating_add(i.mp_strip_ns)
+        .saturating_add(i.pres_ns);
     let other_ms = i.wall_ns.saturating_sub(named) / 1_000_000;
     let sh = &i.sh;
     let sh_ms = sh.total_sh_ns() / 1_000_000;
@@ -2405,7 +2432,7 @@ pub fn format_tip_accept_sh_line(i: &TipAcceptShInput) -> String {
          (collect={coll_ms} sort={sort_ms} seed={seed_ms} body={body_ms} head={head_ms} \
          pin={pin} cold={cold} creates={creates} unique={unique} written={written}) \
          spend={spend_ms}ms tweaks={tweak_ms}ms lookup={lookup_ms}ms struct={structural_ms}ms \
-         drain={drain_ms}ms mp_strip={mp_strip_ms}ms other={other_ms}ms sh/wall={sh_ratio}%",
+         drain={drain_ms}ms mp_strip={mp_strip_ms}ms pres={pres_ms}ms other={other_ms}ms sh/wall={sh_ratio}%",
         h = i.height,
         n_tx = i.n_tx,
         sh_lag = i.sh_lag,
@@ -2418,7 +2445,14 @@ pub fn format_tip_accept_sh_line(i: &TipAcceptShInput) -> String {
 }
 
 /// Sample meters after tip accept and emit INFO `tip: accept …` (SH breakdown).
-fn log_tip_accept_sh(query: &Query, height: u32, n_tx: usize, wall_ns: u64, mp_strip_ns: u64) {
+fn log_tip_accept_sh(
+    query: &Query,
+    height: u32,
+    n_tx: usize,
+    wall_ns: u64,
+    mp_strip_ns: u64,
+    pres_ns: u64,
+) {
     let w = query.confirm_stats().take_window();
     let connect_ns = w.connect_ns;
     let script_ns = w.script_ns;
@@ -2460,6 +2494,7 @@ fn log_tip_accept_sh(query: &Query, height: u32, n_tx: usize, wall_ns: u64, mp_s
         structural_ns,
         drain_ns,
         mp_strip_ns,
+        pres_ns,
         sh_lag: query.sh_lag_heights(),
         sh,
     });
@@ -2601,6 +2636,18 @@ mod tests {
                 script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
             }],
         }
+    }
+
+    #[test]
+    fn strip_txids_from_pres_match_compute_txid() {
+        let a = coinbase(1);
+        let b = coinbase(2);
+        let pres: Vec<_> = [&a, &b]
+            .into_iter()
+            .map(rbitcoin_query::TxPrecompute::from_tx)
+            .collect();
+        let got = ChainHub::strip_txids_from_pres(&pres);
+        assert_eq!(got, vec![a.compute_txid(), b.compute_txid()]);
     }
 
     fn mine(prev: BlockHash, time: u32, height: u32) -> Block {
@@ -3073,6 +3120,7 @@ mod tests {
             structural_ns: 40_000_000,
             drain_ns: 10_000_000,
             mp_strip_ns: 20_000_000,
+            pres_ns: 3_000_000,
             sh_lag: 2,
             sh: rbitcoin_query::TipShSnap {
                 collect_ns: 20_000_000,
@@ -3107,7 +3155,8 @@ mod tests {
         assert!(line.contains("struct=40ms"), "{line}");
         assert!(line.contains("drain=10ms"), "{line}");
         assert!(line.contains("mp_strip=20ms"), "{line}");
-        // 2500 - (100+200+50+7+1725+80+400+300+40+10+20) = -432 → 0
+        assert!(line.contains("pres=3ms"), "{line}");
+        // 2500 - (100+200+50+7+1725+80+400+300+40+10+20+3) = -435 → 0
         assert!(line.contains("other=0ms"), "{line}");
         assert!(line.contains("sh/wall=69%"), "{line}");
     }
@@ -3509,6 +3558,11 @@ mod tests {
         let b1 = mine(gen, 1_300_001_000, 1);
         hub.accept_block(b1.clone()).unwrap();
         assert_eq!(hub.tip_height(), Some(1));
+        assert_eq!(
+            hub.tip_header().expect("tip header").work(),
+            b1.header.work(),
+            "equal-height compare uses header work, not a body reconstruct"
+        );
 
         // Competing tip at same height with more work reorgs (or IgnoredWeaker if equal).
         // Mine many nonces for a sibling of b1 with higher work is hard on regtest

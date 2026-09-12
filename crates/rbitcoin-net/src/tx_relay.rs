@@ -1018,16 +1018,34 @@ impl MempoolHub {
         self.lock_read().live_count()
     }
 
-    /// Live mempool txids that passed consensus script verify at accept.
-    ///
-    /// Tip confirm may skip re-verifying these (same tip-era softfork flags).
-    pub fn script_preverified_txids(&self) -> std::collections::HashSet<[u8; 32]> {
-        use bitcoin::hashes::Hash;
-        let g = self.lock_read();
-        g.graph
+    /// Tip confirm: connect-only pres for live graph txs, full midstates otherwise.
+    pub fn tip_script_pres(
+        &self,
+        txs: &[Transaction],
+    ) -> (
+        std::sync::Arc<[rbitcoin_query::TxPrecompute]>,
+        HashSet<[u8; 32]>,
+    ) {
+        if self.lock_read().live_count() == 0 {
+            return rbitcoin_query::pres_for_tip(txs, true, |_| false);
+        }
+        let mut v: Vec<_> = txs
             .iter()
-            .map(|(txid, _)| txid.to_byte_array())
-            .collect()
+            .map(rbitcoin_query::TxPrecompute::from_tx_connect)
+            .collect();
+        let skip = {
+            let g = self.lock_read();
+            v.iter()
+                .filter(|p| g.graph.contains(&Txid::from_byte_array(p.txid)))
+                .map(|p| p.txid)
+                .collect::<HashSet<_>>()
+        };
+        for (tx, p) in txs.iter().zip(v.iter_mut()) {
+            if !skip.contains(&p.txid) {
+                p.fill_sighash_midstates(tx);
+            }
+        }
+        (std::sync::Arc::from(v), skip)
     }
 
     pub fn generation(&self) -> u64 {
@@ -2016,6 +2034,9 @@ impl MempoolHub {
 
     /// Compact fill: siphash live txid/wtxid, clone **matching** bodies only.
     ///
+    /// Keys are the siphashes already computed here — callers must not
+    /// `compute_txid` / `compute_wtxid` the clones again.
+    ///
     /// `None` if a writer holds `inner` (reconstruct without mempool this round).
     pub fn try_clone_matching_shortids(
         &self,
@@ -2023,15 +2044,15 @@ impl MempoolHub {
         nonce: u64,
         version: u32,
         short_ids: &[bitcoin::bip152::ShortId],
-    ) -> Option<Vec<Transaction>> {
+    ) -> Option<HashMap<bitcoin::bip152::ShortId, Vec<Transaction>>> {
         use bitcoin::bip152::ShortId;
         let needed: std::collections::HashSet<ShortId> = short_ids.iter().copied().collect();
         if needed.is_empty() {
-            return Some(Vec::new());
+            return Some(HashMap::new());
         }
         let g = self.inner.try_read().ok()?;
         let keys = ShortId::calculate_siphash_keys(header, nonce);
-        let mut out = Vec::new();
+        let mut out: HashMap<ShortId, Vec<Transaction>> = HashMap::new();
         for (txid, e) in g.graph.iter() {
             let sid = if version == 1 {
                 ShortId::with_siphash_keys(&txid.to_raw_hash(), keys)
@@ -2040,7 +2061,7 @@ impl MempoolHub {
             };
             if needed.contains(&sid) {
                 if let Some(tx) = g.get_tx(txid) {
-                    out.push(tx.clone());
+                    out.entry(sid).or_default().push(tx.clone());
                 }
             }
         }
@@ -2051,7 +2072,7 @@ impl MempoolHub {
                 ShortId::with_siphash_keys(&tx.compute_wtxid().to_raw_hash(), keys)
             };
             if needed.contains(&sid) {
-                out.push(tx.clone());
+                out.entry(sid).or_default().push(tx.clone());
             }
         }
         Some(out)
@@ -2504,6 +2525,24 @@ mod tests {
             hub.set_relay_enabled(true);
             let tx = spend_true(cbs[1], 1_000, spk.clone());
             hub.accept_tx(&tx).expect("accept");
+            let extra = Transaction {
+                version: Version::TWO,
+                lock_time: LockTime::ZERO,
+                input: vec![],
+                output: vec![],
+            };
+            let (pres, skip) = hub.tip_script_pres(&[tx.clone(), extra]);
+            let live_id = tx.compute_txid().to_byte_array();
+            assert_eq!(skip.len(), 1);
+            assert!(skip.contains(&live_id));
+            assert!(
+                pres[0].sha_prevouts.is_none(),
+                "live graph tx must skip sighash midstates"
+            );
+            assert!(
+                pres[1].sha_prevouts.is_some(),
+                "non-live must fill midstates after connect ids"
+            );
             hub.note_unbroadcast(tx.compute_txid());
             assert_eq!(hub.unbroadcast_count(), 1);
             hub.flush().expect("shutdown flush");
@@ -3146,8 +3185,9 @@ mod tests {
         let got = hub
             .try_clone_matching_shortids(&genesis.header, nonce, 2, &[sid])
             .expect("read lock");
-        assert_eq!(got.len(), 1, "orphan must fill compact short-id");
-        assert_eq!(got[0].compute_txid(), tx.compute_txid());
+        let bodies = got.get(&sid).expect("orphan must fill compact short-id");
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0].compute_txid(), tx.compute_txid());
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&store_dir);
     }

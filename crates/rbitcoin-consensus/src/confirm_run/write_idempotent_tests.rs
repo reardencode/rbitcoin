@@ -2295,9 +2295,10 @@ fn already_at_height_retries_post_commit_spend_annotate() {
         &q,
         &ChainParams::regtest(),
         Height(1),
-        &block1,
+        std::sync::Arc::new(block1),
         Milestone::NONE,
         &ScriptPreverified::new(),
+        None,
     )
     .expect("already-at-height retry");
 

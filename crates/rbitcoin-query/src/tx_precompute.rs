@@ -8,6 +8,8 @@ use bitcoin::consensus::encode::{Encodable, VarInt};
 use bitcoin::hashes::{sha256, sha256d, Hash};
 use bitcoin::{Transaction, TxOut};
 use rbitcoin_primitives::script_sigop_count;
+use std::collections::HashSet;
+use std::sync::Arc;
 
 /// Job-local hash cache: this tx's ids plus Core-style common midstates.
 #[derive(Clone, Debug)]
@@ -142,6 +144,26 @@ impl TxPrecompute {
             .saturating_add(self.total_size)) as u64
     }
 
+    /// BIP143/341 common hashes on a [`Self::from_tx_connect`] row (no txid walk).
+    pub fn fill_sighash_midstates(&mut self, tx: &Transaction) {
+        if self.sha_prevouts.is_some() {
+            return;
+        }
+        let mut sha_prev = sha256::Hash::engine();
+        let mut sha_seq = sha256::Hash::engine();
+        let mut sha_out = sha256::Hash::engine();
+        for txin in &tx.input {
+            let _ = txin.previous_output.consensus_encode(&mut sha_prev);
+            let _ = txin.sequence.consensus_encode(&mut sha_seq);
+        }
+        for txout in &tx.output {
+            let _ = txout.consensus_encode(&mut sha_out);
+        }
+        self.sha_prevouts = Some(sha256::Hash::from_engine(sha_prev).to_byte_array());
+        self.sha_sequences = Some(sha256::Hash::from_engine(sha_seq).to_byte_array());
+        self.sha_outputs = Some(sha256::Hash::from_engine(sha_out).to_byte_array());
+    }
+
     /// BIP341 spent midstates. Call when `prevouts.len() == tx.input.len()`.
     pub fn finish_spent(&mut self, prevouts: &[TxOut]) {
         let mut enc_amt = sha256::Hash::engine();
@@ -153,6 +175,32 @@ impl TxPrecompute {
         self.sha_amounts = Some(sha256::Hash::from_engine(enc_amt).to_byte_array());
         self.sha_scriptpubkeys = Some(sha256::Hash::from_engine(enc_spk).to_byte_array());
     }
+}
+
+/// Tip-follow precompute: `from_tx_connect` for live mempool txs, fill midstates otherwise.
+///
+/// `live_empty` is the no-mempool / empty-graph path — all `from_tx`, no probe.
+pub fn pres_for_tip(
+    txs: &[Transaction],
+    live_empty: bool,
+    is_live: impl Fn([u8; 32]) -> bool,
+) -> (Arc<[TxPrecompute]>, HashSet<[u8; 32]>) {
+    if live_empty {
+        let v: Vec<TxPrecompute> = txs.iter().map(TxPrecompute::from_tx).collect();
+        return (Arc::from(v), HashSet::new());
+    }
+    let mut skip = HashSet::new();
+    let mut v = Vec::with_capacity(txs.len());
+    for tx in txs {
+        let mut c = TxPrecompute::from_tx_connect(tx);
+        if is_live(c.txid) {
+            skip.insert(c.txid);
+        } else {
+            c.fill_sighash_midstates(tx);
+        }
+        v.push(c);
+    }
+    (Arc::from(v), skip)
 }
 
 fn enc(w: &mut impl bitcoin::io::Write, v: &impl Encodable) -> usize {
@@ -336,6 +384,54 @@ mod tests {
             TxPrecompute::from_tx_connect(&tx).wtxid,
             tx.compute_wtxid().to_byte_array()
         );
+    }
+
+    #[test]
+    fn pres_for_tip_connects_live_and_hashes_the_rest() {
+        let live = p2wpkh_like();
+        let other = legacy_1in();
+        let live_id = live.compute_txid().to_byte_array();
+        let (pres, skip) =
+            super::pres_for_tip(&[live.clone(), other.clone()], false, |tid| tid == live_id);
+        assert_eq!(pres.len(), 2);
+        assert_eq!(pres[0].txid, live_id);
+        assert_eq!(
+            pres[0].sha_prevouts, None,
+            "live tx must skip sighash midstates"
+        );
+        assert_eq!(
+            pres[1].sha_prevouts,
+            Some(oracle_sha_prevouts(&other)),
+            "non-live must keep midstates"
+        );
+        assert_eq!(skip.len(), 1);
+        assert!(skip.contains(&live_id));
+    }
+
+    #[test]
+    fn pres_for_tip_empty_live_set_uses_from_tx() {
+        let tx = p2wpkh_like();
+        let (pres, skip) = super::pres_for_tip(std::slice::from_ref(&tx), true, |_| {
+            panic!("empty live-set must not probe")
+        });
+        assert!(skip.is_empty());
+        assert_eq!(pres[0].sha_prevouts, Some(oracle_sha_prevouts(&tx)));
+    }
+
+    #[test]
+    fn fill_sighash_midstates_matches_from_tx() {
+        let tx = p2wpkh_like();
+        let mut c = TxPrecompute::from_tx_connect(&tx);
+        assert!(c.sha_prevouts.is_none());
+        c.fill_sighash_midstates(&tx);
+        let full = TxPrecompute::from_tx(&tx);
+        assert_eq!(c.txid, full.txid);
+        assert_eq!(c.wtxid, full.wtxid);
+        assert_eq!(c.sha_prevouts, full.sha_prevouts);
+        assert_eq!(c.sha_sequences, full.sha_sequences);
+        assert_eq!(c.sha_outputs, full.sha_outputs);
+        c.fill_sighash_midstates(&tx);
+        assert_eq!(c.sha_prevouts, full.sha_prevouts);
     }
 
     #[test]

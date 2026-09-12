@@ -32,7 +32,7 @@ pub use soft_densify::{
     soft_confirm_window_n, soft_densify_band_hi, BQ_SOFT_FREE_BYTES,
 };
 pub use sp_tweaks::{ThinTweakRangeLimits, ThinTweakRow};
-pub use tx_precompute::TxPrecompute;
+pub use tx_precompute::{pres_for_tip, TxPrecompute};
 
 use bitcoin::absolute::LockTime;
 use bitcoin::block::{Header as BlockHeader, Version as BlockVersion};
