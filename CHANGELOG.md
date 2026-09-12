@@ -25,7 +25,7 @@ before 1.0).
 - **Spender overflow:** `for_each_spender_create` stops after `spenders.count()` hops (`Corrupt` on a cycle).
 - **Index seal:** `meta` / `.mphf` / SH `.idx` install is sibling tmp + `sync_all` then rename (empty truncate of the live name is not a seal).
 - **`list_runs`:** catalog scan does not unlink. Residual `*.run` files are discarded with the leftover dir (open-time SH `key_len` and leftover-run **count** do not delete).
-- **Mempool persist order:** admit `persist_all` writes body, then LIVE slots, then meta. A crash after a grown body and before new slots loses admits; it does not claim LIVE ranges past durable `tx.body`. Packed compact uses tmp+`sync_all`+rename so packed body cannot mix with old slots.
+- **Mempool persist order:** admit `persist_all` writes body, then LIVE slots, then meta. A crash after a grown body and before new slots loses admits; it does not claim LIVE ranges past durable `tx.body`. Packed compact uses tmp+`sync_all`+rename, then meta only, so packed body cannot mix with old slots.
 - **Worst-chunk eviction:** `evict_worst_chunk_once` uses `remove_txid_tree` so a parent-only chunk cannot leave a child without its mempool parent.
 - **Same-block coinbase maturity:** a later tx in the same block that spends
   the coinbase is `coinbase immature` (Core `nHeight < coinbaseHeight + 100`).
