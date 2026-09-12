@@ -20,6 +20,11 @@ before 1.0).
 
 ### Fixed
 
+- **Class C `flush_dirty`:** packed dirty-epoch (`0` = clean). Snapshot stays under the `data` read lock; persist IO is unlocked; CAS `e0→0` so a racing `set` is not marked clean.
+- **fuse8:** `decode_body` refuses fingerprint arrays shorter than `hash_of_hash` geometry. `contains` is unchanged.
+- **Spender overflow:** `for_each_spender_create` stops after `spenders.count()` hops (`Corrupt` on a cycle).
+- **Index seal:** `meta` / `.mphf` / SH `.idx` install is sibling tmp + `sync_all` then rename (empty truncate of the live name is not a seal).
+- **`list_runs`:** catalog scan does not unlink. Orphan GC is `list_runs_gc` under `RunsIoGuard`. Open-time SH `key_len` check does not delete stray `*.run`.
 - **Same-block coinbase maturity:** a later tx in the same block that spends
   the coinbase is `coinbase immature` (Core `nHeight < coinbaseHeight + 100`).
   Assemble already maps this block’s txids (`txid_index`); parent index 0
