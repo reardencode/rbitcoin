@@ -78,11 +78,12 @@ already pin reject *class* in [`consensus-tests.md`](./consensus-tests.md).
 One test: broadcast on Esplora, then the tx is visible on JSON-RPC **and**
 Electrum (`test_e2e_cross_surface_esplora_broadcast_visible_in_rpc_and_electrum`).
 Their E2E doc: one process, one store → a write on any surface must show on
-every read surface. We have Electrum and Esplora tests and `rbitcoin-bench`
-Casa/Sparrow (host-only, [`OPERATOR.md`](../OPERATOR.md) Client benchmark).
-We do **not** have one CI test that mines/broadcasts and asserts all three.
-Cheap, and it hits SH lag / mempool overlay bugs we already care about
-([`concurrency.md`](./concurrency.md) Electrum/Esplora roles).
+every read surface. In-tree pin:
+`rbitcoin-test` `--test cross_surface`
+`esplora_broadcast_visible_in_rpc_and_electrum` (Esplora `POST /tx` → RPC
+`getrawmempool` + Electrum `get_mempool` / `get_history` on one `run_p2p`
+datadir). Casa/Sparrow numbers stay host-only
+([`OPERATOR.md`](../OPERATOR.md) Client benchmark).
 
 ### 3. Hornet block-validation rules ↔ our tests
 
