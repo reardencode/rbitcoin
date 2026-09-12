@@ -2858,6 +2858,27 @@ fn resume_work_path_from_loser_tip_explores_heavier_sibling() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// False `prev_fk` can cycle the child map. Resume seed used to spin forever
+/// re-pushing gray nodes (one CPU, no disk, no `ordered=` log).
+#[test]
+fn resume_subtree_score_prev_fk_cycle_terminates() {
+    let (dir, q) = temp_query("resume-cycle");
+    let (g, _) = coinbase_block(0, Fk::NULL, None);
+    let gfk = q.put_header(&g).unwrap();
+    let (a, _) = coinbase_block(1, gfk, Some(g.hash));
+    let afk = q.put_header(&a).unwrap();
+    let mut children: crate::U64Map<Vec<(Fk, [u8; 32])>> = crate::U64Map::default();
+    children.insert(gfk.0, vec![(afk, a.hash)]);
+    children.insert(afk.0, vec![(gfk, g.hash)]);
+    let mut memo = crate::U64Map::default();
+    let (_w, d) = crate::Query::resume_subtree_score(q.store(), &children, gfk, &mut memo)
+        .expect("cycle must not hang");
+    assert!(memo.contains_key(&gfk.0));
+    assert!(memo.contains_key(&afk.0));
+    assert!(d >= 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Two Query engines must not steal each other's lookup/load/scripts/write window.
 #[test]
 fn two_confirm_stats_windows_do_not_steal() {
