@@ -42,5 +42,9 @@ path = "tests/consensus_rules.rs"
 name = "core_analogs"
 path = "tests/core_analogs.rs"
 
+[[test]]
+name = "cross_surface"
+path = "tests/cross_surface.rs"
+
 [lints]
 workspace = true

@@ -7,8 +7,8 @@ use rbitcoin_esplora::{run_esplora, EsploraConfig, EsploraHandle};
 use rbitcoin_log::{debug, enabled, info, warn, Level};
 use rbitcoin_net::{
     default_port, format_serve_perf, format_tip_perf_sizes, netgroup, read_proc_rss,
-    sample_reset_serve_perf, AddrMan, AsMap, ChainHub, IbdConfig, MempoolHub, P2PNode,
-    PeerConnType, TipEvent, TipPerfSizes,
+    sample_reset_serve_perf, AddrMan, AsMap, BlockingRegion, ChainHub, IbdConfig, MempoolHub,
+    P2PNode, PeerConnType, TipEvent, TipPerfSizes,
 };
 use rbitcoin_primitives::Network;
 use rbitcoin_query::{spawn_sh_writebehind, Query};
@@ -133,6 +133,19 @@ fn spawn_signal_handler(shutdown: Arc<Shutdown>) {
     });
 }
 
+async fn mempool_blocking<T: Send + 'static>(
+    mp: &Arc<MempoolHub>,
+    f: impl FnOnce(&MempoolHub) -> T + Send + 'static,
+) -> Result<T, NodeError> {
+    let mp = Arc::clone(mp);
+    tokio::task::spawn_blocking(move || {
+        let _g = BlockingRegion::enter();
+        f(&mp)
+    })
+    .await
+    .map_err(|e| NodeError::Config(format!("mempool task: {e}")))
+}
+
 /// Start the node: ensure datadir, open store.
 pub fn run_node(config: NodeConfig) -> Result<NodeHandle, NodeError> {
     config.ensure_datadir()?;
@@ -229,17 +242,44 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         }
     }
 
-    let mempool = MempoolHub::open_with_weight_persist(
-        config.mempool_path(),
-        node.hub.query.clone(),
-        config.mempool.max_weight,
-        config.mempool.persist,
-    )
+    let mempool_path = config.mempool_path();
+    let query = node.hub.query.clone();
+    let max_weight = config.mempool.max_weight;
+    let persist = config.mempool.persist;
+    let cluster_count = config.mempool.limit_cluster_count;
+    let cluster_kvb = config.mempool.limit_cluster_size_kvb;
+    let min_relay_sat = match config.mempool.min_relay_fee_btc.as_deref() {
+        Some(s) => Some(
+            parse_btc_to_sat(s)
+                .map_err(|e| NodeError::Config(format!("bad --minrelaytxfee {s}: {e}")))?,
+        ),
+        None => None,
+    };
+    let expiry_hours = config.mempool.expiry_hours;
+    let immediate_relay = config.whitelist.iter().any(|w| w.contains("noban"));
+    let hub = Arc::clone(&node.hub);
+    let (mempool, mp_gen, mp_live) = tokio::task::spawn_blocking(move || {
+        let _g = BlockingRegion::enter();
+        let mp = MempoolHub::open_with_weight_persist(mempool_path, query, max_weight, persist)?;
+        mp.set_cluster_limits(cluster_count, cluster_kvb);
+        if immediate_relay {
+            mp.set_immediate_relay(true);
+        }
+        if let Some(sat) = min_relay_sat {
+            mp.set_min_relay_sat_kvb(sat);
+        }
+        if let Some(h) = expiry_hours {
+            mp.set_expiry_hours(h);
+        }
+        hub.attach_mempool(mp.clone())
+            .map_err(|_| "mempool already attached".to_string())?;
+        let gen = mp.generation();
+        let live = mp.live_count();
+        Ok::<_, String>((mp, gen, live))
+    })
+    .await
+    .map_err(|e| NodeError::Config(format!("mempool open join: {e}")))?
     .map_err(NodeError::Config)?;
-    mempool.set_cluster_limits(
-        config.mempool.limit_cluster_count,
-        config.mempool.limit_cluster_size_kvb,
-    );
     if let Some(secs) = config.listen.peer_timeout_secs {
         node.peers.set_peer_timeout_secs(secs);
     }
@@ -248,8 +288,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         node.peers
             .set_external_ips(config.listen.external_ips.clone());
     }
-    if config.whitelist.iter().any(|w| w.contains("noban")) {
-        mempool.set_immediate_relay(true);
+    if immediate_relay {
         node.peers.set_noban(true);
     }
     if config.whitelist.iter().any(|w| w.contains("relay")) {
@@ -259,25 +298,9 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         node.peers.set_forcerelay_perm(true);
         node.peers.set_relay_perm(true);
     }
-    if let Some(s) = config.mempool.min_relay_fee_btc.as_deref() {
-        match parse_btc_to_sat(s) {
-            Ok(sat) => mempool.set_min_relay_sat_kvb(sat),
-            Err(e) => {
-                return Err(NodeError::Config(format!("bad --minrelaytxfee {s}: {e}")));
-            }
-        }
-    }
-    if let Some(h) = config.mempool.expiry_hours {
-        mempool.set_expiry_hours(h);
-    }
-    node.hub
-        .attach_mempool(mempool.clone())
-        .map_err(|_| NodeError::Config("mempool already attached".into()))?;
     info!(
-        "mempool: open {} gen={} live={} max_weight={} (relay off until tip mode)",
+        "mempool: open {} gen={mp_gen} live={mp_live} max_weight={} (relay off until tip mode)",
         config.mempool_path().display(),
-        mempool.generation(),
-        mempool.live_count(),
         config.mempool.max_weight
     );
 
@@ -402,13 +425,14 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 && tip_meets_min_work(&config, &node.hub)
                 && !node.hub.in_ibd()
             {
-                mempool.set_relay_enabled(true);
+                mempool_blocking(&mempool, |mp| mp.set_relay_enabled(true)).await?;
             }
+            let mp_live = mempool_blocking(&mempool, MempoolHub::live_count).await?;
             info!(
                 "node: catch-up complete tip={:?} — tip tracking + block/tx relay \
                  (mempool live={}, shindex={}, sh_tip_ready={})",
                 node.tip_height(),
-                mempool.live_count(),
+                mp_live,
                 config.shindex,
                 sh_tip_ready
             );
@@ -684,7 +708,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     .store(!minwork || ibd, Ordering::SeqCst);
                 let want_relay = !config.mempool.blocksonly && minwork && !ibd;
                 if want_relay != mempool.relay_enabled() {
-                    mempool.set_relay_enabled(want_relay);
+                    mempool_blocking(&mempool, move |mp| mp.set_relay_enabled(want_relay)).await?;
                     if want_relay {
                         info!("ibd: leaving IBD — enabling tx relay");
                     } else {
@@ -705,7 +729,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 let serve = sample_reset_serve_perf();
                 let blks = std::mem::take(&mut window_blocks);
                 if enabled(Level::Debug) {
-                    let live = mempool.live_count();
+                    let live = mempool_blocking(&mempool, MempoolHub::live_count).await?;
                     let follow_live = node.follow_live_count();
                     let acc_avg = mp
                         .accept_us
@@ -919,14 +943,12 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     } else {
         info!("node: store flushed (shutdown-friendly)");
     }
-    if let Err(e) = mempool.flush() {
+    if let Err(e) = mempool_blocking(&mempool, |mp| mp.flush()).await? {
         warn!("node: mempool flush warning: {e}");
     } else {
-        info!(
-            "node: mempool flushed gen={} live={}",
-            mempool.generation(),
-            mempool.live_count()
-        );
+        let (gen, live) =
+            mempool_blocking(&mempool, |mp| (mp.generation(), mp.live_count())).await?;
+        info!("node: mempool flushed gen={gen} live={live}");
     }
     node.shutdown().await;
     info!("node: clean exit");
