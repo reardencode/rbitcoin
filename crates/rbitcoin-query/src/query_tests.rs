@@ -2395,7 +2395,7 @@ fn confirm_run_non_tip_and_tx_runs() {
     let tx = q.get_tx(fks[0]).unwrap();
     let ins = q.tx_input_run_class_a(fks[0], &tx).unwrap();
     assert_eq!(ins.len(), 1);
-    let outs = q.tx_output_run_class_a(fks[0], &tx).unwrap();
+    let outs = q.tx_output_run_class_a(fks[0]).unwrap();
     assert_eq!(outs.len(), 1);
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -2546,6 +2546,33 @@ fn sh_collect_write_pin_skips_store() {
         "no pin + no store must not invent records"
     );
     assert!(recs2.is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn sh_collect_and_disconnect_skip_get_tx_full() {
+    let (dir, q) = temp_query("sh-collect-outs-only");
+    let (h0, t0) = coinbase_block(0, Fk::NULL, None);
+    q.connect_block(Height(0), &h0, &[t0]).unwrap();
+    let fks = q.block_tx_fks(Height(0)).unwrap();
+    q.store().reset_tx_full_gets();
+    let mut recs = Vec::new();
+    q.collect_scripthash_creates(fks[0], &mut recs, None)
+        .expect("cold collect");
+    assert_eq!(recs.len(), 1);
+    assert!(
+        q.store().tx_full_gets().is_empty(),
+        "cold SH collect must not zip inwit: {:?}",
+        q.store().tx_full_gets()
+    );
+    q.store().reset_tx_full_gets();
+    q.disconnect_tip().unwrap();
+    assert!(
+        q.store().tx_full_gets().is_empty(),
+        "disconnect SH unlink must not zip inwit: {:?}",
+        q.store().tx_full_gets()
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
