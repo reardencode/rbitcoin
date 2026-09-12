@@ -1654,6 +1654,58 @@ fn bad_prev_evicts_slot_rewinds_taken() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Post-lookup reject must rewind `lookup_taken_hi` so densify can re-intake.
+#[test]
+fn post_lookup_reject_rewinds_taken_hi() {
+    use crate::chain::ChainHub;
+    use rbitcoin_consensus::{ChainParams, Milestone};
+
+    let (_dir, q) = rbitcoin_query::testutil::tiny_query_labeled("taken-hi-rewind");
+    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    hub.ensure_genesis().unwrap();
+    let tip = hub.tip_height();
+    assert_eq!(tip, Some(0));
+    let mut st = IbdWorkState::new(Vec::new(), hub.tip_hash(), Some(0));
+    let hash = h(0x5a);
+    st.record_height(hash, 2);
+
+    let cases: &[(&str, bool)] = &[
+        ("consensus: bad block: merkle root mismatch", true),
+        (
+            "consensus: store: corrupt record: archive: parent create_fk unresolved (contiguous batch required)",
+            true,
+        ),
+        ("connect height not tip+1", true),
+        ("consensus: prevout already spent on best chain", true),
+        ("confirm cancelled", false),
+    ];
+    for &(err, rewind) in cases {
+        hub.query.set_lookup_taken_hi(Some(2));
+        assert!(
+            hub.query.lookup_already_taken(2),
+            "precondition: height 2 is taken before {err}"
+        );
+        apply_confirm_reject(&mut st, 2, hash, err, Some(hub.query.as_ref()), Some(&hub));
+        if rewind {
+            assert_eq!(
+                hub.query.lookup_taken_hi(),
+                tip,
+                "{err} must rewind taken_hi to confirmed tip"
+            );
+            assert!(
+                !hub.query.lookup_already_taken(2),
+                "{err} must not leave height 2 as in-hand"
+            );
+        } else {
+            assert_eq!(
+                hub.query.lookup_taken_hi(),
+                Some(2),
+                "Cancelled must not rewind taken_hi"
+            );
+        }
+    }
+}
+
 /// Wire-path soft budget charged on receive must release on script reject
 /// **and** on soft prevout-spent (write emits Reject when has_block is false;
 #[test]

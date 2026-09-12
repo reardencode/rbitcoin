@@ -602,6 +602,11 @@ pub(crate) fn apply_confirm_reject(
             f.request_single_block();
         }
     }
+    if class != ConfirmRejectClass::Cancelled {
+        if let Some(q) = query {
+            q.set_lookup_taken_hi(hub.and_then(|h| h.tip_height()));
+        }
+    }
     if class.is_soft() {
         apply_soft_wire_reject(st, height, hash, err, query, hub);
         return;
@@ -633,12 +638,7 @@ fn apply_soft_wire_reject(
 ) {
     let bad_prev = super::reorg::is_bad_prev_err(err);
     if bad_prev {
-        if let Some(q) = query {
-            q.set_lookup_taken_hi(hub.and_then(|h| h.tip_height()));
-        }
         st.headers_done = false;
-    }
-    if bad_prev {
         if let Some(h) = hub {
             st.reorg
                 .register_explore(std::iter::empty::<bitcoin::BlockHash>(), Some(hash));
