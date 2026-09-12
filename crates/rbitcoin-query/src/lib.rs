@@ -1506,6 +1506,11 @@ impl Query {
         self.store.put_header(header)
     }
 
+    /// Batch [`Self::ensure_header`] (header-sync write path).
+    pub fn ensure_headers(&self, recs: &[HeaderRecord]) -> Result<Vec<Fk>, QueryError> {
+        self.store.put_headers(recs)
+    }
+
     pub fn flush(&self) -> Result<(), QueryError> {
         if !self.store.path().exists() {
             return Err(StoreError::NotDirectory(self.store.path().to_path_buf()));

@@ -2039,6 +2039,87 @@ fn apply_peer_event_repeat_headers_skips_ensure_header_fk() {
 }
 
 #[test]
+fn apply_peer_event_headers_batch_persists_parent_before_child() {
+    use super::super::peer_io::{PeerEvent, PeerSlot};
+    use super::apply_peer_event;
+    use crate::seeds::AddrMan;
+    use bitcoin::block::{Header, Version};
+    use bitcoin::CompactTarget;
+
+    use std::collections::HashSet;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::atomic::{AtomicU32, AtomicU64};
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    fn dummy_slot() -> PeerSlot {
+        let (cmd_tx, _rx) = mpsc::unbounded_channel();
+        let task = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .spawn(async {});
+        PeerSlot {
+            id: 1,
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 1, 0, 1)), 18444),
+            cmd_tx,
+            in_flight: HashSet::new(),
+            peer_height: 10,
+            connected_ms: 1,
+            first_data_ms: 0,
+            bytes_rx_total: Arc::new(AtomicU64::new(0)),
+            rate: Default::default(),
+            alive: true,
+            task,
+        }
+    }
+    fn dummy_header(prev: BlockHash, n: u8) -> Header {
+        let mut h = Header {
+            version: Version::from_consensus(4),
+            prev_blockhash: prev,
+            merkle_root: bitcoin::TxMerkleNode::from_byte_array([n; 32]),
+            time: 1_300_000_000 + u32::from(n),
+            bits: CompactTarget::from_consensus(0x207fffff),
+            nonce: u32::from(n),
+        };
+        rbitcoin_consensus::grind_regtest_pow(&mut h);
+        h
+    }
+
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("ev-hdr-batch");
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let mut st = IbdWorkState::new(vec![dummy_slot()], Some(gen), Some(0));
+    let write_next = AtomicU32::new(1);
+    let mut book = AddrMan::new();
+    let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 1, 0, 99)), 18444);
+    let h1 = dummy_header(gen, 1);
+    let h2 = dummy_header(h1.block_hash(), 2);
+    let h3 = dummy_header(h2.block_hash(), 3);
+    let hash1 = h1.block_hash();
+    let hash2 = h2.block_hash();
+    let hash3 = h3.block_hash();
+    let before = hub.query.store().header_count();
+    apply_peer_event(
+        &mut st,
+        &hub,
+        PeerEvent::Headers {
+            peer: 1,
+            headers: vec![h1, h2, h3],
+        },
+        &write_next,
+        &mut book,
+        local,
+        None,
+    );
+    assert_eq!(hub.query.store().header_count(), before + 3);
+    assert!(st.header_fks.contains_key(&hash1));
+    assert!(st.header_fks.contains_key(&hash2));
+    assert!(st.header_fks.contains_key(&hash3));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn apply_confirm_events_accepted_and_reject() {
     use super::super::confirm::ConfirmEvent;
     use super::apply_confirm_events;
