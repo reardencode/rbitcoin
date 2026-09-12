@@ -270,7 +270,10 @@ pub struct PeerEntry {
 }
 
 /// Hard cap for learned / `peers` file / addrv2 (not `--connect` / DNS inject).
-pub const MAX_ADDR_MAN: usize = 4096;
+///
+/// Must exceed `1000 / 0.23` (Core `MAX_ADDR_TO_SEND` / `MAX_PCT_ADDR_TO_SEND`)
+/// so a GetAddr reply can still be 1000 addresses.
+pub const MAX_ADDR_MAN: usize = 8192;
 
 /// Peer book: seeds, learned addrs, and dial ranking.
 #[derive(Debug, Default, Clone)]
@@ -1075,7 +1078,7 @@ mod tests {
         let path = dir.join("peers");
         let mut body = String::from("rbitcoin-peers-v1\n");
         let n_tried = 2000u32;
-        let n_total = 5000u32;
+        let n_total = MAX_ADDR_MAN as u32 + 904;
         for i in 0..n_tried {
             body.push_str(&format!("{} 0x01\n", addr_n(i)));
         }

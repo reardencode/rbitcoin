@@ -78,10 +78,12 @@ before 1.0).
 - **RPC `maxfeerate`:** prevout-sum overflow is over-cap (reject), not
   fail-open. Missing prevouts still skip the cap so `accept_tx` can say
   missing-inputs.
-- **P2P caps (Q-60):** AddrMan learned/`peers`/`addpeeraddress` stay at 4096
-  (evict incompat, then failed last-connect, then oldest new). `--connect` /
-  DNS inject may exceed when only tried addrs remain. Shutdown `merge_from`
-  trims to 4096 (tried first). `announced_wtx` and `from_this_peer`
+- **P2P caps (Q-60):** AddrMan learned/`peers`/`addpeeraddress` stay at 8192
+  (evict incompat, then failed last-connect, then oldest new). 4096 was
+  below Core's GetAddr cache floor (`1000 / 0.23`), so
+  `p2p_getaddr_caching` could not fill 1000. `--connect` / DNS inject may
+  exceed when only tried addrs remain. Shutdown `merge_from` trims to
+  8192 (tried first). `announced_wtx` and `from_this_peer`
   insertion-order FIFO-roll at 50k instead of `clear()`. Compact `cmpct_fills`
   decrement on reconstruct fail, getdata expire, and unregister (Accepted still
   clears the hash).

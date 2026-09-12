@@ -108,10 +108,11 @@ pub(crate) const TIP_HOLE_MAX_PEERS: usize = 4;
 /// Cap on IBD dial pool after getaddr learning (seeds + discovered).
 ///
 /// Mainnet DNS seeds already return ~300–400 addrs. 256 refused all getaddr
-/// once the seed book was larger than the cap. 4096 holds seeds plus learned
-/// addrs; [`AddrMan::add_learned`] evicts incompatible/failed then oldest new
-/// when full so discovery continues. `--connect` / DNS [`AddrMan::add`] may
-/// briefly exceed the cap when only tried addrs remain.
+/// once the seed book was larger than the cap. [`crate::seeds::MAX_ADDR_MAN`]
+/// holds seeds plus learned addrs; [`AddrMan::add_learned`] evicts
+/// incompatible/failed then oldest new when full so discovery continues.
+/// `--connect` / DNS [`AddrMan::add`] may briefly exceed the cap when only
+/// tried addrs remain.
 pub(crate) const MAX_PEER_POOL: usize = crate::seeds::MAX_ADDR_MAN;
 /// Pending (framed, not Class A) longer than this → re-getdata.
 pub(crate) const PENDING_STALE: Duration = Duration::from_secs(45);
