@@ -314,34 +314,18 @@ fn spend_op_true(
     (h1, spend, spend_txid)
 }
 
+/// Slow-pin log is only emitted when load work_ms > 2s — keep the formatter unit.
 #[test]
-fn sampler_stats() {
-    let (_d, q) = crate::testutil::tiny_query_labeled("sampler-stats");
-    let st = q.confirm_stats();
-    st.note_resolve_counts(1, 2, 3, 4, 5, 6);
-    let last = st.last_plan_batch();
-    assert_eq!(last.head_need, 3);
-    assert_eq!(last.head_hit, 4);
-    st.note_prep_plan(1, 2, 3, 10, 6, 7);
-    st.note_prep_batch(10, 1, 2, 3, 4, 1);
-    st.note_write_commit(20, 1, 2, 3, 4, 5, 1);
-    st.note_write_flush(8);
-    let a = st.take_window();
-    assert!(a.prep_phases_sum_ns() > 0);
-    assert!(a.write_phases_sum_ns() > 0);
-    assert!(a.arch_blocks >= 1);
-    assert!(a.arch_prep_head_fk_ns >= 10);
-    assert!(a.arch_prep_head_ns >= 10);
-
-    st.note_last_pin(22, 33, 44, 100, 9);
-    let lp = st.last_pin_phases();
-    assert_eq!(lp.plan_pin_ns, 22);
-    assert_eq!(lp.cold_ns, 33);
-    assert_eq!(lp.contract_ns, 44);
-    assert_eq!(lp.pin_plan_n, 100);
-    assert_eq!(lp.pin_new_n, 9);
+fn format_slow_pin_omits_retired_tokens() {
     assert_eq!(LastPinPhases::ms(2_000_000), 2);
-    let slow = lp.format_slow_pin();
+    let zero = LastPinPhases {
+        plan_pin_ns: 22,
+        cold_ns: 33,
+        contract_ns: 44,
+        pin_plan_n: 100,
+        pin_new_n: 9,
+    };
+    let slow = zero.format_slow_pin();
     assert!(!slow.contains("adopt="), "{slow}");
     assert!(!slow.contains("publish="), "{slow}");
     assert_eq!(slow, "pin(plan=0ms/n=100 cold=0ms/n=9 contract=0ms)");

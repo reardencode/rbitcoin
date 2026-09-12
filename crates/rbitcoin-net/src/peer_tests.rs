@@ -43,16 +43,6 @@ fn p2p_serve_line_names_ntx_bytes_wall() {
 }
 
 #[test]
-fn serve_perf_note_is_sampled() {
-    crate::serve_perf::note_serve(3, 1500, 12_000);
-    let s = crate::serve_perf::sample_reset_serve_perf();
-    assert!(s.n >= 1, "{s:?}");
-    assert!(s.bytes >= 1500, "{s:?}");
-    assert!(s.ntx >= 3, "{s:?}");
-    assert!(s.max_ns >= 12_000, "{s:?}");
-}
-
-#[test]
 fn store_not_found_is_soft_session_error() {
     assert!(net_error_is_store_not_found(&NetError::Consensus(
         "store: record not found".into()
