@@ -681,7 +681,7 @@ Policy lives in `rbitcoin-consensus::policy` and is **never** applied on block c
 | Symptom | Cause | Fix |
 |---------|--------|-----|
 | `known≈982k` while peers ~961k, absurd resume walk | False `prev_fk` / duplicate header edges | Prefer a **fresh datadir**; header rows are hash-unique on write |
-| `tip=H` but tip **hash** is a short orphan sibling; peers ahead | Stale confirmed tip; most-work **explore + reorg** | Restart (invalid marks are process-local). If the log has compact reconstruct failed then `accept dropped … block is invalidated`, that hash was cached `BLOCK_FAILED` — need a build that keeps merkle-mutated compact acceptable, then reorg once bodies densify. |
+| `tip=H` but tip **hash** is a short orphan sibling; peers ahead | Stale confirmed tip; most-work **explore + reorg** | Restart (invalid marks are process-local). v0.6.0: compact reconstruct could `accept` a merkle-mutated body and cache the header `BLOCK_FAILED`. Current builds merkle-check before `Ok` (`getdata`) and do not cache that hash invalid. After upgrade, reorg once bodies densify. |
 | Stuck on tip+1: `prevout already spent` / many re-rejects of same block | Orphan Class C (second Class A+C copy at tip height) | Fixed on open: complement `repair_class_c_above_tip` + confirmed-strong **membership** |
 
 **Every open:** the node (1) revalidates the last **six** confirmed heights

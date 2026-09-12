@@ -26,12 +26,13 @@ before 1.0).
 
 ### Fixed
 
-- **Mutated compact on a held fork is not `BLOCK_FAILED`:** `accept_branch`
-  wraps a merkle/`bad-txnmrklroot` connect fail as `ConnectFailed`, which
-  was cached as consensus-invalid. A later honest `getdata` of that hash
-  was refused and peers advertising the winning chain were banned (mainnet
-  966500/966501, 2026-09-11). Drop the mutated body; keep the hash acceptable.
-  True consensus rejects (`bad-txns-inputs-missingorspent`) still mark
+- **Compact reconstruct merkle-checks before `Ok`:** a unique short-id (or
+  `blocktxn`) fill is not a block until the txs match the compact header
+  merkle (BIP152 `FinishBlock`). Empty missing → `getdata`, not
+  `accept_branch`. Defense in depth: a merkle/`bad-txnmrklroot` that still
+  reaches `accept_branch` is not cached `BLOCK_FAILED` (ConnectFailed wrap
+  used to poison the hash; mainnet 966500/966501, 2026-09-11). True
+  consensus rejects (`bad-txns-inputs-missingorspent`) still mark
   `BLOCK_FAILED`.
 
 - **`p2p_timeouts.py --v2transport`:** VERSION handshake timeout needles are

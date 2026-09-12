@@ -96,8 +96,9 @@ pub fn prefilled_absolute_indexes(hsi: &HeaderAndShortIds) -> Vec<(usize, &Trans
 
 /// Attempt to reconstruct a full block from compact data + available txs.
 ///
-/// On success returns the block. On failure returns absolute indexes still missing
-/// (for `BlockTransactionsRequest`).
+/// On success the txs merkle to `hsi.header`. Incomplete fill returns the
+/// remaining absolute indexes (`getblocktxn`). A complete fill that does not
+/// merkle (wrong unique short-id body) returns an empty vec (`getdata`).
 pub fn try_reconstruct<T: Borrow<Transaction>>(
     hsi: &HeaderAndShortIds,
     available: &HashMap<ShortId, Vec<T>>,
@@ -169,10 +170,7 @@ pub fn try_reconstruct<T: Borrow<Transaction>>(
     // for validation. Prefer version 2. If coinbase has no witness but block needs
     // it, accept_block will fail structure — caller falls back to getdata.
     let _ = version;
-    Ok(Block {
-        header: hsi.header,
-        txdata,
-    })
+    finish_reconstructed(hsi.header, txdata)
 }
 
 /// Build a `getblocktxn` request for missing absolute indexes.
@@ -189,6 +187,7 @@ pub fn missing_request(block_hash: BlockHash, missing: &[u64]) -> BlockTransacti
 /// `txn.transactions` holds the txs in the same order as the request indexes.
 /// Provided txs are placed by absolute index (not re-matched by short-id alone),
 /// so collisions cannot undo a successful `getblocktxn` response.
+/// Completes only when the filled txs merkle to `hsi.header`.
 pub fn apply_block_transactions<T: Borrow<Transaction>>(
     hsi: &HeaderAndShortIds,
     missing: &[u64],
@@ -273,10 +272,16 @@ pub fn apply_block_transactions<T: Borrow<Transaction>>(
         }
     }
     let _ = version;
-    Ok(Block {
-        header: hsi.header,
-        txdata,
-    })
+    finish_reconstructed(hsi.header, txdata)
+}
+
+/// BIP152: filled slots must merkle to the compact header (empty → getdata).
+fn finish_reconstructed(header: Header, txdata: Vec<Transaction>) -> Result<Block, Vec<u64>> {
+    let block = Block { header, txdata };
+    if !block.check_merkle_root() {
+        return Err(Vec::new());
+    }
+    Ok(block)
 }
 
 #[cfg(test)]
@@ -303,6 +308,17 @@ mod tests {
             bits: CompactTarget::from_consensus(0x207fffff),
             nonce: 0,
         }
+    }
+
+    fn sealed_block(txdata: Vec<Transaction>) -> Block {
+        let mut header = dummy_header();
+        header.merkle_root = Block {
+            header,
+            txdata: txdata.clone(),
+        }
+        .compute_merkle_root()
+        .expect("non-empty");
+        Block { header, txdata }
     }
 
     fn coinbase() -> Transaction {
@@ -346,10 +362,7 @@ mod tests {
     fn reconstruct_full_from_mempool_map() {
         let b1 = spend(1);
         let b2 = spend(2);
-        let block = Block {
-            header: dummy_header(),
-            txdata: vec![coinbase(), b1.clone(), b2.clone()],
-        };
+        let block = sealed_block(vec![coinbase(), b1.clone(), b2.clone()]);
         let hsi = HeaderAndShortIds::from_block(&block, 0xdead_beef, 2, &[]).unwrap();
         // Available: both non-coinbase from "mempool"
         let avail = shortid_map_from_txs(&block.header, hsi.nonce, 2, [&b1, &b2]);
@@ -362,10 +375,7 @@ mod tests {
     #[test]
     fn reconstruct_fill_keeps_matching_shortid_not_rehash() {
         let b1 = spend(1);
-        let block = Block {
-            header: dummy_header(),
-            txdata: vec![coinbase(), b1.clone()],
-        };
+        let block = sealed_block(vec![coinbase(), b1.clone()]);
         let mut hsi = HeaderAndShortIds::from_block(&block, 0xdead_beef, 2, &[]).unwrap();
         let keys = ShortId::calculate_siphash_keys(&block.header, hsi.nonce);
         let hashed = short_id_for_tx(&b1, 2, keys);
@@ -424,12 +434,45 @@ mod tests {
     }
 
     #[test]
+    fn unique_shortid_wrong_body_is_not_a_block() {
+        let b1 = spend(8);
+        let block = sealed_block(vec![coinbase(), b1.clone()]);
+        let hsi = HeaderAndShortIds::from_block(&block, 4, 2, &[]).unwrap();
+        let keys = ShortId::calculate_siphash_keys(&block.header, hsi.nonce);
+        let sid = short_id_for_tx(&b1, 2, keys);
+        let mut avail: HashMap<ShortId, Vec<&Transaction>> = HashMap::new();
+        let wrong = spend(9);
+        avail.insert(sid, vec![&wrong]);
+        let missing = try_reconstruct(&hsi, &avail, 2).expect_err("wrong unique fill");
+        assert!(
+            missing.is_empty(),
+            "merkle-mutated fill must getdata (empty missing), got {missing:?}"
+        );
+    }
+
+    #[test]
+    fn apply_blocktxn_wrong_body_is_not_a_block() {
+        let b1 = spend(10);
+        let block = sealed_block(vec![coinbase(), b1]);
+        let hsi = HeaderAndShortIds::from_block(&block, 5, 2, &[]).unwrap();
+        let empty: HashMap<ShortId, Vec<&Transaction>> = HashMap::new();
+        let missing = try_reconstruct(&hsi, &empty, 2).unwrap_err();
+        let txn = BlockTransactions {
+            block_hash: block.block_hash(),
+            transactions: vec![spend(11)],
+        };
+        let err = apply_block_transactions(&hsi, &missing, &txn, &empty, 2)
+            .expect_err("wrong blocktxn body");
+        assert!(
+            err.is_empty(),
+            "merkle-mutated blocktxn must getdata, got {err:?}"
+        );
+    }
+
+    #[test]
     fn apply_blocktxn_completes() {
         let b1 = spend(4);
-        let block = Block {
-            header: dummy_header(),
-            txdata: vec![coinbase(), b1.clone()],
-        };
+        let block = sealed_block(vec![coinbase(), b1.clone()]);
         let hsi = HeaderAndShortIds::from_block(&block, 2, 2, &[]).unwrap();
         let empty: HashMap<ShortId, Vec<&Transaction>> = HashMap::new();
         let missing = try_reconstruct(&hsi, &empty, 2).unwrap_err();
@@ -452,10 +495,7 @@ mod tests {
     fn partial_mempool_plus_blocktxn() {
         let b1 = spend(5);
         let b2 = spend(6);
-        let block = Block {
-            header: dummy_header(),
-            txdata: vec![coinbase(), b1.clone(), b2.clone()],
-        };
+        let block = sealed_block(vec![coinbase(), b1.clone(), b2.clone()]);
         let hsi = HeaderAndShortIds::from_block(&block, 3, 2, &[]).unwrap();
         // Only b1 in "mempool"
         let avail = shortid_map_from_txs(&block.header, hsi.nonce, 2, [&b1]);
@@ -473,10 +513,7 @@ mod tests {
     #[test]
     fn version1_txid_shortids_fill() {
         let b1 = spend(7);
-        let block = Block {
-            header: dummy_header(),
-            txdata: vec![coinbase(), b1.clone()],
-        };
+        let block = sealed_block(vec![coinbase(), b1.clone()]);
         let hsi = HeaderAndShortIds::from_block(&block, 4, 1, &[]).unwrap();
         let avail = shortid_map_from_txs(&block.header, hsi.nonce, 1, [&b1]);
         let recon = try_reconstruct(&hsi, &avail, 1).expect("v1 fill");
