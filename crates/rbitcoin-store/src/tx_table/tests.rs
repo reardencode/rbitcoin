@@ -3356,6 +3356,12 @@ fn spent_span_matches_slot_len_times_n_out() {
                 off + u64::from(vout) * OutputRecord::SPENT_SLOT_LEN as u64
             );
         }
+        let rec = spent_record_len(n_out);
+        if n_out == 0 {
+            assert_eq!(rec, 8, "zero-out spent still pays one idx stride");
+        } else {
+            assert_eq!(rec, buf.len() as u64);
+        }
     }
 }
 
@@ -3408,7 +3414,7 @@ fn script_kind_v17_kind_ten_is_corrupt() {
     }
 }
 
-/// Fat inwit must not force a new `txout.idx` / `spent.idx` segment.
+/// Fat inwit must not force a new `txout.idx` segment.
 #[test]
 fn idx_roll_independent_of_inwit_span() {
     {
@@ -3453,10 +3459,9 @@ fn idx_roll_independent_of_inwit_span() {
             1,
             "txout.idx must not roll when only inwit crosses the soft span"
         );
-        assert_eq!(
-            idx_segs("spent"),
-            1,
-            "spent.idx must not roll when only inwit crosses the soft span"
+        assert!(
+            !dir.join("spent.idx").exists(),
+            "spent.idx is derived; Class A must not write it"
         );
         let last = t.get(Fk(6)).unwrap();
         assert_eq!(last.output_count, 1);
@@ -3469,4 +3474,82 @@ fn idx_roll_independent_of_inwit_span() {
 #[test]
 fn script_hash_collect_span_is_16mib() {
     assert_eq!(SCRIPT_HASH_COLLECT_SPAN, 16 * 1024 * 1024);
+}
+
+fn put_n_out(t: &TxTable, tag: u8, n_out: u32) -> Fk {
+    let mut txid = [0u8; 32];
+    txid[0] = tag;
+    let tx = TxRecord {
+        txid,
+        version: 1,
+        locktime: 0,
+        input_start_fk: Fk::NULL,
+        input_count: 1,
+        output_start_fk: Fk::NULL,
+        output_count: n_out,
+    };
+    let inputs = vec![InputRecord::coinbase(u32::MAX, vec![0x51], vec![])];
+    let outs: Vec<OutputRecord> = (0..n_out)
+        .map(|i| OutputRecord::unspent(1 + i64::from(i), vec![0x51]))
+        .collect();
+    t.put_full_batch_indexed(&[(tx, inputs, outs)], false)
+        .unwrap()[0]
+}
+
+#[test]
+fn class_a_append_does_not_write_spent_idx() {
+    let dir = tempfile_dir("spent-no-idx");
+    let t = create_tiny(&dir);
+    let f0 = put_n_out(&t, 1, 0);
+    let f1 = put_n_out(&t, 2, 1);
+    let f3 = put_n_out(&t, 3, 3);
+    assert!(
+        !dir.join("spent.idx").exists(),
+        "spent.idx must not be created"
+    );
+    let (o0, l0) = t.spent_range(f0).unwrap();
+    let (o1, l1) = t.spent_range(f1).unwrap();
+    let (o3, l3) = t.spent_range(f3).unwrap();
+    assert_eq!(l0, spent_record_len(0));
+    assert_eq!(l1, spent_record_len(1));
+    assert_eq!(l3, spent_record_len(3));
+    assert_eq!(o1, o0 + l0);
+    assert_eq!(o3, o1 + l1);
+    assert_eq!(spent_abs(o3, 2), o3 + 16);
+    let batch = t.spent_range_batch(&[f3, f0, f1]).unwrap();
+    assert_eq!(batch[0], Some((o3, l3)));
+    assert_eq!(batch[1], Some((o0, l0)));
+    assert_eq!(batch[2], Some((o1, l1)));
+    t.flush().unwrap();
+    drop(t);
+    let t = TxTable::open_tiny(&dir).unwrap();
+    assert!(
+        !dir.join("spent.idx").exists(),
+        "reopen must not recreate spent.idx"
+    );
+    assert_eq!(t.spent_range(f0).unwrap(), (o0, l0));
+    assert_eq!(t.spent_range(f1).unwrap(), (o1, l1));
+    assert_eq!(t.spent_range(f3).unwrap(), (o3, l3));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn open_unlinks_leftover_spent_idx() {
+    let dir = tempfile_dir("spent-idx-leftover");
+    let t = create_tiny(&dir);
+    let fk = put_n_out(&t, 1, 2);
+    let (off, len) = t.spent_range(fk).unwrap();
+    t.flush().unwrap();
+    drop(t);
+    let idx = crate::tx_idx::TxIdx::create(&dir, "spent").unwrap();
+    idx.append_starts(0, &[off]).unwrap();
+    drop(idx);
+    assert!(dir.join("spent.idx").is_dir());
+    let t = TxTable::open_tiny(&dir).unwrap();
+    assert!(
+        !dir.join("spent.idx").exists(),
+        "leftover spent.idx must be unlinked"
+    );
+    assert_eq!(t.spent_range(fk).unwrap(), (off, len));
+    let _ = std::fs::remove_dir_all(&dir);
 }

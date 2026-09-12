@@ -22,7 +22,7 @@ type TxidFkMap = HashMap<[u8; 32], Fk, BuildHasherDefault<TxidHasher>>;
 pub struct BatchParentIds {
     /// Wave `txid → (create_fk, body_range)` (shared across chunks).
     pub ids: Arc<IdMap>,
-    /// Wave `create_fk_id → spent.idx` range (shared across chunks).
+    /// Wave `create_fk_id → spent.body` range (shared across chunks).
     pub spent: Arc<U64Map<(u64, u64)>>,
     /// Per-chunk `create_fk_id → vouts` spent in this load batch.
     pub need_vouts: U64Map<Vec<u32>>,
@@ -231,7 +231,7 @@ pub fn stamp_external_parents(
 /// Idx body_range and spent_range for stamped create_fks with no in-flight outs.
 ///
 /// Body miss after identity is `Corrupt`. Spent miss after a **store** body fill
-/// is `Corrupt`. RAM-only identity (in-flight outs, no `spent.idx` row) leaves
+/// is `Corrupt`. RAM-only identity (in-flight outs, no spent range row) leaves
 /// spent unset — write ensure still stamps those holes.
 pub fn fill_missing_parent_ranges(
     store: &Store,

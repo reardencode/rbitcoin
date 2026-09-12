@@ -600,7 +600,7 @@ impl Query {
         self.store.unspent_create_vouts(create_fk, vouts, None)
     }
 
-    /// Batch [`Self::unspent_create_vouts`]: one `spent.idx` walk across creates.
+    /// Batch [`Self::unspent_create_vouts`]: one spent-range walk across creates.
     pub fn unspent_create_vouts_batch(
         &self,
         items: &[(Fk, Vec<u32>)],

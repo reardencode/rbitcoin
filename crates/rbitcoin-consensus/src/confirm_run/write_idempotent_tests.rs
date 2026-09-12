@@ -1036,7 +1036,7 @@ fn pin_and_ensure_journey() {
         pin_for_wire_batch(&q, Some(&plan3), &mut stamp3, &[], &[], None).unwrap();
     assert!(
         parents3.has_abs_layout(pfk),
-        "load pin copies lookup-stamped spent.idx range (no write idx)"
+        "load pin copies lookup-stamped spent range (no write idx)"
     );
     assert_eq!(
         parents3.get_spender_abs(pfk, 0),

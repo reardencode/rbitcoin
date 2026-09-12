@@ -351,8 +351,10 @@ impl OutputRecord {
 
 mod packed;
 mod pending_head;
+mod spent_off;
 pub use packed::*;
 pub(crate) use pending_head::PENDING_HEAD_CAP;
+pub(crate) use spent_off::unlink_leftover_spent_idx;
 
 fn span_rec(span: &[u8], span_off: u64, rec_off: u64, rec_len: u64) -> Result<&[u8], StoreError> {
     let start = rec_off
@@ -399,6 +401,7 @@ pub struct TxTable {
     pub(crate) inwit: VarTable,
     /// `spent.body` — 8 B × n_out sole-spender slots.
     pub(crate) spent: VarTable,
+    spent_off: spent_off::SpentOff,
     /// Segmented fixed-bits heads + seal-time fuse8.
     pub(crate) head: SegmentedTxHead,
     /// Dense create_fk-ordered txids (schema 13+).
@@ -474,13 +477,8 @@ impl TxTable {
                 opts.idx_soft_span,
                 soft_span,
             )?,
-            spent: Self::create_var(
-                dir,
-                "spent",
-                TableKind::Spent,
-                opts.idx_soft_span,
-                soft_span,
-            )?,
+            spent: VarTable::create_body_only(dir, "spent", TableKind::Spent)?,
+            spent_off: spent_off::SpentOff::new(dir),
             head: SegmentedTxHead::create(dir, layout)?,
             txids: crate::txid_body::TxidBody::create(dir)?,
             secret,
@@ -624,22 +622,12 @@ impl TxTable {
             )?
         };
         let spent = if had_spent {
-            Self::open_var(
-                dir,
-                "spent",
-                TableKind::Spent,
-                opts.idx_soft_span,
-                soft_span,
-            )?
+            VarTable::open_body_only(dir, "spent", TableKind::Spent)?
         } else {
-            Self::create_var(
-                dir,
-                "spent",
-                TableKind::Spent,
-                opts.idx_soft_span,
-                soft_span,
-            )?
+            VarTable::create_body_only(dir, "spent", TableKind::Spent)?
         };
+        let spent_off = spent_off::SpentOff::load(dir)?;
+        spent_off::unlink_leftover_spent_idx(dir)?;
         let txids = if dir.join("txid.body").exists() {
             crate::txid_body::TxidBody::open(dir)?
         } else {
@@ -648,11 +636,10 @@ impl TxTable {
         let n_bodies = body.count();
         let n_txids = txids.count();
         let n_inwit = inwit.count();
-        let n_spent = spent.count();
-        if n_txids != n_bodies || n_inwit != n_bodies || n_spent != n_bodies {
-            let n = n_bodies.min(n_txids).min(n_inwit).min(n_spent);
+        if n_txids != n_bodies || n_inwit != n_bodies {
+            let n = n_bodies.min(n_txids).min(n_inwit);
             rbitcoin_log::warn!(
-                "store: Class A count skew txout={n_bodies} inwit={n_inwit} spent={n_spent} \
+                "store: Class A count skew txout={n_bodies} inwit={n_inwit} \
                  txid.body={n_txids} — truncating to {n}"
             );
             if n_bodies > n {
@@ -661,22 +648,23 @@ impl TxTable {
             if n_inwit > n {
                 inwit.truncate_to_count(n)?;
             }
-            if n_spent > n {
-                spent.truncate_to_count(n)?;
-            }
             if n_txids > n {
                 txids.truncate_to_count(n)?;
             }
-            if body.count() != txids.count()
-                || body.count() != inwit.count()
-                || body.count() != spent.count()
-            {
+            spent_off.truncate_to_count(n);
+            if body.count() != txids.count() || body.count() != inwit.count() {
                 return Err(StoreError::Corrupt(
                     "Class A stem counts still mismatch after repair (reindex required)",
                 ));
             }
         }
         let n_bodies = body.count();
+        spent_off.ensure_covering(&body, n_bodies)?;
+        let spent_end = spent_off.end_for(&body, n_bodies)?;
+        if spent.body_logical_len() < spent_end {
+            return Err(StoreError::Corrupt("spent.body short for n_out prefix"));
+        }
+        spent.truncate_body_to(n_bodies, spent_end)?;
         let mut need_rebuild = false;
         let head = if !crate::segmented_head::head_meta_exists(dir) {
             need_rebuild = n_bodies > 0;
@@ -747,6 +735,7 @@ impl TxTable {
             body,
             inwit,
             spent,
+            spent_off,
             head,
             txids,
             secret,
@@ -1063,12 +1052,13 @@ impl TxTable {
 
     /// `spent.body` range for one create.
     pub fn spent_range(&self, fk: Fk) -> Result<(u64, u64), StoreError> {
-        self.spent.record_range(fk)
+        self.spent_off.range_for(&self.body, fk, self.spent.count())
     }
 
     /// `spent.body` ranges (same fk order as [`Self::body_range_batch`]).
     pub fn spent_range_batch(&self, fks: &[Fk]) -> Result<Vec<Option<(u64, u64)>>, StoreError> {
-        self.spent.record_range_batch(fks)
+        self.spent_off
+            .ranges_batch(&self.body, fks, self.spent.count())
     }
 
     /// Annotate spends at known absolute spender-meta offsets (confirm write).
@@ -1283,7 +1273,7 @@ impl TxTable {
         create_tx_fk: Fk,
         vout: u32,
     ) -> Result<(bool, Fk), StoreError> {
-        let (off, len) = self.spent.record_range(create_tx_fk)?;
+        let (off, len) = self.spent_range(create_tx_fk)?;
         self.get_output_spender_meta_at(off, len, vout)
     }
 
@@ -1344,7 +1334,7 @@ impl TxTable {
         multi: bool,
         field: Fk,
     ) -> Result<(), StoreError> {
-        let (off, len) = self.spent.record_range(create_tx_fk)?;
+        let (off, len) = self.spent_range(create_tx_fk)?;
         self.set_output_spender_meta_at(off, len, vout, multi, field)
     }
 
@@ -1635,6 +1625,8 @@ impl TxTable {
         let Some(p_sp) = self.spent.prepare_batch_encode(n, est_spent, encode_sp)? else {
             return Err(StoreError::Corrupt("Class A spent prepare empty"));
         };
+        let sp_base = p_sp.base_count;
+        let sp_starts = p_sp.starts.clone();
         crate::var_table::write_prepared_bodies_one_wave(&[
             (&self.body, &p_out),
             (&self.inwit, &p_in),
@@ -1648,6 +1640,7 @@ impl TxTable {
                 "Class A append fk mismatch across stems",
             ));
         }
+        self.spent_off.note_starts(sp_base, &sp_starts);
         Ok(fks)
     }
 
@@ -2078,6 +2071,7 @@ impl TxTable {
         self.body.flush()?;
         self.inwit.flush()?;
         self.spent.flush()?;
+        self.spent_off.flush()?;
         self.head.flush()?;
         Ok(())
     }
@@ -2086,6 +2080,7 @@ impl TxTable {
         self.body.flush_async()?;
         self.inwit.flush_async()?;
         self.spent.flush_async()?;
+        self.spent_off.flush()?;
         self.head.flush_async()?;
         Ok(())
     }

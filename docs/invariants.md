@@ -45,7 +45,7 @@ header plan after lookup planned it, stamped `create_fk`, etc.).
 ```
 wire / body-queue
   → lookup (stamp create_fk + parent txout/spent ranges + parent txid;
-            IO: tx.head, txout.idx/spent.idx, txid.body — NEVER body decode)
+            IO: tx.head, txout.idx, txid.body, txout meta for spent_range — NEVER outs/inwit decode)
   → load / pin (BatchParents outs by known txout range only;
             IO: txout.body — NEVER head / idx / txid.body / inwit)
   → scripts (pure CPU — NEVER any store IO)
@@ -72,17 +72,17 @@ not head/idx.
 
 | Stage | Allowed IO | Forbidden |
 |-------|------------|-----------|
-| **lookup** | `tx.head`, `txout.idx` / `spent.idx` (fk + ranges), `txid.body`, headers | **`txout`/`inwit` decode** |
-| **load** | **`txout.body` outs by range** (from lookup stamp) | head, idx (`txout` / `spent`), `txid.body`, `inwit` |
+| **lookup** | `tx.head`, `txout.idx` (fk + ranges), `txid.body`, headers; leftover spent_range peeks txout **meta** (`n_out` only) | **`txout` outs / `inwit` decode** |
+| **load** | **`txout.body` outs by range** (from lookup stamp) | head, idx (`txout`), `txid.body`, `inwit` |
 | **scripts** | none | any store IO |
 
 | Stage | Invariant | Soft path allowed? |
 |-------|-----------|--------------------|
-| Lookup parent stamp | Every external spent parent has create_fk + body_range (or offline in_flight CreatePin) + reverse txid. Archived parents also have `spent.idx` range on the stamp (in-flight outs skip idx) | Missing → hard Err at stamp / pin contract |
+| Lookup parent stamp | Every external spent parent has create_fk + body_range (or offline in_flight CreatePin) + reverse txid. Archived parents also have computed `spent.body` range on the stamp (in-flight outs skip) | Missing → hard Err at stamp / pin contract |
 | Parent create_fk | **same-batch** planned fks (offline at pin) → **in-flight** (lookup snapshots `drain_and_fence_hi` **before** the wave's TipOnly read and passes it on the last load batch; load drops tagged map rows with pack height **below** that snapshot after that batch's in-flight read; equality keeps; not Class C tip, not `class_a_hi`, not write freeze; one load-thread HashMap, insert after stamp) → **skeleton** (`BatchParentIds` on the `LoadBatch`: lookup TipOnly fk + body_range + spent_range + per-chunk need-vouts) → **Corrupt** on IBD miss. plan=None / S0 (`skeleton = None`) is in-flight → leftover TipOnly. One helper: [`stamp_external_parents`](../crates/rbitcoin-query/src/stamp.rs). No leftover pending map, no process pin FIFO, no BQ-side hits map, no parent-store create_fk on stamp, no published live_union. Same-wave creates are omitted from TipOnly need. Header-cache GC polls store tip each load pack. One fk per txid — [`errata.md`](./errata.md). | Miss of in-flight and skeleton → `Corrupt("parent create_fk unresolved")` (**engine fault**: requeue once, then halt IBD; never blacklist). Identity without idx range → `Corrupt("invariant: idx range missing after identity")`, not a miss |
 | io_uring harvest | TLS session fail-closed ([`io-modality.md`](./io-modality.md)) | **No** silent success. `Corrupt("invariant: io_uring …")` (not `bdz g page bad slot`). Ring-unavailable still pread-fallback |
-| Load body outs | By `txout` range only from lookup stamp; incomplete outs → hard Err. Pin **copies** lookup `spent_range` (no idx IO) | **No** idx cold outs on load; **no** `spent.idx` IO on pin; **no** `inwit` on pin |
-| Ensure (write) | Every non-null spend edge has `spent_range` abs after ensure returns. Lookup already stamped archived parents; write `tx_spent_range_batch` only for unstamped fks (same-batch after Class A, holes) | Idx stamp of remaining `spent.body` ranges; incomplete → `invariant:` |
+| Load body outs | By `txout` range only from lookup stamp; incomplete outs → hard Err. Pin **copies** lookup `spent_range` (no idx IO) | **No** idx cold outs on load; **no** `spent.idx`; **no** `inwit` on pin |
+| Ensure (write) | Every non-null spend edge has `spent_range` abs after ensure returns. Lookup already stamped archived parents; write `tx_spent_range_batch` only for unstamped fks (same-batch after Class A, holes) | Stamp remaining `spent.body` ranges from n_out; incomplete → `invariant:` |
 | Structural spentness | Abs required for every non-null spend create_fk after load; multi-list → confirmed-strong walk (reorg protocol) | **No** unpinned “wire-corrected create_fk” soft spentness. Multi flag alone is **not** hard `Err` |
 | Pin create identity | Pin must carry non-zero create txid from **lookup stamp** (plan reverse map / wire prev_txid / `txid.body`) | Soft zero-identity pin → assemble mismatch → cold recovery is **forbidden** |
 | Tip already-archived | `plan=None`: lookup still stamps parent pin material; load `txout` by range | Soft spentness recovery for zero pin identity is **not** OK |
@@ -162,8 +162,8 @@ packs at/above the leaving **pack** height **before** the next bind.
 | `pin_for_wire_incomplete_outs_is_invariant_error` | `pin_for_wire_batch` incomplete outs → cold miss |
 | `post_commit_missing_denserels_is_invariant_error` | `post_commit` abs-only annotate |
 | `ensure_spend_abs_incomplete_is_invariant_error` | `ensure_spend_abs_layouts` post-condition |
-| `write_ensure_stamps_spent_range_after_load_pin` / `pin_and_ensure_journey` | load pin copies lookup `spent.idx` range; ensure fills holes (same-batch still no abs until Class A) |
-| `fill_missing_parent_ranges_stamps_spent_idx_for_archived` | lookup stamp carries `spent.idx` for TipOnly leftover |
+| `write_ensure_stamps_spent_range_after_load_pin` / `pin_and_ensure_journey` | load pin copies lookup spent range; ensure fills holes (same-batch still no abs until Class A) |
+| `fill_missing_parent_ranges_stamps_spent_idx_for_archived` | lookup stamp carries spent range for TipOnly leftover |
 | `spend_abs_jobs_unique_and_missing_is_corrupt` | pin arithmetic abs list; missing → Corrupt |
 | `structural_pinned_without_abs_is_invariant_error` | `structural_validate_spends` pin without denserels |
 | `already_archived_schema13_pin_identity_tip_follow` | archive then `confirm_wire_run` plan=None + rapid tip accept |

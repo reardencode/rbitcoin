@@ -1,7 +1,7 @@
 # Schema history
 
 Historic on-disk layouts for the rbitcoin chain store.  
-**Current layout:** [`SCHEMA.md`](./SCHEMA.md) (`SCHEMA_VERSION = 20`).
+**Current layout:** [`SCHEMA.md`](./SCHEMA.md) (`SCHEMA_VERSION = 21`).
 
 Until 1.0 there is **no in-place migration**: a new major layout generally means wipe the store and redo IBD. This file is for archaeology, code archaeology, and understanding why the current design looks the way it does.
 
@@ -13,7 +13,8 @@ Versions below are listed **newest → oldest** after the summary table.
 
 | Version | Headline change | Still in current tree as… |
 |--------:|-----------------|---------------------------|
-| **20** | Sealed `tx.head` value-assigned packed BDZ (`BDZ2`, no `.rel`); sealed SH compact `BDZ3` (2-bit `g` + rank). Refuse occupied 18/19 `tx.head` / `scripthash*`. Leftover fuse8 v1, flat `*.idx.meta`, Shared SH body, pack8 Paged (mode 10) refuse. | **Current** |
+| **21** | Drop `spent.idx`. Spent ranges are `8 × max(n_out,1)` from txout meta; sparse `spent.off`. Unlink leftover idx; rewrite `meta` 20→21. Table headers 13–20 remain openable. | **Current** |
+| **20** | Sealed `tx.head` value-assigned packed BDZ (`BDZ2`, no `.rel`); sealed SH compact `BDZ3` (2-bit `g` + rank). Refuse occupied 18/19 `tx.head` / `scripthash*`. Leftover fuse8 v1, flat `*.idx.meta`, Shared SH body, pack8 Paged (mode 10) refuse. | Prior |
 | **19** | Megakey SH extent: pack8 mode 11 + `ver=2` last page (`extent_base`, `extent_n`). Soft-open 18 with occupied indexes. | Prior |
 | **18** | MPHF SH main (8 B values) + sealed `tx.head` MPHF; no IBD SH runs. Refuse 17 with `tx.head`/`scripthash*` data (wipe indexes, keep Class A). | Prior |
 | **17** | SH runs `key_len=40`; Class A thin meta + kinds 0–9 + 8 B spent; megakey pages delta-stream; `spent.ovf`; no `archive_epoch`; segmented tip-only `sp_tweaks.*` dirs. | Prior |
@@ -34,6 +35,14 @@ Versions below are listed **newest → oldest** after the summary table.
 
 ---
 
+## v21 (drop spent.idx)
+
+Class A spent ranges are `8 × max(n_out, 1)` from LAYOUT17 txout meta.
+No `spent.idx`. Sparse `spent.off` stores absolute starts every 1024
+creates. Open of `meta=20` unlinks leftover `spent.idx` (dir and flat
+`spent.idx.meta`) and rewrites `store/meta` to 21. Table file headers
+13–20 remain openable. A 20 binary refuses 21 `meta`.
+
 ## v20 (assigned packed tx.head + compact SH MPHF)
 
 Index-only. Sealed `tx.head` writes `BDZ2` packed `g[]` whose output is
@@ -42,7 +51,7 @@ Index-only. Sealed `tx.head` writes `BDZ2` packed `g[]` whose output is
 main/L1 writes `BDZ3`: 3-partite peel, 2-bit `g`, occupancy rank (RAM on
 open), then mix64 tags + pack8 `.val`. Occupied schema 18/19 `tx.head` or
 `scripthash*` is refused (wipe those dirs, keep Class A). Empty indexes
-rewrite `meta` to 20; `tx.head` rebuilds from `txid.body`; SH rematerializes
+rewrite `meta` to 21; `tx.head` rebuilds from `txid.body`; SH rematerializes
 with `--shindex`. Open OA is still 4 B rel.
 
 ## v19 (megakey extent)

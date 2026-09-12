@@ -9,6 +9,12 @@ before 1.0).
 
 ## [Unreleased]
 
+### Changed
+
+- **Schema 21:** no `spent.idx`. Spent ranges are `8 × max(n_out,1)` from
+  txout meta (sparse `spent.off`). Open of `meta=20` unlinks leftover
+  `spent.idx` and rewrites `store/meta` to 21. A 20 binary refuses 21 `meta`.
+
 ### Added
 
 - **`--sptweaks-dust SATS`** (conf `sptweaks_dust=`): Electrum

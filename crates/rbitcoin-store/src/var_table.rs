@@ -40,7 +40,8 @@ fn next_aligned_tx_start(cursor: u64) -> u64 {
 
 pub struct VarTable {
     body: TableFile,
-    idx: TxIdx,
+    /// `None` for `spent.body` (ranges are `n_out` prefix, not a stem idx).
+    idx: Option<TxIdx>,
     count: AtomicU64,
     /// Body exclusive-end of the last **published** record.
     /// Must not use live `body.logical_len()` for last-record length: the single
@@ -58,7 +59,23 @@ impl VarTable {
         let idx = TxIdx::create(dir, stem)?;
         Ok(Self {
             body,
-            idx,
+            idx: Some(idx),
+            count: AtomicU64::new(0),
+            published_body_end: AtomicU64::new(FILE_HEADER_LEN as u64),
+            publish_seq: AtomicU64::new(0),
+        })
+    }
+
+    /// `spent.body` only — no `{stem}.idx`.
+    pub fn create_body_only(
+        dir: &Path,
+        stem: &str,
+        body_kind: TableKind,
+    ) -> Result<Self, StoreError> {
+        let body = TableFile::create(Self::body_path(dir, stem), body_kind)?;
+        Ok(Self {
+            body,
+            idx: None,
             count: AtomicU64::new(0),
             published_body_end: AtomicU64::new(FILE_HEADER_LEN as u64),
             publish_seq: AtomicU64::new(0),
@@ -75,7 +92,7 @@ impl VarTable {
         let idx = TxIdx::create_with_soft_span(dir, stem, soft_span)?;
         Ok(Self {
             body,
-            idx,
+            idx: Some(idx),
             count: AtomicU64::new(0),
             published_body_end: AtomicU64::new(FILE_HEADER_LEN as u64),
             publish_seq: AtomicU64::new(0),
@@ -89,8 +106,25 @@ impl VarTable {
         let body_end = body.logical_len().max(FILE_HEADER_LEN as u64);
         Ok(Self {
             body,
-            idx,
+            idx: Some(idx),
             count: AtomicU64::new(count),
+            published_body_end: AtomicU64::new(body_end),
+            publish_seq: AtomicU64::new(0),
+        })
+    }
+
+    /// `spent.body` only — count is adopted from txout after open.
+    pub fn open_body_only(
+        dir: &Path,
+        stem: &str,
+        body_kind: TableKind,
+    ) -> Result<Self, StoreError> {
+        let body = TableFile::open(Self::body_path(dir, stem), body_kind)?;
+        let body_end = body.logical_len().max(FILE_HEADER_LEN as u64);
+        Ok(Self {
+            body,
+            idx: None,
+            count: AtomicU64::new(0),
             published_body_end: AtomicU64::new(body_end),
             publish_seq: AtomicU64::new(0),
         })
@@ -108,11 +142,17 @@ impl VarTable {
         let body_end = body.logical_len().max(FILE_HEADER_LEN as u64);
         Ok(Self {
             body,
-            idx,
+            idx: Some(idx),
             count: AtomicU64::new(count),
             published_body_end: AtomicU64::new(body_end),
             publish_seq: AtomicU64::new(0),
         })
+    }
+
+    fn idx(&self) -> Result<&TxIdx, StoreError> {
+        self.idx
+            .as_ref()
+            .ok_or(StoreError::Corrupt("invariant: var table idx missing"))
     }
 
     /// Truncate published Class A count to `new_count` (idx + RAM count + body HWM).
@@ -133,11 +173,16 @@ impl VarTable {
             FILE_HEADER_LEN as u64
         } else if new_count < cur {
             // record_start uses live idx count; still valid before idx truncate.
-            self.idx.record_start(new_count + 1)?
+            self.idx()?.record_start(new_count + 1)?
         } else {
             self.body.logical_len().max(FILE_HEADER_LEN as u64)
         };
-        self.idx.truncate_to_count(new_count)?;
+        self.idx()?.truncate_to_count(new_count)?;
+        self.truncate_body_to(new_count, new_end)
+    }
+
+    /// Body-only truncate (`spent` has no idx).
+    pub fn truncate_body_to(&self, new_count: u64, new_end: u64) -> Result<(), StoreError> {
         self.body.set_logical_len(new_end)?;
         self.publish_begin();
         self.published_body_end.store(new_end, Ordering::Relaxed);
@@ -191,7 +236,7 @@ impl VarTable {
         if id > count {
             return Err(StoreError::NotFound);
         }
-        self.idx.plan_body_range(id, count, body_end)
+        self.idx()?.plan_body_range(id, count, body_end)
     }
 
     /// Absolute `(offset, len)` of the unframed payload for `fk`.
@@ -212,14 +257,14 @@ impl VarTable {
             return Err(StoreError::NotFound);
         }
         if id < count {
-            return self.idx.record_range_interior(id);
+            return self.idx()?.record_range_interior(id);
         }
         let (count2, body_end) = self.published_meta();
         if id > count2 {
             return Err(StoreError::NotFound);
         }
         if id < count2 {
-            return self.idx.record_range_interior(id);
+            return self.idx()?.record_range_interior(id);
         }
         let start = self.record_start(id, count2)?;
         if body_end < start {
@@ -231,7 +276,7 @@ impl VarTable {
     /// Contiguous `(offset, len)` for Class A ids `first..=last` (1-based).
     pub fn record_ranges(&self, first: u64, last: u64) -> Result<Vec<(u64, u64)>, StoreError> {
         let (count, body_end) = self.published_meta();
-        self.idx.record_ranges(first, last, count, body_end)
+        self.idx()?.record_ranges(first, last, count, body_end)
     }
 
     /// Bulk body ranges for arbitrary fks — **sorted** walk of segmented idx.
@@ -271,7 +316,7 @@ impl VarTable {
         start_ids.dedup();
 
         let starts = self
-            .idx
+            .idx()?
             .record_starts_batch_bulk(&start_ids, crate::io_backend::read_io_backend())?;
         let mut start_map: crate::U64Map<u64> =
             crate::U64Map::with_capacity_and_hasher(start_ids.len(), Default::default());
@@ -471,7 +516,9 @@ impl VarTable {
     pub fn reserve_append(&self, body_bytes: u64, n_records: u64) -> Result<(), StoreError> {
         let body_need = self.body.logical_len().saturating_add(body_bytes);
         self.body.ensure_capacity(body_need)?;
-        self.idx.reserve_slots(n_records)?;
+        if let Some(idx) = &self.idx {
+            idx.reserve_slots(n_records)?;
+        }
         Ok(())
     }
 
@@ -548,7 +595,9 @@ impl VarTable {
 
     /// Idx + count publish after the body blob is already on disk (and HWM set).
     pub(crate) fn finish_prepared(&self, prep: PreparedAppend) -> Result<Vec<Fk>, StoreError> {
-        self.idx.append_starts(prep.base_count, &prep.starts)?;
+        if let Some(idx) = &self.idx {
+            idx.append_starts(prep.base_count, &prep.starts)?;
+        }
         let new_end = prep.start.saturating_add(prep.body_blob.len() as u64);
         let new_count = prep.base_count + prep.fks.len() as u64;
         self.publish_begin();
@@ -563,7 +612,7 @@ impl VarTable {
         if id == 0 || id > count {
             return Err(StoreError::NotFound);
         }
-        self.idx.record_start(id)
+        self.idx()?.record_start(id)
     }
 
     #[inline]
@@ -696,14 +745,18 @@ impl VarTable {
 
     pub fn flush(&self) -> Result<(), StoreError> {
         self.body.flush()?;
-        self.idx.flush()?;
+        if let Some(idx) = &self.idx {
+            idx.flush()?;
+        }
         Ok(())
     }
 
     /// HWM + MS_ASYNC (no fdatasync) — host-friendly process exit.
     pub fn flush_async(&self) -> Result<(), StoreError> {
         self.body.flush_async()?;
-        self.idx.flush_async()?;
+        if let Some(idx) = &self.idx {
+            idx.flush_async()?;
+        }
         Ok(())
     }
 }
