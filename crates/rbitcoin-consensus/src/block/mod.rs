@@ -1754,6 +1754,18 @@ pub(crate) fn structural_validate_spends(
     let spent_ns = t_spent.elapsed().as_nanos() as u64;
 
     // Coinbase = create_fk == first_tx_fk at that height — never `tx.body`.
+    // Core: same-block coinbase spend is immature (`nHeight < coinbaseHeight + 100`).
+    if spends.iter().any(|&(_, _, _, cfk)| cfk.is_null()) {
+        if let Some(cb) = block.txdata.first() {
+            let cb_id = cb.compute_txid().to_byte_array();
+            if spends
+                .iter()
+                .any(|&(ptid, _, _, cfk)| cfk.is_null() && ptid == cb_id)
+            {
+                return Err(ConsensusError::BadTx("coinbase immature"));
+            }
+        }
+    }
     let t_create = Instant::now();
     let mut height_list: Vec<u32> = height_by_id.values().copied().collect();
     height_list.sort_unstable();
