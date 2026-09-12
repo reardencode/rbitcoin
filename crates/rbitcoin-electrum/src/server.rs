@@ -1414,24 +1414,21 @@ fn dispatch_pinned(
             let items = mempool
                 .map(|m| m.scripthash_mempool(&sh))
                 .unwrap_or_default();
-            let hist = if items.is_empty() {
-                Vec::new()
-            } else {
-                query
-                    .scripthash_history_slot(&sh, sh_join)
+            let mut arr = Vec::with_capacity(items.len());
+            for i in items {
+                if query
+                    .tx_fk_by_txid_tip(&i.txid)
                     .map_err(|e| e.to_string())?
-            };
-            let arr: Vec<Value> = items
-                .iter()
-                .filter(|i| !history_has_txid(&hist, &i.txid))
-                .map(|i| {
-                    json!({
-                        "height": i.height,
-                        "tx_hash": txid_hex(&i.txid),
-                        "fee": i.fee,
-                    })
-                })
-                .collect();
+                    .is_some()
+                {
+                    continue;
+                }
+                arr.push(json!({
+                    "height": i.height,
+                    "tx_hash": txid_hex(&i.txid),
+                    "fee": i.fee,
+                }));
+            }
             Ok(Value::Array(arr))
         }
         "blockchain.transaction.get" => {

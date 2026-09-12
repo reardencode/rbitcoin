@@ -3391,7 +3391,7 @@ fn confirmed_leftover_mempool_does_not_double_count() {
         .collect();
     assert!(
         mem_hits.is_empty(),
-        "get_mempool must skip leftover already in confirmed history: {mem}"
+        "get_mempool must skip leftover already connected on the tip: {mem}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
