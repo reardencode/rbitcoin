@@ -165,6 +165,12 @@ fn decode_body(payload: &[u8]) -> Result<BinaryFuse8, StoreError> {
     if segment_length == 0 || segment_length_mask != segment_length.saturating_sub(1) {
         return Err(StoreError::Corrupt("fuse8 segment_length invalid"));
     }
+    let min_fp = (segment_count_length as u64).saturating_add(2 * u64::from(segment_length));
+    if (fp_len as u64) < min_fp {
+        return Err(StoreError::Corrupt(
+            "fuse8 fingerprints shorter than hash geometry",
+        ));
+    }
     let fingerprints = payload[o..o + fp_len].to_vec().into_boxed_slice();
     Ok(BinaryFuse8 {
         seed,
@@ -326,6 +332,26 @@ mod tests {
         bad_mask.extend_from_slice(&64u32.to_le_bytes());
         bad_mask.extend_from_slice(&0u64.to_le_bytes());
         assert!(decode_body(&bad_mask).is_err());
+    }
+
+    #[test]
+    fn decode_body_rejects_fingerprint_len_below_hash_geometry() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u64.to_le_bytes());
+        body.extend_from_slice(&64u32.to_le_bytes());
+        body.extend_from_slice(&63u32.to_le_bytes());
+        body.extend_from_slice(&10_000u32.to_le_bytes());
+        body.extend_from_slice(&8u64.to_le_bytes());
+        body.extend_from_slice(&[0u8; 8]);
+        match decode_body(&body) {
+            Err(StoreError::Corrupt(m)) => {
+                assert!(m.contains("hash geometry"), "{m}");
+            }
+            other => panic!("expected geometry refuse, got {other:?}"),
+        }
+        let ok = BinaryFuse8::try_from_keys(&[1u64, 2, 3]).unwrap();
+        let encoded = encode_body(&ok);
+        decode_body(&encoded).expect("honest filter must still decode");
     }
 
     #[test]
