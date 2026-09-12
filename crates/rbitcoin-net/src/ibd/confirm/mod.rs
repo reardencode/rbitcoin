@@ -518,18 +518,43 @@ fn requeue_on_uring_recover(
     true
 }
 
-/// Stamp/pin fail: drop speculative fks, stale in-channel loadq, keep tail wire.
-fn load_fail_rewind_wave(
+fn reoffer_blocks_to_body_queue<'a>(
+    hub: &ChainHub,
+    items: impl IntoIterator<Item = (u32, BlockHash, &'a bitcoin::Block)>,
+) {
+    use bitcoin::consensus::encode::serialize;
+    for (h, hash, block) in items {
+        if hub.has_block(&hash) {
+            continue;
+        }
+        let payload = serialize(block);
+        let header_fk = hub
+            .query
+            .get_header_by_hash(&hash.to_byte_array())
+            .ok()
+            .flatten()
+            .map(|(fk, _)| fk.0)
+            .unwrap_or(0);
+        let _ = hub
+            .query
+            .block_queue_offer(h, hash.to_byte_array(), header_fk, &payload);
+    }
+}
+
+/// Stamp/pin fail: drop speculative fks, bump the feed epoch, re-offer tail to BQ.
+fn load_fail_rewind_wave<'a>(
     feed: &ConfirmFeed,
     hub: &ChainHub,
     lookup_ahead: &mut LoadAheadState,
     first_h: u32,
-    tail: &[(u32, BlockHash, Option<bitcoin::Block>)],
+    tail: impl IntoIterator<Item = (u32, BlockHash, &'a bitcoin::Block)>,
 ) {
+    let tail: Vec<_> = tail.into_iter().collect();
+    reoffer_blocks_to_body_queue(hub, tail.iter().copied());
     lookup_ahead.clear_all(hub);
     feed.finish(std::iter::once(first_h));
     feed.clear();
-    feed.requeue_wire(tail);
+    hub.query.set_lookup_taken_hi(hub.tip_height());
 }
 
 pub(crate) fn lookup_ready_hash(feed: &ConfirmFeed, height: u32) -> Option<BlockHash> {
@@ -1799,6 +1824,13 @@ pub(crate) fn spawn_confirm_engine(
                         "ibd: confirm load drop stale plan epoch={claim_epoch} live={}",
                         feed_load.epoch()
                     );
+                    reoffer_blocks_to_body_queue(
+                        &hub_load,
+                        lb.items.iter().filter_map(|(h, raw, w)| {
+                            let hash = BlockHash::from_byte_array(*raw);
+                            (!hub_load.has_block(&hash)).then_some((*h, hash, w.block.as_ref()))
+                        }),
+                    );
                     feed_load.finish(lb.items.iter().map(|(h, _, _)| *h));
                     continue;
                 }
@@ -1899,19 +1931,14 @@ pub(crate) fn spawn_confirm_engine(
                             continue;
                         }
                         let first_hash = wire_batch[0].1;
-                        let tail: Vec<(u32, BlockHash, Option<bitcoin::Block>)> =
-                            wire_batch
-                                .iter()
-                                .skip(1)
-                                .filter(|(_, ha, _)| !hub_load.has_block(ha))
-                                .map(|(h, ha, w)| (*h, *ha, Some((*w.block).clone())))
-                                .collect();
                         load_fail_rewind_wave(
                             &feed_load,
                             &hub_load,
                             &mut lookup_ahead,
                             expect_h,
-                            &tail,
+                            wire_batch.iter().skip(1).filter_map(|(h, ha, w)| {
+                                (!hub_load.has_block(ha)).then_some((*h, *ha, w.block.as_ref()))
+                            }),
                         );
                         loop_stats_load
                             .confirm_reject_stops
@@ -2054,19 +2081,14 @@ pub(crate) fn spawn_confirm_engine(
                             );
                             continue;
                         }
-                        let tail: Vec<(u32, BlockHash, Option<bitcoin::Block>)> =
-                            wire_batch
-                                .iter()
-                                .skip(1)
-                                .filter(|(_, ha, _)| !hub_load.has_block(ha))
-                                .map(|(h, ha, w)| (*h, *ha, Some((*w.block).clone())))
-                                .collect();
                         load_fail_rewind_wave(
                             &feed_load,
                             &hub_load,
                             &mut lookup_ahead,
                             expect_h,
-                            &tail,
+                            wire_batch.iter().skip(1).filter_map(|(h, ha, w)| {
+                                (!hub_load.has_block(ha)).then_some((*h, *ha, w.block.as_ref()))
+                            }),
                         );
                         loop_stats_load
                             .confirm_reject_stops
