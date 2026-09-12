@@ -30,7 +30,8 @@ impl PeerOut {
     }
 }
 
-/// Hash set with insertion-order FIFO eviction at `cap` (INV / origin skip).
+/// Hash set with recency FIFO eviction at `cap` (INV / origin skip).
+/// Re-insert of a live key moves it to the back so a still-hot id is not rolled.
 #[derive(Debug)]
 pub(crate) struct CappedSet<T> {
     set: HashSet<T>,
@@ -69,6 +70,12 @@ impl<T> CappedSet<T> {
         T: Eq + Hash + Copy,
     {
         if self.set.contains(&item) {
+            if self.fifo.back() != Some(&item) {
+                if let Some(i) = self.fifo.iter().position(|x| *x == item) {
+                    self.fifo.remove(i);
+                    self.fifo.push_back(item);
+                }
+            }
             return;
         }
         if cap == 0 {

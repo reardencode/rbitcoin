@@ -169,7 +169,7 @@ Still 1.0: Dedicated Core `anchors.dat` can wait if
 | [x] | `{datadir}/peers` persist + rank last-good / fast |
 | [x] | Compact prefill monotonic; held FIFO; getdata retry on unanswered |
 | [x] | IBD / tip-follow outbound diversity (asmap ASN or prefix); stale evict prefers duplicate groups (**Q-60**) |
-| [x] | AddrMan 4096 cap + `announced_wtx` / `from_this_peer` FIFO roll; `cmpct_fills` release on fail/expire/unregister (**Q-60**) |
+| [x] | AddrMan 4096 cap + `announced_wtx` / `from_this_peer` recency FIFO roll; `cmpct_fills` release on fail/expire/unregister (**Q-60**) |
 
 ### Fee estimates that match inclusion
 

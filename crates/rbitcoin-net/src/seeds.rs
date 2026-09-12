@@ -321,6 +321,8 @@ impl AddrMan {
     }
 
     /// Insert or keep existing; never clears known flags when already present.
+    ///
+    /// Uncapped so `load` can keep tried-first then trim. `merge_from` trims.
     pub fn add_with_flags(&mut self, addr: SocketAddr, flags: PeerFlags) {
         if let Some(f) = self.by_addr.get_mut(&addr) {
             // Union: remember the best information we have.
@@ -428,10 +430,14 @@ impl AddrMan {
     }
 
     /// Merge another book into this one (flag bits OR'd for shared addrs).
+    ///
+    /// `add_with_flags` is uncapped so `load` can keep tried-first then trim.
+    /// This path is not load: trim after the union.
     pub fn merge_from(&mut self, other: &AddrMan) {
         for e in other.entries() {
             self.add_with_flags(e.addr, e.flags);
         }
+        self.trim_to_cap(MAX_ADDR_MAN);
         self.sort_order_ipv4_first();
     }
 
@@ -1027,6 +1033,30 @@ mod tests {
         assert!(am.entry(&extra).is_some());
         assert!(am.entry(&addr_n(0)).is_none());
         assert!(am.entry(&addr_n(1)).is_some());
+    }
+
+    #[test]
+    fn merge_from_trims_to_cap_keeping_tried() {
+        let mut a = AddrMan::new();
+        for i in 0..MAX_ADDR_MAN {
+            let x = addr_n(i as u32);
+            a.add(x);
+            a.note_connected(x);
+        }
+        let mut b = AddrMan::new();
+        for i in 0..8 {
+            b.add(addr_n(MAX_ADDR_MAN as u32 + i));
+        }
+        a.merge_from(&b);
+        assert_eq!(a.len(), MAX_ADDR_MAN);
+        assert!(
+            a.entry(&addr_n(0)).is_some(),
+            "tried addrs must survive merge trim"
+        );
+        assert!(
+            a.entry(&addr_n(MAX_ADDR_MAN as u32)).is_none(),
+            "extra new from the other book must not grow past cap"
+        );
     }
 
     #[test]

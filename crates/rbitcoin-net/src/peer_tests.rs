@@ -99,6 +99,27 @@ fn from_this_peer_insert_caps_and_keeps_latest() {
 }
 
 #[test]
+fn capped_set_reinsert_moves_to_back() {
+    use bitcoin::hashes::Hash;
+    let mut m = CappedSet::new();
+    let cap = 3usize;
+    let id = |i: u8| bitcoin::Txid::from_byte_array([i; 32]);
+    m.insert(id(0), cap);
+    m.insert(id(1), cap);
+    m.insert(id(2), cap);
+    m.insert(id(0), cap);
+    m.insert(id(3), cap);
+    assert_eq!(m.len(), cap);
+    assert!(m.contains_key(&id(0)), "re-insert must keep a still-hot id");
+    assert!(
+        !m.contains_key(&id(1)),
+        "untouched oldest must roll off after a refresh"
+    );
+    assert!(m.contains_key(&id(2)));
+    assert!(m.contains_key(&id(3)));
+}
+
+#[test]
 fn tip_follow_locator_empty_store_has_genesis_zero() {
     let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("empty");
     let loc = tip_follow_locator(&hub);
