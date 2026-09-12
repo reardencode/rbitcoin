@@ -1135,13 +1135,13 @@ impl PeerHub {
         }
     }
 
-    /// Core GetAddr reply: per-listen cache (24h) of up to 1000 / 23% of addrman.
+    /// Core GetAddr reply: per-listen cache (24h) of
+    /// [`crate::peer::MAX_ADDR_TO_SEND`] / [`crate::peer::MAX_PCT_ADDR_TO_SEND`]
+    /// of addrman.
     pub fn addr_response_for_bind(
         &self,
         bind: SocketAddr,
     ) -> Vec<(u32, bitcoin::p2p::address::Address)> {
-        const MAX_ADDR_TO_SEND: usize = 1000;
-        const MAX_PCT_ADDR_TO_SEND: usize = 23;
         const CACHE_SECS: u64 = 24 * 60 * 60;
         let bind = canonical_bind(bind);
         let now = self.now_secs();
@@ -1166,8 +1166,8 @@ impl PeerHub {
             g.entries()
         };
         let n = entries.len();
-        let pct_cap = (n * MAX_PCT_ADDR_TO_SEND / 100).max(1);
-        let cap = MAX_ADDR_TO_SEND.min(pct_cap).min(n);
+        let pct_cap = (n * crate::peer::MAX_PCT_ADDR_TO_SEND / 100).max(1);
+        let cap = crate::peer::MAX_ADDR_TO_SEND.min(pct_cap).min(n);
         if cap == 0 {
             return Vec::new();
         }

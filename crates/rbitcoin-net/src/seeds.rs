@@ -271,8 +271,11 @@ pub struct PeerEntry {
 
 /// Hard cap for learned / `peers` file / addrv2 (not `--connect` / DNS inject).
 ///
-/// Must exceed `1000 / 0.23` (Core `MAX_ADDR_TO_SEND` / `MAX_PCT_ADDR_TO_SEND`)
-/// so a GetAddr reply can still be 1000 addresses.
+/// Ours, not a Core constant (Core uses new/tried buckets). Must stay
+/// strictly above Core GetAddr
+/// [`MAX_ADDR_TO_SEND`](crate::peer::MAX_ADDR_TO_SEND) /
+/// [`MAX_PCT_ADDR_TO_SEND`](crate::peer::MAX_PCT_ADDR_TO_SEND)
+/// (`1000 / 0.23`) so a reply can still be 1000 addresses.
 pub const MAX_ADDR_MAN: usize = 8192;
 
 /// Peer book: seeds, learned addrs, and dial ranking.
@@ -993,10 +996,7 @@ mod tests {
 
     #[test]
     fn add_learned_fills_past_getaddr_cache_pct() {
-        // Core p2p_getaddr_caching: getnodeaddresses(0) must be >
-        // MAX_ADDR_TO_SEND / (MAX_PCT_ADDR_TO_SEND/100) so a GetAddr
-        // reply can still be 1000 (23% of the book).
-        const NEED: usize = 1000 * 100 / 23;
+        const NEED: usize = crate::peer::MAX_ADDR_TO_SEND * 100 / crate::peer::MAX_PCT_ADDR_TO_SEND;
         let mut am = AddrMan::new();
         for i in 0..=NEED {
             assert!(

@@ -224,8 +224,16 @@ pub fn version_handshake_timeout_log(peer: u64) -> String {
     format!("version handshake timeout, disconnecting peer={peer}")
 }
 
-/// Core `MAX_ADDR_TO_SEND` (addr / addrv2).
+/// Copied from Core `src/net_processing.cpp` `MAX_ADDR_TO_SEND`.
+/// Max addresses in one ADDR / addrv2. Interop copy — do not change without
+/// a named reason to diverge (see COMPAT.md).
 pub const MAX_ADDR_TO_SEND: usize = 1000;
+
+/// Copied from Core `src/net_processing.cpp` `MAX_PCT_ADDR_TO_SEND`.
+/// GetAddr returns at most this percent of AddrMan (then `MAX_ADDR_TO_SEND`).
+/// Interop copy — do not change without a named reason to diverge
+/// (see COMPAT.md).
+pub const MAX_PCT_ADDR_TO_SEND: usize = 23;
 
 pub fn sendaddrv2_after_verack_log(peer: u64) -> String {
     format!("sendaddrv2 received after verack, disconnecting peer={peer}")
