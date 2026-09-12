@@ -2159,14 +2159,14 @@ impl ChainHub {
     }
 
     fn disconnect_to(&self, keep_height: u32) -> Result<(), NetError> {
-        let harvest = self.mempool().is_some();
+        let mp = self.mempool().cloned();
         let mut disconnected_txs: Vec<Transaction> = Vec::new();
         while let Some(h) = self.query.tip_height() {
             let tip = h.0;
             if tip <= keep_height {
                 break;
             }
-            if harvest {
+            if mp.is_some() {
                 if let Ok(Some(b)) = self.block_at_height(tip) {
                     for tx in b.txdata.iter().skip(1) {
                         disconnected_txs.push(tx.clone());
@@ -2181,7 +2181,7 @@ impl ChainHub {
                 .map_err(|e| NetError::Consensus(e.to_string()))?;
         }
         self.cache.truncate_to_height(keep_height);
-        if let Some(mp) = self.mempool() {
+        if let Some(mp) = mp {
             if !disconnected_txs.is_empty() {
                 let n = mp.reorg_reaccept(&disconnected_txs);
                 if n > 0 {
@@ -2191,8 +2191,6 @@ impl ChainHub {
                     );
                 }
             }
-            // Even when the disconnected blocks were empty, mempool txs that
-            // spend now-immature coinbases must leave (`mempool_reorg`).
             mp.evict_after_reorg();
         }
         self.query
