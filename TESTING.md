@@ -232,6 +232,7 @@ Prefer **one high-level scenario** per behavior cluster. Delete lower-level test
 | `electrum_leftover_mempool_does_not_double_count` | Electrum | Relay-off leftover is confirmed, not a second mempool UTXO |
 | `electrum_max_connections_rejects_extra_client` | Electrum | TCP cap drops the extra client |
 | `electrum_idle_timeout_disconnects_quiet_client` | Electrum | Idle timeout closes a quiet socket |
+| `esplora_broadcast_visible_in_rpc_and_electrum` | Node + Electrum + Esplora + RPC | One `run_p2p` datadir: Esplora `POST /tx` appears in `getrawmempool` and Electrum mempool/history (`fee` on unconfirmed) |
 | `two_node_header_and_block_sync` | P2P (**default + multinode CI**) | Seeder → peer 8-block IBD. **Not** re-run under `coverage.sh`. |
 | `serve_after_restart_via_reconstruct` | P2P (**multinode job only**) | Cold serve via reconstruct |
 | `ibd_skips_dead_peer` | P2P (**multinode job only**) | Live seeder + `127.0.0.1:1` |

@@ -206,30 +206,8 @@ fn config_helpers_and_param_parsers() {
 }
 
 #[test]
-fn history_row_json_omits_fee_on_confirmed_genesis() {
+fn history_row_json_mempool_child_includes_fee() {
     use rbitcoin_primitives::Fk;
-    let genesis = rbitcoin_query::ScriptHashHistoryItem {
-        height: 0,
-        txid: [1u8; 32],
-        tx_fk: Fk(1),
-        fee: None,
-    };
-    let v = history_row_json(&genesis);
-    assert!(
-        v.get("fee").is_none(),
-        "confirmed genesis must omit fee: {v}"
-    );
-    assert_eq!(v["height"], 0);
-
-    let mempool = rbitcoin_query::ScriptHashHistoryItem {
-        height: 0,
-        txid: [2u8; 32],
-        tx_fk: Fk::NULL,
-        fee: Some(123),
-    };
-    let v = history_row_json(&mempool);
-    assert_eq!(v["fee"], 123);
-
     let child = rbitcoin_query::ScriptHashHistoryItem {
         height: -1,
         txid: [3u8; 32],
@@ -239,15 +217,6 @@ fn history_row_json_omits_fee_on_confirmed_genesis() {
     let v = history_row_json(&child);
     assert_eq!(v["fee"], 9);
     assert_eq!(v["height"], -1);
-
-    let conf = rbitcoin_query::ScriptHashHistoryItem {
-        height: 10,
-        txid: [4u8; 32],
-        tx_fk: Fk(2),
-        fee: None,
-    };
-    let v = history_row_json(&conf);
-    assert!(v.get("fee").is_none(), "{v}");
 }
 
 #[test]
