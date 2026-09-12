@@ -48,6 +48,9 @@ fn overlay_mempool_utxos(
         !mp.spends_outpoint(&op)
     });
     for item in mp.scripthash_mempool(sh) {
+        if out.iter().any(|u| u.tx_hash == item.txid) {
+            continue;
+        }
         let tid = bitcoin::Txid::from_byte_array(item.txid);
         let Some(tx) = mp.get_tx(&tid) else {
             continue;
@@ -91,10 +94,7 @@ pub fn scripthash_mempool_stats_slot(
     slot: &mut Option<ShJoinSlot>,
 ) -> Result<MempoolShStats, QueryError> {
     let items = mp.scripthash_mempool(sh);
-    let mut stats = MempoolShStats {
-        tx_count: items.len() as u32,
-        ..MempoolShStats::default()
-    };
+    let mut stats = MempoolShStats::default();
     for u in query.scripthash_listunspent_slot(sh, slot)? {
         let op = OutPoint {
             txid: bitcoin::Txid::from_byte_array(u.tx_hash),
@@ -106,6 +106,10 @@ pub fn scripthash_mempool_stats_slot(
         }
     }
     for item in items {
+        if query.tx_fk_by_txid_tip(&item.txid)?.is_some() {
+            continue;
+        }
+        stats.tx_count = stats.tx_count.saturating_add(1);
         let tid = bitcoin::Txid::from_byte_array(item.txid);
         let Some(tx) = mp.get_tx(&tid) else {
             continue;

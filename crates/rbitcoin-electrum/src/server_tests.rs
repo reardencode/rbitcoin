@@ -3268,6 +3268,134 @@ fn listunspent_mempool_child_height_is_minus_one() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Relay-off leftover: a confirmed tx still live in the hub must not
+/// double-count Electrum balance or listunspent (get_history already skips).
+#[test]
+fn confirmed_leftover_mempool_does_not_double_count() {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::hashes::Hash;
+    use bitcoin::script::ScriptBuf;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
+    use rbitcoin_consensus::{accept_and_connect_block, Milestone};
+    use rbitcoin_net::MempoolHub;
+    use rbitcoin_primitives::Height;
+    use std::sync::Arc;
+
+    let (dir, q) = tmp_store();
+    let params = ChainParams::regtest();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+    let (tip, tip_time, coinbase_txids) = rbitcoin_consensus::pad_empty_from(
+        &q,
+        &params,
+        genesis.block_hash(),
+        genesis.header.time,
+        1,
+        101,
+        1,
+    );
+    let q_arc = Arc::new(q);
+    let mp = MempoolHub::open(dir.join("mempool"), Arc::clone(&q_arc)).unwrap();
+    mp.set_relay_enabled(true);
+    let spk = ScriptBuf::from_bytes(vec![0x52]);
+    let value = 50_0000_0000 - 1_000;
+    let parent = Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: coinbase_txids[0],
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(value),
+            script_pubkey: spk.clone(),
+        }],
+    };
+    mp.accept_tx(&parent).expect("accept");
+    mp.set_relay_enabled(false);
+
+    let blk = rbitcoin_consensus::mine_regtest_paying(
+        tip,
+        tip_time + 600,
+        102,
+        ScriptBuf::from_bytes(vec![0x51]),
+        vec![parent.clone()],
+    );
+    accept_and_connect_block(q_arc.as_ref(), &params, Height(102), &blk, Milestone::NONE).unwrap();
+    q_arc.apply_sh_pending().unwrap();
+    assert!(
+        mp.contains(&parent.compute_txid()),
+        "relay off must leave the confirmed tx in the hub"
+    );
+
+    let sh = electrum_scripthash_hex(spk.as_bytes());
+    let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+    let mut header_sub = false;
+    let mut sh_subs = HashSet::new();
+    let want = rbitcoin_primitives::display_hash_hex(&parent.compute_txid().to_byte_array());
+    let bal = dispatch(
+        "blockchain.scripthash.get_balance",
+        &json!([sh]),
+        &q_arc,
+        &cfg,
+        &params,
+        Some(&mp),
+        &mut header_sub,
+        &mut sh_subs,
+    )
+    .unwrap();
+    assert_eq!(bal["confirmed"], value, "{bal}");
+    assert_eq!(
+        bal["unconfirmed"], 0,
+        "confirmed leftover must not add unconfirmed delta: {bal}"
+    );
+
+    let unspent = dispatch(
+        "blockchain.scripthash.listunspent",
+        &json!([sh]),
+        &q_arc,
+        &cfg,
+        &params,
+        Some(&mp),
+        &mut header_sub,
+        &mut sh_subs,
+    )
+    .unwrap();
+    let rows = unspent.as_array().unwrap();
+    let hits: Vec<_> = rows.iter().filter(|u| u["tx_hash"] == want).collect();
+    assert_eq!(hits.len(), 1, "duplicate confirmed+mempool UTXO: {unspent}");
+    assert!(hits[0]["height"].as_i64().unwrap() > 0, "{hits:?}");
+
+    let mem = dispatch(
+        "blockchain.scripthash.get_mempool",
+        &json!([sh]),
+        &q_arc,
+        &cfg,
+        &params,
+        Some(&mp),
+        &mut header_sub,
+        &mut sh_subs,
+    )
+    .unwrap();
+    let mem_hits: Vec<_> = mem
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|u| u["tx_hash"] == want)
+        .collect();
+    assert!(
+        mem_hits.is_empty(),
+        "get_mempool must skip leftover already connected on the tip: {mem}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Unused scripthash listunspent must not rebuild mempool spentness from
 /// every live body. Confirmed UTXOs spent by the mempool still drop.
 #[test]

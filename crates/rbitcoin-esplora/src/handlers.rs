@@ -17,7 +17,8 @@ use bitcoin::address::Address;
 use bitcoin::consensus::{deserialize, encode::serialize, Encodable};
 use bitcoin::hashes::Hash;
 use bitcoin::pow::{CompactTarget, Target};
-use bitcoin::{MerkleBlock, Network, Txid};
+use bitcoin::{MerkleBlock, Network, OutPoint, Txid};
+use rbitcoin_net::MempoolHub;
 use rbitcoin_primitives::{median_time_past_times, Height};
 use rbitcoin_query::{ChainViewKind, HistoryFilter, Query, ScriptHashChainStats};
 use rbitcoin_store::{script_hash, StoreError};
@@ -429,14 +430,25 @@ pub async fn tx_outspend(
         let Ok(txid) = parse_hash32(&txid_hex) else {
             return not_found();
         };
-        if st.query.tx_fk_by_txid(&txid).ok().flatten().is_none() {
+        let in_class_a = match st.query.tx_fk_by_txid(&txid) {
+            Ok(v) => v.is_some(),
+            Err(e) => return store_err(e),
+        };
+        let tid = Txid::from_byte_array(txid);
+        let in_mempool = st.mempool.as_ref().is_some_and(|m| m.contains(&tid));
+        if !in_class_a && (asof.is_some() || !in_mempool) {
             return not_found();
         }
         let view = match pin_or_reject(&st.query, ChainViewKind::Tip, asof) {
             Ok(v) => v,
             Err(r) => return r,
         };
-        match outspend_json(&st.query, &txid, vout, view.as_ref()) {
+        let mp = if asof.is_none() {
+            st.mempool.as_deref()
+        } else {
+            None
+        };
+        match outspend_json(&st.query, mp, &txid, vout, view.as_ref()) {
             Ok(v) => maybe_attach_view(Json(v).into_response(), view),
             Err(e) => store_err(e),
         }
@@ -453,23 +465,40 @@ pub async fn tx_outspends(
         let Ok(txid) = parse_hash32(&txid_hex) else {
             return not_found();
         };
-        let Some(fk) = (match st.query.tx_fk_by_txid(&txid) {
+        let fk = match st.query.tx_fk_by_txid(&txid) {
             Ok(v) => v,
             Err(e) => return store_err(e),
-        }) else {
-            return not_found();
+        };
+        let nout = if let Some(fk) = fk {
+            match st.query.store().get_tx_meta_and_outputs(fk) {
+                Ok((meta, _)) => meta.output_count,
+                Err(e) => return store_err(e),
+            }
+        } else {
+            if asof.is_some() {
+                return not_found();
+            }
+            let Some(mp) = st.mempool.as_ref() else {
+                return not_found();
+            };
+            let tid = Txid::from_byte_array(txid);
+            let Some(tx) = mp.get_tx(&tid) else {
+                return not_found();
+            };
+            tx.output.len() as u32
         };
         let view = match pin_or_reject(&st.query, ChainViewKind::Tip, asof) {
             Ok(v) => v,
             Err(r) => return r,
         };
-        let (meta, _) = match st.query.store().get_tx_meta_and_outputs(fk) {
-            Ok(v) => v,
-            Err(e) => return store_err(e),
+        let mp = if asof.is_none() {
+            st.mempool.as_deref()
+        } else {
+            None
         };
-        let mut arr = Vec::with_capacity(meta.output_count as usize);
-        for vout in 0..meta.output_count {
-            match outspend_json(&st.query, &txid, vout, view.as_ref()) {
+        let mut arr = Vec::with_capacity(nout as usize);
+        for vout in 0..nout {
+            match outspend_json(&st.query, mp, &txid, vout, view.as_ref()) {
                 Ok(v) => arr.push(v),
                 Err(e) => return store_err(e),
             }
@@ -481,25 +510,38 @@ pub async fn tx_outspends(
 
 fn outspend_json(
     query: &Query,
+    mempool: Option<&MempoolHub>,
     txid: &[u8; 32],
     vout: u32,
     view: Option<&rbitcoin_query::ChainView>,
 ) -> Result<Value, rbitcoin_query::QueryError> {
-    let Some(view) = view else {
-        return Ok(json!({ "spent": false }));
-    };
-    let spenders = query.spenders_at(txid, vout, Some(view.height.0))?;
-    if spenders.is_empty() {
-        return Ok(json!({ "spent": false }));
+    if let Some(view) = view {
+        let spenders = query.spenders_at(txid, vout, Some(view.height.0))?;
+        if !spenders.is_empty() {
+            let p = &spenders[0];
+            let spend_txid = query.store().txs.body_txid(p.spending_tx_fk)?;
+            let status = tx_status_json_in(query, p.spending_tx_fk, view)?;
+            return Ok(json!({
+                "spent": true,
+                "txid": block_hash_hex(&spend_txid),
+                "status": status,
+            }));
+        }
     }
-    let p = &spenders[0];
-    let spend_txid = query.store().txs.body_txid(p.spending_tx_fk)?;
-    let status = tx_status_json_in(query, p.spending_tx_fk, view)?;
-    Ok(json!({
-        "spent": true,
-        "txid": block_hash_hex(&spend_txid),
-        "status": status,
-    }))
+    if let Some(mp) = mempool {
+        let op = OutPoint {
+            txid: Txid::from_byte_array(*txid),
+            vout,
+        };
+        if let Some(spend) = mp.spending_txid(&op) {
+            return Ok(json!({
+                "spent": true,
+                "txid": block_hash_hex(&spend.to_byte_array()),
+                "status": { "confirmed": false },
+            }));
+        }
+    }
+    Ok(json!({ "spent": false }))
 }
 
 pub(crate) async fn spawn_join(f: impl FnOnce() -> Response + Send + 'static) -> Response {
@@ -1215,7 +1257,7 @@ mod pure_helper_tests {
             .set_strong(spend_fk, view.header_fk)
             .unwrap();
         q.store().rebuild_height_fence().unwrap();
-        let v = outspend_json(&q, &[0xcb; 32], 0, Some(&view)).unwrap();
+        let v = outspend_json(&q, None, &[0xcb; 32], 0, Some(&view)).unwrap();
         assert_eq!(v["spent"], true, "{v}");
         assert!(v.get("txid").is_some(), "{v}");
         assert!(

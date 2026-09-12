@@ -652,7 +652,7 @@ pub(crate) fn method_help(m: &str) -> String {
              {isvalid:false} only (no error_locations)."
             .into(),
         "gettxout" => "gettxout txid n (include_mempool)\n\
-             Class A + mempool. Default include_mempool hides confirmed outs spent by a live mempool tx."
+             Connected Class A + mempool. Default include_mempool hides confirmed outs spent by a live mempool tx."
             .into(),
         "sendrawtransaction" => {
             "sendrawtransaction hexstring (maxfeerate) (maxburnamount)\n\

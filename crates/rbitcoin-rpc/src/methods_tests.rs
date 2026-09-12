@@ -1485,6 +1485,64 @@ fn gettxout_include_mempool_hides_mempool_spent_confirmed() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn gettxout_disconnected_archive_row_is_null() {
+    let (ctx, dir, _hub) = ctx_regtest_hub();
+    let (addr, _) = p2wpkh_regtest();
+    dispatch(&ctx, "generatetoaddress", vec![json!(2), json!(addr)]).unwrap();
+    let tip = dispatch(&ctx, "getbestblockhash", vec![])
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+    let blk = dispatch(&ctx, "getblock", vec![json!(tip.clone()), json!(2)]).unwrap();
+    let cb_txid = blk["tx"][0]["txid"].as_str().unwrap().to_string();
+    let live = dispatch(
+        &ctx,
+        "gettxout",
+        vec![json!(cb_txid.clone()), json!(0), json!(false)],
+    )
+    .unwrap();
+    assert_eq!(live["coinbase"], true, "{live}");
+    dispatch(&ctx, "invalidateblock", vec![json!(tip)]).unwrap();
+    let gone = dispatch(
+        &ctx,
+        "gettxout",
+        vec![json!(cb_txid), json!(0), json!(false)],
+    )
+    .unwrap();
+    assert!(
+        gone.is_null(),
+        "disconnected Class A row must not be a UTXO: {gone}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn gettxout_leftover_is_connected_not_unconfirmed() {
+    let (ctx, dir, _hub) = ctx_regtest_hub();
+    let (hex, spend) = mature_coinbase_spend_hex(&ctx, 50_0000_0000 - 1_000);
+    dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
+    ctx.mempool.as_ref().unwrap().set_relay_enabled(false);
+    dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
+    let tid = spend.compute_txid();
+    assert!(
+        ctx.mempool.as_ref().unwrap().contains(&tid),
+        "relay off must leave the confirmed tx in the hub"
+    );
+    let txid = hash_hex_display(&tid.to_byte_array());
+    let utxo = dispatch(&ctx, "gettxout", vec![json!(txid), json!(0)]).unwrap();
+    assert_ne!(
+        utxo["confirmations"], 0,
+        "default include_mempool must not treat a tip-connected leftover as mempool-only: {utxo}"
+    );
+    assert!(
+        utxo["confirmations"].as_u64().unwrap() >= 1,
+        "leftover must use the connected path: {utxo}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn mature_coinbase_spend(
     ctx: &RpcContext,
     keep_sat: u64,

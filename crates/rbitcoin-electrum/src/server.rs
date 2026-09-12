@@ -1338,7 +1338,9 @@ fn dispatch_pinned(
             )?;
             if !is_asof && asof.is_none() {
                 if let Some(mp) = mempool {
-                    b.unconfirmed = mp.scripthash_unconfirmed_delta(&sh);
+                    b.unconfirmed = mp
+                        .scripthash_unconfirmed_delta(&sh)
+                        .map_err(|e| e.to_string())?;
                 }
             }
             Ok(json!({"confirmed": b.confirmed, "unconfirmed": b.unconfirmed}))
@@ -1412,16 +1414,21 @@ fn dispatch_pinned(
             let items = mempool
                 .map(|m| m.scripthash_mempool(&sh))
                 .unwrap_or_default();
-            let arr: Vec<Value> = items
-                .iter()
-                .map(|i| {
-                    json!({
-                        "height": i.height,
-                        "tx_hash": txid_hex(&i.txid),
-                        "fee": i.fee,
-                    })
-                })
-                .collect();
+            let mut arr = Vec::with_capacity(items.len());
+            for i in items {
+                if query
+                    .tx_fk_by_txid_tip(&i.txid)
+                    .map_err(|e| e.to_string())?
+                    .is_some()
+                {
+                    continue;
+                }
+                arr.push(json!({
+                    "height": i.height,
+                    "tx_hash": txid_hex(&i.txid),
+                    "fee": i.fee,
+                }));
+            }
             Ok(Value::Array(arr))
         }
         "blockchain.transaction.get" => {
@@ -1781,13 +1788,17 @@ fn history_row_json(i: &rbitcoin_query::ScriptHashHistoryItem) -> Value {
     row
 }
 
+fn history_has_txid(hist: &[rbitcoin_query::ScriptHashHistoryItem], txid: &[u8; 32]) -> bool {
+    hist.iter().any(|h| h.txid == *txid)
+}
+
 fn append_mempool_history(
     hist: &mut Vec<rbitcoin_query::ScriptHashHistoryItem>,
     mp: &MempoolHub,
     sh: &[u8; 32],
 ) {
     for item in mp.scripthash_mempool(sh) {
-        if hist.iter().any(|h| h.txid == item.txid) {
+        if history_has_txid(hist, &item.txid) {
             continue;
         }
         hist.push(rbitcoin_query::ScriptHashHistoryItem {

@@ -464,8 +464,12 @@ pub(crate) fn gettxout(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Va
     let n = params.req_u64(1, "n")? as u32;
     let include_mempool = params.opt_bool(2, "include_mempool")?.unwrap_or(true);
     let want = parse_hash32_display(hex)?;
+    let connected = ctx
+        .query
+        .tx_fk_by_txid_tip(&want)
+        .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?;
 
-    if include_mempool {
+    if include_mempool && connected.is_none() {
         if let Some(mp) = ctx.mempool.as_ref() {
             let tid = Txid::from_byte_array(want);
             if let Some(tx) = mp.get_tx(&tid) {
@@ -485,14 +489,13 @@ pub(crate) fn gettxout(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Va
         }
     }
 
-    let (fk, rec) = match ctx
-        .query
-        .get_tx_by_txid(&want)
-        .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?
-    {
-        Some(v) => v,
-        None => return Ok(Value::Null),
+    let Some(fk) = connected else {
+        return Ok(Value::Null);
     };
+    let rec = ctx
+        .query
+        .get_tx(fk)
+        .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?;
     if ctx
         .query
         .is_outpoint_spent(&want, n)

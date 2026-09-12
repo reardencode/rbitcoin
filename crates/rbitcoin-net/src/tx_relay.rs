@@ -2253,19 +2253,40 @@ impl MempoolHub {
 
     /// Unconfirmed delta for Electrum balance (sats): +mempool outputs − spent confirmed.
     ///
+    /// Skips txs already connected on the tip (`tx_fk_by_txid_tip`) so a leftover
+    /// live entry after IBD / `-blocksonly` (`remove_for_block` is a no-op while
+    /// relay is off) cannot double-count confirmed value.
+    ///
     /// Uses [`MempoolShIndex`] (same as `scripthash_mempool`). A full-graph walk
     /// plus chain `get_txout` per input is ~1.5 s per empty Cake key on a live
     /// mainnet mempool.
-    pub fn scripthash_unconfirmed_delta(&self, scripthash: &[u8; 32]) -> i64 {
+    pub fn scripthash_unconfirmed_delta(
+        &self,
+        scripthash: &[u8; 32],
+    ) -> Result<i64, rbitcoin_query::QueryError> {
         use rbitcoin_store::script_hash;
         let want: Vec<Txid> = self.sh_index.lock().unwrap().txs_for(scripthash).collect();
         if want.is_empty() {
-            return 0;
+            return Ok(0);
+        }
+        let mut kept = Vec::with_capacity(want.len());
+        for txid in want {
+            if self
+                .query
+                .tx_fk_by_txid_tip(&txid.to_byte_array())?
+                .is_some()
+            {
+                continue;
+            }
+            kept.push(txid);
+        }
+        if kept.is_empty() {
+            return Ok(0);
         }
         let g = self.lock_read();
         let mut delta = 0i64;
         let provider = self.utxo_provider();
-        for txid in want {
+        for txid in kept {
             let Some(tx) = g.get_tx(&txid) else { continue };
             for (vout, o) in tx.output.iter().enumerate() {
                 if script_hash(o.script_pubkey.as_bytes()) != *scripthash {
@@ -2293,7 +2314,7 @@ impl MempoolHub {
                 }
             }
         }
-        delta
+        Ok(delta)
     }
 
     /// Block weight (WU) used for inclusion-frontier depth.
@@ -2592,7 +2613,7 @@ mod tests {
             let rows = hub.scripthash_mempool(&sh);
             assert!(rows.len() >= 2);
             assert!(rows.iter().any(|r| r.height == -1));
-            let delta = hub.scripthash_unconfirmed_delta(&sh);
+            let delta = hub.scripthash_unconfirmed_delta(&sh).unwrap();
             assert_eq!(delta, 50_0000_0000 - 2_000 - 50_0000_0000 - 50_0000_0000);
             assert!(hub.is_relay_servable(&wtxid, hub.current_relay_seq()));
             assert!(hub.remove_for_block(&[parent.compute_txid()]) >= 1);
@@ -2644,10 +2665,10 @@ mod tests {
             let z = hub.sample_reset_perf();
             assert_eq!(z.accepts, 0);
             let unused = script_hash(&[0x00]);
-            assert_eq!(hub.scripthash_unconfirmed_delta(&unused), 0);
+            assert_eq!(hub.scripthash_unconfirmed_delta(&unused).unwrap(), 0);
             let s = hub.sample_reset_perf();
             assert_eq!(s.delta_prevouts, 0);
-            assert_eq!(hub.scripthash_unconfirmed_delta(&sh), -fee_sum);
+            assert_eq!(hub.scripthash_unconfirmed_delta(&sh).unwrap(), -fee_sum);
             let _ = std::fs::remove_dir_all(&mp);
         }
 
@@ -3072,7 +3093,7 @@ mod tests {
         assert!(hub.estimate_fee_btc_per_kb(2) < 0.0 || hub.estimate_fee_btc_per_kb(2) >= 0.0);
         assert!(MempoolHub::relay_fee_btc_per_kb() > 0.0);
         assert!(hub.scripthash_mempool(&[0u8; 32]).is_empty());
-        assert_eq!(hub.scripthash_unconfirmed_delta(&[0u8; 32]), 0);
+        assert_eq!(hub.scripthash_unconfirmed_delta(&[0u8; 32]).unwrap(), 0);
         assert!(hub.list_live().is_empty());
         assert!(!hub.contains_wtxid(&Wtxid::from_byte_array([0u8; 32])));
         assert!(hub
