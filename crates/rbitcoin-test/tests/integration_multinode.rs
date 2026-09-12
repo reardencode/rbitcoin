@@ -2,7 +2,8 @@
 //!
 //! **Tier A (default + CI `multinode` job):** single-hop IBD (8 blocks), cold
 //! reconstruct serve (10 blocks). Hard wall timeouts; hang-free on CI-class hosts.
-//! **Tier B (default suite pure):** non-IBD reorg / hub tests.
+//! **Tier B (default suite):** handshake timeout / GetAddr / keepalive ping,
+//! hub reorg (including leftover/BadPrev orphan that must not blacklist).
 //! **Tier C (`#[ignore]`):** multi-hop, tip-follow, 48-block dual seeder, mesh —
 //! `scripts/integration.sh` or `-- --ignored` only.
 
@@ -78,6 +79,159 @@ async fn two_node_header_and_block_sync() {
     tokio::time::timeout(Duration::from_secs(60), fut)
         .await
         .expect("two_node_header_and_block_sync wall timeout (60s)");
+}
+
+/// In-tree P2P client (no Core functional): peertimeout of a v1-magic inbound,
+/// AddrFetch GetAddr, and one post-verack keepalive ping/pong.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn p2p_timeout_getaddr_and_keepalive_ping() {
+    use rbitcoin_net::{AddrMan, PeerConnType};
+    use std::sync::{Arc, Mutex};
+    use tokio::io::AsyncWriteExt;
+
+    let fut = async {
+        let seed_dir = TempDir::new().unwrap();
+        let peer_dir = TempDir::new().unwrap();
+        let seed = start_node(&seed_dir).await;
+        seed.peers.set_peer_timeout_secs(1);
+
+        let mut book = AddrMan::new();
+        book.add(std::net::SocketAddr::from(([1, 2, 3, 4], 8333)));
+        seed.peers.set_addrman(Arc::new(Mutex::new(book)));
+
+        let mut peer = start_node(&peer_dir).await;
+        tokio::time::timeout(Duration::from_secs(5), peer.follow_from(seed.local_addr))
+            .await
+            .expect("follow_from must return after handshake")
+            .expect("follow handshake");
+        assert!(
+            peer.follow_live_count() >= 1,
+            "outbound session must stay live after follow_from"
+        );
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let inbound = seed
+            .peers
+            .snapshot()
+            .into_iter()
+            .find(|p| p.inbound && !p.subver.is_empty())
+            .expect("seed inbound after handshake");
+        let ping = inbound.bytesrecv_per_msg.get("ping").copied().unwrap_or(0);
+        assert_eq!(
+            ping, 32,
+            "one 8-byte ping (acct +24), not a second interval ping: {ping}"
+        );
+        let outbound = peer
+            .peers
+            .snapshot()
+            .into_iter()
+            .find(|p| !p.inbound)
+            .expect("outbound session");
+        let pong = outbound.bytesrecv_per_msg.get("pong").copied().unwrap_or(0);
+        assert!(pong >= 29, "connect_nodes pong bytes {pong}");
+        assert!(
+            outbound.pingwait.is_none(),
+            "first pong must match the outstanding nonce (pingwait={:?})",
+            outbound.pingwait
+        );
+
+        let magic = bitcoin::p2p::Magic::from(bitcoin::Network::Regtest).to_bytes();
+        let mut raw = tokio::net::TcpStream::connect(seed.local_addr)
+            .await
+            .expect("tcp to seed");
+        raw.write_all(&magic).await.expect("write v1 magic");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let mut saw_connecting = false;
+        loop {
+            let connecting = seed
+                .peers
+                .snapshot()
+                .into_iter()
+                .filter(|p| p.inbound && p.subver.is_empty())
+                .count();
+            if connecting >= 1 {
+                saw_connecting = true;
+            }
+            if saw_connecting && connecting == 0 {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!(
+                    "v1-magic inbound must register then drop at peertimeout=1s \
+                     (saw_connecting={saw_connecting} still={connecting})"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        drop(raw);
+
+        for id in peer
+            .peers
+            .snapshot()
+            .into_iter()
+            .filter(|p| !p.inbound)
+            .map(|p| p.id)
+        {
+            peer.peers.disconnect_id(id);
+        }
+        let drop_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let follow_in = seed
+                .peers
+                .snapshot()
+                .into_iter()
+                .any(|p| p.inbound && !p.subver.is_empty());
+            if !follow_in {
+                break;
+            }
+            if tokio::time::Instant::now() >= drop_deadline {
+                panic!("follow inbound must drop before AddrFetch");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        peer.peers
+            .addconnection(seed.local_addr, PeerConnType::AddrFetch)
+            .expect("addrfetch dial");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let seed_got_getaddr = seed
+                .peers
+                .snapshot()
+                .into_iter()
+                .any(|p| p.bytesrecv_per_msg.get("getaddr").copied().unwrap_or(0) > 0);
+            let fetch_got_addr = peer.peers.snapshot().into_iter().any(|p| {
+                p.conn_type == PeerConnType::AddrFetch
+                    && (p.bytesrecv_per_msg.get("addrv2").copied().unwrap_or(0) > 0
+                        || p.bytesrecv_per_msg.get("addr").copied().unwrap_or(0) > 0)
+            });
+            if seed_got_getaddr && fetch_got_addr {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!(
+                    "AddrFetch must GetAddr and receive addr/addrv2 \
+                     (seed_getaddr={seed_got_getaddr})"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        for id in peer
+            .peers
+            .snapshot()
+            .into_iter()
+            .filter(|p| p.conn_type == PeerConnType::AddrFetch)
+            .map(|p| p.id)
+        {
+            peer.peers.disconnect_id(id);
+        }
+
+        seed.shutdown().await;
+        peer.shutdown().await;
+    };
+    tokio::time::timeout(Duration::from_secs(20), fut)
+        .await
+        .expect("p2p_timeout_getaddr_and_keepalive_ping wall timeout (20s)");
 }
 
 /// Phase 4: seeder restarts with empty RAM cache; peer IBD-syncs via reconstruct
@@ -449,6 +603,72 @@ async fn reorg_to_longer_branch() {
     assert!(matches!(outcome, AcceptOutcome::Accepted { height: 6 }));
     assert_eq!(hub.tip_height(), Some(6));
     assert_eq!(hub.tip_hash().unwrap(), branch.last().unwrap().block_hash());
+}
+
+/// Leftover/BadPrev: an orphan whose parent is not on the tip must be held, not
+/// `BLOCK_FAILED`. Applying the full winner path then reconstructs the new tip.
+#[test]
+fn badprev_orphan_does_not_blacklist_then_reorg_reconstructs() {
+    use rbitcoin_consensus::{ChainParams, Milestone};
+    use rbitcoin_net::{AcceptOutcome, ChainHub};
+
+    let dir = TempDir::new().unwrap();
+    let q = Query::open_or_create_tiny(dir.path().join("store")).unwrap();
+    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+
+    let genesis = regtest_genesis();
+    hub.accept_block(genesis.clone()).unwrap();
+    let mut tip = genesis.block_hash();
+    let mut time = genesis.header.time;
+    for h in 1..=2u32 {
+        let b = mine_regtest_block(tip, time + 600, h, vec![]);
+        tip = b.block_hash();
+        time = b.header.time;
+        hub.accept_block(b).unwrap();
+    }
+    assert_eq!(hub.tip_height(), Some(2));
+    let lose_tip = hub.tip_hash().unwrap();
+
+    let mut p = genesis.block_hash();
+    let mut t = genesis.header.time;
+    let mut winner = Vec::new();
+    for h in 1..=3u32 {
+        let b = mine_regtest_block(p, t + 601, h, vec![]);
+        p = b.block_hash();
+        t = b.header.time;
+        winner.push(b);
+    }
+    let w3 = winner.last().unwrap().clone();
+    let outcome = hub.accept_received_block(w3.clone()).unwrap();
+    assert!(
+        matches!(outcome, AcceptOutcome::IgnoredWeaker),
+        "orphan whose prev is not on the tip must not connect: {outcome:?}"
+    );
+    assert_eq!(hub.tip_height(), Some(2));
+    assert_eq!(hub.tip_hash().unwrap(), lose_tip);
+    assert!(
+        hub.held_body(&w3.block_hash()).is_some(),
+        "orphan body is held, not permanent-blacklist"
+    );
+
+    let outcome = hub.accept_branch(&winner).unwrap();
+    assert!(matches!(outcome, AcceptOutcome::Accepted { height: 3 }));
+    assert_eq!(hub.tip_height(), Some(3));
+    assert_eq!(hub.tip_hash().unwrap(), w3.block_hash());
+    assert_eq!(
+        hub.query
+            .reconstruct_block_at_height(Height(3))
+            .unwrap()
+            .block_hash(),
+        w3.block_hash()
+    );
+    assert_eq!(
+        hub.query
+            .reconstruct_block_at_height(Height(2))
+            .unwrap()
+            .block_hash(),
+        winner[1].block_hash()
+    );
 }
 
 /// Competing spends of the same coinbase on two forks promote multi-list
