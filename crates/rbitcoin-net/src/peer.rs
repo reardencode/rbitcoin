@@ -3447,8 +3447,8 @@ fn work_of_header_path(
                 std::iter::once(base).chain(extra),
             ));
         }
-        let hdr = pending.get(&h)?;
-        if !hub.header_claimed_pow_ok(hdr) {
+        let hdr = pending.get(&h).copied().or_else(|| hub.header_of(&h))?;
+        if !hub.header_claimed_pow_ok(&hdr) {
             return None;
         }
         extra.push(hdr.work());
