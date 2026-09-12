@@ -1014,6 +1014,55 @@ fn pin_and_ensure_journey() {
         bp.get_spender_abs(pfk, 0),
         Some(rbitcoin_store::spent_abs(spent_off, 0))
     );
+    let pinned_spent: Vec<u64> = q
+        .store()
+        .spent_range_batch_fks()
+        .into_iter()
+        .filter(|&id| id == parent_id)
+        .collect();
+    assert_eq!(
+        pinned_spent.len(),
+        1,
+        "pinned hole pays one spent.idx batch: {pinned_spent:?}"
+    );
+
+    let cold_tx = rec_tx(0x33, 1);
+    let cold_outs = vec![OutputRecord::unspent(50, vec![0x51])];
+    let cold_ins = vec![InputRecord::coinbase(u32::MAX, vec![0x02], vec![])];
+    let cfk = q
+        .store()
+        .put_tx_full_batch_indexed(&[(cold_tx.clone(), cold_ins, cold_outs)], true)
+        .unwrap()[0];
+    let cid = cfk.get().unwrap();
+    let prepared_cold = [Prepared {
+        height: Height(1),
+        header_fk: Fk(1),
+        tx_fks: vec![Fk(3)],
+        jobs: vec![],
+        spends: vec![([0x33u8; 32], 0, Fk(3), cfk)],
+        fees: 0,
+        check_scripts: false,
+        time: 1,
+        bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
+        hash: [5u8; 32],
+        txids: vec![],
+        prev_mtp: 0,
+    }];
+    let mut bp_cold = BatchParents::new();
+    q.store().reset_spent_range_batch();
+    ensure_spend_abs_layouts(&q, &mut bp_cold, &prepared_cold).expect("unpinned leftover ensure");
+    assert!(bp_cold.has_abs_layout(cfk));
+    let cold_spent: Vec<u64> = q
+        .store()
+        .spent_range_batch_fks()
+        .into_iter()
+        .filter(|&id| id == cid)
+        .collect();
+    assert_eq!(
+        cold_spent.len(),
+        1,
+        "unpinned leftover fk must not pay spent.idx twice: {cold_spent:?}"
+    );
 
     let mut plan3 = ArchiveWritePlan::empty();
     plan3.packed = vec![(

@@ -431,6 +431,30 @@ pub(super) fn pin_for_wire_batch(
     Ok((batch_parents, spend_edges))
 }
 
+fn stamp_spent_ranges(
+    query: &Query,
+    batch_parents: &mut rbitcoin_query::BatchParents,
+    ids: impl IntoIterator<Item = u64>,
+) -> Result<(), ConsensusError> {
+    let mut spent_fks: Vec<rbitcoin_primitives::Fk> =
+        ids.into_iter().map(rbitcoin_primitives::Fk).collect();
+    spent_fks.sort_unstable_by_key(|f| f.0);
+    spent_fks.dedup();
+    if spent_fks.is_empty() {
+        return Ok(());
+    }
+    let spent = query
+        .store()
+        .tx_spent_range_batch(&spent_fks)
+        .map_err(ConsensusError::from)?;
+    for (fk, opt) in spent_fks.iter().zip(spent) {
+        if let Some(sr) = opt {
+            batch_parents.set_spent_range_only(*fk, sr);
+        }
+    }
+    Ok(())
+}
+
 /// Ensure spend abs for every spend edge on the write batch.
 ///
 /// Lookup stamps archived-parent `spent.idx` ranges; load copies them onto
@@ -472,24 +496,12 @@ pub(super) fn ensure_spend_abs_layouts(
         vouts.dedup();
     }
 
-    // Stamp spent.body ranges first so abs = spent_off + SLOT×vout (idx only).
-    {
-        let mut spent_fks: Vec<rbitcoin_primitives::Fk> =
-            need.keys().map(|id| rbitcoin_primitives::Fk(*id)).collect();
-        spent_fks.sort_unstable_by_key(|f| f.0);
-        spent_fks.dedup();
-        if !spent_fks.is_empty() {
-            let spent = query
-                .store()
-                .tx_spent_range_batch(&spent_fks)
-                .map_err(ConsensusError::from)?;
-            for (fk, opt) in spent_fks.iter().zip(spent) {
-                if let Some(sr) = opt {
-                    batch_parents.set_spent_range_only(*fk, sr);
-                }
-            }
-        }
-    }
+    let first: Vec<u64> = need
+        .keys()
+        .copied()
+        .filter(|&id| batch_parents.contains(rbitcoin_primitives::Fk(id)))
+        .collect();
+    stamp_spent_ranges(query, batch_parents, first)?;
 
     let mut ensure_res = 0u64;
     let mut still: U64Map<Vec<u32>> = U64Map::default();
@@ -569,22 +581,15 @@ pub(super) fn ensure_spend_abs_layouts(
             };
             batch_parents.insert_owned(c.fk, tx, live, checked, cb, Some(c.body_range), sparse);
         }
-        let mut spent_fks: Vec<rbitcoin_primitives::Fk> = still
+        let after: Vec<u64> = still
             .keys()
-            .map(|id| rbitcoin_primitives::Fk(*id))
+            .copied()
+            .filter(|&id| {
+                let fk = rbitcoin_primitives::Fk(id);
+                batch_parents.contains(fk) && !batch_parents.has_abs_layout(fk)
+            })
             .collect();
-        spent_fks.sort_unstable_by_key(|f| f.0);
-        if !spent_fks.is_empty() {
-            let spent = query
-                .store()
-                .tx_spent_range_batch(&spent_fks)
-                .map_err(ConsensusError::from)?;
-            for (fk, opt) in spent_fks.iter().zip(spent) {
-                if let Some(sr) = opt {
-                    batch_parents.set_spent_range_only(*fk, sr);
-                }
-            }
-        }
+        stamp_spent_ranges(query, batch_parents, after)?;
     }
 
     for p in prepared {
