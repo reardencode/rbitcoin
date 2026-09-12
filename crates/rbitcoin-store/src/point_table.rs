@@ -230,7 +230,18 @@ mod tests {
         put_spend_on_create(&txs, &spenders, create, 0, s2).unwrap();
         let (_multi, head) = txs.get_output_spender_meta(create, 0).unwrap();
         let (_sfk, older) = spenders.get(head).unwrap();
-        spenders.overwrite_next(older, head).unwrap();
+        let older_id = older.get().unwrap();
+        let off = crate::file::FILE_HEADER_LEN as u64
+            + (older_id - 1) * crate::spender_table::SPENDER_RECORD_LEN as u64;
+        let ovf = crate::file::TableFile::open(
+            dir.join(crate::spender_table::SPENT_OVF_NAME),
+            rbitcoin_primitives::TableKind::Spender,
+        )
+        .unwrap();
+        let mut rec = [0u8; crate::spender_table::SPENDER_RECORD_LEN];
+        ovf.read_at(off, &mut rec).unwrap();
+        rec[8..16].copy_from_slice(&head.0.to_le_bytes());
+        ovf.write_at(off, &rec).unwrap();
         match for_each_spender_create(&txs, &spenders, create, 0, |_| Ok(true)) {
             Err(StoreError::Corrupt(m)) => {
                 assert!(m.contains("cycle"), "{m}");

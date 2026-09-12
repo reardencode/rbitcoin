@@ -103,15 +103,6 @@ impl SpenderTable {
         ))
     }
 
-    #[cfg(test)]
-    pub(crate) fn overwrite_next(&self, fk: Fk, next: Fk) -> Result<(), StoreError> {
-        let id = fk.get().ok_or(StoreError::InvalidFk)?;
-        let mut buf = [0u8; SPENDER_RECORD_LEN];
-        self.body.read_at(Self::offset(id), &mut buf)?;
-        buf[8..16].copy_from_slice(&next.0.to_le_bytes());
-        self.body.write_at(Self::offset(id), &buf)
-    }
-
     pub fn flush(&self) -> Result<(), StoreError> {
         self.body.flush()
     }

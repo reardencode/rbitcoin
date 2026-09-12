@@ -83,8 +83,7 @@ pub use scripthash_materialize::{
 };
 pub(crate) use sorted_run::host_mem_available_bytes;
 pub use sorted_run::{
-    free_gib_label, list_materialize_claims, list_runs, list_runs_gc, next_run_path,
-    write_sorted_run, RunsIoGuard,
+    free_gib_label, list_materialize_claims, list_runs, next_run_path, write_sorted_run,
 };
 pub use sp_tweaks::SpTweaksTable;
 pub use sp_tweaks_uring::load_tweak_wave;
