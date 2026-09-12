@@ -685,22 +685,11 @@ mod tests {
         )
     }
 
-    /// Pre-ground v2 48-bit wtxid short-id collision: orphan unique-match on a held fork.
-    #[test]
-    fn cmpct_wtxid_shortid_collision_held_fork_journey() {
-        use crate::chain::AcceptOutcome;
-        use crate::error::NetError;
-        use rbitcoin_consensus::mine_empty_regtest;
-        use std::sync::Arc;
-
-        let (block, collider) = load_wtxid_shortid_collision();
-        let (stale, winner) = collision_parents();
-        assert_eq!(block.header.prev_blockhash, winner.block_hash());
+    fn collision_hsi(block: &Block, collider: &Transaction) -> HeaderAndShortIds {
         assert_eq!(block.txdata.len(), 2);
         let block_tx = &block.txdata[1];
         assert_ne!(block_tx.compute_txid(), collider.compute_txid());
         assert_ne!(block_tx.compute_wtxid(), collider.compute_wtxid());
-
         let keys = ShortId::calculate_siphash_keys(&block.header, COLLISION_CMPCT_NONCE);
         let sid_block = ShortId::with_siphash_keys(&block_tx.compute_wtxid().to_raw_hash(), keys);
         let sid_col = ShortId::with_siphash_keys(&collider.compute_wtxid().to_raw_hash(), keys);
@@ -708,22 +697,79 @@ mod tests {
             sid_block, sid_col,
             "fixture must be a v2 short-id collision"
         );
-
-        let hsi = HeaderAndShortIds::from_block(&block, COLLISION_CMPCT_NONCE, 2, &[]).unwrap();
+        let hsi = HeaderAndShortIds::from_block(block, COLLISION_CMPCT_NONCE, 2, &[]).unwrap();
         assert_eq!(hsi.short_ids, vec![sid_block]);
-        let mut avail: HashMap<ShortId, Vec<&Transaction>> = HashMap::new();
-        avail.insert(sid_col, vec![&collider]);
-        let missing = try_reconstruct(&hsi, &avail, 2).expect_err("collider unique fill");
+        hsi
+    }
+
+    fn assert_collider_fill_getdata<T: std::borrow::Borrow<Transaction>>(
+        hsi: &HeaderAndShortIds,
+        avail: &HashMap<ShortId, Vec<T>>,
+    ) {
+        let missing = try_reconstruct(hsi, avail, 2).expect_err("collider unique fill");
         assert!(
             missing.is_empty(),
             "48-bit unique fill must getdata, got {missing:?}"
         );
+    }
+
+    fn mutated_collision_body(block: &Block, collider: &Transaction) -> Block {
         let mutated = Block {
             header: block.header,
             txdata: vec![block.txdata[0].clone(), collider.clone()],
         };
         assert_eq!(mutated.block_hash(), block.block_hash());
         assert!(!mutated.check_merkle_root());
+        mutated
+    }
+
+    fn assert_mutated_not_block_failed(
+        hub: &crate::chain::ChainHub,
+        mutated: Block,
+        hash: bitcoin::BlockHash,
+    ) {
+        use crate::error::NetError;
+        let err = hub
+            .accept_received_block(mutated)
+            .expect_err("v0.6.0 would accept this reconstructed body");
+        match &err {
+            NetError::Mutated(s) | NetError::Consensus(s) => {
+                assert!(
+                    s.contains("merkle") || s.contains("bad-txnmrklroot"),
+                    "got {s}"
+                );
+            }
+            NetError::ConnectFailed { msg, hash: h } => {
+                assert!(
+                    msg.contains("merkle") || msg.contains("bad-txnmrklroot"),
+                    "got {msg}"
+                );
+                assert_eq!(*h, hash.to_byte_array());
+            }
+            other => panic!("expected mutated reject, got {other:?}"),
+        }
+        assert!(
+            !hub.is_block_invalid(&hash),
+            "short-id collision reconstruct must not BLOCK_FAILED the header"
+        );
+    }
+
+    /// Pre-ground v2 48-bit wtxid short-id collision: orphan unique-match on a held fork.
+    #[test]
+    fn cmpct_wtxid_shortid_collision_held_fork_journey() {
+        use crate::chain::AcceptOutcome;
+        use rbitcoin_consensus::mine_empty_regtest;
+        use std::sync::Arc;
+
+        let (block, collider) = load_wtxid_shortid_collision();
+        let (stale, winner) = collision_parents();
+        assert_eq!(block.header.prev_blockhash, winner.block_hash());
+        let hsi = collision_hsi(&block, &collider);
+        let sid = hsi.short_ids[0];
+        let mut avail: HashMap<ShortId, Vec<&Transaction>> = HashMap::new();
+        avail.insert(sid, vec![&collider]);
+        assert_collider_fill_getdata(&hsi, &avail);
+        let mutated = mutated_collision_body(&block, &collider);
 
         let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("cmpct-sid-col");
         hub.ensure_genesis().unwrap();
@@ -743,40 +789,12 @@ mod tests {
         let owned = mp
             .try_clone_matching_shortids(&hsi.header, hsi.nonce, 2, &hsi.short_ids)
             .expect("mempool read");
-        let fill = owned
-            .get(&sid_col)
-            .expect("orphan collider must unique-match");
+        let fill = owned.get(&sid).expect("orphan collider must unique-match");
         assert_eq!(fill.len(), 1);
         assert_eq!(fill[0].compute_wtxid(), collider.compute_wtxid());
-        let missing = try_reconstruct(&hsi, &owned, 2).expect_err("hub fill");
-        assert!(
-            missing.is_empty(),
-            "hub unique-match of collider must getdata, got {missing:?}"
-        );
+        assert_collider_fill_getdata(&hsi, &owned);
 
-        let err = hub
-            .accept_received_block(mutated)
-            .expect_err("v0.6.0 would accept this reconstructed body");
-        match &err {
-            NetError::Mutated(s) | NetError::Consensus(s) => {
-                assert!(
-                    s.contains("merkle") || s.contains("bad-txnmrklroot"),
-                    "got {s}"
-                );
-            }
-            NetError::ConnectFailed { msg, hash } => {
-                assert!(
-                    msg.contains("merkle") || msg.contains("bad-txnmrklroot"),
-                    "got {msg}"
-                );
-                assert_eq!(*hash, block.block_hash().to_byte_array());
-            }
-            other => panic!("expected mutated reject, got {other:?}"),
-        }
-        assert!(
-            !hub.is_block_invalid(&block.block_hash()),
-            "short-id collision reconstruct must not BLOCK_FAILED the header"
-        );
+        assert_mutated_not_block_failed(&hub, mutated, block.block_hash());
         assert_eq!(hub.tip_hash(), Some(stale.block_hash()));
 
         let honest = mine_empty_regtest(
