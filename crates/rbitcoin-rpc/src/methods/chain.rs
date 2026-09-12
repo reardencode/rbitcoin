@@ -487,10 +487,16 @@ pub(crate) fn gettxout(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Va
 
     let (fk, rec) = match ctx
         .query
-        .get_tx_by_txid(&want)
+        .tx_fk_by_txid_tip(&want)
         .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?
     {
-        Some(v) => v,
+        Some(fk) => {
+            let rec = ctx
+                .query
+                .get_tx(fk)
+                .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?;
+            (fk, rec)
+        }
         None => return Ok(Value::Null),
     };
     if ctx

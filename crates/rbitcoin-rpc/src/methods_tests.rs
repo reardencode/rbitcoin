@@ -1485,6 +1485,39 @@ fn gettxout_include_mempool_hides_mempool_spent_confirmed() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn gettxout_disconnected_archive_row_is_null() {
+    let (ctx, dir, _hub) = ctx_regtest_hub();
+    let (addr, _) = p2wpkh_regtest();
+    dispatch(&ctx, "generatetoaddress", vec![json!(2), json!(addr)]).unwrap();
+    let tip = dispatch(&ctx, "getbestblockhash", vec![])
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+    let blk = dispatch(&ctx, "getblock", vec![json!(tip.clone()), json!(2)]).unwrap();
+    let cb_txid = blk["tx"][0]["txid"].as_str().unwrap().to_string();
+    let live = dispatch(
+        &ctx,
+        "gettxout",
+        vec![json!(cb_txid.clone()), json!(0), json!(false)],
+    )
+    .unwrap();
+    assert_eq!(live["coinbase"], true, "{live}");
+    dispatch(&ctx, "invalidateblock", vec![json!(tip)]).unwrap();
+    let gone = dispatch(
+        &ctx,
+        "gettxout",
+        vec![json!(cb_txid), json!(0), json!(false)],
+    )
+    .unwrap();
+    assert!(
+        gone.is_null(),
+        "disconnected Class A row must not be a UTXO: {gone}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn mature_coinbase_spend(
     ctx: &RpcContext,
     keep_sat: u64,
