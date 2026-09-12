@@ -950,6 +950,54 @@ fn disconnect_tip_waits_for_sh_appender() {
 }
 
 #[test]
+fn disconnect_tip_unlinks_megakey_sh_and_truncates_tweaks() {
+    use rbitcoin_store::ShHeadValue;
+    let (dir, q) = temp_query("sh-megakey-reorg");
+    q.set_sptweaks_enabled(true, Height(0)).unwrap();
+    let (h0, t0) = coinbase_block(0, Fk::NULL, None);
+    let hash0 = h0.hash;
+    let fk0 = q.connect_block(Height(0), &h0, &[t0]).unwrap();
+    q.put_sp_tweaks_block(Height(0), fk0, &[None]).unwrap();
+
+    let prev = q.tip_header_fk().unwrap().unwrap();
+    let (h1, mut cb) = coinbase_block(1, prev, Some(hash0));
+    let hot = vec![0x99u8];
+    cb.outputs = vec![OutputRecord::unspent(1, hot.clone())];
+    let mut txs = Vec::with_capacity(257);
+    txs.push(cb);
+    for i in 1..257u16 {
+        let mut t = coinbase_block(1, prev, Some(hash0)).1;
+        t.tx.txid[28] = 0xee;
+        t.tx.txid[29] = (i >> 8) as u8;
+        t.tx.txid[30] = i as u8;
+        t.outputs = vec![OutputRecord::unspent(1, hot.clone())];
+        txs.push(t);
+    }
+    let fk1 = q.connect_block(Height(1), &h1, &txs).unwrap();
+    q.put_sp_tweaks_block(Height(1), fk1, &vec![None; txs.len()])
+        .unwrap();
+    assert_eq!(q.sptweaks_next_height(), Some(Height(2)));
+
+    let sh = script_hash(&[0x99]);
+    match q.store().scripthash.head_value(&sh).unwrap().unwrap() {
+        ShHeadValue::Extent { .. } => {}
+        other => panic!("expected extent megakey after 257 creates, got {other:?}"),
+    }
+    assert_eq!(q.scripthash_history(&sh).unwrap().len(), 257);
+
+    q.disconnect_tip().unwrap();
+    assert_eq!(q.tip_height(), Some(Height(0)));
+    assert!(
+        q.scripthash_history(&sh).unwrap().is_empty(),
+        "disconnected megakey creates must not remain in SH"
+    );
+    assert_eq!(q.sptweaks_next_height(), Some(Height(1)));
+    assert!(q.load_thin_tweaks(Height(1)).unwrap().is_none());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn sh_writebehind_recover_requeues_unapplied_heights() {
     let (dir, q) = temp_query("sh-wb-recover");
     let (mut h0, t0) = coinbase_block(0, Fk::NULL, None);

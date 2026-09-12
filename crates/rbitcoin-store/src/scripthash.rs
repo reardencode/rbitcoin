@@ -706,7 +706,13 @@ fn collect_extent_then_tail(
     let n = n as usize;
     let bytes = (n as u64).saturating_mul(SH_PAGE_SIZE as u64);
     if n == 0 || bytes > SH_PAGE_SPAN_MAX || base.saturating_add(bytes) > body.logical_len() {
-        return Err(StoreError::Corrupt("scripthash extent span overflow"));
+        // `extent_n` is a bulk-pread hint. IBD megakeys can exceed 64 MiB;
+        // DisconnectTip unlink still walks `next` from first_off.
+        let first = sh_page_first_off(last_arr)?;
+        if first == 0 {
+            return Err(StoreError::Corrupt("scripthash extent span overflow"));
+        }
+        return collect_page_chain_linked(body, first, page_ios);
     }
     let last_in_ext = base.saturating_add(((n - 1) as u64).saturating_mul(SH_PAGE_SIZE as u64));
     let (mut out, tail_off) = collect_page_chain_span(body, base, n, page_ios)?.ok_or(
