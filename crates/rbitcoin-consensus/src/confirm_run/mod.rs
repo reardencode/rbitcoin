@@ -117,6 +117,8 @@ struct Prepared {
     bits: bitcoin::CompactTarget,
     /// Header hash of this block (prev-link for the next height in the run).
     hash: [u8; 32],
+    /// Structure txids — SP write indexes by these (no second `compute_txid`).
+    txids: Vec<[u8; 32]>,
     /// Prev-block MTP from assemble (`mtp_at(height-1)`). Write BIP68 uses this
     /// instead of `ConfirmParentCache::get_header_plan`.
     prev_mtp: u32,

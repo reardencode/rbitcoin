@@ -188,6 +188,7 @@ pub(super) fn assemble_run(
             time: block.header.time,
             bits: block.header.bits,
             hash: block_hash,
+            txids: meta.txids,
             prev_mtp,
         });
     }
