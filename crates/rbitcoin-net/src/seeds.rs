@@ -333,35 +333,20 @@ impl AddrMan {
         self.order.push(addr);
     }
 
-    fn evictable_for_learn(&self, addr: &SocketAddr) -> bool {
-        let f = self.flags(addr);
-        f.is_incompatible() || f.failed_last_connect() || !f.has_connected()
-    }
-
     /// Insert a newly learned addr, evicting last-resort then oldest new at `cap`.
     ///
-    /// Returns true when `addr` is now in the book. Duplicates, and a book that
-    /// cannot free a slot (only tried remain), return false. Never exceeds `cap`.
+    /// Returns true when `addr` is now in the book. Duplicates, an already
+    /// over-cap book (`add` exceed), and a full book of only tried addrs
+    /// return false. Never exceeds `cap`.
     pub fn add_learned(&mut self, addr: SocketAddr, cap: usize) -> bool {
-        if self.by_addr.contains_key(&addr) {
+        if self.by_addr.contains_key(&addr) || cap == 0 {
             return false;
         }
-        if cap == 0 {
+        if self.order.len() > cap {
             return false;
         }
-        if self.order.len() >= cap {
-            let need = self.order.len().saturating_add(1).saturating_sub(cap);
-            let can = self
-                .order
-                .iter()
-                .filter(|a| self.evictable_for_learn(a))
-                .count();
-            if can < need {
-                return false;
-            }
-            for _ in 0..need {
-                let _ = self.evict_for_learn();
-            }
+        if self.order.len() == cap && !self.evict_for_learn() {
+            return false;
         }
         self.by_addr.insert(addr, PeerFlags::empty());
         self.order.push(addr);

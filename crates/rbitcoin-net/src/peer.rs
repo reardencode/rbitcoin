@@ -117,14 +117,6 @@ pub(crate) const BLOCK_GETDATA_TIMEOUT: Duration = Duration::from_secs(10);
 /// INV-origin txids this session sent us. Cap matches `announced_wtx` (FIFO roll).
 pub(crate) const FROM_THIS_PEER_CAP: usize = 50_000;
 
-pub(crate) fn insert_capped_txid(
-    map: &mut CappedSet<bitcoin::Txid>,
-    txid: bitcoin::Txid,
-    cap: usize,
-) {
-    map.insert(txid, cap);
-}
-
 /// Test/assert surface for the tip-follow pending-body cap (equals production).
 #[cfg(test)]
 pub(crate) const MAX_PENDING_BLOCKS_FOR_TEST: usize = MAX_PENDING_BLOCKS;
@@ -2765,20 +2757,7 @@ async fn on_cmpctblock(
                             NetworkMessage::GetData(vec![Inventory::WitnessBlock(hash)]),
                         )?;
                     } else {
-                        let inbound = session.is_some_and(|s| s.inbound);
-                        let ph = session.and_then(|s| s.peer_hub());
-                        let may_fill = match ph.as_ref() {
-                            None => true,
-                            Some(ph) => {
-                                let ok = ph.try_cmpct_fill_slot(hash, inbound);
-                                if ok {
-                                    if let Some(s) = session {
-                                        s.note_cmpct_taken(hash, inbound);
-                                    }
-                                }
-                                ok
-                            }
-                        };
+                        let may_fill = session.is_none_or(|s| s.try_cmpct_fill(hash));
                         if !may_fill {
                             // Parallel inbound slot already taken
                             // (`p2p_compactblocks` :929).
@@ -2992,7 +2971,7 @@ async fn on_tx(
             || session.is_some_and(|s| s.peer_hub().is_some_and(|ph| ph.is_relay_perm()))
         {
             let txid = tx.compute_txid();
-            insert_capped_txid(&mut follow.from_this_peer, txid, FROM_THIS_PEER_CAP);
+            follow.from_this_peer.insert(txid, FROM_THIS_PEER_CAP);
             match mp.accept_tx_async(tx.clone()).await {
                 Ok(r) => {
                     if let Some(s) = session {

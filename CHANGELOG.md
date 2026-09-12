@@ -49,10 +49,10 @@ before 1.0).
 - **P2P caps (Q-60):** AddrMan learned/`peers`/`addpeeraddress` stay at 4096
   (evict incompat, then failed last-connect, then oldest new). `--connect` /
   DNS inject may exceed when only tried addrs remain. Shutdown `merge_from`
-  trims to 4096 (tried first). `announced_wtx` and `from_this_peer` recency
-  FIFO-roll at 50k instead of `clear()` (re-insert stays newest). Compact
-  `cmpct_fills` decrement on reconstruct fail, getdata expire, and unregister
-  (Accepted still clears the hash).
+  trims to 4096 (tried first). `announced_wtx` and `from_this_peer`
+  insertion-order FIFO-roll at 50k instead of `clear()`. Compact `cmpct_fills`
+  decrement on reconstruct fail, getdata expire, and unregister (Accepted still
+  clears the hash).
 - **IBD io_uring drain stall:** `drain_all` no longer returns after 5 s with
   leftover SQEs (that freed in-flight buffers). Every TLS session waits while
   CQEs arrive; a 120 s zero-completion stall aborts explicit drain (session

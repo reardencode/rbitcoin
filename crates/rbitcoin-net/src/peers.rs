@@ -30,8 +30,8 @@ impl PeerOut {
     }
 }
 
-/// Hash set with recency FIFO eviction at `cap` (INV / origin skip).
-/// Re-insert of a live key moves it to the back so a still-hot id is not rolled.
+/// Insertion-order set that drops the oldest key at `cap` (INV / origin skip).
+/// Re-insert of a live key is a no-op; it does not refresh FIFO position.
 #[derive(Debug)]
 pub(crate) struct CappedSet<T> {
     set: HashSet<T>,
@@ -69,16 +69,7 @@ impl<T> CappedSet<T> {
     where
         T: Eq + Hash + Copy,
     {
-        if self.set.contains(&item) {
-            if self.fifo.back() != Some(&item) {
-                if let Some(i) = self.fifo.iter().position(|x| *x == item) {
-                    self.fifo.remove(i);
-                    self.fifo.push_back(item);
-                }
-            }
-            return;
-        }
-        if cap == 0 {
+        if cap == 0 || self.set.contains(&item) {
             return;
         }
         if self.set.len() >= cap {
@@ -197,7 +188,7 @@ pub struct LivePeer {
     /// answered only if announced here or the tx is reorg-servable.
     announced_wtx: Mutex<CappedSet<Wtxid>>,
     /// Compact fill slots taken by this session (hub-global `cmpct_fills`).
-    taken_cmpct: Mutex<Vec<(BlockHash, bool)>>,
+    taken_cmpct: Mutex<Vec<BlockHash>>,
     /// Mempool sequence at last tx INV (Core `m_last_inv_sequence`, starts at 1).
     last_inv_sequence: AtomicU64,
     /// Queued tx INV hashes not yet sent (Core `m_tx_inventory_to_send`).
@@ -583,22 +574,29 @@ impl LivePeer {
             .contains(wtxid)
     }
 
-    pub(crate) fn note_cmpct_taken(&self, hash: BlockHash, inbound: bool) {
+    pub(crate) fn try_cmpct_fill(&self, hash: BlockHash) -> bool {
+        let Some(ph) = self.peer_hub() else {
+            return true;
+        };
+        if !ph.try_cmpct_fill_slot(hash, self.inbound) {
+            return false;
+        }
         self.taken_cmpct
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push((hash, inbound));
+            .push(hash);
+        true
     }
 
     pub(crate) fn release_cmpct_taken(&self, hash: BlockHash) {
         let mut g = self.taken_cmpct.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(i) = g.iter().position(|(h, _)| *h == hash) else {
+        let Some(i) = g.iter().position(|h| *h == hash) else {
             return;
         };
-        let (h, inbound) = g.remove(i);
+        g.remove(i);
         drop(g);
         if let Some(ph) = self.peer_hub() {
-            ph.release_cmpct_fill(h, inbound);
+            ph.release_cmpct_fill(hash, self.inbound);
         }
     }
 
@@ -608,8 +606,8 @@ impl LivePeer {
         let Some(ph) = self.peer_hub() else {
             return;
         };
-        for (h, inbound) in taken {
-            ph.release_cmpct_fill(h, inbound);
+        for h in taken {
+            ph.release_cmpct_fill(h, self.inbound);
         }
     }
 
@@ -2203,8 +2201,7 @@ mod tests {
         let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
         let p = hub.register(a, a, &ver("/rbitcoin:0.1.0/"), true, PeerConnType::Inbound);
         let h = BlockHash::from_byte_array([0x22; 32]);
-        assert!(hub.try_cmpct_fill_slot(h, true));
-        p.note_cmpct_taken(h, true);
+        assert!(p.try_cmpct_fill(h));
         hub.unregister(p.id);
         assert!(hub.try_cmpct_fill_slot(h, true));
         assert!(hub.try_cmpct_fill_slot(h, true));
