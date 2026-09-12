@@ -1669,7 +1669,7 @@ mod tests {
                 hash: [1u8; 32],
             };
             q.connect_block(Height::GENESIS, &ph, &[parent]).unwrap();
-            let spent = q.store.txs.spent_range(Fk(1)).expect("spent.idx");
+            let spent = q.store.txs.spent_range(Fk(1)).expect("spent range");
             let _ = q.confirm_stats().fill_missing_n.swap(0, Ordering::Relaxed);
             let need = vec![(Fk(2), vec![child_spend(parent_txid, 0xcd)])];
             let plan =
@@ -1711,7 +1711,7 @@ mod tests {
             hash: [1u8; 32],
         };
         q.connect_block(Height::GENESIS, &ph, &[parent]).unwrap();
-        let spent = q.store.txs.spent_range(Fk(1)).expect("spent.idx");
+        let spent = q.store.txs.spent_range(Fk(1)).expect("spent range");
         let mut child = child_spend(parent_txid, 0xcf);
         child.inputs[0].create_fk = Fk(1);
         let need = vec![(Fk(2), vec![child])];
@@ -1791,16 +1791,20 @@ mod tests {
             Some(&[0u32][..]),
             "lookup packing must publish parent need-vouts for load pin"
         );
-        let spent = q.store.txs.spent_range(Fk(1)).expect("archived spent.idx");
+        let spent = q
+            .store
+            .txs
+            .spent_range(Fk(1))
+            .expect("archived spent range");
         assert_eq!(
             plan.external_parents.get(&1).and_then(|p| p.spent),
             Some(spent),
-            "creates-only in_flight must stamp spent.idx range (write ensure skip)"
+            "creates-only in_flight must stamp spent range (write ensure skip)"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// TipOnly leftover parent: body range from head, spent.idx range on the stamp.
+    /// TipOnly leftover parent: body range from head, spent range on the stamp.
     #[test]
     fn fill_missing_parent_ranges_stamps_spent_idx_for_archived() {
         use rbitcoin_primitives::Height;
@@ -1818,7 +1822,7 @@ mod tests {
             hash: [1u8; 32],
         };
         q.connect_block(Height::GENESIS, &ph, &[parent]).unwrap();
-        let spent = q.store.txs.spent_range(Fk(1)).expect("spent.idx");
+        let spent = q.store.txs.spent_range(Fk(1)).expect("spent range");
         let helper = crate::stamp_external_parents(
             q.store(),
             &[parent_txid],
@@ -1836,7 +1840,7 @@ mod tests {
         assert_eq!(
             helper.idents.get(&1).and_then(|p| p.spent),
             Some(spent),
-            "archived parent must carry spent.idx range on the lookup stamp"
+            "archived parent must carry spent range on the lookup stamp"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

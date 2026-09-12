@@ -1090,7 +1090,7 @@ impl Store {
             // `body_range` here is the create's **spent.body** span (schema 15).
             Some((off, len)) => self.txs.get_output_spender_metas_at(off, len, vouts)?,
             None => {
-                if let Ok((off, len)) = self.txs.spent.record_range(create_tx_fk) {
+                if let Ok((off, len)) = self.txs.spent_range(create_tx_fk) {
                     self.txs.get_output_spender_metas_at(off, len, vouts)?
                 } else {
                     let mut out = Vec::with_capacity(vouts.len());
@@ -1122,7 +1122,7 @@ impl Store {
         Ok(unspent)
     }
 
-    /// Batch [`Self::unspent_create_vouts`]: one `spent.idx` walk, then one
+    /// Batch [`Self::unspent_create_vouts`]: one spent-range walk, then one
     /// spent-body read per create that has a range.
     pub fn unspent_create_vouts_batch(
         &self,

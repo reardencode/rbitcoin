@@ -240,7 +240,7 @@ impl Query {
     /// span** from first..=last eligible fk in the wave (ineligible txout in
     /// the hole is included; `inwit` is not). `sp_tweaks` mutex is not held
     /// during Class A IO. `limits.cut_through` drops confirmed-spent P2TR
-    /// outs after the join (one `spent.idx` batch, then one spent-body walk
+    /// outs after the join (one spent-range batch, then one spent-body walk
     /// per create; txs with none left are omitted; the height remains).
     pub fn load_thin_tweaks_range(
         &self,

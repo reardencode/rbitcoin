@@ -433,7 +433,7 @@ pub(super) fn pin_for_wire_batch(
 
 /// Ensure spend abs for every spend edge on the write batch.
 ///
-/// Lookup stamps archived-parent `spent.idx` ranges; load copies them onto
+/// Lookup stamps archived-parent spent ranges; load copies them onto
 /// the pin. This idx-stamps remaining holes (same-batch creates after Class A,
 /// missing stamp). Missing abs after that is `Corrupt`. Never `put_spend*`.
 pub(super) fn ensure_spend_abs_layouts(

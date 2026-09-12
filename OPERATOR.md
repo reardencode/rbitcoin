@@ -629,10 +629,10 @@ rm -rf "$DATADIR/store/tx.head" "$DATADIR/store/scripthash"*
 #   mkdir -p "$DATADIR/store/txout.idx"
 #   mv "$DATADIR/store/txout.idx.meta" "$DATADIR/store/txout.idx/meta"
 #   mv "$DATADIR/store/txout.idx."[0-9][0-9][0-9][0-9][0-9][0-9] "$DATADIR/store/txout.idx/"
-# same for inwit.idx and spent.idx
+# same for inwit.idx (spent.idx is unlinked on open)
 ```
 
-Keep Class A (`txout` / `inwit` / `spent` + idx, `txid.body`, headers) and
+Keep Class A (`txout` / `inwit` / `spent` + `txout.idx` / `inwit.idx`, `txid.body`, headers) and
 Class C. Restart the same binary: `tx.head` rebuilds from Class A; with
 `--shindex`, SH rematerializes. Do **not** `rm -rf store/`.
 

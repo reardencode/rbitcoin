@@ -399,7 +399,7 @@ fn annotate_jobs_from_connected_hash(
     Ok(jobs)
 }
 
-/// After Class A commit, set body_range (+ spent.idx) for **pinned** creates
+/// After Class A commit, set body_range (+ spent range) for **pinned** creates
 /// still missing layout. Body ranges come from the write's one `tx_body_range_batch`
 /// (same batch as layout fill). Spent holes use one `tx_spent_range_batch`.
 pub(super) fn fill_planned_create_layout_after_commit(

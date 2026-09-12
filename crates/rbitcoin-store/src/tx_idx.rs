@@ -44,7 +44,7 @@ pub const INDEX_REFUSE_FLAT_IDX: &str = "index refuses flat *.idx.meta; place fi
 /// (already-written double-append / clone window).
 pub const IDX_OPEN_DOUBLE_APPEND: &str =
     "tx.idx starts not monotone (double-append class); wipe store/txout.idx \
-     (or inwit.idx / spent.idx) or run scripts/repair-idx-double-append.py — \
+     (or inwit.idx) or run scripts/repair-idx-double-append.py — \
      do not recreate tx.head";
 
 /// Tail slots checked on open (page-grouped). Joins between segments always.

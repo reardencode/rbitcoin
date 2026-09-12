@@ -59,6 +59,7 @@ index refuses flat *.idx.meta; place files under store/{stem}.idx/ (meta + NNNNN
 index refuses Shared (file) scripthash.body; wipe store/scripthash* then restart (Class A kept; SH rematerializes with --shindex)
 index refuses pack8 Paged (mode 10) scripthash heads; wipe store/scripthash* then restart (Class A kept; SH rematerializes with --shindex)
 ```  
+**20 leftover `spent.idx`:** unlinked on open (dir and flat `spent.idx.meta`). Spent `(off,len)` is `8 × max(n_out,1)` from txout meta; sparse `spent.off` (u64/1024 creates). `SCHEMA_VERSION` stays 20.
 **Endianness:** little-endian for all multi-byte integers.
 
 Older versions and migration notes live in [`SCHEMA_HISTORY.md`](./SCHEMA_HISTORY.md).
@@ -73,7 +74,7 @@ Older versions and migration notes live in [`SCHEMA_HISTORY.md`](./SCHEMA_HISTOR
 |--------|----------------|
 | Class A | Split `txout` / `inwit` / `spent`; thin LAYOUT17 meta; kinds **0–9**; 8 B spent slots; `spent.ovf` |
 | Identity | Dense `txid.body` (32 B/fk); segmented `tx.head` (25-bit + fuse8 v2) |
-| Idx | Per-stem `*.idx/` directories; **u32 stride-8**; hard span `2^32 × 8` ≈ 32 GiB; soft roll default 16 GiB. Flat `*.idx.meta` **refused**. |
+| Idx | `txout.idx/` + `inwit.idx/` directories; **u32 stride-8**; hard span `2^32 × 8` ≈ 32 GiB; soft roll default 16 GiB. Flat `*.idx.meta` **refused**. Leftover `spent.idx` unlinked. |
 | Class B | SH runs `key_len=40` unique `(sh, create_fk)`; megakey pages ULEB deltas (`ver=1`); body **dir** (sharded). Leftover file body **refused**. Slab **class** is the byte allocation (32…2048); `used` is the fk count and may exceed the old geometric `slab_cap(class)` when the ULEB stream fits. Decode `used` fks from the payload. |
 | Class C | `confirmed[]` + `header_txs_*`; no `tx_height.body`; `strong_tx` bitset |
 | Tweaks | Segmented `sp_tweaks.idx/` + `sp_tweaks.body/` (`off:u32`, body `0`/`33`) |
@@ -177,7 +178,7 @@ itself changed.
     txout.body / txout.idx/                         # Class A outs (hot)
     inwit.body / inwit.idx/                         # Class A inputs+witness (cold)
     inwit.reloc                  # optional: inwit lives under --datadir-cold/store
-    spent.body / spent.idx/                         # sole-spender 8 B × n_out
+    spent.body / spent.off                          # sole-spender 8 B × n_out; leftover spent.idx unlinked
     tx.body / tx.idx.*                              # schema ≤14 packed (refused if non-empty)
     txid.body                                       # dense create_fk-ordered txids (schema 13+)
     tx.head/                     # meta + open OA NNNNNN; sealed NNNNNN.mphf|.fuse8
@@ -336,11 +337,11 @@ v2+locktime 0 is **3 B**. Schema-15 16-byte prefixes (v1 starts `01 00 00 00`)
 are not accepted. `input_start_fk` / `output_start_fk` stay null in RAM.
 Soft `TxRecord.txid` is filled from the sidefile on get paths.
 
-### Segmented body index (`txout.idx.*` / `inwit.idx.*` / `spent.idx.*`)
+### Segmented body index (`txout.idx.*` / `inwit.idx.*`)
 
 ```text
-{txout,inwit,spent}.idx/meta     # per-stem segment map (first_fk / file_id)
-{txout,inwit,spent}.idx/000000   # dense u32 LE stride units
+{txout,inwit}.idx/meta     # per-stem segment map (first_fk / file_id)
+{txout,inwit}.idx/000000   # dense u32 LE stride units
 …
 ```
 
@@ -358,7 +359,9 @@ i = fk - first_fk
 | `body_base` | absolute body base (8-aligned) for relatives |
 | `file_id` | maps to `{stem}.idx/{file_id:06}` |
 
-Hard span per segment: `2^32 × 8` ≈ 32 GiB. Soft rollover earlier (default 16 GiB; `RBITCOIN_TX_IDX_SOFT_SPAN`). **Each stem rolls independently** when that stem’s next start would exceed the soft span (`inwit` no longer forces `txout`/`spent` idx splits). Length: `start(fk+1) − start(fk)` (may cross segments); last record uses published body end. ~**4 B/tx** vs prior 8 B absolute u64 index (~50% smaller).
+Hard span per segment: `2^32 × 8` ≈ 32 GiB. Soft rollover earlier (default 16 GiB; `RBITCOIN_TX_IDX_SOFT_SPAN`). **Each stem rolls independently** when that stem’s next start would exceed the soft span (`inwit` no longer forces `txout` idx splits). Length: `start(fk+1) − start(fk)` (may cross segments); last record uses published body end. ~**4 B/tx** vs prior 8 B absolute u64 index (~50% smaller).
+
+**`spent.body` has no `spent.idx`.** Record length is `8 × max(n_out, 1)` (zero-out still pays one stride so starts stay monotone). `spent_abs(off, vout) = off + 8×vout`. `n_out` is txout LAYOUT17 meta. Sparse `spent.off` stores absolute starts every 1024 creates (`ArrayLink` u64 LE). Leftover `spent.idx/` (and flat `spent.idx.meta`) is unlinked on open — **same `SCHEMA_VERSION`**.
 
 ### Input encoding (embedded)
 
@@ -680,10 +683,10 @@ Tip **962,298**, **1,416,970,187** creates, mean packed **502.2 B/tx**,
 | `tx.body` / `txout.body` | **662.73 GiB** | **~129 GiB** (schema 15; 17 thin meta + templates cut ~18–26 GiB) |
 | `inwit.body` | — | **~486 GiB** (ins + witness; cold) |
 | `spent.body` | (9 B inside packed outs, ~32 GiB) | **~32 GiB** schema 15; **~21 GiB** after 8 B slots |
-| `{stem}.idx` | 5.28 GiB (`tx.idx`) | 5.28 GiB × **3** (grow-tight; do not 256 MiB-slab each) |
+| `{stem}.idx` | 5.28 GiB (`tx.idx`) | 5.28 GiB × **2** (`txout`/`inwit`; leftover `spent.idx` dropped) |
 | `txid.body` / `tx.head` | 42.23 / 8.23 GiB | unchanged |
 
-Hot pin+annotate working set: **txout + spent + three idx + txid + tx.head**
+Hot pin+annotate working set: **txout + spent + two idx + txid + tx.head**
 (~129+32+16+42+8 ≈ **227 GiB**) vs packed **tx.body + idx + txid + head**
 (~663+5+42+8 ≈ **718 GiB**). Reconstruct / `getrawtransaction` also needs
 `inwit` (~486 GiB), which pin/SH/tweaks do **not** open.

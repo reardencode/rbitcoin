@@ -713,7 +713,7 @@ mod tests {
         assert!(!fk.is_null());
         assert!(
             spent.is_some(),
-            "archived parent must carry spent.idx on the skeleton"
+            "archived parent must carry spent range on the skeleton"
         );
         take_emitted(&q, &wave);
         assert!(!q.block_queue_has_height(1));

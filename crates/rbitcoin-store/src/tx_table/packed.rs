@@ -488,6 +488,12 @@ pub fn encode_spent_zeros(n_out: u32, out: &mut Vec<u8>) {
     out.resize(out.len().saturating_add(n), 0);
 }
 
+/// Published `spent.body` span for one create (zero-out still pays 8 B pad).
+#[inline]
+pub fn spent_record_len(n_out: u32) -> u64 {
+    u64::from(n_out.max(1)).saturating_mul(OutputRecord::SPENT_SLOT_LEN as u64)
+}
+
 /// Schema-17 spent slot width (same as [`OutputRecord::SPENT_SLOT_LEN`]).
 pub const SPENT_SLOT_V17_LEN: usize = 8;
 const SPENT_FIELD_V17_MAX: u64 = (1u64 << 56) - 1;

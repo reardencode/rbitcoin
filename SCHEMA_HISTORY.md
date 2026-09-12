@@ -43,7 +43,8 @@ main/L1 writes `BDZ3`: 3-partite peel, 2-bit `g`, occupancy rank (RAM on
 open), then mix64 tags + pack8 `.val`. Occupied schema 18/19 `tx.head` or
 `scripthash*` is refused (wipe those dirs, keep Class A). Empty indexes
 rewrite `meta` to 20; `tx.head` rebuilds from `txid.body`; SH rematerializes
-with `--shindex`. Open OA is still 4 B rel.
+with `--shindex`. Open OA is still 4 B rel. Leftover `spent.idx` is unlinked;
+spent ranges are the `n_out` prefix (sparse `spent.off`).
 
 ## v19 (megakey extent)
 
