@@ -1433,12 +1433,16 @@ pub(crate) fn structural_validate_spends(
     let spent_cold_ns = multi_list_ns;
 
     let t_pending = Instant::now();
+    let coinbase_txid = block.txdata[0].compute_txid().to_byte_array();
     for &(prev_txid, vout, _spend_fk, create_fk) in spends {
         let key = (prev_txid, vout);
         if pending_spent.contains(&key) {
             return Err(ConsensusError::PrevoutSpent);
         }
         let spent = if create_fk.is_null() {
+            if prev_txid == coinbase_txid {
+                return Err(ConsensusError::BadTx("coinbase immature"));
+            }
             false
         } else if let Some(id) = create_fk.get() {
             durable_spent.contains(&(id, vout))
@@ -1454,18 +1458,6 @@ pub(crate) fn structural_validate_spends(
     let spent_ns = t_spent.elapsed().as_nanos() as u64;
 
     // Coinbase = create_fk == first_tx_fk at that height — never `tx.body`.
-    // Core: same-block coinbase spend is immature (`nHeight < coinbaseHeight + 100`).
-    if spends.iter().any(|&(_, _, _, cfk)| cfk.is_null()) {
-        if let Some(cb) = block.txdata.first() {
-            let cb_id = cb.compute_txid().to_byte_array();
-            if spends
-                .iter()
-                .any(|&(ptid, _, _, cfk)| cfk.is_null() && ptid == cb_id)
-            {
-                return Err(ConsensusError::BadTx("coinbase immature"));
-            }
-        }
-    }
     let t_create = Instant::now();
     let mut height_list: Vec<u32> = height_by_id.values().copied().collect();
     height_list.sort_unstable();
