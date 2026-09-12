@@ -1593,6 +1593,7 @@ fn confirm_load_ahead_of_write_does_not_badprev() {
         next_tx_start: 0,
         in_flight: &inflight,
         skeleton: None,
+        carried_need: Vec::new(),
     };
     let mat_b = confirm_wire_load_phase_pipelined(&q, &params, ms, batch_b, &none, Some(&pipe))
         .unwrap_or_else(|e| {
@@ -2062,6 +2063,7 @@ fn wire_prep_ahead_cross_batch_spend_fills_parent_layout() {
             next_tx_start,
             in_flight: &inflight,
             skeleton: None,
+            carried_need: Vec::new(),
         };
         confirm_wire_load_phase_pipelined(
             &q,
@@ -2121,6 +2123,7 @@ fn wire_prep_ahead_cross_batch_spend_fills_parent_layout() {
             next_tx_start,
             in_flight: &inflight,
             skeleton: None,
+            carried_need: Vec::new(),
         };
         confirm_wire_load_phase_pipelined(
             &q,

@@ -218,7 +218,7 @@ pub fn validate_block_structure_with_pres(
     }
     let walk_ns = t_walk.elapsed().as_nanos() as u64;
 
-    let has_witness_data = block_has_witness(block);
+    let has_witness_data = block_has_witness_from_pres(pres.as_ref());
     let has_commitment = coinbase_has_witness_commitment(block);
     if has_witness_data && ctx.enforce_height_gates && !ctx.params.segwit_active_at(ctx.height.0) {
         return Err(ConsensusError::BadBlock("unexpected witness before segwit"));
@@ -270,6 +270,12 @@ pub fn block_has_witness(block: &Block) -> bool {
         .txdata
         .iter()
         .any(|tx| tx.input.iter().any(|i| !i.witness.is_empty()))
+}
+
+/// Same as [`block_has_witness`] from [`TxPrecompute::has_witness`] (no second walk).
+#[inline]
+pub fn block_has_witness_from_pres(pres: &[TxPrecompute]) -> bool {
+    pres.iter().any(|p| p.has_witness)
 }
 
 /// BIP141 coinbase `OP_RETURN` script for GBT `default_witness_commitment`.

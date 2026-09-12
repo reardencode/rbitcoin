@@ -1054,7 +1054,7 @@ impl ChainHub {
                 return Err(NetError::Consensus("invalid proof of work".into()));
             }
         }
-        let rec = header_to_record(prev_fk, header);
+        let rec = header_to_record(prev_fk, header, header.block_hash().to_byte_array());
         let fk = self
             .query
             .ensure_header(&rec)
@@ -3240,6 +3240,7 @@ mod tests {
                 next_tx_start,
                 in_flight: &inflight,
                 skeleton: None,
+                carried_need: Vec::new(),
             };
             hub.confirm_wire_load_phase_pipelined(&batch1, Some(&pipe))
                 .expect("prep1")
@@ -3285,6 +3286,7 @@ mod tests {
                 next_tx_start,
                 in_flight: &inflight,
                 skeleton: None,
+                carried_need: Vec::new(),
             };
             hub.confirm_wire_load_phase_pipelined(&batch2, Some(&pipe))
                 .expect("prep2 err")

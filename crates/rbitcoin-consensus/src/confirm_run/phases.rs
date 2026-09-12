@@ -102,17 +102,9 @@ pub(super) fn assemble_run(
                 if block.header.bits != expected {
                     return Err(ConsensusError::BadHeader("incorrect proof of work bits"));
                 }
-                let target = Target::from_compact(block.header.bits);
-                if target > params.pow_limit {
-                    return Err(ConsensusError::BadHeader("target above pow limit"));
-                }
-                block
-                    .header
-                    .validate_pow(target)
-                    .map_err(|_| ConsensusError::InvalidPow)?;
             } else {
                 prev_mtp = 0;
-                validate_header(query, params, height, &block.header)?;
+                validate_header_hashed(query, params, height, &block.header, block_hash)?;
             }
         } else {
             let prev = &prepared[i - 1];
@@ -141,20 +133,9 @@ pub(super) fn assemble_run(
             if block.header.bits != expected {
                 return Err(ConsensusError::BadHeader("incorrect proof of work bits"));
             }
-            let target = Target::from_compact(block.header.bits);
-            if target > params.pow_limit {
-                return Err(ConsensusError::BadHeader("target above pow limit"));
-            }
-            block
-                .header
-                .validate_pow(target)
-                .map_err(|_| ConsensusError::InvalidPow)?;
         }
 
-        if params.bip34_active_at(height.0) {
-            check_bip34(block, height.0)?;
-        }
-        if block_has_witness(block) && !params.segwit_active_at(height.0) {
+        if block_has_witness_from_pres(&meta.pres) && !params.segwit_active_at(height.0) {
             return Err(ConsensusError::BadBlock("unexpected witness before segwit"));
         }
 
@@ -207,6 +188,7 @@ pub(super) fn assemble_run(
             time: block.header.time,
             bits: block.header.bits,
             hash: block_hash,
+            txids: meta.txids,
             prev_mtp,
         });
     }
@@ -379,6 +361,7 @@ pub(super) fn post_commit(
     Ok(spend_ann_ns)
 }
 
+#[cfg(test)]
 pub(super) fn check_bip34(block: &Block, height: u32) -> Result<(), ConsensusError> {
     crate::block::check_bip34_coinbase(&block.txdata[0], height)
 }

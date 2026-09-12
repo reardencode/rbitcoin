@@ -359,6 +359,11 @@ impl BlockQueue {
         self.entry_for_height(height).map(|e| e.n_inputs)
     }
 
+    /// Class A header fk stamped at enqueue (`None` if height missing).
+    pub fn header_fk_at(&self, height: u32) -> Option<u64> {
+        self.entry_for_height(height).map(|e| e.header_fk)
+    }
+
     /// One-pass height list for a load pack: stored hash + resolve-complete.
     /// Missing heights are omitted (caller treats as body-missing).
     pub fn pack_snapshot(&self, heights: &[u32]) -> Vec<(u32, [u8; 32], bool)> {
@@ -721,6 +726,8 @@ mod tests {
         let got = q.take_raw(10).expect("take 10");
         assert_eq!(got.hash, [10u8; 32]);
         assert_eq!(got.header_fk, 7);
+        assert_eq!(q.header_fk_at(11), Some(8));
+        assert!(q.header_fk_at(10).is_none());
         assert_eq!(got.payload, b"aaaa");
         assert!(!q.contains_height(10));
         assert!(q.contains_height(11));

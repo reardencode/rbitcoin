@@ -520,10 +520,13 @@ fn records_from_wire(
     if eligible.is_empty() {
         return Some(recs);
     }
+    if p.txids.len() != block.txdata.len() {
+        return None;
+    }
 
-    let mut by_txid: HashMap<[u8; 32], usize> = HashMap::with_capacity(block.txdata.len());
-    for (i, tx) in block.txdata.iter().enumerate() {
-        by_txid.insert(tx.compute_txid().to_byte_array(), i);
+    let mut by_txid: HashMap<[u8; 32], usize> = HashMap::with_capacity(p.txids.len());
+    for (i, tid) in p.txids.iter().enumerate() {
+        by_txid.insert(*tid, i);
     }
     let mut spend_fk: HashMap<([u8; 32], u32), rbitcoin_primitives::Fk> =
         HashMap::with_capacity(p.spends.len());
@@ -580,16 +583,16 @@ fn records_aligned_from_store(
     block: &Block,
 ) -> Result<Vec<Option<[u8; 33]>>, ConsensusError> {
     use crate::silent_payments::tweaks_for_height;
-    use bitcoin::hashes::Hash;
 
+    if p.txids.len() != block.txdata.len() {
+        return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
+            "invariant: SP store fallback txid count mismatch",
+        )));
+    }
     let map = tweaks_for_height(query, params, p.height)?;
-    Ok(block
-        .txdata
+    Ok(p.txids
         .iter()
-        .map(|tx| {
-            let id = tx.compute_txid().to_byte_array();
-            map.get(&id).map(|t| t.tweak)
-        })
+        .map(|id| map.get(id).map(|t| t.tweak))
         .collect())
 }
 
@@ -634,7 +637,11 @@ mod records_from_wire_tests {
         }
     }
 
-    fn prepared(height: u32, spends: Vec<([u8; 32], u32, Fk, Fk)>) -> Prepared {
+    fn prepared(
+        height: u32,
+        spends: Vec<([u8; 32], u32, Fk, Fk)>,
+        txids: Vec<[u8; 32]>,
+    ) -> Prepared {
         Prepared {
             height: Height(height),
             header_fk: Fk(1),
@@ -646,6 +653,7 @@ mod records_from_wire_tests {
             time: 0,
             bits: CompactTarget::from_consensus(0x207f_ffff),
             hash: [0u8; 32],
+            txids,
             prev_mtp: 0,
         }
     }
@@ -675,7 +683,11 @@ mod records_from_wire_tests {
             header: dummy_header(),
             txdata: vec![cb, child],
         };
-        let p = prepared(10, vec![(cb_id.to_byte_array(), 0, Fk(2), Fk::NULL)]);
+        let p = prepared(
+            10,
+            vec![(cb_id.to_byte_array(), 0, Fk(2), Fk::NULL)],
+            vec![],
+        );
         let parents = rbitcoin_query::BatchParents::new();
         let recs = records_from_wire(&p, &block, &parents)
             .expect("same-block prevout is on the wire; pin must not be required");
@@ -710,7 +722,7 @@ mod records_from_wire_tests {
             header: dummy_header(),
             txdata: vec![cb, spend],
         };
-        let p = prepared(850_000, vec![]);
+        let p = prepared(850_000, vec![], vec![]);
         let parents = rbitcoin_query::BatchParents::new();
         let recs = records_from_wire(&p, &block, &parents).expect(
             "no P2TR output → no prevout walk; pin miss must not store-fallback the height",
@@ -745,11 +757,50 @@ mod records_from_wire_tests {
             header: dummy_header(),
             txdata: vec![cb, spend],
         };
-        let p = prepared(850_000, vec![]);
+        let txids = block
+            .txdata
+            .iter()
+            .map(|tx| tx.compute_txid().to_byte_array())
+            .collect();
+        let p = prepared(850_000, vec![], txids);
         let parents = rbitcoin_query::BatchParents::new();
         assert!(
             records_from_wire(&p, &block, &parents).is_none(),
             "P2TR eligible tx with no pin must still store-fallback"
+        );
+    }
+
+    #[test]
+    fn records_from_wire_txid_count_mismatch_is_none() {
+        let cb = coinbase();
+        let mut spk = vec![0x51, 0x20];
+        spk.extend_from_slice(&[0x11u8; 32]);
+        let spend = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([0x22; 32]),
+                    vout: 1,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(spk),
+            }],
+        };
+        let block = Block {
+            header: dummy_header(),
+            txdata: vec![cb, spend],
+        };
+        let p = prepared(850_000, vec![], vec![]);
+        let parents = rbitcoin_query::BatchParents::new();
+        assert!(
+            records_from_wire(&p, &block, &parents).is_none(),
+            "prepared txid count mismatch must not rehash wire"
         );
     }
 }

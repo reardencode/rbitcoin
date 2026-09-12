@@ -52,6 +52,7 @@ fn script_ok_append_contiguous_and_gap() {
             time: 0,
             bits: CompactTarget::from_consensus(0x207f_ffff),
             hash: [hash_byte; 32],
+            txids: vec![],
             prev_mtp: 0,
         }
     }
@@ -310,6 +311,7 @@ fn prepared_at(
         time: 1,
         bits: CompactTarget::from_consensus(0x207f_ffff),
         hash,
+        txids: vec![],
         prev_mtp: 0,
     }
 }
@@ -795,6 +797,7 @@ fn script_wave_skips_preverified_txids() {
         time: 1,
         bits: CompactTarget::from_consensus(0x207f_ffff),
         hash: [1u8; 32],
+        txids: vec![],
         prev_mtp: 0,
     };
     let batch = LoadedBatch {
@@ -905,6 +908,7 @@ fn pin_and_ensure_journey() {
         time: 1,
         bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
         hash: [3u8; 32],
+        txids: vec![],
         prev_mtp: 0,
     }];
     let mut bp = BatchParents::new();
@@ -1001,6 +1005,7 @@ fn pin_and_ensure_journey() {
         time: 1,
         bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
         hash: [4u8; 32],
+        txids: vec![],
         prev_mtp: 0,
     }];
     ensure_spend_abs_layouts(&q, &mut bp, &prepared).expect("spent-range ensure");

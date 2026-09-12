@@ -76,6 +76,7 @@ impl LoadAheadState {
         path_lo: u32,
         store_path_lo: u32,
         skeleton: Option<rbitcoin_query::BatchParentIds>,
+        carried_need: Vec<[u8; 32]>,
     ) -> WireLoadPipeline<'_> {
         let parent_hash = if path_lo == store_path_lo {
             None
@@ -90,6 +91,7 @@ impl LoadAheadState {
             next_tx_start: self.next_tx_start,
             in_flight: &self.in_flight,
             skeleton,
+            carried_need,
         }
     }
 
@@ -660,7 +662,8 @@ pub(crate) fn confirm_batch_max_inputs() -> u32 {
     CONFIRM_BATCH_INPUTS_DEFAULT
 }
 
-/// Σ `tx.input.len()` over a decoded block (confirm pack work meter).
+/// Σ `tx.input.len()` over a decoded block (test oracle for stamped `n_inputs`).
+#[cfg(test)]
 pub(crate) fn block_input_count(block: &bitcoin::Block) -> u32 {
     block
         .txdata
@@ -726,7 +729,8 @@ pub(crate) fn load_stamp_items(
 /// Split a lookup-wave into load-sized batch lengths.
 ///
 /// Stops on [`pack_stop_after`] (soft 8000 / hard 144) and when `has_body` flips.
-/// `has_body` is per height, same order as `input_counts`. Empty skips the kind split.
+/// `has_body` is per height from BQ `header_fk` + Class A range (not hash-head).
+/// Empty skips the kind split.
 pub(crate) fn split_wave_into_load_batches_kind(
     input_counts: &[u32],
     has_body: &[bool],
@@ -764,26 +768,17 @@ pub(crate) fn split_wave_into_load_batches_kind(
     out
 }
 
-/// Per-chunk need-vouts for a load batch (shared wave ids/spent).
+/// Per-chunk need-vouts from carried spend keys ∩ wave ids (no wire input walk).
 pub(crate) fn chunk_parent_ids(
     wave: &rbitcoin_query::BatchParentIds,
     items: &[(u32, [u8; 32], rbitcoin_query::ResolvedWire)],
 ) -> rbitcoin_query::BatchParentIds {
     let mut need_vouts: rbitcoin_query::U64Map<Vec<u32>> = rbitcoin_query::U64Map::default();
     for (_, _, w) in items {
-        for tx in &w.block.txdata {
-            for inp in &tx.input {
-                if inp.previous_output.is_null() {
-                    continue;
-                }
-                let prev = inp.previous_output.txid.to_byte_array();
-                if let Some((fk, _)) = wave.ids.get(&prev) {
-                    if let Some(id) = fk.get() {
-                        need_vouts
-                            .entry(id)
-                            .or_default()
-                            .push(inp.previous_output.vout);
-                    }
+        for &(prev, vout) in w.spend_keys.iter() {
+            if let Some((fk, _)) = wave.ids.get(&prev) {
+                if let Some(id) = fk.get() {
+                    need_vouts.entry(id).or_default().push(vout);
                 }
             }
         }
@@ -1892,10 +1887,22 @@ pub(crate) fn spawn_confirm_engine(
                     )
                 }));
                 confirm_thr_stats::add_load_clone(&stats, t_clone.elapsed());
+                let mut carried_need = Vec::new();
+                for (_, _, w) in &wire_batch {
+                    for &(txid, _) in w.spend_keys.iter() {
+                        if txid != [0u8; 32] {
+                            carried_need.push(txid);
+                        }
+                    }
+                }
                 let t_stamp = Instant::now();
                 let plan_res = {
-                    let pipe =
-                        lookup_ahead.pipeline_for(expect_h, store_path_lo, parent_ids.clone());
+                    let pipe = lookup_ahead.pipeline_for(
+                        expect_h,
+                        store_path_lo,
+                        parent_ids.clone(),
+                        carried_need,
+                    );
                     rbitcoin_consensus::confirm_wire_lookup_stamp(
                         &hub_load.query,
                         &hub_load.params,
@@ -1984,7 +1991,12 @@ pub(crate) fn spawn_confirm_engine(
                     lookup_ahead.drop_inflight_below(drop_below);
                     confirm_thr_stats::add_load_prune(&stats, t_prune.elapsed());
                 }
-                let pipe = lookup_ahead.pipeline_for(expect_h, store_path_lo, parent_ids);
+                let pipe = lookup_ahead.pipeline_for(
+                    expect_h,
+                    store_path_lo,
+                    parent_ids,
+                    Vec::new(),
+                );
                 let plan_ns = stamped.work_ns;
                 let heights_hashes: Vec<(u32, BlockHash)> = wire_batch
                     .iter()
@@ -2193,13 +2205,13 @@ pub(crate) fn spawn_confirm_engine(
                             let counts: Vec<u32> = wave
                                 .items
                                 .iter()
-                                .map(|(_, _, w)| block_input_count(w.block.as_ref()))
+                                .map(|(_, _, w)| w.n_inputs)
                                 .collect();
                             let t_kind = Instant::now();
                             let kinds: Vec<bool> = match wave
                                 .items
                                 .iter()
-                                .map(|(_, hash, _)| hub.query.is_block_archived(hash))
+                                .map(|(_, _, w)| hub.query.header_has_class_a_body(w.header_fk))
                                 .collect::<Result<Vec<_>, _>>()
                             {
                                 Ok(k) => k,

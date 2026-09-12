@@ -78,6 +78,21 @@ fn uring_recover_or_abort_takes_credit() {
     assert_eq!(q.uring_recover("again"), UringRecover::Exhausted);
 }
 
+#[test]
+fn header_has_class_a_body_from_fk_not_hash() {
+    let (dir, q) = temp_query("has-body-fk");
+    let (header, ta) = coinbase_block(0, Fk::NULL, None);
+    let fk = q.connect_block(Height(0), &header, &[ta]).unwrap();
+    assert!(q.header_has_class_a_body(fk.0).unwrap());
+    assert!(q.is_block_archived(&header.hash).unwrap());
+    assert!(!q.header_has_class_a_body(0).unwrap());
+    let (orphan, _) = coinbase_block(99, Fk::NULL, None);
+    let ofk = q.ensure_header(&orphan).unwrap();
+    assert!(!q.header_has_class_a_body(ofk.0).unwrap());
+    assert!(!q.is_block_archived(&orphan.hash).unwrap());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn temp_query(label: &str) -> (crate::testutil::TempDir, Query) {
     crate::testutil::tiny_query_labeled(label)
 }

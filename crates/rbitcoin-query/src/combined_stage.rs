@@ -426,10 +426,7 @@ mod tests {
             },
             txdata: vec![],
         };
-        let wire = ResolvedWire {
-            block: Arc::new(block),
-            pres: Arc::from(Vec::new()),
-        };
+        let wire = ResolvedWire::new(Arc::new(block), Arc::from(Vec::new()));
         q.block_queue_promote_wave(vec![(7, wire, 64)]).unwrap();
         q.block_queue_mark_resolve_complete(7).unwrap();
         assert!(q.block_queue_is_resolve_complete(7));
@@ -513,6 +510,11 @@ mod tests {
         let _ = q.block_queue_take_raw_clone_n();
         let intake = q.block_queue_wave_intake(&asked);
         assert_eq!(intake.raw.len(), 64, "all still-raw heights classified");
+        assert_eq!(intake.raw[0].0, 0);
+        assert_eq!(
+            intake.raw[0].2, 1,
+            "enqueue header_fk rides the intake stamp"
+        );
         assert_eq!(
             q.block_queue_take_raw_clone_n(),
             0,
@@ -551,10 +553,7 @@ mod tests {
             },
             txdata: vec![],
         };
-        let wire = ResolvedWire {
-            block: Arc::new(block),
-            pres: Arc::from(Vec::new()),
-        };
+        let wire = ResolvedWire::new(Arc::new(block), Arc::from(Vec::new()));
         let intake = q.block_queue_wave_intake(&[7, 8]);
         assert_eq!(intake.raw.len(), 2);
         assert!(intake.resolved.is_empty());
@@ -572,7 +571,7 @@ mod tests {
         let intake2 = q.block_queue_wave_intake(&[7, 8]);
         assert_eq!(intake2.resolved.len(), 1);
         assert_eq!(intake2.raw.len(), 1);
-        assert_eq!(intake2.raw[0], (8, 0));
+        assert_eq!(intake2.raw[0], (8, 0, 2));
         q.block_queue_drop_resolved_from(7);
         assert!(q.block_queue_resolved(7).is_none());
         assert_eq!(q.block_queue_dequeue_height(8).unwrap(), 1);

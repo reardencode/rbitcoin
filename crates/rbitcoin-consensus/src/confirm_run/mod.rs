@@ -3,9 +3,10 @@
 //! **Primary height-ordered pipeline** (raw wire → validated tip):
 //! ```text
 //! LOOKUP STAGE (ibd-confirm-lookup OS thread):
-//!   wire Block → structure → stamp create_fk (Class A planned only)
+//!   BQ decode + TipOnly parent ids (no structure / plan_batch)
 //! LOAD STAGE (ibd-confirm-load OS thread):
-//!   pin denserels once → assemble (uses intake wire; **no Class-A wire rebuild**)
+//!   structure + plan_batch (binds carried BQ keys) + pin denserels → assemble
+//!   (uses intake wire; **no Class-A wire rebuild**)
 //! SCRIPTS STAGE (`ibd-confirm` OS thread publishes waves; `rbtc-scripts-*` steal):
 //!   pure CPU verify — no Query, no disk. No coordinator threads.
 //! WRITE STAGE (ibd-confirm-write OS thread, FIFO):
@@ -23,17 +24,18 @@
 //! height order. Steal workers unpark the publisher when a wave completes.
 
 use crate::block::{
-    assemble_block_prevouts, block_has_witness, structural_validate_spends, ScriptCheckJob,
-    ValidationContext,
+    assemble_block_prevouts, block_has_witness_from_pres, structural_validate_spends,
+    ScriptCheckJob, ValidationContext,
 };
 use crate::error::ConsensusError;
 use crate::header::{
-    check_header_version_and_future_time, median_time_past_times, validate_header,
+    check_header_version_and_future_time, median_time_past_times, pow_hash_meets_target,
+    validate_header_hashed,
 };
 use crate::milestone::Milestone;
 use crate::params::{genesis_block, ChainParams};
 use bitcoin::hashes::Hash;
-use bitcoin::{Block, Target};
+use bitcoin::Block;
 use rbitcoin_primitives::Height;
 use rbitcoin_query::{FkMap, Query, U32Map, U64Map, U64Set};
 use rbitcoin_store::{StoreError, WriteIoBackend};
@@ -116,6 +118,8 @@ struct Prepared {
     bits: bitcoin::CompactTarget,
     /// Header hash of this block (prev-link for the next height in the run).
     hash: [u8; 32],
+    /// Structure txids — SP write indexes by these (no second `compute_txid`).
+    txids: Vec<[u8; 32]>,
     /// Prev-block MTP from assemble (`mtp_at(height-1)`). Write BIP68 uses this
     /// instead of `ConfirmParentCache::get_header_plan`.
     prev_mtp: u32,
@@ -142,6 +146,8 @@ pub struct WireLoadPipeline<'a> {
     pub in_flight: &'a rbitcoin_query::InFlight,
     /// Lookup-filled parent identity for this load batch (IBD skeleton).
     pub skeleton: Option<rbitcoin_query::BatchParentIds>,
+    /// External prev_txids from the BQ input walk (IBD skeleton stamp; no second wire collect).
+    pub carried_need: Vec<[u8; 32]>,
 }
 
 /// Wire + assemble complete; script jobs still attached (not yet verified).

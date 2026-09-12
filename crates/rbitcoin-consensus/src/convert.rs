@@ -6,7 +6,8 @@ use rbitcoin_primitives::Fk;
 use rbitcoin_query::{Query, TxApply};
 use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
 
-pub fn header_to_record(prev_fk: Fk, header: &Header) -> HeaderRecord {
+/// Header row from wire fields. `hash` is the caller-computed `header.block_hash()`.
+pub fn header_to_record(prev_fk: Fk, header: &Header, hash: [u8; 32]) -> HeaderRecord {
     HeaderRecord {
         prev_fk,
         version: header.version.to_consensus(),
@@ -14,7 +15,7 @@ pub fn header_to_record(prev_fk: Fk, header: &Header) -> HeaderRecord {
         bits: header.bits.to_consensus(),
         nonce: header.nonce,
         merkle_root: header.merkle_root.to_byte_array(),
-        hash: header.block_hash().to_byte_array(),
+        hash,
     }
 }
 
@@ -65,7 +66,8 @@ pub fn block_to_apply_with_txids_prev(
     if txs.len() != txids.len() {
         return Err(ConsensusError::BadBlock("txid count mismatch"));
     }
-    let header_rec = header_to_record(prev_fk, header);
+    let hash = header.block_hash().to_byte_array();
+    let header_rec = header_to_record(prev_fk, header, hash);
     let mut out = Vec::with_capacity(txs.len());
     for (tx, txid) in txs.iter().zip(txids.iter()) {
         out.push(tx_to_apply(tx, *txid)?);
@@ -122,8 +124,33 @@ fn tx_to_apply(tx: &Transaction, txid: [u8; 32]) -> Result<TxApply, ConsensusErr
 mod tests {
     use super::*;
     use bitcoin::absolute::LockTime;
+    use bitcoin::block::{Header, Version};
     use bitcoin::transaction::Version as TxVersion;
-    use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
+    use bitcoin::{
+        Amount, BlockHash, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
+        TxMerkleNode, TxOut, Witness,
+    };
+
+    #[test]
+    fn header_to_record_stores_caller_hash() {
+        let header = Header {
+            version: Version::ONE,
+            prev_blockhash: BlockHash::from_byte_array([0; 32]),
+            merkle_root: TxMerkleNode::from_byte_array([0; 32]),
+            time: 1,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
+            nonce: 0,
+        };
+        let computed = header.block_hash().to_byte_array();
+        let rec = header_to_record(Fk(3), &header, computed);
+        assert_eq!(rec.hash, computed);
+        assert_eq!(rec.prev_fk, Fk(3));
+        assert_eq!(rec.timestamp, 1);
+        let distinct = [0xab; 32];
+        assert_ne!(distinct, computed);
+        let rec2 = header_to_record(Fk::NULL, &header, distinct);
+        assert_eq!(rec2.hash, distinct);
+    }
 
     #[test]
     fn apply_with_precomputed_txid_matches_fresh_hash() {

@@ -671,7 +671,11 @@ fn confirm_wire_idempotent_when_class_a_already_present() {
         .0;
     let b1 = mine_regtest_block(genesis.block_hash(), genesis.header.time + 600, 1, vec![]);
     let hfk = q
-        .ensure_header(&header_to_record(g_fk, &b1.header))
+        .ensure_header(&header_to_record(
+            g_fk,
+            &b1.header,
+            b1.header.block_hash().to_byte_array(),
+        ))
         .unwrap();
     commit_class_a_block(&q, &params, H(1), &b1, ms).unwrap();
     assert!(q

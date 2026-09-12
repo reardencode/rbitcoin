@@ -80,7 +80,7 @@ pub use silent_payments::{
 };
 
 use bitcoin::hashes::Hash;
-use bitcoin::{Block, Target};
+use bitcoin::Block;
 use rbitcoin_primitives::{Fk, Height};
 use rbitcoin_query::{Query, TxApply};
 use rbitcoin_store::HeaderRecord;
@@ -242,14 +242,8 @@ fn class_a_header_and_txids(
 ) -> Result<(HeaderRecord, Vec<[u8; 32]>), ConsensusError> {
     let ctx = ValidationContext::archive_structure(params);
     let txids = validate_block_structure_hashed(block, &ctx)?;
-    let target = Target::from_compact(block.header.bits);
-    if target > params.pow_limit {
-        return Err(ConsensusError::BadHeader("target above pow limit"));
-    }
-    block
-        .header
-        .validate_pow(target)
-        .map_err(|_| ConsensusError::InvalidPow)?;
+    let hash = block.header.block_hash().to_byte_array();
+    crate::header::pow_hash_meets_target(hash, block.header.bits, params.pow_limit)?;
     let prev = block.header.prev_blockhash;
     let prev_fk = if prev.to_byte_array() == [0u8; 32] {
         Fk::NULL
@@ -260,7 +254,7 @@ fn class_a_header_and_txids(
             .map(|(fk, _)| fk)
             .ok_or(ConsensusError::BadPrev)?
     };
-    Ok((header_to_record(prev_fk, &block.header), txids))
+    Ok((header_to_record(prev_fk, &block.header, hash), txids))
 }
 
 /// Class A only (no tip / Class C). Crash and `plan=None` tests.

@@ -124,7 +124,10 @@ pub struct BqResolveWaveStats {
     pub spent_ns: u64,
 }
 
-/// Push external prev_txids (+ pre-BIP34 create txids) into the wave set.
+/// Push external prev_txids (+ pre-BIP34 create txids) into the wave TipOnly set.
+///
+/// Spend keys record every non-coinbase prev (including same-wave creates) so
+/// a later load chunk can bind in-flight. TipOnly `keys` still omit `skip`.
 fn push_resolve_keys(
     params: &ChainParams,
     height: u32,
@@ -132,23 +135,28 @@ fn push_resolve_keys(
     pres: &[TxPrecompute],
     skip: &HashSet<[u8; 32], BuildHasherDefault<TxidHasher>>,
     keys: &mut HashSet<[u8; 32], BuildHasherDefault<TxidHasher>>,
-) {
+) -> Vec<([u8; 32], u32)> {
     let bip34 = params.bip34_active_at(height);
+    let mut spends = Vec::new();
     for (tx, p) in block.txdata.iter().zip(pres.iter()) {
         for inp in &tx.input {
             if inp.previous_output.is_null() {
                 continue;
             }
             let prev = inp.previous_output.txid.to_byte_array();
-            if prev == [0u8; 32] || skip.contains(&prev) {
+            if prev == [0u8; 32] {
                 continue;
             }
-            keys.insert(prev);
+            spends.push((prev, inp.previous_output.vout));
+            if !skip.contains(&prev) {
+                keys.insert(prev);
+            }
         }
         if !bip34 && !skip.contains(&p.txid) {
             keys.insert(p.txid);
         }
     }
+    spends
 }
 
 fn decode_bq_block(payload: &[u8]) -> Option<Block> {
@@ -181,23 +189,19 @@ pub fn confirm_bq_resolve_wave_capped(
 
     let intake = query.block_queue_wave_intake(heights);
     let mut n_inputs_at: U32Map<u32> = U32Map::default();
+    let mut header_fk_at: U32Map<u64> = U32Map::default();
     let raw_h: HashSet<u32> = intake
         .raw
         .into_iter()
-        .map(|(h, n)| {
+        .map(|(h, n, fk)| {
             n_inputs_at.insert(h, n);
+            header_fk_at.insert(h, fk);
             h
         })
         .collect();
     let mut resolved_by_h: HashMap<u32, ResolvedWire> = HashMap::new();
     for (h, wire) in intake.resolved {
-        let n = wire
-            .block
-            .txdata
-            .iter()
-            .map(|tx| tx.input.len() as u32)
-            .fold(0u32, u32::saturating_add);
-        n_inputs_at.insert(h, n);
+        n_inputs_at.insert(h, wire.n_inputs);
         resolved_by_h.insert(h, wire);
     }
 
@@ -291,6 +295,9 @@ pub fn confirm_bq_resolve_wave_capped(
                 ResolvedWire {
                     block: Arc::clone(&block),
                     pres: Arc::clone(&pres),
+                    n_inputs: n_inputs_at.get(&h).copied().unwrap_or(0),
+                    header_fk: header_fk_at.get(&h).copied().unwrap_or(0),
+                    spend_keys: Arc::from([]),
                 },
             ));
             (block, pres)
@@ -301,7 +308,7 @@ pub fn confirm_bq_resolve_wave_capped(
         for p in pres.iter() {
             wave_creates.insert(p.txid);
         }
-        push_resolve_keys(
+        let spends = push_resolve_keys(
             params,
             h,
             block.as_ref(),
@@ -309,6 +316,9 @@ pub fn confirm_bq_resolve_wave_capped(
             &wave_creates,
             &mut all_keys,
         );
+        if let Some((_, _, w)) = wires.last_mut() {
+            w.spend_keys = Arc::from(spends);
+        }
         stats.collect_ns = stats
             .collect_ns
             .saturating_add(t_col.elapsed().as_nanos() as u64);
@@ -591,9 +601,24 @@ mod tests {
         let mut keys: HashSet<[u8; 32], BuildHasherDefault<TxidHasher>> =
             HashSet::with_hasher(BuildHasherDefault::default());
         let skip = HashSet::with_hasher(BuildHasherDefault::default());
-        push_resolve_keys(&params, height, &block, &pres, &skip, &mut keys);
+        let spends = push_resolve_keys(&params, height, &block, &pres, &skip, &mut keys);
         assert_eq!(keys.len(), 1);
         assert!(keys.contains(&prev.to_byte_array()));
+        assert_eq!(
+            spends,
+            vec![(prev.to_byte_array(), 0), (prev.to_byte_array(), 1),]
+        );
+        let mut skip_same = HashSet::with_hasher(BuildHasherDefault::default());
+        skip_same.insert(prev.to_byte_array());
+        let mut keys2: HashSet<[u8; 32], BuildHasherDefault<TxidHasher>> =
+            HashSet::with_hasher(BuildHasherDefault::default());
+        let skipped = push_resolve_keys(&params, height, &block, &pres, &skip_same, &mut keys2);
+        assert!(keys2.is_empty(), "same-wave creates are not TipOnly need");
+        assert_eq!(
+            skipped,
+            vec![(prev.to_byte_array(), 0), (prev.to_byte_array(), 1),],
+            "spend_keys must still carry same-wave prevs for in-flight stamp"
+        );
     }
 
     #[test]
@@ -629,6 +654,15 @@ mod tests {
         assert!(
             wave.stats.hits >= 1,
             "archived genesis parent must still TipOnly-hit"
+        );
+        let h1 = h1_create.to_byte_array();
+        assert!(
+            wave.parent_ids.get(&h1).is_none(),
+            "same-wave create is not a TipOnly skeleton id"
+        );
+        assert!(
+            wave.items[1].2.spend_keys.iter().any(|&(t, _)| t == h1),
+            "h=2 spend_keys must name the same-wave parent so load stamp can in-flight bind"
         );
         let _ = std::fs::remove_dir_all(&path);
     }
@@ -1052,6 +1086,11 @@ mod tests {
             next_tx_start: q.tx_body_count().saturating_add(1).max(1),
             in_flight: &inflight,
             skeleton: Some(wave.parent_ids.clone()),
+            carried_need: wave
+                .items
+                .iter()
+                .flat_map(|(_, _, w)| w.spend_keys.iter().map(|&(t, _)| t))
+                .collect(),
         };
         let items = [(Height(1), std::sync::Arc::new(b1), None)];
         let stamped =
@@ -1181,6 +1220,7 @@ mod tests {
                 next_tx_start: q.tx_body_count().saturating_add(1).max(1),
                 in_flight: &log,
                 skeleton: None,
+                carried_need: Vec::new(),
             };
             let items = [(Height(1), std::sync::Arc::new(b1), None)];
             crate::confirm_wire_lookup_stamp(&q, &params, Milestone::NONE, &items, Some(&pipe))
@@ -1268,6 +1308,7 @@ mod tests {
                 next_tx_start: q.tx_body_count().saturating_add(1).max(1),
                 in_flight: &log,
                 skeleton: None,
+                carried_need: Vec::new(),
             };
             let items = [(Height(1), std::sync::Arc::new(b1), None)];
             crate::confirm_wire_lookup_stamp(&q, &params, Milestone::NONE, &items, Some(&pipe))
@@ -1355,6 +1396,7 @@ mod tests {
                 &[(rbitcoin_primitives::Fk(1), &block, txids.as_slice())],
                 1,
                 &rbitcoin_query::InFlight::new(),
+                None,
                 None,
             )
             .expect_err("disconnected leftover must not TipThenAny-fill");
