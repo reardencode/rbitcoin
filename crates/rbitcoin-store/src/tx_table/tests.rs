@@ -3640,6 +3640,29 @@ fn class_a_append_does_not_write_spent_idx() {
 }
 
 #[test]
+fn spent_range_uses_append_n_out_not_txout_body() {
+    let dir = tempfile_dir("spent-ram-nout");
+    let t = create_tiny(&dir);
+    let f0 = put_n_out(&t, 1, 0);
+    let f1 = put_n_out(&t, 2, 1);
+    let f3 = put_n_out(&t, 3, 3);
+    let want = t.spent_range_batch(&[f3, f0, f1]).unwrap();
+    assert_eq!(want[0].map(|(_, l)| l), Some(spent_record_len(3)));
+    assert_eq!(want[1].map(|(_, l)| l), Some(spent_record_len(0)));
+    assert_eq!(want[2].map(|(_, l)| l), Some(spent_record_len(1)));
+    {
+        let body = dir.join("txout.body");
+        let f = std::fs::OpenOptions::new().write(true).open(&body).unwrap();
+        f.set_len(crate::file::FILE_HEADER_LEN as u64).unwrap();
+    }
+    let got = t
+        .spent_range_batch(&[f3, f0, f1])
+        .expect("spent range uses RAM n_out from append");
+    assert_eq!(got, want);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn open_unlinks_leftover_spent_idx() {
     let dir = tempfile_dir("spent-idx-leftover");
     let t = create_tiny(&dir);

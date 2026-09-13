@@ -2,7 +2,7 @@
 
 **Version:** `SCHEMA_VERSION = 21` (`rbitcoin_primitives`).  
 **Status:** 21 drops `spent.idx`. Spent `(off,len)` is `8 × max(n_out,1)` from
-txout meta; sparse `spent.off` (u64/1024 creates). A 21 binary unlinks leftover
+RAM `n_out` (sparse `spent.off`, u64/1024 creates). A 21 binary unlinks leftover
 `spent.idx` (dir and flat `spent.idx.meta`) and rewrites `store/meta` 20→21.
 A 20 binary refuses 21 `meta`. Occupied schema 18/19 `tx.head` or
 `scripthash*` is **refused** (wipe those index dirs, keep Class A). Empty
@@ -361,7 +361,7 @@ i = fk - first_fk
 
 Hard span per segment: `2^32 × 8` ≈ 32 GiB. Soft rollover earlier (default 16 GiB; `RBITCOIN_TX_IDX_SOFT_SPAN`). **Each stem rolls independently** when that stem’s next start would exceed the soft span (`inwit` no longer forces `txout` idx splits). Length: `start(fk+1) − start(fk)` (may cross segments); last record uses published body end. ~**4 B/tx** vs prior 8 B absolute u64 index (~50% smaller).
 
-**`spent.body` has no `spent.idx`.** Record length is `8 × max(n_out, 1)` (zero-out still pays one stride so starts stay monotone). `spent_abs(off, vout) = off + 8×vout`. `n_out` is txout LAYOUT17 meta. Sparse `spent.off` stores absolute starts every 1024 creates (`ArrayLink` u64 LE). Leftover `spent.idx/` (and flat `spent.idx.meta`) is unlinked on open; `store/meta` is rewritten to 21.
+**`spent.body` has no `spent.idx`.** Record length is `8 × max(n_out, 1)` (zero-out still pays one stride so starts stay monotone). `spent_abs(off, vout) = off + 8×vout`. `n_out` is Class A append RAM. Sparse `spent.off` stores absolute starts every 1024 creates (`ArrayLink` u64 LE). Spent-range APIs prefix-sum that vec and never read `txout.body`. Open hydrates the vec from LAYOUT17 meta once. Leftover `spent.idx/` (and flat `spent.idx.meta`) is unlinked on open; `store/meta` is rewritten to 21.
 
 ### Input encoding (embedded)
 

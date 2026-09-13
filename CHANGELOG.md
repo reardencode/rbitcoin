@@ -26,6 +26,10 @@ before 1.0).
 
 ### Fixed
 
+- **Spent-range never reads `txout.body`:** `tx_spent_range*` prefix-sums RAM
+  `n_out` from Class A append (open hydrates that vec from LAYOUT17 meta).
+  Missing `n_out` is `Corrupt("invariant: spent n_out missing")`.
+
 - **Compact reconstruct merkle-checks before `Ok`:** a unique short-id (or
   `blocktxn`) fill is not a block until the txs match the compact header
   merkle (BIP152 `FinishBlock`). Empty missing → `getdata`, not

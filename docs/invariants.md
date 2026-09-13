@@ -72,7 +72,7 @@ not head/idx.
 
 | Stage | Allowed IO | Forbidden |
 |-------|------------|-----------|
-| **lookup** | `tx.head`, `txout.idx` (fk + ranges), `txid.body`, headers; leftover spent_range peeks txout **meta** (`n_out` only) | **`txout` outs / `inwit` decode** |
+| **lookup** | `tx.head`, `txout.idx` (fk + ranges), `txid.body`, headers; spent_range from RAM `n_out` (append / open hydrate) | **`txout` outs / `inwit` decode**; **spent_range must not read `txout.body`** |
 | **load** | **`txout.body` outs by range** (from lookup stamp) | head, idx (`txout`), `txid.body`, `inwit` |
 | **scripts** | none | any store IO |
 

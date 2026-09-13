@@ -1,4 +1,7 @@
-//! Sparse `spent.body` starts: prefix of `spent_record_len(n_out)` from txout.
+//! Sparse `spent.body` starts: prefix of `spent_record_len(n_out)`.
+//!
+//! `n_out` is Class A append RAM, or LAYOUT17 meta loaded at open into that vec.
+//! Spent-range APIs never read `txout.body`.
 
 use super::packed::spent_record_len;
 use super::TxRecord;
@@ -9,13 +12,18 @@ use rbitcoin_primitives::{Fk, TableKind};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-/// Checkpoint every N creates (fk 1, 1025, …). Between them, sum `n_out` from txout meta.
+/// Checkpoint every N creates (fk 1, 1025, …). Between them, sum RAM `n_out`.
 const SPENT_OFF_STRIDE: u64 = 1024;
 const META_PEEK: u64 = 32;
 
+struct SpentOffMem {
+    ckpts: Vec<u64>,
+    n_outs: Vec<u32>,
+}
+
 pub(super) struct SpentOff {
     path: PathBuf,
-    ckpts: Mutex<Vec<u64>>,
+    mem: Mutex<SpentOffMem>,
 }
 
 pub(crate) fn unlink_leftover_spent_idx(dir: &Path) -> Result<bool, StoreError> {
@@ -57,11 +65,31 @@ pub(crate) fn unlink_leftover_spent_idx(dir: &Path) -> Result<bool, StoreError> 
     Ok(dropped)
 }
 
+fn range_from_n_outs(n_outs: &[u32], base_fk: u64, id: u64, mut off: u64) -> Option<(u64, u64)> {
+    if id == 0 || (n_outs.len() as u64) < id {
+        return None;
+    }
+    let mut cur = base_fk;
+    while cur <= id {
+        let n_out = n_outs[(cur - 1) as usize];
+        let len = spent_record_len(n_out);
+        if cur == id {
+            return Some((off, len));
+        }
+        off = off.saturating_add(len);
+        cur += 1;
+    }
+    None
+}
+
 impl SpentOff {
     pub(super) fn new(dir: &Path) -> Self {
         Self {
             path: dir.join("spent.off"),
-            ckpts: Mutex::new(Vec::new()),
+            mem: Mutex::new(SpentOffMem {
+                ckpts: Vec::new(),
+                n_outs: Vec::new(),
+            }),
         }
     }
 
@@ -84,57 +112,79 @@ impl SpentOff {
         for c in buf.chunks_exact(8) {
             ckpts.push(u64::from_le_bytes(c.try_into().unwrap()));
         }
-        *me.ckpts.lock().unwrap_or_else(|e| e.into_inner()) = ckpts;
+        me.mem.lock().unwrap_or_else(|e| e.into_inner()).ckpts = ckpts;
         Ok(me)
     }
 
-    pub(super) fn note_starts(&self, base_count: u64, starts: &[u64]) {
+    pub(super) fn note_starts(&self, base_count: u64, starts: &[u64], n_outs: &[u32]) {
         if starts.is_empty() {
             return;
         }
-        let mut g = self.ckpts.lock().unwrap_or_else(|e| e.into_inner());
+        let mut g = self.mem.lock().unwrap_or_else(|e| e.into_inner());
         for (i, &start) in starts.iter().enumerate() {
             let fk = base_count.saturating_add(1).saturating_add(i as u64);
             if !fk.saturating_sub(1).is_multiple_of(SPENT_OFF_STRIDE) {
                 continue;
             }
             let idx = ((fk - 1) / SPENT_OFF_STRIDE) as usize;
-            if g.len() <= idx {
-                g.resize(idx + 1, 0);
+            if g.ckpts.len() <= idx {
+                g.ckpts.resize(idx + 1, 0);
             }
-            g[idx] = start;
+            g.ckpts[idx] = start;
+        }
+        if n_outs.len() == starts.len() && g.n_outs.len() as u64 == base_count {
+            g.n_outs.extend_from_slice(n_outs);
         }
     }
 
     pub(super) fn truncate_to_count(&self, new_count: u64) {
-        let mut g = self.ckpts.lock().unwrap_or_else(|e| e.into_inner());
+        let mut g = self.mem.lock().unwrap_or_else(|e| e.into_inner());
         if new_count == 0 {
-            g.clear();
+            g.ckpts.clear();
+            g.n_outs.clear();
             return;
         }
         let keep = 1 + (new_count - 1) / SPENT_OFF_STRIDE;
-        g.truncate(keep as usize);
+        g.ckpts.truncate(keep as usize);
+        g.n_outs.truncate(new_count as usize);
     }
 
+    /// Open: durable `spent.off` plus RAM `n_out` from LAYOUT17 meta.
     pub(super) fn ensure_covering(&self, body: &VarTable, count: u64) -> Result<(), StoreError> {
         if count == 0 {
-            self.ckpts.lock().unwrap_or_else(|e| e.into_inner()).clear();
+            let mut g = self.mem.lock().unwrap_or_else(|e| e.into_inner());
+            g.ckpts.clear();
+            g.n_outs.clear();
             return Ok(());
         }
         let need = 1 + (count - 1) / SPENT_OFF_STRIDE;
-        {
-            let g = self.ckpts.lock().unwrap_or_else(|e| e.into_inner());
-            if g.len() as u64 >= need && g.first().copied() == Some(FILE_HEADER_LEN as u64) {
-                return Ok(());
-            }
+        let (ckpts_ok, n_out_ok) = {
+            let g = self.mem.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                g.ckpts.len() as u64 >= need
+                    && g.ckpts.first().copied() == Some(FILE_HEADER_LEN as u64),
+                g.n_outs.len() as u64 == count,
+            )
+        };
+        if ckpts_ok && n_out_ok {
+            return Ok(());
         }
-        let rebuilt = rebuild_from_txout(body, count)?;
-        *self.ckpts.lock().unwrap_or_else(|e| e.into_inner()) = rebuilt;
+        let (rebuilt, n_outs) = load_n_outs(body, count)?;
+        let mut g = self.mem.lock().unwrap_or_else(|e| e.into_inner());
+        if !ckpts_ok {
+            g.ckpts = rebuilt;
+        }
+        g.n_outs = n_outs;
         Ok(())
     }
 
     pub(super) fn flush(&self) -> Result<(), StoreError> {
-        let ckpts = self.ckpts.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let ckpts = self
+            .mem
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .ckpts
+            .clone();
         let f = if self.path.exists() {
             TableFile::open(&self.path, TableKind::ArrayLink)?
         } else {
@@ -158,8 +208,8 @@ impl SpentOff {
             return Err(StoreError::InvalidFk);
         }
         let i = (fk - 1) / SPENT_OFF_STRIDE;
-        let g = self.ckpts.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(&off) = g.get(i as usize) else {
+        let g = self.mem.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(&off) = g.ckpts.get(i as usize) else {
             return Err(StoreError::Corrupt(
                 "invariant: spent off checkpoint missing",
             ));
@@ -170,12 +220,7 @@ impl SpentOff {
         Ok((i * SPENT_OFF_STRIDE + 1, off))
     }
 
-    pub(super) fn range_for(
-        &self,
-        body: &VarTable,
-        fk: Fk,
-        count: u64,
-    ) -> Result<(u64, u64), StoreError> {
+    pub(super) fn range_for(&self, fk: Fk, count: u64) -> Result<(u64, u64), StoreError> {
         let id = fk.get().ok_or(StoreError::InvalidFk)?;
         if id == 0 {
             return Err(StoreError::InvalidFk);
@@ -183,29 +228,17 @@ impl SpentOff {
         if id > count {
             return Err(StoreError::NotFound);
         }
-        let (base_fk, mut off) = self.base_for(id)?;
+        let (base_fk, off) = self.base_for(id)?;
         if base_fk > id {
             return Err(StoreError::Corrupt("invariant: spent off base"));
         }
-        let last_sum = id; // inclusive n_out through this fk
-        let n_outs = peek_output_counts(body, base_fk, last_sum)?;
-        if n_outs.len() as u64 != last_sum.saturating_sub(base_fk).saturating_add(1) {
-            return Err(StoreError::Corrupt("invariant: spent n_out walk"));
-        }
-        for (i, n_out) in n_outs.iter().enumerate() {
-            let cur = base_fk + i as u64;
-            let len = spent_record_len(*n_out);
-            if cur == id {
-                return Ok((off, len));
-            }
-            off = off.saturating_add(len);
-        }
-        Err(StoreError::Corrupt("invariant: spent range walk"))
+        let g = self.mem.lock().unwrap_or_else(|e| e.into_inner());
+        range_from_n_outs(&g.n_outs, base_fk, id, off)
+            .ok_or(StoreError::Corrupt("invariant: spent n_out missing"))
     }
 
     pub(super) fn ranges_batch(
         &self,
-        body: &VarTable,
         fks: &[Fk],
         count: u64,
     ) -> Result<Vec<Option<(u64, u64)>>, StoreError> {
@@ -237,7 +270,13 @@ impl SpentOff {
             let lo = jobs[w].1;
             let hi = jobs[e - 1].1;
             let (base_fk, mut off) = self.base_for(lo)?;
-            let n_outs = peek_output_counts(body, base_fk, hi)?;
+            let n_outs = {
+                let g = self.mem.lock().unwrap_or_else(|e| e.into_inner());
+                if (g.n_outs.len() as u64) < hi {
+                    return Err(StoreError::Corrupt("invariant: spent n_out missing"));
+                }
+                g.n_outs[(base_fk - 1) as usize..(hi as usize)].to_vec()
+            };
             let mut want = w;
             for (i, n_out) in n_outs.iter().enumerate() {
                 let cur = base_fk + i as u64;
@@ -256,16 +295,37 @@ impl SpentOff {
         Ok(out)
     }
 
-    pub(super) fn end_for(&self, body: &VarTable, count: u64) -> Result<u64, StoreError> {
+    pub(super) fn end_for(&self, count: u64) -> Result<u64, StoreError> {
         if count == 0 {
             return Ok(FILE_HEADER_LEN as u64);
         }
-        let (off, len) = self.range_for(body, Fk(count), count)?;
+        let (off, len) = self.range_for(Fk(count), count)?;
         Ok(off.saturating_add(len))
     }
 }
 
-fn peek_output_counts(body: &VarTable, first: u64, last: u64) -> Result<Vec<u32>, StoreError> {
+fn load_n_outs(body: &VarTable, count: u64) -> Result<(Vec<u64>, Vec<u32>), StoreError> {
+    let mut ckpts = Vec::new();
+    let mut all_n_outs = Vec::with_capacity(count as usize);
+    let mut off = FILE_HEADER_LEN as u64;
+    let mut first = 1u64;
+    while first <= count {
+        let last = first.saturating_add(SPENT_OFF_STRIDE - 1).min(count);
+        let n_outs = read_output_counts(body, first, last)?;
+        for (i, n_out) in n_outs.iter().enumerate() {
+            let fk = first + i as u64;
+            if (fk - 1).is_multiple_of(SPENT_OFF_STRIDE) {
+                ckpts.push(off);
+            }
+            off = off.saturating_add(spent_record_len(*n_out));
+        }
+        all_n_outs.extend_from_slice(&n_outs);
+        first = last.saturating_add(1);
+    }
+    Ok((ckpts, all_n_outs))
+}
+
+fn read_output_counts(body: &VarTable, first: u64, last: u64) -> Result<Vec<u32>, StoreError> {
     if first == 0 || last < first {
         return Err(StoreError::InvalidFk);
     }
@@ -292,23 +352,4 @@ fn peek_output_counts(body: &VarTable, first: u64, last: u64) -> Result<Vec<u32>
         out.push(rec.output_count);
     }
     Ok(out)
-}
-
-fn rebuild_from_txout(body: &VarTable, count: u64) -> Result<Vec<u64>, StoreError> {
-    let mut ckpts = Vec::new();
-    let mut off = FILE_HEADER_LEN as u64;
-    let mut first = 1u64;
-    while first <= count {
-        let last = first.saturating_add(SPENT_OFF_STRIDE - 1).min(count);
-        let n_outs = peek_output_counts(body, first, last)?;
-        for (i, n_out) in n_outs.iter().enumerate() {
-            let fk = first + i as u64;
-            if (fk - 1).is_multiple_of(SPENT_OFF_STRIDE) {
-                ckpts.push(off);
-            }
-            off = off.saturating_add(spent_record_len(*n_out));
-        }
-        first = last.saturating_add(1);
-    }
-    Ok(ckpts)
 }

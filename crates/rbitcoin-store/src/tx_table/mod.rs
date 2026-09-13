@@ -660,7 +660,7 @@ impl TxTable {
         }
         let n_bodies = body.count();
         spent_off.ensure_covering(&body, n_bodies)?;
-        let spent_end = spent_off.end_for(&body, n_bodies)?;
+        let spent_end = spent_off.end_for(n_bodies)?;
         if spent.body_logical_len() < spent_end {
             return Err(StoreError::Corrupt("spent.body short for n_out prefix"));
         }
@@ -1050,15 +1050,14 @@ impl TxTable {
         self.body.record_range_batch(fks)
     }
 
-    /// `spent.body` range for one create.
+    /// `spent.body` range for one create (RAM `n_out` + `spent.off`; no `txout.body`).
     pub fn spent_range(&self, fk: Fk) -> Result<(u64, u64), StoreError> {
-        self.spent_off.range_for(&self.body, fk, self.spent.count())
+        self.spent_off.range_for(fk, self.spent.count())
     }
 
     /// `spent.body` ranges (same fk order as [`Self::body_range_batch`]).
     pub fn spent_range_batch(&self, fks: &[Fk]) -> Result<Vec<Option<(u64, u64)>>, StoreError> {
-        self.spent_off
-            .ranges_batch(&self.body, fks, self.spent.count())
+        self.spent_off.ranges_batch(fks, self.spent.count())
     }
 
     /// Annotate spends at known absolute spender-meta offsets (confirm write).
@@ -1516,6 +1515,7 @@ impl TxTable {
         if self.inwit.count() != base || self.spent.count() != base {
             return Err(StoreError::Corrupt("Class A stem count mismatch on append"));
         }
+        let n_outs: Vec<u32> = items.iter().map(|(_, _, outs)| outs.len() as u32).collect();
         let fks = self.append_stems_one_wave(
             items.len(),
             est_out,
@@ -1527,6 +1527,7 @@ impl TxTable {
             },
             |i, buf| encode_inwit_with_secret(&items[i].1, buf, Some(&self.secret)),
             |i, buf| encode_spent_zeros(items[i].2.len() as u32, buf),
+            &n_outs,
         )?;
         let ids: Vec<[u8; 32]> = items.iter().map(|(tx, _, _)| tx.txid).collect();
         self.txids.append_batch(base, &ids)?;
@@ -1591,6 +1592,10 @@ impl TxTable {
                 encode_spent_slot_v17(0, fk)?;
             }
         }
+        let n_outs: Vec<u32> = items
+            .iter()
+            .map(|(pin, _)| pin.as_ref().1.len() as u32)
+            .collect();
         let fks = self.append_stems_one_wave(
             items.len(),
             est_out,
@@ -1608,6 +1613,7 @@ impl TxTable {
                 encode_spent_slots(outs.len() as u32, pairs, buf)
                     .expect("spent overlay prechecked");
             },
+            &n_outs,
         )?;
         let ids: Vec<[u8; 32]> = items.iter().map(|(pin, _)| pin.0.txid).collect();
         self.txids.append_batch(base, &ids)?;
@@ -1635,6 +1641,7 @@ impl TxTable {
         encode_out: impl FnMut(usize, &mut Vec<u8>),
         encode_in: impl FnMut(usize, &mut Vec<u8>),
         encode_sp: impl FnMut(usize, &mut Vec<u8>),
+        n_outs: &[u32],
     ) -> Result<Vec<Fk>, StoreError> {
         let Some(p_out) = self.body.prepare_batch_encode(n, est_out, encode_out)? else {
             return Ok(Vec::new());
@@ -1660,7 +1667,7 @@ impl TxTable {
                 "Class A append fk mismatch across stems",
             ));
         }
-        self.spent_off.note_starts(sp_base, &sp_starts);
+        self.spent_off.note_starts(sp_base, &sp_starts, n_outs);
         Ok(fks)
     }
 
