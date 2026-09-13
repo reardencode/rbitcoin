@@ -870,6 +870,7 @@ dependencies = [
 name = "rbitcoin-store"
 version = "0.6.99"
 dependencies = [
+ "arc-swap",
  "bitcoin_hashes 0.14.101",
  "getrandom 0.4.3",
  "io-uring",

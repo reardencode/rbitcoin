@@ -72,7 +72,7 @@ not head/idx.
 
 | Stage | Allowed IO | Forbidden |
 |-------|------------|-----------|
-| **lookup** | `tx.head`, `create.loc` (fk + body+spent ranges + `n_out`), `txid.body`, headers | **`txout.body`** (outs or spent-range peeks) / **`inwit` decode** |
+| **lookup** | `tx.head`, `create.loc` (fk + body+spent ranges + `n_out`; last 2²⁰ creates from append RAM, else FdOnly), `txid.body`, headers | **`txout.body`** (outs or spent-range peeks) / **`inwit` decode** |
 | **load** | **`txout.body` outs by range** (from lookup stamp) | head, loc, `txid.body`, `inwit` |
 | **scripts** | none | any store IO |
 
@@ -82,7 +82,7 @@ not head/idx.
 | Parent create_fk | **same-batch** planned fks (offline at pin) → **in-flight** (lookup snapshots `drain_and_fence_hi` **before** the wave's TipOnly read and passes it on the last load batch; load drops tagged map rows with pack height **below** that snapshot after that batch's in-flight read; equality keeps; not Class C tip, not `class_a_hi`, not write freeze; one load-thread HashMap, insert after stamp) → **skeleton** (`BatchParentIds` on the `LoadBatch`: lookup TipOnly fk + body_range + spent_range + per-chunk need-vouts) → **Corrupt** on IBD miss. plan=None / S0 (`skeleton = None`) is in-flight → leftover TipOnly. One helper: [`stamp_external_parents`](../crates/rbitcoin-query/src/stamp.rs). No leftover pending map, no process pin FIFO, no BQ-side hits map, no parent-store create_fk on stamp, no published live_union. Same-wave creates are omitted from TipOnly need. Header-cache GC polls store tip each load pack. One fk per txid — [`errata.md`](./errata.md). | Miss of in-flight and skeleton → `Corrupt("parent create_fk unresolved")` (**engine fault**: requeue once, then halt IBD; never blacklist). Identity without loc range → `Corrupt("invariant: loc range missing after identity")`, not a miss |
 | io_uring harvest | TLS session fail-closed ([`io-modality.md`](./io-modality.md)) | **No** silent success. `Corrupt("invariant: io_uring …")` (not `bdz g page bad slot`). Ring-unavailable still pread-fallback |
 | Load body outs | By `txout` range only from lookup stamp; incomplete outs → hard Err. Pin **copies** lookup `spent_range` (no loc IO) | **No** loc cold outs on load; **no** `create.loc` on load; **no** `inwit` on pin |
-| Ensure (write) | Every non-null spend edge has `spent_range` abs after ensure returns. Lookup stamped archived parents; same-batch and just-written packs from Class A append RAM (packed pin outs / write loc window). Missing abs → `invariant:` | **No** write `create.loc` read |
+| Ensure (write) | Every non-null spend edge has `spent_range` abs after ensure returns. Lookup stamped archived parents; same-batch and just-written packs from Class A append RAM (packed pin outs / loc window). Missing abs → `invariant:` | **No** write `create.loc` read |
 | Structural spentness | Abs required for every non-null spend create_fk after load; multi-list → confirmed-strong walk (reorg protocol) | **No** unpinned “wire-corrected create_fk” soft spentness. Multi flag alone is **not** hard `Err` |
 | Pin create identity | Pin must carry non-zero create txid from **lookup stamp** (plan reverse map / wire prev_txid / `txid.body`) | Soft zero-identity pin → assemble mismatch → cold recovery is **forbidden** |
 | Tip already-archived | `plan=None`: lookup still stamps parent pin material; load `txout` by range | Soft spentness recovery for zero pin identity is **not** OK |
@@ -162,7 +162,7 @@ packs at/above the leaving **pack** height **before** the next bind.
 | `pin_for_wire_incomplete_outs_is_invariant_error` | `pin_for_wire_batch` incomplete outs → cold miss |
 | `post_commit_missing_denserels_is_invariant_error` | `post_commit` abs-only annotate |
 | `ensure_spend_abs_incomplete_is_invariant_error` | `ensure_spend_abs_layouts` post-condition |
-| `write_ensure_stamps_spent_range_after_load_pin` / `pin_and_ensure_journey` / `fill_same_batch_abs_from_append_loc_ram` | load pin copies lookup spent range; missing stamp is Corrupt; same-batch abs from append RAM (no write loc pread) |
+| `write_ensure_stamps_spent_range_after_load_pin` / `pin_and_ensure_journey` / `fill_same_batch_abs_from_append_loc_ram` / `range_batch_after_append_ignores_smashed_loc_bytes` | load pin copies lookup spent range; missing stamp is Corrupt; same-batch abs from append RAM (no write loc pread); leftover lookup stamps the same window without loc pread |
 | `fill_missing_parent_ranges_stamps_spent_idx_for_archived` | lookup stamp carries spent range for TipOnly leftover |
 | `spend_abs_jobs_unique_and_missing_is_corrupt` | pin arithmetic abs list; missing → Corrupt |
 | `structural_pinned_without_abs_is_invariant_error` | `structural_validate_spends` pin without denserels |

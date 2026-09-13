@@ -33,7 +33,7 @@ pres and **not** the raw bytes. Reorg gather that wants wire re-encodes.
 | Structure | Cap / bound | Production clear / evict |
 |-----------|-------------|---------------------------|
 | **Load-batch parent skeleton** | Wave `txid → (fk, body_range)` + spent ranges on the `LoadBatch`; per-chunk need-vouts at split | Drop with the batch. Lookup TipOnly only. Not a process FIFO. |
-| **Pipeline pins (no process FIFO)** | Plan `batch_pin` / `BatchParents` only | Drop with batch. Cold **outs** for ancient parents use `txout.body` into `BatchParents` (stamped range). Recent-window first spend uses stamp-carried in-flight CreatePin until load drops the pack below the wave's pre-TipOnly drain+fence snapshot |
+| **`create.loc` append window** | Last **2²⁰** decoded pairs (~40 MiB) | Class A append publishes; leftover lookup stamps from it. Truncate trims. Restart / reopen empty |
 | **In-flight CreatePin map** | identity + full create outs; one load-thread HashMap; lookup snapshots `drain_and_fence_hi` before TipOnly and passes it on the last load batch; load drops pack height below that after the in-flight read | Load notes after stamp; disconnect `drop_from` on pack height. Sizes: `iflight=`. Not a coins cache / spend FIFO |
 | **ConfirmParentCache header plans** | tip-GC window | Always on — required for multi-block wire MTP |
 | **Confirm plans / headers** | offer-ahead window | `ConfirmParentCache::advance_tip` from write `post_commit` |

@@ -24,7 +24,7 @@
 //! Stage walls (window sums; stages overlap on OS threads):
 //! - **lookup** = lookup-thread TipOnly wave (`plan_ms` / `lookup_thr wave=`
 //!   with nested `decode=` / `precompute=` / `collect=` /
-//!   `head=(probe= io= preads=)` / `loc=`)
+//!   `head=(probe= io= preads=)` / `loc=` / `loc_ram=` / `loc_disk=`)
 //! - **load=** = pin (`LOAD_NS`) + assemble (`CONNECT_NS`) only — **not** the
 //!   load OS-thread wall. Load thread also does pack decode, leftover stamp
 //!   (plan=None / S0 only), clone, and post-stamp prune on a marked last load
@@ -350,6 +350,10 @@ pub(crate) struct IbdPerfSample {
     pub lookup_wave_head_preads: u64,
     /// Lookup-wave `create.loc` fill inside TipOnly `head=` (`wave=… loc=`).
     pub lookup_wave_spent_ms: u64,
+    /// `create.loc` leftover fks stamped from append RAM (`loc_ram=`).
+    pub loc_ram_n: u64,
+    /// `create.loc` leftover fks that paid a window pread (`loc_disk=`).
+    pub loc_disk_n: u64,
     pub plan_parents: u64,
     pub plan_already: u64,
     pub plan_cold: u64,
@@ -580,6 +584,8 @@ impl Default for IbdPerfSample {
             lookup_wave_head_io_ms: 0,
             lookup_wave_head_preads: 0,
             lookup_wave_spent_ms: 0,
+            loc_ram_n: 0,
+            loc_disk_n: 0,
             plan_parents: 0,
             plan_already: 0,
             plan_cold: 0,
@@ -1028,6 +1034,8 @@ pub(crate) fn sample(
         lookup_wave_head_io_ms: ns_ms(head_res.body_ns.saturating_add(head_res.idx_ns)),
         lookup_wave_head_preads: head_res.body_lookups,
         lookup_wave_spent_ms: ns_ms(head_res.idx_ns),
+        loc_ram_n: head_res.loc_ram_n,
+        loc_disk_n: head_res.loc_disk_n,
         plan_parents: w.lookup_parents,
         plan_already: w.lookup_already,
         plan_cold: w.lookup_cold,
@@ -1332,6 +1340,8 @@ pub(crate) fn format_info(s: &IbdPerfSample) -> String {
             s.plan_cold_io_ms,
         ));
     }
+    append_nz(&mut out, "loc_ram", s.loc_ram_n);
+    append_nz(&mut out, "loc_disk", s.loc_disk_n);
     // CACHE_BODY is adopt / plan / in-flight / same-batch only — this
     // window's cold range-fills increment PIN_NEW, not cache.
     let pin_hit_pct = {
@@ -1615,6 +1625,8 @@ pub(crate) fn format_debug(s: &IbdPerfSample) -> String {
             ));
         }
     }
+    append_nz(&mut out, "loc_ram", s.loc_ram_n);
+    append_nz(&mut out, "loc_disk", s.loc_disk_n);
     if s.arch_write_blocks > 0 || s.arch_write_total_ms > 0 {
         let ca_head_us_blk = div_or_0(s.arch_write_head_ms * 1000, s.arch_write_blocks);
         let ca_body_us_blk = div_or_0(s.arch_write_body_ms * 1000, s.arch_write_blocks);

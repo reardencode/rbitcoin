@@ -129,7 +129,7 @@ IOCP. Ring depth **128** (merge may grow). `RBITCOIN_IO=pread` forces libc.
 | **`txout.body`** | L0 | Hot outs (pin / SH / Electrum tweaks); pread/pwrite/uring |
 | **`inwit.body`** | L0 | Cold ins+witness; reconstruct / getdata only |
 | **`spent.body`** | L0 | 8 B×n_out sole-spender; annotate RMW |
-| **`create.loc` / `inwit.loc`** | L0 | FdOnly 2 B/create (hot) / u16 (cold); leftover `spent.off` unlinked. `create.loc` leftover stamp: batched window preads, sum/read through max fk in-window, SIMD prefix (no loc L2) |
+| **`create.loc` / `inwit.loc`** | L0 | FdOnly 2 B/create (hot) / u16 (cold); leftover `spent.off` unlinked. `create.loc` leftover stamp: last 2²⁰ creates from append RAM (lock-free), else batched window preads, sum/read through max fk in-window, SIMD prefix (no loc L2) |
 | **`tx.head` segments** | L0+L1 | Open OA: 4 KiB page-coalesced RMW. Sealed: RAM fuse8; packed BDZ `g` FdOnly 4 KiB page stream (`KIND_MPHF_G`); MPHF output is `rel−1` |
 | Header hash head | L0+L1 | 128-slot (~3 KiB) chunk cache |
 | Hash multi-list (`.mlt`) | L0 | Linear append |
@@ -143,8 +143,8 @@ IOCP. Ring depth **128** (merge may grow). `RBITCOIN_IO=pread` forces libc.
 
 | Path | Table part | Fd/uring bulk part |
 |------|------------|---------------------|
-| Pin outs | FdOnly `create.loc` ranges (batched window preads; sum/read only through max fk in-window) | uring/pread `txout` bytes (starting OS page; full span if need is likely to spill) |
-| Head resolve stream | FdOnly **page-batched** head probe + FdOnly loc (batched windows on the held session) | uring/pread `txid.body` identity |
+| Pin outs | FdOnly `create.loc` ranges (append RAM when in the last 2²⁰ creates, else batched window preads; sum/read only through max fk in-window) | uring/pread `txout` bytes (starting OS page; full span if need is likely to spill) |
+| Head resolve stream | FdOnly **page-batched** head probe + loc (append RAM or batched windows on the held session) | uring/pread `txid.body` identity |
 | IBD **getdata serve** reconstruct | FdOnly `create.loc` / `inwit.loc` ranges for a contiguous `header_txs` run | libc span pread of `txout.body` + `inwit.body` in parallel (not confirm `idx_body_pipeline`) |
 
 ---

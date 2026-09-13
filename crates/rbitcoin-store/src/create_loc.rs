@@ -1,6 +1,8 @@
 //! Packed create locator: 2 B/create (`txout_strides:u8`, `n_out:u8`).
 //!
 //! Checkpoints in `create.off` (RAM). Loc and overflow stay FdOnly.
+//! Last 2²⁰ decoded pairs stay in process RAM after append so leftover
+//! lookup can stamp without preading the live tail.
 
 use crate::bulk_io::ReadOp;
 use crate::delta_loc::{
@@ -10,14 +12,17 @@ use crate::delta_loc::{
 use crate::error::StoreError;
 use crate::file::{TableFile, FILE_HEADER_LEN};
 use crate::IoCtx;
+use arc_swap::ArcSwap;
 use rbitcoin_primitives::{Fk, TableKind};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 const SLOT: u64 = 2;
 const OFF_SLOT: u64 = 16;
 const OVF_SLOT: u64 = 12;
+/// Sliding window of decoded loc pairs after Class A append (write + lookup).
+const LOC_RAM_KEEP: usize = 1 << 20;
 
 /// Slots to read and prefix-sum in `[win_first, win_last]` for the highest needed fk.
 #[inline]
@@ -36,6 +41,141 @@ pub struct CreateLocPair {
     pub n_out: u32,
 }
 
+/// Immutable loc-pair window. Chunked so append publishes without copying KEEP.
+#[derive(Clone, Default)]
+struct LocRamSnap {
+    base: u64,
+    len: usize,
+    chunks: Vec<Arc<Vec<CreateLocPair>>>,
+}
+
+impl LocRamSnap {
+    const CHUNK: usize = 1024;
+
+    fn get(&self, id: u64) -> Option<CreateLocPair> {
+        let off = id.checked_sub(self.base)? as usize;
+        if off >= self.len {
+            return None;
+        }
+        let first_n = self.chunks.first()?.len();
+        if off < first_n {
+            return self.chunks[0].get(off).copied();
+        }
+        let rest = off - first_n;
+        let ci = 1 + rest / Self::CHUNK;
+        let wi = rest % Self::CHUNK;
+        self.chunks.get(ci)?.get(wi).copied()
+    }
+
+    fn extend(&self, start: u64, loc: &[CreateLocPair]) -> Self {
+        self.extend_capped(start, loc, LOC_RAM_KEEP)
+    }
+
+    fn extend_capped(&self, start: u64, loc: &[CreateLocPair], keep: usize) -> Self {
+        if loc.is_empty() {
+            return self.clone();
+        }
+        let next = self.base.saturating_add(self.len as u64);
+        let mut out = if self.len == 0 || start != next {
+            Self::from_pairs(start, loc)
+        } else {
+            self.append_pairs(loc)
+        };
+        out.trim_keep(keep);
+        out
+    }
+
+    fn from_pairs(start: u64, loc: &[CreateLocPair]) -> Self {
+        let mut chunks = Vec::new();
+        let mut rest = loc;
+        while rest.len() >= Self::CHUNK {
+            chunks.push(Arc::new(rest[..Self::CHUNK].to_vec()));
+            rest = &rest[Self::CHUNK..];
+        }
+        if !rest.is_empty() {
+            chunks.push(Arc::new(rest.to_vec()));
+        }
+        Self {
+            base: start,
+            len: loc.len(),
+            chunks,
+        }
+    }
+
+    fn append_pairs(&self, loc: &[CreateLocPair]) -> Self {
+        let mut chunks = self.chunks.clone();
+        let mut rest = loc;
+        if let Some(last) = chunks.last() {
+            if last.len() < Self::CHUNK {
+                let mut v = last.as_ref().clone();
+                let take = (Self::CHUNK - v.len()).min(rest.len());
+                v.extend_from_slice(&rest[..take]);
+                rest = &rest[take..];
+                *chunks.last_mut().unwrap() = Arc::new(v);
+            }
+        }
+        while rest.len() >= Self::CHUNK {
+            chunks.push(Arc::new(rest[..Self::CHUNK].to_vec()));
+            rest = &rest[Self::CHUNK..];
+        }
+        if !rest.is_empty() {
+            chunks.push(Arc::new(rest.to_vec()));
+        }
+        Self {
+            base: self.base,
+            len: self.len + loc.len(),
+            chunks,
+        }
+    }
+
+    fn trim_keep(&mut self, keep: usize) {
+        if keep == 0 {
+            *self = Self::default();
+            return;
+        }
+        while self.len > keep {
+            let extra = self.len - keep;
+            let Some(first) = self.chunks.first() else {
+                break;
+            };
+            if extra >= first.len() {
+                let n = first.len();
+                self.base = self.base.saturating_add(n as u64);
+                self.len -= n;
+                self.chunks.remove(0);
+            } else {
+                let v = first[extra..].to_vec();
+                self.base = self.base.saturating_add(extra as u64);
+                self.len = keep;
+                self.chunks[0] = Arc::new(v);
+            }
+        }
+    }
+
+    fn truncate_to(&self, new_count: u64) -> Self {
+        if self.len == 0 {
+            return Self::default();
+        }
+        let last_id = self.base + self.len as u64 - 1;
+        if new_count >= last_id {
+            return self.clone();
+        }
+        if new_count < self.base {
+            return Self::default();
+        }
+        let keep_n = (new_count - self.base + 1) as usize;
+        let mut pairs = Vec::with_capacity(keep_n);
+        for i in 0..keep_n {
+            let id = self.base + i as u64;
+            let Some(p) = self.get(id) else {
+                return Self::default();
+            };
+            pairs.push(p);
+        }
+        Self::from_pairs(self.base, &pairs)
+    }
+}
+
 /// Per-create append input (8-aligned body starts and txout length).
 #[derive(Clone, Copy, Debug)]
 pub struct CreateLocAppend {
@@ -52,6 +192,7 @@ pub struct CreateLoc {
     checkpoints: RwLock<Vec<(u64, u64)>>,
     ovf_rows: RwLock<Vec<(u64, u32, u32)>>,
     count: AtomicU64,
+    ram: ArcSwap<LocRamSnap>,
 }
 
 impl CreateLoc {
@@ -63,6 +204,7 @@ impl CreateLoc {
             checkpoints: RwLock::new(Vec::new()),
             ovf_rows: RwLock::new(Vec::new()),
             count: AtomicU64::new(0),
+            ram: ArcSwap::from_pointee(LocRamSnap::default()),
         })
     }
 
@@ -102,11 +244,17 @@ impl CreateLoc {
             checkpoints: RwLock::new(checkpoints),
             ovf_rows: RwLock::new(ovf_rows),
             count: AtomicU64::new(count),
+            ram: ArcSwap::from_pointee(LocRamSnap::default()),
         })
     }
 
     pub fn count(&self) -> u64 {
         self.count.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn ram_get(&self, fk: Fk) -> Option<CreateLocPair> {
+        let id = fk.get()?;
+        self.ram.load().get(id)
     }
 
     pub fn truncate_to_count(&self, new_count: u64) -> Result<(), StoreError> {
@@ -142,6 +290,8 @@ impl CreateLoc {
             }
         }
         self.count.store(new_count, Ordering::Release);
+        self.ram
+            .store(Arc::new(self.ram.load().truncate_to(new_count)));
         Ok(())
     }
 
@@ -225,6 +375,20 @@ impl CreateLoc {
         }
         self.count
             .store(base + recs.len() as u64, Ordering::Release);
+        let start = base + 1;
+        let pairs: Vec<CreateLocPair> = recs
+            .iter()
+            .map(|rec| CreateLocPair {
+                txout: (rec.txout_start, rec.txout_len),
+                spent: (
+                    rec.spent_start,
+                    u64::from(rec.n_out).saturating_mul(IDX_STRIDE),
+                ),
+                n_out: rec.n_out,
+            })
+            .collect();
+        self.ram
+            .store(Arc::new(self.ram.load().extend(start, &pairs)));
         Ok(())
     }
 
@@ -243,14 +407,23 @@ impl CreateLoc {
         }
         let count = self.count.load(Ordering::Acquire);
         let mut out = vec![None; fks.len()];
+        let snap = self.ram.load();
         let mut jobs: Vec<(usize, u64)> = Vec::new();
+        let mut ram_n = 0u64;
         for (i, fk) in fks.iter().enumerate() {
             let Some(id) = fk.get() else { continue };
             if id == 0 || id > count {
                 continue;
             }
+            if let Some(p) = snap.get(id) {
+                out[i] = Some(p);
+                ram_n = ram_n.saturating_add(1);
+                continue;
+            }
             jobs.push((i, id));
         }
+        crate::head_resolve_stats::add_loc_ram(ram_n);
+        crate::head_resolve_stats::add_loc_disk(jobs.len() as u64);
         if jobs.is_empty() {
             return Ok(out);
         }
@@ -595,6 +768,7 @@ mod tests {
     use super::*;
     use crate::file::FILE_HEADER_LEN;
     use crate::testutil::TempDir;
+    use std::path::Path;
 
     fn rec(txout_start: u64, txout_len: u64, spent_start: u64, n_out: u32) -> CreateLocAppend {
         CreateLocAppend {
@@ -846,5 +1020,75 @@ mod tests {
                 .unwrap();
             assert_eq!(held, batch);
         }
+    }
+
+    fn smash_loc_payload(dir: &Path, n: usize) {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.join("create.loc"))
+            .unwrap();
+        f.seek(SeekFrom::Start(FILE_HEADER_LEN as u64)).unwrap();
+        f.write_all(&vec![0xffu8; n * 2]).unwrap();
+        f.sync_all().unwrap();
+    }
+
+    #[test]
+    fn range_batch_after_append_ignores_smashed_loc_bytes() {
+        let dir = TempDir::labeled("create-loc-ram").unwrap();
+        let loc = CreateLoc::create(dir.path()).unwrap();
+        loc.append(&chain(&[1, 3, 2], &[16, 32, 24])).unwrap();
+        let fks = [Fk(2), Fk(1), Fk(3), Fk::NULL];
+        let want = loc.range_batch(&fks).unwrap();
+        assert!(want[0].is_some() && want[1].is_some() && want[2].is_some());
+        smash_loc_payload(dir.path(), 3);
+        let got = loc.range_batch(&fks).unwrap();
+        assert_eq!(
+            got, want,
+            "append RAM must stamp loc without reading smashed bytes"
+        );
+        let disk = CreateLoc::open(dir.path()).unwrap();
+        let from_disk = disk.range_batch(&fks).unwrap();
+        assert_ne!(
+            from_disk, want,
+            "reopen has empty RAM and must see smashed loc bytes"
+        );
+    }
+
+    #[test]
+    fn loc_ram_snap_evicts_oldest_over_keep() {
+        let p = CreateLocPair {
+            txout: (8, 8),
+            spent: (8, 8),
+            n_out: 1,
+        };
+        let snap = LocRamSnap::default().extend_capped(1, &[p, p, p, p, p, p], 4);
+        assert_eq!(snap.get(1), None);
+        assert_eq!(snap.get(2), None);
+        assert_eq!(snap.get(3), Some(p));
+        assert_eq!(snap.get(6), Some(p));
+        assert_eq!(snap.get(7), None);
+    }
+
+    #[test]
+    fn range_batch_after_truncate_keeps_ram_for_remaining() {
+        let dir = TempDir::labeled("create-loc-ram-trunc").unwrap();
+        let loc = CreateLoc::create(dir.path()).unwrap();
+        loc.append(&chain(&[1, 1, 1, 1], &[8, 8, 8, 8])).unwrap();
+        loc.truncate_to_count(2).unwrap();
+        smash_loc_payload(dir.path(), 2);
+        let got = loc.range_batch(&[Fk(1), Fk(2), Fk(3)]).unwrap();
+        assert_eq!(
+            got[0],
+            Some(CreateLocPair {
+                txout: (FILE_HEADER_LEN as u64, 8),
+                spent: (FILE_HEADER_LEN as u64, 8),
+                n_out: 1,
+            })
+        );
+        assert_eq!(got[1].unwrap().n_out, 1);
+        assert_eq!(got[2], None);
+        assert!(loc.ram_get(Fk(1)).is_some());
+        assert!(loc.ram_get(Fk(3)).is_none());
     }
 }

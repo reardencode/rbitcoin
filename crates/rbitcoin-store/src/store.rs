@@ -1017,6 +1017,11 @@ impl Store {
         self.txs.create_loc_range_batch(fks)
     }
 
+    /// Decoded loc pair from the in-process append window (no `create.loc` pread).
+    pub fn create_loc_ram(&self, fk: Fk) -> Option<crate::create_loc::CreateLocPair> {
+        self.txs.create_loc.ram_get(fk)
+    }
+
     pub fn tx_body_range_batch(&self, fks: &[Fk]) -> Result<Vec<Option<(u64, u64)>>, StoreError> {
         Ok(self
             .tx_create_loc_range_batch(fks)?

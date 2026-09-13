@@ -225,46 +225,6 @@ impl ShWriteBehind {
     }
 }
 
-/// Write-thread loc window (sequential fks). Cap drops the oldest pairs.
-#[derive(Default)]
-struct WriteCreateLocRam {
-    base: u64,
-    pairs: Vec<rbitcoin_store::CreateLocPair>,
-}
-
-impl WriteCreateLocRam {
-    const KEEP: usize = 1 << 20;
-
-    fn note(&mut self, fks: &[rbitcoin_primitives::Fk], loc: &[rbitcoin_store::CreateLocPair]) {
-        if fks.is_empty() || loc.len() != fks.len() {
-            return;
-        }
-        let Some(start) = fks[0].get() else {
-            return;
-        };
-        if self.pairs.is_empty() {
-            self.base = start;
-        }
-        let next = self.base.saturating_add(self.pairs.len() as u64);
-        if start != next {
-            self.base = start;
-            self.pairs.clear();
-        }
-        self.pairs.extend_from_slice(loc);
-        if self.pairs.len() > Self::KEEP {
-            let drop = self.pairs.len() - Self::KEEP;
-            self.pairs.drain(..drop);
-            self.base = self.base.saturating_add(drop as u64);
-        }
-    }
-
-    fn get(&self, fk: rbitcoin_primitives::Fk) -> Option<rbitcoin_store::CreateLocPair> {
-        let id = fk.get()?;
-        let off = id.checked_sub(self.base)?;
-        self.pairs.get(off as usize).copied()
-    }
-}
-
 /// Domain query facade used by higher layers (consensus, net, RPC).
 pub struct Query {
     store: Store,
@@ -292,9 +252,6 @@ pub struct Query {
     lookup_started_hi: AtomicU32,
     /// Max height whose Class A append committed (`u32::MAX` = none).
     class_a_hi: AtomicU32,
-    /// Write-thread loc pairs from Class A append. Later packs stamp abs from
-    /// this RAM (just-written parents). Write never preads `create.loc`.
-    write_create_loc: Mutex<WriteCreateLocRam>,
     /// Post-IBD SH SEAL + leftover-run discard (unsorted collect is tip finalize).
     sh_run: sh_builder::ShRunBuilder,
     /// Operator scripthash index intent (`--shindex`). When false, Class C skips
@@ -400,7 +357,6 @@ impl Query {
             lookup_taken_hi: AtomicU32::new(u32::MAX),
             lookup_started_hi: AtomicU32::new(u32::MAX),
             class_a_hi: AtomicU32::new(u32::MAX),
-            write_create_loc: Mutex::new(WriteCreateLocRam::default()),
             sh_run: sh_builder::ShRunBuilder::new(&store_path),
             // Library default: SH on (tests / enter_direct). Node sets false for
             // `--shindex` off before entering Direct.
@@ -755,20 +711,12 @@ impl Query {
             .store(hi.unwrap_or(u32::MAX), AtomicOrdering::Release);
     }
 
-    /// Keep Class A append loc in RAM for later write packs (no loc pread).
-    pub fn note_write_create_loc(
-        &self,
-        fks: &[rbitcoin_primitives::Fk],
-        loc: &[rbitcoin_store::CreateLocPair],
-    ) {
-        self.write_create_loc.lock().unwrap().note(fks, loc);
-    }
-
+    /// Loc pair from the Class A append window (just-written packs; no loc pread).
     pub fn write_create_loc(
         &self,
         fk: rbitcoin_primitives::Fk,
     ) -> Option<rbitcoin_store::CreateLocPair> {
-        self.write_create_loc.lock().unwrap().get(fk)
+        self.store.create_loc_ram(fk)
     }
 
     /// Densify / offer: height is already in the confirm pipeline.

@@ -11,6 +11,11 @@ before 1.0).
 
 ### Added
 
+- **Lookup stamps `create.loc` from Class A append RAM:** leftover TipOnly
+  fills the last 2²⁰ creates from the same lock-free window write already kept
+  (no live-tail pread). Older fks still pay batched window preads. `ibd: perf`
+  `loc_ram=` / `loc_disk=`. [`SCHEMA.md`](SCHEMA.md).
+
 - **Process `getpeerinfo` on live `run_p2p`:** `node_run_p2p_short` `--connect`s to a
   seeder, then JSON-RPC `getpeerinfo` (v2 outbound-full-relay), `getconnectioncount` /
   `getnetworkinfo` / `getnettotals` / `ping`, `addconnection inbound` refuses,

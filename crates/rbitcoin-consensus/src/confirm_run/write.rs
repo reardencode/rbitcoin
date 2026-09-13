@@ -109,7 +109,6 @@ pub fn confirm_write_phase(
             // must already have lookup stamps — missing abs is Corrupt.
             // Direct SH collect is a no-op — skip the FkMap.
             if committed {
-                query.note_write_create_loc(&planned_fks, &loc);
                 if query.index_mode().is_tip() {
                     let t_map = Instant::now();
                     write_create_pins.reserve(planned_fks.len());

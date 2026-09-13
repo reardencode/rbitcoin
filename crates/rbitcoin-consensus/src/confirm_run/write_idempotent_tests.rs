@@ -1237,6 +1237,11 @@ fn fill_same_batch_abs_from_append_loc_ram() {
     assert_eq!(loc[0].txout, q.store().tx_body_range(fks[0]).unwrap());
     assert_eq!(loc[0].spent, q.store().tx_spent_range(fks[0]).unwrap());
     assert_eq!(loc[0].n_out, 1);
+    assert_eq!(
+        q.write_create_loc(fks[0]),
+        Some(loc[0]),
+        "write loc RAM must come from Class A append, not a second note"
+    );
     q.store().reset_spent_range_batch();
 
     let prepared = [Prepared {

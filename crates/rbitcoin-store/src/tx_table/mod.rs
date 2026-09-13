@@ -1796,7 +1796,7 @@ impl TxTable {
     /// Encode and write `txout` + `inwit` + `spent` bodies as one pwrite wave.
     ///
     /// Order is still body → loc → HWM per stem. Not the spend-annotate machine.
-    /// Loc pairs are the append starts (write keeps them in RAM; no loc pread).
+    /// Loc pairs are the append starts (`CreateLoc` RAM window; no loc pread).
     fn append_stems_one_wave(
         &self,
         n: usize,

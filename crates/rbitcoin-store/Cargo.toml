@@ -10,6 +10,7 @@ description = "Relational archive store (libbitcoin-class tables; fd-only bulk I
 [dependencies]
 rbitcoin-primitives = { workspace = true }
 rbitcoin-log = { workspace = true }
+arc-swap = { workspace = true }
 # rust-bitcoin ecosystem (hashes only — not full bitcoin types in this crate)
 bitcoin_hashes = { workspace = true }
 # fallocate / punch-hole for multi‑GiB grows without zero-fill storms (Linux).
