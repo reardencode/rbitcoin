@@ -49,7 +49,7 @@ where
     [--blocks-only] [--prefillcompact[=0|1]] [--minrelaytxfee BTC] \\\n\
     [--limitclustercount N] [--limitclustersize KVB] [--peer-timeout SECS] \\\n\
     [--externalip IP] \\\n\
-    [--min-chain-work HEX] [--max-tip-age SECS] [--checkblocks N] \\\n\
+    [--min-chain-work HEX] [--max-tip-age SECS] [--checkblocks N] [--blocksdir PATH] \\\n\
     [--max-run-secs N] [--log-level LEVEL] [--api-log PATH] [--asmap PATH] [--ua-comment STR] \\\n\
     [--no-seeds] [--smoke] [--inhibit-suspend]\n\n\
 Networks: mainnet|testnet|signet|regtest\n\
@@ -60,6 +60,7 @@ Asmap: --asmap PATH loads a Core ip_asn.dat (relative to datadir). Unset tries {
 Milestone: skip script/sig checks at/below HEIGHT.\n\
   Defaults: mainnet 840000, signet 2000000, testnet 2500000, regtest 0. Use 0 for full scripts.\n\
 Checkblocks: --checkblocks N revalidates the last N confirmed heights on open (default 6; 0 = all).\n\
+Blocksdir: --blocksdir PATH exclusive-locks PATH in addition to datadir (Core -blocksdir analog).\n\
 Mempool: --mempool-size-mb (default ~300 MiB weight budget).\n\
 Peers: --max-outbound (default 16 live download), --max-inbound (default 125).\n\
   --trusted / --always-relay / --relay are inbound permission knobs (not Core -whitelist).\n\
@@ -261,7 +262,11 @@ where
                 }
             }
             Err(e) => {
-                error!("{e}");
+                match &e {
+                    crate::error::NodeError::FutureTip => eprintln!("{e}"),
+                    crate::error::NodeError::Locked(_) => eprintln!("Error: {e}"),
+                    _ => error!("{e}"),
+                }
                 ExitCode::FAILURE
             }
         }
@@ -276,10 +281,10 @@ where
         let code = match rt.block_on(run_p2p(config)) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                if matches!(e, crate::error::NodeError::FutureTip) {
-                    eprintln!("{e}");
-                } else {
-                    error!("{e}");
+                match &e {
+                    crate::error::NodeError::FutureTip => eprintln!("{e}"),
+                    crate::error::NodeError::Locked(_) => eprintln!("Error: {e}"),
+                    _ => error!("{e}"),
                 }
                 ExitCode::FAILURE
             }
@@ -389,8 +394,13 @@ fn cli_apply_err(e: crate::error::NodeError) -> ExitCode {
     if s.contains("peer-timeout must be a positive integer")
         || s.contains("Invalid minimum work")
         || s.contains("must be hexadecimal")
+        || s.contains("Duplicate binding configuration")
     {
-        eprintln!("Error: {e}");
+        if s.contains("Duplicate binding configuration") {
+            eprintln!("Error: Duplicate binding configuration");
+        } else {
+            eprintln!("Error: {e}");
+        }
         ExitCode::from(1)
     } else {
         eprintln!("error: {e}");

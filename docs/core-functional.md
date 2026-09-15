@@ -154,11 +154,12 @@ lists as done, but whose official script still fails on dialect, stay
 
 Shim-only scripts that used to be `run` stay skip: `feature_help.py`
 (`harness`), `tool_rpcauth.py` (`no-tool`), `feature_blocksdir.py`
-(`no-prune`), `feature_dirsymlinks.py` / `feature_filelock.py`
-(`core-internal`). Dummy `blk00000.dat` still exists so
-`rpc_getblockstats.py`'s rename-file needle can run; the rest of that
-script is `submitblock` + archive `getblockstats`. `feature_port.py` is
-`run`: `-bind`/`-port` become `--listen` on those sockets.
+(`no-prune`), `feature_dirsymlinks.py` stays skip (`core-internal`). Dummy `blk00000.dat`
+still exists so `rpc_getblockstats.py`'s rename-file needle can run; the rest
+of that script is `submitblock` + archive `getblockstats`. `feature_port.py`
+is `run`: `-bind`/`-port` become `--listen` on those sockets.
+`feature_filelock.py` is `run`: the node exclusive-locks datadir and
+`{datadir}/blocks` (and `--blocksdir`).
 
 ## CI
 

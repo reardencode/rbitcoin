@@ -281,8 +281,9 @@ BD="$WORKDIR/ext-blocks"
 mkdir -p "$BD"
 BD_NODE="$WORKDIR/bd-node"
 mkdir -p "$BD_NODE"
-if RBITCOIN_NODE="$FAKE" "$SHIM" --print-cmd -datadir="$BD_NODE" -regtest \
-  -blocksdir="$BD" >/dev/null \
+if RBITCOIN_NODE="$FAKE" OUT_BD="$("$SHIM" --print-cmd -datadir="$BD_NODE" -regtest \
+  -blocksdir="$BD" 2>/dev/null)" \
+  && printf '%s' "$OUT_BD" | grep -q -- "--blocksdir=${BD}/regtest/blocks" \
   && [[ -f "$BD/regtest/blocks/blk00000.dat" ]] \
   && [[ -d "$BD_NODE/regtest/blocks/index" ]]; then
   echo "ok - blocksdir layout + default blocks/index"
@@ -334,6 +335,38 @@ assert_fail_msg "port 0 invalid" "Error: Invalid port specified in -port: '0'" \
   env RBITCOIN_NODE="$FAKE" "$SHIM" --print-cmd -datadir="$DATADIR" -regtest -listen -port=0
 assert_fail_msg "port +18444 invalid" "Error: Invalid port specified in -port: '+18444'" \
   env RBITCOIN_NODE="$FAKE" "$SHIM" --print-cmd -datadir="$DATADIR" -regtest -listen -port=+18444
+
+# Onion-only -bind must not also take 0.0.0.0 (feature_bind_extra node0).
+OUT_ONION="$("$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
+  -bind=127.0.0.1:18557=onion 2>/dev/null)" || OUT_ONION=""
+if printf '%s' "$OUT_ONION" | grep -q -- "--listen 127.0.0.1:18557" \
+  && ! printf '%s' "$OUT_ONION" | grep -q -- "--listen 0.0.0.0:"; then
+  echo "ok - onion-only bind does not add 0.0.0.0"
+  PASS=$((PASS + 1))
+else
+  echo "not ok - onion-only bind does not add 0.0.0.0 (got: $OUT_ONION)"
+  FAIL=$((FAIL + 1))
+fi
+
+# Duplicate -bind / -whitebind on the same socket is Core InitError.
+assert_fail_msg "duplicate bind InitError" "Error: Duplicate binding configuration" \
+  env RBITCOIN_NODE="$FAKE" "$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
+  -bind=127.0.0.1:11012 -bind=127.0.0.1:11012
+assert_fail_msg "bind+whitebind same addr InitError" "Error: Duplicate binding configuration" \
+  env RBITCOIN_NODE="$FAKE" "$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
+  -bind=127.0.0.1:11012 -whitebind=noban@127.0.0.1:11012
+
+# whitebind is a listen (+ whitelist).
+OUT_WB="$("$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
+  -whitebind=noban@127.0.0.1:18558 2>/dev/null)" || OUT_WB=""
+if printf '%s' "$OUT_WB" | grep -q -- "--listen 127.0.0.1:18558" \
+  && printf '%s' "$OUT_WB" | grep -q -- "--whitelist=noban@127.0.0.1:18558"; then
+  echo "ok - whitebind maps to listen+whitelist"
+  PASS=$((PASS + 1))
+else
+  echo "not ok - whitebind maps to listen+whitelist (got: $OUT_WB)"
+  FAIL=$((FAIL + 1))
+fi
 
 CONF_PORT="$WORKDIR/conf-port-bad"
 mkdir -p "$CONF_PORT"

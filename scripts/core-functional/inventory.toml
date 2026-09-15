@@ -165,9 +165,7 @@ reason = "core-log"
 
 [[test]]
 name = "feature_filelock.py"
-status = "skip"
-reason = "core-internal"
-analog = "none (no exclusive datadir/blocksdir/wallet flock)"
+status = "run"
 
 [[test]]
 name = "feature_framework_miniwallet.py"

@@ -30,6 +30,8 @@ pub struct NodeHandle {
     /// Durable cluster mempool (opened in `run_p2p` and attached to `ChainHub`).
     /// Smoke-only `run_node` leaves this `None`.
     pub mempool: Option<std::sync::Arc<MempoolHub>>,
+    /// Exclusive datadir / blocksdir flock (released on drop).
+    _dir_locks: crate::lock::DirLocks,
 }
 
 impl std::fmt::Debug for NodeHandle {
@@ -148,9 +150,10 @@ async fn mempool_blocking<T: Send + 'static>(
     .map_err(|e| NodeError::Config(format!("mempool task: {e}")))
 }
 
-/// Start the node: ensure datadir, open store.
+/// Start the node: ensure datadir, exclusive-lock, open store.
 pub fn run_node(config: NodeConfig) -> Result<NodeHandle, NodeError> {
     config.ensure_datadir()?;
+    let dir_locks = crate::lock::lock_node_dirs(&config)?;
     let query = Query::open_or_create_layout_checkblocks(
         config.store_layout(),
         config.check_blocks_window(),
@@ -159,6 +162,7 @@ pub fn run_node(config: NodeConfig) -> Result<NodeHandle, NodeError> {
         config,
         query,
         mempool: None,
+        _dir_locks: dir_locks,
     })
 }
 

@@ -218,6 +218,8 @@ pub struct NodeConfig {
     pub prefill_compact: bool,
     /// Core `-checkblocks` (`None` = 6). `<= 0` means the whole chain.
     pub check_blocks: Option<i64>,
+    /// Extra exclusive-lock directory (Core `-blocksdir` path already suffixed `/blocks`).
+    pub blocks_dir: Option<PathBuf>,
 }
 
 impl Default for NodeConfig {
@@ -262,6 +264,7 @@ impl Default for NodeConfig {
             block_min_tx_fee_btc: None,
             prefill_compact: true,
             check_blocks: None,
+            blocks_dir: None,
         }
     }
 }
@@ -579,6 +582,9 @@ impl NodeConfig {
                 let addr: SocketAddr = val
                     .parse()
                     .map_err(|e| NodeError::Config(format!("conf listen: {e}")))?;
+                if self.listen.p2p == Some(addr) || self.listen.p2p_extra.contains(&addr) {
+                    return Err(NodeError::Config("Duplicate binding configuration".into()));
+                }
                 if self.listen.p2p.is_none() {
                     self.listen.p2p = Some(addr);
                 } else {
@@ -817,6 +823,12 @@ impl NodeConfig {
                     .map_err(|e| NodeError::Config(format!("conf checkblocks: {e}")))?;
                 self.check_blocks = Some(n);
             }
+            "blocksdir" | "blocks_dir" => {
+                if val.is_empty() {
+                    return Err(NodeError::Config("conf blocksdir requires a path".into()));
+                }
+                self.blocks_dir = Some(PathBuf::from(val));
+            }
             "max_tip_age" => {
                 let n: i64 = val
                     .parse()
@@ -1022,6 +1034,20 @@ mod tests {
         assert_eq!(c.check_blocks_window(), 0);
         let bad = c.apply_kv("checkblocks", "nope").unwrap_err();
         assert!(bad.to_string().contains("checkblocks"), "{bad}");
+    }
+
+    #[test]
+    fn duplicate_listen_is_init_error() {
+        let mut c = NodeConfig::default();
+        assert_eq!(
+            c.apply_kv("listen", "127.0.0.1:18444").unwrap(),
+            ConfApply::Applied
+        );
+        let err = c.apply_kv("listen", "127.0.0.1:18444").unwrap_err();
+        assert!(
+            err.to_string().contains("Duplicate binding configuration"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -266,15 +266,19 @@ def listen_targets(
     seen: list[str] = []
 
     def add(addr: str) -> None:
-        if addr not in seen:
-            seen.append(addr)
+        if addr in seen:
+            print("Error: Duplicate binding configuration", file=sys.stderr)
+            raise SystemExit(1)
+        seen.append(addr)
 
     non_onion = [(h, p) for (h, p, o) in binds if not o]
     onion = [(h, p) for (h, p, o) in binds if o]
     if non_onion:
         for host, bport in non_onion:
             add(f"{host}:{bport if bport is not None else port_n}")
-    else:
+    elif not onion:
+        # Bare `-port` (no `-bind`): Core binds 0.0.0.0. Onion-only `-bind=…=onion`
+        # must not also take the default any-addr socket (feature_bind_extra).
         add(f"0.0.0.0:{port_n}")
     if onion:
         for host, bport in onion:
@@ -365,8 +369,8 @@ def _parse_bind(val: str) -> tuple[str, int | None, bool]:
 
 def translate(
     argv: list[str],
-) -> tuple[list[str], Path, int, Path | None, Path | None, str | None, list[str]]:
-    """Return (node argv, datadir, rpcport, blocksdir, walletdir, wallet, bound_lines)."""
+) -> tuple[list[str], Path, int, Path | None, list[str]]:
+    """Return (node argv, datadir, rpcport, blocksdir, bound_lines)."""
     datadir: Path | None = None
     rpcport: str | None = None
     p2pport: str | None = None
@@ -377,8 +381,6 @@ def translate(
     extra_node_args: list[str] = []
     wipe_mempool = False
     blocksdir_arg: Path | None = None
-    walletdir_arg: Path | None = None
-    wallet_name: str | None = None
     argv_binds: list[tuple[str, int | None, bool]] = []
     i = 1
     while i < len(argv):
@@ -402,6 +404,7 @@ def translate(
             "rpcport",
             "port",
             "bind",
+            "whitebind",
             "uacomment",
             "loglevel",
             "conf",
@@ -440,10 +443,6 @@ def translate(
                     file=sys.stderr,
                 )
                 raise SystemExit(1)
-        elif key == "walletdir":
-            walletdir_arg = Path(val or "")
-        elif key == "wallet":
-            wallet_name = val or ""
         elif key == "rpcport":
             rpcport = parse_port(val, "-rpcport")
         elif key == "port":
@@ -454,6 +453,16 @@ def translate(
             # Non-onion bind with an explicit port supplies the P2P listen port.
             if not onion and bport is not None:
                 p2pport = str(bport)
+        elif key == "whitebind" and val:
+            # Core `-whitebind=[perms@]HOST[:PORT]`. Permissions are whitelist;
+            # the socket is a listen (feature_bind_extra duplicate-bind).
+            hostport = val.rsplit("@", 1)[-1]
+            host, bport, onion = _parse_bind(hostport)
+            argv_binds.append((host, bport, onion))
+            if not onion and bport is not None:
+                p2pport = str(bport)
+            perms = val.rsplit("@", 1)[0] if "@" in val else "noban"
+            extra_node_args.append(forward_flag("whitelist", f"{perms}@{hostport}"))
         elif key == "regtest":
             network = "regtest"
         elif key == "uacomment":
@@ -567,6 +576,8 @@ def translate(
     if log_level:
         cmd += ["--log-level", log_level]
     cmd += extra_node_args
+    if blocksdir_arg is not None:
+        cmd += [f"--blocksdir={blocksdir_arg / network / 'blocks'}"]
 
     bound_lines = [f"Bound to {addr}" for addr in listens]
 
@@ -575,30 +586,8 @@ def translate(
         node_dir,
         int(rpcport),
         blocksdir_arg,
-        walletdir_arg,
-        wallet_name,
         bound_lines,
     )
-
-
-def _try_dir_lock(path: Path, label: Path) -> object | None:
-    """Exclusive flock; keep the file open. None → already locked (Core msg)."""
-    import fcntl
-
-    path.mkdir(parents=True, exist_ok=True)
-    lock_path = path / ".lock"
-    fh = open(lock_path, "a+", encoding="utf-8")
-    try:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        fh.close()
-        print(
-            f"Error: Cannot obtain a lock on directory {label}. "
-            f"Bitcoin Core is probably already running.",
-            file=sys.stderr,
-        )
-        return None
-    return fh
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -608,9 +597,7 @@ def main(argv: list[str] | None = None) -> int:
         cmd,
         node_dir,
         public_rpc,
-        blocksdir_arg,
-        walletdir_arg,
-        wallet_name,
+        _blocksdir_arg,
         bound_lines,
     ) = translate(argv)
     pid_path = node_dir / "bitcoind.pid"
@@ -618,41 +605,6 @@ def main(argv: list[str] | None = None) -> int:
         print(" ".join(cmd))
         print(f"pidfile {pid_path}", file=sys.stderr)
         return 0
-    # Core datadir / blocksdir lock (feature_filelock.py).
-    datadir_lock = _try_dir_lock(node_dir, node_dir)
-    if datadir_lock is None:
-        return 1
-    # Default blocks path; -blocksdir=X → X/<network>/blocks (Core regtest shape).
-    blocks_root = (
-        (blocksdir_arg / "regtest" / "blocks")
-        if blocksdir_arg is not None
-        else (node_dir / "blocks")
-    )
-    blocks_lock = _try_dir_lock(blocks_root, blocks_root)
-    if blocks_lock is None:
-        datadir_lock.close()
-        return 1
-    # Wallet exclusive lock (feature_filelock.py). Opening another node's
-    # walletdir (or a locked wallet path) must refuse with Core's SQLite text.
-    if walletdir_arg is not None and wallet_name is not None:
-        wpath = walletdir_arg / wallet_name
-        foreign = False
-        try:
-            foreign = not walletdir_arg.resolve().is_relative_to(node_dir.resolve())
-        except (OSError, ValueError, AttributeError):
-            foreign = True
-        wlock = _try_dir_lock(wpath, wpath)
-        if foreign or wlock is None:
-            print(
-                "Error: SQLiteDatabase: Unable to obtain an exclusive lock on the database, "
-                "is it being used by another instance of Bitcoin Core?",
-                file=sys.stderr,
-            )
-            datadir_lock.close()
-            blocks_lock.close()
-            if wlock is not None:
-                wlock.close()
-            return 1
     pid_path.write_text(f"{os.getpid()}\n")
     # TestNode tails this process's stderr and requires it empty on a clean
     # stop. Core writes logs to debug.log (printtoconsole=0). Keep that shape:

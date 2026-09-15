@@ -403,6 +403,7 @@ Clean smoke:
 | `--testactivationheight name@H` | `testactivationheight=` | empty — buried deployment overlay |
 | `--min-chain-work HEX` | `min_chain_work=` | unset — densify/relay work floor |
 | `--checkblocks N` | `checkblocks=` | 6; `0` / negative = whole chain |
+| `--blocksdir PATH` | `blocksdir=` | unset — extra exclusive lock (datadir is always locked) |
 | `--ua-comment STR` | `ua_comment=` | empty — BIP14 subversion |
 | `--max-run-secs N` | `max_run_secs=` | unset — process exit after N seconds |
 | `--inhibit-suspend` | | off |

@@ -89,6 +89,10 @@ run "CLI InitError drops configuration error prefix (minchainwork)" \
   "Error: configuration error: Invalid minimum work specified (test), must be up to 64 hex digits" \
   "Error: Invalid minimum work specified (test), must be up to 64 hex digits"
 
+run "datadir flock maps rbitcoin to Bitcoin Core" \
+  "Error: Cannot obtain a lock on directory /tmp/dd. rbitcoin is probably already running." \
+  "Error: Cannot obtain a lock on directory /tmp/dd. Bitcoin Core is probably already running."
+
 run "unmapped is empty" \
   "2026-01-01T00:00:00Z INFO something else" \
   ""

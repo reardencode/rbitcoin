@@ -69,6 +69,10 @@ before 1.0).
 - **`--checkblocks N`:** Core `-checkblocks` window on store open (default 6;
   `0` / negative = whole chain). Shim forwards `-checkblocks`.
 
+- **Datadir exclusive lock:** `rbitcoin-node` flocks `{datadir}/.lock` and
+  `{datadir}/blocks/.lock` (plus `--blocksdir`). `feature_filelock.py` is
+  `run`.
+
 - **Coverage ratchet is merge-base, not tip of master:** PRs must not lower
   the **displayed 2-decimal** production LCOV percent vs the **highest**
   green-`master` snapshot whose SHA is an ancestor of
