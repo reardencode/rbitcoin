@@ -5,8 +5,8 @@ in [`CHANGELOG.md`](../CHANGELOG.md). 1.0 product gates:
 [`road-to-1.0.md`](./road-to-1.0.md). Peer-node notes:
 [`peer-clients.md`](./peer-clients.md) (do not copy here).
 
-**Last reaudit:** 2026-09-15. Schema **24**. Core functional **71** `run` /
-**196** `skip`. Findings **001–023** fixed. Nightly fuzz **20** jobs.
+**Last reaudit:** 2026-09-15. Schema **24**. Core functional **63** `run` /
+**204** `skip`. Findings **001–023** fixed. Nightly fuzz **20** jobs.
 Previous: 2026-09-13.
 
 | Section | Purpose |
@@ -24,7 +24,7 @@ evidence (failed Core corpus, new dual path, red required CI, MSRV drift).
 
 | Rank | ID | Item | Done looks like |
 |-----:|----|------|-----------------|
-| 1 | **Q-41** | Grow Core functional `run` set | Inventory `run` covers claimed wallet-client / P2P / mempool / buried-activation. **71 run / 196 skip** (20 `rpc-missing`, 18 `core-log`, 68 `no-wallet`). COMPAT leftovers are `rpc-dialect`, not `rpc-missing`. Next `run`: `p2p_permissions`. `mempool_accept` stays skip (`policy-libre`). Unlabeled PRs stay cargo-only. Owner: [`core-functional.md`](./core-functional.md). |
+| 1 | **Q-41** | Grow Core functional `run` set | Inventory `run` covers claimed wallet-client / P2P / mempool / buried-activation. **63 run / 204 skip** (20 `rpc-missing`, 18 `core-log`, 68 `no-wallet`). COMPAT leftovers are `rpc-dialect`, not `rpc-missing`. `run` must hit node production (not only shim argv / dummy `blk*.dat` / Core decode dialect). Next `run`: `p2p_permissions`. `mempool_accept` stays skip (`policy-libre`). Unlabeled PRs stay cargo-only. Owner: [`core-functional.md`](./core-functional.md). |
 | 2 | **Q-48** | BIP331 rust-bitcoin package types | Native BIP331 `NetworkMessage` when rust-bitcoin exposes it (**RB-007**). Local packages: RPC `submitpackage`, Esplora `POST /txs/package`, Electrum 1.6 `broadcast_package`. `protocol_max` is **1.6**; 1.7 `scriptpubkey.*` still missing. |
 | 3 | **Q-31** | Hermetic tip fixtures | Frozen signet/mainnet tip packs for offline consensus/Electrum regression (no live API). Fuzz already merges tiny `signet_block_*.bin` / `mainnet_block_290329.bin`. Electrum hermetic packs still Open. |
 | 4 | **R-10** | Residual god-files | Peel **only** when a higher row needs a seam. Do not split `interpreter.rs` opcode `match` or io_uring machines. Named extracts: **Q-61** Completed. |

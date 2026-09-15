@@ -490,7 +490,7 @@ python3 scripts/core-functional/check_inventory.py
 ./scripts/core-functional/sync-core-fixtures.test.sh
 ./scripts/core-functional/run.sh.test.sh
 ./scripts/core-functional/run.sh --list
-./scripts/core-functional/run.sh feature_help.py feature_uacomment.py
+./scripts/core-functional/run.sh feature_uacomment.py rpc_uptime.py
 ./scripts/core-functional/bitcoind.test.sh
 ./scripts/core-functional/create_cache.test.sh
 ./scripts/core-functional/check_core_release.test.sh

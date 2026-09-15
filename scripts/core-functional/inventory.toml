@@ -92,7 +92,9 @@ analog = "follow-up: large P2P block / RPC surface"
 
 [[test]]
 name = "feature_blocksdir.py"
-status = "run"
+status = "skip"
+reason = "no-prune"
+analog = "none (no blk*.dat / -blocksdir product)"
 
 [[test]]
 name = "feature_blocksxor.py"
@@ -141,7 +143,9 @@ status = "run"
 
 [[test]]
 name = "feature_dirsymlinks.py"
-status = "run"
+status = "skip"
+reason = "core-internal"
+analog = "none (store/ is not Core blocks+chainstate)"
 
 [[test]]
 name = "feature_discover.py"
@@ -161,7 +165,9 @@ reason = "core-log"
 
 [[test]]
 name = "feature_filelock.py"
-status = "run"
+status = "skip"
+reason = "core-internal"
+analog = "none (no exclusive datadir/blocksdir/wallet flock)"
 
 [[test]]
 name = "feature_framework_miniwallet.py"
@@ -184,7 +190,8 @@ reason = "harness"
 
 [[test]]
 name = "feature_help.py"
-status = "run"
+status = "skip"
+reason = "harness"
 
 [[test]]
 name = "feature_includeconf.py"
@@ -242,7 +249,8 @@ status = "run"
 
 [[test]]
 name = "feature_port.py"
-status = "run"
+status = "skip"
+reason = "core-net-policy"
 
 [[test]]
 name = "feature_posix_fs_permissions.py"
@@ -822,7 +830,9 @@ status = "run"
 
 [[test]]
 name = "rpc_decodescript.py"
-status = "run"
+status = "skip"
+reason = "rpc-dialect"
+analog = "node decodescript/decoderawtransaction subset (no p2sh/segwit wrap, desc, Core asm)"
 
 [[test]]
 name = "rpc_deprecated.py"
@@ -893,7 +903,9 @@ analog = "follow-up: Core help categories / converthelp"
 
 [[test]]
 name = "rpc_invalid_address_message.py"
-status = "run"
+status = "skip"
+reason = "rpc-dialect"
+analog = "node validateaddress subset (isvalid only; no error / error_locations)"
 
 [[test]]
 name = "rpc_invalidateblock.py"
@@ -992,7 +1004,7 @@ reason = "core-log"
 name = "rpc_validateaddress.py"
 status = "skip"
 reason = "rpc-dialect"
-analog = "node happy-path subset; proxy owns Core error-text / error_locations"
+analog = "node happy-path subset (isvalid only; no error / error_locations)"
 
 [[test]]
 name = "rpc_whitelist.py"
@@ -1021,7 +1033,8 @@ reason = "no-tool"
 
 [[test]]
 name = "tool_rpcauth.py"
-status = "run"
+status = "skip"
+reason = "no-tool"
 
 [[test]]
 name = "tool_signet_miner.py"

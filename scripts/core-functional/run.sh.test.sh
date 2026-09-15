@@ -185,9 +185,7 @@ else
   PASS=$((PASS + 1))
 fi
 
-# --- real inventory: first-green run set ---
-assert_stdout "real inventory --list includes feature_help" "feature_help.py" \
-  "$RUN" --list
+# --- real inventory: production-green run set ---
 assert_stdout "real inventory --list includes feature_uacomment" "feature_uacomment.py" \
   "$RUN" --list
 assert_stdout "real inventory --list includes rpc_uptime" "rpc_uptime.py" \
@@ -202,23 +200,22 @@ assert_stdout "real inventory --list includes p2p_block_sync" "p2p_block_sync.py
   "$RUN" --list
 assert_stdout "real inventory --list includes feature_framework_miniwallet" "feature_framework_miniwallet.py" \
   "$RUN" --list
-assert_stdout "real inventory --list includes feature_dirsymlinks" "feature_dirsymlinks.py" \
-  "$RUN" --list
+assert_fail_msg "real inventory skip refused" "not in run set: feature_help.py" \
+  "$RUN" --dry-run feature_help.py
 assert_fail_msg "real inventory skip refused" "not in run set: wallet_basic.py" \
   "$RUN" --dry-run wallet_basic.py
 DRY_REAL="$("$RUN" --dry-run 2>/dev/null || true)"
-if printf '%s' "$DRY_REAL" | grep -q 'feature_help.py' \
-  && printf '%s' "$DRY_REAL" | grep -q 'feature_uacomment.py' \
+if printf '%s' "$DRY_REAL" | grep -q 'feature_uacomment.py' \
   && printf '%s' "$DRY_REAL" | grep -q 'rpc_uptime.py' \
   && printf '%s' "$DRY_REAL" | grep -q 'rpc_named_arguments.py' \
   && printf '%s' "$DRY_REAL" | grep -q 'mempool_spend_coinbase.py' \
   && printf '%s' "$DRY_REAL" | grep -q 'p2p_block_sync.py' \
   && printf '%s' "$DRY_REAL" | grep -q -- '--v2transport' \
   && printf '%s' "$DRY_REAL" | grep -q -- '--keepcache'; then
-  echo "ok - real inventory dry-run first-green set"
+  echo "ok - real inventory dry-run production-green set"
   PASS=$((PASS + 1))
 else
-  echo "not ok - real inventory dry-run first-green set (got: $DRY_REAL)"
+  echo "not ok - real inventory dry-run production-green set (got: $DRY_REAL)"
   FAIL=$((FAIL + 1))
 fi
 

@@ -55,6 +55,14 @@ before 1.0).
   Disconnect score in P2P logs (not banlist). Native serve/cmpct lines use
   `tx=` (not Hungarian `ntx=`).
 
+- **Core functional `run` is production-only:** skip scripts whose asserts
+  were only the bitcoind shim (`feature_help`, `feature_port`,
+  `feature_blocksdir`, `feature_dirsymlinks`, `feature_filelock`,
+  `tool_rpcauth`) or Core decode/`validateaddress` dialect the node does not
+  ship (`rpc_decodescript`, `rpc_invalid_address_message`). Live proxy no
+  longer intercepts `decoderawtransaction` / `decodescript` / `validateaddress`.
+  **63 run / 204 skip**.
+
 - **Coverage ratchet is merge-base, not tip of master:** PRs must not lower
   the **displayed 2-decimal** production LCOV percent vs the **highest**
   green-`master` snapshot whose SHA is an ancestor of
