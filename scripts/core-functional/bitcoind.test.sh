@@ -137,6 +137,7 @@ OUTX="$("$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
   -testactivationheight=csv@102 -permitbaremultisig=0 -maxconnections=8 \
   -minimumchainwork=0x65 -limitancestorcount=5 -blockversion=1337 -mocktime=1296688602 \
   -maxtipage=3600 -blockmintxfee=0.00000001 -externalip=42.42.42.42 \
+  -checkblocks=0 \
   -proxy=127.0.0.1:1 -deprecatedrpc=startingheight \
   2>/dev/null)" || OUTX=""
 if printf '%s' "$OUTX" | grep -q -- "--testactivationheight=csv@102" \
@@ -150,6 +151,7 @@ if printf '%s' "$OUTX" | grep -q -- "--testactivationheight=csv@102" \
   && printf '%s' "$OUTX" | grep -q -- "--max-tip-age=3600" \
   && printf '%s' "$OUTX" | grep -q -- "--blockmintxfee=0.00000001" \
   && printf '%s' "$OUTX" | grep -q -- "--externalip=42.42.42.42" \
+  && printf '%s' "$OUTX" | grep -q -- "--checkblocks=0" \
   && ! printf '%s' "$OUTX" | grep -q -- "--whitelist" \
   && ! printf '%s' "$OUTX" | grep -q -- "--maxconnections" \
   && ! printf '%s' "$OUTX" | grep -q -- "limitancestor" \

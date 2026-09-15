@@ -75,6 +75,7 @@ FORWARD_FLAGS = frozenset(
         "blockversion",
         "blockmintxfee",
         "rpcworkqueue",
+        "checkblocks",
     }
 )
 
@@ -140,8 +141,6 @@ IGNORE_FLAGS = frozenset(
         "printpriority",
         "addresstype",
         "checkblockindex",
-        # Verify-last-N-blocks; we have no Core-style checkblocks pass.
-        "checkblocks",
         # Stop-at-height is a later product; ignore so restart after the
         # future-tip check can proceed to the rest of rpc_blockchain.
         "rpcthreads",
@@ -425,6 +424,7 @@ def translate(
             "blocksdir",
             "walletdir",
             "wallet",
+            "checkblocks",
         ):
             i += 1
             if i >= len(argv):

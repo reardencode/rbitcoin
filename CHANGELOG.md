@@ -66,6 +66,9 @@ before 1.0).
   plus onion `127.0.0.1:port+1`; TestNode `bind=127.0.0.1` stays loopback.
   `Bound to` matches those sockets. `feature_port.py` is `run`.
 
+- **`--checkblocks N`:** Core `-checkblocks` window on store open (default 6;
+  `0` / negative = whole chain). Shim forwards `-checkblocks`.
+
 - **Coverage ratchet is merge-base, not tip of master:** PRs must not lower
   the **displayed 2-decimal** production LCOV percent vs the **highest**
   green-`master` snapshot whose SHA is an ancestor of

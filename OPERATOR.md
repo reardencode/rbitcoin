@@ -402,6 +402,7 @@ Clean smoke:
 | `--startupnotify CMD` | `startupnotify=` | unset |
 | `--testactivationheight name@H` | `testactivationheight=` | empty — buried deployment overlay |
 | `--min-chain-work HEX` | `min_chain_work=` | unset — densify/relay work floor |
+| `--checkblocks N` | `checkblocks=` | 6; `0` / negative = whole chain |
 | `--ua-comment STR` | `ua_comment=` | empty — BIP14 subversion |
 | `--max-run-secs N` | `max_run_secs=` | unset — process exit after N seconds |
 | `--inhibit-suspend` | | off |
@@ -715,13 +716,14 @@ Policy lives in `rbitcoin-consensus::policy` and is **never** applied on block c
 | `tip=H` but tip **hash** is a short orphan sibling; peers ahead | Stale confirmed tip; most-work **explore + reorg** | Restart (invalid marks are process-local). v0.6.0: compact reconstruct could `accept` a merkle-mutated body and cache the header `BLOCK_FAILED`. Current builds merkle-check before `Ok` (`getdata`) and do not cache that hash invalid. After upgrade, reorg once bodies densify. |
 | Stuck on tip+1: `prevout already spent` / many re-rejects of same block | Orphan Class C (second Class A+C copy at tip height) | Fixed on open: complement `repair_class_c_above_tip` + confirmed-strong **membership** |
 
-**Every open:** the node (1) revalidates the last **six** confirmed heights
-(header `prev_fk`/hash chain, Class A range bounds, merkle from `txid.body`,
-those six runs all-strong) and may **shrink tip** or clear a bad body, then
+**Every open:** the node (1) revalidates the last **N** confirmed heights
+(`--checkblocks`, default **six**: header `prev_fk`/hash chain, Class A range
+bounds, merkle from `txid.body`, those N runs all-strong; `0` walks from
+genesis) and may **shrink tip** or clear a bad body, then
 (2) one Class C complement repair (unstrong leftover 1s in fence holes / a
 short suffix — not a minute-long walk of every create). Look for
 `rbitcoin: class_c repair cleared=…` and `rbitcoin: tip revalidate …` on
-stderr. That is intentional Core-style `checkblocks=6` + crash/race healing —
+stderr. That is intentional Core-style `checkblocks` + crash/race healing —
 not a full reindex. Widespread mid-chain header graph poison still means a
 clean datadir.
 

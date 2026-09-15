@@ -151,7 +151,10 @@ async fn mempool_blocking<T: Send + 'static>(
 /// Start the node: ensure datadir, open store.
 pub fn run_node(config: NodeConfig) -> Result<NodeHandle, NodeError> {
     config.ensure_datadir()?;
-    let query = Query::open_or_create_layout(config.store_layout())?;
+    let query = Query::open_or_create_layout_checkblocks(
+        config.store_layout(),
+        config.check_blocks_window(),
+    )?;
     Ok(NodeHandle {
         config,
         query,

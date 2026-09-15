@@ -184,7 +184,9 @@ impl Store {
         self.revalidate_tip_window_n(VERIFY_TIP_BLOCKS)
     }
 
-    /// Same as [`Self::revalidate_tip_window`] with an explicit window (tests).
+    /// Same as [`Self::revalidate_tip_window`] with an explicit window.
+    ///
+    /// `n == 0` walks from genesis (Core `-checkblocks=0`).
     pub fn revalidate_tip_window_n(&self, n: u32) -> Result<TipRevalidateReport, StoreError> {
         let mut report = TipRevalidateReport::default();
         if let Some(h) = self.confirmed.tip_height() {
@@ -230,12 +232,12 @@ impl Store {
         if report.tip_before.is_none() {
             report.tip_before = Some(tip.0);
         }
-        if n == 0 {
-            report.tip_after = Some(tip.0);
-            return Ok(report);
-        }
-
-        let lo = tip.0.saturating_sub(n.saturating_sub(1));
+        // Core `-checkblocks=0` (and negatives mapped to 0 by the node) = all.
+        let lo = if n == 0 {
+            0
+        } else {
+            tip.0.saturating_sub(n.saturating_sub(1))
+        };
         let tx_count = self.txs.count();
         let mut last_good: Option<u32> = if lo == 0 { None } else { Some(lo - 1) };
         // Heights below the window are assumed good for shrink baseline when lo > 0.
@@ -691,6 +693,42 @@ mod tests {
             Some(Height(3)),
             "one open must drop the whole null suffix; report={r:?}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Core `-checkblocks=0` / `-1` means the whole chain, not “skip checks”.
+    #[test]
+    fn checkblocks_zero_walks_below_default_window() {
+        let dir = tmp();
+        let s = Store::create_tiny(&dir).unwrap();
+        let mut parent_hash = [0u8; 32];
+        let mut prev = Fk::NULL;
+        let mut genesis_fk = Fk::NULL;
+        for h in 0u32..10 {
+            let rec = hdr(prev, parent_hash, h as u8);
+            parent_hash = rec.hash;
+            let fk = s.put_header(&rec).unwrap();
+            if h == 0 {
+                genesis_fk = fk;
+            }
+            prev = fk;
+            s.confirmed.set(Height(h), fk).unwrap();
+        }
+        s.confirmed.set(Height(1), genesis_fk).unwrap();
+        s.flush_class_c_tip().unwrap();
+        s.headers.flush().unwrap();
+
+        let r6 = s.revalidate_tip_window_n(6).unwrap();
+        assert!(
+            r6.is_clean(),
+            "default window must not see height-1 poison: {r6:?}"
+        );
+        assert_eq!(s.confirmed.tip_height(), Some(Height(9)));
+
+        let r0 = s.revalidate_tip_window_n(0).unwrap();
+        assert!(r0.tip_shrunk, "n=0 must walk from genesis: {r0:?}");
+        assert_eq!(r0.first_bad_reason, Some("prev_fk != confirmed parent"));
+        assert_eq!(r0.first_bad_height, Some(1));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

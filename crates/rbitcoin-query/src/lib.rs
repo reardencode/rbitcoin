@@ -334,10 +334,18 @@ impl Query {
     }
 
     pub fn open_or_create_layout(layout: StoreLayout) -> Result<Self, QueryError> {
+        Self::open_or_create_layout_checkblocks(layout, rbitcoin_store::VERIFY_TIP_BLOCKS)
+    }
+
+    /// Same as [`Self::open_or_create_layout`] with Core `-checkblocks` window (`0` = all).
+    pub fn open_or_create_layout_checkblocks(
+        layout: StoreLayout,
+        n: u32,
+    ) -> Result<Self, QueryError> {
         write_create_loc::clear();
         let store = Store::open_or_create_layout(layout)?;
         // Core checkblocks-style tip window first so repair sees the final fence.
-        let reval = store.revalidate_tip_window()?;
+        let reval = store.revalidate_tip_window_n(n)?;
         if !reval.is_clean() {
             eprintln!(
                 "rbitcoin: tip revalidate tip_before={:?} tip_after={:?} first_bad={:?} reason={:?} \

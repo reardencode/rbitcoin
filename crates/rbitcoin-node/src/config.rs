@@ -216,6 +216,8 @@ pub struct NodeConfig {
     pub block_min_tx_fee_btc: Option<String>,
     /// BIP152 extra compact-block prefill (default **on**; `--prefillcompact=0` disables).
     pub prefill_compact: bool,
+    /// Core `-checkblocks` (`None` = 6). `<= 0` means the whole chain.
+    pub check_blocks: Option<i64>,
 }
 
 impl Default for NodeConfig {
@@ -259,6 +261,7 @@ impl Default for NodeConfig {
             block_version: None,
             block_min_tx_fee_btc: None,
             prefill_compact: true,
+            check_blocks: None,
         }
     }
 }
@@ -332,6 +335,15 @@ impl NodeConfig {
             Milestone {
                 height: self.milestone_height,
             }
+        }
+    }
+
+    /// Core `-checkblocks` window. `0` = whole chain (store genesis walk).
+    pub fn check_blocks_window(&self) -> u32 {
+        match self.check_blocks {
+            None => rbitcoin_store::VERIFY_TIP_BLOCKS,
+            Some(n) if n <= 0 => 0,
+            Some(n) => u32::try_from(n).unwrap_or(0),
         }
     }
 
@@ -799,6 +811,12 @@ impl NodeConfig {
                 }
                 self.mock_time = Some(n);
             }
+            "checkblocks" | "check_blocks" => {
+                let n: i64 = val
+                    .parse()
+                    .map_err(|e| NodeError::Config(format!("conf checkblocks: {e}")))?;
+                self.check_blocks = Some(n);
+            }
             "max_tip_age" => {
                 let n: i64 = val
                     .parse()
@@ -986,6 +1004,24 @@ mod tests {
             c.apply_kv("minrelaytxfee", "0.00000001").unwrap(),
             ConfApply::Applied
         );
+    }
+
+    #[test]
+    fn checkblocks_apply_kv_zero_is_all() {
+        let mut c = NodeConfig::default();
+        assert_eq!(c.check_blocks, None);
+        assert_eq!(c.check_blocks_window(), rbitcoin_store::VERIFY_TIP_BLOCKS);
+        assert_eq!(c.apply_kv("checkblocks", "6").unwrap(), ConfApply::Applied);
+        assert_eq!(c.check_blocks, Some(6));
+        assert_eq!(c.check_blocks_window(), 6);
+        assert_eq!(c.apply_kv("check_blocks", "0").unwrap(), ConfApply::Applied);
+        assert_eq!(c.check_blocks, Some(0));
+        assert_eq!(c.check_blocks_window(), 0);
+        assert_eq!(c.apply_kv("checkblocks", "-1").unwrap(), ConfApply::Applied);
+        assert_eq!(c.check_blocks, Some(-1));
+        assert_eq!(c.check_blocks_window(), 0);
+        let bad = c.apply_kv("checkblocks", "nope").unwrap_err();
+        assert!(bad.to_string().contains("checkblocks"), "{bad}");
     }
 
     #[test]

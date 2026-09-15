@@ -49,7 +49,7 @@ where
     [--blocks-only] [--prefillcompact[=0|1]] [--minrelaytxfee BTC] \\\n\
     [--limitclustercount N] [--limitclustersize KVB] [--peer-timeout SECS] \\\n\
     [--externalip IP] \\\n\
-    [--min-chain-work HEX] [--max-tip-age SECS] \\\n\
+    [--min-chain-work HEX] [--max-tip-age SECS] [--checkblocks N] \\\n\
     [--max-run-secs N] [--log-level LEVEL] [--api-log PATH] [--asmap PATH] [--ua-comment STR] \\\n\
     [--no-seeds] [--smoke] [--inhibit-suspend]\n\n\
 Networks: mainnet|testnet|signet|regtest\n\
@@ -59,6 +59,7 @@ API log: --api-log PATH writes one JSON line per Electrum/Esplora/RPC call (also
 Asmap: --asmap PATH loads a Core ip_asn.dat (relative to datadir). Unset tries {{datadir}}/ip_asn.dat.\n\
 Milestone: skip script/sig checks at/below HEIGHT.\n\
   Defaults: mainnet 840000, signet 2000000, testnet 2500000, regtest 0. Use 0 for full scripts.\n\
+Checkblocks: --checkblocks N revalidates the last N confirmed heights on open (default 6; 0 = all).\n\
 Mempool: --mempool-size-mb (default ~300 MiB weight budget).\n\
 Peers: --max-outbound (default 16 live download), --max-inbound (default 125).\n\
   --trusted / --always-relay / --relay are inbound permission knobs (not Core -whitelist).\n\
@@ -451,6 +452,25 @@ mod tests {
             Ok(OperatorArgs::Ready { config, .. }) => config,
             other => panic!("expected assembled config, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn checkblocks_cli_parses_core_zero_and_negative() {
+        let omitted = ready_config(["rbitcoin-node"]);
+        assert_eq!(omitted.check_blocks, None);
+        assert_eq!(
+            omitted.check_blocks_window(),
+            rbitcoin_store::VERIFY_TIP_BLOCKS
+        );
+        let six = ready_config(["rbitcoin-node", "--checkblocks=6"]);
+        assert_eq!(six.check_blocks, Some(6));
+        assert_eq!(six.check_blocks_window(), 6);
+        let all = ready_config(["rbitcoin-node", "--checkblocks", "0"]);
+        assert_eq!(all.check_blocks, Some(0));
+        assert_eq!(all.check_blocks_window(), 0);
+        let neg = ready_config(["rbitcoin-node", "--checkblocks=-1"]);
+        assert_eq!(neg.check_blocks, Some(-1));
+        assert_eq!(neg.check_blocks_window(), 0);
     }
 
     #[test]
