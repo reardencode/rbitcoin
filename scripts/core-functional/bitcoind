@@ -127,7 +127,7 @@ IGNORE_FLAGS = frozenset(
         "maxuploadtarget",
         "rest",
         "discover",
-        # Core boolean; we always --listen on 127.0.0.1 (feature_port.py).
+        # Core boolean; listen sockets come from -bind / -port.
         "listen",
         "listenonion",
         "dnsseed",
@@ -242,6 +242,50 @@ def read_conf(path: Path) -> dict[str, str]:
     return out
 
 
+def read_conf_binds(path: Path) -> list[str]:
+    """Repeatable `bind=` lines (TestNode extra_conf `bind=127.0.0.1`)."""
+    out: list[str] = []
+    if not path.is_file():
+        return out
+    for raw in path.read_text().splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or line.startswith("["):
+            continue
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        if k.strip().lower() == "bind":
+            out.append(v.strip())
+    return out
+
+
+def listen_targets(
+    binds: list[tuple[str, int | None, bool]],
+    port_n: int,
+) -> list[str]:
+    """Core `-bind`/`-port` → the sockets we pass as `--listen`."""
+    seen: list[str] = []
+
+    def add(addr: str) -> None:
+        if addr not in seen:
+            seen.append(addr)
+
+    non_onion = [(h, p) for (h, p, o) in binds if not o]
+    onion = [(h, p) for (h, p, o) in binds if o]
+    if non_onion:
+        for host, bport in non_onion:
+            add(f"{host}:{bport if bport is not None else port_n}")
+    else:
+        add(f"0.0.0.0:{port_n}")
+    if onion:
+        for host, bport in onion:
+            h = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+            add(f"{h}:{bport if bport is not None else port_n + 1}")
+    elif not non_onion:
+        add(f"127.0.0.1:{port_n + 1}")
+    return seen
+
+
 def maybe_seed_store(node_dir: Path) -> None:
     """Copy the rbitcoin 199-block store into a Core cache-shaped datadir.
 
@@ -336,8 +380,7 @@ def translate(
     blocksdir_arg: Path | None = None
     walletdir_arg: Path | None = None
     wallet_name: str | None = None
-    # Core-shaped bind announcements for debug.log (feature_port.py).
-    binds: list[tuple[str, int | None, bool]] = []
+    argv_binds: list[tuple[str, int | None, bool]] = []
     i = 1
     while i < len(argv):
         a = argv[i]
@@ -407,7 +450,7 @@ def translate(
             p2pport = parse_port(val, "-port")
         elif key == "bind" and val:
             host, bport, onion = _parse_bind(val)
-            binds.append((host, bport, onion))
+            argv_binds.append((host, bport, onion))
             # Non-onion bind with an explicit port supplies the P2P listen port.
             if not onion and bport is not None:
                 p2pport = str(bport)
@@ -465,6 +508,9 @@ def translate(
     if p2pport is None:
         p2pport = parse_port(conf.get("port") or "18444", "-port")
 
+    conf_binds = [_parse_bind(v) for v in read_conf_binds(datadir / "bitcoin.conf")]
+    binds = conf_binds + argv_binds
+
     node_dir = datadir / network
     node_dir.mkdir(parents=True, exist_ok=True)
     maybe_seed_store(node_dir)
@@ -497,6 +543,10 @@ def translate(
             bd_blk.write_bytes(b"\x00" * 16)
 
     node = find_node()
+    port_n = int(p2pport)
+    listens = listen_targets(binds, port_n)
+    if not listens:
+        listens = [f"127.0.0.1:{port_n}"]
     cmd = [
         str(node),
         "--network",
@@ -506,48 +556,19 @@ def translate(
         "--rpc-listen",
         f"127.0.0.1:{node_rpc_port(int(rpcport))}",
         "--listen",
-        f"127.0.0.1:{p2pport}",
+        listens[0],
         "--no-seeds",
         "--shindex",
         "--esplora-listen",
         f"127.0.0.1:{esplora_port(int(rpcport))}",
     ]
-    # Core `-bind=host:port=onion` → extra listen sockets (getaddr caching).
-    for host, bport, onion in binds:
-        if not onion or bport is None:
-            continue
-        listen_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
-        extra = f"{listen_host}:{bport}"
-        if extra == f"127.0.0.1:{p2pport}":
-            continue
+    for extra in listens[1:]:
         cmd += ["--listen", extra]
     if log_level:
         cmd += ["--log-level", log_level]
     cmd += extra_node_args
 
-    # Core debug.log "Bound to …" announcements (feature_port.py).
-    port_n = int(p2pport)
-    bound_lines: list[str] = []
-    non_onion = [(h, p, o) for (h, p, o) in binds if not o]
-    onion_binds = [(h, p, o) for (h, p, o) in binds if o]
-    if non_onion:
-        for host, bport, _ in non_onion:
-            bound_lines.append(f"Bound to {host}:{bport if bport is not None else port_n}")
-        for host, bport, _ in onion_binds:
-            bound_lines.append(
-                f"Bound to {host}:{bport if bport is not None else port_n + 1}"
-            )
-    else:
-        bound_lines.append(f"Bound to 0.0.0.0:{port_n}")
-        if onion_binds:
-            for host, bport, _ in onion_binds:
-                bound_lines.append(
-                    f"Bound to {host}:{bport if bport is not None else port_n + 1}"
-                )
-        else:
-            bound_lines.append(f"Bound to 127.0.0.1:{port_n + 1}")
-    # Actual node listen (map_debuglog / prior harness expectation).
-    bound_lines.append(f"Bound to 127.0.0.1:{port_n}")
+    bound_lines = [f"Bound to {addr}" for addr in listens]
 
     return (
         cmd,

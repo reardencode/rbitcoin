@@ -12,8 +12,8 @@ match = 'rpc: listening on 127\.0\.0\.1:(\d+)'
 emit = ['Bound to 127.0.0.1:{1}']
 
 [[rule]]
-match = 'rbitcoin-node listening on 127\.0\.0\.1:(\d+)'
-emit = ['Bound to 127.0.0.1:{1}']
+match = 'rbitcoin-node listening on (\S+)'
+emit = ['Bound to {1}']
 
 [[rule]]
 match = 'getblocktxn with out-of-bounds tx indices'

@@ -249,8 +249,7 @@ status = "run"
 
 [[test]]
 name = "feature_port.py"
-status = "skip"
-reason = "core-net-policy"
+status = "run"
 
 [[test]]
 name = "feature_posix_fs_permissions.py"

@@ -56,12 +56,15 @@ before 1.0).
   `tx=` (not Hungarian `ntx=`).
 
 - **Core functional `run` is production-only:** skip scripts whose asserts
-  were only the bitcoind shim (`feature_help`, `feature_port`,
-  `feature_blocksdir`, `feature_dirsymlinks`, `feature_filelock`,
-  `tool_rpcauth`) or Core decode/`validateaddress` dialect the node does not
-  ship (`rpc_decodescript`, `rpc_invalid_address_message`). Live proxy no
-  longer intercepts `decoderawtransaction` / `decodescript` / `validateaddress`.
-  **63 run / 204 skip**.
+  were only the bitcoind shim (`feature_help`, `feature_blocksdir`,
+  `feature_dirsymlinks`, `feature_filelock`, `tool_rpcauth`) or Core
+  decode/`validateaddress` dialect the node does not ship
+  (`rpc_decodescript`, `rpc_invalid_address_message`). Live proxy no longer
+  intercepts `decoderawtransaction` / `decodescript` / `validateaddress`.
+
+- **Core `-bind`/`-port` map to `--listen`:** bare `-port` binds `0.0.0.0`
+  plus onion `127.0.0.1:port+1`; TestNode `bind=127.0.0.1` stays loopback.
+  `Bound to` matches those sockets. `feature_port.py` is `run`.
 
 - **Coverage ratchet is merge-base, not tip of master:** PRs must not lower
   the **displayed 2-decimal** production LCOV percent vs the **highest**

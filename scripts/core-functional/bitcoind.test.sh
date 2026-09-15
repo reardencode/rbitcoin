@@ -77,7 +77,8 @@ if printf '%s' "$OUT" | grep -q -- "--network regtest" \
   && printf '%s' "$OUT" | grep -q -- "--datadir ${DATADIR}/regtest" \
   && printf '%s' "$OUT" | grep -q -- "--rpc-listen 127.0.0.1:28443" \
   && printf '%s' "$OUT" | grep -q -- "--esplora-listen 127.0.0.1:38443" \
-  && printf '%s' "$OUT" | grep -q -- "--listen 127.0.0.1:18444" \
+  && printf '%s' "$OUT" | grep -q -- "--listen 0.0.0.0:18444" \
+  && printf '%s' "$OUT" | grep -q -- "--listen 127.0.0.1:18445" \
   && printf '%s' "$OUT" | grep -q -- "--no-seeds" \
   && printf '%s' "$OUT" | grep -q -- "--log-level debug"; then
   echo "ok - print-cmd maps conf + -debug"
@@ -103,7 +104,8 @@ OUT2="$("$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
   -uacomment=testnode0 2>/dev/null)"
 if printf '%s' "$OUT2" | grep -q -- "--rpc-listen 127.0.0.1:29111" \
   && printf '%s' "$OUT2" | grep -q -- "--esplora-listen 127.0.0.1:39111" \
-  && printf '%s' "$OUT2" | grep -q -- "--listen 127.0.0.1:19222"; then
+  && printf '%s' "$OUT2" | grep -q -- "--listen 0.0.0.0:19222" \
+  && printf '%s' "$OUT2" | grep -q -- "--listen 127.0.0.1:19223"; then
   echo "ok - CLI ports override conf"
   PASS=$((PASS + 1))
 else
@@ -114,7 +116,7 @@ fi
 # -bind=0.0.0.0:P supplies the P2P port; onion binds become extra --listen.
 OUT3="$("$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
   -bind=0.0.0.0:19333 -bind=127.0.0.1:19444=onion 2>/dev/null)"
-if printf '%s' "$OUT3" | grep -q -- "--listen 127.0.0.1:19333" \
+if printf '%s' "$OUT3" | grep -q -- "--listen 0.0.0.0:19333" \
   && printf '%s' "$OUT3" | grep -q -- "--listen 127.0.0.1:19444"; then
   echo "ok - bind port becomes listen (onion as extra listen)"
   PASS=$((PASS + 1))
@@ -299,13 +301,28 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-# feature_port.py: -listen is a Core boolean (ignored; we always listen).
+# feature_port.py: -listen is a Core boolean; bare -port binds 0.0.0.0 + onion port+1.
 OUT_LISTEN="$("$SHIM" --print-cmd -datadir="$DATADIR" -regtest -listen -port=18555 2>/dev/null)" || OUT_LISTEN=""
-if printf '%s' "$OUT_LISTEN" | grep -q -- "--listen 127.0.0.1:18555"; then
+if printf '%s' "$OUT_LISTEN" | grep -q -- "--listen 0.0.0.0:18555" \
+  && printf '%s' "$OUT_LISTEN" | grep -q -- "--listen 127.0.0.1:18556"; then
   echo "ok - -listen accepted with -port"
   PASS=$((PASS + 1))
 else
   echo "not ok - -listen accepted with -port (got: $OUT_LISTEN)"
+  FAIL=$((FAIL + 1))
+fi
+
+# TestNode extra_conf bind=127.0.0.1 (no port) combines with -port.
+BIND_DD="$WORKDIR/conf-bind-local"
+mkdir -p "$BIND_DD"
+printf 'regtest=1\nbind=127.0.0.1\nport=18444\nrpcport=18443\n' >"$BIND_DD/bitcoin.conf"
+OUT_LOCAL="$("$SHIM" --print-cmd -datadir="$BIND_DD" -regtest 2>/dev/null)" || OUT_LOCAL=""
+if printf '%s' "$OUT_LOCAL" | grep -q -- "--listen 127.0.0.1:18444" \
+  && ! printf '%s' "$OUT_LOCAL" | grep -q -- "--listen 0.0.0.0:"; then
+  echo "ok - conf bind=127.0.0.1 stays loopback"
+  PASS=$((PASS + 1))
+else
+  echo "not ok - conf bind=127.0.0.1 stays loopback (got: $OUT_LOCAL)"
   FAIL=$((FAIL + 1))
 fi
 

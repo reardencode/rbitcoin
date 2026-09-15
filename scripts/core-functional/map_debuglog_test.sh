@@ -25,6 +25,10 @@ run "listen maps to Bound to" \
   "2026-01-01T00:00:00Z INFO rbitcoin-node listening on 127.0.0.1:18444 (regtest)" \
   "Bound to 127.0.0.1:18444"
 
+run "0.0.0.0 listen maps to Bound to" \
+  "2026-01-01T00:00:00Z INFO rbitcoin-node listening on 0.0.0.0:18555 (regtest)" \
+  "Bound to 0.0.0.0:18555"
+
 run "p2p dial maps to Core trying v1 needle" \
   "2026-01-01T00:00:00Z DEBUG p2p: trying connection (outbound-full-relay) to 25.0.0.1:8333" \
   "trying v1 connection (outbound-full-relay) to 25.0.0.1:8333"

@@ -212,9 +212,15 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     .await
     .map_err(|e| NodeError::Config(format!("p2p start: {e}")))?;
     for extra in &config.listen.p2p_extra {
-        node.add_listen(*extra)
+        let bound = node
+            .add_listen(*extra)
             .await
             .map_err(|e| NodeError::Config(format!("p2p extra listen {extra}: {e}")))?;
+        info!(
+            "rbitcoin-node listening on {} ({})",
+            bound,
+            config.network.as_str()
+        );
     }
     node.hub.set_minimum_chain_work(config.minimum_chain_work);
     if let Some(secs) = config.max_tip_age_secs {
