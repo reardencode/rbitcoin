@@ -200,6 +200,12 @@ pub struct NodeConfig {
     pub always_relay: bool,
     /// Permit tx relay to inbound while `--blocks-only` (`--relay`; Core `relay`).
     pub relay: bool,
+    /// Parsed `--net-permission` / `--net-permission-bind` (implicit bits in [`Self::finalized_net_perms`]).
+    pub net_perms: rbitcoin_net::NetPermTable,
+    /// Core `-whitelistrelay` (default true).
+    pub whitelist_relay: bool,
+    /// Core `-whitelistforcerelay` (default false).
+    pub whitelist_forcerelay: bool,
     /// Core `-startupnotify` shell command (run once after start).
     pub startup_notify: Option<String>,
     /// Core `-alertnotify` shell command (`%s` = warning text).
@@ -255,6 +261,9 @@ impl Default for NodeConfig {
             trusted: false,
             always_relay: false,
             relay: false,
+            net_perms: rbitcoin_net::NetPermTable::default(),
+            whitelist_relay: rbitcoin_net::DEFAULT_WHITELISTRELAY,
+            whitelist_forcerelay: rbitcoin_net::DEFAULT_WHITELISTFORCERELAY,
             startup_notify: None,
             alert_notify: None,
             minimum_chain_work: None,
@@ -348,6 +357,26 @@ impl NodeConfig {
             Some(n) if n <= 0 => 0,
             Some(n) => u32::try_from(n).unwrap_or(0),
         }
+    }
+
+    /// Implicit whitelist flags resolved with `-whitelistrelay` / `-whitelistforcerelay`.
+    pub fn finalized_net_perms(&self) -> rbitcoin_net::NetPermTable {
+        let mut t = self.net_perms.clone();
+        for g in &mut t.whitelist {
+            g.flags = rbitcoin_net::apply_implicit(
+                g.flags,
+                self.whitelist_relay,
+                self.whitelist_forcerelay,
+            );
+        }
+        for g in &mut t.whitebind {
+            g.flags = rbitcoin_net::apply_implicit(
+                g.flags,
+                self.whitelist_relay,
+                self.whitelist_forcerelay,
+            );
+        }
+        t
     }
 
     /// Compose immutable consensus parameters from operator configuration.
@@ -501,7 +530,8 @@ impl NodeConfig {
     /// `shindex`, `sptweaks`, `sptweaks_dust`, `rpc_listen`, `rpcuser`, `rpcpassword`,
     /// `no_seeds`, `signet_challenge`, `signet_block_time`, `min_chain_work`,
     /// `max_tip_age`, `blocks_only`, `persist_mempool`, `trusted`, `always_relay`,
-    /// `relay`, `ua_comment`, `peer_timeout`. Core names are the functional shim only.
+    /// `relay`, `net_permission`, `net_permission_bind`, `whitelist_relay`,
+    /// `whitelist_forcerelay`, `ua_comment`, `peer_timeout`. Core names are the functional shim only.
     pub fn merge_conf_file(&mut self, path: &Path) -> Result<(), NodeError> {
         let text = std::fs::read_to_string(path).map_err(|source| {
             NodeError::Config(format!("read conf {}: {source}", path.display()))
@@ -666,6 +696,26 @@ impl NodeConfig {
             "relay" => {
                 self.relay = parse_conf_bool(val)
                     .map_err(|e| NodeError::Config(format!("conf relay: {e}")))?;
+            }
+            "net_permission" | "net_permissions" => {
+                if !val.is_empty() {
+                    let g = rbitcoin_net::parse_whitelist(val).map_err(NodeError::Config)?;
+                    self.net_perms.whitelist.push(g);
+                }
+            }
+            "net_permission_bind" => {
+                if !val.is_empty() {
+                    let g = rbitcoin_net::parse_whitebind(val).map_err(NodeError::Config)?;
+                    self.net_perms.whitebind.push(g);
+                }
+            }
+            "whitelist_relay" => {
+                self.whitelist_relay = parse_conf_bool(val)
+                    .map_err(|e| NodeError::Config(format!("conf whitelist-relay: {e}")))?;
+            }
+            "whitelist_forcerelay" => {
+                self.whitelist_forcerelay = parse_conf_bool(val)
+                    .map_err(|e| NodeError::Config(format!("conf whitelist-forcerelay: {e}")))?;
             }
             "blocks_only" => {
                 self.mempool.blocksonly = parse_conf_bool(val)
@@ -1047,6 +1097,51 @@ mod tests {
         assert!(
             err.to_string().contains("Duplicate binding configuration"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn whitelist_parse_errors_match_core() {
+        let mut c = NodeConfig::default();
+        let err = c.apply_kv("net-permission", "in,out@127.0.0.1").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Only direction was set, no permissions"),
+            "{err}"
+        );
+        let err = c.apply_kv("net-permission", "oopsie@127.0.0.1").unwrap_err();
+        assert!(err.to_string().contains("Invalid P2P permission"), "{err}");
+        let err = c
+            .apply_kv("net-permission", "noban@127.0.0.1:230")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid netmask specified in"),
+            "{err}"
+        );
+        let err = c
+            .apply_kv("net-permission-bind", "noban@127.0.0.1/10")
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Cannot resolve -whitebind address"),
+            "{err}"
+        );
+        assert_eq!(
+            c.apply_kv("net-permission", "127.0.0.1").unwrap(),
+            ConfApply::Applied
+        );
+        let t = c.finalized_net_perms();
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+        let bind = "127.0.0.1:18444".parse().unwrap();
+        assert_eq!(
+            t.strings_for(ip, true, bind),
+            ["noban", "relay", "mempool", "download"]
+        );
+        c.whitelist_relay = false;
+        let t = c.finalized_net_perms();
+        assert_eq!(
+            t.strings_for(ip, true, bind),
+            ["noban", "mempool", "download"]
         );
     }
 

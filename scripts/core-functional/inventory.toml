@@ -739,8 +739,7 @@ analog = "follow-up: outbound eviction"
 
 [[test]]
 name = "p2p_permissions.py"
-status = "skip"
-reason = "core-log"
+status = "run"
 
 [[test]]
 name = "p2p_ping.py"

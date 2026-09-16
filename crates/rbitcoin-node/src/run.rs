@@ -271,7 +271,32 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         None => None,
     };
     let expiry_hours = config.mempool.expiry_hours;
-    let immediate_relay = config.trusted;
+    let table = config.finalized_net_perms();
+    let table_noban = table
+        .whitelist
+        .iter()
+        .any(|g| g.flags.has(rbitcoin_net::NetPermissionFlags::NOBAN))
+        || table
+            .whitebind
+            .iter()
+            .any(|g| g.flags.has(rbitcoin_net::NetPermissionFlags::NOBAN));
+    let table_relay = table
+        .whitelist
+        .iter()
+        .any(|g| g.flags.has(rbitcoin_net::NetPermissionFlags::RELAY))
+        || table
+            .whitebind
+            .iter()
+            .any(|g| g.flags.has(rbitcoin_net::NetPermissionFlags::RELAY));
+    let table_forcerelay = table
+        .whitelist
+        .iter()
+        .any(|g| g.flags.has(rbitcoin_net::NetPermissionFlags::FORCE_RELAY))
+        || table
+            .whitebind
+            .iter()
+            .any(|g| g.flags.has(rbitcoin_net::NetPermissionFlags::FORCE_RELAY));
+    let immediate_relay = config.trusted || table_noban;
     let hub = Arc::clone(&node.hub);
     let (mempool, mp_gen, mp_live) = tokio::task::spawn_blocking(move || {
         let _g = BlockingRegion::enter();
@@ -296,6 +321,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     .map_err(|e| NodeError::Config(format!("mempool open join: {e}")))?
     .map_err(NodeError::Config)?;
     node.peers.attach_mempool(&mempool);
+    node.peers.set_net_perms(table.clone());
     if let Some(secs) = config.listen.peer_timeout_secs {
         node.peers.set_peer_timeout_secs(secs);
     }
@@ -307,10 +333,10 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     if immediate_relay {
         node.peers.set_noban(true);
     }
-    if config.relay {
+    if config.relay || table_relay {
         node.peers.set_relay_perm(true);
     }
-    if config.always_relay {
+    if config.always_relay || table_forcerelay {
         node.peers.set_forcerelay_perm(true);
         node.peers.set_relay_perm(true);
     }

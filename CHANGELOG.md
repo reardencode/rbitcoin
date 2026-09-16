@@ -77,6 +77,14 @@ before 1.0).
   Core `EraseForPeer` on disconnect. Handshake/INV stay off the tokio
   reactor write lock. `rpc_orphans.py` is `run`.
 
+- **Core `NetPermissions`:** shim `-whitelist` / `-whitebind` → `--net-permission` /
+  `--net-permission-bind` (implicit flags, in/out, `--whitelist-relay` /
+  `--whitelist-forcerelay`). Operator `--trusted` / `--always-relay` / `--relay`
+  stay global inbound knobs. `getpeerinfo.permissions` is per-peer. 0-value
+  spendable outputs are `dust` (Libre still admits 1-sat). Forcerelay
+  recent-rejects skip ATMP on the second send. Conf `whitebind=` listens.
+  `p2p_permissions.py` is `run`.
+
 - **Coverage ratchet is merge-base, not tip of master:** PRs must not lower
   the **displayed 2-decimal** production LCOV percent vs the **highest**
   green-`master` snapshot whose SHA is an ancestor of

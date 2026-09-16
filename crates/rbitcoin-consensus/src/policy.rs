@@ -7,7 +7,8 @@
 //!
 //! This is the only mempool admit policy. Reject consensus failure, DoS
 //! resource limits, and reserved upgrade hooks. Defaults: **0.1 sat/vB**
-//! min relay, **no dust limit**, full RBF, Libre annex.
+//! min relay, **no dust limit** (1-sat OK; 0-value spendable is dust), full
+//! RBF, Libre annex.
 
 use bitcoin::Transaction;
 
@@ -105,7 +106,19 @@ pub fn check_libre_annex(tx: &Transaction) -> PolicyResult {
     PolicyResult::Standard
 }
 
-/// Libre admission for a single tx given fee and weight (no dust, no template ban).
+/// Core `CScript::IsUnspendable`: leading `OP_RETURN`, or over `MAX_SCRIPT_SIZE`.
+pub fn is_unspendable(script: &[u8]) -> bool {
+    script.first() == Some(&0x6a) || script.len() > 10_000
+}
+
+/// Libre has no dust *limit*; a 0-value spendable output is still dust.
+pub fn zero_value_spendable_is_dust(tx: &Transaction) -> bool {
+    tx.output
+        .iter()
+        .any(|o| o.value.to_sat() == 0 && !is_unspendable(o.script_pubkey.as_bytes()))
+}
+
+/// Libre admission for a single tx given fee and weight (no dust limit, no template ban).
 ///
 /// Callers still enforce consensus, cluster limits, and DoS caps separately.
 pub fn check_libre_admission(tx: &Transaction, fee_sat: u64, weight: u64) -> PolicyResult {
@@ -128,6 +141,9 @@ pub fn check_libre_admission_at(
     if tx.output.is_empty() {
         return PolicyResult::NonStandard("no outputs");
     }
+    if zero_value_spendable_is_dust(tx) {
+        return PolicyResult::NonStandard("dust");
+    }
     if weight > MAX_STANDARD_TX_WEIGHT {
         return PolicyResult::NonStandard("tx weight");
     }
@@ -135,8 +151,6 @@ pub fn check_libre_admission_at(
         return PolicyResult::NonStandard("min relay fee");
     }
     check_libre_annex(tx)
-    // Dust: intentionally not enforced (Libre).
-    // Script templates / bare multisig / large OP_RETURN: allowed.
 }
 
 #[cfg(test)]
@@ -195,6 +209,15 @@ mod tests {
         // pretend input value 50_000
         let fee = 50_000u64.saturating_sub(1);
         assert!(check_libre_admission(&tx, fee, weight).is_ok());
+
+        let zero = bare_tx(0);
+        assert_eq!(
+            check_libre_admission(&zero, 50_000, zero.weight().to_wu()),
+            PolicyResult::NonStandard("dust")
+        );
+        let mut opreturn = bare_tx(0);
+        opreturn.output[0].script_pubkey = ScriptBuf::from_bytes(vec![0x6a, 0x01, 0x00]);
+        assert!(check_libre_admission(&opreturn, 50_000, opreturn.weight().to_wu()).is_ok());
     }
 
     #[test]

@@ -42,7 +42,8 @@ never calls this.
 `Error:` lines (UA / init) are copied to the shim stderr so TestNode’s
 clean-stop check matches Core. Unknown Core flags fail parse. The shim maps
 Core names onto kebab `rbitcoin-node` flags (`-maxconnections` → `--max-inbound`
-as `N−11`, `-whitelist=noban` → `--trusted`, `-blocksonly` → `--blocks-only`,
+as `N−11`, `-whitelist` → `--net-permission`, `-whitebind` → `--net-permission-bind`,
+`-blocksonly` → `--blocks-only`,
 `-minimumchainwork` → `--min-chain-work`, …). The operator CLI does not accept
 those Core aliases.
 
@@ -160,7 +161,10 @@ of that script is `submitblock` + archive `getblockstats`. `feature_port.py`
 is `run`: `-bind`/`-port` become `--listen` on those sockets.
 `feature_filelock.py` is `run`: the node exclusive-locks datadir and
 `{datadir}/blocks` (and `--blocksdir`). `rpc_orphans.py` is `run`: hidden
-`getorphantxs` plus orphan announcers / `EraseForPeer`.
+`getorphantxs` plus orphan announcers / `EraseForPeer`. `p2p_permissions.py`
+is `run`: Core `NetPermissions` on `-whitelist`/`-whitebind`, per-peer
+`getpeerinfo.permissions`, 0-value spendable `dust`, and forcerelay
+recent-rejects.
 
 ## CI
 

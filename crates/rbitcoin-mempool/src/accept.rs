@@ -189,6 +189,16 @@ impl std::fmt::Display for AcceptError {
     }
 }
 
+impl AcceptError {
+    /// Core debug.log / `was not accepted:` needle (`Policy` is the bare reason).
+    pub fn mempool_reject_reason(&self) -> String {
+        match self {
+            AcceptError::Policy(s) => (*s).to_string(),
+            other => other.to_string(),
+        }
+    }
+}
+
 impl std::error::Error for AcceptError {}
 
 /// Side effects of a recordable accept failure (recent-invalid / extra-compact).
@@ -2080,6 +2090,26 @@ mod tests {
         let tx = spend_tx(op, 1);
         let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
         mp.accept_tx(&tx, &utxos, TIP_OK).expect("dust ok");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir = tmp_dir();
+        let (op, _, utxos) = chain_utxo(100_000);
+        let tx = spend_tx(op, 0);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let err = mp.accept_tx(&tx, &utxos, TIP_OK).unwrap_err();
+        assert!(
+            matches!(err, AcceptError::Policy("dust")),
+            "0-value spendable must be dust, got {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir = tmp_dir();
+        let (op, _, utxos) = chain_utxo(100_000);
+        let mut tx = spend_tx(op, 0);
+        tx.output[0].script_pubkey = ScriptBuf::from_bytes(vec![0x6a, 0x01, 0x00]);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        mp.accept_tx(&tx, &utxos, TIP_OK)
+            .expect("0-value OP_RETURN ok");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

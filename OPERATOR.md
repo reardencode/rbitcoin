@@ -389,6 +389,10 @@ Clean smoke:
 | `--trusted` | `trusted=` | off — inbound is not evicted/banned |
 | `--always-relay` | `always_relay=` | off — always announce inbound txs |
 | `--relay` | `relay=` | off — permit tx relay to inbound while `--blocks-only` |
+| `--net-permission SPEC` | `net_permission=` | empty — Core `-whitelist` spec (repeatable) |
+| `--net-permission-bind SPEC` | `net_permission_bind=` | empty — Core `-whitebind` spec (repeatable) |
+| `--whitelist-relay[=0\|1]` | `whitelist_relay=` | **on** — implicit relay on bare CIDR grants |
+| `--whitelist-forcerelay[=0\|1]` | `whitelist_forcerelay=` | **off** — implicit forcerelay on bare CIDR grants |
 | `--limitclustercount N` | `limitclustercount=` | unset — hub default |
 | `--limitclustersize KVB` | `limitclustersize=` | unset — hub default |
 | `--peer-timeout SECS` | `peer_timeout=` | unset — net default; `0` is InitError |

@@ -46,6 +46,7 @@ where
     [--max-outbound N] [--max-inbound N] \\\n\
     [--mempool-size-mb N] \\\n\
     [--testactivationheight name@height] [--persist-mempool[=0|1]] [--trusted] [--always-relay] [--relay] \\\n\
+    [--net-permission SPEC] [--net-permission-bind SPEC] [--whitelist-relay[=0|1]] [--whitelist-forcerelay[=0|1]] \\\n\
     [--blocks-only] [--prefillcompact[=0|1]] [--minrelaytxfee BTC] \\\n\
     [--limitclustercount N] [--limitclustersize KVB] [--peer-timeout SECS] \\\n\
     [--externalip IP] \\\n\
@@ -64,6 +65,7 @@ Blocksdir: --blocksdir PATH exclusive-locks PATH in addition to datadir (Core -b
 Mempool: --mempool-size-mb (default ~300 MiB weight budget).\n\
 Peers: --max-outbound (default 16 live download), --max-inbound (default 125).\n\
   --trusted / --always-relay / --relay are inbound permission knobs (not Core -whitelist).\n\
+  --net-permission / --net-permission-bind are Core -whitelist / -whitebind specs (functional shim).\n\
 Scripthash: --shindex (default off) builds Class B for Electrum/Esplora; both require it.\n\
   --max-sh-creates N refuses Electrum/Esplora joins with more than N creates (0 = unlimited).\n\
   --esplora-block-template enables GET /block-template (GBT template JSON; default off).\n\
@@ -327,6 +329,8 @@ fn is_bool_key(key: &str) -> bool {
             | "prefillcompact"
             | "prefill_compact"
             | "persist_mempool"
+            | "whitelist_relay"
+            | "whitelist_forcerelay"
             | "no_seeds"
             | "inhibit_suspend"
             | "inhibitsuspend"
@@ -395,6 +399,11 @@ fn cli_apply_err(e: crate::error::NodeError) -> ExitCode {
         || s.contains("Invalid minimum work")
         || s.contains("must be hexadecimal")
         || s.contains("Duplicate binding configuration")
+        || s.contains("Invalid P2P permission")
+        || s.contains("Only direction was set, no permissions")
+        || s.contains("Invalid netmask specified in")
+        || s.contains("Cannot resolve -whitebind address")
+        || s.contains("Need to specify a port with -whitebind")
     {
         if s.contains("Duplicate binding configuration") {
             eprintln!("Error: Duplicate binding configuration");

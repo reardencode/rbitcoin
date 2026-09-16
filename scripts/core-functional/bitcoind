@@ -59,6 +59,8 @@ FORWARD_FLAGS = frozenset(
         "testactivationheight",
         "persistmempool",
         "whitelist",
+        "whitelistrelay",
+        "whitelistforcerelay",
         "blocksonly",
         "minrelaytxfee",
         "mempoolexpiry",
@@ -153,55 +155,16 @@ def inbound_from_maxconnections(total: int) -> int:
     return max(1, int(total) - 11)
 
 
-def whitelist_node_args(spec: str) -> list[str]:
-    """Core `-whitelist=` bits → `--trusted` / `--always-relay` / `--relay`."""
-    if "@" in spec:
-        head = spec.split("@", 1)[0]
-    else:
-        bits = {
-            p.strip().lower()
-            for p in spec.replace("+", ",").split(",")
-            if p.strip()
-        }
-        known = {
-            "noban",
-            "relay",
-            "forcerelay",
-            "mempool",
-            "download",
-            "addr",
-            "in",
-            "all",
-        }
-        head = spec if bits and bits <= known else "noban,relay"
-    out: list[str] = []
-    seen: set[str] = set()
-    for part in head.replace("+", ",").split(","):
-        p = part.strip().lower()
-        flag = {
-            "noban": "--trusted",
-            "forcerelay": "--always-relay",
-            "relay": "--relay",
-            "all": None,
-        }.get(p)
-        if p == "all":
-            for f in ("--trusted", "--always-relay", "--relay"):
-                if f not in seen:
-                    seen.add(f)
-                    out.append(f)
-            continue
-        if flag and flag not in seen:
-            seen.add(flag)
-            out.append(flag)
-    return out
-
-
 CORE_TO_NODE = {
     "persistmempool": "persist-mempool",
     "blocksonly": "blocks-only",
     "peertimeout": "peer-timeout",
     "minimumchainwork": "min-chain-work",
     "maxtipage": "max-tip-age",
+    "whitelist": "net-permission",
+    "whitebind": "net-permission-bind",
+    "whitelistrelay": "whitelist-relay",
+    "whitelistforcerelay": "whitelist-forcerelay",
 }
 
 
@@ -215,8 +178,6 @@ def node_args(key: str, val: str | None) -> list[str]:
         except ValueError:
             return [f"--max-inbound={val}"]
         return [f"--max-inbound={n}"]
-    if key == "whitelist":
-        return whitelist_node_args(val or "")
     if key == "uacomment":
         return [f"--ua-comment={val or ''}"]
     name = CORE_TO_NODE.get(key, key)
@@ -243,9 +204,14 @@ def read_conf(path: Path) -> dict[str, str]:
 
 def read_conf_binds(path: Path) -> list[str]:
     """Repeatable `bind=` lines (TestNode extra_conf `bind=127.0.0.1`)."""
+    return read_conf_keys(path, "bind")
+
+
+def read_conf_keys(path: Path, key: str) -> list[str]:
     out: list[str] = []
     if not path.is_file():
         return out
+    want = key.lower()
     for raw in path.read_text().splitlines():
         line = raw.split("#", 1)[0].strip()
         if not line or line.startswith("["):
@@ -253,9 +219,43 @@ def read_conf_binds(path: Path) -> list[str]:
         if "=" not in line:
             continue
         k, v = line.split("=", 1)
-        if k.strip().lower() == "bind":
+        if k.strip().lower() == want:
             out.append(v.strip())
     return out
+
+
+def check_whitebind_addr(val: str) -> None:
+    bind = val.rsplit("@", 1)[-1].split("=", 1)[0]
+    if "/" in bind:
+        print(f"Error: Cannot resolve -whitebind address: '{bind}'", file=sys.stderr)
+        raise SystemExit(1)
+    if ":" not in bind:
+        print(f"Error: Need to specify a port with -whitebind: '{bind}'", file=sys.stderr)
+        raise SystemExit(1)
+    _host, _, port_s = bind.rpartition(":")
+    try:
+        port = int(port_s)
+    except ValueError:
+        print(f"Error: Cannot resolve -whitebind address: '{bind}'", file=sys.stderr)
+        raise SystemExit(1)
+    if port == 0:
+        print(f"Error: Need to specify a port with -whitebind: '{bind}'", file=sys.stderr)
+        raise SystemExit(1)
+
+
+def apply_whitebind(
+    val: str,
+    binds: list[tuple[str, int | None, bool]],
+    extra_node_args: list[str],
+) -> None:
+    check_whitebind_addr(val)
+    extra_node_args.extend(node_args("whitebind", val))
+    hostport = val.rsplit("@", 1)[-1]
+    host, bport, onion = _parse_bind(hostport)
+    binds.append((host, bport, onion))
+    perms = val.rsplit("@", 1)[0] if "@" in val else ""
+    wl = f"{perms}@{host}" if perms else host
+    extra_node_args.extend(node_args("whitelist", wl))
 
 
 def listen_targets(
@@ -382,6 +382,8 @@ def translate(
     wipe_mempool = False
     blocksdir_arg: Path | None = None
     argv_binds: list[tuple[str, int | None, bool]] = []
+    listen_off = False
+    whitebind_vals: list[str] = []
     i = 1
     while i < len(argv):
         a = argv[i]
@@ -454,15 +456,11 @@ def translate(
             if not onion and bport is not None:
                 p2pport = str(bport)
         elif key == "whitebind" and val:
-            # Core `-whitebind=[perms@]HOST[:PORT]`. Permissions are whitelist;
-            # the socket is a listen (feature_bind_extra duplicate-bind).
+            whitebind_vals.append(val)
             hostport = val.rsplit("@", 1)[-1]
-            host, bport, onion = _parse_bind(hostport)
-            argv_binds.append((host, bport, onion))
+            _h, bport, onion = _parse_bind(hostport)
             if not onion and bport is not None:
                 p2pport = str(bport)
-            perms = val.rsplit("@", 1)[0] if "@" in val else "noban"
-            extra_node_args.append(forward_flag("whitelist", f"{perms}@{hostport}"))
         elif key == "regtest":
             network = "regtest"
         elif key == "uacomment":
@@ -487,6 +485,9 @@ def translate(
             if val is not None and str(val).lower() in ("0", "false", "off", "no"):
                 wipe_mempool = True
             extra_node_args.extend(node_args(key, val))
+        elif key == "listen":
+            v = "1" if val is None else str(val).lower()
+            listen_off = v in ("0", "false", "off", "no")
         elif key in IGNORE_FLAGS:
             pass
         elif key in FORWARD_FLAGS:
@@ -518,7 +519,25 @@ def translate(
         p2pport = parse_port(conf.get("port") or "18444", "-port")
 
     conf_binds = [_parse_bind(v) for v in read_conf_binds(datadir / "bitcoin.conf")]
+    for v in read_conf_keys(datadir / "bitcoin.conf", "whitebind"):
+        if not v:
+            continue
+        whitebind_vals.append(v)
+        hostport = v.rsplit("@", 1)[-1]
+        _h, bport, onion = _parse_bind(hostport)
+        if p2pport is None and not onion and bport is not None:
+            p2pport = str(bport)
     binds = conf_binds + argv_binds
+
+    if listen_off and (binds or whitebind_vals):
+        print(
+            "Error: Cannot set -bind or -whitebind together with -listen=0",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    for v in whitebind_vals:
+        apply_whitebind(v, binds, extra_node_args)
 
     node_dir = datadir / network
     node_dir.mkdir(parents=True, exist_ok=True)

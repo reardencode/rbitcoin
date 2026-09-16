@@ -141,7 +141,7 @@ OUTX="$("$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
   -proxy=127.0.0.1:1 -deprecatedrpc=startingheight \
   2>/dev/null)" || OUTX=""
 if printf '%s' "$OUTX" | grep -q -- "--testactivationheight=csv@102" \
-  && printf '%s' "$OUTX" | grep -q -- "--trusted" \
+  && printf '%s' "$OUTX" | grep -q -- "--net-permission=noban@127.0.0.1" \
   && printf '%s' "$OUTX" | grep -q -- "--limitclustercount=10" \
   && ! printf '%s' "$OUTX" | grep -q -- "permitbaremultisig" \
   && printf '%s' "$OUTX" | grep -q -- "--max-inbound=1" \
@@ -218,14 +218,13 @@ fi
 
 OUTWL="$("$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
   -whitelist=noban,relay,forcerelay@127.0.0.1 2>/dev/null)" || OUTWL=""
-if printf '%s' "$OUTWL" | grep -q -- '--trusted' \
-  && printf '%s' "$OUTWL" | grep -q -- '--relay' \
-  && printf '%s' "$OUTWL" | grep -q -- '--always-relay' \
-  && ! printf '%s' "$OUTWL" | grep -q -- whitelist; then
-  echo "ok - whitelist bits map to --trusted/--relay/--always-relay"
+if printf '%s' "$OUTWL" | grep -q -- '--net-permission=noban,relay,forcerelay@127.0.0.1' \
+  && ! printf '%s' "$OUTWL" | grep -q -- '--whitelist' \
+  && ! printf '%s' "$OUTWL" | grep -q -- whitelist=; then
+  echo "ok - whitelist maps to --net-permission"
   PASS=$((PASS + 1))
 else
-  echo "not ok - whitelist bits map (got: $OUTWL)"
+  echo "not ok - whitelist maps to --net-permission (got: $OUTWL)"
   FAIL=$((FAIL + 1))
 fi
 
@@ -356,15 +355,60 @@ assert_fail_msg "bind+whitebind same addr InitError" "Error: Duplicate binding c
   env RBITCOIN_NODE="$FAKE" "$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
   -bind=127.0.0.1:11012 -whitebind=noban@127.0.0.1:11012
 
-# whitebind is a listen (+ whitelist).
+assert_fail_msg "whitebind CIDR InitError" "Error: Cannot resolve -whitebind address" \
+  env RBITCOIN_NODE="$FAKE" "$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
+  -whitebind=noban@127.0.0.1/10
+assert_fail_msg "whitebind missing port InitError" "Error: Need to specify a port with -whitebind" \
+  env RBITCOIN_NODE="$FAKE" "$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
+  -whitebind=noban@127.0.0.1
+assert_fail_msg "listen=0 with bind InitError" "Error: Cannot set -bind or -whitebind together with -listen=0" \
+  env RBITCOIN_NODE="$FAKE" "$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
+  -whitebind=noban@127.0.0.1 -bind=127.0.0.1 -listen=0
+
+# whitebind is a listen (+ whitelist) and is forwarded for node InitError.
 OUT_WB="$("$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
   -whitebind=noban@127.0.0.1:18558 2>/dev/null)" || OUT_WB=""
 if printf '%s' "$OUT_WB" | grep -q -- "--listen 127.0.0.1:18558" \
-  && printf '%s' "$OUT_WB" | grep -q -- "--whitelist=noban@127.0.0.1:18558"; then
-  echo "ok - whitebind maps to listen+whitelist"
+  && printf '%s' "$OUT_WB" | grep -q -- "--net-permission=noban@127.0.0.1" \
+  && printf '%s' "$OUT_WB" | grep -q -- "--net-permission-bind=noban@127.0.0.1:18558"; then
+  echo "ok - whitebind maps to listen+net-permission"
   PASS=$((PASS + 1))
 else
-  echo "not ok - whitebind maps to listen+whitelist (got: $OUT_WB)"
+  echo "not ok - whitebind maps to listen+net-permission (got: $OUT_WB)"
+  FAIL=$((FAIL + 1))
+fi
+
+# Conf `whitebind=` (TestNode replace_in_config) must listen even when the
+# leftover bind is onion-only (`p2p_permissions.py`).
+WB_CONF="$WORKDIR/wb-conf"
+mkdir -p "$WB_CONF"
+cat >"$WB_CONF/bitcoin.conf" <<'EOF'
+regtest=1
+[regtest]
+port=11001
+rpcport=16001
+whitebind=bloomfilter,forcerelay@127.0.0.1:11001
+bind=127.0.0.1:21001=onion
+EOF
+OUT_WBC="$("$SHIM" --print-cmd -datadir="$WB_CONF" -regtest 2>/dev/null)" || OUT_WBC=""
+if printf '%s' "$OUT_WBC" | grep -q -- "--listen 127.0.0.1:11001" \
+  && printf '%s' "$OUT_WBC" | grep -q -- "--listen 127.0.0.1:21001" \
+  && printf '%s' "$OUT_WBC" | grep -q -- "--net-permission-bind=bloomfilter,forcerelay@127.0.0.1:11001"; then
+  echo "ok - conf whitebind+onion bind both listen"
+  PASS=$((PASS + 1))
+else
+  echo "not ok - conf whitebind+onion bind both listen (got: $OUT_WBC)"
+  FAIL=$((FAIL + 1))
+fi
+
+OUT_WR="$("$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
+  -whitelist=127.0.0.1 -whitelistrelay=0 2>/dev/null)" || OUT_WR=""
+if printf '%s' "$OUT_WR" | grep -q -- "--net-permission=127.0.0.1" \
+  && printf '%s' "$OUT_WR" | grep -q -- "--whitelist-relay=0"; then
+  echo "ok - whitelistrelay maps to --whitelist-relay"
+  PASS=$((PASS + 1))
+else
+  echo "not ok - whitelistrelay maps to --whitelist-relay (got: $OUT_WR)"
   FAIL=$((FAIL + 1))
 fi
 

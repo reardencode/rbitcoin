@@ -3227,7 +3227,10 @@ fn getpeerinfo_lists_registered_session() {
     assert_eq!(arr[0]["relaytxes"], true);
     assert_eq!(arr[0]["permissions"], json!([]));
     assert!(arr[0].get("mapped_as").is_none());
-    hub.set_relay_perm(true);
+    let mut t = rbitcoin_net::NetPermTable::default();
+    let g = rbitcoin_net::parse_whitelist("relay,out@127.0.0.1").unwrap();
+    t.whitelist.push(g);
+    hub.set_net_perms(t);
     let r = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
     assert_eq!(r.as_array().unwrap()[0]["permissions"], json!(["relay"]));
     assert_eq!(arr[0]["addr"], "127.0.0.1:18444");

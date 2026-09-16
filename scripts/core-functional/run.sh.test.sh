@@ -200,6 +200,8 @@ assert_stdout "real inventory --list includes p2p_block_sync" "p2p_block_sync.py
   "$RUN" --list
 assert_stdout "real inventory --list includes feature_framework_miniwallet" "feature_framework_miniwallet.py" \
   "$RUN" --list
+assert_stdout "real inventory --list includes p2p_permissions" "p2p_permissions.py" \
+  "$RUN" --list
 assert_fail_msg "real inventory skip refused" "not in run set: feature_help.py" \
   "$RUN" --dry-run feature_help.py
 assert_fail_msg "real inventory skip refused" "not in run set: wallet_basic.py" \
@@ -210,6 +212,7 @@ if printf '%s' "$DRY_REAL" | grep -q 'feature_uacomment.py' \
   && printf '%s' "$DRY_REAL" | grep -q 'rpc_named_arguments.py' \
   && printf '%s' "$DRY_REAL" | grep -q 'mempool_spend_coinbase.py' \
   && printf '%s' "$DRY_REAL" | grep -q 'p2p_block_sync.py' \
+  && printf '%s' "$DRY_REAL" | grep -q 'p2p_permissions.py' \
   && printf '%s' "$DRY_REAL" | grep -q -- '--v2transport' \
   && printf '%s' "$DRY_REAL" | grep -q -- '--keepcache'; then
   echo "ok - real inventory dry-run production-green set"

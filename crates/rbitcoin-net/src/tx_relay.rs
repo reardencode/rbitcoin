@@ -415,6 +415,8 @@ pub struct MempoolHub {
     recent: Mutex<std::collections::VecDeque<RecentAccept>>,
     /// Recently confirmed txid/wtxid for INV AlreadyHave.
     recent_confirmed: Mutex<RecentConfirmed>,
+    /// Core `m_lazy_recent_rejects` (wtxid). Forcerelay second-send skips ATMP.
+    recent_rejects: Mutex<HashSet<Wtxid>>,
     /// Recently confirmed package feerates (sat/kvB) for N=1 sanity clip.
     confirm_feerate_memory: Mutex<std::collections::VecDeque<u64>>,
     /// Per-block p10 of confirmed package feerates (sat/kvB), newest last.
@@ -546,6 +548,7 @@ impl MempoolHub {
                 MEMPOOL_RECENT_CAP,
             )),
             recent_confirmed: Mutex::new(RecentConfirmed::new()),
+            recent_rejects: Mutex::new(HashSet::new()),
             confirm_feerate_memory: Mutex::new(std::collections::VecDeque::with_capacity(64)),
             block_p10_history: Mutex::new(std::collections::VecDeque::with_capacity(1008)),
             fee_flow: Mutex::new(FeeFlowMeter::new(Instant::now())),
@@ -1219,6 +1222,24 @@ impl MempoolHub {
         }
     }
 
+    fn note_recent_reject(&self, wtxid: Wtxid) {
+        let Ok(mut g) = self.recent_rejects.lock() else {
+            return;
+        };
+        if g.len() >= 4_096 {
+            g.clear();
+        }
+        g.insert(wtxid);
+    }
+
+    /// Session TX filter: never parks. Busy lock → `false` (re-ATMP).
+    pub fn try_recent_reject(&self, wtxid: &Wtxid) -> bool {
+        self.recent_rejects
+            .try_lock()
+            .ok()
+            .is_some_and(|g| g.contains(wtxid))
+    }
+
     /// Confirmed tip snapshot for mempool structural checks (height + BIP113 MTP).
     fn chain_tip_ctx(&self) -> ChainTipCtx {
         use rbitcoin_consensus::median_time_past;
@@ -1487,6 +1508,15 @@ impl MempoolHub {
     }
 
     fn note_if_accept_failure(&self, tx: &Transaction, e: &AcceptError) {
+        let soft = matches!(
+            e,
+            AcceptError::Duplicate(_)
+                | AcceptError::Orphaned { .. }
+                | AcceptError::Policy("mempool full")
+        );
+        if !soft {
+            self.note_recent_reject(tx.compute_wtxid());
+        }
         if let Some(rec) = rbitcoin_mempool::ActiveMempool::accept_failure_record(tx, e) {
             let mut g = self.lock_write();
             g.apply_accept_failure(tx, rec);
