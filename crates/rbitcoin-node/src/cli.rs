@@ -46,10 +46,11 @@ where
     [--max-outbound N] [--max-inbound N] \\\n\
     [--mempool-size-mb N] \\\n\
     [--testactivationheight name@height] [--persist-mempool[=0|1]] [--trusted] [--always-relay] [--relay] \\\n\
+    [--net-permission SPEC] [--net-permission-bind SPEC] [--whitelist-relay[=0|1]] [--whitelist-forcerelay[=0|1]] \\\n\
     [--blocks-only] [--prefillcompact[=0|1]] [--minrelaytxfee BTC] \\\n\
     [--limitclustercount N] [--limitclustersize KVB] [--peer-timeout SECS] \\\n\
     [--externalip IP] \\\n\
-    [--min-chain-work HEX] [--max-tip-age SECS] \\\n\
+    [--min-chain-work HEX] [--max-tip-age SECS] [--checkblocks N] [--blocksdir PATH] \\\n\
     [--max-run-secs N] [--log-level LEVEL] [--api-log PATH] [--asmap PATH] [--ua-comment STR] \\\n\
     [--no-seeds] [--smoke] [--inhibit-suspend]\n\n\
 Networks: mainnet|testnet|signet|regtest\n\
@@ -59,9 +60,12 @@ API log: --api-log PATH writes one JSON line per Electrum/Esplora/RPC call (also
 Asmap: --asmap PATH loads a Core ip_asn.dat (relative to datadir). Unset tries {{datadir}}/ip_asn.dat.\n\
 Milestone: skip script/sig checks at/below HEIGHT.\n\
   Defaults: mainnet 840000, signet 2000000, testnet 2500000, regtest 0. Use 0 for full scripts.\n\
+Checkblocks: --checkblocks N revalidates the last N confirmed heights on open (default 6; 0 = all).\n\
+Blocksdir: --blocksdir PATH exclusive-locks PATH in addition to datadir (Core -blocksdir analog).\n\
 Mempool: --mempool-size-mb (default ~300 MiB weight budget).\n\
 Peers: --max-outbound (default 16 live download), --max-inbound (default 125).\n\
   --trusted / --always-relay / --relay are inbound permission knobs (not Core -whitelist).\n\
+  --net-permission / --net-permission-bind are Core -whitelist / -whitebind specs (functional shim).\n\
 Scripthash: --shindex (default off) builds Class B for Electrum/Esplora; both require it.\n\
   --max-sh-creates N refuses Electrum/Esplora joins with more than N creates (0 = unlimited).\n\
   --esplora-block-template enables GET /block-template (GBT template JSON; default off).\n\
@@ -260,7 +264,11 @@ where
                 }
             }
             Err(e) => {
-                error!("{e}");
+                match &e {
+                    crate::error::NodeError::FutureTip => eprintln!("{e}"),
+                    crate::error::NodeError::Locked(_) => eprintln!("Error: {e}"),
+                    _ => error!("{e}"),
+                }
                 ExitCode::FAILURE
             }
         }
@@ -275,10 +283,10 @@ where
         let code = match rt.block_on(run_p2p(config)) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                if matches!(e, crate::error::NodeError::FutureTip) {
-                    eprintln!("{e}");
-                } else {
-                    error!("{e}");
+                match &e {
+                    crate::error::NodeError::FutureTip => eprintln!("{e}"),
+                    crate::error::NodeError::Locked(_) => eprintln!("Error: {e}"),
+                    _ => error!("{e}"),
                 }
                 ExitCode::FAILURE
             }
@@ -321,6 +329,8 @@ fn is_bool_key(key: &str) -> bool {
             | "prefillcompact"
             | "prefill_compact"
             | "persist_mempool"
+            | "whitelist_relay"
+            | "whitelist_forcerelay"
             | "no_seeds"
             | "inhibit_suspend"
             | "inhibitsuspend"
@@ -388,8 +398,18 @@ fn cli_apply_err(e: crate::error::NodeError) -> ExitCode {
     if s.contains("peer-timeout must be a positive integer")
         || s.contains("Invalid minimum work")
         || s.contains("must be hexadecimal")
+        || s.contains("Duplicate binding configuration")
+        || s.contains("Invalid P2P permission")
+        || s.contains("Only direction was set, no permissions")
+        || s.contains("Invalid netmask specified in")
+        || s.contains("Cannot resolve -whitebind address")
+        || s.contains("Need to specify a port with -whitebind")
     {
-        eprintln!("Error: {e}");
+        if s.contains("Duplicate binding configuration") {
+            eprintln!("Error: Duplicate binding configuration");
+        } else {
+            eprintln!("Error: {e}");
+        }
         ExitCode::from(1)
     } else {
         eprintln!("error: {e}");
@@ -451,6 +471,25 @@ mod tests {
             Ok(OperatorArgs::Ready { config, .. }) => config,
             other => panic!("expected assembled config, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn checkblocks_cli_parses_core_zero_and_negative() {
+        let omitted = ready_config(["rbitcoin-node"]);
+        assert_eq!(omitted.check_blocks, None);
+        assert_eq!(
+            omitted.check_blocks_window(),
+            rbitcoin_store::VERIFY_TIP_BLOCKS
+        );
+        let six = ready_config(["rbitcoin-node", "--checkblocks=6"]);
+        assert_eq!(six.check_blocks, Some(6));
+        assert_eq!(six.check_blocks_window(), 6);
+        let all = ready_config(["rbitcoin-node", "--checkblocks", "0"]);
+        assert_eq!(all.check_blocks, Some(0));
+        assert_eq!(all.check_blocks_window(), 0);
+        let neg = ready_config(["rbitcoin-node", "--checkblocks=-1"]);
+        assert_eq!(neg.check_blocks, Some(-1));
+        assert_eq!(neg.check_blocks_window(), 0);
     }
 
     #[test]

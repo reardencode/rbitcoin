@@ -24,6 +24,8 @@ pub enum NodeError {
         source: std::io::Error,
     },
     Store(StoreError),
+    /// Exclusive datadir / blocksdir flock is held by another process.
+    Locked(PathBuf),
 }
 
 impl fmt::Display for NodeError {
@@ -36,6 +38,7 @@ impl fmt::Display for NodeError {
                 write!(f, "datadir error at {}: {source}", path.display())
             }
             NodeError::Store(e) => write!(f, "{e}"),
+            NodeError::Locked(p) => write!(f, "{}", crate::lock::lock_busy_msg(p)),
         }
     }
 }
@@ -46,7 +49,7 @@ impl std::error::Error for NodeError {
             NodeError::Network(e) => Some(e),
             NodeError::Datadir { source, .. } => Some(source),
             NodeError::Store(e) => Some(e),
-            NodeError::Config(_) | NodeError::FutureTip => None,
+            NodeError::Config(_) | NodeError::FutureTip | NodeError::Locked(_) => None,
         }
     }
 }
@@ -104,6 +107,10 @@ mod tests {
         assert!(format!("{store}").contains("x"));
         // StoreError itself is the source for NodeError::Store.
         assert!(store.source().is_some());
+
+        let locked = NodeError::Locked(PathBuf::from("/dd"));
+        assert!(format!("{locked}").contains("Cannot obtain a lock on directory /dd"));
+        assert!(locked.source().is_none());
     }
 
     #[test]

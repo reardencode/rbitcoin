@@ -30,8 +30,8 @@ python3 scripts/core-functional/check_inventory.py \
 `run` names, with `--v2transport`. A `skip` or unknown name fails with
 `not in run set` / `unknown test` (we do not `--exclude` every skip —
 Core exits if an exclude is not in the current test list).
-`--list` prints `run` names (first-green CLI/UA/echo plus MiniWallet
-mempool and inbound block-sync scripts). `--dry-run` prints the command and writes `config.ini`
+`--list` prints `run` names (production P2P / mempool / buried-activation /
+shipped RPC). `--dry-run` prints the command and writes `config.ini`
 (wallet/zmq/ipc off) without starting a node. Default `cargo test`
 never calls this.
 
@@ -42,7 +42,8 @@ never calls this.
 `Error:` lines (UA / init) are copied to the shim stderr so TestNode’s
 clean-stop check matches Core. Unknown Core flags fail parse. The shim maps
 Core names onto kebab `rbitcoin-node` flags (`-maxconnections` → `--max-inbound`
-as `N−11`, `-whitelist=noban` → `--trusted`, `-blocksonly` → `--blocks-only`,
+as `N−11`, `-whitelist` → `--net-permission`, `-whitebind` → `--net-permission-bind`,
+`-blocksonly` → `--blocks-only`,
 `-minimumchainwork` → `--min-chain-work`, …). The operator CLI does not accept
 those Core aliases.
 
@@ -92,10 +93,19 @@ inventory checker only reads `[[test]]` rows and ignores `[release]`.
 A file on disk (or in `v31.1-tests.txt`) that is missing from the inventory,
 or an inventory row with no file, **fails the checker**.
 
-`run` means an **unmodified** Core script is green against rbitcoin. Flip
-to `run` only in the PR that makes that script pass. First green pair:
-`feature_help.py` (shim `-h`/`-version`/`-fakearg`) and
-`feature_uacomment.py` (`getnetworkinfo.subversion` BIP14 parens).
+`run` means an **unmodified** Core script is green against rbitcoin **and**
+exercises node/P2P/RPC production (confirm, mempool, archive reconstruct,
+listen, or a shipped RPC). Flip to `run` only in the PR that makes that
+script pass. Wallet / `createrawtransaction` / `signrawtransactionwithkey` /
+`createmultisig` on the proxy are MiniWallet-class **tooling**: allowed when
+the asserts then hit `sendrawtransaction` / `generate*` / P2P. Do **not**
+`run` a script whose asserts are only shim argv, dummy `blk*.dat`, fabricated
+`Bound to` lines, vendored `rpcauth.py`, or Core decode/`validateaddress`
+dialect the node does not ship.
+
+First production-green pair (historical): `feature_uacomment.py`
+(`getnetworkinfo.subversion` BIP14 parens) and `rpc_uptime.py` (`uptime` /
+`setmocktime`).
 
 ## Skip reasons
 
@@ -136,10 +146,25 @@ lists as done, but whose official script still fails on dialect, stay
 | `rpc_help.py` | `rpc-dialect` | `help` shipped; Core categories / converthelp |
 | `rpc_packages.py` | `rpc-dialect` | `submitpackage` shipped; script field zoo |
 | `rpc_rawtransaction.py` | `rpc-dialect` | Class A always indexes; remaining type-check needles |
-| `rpc_validateaddress.py` | `rpc-dialect` | node happy-path subset; proxy owns Core error text / `error_locations` |
+| `rpc_decodescript.py` | `rpc-dialect` | node decode subset; no p2sh/segwit wrap, `desc`, Core asm |
+| `rpc_validateaddress.py` | `rpc-dialect` | node happy-path subset (`isvalid` only) |
+| `rpc_invalid_address_message.py` | `rpc-dialect` | same; no `error` / `error_locations` |
 | `mempool_persist.py` | `rpc-dialect` | our `{datadir}/mempool/` analog; not Core `mempool.dat` |
 
 `rpc_getblockfrompeer.py` stays `rpc-missing` (method not found).
+
+Shim-only scripts that used to be `run` stay skip: `feature_help.py`
+(`harness`), `tool_rpcauth.py` (`no-tool`), `feature_blocksdir.py`
+(`no-prune`), `feature_dirsymlinks.py` stays skip (`core-internal`). Dummy `blk00000.dat`
+still exists so `rpc_getblockstats.py`'s rename-file needle can run; the rest
+of that script is `submitblock` + archive `getblockstats`. `feature_port.py`
+is `run`: `-bind`/`-port` become `--listen` on those sockets.
+`feature_filelock.py` is `run`: the node exclusive-locks datadir and
+`{datadir}/blocks` (and `--blocksdir`). `rpc_orphans.py` is `run`: hidden
+`getorphantxs` plus orphan announcers / `EraseForPeer`. `p2p_permissions.py`
+is `run`: Core `NetPermissions` on `-whitelist`/`-whitebind`, per-peer
+`getpeerinfo.permissions`, 0-value spendable `dust`, and forcerelay
+recent-rejects.
 
 ## CI
 

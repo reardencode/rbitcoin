@@ -105,7 +105,7 @@ Per-method notes, auth, and the shindex matrix live in
 | Coin / MiniWallet (`gettxout`, `scantxoutset` `raw(HEX)`) | done (Class A unspent walk — not a coins-DB) |
 | Index / tips (`getindexinfo`, `getchaintips`, `waitforblock*`) | done (`txindex` = Class A reconstruct) |
 | Fee (`estimatesmartfee`) | done (**10-minute inclusion** — not Core historical) |
-| Decode (`decoderawtransaction`, `decodescript`, `validateaddress`) | done (node subset; Core-functional scripts still hit the harness proxy) |
+| Decode (`decoderawtransaction`, `decodescript`, `validateaddress`) | done (node subset; official Core dialect scripts stay `rpc-dialect`) |
 | Regtest `generatetoaddress` / `generatetodescriptor` / `generateblock` / `generate` / `submitblock` / `setmocktime` | harness (regtest only except `submitblock`) |
 | `invalidateblock` / `reconsiderblock` / `preciousblock` | done |
 | Mining template (`getblocktemplate`, `getmininginfo`, `prioritisetransaction`, `getmempoolcluster`) | done (no stratum / BIP9 testdummy / wallet keys) |

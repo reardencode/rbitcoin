@@ -3132,6 +3132,135 @@ fn parked_orphan_tx_is_not_logged_as_reject() {
     });
 }
 
+/// Core `m_lazy_recent_rejects`: a second forcerelay send of a rejected tx
+/// logs `Not relaying non-mempool` instead of ATMP again (`p2p_permissions`).
+#[test]
+fn forcerelay_recent_reject_is_not_relayed() {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::consensus::encode::serialize;
+    use bitcoin::script::ScriptBuf;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{Amount, Network, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use tokio::runtime::Builder;
+
+    fn frame_for(msg: NetworkMessage) -> FramedMessage {
+        use bitcoin::p2p::message::RawNetworkMessage;
+        let magic = Magic::from(Network::Regtest);
+        let raw = RawNetworkMessage::new(magic, msg);
+        let full = serialize(&raw);
+        let command: [u8; 12] = full[4..16].try_into().unwrap();
+        let payload = full[24..].to_vec();
+        FramedMessage {
+            magic,
+            command,
+            payload,
+        }
+    }
+
+    let coinbase = Transaction {
+        version: TxVersion::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::from_bytes(vec![0x00, 0x01]),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(50),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let txid = coinbase.compute_txid();
+    let wtxid = coinbase.compute_wtxid();
+
+    let rt = Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("forcerelay-reject");
+        hub.ensure_genesis().unwrap();
+        let t = hub.tip_header().unwrap().time;
+        hub.clock.set_mock(i64::from(t) + 1);
+        let mp = crate::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
+        mp.set_relay_enabled(true);
+        assert!(hub.attach_mempool(mp).is_ok());
+
+        let peers = crate::peers::PeerHub::new();
+        let mut table = crate::net_permissions::NetPermTable::default();
+        table
+            .whitelist
+            .push(crate::net_permissions::parse_whitelist("forcerelay@127.0.0.1").unwrap());
+        peers.set_net_perms(table);
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+        let ver = VersionMessage {
+            version: 70016,
+            services: ServiceFlags::NETWORK,
+            timestamp: 0,
+            receiver: Address::new(&addr, ServiceFlags::NONE),
+            sender: Address::new(&addr, ServiceFlags::NONE),
+            nonce: 1,
+            user_agent: "/rbitcoin:test/".into(),
+            start_height: 0,
+            relay: true,
+        };
+        let sess = peers.register(addr, addr, &ver, true, crate::peers::PeerConnType::Inbound);
+        assert!(sess.has_net_perm("forcerelay"));
+
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        let mut follow = PeerFollowState {
+            wants_headers: false,
+            wtxid_relay: false,
+            send_cmpct: false,
+            cmpct_version: 2u32,
+            pending_headers: HashMap::new(),
+            pending_blocks: PendingBlocks::new(),
+            pending_cmpct: HashMap::new(),
+            from_this_peer: CappedSet::new(),
+            requested_blocks: HashSet::new(),
+            ban_score: 0u32,
+        };
+
+        rbitcoin_log::capture_logs(true);
+        handle_peer_frame(
+            frame_for(NetworkMessage::Tx(coinbase.clone())),
+            &hub,
+            &out_tx,
+            &mut follow,
+            Some(sess.as_ref()),
+        )
+        .await
+        .unwrap();
+        let first = rbitcoin_log::take_logs();
+        rbitcoin_log::capture_logs(false);
+        assert!(
+            first.iter().any(|(_, m)| m.contains(&format!(
+                "{txid} (wtxid={wtxid}) from peer=0 was not accepted: coinbase"
+            ))),
+            "first reject must log ATMP, got {first:?}"
+        );
+
+        rbitcoin_log::capture_logs(true);
+        handle_peer_frame(
+            frame_for(NetworkMessage::Tx(coinbase)),
+            &hub,
+            &out_tx,
+            &mut follow,
+            Some(sess.as_ref()),
+        )
+        .await
+        .unwrap();
+        let second = rbitcoin_log::take_logs();
+        rbitcoin_log::capture_logs(false);
+        assert!(
+            second.iter().any(|(_, m)| m.contains(&format!(
+                "Not relaying non-mempool transaction {txid} (wtxid={wtxid}) from forcerelay peer=0"
+            ))),
+            "second forcerelay send must skip ATMP, got {second:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    });
+}
+
 /// Production P2P runs on `tokio-rt-worker`. Parking must not take the mempool
 /// inner lock on that thread (reader panics, ping/block-sync stall).
 #[test]

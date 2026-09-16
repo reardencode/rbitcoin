@@ -2507,7 +2507,11 @@ fn on_inv(
                 }
                 if relay {
                     if let Some(mp) = hub.mempool() {
-                        if !mp.try_contains(txid) {
+                        if mp.try_contains(txid) {
+                            if let Some(s) = session {
+                                let _ = mp.add_orphan_announcer(txid, s.id);
+                            }
+                        } else {
                             want.push(Inventory::WitnessTransaction(*txid));
                             inv_tx_n = inv_tx_n.saturating_add(1);
                         }
@@ -2520,7 +2524,11 @@ fn on_inv(
                 }
                 if relay {
                     if let Some(mp) = hub.mempool() {
-                        if !mp.try_contains_wtxid(wtxid) {
+                        if mp.try_contains_wtxid(wtxid) {
+                            if let Some(s) = session {
+                                let _ = mp.add_orphan_announcer_wtxid(wtxid, s.id);
+                            }
+                        } else {
                             want.push(Inventory::WTx(*wtxid));
                             inv_tx_n = inv_tx_n.saturating_add(1);
                         }
@@ -3133,8 +3141,30 @@ async fn on_tx(
             || session.is_some_and(|s| s.peer_hub().is_some_and(|ph| ph.is_relay_perm()))
         {
             let txid = tx.compute_txid();
+            let wtxid = tx.compute_wtxid();
             follow.from_this_peer.insert(txid, FROM_THIS_PEER_CAP);
-            match mp.accept_tx_async(tx.clone()).await {
+            if mp.try_recent_reject(&wtxid) {
+                if session.is_some_and(|s| s.has_net_perm("forcerelay")) {
+                    let id = session.map(|s| s.id).unwrap_or(0);
+                    if mp.try_contains(&txid) {
+                        rbitcoin_log::info!(
+                            "Force relaying tx {txid} (wtxid={wtxid}) from peer={id}"
+                        );
+                        if let Some(ph) = session.and_then(|s| s.peer_hub()) {
+                            force_announce_txid(hub, ph.as_ref(), txid);
+                        }
+                    } else {
+                        rbitcoin_log::info!(
+                            "Not relaying non-mempool transaction {txid} (wtxid={wtxid}) from forcerelay peer={id}"
+                        );
+                    }
+                }
+                return Ok(());
+            }
+            match mp
+                .accept_tx_from_async(tx.clone(), session.map(|s| s.id))
+                .await
+            {
                 Ok(r) => {
                     if let Some(s) = session {
                         s.note_last_transaction();
@@ -3157,7 +3187,20 @@ async fn on_tx(
                     }
                 }
                 Err(e) => match tx_accept_log(&e) {
-                    TxAcceptLog::Silent => {}
+                    TxAcceptLog::Silent => {
+                        if let rbitcoin_mempool::AcceptError::Duplicate(tid) = &e {
+                            if session.is_some_and(|s| s.has_net_perm("forcerelay")) {
+                                let id = session.map(|s| s.id).unwrap_or(0);
+                                rbitcoin_log::info!(
+                                    "Force relaying tx {tid} (wtxid={}) from peer={id}",
+                                    tx.compute_wtxid()
+                                );
+                                if let Some(ph) = session.and_then(|s| s.peer_hub()) {
+                                    force_announce_txid(hub, ph.as_ref(), *tid);
+                                }
+                            }
+                        }
+                    }
                     TxAcceptLog::Park(missing) => {
                         rbitcoin_log::debug!("txrelay: park {txid}");
                         queue_orphan_parent_getdata(mp, missing, out_tx)?;
@@ -3168,8 +3211,9 @@ async fn on_tx(
                     TxAcceptLog::Reject => {
                         let id = session.map(|s| s.id).unwrap_or(0);
                         rbitcoin_log::info!(
-                            "{txid} (wtxid={}) from peer={id} was not accepted: {e}",
-                            tx.compute_wtxid()
+                            "{txid} (wtxid={}) from peer={id} was not accepted: {}",
+                            tx.compute_wtxid(),
+                            e.mempool_reject_reason()
                         );
                         rbitcoin_log::debug!("txrelay: reject {txid}: {e}");
                     }

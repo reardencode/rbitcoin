@@ -815,6 +815,7 @@ name = "rbitcoin-node"
 version = "0.6.99"
 dependencies = [
  "bitcoin",
+ "libc",
  "mimalloc",
  "rbitcoin-consensus",
  "rbitcoin-electrum",

@@ -663,4 +663,36 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[tokio::test]
+    async fn add_listen_binds_a_second_socket() {
+        let _live = live_p2p_lock().await;
+        let dir = std::env::temp_dir().join(format!(
+            "rbitcoin-p2p-extra-listen-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let q = rbitcoin_query::Query::open_or_create_tiny(&dir).unwrap();
+        let mut node = P2PNode::start(
+            "127.0.0.1:0".parse().unwrap(),
+            q,
+            ChainParams::regtest(),
+            Milestone::NONE,
+        )
+        .await
+        .unwrap();
+        let extra = node
+            .add_listen("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        assert_ne!(extra, node.local_addr);
+        assert!(std::net::TcpStream::connect(extra).is_ok());
+        node.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Core utility RPCs for the test-only proxy. Not rbitcoin-node product.
 
-Uses Bitcoin Core's test_framework (same tree the functional suite imports).
+Create/sign/multisig/derive stay registered (never a node product).
+`decoderawtransaction` / `decodescript` / `validateaddress` helpers exist
+for dialect unit tests; the live proxy forwards those names to the node.
 """
 
 from __future__ import annotations
@@ -156,9 +158,8 @@ def register_utility(proxy) -> None:
         "combinerawtransaction",
         lambda p: combinerawtransaction(p, lookup=_lookup),
     )
-    proxy.register("decoderawtransaction", decoderawtransaction)
-    proxy.register("decodescript", decodescript)
-    proxy.register("validateaddress", validateaddress)
+    # decoderawtransaction / decodescript / validateaddress stay on the node
+    # (subset). Official Core dialect scripts are inventory skip rpc-dialect.
     proxy.register("deriveaddresses", deriveaddresses)
 
 

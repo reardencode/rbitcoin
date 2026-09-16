@@ -25,7 +25,7 @@ Best-chain views ignore uncommitted Class C state:
 On open (in order):
 
 1. Soft `store/tip_seal` (if present): clamp confirmed tip that advanced without a complete barrier seal.
-2. **Tip-window revalidate** (Core `checkblocks=6`): first drop any trailing null `confirmed[]` slots (HWM ahead of last real tip), then the last six confirmed heights — `prev_fk`/hash chain, `header_txs` range bounds, merkle root from `txid.body`, and those six runs all-strong. On failure: clear bad Class A association and/or shrink tip to last good height, rebuild the fence, flush confirmed.
+2. **Tip-window revalidate** (Core `-checkblocks`, default 6, `0` = all): first drop any trailing null `confirmed[]` slots (HWM ahead of last real tip), then the last N confirmed heights — `prev_fk`/hash chain, `header_txs` range bounds, merkle root from `txid.body`, and those N runs all-strong. On failure: clear bad Class A association and/or shrink tip to last good height, rebuild the fence, flush confirmed.
 3. One `repair_class_c_above_tip`: unstrong bits **not on the fence** via complement ranges (holes + suffix until a zero page). Does **not** walk every set bit. Logs `class_c repair cleared= ranges= ms=` even when zero.
 
 In-process completion-session recover (IBD write/lookup/load/scripts and tip connect) consumes a 1000-height credit and requeues; it does **not** run `repair_class_c_above_tip` (lookup would race the write thread's strong-before-fence window). Abandoned leftover strong is the same as kill-9 and is repaired on the next open. Does **not** truncate Class A. Tip stays the commit point.

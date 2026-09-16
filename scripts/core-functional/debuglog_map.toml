@@ -12,8 +12,8 @@ match = 'rpc: listening on 127\.0\.0\.1:(\d+)'
 emit = ['Bound to 127.0.0.1:{1}']
 
 [[rule]]
-match = 'rbitcoin-node listening on 127\.0\.0\.1:(\d+)'
-emit = ['Bound to 127.0.0.1:{1}']
+match = 'rbitcoin-node listening on (\S+)'
+emit = ['Bound to {1}']
 
 [[rule]]
 match = 'getblocktxn with out-of-bounds tx indices'
@@ -158,3 +158,7 @@ emit = ['UpdateTip: new best={1} height={2} version={3} tx={4} date={5} progress
 [[rule]]
 match = 'Store tip time is more than two hours ahead of the node clock'
 emit = ['The block database contains a block which appears to be from the future.']
+
+[[rule]]
+match = 'Cannot obtain a lock on directory (.+)\. rbitcoin is probably already running'
+emit = ['Error: Cannot obtain a lock on directory {1}. Bitcoin Core is probably already running.']

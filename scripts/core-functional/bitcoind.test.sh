@@ -77,7 +77,8 @@ if printf '%s' "$OUT" | grep -q -- "--network regtest" \
   && printf '%s' "$OUT" | grep -q -- "--datadir ${DATADIR}/regtest" \
   && printf '%s' "$OUT" | grep -q -- "--rpc-listen 127.0.0.1:28443" \
   && printf '%s' "$OUT" | grep -q -- "--esplora-listen 127.0.0.1:38443" \
-  && printf '%s' "$OUT" | grep -q -- "--listen 127.0.0.1:18444" \
+  && printf '%s' "$OUT" | grep -q -- "--listen 0.0.0.0:18444" \
+  && printf '%s' "$OUT" | grep -q -- "--listen 127.0.0.1:18445" \
   && printf '%s' "$OUT" | grep -q -- "--no-seeds" \
   && printf '%s' "$OUT" | grep -q -- "--log-level debug"; then
   echo "ok - print-cmd maps conf + -debug"
@@ -103,7 +104,8 @@ OUT2="$("$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
   -uacomment=testnode0 2>/dev/null)"
 if printf '%s' "$OUT2" | grep -q -- "--rpc-listen 127.0.0.1:29111" \
   && printf '%s' "$OUT2" | grep -q -- "--esplora-listen 127.0.0.1:39111" \
-  && printf '%s' "$OUT2" | grep -q -- "--listen 127.0.0.1:19222"; then
+  && printf '%s' "$OUT2" | grep -q -- "--listen 0.0.0.0:19222" \
+  && printf '%s' "$OUT2" | grep -q -- "--listen 127.0.0.1:19223"; then
   echo "ok - CLI ports override conf"
   PASS=$((PASS + 1))
 else
@@ -114,7 +116,7 @@ fi
 # -bind=0.0.0.0:P supplies the P2P port; onion binds become extra --listen.
 OUT3="$("$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
   -bind=0.0.0.0:19333 -bind=127.0.0.1:19444=onion 2>/dev/null)"
-if printf '%s' "$OUT3" | grep -q -- "--listen 127.0.0.1:19333" \
+if printf '%s' "$OUT3" | grep -q -- "--listen 0.0.0.0:19333" \
   && printf '%s' "$OUT3" | grep -q -- "--listen 127.0.0.1:19444"; then
   echo "ok - bind port becomes listen (onion as extra listen)"
   PASS=$((PASS + 1))
@@ -135,10 +137,11 @@ OUTX="$("$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
   -testactivationheight=csv@102 -permitbaremultisig=0 -maxconnections=8 \
   -minimumchainwork=0x65 -limitancestorcount=5 -blockversion=1337 -mocktime=1296688602 \
   -maxtipage=3600 -blockmintxfee=0.00000001 -externalip=42.42.42.42 \
+  -checkblocks=0 \
   -proxy=127.0.0.1:1 -deprecatedrpc=startingheight \
   2>/dev/null)" || OUTX=""
 if printf '%s' "$OUTX" | grep -q -- "--testactivationheight=csv@102" \
-  && printf '%s' "$OUTX" | grep -q -- "--trusted" \
+  && printf '%s' "$OUTX" | grep -q -- "--net-permission=noban@127.0.0.1" \
   && printf '%s' "$OUTX" | grep -q -- "--limitclustercount=10" \
   && ! printf '%s' "$OUTX" | grep -q -- "permitbaremultisig" \
   && printf '%s' "$OUTX" | grep -q -- "--max-inbound=1" \
@@ -148,6 +151,7 @@ if printf '%s' "$OUTX" | grep -q -- "--testactivationheight=csv@102" \
   && printf '%s' "$OUTX" | grep -q -- "--max-tip-age=3600" \
   && printf '%s' "$OUTX" | grep -q -- "--blockmintxfee=0.00000001" \
   && printf '%s' "$OUTX" | grep -q -- "--externalip=42.42.42.42" \
+  && printf '%s' "$OUTX" | grep -q -- "--checkblocks=0" \
   && ! printf '%s' "$OUTX" | grep -q -- "--whitelist" \
   && ! printf '%s' "$OUTX" | grep -q -- "--maxconnections" \
   && ! printf '%s' "$OUTX" | grep -q -- "limitancestor" \
@@ -214,14 +218,13 @@ fi
 
 OUTWL="$("$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
   -whitelist=noban,relay,forcerelay@127.0.0.1 2>/dev/null)" || OUTWL=""
-if printf '%s' "$OUTWL" | grep -q -- '--trusted' \
-  && printf '%s' "$OUTWL" | grep -q -- '--relay' \
-  && printf '%s' "$OUTWL" | grep -q -- '--always-relay' \
-  && ! printf '%s' "$OUTWL" | grep -q -- whitelist; then
-  echo "ok - whitelist bits map to --trusted/--relay/--always-relay"
+if printf '%s' "$OUTWL" | grep -q -- '--net-permission=noban,relay,forcerelay@127.0.0.1' \
+  && ! printf '%s' "$OUTWL" | grep -q -- '--whitelist' \
+  && ! printf '%s' "$OUTWL" | grep -q -- whitelist=; then
+  echo "ok - whitelist maps to --net-permission"
   PASS=$((PASS + 1))
 else
-  echo "not ok - whitelist bits map (got: $OUTWL)"
+  echo "not ok - whitelist maps to --net-permission (got: $OUTWL)"
   FAIL=$((FAIL + 1))
 fi
 
@@ -277,8 +280,9 @@ BD="$WORKDIR/ext-blocks"
 mkdir -p "$BD"
 BD_NODE="$WORKDIR/bd-node"
 mkdir -p "$BD_NODE"
-if RBITCOIN_NODE="$FAKE" "$SHIM" --print-cmd -datadir="$BD_NODE" -regtest \
-  -blocksdir="$BD" >/dev/null \
+if RBITCOIN_NODE="$FAKE" OUT_BD="$("$SHIM" --print-cmd -datadir="$BD_NODE" -regtest \
+  -blocksdir="$BD" 2>/dev/null)" \
+  && printf '%s' "$OUT_BD" | grep -q -- "--blocksdir=${BD}/regtest/blocks" \
   && [[ -f "$BD/regtest/blocks/blk00000.dat" ]] \
   && [[ -d "$BD_NODE/regtest/blocks/index" ]]; then
   echo "ok - blocksdir layout + default blocks/index"
@@ -299,13 +303,28 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-# feature_port.py: -listen is a Core boolean (ignored; we always listen).
+# feature_port.py: -listen is a Core boolean; bare -port binds 0.0.0.0 + onion port+1.
 OUT_LISTEN="$("$SHIM" --print-cmd -datadir="$DATADIR" -regtest -listen -port=18555 2>/dev/null)" || OUT_LISTEN=""
-if printf '%s' "$OUT_LISTEN" | grep -q -- "--listen 127.0.0.1:18555"; then
+if printf '%s' "$OUT_LISTEN" | grep -q -- "--listen 0.0.0.0:18555" \
+  && printf '%s' "$OUT_LISTEN" | grep -q -- "--listen 127.0.0.1:18556"; then
   echo "ok - -listen accepted with -port"
   PASS=$((PASS + 1))
 else
   echo "not ok - -listen accepted with -port (got: $OUT_LISTEN)"
+  FAIL=$((FAIL + 1))
+fi
+
+# TestNode extra_conf bind=127.0.0.1 (no port) combines with -port.
+BIND_DD="$WORKDIR/conf-bind-local"
+mkdir -p "$BIND_DD"
+printf 'regtest=1\nbind=127.0.0.1\nport=18444\nrpcport=18443\n' >"$BIND_DD/bitcoin.conf"
+OUT_LOCAL="$("$SHIM" --print-cmd -datadir="$BIND_DD" -regtest 2>/dev/null)" || OUT_LOCAL=""
+if printf '%s' "$OUT_LOCAL" | grep -q -- "--listen 127.0.0.1:18444" \
+  && ! printf '%s' "$OUT_LOCAL" | grep -q -- "--listen 0.0.0.0:"; then
+  echo "ok - conf bind=127.0.0.1 stays loopback"
+  PASS=$((PASS + 1))
+else
+  echo "not ok - conf bind=127.0.0.1 stays loopback (got: $OUT_LOCAL)"
   FAIL=$((FAIL + 1))
 fi
 
@@ -315,6 +334,83 @@ assert_fail_msg "port 0 invalid" "Error: Invalid port specified in -port: '0'" \
   env RBITCOIN_NODE="$FAKE" "$SHIM" --print-cmd -datadir="$DATADIR" -regtest -listen -port=0
 assert_fail_msg "port +18444 invalid" "Error: Invalid port specified in -port: '+18444'" \
   env RBITCOIN_NODE="$FAKE" "$SHIM" --print-cmd -datadir="$DATADIR" -regtest -listen -port=+18444
+
+# Onion-only -bind must not also take 0.0.0.0 (feature_bind_extra node0).
+OUT_ONION="$("$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
+  -bind=127.0.0.1:18557=onion 2>/dev/null)" || OUT_ONION=""
+if printf '%s' "$OUT_ONION" | grep -q -- "--listen 127.0.0.1:18557" \
+  && ! printf '%s' "$OUT_ONION" | grep -q -- "--listen 0.0.0.0:"; then
+  echo "ok - onion-only bind does not add 0.0.0.0"
+  PASS=$((PASS + 1))
+else
+  echo "not ok - onion-only bind does not add 0.0.0.0 (got: $OUT_ONION)"
+  FAIL=$((FAIL + 1))
+fi
+
+# Duplicate -bind / -whitebind on the same socket is Core InitError.
+assert_fail_msg "duplicate bind InitError" "Error: Duplicate binding configuration" \
+  env RBITCOIN_NODE="$FAKE" "$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
+  -bind=127.0.0.1:11012 -bind=127.0.0.1:11012
+assert_fail_msg "bind+whitebind same addr InitError" "Error: Duplicate binding configuration" \
+  env RBITCOIN_NODE="$FAKE" "$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
+  -bind=127.0.0.1:11012 -whitebind=noban@127.0.0.1:11012
+
+assert_fail_msg "whitebind CIDR InitError" "Error: Cannot resolve -whitebind address" \
+  env RBITCOIN_NODE="$FAKE" "$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
+  -whitebind=noban@127.0.0.1/10
+assert_fail_msg "whitebind missing port InitError" "Error: Need to specify a port with -whitebind" \
+  env RBITCOIN_NODE="$FAKE" "$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
+  -whitebind=noban@127.0.0.1
+assert_fail_msg "listen=0 with bind InitError" "Error: Cannot set -bind or -whitebind together with -listen=0" \
+  env RBITCOIN_NODE="$FAKE" "$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
+  -whitebind=noban@127.0.0.1 -bind=127.0.0.1 -listen=0
+
+# whitebind is a listen (+ whitelist) and is forwarded for node InitError.
+OUT_WB="$("$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
+  -whitebind=noban@127.0.0.1:18558 2>/dev/null)" || OUT_WB=""
+if printf '%s' "$OUT_WB" | grep -q -- "--listen 127.0.0.1:18558" \
+  && printf '%s' "$OUT_WB" | grep -q -- "--net-permission=noban@127.0.0.1" \
+  && printf '%s' "$OUT_WB" | grep -q -- "--net-permission-bind=noban@127.0.0.1:18558"; then
+  echo "ok - whitebind maps to listen+net-permission"
+  PASS=$((PASS + 1))
+else
+  echo "not ok - whitebind maps to listen+net-permission (got: $OUT_WB)"
+  FAIL=$((FAIL + 1))
+fi
+
+# Conf `whitebind=` (TestNode replace_in_config) must listen even when the
+# leftover bind is onion-only (`p2p_permissions.py`).
+WB_CONF="$WORKDIR/wb-conf"
+mkdir -p "$WB_CONF"
+cat >"$WB_CONF/bitcoin.conf" <<'EOF'
+regtest=1
+[regtest]
+port=11001
+rpcport=16001
+whitebind=bloomfilter,forcerelay@127.0.0.1:11001
+bind=127.0.0.1:21001=onion
+EOF
+OUT_WBC="$("$SHIM" --print-cmd -datadir="$WB_CONF" -regtest 2>/dev/null)" || OUT_WBC=""
+if printf '%s' "$OUT_WBC" | grep -q -- "--listen 127.0.0.1:11001" \
+  && printf '%s' "$OUT_WBC" | grep -q -- "--listen 127.0.0.1:21001" \
+  && printf '%s' "$OUT_WBC" | grep -q -- "--net-permission-bind=bloomfilter,forcerelay@127.0.0.1:11001"; then
+  echo "ok - conf whitebind+onion bind both listen"
+  PASS=$((PASS + 1))
+else
+  echo "not ok - conf whitebind+onion bind both listen (got: $OUT_WBC)"
+  FAIL=$((FAIL + 1))
+fi
+
+OUT_WR="$("$SHIM" --print-cmd -datadir="$DATADIR" -regtest \
+  -whitelist=127.0.0.1 -whitelistrelay=0 2>/dev/null)" || OUT_WR=""
+if printf '%s' "$OUT_WR" | grep -q -- "--net-permission=127.0.0.1" \
+  && printf '%s' "$OUT_WR" | grep -q -- "--whitelist-relay=0"; then
+  echo "ok - whitelistrelay maps to --whitelist-relay"
+  PASS=$((PASS + 1))
+else
+  echo "not ok - whitelistrelay maps to --whitelist-relay (got: $OUT_WR)"
+  FAIL=$((FAIL + 1))
+fi
 
 CONF_PORT="$WORKDIR/conf-port-bad"
 mkdir -p "$CONF_PORT"
@@ -346,6 +442,55 @@ elif printf '%s' "$INIT_OUT" | grep -q -- "Error: peertimeout must be a positive
 else
   echo "not ok - peertimeout InitError maps to Core (got: $INIT_OUT)"
   FAIL=$((FAIL + 1))
+fi
+
+# feature_filelock.py starts a second node with the live node's -datadir (same
+# rpcport in bitcoin.conf). InitError must win over proxy bind.
+FAKE_LOCK="$WORKDIR/rbitcoin-node-locked"
+printf '%s\n' '#!/bin/sh' \
+  'echo "Error: Cannot obtain a lock on directory /tmp/dd. rbitcoin is probably already running."' \
+  'exit 1' >"$FAKE_LOCK"
+chmod +x "$FAKE_LOCK"
+LOCK_DD="$WORKDIR/filelock-rpcport"
+mkdir -p "$LOCK_DD"
+HOLD_PORT_FILE="$WORKDIR/hold.port"
+python3 - "$HOLD_PORT_FILE" <<'PY' &
+import socket, sys, time
+path = sys.argv[1]
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+open(path, "w").write(str(s.getsockname()[1]))
+time.sleep(60)
+PY
+HOLD_PY=$!
+HOLD_PORT=""
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  if [ -s "$HOLD_PORT_FILE" ]; then
+    HOLD_PORT="$(cat "$HOLD_PORT_FILE")"
+    break
+  fi
+  sleep 0.05
+done
+if [ -z "$HOLD_PORT" ]; then
+  echo "not ok - lock InitError before proxy bind (no hold port)"
+  FAIL=$((FAIL + 1))
+  kill "$HOLD_PY" 2>/dev/null || true
+else
+  printf 'regtest=1\nrpcport=%s\n' "$HOLD_PORT" >"$LOCK_DD/bitcoin.conf"
+  LOCK_OUT=""
+  if LOCK_OUT="$(RBITCOIN_NODE="$FAKE_LOCK" "$SHIM" -datadir="$LOCK_DD" -regtest 2>&1)"; then
+    echo "not ok - lock InitError before proxy bind (expected failure)"
+    FAIL=$((FAIL + 1))
+  elif printf '%s' "$LOCK_OUT" | grep -q -- "Error: Cannot obtain a lock on directory /tmp/dd. Bitcoin Core is probably already running." \
+    && ! printf '%s' "$LOCK_OUT" | grep -q -- "Address already in use"; then
+    echo "ok - lock InitError before proxy bind"
+    PASS=$((PASS + 1))
+  else
+    echo "not ok - lock InitError before proxy bind (got: $LOCK_OUT)"
+    FAIL=$((FAIL + 1))
+  fi
+  kill "$HOLD_PY" 2>/dev/null || true
+  wait "$HOLD_PY" 2>/dev/null || true
 fi
 
 FAKE_MCW="$WORKDIR/rbitcoin-node-minchainwork"

@@ -19,6 +19,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 from map_debuglog import apply_line, load_rules, map_error_stderr
@@ -59,6 +60,8 @@ FORWARD_FLAGS = frozenset(
         "testactivationheight",
         "persistmempool",
         "whitelist",
+        "whitelistrelay",
+        "whitelistforcerelay",
         "blocksonly",
         "minrelaytxfee",
         "mempoolexpiry",
@@ -75,6 +78,7 @@ FORWARD_FLAGS = frozenset(
         "blockversion",
         "blockmintxfee",
         "rpcworkqueue",
+        "checkblocks",
     }
 )
 
@@ -127,7 +131,7 @@ IGNORE_FLAGS = frozenset(
         "maxuploadtarget",
         "rest",
         "discover",
-        # Core boolean; we always --listen on 127.0.0.1 (feature_port.py).
+        # Core boolean; listen sockets come from -bind / -port.
         "listen",
         "listenonion",
         "dnsseed",
@@ -140,8 +144,6 @@ IGNORE_FLAGS = frozenset(
         "printpriority",
         "addresstype",
         "checkblockindex",
-        # Verify-last-N-blocks; we have no Core-style checkblocks pass.
-        "checkblocks",
         # Stop-at-height is a later product; ignore so restart after the
         # future-tip check can proceed to the rest of rpc_blockchain.
         "rpcthreads",
@@ -154,55 +156,16 @@ def inbound_from_maxconnections(total: int) -> int:
     return max(1, int(total) - 11)
 
 
-def whitelist_node_args(spec: str) -> list[str]:
-    """Core `-whitelist=` bits → `--trusted` / `--always-relay` / `--relay`."""
-    if "@" in spec:
-        head = spec.split("@", 1)[0]
-    else:
-        bits = {
-            p.strip().lower()
-            for p in spec.replace("+", ",").split(",")
-            if p.strip()
-        }
-        known = {
-            "noban",
-            "relay",
-            "forcerelay",
-            "mempool",
-            "download",
-            "addr",
-            "in",
-            "all",
-        }
-        head = spec if bits and bits <= known else "noban,relay"
-    out: list[str] = []
-    seen: set[str] = set()
-    for part in head.replace("+", ",").split(","):
-        p = part.strip().lower()
-        flag = {
-            "noban": "--trusted",
-            "forcerelay": "--always-relay",
-            "relay": "--relay",
-            "all": None,
-        }.get(p)
-        if p == "all":
-            for f in ("--trusted", "--always-relay", "--relay"):
-                if f not in seen:
-                    seen.add(f)
-                    out.append(f)
-            continue
-        if flag and flag not in seen:
-            seen.add(flag)
-            out.append(flag)
-    return out
-
-
 CORE_TO_NODE = {
     "persistmempool": "persist-mempool",
     "blocksonly": "blocks-only",
     "peertimeout": "peer-timeout",
     "minimumchainwork": "min-chain-work",
     "maxtipage": "max-tip-age",
+    "whitelist": "net-permission",
+    "whitebind": "net-permission-bind",
+    "whitelistrelay": "whitelist-relay",
+    "whitelistforcerelay": "whitelist-forcerelay",
 }
 
 
@@ -216,8 +179,6 @@ def node_args(key: str, val: str | None) -> list[str]:
         except ValueError:
             return [f"--max-inbound={val}"]
         return [f"--max-inbound={n}"]
-    if key == "whitelist":
-        return whitelist_node_args(val or "")
     if key == "uacomment":
         return [f"--ua-comment={val or ''}"]
     name = CORE_TO_NODE.get(key, key)
@@ -240,6 +201,93 @@ def read_conf(path: Path) -> dict[str, str]:
         k, v = line.split("=", 1)
         out[k.strip().lower()] = v.strip()
     return out
+
+
+def read_conf_binds(path: Path) -> list[str]:
+    """Repeatable `bind=` lines (TestNode extra_conf `bind=127.0.0.1`)."""
+    return read_conf_keys(path, "bind")
+
+
+def read_conf_keys(path: Path, key: str) -> list[str]:
+    out: list[str] = []
+    if not path.is_file():
+        return out
+    want = key.lower()
+    for raw in path.read_text().splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or line.startswith("["):
+            continue
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        if k.strip().lower() == want:
+            out.append(v.strip())
+    return out
+
+
+def check_whitebind_addr(val: str) -> None:
+    bind = val.rsplit("@", 1)[-1].split("=", 1)[0]
+    if "/" in bind:
+        print(f"Error: Cannot resolve -whitebind address: '{bind}'", file=sys.stderr)
+        raise SystemExit(1)
+    if ":" not in bind:
+        print(f"Error: Need to specify a port with -whitebind: '{bind}'", file=sys.stderr)
+        raise SystemExit(1)
+    _host, _, port_s = bind.rpartition(":")
+    try:
+        port = int(port_s)
+    except ValueError:
+        print(f"Error: Cannot resolve -whitebind address: '{bind}'", file=sys.stderr)
+        raise SystemExit(1)
+    if port == 0:
+        print(f"Error: Need to specify a port with -whitebind: '{bind}'", file=sys.stderr)
+        raise SystemExit(1)
+
+
+def apply_whitebind(
+    val: str,
+    binds: list[tuple[str, int | None, bool]],
+    extra_node_args: list[str],
+) -> None:
+    check_whitebind_addr(val)
+    extra_node_args.extend(node_args("whitebind", val))
+    hostport = val.rsplit("@", 1)[-1]
+    host, bport, onion = _parse_bind(hostport)
+    binds.append((host, bport, onion))
+    perms = val.rsplit("@", 1)[0] if "@" in val else ""
+    wl = f"{perms}@{host}" if perms else host
+    extra_node_args.extend(node_args("whitelist", wl))
+
+
+def listen_targets(
+    binds: list[tuple[str, int | None, bool]],
+    port_n: int,
+) -> list[str]:
+    """Core `-bind`/`-port` → the sockets we pass as `--listen`."""
+    seen: list[str] = []
+
+    def add(addr: str) -> None:
+        if addr in seen:
+            print("Error: Duplicate binding configuration", file=sys.stderr)
+            raise SystemExit(1)
+        seen.append(addr)
+
+    non_onion = [(h, p) for (h, p, o) in binds if not o]
+    onion = [(h, p) for (h, p, o) in binds if o]
+    if non_onion:
+        for host, bport in non_onion:
+            add(f"{host}:{bport if bport is not None else port_n}")
+    elif not onion:
+        # Bare `-port` (no `-bind`): Core binds 0.0.0.0. Onion-only `-bind=…=onion`
+        # must not also take the default any-addr socket (feature_bind_extra).
+        add(f"0.0.0.0:{port_n}")
+    if onion:
+        for host, bport in onion:
+            h = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+            add(f"{h}:{bport if bport is not None else port_n + 1}")
+    elif not non_onion:
+        add(f"127.0.0.1:{port_n + 1}")
+    return seen
 
 
 def maybe_seed_store(node_dir: Path) -> None:
@@ -322,8 +370,8 @@ def _parse_bind(val: str) -> tuple[str, int | None, bool]:
 
 def translate(
     argv: list[str],
-) -> tuple[list[str], Path, int, Path | None, Path | None, str | None, list[str]]:
-    """Return (node argv, datadir, rpcport, blocksdir, walletdir, wallet, bound_lines)."""
+) -> tuple[list[str], Path, int, Path | None, list[str]]:
+    """Return (node argv, datadir, rpcport, blocksdir, bound_lines)."""
     datadir: Path | None = None
     rpcport: str | None = None
     p2pport: str | None = None
@@ -334,10 +382,9 @@ def translate(
     extra_node_args: list[str] = []
     wipe_mempool = False
     blocksdir_arg: Path | None = None
-    walletdir_arg: Path | None = None
-    wallet_name: str | None = None
-    # Core-shaped bind announcements for debug.log (feature_port.py).
-    binds: list[tuple[str, int | None, bool]] = []
+    argv_binds: list[tuple[str, int | None, bool]] = []
+    listen_off = False
+    whitebind_vals: list[str] = []
     i = 1
     while i < len(argv):
         a = argv[i]
@@ -360,6 +407,7 @@ def translate(
             "rpcport",
             "port",
             "bind",
+            "whitebind",
             "uacomment",
             "loglevel",
             "conf",
@@ -382,6 +430,7 @@ def translate(
             "blocksdir",
             "walletdir",
             "wallet",
+            "checkblocks",
         ):
             i += 1
             if i >= len(argv):
@@ -397,18 +446,20 @@ def translate(
                     file=sys.stderr,
                 )
                 raise SystemExit(1)
-        elif key == "walletdir":
-            walletdir_arg = Path(val or "")
-        elif key == "wallet":
-            wallet_name = val or ""
         elif key == "rpcport":
             rpcport = parse_port(val, "-rpcport")
         elif key == "port":
             p2pport = parse_port(val, "-port")
         elif key == "bind" and val:
             host, bport, onion = _parse_bind(val)
-            binds.append((host, bport, onion))
+            argv_binds.append((host, bport, onion))
             # Non-onion bind with an explicit port supplies the P2P listen port.
+            if not onion and bport is not None:
+                p2pport = str(bport)
+        elif key == "whitebind" and val:
+            whitebind_vals.append(val)
+            hostport = val.rsplit("@", 1)[-1]
+            _h, bport, onion = _parse_bind(hostport)
             if not onion and bport is not None:
                 p2pport = str(bport)
         elif key == "regtest":
@@ -435,6 +486,9 @@ def translate(
             if val is not None and str(val).lower() in ("0", "false", "off", "no"):
                 wipe_mempool = True
             extra_node_args.extend(node_args(key, val))
+        elif key == "listen":
+            v = "1" if val is None else str(val).lower()
+            listen_off = v in ("0", "false", "off", "no")
         elif key in IGNORE_FLAGS:
             pass
         elif key in FORWARD_FLAGS:
@@ -464,6 +518,27 @@ def translate(
         rpcport = parse_port(conf.get("rpcport") or "18443", "-rpcport")
     if p2pport is None:
         p2pport = parse_port(conf.get("port") or "18444", "-port")
+
+    conf_binds = [_parse_bind(v) for v in read_conf_binds(datadir / "bitcoin.conf")]
+    for v in read_conf_keys(datadir / "bitcoin.conf", "whitebind"):
+        if not v:
+            continue
+        whitebind_vals.append(v)
+        hostport = v.rsplit("@", 1)[-1]
+        _h, bport, onion = _parse_bind(hostport)
+        if p2pport is None and not onion and bport is not None:
+            p2pport = str(bport)
+    binds = conf_binds + argv_binds
+
+    if listen_off and (binds or whitebind_vals):
+        print(
+            "Error: Cannot set -bind or -whitebind together with -listen=0",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    for v in whitebind_vals:
+        apply_whitebind(v, binds, extra_node_args)
 
     node_dir = datadir / network
     node_dir.mkdir(parents=True, exist_ok=True)
@@ -497,6 +572,10 @@ def translate(
             bd_blk.write_bytes(b"\x00" * 16)
 
     node = find_node()
+    port_n = int(p2pport)
+    listens = listen_targets(binds, port_n)
+    if not listens:
+        listens = [f"127.0.0.1:{port_n}"]
     cmd = [
         str(node),
         "--network",
@@ -506,78 +585,51 @@ def translate(
         "--rpc-listen",
         f"127.0.0.1:{node_rpc_port(int(rpcport))}",
         "--listen",
-        f"127.0.0.1:{p2pport}",
+        listens[0],
         "--no-seeds",
         "--shindex",
         "--esplora-listen",
         f"127.0.0.1:{esplora_port(int(rpcport))}",
     ]
-    # Core `-bind=host:port=onion` → extra listen sockets (getaddr caching).
-    for host, bport, onion in binds:
-        if not onion or bport is None:
-            continue
-        listen_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
-        extra = f"{listen_host}:{bport}"
-        if extra == f"127.0.0.1:{p2pport}":
-            continue
+    for extra in listens[1:]:
         cmd += ["--listen", extra]
     if log_level:
         cmd += ["--log-level", log_level]
     cmd += extra_node_args
+    if blocksdir_arg is not None:
+        cmd += [f"--blocksdir={blocksdir_arg / network / 'blocks'}"]
 
-    # Core debug.log "Bound to …" announcements (feature_port.py).
-    port_n = int(p2pport)
-    bound_lines: list[str] = []
-    non_onion = [(h, p, o) for (h, p, o) in binds if not o]
-    onion_binds = [(h, p, o) for (h, p, o) in binds if o]
-    if non_onion:
-        for host, bport, _ in non_onion:
-            bound_lines.append(f"Bound to {host}:{bport if bport is not None else port_n}")
-        for host, bport, _ in onion_binds:
-            bound_lines.append(
-                f"Bound to {host}:{bport if bport is not None else port_n + 1}"
-            )
-    else:
-        bound_lines.append(f"Bound to 0.0.0.0:{port_n}")
-        if onion_binds:
-            for host, bport, _ in onion_binds:
-                bound_lines.append(
-                    f"Bound to {host}:{bport if bport is not None else port_n + 1}"
-                )
-        else:
-            bound_lines.append(f"Bound to 127.0.0.1:{port_n + 1}")
-    # Actual node listen (map_debuglog / prior harness expectation).
-    bound_lines.append(f"Bound to 127.0.0.1:{port_n}")
+    bound_lines = [f"Bound to {addr}" for addr in listens]
 
     return (
         cmd,
         node_dir,
         int(rpcport),
         blocksdir_arg,
-        walletdir_arg,
-        wallet_name,
         bound_lines,
     )
 
 
-def _try_dir_lock(path: Path, label: Path) -> object | None:
-    """Exclusive flock; keep the file open. None → already locked (Core msg)."""
-    import fcntl
-
-    path.mkdir(parents=True, exist_ok=True)
-    lock_path = path / ".lock"
-    fh = open(lock_path, "a+", encoding="utf-8")
+def emit_child_init_errors(log_path: Path, prior: int, rules: list) -> None:
+    """Copy Core-shaped InitError needles from the node's debug.log to stderr."""
     try:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        fh.close()
+        with log_path.open("rb") as f:
+            f.seek(prior)
+            text = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        text = ""
+    errs = [ln for ln in text.splitlines() if ln.startswith("Error:")]
+    # Core InitError FULL_TEXT for a tip more than 2h ahead of -mocktime.
+    if "appears to be from the future" in text:
         print(
-            f"Error: Cannot obtain a lock on directory {label}. "
-            f"Bitcoin Core is probably already running.",
+            "The block database contains a block which appears to be from the future."
+            " This may be due to your computer's date and time being set incorrectly."
+            " Only rebuild the block database if you are sure that your computer's date and time are correct.\n"
+            "Please restart with -reindex or -reindex-chainstate to recover.",
             file=sys.stderr,
         )
-        return None
-    return fh
+    elif errs:
+        print("\n".join(map_error_stderr(errs, rules)), file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -587,9 +639,7 @@ def main(argv: list[str] | None = None) -> int:
         cmd,
         node_dir,
         public_rpc,
-        blocksdir_arg,
-        walletdir_arg,
-        wallet_name,
+        _blocksdir_arg,
         bound_lines,
     ) = translate(argv)
     pid_path = node_dir / "bitcoind.pid"
@@ -597,41 +647,6 @@ def main(argv: list[str] | None = None) -> int:
         print(" ".join(cmd))
         print(f"pidfile {pid_path}", file=sys.stderr)
         return 0
-    # Core datadir / blocksdir lock (feature_filelock.py).
-    datadir_lock = _try_dir_lock(node_dir, node_dir)
-    if datadir_lock is None:
-        return 1
-    # Default blocks path; -blocksdir=X → X/<network>/blocks (Core regtest shape).
-    blocks_root = (
-        (blocksdir_arg / "regtest" / "blocks")
-        if blocksdir_arg is not None
-        else (node_dir / "blocks")
-    )
-    blocks_lock = _try_dir_lock(blocks_root, blocks_root)
-    if blocks_lock is None:
-        datadir_lock.close()
-        return 1
-    # Wallet exclusive lock (feature_filelock.py). Opening another node's
-    # walletdir (or a locked wallet path) must refuse with Core's SQLite text.
-    if walletdir_arg is not None and wallet_name is not None:
-        wpath = walletdir_arg / wallet_name
-        foreign = False
-        try:
-            foreign = not walletdir_arg.resolve().is_relative_to(node_dir.resolve())
-        except (OSError, ValueError, AttributeError):
-            foreign = True
-        wlock = _try_dir_lock(wpath, wpath)
-        if foreign or wlock is None:
-            print(
-                "Error: SQLiteDatabase: Unable to obtain an exclusive lock on the database, "
-                "is it being used by another instance of Bitcoin Core?",
-                file=sys.stderr,
-            )
-            datadir_lock.close()
-            blocks_lock.close()
-            if wlock is not None:
-                wlock.close()
-            return 1
     pid_path.write_text(f"{os.getpid()}\n")
     # TestNode tails this process's stderr and requires it empty on a clean
     # stop. Core writes logs to debug.log (printtoconsole=0). Keep that shape:
@@ -675,6 +690,23 @@ def main(argv: list[str] | None = None) -> int:
         line = text.strip()
         return line or None
 
+    # Wait for cookie or InitError exit before binding the RPC proxy. A second
+    # TestNode with `-datadir` of a live node shares that node's rpcport
+    # (`feature_filelock.py`); binding first would traceback Address already
+    # in use instead of the lock InitError.
+    deadline = time.monotonic() + 120
+    while child.poll() is None and not cookie_path.is_file():
+        if time.monotonic() > deadline:
+            break
+        time.sleep(0.05)
+    if child.poll() is not None:
+        pump.join(timeout=2)
+        log_f.close()
+        rc = child.returncode
+        if rc:
+            emit_child_init_errors(log_path, prior, rules)
+        return int(rc) if rc is not None else 1
+
     proxy = RpcProxy(("127.0.0.1", public_rpc), node_url, _cookie)
     register_utility(proxy)
     register_wallet(proxy, f"http://127.0.0.1:{esplora_port(public_rpc)}")
@@ -717,24 +749,7 @@ def main(argv: list[str] | None = None) -> int:
     pump.join(timeout=2)
     log_f.close()
     if rc:
-        try:
-            with log_path.open("rb") as f:
-                f.seek(prior)
-                text = f.read().decode("utf-8", errors="replace")
-        except OSError:
-            text = ""
-        errs = [ln for ln in text.splitlines() if ln.startswith("Error:")]
-        # Core InitError FULL_TEXT for a tip more than 2h ahead of -mocktime.
-        if "appears to be from the future" in text:
-            print(
-                "The block database contains a block which appears to be from the future."
-                " This may be due to your computer's date and time being set incorrectly."
-                " Only rebuild the block database if you are sure that your computer's date and time are correct.\n"
-                "Please restart with -reindex or -reindex-chainstate to recover.",
-                file=sys.stderr,
-            )
-        elif errs:
-            print("\n".join(map_error_stderr(errs, rules)), file=sys.stderr)
+        emit_child_init_errors(log_path, prior, rules)
     return int(rc) if rc is not None else 1
 
 

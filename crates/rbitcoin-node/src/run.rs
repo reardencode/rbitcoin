@@ -30,6 +30,8 @@ pub struct NodeHandle {
     /// Durable cluster mempool (opened in `run_p2p` and attached to `ChainHub`).
     /// Smoke-only `run_node` leaves this `None`.
     pub mempool: Option<std::sync::Arc<MempoolHub>>,
+    /// Exclusive datadir / blocksdir flock (released on drop).
+    _dir_locks: crate::lock::DirLocks,
 }
 
 impl std::fmt::Debug for NodeHandle {
@@ -148,14 +150,19 @@ async fn mempool_blocking<T: Send + 'static>(
     .map_err(|e| NodeError::Config(format!("mempool task: {e}")))
 }
 
-/// Start the node: ensure datadir, open store.
+/// Start the node: ensure datadir, exclusive-lock, open store.
 pub fn run_node(config: NodeConfig) -> Result<NodeHandle, NodeError> {
     config.ensure_datadir()?;
-    let query = Query::open_or_create_layout(config.store_layout())?;
+    let dir_locks = crate::lock::lock_node_dirs(&config)?;
+    let query = Query::open_or_create_layout_checkblocks(
+        config.store_layout(),
+        config.check_blocks_window(),
+    )?;
     Ok(NodeHandle {
         config,
         query,
         mempool: None,
+        _dir_locks: dir_locks,
     })
 }
 
@@ -212,9 +219,15 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     .await
     .map_err(|e| NodeError::Config(format!("p2p start: {e}")))?;
     for extra in &config.listen.p2p_extra {
-        node.add_listen(*extra)
+        let bound = node
+            .add_listen(*extra)
             .await
             .map_err(|e| NodeError::Config(format!("p2p extra listen {extra}: {e}")))?;
+        info!(
+            "rbitcoin-node listening on {} ({})",
+            bound,
+            config.network.as_str()
+        );
     }
     node.hub.set_minimum_chain_work(config.minimum_chain_work);
     if let Some(secs) = config.max_tip_age_secs {
@@ -258,7 +271,32 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         None => None,
     };
     let expiry_hours = config.mempool.expiry_hours;
-    let immediate_relay = config.trusted;
+    let table = config.finalized_net_perms();
+    let table_noban = table
+        .whitelist
+        .iter()
+        .any(|g| g.flags.has(rbitcoin_net::NetPermissionFlags::NOBAN))
+        || table
+            .whitebind
+            .iter()
+            .any(|g| g.flags.has(rbitcoin_net::NetPermissionFlags::NOBAN));
+    let table_relay = table
+        .whitelist
+        .iter()
+        .any(|g| g.flags.has(rbitcoin_net::NetPermissionFlags::RELAY))
+        || table
+            .whitebind
+            .iter()
+            .any(|g| g.flags.has(rbitcoin_net::NetPermissionFlags::RELAY));
+    let table_forcerelay = table
+        .whitelist
+        .iter()
+        .any(|g| g.flags.has(rbitcoin_net::NetPermissionFlags::FORCE_RELAY))
+        || table
+            .whitebind
+            .iter()
+            .any(|g| g.flags.has(rbitcoin_net::NetPermissionFlags::FORCE_RELAY));
+    let immediate_relay = config.trusted || table_noban;
     let hub = Arc::clone(&node.hub);
     let (mempool, mp_gen, mp_live) = tokio::task::spawn_blocking(move || {
         let _g = BlockingRegion::enter();
@@ -282,6 +320,8 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     .await
     .map_err(|e| NodeError::Config(format!("mempool open join: {e}")))?
     .map_err(NodeError::Config)?;
+    node.peers.attach_mempool(&mempool);
+    node.peers.set_net_perms(table.clone());
     if let Some(secs) = config.listen.peer_timeout_secs {
         node.peers.set_peer_timeout_secs(secs);
     }
@@ -293,10 +333,10 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     if immediate_relay {
         node.peers.set_noban(true);
     }
-    if config.relay {
+    if config.relay || table_relay {
         node.peers.set_relay_perm(true);
     }
-    if config.always_relay {
+    if config.always_relay || table_forcerelay {
         node.peers.set_forcerelay_perm(true);
         node.peers.set_relay_perm(true);
     }

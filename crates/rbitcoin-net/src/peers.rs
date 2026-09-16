@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use tokio::sync::mpsc;
 
 /// Session writer payload: application messages or pre-encoded v2 block bytes.
@@ -730,6 +730,14 @@ impl LivePeer {
         self.owner.upgrade()
     }
 
+    pub fn has_net_perm(&self, name: &str) -> bool {
+        self.owner.upgrade().is_some_and(|h| {
+            h.permission_strings(self.addr, self.inbound, self.addrbind)
+                .iter()
+                .any(|p| p == name)
+        })
+    }
+
     pub fn set_inv_gen_floor(&self, floor: u64) {
         self.inv_gen_floor.store(floor, Ordering::Relaxed);
     }
@@ -877,18 +885,11 @@ impl LivePeer {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone(),
-            permissions: {
-                let mut p = Vec::new();
-                if let Some(h) = self.owner.upgrade() {
-                    if h.is_noban() {
-                        p.push("noban".into());
-                    }
-                    if h.is_relay_perm() {
-                        p.push("relay".into());
-                    }
-                }
-                p
-            },
+            permissions: self
+                .owner
+                .upgrade()
+                .map(|h| h.permission_strings(self.addr, self.inbound, self.addrbind))
+                .unwrap_or_default(),
             mapped_as: self.owner.upgrade().and_then(|h| {
                 h.asmap().and_then(|m| {
                     let asn = m.mapped_as(self.addr.ip());
@@ -1007,6 +1008,10 @@ pub struct PeerHub {
     /// P2P listen port used with advertised external IPs.
     listen_port: AtomicU16,
     asmap: Mutex<Option<Arc<crate::asmap::AsMap>>>,
+    /// Tip-mode mempool for Core `EraseForPeer` on disconnect.
+    mempool: Mutex<Option<Weak<crate::tx_relay::MempoolHub>>>,
+    /// Core `-whitelist` / `-whitebind` grants (`getpeerinfo.permissions`).
+    net_perms: Mutex<crate::net_permissions::NetPermTable>,
 }
 
 fn canonical_bind(addr: SocketAddr) -> SocketAddr {
@@ -1077,7 +1082,29 @@ impl PeerHub {
             external_ips: Mutex::new(Vec::new()),
             listen_port: AtomicU16::new(0),
             asmap: Mutex::new(None),
+            mempool: Mutex::new(None),
+            net_perms: Mutex::new(crate::net_permissions::NetPermTable::default()),
         })
+    }
+
+    pub fn attach_mempool(&self, mp: &Arc<crate::tx_relay::MempoolHub>) {
+        *self.mempool.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::downgrade(mp));
+    }
+
+    pub fn set_net_perms(&self, t: crate::net_permissions::NetPermTable) {
+        *self.net_perms.lock().unwrap_or_else(|e| e.into_inner()) = t;
+    }
+
+    pub fn permission_strings(
+        &self,
+        addr: SocketAddr,
+        inbound: bool,
+        bind: SocketAddr,
+    ) -> Vec<String> {
+        self.net_perms
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .strings_for(addr.ip(), inbound, bind)
     }
 
     pub fn set_asmap(&self, m: Option<Arc<crate::asmap::AsMap>>) {
@@ -1599,6 +1626,15 @@ impl PeerHub {
     }
 
     pub fn unregister(&self, id: u64) {
+        if let Some(mp) = self
+            .mempool
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(Weak::upgrade)
+        {
+            mp.erase_orphans_for_peer(id);
+        }
         let removed = self
             .live
             .write()

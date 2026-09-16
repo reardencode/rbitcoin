@@ -189,6 +189,16 @@ impl std::fmt::Display for AcceptError {
     }
 }
 
+impl AcceptError {
+    /// Core debug.log / `was not accepted:` needle (`Policy` is the bare reason).
+    pub fn mempool_reject_reason(&self) -> String {
+        match self {
+            AcceptError::Policy(s) => (*s).to_string(),
+            other => other.to_string(),
+        }
+    }
+}
+
 impl std::error::Error for AcceptError {}
 
 /// Side effects of a recordable accept failure (recent-invalid / extra-compact).
@@ -727,11 +737,24 @@ impl ActiveMempool {
 
     /// Park `tx` waiting on `missing` parent txids (from [`prepare_admit`]).
     pub fn park_orphan(&mut self, tx: &Transaction, missing: BTreeSet<Txid>) -> AcceptError {
+        self.park_orphan_from(tx, missing, None)
+    }
+
+    /// Park with a P2P announcer (`getorphantxs` `from`).
+    pub fn park_orphan_from(
+        &mut self,
+        tx: &Transaction,
+        missing: BTreeSet<Txid>,
+        from: Option<u64>,
+    ) -> AcceptError {
         let txid = tx.compute_txid();
         if self.graph.get(&txid).is_some() {
             return AcceptError::Duplicate(txid);
         }
         if let Some(parked) = self.orphanage.missing_of(&txid).cloned() {
+            if let Some(peer) = from {
+                self.orphanage.add_announcer(&txid, peer);
+            }
             return AcceptError::Orphaned {
                 txid,
                 missing: parked,
@@ -741,7 +764,10 @@ impl ActiveMempool {
         if missing.is_empty() {
             return AcceptError::MissingPrevout(tx.input[0].previous_output);
         }
-        if self.orphanage.insert(tx.clone(), missing.clone()) {
+        if self
+            .orphanage
+            .insert_from(tx.clone(), missing.clone(), from)
+        {
             AcceptError::Orphaned {
                 txid,
                 missing,
@@ -2064,6 +2090,26 @@ mod tests {
         let tx = spend_tx(op, 1);
         let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
         mp.accept_tx(&tx, &utxos, TIP_OK).expect("dust ok");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir = tmp_dir();
+        let (op, _, utxos) = chain_utxo(100_000);
+        let tx = spend_tx(op, 0);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let err = mp.accept_tx(&tx, &utxos, TIP_OK).unwrap_err();
+        assert!(
+            matches!(err, AcceptError::Policy("dust")),
+            "0-value spendable must be dust, got {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir = tmp_dir();
+        let (op, _, utxos) = chain_utxo(100_000);
+        let mut tx = spend_tx(op, 0);
+        tx.output[0].script_pubkey = ScriptBuf::from_bytes(vec![0x6a, 0x01, 0x00]);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        mp.accept_tx(&tx, &utxos, TIP_OK)
+            .expect("0-value OP_RETURN ok");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

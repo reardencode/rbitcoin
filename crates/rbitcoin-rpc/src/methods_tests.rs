@@ -108,6 +108,76 @@ fn help_and_getrpcinfo_list_every_dispatched_method() {
 }
 
 #[test]
+fn getorphantxs_is_hidden_and_lists_parked() {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::script::ScriptBuf;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
+
+    let (ctx, dir) = ctx_empty();
+    let help_all = dispatch(&ctx, "help", vec![]).unwrap();
+    let s = help_all.as_str().unwrap();
+    assert!(
+        !s.lines().any(|l| l == "getorphantxs"),
+        "getorphantxs must stay hidden from help()"
+    );
+    let one = dispatch(&ctx, "help", vec![json!("getorphantxs")]).unwrap();
+    let one_s = one.as_str().unwrap();
+    assert!(one_s.contains("getorphantxs"));
+    assert!(!one_s.contains("unknown command: getorphantxs"));
+
+    let empty = dispatch(&ctx, "getorphantxs", vec![]).unwrap();
+    assert_eq!(empty, json!([]));
+
+    let bool_err = dispatch(&ctx, "getorphantxs", vec![json!(true)]).unwrap_err();
+    assert_eq!(bool_err["code"], ERR_TYPE_ERROR);
+    assert!(bool_err["message"]
+        .as_str()
+        .unwrap()
+        .contains("Verbosity was boolean but only integer allowed"));
+    let bad = dispatch(&ctx, "getorphantxs", vec![json!(-1)]).unwrap_err();
+    assert_eq!(bad["code"], ERR_INVALID_PARAMETER);
+    assert!(bad["message"]
+        .as_str()
+        .unwrap()
+        .contains("Invalid verbosity value -1"));
+
+    let mp = ctx.mempool.as_ref().unwrap();
+    let tx = Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from_byte_array([9u8; 32]),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let err = mp.accept_tx_from(&tx, Some(3)).unwrap_err();
+    assert!(
+        matches!(err, rbitcoin_net::AcceptError::Orphaned { .. }),
+        "{err}"
+    );
+    let ids = dispatch(&ctx, "getorphantxs", vec![]).unwrap();
+    let txid = hash_hex_display(&tx.compute_txid().to_byte_array());
+    assert_eq!(ids, json!([txid]));
+    let v1 = dispatch(&ctx, "getorphantxs", vec![json!(1)]).unwrap();
+    assert_eq!(v1[0]["txid"], json!(txid));
+    assert_eq!(v1[0]["from"], json!([3]));
+    assert!(v1[0].get("hex").is_none());
+    let v2 = dispatch(&ctx, "getorphantxs", vec![json!(2)]).unwrap();
+    assert!(v2[0]["hex"].as_str().unwrap().len() > 20);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn blockchain_empty_store() {
     let (ctx, dir) = ctx_empty();
     let count = dispatch(&ctx, "getblockcount", vec![]).unwrap();
@@ -3157,7 +3227,10 @@ fn getpeerinfo_lists_registered_session() {
     assert_eq!(arr[0]["relaytxes"], true);
     assert_eq!(arr[0]["permissions"], json!([]));
     assert!(arr[0].get("mapped_as").is_none());
-    hub.set_relay_perm(true);
+    let mut t = rbitcoin_net::NetPermTable::default();
+    let g = rbitcoin_net::parse_whitelist("relay,out@127.0.0.1").unwrap();
+    t.whitelist.push(g);
+    hub.set_net_perms(t);
     let r = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
     assert_eq!(r.as_array().unwrap()[0]["permissions"], json!(["relay"]));
     assert_eq!(arr[0]["addr"], "127.0.0.1:18444");

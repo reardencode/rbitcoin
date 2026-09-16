@@ -9,8 +9,9 @@ This is **not** full Core parity: no wallet, no `createrawtransaction` /
 `signrawtransactionwithkey` / `createmultisig` / `sendtoaddress` (those
 live only on the Core-functional test proxy, backed by Esplora).
 `decoderawtransaction` / `decodescript` / `validateaddress` are a **node
-subset** (table below); the functional harness proxy still intercepts those
-names for Core dialect scripts (`rpc_decodescript.py`, `rpc_validateaddress.py`).
+subset** (table below). Official Core dialect scripts (`rpc_decodescript.py`,
+`rpc_validateaddress.py`, `rpc_invalid_address_message.py`) stay inventory
+`rpc-dialect`; the functional harness does not intercept those names.
 `getblocktemplate` / `getmininginfo` are a miner-backend (no stratum, no BIP9
 testdummy). `scantxoutset` supports `raw(script)` via the scripthash
 index (when `--shindex`) or Class A txout + spent. Prefer **Electrum /
@@ -88,6 +89,7 @@ still wait for durable SH when shindex is on.
 | `getnodeaddresses` | Sample from addrman (`count=0` → all). Optional `network` filter. |
 | `addnode` / `disconnectnode` / `addconnection` | All networks. `addnode onetry` / `add` dial; `disconnectnode` by `nodeid` or address |
 | `getmempoolinfo` / `getrawmempool` / `getmempoolentry` | MempoolHub. `maxmempool` is the operator weight budget (`--mempool-size-mb`). `ancestorcount` / `descendantcount` (and size/fee sums) walk the cluster graph. Verbose `fees.{base,modified,ancestor,descendant,chunk}` and `chunkweight` include `prioritisetransaction` deltas; top-level `ancestorfees` / `descendantfees` stay base satoshis. `unbroadcastcount` / `unbroadcast` track `sendrawtransaction` txs until a peer getdata's them. `orphanage.{size,bytes}` is the parked missing-parent side pool (vsize). `permitbaremultisig` is always `true` (Libre has no Core `IsStandard` bare-multisig gate; `--permitbaremultisig` is not a node flag). |
+| `getorphantxs` | Hidden. Verbosity 0 txids, 1 details + `from` peer ids, 2 + hex. Not listed by `help` / `getrpcinfo`. |
 | `getrawtransaction` | Class A + mempool. Optional Core `blockhash` arg is accepted and ignored. Verbose objects share `tx_to_json` with `decoderawtransaction` / `getblock` verbosity 2 (`scriptSig`, `scriptPubKey.type`). |
 | `decoderawtransaction` | All networks. Decode hex. Optional `iswitness`: `false` refuses a BIP141 marker (`-22 TX decode failed`). Extra trailing bytes also `-22`. `scriptSig.asm` is rust-bitcoin, not Core `ScriptToAsmStr` sighash suffixes. Coinbase vin is `txid`/`vout`/`scriptSig` (not Core's `coinbase` key). |
 | `decodescript` | All networks. `asm`, Core-style `type`, `hex`, and `address` when `Address::from_script` succeeds. No `p2sh` wrap, `segwit` wrap, or `desc` / miniscript. |
@@ -124,7 +126,7 @@ still wait for durable SH when shindex is on.
 | Stratum / pool / BIP9 testdummy | `getblocktemplate` / `getmininginfo` / `prioritisetransaction` are a cluster-chunk **selector** ([`COMPAT.md`](../COMPAT.md)). No stratum, no testdummy, no wallet keys |
 | Core `generate*` as a mining product | **Regtest harness only.** `submitblock` is the same receive path as P2P |
 | `combinerawtransaction` / `createrawtransaction` / `signrawtransactionwithkey` / `createmultisig` / `deriveaddresses` | Not implemented (harness proxy only) |
-| Decode Core dialect | Node `decodescript` omits wrap/`desc`; `validateaddress` omits `error_locations`; `decoderawtransaction` asm is rust-bitcoin. Official scripts stay on the proxy. |
+| Decode Core dialect | Node `decodescript` omits wrap/`desc`; `validateaddress` omits `error_locations`; `decoderawtransaction` asm is rust-bitcoin. Official scripts stay `rpc-dialect`. |
 | Full `scantxoutset` / `gettxoutsetinfo` | No UTXO-set coins DB; denserels ≠ chainstate. `raw()` Class A walk is the MiniWallet subset only. |
 | Address history via Core method names | Use Electrum/Esplora with `--shindex` |
 | Exact Core JSON field-for-field | Best-effort |

@@ -55,6 +55,36 @@ before 1.0).
   Disconnect score in P2P logs (not banlist). Native serve/cmpct lines use
   `tx=` (not Hungarian `ntx=`).
 
+- **Core functional `run` is production-only:** skip scripts whose asserts
+  were only the bitcoind shim (`feature_help`, `feature_blocksdir`,
+  `feature_dirsymlinks`, `feature_filelock`, `tool_rpcauth`) or Core
+  decode/`validateaddress` dialect the node does not ship
+  (`rpc_decodescript`, `rpc_invalid_address_message`). Live proxy no longer
+  intercepts `decoderawtransaction` / `decodescript` / `validateaddress`.
+
+- **Core `-bind`/`-port` map to `--listen`:** bare `-port` binds `0.0.0.0`
+  plus onion `127.0.0.1:port+1`; TestNode `bind=127.0.0.1` stays loopback.
+  `Bound to` matches those sockets. `feature_port.py` is `run`.
+
+- **`--checkblocks N`:** Core `-checkblocks` window on store open (default 6;
+  `0` / negative = whole chain). Shim forwards `-checkblocks`.
+
+- **Datadir exclusive lock:** `rbitcoin-node` flocks `{datadir}/.lock` and
+  `{datadir}/blocks/.lock` (plus `--blocksdir`). `feature_filelock.py` is
+  `run`.
+
+- **Hidden `getorphantxs`:** verbosity 0/1/2, `from[]` announcer peer ids,
+  Core `EraseForPeer` on disconnect. Handshake/INV stay off the tokio
+  reactor write lock. `rpc_orphans.py` is `run`.
+
+- **Core `NetPermissions`:** shim `-whitelist` / `-whitebind` → `--net-permission` /
+  `--net-permission-bind` (implicit flags, in/out, `--whitelist-relay` /
+  `--whitelist-forcerelay`). Operator `--trusted` / `--always-relay` / `--relay`
+  stay global inbound knobs. `getpeerinfo.permissions` is per-peer. 0-value
+  spendable outputs are `dust` (Libre still admits 1-sat). Forcerelay
+  recent-rejects skip ATMP on the second send. Conf `whitebind=` listens.
+  `p2p_permissions.py` is `run`.
+
 - **Coverage ratchet is merge-base, not tip of master:** PRs must not lower
   the **displayed 2-decimal** production LCOV percent vs the **highest**
   green-`master` snapshot whose SHA is an ancestor of

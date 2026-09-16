@@ -1129,6 +1129,56 @@ pub(crate) fn gettxspendingprevout(ctx: &RpcContext, params: &RpcParams) -> Resu
     Ok(json!(out))
 }
 
+pub(crate) fn getorphantxs(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
+    params.reject_unknown(&["verbosity"])?;
+    let verbosity = match params.get(0, "verbosity") {
+        None | Some(Value::Null) => 0i64,
+        Some(Value::Bool(_)) => {
+            return Err(rpc_error(
+                ERR_TYPE_ERROR,
+                "Verbosity was boolean but only integer allowed",
+            ));
+        }
+        Some(v) => json_i64(v)
+            .ok_or_else(|| rpc_error(ERR_INVALID_PARAMS, "verbosity must be an integer"))?,
+    };
+    if !(0..=2).contains(&verbosity) {
+        return Err(rpc_error(
+            ERR_INVALID_PARAMETER,
+            format!("Invalid verbosity value {verbosity}"),
+        ));
+    }
+    let Some(mp) = ctx.mempool.as_ref() else {
+        return Ok(json!([]));
+    };
+    let snaps = mp.orphan_snapshot();
+    if verbosity == 0 {
+        let ids: Vec<String> = snaps
+            .iter()
+            .map(|s| hash_hex_display(&s.tx.compute_txid().to_byte_array()))
+            .collect();
+        return Ok(json!(ids));
+    }
+    let mut out = Vec::with_capacity(snaps.len());
+    for s in snaps {
+        let raw = bitcoin::consensus::encode::serialize(&s.tx);
+        let weight = s.tx.weight().to_wu();
+        let mut row = json!({
+            "txid": hash_hex_display(&s.tx.compute_txid().to_byte_array()),
+            "wtxid": hash_hex_display(&s.tx.compute_wtxid().to_byte_array()),
+            "bytes": raw.len(),
+            "vsize": s.tx.vsize(),
+            "weight": weight,
+            "from": s.announcers,
+        });
+        if verbosity == 2 {
+            row["hex"] = json!(bitcoin::consensus::encode::serialize_hex(&s.tx));
+        }
+        out.push(row);
+    }
+    Ok(json!(out))
+}
+
 #[cfg(test)]
 mod fee_look_tests {
     use super::{fold_tx_fee_sat, TxFeeLook};

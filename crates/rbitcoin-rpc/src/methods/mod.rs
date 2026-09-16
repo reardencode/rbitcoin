@@ -417,6 +417,7 @@ pub(crate) fn dispatch_inner(
             getmempoolinfo(ctx)
         }
         "getrawmempool" => getrawmempool(ctx, &params),
+        "getorphantxs" => getorphantxs(ctx, &params),
         "getmempoolentry" => getmempoolentry(ctx, &params),
         "getrawtransaction" => getrawtransaction(ctx, &params),
         "decoderawtransaction" => decoderawtransaction(ctx, &params),
@@ -701,6 +702,10 @@ pub(crate) fn method_help(m: &str) -> String {
         "getpeerinfo" => "getpeerinfo\n\
              Returns data about each connected network node as a json array of objects.\n\
              Valid networks: (ipv4, ipv6, onion, i2p, cjdns, not_publicly_routable)"
+            .into(),
+        "getorphantxs" => "getorphantxs ( verbosity )\n\
+             Shows transactions in the tx orphanage.\n\
+             EXPERIMENTAL warning: this call may be changed in future releases."
             .into(),
         "help" => "help\nhelp ( \"command\" ) — list methods or describe one.".into(),
         "echo" => "echo\necho ( arg0 ... arg9 ) — return arguments as a positional array.".into(),

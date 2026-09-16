@@ -10,6 +10,7 @@ mod eviction;
 mod ibd;
 mod most_work;
 mod msg_decode;
+mod net_permissions;
 mod netgroup;
 mod peer;
 mod peer_dos;
@@ -37,6 +38,10 @@ pub use ibd::{
     TipPerfSizes, DEFAULT_BLOCKS_IN_TRANSIT_PER_PEER, DEFAULT_IBD_WINDOW,
 };
 pub use most_work::sum_work;
+pub use net_permissions::{
+    apply_implicit, parse_whitebind, parse_whitelist, NetPermTable, NetPermissionFlags,
+    WhitebindGrant, WhitelistGrant, DEFAULT_WHITELISTFORCERELAY, DEFAULT_WHITELISTRELAY,
+};
 pub use netgroup::netgroup;
 pub use peer::{
     drain_pending_now, flush_tx_invs, force_announce_txid, local_service_flags, run_feeler_timed,
