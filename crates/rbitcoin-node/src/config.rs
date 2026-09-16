@@ -1103,13 +1103,17 @@ mod tests {
     #[test]
     fn whitelist_parse_errors_match_core() {
         let mut c = NodeConfig::default();
-        let err = c.apply_kv("net-permission", "in,out@127.0.0.1").unwrap_err();
+        let err = c
+            .apply_kv("net-permission", "in,out@127.0.0.1")
+            .unwrap_err();
         assert!(
             err.to_string()
                 .contains("Only direction was set, no permissions"),
             "{err}"
         );
-        let err = c.apply_kv("net-permission", "oopsie@127.0.0.1").unwrap_err();
+        let err = c
+            .apply_kv("net-permission", "oopsie@127.0.0.1")
+            .unwrap_err();
         assert!(err.to_string().contains("Invalid P2P permission"), "{err}");
         let err = c
             .apply_kv("net-permission", "noban@127.0.0.1:230")
