@@ -1,4 +1,5 @@
 use super::*;
+use bitcoin::hashes::Hash;
 use rbitcoin_net::MempoolHub;
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
@@ -32,11 +33,50 @@ pub(crate) fn getpeerinfo(ctx: &RpcContext) -> Value {
     let Some(hub) = ctx.peers.as_ref() else {
         return json!([]);
     };
-    let rows: Vec<Value> = hub.snapshot().into_iter().map(peerinfo_json).collect();
+    let rows: Vec<Value> = hub
+        .snapshot()
+        .into_iter()
+        .map(|p| peerinfo_json(ctx, p))
+        .collect();
     json!(rows)
 }
 
-pub(crate) fn peerinfo_json(p: rbitcoin_net::PeerInfo) -> Value {
+fn peer_header_height(ctx: &RpcContext, hash: &bitcoin::BlockHash) -> Option<i64> {
+    if let Some(c) = ctx.chain.as_ref() {
+        return c.header_height(hash).map(i64::from);
+    }
+    ctx.query
+        .height_of_hash(&hash.to_byte_array())
+        .ok()
+        .flatten()
+        .map(|h| i64::from(h.0))
+}
+
+fn peer_block_connected(ctx: &RpcContext, hash: &bitcoin::BlockHash) -> bool {
+    if let Some(c) = ctx.chain.as_ref() {
+        return c.is_connected(hash);
+    }
+    ctx.query
+        .height_of_hash(&hash.to_byte_array())
+        .ok()
+        .flatten()
+        .is_some()
+}
+
+fn outbound_median_time_offset(rows: &[rbitcoin_net::PeerInfo]) -> i64 {
+    let mut offs: Vec<i64> = rows
+        .iter()
+        .filter(|p| !p.inbound && p.handshake_complete)
+        .map(|p| p.time_offset_secs)
+        .collect();
+    if offs.is_empty() {
+        return 0;
+    }
+    offs.sort_unstable();
+    offs[offs.len() / 2]
+}
+
+pub(crate) fn peerinfo_json(ctx: &RpcContext, p: rbitcoin_net::PeerInfo) -> Value {
     let mut recv = serde_json::Map::new();
     for (k, v) in p.bytesrecv_per_msg {
         recv.insert(k, json!(v));
@@ -45,6 +85,18 @@ pub(crate) fn peerinfo_json(p: rbitcoin_net::PeerInfo) -> Value {
     for (k, v) in p.bytessent_per_msg {
         sent.insert(k, json!(v));
     }
+    let (synced_headers, synced_blocks) = match p.best_known {
+        Some(h) => {
+            let height = peer_header_height(ctx, &h).unwrap_or(-1);
+            let blocks = if peer_block_connected(ctx, &h) {
+                height
+            } else {
+                -1
+            };
+            (height, blocks)
+        }
+        None => (-1, -1),
+    };
     let mut row = json!({
         "id": p.id,
         "addr": p.addr.to_string(),
@@ -60,8 +112,9 @@ pub(crate) fn peerinfo_json(p: rbitcoin_net::PeerInfo) -> Value {
         "relaytxes": p.relay && !matches!(p.conn_type, rbitcoin_net::PeerConnType::BlockRelay),
         "transport_protocol_type": "v2",
         "network": "ipv4",
-        "synced_headers": -1,
-        "synced_blocks": -1,
+        "synced_headers": synced_headers,
+        "synced_blocks": synced_blocks,
+        "timeoffset": p.time_offset_secs,
         "bip152_hb_to": p.bip152_hb_to,
         "bip152_hb_from": p.bip152_hb_from,
         "last_block": p.last_block,
@@ -288,13 +341,13 @@ pub(crate) fn localaddresses_json(ctx: &RpcContext) -> Value {
 }
 
 pub(crate) fn getnetworkinfo(ctx: &RpcContext) -> Value {
-    let (cin, cout) = if let Some(hub) = ctx.peers.as_ref() {
+    let (cin, cout, timeoffset) = if let Some(hub) = ctx.peers.as_ref() {
         let rows = hub.snapshot();
         let cin = rows.iter().filter(|p| p.inbound).count() as u64;
         let cout = rows.iter().filter(|p| !p.inbound).count() as u64;
-        (cin, cout)
+        (cin, cout, outbound_median_time_offset(&rows))
     } else {
-        (0, ctx.connections.load(Ordering::Relaxed))
+        (0, ctx.connections.load(Ordering::Relaxed), 0)
     };
     let flags = rbitcoin_net::local_service_flags();
     let svc_bits = flags.to_u64();
@@ -305,7 +358,7 @@ pub(crate) fn getnetworkinfo(ctx: &RpcContext) -> Value {
         "localservices": format!("{svc_bits:016x}"),
         "localservicesnames": services_names(svc_bits),
         "localrelay": ctx.mempool.as_ref().is_none_or(|m| m.relay_enabled()),
-        "timeoffset": 0,
+        "timeoffset": timeoffset,
         "networkactive": true,
         "connections": cin + cout,
         "connections_in": cin,

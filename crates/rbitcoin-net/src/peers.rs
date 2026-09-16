@@ -246,6 +246,8 @@ pub struct LivePeer {
     wtxid_relay: AtomicBool,
     /// Next self-announce unix seconds (`0` = never sent).
     next_local_addr_send: AtomicU64,
+    /// VERSION timestamp (unix seconds; `0` on the connecting placeholder).
+    version_timestamp: i64,
 }
 
 #[cfg(target_os = "linux")]
@@ -895,6 +897,14 @@ impl LivePeer {
                     (asn != 0).then_some(asn)
                 })
             }),
+            handshake_complete: self.handshake_complete(),
+            time_offset_secs: if self.handshake_complete() {
+                self.version_timestamp
+                    .saturating_sub(self.connected_at.load(Ordering::Relaxed) as i64)
+            } else {
+                0
+            },
+            best_known: self.best_known(),
         }
     }
 }
@@ -968,6 +978,12 @@ pub struct PeerInfo {
     pub inflight: Vec<u32>,
     /// `getpeerinfo.mapped_as` when an asmap mapped this peer (omit/`None` otherwise).
     pub mapped_as: Option<u32>,
+    /// VERSION+VERACK finished. Connecting rows stay false.
+    pub handshake_complete: bool,
+    /// VERSION clock minus connect time, seconds (`0` before handshake).
+    pub time_offset_secs: i64,
+    /// Best block this peer advertised (`None` until they send a header/block).
+    pub best_known: Option<BlockHash>,
 }
 
 #[allow(clippy::type_complexity)] // packed row / pin / script-hash tuple is the on-disk shape
@@ -1490,7 +1506,7 @@ impl PeerHub {
             sender: Address::new(&addrbind, ServiceFlags::NONE),
             nonce: 0,
             user_agent: String::new(),
-            start_height: 0,
+            start_height: -1,
             relay: false,
         };
         self.register_with_id(
@@ -1589,6 +1605,7 @@ impl PeerHub {
             wants_addrv2: AtomicBool::new(false),
             wtxid_relay: AtomicBool::new(false),
             next_local_addr_send: AtomicU64::new(0),
+            version_timestamp: ver.timestamp,
         });
         self.live
             .write()

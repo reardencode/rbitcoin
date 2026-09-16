@@ -160,6 +160,8 @@ def register_utility(proxy) -> None:
     proxy.register("decodescript", decodescript)
     proxy.register("validateaddress", validateaddress)
     proxy.register("deriveaddresses", deriveaddresses)
+    # Core sync_mempools; the node has no wallet/index callback queue.
+    proxy.register("syncwithvalidationinterfacequeue", lambda _: None)
 
 
 def createrawtransaction(params: Any) -> str:

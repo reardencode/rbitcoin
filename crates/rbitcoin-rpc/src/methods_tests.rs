@@ -629,6 +629,23 @@ fn unsupported_methods_error() {
     assert_eq!(e["code"], ERR_METHOD_NOT_FOUND);
     let e2 = dispatch(&ctx, "combinerawtransaction", vec![]).unwrap_err();
     assert_eq!(e2["code"], ERR_METHOD_NOT_FOUND);
+    let e3 = dispatch(&ctx, "syncwithvalidationinterfacequeue", vec![]).unwrap_err();
+    assert_eq!(e3["code"], ERR_METHOD_NOT_FOUND);
+    assert_eq!(e3["message"], "Method not found");
+    let help = dispatch(&ctx, "help", vec![]).unwrap();
+    assert!(!help
+        .as_str()
+        .unwrap()
+        .lines()
+        .any(|l| l == "syncwithvalidationinterfacequeue"));
+    let info = dispatch(&ctx, "getrpcinfo", vec![]).unwrap();
+    let listed: Vec<&str> = info["methods"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(!listed.contains(&"syncwithvalidationinterfacequeue"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -751,7 +768,6 @@ fn all_methods_callable_empty_or_error() {
     // Control / network always succeed on empty store.
     for m in [
         "uptime",
-        "syncwithvalidationinterfacequeue",
         "getnetworkinfo",
         "getconnectioncount",
         "getpeerinfo",
@@ -3203,6 +3219,261 @@ fn getpeerinfo_lists_registered_session() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn test_version(
+    timestamp: i64,
+    start_height: i32,
+) -> bitcoin::p2p::message_network::VersionMessage {
+    use bitcoin::p2p::address::Address;
+    use bitcoin::p2p::message_network::VersionMessage;
+    use bitcoin::p2p::ServiceFlags;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+    let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18445);
+    VersionMessage {
+        version: 70016,
+        services: ServiceFlags::NETWORK | ServiceFlags::WITNESS | ServiceFlags::P2P_V2,
+        timestamp,
+        receiver: Address::new(&addr, ServiceFlags::NONE),
+        sender: Address::new(&bind, ServiceFlags::NONE),
+        nonce: 1,
+        user_agent: "/rbitcoin:0.1.0(testnode0)/".into(),
+        start_height,
+        relay: true,
+    }
+}
+
+#[test]
+fn getpeerinfo_connecting_has_unknown_sync_and_zero_offset() {
+    use bitcoin::hashes::Hash;
+    use rbitcoin_net::{PeerConnType, PeerHub};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let (mut ctx, dir) = ctx_empty();
+    let hub = PeerHub::new();
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+    let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18445);
+    let live = hub.register_connecting(addr, bind, false, PeerConnType::OutboundFullRelay);
+    live.note_best_known(bitcoin::BlockHash::from_byte_array([0xab; 32]));
+    ctx.peers = Some(hub);
+    let r = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
+    let row = &r.as_array().unwrap()[0];
+    assert_eq!(row["synced_headers"], json!(-1));
+    assert_eq!(row["synced_blocks"], json!(-1));
+    assert_eq!(row["timeoffset"], json!(0));
+    assert_eq!(row["startingheight"], json!(-1));
+    let net = dispatch(&ctx, "getnetworkinfo", vec![]).unwrap();
+    assert_eq!(net["timeoffset"], json!(0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn getpeerinfo_synced_heights_from_best_known() {
+    use bitcoin::hashes::Hash;
+    use rbitcoin_net::{PeerConnType, PeerHub};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let (mut ctx, dir, chain) = ctx_regtest_hub();
+    let genesis = chain.tip_hash().expect("genesis");
+    let hub = PeerHub::new();
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+    let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18445);
+    let live = hub.register(
+        addr,
+        bind,
+        &test_version(0, 0),
+        false,
+        PeerConnType::OutboundFullRelay,
+    );
+    live.note_best_known(genesis);
+    ctx.peers = Some(hub.clone());
+    let r = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
+    let row = &r.as_array().unwrap()[0];
+    assert_eq!(row["synced_headers"], json!(0));
+    assert_eq!(row["synced_blocks"], json!(0));
+
+    live.note_best_known(bitcoin::BlockHash::from_byte_array([0xab; 32]));
+    let r = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
+    let row = &r.as_array().unwrap()[0];
+    assert_eq!(row["synced_headers"], json!(-1));
+    assert_eq!(row["synced_blocks"], json!(-1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn getpeerinfo_synced_heights_via_query_without_chain() {
+    use rbitcoin_net::{PeerConnType, PeerHub};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let (mut ctx, dir, chain) = ctx_regtest_hub();
+    let genesis = chain.tip_hash().expect("genesis");
+    ctx.chain = None;
+    let hub = PeerHub::new();
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+    let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18445);
+    let live = hub.register(
+        addr,
+        bind,
+        &test_version(0, 0),
+        false,
+        PeerConnType::OutboundFullRelay,
+    );
+    live.note_best_known(genesis);
+    ctx.peers = Some(hub);
+    let r = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
+    let row = &r.as_array().unwrap()[0];
+    assert_eq!(row["synced_headers"], json!(0));
+    assert_eq!(row["synced_blocks"], json!(0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn getpeerinfo_header_only_best_known_is_not_synced_blocks() {
+    use bitcoin::consensus::encode::serialize;
+    use rbitcoin_consensus::mine_regtest_paying;
+    use rbitcoin_net::{PeerConnType, PeerHub};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let (mut ctx, dir, chain) = ctx_regtest_hub();
+    let (_, script) = p2wpkh_regtest();
+    let prev = chain.tip_hash().unwrap();
+    let time = chain.tip_header().unwrap().time + 1;
+    let child = mine_regtest_paying(prev, time, 1, script, vec![]);
+    let hex = rbitcoin_primitives::hex_encode(serialize(&child));
+    dispatch(&ctx, "submitheader", vec![json!(hex)]).unwrap();
+    let hub = PeerHub::new();
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+    let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18445);
+    let live = hub.register(
+        addr,
+        bind,
+        &test_version(0, 0),
+        false,
+        PeerConnType::OutboundFullRelay,
+    );
+    live.note_best_known(child.block_hash());
+    ctx.peers = Some(hub);
+    let r = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
+    let row = &r.as_array().unwrap()[0];
+    assert_eq!(row["synced_headers"], json!(1));
+    assert_eq!(row["synced_blocks"], json!(-1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn getpeerinfo_and_getnetworkinfo_timeoffset_from_version() {
+    use rbitcoin_net::{PeerConnType, PeerHub};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let (mut ctx, dir) = ctx_empty();
+    let hub = PeerHub::new();
+    hub.set_mock_now(1_700_000_000);
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+    let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18445);
+    hub.register(
+        addr,
+        bind,
+        &test_version(1_700_000_060, 0),
+        false,
+        PeerConnType::OutboundFullRelay,
+    );
+    let inbound_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18500);
+    hub.register(
+        inbound_addr,
+        bind,
+        &test_version(1_700_000_099, 0),
+        true,
+        PeerConnType::Inbound,
+    );
+    ctx.peers = Some(hub);
+    let r = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
+    let arr = r.as_array().unwrap();
+    let out = arr.iter().find(|p| p["inbound"] == false).unwrap();
+    let inn = arr.iter().find(|p| p["inbound"] == true).unwrap();
+    assert_eq!(out["timeoffset"], json!(60));
+    assert_eq!(inn["timeoffset"], json!(99));
+    let net = dispatch(&ctx, "getnetworkinfo", vec![]).unwrap();
+    assert_eq!(
+        net["timeoffset"],
+        json!(60),
+        "getnetworkinfo.timeoffset is outbound median, not inbound"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn getnetworkinfo_timeoffset_median_of_outbound() {
+    use rbitcoin_net::{PeerConnType, PeerHub};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let (mut ctx, dir) = ctx_empty();
+    let hub = PeerHub::new();
+    hub.set_mock_now(1_700_000_000);
+    let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18445);
+    for (i, offset) in [10i64, 20, 40].into_iter().enumerate() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 19000 + i as u16);
+        hub.register(
+            addr,
+            bind,
+            &test_version(1_700_000_000 + offset, 0),
+            false,
+            PeerConnType::OutboundFullRelay,
+        );
+    }
+    ctx.peers = Some(hub);
+    let net = dispatch(&ctx, "getnetworkinfo", vec![]).unwrap();
+    assert_eq!(net["timeoffset"], json!(20));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn getpeerinfo_sent_pingwait_and_limited_services() {
+    use bitcoin::p2p::address::Address;
+    use bitcoin::p2p::message_network::VersionMessage;
+    use bitcoin::p2p::ServiceFlags;
+    use rbitcoin_net::{PeerConnType, PeerHub, PingAction};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let (mut ctx, dir) = ctx_empty();
+    let hub = PeerHub::new();
+    hub.set_mock_now(1_700_000_000);
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+    let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18445);
+    let ver = VersionMessage {
+        version: 70016,
+        services: ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS | ServiceFlags::P2P_V2,
+        timestamp: 1_700_000_000,
+        receiver: Address::new(&addr, ServiceFlags::NONE),
+        sender: Address::new(&bind, ServiceFlags::NONE),
+        nonce: 1,
+        user_agent: "/rbitcoin:0.1.0(testnode0)/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    let live = hub.register(addr, bind, &ver, false, PeerConnType::OutboundFullRelay);
+    live.note_sent("version", 100);
+    let PingAction::Send { nonce } = live.take_ping_action(hub.now_secs()).unwrap() else {
+        panic!("expected ping send");
+    };
+    ctx.peers = Some(hub.clone());
+    let info = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
+    let row = &info.as_array().unwrap()[0];
+    assert!(row["bytessent_per_msg"]["version"].as_u64().unwrap() >= 124);
+    assert!(row.get("pingwait").is_some(), "{row}");
+    let names = row["servicesnames"].as_array().unwrap();
+    assert!(names.iter().any(|n| n == "NETWORK_LIMITED"), "{names:?}");
+
+    assert!(live.on_pong(&nonce.to_le_bytes(), 1_700_000_029).is_none());
+    hub.set_mock_now(1_700_000_029);
+    let info = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
+    let row = &info.as_array().unwrap()[0];
+    assert_eq!(row["pingtime"], json!(29.0));
+    assert_eq!(row["minping"], json!(29.0));
+    hub.set_noban(true);
+    let info = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
+    assert_eq!(info.as_array().unwrap()[0]["permissions"], json!(["noban"]));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn getpeerinfo_mapped_as_when_asmap() {
     use bitcoin::p2p::address::Address;
@@ -3247,6 +3518,10 @@ fn addnode_and_disconnectnode_on_table() {
     assert!(e["message"].as_str().unwrap().contains("dialer"), "{e}");
     let e = dispatch(&ctx, "disconnectnode", vec![json!("127.0.0.1:1")]).unwrap_err();
     assert_eq!(e["code"], ERR_CLIENT_NODE_NOT_CONNECTED);
+    let e = dispatch(&ctx, "disconnectnode", named(json!({"nodeid": 99}))).unwrap_err();
+    assert_eq!(e["code"], ERR_CLIENT_NODE_NOT_CONNECTED);
+    let e = dispatch(&ctx, "disconnectnode", vec![]).unwrap_err();
+    assert_eq!(e["code"], ERR_INVALID_PARAMS);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
