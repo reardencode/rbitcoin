@@ -89,7 +89,9 @@ Inbound `cmpctblock` may prefill any well-formed indexes (BIP152). We always
 log reconstruct fill sources and `fetched=` `blocktxn` bytes, and outbound
 `cmpct announce … prefill=N/bytes` when we send `cmpctblock` (tip announce or
 `MSG_CMPCT_BLOCK` getdata). **Sending** extra prefills (beyond coinbase) is on
-unless `--prefillcompact=0`.
+unless `--prefillcompact=0`. A pending compact owns the first-pass slot
+bodies (mempool / extra / orphan hits). `blocktxn` overlays only the missing
+indexes; apply does not re-walk a live short-id map.
 
 ## Core-class JSON-RPC (subset)
 

@@ -1727,9 +1727,8 @@ fn net_error_needs_parent(e: &NetError) -> bool {
 /// Incomplete compact block waiting for `blocktxn`.
 struct PendingCmpct {
     hsi: HeaderAndShortIds,
-    missing: Vec<u64>,
-    /// BIP152 version (1 = txid short-ids, 2 = wtxid).
-    version: u32,
+    partial: crate::compact::CmpctPartial,
+    fill: Option<crate::compact::CmpctFillSets>,
 }
 
 /// Clone only mempool bodies whose short-ids appear in `hsi` (never `list_live`).
@@ -1758,7 +1757,11 @@ fn mempool_shortid_avail(
 #[derive(Debug)]
 enum CmpctReconstruct {
     Block(Block, Option<Box<crate::compact::CmpctFillSets>>),
-    Missing(Vec<u64>),
+    NeedTxn(
+        crate::compact::CmpctPartial,
+        Option<Box<crate::compact::CmpctFillSets>>,
+    ),
+    GetData,
 }
 
 /// One reconstruct: full block, getblocktxn indexes, or no mempool (`None` → getdata).
@@ -1768,11 +1771,15 @@ fn try_reconstruct_cmpct(
     version: u32,
 ) -> Option<CmpctReconstruct> {
     let (owned, fill) = mempool_shortid_avail(hub, hsi, version);
-    match crate::compact::try_reconstruct(hsi, &owned, version) {
-        Ok(block) => Some(CmpctReconstruct::Block(block, fill.map(Box::new))),
-        Err(m) if m.is_empty() => Some(CmpctReconstruct::Missing(m)),
-        Err(_) if hub.mempool().is_none() => None,
-        Err(m) => Some(CmpctReconstruct::Missing(m)),
+    match crate::compact::reconstruct(hsi, &owned, version) {
+        crate::compact::Reconstruct::Block(block) => {
+            Some(CmpctReconstruct::Block(block, fill.map(Box::new)))
+        }
+        crate::compact::Reconstruct::Fail => Some(CmpctReconstruct::GetData),
+        crate::compact::Reconstruct::Partial(_) if hub.mempool().is_none() => None,
+        crate::compact::Reconstruct::Partial(p) => {
+            Some(CmpctReconstruct::NeedTxn(p, fill.map(Box::new)))
+        }
     }
 }
 
@@ -1988,13 +1995,11 @@ fn queue_due_tx_invs(
 
 /// Finish a pending compact block with a `blocktxn` payload.
 fn apply_cmpct_blocktxn(
-    hub: &ChainHub,
     pc: &PendingCmpct,
     bt: &BlockTransactions,
 ) -> Result<(Block, Option<crate::compact::CmpctFillSets>), ()> {
-    let (owned, fill) = mempool_shortid_avail(hub, &pc.hsi, pc.version);
-    crate::compact::apply_block_transactions(&pc.hsi, &pc.missing, bt, &owned, pc.version)
-        .map(|block| (block, fill))
+    crate::compact::apply_block_transactions(&pc.hsi, &pc.partial, bt)
+        .map(|block| (block, pc.fill.clone()))
         .map_err(|_| ())
 }
 
@@ -2879,21 +2884,23 @@ async fn on_cmpctblock(
                     )
                     .await?;
                 }
-                Some(CmpctReconstruct::Missing(missing)) => {
-                    if missing.is_empty() {
-                        log_cmpct_getdata(hash, 0);
-                        if let Some(s) = session {
-                            s.note_failed_cmpct(hash);
-                        }
-                        queue_out(
-                            out_tx,
-                            NetworkMessage::GetData(vec![Inventory::WitnessBlock(hash)]),
-                        )?;
-                    } else if follow.pending_cmpct.len() >= MAX_PENDING_CMPCT
+                Some(CmpctReconstruct::GetData) => {
+                    log_cmpct_getdata(hash, 0);
+                    if let Some(s) = session {
+                        s.note_failed_cmpct(hash);
+                    }
+                    queue_out(
+                        out_tx,
+                        NetworkMessage::GetData(vec![Inventory::WitnessBlock(hash)]),
+                    )?;
+                }
+                Some(CmpctReconstruct::NeedTxn(partial, fill)) => {
+                    let missing_n = partial.missing().len();
+                    if follow.pending_cmpct.len() >= MAX_PENDING_CMPCT
                         && !follow.pending_cmpct.contains_key(&hash)
                     {
                         follow.ban_score = follow.ban_score.saturating_add(10);
-                        log_cmpct_getdata(hash, missing.len());
+                        log_cmpct_getdata(hash, missing_n);
                         queue_out(
                             out_tx,
                             NetworkMessage::GetData(vec![Inventory::WitnessBlock(hash)]),
@@ -2904,12 +2911,13 @@ async fn on_cmpctblock(
                             // Parallel inbound slot already taken
                             // (`p2p_compactblocks` :929).
                         } else {
+                            let missing = partial.missing().to_vec();
                             follow.pending_cmpct.insert(
                                 hash,
                                 PendingCmpct {
                                     hsi: hsi.clone(),
-                                    missing: missing.clone(),
-                                    version: 2,
+                                    partial,
+                                    fill: fill.map(|b| *b),
                                 },
                             );
                             if let Some(s) = session {
@@ -2932,7 +2940,7 @@ async fn on_cmpctblock(
                             )?;
                             rbitcoin_log::debug!(
                                 "cmpct reconstruct {hash} missing={} awaiting blocktxn",
-                                missing.len()
+                                missing_n
                             );
                         }
                     }
@@ -2967,9 +2975,9 @@ async fn on_blocktxn(
         return Ok(());
     }
     if let Some(pc) = follow.pending_cmpct.remove(&hash) {
-        match apply_cmpct_blocktxn(hub, &pc, bt) {
+        match apply_cmpct_blocktxn(&pc, bt) {
             Ok((block, fill)) => {
-                log_cmpct_filled(hub, &pc.hsi, &block, &pc.missing, fill.as_ref());
+                log_cmpct_filled(hub, &pc.hsi, &block, pc.partial.missing(), fill.as_ref());
                 relay_new_pow_valid_block(hub, &block, session);
                 match hub.accept_received_block_async(block.clone()).await {
                     Ok(AcceptOutcome::Accepted { .. }) => {
@@ -3047,7 +3055,7 @@ async fn on_blocktxn(
             }
             Err(()) => {
                 rbitcoin_log::info!("previous compact block reconstruction attempt failed");
-                log_cmpct_getdata(hash, pc.missing.len());
+                log_cmpct_getdata(hash, pc.partial.missing().len());
                 if let Some(s) = session {
                     s.note_failed_cmpct(hash);
                     s.release_cmpct_taken(hash);

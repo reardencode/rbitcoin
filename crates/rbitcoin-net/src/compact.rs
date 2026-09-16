@@ -96,6 +96,30 @@ pub fn prefilled_absolute_indexes(hsi: &HeaderAndShortIds) -> Vec<(usize, &Trans
     out
 }
 
+/// First-pass compact fill still waiting on `blocktxn` for `missing` slots.
+///
+/// Matched mempool / extra / orphan bodies are owned here. Apply overlays
+/// the peer response onto those holes and must not re-walk a live short-id
+/// map (a later `try_read` miss or eviction would drop first-pass hits).
+#[derive(Clone, Debug)]
+pub(crate) struct CmpctPartial {
+    slots: Vec<Option<Transaction>>,
+    missing: Vec<u64>,
+}
+
+impl CmpctPartial {
+    pub(crate) fn missing(&self) -> &[u64] {
+        &self.missing
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum Reconstruct {
+    Block(Block),
+    Partial(CmpctPartial),
+    Fail,
+}
+
 /// Attempt to reconstruct a full block from compact data + available txs.
 ///
 /// On success the txs merkle to `hsi.header`. Incomplete fill returns the
@@ -106,11 +130,23 @@ pub fn try_reconstruct<T: Borrow<Transaction>>(
     available: &HashMap<ShortId, Vec<T>>,
     version: u32,
 ) -> Result<Block, Vec<u64>> {
+    match reconstruct(hsi, available, version) {
+        Reconstruct::Block(b) => Ok(b),
+        Reconstruct::Partial(p) => Err(p.missing),
+        Reconstruct::Fail => Err(Vec::new()),
+    }
+}
+
+pub(crate) fn reconstruct<T: Borrow<Transaction>>(
+    hsi: &HeaderAndShortIds,
+    available: &HashMap<ShortId, Vec<T>>,
+    version: u32,
+) -> Reconstruct {
     let n_short = hsi.short_ids.len();
     let n_pref = hsi.prefilled_txs.len();
     let total = n_short.saturating_add(n_pref);
     if total == 0 {
-        return Err(Vec::new());
+        return Reconstruct::Fail;
     }
 
     let mut slots: Vec<Option<Transaction>> = vec![None; total];
@@ -118,7 +154,7 @@ pub fn try_reconstruct<T: Borrow<Transaction>>(
     let mut placed: std::collections::HashSet<bitcoin::Txid> = std::collections::HashSet::new();
     for (abs, tx) in prefilled_absolute_indexes(hsi) {
         if abs >= total {
-            return Err(Vec::new());
+            return Reconstruct::Fail;
         }
         placed.insert(tx.compute_txid());
         slots[abs] = Some(tx.clone());
@@ -149,30 +185,29 @@ pub fn try_reconstruct<T: Borrow<Transaction>>(
                 *slot = Some(cands[0].borrow().clone());
             }
             Some(cands) if cands.len() > 1 => {
-                // Ambiguous short-id collision — request from peer.
                 missing.push(abs as u64);
             }
             _ => missing.push(abs as u64),
         }
     }
 
+    let _ = version;
     if !missing.is_empty() {
-        return Err(missing);
+        return Reconstruct::Partial(CmpctPartial { slots, missing });
     }
 
     let mut txdata = Vec::with_capacity(total);
-    for (i, slot) in slots.into_iter().enumerate() {
+    for slot in slots {
         match slot {
             Some(tx) => txdata.push(tx),
-            None => return Err(vec![i as u64]),
+            None => return Reconstruct::Fail,
         }
     }
 
-    // Version 1 strips witness from prefilled; we may need peer to send full blocks
-    // for validation. Prefer version 2. If coinbase has no witness but block needs
-    // it, accept_block will fail structure — caller falls back to getdata.
-    let _ = version;
-    finish_reconstructed(hsi.header, txdata)
+    match finish_reconstructed(hsi.header, txdata) {
+        Ok(block) => Reconstruct::Block(block),
+        Err(_) => Reconstruct::Fail,
+    }
 }
 
 /// Build a `getblocktxn` request for missing absolute indexes.
@@ -183,97 +218,47 @@ pub fn missing_request(block_hash: BlockHash, missing: &[u64]) -> BlockTransacti
     }
 }
 
-/// Apply `blocktxn` payload into a slot list previously missing those indexes.
+/// Overlay `blocktxn` onto a first-pass [`CmpctPartial`].
 ///
-/// `missing` must match the order of indexes we requested (absolute indexes).
-/// `txn.transactions` holds the txs in the same order as the request indexes.
-/// Provided txs are placed by absolute index (not re-matched by short-id alone),
-/// so collisions cannot undo a successful `getblocktxn` response.
+/// `txn.transactions` is 1:1 with `partial.missing` (absolute indexes, request
+/// order). Already-filled slots are kept; the live short-id map is not consulted.
 /// Completes only when the filled txs merkle to `hsi.header`.
-pub fn apply_block_transactions<T: Borrow<Transaction>>(
+pub(crate) fn apply_block_transactions(
     hsi: &HeaderAndShortIds,
-    missing: &[u64],
+    partial: &CmpctPartial,
     txn: &BlockTransactions,
-    available: &HashMap<ShortId, Vec<T>>,
-    version: u32,
 ) -> Result<Block, Vec<u64>> {
-    if txn.transactions.len() != missing.len() {
-        return Err(missing.to_vec());
+    if txn.transactions.len() != partial.missing.len() {
+        return Err(partial.missing.clone());
     }
-
-    let n_short = hsi.short_ids.len();
-    let n_pref = hsi.prefilled_txs.len();
-    let total = n_short.saturating_add(n_pref);
-    if total == 0 {
+    if partial.slots.is_empty() {
         return Err(Vec::new());
     }
 
-    let mut forced: HashMap<usize, &Transaction> = HashMap::with_capacity(missing.len());
-    for (i, abs) in missing.iter().enumerate() {
-        forced.insert(*abs as usize, &txn.transactions[i]);
-    }
-
-    let mut slots: Vec<Option<Transaction>> = vec![None; total];
-    let mut prefilled_set = std::collections::HashSet::new();
-    let mut placed: std::collections::HashSet<bitcoin::Txid> = std::collections::HashSet::new();
-    for (abs, tx) in prefilled_absolute_indexes(hsi) {
-        if abs >= total {
+    let mut slots = partial.slots.clone();
+    let mut placed: std::collections::HashSet<bitcoin::Txid> = slots
+        .iter()
+        .flatten()
+        .map(Transaction::compute_txid)
+        .collect();
+    for (i, abs) in partial.missing.iter().enumerate() {
+        let abs = *abs as usize;
+        if abs >= slots.len() || slots[abs].is_some() {
             return Err(Vec::new());
         }
-        placed.insert(tx.compute_txid());
+        let tx = &txn.transactions[i];
+        if !placed.insert(tx.compute_txid()) {
+            return Err(partial.missing.clone());
+        }
         slots[abs] = Some(tx.clone());
-        prefilled_set.insert(abs);
     }
-
-    let mut short_i = 0usize;
-    let mut still_missing = Vec::new();
-    for (abs, slot) in slots.iter_mut().enumerate() {
-        if prefilled_set.contains(&abs) {
-            continue;
-        }
-        if let Some(tx) = forced.get(&abs) {
-            let txid = tx.compute_txid();
-            if !placed.insert(txid) {
-                return Err(missing.to_vec());
-            }
-            *slot = Some((*tx).clone());
-            // Still consume the corresponding short_id slot.
-            if short_i < hsi.short_ids.len() {
-                short_i += 1;
-            }
-            continue;
-        }
-        if short_i >= hsi.short_ids.len() {
-            still_missing.push(abs as u64);
-            continue;
-        }
-        let sid = hsi.short_ids[short_i];
-        short_i += 1;
-        match available.get(&sid) {
-            Some(cands) if cands.len() == 1 => {
-                let txid = cands[0].borrow().compute_txid();
-                if !placed.insert(txid) {
-                    still_missing.push(abs as u64);
-                    continue;
-                }
-                *slot = Some(cands[0].borrow().clone());
-            }
-            _ => still_missing.push(abs as u64),
-        }
+    let mut txdata = Vec::with_capacity(slots.len());
+    for slot in slots {
+        let Some(tx) = slot else {
+            return Err(partial.missing.clone());
+        };
+        txdata.push(tx);
     }
-
-    if !still_missing.is_empty() {
-        return Err(still_missing);
-    }
-
-    let mut txdata = Vec::with_capacity(total);
-    for (i, slot) in slots.into_iter().enumerate() {
-        match slot {
-            Some(tx) => txdata.push(tx),
-            None => return Err(vec![i as u64]),
-        }
-    }
-    let _ = version;
     finish_reconstructed(hsi.header, txdata)
 }
 
@@ -498,6 +483,17 @@ mod tests {
         HashMap::new()
     }
 
+    fn must_partial<T: Borrow<Transaction>>(
+        hsi: &HeaderAndShortIds,
+        avail: &HashMap<ShortId, Vec<T>>,
+        version: u32,
+    ) -> CmpctPartial {
+        match reconstruct(hsi, avail, version) {
+            Reconstruct::Partial(p) => p,
+            other => panic!("expected partial, got {other:?}"),
+        }
+    }
+
     fn dummy_header() -> Header {
         Header {
             version: Version::from_consensus(4),
@@ -655,13 +651,12 @@ mod tests {
         let block = sealed_block(vec![coinbase(), b1]);
         let hsi = HeaderAndShortIds::from_block(&block, 5, 2, &[]).unwrap();
         let empty: HashMap<ShortId, Vec<&Transaction>> = HashMap::new();
-        let missing = try_reconstruct(&hsi, &empty, 2).unwrap_err();
+        let partial = must_partial(&hsi, &empty, 2);
         let txn = BlockTransactions {
             block_hash: block.block_hash(),
             transactions: vec![spend(11)],
         };
-        let err = apply_block_transactions(&hsi, &missing, &txn, &empty, 2)
-            .expect_err("wrong blocktxn body");
+        let err = apply_block_transactions(&hsi, &partial, &txn).expect_err("wrong blocktxn body");
         assert!(
             err.is_empty(),
             "merkle-mutated blocktxn must getdata, got {err:?}"
@@ -674,12 +669,12 @@ mod tests {
         let block = sealed_block(vec![coinbase(), b1.clone()]);
         let hsi = HeaderAndShortIds::from_block(&block, 2, 2, &[]).unwrap();
         let empty: HashMap<ShortId, Vec<&Transaction>> = HashMap::new();
-        let missing = try_reconstruct(&hsi, &empty, 2).unwrap_err();
+        let partial = must_partial(&hsi, &empty, 2);
         let txn = BlockTransactions {
             block_hash: block.block_hash(),
             transactions: vec![b1.clone()],
         };
-        let recon = apply_block_transactions(&hsi, &missing, &txn, &empty, 2).unwrap();
+        let recon = apply_block_transactions(&hsi, &partial, &txn).unwrap();
         assert_eq!(recon.txdata.len(), 2);
     }
 
@@ -698,15 +693,113 @@ mod tests {
         let hsi = HeaderAndShortIds::from_block(&block, 3, 2, &[]).unwrap();
         // Only b1 in "mempool"
         let avail = shortid_map_from_txs(&block.header, hsi.nonce, 2, [&b1]);
-        let missing = try_reconstruct(&hsi, &avail, 2).unwrap_err();
-        assert_eq!(missing, vec![2]); // abs index of b2
+        let partial = must_partial(&hsi, &avail, 2);
+        assert_eq!(partial.missing(), [2]); // abs index of b2
         let txn = BlockTransactions {
             block_hash: block.block_hash(),
             transactions: vec![b2.clone()],
         };
-        let recon = apply_block_transactions(&hsi, &missing, &txn, &avail, 2).unwrap();
+        let recon = apply_block_transactions(&hsi, &partial, &txn).unwrap();
         assert_eq!(recon.txdata[1].compute_txid(), b1.compute_txid());
         assert_eq!(recon.txdata[2].compute_txid(), b2.compute_txid());
+    }
+
+    #[test]
+    fn apply_keeps_first_pass_when_mempool_map_gone() {
+        let b1 = spend(5);
+        let b2 = spend(6);
+        let block = sealed_block(vec![coinbase(), b1.clone(), b2.clone()]);
+        let hsi = HeaderAndShortIds::from_block(&block, 3, 2, &[]).unwrap();
+        let avail = shortid_map_from_txs(&block.header, hsi.nonce, 2, [&b1]);
+        let partial = must_partial(&hsi, &avail, 2);
+        assert_eq!(partial.missing(), [2]);
+        let txn = BlockTransactions {
+            block_hash: block.block_hash(),
+            transactions: vec![b2.clone()],
+        };
+        let recon = apply_block_transactions(&hsi, &partial, &txn)
+            .expect("blocktxn must complete without a second short-id walk");
+        assert_eq!(recon.txdata[1].compute_txid(), b1.compute_txid());
+        assert_eq!(recon.txdata[2].compute_txid(), b2.compute_txid());
+    }
+
+    #[test]
+    fn apply_collision_slot_from_blocktxn_only() {
+        let b1 = spend(9);
+        let block = sealed_block(vec![coinbase(), b1.clone()]);
+        let hsi = HeaderAndShortIds::from_block(&block, 9, 2, &[]).unwrap();
+        let keys = ShortId::calculate_siphash_keys(&block.header, hsi.nonce);
+        let sid = ShortId::with_siphash_keys(&b1.compute_wtxid().to_raw_hash(), keys);
+        let b_alt = spend(10);
+        let mut avail: HashMap<ShortId, Vec<&Transaction>> = HashMap::new();
+        avail.insert(sid, vec![&b1, &b_alt]);
+        let partial = must_partial(&hsi, &avail, 2);
+        assert_eq!(partial.missing(), [1]);
+        let txn = BlockTransactions {
+            block_hash: block.block_hash(),
+            transactions: vec![b1.clone()],
+        };
+        let recon = apply_block_transactions(&hsi, &partial, &txn).unwrap();
+        assert_eq!(recon.txdata[1].compute_txid(), b1.compute_txid());
+    }
+
+    #[test]
+    fn reconstruct_oob_prefill_is_fail() {
+        let oob = HeaderAndShortIds {
+            header: dummy_header(),
+            nonce: 0,
+            short_ids: vec![],
+            prefilled_txs: vec![bitcoin::bip152::PrefilledTransaction {
+                idx: 1,
+                tx: coinbase(),
+            }],
+        };
+        assert!(matches!(
+            reconstruct(&oob, &empty_avail(), 2),
+            Reconstruct::Fail
+        ));
+    }
+
+    #[test]
+    fn apply_rejects_oob_filled_slot_duplicate_and_leftover_hole() {
+        let b1 = spend(1);
+        let b2 = spend(2);
+        let block = sealed_block(vec![coinbase(), b1.clone(), b2.clone()]);
+        let hsi = HeaderAndShortIds::from_block(&block, 3, 2, &[]).unwrap();
+        let txn1 = BlockTransactions {
+            block_hash: block.block_hash(),
+            transactions: vec![b1.clone()],
+        };
+        let oob = CmpctPartial {
+            slots: vec![Some(coinbase()), None, None],
+            missing: vec![9],
+        };
+        assert!(apply_block_transactions(&hsi, &oob, &txn1)
+            .unwrap_err()
+            .is_empty());
+        let already = CmpctPartial {
+            slots: vec![Some(coinbase()), Some(b1.clone()), None],
+            missing: vec![1],
+        };
+        assert!(apply_block_transactions(&hsi, &already, &txn1)
+            .unwrap_err()
+            .is_empty());
+        let dup = CmpctPartial {
+            slots: vec![Some(coinbase()), Some(b1.clone()), None],
+            missing: vec![2],
+        };
+        assert_eq!(
+            apply_block_transactions(&hsi, &dup, &txn1).unwrap_err(),
+            vec![2]
+        );
+        let hole = CmpctPartial {
+            slots: vec![Some(coinbase()), None, None],
+            missing: vec![1],
+        };
+        assert_eq!(
+            apply_block_transactions(&hsi, &hole, &txn1).unwrap_err(),
+            vec![1]
+        );
     }
 
     #[test]
@@ -728,12 +821,12 @@ mod tests {
         };
         let hsi = HeaderAndShortIds::from_block(&block, 5, 2, &[]).unwrap();
         let empty: HashMap<ShortId, Vec<&Transaction>> = HashMap::new();
-        let missing = try_reconstruct(&hsi, &empty, 2).unwrap_err();
+        let partial = must_partial(&hsi, &empty, 2);
         let txn = BlockTransactions {
             block_hash: block.block_hash(),
             transactions: vec![], // wrong count
         };
-        assert!(apply_block_transactions(&hsi, &missing, &txn, &empty, 2).is_err());
+        assert!(apply_block_transactions(&hsi, &partial, &txn).is_err());
     }
 
     #[test]
@@ -750,15 +843,21 @@ mod tests {
                 .unwrap_err()
                 .is_empty()
         );
+        assert!(matches!(
+            reconstruct(&hsi, &HashMap::<ShortId, Vec<&Transaction>>::new(), 2),
+            Reconstruct::Fail
+        ));
+        let empty_partial = CmpctPartial {
+            slots: Vec::new(),
+            missing: Vec::new(),
+        };
         assert!(apply_block_transactions(
             &hsi,
-            &[],
+            &empty_partial,
             &BlockTransactions {
                 block_hash: BlockHash::from_byte_array([0; 32]),
                 transactions: vec![],
             },
-            &HashMap::<ShortId, Vec<&Transaction>>::new(),
-            2
         )
         .unwrap_err()
         .is_empty());
@@ -1053,18 +1152,18 @@ mod tests {
         let block = sealed_block(vec![coinbase(), b1.clone(), b2.clone()]);
         let hsi = HeaderAndShortIds::from_block(&block, 3, 2, &[]).unwrap();
         let avail = shortid_map_from_txs(&block.header, hsi.nonce, 2, [&b1]);
-        let missing = try_reconstruct(&hsi, &avail, 2).unwrap_err();
+        let partial = must_partial(&hsi, &avail, 2);
         let txn = BlockTransactions {
             block_hash: block.block_hash(),
             transactions: vec![b2.clone()],
         };
-        let recon = apply_block_transactions(&hsi, &missing, &txn, &avail, 2).unwrap();
+        let recon = apply_block_transactions(&hsi, &partial, &txn).unwrap();
         let fill = CmpctFillSets {
             mempool: [b1.compute_wtxid()].into_iter().collect(),
             extra: Default::default(),
             orphan: Default::default(),
         };
-        let stats = reconstruct_stats(&hsi, &recon, &fill, &missing);
+        let stats = reconstruct_stats(&hsi, &recon, &fill, partial.missing());
         let fetched_bytes = bitcoin::consensus::encode::serialize(&b2).len();
         assert_eq!(stats.fetched_n, 1);
         assert_eq!(stats.fetched_bytes, fetched_bytes);

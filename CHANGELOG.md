@@ -25,6 +25,12 @@ before 1.0).
 
 ### Changed
 
+- **Compact `blocktxn` apply owns first-pass slots:** pending compact keeps
+  mempool/extra/orphan hits from the initial short-id walk. `blocktxn`
+  overlays only the missing indexes and does not re-query the live map, so a
+  mempool write or eviction during the RTT cannot force a full `getdata`.
+  [`COMPAT.md`](COMPAT.md).
+
 - **Fee estimates blend live flow with block history:** Near targets invert
   stock + capped admit-EMA (0.1 sat/vB candidates; under-full pool with live
   stock answers min-relay for N=1–5, not a last-chunk far rate). Far targets
