@@ -3426,6 +3426,52 @@ fn getnetworkinfo_timeoffset_median_of_outbound() {
 }
 
 #[test]
+fn getpeerinfo_sent_pingwait_and_limited_services() {
+    use bitcoin::p2p::address::Address;
+    use bitcoin::p2p::message_network::VersionMessage;
+    use bitcoin::p2p::ServiceFlags;
+    use rbitcoin_net::{PeerConnType, PeerHub, PingAction};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let (mut ctx, dir) = ctx_empty();
+    let hub = PeerHub::new();
+    hub.set_mock_now(1_700_000_000);
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+    let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18445);
+    let ver = VersionMessage {
+        version: 70016,
+        services: ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS | ServiceFlags::P2P_V2,
+        timestamp: 1_700_000_000,
+        receiver: Address::new(&addr, ServiceFlags::NONE),
+        sender: Address::new(&bind, ServiceFlags::NONE),
+        nonce: 1,
+        user_agent: "/rbitcoin:0.1.0(testnode0)/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    let live = hub.register(addr, bind, &ver, false, PeerConnType::OutboundFullRelay);
+    live.note_sent("version", 100);
+    let PingAction::Send { nonce } = live.take_ping_action(hub.now_secs()).unwrap() else {
+        panic!("expected ping send");
+    };
+    ctx.peers = Some(hub.clone());
+    let info = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
+    let row = &info.as_array().unwrap()[0];
+    assert!(row["bytessent_per_msg"]["version"].as_u64().unwrap() >= 124);
+    assert!(row.get("pingwait").is_some(), "{row}");
+    let names = row["servicesnames"].as_array().unwrap();
+    assert!(names.iter().any(|n| n == "NETWORK_LIMITED"), "{names:?}");
+
+    assert!(live.on_pong(&nonce.to_le_bytes(), 1_700_000_029).is_none());
+    hub.set_mock_now(1_700_000_029);
+    let info = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
+    let row = &info.as_array().unwrap()[0];
+    assert_eq!(row["pingtime"], json!(29.0));
+    assert_eq!(row["minping"], json!(29.0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn getpeerinfo_mapped_as_when_asmap() {
     use bitcoin::p2p::address::Address;
     use bitcoin::p2p::message_network::VersionMessage;
