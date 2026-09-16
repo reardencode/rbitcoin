@@ -127,6 +127,13 @@ proxy.register("echo", lambda p: p)
 st, body = call("echo")
 assert body["result"] == [], body
 
+# Core sync_mempools calls this; the node omits it. Proxy returns null.
+proxy.register("syncwithvalidationinterfacequeue", lambda _: None)
+st, body = call("syncwithvalidationinterfacequeue")
+assert st == 200, st
+assert body["result"] is None, body
+assert body["error"] is None, body
+
 node.shutdown()
 proxy.shutdown()
 print("ok - rpc_proxy forward + local handler")

@@ -362,11 +362,6 @@ pub(crate) fn dispatch_inner(
             ctx.stop.store(true, Ordering::SeqCst);
             Ok(json!("rbitcoin stopping"))
         }
-        "syncwithvalidationinterfacequeue" => {
-            params.reject_unknown(&[])?;
-            // Core waits for wallet/index callbacks. We have no that queue.
-            Ok(Value::Null)
-        }
         "getblockchaininfo" => {
             params.reject_unknown(&[])?;
             getblockchaininfo(ctx)
@@ -542,7 +537,6 @@ const METHOD_LIST: &[&str] = &[
     "getrpcinfo",
     "uptime",
     "stop",
-    "syncwithvalidationinterfacequeue",
     "getblockchaininfo",
     "getblockcount",
     "getbestblockhash",
