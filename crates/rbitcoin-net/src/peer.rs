@@ -2507,7 +2507,11 @@ fn on_inv(
                 }
                 if relay {
                     if let Some(mp) = hub.mempool() {
-                        if !mp.try_contains(txid) {
+                        if mp.try_contains(txid) {
+                            if let Some(s) = session {
+                                let _ = mp.add_orphan_announcer(txid, s.id);
+                            }
+                        } else {
                             want.push(Inventory::WitnessTransaction(*txid));
                             inv_tx_n = inv_tx_n.saturating_add(1);
                         }
@@ -2520,7 +2524,11 @@ fn on_inv(
                 }
                 if relay {
                     if let Some(mp) = hub.mempool() {
-                        if !mp.try_contains_wtxid(wtxid) {
+                        if mp.try_contains_wtxid(wtxid) {
+                            if let Some(s) = session {
+                                let _ = mp.add_orphan_announcer_wtxid(wtxid, s.id);
+                            }
+                        } else {
                             want.push(Inventory::WTx(*wtxid));
                             inv_tx_n = inv_tx_n.saturating_add(1);
                         }
@@ -3134,7 +3142,10 @@ async fn on_tx(
         {
             let txid = tx.compute_txid();
             follow.from_this_peer.insert(txid, FROM_THIS_PEER_CAP);
-            match mp.accept_tx_async(tx.clone()).await {
+            match mp
+                .accept_tx_from_async(tx.clone(), session.map(|s| s.id))
+                .await
+            {
                 Ok(r) => {
                     if let Some(s) = session {
                         s.note_last_transaction();

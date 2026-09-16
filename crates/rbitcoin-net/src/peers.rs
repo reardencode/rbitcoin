@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use tokio::sync::mpsc;
 
 /// Session writer payload: application messages or pre-encoded v2 block bytes.
@@ -1007,6 +1007,8 @@ pub struct PeerHub {
     /// P2P listen port used with advertised external IPs.
     listen_port: AtomicU16,
     asmap: Mutex<Option<Arc<crate::asmap::AsMap>>>,
+    /// Tip-mode mempool for Core `EraseForPeer` on disconnect.
+    mempool: Mutex<Option<Weak<crate::tx_relay::MempoolHub>>>,
 }
 
 fn canonical_bind(addr: SocketAddr) -> SocketAddr {
@@ -1077,7 +1079,12 @@ impl PeerHub {
             external_ips: Mutex::new(Vec::new()),
             listen_port: AtomicU16::new(0),
             asmap: Mutex::new(None),
+            mempool: Mutex::new(None),
         })
+    }
+
+    pub fn attach_mempool(&self, mp: &Arc<crate::tx_relay::MempoolHub>) {
+        *self.mempool.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::downgrade(mp));
     }
 
     pub fn set_asmap(&self, m: Option<Arc<crate::asmap::AsMap>>) {
@@ -1599,6 +1606,15 @@ impl PeerHub {
     }
 
     pub fn unregister(&self, id: u64) {
+        if let Some(mp) = self
+            .mempool
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(Weak::upgrade)
+        {
+            mp.erase_orphans_for_peer(id);
+        }
         let removed = self
             .live
             .write()

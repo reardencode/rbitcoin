@@ -727,11 +727,24 @@ impl ActiveMempool {
 
     /// Park `tx` waiting on `missing` parent txids (from [`prepare_admit`]).
     pub fn park_orphan(&mut self, tx: &Transaction, missing: BTreeSet<Txid>) -> AcceptError {
+        self.park_orphan_from(tx, missing, None)
+    }
+
+    /// Park with a P2P announcer (`getorphantxs` `from`).
+    pub fn park_orphan_from(
+        &mut self,
+        tx: &Transaction,
+        missing: BTreeSet<Txid>,
+        from: Option<u64>,
+    ) -> AcceptError {
         let txid = tx.compute_txid();
         if self.graph.get(&txid).is_some() {
             return AcceptError::Duplicate(txid);
         }
         if let Some(parked) = self.orphanage.missing_of(&txid).cloned() {
+            if let Some(peer) = from {
+                self.orphanage.add_announcer(&txid, peer);
+            }
             return AcceptError::Orphaned {
                 txid,
                 missing: parked,
@@ -741,7 +754,10 @@ impl ActiveMempool {
         if missing.is_empty() {
             return AcceptError::MissingPrevout(tx.input[0].previous_output);
         }
-        if self.orphanage.insert(tx.clone(), missing.clone()) {
+        if self
+            .orphanage
+            .insert_from(tx.clone(), missing.clone(), from)
+        {
             AcceptError::Orphaned {
                 txid,
                 missing,

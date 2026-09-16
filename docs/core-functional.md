@@ -159,7 +159,8 @@ still exists so `rpc_getblockstats.py`'s rename-file needle can run; the rest
 of that script is `submitblock` + archive `getblockstats`. `feature_port.py`
 is `run`: `-bind`/`-port` become `--listen` on those sockets.
 `feature_filelock.py` is `run`: the node exclusive-locks datadir and
-`{datadir}/blocks` (and `--blocksdir`).
+`{datadir}/blocks` (and `--blocksdir`). `rpc_orphans.py` is `run`: hidden
+`getorphantxs` plus orphan announcers / `EraseForPeer`.
 
 ## CI
 

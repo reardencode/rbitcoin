@@ -4,7 +4,9 @@ use crate::config::NodeConfig;
 use crate::error::NodeError;
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 /// Held exclusive `.lock` files. Dropping releases the flock.
 #[derive(Debug)]

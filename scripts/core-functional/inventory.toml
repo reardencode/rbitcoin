@@ -926,9 +926,7 @@ analog = "official: dual-connect getconnectioncount + last_block/last_transactio
 
 [[test]]
 name = "rpc_orphans.py"
-status = "skip"
-reason = "rpc-missing"
-analog = "follow-up: orphan RPCs"
+status = "run"
 
 [[test]]
 name = "rpc_packages.py"

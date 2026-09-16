@@ -73,6 +73,10 @@ before 1.0).
   `{datadir}/blocks/.lock` (plus `--blocksdir`). `feature_filelock.py` is
   `run`.
 
+- **Hidden `getorphantxs`:** verbosity 0/1/2, `from[]` announcer peer ids,
+  Core `EraseForPeer` on disconnect. Handshake/INV stay off the tokio
+  reactor write lock. `rpc_orphans.py` is `run`.
+
 - **Coverage ratchet is merge-base, not tip of master:** PRs must not lower
   the **displayed 2-decimal** production LCOV percent vs the **highest**
   green-`master` snapshot whose SHA is an ancestor of

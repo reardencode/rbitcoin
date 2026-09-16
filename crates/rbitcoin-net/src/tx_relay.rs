@@ -1254,8 +1254,17 @@ impl MempoolHub {
     /// verify runs on the shared `rbtc-scripts` path **outside** the mempool
     /// mutex so concurrent readers are not blocked by interpreter CPU.
     pub fn accept_tx(&self, tx: &Transaction) -> Result<AcceptResult, AcceptError> {
+        self.accept_tx_from(tx, None)
+    }
+
+    /// Accept, recording `from` as an orphan announcer when parked.
+    pub fn accept_tx_from(
+        &self,
+        tx: &Transaction,
+        from: Option<u64>,
+    ) -> Result<AcceptResult, AcceptError> {
         crate::reactor::assert_not_reactor("mempool accept");
-        self.accept_with_utxo(tx, &self.utxo_provider())
+        self.accept_with_utxo(tx, &self.utxo_provider(), from)
     }
 
     /// Prepare under read lock; scripts off-lock. Parking is the caller's job.
@@ -1309,6 +1318,7 @@ impl MempoolHub {
         &self,
         tx: &Transaction,
         utxo: &impl rbitcoin_mempool::UtxoProvider,
+        from: Option<u64>,
     ) -> Result<AcceptResult, AcceptError> {
         utxo.note_spender(tx);
         let t0 = Instant::now();
@@ -1333,7 +1343,7 @@ impl MempoolHub {
                     }
                     let parked = {
                         let mut g = self.lock_write();
-                        g.park_orphan(tx, missing.clone())
+                        g.park_orphan_from(tx, missing.clone(), from)
                     };
                     let us = t0.elapsed().as_micros() as u64;
                     self.meter_accept_stages(lock_us, stages);
@@ -1519,7 +1529,7 @@ impl MempoolHub {
             g.take_orphan_children(parent)
         };
         for child in children {
-            let _ = self.accept_with_utxo(&child, utxo);
+            let _ = self.accept_with_utxo(&child, utxo, None);
         }
     }
 
@@ -1528,10 +1538,18 @@ impl MempoolHub {
         self: &Arc<Self>,
         tx: Transaction,
     ) -> Result<AcceptResult, AcceptError> {
+        self.accept_tx_from_async(tx, None).await
+    }
+
+    pub async fn accept_tx_from_async(
+        self: &Arc<Self>,
+        tx: Transaction,
+        from: Option<u64>,
+    ) -> Result<AcceptResult, AcceptError> {
         let hub = Arc::clone(self);
         tokio::task::spawn_blocking(move || {
             let _g = crate::reactor::BlockingRegion::enter();
-            hub.accept_tx(&tx)
+            hub.accept_tx_from(&tx, from)
         })
         .await
         .expect("mempool accept join")
@@ -1914,6 +1932,59 @@ impl MempoolHub {
     pub fn orphan_stats(&self) -> (usize, u64) {
         let g = self.lock_read();
         (g.orphanage.len(), g.orphanage.total_weight())
+    }
+
+    pub fn orphan_snapshot(&self) -> Vec<rbitcoin_mempool::OrphanSnapshot> {
+        self.lock_read().orphanage.snapshot()
+    }
+
+    pub fn add_orphan_announcer(&self, txid: &Txid, peer: u64) -> bool {
+        if self
+            .inner
+            .try_read()
+            .ok()
+            .is_none_or(|g| !g.orphanage.contains(txid))
+        {
+            return false;
+        }
+        self.orphan_write(|g| g.orphanage.add_announcer(txid, peer))
+            .unwrap_or(false)
+    }
+
+    pub fn add_orphan_announcer_wtxid(&self, wtxid: &Wtxid, peer: u64) -> bool {
+        if self
+            .inner
+            .try_read()
+            .ok()
+            .is_none_or(|g| !g.orphanage.contains_wtxid(wtxid))
+        {
+            return false;
+        }
+        self.orphan_write(|g| g.orphanage.add_announcer_wtxid(wtxid, peer))
+            .unwrap_or(false)
+    }
+
+    pub fn erase_orphans_for_peer(&self, peer: u64) {
+        let skip = self
+            .inner
+            .try_read()
+            .ok()
+            .is_some_and(|g| !g.orphanage.has_announcer(peer));
+        if skip {
+            return;
+        }
+        let _ = self.orphan_write(|g| g.orphanage.erase_for_peer(peer));
+    }
+
+    /// Handshake/INV/disconnect run on the reactor. Prefer `try_write`; wait only off-reactor.
+    fn orphan_write<R>(&self, f: impl FnOnce(&mut ActiveMempool) -> R) -> Option<R> {
+        if let Ok(mut g) = self.inner.try_write() {
+            return Some(f(&mut g));
+        }
+        if crate::reactor::on_tokio_worker() && !crate::reactor::in_blocking_region() {
+            return None;
+        }
+        Some(f(&mut self.lock_write()))
     }
 
     /// Unique missing parents not already held and not asked within TTL.
@@ -3496,6 +3567,43 @@ mod tests {
     }
 
     #[test]
+    fn accept_from_peer_erase_drops_orphan() {
+        let dir = tmp();
+        let store_dir = tmp();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
+        let hub = MempoolHub::open(&dir, Arc::new(q)).unwrap();
+        hub.set_relay_enabled(true);
+        let tx = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array([9u8; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let err = hub.accept_tx_from(&tx, Some(4)).unwrap_err();
+        assert!(matches!(err, AcceptError::Orphaned { .. }), "{err}");
+        assert_eq!(hub.orphan_snapshot()[0].announcers, vec![4]);
+        hub.add_orphan_announcer(&tx.compute_txid(), 8);
+        assert_eq!(hub.orphan_snapshot()[0].announcers, vec![4, 8]);
+        hub.erase_orphans_for_peer(4);
+        assert_eq!(hub.orphan_count(), 1);
+        hub.erase_orphans_for_peer(8);
+        assert_eq!(hub.orphan_count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&store_dir);
+    }
+
+    #[test]
     fn compact_fill_uses_parked_orphan() {
         use bitcoin::bip152::ShortId;
         use bitcoin::hashes::Hash;
@@ -4237,6 +4345,91 @@ mod tests {
         let _ = std::fs::remove_dir_all(&store_dir);
     }
 
+    fn parked_orphan_tx() -> Transaction {
+        Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array([9u8; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        }
+    }
+
+    /// Handshake `unregister` runs on the reactor with an empty orphanage.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn erase_orphans_empty_does_not_panic_on_tokio_worker() {
+        let store_dir = tmp();
+        let mp_dir = tmp();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
+        let hub = MempoolHub::open(&mp_dir, Arc::new(q)).unwrap();
+        hub.set_relay_enabled(true);
+        let join = tokio::spawn(async move {
+            let name = std::thread::current().name().unwrap_or("").to_string();
+            let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                hub.erase_orphans_for_peer(0);
+            }));
+            (name, panicked)
+        });
+        let (name, panicked) = join.await.expect("join worker");
+        assert!(
+            name.starts_with("tokio-rt-worker"),
+            "spawned task must run on a tokio worker, got {name:?}"
+        );
+        assert!(
+            panicked.is_ok(),
+            "empty erase_orphans_for_peer must not take inner write on reactor: {panicked:?}"
+        );
+        let _ = std::fs::remove_dir_all(&mp_dir);
+        let _ = std::fs::remove_dir_all(&store_dir);
+    }
+
+    /// INV of a parked orphan notes the announcer on the reactor.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn add_orphan_announcer_does_not_panic_on_tokio_worker() {
+        let store_dir = tmp();
+        let mp_dir = tmp();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
+        let hub = MempoolHub::open(&mp_dir, Arc::new(q)).unwrap();
+        hub.set_relay_enabled(true);
+        let tx = parked_orphan_tx();
+        let err = hub.accept_tx_from(&tx, Some(4)).unwrap_err();
+        assert!(matches!(err, AcceptError::Orphaned { .. }), "{err}");
+        let txid = tx.compute_txid();
+        let wtxid = tx.compute_wtxid();
+        let join = tokio::spawn(async move {
+            let name = std::thread::current().name().unwrap_or("").to_string();
+            let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                assert!(hub.add_orphan_announcer(&txid, 8));
+                assert!(hub.add_orphan_announcer_wtxid(&wtxid, 9));
+                hub.erase_orphans_for_peer(4);
+                hub.erase_orphans_for_peer(8);
+                hub.erase_orphans_for_peer(9);
+            }));
+            (name, panicked)
+        });
+        let (name, panicked) = join.await.expect("join worker");
+        assert!(
+            name.starts_with("tokio-rt-worker"),
+            "spawned task must run on a tokio worker, got {name:?}"
+        );
+        assert!(
+            panicked.is_ok(),
+            "orphan announcer + EraseForPeer must not take blocking inner write on reactor: {panicked:?}"
+        );
+        let _ = std::fs::remove_dir_all(&mp_dir);
+        let _ = std::fs::remove_dir_all(&store_dir);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn min_relay_sat_kvb_does_not_panic_on_tokio_worker() {
         let store_dir = tmp();
@@ -4361,7 +4554,7 @@ mod tests {
             write_hits: Arc::clone(&hits),
         };
         let tx = spend_true(cbs[0], 1_000, ScriptBuf::from_bytes(vec![0x51]));
-        hub.accept_with_utxo(&tx, &probe).expect("accept");
+        hub.accept_with_utxo(&tx, &probe, None).expect("accept");
         assert_eq!(
             hits.load(Ordering::Relaxed),
             0,
@@ -4424,7 +4617,7 @@ mod tests {
             }],
         };
         let h = Arc::clone(&hub);
-        let join = thread::spawn(move || h.accept_with_utxo(&tx, &stall));
+        let join = thread::spawn(move || h.accept_with_utxo(&tx, &stall, None));
         let start = Instant::now();
         while !entered.load(Ordering::Acquire) {
             assert!(
