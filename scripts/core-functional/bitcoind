@@ -19,6 +19,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 from map_debuglog import apply_line, load_rules, map_error_stderr
@@ -609,6 +610,28 @@ def translate(
     )
 
 
+def emit_child_init_errors(log_path: Path, prior: int, rules: list) -> None:
+    """Copy Core-shaped InitError needles from the node's debug.log to stderr."""
+    try:
+        with log_path.open("rb") as f:
+            f.seek(prior)
+            text = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        text = ""
+    errs = [ln for ln in text.splitlines() if ln.startswith("Error:")]
+    # Core InitError FULL_TEXT for a tip more than 2h ahead of -mocktime.
+    if "appears to be from the future" in text:
+        print(
+            "The block database contains a block which appears to be from the future."
+            " This may be due to your computer's date and time being set incorrectly."
+            " Only rebuild the block database if you are sure that your computer's date and time are correct.\n"
+            "Please restart with -reindex or -reindex-chainstate to recover.",
+            file=sys.stderr,
+        )
+    elif errs:
+        print("\n".join(map_error_stderr(errs, rules)), file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv if argv is None else argv)
     print_cmd = "--print-cmd" in argv
@@ -667,6 +690,23 @@ def main(argv: list[str] | None = None) -> int:
         line = text.strip()
         return line or None
 
+    # Wait for cookie or InitError exit before binding the RPC proxy. A second
+    # TestNode with `-datadir` of a live node shares that node's rpcport
+    # (`feature_filelock.py`); binding first would traceback Address already
+    # in use instead of the lock InitError.
+    deadline = time.monotonic() + 120
+    while child.poll() is None and not cookie_path.is_file():
+        if time.monotonic() > deadline:
+            break
+        time.sleep(0.05)
+    if child.poll() is not None:
+        pump.join(timeout=2)
+        log_f.close()
+        rc = child.returncode
+        if rc:
+            emit_child_init_errors(log_path, prior, rules)
+        return int(rc) if rc is not None else 1
+
     proxy = RpcProxy(("127.0.0.1", public_rpc), node_url, _cookie)
     register_utility(proxy)
     register_wallet(proxy, f"http://127.0.0.1:{esplora_port(public_rpc)}")
@@ -709,24 +749,7 @@ def main(argv: list[str] | None = None) -> int:
     pump.join(timeout=2)
     log_f.close()
     if rc:
-        try:
-            with log_path.open("rb") as f:
-                f.seek(prior)
-                text = f.read().decode("utf-8", errors="replace")
-        except OSError:
-            text = ""
-        errs = [ln for ln in text.splitlines() if ln.startswith("Error:")]
-        # Core InitError FULL_TEXT for a tip more than 2h ahead of -mocktime.
-        if "appears to be from the future" in text:
-            print(
-                "The block database contains a block which appears to be from the future."
-                " This may be due to your computer's date and time being set incorrectly."
-                " Only rebuild the block database if you are sure that your computer's date and time are correct.\n"
-                "Please restart with -reindex or -reindex-chainstate to recover.",
-                file=sys.stderr,
-            )
-        elif errs:
-            print("\n".join(map_error_stderr(errs, rules)), file=sys.stderr)
+        emit_child_init_errors(log_path, prior, rules)
     return int(rc) if rc is not None else 1
 
 

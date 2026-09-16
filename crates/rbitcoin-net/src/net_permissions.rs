@@ -437,4 +437,54 @@ mod tests {
             ["bloomfilter", "noban", "forcerelay", "relay", "download"]
         );
     }
+
+    #[test]
+    fn whitebind_out_is_init_error() {
+        let err = parse_whitebind("noban,out@127.0.0.1:18444").unwrap_err();
+        assert!(
+            err.contains("whitebind may only be used for incoming connections"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn whitelist_prefix_and_ipv6() {
+        let g = parse_whitelist("noban@127.0.0.1/0").unwrap();
+        assert!(g.subnet.contains(IpAddr::V4(Ipv4Addr::UNSPECIFIED)));
+        assert!(!g.subnet.contains(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)));
+        let err = parse_whitelist("noban@127.0.0.1/33").unwrap_err();
+        assert!(err.contains("Invalid netmask specified in"), "{err}");
+        let err = parse_whitelist("noban@127.0.0.1/nope").unwrap_err();
+        assert!(err.contains("Invalid netmask specified in"), "{err}");
+    }
+
+    #[test]
+    fn whitebind_port_zero_and_missing() {
+        let err = parse_whitebind("noban@127.0.0.1").unwrap_err();
+        assert!(
+            err.contains("Need to specify a port with -whitebind"),
+            "{err}"
+        );
+        let err = parse_whitebind("noban@127.0.0.1:0").unwrap_err();
+        assert!(
+            err.contains("Need to specify a port with -whitebind"),
+            "{err}"
+        );
+        let err = parse_whitebind("noban@not-an-addr:18444").unwrap_err();
+        assert!(err.contains("Cannot resolve -whitebind address"), "{err}");
+    }
+
+    #[test]
+    fn flags_bitor_and_unmatched_subnet() {
+        let a = NetPermissionFlags::NOBAN | NetPermissionFlags::RELAY;
+        assert!(a.has(NetPermissionFlags::NOBAN));
+        assert!(a.has(NetPermissionFlags::RELAY));
+        let mut b = NetPermissionFlags::BLOOM;
+        b |= NetPermissionFlags::ADDR;
+        assert_eq!(b.to_strings(), ["bloomfilter", "addr"]);
+        let g = parse_whitelist("noban@10.0.0.1/32").unwrap();
+        let mut t = NetPermTable::default();
+        t.whitelist.push(g);
+        assert!(t.strings_for(ip(), true, bind()).is_empty());
+    }
 }

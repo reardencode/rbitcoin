@@ -444,6 +444,55 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# feature_filelock.py starts a second node with the live node's -datadir (same
+# rpcport in bitcoin.conf). InitError must win over proxy bind.
+FAKE_LOCK="$WORKDIR/rbitcoin-node-locked"
+printf '%s\n' '#!/bin/sh' \
+  'echo "Error: Cannot obtain a lock on directory /tmp/dd. rbitcoin is probably already running."' \
+  'exit 1' >"$FAKE_LOCK"
+chmod +x "$FAKE_LOCK"
+LOCK_DD="$WORKDIR/filelock-rpcport"
+mkdir -p "$LOCK_DD"
+HOLD_PORT_FILE="$WORKDIR/hold.port"
+python3 - "$HOLD_PORT_FILE" <<'PY' &
+import socket, sys, time
+path = sys.argv[1]
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+open(path, "w").write(str(s.getsockname()[1]))
+time.sleep(60)
+PY
+HOLD_PY=$!
+HOLD_PORT=""
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  if [ -s "$HOLD_PORT_FILE" ]; then
+    HOLD_PORT="$(cat "$HOLD_PORT_FILE")"
+    break
+  fi
+  sleep 0.05
+done
+if [ -z "$HOLD_PORT" ]; then
+  echo "not ok - lock InitError before proxy bind (no hold port)"
+  FAIL=$((FAIL + 1))
+  kill "$HOLD_PY" 2>/dev/null || true
+else
+  printf 'regtest=1\nrpcport=%s\n' "$HOLD_PORT" >"$LOCK_DD/bitcoin.conf"
+  LOCK_OUT=""
+  if LOCK_OUT="$(RBITCOIN_NODE="$FAKE_LOCK" "$SHIM" -datadir="$LOCK_DD" -regtest 2>&1)"; then
+    echo "not ok - lock InitError before proxy bind (expected failure)"
+    FAIL=$((FAIL + 1))
+  elif printf '%s' "$LOCK_OUT" | grep -q -- "Error: Cannot obtain a lock on directory /tmp/dd. Bitcoin Core is probably already running." \
+    && ! printf '%s' "$LOCK_OUT" | grep -q -- "Address already in use"; then
+    echo "ok - lock InitError before proxy bind"
+    PASS=$((PASS + 1))
+  else
+    echo "not ok - lock InitError before proxy bind (got: $LOCK_OUT)"
+    FAIL=$((FAIL + 1))
+  fi
+  kill "$HOLD_PY" 2>/dev/null || true
+  wait "$HOLD_PY" 2>/dev/null || true
+fi
+
 FAKE_MCW="$WORKDIR/rbitcoin-node-minchainwork"
 printf '%s\n' '#!/bin/sh' \
   'echo "Error: configuration error: Invalid minimum work specified (test), must be up to 64 hex digits"' \
