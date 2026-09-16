@@ -3244,6 +3244,7 @@ fn test_version(
 
 #[test]
 fn getpeerinfo_connecting_has_unknown_sync_and_zero_offset() {
+    use bitcoin::hashes::Hash;
     use rbitcoin_net::{PeerConnType, PeerHub};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -3251,7 +3252,8 @@ fn getpeerinfo_connecting_has_unknown_sync_and_zero_offset() {
     let hub = PeerHub::new();
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
     let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18445);
-    hub.register_connecting(addr, bind, false, PeerConnType::OutboundFullRelay);
+    let live = hub.register_connecting(addr, bind, false, PeerConnType::OutboundFullRelay);
+    live.note_best_known(bitcoin::BlockHash::from_byte_array([0xab; 32]));
     ctx.peers = Some(hub);
     let r = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
     let row = &r.as_array().unwrap()[0];
@@ -3293,6 +3295,66 @@ fn getpeerinfo_synced_heights_from_best_known() {
     let r = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
     let row = &r.as_array().unwrap()[0];
     assert_eq!(row["synced_headers"], json!(-1));
+    assert_eq!(row["synced_blocks"], json!(-1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn getpeerinfo_synced_heights_via_query_without_chain() {
+    use rbitcoin_net::{PeerConnType, PeerHub};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let (mut ctx, dir, chain) = ctx_regtest_hub();
+    let genesis = chain.tip_hash().expect("genesis");
+    ctx.chain = None;
+    let hub = PeerHub::new();
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+    let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18445);
+    let live = hub.register(
+        addr,
+        bind,
+        &test_version(0, 0),
+        false,
+        PeerConnType::OutboundFullRelay,
+    );
+    live.note_best_known(genesis);
+    ctx.peers = Some(hub);
+    let r = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
+    let row = &r.as_array().unwrap()[0];
+    assert_eq!(row["synced_headers"], json!(0));
+    assert_eq!(row["synced_blocks"], json!(0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn getpeerinfo_header_only_best_known_is_not_synced_blocks() {
+    use bitcoin::consensus::encode::serialize;
+    use rbitcoin_consensus::mine_regtest_paying;
+    use rbitcoin_net::{PeerConnType, PeerHub};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let (mut ctx, dir, chain) = ctx_regtest_hub();
+    let (_, script) = p2wpkh_regtest();
+    let prev = chain.tip_hash().unwrap();
+    let time = chain.tip_header().unwrap().time + 1;
+    let child = mine_regtest_paying(prev, time, 1, script, vec![]);
+    let hex = rbitcoin_primitives::hex_encode(serialize(&child));
+    dispatch(&ctx, "submitheader", vec![json!(hex)]).unwrap();
+    let hub = PeerHub::new();
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+    let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18445);
+    let live = hub.register(
+        addr,
+        bind,
+        &test_version(0, 0),
+        false,
+        PeerConnType::OutboundFullRelay,
+    );
+    live.note_best_known(child.block_hash());
+    ctx.peers = Some(hub);
+    let r = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
+    let row = &r.as_array().unwrap()[0];
+    assert_eq!(row["synced_headers"], json!(1));
     assert_eq!(row["synced_blocks"], json!(-1));
     let _ = std::fs::remove_dir_all(&dir);
 }
