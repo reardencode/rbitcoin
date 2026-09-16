@@ -3176,6 +3176,12 @@ fn getpeerinfo_lists_registered_session() {
     hub.set_relay_perm(true);
     let r = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
     assert_eq!(r.as_array().unwrap()[0]["permissions"], json!(["relay"]));
+    hub.set_noban(true);
+    let r = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
+    assert_eq!(
+        r.as_array().unwrap()[0]["permissions"],
+        json!(["noban", "relay"])
+    );
     assert_eq!(arr[0]["addr"], "127.0.0.1:18444");
     assert_eq!(arr[0]["last_block"], 0);
     assert_eq!(arr[0]["last_transaction"], 0);
@@ -3515,6 +3521,10 @@ fn addnode_and_disconnectnode_on_table() {
     assert!(e["message"].as_str().unwrap().contains("dialer"), "{e}");
     let e = dispatch(&ctx, "disconnectnode", vec![json!("127.0.0.1:1")]).unwrap_err();
     assert_eq!(e["code"], ERR_CLIENT_NODE_NOT_CONNECTED);
+    let e = dispatch(&ctx, "disconnectnode", named(json!({"nodeid": 99}))).unwrap_err();
+    assert_eq!(e["code"], ERR_CLIENT_NODE_NOT_CONNECTED);
+    let e = dispatch(&ctx, "disconnectnode", vec![]).unwrap_err();
+    assert_eq!(e["code"], ERR_INVALID_PARAMS);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
