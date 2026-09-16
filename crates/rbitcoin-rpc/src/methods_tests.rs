@@ -3176,12 +3176,6 @@ fn getpeerinfo_lists_registered_session() {
     hub.set_relay_perm(true);
     let r = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
     assert_eq!(r.as_array().unwrap()[0]["permissions"], json!(["relay"]));
-    hub.set_noban(true);
-    let r = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
-    assert_eq!(
-        r.as_array().unwrap()[0]["permissions"],
-        json!(["noban", "relay"])
-    );
     assert_eq!(arr[0]["addr"], "127.0.0.1:18444");
     assert_eq!(arr[0]["last_block"], 0);
     assert_eq!(arr[0]["last_transaction"], 0);
@@ -3474,6 +3468,9 @@ fn getpeerinfo_sent_pingwait_and_limited_services() {
     let row = &info.as_array().unwrap()[0];
     assert_eq!(row["pingtime"], json!(29.0));
     assert_eq!(row["minping"], json!(29.0));
+    hub.set_noban(true);
+    let info = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
+    assert_eq!(info.as_array().unwrap()[0]["permissions"], json!(["noban"]));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
