@@ -765,11 +765,19 @@ def main(argv: list[str] | None = None) -> int:
 
     def _pump() -> None:
         assert child.stdout is not None
+        tee = os.environ.get("RBITCOIN_LOG_STDOUT")
         for raw in iter(child.stdout.readline, b""):
             log_f.write(raw)
+            if tee:
+                sys.stdout.buffer.write(raw)
+                sys.stdout.buffer.flush()
             text = raw.decode("utf-8", errors="replace")
             for mapped in apply_line(text, rules):
-                log_f.write((mapped + "\n").encode())
+                line = (mapped + "\n").encode()
+                log_f.write(line)
+                if tee:
+                    sys.stdout.buffer.write(line)
+                    sys.stdout.buffer.flush()
             log_f.flush()
 
     pump = threading.Thread(target=_pump, daemon=True)
