@@ -765,7 +765,7 @@ def main(argv: list[str] | None = None) -> int:
 
     def _pump() -> None:
         assert child.stdout is not None
-        tee = os.environ.get("RBITCOIN_LOG_STDOUT")
+        tee = bool(os.environ.get("RBITCOIN_LOG_STDOUT"))
         for raw in iter(child.stdout.readline, b""):
             log_f.write(raw)
             if tee:
