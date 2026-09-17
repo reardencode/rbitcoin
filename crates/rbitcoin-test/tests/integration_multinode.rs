@@ -2311,7 +2311,7 @@ async fn node_run_p2p_short() {
             .with_network(Network::Regtest)
             .with_p2p_listen("127.0.0.1:0".parse().unwrap())
             .with_tiny_heads();
-        cfg.listen.connect = vec![seed_addr];
+        cfg.listen.connect = vec![seed_addr.to_string()];
         cfg.listen.use_seeds = false;
         cfg.listen.electrum = Some(electrum_addr);
         cfg.listen.esplora = Some(esplora_addr);

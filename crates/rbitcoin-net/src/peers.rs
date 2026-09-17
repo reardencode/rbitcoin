@@ -8,7 +8,7 @@ use bitcoin::p2p::ServiceFlags;
 use bitcoin::{BlockHash, Wtxid};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use tokio::sync::mpsc;
@@ -2015,10 +2015,52 @@ fn service_flags_u64(f: ServiceFlags) -> u64 {
     f.to_u64()
 }
 
-/// Parse Core `ip:port` / `[v6]:port`.
+/// Parse Core `ip:port` / `[v6]:port`. Hostnames need [`parse_peer_addr_with_port`].
 pub fn parse_peer_addr(s: &str) -> Result<SocketAddr, NetError> {
-    s.parse()
-        .map_err(|_| NetError::Encode(format!("bad peer address {s}")))
+    parse_peer_addr_with_port(s, None)
+}
+
+/// Parse `ip:port`, `[v6]:port`, `host:port`, or `host` (uses `default_port`).
+///
+/// Hostnames resolve at call time (`ToSocketAddrs`) so kube-dns / late DNS can
+/// appear after listen. Dual-stack names prefer IPv4 so a `127.0.0.1` listener
+/// is reached via `localhost`.
+pub fn parse_peer_addr_with_port(
+    s: &str,
+    default_port: Option<u16>,
+) -> Result<SocketAddr, NetError> {
+    let bad = || NetError::Encode(format!("bad peer address {s}"));
+    if let Ok(addr) = s.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+    if let Ok(ip) = s.parse::<IpAddr>() {
+        let port = default_port.ok_or_else(bad)?;
+        return Ok(SocketAddr::new(ip, port));
+    }
+    let (host, port) = match s.rsplit_once(':') {
+        Some((h, p)) if !h.is_empty() && !h.starts_with('[') => match p.parse::<u16>() {
+            Ok(port) => (h, port),
+            Err(_) => {
+                let port = default_port.ok_or_else(bad)?;
+                (s, port)
+            }
+        },
+        _ => {
+            let port = default_port.ok_or_else(bad)?;
+            (s, port)
+        }
+    };
+    if host.is_empty() {
+        return Err(bad());
+    }
+    let with_port = format!("{host}:{port}");
+    let addrs: Vec<SocketAddr> = with_port.to_socket_addrs().map_err(|_| bad())?.collect();
+    addrs
+        .iter()
+        .copied()
+        .find(|a| a.is_ipv4())
+        .or_else(|| addrs.first().copied())
+        .ok_or_else(bad)
 }
 
 #[cfg(test)]
@@ -2929,5 +2971,24 @@ mod tests {
             addr_ips(&hub.addr_response_for_bind(SocketAddr::from(([127, 0, 0, 1], 18444))));
         assert_eq!(expired.len(), 1000);
         assert_ne!(a, expired);
+    }
+
+    #[test]
+    fn parse_peer_addr_localhost_and_default_port() {
+        let with_port = parse_peer_addr("localhost:18444").expect("localhost:port");
+        assert_eq!(with_port.port(), 18444);
+        assert!(with_port.ip().is_loopback(), "{with_port}");
+
+        let no_port =
+            parse_peer_addr_with_port("localhost", Some(18444)).expect("localhost default");
+        assert_eq!(no_port.port(), 18444);
+        assert!(no_port.ip().is_loopback(), "{no_port}");
+
+        let lit: SocketAddr = "127.0.0.1:18444".parse().unwrap();
+        assert_eq!(parse_peer_addr("127.0.0.1:18444").unwrap(), lit);
+
+        let err = parse_peer_addr_with_port("not-a-real-host.invalid", Some(18444)).unwrap_err();
+        let s = err.to_string();
+        assert!(s.contains("bad peer address"), "{s}");
     }
 }

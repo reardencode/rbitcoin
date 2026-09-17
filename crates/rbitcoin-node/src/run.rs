@@ -6,9 +6,9 @@ use rbitcoin_electrum::{run_electrum, ElectrumConfig, ElectrumHandle, TipNotify}
 use rbitcoin_esplora::{run_esplora, BlockTemplateFn, EsploraConfig, EsploraHandle};
 use rbitcoin_log::{debug, enabled, info, warn, Level};
 use rbitcoin_net::{
-    default_port, format_serve_perf, format_tip_perf_sizes, netgroup, read_proc_rss,
-    sample_reset_serve_perf, AddrMan, AsMap, BlockingRegion, ChainHub, IbdConfig, MempoolHub,
-    P2PNode, PeerConnType, TipEvent, TipPerfSizes,
+    default_port, format_serve_perf, format_tip_perf_sizes, netgroup, parse_peer_addr_with_port,
+    read_proc_rss, sample_reset_serve_perf, AddrMan, AsMap, BlockingRegion, ChainHub, IbdConfig,
+    MempoolHub, P2PNode, PeerConnType, TipEvent, TipPerfSizes,
 };
 use rbitcoin_primitives::Network;
 use rbitcoin_query::{spawn_sh_writebehind, Query};
@@ -376,7 +376,8 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     let asmap = load_asmap(config.datadir.path(), config.asmap.as_deref());
     addrman.set_asmap(asmap.clone());
     node.peers.set_asmap(asmap);
-    for c in &config.listen.connect {
+    let connect_addrs = resolve_connect_addrs(&config.listen.connect, config.network);
+    for c in &connect_addrs {
         addrman.add(*c);
     }
     if should_resolve_default_seeds(&config) {
@@ -403,8 +404,8 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     let max_out = config.listen.max_outbound.max(1) as usize;
     let candidate_n = max_out.saturating_mul(2).clamp(16, 48);
     let occupied = node.peers.live_outbound_full_relay_addrs();
-    let targets = follow_dial_targets(&config.listen.connect, &addrman, max_out, &occupied);
-    let ibd_targets = follow_dial_targets(&config.listen.connect, &addrman, candidate_n, &occupied);
+    let targets = follow_dial_targets(&connect_addrs, &addrman, max_out, &occupied);
+    let ibd_targets = follow_dial_targets(&connect_addrs, &addrman, candidate_n, &occupied);
     let catch_up = run_ibd_or_skip(
         &node,
         &ibd_targets,
@@ -1594,6 +1595,14 @@ pub(crate) fn load_asmap(datadir: &Path, configured: Option<&Path>) -> Option<Ar
     }
 }
 
+fn resolve_connect_addrs(connect: &[String], network: Network) -> Vec<SocketAddr> {
+    let port = network.default_p2p_port();
+    connect
+        .iter()
+        .filter_map(|s| parse_peer_addr_with_port(s, Some(port)).ok())
+        .collect()
+}
+
 /// `--connect` is operator-pinned: no netgroup filter. Otherwise rank + diversity.
 pub(crate) fn follow_dial_targets(
     connect: &[SocketAddr],
@@ -2260,7 +2269,7 @@ mod tests {
         let mut cfg = tiny_regtest(&dir).with_p2p_listen("127.0.0.1:0".parse().unwrap());
         cfg.listen.use_seeds = false;
         // Blackhole / closed port: connect fails fast under FOLLOW_CONNECT_SECS.
-        cfg.listen.connect = vec!["127.0.0.1:1".parse().unwrap()];
+        cfg.listen.connect = vec!["127.0.0.1:1".into()];
         cfg.max_run_secs = Some(0);
         // Dead connect should fail fast (FOLLOW_CONNECT_SECS); 20s bound for hang detection.
         let result = tokio::time::timeout(Duration::from_secs(20), run_p2p(cfg)).await;
@@ -2389,7 +2398,7 @@ mod tests {
 
         let mut cfg = tiny_regtest(&dir).with_p2p_listen("127.0.0.1:0".parse().unwrap());
         cfg.listen.use_seeds = false;
-        cfg.listen.connect = vec!["127.0.0.1:1".parse().unwrap()];
+        cfg.listen.connect = vec!["127.0.0.1:1".into()];
         cfg.max_run_secs = Some(0);
         let result = tokio::time::timeout(Duration::from_secs(20), run_p2p(cfg)).await;
         assert!(result.is_ok(), "run_p2p timed out");

@@ -4022,7 +4022,7 @@ async fn addnode_two_nodes_see_each_other() {
     ctx_a.peers = Some(Arc::clone(&na.peers));
     let (mut ctx_b, _d1) = ctx_empty();
     ctx_b.peers = Some(Arc::clone(&nb.peers));
-    let baddr = nb.local_addr.to_string();
+    let baddr = format!("localhost:{}", nb.local_addr.port());
     dispatch(&ctx_a, "addnode", vec![json!(baddr), json!("onetry")]).unwrap();
     let mut saw = false;
     for _ in 0..80 {
