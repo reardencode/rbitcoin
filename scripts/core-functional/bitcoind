@@ -327,6 +327,20 @@ def listen_targets(
     return seen
 
 
+def proxy_bind_host(rpcbind: str) -> str:
+    """Helm `rpcbind=0.0.0.0` / `[::]` binds the test proxy all-interfaces."""
+    host = (rpcbind or "").strip()
+    if host.startswith("["):
+        inner = host[1:].split("]", 1)[0]
+        if inner in ("::", "::0"):
+            return "0.0.0.0"
+    else:
+        h = host.split(":", 1)[0]
+        if h in ("0.0.0.0", "::"):
+            return "0.0.0.0"
+    return "127.0.0.1"
+
+
 def maybe_seed_store(node_dir: Path) -> None:
     """Copy the rbitcoin 199-block store into a Core cache-shaped datadir.
 
@@ -407,8 +421,8 @@ def _parse_bind(val: str) -> tuple[str, int | None, bool]:
 
 def translate(
     argv: list[str],
-) -> tuple[list[str], Path, int, Path | None, list[str], bool, list[int]]:
-    """Return (node argv, datadir, rpcport, blocksdir, bound_lines, rpc_proxy, lock_fds)."""
+) -> tuple[list[str], Path, int, Path | None, list[str], bool, list[int], str]:
+    """Return (node argv, datadir, rpcport, blocksdir, bound_lines, rpc_proxy, lock_fds, proxy_host)."""
     datadir: Path | None = None
     rpcport: str | None = None
     p2pport: str | None = None
@@ -554,7 +568,11 @@ def translate(
         raise SystemExit(0)
 
     if datadir is None:
-        raise SystemExit("bitcoind: -datadir is required")
+        env_dd = os.environ.get("BITCOIN_DATA")
+        if env_dd:
+            datadir = Path(env_dd)
+        else:
+            raise SystemExit("bitcoind: -datadir is required")
 
     conf = read_conf(datadir / "bitcoin.conf")
     if conf.get("regtest") in ("1", "true"):
@@ -624,6 +642,7 @@ def translate(
     listens = listen_targets(binds, port_n)
     if not listens:
         listens = [f"127.0.0.1:{port_n}"]
+    proxy_host = proxy_bind_host(conf.get("rpcbind") or "")
     cmd = [
         str(node),
         "--network",
@@ -655,6 +674,7 @@ def translate(
         bound_lines,
         rpc_proxy,
         lock_fds,
+        proxy_host,
     )
 
 
@@ -691,11 +711,13 @@ def main(argv: list[str] | None = None) -> int:
         bound_lines,
         rpc_proxy,
         _lock_fds,
+        proxy_host,
     ) = translate(argv)
     pid_path = node_dir / "bitcoind.pid"
     if print_cmd:
         print(" ".join(cmd))
         print(f"pidfile {pid_path}", file=sys.stderr)
+        print(f"proxy {proxy_host}:{public_rpc}", file=sys.stderr)
         return 0
     pid_path.write_text(f"{os.getpid()}\n")
     # TestNode tails this process's stderr and requires it empty on a clean
@@ -804,7 +826,7 @@ def main(argv: list[str] | None = None) -> int:
         return _child_init_exit()
 
     try:
-        proxy = RpcProxy(("127.0.0.1", public_rpc), node_url, _cookie)
+        proxy = RpcProxy((proxy_host, public_rpc), node_url, _cookie)
     except OSError:
         if child.poll() is None:
             child.terminate()
