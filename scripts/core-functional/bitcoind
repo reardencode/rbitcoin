@@ -605,6 +605,11 @@ def translate(
 
     node_dir = datadir / network
     node_dir.mkdir(parents=True, exist_ok=True)
+    pw = conf.get("rpcpassword") or ""
+    if pw:
+        tok = node_dir / "rpc.token"
+        tok.write_text(pw + "\n")
+        tok.chmod(0o600)
     maybe_seed_store(node_dir)
 
     mp = node_dir / "mempool"

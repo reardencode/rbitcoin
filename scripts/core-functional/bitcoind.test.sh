@@ -629,6 +629,15 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+if [[ -f "$WARNET_DD/regtest/rpc.token" ]] \
+  && grep -qx -- "secret0" "$WARNET_DD/regtest/rpc.token"; then
+  echo "ok - rpcpassword seeds rpc.token"
+  PASS=$((PASS + 1))
+else
+  echo "not ok - rpcpassword seeds rpc.token ($(cat "$WARNET_DD/regtest/rpc.token" 2>/dev/null || echo missing))"
+  FAIL=$((FAIL + 1))
+fi
+
 # Live smoke when a real node binary is on disk (optional in this script).
 REAL=""
 if [[ -n "${RBITCOIN_NODE_REAL:-}" && -x "${RBITCOIN_NODE_REAL}" ]]; then
