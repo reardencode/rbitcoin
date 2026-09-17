@@ -12,7 +12,7 @@ use bitcoin::BlockHash;
 use rbitcoin_consensus::{ChainParams, Milestone};
 use rbitcoin_net::{
     rehydrate_block_queue_residue, run_feeler_timed, select_inbound_eviction, IbdConfig,
-    InboundEvictCandidate, NetError, P2PNode,
+    InboundEvictCandidate, NetError, P2PNode, PeerConnType,
 };
 use rbitcoin_primitives::Height;
 use rbitcoin_query::Query;
@@ -2535,4 +2535,66 @@ async fn mocktime_generate_keeps_ponging_peer() {
     tokio::time::timeout(wall, fut)
         .await
         .unwrap_or_else(|_| panic!("mocktime_generate_keeps_ponging_peer wall timeout ({wall:?})"));
+}
+
+/// `addnode add` before the peer listens still becomes a live manual session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn addnode_add_retries_until_peer_listens() {
+    let fut = async {
+        let _live = live_p2p_lock().await;
+        let a_dir = TempDir::new().unwrap();
+        let b_dir = TempDir::new().unwrap();
+        let a = start_node(&a_dir).await;
+        let b_addr = ephemeral_addr();
+        a.peers
+            .addnode(b_addr, "add")
+            .expect("remember addnode add");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            a.peers
+                .snapshot()
+                .iter()
+                .all(|p| !p.handshake_complete || p.conn_type != PeerConnType::Manual),
+            "B is not listening yet: {:?}",
+            a.peers.snapshot()
+        );
+        let q = Query::open_or_create_tiny(b_dir.path().join("store")).unwrap();
+        let b = P2PNode::start(b_addr, q, ChainParams::regtest(), Milestone::NONE)
+            .await
+            .expect("B listen");
+        wait_ms_until(
+            12_000,
+            || {
+                a.peers.snapshot().iter().any(|p| {
+                    !p.inbound && p.conn_type == PeerConnType::Manual && p.handshake_complete
+                }) || b
+                    .peers
+                    .snapshot()
+                    .iter()
+                    .any(|p| p.inbound && p.handshake_complete)
+            },
+            || {
+                format!(
+                    "no live session after B listen a={:?} b={:?}",
+                    a.peers
+                        .snapshot()
+                        .iter()
+                        .map(|p| (p.inbound, p.conn_type, p.handshake_complete))
+                        .collect::<Vec<_>>(),
+                    b.peers
+                        .snapshot()
+                        .iter()
+                        .map(|p| (p.inbound, p.conn_type, p.handshake_complete))
+                        .collect::<Vec<_>>()
+                )
+            },
+        )
+        .await;
+        a.shutdown().await;
+        b.shutdown().await;
+    };
+    let wall = llvm_cov_wall(30, 90);
+    tokio::time::timeout(wall, fut).await.unwrap_or_else(|_| {
+        panic!("addnode_add_retries_until_peer_listens wall timeout ({wall:?})")
+    });
 }

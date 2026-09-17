@@ -31,6 +31,12 @@ before 1.0).
   before the next slice. Coverage and native `windows` / `macos` stay GitHub
   Actions. See [`docs/how-we-plan.md`](docs/how-we-plan.md).
 
+- **Hostname `--connect` / `addnode` (Q-68):** resolve host strings at each
+  dial (`localhost` and missing port use the network P2P default). `addnode add`
+  and `--connect` retry on a seconds-scale timer until a live session exists;
+  `--connect` still does not enable seed redial. Incomplete IBD at genesis with
+  `--connect` still enters tip-follow so a late peer can attach.
+
 ## [0.7.0] — 2026-09-18
 
 Named published **0.7** line. **Not 1.0.** Patch branch is `v0.7.x`. Schema 24

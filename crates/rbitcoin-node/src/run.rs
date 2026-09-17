@@ -376,6 +376,10 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     let asmap = load_asmap(config.datadir.path(), config.asmap.as_deref());
     addrman.set_asmap(asmap.clone());
     node.peers.set_asmap(asmap);
+    node.peers.set_connect_hosts(
+        config.listen.connect.clone(),
+        config.network.default_p2p_port(),
+    );
     let connect_addrs = resolve_connect_addrs(&config.listen.connect, config.network);
     for c in &connect_addrs {
         addrman.add(*c);
@@ -416,6 +420,12 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         &shutdown,
     )
     .await;
+
+    let catch_up = catch_up_with_connect(
+        catch_up,
+        !config.listen.connect.is_empty(),
+        shutdown.requested(),
+    );
 
     // Still enter tip-follow when work is below `--min-chain-work` so later
     // blocks can raise the tip. Relay / getheaders stay gated on the hub floor.
@@ -1060,6 +1070,19 @@ pub(crate) fn catch_up_after_err(tip: u32, index_is_tip: bool, shutdown: bool) -
         CatchUp::complete_dial_failed()
     } else {
         CatchUp::Incomplete
+    }
+}
+
+/// `--connect` at genesis still follows: the peer may listen after we dial.
+pub(crate) fn catch_up_with_connect(
+    catch_up: CatchUp,
+    has_connect: bool,
+    shutdown: bool,
+) -> CatchUp {
+    if catch_up.is_complete() || shutdown || !has_connect {
+        catch_up
+    } else {
+        CatchUp::complete_dial_failed()
     }
 }
 
@@ -1882,6 +1905,22 @@ mod tests {
         assert_eq!(catch_up_after_err(10, false, false), CatchUp::Incomplete);
         assert_eq!(catch_up_after_err(0, true, false), CatchUp::Incomplete);
         assert_eq!(catch_up_after_err(10, true, true), CatchUp::Incomplete);
+        assert_eq!(
+            catch_up_with_connect(CatchUp::Incomplete, true, false),
+            CatchUp::complete_dial_failed()
+        );
+        assert_eq!(
+            catch_up_with_connect(CatchUp::Incomplete, false, false),
+            CatchUp::Incomplete
+        );
+        assert_eq!(
+            catch_up_with_connect(CatchUp::complete(), true, false),
+            CatchUp::complete()
+        );
+        assert_eq!(
+            catch_up_with_connect(CatchUp::Incomplete, true, true),
+            CatchUp::Incomplete
+        );
     }
 
     #[test]
