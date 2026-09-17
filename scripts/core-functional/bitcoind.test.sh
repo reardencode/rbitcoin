@@ -599,6 +599,7 @@ addnode=tank-0001
 EOF
 OUTW="$("$SHIM" --print-cmd -datadir="$WARNET_DD" -regtest 2>"$WORKDIR/warnet.err")" || OUTW=""
 if printf '%s' "$OUTW" | grep -q -- "--listen 0.0.0.0:18444" \
+  && printf '%s' "$OUTW" | grep -q -- "--connect tank-0001:18444" \
   && grep -q -- "proxy 0.0.0.0:18443" "$WORKDIR/warnet.err"; then
   echo "ok - warnet conf listen/rpcbind all-interfaces"
   PASS=$((PASS + 1))

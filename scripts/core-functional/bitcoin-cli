@@ -7,7 +7,9 @@ parallel. Core's TestNodeCLI shells out to this binary.
 
 from __future__ import annotations
 
+import base64
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -42,6 +44,18 @@ def cookie_auth(datadir: Path) -> str | None:
     for p in (datadir / "regtest" / ".cookie", datadir / ".cookie"):
         if p.is_file():
             return p.read_text(encoding="utf-8").strip()
+    return None
+
+
+def default_datadir() -> Path | None:
+    env = os.environ.get("BITCOIN_DATA")
+    if env:
+        return Path(env)
+    home = os.environ.get("HOME")
+    if home:
+        p = Path(home) / ".bitcoin"
+        if p.is_dir():
+            return p
     return None
 
 
@@ -85,6 +99,8 @@ def main(argv: list[str]) -> int:
         print("too few parameters (need at least command)", file=sys.stderr)
         return 1
     if datadir is None:
+        datadir = default_datadir()
+    if datadir is None:
         print("error: -datadir is required", file=sys.stderr)
         return 1
 
@@ -126,10 +142,14 @@ def main(argv: list[str]) -> int:
         method="POST",
     )
     if cookie:
-        import base64
-
         tok = base64.b64encode(cookie.encode()).decode()
         req.add_header("Authorization", f"Basic {tok}")
+    else:
+        user = conf_value(datadir, "rpcuser") or "user"
+        password = conf_value(datadir, "rpcpassword")
+        if password:
+            tok = base64.b64encode(f"{user}:{password}".encode()).decode()
+            req.add_header("Authorization", f"Basic {tok}")
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
             raw = resp.read().decode()

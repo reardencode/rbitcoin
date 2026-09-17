@@ -437,6 +437,7 @@ def translate(
     listen_off = False
     whitebind_vals: list[str] = []
     rpc_proxy = True
+    addnodes: list[str] = []
     i = 1
     while i < len(argv):
         a = argv[i]
@@ -483,6 +484,7 @@ def translate(
             "walletdir",
             "wallet",
             "checkblocks",
+            "addnode",
         ):
             i += 1
             if i >= len(argv):
@@ -498,6 +500,8 @@ def translate(
                     file=sys.stderr,
                 )
                 raise SystemExit(1)
+        elif key == "addnode" and val:
+            addnodes.append(val)
         elif key == "rpcport":
             rpcport = parse_port(val, "-rpcport")
         elif key == "port":
@@ -668,6 +672,15 @@ def translate(
     if log_level:
         cmd += ["--log-level", log_level]
     cmd += extra_node_args
+    p2p_default = {"regtest": "18444", "signet": "38333", "testnet": "18333"}.get(
+        network, "8333"
+    )
+    conf_path = datadir / "bitcoin.conf"
+    for host in read_conf_keys(conf_path, "addnode") + addnodes:
+        if not host:
+            continue
+        spec = host if (":" in host and not host.endswith(":")) else f"{host}:{p2p_default}"
+        cmd += ["--connect", spec]
 
     bound_lines = [f"Bound to {addr}" for addr in listens]
 
