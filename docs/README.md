@@ -20,8 +20,7 @@ update that file — do not paste a parallel spec.
 Planning a multi-step change: [`how-we-plan.md`](./how-we-plan.md).
 Releases (tag / `vX.Y.x` / `.99`): [`releases.md`](./releases.md).
 1.0 product gates: [`road-to-1.0.md`](./road-to-1.0.md) (not the living
-quality backlog). 0.8 Core+electrs drop-in:
-[`esplora-mempool-backend.md`](./esplora-mempool-backend.md).
+quality backlog).
 
 Agent task router (not a second fact index): [`ORIENT.md`](./ORIENT.md).
 Process playbooks: [`.agents/skills/`](../.agents/skills/). Do not copy them

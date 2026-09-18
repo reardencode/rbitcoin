@@ -1,9 +1,15 @@
 # 0.8: drop-in Core + electrs for mempool.space
 
-**Status:** plan (not shipped). **Q-68.** Execute after **0.7.0**. Anatomy:
-[`how-we-plan.md`](./how-we-plan.md). Shipped surface today:
-[`COMPAT.md`](../COMPAT.md). Owner of this feature until step 12 flips
-product docs.
+**Status:** plan (not shipped). **Q-68.** Execute after **0.7.0**.
+Anatomy and cycle: [`how-we-plan.md`](./how-we-plan.md) (The cycle: Red →
+Green → Refactor, including tests). Ship:
+[`.agents/skills/ship-pr/SKILL.md`](../.agents/skills/ship-pr/SKILL.md).
+Shipped surface today: [`COMPAT.md`](../COMPAT.md). Owner of this feature
+until step 12 flips product docs.
+
+Before a crate edit, read `crates/<name>/AGENTS.md` when it exists
+(`rbitcoin-rpc`, `rbitcoin-esplora`, `rbitcoin-net`). Task router:
+[`ORIENT.md`](./ORIENT.md).
 
 **Story:** an operator running stock mempool/mempool Node+MariaDB+frontend
 retires **bitcoind + mempool/electrs** (or Blockstream/electrs) and points
@@ -234,9 +240,11 @@ mainnet. Core functional is not the Red test.
   Basic, reject wrong user/pass; Bearer still works.
 - **Green:** `crates/rbitcoin-rpc/src/auth.rs` + server header path. On
   `--rpc-listen`, write/sync `.cookie` beside `rpc.token` (same hex). Do not
-  invent `rpcuser`/`rpcpassword` flags (already refused).
+  invent `rpcuser`/`rpcpassword` flags (already refused). Read
+  `crates/rbitcoin-rpc/AGENTS.md` first.
 - **Refactor:** one `RpcAuth` matcher for Bearer and Basic; no duplicate
-  token files with different secrets.
+  token files with different secrets. Keep the cookie unit next to `auth.rs`;
+  do not add a second catalog journey for auth.
 - **Verify:** `cargo test -p rbitcoin-rpc --lib auth`
 - **Done when:** [ ] red [ ] green [ ] refactor [ ] `docs/rpc.md` Auth table
   lists cookie/Basic as TCP drop-in for Core clients
@@ -252,7 +260,8 @@ mainnet. Core functional is not the Red test.
   /blocks/tip/height` via unix HTTP.
 - **Green:** `EsploraConfig` listen enum (TCP \| unix). Node CLI parses
   path vs `host:port`.
-- **Refactor:** one `run_esplora` bind helper; no second router.
+- **Refactor:** one `run_esplora` bind helper; no second router. Unix test
+  stays a crate unit (no journey twin).
 - **Verify:** `cargo test -p rbitcoin-esplora --lib unix`
 - **Done when:** [ ] red [ ] green [ ] refactor [ ] OPERATOR flag row
 
@@ -269,7 +278,8 @@ mainnet. Core functional is not the Red test.
 - **Green:** next to fee snapshot on `MempoolHub`. Reuse `build_tx_json` /
   packed meta; do not clone the full graph into Esplora.
 - **Refactor:** fee snapshot and tx snapshot share dirty/singleflight if
-  that stays simpler than two flags.
+  that stays simpler than two flags. No `*_for_test` hook; the unit drives
+  the published snapshot type.
 - **Verify:** `cargo test -p rbitcoin-net --lib mempool_tx_snapshot`
 - **Done when:** [ ] red [ ] green [ ] refactor [ ] no admit-path JSON build
 
@@ -378,7 +388,10 @@ mainnet. Core functional is not the Red test.
   + `COOKIE_PATH` `{datadir}/.cookie`, `ESPLORA.UNIX_SOCKET_PATH` or
   `REST_API_URL`, `--sh-index`, `--max-sh-creates` 0, `--rpc-listen`,
   `--esplora-listen`. nginx `/api/` → Esplora, `/api/v1/` → :8999.
-- **Refactor:** none if helpers already exist.
+- **Refactor:** lift the bulk HTTP asserts that the journey now hits; delete
+  any duplicate unit that only re-GETs the same route. Keep parser/400 units
+  next to the helper. Shared fixtures stay in esplora/rpc `testutil` or this
+  pad — one open per binary ([`how-we-plan.md`](./how-we-plan.md) Refactor).
 - **Verify:** `cargo test -p rbitcoin-test esplora_broadcast`
 - **Done when:** [ ] red [ ] green [ ] OPERATOR recipe [ ] TESTING.md catalog
   row updated
@@ -393,16 +406,20 @@ mainnet. Core functional is not the Red test.
 - **Red:** none (docs). Agents must not ship this step before 1–11.
 - **Green:** edit README, COMPAT, OPERATOR, SECURITY, architecture,
   `crates/rbitcoin-esplora/src/lib.rs` rustdoc, `crates/rbitcoin-electrum`
-  rustdoc, quality Won't-fix line, this file **Status: shipped in 0.8**.
-  CHANGELOG Unreleased **Changed** bullet. `/address-prefix` stays in the
-  404 non-goal row. [`road-to-1.0.md`](./road-to-1.0.md) 0.8 checklist
-  ticks the claim row.
+  rustdoc, crate `AGENTS.md` indexes (esplora, rpc), [`ORIENT.md`](./ORIENT.md)
+  if the task title changes, quality Won't-fix line, this file **Status:
+  shipped in 0.8**. CHANGELOG Unreleased **Changed** bullet.
+  `/address-prefix` stays in the 404 non-goal row.
+  [`road-to-1.0.md`](./road-to-1.0.md) 0.8 checklist ticks the claim row.
 - **Refactor:** one owner sentence per file; no second COMPAT copy here.
+  Crate indexes stay routers (link this file); they do not restate the
+  route table.
 - **Verify:** grep the tree for `not a graphical` / `not a graphical
   block-explorer` / `Not a mempool.space` and only this plan’s history
   plus CHANGELOG may mention the old stance.
 - **Done when:** [ ] grep clean except history [ ] COMPAT claim matches
   shipped routes [ ] `docs/README.md` still points here as owner
+  [ ] [`ORIENT.md`](./ORIENT.md) still routes here
 
 ---
 

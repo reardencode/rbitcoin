@@ -11,6 +11,7 @@ P2P and IBD. Depends on query, store, consensus, and mempool.
 | Stage IO | [`docs/invariants.md`](../../docs/invariants.md) |
 | Process RAM, caps, evict | [`docs/ibd-memory.md`](../../docs/ibd-memory.md) |
 | IO machines | [`docs/io-modality.md`](../../docs/io-modality.md) |
+| Published mempool snapshots (fees; 0.8 tx JSON) | [`docs/mempool-fee-estimation.md`](../../docs/mempool-fee-estimation.md), [`docs/esplora-mempool-backend.md`](../../docs/esplora-mempool-backend.md) step 3 |
 
 ## Where
 

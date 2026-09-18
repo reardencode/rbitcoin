@@ -67,9 +67,9 @@ at an explicit rank with **Q-63+**.
 | **Q-54** | ast-grep named-cap rules | Caps live in [`ibd-memory.md`](./ibd-memory.md) and production evict. Pinning `const = 128` is a second clippy. **Q-51** already owns shapes. |
 
 Coverage theater (chasing 100% lines), rewriting secp/rust-bitcoin/tokio
-“to reduce deps”, Core-complete RPC, address-prefix search, Liquid, and
-in-binary mempool.space `/api/v1/` catalogue APIs are also not Open.
-**0.8** Core+electrs drop-in is parked **Q-68**.
+“to reduce deps”, Core-complete RPC, and explorer-search APIs (address-prefix)
+are also not Open. Liquid and in-binary mempool.space `/api/v1/` catalogue
+stay out. **0.8** Core+electrs drop-in is parked **Q-68**.
 
 ### Parked (not now; promote to Open with a rank to revisit)
 

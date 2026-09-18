@@ -124,6 +124,9 @@ Risks / follow-ups
 - **Done when:** [ ] red seen  [ ] green  [ ] refactor green  [ ] related tests pass
 ```
 
+In-tree feature plan that uses this template:
+[`esplora-mempool-backend.md`](./esplora-mempool-backend.md) (**Q-68**).
+
 ### Ordering steps
 
 | Prefer | Avoid |

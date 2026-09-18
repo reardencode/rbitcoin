@@ -42,8 +42,8 @@ Things people sometimes expect from “a Bitcoin node” that we are **not**
 taking on for 1.0:
 
 - Wallet keys, GUI, prune, ZMQ, IPC, plaintext v1 P2P
-- Address-prefix search, Liquid, in-binary mempool.space `/api/v1/` catalogue
-  (MariaDB / cubes / lightning). **0.8** is Core+electrs drop-in:
+- Explorer-search APIs (address-prefix), Liquid, in-binary `/api/v1/`
+  catalogue. **0.8** is Core+electrs drop-in:
   [`esplora-mempool-backend.md`](./esplora-mempool-backend.md)
 - Every Bitcoin Core functional test (no wallet / prune / v1 scripts)
 - Matching Core `estimatesmartfee` numbers
