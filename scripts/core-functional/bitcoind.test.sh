@@ -585,7 +585,8 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-# Warnet Helm conf: rpcbind/listen-all; TestNode conf without those stays loopback.
+# Warnet Helm conf: rpcbind all-interfaces for the proxy; P2P bind still
+# follows -bind / bare -port (0.0.0.0). TestNode extra_conf bind=127.0.0.1 stays loopback.
 WARNET_DD="$WORKDIR/warnet-dd"
 mkdir -p "$WARNET_DD"
 cat >"$WARNET_DD/bitcoin.conf" <<'EOF'

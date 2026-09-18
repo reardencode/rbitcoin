@@ -37,10 +37,10 @@ never calls this.
 
 `scripts/core-functional/bitcoind` is the TestNode binary: `-datadir=DIR`
 → `--datadir DIR/regtest` (`bitcoind.pid` under `DIR/regtest`),
-`-rpcport`/`-port`/`bitcoin.conf` → `--rpc-listen` / `--listen` on
-127.0.0.1, `--no-seeds`. Helm `rpcbind=0.0.0.0` / `listen=1` (no `-bind`)
-map the **proxy** and P2P listen to all-interfaces; TestNode conf without
-those keys stays loopback. The node writes `{datadir}/rpc.token` (Bearer);
+`-rpcport`/`-port`/`bitcoin.conf` → `--rpc-listen` on 127.0.0.1 and
+`--listen` from `-bind`/`-port` (bare `-port` is 0.0.0.0; TestNode
+`bind=127.0.0.1` stays loopback), `--no-seeds`. Helm `rpcbind=0.0.0.0`
+binds the **proxy** all-interfaces. The node writes `{datadir}/rpc.token` (Bearer);
 the shim mirrors `__cookie__:<token>` to `{datadir}/.cookie` so Core
 TestNode cookie + HTTP Basic still work on the **proxy** public port. The
 proxy forwards `Authorization: Bearer` to the node (TCP is Bearer-only).
