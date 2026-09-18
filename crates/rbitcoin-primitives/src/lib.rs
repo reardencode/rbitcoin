@@ -410,3 +410,10 @@ mod tests {
         assert_eq!(s, format!("/rbitcoin:{VERSION}/"));
     }
 }
+
+
+
+mod compact;
+mod scriptnum;
+pub use compact::{compact_size_len, read_compact_size, write_compact_size, read_uleb128, write_uleb128, uleb128_len, CompactError};
+pub use scriptnum::{encode_scriptnum, decode_scriptnum, decode_scriptnum_4, is_minimal_scriptnum, ScriptNumError};
