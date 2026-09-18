@@ -40,6 +40,11 @@ before 1.0).
   progress on that hash) so an empty/faster peer can race. Mainnet ~912k sat
   `hole=1` with `conf blks=0` while BQ grew far bodies.
 
+- **0.8 Core+electrs drop-in (plan):** [`docs/esplora-mempool-backend.md`](docs/esplora-mempool-backend.md)
+  (**Q-68**). Cookie/Basic RPC, Esplora unix socket, mempool/electrs
+  `/internal/*` bulk routes. Address-prefix stays out. Docs claim the drop-in
+  only after those routes ship.
+
 - **Q-54 Won't-fix:** ast-grep named-cap rules. Caps stay in
   [`docs/ibd-memory.md`](docs/ibd-memory.md) and production evict.
   Pinning `const = 128` is a second clippy. **Q-51** already owns

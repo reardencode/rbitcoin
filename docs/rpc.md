@@ -134,7 +134,7 @@ still wait for durable SH when shindex is on.
 |-----|-----------------|
 | `{datadir}/rpc.sock` (filesystem) | TLS in-process / mTLS |
 | `{datadir}/rpc.token` Bearer on TCP | multi-user tokens |
-| Harness `.cookie` + Basic on the test proxy only | `rpcallowip` |
+| Harness `.cookie` + Basic on the test proxy only | **0.8:** node `{datadir}/.cookie` + HTTP Basic on `--rpc-listen` ([`esplora-mempool-backend.md`](./esplora-mempool-backend.md) step 1). `rpcallowip` later |
 
 ## Related
 

@@ -33,7 +33,7 @@ evidence (failed Core corpus, new dual path, red required CI, MSRV drift).
 | 6 | **Q-67** | `asked_blocks` clone on hold | `hold_body` clones `asked_blocks` before `held_bodies` insert so the read lock does not overlap the write (`HeldBodies::insert` already takes `&HashSet`). Bound is `MAX_SERVE_BLOCKS` × peers. Follow-up: pass the read guard with a documented lock order, or keep the clone as a named trade. Owner: `crates/rbitcoin-net/src/chain.rs`. |
 
 R-ids were the 2026-08-12 slice. Canonical id is **bold**. Do not start
-**R-11+**. Next unused Q-id is **Q-68**.
+**R-11+**. Next unused Q-id is **Q-69**.
 
 Close work by **moving the Open row into CHANGELOG** in the same edit as
 the landing change (do not grow a Completed museum here). New item: insert
@@ -54,7 +54,7 @@ at an explicit rank with **Q-63+**.
 | **—** | Leftover maps as `txid → Vec<Fk>` | [`errata.md`](./errata.md): only if a mainnet miss is shown |
 | **X-M3** | Esplora process-wide `sh_join` LRU | HTTP is not a session. Sticky joins stay Electrum TCP |
 | **—** | Package-level feerate on `submitpackage` | Sequential `accept_tx`; Core parity is not 1.0 |
-| **—** | Chained Esplora `scripthash_mempool_stats` | Dialect / page cost. Compact `/txs/summary` is COMPAT dialect. Graphical explorer APIs stay Won't-fix |
+| **—** | Chained Esplora `scripthash_mempool_stats` | Dialect / page cost. Compact `/txs/summary` is COMPAT dialect |
 | **—** | Retired algo-review micro-opts | Reopen a named Q-id only with a mainnet profile that names the cost |
 | **—** | Headerless SH extent interiors | Uniform 4 KiB page records; ~0.2% density; schema bump |
 | **—** | Restore `rbtc-script-coord-*` | `ibd-confirm` publishes waves. No coordinator threads |
@@ -67,8 +67,9 @@ at an explicit rank with **Q-63+**.
 | **Q-54** | ast-grep named-cap rules | Caps live in [`ibd-memory.md`](./ibd-memory.md) and production evict. Pinning `const = 128` is a second clippy. **Q-51** already owns shapes. |
 
 Coverage theater (chasing 100% lines), rewriting secp/rust-bitcoin/tokio
-“to reduce deps”, Core-complete RPC, and explorer-search APIs are also
-not Open.
+“to reduce deps”, Core-complete RPC, address-prefix search, Liquid, and
+in-binary mempool.space `/api/v1/` catalogue APIs are also not Open.
+**0.8** Core+electrs drop-in is parked **Q-68**.
 
 ### Parked (not now; promote to Open with a rank to revisit)
 
@@ -80,6 +81,7 @@ just not the current product. COMPAT/OPERATOR stay the shipped contract.
 | **Q-63** | Electrum TLS (50002) + Tor onion **in the binary** | Home Sparrow/phone off-LAN today uses nginx (`OPERATOR.md`). Node stays plain TCP. | Operators refuse a reverse proxy, or a first-class onion listener is the 1.0 install. |
 | **Q-64** | GBT longpoll / `waitNext` (then Sv2 template provider) | Opt-in `getblocktemplate` + Esplora `/block-template` with 15 s cache is the mining extra. No stratum/pool. | DATUM / Bitaxe / mkpool users need push templates; IPC mining interface is the Core shape. |
 | **Q-65** | BIP157/158 compact block filters (`peerblockfilters` / `getblockfilter`) | Electrum + Esplora (exact scripthash) is the wallet path. P2P filter short IDs stay decode-reject (`COMPAT.md`). | Neutrino / LDK-node on *this* node without handing every address to Electrum. |
+| **Q-68** | Drop-in Core + mempool/electrs (or Blockstream electrs) | Today wallet-exact Esplora; their Node still needs `/internal/*` bulk routes, cookie RPC, unix socket. Not address-prefix. Not MariaDB `/api/v1/`. | After **0.7.0**. Owner: [`esplora-mempool-backend.md`](./esplora-mempool-backend.md). |
 
 ---
 

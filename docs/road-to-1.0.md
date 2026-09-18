@@ -41,7 +41,10 @@ Core clone, not a soak badge, not a desktop wallet.
 Things people sometimes expect from “a Bitcoin node” that we are **not**
 taking on for 1.0:
 
-- Wallet keys, GUI, prune, ZMQ, IPC, plaintext v1 P2P, explorer search APIs
+- Wallet keys, GUI, prune, ZMQ, IPC, plaintext v1 P2P
+- Address-prefix search, Liquid, in-binary mempool.space `/api/v1/` catalogue
+  (MariaDB / cubes / lightning). **0.8** is Core+electrs drop-in:
+  [`esplora-mempool-backend.md`](./esplora-mempool-backend.md)
 - Every Bitcoin Core functional test (no wallet / prune / v1 scripts)
 - Matching Core `estimatesmartfee` numbers
 - Apple notarization
@@ -199,6 +202,21 @@ Schema 21 is the current bytes; 0.x may still bump.
 | [x] | No silent wipe; refuse names the dirs ([`SCHEMA.md`](../SCHEMA.md)) |
 | [x] | Q-57 / Q-58 fail-closed on the durable path |
 | [ ] | Tag 1.0.0; `SECURITY.md` names a 1.0.x window |
+
+---
+
+## 0.8 (after 0.7.0)
+
+Drop-in **Bitcoin Core JSON-RPC + mempool/electrs (or Blockstream electrs)**
+so a stock mempool.space Node+MariaDB+frontend can retire bitcoind and
+electrs. Not their `/api/v1/` process. Not address-prefix. Plan and steps:
+[`esplora-mempool-backend.md`](./esplora-mempool-backend.md) (**Q-68**).
+
+| Done | Step |
+|:----:|------|
+| [ ] | Plan merged (this row) |
+| [ ] | Cookie/Basic RPC + Esplora unix socket + `/internal/*` bulk routes |
+| [ ] | Product docs claim the drop-in (plan step 12) |
 
 ---
 

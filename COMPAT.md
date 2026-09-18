@@ -21,17 +21,25 @@ On/off costs and start/IBD/tip behavior: [`OPERATOR.md`](./OPERATOR.md)
 (Scripthash index). Disable later leaves SH files on disk; follow does not
 wait on SH materialize.
 
-### Query surface intent: wallet clients, not graphical explorers
+### Query surface intent: wallet clients, plus 0.8 electrs drop-in
 
 **Goal:** serve **wallet software** (Electrum, Sparrow, custom wallets, light
 clients that already know their addresses/scripthashes or exact txids/block
 ids).
 
-**Non-goal:** power a **graphical block explorer** product (search boxes,
-address-prefix autocomplete, “browse everything” UX, Liquid). Those need reverse
-indexes and explorer-only APIs we deliberately omit. Opt-in `GET /block-template`
-is GBT (same JSON as RPC), not explorer search. Block/tx **by full id** and address/**exact** scripthash history exist so
-wallets and APIs can verify and sync—not so we become mempool.space.
+**0.8 (plan):** drop-in **Bitcoin Core JSON-RPC + mempool/electrs or
+Blockstream electrs** so nginx `/api/` and `CORE_RPC` can retire bitcoind +
+electrs. mempool.space **Node `/api/v1/`** (MariaDB, cubes, mining, lightning)
+stays their process. Address-prefix search is **not** in 0.8. Plan:
+[`docs/esplora-mempool-backend.md`](./docs/esplora-mempool-backend.md)
+(**Q-68**). Until that plan’s last step, shipped HTTP is wallet-exact Esplora
+(no `/internal/*`, Bearer RPC, TCP Esplora only).
+
+**Non-goal (stays):** address-prefix autocomplete, Liquid/assets, in-binary
+mempool.space catalogue UI (`/api/v1/`). Opt-in `GET /block-template`
+is GBT (same JSON as RPC), not explorer search. Block/tx **by full id** and
+address/**exact** scripthash history exist so wallets, APIs, and (after 0.8)
+electrs-shaped explorers can verify and sync.
 
 `--max-sh-creates N` (default **0** = unlimited) refuses Electrum/Esplora SH
 joins with more than N creates: Esplora HTTP **503**, Electrum JSON-RPC error
@@ -219,7 +227,7 @@ via reverse proxy; app `ServeLimits` always on (same model as Electrum).
 | `POST /txs/package` | done | JSON array of hex txs → `accept_package`; **503** without hub; max 25 txs |
 | Unknown path | 404 | plain body |
 | `GET /block-template` | opt-in | `--esplora-block-template` (default off → **404**). Same JSON as RPC `getblocktemplate` `{"rules":["segwit"]}` template mode. **503** without tip. `Cache-Control: no-store`. 15 s cache, invalidated on tip or mempool `template_updates`. No proposal/longpoll HTTP (parked **Q-64**). |
-| **Non-goal / never** | — | Graphical explorer features: `address-prefix` search, Liquid/assets, explorer UI-only APIs |
+| **Non-goal / never** | — | Address-prefix search, Liquid/assets. mempool.space `/api/v1/` catalogue stays their Node. **0.8** `/internal/*` electrs-fork bulk routes: [`docs/esplora-mempool-backend.md`](./docs/esplora-mempool-backend.md) |
 
 ## Esplora WebSocket (wallet live subset)
 
@@ -228,9 +236,11 @@ Same listen as REST (`--esplora-listen`). Paths: **`/v1/ws`** (preferred) and
 (often public URL `wss://host/api/v1/ws` if the proxy strips `/api`).
 
 **Product boundary:** wallet live updates only (tip, address watchlist, pending
-txids, wallet-scoped RBF). **Not** a mempool.space explorer live backend.
-Message *names* follow mempool.space where listed; **payloads use Esplora REST
-shapes** (`build_tx_json` / `tx_status_json` / tip height+hash).
+txids, wallet-scoped RBF). mempool.space explorer live catalogue is **their**
+`/api/v1/` WebSocket, not this listen. After **0.8**, nginx `/api/` is our
+Esplora; `/api/v1/` stays their backend. Message *names* follow mempool.space
+where listed; **payloads use Esplora REST shapes** (`build_tx_json` /
+`tx_status_json` / tip height+hash).
 
 ### Client → server (supported)
 
@@ -309,5 +319,7 @@ Core wallet RPC, fee-estimator research quality, BIP331 native wire enum,
 durable orphans: **out of scope** for this plan. GBT **template RPC** is
 shipped (see above); stratum / pool software is not.
 
-**Permanent non-goals for Electrum/Esplora:** graphical explorer backends
-(address-prefix autocomplete, global search, explorer-only catalogue APIs).
+**Permanent non-goals for Electrum/Esplora:** address-prefix autocomplete,
+Liquid/assets, in-binary mempool.space `/api/v1/` (MariaDB cubes / mining /
+lightning). **0.8 plan** claims Core + electrs drop-in (except prefix) after
+its last step: [`docs/esplora-mempool-backend.md`](./docs/esplora-mempool-backend.md).

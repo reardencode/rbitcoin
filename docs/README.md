@@ -20,7 +20,8 @@ update that file — do not paste a parallel spec.
 Planning a multi-step change: [`how-we-plan.md`](./how-we-plan.md).
 Releases (tag / `vX.Y.x` / `.99`): [`releases.md`](./releases.md).
 1.0 product gates: [`road-to-1.0.md`](./road-to-1.0.md) (not the living
-quality backlog).
+quality backlog). 0.8 Core+electrs drop-in:
+[`esplora-mempool-backend.md`](./esplora-mempool-backend.md).
 
 Agent task router (not a second fact index): [`ORIENT.md`](./ORIENT.md).
 Process playbooks: [`.agents/skills/`](../.agents/skills/). Do not copy them
@@ -50,6 +51,7 @@ into `AGENTS.md`.
 | [`code-shape.md`](./code-shape.md) | Control flow, types, naming, composition (CONTRIBUTING principle 10). Named extracts: quality.md **Q-61** (Completed). Clippy: no workspace `allow` list; leftover lints are site-local with a reason. |
 | [`quality.md`](./quality.md) | Living quality roadmap (Open + Won't-fix + Parked + Protect). |
 | [`road-to-1.0.md`](./road-to-1.0.md) | 1.0 product gates and milestone sequence. |
+| [`esplora-mempool-backend.md`](./esplora-mempool-backend.md) | **0.8** plan: drop-in for Bitcoin Core + mempool/electrs or Blockstream electrs (no address-prefix). |
 | [`reproducible-builds.md`](./reproducible-builds.md) | Pinned Nix / musl byte-identity. |
 | [`rust-bitcoin-limitations.md`](./rust-bitcoin-limitations.md) | Workarounds where rust-bitcoin is not Core-faithful. |
 | [`mempool-fee-estimation.md`](./mempool-fee-estimation.md) | Fee estimator notes. |
