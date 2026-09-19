@@ -2556,4 +2556,67 @@ mod tests {
         handle.shutdown().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[tokio::test]
+    async fn after_txid_skips_and_unknown_is_422() {
+        use rbitcoin_store::script_hash;
+
+        let (dir, q) = temp_query("after-txid");
+        let mut prev = Fk::NULL;
+        let mut parent_hash: Option<[u8; 32]> = None;
+        let mut txids = Vec::new();
+        for h in 0..3u32 {
+            let (header, ta) = coinbase(h, prev, parent_hash);
+            parent_hash = Some(header.hash);
+            txids.push(ta.tx.txid);
+            prev = q.connect_block(Height(h), &header, &[ta]).unwrap();
+        }
+        let q = Arc::new(q);
+        let cfg = EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), Network::Regtest);
+        let handle = run_esplora(cfg, q, None, None).await.expect("listen");
+        let addr = handle.local_addr;
+        let sh = block_hash_hex(&script_hash(&[0x51]));
+        let newest = block_hash_hex(&txids[2]);
+        let mid = block_hash_hex(&txids[1]);
+        let oldest = block_hash_hex(&txids[0]);
+
+        let (st, body) = http_get(addr, &format!("/scripthash/{sh}/txs")).await;
+        assert_eq!(st, 200, "{body}");
+        let all: Vec<Value> = serde_json::from_str(&body).unwrap();
+        let all_ids: Vec<&str> = all
+            .iter()
+            .filter_map(|v| v["txid"].as_str())
+            .collect();
+        assert_eq!(all_ids, vec![newest.as_str(), mid.as_str(), oldest.as_str()]);
+
+        let (st, body) = http_get(addr, &format!("/scripthash/{sh}/txs?after_txid={newest}")).await;
+        assert_eq!(st, 200, "{body}");
+        let page: Vec<Value> = serde_json::from_str(&body).unwrap();
+        let page_ids: Vec<&str> = page
+            .iter()
+            .filter_map(|v| v["txid"].as_str())
+            .collect();
+        assert_eq!(page_ids, vec![mid.as_str(), oldest.as_str()]);
+
+        let (st, body) = http_get(addr, &format!("/scripthash/{sh}/txs/summary?after_txid={newest}"))
+            .await;
+        assert_eq!(st, 200, "{body}");
+        let sum: Vec<Value> = serde_json::from_str(&body).unwrap();
+        assert_eq!(sum[0]["txid"], mid);
+        assert!(!sum.iter().any(|v| v["txid"] == newest));
+
+        let unknown = "ff".repeat(32);
+        let (st, body) = http_get(addr, &format!("/scripthash/{sh}/txs?after_txid={unknown}")).await;
+        assert_eq!(st, 422, "{body}");
+        assert!(body.contains("after_txid not found"), "{body}");
+        let (st, body) =
+            http_get(addr, &format!("/scripthash/{sh}/txs/summary?after_txid={unknown}")).await;
+        assert_eq!(st, 422, "{body}");
+        assert!(body.contains("after_txid not found"), "{body}");
+        let (st, body) = http_get(addr, &format!("/scripthash/{sh}/txs?after_txid=zz")).await;
+        assert_eq!(st, 422, "{body}");
+
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

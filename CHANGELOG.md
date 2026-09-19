@@ -46,6 +46,10 @@ before 1.0).
   time in the lookup window; `nblocks<=0` uses the difficulty retarget
   length. Not dummy 2-work-per-block. [`docs/rpc.md`](docs/rpc.md).
 
+- **Esplora `?after_txid=`:** GET `/address|scripthash/…/txs` and `/txs/summary`
+  skip through a known txid (mempool then chain). Unknown or unparseable →
+  **422** `after_txid not found`.
+
 ## [0.7.0] — 2026-09-18
 
 Named published **0.7** line. **Not 1.0.** Patch branch is `v0.7.x`. Schema 24

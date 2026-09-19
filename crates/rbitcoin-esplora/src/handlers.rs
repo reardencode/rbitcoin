@@ -872,20 +872,30 @@ pub async fn scripthash_txs(
     State(st): State<AppState>,
     Path(sh_hex): Path<String>,
     AsOf(asof): AsOf,
+    AxumQuery(q): AxumQuery<AfterTxidQuery>,
 ) -> Response {
     let Ok(sh) = parse_hash32(&sh_hex) else {
         return not_found();
     };
-    spawn_join(move || combined_txs(&st, &sh, asof)).await
+    let after = match parse_after_txid_query(q) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    spawn_join(move || combined_txs(&st, &sh, asof, after)).await
 }
 
 pub async fn address_txs(
     State(st): State<AppState>,
     Path(addr_s): Path<String>,
     AsOf(asof): AsOf,
+    AxumQuery(q): AxumQuery<AfterTxidQuery>,
 ) -> Response {
+    let after = match parse_after_txid_query(q) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
     match resolve_address_sh(&addr_s, st.network) {
-        Ok(sh) => spawn_join(move || combined_txs(&st, &sh, asof)).await,
+        Ok(sh) => spawn_join(move || combined_txs(&st, &sh, asof, after)).await,
         Err(_) => not_found(),
     }
 }
@@ -906,8 +916,13 @@ pub async fn scripthash_txs_summary(
     State(st): State<AppState>,
     Path(sh_hex): Path<String>,
     AsOf(asof): AsOf,
+    AxumQuery(q): AxumQuery<AfterTxidQuery>,
 ) -> Response {
-    spawn_join(move || summary_page(&st, &sh_hex, None, asof)).await
+    let after = match parse_after_txid_query(q) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    spawn_join(move || summary_page(&st, &sh_hex, after, asof)).await
 }
 
 pub async fn scripthash_txs_summary_cursor(
@@ -925,9 +940,14 @@ pub async fn address_txs_summary(
     State(st): State<AppState>,
     Path(addr_s): Path<String>,
     AsOf(asof): AsOf,
+    AxumQuery(q): AxumQuery<AfterTxidQuery>,
 ) -> Response {
+    let after = match parse_after_txid_query(q) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
     match resolve_address_sh(&addr_s, st.network) {
-        Ok(sh) => spawn_join(move || summary_page_sh(&st, &sh, None, asof)).await,
+        Ok(sh) => spawn_join(move || summary_page_sh(&st, &sh, after, asof)).await,
         Err(_) => not_found(),
     }
 }
@@ -964,6 +984,11 @@ fn summary_page_sh(
     after: Option<[u8; 32]>,
     asof: Option<[u8; 32]>,
 ) -> Response {
+    if let Some(id) = after {
+        if !txid_is_known(st, &id) {
+            return after_txid_not_found();
+        }
+    }
     let filter = HistoryFilter::esplora_chain_page(after);
     let (items, view) = match sh_at_view(
         st,
@@ -1034,12 +1059,31 @@ fn chain_page_sh(
     )
 }
 
-fn combined_txs(st: &AppState, sh: &[u8; 32], asof: Option<[u8; 32]>) -> Response {
-    let mut out = Vec::new();
-    if asof.is_none() {
-        out.extend(mempool_txs_json(st, sh));
+fn combined_txs(
+    st: &AppState,
+    sh: &[u8; 32],
+    asof: Option<[u8; 32]>,
+    after: Option<[u8; 32]>,
+) -> Response {
+    if let Some(id) = after {
+        if !txid_is_known(st, &id) {
+            return after_txid_not_found();
+        }
     }
-    let filter = HistoryFilter::esplora_chain_page(None);
+    let after_in_mempool = after.is_some_and(|id| {
+        let tid = Txid::from_byte_array(id);
+        st.mempool.as_ref().is_some_and(|m| m.contains(&tid))
+    });
+    let mut out = Vec::new();
+    if asof.is_none() && (after.is_none() || after_in_mempool) {
+        let rows = mempool_txs_json(st, sh);
+        out.extend(match after {
+            Some(id) if after_in_mempool => skip_mempool_after(rows, &id),
+            _ => rows,
+        });
+    }
+    let chain_after = if after_in_mempool { None } else { after };
+    let filter = HistoryFilter::esplora_chain_page(chain_after);
     let (items, view) = match sh_at_view(
         st,
         asof,
@@ -1251,6 +1295,37 @@ fn mempool_txs_json(st: &AppState, sh: &[u8; 32]) -> Vec<Value> {
 
 fn mempool_txs_for_sh(st: &AppState, sh: &[u8; 32]) -> Response {
     Json(mempool_txs_json(st, sh)).into_response()
+}
+
+#[derive(Deserialize, Default)]
+pub struct AfterTxidQuery {
+    after_txid: Option<String>,
+}
+
+fn after_txid_not_found() -> Response {
+    (StatusCode::UNPROCESSABLE_ENTITY, "after_txid not found").into_response()
+}
+
+fn parse_after_txid_query(q: AfterTxidQuery) -> Result<Option<[u8; 32]>, Response> {
+    match q.after_txid {
+        None => Ok(None),
+        Some(s) if s.is_empty() => Ok(None),
+        Some(s) => parse_hash32(&s).map(Some).map_err(|_| after_txid_not_found()),
+    }
+}
+
+fn txid_is_known(st: &AppState, id: &[u8; 32]) -> bool {
+    let tid = Txid::from_byte_array(*id);
+    st.mempool.as_ref().is_some_and(|m| m.contains(&tid))
+        || st.query.get_tx_by_txid(id).ok().flatten().is_some()
+}
+
+fn skip_mempool_after(rows: Vec<Value>, after: &[u8; 32]) -> Vec<Value> {
+    let hex = block_hash_hex(after);
+    match rows.iter().position(|v| v["txid"] == hex) {
+        Some(i) => rows[i.saturating_add(1)..].to_vec(),
+        None => rows,
+    }
 }
 
 #[derive(Deserialize)]
