@@ -7,8 +7,8 @@ use rbitcoin_esplora::{run_esplora, BlockTemplateFn, EsploraConfig, EsploraHandl
 use rbitcoin_log::{debug, enabled, info, warn, Level};
 use rbitcoin_net::{
     default_port, format_serve_perf, format_tip_perf_sizes, netgroup, read_proc_rss,
-    sample_reset_serve_perf, AddrMan, AsMap, BlockingRegion, ChainHub, IbdConfig, MempoolHub,
-    P2PNode, PeerConnType, TipEvent, TipPerfSizes,
+    sample_reset_serve_perf, socks_dns_seed_dests, AddrMan, AsMap, BlockingRegion, ChainHub,
+    Dialer, IbdConfig, MempoolHub, P2PNode, PeerConnType, TipEvent, TipPerfSizes,
 };
 use rbitcoin_primitives::Network;
 use rbitcoin_query::{spawn_sh_writebehind, Query};
@@ -208,13 +208,14 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     let p2p_ua =
         rbitcoin_primitives::rbitcoin_subversion(env!("CARGO_PKG_VERSION"), &config.uacomments)
             .unwrap_or_else(|_| format!("/rbitcoin:{}/", env!("CARGO_PKG_VERSION")));
-    let mut node = P2PNode::start_with_agent(
+    let mut node = P2PNode::start_with_dialer(
         listen,
         query,
         params.clone(),
         milestone,
         p2p_ua,
         config.listen.max_inbound as usize,
+        config.listen.dialer(),
     )
     .await
     .map_err(|e| NodeError::Config(format!("p2p start: {e}")))?;
@@ -391,6 +392,9 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             addrman.len().saturating_sub(n_before),
             addrman.len()
         );
+    } else if config.listen.proxy.is_some() && config.listen.use_seeds {
+        let n = socks_dns_seed_dests(config.network).len();
+        info!("ibd: SOCKS proxy set — skipping local DNS for {n} seed hostnames (use --connect)");
     } else if config.signet_challenge.is_some()
         && config.listen.connect.is_empty()
         && addrman.is_empty()
@@ -885,7 +889,8 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     }
                 } else {
                     info!("ibd: retry catch-up from {peer} (tip stagnant, catch-up incomplete)");
-                    let retry_cfg = catch_up_retry_config(std::sync::Arc::clone(&shared_peers));
+                    let retry_cfg =
+                        catch_up_retry_config(std::sync::Arc::clone(&shared_peers), node.dialer());
                     let cancel = Some(Arc::clone(&shutdown.flag));
                     let retry_peers = [peer];
                     tokio::select! {
@@ -985,7 +990,10 @@ fn tip_meets_min_work(config: &NodeConfig, hub: &rbitcoin_net::ChainHub) -> bool
 }
 
 fn should_resolve_default_seeds(config: &NodeConfig) -> bool {
-    config.listen.use_seeds && config.listen.connect.is_empty() && config.signet_challenge.is_none()
+    config.listen.use_seeds
+        && config.listen.connect.is_empty()
+        && config.signet_challenge.is_none()
+        && config.listen.proxy.is_none()
 }
 
 /// One walker per process: SH-warm start and post-IBD `enter_tip_mode` both call this.
@@ -1126,6 +1134,7 @@ async fn run_ibd_or_skip(
         // could deliver mid-chain blocks). Default 30s is enough.
         stall: std::time::Duration::from_secs(30),
         peers: Some(std::sync::Arc::clone(shared_peers)),
+        dialer: node.dialer(),
         ..IbdConfig::default()
     };
     info!(
@@ -1506,10 +1515,14 @@ pub(crate) fn enter_tip_mode(
 ///
 /// Uses [`IbdConfig::default`] (window 1024, stall 30s, connect 8s, …) — not
 /// [`IbdConfig::for_test`], which is only for unit/integration test harnesses.
-fn catch_up_retry_config(peers: std::sync::Arc<std::sync::Mutex<AddrMan>>) -> IbdConfig {
+fn catch_up_retry_config(
+    peers: std::sync::Arc<std::sync::Mutex<AddrMan>>,
+    dialer: Dialer,
+) -> IbdConfig {
     IbdConfig {
         target_peers: 1,
         peers: Some(peers),
+        dialer,
         ..IbdConfig::default()
     }
 }
@@ -1878,7 +1891,7 @@ mod tests {
     #[test]
     fn catch_up_retry_config_uses_production_not_for_test() {
         let peers = std::sync::Arc::new(std::sync::Mutex::new(rbitcoin_net::AddrMan::new()));
-        let cfg = catch_up_retry_config(std::sync::Arc::clone(&peers));
+        let cfg = catch_up_retry_config(std::sync::Arc::clone(&peers), Dialer::Direct);
         let prod = IbdConfig::default();
         let test = IbdConfig::for_test();
 
@@ -1903,6 +1916,17 @@ mod tests {
         assert!(should_resolve_default_seeds(&cfg));
         cfg.signet_challenge = Some(bitcoin::ScriptBuf::from_bytes(vec![0x51]));
         assert!(!should_resolve_default_seeds(&cfg));
+    }
+
+    #[test]
+    fn dns_seeds_not_resolved_locally_when_proxy() {
+        let mut cfg = NodeConfig::default();
+        assert!(should_resolve_default_seeds(&cfg));
+        cfg.listen.proxy = Some("127.0.0.1:9050".parse().unwrap());
+        assert!(
+            !should_resolve_default_seeds(&cfg),
+            "proxy path must not ToSocketAddrs DNS/fixed seeds"
+        );
     }
 
     fn coinbase_block(

@@ -155,6 +155,17 @@ pub fn resolve_all_seeds(network: Network) -> Vec<SocketAddr> {
     out
 }
 
+/// DNS seed hostnames with the network default port for SOCKS domain CONNECT.
+///
+/// Does not call [`ToSocketAddrs`] — the proxy performs remote DNS.
+pub fn socks_dns_seed_dests(network: Network) -> Vec<(String, u16)> {
+    let port = default_port(network);
+    dns_seeds(network)
+        .iter()
+        .map(|host| ((*host).to_string(), port))
+        .collect()
+}
+
 /// Informational peer flags packed into one byte (more bits reserved for later).
 ///
 /// | bit | name | meaning |
@@ -1231,6 +1242,28 @@ mod tests {
         assert!(resolve_dns_seeds(Network::Regtest).is_empty());
         assert!(resolve_fixed_seeds(Network::Regtest).is_empty());
         assert!(resolve_all_seeds(Network::Regtest).is_empty());
+    }
+
+    #[test]
+    fn dns_seeds_not_resolved_locally_when_proxy() {
+        for net in [
+            Network::Mainnet,
+            Network::Testnet,
+            Network::Signet,
+            Network::Regtest,
+        ] {
+            let dests = socks_dns_seed_dests(net);
+            let names = dns_seeds(net);
+            assert_eq!(dests.len(), names.len());
+            for ((host, port), want) in dests.iter().zip(names.iter()) {
+                assert_eq!(host, want);
+                assert_eq!(*port, default_port(net));
+                assert!(
+                    host.parse::<std::net::IpAddr>().is_err(),
+                    "SOCKS seed dest must stay a hostname, got {host}"
+                );
+            }
+        }
     }
 
     #[test]

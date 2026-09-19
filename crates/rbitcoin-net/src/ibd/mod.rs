@@ -164,6 +164,8 @@ pub struct IbdConfig {
     /// Optional shared peer book (discovered addrs + flags). Seeded at start and
     /// written back on IBD exit so the node can persist across runs.
     pub peers: Option<std::sync::Arc<std::sync::Mutex<crate::seeds::AddrMan>>>,
+    /// Outbound TCP: direct or SOCKS5.
+    pub dialer: crate::socks::Dialer,
 }
 
 impl Default for IbdConfig {
@@ -176,6 +178,7 @@ impl Default for IbdConfig {
             headers_batch: MAX_HEADERS_RESULTS,
             connect_timeout: Duration::from_secs(8),
             peers: None,
+            dialer: crate::socks::Dialer::Direct,
         }
     }
 }
@@ -191,6 +194,7 @@ impl IbdConfig {
             headers_batch: MAX_HEADERS_RESULTS,
             connect_timeout: Duration::from_millis(400),
             peers: None,
+            dialer: crate::socks::Dialer::Direct,
         }
     }
 }
@@ -301,6 +305,7 @@ pub async fn ibd_cancellable(
         sinks.clone(),
         cfg.connect_timeout,
         cancel.as_ref().map(Arc::clone),
+        cfg.dialer.clone(),
     )
     .await;
     apply_dial_result(peer_sess.book_mut(), &initial);
@@ -736,10 +741,11 @@ pub async fn ibd_cancellable(
             let sinks_r = sinks.clone();
             let cto = cfg.connect_timeout;
             let cancel_c = cancel.as_ref().map(Arc::clone);
+            let dialer_c = cfg.dialer.clone();
             redial_handle = Some(tokio::spawn(async move {
                 dial_batch(
                     &book, &next_id, want, already, &occupied, magic, local_addr, tip_h, sinks_r,
-                    cto, cancel_c,
+                    cto, cancel_c, dialer_c,
                 )
                 .await
             }));

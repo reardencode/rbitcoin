@@ -19,6 +19,7 @@ mod reactor;
 mod seeds;
 mod serve_perf;
 mod service;
+mod socks;
 mod tip_accept;
 mod tx_relay;
 mod v2;
@@ -57,10 +58,12 @@ pub(crate) use rbitcoin_mempool::MempoolGraphStats;
 pub use reactor::BlockingRegion;
 pub use seeds::{
     default_port, default_rpc_port, dns_seeds, fixed_seed_hosts, resolve_all_seeds,
-    resolve_dns_seeds, resolve_fixed_seeds, AddrMan, PeerEntry, PeerFlags, MAX_ADDR_MAN,
+    resolve_dns_seeds, resolve_fixed_seeds, socks_dns_seed_dests, AddrMan, PeerEntry, PeerFlags,
+    MAX_ADDR_MAN,
 };
 pub use serve_perf::{format_serve_perf, sample_reset_serve_perf, ServePerfSample};
 pub use service::P2PNode;
+pub use socks::Dialer;
 pub use tx_relay::{ElectrumMempoolItem, MempoolAnnounce, MempoolHub, MempoolPerfSample};
 pub use v2::{encode_v2_contents, parse_v2_regtest, parse_v2_regtest_named, WireBytes};
 pub use versionbits_warn::warning_strings;

@@ -60,6 +60,11 @@ let
   ++ optional cfg.esplora.enable (socket cfg.esplora.address cfg.esplora.port)
   ++ optional (cfg.scripthashIndex || cfg.electrum.enable || cfg.esplora.enable) "--shindex"
   ++ optional cfg.silentPaymentIndex "--sptweaks"
+  ++ optional (cfg.proxy != null) "--proxy"
+  ++ optional (cfg.proxy != null) cfg.proxy
+  ++ optional (cfg.onionProxy != null) "--onion"
+  ++ optional (cfg.onionProxy != null) cfg.onionProxy
+  ++ optional (!cfg.proxyRandomize) "--proxy-randomize=0"
   ++ cfg.extraArgs;
 in
 {
@@ -147,6 +152,26 @@ in
       type = types.listOf types.str;
       default = [ ];
       description = "Additional command-line arguments appended after module-managed arguments.";
+    };
+
+    proxy = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "127.0.0.1:9050";
+      description = "SOCKS5 proxy HOST:PORT for all P2P outbound.";
+    };
+
+    onionProxy = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "127.0.0.1:9050";
+      description = "SOCKS5 proxy HOST:PORT for onion destinations.";
+    };
+
+    proxyRandomize = mkOption {
+      type = types.bool;
+      default = true;
+      description = "Fresh SOCKS username per peer so Tor isolates circuits.";
     };
 
     p2p = {

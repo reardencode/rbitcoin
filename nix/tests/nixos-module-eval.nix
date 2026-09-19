@@ -28,6 +28,9 @@ let
             "--max-outbound"
             "8"
           ];
+          proxy = "127.0.0.1:9050";
+          onionProxy = "127.0.0.1:9050";
+          proxyRandomize = true;
           p2p = {
             address = "127.0.0.1";
             openFirewall = true;
@@ -61,6 +64,9 @@ assert defaultCfg.package == expectedPackage;
 assert defaultCfg.network == "mainnet";
 assert defaultCfg.p2p.port == 8333;
 assert defaultCfg.rpc.port == 8332;
+assert defaultCfg.proxy == null;
+assert defaultCfg.onionProxy == null;
+assert defaultCfg.proxyRandomize == true;
 assert cfg.services.rbitcoin.p2p.port == 18444;
 assert cfg.services.rbitcoin.rpc.port == 18443;
 assert
@@ -84,4 +90,6 @@ assert builtins.match ".*--shindex.*" execStart != null;
 assert builtins.match ".*--sptweaks.*" execStart != null;
 assert builtins.match ".*--log-level debug.*" execStart != null;
 assert builtins.match ".*--max-outbound 8.*" execStart != null;
+assert builtins.match ".*--proxy 127.0.0.1:9050.*" execStart != null;
+assert builtins.match ".*--onion 127.0.0.1:9050.*" execStart != null;
 pkgs.runCommand "rbitcoin-nixos-module-eval" { } "touch $out"
