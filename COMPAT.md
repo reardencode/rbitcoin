@@ -237,32 +237,38 @@ Same listen as REST (`--esplora-listen`). Paths: **`/v1/ws`** (preferred) and
 **`/ws`** alias. Plain WS in-process; terminate **WSS** at the reverse proxy
 (often public URL `wss://host/api/ws` when nginx `/api/` → this listen).
 
-**Product boundary:** wallet live updates only (tip, address watchlist, pending
-txids, wallet-scoped RBF). mempool.space explorer live catalogue is **their**
-`/api/v1/` WebSocket, not this listen. nginx `/api/` is our
-Esplora; `/api/v1/` stays their backend. Message *names* follow mempool.space
-where listed; **payloads use Esplora REST shapes** (`build_tx_json` /
-`tx_status_json` / tip height+hash).
+**Product boundary:** wallet live updates (tip, address watchlist, pending
+txids, wallet-scoped RBF, hub `want: stats`). mempool.space explorer live
+catalogue (`live-2h-chart`, compressed `mempool-blocks`, …) is **their**
+`/api/v1/ws`, not this listen. nginx `/api/` is our Esplora (`/api/ws`);
+`/api/v1/` stays their backend. Message *names* follow mempool.space where
+listed; **payloads use Esplora REST shapes**.
 
 ### Client → server (supported)
 
 | Message | Behavior |
 |---------|----------|
-| `{ "action": "want", "data": ["blocks"] }` | Subscribe tip pushes; other `data` tokens **no-op** (no disconnect) |
-| empty want / no `blocks` | Clear tip subscription |
-| `{ "track-address": "<addr>" }` / `{ "track-addresses": [...] }` | Watchlist (network-checked); over-cap → `{ "error": "max_track_addresses exceeded" }` |
-| `{ "stop-track-address": "…" }` / `stop-track-addresses` / empty track-address | Unsubscribe |
+| `{ "action": "want", "data": ["blocks"] }` | Subscribe tip pushes |
+| `{ "action": "want", "data": ["stats"] }` | Immediate `{ "mempoolInfo", "fees" }` (same JSON as `GET /mempool` and `GET /fees/recommended`); re-push on announce/tip when the tx snapshot Arc changes or 1 s fee-snapshot age elapses. Combine with `blocks` |
+| empty want / no `blocks` / no `stats` | Clear those subscriptions |
+| `{ "action": "ping" }` | `{ "pong": true }` |
+| `{ "action": "init" }` | `{ "block": { "height", "id", "timestamp" } }` from the current tip (not Node's 8-block blob) |
+| `{ "track-address": "<addr>" }` / `{ "track-addresses": [...] }` | Watchlist (network-checked); over-cap → `{ "error": "max_track_addresses exceeded" }`. Subscribe snapshots live mempool txs (`address-transactions` / keyed `multi-address-transactions`) |
+| `{ "track-address": "stop" }` / `{ "track-tx": "stop" }` / empty / `stop-track-*` | Unsubscribe |
 | `{ "track-tx": "<txid>" }` / `{ "track-txs": [...] }` | Pending set; over-cap → error |
-| `{ "stop-track-tx": "…" }` / `stop-track-txs` | Unsubscribe |
 
-No client API for global `track-mempool*`, `track-rbf`, or `want` stats/charts.
+Unknown `want` tokens (`mempool-blocks`, `live-2h-chart`, …) **no-op** (no disconnect). No client API for global `track-mempool*` or `track-rbf` trees.
 
 ### Server → client (supported)
 
 | Key | When |
 |-----|------|
-| `{ "block": { "height", "id", "timestamp" } }` | Tip advance after `want: blocks` |
-| `{ "address-transactions": [ … ] }` | Mempool accept touching a tracked script (in/out when resolvable) |
+| `{ "pong": true }` | After `{ "action": "ping" }` |
+| `{ "block": { "height", "id", "timestamp" } }` | Tip advance after `want: blocks`; also `{ "action": "init" }` |
+| `{ "mempoolInfo", "fees" }` | After `want: stats` and coalesced announce/tip |
+| `{ "address-transactions": [ … ] }` | Subscribe snapshot and mempool accept touching a tracked script (Esplora tx JSON) |
+| `{ "multi-address-transactions": { "<addr>": [ … ] } }` | `track-addresses` snapshot, keyed by the display address the client sent |
+| `{ "address-removed-transactions": [ … ] }` | Full-RBF/drop of a tx that paid a tracked script |
 | `{ "block-transactions": [ … ] }` | Tip height: txs in that block that create or spend a tracked script (posting-list probe; no Class A expand on a miss) |
 | `{ "tx": { "txid", "status" } }` | Tracked txid status transition (mempool / confirmed) |
 | `{ "replaced-transactions": [ { "txid", "replaced-by" } ] }` | Full-RBF replace **only if** old or new intersects this connection’s tracks |
@@ -283,7 +289,7 @@ broadcast receivers drop (best-effort, like Electrum).
 
 | mempool.space-style feature | Status |
 |-----------------------------|--------|
-| `want`: `stats`, `mempool-blocks`, `live-2h-chart` | **No** |
+| `want`: `mempool-blocks`, `live-2h-chart` (Node `/api/v1/ws`) | **No** |
 | `track-mempool` / `track-mempool-txids` global firehose | **No** |
 | `track-mempool-block` projected templates | **No** |
 | Global `track-rbf` / `rbfLatest` trees | **No** (wallet-scoped replace only) |
