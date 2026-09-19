@@ -366,6 +366,9 @@ Clean smoke:
 | `--signet-block-time SECS` | `signet_block_time=` | 600; requires a custom challenge |
 | `--listen ADDR` | `listen=` | bind later default port |
 | `--connect ADDR` | `connect=` (repeatable) | seeds |
+| `--proxy HOST:PORT` | `proxy=` | unset — SOCKS5 for all P2P outbound |
+| `--onion HOST:PORT` | `onion=` | unset — SOCKS5 for onion destinations |
+| `--proxy-randomize[=0\|1]` | `proxy_randomize=` | **on** — fresh SOCKS username per peer (Tor circuit isolation) |
 | `--milestone HEIGHT` | `milestone=` | network default (mainnet 840000) |
 | `--max-outbound N` | `max_outbound=` | 16 live download peers |
 | `--max-inbound N` | `max_inbound=` | 125 inbound sessions |
@@ -423,6 +426,14 @@ network=signet
 max_inbound=64
 mempool_size_mb=100
 ```
+
+### P2P via system Tor SOCKS
+
+`--proxy 127.0.0.1:9050` sends every P2P outbound through SOCKS5 CONNECT
+(system `tor`, not Arti). DNS seeds are not resolved locally on that path —
+pass `--connect ADDR` (or reuse a `peers` file). `--proxy-randomize` (default
+on) uses a fresh SOCKS username per peer so Tor isolates circuits.
+`--onion HOST:PORT` stores a separate SOCKS endpoint for onion destinations.
 
 `--datadir` holds the node root (`store/`, `mempool/`, `peers`, `rpc.token`, `rpc.sock`).
 Omit `--datadir-cold` and cold files live there too. Set it to put the large
