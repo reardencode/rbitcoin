@@ -592,6 +592,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_mempool_totals_match_snapshot() {
+        let pad = pad_hub("mempool-info-snap", 3);
+        let a = spend_true(pad.cbs[0], 1_000, ScriptBuf::from_bytes(vec![0x51]));
+        pad.hub.accept_tx(&a).unwrap();
+        let snap = pad.hub.mempool_tx_snapshot();
+        let expect_count = snap.entries().len() as u64;
+        let expect_fee: u64 = snap.entries().iter().map(|e| e.fee_sat).sum();
+        let expect_vsize: u64 = snap
+            .entries()
+            .iter()
+            .map(|e| e.weight.saturating_add(3) / 4)
+            .sum();
+        assert!(expect_count >= 1);
+        assert!(expect_fee > 0);
+        assert!(expect_vsize > 0);
+        let cfg =
+            EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), bitcoin::Network::Regtest);
+        let handle = run_esplora(cfg, Arc::clone(&pad.q), Some(Arc::clone(&pad.hub)), None)
+            .await
+            .unwrap();
+        let addr = handle.local_addr;
+        let (st, body) = http_get(addr, "/mempool").await;
+        assert_eq!(st, 200, "{body}");
+        let mem: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(mem["count"].as_u64(), Some(expect_count), "{body}");
+        assert_eq!(mem["total_fee"].as_u64(), Some(expect_fee), "{body}");
+        assert_eq!(mem["vsize"].as_u64(), Some(expect_vsize), "{body}");
+        handle.shutdown().await;
+        let _ = pad.dir;
+    }
+
+    #[tokio::test]
     async fn mempool_txids_page() {
         let pad = pad_hub("internal-txids-page", 3);
         pad.hub

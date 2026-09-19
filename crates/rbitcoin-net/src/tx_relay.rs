@@ -104,6 +104,7 @@ pub struct MempoolTxSnapshot {
 pub struct MempoolTxSnapEntry {
     pub txid: Txid,
     pub fee_sat: u64,
+    pub weight: u64,
     pub tx: Arc<Transaction>,
     pub json: std::sync::OnceLock<Box<str>>,
 }
@@ -2013,7 +2014,7 @@ impl MempoolHub {
         let live = self.list_live_meta();
         let mut entries: Vec<MempoolTxSnapEntry> = live
             .into_iter()
-            .filter_map(|(txid, fee_sat, _weight)| {
+            .filter_map(|(txid, fee_sat, weight)| {
                 if let Some(old_e) = old.get(&txid) {
                     let json = std::sync::OnceLock::new();
                     if old_e.fee_sat == fee_sat {
@@ -2024,6 +2025,7 @@ impl MempoolHub {
                     return Some(MempoolTxSnapEntry {
                         txid,
                         fee_sat,
+                        weight,
                         tx: Arc::clone(&old_e.tx),
                         json,
                     });
@@ -2032,6 +2034,7 @@ impl MempoolHub {
                 Some(MempoolTxSnapEntry {
                     txid,
                     fee_sat,
+                    weight,
                     tx: Arc::new(tx),
                     json: std::sync::OnceLock::new(),
                 })

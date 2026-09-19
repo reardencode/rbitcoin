@@ -1464,22 +1464,25 @@ pub async fn mempool_info(State(st): State<AppState>) -> Response {
 }
 
 fn mempool_info_sync(st: &AppState) -> Response {
-    let Some(mp) = st.mempool.as_ref() else {
-        return Json(json!({
+    Json(mempool_info_json(st.mempool.as_deref())).into_response()
+}
+
+/// `GET /mempool` body. Request path loads the published tx snapshot.
+pub(crate) fn mempool_info_json(mp: Option<&MempoolHub>) -> Value {
+    let Some(mp) = mp else {
+        return json!({
             "count": 0,
             "vsize": 0,
             "total_fee": 0,
             "fee_histogram": [],
-        }))
-        .into_response();
+        });
     };
-    let live = mp.list_live_meta();
-    let count = live.len();
+    let snap = mp.mempool_tx_snapshot();
     let mut vsize = 0u64;
     let mut total_fee = 0u64;
-    for (_txid, fee, weight) in &live {
-        total_fee = total_fee.saturating_add(*fee);
-        vsize = vsize.saturating_add(weight.saturating_add(3) / 4);
+    for e in snap.entries() {
+        total_fee = total_fee.saturating_add(e.fee_sat);
+        vsize = vsize.saturating_add(e.weight.saturating_add(3) / 4);
     }
     let hist: Vec<Value> = mp
         .fee_histogram()
@@ -1489,13 +1492,12 @@ fn mempool_info_sync(st: &AppState) -> Response {
             json!([rate_sat_per_vb, vs])
         })
         .collect();
-    Json(json!({
-        "count": count,
+    json!({
+        "count": snap.entries().len(),
         "vsize": vsize,
         "total_fee": total_fee,
         "fee_histogram": hist,
-    }))
-    .into_response()
+    })
 }
 
 pub async fn fee_estimates(State(st): State<AppState>) -> Response {
