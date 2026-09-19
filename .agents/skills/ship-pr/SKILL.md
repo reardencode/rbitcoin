@@ -94,6 +94,10 @@ If the slice changed `flake.nix`, `nix/`, or the NixOS module, also
 start argv changed — that runs `nixos-module-runtime` (qemu). Do not wait
 out the VM test locally.
 
+Agents: redirect each command’s stdout/stderr to a `/tmp` file and read
+only the exit code plus a short failure/tail summary. Do not ingest a full
+workspace suite or clippy log ([how-we-plan](../../../docs/how-we-plan.md)).
+
 Coverage and native `windows` / `macos` stay GitHub Actions;
 `ci-os-smoke.sh` is the local stand-in. Do not wait out a host IBD or a
 coverage run in the agent VM.
