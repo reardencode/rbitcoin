@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, Semaphore};
@@ -214,6 +214,26 @@ fn path_never_pins(path: &str) -> bool {
             | ["address", _, "txs", "mempool"]
             | ["scripthash", _, "txs", "mempool"]
     )
+}
+
+fn powered_by_header() -> HeaderValue {
+    static V: OnceLock<HeaderValue> = OnceLock::new();
+    V.get_or_init(|| {
+        let ver = env!("CARGO_PKG_VERSION");
+        let mut hex = String::with_capacity(ver.len().saturating_mul(2));
+        for b in ver.as_bytes() {
+            hex.push_str(&format!("{b:02x}"));
+        }
+        HeaderValue::from_str(&format!("rbitcoin-esplora/{ver}-{hex}")).expect("ascii powered-by")
+    })
+    .clone()
+}
+
+async fn stamp_powered_by_mw(req: Request, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    resp.headers_mut()
+        .insert("x-powered-by", powered_by_header());
+    resp
 }
 
 async fn stamp_chain_view_mw(State(st): State<AppState>, req: Request, next: Next) -> Response {
@@ -869,7 +889,10 @@ pub async fn run_esplora(
         .route("/v1/ws", get(ws::ws_upgrade))
         .route("/ws", get(ws::ws_upgrade));
 
-    let app = rest.merge(ws_routes).with_state(state);
+    let app = rest
+        .merge(ws_routes)
+        .layer(middleware::from_fn(stamp_powered_by_mw))
+        .with_state(state);
 
     match config.listen {
         EsploraListen::Tcp(addr) => {
@@ -1505,6 +1528,32 @@ mod tests {
         let (st, body) = http_get_unix(&sock, "/blocks/tip/height").await;
         assert_eq!(st, 200, "{body}");
         assert_eq!(body, "0");
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn x_powered_by_on_tip_height() {
+        let (dir, q) = temp_query("powered-by");
+        let (h0, t0) = coinbase(0, Fk::NULL, None);
+        q.connect_block(Height(0), &h0, &[t0]).unwrap();
+        let cfg = EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), Network::Regtest);
+        let handle = run_esplora(cfg, Arc::new(q), None, None)
+            .await
+            .expect("listen");
+        let (st, raw, body) = http_get_raw(handle.local_addr, "/blocks/tip/height").await;
+        assert_eq!(st, 200, "{body}");
+        let powered = header_value(&raw, "x-powered-by").expect("X-Powered-By");
+        assert!(
+            powered.starts_with("rbitcoin-esplora/"),
+            "prefix: {powered}"
+        );
+        let hex_run = powered
+            .bytes()
+            .collect::<Vec<_>>()
+            .windows(5)
+            .any(|w| w.iter().all(|b| b.is_ascii_hexdigit()));
+        assert!(hex_run, "need ≥5 hex for mempool failover: {powered}");
         handle.shutdown().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
