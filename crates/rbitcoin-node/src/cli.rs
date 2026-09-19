@@ -128,7 +128,12 @@ fn apply_operator_kvs(config: &mut NodeConfig, kvs: Vec<(String, String)>) -> Re
     let mut saw_seednode = false;
     for (key, val) in kvs {
         if key == "listen" && !saw_listen {
-            config.listen.p2p = None;
+            config.listen.p2p = crate::config::P2pListen::Auto;
+            config.listen.p2p_extra.clear();
+            saw_listen = true;
+        }
+        if key == "no_listen" && !saw_listen {
+            config.listen.p2p = crate::config::P2pListen::Auto;
             config.listen.p2p_extra.clear();
             saw_listen = true;
         }
@@ -288,7 +293,7 @@ fn operator_usage() -> String {
         "rbitcoin-node {} — usage:\n\
   rbitcoin-node [--conf FILE] [--datadir PATH] [--datadir-cold PATH] [--network NET] \\\n\
     [--signet-challenge HEX] [--signet-block-time SECS] \\\n\
-    [--listen ADDR] [--connect ADDR]... [--seed-node HOST]... [--proxy HOST:PORT] [--onion HOST:PORT] [--proxy-randomize[=0|1]] \\\n\
+    [--listen ADDR] [--no-listen] [--connect ADDR]... [--seed-node HOST]... [--proxy HOST:PORT] [--onion HOST:PORT] [--proxy-randomize[=0|1]] \\\n\
     [--electrum-listen ADDR] [--esplora-listen ADDR] \\\n\
     [--sh-index] [--sp-tweaks] [--sp-tweaks-dust SATS] [--max-sh-creates N] [--esplora-block-template] \\\n\
     [--rpc] [--rpc-listen [ADDR]] [--rpc-token-file PATH] [--rpc-work-queue N] \\\n\
@@ -369,6 +374,7 @@ fn is_bool_key(key: &str) -> bool {
             | "net_permission_relay"
             | "net_permission_force_relay"
             | "no_seeds"
+            | "no_listen"
             | "proxy_randomize"
             | "inhibit_suspend"
             | "trusted"
@@ -561,6 +567,7 @@ mod tests {
             "--proxy",
             "--onion",
             "--proxy-randomize",
+            "--no-listen",
         ] {
             assert!(h.contains(flag), "help must list {flag}");
         }
@@ -590,6 +597,7 @@ mod tests {
             "--blocks-dir",
             "--whitelist-relay",
             "--whitelist-forcerelay",
+            "--nolisten",
         ] {
             assert!(!h.contains(concat), "help must not advertise {concat}");
         }
@@ -721,6 +729,49 @@ mod tests {
             .apply_kv("max_outbound", "0")
             .unwrap_err();
         assert!(format!("{out}").contains("max_outbound"));
+    }
+
+    #[test]
+    fn listen_zero_does_not_default_loopback() {
+        let _g = OPERATOR_ENV_TEST_LOCK.lock().unwrap();
+        let mut c = NodeConfig::default();
+        assert_eq!(c.apply_kv("listen", "0").unwrap(), ConfApply::Applied);
+        assert_eq!(c.listen.p2p, crate::config::P2pListen::Off);
+        assert!(c.listen.p2p_bind_addr(Network::Regtest).is_none());
+
+        let n = ready_config(["rbitcoin-node", "--no-listen"]);
+        assert_eq!(n.listen.p2p, crate::config::P2pListen::Off);
+        assert!(n.listen.p2p_bind_addr(Network::Regtest).is_none());
+
+        let eq = ready_config(["rbitcoin-node", "--listen=0"]);
+        assert_eq!(eq.listen.p2p, crate::config::P2pListen::Off);
+
+        let bound = ready_config(["rbitcoin-node", "--listen", "127.0.0.1:18444"]);
+        assert_eq!(
+            bound.listen.p2p,
+            crate::config::P2pListen::Socket("127.0.0.1:18444".parse().unwrap())
+        );
+        assert_eq!(
+            bound.listen.p2p_bind_addr(Network::Regtest),
+            Some("127.0.0.1:18444".parse().unwrap())
+        );
+
+        let auto = NodeConfig::default();
+        assert_eq!(auto.listen.p2p, crate::config::P2pListen::Auto);
+        assert_eq!(
+            auto.listen.p2p_bind_addr(Network::Regtest),
+            Some("127.0.0.1:18444".parse().unwrap())
+        );
+
+        let h = operator_usage();
+        assert!(
+            h.contains("--no-listen"),
+            "help must list kebab --no-listen"
+        );
+        assert!(
+            !h.contains("--nolisten"),
+            "help must not advertise concatenated --nolisten"
+        );
     }
 
     #[test]

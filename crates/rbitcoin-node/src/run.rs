@@ -185,7 +185,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     apply_startup_index_mode(&handle.query, &config, params.taproot_height())?;
     let listen = config
         .listen
-        .p2p
+        .p2p_bind_addr(config.network)
         .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], default_port(config.network))));
 
     let start_tip = handle.query.tip_height().map(|h| h.0).unwrap_or(0);
