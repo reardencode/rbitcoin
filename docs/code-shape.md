@@ -53,15 +53,19 @@ do not restate them here.
 ## Extract under tests
 
 Behavior-preserving moves still follow Red → Green → Refactor
-([`how-we-plan.md`](./how-we-plan.md)):
+([`how-we-plan.md`](./how-we-plan.md)). This is a **move**, not a second
+implementation:
 
-- Existing tests that drive the shipped function are the pin.
-- If an arm has no observable assert, add one **before** moving the code.
-- Green is the extract only — no new branches.
-- Refactor deletes the dual path, the unused flag, and restating comments
-  in the touched function.
+1. Find the existing production implementations and every caller.
+2. Choose the crate that owns the concept (rule 6).
+3. If an arm has no observable assert, add one **before** moving the code.
+4. Green is the extract only — no new branches. Wrap the old API, switch one
+   caller at a time, keep `--lib` compiling.
+5. Delete the old path, the unused flag, and restating comments.
 
 Do not invent a failing test for a pure move that is already pinned.
+Do not copy the helper into a test-friendly crate and leave the original
+(Miri peels included).
 
 ---
 

@@ -62,6 +62,9 @@ step. Keep `--lib` compiling (wrap the old API, switch one caller). Owner:
 [`.agents/skills/ship-pr/SKILL.md`](.agents/skills/ship-pr/SKILL.md).
 
 One production implementation at the lowest crate that owns the concept.
+Extract is a move: [`docs/code-shape.md`](docs/code-shape.md). Core-facing
+RPC / P2P / Electrum / Esplora: [`COMPAT.md`](COMPAT.md).
+
 Tests assert shipped behavior, not repo text
 ([`CONTRIBUTING.md`](CONTRIBUTING.md) principle 8). Budgets, no `*_for_test`
 backdoors, no production-scale default fixtures: [`TESTING.md`](TESTING.md).

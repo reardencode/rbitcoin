@@ -94,6 +94,8 @@ If the slice changed `flake.nix`, `nix/`, or the NixOS module, also
 start argv changed — that runs `nixos-module-runtime` (qemu). Do not wait
 out the VM test locally.
 
+Agent logs: [`how-we-plan.md`](../../../docs/how-we-plan.md) (Agent RAM).
+
 Coverage and native `windows` / `macos` stay GitHub Actions;
 `ci-os-smoke.sh` is the local stand-in. Do not wait out a host IBD or a
 coverage run in the agent VM.

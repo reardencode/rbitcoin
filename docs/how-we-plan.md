@@ -171,6 +171,7 @@ until it passes — do not use that CI job as the inner loop
 | Prefer synthetic `/tmp` fixtures; no agent-VM mainnet open | |
 | Hot-path Contract includes the cost model | [`CONTRIBUTING.md`](../CONTRIBUTING.md) principle 9 |
 | After Refactor, same tests still pass; only drop **duplicate** tests | |
+| Core-facing RPC / P2P / Electrum / Esplora | [`COMPAT.md`](../COMPAT.md) |
 
 Suite speed and fixture size: [`TESTING.md`](../TESTING.md). Worktree, push,
 and poll: [ship-pr](../.agents/skills/ship-pr/SKILL.md). A conflicted or
@@ -208,6 +209,12 @@ Edits inside Red and Green stay targeted: `cargo test -p <crate> …` and
 `cargo check -p <crate> --lib`. Do not `cargo check --tests` after every
 edit. The workspace suite is step 3 (and again in step 5 if Refactor
 changed code).
+
+**Agent RAM:** do not load full `cargo test`, clippy, deny, or rustc stdout
+into the session. Redirect to a file under `/tmp`, then read only the exit
+code, the failure names (`test … FAILED`, lint ids, first rustc error), and
+at most ~80 lines of tail. `--quiet` is enough to confirm green. Workspace
+suite logs in particular will OOM an agent turn.
 
 Pure docs, comments, or formatting skip Red, Green, and the workspace suite.
 Still run `cargo fmt --all` if rustfmt would touch the tree, and the other

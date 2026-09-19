@@ -9,6 +9,10 @@ messages (**Q-48** / RB-007).
 contrasts: [`docs/architecture.md`](./docs/architecture.md). Lab mainnet:
 [`docs/experimental-mainnet.md`](./docs/experimental-mainnet.md).
 
+A Core, Electrum, or Esplora difference that looks like a bug is often
+**intentional**. Read this file before changing shipped behavior. Name the
+row you are changing; do not mix unrelated dialect work into the same step.
+
 ## Active product track
 
 Full **P2P participant** (blocks + tip-mode tx relay) and **wallet-client
