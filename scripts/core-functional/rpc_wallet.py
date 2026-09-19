@@ -133,6 +133,7 @@ class WalletHub:
         p.register("createwallet", self.createwallet)
         p.register("loadwallet", self.loadwallet)
         p.register("listwallets", self.listwallets)
+        p.register("listwalletdir", self.listwalletdir)
         p.register("getwalletinfo", self.getwalletinfo)
         p.register("importdescriptors", self.importdescriptors)
         p.register("importprivkey", self.importprivkey)
@@ -205,6 +206,9 @@ class WalletHub:
 
     def listwallets(self, _params: Any) -> list[str]:
         return list(self.wallets.keys())
+
+    def listwalletdir(self, _params: Any) -> dict[str, Any]:
+        return {"wallets": [{"name": n} for n in self.wallets]}
 
     def getwalletinfo(self, _params: Any) -> dict[str, Any]:
         w = self._cur()

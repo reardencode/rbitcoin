@@ -75,7 +75,7 @@ pub struct ListenOpts {
     pub p2p_extra: Vec<SocketAddr>,
     pub electrum: Option<SocketAddr>,
     pub esplora: Option<SocketAddr>,
-    pub connect: Vec<SocketAddr>,
+    pub connect: Vec<String>,
     pub seednodes: Vec<String>,
     pub use_seeds: bool,
     pub max_outbound: u32,
@@ -641,10 +641,12 @@ impl NodeConfig {
                 self.push_p2p_listen(addr)?;
             }
             "connect" => {
-                self.listen.connect.push(
-                    val.parse()
-                        .map_err(|e| NodeError::Config(format!("conf connect: {e}")))?,
-                );
+                if val.is_empty() {
+                    return Err(NodeError::Config(
+                        "conf connect requires host[:port]".into(),
+                    ));
+                }
+                self.listen.connect.push(val.to_string());
             }
             "seed_node" => {
                 if !val.is_empty() {
@@ -1056,6 +1058,14 @@ mod tests {
             ConfApply::Unknown(k) => assert_eq!(k, "not-a-real-key"),
             other => panic!("{other:?}"),
         }
+        assert_eq!(
+            c.apply_kv("connect", "localhost").unwrap(),
+            ConfApply::Applied
+        );
+        assert_eq!(
+            c.listen.connect.last().map(String::as_str),
+            Some("localhost")
+        );
     }
 
     #[test]
@@ -1421,6 +1431,7 @@ mod tests {
             Some(std::path::Path::new("/tmp/ip_asn.dat"))
         );
         assert_eq!(cfg.listen.connect.len(), 1);
+        assert_eq!(cfg.listen.connect[0], "127.0.0.1:38333");
         assert_eq!(
             cfg.datadir.cold.as_deref(),
             Some(std::path::Path::new("/mnt/hdd/rbtc-cold"))
@@ -1771,6 +1782,7 @@ mod tests {
         assert_eq!(cfg.network, Network::Regtest);
         assert!(cfg.listen.p2p.is_some());
         assert_eq!(cfg.listen.connect.len(), 1);
+        assert_eq!(cfg.listen.connect[0], "127.0.0.1:18445");
         assert!(cfg.shindex);
         assert!(!cfg.sptweaks);
         assert!(cfg.listen.electrum.is_some());

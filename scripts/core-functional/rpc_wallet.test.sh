@@ -198,9 +198,20 @@ def call(method, params=None):
 body = call("getbalance")
 assert body["error"] and body["error"]["code"] == -18, body
 
-body = call("createwallet", ["default_wallet"])
+body = call("listwalletdir")
+assert body["error"] is None, body
+assert body["result"] == {"wallets": []}, body
+
+body = call(
+    "createwallet",
+    {"wallet_name": "default_wallet", "descriptors": True, "load_on_startup": True},
+)
 assert body["error"] is None, body
 assert body["result"]["name"] == "default_wallet", body
+
+body = call("listwalletdir")
+assert body["error"] is None, body
+assert body["result"]["wallets"] == [{"name": "default_wallet"}], body
 
 from test_framework.descriptors import descsum_create
 

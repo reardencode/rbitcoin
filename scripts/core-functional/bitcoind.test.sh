@@ -585,6 +585,61 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# Warnet Helm conf: rpcbind all-interfaces for the proxy; P2P bind still
+# follows -bind / bare -port (0.0.0.0). TestNode extra_conf bind=127.0.0.1 stays loopback.
+WARNET_DD="$WORKDIR/warnet-dd"
+mkdir -p "$WARNET_DD"
+cat >"$WARNET_DD/bitcoin.conf" <<'EOF'
+rpcbind=0.0.0.0
+rpcport=18443
+listen=1
+[regtest]
+rpcuser=user
+rpcpassword=secret0
+addnode=tank-0001
+EOF
+OUTW="$("$SHIM" --print-cmd -datadir="$WARNET_DD" -regtest 2>"$WORKDIR/warnet.err")" || OUTW=""
+if printf '%s' "$OUTW" | grep -q -- "--listen 0.0.0.0:18444" \
+  && printf '%s' "$OUTW" | grep -q -- "--connect tank-0001:18444" \
+  && grep -q -- "proxy 0.0.0.0:18443" "$WORKDIR/warnet.err"; then
+  echo "ok - warnet conf listen/rpcbind all-interfaces"
+  PASS=$((PASS + 1))
+else
+  echo "not ok - warnet conf listen/rpcbind (cmd: $OUTW err: $(cat "$WORKDIR/warnet.err" 2>/dev/null))"
+  FAIL=$((FAIL + 1))
+fi
+
+# listen=1 must not override an explicit -bind (Core).
+OUTWB="$("$SHIM" --print-cmd -datadir="$WARNET_DD" -regtest -bind=127.0.0.1:19333 2>/dev/null)" || OUTWB=""
+if printf '%s' "$OUTWB" | grep -q -- "--listen 127.0.0.1:19333" \
+  && ! printf '%s' "$OUTWB" | grep -q -- "--listen 0.0.0.0:19333"; then
+  echo "ok - listen=1 ignored when -bind set"
+  PASS=$((PASS + 1))
+else
+  echo "not ok - listen=1 ignored when -bind set (got: $OUTWB)"
+  FAIL=$((FAIL + 1))
+fi
+
+ENV_DD="$WORKDIR/env-datadir"
+mkdir -p "$ENV_DD"
+OUT_ENV="$(env BITCOIN_DATA="$ENV_DD" "$SHIM" --print-cmd -regtest 2>/dev/null)" || OUT_ENV=""
+if printf '%s' "$OUT_ENV" | grep -q -- "--datadir $ENV_DD/regtest"; then
+  echo "ok - BITCOIN_DATA supplies default datadir"
+  PASS=$((PASS + 1))
+else
+  echo "not ok - BITCOIN_DATA default datadir (got: $OUT_ENV)"
+  FAIL=$((FAIL + 1))
+fi
+
+if [[ -f "$WARNET_DD/regtest/rpc.token" ]] \
+  && grep -qx -- "secret0" "$WARNET_DD/regtest/rpc.token"; then
+  echo "ok - rpcpassword seeds rpc.token"
+  PASS=$((PASS + 1))
+else
+  echo "not ok - rpcpassword seeds rpc.token ($(cat "$WARNET_DD/regtest/rpc.token" 2>/dev/null || echo missing))"
+  FAIL=$((FAIL + 1))
+fi
+
 # Live smoke when a real node binary is on disk (optional in this script).
 REAL=""
 if [[ -n "${RBITCOIN_NODE_REAL:-}" && -x "${RBITCOIN_NODE_REAL}" ]]; then

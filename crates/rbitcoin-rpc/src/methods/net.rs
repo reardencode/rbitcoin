@@ -2,6 +2,7 @@ use super::*;
 use bitcoin::hashes::Hash;
 use rbitcoin_net::MempoolHub;
 use serde_json::{json, Value};
+use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 
 pub(crate) fn getnettotals(ctx: &RpcContext) -> Value {
@@ -172,15 +173,24 @@ pub(crate) fn require_peers(ctx: &RpcContext) -> Result<&rbitcoin_net::PeerHub, 
         .ok_or_else(|| rpc_error(ERR_MISC, "P2P session table not attached"))
 }
 
+fn rpc_peer_addr(ctx: &RpcContext, s: &str) -> Result<SocketAddr, Value> {
+    rbitcoin_net::parse_peer_addr_with_port(s, Some(ctx.network.default_p2p_port()))
+        .map_err(|e| rpc_error(ERR_INVALID_PARAMS, e.to_string()))
+}
+
 pub(crate) fn addnode(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["node", "command", "v2transport"])?;
     let hub = require_peers(ctx)?;
     let node = params.req_str(0, "node")?;
     let cmd = params.req_str(1, "command")?;
     let _v2 = params.opt_bool(2, "v2transport")?;
-    let addr = rbitcoin_net::parse_peer_addr(node)
-        .map_err(|e| rpc_error(ERR_INVALID_PARAMS, e.to_string()))?;
-    hub.addnode(addr, cmd).map_err(|e| rpc_error(ERR_MISC, e))?;
+    hub.addnode(node, cmd).map_err(|e| {
+        if e.contains("bad peer address") {
+            rpc_error(ERR_INVALID_PARAMS, e)
+        } else {
+            rpc_error(ERR_MISC, e)
+        }
+    })?;
     Ok(Value::Null)
 }
 
@@ -197,8 +207,7 @@ pub(crate) fn disconnectnode(ctx: &RpcContext, params: &RpcParams) -> Result<Val
         return Ok(Value::Null);
     }
     if let Some(a) = params.get(0, "address").and_then(|v| v.as_str()) {
-        let addr = rbitcoin_net::parse_peer_addr(a)
-            .map_err(|e| rpc_error(ERR_INVALID_PARAMS, e.to_string()))?;
+        let addr = rpc_peer_addr(ctx, a)?;
         if !hub.disconnect_addr(addr) {
             return Err(rpc_error(
                 ERR_CLIENT_NODE_NOT_CONNECTED,
@@ -216,8 +225,7 @@ pub(crate) fn addconnection(ctx: &RpcContext, params: &RpcParams) -> Result<Valu
     let address = params.req_str(0, "address")?;
     let typ_s = params.req_str(1, "connection_type")?;
     let _v2 = params.opt_bool(2, "v2transport")?.unwrap_or(true);
-    let addr = rbitcoin_net::parse_peer_addr(address)
-        .map_err(|e| rpc_error(ERR_INVALID_PARAMS, e.to_string()))?;
+    let addr = rpc_peer_addr(ctx, address)?;
     let typ =
         rbitcoin_net::PeerConnType::parse(typ_s).map_err(|e| rpc_error(ERR_INVALID_PARAMS, e))?;
     hub.addconnection(addr, typ)

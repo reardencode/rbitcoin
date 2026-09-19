@@ -37,8 +37,10 @@ never calls this.
 
 `scripts/core-functional/bitcoind` is the TestNode binary: `-datadir=DIR`
 → `--datadir DIR/regtest` (`bitcoind.pid` under `DIR/regtest`),
-`-rpcport`/`-port`/`bitcoin.conf` → `--rpc-listen` / `--listen` on
-127.0.0.1, `--no-seeds`. The node writes `{datadir}/rpc.token` (Bearer);
+`-rpcport`/`-port`/`bitcoin.conf` → `--rpc-listen` on 127.0.0.1 and
+`--listen` from `-bind`/`-port` (bare `-port` is 0.0.0.0; TestNode
+`bind=127.0.0.1` stays loopback), `--no-seeds`. Helm `rpcbind=0.0.0.0`
+binds the **proxy** all-interfaces. The node writes `{datadir}/rpc.token` (Bearer);
 the shim mirrors `__cookie__:<token>` to `{datadir}/.cookie` so Core
 TestNode cookie + HTTP Basic still work on the **proxy** public port. The
 proxy forwards `Authorization: Bearer` to the node (TCP is Bearer-only).
@@ -274,3 +276,78 @@ no `store/` (clean-chain starts stay empty).
 python3 scripts/core-functional/create_cache.py --ensure
 ./scripts/core-functional/create_cache.test.sh
 ```
+
+## Warnet lab (all-rbitcoin tanks)
+
+Not an operator musl Release. Image tag `rbitcoin-warnet:local`. Warnet
+stays Core Helm (`bitcoin.conf`, `rpcuser`/`rpcpassword`, `addnode=tank-N`,
+`pidof bitcoind`, `kubectl exec bitcoin-cli`). The node is not taught Core
+conf; the Python shim translates.
+
+Needs Docker + kind (or minikube) on an **operator host**. Do not open
+mainnet. Wallet keys are RAM-only; a pod restart drops `miner`.
+
+```bash
+./scripts/core-functional/init-submodule.sh
+cargo build -p rbitcoin-node
+docker build -t rbitcoin-warnet:local \
+  --build-arg NODE_BIN=target/dev/debug/rbitcoin-node \
+  -f scripts/core-functional/warnet/Dockerfile .
+kind load docker-image rbitcoin-warnet:local
+```
+
+`scripts/core-functional/warnet/Dockerfile.test.sh` pins the Dockerfile
+and entrypoint text (no Docker required). PID 1 is a `python3` binary
+copied as `bitcoind` so `pidof bitcoind` works. `BITCOIN_DATA` defaults to
+`/root/.bitcoin`. `RBITCOIN_LOG_STDOUT=1` tees mapped debug lines to
+stdout for `kubectl logs`.
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install warnet
+warnet setup
+warnet new /tmp/rbtc-warnet
+```
+
+Replace `networks/<name>/network.yaml` with three tanks, same image, ring
+`addnode`, unique `rpcpassword`, no LN, no snapshot:
+
+```yaml
+nodes:
+  - name: tank-0000
+    image: { repository: rbitcoin-warnet, tag: local, pullPolicy: Never }
+    global: { chain: regtest, rpcpassword: secret0 }
+    addnode: [tank-0001]
+  - name: tank-0001
+    image: { repository: rbitcoin-warnet, tag: local, pullPolicy: Never }
+    global: { chain: regtest, rpcpassword: secret1 }
+    addnode: [tank-0002]
+  - name: tank-0002
+    image: { repository: rbitcoin-warnet, tag: local, pullPolicy: Never }
+    global: { chain: regtest, rpcpassword: secret2 }
+    addnode: [tank-0000]
+caddy: { enabled: false }
+fork_observer: { enabled: false }
+```
+
+`node-defaults.yaml`: `chain: regtest` only. Liveness is `pidof bitcoind`.
+
+```bash
+warnet deploy /tmp/rbtc-warnet/networks/<name>
+warnet status
+warnet bitcoin rpc tank-0000 getblockcount
+warnet run /tmp/rbtc-warnet/scenarios/miner_std.py -- --interval=10 --mature
+warnet bitcoin rpc tank-0000 getblockcount   # >= 101 after --mature
+warnet bitcoin rpc tank-0001 getblockcount   # same height
+warnet bitcoin rpc tank-0002 getblockcount
+warnet bitcoin peers tank-0000
+warnet down
+```
+
+Pass: all three heights match and are > 0; peers show the ring; miner_std
+commander is `running` then can be `warnet stop`'d.
+
+Fail classes: CrashLoop `pidof`; 401 on RPC; height only on tank-0000
+(DNS/retry/bind); `listwalletdir` / `createwallet` errors in commander
+logs. `pullPolicy: Never` without `kind load` is ImagePullBackOff.
+

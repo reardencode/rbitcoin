@@ -8,7 +8,7 @@ use bitcoin::p2p::ServiceFlags;
 use bitcoin::{BlockHash, Wtxid};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use tokio::sync::mpsc;
@@ -1018,7 +1018,9 @@ pub struct PeerInfo {
 pub struct PeerHub {
     next_id: AtomicU64,
     live: RwLock<HashMap<u64, Arc<LivePeer>>>,
-    added: Mutex<HashSet<SocketAddr>>,
+    added: Mutex<HashSet<String>>,
+    connect: Mutex<Vec<String>>,
+    connect_default_port: AtomicU16,
     dial_tx: Mutex<Option<mpsc::UnboundedSender<DialRequest>>>,
     /// Peers we asked to send us compact (BIP152 HB, max 3, prefer outbound).
     hb_selected: Mutex<Vec<u64>>,
@@ -1108,6 +1110,8 @@ impl PeerHub {
             next_id: AtomicU64::new(0),
             live: RwLock::new(HashMap::new()),
             added: Mutex::new(HashSet::new()),
+            connect: Mutex::new(Vec::new()),
+            connect_default_port: AtomicU16::new(0),
             dial_tx: Mutex::new(None),
             hb_selected: Mutex::new(Vec::new()),
             mock_now: AtomicU64::new(0),
@@ -1771,26 +1775,81 @@ impl PeerHub {
             .cloned()
     }
 
-    pub fn addnode(&self, addr: SocketAddr, cmd: &str) -> Result<(), String> {
+    pub fn addnode(&self, node: &str, cmd: &str) -> Result<(), String> {
         match cmd {
-            "onetry" => self.dial(addr, PeerConnType::Manual),
+            "onetry" => {
+                let addr = self.parse_added_addr(node)?;
+                self.dial(addr, PeerConnType::Manual)
+            }
             "add" => {
                 self.added
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .insert(addr);
-                let _ = self.dial(addr, PeerConnType::Manual);
+                    .insert(node.to_string());
+                if let Ok(addr) = self.parse_added_addr(node) {
+                    let _ = self.dial(addr, PeerConnType::Manual);
+                }
                 Ok(())
             }
             "remove" => {
                 self.added
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .remove(&addr);
-                self.disconnect_addr(addr);
+                    .remove(node);
+                if let Ok(addr) = self.parse_added_addr(node) {
+                    self.disconnect_addr(addr);
+                }
                 Ok(())
             }
             other => Err(format!("unknown addnode command {other}")),
+        }
+    }
+
+    fn parse_added_addr(&self, node: &str) -> Result<SocketAddr, String> {
+        let port = self.connect_default_port.load(Ordering::Relaxed);
+        let default_port = (port != 0).then_some(port);
+        parse_peer_addr_with_port(node, default_port).map_err(|e| e.to_string())
+    }
+
+    pub fn set_connect_hosts(&self, hosts: Vec<String>, default_port: u16) {
+        self.connect_default_port
+            .store(default_port, Ordering::Relaxed);
+        *self.connect.lock().unwrap_or_else(|e| e.into_inner()) = hosts;
+    }
+
+    fn is_addr_live(&self, addr: SocketAddr) -> bool {
+        self.snapshot().iter().any(|p| p.addr == addr)
+    }
+
+    /// Dial remembered `addnode add` / `--connect` hosts that are not live.
+    pub fn redial_remembered(&self) {
+        let added: Vec<String> = self
+            .added
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect();
+        for host in added {
+            let Ok(addr) = self.parse_added_addr(&host) else {
+                continue;
+            };
+            if !self.is_addr_live(addr) {
+                let _ = self.dial(addr, PeerConnType::Manual);
+            }
+        }
+        let hosts: Vec<String> = self
+            .connect
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        for host in hosts {
+            let Ok(addr) = self.parse_added_addr(&host) else {
+                continue;
+            };
+            if !self.is_addr_live(addr) {
+                let _ = self.dial(addr, PeerConnType::OutboundFullRelay);
+            }
         }
     }
 
@@ -2015,10 +2074,52 @@ fn service_flags_u64(f: ServiceFlags) -> u64 {
     f.to_u64()
 }
 
-/// Parse Core `ip:port` / `[v6]:port`.
+/// Parse Core `ip:port` / `[v6]:port`. Hostnames need [`parse_peer_addr_with_port`].
 pub fn parse_peer_addr(s: &str) -> Result<SocketAddr, NetError> {
-    s.parse()
-        .map_err(|_| NetError::Encode(format!("bad peer address {s}")))
+    parse_peer_addr_with_port(s, None)
+}
+
+/// Parse `ip:port`, `[v6]:port`, `host:port`, or `host` (uses `default_port`).
+///
+/// Hostnames resolve at call time (`ToSocketAddrs`) so kube-dns / late DNS can
+/// appear after listen. Dual-stack names prefer IPv4 so a `127.0.0.1` listener
+/// is reached via `localhost`.
+pub fn parse_peer_addr_with_port(
+    s: &str,
+    default_port: Option<u16>,
+) -> Result<SocketAddr, NetError> {
+    let bad = || NetError::Encode(format!("bad peer address {s}"));
+    if let Ok(addr) = s.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+    if let Ok(ip) = s.parse::<IpAddr>() {
+        let port = default_port.ok_or_else(bad)?;
+        return Ok(SocketAddr::new(ip, port));
+    }
+    let (host, port) = match s.rsplit_once(':') {
+        Some((h, p)) if !h.is_empty() && !h.starts_with('[') => match p.parse::<u16>() {
+            Ok(port) => (h, port),
+            Err(_) => {
+                let port = default_port.ok_or_else(bad)?;
+                (s, port)
+            }
+        },
+        _ => {
+            let port = default_port.ok_or_else(bad)?;
+            (s, port)
+        }
+    };
+    if host.is_empty() {
+        return Err(bad());
+    }
+    let with_port = format!("{host}:{port}");
+    let addrs: Vec<SocketAddr> = with_port.to_socket_addrs().map_err(|_| bad())?.collect();
+    addrs
+        .iter()
+        .copied()
+        .find(|a| a.is_ipv4())
+        .or_else(|| addrs.first().copied())
+        .ok_or_else(bad)
 }
 
 #[cfg(test)]
@@ -2753,8 +2854,34 @@ mod tests {
     #[test]
     fn addnode_unknown_command() {
         let hub = PeerHub::new();
-        let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1);
-        assert!(hub.addnode(a, "nope").is_err());
+        assert!(hub.addnode("127.0.0.1:1", "nope").is_err());
+    }
+
+    #[test]
+    fn redial_remembered_dials_added_and_connect_hosts() {
+        let hub = PeerHub::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        hub.set_dialer(tx);
+        let added = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+        hub.addnode("127.0.0.1:18444", "add").unwrap();
+        let first = rx.try_recv().expect("addnode dials once");
+        assert_eq!(first.addr, added);
+        assert_eq!(first.typ, PeerConnType::Manual);
+
+        hub.set_connect_hosts(vec!["127.0.0.1:18445".into()], 18444);
+        hub.redial_remembered();
+        let mut got = Vec::new();
+        while let Ok(r) = rx.try_recv() {
+            got.push((r.addr.port(), r.typ));
+        }
+        assert!(
+            got.contains(&(18444, PeerConnType::Manual)),
+            "added not live must redial: {got:?}"
+        );
+        assert!(
+            got.contains(&(18445, PeerConnType::OutboundFullRelay)),
+            "--connect not live must redial: {got:?}"
+        );
     }
 
     #[test]
@@ -2929,5 +3056,36 @@ mod tests {
             addr_ips(&hub.addr_response_for_bind(SocketAddr::from(([127, 0, 0, 1], 18444))));
         assert_eq!(expired.len(), 1000);
         assert_ne!(a, expired);
+    }
+
+    #[test]
+    fn parse_peer_addr_localhost_and_default_port() {
+        let with_port = parse_peer_addr("localhost:18444").expect("localhost:port");
+        assert_eq!(with_port.port(), 18444);
+        assert!(with_port.ip().is_loopback(), "{with_port}");
+
+        let no_port =
+            parse_peer_addr_with_port("localhost", Some(18444)).expect("localhost default");
+        assert_eq!(no_port.port(), 18444);
+        assert!(no_port.ip().is_loopback(), "{no_port}");
+
+        let lit: SocketAddr = "127.0.0.1:18444".parse().unwrap();
+        assert_eq!(parse_peer_addr("127.0.0.1:18444").unwrap(), lit);
+
+        let err = parse_peer_addr_with_port("not-a-real-host.invalid", Some(18444)).unwrap_err();
+        let s = err.to_string();
+        assert!(s.contains("bad peer address"), "{s}");
+    }
+
+    #[test]
+    fn addnode_add_keeps_unresolved_host_for_redial() {
+        let hub = PeerHub::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        hub.set_dialer(tx);
+        hub.set_connect_hosts(vec![], 18444);
+        hub.addnode("not-a-real-host.invalid", "add").unwrap();
+        assert!(rx.try_recv().is_err(), "unresolved add must not dial");
+        hub.redial_remembered();
+        assert!(rx.try_recv().is_err(), "still unresolved: skip this tick");
     }
 }

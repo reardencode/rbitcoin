@@ -134,6 +134,22 @@ impl P2PNode {
             }
         });
 
+        const CONNECT_RETRY_SECS: u64 = 2;
+        let retry_peers = peers.clone();
+        let retry_shutdown = shutdown.clone();
+        let retry_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(CONNECT_RETRY_SECS));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if retry_shutdown.load(Ordering::SeqCst) {
+                    break;
+                }
+                retry_peers.redial_remembered();
+            }
+        });
+
         Ok(Self {
             cache,
             query,
@@ -142,7 +158,7 @@ impl P2PNode {
             magic,
             shutdown,
             follow_live,
-            tasks: vec![accept_task, dial_task],
+            tasks: vec![accept_task, dial_task, retry_task],
             session_tasks,
             peers,
             user_agent,

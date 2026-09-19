@@ -154,6 +154,29 @@ assert body["error"] is None
 st, _body = call("getblockcount", auth=False)
 assert st == 401, st
 
+def call_basic(user, password):
+    tok = base64.b64encode(f"{user}:{password}".encode()).decode()
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{listen_port}/",
+        data=json.dumps(
+            {"jsonrpc": "1.0", "id": 1, "method": "getblockcount", "params": []}
+        ).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Basic " + tok,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+assert call_basic("user", "secret") == 200
+assert call_basic("__cookie__", "secret") == 200
+assert call_basic("user", "wrong") == 401
+
 proxy.register("echo", lambda p: p)
 st, body = call("echo")
 assert body["result"] == [], body

@@ -33,7 +33,7 @@ evidence (failed Core corpus, new dual path, red required CI, MSRV drift).
 | 6 | **Q-67** | `asked_blocks` clone on hold | `hold_body` clones `asked_blocks` before `held_bodies` insert so the read lock does not overlap the write (`HeldBodies::insert` already takes `&HashSet`). Bound is `MAX_SERVE_BLOCKS` × peers. Follow-up: pass the read guard with a documented lock order, or keep the clone as a named trade. Owner: `crates/rbitcoin-net/src/chain.rs`. |
 
 R-ids were the 2026-08-12 slice. Canonical id is **bold**. Do not start
-**R-11+**. Next unused Q-id is **Q-68**.
+**R-11+**. Next unused Q-id is **Q-69**.
 
 Close work by **moving the Open row into CHANGELOG** in the same edit as
 the landing change (do not grow a Completed museum here). New item: insert
