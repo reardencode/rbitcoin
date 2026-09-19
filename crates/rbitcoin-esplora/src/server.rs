@@ -480,6 +480,7 @@ pub async fn run_esplora(
         .route("/tx/{txid}/outspend/{vout}", get(handlers::tx_outspend))
         .route("/tx/{txid}/outspends", get(handlers::tx_outspends))
         .route("/tx", post(handlers::post_tx))
+        .route("/txs/outspends", get(handlers::get_txs_outspends))
         .route("/txs/package", post(handlers::post_tx_package))
         .route("/address/{addr}", get(handlers::address_info))
         .route("/address/{addr}/utxo", get(handlers::address_utxo))

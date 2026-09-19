@@ -268,6 +268,47 @@ pub async fn get_internal_block_txs(
     .await
 }
 
+pub(crate) fn outspends_for_txid_opts(st: &AppState, ids: Vec<Option<[u8; 32]>>) -> Response {
+    let view = match pin_or_reject(&st.query, ChainViewKind::Tip, None) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let mp = st.mempool.as_deref();
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        let Some(id) = id else {
+            out.push(json!([]));
+            continue;
+        };
+        let nout = if let Ok(Some(fk)) = st.query.tx_fk_by_txid(&id) {
+            match st.query.store().get_tx_meta_and_outputs(fk) {
+                Ok((meta, _)) => meta.output_count,
+                Err(e) => return store_err(e),
+            }
+        } else if let Some(mp) = mp {
+            let tid = Txid::from_byte_array(id);
+            mp.get_tx(&tid)
+                .map(|tx| tx.output.len() as u32)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let mut slots = Vec::with_capacity(nout as usize);
+        for vout in 0..nout {
+            match outspend_json(&st.query, mp, &id, vout, view.as_ref()) {
+                Ok(v) => slots.push(v),
+                Err(e) => return store_err(e),
+            }
+        }
+        out.push(Value::Array(slots));
+    }
+    Json(out).into_response()
+}
+
+pub(crate) fn outspends_for_txids(st: &AppState, ids: Vec<[u8; 32]>) -> Response {
+    outspends_for_txid_opts(st, ids.into_iter().map(Some).collect())
+}
+
 pub async fn post_outspends_by_txid(State(st): State<AppState>, body: Bytes) -> Response {
     if body.len() > st.max_body {
         return (StatusCode::PAYLOAD_TOO_LARGE, "body too large").into_response();
@@ -277,36 +318,7 @@ pub async fn post_outspends_by_txid(State(st): State<AppState>, body: Bytes) -> 
             Ok(v) => v,
             Err(r) => return r,
         };
-        let view = match pin_or_reject(&st.query, ChainViewKind::Tip, None) {
-            Ok(v) => v,
-            Err(r) => return r,
-        };
-        let mp = st.mempool.as_deref();
-        let mut out = Vec::with_capacity(ids.len());
-        for id in ids {
-            let nout = if let Ok(Some(fk)) = st.query.tx_fk_by_txid(&id) {
-                match st.query.store().get_tx_meta_and_outputs(fk) {
-                    Ok((meta, _)) => meta.output_count,
-                    Err(e) => return store_err(e),
-                }
-            } else if let Some(mp) = mp {
-                let tid = Txid::from_byte_array(id);
-                mp.get_tx(&tid)
-                    .map(|tx| tx.output.len() as u32)
-                    .unwrap_or(0)
-            } else {
-                0
-            };
-            let mut slots = Vec::with_capacity(nout as usize);
-            for vout in 0..nout {
-                match outspend_json(&st.query, mp, &id, vout, view.as_ref()) {
-                    Ok(v) => slots.push(v),
-                    Err(e) => return store_err(e),
-                }
-            }
-            out.push(Value::Array(slots));
-        }
-        Json(out).into_response()
+        outspends_for_txids(&st, ids)
     })
     .await
 }
@@ -668,6 +680,36 @@ mod tests {
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["spent"], true);
         assert_eq!(arr[1]["spent"], false);
+        handle.shutdown().await;
+        let _ = pad.dir;
+    }
+
+    #[tokio::test]
+    async fn get_txs_outspends_query() {
+        let pad = pad_hub("get-txs-outspends", 3);
+        let a = spend_true(pad.cbs[0], 1_000, ScriptBuf::from_bytes(vec![0x51]));
+        pad.hub.accept_tx(&a).unwrap();
+        let cfg =
+            EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), bitcoin::Network::Regtest);
+        let handle = run_esplora(cfg, Arc::clone(&pad.q), Some(Arc::clone(&pad.hub)), None)
+            .await
+            .unwrap();
+        let addr = handle.local_addr;
+        let spent = pad.cbs[0].to_string();
+        let unknown = "ff".repeat(32);
+        let (st, resp) = http_get(addr, &format!("/txs/outspends?txids={spent},{unknown}")).await;
+        assert_eq!(st, 200, "{resp}");
+        let arr: Vec<Value> = serde_json::from_str(&resp).unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0][0]["spent"], true);
+        assert_eq!(arr[1], json!([]));
+        let too_many = (0..51)
+            .map(|_| "aa".repeat(32))
+            .collect::<Vec<_>>()
+            .join(",");
+        let (st, resp) = http_get(addr, &format!("/txs/outspends?txids={too_many}")).await;
+        assert_eq!(st, 400, "{resp}");
+        assert!(resp.contains("Too many txids requested"), "{resp}");
         handle.shutdown().await;
         let _ = pad.dir;
     }

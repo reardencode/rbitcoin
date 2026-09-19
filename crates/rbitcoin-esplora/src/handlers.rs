@@ -9,7 +9,7 @@ use crate::tx_json::{
     utxo_list_json,
 };
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query as AxumQuery, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -24,6 +24,7 @@ use rbitcoin_query::{
     ChainViewKind, HistoryFilter, Query, ScriptHashChainStats, ScriptHashTxSummary,
 };
 use rbitcoin_store::{script_hash, StoreError};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -1250,6 +1251,29 @@ fn mempool_txs_json(st: &AppState, sh: &[u8; 32]) -> Vec<Value> {
 
 fn mempool_txs_for_sh(st: &AppState, sh: &[u8; 32]) -> Response {
     Json(mempool_txs_json(st, sh)).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct TxidsQuery {
+    txids: Option<String>,
+}
+
+pub async fn get_txs_outspends(
+    State(st): State<AppState>,
+    AxumQuery(q): AxumQuery<TxidsQuery>,
+) -> Response {
+    let Some(raw) = q.txids.filter(|s| !s.is_empty()) else {
+        return (StatusCode::BAD_REQUEST, "No txids specified").into_response();
+    };
+    spawn_join(move || {
+        let parts: Vec<&str> = raw.split(',').collect();
+        if parts.len() > 50 {
+            return (StatusCode::BAD_REQUEST, "Too many txids requested").into_response();
+        }
+        let ids: Vec<Option<[u8; 32]>> = parts.iter().map(|p| parse_hash32(p).ok()).collect();
+        crate::internal::outspends_for_txid_opts(&st, ids)
+    })
+    .await
 }
 
 pub async fn post_tx(State(st): State<AppState>, body: Bytes) -> Response {
