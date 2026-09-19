@@ -305,6 +305,95 @@ mod tests {
         server.await.unwrap();
     }
 
+    async fn accept_domain_connect(
+        listener: TcpListener,
+        want_host: &'static [u8],
+        want_port: u16,
+    ) {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let mut ver_n = [0u8; 2];
+        s.read_exact(&mut ver_n).await.unwrap();
+        let nmethods = ver_n[1] as usize;
+        let mut methods = vec![0u8; nmethods];
+        s.read_exact(&mut methods).await.unwrap();
+        if methods.contains(&0x02) {
+            s.write_all(&[5, 0x02]).await.unwrap();
+            let mut ver = [0u8; 1];
+            s.read_exact(&mut ver).await.unwrap();
+            let mut ulen = [0u8; 1];
+            s.read_exact(&mut ulen).await.unwrap();
+            let mut user = vec![0u8; ulen[0] as usize];
+            s.read_exact(&mut user).await.unwrap();
+            let mut plen = [0u8; 1];
+            s.read_exact(&mut plen).await.unwrap();
+            let mut pass = vec![0u8; plen[0] as usize];
+            s.read_exact(&mut pass).await.unwrap();
+            s.write_all(&[1, 0]).await.unwrap();
+        } else {
+            s.write_all(&[5, 0x00]).await.unwrap();
+        }
+        let mut hdr = [0u8; 4];
+        s.read_exact(&mut hdr).await.unwrap();
+        assert_eq!(hdr[3], 3, "ATYP domain");
+        let mut n = [0u8; 1];
+        s.read_exact(&mut n).await.unwrap();
+        let mut name = vec![0u8; n[0] as usize];
+        s.read_exact(&mut name).await.unwrap();
+        let mut p = [0u8; 2];
+        s.read_exact(&mut p).await.unwrap();
+        assert_eq!(name, want_host);
+        assert_eq!(u16::from_be_bytes(p), want_port);
+        s.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dialer_connect_domain_covers_socks_and_direct() {
+        let host = "seed.example";
+        let port = 8333u16;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = listener.local_addr().unwrap();
+        let server = tokio::spawn(accept_domain_connect(listener, b"seed.example", port));
+        Dialer::Socks {
+            proxy,
+            randomize: true,
+        }
+        .connect_domain(host, port)
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = listener.local_addr().unwrap();
+        let server = tokio::spawn(accept_domain_connect(listener, b"seed.example", port));
+        Dialer::Socks {
+            proxy,
+            randomize: false,
+        }
+        .connect_domain(host, port)
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let echo_addr = echo.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = echo.accept().await.unwrap();
+            let mut b = [0u8; 1];
+            s.read_exact(&mut b).await.unwrap();
+            s.write_all(&b).await.unwrap();
+        });
+        let mut stream = Dialer::Direct
+            .connect_domain("127.0.0.1", echo_addr.port())
+            .await
+            .unwrap();
+        stream.write_all(&[0x42]).await.unwrap();
+        let mut got = [0u8; 1];
+        stream.read_exact(&mut got).await.unwrap();
+        assert_eq!(got, [0x42]);
+        server.await.unwrap();
+    }
+
     async fn serve_userpass_ipv4(
         s: &mut tokio::net::TcpStream,
         want_ip: [u8; 4],
