@@ -316,7 +316,10 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     if let Some(secs) = config.listen.peer_timeout_secs {
         node.peers.set_peer_timeout_secs(secs);
     }
-    node.peers.set_listen_port(listen.port());
+    node.peers.set_discover(config.listen.discover);
+    if let Some(addr) = bind {
+        node.peers.set_listen_port(addr.port());
+    }
     if !config.listen.external_ips.is_empty() {
         node.peers
             .set_external_ips(config.listen.external_ips.clone());

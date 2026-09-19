@@ -3430,6 +3430,10 @@ fn getnetworkinfo_localaddresses_from_externalip() {
     assert_eq!(addrs[0]["address"], "42.42.42.42");
     assert_eq!(addrs[0]["port"], 18445);
     assert_eq!(addrs[0]["score"], 4);
+    ctx.peers.as_ref().unwrap().set_discover(false);
+    let info = dispatch(&ctx, "getnetworkinfo", vec![]).unwrap();
+    let addrs = info["localaddresses"].as_array().expect("array");
+    assert!(addrs.is_empty(), "no-discover localaddresses: {info}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

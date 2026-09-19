@@ -308,7 +308,7 @@ fn operator_usage() -> String {
     [--min-chain-work HEX] [--max-tip-age SECS] [--check-blocks N] [--mock-time UNIX] \\\n\
     [--block-version N] [--block-min-tx-fee BTC] [--alert-notify CMD] [--startup-notify CMD] \\\n\
     [--max-run-secs N] [--log-level LEVEL] [--api-log PATH] [--asmap PATH] \\\n\
-    [--no-seeds] [--smoke] [--inhibit-suspend]\n\n\
+    [--no-seeds] [--no-listen] [--no-discover] [--smoke] [--inhibit-suspend]\n\n\
 Networks: mainnet|testnet|signet|regtest.\n\
 Custom Signet: --signet-challenge HEX [--signet-block-time SECS].\n\
 Log level: error|warn|info|debug|trace|off (CLI > conf log_level > RBITCOIN_LOG / RUST_LOG).\n\
@@ -375,6 +375,7 @@ fn is_bool_key(key: &str) -> bool {
             | "net_permission_force_relay"
             | "no_seeds"
             | "no_listen"
+            | "no_discover"
             | "proxy_randomize"
             | "inhibit_suspend"
             | "trusted"
@@ -568,6 +569,7 @@ mod tests {
             "--onion",
             "--proxy-randomize",
             "--no-listen",
+            "--no-discover",
         ] {
             assert!(h.contains(flag), "help must list {flag}");
         }
@@ -598,6 +600,7 @@ mod tests {
             "--whitelist-relay",
             "--whitelist-forcerelay",
             "--nolisten",
+            "--nodiscover",
         ] {
             assert!(!h.contains(concat), "help must not advertise {concat}");
         }
@@ -772,6 +775,19 @@ mod tests {
             !h.contains("--nolisten"),
             "help must not advertise concatenated --nolisten"
         );
+    }
+
+    #[test]
+    fn no_discover_conf() {
+        let _g = OPERATOR_ENV_TEST_LOCK.lock().unwrap();
+        assert!(NodeConfig::default().listen.discover);
+        let off = ready_config(["rbitcoin-node", "--no-discover"]);
+        assert!(!off.listen.discover);
+        let mut c = NodeConfig::default();
+        assert_eq!(c.apply_kv("no_discover", "1").unwrap(), ConfApply::Applied);
+        assert!(!c.listen.discover);
+        c.apply_kv("no_discover", "0").unwrap();
+        assert!(c.listen.discover);
     }
 
     #[test]

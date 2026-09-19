@@ -98,6 +98,8 @@ pub struct ListenOpts {
     pub onion: Option<SocketAddr>,
     /// Fresh SOCKS USERPASS per peer (Core `-proxyrandomize`; default on).
     pub proxy_randomize: bool,
+    /// Core `-discover` (default on). Off: no self-announce / localaddresses.
+    pub discover: bool,
 }
 
 impl Default for ListenOpts {
@@ -118,6 +120,7 @@ impl Default for ListenOpts {
             proxy: None,
             onion: None,
             proxy_randomize: true,
+            discover: true,
         }
     }
 }
@@ -690,6 +693,9 @@ impl NodeConfig {
                     self.listen.p2p = P2pListen::Off;
                     self.listen.p2p_extra.clear();
                 }
+            }
+            "no_discover" => {
+                self.listen.discover = !is_conf_true(val);
             }
             "connect" => {
                 self.listen.connect.push(
