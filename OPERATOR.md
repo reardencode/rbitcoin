@@ -365,13 +365,15 @@ Clean smoke:
 | `--signet-challenge HEX` | `signet_challenge=` | default global Signet challenge |
 | `--signet-block-time SECS` | `signet_block_time=` | 600; requires a custom challenge |
 | `--listen ADDR` | `listen=` | bind later default port |
+| `--no-listen` / `--listen=0` | `listen=0` / `no_listen=` | bind a loopback default; **off** = no P2P socket (outbound-only) |
+| `--no-discover` | `no_discover=` | discover **on**; flag off = no self-announce / `localaddresses` |
 | `--connect ADDR` | `connect=` (repeatable) | seeds |
 | `--proxy HOST:PORT` | `proxy=` | unset — SOCKS5 for all P2P outbound |
 | `--onion HOST:PORT` | `onion=` | unset — SOCKS5 for onion destinations |
 | `--proxy-randomize[=0\|1]` | `proxy_randomize=` | **on** — fresh SOCKS username per peer (Tor circuit isolation) |
 | `--milestone HEIGHT` | `milestone=` | network default (mainnet 840000) |
 | `--max-outbound N` | `max_outbound=` | 16 live download peers |
-| `--max-inbound N` | `max_inbound=` | 125 inbound sessions |
+| `--max-inbound N` | `max_inbound=` | 125 inbound sessions; **0** = no inbound slots (outbound-only) |
 | `--mempool-size-mb N` | `mempool_size_mb=` | ~300 MiB weight |
 | `--conf FILE` | | none |
 | `--log-level LEVEL` | `log_level=` | `info` |
@@ -434,6 +436,11 @@ mempool_size_mb=100
 pass `--connect ADDR` (or reuse a `peers` file). `--proxy-randomize` (default
 on) uses a fresh SOCKS username per peer so Tor isolates circuits.
 `--onion HOST:PORT` stores a separate SOCKS endpoint for onion destinations.
+
+`--listen=0` / `--no-listen` starts without a P2P TCP bind (no ISP port
+forward). `--max-inbound 0` refuses inbound slots. `--no-discover` does not
+self-announce even when `--external-ip` is set. A later onion inbound bind
+does not require a public clearnet listen.
 
 `--datadir` holds the node root (`store/`, `mempool/`, `peers`, `rpc.token`, `rpc.sock`).
 Omit `--datadir-cold` and cold files live there too. Set it to put the large

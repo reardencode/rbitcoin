@@ -45,11 +45,23 @@ let
     cfg.dataDir
     "--network"
     cfg.network
-    "--listen"
-    (socket cfg.p2p.address cfg.p2p.port)
+  ]
+  ++ (
+    if cfg.p2p.listen then
+      [
+        "--listen"
+        (socket cfg.p2p.address cfg.p2p.port)
+      ]
+    else
+      [ "--no-listen" ]
+  )
+  ++ [
     "--log-level"
     cfg.logLevel
   ]
+  ++ optional (cfg.p2p.maxInbound != 125) "--max-inbound"
+  ++ optional (cfg.p2p.maxInbound != 125) (toString cfg.p2p.maxInbound)
+  ++ optional (!cfg.p2p.discover) "--no-discover"
   ++ optional (cfg.coldDataDir != null) "--datadir-cold"
   ++ optional (cfg.coldDataDir != null) cfg.coldDataDir
   ++ optional cfg.rpc.enable "--rpc-listen"
@@ -187,10 +199,28 @@ in
         description = "Bitcoin P2P listen port.";
       };
 
+      listen = mkOption {
+        type = types.bool;
+        default = true;
+        description = "Bind a P2P listen socket. Set false for outbound-only (no ISP port forward).";
+      };
+
+      maxInbound = mkOption {
+        type = types.ints.unsigned;
+        default = 125;
+        description = "Inbound P2P session cap. 0 with listen=false is outbound-only.";
+      };
+
+      discover = mkOption {
+        type = types.bool;
+        default = true;
+        description = "Advertise local addresses to peers. Off with --no-discover.";
+      };
+
       openFirewall = mkOption {
         type = types.bool;
         default = false;
-        description = "Open the P2P listen port in the NixOS firewall.";
+        description = "Open the P2P listen port in the NixOS firewall. Ignored when listen is false.";
       };
     };
 
@@ -310,7 +340,7 @@ in
     };
 
     networking.firewall.allowedTCPPorts =
-      optional cfg.p2p.openFirewall cfg.p2p.port
+      optional (cfg.p2p.openFirewall && cfg.p2p.listen) cfg.p2p.port
       ++ optional (cfg.electrum.enable && cfg.electrum.openFirewall) cfg.electrum.port
       ++ optional (cfg.esplora.enable && cfg.esplora.openFirewall) cfg.esplora.port;
 
