@@ -21,13 +21,18 @@ use bitcoin::{MerkleBlock, Network, OutPoint, Txid};
 use rbitcoin_net::MempoolHub;
 use rbitcoin_primitives::{median_time_past_times, Height};
 use rbitcoin_query::{
-    ChainViewKind, HistoryFilter, Query, ScriptHashChainStats, ScriptHashTxSummary,
+    ChainViewKind, HistoryFilter, Query, ScriptHashChainStats, ScriptHashTxSummary, ShJoinSlot,
 };
 use rbitcoin_store::{script_hash, StoreError};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
+
+const MULTI_ADDRESS_LIMIT: usize = 300;
+
+type JoinBag = HashMap<[u8; 32], ShJoinSlot>;
 
 /// Best-chain wire block for Esplora (archived reconstruct; no extra PoW rehash gate).
 fn best_chain_block(
@@ -633,6 +638,7 @@ fn sh_pin(
 #[allow(clippy::result_large_err)] // public error enum
 fn sh_at_view<T>(
     st: &AppState,
+    sh: &[u8; 32],
     asof: Option<[u8; 32]>,
     asof_fn: impl Fn(&Query, &rbitcoin_query::ChainView) -> Result<T, rbitcoin_query::QueryError>,
     live_fn: impl Fn(
@@ -641,6 +647,7 @@ fn sh_at_view<T>(
         &rbitcoin_query::ChainView,
     ) -> Result<T, rbitcoin_query::QueryError>,
     missing: T,
+    mut bag: Option<&mut JoinBag>,
 ) -> Result<(T, Option<rbitcoin_query::ChainView>), Response> {
     if asof.is_some() {
         let view = sh_pin(st, asof)?;
@@ -652,9 +659,23 @@ fn sh_at_view<T>(
             Err(e) => Err(store_err(e)),
         }
     } else {
-        match st.query.run_at_view(ChainViewKind::ScriptHash, |view| {
-            st.with_sh_join(|slot| live_fn(&st.query, slot, view))
-        }) {
+        let mut slot = bag.as_mut().and_then(|m| m.remove(sh));
+        let used_bag = bag.is_some();
+        let ran = if used_bag {
+            st.query.run_at_view(ChainViewKind::ScriptHash, |view| {
+                live_fn(&st.query, &mut slot, view)
+            })
+        } else {
+            st.query.run_at_view(ChainViewKind::ScriptHash, |view| {
+                st.with_sh_join(|s| live_fn(&st.query, s, view))
+            })
+        };
+        if let Some(map) = bag {
+            if let Some(s) = slot {
+                map.insert(*sh, s);
+            }
+        }
+        match ran {
             Ok((view, t)) => Ok((t, Some(view))),
             Err(StoreError::NotFound) => Ok((missing, None)),
             Err(e) => Err(store_err(e)),
@@ -723,6 +744,7 @@ pub async fn scripthash_utxo(
 fn utxo_response(st: &AppState, sh: &[u8; 32], asof: Option<[u8; 32]>) -> Response {
     let (list, view) = match sh_at_view(
         st,
+        sh,
         asof,
         |q, view| q.scripthash_listunspent_in(sh, view),
         |q, slot, view| {
@@ -735,6 +757,7 @@ fn utxo_response(st: &AppState, sh: &[u8; 32], asof: Option<[u8; 32]>) -> Respon
             )
         },
         Vec::new(),
+        None,
     ) {
         Ok(x) => x,
         Err(r) => return r,
@@ -772,7 +795,9 @@ fn sh_stats_json(
         (st.query.scripthash_chain_stats_in(sh, v)?, view)
     } else {
         match st.query.run_at_view(ChainViewKind::ScriptHash, |v| {
-            st.with_sh_join(|slot| st.query.scripthash_chain_stats_slot_in(sh, slot, v))
+            st.with_sh_join(|slot| {
+                st.query.scripthash_chain_stats_slot_in(sh, slot, v)
+            })
         }) {
             Ok((view, chain)) => (chain, Some(view)),
             Err(StoreError::NotFound) => (ScriptHashChainStats::default(), None),
@@ -992,10 +1017,12 @@ fn summary_page_sh(
     let filter = HistoryFilter::esplora_chain_page(after);
     let (items, view) = match sh_at_view(
         st,
+        sh,
         asof,
         |q, view| q.scripthash_history_summary_filtered_in(sh, &filter, view),
         |q, slot, view| q.scripthash_history_summary_filtered_slot_in(sh, &filter, slot, view),
         Vec::new(),
+        None,
     ) {
         Ok(x) => x,
         Err(r) => return r,
@@ -1042,10 +1069,12 @@ fn chain_page_sh(
     let filter = HistoryFilter::esplora_chain_page(after);
     let (items, view) = match sh_at_view(
         st,
+        sh,
         asof,
         |q, view| q.scripthash_history_filtered_in(sh, &filter, view),
         |q, slot, view| q.scripthash_history_filtered_slot_in(sh, &filter, slot, view),
         Vec::new(),
+        None,
     ) {
         Ok(x) => x,
         Err(r) => return r,
@@ -1086,10 +1115,12 @@ fn combined_txs(
     let filter = HistoryFilter::esplora_chain_page(chain_after);
     let (items, view) = match sh_at_view(
         st,
+        sh,
         asof,
         |q, view| q.scripthash_history_filtered_in(sh, &filter, view),
         |q, slot, view| q.scripthash_history_filtered_slot_in(sh, &filter, slot, view),
         Vec::new(),
+        None,
     ) {
         Ok(x) => x,
         Err(r) => return r,
@@ -1104,6 +1135,260 @@ fn combined_txs(
         },
         view,
     )
+}
+
+enum MultiKind {
+    Address,
+    Scripthash,
+}
+
+fn body_too_long() -> Response {
+    (StatusCode::UNPROCESSABLE_ENTITY, "body too long").into_response()
+}
+
+fn parse_multi_scripts(
+    network: Network,
+    kind: MultiKind,
+    body: &[u8],
+) -> Result<Vec<[u8; 32]>, Response> {
+    let parsed: Vec<String> = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return Err((StatusCode::BAD_REQUEST, format!("invalid json: {e}")).into_response());
+        }
+    };
+    if parsed.len() > MULTI_ADDRESS_LIMIT {
+        return Err(body_too_long());
+    }
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for s in parsed {
+        let sh = match kind {
+            MultiKind::Address => resolve_address_sh(&s, network).ok(),
+            MultiKind::Scripthash => parse_hash32(&s).ok(),
+        };
+        if let Some(sh) = sh {
+            if seen.insert(sh) {
+                out.push(sh);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn tx_row_txid(v: &Value) -> Option<&str> {
+    v["txid"].as_str()
+}
+
+fn sort_txs_newest_first(rows: &mut [Value]) {
+    rows.sort_by(|a, b| {
+        let ca = a["status"]["confirmed"].as_bool() == Some(true);
+        let cb = b["status"]["confirmed"].as_bool() == Some(true);
+        match (ca, cb) {
+            (false, true) => std::cmp::Ordering::Less,
+            (true, false) => std::cmp::Ordering::Greater,
+            _ => {
+                let ha = a["status"]["block_height"].as_u64().unwrap_or(0);
+                let hb = b["status"]["block_height"].as_u64().unwrap_or(0);
+                hb.cmp(&ha).then_with(|| {
+                    let ta = a["txid"].as_str().unwrap_or("");
+                    let tb = b["txid"].as_str().unwrap_or("");
+                    tb.cmp(ta)
+                })
+            }
+        }
+    });
+}
+
+fn skip_rows_after(rows: Vec<Value>, after: Option<[u8; 32]>) -> Vec<Value> {
+    let Some(id) = after else {
+        return rows;
+    };
+    let hex = block_hash_hex(&id);
+    match rows.iter().position(|v| v["txid"] == hex) {
+        Some(i) => rows[i.saturating_add(1)..].to_vec(),
+        None => rows,
+    }
+}
+
+fn dedup_txid(rows: Vec<Value>) -> Vec<Value> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(rows.len());
+    for v in rows {
+        let Some(id) = tx_row_txid(&v).map(str::to_owned) else {
+            continue;
+        };
+        if seen.insert(id) {
+            out.push(v);
+        }
+    }
+    out
+}
+
+fn combined_tx_vec(
+    st: &AppState,
+    sh: &[u8; 32],
+    asof: Option<[u8; 32]>,
+    bag: Option<&mut JoinBag>,
+) -> Result<Vec<Value>, Response> {
+    let mut out = Vec::new();
+    if asof.is_none() {
+        out.extend(mempool_txs_json(st, sh));
+    }
+    let filter = HistoryFilter::esplora_chain_page(None);
+    let (items, _) = sh_at_view(
+        st,
+        sh,
+        asof,
+        |q, view| q.scripthash_history_filtered_in(sh, &filter, view),
+        |q, slot, view| q.scripthash_history_filtered_slot_in(sh, &filter, slot, view),
+        Vec::new(),
+        bag,
+    )?;
+    let chain = history_items_to_tx_json(&st.query, &items, st.network).map_err(store_err)?;
+    out.extend(chain);
+    Ok(out)
+}
+
+fn summary_vec(
+    st: &AppState,
+    sh: &[u8; 32],
+    asof: Option<[u8; 32]>,
+    bag: Option<&mut JoinBag>,
+) -> Result<Vec<Value>, Response> {
+    let filter = HistoryFilter::esplora_chain_page(None);
+    let (items, _) = sh_at_view(
+        st,
+        sh,
+        asof,
+        |q, view| q.scripthash_history_summary_filtered_in(sh, &filter, view),
+        |q, slot, view| q.scripthash_history_summary_filtered_slot_in(sh, &filter, slot, view),
+        Vec::new(),
+        bag,
+    )?;
+    match summaries_json(&st.query, &items) {
+        Ok(Value::Array(v)) => Ok(v),
+        Ok(_) => Ok(Vec::new()),
+        Err(e) => Err(store_err(e)),
+    }
+}
+
+fn multi_txs(
+    st: &AppState,
+    scripts: Vec<[u8; 32]>,
+    after: Option<[u8; 32]>,
+    asof: Option<[u8; 32]>,
+) -> Response {
+    if let Some(id) = after {
+        if !txid_is_known(st, &id) {
+            return after_txid_not_found();
+        }
+    }
+    let mut bag = JoinBag::new();
+    let mut rows = Vec::new();
+    for sh in &scripts {
+        match combined_tx_vec(st, sh, asof, Some(&mut bag)) {
+            Ok(part) => rows.extend(part),
+            Err(r) => return r,
+        }
+    }
+    st.promote_bulk(&bag);
+    let mut rows = dedup_txid(rows);
+    sort_txs_newest_first(&mut rows);
+    let rows = skip_rows_after(rows, after);
+    Json(rows).into_response()
+}
+
+fn multi_summary(
+    st: &AppState,
+    scripts: Vec<[u8; 32]>,
+    after: Option<[u8; 32]>,
+    asof: Option<[u8; 32]>,
+) -> Response {
+    if let Some(id) = after {
+        if !txid_is_known(st, &id) {
+            return after_txid_not_found();
+        }
+    }
+    let mut bag = JoinBag::new();
+    let mut rows = Vec::new();
+    for sh in &scripts {
+        match summary_vec(st, sh, asof, Some(&mut bag)) {
+            Ok(part) => rows.extend(part),
+            Err(r) => return r,
+        }
+    }
+    st.promote_bulk(&bag);
+    let mut rows = dedup_txid(rows);
+    rows.sort_by(|a, b| {
+        let ha = a["height"].as_i64().unwrap_or(0);
+        let hb = b["height"].as_i64().unwrap_or(0);
+        hb.cmp(&ha).then_with(|| {
+            b["txid"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(a["txid"].as_str().unwrap_or(""))
+        })
+    });
+    let rows = skip_rows_after(rows, after);
+    Json(rows).into_response()
+}
+
+fn post_multi_body(
+    st: AppState,
+    kind: MultiKind,
+    q: AfterTxidQuery,
+    body: Bytes,
+    summary: bool,
+) -> Response {
+    let after = match parse_after_txid_query(q) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    if body.len() > st.max_body {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "body too large").into_response();
+    }
+    let scripts = match parse_multi_scripts(st.network, kind, &body) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    if summary {
+        multi_summary(&st, scripts, after, None)
+    } else {
+        multi_txs(&st, scripts, after, None)
+    }
+}
+
+pub async fn post_addresses_txs(
+    State(st): State<AppState>,
+    AxumQuery(q): AxumQuery<AfterTxidQuery>,
+    body: Bytes,
+) -> Response {
+    spawn_join(move || post_multi_body(st, MultiKind::Address, q, body, false)).await
+}
+
+pub async fn post_scripthashes_txs(
+    State(st): State<AppState>,
+    AxumQuery(q): AxumQuery<AfterTxidQuery>,
+    body: Bytes,
+) -> Response {
+    spawn_join(move || post_multi_body(st, MultiKind::Scripthash, q, body, false)).await
+}
+
+pub async fn post_addresses_txs_summary(
+    State(st): State<AppState>,
+    AxumQuery(q): AxumQuery<AfterTxidQuery>,
+    body: Bytes,
+) -> Response {
+    spawn_join(move || post_multi_body(st, MultiKind::Address, q, body, true)).await
+}
+
+pub async fn post_scripthashes_txs_summary(
+    State(st): State<AppState>,
+    AxumQuery(q): AxumQuery<AfterTxidQuery>,
+    body: Bytes,
+) -> Response {
+    spawn_join(move || post_multi_body(st, MultiKind::Scripthash, q, body, true)).await
 }
 
 pub async fn mempool_info(State(st): State<AppState>) -> Response {
@@ -1310,7 +1595,9 @@ fn parse_after_txid_query(q: AfterTxidQuery) -> Result<Option<[u8; 32]>, Respons
     match q.after_txid {
         None => Ok(None),
         Some(s) if s.is_empty() => Ok(None),
-        Some(s) => parse_hash32(&s).map(Some).map_err(|_| after_txid_not_found()),
+        Some(s) => parse_hash32(&s)
+            .map(Some)
+            .map_err(|_| after_txid_not_found()),
     }
 }
 
@@ -1690,7 +1977,7 @@ mod pure_helper_tests {
             max_ws_message_bytes: 64 * 1024,
             max_track_addresses: 64,
             max_track_txs: 64,
-            sh_join: Arc::new(Mutex::new(None)),
+            sh_join: Arc::new(Mutex::new(std::collections::HashMap::new())),
             block_template: None,
             gbt_cache: Arc::new(Mutex::new(None)),
         };

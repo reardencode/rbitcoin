@@ -409,6 +409,8 @@ impl AppState {
         *self.sh_join.lock().unwrap_or_else(|p| p.into_inner()) = slot;
         r
     }
+
+    pub(crate) fn promote_bulk(&self, _bag: &HashMap<[u8; 32], ShJoinSlot>) {}
 }
 
 /// Start Esplora **plain HTTP** (+ wallet WebSocket) on `config.listen`.
@@ -482,6 +484,16 @@ pub async fn run_esplora(
         .route("/tx", post(handlers::post_tx))
         .route("/txs/outspends", get(handlers::get_txs_outspends))
         .route("/txs/package", post(handlers::post_tx_package))
+        .route("/addresses/txs", post(handlers::post_addresses_txs))
+        .route(
+            "/addresses/txs/summary",
+            post(handlers::post_addresses_txs_summary),
+        )
+        .route("/scripthashes/txs", post(handlers::post_scripthashes_txs))
+        .route(
+            "/scripthashes/txs/summary",
+            post(handlers::post_scripthashes_txs_summary),
+        )
         .route("/address/{addr}", get(handlers::address_info))
         .route("/address/{addr}/utxo", get(handlers::address_utxo))
         .route("/address/{addr}/txs", get(handlers::address_txs))
@@ -2583,38 +2595,157 @@ mod tests {
         let (st, body) = http_get(addr, &format!("/scripthash/{sh}/txs")).await;
         assert_eq!(st, 200, "{body}");
         let all: Vec<Value> = serde_json::from_str(&body).unwrap();
-        let all_ids: Vec<&str> = all
-            .iter()
-            .filter_map(|v| v["txid"].as_str())
-            .collect();
-        assert_eq!(all_ids, vec![newest.as_str(), mid.as_str(), oldest.as_str()]);
+        let all_ids: Vec<&str> = all.iter().filter_map(|v| v["txid"].as_str()).collect();
+        assert_eq!(
+            all_ids,
+            vec![newest.as_str(), mid.as_str(), oldest.as_str()]
+        );
 
         let (st, body) = http_get(addr, &format!("/scripthash/{sh}/txs?after_txid={newest}")).await;
         assert_eq!(st, 200, "{body}");
         let page: Vec<Value> = serde_json::from_str(&body).unwrap();
-        let page_ids: Vec<&str> = page
-            .iter()
-            .filter_map(|v| v["txid"].as_str())
-            .collect();
+        let page_ids: Vec<&str> = page.iter().filter_map(|v| v["txid"].as_str()).collect();
         assert_eq!(page_ids, vec![mid.as_str(), oldest.as_str()]);
 
-        let (st, body) = http_get(addr, &format!("/scripthash/{sh}/txs/summary?after_txid={newest}"))
-            .await;
+        let (st, body) = http_get(
+            addr,
+            &format!("/scripthash/{sh}/txs/summary?after_txid={newest}"),
+        )
+        .await;
         assert_eq!(st, 200, "{body}");
         let sum: Vec<Value> = serde_json::from_str(&body).unwrap();
         assert_eq!(sum[0]["txid"], mid);
         assert!(!sum.iter().any(|v| v["txid"] == newest));
 
         let unknown = "ff".repeat(32);
-        let (st, body) = http_get(addr, &format!("/scripthash/{sh}/txs?after_txid={unknown}")).await;
+        let (st, body) =
+            http_get(addr, &format!("/scripthash/{sh}/txs?after_txid={unknown}")).await;
         assert_eq!(st, 422, "{body}");
         assert!(body.contains("after_txid not found"), "{body}");
-        let (st, body) =
-            http_get(addr, &format!("/scripthash/{sh}/txs/summary?after_txid={unknown}")).await;
+        let (st, body) = http_get(
+            addr,
+            &format!("/scripthash/{sh}/txs/summary?after_txid={unknown}"),
+        )
+        .await;
         assert_eq!(st, 422, "{body}");
         assert!(body.contains("after_txid not found"), "{body}");
         let (st, body) = http_get(addr, &format!("/scripthash/{sh}/txs?after_txid=zz")).await;
         assert_eq!(st, 422, "{body}");
+
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn post_scripthashes_txs_merges_and_caps() {
+        use rbitcoin_store::script_hash;
+
+        let (a1, spk1) = regtest_p2wpkh();
+        let (a2, spk2) = {
+            use bitcoin::key::CompressedPublicKey;
+            use bitcoin::secp256k1::{Secp256k1, SecretKey};
+            use bitcoin::{Address, Network, PrivateKey};
+            let secp = Secp256k1::new();
+            let sk = SecretKey::from_slice(&[9u8; 32]).unwrap();
+            let pk = PrivateKey::new(sk, Network::Regtest);
+            let cpk = CompressedPublicKey::from_private_key(&secp, &pk).unwrap();
+            let addr = Address::p2wpkh(&cpk, Network::Regtest);
+            (addr.to_string(), addr.script_pubkey())
+        };
+
+        let (dir, q) = temp_query("post-multi-txs");
+        let (h0, t0) = coinbase(0, Fk::NULL, None);
+        let prev = q.connect_block(Height(0), &h0, &[t0]).unwrap();
+        let pay = |tag: u8, spk: bitcoin::ScriptBuf| {
+            let mut txid = [0u8; 32];
+            txid[0] = tag;
+            txid[31] = 0xaa;
+            TxApply {
+                tx: TxRecord {
+                    txid,
+                    version: 2,
+                    locktime: 0,
+                    input_start_fk: Fk::NULL,
+                    input_count: 1,
+                    output_start_fk: Fk::NULL,
+                    output_count: 1,
+                },
+                inputs: vec![InputRecord {
+                    prev_txid: [0u8; 32],
+                    create_fk: Fk::NULL,
+                    prev_index: u32::MAX,
+                    sequence: u32::MAX,
+                    script_sig: vec![],
+                    witness: vec![],
+                }],
+                outputs: vec![OutputRecord::unspent(1_0000_0000, spk.to_bytes())],
+            }
+        };
+        let (h1, cb1) = coinbase(1, prev, Some(h0.hash));
+        let prev = q
+            .connect_block(Height(1), &h1, &[cb1, pay(0x11, spk1.clone())])
+            .unwrap();
+        let (h2, cb2) = coinbase(2, prev, Some(h1.hash));
+        q.connect_block(Height(2), &h2, &[cb2, pay(0x22, spk2.clone())])
+            .unwrap();
+
+        let q = Arc::new(q);
+        let cfg = EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), Network::Regtest);
+        let handle = run_esplora(cfg, q, None, None).await.expect("listen");
+        let addr = handle.local_addr;
+        let sh1 = block_hash_hex(&script_hash(spk1.as_bytes()));
+        let sh2 = block_hash_hex(&script_hash(spk2.as_bytes()));
+        let t1 = block_hash_hex(&[
+            0x11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0xaa,
+        ]);
+        let t2 = block_hash_hex(&[
+            0x22, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0xaa,
+        ]);
+
+        let body = serde_json::to_vec(&json!([&sh1, &sh2])).unwrap();
+        let (st, resp) = http_post(addr, "/scripthashes/txs", &body).await;
+        assert_eq!(st, 200, "{resp}");
+        let rows: Vec<Value> = serde_json::from_str(&resp).unwrap();
+        let ids: Vec<&str> = rows.iter().filter_map(|v| v["txid"].as_str()).collect();
+        assert_eq!(ids, vec![t2.as_str(), t1.as_str()], "{resp}");
+
+        let body = serde_json::to_vec(&json!([&a1, &a2])).unwrap();
+        let (st, resp) = http_post(addr, "/addresses/txs", &body).await;
+        assert_eq!(st, 200, "{resp}");
+        let rows: Vec<Value> = serde_json::from_str(&resp).unwrap();
+        assert_eq!(rows[0]["txid"], t2);
+
+        let body = serde_json::to_vec(&json!([&sh1, &sh2])).unwrap();
+        let (st, resp) = http_post(addr, "/scripthashes/txs/summary", &body).await;
+        assert_eq!(st, 200, "{resp}");
+        let rows: Vec<Value> = serde_json::from_str(&resp).unwrap();
+        assert_eq!(rows[0]["txid"], t2);
+        assert_eq!(rows[1]["txid"], t1);
+
+        let (st, resp) =
+            http_post(addr, &format!("/scripthashes/txs?after_txid={t2}"), &body).await;
+        assert_eq!(st, 200, "{resp}");
+        let rows: Vec<Value> = serde_json::from_str(&resp).unwrap();
+        assert_eq!(rows[0]["txid"], t1);
+        assert!(!rows.iter().any(|v| v["txid"] == t2));
+
+        let unknown = "ff".repeat(32);
+        let (st, resp) = http_post(
+            addr,
+            &format!("/scripthashes/txs?after_txid={unknown}"),
+            &body,
+        )
+        .await;
+        assert_eq!(st, 422, "{resp}");
+        assert!(resp.contains("after_txid not found"), "{resp}");
+
+        let too: Vec<String> = (0..301).map(|_| "aa".repeat(32)).collect();
+        let body = serde_json::to_vec(&too).unwrap();
+        let (st, resp) = http_post(addr, "/scripthashes/txs", &body).await;
+        assert_eq!(st, 422, "{resp}");
+        assert!(resp.contains("body too long"), "{resp}");
 
         handle.shutdown().await;
         let _ = std::fs::remove_dir_all(&dir);

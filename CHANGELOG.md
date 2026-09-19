@@ -50,6 +50,9 @@ before 1.0).
   skip through a known txid (mempool then chain). Unknown or unparseable →
   **422** `after_txid not found`.
 
+- **Esplora multi-script POST:** `POST /addresses|scripthashes/txs` and
+  `/txs/summary` merge unique scripts (max 300; over → **422**).
+
 ## [0.7.0] — 2026-09-18
 
 Named published **0.7** line. **Not 1.0.** Patch branch is `v0.7.x`. Schema 24
