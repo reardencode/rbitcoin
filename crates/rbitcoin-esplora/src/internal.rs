@@ -2,7 +2,9 @@
 
 use crate::handlers::{outspend_json, spawn_join};
 use crate::server::{block_hash_hex, not_found, parse_hash32, pin_or_reject, store_err, AppState};
-use crate::tx_json::{build_tx_json, build_tx_json_from_tx};
+use crate::tx_json::{
+    build_tx_json, build_tx_json_from_tx, build_tx_json_from_tx_with_status, tx_status_json,
+};
 use axum::body::Bytes;
 use axum::extract::{Path, Query as AxumQuery, State};
 use axum::http::StatusCode;
@@ -12,6 +14,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::Txid;
 use rbitcoin_net::{MempoolHub, MempoolTxSnapEntry};
 use rbitcoin_query::ChainViewKind;
+use rbitcoin_store::StoreError;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -245,7 +248,7 @@ pub async fn get_internal_block_txs(
         let Ok(hash) = parse_hash32(&hash_hex) else {
             return not_found();
         };
-        let Some((header_fk, _)) = (match st.query.get_header_by_hash(&hash) {
+        let Some((header_fk, rec)) = (match st.query.get_header_by_hash(&hash) {
             Ok(v) => v,
             Err(e) => return store_err(e),
         }) else {
@@ -256,9 +259,25 @@ pub async fn get_internal_block_txs(
             Ok(None) => return not_found(),
             Err(e) => return store_err(e),
         };
+        let block = match st
+            .query
+            .reconstruct_archived_block_from_parts(rec, fks.clone())
+        {
+            Ok(b) => b,
+            Err(e) => return store_err(e),
+        };
+        if block.txdata.len() != fks.len() {
+            return store_err(StoreError::Corrupt(
+                "invariant: reconstruct tx count != header_txs",
+            ));
+        }
         let mut out = Vec::with_capacity(fks.len());
-        for fk in fks {
-            match build_tx_json(&st.query, fk, st.network) {
+        for (fk, tx) in fks.into_iter().zip(block.txdata.iter()) {
+            let status = match tx_status_json(&st.query, fk) {
+                Ok(s) => s,
+                Err(e) => return store_err(e),
+            };
+            match build_tx_json_from_tx_with_status(&st.query, tx, st.network, status, None, None) {
                 Ok(v) => out.push(v),
                 Err(e) => return store_err(e),
             }
@@ -673,6 +692,11 @@ mod tests {
         let arr: Vec<Value> = serde_json::from_str(&body).unwrap();
         assert_eq!(arr.len(), 1, "genesis coinbase");
         assert_eq!(arr[0]["vin"][0]["is_coinbase"], true);
+        let (st, ids) = http_get(addr, &format!("/block/{g}/txids")).await;
+        assert_eq!(st, 200, "{ids}");
+        let txids: Vec<String> = serde_json::from_str(&ids).unwrap();
+        assert_eq!(arr.len(), txids.len());
+        assert_eq!(arr[0]["txid"].as_str(), Some(txids[0].as_str()));
         let (st, pubp) = http_get(addr, &format!("/block/{g}/txs")).await;
         assert_eq!(st, 200, "{pubp}");
         let pub_arr: Vec<Value> = serde_json::from_str(&pubp).unwrap();

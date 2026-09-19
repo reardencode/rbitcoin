@@ -174,11 +174,30 @@ pub fn build_tx_json_from_tx(
     fee: Option<i64>,
     mempool: Option<&MempoolHub>,
 ) -> Result<Value, QueryError> {
-    tx_json_from_wire(
+    build_tx_json_from_tx_with_status(
         query,
         tx,
         network,
         json!({ "confirmed": false }),
+        fee,
+        mempool,
+    )
+}
+
+/// Wire tx JSON with a caller-supplied `status` (archived reconstruct).
+pub fn build_tx_json_from_tx_with_status(
+    query: &Query,
+    tx: &Transaction,
+    network: Network,
+    status: Value,
+    fee: Option<i64>,
+    mempool: Option<&MempoolHub>,
+) -> Result<Value, QueryError> {
+    tx_json_from_wire(
+        query,
+        tx,
+        network,
+        status,
         &[],
         tx.compute_txid().to_byte_array(),
         fee,
