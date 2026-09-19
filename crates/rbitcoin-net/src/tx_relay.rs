@@ -2049,7 +2049,7 @@ impl MempoolHub {
                 }
             })
             .collect();
-        entries.sort_by(|a, b| a.txid.cmp(&b.txid));
+        entries.sort_by_key(|a| a.txid);
         self.tx_snapshot.store(Arc::new(MempoolTxSnapshot {
             entries,
             computed_at: t0,

@@ -308,7 +308,7 @@ impl EsploraListen {
         }
         #[cfg(unix)]
         {
-            return Ok(Self::Unix(PathBuf::from(val)));
+            Ok(Self::Unix(PathBuf::from(val)))
         }
         #[cfg(not(unix))]
         {

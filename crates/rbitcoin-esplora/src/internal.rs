@@ -30,6 +30,7 @@ fn bad_request(msg: &'static str) -> Response {
     (StatusCode::BAD_REQUEST, msg).into_response()
 }
 
+#[allow(clippy::result_large_err)] // axum Response
 fn parse_txid_array(body: &[u8]) -> Result<Vec<[u8; 32]>, Response> {
     let v: Value = serde_json::from_slice(body).map_err(|_| bad_request("invalid json"))?;
     let arr = v
