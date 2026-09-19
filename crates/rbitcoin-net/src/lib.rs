@@ -19,6 +19,7 @@ mod reactor;
 mod seeds;
 mod serve_perf;
 mod service;
+mod socks;
 mod tip_accept;
 mod tx_relay;
 mod v2;
