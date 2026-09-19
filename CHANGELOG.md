@@ -53,6 +53,9 @@ before 1.0).
 - **Esplora multi-script POST:** `POST /addresses|scripthashes/txs` and
   `/txs/summary` merge unique scripts (max 300; over → **422**).
 
+- **Esplora broadcast test:** `GET /broadcast?tx=` admits like `POST /tx`.
+  `POST /txs/test` is dry-run `test_accept` with electrs `maxfeerate` BTC/kvB.
+
 ## [0.7.0] — 2026-09-18
 
 Named published **0.7** line. **Not 1.0.** Patch branch is `v0.7.x`. Schema 24

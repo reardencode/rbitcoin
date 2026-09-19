@@ -713,4 +713,50 @@ mod tests {
         handle.shutdown().await;
         let _ = pad.dir;
     }
+
+    #[tokio::test]
+    async fn broadcast_get_and_txs_test() {
+        use bitcoin::consensus::encode::serialize_hex;
+
+        let pad = pad_hub("broadcast-test", 3);
+        let a = spend_true(pad.cbs[0], 1_000, ScriptBuf::from_bytes(vec![0x51]));
+        let hex = serialize_hex(&a);
+        let cfg =
+            EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), bitcoin::Network::Regtest);
+        let handle = run_esplora(cfg, Arc::clone(&pad.q), Some(Arc::clone(&pad.hub)), None)
+            .await
+            .unwrap();
+        let addr = handle.local_addr;
+
+        let (st, body) = http_get(addr, "/broadcast").await;
+        assert_eq!(st, 400, "{body}");
+        assert!(body.contains("Missing tx"), "{body}");
+
+        let body = serde_json::to_vec(&json!([&hex])).unwrap();
+        let (st, resp) = http_post(addr, "/txs/test", &body).await;
+        assert_eq!(st, 200, "{resp}");
+        let arr: Vec<Value> = serde_json::from_str(&resp).unwrap();
+        assert_eq!(arr[0]["allowed"], true, "{resp}");
+        assert!(!pad.hub.contains(&a.compute_txid()), "test must not admit");
+
+        let (st, resp) = http_post(addr, "/txs/test?maxfeerate=0.00000001", &body).await;
+        assert_eq!(st, 200, "{resp}");
+        let arr: Vec<Value> = serde_json::from_str(&resp).unwrap();
+        assert_eq!(arr[0]["allowed"], false, "{resp}");
+        assert_eq!(arr[0]["reject-reason"], "max-fee-exceeded");
+
+        let too: Vec<String> = (0..26).map(|_| hex.clone()).collect();
+        let body = serde_json::to_vec(&too).unwrap();
+        let (st, resp) = http_post(addr, "/txs/test", &body).await;
+        assert_eq!(st, 400, "{resp}");
+        assert!(resp.contains("Exceeded maximum of 25"), "{resp}");
+
+        let (st, resp) = http_get(addr, &format!("/broadcast?tx={hex}")).await;
+        assert_eq!(st, 200, "{resp}");
+        assert_eq!(resp, a.compute_txid().to_string());
+        assert!(pad.hub.contains(&a.compute_txid()));
+
+        handle.shutdown().await;
+        let _ = pad.dir;
+    }
 }

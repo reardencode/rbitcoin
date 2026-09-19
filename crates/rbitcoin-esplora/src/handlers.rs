@@ -1638,28 +1638,23 @@ pub async fn get_txs_outspends(
     .await
 }
 
-pub async fn post_tx(State(st): State<AppState>, body: Bytes) -> Response {
-    let Some(mp) = st.mempool.as_ref() else {
-        return (StatusCode::SERVICE_UNAVAILABLE, "mempool not available").into_response();
-    };
-    if body.len() > st.max_body {
-        return (StatusCode::PAYLOAD_TOO_LARGE, "body too large").into_response();
-    }
-    let hex = std::str::from_utf8(&body)
-        .unwrap_or("")
-        .trim()
-        .trim_matches('"');
+fn decode_tx_hex_str(hex: &str) -> Result<bitcoin::Transaction, Response> {
+    let hex = hex.trim().trim_matches('"');
     let raw = match rbitcoin_primitives::hex_decode(hex) {
         Ok(r) => r,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, format!("invalid hex: {e}")).into_response();
+            return Err((StatusCode::BAD_REQUEST, format!("invalid hex: {e}")).into_response());
         }
     };
-    let tx: bitcoin::Transaction = match deserialize(&raw) {
-        Ok(t) => t,
-        Err(e) => {
-            return (StatusCode::BAD_REQUEST, format!("invalid tx: {e}")).into_response();
-        }
+    match deserialize(&raw) {
+        Ok(t) => Ok(t),
+        Err(e) => Err((StatusCode::BAD_REQUEST, format!("invalid tx: {e}")).into_response()),
+    }
+}
+
+async fn admit_broadcast(st: AppState, tx: bitcoin::Transaction) -> Response {
+    let Some(mp) = st.mempool.as_ref() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "mempool not available").into_response();
     };
     match mp.accept_tx_async(tx).await {
         Ok(r) => {
@@ -1668,6 +1663,173 @@ pub async fn post_tx(State(st): State<AppState>, body: Bytes) -> Response {
         }
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     }
+}
+
+#[derive(Deserialize, Default)]
+pub struct BroadcastQuery {
+    tx: Option<String>,
+}
+
+pub async fn get_broadcast(
+    State(st): State<AppState>,
+    AxumQuery(q): AxumQuery<BroadcastQuery>,
+) -> Response {
+    if st.mempool.is_none() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "mempool not available").into_response();
+    }
+    let Some(hex) = q.tx.filter(|s| !s.is_empty()) else {
+        return (StatusCode::BAD_REQUEST, "Missing tx").into_response();
+    };
+    let tx = match decode_tx_hex_str(&hex) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    admit_broadcast(st, tx).await
+}
+
+pub async fn post_tx(State(st): State<AppState>, body: Bytes) -> Response {
+    if st.mempool.is_none() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "mempool not available").into_response();
+    }
+    if body.len() > st.max_body {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "body too large").into_response();
+    }
+    let hex = std::str::from_utf8(&body).unwrap_or("");
+    let tx = match decode_tx_hex_str(hex) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    admit_broadcast(st, tx).await
+}
+
+#[derive(Deserialize, Default)]
+pub struct MaxFeeQuery {
+    maxfeerate: Option<String>,
+}
+
+fn parse_maxfeerate_btc_kvb(q: MaxFeeQuery) -> Result<u64, Response> {
+    let Some(s) = q.maxfeerate.filter(|s| !s.is_empty()) else {
+        return Ok(10_000);
+    };
+    let v: f64 = s
+        .parse()
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid maxfeerate").into_response())?;
+    if !v.is_finite() || v < 0.0 {
+        return Err((StatusCode::BAD_REQUEST, "Invalid maxfeerate").into_response());
+    }
+    if v == 0.0 {
+        return Ok(0);
+    }
+    let sat = (v * 100_000.0).ceil() as u64;
+    Ok(sat.max(1))
+}
+
+fn fee_exceeds_sat_vb(fee_sat: u64, weight: u64, max_sat_vb: u64) -> bool {
+    if max_sat_vb == 0 {
+        return false;
+    }
+    let vsize = rbitcoin_consensus::policy::get_virtual_size(weight);
+    fee_sat > max_sat_vb.saturating_mul(vsize)
+}
+
+pub async fn post_txs_test(
+    State(st): State<AppState>,
+    AxumQuery(q): AxumQuery<MaxFeeQuery>,
+    body: Bytes,
+) -> Response {
+    let max_sat_vb = match parse_maxfeerate_btc_kvb(q) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    if body.len() > st.max_body {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "body too large").into_response();
+    }
+    spawn_join(move || {
+        let Some(mp) = st.mempool.as_ref() else {
+            return (StatusCode::SERVICE_UNAVAILABLE, "mempool not available").into_response();
+        };
+        let hexes: Vec<String> = match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, format!("invalid json: {e}")).into_response();
+            }
+        };
+        if hexes.len() > 25 {
+            return (
+                StatusCode::BAD_REQUEST,
+                "Exceeded maximum of 25 transactions",
+            )
+                .into_response();
+        }
+        for (i, hex) in hexes.iter().enumerate() {
+            if !(120..800_000).contains(&hex.len()) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid transaction size for item {i}"),
+                )
+                    .into_response();
+            }
+        }
+        let mut decoded = Vec::with_capacity(hexes.len());
+        for (i, hex) in hexes.iter().enumerate() {
+            match decode_tx_hex_str(hex) {
+                Ok(tx) => decoded.push(tx),
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        format!("Invalid transaction hex for item {i}"),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        let mut ids = HashSet::new();
+        if decoded.iter().any(|tx| !ids.insert(tx.compute_txid())) {
+            let tx = &decoded[0];
+            return Json(json!([{
+                "txid": format!("{}", tx.compute_txid()),
+                "wtxid": format!("{}", tx.compute_wtxid()),
+                "allowed": false,
+                "package-error": "package-contains-duplicates",
+            }]))
+            .into_response();
+        }
+        let mut out = Vec::new();
+        for tx in decoded {
+            let txid = format!("{}", tx.compute_txid());
+            let wtxid = format!("{}", tx.compute_wtxid());
+            match mp.test_accept(&tx) {
+                Ok(r) => {
+                    if fee_exceeds_sat_vb(r.fee_sat, r.weight, max_sat_vb) {
+                        out.push(json!({
+                            "txid": txid,
+                            "wtxid": wtxid,
+                            "allowed": false,
+                            "reject-reason": "max-fee-exceeded",
+                        }));
+                        continue;
+                    }
+                    out.push(json!({
+                        "txid": txid,
+                        "wtxid": wtxid,
+                        "allowed": true,
+                        "vsize": r.weight / 4,
+                        "fees": { "base": r.fee_sat as f64 / 100_000_000.0 },
+                    }));
+                }
+                Err(e) => {
+                    out.push(json!({
+                        "txid": txid,
+                        "wtxid": wtxid,
+                        "allowed": false,
+                        "reject-reason": e.to_string(),
+                    }));
+                }
+            }
+        }
+        Json(out).into_response()
+    })
+    .await
 }
 
 /// `POST /txs/package` — JSON array of hex txs → `MempoolHub::accept_package`.
