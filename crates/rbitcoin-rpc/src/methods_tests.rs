@@ -1510,13 +1510,25 @@ fn generate_one_to_p2wpkh() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn assert_getblock_core_header_keys(obj: &Value, header: &Value) {
+    assert!(obj["difficulty"].as_f64().is_some(), "difficulty: {obj}");
+    assert_eq!(obj["difficulty"], header["difficulty"]);
+    let vh = obj["versionHex"].as_str().expect("versionHex");
+    assert_eq!(vh.len(), 8);
+    assert_eq!(vh, header["versionHex"].as_str().unwrap());
+    let cw = obj["chainwork"].as_str().expect("chainwork");
+    assert_eq!(cw.len(), 64);
+    assert_eq!(cw, header["chainwork"].as_str().unwrap());
+}
+
 #[test]
 fn getblock_verbosity_1_txids_skip_reconstruct() {
     let (ctx, dir, _hub) = ctx_regtest_hub();
-    let hashes = dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
-    let best = hashes.as_array().unwrap()[0].clone();
+    let hashes = dispatch(&ctx, "generate", vec![json!(2)]).unwrap();
+    let first = hashes.as_array().unwrap()[0].clone();
+    let tip = hashes.as_array().unwrap()[1].clone();
     ctx.query.store().reset_tx_full_gets();
-    let v1 = dispatch(&ctx, "getblock", vec![best.clone(), json!(1)]).unwrap();
+    let v1 = dispatch(&ctx, "getblock", vec![first.clone(), json!(1)]).unwrap();
     assert!(
         ctx.query.store().tx_full_gets().is_empty(),
         "verbosity 1 must not zip inwit: {:?}",
@@ -1525,8 +1537,36 @@ fn getblock_verbosity_1_txids_skip_reconstruct() {
     let txs = v1["tx"].as_array().unwrap();
     assert_eq!(txs.len(), 1);
     assert!(txs[0].as_str().unwrap().len() == 64);
-    let v2 = dispatch(&ctx, "getblock", vec![best, json!(2)]).unwrap();
+    let hdr = dispatch(&ctx, "getblockheader", vec![first.clone()]).unwrap();
+    assert_getblock_core_header_keys(&v1, &hdr);
+    assert_eq!(v1["nextblockhash"], tip);
+
+    let v2 = dispatch(&ctx, "getblock", vec![tip.clone(), json!(2)]).unwrap();
     assert!(v2["tx"][0]["vin"][0].get("txid").is_some());
+    let tip_hdr = dispatch(&ctx, "getblockheader", vec![tip]).unwrap();
+    assert_getblock_core_header_keys(&v2, &tip_hdr);
+    assert!(v2.get("nextblockhash").is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn getblock_held_header_fields() {
+    use rbitcoin_consensus::mine_regtest_paying;
+
+    let (ctx, dir, hub) = ctx_regtest_hub();
+    dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
+    let (_, script) = p2wpkh_regtest();
+    let prev = hub.tip_hash().unwrap();
+    let time = hub.tip_header().unwrap().time + 1;
+    let sibling = mine_regtest_paying(prev, time, 2, script, vec![]);
+    hub.hold_unconnected_body(sibling.clone());
+    let hash = sibling.block_hash().to_string();
+    let v1 = dispatch(&ctx, "getblock", vec![json!(hash), json!(1)]).unwrap();
+    assert_eq!(v1["confirmations"], json!(-1));
+    assert!(v1["difficulty"].as_f64().is_some(), "held difficulty: {v1}");
+    let vh = v1["versionHex"].as_str().expect("held versionHex");
+    assert_eq!(vh.len(), 8);
+    assert!(v1.get("nextblockhash").is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

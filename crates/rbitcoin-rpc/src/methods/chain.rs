@@ -217,7 +217,6 @@ pub(crate) fn getblockheader(ctx: &RpcContext, params: &RpcParams) -> Result<Val
 }
 
 /// 32-byte BE chainwork hex (regtest = 2 per block). Empty store → 64 zeros.
-/// 32-byte BE chainwork hex (regtest = 2 per block). Empty store → 64 zeros.
 pub(crate) fn chainwork_hex(ctx: &RpcContext, through: Option<Height>) -> String {
     let Some(tip) = through.or_else(|| ctx.query.tip_height()) else {
         return "00".repeat(32);
@@ -234,6 +233,58 @@ pub(crate) fn chainwork_hex(ctx: &RpcContext, through: Option<Height>) -> String
         }
     }
     hex_encode(rbitcoin_net::sum_work(works.into_iter()).to_be_bytes())
+}
+
+fn version_hex(version: i32) -> String {
+    format!("{:08x}", version as u32)
+}
+
+fn nextblockhash_at(ctx: &RpcContext, height: Height) -> Option<String> {
+    ctx.query
+        .header_at_height(Height(height.0 + 1))
+        .ok()
+        .flatten()
+        .map(|(_, r)| hash_hex_display(&r.hash))
+}
+
+fn enrich_block_header_json(
+    obj: &mut Value,
+    ctx: &RpcContext,
+    version: i32,
+    bits: u32,
+    height: Option<Height>,
+    held_chainwork: Option<String>,
+) {
+    let Some(o) = obj.as_object_mut() else {
+        return;
+    };
+    o.insert("versionHex".into(), json!(version_hex(version)));
+    o.insert("difficulty".into(), json!(difficulty_from_bits(bits)));
+    match height {
+        Some(h) => {
+            o.insert("chainwork".into(), json!(chainwork_hex(ctx, Some(h))));
+            if let Some(n) = nextblockhash_at(ctx, h) {
+                o.insert("nextblockhash".into(), json!(n));
+            }
+        }
+        None => {
+            if let Some(cw) = held_chainwork {
+                o.insert("chainwork".into(), json!(cw));
+            }
+        }
+    }
+}
+
+fn held_chainwork_hex(ctx: &RpcContext, block: &Block) -> String {
+    let prev = block.header.prev_blockhash.to_byte_array();
+    if let Ok(Some(h)) = ctx.query.height_of_hash(&prev) {
+        if let Some(hub) = ctx.chain.as_ref() {
+            if let Ok(w) = hub.work_through_height(h.0) {
+                return hex_encode((w + block.header.work()).to_be_bytes());
+            }
+        }
+    }
+    hex_encode(block.header.work().to_be_bytes())
 }
 
 pub(crate) fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
@@ -273,7 +324,7 @@ pub(crate) fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Va
             .block_txids(height)
             .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?;
         let txids: Vec<String> = ids.iter().map(hash_hex_display).collect();
-        return Ok(json!({
+        let mut obj = json!({
             "hash": hash_hex_display(&hash),
             "confirmations": confirmations(ctx, height),
             "height": height.0,
@@ -287,7 +338,9 @@ pub(crate) fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Va
             "previousblockhash": prev,
             "nTx": txids.len(),
             "tx": txids,
-        }));
+        });
+        enrich_block_header_json(&mut obj, ctx, rec.version, rec.bits, Some(height), None);
+        return Ok(obj);
     }
     let block = ctx
         .query
@@ -320,6 +373,14 @@ pub(crate) fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Va
         "nTx": block.txdata.len(),
         "tx": txids,
     });
+    enrich_block_header_json(
+        &mut obj,
+        ctx,
+        block.header.version.to_consensus(),
+        block.header.bits.to_consensus(),
+        Some(height),
+        None,
+    );
     if verbosity >= 2 {
         let net = rpc_btc_network(ctx.network);
         let txs: Vec<Value> = block
@@ -347,17 +408,28 @@ fn getblock_unknown_hash(ctx: &RpcContext, hash: [u8; 32], verbosity: u32) -> Re
             .iter()
             .map(|tx| hash_hex_display(&tx.compute_txid().to_byte_array()))
             .collect();
-        return Ok(json!({
+        let bits = block.header.bits.to_consensus();
+        let version = block.header.version.to_consensus();
+        let mut obj = json!({
             "hash": hash_hex_display(&hash),
             "confirmations": -1,
-            "version": block.header.version.to_consensus(),
+            "version": version,
             "merkleroot": hash_hex_display(&block.header.merkle_root.to_byte_array()),
             "time": block.header.time,
             "nonce": block.header.nonce,
-            "bits": format!("{:08x}", block.header.bits.to_consensus()),
+            "bits": format!("{:08x}", bits),
             "nTx": block.txdata.len(),
             "tx": txids,
-        }));
+        });
+        enrich_block_header_json(
+            &mut obj,
+            ctx,
+            version,
+            bits,
+            None,
+            Some(held_chainwork_hex(ctx, &block)),
+        );
+        return Ok(obj);
     }
     let header_only = ctx.chain.as_ref().is_some_and(|c| c.knows_header(&typed))
         || ctx.query.get_header_by_hash(&hash).ok().flatten().is_some();
