@@ -1018,8 +1018,7 @@ pub struct PeerInfo {
 pub struct PeerHub {
     next_id: AtomicU64,
     live: RwLock<HashMap<u64, Arc<LivePeer>>>,
-    added: Mutex<HashSet<SocketAddr>>,
-    /// `--connect` hosts (resolve on each redial). Empty unless the node set them.
+    added: Mutex<HashSet<String>>,
     connect: Mutex<Vec<String>>,
     connect_default_port: AtomicU16,
     dial_tx: Mutex<Option<mpsc::UnboundedSender<DialRequest>>>,
@@ -1776,30 +1775,42 @@ impl PeerHub {
             .cloned()
     }
 
-    pub fn addnode(&self, addr: SocketAddr, cmd: &str) -> Result<(), String> {
+    pub fn addnode(&self, node: &str, cmd: &str) -> Result<(), String> {
         match cmd {
-            "onetry" => self.dial(addr, PeerConnType::Manual),
+            "onetry" => {
+                let addr = self.parse_added_addr(node)?;
+                self.dial(addr, PeerConnType::Manual)
+            }
             "add" => {
                 self.added
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .insert(addr);
-                let _ = self.dial(addr, PeerConnType::Manual);
+                    .insert(node.to_string());
+                if let Ok(addr) = self.parse_added_addr(node) {
+                    let _ = self.dial(addr, PeerConnType::Manual);
+                }
                 Ok(())
             }
             "remove" => {
                 self.added
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .remove(&addr);
-                self.disconnect_addr(addr);
+                    .remove(node);
+                if let Ok(addr) = self.parse_added_addr(node) {
+                    self.disconnect_addr(addr);
+                }
                 Ok(())
             }
             other => Err(format!("unknown addnode command {other}")),
         }
     }
 
-    /// Operator `--connect` / conf `connect=` hosts. Resolved again on each redial.
+    fn parse_added_addr(&self, node: &str) -> Result<SocketAddr, String> {
+        let port = self.connect_default_port.load(Ordering::Relaxed);
+        let default_port = (port != 0).then_some(port);
+        parse_peer_addr_with_port(node, default_port).map_err(|e| e.to_string())
+    }
+
     pub fn set_connect_hosts(&self, hosts: Vec<String>, default_port: u16) {
         self.connect_default_port
             .store(default_port, Ordering::Relaxed);
@@ -1812,14 +1823,17 @@ impl PeerHub {
 
     /// Dial remembered `addnode add` / `--connect` hosts that are not live.
     pub fn redial_remembered(&self) {
-        let added: Vec<SocketAddr> = self
+        let added: Vec<String> = self
             .added
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .copied()
+            .cloned()
             .collect();
-        for addr in added {
+        for host in added {
+            let Ok(addr) = self.parse_added_addr(&host) else {
+                continue;
+            };
             if !self.is_addr_live(addr) {
                 let _ = self.dial(addr, PeerConnType::Manual);
             }
@@ -1829,10 +1843,8 @@ impl PeerHub {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let port = self.connect_default_port.load(Ordering::Relaxed);
-        let default_port = (port != 0).then_some(port);
         for host in hosts {
-            let Ok(addr) = parse_peer_addr_with_port(&host, default_port) else {
+            let Ok(addr) = self.parse_added_addr(&host) else {
                 continue;
             };
             if !self.is_addr_live(addr) {
@@ -2842,8 +2854,7 @@ mod tests {
     #[test]
     fn addnode_unknown_command() {
         let hub = PeerHub::new();
-        let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1);
-        assert!(hub.addnode(a, "nope").is_err());
+        assert!(hub.addnode("127.0.0.1:1", "nope").is_err());
     }
 
     #[test]
@@ -2852,7 +2863,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         hub.set_dialer(tx);
         let added = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
-        hub.addnode(added, "add").unwrap();
+        hub.addnode("127.0.0.1:18444", "add").unwrap();
         let first = rx.try_recv().expect("addnode dials once");
         assert_eq!(first.addr, added);
         assert_eq!(first.typ, PeerConnType::Manual);
@@ -3064,5 +3075,17 @@ mod tests {
         let err = parse_peer_addr_with_port("not-a-real-host.invalid", Some(18444)).unwrap_err();
         let s = err.to_string();
         assert!(s.contains("bad peer address"), "{s}");
+    }
+
+    #[test]
+    fn addnode_add_keeps_unresolved_host_for_redial() {
+        let hub = PeerHub::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        hub.set_dialer(tx);
+        hub.set_connect_hosts(vec![], 18444);
+        hub.addnode("not-a-real-host.invalid", "add").unwrap();
+        assert!(rx.try_recv().is_err(), "unresolved add must not dial");
+        hub.redial_remembered();
+        assert!(rx.try_recv().is_err(), "still unresolved: skip this tick");
     }
 }

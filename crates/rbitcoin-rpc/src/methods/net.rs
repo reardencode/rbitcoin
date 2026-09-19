@@ -184,8 +184,13 @@ pub(crate) fn addnode(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Val
     let node = params.req_str(0, "node")?;
     let cmd = params.req_str(1, "command")?;
     let _v2 = params.opt_bool(2, "v2transport")?;
-    let addr = rpc_peer_addr(ctx, node)?;
-    hub.addnode(addr, cmd).map_err(|e| rpc_error(ERR_MISC, e))?;
+    hub.addnode(node, cmd).map_err(|e| {
+        if e.contains("bad peer address") {
+            rpc_error(ERR_INVALID_PARAMS, e)
+        } else {
+            rpc_error(ERR_MISC, e)
+        }
+    })?;
     Ok(Value::Null)
 }
 

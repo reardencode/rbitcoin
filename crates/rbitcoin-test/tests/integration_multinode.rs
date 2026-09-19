@@ -2547,7 +2547,7 @@ async fn addnode_add_retries_until_peer_listens() {
         let a = start_node(&a_dir).await;
         let b_addr = ephemeral_addr();
         a.peers
-            .addnode(b_addr, "add")
+            .addnode(&b_addr.to_string(), "add")
             .expect("remember addnode add");
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
