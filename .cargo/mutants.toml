@@ -1,0 +1,2 @@
+exclude_re = ["rbitcoin-node", "rbitcoin-cli", "rbitcoin-bench"]
+exclude_globs = []
