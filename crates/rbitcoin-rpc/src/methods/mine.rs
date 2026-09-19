@@ -958,7 +958,7 @@ pub(crate) fn tip_bits(ctx: &RpcContext) -> Option<u32> {
 
 pub(crate) fn getnetworkhashps(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["nblocks", "height"])?;
-    let nblocks = params.opt_u64(0, "nblocks")?.unwrap_or(120) as i64;
+    let nblocks = params.opt_i64(0, "nblocks")?.unwrap_or(120);
     let height = match params.get(1, "height") {
         None | Some(Value::Null) => -1,
         Some(v) => {
@@ -968,22 +968,77 @@ pub(crate) fn getnetworkhashps(ctx: &RpcContext, params: &RpcParams) -> Result<V
     Ok(json!(network_hash_ps(ctx, nblocks, height)?))
 }
 
+fn work_to_f64(w: bitcoin::Work) -> f64 {
+    w.to_be_bytes()
+        .iter()
+        .fold(0.0, |a, b| a * 256.0 + f64::from(*b))
+}
+
+fn work_through(ctx: &RpcContext, height: u32) -> bitcoin::Work {
+    if let Some(hub) = ctx.chain.as_ref() {
+        if let Ok(w) = hub.work_through_height(height) {
+            return w;
+        }
+    }
+    let mut works = Vec::new();
+    for h in 0..=height {
+        if let Ok(hdr) = ctx
+            .query
+            .wire_header_at_height(rbitcoin_primitives::Height(h))
+        {
+            works.push(hdr.work());
+        }
+    }
+    rbitcoin_net::sum_work(works.into_iter())
+}
+
 pub(crate) fn network_hash_ps(ctx: &RpcContext, nblocks: i64, height: i64) -> Result<f64, Value> {
     let tip = ctx.query.tip_height().map(|h| h.0).unwrap_or(0);
     if tip == 0 {
         return Ok(0.0);
     }
-    let end = if height < 0 || height as u32 > tip {
+    let end = if height < 0 || (height as u32) > tip {
         tip
     } else {
         height as u32
     };
-    let n = if nblocks <= 0 { 120u32 } else { nblocks as u32 };
-    let start = end.saturating_sub(n);
-    let t0 = header_time(ctx, start).unwrap_or(0);
-    let t1 = header_time(ctx, end).unwrap_or(t0);
-    let dt = t1.saturating_sub(t0).max(1) as f64;
-    let work = f64::from(end.saturating_sub(start).saturating_mul(2));
+    if end == 0 {
+        return Ok(0.0);
+    }
+    let interval = ctx
+        .chain
+        .as_ref()
+        .map(|c| c.params.difficulty_adjustment_interval())
+        .unwrap_or_else(|| {
+            rbitcoin_consensus::ChainParams::for_network(ctx.network)
+                .difficulty_adjustment_interval()
+        });
+    let mut lookup = if nblocks <= 0 {
+        end % interval + 1
+    } else {
+        nblocks as u32
+    };
+    if lookup > end {
+        lookup = end;
+    }
+    if lookup == 0 {
+        return Ok(0.0);
+    }
+    let start = end - lookup;
+    let mut min_time = u32::MAX;
+    let mut max_time = 0u32;
+    for h in start..=end {
+        let Some(t) = header_time(ctx, h) else {
+            continue;
+        };
+        min_time = min_time.min(t);
+        max_time = max_time.max(t);
+    }
+    if min_time == u32::MAX || min_time == max_time {
+        return Ok(0.0);
+    }
+    let work = work_to_f64(work_through(ctx, end)) - work_to_f64(work_through(ctx, start));
+    let dt = f64::from(max_time - min_time);
     Ok(work / dt)
 }
 

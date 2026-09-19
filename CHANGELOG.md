@@ -42,6 +42,10 @@ before 1.0).
   plus the documented mempool `socketPath` patch, not cookie/Basic.
   Address-prefix stays 404. Surface: [`COMPAT.md`](COMPAT.md).
 
+- **`getnetworkhashps` matches Core:** chainwork delta over min/max header
+  time in the lookup window; `nblocks<=0` uses the difficulty retarget
+  length. Not dummy 2-work-per-block. [`docs/rpc.md`](docs/rpc.md).
+
 ## [0.7.0] — 2026-09-18
 
 Named published **0.7** line. **Not 1.0.** Patch branch is `v0.7.x`. Schema 24

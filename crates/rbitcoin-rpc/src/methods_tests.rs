@@ -207,12 +207,77 @@ fn blockchain_empty_store() {
 }
 
 #[test]
-fn getnetworkhashps_help_labels_dummy_work() {
+fn getnetworkhashps_help_names_chainwork() {
     let h = super::method_help("getnetworkhashps");
     assert!(
-        h.contains("2-work-per-block") && h.contains("not Core"),
-        "dummy hashrate must be labeled: {h}"
+        h.to_lowercase().contains("chainwork") && !h.contains("Dummy 2-work"),
+        "hashrate help must name chainwork, not dummy 2-work: {h}"
     );
+}
+
+#[test]
+fn getnetworkhashps_chainwork_over_minmax_time() {
+    let (ctx, dir, _hub) = ctx_regtest_hub();
+    let hashes = dispatch(&ctx, "generate", vec![json!(2)]).unwrap();
+    let tip = hashes.as_array().unwrap()[1].clone();
+    let h2 = dispatch(&ctx, "getblockheader", vec![tip]).unwrap();
+    let h1 = dispatch(
+        &ctx,
+        "getblockheader",
+        vec![h2["previousblockhash"].clone()],
+    )
+    .unwrap();
+    let w2 = chainwork_f64(h2["chainwork"].as_str().unwrap());
+    let w1 = chainwork_f64(h1["chainwork"].as_str().unwrap());
+    let t2 = h2["time"].as_u64().unwrap();
+    let t1 = h1["time"].as_u64().unwrap();
+    let dt = t2.abs_diff(t1) as f64;
+    let got = dispatch(&ctx, "getnetworkhashps", vec![json!(1), json!(2)])
+        .unwrap()
+        .as_f64()
+        .unwrap();
+    if dt == 0.0 {
+        assert_eq!(got, 0.0);
+    } else {
+        let expect = (w2 - w1) / dt;
+        assert!(
+            (got - expect).abs() < 1e-9,
+            "got={got} expect={expect} w2={w2} w1={w1} dt={dt}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn getnetworkhashps_nblocks_zero_uses_retarget_window() {
+    let (ctx, dir, _hub) = ctx_regtest_hub();
+    dispatch(&ctx, "generate", vec![json!(130)]).unwrap();
+    let zero = dispatch(&ctx, "getnetworkhashps", vec![json!(0)])
+        .unwrap()
+        .as_f64()
+        .unwrap();
+    let full = dispatch(&ctx, "getnetworkhashps", vec![json!(130)])
+        .unwrap()
+        .as_f64()
+        .unwrap();
+    let dummy_window = dispatch(&ctx, "getnetworkhashps", vec![json!(120)])
+        .unwrap()
+        .as_f64()
+        .unwrap();
+    assert_eq!(
+        zero, full,
+        "nblocks<=0 is height%interval+1 capped to height"
+    );
+    assert_ne!(
+        zero, dummy_window,
+        "nblocks=0 must not fall back to the dummy 120-block window"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn chainwork_f64(hex: &str) -> f64 {
+    let b = rbitcoin_primitives::hex_decode(hex).unwrap();
+    b.iter().fold(0.0, |a, x| a * 256.0 + f64::from(*x))
 }
 
 #[test]

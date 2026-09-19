@@ -63,8 +63,8 @@ functional harness **or** an explicit “we differ on purpose” note (fee
 product, error codes, our mempool files). First green was 9 scripts; **71**
 unmodified v31.1 scripts `run` now. Remaining growth is claimed
 wallet-client / P2P / mempool / buried-activation scripts, not the
-product-never skips (`no-wallet`, prune, v1). Labeled dummy
-`getnetworkhashps` is documented in [`rpc.md`](./rpc.md). Remaining
+product-never skips (`no-wallet`, prune, v1). `getnetworkhashps` is Core
+chainwork / min-max time ([`rpc.md`](./rpc.md)). Remaining
 claimed-surface `run` growth is [`quality.md`](./quality.md) **Q-41**.
 Owner: [`core-functional.md`](./core-functional.md).
 
