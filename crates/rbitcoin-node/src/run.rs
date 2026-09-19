@@ -183,10 +183,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         );
     }
     apply_startup_index_mode(&handle.query, &config, params.taproot_height())?;
-    let listen = config
-        .listen
-        .p2p_bind_addr(config.network)
-        .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], default_port(config.network))));
+    let bind = config.listen.p2p_bind_addr(config.network);
 
     let start_tip = handle.query.tip_height().map(|h| h.0).unwrap_or(0);
     let run_started = Instant::now();
@@ -208,16 +205,31 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     let p2p_ua =
         rbitcoin_primitives::rbitcoin_subversion(env!("CARGO_PKG_VERSION"), &config.uacomments)
             .unwrap_or_else(|_| format!("/rbitcoin:{}/", env!("CARGO_PKG_VERSION")));
-    let mut node = P2PNode::start_with_dialer(
-        listen,
-        query,
-        params.clone(),
-        milestone,
-        p2p_ua,
-        config.listen.max_inbound as usize,
-        config.listen.dialer(),
-    )
-    .await
+    let mut node = match bind {
+        Some(listen) => {
+            P2PNode::start_with_dialer(
+                listen,
+                query,
+                params.clone(),
+                milestone,
+                p2p_ua,
+                config.listen.max_inbound as usize,
+                config.listen.dialer(),
+            )
+            .await
+        }
+        None => {
+            P2PNode::start_outbound_only(
+                query,
+                params.clone(),
+                milestone,
+                p2p_ua,
+                config.listen.max_inbound as usize,
+                config.listen.dialer(),
+            )
+            .await
+        }
+    }
     .map_err(|e| NodeError::Config(format!("p2p start: {e}")))?;
     for extra in &config.listen.p2p_extra {
         let bound = node
@@ -325,11 +337,18 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         config.mempool.max_weight
     );
 
-    info!(
-        "rbitcoin-node listening on {} ({})",
-        node.local_addr,
-        config.network.as_str()
-    );
+    if node.local_addr.port() == 0 {
+        info!(
+            "rbitcoin-node P2P outbound-only ({})",
+            config.network.as_str()
+        );
+    } else {
+        info!(
+            "rbitcoin-node listening on {} ({})",
+            node.local_addr,
+            config.network.as_str()
+        );
+    }
 
     let shutdown = Shutdown::new();
     spawn_signal_handler(shutdown.clone());
