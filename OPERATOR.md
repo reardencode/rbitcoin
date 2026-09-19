@@ -1069,10 +1069,22 @@ Blockstream Esplora `API.md`); surface: [`COMPAT.md`](./COMPAT.md).
   --network mainnet \
   --sh-index \
   --esplora-listen 127.0.0.1:3000 \
+  --rpc \
   --log-level info
 ```
 
 Conf: `sh_index=1` and `esplora_listen=127.0.0.1:3000`. Default is **disabled**.
+Leave `--max-sh-creates` at **0** (unlimited join) for explorer backends.
+
+### mempool.space
+
+Stock mempool Node + MariaDB + frontend. nginx **`/api/`** → this Esplora
+(TCP or unix); **`/api/v1/`** → their process (`:8999`). Set
+`MEMPOOL.BACKEND=esplora`. Esplora: `--esplora-listen 127.0.0.1:3000` or a
+unix path (`/run/rbitcoin/esplora.sock`, mode **0660**; dummy `Host: api` is
+fine). Core RPC is `{datadir}/rpc.sock` plus the `bitcoin-client`
+`socketPath` patch below — **not** `COOKIE_PATH` / HTTP Basic. Requires
+`--sh-index`. Leave `--max-sh-creates` at 0.
 
 ## Core-class JSON-RPC
 
@@ -1136,18 +1148,27 @@ WebSocket extras (defaults): max 64 concurrent `/v1/ws` sockets, 64 KiB client
 Terminate TLS and forward REST **and** WebSocket to the same upstream. Example nginx:
 
 ```nginx
+location /api/v1/ {
+  proxy_pass http://127.0.0.1:8999/;
+  proxy_http_version 1.1;
+  proxy_set_header Host $host;
+  proxy_read_timeout 3600s;
+}
 location /api/ {
-    proxy_pass http://127.0.0.1:3000/;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_set_header Host $host;
-    proxy_read_timeout 3600s;
+  proxy_pass http://127.0.0.1:3000/;
+  proxy_http_version 1.1;
+  proxy_set_header Upgrade $http_upgrade;
+  proxy_set_header Connection "upgrade";
+  proxy_set_header Host $host;
+  proxy_read_timeout 3600s;
 }
 ```
 
-Clients then use `wss://host/api/v1/ws` (proxy strips `/api`). Caddy: `reverse_proxy`
-with default HTTP/1.1 upgrade support to the same listen.
+`/api/v1/` is mempool's Node (MariaDB catalogue). `/api/` is rbitcoin Esplora
+(electrs HTTP). Register the `/api/v1/` location **first**. Unix Esplora:
+`proxy_pass http://unix:/run/rbitcoin/esplora.sock:`. Wallet Esplora WS is
+`wss://host/api/ws`. Caddy: `reverse_proxy` with default HTTP/1.1 upgrade
+support to the same listen.
 
 ## Signet lab
 

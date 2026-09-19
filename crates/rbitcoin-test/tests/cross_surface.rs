@@ -109,6 +109,104 @@ async fn http_post(addr: SocketAddr, path: &str, body: &str) -> (u16, String) {
     .await
 }
 
+async fn http_post_json(addr: SocketAddr, path: &str, body: &str) -> (u16, String) {
+    http_exchange(
+        addr,
+        &format!(
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ),
+    )
+    .await
+}
+
+#[cfg(unix)]
+async fn wait_unix_socket(path: &std::path::Path) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if tokio::net::UnixStream::connect(path).await.is_ok() {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!("unix socket not up: {}", path.display());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[cfg(unix)]
+async fn jsonrpc_unix(path: &std::path::Path, method: &str, params: Value) -> Value {
+    let body = json!({"jsonrpc":"1.0","id":"test","method":method,"params":params}).to_string();
+    let req = format!(
+        "POST / HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let mut stream = tokio::net::UnixStream::connect(path)
+        .await
+        .unwrap_or_else(|e| panic!("unix rpc connect {}: {e}", path.display()));
+    stream.write_all(req.as_bytes()).await.unwrap();
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    let text = String::from_utf8_lossy(&buf);
+    let json = text
+        .split("\r\n\r\n")
+        .nth(1)
+        .unwrap_or(text.as_ref())
+        .trim();
+    serde_json::from_str(json).unwrap_or_else(|e| panic!("unix rpc {method} json: {e} body={text}"))
+}
+
+async fn pin_address_prefix_404(esplora_addr: SocketAddr) {
+    let (st, body) = http_get(esplora_addr, "/address-prefix/bc1").await;
+    assert_eq!(st, 404, "address-prefix stays 404: {body}");
+}
+
+async fn pin_internal_mempool_txs(esplora_addr: SocketAddr, live_txid: &str) {
+    let (st, body) = http_get(esplora_addr, "/internal/mempool/txs?max_txs=10000").await;
+    assert_eq!(st, 200, "GET /internal/mempool/txs: {body}");
+    let arr: Vec<Value> = serde_json::from_str(&body).unwrap();
+    assert!(
+        arr.iter().any(|t| t["txid"] == live_txid),
+        "internal mempool dump missing {live_txid}: {body}"
+    );
+    let payload = json!([live_txid, "ff".repeat(32)]).to_string();
+    let (st, body) = http_post_json(esplora_addr, "/internal/mempool/txs", &payload).await;
+    assert_eq!(st, 200, "POST /internal/mempool/txs: {body}");
+    let arr: Vec<Value> = serde_json::from_str(&body).unwrap();
+    assert_eq!(arr.len(), 1, "unknown mempool id omitted: {body}");
+    assert_eq!(arr[0]["txid"], live_txid, "{body}");
+}
+
+async fn pin_internal_block_txs_and_outspends(
+    esplora_addr: SocketAddr,
+    block_hash: &str,
+    n_tx: usize,
+    spent_txid: &str,
+) {
+    let (st, body) = http_get(esplora_addr, &format!("/internal/block/{block_hash}/txs")).await;
+    assert_eq!(st, 200, "GET /internal/block/…/txs: {body}");
+    let arr: Vec<Value> = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        arr.len(),
+        n_tx,
+        "internal block txs is the full list: {body}"
+    );
+    let (st, pub_body) = http_get(esplora_addr, &format!("/block/{block_hash}/txs")).await;
+    assert_eq!(st, 200, "public /txs page: {pub_body}");
+    let pub_arr: Vec<Value> = serde_json::from_str(&pub_body).unwrap();
+    assert_eq!(pub_arr.len(), 25, "public /txs stays 25/page: {pub_body}");
+    let unknown = "ff".repeat(32);
+    let payload = json!([spent_txid, unknown]).to_string();
+    let (st, body) =
+        http_post_json(esplora_addr, "/internal/txs/outspends/by-txid", &payload).await;
+    assert_eq!(st, 200, "POST outspends/by-txid: {body}");
+    let arr: Vec<Value> = serde_json::from_str(&body).unwrap();
+    assert_eq!(arr.len(), 2, "same-length outspend slots: {body}");
+    assert_eq!(arr[0][0]["spent"], true, "{body}");
+    assert!(arr[0][0].get("vin").is_some(), "{body}");
+    assert_eq!(arr[1], json!([]), "unknown tx keeps [] slot: {body}");
+}
+
 async fn jsonrpc(addr: SocketAddr, method: &str, params: Value) -> Value {
     let body = json!({"jsonrpc":"1.0","id":"test","method":method,"params":params}).to_string();
     let req = format!(
@@ -742,11 +840,23 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
     cfg.listen.electrum = Some(electrum_addr);
     cfg.listen.esplora = Some(rbitcoin_esplora::EsploraListen::Tcp(esplora_addr));
     cfg.rpc.listen = Some(rpc_addr);
+    cfg.rpc.socket = true;
     std::fs::write(td.path().join("rpc.token"), "pass").unwrap();
     cfg.max_run_secs = Some(90);
 
     let node = tokio::spawn(run_p2p(cfg));
     wait_listeners(&[electrum_addr, esplora_addr, rpc_addr]).await;
+    pin_address_prefix_404(esplora_addr).await;
+    #[cfg(unix)]
+    {
+        let rpc_sock = td.path().join("rpc.sock");
+        wait_unix_socket(&rpc_sock).await;
+        let unix_count = jsonrpc_unix(&rpc_sock, "getblockcount", json!([])).await;
+        assert_eq!(
+            unix_count["result"], 106,
+            "unix rpc.sock getblockcount without Authorization: {unix_count}"
+        );
+    }
 
     let (st, height) = http_get(esplora_addr, "/blocks/tip/height").await;
     assert_eq!(st, 200, "esplora tip height: {height}");
@@ -1284,6 +1394,7 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
             .any(|v| v.as_str() == Some(pkg_parent_txid.as_str())),
         "mempool/txids missing package parent: {body}"
     );
+    pin_internal_mempool_txs(esplora_addr, &pkg_parent_txid).await;
     let (st, body) = http_get(esplora_addr, "/mempool/recent").await;
     assert_eq!(st, 200, "GET /mempool/recent: {body}");
     let recent: Value = serde_json::from_str(&body).unwrap();
@@ -1361,6 +1472,7 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
     );
     pin_esplora_blocks_summaries(esplora_addr, 107, new_hash).await;
     pin_esplora_block_txs_pages(esplora_addr, new_hash, txs.len()).await;
+    pin_internal_block_txs_and_outspends(esplora_addr, new_hash, txs.len(), &cb_hex).await;
     assert!(
         txs[0]["vin"][0].get("txid").is_some(),
         "verbosity 2 coinbase vin: {blk}"
