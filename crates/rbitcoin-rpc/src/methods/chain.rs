@@ -287,6 +287,39 @@ fn held_chainwork_hex(ctx: &RpcContext, block: &Block) -> String {
     hex_encode(block.header.work().to_be_bytes())
 }
 
+fn insert_block_size_fields(obj: &mut Value, block: &Block) {
+    let size = block.total_size() as u64;
+    let weight = block.weight().to_wu();
+    let Some(o) = obj.as_object_mut() else {
+        return;
+    };
+    o.insert("size".into(), json!(size));
+    o.insert("weight".into(), json!(weight));
+    o.insert(
+        "strippedsize".into(),
+        json!(weight.saturating_sub(size) / 3),
+    );
+}
+
+fn getblock_v2_tx_json(ctx: &RpcContext, block: &Block) -> Vec<Value> {
+    let net = rpc_btc_network(ctx.network);
+    block
+        .txdata
+        .iter()
+        .map(|tx| {
+            let extra = if tx.is_coinbase() {
+                None
+            } else {
+                match tx_fee_sat_from_prevouts(ctx, tx) {
+                    TxFeeLook::Fee(fee) => Some(json!({ "fee": sat_btc_json(fee as i64) })),
+                    TxFeeLook::MissingPrevout | TxFeeLook::Overflow => None,
+                }
+            };
+            tx_to_json(tx, extra, net)
+        })
+        .collect()
+}
+
 pub(crate) fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["blockhash", "verbosity", "verbose"])?;
     let hash_hex = params.req_str(0, "blockhash")?;
@@ -382,13 +415,8 @@ pub(crate) fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Va
         None,
     );
     if verbosity >= 2 {
-        let net = rpc_btc_network(ctx.network);
-        let txs: Vec<Value> = block
-            .txdata
-            .iter()
-            .map(|tx| tx_to_json(tx, None, net))
-            .collect();
-        obj["tx"] = json!(txs);
+        insert_block_size_fields(&mut obj, &block);
+        obj["tx"] = json!(getblock_v2_tx_json(ctx, &block));
     }
     Ok(obj)
 }
@@ -429,6 +457,10 @@ fn getblock_unknown_hash(ctx: &RpcContext, hash: [u8; 32], verbosity: u32) -> Re
             None,
             Some(held_chainwork_hex(ctx, &block)),
         );
+        if verbosity >= 2 {
+            insert_block_size_fields(&mut obj, &block);
+            obj["tx"] = json!(getblock_v2_tx_json(ctx, &block));
+        }
         return Ok(obj);
     }
     let header_only = ctx.chain.as_ref().is_some_and(|c| c.knows_header(&typed))

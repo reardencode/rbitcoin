@@ -1571,6 +1571,32 @@ fn getblock_held_header_fields() {
 }
 
 #[test]
+fn getblock_verbosity_2_size_weight_and_tx_fee() {
+    use bitcoin::consensus::encode::deserialize;
+
+    let (ctx, dir, _hub) = ctx_regtest_hub();
+    let (hex, _spend) = mature_coinbase_spend_hex(&ctx, 50_0000_0000 - 1_000);
+    dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
+    let hashes = dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
+    let tip = hashes.as_array().unwrap()[0].clone();
+    let v2 = dispatch(&ctx, "getblock", vec![tip.clone(), json!(2)]).unwrap();
+    let raw = dispatch(&ctx, "getblock", vec![tip, json!(0)]).unwrap();
+    let raw_bytes = rbitcoin_primitives::hex_decode(raw.as_str().unwrap()).unwrap();
+    let block: bitcoin::Block = deserialize(&raw_bytes).unwrap();
+    assert_eq!(v2["size"].as_u64().unwrap(), block.total_size() as u64);
+    assert_eq!(v2["weight"].as_u64().unwrap(), block.weight().to_wu());
+    assert_eq!(
+        v2["strippedsize"].as_u64().unwrap(),
+        (block.weight().to_wu() - block.total_size() as u64) / 3
+    );
+    let txs = v2["tx"].as_array().unwrap();
+    assert!(txs[0].get("fee").is_none(), "coinbase must omit fee: {v2}");
+    let fee = txs[1]["fee"].as_f64().expect("spend fee");
+    assert!((fee - (1_000.0 / 1e8)).abs() < 1e-10, "fee={fee} v2={v2}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn getblock_named_verbose_genesis_and_hex() {
     let (ctx, dir, _hub) = ctx_regtest_hub();
     let genesis = dispatch(&ctx, "getblockhash", vec![json!(0)]).unwrap();
