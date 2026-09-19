@@ -680,6 +680,33 @@ mod tests {
         let h = operator_usage();
         assert!(h.contains("--proxy"), "help must list kebab --proxy");
         assert!(h.contains("--onion"), "help must list kebab --onion");
+        assert!(
+            h.contains("--proxy-randomize"),
+            "help must list kebab --proxy-randomize"
+        );
+    }
+
+    #[test]
+    fn proxy_randomize_defaults_on() {
+        let _g = OPERATOR_ENV_TEST_LOCK.lock().unwrap();
+        assert!(NodeConfig::default().listen.proxy_randomize);
+        let off = ready_config([
+            "rbitcoin-node",
+            "--proxy",
+            "127.0.0.1:9050",
+            "--proxy-randomize=0",
+        ]);
+        assert!(!off.listen.proxy_randomize);
+        match off.listen.dialer() {
+            rbitcoin_net::Dialer::Socks { randomize, .. } => assert!(!randomize),
+            other => panic!("expected socks dialer, got {other:?}"),
+        }
+        let on = ready_config(["rbitcoin-node", "--proxy", "127.0.0.1:9050"]);
+        assert!(on.listen.proxy_randomize);
+        match on.listen.dialer() {
+            rbitcoin_net::Dialer::Socks { randomize, .. } => assert!(randomize),
+            other => panic!("expected socks dialer, got {other:?}"),
+        }
     }
 
     #[test]

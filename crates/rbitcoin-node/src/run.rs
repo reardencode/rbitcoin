@@ -7,8 +7,8 @@ use rbitcoin_esplora::{run_esplora, BlockTemplateFn, EsploraConfig, EsploraHandl
 use rbitcoin_log::{debug, enabled, info, warn, Level};
 use rbitcoin_net::{
     default_port, format_serve_perf, format_tip_perf_sizes, netgroup, read_proc_rss,
-    sample_reset_serve_perf, AddrMan, AsMap, BlockingRegion, ChainHub, Dialer, IbdConfig,
-    MempoolHub, P2PNode, PeerConnType, TipEvent, TipPerfSizes,
+    sample_reset_serve_perf, socks_dns_seed_dests, AddrMan, AsMap, BlockingRegion, ChainHub,
+    Dialer, IbdConfig, MempoolHub, P2PNode, PeerConnType, TipEvent, TipPerfSizes,
 };
 use rbitcoin_primitives::Network;
 use rbitcoin_query::{spawn_sh_writebehind, Query};
@@ -392,6 +392,9 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             addrman.len().saturating_sub(n_before),
             addrman.len()
         );
+    } else if config.listen.proxy.is_some() && config.listen.use_seeds {
+        let n = socks_dns_seed_dests(config.network).len();
+        info!("ibd: SOCKS proxy set — skipping local DNS for {n} seed hostnames (use --connect)");
     } else if config.signet_challenge.is_some()
         && config.listen.connect.is_empty()
         && addrman.is_empty()
@@ -990,7 +993,10 @@ fn tip_meets_min_work(config: &NodeConfig, hub: &rbitcoin_net::ChainHub) -> bool
 }
 
 fn should_resolve_default_seeds(config: &NodeConfig) -> bool {
-    config.listen.use_seeds && config.listen.connect.is_empty() && config.signet_challenge.is_none()
+    config.listen.use_seeds
+        && config.listen.connect.is_empty()
+        && config.signet_challenge.is_none()
+        && config.listen.proxy.is_none()
 }
 
 /// One walker per process: SH-warm start and post-IBD `enter_tip_mode` both call this.
@@ -1914,6 +1920,17 @@ mod tests {
         assert!(should_resolve_default_seeds(&cfg));
         cfg.signet_challenge = Some(bitcoin::ScriptBuf::from_bytes(vec![0x51]));
         assert!(!should_resolve_default_seeds(&cfg));
+    }
+
+    #[test]
+    fn dns_seeds_not_resolved_locally_when_proxy() {
+        let mut cfg = NodeConfig::default();
+        assert!(should_resolve_default_seeds(&cfg));
+        cfg.listen.proxy = Some("127.0.0.1:9050".parse().unwrap());
+        assert!(
+            !should_resolve_default_seeds(&cfg),
+            "proxy path must not ToSocketAddrs DNS/fixed seeds"
+        );
     }
 
     fn coinbase_block(
