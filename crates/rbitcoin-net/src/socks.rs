@@ -1,18 +1,41 @@
 //! SOCKS5 CONNECT client for P2P outbound (system Tor / generic proxy).
 
 use crate::error::NetError;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+
+enum SocksDest<'a> {
+    Socket(SocketAddr),
+    Domain { host: &'a str, port: u16 },
+}
 
 pub(crate) async fn socks5_connect(
     proxy: SocketAddr,
     target: SocketAddr,
     creds: Option<&[u8]>,
 ) -> Result<TcpStream, NetError> {
+    socks5_connect_dest(proxy, SocksDest::Socket(target), creds).await
+}
+
+pub(crate) async fn socks5_connect_domain(
+    proxy: SocketAddr,
+    host: &str,
+    port: u16,
+    creds: Option<&[u8]>,
+) -> Result<TcpStream, NetError> {
+    socks5_connect_dest(proxy, SocksDest::Domain { host, port }, creds).await
+}
+
+async fn socks5_connect_dest(
+    proxy: SocketAddr,
+    dest: SocksDest<'_>,
+    creds: Option<&[u8]>,
+) -> Result<TcpStream, NetError> {
     let mut s = TcpStream::connect(proxy).await?;
     greet(&mut s, creds).await?;
-    connect_ipv4(&mut s, target).await?;
+    write_connect(&mut s, dest).await?;
+    read_connect_reply(&mut s).await?;
     Ok(s)
 }
 
@@ -31,20 +54,33 @@ async fn greet(s: &mut TcpStream, creds: Option<&[u8]>) -> Result<(), NetError> 
     Ok(())
 }
 
-async fn connect_ipv4(s: &mut TcpStream, target: SocketAddr) -> Result<(), NetError> {
-    let SocketAddr::V4(v4) = target else {
-        return Err(NetError::Protocol("socks CONNECT needs IPv4"));
-    };
-    let ip: Ipv4Addr = *v4.ip();
-    let port = v4.port().to_be_bytes();
-    let mut req = [0u8; 10];
-    req[0] = 5;
-    req[1] = 1;
-    req[3] = 1;
-    req[4..8].copy_from_slice(&ip.octets());
-    req[8..10].copy_from_slice(&port);
+async fn write_connect(s: &mut TcpStream, dest: SocksDest<'_>) -> Result<(), NetError> {
+    let mut req = Vec::with_capacity(22);
+    req.extend_from_slice(&[5, 1, 0]);
+    match dest {
+        SocksDest::Socket(SocketAddr::V4(v4)) => {
+            req.push(1);
+            req.extend_from_slice(&v4.ip().octets());
+            req.extend_from_slice(&v4.port().to_be_bytes());
+        }
+        SocksDest::Socket(SocketAddr::V6(v6)) => {
+            req.push(4);
+            req.extend_from_slice(&v6.ip().octets());
+            req.extend_from_slice(&v6.port().to_be_bytes());
+        }
+        SocksDest::Domain { host, port } => {
+            let bytes = host.as_bytes();
+            if bytes.is_empty() || bytes.len() > 255 {
+                return Err(NetError::Protocol("socks domain length"));
+            }
+            req.push(3);
+            req.push(bytes.len() as u8);
+            req.extend_from_slice(bytes);
+            req.extend_from_slice(&port.to_be_bytes());
+        }
+    }
     s.write_all(&req).await?;
-    read_connect_reply(s).await
+    Ok(())
 }
 
 async fn read_connect_reply(s: &mut TcpStream) -> Result<(), NetError> {
@@ -78,7 +114,7 @@ async fn read_connect_reply(s: &mut TcpStream) -> Result<(), NetError> {
 
 #[cfg(test)]
 mod tests {
-    use super::socks5_connect;
+    use super::{socks5_connect, socks5_connect_domain};
     use std::net::{Ipv4Addr, SocketAddr};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -125,6 +161,46 @@ mod tests {
         let mut echo = [0u8; 1];
         stream.read_exact(&mut echo).await.unwrap();
         assert_eq!(echo, [0xab]);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn socks5_connect_domain_does_not_resolve_locally() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = listener.local_addr().unwrap();
+        let host = "seed.example";
+        let port = 8333u16;
+
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut ver_n = [0u8; 2];
+            s.read_exact(&mut ver_n).await.unwrap();
+            let nmethods = ver_n[1] as usize;
+            let mut methods = vec![0u8; nmethods];
+            s.read_exact(&mut methods).await.unwrap();
+            s.write_all(&[5, 0x00]).await.unwrap();
+
+            let mut hdr = [0u8; 4];
+            s.read_exact(&mut hdr).await.unwrap();
+            assert_eq!(hdr[0], 5);
+            assert_eq!(hdr[1], 1, "CONNECT");
+            assert_eq!(hdr[2], 0);
+            assert_eq!(hdr[3], 3, "ATYP domain; must not resolve locally");
+            let mut n = [0u8; 1];
+            s.read_exact(&mut n).await.unwrap();
+            let mut name = vec![0u8; n[0] as usize];
+            s.read_exact(&mut name).await.unwrap();
+            let mut p = [0u8; 2];
+            s.read_exact(&mut p).await.unwrap();
+            assert_eq!(name, b"seed.example");
+            assert_eq!(u16::from_be_bytes(p), 8333);
+
+            s.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await.unwrap();
+        });
+
+        socks5_connect_domain(proxy, host, port, None)
+            .await
+            .unwrap();
         server.await.unwrap();
     }
 }
