@@ -405,8 +405,42 @@ const JOIN_MAX_CLIENTS: usize = 256;
 const JOIN_BULK_CAP: usize = 16 * 1024 * 1024;
 
 struct InflightJoin {
-    done: Mutex<Option<ShJoinSlot>>,
+    /// `None` = still running. `Some(slot)` = finished (`slot` may be empty).
+    done: Mutex<Option<Option<ShJoinSlot>>>,
     cv: std::sync::Condvar,
+}
+
+impl InflightJoin {
+    fn finish(&self, slot: Option<ShJoinSlot>) {
+        let mut d = self.done.lock().unwrap_or_else(|p| p.into_inner());
+        if d.is_none() {
+            *d = Some(slot);
+            self.cv.notify_all();
+        }
+    }
+}
+
+/// Finishes the inflight slot (and drops the map entry) if the leader unwinds.
+struct InflightGuard {
+    cache: Arc<Mutex<JoinCache>>,
+    id: String,
+    sh: [u8; 32],
+    inf: Arc<InflightJoin>,
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.inf.finish(None);
+        let mut g = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(c) = g.clients.get_mut(&self.id) {
+            if c.inflight
+                .get(&self.sh)
+                .is_some_and(|a| Arc::ptr_eq(a, &self.inf))
+            {
+                c.inflight.remove(&self.sh);
+            }
+        }
+    }
 }
 
 struct ClientJoins {
@@ -530,7 +564,7 @@ impl AppState {
             let mut slot = None;
             return f(&mut slot);
         };
-        let waiter = {
+        let inflight = {
             let mut g = self.sh_join.lock().unwrap_or_else(|p| p.into_inner());
             sweep_clients(&mut g.clients, Instant::now());
             let c = g.clients.entry(id.to_string()).or_default();
@@ -549,46 +583,53 @@ impl AppState {
                 return r;
             }
             if let Some(inf) = c.inflight.get(sh).cloned() {
-                Some(inf)
+                Err(inf)
             } else {
                 let inf = Arc::new(InflightJoin {
                     done: Mutex::new(None),
                     cv: std::sync::Condvar::new(),
                 });
-                c.inflight.insert(*sh, inf);
-                None
+                c.inflight.insert(*sh, Arc::clone(&inf));
+                Ok(inf)
             }
         };
-        if let Some(inf) = waiter {
-            let mut d = inf.done.lock().unwrap_or_else(|p| p.into_inner());
-            while d.is_none() {
-                d = inf.cv.wait(d).unwrap_or_else(|p| p.into_inner());
-            }
-            let mut slot = d.clone();
-            drop(d);
-            let r = f(&mut slot);
-            if let Some(s) = slot {
-                let mut g = self.sh_join.lock().unwrap_or_else(|p| p.into_inner());
-                if let Some(c) = g.clients.get_mut(id) {
-                    c.last_sh = Some((*sh, s));
-                    c.last_req = Instant::now();
+        let inf = match inflight {
+            Err(inf) => {
+                let mut d = inf.done.lock().unwrap_or_else(|p| p.into_inner());
+                while d.is_none() {
+                    d = inf.cv.wait(d).unwrap_or_else(|p| p.into_inner());
                 }
+                let mut slot = (*d).clone().flatten();
+                drop(d);
+                let r = f(&mut slot);
+                if let Some(s) = slot {
+                    let mut g = self.sh_join.lock().unwrap_or_else(|p| p.into_inner());
+                    if let Some(c) = g.clients.get_mut(id) {
+                        c.last_sh = Some((*sh, s));
+                        c.last_req = Instant::now();
+                    }
+                }
+                return r;
             }
-            return r;
-        }
+            Ok(inf) => inf,
+        };
         let mut slot = {
             let g = self.sh_join.lock().unwrap_or_else(|p| p.into_inner());
             g.clients.get(id).and_then(|c| c.last_bulk.get(sh).cloned())
         };
+        let _guard = InflightGuard {
+            cache: Arc::clone(&self.sh_join),
+            id: id.to_string(),
+            sh: *sh,
+            inf: Arc::clone(&inf),
+        };
         let r = f(&mut slot);
+        inf.finish(slot.clone());
         {
             let mut g = self.sh_join.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(c) = g.clients.get_mut(id) {
                 c.last_req = Instant::now();
-                if let Some(inf) = c.inflight.remove(sh) {
-                    *inf.done.lock().unwrap_or_else(|p| p.into_inner()) = slot.clone();
-                    inf.cv.notify_all();
-                }
+                c.inflight.remove(sh);
                 if let Some(s) = slot {
                     c.last_sh = Some((*sh, s));
                 }
@@ -1298,6 +1339,89 @@ mod tests {
         sweep_clients(&mut map, now);
         assert!(!map.contains_key("stale"));
         assert!(map.contains_key("fresh"));
+    }
+
+    fn join_only_state(q: Arc<Query>) -> AppState {
+        AppState {
+            query: q,
+            network: Network::Regtest,
+            mempool: None,
+            max_body: 1 << 20,
+            tip_tx: None,
+            ws_sem: None,
+            max_ws_message_bytes: 1024,
+            max_track_addresses: 1,
+            max_track_txs: 1,
+            sh_join: Arc::new(Mutex::new(JoinCache::default())),
+            join_header_trusted: true,
+            block_template: None,
+            gbt_cache: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[test]
+    fn with_sh_join_empty_slot_unblocks_waiter() {
+        let (_dir, q) = temp_query("join-empty-waiter");
+        let st = Arc::new(join_only_state(Arc::new(q)));
+        let sh = [0x11u8; 32];
+        let (leader_in, leader_in_rx) = std::sync::mpsc::channel::<()>();
+        let (release, release_rx) = std::sync::mpsc::channel::<()>();
+        let st_l = Arc::clone(&st);
+        let leader = std::thread::spawn(move || {
+            st_l.with_sh_join(Some("c1"), &sh, |slot| {
+                *slot = None;
+                let _ = leader_in.send(());
+                let _ = release_rx.recv();
+            });
+        });
+        leader_in_rx.recv().expect("leader entered f");
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let st_w = Arc::clone(&st);
+        let waiter = std::thread::spawn(move || {
+            st_w.with_sh_join(Some("c1"), &sh, |slot| {
+                let _ = done_tx.send(slot.is_none());
+            });
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        let _ = release.send(());
+        leader.join().expect("leader");
+        let empty = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("waiter unblocked after empty join");
+        assert!(empty, "finished empty slot");
+        waiter.join().expect("waiter");
+    }
+
+    #[test]
+    fn with_sh_join_leader_panic_unblocks_waiter() {
+        let (_dir, q) = temp_query("join-panic-waiter");
+        let st = Arc::new(join_only_state(Arc::new(q)));
+        let sh = [0x22u8; 32];
+        let (leader_in, leader_in_rx) = std::sync::mpsc::channel::<()>();
+        let (release, release_rx) = std::sync::mpsc::channel::<()>();
+        let st_l = Arc::clone(&st);
+        let leader = std::thread::spawn(move || {
+            st_l.with_sh_join(Some("c1"), &sh, |_slot| {
+                let _ = leader_in.send(());
+                let _ = release_rx.recv();
+                panic!("join leader unwind");
+            });
+        });
+        leader_in_rx.recv().expect("leader entered f");
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let st_w = Arc::clone(&st);
+        let waiter = std::thread::spawn(move || {
+            st_w.with_sh_join(Some("c1"), &sh, |_slot| {
+                let _ = done_tx.send(());
+            });
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        let _ = release.send(());
+        let _ = leader.join();
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("waiter unblocked after leader panic");
+        waiter.join().expect("waiter");
     }
 
     #[cfg(unix)]
