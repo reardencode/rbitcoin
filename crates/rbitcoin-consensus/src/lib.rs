@@ -58,7 +58,7 @@ pub fn verify_tx_scripts_detached_forks(
 
 pub use block::{
     bip34_height_script, bip68_active_for_tx, block_has_witness, block_subsidy, check_block_wire,
-    is_final_tx, sequence_locks_satisfied, tx_gbt_sigops, validate_block_structure,
+    is_final_tx, sequence_locks_satisfied, tx_gbt_sigops, tx_sigop_cost, validate_block_structure,
     witness_commitment_script, ValidationContext,
 };
 pub(crate) use block::{validate_block_structure_hashed, TxPrecompute};

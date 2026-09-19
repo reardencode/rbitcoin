@@ -199,6 +199,7 @@ fn tx_json_from_wire(
 ) -> Result<Value, QueryError> {
     let mut vin = Vec::with_capacity(wire.input.len());
     let mut fee_in: Option<i64> = Some(0);
+    let mut prev_spks: Vec<Vec<u8>> = Vec::with_capacity(wire.input.len());
     for (i, tin) in wire.input.iter().enumerate() {
         let is_coinbase = tin.previous_output.is_null();
         let mut vin_obj = json!({
@@ -227,19 +228,26 @@ fn tx_json_from_wire(
             vin_obj["inner_witnessscript_asm"] = Value::String(asm);
         }
 
-        if !is_coinbase {
-            if let Some(prev) = prevout_json(query, stored_inputs, i, tin, network, mempool)? {
-                if let Some(v) = prev.get("value").and_then(|x| x.as_i64()) {
-                    if let Some(acc) = fee_in.as_mut() {
-                        *acc = acc.saturating_add(v);
-                    }
-                } else {
-                    fee_in = None;
+        if is_coinbase {
+            prev_spks.push(Vec::new());
+        } else if let Some(prev) = prevout_json(query, stored_inputs, i, tin, network, mempool)? {
+            if let Some(v) = prev.get("value").and_then(|x| x.as_i64()) {
+                if let Some(acc) = fee_in.as_mut() {
+                    *acc = acc.saturating_add(v);
                 }
-                vin_obj["prevout"] = prev;
             } else {
                 fee_in = None;
             }
+            let spk = prev
+                .get("scriptpubkey")
+                .and_then(|x| x.as_str())
+                .and_then(|h| rbitcoin_primitives::hex_decode(h).ok())
+                .unwrap_or_default();
+            prev_spks.push(spk);
+            vin_obj["prevout"] = prev;
+        } else {
+            fee_in = None;
+            prev_spks.push(Vec::new());
         }
 
         vin.push(vin_obj);
@@ -273,6 +281,10 @@ fn tx_json_from_wire(
         "vout": vout,
         "status": status,
     });
+    let spk_refs: Vec<&[u8]> = prev_spks.iter().map(|s| s.as_slice()).collect();
+    obj["sigops"] = json!(rbitcoin_consensus::tx_sigop_cost(
+        wire, &spk_refs, true, true
+    ));
 
     if let Some(fee) = fee_override {
         obj["fee"] = json!(fee);
@@ -739,7 +751,7 @@ mod tests {
                 script_sig: vec![],
                 witness: vec![],
             }],
-            outputs: vec![OutputRecord::unspent(48_0000_0000, vec![0x00])],
+            outputs: vec![OutputRecord::unspent(48_0000_0000, vec![0xac])],
         };
         q.connect_block(Height(2), &h2, &[ta2]).unwrap();
         let spend2_fk = q.block_tx_fks(Height(2)).unwrap()[0];
@@ -754,6 +766,7 @@ mod tests {
         );
         assert_eq!(v["txid"], block_hash_hex(&spend2_txid));
         assert_eq!(v["vin"][0]["prevout"]["value"].as_i64(), Some(49_0000_0000));
+        assert_eq!(v["sigops"], 4, "OP_CHECKSIG output scaled: {v}");
         assert_eq!(q.store().txs.body_txid(spend2_fk).unwrap(), spend2_txid);
 
         let _ = std::fs::remove_dir_all(&dir);

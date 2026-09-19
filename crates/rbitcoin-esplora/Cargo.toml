@@ -14,6 +14,7 @@ rbitcoin-query = { workspace = true }
 rbitcoin-store = { workspace = true }
 rbitcoin-electrum = { workspace = true }
 rbitcoin-net = { workspace = true }
+rbitcoin-consensus = { workspace = true }
 bitcoin = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
@@ -24,7 +25,6 @@ serde_json = { workspace = true }
 futures-util = "0.3"
 
 [dev-dependencies]
-rbitcoin-consensus = { workspace = true }
 # Match axum 0.8's tungstenite line (single version in the lock).
 tokio-tungstenite = "0.29"
 http = "1"

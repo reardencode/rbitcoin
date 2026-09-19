@@ -56,6 +56,9 @@ before 1.0).
 - **Esplora broadcast test:** `GET /broadcast?tx=` admits like `POST /tx`.
   `POST /txs/test` is dry-run `test_accept` with electrs `maxfeerate` BTC/kvB.
 
+- **Esplora tx JSON `sigops`:** BIP16+BIP141 cost via `tx_sigop_cost` (same as
+  Core `GetTransactionSigOpCost`).
+
 ## [0.7.0] — 2026-09-18
 
 Named published **0.7** line. **Not 1.0.** Patch branch is `v0.7.x`. Schema 24
