@@ -1170,13 +1170,18 @@ location /api/ {
 }
 ```
 
-`/api/v1/` is mempool's Node (MariaDB catalogue). `/api/` is rbitcoin Esplora
-(electrs HTTP). Register the `/api/v1/` location **first**. Unix Esplora:
-`proxy_pass http://unix:/run/rbitcoin/esplora.sock:`. Wallet Esplora WS is
-`wss://host/api/ws`. Caddy: `reverse_proxy` with default HTTP/1.1 upgrade
-support to the same listen. `X-Rbitcoin-Client $connection` is how last-1 GET
-and last-bulk POST joins stick to one nginx connection; omit it on a public
-TCP expose.
+`/api/v1/` is mempool's Node (MariaDB catalogue), including **`/api/v1/ws`**.
+`/api/` is rbitcoin Esplora (electrs HTTP), including wallet **`/api/ws`**
+(`--esplora-listen` `/v1/ws` + `/ws`). Register the `/api/v1/` location
+**first** so Node keeps the explorer firehose. Unix Esplora:
+`proxy_pass http://unix:/run/rbitcoin/esplora.sock:`. Caddy: `reverse_proxy`
+with default HTTP/1.1 upgrade support to the same listen. `X-Rbitcoin-Client
+$connection` is how last-1 GET and last-bulk POST joins stick to one nginx
+connection; omit it on a public TCP expose. HTTP/1.1 browsers open several
+`$connection` ids (each GET can miss last-1); terminate **HTTP/2** on this
+location so one tab maps to one connection. Every Esplora REST response and
+the WS upgrade includes `X-Powered-By: rbitcoin-esplora/<version>-<hex>`
+(mempool failover regex).
 
 ## Signet lab
 

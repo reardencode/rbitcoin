@@ -64,6 +64,12 @@ before 1.0).
   clients). Public TCP ignores the header. Not an 8-script LRU and not a >5s
   process whale cache.
 
+- **Esplora wallet WebSocket:** `{ "action": "ping"|"init" }`, `track-*: "stop"`,
+  subscribe snapshots of live mempool txs, RBF `address-removed-transactions`,
+  and `want: stats` (`mempoolInfo` + `fees` from the hub snapshots). Public URL
+  `wss://host/api/ws`; mempool Node keeps `/api/v1/ws`. REST and WS upgrade send
+  `X-Powered-By: rbitcoin-esplora/<version>-<hex>`.
+
 ## [0.7.0] — 2026-09-18
 
 Named published **0.7** line. **Not 1.0.** Patch branch is `v0.7.x`. Schema 24
