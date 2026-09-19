@@ -570,7 +570,7 @@ impl AppState {
             let c = g.clients.entry(id.to_string()).or_default();
             c.last_req = Instant::now();
             if c.last_sh.as_ref().is_some_and(|(k, _)| k == sh) {
-                let mut slot = c.last_sh.take().map(|(_, s)| s);
+                let mut slot = c.last_sh.as_ref().map(|(_, s)| s.clone());
                 drop(g);
                 let r = f(&mut slot);
                 if let Some(s) = slot {
@@ -1341,7 +1341,7 @@ mod tests {
         assert!(map.contains_key("fresh"));
     }
 
-    fn join_only_state(q: Arc<Query>) -> AppState {
+    fn join_only_state(q: Arc<Query>, cache: Arc<Mutex<JoinCache>>) -> AppState {
         AppState {
             query: q,
             network: Network::Regtest,
@@ -1352,7 +1352,7 @@ mod tests {
             max_ws_message_bytes: 1024,
             max_track_addresses: 1,
             max_track_txs: 1,
-            sh_join: Arc::new(Mutex::new(JoinCache::default())),
+            sh_join: cache,
             join_header_trusted: true,
             block_template: None,
             gbt_cache: Arc::new(Mutex::new(None)),
@@ -1362,7 +1362,10 @@ mod tests {
     #[test]
     fn with_sh_join_empty_slot_unblocks_waiter() {
         let (_dir, q) = temp_query("join-empty-waiter");
-        let st = Arc::new(join_only_state(Arc::new(q)));
+        let st = Arc::new(join_only_state(
+            Arc::new(q),
+            Arc::new(Mutex::new(JoinCache::default())),
+        ));
         let sh = [0x11u8; 32];
         let (leader_in, leader_in_rx) = std::sync::mpsc::channel::<()>();
         let (release, release_rx) = std::sync::mpsc::channel::<()>();
@@ -1395,7 +1398,10 @@ mod tests {
     #[test]
     fn with_sh_join_leader_panic_unblocks_waiter() {
         let (_dir, q) = temp_query("join-panic-waiter");
-        let st = Arc::new(join_only_state(Arc::new(q)));
+        let st = Arc::new(join_only_state(
+            Arc::new(q),
+            Arc::new(Mutex::new(JoinCache::default())),
+        ));
         let sh = [0x22u8; 32];
         let (leader_in, leader_in_rx) = std::sync::mpsc::channel::<()>();
         let (release, release_rx) = std::sync::mpsc::channel::<()>();
@@ -1422,6 +1428,59 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .expect("waiter unblocked after leader panic");
         waiter.join().expect("waiter");
+    }
+
+    #[tokio::test]
+    async fn with_sh_join_last1_clone_visible_to_overlapping_get() {
+        use rbitcoin_store::script_hash;
+
+        let (_a1, spk1) = regtest_p2wpkh();
+        let (dir, q) = temp_query("join-last1-clone");
+        let (h0, t0) = coinbase(0, Fk::NULL, None);
+        let prev = q.connect_block(Height(0), &h0, &[t0]).unwrap();
+        let (h1, cb1) = coinbase(1, prev, Some(h0.hash));
+        q.connect_block(Height(1), &h1, &[cb1, two_script_pay(0x11, spk1.clone())])
+            .unwrap();
+        let q = Arc::new(q);
+        let sh1 = script_hash(spk1.as_bytes());
+        let h1hex = block_hash_hex(&sh1);
+        let cache = Arc::new(Mutex::new(JoinCache::default()));
+        let app = app_with_join(Arc::clone(&q), Arc::clone(&cache), true);
+        let (st, body) =
+            oneshot_http(&app, get_with_client(&format!("/scripthash/{h1hex}"), "c1")).await;
+        assert_eq!(st, 200, "{body}");
+        assert_eq!(cache.lock().unwrap().last_sh_key("c1"), Some(sh1));
+
+        let st = Arc::new(join_only_state(Arc::clone(&q), Arc::clone(&cache)));
+        let (holder_in, holder_in_rx) = std::sync::mpsc::channel::<()>();
+        let (release, release_rx) = std::sync::mpsc::channel::<()>();
+        let st_a = Arc::clone(&st);
+        let holder = std::thread::spawn(move || {
+            st_a.with_sh_join(Some("c1"), &sh1, |slot| {
+                assert!(slot.is_some(), "holder must see warm last-1");
+                let _ = holder_in.send(());
+                let _ = release_rx.recv();
+            });
+        });
+        holder_in_rx.recv().expect("holder entered f");
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel();
+        let st_b = Arc::clone(&st);
+        let overlap = std::thread::spawn(move || {
+            st_b.with_sh_join(Some("c1"), &sh1, |slot| {
+                let _ = seen_tx.send(slot.is_some());
+            });
+        });
+        let saw = seen_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("overlap entered f");
+        assert!(
+            saw,
+            "overlapping same-sh GET must clone last-1, not take it"
+        );
+        let _ = release.send(());
+        holder.join().expect("holder");
+        overlap.join().expect("overlap");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]
