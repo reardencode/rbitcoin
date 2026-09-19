@@ -573,8 +573,10 @@ async fn pin_esplora_tx_json_unknown_coinbase(esplora_addr: SocketAddr, cb_txid:
     );
     assert_eq!(full["vin"][0]["is_coinbase"], true, "{body}");
     assert!(full["vin"][0].get("scriptsig_asm").is_some(), "{body}");
+    assert!(full.get("sigops").is_some(), "tx JSON sigops: {body}");
 }
 
+#[allow(clippy::cognitive_complexity)] // one SH surface pin table
 async fn pin_esplora_scripthash_pages(esplora_addr: SocketAddr) {
     use rbitcoin_primitives::display_hash_hex;
     use rbitcoin_store::script_hash;
@@ -630,6 +632,33 @@ async fn pin_esplora_scripthash_pages(esplora_addr: SocketAddr) {
         esplora_json_array(esplora_addr, &format!("/scripthash/{sh_hex}/txs")).await;
     assert_eq!(st, 200, "{body}");
     assert!(!combined.is_empty(), "{body}");
+    pin_esplora_after_txid_and_post_multi(esplora_addr, &sh_hex, &combined).await;
+}
+
+async fn pin_esplora_after_txid_and_post_multi(
+    esplora_addr: SocketAddr,
+    sh_hex: &str,
+    combined: &[Value],
+) {
+    let newest = combined[0]["txid"]
+        .as_str()
+        .expect("combined txid")
+        .to_string();
+    let (st, body, after) = esplora_json_array(
+        esplora_addr,
+        &format!("/scripthash/{sh_hex}/txs?after_txid={newest}"),
+    )
+    .await;
+    assert_eq!(st, 200, "{body}");
+    assert!(
+        after.iter().all(|row| row["txid"] != newest),
+        "after_txid must omit {newest}: {body}"
+    );
+    let payload = serde_json::to_string(&json!([sh_hex])).unwrap();
+    let (st, body) = http_post_json(esplora_addr, "/scripthashes/txs", &payload).await;
+    assert_eq!(st, 200, "POST /scripthashes/txs: {body}");
+    let posted: Vec<Value> = serde_json::from_str(&body).unwrap();
+    assert!(!posted.is_empty(), "{body}");
 }
 
 /// B13: one live `want: blocks` + `track-tx` on this `run_p2p` process.
@@ -961,6 +990,13 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
     let (st, body) = http_post(esplora_addr, "/tx", &hex).await;
     assert_eq!(st, 200, "POST /tx: {body}");
     assert_eq!(body, txid_hex);
+    let (st, body) = http_get(esplora_addr, &format!("/broadcast?tx={hex}")).await;
+    assert_eq!(st, 400, "GET /broadcast of live tx: {body}");
+    assert!(body.contains("duplicate"), "{body}");
+    let (st, body) = http_get(esplora_addr, &format!("/txs/outspends?txids={cb_hex}")).await;
+    assert_eq!(st, 200, "GET /txs/outspends: {body}");
+    let outspends: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(outspends[0][0]["spent"], true, "{body}");
     let hidden = jsonrpc(rpc_addr, "gettxout", json!([cb_hex.clone(), 0])).await;
     assert!(
         hidden["result"].is_null(),
@@ -1026,6 +1062,16 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
     );
     let child_hex = encode_tx(&child);
     let child_txid = child.compute_txid().to_string();
+    let test_body = serde_json::to_string(&json!([child_hex.clone()])).unwrap();
+    let (st, body) = http_post_json(esplora_addr, "/txs/test", &test_body).await;
+    assert_eq!(st, 200, "POST /txs/test: {body}");
+    let tested: Vec<Value> = serde_json::from_str(&body).unwrap();
+    assert_eq!(tested[0]["allowed"], true, "{body}");
+    let mem_before_child = jsonrpc(rpc_addr, "getrawmempool", json!([])).await;
+    assert!(
+        !mempool_has(&mem_before_child, &child_txid),
+        "test_accept must not admit: {mem_before_child}"
+    );
     let (st, body) = http_post(esplora_addr, "/tx", &child_hex).await;
     assert_eq!(st, 200, "POST /tx child: {body}");
     assert_eq!(body, child_txid);
