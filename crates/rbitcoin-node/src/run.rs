@@ -417,7 +417,6 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         &mut addrman,
         &peers_path,
         &shutdown,
-        config.listen.dialer(),
     )
     .await;
 
@@ -890,10 +889,8 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     }
                 } else {
                     info!("ibd: retry catch-up from {peer} (tip stagnant, catch-up incomplete)");
-                    let retry_cfg = catch_up_retry_config(
-                        std::sync::Arc::clone(&shared_peers),
-                        config.listen.dialer(),
-                    );
+                    let retry_cfg =
+                        catch_up_retry_config(std::sync::Arc::clone(&shared_peers), node.dialer());
                     let cancel = Some(Arc::clone(&shutdown.flag));
                     let retry_peers = [peer];
                     tokio::select! {
@@ -1120,7 +1117,6 @@ async fn run_ibd_or_skip(
     addrman: &mut AddrMan,
     peers_path: &std::path::Path,
     shutdown: &Shutdown,
-    dialer: Dialer,
 ) -> CatchUp {
     if ibd_targets.is_empty() {
         info!("ibd: no outbound peers; serving only (use --connect or seeds)");
@@ -1138,7 +1134,7 @@ async fn run_ibd_or_skip(
         // could deliver mid-chain blocks). Default 30s is enough.
         stall: std::time::Duration::from_secs(30),
         peers: Some(std::sync::Arc::clone(shared_peers)),
-        dialer,
+        dialer: node.dialer(),
         ..IbdConfig::default()
     };
     info!(

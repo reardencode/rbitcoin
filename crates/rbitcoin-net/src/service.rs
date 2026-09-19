@@ -177,6 +177,11 @@ impl P2PNode {
         })
     }
 
+    /// Outbound TCP path (direct or SOCKS).
+    pub fn dialer(&self) -> crate::socks::Dialer {
+        self.dialer.clone()
+    }
+
     /// Bind an additional listen socket (Core multi-`-bind`).
     pub async fn add_listen(&mut self, listen: SocketAddr) -> Result<SocketAddr, NetError> {
         let listener = TcpListener::bind(listen).await?;
