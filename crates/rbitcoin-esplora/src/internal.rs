@@ -1,6 +1,6 @@
 //! mempool/electrs `/internal/*` bulk REST and `/mempool/txids/page`.
 
-use crate::handlers::outspend_json;
+use crate::handlers::{outspend_json, spawn_join};
 use crate::server::{block_hash_hex, not_found, parse_hash32, pin_or_reject, store_err, AppState};
 use crate::tx_json::{build_tx_json, build_tx_json_from_tx};
 use axum::body::Bytes;
@@ -86,34 +86,40 @@ pub async fn post_internal_txs(State(st): State<AppState>, body: Bytes) -> Respo
     if body.len() > st.max_body {
         return (StatusCode::PAYLOAD_TOO_LARGE, "body too large").into_response();
     }
-    let ids = match parse_txid_array(&body) {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
-    let mut out = Vec::new();
-    for id in ids {
-        if let Some(v) = confirmed_or_mempool_tx(&st, &id) {
-            out.push(v);
+    spawn_join(move || {
+        let ids = match parse_txid_array(&body) {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        let mut out = Vec::new();
+        for id in ids {
+            if let Some(v) = confirmed_or_mempool_tx(&st, &id) {
+                out.push(v);
+            }
         }
-    }
-    Json(out).into_response()
+        Json(out).into_response()
+    })
+    .await
 }
 
 pub async fn post_internal_mempool_txs(State(st): State<AppState>, body: Bytes) -> Response {
     if body.len() > st.max_body {
         return (StatusCode::PAYLOAD_TOO_LARGE, "body too large").into_response();
     }
-    let ids = match parse_txid_array(&body) {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
-    let mut out = Vec::new();
-    for id in ids {
-        if let Some(v) = mempool_tx_json(&st, &id) {
-            out.push(v);
+    spawn_join(move || {
+        let ids = match parse_txid_array(&body) {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        let mut out = Vec::new();
+        for id in ids {
+            if let Some(v) = mempool_tx_json(&st, &id) {
+                out.push(v);
+            }
         }
-    }
-    Json(out).into_response()
+        Json(out).into_response()
+    })
+    .await
 }
 
 fn mempool_tx_page(st: &AppState, last: Option<&Txid>, max: usize) -> Vec<Value> {
@@ -131,11 +137,12 @@ pub async fn get_internal_mempool_txs(
     State(st): State<AppState>,
     AxumQuery(q): AxumQuery<MaxTxs>,
 ) -> Response {
-    Json(mempool_tx_page(&st, None, cap_max_txs(&q))).into_response()
+    let max = cap_max_txs(&q);
+    spawn_join(move || Json(mempool_tx_page(&st, None, max)).into_response()).await
 }
 
 pub async fn get_internal_mempool_txs_all(State(st): State<AppState>) -> Response {
-    Json(mempool_tx_page(&st, None, usize::MAX)).into_response()
+    spawn_join(move || Json(mempool_tx_page(&st, None, usize::MAX)).into_response()).await
 }
 
 pub async fn get_internal_mempool_txs_cursor(
@@ -147,7 +154,8 @@ pub async fn get_internal_mempool_txs_cursor(
         return bad_request("unparseable txid");
     };
     let last = Txid::from_byte_array(id);
-    Json(mempool_tx_page(&st, Some(&last), cap_max_txs(&q))).into_response()
+    let max = cap_max_txs(&q);
+    spawn_join(move || Json(mempool_tx_page(&st, Some(&last), max)).into_response()).await
 }
 
 fn mempool_txid_page(st: &AppState, last: Option<&Txid>, max: usize) -> Vec<String> {
@@ -165,7 +173,8 @@ pub async fn get_mempool_txids_page(
     State(st): State<AppState>,
     AxumQuery(q): AxumQuery<MaxTxs>,
 ) -> Response {
-    Json(mempool_txid_page(&st, None, cap_max_txs(&q))).into_response()
+    let max = cap_max_txs(&q);
+    spawn_join(move || Json(mempool_txid_page(&st, None, max)).into_response()).await
 }
 
 pub async fn get_mempool_txids_page_cursor(
@@ -177,117 +186,127 @@ pub async fn get_mempool_txids_page_cursor(
         return bad_request("unparseable txid");
     };
     let last = Txid::from_byte_array(id);
-    Json(mempool_txid_page(&st, Some(&last), cap_max_txs(&q))).into_response()
+    let max = cap_max_txs(&q);
+    spawn_join(move || Json(mempool_txid_page(&st, Some(&last), max)).into_response()).await
 }
 
 pub async fn get_internal_block_txs(
     State(st): State<AppState>,
     Path(hash_hex): Path<String>,
 ) -> Response {
-    let Ok(hash) = parse_hash32(&hash_hex) else {
-        return not_found();
-    };
-    let Some((header_fk, _)) = (match st.query.get_header_by_hash(&hash) {
-        Ok(v) => v,
-        Err(e) => return store_err(e),
-    }) else {
-        return not_found();
-    };
-    let fks = match st.query.header_tx_fks(header_fk, Some(&hash)) {
-        Ok(Some(fks)) => fks,
-        Ok(None) => return not_found(),
-        Err(e) => return store_err(e),
-    };
-    let mut out = Vec::with_capacity(fks.len());
-    for fk in fks {
-        match build_tx_json(&st.query, fk, st.network) {
-            Ok(v) => out.push(v),
+    spawn_join(move || {
+        let Ok(hash) = parse_hash32(&hash_hex) else {
+            return not_found();
+        };
+        let Some((header_fk, _)) = (match st.query.get_header_by_hash(&hash) {
+            Ok(v) => v,
             Err(e) => return store_err(e),
+        }) else {
+            return not_found();
+        };
+        let fks = match st.query.header_tx_fks(header_fk, Some(&hash)) {
+            Ok(Some(fks)) => fks,
+            Ok(None) => return not_found(),
+            Err(e) => return store_err(e),
+        };
+        let mut out = Vec::with_capacity(fks.len());
+        for fk in fks {
+            match build_tx_json(&st.query, fk, st.network) {
+                Ok(v) => out.push(v),
+                Err(e) => return store_err(e),
+            }
         }
-    }
-    Json(out).into_response()
+        Json(out).into_response()
+    })
+    .await
 }
 
 pub async fn post_outspends_by_txid(State(st): State<AppState>, body: Bytes) -> Response {
     if body.len() > st.max_body {
         return (StatusCode::PAYLOAD_TOO_LARGE, "body too large").into_response();
     }
-    let ids = match parse_txid_array(&body) {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
-    let view = match pin_or_reject(&st.query, ChainViewKind::Tip, None) {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
-    let mp = st.mempool.as_deref();
-    let mut out = Vec::with_capacity(ids.len());
-    for id in ids {
-        let nout = if let Ok(Some(fk)) = st.query.tx_fk_by_txid(&id) {
-            match st.query.store().get_tx_meta_and_outputs(fk) {
-                Ok((meta, _)) => meta.output_count,
-                Err(e) => return store_err(e),
-            }
-        } else if let Some(mp) = mp {
-            let tid = Txid::from_byte_array(id);
-            mp.get_tx(&tid)
-                .map(|tx| tx.output.len() as u32)
-                .unwrap_or(0)
-        } else {
-            0
+    spawn_join(move || {
+        let ids = match parse_txid_array(&body) {
+            Ok(v) => v,
+            Err(r) => return r,
         };
-        let mut slots = Vec::with_capacity(nout as usize);
-        for vout in 0..nout {
-            match outspend_json(&st.query, mp, &id, vout, view.as_ref()) {
-                Ok(v) => slots.push(v),
-                Err(e) => return store_err(e),
+        let view = match pin_or_reject(&st.query, ChainViewKind::Tip, None) {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        let mp = st.mempool.as_deref();
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            let nout = if let Ok(Some(fk)) = st.query.tx_fk_by_txid(&id) {
+                match st.query.store().get_tx_meta_and_outputs(fk) {
+                    Ok((meta, _)) => meta.output_count,
+                    Err(e) => return store_err(e),
+                }
+            } else if let Some(mp) = mp {
+                let tid = Txid::from_byte_array(id);
+                mp.get_tx(&tid)
+                    .map(|tx| tx.output.len() as u32)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            let mut slots = Vec::with_capacity(nout as usize);
+            for vout in 0..nout {
+                match outspend_json(&st.query, mp, &id, vout, view.as_ref()) {
+                    Ok(v) => slots.push(v),
+                    Err(e) => return store_err(e),
+                }
             }
+            out.push(Value::Array(slots));
         }
-        out.push(Value::Array(slots));
-    }
-    Json(out).into_response()
+        Json(out).into_response()
+    })
+    .await
 }
 
 pub async fn post_outspends_by_outpoint(State(st): State<AppState>, body: Bytes) -> Response {
     if body.len() > st.max_body {
         return (StatusCode::PAYLOAD_TOO_LARGE, "body too large").into_response();
     }
-    let v: Value = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(_) => return bad_request("invalid json"),
-    };
-    let Some(arr) = v.as_array() else {
-        return bad_request("body must be a JSON array of txid:vout");
-    };
-    let view = match pin_or_reject(&st.query, ChainViewKind::Tip, None) {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
-    let mp = st.mempool.as_deref();
-    let mut out = Vec::with_capacity(arr.len());
-    for x in arr {
-        let Some(s) = x.as_str() else {
-            out.push(json!({"spent": false}));
-            continue;
+    spawn_join(move || {
+        let v: Value = match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(_) => return bad_request("invalid json"),
         };
-        let Some((tid_s, vout_s)) = s.rsplit_once(':') else {
-            out.push(json!({"spent": false}));
-            continue;
+        let Some(arr) = v.as_array() else {
+            return bad_request("body must be a JSON array of txid:vout");
         };
-        let Ok(txid) = parse_hash32(tid_s) else {
-            out.push(json!({"spent": false}));
-            continue;
+        let view = match pin_or_reject(&st.query, ChainViewKind::Tip, None) {
+            Ok(v) => v,
+            Err(r) => return r,
         };
-        let Ok(vout) = vout_s.parse::<u32>() else {
-            out.push(json!({"spent": false}));
-            continue;
-        };
-        match outspend_json(&st.query, mp, &txid, vout, view.as_ref()) {
-            Ok(v) => out.push(v),
-            Err(e) => return store_err(e),
+        let mp = st.mempool.as_deref();
+        let mut out = Vec::with_capacity(arr.len());
+        for x in arr {
+            let Some(s) = x.as_str() else {
+                out.push(json!({"spent": false}));
+                continue;
+            };
+            let Some((tid_s, vout_s)) = s.rsplit_once(':') else {
+                out.push(json!({"spent": false}));
+                continue;
+            };
+            let Ok(txid) = parse_hash32(tid_s) else {
+                out.push(json!({"spent": false}));
+                continue;
+            };
+            let Ok(vout) = vout_s.parse::<u32>() else {
+                out.push(json!({"spent": false}));
+                continue;
+            };
+            match outspend_json(&st.query, mp, &txid, vout, view.as_ref()) {
+                Ok(v) => out.push(v),
+                Err(e) => return store_err(e),
+            }
         }
-    }
-    Json(out).into_response()
+        Json(out).into_response()
+    })
+    .await
 }
 
 #[cfg(test)]
