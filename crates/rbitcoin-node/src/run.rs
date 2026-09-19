@@ -7,8 +7,8 @@ use rbitcoin_esplora::{run_esplora, BlockTemplateFn, EsploraConfig, EsploraHandl
 use rbitcoin_log::{debug, enabled, info, warn, Level};
 use rbitcoin_net::{
     default_port, format_serve_perf, format_tip_perf_sizes, netgroup, read_proc_rss,
-    sample_reset_serve_perf, AddrMan, AsMap, BlockingRegion, ChainHub, IbdConfig, MempoolHub,
-    P2PNode, PeerConnType, TipEvent, TipPerfSizes,
+    sample_reset_serve_perf, AddrMan, AsMap, BlockingRegion, ChainHub, Dialer, IbdConfig,
+    MempoolHub, P2PNode, PeerConnType, TipEvent, TipPerfSizes,
 };
 use rbitcoin_primitives::Network;
 use rbitcoin_query::{spawn_sh_writebehind, Query};
@@ -208,13 +208,14 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     let p2p_ua =
         rbitcoin_primitives::rbitcoin_subversion(env!("CARGO_PKG_VERSION"), &config.uacomments)
             .unwrap_or_else(|_| format!("/rbitcoin:{}/", env!("CARGO_PKG_VERSION")));
-    let mut node = P2PNode::start_with_agent(
+    let mut node = P2PNode::start_with_dialer(
         listen,
         query,
         params.clone(),
         milestone,
         p2p_ua,
         config.listen.max_inbound as usize,
+        config.listen.dialer(),
     )
     .await
     .map_err(|e| NodeError::Config(format!("p2p start: {e}")))?;
@@ -413,6 +414,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         &mut addrman,
         &peers_path,
         &shutdown,
+        config.listen.dialer(),
     )
     .await;
 
@@ -885,7 +887,10 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     }
                 } else {
                     info!("ibd: retry catch-up from {peer} (tip stagnant, catch-up incomplete)");
-                    let retry_cfg = catch_up_retry_config(std::sync::Arc::clone(&shared_peers));
+                    let retry_cfg = catch_up_retry_config(
+                        std::sync::Arc::clone(&shared_peers),
+                        config.listen.dialer(),
+                    );
                     let cancel = Some(Arc::clone(&shutdown.flag));
                     let retry_peers = [peer];
                     tokio::select! {
@@ -1109,6 +1114,7 @@ async fn run_ibd_or_skip(
     addrman: &mut AddrMan,
     peers_path: &std::path::Path,
     shutdown: &Shutdown,
+    dialer: Dialer,
 ) -> CatchUp {
     if ibd_targets.is_empty() {
         info!("ibd: no outbound peers; serving only (use --connect or seeds)");
@@ -1126,6 +1132,7 @@ async fn run_ibd_or_skip(
         // could deliver mid-chain blocks). Default 30s is enough.
         stall: std::time::Duration::from_secs(30),
         peers: Some(std::sync::Arc::clone(shared_peers)),
+        dialer,
         ..IbdConfig::default()
     };
     info!(
@@ -1506,10 +1513,14 @@ pub(crate) fn enter_tip_mode(
 ///
 /// Uses [`IbdConfig::default`] (window 1024, stall 30s, connect 8s, …) — not
 /// [`IbdConfig::for_test`], which is only for unit/integration test harnesses.
-fn catch_up_retry_config(peers: std::sync::Arc<std::sync::Mutex<AddrMan>>) -> IbdConfig {
+fn catch_up_retry_config(
+    peers: std::sync::Arc<std::sync::Mutex<AddrMan>>,
+    dialer: Dialer,
+) -> IbdConfig {
     IbdConfig {
         target_peers: 1,
         peers: Some(peers),
+        dialer,
         ..IbdConfig::default()
     }
 }
@@ -1878,7 +1889,7 @@ mod tests {
     #[test]
     fn catch_up_retry_config_uses_production_not_for_test() {
         let peers = std::sync::Arc::new(std::sync::Mutex::new(rbitcoin_net::AddrMan::new()));
-        let cfg = catch_up_retry_config(std::sync::Arc::clone(&peers));
+        let cfg = catch_up_retry_config(std::sync::Arc::clone(&peers), Dialer::Direct);
         let prod = IbdConfig::default();
         let test = IbdConfig::for_test();
 

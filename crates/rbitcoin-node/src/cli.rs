@@ -288,7 +288,8 @@ fn operator_usage() -> String {
         "rbitcoin-node {} — usage:\n\
   rbitcoin-node [--conf FILE] [--datadir PATH] [--datadir-cold PATH] [--network NET] \\\n\
     [--signet-challenge HEX] [--signet-block-time SECS] \\\n\
-    [--listen ADDR] [--connect ADDR]... [--seed-node HOST]... [--electrum-listen ADDR] [--esplora-listen ADDR] \\\n\
+    [--listen ADDR] [--connect ADDR]... [--seed-node HOST]... [--proxy HOST:PORT] [--onion HOST:PORT] [--proxy-randomize[=0|1]] \\\n\
+    [--electrum-listen ADDR] [--esplora-listen ADDR] \\\n\
     [--sh-index] [--sp-tweaks] [--sp-tweaks-dust SATS] [--max-sh-creates N] [--esplora-block-template] \\\n\
     [--rpc] [--rpc-listen [ADDR]] [--rpc-token-file PATH] [--rpc-work-queue N] \\\n\
     [--milestone HEIGHT] \\\n\
@@ -313,6 +314,8 @@ Milestone: skip script/sig checks at/below HEIGHT.\n\
 Check-blocks: --check-blocks N revalidates the last N confirmed heights on open (default 6; 0 = all).\n\
 Mempool: --mempool-size-mb (default ~300 MiB weight budget).\n\
 Peers: --max-outbound (default 16 live download), --max-inbound (default 125).\n\
+  --proxy HOST:PORT SOCKS5 for all P2P outbound; --onion HOST:PORT SOCKS for onion (02).\n\
+  --proxy-randomize (default on) uses a fresh SOCKS username per peer (Tor circuit isolation).\n\
   --trusted / --always-relay / --relay are inbound permission knobs.\n\
   --net-permission / --net-permission-bind are CIDR or bind grants (noban, relay, …; IPv4 and IPv6).\n\
   --net-permission-relay (default on) / --net-permission-force-relay (default off) are implicit bits on a bare CIDR grant.\n\
@@ -366,6 +369,7 @@ fn is_bool_key(key: &str) -> bool {
             | "net_permission_relay"
             | "net_permission_force_relay"
             | "no_seeds"
+            | "proxy_randomize"
             | "inhibit_suspend"
             | "trusted"
             | "always_relay"
@@ -554,6 +558,9 @@ mod tests {
             "--rpc",
             "--rpc-listen",
             "--rpc-token-file",
+            "--proxy",
+            "--onion",
+            "--proxy-randomize",
         ] {
             assert!(h.contains(flag), "help must list {flag}");
         }
@@ -611,6 +618,68 @@ mod tests {
             cli_main(["rbitcoin-node", "--sptweaks-dust=1"]),
             ExitCode::from(2),
         );
+    }
+
+    #[test]
+    fn proxy_conf_and_cli() {
+        let _g = OPERATOR_ENV_TEST_LOCK.lock().unwrap();
+        let cfg = ready_config(["rbitcoin-node", "--proxy", "127.0.0.1:9050"]);
+        assert_eq!(cfg.listen.proxy, Some("127.0.0.1:9050".parse().unwrap()));
+        assert!(cfg.listen.onion.is_none());
+        assert_eq!(
+            cfg.listen.dialer(),
+            rbitcoin_net::Dialer::Socks {
+                proxy: "127.0.0.1:9050".parse().unwrap(),
+                randomize: true,
+            }
+        );
+        assert_eq!(
+            NodeConfig::default().listen.dialer(),
+            rbitcoin_net::Dialer::Direct
+        );
+
+        let mut from_conf = NodeConfig::default();
+        assert_eq!(
+            from_conf.apply_kv("proxy", "127.0.0.1:9050").unwrap(),
+            ConfApply::Applied
+        );
+        assert_eq!(
+            from_conf.listen.proxy,
+            Some("127.0.0.1:9050".parse().unwrap())
+        );
+
+        let empty = NodeConfig::default().apply_kv("proxy", "").unwrap_err();
+        let empty_msg = format!("{empty}");
+        assert!(
+            empty_msg.contains("proxy"),
+            "empty proxy must be a start error: {empty_msg}"
+        );
+
+        let bad = NodeConfig::default()
+            .apply_kv("proxy", "not-an-addr")
+            .unwrap_err();
+        let bad_msg = format!("{bad}");
+        assert!(
+            bad_msg.contains("proxy"),
+            "invalid proxy must be a start error: {bad_msg}"
+        );
+
+        let split = ready_config([
+            "rbitcoin-node",
+            "--proxy",
+            "127.0.0.1:9050",
+            "--onion",
+            "127.0.0.1:9051",
+        ]);
+        assert_eq!(split.listen.proxy, Some("127.0.0.1:9050".parse().unwrap()));
+        assert_eq!(split.listen.onion, Some("127.0.0.1:9051".parse().unwrap()));
+        assert!(split.listen.proxy.is_some());
+        assert!(split.listen.onion.is_some());
+        assert_ne!(split.listen.proxy, split.listen.onion);
+
+        let h = operator_usage();
+        assert!(h.contains("--proxy"), "help must list kebab --proxy");
+        assert!(h.contains("--onion"), "help must list kebab --onion");
     }
 
     #[test]
