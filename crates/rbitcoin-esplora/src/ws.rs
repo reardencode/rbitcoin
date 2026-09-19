@@ -36,6 +36,8 @@ pub(crate) enum ClientMsg {
     StopTrackTxs,
     /// Recognized JSON object with no actionable keys (ignore).
     Noop,
+    Ping,
+    Init,
 }
 
 fn json_str_list(v: &Value) -> Vec<String> {
@@ -50,11 +52,15 @@ fn json_str_list(v: &Value) -> Vec<String> {
 
 fn parse_want_action(obj: &serde_json::Map<String, Value>) -> Option<ClientMsg> {
     let action = obj.get("action").and_then(|a| a.as_str())?;
-    if action != "want" {
-        return None;
+    match action {
+        "want" => {
+            let data = obj.get("data").map(json_str_list).unwrap_or_default();
+            Some(ClientMsg::Want(data))
+        }
+        "ping" => Some(ClientMsg::Ping),
+        "init" => Some(ClientMsg::Init),
+        _ => None,
     }
-    let data = obj.get("data").map(json_str_list).unwrap_or_default();
-    Some(ClientMsg::Want(data))
 }
 
 fn parse_address_track(obj: &serde_json::Map<String, Value>) -> Option<ClientMsg> {
@@ -63,7 +69,7 @@ fn parse_address_track(obj: &serde_json::Map<String, Value>) -> Option<ClientMsg
             return Some(ClientMsg::StopTrackAddresses);
         }
         if let Some(s) = v.as_str() {
-            if s.is_empty() {
+            if s.is_empty() || s.eq_ignore_ascii_case("stop") {
                 return Some(ClientMsg::StopTrackAddresses);
             }
             return Some(ClientMsg::TrackAddress(s.to_string()));
@@ -101,7 +107,7 @@ fn parse_tx_track(obj: &serde_json::Map<String, Value>) -> Option<ClientMsg> {
             return Some(ClientMsg::StopTrackTxs);
         }
         if let Some(s) = v.as_str() {
-            if s.is_empty() {
+            if s.is_empty() || s.eq_ignore_ascii_case("stop") {
                 return Some(ClientMsg::StopTrackTxs);
             }
             return Some(ClientMsg::TrackTx(s.to_string()));
@@ -242,6 +248,18 @@ fn tip_push_json(ev: &TipEvent) -> Value {
             "timestamp": ev.header.time,
         }
     })
+}
+
+fn init_tip_json(query: &Query) -> Option<Value> {
+    let h = query.tip_height()?;
+    let rec = query.header_at_height(h).ok()??.1;
+    Some(json!({
+        "block": {
+            "height": h.0,
+            "id": display_hash_hex(&rec.hash),
+            "timestamp": rec.timestamp,
+        }
+    }))
 }
 
 async fn send_json(
@@ -412,6 +430,11 @@ async fn handle_client_msg(
             Ok(())
         }
         ClientMsg::Noop => Ok(()),
+        ClientMsg::Ping => send_json(sink, &json!({ "pong": true })).await,
+        ClientMsg::Init => match init_tip_json(&st.query) {
+            Some(v) => send_json(sink, &v).await,
+            None => Ok(()),
+        },
     }
 }
 
@@ -697,6 +720,10 @@ mod tests {
             parse_client_msg(r#"{"track-address":""}"#).unwrap(),
             ClientMsg::StopTrackAddresses
         );
+        assert_eq!(
+            parse_client_msg(r#"{"track-address":"stop"}"#).unwrap(),
+            ClientMsg::StopTrackAddresses
+        );
     }
 
     #[test]
@@ -712,6 +739,10 @@ mod tests {
         );
         assert_eq!(
             parse_client_msg(r#"{"stop-track-txs":true}"#).unwrap(),
+            ClientMsg::StopTrackTxs
+        );
+        assert_eq!(
+            parse_client_msg(r#"{"track-tx":"stop"}"#).unwrap(),
             ClientMsg::StopTrackTxs
         );
     }
@@ -774,7 +805,11 @@ mod tests {
         );
         assert_eq!(
             parse_client_msg(r#"{"action":"ping"}"#).unwrap(),
-            ClientMsg::Noop
+            ClientMsg::Ping
+        );
+        assert_eq!(
+            parse_client_msg(r#"{"action":"init"}"#).unwrap(),
+            ClientMsg::Init
         );
     }
 }

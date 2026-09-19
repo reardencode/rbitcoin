@@ -2450,6 +2450,34 @@ mod tests {
             .expect("ws upgrade");
         // Handler task may lag the HTTP upgrade handshake.
         tokio::time::sleep(Duration::from_millis(150)).await;
+        ws.send(WsMsg::Text(r#"{"action":"ping"}"#.into()))
+            .await
+            .unwrap();
+        let ping = tokio::time::timeout(Duration::from_secs(2), ws.next())
+            .await
+            .expect("ping timeout")
+            .expect("ws closed")
+            .expect("ws err");
+        let ping_text = match ping {
+            WsMsg::Text(t) => t.as_str().to_owned(),
+            other => panic!("expected pong text, got {other:?}"),
+        };
+        let ping_v: serde_json::Value = serde_json::from_str(&ping_text).unwrap();
+        assert_eq!(ping_v["pong"], true, "{ping_text}");
+        ws.send(WsMsg::Text(r#"{"action":"init"}"#.into()))
+            .await
+            .unwrap();
+        let init = tokio::time::timeout(Duration::from_secs(2), ws.next())
+            .await
+            .expect("init timeout")
+            .expect("ws closed")
+            .expect("ws err");
+        let init_text = match init {
+            WsMsg::Text(t) => t.as_str().to_owned(),
+            other => panic!("expected init text, got {other:?}"),
+        };
+        let init_v: serde_json::Value = serde_json::from_str(&init_text).unwrap();
+        assert_eq!(init_v["block"]["height"], 1, "{init_text}");
         ws.send(WsMsg::Text(
             r#"{"action":"want","data":["blocks","stats"]}"#.into(),
         ))
