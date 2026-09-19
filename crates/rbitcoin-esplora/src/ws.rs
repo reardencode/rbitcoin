@@ -403,8 +403,8 @@ async fn handle_client_msg(
             conn.want_blocks = data.iter().any(|s| s == "blocks");
             Ok(())
         }
-        ClientMsg::TrackAddress(addr) => add_addresses(st, conn, &[addr], sink).await,
-        ClientMsg::TrackAddresses(addrs) => add_addresses(st, conn, &addrs, sink).await,
+        ClientMsg::TrackAddress(addr) => add_addresses(st, conn, &[addr], false, sink).await,
+        ClientMsg::TrackAddresses(addrs) => add_addresses(st, conn, &addrs, true, sink).await,
         ClientMsg::StopTrackAddress(Some(addr)) => {
             if let Ok(sh) = resolve_address_sh(&addr, st.network) {
                 conn.addresses.remove(&sh);
@@ -438,12 +438,81 @@ async fn handle_client_msg(
     }
 }
 
+fn txs_touching_watched<'a, I>(
+    query: &Query,
+    mp: &MempoolHub,
+    network: Network,
+    watched: &HashMap<[u8; 32], String>,
+    txs: I,
+) -> HashMap<String, Vec<Value>>
+where
+    I: IntoIterator<Item = (Txid, &'a Transaction, Option<i64>)>,
+{
+    let mut out: HashMap<String, Vec<Value>> = HashMap::new();
+    if watched.is_empty() {
+        return out;
+    }
+    for (txid, tx, fee) in txs {
+        let shs = scripts_touched_full(query, Some(mp), tx);
+        let mut body: Option<Value> = None;
+        for sh in shs {
+            if let Some(addr) = watched.get(&sh) {
+                let v = body
+                    .get_or_insert_with(|| {
+                        build_tx_json_from_tx(query, tx, network, fee, Some(mp))
+                            .unwrap_or_else(|_| json!({ "txid": txid_display_hex(&txid) }))
+                    })
+                    .clone();
+                out.entry(addr.clone()).or_default().push(v);
+            }
+        }
+    }
+    out
+}
+
+fn unique_tx_jsons(by_addr: &HashMap<String, Vec<Value>>) -> Vec<Value> {
+    let mut seen = HashSet::new();
+    let mut txs = Vec::new();
+    for vs in by_addr.values() {
+        for v in vs {
+            let Some(id) = v.get("txid").and_then(|x| x.as_str()) else {
+                continue;
+            };
+            if seen.insert(id.to_string()) {
+                txs.push(v.clone());
+            }
+        }
+    }
+    txs
+}
+
+fn removed_tx_json(
+    query: &Query,
+    mempool: Option<&MempoolHub>,
+    network: Network,
+    old: &Txid,
+) -> Value {
+    if let Some(m) = mempool {
+        if let Some(tx) = m.get_tx(old) {
+            return build_tx_json_from_tx(query, &tx, network, None, Some(m))
+                .unwrap_or_else(|_| json!({ "txid": txid_display_hex(old) }));
+        }
+        if let Some(e) = m.mempool_tx_snapshot().get(old) {
+            return build_tx_json_from_tx(query, &e.tx, network, Some(e.fee_sat as i64), Some(m))
+                .unwrap_or_else(|_| json!({ "txid": txid_display_hex(old) }));
+        }
+    }
+    json!({ "txid": txid_display_hex(old) })
+}
+
 async fn add_addresses(
     st: &AppState,
     conn: &mut ConnState,
     addrs: &[String],
+    keyed: bool,
     sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
 ) -> Result<(), ()> {
+    let mut added: HashMap<[u8; 32], String> = HashMap::new();
     for addr in addrs {
         if conn.addresses.len() >= st.max_track_addresses {
             send_error(sink, "max_track_addresses exceeded").await?;
@@ -452,10 +521,55 @@ async fn add_addresses(
         match resolve_address_sh(addr, st.network) {
             Ok(sh) => {
                 conn.addresses.insert(sh, addr.clone());
+                added.insert(sh, addr.clone());
             }
             Err(()) => {
                 send_error(sink, &format!("invalid address: {addr}")).await?;
             }
+        }
+    }
+    if added.is_empty() {
+        return Ok(());
+    }
+    let Some(mp) = st.mempool.clone() else {
+        return Ok(());
+    };
+    let query = Arc::clone(&st.query);
+    let network = st.network;
+    let by_addr = match tokio::task::spawn_blocking(move || {
+        let _g = rbitcoin_net::BlockingRegion::enter();
+        let snap = mp.mempool_tx_snapshot();
+        txs_touching_watched(
+            query.as_ref(),
+            mp.as_ref(),
+            network,
+            &added,
+            snap.entries()
+                .iter()
+                .map(|e| (e.txid, e.tx.as_ref(), Some(e.fee_sat as i64))),
+        )
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+    if keyed {
+        let mut obj = serde_json::Map::new();
+        for addr in addrs {
+            if let Some(txs) = by_addr.get(addr) {
+                if !txs.is_empty() {
+                    obj.insert(addr.clone(), json!(txs));
+                }
+            }
+        }
+        if !obj.is_empty() {
+            send_json(sink, &json!({ "multi-address-transactions": obj })).await?;
+        }
+    } else {
+        let txs = unique_tx_jsons(&by_addr);
+        if !txs.is_empty() {
+            send_json(sink, &json!({ "address-transactions": txs })).await?;
         }
     }
     Ok(())
@@ -487,6 +601,7 @@ async fn add_txids(
 struct MempoolAnnounceFrames {
     replaced: Option<Value>,
     address_txs: Option<Value>,
+    address_removed: Option<Value>,
     tx_status: bool,
 }
 
@@ -499,6 +614,7 @@ fn mempool_announce_frames(
     ann: &MempoolAnnounce,
 ) -> MempoolAnnounceFrames {
     let mut replaced = None;
+    let mut address_removed = None;
     if !ann.replaced.is_empty() {
         let addr_hit_old = !watched.is_empty()
             && ann
@@ -526,12 +642,23 @@ fn mempool_announce_frames(
         if !replaced_for_client.is_empty() {
             replaced = Some(json!({ "replaced-transactions": replaced_for_client }));
         }
+        if addr_hit_old {
+            let removed: Vec<Value> = ann
+                .replaced
+                .iter()
+                .map(|old| removed_tx_json(query, mempool, network, old))
+                .collect();
+            if !removed.is_empty() {
+                address_removed = Some(json!({ "address-removed-transactions": removed }));
+            }
+        }
     }
 
     let Some(m) = mempool else {
         return MempoolAnnounceFrames {
             replaced,
             address_txs: None,
+            address_removed,
             tx_status: tracked.contains(&ann.txid),
         };
     };
@@ -539,29 +666,30 @@ fn mempool_announce_frames(
         return MempoolAnnounceFrames {
             replaced,
             address_txs: None,
+            address_removed,
             tx_status: tracked.contains(&ann.txid),
         };
     };
 
     let mut address_txs = None;
     if !watched.is_empty() {
-        let shs = scripts_touched_full(query, Some(m), &tx);
-        if shs.iter().any(|s| watched.contains_key(s)) {
-            let body = match query.get_tx_by_txid(&ann.txid.to_byte_array()) {
-                Ok(Some((fk, _))) => build_tx_json(query, fk, network).unwrap_or_else(|_| {
-                    build_tx_json_from_tx(query, &tx, network, None, Some(m))
-                        .unwrap_or_else(|_| json!({ "txid": txid_display_hex(&ann.txid) }))
-                }),
-                _ => build_tx_json_from_tx(query, &tx, network, None, Some(m))
-                    .unwrap_or_else(|_| json!({ "txid": txid_display_hex(&ann.txid) })),
-            };
-            address_txs = Some(json!({ "address-transactions": [body] }));
+        let grouped = txs_touching_watched(
+            query,
+            m,
+            network,
+            watched,
+            std::iter::once((ann.txid, &tx, None)),
+        );
+        let bodies = unique_tx_jsons(&grouped);
+        if !bodies.is_empty() {
+            address_txs = Some(json!({ "address-transactions": bodies }));
         }
     }
 
     MempoolAnnounceFrames {
         replaced,
         address_txs,
+        address_removed,
         tx_status: tracked.contains(&ann.txid),
     }
 }
@@ -597,6 +725,9 @@ async fn on_mempool_announce(
     };
 
     if let Some(v) = frames.replaced {
+        send_json(sink, &v).await?;
+    }
+    if let Some(v) = frames.address_removed {
         send_json(sink, &v).await?;
     }
     if let Some(v) = frames.address_txs {

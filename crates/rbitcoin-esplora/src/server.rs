@@ -2602,11 +2602,15 @@ mod tests {
 
     /// Regtest P2WPKH address + scriptPubKey for wallet-style track-address tests.
     fn regtest_p2wpkh() -> (String, bitcoin::ScriptBuf) {
+        regtest_p2wpkh_sk(7)
+    }
+
+    fn regtest_p2wpkh_sk(fill: u8) -> (String, bitcoin::ScriptBuf) {
         use bitcoin::key::CompressedPublicKey;
         use bitcoin::secp256k1::{Secp256k1, SecretKey};
         use bitcoin::{Address, Network, PrivateKey};
         let secp = Secp256k1::new();
-        let sk = SecretKey::from_slice(&[7u8; 32]).expect("sk");
+        let sk = SecretKey::from_slice(&[fill; 32]).expect("sk");
         let pk = PrivateKey::new(sk, Network::Regtest);
         let cpk = CompressedPublicKey::from_private_key(&secp, &pk).expect("cpk");
         let addr = Address::p2wpkh(&cpk, Network::Regtest);
@@ -2833,6 +2837,212 @@ mod tests {
             }
         }
         assert!(saw_block_txs, "expected block-transactions at tip 101");
+
+        let _ = ws.close(None).await;
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Subscribe snapshots live mempool txs; RBF emits address-removed; track-addresses is keyed.
+    #[tokio::test]
+    async fn ws_track_address_snapshot_removed_and_multi() {
+        use bitcoin::absolute::LockTime;
+        use bitcoin::hashes::Hash;
+        use bitcoin::transaction::Version as TxVersion;
+        use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
+        use futures_util::SinkExt;
+        use rbitcoin_net::MempoolHub;
+        use tokio_tungstenite::tungstenite::Message as WsMsg;
+
+        let (addr_a, spk_a) = regtest_p2wpkh_sk(7);
+        let (addr_b, spk_b) = regtest_p2wpkh_sk(8);
+        let (dir, q) = temp_query("ws-snap");
+        let mut prev = Fk::NULL;
+        let mut parent_hash: Option<[u8; 32]> = None;
+        let mut coinbase_txids = Vec::new();
+        for h in 0..103u32 {
+            let (header, ta) = coinbase(h, prev, parent_hash);
+            parent_hash = Some(header.hash);
+            coinbase_txids.push(ta.tx.txid);
+            prev = q.connect_block(Height(h), &header, &[ta]).unwrap();
+        }
+        let q = Arc::new(q);
+        let mp_dir = dir.join("mp");
+        std::fs::create_dir_all(&mp_dir).unwrap();
+        let hub = MempoolHub::open(&mp_dir, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+
+        let cfg =
+            EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), bitcoin::Network::Regtest);
+        let handle = run_esplora(cfg, Arc::clone(&q), Some(Arc::clone(&hub)), None)
+            .await
+            .expect("listen");
+        let (mut ws, _) =
+            tokio_tungstenite::connect_async(format!("ws://{}/v1/ws", handle.local_addr))
+                .await
+                .unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let pay = |op: OutPoint, spk: bitcoin::ScriptBuf, value: u64| Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: op,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(value),
+                script_pubkey: spk,
+            }],
+        };
+
+        let old = pay(
+            OutPoint {
+                txid: bitcoin::Txid::from_byte_array(coinbase_txids[0]),
+                vout: 0,
+            },
+            spk_a.clone(),
+            49_0000_0000,
+        );
+        let old_hex = display_txid(old.compute_txid());
+        hub.accept_tx(&old).expect("admit pay A");
+
+        ws.send(WsMsg::Text(
+            (format!(r#"{{"track-address":"{addr_a}"}}"#)).into(),
+        ))
+        .await
+        .unwrap();
+
+        let mut saw_snap = false;
+        for _ in 0..12 {
+            let v = ws_recv_json(&mut ws, 3).await;
+            if let Some(arr) = v.get("address-transactions").and_then(|a| a.as_array()) {
+                let txids: Vec<&str> = arr
+                    .iter()
+                    .filter_map(|t| t.get("txid").and_then(|x| x.as_str()))
+                    .collect();
+                assert!(
+                    txids.iter().any(|t| *t == old_hex),
+                    "subscribe snapshot should include live pay {old_hex}, got {txids:?}"
+                );
+                assert!(arr
+                    .iter()
+                    .any(|t| t.get("vin").and_then(|x| x.as_array()).is_some()));
+                saw_snap = true;
+                break;
+            }
+        }
+        assert!(
+            saw_snap,
+            "expected address-transactions snapshot on subscribe"
+        );
+
+        let away = pay(
+            OutPoint {
+                txid: bitcoin::Txid::from_byte_array(coinbase_txids[0]),
+                vout: 0,
+            },
+            ScriptBuf::from_bytes(vec![0x51]),
+            48_0000_0000,
+        );
+        hub.accept_tx(&away).expect("rbf away from A");
+
+        let mut saw_removed = false;
+        for _ in 0..12 {
+            let v = ws_recv_json(&mut ws, 3).await;
+            if let Some(arr) = v
+                .get("address-removed-transactions")
+                .and_then(|a| a.as_array())
+            {
+                let txids: Vec<&str> = arr
+                    .iter()
+                    .filter_map(|t| t.get("txid").and_then(|x| x.as_str()))
+                    .collect();
+                assert!(
+                    txids.iter().any(|t| *t == old_hex),
+                    "address-removed-transactions should include {old_hex}, got {txids:?}"
+                );
+                saw_removed = true;
+                break;
+            }
+        }
+        assert!(saw_removed, "expected address-removed-transactions on RBF");
+
+        ws.send(WsMsg::Text(r#"{"stop-track-addresses":true}"#.into()))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let pay_a = pay(
+            OutPoint {
+                txid: bitcoin::Txid::from_byte_array(coinbase_txids[1]),
+                vout: 0,
+            },
+            spk_a,
+            49_0000_0000,
+        );
+        let pay_b = pay(
+            OutPoint {
+                txid: bitcoin::Txid::from_byte_array(coinbase_txids[2]),
+                vout: 0,
+            },
+            spk_b,
+            49_0000_0000,
+        );
+        let hex_a = display_txid(pay_a.compute_txid());
+        let hex_b = display_txid(pay_b.compute_txid());
+        hub.accept_tx(&pay_a).expect("admit A");
+        hub.accept_tx(&pay_b).expect("admit B");
+
+        ws.send(WsMsg::Text(
+            (format!(r#"{{"track-addresses":["{addr_a}","{addr_b}"]}}"#)).into(),
+        ))
+        .await
+        .unwrap();
+
+        let mut saw_multi = false;
+        for _ in 0..12 {
+            let v = ws_recv_json(&mut ws, 3).await;
+            if let Some(obj) = v
+                .get("multi-address-transactions")
+                .and_then(|o| o.as_object())
+            {
+                let ids_a: Vec<&str> = obj
+                    .get(&addr_a)
+                    .and_then(|a| a.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|t| t.get("txid").and_then(|x| x.as_str()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let ids_b: Vec<&str> = obj
+                    .get(&addr_b)
+                    .and_then(|a| a.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|t| t.get("txid").and_then(|x| x.as_str()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                assert!(
+                    ids_a.iter().any(|t| *t == hex_a),
+                    "multi {addr_a} should include {hex_a}, got {ids_a:?}"
+                );
+                assert!(
+                    ids_b.iter().any(|t| *t == hex_b),
+                    "multi {addr_b} should include {hex_b}, got {ids_b:?}"
+                );
+                saw_multi = true;
+                break;
+            }
+        }
+        assert!(
+            saw_multi,
+            "expected multi-address-transactions keyed by display address"
+        );
 
         let _ = ws.close(None).await;
         handle.shutdown().await;
