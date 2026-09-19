@@ -1,10 +1,8 @@
-//! Esplora-compatible REST HTTP for **wallet clients and APIs** (plain HTTP;
-//! TLS via reverse proxy).
+//! Esplora-compatible REST HTTP (plain HTTP; TLS via reverse proxy).
 //!
-//! Serves exact address/scripthash history, tx/block by id, and broadcast.
-//! **0.8:** mempool/electrs `/internal/*` bulk routes + unix listen so this
-//! process can replace electrs behind mempool.space `/api/`. Address-prefix
-//! search is out. Surface: [`COMPAT.md`](../../../COMPAT.md).
+//! Wallet clients (exact address/scripthash, tx/block by id, broadcast) and
+//! **mempool/electrs HTTP drop-in** (`/internal/*`, unix listen) except
+//! address-prefix. Surface: [`COMPAT.md`](../../../COMPAT.md).
 //! `GET …/txs/summary` is a mempool.space-shaped compact dialect (not
 //! Blockstream Esplora `API.md`). Opt-in `GET /block-template` is GBT.
 

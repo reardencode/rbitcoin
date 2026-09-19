@@ -64,8 +64,7 @@ using or packaging this tree. 1.0 gates:
 **0.8:** drop-in for **mempool/electrs or Blockstream electrs HTTP** (not
 address-prefix, not their `/api/v1/` Node process). Core RPC for that stack
 is unix `{datadir}/rpc.sock` plus a documented mempool `CORE_RPC` socket
-patch, not cookie. Until `/internal/*` and Esplora unix listen ship, Esplora
-is wallet-exact HTTP. Product surface: [`COMPAT.md`](./COMPAT.md).
+patch, not cookie. Product surface: [`COMPAT.md`](./COMPAT.md).
 
 **Authorship:** first-party code is **AI-written** (Grok / xAI) under
 **Brandon Black** ([@reardencode](https://github.com/reardencode)) prompting —

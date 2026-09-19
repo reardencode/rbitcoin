@@ -1048,12 +1048,11 @@ no confirmed item. Esplora `oldest_tx`/`newest_tx` are from the returned
 
 ## Esplora REST
 
-Blockstream-**compatible** **plain HTTP** API for **wallet clients and APIs**
-(exact address/scripthash, tx/block by id, broadcast). **0.8** adds
-mempool/electrs `/internal/*` bulk routes and unix listen so this process can
-replace electrs behind mempool.space nginx `/api/` ([`COMPAT.md`](./COMPAT.md)).
-Same internet-facing model as Electrum: app DoS limits always on; terminate
-TLS at a reverse proxy.
+Blockstream-**compatible** **plain HTTP** API for **wallet clients** and
+**mempool/electrs HTTP drop-in** (exact address/scripthash, tx/block by id,
+broadcast, `/internal/*`). nginx `/api/` can retire electrs
+([`COMPAT.md`](./COMPAT.md)). Same internet-facing model as Electrum: app DoS
+limits always on; terminate TLS at a reverse proxy.
 
 **Requires `--sh-index`.** Without it the node refuses to start.
 

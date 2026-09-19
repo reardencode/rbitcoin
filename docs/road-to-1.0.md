@@ -216,9 +216,9 @@ socket patch, not cookie. Not their `/api/v1/` process. Not address-prefix.
 
 | Done | Step |
 |:----:|------|
-| [ ] | Q-68 parked (this row) |
-| [ ] | Esplora unix + `/internal/*` + mempool tx-JSON snapshot |
-| [ ] | Product docs claim the drop-in |
+| [x] | Q-68 parked (this row) |
+| [x] | Esplora unix + `/internal/*` + mempool tx-JSON snapshot |
+| [x] | Product docs claim the drop-in |
 
 ---
 

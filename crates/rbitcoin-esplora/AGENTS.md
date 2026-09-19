@@ -10,13 +10,14 @@ need `--sh-index`.
 |--------|------|
 | Shipped HTTP / WS surface | [`COMPAT.md`](../../COMPAT.md) |
 | Flags, listen, SH tradeoffs | [`OPERATOR.md`](../../OPERATOR.md) |
-| 0.8 `/internal/*` and unix listen | [`COMPAT.md`](../../COMPAT.md), [`OPERATOR.md`](../../OPERATOR.md) |
+| `/internal/*` and unix listen | [`COMPAT.md`](../../COMPAT.md), [`OPERATOR.md`](../../OPERATOR.md) |
 | JSON-RPC overlap (broadcast, unix `rpc.sock`) | [`docs/rpc.md`](../../docs/rpc.md) |
 
 ## Where
 
 - Router and listen: `src/server.rs`
 - Handlers: `src/handlers.rs`
+- electrs `/internal/*`: `src/internal.rs`
 - Tx JSON: `src/tx_json.rs`
 - WS: `src/ws.rs`
 

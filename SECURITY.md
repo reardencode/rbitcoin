@@ -53,7 +53,7 @@ that affect consensus, P2P attack surface, or Electrum/query integrity.
   (`--max-inbound`, default 125), per-session message/byte
   rate windows, misbehavior score disconnect.
 - **Electrum and Esplora:** plain TCP/HTTP; TLS is an operator reverse-proxy
-  concern. Wallet clients today; **0.8** also electrs-shaped explorer HTTP
+  concern. Wallet clients and electrs HTTP (except address-prefix)
   ([`COMPAT.md`](./COMPAT.md)).
   The node is **internet-facing capable**: application DoS limits
   (`ServeLimits` — max connections, request size, idle timeout, plus Electrum

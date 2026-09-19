@@ -36,11 +36,11 @@ before 1.0).
   and the other required gates except coverage after Refactor, then commits
   before the next slice. Coverage and native `windows` / `macos` stay GitHub
   Actions. See [`docs/how-we-plan.md`](docs/how-we-plan.md).
-- **0.8 Core+electrs drop-in (**Q-68**):** parked. Esplora HTTP stays
-  wallet-exact until `/internal/*` and unix listen ship. Core RPC for that
-  stack is unix `{datadir}/rpc.sock` plus a documented mempool `CORE_RPC`
-  socket patch, not cookie/Basic. Address-prefix stays out. Surface:
-  [`COMPAT.md`](COMPAT.md).
+- **0.8 electrs HTTP drop-in (**Q-68**):** Esplora serves mempool/electrs
+  `/internal/*` bulk REST, unix-domain listen, and a published mempool
+  tx-JSON snapshot. Core RPC for that stack is unix `{datadir}/rpc.sock`
+  plus the documented mempool `socketPath` patch, not cookie/Basic.
+  Address-prefix stays 404. Surface: [`COMPAT.md`](COMPAT.md).
 
 ## [0.7.0] — 2026-09-18
 

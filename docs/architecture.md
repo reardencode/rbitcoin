@@ -54,8 +54,8 @@ for unknown-height bodies (mark missing → re-getdata).
   Tip-follow does **not** wait on SH materialize; Electrum/Esplora do.
   SH tip materialize is unsorted per-shard files then unique-sort; cold megakey pages
   stream into 4 KiB delta pages (schema 17).
-  **0.8:** Esplora will also cover mempool/electrs `/internal/*` bulk HTTP
-  so this binary can replace electrs behind mempool.space `/api/`
+  **0.8:** Esplora covers mempool/electrs `/internal/*` bulk HTTP so this
+  binary can replace electrs behind mempool.space `/api/`
   ([`COMPAT.md`](../COMPAT.md)).
 - **JSON-RPC** (optional) is a Core-class **subset** over archive + mempool —
   see [`rpc.md`](./rpc.md).

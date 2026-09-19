@@ -68,7 +68,7 @@ at an explicit rank with **Q-63+**.
 Coverage theater (chasing 100% lines), rewriting secp/rust-bitcoin/tokio
 “to reduce deps”, Core-complete RPC, and explorer-search APIs (address-prefix)
 are also not Open. Liquid and in-binary mempool.space `/api/v1/` catalogue
-stay out. **0.8** Core+electrs drop-in is parked **Q-68**.
+stay out.
 
 ### Parked (not now; promote to Open with a rank to revisit)
 
@@ -80,7 +80,6 @@ just not the current product. COMPAT/OPERATOR stay the shipped contract.
 | **Q-63** | Electrum TLS (50002) + Tor onion **in the binary** | Home Sparrow/phone off-LAN today uses nginx (`OPERATOR.md`). Node stays plain TCP. | Operators refuse a reverse proxy, or a first-class onion listener is the 1.0 install. |
 | **Q-64** | GBT longpoll / `waitNext` (then Sv2 template provider) | Opt-in `getblocktemplate` + Esplora `/block-template` with 15 s cache is the mining extra. No stratum/pool. | DATUM / Bitaxe / mkpool users need push templates; IPC mining interface is the Core shape. |
 | **Q-65** | BIP157/158 compact block filters (`peerblockfilters` / `getblockfilter`) | Electrum + Esplora (exact scripthash) is the wallet path. P2P filter short IDs stay decode-reject (`COMPAT.md`). | Neutrino / LDK-node on *this* node without handing every address to Electrum. |
-| **Q-68** | Drop-in Core + mempool/electrs (or Blockstream electrs) | Today wallet-exact Esplora; their Node still needs `/internal/*` bulk routes, Esplora unix listen, mempool tx-JSON snapshot. Core RPC for that stack is unix `{datadir}/rpc.sock` (documented mempool patch), not cookie. Not address-prefix. Not MariaDB `/api/v1/`. | After **0.7.0**. Owner: [`COMPAT.md`](../COMPAT.md) / [`OPERATOR.md`](../OPERATOR.md). |
 
 ---
 
