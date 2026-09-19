@@ -2483,6 +2483,9 @@ mod tests {
         ))
         .await
         .unwrap();
+        let stats = ws_recv_json(&mut ws, 3).await;
+        assert!(stats.get("mempoolInfo").is_some(), "{stats}");
+        assert!(stats.get("fees").is_some(), "{stats}");
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Inject tip (header minimal).
@@ -2595,6 +2598,98 @@ mod tests {
         }
 
         let _ = ws2.close(None).await;
+        let _ = ws.close(None).await;
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `want: stats` pushes GET /mempool + /fees/recommended shapes; admit bumps count.
+    #[tokio::test]
+    async fn ws_want_stats_mempoolinfo_and_fees() {
+        use bitcoin::absolute::LockTime;
+        use bitcoin::hashes::Hash;
+        use bitcoin::transaction::Version as TxVersion;
+        use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
+        use futures_util::SinkExt;
+        use rbitcoin_net::MempoolHub;
+        use tokio_tungstenite::tungstenite::Message as WsMsg;
+
+        let (dir, q) = temp_query("ws-stats");
+        let mut prev = Fk::NULL;
+        let mut parent_hash: Option<[u8; 32]> = None;
+        let mut coinbase_txids = Vec::new();
+        for h in 0..101u32 {
+            let (header, ta) = coinbase(h, prev, parent_hash);
+            parent_hash = Some(header.hash);
+            coinbase_txids.push(ta.tx.txid);
+            prev = q.connect_block(Height(h), &header, &[ta]).unwrap();
+        }
+        let q = Arc::new(q);
+        let mp_dir = dir.join("mp");
+        std::fs::create_dir_all(&mp_dir).unwrap();
+        let hub = MempoolHub::open(&mp_dir, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+
+        let cfg =
+            EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), bitcoin::Network::Regtest);
+        let handle = run_esplora(cfg, Arc::clone(&q), Some(Arc::clone(&hub)), None)
+            .await
+            .expect("listen");
+        let (mut ws, _) =
+            tokio_tungstenite::connect_async(format!("ws://{}/v1/ws", handle.local_addr))
+                .await
+                .unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        ws.send(WsMsg::Text(r#"{"action":"want","data":["stats"]}"#.into()))
+            .await
+            .unwrap();
+
+        let mut saw_zero = false;
+        for _ in 0..8 {
+            let v = ws_recv_json(&mut ws, 3).await;
+            if v.get("mempoolInfo").is_some() && v.get("fees").is_some() {
+                assert_eq!(v["mempoolInfo"]["count"], 0, "{v}");
+                assert!(v["fees"].get("fastestFee").is_some(), "{v}");
+                saw_zero = true;
+                break;
+            }
+        }
+        assert!(saw_zero, "expected mempoolInfo+fees on want stats");
+
+        let pay = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: bitcoin::Txid::from_byte_array(coinbase_txids[0]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(49_0000_0000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        hub.accept_tx(&pay).expect("admit");
+
+        let mut saw_bump = false;
+        for _ in 0..8 {
+            let v = ws_recv_json(&mut ws, 3).await;
+            if let Some(info) = v.get("mempoolInfo") {
+                assert!(
+                    info["count"].as_u64().unwrap_or(0) >= 1,
+                    "count should bump after admit, got {v}"
+                );
+                saw_bump = true;
+                break;
+            }
+        }
+        assert!(saw_bump, "expected mempoolInfo count bump after admit");
+
         let _ = ws.close(None).await;
         handle.shutdown().await;
         let _ = std::fs::remove_dir_all(&dir);

@@ -1523,20 +1523,19 @@ fn sat_vb_for_target(pairs: &[(u32, f64)], target: u32) -> u32 {
         .unwrap_or(1)
 }
 
-fn fees_recommended_sync(st: &AppState) -> Response {
-    let pairs: Vec<(u32, f64)> = st
-        .mempool
-        .as_ref()
-        .map(|m| m.fee_estimates_btc_per_kb())
-        .unwrap_or_default();
-    Json(json!({
+pub(crate) fn fees_recommended_json(mp: Option<&MempoolHub>) -> Value {
+    let pairs: Vec<(u32, f64)> = mp.map(|m| m.fee_estimates_btc_per_kb()).unwrap_or_default();
+    json!({
         "fastestFee": sat_vb_for_target(&pairs, 1),
         "halfHourFee": sat_vb_for_target(&pairs, 3),
         "hourFee": sat_vb_for_target(&pairs, 6),
         "economyFee": sat_vb_for_target(&pairs, 144),
         "minimumFee": 1,
-    }))
-    .into_response()
+    })
+}
+
+fn fees_recommended_sync(st: &AppState) -> Response {
+    Json(fees_recommended_json(st.mempool.as_deref())).into_response()
 }
 
 fn fee_estimates_sync(st: &AppState) -> Response {

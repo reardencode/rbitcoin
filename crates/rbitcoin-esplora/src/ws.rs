@@ -2,7 +2,7 @@
 //!
 //! Payloads use Esplora REST shapes. Global mempool/RBF explorer feeds are out of scope.
 
-use crate::handlers::resolve_address_sh;
+use crate::handlers::{fees_recommended_json, mempool_info_json, resolve_address_sh};
 use crate::server::AppState;
 use crate::tx_json::{build_tx_json, build_tx_json_from_tx, tx_status_json};
 use axum::extract::ws::{Message, WebSocket};
@@ -13,13 +13,14 @@ use bitcoin::consensus::Encodable;
 use bitcoin::hashes::Hash;
 use bitcoin::{Network, Transaction, Txid};
 use futures_util::{SinkExt, StreamExt};
-use rbitcoin_net::{MempoolAnnounce, MempoolHub, TipEvent};
+use rbitcoin_net::{MempoolAnnounce, MempoolHub, MempoolTxSnapshot, TipEvent};
 use rbitcoin_primitives::{display_hash_hex, Height};
 use rbitcoin_query::Query;
 use rbitcoin_store::script_hash;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, OwnedSemaphorePermit};
 
 /// Parse one client JSON text frame (pure; unit-tested).
@@ -158,20 +159,26 @@ pub(crate) fn parse_client_msg(text: &str) -> Result<ClientMsg, String> {
 
 struct ConnState {
     want_blocks: bool,
+    want_stats: bool,
     /// scripthash → display address (as client sent).
     addresses: HashMap<[u8; 32], String>,
     txids: HashSet<Txid>,
     /// Last pushed confirmed flag per tracked txid.
     last_confirmed: HashMap<Txid, bool>,
+    last_stats_snap: Option<Arc<MempoolTxSnapshot>>,
+    last_stats_push: Option<Instant>,
 }
 
 impl ConnState {
     fn new() -> Self {
         Self {
             want_blocks: false,
+            want_stats: false,
             addresses: HashMap::new(),
             txids: HashSet::new(),
             last_confirmed: HashMap::new(),
+            last_stats_snap: None,
+            last_stats_push: None,
         }
     }
 }
@@ -275,6 +282,46 @@ async fn send_error(
     msg: &str,
 ) -> Result<(), ()> {
     send_json(sink, &json!({ "error": msg })).await
+}
+
+/// Match fee-snapshot max age: re-push stats at most this often when the tx Arc is unchanged.
+const STATS_PUSH_MIN_AGE: Duration = Duration::from_secs(1);
+
+fn stats_frame(mp: Option<&MempoolHub>) -> Value {
+    json!({
+        "mempoolInfo": mempool_info_json(mp),
+        "fees": fees_recommended_json(mp),
+    })
+}
+
+async fn push_stats(
+    st: &AppState,
+    conn: &mut ConnState,
+    sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    force: bool,
+) -> Result<(), ()> {
+    if !conn.want_stats {
+        return Ok(());
+    }
+    let mp = st.mempool.as_deref();
+    let snap = mp.map(|m| m.mempool_tx_snapshot());
+    if !force {
+        let same_snap = match (&conn.last_stats_snap, &snap) {
+            (Some(prev), Some(cur)) => Arc::ptr_eq(prev, cur),
+            (None, None) => true,
+            _ => false,
+        };
+        let fresh = conn
+            .last_stats_push
+            .is_some_and(|t| t.elapsed() < STATS_PUSH_MIN_AGE);
+        if same_snap && fresh {
+            return Ok(());
+        }
+    }
+    send_json(sink, &stats_frame(mp)).await?;
+    conn.last_stats_snap = snap;
+    conn.last_stats_push = Some(Instant::now());
+    Ok(())
 }
 
 /// HTTP upgrade entry (own semaphore; not under REST concurrency layer).
@@ -399,8 +446,11 @@ async fn handle_client_msg(
 ) -> Result<(), ()> {
     match msg {
         ClientMsg::Want(data) => {
-            // Only `blocks` is supported; other tokens no-op (wallet-not-explorer).
             conn.want_blocks = data.iter().any(|s| s == "blocks");
+            conn.want_stats = data.iter().any(|s| s == "stats");
+            if conn.want_stats {
+                push_stats(st, conn, sink, true).await?;
+            }
             Ok(())
         }
         ClientMsg::TrackAddress(addr) => add_addresses(st, conn, &[addr], false, sink).await,
@@ -736,6 +786,7 @@ async fn on_mempool_announce(
     if frames.tx_status {
         push_tx_status(st, conn, &txid, sink).await?;
     }
+    push_stats(st, conn, sink, false).await?;
     Ok(())
 }
 
@@ -812,6 +863,7 @@ async fn on_tip(
     for t in tracked {
         push_tx_status(st, conn, &t, sink).await?;
     }
+    push_stats(st, conn, sink, false).await?;
     Ok(())
 }
 
