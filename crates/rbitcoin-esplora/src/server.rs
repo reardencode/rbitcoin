@@ -3,7 +3,7 @@
 use crate::handlers;
 use crate::tx_json::{build_tx_json, build_tx_json_from_tx, tx_status_json_in};
 use crate::ws;
-use axum::extract::{FromRequestParts, Path, Query as AxumQuery, Request, State};
+use axum::extract::{ConnectInfo, FromRequestParts, Path, Query as AxumQuery, Request, State};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
@@ -20,6 +20,7 @@ use rbitcoin_query::{ChainView, ChainViewKind, Query, ShJoinSlot};
 use rbitcoin_store::StoreError;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -391,26 +392,234 @@ pub(crate) struct AppState {
     pub(crate) max_ws_message_bytes: usize,
     pub(crate) max_track_addresses: usize,
     pub(crate) max_track_txs: usize,
-    /// Last scripthash join (tip-fenced). HTTP is not session-oriented; one
-    /// slot still covers Casa `/scripthash` → `/txs` → `/utxo` and chain pages.
-    pub(crate) sh_join: Arc<Mutex<Option<ShJoinSlot>>>,
+    /// Per-client last-1 GET + last-bulk POST joins (unix/loopback `X-Rbitcoin-Client`).
+    pub(crate) sh_join: Arc<Mutex<JoinCache>>,
+    /// Unix listen trusts `X-Rbitcoin-Client` without a TCP peer address.
+    pub(crate) join_header_trusted: bool,
     pub(crate) block_template: Option<BlockTemplateFn>,
     pub(crate) gbt_cache: Arc<Mutex<Option<GbtCache>>>,
 }
 
+const JOIN_IDLE: Duration = Duration::from_secs(30);
+const JOIN_MAX_CLIENTS: usize = 256;
+const JOIN_BULK_CAP: usize = 16 * 1024 * 1024;
+
+struct InflightJoin {
+    done: Mutex<Option<ShJoinSlot>>,
+    cv: std::sync::Condvar,
+}
+
+struct ClientJoins {
+    last_sh: Option<([u8; 32], ShJoinSlot)>,
+    last_bulk: HashMap<[u8; 32], ShJoinSlot>,
+    last_req: Instant,
+    inflight: HashMap<[u8; 32], Arc<InflightJoin>>,
+}
+
+impl Default for ClientJoins {
+    fn default() -> Self {
+        Self {
+            last_sh: None,
+            last_bulk: HashMap::new(),
+            last_req: Instant::now(),
+            inflight: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct JoinCache {
+    clients: HashMap<String, ClientJoins>,
+}
+
+impl JoinCache {
+    #[cfg(test)]
+    fn last_sh_key(&self, id: &str) -> Option<[u8; 32]> {
+        self.clients
+            .get(id)
+            .and_then(|c| c.last_sh.as_ref().map(|(k, _)| *k))
+    }
+
+    #[cfg(test)]
+    fn bulk_len(&self, id: &str) -> usize {
+        self.clients.get(id).map(|c| c.last_bulk.len()).unwrap_or(0)
+    }
+}
+
+fn sweep_clients(map: &mut HashMap<String, ClientJoins>, now: Instant) {
+    map.retain(|_, c| now.saturating_duration_since(c.last_req) < JOIN_IDLE);
+    while map.len() > JOIN_MAX_CLIENTS {
+        let oldest = map
+            .iter()
+            .min_by_key(|(_, c)| c.last_req)
+            .map(|(k, _)| k.clone());
+        match oldest {
+            Some(k) => {
+                map.remove(&k);
+            }
+            None => break,
+        }
+    }
+}
+
+fn cap_bulk(c: &mut ClientJoins) {
+    let mut bytes: usize = c.last_bulk.values().map(ShJoinSlot::packed_bytes).sum();
+    while bytes > JOIN_BULK_CAP && !c.last_bulk.is_empty() {
+        let victim = c
+            .last_bulk
+            .iter()
+            .max_by_key(|(_, s)| s.packed_bytes())
+            .map(|(k, s)| (*k, s.packed_bytes()));
+        let Some((k, sz)) = victim else {
+            break;
+        };
+        c.last_bulk.remove(&k);
+        bytes = bytes.saturating_sub(sz);
+    }
+}
+
+pub(crate) fn client_id_from(
+    unix_or_trusted: bool,
+    loopback: bool,
+    header: Option<String>,
+) -> Option<String> {
+    if unix_or_trusted || loopback {
+        header
+    } else {
+        None
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct JoinClient(pub Option<String>);
+
+impl FromRequestParts<AppState> for JoinClient {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let header = parts
+            .headers
+            .get("x-rbitcoin-client")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let loopback = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .is_some_and(|c| c.0.ip().is_loopback());
+        Ok(JoinClient(client_id_from(
+            state.join_header_trusted,
+            loopback,
+            header,
+        )))
+    }
+}
+
 impl AppState {
-    pub(crate) fn with_sh_join<R>(&self, f: impl FnOnce(&mut Option<ShJoinSlot>) -> R) -> R {
-        let mut slot = self
-            .sh_join
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .take();
+    pub(crate) fn with_sh_join<R>(
+        &self,
+        client: Option<&str>,
+        sh: &[u8; 32],
+        f: impl FnOnce(&mut Option<ShJoinSlot>) -> R,
+    ) -> R {
+        let Some(id) = client.filter(|s| !s.is_empty()) else {
+            let mut slot = None;
+            return f(&mut slot);
+        };
+        let waiter = {
+            let mut g = self.sh_join.lock().unwrap_or_else(|p| p.into_inner());
+            sweep_clients(&mut g.clients, Instant::now());
+            let c = g.clients.entry(id.to_string()).or_default();
+            c.last_req = Instant::now();
+            if c.last_sh.as_ref().is_some_and(|(k, _)| k == sh) {
+                let mut slot = c.last_sh.take().map(|(_, s)| s);
+                drop(g);
+                let r = f(&mut slot);
+                if let Some(s) = slot {
+                    let mut g = self.sh_join.lock().unwrap_or_else(|p| p.into_inner());
+                    if let Some(c) = g.clients.get_mut(id) {
+                        c.last_sh = Some((*sh, s));
+                        c.last_req = Instant::now();
+                    }
+                }
+                return r;
+            }
+            if let Some(inf) = c.inflight.get(sh).cloned() {
+                Some(inf)
+            } else {
+                let inf = Arc::new(InflightJoin {
+                    done: Mutex::new(None),
+                    cv: std::sync::Condvar::new(),
+                });
+                c.inflight.insert(*sh, inf);
+                None
+            }
+        };
+        if let Some(inf) = waiter {
+            let mut d = inf.done.lock().unwrap_or_else(|p| p.into_inner());
+            while d.is_none() {
+                d = inf.cv.wait(d).unwrap_or_else(|p| p.into_inner());
+            }
+            let mut slot = d.clone();
+            drop(d);
+            let r = f(&mut slot);
+            if let Some(s) = slot {
+                let mut g = self.sh_join.lock().unwrap_or_else(|p| p.into_inner());
+                if let Some(c) = g.clients.get_mut(id) {
+                    c.last_sh = Some((*sh, s));
+                    c.last_req = Instant::now();
+                }
+            }
+            return r;
+        }
+        let mut slot = {
+            let g = self.sh_join.lock().unwrap_or_else(|p| p.into_inner());
+            g.clients.get(id).and_then(|c| c.last_bulk.get(sh).cloned())
+        };
         let r = f(&mut slot);
-        *self.sh_join.lock().unwrap_or_else(|p| p.into_inner()) = slot;
+        {
+            let mut g = self.sh_join.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(c) = g.clients.get_mut(id) {
+                c.last_req = Instant::now();
+                if let Some(inf) = c.inflight.remove(sh) {
+                    *inf.done.lock().unwrap_or_else(|p| p.into_inner()) = slot.clone();
+                    inf.cv.notify_all();
+                }
+                if let Some(s) = slot {
+                    c.last_sh = Some((*sh, s));
+                }
+            }
+        }
         r
     }
 
-    pub(crate) fn promote_bulk(&self, _bag: &HashMap<[u8; 32], ShJoinSlot>) {}
+    pub(crate) fn seed_bulk(&self, client: Option<&str>, bag: &mut HashMap<[u8; 32], ShJoinSlot>) {
+        let Some(id) = client.filter(|s| !s.is_empty()) else {
+            return;
+        };
+        let g = self.sh_join.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(c) = g.clients.get(id) {
+            for (k, v) in &c.last_bulk {
+                bag.entry(*k).or_insert_with(|| v.clone());
+            }
+        }
+    }
+
+    pub(crate) fn promote_bulk(&self, client: Option<&str>, bag: HashMap<[u8; 32], ShJoinSlot>) {
+        let Some(id) = client.filter(|s| !s.is_empty()) else {
+            return;
+        };
+        let mut g = self.sh_join.lock().unwrap_or_else(|p| p.into_inner());
+        sweep_clients(&mut g.clients, Instant::now());
+        let c = g.clients.entry(id.to_string()).or_default();
+        c.last_req = Instant::now();
+        c.last_bulk = bag;
+        cap_bulk(c);
+    }
 }
 
 /// Start Esplora **plain HTTP** (+ wallet WebSocket) on `config.listen`.
@@ -449,7 +658,17 @@ pub async fn run_esplora(
         max_ws_message_bytes: config.max_ws_message_bytes.max(1024),
         max_track_addresses: config.max_track_addresses.max(1),
         max_track_txs: config.max_track_txs.max(1),
-        sh_join: Arc::new(Mutex::new(None)),
+        sh_join: Arc::new(Mutex::new(JoinCache::default())),
+        join_header_trusted: {
+            #[cfg(unix)]
+            {
+                matches!(config.listen, EsploraListen::Unix(_))
+            }
+            #[cfg(not(unix))]
+            {
+                false
+            }
+        },
         block_template: config.block_template,
         gbt_cache: Arc::new(Mutex::new(None)),
     };
@@ -608,7 +827,8 @@ pub async fn run_esplora(
             let listener = TcpListener::bind(addr).await?;
             let local_addr = listener.local_addr()?;
             let task = tokio::spawn(async move {
-                let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
+                let make = app.into_make_service_with_connect_info::<SocketAddr>();
+                let serve = axum::serve(listener, make).with_graceful_shutdown(async move {
                     while !shutdown_c.load(Ordering::SeqCst) {
                         tokio::time::sleep(Duration::from_millis(50)).await;
                     }
@@ -932,6 +1152,17 @@ mod tests {
         (status, body)
     }
 
+    async fn http_get_hdr(addr: SocketAddr, path: &str, client: &str) -> (u16, String) {
+        let mut stream = TcpStream::connect(addr).await.expect("connect");
+        let req = format!(
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Rbitcoin-Client: {client}\r\nConnection: close\r\n\r\n"
+        );
+        stream.write_all(req.as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        parse_http_response(&buf)
+    }
+
     async fn http_get_raw(addr: SocketAddr, path: &str) -> (u16, String, String) {
         let mut stream = TcpStream::connect(addr).await.expect("connect");
         let req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
@@ -1032,6 +1263,43 @@ mod tests {
         assert!(EsploraListen::parse("not-an-addr", 3000).is_err());
     }
 
+    #[test]
+    fn client_id_ignored_on_public_tcp() {
+        assert!(client_id_from(false, false, Some("x".into())).is_none());
+        assert_eq!(
+            client_id_from(false, true, Some("x".into())).as_deref(),
+            Some("x")
+        );
+        assert_eq!(
+            client_id_from(true, false, Some("x".into())).as_deref(),
+            Some("x")
+        );
+        assert!(client_id_from(true, true, None).is_none());
+    }
+
+    #[test]
+    fn join_idle_evicts_after_ttl() {
+        let mut map = HashMap::new();
+        let now = Instant::now();
+        map.insert(
+            "stale".into(),
+            ClientJoins {
+                last_req: now.checked_sub(JOIN_IDLE + Duration::from_secs(1)).unwrap(),
+                ..ClientJoins::default()
+            },
+        );
+        map.insert(
+            "fresh".into(),
+            ClientJoins {
+                last_req: now,
+                ..ClientJoins::default()
+            },
+        );
+        sweep_clients(&mut map, now);
+        assert!(!map.contains_key("stale"));
+        assert!(map.contains_key("fresh"));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn unix_listen_serves_tip_height() {
@@ -1047,6 +1315,262 @@ mod tests {
         assert_eq!(st, 200, "{body}");
         assert_eq!(body, "0");
         handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn sh_join_slots_two_addresses_utxo() {
+        let (a1, spk1) = regtest_p2wpkh();
+        let (a2, spk2) = {
+            use bitcoin::key::CompressedPublicKey;
+            use bitcoin::secp256k1::{Secp256k1, SecretKey};
+            use bitcoin::{Address, Network, PrivateKey};
+            let secp = Secp256k1::new();
+            let sk = SecretKey::from_slice(&[9u8; 32]).unwrap();
+            let pk = PrivateKey::new(sk, Network::Regtest);
+            let cpk = CompressedPublicKey::from_private_key(&secp, &pk).unwrap();
+            let addr = Address::p2wpkh(&cpk, Network::Regtest);
+            (addr.to_string(), addr.script_pubkey())
+        };
+
+        let (dir, q) = temp_query("sh-join-slots");
+        let (h0, t0) = coinbase(0, Fk::NULL, None);
+        let prev = q.connect_block(Height(0), &h0, &[t0]).unwrap();
+        let pay = |tag: u8, spk: bitcoin::ScriptBuf| {
+            let mut txid = [0u8; 32];
+            txid[0] = tag;
+            txid[31] = 0xaa;
+            TxApply {
+                tx: TxRecord {
+                    txid,
+                    version: 2,
+                    locktime: 0,
+                    input_start_fk: Fk::NULL,
+                    input_count: 1,
+                    output_start_fk: Fk::NULL,
+                    output_count: 1,
+                },
+                inputs: vec![InputRecord {
+                    prev_txid: [0u8; 32],
+                    create_fk: Fk::NULL,
+                    prev_index: u32::MAX,
+                    sequence: u32::MAX,
+                    script_sig: vec![],
+                    witness: vec![],
+                }],
+                outputs: vec![OutputRecord::unspent(1_0000_0000, spk.to_bytes())],
+            }
+        };
+        let (h1, cb1) = coinbase(1, prev, Some(h0.hash));
+        q.connect_block(Height(1), &h1, &[cb1, pay(0x11, spk1), pay(0x22, spk2)])
+            .unwrap();
+
+        let q = Arc::new(q);
+        let cfg = EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), Network::Regtest);
+        let handle = run_esplora(cfg, q, None, None).await.expect("listen");
+        let addr = handle.local_addr;
+        let p1 = format!("/address/{a1}/utxo");
+        let p2 = format!("/address/{a2}/utxo");
+        let ((st1, b1), (st2, b2)) =
+            tokio::join!(http_get_hdr(addr, &p1, "a"), http_get_hdr(addr, &p2, "b"));
+        assert_eq!(st1, 200, "{b1}");
+        assert_eq!(st2, 200, "{b2}");
+        let v1: Value = serde_json::from_str(&b1).unwrap();
+        let v2: Value = serde_json::from_str(&b2).unwrap();
+        assert_eq!(v1.as_array().map(|a| a.len()), Some(1), "{b1}");
+        assert_eq!(v2.as_array().map(|a| a.len()), Some(1), "{b2}");
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn two_script_pay(tag: u8, spk: bitcoin::ScriptBuf) -> TxApply {
+        let mut txid = [0u8; 32];
+        txid[0] = tag;
+        txid[31] = 0xaa;
+        TxApply {
+            tx: TxRecord {
+                txid,
+                version: 2,
+                locktime: 0,
+                input_start_fk: Fk::NULL,
+                input_count: 1,
+                output_start_fk: Fk::NULL,
+                output_count: 1,
+            },
+            inputs: vec![InputRecord {
+                prev_txid: [0u8; 32],
+                create_fk: Fk::NULL,
+                prev_index: u32::MAX,
+                sequence: u32::MAX,
+                script_sig: vec![],
+                witness: vec![],
+            }],
+            outputs: vec![OutputRecord::unspent(1_0000_0000, spk.to_bytes())],
+        }
+    }
+
+    fn app_with_join(q: Arc<Query>, cache: Arc<Mutex<JoinCache>>, trusted: bool) -> Router {
+        let state = AppState {
+            query: q,
+            network: Network::Regtest,
+            mempool: None,
+            max_body: 1 << 20,
+            tip_tx: None,
+            ws_sem: None,
+            max_ws_message_bytes: 1024,
+            max_track_addresses: 1,
+            max_track_txs: 1,
+            sh_join: cache,
+            join_header_trusted: trusted,
+            block_template: None,
+            gbt_cache: Arc::new(Mutex::new(None)),
+        };
+        Router::new()
+            .route("/scripthash/{hash}", get(handlers::scripthash_info))
+            .route("/scripthash/{hash}/utxo", get(handlers::scripthash_utxo))
+            .route("/scripthashes/txs", post(handlers::post_scripthashes_txs))
+            .with_state(state)
+    }
+
+    async fn oneshot_http(
+        app: &Router,
+        req: axum::http::Request<axum::body::Body>,
+    ) -> (u16, String) {
+        use tower::ServiceExt;
+        let resp = app.clone().oneshot(req).await.expect("oneshot");
+        let status = resp.status().as_u16();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn get_with_client(path: &str, client: &str) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::builder()
+            .uri(path)
+            .header("X-Rbitcoin-Client", client)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn http_sh_join_last1_last_bulk_and_header_trust() {
+        use rbitcoin_store::script_hash;
+
+        let (_a1, spk1) = regtest_p2wpkh();
+        let (_a2, spk2) = {
+            use bitcoin::key::CompressedPublicKey;
+            use bitcoin::secp256k1::{Secp256k1, SecretKey};
+            use bitcoin::{Address, PrivateKey};
+            let secp = Secp256k1::new();
+            let sk = SecretKey::from_slice(&[9u8; 32]).unwrap();
+            let pk = PrivateKey::new(sk, Network::Regtest);
+            let cpk = CompressedPublicKey::from_private_key(&secp, &pk).unwrap();
+            let addr = Address::p2wpkh(&cpk, Network::Regtest);
+            (addr.to_string(), addr.script_pubkey())
+        };
+        let (dir, q) = temp_query("sh-join-http");
+        let (h0, t0) = coinbase(0, Fk::NULL, None);
+        let prev = q.connect_block(Height(0), &h0, &[t0]).unwrap();
+        let (h1, cb1) = coinbase(1, prev, Some(h0.hash));
+        q.connect_block(
+            Height(1),
+            &h1,
+            &[
+                cb1,
+                two_script_pay(0x11, spk1.clone()),
+                two_script_pay(0x22, spk2.clone()),
+            ],
+        )
+        .unwrap();
+        let q = Arc::new(q);
+        let sh1 = script_hash(spk1.as_bytes());
+        let sh2 = script_hash(spk2.as_bytes());
+        let h1hex = block_hash_hex(&sh1);
+        let h2hex = block_hash_hex(&sh2);
+        let t2 = block_hash_hex(&[
+            0x22, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0xaa,
+        ]);
+
+        let cache = Arc::new(Mutex::new(JoinCache::default()));
+        let app = app_with_join(Arc::clone(&q), Arc::clone(&cache), true);
+
+        let (st, body) =
+            oneshot_http(&app, get_with_client(&format!("/scripthash/{h1hex}"), "c1")).await;
+        assert_eq!(st, 200, "{body}");
+        assert_eq!(cache.lock().unwrap().last_sh_key("c1"), Some(sh1));
+        let (st, body) = oneshot_http(
+            &app,
+            get_with_client(&format!("/scripthash/{h1hex}/utxo"), "c1"),
+        )
+        .await;
+        assert_eq!(st, 200, "{body}");
+        assert_eq!(cache.lock().unwrap().last_sh_key("c1"), Some(sh1));
+
+        let (st, body) =
+            oneshot_http(&app, get_with_client(&format!("/scripthash/{h2hex}"), "c1")).await;
+        assert_eq!(st, 200, "{body}");
+        assert_eq!(
+            cache.lock().unwrap().last_sh_key("c1"),
+            Some(sh2),
+            "GET B replaces last-1"
+        );
+
+        let (st, body) =
+            oneshot_http(&app, get_with_client(&format!("/scripthash/{h1hex}"), "c2")).await;
+        assert_eq!(st, 200, "{body}");
+        {
+            let g = cache.lock().unwrap();
+            assert_eq!(g.last_sh_key("c1"), Some(sh2));
+            assert_eq!(g.last_sh_key("c2"), Some(sh1));
+        }
+
+        let body = serde_json::to_vec(&json!([&h1hex, &h2hex])).unwrap();
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/scripthashes/txs")
+            .header("X-Rbitcoin-Client", "wallet")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.clone()))
+            .unwrap();
+        let (st, resp) = oneshot_http(&app, req).await;
+        assert_eq!(st, 200, "{resp}");
+        assert_eq!(cache.lock().unwrap().bulk_len("wallet"), 2);
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/scripthashes/txs?after_txid={t2}"))
+            .header("X-Rbitcoin-Client", "wallet")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        let (st, resp) = oneshot_http(&app, req).await;
+        assert_eq!(st, 200, "{resp}");
+        assert_eq!(cache.lock().unwrap().bulk_len("wallet"), 2);
+
+        let public = Arc::new(Mutex::new(JoinCache::default()));
+        let pub_app = app_with_join(Arc::clone(&q), Arc::clone(&public), false);
+        let (st, body) = oneshot_http(
+            &pub_app,
+            get_with_client(&format!("/scripthash/{h1hex}"), "ignored"),
+        )
+        .await;
+        assert_eq!(st, 200, "{body}");
+        assert!(
+            public.lock().unwrap().last_sh_key("ignored").is_none(),
+            "public TCP ignores X-Rbitcoin-Client"
+        );
+
+        let loopback = Arc::new(Mutex::new(JoinCache::default()));
+        let lb_app = app_with_join(q, Arc::clone(&loopback), false);
+        let mut req = get_with_client(&format!("/scripthash/{h1hex}"), "lb");
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 1))));
+        let (st, body) = oneshot_http(&lb_app, req).await;
+        assert_eq!(st, 200, "{body}");
+        assert_eq!(loopback.lock().unwrap().last_sh_key("lb"), Some(sh1));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1258,7 +1782,8 @@ mod tests {
             max_ws_message_bytes: 1024,
             max_track_addresses: 1,
             max_track_txs: 1,
-            sh_join: Arc::new(Mutex::new(None)),
+            sh_join: Arc::new(Mutex::new(JoinCache::default())),
+            join_header_trusted: false,
             block_template: None,
             gbt_cache: Arc::new(Mutex::new(None)),
         };

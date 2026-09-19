@@ -24,7 +24,7 @@ need `--sh-index`.
 ## Rules here
 
 - Address-prefix and Liquid stay 404. Do not add `/api/v1/` catalogue routes.
-- HTTP `sh_join` is not an unbounded process LRU (**X-M3**). Sticky joins stay Electrum TCP.
+- Last-1 GET + last-bulk POST (16 MiB) `sh_join` per `X-Rbitcoin-Client` (unix/loopback). Unbounded process LRU stays **X-M3**. Sticky joins stay Electrum TCP.
 - Do not grow a `*_for_test` backdoor. Tests drive the shipped route.
 
 ## Verify

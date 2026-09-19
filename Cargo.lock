@@ -766,6 +766,7 @@ dependencies = [
  "bitcoin",
  "futures-util",
  "http",
+ "rbitcoin-consensus",
  "rbitcoin-electrum",
  "rbitcoin-log",
  "rbitcoin-net",

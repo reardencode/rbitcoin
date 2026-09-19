@@ -961,11 +961,17 @@ posting list with the new block's tx fks and prevout `create_fk`s; a miss
 does not expand packed `txout`. Full status still runs on a hit. Each Electrum
 TCP connection keeps one last-scripthash join (outs + spentness) until tip
 height changes, so Casa `get_balance` → `get_history` → `listunspent` on the
-same socket pays Class A once. Not a process-global cache. Esplora REST keeps
-one last-scripthash join on the listener (HTTP is not session-oriented) so
-Casa `/scripthash` → `/txs` → `/utxo` and `/txs/chain` pages reuse packed
-outs until tip height changes. Concurrent different keys may replace the
-slot. Esplora WS `block-transactions` uses the same posting-list tip probe
+same socket pays Class A once. Not a process-global cache. Esplora REST keys
+reuse by nginx `$connection` via `X-Rbitcoin-Client` (**unix listen or TCP
+loopback only**; public TCP ignores the header): **last-1 GET** so address-page
+stats∥txs∥utxo and `after_txid` on the same script reuse one slot;
+**last-bulk POST** (16 MiB packed/client) so wallet `POST /addresses/txs` then
+the same POST with `after_txid` reuse. Idle **30s**; **256** clients (evict
+idle-longest). Not an 8-script LRU and not a >5s process whale cache. Extra
+operator RAM is the kernel page cache of Class A `txout` / SH heads. Public
+explorer second-hit of a whale GET is nginx/CDN (`/api/address/` is cacheable).
+`--max-sh-creates N` (`N>0` → Esplora **503**) is the fuse; default **0**.
+Esplora WS `block-transactions` uses the same posting-list tip probe
 as Electrum subscribe (miss skips Class A).
 
 Re-measure fat keys on the operator host (`rbitcoin-bench --suite casa
@@ -1159,6 +1165,7 @@ location /api/ {
   proxy_set_header Upgrade $http_upgrade;
   proxy_set_header Connection "upgrade";
   proxy_set_header Host $host;
+  proxy_set_header X-Rbitcoin-Client $connection;
   proxy_read_timeout 3600s;
 }
 ```
@@ -1167,7 +1174,9 @@ location /api/ {
 (electrs HTTP). Register the `/api/v1/` location **first**. Unix Esplora:
 `proxy_pass http://unix:/run/rbitcoin/esplora.sock:`. Wallet Esplora WS is
 `wss://host/api/ws`. Caddy: `reverse_proxy` with default HTTP/1.1 upgrade
-support to the same listen.
+support to the same listen. `X-Rbitcoin-Client $connection` is how last-1 GET
+and last-bulk POST joins stick to one nginx connection; omit it on a public
+TCP expose.
 
 ## Signet lab
 

@@ -36,7 +36,7 @@ before 1.0).
   and the other required gates except coverage after Refactor, then commits
   before the next slice. Coverage and native `windows` / `macos` stay GitHub
   Actions. See [`docs/how-we-plan.md`](docs/how-we-plan.md).
-- **0.8 electrs HTTP drop-in (**Q-68**):** Esplora serves mempool/electrs
+- **0.8 electrs HTTP drop-in:** Esplora serves mempool/electrs
   `/internal/*` bulk REST, unix-domain listen, and a published mempool
   tx-JSON snapshot. Core RPC for that stack is unix `{datadir}/rpc.sock`
   plus the documented mempool `socketPath` patch, not cookie/Basic.
@@ -58,6 +58,11 @@ before 1.0).
 
 - **Esplora tx JSON `sigops`:** BIP16+BIP141 cost via `tx_sigop_cost` (same as
   Core `GetTransactionSigOpCost`).
+
+- **Esplora HTTP SH join:** last-1 GET + last-bulk POST (16 MiB packed/client)
+  keyed by `X-Rbitcoin-Client` (unix listen or TCP loopback; 30s idle; 256
+  clients). Public TCP ignores the header. Not an 8-script LRU and not a >5s
+  process whale cache.
 
 ## [0.7.0] — 2026-09-18
 

@@ -2,7 +2,7 @@
 
 use crate::server::{
     block_hash_hex, maybe_attach_view, mempool_wire, not_found, parse_hash32, pin_or_reject,
-    plain_ok, store_err, AppState, AsOf, GbtCache,
+    plain_ok, store_err, AppState, AsOf, GbtCache, JoinClient,
 };
 use crate::tx_json::{
     build_tx_json, build_tx_json_from_tx, history_items_to_tx_json, tx_status_json_in,
@@ -636,6 +636,7 @@ fn sh_pin(
 }
 
 #[allow(clippy::result_large_err)] // public error enum
+#[allow(clippy::too_many_arguments)] // asof vs live join plus last-1 / last-bulk
 fn sh_at_view<T>(
     st: &AppState,
     sh: &[u8; 32],
@@ -647,6 +648,7 @@ fn sh_at_view<T>(
         &rbitcoin_query::ChainView,
     ) -> Result<T, rbitcoin_query::QueryError>,
     missing: T,
+    client: Option<&str>,
     mut bag: Option<&mut JoinBag>,
 ) -> Result<(T, Option<rbitcoin_query::ChainView>), Response> {
     if asof.is_some() {
@@ -667,7 +669,7 @@ fn sh_at_view<T>(
             })
         } else {
             st.query.run_at_view(ChainViewKind::ScriptHash, |view| {
-                st.with_sh_join(|s| live_fn(&st.query, s, view))
+                st.with_sh_join(client, sh, |s| live_fn(&st.query, s, view))
             })
         };
         if let Some(map) = bag {
@@ -687,15 +689,23 @@ pub async fn address_info(
     State(st): State<AppState>,
     Path(addr_s): Path<String>,
     AsOf(asof): AsOf,
+    JoinClient(client): JoinClient,
 ) -> Response {
     match resolve_address_sh(&addr_s, st.network) {
         Ok(sh) => {
-            spawn_join(
-                move || match sh_stats_json(&st, &sh, Some(addr_s.as_str()), None, asof) {
+            spawn_join(move || {
+                match sh_stats_json(
+                    &st,
+                    &sh,
+                    Some(addr_s.as_str()),
+                    None,
+                    asof,
+                    client.as_deref(),
+                ) {
                     Ok((v, view)) => maybe_attach_view(Json(v).into_response(), view),
                     Err(e) => store_err(e),
-                },
-            )
+                }
+            })
             .await
         }
         Err(_) => not_found(),
@@ -706,16 +716,24 @@ pub async fn scripthash_info(
     State(st): State<AppState>,
     Path(sh_hex): Path<String>,
     AsOf(asof): AsOf,
+    JoinClient(client): JoinClient,
 ) -> Response {
     let Ok(sh) = parse_hash32(&sh_hex) else {
         return not_found();
     };
-    spawn_join(
-        move || match sh_stats_json(&st, &sh, None, Some(sh_hex.as_str()), asof) {
+    spawn_join(move || {
+        match sh_stats_json(
+            &st,
+            &sh,
+            None,
+            Some(sh_hex.as_str()),
+            asof,
+            client.as_deref(),
+        ) {
             Ok((v, view)) => maybe_attach_view(Json(v).into_response(), view),
             Err(e) => store_err(e),
-        },
-    )
+        }
+    })
     .await
 }
 
@@ -723,9 +741,10 @@ pub async fn address_utxo(
     State(st): State<AppState>,
     Path(addr_s): Path<String>,
     AsOf(asof): AsOf,
+    JoinClient(client): JoinClient,
 ) -> Response {
     match resolve_address_sh(&addr_s, st.network) {
-        Ok(sh) => spawn_join(move || utxo_response(&st, &sh, asof)).await,
+        Ok(sh) => spawn_join(move || utxo_response(&st, &sh, asof, client.as_deref())).await,
         Err(_) => not_found(),
     }
 }
@@ -734,14 +753,20 @@ pub async fn scripthash_utxo(
     State(st): State<AppState>,
     Path(sh_hex): Path<String>,
     AsOf(asof): AsOf,
+    JoinClient(client): JoinClient,
 ) -> Response {
     let Ok(sh) = parse_hash32(&sh_hex) else {
         return not_found();
     };
-    spawn_join(move || utxo_response(&st, &sh, asof)).await
+    spawn_join(move || utxo_response(&st, &sh, asof, client.as_deref())).await
 }
 
-fn utxo_response(st: &AppState, sh: &[u8; 32], asof: Option<[u8; 32]>) -> Response {
+fn utxo_response(
+    st: &AppState,
+    sh: &[u8; 32],
+    asof: Option<[u8; 32]>,
+    client: Option<&str>,
+) -> Response {
     let (list, view) = match sh_at_view(
         st,
         sh,
@@ -757,6 +782,7 @@ fn utxo_response(st: &AppState, sh: &[u8; 32], asof: Option<[u8; 32]>) -> Respon
             )
         },
         Vec::new(),
+        client,
         None,
     ) {
         Ok(x) => x,
@@ -783,6 +809,7 @@ fn sh_stats_json(
     address: Option<&str>,
     scripthash_hex: Option<&str>,
     asof: Option<[u8; 32]>,
+    client: Option<&str>,
 ) -> Result<(Value, Option<rbitcoin_query::ChainView>), rbitcoin_query::QueryError> {
     let (chain, view) = if asof.is_some() {
         let view = st
@@ -795,7 +822,7 @@ fn sh_stats_json(
         (st.query.scripthash_chain_stats_in(sh, v)?, view)
     } else {
         match st.query.run_at_view(ChainViewKind::ScriptHash, |v| {
-            st.with_sh_join(|slot| {
+            st.with_sh_join(client, sh, |slot| {
                 st.query.scripthash_chain_stats_slot_in(sh, slot, v)
             })
         }) {
@@ -821,7 +848,7 @@ fn sh_stats_json(
     let mempool_stats = if asof.is_some() {
         zeros
     } else if let Some(mp) = st.mempool.as_ref() {
-        st.with_sh_join(|slot| {
+        st.with_sh_join(client, sh, |slot| {
             rbitcoin_electrum::scripthash_mempool_stats_slot(&st.query, mp, sh, slot).map(|s| {
                 json!({
                     "tx_count": s.tx_count,
@@ -852,28 +879,31 @@ pub async fn scripthash_txs_chain(
     State(st): State<AppState>,
     Path(sh_hex): Path<String>,
     AsOf(asof): AsOf,
+    JoinClient(client): JoinClient,
 ) -> Response {
-    spawn_join(move || chain_page(&st, &sh_hex, None, asof)).await
+    spawn_join(move || chain_page(&st, &sh_hex, None, asof, client.as_deref())).await
 }
 
 pub async fn scripthash_txs_chain_cursor(
     State(st): State<AppState>,
     Path((sh_hex, last)): Path<(String, String)>,
     AsOf(asof): AsOf,
+    JoinClient(client): JoinClient,
 ) -> Response {
     let Ok(after) = parse_hash32(&last) else {
         return not_found();
     };
-    spawn_join(move || chain_page(&st, &sh_hex, Some(after), asof)).await
+    spawn_join(move || chain_page(&st, &sh_hex, Some(after), asof, client.as_deref())).await
 }
 
 pub async fn address_txs_chain(
     State(st): State<AppState>,
     Path(addr_s): Path<String>,
     AsOf(asof): AsOf,
+    JoinClient(client): JoinClient,
 ) -> Response {
     match resolve_address_sh(&addr_s, st.network) {
-        Ok(sh) => spawn_join(move || chain_page_sh(&st, &sh, None, asof)).await,
+        Ok(sh) => spawn_join(move || chain_page_sh(&st, &sh, None, asof, client.as_deref())).await,
         Err(_) => not_found(),
     }
 }
@@ -882,12 +912,15 @@ pub async fn address_txs_chain_cursor(
     State(st): State<AppState>,
     Path((addr_s, last)): Path<(String, String)>,
     AsOf(asof): AsOf,
+    JoinClient(client): JoinClient,
 ) -> Response {
     let Ok(after) = parse_hash32(&last) else {
         return not_found();
     };
     match resolve_address_sh(&addr_s, st.network) {
-        Ok(sh) => spawn_join(move || chain_page_sh(&st, &sh, Some(after), asof)).await,
+        Ok(sh) => {
+            spawn_join(move || chain_page_sh(&st, &sh, Some(after), asof, client.as_deref())).await
+        }
         Err(_) => not_found(),
     }
 }
@@ -898,6 +931,7 @@ pub async fn scripthash_txs(
     Path(sh_hex): Path<String>,
     AsOf(asof): AsOf,
     AxumQuery(q): AxumQuery<AfterTxidQuery>,
+    JoinClient(client): JoinClient,
 ) -> Response {
     let Ok(sh) = parse_hash32(&sh_hex) else {
         return not_found();
@@ -906,7 +940,7 @@ pub async fn scripthash_txs(
         Ok(v) => v,
         Err(r) => return r,
     };
-    spawn_join(move || combined_txs(&st, &sh, asof, after)).await
+    spawn_join(move || combined_txs(&st, &sh, asof, after, client.as_deref())).await
 }
 
 pub async fn address_txs(
@@ -914,13 +948,14 @@ pub async fn address_txs(
     Path(addr_s): Path<String>,
     AsOf(asof): AsOf,
     AxumQuery(q): AxumQuery<AfterTxidQuery>,
+    JoinClient(client): JoinClient,
 ) -> Response {
     let after = match parse_after_txid_query(q) {
         Ok(v) => v,
         Err(r) => return r,
     };
     match resolve_address_sh(&addr_s, st.network) {
-        Ok(sh) => spawn_join(move || combined_txs(&st, &sh, asof, after)).await,
+        Ok(sh) => spawn_join(move || combined_txs(&st, &sh, asof, after, client.as_deref())).await,
         Err(_) => not_found(),
     }
 }
@@ -930,11 +965,12 @@ fn chain_page(
     sh_hex: &str,
     after: Option<[u8; 32]>,
     asof: Option<[u8; 32]>,
+    client: Option<&str>,
 ) -> Response {
     let Ok(sh) = parse_hash32(sh_hex) else {
         return not_found();
     };
-    chain_page_sh(st, &sh, after, asof)
+    chain_page_sh(st, &sh, after, asof, client)
 }
 
 pub async fn scripthash_txs_summary(
@@ -942,23 +978,25 @@ pub async fn scripthash_txs_summary(
     Path(sh_hex): Path<String>,
     AsOf(asof): AsOf,
     AxumQuery(q): AxumQuery<AfterTxidQuery>,
+    JoinClient(client): JoinClient,
 ) -> Response {
     let after = match parse_after_txid_query(q) {
         Ok(v) => v,
         Err(r) => return r,
     };
-    spawn_join(move || summary_page(&st, &sh_hex, after, asof)).await
+    spawn_join(move || summary_page(&st, &sh_hex, after, asof, client.as_deref())).await
 }
 
 pub async fn scripthash_txs_summary_cursor(
     State(st): State<AppState>,
     Path((sh_hex, last)): Path<(String, String)>,
     AsOf(asof): AsOf,
+    JoinClient(client): JoinClient,
 ) -> Response {
     let Ok(after) = parse_hash32(&last) else {
         return not_found();
     };
-    spawn_join(move || summary_page(&st, &sh_hex, Some(after), asof)).await
+    spawn_join(move || summary_page(&st, &sh_hex, Some(after), asof, client.as_deref())).await
 }
 
 pub async fn address_txs_summary(
@@ -966,13 +1004,16 @@ pub async fn address_txs_summary(
     Path(addr_s): Path<String>,
     AsOf(asof): AsOf,
     AxumQuery(q): AxumQuery<AfterTxidQuery>,
+    JoinClient(client): JoinClient,
 ) -> Response {
     let after = match parse_after_txid_query(q) {
         Ok(v) => v,
         Err(r) => return r,
     };
     match resolve_address_sh(&addr_s, st.network) {
-        Ok(sh) => spawn_join(move || summary_page_sh(&st, &sh, after, asof)).await,
+        Ok(sh) => {
+            spawn_join(move || summary_page_sh(&st, &sh, after, asof, client.as_deref())).await
+        }
         Err(_) => not_found(),
     }
 }
@@ -981,12 +1022,16 @@ pub async fn address_txs_summary_cursor(
     State(st): State<AppState>,
     Path((addr_s, last)): Path<(String, String)>,
     AsOf(asof): AsOf,
+    JoinClient(client): JoinClient,
 ) -> Response {
     let Ok(after) = parse_hash32(&last) else {
         return not_found();
     };
     match resolve_address_sh(&addr_s, st.network) {
-        Ok(sh) => spawn_join(move || summary_page_sh(&st, &sh, Some(after), asof)).await,
+        Ok(sh) => {
+            spawn_join(move || summary_page_sh(&st, &sh, Some(after), asof, client.as_deref()))
+                .await
+        }
         Err(_) => not_found(),
     }
 }
@@ -996,11 +1041,12 @@ fn summary_page(
     sh_hex: &str,
     after: Option<[u8; 32]>,
     asof: Option<[u8; 32]>,
+    client: Option<&str>,
 ) -> Response {
     let Ok(sh) = parse_hash32(sh_hex) else {
         return not_found();
     };
-    summary_page_sh(st, &sh, after, asof)
+    summary_page_sh(st, &sh, after, asof, client)
 }
 
 fn summary_page_sh(
@@ -1008,6 +1054,7 @@ fn summary_page_sh(
     sh: &[u8; 32],
     after: Option<[u8; 32]>,
     asof: Option<[u8; 32]>,
+    client: Option<&str>,
 ) -> Response {
     if let Some(id) = after {
         if !txid_is_known(st, &id) {
@@ -1022,6 +1069,7 @@ fn summary_page_sh(
         |q, view| q.scripthash_history_summary_filtered_in(sh, &filter, view),
         |q, slot, view| q.scripthash_history_summary_filtered_slot_in(sh, &filter, slot, view),
         Vec::new(),
+        client,
         None,
     ) {
         Ok(x) => x,
@@ -1065,6 +1113,7 @@ fn chain_page_sh(
     sh: &[u8; 32],
     after: Option<[u8; 32]>,
     asof: Option<[u8; 32]>,
+    client: Option<&str>,
 ) -> Response {
     let filter = HistoryFilter::esplora_chain_page(after);
     let (items, view) = match sh_at_view(
@@ -1074,6 +1123,7 @@ fn chain_page_sh(
         |q, view| q.scripthash_history_filtered_in(sh, &filter, view),
         |q, slot, view| q.scripthash_history_filtered_slot_in(sh, &filter, slot, view),
         Vec::new(),
+        client,
         None,
     ) {
         Ok(x) => x,
@@ -1093,6 +1143,7 @@ fn combined_txs(
     sh: &[u8; 32],
     asof: Option<[u8; 32]>,
     after: Option<[u8; 32]>,
+    client: Option<&str>,
 ) -> Response {
     if let Some(id) = after {
         if !txid_is_known(st, &id) {
@@ -1120,6 +1171,7 @@ fn combined_txs(
         |q, view| q.scripthash_history_filtered_in(sh, &filter, view),
         |q, slot, view| q.scripthash_history_filtered_slot_in(sh, &filter, slot, view),
         Vec::new(),
+        client,
         None,
     ) {
         Ok(x) => x,
@@ -1146,6 +1198,7 @@ fn body_too_long() -> Response {
     (StatusCode::UNPROCESSABLE_ENTITY, "body too long").into_response()
 }
 
+#[allow(clippy::result_large_err)]
 fn parse_multi_scripts(
     network: Network,
     kind: MultiKind,
@@ -1225,6 +1278,7 @@ fn dedup_txid(rows: Vec<Value>) -> Vec<Value> {
     out
 }
 
+#[allow(clippy::result_large_err)] // public error enum
 fn combined_tx_vec(
     st: &AppState,
     sh: &[u8; 32],
@@ -1243,6 +1297,7 @@ fn combined_tx_vec(
         |q, view| q.scripthash_history_filtered_in(sh, &filter, view),
         |q, slot, view| q.scripthash_history_filtered_slot_in(sh, &filter, slot, view),
         Vec::new(),
+        None,
         bag,
     )?;
     let chain = history_items_to_tx_json(&st.query, &items, st.network).map_err(store_err)?;
@@ -1250,6 +1305,7 @@ fn combined_tx_vec(
     Ok(out)
 }
 
+#[allow(clippy::result_large_err)] // public error enum
 fn summary_vec(
     st: &AppState,
     sh: &[u8; 32],
@@ -1264,6 +1320,7 @@ fn summary_vec(
         |q, view| q.scripthash_history_summary_filtered_in(sh, &filter, view),
         |q, slot, view| q.scripthash_history_summary_filtered_slot_in(sh, &filter, slot, view),
         Vec::new(),
+        None,
         bag,
     )?;
     match summaries_json(&st.query, &items) {
@@ -1278,6 +1335,7 @@ fn multi_txs(
     scripts: Vec<[u8; 32]>,
     after: Option<[u8; 32]>,
     asof: Option<[u8; 32]>,
+    client: Option<&str>,
 ) -> Response {
     if let Some(id) = after {
         if !txid_is_known(st, &id) {
@@ -1285,6 +1343,7 @@ fn multi_txs(
         }
     }
     let mut bag = JoinBag::new();
+    st.seed_bulk(client, &mut bag);
     let mut rows = Vec::new();
     for sh in &scripts {
         match combined_tx_vec(st, sh, asof, Some(&mut bag)) {
@@ -1292,7 +1351,7 @@ fn multi_txs(
             Err(r) => return r,
         }
     }
-    st.promote_bulk(&bag);
+    st.promote_bulk(client, bag);
     let mut rows = dedup_txid(rows);
     sort_txs_newest_first(&mut rows);
     let rows = skip_rows_after(rows, after);
@@ -1304,6 +1363,7 @@ fn multi_summary(
     scripts: Vec<[u8; 32]>,
     after: Option<[u8; 32]>,
     asof: Option<[u8; 32]>,
+    client: Option<&str>,
 ) -> Response {
     if let Some(id) = after {
         if !txid_is_known(st, &id) {
@@ -1311,6 +1371,7 @@ fn multi_summary(
         }
     }
     let mut bag = JoinBag::new();
+    st.seed_bulk(client, &mut bag);
     let mut rows = Vec::new();
     for sh in &scripts {
         match summary_vec(st, sh, asof, Some(&mut bag)) {
@@ -1318,7 +1379,7 @@ fn multi_summary(
             Err(r) => return r,
         }
     }
-    st.promote_bulk(&bag);
+    st.promote_bulk(client, bag);
     let mut rows = dedup_txid(rows);
     rows.sort_by(|a, b| {
         let ha = a["height"].as_i64().unwrap_or(0);
@@ -1340,6 +1401,7 @@ fn post_multi_body(
     q: AfterTxidQuery,
     body: Bytes,
     summary: bool,
+    client: Option<String>,
 ) -> Response {
     let after = match parse_after_txid_query(q) {
         Ok(v) => v,
@@ -1352,43 +1414,48 @@ fn post_multi_body(
         Ok(v) => v,
         Err(r) => return r,
     };
+    let client = client.as_deref();
     if summary {
-        multi_summary(&st, scripts, after, None)
+        multi_summary(&st, scripts, after, None, client)
     } else {
-        multi_txs(&st, scripts, after, None)
+        multi_txs(&st, scripts, after, None, client)
     }
 }
 
 pub async fn post_addresses_txs(
     State(st): State<AppState>,
+    JoinClient(client): JoinClient,
     AxumQuery(q): AxumQuery<AfterTxidQuery>,
     body: Bytes,
 ) -> Response {
-    spawn_join(move || post_multi_body(st, MultiKind::Address, q, body, false)).await
+    spawn_join(move || post_multi_body(st, MultiKind::Address, q, body, false, client)).await
 }
 
 pub async fn post_scripthashes_txs(
     State(st): State<AppState>,
+    JoinClient(client): JoinClient,
     AxumQuery(q): AxumQuery<AfterTxidQuery>,
     body: Bytes,
 ) -> Response {
-    spawn_join(move || post_multi_body(st, MultiKind::Scripthash, q, body, false)).await
+    spawn_join(move || post_multi_body(st, MultiKind::Scripthash, q, body, false, client)).await
 }
 
 pub async fn post_addresses_txs_summary(
     State(st): State<AppState>,
+    JoinClient(client): JoinClient,
     AxumQuery(q): AxumQuery<AfterTxidQuery>,
     body: Bytes,
 ) -> Response {
-    spawn_join(move || post_multi_body(st, MultiKind::Address, q, body, true)).await
+    spawn_join(move || post_multi_body(st, MultiKind::Address, q, body, true, client)).await
 }
 
 pub async fn post_scripthashes_txs_summary(
     State(st): State<AppState>,
+    JoinClient(client): JoinClient,
     AxumQuery(q): AxumQuery<AfterTxidQuery>,
     body: Bytes,
 ) -> Response {
-    spawn_join(move || post_multi_body(st, MultiKind::Scripthash, q, body, true)).await
+    spawn_join(move || post_multi_body(st, MultiKind::Scripthash, q, body, true, client)).await
 }
 
 pub async fn mempool_info(State(st): State<AppState>) -> Response {
@@ -1591,6 +1658,7 @@ fn after_txid_not_found() -> Response {
     (StatusCode::UNPROCESSABLE_ENTITY, "after_txid not found").into_response()
 }
 
+#[allow(clippy::result_large_err)] // public error enum
 fn parse_after_txid_query(q: AfterTxidQuery) -> Result<Option<[u8; 32]>, Response> {
     match q.after_txid {
         None => Ok(None),
@@ -1638,6 +1706,7 @@ pub async fn get_txs_outspends(
     .await
 }
 
+#[allow(clippy::result_large_err)] // public error enum
 fn decode_tx_hex_str(hex: &str) -> Result<bitcoin::Transaction, Response> {
     let hex = hex.trim().trim_matches('"');
     let raw = match rbitcoin_primitives::hex_decode(hex) {
@@ -1707,6 +1776,7 @@ pub struct MaxFeeQuery {
     maxfeerate: Option<String>,
 }
 
+#[allow(clippy::result_large_err)] // public error enum
 fn parse_maxfeerate_btc_kvb(q: MaxFeeQuery) -> Result<u64, Response> {
     let Some(s) = q.maxfeerate.filter(|s| !s.is_empty()) else {
         return Ok(10_000);
@@ -2139,28 +2209,181 @@ mod pure_helper_tests {
             max_ws_message_bytes: 64 * 1024,
             max_track_addresses: 64,
             max_track_txs: 64,
-            sh_join: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            sh_join: Arc::new(Mutex::new(crate::server::JoinCache::default())),
+            join_header_trusted: true,
             block_template: None,
             gbt_cache: Arc::new(Mutex::new(None)),
         };
         let sh = script_hash(&[0x51]);
         reset_body_ok_reads();
-        let (info, _) = super::sh_stats_json(&st, &sh, None, None, None).unwrap();
+        let (info, _) = super::sh_stats_json(&st, &sh, None, None, None, Some("casa")).unwrap();
         assert_eq!(info["chain_stats"]["tx_count"], 3);
         let after_info = body_ok_reads();
         assert_eq!(after_info, 3);
 
-        let _ = super::utxo_response(&st, &sh, None);
+        let _ = super::utxo_response(&st, &sh, None, Some("casa"));
         assert_eq!(
             body_ok_reads(),
             after_info,
             "/utxo must reuse the last SH join"
         );
-        let _ = super::chain_page_sh(&st, &sh, None, None);
+        let _ = super::chain_page_sh(&st, &sh, None, None, Some("casa"));
         assert_eq!(
             body_ok_reads(),
             after_info,
             "/txs must reuse the last SH join"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn app_state(q: Query) -> crate::server::AppState {
+        use crate::server::AppState;
+        use std::sync::{Arc, Mutex};
+        AppState {
+            query: Arc::new(q),
+            network: Network::Regtest,
+            mempool: None,
+            max_body: 1 << 20,
+            tip_tx: None,
+            ws_sem: None,
+            max_ws_message_bytes: 64 * 1024,
+            max_track_addresses: 64,
+            max_track_txs: 64,
+            sh_join: Arc::new(Mutex::new(crate::server::JoinCache::default())),
+            join_header_trusted: true,
+            block_template: None,
+            gbt_cache: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn connect_op_true_blocks(q: &Query, n: u32) -> ([u8; 32], Fk) {
+        let mut prev = Fk::NULL;
+        let mut parent_hash: Option<[u8; 32]> = None;
+        let mut last_hash = [0u8; 32];
+        for h in 0..n {
+            let merkle = {
+                let mut m = [0xab; 32];
+                m[0] = h as u8;
+                m
+            };
+            let hash = match parent_hash {
+                None => merkle,
+                Some(ph) => {
+                    rbitcoin_store::block_header_hash(1, &ph, &merkle, h + 1, 0x207f_ffff, h)
+                }
+            };
+            let header = HeaderRecord {
+                prev_fk: prev,
+                version: 1,
+                timestamp: h + 1,
+                bits: 0x207f_ffff,
+                nonce: h,
+                merkle_root: merkle,
+                hash,
+                size: 0,
+                weight: 0,
+            };
+            let mut txid = [0xcb; 32];
+            txid[0] = h as u8;
+            let ta = TxApply {
+                tx: TxRecord {
+                    txid,
+                    version: 1,
+                    locktime: 0,
+                    input_start_fk: Fk::NULL,
+                    input_count: 1,
+                    output_start_fk: Fk::NULL,
+                    output_count: 1,
+                },
+                inputs: vec![InputRecord {
+                    prev_txid: [0u8; 32],
+                    create_fk: Fk::NULL,
+                    prev_index: u32::MAX,
+                    sequence: u32::MAX,
+                    script_sig: vec![h as u8],
+                    witness: vec![],
+                }],
+                outputs: vec![OutputRecord::unspent(50_0000_0000, vec![0x51])],
+            };
+            last_hash = hash;
+            parent_hash = Some(header.hash);
+            prev = q.connect_block(Height(h), &header, &[ta]).unwrap();
+        }
+        (last_hash, prev)
+    }
+
+    #[test]
+    fn sh_join_last1_two_clients_and_bulk_reuse() {
+        use rbitcoin_query::{body_ok_reads, reset_body_ok_reads};
+        use rbitcoin_store::script_hash;
+
+        let (dir, q) = temp_query();
+        let (parent, prev) = connect_op_true_blocks(&q, 3);
+        let merkle = [0xcd; 32];
+        let hash = rbitcoin_store::block_header_hash(1, &parent, &merkle, 4, 0x207f_ffff, 3);
+        let header = HeaderRecord {
+            prev_fk: prev,
+            version: 1,
+            timestamp: 4,
+            bits: 0x207f_ffff,
+            nonce: 3,
+            merkle_root: merkle,
+            hash,
+            size: 0,
+            weight: 0,
+        };
+        let ta = TxApply {
+            tx: TxRecord {
+                txid: [0x22; 32],
+                version: 1,
+                locktime: 0,
+                input_start_fk: Fk::NULL,
+                input_count: 1,
+                output_start_fk: Fk::NULL,
+                output_count: 1,
+            },
+            inputs: vec![InputRecord {
+                prev_txid: [0u8; 32],
+                create_fk: Fk::NULL,
+                prev_index: u32::MAX,
+                sequence: u32::MAX,
+                script_sig: vec![0x22],
+                witness: vec![],
+            }],
+            outputs: vec![OutputRecord::unspent(1_0000_0000, vec![0x52])],
+        };
+        q.connect_block(Height(3), &header, &[ta]).unwrap();
+        let st = app_state(q);
+        let sha = script_hash(&[0x51]);
+        let shb = script_hash(&[0x52]);
+
+        reset_body_ok_reads();
+        let _ = super::sh_stats_json(&st, &sha, None, None, None, Some("c1")).unwrap();
+        let after_a = body_ok_reads();
+        assert!(after_a > 0);
+        let _ = super::sh_stats_json(&st, &shb, None, None, None, Some("c1")).unwrap();
+        let after_b = body_ok_reads();
+        assert!(after_b > after_a, "GET B is a new join");
+        let _ = super::sh_stats_json(&st, &sha, None, None, None, Some("c1")).unwrap();
+        let after_a2 = body_ok_reads();
+        assert!(after_a2 > after_b, "GET A after B must not keep A (last-1)");
+
+        reset_body_ok_reads();
+        let _ = super::sh_stats_json(&st, &sha, None, None, None, Some("c1")).unwrap();
+        let c1 = body_ok_reads();
+        let _ = super::sh_stats_json(&st, &sha, None, None, None, Some("c2")).unwrap();
+        assert!(body_ok_reads() > c1, "different clients never share slots");
+
+        reset_body_ok_reads();
+        let _ = super::multi_txs(&st, vec![sha, shb], None, None, Some("wallet"));
+        let first_bulk = body_ok_reads();
+        assert!(first_bulk > 0);
+        let _ = super::multi_txs(&st, vec![sha, shb], Some([0x22; 32]), None, Some("wallet"));
+        assert_eq!(
+            body_ok_reads(),
+            first_bulk,
+            "POST after_txid reuses last-bulk joins"
         );
 
         let _ = std::fs::remove_dir_all(dir);

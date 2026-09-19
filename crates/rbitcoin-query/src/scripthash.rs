@@ -279,12 +279,14 @@ pub struct ScriptHashChainStats {
     pub spent_txo_sum: i64,
 }
 
+#[derive(Clone)]
 pub(crate) struct ShSpender {
     fk: Fk,
     txid: [u8; 32],
     height: u32,
 }
 
+#[derive(Clone)]
 pub(crate) struct ShJoinedOut {
     pub(crate) out: ScriptHashOutpoint,
     pub(crate) spent: bool,
@@ -297,10 +299,24 @@ pub(crate) struct ShJoinedOut {
 /// Holds BALANCE-level outs + spentness. Identity is filled in place on
 /// history / listunspent. Invalid once the published tip **hash** moves
 /// (including a same-height replace).
+#[derive(Clone)]
 pub struct ShJoinSlot {
     scripthash: [u8; 32],
     tip_hash: [u8; 32],
     joined: Vec<ShJoinedOut>,
+}
+
+impl ShJoinSlot {
+    /// Approximate packed join size for the HTTP last-bulk byte cap.
+    pub fn packed_bytes(&self) -> usize {
+        const BASE: usize = 64;
+        const OUT: usize = 80;
+        self.joined.iter().fold(BASE, |acc, o| {
+            acc.saturating_add(OUT)
+                .saturating_add(o.spender_fks.len().saturating_mul(8))
+                .saturating_add(o.spenders.len().saturating_mul(48))
+        })
+    }
 }
 
 /// Which identity sidefiles this SH join must fill.

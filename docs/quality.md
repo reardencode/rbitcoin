@@ -51,7 +51,7 @@ at an explicit rank with **Q-63+**.
 | **Q-35** | Mainnet soak program | Signet first, then mainnet with monitoring. No badge |
 | **—** | Darwin notarization | Ad-hoc `codesign -s -` only |
 | **—** | Leftover maps as `txid → Vec<Fk>` | [`errata.md`](./errata.md): only if a mainnet miss is shown |
-| **X-M3** | Esplora process-wide `sh_join` LRU | HTTP is not a session. Sticky joins stay Electrum TCP |
+| **X-M3** | Esplora unbounded process `sh_join` LRU | Last-1 GET + last-bulk POST (16 MiB/client) shipped. Sticky joins stay Electrum TCP |
 | **—** | Package-level feerate on `submitpackage` | Sequential `accept_tx`; Core parity is not 1.0 |
 | **—** | Chained Esplora `scripthash_mempool_stats` | Dialect / page cost. Compact `/txs/summary` is COMPAT dialect |
 | **—** | Retired algo-review micro-opts | Reopen a named Q-id only with a mainnet profile that names the cost |
