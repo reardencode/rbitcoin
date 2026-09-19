@@ -21,7 +21,6 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -159,8 +158,9 @@ pub(crate) async fn spawn_peer(
     local: SocketAddr,
     tip_h: Option<u32>,
     sinks: PeerEventSinks,
+    dialer: crate::socks::Dialer,
 ) -> Result<PeerSlot, NetError> {
-    let stream = TcpStream::connect(addr).await?;
+    let stream = dialer.connect(addr).await?;
     let ua = rbitcoin_primitives::rbitcoin_subversion(env!("CARGO_PKG_VERSION"), &[] as &[&str])
         .unwrap_or_else(|_| format!("/rbitcoin:{}/", env!("CARGO_PKG_VERSION")));
     let (ver, reader, writer, _wire, _tcp_shutdown) = connect_and_handshake_timed(

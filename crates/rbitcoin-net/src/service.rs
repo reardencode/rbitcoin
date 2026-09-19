@@ -20,7 +20,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
 /// Running P2P node handle (listen + optional outbound sync / tip follow).
@@ -46,6 +46,7 @@ pub struct P2PNode {
     pub max_inbound: usize,
     /// Shared inbound slots across all listen sockets.
     inbound_sem: Arc<tokio::sync::Semaphore>,
+    dialer: crate::socks::Dialer,
 }
 
 impl P2PNode {
@@ -76,6 +77,28 @@ impl P2PNode {
         milestone: Milestone,
         user_agent: String,
         max_inbound: usize,
+    ) -> Result<Self, NetError> {
+        Self::start_with_dialer(
+            listen,
+            query,
+            params,
+            milestone,
+            user_agent,
+            max_inbound,
+            crate::socks::Dialer::Direct,
+        )
+        .await
+    }
+
+    /// Like [`Self::start_with_agent`] with an outbound [`crate::Dialer`].
+    pub async fn start_with_dialer(
+        listen: SocketAddr,
+        query: Query,
+        params: ChainParams,
+        milestone: Milestone,
+        user_agent: String,
+        max_inbound: usize,
+        dialer: crate::socks::Dialer,
     ) -> Result<Self, NetError> {
         let magic = magic_for_params(&params);
         let hub = Arc::new(ChainHub::new(query, params, milestone));
@@ -113,6 +136,7 @@ impl P2PNode {
         let dial_live = follow_live.clone();
         let dial_shutdown = shutdown.clone();
         let sessions_dial = session_tasks.clone();
+        let dialer_task = dialer.clone();
         let dial_task = tokio::spawn(async move {
             while let Some(req) = dial_rx.recv().await {
                 if dial_shutdown.load(Ordering::SeqCst) {
@@ -122,10 +146,11 @@ impl P2PNode {
                 let peers = dial_peers.clone();
                 let ua = dial_ua.clone();
                 let live = dial_live.clone();
+                let d = dialer_task.clone();
                 let (ah_tx, ah_rx) = tokio::sync::oneshot::channel::<tokio::task::AbortHandle>();
                 let h = tokio::spawn(async move {
                     let _ = run_outbound_session_with_abort(
-                        req.addr, magic, local_addr, hub, peers, ua, live, req.typ, ah_rx,
+                        req.addr, magic, local_addr, hub, peers, ua, live, req.typ, ah_rx, d,
                     )
                     .await;
                 });
@@ -148,6 +173,7 @@ impl P2PNode {
             user_agent,
             max_inbound,
             inbound_sem,
+            dialer,
         })
     }
 
@@ -241,6 +267,7 @@ impl P2PNode {
             self.user_agent.clone(),
             self.follow_live.clone(),
             PeerConnType::OutboundFullRelay,
+            self.dialer.clone(),
         )
         .await?;
         let handle = tokio::spawn(async move {
@@ -454,9 +481,10 @@ async fn prepare_outbound_session(
     user_agent: String,
     follow_live: Arc<AtomicUsize>,
     typ: PeerConnType,
+    dialer: crate::socks::Dialer,
 ) -> Result<PreparedOutbound, NetError> {
     rbitcoin_log::debug!("{}", crate::peers::trying_connection_log(typ, peer));
-    let stream = TcpStream::connect(peer).await?;
+    let stream = dialer.connect(peer).await?;
     let bind = stream.local_addr().unwrap_or(local);
     let height = hub.tip_height().map(|h| h as i32).unwrap_or(0);
     // Core adds CNode before VERSION. Provisional row so getpeerinfo is non-empty
@@ -551,15 +579,25 @@ async fn run_outbound_session_with_abort(
     follow_live: Arc<AtomicUsize>,
     typ: PeerConnType,
     ah_rx: tokio::sync::oneshot::Receiver<tokio::task::AbortHandle>,
+    dialer: crate::socks::Dialer,
 ) -> Result<(), NetError> {
     if typ == PeerConnType::Feeler {
-        let stream = TcpStream::connect(peer).await?;
+        let stream = dialer.connect(peer).await?;
         let height = hub.tip_height().map(|h| h as i32).unwrap_or(0);
         return crate::peer::run_feeler(stream, magic, local, peer, height, &user_agent).await;
     }
-    let prepared =
-        prepare_outbound_session(peer, magic, local, hub, peers, user_agent, follow_live, typ)
-            .await?;
+    let prepared = prepare_outbound_session(
+        peer,
+        magic,
+        local,
+        hub,
+        peers,
+        user_agent,
+        follow_live,
+        typ,
+        dialer,
+    )
+    .await?;
     if let Ok(ah) = ah_rx.await {
         prepared.sess.set_session_abort(ah);
     }

@@ -50,6 +50,57 @@ pub(crate) async fn dial_isolated(
     socks5_connect(proxy, target, Some(&creds)).await
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Dialer {
+    #[default]
+    Direct,
+    Socks {
+        proxy: SocketAddr,
+        randomize: bool,
+    },
+}
+
+impl Dialer {
+    pub async fn connect(&self, target: SocketAddr) -> Result<TcpStream, NetError> {
+        match self {
+            Dialer::Direct => Ok(TcpStream::connect(target).await?),
+            Dialer::Socks { proxy, randomize } => {
+                if *randomize {
+                    let creds = ProxyCreds::fresh();
+                    socks5_connect(*proxy, target, Some(&creds)).await
+                } else {
+                    socks5_connect(*proxy, target, None).await
+                }
+            }
+        }
+    }
+
+    pub async fn connect_domain(&self, host: &str, port: u16) -> Result<TcpStream, NetError> {
+        match self {
+            Dialer::Direct => {
+                let mut addrs = tokio::net::lookup_host((host, port)).await?;
+                let addr = addrs.next().ok_or(NetError::Protocol("dns lookup empty"))?;
+                self.connect(addr).await
+            }
+            Dialer::Socks { proxy, randomize } => {
+                if *randomize {
+                    let creds = ProxyCreds::fresh();
+                    socks5_connect_domain(*proxy, host, port, Some(&creds)).await
+                } else {
+                    socks5_connect_domain(*proxy, host, port, None).await
+                }
+            }
+        }
+    }
+
+    pub async fn connect_isolated(&self, target: SocketAddr) -> Result<TcpStream, NetError> {
+        match self {
+            Dialer::Direct => self.connect(target).await,
+            Dialer::Socks { proxy, .. } => dial_isolated(*proxy, target).await,
+        }
+    }
+}
+
 async fn socks5_connect_dest(
     proxy: SocketAddr,
     dest: SocksDest<'_>,
@@ -164,10 +215,10 @@ async fn read_connect_reply(s: &mut TcpStream) -> Result<(), NetError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{dial_isolated, socks5_connect, socks5_connect_domain, ProxyCreds};
+    use super::{dial_isolated, socks5_connect, socks5_connect_domain, Dialer, ProxyCreds};
     use std::net::{Ipv4Addr, SocketAddr};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use tokio::net::{TcpListener, TcpStream};
 
     #[tokio::test]
     async fn socks5_connect_ipv4_against_fake_proxy() {
@@ -333,5 +384,138 @@ mod tests {
         server.await.unwrap();
         assert_ne!(u1, u2, "each isolated dial must use fresh SOCKS creds");
         assert!(!u1.is_empty() && !u2.is_empty());
+    }
+
+    async fn splice_one_socks(
+        listener: TcpListener,
+        saw: tokio::sync::oneshot::Sender<SocketAddr>,
+    ) {
+        let (mut c, _) = listener.accept().await.unwrap();
+        let mut ver_n = [0u8; 2];
+        c.read_exact(&mut ver_n).await.unwrap();
+        let nmethods = ver_n[1] as usize;
+        let mut methods = vec![0u8; nmethods];
+        c.read_exact(&mut methods).await.unwrap();
+        if methods.contains(&0x02) {
+            c.write_all(&[5, 0x02]).await.unwrap();
+            let mut ver = [0u8; 1];
+            c.read_exact(&mut ver).await.unwrap();
+            let mut ulen = [0u8; 1];
+            c.read_exact(&mut ulen).await.unwrap();
+            let mut user = vec![0u8; ulen[0] as usize];
+            c.read_exact(&mut user).await.unwrap();
+            let mut plen = [0u8; 1];
+            c.read_exact(&mut plen).await.unwrap();
+            let mut pass = vec![0u8; plen[0] as usize];
+            c.read_exact(&mut pass).await.unwrap();
+            c.write_all(&[1, 0]).await.unwrap();
+        } else {
+            c.write_all(&[5, 0x00]).await.unwrap();
+        }
+        let mut hdr = [0u8; 4];
+        c.read_exact(&mut hdr).await.unwrap();
+        assert_eq!(hdr[1], 1);
+        let dest = match hdr[3] {
+            1 => {
+                let mut a = [0u8; 4];
+                c.read_exact(&mut a).await.unwrap();
+                let mut p = [0u8; 2];
+                c.read_exact(&mut p).await.unwrap();
+                SocketAddr::from((Ipv4Addr::new(a[0], a[1], a[2], a[3]), u16::from_be_bytes(p)))
+            }
+            _ => panic!("test splice expects IPv4 CONNECT"),
+        };
+        let mut peer = TcpStream::connect(dest).await.unwrap();
+        c.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await.unwrap();
+        let _ = saw.send(dest);
+        let _ = tokio::io::copy_bidirectional(&mut c, &mut peer).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn outbound_dial_uses_proxy_when_set() {
+        use crate::peer::{connect_and_handshake_timed, HandshakePolicy, HANDSHAKE_TIMEOUT};
+        use bitcoin::p2p::Magic;
+        use std::time::Duration;
+
+        let bitcoin_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer_addr = bitcoin_l.local_addr().unwrap();
+        let inbound = tokio::spawn(async move {
+            let (stream, from) = bitcoin_l.accept().await.unwrap();
+            connect_and_handshake_timed(
+                Duration::from_secs(5),
+                stream,
+                Magic::REGTEST,
+                peer_addr,
+                from,
+                0,
+                true,
+                "/rbitcoin:test/",
+                HandshakePolicy::plain(),
+            )
+            .await
+        });
+
+        let socks_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = socks_l.local_addr().unwrap();
+        let (saw_tx, saw_rx) = tokio::sync::oneshot::channel();
+        let splice = tokio::spawn(splice_one_socks(socks_l, saw_tx));
+
+        let stream = Dialer::Socks {
+            proxy,
+            randomize: true,
+        }
+        .connect(peer_addr)
+        .await
+        .unwrap();
+        assert_eq!(saw_rx.await.unwrap(), peer_addr);
+
+        connect_and_handshake_timed(
+            Duration::from_secs(5),
+            stream,
+            Magic::REGTEST,
+            proxy,
+            peer_addr,
+            0,
+            false,
+            "/rbitcoin:test/",
+            HandshakePolicy::plain(),
+        )
+        .await
+        .unwrap();
+        inbound.await.unwrap().unwrap();
+        splice.abort();
+
+        let direct_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let direct_addr = direct_l.local_addr().unwrap();
+        let inbound = tokio::spawn(async move {
+            let (stream, from) = direct_l.accept().await.unwrap();
+            connect_and_handshake_timed(
+                HANDSHAKE_TIMEOUT,
+                stream,
+                Magic::REGTEST,
+                direct_addr,
+                from,
+                0,
+                true,
+                "/rbitcoin:test/",
+                HandshakePolicy::plain(),
+            )
+            .await
+        });
+        let stream = Dialer::Direct.connect(direct_addr).await.unwrap();
+        connect_and_handshake_timed(
+            Duration::from_secs(5),
+            stream,
+            Magic::REGTEST,
+            direct_addr,
+            direct_addr,
+            0,
+            false,
+            "/rbitcoin:test/",
+            HandshakePolicy::plain(),
+        )
+        .await
+        .unwrap();
+        inbound.await.unwrap().unwrap();
     }
 }

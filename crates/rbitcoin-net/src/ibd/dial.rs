@@ -243,6 +243,7 @@ pub(crate) async fn dial_batch(
     sinks: PeerEventSinks,
     connect_timeout: Duration,
     cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    dialer: crate::socks::Dialer,
 ) -> DialBatchResult {
     let mut out = DialBatchResult {
         slots: Vec::new(),
@@ -278,8 +279,9 @@ pub(crate) async fn dial_batch(
             "{}",
             trying_connection_log(PeerConnType::OutboundFullRelay, addr)
         );
+        let dialer = dialer.clone();
         handles.push(tokio::spawn(async move {
-            let fut = spawn_peer(id, addr, magic, local_addr, tip_h, sinks);
+            let fut = spawn_peer(id, addr, magic, local_addr, tip_h, sinks, dialer);
             match tokio::time::timeout(connect_timeout, fut).await {
                 Ok(Ok(slot)) => Ok(slot),
                 Ok(Err(e)) => {
@@ -968,6 +970,7 @@ mod tests {
             sinks.clone(),
             Duration::from_millis(50),
             None,
+            crate::socks::Dialer::Direct,
         ));
         assert!(r.slots.is_empty() && r.failed.is_empty());
         let r2 = rt.block_on(dial_batch(
@@ -982,6 +985,7 @@ mod tests {
             sinks,
             Duration::from_millis(50),
             None,
+            crate::socks::Dialer::Direct,
         ));
         assert!(r2.slots.is_empty() && r2.failed.is_empty());
     }
