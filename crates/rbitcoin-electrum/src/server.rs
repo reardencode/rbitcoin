@@ -340,7 +340,7 @@ struct ElectrumConn {
     protocol: String,
     header_sub: bool,
     sh_subs: HashSet<[u8; 32]>,
-    sh_join: Option<ShJoinSlot>,
+    sh_join: Option<Arc<ShJoinSlot>>,
     outpoint_subs: HashSet<([u8; 32], u32)>,
     sp_sub: Option<crate::silent_scan::SpSub>,
 }
@@ -1401,10 +1401,10 @@ fn sh_at_view<T>(
     pinned: Option<&ChainView>,
     is_asof: bool,
     asof: Option<[u8; 32]>,
-    sh_join: &mut Option<ShJoinSlot>,
+    sh_join: &mut Option<Arc<ShJoinSlot>>,
     asof_fn: impl FnOnce(&Query, &ChainView) -> Result<T, String>,
-    slot_fn: impl FnOnce(&Query, &mut Option<ShJoinSlot>, &ChainView) -> Result<T, String>,
-    live_fn: impl FnOnce(&Query, &mut Option<ShJoinSlot>) -> Result<T, String>,
+    slot_fn: impl FnOnce(&Query, &mut Option<Arc<ShJoinSlot>>, &ChainView) -> Result<T, String>,
+    live_fn: impl FnOnce(&Query, &mut Option<Arc<ShJoinSlot>>) -> Result<T, String>,
 ) -> Result<T, String> {
     if let Some(view) = pinned {
         if is_asof {
@@ -2318,7 +2318,7 @@ fn scripthash_status_full_slot(
     query: &Query,
     mp: &MempoolHub,
     sh: &[u8; 32],
-    slot: &mut Option<ShJoinSlot>,
+    slot: &mut Option<Arc<ShJoinSlot>>,
 ) -> Result<String, String> {
     let mut hist = query
         .scripthash_history_slot(sh, slot)

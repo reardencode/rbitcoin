@@ -6,6 +6,7 @@
 
 use super::*;
 use rbitcoin_store::{output_flags, script_hash, spent_abs, IdxBodyMode};
+use std::sync::Arc;
 
 /// Class A expand / spend-join wave. Bounds decoded `txout` pages in RAM.
 const SH_JOIN_WAVE: usize = 4096;
@@ -522,7 +523,7 @@ impl Query {
     fn ensure_sh_join_slot(
         &self,
         scripthash: &[u8; 32],
-        slot: &mut Option<ShJoinSlot>,
+        slot: &mut Option<Arc<ShJoinSlot>>,
     ) -> Result<(), QueryError> {
         let Some(view) = self.pin_sh_chain_view()? else {
             *slot = None;
@@ -534,7 +535,7 @@ impl Query {
     fn ensure_sh_join_slot_in(
         &self,
         scripthash: &[u8; 32],
-        slot: &mut Option<ShJoinSlot>,
+        slot: &mut Option<Arc<ShJoinSlot>>,
         view: &ChainView,
     ) -> Result<(), QueryError> {
         if slot
@@ -544,11 +545,11 @@ impl Query {
             return Ok(());
         }
         let joined = self.sh_join(scripthash, ShJoinNeed::BALANCE, None, view)?;
-        *slot = Some(ShJoinSlot {
+        *slot = Some(Arc::new(ShJoinSlot {
             scripthash: *scripthash,
             tip_hash: view.hash,
             joined,
-        });
+        }));
         Ok(())
     }
 
@@ -855,7 +856,7 @@ impl Query {
     pub fn scripthash_history_slot(
         &self,
         scripthash: &[u8; 32],
-        slot: &mut Option<ShJoinSlot>,
+        slot: &mut Option<Arc<ShJoinSlot>>,
     ) -> Result<Vec<ScriptHashHistoryItem>, QueryError> {
         self.scripthash_history_filtered_slot(scripthash, &HistoryFilter::open(), slot)
     }
@@ -865,7 +866,7 @@ impl Query {
         &self,
         scripthash: &[u8; 32],
         filter: &HistoryFilter,
-        slot: &mut Option<ShJoinSlot>,
+        slot: &mut Option<Arc<ShJoinSlot>>,
     ) -> Result<Vec<ScriptHashHistoryItem>, QueryError> {
         let Some(view) = self.pin_sh_chain_view()? else {
             *slot = None;
@@ -879,7 +880,7 @@ impl Query {
         &self,
         scripthash: &[u8; 32],
         filter: &HistoryFilter,
-        slot: &mut Option<ShJoinSlot>,
+        slot: &mut Option<Arc<ShJoinSlot>>,
         view: &ChainView,
     ) -> Result<Vec<ScriptHashHistoryItem>, QueryError> {
         let hit = slot
@@ -889,10 +890,11 @@ impl Query {
             return self.scripthash_history_filtered_in(scripthash, filter, view);
         }
         self.ensure_sh_join_slot_in(scripthash, slot, view)?;
-        let recs = &mut slot
-            .as_mut()
-            .ok_or(StoreError::Corrupt("invariant: SH join slot missing"))?
-            .joined;
+        let recs = &mut Arc::make_mut(
+            slot.as_mut()
+                .ok_or(StoreError::Corrupt("invariant: SH join slot missing"))?,
+        )
+        .joined;
         self.enrich_joined(recs, ShJoinNeed::HISTORY)?;
         Ok(history_items_from_joined(recs, filter))
     }
@@ -911,7 +913,7 @@ impl Query {
         &self,
         scripthash: &[u8; 32],
         filter: &HistoryFilter,
-        slot: &mut Option<ShJoinSlot>,
+        slot: &mut Option<Arc<ShJoinSlot>>,
         view: &ChainView,
     ) -> Result<Vec<ScriptHashTxSummary>, QueryError> {
         let hit = slot
@@ -921,10 +923,11 @@ impl Query {
             return self.scripthash_history_summary_filtered_in(scripthash, filter, view);
         }
         self.ensure_sh_join_slot_in(scripthash, slot, view)?;
-        let recs = &mut slot
-            .as_mut()
-            .ok_or(StoreError::Corrupt("invariant: SH join slot missing"))?
-            .joined;
+        let recs = &mut Arc::make_mut(
+            slot.as_mut()
+                .ok_or(StoreError::Corrupt("invariant: SH join slot missing"))?,
+        )
+        .joined;
         self.enrich_joined(recs, ShJoinNeed::HISTORY)?;
         Ok(summaries_from_joined(recs, filter))
     }
@@ -1013,7 +1016,7 @@ impl Query {
     pub fn scripthash_balance_slot(
         &self,
         scripthash: &[u8; 32],
-        slot: &mut Option<ShJoinSlot>,
+        slot: &mut Option<Arc<ShJoinSlot>>,
     ) -> Result<ScriptHashBalance, QueryError> {
         self.ensure_sh_join_slot(scripthash, slot)?;
         self.scripthash_balance_from_slot(slot)
@@ -1023,7 +1026,7 @@ impl Query {
     pub fn scripthash_balance_slot_in(
         &self,
         scripthash: &[u8; 32],
-        slot: &mut Option<ShJoinSlot>,
+        slot: &mut Option<Arc<ShJoinSlot>>,
         view: &ChainView,
     ) -> Result<ScriptHashBalance, QueryError> {
         self.ensure_sh_join_slot_in(scripthash, slot, view)?;
@@ -1032,7 +1035,7 @@ impl Query {
 
     fn scripthash_balance_from_slot(
         &self,
-        slot: &Option<ShJoinSlot>,
+        slot: &Option<Arc<ShJoinSlot>>,
     ) -> Result<ScriptHashBalance, QueryError> {
         let Some(recs) = slot.as_ref() else {
             return Ok(ScriptHashBalance::default());
@@ -1117,7 +1120,7 @@ impl Query {
     pub fn scripthash_listunspent_slot(
         &self,
         scripthash: &[u8; 32],
-        slot: &mut Option<ShJoinSlot>,
+        slot: &mut Option<Arc<ShJoinSlot>>,
     ) -> Result<Vec<ScriptHashUtxo>, QueryError> {
         self.ensure_sh_join_slot(scripthash, slot)?;
         self.scripthash_listunspent_from_slot(slot)
@@ -1127,7 +1130,7 @@ impl Query {
     pub fn scripthash_listunspent_slot_in(
         &self,
         scripthash: &[u8; 32],
-        slot: &mut Option<ShJoinSlot>,
+        slot: &mut Option<Arc<ShJoinSlot>>,
         view: &ChainView,
     ) -> Result<Vec<ScriptHashUtxo>, QueryError> {
         self.ensure_sh_join_slot_in(scripthash, slot, view)?;
@@ -1136,13 +1139,13 @@ impl Query {
 
     fn scripthash_listunspent_from_slot(
         &self,
-        slot: &mut Option<ShJoinSlot>,
+        slot: &mut Option<Arc<ShJoinSlot>>,
     ) -> Result<Vec<ScriptHashUtxo>, QueryError> {
-        let Some(recs) = slot.as_mut() else {
+        let Some(slot_arc) = slot.as_mut() else {
             return Ok(Vec::new());
         };
-        self.fill_create_txids(&mut recs.joined, true)?;
-        self.listunspent_from_joined(&recs.joined)
+        self.fill_create_txids(&mut Arc::make_mut(slot_arc).joined, true)?;
+        self.listunspent_from_joined(&slot_arc.joined)
     }
 
     /// Confirmed unspents whose `scriptPubKey` is in `scripts`.
@@ -1254,7 +1257,7 @@ impl Query {
     pub fn scripthash_chain_stats_slot(
         &self,
         scripthash: &[u8; 32],
-        slot: &mut Option<ShJoinSlot>,
+        slot: &mut Option<Arc<ShJoinSlot>>,
     ) -> Result<ScriptHashChainStats, QueryError> {
         self.ensure_sh_join_slot(scripthash, slot)?;
         let Some(recs) = slot.as_ref() else {
@@ -1267,7 +1270,7 @@ impl Query {
     pub fn scripthash_chain_stats_slot_in(
         &self,
         scripthash: &[u8; 32],
-        slot: &mut Option<ShJoinSlot>,
+        slot: &mut Option<Arc<ShJoinSlot>>,
         view: &ChainView,
     ) -> Result<ScriptHashChainStats, QueryError> {
         self.ensure_sh_join_slot_in(scripthash, slot, view)?;

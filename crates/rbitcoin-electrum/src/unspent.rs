@@ -6,13 +6,14 @@ use rbitcoin_net::MempoolHub;
 use rbitcoin_primitives::Fk;
 use rbitcoin_query::{ChainView, Query, QueryError, ScriptHashUtxo, ShJoinSlot};
 use rbitcoin_store::script_hash;
+use std::sync::Arc;
 
 /// Confirmed SH UTXOs plus mempool funding, minus mempool spends (Electrum rules).
 pub fn scripthash_utxos_with_mempool_slot(
     query: &Query,
     mempool: Option<&MempoolHub>,
     sh: &[u8; 32],
-    slot: &mut Option<ShJoinSlot>,
+    slot: &mut Option<Arc<ShJoinSlot>>,
 ) -> Result<Vec<ScriptHashUtxo>, QueryError> {
     let mut out = query.scripthash_listunspent_slot(sh, slot)?;
     overlay_mempool_utxos(&mut out, mempool, sh);
@@ -24,7 +25,7 @@ pub fn scripthash_utxos_with_mempool_slot_in(
     query: &Query,
     mempool: Option<&MempoolHub>,
     sh: &[u8; 32],
-    slot: &mut Option<ShJoinSlot>,
+    slot: &mut Option<Arc<ShJoinSlot>>,
     view: &ChainView,
 ) -> Result<Vec<ScriptHashUtxo>, QueryError> {
     let mut out = query.scripthash_listunspent_slot_in(sh, slot, view)?;
@@ -91,7 +92,7 @@ pub fn scripthash_mempool_stats_slot(
     query: &Query,
     mp: &MempoolHub,
     sh: &[u8; 32],
-    slot: &mut Option<ShJoinSlot>,
+    slot: &mut Option<Arc<ShJoinSlot>>,
 ) -> Result<MempoolShStats, QueryError> {
     let items = mp.scripthash_mempool(sh);
     let mut stats = MempoolShStats::default();

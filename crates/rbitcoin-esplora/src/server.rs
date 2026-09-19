@@ -406,12 +406,12 @@ const JOIN_BULK_CAP: usize = 16 * 1024 * 1024;
 
 struct InflightJoin {
     /// `None` = still running. `Some(slot)` = finished (`slot` may be empty).
-    done: Mutex<Option<Option<ShJoinSlot>>>,
+    done: Mutex<Option<Option<Arc<ShJoinSlot>>>>,
     cv: std::sync::Condvar,
 }
 
 impl InflightJoin {
-    fn finish(&self, slot: Option<ShJoinSlot>) {
+    fn finish(&self, slot: Option<Arc<ShJoinSlot>>) {
         let mut d = self.done.lock().unwrap_or_else(|p| p.into_inner());
         if d.is_none() {
             *d = Some(slot);
@@ -444,8 +444,8 @@ impl Drop for InflightGuard {
 }
 
 struct ClientJoins {
-    last_sh: Option<([u8; 32], ShJoinSlot)>,
-    last_bulk: HashMap<[u8; 32], ShJoinSlot>,
+    last_sh: Option<([u8; 32], Arc<ShJoinSlot>)>,
+    last_bulk: HashMap<[u8; 32], Arc<ShJoinSlot>>,
     last_req: Instant,
     inflight: HashMap<[u8; 32], Arc<InflightJoin>>,
 }
@@ -497,7 +497,7 @@ fn sweep_clients(map: &mut HashMap<String, ClientJoins>, now: Instant) {
 }
 
 fn cap_bulk(c: &mut ClientJoins) {
-    let mut bytes: usize = c.last_bulk.values().map(ShJoinSlot::packed_bytes).sum();
+    let mut bytes: usize = c.last_bulk.values().map(|s| s.packed_bytes()).sum();
     while bytes > JOIN_BULK_CAP && !c.last_bulk.is_empty() {
         let victim = c
             .last_bulk
@@ -558,7 +558,7 @@ impl AppState {
         &self,
         client: Option<&str>,
         sh: &[u8; 32],
-        f: impl FnOnce(&mut Option<ShJoinSlot>) -> R,
+        f: impl FnOnce(&mut Option<Arc<ShJoinSlot>>) -> R,
     ) -> R {
         let Some(id) = client.filter(|s| !s.is_empty()) else {
             let mut slot = None;
@@ -638,7 +638,11 @@ impl AppState {
         r
     }
 
-    pub(crate) fn seed_bulk(&self, client: Option<&str>, bag: &mut HashMap<[u8; 32], ShJoinSlot>) {
+    pub(crate) fn seed_bulk(
+        &self,
+        client: Option<&str>,
+        bag: &mut HashMap<[u8; 32], Arc<ShJoinSlot>>,
+    ) {
         let Some(id) = client.filter(|s| !s.is_empty()) else {
             return;
         };
@@ -650,7 +654,11 @@ impl AppState {
         }
     }
 
-    pub(crate) fn promote_bulk(&self, client: Option<&str>, bag: HashMap<[u8; 32], ShJoinSlot>) {
+    pub(crate) fn promote_bulk(
+        &self,
+        client: Option<&str>,
+        bag: HashMap<[u8; 32], Arc<ShJoinSlot>>,
+    ) {
         let Some(id) = client.filter(|s| !s.is_empty()) else {
             return;
         };
@@ -1720,6 +1728,23 @@ mod tests {
         let (st, resp) = oneshot_http(&app, req).await;
         assert_eq!(st, 200, "{resp}");
         assert_eq!(cache.lock().unwrap().bulk_len("wallet"), 2);
+        {
+            let st = join_only_state(Arc::clone(&q), Arc::clone(&cache));
+            let mut bag = HashMap::new();
+            st.seed_bulk(Some("wallet"), &mut bag);
+            assert_eq!(bag.len(), 2);
+            let g = cache.lock().unwrap();
+            let c = g.clients.get("wallet").expect("wallet bulk");
+            let packed: usize = c.last_bulk.values().map(|s| s.packed_bytes()).sum();
+            assert!(packed <= JOIN_BULK_CAP, "last-bulk stays under 16 MiB");
+            for (k, v) in &bag {
+                let cached = c.last_bulk.get(k).expect("seeded key");
+                assert!(
+                    Arc::ptr_eq(cached, v),
+                    "seed_bulk must Arc-clone last-bulk, not memcpy outs"
+                );
+            }
+        }
 
         let req = axum::http::Request::builder()
             .method("POST")

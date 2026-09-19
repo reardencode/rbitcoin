@@ -28,11 +28,12 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const MULTI_ADDRESS_LIMIT: usize = 300;
 
-type JoinBag = HashMap<[u8; 32], ShJoinSlot>;
+type JoinBag = HashMap<[u8; 32], Arc<ShJoinSlot>>;
 
 /// Best-chain wire block for Esplora (archived reconstruct; no extra PoW rehash gate).
 fn best_chain_block(
@@ -644,7 +645,7 @@ fn sh_at_view<T>(
     asof_fn: impl Fn(&Query, &rbitcoin_query::ChainView) -> Result<T, rbitcoin_query::QueryError>,
     live_fn: impl Fn(
         &Query,
-        &mut Option<rbitcoin_query::ShJoinSlot>,
+        &mut Option<Arc<rbitcoin_query::ShJoinSlot>>,
         &rbitcoin_query::ChainView,
     ) -> Result<T, rbitcoin_query::QueryError>,
     missing: T,
