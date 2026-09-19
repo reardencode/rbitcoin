@@ -128,7 +128,12 @@ fn apply_operator_kvs(config: &mut NodeConfig, kvs: Vec<(String, String)>) -> Re
     let mut saw_seednode = false;
     for (key, val) in kvs {
         if key == "listen" && !saw_listen {
-            config.listen.p2p = None;
+            config.listen.p2p = crate::config::P2pListen::Auto;
+            config.listen.p2p_extra.clear();
+            saw_listen = true;
+        }
+        if key == "no_listen" && !saw_listen {
+            config.listen.p2p = crate::config::P2pListen::Auto;
             config.listen.p2p_extra.clear();
             saw_listen = true;
         }
@@ -288,7 +293,7 @@ fn operator_usage() -> String {
         "rbitcoin-node {} — usage:\n\
   rbitcoin-node [--conf FILE] [--datadir PATH] [--datadir-cold PATH] [--network NET] \\\n\
     [--signet-challenge HEX] [--signet-block-time SECS] \\\n\
-    [--listen ADDR] [--connect ADDR]... [--seed-node HOST]... [--proxy HOST:PORT] [--onion HOST:PORT] [--proxy-randomize[=0|1]] \\\n\
+    [--listen ADDR] [--no-listen] [--connect ADDR]... [--seed-node HOST]... [--proxy HOST:PORT] [--onion HOST:PORT] [--proxy-randomize[=0|1]] \\\n\
     [--electrum-listen ADDR] [--esplora-listen ADDR] \\\n\
     [--sh-index] [--sp-tweaks] [--sp-tweaks-dust SATS] [--max-sh-creates N] [--esplora-block-template] \\\n\
     [--rpc] [--rpc-listen [ADDR]] [--rpc-token-file PATH] [--rpc-work-queue N] \\\n\
@@ -303,7 +308,7 @@ fn operator_usage() -> String {
     [--min-chain-work HEX] [--max-tip-age SECS] [--check-blocks N] [--mock-time UNIX] \\\n\
     [--block-version N] [--block-min-tx-fee BTC] [--alert-notify CMD] [--startup-notify CMD] \\\n\
     [--max-run-secs N] [--log-level LEVEL] [--api-log PATH] [--asmap PATH] \\\n\
-    [--no-seeds] [--smoke] [--inhibit-suspend]\n\n\
+    [--no-seeds] [--no-listen] [--no-discover] [--smoke] [--inhibit-suspend]\n\n\
 Networks: mainnet|testnet|signet|regtest.\n\
 Custom Signet: --signet-challenge HEX [--signet-block-time SECS].\n\
 Log level: error|warn|info|debug|trace|off (CLI > conf log_level > RBITCOIN_LOG / RUST_LOG).\n\
@@ -369,6 +374,8 @@ fn is_bool_key(key: &str) -> bool {
             | "net_permission_relay"
             | "net_permission_force_relay"
             | "no_seeds"
+            | "no_listen"
+            | "no_discover"
             | "proxy_randomize"
             | "inhibit_suspend"
             | "trusted"
@@ -561,6 +568,8 @@ mod tests {
             "--proxy",
             "--onion",
             "--proxy-randomize",
+            "--no-listen",
+            "--no-discover",
         ] {
             assert!(h.contains(flag), "help must list {flag}");
         }
@@ -590,6 +599,8 @@ mod tests {
             "--blocks-dir",
             "--whitelist-relay",
             "--whitelist-forcerelay",
+            "--nolisten",
+            "--nodiscover",
         ] {
             assert!(!h.contains(concat), "help must not advertise {concat}");
         }
@@ -707,6 +718,76 @@ mod tests {
             rbitcoin_net::Dialer::Socks { randomize, .. } => assert!(randomize),
             other => panic!("expected socks dialer, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn max_inbound_zero_is_allowed() {
+        let _g = OPERATOR_ENV_TEST_LOCK.lock().unwrap();
+        let cfg = ready_config(["rbitcoin-node", "--max-inbound", "0"]);
+        assert_eq!(cfg.listen.max_inbound, 0);
+        assert!(cfg.listen.max_inbound_explicit);
+        cfg.validate()
+            .expect("CLI --max-inbound 0 must assemble and validate");
+        let out = NodeConfig::default()
+            .apply_kv("max_outbound", "0")
+            .unwrap_err();
+        assert!(format!("{out}").contains("max_outbound"));
+    }
+
+    #[test]
+    fn listen_zero_does_not_default_loopback() {
+        let _g = OPERATOR_ENV_TEST_LOCK.lock().unwrap();
+        let mut c = NodeConfig::default();
+        assert_eq!(c.apply_kv("listen", "0").unwrap(), ConfApply::Applied);
+        assert_eq!(c.listen.p2p, crate::config::P2pListen::Off);
+        assert!(c.listen.p2p_bind_addr(Network::Regtest).is_none());
+
+        let n = ready_config(["rbitcoin-node", "--no-listen"]);
+        assert_eq!(n.listen.p2p, crate::config::P2pListen::Off);
+        assert!(n.listen.p2p_bind_addr(Network::Regtest).is_none());
+
+        let eq = ready_config(["rbitcoin-node", "--listen=0"]);
+        assert_eq!(eq.listen.p2p, crate::config::P2pListen::Off);
+
+        let bound = ready_config(["rbitcoin-node", "--listen", "127.0.0.1:18444"]);
+        assert_eq!(
+            bound.listen.p2p,
+            crate::config::P2pListen::Socket("127.0.0.1:18444".parse().unwrap())
+        );
+        assert_eq!(
+            bound.listen.p2p_bind_addr(Network::Regtest),
+            Some("127.0.0.1:18444".parse().unwrap())
+        );
+
+        let auto = NodeConfig::default();
+        assert_eq!(auto.listen.p2p, crate::config::P2pListen::Auto);
+        assert_eq!(
+            auto.listen.p2p_bind_addr(Network::Regtest),
+            Some("127.0.0.1:18444".parse().unwrap())
+        );
+
+        let h = operator_usage();
+        assert!(
+            h.contains("--no-listen"),
+            "help must list kebab --no-listen"
+        );
+        assert!(
+            !h.contains("--nolisten"),
+            "help must not advertise concatenated --nolisten"
+        );
+    }
+
+    #[test]
+    fn no_discover_conf() {
+        let _g = OPERATOR_ENV_TEST_LOCK.lock().unwrap();
+        assert!(NodeConfig::default().listen.discover);
+        let off = ready_config(["rbitcoin-node", "--no-discover"]);
+        assert!(!off.listen.discover);
+        let mut c = NodeConfig::default();
+        assert_eq!(c.apply_kv("no_discover", "1").unwrap(), ConfApply::Applied);
+        assert!(!c.listen.discover);
+        c.apply_kv("no_discover", "0").unwrap();
+        assert!(c.listen.discover);
     }
 
     #[test]
@@ -982,10 +1063,6 @@ mod tests {
         assert_exit(cli_main(["rbitcoin-node", "--conf"]), ExitCode::from(2));
         assert_exit(
             cli_main(["rbitcoin-node", "--max-inbound"]),
-            ExitCode::from(2),
-        );
-        assert_exit(
-            cli_main(["rbitcoin-node", "--max-inbound", "0"]),
             ExitCode::from(2),
         );
         assert_exit(

@@ -59,10 +59,32 @@ let
     ];
   };
   defaultCfg = defaultSystem.config.services.rbitcoin;
+  listenOffSystem = nixpkgs.lib.nixosSystem {
+    inherit (pkgs.stdenv.hostPlatform) system;
+    modules = [
+      module
+      {
+        services.rbitcoin = {
+          enable = true;
+          package = fakePackage;
+          p2p = {
+            listen = false;
+            maxInbound = 0;
+            discover = false;
+            openFirewall = true;
+          };
+        };
+      }
+    ];
+  };
+  listenOffExec = listenOffSystem.config.systemd.services.rbitcoin.serviceConfig.ExecStart;
 in
 assert defaultCfg.package == expectedPackage;
 assert defaultCfg.network == "mainnet";
 assert defaultCfg.p2p.port == 8333;
+assert defaultCfg.p2p.listen == true;
+assert defaultCfg.p2p.maxInbound == 125;
+assert defaultCfg.p2p.discover == true;
 assert defaultCfg.rpc.port == 8332;
 assert defaultCfg.proxy == null;
 assert defaultCfg.onionProxy == null;
@@ -92,4 +114,9 @@ assert builtins.match ".*--log-level debug.*" execStart != null;
 assert builtins.match ".*--max-outbound 8.*" execStart != null;
 assert builtins.match ".*--proxy 127.0.0.1:9050.*" execStart != null;
 assert builtins.match ".*--onion 127.0.0.1:9050.*" execStart != null;
+assert builtins.match ".*--no-listen.*" listenOffExec != null;
+assert builtins.match ".*--listen .*" listenOffExec == null;
+assert builtins.match ".*--max-inbound 0.*" listenOffExec != null;
+assert builtins.match ".*--no-discover.*" listenOffExec != null;
+assert listenOffSystem.config.networking.firewall.allowedTCPPorts == [ ];
 pkgs.runCommand "rbitcoin-nixos-module-eval" { } "touch $out"

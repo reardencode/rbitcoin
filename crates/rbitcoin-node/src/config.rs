@@ -10,6 +10,15 @@ use std::path::{Path, PathBuf};
 /// Default max concurrent inbound P2P sessions (same as net `DEFAULT_MAX_INBOUND`).
 pub const DEFAULT_MAX_INBOUND: u32 = rbitcoin_net::DEFAULT_MAX_INBOUND as u32;
 
+/// P2P bind: omitted flag (loopback default), `--listen=0` / `--no-listen`, or an address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum P2pListen {
+    #[default]
+    Auto,
+    Off,
+    Socket(SocketAddr),
+}
+
 /// Parse Core BTC/kvB (`0.00000001`) to sat/kvB. Negatives and junk fail.
 pub(crate) fn parse_btc_to_sat(s: &str) -> Result<u64, &'static str> {
     let s = s.trim();
@@ -71,7 +80,7 @@ impl From<PathBuf> for DatadirOpts {
 /// P2P / Electrum / Esplora listen and peer-count knobs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ListenOpts {
-    pub p2p: Option<SocketAddr>,
+    pub p2p: P2pListen,
     pub p2p_extra: Vec<SocketAddr>,
     pub electrum: Option<SocketAddr>,
     pub esplora: Option<SocketAddr>,
@@ -89,12 +98,14 @@ pub struct ListenOpts {
     pub onion: Option<SocketAddr>,
     /// Fresh SOCKS USERPASS per peer (Core `-proxyrandomize`; default on).
     pub proxy_randomize: bool,
+    /// Core `-discover` (default on). Off: no self-announce / localaddresses.
+    pub discover: bool,
 }
 
 impl Default for ListenOpts {
     fn default() -> Self {
         Self {
-            p2p: None,
+            p2p: P2pListen::Auto,
             p2p_extra: Vec::new(),
             electrum: None,
             esplora: None,
@@ -109,6 +120,7 @@ impl Default for ListenOpts {
             proxy: None,
             onion: None,
             proxy_randomize: true,
+            discover: true,
         }
     }
 }
@@ -121,6 +133,17 @@ impl ListenOpts {
                 proxy,
                 randomize: self.proxy_randomize,
             },
+        }
+    }
+
+    pub fn p2p_bind_addr(&self, network: Network) -> Option<SocketAddr> {
+        match self.p2p {
+            P2pListen::Off => None,
+            P2pListen::Auto => Some(SocketAddr::from((
+                [127, 0, 0, 1],
+                network.default_p2p_port(),
+            ))),
+            P2pListen::Socket(a) => Some(a),
         }
     }
 }
@@ -328,7 +351,7 @@ impl NodeConfig {
     }
 
     pub fn with_p2p_listen(mut self, addr: SocketAddr) -> Self {
-        self.listen.p2p = Some(addr);
+        self.listen.p2p = P2pListen::Socket(addr);
         self
     }
 
@@ -403,11 +426,11 @@ impl NodeConfig {
     }
 
     fn push_p2p_listen(&mut self, addr: SocketAddr) -> Result<(), NodeError> {
-        if self.listen.p2p == Some(addr) || self.listen.p2p_extra.contains(&addr) {
+        if self.listen.p2p == P2pListen::Socket(addr) || self.listen.p2p_extra.contains(&addr) {
             return Err(NodeError::Init("Duplicate binding configuration".into()));
         }
-        if self.listen.p2p.is_none() {
-            self.listen.p2p = Some(addr);
+        if matches!(self.listen.p2p, P2pListen::Auto | P2pListen::Off) {
+            self.listen.p2p = P2pListen::Socket(addr);
         } else {
             self.listen.p2p_extra.push(addr);
         }
@@ -449,9 +472,6 @@ impl NodeConfig {
         }
         if self.listen.max_outbound == 0 {
             return Err(NodeError::Config("max-outbound must be >= 1".into()));
-        }
-        if self.listen.max_inbound == 0 {
-            return Err(NodeError::Config("max-inbound must be >= 1".into()));
         }
         if (self.signet_challenge.is_some() || self.signet_block_time.is_some())
             && self.network != Network::Signet
@@ -656,10 +676,26 @@ impl NodeConfig {
                 );
             }
             "listen" => {
-                let addr: SocketAddr = val
-                    .parse()
-                    .map_err(|e| NodeError::Config(format!("conf listen: {e}")))?;
-                self.push_p2p_listen(addr)?;
+                if is_listen_off(val) {
+                    self.listen.p2p = P2pListen::Off;
+                    self.listen.p2p_extra.clear();
+                } else {
+                    let addr: SocketAddr = val
+                        .parse()
+                        .map_err(|e| NodeError::Config(format!("conf listen: {e}")))?;
+                    self.push_p2p_listen(addr)?;
+                }
+            }
+            "no_listen" => {
+                if parse_conf_bool(val)
+                    .map_err(|e| NodeError::Config(format!("conf no_listen: {e}")))?
+                {
+                    self.listen.p2p = P2pListen::Off;
+                    self.listen.p2p_extra.clear();
+                }
+            }
+            "no_discover" => {
+                self.listen.discover = !is_conf_true(val);
             }
             "connect" => {
                 self.listen.connect.push(
@@ -781,7 +817,9 @@ impl NodeConfig {
             "net_permission_bind" => {
                 if !val.is_empty() {
                     let g = rbitcoin_net::parse_whitebind(val).map_err(NodeError::Init)?;
-                    if self.listen.p2p != Some(g.addr) && !self.listen.p2p_extra.contains(&g.addr) {
+                    if self.listen.p2p != P2pListen::Socket(g.addr)
+                        && !self.listen.p2p_extra.contains(&g.addr)
+                    {
                         self.push_p2p_listen(g.addr)?;
                     }
                     self.net_perms.whitebind.push(g);
@@ -883,9 +921,6 @@ impl NodeConfig {
                 let n: u32 = val
                     .parse()
                     .map_err(|e| NodeError::Config(format!("conf max_inbound: {e}")))?;
-                if n == 0 {
-                    return Err(NodeError::Config("conf max_inbound must be >= 1".into()));
-                }
                 self.listen.max_inbound = n;
                 self.listen.max_inbound_explicit = true;
             }
@@ -1011,6 +1046,13 @@ fn parse_required_socket(val: &str, key: &str) -> Result<SocketAddr, NodeError> 
     }
     val.parse()
         .map_err(|e| NodeError::Config(format!("conf {key}: {e}")))
+}
+
+fn is_listen_off(val: &str) -> bool {
+    matches!(
+        val.to_ascii_lowercase().as_str(),
+        "0" | "false" | "off" | "no"
+    )
 }
 
 fn is_conf_true(val: &str) -> bool {
@@ -1315,7 +1357,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             c2.listen.p2p,
-            Some("127.0.0.1:18445".parse().unwrap()),
+            P2pListen::Socket("127.0.0.1:18445".parse().unwrap()),
             "net_permission_bind listens"
         );
         assert_eq!(c2.net_perms.whitebind.len(), 1);
@@ -1657,12 +1699,35 @@ mod tests {
         assert!(cfg.validate().is_err());
         cfg.listen.max_outbound = 1;
         cfg.listen.max_inbound = 0;
-        assert!(cfg.validate().is_err());
-        cfg.listen.max_inbound = 1;
         assert!(cfg.validate().is_ok());
         assert_eq!(cfg.milestone(), Milestone::NONE);
         cfg.milestone_height = 10;
         assert_eq!(cfg.milestone().height, 10);
+    }
+
+    #[test]
+    fn max_inbound_zero_is_allowed() {
+        let mut c = NodeConfig::default().with_datadir(tmp());
+        assert_eq!(c.apply_kv("max_inbound", "0").unwrap(), ConfApply::Applied);
+        assert_eq!(c.listen.max_inbound, 0);
+        assert!(c.listen.max_inbound_explicit);
+        c.validate()
+            .expect("max_inbound=0 is outbound-only, not an error");
+
+        let err = NodeConfig::default()
+            .apply_kv("max_outbound", "0")
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("max_outbound"),
+            "max_outbound=0 must still fail: {err}"
+        );
+        let mut o = NodeConfig::default().with_datadir(tmp());
+        o.listen.max_outbound = 0;
+        let verr = o.validate().unwrap_err().to_string();
+        assert!(
+            verr.contains("max-outbound"),
+            "validate must still reject max_outbound=0: {verr}"
+        );
     }
 
     #[test]
@@ -1808,7 +1873,7 @@ mod tests {
         let mut cfg = NodeConfig::default().with_datadir(dir.join("d"));
         cfg.merge_conf_file(&conf).unwrap();
         assert_eq!(cfg.network, Network::Regtest);
-        assert!(cfg.listen.p2p.is_some());
+        assert!(matches!(cfg.listen.p2p, P2pListen::Socket(_)));
         assert_eq!(cfg.listen.connect.len(), 1);
         assert!(cfg.shindex);
         assert!(!cfg.sptweaks);

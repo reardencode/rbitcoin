@@ -1049,6 +1049,8 @@ pub struct PeerHub {
     external_ips: Mutex<Vec<IpAddr>>,
     /// P2P listen port used with advertised external IPs.
     listen_port: AtomicU16,
+    /// Core `-discover`. Off: never self-announce, even with `--external-ip`.
+    discover: AtomicBool,
     asmap: Mutex<Option<Arc<crate::asmap::AsMap>>>,
     /// Tip-mode mempool for Core `EraseForPeer` on disconnect.
     mempool: Mutex<Option<Weak<crate::tx_relay::MempoolHub>>>,
@@ -1123,6 +1125,7 @@ impl PeerHub {
             peer_timeout_secs: AtomicU64::new(60),
             external_ips: Mutex::new(Vec::new()),
             listen_port: AtomicU16::new(0),
+            discover: AtomicBool::new(true),
             asmap: Mutex::new(None),
             mempool: Mutex::new(None),
             net_perms: Mutex::new(crate::net_permissions::NetPermTable::default()),
@@ -1182,9 +1185,16 @@ impl PeerHub {
         self.listen_port.store(port, Ordering::Relaxed);
     }
 
+    pub fn set_discover(&self, on: bool) {
+        self.discover.store(on, Ordering::Relaxed);
+    }
+
     /// `getnetworkinfo.localaddresses` rows for operator-advertised IPs.
     pub fn rpc_local_addresses(&self) -> Vec<(String, u16, i32)> {
         const LOCAL_MANUAL: i32 = 4;
+        if !self.discover.load(Ordering::Relaxed) {
+            return Vec::new();
+        }
         let port = self.listen_port.load(Ordering::Relaxed);
         if port == 0 {
             return Vec::new();
@@ -1200,6 +1210,9 @@ impl PeerHub {
     }
 
     pub fn advertise_local_socket(&self) -> Option<SocketAddr> {
+        if !self.discover.load(Ordering::Relaxed) {
+            return None;
+        }
         let port = self.listen_port.load(Ordering::Relaxed);
         if port == 0 {
             return None;

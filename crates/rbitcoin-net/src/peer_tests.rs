@@ -5281,6 +5281,39 @@ fn externalip_is_advertised_once_then_after_a_day() {
 }
 
 #[test]
+fn no_discover_suppresses_self_announce() {
+    use crate::peers::{PeerConnType, PeerHub};
+    use bitcoin::p2p::address::Address;
+    use bitcoin::p2p::message_network::VersionMessage;
+    use bitcoin::p2p::ServiceFlags;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let hub = PeerHub::new();
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+    let ver = VersionMessage {
+        version: 70016,
+        services: ServiceFlags::NETWORK,
+        timestamp: 0,
+        receiver: Address::new(&addr, ServiceFlags::NONE),
+        sender: Address::new(&addr, ServiceFlags::NONE),
+        nonce: 1,
+        user_agent: "/rbitcoin:test/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    let peer = hub.register(addr, addr, &ver, false, PeerConnType::OutboundFullRelay);
+    hub.set_listen_port(18445);
+    hub.set_external_ips(vec![IpAddr::V4(Ipv4Addr::new(42, 42, 42, 42))]);
+    hub.set_discover(false);
+    assert!(
+        peer.take_local_addr_due(1_000).is_none(),
+        "--no-discover must suppress self-announce"
+    );
+    assert!(peer.take_self_announce_msg().is_none());
+    assert!(hub.rpc_local_addresses().is_empty());
+}
+
+#[test]
 fn redundant_verack_is_ignored_and_logged() {
     use bitcoin::consensus::encode::serialize;
     use bitcoin::Network;

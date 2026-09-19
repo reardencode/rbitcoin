@@ -100,34 +100,90 @@ impl P2PNode {
         max_inbound: usize,
         dialer: crate::socks::Dialer,
     ) -> Result<Self, NetError> {
+        let bind = (max_inbound > 0).then_some(listen);
+        Self::start_inner(
+            bind,
+            query,
+            params,
+            milestone,
+            user_agent,
+            max_inbound,
+            dialer,
+        )
+        .await
+    }
+
+    /// Outbound dials only: no P2P `TcpListener`. `local_addr` is `127.0.0.1:0`.
+    pub async fn start_outbound_only(
+        query: Query,
+        params: ChainParams,
+        milestone: Milestone,
+        user_agent: String,
+        max_inbound: usize,
+        dialer: crate::socks::Dialer,
+    ) -> Result<Self, NetError> {
+        Self::start_inner(
+            None,
+            query,
+            params,
+            milestone,
+            user_agent,
+            max_inbound,
+            dialer,
+        )
+        .await
+    }
+
+    async fn start_inner(
+        listen: Option<SocketAddr>,
+        query: Query,
+        params: ChainParams,
+        milestone: Milestone,
+        user_agent: String,
+        max_inbound: usize,
+        dialer: crate::socks::Dialer,
+    ) -> Result<Self, NetError> {
         let magic = magic_for_params(&params);
         let hub = Arc::new(ChainHub::new(query, params, milestone));
         hub.ensure_genesis()?;
         let cache = hub.cache.clone();
         let query = hub.query.clone();
-        let listener = TcpListener::bind(listen).await?;
-        let local_addr = listener.local_addr()?;
         let shutdown = Arc::new(AtomicBool::new(false));
+
+        let (listener, local_addr) = if let Some(addr) = listen {
+            let listener = TcpListener::bind(addr).await?;
+            let local_addr = listener.local_addr()?;
+            (Some(listener), local_addr)
+        } else {
+            (None, SocketAddr::from(([127, 0, 0, 1], 0)))
+        };
 
         let peers = PeerHub::new();
         let (dial_tx, mut dial_rx) = tokio::sync::mpsc::unbounded_channel::<DialRequest>();
         peers.set_dialer(dial_tx);
 
-        let max_inbound = max_inbound.max(1);
-        let inbound_sem = inbound_semaphore(max_inbound);
+        let max_inbound = if listener.is_some() {
+            max_inbound.max(1)
+        } else {
+            0
+        };
+        let inbound_sem = inbound_semaphore(max_inbound.max(1));
         let session_tasks = Arc::new(Mutex::new(Vec::<JoinHandle<()>>::new()));
-        let accept_task = spawn_inbound_accept(
-            listener,
-            local_addr,
-            hub.clone(),
-            peers.clone(),
-            user_agent.clone(),
-            magic,
-            max_inbound,
-            inbound_sem.clone(),
-            shutdown.clone(),
-            session_tasks.clone(),
-        );
+        let mut tasks = Vec::new();
+        if let Some(listener) = listener {
+            tasks.push(spawn_inbound_accept(
+                listener,
+                local_addr,
+                hub.clone(),
+                peers.clone(),
+                user_agent.clone(),
+                magic,
+                max_inbound.max(1),
+                inbound_sem.clone(),
+                shutdown.clone(),
+                session_tasks.clone(),
+            ));
+        }
 
         let follow_live = Arc::new(AtomicUsize::new(0));
         let dial_hub = hub.clone();
@@ -158,6 +214,7 @@ impl P2PNode {
                 push_session_task(&sessions_dial, h);
             }
         });
+        tasks.push(dial_task);
 
         Ok(Self {
             cache,
@@ -167,7 +224,7 @@ impl P2PNode {
             magic,
             shutdown,
             follow_live,
-            tasks: vec![accept_task, dial_task],
+            tasks,
             session_tasks,
             peers,
             user_agent,
@@ -795,5 +852,68 @@ mod tests {
         assert!(std::net::TcpStream::connect(extra).is_ok());
         node.shutdown().await;
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p2p_outbound_only_dials_without_listener() {
+        let _live = live_p2p_lock().await;
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("rbitcoin-outbound-only-{n}"));
+        std::fs::create_dir_all(dir.join("seed")).unwrap();
+        std::fs::create_dir_all(dir.join("follow")).unwrap();
+        let qa = Query::open_or_create_tiny(dir.join("seed")).unwrap();
+        let qb = Query::open_or_create_tiny(dir.join("follow")).unwrap();
+        let params = ChainParams::regtest();
+        let seeder = P2PNode::start_with_agent(
+            "127.0.0.1:0".parse().unwrap(),
+            qa,
+            params.clone(),
+            Milestone::NONE,
+            "/rbitcoin:0.1.0(seed)/".into(),
+            crate::DEFAULT_MAX_INBOUND,
+        )
+        .await
+        .unwrap();
+        let mut follower = P2PNode::start_outbound_only(
+            qb,
+            params,
+            Milestone::NONE,
+            "/rbitcoin:0.1.0(follow)/".into(),
+            0,
+            crate::socks::Dialer::Direct,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            follower.local_addr,
+            "127.0.0.1:0".parse().unwrap(),
+            "outbound-only must not bind a P2P port"
+        );
+        assert_eq!(follower.max_inbound, 0);
+        let inbound_err = follower
+            .peers
+            .addconnection(seeder.local_addr, PeerConnType::Inbound)
+            .unwrap_err();
+        assert!(
+            inbound_err.contains("inbound"),
+            "addconnection inbound must refuse: {inbound_err}"
+        );
+
+        follower.follow_from(seeder.local_addr).await.unwrap();
+        let mut linked = false;
+        for _ in 0..100 {
+            if follower.follow_live_count() >= 1 && !seeder.peers.snapshot().is_empty() {
+                linked = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        seeder.shutdown().await;
+        follower.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(linked, "outbound-only follower must handshake the seeder");
     }
 }
