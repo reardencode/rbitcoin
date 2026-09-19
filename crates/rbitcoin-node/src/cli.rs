@@ -631,7 +631,26 @@ mod tests {
         let el = ready_config(["rbitcoin-node", "--sh-index", "--electrum-listen"]);
         assert_eq!(el.listen.electrum.unwrap().port(), 50001);
         let es = ready_config(["rbitcoin-node", "--sh-index", "--esplora-listen"]);
-        assert_eq!(es.listen.esplora.unwrap().port(), 3000);
+        match es.listen.esplora.unwrap() {
+            rbitcoin_esplora::EsploraListen::Tcp(a) => assert_eq!(a.port(), 3000),
+            #[cfg(unix)]
+            rbitcoin_esplora::EsploraListen::Unix(_) => panic!("default esplora-listen is TCP"),
+        }
+        #[cfg(unix)]
+        {
+            let es_unix = ready_config([
+                "rbitcoin-node",
+                "--sh-index",
+                "--esplora-listen",
+                "/tmp/esplora.sock",
+            ]);
+            match es_unix.listen.esplora.unwrap() {
+                rbitcoin_esplora::EsploraListen::Unix(p) => {
+                    assert_eq!(p, std::path::PathBuf::from("/tmp/esplora.sock"))
+                }
+                rbitcoin_esplora::EsploraListen::Tcp(_) => panic!("path must be unix"),
+            }
+        }
     }
 
     #[test]

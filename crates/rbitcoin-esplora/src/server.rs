@@ -21,6 +21,7 @@ use rbitcoin_store::StoreError;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -278,10 +279,51 @@ pub(crate) struct GbtCache {
     pub(crate) body: Value,
 }
 
+/// TCP `host:port` or a filesystem unix socket.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EsploraListen {
+    Tcp(SocketAddr),
+    #[cfg(unix)]
+    Unix(PathBuf),
+}
+
+impl EsploraListen {
+    /// Empty value → `127.0.0.1:<default_port>`. A `host:port` is TCP. A path
+    /// (`/…`, `./…`, or `*.sock`) is unix (not Windows).
+    pub fn parse(val: &str, default_port: u16) -> Result<Self, String> {
+        if val.is_empty() {
+            return Ok(Self::Tcp(SocketAddr::from(([127, 0, 0, 1], default_port))));
+        }
+        if let Ok(addr) = val.parse::<SocketAddr>() {
+            return Ok(Self::Tcp(addr));
+        }
+        let pathish = val.starts_with('/')
+            || val.starts_with('.')
+            || val.contains('/')
+            || val.ends_with(".sock");
+        if !pathish {
+            return Err(format!(
+                "esplora-listen: expected host:port or unix path, got {val}"
+            ));
+        }
+        #[cfg(unix)]
+        {
+            return Ok(Self::Unix(PathBuf::from(val)));
+        }
+        #[cfg(not(unix))]
+        {
+            Err(
+                "esplora unix socket needs AF_UNIX; this Windows build has no tokio UnixListener"
+                    .into(),
+            )
+        }
+    }
+}
+
 /// Esplora HTTP server config (listen + shared DoS floor + WS caps).
 #[derive(Clone, Debug)]
 pub struct EsploraConfig {
-    pub listen: SocketAddr,
+    pub listen: EsploraListen,
     /// Shared with Electrum ([`ServeLimits::for_public_proxy`] defaults).
     pub limits: ServeLimits,
     /// Address encoding network (mainnet/testnet/signet/regtest).
@@ -304,6 +346,10 @@ impl EsploraConfig {
     }
 
     pub fn with_network(listen: SocketAddr, network: Network) -> Self {
+        Self::with_listen(EsploraListen::Tcp(listen), network)
+    }
+
+    pub fn with_listen(listen: EsploraListen, network: Network) -> Self {
         Self {
             listen,
             limits: ServeLimits::for_public_proxy(),
@@ -318,7 +364,9 @@ impl EsploraConfig {
 }
 
 pub struct EsploraHandle {
+    /// Bound TCP address. Unix listen leaves this as `127.0.0.1:0`.
     pub local_addr: SocketAddr,
+    pub socket_path: Option<PathBuf>,
     shutdown: Arc<AtomicBool>,
     task: JoinHandle<()>,
 }
@@ -378,8 +426,6 @@ pub async fn run_esplora(
     mempool: Option<Arc<MempoolHub>>,
     tip_tx: Option<broadcast::Sender<TipEvent>>,
 ) -> Result<EsploraHandle, std::io::Error> {
-    let listener = TcpListener::bind(config.listen).await?;
-    let local_addr = listener.local_addr()?;
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_c = shutdown.clone();
 
@@ -508,22 +554,58 @@ pub async fn run_esplora(
 
     let app = rest.merge(ws_routes).with_state(state);
 
-    let task = tokio::spawn(async move {
-        let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
-            while !shutdown_c.load(Ordering::SeqCst) {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        });
-        if let Err(e) = serve.await {
-            rbitcoin_log::warn!("esplora: serve ended: {e}");
+    match config.listen {
+        EsploraListen::Tcp(addr) => {
+            let listener = TcpListener::bind(addr).await?;
+            let local_addr = listener.local_addr()?;
+            let task = tokio::spawn(async move {
+                let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
+                    while !shutdown_c.load(Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                });
+                if let Err(e) = serve.await {
+                    rbitcoin_log::warn!("esplora: serve ended: {e}");
+                }
+            });
+            Ok(EsploraHandle {
+                local_addr,
+                socket_path: None,
+                shutdown,
+                task,
+            })
         }
-    });
-
-    Ok(EsploraHandle {
-        local_addr,
-        shutdown,
-        task,
-    })
+        #[cfg(unix)]
+        EsploraListen::Unix(path) => {
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent)?;
+                }
+            }
+            let _ = std::fs::remove_file(&path);
+            let listener = tokio::net::UnixListener::bind(&path)?;
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660));
+            }
+            let task = tokio::spawn(async move {
+                let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
+                    while !shutdown_c.load(Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                });
+                if let Err(e) = serve.await {
+                    rbitcoin_log::warn!("esplora: serve ended: {e}");
+                }
+            });
+            Ok(EsploraHandle {
+                local_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+                socket_path: Some(path),
+                shutdown,
+                task,
+            })
+        }
+    }
 }
 
 async fn tip_height(State(st): State<AppState>) -> Response {
@@ -847,6 +929,76 @@ mod tests {
             .trim()
             .to_string();
         (status, body)
+    }
+
+    fn parse_http_response(buf: &[u8]) -> (u16, String) {
+        let text = String::from_utf8_lossy(buf).into_owned();
+        let status = text
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let body = text
+            .split("\r\n\r\n")
+            .nth(1)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        (status, body)
+    }
+
+    #[cfg(unix)]
+    async fn http_get_unix(sock: &std::path::Path, path: &str) -> (u16, String) {
+        use tokio::net::UnixStream;
+        let mut stream = UnixStream::connect(sock).await.expect("unix connect");
+        let req = format!("GET {path} HTTP/1.1\r\nHost: api\r\nConnection: close\r\n\r\n");
+        stream.write_all(req.as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        parse_http_response(&buf)
+    }
+
+    #[test]
+    fn esplora_listen_parse_tcp_and_path() {
+        assert!(matches!(
+            EsploraListen::parse("127.0.0.1:3000", 3000).unwrap(),
+            EsploraListen::Tcp(_)
+        ));
+        assert!(matches!(
+            EsploraListen::parse("", 3000).unwrap(),
+            EsploraListen::Tcp(a) if a.port() == 3000
+        ));
+        #[cfg(unix)]
+        {
+            assert!(matches!(
+                EsploraListen::parse("/run/rbitcoin/esplora.sock", 3000).unwrap(),
+                EsploraListen::Unix(_)
+            ));
+            assert!(matches!(
+                EsploraListen::parse("./esplora.sock", 3000).unwrap(),
+                EsploraListen::Unix(_)
+            ));
+        }
+        assert!(EsploraListen::parse("not-an-addr", 3000).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_listen_serves_tip_height() {
+        let (dir, q) = temp_query("esplora-unix");
+        let (h0, t0) = coinbase(0, Fk::NULL, None);
+        q.connect_block(Height(0), &h0, &[t0]).unwrap();
+        let q = Arc::new(q);
+        let sock = dir.join("esplora.sock");
+        let cfg = EsploraConfig::with_listen(EsploraListen::Unix(sock.clone()), Network::Regtest);
+        let handle = run_esplora(cfg, q, None, None).await.expect("unix listen");
+        assert!(sock.exists(), "socket file");
+        let (st, body) = http_get_unix(&sock, "/blocks/tip/height").await;
+        assert_eq!(st, 200, "{body}");
+        assert_eq!(body, "0");
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

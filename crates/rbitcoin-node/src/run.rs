@@ -3,7 +3,7 @@ use crate::error::NodeError;
 use crate::regtest_rpc::HubRegtest;
 use bitcoin::consensus::Encodable;
 use rbitcoin_electrum::{run_electrum, ElectrumConfig, ElectrumHandle, TipNotify};
-use rbitcoin_esplora::{run_esplora, BlockTemplateFn, EsploraConfig, EsploraHandle};
+use rbitcoin_esplora::{run_esplora, BlockTemplateFn, EsploraConfig, EsploraHandle, EsploraListen};
 use rbitcoin_log::{debug, enabled, info, warn, Level};
 use rbitcoin_net::{
     default_port, format_serve_perf, format_tip_perf_sizes, netgroup, read_proc_rss,
@@ -585,7 +585,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     .await;
     let (esplora_handles, esplora_tip_bridge) = start_esplora_if_ready(
         sh_tip_ready,
-        config.listen.esplora,
+        config.listen.esplora.clone(),
         config.network,
         config.esplora_block_template,
         &shutdown,
@@ -1294,14 +1294,14 @@ async fn start_electrum_if_ready(
 
 async fn start_esplora_if_ready(
     sh_tip_ready: bool,
-    addr: Option<SocketAddr>,
+    listen: Option<EsploraListen>,
     network: Network,
     enable_block_template: bool,
     shutdown: &Shutdown,
     hub: Arc<ChainHub>,
     mempool: &std::sync::Arc<MempoolHub>,
 ) -> (Vec<EsploraHandle>, Option<tokio::task::JoinHandle<()>>) {
-    let Some(addr) = addr else {
+    let Some(listen) = listen else {
         return (Vec::new(), None);
     };
     if !sh_tip_ready || shutdown.requested() {
@@ -1322,7 +1322,7 @@ async fn start_esplora_if_ready(
         Arc::clone(&shutdown.flag),
         Some,
     );
-    let mut ecfg = EsploraConfig::with_network(addr, btc_net);
+    let mut ecfg = EsploraConfig::with_listen(listen, btc_net);
     if enable_block_template {
         let q = Arc::clone(&hub.query);
         let mp = Arc::clone(mempool);
@@ -1362,7 +1362,11 @@ async fn start_esplora_if_ready(
         Ok(h) => {
             info!(
                 "esplora HTTP+WS on {} (REST + /v1/ws; max_conn={} max_body={} idle={}s max_ws={}; TLS via reverse proxy if public)",
-                h.local_addr, max_conn, max_body, idle_secs, max_ws
+                h.socket_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| h.local_addr.to_string()),
+                max_conn, max_body, idle_secs, max_ws
             );
             (vec![h], Some(bridge))
         }
@@ -2241,7 +2245,7 @@ mod tests {
         cfg.listen.use_seeds = false;
         cfg.listen.connect.clear();
         cfg.shindex = true;
-        cfg.listen.esplora = Some("127.0.0.1:0".parse().unwrap());
+        cfg.listen.esplora = Some(EsploraListen::Tcp("127.0.0.1:0".parse().unwrap()));
         cfg.max_run_secs = Some(0);
         let result = tokio::time::timeout(Duration::from_secs(15), run_p2p(cfg)).await;
         assert!(result.is_ok(), "run_p2p timed out");

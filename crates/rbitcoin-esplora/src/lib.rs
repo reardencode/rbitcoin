@@ -14,4 +14,6 @@ mod server;
 mod tx_json;
 mod ws;
 
-pub use server::{run_esplora, sample_reset_perf, BlockTemplateFn, EsploraConfig, EsploraHandle};
+pub use server::{
+    run_esplora, sample_reset_perf, BlockTemplateFn, EsploraConfig, EsploraHandle, EsploraListen,
+};

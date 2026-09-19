@@ -380,7 +380,7 @@ Clean smoke:
 | `--sp-tweaks` | `sp_tweaks=` | **off** — thin BIP-352 tweak index (`sp_tweaks.*`) |
 | `--sp-tweaks-dust SATS` | `sp_tweaks_dust=` | **1000** — omit served P2TR outs with `value <= SATS` (`0` = serve all; **546** matches Cake electrs) |
 | `--electrum-listen [ADDR]` | `electrum_listen=` | disabled (**requires** `--sh-index`); omit ADDR → `127.0.0.1:50001` |
-| `--esplora-listen [ADDR]` | `esplora_listen=` | disabled (Esplora REST; **requires** `--sh-index`); omit ADDR → `127.0.0.1:3000` |
+| `--esplora-listen [ADDR\|PATH]` | `esplora_listen=` | disabled (Esplora REST; **requires** `--sh-index`); omit ADDR → `127.0.0.1:3000`; a filesystem path is unix HTTP (mode **0660**, dummy `Host: api` is fine) |
 | `--esplora-block-template` | `esplora_block_template=` | **off** — `GET /block-template` is 404; on = GBT JSON (same as RPC template mode) |
 | `--rpc` | `rpc=` | **off** — unix JSON-RPC `{datadir}/rpc.sock` (mode 0600) |
 | `--rpc-listen [ADDR]` | `rpc_listen=` | disabled — implies `--rpc`; omit ADDR → `127.0.0.1` and Core-matching RPC port |

@@ -2314,7 +2314,7 @@ async fn node_run_p2p_short() {
         cfg.listen.connect = vec![seed_addr];
         cfg.listen.use_seeds = false;
         cfg.listen.electrum = Some(electrum_addr);
-        cfg.listen.esplora = Some(esplora_addr);
+        cfg.listen.esplora = Some(rbitcoin_esplora::EsploraListen::Tcp(esplora_addr));
         cfg.shindex = true;
         cfg.rpc.listen = Some(rpc_addr);
         std::fs::write(node_dir.path().join("rpc.token"), "pass").unwrap();

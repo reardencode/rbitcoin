@@ -740,7 +740,7 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
     cfg.listen.connect.clear();
     cfg.shindex = true;
     cfg.listen.electrum = Some(electrum_addr);
-    cfg.listen.esplora = Some(esplora_addr);
+    cfg.listen.esplora = Some(rbitcoin_esplora::EsploraListen::Tcp(esplora_addr));
     cfg.rpc.listen = Some(rpc_addr);
     std::fs::write(td.path().join("rpc.token"), "pass").unwrap();
     cfg.max_run_secs = Some(90);

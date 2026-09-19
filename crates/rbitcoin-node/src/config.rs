@@ -2,6 +2,7 @@ use crate::error::NodeError;
 use bitcoin::hex::FromHex;
 use bitcoin::ScriptBuf;
 use rbitcoin_consensus::{ChainParams, Milestone};
+use rbitcoin_esplora::EsploraListen;
 use rbitcoin_primitives::{Network, DEFAULT_ELECTRUM_PORT, DEFAULT_ESPLORA_PORT};
 use rbitcoin_store::HeadScale;
 use std::net::SocketAddr;
@@ -74,7 +75,7 @@ pub struct ListenOpts {
     pub p2p: Option<SocketAddr>,
     pub p2p_extra: Vec<SocketAddr>,
     pub electrum: Option<SocketAddr>,
-    pub esplora: Option<SocketAddr>,
+    pub esplora: Option<EsploraListen>,
     pub connect: Vec<SocketAddr>,
     pub seednodes: Vec<String>,
     pub use_seeds: bool,
@@ -661,9 +662,9 @@ impl NodeConfig {
             }
             "esplora_listen" => {
                 self.listen.esplora = Some(if val.is_empty() {
-                    SocketAddr::from(([127, 0, 0, 1], DEFAULT_ESPLORA_PORT))
+                    EsploraListen::Tcp(SocketAddr::from(([127, 0, 0, 1], DEFAULT_ESPLORA_PORT)))
                 } else {
-                    val.parse()
+                    EsploraListen::parse(val, DEFAULT_ESPLORA_PORT)
                         .map_err(|e| NodeError::Config(format!("conf esplora_listen: {e}")))?
                 });
             }
@@ -1682,7 +1683,7 @@ mod tests {
     #[test]
     fn esplora_without_shindex_fails_validate() {
         let mut cfg = NodeConfig::default().with_datadir(tmp());
-        cfg.listen.esplora = Some("127.0.0.1:3000".parse().unwrap());
+        cfg.listen.esplora = Some(EsploraListen::parse("127.0.0.1:3000", 3000).unwrap());
         cfg.shindex = false;
         let err = cfg.validate().unwrap_err().to_string();
         assert!(
