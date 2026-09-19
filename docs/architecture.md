@@ -54,6 +54,9 @@ for unknown-height bodies (mark missing → re-getdata).
   Tip-follow does **not** wait on SH materialize; Electrum/Esplora do.
   SH tip materialize is unsorted per-shard files then unique-sort; cold megakey pages
   stream into 4 KiB delta pages (schema 17).
+  **0.8:** Esplora will also cover mempool/electrs `/internal/*` bulk HTTP
+  so this binary can replace electrs behind mempool.space `/api/`
+  ([`COMPAT.md`](../COMPAT.md)).
 - **JSON-RPC** (optional) is a Core-class **subset** over archive + mempool —
   see [`rpc.md`](./rpc.md).
 
@@ -73,7 +76,7 @@ for unknown-height bodies (mark missing → re-getdata).
 | Script verification | Pure Rust in-tree (`rbitcoin-consensus::script`) | libbitcoinconsensus / script interpreter in C++ |
 | Electrum | In-process index on confirm | External (Fulcrum, ElectrumX, …) |
 | IBD vs “current” | Dedicated densify loop exits when the **connected work path** has no remainder and is at (or one chatter block from) advertised peer height; then disconnect and `enter_tip_mode`. After the switch, **relay-inhibited** is `--min-chain-work` + `--max-tip-age` (24h). RPC `initialblockdownload` is the Core alias for that latch (not “still densifying”). | Same header/block pipeline throughout. `IsInitialBlockDownload` latches false on min chain work + tip timestamp recency (`nMaxTipAge`). btcd/libbitcoin also latch on tip time, not empty getdata. |
-| Product scope | Full node + Electrum backend; **no** wallet/mining/GUI/prune | Full Core product surface |
+| Product scope | Full node + Electrum/Esplora; **0.8** Core+electrs drop-in ([`COMPAT.md`](../COMPAT.md)); **no** wallet/GUI/prune | Full Core product surface |
 
 Product / wire intentional differences: [`COMPAT.md`](../COMPAT.md).
 

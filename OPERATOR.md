@@ -902,8 +902,9 @@ security model by itself.
 `getNodeIsElectrs()` will probe silent-payment tweaks. Other tweaks clients
 do not need that substring. We are **not** electrs — see `COMPAT.md`.
 
-**Not a graphical explorer.** We serve clients that already know their
-scripthashes / txids; we do **not** aim to back block-explorer search UIs.
+**Not a search-box explorer.** We serve clients that already know their
+scripthashes / txids. Address-prefix autocomplete is out.
+**0.8** electrs HTTP drop-in (mempool.space nginx `/api/`): [`COMPAT.md`](./COMPAT.md).
 
 ```bash
 ./target/release/rbitcoin-node \
@@ -1048,14 +1049,16 @@ no confirmed item. Esplora `oldest_tx`/`newest_tx` are from the returned
 ## Esplora REST
 
 Blockstream-**compatible** **plain HTTP** API for **wallet clients and APIs**
-(exact address/scripthash, tx/block by id, broadcast)—**not** a graphical
-block-explorer backend. Same internet-facing model as Electrum: app DoS limits
-always on; terminate TLS at a reverse proxy.
+(exact address/scripthash, tx/block by id, broadcast). **0.8** adds
+mempool/electrs `/internal/*` bulk routes and unix listen so this process can
+replace electrs behind mempool.space nginx `/api/` ([`COMPAT.md`](./COMPAT.md)).
+Same internet-facing model as Electrum: app DoS limits always on; terminate
+TLS at a reverse proxy.
 
 **Requires `--sh-index`.** Without it the node refuses to start.
 
-**Explicit non-goals:** explorer search/`address-prefix`, Liquid,
-mempool.space-style catalogue UI APIs. Opt-in `GET /block-template` is GBT
+**Still out:** explorer search/`address-prefix`, Liquid, in-binary
+mempool.space `/api/v1/` catalogue. Opt-in `GET /block-template` is GBT
 (`--esplora-block-template`), not a stratum/pool stack. Compact
 `/address|scripthash/…/txs/summary` is a mempool.space-shaped dialect (not
 Blockstream Esplora `API.md`); surface: [`COMPAT.md`](./COMPAT.md).
@@ -1099,7 +1102,7 @@ rbitcoin-cli --datadir ./datadir-mainnet getblockcount
 | Address / scripthash | chain_stats, utxo, `/txs` + `/txs/chain` + `/txs/mempool`, compact `/txs/summary` (dialect; [`COMPAT.md`](./COMPAT.md)); complete after SH tip finalize |
 | Mempool | `/mempool`, `/mempool/txids`, `/mempool/recent`, `/fee-estimates`, `/fees/recommended`; `POST /tx` and **`POST /txs/package`** when hub open |
 | Without mempool | mempool routes empty/safe; POST broadcast → **503**; WS track still upgrades but mempool pushes need hub |
-| Unknown / non-goal | **404** (explorer-only APIs e.g. address-prefix; Liquid). `GET /block-template` is 404 unless `--esplora-block-template`. |
+| Unknown / non-goal | **404** (address-prefix; Liquid). `GET /block-template` is 404 unless `--esplora-block-template`. **0.8** `/internal/*`: [`COMPAT.md`](./COMPAT.md) |
 
 **Large responses:** `GET /block/:hash/raw` may be multi‑MB; concurrency/timeout from `ServeLimits` still apply.  
 **Package broadcast:** body is a JSON array of tx hex (max 25); uses the same libre-relay mempool policy as single `POST /tx`.
