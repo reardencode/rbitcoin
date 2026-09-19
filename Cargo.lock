@@ -802,6 +802,7 @@ dependencies = [
  "arc-swap",
  "bip324",
  "bitcoin",
+ "getrandom 0.4.3",
  "libc",
  "rbitcoin-consensus",
  "rbitcoin-log",

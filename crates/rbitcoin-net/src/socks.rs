@@ -5,6 +5,21 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+pub(crate) struct ProxyCreds {
+    pub(crate) username: Vec<u8>,
+    pub(crate) password: Vec<u8>,
+}
+
+impl ProxyCreds {
+    pub(crate) fn fresh() -> Self {
+        let mut username = vec![0u8; 16];
+        let mut password = vec![0u8; 16];
+        getrandom::fill(&mut username).expect("CSPRNG for SOCKS creds");
+        getrandom::fill(&mut password).expect("CSPRNG for SOCKS creds");
+        Self { username, password }
+    }
+}
+
 enum SocksDest<'a> {
     Socket(SocketAddr),
     Domain { host: &'a str, port: u16 },
@@ -13,7 +28,7 @@ enum SocksDest<'a> {
 pub(crate) async fn socks5_connect(
     proxy: SocketAddr,
     target: SocketAddr,
-    creds: Option<&[u8]>,
+    creds: Option<&ProxyCreds>,
 ) -> Result<TcpStream, NetError> {
     socks5_connect_dest(proxy, SocksDest::Socket(target), creds).await
 }
@@ -22,15 +37,23 @@ pub(crate) async fn socks5_connect_domain(
     proxy: SocketAddr,
     host: &str,
     port: u16,
-    creds: Option<&[u8]>,
+    creds: Option<&ProxyCreds>,
 ) -> Result<TcpStream, NetError> {
     socks5_connect_dest(proxy, SocksDest::Domain { host, port }, creds).await
+}
+
+pub(crate) async fn dial_isolated(
+    proxy: SocketAddr,
+    target: SocketAddr,
+) -> Result<TcpStream, NetError> {
+    let creds = ProxyCreds::fresh();
+    socks5_connect(proxy, target, Some(&creds)).await
 }
 
 async fn socks5_connect_dest(
     proxy: SocketAddr,
     dest: SocksDest<'_>,
-    creds: Option<&[u8]>,
+    creds: Option<&ProxyCreds>,
 ) -> Result<TcpStream, NetError> {
     let mut s = TcpStream::connect(proxy).await?;
     greet(&mut s, creds).await?;
@@ -39,19 +62,46 @@ async fn socks5_connect_dest(
     Ok(s)
 }
 
-async fn greet(s: &mut TcpStream, creds: Option<&[u8]>) -> Result<(), NetError> {
-    if creds.is_some() {
-        return Err(NetError::Protocol(
-            "socks username/password not implemented",
-        ));
+async fn greet(s: &mut TcpStream, creds: Option<&ProxyCreds>) -> Result<(), NetError> {
+    match creds {
+        None => {
+            s.write_all(&[5, 1, 0x00]).await?;
+            let mut sel = [0u8; 2];
+            s.read_exact(&mut sel).await?;
+            if sel[0] != 5 || sel[1] != 0x00 {
+                return Err(NetError::Protocol("socks method rejected"));
+            }
+            Ok(())
+        }
+        Some(c) => {
+            if c.username.is_empty()
+                || c.username.len() > 255
+                || c.password.is_empty()
+                || c.password.len() > 255
+            {
+                return Err(NetError::Protocol("socks username/password length"));
+            }
+            s.write_all(&[5, 1, 0x02]).await?;
+            let mut sel = [0u8; 2];
+            s.read_exact(&mut sel).await?;
+            if sel[0] != 5 || sel[1] != 0x02 {
+                return Err(NetError::Protocol("socks method rejected"));
+            }
+            let mut auth = Vec::with_capacity(3 + c.username.len() + c.password.len());
+            auth.push(1);
+            auth.push(c.username.len() as u8);
+            auth.extend_from_slice(&c.username);
+            auth.push(c.password.len() as u8);
+            auth.extend_from_slice(&c.password);
+            s.write_all(&auth).await?;
+            let mut st = [0u8; 2];
+            s.read_exact(&mut st).await?;
+            if st[0] != 1 || st[1] != 0 {
+                return Err(NetError::Protocol("socks username/password rejected"));
+            }
+            Ok(())
+        }
     }
-    s.write_all(&[5, 1, 0x00]).await?;
-    let mut sel = [0u8; 2];
-    s.read_exact(&mut sel).await?;
-    if sel[0] != 5 || sel[1] != 0x00 {
-        return Err(NetError::Protocol("socks method rejected"));
-    }
-    Ok(())
 }
 
 async fn write_connect(s: &mut TcpStream, dest: SocksDest<'_>) -> Result<(), NetError> {
@@ -114,7 +164,7 @@ async fn read_connect_reply(s: &mut TcpStream) -> Result<(), NetError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{socks5_connect, socks5_connect_domain};
+    use super::{dial_isolated, socks5_connect, socks5_connect_domain, ProxyCreds};
     use std::net::{Ipv4Addr, SocketAddr};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -202,5 +252,86 @@ mod tests {
             .await
             .unwrap();
         server.await.unwrap();
+    }
+
+    async fn serve_userpass_ipv4(
+        s: &mut tokio::net::TcpStream,
+        want_ip: [u8; 4],
+        want_port: u16,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let mut ver_n = [0u8; 2];
+        s.read_exact(&mut ver_n).await.unwrap();
+        assert_eq!(ver_n[0], 5);
+        let nmethods = ver_n[1] as usize;
+        let mut methods = vec![0u8; nmethods];
+        s.read_exact(&mut methods).await.unwrap();
+        assert!(methods.contains(&0x02), "USERPASS offered, got {methods:?}");
+        s.write_all(&[5, 0x02]).await.unwrap();
+
+        let mut ver = [0u8; 1];
+        s.read_exact(&mut ver).await.unwrap();
+        assert_eq!(ver[0], 1);
+        let mut ulen = [0u8; 1];
+        s.read_exact(&mut ulen).await.unwrap();
+        let mut user = vec![0u8; ulen[0] as usize];
+        s.read_exact(&mut user).await.unwrap();
+        let mut plen = [0u8; 1];
+        s.read_exact(&mut plen).await.unwrap();
+        let mut pass = vec![0u8; plen[0] as usize];
+        s.read_exact(&mut pass).await.unwrap();
+        s.write_all(&[1, 0]).await.unwrap();
+
+        let mut hdr = [0u8; 4];
+        s.read_exact(&mut hdr).await.unwrap();
+        assert_eq!(hdr[3], 1);
+        let mut addr = [0u8; 4];
+        s.read_exact(&mut addr).await.unwrap();
+        let mut p = [0u8; 2];
+        s.read_exact(&mut p).await.unwrap();
+        assert_eq!(addr, want_ip);
+        assert_eq!(u16::from_be_bytes(p), want_port);
+        s.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await.unwrap();
+        (user, pass)
+    }
+
+    #[tokio::test]
+    async fn socks5_username_password_seen_by_fake_proxy() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = listener.local_addr().unwrap();
+        let target = SocketAddr::from((Ipv4Addr::new(198, 51, 100, 1), 8333));
+        let creds = ProxyCreds {
+            username: b"alice".to_vec(),
+            password: b"secret".to_vec(),
+        };
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            serve_userpass_ipv4(&mut s, [198, 51, 100, 1], 8333).await
+        });
+        socks5_connect(proxy, target, Some(&creds)).await.unwrap();
+        let (user, pass) = server.await.unwrap();
+        assert_eq!(user, b"alice");
+        assert_eq!(pass, b"secret");
+    }
+
+    #[tokio::test]
+    async fn dial_isolated_uses_new_creds_each_call() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = listener.local_addr().unwrap();
+        let target = SocketAddr::from((Ipv4Addr::new(198, 51, 100, 2), 8333));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut s, _) = listener.accept().await.unwrap();
+                let creds = serve_userpass_ipv4(&mut s, [198, 51, 100, 2], 8333).await;
+                tx.send(creds).await.unwrap();
+            }
+        });
+        dial_isolated(proxy, target).await.unwrap();
+        dial_isolated(proxy, target).await.unwrap();
+        let (u1, _) = rx.recv().await.unwrap();
+        let (u2, _) = rx.recv().await.unwrap();
+        server.await.unwrap();
+        assert_ne!(u1, u2, "each isolated dial must use fresh SOCKS creds");
+        assert!(!u1.is_empty() && !u2.is_empty());
     }
 }
