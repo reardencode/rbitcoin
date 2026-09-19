@@ -450,9 +450,6 @@ impl NodeConfig {
         if self.listen.max_outbound == 0 {
             return Err(NodeError::Config("max-outbound must be >= 1".into()));
         }
-        if self.listen.max_inbound == 0 {
-            return Err(NodeError::Config("max-inbound must be >= 1".into()));
-        }
         if (self.signet_challenge.is_some() || self.signet_block_time.is_some())
             && self.network != Network::Signet
         {
@@ -883,9 +880,6 @@ impl NodeConfig {
                 let n: u32 = val
                     .parse()
                     .map_err(|e| NodeError::Config(format!("conf max_inbound: {e}")))?;
-                if n == 0 {
-                    return Err(NodeError::Config("conf max_inbound must be >= 1".into()));
-                }
                 self.listen.max_inbound = n;
                 self.listen.max_inbound_explicit = true;
             }
@@ -1657,12 +1651,35 @@ mod tests {
         assert!(cfg.validate().is_err());
         cfg.listen.max_outbound = 1;
         cfg.listen.max_inbound = 0;
-        assert!(cfg.validate().is_err());
-        cfg.listen.max_inbound = 1;
         assert!(cfg.validate().is_ok());
         assert_eq!(cfg.milestone(), Milestone::NONE);
         cfg.milestone_height = 10;
         assert_eq!(cfg.milestone().height, 10);
+    }
+
+    #[test]
+    fn max_inbound_zero_is_allowed() {
+        let mut c = NodeConfig::default().with_datadir(tmp());
+        assert_eq!(c.apply_kv("max_inbound", "0").unwrap(), ConfApply::Applied);
+        assert_eq!(c.listen.max_inbound, 0);
+        assert!(c.listen.max_inbound_explicit);
+        c.validate()
+            .expect("max_inbound=0 is outbound-only, not an error");
+
+        let err = NodeConfig::default()
+            .apply_kv("max_outbound", "0")
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("max_outbound"),
+            "max_outbound=0 must still fail: {err}"
+        );
+        let mut o = NodeConfig::default().with_datadir(tmp());
+        o.listen.max_outbound = 0;
+        let verr = o.validate().unwrap_err().to_string();
+        assert!(
+            verr.contains("max-outbound"),
+            "validate must still reject max_outbound=0: {verr}"
+        );
     }
 
     #[test]

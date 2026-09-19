@@ -710,6 +710,20 @@ mod tests {
     }
 
     #[test]
+    fn max_inbound_zero_is_allowed() {
+        let _g = OPERATOR_ENV_TEST_LOCK.lock().unwrap();
+        let cfg = ready_config(["rbitcoin-node", "--max-inbound", "0"]);
+        assert_eq!(cfg.listen.max_inbound, 0);
+        assert!(cfg.listen.max_inbound_explicit);
+        cfg.validate()
+            .expect("CLI --max-inbound 0 must assemble and validate");
+        let out = NodeConfig::default()
+            .apply_kv("max_outbound", "0")
+            .unwrap_err();
+        assert!(format!("{out}").contains("max_outbound"));
+    }
+
+    #[test]
     fn kebab_seed_node_and_min_relay_tx_fee_parse() {
         let seeds = ready_config(["rbitcoin-node", "--seed-node", "127.0.0.1:8333"]);
         assert_eq!(seeds.listen.seednodes, vec!["127.0.0.1:8333".to_string()]);
@@ -982,10 +996,6 @@ mod tests {
         assert_exit(cli_main(["rbitcoin-node", "--conf"]), ExitCode::from(2));
         assert_exit(
             cli_main(["rbitcoin-node", "--max-inbound"]),
-            ExitCode::from(2),
-        );
-        assert_exit(
-            cli_main(["rbitcoin-node", "--max-inbound", "0"]),
             ExitCode::from(2),
         );
         assert_exit(
