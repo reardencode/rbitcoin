@@ -9,6 +9,7 @@
 //! Blockstream Esplora `API.md`). Opt-in `GET /block-template` is GBT.
 
 mod handlers;
+mod internal;
 mod script_fields;
 mod server;
 mod tx_json;

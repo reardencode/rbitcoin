@@ -509,7 +509,7 @@ pub async fn tx_outspends(
     .await
 }
 
-fn outspend_json(
+pub(crate) fn outspend_json(
     query: &Query,
     mempool: Option<&MempoolHub>,
     txid: &[u8; 32],

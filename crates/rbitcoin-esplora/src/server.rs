@@ -528,11 +528,45 @@ pub async fn run_esplora(
             get(handlers::scripthash_txs_chain_cursor),
         )
         .route("/mempool", get(handlers::mempool_info))
+        .route(
+            "/mempool/txids/page",
+            get(crate::internal::get_mempool_txids_page),
+        )
+        .route(
+            "/mempool/txids/page/{last}",
+            get(crate::internal::get_mempool_txids_page_cursor),
+        )
         .route("/mempool/txids", get(handlers::mempool_txids))
         .route("/mempool/recent", get(handlers::mempool_recent))
         .route("/fee-estimates", get(handlers::fee_estimates))
         .route("/fees/recommended", get(handlers::fees_recommended))
         .route("/v1/fees/recommended", get(handlers::fees_recommended))
+        .route("/internal/txs", post(crate::internal::post_internal_txs))
+        .route(
+            "/internal/mempool/txs/all",
+            get(crate::internal::get_internal_mempool_txs_all),
+        )
+        .route(
+            "/internal/mempool/txs",
+            get(crate::internal::get_internal_mempool_txs)
+                .post(crate::internal::post_internal_mempool_txs),
+        )
+        .route(
+            "/internal/mempool/txs/{last}",
+            get(crate::internal::get_internal_mempool_txs_cursor),
+        )
+        .route(
+            "/internal/block/{hash}/txs",
+            get(crate::internal::get_internal_block_txs),
+        )
+        .route(
+            "/internal/txs/outspends/by-txid",
+            post(crate::internal::post_outspends_by_txid),
+        )
+        .route(
+            "/internal/txs/outspends/by-outpoint",
+            post(crate::internal::post_outspends_by_outpoint),
+        )
         .fallback(fallback_404)
         // Outer → inner: concurrency → body → timeout → meter → chain-view stamp.
         .layer(middleware::from_fn_with_state(
