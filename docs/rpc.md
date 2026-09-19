@@ -34,6 +34,15 @@ to the node. Mixed AuthServiceProxy `{args: […], maxfeerate: …}` is expanded
 to a positional list in that proxy (`echo` mixed `{args, argN}` stays on the
 node).
 
+### curl example (unix socket, no HTTP auth)
+
+```bash
+# After node start with --rpc (binds {datadir}/rpc.sock, mode 0600)
+curl --unix-socket datadir/rpc.sock --data-binary \
+  '{"jsonrpc":"1.0","id":"1","method":"getblockcount","params":[]}' \
+  -H 'content-type: application/json' http://rpc/
+```
+
 ### curl example (TCP Bearer)
 
 ```bash

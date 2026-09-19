@@ -1077,11 +1077,19 @@ Conf: `sh_index=1` and `esplora_listen=127.0.0.1:3000`. Default is **disabled**.
 ## Core-class JSON-RPC
 
 Optional HTTP JSON-RPC subset (default **off**). `--rpc` binds
-`{datadir}/rpc.sock` (filesystem auth, no HTTP header). `--rpc-listen`
-adds TCP on `127.0.0.1:<network port>` when ADDR is omitted (mainnet 8332,
-testnet 18332, signet 38332, regtest 18443). TCP auth is
+`{datadir}/rpc.sock` (mode **0600**, filesystem auth, no HTTP header).
+`--rpc-listen` adds TCP on `127.0.0.1:<network port>` when ADDR is omitted
+(mainnet 8332, testnet 18332, signet 38332, regtest 18443). TCP auth is
 `Authorization: Bearer` from `{datadir}/rpc.token` (0600). See
 [`docs/rpc.md`](./docs/rpc.md) and [`COMPAT.md`](./COMPAT.md).
+
+**mempool.space `CORE_RPC`:** stock mempool is TCP + cookie or user/pass.
+Their unix config is Esplora, not bitcoind. Point their Node at this
+socket with a small patch to `backend/src/api/bitcoin/bitcoin-client.ts`
+(same `socketPath` + dummy `http://rpc/` pattern as
+`ESPLORA.UNIX_SOCKET_PATH`). Do **not** send `Authorization`. Run their
+Node as the **same UID** as rbitcoin (0600); or `chmod 0660` and a shared
+group. TCP `--rpc-listen` stays Bearer — that is not the mempool recipe.
 
 ```bash
 ./target/release/rbitcoin-node \
@@ -1091,6 +1099,17 @@ testnet 18332, signet 38332, regtest 18443). TCP auth is
   --log-level info
 # local socket:
 rbitcoin-cli --datadir ./datadir-mainnet getblockcount
+```
+
+mempool `bitcoin-client` sketch (axios; dummy host required):
+
+```js
+const client = axios.create({
+  socketPath: '/path/to/datadir/rpc.sock',
+  baseURL: 'http://rpc/',
+  timeout: 60000,
+});
+// POST JSON-RPC body; no Authorization header
 ```
 
 | Feature | Behavior |
