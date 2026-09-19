@@ -4,8 +4,9 @@
 
 Bitcoin **full node** in Rust aimed at **production server-side** use: multi-peer
 IBD, tip follow, block/tx relay (tip mode), optional **Core-class JSON-RPC**, and
-in-process **Electrum + optional Esplora REST for wallet clients** (scripthash
-index via `--sh-index`, default off; not a graphical block-explorer stack) — built
+in-process **Electrum + optional Esplora REST** (scripthash index via
+`--sh-index`, default off; **0.8** Core+electrs drop-in:
+[`COMPAT.md`](./COMPAT.md)) — built
 around a **relational archive (Class A/B/C)** and a **pure-Rust
 consensus/script** path.
 
@@ -60,9 +61,10 @@ Finishing any one operator’s first full mainnet sync is **not** a gate for
 using or packaging this tree. 1.0 gates:
 [`docs/road-to-1.0.md`](./docs/road-to-1.0.md).
 
-**Non-goal:** powering a **graphical block explorer** (search boxes,
-address-prefix autocomplete, explorer-only catalogue APIs). Product surface:
-[`COMPAT.md`](./COMPAT.md).
+**0.8:** drop-in for **mempool/electrs or Blockstream electrs HTTP** (not
+address-prefix, not their `/api/v1/` Node process). Core RPC for that stack
+is unix `{datadir}/rpc.sock` plus a documented mempool `CORE_RPC` socket
+patch, not cookie. Product surface: [`COMPAT.md`](./COMPAT.md).
 
 **Authorship:** first-party code is **AI-written** (Grok / xAI) under
 **Brandon Black** ([@reardencode](https://github.com/reardencode)) prompting —

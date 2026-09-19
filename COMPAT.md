@@ -21,17 +21,24 @@ On/off costs and start/IBD/tip behavior: [`OPERATOR.md`](./OPERATOR.md)
 (Scripthash index). Disable later leaves SH files on disk; follow does not
 wait on SH materialize.
 
-### Query surface intent: wallet clients, not graphical explorers
+### Query surface intent: wallet clients, plus 0.8 electrs drop-in
 
 **Goal:** serve **wallet software** (Electrum, Sparrow, custom wallets, light
 clients that already know their addresses/scripthashes or exact txids/block
 ids).
 
-**Non-goal:** power a **graphical block explorer** product (search boxes,
-address-prefix autocomplete, “browse everything” UX, Liquid). Those need reverse
-indexes and explorer-only APIs we deliberately omit. Opt-in `GET /block-template`
-is GBT (same JSON as RPC), not explorer search. Block/tx **by full id** and address/**exact** scripthash history exist so
-wallets and APIs can verify and sync—not so we become mempool.space.
+**0.8:** drop-in **mempool/electrs or Blockstream electrs HTTP** so nginx
+`/api/` can retire electrs. Core JSON-RPC for that stack is unix
+`{datadir}/rpc.sock` (filesystem auth) plus a documented mempool `CORE_RPC`
+socket patch — not cookie/Basic TCP. mempool.space **Node `/api/v1/`**
+(MariaDB, cubes, mining, lightning) stays their process. Address-prefix
+search is **not** in 0.8 (**404**). Surface table below.
+
+**Non-goal (stays):** address-prefix autocomplete, Liquid/assets, in-binary
+mempool.space catalogue UI (`/api/v1/`). Opt-in `GET /block-template`
+is GBT (same JSON as RPC), not explorer search. Block/tx **by full id** and
+address/**exact** scripthash history exist so wallets, APIs, and (after 0.8)
+electrs-shaped explorers can verify and sync.
 
 `--max-sh-creates N` (default **0** = unlimited) refuses Electrum/Esplora SH
 joins with more than N creates: Esplora HTTP **503**, Electrum JSON-RPC error
@@ -211,46 +218,57 @@ via reverse proxy; app `ServeLimits` always on (same model as Electrum).
 | Tip | done | `/blocks/tip/height`, `/blocks/tip/hash`. REST stamps `X-Bitcoin-Chain-Tip` / `X-Bitcoin-Chain-Tip-Height` (CORS-exposed): **live tip** for block/tx/header routes; **SH watermark** for `/address/` and `/scripthash/` so wallet JSON matches the SH join. Empty chain omits them (existing 503). If the pin dies mid-request: **503** `chain view moved`. |
 | Blocks list | done | `/blocks`, `/blocks/:start_height` (10 summaries, newest-first) |
 | Block | done | `/block/:hash` JSON, `/raw`, `/status`, `/header`, `/txids`, `/txid/:i`, `/txs[/:start]`. JSON `bits` is the compact-target **u32** (Esplora schema, not Core hex). `size` / `weight` are BIP144 total size and BIP141 weight (witness included). |
-| Tx | done | `/tx/:txid` full JSON, `/hex`, `/raw`, `/status`, Electrum `/merkle-proof`, BIP37 `/merkleblock-proof`, `/outspend(s)` (`vin` from the spent slot; unspent omits it). Mempool-only txs (not in Class A) use the wire body from the mempool hub (`vin`/`vout`/`size`/`weight`/`fee`, `status.confirmed` false) including `GET /tx/:txid/status`. Live `/outspend(s)` overlay mempool spends of confirmed coins; `?asof=` omits mempool. `?asof=<hash>` on `/status` and `/outspend(s)`: confirmed/spent as of that ancestor; 404 if not on chain. |
-| Address / scripthash | done | stats + `/utxo` + `/txs` + `/txs/mempool` + `/txs/chain[/:last_seen_txid]` + `/txs/summary[/:last_seen_txid]` (dialect; next row). `/utxo` matches Electrum listunspent (mempool funding + drop mempool-spent confirmed); `/txs` and `/txs/mempool` use full Esplora tx JSON for mempool-only rows (wire from the hub). Last **one** SH join reused across sequential REST calls until SH-view **hash** changes; concurrent different SHs re-join. Needs SH finalize. Stamp is visible SH (durable + pending write-behind), matching live tip while jobs sit in RAM. `?asof=<hash>` on `/`, `/utxo`, `/txs`, `/txs/chain`, `/txs/summary`: confirmed join at that ancestor **at or behind visible SH**, **no** mempool; headers are the asof hash; 404 if not on chain or ahead of visible SH. |
-| `/txs/summary` | dialect | **Not** in Blockstream Esplora [`API.md`](https://github.com/Blockstream/esplora/blob/master/API.md). Compact `{txid, value, height, time}` like mempool.space `/address/:addr/txs/summary`. Confirmed only (25/page, newest first); path cursor `/:last_seen_txid` like Esplora `/txs/chain`, not mempool.space `?after_txid=`. `value` is net sats for that script in that tx (funded − spent). `time` is the confirming header timestamp (`0` if the header is missing). Mempool rows stay on `/txs` and `/txs/mempool`. Over `--max-sh-creates` → **503**. |
-| Mempool / fees | done | `/mempool`, `/mempool/txids`, `/mempool/recent` (accept-order ring), `/fee-estimates`, mempool.space `/fees/recommended` and `/v1/fees/recommended` (sat/vB tiers) |
-| `POST /tx` | done | broadcast via mempool hub; **503** if hub absent |
+| Tx | done | `/tx/:txid` full JSON, `/hex`, `/raw`, `/status`, Electrum `/merkle-proof`, BIP37 `/merkleblock-proof`, `/outspend(s)` (`vin` from the spent slot; unspent omits it). Mempool-only txs (not in Class A) use the wire body from the mempool hub (`vin`/`vout`/`size`/`weight`/`fee`/`sigops`, `status.confirmed` false) including `GET /tx/:txid/status`. Live `/outspend(s)` overlay mempool spends of confirmed coins; `?asof=` omits mempool. `?asof=<hash>` on `/status` and `/outspend(s)`: confirmed/spent as of that ancestor; 404 if not on chain. |
+| Address / scripthash | done | stats + `/utxo` + `/txs` + `/txs/mempool` + `/txs/chain[/:last_seen_txid]` + `/txs/summary[/:last_seen_txid]` (dialect; next row). `/utxo` matches Electrum listunspent (mempool funding + drop mempool-spent confirmed); `/txs` and `/txs/mempool` use full Esplora tx JSON for mempool-only rows (wire from the hub). `?after_txid=` on `/txs` and `/txs/summary` skips through that tx (mempool then chain); unknown or unparseable → **422** `after_txid not found`. `POST /addresses/txs` and `POST /scripthashes/txs` (and `/txs/summary`) take a JSON array (max **300**; over → **422** `body too long`); unique scripts join once per request, merge newest-first. Unix/loopback `X-Rbitcoin-Client`: last-1 GET join + last-bulk POST (16 MiB packed/client), 30s idle, 256 clients, singleflight on the same `(client, sh)`. Public TCP ignores the header (stack-local join). Concurrent different GET scripts replace last-1. Unbounded process LRU stays **X-M3**. Needs SH finalize. Stamp is visible SH (durable + pending write-behind), matching live tip while jobs sit in RAM. `?asof=<hash>` on `/`, `/utxo`, `/txs`, `/txs/chain`, `/txs/summary`: confirmed join at that ancestor **at or behind visible SH**, **no** mempool; headers are the asof hash; 404 if not on chain or ahead of visible SH. |
+| `/txs/summary` | dialect | **Not** in Blockstream Esplora [`API.md`](https://github.com/Blockstream/esplora/blob/master/API.md). Compact `{txid, value, height, time}` like mempool.space `/address/:addr/txs/summary`. Confirmed only (25/page, newest first); path cursor `/:last_seen_txid` and mempool.space `?after_txid=` (unknown → **422**). `value` is net sats for that script in that tx (funded − spent). `time` is the confirming header timestamp (`0` if the header is missing). Mempool rows stay on `/txs` and `/txs/mempool`. Over `--max-sh-creates` → **503**. |
+| Mempool / fees | done | `/mempool`, `/mempool/txids`, `/mempool/txids/page[/:last]`, `/mempool/recent` (accept-order ring), `/fee-estimates`, mempool.space `/fees/recommended` and `/v1/fees/recommended` (sat/vB tiers) |
+| `POST /tx` | done | broadcast via mempool hub; **503** if hub absent. `GET /broadcast?tx=` is the same admit path (legacy electrs). |
+| `POST /txs/test` | done | JSON array of hex (max 25) → `MempoolHub::test_accept` (no admit). `?maxfeerate=` is BTC/kvB like electrs (`0` unlimited; omitted → 0.1 BTC/kvB). |
 | `POST /txs/package` | done | JSON array of hex txs → `accept_package`; **503** without hub; max 25 txs |
-| Unknown path | 404 | plain body |
+| electrs `/internal/*` | done | `POST /internal/txs` (400 on unparseable id; missing omitted); `POST /internal/mempool/txs` (mempool only); `GET /internal/mempool/txs[/all|/:last]` (txid-sort pages, default `max_txs=10000`; `/all` registered first); `GET /internal/block/:hash/txs` (full list; public `/txs` stays 25/page); `POST /internal/txs/outspends/by-txid` (same-length slots, unknown → `[]`); `POST /internal/txs/outspends/by-outpoint` (`txid:vout`; malformed → `{"spent":false}`). Snapshot JSON is published on the hub (no admit-path build). |
+| Unix listen | done | `--esplora-listen` filesystem path (same router as TCP; mode **0660**) |
+| Unknown path | 404 | plain body (including `/address-prefix`) |
 | `GET /block-template` | opt-in | `--esplora-block-template` (default off → **404**). Same JSON as RPC `getblocktemplate` `{"rules":["segwit"]}` template mode. **503** without tip. `Cache-Control: no-store`. 15 s cache, invalidated on tip or mempool `template_updates`. No proposal/longpoll HTTP (parked **Q-64**). |
-| **Non-goal / never** | — | Graphical explorer features: `address-prefix` search, Liquid/assets, explorer UI-only APIs |
+| **Non-goal / never** | — | Address-prefix search, Liquid/assets. mempool.space `/api/v1/` catalogue stays their Node. |
 
 ## Esplora WebSocket (wallet live subset)
 
 Same listen as REST (`--esplora-listen`). Paths: **`/v1/ws`** (preferred) and
 **`/ws`** alias. Plain WS in-process; terminate **WSS** at the reverse proxy
-(often public URL `wss://host/api/v1/ws` if the proxy strips `/api`).
+(often public URL `wss://host/api/ws` when nginx `/api/` → this listen).
 
-**Product boundary:** wallet live updates only (tip, address watchlist, pending
-txids, wallet-scoped RBF). **Not** a mempool.space explorer live backend.
-Message *names* follow mempool.space where listed; **payloads use Esplora REST
-shapes** (`build_tx_json` / `tx_status_json` / tip height+hash).
+**Product boundary:** wallet live updates (tip, address watchlist, pending
+txids, wallet-scoped RBF, hub `want: stats`). mempool.space explorer live
+catalogue (`live-2h-chart`, compressed `mempool-blocks`, …) is **their**
+`/api/v1/ws`, not this listen. nginx `/api/` is our Esplora (`/api/ws`);
+`/api/v1/` stays their backend. Message *names* follow mempool.space where
+listed; **payloads use Esplora REST shapes**.
 
 ### Client → server (supported)
 
 | Message | Behavior |
 |---------|----------|
-| `{ "action": "want", "data": ["blocks"] }` | Subscribe tip pushes; other `data` tokens **no-op** (no disconnect) |
-| empty want / no `blocks` | Clear tip subscription |
-| `{ "track-address": "<addr>" }` / `{ "track-addresses": [...] }` | Watchlist (network-checked); over-cap → `{ "error": "max_track_addresses exceeded" }` |
-| `{ "stop-track-address": "…" }` / `stop-track-addresses` / empty track-address | Unsubscribe |
+| `{ "action": "want", "data": ["blocks"] }` | Subscribe tip pushes |
+| `{ "action": "want", "data": ["stats"] }` | Immediate `{ "mempoolInfo", "fees" }` (same JSON as `GET /mempool` and `GET /fees/recommended`); re-push on announce/tip when the tx snapshot Arc changes or 1 s fee-snapshot age elapses. Combine with `blocks` |
+| empty want / no `blocks` / no `stats` | Clear those subscriptions |
+| `{ "action": "ping" }` | `{ "pong": true }` |
+| `{ "action": "init" }` | `{ "block": { "height", "id", "timestamp" } }` from the current tip (not Node's 8-block blob) |
+| `{ "track-address": "<addr>" }` / `{ "track-addresses": [...] }` | Watchlist (network-checked); over-cap → `{ "error": "max_track_addresses exceeded" }`. Subscribe snapshots live mempool txs (`address-transactions` / keyed `multi-address-transactions`) |
+| `{ "track-address": "stop" }` / `{ "track-tx": "stop" }` / empty / `stop-track-*` | Unsubscribe |
 | `{ "track-tx": "<txid>" }` / `{ "track-txs": [...] }` | Pending set; over-cap → error |
-| `{ "stop-track-tx": "…" }` / `stop-track-txs` | Unsubscribe |
 
-No client API for global `track-mempool*`, `track-rbf`, or `want` stats/charts.
+Unknown `want` tokens (`mempool-blocks`, `live-2h-chart`, …) **no-op** (no disconnect). No client API for global `track-mempool*` or `track-rbf` trees.
 
 ### Server → client (supported)
 
 | Key | When |
 |-----|------|
-| `{ "block": { "height", "id", "timestamp" } }` | Tip advance after `want: blocks` |
-| `{ "address-transactions": [ … ] }` | Mempool accept touching a tracked script (in/out when resolvable) |
+| `{ "pong": true }` | After `{ "action": "ping" }` |
+| `{ "block": { "height", "id", "timestamp" } }` | Tip advance after `want: blocks`; also `{ "action": "init" }` |
+| `{ "mempoolInfo", "fees" }` | After `want: stats` and coalesced announce/tip |
+| `{ "address-transactions": [ … ] }` | Subscribe snapshot and mempool accept touching a tracked script (Esplora tx JSON) |
+| `{ "multi-address-transactions": { "<addr>": [ … ] } }` | `track-addresses` snapshot, keyed by the display address the client sent |
+| `{ "address-removed-transactions": [ … ] }` | Full-RBF/drop of a tx that paid a tracked script |
 | `{ "block-transactions": [ … ] }` | Tip height: txs in that block that create or spend a tracked script (posting-list probe; no Class A expand on a miss) |
 | `{ "tx": { "txid", "status" } }` | Tracked txid status transition (mempool / confirmed) |
 | `{ "replaced-transactions": [ { "txid", "replaced-by" } ] }` | Full-RBF replace **only if** old or new intersects this connection’s tracks |
@@ -271,7 +289,7 @@ broadcast receivers drop (best-effort, like Electrum).
 
 | mempool.space-style feature | Status |
 |-----------------------------|--------|
-| `want`: `stats`, `mempool-blocks`, `live-2h-chart` | **No** |
+| `want`: `mempool-blocks`, `live-2h-chart` (Node `/api/v1/ws`) | **No** |
 | `track-mempool` / `track-mempool-txids` global firehose | **No** |
 | `track-mempool-block` projected templates | **No** |
 | Global `track-rbf` / `rbfLatest` trees | **No** (wallet-scoped replace only) |
@@ -309,5 +327,7 @@ Core wallet RPC, fee-estimator research quality, BIP331 native wire enum,
 durable orphans: **out of scope** for this plan. GBT **template RPC** is
 shipped (see above); stratum / pool software is not.
 
-**Permanent non-goals for Electrum/Esplora:** graphical explorer backends
-(address-prefix autocomplete, global search, explorer-only catalogue APIs).
+**Permanent non-goals for Electrum/Esplora:** address-prefix autocomplete,
+Liquid/assets, in-binary mempool.space `/api/v1/` (MariaDB cubes / mining /
+lightning). **0.8** is electrs HTTP drop-in except prefix. Core RPC for that
+stack is `rpc.sock` plus the mempool patch.

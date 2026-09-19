@@ -207,12 +207,77 @@ fn blockchain_empty_store() {
 }
 
 #[test]
-fn getnetworkhashps_help_labels_dummy_work() {
+fn getnetworkhashps_help_names_chainwork() {
     let h = super::method_help("getnetworkhashps");
     assert!(
-        h.contains("2-work-per-block") && h.contains("not Core"),
-        "dummy hashrate must be labeled: {h}"
+        h.to_lowercase().contains("chainwork") && !h.contains("Dummy 2-work"),
+        "hashrate help must name chainwork, not dummy 2-work: {h}"
     );
+}
+
+#[test]
+fn getnetworkhashps_chainwork_over_minmax_time() {
+    let (ctx, dir, _hub) = ctx_regtest_hub();
+    let hashes = dispatch(&ctx, "generate", vec![json!(2)]).unwrap();
+    let tip = hashes.as_array().unwrap()[1].clone();
+    let h2 = dispatch(&ctx, "getblockheader", vec![tip]).unwrap();
+    let h1 = dispatch(
+        &ctx,
+        "getblockheader",
+        vec![h2["previousblockhash"].clone()],
+    )
+    .unwrap();
+    let w2 = chainwork_f64(h2["chainwork"].as_str().unwrap());
+    let w1 = chainwork_f64(h1["chainwork"].as_str().unwrap());
+    let t2 = h2["time"].as_u64().unwrap();
+    let t1 = h1["time"].as_u64().unwrap();
+    let dt = t2.abs_diff(t1) as f64;
+    let got = dispatch(&ctx, "getnetworkhashps", vec![json!(1), json!(2)])
+        .unwrap()
+        .as_f64()
+        .unwrap();
+    if dt == 0.0 {
+        assert_eq!(got, 0.0);
+    } else {
+        let expect = (w2 - w1) / dt;
+        assert!(
+            (got - expect).abs() < 1e-9,
+            "got={got} expect={expect} w2={w2} w1={w1} dt={dt}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn getnetworkhashps_nblocks_zero_uses_retarget_window() {
+    let (ctx, dir, _hub) = ctx_regtest_hub();
+    dispatch(&ctx, "generate", vec![json!(130)]).unwrap();
+    let zero = dispatch(&ctx, "getnetworkhashps", vec![json!(0)])
+        .unwrap()
+        .as_f64()
+        .unwrap();
+    let full = dispatch(&ctx, "getnetworkhashps", vec![json!(130)])
+        .unwrap()
+        .as_f64()
+        .unwrap();
+    let dummy_window = dispatch(&ctx, "getnetworkhashps", vec![json!(120)])
+        .unwrap()
+        .as_f64()
+        .unwrap();
+    assert_eq!(
+        zero, full,
+        "nblocks<=0 is height%interval+1 capped to height"
+    );
+    assert_ne!(
+        zero, dummy_window,
+        "nblocks=0 must not fall back to the dummy 120-block window"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn chainwork_f64(hex: &str) -> f64 {
+    let b = rbitcoin_primitives::hex_decode(hex).unwrap();
+    b.iter().fold(0.0, |a, x| a * 256.0 + f64::from(*x))
 }
 
 #[test]
@@ -1510,13 +1575,25 @@ fn generate_one_to_p2wpkh() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn assert_getblock_core_header_keys(obj: &Value, header: &Value) {
+    assert!(obj["difficulty"].as_f64().is_some(), "difficulty: {obj}");
+    assert_eq!(obj["difficulty"], header["difficulty"]);
+    let vh = obj["versionHex"].as_str().expect("versionHex");
+    assert_eq!(vh.len(), 8);
+    assert_eq!(vh, header["versionHex"].as_str().unwrap());
+    let cw = obj["chainwork"].as_str().expect("chainwork");
+    assert_eq!(cw.len(), 64);
+    assert_eq!(cw, header["chainwork"].as_str().unwrap());
+}
+
 #[test]
 fn getblock_verbosity_1_txids_skip_reconstruct() {
     let (ctx, dir, _hub) = ctx_regtest_hub();
-    let hashes = dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
-    let best = hashes.as_array().unwrap()[0].clone();
+    let hashes = dispatch(&ctx, "generate", vec![json!(2)]).unwrap();
+    let first = hashes.as_array().unwrap()[0].clone();
+    let tip = hashes.as_array().unwrap()[1].clone();
     ctx.query.store().reset_tx_full_gets();
-    let v1 = dispatch(&ctx, "getblock", vec![best.clone(), json!(1)]).unwrap();
+    let v1 = dispatch(&ctx, "getblock", vec![first.clone(), json!(1)]).unwrap();
     assert!(
         ctx.query.store().tx_full_gets().is_empty(),
         "verbosity 1 must not zip inwit: {:?}",
@@ -1525,8 +1602,62 @@ fn getblock_verbosity_1_txids_skip_reconstruct() {
     let txs = v1["tx"].as_array().unwrap();
     assert_eq!(txs.len(), 1);
     assert!(txs[0].as_str().unwrap().len() == 64);
-    let v2 = dispatch(&ctx, "getblock", vec![best, json!(2)]).unwrap();
+    let hdr = dispatch(&ctx, "getblockheader", vec![first.clone()]).unwrap();
+    assert_getblock_core_header_keys(&v1, &hdr);
+    assert_eq!(v1["nextblockhash"], tip);
+
+    let v2 = dispatch(&ctx, "getblock", vec![tip.clone(), json!(2)]).unwrap();
     assert!(v2["tx"][0]["vin"][0].get("txid").is_some());
+    let tip_hdr = dispatch(&ctx, "getblockheader", vec![tip]).unwrap();
+    assert_getblock_core_header_keys(&v2, &tip_hdr);
+    assert!(v2.get("nextblockhash").is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn getblock_held_header_fields() {
+    use rbitcoin_consensus::mine_regtest_paying;
+
+    let (ctx, dir, hub) = ctx_regtest_hub();
+    dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
+    let (_, script) = p2wpkh_regtest();
+    let prev = hub.tip_hash().unwrap();
+    let time = hub.tip_header().unwrap().time + 1;
+    let sibling = mine_regtest_paying(prev, time, 2, script, vec![]);
+    hub.hold_unconnected_body(sibling.clone());
+    let hash = sibling.block_hash().to_string();
+    let v1 = dispatch(&ctx, "getblock", vec![json!(hash), json!(1)]).unwrap();
+    assert_eq!(v1["confirmations"], json!(-1));
+    assert!(v1["difficulty"].as_f64().is_some(), "held difficulty: {v1}");
+    let vh = v1["versionHex"].as_str().expect("held versionHex");
+    assert_eq!(vh.len(), 8);
+    assert!(v1.get("nextblockhash").is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn getblock_verbosity_2_size_weight_and_tx_fee() {
+    use bitcoin::consensus::encode::deserialize;
+
+    let (ctx, dir, _hub) = ctx_regtest_hub();
+    let (hex, _spend) = mature_coinbase_spend_hex(&ctx, 50_0000_0000 - 1_000);
+    dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
+    let hashes = dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
+    let tip = hashes.as_array().unwrap()[0].clone();
+    let v2 = dispatch(&ctx, "getblock", vec![tip.clone(), json!(2)]).unwrap();
+    let raw = dispatch(&ctx, "getblock", vec![tip, json!(0)]).unwrap();
+    let raw_bytes = rbitcoin_primitives::hex_decode(raw.as_str().unwrap()).unwrap();
+    let block: bitcoin::Block = deserialize(&raw_bytes).unwrap();
+    assert_eq!(v2["size"].as_u64().unwrap(), block.total_size() as u64);
+    assert_eq!(v2["weight"].as_u64().unwrap(), block.weight().to_wu());
+    assert_eq!(
+        v2["strippedsize"].as_u64().unwrap(),
+        (block.weight().to_wu() - block.total_size() as u64) / 3
+    );
+    let txs = v2["tx"].as_array().unwrap();
+    assert!(txs[0].get("fee").is_none(), "coinbase must omit fee: {v2}");
+    let fee = txs[1]["fee"].as_f64().expect("spend fee");
+    assert!((fee - (1_000.0 / 1e8)).abs() < 1e-10, "fee={fee} v2={v2}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

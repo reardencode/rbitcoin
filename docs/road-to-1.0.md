@@ -42,7 +42,10 @@ Core clone, not a soak badge, not a desktop wallet.
 Things people sometimes expect from “a Bitcoin node” that we are **not**
 taking on for 1.0:
 
-- Wallet keys, GUI, prune, ZMQ, IPC, plaintext v1 P2P, explorer search APIs
+- Wallet keys, GUI, prune, ZMQ, IPC, plaintext v1 P2P
+- Explorer-search APIs (address-prefix), Liquid, in-binary `/api/v1/`
+  catalogue. **0.8** is electrs HTTP drop-in (except prefix):
+  [`COMPAT.md`](../COMPAT.md) (**Q-68**)
 - Every Bitcoin Core functional test (no wallet / prune / v1 scripts)
 - Matching Core `estimatesmartfee` numbers
 - Apple notarization
@@ -60,8 +63,8 @@ functional harness **or** an explicit “we differ on purpose” note (fee
 product, error codes, our mempool files). First green was 9 scripts; **71**
 unmodified v31.1 scripts `run` now. Remaining growth is claimed
 wallet-client / P2P / mempool / buried-activation scripts, not the
-product-never skips (`no-wallet`, prune, v1). Labeled dummy
-`getnetworkhashps` is documented in [`rpc.md`](./rpc.md). Remaining
+product-never skips (`no-wallet`, prune, v1). `getnetworkhashps` is Core
+chainwork / min-max time ([`rpc.md`](./rpc.md)). Remaining
 claimed-surface `run` growth is [`quality.md`](./quality.md) **Q-41**.
 Owner: [`core-functional.md`](./core-functional.md).
 
@@ -200,6 +203,22 @@ Schema 21 is the current bytes; 0.x may still bump.
 | [x] | No silent wipe; refuse names the dirs ([`SCHEMA.md`](../SCHEMA.md)) |
 | [x] | Q-57 / Q-58 fail-closed on the durable path |
 | [ ] | Tag 1.0.0; `SECURITY.md` names a 1.0.x window |
+
+---
+
+## 0.8 (after 0.7.0)
+
+Drop-in **mempool/electrs (or Blockstream electrs) HTTP** so a stock
+mempool.space Node+MariaDB+frontend can retire electrs. Core JSON-RPC for
+that stack is unix `{datadir}/rpc.sock` plus a documented mempool `CORE_RPC`
+socket patch, not cookie. Not their `/api/v1/` process. Not address-prefix.
+**Q-68**. Surface: [`COMPAT.md`](../COMPAT.md).
+
+| Done | Step |
+|:----:|------|
+| [x] | Q-68 parked (this row) |
+| [x] | Esplora unix + `/internal/*` + mempool tx-JSON snapshot |
+| [x] | Product docs claim the drop-in |
 
 ---
 

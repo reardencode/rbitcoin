@@ -237,6 +237,15 @@ impl RpcParams {
         }
     }
 
+    pub fn opt_i64(&self, index: usize, name: &str) -> Result<Option<i64>, Value> {
+        match self.get(index, name) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => json_i64(v)
+                .map(Some)
+                .ok_or_else(|| rpc_error(ERR_INVALID_PARAMS, format!("{name} must be an integer"))),
+        }
+    }
+
     pub fn opt_str(&self, index: usize, name: &str) -> Result<Option<&str>, Value> {
         match self.get(index, name) {
             None | Some(Value::Null) => Ok(None),
@@ -721,8 +730,9 @@ const NAMED_HELP: &[(&str, &str)] = &[
     (
         "getnetworkhashps",
         "getnetworkhashps (nblocks) (height)\n\
-         Dummy 2-work-per-block / elapsed seconds — not Core chainwork hashrate. \
-         Useful on regtest (2 work/block). See docs/rpc.md.",
+         Estimated hashes per second from chainwork delta over the lookup \
+         window (min/max header time). nblocks<=0 uses the difficulty \
+         retarget length. See docs/rpc.md.",
     ),
     (
         "prioritisetransaction",

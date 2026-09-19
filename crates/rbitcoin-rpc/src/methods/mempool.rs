@@ -379,7 +379,7 @@ fn prevout_value_sat(ctx: &RpcContext, op: &OutPoint) -> Option<u64> {
 }
 
 #[derive(Debug)]
-enum TxFeeLook {
+pub(crate) enum TxFeeLook {
     Fee(u64),
     MissingPrevout,
     Overflow,
@@ -414,7 +414,7 @@ fn tx_output_sum_sat(tx: &Transaction) -> Option<u64> {
         .try_fold(0u64, |a, o| a.checked_add(o.value.to_sat()))
 }
 
-fn tx_fee_sat_from_prevouts(ctx: &RpcContext, tx: &Transaction) -> TxFeeLook {
+pub(crate) fn tx_fee_sat_from_prevouts(ctx: &RpcContext, tx: &Transaction) -> TxFeeLook {
     fold_tx_fee_sat(
         tx.input
             .iter()

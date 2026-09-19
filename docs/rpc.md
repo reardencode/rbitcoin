@@ -34,6 +34,15 @@ to the node. Mixed AuthServiceProxy `{args: […], maxfeerate: …}` is expanded
 to a positional list in that proxy (`echo` mixed `{args, argN}` stays on the
 node).
 
+### curl example (unix socket, no HTTP auth)
+
+```bash
+# After node start with --rpc (binds {datadir}/rpc.sock, mode 0600)
+curl --unix-socket datadir/rpc.sock --data-binary \
+  '{"jsonrpc":"1.0","id":"1","method":"getblockcount","params":[]}' \
+  -H 'content-type: application/json' http://rpc/
+```
+
 ### curl example (TCP Bearer)
 
 ```bash
@@ -93,7 +102,7 @@ still wait for durable SH when shindex is on.
 | `sendrawtransaction` / `testmempoolaccept` | `sendrawtransaction` is live accept (RPC still admits under `-blocksonly`; serving-only refuse is IBD / tip-not-ready `relay disabled`). `testmempoolaccept` is dry-run (`MempoolHub::test_accept`: prepare + scripts + RBF/cluster checks, no commit / announce / RBF eviction / orphan park). Invalid hex / decode is `-22 TX decode failed` (same as `decoderawtransaction`). Confirmed on the active chain is `txn-already-known` (tip + confirmed-strong); live mempool duplicate is `txn-already-in-mempool`; archive-only after invalidate is not already-known. RPC-submit only: `maxfeerate` is **sat/vB** (default **10000**; `0` unlimited; `>= 100000` is `-8`). sendraw over-cap is `-25` configured-max text; `testmempoolaccept` reject-reason stays `max-fee-exceeded`. `maxburnamount` default **0** (valued unspendable / OP_RETURN outs). P2P `accept_tx` does not apply these caps. Core functional tests still speak BTC/kvB via `scripts/core-functional/rpc_proxy.py`. |
 | `estimatesmartfee` | **10-minute inclusion frontier** — not Core historical multi-horizon. See [`mempool-fee-estimation.md`](./mempool-fee-estimation.md). |
 | `estimaterawfee` | Same 10-minute frontier product as `estimatesmartfee` (Core RPC name for harness scripts). Not Core historical `estimaterawfee` buckets. |
-| `getnetworkhashps` | Dummy **2-work-per-block / elapsed** over `nblocks` (default 120) ending at `height` (default tip). **Not** Core `GetNetworkHashPS` (nBits / chainwork). Matches regtest 2 work/block. |
+| `getnetworkhashps` | Core `GetNetworkHashPS`: `chainwork(end) − chainwork(start)` over `(maxTime − minTime)` in the lookup window. Default `nblocks` 120; `nblocks<=0` uses `height % difficulty_adjustment_interval + 1` (capped to height). `height<0` or past tip → tip. Genesis / zero dt → `0.0`. |
 | `generatetoaddress` / `generatetodescriptor` / `generateblock` / `generate` | **Regtest only.** Mine through `ChainHub::accept_block` (same confirm as P2P). First generated block includes `select_block_txs`, then `remove_for_block`. `generatetodescriptor` accepts `raw(HEX)`, `addr(ADDRESS)`, or a bare address. |
 | `getblocktemplate` / `getmininginfo` | All networks. Template from `select_block_txs`. `rules` must include `segwit`. Proposal validates without connecting and returns Core reject needles (`bad-cb-missing`, `bad-diffbits`, `time-too-old`, …). Version is `VERSIONBITS_TOP_BITS` only (no testdummy). `longpollid` waits until the tip or mempool update counter changes. `getmininginfo.blockmintxfee` is 8-decimal BTC/kvB (`sat_btc_json`, same helper as mempool fees). |
 | `prioritisetransaction` / `getprioritisedtransactions` | All networks. Local mining fee delta (sat). Dummy must be 0. Selector honors modified fee. |

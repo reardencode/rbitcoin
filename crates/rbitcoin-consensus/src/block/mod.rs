@@ -494,15 +494,14 @@ pub fn tx_gbt_sigops(tx: &Transaction) -> u64 {
 }
 
 /// Full Core-style sigop cost for one tx given prevout scripts (BIP16 + BIP141).
-#[cfg(test)]
-fn tx_sigop_cost(tx: &Transaction, prev_spks: &[&[u8]], bip16: bool, segwit: bool) -> u64 {
+pub fn tx_sigop_cost(tx: &Transaction, prev_spks: &[&[u8]], bip16: bool, segwit: bool) -> u64 {
     const WITNESS_SCALE: u64 = 4;
     let mut cost = legacy_sigop_count(tx).saturating_mul(WITNESS_SCALE);
-    if bip16 {
-        cost = cost.saturating_add(p2sh_sigop_count(tx, prev_spks).saturating_mul(WITNESS_SCALE));
-    }
-    if segwit {
-        cost = cost.saturating_add(witness_sigop_count(tx, prev_spks));
+    for (i, inp) in tx.input.iter().enumerate() {
+        let Some(spk) = prev_spks.get(i) else {
+            continue;
+        };
+        cost = cost.saturating_add(prevout_spk_sigops(inp, spk, bip16, segwit));
     }
     cost
 }

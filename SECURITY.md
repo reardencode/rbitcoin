@@ -52,15 +52,16 @@ that affect consensus, P2P attack surface, or Electrum/query integrity.
   mitigations are intentional operator surface: max inbound sessions
   (`--max-inbound`, default 125), per-session message/byte
   rate windows, misbehavior score disconnect.
-- **Electrum and Esplora (wallet-client backends):** plain TCP/HTTP; TLS is an
-  operator reverse-proxy concern. Intended for **wallet software**, not as a
-  graphical explorer product. The node is **internet-facing capable**:
-  application DoS limits (`ServeLimits` — max connections, request size, idle
-  timeout, plus Electrum scripthash-sub / broadcast-hex caps) are **always
-  enforced**, not only when bound to localhost. Esplora WebSocket adds a
-  **separate** socket cap, inbound frame size limit, and per-connection
-  address/tx track caps (defaults 64/64 KiB/64/64). Excess connections and
-  oversize lines/bodies/frames fail closed without hanging accept. Esplora is
+- **Electrum and Esplora:** plain TCP/HTTP; TLS is an operator reverse-proxy
+  concern. Wallet clients and electrs HTTP (except address-prefix)
+  ([`COMPAT.md`](./COMPAT.md)).
+  The node is **internet-facing capable**: application DoS limits
+  (`ServeLimits` — max connections, request size, idle timeout, plus Electrum
+  scripthash-sub / broadcast-hex caps) are **always enforced**, not only when
+  bound to localhost. Esplora WebSocket adds a **separate** socket cap,
+  inbound frame size limit, and per-connection address/tx track caps
+  (defaults 64/64 KiB/64/64). Excess connections and oversize
+  lines/bodies/frames fail closed without hanging accept. Esplora is
   opt-in (`--esplora-listen`). Edge TLS, multi-tenant metering, and API keys
   are still out of process (see [`OPERATOR.md`](./OPERATOR.md)).
 - **Store / archive:** corruption or incorrect spend/scripthash results that

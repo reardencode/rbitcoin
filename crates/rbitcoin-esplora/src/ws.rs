@@ -2,7 +2,7 @@
 //!
 //! Payloads use Esplora REST shapes. Global mempool/RBF explorer feeds are out of scope.
 
-use crate::handlers::resolve_address_sh;
+use crate::handlers::{fees_recommended_json, mempool_info_json, resolve_address_sh};
 use crate::server::AppState;
 use crate::tx_json::{build_tx_json, build_tx_json_from_tx, tx_status_json};
 use axum::extract::ws::{Message, WebSocket};
@@ -13,13 +13,14 @@ use bitcoin::consensus::Encodable;
 use bitcoin::hashes::Hash;
 use bitcoin::{Network, Transaction, Txid};
 use futures_util::{SinkExt, StreamExt};
-use rbitcoin_net::{MempoolAnnounce, MempoolHub, TipEvent};
+use rbitcoin_net::{MempoolAnnounce, MempoolHub, MempoolTxSnapshot, TipEvent};
 use rbitcoin_primitives::{display_hash_hex, Height};
 use rbitcoin_query::Query;
 use rbitcoin_store::script_hash;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, OwnedSemaphorePermit};
 
 /// Parse one client JSON text frame (pure; unit-tested).
@@ -36,6 +37,8 @@ pub(crate) enum ClientMsg {
     StopTrackTxs,
     /// Recognized JSON object with no actionable keys (ignore).
     Noop,
+    Ping,
+    Init,
 }
 
 fn json_str_list(v: &Value) -> Vec<String> {
@@ -50,11 +53,15 @@ fn json_str_list(v: &Value) -> Vec<String> {
 
 fn parse_want_action(obj: &serde_json::Map<String, Value>) -> Option<ClientMsg> {
     let action = obj.get("action").and_then(|a| a.as_str())?;
-    if action != "want" {
-        return None;
+    match action {
+        "want" => {
+            let data = obj.get("data").map(json_str_list).unwrap_or_default();
+            Some(ClientMsg::Want(data))
+        }
+        "ping" => Some(ClientMsg::Ping),
+        "init" => Some(ClientMsg::Init),
+        _ => None,
     }
-    let data = obj.get("data").map(json_str_list).unwrap_or_default();
-    Some(ClientMsg::Want(data))
 }
 
 fn parse_address_track(obj: &serde_json::Map<String, Value>) -> Option<ClientMsg> {
@@ -63,7 +70,7 @@ fn parse_address_track(obj: &serde_json::Map<String, Value>) -> Option<ClientMsg
             return Some(ClientMsg::StopTrackAddresses);
         }
         if let Some(s) = v.as_str() {
-            if s.is_empty() {
+            if s.is_empty() || s.eq_ignore_ascii_case("stop") {
                 return Some(ClientMsg::StopTrackAddresses);
             }
             return Some(ClientMsg::TrackAddress(s.to_string()));
@@ -101,7 +108,7 @@ fn parse_tx_track(obj: &serde_json::Map<String, Value>) -> Option<ClientMsg> {
             return Some(ClientMsg::StopTrackTxs);
         }
         if let Some(s) = v.as_str() {
-            if s.is_empty() {
+            if s.is_empty() || s.eq_ignore_ascii_case("stop") {
                 return Some(ClientMsg::StopTrackTxs);
             }
             return Some(ClientMsg::TrackTx(s.to_string()));
@@ -152,20 +159,26 @@ pub(crate) fn parse_client_msg(text: &str) -> Result<ClientMsg, String> {
 
 struct ConnState {
     want_blocks: bool,
+    want_stats: bool,
     /// scripthash → display address (as client sent).
     addresses: HashMap<[u8; 32], String>,
     txids: HashSet<Txid>,
     /// Last pushed confirmed flag per tracked txid.
     last_confirmed: HashMap<Txid, bool>,
+    last_stats_snap: Option<Arc<MempoolTxSnapshot>>,
+    last_stats_push: Option<Instant>,
 }
 
 impl ConnState {
     fn new() -> Self {
         Self {
             want_blocks: false,
+            want_stats: false,
             addresses: HashMap::new(),
             txids: HashSet::new(),
             last_confirmed: HashMap::new(),
+            last_stats_snap: None,
+            last_stats_push: None,
         }
     }
 }
@@ -244,6 +257,18 @@ fn tip_push_json(ev: &TipEvent) -> Value {
     })
 }
 
+fn init_tip_json(query: &Query) -> Option<Value> {
+    let h = query.tip_height()?;
+    let rec = query.header_at_height(h).ok()??.1;
+    Some(json!({
+        "block": {
+            "height": h.0,
+            "id": display_hash_hex(&rec.hash),
+            "timestamp": rec.timestamp,
+        }
+    }))
+}
+
 async fn send_json(
     sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     v: &Value,
@@ -257,6 +282,46 @@ async fn send_error(
     msg: &str,
 ) -> Result<(), ()> {
     send_json(sink, &json!({ "error": msg })).await
+}
+
+/// Match fee-snapshot max age: re-push stats at most this often when the tx Arc is unchanged.
+const STATS_PUSH_MIN_AGE: Duration = Duration::from_secs(1);
+
+fn stats_frame(mp: Option<&MempoolHub>) -> Value {
+    json!({
+        "mempoolInfo": mempool_info_json(mp),
+        "fees": fees_recommended_json(mp),
+    })
+}
+
+async fn push_stats(
+    st: &AppState,
+    conn: &mut ConnState,
+    sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    force: bool,
+) -> Result<(), ()> {
+    if !conn.want_stats {
+        return Ok(());
+    }
+    let mp = st.mempool.as_deref();
+    let snap = mp.map(|m| m.mempool_tx_snapshot());
+    if !force {
+        let same_snap = match (&conn.last_stats_snap, &snap) {
+            (Some(prev), Some(cur)) => Arc::ptr_eq(prev, cur),
+            (None, None) => true,
+            _ => false,
+        };
+        let fresh = conn
+            .last_stats_push
+            .is_some_and(|t| t.elapsed() < STATS_PUSH_MIN_AGE);
+        if same_snap && fresh {
+            return Ok(());
+        }
+    }
+    send_json(sink, &stats_frame(mp)).await?;
+    conn.last_stats_snap = snap;
+    conn.last_stats_push = Some(Instant::now());
+    Ok(())
 }
 
 /// HTTP upgrade entry (own semaphore; not under REST concurrency layer).
@@ -381,12 +446,15 @@ async fn handle_client_msg(
 ) -> Result<(), ()> {
     match msg {
         ClientMsg::Want(data) => {
-            // Only `blocks` is supported; other tokens no-op (wallet-not-explorer).
             conn.want_blocks = data.iter().any(|s| s == "blocks");
+            conn.want_stats = data.iter().any(|s| s == "stats");
+            if conn.want_stats {
+                push_stats(st, conn, sink, true).await?;
+            }
             Ok(())
         }
-        ClientMsg::TrackAddress(addr) => add_addresses(st, conn, &[addr], sink).await,
-        ClientMsg::TrackAddresses(addrs) => add_addresses(st, conn, &addrs, sink).await,
+        ClientMsg::TrackAddress(addr) => add_addresses(st, conn, &[addr], false, sink).await,
+        ClientMsg::TrackAddresses(addrs) => add_addresses(st, conn, &addrs, true, sink).await,
         ClientMsg::StopTrackAddress(Some(addr)) => {
             if let Ok(sh) = resolve_address_sh(&addr, st.network) {
                 conn.addresses.remove(&sh);
@@ -412,15 +480,89 @@ async fn handle_client_msg(
             Ok(())
         }
         ClientMsg::Noop => Ok(()),
+        ClientMsg::Ping => send_json(sink, &json!({ "pong": true })).await,
+        ClientMsg::Init => match init_tip_json(&st.query) {
+            Some(v) => send_json(sink, &v).await,
+            None => Ok(()),
+        },
     }
+}
+
+fn txs_touching_watched<'a, I>(
+    query: &Query,
+    mp: &MempoolHub,
+    network: Network,
+    watched: &HashMap<[u8; 32], String>,
+    txs: I,
+) -> HashMap<String, Vec<Value>>
+where
+    I: IntoIterator<Item = (Txid, &'a Transaction, Option<i64>)>,
+{
+    let mut out: HashMap<String, Vec<Value>> = HashMap::new();
+    if watched.is_empty() {
+        return out;
+    }
+    for (txid, tx, fee) in txs {
+        let shs = scripts_touched_full(query, Some(mp), tx);
+        let mut body: Option<Value> = None;
+        for sh in shs {
+            if let Some(addr) = watched.get(&sh) {
+                let v = body
+                    .get_or_insert_with(|| {
+                        build_tx_json_from_tx(query, tx, network, fee, Some(mp))
+                            .unwrap_or_else(|_| json!({ "txid": txid_display_hex(&txid) }))
+                    })
+                    .clone();
+                out.entry(addr.clone()).or_default().push(v);
+            }
+        }
+    }
+    out
+}
+
+fn unique_tx_jsons(by_addr: &HashMap<String, Vec<Value>>) -> Vec<Value> {
+    let mut seen = HashSet::new();
+    let mut txs = Vec::new();
+    for vs in by_addr.values() {
+        for v in vs {
+            let Some(id) = v.get("txid").and_then(|x| x.as_str()) else {
+                continue;
+            };
+            if seen.insert(id.to_string()) {
+                txs.push(v.clone());
+            }
+        }
+    }
+    txs
+}
+
+fn removed_tx_json(
+    query: &Query,
+    mempool: Option<&MempoolHub>,
+    network: Network,
+    old: &Txid,
+) -> Value {
+    if let Some(m) = mempool {
+        if let Some(tx) = m.get_tx(old) {
+            return build_tx_json_from_tx(query, &tx, network, None, Some(m))
+                .unwrap_or_else(|_| json!({ "txid": txid_display_hex(old) }));
+        }
+        if let Some(e) = m.mempool_tx_snapshot().get(old) {
+            return build_tx_json_from_tx(query, &e.tx, network, Some(e.fee_sat as i64), Some(m))
+                .unwrap_or_else(|_| json!({ "txid": txid_display_hex(old) }));
+        }
+    }
+    json!({ "txid": txid_display_hex(old) })
 }
 
 async fn add_addresses(
     st: &AppState,
     conn: &mut ConnState,
     addrs: &[String],
+    keyed: bool,
     sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
 ) -> Result<(), ()> {
+    let mut added: HashMap<[u8; 32], String> = HashMap::new();
     for addr in addrs {
         if conn.addresses.len() >= st.max_track_addresses {
             send_error(sink, "max_track_addresses exceeded").await?;
@@ -429,10 +571,55 @@ async fn add_addresses(
         match resolve_address_sh(addr, st.network) {
             Ok(sh) => {
                 conn.addresses.insert(sh, addr.clone());
+                added.insert(sh, addr.clone());
             }
             Err(()) => {
                 send_error(sink, &format!("invalid address: {addr}")).await?;
             }
+        }
+    }
+    if added.is_empty() {
+        return Ok(());
+    }
+    let Some(mp) = st.mempool.clone() else {
+        return Ok(());
+    };
+    let query = Arc::clone(&st.query);
+    let network = st.network;
+    let by_addr = match tokio::task::spawn_blocking(move || {
+        let _g = rbitcoin_net::BlockingRegion::enter();
+        let snap = mp.mempool_tx_snapshot();
+        txs_touching_watched(
+            query.as_ref(),
+            mp.as_ref(),
+            network,
+            &added,
+            snap.entries()
+                .iter()
+                .map(|e| (e.txid, e.tx.as_ref(), Some(e.fee_sat as i64))),
+        )
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+    if keyed {
+        let mut obj = serde_json::Map::new();
+        for addr in addrs {
+            if let Some(txs) = by_addr.get(addr) {
+                if !txs.is_empty() {
+                    obj.insert(addr.clone(), json!(txs));
+                }
+            }
+        }
+        if !obj.is_empty() {
+            send_json(sink, &json!({ "multi-address-transactions": obj })).await?;
+        }
+    } else {
+        let txs = unique_tx_jsons(&by_addr);
+        if !txs.is_empty() {
+            send_json(sink, &json!({ "address-transactions": txs })).await?;
         }
     }
     Ok(())
@@ -464,6 +651,7 @@ async fn add_txids(
 struct MempoolAnnounceFrames {
     replaced: Option<Value>,
     address_txs: Option<Value>,
+    address_removed: Option<Value>,
     tx_status: bool,
 }
 
@@ -476,6 +664,7 @@ fn mempool_announce_frames(
     ann: &MempoolAnnounce,
 ) -> MempoolAnnounceFrames {
     let mut replaced = None;
+    let mut address_removed = None;
     if !ann.replaced.is_empty() {
         let addr_hit_old = !watched.is_empty()
             && ann
@@ -503,12 +692,23 @@ fn mempool_announce_frames(
         if !replaced_for_client.is_empty() {
             replaced = Some(json!({ "replaced-transactions": replaced_for_client }));
         }
+        if addr_hit_old {
+            let removed: Vec<Value> = ann
+                .replaced
+                .iter()
+                .map(|old| removed_tx_json(query, mempool, network, old))
+                .collect();
+            if !removed.is_empty() {
+                address_removed = Some(json!({ "address-removed-transactions": removed }));
+            }
+        }
     }
 
     let Some(m) = mempool else {
         return MempoolAnnounceFrames {
             replaced,
             address_txs: None,
+            address_removed,
             tx_status: tracked.contains(&ann.txid),
         };
     };
@@ -516,29 +716,30 @@ fn mempool_announce_frames(
         return MempoolAnnounceFrames {
             replaced,
             address_txs: None,
+            address_removed,
             tx_status: tracked.contains(&ann.txid),
         };
     };
 
     let mut address_txs = None;
     if !watched.is_empty() {
-        let shs = scripts_touched_full(query, Some(m), &tx);
-        if shs.iter().any(|s| watched.contains_key(s)) {
-            let body = match query.get_tx_by_txid(&ann.txid.to_byte_array()) {
-                Ok(Some((fk, _))) => build_tx_json(query, fk, network).unwrap_or_else(|_| {
-                    build_tx_json_from_tx(query, &tx, network, None, Some(m))
-                        .unwrap_or_else(|_| json!({ "txid": txid_display_hex(&ann.txid) }))
-                }),
-                _ => build_tx_json_from_tx(query, &tx, network, None, Some(m))
-                    .unwrap_or_else(|_| json!({ "txid": txid_display_hex(&ann.txid) })),
-            };
-            address_txs = Some(json!({ "address-transactions": [body] }));
+        let grouped = txs_touching_watched(
+            query,
+            m,
+            network,
+            watched,
+            std::iter::once((ann.txid, &tx, None)),
+        );
+        let bodies = unique_tx_jsons(&grouped);
+        if !bodies.is_empty() {
+            address_txs = Some(json!({ "address-transactions": bodies }));
         }
     }
 
     MempoolAnnounceFrames {
         replaced,
         address_txs,
+        address_removed,
         tx_status: tracked.contains(&ann.txid),
     }
 }
@@ -576,12 +777,16 @@ async fn on_mempool_announce(
     if let Some(v) = frames.replaced {
         send_json(sink, &v).await?;
     }
+    if let Some(v) = frames.address_removed {
+        send_json(sink, &v).await?;
+    }
     if let Some(v) = frames.address_txs {
         send_json(sink, &v).await?;
     }
     if frames.tx_status {
         push_tx_status(st, conn, &txid, sink).await?;
     }
+    push_stats(st, conn, sink, false).await?;
     Ok(())
 }
 
@@ -658,6 +863,7 @@ async fn on_tip(
     for t in tracked {
         push_tx_status(st, conn, &t, sink).await?;
     }
+    push_stats(st, conn, sink, false).await?;
     Ok(())
 }
 
@@ -697,6 +903,10 @@ mod tests {
             parse_client_msg(r#"{"track-address":""}"#).unwrap(),
             ClientMsg::StopTrackAddresses
         );
+        assert_eq!(
+            parse_client_msg(r#"{"track-address":"stop"}"#).unwrap(),
+            ClientMsg::StopTrackAddresses
+        );
     }
 
     #[test]
@@ -712,6 +922,10 @@ mod tests {
         );
         assert_eq!(
             parse_client_msg(r#"{"stop-track-txs":true}"#).unwrap(),
+            ClientMsg::StopTrackTxs
+        );
+        assert_eq!(
+            parse_client_msg(r#"{"track-tx":"stop"}"#).unwrap(),
             ClientMsg::StopTrackTxs
         );
     }
@@ -774,7 +988,11 @@ mod tests {
         );
         assert_eq!(
             parse_client_msg(r#"{"action":"ping"}"#).unwrap(),
-            ClientMsg::Noop
+            ClientMsg::Ping
+        );
+        assert_eq!(
+            parse_client_msg(r#"{"action":"init"}"#).unwrap(),
+            ClientMsg::Init
         );
     }
 }

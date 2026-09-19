@@ -3,7 +3,7 @@
 use crate::handlers;
 use crate::tx_json::{build_tx_json, build_tx_json_from_tx, tx_status_json_in};
 use crate::ws;
-use axum::extract::{FromRequestParts, Path, Query as AxumQuery, Request, State};
+use axum::extract::{ConnectInfo, FromRequestParts, Path, Query as AxumQuery, Request, State};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
@@ -20,9 +20,11 @@ use rbitcoin_query::{ChainView, ChainViewKind, Query, ShJoinSlot};
 use rbitcoin_store::StoreError;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, Semaphore};
@@ -214,6 +216,26 @@ fn path_never_pins(path: &str) -> bool {
     )
 }
 
+fn powered_by_header() -> HeaderValue {
+    static V: OnceLock<HeaderValue> = OnceLock::new();
+    V.get_or_init(|| {
+        let ver = env!("CARGO_PKG_VERSION");
+        let mut hex = String::with_capacity(ver.len().saturating_mul(2));
+        for b in ver.as_bytes() {
+            hex.push_str(&format!("{b:02x}"));
+        }
+        HeaderValue::from_str(&format!("rbitcoin-esplora/{ver}-{hex}")).expect("ascii powered-by")
+    })
+    .clone()
+}
+
+async fn stamp_powered_by_mw(req: Request, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    resp.headers_mut()
+        .insert("x-powered-by", powered_by_header());
+    resp
+}
+
 async fn stamp_chain_view_mw(State(st): State<AppState>, req: Request, next: Next) -> Response {
     let asof = match asof_hash_from_uri(req.uri()) {
         Ok(v) => v,
@@ -278,10 +300,51 @@ pub(crate) struct GbtCache {
     pub(crate) body: Value,
 }
 
+/// TCP `host:port` or a filesystem unix socket.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EsploraListen {
+    Tcp(SocketAddr),
+    #[cfg(unix)]
+    Unix(PathBuf),
+}
+
+impl EsploraListen {
+    /// Empty value → `127.0.0.1:<default_port>`. A `host:port` is TCP. A path
+    /// (`/…`, `./…`, or `*.sock`) is unix (not Windows).
+    pub fn parse(val: &str, default_port: u16) -> Result<Self, String> {
+        if val.is_empty() {
+            return Ok(Self::Tcp(SocketAddr::from(([127, 0, 0, 1], default_port))));
+        }
+        if let Ok(addr) = val.parse::<SocketAddr>() {
+            return Ok(Self::Tcp(addr));
+        }
+        let pathish = val.starts_with('/')
+            || val.starts_with('.')
+            || val.contains('/')
+            || val.ends_with(".sock");
+        if !pathish {
+            return Err(format!(
+                "esplora-listen: expected host:port or unix path, got {val}"
+            ));
+        }
+        #[cfg(unix)]
+        {
+            Ok(Self::Unix(PathBuf::from(val)))
+        }
+        #[cfg(not(unix))]
+        {
+            Err(
+                "esplora unix socket needs AF_UNIX; this Windows build has no tokio UnixListener"
+                    .into(),
+            )
+        }
+    }
+}
+
 /// Esplora HTTP server config (listen + shared DoS floor + WS caps).
 #[derive(Clone, Debug)]
 pub struct EsploraConfig {
-    pub listen: SocketAddr,
+    pub listen: EsploraListen,
     /// Shared with Electrum ([`ServeLimits::for_public_proxy`] defaults).
     pub limits: ServeLimits,
     /// Address encoding network (mainnet/testnet/signet/regtest).
@@ -304,6 +367,10 @@ impl EsploraConfig {
     }
 
     pub fn with_network(listen: SocketAddr, network: Network) -> Self {
+        Self::with_listen(EsploraListen::Tcp(listen), network)
+    }
+
+    pub fn with_listen(listen: EsploraListen, network: Network) -> Self {
         Self {
             listen,
             limits: ServeLimits::for_public_proxy(),
@@ -318,7 +385,9 @@ impl EsploraConfig {
 }
 
 pub struct EsploraHandle {
+    /// Bound TCP address. Unix listen leaves this as `127.0.0.1:0`.
     pub local_addr: SocketAddr,
+    pub socket_path: Option<PathBuf>,
     shutdown: Arc<AtomicBool>,
     task: JoinHandle<()>,
 }
@@ -343,23 +412,282 @@ pub(crate) struct AppState {
     pub(crate) max_ws_message_bytes: usize,
     pub(crate) max_track_addresses: usize,
     pub(crate) max_track_txs: usize,
-    /// Last scripthash join (tip-fenced). HTTP is not session-oriented; one
-    /// slot still covers Casa `/scripthash` → `/txs` → `/utxo` and chain pages.
-    pub(crate) sh_join: Arc<Mutex<Option<ShJoinSlot>>>,
+    /// Per-client last-1 GET + last-bulk POST joins (unix/loopback `X-Rbitcoin-Client`).
+    pub(crate) sh_join: Arc<Mutex<JoinCache>>,
+    /// Unix listen trusts `X-Rbitcoin-Client` without a TCP peer address.
+    pub(crate) join_header_trusted: bool,
     pub(crate) block_template: Option<BlockTemplateFn>,
     pub(crate) gbt_cache: Arc<Mutex<Option<GbtCache>>>,
 }
 
+const JOIN_IDLE: Duration = Duration::from_secs(30);
+const JOIN_MAX_CLIENTS: usize = 256;
+const JOIN_BULK_CAP: usize = 16 * 1024 * 1024;
+
+struct InflightJoin {
+    /// `None` = still running. `Some(slot)` = finished (`slot` may be empty).
+    done: Mutex<Option<Option<Arc<ShJoinSlot>>>>,
+    cv: std::sync::Condvar,
+}
+
+impl InflightJoin {
+    fn finish(&self, slot: Option<Arc<ShJoinSlot>>) {
+        let mut d = self.done.lock().unwrap_or_else(|p| p.into_inner());
+        if d.is_none() {
+            *d = Some(slot);
+            self.cv.notify_all();
+        }
+    }
+}
+
+/// Finishes the inflight slot (and drops the map entry) if the leader unwinds.
+struct InflightGuard {
+    cache: Arc<Mutex<JoinCache>>,
+    id: String,
+    sh: [u8; 32],
+    inf: Arc<InflightJoin>,
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.inf.finish(None);
+        let mut g = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(c) = g.clients.get_mut(&self.id) {
+            if c.inflight
+                .get(&self.sh)
+                .is_some_and(|a| Arc::ptr_eq(a, &self.inf))
+            {
+                c.inflight.remove(&self.sh);
+            }
+        }
+    }
+}
+
+struct ClientJoins {
+    last_sh: Option<([u8; 32], Arc<ShJoinSlot>)>,
+    last_bulk: HashMap<[u8; 32], Arc<ShJoinSlot>>,
+    last_req: Instant,
+    inflight: HashMap<[u8; 32], Arc<InflightJoin>>,
+}
+
+impl Default for ClientJoins {
+    fn default() -> Self {
+        Self {
+            last_sh: None,
+            last_bulk: HashMap::new(),
+            last_req: Instant::now(),
+            inflight: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct JoinCache {
+    clients: HashMap<String, ClientJoins>,
+}
+
+impl JoinCache {
+    #[cfg(test)]
+    fn last_sh_key(&self, id: &str) -> Option<[u8; 32]> {
+        self.clients
+            .get(id)
+            .and_then(|c| c.last_sh.as_ref().map(|(k, _)| *k))
+    }
+
+    #[cfg(test)]
+    fn bulk_len(&self, id: &str) -> usize {
+        self.clients.get(id).map(|c| c.last_bulk.len()).unwrap_or(0)
+    }
+}
+
+fn sweep_clients(map: &mut HashMap<String, ClientJoins>, now: Instant) {
+    map.retain(|_, c| now.saturating_duration_since(c.last_req) < JOIN_IDLE);
+    while map.len() > JOIN_MAX_CLIENTS {
+        let oldest = map
+            .iter()
+            .min_by_key(|(_, c)| c.last_req)
+            .map(|(k, _)| k.clone());
+        match oldest {
+            Some(k) => {
+                map.remove(&k);
+            }
+            None => break,
+        }
+    }
+}
+
+fn cap_bulk(c: &mut ClientJoins) {
+    let mut bytes: usize = c.last_bulk.values().map(|s| s.packed_bytes()).sum();
+    while bytes > JOIN_BULK_CAP && !c.last_bulk.is_empty() {
+        let victim = c
+            .last_bulk
+            .iter()
+            .max_by_key(|(_, s)| s.packed_bytes())
+            .map(|(k, s)| (*k, s.packed_bytes()));
+        let Some((k, sz)) = victim else {
+            break;
+        };
+        c.last_bulk.remove(&k);
+        bytes = bytes.saturating_sub(sz);
+    }
+}
+
+pub(crate) fn client_id_from(
+    unix_or_trusted: bool,
+    loopback: bool,
+    header: Option<String>,
+) -> Option<String> {
+    if unix_or_trusted || loopback {
+        header
+    } else {
+        None
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct JoinClient(pub Option<String>);
+
+impl FromRequestParts<AppState> for JoinClient {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let header = parts
+            .headers
+            .get("x-rbitcoin-client")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let loopback = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .is_some_and(|c| c.0.ip().is_loopback());
+        Ok(JoinClient(client_id_from(
+            state.join_header_trusted,
+            loopback,
+            header,
+        )))
+    }
+}
+
 impl AppState {
-    pub(crate) fn with_sh_join<R>(&self, f: impl FnOnce(&mut Option<ShJoinSlot>) -> R) -> R {
-        let mut slot = self
-            .sh_join
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .take();
+    pub(crate) fn with_sh_join<R>(
+        &self,
+        client: Option<&str>,
+        sh: &[u8; 32],
+        f: impl FnOnce(&mut Option<Arc<ShJoinSlot>>) -> R,
+    ) -> R {
+        let Some(id) = client.filter(|s| !s.is_empty()) else {
+            let mut slot = None;
+            return f(&mut slot);
+        };
+        let inflight = {
+            let mut g = self.sh_join.lock().unwrap_or_else(|p| p.into_inner());
+            sweep_clients(&mut g.clients, Instant::now());
+            let c = g.clients.entry(id.to_string()).or_default();
+            c.last_req = Instant::now();
+            if c.last_sh.as_ref().is_some_and(|(k, _)| k == sh) {
+                let mut slot = c.last_sh.as_ref().map(|(_, s)| s.clone());
+                drop(g);
+                let r = f(&mut slot);
+                if let Some(s) = slot {
+                    let mut g = self.sh_join.lock().unwrap_or_else(|p| p.into_inner());
+                    if let Some(c) = g.clients.get_mut(id) {
+                        c.last_sh = Some((*sh, s));
+                        c.last_req = Instant::now();
+                    }
+                }
+                return r;
+            }
+            if let Some(inf) = c.inflight.get(sh).cloned() {
+                Err(inf)
+            } else {
+                let inf = Arc::new(InflightJoin {
+                    done: Mutex::new(None),
+                    cv: std::sync::Condvar::new(),
+                });
+                c.inflight.insert(*sh, Arc::clone(&inf));
+                Ok(inf)
+            }
+        };
+        let inf = match inflight {
+            Err(inf) => {
+                let mut d = inf.done.lock().unwrap_or_else(|p| p.into_inner());
+                while d.is_none() {
+                    d = inf.cv.wait(d).unwrap_or_else(|p| p.into_inner());
+                }
+                let mut slot = (*d).clone().flatten();
+                drop(d);
+                let r = f(&mut slot);
+                if let Some(s) = slot {
+                    let mut g = self.sh_join.lock().unwrap_or_else(|p| p.into_inner());
+                    if let Some(c) = g.clients.get_mut(id) {
+                        c.last_sh = Some((*sh, s));
+                        c.last_req = Instant::now();
+                    }
+                }
+                return r;
+            }
+            Ok(inf) => inf,
+        };
+        let mut slot = {
+            let g = self.sh_join.lock().unwrap_or_else(|p| p.into_inner());
+            g.clients.get(id).and_then(|c| c.last_bulk.get(sh).cloned())
+        };
+        let _guard = InflightGuard {
+            cache: Arc::clone(&self.sh_join),
+            id: id.to_string(),
+            sh: *sh,
+            inf: Arc::clone(&inf),
+        };
         let r = f(&mut slot);
-        *self.sh_join.lock().unwrap_or_else(|p| p.into_inner()) = slot;
+        inf.finish(slot.clone());
+        {
+            let mut g = self.sh_join.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(c) = g.clients.get_mut(id) {
+                c.last_req = Instant::now();
+                c.inflight.remove(sh);
+                if let Some(s) = slot {
+                    c.last_sh = Some((*sh, s));
+                }
+            }
+        }
         r
+    }
+
+    pub(crate) fn seed_bulk(
+        &self,
+        client: Option<&str>,
+        bag: &mut HashMap<[u8; 32], Arc<ShJoinSlot>>,
+    ) {
+        let Some(id) = client.filter(|s| !s.is_empty()) else {
+            return;
+        };
+        let g = self.sh_join.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(c) = g.clients.get(id) {
+            for (k, v) in &c.last_bulk {
+                bag.entry(*k).or_insert_with(|| v.clone());
+            }
+        }
+    }
+
+    pub(crate) fn promote_bulk(
+        &self,
+        client: Option<&str>,
+        bag: HashMap<[u8; 32], Arc<ShJoinSlot>>,
+    ) {
+        let Some(id) = client.filter(|s| !s.is_empty()) else {
+            return;
+        };
+        let mut g = self.sh_join.lock().unwrap_or_else(|p| p.into_inner());
+        sweep_clients(&mut g.clients, Instant::now());
+        let c = g.clients.entry(id.to_string()).or_default();
+        c.last_req = Instant::now();
+        c.last_bulk = bag;
+        cap_bulk(c);
     }
 }
 
@@ -378,8 +706,6 @@ pub async fn run_esplora(
     mempool: Option<Arc<MempoolHub>>,
     tip_tx: Option<broadcast::Sender<TipEvent>>,
 ) -> Result<EsploraHandle, std::io::Error> {
-    let listener = TcpListener::bind(config.listen).await?;
-    let local_addr = listener.local_addr()?;
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_c = shutdown.clone();
 
@@ -401,7 +727,17 @@ pub async fn run_esplora(
         max_ws_message_bytes: config.max_ws_message_bytes.max(1024),
         max_track_addresses: config.max_track_addresses.max(1),
         max_track_txs: config.max_track_txs.max(1),
-        sh_join: Arc::new(Mutex::new(None)),
+        sh_join: Arc::new(Mutex::new(JoinCache::default())),
+        join_header_trusted: {
+            #[cfg(unix)]
+            {
+                matches!(config.listen, EsploraListen::Unix(_))
+            }
+            #[cfg(not(unix))]
+            {
+                false
+            }
+        },
         block_template: config.block_template,
         gbt_cache: Arc::new(Mutex::new(None)),
     };
@@ -434,7 +770,20 @@ pub async fn run_esplora(
         .route("/tx/{txid}/outspend/{vout}", get(handlers::tx_outspend))
         .route("/tx/{txid}/outspends", get(handlers::tx_outspends))
         .route("/tx", post(handlers::post_tx))
+        .route("/broadcast", get(handlers::get_broadcast))
+        .route("/txs/test", post(handlers::post_txs_test))
+        .route("/txs/outspends", get(handlers::get_txs_outspends))
         .route("/txs/package", post(handlers::post_tx_package))
+        .route("/addresses/txs", post(handlers::post_addresses_txs))
+        .route(
+            "/addresses/txs/summary",
+            post(handlers::post_addresses_txs_summary),
+        )
+        .route("/scripthashes/txs", post(handlers::post_scripthashes_txs))
+        .route(
+            "/scripthashes/txs/summary",
+            post(handlers::post_scripthashes_txs_summary),
+        )
         .route("/address/{addr}", get(handlers::address_info))
         .route("/address/{addr}/utxo", get(handlers::address_utxo))
         .route("/address/{addr}/txs", get(handlers::address_txs))
@@ -482,11 +831,45 @@ pub async fn run_esplora(
             get(handlers::scripthash_txs_chain_cursor),
         )
         .route("/mempool", get(handlers::mempool_info))
+        .route(
+            "/mempool/txids/page",
+            get(crate::internal::get_mempool_txids_page),
+        )
+        .route(
+            "/mempool/txids/page/{last}",
+            get(crate::internal::get_mempool_txids_page_cursor),
+        )
         .route("/mempool/txids", get(handlers::mempool_txids))
         .route("/mempool/recent", get(handlers::mempool_recent))
         .route("/fee-estimates", get(handlers::fee_estimates))
         .route("/fees/recommended", get(handlers::fees_recommended))
         .route("/v1/fees/recommended", get(handlers::fees_recommended))
+        .route("/internal/txs", post(crate::internal::post_internal_txs))
+        .route(
+            "/internal/mempool/txs/all",
+            get(crate::internal::get_internal_mempool_txs_all),
+        )
+        .route(
+            "/internal/mempool/txs",
+            get(crate::internal::get_internal_mempool_txs)
+                .post(crate::internal::post_internal_mempool_txs),
+        )
+        .route(
+            "/internal/mempool/txs/{last}",
+            get(crate::internal::get_internal_mempool_txs_cursor),
+        )
+        .route(
+            "/internal/block/{hash}/txs",
+            get(crate::internal::get_internal_block_txs),
+        )
+        .route(
+            "/internal/txs/outspends/by-txid",
+            post(crate::internal::post_outspends_by_txid),
+        )
+        .route(
+            "/internal/txs/outspends/by-outpoint",
+            post(crate::internal::post_outspends_by_outpoint),
+        )
         .fallback(fallback_404)
         // Outer → inner: concurrency → body → timeout → meter → chain-view stamp.
         .layer(middleware::from_fn_with_state(
@@ -506,24 +889,64 @@ pub async fn run_esplora(
         .route("/v1/ws", get(ws::ws_upgrade))
         .route("/ws", get(ws::ws_upgrade));
 
-    let app = rest.merge(ws_routes).with_state(state);
+    let app = rest
+        .merge(ws_routes)
+        .layer(middleware::from_fn(stamp_powered_by_mw))
+        .with_state(state);
 
-    let task = tokio::spawn(async move {
-        let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
-            while !shutdown_c.load(Ordering::SeqCst) {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        });
-        if let Err(e) = serve.await {
-            rbitcoin_log::warn!("esplora: serve ended: {e}");
+    match config.listen {
+        EsploraListen::Tcp(addr) => {
+            let listener = TcpListener::bind(addr).await?;
+            let local_addr = listener.local_addr()?;
+            let task = tokio::spawn(async move {
+                let make = app.into_make_service_with_connect_info::<SocketAddr>();
+                let serve = axum::serve(listener, make).with_graceful_shutdown(async move {
+                    while !shutdown_c.load(Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                });
+                if let Err(e) = serve.await {
+                    rbitcoin_log::warn!("esplora: serve ended: {e}");
+                }
+            });
+            Ok(EsploraHandle {
+                local_addr,
+                socket_path: None,
+                shutdown,
+                task,
+            })
         }
-    });
-
-    Ok(EsploraHandle {
-        local_addr,
-        shutdown,
-        task,
-    })
+        #[cfg(unix)]
+        EsploraListen::Unix(path) => {
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent)?;
+                }
+            }
+            let _ = std::fs::remove_file(&path);
+            let listener = tokio::net::UnixListener::bind(&path)?;
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660));
+            }
+            let task = tokio::spawn(async move {
+                let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
+                    while !shutdown_c.load(Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                });
+                if let Err(e) = serve.await {
+                    rbitcoin_log::warn!("esplora: serve ended: {e}");
+                }
+            });
+            Ok(EsploraHandle {
+                local_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+                socket_path: Some(path),
+                shutdown,
+                task,
+            })
+        }
+    }
 }
 
 async fn tip_height(State(st): State<AppState>) -> Response {
@@ -801,6 +1224,17 @@ mod tests {
         (status, body)
     }
 
+    async fn http_get_hdr(addr: SocketAddr, path: &str, client: &str) -> (u16, String) {
+        let mut stream = TcpStream::connect(addr).await.expect("connect");
+        let req = format!(
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Rbitcoin-Client: {client}\r\nConnection: close\r\n\r\n"
+        );
+        stream.write_all(req.as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        parse_http_response(&buf)
+    }
+
     async fn http_get_raw(addr: SocketAddr, path: &str) -> (u16, String, String) {
         let mut stream = TcpStream::connect(addr).await.expect("connect");
         let req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
@@ -847,6 +1281,554 @@ mod tests {
             .trim()
             .to_string();
         (status, body)
+    }
+
+    fn parse_http_response(buf: &[u8]) -> (u16, String) {
+        let text = String::from_utf8_lossy(buf).into_owned();
+        let status = text
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let body = text
+            .split("\r\n\r\n")
+            .nth(1)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        (status, body)
+    }
+
+    #[cfg(unix)]
+    async fn http_get_unix(sock: &std::path::Path, path: &str) -> (u16, String) {
+        use tokio::net::UnixStream;
+        let mut stream = UnixStream::connect(sock).await.expect("unix connect");
+        let req = format!("GET {path} HTTP/1.1\r\nHost: api\r\nConnection: close\r\n\r\n");
+        stream.write_all(req.as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        parse_http_response(&buf)
+    }
+
+    #[test]
+    fn esplora_listen_parse_tcp_and_path() {
+        assert!(matches!(
+            EsploraListen::parse("127.0.0.1:3000", 3000).unwrap(),
+            EsploraListen::Tcp(_)
+        ));
+        assert!(matches!(
+            EsploraListen::parse("", 3000).unwrap(),
+            EsploraListen::Tcp(a) if a.port() == 3000
+        ));
+        #[cfg(unix)]
+        {
+            assert!(matches!(
+                EsploraListen::parse("/run/rbitcoin/esplora.sock", 3000).unwrap(),
+                EsploraListen::Unix(_)
+            ));
+            assert!(matches!(
+                EsploraListen::parse("./esplora.sock", 3000).unwrap(),
+                EsploraListen::Unix(_)
+            ));
+        }
+        assert!(EsploraListen::parse("not-an-addr", 3000).is_err());
+    }
+
+    #[test]
+    fn client_id_ignored_on_public_tcp() {
+        assert!(client_id_from(false, false, Some("x".into())).is_none());
+        assert_eq!(
+            client_id_from(false, true, Some("x".into())).as_deref(),
+            Some("x")
+        );
+        assert_eq!(
+            client_id_from(true, false, Some("x".into())).as_deref(),
+            Some("x")
+        );
+        assert!(client_id_from(true, true, None).is_none());
+    }
+
+    #[test]
+    fn join_idle_evicts_after_ttl() {
+        let mut map = HashMap::new();
+        let now = Instant::now();
+        map.insert(
+            "stale".into(),
+            ClientJoins {
+                last_req: now.checked_sub(JOIN_IDLE + Duration::from_secs(1)).unwrap(),
+                ..ClientJoins::default()
+            },
+        );
+        map.insert(
+            "fresh".into(),
+            ClientJoins {
+                last_req: now,
+                ..ClientJoins::default()
+            },
+        );
+        sweep_clients(&mut map, now);
+        assert!(!map.contains_key("stale"));
+        assert!(map.contains_key("fresh"));
+    }
+
+    fn join_only_state(q: Arc<Query>, cache: Arc<Mutex<JoinCache>>) -> AppState {
+        AppState {
+            query: q,
+            network: Network::Regtest,
+            mempool: None,
+            max_body: 1 << 20,
+            tip_tx: None,
+            ws_sem: None,
+            max_ws_message_bytes: 1024,
+            max_track_addresses: 1,
+            max_track_txs: 1,
+            sh_join: cache,
+            join_header_trusted: true,
+            block_template: None,
+            gbt_cache: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[test]
+    fn with_sh_join_empty_slot_unblocks_waiter() {
+        let (_dir, q) = temp_query("join-empty-waiter");
+        let st = Arc::new(join_only_state(
+            Arc::new(q),
+            Arc::new(Mutex::new(JoinCache::default())),
+        ));
+        let sh = [0x11u8; 32];
+        let (leader_in, leader_in_rx) = std::sync::mpsc::channel::<()>();
+        let (release, release_rx) = std::sync::mpsc::channel::<()>();
+        let st_l = Arc::clone(&st);
+        let leader = std::thread::spawn(move || {
+            st_l.with_sh_join(Some("c1"), &sh, |slot| {
+                *slot = None;
+                let _ = leader_in.send(());
+                let _ = release_rx.recv();
+            });
+        });
+        leader_in_rx.recv().expect("leader entered f");
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let st_w = Arc::clone(&st);
+        let waiter = std::thread::spawn(move || {
+            st_w.with_sh_join(Some("c1"), &sh, |slot| {
+                let _ = done_tx.send(slot.is_none());
+            });
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        let _ = release.send(());
+        leader.join().expect("leader");
+        let empty = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("waiter unblocked after empty join");
+        assert!(empty, "finished empty slot");
+        waiter.join().expect("waiter");
+    }
+
+    #[test]
+    fn with_sh_join_leader_panic_unblocks_waiter() {
+        let (_dir, q) = temp_query("join-panic-waiter");
+        let st = Arc::new(join_only_state(
+            Arc::new(q),
+            Arc::new(Mutex::new(JoinCache::default())),
+        ));
+        let sh = [0x22u8; 32];
+        let (leader_in, leader_in_rx) = std::sync::mpsc::channel::<()>();
+        let (release, release_rx) = std::sync::mpsc::channel::<()>();
+        let st_l = Arc::clone(&st);
+        let leader = std::thread::spawn(move || {
+            st_l.with_sh_join(Some("c1"), &sh, |_slot| {
+                let _ = leader_in.send(());
+                let _ = release_rx.recv();
+                panic!("join leader unwind");
+            });
+        });
+        leader_in_rx.recv().expect("leader entered f");
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let st_w = Arc::clone(&st);
+        let waiter = std::thread::spawn(move || {
+            st_w.with_sh_join(Some("c1"), &sh, |_slot| {
+                let _ = done_tx.send(());
+            });
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        let _ = release.send(());
+        let _ = leader.join();
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("waiter unblocked after leader panic");
+        waiter.join().expect("waiter");
+    }
+
+    #[tokio::test]
+    async fn with_sh_join_last1_clone_visible_to_overlapping_get() {
+        use rbitcoin_store::script_hash;
+
+        let (_a1, spk1) = regtest_p2wpkh();
+        let (dir, q) = temp_query("join-last1-clone");
+        let (h0, t0) = coinbase(0, Fk::NULL, None);
+        let prev = q.connect_block(Height(0), &h0, &[t0]).unwrap();
+        let (h1, cb1) = coinbase(1, prev, Some(h0.hash));
+        q.connect_block(Height(1), &h1, &[cb1, two_script_pay(0x11, spk1.clone())])
+            .unwrap();
+        let q = Arc::new(q);
+        let sh1 = script_hash(spk1.as_bytes());
+        let h1hex = block_hash_hex(&sh1);
+        let cache = Arc::new(Mutex::new(JoinCache::default()));
+        let app = app_with_join(Arc::clone(&q), Arc::clone(&cache), true);
+        let (st, body) =
+            oneshot_http(&app, get_with_client(&format!("/scripthash/{h1hex}"), "c1")).await;
+        assert_eq!(st, 200, "{body}");
+        assert_eq!(cache.lock().unwrap().last_sh_key("c1"), Some(sh1));
+
+        let st = Arc::new(join_only_state(Arc::clone(&q), Arc::clone(&cache)));
+        let (holder_in, holder_in_rx) = std::sync::mpsc::channel::<()>();
+        let (release, release_rx) = std::sync::mpsc::channel::<()>();
+        let st_a = Arc::clone(&st);
+        let holder = std::thread::spawn(move || {
+            st_a.with_sh_join(Some("c1"), &sh1, |slot| {
+                assert!(slot.is_some(), "holder must see warm last-1");
+                let _ = holder_in.send(());
+                let _ = release_rx.recv();
+            });
+        });
+        holder_in_rx.recv().expect("holder entered f");
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel();
+        let st_b = Arc::clone(&st);
+        let overlap = std::thread::spawn(move || {
+            st_b.with_sh_join(Some("c1"), &sh1, |slot| {
+                let _ = seen_tx.send(slot.is_some());
+            });
+        });
+        let saw = seen_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("overlap entered f");
+        assert!(
+            saw,
+            "overlapping same-sh GET must clone last-1, not take it"
+        );
+        let _ = release.send(());
+        holder.join().expect("holder");
+        overlap.join().expect("overlap");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_listen_serves_tip_height() {
+        let (dir, q) = temp_query("esplora-unix");
+        let (h0, t0) = coinbase(0, Fk::NULL, None);
+        q.connect_block(Height(0), &h0, &[t0]).unwrap();
+        let q = Arc::new(q);
+        let sock = dir.join("esplora.sock");
+        let cfg = EsploraConfig::with_listen(EsploraListen::Unix(sock.clone()), Network::Regtest);
+        let handle = run_esplora(cfg, q, None, None).await.expect("unix listen");
+        assert!(sock.exists(), "socket file");
+        let (st, body) = http_get_unix(&sock, "/blocks/tip/height").await;
+        assert_eq!(st, 200, "{body}");
+        assert_eq!(body, "0");
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn x_powered_by_on_tip_height() {
+        let (dir, q) = temp_query("powered-by");
+        let (h0, t0) = coinbase(0, Fk::NULL, None);
+        q.connect_block(Height(0), &h0, &[t0]).unwrap();
+        let cfg = EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), Network::Regtest);
+        let handle = run_esplora(cfg, Arc::new(q), None, None)
+            .await
+            .expect("listen");
+        let (st, raw, body) = http_get_raw(handle.local_addr, "/blocks/tip/height").await;
+        assert_eq!(st, 200, "{body}");
+        let powered = header_value(&raw, "x-powered-by").expect("X-Powered-By");
+        assert!(
+            powered.starts_with("rbitcoin-esplora/"),
+            "prefix: {powered}"
+        );
+        let hex_run = powered
+            .bytes()
+            .collect::<Vec<_>>()
+            .windows(5)
+            .any(|w| w.iter().all(|b| b.is_ascii_hexdigit()));
+        assert!(hex_run, "need ≥5 hex for mempool failover: {powered}");
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn sh_join_slots_two_addresses_utxo() {
+        let (a1, spk1) = regtest_p2wpkh();
+        let (a2, spk2) = {
+            use bitcoin::key::CompressedPublicKey;
+            use bitcoin::secp256k1::{Secp256k1, SecretKey};
+            use bitcoin::{Address, Network, PrivateKey};
+            let secp = Secp256k1::new();
+            let sk = SecretKey::from_slice(&[9u8; 32]).unwrap();
+            let pk = PrivateKey::new(sk, Network::Regtest);
+            let cpk = CompressedPublicKey::from_private_key(&secp, &pk).unwrap();
+            let addr = Address::p2wpkh(&cpk, Network::Regtest);
+            (addr.to_string(), addr.script_pubkey())
+        };
+
+        let (dir, q) = temp_query("sh-join-slots");
+        let (h0, t0) = coinbase(0, Fk::NULL, None);
+        let prev = q.connect_block(Height(0), &h0, &[t0]).unwrap();
+        let pay = |tag: u8, spk: bitcoin::ScriptBuf| {
+            let mut txid = [0u8; 32];
+            txid[0] = tag;
+            txid[31] = 0xaa;
+            TxApply {
+                tx: TxRecord {
+                    txid,
+                    version: 2,
+                    locktime: 0,
+                    input_start_fk: Fk::NULL,
+                    input_count: 1,
+                    output_start_fk: Fk::NULL,
+                    output_count: 1,
+                },
+                inputs: vec![InputRecord {
+                    prev_txid: [0u8; 32],
+                    create_fk: Fk::NULL,
+                    prev_index: u32::MAX,
+                    sequence: u32::MAX,
+                    script_sig: vec![],
+                    witness: vec![],
+                }],
+                outputs: vec![OutputRecord::unspent(1_0000_0000, spk.to_bytes())],
+            }
+        };
+        let (h1, cb1) = coinbase(1, prev, Some(h0.hash));
+        q.connect_block(Height(1), &h1, &[cb1, pay(0x11, spk1), pay(0x22, spk2)])
+            .unwrap();
+
+        let q = Arc::new(q);
+        let cfg = EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), Network::Regtest);
+        let handle = run_esplora(cfg, q, None, None).await.expect("listen");
+        let addr = handle.local_addr;
+        let p1 = format!("/address/{a1}/utxo");
+        let p2 = format!("/address/{a2}/utxo");
+        let ((st1, b1), (st2, b2)) =
+            tokio::join!(http_get_hdr(addr, &p1, "a"), http_get_hdr(addr, &p2, "b"));
+        assert_eq!(st1, 200, "{b1}");
+        assert_eq!(st2, 200, "{b2}");
+        let v1: Value = serde_json::from_str(&b1).unwrap();
+        let v2: Value = serde_json::from_str(&b2).unwrap();
+        assert_eq!(v1.as_array().map(|a| a.len()), Some(1), "{b1}");
+        assert_eq!(v2.as_array().map(|a| a.len()), Some(1), "{b2}");
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn two_script_pay(tag: u8, spk: bitcoin::ScriptBuf) -> TxApply {
+        let mut txid = [0u8; 32];
+        txid[0] = tag;
+        txid[31] = 0xaa;
+        TxApply {
+            tx: TxRecord {
+                txid,
+                version: 2,
+                locktime: 0,
+                input_start_fk: Fk::NULL,
+                input_count: 1,
+                output_start_fk: Fk::NULL,
+                output_count: 1,
+            },
+            inputs: vec![InputRecord {
+                prev_txid: [0u8; 32],
+                create_fk: Fk::NULL,
+                prev_index: u32::MAX,
+                sequence: u32::MAX,
+                script_sig: vec![],
+                witness: vec![],
+            }],
+            outputs: vec![OutputRecord::unspent(1_0000_0000, spk.to_bytes())],
+        }
+    }
+
+    fn app_with_join(q: Arc<Query>, cache: Arc<Mutex<JoinCache>>, trusted: bool) -> Router {
+        let state = AppState {
+            query: q,
+            network: Network::Regtest,
+            mempool: None,
+            max_body: 1 << 20,
+            tip_tx: None,
+            ws_sem: None,
+            max_ws_message_bytes: 1024,
+            max_track_addresses: 1,
+            max_track_txs: 1,
+            sh_join: cache,
+            join_header_trusted: trusted,
+            block_template: None,
+            gbt_cache: Arc::new(Mutex::new(None)),
+        };
+        Router::new()
+            .route("/scripthash/{hash}", get(handlers::scripthash_info))
+            .route("/scripthash/{hash}/utxo", get(handlers::scripthash_utxo))
+            .route("/scripthashes/txs", post(handlers::post_scripthashes_txs))
+            .with_state(state)
+    }
+
+    async fn oneshot_http(
+        app: &Router,
+        req: axum::http::Request<axum::body::Body>,
+    ) -> (u16, String) {
+        use tower::ServiceExt;
+        let resp = app.clone().oneshot(req).await.expect("oneshot");
+        let status = resp.status().as_u16();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn get_with_client(path: &str, client: &str) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::builder()
+            .uri(path)
+            .header("X-Rbitcoin-Client", client)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn http_sh_join_last1_last_bulk_and_header_trust() {
+        use rbitcoin_store::script_hash;
+
+        let (_a1, spk1) = regtest_p2wpkh();
+        let (_a2, spk2) = {
+            use bitcoin::key::CompressedPublicKey;
+            use bitcoin::secp256k1::{Secp256k1, SecretKey};
+            use bitcoin::{Address, PrivateKey};
+            let secp = Secp256k1::new();
+            let sk = SecretKey::from_slice(&[9u8; 32]).unwrap();
+            let pk = PrivateKey::new(sk, Network::Regtest);
+            let cpk = CompressedPublicKey::from_private_key(&secp, &pk).unwrap();
+            let addr = Address::p2wpkh(&cpk, Network::Regtest);
+            (addr.to_string(), addr.script_pubkey())
+        };
+        let (dir, q) = temp_query("sh-join-http");
+        let (h0, t0) = coinbase(0, Fk::NULL, None);
+        let prev = q.connect_block(Height(0), &h0, &[t0]).unwrap();
+        let (h1, cb1) = coinbase(1, prev, Some(h0.hash));
+        q.connect_block(
+            Height(1),
+            &h1,
+            &[
+                cb1,
+                two_script_pay(0x11, spk1.clone()),
+                two_script_pay(0x22, spk2.clone()),
+            ],
+        )
+        .unwrap();
+        let q = Arc::new(q);
+        let sh1 = script_hash(spk1.as_bytes());
+        let sh2 = script_hash(spk2.as_bytes());
+        let h1hex = block_hash_hex(&sh1);
+        let h2hex = block_hash_hex(&sh2);
+        let t2 = block_hash_hex(&[
+            0x22, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0xaa,
+        ]);
+
+        let cache = Arc::new(Mutex::new(JoinCache::default()));
+        let app = app_with_join(Arc::clone(&q), Arc::clone(&cache), true);
+
+        let (st, body) =
+            oneshot_http(&app, get_with_client(&format!("/scripthash/{h1hex}"), "c1")).await;
+        assert_eq!(st, 200, "{body}");
+        assert_eq!(cache.lock().unwrap().last_sh_key("c1"), Some(sh1));
+        let (st, body) = oneshot_http(
+            &app,
+            get_with_client(&format!("/scripthash/{h1hex}/utxo"), "c1"),
+        )
+        .await;
+        assert_eq!(st, 200, "{body}");
+        assert_eq!(cache.lock().unwrap().last_sh_key("c1"), Some(sh1));
+
+        let (st, body) =
+            oneshot_http(&app, get_with_client(&format!("/scripthash/{h2hex}"), "c1")).await;
+        assert_eq!(st, 200, "{body}");
+        assert_eq!(
+            cache.lock().unwrap().last_sh_key("c1"),
+            Some(sh2),
+            "GET B replaces last-1"
+        );
+
+        let (st, body) =
+            oneshot_http(&app, get_with_client(&format!("/scripthash/{h1hex}"), "c2")).await;
+        assert_eq!(st, 200, "{body}");
+        {
+            let g = cache.lock().unwrap();
+            assert_eq!(g.last_sh_key("c1"), Some(sh2));
+            assert_eq!(g.last_sh_key("c2"), Some(sh1));
+        }
+
+        let body = serde_json::to_vec(&json!([&h1hex, &h2hex])).unwrap();
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/scripthashes/txs")
+            .header("X-Rbitcoin-Client", "wallet")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.clone()))
+            .unwrap();
+        let (st, resp) = oneshot_http(&app, req).await;
+        assert_eq!(st, 200, "{resp}");
+        assert_eq!(cache.lock().unwrap().bulk_len("wallet"), 2);
+        {
+            let st = join_only_state(Arc::clone(&q), Arc::clone(&cache));
+            let mut bag = HashMap::new();
+            st.seed_bulk(Some("wallet"), &mut bag);
+            assert_eq!(bag.len(), 2);
+            let g = cache.lock().unwrap();
+            let c = g.clients.get("wallet").expect("wallet bulk");
+            let packed: usize = c.last_bulk.values().map(|s| s.packed_bytes()).sum();
+            assert!(packed <= JOIN_BULK_CAP, "last-bulk stays under 16 MiB");
+            for (k, v) in &bag {
+                let cached = c.last_bulk.get(k).expect("seeded key");
+                assert!(
+                    Arc::ptr_eq(cached, v),
+                    "seed_bulk must Arc-clone last-bulk, not memcpy outs"
+                );
+            }
+        }
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/scripthashes/txs?after_txid={t2}"))
+            .header("X-Rbitcoin-Client", "wallet")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        let (st, resp) = oneshot_http(&app, req).await;
+        assert_eq!(st, 200, "{resp}");
+        assert_eq!(cache.lock().unwrap().bulk_len("wallet"), 2);
+
+        let public = Arc::new(Mutex::new(JoinCache::default()));
+        let pub_app = app_with_join(Arc::clone(&q), Arc::clone(&public), false);
+        let (st, body) = oneshot_http(
+            &pub_app,
+            get_with_client(&format!("/scripthash/{h1hex}"), "ignored"),
+        )
+        .await;
+        assert_eq!(st, 200, "{body}");
+        assert!(
+            public.lock().unwrap().last_sh_key("ignored").is_none(),
+            "public TCP ignores X-Rbitcoin-Client"
+        );
+
+        let loopback = Arc::new(Mutex::new(JoinCache::default()));
+        let lb_app = app_with_join(q, Arc::clone(&loopback), false);
+        let mut req = get_with_client(&format!("/scripthash/{h1hex}"), "lb");
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 1))));
+        let (st, body) = oneshot_http(&lb_app, req).await;
+        assert_eq!(st, 200, "{body}");
+        assert_eq!(loopback.lock().unwrap().last_sh_key("lb"), Some(sh1));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -1057,7 +2039,8 @@ mod tests {
             max_ws_message_bytes: 1024,
             max_track_addresses: 1,
             max_track_txs: 1,
-            sh_join: Arc::new(Mutex::new(None)),
+            sh_join: Arc::new(Mutex::new(JoinCache::default())),
+            join_header_trusted: false,
             block_template: None,
             gbt_cache: Arc::new(Mutex::new(None)),
         };
@@ -1467,11 +2450,42 @@ mod tests {
             .expect("ws upgrade");
         // Handler task may lag the HTTP upgrade handshake.
         tokio::time::sleep(Duration::from_millis(150)).await;
+        ws.send(WsMsg::Text(r#"{"action":"ping"}"#.into()))
+            .await
+            .unwrap();
+        let ping = tokio::time::timeout(Duration::from_secs(2), ws.next())
+            .await
+            .expect("ping timeout")
+            .expect("ws closed")
+            .expect("ws err");
+        let ping_text = match ping {
+            WsMsg::Text(t) => t.as_str().to_owned(),
+            other => panic!("expected pong text, got {other:?}"),
+        };
+        let ping_v: serde_json::Value = serde_json::from_str(&ping_text).unwrap();
+        assert_eq!(ping_v["pong"], true, "{ping_text}");
+        ws.send(WsMsg::Text(r#"{"action":"init"}"#.into()))
+            .await
+            .unwrap();
+        let init = tokio::time::timeout(Duration::from_secs(2), ws.next())
+            .await
+            .expect("init timeout")
+            .expect("ws closed")
+            .expect("ws err");
+        let init_text = match init {
+            WsMsg::Text(t) => t.as_str().to_owned(),
+            other => panic!("expected init text, got {other:?}"),
+        };
+        let init_v: serde_json::Value = serde_json::from_str(&init_text).unwrap();
+        assert_eq!(init_v["block"]["height"], 1, "{init_text}");
         ws.send(WsMsg::Text(
             r#"{"action":"want","data":["blocks","stats"]}"#.into(),
         ))
         .await
         .unwrap();
+        let stats = ws_recv_json(&mut ws, 3).await;
+        assert!(stats.get("mempoolInfo").is_some(), "{stats}");
+        assert!(stats.get("fees").is_some(), "{stats}");
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Inject tip (header minimal).
@@ -1589,13 +2603,109 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `want: stats` pushes GET /mempool + /fees/recommended shapes; admit bumps count.
+    #[tokio::test]
+    async fn ws_want_stats_mempoolinfo_and_fees() {
+        use bitcoin::absolute::LockTime;
+        use bitcoin::hashes::Hash;
+        use bitcoin::transaction::Version as TxVersion;
+        use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
+        use futures_util::SinkExt;
+        use rbitcoin_net::MempoolHub;
+        use tokio_tungstenite::tungstenite::Message as WsMsg;
+
+        let (dir, q) = temp_query("ws-stats");
+        let mut prev = Fk::NULL;
+        let mut parent_hash: Option<[u8; 32]> = None;
+        let mut coinbase_txids = Vec::new();
+        for h in 0..101u32 {
+            let (header, ta) = coinbase(h, prev, parent_hash);
+            parent_hash = Some(header.hash);
+            coinbase_txids.push(ta.tx.txid);
+            prev = q.connect_block(Height(h), &header, &[ta]).unwrap();
+        }
+        let q = Arc::new(q);
+        let mp_dir = dir.join("mp");
+        std::fs::create_dir_all(&mp_dir).unwrap();
+        let hub = MempoolHub::open(&mp_dir, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+
+        let cfg =
+            EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), bitcoin::Network::Regtest);
+        let handle = run_esplora(cfg, Arc::clone(&q), Some(Arc::clone(&hub)), None)
+            .await
+            .expect("listen");
+        let (mut ws, _) =
+            tokio_tungstenite::connect_async(format!("ws://{}/v1/ws", handle.local_addr))
+                .await
+                .unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        ws.send(WsMsg::Text(r#"{"action":"want","data":["stats"]}"#.into()))
+            .await
+            .unwrap();
+
+        let mut saw_zero = false;
+        for _ in 0..8 {
+            let v = ws_recv_json(&mut ws, 3).await;
+            if v.get("mempoolInfo").is_some() && v.get("fees").is_some() {
+                assert_eq!(v["mempoolInfo"]["count"], 0, "{v}");
+                assert!(v["fees"].get("fastestFee").is_some(), "{v}");
+                saw_zero = true;
+                break;
+            }
+        }
+        assert!(saw_zero, "expected mempoolInfo+fees on want stats");
+
+        let pay = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: bitcoin::Txid::from_byte_array(coinbase_txids[0]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(49_0000_0000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        hub.accept_tx(&pay).expect("admit");
+
+        let mut saw_bump = false;
+        for _ in 0..8 {
+            let v = ws_recv_json(&mut ws, 3).await;
+            if let Some(info) = v.get("mempoolInfo") {
+                assert!(
+                    info["count"].as_u64().unwrap_or(0) >= 1,
+                    "count should bump after admit, got {v}"
+                );
+                saw_bump = true;
+                break;
+            }
+        }
+        assert!(saw_bump, "expected mempoolInfo count bump after admit");
+
+        let _ = ws.close(None).await;
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Regtest P2WPKH address + scriptPubKey for wallet-style track-address tests.
     fn regtest_p2wpkh() -> (String, bitcoin::ScriptBuf) {
+        regtest_p2wpkh_sk(7)
+    }
+
+    fn regtest_p2wpkh_sk(fill: u8) -> (String, bitcoin::ScriptBuf) {
         use bitcoin::key::CompressedPublicKey;
         use bitcoin::secp256k1::{Secp256k1, SecretKey};
         use bitcoin::{Address, Network, PrivateKey};
         let secp = Secp256k1::new();
-        let sk = SecretKey::from_slice(&[7u8; 32]).expect("sk");
+        let sk = SecretKey::from_slice(&[fill; 32]).expect("sk");
         let pk = PrivateKey::new(sk, Network::Regtest);
         let cpk = CompressedPublicKey::from_private_key(&secp, &pk).expect("cpk");
         let addr = Address::p2wpkh(&cpk, Network::Regtest);
@@ -1822,6 +2932,212 @@ mod tests {
             }
         }
         assert!(saw_block_txs, "expected block-transactions at tip 101");
+
+        let _ = ws.close(None).await;
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Subscribe snapshots live mempool txs; RBF emits address-removed; track-addresses is keyed.
+    #[tokio::test]
+    async fn ws_track_address_snapshot_removed_and_multi() {
+        use bitcoin::absolute::LockTime;
+        use bitcoin::hashes::Hash;
+        use bitcoin::transaction::Version as TxVersion;
+        use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
+        use futures_util::SinkExt;
+        use rbitcoin_net::MempoolHub;
+        use tokio_tungstenite::tungstenite::Message as WsMsg;
+
+        let (addr_a, spk_a) = regtest_p2wpkh_sk(7);
+        let (addr_b, spk_b) = regtest_p2wpkh_sk(8);
+        let (dir, q) = temp_query("ws-snap");
+        let mut prev = Fk::NULL;
+        let mut parent_hash: Option<[u8; 32]> = None;
+        let mut coinbase_txids = Vec::new();
+        for h in 0..103u32 {
+            let (header, ta) = coinbase(h, prev, parent_hash);
+            parent_hash = Some(header.hash);
+            coinbase_txids.push(ta.tx.txid);
+            prev = q.connect_block(Height(h), &header, &[ta]).unwrap();
+        }
+        let q = Arc::new(q);
+        let mp_dir = dir.join("mp");
+        std::fs::create_dir_all(&mp_dir).unwrap();
+        let hub = MempoolHub::open(&mp_dir, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+
+        let cfg =
+            EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), bitcoin::Network::Regtest);
+        let handle = run_esplora(cfg, Arc::clone(&q), Some(Arc::clone(&hub)), None)
+            .await
+            .expect("listen");
+        let (mut ws, _) =
+            tokio_tungstenite::connect_async(format!("ws://{}/v1/ws", handle.local_addr))
+                .await
+                .unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let pay = |op: OutPoint, spk: bitcoin::ScriptBuf, value: u64| Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: op,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(value),
+                script_pubkey: spk,
+            }],
+        };
+
+        let old = pay(
+            OutPoint {
+                txid: bitcoin::Txid::from_byte_array(coinbase_txids[0]),
+                vout: 0,
+            },
+            spk_a.clone(),
+            49_0000_0000,
+        );
+        let old_hex = display_txid(old.compute_txid());
+        hub.accept_tx(&old).expect("admit pay A");
+
+        ws.send(WsMsg::Text(
+            (format!(r#"{{"track-address":"{addr_a}"}}"#)).into(),
+        ))
+        .await
+        .unwrap();
+
+        let mut saw_snap = false;
+        for _ in 0..12 {
+            let v = ws_recv_json(&mut ws, 3).await;
+            if let Some(arr) = v.get("address-transactions").and_then(|a| a.as_array()) {
+                let txids: Vec<&str> = arr
+                    .iter()
+                    .filter_map(|t| t.get("txid").and_then(|x| x.as_str()))
+                    .collect();
+                assert!(
+                    txids.iter().any(|t| *t == old_hex),
+                    "subscribe snapshot should include live pay {old_hex}, got {txids:?}"
+                );
+                assert!(arr
+                    .iter()
+                    .any(|t| t.get("vin").and_then(|x| x.as_array()).is_some()));
+                saw_snap = true;
+                break;
+            }
+        }
+        assert!(
+            saw_snap,
+            "expected address-transactions snapshot on subscribe"
+        );
+
+        let away = pay(
+            OutPoint {
+                txid: bitcoin::Txid::from_byte_array(coinbase_txids[0]),
+                vout: 0,
+            },
+            ScriptBuf::from_bytes(vec![0x51]),
+            48_0000_0000,
+        );
+        hub.accept_tx(&away).expect("rbf away from A");
+
+        let mut saw_removed = false;
+        for _ in 0..12 {
+            let v = ws_recv_json(&mut ws, 3).await;
+            if let Some(arr) = v
+                .get("address-removed-transactions")
+                .and_then(|a| a.as_array())
+            {
+                let txids: Vec<&str> = arr
+                    .iter()
+                    .filter_map(|t| t.get("txid").and_then(|x| x.as_str()))
+                    .collect();
+                assert!(
+                    txids.iter().any(|t| *t == old_hex),
+                    "address-removed-transactions should include {old_hex}, got {txids:?}"
+                );
+                saw_removed = true;
+                break;
+            }
+        }
+        assert!(saw_removed, "expected address-removed-transactions on RBF");
+
+        ws.send(WsMsg::Text(r#"{"stop-track-addresses":true}"#.into()))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let pay_a = pay(
+            OutPoint {
+                txid: bitcoin::Txid::from_byte_array(coinbase_txids[1]),
+                vout: 0,
+            },
+            spk_a,
+            49_0000_0000,
+        );
+        let pay_b = pay(
+            OutPoint {
+                txid: bitcoin::Txid::from_byte_array(coinbase_txids[2]),
+                vout: 0,
+            },
+            spk_b,
+            49_0000_0000,
+        );
+        let hex_a = display_txid(pay_a.compute_txid());
+        let hex_b = display_txid(pay_b.compute_txid());
+        hub.accept_tx(&pay_a).expect("admit A");
+        hub.accept_tx(&pay_b).expect("admit B");
+
+        ws.send(WsMsg::Text(
+            (format!(r#"{{"track-addresses":["{addr_a}","{addr_b}"]}}"#)).into(),
+        ))
+        .await
+        .unwrap();
+
+        let mut saw_multi = false;
+        for _ in 0..12 {
+            let v = ws_recv_json(&mut ws, 3).await;
+            if let Some(obj) = v
+                .get("multi-address-transactions")
+                .and_then(|o| o.as_object())
+            {
+                let ids_a: Vec<&str> = obj
+                    .get(&addr_a)
+                    .and_then(|a| a.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|t| t.get("txid").and_then(|x| x.as_str()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let ids_b: Vec<&str> = obj
+                    .get(&addr_b)
+                    .and_then(|a| a.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|t| t.get("txid").and_then(|x| x.as_str()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                assert!(
+                    ids_a.iter().any(|t| *t == hex_a),
+                    "multi {addr_a} should include {hex_a}, got {ids_a:?}"
+                );
+                assert!(
+                    ids_b.iter().any(|t| *t == hex_b),
+                    "multi {addr_b} should include {hex_b}, got {ids_b:?}"
+                );
+                saw_multi = true;
+                break;
+            }
+        }
+        assert!(
+            saw_multi,
+            "expected multi-address-transactions keyed by display address"
+        );
 
         let _ = ws.close(None).await;
         handle.shutdown().await;
@@ -2365,6 +3681,188 @@ mod tests {
         assert_eq!(st, 200, "{hex_body}");
         let (st, _) = http_get(addr, &format!("/tx/{txid_hex}/raw")).await;
         assert_eq!(st, 200);
+
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn after_txid_skips_and_unknown_is_422() {
+        use rbitcoin_store::script_hash;
+
+        let (dir, q) = temp_query("after-txid");
+        let mut prev = Fk::NULL;
+        let mut parent_hash: Option<[u8; 32]> = None;
+        let mut txids = Vec::new();
+        for h in 0..3u32 {
+            let (header, ta) = coinbase(h, prev, parent_hash);
+            parent_hash = Some(header.hash);
+            txids.push(ta.tx.txid);
+            prev = q.connect_block(Height(h), &header, &[ta]).unwrap();
+        }
+        let q = Arc::new(q);
+        let cfg = EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), Network::Regtest);
+        let handle = run_esplora(cfg, q, None, None).await.expect("listen");
+        let addr = handle.local_addr;
+        let sh = block_hash_hex(&script_hash(&[0x51]));
+        let newest = block_hash_hex(&txids[2]);
+        let mid = block_hash_hex(&txids[1]);
+        let oldest = block_hash_hex(&txids[0]);
+
+        let (st, body) = http_get(addr, &format!("/scripthash/{sh}/txs")).await;
+        assert_eq!(st, 200, "{body}");
+        let all: Vec<Value> = serde_json::from_str(&body).unwrap();
+        let all_ids: Vec<&str> = all.iter().filter_map(|v| v["txid"].as_str()).collect();
+        assert_eq!(
+            all_ids,
+            vec![newest.as_str(), mid.as_str(), oldest.as_str()]
+        );
+
+        let (st, body) = http_get(addr, &format!("/scripthash/{sh}/txs?after_txid={newest}")).await;
+        assert_eq!(st, 200, "{body}");
+        let page: Vec<Value> = serde_json::from_str(&body).unwrap();
+        let page_ids: Vec<&str> = page.iter().filter_map(|v| v["txid"].as_str()).collect();
+        assert_eq!(page_ids, vec![mid.as_str(), oldest.as_str()]);
+
+        let (st, body) = http_get(
+            addr,
+            &format!("/scripthash/{sh}/txs/summary?after_txid={newest}"),
+        )
+        .await;
+        assert_eq!(st, 200, "{body}");
+        let sum: Vec<Value> = serde_json::from_str(&body).unwrap();
+        assert_eq!(sum[0]["txid"], mid);
+        assert!(!sum.iter().any(|v| v["txid"] == newest));
+
+        let unknown = "ff".repeat(32);
+        let (st, body) =
+            http_get(addr, &format!("/scripthash/{sh}/txs?after_txid={unknown}")).await;
+        assert_eq!(st, 422, "{body}");
+        assert!(body.contains("after_txid not found"), "{body}");
+        let (st, body) = http_get(
+            addr,
+            &format!("/scripthash/{sh}/txs/summary?after_txid={unknown}"),
+        )
+        .await;
+        assert_eq!(st, 422, "{body}");
+        assert!(body.contains("after_txid not found"), "{body}");
+        let (st, body) = http_get(addr, &format!("/scripthash/{sh}/txs?after_txid=zz")).await;
+        assert_eq!(st, 422, "{body}");
+
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn post_scripthashes_txs_merges_and_caps() {
+        use rbitcoin_store::script_hash;
+
+        let (a1, spk1) = regtest_p2wpkh();
+        let (a2, spk2) = {
+            use bitcoin::key::CompressedPublicKey;
+            use bitcoin::secp256k1::{Secp256k1, SecretKey};
+            use bitcoin::{Address, Network, PrivateKey};
+            let secp = Secp256k1::new();
+            let sk = SecretKey::from_slice(&[9u8; 32]).unwrap();
+            let pk = PrivateKey::new(sk, Network::Regtest);
+            let cpk = CompressedPublicKey::from_private_key(&secp, &pk).unwrap();
+            let addr = Address::p2wpkh(&cpk, Network::Regtest);
+            (addr.to_string(), addr.script_pubkey())
+        };
+
+        let (dir, q) = temp_query("post-multi-txs");
+        let (h0, t0) = coinbase(0, Fk::NULL, None);
+        let prev = q.connect_block(Height(0), &h0, &[t0]).unwrap();
+        let pay = |tag: u8, spk: bitcoin::ScriptBuf| {
+            let mut txid = [0u8; 32];
+            txid[0] = tag;
+            txid[31] = 0xaa;
+            TxApply {
+                tx: TxRecord {
+                    txid,
+                    version: 2,
+                    locktime: 0,
+                    input_start_fk: Fk::NULL,
+                    input_count: 1,
+                    output_start_fk: Fk::NULL,
+                    output_count: 1,
+                },
+                inputs: vec![InputRecord {
+                    prev_txid: [0u8; 32],
+                    create_fk: Fk::NULL,
+                    prev_index: u32::MAX,
+                    sequence: u32::MAX,
+                    script_sig: vec![],
+                    witness: vec![],
+                }],
+                outputs: vec![OutputRecord::unspent(1_0000_0000, spk.to_bytes())],
+            }
+        };
+        let (h1, cb1) = coinbase(1, prev, Some(h0.hash));
+        let prev = q
+            .connect_block(Height(1), &h1, &[cb1, pay(0x11, spk1.clone())])
+            .unwrap();
+        let (h2, cb2) = coinbase(2, prev, Some(h1.hash));
+        q.connect_block(Height(2), &h2, &[cb2, pay(0x22, spk2.clone())])
+            .unwrap();
+
+        let q = Arc::new(q);
+        let cfg = EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), Network::Regtest);
+        let handle = run_esplora(cfg, q, None, None).await.expect("listen");
+        let addr = handle.local_addr;
+        let sh1 = block_hash_hex(&script_hash(spk1.as_bytes()));
+        let sh2 = block_hash_hex(&script_hash(spk2.as_bytes()));
+        let t1 = block_hash_hex(&[
+            0x11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0xaa,
+        ]);
+        let t2 = block_hash_hex(&[
+            0x22, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0xaa,
+        ]);
+
+        let body = serde_json::to_vec(&json!([&sh1, &sh2])).unwrap();
+        let (st, resp) = http_post(addr, "/scripthashes/txs", &body).await;
+        assert_eq!(st, 200, "{resp}");
+        let rows: Vec<Value> = serde_json::from_str(&resp).unwrap();
+        let ids: Vec<&str> = rows.iter().filter_map(|v| v["txid"].as_str()).collect();
+        assert_eq!(ids, vec![t2.as_str(), t1.as_str()], "{resp}");
+
+        let body = serde_json::to_vec(&json!([&a1, &a2])).unwrap();
+        let (st, resp) = http_post(addr, "/addresses/txs", &body).await;
+        assert_eq!(st, 200, "{resp}");
+        let rows: Vec<Value> = serde_json::from_str(&resp).unwrap();
+        assert_eq!(rows[0]["txid"], t2);
+
+        let body = serde_json::to_vec(&json!([&sh1, &sh2])).unwrap();
+        let (st, resp) = http_post(addr, "/scripthashes/txs/summary", &body).await;
+        assert_eq!(st, 200, "{resp}");
+        let rows: Vec<Value> = serde_json::from_str(&resp).unwrap();
+        assert_eq!(rows[0]["txid"], t2);
+        assert_eq!(rows[1]["txid"], t1);
+
+        let (st, resp) =
+            http_post(addr, &format!("/scripthashes/txs?after_txid={t2}"), &body).await;
+        assert_eq!(st, 200, "{resp}");
+        let rows: Vec<Value> = serde_json::from_str(&resp).unwrap();
+        assert_eq!(rows[0]["txid"], t1);
+        assert!(!rows.iter().any(|v| v["txid"] == t2));
+
+        let unknown = "ff".repeat(32);
+        let (st, resp) = http_post(
+            addr,
+            &format!("/scripthashes/txs?after_txid={unknown}"),
+            &body,
+        )
+        .await;
+        assert_eq!(st, 422, "{resp}");
+        assert!(resp.contains("after_txid not found"), "{resp}");
+
+        let too: Vec<String> = (0..301).map(|_| "aa".repeat(32)).collect();
+        let body = serde_json::to_vec(&too).unwrap();
+        let (st, resp) = http_post(addr, "/scripthashes/txs", &body).await;
+        assert_eq!(st, 422, "{resp}");
+        assert!(resp.contains("body too long"), "{resp}");
 
         handle.shutdown().await;
         let _ = std::fs::remove_dir_all(&dir);

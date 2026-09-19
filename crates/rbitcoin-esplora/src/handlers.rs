@@ -2,14 +2,14 @@
 
 use crate::server::{
     block_hash_hex, maybe_attach_view, mempool_wire, not_found, parse_hash32, pin_or_reject,
-    plain_ok, store_err, AppState, AsOf, GbtCache,
+    plain_ok, store_err, AppState, AsOf, GbtCache, JoinClient,
 };
 use crate::tx_json::{
     build_tx_json, build_tx_json_from_tx, history_items_to_tx_json, tx_status_json_in,
     utxo_list_json,
 };
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query as AxumQuery, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -21,12 +21,19 @@ use bitcoin::{MerkleBlock, Network, OutPoint, Txid};
 use rbitcoin_net::MempoolHub;
 use rbitcoin_primitives::{median_time_past_times, Height};
 use rbitcoin_query::{
-    ChainViewKind, HistoryFilter, Query, ScriptHashChainStats, ScriptHashTxSummary,
+    ChainViewKind, HistoryFilter, Query, ScriptHashChainStats, ScriptHashTxSummary, ShJoinSlot,
 };
 use rbitcoin_store::{script_hash, StoreError};
+use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+const MULTI_ADDRESS_LIMIT: usize = 300;
+
+type JoinBag = HashMap<[u8; 32], Arc<ShJoinSlot>>;
 
 /// Best-chain wire block for Esplora (archived reconstruct; no extra PoW rehash gate).
 fn best_chain_block(
@@ -509,7 +516,7 @@ pub async fn tx_outspends(
     .await
 }
 
-fn outspend_json(
+pub(crate) fn outspend_json(
     query: &Query,
     mempool: Option<&MempoolHub>,
     txid: &[u8; 32],
@@ -630,16 +637,20 @@ fn sh_pin(
 }
 
 #[allow(clippy::result_large_err)] // public error enum
+#[allow(clippy::too_many_arguments)] // asof vs live join plus last-1 / last-bulk
 fn sh_at_view<T>(
     st: &AppState,
+    sh: &[u8; 32],
     asof: Option<[u8; 32]>,
     asof_fn: impl Fn(&Query, &rbitcoin_query::ChainView) -> Result<T, rbitcoin_query::QueryError>,
     live_fn: impl Fn(
         &Query,
-        &mut Option<rbitcoin_query::ShJoinSlot>,
+        &mut Option<Arc<rbitcoin_query::ShJoinSlot>>,
         &rbitcoin_query::ChainView,
     ) -> Result<T, rbitcoin_query::QueryError>,
     missing: T,
+    client: Option<&str>,
+    mut bag: Option<&mut JoinBag>,
 ) -> Result<(T, Option<rbitcoin_query::ChainView>), Response> {
     if asof.is_some() {
         let view = sh_pin(st, asof)?;
@@ -651,9 +662,23 @@ fn sh_at_view<T>(
             Err(e) => Err(store_err(e)),
         }
     } else {
-        match st.query.run_at_view(ChainViewKind::ScriptHash, |view| {
-            st.with_sh_join(|slot| live_fn(&st.query, slot, view))
-        }) {
+        let mut slot = bag.as_mut().and_then(|m| m.remove(sh));
+        let used_bag = bag.is_some();
+        let ran = if used_bag {
+            st.query.run_at_view(ChainViewKind::ScriptHash, |view| {
+                live_fn(&st.query, &mut slot, view)
+            })
+        } else {
+            st.query.run_at_view(ChainViewKind::ScriptHash, |view| {
+                st.with_sh_join(client, sh, |s| live_fn(&st.query, s, view))
+            })
+        };
+        if let Some(map) = bag {
+            if let Some(s) = slot {
+                map.insert(*sh, s);
+            }
+        }
+        match ran {
             Ok((view, t)) => Ok((t, Some(view))),
             Err(StoreError::NotFound) => Ok((missing, None)),
             Err(e) => Err(store_err(e)),
@@ -665,15 +690,23 @@ pub async fn address_info(
     State(st): State<AppState>,
     Path(addr_s): Path<String>,
     AsOf(asof): AsOf,
+    JoinClient(client): JoinClient,
 ) -> Response {
     match resolve_address_sh(&addr_s, st.network) {
         Ok(sh) => {
-            spawn_join(
-                move || match sh_stats_json(&st, &sh, Some(addr_s.as_str()), None, asof) {
+            spawn_join(move || {
+                match sh_stats_json(
+                    &st,
+                    &sh,
+                    Some(addr_s.as_str()),
+                    None,
+                    asof,
+                    client.as_deref(),
+                ) {
                     Ok((v, view)) => maybe_attach_view(Json(v).into_response(), view),
                     Err(e) => store_err(e),
-                },
-            )
+                }
+            })
             .await
         }
         Err(_) => not_found(),
@@ -684,16 +717,24 @@ pub async fn scripthash_info(
     State(st): State<AppState>,
     Path(sh_hex): Path<String>,
     AsOf(asof): AsOf,
+    JoinClient(client): JoinClient,
 ) -> Response {
     let Ok(sh) = parse_hash32(&sh_hex) else {
         return not_found();
     };
-    spawn_join(
-        move || match sh_stats_json(&st, &sh, None, Some(sh_hex.as_str()), asof) {
+    spawn_join(move || {
+        match sh_stats_json(
+            &st,
+            &sh,
+            None,
+            Some(sh_hex.as_str()),
+            asof,
+            client.as_deref(),
+        ) {
             Ok((v, view)) => maybe_attach_view(Json(v).into_response(), view),
             Err(e) => store_err(e),
-        },
-    )
+        }
+    })
     .await
 }
 
@@ -701,9 +742,10 @@ pub async fn address_utxo(
     State(st): State<AppState>,
     Path(addr_s): Path<String>,
     AsOf(asof): AsOf,
+    JoinClient(client): JoinClient,
 ) -> Response {
     match resolve_address_sh(&addr_s, st.network) {
-        Ok(sh) => spawn_join(move || utxo_response(&st, &sh, asof)).await,
+        Ok(sh) => spawn_join(move || utxo_response(&st, &sh, asof, client.as_deref())).await,
         Err(_) => not_found(),
     }
 }
@@ -712,16 +754,23 @@ pub async fn scripthash_utxo(
     State(st): State<AppState>,
     Path(sh_hex): Path<String>,
     AsOf(asof): AsOf,
+    JoinClient(client): JoinClient,
 ) -> Response {
     let Ok(sh) = parse_hash32(&sh_hex) else {
         return not_found();
     };
-    spawn_join(move || utxo_response(&st, &sh, asof)).await
+    spawn_join(move || utxo_response(&st, &sh, asof, client.as_deref())).await
 }
 
-fn utxo_response(st: &AppState, sh: &[u8; 32], asof: Option<[u8; 32]>) -> Response {
+fn utxo_response(
+    st: &AppState,
+    sh: &[u8; 32],
+    asof: Option<[u8; 32]>,
+    client: Option<&str>,
+) -> Response {
     let (list, view) = match sh_at_view(
         st,
+        sh,
         asof,
         |q, view| q.scripthash_listunspent_in(sh, view),
         |q, slot, view| {
@@ -734,6 +783,8 @@ fn utxo_response(st: &AppState, sh: &[u8; 32], asof: Option<[u8; 32]>) -> Respon
             )
         },
         Vec::new(),
+        client,
+        None,
     ) {
         Ok(x) => x,
         Err(r) => return r,
@@ -759,6 +810,7 @@ fn sh_stats_json(
     address: Option<&str>,
     scripthash_hex: Option<&str>,
     asof: Option<[u8; 32]>,
+    client: Option<&str>,
 ) -> Result<(Value, Option<rbitcoin_query::ChainView>), rbitcoin_query::QueryError> {
     let (chain, view) = if asof.is_some() {
         let view = st
@@ -771,7 +823,9 @@ fn sh_stats_json(
         (st.query.scripthash_chain_stats_in(sh, v)?, view)
     } else {
         match st.query.run_at_view(ChainViewKind::ScriptHash, |v| {
-            st.with_sh_join(|slot| st.query.scripthash_chain_stats_slot_in(sh, slot, v))
+            st.with_sh_join(client, sh, |slot| {
+                st.query.scripthash_chain_stats_slot_in(sh, slot, v)
+            })
         }) {
             Ok((view, chain)) => (chain, Some(view)),
             Err(StoreError::NotFound) => (ScriptHashChainStats::default(), None),
@@ -795,7 +849,7 @@ fn sh_stats_json(
     let mempool_stats = if asof.is_some() {
         zeros
     } else if let Some(mp) = st.mempool.as_ref() {
-        st.with_sh_join(|slot| {
+        st.with_sh_join(client, sh, |slot| {
             rbitcoin_electrum::scripthash_mempool_stats_slot(&st.query, mp, sh, slot).map(|s| {
                 json!({
                     "tx_count": s.tx_count,
@@ -826,28 +880,31 @@ pub async fn scripthash_txs_chain(
     State(st): State<AppState>,
     Path(sh_hex): Path<String>,
     AsOf(asof): AsOf,
+    JoinClient(client): JoinClient,
 ) -> Response {
-    spawn_join(move || chain_page(&st, &sh_hex, None, asof)).await
+    spawn_join(move || chain_page(&st, &sh_hex, None, asof, client.as_deref())).await
 }
 
 pub async fn scripthash_txs_chain_cursor(
     State(st): State<AppState>,
     Path((sh_hex, last)): Path<(String, String)>,
     AsOf(asof): AsOf,
+    JoinClient(client): JoinClient,
 ) -> Response {
     let Ok(after) = parse_hash32(&last) else {
         return not_found();
     };
-    spawn_join(move || chain_page(&st, &sh_hex, Some(after), asof)).await
+    spawn_join(move || chain_page(&st, &sh_hex, Some(after), asof, client.as_deref())).await
 }
 
 pub async fn address_txs_chain(
     State(st): State<AppState>,
     Path(addr_s): Path<String>,
     AsOf(asof): AsOf,
+    JoinClient(client): JoinClient,
 ) -> Response {
     match resolve_address_sh(&addr_s, st.network) {
-        Ok(sh) => spawn_join(move || chain_page_sh(&st, &sh, None, asof)).await,
+        Ok(sh) => spawn_join(move || chain_page_sh(&st, &sh, None, asof, client.as_deref())).await,
         Err(_) => not_found(),
     }
 }
@@ -856,12 +913,15 @@ pub async fn address_txs_chain_cursor(
     State(st): State<AppState>,
     Path((addr_s, last)): Path<(String, String)>,
     AsOf(asof): AsOf,
+    JoinClient(client): JoinClient,
 ) -> Response {
     let Ok(after) = parse_hash32(&last) else {
         return not_found();
     };
     match resolve_address_sh(&addr_s, st.network) {
-        Ok(sh) => spawn_join(move || chain_page_sh(&st, &sh, Some(after), asof)).await,
+        Ok(sh) => {
+            spawn_join(move || chain_page_sh(&st, &sh, Some(after), asof, client.as_deref())).await
+        }
         Err(_) => not_found(),
     }
 }
@@ -871,20 +931,32 @@ pub async fn scripthash_txs(
     State(st): State<AppState>,
     Path(sh_hex): Path<String>,
     AsOf(asof): AsOf,
+    AxumQuery(q): AxumQuery<AfterTxidQuery>,
+    JoinClient(client): JoinClient,
 ) -> Response {
     let Ok(sh) = parse_hash32(&sh_hex) else {
         return not_found();
     };
-    spawn_join(move || combined_txs(&st, &sh, asof)).await
+    let after = match parse_after_txid_query(q) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    spawn_join(move || combined_txs(&st, &sh, asof, after, client.as_deref())).await
 }
 
 pub async fn address_txs(
     State(st): State<AppState>,
     Path(addr_s): Path<String>,
     AsOf(asof): AsOf,
+    AxumQuery(q): AxumQuery<AfterTxidQuery>,
+    JoinClient(client): JoinClient,
 ) -> Response {
+    let after = match parse_after_txid_query(q) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
     match resolve_address_sh(&addr_s, st.network) {
-        Ok(sh) => spawn_join(move || combined_txs(&st, &sh, asof)).await,
+        Ok(sh) => spawn_join(move || combined_txs(&st, &sh, asof, after, client.as_deref())).await,
         Err(_) => not_found(),
     }
 }
@@ -894,39 +966,55 @@ fn chain_page(
     sh_hex: &str,
     after: Option<[u8; 32]>,
     asof: Option<[u8; 32]>,
+    client: Option<&str>,
 ) -> Response {
     let Ok(sh) = parse_hash32(sh_hex) else {
         return not_found();
     };
-    chain_page_sh(st, &sh, after, asof)
+    chain_page_sh(st, &sh, after, asof, client)
 }
 
 pub async fn scripthash_txs_summary(
     State(st): State<AppState>,
     Path(sh_hex): Path<String>,
     AsOf(asof): AsOf,
+    AxumQuery(q): AxumQuery<AfterTxidQuery>,
+    JoinClient(client): JoinClient,
 ) -> Response {
-    spawn_join(move || summary_page(&st, &sh_hex, None, asof)).await
+    let after = match parse_after_txid_query(q) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    spawn_join(move || summary_page(&st, &sh_hex, after, asof, client.as_deref())).await
 }
 
 pub async fn scripthash_txs_summary_cursor(
     State(st): State<AppState>,
     Path((sh_hex, last)): Path<(String, String)>,
     AsOf(asof): AsOf,
+    JoinClient(client): JoinClient,
 ) -> Response {
     let Ok(after) = parse_hash32(&last) else {
         return not_found();
     };
-    spawn_join(move || summary_page(&st, &sh_hex, Some(after), asof)).await
+    spawn_join(move || summary_page(&st, &sh_hex, Some(after), asof, client.as_deref())).await
 }
 
 pub async fn address_txs_summary(
     State(st): State<AppState>,
     Path(addr_s): Path<String>,
     AsOf(asof): AsOf,
+    AxumQuery(q): AxumQuery<AfterTxidQuery>,
+    JoinClient(client): JoinClient,
 ) -> Response {
+    let after = match parse_after_txid_query(q) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
     match resolve_address_sh(&addr_s, st.network) {
-        Ok(sh) => spawn_join(move || summary_page_sh(&st, &sh, None, asof)).await,
+        Ok(sh) => {
+            spawn_join(move || summary_page_sh(&st, &sh, after, asof, client.as_deref())).await
+        }
         Err(_) => not_found(),
     }
 }
@@ -935,12 +1023,16 @@ pub async fn address_txs_summary_cursor(
     State(st): State<AppState>,
     Path((addr_s, last)): Path<(String, String)>,
     AsOf(asof): AsOf,
+    JoinClient(client): JoinClient,
 ) -> Response {
     let Ok(after) = parse_hash32(&last) else {
         return not_found();
     };
     match resolve_address_sh(&addr_s, st.network) {
-        Ok(sh) => spawn_join(move || summary_page_sh(&st, &sh, Some(after), asof)).await,
+        Ok(sh) => {
+            spawn_join(move || summary_page_sh(&st, &sh, Some(after), asof, client.as_deref()))
+                .await
+        }
         Err(_) => not_found(),
     }
 }
@@ -950,11 +1042,12 @@ fn summary_page(
     sh_hex: &str,
     after: Option<[u8; 32]>,
     asof: Option<[u8; 32]>,
+    client: Option<&str>,
 ) -> Response {
     let Ok(sh) = parse_hash32(sh_hex) else {
         return not_found();
     };
-    summary_page_sh(st, &sh, after, asof)
+    summary_page_sh(st, &sh, after, asof, client)
 }
 
 fn summary_page_sh(
@@ -962,14 +1055,23 @@ fn summary_page_sh(
     sh: &[u8; 32],
     after: Option<[u8; 32]>,
     asof: Option<[u8; 32]>,
+    client: Option<&str>,
 ) -> Response {
+    if let Some(id) = after {
+        if !txid_is_known(st, &id) {
+            return after_txid_not_found();
+        }
+    }
     let filter = HistoryFilter::esplora_chain_page(after);
     let (items, view) = match sh_at_view(
         st,
+        sh,
         asof,
         |q, view| q.scripthash_history_summary_filtered_in(sh, &filter, view),
         |q, slot, view| q.scripthash_history_summary_filtered_slot_in(sh, &filter, slot, view),
         Vec::new(),
+        client,
+        None,
     ) {
         Ok(x) => x,
         Err(r) => return r,
@@ -1012,14 +1114,18 @@ fn chain_page_sh(
     sh: &[u8; 32],
     after: Option<[u8; 32]>,
     asof: Option<[u8; 32]>,
+    client: Option<&str>,
 ) -> Response {
     let filter = HistoryFilter::esplora_chain_page(after);
     let (items, view) = match sh_at_view(
         st,
+        sh,
         asof,
         |q, view| q.scripthash_history_filtered_in(sh, &filter, view),
         |q, slot, view| q.scripthash_history_filtered_slot_in(sh, &filter, slot, view),
         Vec::new(),
+        client,
+        None,
     ) {
         Ok(x) => x,
         Err(r) => return r,
@@ -1033,18 +1139,41 @@ fn chain_page_sh(
     )
 }
 
-fn combined_txs(st: &AppState, sh: &[u8; 32], asof: Option<[u8; 32]>) -> Response {
-    let mut out = Vec::new();
-    if asof.is_none() {
-        out.extend(mempool_txs_json(st, sh));
+fn combined_txs(
+    st: &AppState,
+    sh: &[u8; 32],
+    asof: Option<[u8; 32]>,
+    after: Option<[u8; 32]>,
+    client: Option<&str>,
+) -> Response {
+    if let Some(id) = after {
+        if !txid_is_known(st, &id) {
+            return after_txid_not_found();
+        }
     }
-    let filter = HistoryFilter::esplora_chain_page(None);
+    let after_in_mempool = after.is_some_and(|id| {
+        let tid = Txid::from_byte_array(id);
+        st.mempool.as_ref().is_some_and(|m| m.contains(&tid))
+    });
+    let mut out = Vec::new();
+    if asof.is_none() && (after.is_none() || after_in_mempool) {
+        let rows = mempool_txs_json(st, sh);
+        out.extend(match after {
+            Some(id) if after_in_mempool => skip_mempool_after(rows, &id),
+            _ => rows,
+        });
+    }
+    let chain_after = if after_in_mempool { None } else { after };
+    let filter = HistoryFilter::esplora_chain_page(chain_after);
     let (items, view) = match sh_at_view(
         st,
+        sh,
         asof,
         |q, view| q.scripthash_history_filtered_in(sh, &filter, view),
         |q, slot, view| q.scripthash_history_filtered_slot_in(sh, &filter, slot, view),
         Vec::new(),
+        client,
+        None,
     ) {
         Ok(x) => x,
         Err(r) => return r,
@@ -1061,27 +1190,299 @@ fn combined_txs(st: &AppState, sh: &[u8; 32], asof: Option<[u8; 32]>) -> Respons
     )
 }
 
+enum MultiKind {
+    Address,
+    Scripthash,
+}
+
+fn body_too_long() -> Response {
+    (StatusCode::UNPROCESSABLE_ENTITY, "body too long").into_response()
+}
+
+#[allow(clippy::result_large_err)]
+fn parse_multi_scripts(
+    network: Network,
+    kind: MultiKind,
+    body: &[u8],
+) -> Result<Vec<[u8; 32]>, Response> {
+    let parsed: Vec<String> = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return Err((StatusCode::BAD_REQUEST, format!("invalid json: {e}")).into_response());
+        }
+    };
+    if parsed.len() > MULTI_ADDRESS_LIMIT {
+        return Err(body_too_long());
+    }
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for s in parsed {
+        let sh = match kind {
+            MultiKind::Address => resolve_address_sh(&s, network).ok(),
+            MultiKind::Scripthash => parse_hash32(&s).ok(),
+        };
+        if let Some(sh) = sh {
+            if seen.insert(sh) {
+                out.push(sh);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn tx_row_txid(v: &Value) -> Option<&str> {
+    v["txid"].as_str()
+}
+
+fn sort_txs_newest_first(rows: &mut [Value]) {
+    rows.sort_by(|a, b| {
+        let ca = a["status"]["confirmed"].as_bool() == Some(true);
+        let cb = b["status"]["confirmed"].as_bool() == Some(true);
+        match (ca, cb) {
+            (false, true) => std::cmp::Ordering::Less,
+            (true, false) => std::cmp::Ordering::Greater,
+            _ => {
+                let ha = a["status"]["block_height"].as_u64().unwrap_or(0);
+                let hb = b["status"]["block_height"].as_u64().unwrap_or(0);
+                hb.cmp(&ha).then_with(|| {
+                    let ta = a["txid"].as_str().unwrap_or("");
+                    let tb = b["txid"].as_str().unwrap_or("");
+                    tb.cmp(ta)
+                })
+            }
+        }
+    });
+}
+
+fn skip_rows_after(rows: Vec<Value>, after: Option<[u8; 32]>) -> Vec<Value> {
+    let Some(id) = after else {
+        return rows;
+    };
+    let hex = block_hash_hex(&id);
+    match rows.iter().position(|v| v["txid"] == hex) {
+        Some(i) => rows[i.saturating_add(1)..].to_vec(),
+        None => rows,
+    }
+}
+
+fn dedup_txid(rows: Vec<Value>) -> Vec<Value> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(rows.len());
+    for v in rows {
+        let Some(id) = tx_row_txid(&v).map(str::to_owned) else {
+            continue;
+        };
+        if seen.insert(id) {
+            out.push(v);
+        }
+    }
+    out
+}
+
+#[allow(clippy::result_large_err)] // public error enum
+fn combined_tx_vec(
+    st: &AppState,
+    sh: &[u8; 32],
+    asof: Option<[u8; 32]>,
+    bag: Option<&mut JoinBag>,
+) -> Result<Vec<Value>, Response> {
+    let mut out = Vec::new();
+    if asof.is_none() {
+        out.extend(mempool_txs_json(st, sh));
+    }
+    let filter = HistoryFilter::esplora_chain_page(None);
+    let (items, _) = sh_at_view(
+        st,
+        sh,
+        asof,
+        |q, view| q.scripthash_history_filtered_in(sh, &filter, view),
+        |q, slot, view| q.scripthash_history_filtered_slot_in(sh, &filter, slot, view),
+        Vec::new(),
+        None,
+        bag,
+    )?;
+    let chain = history_items_to_tx_json(&st.query, &items, st.network).map_err(store_err)?;
+    out.extend(chain);
+    Ok(out)
+}
+
+#[allow(clippy::result_large_err)] // public error enum
+fn summary_vec(
+    st: &AppState,
+    sh: &[u8; 32],
+    asof: Option<[u8; 32]>,
+    bag: Option<&mut JoinBag>,
+) -> Result<Vec<Value>, Response> {
+    let filter = HistoryFilter::esplora_chain_page(None);
+    let (items, _) = sh_at_view(
+        st,
+        sh,
+        asof,
+        |q, view| q.scripthash_history_summary_filtered_in(sh, &filter, view),
+        |q, slot, view| q.scripthash_history_summary_filtered_slot_in(sh, &filter, slot, view),
+        Vec::new(),
+        None,
+        bag,
+    )?;
+    match summaries_json(&st.query, &items) {
+        Ok(Value::Array(v)) => Ok(v),
+        Ok(_) => Ok(Vec::new()),
+        Err(e) => Err(store_err(e)),
+    }
+}
+
+fn multi_txs(
+    st: &AppState,
+    scripts: Vec<[u8; 32]>,
+    after: Option<[u8; 32]>,
+    asof: Option<[u8; 32]>,
+    client: Option<&str>,
+) -> Response {
+    if let Some(id) = after {
+        if !txid_is_known(st, &id) {
+            return after_txid_not_found();
+        }
+    }
+    let mut bag = JoinBag::new();
+    st.seed_bulk(client, &mut bag);
+    let mut rows = Vec::new();
+    for sh in &scripts {
+        match combined_tx_vec(st, sh, asof, Some(&mut bag)) {
+            Ok(part) => rows.extend(part),
+            Err(r) => return r,
+        }
+    }
+    st.promote_bulk(client, bag);
+    let mut rows = dedup_txid(rows);
+    sort_txs_newest_first(&mut rows);
+    let rows = skip_rows_after(rows, after);
+    Json(rows).into_response()
+}
+
+fn multi_summary(
+    st: &AppState,
+    scripts: Vec<[u8; 32]>,
+    after: Option<[u8; 32]>,
+    asof: Option<[u8; 32]>,
+    client: Option<&str>,
+) -> Response {
+    if let Some(id) = after {
+        if !txid_is_known(st, &id) {
+            return after_txid_not_found();
+        }
+    }
+    let mut bag = JoinBag::new();
+    st.seed_bulk(client, &mut bag);
+    let mut rows = Vec::new();
+    for sh in &scripts {
+        match summary_vec(st, sh, asof, Some(&mut bag)) {
+            Ok(part) => rows.extend(part),
+            Err(r) => return r,
+        }
+    }
+    st.promote_bulk(client, bag);
+    let mut rows = dedup_txid(rows);
+    rows.sort_by(|a, b| {
+        let ha = a["height"].as_i64().unwrap_or(0);
+        let hb = b["height"].as_i64().unwrap_or(0);
+        hb.cmp(&ha).then_with(|| {
+            b["txid"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(a["txid"].as_str().unwrap_or(""))
+        })
+    });
+    let rows = skip_rows_after(rows, after);
+    Json(rows).into_response()
+}
+
+fn post_multi_body(
+    st: AppState,
+    kind: MultiKind,
+    q: AfterTxidQuery,
+    body: Bytes,
+    summary: bool,
+    client: Option<String>,
+) -> Response {
+    let after = match parse_after_txid_query(q) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    if body.len() > st.max_body {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "body too large").into_response();
+    }
+    let scripts = match parse_multi_scripts(st.network, kind, &body) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let client = client.as_deref();
+    if summary {
+        multi_summary(&st, scripts, after, None, client)
+    } else {
+        multi_txs(&st, scripts, after, None, client)
+    }
+}
+
+pub async fn post_addresses_txs(
+    State(st): State<AppState>,
+    JoinClient(client): JoinClient,
+    AxumQuery(q): AxumQuery<AfterTxidQuery>,
+    body: Bytes,
+) -> Response {
+    spawn_join(move || post_multi_body(st, MultiKind::Address, q, body, false, client)).await
+}
+
+pub async fn post_scripthashes_txs(
+    State(st): State<AppState>,
+    JoinClient(client): JoinClient,
+    AxumQuery(q): AxumQuery<AfterTxidQuery>,
+    body: Bytes,
+) -> Response {
+    spawn_join(move || post_multi_body(st, MultiKind::Scripthash, q, body, false, client)).await
+}
+
+pub async fn post_addresses_txs_summary(
+    State(st): State<AppState>,
+    JoinClient(client): JoinClient,
+    AxumQuery(q): AxumQuery<AfterTxidQuery>,
+    body: Bytes,
+) -> Response {
+    spawn_join(move || post_multi_body(st, MultiKind::Address, q, body, true, client)).await
+}
+
+pub async fn post_scripthashes_txs_summary(
+    State(st): State<AppState>,
+    JoinClient(client): JoinClient,
+    AxumQuery(q): AxumQuery<AfterTxidQuery>,
+    body: Bytes,
+) -> Response {
+    spawn_join(move || post_multi_body(st, MultiKind::Scripthash, q, body, true, client)).await
+}
+
 pub async fn mempool_info(State(st): State<AppState>) -> Response {
     spawn_join(move || mempool_info_sync(&st)).await
 }
 
 fn mempool_info_sync(st: &AppState) -> Response {
-    let Some(mp) = st.mempool.as_ref() else {
-        return Json(json!({
+    Json(mempool_info_json(st.mempool.as_deref())).into_response()
+}
+
+/// `GET /mempool` body. Request path loads the published tx snapshot.
+pub(crate) fn mempool_info_json(mp: Option<&MempoolHub>) -> Value {
+    let Some(mp) = mp else {
+        return json!({
             "count": 0,
             "vsize": 0,
             "total_fee": 0,
             "fee_histogram": [],
-        }))
-        .into_response();
+        });
     };
-    let live = mp.list_live_meta();
-    let count = live.len();
+    let snap = mp.mempool_tx_snapshot();
     let mut vsize = 0u64;
     let mut total_fee = 0u64;
-    for (_txid, fee, weight) in &live {
-        total_fee = total_fee.saturating_add(*fee);
-        vsize = vsize.saturating_add(weight.saturating_add(3) / 4);
+    for e in snap.entries() {
+        total_fee = total_fee.saturating_add(e.fee_sat);
+        vsize = vsize.saturating_add(e.weight.saturating_add(3) / 4);
     }
     let hist: Vec<Value> = mp
         .fee_histogram()
@@ -1091,13 +1492,12 @@ fn mempool_info_sync(st: &AppState) -> Response {
             json!([rate_sat_per_vb, vs])
         })
         .collect();
-    Json(json!({
-        "count": count,
+    json!({
+        "count": snap.entries().len(),
         "vsize": vsize,
         "total_fee": total_fee,
         "fee_histogram": hist,
-    }))
-    .into_response()
+    })
 }
 
 pub async fn fee_estimates(State(st): State<AppState>) -> Response {
@@ -1123,20 +1523,19 @@ fn sat_vb_for_target(pairs: &[(u32, f64)], target: u32) -> u32 {
         .unwrap_or(1)
 }
 
-fn fees_recommended_sync(st: &AppState) -> Response {
-    let pairs: Vec<(u32, f64)> = st
-        .mempool
-        .as_ref()
-        .map(|m| m.fee_estimates_btc_per_kb())
-        .unwrap_or_default();
-    Json(json!({
+pub(crate) fn fees_recommended_json(mp: Option<&MempoolHub>) -> Value {
+    let pairs: Vec<(u32, f64)> = mp.map(|m| m.fee_estimates_btc_per_kb()).unwrap_or_default();
+    json!({
         "fastestFee": sat_vb_for_target(&pairs, 1),
         "halfHourFee": sat_vb_for_target(&pairs, 3),
         "hourFee": sat_vb_for_target(&pairs, 6),
         "economyFee": sat_vb_for_target(&pairs, 144),
         "minimumFee": 1,
-    }))
-    .into_response()
+    })
+}
+
+fn fees_recommended_sync(st: &AppState) -> Response {
+    Json(fees_recommended_json(st.mempool.as_deref())).into_response()
 }
 
 fn fee_estimates_sync(st: &AppState) -> Response {
@@ -1252,28 +1651,81 @@ fn mempool_txs_for_sh(st: &AppState, sh: &[u8; 32]) -> Response {
     Json(mempool_txs_json(st, sh)).into_response()
 }
 
-pub async fn post_tx(State(st): State<AppState>, body: Bytes) -> Response {
-    let Some(mp) = st.mempool.as_ref() else {
-        return (StatusCode::SERVICE_UNAVAILABLE, "mempool not available").into_response();
-    };
-    if body.len() > st.max_body {
-        return (StatusCode::PAYLOAD_TOO_LARGE, "body too large").into_response();
+#[derive(Deserialize, Default)]
+pub struct AfterTxidQuery {
+    after_txid: Option<String>,
+}
+
+fn after_txid_not_found() -> Response {
+    (StatusCode::UNPROCESSABLE_ENTITY, "after_txid not found").into_response()
+}
+
+#[allow(clippy::result_large_err)] // public error enum
+fn parse_after_txid_query(q: AfterTxidQuery) -> Result<Option<[u8; 32]>, Response> {
+    match q.after_txid {
+        None => Ok(None),
+        Some(s) if s.is_empty() => Ok(None),
+        Some(s) => parse_hash32(&s)
+            .map(Some)
+            .map_err(|_| after_txid_not_found()),
     }
-    let hex = std::str::from_utf8(&body)
-        .unwrap_or("")
-        .trim()
-        .trim_matches('"');
+}
+
+fn txid_is_known(st: &AppState, id: &[u8; 32]) -> bool {
+    let tid = Txid::from_byte_array(*id);
+    st.mempool.as_ref().is_some_and(|m| m.contains(&tid))
+        || st.query.get_tx_by_txid(id).ok().flatten().is_some()
+}
+
+fn skip_mempool_after(rows: Vec<Value>, after: &[u8; 32]) -> Vec<Value> {
+    let hex = block_hash_hex(after);
+    match rows.iter().position(|v| v["txid"] == hex) {
+        Some(i) => rows[i.saturating_add(1)..].to_vec(),
+        None => rows,
+    }
+}
+
+#[derive(Deserialize)]
+pub struct TxidsQuery {
+    txids: Option<String>,
+}
+
+pub async fn get_txs_outspends(
+    State(st): State<AppState>,
+    AxumQuery(q): AxumQuery<TxidsQuery>,
+) -> Response {
+    let Some(raw) = q.txids.filter(|s| !s.is_empty()) else {
+        return (StatusCode::BAD_REQUEST, "No txids specified").into_response();
+    };
+    spawn_join(move || {
+        let parts: Vec<&str> = raw.split(',').collect();
+        if parts.len() > 50 {
+            return (StatusCode::BAD_REQUEST, "Too many txids requested").into_response();
+        }
+        let ids: Vec<Option<[u8; 32]>> = parts.iter().map(|p| parse_hash32(p).ok()).collect();
+        crate::internal::outspends_for_txid_opts(&st, ids)
+    })
+    .await
+}
+
+#[allow(clippy::result_large_err)] // public error enum
+fn decode_tx_hex_str(hex: &str) -> Result<bitcoin::Transaction, Response> {
+    let hex = hex.trim().trim_matches('"');
     let raw = match rbitcoin_primitives::hex_decode(hex) {
         Ok(r) => r,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, format!("invalid hex: {e}")).into_response();
+            return Err((StatusCode::BAD_REQUEST, format!("invalid hex: {e}")).into_response());
         }
     };
-    let tx: bitcoin::Transaction = match deserialize(&raw) {
-        Ok(t) => t,
-        Err(e) => {
-            return (StatusCode::BAD_REQUEST, format!("invalid tx: {e}")).into_response();
-        }
+    match deserialize(&raw) {
+        Ok(t) => Ok(t),
+        Err(e) => Err((StatusCode::BAD_REQUEST, format!("invalid tx: {e}")).into_response()),
+    }
+}
+
+async fn admit_broadcast(st: AppState, tx: bitcoin::Transaction) -> Response {
+    let Some(mp) = st.mempool.as_ref() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "mempool not available").into_response();
     };
     match mp.accept_tx_async(tx).await {
         Ok(r) => {
@@ -1282,6 +1734,174 @@ pub async fn post_tx(State(st): State<AppState>, body: Bytes) -> Response {
         }
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     }
+}
+
+#[derive(Deserialize, Default)]
+pub struct BroadcastQuery {
+    tx: Option<String>,
+}
+
+pub async fn get_broadcast(
+    State(st): State<AppState>,
+    AxumQuery(q): AxumQuery<BroadcastQuery>,
+) -> Response {
+    if st.mempool.is_none() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "mempool not available").into_response();
+    }
+    let Some(hex) = q.tx.filter(|s| !s.is_empty()) else {
+        return (StatusCode::BAD_REQUEST, "Missing tx").into_response();
+    };
+    let tx = match decode_tx_hex_str(&hex) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    admit_broadcast(st, tx).await
+}
+
+pub async fn post_tx(State(st): State<AppState>, body: Bytes) -> Response {
+    if st.mempool.is_none() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "mempool not available").into_response();
+    }
+    if body.len() > st.max_body {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "body too large").into_response();
+    }
+    let hex = std::str::from_utf8(&body).unwrap_or("");
+    let tx = match decode_tx_hex_str(hex) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    admit_broadcast(st, tx).await
+}
+
+#[derive(Deserialize, Default)]
+pub struct MaxFeeQuery {
+    maxfeerate: Option<String>,
+}
+
+#[allow(clippy::result_large_err)] // public error enum
+fn parse_maxfeerate_btc_kvb(q: MaxFeeQuery) -> Result<u64, Response> {
+    let Some(s) = q.maxfeerate.filter(|s| !s.is_empty()) else {
+        return Ok(10_000);
+    };
+    let v: f64 = s
+        .parse()
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid maxfeerate").into_response())?;
+    if !v.is_finite() || v < 0.0 {
+        return Err((StatusCode::BAD_REQUEST, "Invalid maxfeerate").into_response());
+    }
+    if v == 0.0 {
+        return Ok(0);
+    }
+    let sat = (v * 100_000.0).ceil() as u64;
+    Ok(sat.max(1))
+}
+
+fn fee_exceeds_sat_vb(fee_sat: u64, weight: u64, max_sat_vb: u64) -> bool {
+    if max_sat_vb == 0 {
+        return false;
+    }
+    let vsize = rbitcoin_consensus::policy::get_virtual_size(weight);
+    fee_sat > max_sat_vb.saturating_mul(vsize)
+}
+
+pub async fn post_txs_test(
+    State(st): State<AppState>,
+    AxumQuery(q): AxumQuery<MaxFeeQuery>,
+    body: Bytes,
+) -> Response {
+    let max_sat_vb = match parse_maxfeerate_btc_kvb(q) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    if body.len() > st.max_body {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "body too large").into_response();
+    }
+    spawn_join(move || {
+        let Some(mp) = st.mempool.as_ref() else {
+            return (StatusCode::SERVICE_UNAVAILABLE, "mempool not available").into_response();
+        };
+        let hexes: Vec<String> = match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, format!("invalid json: {e}")).into_response();
+            }
+        };
+        if hexes.len() > 25 {
+            return (
+                StatusCode::BAD_REQUEST,
+                "Exceeded maximum of 25 transactions",
+            )
+                .into_response();
+        }
+        for (i, hex) in hexes.iter().enumerate() {
+            if !(120..800_000).contains(&hex.len()) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid transaction size for item {i}"),
+                )
+                    .into_response();
+            }
+        }
+        let mut decoded = Vec::with_capacity(hexes.len());
+        for (i, hex) in hexes.iter().enumerate() {
+            match decode_tx_hex_str(hex) {
+                Ok(tx) => decoded.push(tx),
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        format!("Invalid transaction hex for item {i}"),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        let mut ids = HashSet::new();
+        if decoded.iter().any(|tx| !ids.insert(tx.compute_txid())) {
+            let tx = &decoded[0];
+            return Json(json!([{
+                "txid": format!("{}", tx.compute_txid()),
+                "wtxid": format!("{}", tx.compute_wtxid()),
+                "allowed": false,
+                "package-error": "package-contains-duplicates",
+            }]))
+            .into_response();
+        }
+        let mut out = Vec::new();
+        for tx in decoded {
+            let txid = format!("{}", tx.compute_txid());
+            let wtxid = format!("{}", tx.compute_wtxid());
+            match mp.test_accept(&tx) {
+                Ok(r) => {
+                    if fee_exceeds_sat_vb(r.fee_sat, r.weight, max_sat_vb) {
+                        out.push(json!({
+                            "txid": txid,
+                            "wtxid": wtxid,
+                            "allowed": false,
+                            "reject-reason": "max-fee-exceeded",
+                        }));
+                        continue;
+                    }
+                    out.push(json!({
+                        "txid": txid,
+                        "wtxid": wtxid,
+                        "allowed": true,
+                        "vsize": r.weight / 4,
+                        "fees": { "base": r.fee_sat as f64 / 100_000_000.0 },
+                    }));
+                }
+                Err(e) => {
+                    out.push(json!({
+                        "txid": txid,
+                        "wtxid": wtxid,
+                        "allowed": false,
+                        "reject-reason": e.to_string(),
+                    }));
+                }
+            }
+        }
+        Json(out).into_response()
+    })
+    .await
 }
 
 /// `POST /txs/package` — JSON array of hex txs → `MempoolHub::accept_package`.
@@ -1591,28 +2211,181 @@ mod pure_helper_tests {
             max_ws_message_bytes: 64 * 1024,
             max_track_addresses: 64,
             max_track_txs: 64,
-            sh_join: Arc::new(Mutex::new(None)),
+            sh_join: Arc::new(Mutex::new(crate::server::JoinCache::default())),
+            join_header_trusted: true,
             block_template: None,
             gbt_cache: Arc::new(Mutex::new(None)),
         };
         let sh = script_hash(&[0x51]);
         reset_body_ok_reads();
-        let (info, _) = super::sh_stats_json(&st, &sh, None, None, None).unwrap();
+        let (info, _) = super::sh_stats_json(&st, &sh, None, None, None, Some("casa")).unwrap();
         assert_eq!(info["chain_stats"]["tx_count"], 3);
         let after_info = body_ok_reads();
         assert_eq!(after_info, 3);
 
-        let _ = super::utxo_response(&st, &sh, None);
+        let _ = super::utxo_response(&st, &sh, None, Some("casa"));
         assert_eq!(
             body_ok_reads(),
             after_info,
             "/utxo must reuse the last SH join"
         );
-        let _ = super::chain_page_sh(&st, &sh, None, None);
+        let _ = super::chain_page_sh(&st, &sh, None, None, Some("casa"));
         assert_eq!(
             body_ok_reads(),
             after_info,
             "/txs must reuse the last SH join"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn app_state(q: Query) -> crate::server::AppState {
+        use crate::server::AppState;
+        use std::sync::{Arc, Mutex};
+        AppState {
+            query: Arc::new(q),
+            network: Network::Regtest,
+            mempool: None,
+            max_body: 1 << 20,
+            tip_tx: None,
+            ws_sem: None,
+            max_ws_message_bytes: 64 * 1024,
+            max_track_addresses: 64,
+            max_track_txs: 64,
+            sh_join: Arc::new(Mutex::new(crate::server::JoinCache::default())),
+            join_header_trusted: true,
+            block_template: None,
+            gbt_cache: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn connect_op_true_blocks(q: &Query, n: u32) -> ([u8; 32], Fk) {
+        let mut prev = Fk::NULL;
+        let mut parent_hash: Option<[u8; 32]> = None;
+        let mut last_hash = [0u8; 32];
+        for h in 0..n {
+            let merkle = {
+                let mut m = [0xab; 32];
+                m[0] = h as u8;
+                m
+            };
+            let hash = match parent_hash {
+                None => merkle,
+                Some(ph) => {
+                    rbitcoin_store::block_header_hash(1, &ph, &merkle, h + 1, 0x207f_ffff, h)
+                }
+            };
+            let header = HeaderRecord {
+                prev_fk: prev,
+                version: 1,
+                timestamp: h + 1,
+                bits: 0x207f_ffff,
+                nonce: h,
+                merkle_root: merkle,
+                hash,
+                size: 0,
+                weight: 0,
+            };
+            let mut txid = [0xcb; 32];
+            txid[0] = h as u8;
+            let ta = TxApply {
+                tx: TxRecord {
+                    txid,
+                    version: 1,
+                    locktime: 0,
+                    input_start_fk: Fk::NULL,
+                    input_count: 1,
+                    output_start_fk: Fk::NULL,
+                    output_count: 1,
+                },
+                inputs: vec![InputRecord {
+                    prev_txid: [0u8; 32],
+                    create_fk: Fk::NULL,
+                    prev_index: u32::MAX,
+                    sequence: u32::MAX,
+                    script_sig: vec![h as u8],
+                    witness: vec![],
+                }],
+                outputs: vec![OutputRecord::unspent(50_0000_0000, vec![0x51])],
+            };
+            last_hash = hash;
+            parent_hash = Some(header.hash);
+            prev = q.connect_block(Height(h), &header, &[ta]).unwrap();
+        }
+        (last_hash, prev)
+    }
+
+    #[test]
+    fn sh_join_last1_two_clients_and_bulk_reuse() {
+        use rbitcoin_query::{body_ok_reads, reset_body_ok_reads};
+        use rbitcoin_store::script_hash;
+
+        let (dir, q) = temp_query();
+        let (parent, prev) = connect_op_true_blocks(&q, 3);
+        let merkle = [0xcd; 32];
+        let hash = rbitcoin_store::block_header_hash(1, &parent, &merkle, 4, 0x207f_ffff, 3);
+        let header = HeaderRecord {
+            prev_fk: prev,
+            version: 1,
+            timestamp: 4,
+            bits: 0x207f_ffff,
+            nonce: 3,
+            merkle_root: merkle,
+            hash,
+            size: 0,
+            weight: 0,
+        };
+        let ta = TxApply {
+            tx: TxRecord {
+                txid: [0x22; 32],
+                version: 1,
+                locktime: 0,
+                input_start_fk: Fk::NULL,
+                input_count: 1,
+                output_start_fk: Fk::NULL,
+                output_count: 1,
+            },
+            inputs: vec![InputRecord {
+                prev_txid: [0u8; 32],
+                create_fk: Fk::NULL,
+                prev_index: u32::MAX,
+                sequence: u32::MAX,
+                script_sig: vec![0x22],
+                witness: vec![],
+            }],
+            outputs: vec![OutputRecord::unspent(1_0000_0000, vec![0x52])],
+        };
+        q.connect_block(Height(3), &header, &[ta]).unwrap();
+        let st = app_state(q);
+        let sha = script_hash(&[0x51]);
+        let shb = script_hash(&[0x52]);
+
+        reset_body_ok_reads();
+        let _ = super::sh_stats_json(&st, &sha, None, None, None, Some("c1")).unwrap();
+        let after_a = body_ok_reads();
+        assert!(after_a > 0);
+        let _ = super::sh_stats_json(&st, &shb, None, None, None, Some("c1")).unwrap();
+        let after_b = body_ok_reads();
+        assert!(after_b > after_a, "GET B is a new join");
+        let _ = super::sh_stats_json(&st, &sha, None, None, None, Some("c1")).unwrap();
+        let after_a2 = body_ok_reads();
+        assert!(after_a2 > after_b, "GET A after B must not keep A (last-1)");
+
+        reset_body_ok_reads();
+        let _ = super::sh_stats_json(&st, &sha, None, None, None, Some("c1")).unwrap();
+        let c1 = body_ok_reads();
+        let _ = super::sh_stats_json(&st, &sha, None, None, None, Some("c2")).unwrap();
+        assert!(body_ok_reads() > c1, "different clients never share slots");
+
+        reset_body_ok_reads();
+        let _ = super::multi_txs(&st, vec![sha, shb], None, None, Some("wallet"));
+        let first_bulk = body_ok_reads();
+        assert!(first_bulk > 0);
+        let _ = super::multi_txs(&st, vec![sha, shb], Some([0x22; 32]), None, Some("wallet"));
+        assert_eq!(
+            body_ok_reads(),
+            first_bulk,
+            "POST after_txid reuses last-bulk joins"
         );
 
         let _ = std::fs::remove_dir_all(dir);

@@ -380,7 +380,7 @@ Clean smoke:
 | `--sp-tweaks` | `sp_tweaks=` | **off** — thin BIP-352 tweak index (`sp_tweaks.*`) |
 | `--sp-tweaks-dust SATS` | `sp_tweaks_dust=` | **1000** — omit served P2TR outs with `value <= SATS` (`0` = serve all; **546** matches Cake electrs) |
 | `--electrum-listen [ADDR]` | `electrum_listen=` | disabled (**requires** `--sh-index`); omit ADDR → `127.0.0.1:50001` |
-| `--esplora-listen [ADDR]` | `esplora_listen=` | disabled (Esplora REST; **requires** `--sh-index`); omit ADDR → `127.0.0.1:3000` |
+| `--esplora-listen [ADDR\|PATH]` | `esplora_listen=` | disabled (Esplora REST; **requires** `--sh-index`); omit ADDR → `127.0.0.1:3000`; a filesystem path is unix HTTP (mode **0660**, dummy `Host: api` is fine) |
 | `--esplora-block-template` | `esplora_block_template=` | **off** — `GET /block-template` is 404; on = GBT JSON (same as RPC template mode) |
 | `--rpc` | `rpc=` | **off** — unix JSON-RPC `{datadir}/rpc.sock` (mode 0600) |
 | `--rpc-listen [ADDR]` | `rpc_listen=` | disabled — implies `--rpc`; omit ADDR → `127.0.0.1` and Core-matching RPC port |
@@ -902,8 +902,9 @@ security model by itself.
 `getNodeIsElectrs()` will probe silent-payment tweaks. Other tweaks clients
 do not need that substring. We are **not** electrs — see `COMPAT.md`.
 
-**Not a graphical explorer.** We serve clients that already know their
-scripthashes / txids; we do **not** aim to back block-explorer search UIs.
+**Not a search-box explorer.** We serve clients that already know their
+scripthashes / txids. Address-prefix autocomplete is out.
+**0.8** electrs HTTP drop-in (mempool.space nginx `/api/`): [`COMPAT.md`](./COMPAT.md).
 
 ```bash
 ./target/release/rbitcoin-node \
@@ -960,11 +961,17 @@ posting list with the new block's tx fks and prevout `create_fk`s; a miss
 does not expand packed `txout`. Full status still runs on a hit. Each Electrum
 TCP connection keeps one last-scripthash join (outs + spentness) until tip
 height changes, so Casa `get_balance` → `get_history` → `listunspent` on the
-same socket pays Class A once. Not a process-global cache. Esplora REST keeps
-one last-scripthash join on the listener (HTTP is not session-oriented) so
-Casa `/scripthash` → `/txs` → `/utxo` and `/txs/chain` pages reuse packed
-outs until tip height changes. Concurrent different keys may replace the
-slot. Esplora WS `block-transactions` uses the same posting-list tip probe
+same socket pays Class A once. Not a process-global cache. Esplora REST keys
+reuse by nginx `$connection` via `X-Rbitcoin-Client` (**unix listen or TCP
+loopback only**; public TCP ignores the header): **last-1 GET** so address-page
+stats∥txs∥utxo and `after_txid` on the same script reuse one slot;
+**last-bulk POST** (16 MiB packed/client) so wallet `POST /addresses/txs` then
+the same POST with `after_txid` reuse. Idle **30s**; **256** clients (evict
+idle-longest). Not an 8-script LRU and not a >5s process whale cache. Extra
+operator RAM is the kernel page cache of Class A `txout` / SH heads. Public
+explorer second-hit of a whale GET is nginx/CDN (`/api/address/` is cacheable).
+`--max-sh-creates N` (`N>0` → Esplora **503**) is the fuse; default **0**.
+Esplora WS `block-transactions` uses the same posting-list tip probe
 as Electrum subscribe (miss skips Class A).
 
 Re-measure fat keys on the operator host (`rbitcoin-bench --suite casa
@@ -1047,15 +1054,16 @@ no confirmed item. Esplora `oldest_tx`/`newest_tx` are from the returned
 
 ## Esplora REST
 
-Blockstream-**compatible** **plain HTTP** API for **wallet clients and APIs**
-(exact address/scripthash, tx/block by id, broadcast)—**not** a graphical
-block-explorer backend. Same internet-facing model as Electrum: app DoS limits
-always on; terminate TLS at a reverse proxy.
+Blockstream-**compatible** **plain HTTP** API for **wallet clients** and
+**mempool/electrs HTTP drop-in** (exact address/scripthash, tx/block by id,
+broadcast, `/internal/*`). nginx `/api/` can retire electrs
+([`COMPAT.md`](./COMPAT.md)). Same internet-facing model as Electrum: app DoS
+limits always on; terminate TLS at a reverse proxy.
 
 **Requires `--sh-index`.** Without it the node refuses to start.
 
-**Explicit non-goals:** explorer search/`address-prefix`, Liquid,
-mempool.space-style catalogue UI APIs. Opt-in `GET /block-template` is GBT
+**Still out:** explorer search/`address-prefix`, Liquid, in-binary
+mempool.space `/api/v1/` catalogue. Opt-in `GET /block-template` is GBT
 (`--esplora-block-template`), not a stratum/pool stack. Compact
 `/address|scripthash/…/txs/summary` is a mempool.space-shaped dialect (not
 Blockstream Esplora `API.md`); surface: [`COMPAT.md`](./COMPAT.md).
@@ -1066,19 +1074,39 @@ Blockstream Esplora `API.md`); surface: [`COMPAT.md`](./COMPAT.md).
   --network mainnet \
   --sh-index \
   --esplora-listen 127.0.0.1:3000 \
+  --rpc \
   --log-level info
 ```
 
 Conf: `sh_index=1` and `esplora_listen=127.0.0.1:3000`. Default is **disabled**.
+Leave `--max-sh-creates` at **0** (unlimited join) for explorer backends.
+
+### mempool.space
+
+Stock mempool Node + MariaDB + frontend. nginx **`/api/`** → this Esplora
+(TCP or unix); **`/api/v1/`** → their process (`:8999`). Set
+`MEMPOOL.BACKEND=esplora`. Esplora: `--esplora-listen 127.0.0.1:3000` or a
+unix path (`/run/rbitcoin/esplora.sock`, mode **0660**; dummy `Host: api` is
+fine). Core RPC is `{datadir}/rpc.sock` plus the `bitcoin-client`
+`socketPath` patch below — **not** `COOKIE_PATH` / HTTP Basic. Requires
+`--sh-index`. Leave `--max-sh-creates` at 0.
 
 ## Core-class JSON-RPC
 
 Optional HTTP JSON-RPC subset (default **off**). `--rpc` binds
-`{datadir}/rpc.sock` (filesystem auth, no HTTP header). `--rpc-listen`
-adds TCP on `127.0.0.1:<network port>` when ADDR is omitted (mainnet 8332,
-testnet 18332, signet 38332, regtest 18443). TCP auth is
+`{datadir}/rpc.sock` (mode **0600**, filesystem auth, no HTTP header).
+`--rpc-listen` adds TCP on `127.0.0.1:<network port>` when ADDR is omitted
+(mainnet 8332, testnet 18332, signet 38332, regtest 18443). TCP auth is
 `Authorization: Bearer` from `{datadir}/rpc.token` (0600). See
 [`docs/rpc.md`](./docs/rpc.md) and [`COMPAT.md`](./COMPAT.md).
+
+**mempool.space `CORE_RPC`:** stock mempool is TCP + cookie or user/pass.
+Their unix config is Esplora, not bitcoind. Point their Node at this
+socket with a small patch to `backend/src/api/bitcoin/bitcoin-client.ts`
+(same `socketPath` + dummy `http://rpc/` pattern as
+`ESPLORA.UNIX_SOCKET_PATH`). Do **not** send `Authorization`. Run their
+Node as the **same UID** as rbitcoin (0600); or `chmod 0660` and a shared
+group. TCP `--rpc-listen` stays Bearer — that is not the mempool recipe.
 
 ```bash
 ./target/release/rbitcoin-node \
@@ -1090,6 +1118,17 @@ testnet 18332, signet 38332, regtest 18443). TCP auth is
 rbitcoin-cli --datadir ./datadir-mainnet getblockcount
 ```
 
+mempool `bitcoin-client` sketch (axios; dummy host required):
+
+```js
+const client = axios.create({
+  socketPath: '/path/to/datadir/rpc.sock',
+  baseURL: 'http://rpc/',
+  timeout: 60000,
+});
+// POST JSON-RPC body; no Authorization header
+```
+
 | Feature | Behavior |
 |---------|----------|
 | Transport | plain HTTP (axum + tower body/concurrency/timeout from `ServeLimits`) |
@@ -1099,7 +1138,7 @@ rbitcoin-cli --datadir ./datadir-mainnet getblockcount
 | Address / scripthash | chain_stats, utxo, `/txs` + `/txs/chain` + `/txs/mempool`, compact `/txs/summary` (dialect; [`COMPAT.md`](./COMPAT.md)); complete after SH tip finalize |
 | Mempool | `/mempool`, `/mempool/txids`, `/mempool/recent`, `/fee-estimates`, `/fees/recommended`; `POST /tx` and **`POST /txs/package`** when hub open |
 | Without mempool | mempool routes empty/safe; POST broadcast → **503**; WS track still upgrades but mempool pushes need hub |
-| Unknown / non-goal | **404** (explorer-only APIs e.g. address-prefix; Liquid). `GET /block-template` is 404 unless `--esplora-block-template`. |
+| Unknown / non-goal | **404** (address-prefix; Liquid). `GET /block-template` is 404 unless `--esplora-block-template`. **0.8** `/internal/*`: [`COMPAT.md`](./COMPAT.md) |
 
 **Large responses:** `GET /block/:hash/raw` may be multi‑MB; concurrency/timeout from `ServeLimits` still apply.  
 **Package broadcast:** body is a JSON array of tx hex (max 25); uses the same libre-relay mempool policy as single `POST /tx`.
@@ -1114,18 +1153,35 @@ WebSocket extras (defaults): max 64 concurrent `/v1/ws` sockets, 64 KiB client
 Terminate TLS and forward REST **and** WebSocket to the same upstream. Example nginx:
 
 ```nginx
+location /api/v1/ {
+  proxy_pass http://127.0.0.1:8999/;
+  proxy_http_version 1.1;
+  proxy_set_header Host $host;
+  proxy_read_timeout 3600s;
+}
 location /api/ {
-    proxy_pass http://127.0.0.1:3000/;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_set_header Host $host;
-    proxy_read_timeout 3600s;
+  proxy_pass http://127.0.0.1:3000/;
+  proxy_http_version 1.1;
+  proxy_set_header Upgrade $http_upgrade;
+  proxy_set_header Connection "upgrade";
+  proxy_set_header Host $host;
+  proxy_set_header X-Rbitcoin-Client $connection;
+  proxy_read_timeout 3600s;
 }
 ```
 
-Clients then use `wss://host/api/v1/ws` (proxy strips `/api`). Caddy: `reverse_proxy`
-with default HTTP/1.1 upgrade support to the same listen.
+`/api/v1/` is mempool's Node (MariaDB catalogue), including **`/api/v1/ws`**.
+`/api/` is rbitcoin Esplora (electrs HTTP), including wallet **`/api/ws`**
+(`--esplora-listen` `/v1/ws` + `/ws`). Register the `/api/v1/` location
+**first** so Node keeps the explorer firehose. Unix Esplora:
+`proxy_pass http://unix:/run/rbitcoin/esplora.sock:`. Caddy: `reverse_proxy`
+with default HTTP/1.1 upgrade support to the same listen. `X-Rbitcoin-Client
+$connection` is how last-1 GET and last-bulk POST joins stick to one nginx
+connection; omit it on a public TCP expose. HTTP/1.1 browsers open several
+`$connection` ids (each GET can miss last-1); terminate **HTTP/2** on this
+location so one tab maps to one connection. Every Esplora REST response and
+the WS upgrade includes `X-Powered-By: rbitcoin-esplora/<version>-<hex>`
+(mempool failover regex).
 
 ## Signet lab
 

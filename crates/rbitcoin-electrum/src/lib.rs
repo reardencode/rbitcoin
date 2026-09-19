@@ -1,8 +1,7 @@
 //! Electrum protocol 1.4+ server for **wallet clients** (confirmed + optional
 //! mempool / libre-relay-class).
 //!
-//! Not a graphical block-explorer backend: clients are expected to already
-//! know their scripthashes / txids.
+//! Clients already know their scripthashes / txids.
 //!
 //! `server.version[0]` is `rbitcoin-electrs <workspace.package.version>`.
 //! We are not electrs. Cake Wallet `getNodeIsElectrs()` requires the

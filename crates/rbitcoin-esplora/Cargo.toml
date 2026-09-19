@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-description = "Esplora-compatible REST for wallet clients (not a graphical explorer backend)"
+description = "Esplora-compatible REST (electrs HTTP drop-in except address-prefix)"
 
 [dependencies]
 rbitcoin-primitives = { workspace = true }
@@ -14,6 +14,7 @@ rbitcoin-query = { workspace = true }
 rbitcoin-store = { workspace = true }
 rbitcoin-electrum = { workspace = true }
 rbitcoin-net = { workspace = true }
+rbitcoin-consensus = { workspace = true }
 bitcoin = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }

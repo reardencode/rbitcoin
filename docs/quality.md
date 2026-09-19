@@ -32,7 +32,7 @@ evidence (failed Core corpus, new dual path, red required CI, MSRV drift).
 | 5 | **Q-67** | `asked_blocks` clone on hold | `hold_body` clones `asked_blocks` before `held_bodies` insert so the read lock does not overlap the write (`HeldBodies::insert` already takes `&HashSet`). Bound is `MAX_SERVE_BLOCKS` × peers. Follow-up: pass the read guard with a documented lock order, or keep the clone as a named trade. Owner: `crates/rbitcoin-net/src/chain.rs`. |
 
 R-ids were the 2026-08-12 slice. Canonical id is **bold**. Do not start
-**R-11+**. Next unused Q-id is **Q-68**.
+**R-11+**. Next unused Q-id is **Q-69**.
 
 Close work by **moving the Open row into CHANGELOG** in the same edit as
 the landing change (do not grow a Completed museum here). New item: insert
@@ -51,9 +51,9 @@ at an explicit rank with **Q-63+**.
 | **Q-35** | Mainnet soak program | Signet first, then mainnet with monitoring. No badge |
 | **—** | Darwin notarization | Ad-hoc `codesign -s -` only |
 | **—** | Leftover maps as `txid → Vec<Fk>` | [`errata.md`](./errata.md): only if a mainnet miss is shown |
-| **X-M3** | Esplora process-wide `sh_join` LRU | HTTP is not a session. Sticky joins stay Electrum TCP |
+| **X-M3** | Esplora unbounded process `sh_join` LRU | Last-1 GET + last-bulk POST (16 MiB/client) shipped. Sticky joins stay Electrum TCP |
 | **—** | Package-level feerate on `submitpackage` | Sequential `accept_tx`; Core parity is not 1.0 |
-| **—** | Chained Esplora `scripthash_mempool_stats` | Dialect / page cost. Compact `/txs/summary` is COMPAT dialect. Graphical explorer APIs stay Won't-fix |
+| **—** | Chained Esplora `scripthash_mempool_stats` | Dialect / page cost. Compact `/txs/summary` is COMPAT dialect |
 | **—** | Retired algo-review micro-opts | Reopen a named Q-id only with a mainnet profile that names the cost |
 | **—** | Headerless SH extent interiors | Uniform 4 KiB page records; ~0.2% density; schema bump |
 | **—** | Restore `rbtc-script-coord-*` | `ibd-confirm` publishes waves. No coordinator threads |
@@ -66,8 +66,9 @@ at an explicit rank with **Q-63+**.
 | **Q-54** | ast-grep named-cap rules | Caps live in [`ibd-memory.md`](./ibd-memory.md) and production evict. Pinning `const = 128` is a second clippy. **Q-51** already owns shapes. |
 
 Coverage theater (chasing 100% lines), rewriting secp/rust-bitcoin/tokio
-“to reduce deps”, Core-complete RPC, and explorer-search APIs are also
-not Open.
+“to reduce deps”, Core-complete RPC, and explorer-search APIs (address-prefix)
+are also not Open. Liquid and in-binary mempool.space `/api/v1/` catalogue
+stay out.
 
 ### Parked (not now; promote to Open with a rank to revisit)
 
