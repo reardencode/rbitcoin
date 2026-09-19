@@ -47,22 +47,60 @@ fn parse_txid_array(body: &[u8]) -> Result<Vec<[u8; 32]>, Response> {
     Ok(out)
 }
 
-fn entry_json(st: &AppState, mp: &MempoolHub, e: &MempoolTxSnapEntry) -> Value {
-    let raw = e.json.get_or_init(|| {
-        match build_tx_json_from_tx(
+fn cache_json_str(
+    slot: &std::sync::OnceLock<Box<str>>,
+    build: impl FnOnce() -> Result<String, ()>,
+) -> Option<&str> {
+    if let Some(s) = slot.get() {
+        return Some(s.as_ref());
+    }
+    match build() {
+        Ok(s) => {
+            let _ = slot.set(s.into());
+            slot.get().map(|b| b.as_ref())
+        }
+        Err(()) => None,
+    }
+}
+
+fn join_cached_objects(parts: &[Option<&str>]) -> String {
+    let mut body = String::from("[");
+    let mut first = true;
+    for p in parts {
+        let Some(s) = p else {
+            continue;
+        };
+        if !first {
+            body.push(',');
+        }
+        first = false;
+        body.push_str(s);
+    }
+    body.push(']');
+    body
+}
+
+fn entry_json_str<'a>(
+    st: &AppState,
+    mp: &MempoolHub,
+    e: &'a MempoolTxSnapEntry,
+) -> Option<&'a str> {
+    cache_json_str(&e.json, || {
+        let v = build_tx_json_from_tx(
             &st.query,
             &e.tx,
             st.network,
             Some(e.fee_sat as i64),
             Some(mp),
-        ) {
-            Ok(v) => serde_json::to_string(&v)
-                .unwrap_or_else(|_| "{}".into())
-                .into(),
-            Err(_) => "{}".into(),
-        }
-    });
-    serde_json::from_str(raw).unwrap_or(json!({}))
+        )
+        .map_err(|_| ())?;
+        serde_json::to_string(&v).map_err(|_| ())
+    })
+}
+
+fn entry_json(st: &AppState, mp: &MempoolHub, e: &MempoolTxSnapEntry) -> Option<Value> {
+    let raw = entry_json_str(st, mp, e)?;
+    serde_json::from_str(raw).ok()
 }
 
 fn confirmed_or_mempool_tx(st: &AppState, id: &[u8; 32]) -> Option<Value> {
@@ -76,7 +114,7 @@ fn mempool_tx_json(st: &AppState, id: &[u8; 32]) -> Option<Value> {
     let mp = st.mempool.as_ref()?;
     let tid = Txid::from_byte_array(*id);
     if let Some(e) = mp.mempool_tx_snapshot().get(&tid) {
-        return Some(entry_json(st, mp, e));
+        return entry_json(st, mp, e);
     }
     let tx = mp.get_tx(&tid)?;
     let fee = mp.get_live_meta(&tid).map(|(f, _)| f as i64);
@@ -123,15 +161,23 @@ pub async fn post_internal_mempool_txs(State(st): State<AppState>, body: Bytes) 
     .await
 }
 
-fn mempool_tx_page(st: &AppState, last: Option<&Txid>, max: usize) -> Vec<Value> {
+fn mempool_tx_page(st: &AppState, last: Option<&Txid>, max: usize) -> Response {
     let Some(mp) = st.mempool.as_ref() else {
-        return Vec::new();
+        return Json(Value::Array(Vec::new())).into_response();
     };
     let snap = mp.mempool_tx_snapshot();
-    snap.page(last, max)
+    let parts: Vec<Option<&str>> = snap
+        .page(last, max)
         .iter()
-        .map(|e| entry_json(st, mp, e))
-        .collect()
+        .map(|e| entry_json_str(st, mp, e))
+        .collect();
+    let body = join_cached_objects(&parts);
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response()
 }
 
 pub async fn get_internal_mempool_txs(
@@ -139,11 +185,11 @@ pub async fn get_internal_mempool_txs(
     AxumQuery(q): AxumQuery<MaxTxs>,
 ) -> Response {
     let max = cap_max_txs(&q);
-    spawn_join(move || Json(mempool_tx_page(&st, None, max)).into_response()).await
+    spawn_join(move || mempool_tx_page(&st, None, max)).await
 }
 
 pub async fn get_internal_mempool_txs_all(State(st): State<AppState>) -> Response {
-    spawn_join(move || Json(mempool_tx_page(&st, None, usize::MAX)).into_response()).await
+    spawn_join(move || mempool_tx_page(&st, None, usize::MAX)).await
 }
 
 pub async fn get_internal_mempool_txs_cursor(
@@ -156,7 +202,7 @@ pub async fn get_internal_mempool_txs_cursor(
     };
     let last = Txid::from_byte_array(id);
     let max = cap_max_txs(&q);
-    spawn_join(move || Json(mempool_tx_page(&st, Some(&last), max)).into_response()).await
+    spawn_join(move || mempool_tx_page(&st, Some(&last), max)).await
 }
 
 fn mempool_txid_page(st: &AppState, last: Option<&Txid>, max: usize) -> Vec<String> {
@@ -323,6 +369,27 @@ mod tests {
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
+
+    #[test]
+    fn join_cached_objects_skips_none() {
+        assert_eq!(
+            join_cached_objects(&[Some("{\"a\":1}"), None, Some("{\"b\":2}")]),
+            "[{\"a\":1},{\"b\":2}]"
+        );
+        assert_eq!(join_cached_objects(&[None, None]), "[]");
+    }
+
+    #[test]
+    fn cache_json_str_does_not_store_empty_on_err() {
+        let slot = std::sync::OnceLock::<Box<str>>::new();
+        assert!(cache_json_str(&slot, || Err::<String, ()>(())).is_none());
+        assert!(slot.get().is_none());
+        assert_eq!(
+            cache_json_str(&slot, || Ok::<_, ()>("{\"ok\":true}".into())),
+            Some("{\"ok\":true}")
+        );
+        assert_eq!(slot.get().map(|s| s.as_ref()), Some("{\"ok\":true}"));
+    }
 
     fn spend_true(cb: Txid, fee: u64, spk: ScriptBuf) -> Transaction {
         Transaction {
@@ -497,6 +564,7 @@ mod tests {
         assert_eq!(st, 200, "{p1}");
         let a1: Vec<Value> = serde_json::from_str(&p1).unwrap();
         assert_eq!(a1.len(), 2);
+        assert!(a1.iter().all(|v| v.get("txid").is_some()), "{p1}");
         let last = a1[1]["txid"].as_str().unwrap();
         let (st, p2) = http_get(addr, &format!("/internal/mempool/txs/{last}?max_txs=2")).await;
         assert_eq!(st, 200, "{p2}");
