@@ -104,9 +104,7 @@ pub struct MempoolTxSnapshot {
 pub struct MempoolTxSnapEntry {
     pub txid: Txid,
     pub fee_sat: u64,
-    pub weight: u64,
     pub tx: Transaction,
-    pub prevouts: Vec<Option<(u64, ScriptBuf)>>,
     pub json: std::sync::OnceLock<Box<str>>,
 }
 
@@ -2011,42 +2009,32 @@ impl MempoolHub {
 
     fn refresh_tx_snapshot(&self) {
         let t0 = Instant::now();
-        let live = self.list_live();
-        let by_txid: HashMap<Txid, &Transaction> =
-            live.iter().map(|(tid, _, _, tx)| (*tid, tx)).collect();
+        let old = self.tx_snapshot.load_full();
+        let live = self.list_live_meta();
         let mut entries: Vec<MempoolTxSnapEntry> = live
-            .iter()
-            .map(|(txid, fee_sat, weight, tx)| {
-                let prevouts = tx
-                    .input
-                    .iter()
-                    .map(|inp| {
-                        if inp.previous_output.is_null() {
-                            return None;
+            .into_iter()
+            .filter_map(|(txid, fee_sat, _weight)| {
+                if let Some(old_e) = old.get(&txid) {
+                    let json = std::sync::OnceLock::new();
+                    if old_e.fee_sat == fee_sat {
+                        if let Some(s) = old_e.json.get() {
+                            let _ = json.set(s.clone());
                         }
-                        if let Some(parent) = by_txid.get(&inp.previous_output.txid) {
-                            return parent
-                                .output
-                                .get(inp.previous_output.vout as usize)
-                                .map(|o| (o.value.to_sat(), o.script_pubkey.clone()));
-                        }
-                        let tid = inp.previous_output.txid.to_byte_array();
-                        let (fk, _) = self.query.get_tx_by_txid(&tid).ok().flatten()?;
-                        let rec = self
-                            .query
-                            .tx_output_at_fk(fk, inp.previous_output.vout)
-                            .ok()?;
-                        Some((rec.value.max(0) as u64, ScriptBuf::from_bytes(rec.script)))
-                    })
-                    .collect();
-                MempoolTxSnapEntry {
-                    txid: *txid,
-                    fee_sat: *fee_sat,
-                    weight: *weight,
-                    tx: tx.clone(),
-                    prevouts,
-                    json: std::sync::OnceLock::new(),
+                    }
+                    return Some(MempoolTxSnapEntry {
+                        txid,
+                        fee_sat,
+                        tx: old_e.tx.clone(),
+                        json,
+                    });
                 }
+                let tx = self.get_tx(&txid)?;
+                Some(MempoolTxSnapEntry {
+                    txid,
+                    fee_sat,
+                    tx,
+                    json: std::sync::OnceLock::new(),
+                })
             })
             .collect();
         entries.sort_by_key(|a| a.txid);
@@ -5250,15 +5238,15 @@ mod tests {
         assert_eq!(snap.entries().len(), 2);
         for e in snap.entries() {
             assert!(e.fee_sat > 0, "fee");
-            assert_eq!(e.prevouts.len(), 1);
-            let (val, _) = e.prevouts[0].as_ref().expect("prevout");
-            assert_eq!(*val, 50_0000_0000);
         }
         let aid = a.compute_txid();
         let bid = b.compute_txid();
         assert!(snap.get(&aid).is_some());
         assert!(snap.get(&bid).is_some());
+        let _ = snap.get(&aid).unwrap().json.set("keep-a".into());
+        let _ = snap.get(&bid).unwrap().json.set("keep-b".into());
         let c = spend_true(cbs[2], 3_000, ScriptBuf::from_bytes(vec![0x53]));
+        let cid = c.compute_txid();
         let held = Arc::clone(&snap);
         let h2 = Arc::clone(&hub);
         let join = thread::spawn(move || h2.accept_tx(&c));
@@ -5266,6 +5254,15 @@ mod tests {
         assert_eq!(held.entries().len(), 2, "held Arc is the old snapshot");
         let snap2 = hub.mempool_tx_snapshot();
         assert_eq!(snap2.entries().len(), 3);
+        assert_eq!(
+            snap2.get(&aid).unwrap().json.get().map(|s| s.as_ref()),
+            Some("keep-a")
+        );
+        assert_eq!(
+            snap2.get(&bid).unwrap().json.get().map(|s| s.as_ref()),
+            Some("keep-b")
+        );
+        assert!(snap2.get(&cid).unwrap().json.get().is_none());
         let _ = std::fs::remove_dir_all(&mp_dir);
         let _ = std::fs::remove_dir_all(&store_dir);
     }
