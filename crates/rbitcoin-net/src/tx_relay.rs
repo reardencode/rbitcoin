@@ -104,7 +104,7 @@ pub struct MempoolTxSnapshot {
 pub struct MempoolTxSnapEntry {
     pub txid: Txid,
     pub fee_sat: u64,
-    pub tx: Transaction,
+    pub tx: Arc<Transaction>,
     pub json: std::sync::OnceLock<Box<str>>,
 }
 
@@ -2024,7 +2024,7 @@ impl MempoolHub {
                     return Some(MempoolTxSnapEntry {
                         txid,
                         fee_sat,
-                        tx: old_e.tx.clone(),
+                        tx: Arc::clone(&old_e.tx),
                         json,
                     });
                 }
@@ -2032,7 +2032,7 @@ impl MempoolHub {
                 Some(MempoolTxSnapEntry {
                     txid,
                     fee_sat,
-                    tx,
+                    tx: Arc::new(tx),
                     json: std::sync::OnceLock::new(),
                 })
             })
@@ -5263,6 +5263,56 @@ mod tests {
             Some("keep-b")
         );
         assert!(snap2.get(&cid).unwrap().json.get().is_none());
+        let _ = std::fs::remove_dir_all(&mp_dir);
+        let _ = std::fs::remove_dir_all(&store_dir);
+    }
+
+    #[test]
+    fn mempool_tx_snapshot_refresh_reuses_tx_arc() {
+        use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
+        use rbitcoin_primitives::Height;
+
+        let store_dir = tmp();
+        let mp_dir = tmp();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
+        let params = ChainParams::regtest();
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+        let (_tip, _time, cbs) = rbitcoin_consensus::pad_empty_from(
+            &q,
+            &params,
+            genesis.block_hash(),
+            genesis.header.time,
+            1,
+            102,
+            2,
+        );
+        let q = Arc::new(q);
+        let hub = MempoolHub::open(&mp_dir, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        let a = spend_true(cbs[0], 1_000, ScriptBuf::from_bytes(vec![0x51]));
+        hub.accept_tx(&a).expect("a");
+        let snap1 = hub.mempool_tx_snapshot();
+        let aid = a.compute_txid();
+        let e1 = snap1.get(&aid).expect("a in snap1");
+        let _ = e1.json.set("keep-a".into());
+        std::thread::sleep(Duration::from_millis(1100));
+        let snap2 = hub.mempool_tx_snapshot();
+        let e2 = snap2.get(&aid).expect("a in snap2");
+        assert!(
+            Arc::ptr_eq(&e1.tx, &e2.tx),
+            "unchanged live set must reuse Transaction Arc"
+        );
+        assert_eq!(e2.json.get().map(|s| s.as_ref()), Some("keep-a"));
+        let b = spend_true(cbs[1], 2_000, ScriptBuf::from_bytes(vec![0x52]));
+        hub.accept_tx(&b).expect("b");
+        let snap3 = hub.mempool_tx_snapshot();
+        let bid = b.compute_txid();
+        let e3a = snap3.get(&aid).expect("a still live");
+        let e3b = snap3.get(&bid).expect("b in snap3");
+        assert!(Arc::ptr_eq(&e2.tx, &e3a.tx), "A reused across new admit");
+        assert!(!Arc::ptr_eq(&e3a.tx, &e3b.tx), "new admit gets its own Arc");
+        assert!(e3b.json.get().is_none());
         let _ = std::fs::remove_dir_all(&mp_dir);
         let _ = std::fs::remove_dir_all(&store_dir);
     }
