@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "label": "coverage",
-  "message": "92.05%",
+  "message": "92.03%",
   "color": "brightgreen",
-  "pct": 92.05,
-  "lh": 124035,
+  "pct": 92.03,
+  "lh": 124016,
   "lf": 134749,
   "gate": 92,
   "scope": "production",
-  "sha": "7ddfcd492eea",
+  "sha": "18b06bb68aad",
   "date": "2026-09-23"
 }
