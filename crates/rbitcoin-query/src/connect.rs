@@ -256,13 +256,25 @@ impl Query {
     }
 
     /// Seal basic filters through the last height of this confirm batch.
+    ///
+    /// Before the materialize step (IBD) this is a no-op: the catch-up gap is
+    /// sealed once in `backfill_block_filters`, not on the write thread.
     fn seal_confirmed_block_filters(&self, items: &[ConfirmPrepared]) -> Result<(), QueryError> {
-        if !self.block_filter_enabled() {
+        if !self.block_filters_follow_confirm() {
             return Ok(());
         }
-        let Some(tip) = items.last().map(|i| i.height.0) else {
+        let (Some(first), Some(tip)) = (items.first(), items.last().map(|i| i.height.0)) else {
             return Ok(());
         };
+        let next = self
+            .basic_filter_hwm()?
+            .map(|h| h.saturating_add(1))
+            .unwrap_or(0);
+        if next != first.height.0 {
+            return Err(StoreError::Corrupt(
+                "invariant: sealed basic filters are not at the confirm parent",
+            ));
+        }
         let t0 = std::time::Instant::now();
         self.backfill_block_filters_through(tip)?;
         rbitcoin_log::debug!(

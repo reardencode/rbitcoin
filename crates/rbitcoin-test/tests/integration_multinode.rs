@@ -1754,6 +1754,7 @@ async fn ibd_skips_dead_peer() {
 }
 
 /// After IBD, seed announces a new tip; follower picks it up via inv/headers.
+/// Basic filters wait for the materialize step, then seal each followed block.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tip_follow_after_ibd() {
     let fut = async {
@@ -1765,10 +1766,20 @@ async fn tip_follow_after_ibd() {
         seed_chain(&seed, 5).await;
 
         let mut peer = start_node(&peer_dir).await;
+        peer.query.set_block_filter_index(true);
         sync_ibd(&peer, seed.local_addr).await;
         peer.wait_height(5, Duration::from_secs(10))
             .await
             .expect("ibd");
+        assert_eq!(
+            peer.query.basic_filter_hwm().unwrap(),
+            None,
+            "IBD confirm leaves basic filters to the materialize step"
+        );
+        peer.query
+            .backfill_block_filters()
+            .expect("materialize filters");
+        assert_eq!(peer.query.basic_filter_hwm().unwrap(), Some(5));
         peer.follow_from(seed.local_addr).await.expect("follow");
         assert!(
             peer.follow_live_count() >= 1,
@@ -1791,6 +1802,11 @@ async fn tip_follow_after_ibd() {
             .await
             .expect("tip follow");
         assert_eq!(peer.query.tip_height(), Some(Height(6)));
+        assert_eq!(
+            peer.query.basic_filter_hwm().unwrap(),
+            Some(6),
+            "tip follow seals the new block's filter"
+        );
 
         seed.shutdown().await;
         peer.shutdown().await;

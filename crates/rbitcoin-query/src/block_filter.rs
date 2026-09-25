@@ -196,11 +196,26 @@ impl Query {
     }
 
     /// Seal missing heights `(hwm, tip]`. No-op when the index flag is off.
+    ///
+    /// The post-IBD materialize step. After it, confirm seals each new height.
     pub fn backfill_block_filters(&self) -> Result<(), QueryError> {
         let Some(tip) = self.tip_height() else {
             return Ok(());
         };
-        self.backfill_block_filters_through(tip.0)
+        self.backfill_block_filters_through(tip.0)?;
+        if self.block_filter_enabled() {
+            self.block_filters_sealed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    /// Whether confirm seals basic filters (index on and materialized).
+    pub(crate) fn block_filters_follow_confirm(&self) -> bool {
+        self.block_filter_enabled()
+            && self
+                .block_filters_sealed
+                .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn backfill_block_filters_through(&self, through: u32) -> Result<(), QueryError> {

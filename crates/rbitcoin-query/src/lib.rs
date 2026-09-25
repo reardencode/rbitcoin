@@ -302,6 +302,9 @@ pub struct Query {
     /// SH collect/enqueue/durable write-through entirely (tip follow independent).
     sh_index_enabled: std::sync::atomic::AtomicBool,
     block_filter_enabled: std::sync::atomic::AtomicBool,
+    /// Basic filters reached the tip in the post-IBD materialize step. Until
+    /// then confirm leaves them alone, like scripthash in Direct.
+    block_filters_sealed: std::sync::atomic::AtomicBool,
     /// Optional BIP-352 thin tweak index (`--sptweaks`). Files may exist when off.
     sp_tweaks: Mutex<Option<SpTweaksTable>>,
     sptweaks_enabled: AtomicBool,
@@ -451,6 +454,7 @@ impl Query {
             // `--shindex` off before entering Direct.
             sh_index_enabled: std::sync::atomic::AtomicBool::new(true),
             block_filter_enabled: std::sync::atomic::AtomicBool::new(false),
+            block_filters_sealed: std::sync::atomic::AtomicBool::new(false),
             sp_tweaks: Mutex::new(sp_tweaks),
             sptweaks_enabled: AtomicBool::new(false),
             sptweaks_origin: AtomicU32::new(sptweaks_origin),
