@@ -2660,37 +2660,38 @@ impl ChainHub {
         };
         let pres_ns = t_pres.elapsed().as_nanos() as u64;
         debug_assert_eq!(pres.len(), block.txdata.len());
-        let now = self.clock.now_secs();
-        let _ = rbitcoin_consensus::with_now(now, || loop {
-            match accept_and_connect_block_preverified(
-                &self.query,
-                &self.params,
-                Height(height),
-                Arc::clone(&block),
-                self.milestone,
-                &preverified,
-                Some(std::sync::Arc::clone(&pres)),
-            ) {
-                Ok(fk) => return Ok(fk),
-                Err(e) if e.is_uring_session_fault() => {
-                    self.query.uring_recover_or_abort("tip-connect");
-                    continue;
+        let _ = self
+            .clock
+            .with_frozen(|| loop {
+                match accept_and_connect_block_preverified(
+                    &self.query,
+                    &self.params,
+                    Height(height),
+                    Arc::clone(&block),
+                    self.milestone,
+                    &preverified,
+                    Some(std::sync::Arc::clone(&pres)),
+                ) {
+                    Ok(fk) => return Ok(fk),
+                    Err(e) if e.is_uring_session_fault() => {
+                        self.query.uring_recover_or_abort("tip-connect");
+                        continue;
+                    }
+                    Err(e) => return Err(e),
                 }
-                Err(e) => return Err(e),
-            }
-        })
-        .map_err(|e| {
-            let reason = rbitcoin_consensus::block_reject_reason(&e);
-            rbitcoin_log::info!(
-                "{}",
-                rbitcoin_consensus::block_reject_log_line(hash, &reason)
-            );
-            if reject_is_mutated(&reason) {
-                NetError::Mutated(reason)
-            } else {
-                NetError::Consensus(reason)
-            }
-        })?;
+            })
+            .map_err(|e| {
+                let reason = rbitcoin_consensus::block_reject_reason(&e);
+                rbitcoin_log::info!(
+                    "{}",
+                    rbitcoin_consensus::block_reject_log_line(hash, &reason)
+                );
+                if reject_is_mutated(&reason) {
+                    NetError::Mutated(reason)
+                } else {
+                    NetError::Consensus(reason)
+                }
+            })?;
         self.header_tips.write().unwrap().remove(&hash);
         let t_mp = std::time::Instant::now();
         if let Some(mp) = self.mempool() {

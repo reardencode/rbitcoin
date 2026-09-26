@@ -60,6 +60,16 @@ pub fn current_now() -> u64 {
     NOW_OVERRIDE.with(|c| c.get()).unwrap_or_else(wall_now)
 }
 
+impl NodeClock {
+    /// Freeze wall time to a consistent value for the duration of `f`.
+    /// All `now_secs()` calls inside `f` return the same instant.
+    /// Restored when `f` exits — synchronous only, does not persist across .await.
+    pub fn with_frozen<R>(&self, f: impl FnOnce() -> R) -> R {
+        let frozen = self.now_secs();
+        with_now(frozen, f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,5 +99,26 @@ mod tests {
     #[should_panic(expected = "system clock before Unix epoch")]
     fn unix_secs_panics_before_epoch() {
         unix_secs(UNIX_EPOCH - std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn with_frozen_uses_current_now_restores_prior() {
+        let c = NodeClock::new();
+        c.set_mock(1_000_000_000);
+
+        c.set_mock(2_000_000_000);
+        c.with_frozen(|| {
+            assert_eq!(
+                current_now(),
+                2_000_000_000,
+                "frozen value visible via current_now() inside closure"
+            );
+        });
+
+        assert_eq!(
+            c.now_secs(),
+            2_000_000_000,
+            "outer mock value unchanged after scope"
+        );
     }
 }
