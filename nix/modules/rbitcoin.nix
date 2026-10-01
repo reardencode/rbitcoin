@@ -86,6 +86,9 @@ let
   ++ optional cfg.electrum.enable (socket cfg.electrum.address cfg.electrum.port)
   ++ optional cfg.esplora.enable "--esplora-listen"
   ++ optional cfg.esplora.enable (socket cfg.esplora.address cfg.esplora.port)
+  ++ optional cfg.health.enable "--health-listen"
+  ++ optional cfg.health.enable (socket cfg.health.address cfg.health.port)
+  ++ optional cfg.metrics "--metrics"
   ++ optional (cfg.scripthashIndex || cfg.electrum.enable || cfg.esplora.enable) "--sh-index"
   ++ optional cfg.silentPaymentIndex "--sp-tweaks"
   ++ optional (cfg.proxy != null) "--proxy"
@@ -314,6 +317,30 @@ in
       };
     };
 
+    health = {
+      enable = mkEnableOption "the loopback health listener (/healthz and /readyz)";
+
+      address = mkOption {
+        type = types.str;
+        default = "127.0.0.1";
+        description = "Address for --health-listen. Keep this on loopback; it is unauthenticated.";
+      };
+
+      port = mkOption {
+        type = types.port;
+        default = 9332;
+        description = "Health listen port. Same default as a bare --health-listen.";
+      };
+
+      openFirewall = mkOption {
+        type = types.bool;
+        default = false;
+        description = "Open the health port in the firewall. Leave this off unless a probe must dial a non-loopback address.";
+      };
+    };
+
+    metrics = mkEnableOption "Prometheus GET /metrics on the health listener";
+
     rpc = {
       enable = mkEnableOption "the JSON-RPC listener";
 
@@ -437,6 +464,10 @@ in
         assertion = cfg.rpc.cookieFile == null || cfg.rpc.enable;
         message = "services.rbitcoin.rpc.cookieFile requires rpc.enable (the cookie is accepted on TCP only)";
       }
+      {
+        assertion = !cfg.metrics || cfg.health.enable;
+        message = "services.rbitcoin.metrics requires health.enable (--metrics needs --health-listen)";
+      }
     ];
 
     users.groups.${cfg.group} = { };
@@ -512,7 +543,19 @@ in
     networking.firewall.allowedTCPPorts =
       optional (cfg.p2p.openFirewall && cfg.p2p.listen) cfg.p2p.port
       ++ optional (cfg.electrum.enable && cfg.electrum.openFirewall) cfg.electrum.port
-      ++ optional (cfg.esplora.enable && cfg.esplora.openFirewall) cfg.esplora.port;
+      ++ optional (cfg.esplora.enable && cfg.esplora.openFirewall) cfg.esplora.port
+      ++ optional (cfg.health.enable && cfg.health.openFirewall) cfg.health.port;
+
+    services.prometheus.scrapeConfigs = mkIf (cfg.metrics && config.services.prometheus.enable) [
+      {
+        job_name = "rbitcoin";
+        static_configs = [
+          {
+            targets = [ (socket cfg.health.address cfg.health.port) ];
+          }
+        ];
+      }
+    ];
 
     environment.systemPackages = [ cfg.package ];
   };

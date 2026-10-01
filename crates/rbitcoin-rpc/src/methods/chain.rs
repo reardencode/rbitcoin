@@ -133,21 +133,7 @@ pub(crate) fn rpc_warnings(ctx: &RpcContext) -> Vec<String> {
     w
 }
 
-pub(crate) fn difficulty_from_bits(bits: u32) -> f64 {
-    // Compact target → difficulty relative to max target (same class as Core).
-    let n_shift = ((bits >> 24) & 0xff) as i32;
-    let mut ddiff = (0x0000_ffff_u64 as f64) / ((bits & 0x00ff_ffff) as f64);
-    let mut shift = n_shift - 29;
-    while shift < 0 {
-        ddiff *= 256.0;
-        shift += 1;
-    }
-    while shift > 0 {
-        ddiff /= 256.0;
-        shift -= 1;
-    }
-    ddiff
-}
+pub(crate) use rbitcoin_consensus::difficulty_from_bits;
 
 pub(crate) fn difficulty_at_tip(ctx: &RpcContext) -> Result<f64, Value> {
     let tip = ctx

@@ -407,8 +407,11 @@ which. Counters are the process-lifetime totals behind the 5s DEBUG
 `tip: perf` line; that line still prints only the change since its previous
 sample. A scrape runs on the blocking pool: chain reads
 (`best_header_height`, the tip header, `in_ibd`, and scripthash lag with
-`--sh-index`), one peer snapshot, and one mempool fold for
-`rbitcoin_mempool_bytes` (the same fold as `getmempoolinfo`).
+`--sh-index`), one peer snapshot and a byte-total walk, and one mempool
+fold for `rbitcoin_mempool_bytes` (the same fold as `getmempoolinfo`) plus
+the min-fee, weight cap, orphan count, and unbroadcast count. NixOS:
+`services.rbitcoin.health.enable` and `services.rbitcoin.metrics`
+([setup](setup.md#nixos-service)).
 
 | Metric | Type | Equals |
 |--------|------|--------|
@@ -419,9 +422,19 @@ sample. A scrape runs on the blocking pool: chain reads
 | `rbitcoin_headers` | gauge | `getblockchaininfo.headers` |
 | `rbitcoin_tip_time_seconds` | gauge | `getblockchaininfo.time` |
 | `rbitcoin_initial_block_download` | gauge | `getblockchaininfo.initialblockdownload` |
+| `rbitcoin_verification_progress` | gauge | `getblockchaininfo.verificationprogress` (`blocks/headers`) |
+| `rbitcoin_tip_age_seconds` | gauge | Seconds since `getblockchaininfo.time` |
+| `rbitcoin_difficulty` | gauge | `getblockchaininfo.difficulty` |
 | `rbitcoin_connections{direction="in"\|"out"}` | gauge | `getnetworkinfo.connections_in` / `connections_out` |
+| `rbitcoin_peers{network}` | gauge | Count of `getpeerinfo` rows for `ipv4`, `ipv6`, `onion`, `i2p`, `cjdns` |
+| `rbitcoin_peer_time_offset_seconds` | gauge | `getnetworkinfo.timeoffset` |
+| `rbitcoin_network_receive_bytes_total` / `_transmit_bytes_total` | counter | `getnettotals.totalbytesrecv` / `totalbytessent` |
 | `rbitcoin_mempool_transactions` | gauge | `getmempoolinfo.size` |
 | `rbitcoin_mempool_bytes` | gauge | `getmempoolinfo.bytes` (virtual size) |
+| `rbitcoin_mempool_min_fee_sat_per_kvb` | gauge | `getmempoolinfo.mempoolminfee` in sat/kvB |
+| `rbitcoin_mempool_max_weight` | gauge | `getmempoolinfo.maxmempool` (weight units) |
+| `rbitcoin_mempool_orphan_transactions` | gauge | `getmempoolinfo.orphanage.size` |
+| `rbitcoin_mempool_unbroadcast_transactions` | gauge | `getmempoolinfo.unbroadcastcount` |
 | `rbitcoin_scripthash_lag_blocks` | gauge | `tip: accept sh_lag=` (with `--sh-index`) |
 | `rbitcoin_esplora_requests_total` / `_request_seconds_total` | counter | Lifetime sum of `tip: perf esplora req=`, and of that handler's wall time in seconds. The DEBUG line is the last ~5s window (`req=`, `avg_us` in microseconds) |
 | `rbitcoin_electrum_requests_total` / `_request_seconds_total` | counter | Lifetime sum of `tip: perf electrum req=`, and of that handler's wall time in seconds. The DEBUG line is the last ~5s window (`req=`, `avg_us` in microseconds) |
