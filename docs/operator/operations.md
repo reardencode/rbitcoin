@@ -431,7 +431,7 @@ the min-fee, weight cap, orphan count, and unbroadcast count. NixOS:
 | `rbitcoin_network_receive_bytes_total` / `_transmit_bytes_total` | counter | `getnettotals.totalbytesrecv` / `totalbytessent` |
 | `rbitcoin_mempool_transactions` | gauge | `getmempoolinfo.size` |
 | `rbitcoin_mempool_bytes` | gauge | `getmempoolinfo.bytes` (virtual size) |
-| `rbitcoin_mempool_min_fee_sat_per_kvb` | gauge | `getmempoolinfo.mempoolminfee` in sat/kvB |
+| `rbitcoin_mempool_min_fee_sat_per_vb` | gauge | Minimum mempool feerate in sat/vB. `getmempoolinfo.mempoolminfee` is BTC/kvB |
 | `rbitcoin_mempool_max_weight` | gauge | `getmempoolinfo.maxmempool` (weight units) |
 | `rbitcoin_mempool_orphan_transactions` | gauge | `getmempoolinfo.orphanage.size` |
 | `rbitcoin_mempool_unbroadcast_transactions` | gauge | `getmempoolinfo.unbroadcastcount` |

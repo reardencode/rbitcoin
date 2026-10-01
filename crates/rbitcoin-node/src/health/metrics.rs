@@ -119,9 +119,9 @@ pub(super) fn render(status: &NodeStatus) -> String {
             vbytes,
         );
         out.gauge(
-            "rbitcoin_mempool_min_fee_sat_per_kvb",
-            "Mempool min fee in sat/kvB (getmempoolinfo.mempoolminfee).",
-            mempool.mempool_min_fee_sat_kvb(),
+            "rbitcoin_mempool_min_fee_sat_per_vb",
+            "Minimum mempool feerate in sat/vB.",
+            mempool.mempool_min_fee_sat_kvb() as f64 / 1000.0,
         );
         out.gauge(
             "rbitcoin_mempool_max_weight",

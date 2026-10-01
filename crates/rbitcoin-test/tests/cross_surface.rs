@@ -269,9 +269,10 @@ async fn pin_metrics_equal_rpc(
     ] {
         assert_eq!(m.get(series), Some(&want), "{series}: {m:?}");
     }
-    let min_fee_sat = (num(&mempool["mempoolminfee"]) * 100_000_000.0).round();
+    let min_fee_sat_kvb = (num(&mempool["mempoolminfee"]) * 100_000_000.0).round();
     assert_eq!(
-        m["rbitcoin_mempool_min_fee_sat_per_kvb"], min_fee_sat,
+        m["rbitcoin_mempool_min_fee_sat_per_vb"],
+        min_fee_sat_kvb / 1000.0,
         "mempoolminfee: {mempool}"
     );
     let now = std::time::SystemTime::now()
