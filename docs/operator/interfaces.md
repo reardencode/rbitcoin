@@ -257,6 +257,65 @@ must import `pools-v2.json` or every block is **Unknown**: `npm run start
 hundreds when that worked. Predicted blocks wait on Node’s first mempool
 sync + rust-gbt; they are empty until `/internal/mempool/txs` has filled.
 
+## Stratum v2 Template Provider
+
+`--sv2-tp-listen ADDR` serves the SV2 Template Distribution Protocol (TDP v2)
+over Noise NX. A Job Declarator Client or pool connects, sends
+`CoinbaseOutputConstraints`, and gets `NewTemplate` / `SetNewPrevHash` on
+every tip. It can request a template's transactions and submit a solved
+block, which the node validates and connects like any other block. Default
+is **off**; there is no plaintext mode.
+
+| Flag (conf key) | Default | Meaning |
+|---|---|---|
+| `--sv2-tp-listen ADDR` (`sv2_tp_listen`) | off | TCP bind for TDP clients |
+| `--sv2-tp-authority-sec-file PATH` (`sv2_tp_authority_sec_file`) | — | File holding the secp256k1 authority secret: 64 hex, or the SRI `key-utils` base58check form |
+| `--sv2-tp-authority-sec KEY` (`sv2_tp_authority_sec`) | — | The same secret inline. Argv shows in `ps`; prefer the file or the conf file |
+| `--sv2-tp-cert-validity SECS` (`sv2_tp_cert_validity`) | 3600 | Lifetime of each per-connection Noise certificate; 1 to 4294967295 (`u32::MAX`, the Noise cert field) |
+| `--sv2-tp-stale-grace SECS` (`sv2_tp_stale_grace`) | 10 | How long templates on a replaced tip still answer; 0 to 86400 (one day), `0` retires them at once |
+
+`--sv2-tp-listen` needs one of the authority flags. At startup the node logs
+`sv2 TP on ADDR (authority pubkey KEY)`. KEY is in the SRI `key-utils`
+base58check form (`9b…`); configure it as the TP authority public key in the
+client. No templates are sent while the node is in IBD.
+At most 8 sessions run at once. A connection that has not finished the
+Noise handshake and `SetupConnection` and sent its first
+`CoinbaseOutputConstraints` within 10 s is closed; after that a client may
+stay silent indefinitely. A client that stops reading is closed
+once a write to it makes no progress for 30 s.
+A changed `CoinbaseOutputConstraints` within 1 s of the last template waits
+out the rest of that second; a client that keeps replacing a queued budget
+(more than 8 times before it is built) is closed.
+Each session keeps its last 3 templates. A request for an older template id
+answers `stale-template-id`, and an undecodable `SubmitSolution` or one
+that misses the template target is logged and dropped. A `header_timestamp`
+outside the sv2 rolling window (a miner clock running ahead) is logged and
+still submitted; block validation applies the consensus time rules.
+
+There is no client authentication. Noise NX proves the TP's authority key
+to the client, not the client to the TP, so anyone who can reach the port
+can request templates and submit solutions. Bind to loopback (the NixOS
+module default) or firewall the port to the JDC host.
+
+```bash
+openssl rand -hex 32 > ./datadir-regtest/sv2-authority.key
+./target/release/rbitcoin-node \
+  --datadir ./datadir-regtest --network regtest \
+  --sv2-tp-listen 127.0.0.1:18447 \
+  --sv2-tp-authority-sec-file ./datadir-regtest/sv2-authority.key
+```
+
+NixOS takes only a runtime path for the key, so it never enters the store:
+
+```nix
+services.rbitcoin.sv2.tp = {
+  enable = true;                       # --sv2-tp-listen address:port
+  port = 8442;                         # default; address = "127.0.0.1"
+  authoritySecretFile = "/run/keys/sv2-authority"; # readable by the service user
+  # certValidity = 3600; staleGrace = 10; openFirewall = false;
+};
+```
+
 ## Core-class JSON-RPC
 
 Optional HTTP JSON-RPC subset (default **off**). `--rpc` binds

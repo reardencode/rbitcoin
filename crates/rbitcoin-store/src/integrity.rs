@@ -125,18 +125,50 @@ pub fn merkle_root_from_txids(leaves: &[[u8; 32]]) -> [u8; 32] {
     }
     let mut level: Vec<[u8; 32]> = leaves.to_vec();
     while level.len() > 1 {
-        if level.len() % 2 == 1 {
-            if let Some(last) = level.last().copied() {
-                level.push(last);
-            }
-        }
-        let mut next = Vec::with_capacity(level.len() / 2);
-        for pair in level.chunks_exact(2) {
-            next.push(hash256_concat(&pair[0], &pair[1]));
-        }
-        level = next;
+        level = merkle_parent_level(level);
     }
     level[0]
+}
+
+/// Sibling hashes from `leaves[index]` up to the root, deepest first. Empty for
+/// one leaf. Folding the leaf with them (left when the index bit is 0)
+/// reproduces [`merkle_root_from_txids`]. The leaf's own value feeds no entry.
+pub fn merkle_branch(leaves: &[[u8; 32]], mut index: usize) -> Vec<[u8; 32]> {
+    let mut branch = Vec::new();
+    let mut level: Vec<[u8; 32]> = leaves.to_vec();
+    while level.len() > 1 {
+        let sibling = (index ^ 1).min(level.len() - 1);
+        branch.push(level[sibling]);
+        level = merkle_parent_level(level);
+        index /= 2;
+    }
+    branch
+}
+
+/// Root reached by folding `leaf` at `index` with its [`merkle_branch`]. The
+/// leaf is the left child when the index bit at that depth is 0.
+pub fn merkle_root_from_branch(leaf: [u8; 32], branch: &[[u8; 32]], index: usize) -> [u8; 32] {
+    branch
+        .iter()
+        .enumerate()
+        .fold(leaf, |acc, (depth, sibling)| {
+            if (index >> depth) & 1 == 0 {
+                hash256_concat(&acc, sibling)
+            } else {
+                hash256_concat(sibling, &acc)
+            }
+        })
+}
+
+// Bitcoin pairs an odd last node with itself.
+fn merkle_parent_level(mut level: Vec<[u8; 32]>) -> Vec<[u8; 32]> {
+    if level.len() % 2 == 1 {
+        level.push(level[level.len() - 1]);
+    }
+    level
+        .chunks_exact(2)
+        .map(|pair| hash256_concat(&pair[0], &pair[1]))
+        .collect()
 }
 
 fn hash256_concat(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
@@ -536,6 +568,42 @@ mod tests {
         let b = [2u8; 32];
         let root = merkle_root_from_txids(&[a, b]);
         assert_eq!(root, hash256_concat(&a, &b));
+    }
+
+    #[test]
+    fn merkle_path_folds_to_root_at_every_index() {
+        let (a, b, c) = ([1u8; 32], [2u8; 32], [3u8; 32]);
+        assert!(merkle_branch(&[a], 0).is_empty());
+        assert_eq!(merkle_branch(&[a, b], 0), vec![b]);
+        assert_eq!(
+            merkle_branch(&[a, b, c], 0),
+            vec![b, hash256_concat(&c, &c)]
+        );
+        assert_eq!(
+            merkle_branch(&[a, b, c], 2),
+            vec![c, hash256_concat(&a, &b)]
+        );
+        for n in 1..=9u8 {
+            let leaves: Vec<[u8; 32]> = (0..n).map(|i| [i + 10; 32]).collect();
+            let root = merkle_root_from_txids(&leaves);
+            for (index, leaf) in leaves.iter().enumerate() {
+                let branch = merkle_branch(&leaves, index);
+                let mut h = *leaf;
+                for (depth, sib) in branch.iter().enumerate() {
+                    h = if (index >> depth) & 1 == 0 {
+                        hash256_concat(&h, sib)
+                    } else {
+                        hash256_concat(sib, &h)
+                    };
+                }
+                assert_eq!(h, root, "n={n} index={index}");
+                assert_eq!(
+                    merkle_root_from_branch(*leaf, &branch, index),
+                    root,
+                    "n={n} index={index}"
+                );
+            }
+        }
     }
 
     #[test]

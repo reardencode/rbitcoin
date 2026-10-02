@@ -16,6 +16,7 @@ shared libraries through storage and runtime crates to composition and tools;
 | `rbitcoin-rpc` | Core-class JSON-RPC subset |
 | `rbitcoin-electrum` | Electrum TCP server |
 | `rbitcoin-esplora` | Esplora REST server |
+| `rbitcoin-sv2` | Stratum v2 Template Distribution Protocol server (Noise over TCP) |
 | `rbitcoin-node` | Product binary and process composition |
 | `rbitcoin-cli` | RPC client binary |
 | `rbitcoin-test` | High-level scenario and integration-test harness |

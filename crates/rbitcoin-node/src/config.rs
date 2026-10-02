@@ -236,6 +236,16 @@ impl std::fmt::Debug for TorControlOpts {
     }
 }
 
+/// SV2 authority secret key; `Debug` never prints it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Sv2AuthoritySecret(pub [u8; 32]);
+
+impl std::fmt::Debug for Sv2AuthoritySecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("****")
+    }
+}
+
 /// JSON-RPC listen and auth.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RpcOpts {
@@ -316,6 +326,14 @@ pub struct NodeConfig {
     pub metrics: bool,
     /// ADD_ONION for `--esplora-listen` when `--tor-control` is set. Default on.
     pub esplora_onion: bool,
+    /// SV2 Template Provider bind (`--sv2-tp-listen`). Default off.
+    pub sv2_tp_listen: Option<SocketAddr>,
+    /// Authority secret key the TP signs its Noise certificates with.
+    pub sv2_tp_authority_sec: Option<Sv2AuthoritySecret>,
+    /// Validity of each per-connection Noise certificate. Default 3600 s.
+    pub sv2_tp_cert_validity_secs: u64,
+    /// How long a template on a replaced tip still answers. Default 10 s.
+    pub sv2_tp_stale_grace_secs: u64,
     /// Skip script/prevout checks for blocks at or below this height (0 = off).
     pub milestone_height: u32,
     /// Set when conf or CLI applied `milestone` (including 0).
@@ -393,6 +411,10 @@ impl Default for NodeConfig {
             esplora_block_template: false,
             metrics: false,
             esplora_onion: true,
+            sv2_tp_listen: None,
+            sv2_tp_authority_sec: None,
+            sv2_tp_cert_validity_secs: 3600,
+            sv2_tp_stale_grace_secs: 10,
             milestone_height: 0,
             milestone_explicit: false,
             inhibit_suspend: false,
@@ -612,6 +634,12 @@ impl NodeConfig {
         }
         if self.metrics && self.listen.health.is_none() {
             return Err(NodeError::Config("--metrics needs --health-listen".into()));
+        }
+        if self.sv2_tp_listen.is_some() && self.sv2_tp_authority_sec.is_none() {
+            return Err(NodeError::Config(
+                "--sv2-tp-listen requires --sv2-tp-authority-sec or --sv2-tp-authority-sec-file"
+                    .into(),
+            ));
         }
         self.validate_only_net()?;
         self.validate_hidden_inbound()?;
@@ -1065,6 +1093,43 @@ impl NodeConfig {
                 self.esplora_onion = parse_conf_bool(val)
                     .map_err(|e| NodeError::Config(format!("conf esplora_onion: {e}")))?;
             }
+            "sv2_tp_listen" => {
+                self.sv2_tp_listen = Some(
+                    val.parse()
+                        .map_err(|e| NodeError::Config(format!("conf sv2_tp_listen: {e}")))?,
+                );
+            }
+            "sv2_tp_authority_sec" => {
+                self.sv2_tp_authority_sec = Some(parse_authority_sec(&key_l, val)?);
+            }
+            // Keeps the secret out of argv and the unit file.
+            "sv2_tp_authority_sec_file" => {
+                let hex = std::fs::read_to_string(val).map_err(|e| {
+                    // The path may be the key pasted into the wrong knob: never echo it.
+                    NodeError::Config(format!("conf sv2_tp_authority_sec_file: {e}"))
+                })?;
+                self.sv2_tp_authority_sec = Some(parse_authority_sec(&key_l, hex.trim())?);
+            }
+            "sv2_tp_stale_grace" => {
+                let max = rbitcoin_sv2::MAX_STALE_GRACE.as_secs();
+                self.sv2_tp_stale_grace_secs =
+                    val.parse().ok().filter(|&s| s <= max).ok_or_else(|| {
+                        NodeError::Config(format!("conf sv2_tp_stale_grace: want seconds <= {max}"))
+                    })?;
+            }
+            "sv2_tp_cert_validity" => {
+                self.sv2_tp_cert_validity_secs = val
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|&s| s > 0)
+                    .ok_or_else(|| {
+                        NodeError::Config(format!(
+                            "conf sv2_tp_cert_validity: want seconds in 1..={}",
+                            u32::MAX
+                        ))
+                    })?
+                    .into();
+            }
             "rpc" => {
                 self.rpc.socket = parse_conf_bool(val)
                     .map_err(|e| NodeError::Config(format!("conf rpc: {e}")))?;
@@ -1404,6 +1469,21 @@ fn is_conf_true(val: &str) -> bool {
     )
 }
 
+/// 64 hex, or SRI `key-utils` `Secp256k1SecretKey` base58check (the raw 32 bytes).
+/// The error never echoes `val`: it is a secret.
+fn parse_authority_sec(key: &str, val: &str) -> Result<Sv2AuthoritySecret, NodeError> {
+    <[u8; 32]>::from_hex(val)
+        .ok()
+        .or_else(|| bitcoin::base58::decode_check(val).ok()?.try_into().ok())
+        .filter(|k| bitcoin::secp256k1::SecretKey::from_slice(k).is_ok())
+        .map(Sv2AuthoritySecret)
+        .ok_or_else(|| {
+            NodeError::Config(format!(
+                "conf {key}: want a secp256k1 secret key (64 hex or key-utils base58check)"
+            ))
+        })
+}
+
 /// Parse `1`/`true`/`yes`/`on` → true; `0`/`false`/`no`/`off` → false.
 fn parse_conf_bool(val: &str) -> Result<bool, String> {
     let v = val.to_ascii_lowercase();
@@ -1544,6 +1624,137 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("rpc_socket requires a path"), "{err}");
+    }
+
+    #[test]
+    fn sv2_tp_apply_kv_and_listen_requires_authority() {
+        let mut c = NodeConfig::default().with_datadir(tmp());
+        assert_eq!(c.sv2_tp_listen, None);
+        assert_eq!(c.sv2_tp_cert_validity_secs, 3600);
+        assert_eq!(c.sv2_tp_stale_grace_secs, 10);
+        for (k, v) in [
+            ("sv2_tp_listen", "127.0.0.1:8442"),
+            ("sv2_tp_cert_validity", "600"),
+            ("sv2_tp_stale_grace", "0"),
+        ] {
+            assert_eq!(c.apply_kv(k, v).unwrap(), ConfApply::Applied);
+        }
+        assert_eq!(c.sv2_tp_listen, Some("127.0.0.1:8442".parse().unwrap()));
+        assert_eq!(c.sv2_tp_cert_validity_secs, 600);
+        assert_eq!(c.sv2_tp_stale_grace_secs, 0);
+        let no_auth = c.validate().unwrap_err();
+        assert!(
+            format!("{no_auth}").contains("sv2-tp-authority-sec"),
+            "{no_auth}"
+        );
+        assert_eq!(
+            c.apply_kv("sv2_tp_authority_sec", &"07".repeat(32))
+                .unwrap(),
+            ConfApply::Applied
+        );
+        assert_eq!(c.sv2_tp_authority_sec, Some(Sv2AuthoritySecret([7; 32])));
+        assert!(c.validate().is_ok());
+
+        let zero = "00".repeat(32);
+        let not_hex = "zz".repeat(32);
+        for (k, v) in [
+            ("sv2_tp_listen", "nope"),
+            ("sv2_tp_authority_sec", "07"),
+            ("sv2_tp_authority_sec", zero.as_str()),
+            ("sv2_tp_authority_sec", not_hex.as_str()),
+            ("sv2_tp_cert_validity", "0"),
+            ("sv2_tp_stale_grace", "-1"),
+            ("sv2_tp_stale_grace", "86401"),
+            ("sv2_tp_cert_validity", "4294967296"),
+        ] {
+            let e = format!("{}", c.apply_kv(k, v).unwrap_err());
+            assert!(e.contains(k), "garbage must name the knob: {e}");
+        }
+    }
+
+    #[test]
+    fn sv2_tp_authority_sec_file_reads_the_key_off_argv() {
+        let dir = tmp();
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut c = NodeConfig::default().with_datadir(dir.clone());
+        let key = dir.join("sv2-authority.key");
+        std::fs::write(&key, format!("{}\n", "07".repeat(32))).unwrap();
+        let path = key.to_str().unwrap();
+        assert_eq!(
+            c.apply_kv("sv2_tp_authority_sec_file", path).unwrap(),
+            ConfApply::Applied
+        );
+        assert_eq!(c.sv2_tp_authority_sec, Some(Sv2AuthoritySecret([7; 32])));
+
+        let bad = dir.join("sv2-bad.key");
+        std::fs::write(&bad, "00".repeat(32)).unwrap();
+        let missing = dir.join("sv2-missing.key");
+        for p in [&bad, &missing] {
+            let e = format!(
+                "{}",
+                c.apply_kv("sv2_tp_authority_sec_file", p.to_str().unwrap())
+                    .unwrap_err()
+            );
+            assert!(e.contains("sv2_tp_authority_sec_file"), "{e}");
+            assert!(!e.contains(&"00".repeat(32)), "never echo the key: {e}");
+        }
+    }
+
+    /// An operator who passes the key itself to the file knob, or logs the
+    /// config, must not see the key printed.
+    #[test]
+    fn sv2_tp_authority_secret_never_prints() {
+        let hex = "07".repeat(32);
+        let mut c = NodeConfig::default();
+        c.apply_kv("sv2_tp_authority_sec", &hex).unwrap();
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("sv2_tp_authority_sec"), "{dbg}");
+        assert!(!dbg.contains("[7, 7"), "never print the key: {dbg}");
+        assert!(!dbg.contains(&hex), "never print the key: {dbg}");
+
+        let e = format!(
+            "{}",
+            c.apply_kv("sv2_tp_authority_sec_file", &hex).unwrap_err()
+        );
+        assert!(e.contains("sv2_tp_authority_sec_file"), "{e}");
+        assert!(!e.contains(&hex), "never echo the key: {e}");
+    }
+
+    /// key-utils 1.2.0 vector: SRI configs carry the authority secret as
+    /// `Secp256k1SecretKey` base58check; its pubkey is the one the TP prints.
+    #[test]
+    fn sv2_tp_authority_sec_takes_key_utils_base58check() {
+        let secret = "zmBEmPhqo3A92FkiLVvyCz6htc3e53ph3ZbD4ASqGaLjwnFLi";
+        let dir = tmp();
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("sv2-authority.key");
+        std::fs::write(&file, format!("{secret}\n")).unwrap();
+        for (k, v) in [
+            ("sv2_tp_authority_sec", secret),
+            ("sv2_tp_authority_sec_file", file.to_str().unwrap()),
+        ] {
+            let mut c = NodeConfig::default().with_datadir(dir.clone());
+            assert_eq!(c.apply_kv(k, v).unwrap(), ConfApply::Applied);
+            let kp = bitcoin::secp256k1::Keypair::from_seckey_slice(
+                &bitcoin::secp256k1::Secp256k1::new(),
+                &c.sv2_tp_authority_sec.unwrap().0,
+            )
+            .unwrap();
+            let mut pk = vec![1, 0];
+            pk.extend(kp.x_only_public_key().0.serialize());
+            assert_eq!(
+                bitcoin::base58::encode_check(&pk),
+                "9bDuixKmZqAJnrmP746n8zU1wyAQRrus7th9dxnkPg6RzQvCnan"
+            );
+        }
+        let mut c = NodeConfig::default();
+        let bad_check = format!("{}1", &secret[..secret.len() - 1]);
+        let e = format!(
+            "{}",
+            c.apply_kv("sv2_tp_authority_sec", &bad_check).unwrap_err()
+        );
+        assert!(e.contains("sv2_tp_authority_sec"), "{e}");
+        assert!(!e.contains(&bad_check), "never echo the key: {e}");
     }
 
     #[test]

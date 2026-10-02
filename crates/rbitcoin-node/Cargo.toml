@@ -22,6 +22,7 @@ rbitcoin-net = { workspace = true }
 rbitcoin-rpc = { workspace = true }
 rbitcoin-electrum = { workspace = true }
 rbitcoin-esplora = { workspace = true }
+rbitcoin-sv2 = { workspace = true }
 bitcoin = { workspace = true }
 bitcoin_hashes = { workspace = true }
 serde_json = { workspace = true }

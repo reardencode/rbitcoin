@@ -17,6 +17,7 @@ use rbitcoin_rpc::{
     gbt_template, run_rpc, RpcActive, RpcConfig, RpcContext, RpcHandle, RpcRegtest,
 };
 use rbitcoin_store::StoreError;
+use rbitcoin_sv2::{run_sv2_tp, Sv2TpConfig, Sv2TpHandle};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -832,6 +833,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 .set_wallet_onion(format!("{}.onion", hs.service_id), h.local_addr.port());
         }
     }
+    let sv2_tp = start_sv2_tp(&config, &node.hub).await;
     let mut i2p_wallet = Vec::new();
     if config.listen.i2p_accept_incoming {
         if let Some(addr) = config.listen.i2p_sam {
@@ -1239,6 +1241,9 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     }
     for e in esplora_handles {
         e.shutdown().await;
+    }
+    if let Some(h) = sv2_tp {
+        h.shutdown().await;
     }
     if let Some(h) = rpc_handle {
         if h.stop.load(Ordering::SeqCst) {
@@ -1734,6 +1739,34 @@ async fn start_esplora_if_ready(
         Err(e) => {
             warn!("esplora HTTP start warning: {e}");
             Vec::new()
+        }
+    }
+}
+
+async fn start_sv2_tp(config: &NodeConfig, hub: &Arc<ChainHub>) -> Option<Sv2TpHandle> {
+    let listen = config.sv2_tp_listen?;
+    let authority_secret = config.sv2_tp_authority_sec?.0;
+    let cfg = Sv2TpConfig {
+        listen,
+        chain: Arc::clone(hub),
+        authority_secret,
+        cert_validity: Duration::from_secs(config.sv2_tp_cert_validity_secs),
+        stale_grace: Duration::from_secs(config.sv2_tp_stale_grace_secs),
+        setup_timeout: rbitcoin_sv2::SETUP_TIMEOUT,
+        write_timeout: rbitcoin_sv2::WRITE_TIMEOUT,
+    };
+    match run_sv2_tp(cfg).await {
+        Ok(h) => {
+            info!(
+                "sv2 TP on {} (authority pubkey {})",
+                h.local_addr,
+                h.authority_key()
+            );
+            Some(h)
+        }
+        Err(e) => {
+            warn!("sv2 TP start warning: {e}");
+            None
         }
     }
 }

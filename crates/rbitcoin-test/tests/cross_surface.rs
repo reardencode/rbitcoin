@@ -8,7 +8,7 @@ use bitcoin::transaction::Version as TxVersion;
 use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
 use rbitcoin_consensus::{accept_and_connect_block, pad_empty_from, ChainParams, Milestone};
 use rbitcoin_electrum::electrum_scripthash_hex;
-use rbitcoin_node::{run_p2p, NodeConfig};
+use rbitcoin_node::{run_p2p, NodeConfig, Sv2AuthoritySecret};
 use rbitcoin_primitives::{Height, Network};
 use rbitcoin_query::Query;
 use rbitcoin_test::{build_mature_regtest_with_spend, TestDatadir};
@@ -2754,4 +2754,316 @@ async fn enter_tip_mode_indexes() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     stop_run_p2p(rpc_addr, node).await;
+}
+
+/// Authority secret for the SV2 TP journey; the client derives the pubkey.
+const SV2_AUTHORITY_SEC: [u8; 32] = [7; 32];
+
+async fn sv2_recv(c: &mut rbitcoin_sv2::testutil::TpClient) -> rbitcoin_sv2::Frame {
+    tokio::time::timeout(Duration::from_secs(10), c.recv())
+        .await
+        .expect("sv2 message in time")
+        .expect("sv2 message")
+}
+
+struct Sv2Template {
+    template_id: u64,
+    future_template: bool,
+    version: u32,
+    coinbase_prefix: Vec<u8>,
+    value_remaining: u64,
+    coinbase_outputs: Vec<u8>,
+    merkle_path: Vec<[u8; 32]>,
+}
+
+fn sv2_template(mut f: rbitcoin_sv2::Frame) -> Sv2Template {
+    assert_eq!(
+        f.msg_type,
+        template_distribution_sv2::MESSAGE_TYPE_NEW_TEMPLATE
+    );
+    let t: template_distribution_sv2::NewTemplate = binary_sv2::from_bytes(&mut f.payload).unwrap();
+    Sv2Template {
+        template_id: t.template_id,
+        future_template: t.future_template,
+        version: t.version,
+        coinbase_prefix: t.coinbase_prefix.as_ref().to_vec(),
+        value_remaining: t.coinbase_tx_value_remaining,
+        coinbase_outputs: t.coinbase_tx_outputs.as_ref().to_vec(),
+        merkle_path: t
+            .merkle_path
+            .iter()
+            .map(|h| h.as_ref().try_into().unwrap())
+            .collect(),
+    }
+}
+
+/// Coinbase the template describes: OP_TRUE payout, then the TP's outputs.
+fn sv2_coinbase(t: &Sv2Template) -> Transaction {
+    let tp_out: TxOut = bitcoin::consensus::deserialize(&t.coinbase_outputs).unwrap();
+    Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::from_bytes(t.coinbase_prefix.clone()),
+            sequence: Sequence::MAX,
+            witness: Witness::from_slice(&[[0u8; 32]]),
+        }],
+        output: vec![
+            TxOut {
+                value: Amount::from_sat(t.value_remaining),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            },
+            tp_out,
+        ],
+    }
+}
+
+fn sv2_tx_data(mut f: rbitcoin_sv2::Frame) -> (u64, Vec<u8>, Vec<Vec<u8>>) {
+    use template_distribution_sv2::{
+        RequestTransactionDataSuccess, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
+    };
+    assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS);
+    let d: RequestTransactionDataSuccess = binary_sv2::from_bytes(&mut f.payload).unwrap();
+    let txs = d
+        .transaction_list
+        .iter()
+        .map(|t| t.as_ref().to_vec())
+        .collect();
+    (d.template_id, d.excess_data.as_ref().to_vec(), txs)
+}
+
+fn sv2_tx_data_error(mut f: rbitcoin_sv2::Frame) -> (u64, String) {
+    use template_distribution_sv2::{
+        RequestTransactionDataError, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR,
+    };
+    assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR);
+    let e: RequestTransactionDataError = binary_sv2::from_bytes(&mut f.payload).unwrap();
+    (e.template_id, e.error_code.as_utf8_or_hex())
+}
+
+/// An SV2 client on a node whose chain is stale: no template until a fresh
+/// tip ends IBD, then the pair on the RPC tip, then a non-future template
+/// carrying a transaction sent over RPC.
+#[tokio::test(flavor = "multi_thread")]
+async fn sv2_tp_bootstrap() {
+    use template_distribution_sv2::{SetNewPrevHash, MESSAGE_TYPE_SET_NEW_PREV_HASH};
+
+    let td = TestDatadir::new().unwrap();
+    let params = ChainParams::regtest();
+    let coinbase = {
+        let q = Query::open_or_create_tiny(td.store_path()).unwrap();
+        let chain = build_mature_regtest_with_spend(&q, &params);
+        q.flush().unwrap();
+        chain.blocks[2].txdata[0].compute_txid()
+    };
+
+    let rpc_addr = ephemeral_addr();
+    let sv2_addr = ephemeral_addr();
+    let mut cfg = NodeConfig::default()
+        .with_datadir(td.path())
+        .with_network(Network::Regtest)
+        .with_tiny_heads()
+        .with_p2p_listen("127.0.0.1:0".parse().unwrap());
+    cfg.listen.use_seeds = false;
+    cfg.listen.connect.clear();
+    cfg.rpc.listen = Some(rpc_addr);
+    cfg.sv2_tp_listen = Some(sv2_addr);
+    cfg.sv2_tp_authority_sec = Some(Sv2AuthoritySecret(SV2_AUTHORITY_SEC));
+    cfg.sv2_tp_stale_grace_secs = 1;
+    std::fs::write(td.path().join("rpc.token"), "pass").unwrap();
+    cfg.max_run_secs = Some(60);
+    let node = tokio::spawn(run_p2p(cfg));
+    wait_listeners(&[rpc_addr, sv2_addr]).await;
+
+    let secp = bitcoin::secp256k1::Secp256k1::new();
+    let authority = bitcoin::secp256k1::Keypair::from_seckey_slice(&secp, &SV2_AUTHORITY_SEC)
+        .unwrap()
+        .x_only_public_key()
+        .0
+        .serialize();
+    let mut c = rbitcoin_sv2::testutil::TpClient::connect(sv2_addr, authority)
+        .await
+        .expect("sv2 handshake");
+    c.setup_connection(2, 2, 2, 0).await.unwrap();
+    sv2_recv(&mut c).await;
+    c.coinbase_output_constraints(0, 0).await.unwrap();
+
+    // One recv future across the gate: dropping it mid-frame breaks Noise.
+    let first = {
+        let recv = c.recv();
+        tokio::pin!(recv);
+        let held = tokio::time::timeout(Duration::from_millis(500), &mut recv).await;
+        assert!(held.is_err(), "no template while the stale tip keeps IBD");
+        let mined = jsonrpc(rpc_addr, "generateblock", json!(["raw(51)", []])).await;
+        assert!(mined["result"]["hash"].is_string(), "{mined}");
+        tokio::time::timeout(Duration::from_secs(10), recv)
+            .await
+            .expect("template after the fresh tip")
+            .expect("sv2 message")
+    };
+    let t = sv2_template(first);
+    assert!(t.future_template, "first template on a prev hash is future");
+    assert!(t.merkle_path.is_empty(), "empty mempool");
+    let mut f = sv2_recv(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_SET_NEW_PREV_HASH);
+    let p: SetNewPrevHash = binary_sv2::from_bytes(&mut f.payload).unwrap();
+    assert_eq!(p.template_id, t.template_id);
+    let best = jsonrpc(rpc_addr, "getbestblockhash", json!([])).await;
+    let best = bitcoin::BlockHash::from_str(best["result"].as_str().unwrap()).unwrap();
+    assert_eq!(p.prev_hash.as_ref(), best.to_byte_array());
+    let gbt = jsonrpc(rpc_addr, "getblocktemplate", json!([{"rules": ["segwit"]}])).await;
+    let bits = u32::from_str_radix(gbt["result"]["bits"].as_str().unwrap(), 16).unwrap();
+    assert_eq!(p.n_bits, bits, "{gbt}");
+
+    let fee = 10_000;
+    let tx = acs_spend(
+        coinbase,
+        50_0000_0000,
+        fee,
+        ScriptBuf::from_bytes(vec![0x51]),
+    );
+    let sent = jsonrpc(rpc_addr, "sendrawtransaction", json!([encode_tx(&tx)])).await;
+    assert_eq!(sent["result"], tx.compute_txid().to_string(), "{sent}");
+    // An identical resend does not rebuild; a changed budget does.
+    c.coinbase_output_constraints(0, 1).await.unwrap();
+    let t2 = sv2_template(sv2_recv(&mut c).await);
+    assert!(!t2.future_template, "same prev hash: no new SetNewPrevHash");
+    assert!(t2.template_id > t.template_id);
+    assert_eq!(t2.value_remaining, t.value_remaining + fee);
+    assert_eq!(t2.merkle_path, [tx.compute_txid().to_byte_array()]);
+
+    // Served from the session's retained template, witness-serialized.
+    c.request_transaction_data(t2.template_id).await.unwrap();
+    let (id, excess, txs) = sv2_tx_data(sv2_recv(&mut c).await);
+    assert_eq!(id, t2.template_id);
+    assert!(excess.is_empty());
+    assert_eq!(txs, [bitcoin::consensus::encode::serialize(&tx)]);
+    c.request_transaction_data(t.template_id).await.unwrap();
+    assert_eq!(sv2_tx_data(sv2_recv(&mut c).await).2.len(), 0);
+    c.request_transaction_data(t2.template_id + 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        sv2_tx_data_error(sv2_recv(&mut c).await),
+        (t2.template_id + 100, "template-id-not-found".to_string())
+    );
+    // Three templates retained per session: the oldest is now stale.
+    let mut last = t2.template_id;
+    for sigops in 2..4 {
+        c.coinbase_output_constraints(0, sigops).await.unwrap();
+        last = sv2_template(sv2_recv(&mut c).await).template_id;
+    }
+    c.request_transaction_data(t.template_id).await.unwrap();
+    assert_eq!(
+        sv2_tx_data_error(sv2_recv(&mut c).await),
+        (t.template_id, "stale-template-id".to_string())
+    );
+    c.request_transaction_data(t2.template_id).await.unwrap();
+    assert_eq!(sv2_tx_data(sv2_recv(&mut c).await).2.len(), 1);
+
+    // A new tip is pushed unasked; the old tip's template lives for the grace.
+    let mined = jsonrpc(rpc_addr, "generateblock", json!(["raw(51)", []])).await;
+    let mined = bitcoin::BlockHash::from_str(mined["result"]["hash"].as_str().unwrap()).unwrap();
+    let pushed = sv2_template(sv2_recv(&mut c).await);
+    assert!(pushed.future_template, "tip push is a future template");
+    assert!(pushed.template_id > last);
+    let mut f = sv2_recv(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_SET_NEW_PREV_HASH);
+    let p: SetNewPrevHash = binary_sv2::from_bytes(&mut f.payload).unwrap();
+    assert_eq!(p.template_id, pushed.template_id);
+    assert_eq!(p.prev_hash.as_ref(), mined.to_byte_array());
+    c.request_transaction_data(last).await.unwrap();
+    assert_eq!(
+        sv2_tx_data(sv2_recv(&mut c).await).0,
+        last,
+        "within the grace"
+    );
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    c.request_transaction_data(last).await.unwrap();
+    assert_eq!(
+        sv2_tx_data_error(sv2_recv(&mut c).await),
+        (last, "stale-template-id".to_string())
+    );
+    c.request_transaction_data(pushed.template_id)
+        .await
+        .unwrap();
+    assert_eq!(sv2_tx_data(sv2_recv(&mut c).await).0, pushed.template_id);
+
+    // A solution the TP cannot decode is dropped; the session keeps serving.
+    c.submit_solution(
+        pushed.template_id,
+        pushed.version,
+        p.header_timestamp,
+        0,
+        &[0xff; 8],
+    )
+    .await
+    .unwrap();
+    c.request_transaction_data(pushed.template_id)
+        .await
+        .unwrap();
+    assert_eq!(sv2_tx_data(sv2_recv(&mut c).await).2.len(), 1);
+    let best = jsonrpc(rpc_addr, "getbestblockhash", json!([])).await;
+    assert_eq!(best["result"], mined.to_string());
+
+    // Grind the pushed template (it carries the RPC tx) and submit it.
+    let coinbase = sv2_coinbase(&pushed);
+    let root =
+        pushed
+            .merkle_path
+            .iter()
+            .fold(coinbase.compute_txid().to_byte_array(), |acc, sibling| {
+                let mut buf = [0u8; 64];
+                buf[..32].copy_from_slice(&acc);
+                buf[32..].copy_from_slice(sibling);
+                bitcoin::hashes::sha256d::Hash::hash(&buf).to_byte_array()
+            });
+    let mut header = bitcoin::block::Header {
+        version: bitcoin::block::Version::from_consensus(pushed.version as i32),
+        prev_blockhash: mined,
+        merkle_root: bitcoin::TxMerkleNode::from_byte_array(root),
+        time: p.header_timestamp,
+        bits: bitcoin::CompactTarget::from_consensus(p.n_bits),
+        nonce: 0,
+    };
+    while header.validate_pow(header.target()).is_err() {
+        header.nonce += 1;
+    }
+    c.submit_solution(
+        pushed.template_id,
+        pushed.version,
+        header.time,
+        header.nonce,
+        &bitcoin::consensus::encode::serialize(&coinbase),
+    )
+    .await
+    .unwrap();
+    let solved = header.block_hash();
+    let next = sv2_template(sv2_recv(&mut c).await);
+    assert!(next.future_template);
+    let mut f = sv2_recv(&mut c).await;
+    let p: SetNewPrevHash = binary_sv2::from_bytes(&mut f.payload).unwrap();
+    assert_eq!(
+        p.prev_hash.as_ref(),
+        solved.to_byte_array(),
+        "solved block is the tip"
+    );
+    let best = jsonrpc(rpc_addr, "getbestblockhash", json!([])).await;
+    assert_eq!(best["result"], solved.to_string());
+    let block = jsonrpc(rpc_addr, "getblock", json!([solved.to_string(), 1])).await;
+    assert_eq!(
+        block["result"]["tx"],
+        json!([
+            coinbase.compute_txid().to_string(),
+            tx.compute_txid().to_string()
+        ])
+    );
+
+    let _ = jsonrpc(rpc_addr, "stop", json!([])).await;
+    let stopped = tokio::time::timeout(Duration::from_secs(15), node).await;
+    assert!(
+        matches!(stopped, Ok(Ok(Ok(())))),
+        "run_p2p did not stop cleanly"
+    );
 }

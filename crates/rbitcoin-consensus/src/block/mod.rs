@@ -281,7 +281,7 @@ fn coinbase_has_witness_commitment(block: &Block) -> bool {
 }
 
 /// Last BIP141 `OP_RETURN` witness commitment (exact 38-byte `6a24aa21a9ed` prefix).
-pub(crate) fn witness_commitment_vout_index(coinbase: &Transaction) -> Option<usize> {
+pub fn witness_commitment_vout_index(coinbase: &Transaction) -> Option<usize> {
     const MAGIC: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
     coinbase
         .output

@@ -9,7 +9,7 @@ previous slice is committed.
 | Plan | Outcome | Ships flags |
 |------|---------|-------------|
 | **A** | Landed. GBT and `generate` build from `MempoolHub::select_block_template` | none |
-| **B** | A Job Declarator Client mines a block through the node's TP | `--sv2-tp-listen`, `--sv2-tp-authority-sec`, `--sv2-tp-cert-validity`, `--sv2-tp-stale-grace` |
+| **B** | A Job Declarator Client mines a block through the node's TP | `--sv2-tp-listen`, `--sv2-tp-authority-sec` / `--sv2-tp-authority-sec-file`, `--sv2-tp-cert-validity`, `--sv2-tp-stale-grace` |
 | **C** | Templates refresh on fee gain with the tip unchanged | `--sv2-tp-fee-delta`, `--sv2-tp-template-interval` |
 
 B is not split further: a listener that serves templates without
@@ -68,8 +68,8 @@ three unused subprotocol crates) if it adds nothing.
 ## Constraints (all plans)
 
 - New crate `crates/rbitcoin-sv2` (Plan B), service pattern of
-  electrum/esplora: depends on `rbitcoin-query` / `rbitcoin-net` /
-  `rbitcoin-mempool` / `rbitcoin-consensus`; wired in `rbitcoin-node`
+  electrum/esplora: depends on `rbitcoin-net` (`ChainHub`, `MempoolHub`) /
+  `rbitcoin-consensus` / `rbitcoin-store` (merkle); wired in `rbitcoin-node`
   `run.rs` behind flags. Nothing starts without `--sv2-tp-listen`.
 - `binary_sv2` byte-buffer types and `noise_sv2`'s `secp256k1` 0.28 stay
   inside `rbitcoin-sv2`; consensus decode uses the workspace
@@ -86,6 +86,26 @@ three unused subprotocol crates) if it adds nothing.
 - Session cap (always on): the listener accepts at most 8 concurrent
   sessions and closes the next one after accept, like Electrum's
   `max_connections` semaphore. Per-IP metering stays out of scope.
+- Setup deadline: a session holds its slot from TCP accept, so the Noise
+  handshake, `SetupConnection`, and the first `CoinbaseOutputConstraints`
+  must all arrive within 10 s (`SETUP_TIMEOUT`) or the socket is closed.
+  The client sends constraints right after setup (sv2-spec 07); without
+  them the session never gets a template, never writes, and the write
+  deadline cannot free the slot. Other frames before the first constraints
+  are handled but do not extend the deadline. There is no read deadline
+  after that: TDP has no keepalive and a client may stay silent while the
+  TP pushes.
+- Write deadline: a socket write that makes no progress for 30 s
+  (`WRITE_TIMEOUT`) closes the session, so a client that stops reading
+  cannot stall it. The deadline is per write call, not per frame, so a
+  slow reader still receives a multi-MB `RequestTransactionData.Success`.
+- Client frame cap: a client→TP payload over `MAX_CLIENT_PAYLOAD`
+  (65557 bytes: `SubmitSolution`'s 20 fixed bytes plus a full `B064K`
+  coinbase, the largest TDP client message) closes the session. codec_sv2
+  keeps the decrypted header length private and reads a frame one chunk at
+  a time, so the reader counts encrypted bytes per frame and closes before
+  reading the chunk that would pass the cap. A session buffers at most
+  ~64 KiB of client frame instead of the ~16 MB the 24-bit length allows.
 - Per-session budget: weight `MAX_BLOCK_WEIGHT − max(1168 +
   4·coinbase_output_max_additional_size, 2000)` WU (sv2-spec 07 §7.1);
   sigops start at `coinbase_output_max_additional_sigops` (Core
@@ -102,17 +122,30 @@ three unused subprotocol crates) if it adds nothing.
   subsidy + Σ fees; `coinbase_tx_outputs` is the raw concatenation (no
   CompactSize prefix) with the witness-commitment OP_RETURN **last**, from
   `rbitcoin_consensus::witness_commitment_script` (already the one owner,
-  used by GBT) with a 32-byte zero reserved value.
+  used by GBT) with a 32-byte zero reserved value. A `SubmitSolution`
+  coinbase with an empty input witness and a witness-commitment output
+  gets that reserved value filled in before assembly (the txid, and so
+  the merkle root, does not cover it); a coinbase without a commitment
+  or with a non-empty witness is submitted as sent.
 - `SetNewPrevHash.target` == nBits target here (no weak blocks).
 - No templates before sync: same refusal gate as `getblocktemplate` during
   IBD.
 - `SubmitSolution` has no error message in TDP: undecodable or
-  unknown-template solutions are logged and dropped; decodable ones are
-  always attempted through `ChainHub::accept_block` (the TP MUST try to
+  unknown-template solutions are logged and dropped; decodable ones that
+  meet the target are always attempted through `ChainHub::accept_block` (the TP MUST try to
   broadcast work on its templates).
-- `SubmitSolution.header_timestamp` pre-check: ≥ the sent
-  `SetNewPrevHash.header_timestamp` and ≤ that plus wall-clock elapsed
-  (sv2-spec 07 §7.7).
+- `SubmitSolution.header_timestamp` window (sv2-spec 07 §7.7: ≥ the sent
+  `SetNewPrevHash.header_timestamp` and ≤ that plus wall-clock elapsed) is
+  logged, not enforced. A miner clock a few seconds fast still finds a
+  consensus-valid block, and `accept_block` applies the consensus bounds
+  (> MTP, < now + 2 h); dropping it would lose a real block.
+- `SubmitSolution` PoW pre-check: the session folds the coinbase txid over
+  the retained template's `merkle_path` (coinbase is leaf 0, always the
+  left child), builds the header, and drops the solution unless it meets
+  the template's `n_bits` target. Only then does it clone the template's
+  txs and call `ChainHub::accept_block`, so a spam of cheap bad-nonce
+  solutions never takes `connect_lock`, the compact-block prefill slot, or
+  the mempool.
 - OPERATOR / COMPAT / NixOS options land in the plan that ships the flag
   (same PR).
 
@@ -181,64 +214,110 @@ Ships the listener, bootstrap, tip push, transaction data, and
   in-crate test initiator; success, bad-flags, bad-protocol, and
   (cap + 1)th-connection cases.
 - **Green:** `crates/rbitcoin-sv2` (workspace member) with the wire crates
-  pinned to the Step 0 set; authority-keypair config, listener task,
+  pinned to the Step 0 set minus `parsers_sv2` (known TDP / common types
+  decode with `binary_sv2::from_bytes`); authority-keypair config, listener task,
   per-connection session task driving the `codec_sv2` handshake then the
   common-message branch; session-cap semaphore on accept. Add the
   `rbitcoin-sv2` row to [`CRATES.md`](./CRATES.md) in this commit
   ([`README.md`](./README.md) rule: row with the new file).
-- **Refactor:** session state as an enum (`Handshake`,
-  `AwaitingConstraints`, `Active`), not nested ifs.
+- **Refactor:** session state as an enum (`AwaitingSetup`,
+  `AwaitingConstraints`, later `Active`), not nested ifs. The Noise
+  handshake is a typed prologue (`codec_sv2::Handshake` consumes its
+  state), not a phase.
 - **Verify:** `cargo test -p rbitcoin-sv2 setup_`
 
-### B2 — Merkle path helper in consensus
+### B2 — Merkle path helper next to the root
 
-- **Contract:** `coinbase_merkle_path(txids)` returns the leftmost-branch
-  hashes deepest-first; folding them with the coinbase txid reproduces
-  `merkle_root_bytes` for the same list. Edge cases: single tx (empty
-  path), odd counts at every level.
-- **Red:** `cargo test -p rbitcoin-consensus merkle_path_` — small known
-  vectors.
-- **Green:** helper next to `merkle_root_bytes`
-  (`crates/rbitcoin-consensus/src/block/mod.rs`).
-- **Refactor:** share the level-pairing loop with the root computation if
-  it dedupes without obscuring.
-- **Verify:** `cargo test -p rbitcoin-consensus merkle_path_`
+- **Contract:** `merkle_branch(leaves, index)` returns the sibling hashes
+  from `leaves[index]` to the root, deepest-first; folding them with the
+  leaf reproduces `merkle_root_from_txids` for the same list. The coinbase
+  path is `index = 0` (the leaf's own value feeds no entry, so the builder
+  passes a placeholder). Edge cases: single tx (empty path), odd counts at
+  every level.
+- **Red:** `cargo test -p rbitcoin-store --lib merkle_path_` — small known
+  vectors plus a fold at every index for 1..=9 leaves (pure arithmetic, no
+  session reaches it before B3).
+- **Green:** helper next to `merkle_root_from_txids`
+  (`crates/rbitcoin-store/src/integrity.rs`). The root's owner is the store
+  (consensus `merkle_root_bytes` only wraps it), and
+  `rbitcoin-query` `merkle_proof` (Electrum `get_merkle`, Esplora
+  `merkle-proof`) had its own inline branch loop; one owner for both.
+- **Refactor:** root and branch share one level-pairing step;
+  `Query::merkle_proof` calls `merkle_branch`.
+- **Verify:** `cargo test -p rbitcoin-store --lib merkle_`, Electrum /
+  Esplora merkle journeys
 
-### B3 — Template builder with TDP coinbase
+### B3 — Template builder, NewTemplate on constraints
 
-- **Contract:** `build(hub, tip, constraints) -> TemplateRecord` calls
+- **Contract:** after setup, `CoinbaseOutputConstraints` makes the session
+  build in a blocking region and send `NewTemplate{future_template: true}`
+  with a strictly increasing `template_id`; a changed constraints message
+  rebuilds with the new budget. A resend identical to the last budget,
+  once a template on the current prev hash was sent, is a no-op: it
+  does not take the mempool lock or send a template (tip events still
+  rebuild; mempool gains on an unchanged tip are Plan C). A changed
+  budget within 1 s of the session's last template is deferred to the end
+  of that second and built once on the latest budget, so a client cycling
+  budgets gets at most one constraints-triggered build per second. More
+  than 8 budgets that each replace a still-queued one before it is built
+  close the session: a real client changes its budget minutes apart, and
+  the slot goes back to one. A client pacing one budget per cooldown is
+  only made to wait. The build calls
   `MempoolHub::select_block_template` with the per-session budget
   ([Constraints](#constraints-all-plans)); `coinbase_prefix` is the BIP34
   height push; `value_remaining` = subsidy + Σ selected fees (from the
   selection, not a re-read); outputs = witness commitment last;
-  `merkle_path` from B2; the record carries the serialized non-coinbase
-  txs in selection order.
-- **Red:** `cargo test -p rbitcoin-sv2 template_` — synthetic mempool
-  (reuse `rbitcoin-mempool` accept fixtures): weight bound at the reserved
-  edge, sigops at a large `max_additional_sigops`, fee sum, prefix bytes,
-  commitment, tx order.
-- **Green:** builder module in `rbitcoin-sv2`; subsidy/params from
-  `rbitcoin-consensus`.
+  `merkle_path` from B2's `merkle_branch` over the selection order.
+- **Red:** `cargo test -p rbitcoin-sv2 template_` — loopback test client
+  against a padded regtest `ChainHub` with an attached `MempoolHub`
+  (Libre policy admits a high-sigop output script): weight bound at the
+  reserved edge, sigops at a large `max_additional_sigops`, fee sum,
+  prefix bytes, commitment, tx order via the merkle fold.
+- **Green:** builder module in `rbitcoin-sv2`; subsidy from
+  `rbitcoin-consensus`, version and min fee from `ChainHub`. The listener
+  config carries the `ChainHub`. Sending in this step keeps the builder
+  reachable from the shipped path (no test-only caller); tx retention
+  lands with its first reader in B5.
 - **Refactor:** none expected (commitment and selection already have one
   owner).
 - **Verify:** `cargo test -p rbitcoin-sv2 template_`
 
-### B4 — Node wiring + bootstrap flow
+### B4a — SetNewPrevHash + sync gate
 
-- **Contract:** with `--sv2-tp-listen` set, the node serves the listener; a
-  client completing setup and sending `CoinbaseOutputConstraints`
-  immediately receives `NewTemplate{future_template: true}` then
-  `SetNewPrevHash` with the same `template_id`, the current tip as
-  `prev_hash`, and matching nBits/target. While the GBT sync gate says
-  not-synced, the session holds the constraints and sends the first
-  template when the gate clears.
+- **Contract:** the first template on a prev hash is
+  `NewTemplate{future_template: true}` followed by `SetNewPrevHash` with
+  the same `template_id`, the tip as `prev_hash`, `header_timestamp` ≥
+  MTP + 1, and the next nBits with its target. A later template on the
+  same prev hash (changed constraints) is `future_template: false` with no
+  `SetNewPrevHash`. While `ChainHub::in_ibd()` (relay-inhibited: stale tip
+  or below min chain work), the session holds the constraints and builds
+  when a tip event clears it. `getblocktemplate` has no sync gate in this
+  node, so the TP gate is the relay gate; leaving IBD always comes with a
+  new tip.
+- **Red:** `cargo test -p rbitcoin-sv2 --lib` — the B3 template test gains
+  the `SetNewPrevHash` pair and the `future_template: false` rebuilds;
+  `sync_gate_` holds on a stale padded chain and serves after a fresh block
+  is accepted through `ChainHub`.
+- **Green:** tip read once per build (height, header, MTP, bits);
+  per-session current prev hash; gate loop on `subscribe_tips()` in the
+  session.
+- **Refactor:** none expected.
+- **Verify:** `cargo test -p rbitcoin-sv2 --lib`
+
+### B4b — Node wiring + bootstrap journey
+
+- **Contract:** with `--sv2-tp-listen` set, the node serves the listener
+  (`--sv2-tp-authority-sec` required with it, `--sv2-tp-cert-validity`
+  optional); a client completing setup and sending
+  `CoinbaseOutputConstraints` receives the B4a pair against the node tip
+  and mempool once the node leaves IBD.
 - **Red:** `cargo test -p rbitcoin-test sv2_tp_bootstrap` — one regtest
-  node, full handshake → setup → constraints; assert NewTemplate fields
-  against the node tip and mempool, and SetNewPrevHash consistency. Gate
-  predicate unit in `rbitcoin-sv2`.
-- **Green:** `run.rs` service start behind `--sv2-tp-listen` /
-  `--sv2-tp-authority-sec` / `--sv2-tp-cert-validity`; session loop calls
-  the builder on first constraints; per-session template map.
+  node on a padded (stale) chain: handshake → setup → constraints, no
+  template while in IBD, `generateblock` clears the gate, then assert the
+  pair against RPC (`getbestblockhash`, `getblocktemplate` bits) and a
+  mempool tx sent over RPC; config parse units under `sv2_tp_`.
+- **Green:** `run.rs` service start behind the three flags; handle shut
+  down with the other services.
 - **Refactor:** flag plumbing follows the `esplora_block_template` config
   pattern.
 - **Verify:** `cargo test -p rbitcoin-test sv2_tp_bootstrap`,
@@ -248,12 +327,15 @@ Ships the listener, bootstrap, tip push, transaction data, and
 
 - **Contract:** a live `template_id` →
   `RequestTransactionData.Success{template_id, excess_data: "",
-  transaction_list}` with the witness-serialized txs in template order;
-  unknown id → `RequestTransactionData.Error{error_code:
-  "template-id-not-found"}`.
-- **Red:** extend the B4 journey: request the served template's data,
-  assert count/order/bytes against the mempool txs; unknown-id error.
-- **Green:** session cache read path.
+  transaction_list}` with the witness-serialized txs in template order.
+  A session retains its last 3 templates; an id it was sent but dropped →
+  `RequestTransactionData.Error{error_code: "stale-template-id"}`, an id
+  never sent → `"template-id-not-found"`.
+- **Red:** extend the B4b journey: request the served template's data,
+  assert count/order/bytes against the mempool txs; unknown-id and
+  dropped-id errors.
+- **Green:** per-session template map retaining the witness-serialized
+  txs (the named RAM trade), and its read path.
 - **Refactor:** none expected.
 - **Verify:** same journey filter.
 
@@ -265,15 +347,47 @@ Ships the listener, bootstrap, tip push, transaction data, and
   During `--sv2-tp-stale-grace` the old template still answers
   `RequestTransactionData`; after the grace it answers
   `"stale-template-id"`. Future templates for the old prev hash retire the
-  same way.
+  same way. `--sv2-tp-stale-grace` is at most 86400 s
+  (`MAX_STALE_GRACE`) and `--sv2-tp-cert-validity` at most `u32::MAX` s
+  (the Noise cert field); config parse and `run_sv2_tp` both refuse
+  larger values. `ChainHub::connect_at` moves the store tip before it strips the
+  block's txs from the mempool and sends the tip event, so a build in that
+  window (constraints, or the previous event's rebuild on back-to-back
+  blocks) can land on the new prev hash with confirmed txs. A failed
+  reorg's rollback reconnects the same hash the same way. The session
+  flags every build and each tip event clears the flag: an event for the
+  current prev hash rebuilds iff a template was built since the last
+  event, sent as `future_template: false` with no `SetNewPrevHash`. A
+  repeat event with no build between is skipped.
+  Future consideration: stripping the mempool before publishing the store
+  tip, or publishing both atomically, would close the window for every
+  template consumer, and `built_since_tip` could then go. GBT
+  (`getblocktemplate`) and Esplora `GET /block-template` read the store tip
+  and then select from the mempool with no tie to `connect_lock`, so a call
+  in the window has the same stale selection. The change reorders the store
+  publish against the mempool on the tip-accept hot path and needs `ibd:
+  perf` timers. Admission is not serialized with connect: `accept_tx` takes
+  neither `connect_lock` nor the tip-accept thread. It prepares against the
+  store tip under the mempool read lock and commits under the write lock
+  without re-reading the tip. A tx prepared against the old tip in the gap
+  between strip and publish could then re-admit a confirmed tx unless
+  admission is serialized with connect.
 - **Red:** journey: generate a block via the harness RPC, assert the push
   pair arrives without client polling; stale-id behavior before and after
   the grace (the harness sets it small).
 - **Green:** `ChainHub::subscribe_tips()` consumer; rebuild per session
   with its constraints; retire on the grace timer.
 - **Refactor:** one "publish template" path shared by bootstrap and tip
-  (Plan C adds the fee trigger to it).
-- **Verify:** journey filter; `cargo test -p rbitcoin-sv2 tip_`
+  (Plan C adds the fee trigger to it). The session selects over client
+  frames, tip events, and the grace deadline; frames come from a reader
+  task because a Noise `recv` is not cancel-safe.
+- **Verify:** journey filter; `cargo test -p rbitcoin-sv2 --lib` (the sync
+  gate unit now clears on the tip event; the
+  `tip_event_rebuilds_a_template_built_on_its_prev_hash` journey writes a
+  two-block batch through `confirm_write`, so the rebuild for the first
+  event already sits on the second block's hash; the
+  `tip_event_rebuilds_a_template_built_before_it` unit pins the rollback
+  reconnect, which no session hits deterministically)
 
 ### B7 — SubmitSolution → accept_block
 
@@ -282,29 +396,78 @@ Ships the listener, bootstrap, tip push, transaction data, and
   coinbase_tx}` (full witness coinbase); the node assembles header (prev +
   recomputed merkle + message fields) + coinbase + retained txs and runs
   `ChainHub::accept_block`; the tip advances. Unknown/stale template or
-  undecodable coinbase → log and drop. Timestamp-window pre-check per
-  [Constraints](#constraints-all-plans).
+  undecodable coinbase → log and drop. An out-of-window timestamp is
+  logged and still submitted per [Constraints](#constraints-all-plans).
 - **Red:** journey: grind a regtest nonce on the served template, submit,
   assert the new tip hash; a garbage-coinbase submission leaves tip and
   session healthy.
 - **Green:** assembly + pre-checks in a blocking region; accept via
   ChainHub.
-- **Refactor:** solution assembly shares the B2 merkle fold.
+- **Refactor:** assembly folds the coinbase txid (leaf 0) over the
+  retained template's `merkle_path` with the store's
+  `merkle_root_from_branch` (the inverse of the B2 `merkle_branch`
+  helper), so a bad-PoW solution is dropped before the full txid list is
+  hashed; `accept_block` still checks the root.
 - **Verify:** journey filter.
 
-### B8 — Operator surface
+### B8a — Authority secret from a file
+
+- **Contract:** `--sv2-tp-authority-sec-file PATH` (conf
+  `sv2_tp_authority_sec_file`) reads the same secret from a file at
+  parse time. A hex value in argv shows in `ps` and in a NixOS unit in the
+  world-readable store; the file keeps it out of both. Errors name the knob
+  and never echo the key.
+- **Red:** node lib test: a key file sets the secret; a bad key and a
+  missing file fail without echoing it.
+- **Green:** the key shares the hex + `SecretKey` check with
+  `sv2_tp_authority_sec`.
+- **Verify:** `cargo test -p rbitcoin-node --lib sv2_tp`
+
+### B8b — Operator surface
 
 - **Contract:** [`OPERATOR.md`](../OPERATOR.md) documents
-  `--sv2-tp-listen`, `--sv2-tp-authority-sec`, `--sv2-tp-cert-validity`,
+  `--sv2-tp-listen`, `--sv2-tp-authority-sec`,
+  `--sv2-tp-authority-sec-file`, `--sv2-tp-cert-validity`,
   `--sv2-tp-stale-grace`. [`COMPAT.md`](../COMPAT.md) gains the SV2 TDP
   row (the "no stratum" row stays; that row is v1 stratum/pool).
   First-class `services.rbitcoin.sv2.tp.*` options in
   [`nix/modules/rbitcoin.nix`](../nix/modules/rbitcoin.nix) with argv
-  asserts in `nixos-module-eval.nix`.
+  asserts in `nixos-module-eval.nix`. The module takes only
+  `authoritySecretFile` (a runtime path), never the hex.
 - **Red:** eval assert for the flags; docs need no test.
 - **Green:** options + docs.
 - **Refactor:** `extraArgs` still appends last.
 - **Verify:** `nix build .#checks.x86_64-linux.nixos-module-eval --no-link`
+
+### B8c — Authority key in `key-utils` form
+
+- **Contract:** the startup log prints the authority public key as SRI
+  `key-utils` `Secp256k1PublicKey` (base58check of version `1u16` LE plus
+  the x-only key), the form SRI clients take. Hex is not accepted there.
+- **Red:** `listener_tests.rs` `authority_key_prints_in_key_utils_base58check`
+  pins the key-utils 1.2.0 vector and connects with the decoded key.
+- **Green:** `Sv2TpHandle::authority_key()`; `run.rs` logs it.
+
+### B8d — Authority secret in `key-utils` form
+
+- **Contract:** `--sv2-tp-authority-sec` and the file also take SRI
+  `key-utils` `Secp256k1SecretKey` (base58check of the raw 32 bytes), so a
+  key generated for an SRI deployment works as is. 64 hex still parses.
+- **Red:** node lib `sv2_tp_authority_sec_takes_key_utils_base58check`: the
+  key-utils vector secret, inline and from a file, yields the vector pubkey;
+  a bad checksum names the knob without echoing the key.
+- **Green:** `parse_authority_sec` falls back to base58check.
+
+### B8e — Authority secret never prints
+
+- **Contract:** `NodeConfig` `Debug` masks the authority secret, and a
+  `sv2_tp_authority_sec_file` read error names the knob and the IO error
+  without the path: an operator who passes the key to the file knob must
+  not see it logged.
+- **Red:** node lib `sv2_tp_authority_secret_never_prints`: the config
+  `Debug` and the error for the hex key given as a path hold no key bytes.
+- **Green:** `Sv2AuthoritySecret` newtype with a masking `Debug` (the
+  `TorControlOpts` password precedent); the file error drops the path.
 
 ---
 
@@ -335,15 +498,40 @@ when fees rise enough to matter, throttled. Requires Plan B.
 - **Contract:** OPERATOR documents `--sv2-tp-fee-delta` and
   `--sv2-tp-template-interval`; `services.rbitcoin.sv2.tp.*` gains both
   with argv asserts.
-- **Red / Green / Refactor / Verify:** as B8.
+- **Red / Green / Refactor / Verify:** as B8b.
+
+### C3 — Min-difficulty boundary re-push
+
+- **Problem:** on min-difficulty networks (testnet3, testnet4) the build
+  fixes `n_bits` from `header_timestamp` (`expected_next_bits`). A
+  template built before prev + 20 min carries the walked-back difficulty;
+  a miner that rolls `ntime` past prev + 20 min produces a header whose
+  expected bits are the pow limit, and validation rejects it as incorrect
+  proof-of-work bits (Core `bad-diffbits`). Nothing re-pushes a template
+  when prev + 20 min passes: the session rebuilds only on a tip event or a
+  constraints change.
+- **Contract:** on networks that allow min-difficulty blocks, the session
+  arms its own deadline at prev + 2 × target spacing + 1 s (a
+  `sleep_until` arm in the session select loop, beside `retire_at` and
+  `rebuild_at`). The `+ 1` is required: `expected_next_bits` selects the
+  pow limit only when `header_time` is strictly greater than
+  prev + 2 × spacing, and the build stamps `header_timestamp` from the
+  clock, so a rebuild at exactly the boundary would keep the walked-back
+  bits and nothing would re-arm. When
+  it fires with the tip unchanged, the session rebuilds and sends
+  `NewTemplate{future_template: false}` carrying the pow-limit `n_bits`,
+  with no `SetNewPrevHash`. The deadline does not depend on C1: C1 fires
+  only when `MempoolHub::template_updates` advances, and
+  `--sv2-tp-template-interval` only throttles that push, so a quiet
+  mempool would never reach the boundary through C1.
 
 ---
 
 ## Test budget
 
-Units in `rbitcoin-mempool` (budgeted selection), `rbitcoin-consensus`
+Units in `rbitcoin-mempool` (budgeted selection), `rbitcoin-store`
 (merkle path), and `rbitcoin-sv2` (builder, throttle, gate). **One**
-regtest integration journey in `rbitcoin-test`, opened in B4 and extended
+regtest integration journey in `rbitcoin-test`, opened in B4b and extended
 by B5–B7 and C1 — one node open, per [`TESTING.md`](../TESTING.md) budgets.
 No live pool/JDC, no mainnet datadir, no plaintext mode.
 
@@ -361,5 +549,10 @@ No live pool/JDC, no mainnet datadir, no plaintext mode.
 - Authority-cert rotation: certs are short-lived
   (`--sv2-tp-cert-validity`); rotation is restart-with-new-cert in
   OPERATOR. Hot rotation is a follow-up.
+- Pre-existing, outside this plan: consensus does not enforce the BIP94
+  timewarp floor (testnet4). The first block of a retarget period may carry
+  a timestamp more than 600 s before its parent. Core rejects it
+  (`time-timewarp-attack`); when consensus gains the rule, the template
+  timestamp floor must include it.
 - After ship: JD-server mode, weak blocks, extension negotiation, per-IP
   connection limits → quality.md rows, not this roadmap.

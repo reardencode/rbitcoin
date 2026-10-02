@@ -1,0 +1,28 @@
+[package]
+name = "rbitcoin-sv2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Stratum v2 Template Distribution Protocol server (Noise over TCP)"
+
+[dependencies]
+rbitcoin-log = { workspace = true }
+rbitcoin-consensus = { workspace = true }
+rbitcoin-net = { workspace = true }
+rbitcoin-primitives = { workspace = true }
+rbitcoin-store = { workspace = true }
+bitcoin = { workspace = true }
+tokio = { workspace = true }
+noise_sv2 = { workspace = true }
+codec_sv2 = { workspace = true }
+binary_sv2 = { workspace = true }
+common_messages_sv2 = { workspace = true }
+template_distribution_sv2 = { workspace = true }
+
+[dev-dependencies]
+rbitcoin-query = { workspace = true }
+
+[lints]
+workspace = true

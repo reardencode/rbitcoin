@@ -66,7 +66,7 @@ pub use peers::{
 };
 pub use perf_meter::RequestMeter;
 pub(crate) use rbitcoin_mempool::MempoolGraphStats;
-pub use rbitcoin_mempool::{AcceptError, Selected};
+pub use rbitcoin_mempool::{AcceptError, SelectBudget, Selected};
 pub use reactor::BlockingRegion;
 pub use seeds::{
     default_port, default_rpc_port, dns_seeds, fixed_seed_hosts, resolve_all_seeds,

@@ -148,42 +148,15 @@ impl Query {
     }
 
     pub fn merkle_proof(&self, height: Height, txid: &[u8; 32]) -> Result<MerkleProof, QueryError> {
-        use bitcoin::hashes::{sha256d, Hash as _};
-
         let txids = self.block_txids(height)?;
         let pos = txids
             .iter()
             .position(|t| t == txid)
             .ok_or(StoreError::NotFound)?;
-        let mut branch = Vec::new();
-        let mut idx = pos;
-        let mut layer: Vec<[u8; 32]> = txids;
-        while layer.len() > 1 {
-            if layer.len() % 2 == 1 {
-                layer.push(*layer.last().unwrap());
-            }
-            let sibling = if idx % 2 == 0 {
-                layer[idx + 1]
-            } else {
-                layer[idx - 1]
-            };
-            branch.push(sibling);
-            let mut next = Vec::with_capacity(layer.len() / 2);
-            let mut i = 0;
-            while i < layer.len() {
-                let mut buf = [0u8; 64];
-                buf[0..32].copy_from_slice(&layer[i]);
-                buf[32..64].copy_from_slice(&layer[i + 1]);
-                next.push(sha256d::Hash::hash(&buf).to_byte_array());
-                i += 2;
-            }
-            layer = next;
-            idx /= 2;
-        }
         Ok(MerkleProof {
             block_height: height.0,
             pos,
-            merkle: branch,
+            merkle: rbitcoin_store::merkle_branch(&txids, pos),
         })
     }
 

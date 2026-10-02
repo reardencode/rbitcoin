@@ -17,12 +17,15 @@ rbitcoin-net = { workspace = true }
 rbitcoin-rpc = { workspace = true }
 rbitcoin-electrum = { workspace = true }
 rbitcoin-esplora = { workspace = true }
+rbitcoin-sv2 = { workspace = true }
 rbitcoin-cli = { workspace = true }
 rbitcoin-node = { workspace = true }
 rbitcoin-log = { workspace = true }
 bitcoin = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
+binary_sv2 = { workspace = true }
+template_distribution_sv2 = { workspace = true }
 
 [[test]]
 name = "scenarios"
