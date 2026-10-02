@@ -2887,6 +2887,78 @@ async fn over_budget_reader_waits_until_one_byte_is_written() {
         .unwrap();
 }
 
+fn inbound_peer(
+    peers: &std::sync::Arc<crate::peers::PeerHub>,
+) -> std::sync::Arc<crate::peers::LivePeer> {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 1));
+    let ver = bitcoin::p2p::message_network::VersionMessage {
+        version: 70016,
+        services: bitcoin::p2p::ServiceFlags::NETWORK,
+        timestamp: 0,
+        receiver: bitcoin::p2p::address::Address::new(&addr, bitcoin::p2p::ServiceFlags::NONE),
+        sender: bitcoin::p2p::address::Address::new(&addr, bitcoin::p2p::ServiceFlags::NONE),
+        nonce: 1,
+        user_agent: "/rbitcoin:test/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    peers.register(addr, addr, &ver, true, crate::peers::PeerConnType::Inbound)
+}
+
+#[tokio::test]
+async fn inv_getdata_charges_send_budget() {
+    use bitcoin::hashes::Hash;
+    use bitcoin::Txid;
+
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("inv-budget");
+    hub.ensure_genesis().unwrap();
+    let t = hub.tip_header().unwrap().time;
+    hub.clock.set_mock(i64::from(t) + 1);
+    assert!(!hub.in_ibd(), "tx inv getdata pin is not IBD");
+    let mp = crate::tx_relay::MempoolHub::open(dir.join("mp"), std::sync::Arc::clone(&hub.query))
+        .unwrap();
+    mp.set_relay_enabled(true);
+    assert!(hub.attach_mempool(mp).is_ok());
+    let peers = crate::peers::PeerHub::new();
+    let peer = inbound_peer(&peers);
+    let (out_tx, _rx) = mpsc::unbounded_channel();
+    let mut follow = PeerFollowState::new();
+    let tx = Inventory::WitnessTransaction(Txid::from_byte_array([0x42; 32]));
+    on_inv(&hub, &out_tx, &mut follow, Some(&peer), &[tx]).unwrap();
+    assert!(
+        peer.send_queued() > 0,
+        "inv getdata must charge the send budget"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn getdata_stops_when_send_budget_is_already_over() {
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("gd-budget");
+    hub.ensure_genesis().unwrap();
+    let peers = crate::peers::PeerHub::new();
+    let peer = inbound_peer(&peers);
+    peer.note_send_queued(crate::peers::PEER_SEND_BUDGET + 1);
+    let (out_tx, mut rx) = mpsc::unbounded_channel();
+    let mut follow = PeerFollowState::new();
+    let genesis = hub.tip_hash().unwrap();
+    serve_getdata(
+        &hub,
+        &out_tx,
+        &mut follow,
+        Some(&peer),
+        &[Inventory::WitnessBlock(genesis)],
+    )
+    .await
+    .unwrap();
+    assert!(
+        rx.try_recv().is_err(),
+        "a getdata must not queue another block once the send budget is over"
+    );
+    assert_eq!(peer.send_queued(), crate::peers::PEER_SEND_BUDGET + 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// FNV-1a of the address bytes. Duplicated here so a broken mixer in
 /// `addr_relay_key` cannot satisfy the assertion by changing both sides.
 fn addr_key_oracle(msg: &bitcoin::p2p::address::AddrV2Message) -> u64 {

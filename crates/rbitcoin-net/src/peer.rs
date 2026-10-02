@@ -1978,7 +1978,14 @@ fn maybe_expire_pending_cmpct(
     }
     for hash in stale {
         drop_pending_cmpct(follow, session, hash);
-        queue_block_getdata(hub, out, &mut follow.requested_blocks, &[hash], false)?;
+        queue_block_getdata(
+            hub,
+            out,
+            session,
+            &mut follow.requested_blocks,
+            &[hash],
+            false,
+        )?;
     }
     Ok(true)
 }
@@ -1986,6 +1993,7 @@ fn maybe_expire_pending_cmpct(
 fn queue_block_getdata(
     hub: &ChainHub,
     out: &mpsc::UnboundedSender<PeerOut>,
+    session: Option<&crate::peers::LivePeer>,
     requested_blocks: &mut HashSet<BlockHash>,
     want: &[BlockHash],
     compact: bool,
@@ -2008,7 +2016,7 @@ fn queue_block_getdata(
         hub.note_asked_block(*h);
     }
     for chunk in inv.chunks(MAX_INV_SIZE.min(500)) {
-        queue_out(out, NetworkMessage::GetData(chunk.to_vec()))?;
+        queue_accounted(session, out, NetworkMessage::GetData(chunk.to_vec()))?;
     }
     Ok(())
 }
@@ -2157,7 +2165,7 @@ pub fn force_announce_txid(hub: &ChainHub, peers: &crate::peers::PeerHub, txid: 
             continue;
         };
         s.note_announced_wtx(w);
-        let _ = queue_out(&out, NetworkMessage::Inv(vec![Inventory::WTx(w)]));
+        let _ = queue_accounted(Some(&s), &out, NetworkMessage::Inv(vec![Inventory::WTx(w)]));
         if let Some(seq) = mp.relay_seq_of(&w) {
             s.note_tx_inv_seq(s.last_inv_sequence().max(seq.saturating_add(1)));
         }
@@ -2300,7 +2308,11 @@ fn queue_due_tx_invs(
                 continue;
             }
             session.note_announced_wtx(w);
-            let _ = queue_out(out_tx, NetworkMessage::Inv(vec![Inventory::WTx(w)]));
+            let _ = queue_accounted(
+                Some(session),
+                out_tx,
+                NetworkMessage::Inv(vec![Inventory::WTx(w)]),
+            );
             n += 1;
             if let Some(seq) = mp.relay_seq_of(&w) {
                 max_ann = max_ann.max(seq.saturating_add(1));
@@ -2327,7 +2339,11 @@ fn queue_due_tx_invs(
                 continue;
             }
             session.note_announced_wtx(w);
-            let _ = queue_out(out_tx, NetworkMessage::Inv(vec![Inventory::WTx(w)]));
+            let _ = queue_accounted(
+                Some(session),
+                out_tx,
+                NetworkMessage::Inv(vec![Inventory::WTx(w)]),
+            );
             n += 1;
             if let Some(seq) = mp.relay_seq_of(&w) {
                 max_ann = max_ann.max(seq.saturating_add(1));
@@ -2487,11 +2503,12 @@ fn on_compact_filters(
     payload: &NetworkMessage,
     hub: &ChainHub,
     out_tx: &mpsc::UnboundedSender<PeerOut>,
+    session: Option<&crate::peers::LivePeer>,
 ) -> Result<(), NetError> {
     match payload {
-        NetworkMessage::GetCFilters(m) => on_getcfilters(hub, out_tx, m),
-        NetworkMessage::GetCFHeaders(m) => on_getcfheaders(hub, out_tx, m),
-        NetworkMessage::GetCFCheckpt(m) => on_getcfcheckpt(hub, out_tx, m),
+        NetworkMessage::GetCFilters(m) => on_getcfilters(hub, out_tx, session, m),
+        NetworkMessage::GetCFHeaders(m) => on_getcfheaders(hub, out_tx, session, m),
+        NetworkMessage::GetCFCheckpt(m) => on_getcfcheckpt(hub, out_tx, session, m),
         _ => Ok(()),
     }
 }
@@ -2533,6 +2550,7 @@ fn within_filter_watermark(hub: &ChainHub, stop: u32) -> Result<bool, NetError> 
 fn on_getcfilters(
     hub: &ChainHub,
     out_tx: &mpsc::UnboundedSender<PeerOut>,
+    session: Option<&crate::peers::LivePeer>,
     m: &bitcoin::p2p::message_filter::GetCFilters,
 ) -> Result<(), NetError> {
     use bitcoin::hashes::Hash;
@@ -2551,7 +2569,8 @@ fn on_getcfilters(
         else {
             return Ok(());
         };
-        queue_out(
+        queue_accounted(
+            session,
             out_tx,
             NetworkMessage::CFilter(bitcoin::p2p::message_filter::CFilter {
                 filter_type: 0,
@@ -2566,6 +2585,7 @@ fn on_getcfilters(
 fn on_getcfheaders(
     hub: &ChainHub,
     out_tx: &mpsc::UnboundedSender<PeerOut>,
+    session: Option<&crate::peers::LivePeer>,
     m: &bitcoin::p2p::message_filter::GetCFHeaders,
 ) -> Result<(), NetError> {
     use bitcoin::bip158::FilterHeader;
@@ -2587,7 +2607,8 @@ fn on_getcfheaders(
     } else {
         (rows[0].1, &rows[1..])
     };
-    queue_out(
+    queue_accounted(
+        session,
         out_tx,
         NetworkMessage::CFHeaders(bitcoin::p2p::message_filter::CFHeaders {
             filter_type: 0,
@@ -2602,6 +2623,7 @@ fn on_getcfheaders(
 fn on_getcfcheckpt(
     hub: &ChainHub,
     out_tx: &mpsc::UnboundedSender<PeerOut>,
+    session: Option<&crate::peers::LivePeer>,
     m: &bitcoin::p2p::message_filter::GetCFCheckpt,
 ) -> Result<(), NetError> {
     use bitcoin::hashes::Hash;
@@ -2620,7 +2642,8 @@ fn on_getcfcheckpt(
         filter_headers.push(row[0].1);
         h = h.saturating_add(1000);
     }
-    queue_out(
+    queue_accounted(
+        session,
         out_tx,
         NetworkMessage::CFCheckpt(bitcoin::p2p::message_filter::CFCheckpt {
             filter_type: 0,
@@ -2660,7 +2683,9 @@ fn handle_peer_inventory_msg(
         NetworkMessage::GetAddr => on_getaddr(hub, out_tx, session)?,
         NetworkMessage::GetCFilters(_)
         | NetworkMessage::GetCFHeaders(_)
-        | NetworkMessage::GetCFCheckpt(_) => on_compact_filters(payload, hub, out_tx)?,
+        | NetworkMessage::GetCFCheckpt(_) => {
+            on_compact_filters(payload, hub, out_tx, session)?
+        }
         NetworkMessage::Unknown { .. }
         | NetworkMessage::GetData(_)
         | NetworkMessage::Block(_)
@@ -2915,6 +2940,9 @@ async fn serve_getdata(
     let inflight = session.map(|s| &s.serve_inflight);
     let mut notfound: Vec<Inventory> = Vec::new();
     for item in inv {
+        if session.is_some_and(|s| s.send_over_budget()) {
+            break;
+        }
         match item {
             Inventory::Block(h) | Inventory::WitnessBlock(h) => {
                 serve_getdata_full_block(hub, out_tx, session, inflight, h).await?;
@@ -3187,7 +3215,7 @@ fn on_inv(
         let _ = queue_getheaders(out_tx, hub, session, true, None);
     }
     if !want.is_empty() {
-        queue_out(out_tx, NetworkMessage::GetData(want))?;
+        queue_accounted(session, out_tx, NetworkMessage::GetData(want))?;
     }
     Ok(())
 }
@@ -3353,6 +3381,7 @@ fn on_headers(
                 queue_block_getdata(
                     hub,
                     out_tx,
+                    session,
                     &mut follow.requested_blocks,
                     &want,
                     getdata_use_compact(hub, follow.cmpct_version),
@@ -3559,7 +3588,7 @@ async fn on_cmpctblock(
     }
     let keep = keep_pending_connecting_paths(hub, &follow.pending_headers);
     release_asks_off_path(hub, &mut follow.requested_blocks, &keep);
-    on_cmpctblock_queue_ancestors(hub, out_tx, follow, hash)?;
+    on_cmpctblock_queue_ancestors(hub, out_tx, follow, session, hash)?;
     if compact_header_low_work(hub, &hsi.header) && !follow.requested_blocks.contains(&hash) {
         let id = session.map(|s| s.id).unwrap_or(0);
         rbitcoin_log::info!("p2p: ignore low-work compact block from peer {id}");
@@ -3617,6 +3646,7 @@ fn on_cmpctblock_queue_ancestors(
     hub: &ChainHub,
     out_tx: &mpsc::UnboundedSender<PeerOut>,
     follow: &mut PeerFollowState,
+    session: Option<&crate::peers::LivePeer>,
     hash: BlockHash,
 ) -> Result<(), NetError> {
     let mut ancestors: Vec<BlockHash> = fetchable_header_path_bodies(
@@ -3633,6 +3663,7 @@ fn on_cmpctblock_queue_ancestors(
     queue_block_getdata(
         hub,
         out_tx,
+        session,
         &mut follow.requested_blocks,
         &ancestors,
         getdata_use_compact(hub, follow.cmpct_version),
@@ -4002,7 +4033,7 @@ fn queue_due_parent_getdata(
             }
         })
         .collect();
-    let _ = queue_out(out_tx, NetworkMessage::GetData(inv));
+    let _ = queue_accounted(Some(session), out_tx, NetworkMessage::GetData(inv));
 }
 
 async fn on_tx(
@@ -4915,7 +4946,7 @@ async fn drain_pending(
     missing.retain(|h| !requested_blocks.contains(h));
     let room = MAX_SERVE_BLOCKS.saturating_sub(requested_blocks.len());
     missing.truncate(room);
-    queue_block_getdata(hub, out, requested_blocks, &missing, compact)?;
+    queue_block_getdata(hub, out, session, requested_blocks, &missing, compact)?;
     Ok(())
 }
 

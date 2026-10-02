@@ -14,8 +14,8 @@ steps.
 | H3 | high | REST always on and shares the RPC work queue | open | — |
 | H4 | medium | Silent-payment unsubscribe logs the scan secret | open | — |
 | H5 | high | IBD reader credits unsolicited data as progress | open | — |
-| N1 | medium | Inv getdata does not charge the send budget | open | — |
-| M1 | medium | Block getdata can queue past the send budget | open | — |
+| N1 | medium | Inv getdata does not charge the send budget | fixed | `inv_getdata_charges_send_budget` |
+| M1 | medium | Block getdata can queue past the send budget | fixed | `getdata_stops_when_send_budget_is_already_over` |
 | M2 | medium | Silent-payment scan span is unbounded when start is set | open | — |
 | M3 | medium | RPC listener has no accept timeout; long-poll holds a permit | open | — |
 | M4 | medium | fuse8 segment length need not be a power of two | open | — |
