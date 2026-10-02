@@ -2076,6 +2076,33 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
         "RPC over-weight package: {fat}"
     );
 
+    // Reorg filter torn-slot: off-best must not serve stale body
+    let tip_hash = jsonrpc(rpc_addr, "getbestblockhash", json!([])).await["result"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let f_a = jsonrpc(rpc_addr, "getblockfilter", json!([tip_hash.clone()])).await;
+    let filter_a = f_a["result"]["filter"].as_str().unwrap().to_string();
+    jsonrpc(rpc_addr, "invalidateblock", json!([tip_hash.clone()])).await;
+    let arr = jsonrpc(rpc_addr, "generate", json!([2])).await["result"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let hash_b_same = arr[0].as_str().unwrap().to_string();
+    let hash_b_next = arr[1].as_str().unwrap().to_string();
+    let err_old = jsonrpc(rpc_addr, "getblockfilter", json!([tip_hash])).await;
+    assert_eq!(err_old["error"]["code"], -5);
+    assert!(err_old["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("Block not found"));
+    let f_b = jsonrpc(rpc_addr, "getblockfilter", json!([hash_b_same.clone()])).await;
+    let filter_b = f_b["result"]["filter"].as_str().unwrap().to_string();
+    assert!(!filter_b.is_empty() && filter_b.len() > 10);
+    assert_ne!(filter_b, filter_a, "torn slot - sibling == old filter");
+    let f_tip = jsonrpc(rpc_addr, "getblockfilter", json!([hash_b_next])).await;
+    assert!(f_tip["result"]["filter"].as_str().is_some());
+
     let _ = jsonrpc(rpc_addr, "stop", json!([])).await;
     let stopped = tokio::time::timeout(Duration::from_secs(15), node).await;
     match stopped {
