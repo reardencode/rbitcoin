@@ -220,6 +220,8 @@ async fn pin_metrics_equal_rpc(
     let chain = jsonrpc(rpc_addr, "getblockchaininfo", json!([])).await["result"].clone();
     let net = jsonrpc(rpc_addr, "getnetworkinfo", json!([])).await["result"].clone();
     let mempool = jsonrpc(rpc_addr, "getmempoolinfo", json!([])).await["result"].clone();
+    let peers = jsonrpc(rpc_addr, "getpeerinfo", json!([])).await["result"].clone();
+    let totals = jsonrpc(rpc_addr, "getnettotals", json!([])).await["result"].clone();
     let m = scrape_metrics(health_addr).await;
     let num = |v: &Value| v.as_f64().unwrap_or_else(|| panic!("number: {v}"));
     let flag = |b: bool| if b { 1.0 } else { 0.0 };
@@ -249,14 +251,60 @@ async fn pin_metrics_equal_rpc(
         ),
         ("rbitcoin_mempool_transactions", num(&mempool["size"])),
         ("rbitcoin_mempool_bytes", num(&mempool["bytes"])),
+        (
+            "rbitcoin_verification_progress",
+            num(&chain["verificationprogress"]),
+        ),
+        ("rbitcoin_difficulty", num(&chain["difficulty"])),
+        ("rbitcoin_peer_time_offset_seconds", num(&net["timeoffset"])),
+        ("rbitcoin_mempool_max_weight", num(&mempool["maxmempool"])),
+        (
+            "rbitcoin_mempool_orphan_transactions",
+            num(&mempool["orphanage"]["size"]),
+        ),
+        (
+            "rbitcoin_mempool_unbroadcast_transactions",
+            num(&mempool["unbroadcastcount"]),
+        ),
     ] {
         assert_eq!(m.get(series), Some(&want), "{series}: {m:?}");
     }
-    assert!(m["rbitcoin_scripthash_lag_blocks"] <= 6.0, "{m:?}");
+    let min_fee_sat_kvb = (num(&mempool["mempoolminfee"]) * 100_000_000.0).round();
+    assert_eq!(
+        m["rbitcoin_mempool_min_fee_sat_per_vb"],
+        min_fee_sat_kvb / 1000.0,
+        "mempoolminfee: {mempool}"
+    );
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs_f64();
+    let tip_age = now - num(&chain["time"]);
+    assert!(
+        (m["rbitcoin_tip_age_seconds"] - tip_age).abs() < 30.0,
+        "tip age {} vs {tip_age}",
+        m["rbitcoin_tip_age_seconds"]
+    );
+    let peer_rows = peers.as_array().expect("getpeerinfo array");
+    for network in ["ipv4", "ipv6", "onion", "i2p", "cjdns"] {
+        let want = peer_rows.iter().filter(|p| p["network"] == network).count() as f64;
+        let series = format!("rbitcoin_peers{{network=\"{network}\"}}");
+        assert_eq!(m.get(&series), Some(&want), "{series}: {m:?}");
+    }
+    // Bytes can move between the RPC read and the scrape. Both are the same counters.
+    let recv = num(&totals["totalbytesrecv"]);
+    let sent = num(&totals["totalbytessent"]);
+    assert!(
+        (m["rbitcoin_network_receive_bytes_total"] - recv).abs() < 1_000_000.0,
+        "recv {} vs {recv}",
+        m["rbitcoin_network_receive_bytes_total"]
+    );
+    assert!(
+        (m["rbitcoin_network_transmit_bytes_total"] - sent).abs() < 1_000_000.0,
+        "sent {} vs {sent}",
+        m["rbitcoin_network_transmit_bytes_total"]
+    );
+    assert!(m["rbitcoin_scripthash_lag_blocks"] <= 6.0, "{m:?}");
     let started = m["process_start_time_seconds"];
     assert!(started <= now && started > now - 600.0, "{m:?}");
     #[cfg(any(target_os = "linux", target_os = "macos"))]

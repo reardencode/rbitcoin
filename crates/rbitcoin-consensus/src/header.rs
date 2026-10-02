@@ -304,6 +304,22 @@ fn min_diff_bits(
     Some(bits)
 }
 
+/// Compact `nBits` as a difficulty relative to the max target (Core `GetDifficulty`).
+pub fn difficulty_from_bits(bits: u32) -> f64 {
+    let n_shift = ((bits >> 24) & 0xff) as i32;
+    let mut ddiff = (0x0000_ffff_u64 as f64) / ((bits & 0x00ff_ffff) as f64);
+    let mut shift = n_shift - 29;
+    while shift < 0 {
+        ddiff *= 256.0;
+        shift += 1;
+    }
+    while shift > 0 {
+        ddiff /= 256.0;
+        shift -= 1;
+    }
+    ddiff
+}
+
 fn header_bits_at(query: &Query, height: Height) -> Result<u32, ConsensusError> {
     if let Some((_fk, rec)) = query.header_at_height(height)? {
         return Ok(rec.bits);
@@ -323,6 +339,11 @@ mod median_time_past_tests {
     use rbitcoin_query::{Query, TxApply};
     use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn max_target_bits_are_difficulty_one() {
+        assert_eq!(difficulty_from_bits(0x1d00_ffff), 1.0);
+    }
 
     #[test]
     fn pow_hash_meets_target_meet_miss_and_limit() {

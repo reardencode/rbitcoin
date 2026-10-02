@@ -1188,6 +1188,21 @@ pub fn connection_counts(peers: &[PeerInfo]) -> (u64, u64) {
     (inbound as u64, (peers.len() - inbound) as u64)
 }
 
+/// `getnetworkinfo.timeoffset`: median VERSION offset of completed outbound peers.
+/// Even counts use the upper middle. Inbound-only or empty is 0.
+pub fn outbound_time_offset(peers: &[PeerInfo]) -> i64 {
+    let mut offs: Vec<i64> = peers
+        .iter()
+        .filter(|p| !p.inbound && p.handshake_complete)
+        .map(|p| p.time_offset_secs)
+        .collect();
+    if offs.is_empty() {
+        return 0;
+    }
+    offs.sort_unstable();
+    offs[offs.len() / 2]
+}
+
 /// RPC-facing snapshot.
 #[derive(Clone, Debug)]
 pub struct PeerInfo {

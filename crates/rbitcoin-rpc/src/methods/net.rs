@@ -64,16 +64,7 @@ fn peer_block_connected(ctx: &RpcContext, hash: &bitcoin::BlockHash) -> bool {
 }
 
 fn outbound_median_time_offset(rows: &[rbitcoin_net::PeerInfo]) -> i64 {
-    let mut offs: Vec<i64> = rows
-        .iter()
-        .filter(|p| !p.inbound && p.handshake_complete)
-        .map(|p| p.time_offset_secs)
-        .collect();
-    if offs.is_empty() {
-        return 0;
-    }
-    offs.sort_unstable();
-    offs[offs.len() / 2]
+    rbitcoin_net::outbound_time_offset(rows)
 }
 
 pub(crate) fn peerinfo_json(ctx: &RpcContext, p: rbitcoin_net::PeerInfo) -> Value {
