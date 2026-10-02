@@ -56,6 +56,7 @@ rbitcoin reference, or redteam static analysis). Numbered reports live beside th
 | [044](./044-local-auth.md) | low | Tor SAFECOOKIE, datadir `0700`, socket mode, overlay permissions | fixed | `tor_control_onion_lifecycle` |
 | [043](./043-peer-send-buffer.md) | high | Unbounded per-peer outbound queue | fixed | `hostile_peer_session` |
 | [040](./040-corrupt-bounds.md) | medium | Corrupt uleb128, seqsigwit lengths, and BDZ modulus | fixed | `read_packed_zero_modulus_or_vertices_is_corrupt` |
+| [052](./052-livera-review-index.md) | — | Livera review index | index | Q-72 |
 
 **012–021:** fuzzamoto differential report (`rbitcoin-report.tar.gz`, baseline
 `8f3990f`). Report-local 001–010 are **renumbered** here. Identity/BIP30
