@@ -8,7 +8,10 @@ use super::rate::PeerRate;
 use crate::codec::MAX_INV_SIZE;
 use crate::error::NetError;
 use crate::msg_decode::spawn_decode_then_with_err;
-use crate::peer::{connect_and_handshake_timed, HandshakePolicy, HANDSHAKE_TIMEOUT};
+use crate::peer::{
+    connect_and_handshake_timed, HandshakePolicy, BAN_SCORE_THRESHOLD, HANDSHAKE_TIMEOUT,
+};
+use crate::peer_dos::{PeerRateLimiter, RATE_LIMIT_BAN_SCORE};
 use crate::v2::{read_v2_frame_with_progress, write_v2_msg_offload};
 use bitcoin::block::Header;
 use bitcoin::hashes::Hash;
@@ -227,12 +230,28 @@ pub(crate) async fn spawn_peer(
         let sinks_r = sinks.clone();
         let reader_task = tokio::spawn(async move {
             let mut prog_mark = 0usize;
+            // Decoys and unknown types only. Requested block bodies stay off
+            // this window so a fast peer is not clipped at the tip-follow cap.
+            let mut rate = PeerRateLimiter::default_limits();
+            let mut logged_invalid_v2 = false;
+            let mut ban_score = 0u32;
             loop {
-                let frame = read_v2_frame_with_progress(&mut reader, magic, |buffered| {
-                    let delta = buffered.saturating_sub(prog_mark);
-                    note_stream_bytes(&bytes_io, delta as u64);
-                    prog_mark = buffered;
-                })
+                let frame = read_v2_frame_with_progress(
+                    &mut reader,
+                    magic,
+                    |buffered| {
+                        let delta = buffered.saturating_sub(prog_mark);
+                        note_stream_bytes(&bytes_io, delta as u64);
+                        prog_mark = buffered;
+                    },
+                    |n| {
+                        if rate.note(n) {
+                            Ok(())
+                        } else {
+                            Err(NetError::Protocol("peer misbehavior threshold"))
+                        }
+                    },
+                )
                 .await;
                 prog_mark = 0;
                 match frame {
@@ -326,8 +345,21 @@ pub(crate) async fn spawn_peer(
                             },
                         );
                     }
-                    Err(NetError::InvalidV2Type { .. }) => {
-                        // Core logs and stays connected (same as tip-follow).
+                    Err(NetError::InvalidV2Type { contents_len }) => {
+                        if !logged_invalid_v2 {
+                            logged_invalid_v2 = true;
+                            rbitcoin_log::debug!("{}", crate::v2::v2_invalid_message_type_log());
+                        }
+                        if !rate.note(contents_len) {
+                            ban_score = ban_score.saturating_add(RATE_LIMIT_BAN_SCORE);
+                            if ban_score >= BAN_SCORE_THRESHOLD {
+                                sinks_r.send_body(PeerEvent::Dead {
+                                    peer: id,
+                                    reason: "peer misbehavior threshold".to_string(),
+                                });
+                                break;
+                            }
+                        }
                         continue;
                     }
                     Err(NetError::Io(e))

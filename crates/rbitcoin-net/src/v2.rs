@@ -208,13 +208,19 @@ impl<R: AsyncRead + Unpin + Send> V2SessionReader<R> {
     }
     /// Next genuine application contents (skips decoys). Checks the decrypted
     /// length prefix against [`MAX_V2_CONTENTS_LEN`] before reading the body.
-    async fn read_genuine_contents<F>(&mut self, mut on_progress: F) -> Result<Vec<u8>, NetError>
+    async fn read_genuine_contents<F, D>(
+        &mut self,
+        mut on_progress: F,
+        mut on_decoy: D,
+    ) -> Result<Vec<u8>, NetError>
     where
         F: FnMut(usize),
+        D: FnMut(usize) -> Result<(), NetError>,
     {
         loop {
             let (packet_type, plaintext) = self.read_packet(&mut on_progress).await?;
             if packet_type == PacketType::Decoy {
+                on_decoy(plaintext.len())?;
                 continue;
             }
             // plaintext = 1-byte ignore header + application contents
@@ -440,7 +446,6 @@ pub fn parse_v2_contents(magic: Magic, contents: &[u8]) -> Result<FramedMessage,
         match command_for_short_id(first) {
             Some(name) => (command_to_12(name), contents[1..].to_vec()),
             None => {
-                rbitcoin_log::info!("{}", v2_invalid_message_type_log());
                 return Err(NetError::InvalidV2Type {
                     contents_len: contents.len(),
                 });
@@ -453,7 +458,6 @@ pub fn parse_v2_contents(magic: Magic, contents: &[u8]) -> Result<FramedMessage,
         let mut cmd12 = [0u8; 12];
         cmd12.copy_from_slice(&contents[1..13]);
         if command_from_12(&cmd12).is_err() {
-            rbitcoin_log::info!("{}", v2_invalid_message_type_log());
             return Err(NetError::InvalidV2Type {
                 contents_len: contents.len(),
             });
@@ -665,7 +669,7 @@ pub async fn read_v2_contents<R>(reader: &mut V2SessionReader<R>) -> Result<Vec<
 where
     R: AsyncRead + Unpin + Send,
 {
-    reader.read_genuine_contents(|_| {}).await
+    reader.read_genuine_contents(|_| {}, |_| Ok(())).await
 }
 
 /// Read the next genuine application frame (skips decoy packets).
@@ -678,21 +682,25 @@ pub async fn read_v2_frame<R>(
 where
     R: AsyncRead + Unpin + Send,
 {
-    read_v2_frame_with_progress(reader, magic, |_| {}).await
+    read_v2_frame_with_progress(reader, magic, |_| {}, |_| Ok(())).await
 }
 
 /// Read the next genuine frame; `on_progress` is invoked as ciphertext body
 /// bytes arrive, then again with decrypted content length.
-pub async fn read_v2_frame_with_progress<R, F>(
+pub async fn read_v2_frame_with_progress<R, F, D>(
     reader: &mut V2SessionReader<R>,
     magic: Magic,
     mut on_progress: F,
+    on_decoy: D,
 ) -> Result<FramedMessage, NetError>
 where
     R: AsyncRead + Unpin + Send,
     F: FnMut(usize),
+    D: FnMut(usize) -> Result<(), NetError>,
 {
-    let contents = reader.read_genuine_contents(&mut on_progress).await?;
+    let contents = reader
+        .read_genuine_contents(&mut on_progress, on_decoy)
+        .await?;
     on_progress(contents.len());
     parse_v2_contents(magic, &contents)
 }
@@ -1052,6 +1060,66 @@ mod tests {
             Err(NetError::MessageTooLarge(n)) => assert_eq!(n, too_big),
             other => panic!("expected MessageTooLarge({too_big}), got {other:?}"),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn decoy_packet_is_handed_to_the_rate_hook() {
+        use bip324::OutboundCipher;
+        use tokio::io::AsyncWriteExt;
+
+        let magic = signet_magic();
+        let magic_b = magic.to_bytes();
+        let (client, server) = duplex(64 * 1024);
+        let server_task = tokio::spawn(async move {
+            let (rh, wh) = tokio::io::split(server);
+            let reader = BufReader::new(rh);
+            let protocol = Protocol::new(magic_b, Role::Responder, None, None, reader, wh)
+                .await
+                .expect("server handshake");
+            let (r, _w) = protocol.into_split();
+            let mut reader = V2SessionReader::from_protocol_reader(r);
+            let mut seen = Vec::new();
+            let frame = read_v2_frame_with_progress(
+                &mut reader,
+                magic,
+                |_| {},
+                |n| {
+                    seen.push(n);
+                    Ok(())
+                },
+            )
+            .await
+            .expect("genuine frame after decoy");
+            (seen, frame.is_ping())
+        });
+
+        let (rh, wh) = tokio::io::split(client);
+        let reader = BufReader::new(rh);
+        let protocol = Protocol::new(magic_b, Role::Initiator, None, None, reader, wh)
+            .await
+            .expect("client handshake");
+        let (_r, w) = protocol.into_split();
+        let (mut cipher, mut raw_w) = w.into_inner();
+        let decoy_plain = vec![0u8; 32];
+        let mut packet = vec![0u8; OutboundCipher::encryption_buffer_len(decoy_plain.len())];
+        cipher
+            .encrypt(&decoy_plain, &mut packet, PacketType::Decoy, None)
+            .expect("encrypt decoy");
+        raw_w.write_all(&packet).await.unwrap();
+        let ping = encode_v2_contents(NetworkMessage::Ping(7)).unwrap();
+        let mut packet = vec![0u8; OutboundCipher::encryption_buffer_len(ping.len())];
+        cipher
+            .encrypt(&ping, &mut packet, PacketType::Genuine, None)
+            .expect("encrypt ping");
+        raw_w.write_all(&packet).await.unwrap();
+        raw_w.flush().await.unwrap();
+
+        let (seen, is_ping) = tokio::time::timeout(std::time::Duration::from_secs(5), server_task)
+            .await
+            .expect("decoy read timed out")
+            .expect("server task join");
+        assert!(!seen.is_empty(), "a decoy must reach the rate hook");
+        assert!(is_ping, "the genuine packet after the decoy is the ping");
     }
 
     #[test]

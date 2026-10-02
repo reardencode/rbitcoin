@@ -8,7 +8,7 @@ steps.
 |----|----------|--------|--------|------------|
 | C1 | critical | Unbounded parent-request tracker | fixed | `parent_req_stops_at_per_peer_cap`, `parent_req_stops_at_global_cap`, `second_peer_take_due_does_not_drop_other_peers_keys` |
 | N2 | low | Wtxid follow-up requested as a txid | fixed | `wtxid_followup_is_requested_as_wtx` |
-| H1 | high | Decoy and invalid-type packets skip the rate window | open | — |
+| H1 | high | Decoy and invalid-type packets skip the rate window | fixed | `decoy_packet_is_handed_to_the_rate_hook` |
 | H2 | high | Inbound eviction drops the longest-connected peer | open | — |
 | H2-ban | high | Misbehavior disconnect is not remembered | open | — |
 | H3 | high | REST always on and shares the RPC work queue | open | — |

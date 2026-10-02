@@ -6,3 +6,5 @@ Security
   budget, and stop serving blocks once that budget is already over.
 - The per-peer rate window keeps the previous second so a boundary does
   not grant a second full budget.
+- Count v2 decoy packets and unknown message types in the per-peer rate
+  window on tip-follow and IBD, and disconnect once that window is over.

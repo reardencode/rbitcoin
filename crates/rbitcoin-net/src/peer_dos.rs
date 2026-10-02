@@ -79,8 +79,7 @@ impl PeerRateLimiter {
             .as_millis()
             .min(1_000) as u64;
         let prev_weight = 1_000 - elapsed_ms;
-        let eff_msgs = u64::from(self.cur_msgs)
-            + (u64::from(self.prev_msgs) * prev_weight) / 1_000;
+        let eff_msgs = u64::from(self.cur_msgs) + (u64::from(self.prev_msgs) * prev_weight) / 1_000;
         let eff_bytes = self.cur_bytes + (self.prev_bytes * prev_weight) / 1_000;
         let next_msgs = eff_msgs.saturating_add(1);
         let next_bytes = eff_bytes.saturating_add(payload_len as u64);

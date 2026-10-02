@@ -154,13 +154,10 @@ impl ParentTracker {
         let peer = ann.peer;
         let due_at = ann.due_at;
         let exp = ann.requested_until;
-        let slot = self
-            .by_hash
-            .entry(hash)
-            .or_insert_with(|| ParentSlot {
-                anns: Vec::new(),
-                wtxid: false,
-            });
+        let slot = self.by_hash.entry(hash).or_insert_with(|| ParentSlot {
+            anns: Vec::new(),
+            wtxid: false,
+        });
         if wtxid {
             slot.wtxid = true;
         }
@@ -420,7 +417,11 @@ fn index_at(
     time: u64,
     hash: [u8; 32],
 ) {
-    tree.entry(peer).or_default().entry(time).or_default().push(hash);
+    tree.entry(peer)
+        .or_default()
+        .entry(time)
+        .or_default()
+        .push(hash);
 }
 
 fn unindex(

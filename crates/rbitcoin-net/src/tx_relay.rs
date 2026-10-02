@@ -2562,10 +2562,10 @@ impl MempoolHub {
     }
 
     pub(crate) fn resolve_tx_request(&self, txid: &Txid, wtxid: &Wtxid, admitted: bool) {
-        self.parent_req.lock().unwrap().resolve(
-            [txid.to_byte_array(), wtxid.to_byte_array()],
-            admitted,
-        );
+        self.parent_req
+            .lock()
+            .unwrap()
+            .resolve([txid.to_byte_array(), wtxid.to_byte_array()], admitted);
     }
 
     pub(crate) fn take_due_parent_getdata(&self, peer: u64, now: u64) -> Vec<DueParent> {

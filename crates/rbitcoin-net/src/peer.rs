@@ -12,8 +12,8 @@ use crate::msg_decode::decode_framed_offload;
 use crate::peer_dos::{PeerRateLimiter, OVERSIZE_BAN_SCORE, RATE_LIMIT_BAN_SCORE};
 use crate::peers::{CappedSet, PeerOut, PingAction};
 use crate::v2::{
-    open_v2, open_v2_with_wire, read_v2_contents, read_v2_frame, write_v2_contents, write_v2_msg,
-    write_v2_msg_offload, V2Reader, V2Writer,
+    open_v2, open_v2_with_wire, read_v2_contents, read_v2_frame, read_v2_frame_with_progress,
+    write_v2_contents, write_v2_msg, write_v2_msg_offload, V2Reader, V2Writer,
 };
 use bitcoin::bip152::{BlockTransactions, BlockTransactionsRequest, HeaderAndShortIds};
 use bitcoin::hashes::Hash;
@@ -1566,6 +1566,7 @@ pub async fn peer_session_with(
     }
     let mut requested_since: Option<std::time::Instant> = None;
     let mut rate = PeerRateLimiter::default_limits();
+    let mut logged_invalid_v2 = false;
     let mut tx_announce_rx = hub.mempool().map(|m| m.subscribe_announces());
     let mut inv_flush_rx = hub.mempool().map(|m| m.subscribe_inv_flush());
     let mut headers_poll = tokio::time::interval(Duration::from_secs(HEADERS_POLL_SECS));
@@ -1597,7 +1598,13 @@ pub async fn peer_session_with(
                 }
                 // Inbound before local tip announce so GetData during a
                 // generate burst is not queued behind hundreds of cmpctblocks.
-                frame = read_v2_frame(&mut reader, magic) => {
+                frame = read_v2_frame_with_progress(&mut reader, magic, |_| {}, |n| {
+                    if rate.note(n) {
+                        Ok(())
+                    } else {
+                        Err(NetError::Protocol("peer misbehavior threshold"))
+                    }
+                }) => {
                     let frame = match frame {
                         Ok(f) => f,
                         // Any socket Io means the peer is gone — exit cleanly so
@@ -1616,11 +1623,26 @@ pub async fn peer_session_with(
                         }
                         Err(NetError::InvalidV2Type { contents_len }) => {
                             // Core stays connected; counts raw v2 size as `*other*`.
+                            if !logged_invalid_v2 {
+                                logged_invalid_v2 = true;
+                                rbitcoin_log::debug!("{}", crate::v2::v2_invalid_message_type_log());
+                            }
                             if let Some(ref sess) = session {
                                 sess.note_recv_raw(
                                     "*other*",
                                     crate::v2::v2_other_recv_bytes(contents_len),
                                 );
+                            }
+                            if !rate.note(contents_len) {
+                                follow.ban_score =
+                                    follow.ban_score.saturating_add(RATE_LIMIT_BAN_SCORE);
+                                rbitcoin_log::warn!(
+                                    "p2p: {peer_s} rate limit exceeded misbehavior={}",
+                                    follow.ban_score
+                                );
+                                if follow.ban_score >= BAN_SCORE_THRESHOLD {
+                                    return Err(NetError::Protocol("peer misbehavior threshold"));
+                                }
                             }
                             continue;
                         }
@@ -2683,9 +2705,7 @@ fn handle_peer_inventory_msg(
         NetworkMessage::GetAddr => on_getaddr(hub, out_tx, session)?,
         NetworkMessage::GetCFilters(_)
         | NetworkMessage::GetCFHeaders(_)
-        | NetworkMessage::GetCFCheckpt(_) => {
-            on_compact_filters(payload, hub, out_tx, session)?
-        }
+        | NetworkMessage::GetCFCheckpt(_) => on_compact_filters(payload, hub, out_tx, session)?,
         NetworkMessage::Unknown { .. }
         | NetworkMessage::GetData(_)
         | NetworkMessage::Block(_)
