@@ -9,7 +9,7 @@ use tokio::sync::Semaphore;
 
 /// Default max concurrent **inbound** P2P sessions (post-handshake work).
 pub const DEFAULT_MAX_INBOUND: usize = 125;
-/// Sliding window for rate accounting.
+/// One-second rate window (current second plus the previous second).
 pub const RATE_WINDOW: Duration = Duration::from_secs(1);
 /// Max application messages per peer per window (after decrypt/frame).
 ///
@@ -31,12 +31,19 @@ pub fn inbound_semaphore(max: usize) -> Arc<Semaphore> {
     Arc::new(Semaphore::new(max.max(1)))
 }
 
-/// Per-session sliding-window message and byte counters.
+/// Per-session message and byte counters.
+///
+/// Two buckets (the current second and the previous one). A note weighs the
+/// previous bucket by how much of it is still inside the one-second window.
+/// No per-message allocation. A tumbling reset granted a second full budget
+/// at the boundary.
 #[derive(Debug, Clone)]
 pub struct PeerRateLimiter {
-    window_start: Instant,
-    msgs: u32,
-    bytes: u64,
+    current_start: Instant,
+    cur_msgs: u32,
+    cur_bytes: u64,
+    prev_msgs: u32,
+    prev_bytes: u64,
     max_msgs: u32,
     max_bytes: u64,
 }
@@ -44,9 +51,11 @@ pub struct PeerRateLimiter {
 impl PeerRateLimiter {
     pub fn new(max_msgs: u32, max_bytes: u64) -> Self {
         Self {
-            window_start: Instant::now(),
-            msgs: 0,
-            bytes: 0,
+            current_start: Instant::now(),
+            cur_msgs: 0,
+            cur_bytes: 0,
+            prev_msgs: 0,
+            prev_bytes: 0,
             max_msgs: max_msgs.max(1),
             max_bytes: max_bytes.max(1),
         }
@@ -59,20 +68,48 @@ impl PeerRateLimiter {
     /// Record one framed message of `payload_len` bytes.
     /// Returns `false` if this message would exceed the window budget.
     pub fn note(&mut self, payload_len: usize) -> bool {
-        let now = Instant::now();
-        if now.duration_since(self.window_start) >= RATE_WINDOW {
-            self.window_start = now;
-            self.msgs = 0;
-            self.bytes = 0;
-        }
-        let next_msgs = self.msgs.saturating_add(1);
-        let next_bytes = self.bytes.saturating_add(payload_len as u64);
-        if next_msgs > self.max_msgs || next_bytes > self.max_bytes {
+        self.note_at(payload_len, Instant::now())
+    }
+
+    /// Same as [`Self::note`] at a chosen instant. Tests pin the window edge.
+    pub fn note_at(&mut self, payload_len: usize, now: Instant) -> bool {
+        self.roll(now);
+        let elapsed_ms = now
+            .saturating_duration_since(self.current_start)
+            .as_millis()
+            .min(1_000) as u64;
+        let prev_weight = 1_000 - elapsed_ms;
+        let eff_msgs = u64::from(self.cur_msgs)
+            + (u64::from(self.prev_msgs) * prev_weight) / 1_000;
+        let eff_bytes = self.cur_bytes + (self.prev_bytes * prev_weight) / 1_000;
+        let next_msgs = eff_msgs.saturating_add(1);
+        let next_bytes = eff_bytes.saturating_add(payload_len as u64);
+        if next_msgs > u64::from(self.max_msgs) || next_bytes > self.max_bytes {
             return false;
         }
-        self.msgs = next_msgs;
-        self.bytes = next_bytes;
+        self.cur_msgs = self.cur_msgs.saturating_add(1);
+        self.cur_bytes = self.cur_bytes.saturating_add(payload_len as u64);
         true
+    }
+
+    fn roll(&mut self, now: Instant) {
+        let elapsed = now.saturating_duration_since(self.current_start);
+        if elapsed < RATE_WINDOW {
+            return;
+        }
+        if elapsed >= RATE_WINDOW + RATE_WINDOW {
+            self.prev_msgs = 0;
+            self.prev_bytes = 0;
+            self.cur_msgs = 0;
+            self.cur_bytes = 0;
+            self.current_start = now;
+            return;
+        }
+        self.prev_msgs = self.cur_msgs;
+        self.prev_bytes = self.cur_bytes;
+        self.cur_msgs = 0;
+        self.cur_bytes = 0;
+        self.current_start += RATE_WINDOW;
     }
 }
 
@@ -97,14 +134,32 @@ mod tests {
     }
 
     #[test]
+    fn rate_limiter_boundary_does_not_grant_a_second_budget() {
+        let mut r = PeerRateLimiter::new(2, 10_000);
+        let t0 = Instant::now();
+        assert!(r.note_at(1, t0));
+        assert!(r.note_at(1, t0));
+        assert!(!r.note_at(1, t0));
+        let boundary = t0 + RATE_WINDOW;
+        assert!(
+            !r.note_at(1, boundary),
+            "a full previous second must not grant another budget at the boundary"
+        );
+        let cleared = t0 + RATE_WINDOW + RATE_WINDOW + Duration::from_millis(1);
+        assert!(r.note_at(1, cleared));
+        assert!(r.note_at(1, cleared));
+        assert!(!r.note_at(1, cleared));
+    }
+
+    #[test]
     fn rate_limiter_window_resets() {
         let mut r = PeerRateLimiter::new(2, 10_000);
-        assert!(r.note(1));
-        assert!(r.note(1));
-        assert!(!r.note(1));
-        // Simulate window expiry.
-        r.window_start = Instant::now() - RATE_WINDOW - Duration::from_millis(1);
-        assert!(r.note(1));
+        let t0 = Instant::now();
+        assert!(r.note_at(1, t0));
+        assert!(r.note_at(1, t0));
+        assert!(!r.note_at(1, t0));
+        let cleared = t0 + RATE_WINDOW + RATE_WINDOW + Duration::from_millis(1);
+        assert!(r.note_at(1, cleared));
     }
 
     #[test]

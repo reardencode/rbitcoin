@@ -34,7 +34,7 @@ steps.
 | L10 | low | Datadir lock follows a symlink | open | — |
 | L11 | low | Conf parse errors echo the raw line | open | — |
 | L12 | low | Invalid-hash set grows without a cap | open | — |
-| L13 | low | Rate window grants two budgets at the boundary | open | — |
+| L13 | low | Rate window grants two budgets at the boundary | fixed | `rate_limiter_boundary_does_not_grant_a_second_budget` |
 | L14 | low | Mempool expiry runs only on admission | open | — |
 | L15 | low | Write jobs form a mutable slice over a shared buffer | open | — |
 | L2 | — | P2PKH fast path skips FindAndDelete | rejected | The fast path is the 25-byte template. A DER signature does not fit in that scriptCode, so FindAndDelete cannot change it. |
