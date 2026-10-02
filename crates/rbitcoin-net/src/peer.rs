@@ -3117,6 +3117,7 @@ fn on_inv(
     }
     let mut want = Vec::new();
     let mut inv_tx_n = 0u64;
+    let mut parent_capped = false;
     let mut need_headers = false;
     let mut tx_inv_hex: Option<String> = None;
     let relay = !hub.in_ibd()
@@ -3137,7 +3138,7 @@ fn on_inv(
                 if tx_inv_hex.is_none() {
                     tx_inv_hex = Some(txid.to_string());
                 }
-                if let Some(inv) = on_inv_txid(hub, session, relay, txid) {
+                if let Some(inv) = on_inv_txid(hub, session, relay, txid, &mut parent_capped) {
                     want.push(inv);
                     inv_tx_n = inv_tx_n.saturating_add(1);
                 }
@@ -3146,7 +3147,7 @@ fn on_inv(
                 if tx_inv_hex.is_none() {
                     tx_inv_hex = Some(wtxid.to_string());
                 }
-                if let Some(inv) = on_inv_wtxid(hub, session, relay, wtxid) {
+                if let Some(inv) = on_inv_wtxid(hub, session, relay, wtxid, &mut parent_capped) {
                     want.push(inv);
                     inv_tx_n = inv_tx_n.saturating_add(1);
                 }
@@ -3168,6 +3169,10 @@ fn on_inv(
             })
             .count() as u64;
         mp.note_getdata_tx(gd_tx);
+    }
+    if parent_capped {
+        punish_disconnect(&mut follow.ban_score, session);
+        return Ok(());
     }
     if let Some(hx) = tx_inv_hex {
         if reject_unsolicited_tx(hub, session) {
@@ -3210,6 +3215,7 @@ fn on_inv_txid(
     session: Option<&crate::peers::LivePeer>,
     relay: bool,
     txid: &bitcoin::Txid,
+    parent_capped: &mut bool,
 ) -> Option<Inventory> {
     if !relay {
         return None;
@@ -3223,7 +3229,10 @@ fn on_inv_txid(
         return None;
     }
     if let Some(s) = session {
-        mp.note_inv_tx_requested(s.id, txid.to_byte_array(), s.inbound, s.clock_now());
+        if !mp.note_inv_tx_requested(s.id, txid.to_byte_array(), s.inbound, s.clock_now(), false) {
+            *parent_capped = true;
+            return None;
+        }
     }
     Some(Inventory::WitnessTransaction(*txid))
 }
@@ -3233,6 +3242,7 @@ fn on_inv_wtxid(
     session: Option<&crate::peers::LivePeer>,
     relay: bool,
     wtxid: &bitcoin::Wtxid,
+    parent_capped: &mut bool,
 ) -> Option<Inventory> {
     if !relay {
         return None;
@@ -3240,7 +3250,16 @@ fn on_inv_wtxid(
     let mp = hub.mempool()?;
     if !mp.try_contains_wtxid(wtxid) {
         if let Some(s) = session {
-            mp.note_inv_tx_requested(s.id, wtxid.to_byte_array(), s.inbound, s.clock_now());
+            if !mp.note_inv_tx_requested(
+                s.id,
+                wtxid.to_byte_array(),
+                s.inbound,
+                s.clock_now(),
+                true,
+            ) {
+                *parent_capped = true;
+                return None;
+            }
         }
         return Some(Inventory::WTx(*wtxid));
     }
@@ -3973,14 +3992,17 @@ fn queue_due_parent_getdata(
         return;
     }
     mp.note_getdata_tx(want.len() as u64);
-    let _ = queue_out(
-        out_tx,
-        NetworkMessage::GetData(
-            want.into_iter()
-                .map(Inventory::WitnessTransaction)
-                .collect(),
-        ),
-    );
+    let inv = want
+        .into_iter()
+        .map(|due| {
+            if due.wtxid {
+                Inventory::WTx(bitcoin::Wtxid::from_byte_array(due.hash))
+            } else {
+                Inventory::WitnessTransaction(bitcoin::Txid::from_byte_array(due.hash))
+            }
+        })
+        .collect();
+    let _ = queue_out(out_tx, NetworkMessage::GetData(inv));
 }
 
 async fn on_tx(
