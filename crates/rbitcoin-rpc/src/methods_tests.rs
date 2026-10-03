@@ -4263,6 +4263,8 @@ fn http_wait_satisfied_tracks_the_setter() {
 
 /// Core never sets `BLOCK_FAILED_VALID` on a system error: a store read
 /// fault during `submitblock` must leave the block submittable again.
+/// `BIP22ValidationResult` throws `RPC_VERIFY_ERROR` for `state.IsError()`
+/// instead of returning a reject-reason string.
 #[test]
 fn submitblock_store_fault_does_not_cache_block_invalid() {
     let (ctx, dir, hub) = ctx_regtest_hub();
@@ -4291,11 +4293,15 @@ fn submitblock_store_fault_does_not_cache_block_invalid() {
 
     let s3 = mine_on(s2.block_hash(), 3, t0 + 4);
     for attempt in 0..2 {
-        let r = dispatch(&ctx, "submitblock", vec![json!(block_hex(&s3))]).unwrap();
-        let reason = r.as_str().unwrap_or_default();
+        let e = dispatch(&ctx, "submitblock", vec![json!(block_hex(&s3))])
+            .expect_err("a local store fault is an RPC error, not a BIP22 result");
+        assert_eq!(e["code"], ERR_VERIFY_ERROR, "attempt {attempt}: {e}");
         assert!(
-            reason.starts_with("store: "),
-            "attempt {attempt}: the reorg disconnect read must fault: {r}"
+            e["message"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("store: "),
+            "attempt {attempt}: the reorg disconnect read must fault: {e}"
         );
         assert!(
             !hub.is_block_invalid(&s3.block_hash()),
@@ -4303,6 +4309,44 @@ fn submitblock_store_fault_does_not_cache_block_invalid() {
         );
         assert_eq!(hub.tip_hash(), Some(b2.block_hash()));
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A store fault reading the parent header is not `prev-blk-not-found`.
+#[test]
+fn submitblock_prev_header_read_fault_is_rpc_error() {
+    let (ctx, dir, hub) = ctx_regtest_hub();
+    let op_true = ScriptBuf::from_bytes(vec![0x51]);
+    let mine_on = |prev: BlockHash, height: u32, time: u32| {
+        rbitcoin_consensus::mine_regtest_paying(prev, time, height, op_true.clone(), vec![])
+    };
+    let t0 = hub.tip_header().unwrap().time;
+    let b1 = mine_on(hub.tip_hash().unwrap(), 1, t0 + 1);
+    let b2 = mine_on(b1.block_hash(), 2, t0 + 2);
+    for b in [&b1, &b2] {
+        let r = dispatch(&ctx, "submitblock", vec![json!(block_hex(b))]).unwrap();
+        assert!(r.is_null(), "{r}");
+    }
+    let s2 = mine_on(b1.block_hash(), 2, t0 + 3);
+    let body = walk_for(&dir.join("store"), "header.body").expect("header.body");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(body)
+        .unwrap()
+        .set_len(0)
+        .unwrap();
+
+    let e = dispatch(&ctx, "submitblock", vec![json!(block_hex(&s2))])
+        .expect_err("a parent header read fault is an RPC error");
+    assert_eq!(e["code"], ERR_VERIFY_ERROR, "{e}");
+    assert!(
+        e["message"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("store: "),
+        "{e}"
+    );
+    assert!(!hub.is_block_invalid(&s2.block_hash()));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

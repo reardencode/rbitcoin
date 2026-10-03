@@ -1023,7 +1023,12 @@ pub fn submit_received_block(hub: &rbitcoin_net::ChainHub, block: Block) -> Subm
         return SubmitBlockOutcome::Rejected("high-hash".into());
     }
     let prev = block.header.prev_blockhash.to_byte_array();
-    let known = hub.query.get_header_by_hash(&prev).ok().flatten().is_some()
+    let prev_header = match hub.query.get_header_by_hash(&prev) {
+        Ok(h) => h.is_some(),
+        Err(rbitcoin_store::StoreError::NotFound) => false,
+        Err(e) => return SubmitBlockOutcome::Error(format!("store: {e}")),
+    };
+    let known = prev_header
         || hub
             .held_body(&bitcoin::BlockHash::from_byte_array(prev))
             .is_some();
@@ -1037,10 +1042,12 @@ pub fn submit_received_block(hub: &rbitcoin_net::ChainHub, block: Block) -> Subm
         Ok(AcceptOutcome::Accepted { .. }) => SubmitBlockOutcome::Accepted,
         Ok(AcceptOutcome::AlreadyHave) => SubmitBlockOutcome::Duplicate,
         Ok(AcceptOutcome::IgnoredWeaker) => SubmitBlockOutcome::IgnoredWeaker,
+        // Core: an interrupted ProcessNewBlock never fires BlockChecked.
+        Err(rbitcoin_net::NetError::Cancelled) => SubmitBlockOutcome::IgnoredWeaker,
+        Err(e) if e.is_local_fault() => SubmitBlockOutcome::Error(e.to_string()),
         Err(e) => {
             let reason = submit_reject_reason(&e);
-            if !e.is_local_fault()
-                && reason != "bad-txnmrklroot"
+            if reason != "bad-txnmrklroot"
                 && reason != "high-hash"
                 && reason != "prev-blk-not-found"
             {
@@ -1183,6 +1190,7 @@ pub(crate) fn submitblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value,
         SubmitBlockOutcome::Duplicate => Ok(json!("duplicate")),
         SubmitBlockOutcome::IgnoredWeaker => Ok(json!("inconclusive")),
         SubmitBlockOutcome::Rejected(reason) => Ok(json!(reason)),
+        SubmitBlockOutcome::Error(msg) => Err(rpc_error(ERR_VERIFY_ERROR, msg)),
     }
 }
 
