@@ -788,6 +788,10 @@ where
     let scanned = scan_sp_off_connection(reader, query, chain, &sub, last).await;
     let hits = scanned.hits;
     conn.sp_scan_busy = false;
+    // The client left before any chunk. A history line would write into a closed socket.
+    if scanned.chunks == 0 && sub.start <= last {
+        return Ok(());
+    }
     let note = json!({
         "jsonrpc": "2.0",
         "method": "blockchain.silentpayments.subscribe",
