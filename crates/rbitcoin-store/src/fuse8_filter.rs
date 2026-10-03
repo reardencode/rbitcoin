@@ -189,6 +189,12 @@ fn parse_v2_geometry(payload: &[u8]) -> Result<V2Geometry, StoreError> {
     if segment_length == 0 || segment_length_mask != segment_length.saturating_sub(1) {
         return Err(StoreError::Corrupt("fuse8 segment_length invalid"));
     }
+    // Binary Fuse8 indexes with a bit mask. A non-power-of-two length aliases slots.
+    if !segment_length.is_power_of_two() {
+        return Err(StoreError::Corrupt(
+            "fuse8 segment length must be a power of two",
+        ));
+    }
     let min_fp = (segment_count_length as u64).saturating_add(2 * u64::from(segment_length));
     if (fp_len as u64) < min_fp {
         return Err(StoreError::Corrupt(
@@ -239,6 +245,20 @@ mod tests {
         let p = std::env::temp_dir().join(format!("rbitcoin-fuse8-{n}"));
         let _ = std::fs::create_dir_all(&p);
         p
+    }
+
+    #[test]
+    fn fuse8_segment_length_must_be_power_of_two() {
+        let mut payload = vec![0u8; 8 + 4 + 4 + 4 + 8 + 13];
+        payload[8..12].copy_from_slice(&6u32.to_le_bytes());
+        payload[12..16].copy_from_slice(&5u32.to_le_bytes());
+        payload[16..20].copy_from_slice(&1u32.to_le_bytes());
+        payload[20..28].copy_from_slice(&13u64.to_le_bytes());
+        match parse_v2_geometry(&payload) {
+            Err(StoreError::Corrupt(msg)) => assert!(msg.contains("power of two"), "{msg}"),
+            Ok(_) => panic!("segment length 6 was accepted"),
+            Err(other) => panic!("{other}"),
+        }
     }
 
     fn decode_body(payload: &[u8]) -> Result<BinaryFuse8, StoreError> {
