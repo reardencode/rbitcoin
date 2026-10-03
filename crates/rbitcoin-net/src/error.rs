@@ -98,7 +98,7 @@ impl NetError {
     }
 
     /// Local store fault or cooperative abort: not a verdict on the block.
-    pub(crate) fn is_local_fault(&self) -> bool {
+    pub fn is_local_fault(&self) -> bool {
         matches!(self, NetError::Store(_) | NetError::Cancelled)
     }
 

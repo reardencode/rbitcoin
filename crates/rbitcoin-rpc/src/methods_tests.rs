@@ -4261,4 +4261,49 @@ fn http_wait_satisfied_tracks_the_setter() {
     assert!(!http_wait_satisfied());
 }
 
+/// Core never sets `BLOCK_FAILED_VALID` on a system error: a store read
+/// fault during `submitblock` must leave the block submittable again.
+#[test]
+fn submitblock_store_fault_does_not_cache_block_invalid() {
+    let (ctx, dir, hub) = ctx_regtest_hub();
+    let op_true = ScriptBuf::from_bytes(vec![0x51]);
+    let mine_on = |prev: BlockHash, height: u32, time: u32| {
+        rbitcoin_consensus::mine_regtest_paying(prev, time, height, op_true.clone(), vec![])
+    };
+    let t0 = hub.tip_header().unwrap().time;
+    let b1 = mine_on(hub.tip_hash().unwrap(), 1, t0 + 1);
+    let b2 = mine_on(b1.block_hash(), 2, t0 + 2);
+    for b in [&b1, &b2] {
+        let r = dispatch(&ctx, "submitblock", vec![json!(block_hex(b))]).unwrap();
+        assert!(r.is_null(), "{r}");
+    }
+    let s2 = mine_on(b1.block_hash(), 2, t0 + 3);
+    let r = dispatch(&ctx, "submitblock", vec![json!(block_hex(&s2))]).unwrap();
+    assert_eq!(r, "inconclusive", "equal-work sibling is held");
+
+    let body = walk_for(&dir.join("store"), "txout.body").expect("txout.body");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(body)
+        .unwrap()
+        .set_len(0)
+        .unwrap();
+
+    let s3 = mine_on(s2.block_hash(), 3, t0 + 4);
+    for attempt in 0..2 {
+        let r = dispatch(&ctx, "submitblock", vec![json!(block_hex(&s3))]).unwrap();
+        let reason = r.as_str().unwrap_or_default();
+        assert!(
+            reason.starts_with("store: "),
+            "attempt {attempt}: the reorg disconnect read must fault: {r}"
+        );
+        assert!(
+            !hub.is_block_invalid(&s3.block_hash()),
+            "attempt {attempt}: a store fault is not a block verdict"
+        );
+        assert_eq!(hub.tip_hash(), Some(b2.block_hash()));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 include!("regtest_chain_ops_journey.rs");
