@@ -120,11 +120,20 @@ impl TipRevalidateReport {
 
 /// Bitcoin block merkle root from leaf txids (internal byte order).
 pub fn merkle_root_from_txids(leaves: &[[u8; 32]]) -> [u8; 32] {
+    merkle_root_mutated(leaves).0
+}
+
+/// [`merkle_root_from_txids`] plus Core's `ComputeMerkleRoot` mutation flag
+/// (CVE-2012-2459): some level held two equal hashes in one pair before odd
+/// padding, so a shorter tx list has the same root.
+pub fn merkle_root_mutated(leaves: &[[u8; 32]]) -> ([u8; 32], bool) {
     if leaves.is_empty() {
-        return [0u8; 32];
+        return ([0u8; 32], false);
     }
+    let mut mutated = false;
     let mut level: Vec<[u8; 32]> = leaves.to_vec();
     while level.len() > 1 {
+        mutated |= level.chunks_exact(2).any(|pair| pair[0] == pair[1]);
         if level.len() % 2 == 1 {
             if let Some(last) = level.last().copied() {
                 level.push(last);
@@ -136,7 +145,7 @@ pub fn merkle_root_from_txids(leaves: &[[u8; 32]]) -> [u8; 32] {
         }
         level = next;
     }
-    level[0]
+    (level[0], mutated)
 }
 
 fn hash256_concat(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
@@ -536,6 +545,27 @@ mod tests {
         let b = [2u8; 32];
         let root = merkle_root_from_txids(&[a, b]);
         assert_eq!(root, hash256_concat(&a, &b));
+    }
+
+    /// CVE-2012-2459: a repeated tail at any level keeps the root and is
+    /// flagged. The shorter list and an unpaired repeat are not.
+    #[test]
+    fn merkle_mutation_flags_a_repeated_tail_at_any_level() {
+        let l: Vec<[u8; 32]> = (1..=6u8).map(|n| [n; 32]).collect();
+        let (root3, mutated) = merkle_root_mutated(&l[..3]);
+        assert!(!mutated);
+        assert_eq!(
+            merkle_root_mutated(&[l[0], l[1], l[2], l[2]]),
+            (root3, true)
+        );
+        assert!(!merkle_root_mutated(&[l[0], l[1], l[1]]).1);
+
+        let (root6, mutated) = merkle_root_mutated(&l);
+        assert!(!mutated);
+        let mut tail = l.clone();
+        tail.extend_from_slice(&l[4..]);
+        assert_eq!(merkle_root_mutated(&tail), (root6, true));
+        assert_eq!(merkle_root_mutated(&[]), ([0u8; 32], false));
     }
 
     #[test]

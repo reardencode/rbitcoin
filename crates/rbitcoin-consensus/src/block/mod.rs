@@ -130,14 +130,15 @@ pub(crate) fn validate_block_structure_precomputed(
     Ok(validate_block_structure_with_pres(block, ctx, None, None)?.to_vec())
 }
 
-/// Like [`validate_block_structure_precomputed`], reusing lookup-stashed pres
-/// when `pres` is `Some` (no second `from_tx`). Length must match `txdata`.
-/// Caller Arc is returned as-is (refcount only).
-fn reject_bad_block_tx_layout(block: &Block) -> Result<(), ConsensusError> {
+fn reject_bad_block_tx_layout(block: &Block, pres: &[TxPrecompute]) -> Result<(), ConsensusError> {
     if block.txdata.is_empty() {
         return Err(ConsensusError::BadBlock("no transactions"));
     }
     if !block.txdata[0].is_coinbase() {
+        // Core IsBlockMutated: a 64-byte tx may be an inner merkle node.
+        if pres.iter().any(|p| p.base_size == 64) {
+            return Err(ConsensusError::BadBlock("merkle mutated by a 64-byte tx"));
+        }
         return Err(ConsensusError::BadBlock("first tx not coinbase"));
     }
     for tx in block.txdata.iter().skip(1) {
@@ -148,14 +149,15 @@ fn reject_bad_block_tx_layout(block: &Block) -> Result<(), ConsensusError> {
     Ok(())
 }
 
+/// Like [`validate_block_structure_precomputed`], reusing lookup-stashed pres
+/// when `pres` is `Some` (no second `from_tx`). Length must match `txdata`.
+/// Caller Arc is returned as-is (refcount only).
 pub fn validate_block_structure_with_pres(
     block: &Block,
     ctx: &ValidationContext<'_>,
     pres: Option<Arc<[TxPrecompute]>>,
     stats: Option<&rbitcoin_query::ConfirmStats>,
 ) -> Result<Arc<[TxPrecompute]>, ConsensusError> {
-    reject_bad_block_tx_layout(block)?;
-
     let n = block.txdata.len();
     let (pres, txid_ns) = if let Some(stashed) = pres {
         if stashed.len() != n {
@@ -167,6 +169,20 @@ pub fn validate_block_structure_with_pres(
         let v: Vec<TxPrecompute> = block.txdata.iter().map(TxPrecompute::from_tx).collect();
         (Arc::from(v), t_txid.elapsed().as_nanos() as u64)
     };
+
+    let t_walk = Instant::now();
+    // Core CheckMerkleRoot runs before any body rule. A body the header does
+    // not commit to is the peer's fault, not the block hash's.
+    let txids: Vec<[u8; 32]> = pres.iter().map(|p| p.txid).collect();
+    let (merkle, mutated) = rbitcoin_store::merkle_root_mutated(&txids);
+    if merkle != block.header.merkle_root.to_byte_array() {
+        return Err(ConsensusError::BadBlock("merkle root mismatch"));
+    }
+    if mutated {
+        return Err(ConsensusError::BadBlock("bad-txns-duplicate"));
+    }
+    reject_bad_block_tx_layout(block, &pres)?;
+
     let mut seen: rbitcoin_query::TxidSet =
         rbitcoin_query::TxidSet::with_capacity_and_hasher(n, Default::default());
     for p in pres.iter() {
@@ -175,7 +191,6 @@ pub fn validate_block_structure_with_pres(
         }
     }
 
-    let t_walk = Instant::now();
     let tx_count_vi = bitcoin::consensus::encode::VarInt(n as u64).size();
     let base = 80usize
         .saturating_add(tx_count_vi)
@@ -197,12 +212,6 @@ pub fn validate_block_structure_with_pres(
     reject_witness_malleation(block, ctx, pres.as_ref())?;
     if weight_wu > MAX_BLOCK_WEIGHT {
         return Err(ConsensusError::BadBlock("block weight too large"));
-    }
-
-    let txids: Vec<[u8; 32]> = pres.iter().map(|p| p.txid).collect();
-    let merkle = merkle_root_bytes(&txids);
-    if merkle != block.header.merkle_root.to_byte_array() {
-        return Err(ConsensusError::BadBlock("merkle root mismatch"));
     }
 
     // BIP34 only after the network's buried height (mainnet 227931). From

@@ -290,6 +290,9 @@ pub struct ScriptsBatchMeta {
     pub n: usize,
     pub first_h: u32,
     pub heights_hashes: Vec<(u32, [u8; 32])>,
+    /// Arc clones of the batch's bodies (no copy), so a rejected wave can be
+    /// offered back to the body queue.
+    pub wire_blocks: Vec<Arc<Block>>,
     pub mat_ns: u64,
     pub t0: Instant,
 }
@@ -302,6 +305,7 @@ impl ScriptsBatchMeta {
             n: batch.len(),
             first_h,
             heights_hashes,
+            wire_blocks: batch.wire_blocks.clone(),
             mat_ns,
             t0: Instant::now(),
         }

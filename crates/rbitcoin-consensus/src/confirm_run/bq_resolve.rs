@@ -377,15 +377,19 @@ pub fn confirm_bq_resolve_wave_capped(
 }
 
 /// Dequeue BQ rows and bump `lookup_taken_hi` after a successful loadq send.
+/// `gen` is [`Query::lookup_taken_gen`] when the wave was selected: after a
+/// re-arm the mark stays at the re-arm, so bodies it offered back are taken
+/// again.
 pub fn take_wave_items_for_load(
     query: &Query,
     items: &[(u32, [u8; 32], ResolvedWire)],
+    gen: u32,
 ) -> Result<(), ConsensusError> {
     for (h, _, _) in items {
         query
             .block_queue_dequeue_height(*h)
             .map_err(ConsensusError::from)?;
-        query.set_lookup_taken_hi(Some(*h));
+        query.advance_lookup_taken_hi(gen, *h);
     }
     Ok(())
 }
@@ -409,7 +413,7 @@ mod tests {
     }
 
     fn take_emitted(q: &Query, wave: &BqResolveWave) {
-        take_wave_items_for_load(q, &wave.items).unwrap();
+        take_wave_items_for_load(q, &wave.items, q.lookup_taken_gen()).unwrap();
     }
 
     fn resolve_wave(

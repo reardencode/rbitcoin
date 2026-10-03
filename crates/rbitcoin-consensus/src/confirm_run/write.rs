@@ -146,11 +146,32 @@ pub fn confirm_write_phase(
     query: &Query,
     params: &ChainParams,
     milestone: Milestone,
+    batch: ScriptOkBatch,
+) -> Result<Vec<rbitcoin_primitives::Fk>, ConsensusError> {
+    confirm_write_phase_or_return(query, params, milestone, batch).map_err(|(e, _)| e)
+}
+
+/// [`confirm_write_phase`] that hands the batch back on error, so a caller
+/// that retries the wave can offer its bodies back.
+#[allow(clippy::result_large_err)] // the batch is the point of the error
+pub fn confirm_write_phase_or_return(
+    query: &Query,
+    params: &ChainParams,
+    milestone: Milestone,
     mut batch: ScriptOkBatch,
+) -> Result<Vec<rbitcoin_primitives::Fk>, (ConsensusError, ScriptOkBatch)> {
+    write_phase(query, params, milestone, &mut batch).map_err(|e| (e, batch))
+}
+
+fn write_phase(
+    query: &Query,
+    params: &ChainParams,
+    milestone: Milestone,
+    batch: &mut ScriptOkBatch,
 ) -> Result<Vec<rbitcoin_primitives::Fk>, ConsensusError> {
     let tip = query.tip_height().map(|h| h.0);
     match write_batch_vs_tip(tip, batch.prepared.iter().map(|p| p.height.0)) {
-        WriteBatchVsTip::AllOld => return finish_already_committed_write(query, &batch),
+        WriteBatchVsTip::AllOld => return finish_already_committed_write(query, batch),
         WriteBatchVsTip::SpansTip => {
             return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
                 "invariant: write batch spans tip",
@@ -167,7 +188,7 @@ pub fn confirm_write_phase(
         mut ensure_ns,
         plan_take_ns,
         create_map_ns,
-    } = apply_archive_plan(query, &mut batch)?;
+    } = apply_archive_plan(query, batch)?;
     let t_ens = Instant::now();
     let abs_jobs = super::collect_spend_abs_after_fill(&batch.batch_parents, &batch.prepared)?;
     ensure_ns = ensure_ns.saturating_add(t_ens.elapsed().as_nanos() as u64);

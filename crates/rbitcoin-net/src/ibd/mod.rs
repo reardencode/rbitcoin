@@ -262,6 +262,7 @@ pub async fn ibd_cancellable(
     peers: &[crate::NetAddr],
     cfg: IbdConfig,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    perms: Option<Arc<crate::peers::PeerHub>>,
 ) -> Result<u32, NetError> {
     struct IbdModeGuard(std::sync::Arc<rbitcoin_query::Query>);
     impl Drop for IbdModeGuard {
@@ -383,6 +384,7 @@ pub async fn ibd_cancellable(
     let mut st = IbdWorkState::new(initial_slots, hub.tip_hash(), hub.tip_height());
     st.addr_cooldown = boot_cooldown;
     st.addr_strikes = boot_strikes;
+    st.perms = perms;
     seed_work_path_from_store(&mut st, hub.as_ref());
     header_walk::restore_adopt(&mut st, hub.as_ref());
 
