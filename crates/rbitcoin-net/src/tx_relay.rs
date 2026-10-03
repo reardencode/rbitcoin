@@ -1572,7 +1572,7 @@ impl MempoolHub {
             return;
         };
         if g.len() >= 4_096 {
-            g.clear();
+            return;
         }
         g.insert(wtxid);
     }
@@ -3691,6 +3691,32 @@ mod tests {
             .as_nanos();
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("rbitcoin-txrelay-{n}-{seq}"))
+    }
+
+    #[test]
+    fn recent_reject_at_the_cap_does_not_clear() {
+        let dir = tmp();
+        let mdir = tmp();
+        let q = Query::open_or_create_tiny(&dir).unwrap();
+        let hub = MempoolHub::open(&mdir, std::sync::Arc::new(q)).unwrap();
+        let first = bitcoin::Wtxid::from_byte_array({
+            let mut b = [0u8; 32];
+            b[0] = 1;
+            b
+        });
+        hub.note_recent_reject(first);
+        // 2..4097 is 4095 ids and does not collide with `first` (byte 0 == 1).
+        for i in 2..4_097u32 {
+            let mut b = [0u8; 32];
+            b[0..4].copy_from_slice(&i.to_le_bytes());
+            hub.note_recent_reject(bitcoin::Wtxid::from_byte_array(b));
+        }
+        let extra = bitcoin::Wtxid::from_byte_array([0xff; 32]);
+        hub.note_recent_reject(extra);
+        assert!(hub.try_recent_reject(&first));
+        assert!(!hub.try_recent_reject(&extra));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&mdir);
     }
 
     fn record_fee_sample(hub: &MempoolHub, height: u32, rate_sat_kvb: u64) {
