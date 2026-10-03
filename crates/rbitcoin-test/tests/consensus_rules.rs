@@ -377,6 +377,37 @@ fn header_and_spending_boundaries() {
         );
     }
 
+    // Core CheckTxInputs: a confirmed txid with no output at `vout` is
+    // bad-txns-inputs-missingorspent, not a store fault.
+    let past_end = u32::try_from(b1.txdata[0].output.len()).unwrap();
+    for vout in [past_end, past_end + 1, u32::MAX - 1] {
+        let oob = spend_anyone_can_spend(cb_txid, vout, Amount::from_sat(1));
+        let oob_block = mine_regtest_block(tip, time, 101, vec![oob]);
+        let err = accept_and_connect_block(&q, &params, Height(101), &oob_block, Milestone::NONE);
+        assert!(
+            matches!(err, Err(ConsensusError::MissingPrevout)),
+            "confirmed txid vout {vout} past n_out must reject as MissingPrevout: {err:?}"
+        );
+        assert_eq!(q.tip_height(), Some(Height(100)));
+    }
+
+    // IBD batch: the parent is created one block earlier in the same confirm run.
+    let parent = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(49_0000_0000));
+    let oob_child = spend_anyone_can_spend(parent.compute_txid(), 1, Amount::from_sat(1));
+    let b101 = mine_regtest_block(tip, time, 101, vec![parent]);
+    let b102 = mine_regtest_block(b101.block_hash(), time + 600, 102, vec![oob_child]);
+    let err = confirm_wire_run(
+        &q,
+        &params,
+        Milestone::NONE,
+        &[(Height(101), b101), (Height(102), b102)],
+    );
+    assert!(
+        matches!(err, Err(ConsensusError::MissingPrevout)),
+        "same-batch parent vout past n_out must reject as MissingPrevout: {err:?}"
+    );
+    assert_eq!(q.tip_height(), Some(Height(100)));
+
     let mut nonfinal = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(49_0000_0000));
     nonfinal.lock_time = LockTime::from_height(101).unwrap();
     nonfinal.input[0].sequence = Sequence::ZERO;

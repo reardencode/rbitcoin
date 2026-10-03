@@ -213,6 +213,38 @@ fn apply_plan_pins(
     n_plan_pin
 }
 
+/// Core `CheckTxInputs`: a spend of `vout >= n_out` on a resolved parent is
+/// `bad-txns-inputs-missingorspent`.
+///
+/// The wire `vout` is peer-chosen. It is checked against the lookup-stamped
+/// `create.loc` count, or the full wire tx of a batch / in-flight pin, before
+/// any body read. A short load after this point stays store `Corrupt`.
+fn reject_vout_past_n_out(
+    parent_vouts: &U64Map<Vec<u32>>,
+    parent_pin: &ParentPinStamp,
+    plan_by_id: &U64Map<CreatePin>,
+) -> Result<(), ConsensusError> {
+    for (id, need) in parent_vouts {
+        let Some(&max_vout) = need.iter().max() else {
+            continue;
+        };
+        let wire_n_out = || match plan_by_id.get(id).map(|p| &***p) {
+            Some(rbitcoin_query::CreatePinInner::Wire {
+                block, tx_index, ..
+            }) => block
+                .txdata
+                .get(*tx_index as usize)
+                .map(|t| t.output.len() as u64),
+            _ => None,
+        };
+        let n_out = parent_pin.n_out(*id).map(u64::from).or_else(wire_n_out);
+        if n_out.is_some_and(|n| u64::from(max_vout) >= n) {
+            return Err(ConsensusError::MissingPrevout);
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::type_complexity)] // packed row / pin / script-hash tuple is the on-disk shape
 fn denserels_by_stamped_range(
     query: &Query,
@@ -355,6 +387,7 @@ pub(super) fn pin_for_wire_batch(
         in_flight,
         query.confirm_stats(),
     );
+    reject_vout_past_n_out(&parent_vouts, parent_pin, &plan_by_id)?;
 
     let mut batch_parents = rbitcoin_query::BatchParents::with_capacity(parent_vouts.len());
     let thin_ns = t_thin.elapsed().as_nanos() as u64;
