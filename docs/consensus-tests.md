@@ -90,7 +90,7 @@ header version/time, `finality_tests`, `sigop_cost_tests`,
 | S9 | Coinbase scriptSig length 2..=100 | `bad-cb-length` | `s9_rejects_bad_cb_length_short`, `s9_rejects_bad_cb_length_long` |
 | S10 | Output value / sum ≤ MAX_MONEY | `toolarge` | `s10_rejects_vout_toolarge` |
 | S11 | Legacy sigops cost ≤ 80_000 | `bad-blk-sigops` | `s11_rejects_excessive_legacy_sigops` (20_000 accept / 20_001 reject) |
-| S12 | Connect: P2SH + witness sigops (BIP16/BIP141); P2SH scriptSig opcode `> OP_16` → 0; witness sigops only when segwit is active | `bad-blk-sigops` | `sigop_cost_tests::*` + `p2sh_sigops_non_push_scriptsig_is_zero` + `witness_sigops_gated_on_segwit` |
+| S12 | Connect: P2SH + witness sigops (BIP16/BIP141); P2SH scriptSig opcode `> OP_16` → 0; witness sigops whenever the WITNESS script flag is set (every block except the BIP16 exception, as in Core) | `bad-blk-sigops` | `sigop_cost_tests::*` + `p2sh_sigops_non_push_scriptsig_is_zero` + `witness_sigops_gated_on_witness_flag` + `script_flags_follow_core_exception_table` |
 | S13 | Every tx including coinbase has ≥1 output | `no outputs` | `s13_rejects_coinbase_empty_vout`; `header_and_spending_boundaries` (non-coinbase empty `vout`) |
 | S14 | Stripped size ≤ 1_000_000 | `block stripped size too large` | `s14_stripped_size_1_000_000_accepts_1_000_001_rejects` |
 | S15 | Every tx has ≥1 input | `no inputs` | `s15_rejects_empty_vin` |
@@ -137,6 +137,7 @@ version floors and exact +2h).
 | C22 | Subsidy halving interval from params | 50 BTC until interval | `p1_block_subsidy_halvings`; `rejects_coinbase_excess_value_fast`; journey overlay interval=2: `header_and_spending_boundaries` |
 | C27 | Captured signet/mainnet script-edge wire blocks (not Core JSON) | hash / opcode presence; detached verify | `script_edge_fixtures` |
 | C28 | Coinbase maturity (`COINBASE_MATURITY`) when the coinbase and its spender are in different blocks of one confirm batch | `BadTx("coinbase immature")` at created+99; created+100 accepts | `consensus_rules::coinbase_maturity_holds_inside_one_confirm_batch`; one-block-per-batch: `header_and_spending_boundaries` |
+| C31 | Script flags: P2SH / WITNESS / TAPROOT on every block; Core's mainnet `script_flag_exceptions` replace the set (BIP16 170060 → none, Taproot 692261 → P2SH+WITNESS); DERSIG / CLTV / CSV / NULLDUMMY height-gated. The testnet3 BIP16 exception arrives with #884; once both land, `witness_active = bip16_active` clears WITNESS and TAPROOT for that block too, as in Core | `ScriptVerifyFlags::consensus_at`; script reject below an overlaid segwit height | `script_flags_follow_core_exception_table`; `consensus_rules::witness_program_rules_bind_below_segwit_height` |
 
 ## Adding a new rule
 

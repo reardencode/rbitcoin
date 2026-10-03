@@ -288,7 +288,7 @@ fn witness_p2wpkh_counts_one() {
 }
 
 #[test]
-fn witness_sigops_gated_on_segwit() {
+fn witness_sigops_gated_on_witness_flag() {
     let mut spk = vec![0x00, 0x14];
     spk.extend([0u8; 20]);
     let inp = TxIn {

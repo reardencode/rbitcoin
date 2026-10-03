@@ -494,27 +494,27 @@ fn witness_sigop_count(tx: &Transaction, prev_spks: &[&[u8]]) -> u64 {
     n
 }
 
-fn prevout_spk_sigops(inp: &bitcoin::TxIn, spk: &[u8], bip16: bool, segwit: bool) -> u64 {
+fn prevout_spk_sigops(inp: &bitcoin::TxIn, spk: &[u8], bip16: bool, witness: bool) -> u64 {
     const WITNESS_SCALE: u64 = 4;
     let mut n = 0u64;
     if bip16 {
         n = n.saturating_add(p2sh_sigops_one(inp, spk).saturating_mul(WITNESS_SCALE));
     }
-    if segwit {
+    if witness {
         n = n.saturating_add(witness_sigops_one(inp, spk));
     }
     n
 }
 
 /// Full Core-style sigop cost for one tx given prevout scripts (BIP16 + BIP141).
-pub fn tx_sigop_cost(tx: &Transaction, prev_spks: &[&[u8]], bip16: bool, segwit: bool) -> u64 {
+pub fn tx_sigop_cost(tx: &Transaction, prev_spks: &[&[u8]], bip16: bool, witness: bool) -> u64 {
     const WITNESS_SCALE: u64 = 4;
     let mut cost = legacy_sigop_count(tx).saturating_mul(WITNESS_SCALE);
     for (i, inp) in tx.input.iter().enumerate() {
         let Some(spk) = prev_spks.get(i) else {
             continue;
         };
-        cost = cost.saturating_add(prevout_spk_sigops(inp, spk, bip16, segwit));
+        cost = cost.saturating_add(prevout_spk_sigops(inp, spk, bip16, witness));
     }
     cost
 }
@@ -629,6 +629,14 @@ pub(crate) const BIP16_EXCEPTION_MAINNET: [u8; 32] = [
     // little-endian display hash 00000000000002dc756eebf4f49723ed8d30cc28a5f108eb94b1ba88ac4f9c22
     0x22, 0x9c, 0x4f, 0xac, 0x88, 0xba, 0xb1, 0x94, 0xeb, 0x08, 0xf1, 0xa5, 0x28, 0xcc, 0x30, 0x8d,
     0xed, 0x23, 0x97, 0xf4, 0xf4, 0xeb, 0x6e, 0x75, 0xdc, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// Core `script_flag_exceptions`: mainnet block 692261 violated Taproot and
+/// runs with P2SH and WITNESS only.
+pub(crate) const TAPROOT_EXCEPTION_MAINNET: [u8; 32] = [
+    // little-endian display hash 0000000000000000000f14c35b2d841e986ab5441de8c585d5ffe55ea1e395ad
+    0xad, 0x95, 0xe3, 0xa1, 0x5e, 0xe5, 0xff, 0xd5, 0x85, 0xc5, 0xe8, 0x1d, 0x44, 0xb5, 0x6a, 0x98,
+    0x1e, 0x84, 0x2d, 0x5b, 0xc3, 0x14, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
 /// BIP16 P2SH from **precomputed** prev MTP + block hash (no header re-walk, no rehash).
@@ -786,25 +794,34 @@ impl ScriptVerifyFlags {
         }
     }
 
-    /// Activation + BIP141/147 defaults at `ctx` (BIP16 is caller MTP).
+    /// Core `GetBlockScriptFlags` for `block_hash` at `ctx`. `bip16_active` is
+    /// false only for a BIP16 exception block or genesis.
     #[inline]
-    pub fn consensus_at(ctx: &ValidationContext<'_>, bip16_active: bool) -> Self {
+    pub fn consensus_at(
+        ctx: &ValidationContext<'_>,
+        block_hash: &[u8; 32],
+        bip16_active: bool,
+    ) -> Self {
         let h = ctx.height.0;
-        let segwit = ctx.params.segwit_active_at(h);
+        // Core sets P2SH|WITNESS|TAPROOT on every block. An exception hash
+        // replaces that set: the BIP16 exception (`!bip16_active`) gets none,
+        // the Taproot exception gets P2SH|WITNESS.
+        let witness_active = bip16_active;
+        let taproot_active = bip16_active && *block_hash != TAPROOT_EXCEPTION_MAINNET;
         Self {
             bip65_active: ctx.params.bip65_active_at(h),
             bip112_active: ctx.params.csv_active_at(h),
             bip66_active: ctx.params.bip66_active_at(h),
             bip16_active,
-            taproot_active: ctx.params.taproot_active_at(h),
+            taproot_active,
             minimal_if: false,
             nullfail: false,
             low_s: false,
             strictenc: false,
-            null_dummy: segwit,
+            null_dummy: ctx.params.segwit_active_at(h),
             minimal_data: false,
             witness_pubkeytype: false,
-            witness_active: segwit,
+            witness_active,
             discourage_upgradable_witness: false,
             const_scriptcode: false,
         }
@@ -1023,8 +1040,7 @@ pub(crate) fn assemble_block_prevouts(
         bip16_active,
         bip16_active_from_prev_mtp(ctx.params, ctx.height.0, block_hash, prev_mtp)
     );
-    let _ = block_hash; // used in debug_assert; release keeps caller contract
-    let flags = ScriptVerifyFlags::consensus_at(ctx, bip16_active);
+    let flags = ScriptVerifyFlags::consensus_at(ctx, block_hash, bip16_active);
 
     let n_tx = block.txdata.len();
     let mut txid_index: TxidMap<usize> =
@@ -2351,7 +2367,7 @@ fn resolve_prevout(
     spend_ti: usize,
     batch_parents: &rbitcoin_query::BatchParents,
     bip16: bool,
-    segwit: bool,
+    witness: bool,
     need_script_buf: bool,
     acc: &mut AsmPrevoutAcc,
 ) -> Result<ResolvedPrevout, ConsensusError> {
@@ -2373,7 +2389,7 @@ fn resolve_prevout(
                         script_pubkey: ScriptBuf::new(),
                     }
                 },
-                input_sigops: prevout_spk_sigops(inp, o.script_pubkey.as_bytes(), bip16, segwit),
+                input_sigops: prevout_spk_sigops(inp, o.script_pubkey.as_bytes(), bip16, witness),
                 create_fk: rbitcoin_primitives::Fk::NULL,
             });
         }
@@ -2403,7 +2419,7 @@ fn resolve_prevout(
                             ScriptBuf::new()
                         },
                     },
-                    input_sigops: prevout_spk_sigops(inp, script, bip16, segwit),
+                    input_sigops: prevout_spk_sigops(inp, script, bip16, witness),
                 }
             },
         ) {
