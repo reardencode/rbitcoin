@@ -630,7 +630,7 @@ fn apply_block_framed(
             return;
         }
     }
-    st.body.mark_pending(hash);
+    st.body.mark_pending_from(hash, peer);
     if let Some(feed) = confirm_feed {
         feed.note(height, hash);
     }
@@ -893,6 +893,13 @@ fn apply_soft_wire_reject(
         }
     }
     if !bad_prev {
+        // `isolate_if_batched` leaves SoftWire only for a one-block wave, so
+        // `hash` is the block that failed.
+        if crate::chain::reject_is_mutated(err) {
+            if let Some(peer) = st.body.pending_sender(&hash) {
+                punish_mutated_sender(st, peer, hash);
+            }
+        }
         // A batched soft reject was isolated as a cascade. It landed here on
         // its own block, so it does not count toward the cascade halt. This
         // also clears a count for another hash: the tip+1 retry got a
@@ -907,6 +914,38 @@ fn apply_soft_wire_reject(
             "ibd: confirm reject BadPrev @{height} {hash}: {err} (slot evicted, not re-get same hash)"
         );
     }
+}
+
+/// Core `MaybePunishNodeForBlock` (`BLOCK_MUTATED`): drop the sender and
+/// cool down its address so the re-get goes to another peer. Redial falls
+/// back to a cooling address when no other is dialable. A noban peer stays.
+fn punish_mutated_sender(st: &mut IbdWorkState, peer: usize, hash: BlockHash) {
+    let Some(addr) = st
+        .slots
+        .iter()
+        .find(|s| s.id == peer && s.alive)
+        .map(|s| s.addr)
+    else {
+        return;
+    };
+    // IBD dials outbound only. A bind address only matters for inbound
+    // (`-whitebind`), so the peer address fills that slot.
+    let noban = st.perms.as_ref().is_some_and(|p| {
+        p.is_noban()
+            || p.permission_flags(addr, false, addr)
+                .has(crate::net_permissions::NetPermissionFlags::NOBAN)
+    });
+    if noban {
+        warn!("ibd: peer[{peer}] sent mutated block {hash}; not punishing noban peer");
+        return;
+    }
+    warn!("ibd: peer[{peer}] sent mutated block {hash}; dropping peer");
+    disconnect_peer(
+        &mut st.slots,
+        &mut st.addr_cooldown,
+        &mut st.addr_strikes,
+        peer,
+    );
 }
 
 /// A cascaded wave lost its in-pipeline work, and lookup had already taken

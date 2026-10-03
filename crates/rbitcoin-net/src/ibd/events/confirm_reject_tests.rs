@@ -1919,18 +1919,21 @@ impl WireRig {
     }
 }
 
-/// A peer answers the getdata for tip+1 with a body the header does not
+/// Peers answer the getdata for tip+1 with a body the header does not
 /// commit to: no txs, a repeated tail (CVE-2012-2459), or witness the
 /// coinbase does not commit to. Each confirm reject is mutated wire: the
-/// body leaves the queue, the hash stays off the invalid set, assign asks
-/// for it again, and the honest body then connects.
+/// body leaves the queue, the hash stays off the invalid set, and the
+/// sender is dropped and cooled down unless noban (Core
+/// `MaybePunishNodeForBlock`). Assign asks for the hash again, and the
+/// honest body from another peer connects.
 #[test]
 fn ibd_mutated_body_is_refetched_not_blacklisted() {
     use super::super::assign::tests::lock_default_assign_stop;
     use bitcoin::{ScriptBuf, Transaction, Witness};
+    use std::sync::Arc;
 
     let _env = lock_default_assign_stop();
-    let mut rig = WireRig::new("mutated-body", 1);
+    let mut rig = WireRig::new("mutated-body", 5);
     let (t, cbs) = (rig.t, rig.cbs.clone());
     let honest = rbitcoin_consensus::mine_regtest_paying(
         rig.tip,
@@ -1951,12 +1954,27 @@ fn ibd_mutated_body_is_refetched_not_blacklisted() {
     witness[1].input[0].witness = Witness::from_slice(&[[0x01]]);
     rig.plant(&[&honest]);
     rig.start_engine();
+    let peers = crate::peers::PeerHub::new();
+    let mut noban = crate::net_permissions::NetPermTable::default();
+    noban
+        .whitelist
+        .push(crate::net_permissions::parse_whitelist("noban,out@127.0.0.1").unwrap());
+    peers.set_net_perms(noban);
 
-    for (what, txdata) in [
-        ("no txs", vec![]),
-        ("repeated tail", repeated),
-        ("uncommitted witness", witness),
+    // One peer is up per round, so assign asks that peer.
+    let up = |st: &mut IbdWorkState, peer: usize| {
+        for s in &mut st.slots {
+            s.alive = s.id == peer;
+        }
+    };
+    for (what, peer, noban, txdata) in [
+        ("no txs", 1, false, vec![]),
+        ("repeated tail", 2, false, repeated.clone()),
+        ("uncommitted witness", 3, false, witness),
+        ("noban repeated tail", 4, true, repeated),
     ] {
+        up(&mut rig.st, peer);
+        rig.st.perms = noban.then(|| Arc::clone(&peers));
         let body = under_header(txdata);
         let rejects = rig.pump(|_, _| body.clone(), |_, _, r| !r.is_empty());
         assert_eq!(rejects, [(hash, ConfirmRejectClass::SoftWire, 1)], "{what}");
@@ -1969,12 +1987,34 @@ fn ibd_mutated_body_is_refetched_not_blacklisted() {
         );
         assert!(!st.body.skip_download(&rig.hub, &hash), "{what}: re-get");
         assert_eq!(rig.hub.tip_height(), Some(t), "{what}");
+        let sender = &st.slots[peer - 1];
+        assert_eq!(sender.alive, noban, "{what}: sender dropped");
+        assert_eq!(
+            st.addr_cooldown.contains_key(&sender.addr),
+            !noban,
+            "{what}: sender cooled down"
+        );
     }
+    up(&mut rig.st, 5);
     let rejects = rig.pump(
         |_, _| honest.clone(),
         |_, hub, _| hub.tip_hash() == Some(hash),
     );
     assert!(rejects.is_empty(), "{rejects:?}");
+
+    // A soft reject that is not a mutation is not the sender's fault.
+    let next = BlockHash::from_byte_array([0x5a; 32]);
+    rig.st.body.mark_pending_from(next, 5);
+    apply_confirm_reject(
+        &mut rig.st,
+        t + 2,
+        next,
+        "consensus: bad header: missing retarget first header",
+        None,
+        Some(&rig.hub),
+    );
+    assert!(rig.st.body.is_missing(&next), "re-get");
+    assert!(rig.st.slots[4].alive, "retarget miss keeps the sender");
     rig.finish();
 }
 
@@ -2113,8 +2153,9 @@ fn isolation_claims_one_block_at_a_time() {
 
 /// tip+1 and tip+2 confirm in one wave and peer 2 serves a mutated tip+2.
 /// The wave reject names tip+1, so it is isolated and retried one block at
-/// a time: tip+2 is rejected under its own hash. Assign asks again for
-/// every body the rewind dropped, and both honest bodies connect.
+/// a time: tip+2 is rejected under its own hash and only peer 2 is
+/// dropped. Assign asks again for every body the rewind dropped, and both
+/// honest bodies connect.
 #[test]
 fn ibd_batched_mutated_body_is_isolated_to_its_block() {
     use super::super::assign::tests::lock_default_assign_stop;
@@ -2166,14 +2207,17 @@ fn ibd_batched_mutated_body_is_isolated_to_its_block() {
         (h1, ConfirmRejectClass::Cascade, 2),
         "one wave, named by tip+1, is isolated"
     );
-    assert!(
-        rejects[1..]
-            .iter()
-            .all(|r| *r == (h2, ConfirmRejectClass::SoftWire, 1)),
-        "only the mutated block is rejected as wire, alone: {rejects:?}"
+    assert_eq!(
+        rejects[1..],
+        [(h2, ConfirmRejectClass::SoftWire, 1)],
+        "only the mutated block is rejected as wire, alone"
     );
-    assert!(rejects.len() > 1, "{rejects:?}");
     assert_eq!(rig.hub.tip_height(), Some(t + 2));
+    assert!(rig.st.slots[0].alive, "tip+1's sender is kept");
+    assert!(
+        !rig.st.slots[1].alive,
+        "the mutated body's sender is dropped"
+    );
     rig.finish();
 }
 

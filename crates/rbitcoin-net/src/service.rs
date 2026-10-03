@@ -329,6 +329,7 @@ impl P2PNode {
             peers,
             cfg,
             cancel,
+            Some(Arc::clone(&self.peers)),
         )
         .await
     }

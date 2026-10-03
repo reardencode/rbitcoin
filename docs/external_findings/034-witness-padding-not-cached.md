@@ -20,7 +20,10 @@ as soft, so a witness mutation still blacklisted the hash during IBD. It
 now consults `reject_is_mutated` too. Block structure also checks the
 merkle root (with the CVE-2012-2459 repeated-tail flag,
 `bad-txns-duplicate`) before every other body rule, so a body the header
-does not commit to is never blamed on the hash.
+does not commit to is never blamed on the hash. As in Core's
+`MaybePunishNodeForBlock` (`BLOCK_MUTATED`), IBD drops and cools down the
+peer that sent the mutated body unless it is noban, so the re-get goes to
+another peer.
 
 **Regression:** `rbitcoin-net`
 `chain::tests::hostile_peer_session`,

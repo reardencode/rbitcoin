@@ -12,6 +12,11 @@ Fixed
   block whose bad body was dropped could wait forever.
   When the bad body is checked in a batch with other blocks, IBD retries
   the batch one block at a time, so only the bad body is dropped.
+- **IBD disconnects a peer that sends a mutated block.** The peer's
+  address also cools down, so the block is requested from another peer
+  when one is available. A `noban` peer stays connected, as in Bitcoin
+  Core. Unlike Core, a manual (`--connect`) peer is also disconnected,
+  as on the tip path.
 - **A block with a second coinbase or a repeated transaction is now
   remembered as invalid.** These blocks reported `bad-txns-duplicate`,
   the reason Bitcoin Core keeps for a mutated body, so the node did not
