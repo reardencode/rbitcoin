@@ -80,7 +80,7 @@ header version/time, `finality_tests`, `sigop_cost_tests`,
 | ID | Rule | Error signal | Test |
 |----|------|--------------|------|
 | S1 | Block has ≥1 tx | `BadBlock("no transactions")` | `structure_rule_tests::s1_rejects_empty_txdata` |
-| S2 | First tx is coinbase | `BadBlock("first tx not coinbase")` | `structure_rule_tests::s2_rejects_non_coinbase_first` |
+| S2 | First tx is coinbase; without one, any 64-byte tx marks the body mutated (Core `IsBlockMutated`) | `BadBlock("first tx not coinbase")`, `BadBlock("merkle mutated by a 64-byte tx")` (both `bad-cb-missing`) | `structure_rule_tests::s2_rejects_non_coinbase_first`, `no_coinbase_with_a_64_byte_tx_is_mutated` |
 | S3 | No later coinbase | `BadBlock("coinbase not first")` | `structure_rule_tests::s3_rejects_second_coinbase` |
 | S4 | Weight ≤ 4_000_000 WU | `BadBlock("…weight…")` | `s4_rejects_overweight_block`, `s4_weight_4_000_000_accepts_4_000_001_rejects` |
 | S5 | Unique txids | `BadBlock("duplicate txid")` | `structure_rule_tests::s5_rejects_duplicate_txid` |

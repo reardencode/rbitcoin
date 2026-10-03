@@ -130,11 +130,15 @@ pub(crate) fn validate_block_structure_precomputed(
     Ok(validate_block_structure_with_pres(block, ctx, None, None)?.to_vec())
 }
 
-fn reject_bad_block_tx_layout(block: &Block) -> Result<(), ConsensusError> {
+fn reject_bad_block_tx_layout(block: &Block, pres: &[TxPrecompute]) -> Result<(), ConsensusError> {
     if block.txdata.is_empty() {
         return Err(ConsensusError::BadBlock("no transactions"));
     }
     if !block.txdata[0].is_coinbase() {
+        // Core IsBlockMutated: a 64-byte tx may be an inner merkle node.
+        if pres.iter().any(|p| p.base_size == 64) {
+            return Err(ConsensusError::BadBlock("merkle mutated by a 64-byte tx"));
+        }
         return Err(ConsensusError::BadBlock("first tx not coinbase"));
     }
     for tx in block.txdata.iter().skip(1) {
@@ -177,7 +181,7 @@ pub fn validate_block_structure_with_pres(
     if mutated {
         return Err(ConsensusError::BadBlock("bad-txns-duplicate"));
     }
-    reject_bad_block_tx_layout(block)?;
+    reject_bad_block_tx_layout(block, &pres)?;
 
     let mut seen: rbitcoin_query::TxidSet =
         rbitcoin_query::TxidSet::with_capacity_and_hasher(n, Default::default());

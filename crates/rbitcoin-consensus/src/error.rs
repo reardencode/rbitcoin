@@ -99,7 +99,9 @@ pub fn block_reject_reason(err: &ConsensusError) -> String {
         ConsensusError::BadBlock("no transactions" | "block stripped size too large") => {
             "bad-blk-length".into()
         }
-        ConsensusError::BadBlock("first tx not coinbase") => "bad-cb-missing".into(),
+        ConsensusError::BadBlock("first tx not coinbase" | "merkle mutated by a 64-byte tx") => {
+            "bad-cb-missing".into()
+        }
         ConsensusError::BadBlock("coinbase excess value") => "bad-cb-amount".into(),
         ConsensusError::BadBlock("coinbase not first") => "bad-txns-duplicate".into(),
         ConsensusError::BadBlock("duplicate txid") => "bad-txns-duplicate".into(),

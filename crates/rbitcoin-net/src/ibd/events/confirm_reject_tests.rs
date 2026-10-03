@@ -104,6 +104,7 @@ fn confirm_reject_class_matches_substring_table() {
     for mutated in [
         "merkle root mismatch",
         "bad-txns-duplicate",
+        "merkle mutated by a 64-byte tx",
         "missing witness commitment",
         "witness commitment mismatch",
         "bad-witness-nonce-size",

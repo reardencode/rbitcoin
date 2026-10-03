@@ -683,6 +683,33 @@ fn body_rules_run_after_the_header_merkle_check() {
     );
 }
 
+/// Core `IsBlockMutated`: with no coinbase first, a 64-byte tx can be an
+/// inner merkle node read as a tx (CVE-2017-12842). That body is mutated.
+/// submitblock still reports Core's CheckBlock reason.
+#[test]
+fn no_coinbase_with_a_64_byte_tx_is_mutated() {
+    let mut inner = non_coinbase_spend(1);
+    inner.input[0].script_sig = ScriptBuf::from_bytes(vec![0x51; 3]);
+    assert_eq!(bitcoin::consensus::serialize(&inner).len(), 64);
+    let (a, b) = (non_coinbase_spend(2), non_coinbase_spend(3));
+    for txdata in [vec![inner.clone(), a.clone()], vec![a.clone(), inner]] {
+        let err = validate_block_structure(&block_with(txdata), &ctx_h(1)).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ConsensusError::BadBlock("merkle mutated by a 64-byte tx")
+            ),
+            "{err:?}"
+        );
+        assert_eq!(crate::error::block_reject_reason(&err), "bad-cb-missing");
+    }
+    let err = validate_block_structure(&block_with(vec![a, b]), &ctx_h(1)).unwrap_err();
+    assert!(
+        matches!(err, ConsensusError::BadBlock("first tx not coinbase")),
+        "{err:?}"
+    );
+}
+
 #[test]
 fn s7_rejects_bip34_missing_after_activation_signet() {
     // Signet activates BIP34 at height 1 (rust-bitcoin Params::SIGNET).
