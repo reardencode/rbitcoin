@@ -876,6 +876,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             token_path: Some(config.rpc_token_path()),
             cookie_path: config.rpc_cookie_path(),
             work_queue: config.rpc.work_queue,
+            rest: config.rpc.rest,
             subversion: Some(
                 rbitcoin_primitives::rbitcoin_subversion(
                     env!("CARGO_PKG_VERSION"),

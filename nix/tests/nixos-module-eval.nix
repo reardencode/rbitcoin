@@ -215,6 +215,24 @@ assert builtins.match ".*--datadir-cold /srv/rbitcoin-cold.*" execStart != null;
 assert builtins.match ".*--network regtest.*" execStart != null;
 assert builtins.match ".*--listen 127.0.0.1:18444.*" execStart != null;
 assert builtins.match ".*--rpc-listen 127.0.0.1:18443.*" execStart != null;
+assert builtins.match ".*--rest.*" execStart == null;
+assert builtins.match ".*--rest.*" (
+  nixpkgs.lib.nixosSystem {
+    inherit (pkgs.stdenv.hostPlatform) system;
+    modules = [
+      module
+      {
+        services.rbitcoin = {
+          enable = true;
+          package = fakePackage;
+          rpc.enable = true;
+          rpc.rest = true;
+        };
+      }
+    ];
+  }
+  .config.systemd.services.rbitcoin.serviceConfig.ExecStart
+) != null;
 assert builtins.match ".*--rpc-socket /run/rbitcoin/rpc.sock.*" execStart != null;
 assert builtins.match ".*--rpc-cookie-file /run/rbitcoin/rpc.cookie.*" execStart != null;
 assert builtins.elem "/run/rbitcoin" service.serviceConfig.ReadWritePaths;

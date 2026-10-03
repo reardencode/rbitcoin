@@ -78,6 +78,7 @@ let
   ++ optional (cfg.coldDataDir != null) cfg.coldDataDir
   ++ optional cfg.rpc.enable "--rpc-listen"
   ++ optional cfg.rpc.enable (socket cfg.rpc.address cfg.rpc.port)
+  ++ optional (cfg.rpc.enable && cfg.rpc.rest) "--rest"
   ++ optional (cfg.rpc.socketPath != null) "--rpc-socket"
   ++ optional (cfg.rpc.socketPath != null) cfg.rpc.socketPath
   ++ optional (cfg.rpc.cookieFile != null) "--rpc-cookie-file"
@@ -368,6 +369,16 @@ in
           Bind the unix JSON-RPC socket here (mode 0660) instead of {dataDir}/rpc.sock (0600).
           Its directory is created mode 0750, so members of `group` (for example mempool's
           backend) can connect without reading the datadir. Independent of `enable` (TCP).
+        '';
+      };
+
+      rest = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Pass `--rest` so unauthenticated `/rest/` is served on the RPC listener.
+          Off by default. Requires `enable` (TCP). The route uses its own queue,
+          not the RPC work queue.
         '';
       };
 

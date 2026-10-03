@@ -57,11 +57,12 @@ later Core RPC is present, including descriptor-wallet calls from 0.21
 | `--sh-index` | **off** | Class B scripthash (Electrum/Esplora only; RPC by height/hash/txid does not need it) |
 | `--block-filter-index` | **off** | BIP158 basic. IBD seals them when the flag is on from the start. A later enable still materializes after catch-up. `NODE_COMPACT_FILTERS` is advertised once filters first reach the tip (`getnetworkinfo` lists `COMPACT_FILTERS`), then for the life of the process. `getblockfilter` and `/rest/blockfilter/` serve heights the watermark already covers. Independent of `--sh-index` |
 | `--rpc-work-queue N` | **16** | In-flight HTTP RPC (Core `-rpcworkqueue`). One POST is one slot (a JSON-RPC array is still one slot). Full permit is HTTP **503** `Work queue depth exceeded`. **0** is the default queue of 16. |
+| `--rest` / conf `rest=` | **off** | Unauthenticated `/rest/` on the RPC listener. Own queue, same depth as `--rpc-work-queue`'s default. The body is read before that permit is taken. Without the flag those paths are 404. |
 
 TLS is external (reverse proxy). Unix socket needs no HTTP header. TCP is
 Bearer-authenticated (`{datadir}/rpc.token`) and, only when `--rpc-cookie-file`
 is configured, also accepts Core cookie HTTP Basic. `GET /rest/…` is on the same
-binds. TCP `/rest/` skips Bearer, matching Core. Routes: `chaininfo.json`,
+binds only when `--rest` is set. TCP `/rest/` skips Bearer, matching Core. Routes: `chaininfo.json`,
 `blockhashbyheight/<height>.<bin|hex|json>`, `headers/<count>/<hash>.*`,
 `block/<hash>.*`, `block/notxdetails/<hash>.*`, `tx/<txid>.*` (chain and
 mempool), `mempool/info.json`, `mempool/contents.json`, `getutxos.json`

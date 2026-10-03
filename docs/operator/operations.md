@@ -106,6 +106,7 @@ Clean smoke:
 | `--esplora-block-template` | `esplora_block_template=` | **off** — `GET /block-template` is 404; on = GBT JSON (same as RPC template mode) |
 | `--rpc` | `rpc=` | **off** — unix JSON-RPC `{datadir}/rpc.sock` (mode 0600) |
 | `--rpc-listen [ADDR]` | `rpc_listen=` | disabled — implies `--rpc`; omit ADDR → `127.0.0.1` and Core-matching RPC port |
+| `--rest` | `rest=` | **off** — unauthenticated `/rest/` on the RPC listener. Own queue. Needs `--rpc` or `--rpc-listen` |
 | `--rpc-token-file PATH` | `rpc_token_file=` | `{datadir}/rpc.token` (CSPRNG hex; TCP Bearer) |
 | `--rpc-cookie-file PATH` | `rpc_cookie_file=` | disabled — existing Core `username:password` cookie (no trailing newline) enables TCP HTTP Basic alongside Bearer |
 | `--rpc-work-queue N` | `rpc_work_queue=` | **16** in-flight HTTP RPC (Core `-rpcworkqueue`). One POST is one slot (array batches still run). Full permit is HTTP **503** `Work queue depth exceeded`. **0** is the default queue of 16. |

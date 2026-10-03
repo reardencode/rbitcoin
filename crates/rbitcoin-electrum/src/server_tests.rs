@@ -1498,4 +1498,62 @@ fn sp_scan_ranges_cover_one_height_and_the_next_chunk() {
     assert_eq!(super::sp_scan_ranges(0, 1), vec![(0, 1)]);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn sp_scan_stops_when_the_client_hangs_up() {
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncBufRead, AsyncRead, ReadBuf};
+
+    struct HangUp {
+        polls: std::cell::Cell<usize>,
+    }
+    impl AsyncRead for HangUp {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Pending
+        }
+    }
+    impl AsyncBufRead for HangUp {
+        fn poll_fill_buf(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<&[u8]>> {
+            let n = self.polls.get();
+            self.polls.set(n + 1);
+            if n == 0 {
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(&[]))
+            }
+        }
+        fn consume(self: Pin<&mut Self>, _amt: usize) {}
+    }
+
+    let (_dir, q) = tmp_store();
+    let q = std::sync::Arc::new(q);
+    let chain = std::sync::Arc::new(ChainParams::regtest());
+    let scan = "0f694e068028a717f8af6b9411f9a133dd3565258714cc226594b34db90c1f2c";
+    let spend = "025cc9856d6f8375350e123978daac200c260cb5b5ae83106cab90484dcd8fcf36";
+    let sub = crate::silent_scan::parse_sub(
+        &json!([scan, spend, 0]),
+        bitcoin::Network::Regtest,
+        Some(crate::silent_scan::SP_SCAN_CHUNK),
+    )
+    .unwrap();
+    let last = crate::silent_scan::SP_SCAN_CHUNK;
+    let ranges = super::sp_scan_ranges(sub.start, last);
+    assert_eq!(ranges.len(), 2, "the fixture spans two chunks");
+    let mut reader = HangUp {
+        polls: std::cell::Cell::new(0),
+    };
+    let scanned = super::scan_sp_off_connection(&mut reader, &q, &chain, &sub, last).await;
+    assert_eq!(
+        scanned.chunks, 1,
+        "a hang-up before the next chunk stops the scan"
+    );
+}
+
 include!("electrum_sh_journey.rs");

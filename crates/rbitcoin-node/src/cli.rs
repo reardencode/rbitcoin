@@ -304,7 +304,7 @@ fn operator_usage() -> String {
     [--i2p-sam [HOST:PORT]] [--i2p-accept-incoming] \\\n\
     [--electrum-listen ADDR] [--esplora-listen ADDR] [--esplora-onion[=0|1]] [--health-listen [ADDR]] [--metrics] \\\n\
     [--sh-index] [--block-filter-index] [--prune-seqsigwit] [--prune-seqsigwit-ram-threshold-bytes N] [--sp-tweaks] [--sp-tweaks-dust SATS] [--max-sh-creates N] [--electrum-max-subs N] [--esplora-block-template] \\\n\
-    [--rpc] [--rpc-listen [ADDR]] [--rpc-socket PATH] [--rpc-token-file PATH] [--rpc-cookie-file PATH] [--rpc-work-queue N] \\\n\
+    [--rpc] [--rpc-listen [ADDR]] [--rest] [--rpc-socket PATH] [--rpc-token-file PATH] [--rpc-cookie-file PATH] [--rpc-work-queue N] \\\n\
     [--milestone HEIGHT] \\\n\
     [--max-outbound N] [--max-inbound N] \\\n\
     [--mempool-size-mb N] [--mempool-expiry HOURS] \\\n\
@@ -357,7 +357,7 @@ Silent payments: --sp-tweaks (default off) writes/serves the thin BIP-352 tweak 
 Health: --health-listen [ADDR] serves GET /healthz from the first second of startup\n\
   and GET /readyz (default 127.0.0.1:9332). Unauthenticated; keep it on loopback or a\n\
   probe-only network. --metrics adds Prometheus GET /metrics there (needs --health-listen).\n\
-RPC: --rpc unix socket {{datadir}}/rpc.sock; --rpc-listen [ADDR] adds TCP (default 127.0.0.1 and Core-matching port). Token {{datadir}}/rpc.token (Bearer); --rpc-cookie-file opts TCP into Core cookie HTTP Basic. No --rpcuser.\n\
+RPC: --rpc unix socket {{datadir}}/rpc.sock; --rpc-listen [ADDR] adds TCP (default 127.0.0.1 and Core-matching port). Token {{datadir}}/rpc.token (Bearer); --rpc-cookie-file opts TCP into Core cookie HTTP Basic. No --rpcuser. --rest turns on unauthenticated /rest/ on those listeners (off unless set).\n\
 Cold files: --datadir-cold PATH puts Class A seqsigwit.body/idx under PATH/store (HDD).\n\
   Default (flag omitted): hot and cold files both live under --datadir.\n\
 Conf: --conf FILE (snake_case key=value; CLI kebab overrides conf). See OPERATOR.md and docs/rpc.md.\n\
@@ -413,6 +413,7 @@ fn is_bool_key(key: &str) -> bool {
             | "i2p_accept_incoming"
             | "inhibit_suspend"
             | "metrics"
+            | "rest"
             | "trusted"
             | "always_relay"
             | "relay"
@@ -625,6 +626,7 @@ mod tests {
             "--esplora-onion",
             "--rpc",
             "--rpc-listen",
+            "--rest",
             "--rpc-socket",
             "--rpc-token-file",
             "--rpc-cookie-file",
