@@ -1219,12 +1219,18 @@ fn ctx_regtest_hub() -> (RpcContext, TempDir, Arc<rbitcoin_net::ChainHub>) {
 }
 
 fn ctx_regtest_hub_with_weight(max_wu: u64) -> (RpcContext, TempDir, Arc<rbitcoin_net::ChainHub>) {
-    use rbitcoin_consensus::{ChainParams, Milestone};
+    ctx_regtest_hub_on(rbitcoin_consensus::ChainParams::regtest(), max_wu)
+}
+
+fn ctx_regtest_hub_on(
+    params: rbitcoin_consensus::ChainParams,
+    max_wu: u64,
+) -> (RpcContext, TempDir, Arc<rbitcoin_net::ChainHub>) {
     let dir = TempDir::labeled("rpc-gen").expect("temp dir");
     let hub = Arc::new(rbitcoin_net::ChainHub::new(
         Query::open_or_create_tiny(dir.join("store")).unwrap(),
-        ChainParams::regtest(),
-        Milestone::NONE,
+        params,
+        rbitcoin_consensus::Milestone::NONE,
     ));
     hub.ensure_genesis().unwrap();
     let mp = MempoolHub::open_with_weight(dir.join("mempool"), hub.query.clone(), max_wu).unwrap();
@@ -4259,6 +4265,38 @@ fn http_wait_satisfied_tracks_the_setter() {
     assert!(http_wait_satisfied());
     set_http_wait_satisfied(false);
     assert!(!http_wait_satisfied());
+}
+
+/// Core ContextualCheckBlock: a coinbase without this height's BIP34 push is
+/// `bad-cb-height`, a consensus reject the node remembers.
+#[test]
+fn submitblock_bip34_height_reject_is_bad_cb_height() {
+    let mut params = rbitcoin_consensus::ChainParams::regtest();
+    params.apply_test_activation_height("bip34", 1).unwrap();
+    let (ctx, _dir, hub) = ctx_regtest_hub_on(params, 300_000_000);
+    let (_, spk) = p2wpkh_regtest();
+    let mine_claiming = |claimed: u32| {
+        rbitcoin_consensus::mine_regtest_paying(
+            hub.tip_hash().unwrap(),
+            hub.tip_header().unwrap().time + 1,
+            claimed,
+            spk.clone(),
+            vec![],
+        )
+    };
+    let submit = |b: &bitcoin::Block| {
+        let hex = hex_encode(bitcoin::consensus::serialize(b));
+        dispatch(&ctx, "submitblock", vec![json!(hex)]).unwrap()
+    };
+    let wrong = mine_claiming(2);
+    assert_eq!(submit(&wrong), "bad-cb-height");
+    assert_eq!(
+        submit(&wrong),
+        "duplicate-invalid",
+        "bad-cb-height is a consensus reject, not a mutated body"
+    );
+    let r = submit(&mine_claiming(1));
+    assert!(r.is_null(), "the right height push connects: {r}");
 }
 
 include!("regtest_chain_ops_journey.rs");

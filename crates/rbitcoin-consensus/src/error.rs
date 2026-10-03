@@ -104,6 +104,9 @@ pub fn block_reject_reason(err: &ConsensusError) -> String {
         ConsensusError::BadBlock("coinbase not first") => "bad-txns-duplicate".into(),
         ConsensusError::BadBlock("duplicate txid") => "bad-txns-duplicate".into(),
         ConsensusError::BadBlock("merkle root mismatch") => "bad-txnmrklroot".into(),
+        ConsensusError::BadBlock("bip34 height encoding" | "bip34 coinbase script empty") => {
+            "bad-cb-height".into()
+        }
         ConsensusError::BadBlock(s) => (*s).into(),
         ConsensusError::BadHeader("timestamp <= median-time-past") => "time-too-old".into(),
         ConsensusError::BadHeader("timestamp too far in future") => "time-too-new".into(),
@@ -246,6 +249,12 @@ mod tests {
             block_reject_reason(&ConsensusError::BadBlock("coinbase excess value")),
             "bad-cb-amount"
         );
+        for bip34 in ["bip34 height encoding", "bip34 coinbase script empty"] {
+            assert_eq!(
+                block_reject_reason(&ConsensusError::BadBlock(bip34)),
+                "bad-cb-height"
+            );
+        }
         assert_eq!(
             block_reject_reason(&ConsensusError::BadHeader("incorrect proof of work bits")),
             "bad-diffbits"
