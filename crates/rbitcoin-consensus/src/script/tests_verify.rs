@@ -1214,3 +1214,61 @@ fn p2wsh_witness_script_larger_than_520_is_valid() {
         "P2WSH witnessScript >520 must verify (Core ExecuteWitnessScript after SpanPopBack)",
     );
 }
+
+/// Core pushes every scriptSig element through the interpreter's
+/// MAX_SCRIPT_ELEMENT_SIZE check. Pre-BIP66 lax DER ignores junk after S, so
+/// a valid signature padded past 520 bytes must still fail on push size.
+#[test]
+fn p2pkh_signature_push_over_520_rejected_pre_bip66() {
+    let secp = Secp256k1::new();
+    let sk = SecretKey::from_slice(&[3u8; 32]).unwrap();
+    let pk_bytes = bitcoin::PublicKey::new(sk.public_key(&secp)).to_bytes();
+    let spk = ScriptBuf::new_p2pkh(&bitcoin::PubkeyHash::hash(&pk_bytes));
+    let prevout = TxOut {
+        value: Amount::from_sat(50_000),
+        script_pubkey: spk.clone(),
+    };
+    let mut tx = Transaction {
+        version: bitcoin::transaction::Version::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(49_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let sighash = SighashCache::new(&tx)
+        .legacy_signature_hash(0, &spk, EcdsaSighashType::All as u32)
+        .unwrap();
+    let der = secp
+        .sign_ecdsa(&Message::from_digest(sighash.to_byte_array()), &sk)
+        .serialize_der()
+        .to_vec();
+
+    let mut verdicts = Vec::new();
+    for junk in [0usize, 400, 460] {
+        let mut sig = der.clone();
+        sig.extend(std::iter::repeat_n(0xeeu8, junk));
+        sig.push(EcdsaSighashType::All as u8);
+        let sig = bitcoin::script::PushBytesBuf::try_from(sig).unwrap();
+        let pk = bitcoin::script::PushBytesBuf::try_from(pk_bytes.clone()).unwrap();
+        tx.input[0].script_sig = bitcoin::script::Builder::new()
+            .push_slice(&sig)
+            .push_slice(&pk)
+            .into_script();
+        let flags = crate::block::ScriptVerifyFlags::buried(true, true, false, true, true);
+        let job = ScriptCheckJob::new(vec![prevout.clone()], tx.clone(), flags);
+        verdicts.push((sig.len(), script::verify_job_all_inputs(&job).is_ok()));
+    }
+    assert!(verdicts[2].0 > 520, "{verdicts:?}");
+    assert_eq!(
+        verdicts.iter().map(|v| v.1).collect::<Vec<_>>(),
+        [true, true, false],
+        "{verdicts:?}"
+    );
+}
