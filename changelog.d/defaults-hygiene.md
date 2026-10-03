@@ -16,3 +16,4 @@ Security
   contains CR, LF, or NUL is refused, and passing it on the command
   line warns once. A conf error names the file and line and does not
   echo the raw line. A group- or world-readable RPC cookie warns once.
+- Findings write-ups: 073, 074, 075, 076, 077, 078, 079, 080, 081, 082, 083.

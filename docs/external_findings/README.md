@@ -77,6 +77,17 @@ rbitcoin reference, or redteam static analysis). Numbered reports live beside th
 | [070](./070-manifest-length.md) | low | Manifest and txstat lengths must fit the file | fixed | `manifest_length_past_the_file_is_corrupt` |
 | [071](./071-datadir-lock-symlink.md) | low | Datadir lock does not follow a symlink | fixed | `lock_file_does_not_follow_a_symlink` |
 | [072](./072-pool-write-slice.md) | low | Pool write jobs use a shared slice | fixed | `pool write arm uses a shared slice` |
+| [073](./073-testnet-milestone-scripts.md) | medium | Omitted testnet milestone checks every script | fixed | `p3_default_milestone_heights` |
+| [074](./074-tip-body-orphan-bytes.md) | medium | Tip-follow bodies and one peer's orphans are bounded | fixed | `pending_block_over_four_megabytes_is_not_parked` |
+| [075](./075-secret-debug.md) | low | Secret debug output is redacted | fixed | `debug_does_not_print_secret_bytes` |
+| [076](./076-bip68-genesis-median.md) | low | Height 0 is a genesis coin for BIP68 | fixed | `bip68_height_zero_time_lock_uses_the_median` |
+| [077](./077-empty-median.md) | low | Empty median time is an error | fixed | `empty_median_time_is_an_error` |
+| [078](./078-version-nonce.md) | low | Version nonce comes from the CSPRNG | fixed | `rand_nonce_changes` |
+| [079](./079-recent-reject-cap.md) | low | Recent-reject set stops at 4096 | fixed | `recent_reject_at_the_cap_does_not_clear` |
+| [080](./080-tor-control-password.md) | low | Tor control password rejects a line break | fixed | `tor_control_password_rejects_a_line_break` |
+| [081](./081-conf-error-line.md) | low | Conf errors name the file and line | fixed | `conf_error_names_the_file_and_line` |
+| [082](./082-invalid-hash-cap.md) | low | Invalid-hash set stops at 4096 | fixed | `invalid_hash_set_stops_at_the_cap` |
+| [083](./083-mempool-expiry-cursor.md) | low | Mempool expiry runs without a new admission | fixed | `expire_stale_drops_old_tx_without_a_new_accept` |
 
 **012–021:** fuzzamoto differential report (`rbitcoin-report.tar.gz`, baseline
 `8f3990f`). Report-local 001–010 are **renumbered** here. Identity/BIP30
