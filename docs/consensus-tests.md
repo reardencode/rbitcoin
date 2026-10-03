@@ -137,6 +137,7 @@ version floors and exact +2h).
 | C22 | Subsidy halving interval from params | 50 BTC until interval | `p1_block_subsidy_halvings`; `rejects_coinbase_excess_value_fast`; journey overlay interval=2: `header_and_spending_boundaries` |
 | C27 | Captured signet/mainnet script-edge wire blocks (not Core JSON) | hash / opcode presence; detached verify | `script_edge_fixtures` |
 | C28 | Coinbase maturity (`COINBASE_MATURITY`) when the coinbase and its spender are in different blocks of one confirm batch | `BadTx("coinbase immature")` at created+99; created+100 accepts | `consensus_rules::coinbase_maturity_holds_inside_one_confirm_batch`; one-block-per-batch: `header_and_spending_boundaries` |
+| C34 | Base CHECKMULTISIG FindAndDelete of an empty sig removes every OP_0 opcode before the other sigs hash scriptCode | accept / `SIG_DER` | `legacy_multisig_empty_sig_deletes_op_0_from_script_code` |
 
 ## Adding a new rule
 
