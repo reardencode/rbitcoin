@@ -1,6 +1,6 @@
 //! Peer dial, header request, stall disconnect / cooldown.
 
-use super::peer_io::{ibd_mono_ms, solicit_track, spawn_peer, PeerCmd, PeerEventSinks, PeerSlot};
+use super::peer_io::{ibd_mono_ms, spawn_peer, PeerCmd, PeerEventSinks, PeerSlot};
 use super::rate::RELSLOW_ACTIVE_MS;
 use crate::chain::ChainHub;
 use crate::error::NetError;
@@ -650,16 +650,23 @@ pub(crate) fn disconnect_stalled_block_peers_at(
     let mut freed = Vec::new();
     let stall = stall.max(Duration::from_secs(30));
     let stall_ms = stall.as_millis() as u64;
-    let stalled_peers: Vec<(usize, usize, SocketAddr)> = slots
+    let stalled_peers: Vec<(usize, usize, SocketAddr, u64)> = slots
         .iter()
         .filter(|s| s.alive && !s.in_flight.is_empty())
         .filter(|s| s.rate.stalled(now_ms, stall_ms, true))
-        .map(|s| (s.id, s.in_flight.len(), s.addr))
+        .map(|s| {
+            (
+                s.id,
+                s.in_flight.len(),
+                s.addr,
+                s.bytes_rx_total.load(Ordering::Relaxed),
+            )
+        })
         .collect();
-    for (id, n_work, addr) in stalled_peers {
+    for (id, n_work, addr, stream) in stalled_peers {
         let cool = record_stall_kick(addr_cooldown, addr_strikes, addr, now);
         warn!(
-            "ibd: peer[{id}] {addr} stalled (no block progress for {stall:?}, {n_work} in-flight) — disconnect + reassign (cooldown {cool:?})"
+            "ibd: peer[{id}] {addr} stalled (no block progress for {stall:?}, {n_work} in-flight, stream={stream}) — disconnect + reassign (cooldown {cool:?})"
         );
         if let Some(s) = slots.iter_mut().find(|s| s.id == id) {
             let _ = s.cmd_tx.send(PeerCmd::Shutdown);
@@ -772,6 +779,7 @@ pub(crate) fn disconnect_relative_slow_block_peers_at(
 
 #[cfg(test)]
 mod tests {
+    use super::super::peer_io::solicit_track;
     use super::*;
     use bitcoin::hashes::Hash;
     use bitcoin::BlockHash;

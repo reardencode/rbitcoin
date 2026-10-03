@@ -35,7 +35,7 @@ use super::assign_plan::densify_slots_for_peer;
 use super::dial::{
     median_u64, relative_slow_pick, RelativeSlowSample, RELATIVE_SLOW_CLUSTER_SPREAD,
 };
-use super::peer_io::{ibd_mono_ms, solicit_track, PeerCmd, PeerSlot};
+use super::peer_io::{ibd_mono_ms, PeerCmd, PeerSlot};
 use super::state::{self, IbdWorkState};
 use super::status::LoopStats;
 use super::{
@@ -1391,6 +1391,7 @@ pub(crate) fn cover_tip_holes(
 
 #[cfg(test)]
 pub(in crate::ibd) mod tests {
+    use super::super::peer_io::solicit_track;
     use super::super::status::LoopStats;
     use super::*;
     use bitcoin::hashes::Hash;
