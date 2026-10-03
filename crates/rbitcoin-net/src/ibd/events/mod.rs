@@ -834,7 +834,7 @@ pub(crate) fn apply_confirm_reject(
         }
         ConfirmRejectClass::SoftWire => {}
         ConfirmRejectClass::Cascade => {
-            apply_cascade_reject(st, height, hash, err, hub, batch_len);
+            apply_cascade_reject(st, height, hash, err, hub);
         }
         ConfirmRejectClass::EngineFault => {
             apply_engine_fault_reject(st, height, hash, err, query);
@@ -941,43 +941,16 @@ fn punish_mutated_sender(st: &mut IbdWorkState, peer: usize, hash: BlockHash) {
     );
 }
 
-/// A cascaded wave lost its in-pipeline work, and lookup had already taken
-/// its bodies off the queue. A pending flag in `heights` with no queue wire
-/// behind it would wait for the stale timeout, so mark it missing and reopen
-/// densify for a re-get. Earlier waves are not touched: they are still in
-/// scripts or write, and if a load-side rewind left them epoch-stale, the
-/// write drops them and tip-hole cover fetches them again.
-fn demote_unqueued_pending(st: &mut IbdWorkState, hub: &ChainHub, heights: std::ops::Range<u32>) {
-    let mut freed = Vec::new();
-    for ht in heights {
-        if let Some(&hash) = st.height_to_hash.get(&ht) {
-            super::assign::demote_zombie_pending_for_fetch(&mut st.body, hub, hash, Some(ht));
-            if st.body.is_missing(&hash) {
-                freed.push(hash);
-            }
-        }
-    }
-    st.reopen_for_densify(&freed);
-}
-
 fn apply_cascade_reject(
     st: &mut IbdWorkState,
     height: u32,
     hash: BlockHash,
     err: &str,
     hub: Option<&crate::chain::ChainHub>,
-    batch_len: usize,
 ) {
-    // Leave the body queue: the plan was stale, the wire is still good. A
-    // body of this wave that lookup already took is fetched again.
+    // Leave the body queue: the plan was stale, and the confirm thread that
+    // rejected offered any body it held back.
     clear_hash_inflight(&mut st.slots, &mut st.inflight, hash);
-    if let Some(h) = hub {
-        demote_unqueued_pending(
-            st,
-            h,
-            height..height.saturating_add(batch_len.max(1) as u32),
-        );
-    }
     const CASCADE_HALT_AFTER: u8 = 3;
     let tip = hub
         .and_then(|h| h.tip_hash())

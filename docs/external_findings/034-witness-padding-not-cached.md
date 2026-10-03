@@ -23,8 +23,14 @@ merkle root (with the CVE-2012-2459 repeated-tail flag,
 does not commit to is never blamed on the hash. As in Core's
 `MaybePunishNodeForBlock` (`BLOCK_MUTATED`), IBD drops and cools down the
 peer that sent the mutated body unless it is noban, so the re-get goes to
-another peer.
+another peer. A mutated body checked in a batch is retried one block at a
+time from the bodies the confirm engine already holds. IBD does not fetch
+the batch again, so the peer dropped is the one that sent the mutated
+body, even when the engine retakes and rejects it before IBD applies the
+batch reject.
 
 **Regression:** `rbitcoin-net`
 `chain::tests::hostile_peer_session`,
-`ibd::events::confirm_reject_tests::ibd_mutated_body_is_refetched_not_blacklisted`
+`ibd::events::confirm_reject_tests::ibd_mutated_body_is_refetched_not_blacklisted`,
+`ibd::events::confirm_reject_tests::ibd_batched_mutated_body_is_isolated_to_its_block`,
+`ibd::events::confirm_reject_tests::isolated_mutated_head_punishes_its_sender_when_lookup_runs_ahead`

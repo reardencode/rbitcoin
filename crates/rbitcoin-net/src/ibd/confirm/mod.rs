@@ -568,14 +568,17 @@ fn rearm_after_reject(
 }
 
 /// Stamp/pin fail: drop speculative fks, bump the feed epoch, re-offer to BQ.
-/// A one-block wave drops its failing block. A batched reject names the first
-/// hash but may be any block's fault, so every block goes back and the retry
-/// runs one block at a time.
+/// A one-block verdict drops its failing block; a one-block cascade (a stale
+/// plan, or a consensus reject against a parent that is not the tip) goes
+/// back for a retry. A batched reject names the first hash but may be any
+/// block's fault, so every block goes back and the retry runs one block at
+/// a time.
 fn load_fail_rewind_wave(
     feed: &ConfirmFeed,
     hub: &ChainHub,
     lookup_ahead: &mut LoadAheadState,
     first_h: u32,
+    class: ConfirmRejectClass,
     wave: &[(u32, BlockHash, &bitcoin::Block)],
 ) {
     lookup_ahead.clear_all(hub);
@@ -588,7 +591,11 @@ fn load_fail_rewind_wave(
     }
     hub.query.set_lookup_taken_hi(hub.tip_height());
     hub.query.set_lookup_started_hi(hub.tip_height());
-    reoffer_blocks_to_body_queue(hub, wave[usize::from(wave.len() == 1)..].iter().copied());
+    let drop_head = match wave {
+        [(_, hash, _)] => class.trust_consensus(hub, *hash) != ConfirmRejectClass::Cascade,
+        _ => false,
+    };
+    reoffer_blocks_to_body_queue(hub, wave[usize::from(drop_head)..].iter().copied());
     feed.notify();
 }
 
@@ -2051,6 +2058,7 @@ pub(crate) fn spawn_confirm_engine(
                                 &hub_load,
                                 &mut lookup_ahead,
                                 expect_h,
+                                class,
                                 &wire_batch
                                     .iter()
                                     .map(|(h, ha, w)| (*h, *ha, w.block.as_ref()))
@@ -2204,11 +2212,13 @@ pub(crate) fn spawn_confirm_engine(
                             );
                             continue;
                         }
+                        let class = ConfirmRejectClass::from_net(&e);
                         load_fail_rewind_wave(
                             &feed_load,
                             &hub_load,
                             &mut lookup_ahead,
                             expect_h,
+                            class,
                             &wire_batch
                                 .iter()
                                 .map(|(h, ha, w)| (*h, *ha, w.block.as_ref()))
@@ -2223,7 +2233,7 @@ pub(crate) fn spawn_confirm_engine(
                             &feed_load,
                             expect_h,
                             first_hash,
-                            ConfirmRejectClass::from_net(&e),
+                            class,
                             msg,
                             heights_hashes.len(),
                         )

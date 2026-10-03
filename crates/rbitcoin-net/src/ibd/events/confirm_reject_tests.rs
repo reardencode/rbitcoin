@@ -2013,89 +2013,6 @@ fn ibd_mutated_body_is_refetched_not_blacklisted() {
     rig.finish();
 }
 
-/// A write-side cascade (a plan a rewind left stale) names tip+1, whose
-/// body lookup already took off the queue. That body is fetched again and
-/// connects. A queued body above it is left alone, and a reject above
-/// tip+1 does not re-request tip+1 while it may still be in scripts or
-/// write.
-#[test]
-fn cascade_refetches_its_own_taken_body() {
-    use super::super::assign::tests::lock_default_assign_stop;
-    use super::super::state::InflightReq;
-    use bitcoin::ScriptBuf;
-    use rbitcoin_consensus::mine_regtest_paying;
-
-    let _env = lock_default_assign_stop();
-    let mut rig = WireRig::new("cascade-taken", 1);
-    let (t, cbs) = (rig.t, rig.cbs.clone());
-    let spk = ScriptBuf::from_bytes(vec![0x51]);
-    let b1 = mine_regtest_paying(
-        rig.tip,
-        rig.tip_time + 600,
-        t + 1,
-        spk.clone(),
-        vec![WireRig::spend(cbs[0])],
-    );
-    let b2 = mine_regtest_paying(
-        b1.block_hash(),
-        rig.tip_time + 1200,
-        t + 2,
-        spk,
-        vec![WireRig::spend(cbs[1])],
-    );
-    let (h1, h2) = (b1.block_hash(), b2.block_hash());
-    rig.plant(&[&b1, &b2]);
-    rig.st.body.mark_pending(h1);
-    rig.st.slots[0].in_flight.insert(h2);
-    rig.st.inflight.insert(h2, InflightReq::new(1));
-    rig.deliver(1, &b2);
-    let stale =
-        "store: corrupt record: tx put_full_batch fk mismatch (plan not committed in order)";
-    let hub = std::sync::Arc::clone(&rig.hub);
-    let reject = |st: &mut IbdWorkState, ht: u32, hash, class, err: &str| {
-        apply_confirm_reject_class(
-            st,
-            ht,
-            hash,
-            class,
-            err,
-            Some(&hub.query),
-            Some(&hub),
-            1,
-            None,
-        );
-    };
-
-    // tip+1 is pending with no queue wire, as while it is in scripts or
-    // write. Rejects at tip+2 leave it alone.
-    let soft = "consensus: bad header: missing retarget first header";
-    reject(&mut rig.st, t + 2, h2, ConfirmRejectClass::SoftWire, soft);
-    assert!(rig.st.body.is_missing(&h2));
-    rig.st.slots[0].in_flight.insert(h2);
-    rig.st.inflight.insert(h2, InflightReq::new(1));
-    rig.deliver(1, &b2);
-    reject(&mut rig.st, t + 2, h2, ConfirmRejectClass::Cascade, stale);
-    assert!(
-        rig.st.body.is_pending(&h1),
-        "in-pipeline tip+1 is not re-asked"
-    );
-    assert!(rig.st.body.is_pending(&h2), "queued body stays");
-
-    rig.st.densify_scan_lo = t + 3;
-    reject(&mut rig.st, t + 1, h1, ConfirmRejectClass::Cascade, stale);
-    assert!(rig.st.body.is_missing(&h1), "taken body is fetched again");
-    assert_eq!(rig.st.densify_scan_lo, t + 1);
-    assert!(rig.st.body.is_pending(&h2), "queued body stays");
-
-    rig.start_engine();
-    let rejects = rig.pump(
-        |_, hash| if hash == h1 { b1.clone() } else { b2.clone() },
-        |_, hub, _| hub.tip_hash() == Some(h2),
-    );
-    assert!(rejects.is_empty(), "{rejects:?}");
-    rig.finish();
-}
-
 /// While isolated, lookup takes tip+2 only after tip+1 has connected: no
 /// block is claimed while the one before it is still in the pipeline.
 #[test]
@@ -2429,5 +2346,97 @@ fn batched_scripts_reject_offers_the_wave_back() {
     );
     assert!(!asked_h1, "tip+1 came back from the reject, not a getdata");
     assert_eq!(rig.hub.tip_hash(), Some(h1));
+    rig.finish();
+}
+
+/// Peer 2 serves a mutated tip+1 in one wave with tip+2. The wave reject
+/// is isolated, and the confirm engine retakes tip+1 and rejects it alone
+/// before IBD applies either reject. Applied together, the mutated sender
+/// is still the peer dropped, and both honest bodies then connect.
+#[test]
+fn isolated_mutated_head_punishes_its_sender_when_lookup_runs_ahead() {
+    use super::super::assign::tests::lock_default_assign_stop;
+    use super::super::confirm::ConfirmEvent;
+    use super::super::state::InflightReq;
+    use bitcoin::ScriptBuf;
+    use rbitcoin_consensus::mine_regtest_paying;
+    use std::time::{Duration, Instant};
+
+    let _env = lock_default_assign_stop();
+    let mut rig = WireRig::new("mutated-head-ahead", 3);
+    let (t, cbs) = (rig.t, rig.cbs.clone());
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+    let b1 = mine_regtest_paying(
+        rig.tip,
+        rig.tip_time + 600,
+        t + 1,
+        spk.clone(),
+        vec![WireRig::spend(cbs[0])],
+    );
+    let b2 = mine_regtest_paying(
+        b1.block_hash(),
+        rig.tip_time + 1200,
+        t + 2,
+        spk,
+        vec![WireRig::spend(cbs[1])],
+    );
+    let (h1, h2) = (b1.block_hash(), b2.block_hash());
+    let mut mutated = b1.clone();
+    mutated.txdata.push(mutated.txdata[1].clone());
+    rig.plant(&[&b1, &b2]);
+    for (peer, body) in [(2, &mutated), (1, &b2)] {
+        let hash = body.block_hash();
+        rig.st.slots[peer - 1].in_flight.insert(hash);
+        rig.st.inflight.insert(hash, InflightReq::new(peer));
+        rig.deliver(peer, body);
+    }
+    rig.start_engine();
+
+    // Hold the rejects until the engine has retaken tip+1 and rejected it
+    // alone, then apply them as one drain.
+    let rx = &rig.engine.as_ref().unwrap().1;
+    let (held_tx, held) = std::sync::mpsc::channel();
+    let mut seen = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !seen.contains(&(h1, ConfirmRejectClass::SoftWire, 1)) {
+        assert!(Instant::now() < deadline, "no isolated reject: {seen:?}");
+        let Ok(ev) = rx.recv_timeout(Duration::from_millis(5)) else {
+            continue;
+        };
+        if let ConfirmEvent::Reject {
+            hash,
+            class,
+            batch_len,
+            ..
+        } = &ev
+        {
+            seen.push((*hash, *class, *batch_len));
+        }
+        held_tx.send(ev).unwrap();
+    }
+    assert_eq!(seen[0], (h1, ConfirmRejectClass::Cascade, 2), "{seen:?}");
+    super::apply_confirm_events(
+        &mut rig.st,
+        &rig.hub,
+        &held,
+        &rig.write_next,
+        &std::sync::atomic::AtomicU32::new(0),
+        &mut rig.progress,
+        Some(&rig.feed),
+    );
+    assert!(
+        !rig.st.slots[1].alive,
+        "the mutated body's sender is dropped"
+    );
+    assert!(rig.st.slots[0].alive, "tip+2's sender is kept");
+
+    let rejects = rig.pump(
+        |_, hash| if hash == h1 { b1.clone() } else { b2.clone() },
+        |_, hub, _| hub.tip_hash() == Some(h2),
+    );
+    assert!(
+        rejects.iter().all(|r| r.1 != ConfirmRejectClass::SoftWire),
+        "{rejects:?}"
+    );
     rig.finish();
 }
