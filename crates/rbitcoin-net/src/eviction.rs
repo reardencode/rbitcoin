@@ -20,6 +20,8 @@ const PROTECT_NETGROUP: usize = 4;
 const PROTECT_BLOCKS: usize = 4;
 const PROTECT_TXS: usize = 4;
 const PROTECT_MINPING: usize = 8;
+/// Longest-connected inbound peers kept when slots are full.
+const PROTECT_LONGEST: usize = 8;
 
 /// Pick one inbound id to disconnect, or `None` if every candidate is protected.
 pub fn select_inbound_eviction(mut cands: Vec<InboundEvictCandidate>) -> Option<u64> {
@@ -60,13 +62,37 @@ pub fn select_inbound_eviction(mut cands: Vec<InboundEvictCandidate>) -> Option<
         return None;
     }
 
-    // Prefer the longest-connected remaining peer (stable id tie-break).
+    // A share of the longest-connected peers stays. Evicting them is how a
+    // new inbound replaces the peers that have been useful the longest.
     cands.sort_by(|a, b| {
         a.connected_at
             .cmp(&b.connected_at)
             .then_with(|| a.id.cmp(&b.id))
     });
-    Some(cands[0].id)
+    remove_first_k(&mut cands, PROTECT_LONGEST);
+    if cands.is_empty() {
+        return None;
+    }
+
+    // Newest peer in the largest netgroup. Group ids are the integers stored
+    // at accept; this compares those integers and does not read asmap.
+    let mut counts = std::collections::HashMap::<u64, usize>::new();
+    for c in &cands {
+        *counts.entry(c.netgroup).or_insert(0) += 1;
+    }
+    let (group, _) = counts
+        .into_iter()
+        .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
+        .expect("at least one candidate");
+    cands
+        .iter()
+        .filter(|c| c.netgroup == group)
+        .max_by(|a, b| {
+            a.connected_at
+                .cmp(&b.connected_at)
+                .then_with(|| a.id.cmp(&b.id))
+        })
+        .map(|c| c.id)
 }
 
 fn ping_key(min_ping: Option<f64>) -> f64 {
@@ -135,6 +161,65 @@ mod tests {
     }
 
     #[test]
+    fn eviction_drops_the_newest_in_the_largest_netgroup() {
+        // Low ids are one-peer groups with a better ping, so the block, tx,
+        // ping, and netgroup protects consume them. The interesting peers are
+        // a size-3 group and one newer peer alone in another group.
+        let mut cands = Vec::new();
+        for i in 1..=40 {
+            cands.push(InboundEvictCandidate {
+                id: i,
+                connected_at: 1,
+                min_ping: Some(0.01),
+                last_block: 0,
+                last_tx: 0,
+                netgroup: 1_000 + i,
+                noban: false,
+            });
+        }
+        cands.push(InboundEvictCandidate {
+            id: 100,
+            connected_at: 10,
+            min_ping: Some(1.0),
+            last_block: 0,
+            last_tx: 0,
+            netgroup: 7,
+            noban: false,
+        });
+        cands.push(InboundEvictCandidate {
+            id: 101,
+            connected_at: 50,
+            min_ping: Some(1.0),
+            last_block: 0,
+            last_tx: 0,
+            netgroup: 7,
+            noban: false,
+        });
+        cands.push(InboundEvictCandidate {
+            id: 102,
+            connected_at: 200,
+            min_ping: Some(1.0),
+            last_block: 0,
+            last_tx: 0,
+            netgroup: 7,
+            noban: false,
+        });
+        cands.push(InboundEvictCandidate {
+            id: 103,
+            connected_at: 500,
+            min_ping: Some(1.0),
+            last_block: 0,
+            last_tx: 0,
+            netgroup: 9_000,
+            noban: false,
+        });
+        let victim = select_inbound_eviction(cands).expect("one inbound to evict");
+        assert_ne!(victim, 101, "the oldest peer in the largest group stays");
+        assert_ne!(victim, 103, "a newer peer in a smaller group stays");
+        assert_eq!(victim, 102, "evict the newest peer in the largest netgroup");
+    }
+
+    #[test]
     fn eviction_protects_block_tx_ping_and_netgroup() {
         // 4 block + 5 slow + 4 tx + 8 fast = 21; after protects, one slow remains.
         let mut cands = Vec::new();
@@ -150,8 +235,10 @@ mod tests {
         for i in 13..21 {
             cands.push(cand(i, 400 + i, Some(0.01), 0, 0));
         }
-        let victim = select_inbound_eviction(cands).expect("one unprotected slow");
-        assert!((4..9).contains(&victim), "victim={victim}");
+        assert!(
+            select_inbound_eviction(cands).is_none(),
+            "block, tx, ping, netgroup, and longest-connected protects cover this set"
+        );
     }
 
     #[test]

@@ -64,6 +64,9 @@ rbitcoin reference, or redteam static analysis). Numbered reports live beside th
 | [057](./057-block-getdata-budget.md) | medium | Block serving stops when the send budget is over | fixed | `getdata_stops_when_send_budget_is_already_over` |
 | [058](./058-tx-inv-batch.md) | medium | Mempool announcements batch into one inv | fixed | `tx_inv_over_one_thousand_is_two_messages` |
 | [059](./059-rate-window-boundary.md) | low | Rate window keeps the previous second | fixed | `rate_limiter_boundary_does_not_grant_a_second_budget` |
+| [060](./060-evict-newest-netgroup.md) | high | Evict the newest inbound in the largest netgroup | fixed | `eviction_drops_the_newest_in_the_largest_netgroup` |
+| [061](./061-misbehavior-remembered.md) | high | Misbehavior disconnect is remembered in memory | fixed | `misbehavior_disconnect_refuses_the_same_address` |
+| [062](./062-ibd-requested-progress.md) | high | Only a requested block moves the IBD stall clock | fixed | `unsolicited_block_does_not_refresh_progress` |
 
 **012–021:** fuzzamoto differential report (`rbitcoin-report.tar.gz`, baseline
 `8f3990f`). Report-local 001–010 are **renumbered** here. Identity/BIP30

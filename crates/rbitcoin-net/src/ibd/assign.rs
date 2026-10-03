@@ -161,7 +161,7 @@ pub(crate) fn clear_hash_inflight(
 ) {
     inflight.remove(&hash);
     for s in slots.iter_mut() {
-        s.in_flight.remove(&hash);
+        s.track_remove(&hash);
     }
 }
 
@@ -173,7 +173,7 @@ pub(crate) fn prune_satisfied_inflight(
 ) {
     inflight.retain(|h, _| !hub.has_block(h));
     for s in slots.iter_mut() {
-        s.in_flight.retain(|h| !hub.has_block(h));
+        s.track_retain(|h| !hub.has_block(h));
     }
 }
 
@@ -759,7 +759,7 @@ pub(crate) fn issue_batch(
     }
     let empty = st.slots[idx].in_flight.is_empty();
     for &h in &batch {
-        st.slots[idx].in_flight.insert(h);
+        st.slots[idx].track_insert(h);
     }
     if empty {
         st.slots[idx].rate.note_work_started(ibd_mono_ms());
@@ -1391,6 +1391,7 @@ pub(crate) fn cover_tip_holes(
 
 #[cfg(test)]
 pub(in crate::ibd) mod tests {
+    use super::super::peer_io::solicit_track;
     use super::super::status::LoopStats;
     use super::*;
     use bitcoin::hashes::Hash;
@@ -1443,6 +1444,9 @@ pub(in crate::ibd) mod tests {
             )),
             cmd_tx,
             in_flight: HashSet::new(),
+            requested: solicit_track().0,
+            solicited_bytes: solicit_track().1,
+            solicited_ms: solicit_track().2,
             peer_height: 100,
             connected_ms: 1,
             first_data_ms: 0,
@@ -1517,7 +1521,7 @@ pub(in crate::ibd) mod tests {
         let _ = getdata_asks(wire, BlockHash::all_zeros());
         let mut slots = std::mem::take(&mut st.slots);
         for s in &mut slots {
-            s.in_flight.clear();
+            s.track_clear();
             s.rate = Default::default();
             s.alive = alive.contains(&s.id);
         }

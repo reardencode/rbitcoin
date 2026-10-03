@@ -2905,6 +2905,103 @@ fn inbound_peer(
     peers.register(addr, addr, &ver, true, crate::peers::PeerConnType::Inbound)
 }
 
+#[test]
+fn inbound_netgroup_is_fixed_at_accept() {
+    let peers = crate::peers::PeerHub::new();
+    let mk = |ip: [u8; 4]| {
+        let addr = std::net::SocketAddr::from((ip, 1));
+        let ver = bitcoin::p2p::message_network::VersionMessage {
+            version: 70016,
+            services: bitcoin::p2p::ServiceFlags::NETWORK,
+            timestamp: 0,
+            receiver: bitcoin::p2p::address::Address::new(&addr, bitcoin::p2p::ServiceFlags::NONE),
+            sender: bitcoin::p2p::address::Address::new(&addr, bitcoin::p2p::ServiceFlags::NONE),
+            nonce: u64::from(ip[3]),
+            user_agent: "/rbitcoin:test/".into(),
+            start_height: 0,
+            relay: true,
+        };
+        peers.register(addr, addr, &ver, true, crate::peers::PeerConnType::Inbound)
+    };
+    let a = mk([1, 2, 3, 4]);
+    let b = mk([1, 2, 9, 9]);
+    let c = mk([1, 3, 0, 1]);
+    assert_eq!(a.netgroup(), b.netgroup(), "same /16 is one group");
+    assert_ne!(
+        a.netgroup(),
+        c.netgroup(),
+        "a different /16 is another group"
+    );
+    assert_eq!(a.netgroup(), crate::eviction::eviction_netgroup(a.addr));
+}
+
+#[test]
+fn misbehavior_disconnect_refuses_the_same_address() {
+    let peers = crate::peers::PeerHub::new();
+    let now = 1_700_000_000u64;
+    peers.set_mock_now(now);
+    let addr = std::net::SocketAddr::from(([9, 9, 9, 9], 8333));
+    let ver = bitcoin::p2p::message_network::VersionMessage {
+        version: 70016,
+        services: bitcoin::p2p::ServiceFlags::NETWORK,
+        timestamp: 0,
+        receiver: bitcoin::p2p::address::Address::new(&addr, bitcoin::p2p::ServiceFlags::NONE),
+        sender: bitcoin::p2p::address::Address::new(&addr, bitcoin::p2p::ServiceFlags::NONE),
+        nonce: 9,
+        user_agent: "/rbitcoin:test/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    let peer = peers.register(addr, addr, &ver, true, crate::peers::PeerConnType::Inbound);
+    let mut score = 0u32;
+    punish_disconnect(&mut score, Some(peer.as_ref()));
+    let other_port = std::net::SocketAddr::from(([9, 9, 9, 9], 9999));
+    assert!(
+        peers.inbound_discouraged(other_port),
+        "a misbehavior disconnect refuses that address"
+    );
+    peers.set_mock_now(now + crate::peers::PeerHub::DISCOURAGE_TTL_SECS);
+    assert!(
+        !peers.inbound_discouraged(addr),
+        "the refusal ends after a day"
+    );
+}
+
+#[test]
+fn evicted_netgroup_waits_less_than_a_day_and_the_set_is_capped() {
+    let peers = crate::peers::PeerHub::new();
+    let now = 1_800_000_000u64;
+    peers.set_mock_now(now);
+    let group = crate::eviction::eviction_netgroup("8.8.1.1:1".parse().unwrap());
+    peers.note_slot_evict(group);
+    let same = "8.8.9.9:8333".parse().unwrap();
+    assert!(
+        peers.inbound_discouraged(same),
+        "a netgroup that just lost a slot is refused"
+    );
+    peers.set_mock_now(now + crate::peers::PeerHub::NETGROUP_SLOT_WAIT_SECS);
+    assert!(
+        !peers.inbound_discouraged(same),
+        "the netgroup wait is shorter than a day"
+    );
+    peers.set_mock_now(now);
+    for i in 0..crate::peers::PeerHub::DISCOURAGE_CAP {
+        let ip = std::net::Ipv4Addr::from(i as u32);
+        peers.note_misbehavior_addr(std::net::IpAddr::V4(ip));
+    }
+    let extra = std::net::SocketAddr::from(([255, 255, 255, 254], 1));
+    peers.note_misbehavior_addr(extra.ip());
+    assert!(
+        !peers.inbound_discouraged(extra),
+        "past the cap the set does not grow"
+    );
+    let first = std::net::SocketAddr::from((std::net::Ipv4Addr::from(0u32), 1));
+    assert!(
+        peers.inbound_discouraged(first),
+        "rows already stored stay until they expire"
+    );
+}
+
 #[tokio::test]
 async fn inv_getdata_charges_send_budget() {
     use bitcoin::hashes::Hash;

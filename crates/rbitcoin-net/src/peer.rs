@@ -148,6 +148,9 @@ fn punish_disconnect(ban_score: &mut u32, session: Option<&crate::peers::LivePee
     *ban_score = ban_score.saturating_add(BAN_SCORE_THRESHOLD);
     if let Some(s) = session {
         s.request_disconnect();
+        if let Some(hub) = s.peer_hub() {
+            hub.note_misbehavior_addr(s.addr.ip());
+        }
     }
 }
 

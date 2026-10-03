@@ -319,6 +319,9 @@ pub struct LivePeer {
     addr_token_ms: AtomicU64,
     /// Unix seconds when this session was registered.
     connected_at: AtomicU64,
+    /// Netgroup fixed at accept. Inbound eviction compares this integer
+    /// and does not read asmap.
+    netgroup: u64,
     /// Skip INV for mempool txs with `accept_gen < floor` (post-verack privacy).
     inv_gen_floor: AtomicU64,
     /// Age-INV due-log cursor (`due_secs`, `accept_gen`).
@@ -928,6 +931,10 @@ impl LivePeer {
         self.connected_at.load(Ordering::Relaxed)
     }
 
+    pub(crate) fn netgroup(&self) -> u64 {
+        self.netgroup
+    }
+
     pub fn peer_hub(&self) -> Option<Arc<PeerHub>> {
         self.owner.upgrade()
     }
@@ -1309,6 +1316,10 @@ pub struct PeerHub {
     mempool: Mutex<Option<Weak<crate::tx_relay::MempoolHub>>>,
     /// Core `-whitelist` / `-whitebind` grants (`getpeerinfo.permissions`).
     net_perms: Mutex<crate::net_permissions::NetPermTable>,
+    /// Misbehavior addresses → unix second the refusal ends. In memory only.
+    discouraged_addrs: Mutex<HashMap<IpAddr, u64>>,
+    /// Netgroup → unix second a slot-loss refusal ends.
+    discouraged_groups: Mutex<HashMap<u64, u64>>,
 }
 
 fn canonical_bind(addr: SocketAddr) -> SocketAddr {
@@ -1400,6 +1411,8 @@ impl PeerHub {
             asmap: Mutex::new(None),
             mempool: Mutex::new(None),
             net_perms: Mutex::new(crate::net_permissions::NetPermTable::default()),
+            discouraged_addrs: Mutex::new(HashMap::new()),
+            discouraged_groups: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1863,6 +1876,78 @@ impl PeerHub {
         }
     }
 
+    /// One day. Not a configuration flag.
+    pub(crate) const DISCOURAGE_TTL_SECS: u64 = 24 * 60 * 60;
+    /// Shorter than [`Self::DISCOURAGE_TTL_SECS`]. A netgroup that just lost
+    /// an inbound slot cannot refill it immediately.
+    pub(crate) const NETGROUP_SLOT_WAIT_SECS: u64 = 10 * 60;
+    /// The in-memory set does not grow past this many addresses.
+    pub(crate) const DISCOURAGE_CAP: usize = 10_000;
+
+    fn sweep_discouraged(&self, now: u64) {
+        self.discouraged_addrs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, until| *until > now);
+        self.discouraged_groups
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, until| *until > now);
+    }
+
+    /// Record `ip` until [`Self::DISCOURAGE_TTL_SECS`] from now. At the cap a
+    /// new address is ignored; an address already stored is refreshed.
+    pub(crate) fn note_misbehavior_addr(&self, ip: IpAddr) {
+        let now = self.now_secs();
+        let until = now.saturating_add(Self::DISCOURAGE_TTL_SECS);
+        let mut g = self
+            .discouraged_addrs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !g.contains_key(&ip) && g.len() >= Self::DISCOURAGE_CAP {
+            return;
+        }
+        g.insert(ip, until);
+    }
+
+    /// The netgroup that just lost an inbound slot waits
+    /// [`Self::NETGROUP_SLOT_WAIT_SECS`].
+    pub(crate) fn note_slot_evict(&self, group: u64) {
+        let until = self
+            .now_secs()
+            .saturating_add(Self::NETGROUP_SLOT_WAIT_SECS);
+        let mut g = self
+            .discouraged_groups
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !g.contains_key(&group) && g.len() >= Self::DISCOURAGE_CAP {
+            return;
+        }
+        g.insert(group, until);
+    }
+
+    /// True when this inbound address or its accept-time netgroup is still
+    /// refused. Expired rows are dropped here, which is the only sweep.
+    pub(crate) fn inbound_discouraged(&self, addr: SocketAddr) -> bool {
+        let now = self.now_secs();
+        self.sweep_discouraged(now);
+        if self
+            .discouraged_addrs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&addr.ip())
+            .is_some_and(|until| *until > now)
+        {
+            return true;
+        }
+        let group = crate::eviction::eviction_netgroup(addr);
+        self.discouraged_groups
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&group)
+            .is_some_and(|until| *until > now)
+    }
+
     pub fn now_secs(&self) -> u64 {
         let mock = self.mock_now.load(Ordering::Acquire);
         if mock != 0 {
@@ -2121,6 +2206,7 @@ impl PeerHub {
             addr_tokens: Mutex::new(crate::peer::ADDR_RELAY_BURST),
             addr_token_ms: AtomicU64::new(0),
             connected_at: AtomicU64::new(connected_at),
+            netgroup: crate::eviction::eviction_netgroup(endpoint.addr),
             inv_gen_floor: AtomicU64::new(0),
             age_inv_seen_due: AtomicU64::new(0),
             age_inv_seen_gen: AtomicU64::new(0),
@@ -2606,7 +2692,7 @@ impl PeerHub {
                     min_ping: minping,
                     last_block: p.last_block.load(Ordering::Relaxed),
                     last_tx: p.last_transaction.load(Ordering::Relaxed),
-                    netgroup: crate::eviction::eviction_netgroup(p.addr),
+                    netgroup: p.netgroup,
                     noban: p.session_noban(),
                 }
             })
@@ -2614,6 +2700,9 @@ impl PeerHub {
         let Some(id) = crate::eviction::select_inbound_eviction(cands) else {
             return false;
         };
+        if let Some(p) = self.get(id) {
+            self.note_slot_evict(p.netgroup());
+        }
         rbitcoin_log::info!("p2p: evict inbound peer={id} (inbound full)");
         self.disconnect_id(id)
     }
