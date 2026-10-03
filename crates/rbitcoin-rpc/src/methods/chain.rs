@@ -1111,7 +1111,8 @@ pub(crate) fn getchaintips(ctx: &RpcContext, params: &RpcParams) -> Result<Value
 }
 
 pub(crate) fn wait_timeout_ms(params: &RpcParams, idx: usize, name: &str) -> Result<u64, Value> {
-    Ok(params.opt_u64(idx, name)?.unwrap_or(30_000))
+    let ms = params.opt_u64(idx, name)?.unwrap_or(30_000);
+    Ok(ms.min(super::RPC_WAIT_TIMEOUT_MS))
 }
 
 pub(crate) fn tip_hash_height(ctx: &RpcContext) -> Result<(String, u32), Value> {
@@ -1310,5 +1311,20 @@ mod core_double_tests {
         assert_eq!(format_core_double(1.0), "1");
         assert_eq!(format_core_double(0.0), "0");
         assert_eq!(format_core_double(132757073449487.52), "132757073449487.5");
+    }
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::*;
+
+    #[test]
+    fn wait_timeout_ms_caps_at_two_minutes() {
+        let huge = RpcParams::positional(vec![json!(500_000)]);
+        assert_eq!(wait_timeout_ms(&huge, 0, "timeout").unwrap(), 120_000);
+        let absent = RpcParams::positional(vec![]);
+        assert_eq!(wait_timeout_ms(&absent, 0, "timeout").unwrap(), 30_000);
+        let short = RpcParams::positional(vec![json!(50)]);
+        assert_eq!(wait_timeout_ms(&short, 0, "timeout").unwrap(), 50);
     }
 }

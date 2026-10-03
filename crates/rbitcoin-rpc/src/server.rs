@@ -11,11 +11,15 @@ use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
+use tower::limit::ConcurrencyLimitLayer;
+use tower_http::timeout::TimeoutLayer;
 
 /// Axum's default request-body cap, named so auth and 413 share one limit.
 pub const RPC_MAX_HTTP_BODY: usize = 2 * 1024 * 1024;
 /// Core `-rpcworkqueue`. Omitted or `0` is this finite queue.
 pub const DEFAULT_RPC_WORK_QUEUE: usize = 16;
+/// Accept cap, copied from the Electrum public listener. Not a knob.
+const RPC_MAX_CONNECTIONS: usize = 256;
 use rbitcoin_log::info;
 use rbitcoin_net::{BlockingRegion, MempoolHub};
 use rbitcoin_primitives::Network;
@@ -271,6 +275,11 @@ fn rpc_app(state: AppState) -> Router {
         .route("/rest/{*path}", get(rest_entry).post(rest_entry))
         .layer(DefaultBodyLimit::max(RPC_MAX_HTTP_BODY))
         .layer(from_fn_with_state(state.clone(), reject_unauthorized))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            std::time::Duration::from_millis(crate::methods::RPC_WAIT_TIMEOUT_MS),
+        ))
+        .layer(ConcurrencyLimitLayer::new(RPC_MAX_CONNECTIONS))
         .with_state(state)
 }
 
@@ -373,7 +382,12 @@ async fn satisfy_http_wait(
         rbitcoin_log::info!("ThreadRPCServer method=getblocktemplate");
         let _active = crate::methods::ActiveCall::enter(&ctx.active, method);
         let ctx = Arc::clone(ctx);
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_millis(crate::methods::RPC_WAIT_TIMEOUT_MS);
         loop {
+            if ctx.stop.load(Ordering::SeqCst) || tokio::time::Instant::now() >= deadline {
+                return true;
+            }
             let ready = {
                 let ctx = Arc::clone(&ctx);
                 let want = want.clone();
@@ -383,11 +397,14 @@ async fn satisfy_http_wait(
                 .await
                 .unwrap_or(true)
             };
-            if ready {
+            if ready || tokio::time::Instant::now() >= deadline {
                 return true;
             }
+            let slice = deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .min(std::time::Duration::from_millis(50));
             tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+                _ = tokio::time::sleep(slice) => {}
                 _ = recv_tip(&mut tips) => {}
             }
         }
@@ -475,6 +492,15 @@ async fn recv_tip(tips: &mut Option<tokio::sync::broadcast::Receiver<rbitcoin_ne
 }
 
 async fn rpc_post(State(state): State<AppState>, body: Bytes) -> Response {
+    let parsed: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            return parse_error_response();
+        }
+    };
+    let ctx = Arc::clone(&state.ctx);
+    // The long-poll must not sit on the only work-queue slot.
+    let waited = satisfy_http_wait(&ctx, &parsed).await;
     let _permit = match state.work_queue.try_acquire() {
         Ok(p) => p,
         Err(_) => {
@@ -485,14 +511,6 @@ async fn rpc_post(State(state): State<AppState>, body: Bytes) -> Response {
                 .into_response();
         }
     };
-    let parsed: serde_json::Value = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(_) => {
-            return parse_error_response();
-        }
-    };
-    let ctx = Arc::clone(&state.ctx);
-    let waited = satisfy_http_wait(&ctx, &parsed).await;
     let joined = tokio::task::spawn_blocking(move || {
         let _g = BlockingRegion::enter();
         if waited {
@@ -1361,6 +1379,68 @@ mod tests {
             handle.shutdown().await;
             let _ = std::fs::remove_dir_all(&dir);
         });
+    }
+
+    #[tokio::test]
+    async fn long_poll_does_not_hold_the_work_queue() {
+        let dir = rbitcoin_store::testutil::TempDir::labeled("rpc-wait-queue").expect("dir");
+        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
+        let hub = rbitcoin_net::ChainHub::new(
+            q,
+            rbitcoin_consensus::ChainParams::regtest(),
+            rbitcoin_consensus::Milestone::NONE,
+        );
+        hub.ensure_genesis().unwrap();
+        let query = Arc::clone(&hub.query);
+        let cfg = RpcConfig {
+            listen: Some("127.0.0.1:0".parse().unwrap()),
+            socket_path: None,
+            socket_shared: false,
+            datadir: dir.path().to_path_buf(),
+            network: Network::Regtest,
+            token_path: None,
+            cookie_path: None,
+            subversion: None,
+            work_queue: Some(1),
+            rest: false,
+            alert_notify: None,
+        };
+        let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        let addr = tcp_addr(&handle);
+        let auth = handle.auth.clone();
+        let waiter = tokio::spawn(async move {
+            let body = serde_json::json!({
+                "jsonrpc": "1.0",
+                "id": "w",
+                "method": "waitfornewblock",
+                "params": [5_000]
+            })
+            .to_string();
+            let _ = post_raw(addr, &auth, body.as_bytes()).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let (st, body) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            post_raw(
+                tcp_addr(&handle),
+                &handle.auth,
+                br#"{"jsonrpc":"1.0","id":1,"method":"getblockcount"}"#,
+            ),
+        )
+        .await
+        .expect("getblockcount while a long-poll is in flight");
+        assert_eq!(st, 200, "{body:?}");
+        assert_eq!(body.expect("json")["result"], 0);
+        assert!(
+            !waiter.is_finished(),
+            "waitfornewblock returned before the queue probe"
+        );
+        waiter.abort();
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
