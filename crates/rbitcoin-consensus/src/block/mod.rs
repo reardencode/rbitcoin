@@ -2083,12 +2083,17 @@ fn structural_bip68(
             let ch = if create_fk.is_null() {
                 ctx.height.0
             } else {
-                create_height_by_fk.get(&create_fk).copied().unwrap_or(0)
+                match create_height_by_fk.get(&create_fk) {
+                    Some(&h) => h,
+                    None => return Err(ConsensusError::BadTx("bad-txns-nonfinal")),
+                }
             };
             prev_heights.push(ch);
             let seq = inp.sequence.to_consensus_u32();
             let need_mtp = seq & DISABLE == 0 && seq & TYPE_FLAG != 0;
-            let mtp = if !need_mtp || ch == 0 {
+            // Height 0 is the genesis coin: one median lookup of block 0.
+            // A missing create height is not height 0.
+            let mtp = if !need_mtp {
                 0
             } else {
                 mtp_at(query, Height(ch.saturating_sub(1)), mtp_cache)?
@@ -2286,7 +2291,8 @@ pub fn bip68_active_for_tx(tx: &Transaction) -> bool {
 /// BIP68 relative locks when `tx.version` as u32 ≥ 2.
 ///
 /// `prev_heights[i]` / `prev_mtps[i]`: create height and MTP of the block *before*
-/// the creating block (for time-based locks; use 0 when create height is 0).
+/// the creating block. Height 0 is the genesis coin; its median is that
+/// block's timestamp, not 0. A missing height slice or a zero median fails closed.
 /// `block_height` = containing block; `block_prev_mtp` = MTP of previous block.
 pub fn sequence_locks_satisfied(
     tx: &Transaction,
@@ -2310,14 +2316,11 @@ pub fn sequence_locks_satisfied(
         if seq & DISABLE != 0 {
             continue;
         }
-        // Missing/zero coin height is unresolved. Defaulting to 0 fails *open*
-        // for time locks (epoch MTP). Same-block callers pass spend height — never 0.
+        // A missing height slice is unresolved. Height 0 is the genesis coin.
+        // raw_mtp 0 is unresolved: it is not a real median.
         let Some(&coin_h) = prev_heights.get(i) else {
             return false;
         };
-        if coin_h == 0 {
-            return false;
-        }
         let rel = (seq & MASK) as i64;
         if seq & TYPE_FLAG != 0 {
             let Some(&raw_mtp) = prev_coin_mtps.get(i) else {
