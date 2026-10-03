@@ -1826,3 +1826,116 @@ fn ibd_flag_zero_tx_block_is_consensus_invalid() {
 
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Densify walks past a height once its body is requested or queued. A body
+/// refused at intake, and a queued body lookup rejects as soft wire, both
+/// put that hash back to missing below the cursor. The next assign must ask
+/// for it again, or confirm waits at that height forever.
+#[test]
+fn ibd_refused_body_is_asked_again() {
+    use super::super::assign::tests::{dummy_slot, lock_default_assign_stop};
+    use super::super::assign::{assign_work_ordered, AssignDepth};
+    use super::super::confirm::{ConfirmEvent, ConfirmFeed};
+    use super::super::path::seed_work_path_from_store;
+    use super::super::peer_io::PeerEvent;
+    use super::super::status::LoopStats;
+    use super::super::IbdConfig;
+    use super::{apply_confirm_events, apply_peer_event};
+    use crate::seeds::AddrMan;
+    use bitcoin::consensus::serialize;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::atomic::AtomicU32;
+    use std::time::Instant;
+
+    let _env = lock_default_assign_stop();
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("refused-body-reask");
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let a: Vec<bitcoin::Block> = (1..=4u32).fold(Vec::new(), |mut a, ht| {
+        let prev = a.last().map_or(gen, |b: &bitcoin::Block| b.block_hash());
+        a.push(mine(prev, ht * 10, ht, vec![]));
+        a
+    });
+    for b in &a {
+        hub.ensure_header(&b.header).unwrap();
+    }
+    let (a1, a2) = (a[0].block_hash(), a[1].block_hash());
+    let mut st = IbdWorkState::new(
+        (1..=3).map(dummy_slot).collect(),
+        hub.tip_hash(),
+        hub.tip_height(),
+    );
+    seed_work_path_from_store(&mut st, &hub);
+    let feed = ConfirmFeed::new();
+    let mut book = AddrMan::new();
+    let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1);
+    let (cfg, stats) = (IbdConfig::for_test(), LoopStats::default());
+    let assign = |st: &mut IbdWorkState| {
+        assign_work_ordered(st, &hub, &cfg, &stats, AssignDepth::Full, None);
+    };
+    let owner = |st: &IbdWorkState, hash| *st.inflight[&hash].peers.iter().next().unwrap();
+    let mut framed = |st: &mut IbdWorkState, peer, hash, payload| {
+        apply_peer_event(
+            st,
+            &hub,
+            PeerEvent::BlockFramed {
+                peer,
+                hash,
+                payload,
+            },
+            &AtomicU32::new(1),
+            &mut book,
+            local,
+            Some(&feed),
+        );
+    };
+    assign(&mut st);
+    assert!(a.iter().all(|b| st.inflight.contains_key(&b.block_hash())));
+    assign(&mut st);
+    assert!(
+        st.densify_scan_lo > 4,
+        "densify walked past the requested path"
+    );
+
+    // A1's owner answers with the real header and a tx that does not parse.
+    let peer = owner(&st, a1);
+    let mut junk = serialize(&a[0].header);
+    junk.extend_from_slice(&[0x01, 0x01, 0, 0, 0, 0x00, 0x02, 0, 0, 0, 0]);
+    framed(&mut st, peer, a1, junk);
+    assert!(!st.inflight.contains_key(&a1) && st.body.is_missing(&a1));
+    assign(&mut st);
+    assert!(st.inflight.contains_key(&a1), "refused body is asked again");
+
+    // A2's body is queued, then lookup rejects it as soft wire.
+    let peer = owner(&st, a2);
+    framed(&mut st, peer, a2, serialize(&a[1]));
+    assert!(st.body.is_pending(&a2) && !st.inflight.contains_key(&a2));
+    assign(&mut st);
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(ConfirmEvent::Reject {
+        height: 2,
+        hash: a2,
+        class: ConfirmRejectClass::SoftWire,
+        err: "body queue wire does not decode".into(),
+        batch_len: 1,
+    })
+    .unwrap();
+    drop(tx);
+    apply_confirm_events(
+        &mut st,
+        &hub,
+        &rx,
+        &AtomicU32::new(1),
+        &AtomicU32::new(0),
+        &mut Instant::now(),
+        Some(&feed),
+    );
+    assert!(!hub.query.block_queue_has_height(2) && st.body.is_missing(&a2));
+    assign(&mut st);
+    assert!(
+        st.inflight.contains_key(&a2),
+        "soft-rejected body is asked again"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
