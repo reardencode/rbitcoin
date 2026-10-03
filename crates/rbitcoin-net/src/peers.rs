@@ -319,6 +319,9 @@ pub struct LivePeer {
     addr_token_ms: AtomicU64,
     /// Unix seconds when this session was registered.
     connected_at: AtomicU64,
+    /// Netgroup fixed at accept. Inbound eviction compares this integer
+    /// and does not read asmap.
+    netgroup: u64,
     /// Skip INV for mempool txs with `accept_gen < floor` (post-verack privacy).
     inv_gen_floor: AtomicU64,
     /// Age-INV due-log cursor (`due_secs`, `accept_gen`).
@@ -926,6 +929,10 @@ impl LivePeer {
 
     pub fn connected_at(&self) -> u64 {
         self.connected_at.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn netgroup(&self) -> u64 {
+        self.netgroup
     }
 
     pub fn peer_hub(&self) -> Option<Arc<PeerHub>> {
@@ -2121,6 +2128,7 @@ impl PeerHub {
             addr_tokens: Mutex::new(crate::peer::ADDR_RELAY_BURST),
             addr_token_ms: AtomicU64::new(0),
             connected_at: AtomicU64::new(connected_at),
+            netgroup: crate::eviction::eviction_netgroup(endpoint.addr),
             inv_gen_floor: AtomicU64::new(0),
             age_inv_seen_due: AtomicU64::new(0),
             age_inv_seen_gen: AtomicU64::new(0),
@@ -2606,7 +2614,7 @@ impl PeerHub {
                     min_ping: minping,
                     last_block: p.last_block.load(Ordering::Relaxed),
                     last_tx: p.last_transaction.load(Ordering::Relaxed),
-                    netgroup: crate::eviction::eviction_netgroup(p.addr),
+                    netgroup: p.netgroup,
                     noban: p.session_noban(),
                 }
             })

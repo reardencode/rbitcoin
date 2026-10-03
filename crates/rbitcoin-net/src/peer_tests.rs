@@ -2905,6 +2905,36 @@ fn inbound_peer(
     peers.register(addr, addr, &ver, true, crate::peers::PeerConnType::Inbound)
 }
 
+#[test]
+fn inbound_netgroup_is_fixed_at_accept() {
+    let peers = crate::peers::PeerHub::new();
+    let mk = |ip: [u8; 4]| {
+        let addr = std::net::SocketAddr::from((ip, 1));
+        let ver = bitcoin::p2p::message_network::VersionMessage {
+            version: 70016,
+            services: bitcoin::p2p::ServiceFlags::NETWORK,
+            timestamp: 0,
+            receiver: bitcoin::p2p::address::Address::new(&addr, bitcoin::p2p::ServiceFlags::NONE),
+            sender: bitcoin::p2p::address::Address::new(&addr, bitcoin::p2p::ServiceFlags::NONE),
+            nonce: u64::from(ip[3]),
+            user_agent: "/rbitcoin:test/".into(),
+            start_height: 0,
+            relay: true,
+        };
+        peers.register(addr, addr, &ver, true, crate::peers::PeerConnType::Inbound)
+    };
+    let a = mk([1, 2, 3, 4]);
+    let b = mk([1, 2, 9, 9]);
+    let c = mk([1, 3, 0, 1]);
+    assert_eq!(a.netgroup(), b.netgroup(), "same /16 is one group");
+    assert_ne!(
+        a.netgroup(),
+        c.netgroup(),
+        "a different /16 is another group"
+    );
+    assert_eq!(a.netgroup(), crate::eviction::eviction_netgroup(a.addr));
+}
+
 #[tokio::test]
 async fn inv_getdata_charges_send_budget() {
     use bitcoin::hashes::Hash;
