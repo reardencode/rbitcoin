@@ -195,6 +195,27 @@ fn body_rejected_subset_of_consensus_invalid() {
     }
 }
 
+/// A coinbase scriptSig swapped under a real header (length outside 2..=100)
+/// is a body the header does not commit to: SoftWire re-get, not a
+/// blacklisted `bad-cb-length`.
+#[test]
+fn short_coinbase_under_a_real_header_is_soft_wire() {
+    use rbitcoin_consensus::{validate_block_structure, ChainParams, Milestone, ValidationContext};
+    let params = ChainParams::regtest();
+    let ctx = ValidationContext::at(&params, rbitcoin_primitives::Height(1), Milestone::NONE);
+    let honest = mine(h(0), 1, 1, Vec::new());
+    validate_block_structure(&honest, &ctx).unwrap();
+    let mut swapped = honest.clone();
+    swapped.txdata[0].input[0].script_sig = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    assert_eq!(swapped.block_hash(), honest.block_hash());
+    let err = validate_block_structure(&swapped, &ctx).unwrap_err();
+    assert_eq!(
+        ConfirmRejectClass::from_consensus(&err),
+        ConfirmRejectClass::SoftWire,
+        "{err:?}"
+    );
+}
+
 /// Multi-hop with all path bodies already loadable → reorg without await.
 #[test]
 fn multi_hop_bad_prev_applies_when_full_path_bodies_ready() {

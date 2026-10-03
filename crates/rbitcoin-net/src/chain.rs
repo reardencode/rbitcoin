@@ -5387,6 +5387,17 @@ mod tests {
             !hub.is_block_invalid(&honest.block_hash()),
             "witness padding must not cache the block hash"
         );
+        let mut short_cb = honest.clone();
+        short_cb.txdata[0].input[0].script_sig = ScriptBuf::from_bytes(vec![0x51]);
+        assert_eq!(short_cb.block_hash(), honest.block_hash());
+        let err = hub
+            .accept_received_block(short_cb)
+            .expect_err("a coinbase the header does not commit to must reject");
+        assert!(matches!(&err, NetError::Mutated(_)), "{err:?}");
+        assert!(
+            !hub.is_block_invalid(&honest.block_hash()),
+            "a swapped coinbase scriptSig must not cache the block hash"
+        );
         assert!(matches!(
             hub.accept_received_block(honest.clone()).unwrap(),
             AcceptOutcome::Accepted { height: 1 }

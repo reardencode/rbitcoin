@@ -670,10 +670,32 @@ fn s7_bip34_required_at_mainnet_activation_height() {
     let h = p.btc.bip34_height;
     let ctx = ValidationContext::at(p, Height(h), Milestone::NONE);
     let mut cb = coinbase(h);
-    cb.input[0].script_sig = ScriptBuf::new();
-    let b = block_with(vec![cb]);
+    cb.input[0].script_sig = ScriptBuf::from_bytes(vec![0x00, 0x00]);
+    let b = block_with(vec![cb.clone()]);
     let err = validate_block_structure(&b, &ctx).unwrap_err();
     assert_bad_block(err, "bip34");
+    // Core CheckTransaction's length rule runs before the height push.
+    cb.input[0].script_sig = ScriptBuf::new();
+    let err = validate_block_structure(&block_with(vec![cb]), &ctx).unwrap_err();
+    assert_bad_block(err, "bad-cb-length");
+}
+
+/// A coinbase scriptSig swapped under a real header is a body the header
+/// does not commit to. It must fail the merkle check, not `bad-cb-length`,
+/// so IBD and P2P re-get the block instead of caching its hash.
+#[test]
+fn short_coinbase_under_a_real_header_is_merkle_mismatch() {
+    let honest = block_with(vec![coinbase(1)]);
+    validate_block_structure(&honest, &ctx_h(1)).unwrap();
+    for script_sig in [vec![0x51], vec![], vec![0x51; 101]] {
+        let mut swapped = honest.clone();
+        swapped.txdata[0].input[0].script_sig = ScriptBuf::from_bytes(script_sig);
+        let err = validate_block_structure(&swapped, &ctx_h(1)).unwrap_err();
+        assert!(
+            matches!(err, ConsensusError::BadBlock("merkle root mismatch")),
+            "{err:?}"
+        );
+    }
 }
 
 #[test]
