@@ -97,6 +97,7 @@ pub fn block_reject_reason(err: &ConsensusError) -> String {
         ConsensusError::BadTx("not final" | "bad-txns-nonfinal") => "bad-txns-nonfinal".into(),
         ConsensusError::BadTx("no inputs") => "bad-txns-vin-empty".into(),
         ConsensusError::BadTx("no outputs") => "bad-txns-vout-empty".into(),
+        ConsensusError::BadTx("coinbase immature") => "bad-txns-premature-spend-of-coinbase".into(),
         ConsensusError::BadTx(s) => (*s).into(),
         ConsensusError::BadBlock("no transactions" | "block stripped size too large") => {
             "bad-blk-length".into()

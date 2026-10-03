@@ -583,6 +583,9 @@ fn chain_ops_submit_rejects(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub, p2wp
     let mut burn = spend(OutPoint { txid: cb, vout: 0 }, 0);
     burn.output.clear();
     no_vout.txdata.push(burn);
+    let mut young = mine(7);
+    let cb = young.txdata[0].compute_txid();
+    young.txdata.push(spend(OutPoint { txid: cb, vout: 0 }, 1));
     for (block, want) in [
         (commit(empty), "bad-blk-length"),
         (commit(no_cb), "bad-cb-missing"),
@@ -590,6 +593,7 @@ fn chain_ops_submit_rejects(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub, p2wp
         (commit(below), "bad-txns-in-belowout"),
         (commit(miss), "bad-txns-inputs-missingorspent"),
         (commit(no_vout), "bad-txns-vout-empty"),
+        (commit(young), "bad-txns-premature-spend-of-coinbase"),
     ] {
         let r = dispatch(ctx, "submitblock", vec![json!(block_hex(&block))]).unwrap();
         assert_eq!(r, want);

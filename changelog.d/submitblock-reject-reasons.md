@@ -18,3 +18,5 @@ Fixed
 - **A transaction with no outputs or no inputs gets Bitcoin Core's reason.**
   `submitblock` and the block reject log said `no outputs` and `no inputs`.
   They now say `bad-txns-vout-empty` and `bad-txns-vin-empty`.
+- **A block that spends an immature coinbase reports
+  `bad-txns-premature-spend-of-coinbase`.** It said `coinbase immature`.
