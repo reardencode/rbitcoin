@@ -103,8 +103,10 @@ pub fn block_reject_reason(err: &ConsensusError) -> String {
             "bad-cb-missing".into()
         }
         ConsensusError::BadBlock("coinbase excess value") => "bad-cb-amount".into(),
-        ConsensusError::BadBlock("coinbase not first") => "bad-txns-duplicate".into(),
-        ConsensusError::BadBlock("duplicate txid") => "bad-txns-duplicate".into(),
+        ConsensusError::BadBlock("coinbase not first") => "bad-cb-multiple".into(),
+        // Core has no such CheckBlock rule: the second copy spends a spent
+        // input at connect. bad-txns-duplicate is the mutated-merkle reason.
+        ConsensusError::BadBlock("duplicate txid") => "bad-txns-inputs-missingorspent".into(),
         ConsensusError::BadBlock("merkle root mismatch") => "bad-txnmrklroot".into(),
         ConsensusError::BadBlock(s) => (*s).into(),
         ConsensusError::BadHeader("timestamp <= median-time-past") => "time-too-old".into(),

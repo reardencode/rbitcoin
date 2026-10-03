@@ -81,9 +81,9 @@ header version/time, `finality_tests`, `sigop_cost_tests`,
 |----|------|--------------|------|
 | S1 | Block has ≥1 tx | `BadBlock("no transactions")` | `structure_rule_tests::s1_rejects_empty_txdata` |
 | S2 | First tx is coinbase; without one, any 64-byte tx marks the body mutated (Core `IsBlockMutated`) | `BadBlock("first tx not coinbase")`, `BadBlock("merkle mutated by a 64-byte tx")` (both `bad-cb-missing`) | `structure_rule_tests::s2_rejects_non_coinbase_first`, `no_coinbase_with_a_64_byte_tx_is_mutated` |
-| S3 | No later coinbase | `BadBlock("coinbase not first")` | `structure_rule_tests::s3_rejects_second_coinbase` |
+| S3 | No later coinbase | `BadBlock("coinbase not first")` (`bad-cb-multiple`) | `structure_rule_tests::s3_rejects_second_coinbase`; tip cache `chain::tests::hostile_peer_session` |
 | S4 | Weight ≤ 4_000_000 WU | `BadBlock("…weight…")` | `s4_rejects_overweight_block`, `s4_weight_4_000_000_accepts_4_000_001_rejects` |
-| S5 | Unique txids | `BadBlock("duplicate txid")` | `structure_rule_tests::s5_rejects_duplicate_txid` |
+| S5 | Unique txids | `BadBlock("duplicate txid")` (`bad-txns-inputs-missingorspent`, as Core rejects the second copy at connect) | `structure_rule_tests::s5_rejects_duplicate_txid`; tip cache `chain::tests::hostile_peer_session` |
 | S6 | Merkle root matches txids, checked before every other body rule; a repeated tail (CVE-2012-2459) is mutated | `BadBlock("merkle root mismatch")`, `BadBlock("bad-txns-duplicate")` | `structure_rule_tests::s6_rejects_merkle_root_mismatch`, `body_rules_run_after_the_header_merkle_check` (+ `merkle_root_bytes_single_and_odd`; store `merkle_mutation_flags_a_repeated_tail_at_any_level`) |
 | S7 | BIP34 height in coinbase (h≥1) | `BadBlock("bip34…")` | `s7_rejects_bip34_missing_at_height_1`, `s7_bip34_not_required_at_height_0`, `s7_regtest_rejects_bip34_missing_at_height_1`, `s7_regtest_bip34_activation_height_override` |
 | S8 | Witness commitment when any witness; reject witness before SegWit activation | missing / mismatch / `BadBlock("unexpected witness before segwit")` | `s8_rejects_missing_witness_commitment`, `s8_rejects_wrong_witness_commitment`; `consensus_rules::header_and_spending_boundaries` (connect-path pre-activation reject) |

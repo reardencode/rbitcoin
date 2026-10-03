@@ -5392,6 +5392,44 @@ mod tests {
             AcceptOutcome::Accepted { height: 1 }
         ));
 
+        // The header commits to these txs, so the hash itself is invalid
+        // (Core bad-cb-multiple; a repeat that leaves the tree unmutated is
+        // bad-txns-inputs-missingorspent at connect).
+        let spend = |n: u8| Transaction {
+            version: TxVersion::ONE,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([n; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let t2 = honest.header.time + 600;
+        for (extra, want) in [
+            (vec![coinbase(3)], "bad-cb-multiple"),
+            (
+                vec![spend(1), spend(2), spend(1)],
+                "bad-txns-inputs-missingorspent",
+            ),
+        ] {
+            let bad = mine_with_extra(honest.block_hash(), t2, 2, extra);
+            hub.note_asked_block(bad.block_hash());
+            let err = hub.accept_received_block(bad.clone()).expect_err(want);
+            assert!(
+                matches!(&err, NetError::Consensus(s) if s.contains(want)),
+                "{want}: {err:?}"
+            );
+            assert!(hub.is_block_invalid(&bad.block_hash()), "{want} cached");
+        }
+
         let now = honest.header.time;
         hub.clock.set_mock(i64::from(now));
         let far = now + 2 * 3600 + 1;

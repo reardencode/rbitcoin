@@ -8,3 +8,8 @@ Fixed
   for it again. Block checks now test the merkle root before the other
   body rules, as Bitcoin Core does. IBD treats these failures as a bad
   copy of the block: it drops the body and requests the block again.
+- **A block with a second coinbase or a repeated transaction is now
+  remembered as invalid.** These blocks reported `bad-txns-duplicate`,
+  the reason Bitcoin Core keeps for a mutated body, so the node did not
+  remember them and asked for them again. They now report Core's
+  `bad-cb-multiple` and `bad-txns-inputs-missingorspent`.
