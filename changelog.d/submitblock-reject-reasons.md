@@ -20,3 +20,5 @@ Fixed
   They now say `bad-txns-vout-empty` and `bad-txns-vin-empty`.
 - **A block that spends an immature coinbase reports
   `bad-txns-premature-spend-of-coinbase`.** It said `coinbase immature`.
+- **A block over the weight limit reports `bad-blk-weight`.** It said
+  `block weight too large`.

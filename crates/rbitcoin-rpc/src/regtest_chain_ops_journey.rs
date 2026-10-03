@@ -95,6 +95,7 @@ fn rpc_regtest_chain_ops() {
     let fee_block = chain_ops_generateblock_and_parent_first(&ctx, &mut cbs);
     chain_ops_proposal_spends(&ctx, &mut cbs);
     chain_ops_submit_repeated_txids(&ctx, &hub, &mut cbs);
+    chain_ops_submit_overweight(&ctx, &hub, &mut cbs);
     chain_ops_maxfeerate(&ctx, &mut cbs);
     chain_ops_invalidate_and_precious(&ctx, &hub, &mut cbs, &p2wpkh);
 
@@ -1213,6 +1214,37 @@ fn chain_ops_submit_repeated_txids(
         let r = dispatch(ctx, "submitblock", vec![json!(block_hex(&block))]).unwrap();
         assert_eq!(r, want);
     }
+    assert_eq!(tip_count(ctx), before);
+}
+
+/// Witness bytes weigh one unit each, so a block under the stripped-size cap
+/// can still pass MAX_BLOCK_WEIGHT: Core ContextualCheckBlock `bad-blk-weight`.
+fn chain_ops_submit_overweight(
+    ctx: &RpcContext,
+    hub: &rbitcoin_net::ChainHub,
+    cbs: &mut TrueCoinbases,
+) {
+    // Two spends: one witness may not exceed rust-bitcoin's 4 MB decode cap.
+    let heavy: Vec<Transaction> = (0..2)
+        .map(|_| {
+            let f = cbs.take();
+            let cb_f = generated_coinbase_value(ctx, f);
+            let (_, mut tx) = spend_generated_coinbase(ctx, f, cb_f - 1_000, true_spk());
+            tx.input[0].witness = bitcoin::Witness::from_slice(&vec![vec![0u8; 4_000]; 525]);
+            tx
+        })
+        .collect();
+    let block = rbitcoin_consensus::mine_regtest_paying(
+        hub.tip_hash().unwrap(),
+        hub.tip_header().unwrap().time + 1,
+        tip_count(ctx) as u32 + 1,
+        true_spk(),
+        heavy,
+    );
+    assert!(block.weight().to_wu() > 4_000_000);
+    let before = tip_count(ctx);
+    let r = dispatch(ctx, "submitblock", vec![json!(block_hex(&block))]).unwrap();
+    assert_eq!(r, "bad-blk-weight");
     assert_eq!(tip_count(ctx), before);
 }
 

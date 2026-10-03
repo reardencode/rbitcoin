@@ -110,6 +110,7 @@ pub fn block_reject_reason(err: &ConsensusError) -> String {
         ConsensusError::BadBlock("bip34 height encoding" | "bip34 coinbase script empty") => {
             "bad-cb-height".into()
         }
+        ConsensusError::BadBlock("block weight too large") => "bad-blk-weight".into(),
         ConsensusError::BadBlock(s) => (*s).into(),
         ConsensusError::BadHeader("timestamp <= median-time-past") => "time-too-old".into(),
         ConsensusError::BadHeader("timestamp too far in future") => "time-too-new".into(),
