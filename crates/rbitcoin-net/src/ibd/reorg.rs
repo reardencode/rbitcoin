@@ -195,7 +195,7 @@ fn header_hashes_to_best_ancestor_n(
         let Some((_fk, rec)) = hub
             .query
             .get_header_by_hash(&cur.to_byte_array())
-            .map_err(|e| NetError::Consensus(e.to_string()))?
+            .map_err(NetError::store)?
         else {
             break;
         };
@@ -205,7 +205,7 @@ fn header_hashes_to_best_ancestor_n(
         let parent = hub
             .query
             .get_header(rbitcoin_primitives::Fk(pfk))
-            .map_err(|e| NetError::Consensus(e.to_string()))?;
+            .map_err(NetError::store)?;
         cur = BlockHash::from_byte_array(parent.hash);
     }
     rev.reverse();
@@ -219,17 +219,14 @@ pub(crate) fn parent_hash_of(
     let Some((_, rec)) = hub
         .query
         .get_header_by_hash(&hash.to_byte_array())
-        .map_err(|e| NetError::Consensus(e.to_string()))?
+        .map_err(NetError::store)?
     else {
         return Ok(None);
     };
     if rec.prev_fk.is_null() {
         return Ok(Some(BlockHash::from_byte_array([0u8; 32])));
     }
-    let parent = hub
-        .query
-        .get_header(rec.prev_fk)
-        .map_err(|e| NetError::Consensus(e.to_string()))?;
+    let parent = hub.query.get_header(rec.prev_fk).map_err(NetError::store)?;
     Ok(Some(BlockHash::from_byte_array(parent.hash)))
 }
 
@@ -237,7 +234,7 @@ fn header_work_of(hub: &ChainHub, hash: BlockHash) -> Result<Option<bitcoin::Wor
     let Some((_, rec)) = hub
         .query
         .get_header_by_hash(&hash.to_byte_array())
-        .map_err(|e| NetError::Consensus(e.to_string()))?
+        .map_err(NetError::store)?
     else {
         return Ok(None);
     };
@@ -254,7 +251,7 @@ fn our_work_from_lca(hub: &ChainHub, lca_height: u32) -> Result<bitcoin::Work, N
             let hdr = hub
                 .query
                 .wire_header_at_height(Height(h))
-                .map_err(|e| NetError::Consensus(e.to_string()))?;
+                .map_err(NetError::store)?;
             our.push(hdr.work());
         }
     }
@@ -276,7 +273,7 @@ pub fn shortest_heavier_header_prefix(
     let lca_h = hub
         .query
         .height_of_hash(&parent.to_byte_array())
-        .map_err(|e| NetError::Consensus(e.to_string()))?
+        .map_err(NetError::store)?
         .map(|h| h.0)
         .unwrap_or(0);
     let ours = our_work_from_lca(hub, lca_h)?;
@@ -338,7 +335,7 @@ fn connecting_hashes_heavier_disconnected_n(
     if let Some(jh) = hub
         .query
         .height_of_hash(&join.to_byte_array())
-        .map_err(|e| NetError::Consensus(e.to_string()))?
+        .map_err(NetError::store)?
     {
         if let Ok(next) = hub
             .query
@@ -579,7 +576,7 @@ pub(crate) fn apply_header_rewind(
     let Some(lca_h) = hub
         .query
         .height_of_hash(&lca.to_byte_array())
-        .map_err(|e| NetError::Consensus(e.to_string()))?
+        .map_err(NetError::store)?
         .map(|h| h.0)
     else {
         return Ok(false);
