@@ -205,17 +205,17 @@ pub fn validate_block_structure_with_pres(
         return Err(ConsensusError::BadBlock("merkle root mismatch"));
     }
 
+    // Core CheckTransaction: after the root matches, so a swapped scriptSig is
+    // a merkle mismatch, and before ContextualCheckBlock's BIP34 height.
+    let cb_ss = block.txdata[0].input[0].script_sig.len();
+    if !(2..=100).contains(&cb_ss) {
+        return Err(ConsensusError::BadBlock("bad-cb-length"));
+    }
+
     // BIP34 only after the network's buried height (mainnet 227931). From
     // height 1 this rejects mainnet block 1.
     if ctx.enforce_height_gates && ctx.params.bip34_active_at(ctx.height.0) {
         check_bip34_coinbase(&block.txdata[0], ctx.height.0)?;
-    }
-
-    {
-        let cb_ss = block.txdata[0].input[0].script_sig.as_bytes().len();
-        if !(2..=100).contains(&cb_ss) {
-            return Err(ConsensusError::BadBlock("bad-cb-length"));
-        }
     }
 
     // Only money-range gate. `money_range_out_sum` casts a sum that passed here.

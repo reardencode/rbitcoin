@@ -4268,9 +4268,10 @@ fn http_wait_satisfied_tracks_the_setter() {
 }
 
 /// Core ContextualCheckBlock: a coinbase without this height's BIP34 push is
-/// `bad-cb-height`, a consensus reject the node remembers.
+/// `bad-cb-height`, a consensus reject the node remembers. A scriptSig under
+/// two bytes fails CheckTransaction's `bad-cb-length` before that.
 #[test]
-fn submitblock_bip34_height_reject_is_bad_cb_height() {
+fn submitblock_coinbase_script_rejects_match_core() {
     let mut params = rbitcoin_consensus::ChainParams::regtest();
     params.apply_test_activation_height("bip34", 1).unwrap();
     let (ctx, _dir, hub) = ctx_regtest_hub_on(params, 300_000_000);
@@ -4295,6 +4296,13 @@ fn submitblock_bip34_height_reject_is_bad_cb_height() {
         "duplicate-invalid",
         "bad-cb-height is a consensus reject, not a mutated body"
     );
+    for script_sig in [vec![0x52], vec![]] {
+        let mut short = mine_claiming(1);
+        short.txdata[0].input[0].script_sig = ScriptBuf::from_bytes(script_sig);
+        short.header.merkle_root = short.compute_merkle_root().unwrap();
+        regrind(&mut short);
+        assert_eq!(submit(&short), "bad-cb-length");
+    }
     let r = submit(&mine_claiming(1));
     assert!(r.is_null(), "the right height push connects: {r}");
 }
