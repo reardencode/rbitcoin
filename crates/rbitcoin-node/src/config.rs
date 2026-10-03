@@ -252,6 +252,8 @@ pub struct RpcOpts {
     /// Opt-in Core-format `username:password` cookie accepted as TCP HTTP Basic.
     pub cookie_file: Option<PathBuf>,
     pub work_queue: Option<usize>,
+    /// Core REST on the RPC listener. Off unless `--rest` / `rest=`.
+    pub rest: bool,
 }
 
 impl Default for RpcOpts {
@@ -264,6 +266,7 @@ impl Default for RpcOpts {
             token_file: None,
             cookie_file: None,
             work_queue: Some(rbitcoin_rpc::DEFAULT_RPC_WORK_QUEUE),
+            rest: false,
         }
     }
 }
@@ -616,6 +619,9 @@ impl NodeConfig {
         }
         if self.metrics && self.listen.health.is_none() {
             return Err(NodeError::Config("--metrics needs --health-listen".into()));
+        }
+        if self.rpc.rest && self.rpc.listen.is_none() && !self.rpc.socket {
+            return Err(NodeError::Config("--rest needs --rpc or --rpc-listen".into()));
         }
         self.validate_only_net()?;
         self.validate_hidden_inbound()?;
@@ -1324,6 +1330,10 @@ impl NodeConfig {
             "metrics" => {
                 self.metrics = parse_conf_bool(val)
                     .map_err(|e| NodeError::Config(format!("conf metrics: {e}")))?;
+            }
+            "rest" => {
+                self.rpc.rest = parse_conf_bool(val)
+                    .map_err(|e| NodeError::Config(format!("conf rest: {e}")))?;
             }
             "inhibit_suspend" => {
                 self.inhibit_suspend = parse_conf_bool(val)

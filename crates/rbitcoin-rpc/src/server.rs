@@ -55,6 +55,8 @@ pub struct RpcConfig {
     pub subversion: Option<String>,
     /// HTTP occupancy cap. `None` and `0` are [`DEFAULT_RPC_WORK_QUEUE`].
     pub work_queue: Option<usize>,
+    /// `GET`/`POST /rest/` on this listener. Off unless `--rest` / `rest=`.
+    pub rest: bool,
     /// `--alert-notify` (`%s` = warning text).
     pub alert_notify: Option<String>,
 }
@@ -91,6 +93,9 @@ struct AppState {
     auth: RpcAuth,
     cookie: Option<RpcCookie>,
     work_queue: Arc<tokio::sync::Semaphore>,
+    /// Separate from [`Self::work_queue`]. REST must not take an RPC slot.
+    rest_queue: Arc<tokio::sync::Semaphore>,
+    rest: bool,
     require_auth: bool,
 }
 
@@ -156,6 +161,7 @@ pub async fn run_rpc(
 
     let n = work_queue_permits(config.work_queue);
     let work_queue = Arc::new(tokio::sync::Semaphore::new(n));
+    let rest_queue = Arc::new(tokio::sync::Semaphore::new(DEFAULT_RPC_WORK_QUEUE));
     let shutdown = Arc::new(AtomicBool::new(false));
     let mut tasks = Vec::new();
     let mut local_addr = None;
@@ -173,6 +179,8 @@ pub async fn run_rpc(
             auth: auth.clone(),
             cookie: cookie.clone(),
             work_queue: work_queue.clone(),
+            rest_queue: rest_queue.clone(),
+            rest: config.rest,
             require_auth: true,
         };
         let app = rpc_app(state);
@@ -207,6 +215,8 @@ pub async fn run_rpc(
             auth: auth.clone(),
             cookie,
             work_queue,
+            rest_queue,
+            rest: config.rest,
             require_auth: false,
         };
         let app = rpc_app(state);
@@ -265,7 +275,17 @@ fn rpc_app(state: AppState) -> Router {
 }
 
 async fn rest_entry(State(state): State<AppState>, req: axum::extract::Request) -> Response {
-    let _permit = match state.work_queue.try_acquire() {
+    if !state.rest {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    // Body first, then the REST queue. A slow client must not hold an RPC slot,
+    // and REST does not use the RPC work queue.
+    let path = req.uri().path().to_string();
+    let query = req.uri().query().unwrap_or("").to_string();
+    let body = axum::body::to_bytes(req.into_body(), RPC_MAX_HTTP_BODY)
+        .await
+        .unwrap_or_default();
+    let _permit = match state.rest_queue.try_acquire() {
         Ok(p) => p,
         Err(_) => {
             return (
@@ -275,11 +295,6 @@ async fn rest_entry(State(state): State<AppState>, req: axum::extract::Request) 
                 .into_response();
         }
     };
-    let path = req.uri().path().to_string();
-    let query = req.uri().query().unwrap_or("").to_string();
-    let body = axum::body::to_bytes(req.into_body(), RPC_MAX_HTTP_BODY)
-        .await
-        .unwrap_or_default();
     let ctx = Arc::clone(&state.ctx);
     let reply = tokio::task::spawn_blocking(move || {
         let _g = BlockingRegion::enter();
@@ -803,6 +818,7 @@ mod tests {
             cookie_path: None,
             subversion: None,
             work_queue: None,
+            rest: true,
 
             alert_notify: None,
         };
@@ -888,6 +904,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[tokio::test]
+    async fn rest_is_404_without_the_flag() {
+        let dir = rbitcoin_store::testutil::TempDir::labeled("rpc-rest-off").expect("temp dir");
+        let q = Arc::new(Query::open_or_create_tiny(dir.join("store")).unwrap());
+        let cfg = RpcConfig {
+            listen: Some("127.0.0.1:0".parse().unwrap()),
+            socket_path: None,
+            socket_shared: false,
+            datadir: dir.path().to_path_buf(),
+            network: Network::Regtest,
+            token_path: None,
+            cookie_path: None,
+            subversion: None,
+            work_queue: None,
+            rest: false,
+            alert_notify: None,
+        };
+        let handle = run_rpc(cfg, q, None, None, None, None, None).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut rest = tokio::net::TcpStream::connect(tcp_addr(&handle))
+            .await
+            .unwrap();
+        let get = b"GET /rest/chaininfo.json HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+        rest.write_all(get).await.unwrap();
+        let mut buf = Vec::new();
+        rest.read_to_end(&mut buf).await.unwrap();
+        let text = String::from_utf8_lossy(&buf);
+        assert!(text.contains("404"), "REST is off unless --rest: {text}");
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     async fn post_raw(
         addr: SocketAddr,
         auth: &RpcAuth,
@@ -937,6 +986,7 @@ mod tests {
             cookie_path: None,
             subversion: None,
             work_queue: None,
+            rest: false,
 
             alert_notify: None,
         };
@@ -1018,6 +1068,7 @@ mod tests {
             cookie_path: None,
             subversion: None,
             work_queue: None,
+            rest: false,
             alert_notify: None,
         };
         let handle = run_rpc(cfg, q, None, None, None, None, None).await.unwrap();
@@ -1058,6 +1109,7 @@ mod tests {
             cookie_path: None,
             subversion: None,
             work_queue: None,
+            rest: false,
             alert_notify: None,
         };
         let handle = run_rpc(cfg, q, None, None, None, None, None).await.unwrap();
@@ -1124,6 +1176,7 @@ mod tests {
             cookie_path: None,
             subversion: None,
             work_queue: None,
+            rest: false,
             alert_notify: None,
         };
         let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
@@ -1262,6 +1315,7 @@ mod tests {
                 cookie_path: None,
                 subversion: None,
                 work_queue: None,
+                rest: false,
                 alert_notify: None,
             };
             let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
@@ -1325,6 +1379,7 @@ mod tests {
             cookie_path: None,
             subversion: None,
             work_queue: Some(1),
+            rest: false,
 
             alert_notify: None,
         };
@@ -1407,6 +1462,7 @@ mod tests {
             cookie_path: None,
             subversion: None,
             work_queue: None,
+            rest: false,
             alert_notify: None,
         };
         let handle = run_rpc(cfg, q, Some(mp), None, None, None, None)
@@ -1577,6 +1633,7 @@ mod tests {
             cookie_path: None,
             subversion: None,
             work_queue: None,
+            rest: false,
             alert_notify: None,
         };
         let handle = run_rpc(
@@ -1617,6 +1674,7 @@ mod tests {
             cookie_path: Some(cookie_path.clone()),
             subversion: None,
             work_queue: None,
+            rest: false,
             alert_notify: None,
         };
         // The cookie is TCP-only: a socket-only listener must not silently ignore it.
@@ -1765,6 +1823,7 @@ mod tests {
             cookie_path: None,
             subversion: None,
             work_queue: None,
+            rest: false,
             alert_notify: None,
         };
         let err = run_rpc(cfg, q, None, None, None, None, None)
@@ -1792,6 +1851,7 @@ mod tests {
             cookie_path: None,
             subversion: None,
             work_queue: None,
+            rest: false,
             alert_notify: None,
         };
         let handle = run_rpc(cfg, q, None, None, None, None, None).await.unwrap();

@@ -11,7 +11,7 @@ steps.
 | H1 | high | Decoy and invalid-type packets skip the rate window | fixed | `decoy_packet_is_handed_to_the_rate_hook` ([055](./055-decoy-rate.md)) |
 | H2 | high | Inbound eviction drops the longest-connected peer | fixed | `eviction_drops_the_newest_in_the_largest_netgroup` ([060](./060-evict-newest-netgroup.md)) |
 | H2-ban | high | Misbehavior disconnect is not remembered | fixed | `misbehavior_disconnect_refuses_the_same_address` ([061](./061-misbehavior-remembered.md)) |
-| H3 | high | REST always on and shares the RPC work queue | open | — |
+| H3 | high | REST always on and shares the RPC work queue | fixed | `rest_is_404_without_the_flag` |
 | H4 | medium | Silent-payment unsubscribe logs the scan secret | open | — |
 | H5 | high | IBD reader credits unsolicited data as progress | fixed | `unsolicited_block_does_not_refresh_progress` ([062](./062-ibd-requested-progress.md)) |
 | N1 | medium | Inv getdata does not charge the send budget | fixed | `inv_getdata_charges_send_budget` ([056](./056-inv-getdata-budget.md)) |

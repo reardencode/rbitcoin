@@ -267,7 +267,7 @@ client in rbitcoin's group can connect without traversing the `0700` datadir.
 (mainnet 8332, testnet 18332, signet 38332, regtest 18443). TCP auth is
 `Authorization: Bearer` from `{datadir}/rpc.token` (0600), plus optional Core
 cookie HTTP Basic from `--rpc-cookie-file PATH`. The same
-listeners serve Core REST: `GET /rest/chaininfo.json`, block, headers, tx,
+listeners serve Core REST when `--rest` is set: `GET /rest/chaininfo.json`, block, headers, tx,
 mempool, `getutxos`, `deploymentinfo`, and `blockfilter/basic` for heights
 `--block-filter-index` has sealed. TCP `/rest/` is unauthenticated (Core).
 `{datadir}/rpc.sock` stays mode 0600 with no HTTP header. See
