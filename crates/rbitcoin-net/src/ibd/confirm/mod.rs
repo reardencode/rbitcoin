@@ -2208,6 +2208,10 @@ pub(crate) fn spawn_confirm_engine(
                 // Isolation retries one block through the whole pipeline. A
                 // reject while an earlier block is still in write would
                 // rewind under it and stamp the next plan from stale fks.
+                // A re-arm isolates, bumps the generation, then offers bodies
+                // back: read the generation first and re-check it after the
+                // selection, so a wave never mixes the two sides of a re-arm.
+                let taken_gen = hub.query.lookup_taken_gen();
                 let single = feed.single_block();
                 if single && (!skip.is_empty() || hub.query.lookup_taken_hi() > tip) {
                     let t_wait = Instant::now();
@@ -2235,6 +2239,9 @@ pub(crate) fn spawn_confirm_engine(
                     .query
                     .block_queue_unresolved_heights(path_lo, &skip, max_blocks);
                 confirm_thr_stats::add_lookup_other(&stats, t_sel.elapsed());
+                if hub.query.lookup_taken_gen() != taken_gen {
+                    continue;
+                }
                 let mut did = false;
                 if !wave_h.is_empty() {
                     let t_wave = Instant::now();
@@ -2298,7 +2305,9 @@ pub(crate) fn spawn_confirm_engine(
                                 if load_tx.send(batch).is_err() {
                                     break;
                                 }
-                                if rbitcoin_consensus::take_wave_items_for_load(&hub.query, &chunk)
+                                if rbitcoin_consensus::take_wave_items_for_load(
+                                    &hub.query, &chunk, taken_gen,
+                                )
                                     .is_err()
                                 {
                                     break;

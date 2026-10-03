@@ -1384,7 +1384,7 @@ fn pin_head_parent_via_waves_and_leftover_stamp(
     let stamped = confirm_wire_lookup_stamp(q, params, ms, &items, Some(&pipe)).unwrap();
     let edge = spend_edge_of(&stamped.plan.expect("a new body needs a plan"));
     assert_eq!(edge.create_fk, head_fk);
-    take_wave_items_for_load(q, &w1.items).unwrap();
+    take_wave_items_for_load(q, &w1.items, q.lookup_taken_gen()).unwrap();
 
     let w2 = wave(spend_h + 1);
     assert!(
@@ -1392,7 +1392,7 @@ fn pin_head_parent_via_waves_and_leftover_stamp(
         "a second wave TipOnlys the same connected parent again"
     );
     assert!(w2.parent_ids.get(&parent).is_some());
-    take_wave_items_for_load(q, &w2.items).unwrap();
+    take_wave_items_for_load(q, &w2.items, q.lookup_taken_gen()).unwrap();
     assert!(!q.block_queue_has_height(spend_h));
     assert!(!q.block_queue_has_height(spend_h + 1));
 }
@@ -1900,7 +1900,7 @@ fn pin_abandoned_fork_is_not_a_parent(
     )
     .unwrap();
     assert_eq!(wave.stats.heights, 1);
-    take_wave_items_for_load(q, &wave.items).unwrap();
+    take_wave_items_for_load(q, &wave.items, q.lookup_taken_gen()).unwrap();
     assert!(
         wave.parent_ids
             .get(&orphan_parent.to_byte_array())
@@ -3142,7 +3142,7 @@ fn pin_bq_wave_then_stamp_confirms_empty_block(
         BQ_RESOLVE_WAVE_MAX_INPUTS,
     )
     .unwrap();
-    take_wave_items_for_load(q, &wave.items).unwrap();
+    take_wave_items_for_load(q, &wave.items, q.lookup_taken_gen()).unwrap();
     assert!(!q.block_queue_has_height(h));
     let items = [(Height(h), std::sync::Arc::new(b), None)];
     let stamped = confirm_wire_lookup_stamp(q, params, ms, &items, None)

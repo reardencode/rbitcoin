@@ -12,6 +12,11 @@ Fixed
   block whose bad body was dropped could wait forever.
   When the bad body is checked in a batch with other blocks, IBD retries
   the batch one block at a time, so only the bad body is dropped.
+- **IBD no longer stalls after a confirm reject.** A reject puts the
+  bodies of the retried blocks back on the body queue and restarts the
+  confirm lookup at the tip. A lookup pass that started before the reject
+  could then move the restart point past those bodies, so they were never
+  confirmed and IBD waited on blocks it already had.
 - **IBD disconnects a peer that sends a mutated block.** The peer's
   address also cools down, so the block is requested from another peer
   when one is available. A `noban` peer stays connected, as in Bitcoin
