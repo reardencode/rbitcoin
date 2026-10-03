@@ -58,10 +58,6 @@ impl ParentTracker {
         }
     }
 
-    pub(super) fn announcement_count(&self) -> usize {
-        self.announcements
-    }
-
     fn at_cap(&self, peer: u64) -> bool {
         self.announcements >= MAX_PARENT_ANN_GLOBAL
             || self.ann_per_peer.get(&peer).copied().unwrap_or(0) >= MAX_PARENT_ANN_PER_PEER

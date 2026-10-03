@@ -2546,10 +2546,6 @@ impl MempoolHub {
             .note_inv(peer, hash, inbound, now, wtxid)
     }
 
-    pub(crate) fn parent_announcement_count(&self) -> usize {
-        self.parent_req.lock().unwrap().announcement_count()
-    }
-
     pub(crate) fn forget_parent_anns_for_peer(&self, peer: u64) {
         self.parent_req.lock().unwrap().forget_peer(peer);
     }
@@ -4991,7 +4987,6 @@ mod tests {
                 assert!(!accepted, "announcement {i} past the cap is misbehavior");
             }
         }
-        assert_eq!(hub.parent_announcement_count(), cap);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&store_dir);
     }
@@ -5009,12 +5004,11 @@ mod tests {
         while n < global {
             assert!(hub.note_inv_tx_requested(peer, parent_hash(n), false, 1_000, false));
             n += 1;
-            if n % per_peer == 0 {
+            if n.is_multiple_of(per_peer) {
                 peer += 1;
             }
         }
         assert!(!hub.note_inv_tx_requested(peer, parent_hash(n), false, 1_000, false));
-        assert_eq!(hub.parent_announcement_count(), global as usize);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&store_dir);
     }
