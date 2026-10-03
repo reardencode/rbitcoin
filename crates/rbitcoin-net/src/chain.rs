@@ -256,14 +256,6 @@ pub(crate) fn reject_is_mutated(reason: &str) -> bool {
         || reason.contains("unexpected witness")
 }
 
-fn accept_err_is_mutated(e: &NetError) -> bool {
-    match e {
-        NetError::Mutated(_) => true,
-        NetError::ConnectFailed { msg, .. } | NetError::Consensus(msg) => reject_is_mutated(msg),
-        _ => false,
-    }
-}
-
 /// Core logs a contextual header reject (`bad-version`, `time-too-new`) with
 /// its reason. The returned error keeps the store-facing Display string.
 fn header_reject(header: &Header, e: &rbitcoin_consensus::ConsensusError) -> NetError {
@@ -1107,7 +1099,7 @@ impl ChainHub {
             .failing_block_hash()
             .map(BlockHash::from_byte_array)
             .unwrap_or(offered);
-        if accept_err_is_mutated(e) || accept_err_is_temporary_time(e) {
+        if e.is_mutated() || accept_err_is_temporary_time(e) {
             self.drop_held(hash);
             self.forget_asked_block(&hash);
             return;

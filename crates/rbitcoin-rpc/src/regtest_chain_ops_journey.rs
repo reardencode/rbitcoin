@@ -579,6 +579,43 @@ fn chain_ops_submit_rejects(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub, p2wp
         assert_eq!(r, want);
     }
     assert_eq!(tip_count(ctx), before + 1);
+
+    // A ground block [cb, t1] has txid(cb) || txid(t1) as one 64-byte tx.
+    // That tx alone under the real header must not cache the hash.
+    let mut inner = mine(6);
+    inner.txdata = vec![spend(
+        OutPoint {
+            txid: Txid::from_byte_array([0x64; 32]),
+            vout: 0,
+        },
+        0,
+    )];
+    inner.txdata[0].output[0].script_pubkey = ScriptBuf::from_bytes(vec![0x51; 4]);
+    assert_eq!(inner.txdata[0].base_size(), 64);
+    inner.header.merkle_root = inner.compute_merkle_root().unwrap();
+    regrind(&mut inner);
+    let r = dispatch(ctx, "submitblock", vec![json!(block_hex(&inner))]).unwrap();
+    assert_eq!(r, "bad-cb-missing");
+    assert!(
+        !hub.is_block_invalid(&inner.block_hash()),
+        "a 64-byte tx without a coinbase may be an inner merkle node"
+    );
+    assert_eq!(tip_count(ctx), before + 1);
+
+    // Witness bytes are not in the block hash. A padded copy is mutated.
+    let honest = mine(7);
+    let mut padded = honest.clone();
+    padded.txdata[0].input[0].witness = Witness::from_slice(&[[0u8; 32]]);
+    assert_eq!(padded.block_hash(), honest.block_hash());
+    let r = dispatch(ctx, "submitblock", vec![json!(block_hex(&padded))]).unwrap();
+    assert!(r.is_string(), "a padded witness rejects: {r}");
+    assert!(
+        !hub.is_block_invalid(&honest.block_hash()),
+        "a mutated submit must not cache the block hash"
+    );
+    let r = dispatch(ctx, "submitblock", vec![json!(block_hex(&honest))]).unwrap();
+    assert!(r.is_null(), "the honest body still connects: {r}");
+    assert_eq!(tip_count(ctx), before + 2);
 }
 
 /// Past 120 blocks and short of the 144 retarget window.

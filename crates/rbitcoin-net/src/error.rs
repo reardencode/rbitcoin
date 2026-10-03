@@ -87,6 +87,18 @@ impl NetError {
         }
     }
 
+    /// `BLOCK_MUTATED`: the body may not be the one the header commits to,
+    /// so the block hash must not be cached as failed.
+    pub fn is_mutated(&self) -> bool {
+        match self {
+            NetError::Mutated(_) => true,
+            NetError::ConnectFailed { msg, .. } | NetError::Consensus(msg) => {
+                crate::chain::reject_is_mutated(msg)
+            }
+            _ => false,
+        }
+    }
+
     /// Hash of the block that failed connect, when known.
     pub fn failing_block_hash(&self) -> Option<[u8; 32]> {
         match self {
