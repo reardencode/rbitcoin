@@ -13,7 +13,7 @@ steps.
 | H2-ban | high | Misbehavior disconnect is not remembered | fixed | `misbehavior_disconnect_refuses_the_same_address` |
 | H3 | high | REST always on and shares the RPC work queue | open | — |
 | H4 | medium | Silent-payment unsubscribe logs the scan secret | open | — |
-| H5 | high | IBD reader credits unsolicited data as progress | open | — |
+| H5 | high | IBD reader credits unsolicited data as progress | fixed | `unsolicited_block_does_not_refresh_progress` |
 | N1 | medium | Inv getdata does not charge the send budget | fixed | `inv_getdata_charges_send_budget` ([056](./056-inv-getdata-budget.md)) |
 | M1 | medium | Block getdata can queue past the send budget | fixed | `getdata_stops_when_send_budget_is_already_over` ([057](./057-block-getdata-budget.md)) |
 | M2 | medium | Silent-payment scan span is unbounded when start is set | open | — |

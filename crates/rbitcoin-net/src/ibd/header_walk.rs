@@ -2859,7 +2859,7 @@ fn renote_stored_path(st: &IbdWorkState, hub: &ChainHub) {
 mod tests {
     use super::*;
     use crate::ibd::events::apply_peer_event;
-    use crate::ibd::peer_io::{PeerCmd, PeerEvent, PeerSlot};
+    use crate::ibd::peer_io::{solicit_track, PeerCmd, PeerEvent, PeerSlot};
     use crate::ibd::state::IbdWorkState;
     use crate::seeds::AddrMan;
     use bitcoin::block::Header;
@@ -2898,6 +2898,9 @@ mod tests {
                 net: crate::NetAddr::from_socket(addr),
                 cmd_tx,
                 in_flight: Default::default(),
+                requested: solicit_track().0,
+                solicited_bytes: solicit_track().1,
+                solicited_ms: solicit_track().2,
                 peer_height: 50_000,
                 connected_ms: 1,
                 first_data_ms: 0,

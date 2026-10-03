@@ -39,7 +39,7 @@ pub(crate) fn disconnect_all_peers(st: &mut IbdWorkState) {
     }
     st.inflight.clear();
     for s in &mut st.slots {
-        s.in_flight.clear();
+        s.track_clear();
         s.alive = false;
     }
     st.slots.clear();
@@ -553,15 +553,14 @@ fn apply_block_framed(
     payload: Vec<u8>,
 ) {
     let wire_bytes = payload.len();
-    note_block_rx(&mut st.slots, peer, wire_bytes);
-    // Unsolicited wire is not a body we asked for. Drop it before any copy.
+    // Unsolicited wire is not a body we asked for. Drop it before any copy
+    // and before it can move this peer's progress clock.
     let requested = st.inflight.contains_key(&hash);
-    if requested {
-        super::assign::note_block_len(st, wire_bytes);
-    }
     if !requested {
         return;
     }
+    note_block_rx(&mut st.slots, peer, wire_bytes);
+    super::assign::note_block_len(st, wire_bytes);
     clear_hash_inflight(&mut st.slots, &mut st.inflight, hash);
     if st.body.is_rejected(&hash) || hub.has_block(&hash) {
         return;
@@ -649,7 +648,7 @@ fn apply_notfound(st: &mut IbdWorkState, peer: usize, hashes: Vec<BlockHash>) {
     let mut freed = Vec::new();
     if let Some(s) = st.slots.iter_mut().find(|s| s.id == peer) {
         for h in &hashes {
-            s.in_flight.remove(h);
+            s.track_remove(h);
             let empty = st
                 .inflight
                 .get_mut(h)

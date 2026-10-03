@@ -22,9 +22,9 @@ use bitcoin::BlockHash;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 
 /// Block and witness-block entries from an `inv` or `notfound`.
@@ -111,17 +111,149 @@ pub(crate) struct PeerSlot {
     pub cmd_tx: mpsc::UnboundedSender<PeerCmd>,
     /// Hashes currently requested from this peer.
     pub in_flight: HashSet<BlockHash>,
+    /// Same hashes, shared with the reader. One extra set per live peer so a
+    /// block check does not take the IBD work state.
+    pub requested: Arc<Mutex<HashSet<BlockHash>>>,
+    /// Bytes of blocks this peer was asked for. Stall-clock input.
+    pub solicited_bytes: Arc<AtomicU64>,
+    /// Mono ms of the last solicited block the reader accepted.
+    pub solicited_ms: Arc<AtomicU64>,
     /// Peer's `version.start_height` (best-effort network tip signal).
     pub peer_height: u32,
     /// Mono ms when the slot became live (post-handshake).
     pub connected_ms: u64,
     /// First block-payload mono ms (0 = none yet). IBD main thread only.
     pub first_data_ms: u64,
-    /// All streamed wire bytes (EWMA input). Reader-only `fetch_add`.
+    /// All streamed wire bytes. Reader-only `fetch_add`. Not the stall clock.
     pub bytes_rx_total: Arc<AtomicU64>,
     pub rate: PeerRate,
     pub alive: bool,
     pub task: JoinHandle<()>,
+}
+
+/// Empty side-set and solicited counters for a new [`PeerSlot`].
+pub(crate) fn solicit_track() -> (
+    Arc<Mutex<HashSet<BlockHash>>>,
+    Arc<AtomicU64>,
+    Arc<AtomicU64>,
+) {
+    (
+        Arc::new(Mutex::new(HashSet::new())),
+        Arc::new(AtomicU64::new(0)),
+        Arc::new(AtomicU64::new(0)),
+    )
+}
+
+/// In-flight light decodes (inv, addr, tx, cmpct) per IBD peer. Not a knob.
+const LIGHT_DECODE_PERMITS: usize = 32;
+
+impl PeerSlot {
+    fn requested_set(&self) -> std::sync::MutexGuard<'_, HashSet<BlockHash>> {
+        self.requested.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn track_insert(&mut self, hash: BlockHash) {
+        self.in_flight.insert(hash);
+        self.requested_set().insert(hash);
+    }
+
+    pub(crate) fn track_remove(&mut self, hash: &BlockHash) -> bool {
+        let removed = self.in_flight.remove(hash);
+        self.requested_set().remove(hash);
+        removed
+    }
+
+    pub(crate) fn track_clear(&mut self) {
+        self.in_flight.clear();
+        self.requested_set().clear();
+    }
+
+    pub(crate) fn track_retain(&mut self, mut keep: impl FnMut(&BlockHash) -> bool) {
+        self.in_flight.retain(|h| keep(h));
+        self.requested_set().retain(|h| keep(h));
+    }
+
+    pub(crate) fn track_drain(&mut self) -> Vec<BlockHash> {
+        let drained: Vec<BlockHash> = self.in_flight.drain().collect();
+        self.requested_set().clear();
+        drained
+    }
+}
+
+/// `true` when `hash` was requested: record `len` and the read time.
+/// An absent hash leaves both counters unchanged.
+pub(crate) fn note_solicited_block(
+    requested: &Mutex<HashSet<BlockHash>>,
+    bytes: &AtomicU64,
+    ms: &AtomicU64,
+    hash: &BlockHash,
+    len: usize,
+) -> bool {
+    let present = requested
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(hash);
+    if !present {
+        return false;
+    }
+    bytes.fetch_add(len as u64, Ordering::Relaxed);
+    ms.store(ibd_mono_ms(), Ordering::Relaxed);
+    true
+}
+
+/// One light-decode slot, or `None` without waiting.
+pub(crate) fn try_light_decode_permit(sem: &Arc<Semaphore>) -> Option<OwnedSemaphorePermit> {
+    Arc::clone(sem).try_acquire_owned().ok()
+}
+
+fn misbehavior_disconnect(rate: &mut PeerRateLimiter, ban_score: &mut u32, n: usize) -> bool {
+    if rate.note(n) {
+        return false;
+    }
+    *ban_score = ban_score.saturating_add(RATE_LIMIT_BAN_SCORE);
+    *ban_score >= BAN_SCORE_THRESHOLD
+}
+
+fn apply_decoded_message(
+    id: usize,
+    sinks: &PeerEventSinks,
+    msg: bitcoin::p2p::message::RawNetworkMessage,
+) {
+    match msg.into_payload() {
+        NetworkMessage::Headers(h) => {
+            sinks.send_ctrl(PeerEvent::Headers {
+                peer: id,
+                headers: h,
+            });
+        }
+        NetworkMessage::NotFound(inv) => {
+            let hashes = block_inventory_hashes(&inv);
+            if !hashes.is_empty() {
+                sinks.send_body(PeerEvent::NotFound { peer: id, hashes });
+            }
+        }
+        NetworkMessage::Addr(list) => {
+            let addrs = net_addrs_from_addr(&list);
+            if !addrs.is_empty() {
+                sinks.send_ctrl(PeerEvent::Addrs { peer: id, addrs });
+            }
+        }
+        NetworkMessage::AddrV2(list) => {
+            let addrs = net_addrs_from_addrv2(&list);
+            if !addrs.is_empty() {
+                sinks.send_ctrl(PeerEvent::Addrs { peer: id, addrs });
+            }
+        }
+        NetworkMessage::SendAddrV2 => {}
+        NetworkMessage::Block(_) => {}
+        NetworkMessage::Inv(inv) => {
+            let hashes = block_inventory_hashes(&inv);
+            if !hashes.is_empty() {
+                sinks.send_ctrl(PeerEvent::BlocksInv { peer: id, hashes });
+            }
+        }
+        _other => {}
+    }
 }
 
 impl Drop for PeerSlot {
@@ -149,7 +281,12 @@ pub(crate) fn sample_peer_rates(slots: &mut [PeerSlot], now_ms: u64) {
         if !s.alive {
             continue;
         }
-        let bytes = s.bytes_rx_total.load(Ordering::Relaxed);
+        // Read-time credit. Decoys stay in `bytes_rx_total` and do not move this.
+        let mark = s.solicited_ms.load(Ordering::Relaxed);
+        if mark > s.rate.progress_ms {
+            s.rate.progress_ms = mark;
+        }
+        let bytes = s.solicited_bytes.load(Ordering::Relaxed);
         s.rate.sample(now_ms, bytes, !s.in_flight.is_empty());
     }
 }
@@ -205,6 +342,11 @@ pub(crate) async fn spawn_peer(
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<NetworkMessage>();
     let bytes_rx_total = Arc::new(AtomicU64::new(0));
     let bytes_io = Arc::clone(&bytes_rx_total);
+    let (requested, solicited_bytes, solicited_ms) = solicit_track();
+    let req_r = Arc::clone(&requested);
+    let sol_bytes_r = Arc::clone(&solicited_bytes);
+    let sol_ms_r = Arc::clone(&solicited_ms);
+    let light_decode = Arc::new(Semaphore::new(LIGHT_DECODE_PERMITS));
 
     // Parent owns concurrent read + write tasks. Aborting the parent (PeerSlot
     // Drop / stall disconnect) must abort both children — plain JoinHandle drop
@@ -266,11 +408,28 @@ pub(crate) async fn spawn_peer(
                         if frame.is_block() {
                             match frame.block_hash_from_header() {
                                 Some(hash) if frame.payload.len() >= 80 => {
-                                    sinks_r.send_body(PeerEvent::BlockFramed {
-                                        peer: id,
-                                        hash,
-                                        payload: frame.payload,
-                                    });
+                                    // Unsolicited bodies stay off the channel.
+                                    // Requested bodies are not rate-capped.
+                                    let n = frame.payload.len();
+                                    if note_solicited_block(
+                                        &req_r,
+                                        &sol_bytes_r,
+                                        &sol_ms_r,
+                                        &hash,
+                                        n,
+                                    ) {
+                                        sinks_r.send_body(PeerEvent::BlockFramed {
+                                            peer: id,
+                                            hash,
+                                            payload: frame.payload,
+                                        });
+                                    } else if misbehavior_disconnect(&mut rate, &mut ban_score, n) {
+                                        sinks_r.send_body(PeerEvent::Dead {
+                                            peer: id,
+                                            reason: "peer misbehavior threshold".to_string(),
+                                        });
+                                        break;
+                                    }
                                 }
                                 Some(hash) => {
                                     sinks_r
@@ -285,55 +444,44 @@ pub(crate) async fn spawn_peer(
                             continue;
                         }
 
+                        // Headers and notfound stay on the heavy decode pool.
+                        // Light frames take a permit without waiting.
+                        if !frame.decode_is_cpu_heavy() {
+                            let n = frame.payload.len();
+                            match try_light_decode_permit(&light_decode) {
+                                Some(permit) => {
+                                    let sinks_d = sinks_r.clone();
+                                    tokio::spawn(async move {
+                                        let _permit = permit;
+                                        match frame.try_decode() {
+                                            Ok(msg) => apply_decoded_message(id, &sinks_d, msg),
+                                            Err(e) => {
+                                                sinks_d.send_body(PeerEvent::Dead {
+                                                    peer: id,
+                                                    reason: e.to_string(),
+                                                });
+                                            }
+                                        }
+                                    });
+                                }
+                                None => {
+                                    if misbehavior_disconnect(&mut rate, &mut ban_score, n) {
+                                        sinks_r.send_body(PeerEvent::Dead {
+                                            peer: id,
+                                            reason: "peer misbehavior threshold".to_string(),
+                                        });
+                                        break;
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+
                         let sinks_d = sinks_r.clone();
-                        // Non-block: decode off-thread. Never await a decode permit
-                        // on the reader (stalls TCP). Soft budgets gate *requests* only.
+                        // Never await a decode permit on the reader (stalls TCP).
                         spawn_decode_then_with_err(
                             frame,
-                            move |msg| {
-                                match msg.into_payload() {
-                                    NetworkMessage::Headers(h) => {
-                                        sinks_d.send_ctrl(PeerEvent::Headers {
-                                            peer: id,
-                                            headers: h,
-                                        });
-                                    }
-                                    NetworkMessage::NotFound(inv) => {
-                                        let hashes = block_inventory_hashes(&inv);
-                                        if !hashes.is_empty() {
-                                            sinks_d.send_body(PeerEvent::NotFound {
-                                                peer: id,
-                                                hashes,
-                                            });
-                                        }
-                                    }
-                                    NetworkMessage::Addr(list) => {
-                                        let addrs = net_addrs_from_addr(&list);
-                                        if !addrs.is_empty() {
-                                            sinks_d.send_ctrl(PeerEvent::Addrs { peer: id, addrs });
-                                        }
-                                    }
-                                    NetworkMessage::AddrV2(list) => {
-                                        let addrs = net_addrs_from_addrv2(&list);
-                                        if !addrs.is_empty() {
-                                            sinks_d.send_ctrl(PeerEvent::Addrs { peer: id, addrs });
-                                        }
-                                    }
-                                    NetworkMessage::SendAddrV2 => {}
-                                    // Blocks must not reach decode (handled above).
-                                    NetworkMessage::Block(_) => {}
-                                    NetworkMessage::Inv(inv) => {
-                                        let hashes = block_inventory_hashes(&inv);
-                                        if !hashes.is_empty() {
-                                            sinks_d.send_ctrl(PeerEvent::BlocksInv {
-                                                peer: id,
-                                                hashes,
-                                            });
-                                        }
-                                    }
-                                    _other => {}
-                                }
-                            },
+                            move |msg| apply_decoded_message(id, &sinks_d, msg),
                             {
                                 let sinks_e = sinks_r.clone();
                                 move |e| {
@@ -350,15 +498,12 @@ pub(crate) async fn spawn_peer(
                             logged_invalid_v2 = true;
                             rbitcoin_log::debug!("{}", crate::v2::v2_invalid_message_type_log());
                         }
-                        if !rate.note(contents_len) {
-                            ban_score = ban_score.saturating_add(RATE_LIMIT_BAN_SCORE);
-                            if ban_score >= BAN_SCORE_THRESHOLD {
-                                sinks_r.send_body(PeerEvent::Dead {
-                                    peer: id,
-                                    reason: "peer misbehavior threshold".to_string(),
-                                });
-                                break;
-                            }
+                        if misbehavior_disconnect(&mut rate, &mut ban_score, contents_len) {
+                            sinks_r.send_body(PeerEvent::Dead {
+                                peer: id,
+                                reason: "peer misbehavior threshold".to_string(),
+                            });
+                            break;
                         }
                         continue;
                     }
@@ -479,6 +624,9 @@ pub(crate) async fn spawn_peer(
         net: addr,
         cmd_tx,
         in_flight: HashSet::new(),
+        requested,
+        solicited_bytes,
+        solicited_ms,
         peer_height,
         connected_ms: ibd_mono_ms(),
         first_data_ms: 0,
@@ -574,6 +722,9 @@ mod tests {
             )),
             cmd_tx,
             in_flight: HashSet::new(),
+            requested: Arc::new(Mutex::new(HashSet::new())),
+            solicited_bytes: Arc::new(AtomicU64::new(0)),
+            solicited_ms: Arc::new(AtomicU64::new(0)),
             peer_height: 100,
             connected_ms: 1,
             first_data_ms: 0,
@@ -638,6 +789,74 @@ mod tests {
         note_block_progress(std::slice::from_mut(&mut s), 99);
         note_block_rx(std::slice::from_mut(&mut s), 99, 1);
         assert!(ibd_mono_ms() > 0);
+    }
+
+    #[test]
+    fn unsolicited_block_does_not_refresh_progress() {
+        let hash = BlockHash::from_byte_array([7u8; 32]);
+        let requested = Mutex::new(HashSet::new());
+        let bytes = AtomicU64::new(0);
+        let ms = AtomicU64::new(0);
+        assert!(
+            !note_solicited_block(&requested, &bytes, &ms, &hash, 80),
+            "an unsolicited block does not count"
+        );
+        assert_eq!(bytes.load(Ordering::Relaxed), 0);
+        assert_eq!(ms.load(Ordering::Relaxed), 0);
+
+        while ibd_mono_ms() == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        requested.lock().unwrap().insert(hash);
+        let len = crate::ibd::rate::PROGRESS_STEP as usize;
+        assert!(
+            note_solicited_block(&requested, &bytes, &ms, &hash, len),
+            "a requested block records its bytes"
+        );
+        assert_eq!(bytes.load(Ordering::Relaxed), len as u64);
+        let marked = ms.load(Ordering::Relaxed);
+        assert!(marked > 0, "a requested block stamps the read time");
+
+        let mut quiet = PeerRate::default();
+        quiet.sample(0, 0, true);
+        quiet.sample(10_000, 0, true);
+        assert_eq!(
+            quiet.progress_ms, 0,
+            "zero solicited bytes over 10s leave the stall clock"
+        );
+        let mut moved = PeerRate::default();
+        moved.sample(0, 0, true);
+        moved.sample(1_000, bytes.load(Ordering::Relaxed), true);
+        assert_eq!(moved.progress_ms, 1_000);
+
+        let mut slot = dummy_slot(4);
+        slot.in_flight.insert(hash);
+        assert_eq!(slot.solicited_bytes.load(Ordering::Relaxed), 0);
+        assert_eq!(slot.solicited_ms.load(Ordering::Relaxed), 0);
+        sample_peer_rates(std::slice::from_mut(&mut slot), 0);
+        note_stream_bytes(&slot.bytes_rx_total, 8_000_000);
+        sample_peer_rates(std::slice::from_mut(&mut slot), 10_000);
+        assert_eq!(
+            slot.rate.progress_ms, 0,
+            "unsolicited stream bytes do not refresh progress"
+        );
+
+        slot.solicited_ms.store(marked, Ordering::Relaxed);
+        sample_peer_rates(std::slice::from_mut(&mut slot), 0);
+        assert_eq!(slot.rate.progress_ms, marked);
+    }
+
+    #[test]
+    fn light_decode_permit_does_not_wait() {
+        let sem = Arc::new(Semaphore::new(1));
+        let first = try_light_decode_permit(&sem);
+        assert!(first.is_some(), "one permit is available immediately");
+        assert!(
+            try_light_decode_permit(&sem).is_none(),
+            "a second permit does not wait"
+        );
+        drop(first);
+        assert!(try_light_decode_permit(&sem).is_some());
     }
 
     #[test]

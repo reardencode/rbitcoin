@@ -1,6 +1,6 @@
 //! Peer dial, header request, stall disconnect / cooldown.
 
-use super::peer_io::{ibd_mono_ms, spawn_peer, PeerCmd, PeerEventSinks, PeerSlot};
+use super::peer_io::{ibd_mono_ms, solicit_track, spawn_peer, PeerCmd, PeerEventSinks, PeerSlot};
 use super::rate::RELSLOW_ACTIVE_MS;
 use crate::chain::ChainHub;
 use crate::error::NetError;
@@ -462,7 +462,7 @@ pub(crate) fn release_peer_block_work(
     let mut freed = Vec::new();
     if let Some(s) = slots.iter_mut().find(|s| s.id == peer) {
         s.alive = false;
-        for h in s.in_flight.drain() {
+        for h in s.track_drain() {
             let empty = inflight
                 .get_mut(&h)
                 .map(|e| e.remove_peer(peer))
@@ -808,6 +808,9 @@ mod tests {
             net: crate::NetAddr::from_socket(a),
             cmd_tx,
             in_flight: HashSet::new(),
+            requested: solicit_track().0,
+            solicited_bytes: solicit_track().1,
+            solicited_ms: solicit_track().2,
             peer_height: 0,
             connected_ms: 0,
             first_data_ms: 0,
