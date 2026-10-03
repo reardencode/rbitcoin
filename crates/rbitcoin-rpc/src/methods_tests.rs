@@ -4312,7 +4312,8 @@ fn submitblock_store_fault_does_not_cache_block_invalid() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A store fault reading the parent header is not `prev-blk-not-found`.
+/// A store fault reading the parent header is not `prev-blk-not-found`,
+/// and on the tip-extend path it is not a reject reason that gets cached.
 #[test]
 fn submitblock_prev_header_read_fault_is_rpc_error() {
     let (ctx, dir, hub) = ctx_regtest_hub();
@@ -4328,6 +4329,7 @@ fn submitblock_prev_header_read_fault_is_rpc_error() {
         assert!(r.is_null(), "{r}");
     }
     let s2 = mine_on(b1.block_hash(), 2, t0 + 3);
+    let b3 = mine_on(b2.block_hash(), 3, t0 + 4);
     let body = walk_for(&dir.join("store"), "header.body").expect("header.body");
     std::fs::OpenOptions::new()
         .write(true)
@@ -4347,6 +4349,16 @@ fn submitblock_prev_header_read_fault_is_rpc_error() {
         "{e}"
     );
     assert!(!hub.is_block_invalid(&s2.block_hash()));
+
+    for attempt in 0..2 {
+        let e = dispatch(&ctx, "submitblock", vec![json!(block_hex(&b3))])
+            .expect_err("a tip header read fault is an RPC error");
+        assert_eq!(e["code"], ERR_VERIFY_ERROR, "attempt {attempt}: {e}");
+        assert!(
+            !hub.is_block_invalid(&b3.block_hash()),
+            "attempt {attempt}: a tip header read fault is not a block verdict"
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

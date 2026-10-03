@@ -752,23 +752,27 @@ impl ChainHub {
     }
 
     pub fn tip_hash(&self) -> Option<BlockHash> {
+        self.try_tip_hash().ok().flatten()
+    }
+
+    /// [`Self::tip_hash`] that keeps a store read fault as [`NetError::Store`].
+    fn try_tip_hash(&self) -> Result<Option<BlockHash>, NetError> {
         // Store tip is authoritative after IBD/archive-confirm (cache may only
         // hold genesis or a short tip window while Class C is far ahead). Prefer
         // query when its height is at least the cache tip; otherwise fall back
         // to the in-memory cache chain (pre-store / regtest cache-only paths).
         let q_h = self.query.tip_height().map(|h| h.0);
         let c_h = self.cache.tip_height();
-        match (q_h, c_h) {
+        Ok(match (q_h, c_h) {
             (Some(qh), Some(ch)) if ch > qh => self.cache.tip_hash(),
             (Some(qh), _) => self
                 .query
                 .header_at_height(rbitcoin_primitives::Height(qh))
-                .ok()
-                .flatten()
+                .map_err(NetError::store)?
                 .map(|(_, rec)| BlockHash::from_byte_array(rec.hash)),
             (None, Some(_)) => self.cache.tip_hash(),
             (None, None) => None,
-        }
+        })
     }
 
     pub fn tip_header(&self) -> Option<Header> {
@@ -2100,7 +2104,7 @@ impl ChainHub {
                     return Err(NetError::Protocol("non-genesis prev is zero"));
                 }
                 let tip_hash = self
-                    .tip_hash()
+                    .try_tip_hash()?
                     .ok_or(NetError::Protocol("missing tip hash"))?;
                 if prev == tip_hash {
                     let height = tip_h.saturating_add(1);
@@ -2130,8 +2134,9 @@ impl ChainHub {
 
                 if new_height == tip_h {
                     let cur_work = self
-                        .tip_header()
-                        .ok_or(NetError::Protocol("missing current tip header"))?
+                        .query
+                        .wire_header_at_height(Height(tip_h))
+                        .map_err(NetError::store)?
                         .work();
                     let new_work = block.header.work();
                     let precious = *self.precious.read().unwrap() == Some(hash);

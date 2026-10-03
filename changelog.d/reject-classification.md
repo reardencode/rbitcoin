@@ -11,8 +11,8 @@ Fixed
   longer cached as an invalid block, and neither is a connect cancelled
   by shutdown. Before, the valid block was refused for the rest of the
   process. Consensus rejects are still cached. `submitblock` answers a
-  store fault, including one reading the parent header, with RPC error
-  `-25` (`RPC_VERIFY_ERROR`), as Core does for `state.IsError()`. A
-  cancelled connect answers `inconclusive`, as Core does when shutdown
-  interrupts the block check. Consensus rejects still return their
-  BIP22 reason string.
+  store fault, including one reading the parent or tip header, with RPC
+  error `-25` (`RPC_VERIFY_ERROR`), as Core does for `state.IsError()`.
+  A cancelled connect answers `inconclusive`, as Core does when
+  shutdown interrupts the block check. Consensus rejects still return
+  their BIP22 reason string.
