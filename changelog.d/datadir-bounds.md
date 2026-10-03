@@ -9,3 +9,4 @@ Security
 - The datadir `.lock` is created mode 0600 and is not followed if it is
   a symlink.
 - Pool write jobs read the caller buffer through a shared slice.
+- Findings write-ups: 067, 068, 069, 070, 071, 072.
