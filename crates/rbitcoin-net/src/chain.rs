@@ -2106,6 +2106,11 @@ impl ChainHub {
         if self.invalidated.set.read().unwrap().contains(&hash) {
             return Err(NetError::Consensus("block is invalidated".into()));
         }
+        if rbitcoin_consensus::block_mutated_without_coinbase(&block) {
+            return Err(NetError::Mutated(
+                "bad-cb-missing, 64-byte transaction".into(),
+            ));
+        }
 
         let _guard = self.connect_lock.lock().unwrap_or_else(|e| e.into_inner());
         // Same hash already tip/confirmed (or won a concurrent accept): drop —
@@ -3248,6 +3253,50 @@ pub(crate) fn tiny_regtest_hub_labeled(
     let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled(label);
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     (dir, hub)
+}
+
+/// The body a merkle-ambiguity attacker sends: one 64-byte non-coinbase tx
+/// whose txid is the header's merkle root. With a ground block `[cb, t1]`
+/// those 64 bytes are `txid(cb) || txid(t1)` and the header is the real one.
+#[cfg(test)]
+pub(crate) fn sixty_four_byte_body(prev: BlockHash, time: u32) -> Block {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::block::{Header, Version};
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{Amount, OutPoint, Sequence, TxIn, TxOut};
+    let inner_node = Transaction {
+        version: TxVersion::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from_byte_array([0x64; 32]),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: bitcoin::Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51; 4]),
+        }],
+    };
+    assert_eq!(bitcoin::consensus::serialize(&inner_node).len(), 64);
+    let mut block = Block {
+        header: Header {
+            version: Version::from_consensus(4),
+            prev_blockhash: prev,
+            merkle_root: bitcoin::TxMerkleNode::from_byte_array([0u8; 32]),
+            time,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
+            nonce: 0,
+        },
+        txdata: vec![inner_node],
+    };
+    block.header.merkle_root = block.compute_merkle_root().unwrap();
+    rbitcoin_consensus::grind_regtest_pow(&mut block.header);
+    assert!(block.check_merkle_root());
+    block
 }
 
 #[cfg(test)]
@@ -5416,6 +5465,23 @@ mod tests {
             hub.accept_received_block(honest.clone()).unwrap(),
             AcceptOutcome::Accepted { height: 1 }
         ));
+
+        let inner = super::sixty_four_byte_body(honest.block_hash(), honest.header.time + 1);
+        hub.note_asked_block(inner.block_hash());
+        let err = hub
+            .accept_received_block(inner.clone())
+            .expect_err("a body with no coinbase must reject");
+        assert!(matches!(err, NetError::Mutated(_)), "got {err:?}");
+        assert!(
+            !hub.is_block_invalid(&inner.block_hash()),
+            "a 64-byte tx without a coinbase may be an inner merkle node: \
+             the header's real body must stay acceptable"
+        );
+        assert!(
+            !hub.already_have_or_asked_block(&inner.block_hash()),
+            "a mutated reject forgets the ask so the real body can be fetched"
+        );
+        assert_eq!(hub.tip_hash(), Some(honest.block_hash()));
 
         let now = honest.header.time;
         hub.clock.set_mock(i64::from(now));
