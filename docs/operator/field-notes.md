@@ -98,6 +98,6 @@ Full validation has fixed several pre-soft-fork script edges:
 | Lax DER pre-BIP66 | always `from_der_lax`; BIP66 is encoding check |
 | High-bit S, `from_der`≠lax | never prefer strict-first |
 | CODESEPARATOR in scriptSig | full EvalScript(scriptSig) for bare |
-| Pre-BIP16 P2SH shape | bare HASH160/EQUAL; Core BIP16Exception @ 170060 |
+| Pre-BIP16 P2SH shape | bare HASH160/EQUAL; Core BIP16Exception @ 170060 (testnet3 `00000000dd30…b105`) |
 
 In-memory **confirm reject blacklist** clears only on process restart after a binary fix.

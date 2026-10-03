@@ -2382,6 +2382,22 @@ fn bip16_from_prev_mtp_exception_and_time() {
     ));
 }
 
+/// Testnet3 BIP16 exception (Core `CTestNetParams::script_flag_exceptions`).
+#[test]
+fn bip16_testnet3_exception_block() {
+    use std::str::FromStr;
+    let exception =
+        BlockHash::from_str("00000000dd30457c001f4095d208cc1296b0eed002427aa599874af7a432b105")
+            .unwrap()
+            .to_byte_array();
+    let p = ChainParams::testnet();
+    assert!(!bip16_active_from_prev_mtp(&p, 1, &exception, u32::MAX));
+    let mut neighbor = exception;
+    neighbor[0] ^= 1;
+    assert!(bip16_active_from_prev_mtp(&p, 1, &neighbor, u32::MAX));
+    assert!(bip16_active_from_prev_mtp(&p, 1, &[1u8; 32], 0));
+}
+
 /// Confirm jobs share wire Arc — same Transaction address, no deep clone.
 #[test]
 fn script_job_shared_tx_is_wire_pointer() {

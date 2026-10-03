@@ -15,11 +15,13 @@ path (`HASH160 EQUAL` only). The redeemScript is **never executed**, so a redeem
 with an undefined opcode still “pays.” Core rejects; we accept.
 
 Modern Core buries P2SH: block script flags always include `SCRIPT_VERIFY_P2SH`
-except the named **BIP16Exception** mainnet hash. We must match that — not invent
+except the named per-network exception hash (mainnet **BIP16Exception**,
+testnet3 `00000000dd30…b105`). We must match that — not invent
 an earlier or later mainnet schedule. Keep the exception (and genesis) off.
 
 ## Fix
 
 `bip16_active_from_prev_mtp`: after exception-hash / genesis carve-outs, return
 **true** (ignore MTP). Pin exception still false. Red: undefined-opcode redeem
-on an early-MTP/regtest chain must reject.
+on an early-MTP/regtest chain must reject. Testnet3 exception:
+`bip16_testnet3_exception_block`.
