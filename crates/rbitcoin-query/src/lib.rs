@@ -1513,7 +1513,7 @@ impl Query {
                 return Ok(BlockQueueOffer { queue_id: id });
             }
         }
-        let n_inputs = rbitcoin_store::block_wire_input_count(payload);
+        let n_inputs = rbitcoin_store::block_wire_input_count(payload).unwrap_or(0);
         let owned = payload.to_vec();
         let mut g = self.block_queue.lock().unwrap();
         if let Some(id) = g.id_for_height(height) {
@@ -1531,7 +1531,7 @@ impl Query {
         header_fk: u64,
         payload: &[u8],
     ) -> Result<u64, QueryError> {
-        let n_inputs = rbitcoin_store::block_wire_input_count(payload);
+        let n_inputs = rbitcoin_store::block_wire_input_count(payload).unwrap_or(0);
         let owned = payload.to_vec();
         let mut g = self.block_queue.lock().unwrap();
         g.enqueue_vec(height, hash, header_fk, owned, n_inputs)

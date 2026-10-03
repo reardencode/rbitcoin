@@ -632,6 +632,54 @@ mod tests {
         assert!(block.txdata[0].output.is_empty());
     }
 
+    /// Peer intake walks the wire and lookup decodes it. A payload one side
+    /// accepts and the other refuses either strands a queued body or drops an
+    /// honest one, so every truncation and single-byte rewrite must agree.
+    #[test]
+    fn block_wire_walk_agrees_with_decode() {
+        use bitcoin::consensus::encode::serialize;
+        let zero_in = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        // Segwit with one empty and one non-empty witness decodes; rewriting
+        // the non-empty stack count to 0 hits the all-empty refusal.
+        let mut mixed = p2wpkh_like();
+        mixed.input.insert(0, legacy_1in().input[0].clone());
+        mixed.input[1].witness = Witness::from_slice(&[[0x01]]);
+        let mut raw = vec![0u8; 80];
+        raw.push(4);
+        for tx in [legacy_1in(), p2wpkh_like(), zero_in, mixed] {
+            raw.extend_from_slice(&serialize(&tx));
+        }
+        let agree = |p: &[u8]| {
+            let decoded = super::decode_block_precomputes(p, false)
+                .map(|(b, _, _)| b.txdata.iter().map(|t| t.input.len() as u32).sum());
+            assert_eq!(
+                rbitcoin_store::block_wire_input_count(p),
+                decoded,
+                "payload {p:02x?}"
+            );
+            decoded
+        };
+        assert_eq!(agree(&raw), Some(4));
+        for n in 0..raw.len() {
+            agree(&raw[..n]);
+        }
+        for i in 80..raw.len() {
+            for v in [0x00, 0x01, 0x02, 0xfd, 0xfe, 0xff] {
+                let mut p = raw.clone();
+                p[i] = v;
+                agree(&p);
+            }
+        }
+    }
+
     #[test]
     fn decode_block_precomputes_hashes_payload_slices() {
         use bitcoin::blockdata::constants::genesis_block;

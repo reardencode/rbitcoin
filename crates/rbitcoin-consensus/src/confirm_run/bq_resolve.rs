@@ -526,7 +526,7 @@ mod tests {
             .fold(0u32, u32::saturating_add);
         assert_eq!(
             rbitcoin_store::block_wire_input_count(&serialize(&genesis)),
-            n
+            Some(n)
         );
         let g_cb = genesis.txdata[0].compute_txid();
         let b1 = mine_with_txs(
@@ -540,7 +540,10 @@ mod tests {
             .iter()
             .map(|tx| tx.input.len() as u32)
             .fold(0u32, u32::saturating_add);
-        assert_eq!(rbitcoin_store::block_wire_input_count(&serialize(&b1)), n1);
+        assert_eq!(
+            rbitcoin_store::block_wire_input_count(&serialize(&b1)),
+            Some(n1)
+        );
         assert!(n1 >= 2, "coinbase + spend");
     }
 
