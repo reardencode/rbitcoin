@@ -9,3 +9,4 @@ Security
 - During initial download, only a block this node requested moves the
   stall clock or is queued. Other frames are rate-limited. Light
   decodes do not wait on the reader.
+- Findings write-ups: 060, 061, 062.
