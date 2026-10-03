@@ -1,8 +1,8 @@
 //! Bitcoin **block** wire walk: Σ `tx.input` without a `Block` decode.
 //!
 //! Peer enqueue stamps this so IBD lookup can pack/hold waves from the BQ
-//! index. The walk refuses the payloads rust-bitcoin's block decode refuses,
-//! so intake can drop a body that lookup would never decode.
+//! index. The walk refuses the payloads lookup's block decode refuses, so
+//! intake can drop a body that lookup would never decode.
 
 use rbitcoin_primitives::read_compact_size;
 
@@ -10,10 +10,11 @@ const HEADER_LEN: usize = 80;
 
 /// Σ input count over every tx in a serialized block (header + tx vector).
 ///
-/// `None` when rust-bitcoin's consensus decode fails on a P2P-sized payload:
-/// truncation, a non-minimal CompactSize, a segwit flag other than 1, or a
-/// segwit tx whose witnesses are all empty. Trailing bytes are ignored, as
-/// in that decode.
+/// `None` when lookup's block decode fails on a P2P-sized payload:
+/// truncation, a non-minimal CompactSize, a segwit flag other than 0 or 1,
+/// or a segwit tx whose witnesses are all empty. Flag 0 is Core's 10-byte
+/// tx with no inputs and no outputs. Trailing bytes are ignored, as in that
+/// decode.
 pub fn block_wire_input_count(payload: &[u8]) -> Option<u32> {
     if payload.len() < HEADER_LEN {
         return None;
@@ -78,11 +79,16 @@ fn skip_tx(buf: &[u8], off: &mut usize) -> Option<u32> {
     let mut n_in = read_count(buf, off)?;
     let segwit = n_in == 0;
     if segwit {
-        // BIP144: an empty vin is the marker; rust-bitcoin takes only flag 1.
-        if *buf.get(*off)? != 1 {
-            return None;
+        // BIP144: an empty vin is the marker and flag 1 follows. Core reads
+        // flag 0 as a tx with no inputs and no outputs, then the locktime.
+        match *buf.get(*off)? {
+            0 => {
+                advance(buf, off, 5)?;
+                return Some(0);
+            }
+            1 => *off += 1,
+            _ => return None,
         }
-        *off += 1;
         n_in = read_count(buf, off)?;
     }
     for _ in 0..n_in {
@@ -220,10 +226,20 @@ mod tests {
     }
 
     #[test]
+    fn flag_zero_tx_is_ten_bytes_without_inputs() {
+        let dummy = vec![1, 0, 0, 0, 0x00, 0x00, 0, 0, 0, 0];
+        let p = block(&[coinbase_tx(1), dummy.clone(), coinbase_tx(2)]);
+        assert_eq!(block_wire_input_count(&p), Some(3));
+        let mut short = block(&[dummy]);
+        short.pop();
+        assert_eq!(block_wire_input_count(&short), None);
+    }
+
+    #[test]
     fn refuses_what_rust_bitcoin_refuses() {
-        let mut flag0 = witness_tx(1);
-        flag0[5] = 0;
-        assert_eq!(block_wire_input_count(&block(&[flag0])), None);
+        let mut flag2 = witness_tx(1);
+        flag2[5] = 2;
+        assert_eq!(block_wire_input_count(&block(&[flag2])), None);
 
         let mut bare = witness_tx(1);
         let lock = bare.len() - 4;

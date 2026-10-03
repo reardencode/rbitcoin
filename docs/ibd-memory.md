@@ -22,9 +22,9 @@ stamp Σ `tx.input` (`block_wire_input_count`; CompactSize walk, not a `Block`).
 The walk refuses exactly the payloads `decode_block_precomputes` refuses. Offer
 drops such a body before the copy, the sender is disconnected, and the hash
 stays fetchable: a queued hash counts as in hand, so an undecodable row would
-block the honest copy. Known gap: a tx with segwit flag 0 decodes in Core (an
-empty vin, consensus-invalid) but not in rust-bitcoin, so such a block is
-refetched instead of marked invalid.
+block the honest copy. Lookup decodes Core's flag-0 tx (an empty vin, then
+flag 0, then the locktime) as a tx with no inputs and no outputs, so a block
+holding one is consensus-invalid, as in Core, not undecodable.
 Lookup packs and **holds** on that stamped count (no clone, no decode). The first
 full decode is lookup emit: `decode_block_precomputes` (payload-slice wtxid;
 stripped txid; `from_tx_wire` skips the second SHA engine when `wtxid==txid`;

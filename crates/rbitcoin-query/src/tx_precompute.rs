@@ -344,6 +344,26 @@ fn block_tx_count_fits(n: usize, remaining: usize) -> bool {
     n <= remaining / 10
 }
 
+const FLAG_ZERO_TX_LEN: usize = 10;
+
+/// Core's `UnserializeTransaction` reads an empty vin followed by segwit flag
+/// 0 as a tx with no inputs and no outputs, then the locktime. Those 10 bytes
+/// are also that tx's legacy encoding, so the txid matches Core. rust-bitcoin
+/// refuses flag 0; without this the block never gets Core's invalid verdict.
+fn decode_flag_zero_tx(wire: &[u8]) -> Option<Transaction> {
+    let w = wire.get(..FLAG_ZERO_TX_LEN)?;
+    if w[4..6] != [0, 0] {
+        return None;
+    }
+    let word = |i: usize| [w[i], w[i + 1], w[i + 2], w[i + 3]];
+    Some(Transaction {
+        version: bitcoin::transaction::Version(i32::from_le_bytes(word(0))),
+        lock_time: bitcoin::absolute::LockTime::from_consensus(u32::from_le_bytes(word(6))),
+        input: Vec::new(),
+        output: Vec::new(),
+    })
+}
+
 /// Decode a P2P block payload once: rust-bitcoin `Block` plus per-tx pres from
 /// each tx's **wire slice** (no second consensus_encode into SHA engines).
 ///
@@ -369,7 +389,13 @@ pub fn decode_block_precomputes(
     let mut hash_ns = 0u64;
     for _ in 0..n {
         let start = cur.position() as usize;
-        let tx = Transaction::consensus_decode(&mut cur).ok()?;
+        let tx = match decode_flag_zero_tx(&payload[start..]) {
+            Some(tx) => {
+                cur.set_position((start + FLAG_ZERO_TX_LEN) as u64);
+                tx
+            }
+            None => Transaction::consensus_decode(&mut cur).ok()?,
+        };
         let end = cur.position() as usize;
         let wire = payload.get(start..end)?;
         let t = Instant::now();
@@ -653,10 +679,11 @@ mod tests {
         mixed.input.insert(0, legacy_1in().input[0].clone());
         mixed.input[1].witness = Witness::from_slice(&[[0x01]]);
         let mut raw = vec![0u8; 80];
-        raw.push(4);
+        raw.push(5);
         for tx in [legacy_1in(), p2wpkh_like(), zero_in, mixed] {
             raw.extend_from_slice(&serialize(&tx));
         }
+        raw.extend_from_slice(&FLAG_ZERO_TX);
         let agree = |p: &[u8]| {
             let decoded = super::decode_block_precomputes(p, false)
                 .map(|(b, _, _)| b.txdata.iter().map(|t| t.input.len() as u32).sum());
@@ -678,6 +705,35 @@ mod tests {
                 agree(&p);
             }
         }
+    }
+
+    /// Core's `UnserializeTransaction` reads an empty vin and flag 0 as a tx
+    /// with no inputs and no outputs; the locktime follows.
+    const FLAG_ZERO_TX: [u8; 10] = [2, 0, 0, 0, 0x00, 0x00, 7, 0, 0, 0];
+
+    #[test]
+    fn flag_zero_tx_decodes_with_core_txid() {
+        use bitcoin::consensus::encode::serialize;
+        let mut raw = vec![0u8; 80];
+        raw.push(3);
+        raw.extend_from_slice(&serialize(&legacy_1in()));
+        raw.extend_from_slice(&FLAG_ZERO_TX);
+        raw.extend_from_slice(&serialize(&legacy_1in()));
+        let (block, pres, _) = super::decode_block_precomputes(&raw, false).unwrap();
+        let tx = &block.txdata[1];
+        assert!(tx.input.is_empty() && tx.output.is_empty());
+        assert_eq!(
+            (tx.version, tx.lock_time),
+            (Version::TWO, LockTime::from_consensus(7))
+        );
+        let core = sha256d::Hash::hash(&FLAG_ZERO_TX).to_byte_array();
+        assert_eq!(pres[1].txid, core);
+        assert_eq!(tx.compute_txid().to_byte_array(), core);
+        assert_eq!(pres[1].wtxid, core, "no witness: wtxid is the txid");
+        assert_eq!(
+            pres[2].txid, pres[0].txid,
+            "the next tx starts after locktime"
+        );
     }
 
     #[test]

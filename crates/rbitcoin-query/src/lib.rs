@@ -1506,7 +1506,7 @@ impl Query {
     /// Restart drops the queue (redownload); sole durable write is Class A on
     /// confirm.
     ///
-    /// A payload rust-bitcoin would not decode is refused with
+    /// A payload lookup would not decode is refused with
     /// [`StoreError::Rejected`] carrying [`Self::UNDECODABLE_WIRE_MSG`], and
     /// nothing is queued: a queued hash counts as in hand, so an undecodable
     /// row would block the honest copy.
