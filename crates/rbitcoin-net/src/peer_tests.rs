@@ -2077,6 +2077,16 @@ fn pending_blocks_insert_evicts_at_cap() {
 }
 
 #[test]
+fn pending_block_over_four_megabytes_is_not_parked() {
+    let mut pending = PendingBlocks::new();
+    let mut b = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    b.txdata[0].input[0].script_sig = bitcoin::ScriptBuf::from_bytes(vec![0u8; 4_000_001]);
+    let h = b.block_hash();
+    pending.insert(h, b);
+    assert!(!pending.contains_key(&h));
+}
+
+#[test]
 fn try_queue_served_block_false_at_cap() {
     let (out_tx, mut out_rx) = mpsc::unbounded_channel();
     let n = AtomicUsize::new(MAX_SERVE_BLOCKS);

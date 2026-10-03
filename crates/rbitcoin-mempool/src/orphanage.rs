@@ -147,6 +147,15 @@ impl Orphanage {
         if weight > MAX_ORPHAN_TX_WEIGHT {
             return false;
         }
+        if let Some(peer) = from {
+            while self.peer_orphan_weight(peer).saturating_add(weight)
+                > ORPHAN_RESERVED_WEIGHT_PER_PEER
+            {
+                if !self.evict_one_from_peer(peer) {
+                    return false;
+                }
+            }
+        }
         while !self.by_txid.is_empty()
             && (self.by_txid.len() >= self.max_count
                 || self.total_weight.saturating_add(weight) > self.max_weight)
@@ -239,6 +248,24 @@ impl Orphanage {
         e.announcers
             .iter()
             .any(|p| self.peer_orphan_weight(*p) <= ORPHAN_RESERVED_WEIGHT_PER_PEER)
+    }
+
+    fn evict_one_from_peer(&mut self, peer: u64) -> bool {
+        let victim = self
+            .fifo
+            .iter()
+            .find(|txid| {
+                self.by_txid
+                    .get(*txid)
+                    .is_some_and(|e| e.announcers.contains(&peer))
+            })
+            .copied();
+        let Some(txid) = victim else {
+            return false;
+        };
+        self.remove_txid(&txid);
+        self.fifo.retain(|t| self.by_txid.contains_key(t));
+        true
     }
 
     fn evict_oldest(&mut self) -> bool {
@@ -450,6 +477,33 @@ mod tests {
                 )),
             }],
         }
+    }
+
+    #[test]
+    fn one_peer_cannot_fill_the_orphanage() {
+        let mut o = Orphanage::new();
+        let parent = txid_n(8);
+        let tx2 = {
+            let mut tx = make_orphan(parent, 1);
+            tx.input[0].witness = Witness::from_slice(&[vec![2u8; 64]]);
+            tx
+        };
+        let mut miss = BTreeSet::new();
+        miss.insert(parent);
+        assert!(o.insert_from(tx2.clone(), miss.clone(), Some(2)));
+        for i in 0..80u8 {
+            let mut tx = make_orphan(parent, i.wrapping_add(3));
+            tx.input[0].witness = Witness::from_slice(&[vec![i.wrapping_add(3); 20_000]]);
+            tx.lock_time = LockTime::from_height(i as u32).unwrap();
+            o.insert_from(tx, miss.clone(), Some(1));
+        }
+        assert!(
+            o.peer_orphan_weight(1) <= ORPHAN_RESERVED_WEIGHT_PER_PEER,
+            "peer weight {}",
+            o.peer_orphan_weight(1)
+        );
+        let peer2_kept = o.announcers_of(&tx2.compute_txid()).contains(&2);
+        assert!(peer2_kept, "peer 2 must keep its orphan");
     }
 
     #[test]
