@@ -101,6 +101,10 @@ pub struct BqResolveWave {
     pub drain_fence_hi: Option<u32>,
     /// TipOnly hits for this wave (`need_vouts` filled per load chunk at send).
     pub parent_ids: BatchParentIds,
+    /// `(height, hash)` of a raw row that did not decode. The wave stops
+    /// there and the row is already off the body queue; the caller rejects
+    /// the hash as soft wire so another peer can serve it.
+    pub undecodable: Option<(u32, [u8; 32])>,
 }
 
 /// Outcome of one TipOnly wave over BQ-ready heights.
@@ -160,7 +164,9 @@ fn push_resolve_keys(
 
 /// TipOnly-resolve external parents for `heights` still on the BQ.
 ///
-/// Skips missing / already-complete / undecodable heights. Marks each
+/// Skips missing / already-complete heights. Stops at the first raw row
+/// that does not decode, dequeues it, and names it in
+/// [`BqResolveWave::undecodable`]. Marks each
 /// processed height resolve-complete even when some keys miss (same-batch /
 /// in-flight remainder is load's job). Connected-only (fence) resolve.
 /// `max_blocks` / `max_inputs` cap emit (remaining loadq).
@@ -245,10 +251,12 @@ pub fn confirm_bq_resolve_wave_capped(
                 items: Vec::new(),
                 drain_fence_hi: None,
                 parent_ids: BatchParentIds::default(),
+                undecodable: None,
             });
         }
     }
 
+    let mut undecodable = None;
     for &h in &selected {
         if all_keys.len() >= BQ_RESOLVE_WAVE_MAX_KEYS && !done.is_empty() {
             break;
@@ -262,13 +270,19 @@ pub fn confirm_bq_resolve_wave_capped(
                 continue;
             };
             let t_dec = Instant::now();
-            let Some((block, pres_vec, pre_ns)) = rbitcoin_query::decode_block_precomputes(
+            let decoded = rbitcoin_query::decode_block_precomputes(
                 &payload,
                 !crate::milestone::skips_on_query(milestone, query, h, &hash),
-            ) else {
-                continue;
-            };
+            );
             let wall = t_dec.elapsed().as_nanos() as u64;
+            let Some((block, pres_vec, pre_ns)) = decoded else {
+                // A row that never decodes would hold this height in hand
+                // forever: drop it so the hash is fetched again.
+                stats.decode_ns = stats.decode_ns.saturating_add(wall);
+                query.block_queue_dequeue_height(h)?;
+                undecodable = Some((h, hash));
+                break;
+            };
             stats.decode_ns = stats.decode_ns.saturating_add(wall.saturating_sub(pre_ns));
             stats.precompute_ns = stats.precompute_ns.saturating_add(pre_ns);
             let pres = Arc::<[TxPrecompute]>::from(pres_vec);
@@ -373,6 +387,7 @@ pub fn confirm_bq_resolve_wave_capped(
         items,
         drain_fence_hi,
         parent_ids,
+        undecodable,
     })
 }
 
