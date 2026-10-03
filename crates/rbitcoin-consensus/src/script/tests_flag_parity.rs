@@ -166,3 +166,30 @@ fn discourage_skips_native_p2a_and_pre_taproot_v1() {
     });
     script::verify_job_all_inputs(&pre_taproot).expect("v1/32 before Taproot");
 }
+
+/// Core passes `is_p2sh` to `VerifyWitnessProgram`: a P2SH-wrapped v1
+/// 32-byte program is not Taproot and P2SH-wrapped `0x4e73` is not an
+/// anchor, so both reach DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM.
+#[test]
+fn discourage_rejects_p2sh_wrapped_upgradable_programs() {
+    let mut v1 = vec![0x51, 0x20];
+    v1.extend_from_slice(&[0x11; 32]);
+    let anchor_shape = vec![0x51, 0x02, 0x4e, 0x73];
+    let v2 = vec![0x52, 0x02, 0x00, 0x01];
+    for redeem in [v1, anchor_shape, v2] {
+        let mut spk = vec![0xa9, 0x14];
+        spk.extend_from_slice(&crate::script::crypto::hash160(&redeem));
+        spk.push(0x87);
+        let mut script_sig = Vec::new();
+        push(&mut script_sig, &redeem);
+        let tx = spend(script_sig, &[]);
+        let consensus = job(spk.clone(), tx.clone(), |_| {});
+        script::verify_job_all_inputs(&consensus).expect("wrapped upgradable program");
+        let discouraged = job(spk, tx, |f| f.discourage_upgradable_witness = true);
+        let err = script::verify_job_all_inputs(&discouraged).expect_err("discourage");
+        assert!(
+            format!("{err}").contains("DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM"),
+            "{err}"
+        );
+    }
+}
