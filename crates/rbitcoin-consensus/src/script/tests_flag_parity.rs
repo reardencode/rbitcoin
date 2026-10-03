@@ -106,3 +106,44 @@ fn nullfail_p2wsh_multisig_sig_matching_later_key_accepts() {
     let job = job(p2wsh_spk(&ws), tx, |f| f.nullfail = true);
     script::verify_job_all_inputs(&job).expect("1-of-2 with NULLFAIL");
 }
+
+fn uncompressed_pubkey(n: u8) -> Vec<u8> {
+    let secp = Secp256k1::new();
+    secret(n)
+        .public_key(&secp)
+        .serialize_uncompressed()
+        .to_vec()
+}
+
+/// Core `CheckPubKeyEncoding` runs for an empty signature: CHECKSIG and every
+/// CHECKMULTISIG pair the key walk examines.
+#[test]
+fn empty_sig_still_checks_pubkey_encoding() {
+    let bad_key = [0x05u8; 33];
+
+    let mut checksig_not = Vec::new();
+    push(&mut checksig_not, &bad_key);
+    checksig_not.extend_from_slice(&[0xac, 0x91]);
+    let mut multisig_not = vec![0x51];
+    push(&mut multisig_not, &bad_key);
+    multisig_not.extend_from_slice(&[0x51, 0xae, 0x91]);
+
+    for (spk, script_sig) in [(checksig_not, vec![0x00]), (multisig_not, vec![0x00, 0x00])] {
+        let tx = spend(script_sig, &[]);
+        let consensus = job(spk.clone(), tx.clone(), |_| {});
+        script::verify_job_all_inputs(&consensus).expect("consensus: empty sig is false");
+        let strict = job(spk, tx, |f| f.strictenc = true);
+        let err = script::verify_job_all_inputs(&strict).expect_err("STRICTENC");
+        assert!(format!("{err}").contains("PUBKEYTYPE"), "{err}");
+    }
+
+    let mut ws = Vec::new();
+    push(&mut ws, &uncompressed_pubkey(1));
+    ws.extend_from_slice(&[0xac, 0x91]);
+    let tx = spend(Vec::new(), &[Vec::new(), ws.clone()]);
+    let consensus = job(p2wsh_spk(&ws), tx.clone(), |_| {});
+    script::verify_job_all_inputs(&consensus).expect("consensus: empty sig is false");
+    let typed = job(p2wsh_spk(&ws), tx, |f| f.witness_pubkeytype = true);
+    let err = script::verify_job_all_inputs(&typed).expect_err("WITNESS_PUBKEYTYPE");
+    assert!(format!("{err}").contains("WITNESS_PUBKEYTYPE"), "{err}");
+}
