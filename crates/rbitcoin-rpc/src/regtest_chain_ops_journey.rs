@@ -94,6 +94,7 @@ fn rpc_regtest_chain_ops() {
     chain_ops_prioritise(&ctx, &mut cbs);
     let fee_block = chain_ops_generateblock_and_parent_first(&ctx, &mut cbs);
     chain_ops_proposal_spends(&ctx, &mut cbs);
+    chain_ops_submit_repeated_txids(&ctx, &hub, &mut cbs);
     chain_ops_maxfeerate(&ctx, &mut cbs);
     chain_ops_invalidate_and_precious(&ctx, &hub, &mut cbs, &p2wpkh);
 
@@ -1161,6 +1162,48 @@ fn chain_ops_proposal_spends(ctx: &RpcContext, cbs: &mut TrueCoinbases) {
         "bad-txns-inputs-missingorspent",
         "a coin a block spent is gone from the proposal view"
     );
+}
+
+/// Core reports a repeated txid by where it fails: a repeat that keeps the
+/// merkle root is a mutated body (CheckMerkleRoot), a second coinbase is
+/// CheckBlock's `bad-cb-multiple`, and any other repeat spends a spent coin.
+fn chain_ops_submit_repeated_txids(
+    ctx: &RpcContext,
+    hub: &rbitcoin_net::ChainHub,
+    cbs: &mut TrueCoinbases,
+) {
+    let f = cbs.take();
+    let cb_f = generated_coinbase_value(ctx, f);
+    let (_, spend) = spend_generated_coinbase(ctx, f, cb_f - 1_000, true_spk());
+    let h = tip_count(ctx) as u32 + 1;
+    let time = hub.tip_header().unwrap().time + 1;
+    let mine = |height: u32, extra: Vec<Transaction>| {
+        rbitcoin_consensus::mine_regtest_paying(
+            hub.tip_hash().unwrap(),
+            time,
+            height,
+            true_spk(),
+            extra,
+        )
+    };
+    let mut mutated = mine(h, vec![]);
+    mutated.txdata.push(mutated.txdata[0].clone());
+    mutated.header.merkle_root = mutated.compute_merkle_root().unwrap();
+    regrind(&mut mutated);
+    let other_cb = mine(h + 1, vec![]).txdata[0].clone();
+    let before = tip_count(ctx);
+    for (block, want) in [
+        (mutated, "bad-txns-duplicate"),
+        (mine(h, vec![other_cb]), "bad-cb-multiple"),
+        (
+            mine(h, vec![spend.clone(), spend.clone()]),
+            "bad-txns-inputs-missingorspent",
+        ),
+    ] {
+        let r = dispatch(ctx, "submitblock", vec![json!(block_hex(&block))]).unwrap();
+        assert_eq!(r, want);
+    }
+    assert_eq!(tip_count(ctx), before);
 }
 
 fn chain_ops_maxfeerate(ctx: &RpcContext, cbs: &mut TrueCoinbases) {

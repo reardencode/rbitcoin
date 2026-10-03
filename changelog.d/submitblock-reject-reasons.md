@@ -10,3 +10,8 @@ Fixed
   body the header does not commit to reported a transaction reason such
   as `bad-cb-missing` or `bad-txns-duplicate`. It now reports
   `bad-txnmrklroot`, as Bitcoin Core does.
+- **`submitblock` reports Bitcoin Core's reason for a repeated
+  transaction.** Every repeated txid was `bad-txns-duplicate`. Core keeps
+  that reason for a repeat that leaves the merkle root unchanged. A second
+  coinbase is now `bad-cb-multiple`, and any other repeat is
+  `bad-txns-inputs-missingorspent`.

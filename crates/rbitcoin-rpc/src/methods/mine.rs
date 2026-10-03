@@ -1053,29 +1053,31 @@ pub fn submit_received_block(hub: &rbitcoin_net::ChainHub, block: Block) -> Subm
 
 fn cheap_submit_tx_reject(query: &rbitcoin_query::Query, block: &Block) -> Option<String> {
     use bitcoin::{Amount, OutPoint, TxOut};
-    // Core CheckMerkleRoot runs before every body rule. Core's root of no
-    // transactions is zero.
-    let root = block
-        .compute_merkle_root()
-        .map_or([0u8; 32], |r| r.to_byte_array());
+    // Core CheckMerkleRoot runs before every body rule. A repeat that keeps
+    // the root (CVE-2012-2459) is the only bad-txns-duplicate. Any other
+    // repeat spends a coin its first copy spent.
+    let txids: Vec<Txid> = block.txdata.iter().map(Transaction::compute_txid).collect();
+    let leaves: Vec<[u8; 32]> = txids.iter().map(|t| t.to_byte_array()).collect();
+    let (root, mutated) = rbitcoin_store::merkle_root_mutated(&leaves);
     if root != block.header.merkle_root.to_byte_array() {
         return Some("bad-txnmrklroot".into());
     }
-    if block.txdata.is_empty() {
-        return Some("bad-blk-length".into());
+    if mutated {
+        return Some("bad-txns-duplicate".into());
     }
-    let mut seen = std::collections::HashSet::new();
+    let Some((first, rest)) = block.txdata.split_first() else {
+        return Some("bad-blk-length".into());
+    };
+    if !first.is_coinbase() {
+        return Some("bad-cb-missing".into());
+    }
+    if rest.iter().any(Transaction::is_coinbase) {
+        return Some("bad-cb-multiple".into());
+    }
     let mut spent = std::collections::HashSet::new();
     let mut created: std::collections::HashMap<OutPoint, TxOut> = std::collections::HashMap::new();
-    for (i, tx) in block.txdata.iter().enumerate() {
-        if !seen.insert(tx.compute_txid()) {
-            return Some("bad-txns-duplicate".into());
-        }
+    for (i, (tx, &tid)) in block.txdata.iter().zip(&txids).enumerate() {
         if i == 0 {
-            if !tx.is_coinbase() {
-                return Some("bad-cb-missing".into());
-            }
-            let tid = tx.compute_txid();
             for (v, o) in tx.output.iter().enumerate() {
                 created.insert(
                     OutPoint {
@@ -1126,7 +1128,6 @@ fn cheap_submit_tx_reject(query: &rbitcoin_query::Query, block: &Block) -> Optio
         if out_val > in_val {
             return Some("bad-txns-in-belowout".into());
         }
-        let tid = tx.compute_txid();
         for (v, o) in tx.output.iter().enumerate() {
             created.insert(
                 OutPoint {
