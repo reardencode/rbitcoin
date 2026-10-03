@@ -165,7 +165,10 @@ impl AnalogHistory {
             .filter(|(before, _)| (before - now).abs() <= band)
             .map(|&(_, ahead)| ahead)
             .collect();
-        if outcomes.len() < ANALOG_MIN_NEIGHBORS {
+        // Out-of-band distances sit past the band, so a full in-band set is
+        // already the nearest floor. Borrow only while some neighbors are missing.
+        let missing = ANALOG_MIN_NEIGHBORS.saturating_sub(outcomes.len());
+        if missing > 0 {
             let mut nearest: Vec<(f64, u64)> = d
                 .pairs
                 .iter()

@@ -4622,6 +4622,10 @@ mod tests {
                     st.header_walk.tip.work,
                     Work::from_be_bytes(st.header_walk.base_work)
                 );
+                assert!(
+                    st.header_walk.tip.work > Work::from_be_bytes([0; 32]),
+                    "an empty rewind keeps the confirmed chain's work"
+                );
 
                 assert!(send_getheaders(&mut st, &hub).unwrap());
                 apply(&mut st, &hub, 0, vec![first, second]);
@@ -4713,9 +4717,18 @@ mod tests {
                     36,
                     "an empty reply below the floor steps back one checkpoint"
                 );
-                let checkpoint_work =
-                    Work::from_be_bytes(st.header_walk.checkpoints.last().unwrap().work);
+                let checkpoint = st.header_walk.checkpoints.last().unwrap();
+                assert_eq!(
+                    st.header_walk.tip_hash(),
+                    Some(checkpoint.hash),
+                    "an empty rewind lands on that checkpoint"
+                );
+                let checkpoint_work = Work::from_be_bytes(checkpoint.work);
                 assert_eq!(st.header_walk.tip.work, checkpoint_work);
+                assert!(
+                    checkpoint_work > Work::from_be_bytes([0; 32]),
+                    "an empty rewind keeps that checkpoint's work"
+                );
                 let next = extend_chain(&hub, &genesis, &chain[..36], 20, 3);
                 let tip = next.last().unwrap().block_hash();
                 assert!(send_getheaders(&mut st, &hub).unwrap());

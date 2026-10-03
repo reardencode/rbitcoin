@@ -572,6 +572,134 @@ fn io_loop(
 mod tests {
     use super::*;
 
+    /// Info lines from one `io_loop`. A loop that waits out `budget` is the
+    /// height equal to the target being skipped.
+    fn io_loop_lines(
+        query: &Query,
+        stop: &AtomicBool,
+        resync: &AtomicBool,
+        stages: &IndexStageMs,
+        tx: &std::sync::mpsc::SyncSender<ReadyWindow>,
+        budget: Duration,
+        on_caught: impl FnOnce(),
+    ) -> Vec<String> {
+        let forced = AtomicBool::new(false);
+        let started = Instant::now();
+        let logs = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !stop.load(Ordering::Relaxed) {
+                    if started.elapsed() >= budget {
+                        forced.store(true, Ordering::Relaxed);
+                        stop.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            });
+            rbitcoin_log::capture_logs(false);
+            rbitcoin_log::capture_logs(true);
+            io_loop(query, stop, resync, stages, tx, on_caught).unwrap();
+            let logs = rbitcoin_log::take_logs();
+            rbitcoin_log::capture_logs(false);
+            stop.store(true, Ordering::Relaxed);
+            logs
+        });
+        assert!(
+            !forced.load(Ordering::Relaxed),
+            "io_loop waited instead of sealing the height that equals the target"
+        );
+        logs.into_iter().map(|(_, line)| line).collect()
+    }
+
+    /// Seal from the current watermarks through the released tip.
+    /// `hold_first` blocks the first window so a later window in the same
+    /// pass can cross [`PROGRESS_EVERY`].
+    fn drive_index_pass(query: &Query, hold_first: Duration) -> Vec<String> {
+        let stop = AtomicBool::new(false);
+        let resync = AtomicBool::new(false);
+        let stages = IndexStageMs::default();
+        let (tx, rx) = sync_channel(0);
+        let (worker_tx, worker_rx) = sync_channel(2);
+        let forced = AtomicBool::new(false);
+        let started = Instant::now();
+        let logs = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !stop.load(Ordering::Relaxed) {
+                    if started.elapsed() >= Duration::from_secs(120) {
+                        forced.store(true, Ordering::Relaxed);
+                        stop.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            });
+            let worker = scope.spawn(|| {
+                rbitcoin_log::capture_logs(false);
+                rbitcoin_log::capture_logs(true);
+                cpu_worker(query, worker_rx, &resync, &stages).unwrap();
+                rbitcoin_log::take_logs()
+            });
+            let forward = scope.spawn(move || {
+                if !hold_first.is_zero() {
+                    std::thread::sleep(hold_first);
+                }
+                while let Ok(window) = rx.recv() {
+                    if worker_tx.send(window).is_err() {
+                        break;
+                    }
+                }
+            });
+            rbitcoin_log::capture_logs(false);
+            rbitcoin_log::capture_logs(true);
+            io_loop(query, &stop, &resync, &stages, &tx, || {
+                stop.store(true, Ordering::Relaxed);
+            })
+            .unwrap();
+            let mut logs = rbitcoin_log::take_logs();
+            rbitcoin_log::capture_logs(false);
+            stop.store(true, Ordering::Relaxed);
+            drop(tx);
+            forward.join().unwrap();
+            logs.extend(worker.join().unwrap());
+            logs
+        });
+        assert!(
+            !forced.load(Ordering::Relaxed),
+            "io_loop waited instead of sealing the height that equals the target"
+        );
+        logs.into_iter().map(|(_, line)| line).collect()
+    }
+
+    fn connect_coinbases(
+        q: &Query,
+        from: u32,
+        to: u32,
+        prev_fk: &mut Fk,
+        prev_hash: &mut Option<[u8; 32]>,
+    ) {
+        use rbitcoin_query::testutil::FixtureChain;
+        use rbitcoin_store::{InputRecord, OutputRecord};
+
+        for height in from..=to {
+            let header = header_rec(height, *prev_fk, *prev_hash);
+            let mut txid = [0u8; 32];
+            txid[..4].copy_from_slice(&height.to_le_bytes());
+            txid[31] = 0xcb;
+            *prev_fk = q
+                .connect_block(
+                    Height(height),
+                    &header,
+                    &[tx_apply(
+                        txid,
+                        vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])],
+                        vec![OutputRecord::unspent(1, vec![0x51])],
+                    )],
+                )
+                .unwrap();
+            *prev_hash = Some(header.hash);
+        }
+    }
+
     #[test]
     fn index_build_progress_names_stage_ms() {
         let line = format_index_build_progress(&IndexBuildProgress {
@@ -804,6 +932,52 @@ mod tests {
             "a successful commit stays synced"
         );
 
+        let resume = q.filter_index_next().unwrap();
+        let pass_tip = resume + WINDOW_HEIGHTS;
+        connect_coinbases(&q, resume, pass_tip, &mut prev_fk, &mut prev_hash);
+        q.release_index_writebehind(Height(pass_tip));
+        let lines = drive_index_pass(&q, PROGRESS_EVERY + Duration::from_secs(2));
+        let heights = pass_tip + 1 - resume;
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains(&format!("heights={heights} elapsed"))),
+            "{lines:?}"
+        );
+        let progress: Vec<_> = lines
+            .iter()
+            .filter(|line| line.contains("index: build next="))
+            .collect();
+        assert_eq!(progress.len(), 1, "{lines:?}");
+        assert!(
+            progress[0].contains(&format!("next={pass_tip} tip=")),
+            "{lines:?}"
+        );
+        assert_eq!(q.filter_index_next(), Some(pass_tip + 1));
+        assert_eq!(q.tweak_index_next(), Some(pass_tip + 1));
+
+        let short_from = q.filter_index_next().unwrap();
+        let short_tip = short_from + 10;
+        connect_coinbases(&q, short_from, short_tip, &mut prev_fk, &mut prev_hash);
+        q.release_index_writebehind(Height(short_tip));
+        let lines = drive_index_pass(&q, Duration::ZERO);
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.contains("index: build from=")),
+            "{lines:?}"
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("index: apply h="))
+                .count(),
+            1,
+            "{lines:?}"
+        );
+        assert_eq!(q.filter_index_next(), Some(short_tip + 1));
+        assert_eq!(q.tweak_index_next(), Some(short_tip + 1));
+
         let _ = std::fs::remove_dir_all(dir.path());
     }
 
@@ -847,23 +1021,49 @@ mod tests {
         let stages = IndexStageMs::default();
         let (tx, rx) = sync_channel(1);
         drop(rx);
-        io_loop(&q, &stop, &resync, &stages, &tx, || {
-            called.fetch_add(1, Ordering::Relaxed);
-        })
-        .unwrap();
+        let lines = io_loop_lines(
+            &q,
+            &stop,
+            &resync,
+            &stages,
+            &tx,
+            Duration::from_secs(8),
+            || {
+                called.fetch_add(1, Ordering::Relaxed);
+            },
+        );
         assert_eq!(called.load(Ordering::Relaxed), 0, "next equals the tip");
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.contains("index: build from=")),
+            "{lines:?}"
+        );
 
         let last = Arc::new(read_window(&q, 1, 1).unwrap());
         let filter = q.basic_filter_from_window(&last, 0).unwrap();
         q.commit_window_filters(1, &[(filter, last.blocks[0].header_fk)])
             .unwrap();
         let stop = AtomicBool::new(false);
-        io_loop(&q, &stop, &resync, &stages, &tx, || {
-            called.fetch_add(1, Ordering::Relaxed);
-            stop.store(true, Ordering::Relaxed);
-        })
-        .unwrap();
+        let lines = io_loop_lines(
+            &q,
+            &stop,
+            &resync,
+            &stages,
+            &tx,
+            Duration::from_secs(8),
+            || {
+                called.fetch_add(1, Ordering::Relaxed);
+                stop.store(true, Ordering::Relaxed);
+            },
+        );
         assert_eq!(called.load(Ordering::Relaxed), 1, "next is past the tip");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("blockfilter: caught up through=1;")),
+            "{lines:?}"
+        );
 
         let _ = std::fs::remove_dir_all(dir.path());
     }
