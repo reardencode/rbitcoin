@@ -1,8 +1,9 @@
 //! Native P2WPKH verification (SegWit v0).
 
+use bitcoin::script::Script;
 use bitcoin::Transaction;
 
-use super::{crypto, interpreter};
+use super::{crypto, interpreter, p2wsh};
 use crate::block::ScriptCheckJob;
 use crate::error::ConsensusError;
 use crate::TxPrecompute;
@@ -110,6 +111,32 @@ fn check_element_sizes(sig_raw: &[u8], pubkey_raw: &[u8]) -> Result<(), Consensu
         return Err(ConsensusError::Script("PUSH_SIZE".into()));
     }
     Ok(())
+}
+
+/// P2WPKH through the interpreter: Core `ExecuteWitnessScript` on
+/// `DUP HASH160 <keyhash> EQUALVERIFY CHECKSIG`. Used when LOW_S, STRICTENC,
+/// or NULLFAIL is set; the typed paths above do not apply those flags.
+pub(crate) fn verify_interpreted(
+    job: &ScriptCheckJob,
+    input_index: usize,
+    tx: &Transaction,
+    keyhash: &[u8],
+) -> Result<(), ConsensusError> {
+    let witness = &tx.input[input_index].witness;
+    if witness.len() != 2 {
+        return Err(ConsensusError::Script("p2wpkh witness len".into()));
+    }
+    let mut script_code = Vec::with_capacity(25);
+    script_code.extend_from_slice(&[0x76, 0xa9, 0x14]);
+    script_code.extend_from_slice(keyhash);
+    script_code.extend_from_slice(&[0x88, 0xac]);
+    p2wsh::execute_witness_v0(
+        job,
+        input_index,
+        tx,
+        Script::from_bytes(&script_code),
+        witness.iter(),
+    )
 }
 
 #[cfg(test)]

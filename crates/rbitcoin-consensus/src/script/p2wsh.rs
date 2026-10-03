@@ -44,19 +44,31 @@ pub(crate) fn verify_with_scripthash(
         return Err(ConsensusError::Script("p2wsh script hash".into()));
     }
 
-    let mut stack: Vec<Vec<u8>> = Vec::with_capacity(wit_len.saturating_sub(1));
-    for i in 0..wit_len - 1 {
-        let item = input
-            .witness
-            .nth(i)
-            .ok_or_else(|| ConsensusError::Script("p2wsh witness".into()))?;
+    execute_witness_v0(
+        job,
+        input_index,
+        tx,
+        Script::from_bytes(script_bytes),
+        input.witness.iter().take(wit_len - 1),
+    )
+}
+
+/// Core `ExecuteWitnessScript` for witness v0: every initial stack item is
+/// at most 520 bytes, then `script` runs and must leave exactly one true item.
+pub(crate) fn execute_witness_v0<'w>(
+    job: &ScriptCheckJob,
+    input_index: usize,
+    tx: &Transaction,
+    script: &Script,
+    items: impl Iterator<Item = &'w [u8]>,
+) -> Result<(), ConsensusError> {
+    let mut stack: Vec<Vec<u8>> = Vec::with_capacity(items.size_hint().0);
+    for item in items {
         if item.len() > interpreter::MAX_SCRIPT_ELEMENT_SIZE {
             return Err(ConsensusError::Script("PUSH_SIZE".into()));
         }
         stack.push(item.to_vec());
     }
-
-    let script = Script::from_bytes(script_bytes);
     let ctx = EvalContext::from_job(job, tx, input_index, script, SigVersion::WitnessV0);
     if interpreter::eval_script(script, &mut stack, &ctx)? {
         interpreter::require_clean_true(&stack)?;
