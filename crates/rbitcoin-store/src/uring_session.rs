@@ -1062,15 +1062,19 @@ impl UringSession {
     /// `fail_closed` aborts outside tests. Leftover ids stay in `pending`.
     fn drop_drain(&mut self) {
         if let Err(err) = self.drain_all_inner(true) {
-            #[cfg(test)]
-            if let StoreError::Corrupt(msg) = err {
-                DROP_DRAIN_ERROR.with(|c| c.set(Some(msg)));
-            }
-            #[cfg(not(test))]
-            {
-                let _ = err;
-            }
+            note_drop_drain_error(&err);
         }
+    }
+}
+
+fn note_drop_drain_error(err: &StoreError) {
+    #[cfg(test)]
+    if let StoreError::Corrupt(msg) = err {
+        DROP_DRAIN_ERROR.with(|c| c.set(Some(*msg)));
+    }
+    #[cfg(not(test))]
+    {
+        let _ = err;
     }
 }
 
