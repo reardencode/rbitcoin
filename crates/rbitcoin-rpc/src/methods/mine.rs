@@ -1023,20 +1023,38 @@ pub fn submit_received_block(hub: &rbitcoin_net::ChainHub, block: Block) -> Subm
         return SubmitBlockOutcome::Rejected("high-hash".into());
     }
     let prev = block.header.prev_blockhash.to_byte_array();
-    let known = hub.query.get_header_by_hash(&prev).ok().flatten().is_some()
+    let prev_header = match hub.query.get_header_by_hash(&prev) {
+        Ok(h) => h.is_some(),
+        Err(rbitcoin_store::StoreError::NotFound) => false,
+        Err(e) => return SubmitBlockOutcome::Error(format!("store: {e}")),
+    };
+    let known = prev_header
         || hub
             .held_body(&bitcoin::BlockHash::from_byte_array(prev))
             .is_some();
     if !known {
         return SubmitBlockOutcome::Rejected("prev-blk-not-found".into());
     }
-    if let Some(reason) = cheap_submit_tx_reject(hub.query.as_ref(), &block) {
+    let mut prevout_fault = None;
+    let cheap = cheap_submit_tx_reject(&block, |op| {
+        read_confirmed_prevout(hub.query.as_ref(), op).unwrap_or_else(|e| {
+            prevout_fault.get_or_insert(e);
+            None
+        })
+    });
+    if let Some(e) = prevout_fault {
+        return SubmitBlockOutcome::Error(format!("store: {e}"));
+    }
+    if let Some(reason) = cheap {
         return SubmitBlockOutcome::Rejected(reason);
     }
     match hub.accept_received_block(block.clone()) {
         Ok(AcceptOutcome::Accepted { .. }) => SubmitBlockOutcome::Accepted,
         Ok(AcceptOutcome::AlreadyHave) => SubmitBlockOutcome::Duplicate,
         Ok(AcceptOutcome::IgnoredWeaker) => SubmitBlockOutcome::IgnoredWeaker,
+        // Core: an interrupted ProcessNewBlock never fires BlockChecked.
+        Err(rbitcoin_net::NetError::Cancelled) => SubmitBlockOutcome::IgnoredWeaker,
+        Err(e) if e.is_local_fault() => SubmitBlockOutcome::Error(e.to_string()),
         Err(e) => {
             let reason = submit_reject_reason(&e);
             if reason != "bad-txnmrklroot"
@@ -1051,8 +1069,50 @@ pub fn submit_received_block(hub: &rbitcoin_net::ChainHub, block: Block) -> Subm
     }
 }
 
-fn cheap_submit_tx_reject(query: &rbitcoin_query::Query, block: &Block) -> Option<String> {
-    use bitcoin::{Amount, OutPoint, TxOut};
+/// Confirmed unspent output at `op`. `Ok(None)` is a real miss or spend;
+/// `Err` is a store read fault, not a verdict on the spending block.
+///
+/// `vout` is peer-chosen. It is checked against the parent's output count
+/// before the spender read, which treats a slot past that count as corrupt.
+fn read_confirmed_prevout(
+    query: &rbitcoin_query::Query,
+    op: bitcoin::OutPoint,
+) -> Result<Option<bitcoin::TxOut>, rbitcoin_store::StoreError> {
+    use rbitcoin_store::StoreError;
+    let read = || {
+        let tid = op.txid.to_byte_array();
+        let Some((fk, rec)) = query.get_tx_by_txid(&tid)? else {
+            return Ok(None);
+        };
+        if op.vout >= rec.output_count || query.is_outpoint_spent(&tid, op.vout)? {
+            return Ok(None);
+        }
+        query
+            .tx_output_at_fk(fk, op.vout)
+            .or_else(|_| query.tx_output(&rec, op.vout))
+            .map(Some)
+    };
+    let out = match read() {
+        Ok(Some(out)) => out,
+        Ok(None) | Err(StoreError::NotFound) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let value = if out.value < 0 {
+        bitcoin::Amount::ZERO
+    } else {
+        bitcoin::Amount::from_sat(out.value as u64)
+    };
+    Ok(Some(bitcoin::TxOut {
+        value,
+        script_pubkey: bitcoin::ScriptBuf::from_bytes(out.script),
+    }))
+}
+
+fn cheap_submit_tx_reject(
+    block: &Block,
+    mut confirmed_prevout: impl FnMut(bitcoin::OutPoint) -> Option<bitcoin::TxOut>,
+) -> Option<String> {
+    use bitcoin::{OutPoint, TxOut};
     if block.txdata.is_empty() {
         return Some("bad-blk-length".into());
     }
@@ -1088,29 +1148,10 @@ fn cheap_submit_tx_reject(query: &rbitcoin_query::Query, block: &Block) -> Optio
             let txout = if let Some(o) = created.get(&op) {
                 o.clone()
             } else {
-                let tid = op.txid.to_byte_array();
-                if query.is_outpoint_spent(&tid, op.vout).ok().unwrap_or(true) {
-                    return Some("bad-txns-inputs-missingorspent".into());
-                }
-                let Some((fk, rec)) = query.get_tx_by_txid(&tid).ok().flatten() else {
+                let Some(out) = confirmed_prevout(op) else {
                     return Some("bad-txns-inputs-missingorspent".into());
                 };
-                let Some(out) = query
-                    .tx_output_at_fk(fk, op.vout)
-                    .ok()
-                    .or_else(|| query.tx_output(&rec, op.vout).ok())
-                else {
-                    return Some("bad-txns-inputs-missingorspent".into());
-                };
-                let value = if out.value < 0 {
-                    Amount::ZERO
-                } else {
-                    Amount::from_sat(out.value as u64)
-                };
-                TxOut {
-                    value,
-                    script_pubkey: bitcoin::ScriptBuf::from_bytes(out.script),
-                }
+                out
             };
             in_val = in_val.saturating_add(txout.value.to_sat());
         }
@@ -1182,6 +1223,7 @@ pub(crate) fn submitblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value,
         SubmitBlockOutcome::Duplicate => Ok(json!("duplicate")),
         SubmitBlockOutcome::IgnoredWeaker => Ok(json!("inconclusive")),
         SubmitBlockOutcome::Rejected(reason) => Ok(json!(reason)),
+        SubmitBlockOutcome::Error(msg) => Err(rpc_error(ERR_VERIFY_ERROR, msg)),
     }
 }
 

@@ -242,6 +242,9 @@ fn accept_err_is_mutated(e: &NetError) -> bool {
 /// Core logs a contextual header reject (`bad-version`, `time-too-new`) with
 /// its reason. The returned error keeps the store-facing Display string.
 fn header_reject(header: &Header, e: &rbitcoin_consensus::ConsensusError) -> NetError {
+    if let rbitcoin_consensus::ConsensusError::Store(se) = e {
+        return NetError::store(se);
+    }
     let reason = rbitcoin_consensus::block_reject_reason(e);
     rbitcoin_log::info!(
         "{}",
@@ -749,23 +752,27 @@ impl ChainHub {
     }
 
     pub fn tip_hash(&self) -> Option<BlockHash> {
+        self.try_tip_hash().ok().flatten()
+    }
+
+    /// [`Self::tip_hash`] that keeps a store read fault as [`NetError::Store`].
+    fn try_tip_hash(&self) -> Result<Option<BlockHash>, NetError> {
         // Store tip is authoritative after IBD/archive-confirm (cache may only
         // hold genesis or a short tip window while Class C is far ahead). Prefer
         // query when its height is at least the cache tip; otherwise fall back
         // to the in-memory cache chain (pre-store / regtest cache-only paths).
         let q_h = self.query.tip_height().map(|h| h.0);
         let c_h = self.cache.tip_height();
-        match (q_h, c_h) {
+        Ok(match (q_h, c_h) {
             (Some(qh), Some(ch)) if ch > qh => self.cache.tip_hash(),
             (Some(qh), _) => self
                 .query
                 .header_at_height(rbitcoin_primitives::Height(qh))
-                .ok()
-                .flatten()
+                .map_err(NetError::store)?
                 .map(|(_, rec)| BlockHash::from_byte_array(rec.hash)),
             (None, Some(_)) => self.cache.tip_hash(),
             (None, None) => None,
-        }
+        })
     }
 
     pub fn tip_header(&self) -> Option<Header> {
@@ -1233,10 +1240,7 @@ impl ChainHub {
     pub fn ensure_header_fk(&self, header: &Header) -> Result<Fk, NetError> {
         let prev_fk = self.header_sync_prev_fk(header, &HashMap::new())?;
         let rec = header_to_record(prev_fk, header, header.block_hash().to_byte_array());
-        let fk = self
-            .query
-            .ensure_header(&rec)
-            .map_err(|e| NetError::Consensus(e.to_string()))?;
+        let fk = self.query.ensure_header(&rec).map_err(NetError::store)?;
         self.note_header_tip(header);
         Ok(fk)
     }
@@ -1261,7 +1265,7 @@ impl ChainHub {
             if let Some((fk, _)) = self
                 .query
                 .get_header_by_hash(&hash)
-                .map_err(|e| NetError::Consensus(e.to_string()))?
+                .map_err(NetError::store)?
             {
                 out[i] = fk;
                 let prev = header.prev_blockhash.to_byte_array();
@@ -1302,10 +1306,7 @@ impl ChainHub {
         }
         if !recs.is_empty() {
             let only: Vec<_> = recs.iter().map(|(_, r)| r.clone()).collect();
-            let got = self
-                .query
-                .ensure_headers(&only)
-                .map_err(|e| NetError::Consensus(e.to_string()))?;
+            let got = self.query.ensure_headers(&only).map_err(NetError::store)?;
             for ((i, _), fk) in recs.iter().zip(got) {
                 out[*i] = fk;
             }
@@ -1330,7 +1331,7 @@ impl ChainHub {
             match self
                 .query
                 .get_header_by_hash(&prev_bytes)
-                .map_err(|e| NetError::Consensus(e.to_string()))?
+                .map_err(NetError::store)?
             {
                 Some((fk, _)) => fk,
                 None => {
@@ -1825,7 +1826,7 @@ impl ChainHub {
         let on_tip = self
             .query
             .height_of_hash(&hash.to_byte_array())
-            .map_err(|e| NetError::Consensus(e.to_string()))?
+            .map_err(NetError::store)?
             .filter(|h| h.0 <= tip);
         if let Some(h) = on_tip {
             let _guard = self.connect_lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -2103,7 +2104,7 @@ impl ChainHub {
                     return Err(NetError::Protocol("non-genesis prev is zero"));
                 }
                 let tip_hash = self
-                    .tip_hash()
+                    .try_tip_hash()?
                     .ok_or(NetError::Protocol("missing tip hash"))?;
                 if prev == tip_hash {
                     let height = tip_h.saturating_add(1);
@@ -2115,7 +2116,7 @@ impl ChainHub {
                 let Some(parent_h) = self
                     .query
                     .height_of_hash(&prev.to_byte_array())
-                    .map_err(|e| NetError::Consensus(e.to_string()))?
+                    .map_err(NetError::store)?
                 else {
                     if hold_unconnected {
                         self.hold_body(block);
@@ -2133,8 +2134,9 @@ impl ChainHub {
 
                 if new_height == tip_h {
                     let cur_work = self
-                        .tip_header()
-                        .ok_or(NetError::Protocol("missing current tip header"))?
+                        .query
+                        .wire_header_at_height(Height(tip_h))
+                        .map_err(NetError::store)?
                         .work();
                     let new_work = block.header.work();
                     let precious = *self.precious.read().unwrap() == Some(hash);
@@ -2243,7 +2245,7 @@ impl ChainHub {
         Ok(Some(
             self.query
                 .height_of_hash(&fork_prev.to_byte_array())
-                .map_err(|e| NetError::Consensus(e.to_string()))?
+                .map_err(NetError::store)?
                 .ok_or(NetError::Protocol("branch parent not on chain"))?
                 .0,
         ))
@@ -2282,7 +2284,7 @@ impl ChainHub {
             .get(fork_height as usize)
             .copied()
             .ok_or_else(|| {
-                NetError::Consensus(format!(
+                NetError::Store(format!(
                     "invariant: no chain work at fork height {fork_height}"
                 ))
             })?;
@@ -2332,9 +2334,7 @@ impl ChainHub {
                 if let Some(th) = self.tip_hash() {
                     self.confirmed.write().unwrap().remove(&th);
                 }
-                self.query
-                    .disconnect_tip()
-                    .map_err(|e| NetError::Consensus(e.to_string()))?;
+                self.query.disconnect_tip().map_err(NetError::store)?;
             }
             self.cache.clear();
             self.confirmed.write().unwrap().clear();
@@ -2354,19 +2354,29 @@ impl ChainHub {
         for (i, b) in blocks.iter().enumerate() {
             if let Err(e) = self.connect_at(base + i as u32, Arc::new(b.clone())) {
                 self.announce_reorg_len.store(0, Ordering::Relaxed);
+                let restore_failed = |msg: String| {
+                    if e.is_local_fault() {
+                        NetError::Store(msg)
+                    } else {
+                        NetError::Consensus(msg)
+                    }
+                };
                 if let Some(fh) = fork_height {
                     if let Err(disc) = self.disconnect_to(fh) {
-                        return Err(NetError::Consensus(format!(
+                        return Err(restore_failed(format!(
                             "reorg connect failed ({e}); disconnect for restore failed: {disc}"
                         )));
                     }
                     for (j, ob) in old_path.iter().enumerate() {
                         if let Err(re) = self.connect_at(base + j as u32, Arc::new(ob.clone())) {
-                            return Err(NetError::Consensus(format!(
+                            return Err(restore_failed(format!(
                                 "reorg connect failed ({e}); tip restore failed: {re}"
                             )));
                         }
                     }
+                }
+                if e.is_local_fault() {
+                    return Err(e);
                 }
                 return Err(NetError::ConnectFailed {
                     hash: b.block_hash().to_byte_array(),
@@ -2722,16 +2732,23 @@ impl ChainHub {
                     Err(e) => return Err(e),
                 }
             })
-            .map_err(|e| {
-                let reason = rbitcoin_consensus::block_reject_reason(&e);
-                rbitcoin_log::info!(
-                    "{}",
-                    rbitcoin_consensus::block_reject_log_line(hash, &reason)
-                );
-                if reject_is_mutated(&reason) {
-                    NetError::Mutated(reason)
-                } else {
-                    NetError::Consensus(reason)
+            .map_err(|e| match e {
+                rbitcoin_consensus::ConsensusError::Cancelled => NetError::Cancelled,
+                rbitcoin_consensus::ConsensusError::Store(se) => {
+                    rbitcoin_log::warn!("tip connect {hash} @ {height}: store fault: {se}");
+                    NetError::store(se)
+                }
+                e => {
+                    let reason = rbitcoin_consensus::block_reject_reason(&e);
+                    rbitcoin_log::info!(
+                        "{}",
+                        rbitcoin_consensus::block_reject_log_line(hash, &reason)
+                    );
+                    if reject_is_mutated(&reason) {
+                        NetError::Mutated(reason)
+                    } else {
+                        NetError::Consensus(reason)
+                    }
                 }
             })?;
         self.header_tips.write().unwrap().remove(&hash);
@@ -2799,7 +2816,7 @@ impl ChainHub {
             }
             self.query
                 .disconnect_tip_keep_pending()
-                .map_err(|e| NetError::Consensus(e.to_string()))?;
+                .map_err(NetError::store)?;
         }
         self.cache.truncate_to_height(keep_height);
         if let Some(mp) = mp {
@@ -2875,7 +2892,7 @@ impl ChainHub {
             Err(e) if e.to_string().contains("not found") || e.to_string().contains("NotFound") => {
                 Ok(None)
             }
-            Err(e) => Err(NetError::Consensus(e.to_string())),
+            Err(e) => Err(NetError::store(e)),
         }
     }
 
@@ -2928,7 +2945,7 @@ impl ChainHub {
             let hdr = self
                 .query
                 .wire_header_at_height(Height(h))
-                .map_err(|e| NetError::Consensus(e.to_string()))?;
+                .map_err(NetError::store)?;
             let w = hdr.work();
             let acc = match p.last() {
                 None => w,
@@ -5357,6 +5374,133 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    fn find_store_file(root: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+        for e in std::fs::read_dir(root).ok()?.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if let Some(hit) = find_store_file(&p, name) {
+                    return Some(hit);
+                }
+            } else if p.file_name().is_some_and(|n| n == name) {
+                return Some(p);
+            }
+        }
+        None
+    }
+
+    fn spend_block(prev: BlockHash, time: u32, height: u32, outpoint: OutPoint) -> Block {
+        let spend = Transaction {
+            version: TxVersion::ONE,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: outpoint,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        mine_regtest_paying(
+            prev,
+            time,
+            height,
+            ScriptBuf::from_bytes(vec![0x51]),
+            vec![spend],
+        )
+    }
+
+    /// Hub at `t2` on `b1` with `txout.body` cut to zero bytes: any later
+    /// read of a confirmed out is a local IO fault, not a block verdict.
+    fn hub_with_truncated_body() -> (rbitcoin_query::testutil::TempDir, ChainHub, Block, Block) {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let b1 = mine(gen, 1_300_080_000, 1);
+        hub.accept_block(b1.clone()).unwrap();
+        let t2 = mine(b1.block_hash(), b1.header.time + 600, 2);
+        hub.accept_block(t2.clone()).unwrap();
+        let body = find_store_file(dir.path(), "txout.body").expect("txout.body");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&body)
+            .unwrap()
+            .set_len(0)
+            .unwrap();
+        (dir, hub, b1, t2)
+    }
+
+    fn coinbase_out(b: &Block) -> OutPoint {
+        OutPoint {
+            txid: b.txdata[0].compute_txid(),
+            vout: 0,
+        }
+    }
+
+    /// Core treats a local read fault as fatal, never `BLOCK_FAILED_VALID`.
+    /// The spend is also immature, so a missed fault would cache the hash.
+    #[test]
+    fn store_fault_on_tip_connect_does_not_cache_block_invalid() {
+        let (dir, hub, b1, t2) = hub_with_truncated_body();
+
+        let b3 = spend_block(t2.block_hash(), t2.header.time + 600, 3, coinbase_out(&b1));
+        let err = hub
+            .accept_received_block(b3.clone())
+            .expect_err("parent body read past EOF must fail");
+        assert!(matches!(err, NetError::Store(_)), "tip extend: {err:?}");
+        assert!(
+            !hub.is_block_invalid(&b3.block_hash()),
+            "a store fault on tip extend is not a block verdict"
+        );
+        assert_eq!(hub.tip_hash(), Some(t2.block_hash()));
+
+        let s2 = mine_distinct(b1.block_hash(), t2.header.time + 1, 2, &[t2.block_hash()]);
+        assert!(matches!(
+            hub.accept_received_block(s2.clone()).unwrap(),
+            AcceptOutcome::IgnoredWeaker
+        ));
+        let s3 = spend_block(s2.block_hash(), s2.header.time + 600, 3, coinbase_out(&b1));
+        let err = hub
+            .accept_received_block(s3.clone())
+            .expect_err("reorg must hit the same read fault");
+        assert!(matches!(err, NetError::Store(_)), "reorg: {err:?}");
+        assert!(
+            !hub.is_block_invalid(&s3.block_hash()),
+            "a store fault during reorg is not a block verdict"
+        );
+        assert_eq!(hub.tip_hash(), Some(t2.block_hash()));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn store_fault_applying_held_child_does_not_cache_block_invalid() {
+        let (dir, hub, b1, t2) = hub_with_truncated_body();
+
+        let b3 = mine(t2.block_hash(), t2.header.time + 600, 3);
+        let c4 = spend_block(b3.block_hash(), b3.header.time + 600, 4, coinbase_out(&b1));
+        assert!(matches!(
+            hub.accept_received_block(c4.clone()).unwrap(),
+            AcceptOutcome::IgnoredWeaker
+        ));
+        assert!(hub.held_body(&c4.block_hash()).is_some());
+
+        let err = hub
+            .accept_received_block(b3.clone())
+            .expect_err("held child connect must hit the read fault");
+        assert!(matches!(err, NetError::Store(_)), "held apply: {err:?}");
+        assert_eq!(hub.tip_hash(), Some(b3.block_hash()));
+        assert!(
+            !hub.is_block_invalid(&c4.block_hash()),
+            "a store fault applying a held child is not a block verdict"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn hostile_peer_session() {
         let (dir, hub) = tmp_hub();

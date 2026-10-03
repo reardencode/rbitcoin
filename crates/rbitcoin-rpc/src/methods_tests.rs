@@ -4261,4 +4261,203 @@ fn http_wait_satisfied_tracks_the_setter() {
     assert!(!http_wait_satisfied());
 }
 
+/// Core never sets `BLOCK_FAILED_VALID` on a system error: a store read
+/// fault during `submitblock` must leave the block submittable again.
+/// `BIP22ValidationResult` throws `RPC_VERIFY_ERROR` for `state.IsError()`
+/// instead of returning a reject-reason string.
+#[test]
+fn submitblock_store_fault_does_not_cache_block_invalid() {
+    let (ctx, dir, hub) = ctx_regtest_hub();
+    let op_true = ScriptBuf::from_bytes(vec![0x51]);
+    let mine_on = |prev: BlockHash, height: u32, time: u32| {
+        rbitcoin_consensus::mine_regtest_paying(prev, time, height, op_true.clone(), vec![])
+    };
+    let t0 = hub.tip_header().unwrap().time;
+    let b1 = mine_on(hub.tip_hash().unwrap(), 1, t0 + 1);
+    let b2 = mine_on(b1.block_hash(), 2, t0 + 2);
+    for b in [&b1, &b2] {
+        let r = dispatch(&ctx, "submitblock", vec![json!(block_hex(b))]).unwrap();
+        assert!(r.is_null(), "{r}");
+    }
+    let s2 = mine_on(b1.block_hash(), 2, t0 + 3);
+    let r = dispatch(&ctx, "submitblock", vec![json!(block_hex(&s2))]).unwrap();
+    assert_eq!(r, "inconclusive", "equal-work sibling is held");
+
+    let body = walk_for(&dir.join("store"), "txout.body").expect("txout.body");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(body)
+        .unwrap()
+        .set_len(0)
+        .unwrap();
+
+    let s3 = mine_on(s2.block_hash(), 3, t0 + 4);
+    for attempt in 0..2 {
+        let e = dispatch(&ctx, "submitblock", vec![json!(block_hex(&s3))])
+            .expect_err("a local store fault is an RPC error, not a BIP22 result");
+        assert_eq!(e["code"], ERR_VERIFY_ERROR, "attempt {attempt}: {e}");
+        assert!(
+            e["message"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("store: "),
+            "attempt {attempt}: the reorg disconnect read must fault: {e}"
+        );
+        assert!(
+            !hub.is_block_invalid(&s3.block_hash()),
+            "attempt {attempt}: a store fault is not a block verdict"
+        );
+        assert_eq!(hub.tip_hash(), Some(b2.block_hash()));
+    }
+
+    let spend = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![bitcoin::TxIn {
+            previous_output: bitcoin::OutPoint {
+                txid: b1.txdata[0].compute_txid(),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: bitcoin::Sequence::MAX,
+            witness: bitcoin::Witness::new(),
+        }],
+        output: vec![bitcoin::TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: op_true.clone(),
+        }],
+    };
+    let b3 = rbitcoin_consensus::mine_regtest_paying(
+        b2.block_hash(),
+        t0 + 5,
+        3,
+        op_true.clone(),
+        vec![spend],
+    );
+    let e = dispatch(&ctx, "submitblock", vec![json!(block_hex(&b3))])
+        .expect_err("a spent-output read fault is not bad-txns-inputs-missingorspent");
+    assert_eq!(e["code"], ERR_VERIFY_ERROR, "{e}");
+    assert!(
+        e["message"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("store: "),
+        "{e}"
+    );
+    assert!(!hub.is_block_invalid(&b3.block_hash()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Core `CheckTxInputs`: a confirmed txid with no output at `vout` is a
+/// missing input, not a store fault.
+#[test]
+fn submitblock_vout_past_n_out_is_missingorspent() {
+    let (ctx, dir, hub) = ctx_regtest_hub();
+    let op_true = ScriptBuf::from_bytes(vec![0x51]);
+    let t0 = hub.tip_header().unwrap().time;
+    let b1 = rbitcoin_consensus::mine_regtest_paying(
+        hub.tip_hash().unwrap(),
+        t0 + 1,
+        1,
+        op_true.clone(),
+        vec![],
+    );
+    let r = dispatch(&ctx, "submitblock", vec![json!(block_hex(&b1))]).unwrap();
+    assert!(r.is_null(), "{r}");
+    let past_end = u32::try_from(b1.txdata[0].output.len()).unwrap();
+    for vout in [past_end, past_end + 1, u32::MAX - 1] {
+        let spend = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint {
+                    txid: b1.txdata[0].compute_txid(),
+                    vout,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: bitcoin::Sequence::MAX,
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![bitcoin::TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: op_true.clone(),
+            }],
+        };
+        let b2 = rbitcoin_consensus::mine_regtest_paying(
+            b1.block_hash(),
+            t0 + 2,
+            2,
+            op_true.clone(),
+            vec![spend],
+        );
+        let r = dispatch(&ctx, "submitblock", vec![json!(block_hex(&b2))])
+            .unwrap_or_else(|e| panic!("vout {vout} is a consensus reject, not an RPC error: {e}"));
+        assert_eq!(r, "bad-txns-inputs-missingorspent", "vout {vout}");
+        assert_eq!(hub.tip_hash(), Some(b1.block_hash()));
+
+        let err = hub
+            .accept_received_block(b2.clone())
+            .expect_err("tip connect rejects the same spend");
+        assert!(
+            err.to_string().contains("bad-txns-inputs-missingorspent"),
+            "vout {vout}: {err}"
+        );
+        assert!(
+            hub.is_block_invalid(&b2.block_hash()),
+            "vout {vout}: the tip path caches the consensus reject"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A store fault reading the parent header is not `prev-blk-not-found`,
+/// and on the tip-extend path it is not a reject reason that gets cached.
+#[test]
+fn submitblock_prev_header_read_fault_is_rpc_error() {
+    let (ctx, dir, hub) = ctx_regtest_hub();
+    let op_true = ScriptBuf::from_bytes(vec![0x51]);
+    let mine_on = |prev: BlockHash, height: u32, time: u32| {
+        rbitcoin_consensus::mine_regtest_paying(prev, time, height, op_true.clone(), vec![])
+    };
+    let t0 = hub.tip_header().unwrap().time;
+    let b1 = mine_on(hub.tip_hash().unwrap(), 1, t0 + 1);
+    let b2 = mine_on(b1.block_hash(), 2, t0 + 2);
+    for b in [&b1, &b2] {
+        let r = dispatch(&ctx, "submitblock", vec![json!(block_hex(b))]).unwrap();
+        assert!(r.is_null(), "{r}");
+    }
+    let s2 = mine_on(b1.block_hash(), 2, t0 + 3);
+    let b3 = mine_on(b2.block_hash(), 3, t0 + 4);
+    let body = walk_for(&dir.join("store"), "header.body").expect("header.body");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(body)
+        .unwrap()
+        .set_len(0)
+        .unwrap();
+
+    let e = dispatch(&ctx, "submitblock", vec![json!(block_hex(&s2))])
+        .expect_err("a parent header read fault is an RPC error");
+    assert_eq!(e["code"], ERR_VERIFY_ERROR, "{e}");
+    assert!(
+        e["message"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("store: "),
+        "{e}"
+    );
+    assert!(!hub.is_block_invalid(&s2.block_hash()));
+
+    for attempt in 0..2 {
+        let e = dispatch(&ctx, "submitblock", vec![json!(block_hex(&b3))])
+            .expect_err("a tip header read fault is an RPC error");
+        assert_eq!(e["code"], ERR_VERIFY_ERROR, "attempt {attempt}: {e}");
+        assert!(
+            !hub.is_block_invalid(&b3.block_hash()),
+            "attempt {attempt}: a tip header read fault is not a block verdict"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 include!("regtest_chain_ops_journey.rs");

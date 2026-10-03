@@ -148,6 +148,9 @@ pub enum SubmitBlockOutcome {
     Duplicate,
     IgnoredWeaker,
     Rejected(String),
+    /// Local store fault, not a verdict on the block.
+    /// Core `state.IsError()`: `RPC_VERIFY_ERROR`, not a BIP22 result.
+    Error(String),
 }
 
 /// Regtest-only mine + accept. Implemented by the node (not a mining product).

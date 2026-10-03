@@ -20,6 +20,9 @@ pub enum NetError {
     },
     BadMagic,
     Consensus(String),
+    /// Local store / engine fault during connect (IO, invariant, io_uring).
+    /// Not a verdict on the block: never cached as invalid.
+    Store(String),
     /// IBD / tip-accept cooperative abort. Display matches confirm-engine logs.
     Cancelled,
     /// Compact/body does not match the header (`BLOCK_MUTATED`). Do not cache as failed.
@@ -53,6 +56,7 @@ impl fmt::Display for NetError {
             }
             NetError::BadMagic => f.write_str("wrong network magic"),
             NetError::Consensus(s) => write!(f, "consensus: {s}"),
+            NetError::Store(s) => write!(f, "store: {s}"),
             NetError::Cancelled => f.write_str("confirm cancelled"),
             NetError::Mutated(s) => write!(f, "consensus: {s}"),
             NetError::BadPrev => f.write_str("consensus: unexpected previous header"),
@@ -83,8 +87,19 @@ impl NetError {
         match e {
             rbitcoin_consensus::ConsensusError::Cancelled => NetError::Cancelled,
             rbitcoin_consensus::ConsensusError::BadPrev => NetError::BadPrev,
+            rbitcoin_consensus::ConsensusError::Store(se) => NetError::store(se),
             other => NetError::Consensus(other.to_string()),
         }
+    }
+
+    /// Local store / query read or write fault.
+    pub(crate) fn store(e: impl fmt::Display) -> Self {
+        NetError::Store(e.to_string())
+    }
+
+    /// Local store fault or cooperative abort: not a verdict on the block.
+    pub fn is_local_fault(&self) -> bool {
+        matches!(self, NetError::Store(_) | NetError::Cancelled)
     }
 
     /// Hash of the block that failed connect, when known.
@@ -118,6 +133,7 @@ mod tests {
             ),
             (NetError::BadMagic, "wrong network magic"),
             (NetError::Consensus("c".into()), "consensus: c"),
+            (NetError::Store("s".into()), "store: s"),
             (NetError::Cancelled, "confirm cancelled"),
             (
                 NetError::Mutated("bad-txnmrklroot".into()),
