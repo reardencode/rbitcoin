@@ -284,7 +284,7 @@ async fn tip_announce_compact_requires_parent(hub: &crate::chain::ChainHub) {
         .block_hash();
     let parent = hub.tip_header().unwrap().prev_blockhash;
     let ev = tip_event(hub, 0);
-    let peers = crate::peers::PeerHub::new();
+    let peers = crate::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let sess_behind = live_peer(&peers, 18444, 1, false);
     sess_behind.note_best_known(behind);
     let (out_tx, mut out_rx) = mpsc::unbounded_channel();
@@ -389,7 +389,7 @@ async fn tip_announce_depth_and_fill_slot(hub: &crate::chain::ChainHub) {
         .query
         .reconstruct_block_at_height(Height(tip_h))
         .unwrap();
-    let peers = crate::peers::PeerHub::new();
+    let peers = crate::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let session = live_peer(&peers, 18446, 3, true);
     assert!(session.try_cmpct_fill(hash));
     let mut follow = PeerFollowState::new();
@@ -415,7 +415,7 @@ async fn tip_announce_depth_and_fill_slot(hub: &crate::chain::ChainHub) {
 async fn tip_announce_serve_inflight_untouched(hub: &crate::chain::ChainHub) {
     use std::sync::atomic::Ordering;
     let hash = hub.tip_hash().unwrap();
-    let peers = crate::peers::PeerHub::new();
+    let peers = crate::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let (out_tx, mut out_rx) = mpsc::unbounded_channel();
 
     let wrap = live_peer(&peers, 18447, 4, false);
@@ -600,7 +600,7 @@ async fn tip_announce_hb_relays_before_connect(hub: &crate::chain::ChainHub) {
     let pref: Vec<usize> = (0..block.txdata.len()).collect();
     let hsi = HeaderAndShortIds::from_block(&block, 1, 2, &pref).expect("hsi");
 
-    let peers = crate::peers::PeerHub::new();
+    let peers = crate::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let a = live_peer(&peers, 18449, 6, false);
     let b = live_peer(&peers, 18450, 7, false);
     b.set_hb_to(true);
@@ -970,7 +970,7 @@ async fn tip_announce_merkle_second_cmpct_disconnects(hub: &crate::chain::ChainH
     };
     let hash = hsi.header.block_hash();
     assert!(!hub.has_block(&hash));
-    let peers = crate::peers::PeerHub::new();
+    let peers = crate::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let session = live_peer(&peers, 18451, 8, true);
     let (out_tx, _out_rx) = mpsc::unbounded_channel();
     let mut follow = PeerFollowState::new();

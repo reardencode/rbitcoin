@@ -174,7 +174,7 @@ fn only_net_dials_and_peers_file(am: &Mutex<crate::seeds::AddrMan>, overlays: [c
 #[test]
 fn overlay_config() {
     dial_targets_roundtrip();
-    let hub = PeerHub::new();
+    let hub = PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let am = Arc::new(Mutex::new(crate::seeds::AddrMan::new()));
     hub.set_addrman(am.clone());
     let pk = [

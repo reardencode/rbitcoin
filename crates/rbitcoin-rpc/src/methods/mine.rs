@@ -444,7 +444,7 @@ pub(crate) fn setmocktime(ctx: &RpcContext, params: &RpcParams) -> Result<Value,
         .set_mock_time(ts)
         .map_err(|e| rpc_error(ERR_MISC, e))?;
     if let Some(peers) = ctx.peers.as_ref() {
-        peers.set_mock_now(ts as u64);
+        peers.on_clock_jump();
     }
     if let Some(mp) = ctx.mempool.as_ref() {
         mp.note_mock_now(ts as u64);

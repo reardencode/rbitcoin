@@ -2574,7 +2574,7 @@ mod tests {
 
     #[test]
     fn proxy_seed_bootstrap_queues_domain_addrfetch() {
-        let peers = rbitcoin_net::PeerHub::new();
+        let peers = rbitcoin_net::PeerHub::new(rbitcoin_consensus::NodeClock::new());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<rbitcoin_net::DialRequest>();
         peers.set_dialer(tx);
         let n = queue_proxy_seed_addrfetch(&peers, rbitcoin_primitives::Network::Signet);

@@ -8,6 +8,8 @@ use crate::error::NetError;
 use bitcoin::block::Header;
 use bitcoin::hashes::Hash;
 use bitcoin::{Block, BlockHash, CompactTarget, ScriptBuf, Target, Transaction, Txid, Work};
+#[allow(unused_imports)]
+use rbitcoin_consensus::NodeClock;
 use rbitcoin_consensus::{
     accept_and_connect_block_preverified, confirm_wire_load_from_plan as consensus_load_from_plan,
     confirm_wire_load_phase_pipelined, confirm_write_phase, genesis_block, header_to_record,
@@ -360,7 +362,7 @@ impl ChainHub {
             generate_lock: std::sync::Mutex::new(()),
             mempool: std::sync::OnceLock::new(),
             self_weak: std::sync::OnceLock::new(),
-            clock: rbitcoin_consensus::NodeClock::new(),
+            clock: NodeClock::new(),
             invalidated: Invalidated::new(),
             held_bodies: RwLock::new(HeldBodies::new()),
             precious: RwLock::new(None),

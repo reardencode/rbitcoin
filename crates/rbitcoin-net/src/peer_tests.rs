@@ -1,6 +1,8 @@
 use super::*;
 use crate::peers::{CappedSet, PeerOut};
 use bitcoin::BlockHash;
+#[allow(unused_imports)]
+use rbitcoin_consensus::NodeClock;
 use rbitcoin_consensus::{ChainParams, Milestone};
 use rbitcoin_query::Query;
 use std::collections::{HashMap, HashSet};
@@ -426,7 +428,7 @@ async fn partial_for_a_block_connected_elsewhere_frees_the_slot() {
         vec![spend(1)],
     );
 
-    let peers = crate::peers::PeerHub::new();
+    let peers = crate::peers::PeerHub::new(NodeClock::new());
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18447);
     let ver = VersionMessage {
         version: 70016,
@@ -585,7 +587,7 @@ fn same_peer_pending_cmpct_does_not_getblocktxn_again() {
         block.header.merkle_root = block.compute_merkle_root().unwrap();
         let hsi = HeaderAndShortIds::from_block(&block, 0xbeef, 2, &[]).unwrap();
         let hash = block.block_hash();
-        let peers = crate::peers::PeerHub::new();
+        let peers = crate::peers::PeerHub::new(NodeClock::new());
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18446);
         let ver = VersionMessage {
             version: 70016,
@@ -1337,7 +1339,7 @@ fn recent_reject_skips_atmp_on_second_send(via_cidr: bool) {
         mp.set_relay_enabled(true);
         assert!(hub.attach_mempool(mp).is_ok());
 
-        let peers = crate::peers::PeerHub::new();
+        let peers = crate::peers::PeerHub::new(NodeClock::new());
         if via_cidr {
             let mut table = crate::net_permissions::NetPermTable::default();
             table
@@ -2181,7 +2183,7 @@ fn getdata_skips_reconstruct_when_serve_inflight_at_cap() {
             .unwrap();
         assert!(hashes.len() >= 20);
 
-        let peers = crate::peers::PeerHub::new();
+        let peers = crate::peers::PeerHub::new(NodeClock::new());
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
         let ver = bitcoin::p2p::message_network::VersionMessage {
             version: 70016,
@@ -2388,7 +2390,7 @@ fn snapshot_omits_peer_after_tcp_fin() {
     use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
     use std::time::Duration;
 
-    let hub = PeerHub::new();
+    let hub = PeerHub::new(NodeClock::new());
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
     let ver = VersionMessage {
         version: 70016,
@@ -2858,7 +2860,7 @@ async fn inv_and_getdata_at_cap_stay_one_past_disconnects() {
 }
 #[tokio::test]
 async fn over_budget_reader_waits_until_one_byte_is_written() {
-    let peers = crate::peers::PeerHub::new();
+    let peers = crate::peers::PeerHub::new(NodeClock::new());
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 1));
     let ver = bitcoin::p2p::message_network::VersionMessage {
         version: 70016,

@@ -1093,7 +1093,7 @@ async fn peer_header_dos_and_self_announce() {
     params.apply_test_activation_height("cltv", 111).unwrap();
     let hub = ChainHub::new(q, params, Milestone::NONE);
     hub.ensure_genesis().unwrap();
-    let peers = crate::peers::PeerHub::new();
+    let peers = crate::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
 
     handshake_verack_and_addrv2(&hub, &peers).await;
     unknown_parent_bodies(&hub, &peers).await;

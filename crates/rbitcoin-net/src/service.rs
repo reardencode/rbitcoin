@@ -158,7 +158,7 @@ impl P2PNode {
             (None, SocketAddr::from(([127, 0, 0, 1], 0)))
         };
 
-        let peers = PeerHub::new();
+        let peers = PeerHub::new(hub.clock.clone());
         let (dial_tx, mut dial_rx) = tokio::sync::mpsc::unbounded_channel::<DialRequest>();
         peers.set_dialer(dial_tx);
 

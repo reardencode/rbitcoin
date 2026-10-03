@@ -45,7 +45,7 @@ async fn hostile_peer_session() {
         .unwrap()
         .block_hash();
 
-    let peers = crate::peers::PeerHub::new();
+    let peers = crate::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
     let ver = hostile_ver(bind);
     let peer = peers.register(

@@ -422,7 +422,7 @@ mod tests {
             relay: true,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let peers = crate::peers::PeerHub::new();
+        let peers = crate::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
         let sess = peers.register(
             addr,
             addr,

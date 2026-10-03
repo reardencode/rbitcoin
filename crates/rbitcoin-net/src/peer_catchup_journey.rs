@@ -78,7 +78,7 @@ async fn peer_catchup_compact_reorg() {
     mp.set_relay_enabled(true);
     assert!(hub.attach_mempool(mp).is_ok());
 
-    let peers = crate::peers::PeerHub::new();
+    let peers = crate::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
     let ver = bitcoin::p2p::message_network::VersionMessage {
         version: 70016,

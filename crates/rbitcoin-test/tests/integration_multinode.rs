@@ -438,7 +438,7 @@ async fn p2p_timeout_getaddr_and_keepalive_ping() {
         );
 
         let now = seed.peers.now_secs();
-        seed.peers.set_mock_now(now + 40 * 60);
+        seed.peers.clock.set_mock((now + 40 * 60) as i64);
         wait_ms_until(
             3_000,
             || {
@@ -457,7 +457,7 @@ async fn p2p_timeout_getaddr_and_keepalive_ping() {
             },
         )
         .await;
-        seed.peers.set_mock_now(0);
+        seed.peers.clock.set_mock(0);
 
         seed.peers
             .addconnection(seed.local_addr, PeerConnType::OutboundFullRelay)
@@ -618,7 +618,7 @@ async fn p2p_timeout_getaddr_and_keepalive_ping() {
         }
 
         let t = seed.peers.now_secs();
-        seed.peers.set_mock_now(t + 24 * 60 * 60 + 1);
+        seed.peers.clock.set_mock((t + 24 * 60 * 60 + 1) as i64);
         peer.peers
             .addconnection(seed.local_addr, PeerConnType::AddrFetch)
             .expect("addrfetch dial");
@@ -671,7 +671,7 @@ async fn p2p_timeout_getaddr_and_keepalive_ping() {
             peer.peers.snapshot()
         );
         let t = peer.peers.now_secs();
-        peer.peers.set_mock_now(t + 301);
+        peer.peers.clock.set_mock((t + 301) as i64);
         wait_ms_until(
             2_000,
             || {
@@ -689,7 +689,7 @@ async fn p2p_timeout_getaddr_and_keepalive_ping() {
             },
         )
         .await;
-        peer.peers.set_mock_now(0);
+        peer.peers.clock.set_mock(0);
 
         let mut many = AddrMan::new();
         for i in 0..20u8 {
@@ -697,7 +697,7 @@ async fn p2p_timeout_getaddr_and_keepalive_ping() {
         }
         seed.peers.set_addrman(Arc::new(Mutex::new(many)));
         let t = seed.peers.now_secs();
-        seed.peers.set_mock_now(t + 24 * 60 * 60 + 1);
+        seed.peers.clock.set_mock((t + 24 * 60 * 60 + 1) as i64);
         peer.peers
             .addconnection(seed.local_addr, PeerConnType::AddrFetch)
             .expect("second addrfetch dial");
@@ -3097,7 +3097,9 @@ async fn pong_first_ping_then_go_silent(node: &P2PNode) -> rbitcoin_net::V2Plain
     )
     .await;
 
-    node.peers.set_mock_now(node.peers.now_secs() + 121);
+    node.peers
+        .clock
+        .set_mock((node.peers.now_secs() as i64) + 121);
     next_ping(&mut raw).await;
     assert!(row().pingwait.is_some(), "{:?}", row());
     raw.write_contents(&pong(0)).await.expect("write pong");
@@ -3142,7 +3144,7 @@ async fn mocktime_generate_keeps_ponging_peer() {
         let t0 = a.peers.now_secs();
         let script = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
         for i in 1..=10u64 {
-            a.peers.set_mock_now(t0 + i * 600);
+            a.peers.clock.set_mock((t0 + i * 600) as i64);
             let hub = a.hub.clone();
             let script = script.clone();
             tokio::task::spawn_blocking(move || {
