@@ -99,6 +99,17 @@ pub fn validate_block_structure(
     validate_block_structure_hashed(block, ctx).map(|_| ())
 }
 
+/// Core `IsBlockMutated` 64-byte rule. With no coinbase first, a tx whose
+/// stripped size is 64 bytes may be an inner merkle node read as a tx, so
+/// the body need not be the one the header commits to. Such a block is
+/// already invalid; this only decides that its hash is not cached as failed.
+pub fn block_mutated_without_coinbase(block: &Block) -> bool {
+    if block.txdata.first().is_some_and(Transaction::is_coinbase) {
+        return false;
+    }
+    block.txdata.iter().any(|tx| tx.base_size() == 64)
+}
+
 /// Decode consensus-encoded block bytes and run archive-structure checks.
 ///
 /// Junk / truncated wire returns `Err`. Must not panic — fuzz entry.
