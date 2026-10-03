@@ -1698,73 +1698,246 @@ fn ibd_bad_prev_fork() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+type Reject = (BlockHash, ConfirmRejectClass, usize);
+
+/// Regtest hub padded past coinbase maturity, IBD work state, and a confirm
+/// engine. Getdata comes from the real assign.
+struct WireRig {
+    dir: rbitcoin_query::testutil::TempDir,
+    hub: std::sync::Arc<crate::chain::ChainHub>,
+    feed: std::sync::Arc<super::super::confirm::ConfirmFeed>,
+    engine: Option<(
+        std::thread::JoinHandle<()>,
+        std::sync::mpsc::Receiver<super::super::confirm::ConfirmEvent>,
+    )>,
+    st: IbdWorkState,
+    write_next: std::sync::atomic::AtomicU32,
+    book: crate::seeds::AddrMan,
+    progress: std::time::Instant,
+    cfg: crate::ibd::IbdConfig,
+    stats: super::super::status::LoopStats,
+    tip: BlockHash,
+    tip_time: u32,
+    t: u32,
+    cbs: Vec<bitcoin::Txid>,
+}
+
+impl WireRig {
+    fn new(label: &str, peers: usize) -> Self {
+        use super::super::assign::tests::dummy_slot;
+        use rbitcoin_consensus::{pad_empty_from, ChainParams};
+        let (dir, hub0) = crate::chain::tiny_regtest_hub_labeled(label);
+        hub0.query.enter_direct_index_mode().unwrap();
+        let hub = std::sync::Arc::new(hub0);
+        hub.ensure_genesis().unwrap();
+        let params = ChainParams::regtest();
+        let gen_time = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest)
+            .header
+            .time;
+        let last = params.coinbase_maturity() + 2;
+        let (tip, tip_time, cbs) = pad_empty_from(
+            &hub.query,
+            &params,
+            hub.tip_hash().unwrap(),
+            gen_time,
+            1,
+            last,
+            2,
+        );
+        let t = hub.tip_height().unwrap();
+        let st = IbdWorkState::new((1..=peers).map(dummy_slot).collect(), Some(tip), Some(t));
+        Self {
+            dir,
+            hub,
+            feed: std::sync::Arc::new(super::super::confirm::ConfirmFeed::new()),
+            engine: None,
+            st,
+            write_next: std::sync::atomic::AtomicU32::new(t + 1),
+            book: crate::seeds::AddrMan::new(),
+            progress: std::time::Instant::now(),
+            cfg: crate::ibd::IbdConfig::for_test(),
+            stats: Default::default(),
+            tip,
+            tip_time,
+            t,
+            cbs,
+        }
+    }
+
+    /// A tx spending output 0 of `prev` to OP_TRUE.
+    fn spend(prev: bitcoin::Txid) -> bitcoin::Transaction {
+        use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, TxIn, TxOut, Witness};
+        bitcoin::Transaction {
+            version: bitcoin::transaction::Version::ONE,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: prev,
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(49_0000_0000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        }
+    }
+
+    /// Put `blocks` (tip+1, tip+2, …) on the header path. Every peer is
+    /// taller.
+    fn plant(&mut self, blocks: &[&bitcoin::Block]) {
+        for (i, b) in blocks.iter().enumerate() {
+            let (hash, ht) = (b.block_hash(), self.t + 1 + i as u32);
+            self.st.record_height(hash, ht);
+            self.st.ordered_set.insert(hash);
+            self.st.ordered.push_back(hash);
+            self.st.max_ordered_height = ht;
+            self.st
+                .header_fks
+                .insert(hash, self.hub.ensure_header_fk(&b.header).unwrap());
+        }
+        let top = self.st.max_ordered_height;
+        for s in &mut self.st.slots {
+            s.peer_height = top;
+        }
+    }
+
+    /// `peer` answers a getdata for `body`'s hash with `body`.
+    fn deliver(&mut self, peer: usize, body: &bitcoin::Block) {
+        use super::super::peer_io::PeerEvent;
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1);
+        super::apply_peer_event(
+            &mut self.st,
+            &self.hub,
+            PeerEvent::BlockFramed {
+                peer,
+                hash: body.block_hash(),
+                payload: bitcoin::consensus::serialize(body),
+            },
+            &self.write_next,
+            &mut self.book,
+            local,
+            Some(&self.feed),
+        );
+    }
+
+    fn start_engine(&mut self) {
+        use super::super::confirm::spawn_confirm_engine;
+        let (ev_tx, ev_rx) = std::sync::mpsc::channel();
+        let (engine, _queues) = spawn_confirm_engine(
+            std::sync::Arc::clone(&self.hub),
+            std::sync::Arc::clone(&self.feed),
+            ev_tx,
+            std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            std::sync::Arc::new(Default::default()),
+        );
+        self.engine = Some((engine, ev_rx));
+    }
+
+    /// Apply confirm events and run assign. Each getdata to a live peer is
+    /// answered with `serve(peer, hash)`. Returns the rejects seen once
+    /// `stop` holds after an event. Panics past a deadline: a missing body
+    /// that assign never asks for is a stall.
+    fn pump(
+        &mut self,
+        mut serve: impl FnMut(usize, BlockHash) -> bitcoin::Block,
+        mut stop: impl FnMut(&IbdWorkState, &crate::chain::ChainHub, &[Reject]) -> bool,
+    ) -> Vec<Reject> {
+        use super::super::assign::{assign_work_ordered, AssignDepth};
+        use super::super::confirm::ConfirmEvent;
+        use std::time::{Duration, Instant};
+        let mut rejects = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let path_lo = self.hub.tip_height().unwrap() + 1;
+            assert!(
+                Instant::now() < deadline,
+                "stall: rejects={rejects:?} asked={:?} scan_lo={} path_lo={path_lo}",
+                self.st.inflight.keys().collect::<Vec<_>>(),
+                self.st.densify_scan_lo,
+            );
+            let rx = &self.engine.as_ref().expect("engine").1;
+            if let Ok(ev) = rx.recv_timeout(Duration::from_millis(5)) {
+                if let ConfirmEvent::Reject {
+                    hash,
+                    class,
+                    batch_len,
+                    ..
+                } = &ev
+                {
+                    rejects.push((*hash, *class, *batch_len));
+                }
+                let (tx, one) = std::sync::mpsc::channel();
+                tx.send(ev).unwrap();
+                drop(tx);
+                super::apply_confirm_events(
+                    &mut self.st,
+                    &self.hub,
+                    &one,
+                    &self.write_next,
+                    &std::sync::atomic::AtomicU32::new(0),
+                    &mut self.progress,
+                    Some(&self.feed),
+                );
+                if stop(&self.st, &self.hub, &rejects) {
+                    return rejects;
+                }
+            }
+            assign_work_ordered(
+                &mut self.st,
+                &self.hub,
+                &self.cfg,
+                &self.stats,
+                AssignDepth::Full,
+                None,
+            );
+            let asks: Vec<(BlockHash, usize)> = self
+                .st
+                .inflight
+                .iter()
+                .flat_map(|(h, r)| r.peers.iter().map(move |p| (*h, *p)))
+                .filter(|(_, p)| self.st.slots.iter().any(|s| s.id == *p && s.alive))
+                .collect();
+            for (hash, peer) in asks {
+                let body = serve(peer, hash);
+                self.deliver(peer, &body);
+            }
+        }
+    }
+
+    fn finish(mut self) {
+        self.feed.request_stop();
+        self.feed.notify();
+        if let Some((engine, _)) = self.engine.take() {
+            let _ = engine.join();
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
 /// A peer answers the getdata for tip+1 with a body the header does not
 /// commit to: no txs, a repeated tail (CVE-2012-2459), or witness the
 /// coinbase does not commit to. Each confirm reject is mutated wire: the
-/// body leaves the queue, the hash stays off the invalid set and is
-/// re-requested, and the honest body then connects.
+/// body leaves the queue, the hash stays off the invalid set, assign asks
+/// for it again, and the honest body then connects.
 #[test]
 fn ibd_mutated_body_is_refetched_not_blacklisted() {
-    use super::super::assign::tests::{dummy_slot, lock_default_assign_stop};
-    use super::super::confirm::{spawn_confirm_engine, ConfirmEvent, ConfirmFeed};
-    use super::super::peer_io::PeerEvent;
-    use super::super::state::InflightReq;
-    use super::super::status::LoopStats;
-    use super::{apply_confirm_events, apply_peer_event};
-    use crate::seeds::AddrMan;
-    use bitcoin::absolute::LockTime;
-    use bitcoin::consensus::serialize;
-    use bitcoin::transaction::Version as TxVersion;
-    use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
-    use rbitcoin_consensus::{mine_regtest_paying, pad_empty_from, ChainParams};
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-    use std::sync::atomic::AtomicU32;
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use super::super::assign::tests::lock_default_assign_stop;
+    use bitcoin::{ScriptBuf, Transaction, Witness};
 
     let _env = lock_default_assign_stop();
-    let (dir, hub0) = crate::chain::tiny_regtest_hub_labeled("mutated-body");
-    hub0.query.enter_direct_index_mode().unwrap();
-    let hub = Arc::new(hub0);
-    hub.ensure_genesis().unwrap();
-    let params = ChainParams::regtest();
-    let gen_time = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest)
-        .header
-        .time;
-    let last = params.coinbase_maturity() + 2;
-    let (tip, tip_time, cbs) = pad_empty_from(
-        &hub.query,
-        &params,
-        hub.tip_hash().unwrap(),
-        gen_time,
-        1,
-        last,
-        2,
-    );
-    let t = hub.tip_height().unwrap();
-    let spend = |prev: Txid| Transaction {
-        version: TxVersion::ONE,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint {
-                txid: prev,
-                vout: 0,
-            },
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        output: vec![TxOut {
-            value: Amount::from_sat(49_0000_0000),
-            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
-        }],
-    };
-    let honest = mine_regtest_paying(
-        tip,
-        tip_time + 600,
+    let mut rig = WireRig::new("mutated-body", 1);
+    let (t, cbs) = (rig.t, rig.cbs.clone());
+    let honest = rbitcoin_consensus::mine_regtest_paying(
+        rig.tip,
+        rig.tip_time + 600,
         t + 1,
         ScriptBuf::from_bytes(vec![0x51]),
-        vec![spend(cbs[0]), spend(cbs[1])],
+        vec![WireRig::spend(cbs[0]), WireRig::spend(cbs[1])],
     );
     let hash = honest.block_hash();
     let raw = hash.to_byte_array();
@@ -1776,92 +1949,31 @@ fn ibd_mutated_body_is_refetched_not_blacklisted() {
     repeated.push(repeated[2].clone());
     let mut witness = honest.txdata.clone();
     witness[1].input[0].witness = Witness::from_slice(&[[0x01]]);
-
-    let feed = Arc::new(ConfirmFeed::new());
-    let (ev_tx, ev_rx) = std::sync::mpsc::channel();
-    let (engine, _queues) = spawn_confirm_engine(
-        Arc::clone(&hub),
-        Arc::clone(&feed),
-        ev_tx,
-        Arc::new(AtomicU32::new(0)),
-        Arc::new(LoopStats::default()),
-    );
-    let mut st = IbdWorkState::new(vec![dummy_slot(1)], Some(tip), Some(t));
-    st.record_height(hash, t + 1);
-    st.header_fks
-        .insert(hash, hub.ensure_header_fk(&honest.header).unwrap());
-    let write_next = AtomicU32::new(t + 1);
-    let mut book = AddrMan::new();
-    let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1);
-    let mut progress = Instant::now();
-    // Answer the getdata with `body`, then apply confirm events until a
-    // reject (its class) or tip+1 connects (`None`).
-    let mut serve = |st: &mut IbdWorkState, body: &bitcoin::Block| {
-        st.slots[0].in_flight.insert(hash);
-        st.inflight.insert(hash, InflightReq::new(1));
-        apply_peer_event(
-            st,
-            &hub,
-            PeerEvent::BlockFramed {
-                peer: 1,
-                hash,
-                payload: serialize(body),
-            },
-            &write_next,
-            &mut book,
-            local,
-            Some(&feed),
-        );
-        assert!(hub.query.block_queue_has_hash(&raw), "body queued");
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            assert!(Instant::now() < deadline, "no confirm verdict");
-            let Ok(ev) = ev_rx.recv_timeout(Duration::from_millis(5)) else {
-                continue;
-            };
-            let class = match &ev {
-                ConfirmEvent::Reject { class, .. } => Some(*class),
-                ConfirmEvent::Accepted { .. } => None,
-            };
-            let (tx, rx) = std::sync::mpsc::channel();
-            tx.send(ev).unwrap();
-            drop(tx);
-            apply_confirm_events(
-                st,
-                &hub,
-                &rx,
-                &write_next,
-                &AtomicU32::new(0),
-                &mut progress,
-                Some(&feed),
-            );
-            if class.is_some() || hub.tip_height() == Some(t + 1) {
-                return class;
-            }
-        }
-    };
+    rig.plant(&[&honest]);
+    rig.start_engine();
 
     for (what, txdata) in [
         ("no txs", vec![]),
         ("repeated tail", repeated),
         ("uncommitted witness", witness),
     ] {
-        let class = serve(&mut st, &under_header(txdata));
-        assert_eq!(class, Some(ConfirmRejectClass::SoftWire), "{what}");
+        let body = under_header(txdata);
+        let rejects = rig.pump(|_, _| body.clone(), |_, _, r| !r.is_empty());
+        assert_eq!(rejects, [(hash, ConfirmRejectClass::SoftWire, 1)], "{what}");
+        let st = &mut rig.st;
         assert!(!st.body.is_rejected(&hash), "{what}");
         assert!(!st.reorg.invalid.contains(raw), "{what}");
         assert!(
-            !hub.query.block_queue_has_hash(&raw),
+            !rig.hub.query.block_queue_has_hash(&raw),
             "{what}: body dropped"
         );
-        assert!(!st.body.skip_download(&hub, &hash), "{what}: re-get");
-        assert_eq!(hub.tip_height(), Some(t), "{what}");
+        assert!(!st.body.skip_download(&rig.hub, &hash), "{what}: re-get");
+        assert_eq!(rig.hub.tip_height(), Some(t), "{what}");
     }
-    assert_eq!(serve(&mut st, &honest), None);
-    assert_eq!(hub.tip_hash(), Some(hash));
-
-    feed.request_stop();
-    feed.notify();
-    let _ = engine.join();
-    let _ = std::fs::remove_dir_all(dir);
+    let rejects = rig.pump(
+        |_, _| honest.clone(),
+        |_, hub, _| hub.tip_hash() == Some(hash),
+    );
+    assert!(rejects.is_empty(), "{rejects:?}");
+    rig.finish();
 }

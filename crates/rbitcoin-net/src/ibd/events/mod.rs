@@ -895,6 +895,7 @@ fn apply_soft_wire_reject(
     if !bad_prev {
         st.body.mark_missing(hash);
         st.body.demote_known(hash);
+        st.reopen_for_densify(&[hash]);
         warn!("ibd: confirm reject soft @{height} {hash}: {err} (re-getdata, not blacklisted)");
     } else {
         warn!(
