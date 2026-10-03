@@ -144,7 +144,7 @@ impl BlockQueue {
         header_fk: u64,
         payload: &[u8],
     ) -> Result<u64, StoreError> {
-        let n_inputs = crate::block_wire_input_count(payload);
+        let n_inputs = crate::block_wire_input_count(payload).unwrap_or(0);
         self.enqueue_vec(height, hash, header_fk, payload.to_vec(), n_inputs)
     }
 

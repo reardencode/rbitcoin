@@ -1149,13 +1149,39 @@ fn ibd_bad_prev_fork() {
     assert_eq!(st.header_fks.len(), fks);
     assert_eq!(hub.query.store().header_count(), before + 3);
 
-    // IBD restarts. A1's body arrives raw and is redelivered: one body-queue
-    // row, one confirm-feed note.
-    let mut st = IbdWorkState::new(vec![dummy_slot(1)], Some(gen), Some(0));
+    // IBD restarts. Peer 2 answers A1's getdata with the real header and a
+    // tx that does not parse (segwit marker, flag 2). Nothing is queued, A1
+    // can be fetched again, and peer 2 is dropped.
+    let mut st = IbdWorkState::new(vec![dummy_slot(1), dummy_slot(2)], Some(gen), Some(0));
     let feed = ConfirmFeed::new();
     st.record_height(a1, 1);
     st.header_fks
         .insert(a1, hub.ensure_header_fk(&a[0].header).unwrap());
+    let mut junk = serialize(&a[0].header);
+    junk.extend_from_slice(&[0x01, 0x01, 0, 0, 0, 0x00, 0x02, 0, 0, 0, 0]);
+    st.slots[1].in_flight.insert(a1);
+    st.inflight.insert(a1, InflightReq::new(2));
+    apply_peer_event(
+        &mut st,
+        &hub,
+        PeerEvent::BlockFramed {
+            peer: 2,
+            hash: a1,
+            payload: junk,
+        },
+        &write_next,
+        &mut book,
+        local,
+        Some(&feed),
+    );
+    assert_eq!(hub.query.block_queue_stats().2, 0, "undecodable wire");
+    assert_eq!(feed.size_snap().0, 0);
+    assert!(st.inflight.is_empty() && !st.body.is_pending(&a1));
+    assert!(!st.body.is_rejected(&a1), "the hash stays fetchable");
+    assert!(!st.slots[1].alive, "the sender is dropped");
+
+    // A1's body arrives raw from peer 1 and is redelivered: one body-queue
+    // row, one confirm-feed note.
     st.slots[0].in_flight.insert(a1);
     st.inflight.insert(a1, InflightReq::new(1));
     for _ in 0..2 {
@@ -1670,6 +1696,246 @@ fn ibd_bad_prev_fork() {
     );
     assert!(!st.body.is_rejected(&a1) && !st.body.is_known_archived(&a1));
     assert!(!hub.query.store().header_txs.has_body(hfk).unwrap());
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Core reads `version | 0x00 | 0x00 | locktime` as a tx with no inputs and
+/// no outputs (an empty vin, then segwit flag 0) and caches the block
+/// invalid. That wire through intake and the confirm engine reaches the same
+/// verdict: the hash is blacklisted and its sender stays connected.
+#[test]
+fn ibd_flag_zero_tx_block_is_consensus_invalid() {
+    use super::super::assign::tests::dummy_slot;
+    use super::super::confirm::{spawn_confirm_engine, ConfirmEvent, ConfirmFeed};
+    use super::super::peer_io::PeerEvent;
+    use super::super::state::InflightReq;
+    use super::super::status::LoopStats;
+    use super::{apply_confirm_events, apply_peer_event};
+    use crate::seeds::AddrMan;
+    use bitcoin::consensus::serialize;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::atomic::AtomicU32;
+    use std::sync::mpsc::{channel, RecvTimeoutError};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("flag-zero-tx");
+    hub.query.enter_direct_index_mode().unwrap();
+    let hub = Arc::new(hub);
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+
+    // The merkle root commits to the dummy's legacy encoding, which is the
+    // 10-byte wire. rust-bitcoin would serialize it with a segwit flag of 1.
+    let empty = bitcoin::Transaction {
+        version: bitcoin::transaction::Version::ONE,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![],
+        output: vec![],
+    };
+    let block = mine(gen, 10, 1, vec![empty]);
+    let hash = block.block_hash();
+    let mut wire = serialize(&block.header);
+    wire.push(2);
+    wire.extend_from_slice(&serialize(&block.txdata[0]));
+    wire.extend_from_slice(&[1, 0, 0, 0, 0x00, 0x00, 0, 0, 0, 0]);
+
+    let mut st = IbdWorkState::new(vec![dummy_slot(1)], Some(gen), Some(0));
+    let feed = Arc::new(ConfirmFeed::new());
+    st.record_height(hash, 1);
+    st.header_fks
+        .insert(hash, hub.ensure_header_fk(&block.header).unwrap());
+    st.ordered.push_back(hash);
+    st.ordered_set.insert(hash);
+    st.slots[0].in_flight.insert(hash);
+    st.inflight.insert(hash, InflightReq::new(1));
+    apply_peer_event(
+        &mut st,
+        &hub,
+        PeerEvent::BlockFramed {
+            peer: 1,
+            hash,
+            payload: wire,
+        },
+        &AtomicU32::new(1),
+        &mut AddrMan::new(),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1),
+        Some(feed.as_ref()),
+    );
+    assert!(st.slots[0].alive, "Core's encoding is not undecodable wire");
+    assert!(st.body.is_pending(&hash));
+    assert_eq!(hub.query.block_queue_stats().2, 1);
+
+    let (ev_tx, ev_rx) = channel();
+    let (engine, _queues) = spawn_confirm_engine(
+        Arc::clone(&hub),
+        Arc::clone(&feed),
+        ev_tx,
+        Arc::new(AtomicU32::new(0)),
+        Arc::new(LoopStats::default()),
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let (height, got, class, err, batch_len) = loop {
+        match ev_rx.recv_timeout(Duration::from_millis(5)) {
+            Ok(ConfirmEvent::Reject {
+                height,
+                hash,
+                class,
+                err,
+                batch_len,
+            }) => break (height, hash, class, err, batch_len),
+            Ok(ConfirmEvent::Accepted { .. }) => panic!("a block with an empty tx connected"),
+            Err(RecvTimeoutError::Timeout) => {
+                assert!(Instant::now() < deadline, "no confirm reject")
+            }
+            Err(RecvTimeoutError::Disconnected) => panic!("confirm engine exited"),
+        }
+    };
+    feed.request_stop();
+    feed.notify();
+    let _ = engine.join();
+    assert_eq!(
+        (height, got, class, batch_len),
+        (1, hash, ConfirmRejectClass::ConsensusInvalid, 1),
+        "{err}"
+    );
+    assert!(err.contains("no inputs"), "{err}");
+
+    let (tx, rx) = channel();
+    tx.send(ConfirmEvent::Reject {
+        height,
+        hash,
+        class,
+        err,
+        batch_len,
+    })
+    .unwrap();
+    drop(tx);
+    apply_confirm_events(
+        &mut st,
+        &hub,
+        &rx,
+        &AtomicU32::new(1),
+        &AtomicU32::new(0),
+        &mut Instant::now(),
+        Some(feed.as_ref()),
+    );
+    assert!(st.body.is_rejected(&hash) && st.slots[0].alive);
+    assert_eq!(hub.tip_hash(), Some(gen));
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Densify walks past a height once its body is requested or queued. A body
+/// refused at intake, and a queued body lookup rejects as soft wire, both
+/// put that hash back to missing below the cursor. The next assign must ask
+/// for it again, or confirm waits at that height forever.
+#[test]
+fn ibd_refused_body_is_asked_again() {
+    use super::super::assign::tests::{dummy_slot, lock_default_assign_stop};
+    use super::super::assign::{assign_work_ordered, AssignDepth};
+    use super::super::confirm::{ConfirmEvent, ConfirmFeed};
+    use super::super::path::seed_work_path_from_store;
+    use super::super::peer_io::PeerEvent;
+    use super::super::status::LoopStats;
+    use super::super::IbdConfig;
+    use super::{apply_confirm_events, apply_peer_event};
+    use crate::seeds::AddrMan;
+    use bitcoin::consensus::serialize;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::atomic::AtomicU32;
+    use std::time::Instant;
+
+    let _env = lock_default_assign_stop();
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("refused-body-reask");
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let a: Vec<bitcoin::Block> = (1..=4u32).fold(Vec::new(), |mut a, ht| {
+        let prev = a.last().map_or(gen, |b: &bitcoin::Block| b.block_hash());
+        a.push(mine(prev, ht * 10, ht, vec![]));
+        a
+    });
+    for b in &a {
+        hub.ensure_header(&b.header).unwrap();
+    }
+    let (a1, a2) = (a[0].block_hash(), a[1].block_hash());
+    let mut st = IbdWorkState::new(
+        (1..=3).map(dummy_slot).collect(),
+        hub.tip_hash(),
+        hub.tip_height(),
+    );
+    seed_work_path_from_store(&mut st, &hub);
+    let feed = ConfirmFeed::new();
+    let mut book = AddrMan::new();
+    let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1);
+    let (cfg, stats) = (IbdConfig::for_test(), LoopStats::default());
+    let assign = |st: &mut IbdWorkState| {
+        assign_work_ordered(st, &hub, &cfg, &stats, AssignDepth::Full, None);
+    };
+    let owner = |st: &IbdWorkState, hash| *st.inflight[&hash].peers.iter().next().unwrap();
+    let mut framed = |st: &mut IbdWorkState, peer, hash, payload| {
+        apply_peer_event(
+            st,
+            &hub,
+            PeerEvent::BlockFramed {
+                peer,
+                hash,
+                payload,
+            },
+            &AtomicU32::new(1),
+            &mut book,
+            local,
+            Some(&feed),
+        );
+    };
+    assign(&mut st);
+    assert!(a.iter().all(|b| st.inflight.contains_key(&b.block_hash())));
+    assign(&mut st);
+    assert!(
+        st.densify_scan_lo > 4,
+        "densify walked past the requested path"
+    );
+
+    // A1's owner answers with the real header and a tx that does not parse.
+    let peer = owner(&st, a1);
+    let mut junk = serialize(&a[0].header);
+    junk.extend_from_slice(&[0x01, 0x01, 0, 0, 0, 0x00, 0x02, 0, 0, 0, 0]);
+    framed(&mut st, peer, a1, junk);
+    assert!(!st.inflight.contains_key(&a1) && st.body.is_missing(&a1));
+    assign(&mut st);
+    assert!(st.inflight.contains_key(&a1), "refused body is asked again");
+
+    // A2's body is queued, then lookup rejects it as soft wire.
+    let peer = owner(&st, a2);
+    framed(&mut st, peer, a2, serialize(&a[1]));
+    assert!(st.body.is_pending(&a2) && !st.inflight.contains_key(&a2));
+    assign(&mut st);
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(ConfirmEvent::Reject {
+        height: 2,
+        hash: a2,
+        class: ConfirmRejectClass::SoftWire,
+        err: "body queue wire does not decode".into(),
+        batch_len: 1,
+    })
+    .unwrap();
+    drop(tx);
+    apply_confirm_events(
+        &mut st,
+        &hub,
+        &rx,
+        &AtomicU32::new(1),
+        &AtomicU32::new(0),
+        &mut Instant::now(),
+        Some(&feed),
+    );
+    assert!(!hub.query.block_queue_has_height(2) && st.body.is_missing(&a2));
+    assign(&mut st);
+    assert!(
+        st.inflight.contains_key(&a2),
+        "soft-rejected body is asked again"
+    );
 
     let _ = std::fs::remove_dir_all(dir);
 }

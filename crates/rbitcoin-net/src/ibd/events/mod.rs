@@ -624,6 +624,20 @@ fn apply_block_framed(
         Ok(_offer) => {
             let _ = try_complete_awaiting_reorg(st, hub);
         }
+        Err(rbitcoin_store::StoreError::Rejected(why))
+            if why == rbitcoin_query::Query::UNDECODABLE_WIRE_MSG =>
+        {
+            warn!("ibd: peer[{peer}] block {hash} h={height}: {why}; dropping peer");
+            st.body.mark_missing(hash);
+            st.reopen_for_densify(&[hash]);
+            disconnect_peer(
+                &mut st.slots,
+                &mut st.addr_cooldown,
+                &mut st.addr_strikes,
+                peer,
+            );
+            return;
+        }
         Err(e) => {
             rbitcoin_log::warn!("ibd: body queue offer failed ({e}) h={height}");
             st.body.mark_missing(hash);
@@ -894,6 +908,7 @@ fn apply_soft_wire_reject(
     }
     if !bad_prev {
         st.body.mark_missing(hash);
+        st.reopen_for_densify(&[hash]);
         st.body.demote_known(hash);
         warn!("ibd: confirm reject soft @{height} {hash}: {err} (re-getdata, not blacklisted)");
     } else {

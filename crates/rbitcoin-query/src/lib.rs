@@ -1242,6 +1242,10 @@ impl Query {
     pub const MAX_SH_CREATES_MSG: &'static str =
         "scripthash join exceeds --max-sh-creates (default 10000)";
 
+    /// [`StoreError::Rejected`] payload from [`Self::block_queue_offer`] for
+    /// wire that does not decode. Only this refusal is the sender's fault.
+    pub const UNDECODABLE_WIRE_MSG: &'static str = "block wire does not decode";
+
     pub fn set_max_sh_creates(&self, n: u32) {
         self.max_sh_creates.store(n, AtomicOrdering::Relaxed);
     }
@@ -1497,9 +1501,15 @@ impl Query {
 
     /// Enqueue a raw block payload in the process-local RAM queue.
     ///
-    /// **Always accepts** peer wire. Soft densify / assign-stop only limit
-    /// **new getdata assign**; never refuse in-flight bodies here. Restart
-    /// drops the queue (redownload); sole durable write is Class A on confirm.
+    /// **Always accepts** decodable peer wire. Soft densify / assign-stop only
+    /// limit **new getdata assign**; never refuse in-flight bodies here.
+    /// Restart drops the queue (redownload); sole durable write is Class A on
+    /// confirm.
+    ///
+    /// A payload lookup would not decode is refused with
+    /// [`StoreError::Rejected`] carrying [`Self::UNDECODABLE_WIRE_MSG`], and
+    /// nothing is queued: a queued hash counts as in hand, so an undecodable
+    /// row would block the honest copy.
     pub fn block_queue_offer(
         &self,
         height: u32,
@@ -1513,7 +1523,9 @@ impl Query {
                 return Ok(BlockQueueOffer { queue_id: id });
             }
         }
-        let n_inputs = rbitcoin_store::block_wire_input_count(payload);
+        let Some(n_inputs) = rbitcoin_store::block_wire_input_count(payload) else {
+            return Err(StoreError::Rejected(Self::UNDECODABLE_WIRE_MSG));
+        };
         let owned = payload.to_vec();
         let mut g = self.block_queue.lock().unwrap();
         if let Some(id) = g.id_for_height(height) {
@@ -1531,7 +1543,7 @@ impl Query {
         header_fk: u64,
         payload: &[u8],
     ) -> Result<u64, QueryError> {
-        let n_inputs = rbitcoin_store::block_wire_input_count(payload);
+        let n_inputs = rbitcoin_store::block_wire_input_count(payload).unwrap_or(0);
         let owned = payload.to_vec();
         let mut g = self.block_queue.lock().unwrap();
         g.enqueue_vec(height, hash, header_fk, owned, n_inputs)

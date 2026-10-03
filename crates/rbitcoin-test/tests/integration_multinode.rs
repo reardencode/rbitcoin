@@ -1689,16 +1689,16 @@ fn pin_restart_empty_and_same_process_bq_residue(seed: &P2PNode) {
         .1
         .hash;
     seed.query
-        .block_queue_offer(below, below_hash, 0, b"stale")
+        .block_queue_enqueue(below, below_hash, 0, b"stale")
         .unwrap();
     seed.query
-        .block_queue_offer(tip + 1, [0xAB; 32], 0, b"")
+        .block_queue_enqueue(tip + 1, [0xAB; 32], 0, b"")
         .unwrap();
     seed.query
-        .block_queue_offer(tip + 2, [0xCD; 32], 0, b"wire")
+        .block_queue_enqueue(tip + 2, [0xCD; 32], 0, b"wire")
         .unwrap();
     seed.query
-        .block_queue_offer(u32::MAX, [0x11; 32], 0, b"unk")
+        .block_queue_enqueue(u32::MAX, [0x11; 32], 0, b"unk")
         .unwrap();
 
     let n = rehydrate_block_queue_residue(&seed.hub).expect("same-process rehydrate");

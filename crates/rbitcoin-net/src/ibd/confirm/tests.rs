@@ -1417,6 +1417,32 @@ fn lookup_ready_hash_none_when_missing() {
     assert_eq!(super::lookup_ready_hash(&feed, 10), Some(h));
 }
 
+/// First `ConfirmEvent::Reject` within 15 s; other events are skipped.
+fn next_reject(
+    rx: &std::sync::mpsc::Receiver<super::ConfirmEvent>,
+) -> (u32, BlockHash, super::ConfirmRejectClass) {
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match rx.recv_timeout(Duration::from_millis(5)) {
+            Ok(super::ConfirmEvent::Reject {
+                height,
+                hash,
+                class,
+                ..
+            }) => return (height, hash, class),
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => {
+                assert!(Instant::now() < deadline, "no confirm reject")
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                panic!("confirm engine exited before a reject")
+            }
+        }
+    }
+}
+
 /// One direct-index regtest chain through the confirm engine. Four spends of
 /// a freshly written parent, each in a mainnet ordering of lookup and write,
 /// must confirm (187, 905, 133433, and 496 under single-block isolate). Then,
@@ -1427,7 +1453,7 @@ fn ibd_confirm_pin_fault() {
     use super::{
         finish_connected_write_after_session_fault, load_fail_rewind_wave,
         reoffer_blocks_to_body_queue, spawn_confirm_engine, write_batch_is_stale, ConfirmEvent,
-        LoadAheadState,
+        ConfirmRejectClass, LoadAheadState,
     };
     use crate::ibd::status::LoopStats;
     use bitcoin::absolute::LockTime;
@@ -1581,6 +1607,31 @@ fn ibd_confirm_pin_fault() {
     }
     wait_tip(blocks.last().unwrap().0);
 
+    // A peer answers getdata with the real header and a body that does not
+    // decode. Lookup drops the row and reports a soft wire reject, so the
+    // hash stays fetchable. The honest body for the same hash then connects.
+    let t = hub.tip_height().unwrap();
+    let next = mine_empty_regtest(tip, tip_time + 600, t + 1);
+    let mut junk = serialize(&next.header);
+    junk.extend_from_slice(&[0x01, 0x01, 0x00]);
+    hub.query
+        .block_queue_enqueue(t + 1, next.block_hash().to_byte_array(), 1, &junk)
+        .unwrap();
+    feed.note(t + 1, next.block_hash());
+    let reject = next_reject(&ev_rx);
+    assert_eq!(
+        (reject, hub.query.block_queue_has_height(t + 1)),
+        (
+            (t + 1, next.block_hash(), ConfirmRejectClass::SoftWire),
+            false
+        ),
+        "the undecodable row leaves the body queue before the reject"
+    );
+    enqueue(&(t + 1, next.clone()));
+    wait_tip(t + 1);
+    tip = next.block_hash();
+    tip_time = next.header.time;
+
     feed.request_stop();
     feed.notify();
     let _ = engine.join();
@@ -1732,7 +1783,7 @@ fn ibd_confirm_pin_fault() {
     assert!(hub.is_connected(&BlockHash::from_byte_array(hash1)));
     let hfk1 = hub.query.get_header_by_hash(&hash1).unwrap().unwrap().0;
     hub.query
-        .block_queue_offer(t + 1, hash1, hfk1.0, &[0u8; 80])
+        .block_queue_offer(t + 1, hash1, hfk1.0, &[0u8; 81])
         .unwrap();
     finish_connected_write_after_session_fault(&hub.query, &[(t + 1, hash1)])
         .expect("in-place finish");

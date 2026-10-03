@@ -11,7 +11,7 @@ sidecars and SH BDZ3 occupancy prefixes are **read-only mmap** exceptions
 
 | Structure | Cap / bound | Production clear / evict |
 |-----------|-------------|---------------------------|
-| **In-RAM body queue** | Soft densify assign (no hysteresis): under ~100 MiB free densify ahead; over ~100 MiB only heights confirm will consume in the next ~1 min at tip rate; at the 1 GiB assign-stop (`RBITCOIN_BLOCK_QUEUE_GB` / `_BYTES`, `0` = unlimited) no new getdata is issued. **Intake budget:** body-queue `bytes()` plus outstanding getdata hashes × the per-hash charge must fit in that same assign-stop before a **new** getdata hash is issued. The charge is 4 MiB until 8 requested bodies have been recorded, then the maximum wire length among the most recent 32, and never above 4 MiB. A hash already requested is never refused. A frame whose hash is not in inflight, or is already queued, is dropped before the payload copy. `bytes()` is **raw only** | Peer **BlockFramed** enqueues **raw** frame payload and stamps Σ `tx.input` via a CompactSize walk (no `Block` decode). Lookup packs/holds on that count; **dequeues** after load-batch send. Decoded `Arc<Block>` + `TxPrecompute` live on **loadq** (cap 14), then scriptq/writeq. **Have-body** (hole / densify / receive) is confirmed ∨ BQ hash ∨ `H ≤ lookup_taken_hi`. **Never both** raw and decoded. **RAM-only by design**. Restart empties BQ+loadq. Logs: `bq soft=n/win RAM=` (`bytes()`). `loadq=n/14`. |
+| **In-RAM body queue** | Soft densify assign (no hysteresis): under ~100 MiB free densify ahead; over ~100 MiB only heights confirm will consume in the next ~1 min at tip rate; at the 1 GiB assign-stop (`RBITCOIN_BLOCK_QUEUE_GB` / `_BYTES`, `0` = unlimited) no new getdata is issued. **Intake budget:** body-queue `bytes()` plus outstanding getdata hashes × the per-hash charge must fit in that same assign-stop before a **new** getdata hash is issued. The charge is 4 MiB until 8 requested bodies have been recorded, then the maximum wire length among the most recent 32, and never above 4 MiB. A hash already requested is never refused for budget (undecodable wire is still dropped; see below). A frame whose hash is not in inflight, or is already queued, is dropped before the payload copy. `bytes()` is **raw only** | Peer **BlockFramed** enqueues **raw** frame payload and stamps Σ `tx.input` via a CompactSize walk (no `Block` decode). Lookup packs/holds on that count; **dequeues** after load-batch send. Decoded `Arc<Block>` + `TxPrecompute` live on **loadq** (cap 14), then scriptq/writeq. **Have-body** (hole / densify / receive) is confirmed ∨ BQ hash ∨ `H ≤ lookup_taken_hi`. **Never both** raw and decoded. **RAM-only by design**. Restart empties BQ+loadq. Logs: `bq soft=n/win RAM=` (`bytes()`). `loadq=n/14`. |
 | **Body densify height horizon** | `CONTIG_DENSIFY_AHEAD` (64 k past tip) | Safety max walk/receive; primary gate is soft assign (100 MiB free / 1 min confirm window). |
 | **Confirm feed** | readiness (height/hash), no wire retain | Load pack / lookup-wave caps: [`concurrency.md`](./concurrency.md). Requeue / finish on outcome |
 
@@ -19,6 +19,12 @@ sidecars and SH BDZ3 occupancy prefixes are **read-only mmap** exceptions
 
 Peers enqueue **raw** framed block payloads into the **in-RAM** body queue and
 stamp Σ `tx.input` (`block_wire_input_count`; CompactSize walk, not a `Block`).
+The walk refuses exactly the payloads `decode_block_precomputes` refuses. Offer
+drops such a body before the copy, the sender is disconnected, and the hash
+stays fetchable: a queued hash counts as in hand, so an undecodable row would
+block the honest copy. Lookup decodes Core's flag-0 tx (an empty vin, then
+flag 0, then the locktime) as a tx with no inputs and no outputs, so a block
+holding one is consensus-invalid, as in Core, not undecodable.
 Lookup packs and **holds** on that stamped count (no clone, no decode). The first
 full decode is lookup emit: `decode_block_precomputes` (payload-slice wtxid;
 stripped txid; `from_tx_wire` skips the second SHA engine when `wtxid==txid`;
