@@ -1113,17 +1113,9 @@ fn framed_cmd(frame: &FramedMessage) -> String {
 }
 
 fn rand_nonce() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    // Concurrent dials often share the same wall-clock instant; a counter keeps
-    // version nonces unique (Core self-connect / loop detection uses nonce).
-    static N: AtomicU64 = AtomicU64::new(1);
-    let seq = N.fetch_add(1, Ordering::Relaxed);
-    let tick = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    tick.wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        .wrapping_add(seq.wrapping_mul(0xBF58_476D_1CE4_E5B9))
+    let mut buf = [0u8; 8];
+    getrandom::fill(&mut buf).expect("CSPRNG for version nonce");
+    u64::from_le_bytes(buf)
 }
 
 /// Bidirectional peer session: serve history, tip follow, announce our tip.
