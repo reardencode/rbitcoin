@@ -4,8 +4,11 @@
 //! `RBITCOIN_LOG` / `--log-level` (wired by the node CLI).
 //!
 //! Format: `2026-07-15T19:21:03.456Z  INFO message…`
+//!
+//! [`progress`] keeps live done/total for long stages, readable at any level.
 
 mod api_log;
+pub mod progress;
 
 pub use api_log::{api_call, close_api_log, init_api_log};
 

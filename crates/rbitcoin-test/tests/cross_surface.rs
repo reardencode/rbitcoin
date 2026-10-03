@@ -159,11 +159,18 @@ async fn jsonrpc_unix(path: &std::path::Path, method: &str, params: Value) -> Va
     serde_json::from_str(json).unwrap_or_else(|e| panic!("unix rpc {method} json: {e} body={text}"))
 }
 
-/// `--health-listen` answers `GET /healthz` in every phase; nothing else is a route.
+/// `--health-listen` answers `GET /healthz` and `GET /progress` (JSON) in every
+/// phase; an unknown path is 404.
 async fn pin_healthz(health_addr: SocketAddr) {
     assert_eq!(http_get(health_addr, "/healthz").await, (200, "ok".into()));
     let (st, body) = http_post(health_addr, "/healthz", "").await;
     assert_eq!(st, 405, "POST /healthz: {body}");
+    let (st, body) = http_get(health_addr, "/progress").await;
+    assert_eq!(st, 200, "GET /progress: {body}");
+    assert!(
+        body.starts_with('{') && body.contains("\"phase\":"),
+        "{body}"
+    );
     let (st, body) = http_get(health_addr, "/nope").await;
     assert_eq!(st, 404, "unknown health path: {body}");
 }

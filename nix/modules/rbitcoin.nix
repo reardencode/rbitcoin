@@ -322,7 +322,7 @@ in
     };
 
     health = {
-      enable = mkEnableOption "the loopback health listener (/healthz and /readyz)";
+      enable = mkEnableOption "the loopback health listener (/healthz, /readyz, and /progress)";
 
       address = mkOption {
         type = types.str;

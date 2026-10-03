@@ -1,6 +1,6 @@
 //! Prometheus text exposition for `--metrics`. Each gauge is a value RPC or a
 //! log line already publishes, named after that source; `phase` and `ready`
-//! are `/readyz` itself.
+//! are `/readyz` itself, and `rbitcoin_progress_*` is `GET /progress`.
 
 use super::{readiness, NodeStatus, Phase};
 use rbitcoin_net::ChainHub;
@@ -56,6 +56,7 @@ pub(super) fn render(status: &NodeStatus) -> String {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
     );
+    progress_gauges(&mut out, &rbitcoin_log::progress::snapshots());
     let rss_kb = rbitcoin_net::read_platform_rss().rss_kb;
     if rss_kb > 0 {
         out.gauge(
@@ -273,5 +274,102 @@ impl Exposition {
     fn counter(&mut self, name: &str, help: &str, value: impl Display) {
         self.family(name, "counter", help);
         self.sample(name, "", value);
+    }
+}
+
+/// Every long stage running now, one series per `stage`. `GET /progress`
+/// shows the newest of them. Absent while none runs, so an idle node exports
+/// no progress series.
+fn progress_gauges(out: &mut Exposition, stages: &[rbitcoin_log::progress::Snapshot]) {
+    if stages.is_empty() {
+        return;
+    }
+    type Field = fn(&rbitcoin_log::progress::Snapshot) -> u64;
+    let fields: [(&str, &str, Field); 3] = [
+        (
+            "rbitcoin_progress_done",
+            "Units done in a running long stage (GET /progress done).",
+            |p| p.done,
+        ),
+        (
+            "rbitcoin_progress_target",
+            "Units a running long stage ends at (GET /progress total); 0 when unknown.",
+            |p| p.total,
+        ),
+        (
+            "rbitcoin_progress_start_time_seconds",
+            "Start time of a running long stage since the Unix epoch in seconds.",
+            |p| {
+                p.started_at
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs())
+            },
+        ),
+    ];
+    let mut newest: Vec<&rbitcoin_log::progress::Snapshot> = Vec::new();
+    for p in stages.iter().rev() {
+        if !newest.iter().any(|q| q.stage == p.stage) {
+            newest.push(p);
+        }
+    }
+    for (name, help, value) in fields {
+        out.family(name, "gauge", help);
+        for p in &newest {
+            out.sample(name, &format!("{{stage=\"{}\"}}", p.stage), value(p));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rbitcoin_log::progress::Snapshot;
+    use std::time::{Duration, SystemTime};
+
+    fn stage(stage: &'static str, done: u64) -> Snapshot {
+        Snapshot {
+            stage,
+            done,
+            total: 10,
+            base: 0,
+            elapsed: Duration::ZERO,
+            started_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
+        }
+    }
+
+    /// Two running stages of one name (two nodes in one process) export one
+    /// series, the newest; each family's HELP/TYPE appears once; idle exports
+    /// nothing.
+    #[test]
+    fn progress_gauges_one_series_per_stage_name() {
+        let mut out = Exposition::default();
+        progress_gauges(&mut out, &[]);
+        assert_eq!(out.0, "");
+
+        let mut out = Exposition::default();
+        progress_gauges(&mut out, &[stage("x", 1), stage("y", 5), stage("x", 2)]);
+        let lines: Vec<&str> = out.0.lines().collect();
+        let count = |prefix: &str| lines.iter().filter(|l| l.starts_with(prefix)).count();
+        assert_eq!(count("rbitcoin_progress_done{stage=\"x\"}"), 1, "{}", out.0);
+        assert!(
+            lines.contains(&"rbitcoin_progress_done{stage=\"x\"} 2"),
+            "{}",
+            out.0
+        );
+        assert!(
+            lines.contains(&"rbitcoin_progress_done{stage=\"y\"} 5"),
+            "{}",
+            out.0
+        );
+        assert!(lines.contains(&"rbitcoin_progress_target{stage=\"x\"} 10"));
+        assert!(lines.contains(&"rbitcoin_progress_start_time_seconds{stage=\"x\"} 1000"));
+        for family in [
+            "rbitcoin_progress_done",
+            "rbitcoin_progress_target",
+            "rbitcoin_progress_start_time_seconds",
+        ] {
+            assert_eq!(count(&format!("# TYPE {family} gauge")), 1, "{}", out.0);
+            assert_eq!(count(&format!("# HELP {family} ")), 1, "{}", out.0);
+        }
     }
 }

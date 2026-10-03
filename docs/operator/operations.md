@@ -101,7 +101,7 @@ Clean smoke:
 | `--electrum-listen [ADDR]` | `electrum_listen=` | disabled; omit ADDR → `127.0.0.1:50001`. Address/scripthash methods need `--sh-index` |
 | `--esplora-listen [ADDR\|PATH]` | `esplora_listen=` | disabled (Esplora REST); omit ADDR → `127.0.0.1:3000`; a filesystem path is unix HTTP (mode **0660**, dummy `Host: api` is fine). Address/scripthash methods need `--sh-index` |
 | `--esplora-onion[=0\|1]` | `esplora_onion=` | **on** — `ADD_ONION` for Esplora when `--tor-control` is set |
-| `--health-listen [ADDR]` | `health_listen=` | disabled; omit ADDR → `127.0.0.1:9332`. Unauthenticated `GET /healthz` and `/readyz`, bound before the store opens ([Health probes and metrics](#health-probes-and-metrics)). A bind failure stops the node |
+| `--health-listen [ADDR]` | `health_listen=` | disabled; omit ADDR → `127.0.0.1:9332`. Unauthenticated `GET /healthz`, `/readyz`, and `/progress`, bound before the store opens ([Health probes and metrics](#health-probes-and-metrics)). A bind failure stops the node |
 | `--metrics[=0\|1]` | `metrics=` | **off** — Prometheus `GET /metrics` on the health listener. Refused without `--health-listen` |
 | `--esplora-block-template` | `esplora_block_template=` | **off** — `GET /block-template` is 404; on = GBT JSON (same as RPC template mode) |
 | `--rpc` | `rpc=` | **off** — unix JSON-RPC `{datadir}/rpc.sock` (mode 0600) |
@@ -359,6 +359,7 @@ hours (IBD). The health listener answers through all of it.
 |-------|--------|
 | `GET /healthz` | `200 ok` in every phase. The process is up and serving HTTP |
 | `GET /readyz` | `200 ok` when the node follows the tip and every configured listener is up; otherwise `503 not ready: <reason>` |
+| `GET /progress` | `200`, JSON: the phase, the long stage running now, and the last one to end ([Progress](#progress)) |
 | `GET /metrics` | Prometheus text format with `--metrics`; 404 without it |
 
 Other paths are 404 and other methods 405. Requests carry no body and no
@@ -366,7 +367,8 @@ auth, and time out after 5 s (408). `/readyz` runs at most 4 checks at
 once and `/metrics` one render at a time; past that a request answers 503
 at once (`not ready: busy`, `metrics: a scrape is already running`)
 instead of queueing, and a timed-out check keeps its slot until it
-returns. A non-loopback bind logs a WARN: keep the port on loopback or a
+returns. `/progress` reads in-memory counters under one short lock, so it
+has no cap. A non-loopback bind logs a WARN: keep the port on loopback or a
 probe-only network.
 
 `/readyz` reports the first failing check, in this order:
@@ -400,17 +402,63 @@ readinessProbe:
 A k8s `httpGet` probe connects to the pod IP, so in a pod use
 `--health-listen 0.0.0.0:9332` and keep the port off any Service.
 
+### Progress
+
+`GET /progress` shows where a long stage is, at any `--log-level`. The INFO
+progress lines for these stages count the same units; at `warn` this is the
+only view.
+
+```console
+$ curl -s 127.0.0.1:9332/progress
+{"done":731000000,"elapsed_secs":15120,"eta_secs":9328,"finished":{"done":64,"elapsed_secs":2210,"stage":"scripthash keys merge","total":64},"percent":61.84,"phase":"indexing","stage":"scripthash postings collect","total":1182000000}
+```
+
+`percent` is `null` only when the total is unknown, and rounds down, so it
+reads 100 only when the stage is done. `eta_secs` extrapolates this run's
+rate: a stage resumed after a restart starts at the work already done (so
+`percent` does not drop to 0) but times only what it does now. `eta_secs` is
+`null` until this run has done some work and again at 100% (a stage can sit
+there while it flushes or installs what it built). `/progress` is the
+always-on human view of these numbers; `/metrics` (opt-in) carries the same
+done and total for Prometheus. When stages nest, the body shows the one
+begun last. `finished` is the stage that ended most recently, with its
+numbers at the end, or `null` before any has ended. `done` short of `total`
+means it stopped on an error or cancel; `done` equal to `total` does not
+prove success, since a stage can still fail while it flushes or installs, so
+check the log for an ERROR. With no stage running, the body is the phase,
+`"stage":null`, and `finished`.
+
+| `stage` | `phase` | Unit of `done` / `total` | Matching INFO line |
+|---------|---------|--------------------------|-------------------------------|
+| `tx.head rebuild` | `opening` | Txids in sealed ranges, counted as each range seals | `tx.head rebuild progress` (prints only after every range seals) |
+| `tx.head backfill` | `opening` | Bodies in `tx.head` after a crash left it behind Class A, starting at those already there | `tx.head lags Class A covered= n=` (start only) |
+| `input backfill` | `opening` | Class A creates with input edges, including ones done before a restart | `input backfill progress` |
+| `scripthash keys collect` | `indexing` | Class A creates scanned (pass 1) | `scripthash keys collect scanned=` |
+| `scripthash keys merge` | `indexing` | Head shards sealed (a merge finishing key files an older build left starts at the shards that need no merge) | `scripthash keys merge shard=` (one line per shard) |
+| `scripthash postings collect` | `indexing` | Class A creates scanned (pass 2) | `scripthash postings collect scanned=` |
+| `scripthash pack` | `indexing` | Head shards packed and published | `scripthash unsorted pack shard= shards=` |
+
+Other work in these phases (for example spend replay at open, or the
+scripthash catch-up after the build) has no stage yet and shows
+`"stage":null` while it runs. The counters are per process, which matters
+only when several nodes share one (tests).
+
+`/readyz` still answers with the phase alone (`not ready: indexing`); poll
+`/progress` for how far along it is. With `--metrics`, every running stage is
+also on `/metrics` (below).
+
 ### Metrics
 
 `--metrics` (needs `--health-listen`) adds `GET /metrics`. Gauges are values
-the node already publishes on RPC or a log line, under a name that says
-which. Counters are the process-lifetime totals behind the 5s DEBUG
+the node already publishes on RPC, a log line, or `GET /progress`, under a
+name that says which. Counters are the process-lifetime totals behind the 5s DEBUG
 `tip: perf` line; that line still prints only the change since its previous
 sample. A scrape runs on the blocking pool: chain reads
 (`best_header_height`, the tip header, `in_ibd`, and scripthash lag with
 `--sh-index`), one peer snapshot and a byte-total walk, and one mempool
 fold for `rbitcoin_mempool_bytes` (the same fold as `getmempoolinfo`) plus
-the min-fee, weight cap, orphan count, and unbroadcast count. NixOS:
+the min-fee, weight cap, orphan count, and unbroadcast count, and one short
+lock on the progress registry. NixOS:
 `services.rbitcoin.health.enable` and `services.rbitcoin.metrics`
 ([setup](setup.md#nixos-service)).
 
@@ -443,6 +491,7 @@ the min-fee, weight cap, orphan count, and unbroadcast count. NixOS:
 | `rbitcoin_mempool_accepts_total` / `_rejects_total` | counter | Lifetime sum of `tip: perf accepts=` / `rejects=`. That line is the last ~5s window |
 | `process_resident_memory_bytes` | gauge | Same RSS reading as `ibd: sizes rss=` and `tip: perf rss=`, in bytes (`rss_kb * 1024`). Those lines print integer MiB (`rss_kb / 1024`). Linux and macOS |
 | `process_start_time_seconds` | gauge | Unix time `rbitcoin-node` started |
+| `rbitcoin_progress_done{stage}` / `_target{stage}` / `_start_time_seconds{stage}` | gauge | `GET /progress` `done` and `total`, and Unix time the stage began; one series per running stage name (the newest if two overlap). Absent while none runs |
 
 Hub gauges appear once P2P has started. `/metrics` exposes peer and mempool
 counts: do not publish it without a firewall.

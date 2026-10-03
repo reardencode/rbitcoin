@@ -354,8 +354,9 @@ Block filters: --block-filter-index (default off) builds BIP158 basic filters. I
 Silent payments: --sp-tweaks (default off) writes/serves the thin BIP-352 tweak index.\n\
   Not with --prune-seqsigwit (tweaks read scriptSig and witness).\n\
   --sp-tweaks-dust SATS omits served P2TR outs with value <= SATS (default 1000; 0 = all; 546 = Cake electrs).\n\
-Health: --health-listen [ADDR] serves GET /healthz from the first second of startup\n\
-  and GET /readyz (default 127.0.0.1:9332). Unauthenticated; keep it on loopback or a\n\
+Health: --health-listen [ADDR] serves GET /healthz, GET /readyz, and GET /progress (JSON:\n\
+  the running index build, rebuild, or backfill stage, at any log level) from the first\n\
+  second of startup (default 127.0.0.1:9332). Unauthenticated; keep it on loopback or a\n\
   probe-only network. --metrics adds Prometheus GET /metrics there (needs --health-listen).\n\
 RPC: --rpc unix socket {{datadir}}/rpc.sock; --rpc-listen [ADDR] adds TCP (default 127.0.0.1 and Core-matching port). Token {{datadir}}/rpc.token (Bearer); --rpc-cookie-file opts TCP into Core cookie HTTP Basic. No --rpcuser.\n\
 Cold files: --datadir-cold PATH puts Class A seqsigwit.body/idx under PATH/store (HDD).\n\

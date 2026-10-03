@@ -90,9 +90,10 @@ JSON-RPC has no firewall option; expose it only through an explicitly managed
 firewall or tunnel.
 
 `health.enable` binds `--health-listen` (default `127.0.0.1:9332`) for
-`/healthz` and `/readyz`. `metrics` adds `--metrics` on that listener and,
-when `services.prometheus.enable` is set, a scrape job for the health
-address. Leave `health.openFirewall` off: the listener is unauthenticated.
+`/healthz`, `/readyz`, and `/progress`. `metrics` adds `--metrics` on that
+listener and, when `services.prometheus.enable` is set, a scrape job for
+the health address. Leave `health.openFirewall` off: the listener is
+unauthenticated.
 
 The daemon does not terminate TLS. Keep its application listeners on loopback
 and compose them with a proxy. This example serves Esplora and RPC over HTTPS,

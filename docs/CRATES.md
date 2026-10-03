@@ -7,7 +7,7 @@ shared libraries through storage and runtime crates to composition and tools;
 | Crate | Owns |
 |-------|------|
 | `rbitcoin-primitives` | Shared Bitcoin types and newtypes used across the workspace |
-| `rbitcoin-log` | Leveled stderr logging |
+| `rbitcoin-log` | Leveled stderr logging; live progress of long stages (`progress`) |
 | `rbitcoin-store` | Relational archive and Class A/B/C on-disk tables |
 | `rbitcoin-query` | Archive, confirm, reconstruction, and query APIs over the store |
 | `rbitcoin-consensus` | Header, block, and script validation |

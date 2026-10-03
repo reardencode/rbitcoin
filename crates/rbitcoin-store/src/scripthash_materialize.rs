@@ -1131,6 +1131,7 @@ fn collect_keys_from_txs(
     let t0 = Instant::now();
     let last_status = Mutex::new(t0);
     let spans = worker_fk_spans(first, last, workers);
+    let live = rbitcoin_log::progress::begin("scripthash keys collect", span_fks);
     std::thread::scope(|scope| {
         let n_workers = spans.len().max(1);
         rbitcoin_log::info!(
@@ -1143,6 +1144,7 @@ fn collect_keys_from_txs(
             let tx = tx.clone();
             let recs = &recs;
             let scanned = &scanned;
+            let live = &live;
             let err = &err;
             let last_status = &last_status;
             scope.spawn(move || {
@@ -1181,6 +1183,7 @@ fn collect_keys_from_txs(
                         break;
                     }
                     let done = note_scanned_fks(scanned, lo, hi);
+                    live.set_done(done);
                     let now = Instant::now();
                     let mut st = last_status.lock().unwrap();
                     if now.duration_since(*st) >= MATERIALIZE_STATUS_INTERVAL {
@@ -1212,8 +1215,10 @@ fn collect_keys_from_txs(
     if let Some(e) = err.lock().unwrap().take() {
         return Err(e);
     }
+    drop(live);
     let merge_workers = workers.max(1).min(n_shards.max(1));
     fs::create_dir_all(dir.join(MULTI_SUBDIR)).map_err(|e| StoreError::io(dir, e))?;
+    let live_merge = rbitcoin_log::progress::begin("scripthash keys merge", n_shards as u64);
     rbitcoin_log::info!(
         "store: scripthash keys merge start n_shards={n_shards} workers={merge_workers}"
     );
@@ -1224,6 +1229,7 @@ fn collect_keys_from_txs(
             check_cancel(cancel, "scripthash keys merge")?;
             let (n, fold_ns, bdz_ns) = finish_key_shard(table, dir, si, n_shards)?;
             slot.store(n, Ordering::Relaxed);
+            live_merge.add_done(1);
             rbitcoin_log::info!(
                 "store: scripthash keys merge shard={si:02x} keys={n} fold={:?} bdz={:?}",
                 Duration::from_nanos(fold_ns),
@@ -1238,6 +1244,7 @@ fn collect_keys_from_txs(
                 let merge_jobs = &merge_jobs;
                 let merge_err = &merge_err;
                 let per_shard = &per_shard;
+                let live_merge = &live_merge;
                 scope.spawn(move || loop {
                     if check_cancel(cancel, "scripthash keys merge").is_err() {
                         let mut g = merge_err.lock().unwrap();
@@ -1256,6 +1263,7 @@ fn collect_keys_from_txs(
                     match finish_key_shard(table, dir, si, n_shards) {
                         Ok((n, fold_ns, bdz_ns)) => {
                             per_shard[si].store(n, Ordering::Relaxed);
+                            live_merge.add_done(1);
                             rbitcoin_log::info!(
                                 "store: scripthash keys merge shard={si:02x} keys={n} fold={:?} bdz={:?}",
                                 Duration::from_nanos(fold_ns),
@@ -1436,6 +1444,13 @@ pub(crate) fn seal_mphf_from_keys(
     let remaining = jobs.len();
     let t_all = Instant::now();
     let workers = sh_extract_workers().max(1).min(remaining.max(1));
+    let live = (remaining > 0).then(|| {
+        rbitcoin_log::progress::begin_at(
+            "scripthash keys merge",
+            n_shards as u64,
+            (n_shards - remaining) as u64,
+        )
+    });
     if remaining > 0 {
         rbitcoin_log::info!(
             "store: scripthash keys merge start remaining={remaining} n_shards={n_shards} workers={workers}"
@@ -1450,6 +1465,7 @@ pub(crate) fn seal_mphf_from_keys(
             }
             let jobq = &jobq;
             let err = &err;
+            let live = live.as_ref();
             scope.spawn(move || loop {
                 if check_cancel(cancel, "scripthash mphf from keys").is_err() {
                     let mut g = err.lock().unwrap();
@@ -1466,6 +1482,9 @@ pub(crate) fn seal_mphf_from_keys(
                 };
                 match seal_one_mphf_shard(table, dir, si, n_shards) {
                     Ok((nkeys, fold_ns, bdz_ns)) => {
+                        if let Some(live) = live {
+                            live.add_done(1);
+                        }
                         rbitcoin_log::info!(
                             "store: scripthash keys merge shard={si:02x} keys={nkeys} fold={:?} bdz={:?}",
                             Duration::from_nanos(fold_ns),
@@ -1560,6 +1579,7 @@ fn collect_posts_from_txs(
     let t0 = Instant::now();
     let last_status = Mutex::new(t0);
     let spans = worker_fk_spans(first, last, workers);
+    let live = rbitcoin_log::progress::begin("scripthash postings collect", span_fks);
     std::thread::scope(|scope| {
         let n_workers = spans.len().max(1);
         rbitcoin_log::info!(
@@ -1574,6 +1594,7 @@ fn collect_posts_from_txs(
             let recs = &recs;
             let hits = &hits;
             let scanned = &scanned;
+            let live = &live;
             let per = &per;
             let err = &err;
             let last_status = &last_status;
@@ -1624,6 +1645,7 @@ fn collect_posts_from_txs(
                         break;
                     }
                     let done = note_scanned_fks(scanned, lo, hi);
+                    live.set_done(done);
                     let now = Instant::now();
                     let mut st = last_status.lock().unwrap();
                     if now.duration_since(*st) >= MATERIALIZE_STATUS_INTERVAL {
@@ -1877,6 +1899,8 @@ pub fn materialize_sh_from_unsorted(
         .creates_published
         .store(table.entry_count(), Ordering::Relaxed);
     let max_fk = AtomicU64::new(0);
+    let live =
+        rbitcoin_log::progress::begin_at("scripthash pack", n_shards as u64, u64::from(already));
     rbitcoin_log::info!(
         "store: scripthash unsorted pack start unsealed={} n_shards={n_shards} workers={workers}",
         jobs.len()
@@ -1885,6 +1909,7 @@ pub fn materialize_sh_from_unsorted(
     let out = std::thread::scope(|scope| {
         let progress = &progress;
         let max_fk = &max_fk;
+        let live = &live;
         if workers <= 1 {
             for shard in jobs {
                 let d = pack_and_seal_unsorted_shard(
@@ -1895,11 +1920,9 @@ pub fn materialize_sh_from_unsorted(
                     progress,
                     max_fk,
                 )?;
-                log_unsorted_pack_shard(
-                    n_shards,
-                    progress.shards_published.load(Ordering::Relaxed),
-                    &d,
-                );
+                let published = progress.shards_published.load(Ordering::Relaxed);
+                live.set_done(u64::from(published));
+                log_unsorted_pack_shard(n_shards, published, &d);
             }
         } else {
             let shared = Arc::new(ShardPool {
@@ -1933,11 +1956,9 @@ pub fn materialize_sh_from_unsorted(
                         max_fk,
                     ) {
                         Ok(d) => {
-                            log_unsorted_pack_shard(
-                                n_shards,
-                                progress.shards_published.load(Ordering::Relaxed),
-                                &d,
-                            );
+                            let published = progress.shards_published.load(Ordering::Relaxed);
+                            live.set_done(u64::from(published));
+                            log_unsorted_pack_shard(n_shards, published, &d);
                         }
                         Err(e) => {
                             *shared.err.lock().unwrap() = Some(e);

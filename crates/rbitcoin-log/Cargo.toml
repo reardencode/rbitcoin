@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-description = "Minimal leveled stderr logger (timestamps, no external deps)"
+description = "Minimal leveled stderr logger and long-stage progress registry (no external deps)"
 
 [dependencies]
 

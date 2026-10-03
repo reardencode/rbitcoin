@@ -1032,7 +1032,10 @@ fn reopen_resumes_partial_legacy_input_backfill() {
         .append(&[vec![crate::input::InputEdge::coinbase()]])
         .unwrap();
     drop(partial);
+    rbitcoin_log::progress::capture_finished(true);
     let t2 = TxTable::open_tiny(&dir).unwrap();
+    let fin = finished_stages();
+    assert!(fin.contains(&("input backfill", 2, 2)), "{fin:?}");
     assert_eq!(
         t2.input.edges(Fk(1)).unwrap().unwrap(),
         vec![crate::input::InputEdge::coinbase()]
@@ -1045,6 +1048,98 @@ fn reopen_resumes_partial_legacy_input_backfill() {
         }],
         "resume must read the legacy prevout, not stamp n_in 0"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A resumed input backfill starts at the creates already backfilled, so
+/// `/progress` does not drop to 0% after a restart. fk 1 was done before the
+/// restart; fk 2's record is garbage, so the stage ends at the seed.
+#[test]
+fn input_backfill_resume_starts_at_backfilled_count() {
+    let dir = tempfile_dir("input-backfill-progress");
+    let t = create_tiny(&dir);
+    let coinbase = (
+        TxRecord {
+            txid: [1u8; 32],
+            version: 1,
+            locktime: 0,
+            input_start_fk: Fk::NULL,
+            input_count: 1,
+            output_start_fk: Fk::NULL,
+            output_count: 1,
+        },
+        vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])],
+        vec![OutputRecord::unspent(1, vec![0x51])],
+    );
+    let spend = (
+        TxRecord {
+            txid: [2u8; 32],
+            version: 1,
+            locktime: 0,
+            input_start_fk: Fk::NULL,
+            input_count: 1,
+            output_start_fk: Fk::NULL,
+            output_count: 1,
+        },
+        vec![InputRecord {
+            prev_txid: [1u8; 32],
+            create_fk: Fk(1),
+            prev_index: 0,
+            sequence: u32::MAX,
+            script_sig: vec![0xab; 8],
+            witness: vec![vec![0x30; 16]],
+        }],
+        vec![OutputRecord::unspent(2, vec![0x51])],
+    );
+    t.put_full_batch_indexed(&[coinbase, spend], true).unwrap();
+    for (i, payload) in [
+        vec![
+            input_flags::NULL_PREV
+                | input_flags::SEQ_FINAL
+                | input_flags::EMPTY_SCRIPT
+                | input_flags::EMPTY_WITNESS,
+        ],
+        {
+            let mut v = vec![
+                input_flags::SEQ_FINAL | input_flags::EMPTY_SCRIPT | input_flags::EMPTY_WITNESS,
+            ];
+            v.extend_from_slice(&1u64.to_le_bytes());
+            write_compact_size(&mut v, 0);
+            v
+        },
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (off, len) = t.seqsigwit_range(Fk((i + 1) as u64)).unwrap();
+        assert!((payload.len() as u64) <= len);
+        let mut raw = payload.clone();
+        raw.resize(len as usize, 0);
+        if i == 1 {
+            // Declares a script longer than the span holds.
+            raw.clear();
+            raw.push(input_flags::SEQ_FINAL | input_flags::EMPTY_WITNESS);
+            raw.extend_from_slice(&1u64.to_le_bytes());
+            write_compact_size(&mut raw, 0);
+            write_compact_size(&mut raw, 0xffff);
+            raw.resize(len as usize, 0);
+        }
+        t.seqsigwit.write_body_abs(off, &raw).unwrap();
+    }
+    drop(t);
+    for name in ["input.loc", "input.off", "input.body"] {
+        std::fs::remove_file(dir.join(name)).unwrap();
+    }
+    let partial = crate::input::Input::create(&dir).unwrap();
+    partial
+        .append(&[vec![crate::input::InputEdge::coinbase()]])
+        .unwrap();
+    drop(partial);
+    rbitcoin_log::progress::capture_finished(true);
+    let r = TxTable::open_tiny(&dir);
+    let fin = finished_stages();
+    assert!(r.is_err(), "fk 2's record is garbage");
+    assert_eq!(fin, [("input backfill", 1, 2)]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3823,6 +3918,92 @@ fn rebuild_head_direct_mphf_empty_tail() {
     }
 }
 
+/// `(stage, done, total)` of the stages that ended on this thread since
+/// `capture_finished(true)`; turns capture off.
+fn finished_stages() -> Vec<(&'static str, u64, u64)> {
+    let fin = rbitcoin_log::progress::take_finished()
+        .into_iter()
+        .map(|p| (p.stage, p.done, p.total))
+        .collect();
+    rbitcoin_log::progress::capture_finished(false);
+    fin
+}
+
+/// The rebuild counts sealed ranges into the live progress registry as the
+/// workers finish (its `on_progress` only runs after all of them), and the
+/// stage ends with the call.
+#[test]
+fn rebuild_head_reports_live_progress() {
+    let dir = tempfile_dir("rebuild-progress");
+    let t = create_tiny_rebuild(&dir, 6, 2);
+    let recs: Vec<TxRecord> = (0..65u64)
+        .map(|i| {
+            let mut txid = [0u8; 32];
+            txid[0..8].copy_from_slice(&(i + 1).to_le_bytes());
+            TxRecord {
+                txid,
+                version: 1,
+                locktime: 0,
+                input_start_fk: Fk::NULL,
+                input_count: 0,
+                output_start_fk: Fk::NULL,
+                output_count: 0,
+            }
+        })
+        .collect();
+    t.put_full_batch_indexed(&meta_only_items(&recs), true)
+        .unwrap();
+    t.flush().unwrap();
+    rbitcoin_log::progress::capture_finished(true);
+    t.rebuild_head_from_bodies(|_, _, _| {}).unwrap();
+    let fin = finished_stages();
+    // `on_progress` runs only after every range seals; the count comes from
+    // the workers.
+    assert_eq!(fin, [("tx.head rebuild", 65, 65)]);
+    for i in [1u64, 64, 65] {
+        let mut txid = [0u8; 32];
+        txid[0..8].copy_from_slice(&i.to_le_bytes());
+        assert_eq!(t.probe_body_match_fk(&txid).unwrap(), Some(Fk(i)), "fk={i}");
+    }
+    drop(t);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A range that fails leaves the ranges that sealed before it counted: the
+/// stage ends short of its total, not at 0. T=64, n=65: range 1 is fks 1..=64,
+/// range 2 is fk 65, whose txid the truncated identity file no longer has.
+#[test]
+fn rebuild_head_failure_keeps_sealed_ranges_counted() {
+    let dir = tempfile_dir("rebuild-progress-fail");
+    let t = create_tiny_rebuild(&dir, 6, 2);
+    let recs: Vec<TxRecord> = (0..65u64)
+        .map(|i| {
+            let mut txid = [0u8; 32];
+            txid[0..8].copy_from_slice(&(i + 1).to_le_bytes());
+            TxRecord {
+                txid,
+                version: 1,
+                locktime: 0,
+                input_start_fk: Fk::NULL,
+                input_count: 0,
+                output_start_fk: Fk::NULL,
+                output_count: 0,
+            }
+        })
+        .collect();
+    t.put_full_batch_indexed(&meta_only_items(&recs), true)
+        .unwrap();
+    t.flush().unwrap();
+    t.txid_sidefile().truncate_to_count(64).unwrap();
+    rbitcoin_log::progress::capture_finished(true);
+    let r = t.rebuild_head_from_bodies(|_, _, _| {});
+    let fin = finished_stages();
+    assert!(r.is_err(), "fk 65 has no txid");
+    assert_eq!(fin, [("tx.head rebuild", 64, 65)]);
+    drop(t);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn rebuild_head_direct_mphf_bip30_newest_first() {
     {
@@ -4648,6 +4829,26 @@ fn spent_range_uses_loc_not_txout_body() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A tail backfill starts at the bodies already in tx.head, so `/progress`
+/// does not read 0% for the whole tail at open. fk 2's txid is gone, so the
+/// stage ends at that start.
+#[test]
+fn backfill_head_from_starts_at_covered() {
+    let dir = tempfile_dir("backfill-head-covered");
+    let t = create_tiny(&dir);
+    let _ = put_n_out(&t, 1, 1);
+    let f2 = put_n_out(&t, 2, 1).get().expect("indexed create fk");
+    t.flush().unwrap();
+    t.txid_sidefile().truncate_to_count(f2 - 1).unwrap();
+    rbitcoin_log::progress::capture_finished(true);
+    let r = t.backfill_head_from(f2);
+    let fin = finished_stages();
+    assert!(r.is_err(), "fk {f2} has no txid");
+    assert_eq!(fin, [("tx.head backfill", f2 - 1, f2)]);
+    drop(t);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn backfill_head_from_empty_and_unindexed() {
     let dir = tempfile_dir("backfill-head");
@@ -4658,10 +4859,18 @@ fn backfill_head_from_empty_and_unindexed() {
     let n = t.count();
     assert_eq!(t.backfill_head_from(n + 1).unwrap(), 0);
     let first = f1.get().expect("indexed create fk");
+    rbitcoin_log::progress::capture_finished(true);
     let inserted = t.backfill_head_from(first).unwrap();
+    assert_eq!(finished_stages(), [("tx.head backfill", 1, 1)]);
     assert_eq!(inserted, 1);
     let txid = t.body_txid(f1).unwrap();
     let batch = t.get_fk_by_txid_batch(&[txid]).unwrap();
     assert_eq!(batch[0].1.map(|(f, _)| f), Some(f1));
+    // A tail past fk 1 counts in Class A's frame: the bodies already in
+    // tx.head are done from the start.
+    let f2 = put_n_out(&t, 2, 1).get().expect("indexed create fk");
+    rbitcoin_log::progress::capture_finished(true);
+    assert_eq!(t.backfill_head_from(f2).unwrap(), 1);
+    assert_eq!(finished_stages(), [("tx.head backfill", f2, f2)]);
     let _ = std::fs::remove_dir_all(&dir);
 }

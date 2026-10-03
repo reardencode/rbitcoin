@@ -3035,6 +3035,142 @@ fn unsorted_materialize_appends_when_done_lags_and_no_shards() {
     }
 }
 
+/// `(stage, done, total)` of the stages that ended on this thread since
+/// `capture_finished(true)`; turns capture off. Other tests in the binary
+/// build concurrently under the same stage names.
+fn finished_here() -> Vec<(&'static str, u64, u64)> {
+    let fin = rbitcoin_log::progress::take_finished()
+        .into_iter()
+        .map(|p| (p.stage, p.done, p.total))
+        .collect();
+    rbitcoin_log::progress::capture_finished(false);
+    fin
+}
+
+/// Each pass of the unsorted build reports through the live progress
+/// registry and ends at its total.
+#[test]
+fn unsorted_build_reports_each_pass_to_progress() {
+    let dir = tmp();
+    let s = crate::Store::create_tiny(&dir).unwrap();
+    for i in 0..8u8 {
+        s.put_tx_full_batch_indexed(&[class_a_coinbase([i + 1; 32], vec![0x51 + i])], true)
+            .unwrap();
+    }
+    rbitcoin_log::progress::capture_finished(true);
+    crate::materialize_sh_unsorted_from_class_a(&s, 2, 2, None).unwrap();
+    let mine = finished_here();
+    let stages: Vec<_> = mine.iter().map(|p| p.0).collect();
+    for stage in [
+        "scripthash keys collect",
+        "scripthash keys merge",
+        "scripthash postings collect",
+        "scripthash pack",
+    ] {
+        assert!(stages.contains(&stage), "{stage}: {mine:?}");
+    }
+    assert!(
+        mine.iter()
+            .all(|&(_, done, total)| total > 0 && done == total),
+        "{mine:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Parallel merge and pack workers report each shard: four head shards, two
+/// workers, every shard counted.
+#[test]
+fn unsorted_parallel_passes_count_every_shard() {
+    let dir = tmp();
+    let s = crate::Store::create_tiny(&dir).unwrap();
+    let n_shards = 4usize;
+    for shard in 0..n_shards {
+        let script = script_for_prefix_shard(shard, n_shards);
+        let mut txid = [0u8; 32];
+        txid[0] = shard as u8;
+        s.put_tx_full_batch_indexed(&[class_a_coinbase(txid, script)], true)
+            .unwrap();
+    }
+    let sh_dir = dir.join("sh4");
+    std::fs::create_dir_all(&sh_dir).unwrap();
+    let table = four_shard_dir_table(&sh_dir);
+    let udir = sh_dir.join(UNSORTED_SHARD_DIR);
+    rbitcoin_log::progress::capture_finished(true);
+    crate::scripthash_materialize::collect_unsorted_covering_txs(
+        &s.txs, &table, &udir, n_shards, 2, false, None,
+    )
+    .unwrap();
+    materialize_sh_from_unsorted_from_txs(&table, &s.txs, &udir, 2, 2, None).unwrap();
+    assert!(table.unsealed_main_shards().is_empty());
+    let mine = finished_here();
+    for stage in ["scripthash keys merge", "scripthash pack"] {
+        assert!(mine.iter().any(|p| p.0 == stage), "{stage}: {mine:?}");
+    }
+    assert!(
+        mine.iter()
+            .all(|&(_, done, total)| total > 0 && done == total),
+        "{mine:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A resumed pack starts at the shards already published, so `/progress`
+/// does not drop to 0% after a restart. Cancel before the first new shard
+/// leaves only that seed.
+#[test]
+fn unsorted_pack_resume_starts_at_published_shards() {
+    let dir = tmp();
+    let s = crate::Store::create_tiny(&dir).unwrap();
+    let n_shards = 4usize;
+    for shard in 0..n_shards {
+        let script = script_for_prefix_shard(shard, n_shards);
+        let mut txid = [0u8; 32];
+        txid[0] = shard as u8;
+        s.put_tx_full_batch_indexed(&[class_a_coinbase(txid, script)], true)
+            .unwrap();
+    }
+    let sh_dir = dir.join("sh4");
+    std::fs::create_dir_all(&sh_dir).unwrap();
+    let table = four_shard_dir_table(&sh_dir);
+    let udir = sh_dir.join(UNSORTED_SHARD_DIR);
+    crate::scripthash_materialize::collect_unsorted_covering_txs(
+        &s.txs, &table, &udir, n_shards, 1, false, None,
+    )
+    .unwrap();
+    seal_mphf_from_keys(&table, &udir, n_shards, None).unwrap();
+    pack_one_extract_shard(&table, &udir, 0).unwrap();
+    assert_eq!(table.unsealed_main_shards().len(), 3);
+    let cancel = AtomicBool::new(true);
+    rbitcoin_log::progress::capture_finished(true);
+    let err = materialize_sh_from_unsorted(&table, &udir, 1, Some(&cancel)).unwrap_err();
+    let mine = finished_here();
+    assert!(matches!(err, StoreError::Cancelled(_)), "{err}");
+    assert_eq!(mine, [("scripthash pack", 1, 4)]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The keys merge from surviving key files counts in the fresh merge's frame:
+/// shards with nothing to merge are done from the start, the rest as each
+/// seals. Shard 0 has no key file here.
+#[test]
+fn keys_merge_resume_starts_at_shards_needing_no_merge() {
+    let dir = tmp();
+    let sh_dir = dir.join("sh4");
+    std::fs::create_dir_all(&sh_dir).unwrap();
+    let table = four_shard_dir_table(&sh_dir);
+    let n_shards = 4usize;
+    let udir = sh_dir.join(UNSORTED_SHARD_DIR);
+    std::fs::create_dir_all(udir.join("keys")).unwrap();
+    for shard in [1usize, 2, 3] {
+        write_keys_spill_entries(&udir, shard, 0, &[]).unwrap();
+    }
+    rbitcoin_log::progress::capture_finished(true);
+    seal_mphf_from_keys(&table, &udir, n_shards, None).unwrap();
+    let mine = finished_here();
+    assert_eq!(mine, [("scripthash keys merge", 4, 4)]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn pack_shard_unlinks_only_that_post_file() {
     {

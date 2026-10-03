@@ -1655,6 +1655,7 @@ impl TxTable {
         let n = self.create_loc.count();
         let mut id = from.max(1);
         rbitcoin_log::info!("store: input backfill from seqsigwit n={n} start={id}");
+        let live = rbitcoin_log::progress::begin_at("input backfill", n, id - 1);
         let mut buf = Vec::new();
         while id <= n {
             let end = backfill_chunk_end(id, n);
@@ -1667,6 +1668,7 @@ impl TxTable {
                 &mut buf,
             )?;
             self.input.append(&edges)?;
+            live.set_done(end);
             if backfill_progress_due(end, id) {
                 rbitcoin_log::info!("store: input backfill progress {end}/{n}");
             }
@@ -2599,6 +2601,7 @@ impl TxTable {
         let write_chunk: usize = 65_536;
         let mut batch: Vec<([u8; 32], Fk)> = Vec::with_capacity(write_chunk);
         let mut cur = first_fk;
+        let live = rbitcoin_log::progress::begin_at("tx.head backfill", n, first_fk - 1);
         while cur <= n {
             let end = (cur + read_batch - 1).min(n);
             let txids = self.body_txid_range(cur, end)?;
@@ -2608,6 +2611,7 @@ impl TxTable {
                     inserted += batch.len() as u64;
                     self.head_insert_many(&batch)?;
                     batch.clear();
+                    live.set_done(first_fk - 1 + inserted);
                 }
             }
             cur = end + 1;
@@ -2615,6 +2619,7 @@ impl TxTable {
         if !batch.is_empty() {
             inserted += batch.len() as u64;
             self.head_insert_many(&batch)?;
+            live.set_done(first_fk - 1 + inserted);
         }
         Ok(inserted)
     }
@@ -2642,6 +2647,7 @@ impl TxTable {
              workers={workers} free_GiB={}",
             crate::free_gib_label()
         );
+        let live = rbitcoin_log::progress::begin("tx.head rebuild", n);
         let jobs: Vec<(u32, u64, u64)> = ranges
             .into_iter()
             .enumerate()
@@ -2664,6 +2670,9 @@ impl TxTable {
                     }
                     let (file_id, first, count) = jobs[i];
                     let r = self.seal_rebuild_range(file_id, first, count);
+                    if r.is_ok() {
+                        live.add_done(count);
+                    }
                     *slots[i].lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
                 });
             }

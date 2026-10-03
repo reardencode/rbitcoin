@@ -1,5 +1,6 @@
 //! Health listener (`--health-listen`): unauthenticated `GET /healthz` and
-//! `GET /readyz` for process probes, and `GET /metrics` with `--metrics`.
+//! `GET /readyz` for process probes, `GET /progress` for the long stage
+//! running now, and `GET /metrics` with `--metrics`.
 //!
 //! It binds at the top of [`crate::run_p2p`], before the store opens, so it
 //! answers through a schema migration, catch-up, and index materialize. The
@@ -12,7 +13,7 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use rbitcoin_log::{info, warn};
+use rbitcoin_log::{info, progress, warn};
 use rbitcoin_net::{BlockingRegion, ChainHub, MempoolHub, PeerHub};
 use rbitcoin_primitives::Network;
 use std::net::SocketAddr;
@@ -231,8 +232,12 @@ pub(crate) async fn run_health(
     let local_addr = listener.local_addr()?;
     if !local_addr.ip().is_loopback() {
         warn!(
-            "health: {local_addr} is not loopback; /healthz and /readyz{} are unauthenticated",
-            if metrics { " and /metrics" } else { "" }
+            "health: {local_addr} is not loopback; /healthz, /readyz, {} are unauthenticated",
+            if metrics {
+                "/progress, and /metrics"
+            } else {
+                "and /progress"
+            }
         );
     }
     let app = router(status, metrics);
@@ -272,7 +277,8 @@ fn router(status: Arc<NodeStatus>, metrics: bool) -> Router {
 fn router_for(health: Health, metrics: bool) -> Router {
     let routes = Router::new()
         .route("/healthz", get(healthz))
-        .route("/readyz", get(readyz));
+        .route("/readyz", get(readyz))
+        .route("/progress", get(progress_json));
     let routes = if metrics {
         routes.route("/metrics", get(scrape))
     } else {
@@ -345,6 +351,50 @@ async fn readyz(State(health): State<Health>) -> (StatusCode, String) {
         Some(Err(e)) => (StatusCode::SERVICE_UNAVAILABLE, format!("not ready: {e}\n")),
         None => (StatusCode::SERVICE_UNAVAILABLE, "not ready: busy\n".into()),
     }
+}
+
+/// `GET /progress`: the bring-up phase plus the long stage running now
+/// (index build, rebuild, backfill), at any log level. Reads one lock and a
+/// few atomics, so it needs no gate.
+async fn progress_json(State(health): State<Health>) -> axum::Json<serde_json::Value> {
+    let (running, finished) = progress::view();
+    axum::Json(progress_body(
+        health.status.phase(),
+        running.as_ref(),
+        finished.as_ref(),
+    ))
+}
+
+fn progress_body(
+    phase: Phase,
+    running: Option<&progress::Snapshot>,
+    finished: Option<&progress::Snapshot>,
+) -> serde_json::Value {
+    let finished = finished.map(|f| {
+        serde_json::json!({
+            "stage": f.stage,
+            "done": f.done,
+            "total": f.total,
+            "elapsed_secs": f.elapsed.as_secs(),
+        })
+    });
+    let Some(p) = running else {
+        return serde_json::json!({
+            "phase": phase.as_str(),
+            "stage": null,
+            "finished": finished,
+        });
+    };
+    serde_json::json!({
+        "phase": phase.as_str(),
+        "stage": p.stage,
+        "done": p.done,
+        "total": p.total,
+        "percent": p.percent(),
+        "elapsed_secs": p.elapsed.as_secs(),
+        "eta_secs": p.eta().map(|d| d.as_secs()),
+        "finished": finished,
+    })
 }
 
 #[cfg(test)]
@@ -508,6 +558,83 @@ mod tests {
             scraped.starts_with("HTTP/1.1 200 OK|# HELP rbitcoin_build_info"),
             "{scraped}"
         );
+    }
+
+    #[test]
+    fn progress_body_shapes() {
+        assert_eq!(
+            progress_body(Phase::Opening, None, None),
+            serde_json::json!({ "phase": "opening", "stage": null, "finished": null })
+        );
+        let p = progress::Snapshot {
+            stage: "scripthash keys collect",
+            done: 1,
+            total: 3,
+            base: 0,
+            elapsed: Duration::from_secs(60),
+            started_at: std::time::SystemTime::UNIX_EPOCH,
+        };
+        assert_eq!(
+            progress_body(Phase::Opening, Some(&p), None),
+            serde_json::json!({
+                "phase": "opening",
+                "stage": "scripthash keys collect",
+                "done": 1,
+                "total": 3,
+                "percent": 33.33,
+                "elapsed_secs": 60,
+                "eta_secs": 120,
+                "finished": null,
+            })
+        );
+        assert_eq!(
+            progress_body(Phase::Following, None, Some(&p)),
+            serde_json::json!({
+                "phase": "following",
+                "stage": null,
+                "finished": {
+                    "stage": "scripthash keys collect",
+                    "done": 1,
+                    "total": 3,
+                    "elapsed_secs": 60,
+                },
+            })
+        );
+        let unknown = progress::Snapshot { total: 0, ..p };
+        let body = progress_body(Phase::Indexing, Some(&unknown), None);
+        assert_eq!(body["percent"], serde_json::Value::Null);
+        assert_eq!(body["eta_secs"], serde_json::Value::Null);
+    }
+
+    /// A running stage shows on `/progress` and as `/metrics` gauges served by
+    /// the health router. `/readyz` keeps its reason text as is.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn running_stage_is_visible_on_every_route() {
+        let addr = serve(router(NodeStatus::new(Network::Regtest, false), true)).await;
+        // The registry is process-global and a store test in this binary may
+        // start its own stage; retry a few times rather than flake.
+        let mut last = String::new();
+        for _ in 0..5 {
+            let stage = progress::begin("health test stage", 8);
+            stage.set_done(2);
+            let p = get_soon(addr, "/progress").await;
+            let r = get_soon(addr, "/readyz").await;
+            let m = get_soon(addr, "/metrics").await;
+            drop(stage);
+            let ok = p.starts_with("HTTP/1.1 200 OK|")
+                && p.contains(r#""stage":"health test stage""#)
+                && p.contains(r#""done":2"#)
+                && p.contains(r#""total":8"#)
+                && p.contains(r#""percent":25.0"#)
+                && r == "HTTP/1.1 503 Service Unavailable|not ready: opening\n"
+                && m.contains("rbitcoin_progress_done{stage=\"health test stage\"} 2\n")
+                && m.contains("rbitcoin_progress_target{stage=\"health test stage\"} 8\n");
+            if ok {
+                return;
+            }
+            last = format!("{p}\n---\n{r}\n---\n{m}");
+        }
+        panic!("stage not visible:\n{last}");
     }
 
     async fn serve(app: Router) -> SocketAddr {
