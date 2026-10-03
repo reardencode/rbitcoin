@@ -967,7 +967,7 @@ fn op_checksig(
     if ctx.sig_version == SigVersion::TapScript {
         return op_checksig_tapscript(stack, alt_len, &sig, &pubkey, ctx, verify);
     }
-    let ok = checksig_legacy(&sig, &pubkey, ctx, None)?;
+    let ok = checksig_legacy(&sig, &pubkey, ctx)?;
     if verify {
         if !ok {
             return Err(ConsensusError::Script("CHECKSIGVERIFY".into()));
@@ -1115,22 +1115,21 @@ fn op_checkmultisig(
     }
 
     // Core Base: FindAndDelete **all** sigs from scriptCode before the loop.
-    let script_code_owned: Option<Vec<u8>> = if ctx.sig_version == SigVersion::Base {
-        let mut sc = script_code_bytes(ctx).to_vec();
-        let original = sc.clone();
+    let original = script_code_bytes(ctx);
+    let script_code: Cow<'_, [u8]> = if ctx.sig_version == SigVersion::Base {
+        let mut sc = original.to_vec();
         for sig in &sigs {
             sc = find_and_delete(&sc, sig);
         }
         if ctx.const_scriptcode && sc != original {
             return Err(ConsensusError::Script("SIG_FINDANDDELETE".into()));
         }
-        Some(sc)
+        Cow::Owned(sc)
     } else {
-        None
+        Cow::Borrowed(original)
     };
-    let script_override = script_code_owned.as_deref();
 
-    let f_success = checkmultisig_pairs(&sigs, &pubkeys, ctx, script_override)?;
+    let f_success = checkmultisig_pairs(&sigs, &pubkeys, ctx, &script_code)?;
 
     if !f_success && ctx.nullfail && sigs.iter().any(|s| !s.is_empty()) {
         return Err(ConsensusError::Script("NULLFAIL".into()));
@@ -1150,7 +1149,7 @@ fn checkmultisig_pairs(
     sigs: &[Vec<u8>],
     pubkeys: &[Vec<u8>],
     ctx: &EvalContext<'_>,
-    script_override: Option<&[u8]>,
+    script_code: &[u8],
 ) -> Result<bool, ConsensusError> {
     // Core: start at last-pushed sig/key (index 0 after pop-order storage).
     // Advance key always; advance sig only on match. Encoding checks run only
@@ -1161,7 +1160,7 @@ fn checkmultisig_pairs(
     let mut isig = 0usize;
     let mut ikey = 0usize;
     while f_success && n_sigs > 0 {
-        let f_ok = checksig_legacy(&sigs[isig], &pubkeys[ikey], ctx, script_override)?;
+        let f_ok = ecdsa_sig_matches(&sigs[isig], &pubkeys[ikey], ctx, script_code)?;
         if f_ok {
             isig += 1;
             n_sigs -= 1;
@@ -1313,79 +1312,64 @@ pub(crate) fn strip_op_codeseparator(script: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Legacy / witness-v0 CHECKSIG.
+/// Legacy / witness-v0 OP_CHECKSIG (Core `EvalChecksigPreTapscript`).
 ///
-/// Empty signature → soft false. Encoding failures under DERSIG / LOW_S /
-/// STRICTENC hard-fail. NULLFAIL hard-fails a non-empty signature that does not
-/// verify.
-///
-/// `script_code_override`: when `Some`, use these bytes as scriptCode for sighash
-/// (CHECKMULTISIG pre-deletes **all** stack sigs). When `None`, Base path applies
-/// FindAndDelete of **this** signature only.
+/// Base FindAndDeletes this signature from scriptCode. NULLFAIL hard-fails a
+/// non-empty signature that does not verify.
 fn checksig_legacy(
     sig: &[u8],
     pubkey: &[u8],
     ctx: &EvalContext<'_>,
-    script_code_override: Option<&[u8]>,
 ) -> Result<bool, ConsensusError> {
-    // CMS passes script_code_override; NULLFAIL is applied after the whole
-    // multisig loop (Core), not per key attempt — so suppress here when override.
-    let apply_nullfail = ctx.nullfail && script_code_override.is_none();
+    if sig.is_empty() {
+        return Ok(false);
+    }
+    let base = script_code_bytes(ctx);
+    let deleted: Vec<u8>;
+    let script_code: &[u8] = if ctx.sig_version == SigVersion::Base {
+        deleted = find_and_delete(base, sig);
+        if ctx.const_scriptcode && deleted.as_slice() != base {
+            return Err(ConsensusError::Script("SIG_FINDANDDELETE".into()));
+        }
+        &deleted
+    } else {
+        base
+    };
+    let ok = ecdsa_sig_matches(sig, pubkey, ctx, script_code)?;
+    if !ok && ctx.nullfail {
+        return Err(ConsensusError::Script("NULLFAIL".into()));
+    }
+    Ok(ok)
+}
+
+/// One ECDSA signature / pubkey comparison against `script_code`.
+///
+/// Empty signature → false. Encoding failures under DERSIG / LOW_S /
+/// STRICTENC / WITNESS_PUBKEYTYPE hard-fail. A signature that does not verify
+/// is false; NULLFAIL belongs to the calling opcode (CHECKMULTISIG applies it
+/// only after the whole key walk fails).
+fn ecdsa_sig_matches(
+    sig: &[u8],
+    pubkey: &[u8],
+    ctx: &EvalContext<'_>,
+    script_code: &[u8],
+) -> Result<bool, ConsensusError> {
     if sig.is_empty() {
         return Ok(false);
     }
     checksig_legacy_encodings(sig, pubkey, ctx)?;
 
-    let (ecdsa_sig, sighash_ty) = match crypto::parse_der_sig(sig, false) {
-        Ok(x) => x,
-        // Pre-DERSIG: malformed DER that slipped encoding → soft false (NULLFAIL if set).
-        Err(_) => {
-            if apply_nullfail {
-                return Err(ConsensusError::Script("NULLFAIL".into()));
-            }
-            return Ok(false);
-        }
+    // Pre-DERSIG: malformed DER that slipped encoding → false.
+    let Ok((ecdsa_sig, sighash_ty)) = crypto::parse_der_sig(sig, false) else {
+        return Ok(false);
     };
-    let pk = match crypto::parse_pubkey(pubkey) {
-        Ok(p) => p,
-        Err(_) => {
-            // Invalid key: STRICTENC already hard-failed hybrid; other bad keys soft-false.
-            if apply_nullfail {
-                return Err(ConsensusError::Script("NULLFAIL".into()));
-            }
-            return Ok(false);
-        }
+    let Ok(pk) = crypto::parse_pubkey(pubkey) else {
+        return Ok(false);
     };
-    let owned: Vec<u8>;
-    let script_bytes: &[u8] = if let Some(sc) = script_code_override {
-        sc
-    } else {
-        let base = script_code_bytes(ctx);
-        if ctx.sig_version == SigVersion::Base {
-            let deleted = find_and_delete(base, sig);
-            if ctx.const_scriptcode && deleted.as_slice() != base {
-                return Err(ConsensusError::Script("SIG_FINDANDDELETE".into()));
-            }
-            owned = deleted;
-            owned.as_slice()
-        } else {
-            base
-        }
+    let Ok(sighash) = sighash_for_script(ctx, sighash_ty, script_code) else {
+        return Ok(false);
     };
-    let sighash = match sighash_for_script(ctx, sighash_ty, script_bytes) {
-        Ok(h) => h,
-        Err(_) => {
-            if apply_nullfail {
-                return Err(ConsensusError::Script("NULLFAIL".into()));
-            }
-            return Ok(false);
-        }
-    };
-    let ok = crypto::verify_ecdsa(sighash, &ecdsa_sig, &pk);
-    if !ok && apply_nullfail {
-        return Err(ConsensusError::Script("NULLFAIL".into()));
-    }
-    Ok(ok)
+    Ok(crypto::verify_ecdsa(sighash, &ecdsa_sig, &pk))
 }
 
 fn checksig_legacy_encodings(

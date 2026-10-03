@@ -25,6 +25,8 @@ mod core_tx_vectors;
 #[cfg(test)]
 mod core_vectors;
 #[cfg(test)]
+mod tests_flag_parity;
+#[cfg(test)]
 mod tests_verify;
 
 use bitcoin::hashes::Hash;
