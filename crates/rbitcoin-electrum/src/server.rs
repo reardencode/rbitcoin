@@ -920,7 +920,7 @@ struct SpScan {
 /// poll twice, so this does not use one.
 fn peer_hung_up<R: AsyncBufRead + Unpin>(reader: &mut R) -> bool {
     let waker = std::task::Waker::noop();
-    let mut cx = std::task::Context::from_waker(&waker);
+    let mut cx = std::task::Context::from_waker(waker);
     let mut fut = std::pin::pin!(reader.fill_buf());
     match std::future::Future::poll(fut.as_mut(), &mut cx) {
         std::task::Poll::Ready(Ok(buf)) => buf.is_empty(),
