@@ -206,10 +206,13 @@ fn worker_loop(shared: Arc<SharedPool>) {
                 q = shared.job_cv.wait(q).unwrap_or_else(|e| e.into_inner());
             }
         };
-        let buf = unsafe { std::slice::from_raw_parts_mut(job.ptr, job.len) };
         let res = if job.write {
+            // SAFETY: `pwrite` only reads. A mutable slice would alias a shared buffer.
+            let buf = unsafe { std::slice::from_raw_parts(job.ptr, job.len) };
             job.handle.pwrite(job.offset, buf)
         } else {
+            // SAFETY: the caller keeps this pread buffer alive until the CQE is harvested.
+            let buf = unsafe { std::slice::from_raw_parts_mut(job.ptr, job.len) };
             job.handle.pread(job.offset, buf)
         };
         {
