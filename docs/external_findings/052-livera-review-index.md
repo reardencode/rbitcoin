@@ -10,7 +10,7 @@ steps.
 | N2 | low | Wtxid follow-up requested as a txid | fixed | `wtxid_followup_is_requested_as_wtx` ([054](./054-wtxid-getdata.md)) |
 | H1 | high | Decoy and invalid-type packets skip the rate window | fixed | `decoy_packet_is_handed_to_the_rate_hook` ([055](./055-decoy-rate.md)) |
 | H2 | high | Inbound eviction drops the longest-connected peer | fixed | `eviction_drops_the_newest_in_the_largest_netgroup` |
-| H2-ban | high | Misbehavior disconnect is not remembered | open | — |
+| H2-ban | high | Misbehavior disconnect is not remembered | fixed | `misbehavior_disconnect_refuses_the_same_address` |
 | H3 | high | REST always on and shares the RPC work queue | open | — |
 | H4 | medium | Silent-payment unsubscribe logs the scan secret | open | — |
 | H5 | high | IBD reader credits unsolicited data as progress | open | — |

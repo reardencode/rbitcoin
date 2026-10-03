@@ -484,6 +484,11 @@ fn spawn_inbound_accept(
             let accept = tokio::time::timeout(Duration::from_millis(200), listener.accept()).await;
             match accept {
                 Ok(Ok((stream, peer_addr))) => {
+                    if peers.inbound_discouraged(peer_addr) {
+                        rbitcoin_log::info!("p2p: reject discouraged inbound {peer_addr}");
+                        drop(stream);
+                        continue;
+                    }
                     let permit = match inbound_sem.clone().try_acquire_owned() {
                         Ok(p) => p,
                         Err(_) => {
