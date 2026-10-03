@@ -1340,3 +1340,84 @@ fn p2wpkh_der_follows_bip66_flag_and_push_size() {
         assert!(!verdict(nested, 460, false), "nested={nested} 520-byte cap");
     }
 }
+
+/// Base CHECKMULTISIG FindAndDeletes every signature before the key walk.
+/// Core deletes `CScript() << vchSig`; for an empty signature that is the
+/// one-byte push `0x00`, so every OP_0 opcode leaves scriptCode and the
+/// other signatures hash the shorter script.
+///
+/// `OP_0 OP_DROP 3 <k1> <k2> <k3> 3 CHECKMULTISIG NOT` spent with
+/// `OP_0 <empty> <bad DER> <sig k3>`: when `sig k3` matches `k3`, the walk
+/// reaches the bad-DER signature and BIP66 fails the script. When it does
+/// not match, the walk exits early and NOT makes the spend valid.
+/// Cross-checked against libbitcoinconsensus (external finding 084).
+#[test]
+fn legacy_multisig_empty_sig_deletes_op_0_from_script_code() {
+    let secp = Secp256k1::new();
+    let key = |n: u8| SecretKey::from_slice(&[n; 32]).unwrap();
+    let push = |script: &mut Vec<u8>, data: &[u8]| {
+        script.push(data.len() as u8);
+        script.extend_from_slice(data);
+    };
+    let mut spk = vec![0x00, 0x75, 0x53];
+    for n in 1..=3 {
+        push(&mut spk, &key(n).public_key(&secp).serialize());
+    }
+    spk.extend_from_slice(&[0x53, 0xae, 0x91]);
+    let core_script_code = spk[1..].to_vec();
+
+    let spend = |script_sig: Vec<u8>| Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::from_bytes(script_sig),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(49_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let unsigned = spend(Vec::new());
+    let signed_over = |script_code: &[u8]| {
+        let digest = SighashCache::new(&unsigned)
+            .legacy_signature_hash(
+                0,
+                ScriptBuf::from_bytes(script_code.to_vec()).as_script(),
+                1,
+            )
+            .unwrap();
+        let sig = secp.sign_ecdsa(&Message::from_digest(digest.to_byte_array()), &key(3));
+        let mut sig_k3 = sig.serialize_der().to_vec();
+        sig_k3.push(EcdsaSighashType::All as u8);
+        let mut script_sig = vec![0x00, 0x00];
+        push(&mut script_sig, &[0x01]);
+        push(&mut script_sig, &sig_k3);
+        spend(script_sig)
+    };
+    let job = |tx: Transaction, const_scriptcode: bool| {
+        let mut flags = crate::block::ScriptVerifyFlags::buried(true, true, true, true, true);
+        flags.const_scriptcode = const_scriptcode;
+        let prevout = TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey: ScriptBuf::from_bytes(spk.clone()),
+        };
+        ScriptCheckJob::new(vec![prevout], tx, flags)
+    };
+
+    let over_full_spk = signed_over(&spk);
+    script::verify_job_all_inputs(&job(over_full_spk.clone(), false))
+        .expect("sig misses k3: CHECKMULTISIG false, NOT true");
+
+    let over_core_code = signed_over(&core_script_code);
+    let err =
+        script::verify_job_all_inputs(&job(over_core_code, false)).expect_err("bad DER reached");
+    assert!(format!("{err}").contains("SIG_DER"), "{err}");
+
+    let err = script::verify_job_all_inputs(&job(over_full_spk, true))
+        .expect_err("CONST_SCRIPTCODE: the empty sig deletes an OP_0");
+    assert!(format!("{err}").contains("SIG_FINDANDDELETE"), "{err}");
+}
+

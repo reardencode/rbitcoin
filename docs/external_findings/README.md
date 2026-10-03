@@ -88,6 +88,7 @@ rbitcoin reference, or redteam static analysis). Numbered reports live beside th
 | [081](./081-conf-error-line.md) | low | Conf errors name the file and line | fixed | `conf_error_names_the_file_and_line` |
 | [082](./082-invalid-hash-cap.md) | low | Invalid-hash set stops at 4096 | fixed | `invalid_hash_set_stops_at_the_cap` |
 | [083](./083-mempool-expiry-cursor.md) | low | Mempool expiry runs without a new admission | fixed | `expire_stale_drops_old_tx_without_a_new_accept` |
+| [084](./084-findanddelete-empty-sig.md) | critical | Empty sig in legacy CHECKMULTISIG did not delete OP_0 from scriptCode | fixed | `legacy_multisig_empty_sig_deletes_op_0_from_script_code` |
 
 **012–021:** fuzzamoto differential report (`rbitcoin-report.tar.gz`, baseline
 `8f3990f`). Report-local 001–010 are **renumbered** here. Identity/BIP30

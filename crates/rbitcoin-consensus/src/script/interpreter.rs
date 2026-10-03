@@ -1178,10 +1178,10 @@ fn checkmultisig_pairs(
 ///
 /// Used for legacy (Base) CHECKSIG / CHECKMULTISIG so a signature cannot sign itself
 /// when it appears inside scriptCode (mainnet block 290329: P2SH redeem embeds a sig).
+///
+/// Consensus: empty `data` is Core's `CScript() << vchSig` = the push `0x00`,
+/// so an empty signature deletes every OP_0 opcode.
 pub(crate) fn find_and_delete(script: &[u8], data: &[u8]) -> Vec<u8> {
-    if data.is_empty() {
-        return script.to_vec();
-    }
     let mut needle = Vec::with_capacity(data.len() + 3);
     if data.len() < 0x4c {
         needle.push(data.len() as u8);
@@ -1979,7 +1979,10 @@ mod success_and_disabled_tests {
         script.push(0x51);
         let out = find_and_delete(&script, &data);
         assert_eq!(out, vec![0x51]);
-        assert_eq!(find_and_delete(&script, &[]), script);
+        assert_eq!(
+            find_and_delete(&[0x00, 0x00, 0x02, 0x00, 0x00, 0x51], &[]),
+            vec![0x02, 0x00, 0x00, 0x51]
+        );
 
         // PUSHDATA1 needle
         let big = vec![0x22u8; 80];
