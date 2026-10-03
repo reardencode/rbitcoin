@@ -167,6 +167,82 @@ fn discourage_skips_native_p2a_and_pre_taproot_v1() {
     script::verify_job_all_inputs(&pre_taproot).expect("v1/32 before Taproot");
 }
 
+fn p2wpkh_program(key: u8) -> Vec<u8> {
+    let mut program = vec![0x00, 0x14];
+    program.extend_from_slice(&crate::script::crypto::hash160(&compressed_pubkey(key)));
+    program
+}
+
+/// BIP143 P2WPKH signature over the raw `hashtype` byte.
+fn sign_p2wpkh(tx: &Transaction, program: &[u8], key: u8, hashtype: u8) -> Vec<u8> {
+    let pre = crate::TxPrecompute::from_tx(tx);
+    let digest = crate::script::crypto::bip143_p2wpkh_signature_hash(
+        tx,
+        0,
+        Script::from_bytes(program),
+        VALUE,
+        u32::from(hashtype),
+        &pre,
+    )
+    .unwrap();
+    der_with_hashtype(digest, key, hashtype)
+}
+
+/// Same signature with S replaced by `n - S`: valid ECDSA, not LOW_S.
+fn high_s(sig: &[u8]) -> Vec<u8> {
+    let (der, hashtype) = sig.split_at(sig.len() - 1);
+    let compact = bitcoin::secp256k1::ecdsa::Signature::from_der(der)
+        .unwrap()
+        .serialize_compact();
+    let s = SecretKey::from_slice(&compact[32..]).unwrap().negate();
+    let mut flipped = compact;
+    flipped[32..].copy_from_slice(&s.secret_bytes());
+    let mut raw = bitcoin::secp256k1::ecdsa::Signature::from_compact(&flipped)
+        .unwrap()
+        .serialize_der()
+        .to_vec();
+    raw.extend_from_slice(hashtype);
+    raw
+}
+
+/// LOW_S and STRICTENC hashtype apply to P2WPKH signatures, native and
+/// P2SH-wrapped, as they do to the same CHECKSIG in any other script.
+#[test]
+fn p2wpkh_applies_low_s_and_strictenc_hashtype() {
+    let program = p2wpkh_program(1);
+    let unsigned = spend(Vec::new(), &[]);
+    let pubkey = compressed_pubkey(1);
+    let mut wrapped_spk = vec![0xa9, 0x14];
+    wrapped_spk.extend_from_slice(&crate::script::crypto::hash160(&program));
+    wrapped_spk.push(0x87);
+    let mut wrapped_sig = Vec::new();
+    push(&mut wrapped_sig, &program);
+
+    let high = high_s(&sign_p2wpkh(&unsigned, &program, 1, 0x01));
+    let undefined = sign_p2wpkh(&unsigned, &program, 1, 0x04);
+    let cases = [
+        (high, "SIG_HIGH_S", true),
+        (undefined, "SIG_HASHTYPE", false),
+    ];
+    for (sig, code, low_s) in cases {
+        let witness = [sig, pubkey.clone()];
+        for (spk, script_sig) in [
+            (program.clone(), Vec::new()),
+            (wrapped_spk.clone(), wrapped_sig.clone()),
+        ] {
+            let tx = spend(script_sig, &witness);
+            let consensus = job(spk.clone(), tx.clone(), |_| {});
+            script::verify_job_all_inputs(&consensus).expect("consensus accepts");
+            let policy = job(spk, tx, |f| {
+                f.low_s = low_s;
+                f.strictenc = !low_s;
+            });
+            let err = script::verify_job_all_inputs(&policy).expect_err(code);
+            assert!(format!("{err}").contains(code), "{err}");
+        }
+    }
+}
+
 /// Core passes `is_p2sh` to `VerifyWitnessProgram`: a P2SH-wrapped v1
 /// 32-byte program is not Taproot and P2SH-wrapped `0x4e73` is not an
 /// anchor, so both reach DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM.

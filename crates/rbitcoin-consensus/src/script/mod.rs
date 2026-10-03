@@ -144,9 +144,7 @@ pub(crate) fn verify_input<'a>(
 
     match kind {
         ScriptKind::P2pkh => {
-            // LOW_S / STRICTENC / NULLFAIL are interpreter policy. The fast path
-            // does not apply them, so those jobs use the generic interpreter.
-            if job.low_s || job.strictenc || job.nullfail {
+            if needs_interpreted_ecdsa(job) {
                 return verify_bare(job, input_index, tx, prevout);
             }
             // Fast path: exact `<sig> <pubkey>` scriptSig. Historical mainnet has
@@ -218,6 +216,9 @@ fn verify_native_witness<'a>(
         return Err(ConsensusError::Script("EVAL_FALSE".into()));
     }
     match (version, program.len()) {
+        (0, 20) if needs_interpreted_ecdsa(job) => {
+            p2wpkh::verify_interpreted(job, input_index, tx, program)
+        }
         (0, 20) => p2wpkh::verify(job, input_index, tx, pre),
         (0, 32) => p2wsh::verify(job, input_index, tx),
         (0, _) => Err(ConsensusError::Script(
@@ -237,6 +238,12 @@ fn verify_native_witness<'a>(
             Ok(())
         }
     }
+}
+
+/// LOW_S / STRICTENC / NULLFAIL are interpreter policy. The typed P2PKH and
+/// P2WPKH paths do not apply them, so those jobs use the interpreter.
+fn needs_interpreted_ecdsa(job: &ScriptCheckJob) -> bool {
+    job.low_s || job.strictenc || job.nullfail
 }
 
 /// True when the P2PKH fast path failed because scriptSig is not exactly two

@@ -62,6 +62,9 @@ pub(crate) fn try_p2sh_nested_segwit(
     }
 
     Some(match (version, program.len()) {
+        (0, 20) if super::needs_interpreted_ecdsa(job) => {
+            p2wpkh::verify_interpreted(job, input_index, tx, program)
+        }
         (0, 20) => {
             let mut keyhash = [0u8; 20];
             keyhash.copy_from_slice(program);
