@@ -5,7 +5,7 @@ use bitcoin::script::{Instruction, Script};
 use bitcoin::sighash::SighashCache;
 use bitcoin::Transaction;
 
-use super::crypto;
+use super::{crypto, interpreter};
 use crate::block::ScriptCheckJob;
 use crate::error::ConsensusError;
 
@@ -47,6 +47,12 @@ fn parse_two_pushes(script: &Script) -> Result<(Vec<u8>, Vec<u8>), ConsensusErro
     let mut items = Vec::with_capacity(2);
     for ins in script.instructions() {
         match ins.map_err(|_| ConsensusError::Script("p2pkh scriptSig".into()))? {
+            // Over-size pushes are a shape error so the interpreter reports
+            // PUSH_SIZE. Two pushes of at most 520 bytes keep the scriptSig
+            // far below MAX_SCRIPT_SIZE.
+            Instruction::PushBytes(b) if b.len() > interpreter::MAX_SCRIPT_ELEMENT_SIZE => {
+                return Err(ConsensusError::Script("p2pkh scriptSig".into()));
+            }
             Instruction::PushBytes(b) => items.push(b.as_bytes().to_vec()),
             Instruction::Op(op) if op.to_u8() >= 0x51 && op.to_u8() <= 0x60 => {
                 return Err(ConsensusError::Script("p2pkh scriptSig op".into()));
@@ -78,6 +84,10 @@ mod tests {
         assert!(parse_two_pushes(Script::from_bytes(&[0x00])).is_err()); // OP_0 unexpected
         assert!(parse_two_pushes(Script::from_bytes(&[0x01, 0xaa])).is_err()); // len
         assert!(parse_two_pushes(Script::from_bytes(&[0x05, 0x01])).is_err()); // decode
+        let mut big = vec![0x4d, 0x09, 0x02]; // PUSHDATA2 521
+        big.extend([0u8; 521]);
+        big.extend([0x01, 0xbb]);
+        assert!(parse_two_pushes(Script::from_bytes(&big)).is_err()); // push size
         let ok = parse_two_pushes(Script::from_bytes(&[0x01, 0xaa, 0x01, 0xbb])).unwrap();
         assert_eq!(ok, (vec![0xaa], vec![0xbb]));
     }

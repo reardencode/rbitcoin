@@ -2,7 +2,7 @@
 
 use bitcoin::Transaction;
 
-use super::crypto;
+use super::{crypto, interpreter};
 use crate::block::ScriptCheckJob;
 use crate::error::ConsensusError;
 use crate::TxPrecompute;
@@ -32,6 +32,7 @@ pub(crate) fn verify(
     if sig_raw.is_empty() || pubkey_raw.is_empty() {
         return Err(ConsensusError::Script("p2wpkh empty witness item".into()));
     }
+    check_element_sizes(sig_raw, pubkey_raw)?;
 
     let pk_hash = crypto::hash160(pubkey_raw);
     if pk_hash.as_slice() != keyhash {
@@ -41,8 +42,7 @@ pub(crate) fn verify(
     if job.witness_pubkeytype && !crypto::is_compressed_pubkey(pubkey_raw) {
         return Err(ConsensusError::Script("WITNESS_PUBKEYTYPE".into()));
     }
-    // Segwit activates after BIP66 on mainnet; always require strict DER.
-    let (sig, sighash_ty) = crypto::parse_der_sig(sig_raw, true)?;
+    let (sig, sighash_ty) = crypto::parse_der_sig(sig_raw, job.bip66_active)?;
     let pubkey = crypto::parse_pubkey(pubkey_raw)?;
 
     let amount = job.prevouts[input_index].value;
@@ -77,6 +77,7 @@ pub(crate) fn verify_with_keyhash(
         .witness
         .nth(1)
         .ok_or_else(|| ConsensusError::Script("p2wpkh witness".into()))?;
+    check_element_sizes(sig_raw, pubkey_raw)?;
 
     let pk_hash = crypto::hash160(pubkey_raw);
     if &pk_hash != keyhash {
@@ -86,7 +87,7 @@ pub(crate) fn verify_with_keyhash(
     if job.witness_pubkeytype && !crypto::is_compressed_pubkey(pubkey_raw) {
         return Err(ConsensusError::Script("WITNESS_PUBKEYTYPE".into()));
     }
-    let (sig, sighash_ty) = crypto::parse_der_sig(sig_raw, true)?;
+    let (sig, sighash_ty) = crypto::parse_der_sig(sig_raw, job.bip66_active)?;
     let pubkey = crypto::parse_pubkey(pubkey_raw)?;
 
     let amount = job.prevouts[input_index].value;
@@ -98,6 +99,17 @@ pub(crate) fn verify_with_keyhash(
     } else {
         Err(ConsensusError::Script("p2wpkh ecdsa".into()))
     }
+}
+
+/// Core `ExecuteWitnessScript`: every initial witness stack element is at
+/// most MAX_SCRIPT_ELEMENT_SIZE.
+fn check_element_sizes(sig_raw: &[u8], pubkey_raw: &[u8]) -> Result<(), ConsensusError> {
+    if sig_raw.len() > interpreter::MAX_SCRIPT_ELEMENT_SIZE
+        || pubkey_raw.len() > interpreter::MAX_SCRIPT_ELEMENT_SIZE
+    {
+        return Err(ConsensusError::Script("PUSH_SIZE".into()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
