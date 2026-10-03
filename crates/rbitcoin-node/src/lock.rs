@@ -60,6 +60,13 @@ struct LockBusy;
 fn open_lockfile(path: &Path) -> io::Result<File> {
     let mut opts = OpenOptions::new();
     opts.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+        // A symlink `.lock` must fail closed. Do not create the target.
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
@@ -106,6 +113,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    #[test]
+    fn lock_file_does_not_follow_a_symlink() {
+        let dir = tmp();
+        let outside = tmp();
+        let link = dir.join(".lock");
+        std::os::unix::fs::symlink(outside.join("elsewhere.lock"), &link).unwrap();
+        let err = lock_dir(&dir).expect_err("symlink lock");
+        match err {
+            NodeError::Datadir { .. } => {}
+            other => panic!("expected datadir open failure, got {other}"),
+        }
+        assert!(
+            !outside.join("elsewhere.lock").exists(),
+            "open followed the symlink"
+        );
     }
 
     #[test]
