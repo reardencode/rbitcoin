@@ -1809,7 +1809,27 @@ pub(crate) fn spawn_confirm_engine(
                         .fetch_add(1, Ordering::Relaxed);
                     warn!("ibd: confirm scripts reject @ {height} (batch first {hash}): {e}");
                     let class = ConfirmRejectClass::from_consensus(&e);
-                    rearm_after_reject(&hub_sc, &feed_sc, class, &[]);
+                    // A retried wave goes back with the batches dropped behind
+                    // it; a one-block verdict drops its block.
+                    let retried = class.isolate_if_batched(meta.heights_hashes.len())
+                        == ConfirmRejectClass::Cascade;
+                    let t_rearm = Instant::now();
+                    let wave: Vec<(u32, BlockHash, &bitcoin::Block)> = if retried {
+                        std::iter::once(&meta)
+                            .chain(dropped)
+                            .flat_map(|m| m.heights_hashes.iter().zip(&m.wire_blocks))
+                            .map(|(&(h, raw), b)| (h, BlockHash::from_byte_array(raw), b.as_ref()))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let rearm = if retried {
+                        ConfirmRejectClass::Cascade
+                    } else {
+                        class
+                    };
+                    rearm_after_reject(&hub_sc, &feed_sc, rearm, &wave);
+                    confirm_thr_stats::add_script_work(&stats, t_rearm.elapsed());
                     let _ = emit_confirm_reject(
                         &event_tx_sc,
                         &feed_sc,

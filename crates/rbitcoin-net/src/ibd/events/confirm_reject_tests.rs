@@ -2339,3 +2339,95 @@ fn isolated_soft_reject_does_not_count_toward_cascade_halt() {
     }
     assert!(st.halt.is_none(), "{:?}", st.halt);
 }
+
+/// tip+1 and tip+2 run scripts in one wave and tip+2's script fails. The
+/// scripts reject offers the wave back and isolates it: tip+1 connects from
+/// the offered-back body with no second getdata and no stale-plan retry,
+/// and tip+2 alone is rejected as invalid.
+#[test]
+fn batched_scripts_reject_offers_the_wave_back() {
+    use super::super::assign::tests::lock_default_assign_stop;
+    use super::super::confirm::ConfirmEvent;
+    use super::super::state::InflightReq;
+    use bitcoin::ScriptBuf;
+    use rbitcoin_consensus::mine_regtest_paying;
+    use std::time::{Duration, Instant};
+
+    let _env = lock_default_assign_stop();
+    let mut rig = WireRig::new("scripts-reject", 2);
+    let (t, cbs) = (rig.t, rig.cbs.clone());
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+    let b1 = mine_regtest_paying(
+        rig.tip,
+        rig.tip_time + 600,
+        t + 1,
+        spk.clone(),
+        vec![WireRig::spend(cbs[0])],
+    );
+    let mut bad = WireRig::spend(cbs[1]);
+    bad.input[0].script_sig = ScriptBuf::from_bytes(vec![0x6a]);
+    let b2 = mine_regtest_paying(b1.block_hash(), rig.tip_time + 1200, t + 2, spk, vec![bad]);
+    let (h1, h2) = (b1.block_hash(), b2.block_hash());
+    rig.plant(&[&b1, &b2]);
+    for (peer, body) in [(1, &b1), (2, &b2)] {
+        let hash = body.block_hash();
+        rig.st.slots[peer - 1].in_flight.insert(hash);
+        rig.st.inflight.insert(hash, InflightReq::new(peer));
+        rig.deliver(peer, body);
+    }
+    rig.start_engine();
+
+    // Hold the rejects until tip+1 has connected, so IBD cannot be the
+    // one that brings its body back.
+    let rx = &rig.engine.as_ref().unwrap().1;
+    let (held_tx, held) = std::sync::mpsc::channel();
+    let mut seen = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while rig.hub.tip_hash() != Some(h1) {
+        assert!(Instant::now() < deadline, "tip+1 never connected: {seen:?}");
+        let Ok(ev) = rx.recv_timeout(Duration::from_millis(5)) else {
+            continue;
+        };
+        if let ConfirmEvent::Reject {
+            hash,
+            class,
+            batch_len,
+            ..
+        } = &ev
+        {
+            seen.push((*hash, *class, *batch_len));
+        }
+        held_tx.send(ev).unwrap();
+    }
+    drop(held_tx);
+    assert_eq!(
+        seen,
+        [(h1, ConfirmRejectClass::Cascade, 2)],
+        "the retake stamps a fresh plan"
+    );
+    super::apply_confirm_events(
+        &mut rig.st,
+        &rig.hub,
+        &held,
+        &rig.write_next,
+        &std::sync::atomic::AtomicU32::new(0),
+        &mut rig.progress,
+        Some(&rig.feed),
+    );
+
+    let mut asked_h1 = false;
+    rig.pump(
+        |_, hash| {
+            asked_h1 |= hash == h1;
+            if hash == h1 {
+                b1.clone()
+            } else {
+                b2.clone()
+            }
+        },
+        |st, _, _| st.body.is_rejected(&h2),
+    );
+    assert!(!asked_h1, "tip+1 came back from the reject, not a getdata");
+    assert_eq!(rig.hub.tip_hash(), Some(h1));
+    rig.finish();
+}
