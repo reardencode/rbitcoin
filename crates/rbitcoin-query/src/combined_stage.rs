@@ -408,7 +408,7 @@ mod tests {
         );
         assert!(q.block_queue_soft_pressure());
         let offered = q
-            .block_queue_offer(5, [5u8; 32], 5, b"already-requested-body")
+            .block_queue_offer(5, [5u8; 32], 5, &[0u8; 81])
             .expect("offer must succeed while soft densify is restricted");
         assert!(offered.queue_id > 0);
         assert!(q.block_queue_has_height(5));

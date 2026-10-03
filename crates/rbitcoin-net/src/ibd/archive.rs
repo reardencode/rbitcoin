@@ -479,14 +479,14 @@ mod class_a_rehydrate_tests {
         );
 
         hub.query
-            .block_queue_offer(0, gen.to_byte_array(), 0, b"stale")
+            .block_queue_enqueue(0, gen.to_byte_array(), 0, b"stale")
             .unwrap();
         hub.query
-            .block_queue_offer(1, hashes[0].to_byte_array(), 0, b"")
+            .block_queue_enqueue(1, hashes[0].to_byte_array(), 0, b"")
             .unwrap();
         st.body.mark_archived(hashes[1]);
         hub.query
-            .block_queue_offer(2, hashes[1].to_byte_array(), 7, b"wire2")
+            .block_queue_enqueue(2, hashes[1].to_byte_array(), 7, b"wire2")
             .unwrap();
         hub.note_confirmed_tip(&[(3, hashes[2])], &[headers[2]])
             .unwrap();
@@ -496,11 +496,11 @@ mod class_a_rehydrate_tests {
         );
         assert_eq!(hub.tip_height(), Some(0));
         hub.query
-            .block_queue_offer(3, hashes[2].to_byte_array(), 0, b"wire3")
+            .block_queue_enqueue(3, hashes[2].to_byte_array(), 0, b"wire3")
             .unwrap();
         let unk = BlockHash::from_byte_array([0x11; 32]);
         hub.query
-            .block_queue_offer(u32::MAX, unk.to_byte_array(), 0, b"unk")
+            .block_queue_enqueue(u32::MAX, unk.to_byte_array(), 0, b"unk")
             .unwrap();
         for (i, h) in hashes.iter().enumerate() {
             st.record_height(*h, (i as u32) + 1);
@@ -548,7 +548,7 @@ mod class_a_rehydrate_tests {
         assert!(hub.tip_height().is_none());
         let h = BlockHash::from_byte_array([0x22; 32]);
         hub.query
-            .block_queue_offer(0, h.to_byte_array(), 1, b"gen")
+            .block_queue_enqueue(0, h.to_byte_array(), 1, b"gen")
             .unwrap();
         let mut st = IbdWorkState::new(Vec::new(), None, None);
         let feed = ConfirmFeed::new();

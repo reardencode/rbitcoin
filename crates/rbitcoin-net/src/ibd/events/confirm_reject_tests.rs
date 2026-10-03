@@ -1149,13 +1149,39 @@ fn ibd_bad_prev_fork() {
     assert_eq!(st.header_fks.len(), fks);
     assert_eq!(hub.query.store().header_count(), before + 3);
 
-    // IBD restarts. A1's body arrives raw and is redelivered: one body-queue
-    // row, one confirm-feed note.
-    let mut st = IbdWorkState::new(vec![dummy_slot(1)], Some(gen), Some(0));
+    // IBD restarts. Peer 2 answers A1's getdata with the real header and a
+    // tx that does not parse (segwit marker, flag 0). Nothing is queued, A1
+    // can be fetched again, and peer 2 is dropped.
+    let mut st = IbdWorkState::new(vec![dummy_slot(1), dummy_slot(2)], Some(gen), Some(0));
     let feed = ConfirmFeed::new();
     st.record_height(a1, 1);
     st.header_fks
         .insert(a1, hub.ensure_header_fk(&a[0].header).unwrap());
+    let mut junk = serialize(&a[0].header);
+    junk.extend_from_slice(&[0x01, 0x01, 0, 0, 0, 0x00, 0x00, 0, 0, 0, 0]);
+    st.slots[1].in_flight.insert(a1);
+    st.inflight.insert(a1, InflightReq::new(2));
+    apply_peer_event(
+        &mut st,
+        &hub,
+        PeerEvent::BlockFramed {
+            peer: 2,
+            hash: a1,
+            payload: junk,
+        },
+        &write_next,
+        &mut book,
+        local,
+        Some(&feed),
+    );
+    assert_eq!(hub.query.block_queue_stats().2, 0, "undecodable wire");
+    assert_eq!(feed.size_snap().0, 0);
+    assert!(st.inflight.is_empty() && !st.body.is_pending(&a1));
+    assert!(!st.body.is_rejected(&a1), "the hash stays fetchable");
+    assert!(!st.slots[1].alive, "the sender is dropped");
+
+    // A1's body arrives raw from peer 1 and is redelivered: one body-queue
+    // row, one confirm-feed note.
     st.slots[0].in_flight.insert(a1);
     st.inflight.insert(a1, InflightReq::new(1));
     for _ in 0..2 {

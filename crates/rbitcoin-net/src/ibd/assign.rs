@@ -1534,7 +1534,7 @@ pub(in crate::ibd) mod tests {
         use bitcoin::hashes::Hash as _;
         for ht in path_lo..=32 {
             hub.query
-                .block_queue_offer(ht, h(ht).to_byte_array(), 1, &[0u8; 80])
+                .block_queue_offer(ht, h(ht).to_byte_array(), 1, &[0u8; 81])
                 .unwrap();
             st.body.mark_pending(h(ht));
         }
@@ -1544,13 +1544,13 @@ pub(in crate::ibd) mod tests {
         use bitcoin::hashes::Hash as _;
         for ht in lo..=hi {
             hub.query
-                .block_queue_offer(ht, h(ht).to_byte_array(), 1, &[0u8; 80])
+                .block_queue_offer(ht, h(ht).to_byte_array(), 1, &[0u8; 81])
                 .unwrap();
             st.body.mark_pending(h(ht));
         }
     }
 
-    /// 75×80-byte bodies past the tip window. At 5 blk/s the confirm window is
+    /// 75 header-only bodies past the tip window. At 5 blk/s the confirm window is
     /// 300 blocks, so this is a quarter of that window.
     fn plant_quarter_window(hub: &ChainHub, path_lo: u32) {
         use bitcoin::hashes::Hash as _;
@@ -1558,7 +1558,7 @@ pub(in crate::ibd) mod tests {
         for i in 0..75u32 {
             let ht = start.saturating_add(i);
             hub.query
-                .block_queue_offer(ht, h(ht).to_byte_array(), 1, &[0u8; 80])
+                .block_queue_offer(ht, h(ht).to_byte_array(), 1, &[0u8; 81])
                 .unwrap();
         }
     }
@@ -1856,7 +1856,7 @@ pub(in crate::ibd) mod tests {
         for i in 0..rbitcoin_query::TIP_HOLE_MIN_AHEAD_BLOCKS {
             let ht = start.saturating_add(i);
             hub.query
-                .block_queue_offer(ht, h(ht).to_byte_array(), 1, &[0u8; 80])
+                .block_queue_offer(ht, h(ht).to_byte_array(), 1, &[0u8; 81])
                 .unwrap();
         }
         assign_work_ordered(&mut st, hub, &cfg, &stats, AssignDepth::Full, None);
@@ -1961,7 +1961,7 @@ pub(in crate::ibd) mod tests {
         let want = h(0xabc);
         plant_tip_hole(&mut st, want, tip1);
         hub.query
-            .block_queue_offer(tip1, h(0xdef).to_byte_array(), 0, b"wrong")
+            .block_queue_offer(tip1, h(0xdef).to_byte_array(), 0, &[0u8; 81])
             .unwrap();
         assert!(hub.query.block_queue_has_height(tip1));
         assert!(!claim_ready(&hub, &mut st.body, tip1, &want));
@@ -2590,7 +2590,7 @@ pub(in crate::ibd) mod tests {
         enqueue(&mut st, 1, b"ok1");
         st.body.mark_pending(h(3));
         hub.query
-            .block_queue_offer(4, h(0x99).to_byte_array(), 0, b"wrong4")
+            .block_queue_offer(4, h(0x99).to_byte_array(), 0, &[0u8; 81])
             .unwrap();
         assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
         assert!((2..=4).all(|ht| st.inflight.contains_key(&h(ht))));
@@ -2615,7 +2615,7 @@ pub(in crate::ibd) mod tests {
         let (need, mid) = (h(0xab), h(0xac));
         st.record_height(need, 1);
         hub.query
-            .block_queue_offer(1, h(0xde).to_byte_array(), 0, b"loser")
+            .block_queue_offer(1, h(0xde).to_byte_array(), 0, &[0u8; 81])
             .unwrap();
         assert!(!hub.query.block_queue_has_hash(&need.to_byte_array()));
         st.reorg.register_explore([need, mid], None);

@@ -21,7 +21,7 @@ for signet/mainnet sync. **Not** CLI.
 
 | Env | Default | Role |
 |-----|---------|------|
-| `RBITCOIN_BLOCK_QUEUE_GB` | 1 | Densify assign-stop (GiB). `0` = unlimited. Never refuses enqueue |
+| `RBITCOIN_BLOCK_QUEUE_GB` | 1 | Densify assign-stop (GiB). `0` = unlimited. Never refuses enqueue for budget (undecodable wire is dropped) |
 | `RBITCOIN_BLOCK_QUEUE_BYTES` | 1 GiB | Same stop in bytes (wins over GB). `0` = unlimited |
 | `RBITCOIN_BULK_IO_WORKERS` | backend default | pread worker count when `RBITCOIN_IO=pread` |
 | `RBITCOIN_CLASS_C_INRAM_MAX_MB` | 256 | L2 cap for `confirmed` / `header_txs_*`; over → fd L0. `strong_tx` always L2 |

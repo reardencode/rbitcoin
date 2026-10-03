@@ -1783,7 +1783,7 @@ fn ibd_confirm_pin_fault() {
     assert!(hub.is_connected(&BlockHash::from_byte_array(hash1)));
     let hfk1 = hub.query.get_header_by_hash(&hash1).unwrap().unwrap().0;
     hub.query
-        .block_queue_offer(t + 1, hash1, hfk1.0, &[0u8; 80])
+        .block_queue_offer(t + 1, hash1, hfk1.0, &[0u8; 81])
         .unwrap();
     finish_connected_write_after_session_fault(&hub.query, &[(t + 1, hash1)])
         .expect("in-place finish");
