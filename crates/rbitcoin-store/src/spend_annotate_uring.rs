@@ -505,7 +505,7 @@ fn put_spend_batch_pure_write_pwrite(
         let mut buf = vec![0u8; g.len];
         if txs
             .spent
-            .read_prefix_at(g.off, g.len as u64, &mut buf)
+            .read_prefix_at_published(body_pub, g.off, g.len as u64, &mut buf)
             .is_err()
         {
             cold_group_edges(&mut cold, &g.writes);
@@ -989,8 +989,14 @@ mod tests {
             let known0 = t.get_spender_meta_at_abs_batch(&[abs0]).unwrap()[0].unwrap();
             let known2 = t.get_spender_meta_at_abs_batch(&[abs2]).unwrap()[0].unwrap();
             let mut hdr_before = [0u8; crate::file::FILE_HEADER_LEN];
+            let body_pub = t.spent.body_published_len();
             t.spent
-                .read_prefix_at(0, crate::file::FILE_HEADER_LEN as u64, &mut hdr_before)
+                .read_prefix_at_published(
+                    body_pub,
+                    0,
+                    crate::file::FILE_HEADER_LEN as u64,
+                    &mut hdr_before,
+                )
                 .unwrap();
             let cold = put_spend_batch_by_abs_meta_known(
                 &t,
@@ -1015,7 +1021,12 @@ mod tests {
 
             let mut hdr_after = [0u8; crate::file::FILE_HEADER_LEN];
             t.spent
-                .read_prefix_at(0, crate::file::FILE_HEADER_LEN as u64, &mut hdr_after)
+                .read_prefix_at_published(
+                    body_pub,
+                    0,
+                    crate::file::FILE_HEADER_LEN as u64,
+                    &mut hdr_after,
+                )
                 .unwrap();
             assert_eq!(
                 hdr_before, hdr_after,

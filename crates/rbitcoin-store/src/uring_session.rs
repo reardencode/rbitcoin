@@ -117,6 +117,12 @@ fn drain_hard_cap() -> Duration {
 #[cfg(test)]
 thread_local! {
     static TEST_DRAIN_HARD: Cell<Option<Duration>> = const { Cell::new(None) };
+    static DROP_DRAIN_ERROR: Cell<Option<&'static str>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_drop_drain_error() -> Option<&'static str> {
+    DROP_DRAIN_ERROR.with(Cell::take)
 }
 
 #[cfg(test)]
@@ -1051,9 +1057,30 @@ impl UringSession {
     }
 }
 
+impl UringSession {
+    /// Drop must not ignore a hard cap and then free caller buffers.
+    /// `fail_closed` aborts outside tests. Leftover ids stay in `pending`.
+    fn drop_drain(&mut self) {
+        if let Err(err) = self.drain_all_inner(true) {
+            note_drop_drain_error(&err);
+        }
+    }
+}
+
+fn note_drop_drain_error(err: &StoreError) {
+    #[cfg(test)]
+    if let StoreError::Corrupt(msg) = err {
+        DROP_DRAIN_ERROR.with(|c| c.set(Some(*msg)));
+    }
+    #[cfg(not(test))]
+    {
+        let _ = err;
+    }
+}
+
 impl Drop for UringSession {
     fn drop(&mut self) {
-        let _ = self.drain_all_inner(false);
+        self.drop_drain();
     }
 }
 
@@ -1071,7 +1098,7 @@ impl UringSession {
 
 impl Drop for DrainOnDrop<'_> {
     fn drop(&mut self) {
-        let _ = self.session.drain_all_inner(false);
+        self.session.drop_drain();
     }
 }
 
@@ -1586,6 +1613,9 @@ mod tests {
         session.pending.insert(1).unwrap();
         with_drain_hard_cap(Duration::from_millis(200), || {
             drop(session.drain_guard());
+            let err = take_drop_drain_error();
+            assert_eq!(err, Some("invariant: io_uring undrained"));
+            assert!(session.is_poisoned());
             drop(session);
         });
     }

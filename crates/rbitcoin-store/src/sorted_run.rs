@@ -171,6 +171,12 @@ fn load_manifest(dir: &Path) -> Result<Option<Manifest>, StoreError> {
         return Ok(None);
     }
     let n = u32::from_le_bytes(hdr[12..16].try_into().unwrap()) as usize;
+    let bytes = (n as u64).saturating_mul(MANIFEST_ENTRY_LEN as u64);
+    let file_len = f.metadata().map_err(|e| io_err(&path, e))?.len();
+    // Refuse the allocation when the catalog claims more than the file holds.
+    if n > 1_000_000 || bytes > file_len.saturating_sub(16) {
+        return Err(StoreError::Corrupt("invariant: sorted run manifest length"));
+    }
     let mut body = vec![0u8; n.saturating_mul(MANIFEST_ENTRY_LEN)];
     if !body.is_empty() {
         f.read_exact(&mut body).map_err(|e| io_err(&path, e))?;
@@ -745,6 +751,22 @@ mod tests {
         r[0] = key;
         r[32] = tag;
         r
+    }
+
+    #[test]
+    fn manifest_length_past_the_file_is_corrupt() {
+        let dir = tmp_dir();
+        let path = dir.path().join(MANIFEST_NAME);
+        let mut hdr = [0u8; 16];
+        hdr[0..8].copy_from_slice(&MANIFEST_MAGIC);
+        hdr[8..12].copy_from_slice(&MANIFEST_VERSION.to_le_bytes());
+        hdr[12..16].copy_from_slice(&1_000u32.to_le_bytes());
+        std::fs::write(&path, hdr).unwrap();
+        let err = load_manifest(dir.path()).expect_err("short manifest");
+        match err {
+            StoreError::Corrupt(msg) => assert!(msg.contains("manifest"), "{msg}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

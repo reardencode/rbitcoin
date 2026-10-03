@@ -27,6 +27,15 @@ pub const TXSTAT_BODY_HEADER: u64 = 32;
 pub const TXSTAT_ENTRY_LEN: u64 = 8;
 const BLK_HEADER: u64 = 32;
 const BLK_SLOT: u64 = 16;
+/// Overflow blob ceiling. A longer on-disk length is corrupt, not an allocation.
+const TXSTAT_BLOB_CEILING: usize = 16 * 1024 * 1024;
+
+fn checked_blob_len(len: usize, remain: u64) -> Result<usize, StoreError> {
+    if len > TXSTAT_BLOB_CEILING || (len as u64) > remain {
+        return Err(StoreError::Corrupt("invariant: txstat blob length"));
+    }
+    Ok(len)
+}
 
 /// Packed confirm-time econ. All-zero on disk is unstamped (not this struct).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -574,6 +583,8 @@ impl TxStat {
         if len == 0 {
             return Ok(Vec::new());
         }
+        let remain = self.ovf.logical_len().saturating_sub(off);
+        let len = checked_blob_len(len, remain)?;
         let mut buf = vec![0u8; len];
         self.ovf.read_at(off, &mut buf)?;
         Ok(buf)
@@ -591,6 +602,16 @@ mod tests {
             base,
             wit_extra: wit,
         }
+    }
+
+    #[test]
+    fn txstat_blob_longer_than_the_file_is_corrupt() {
+        let err = checked_blob_len(1 << 30, 32).expect_err("huge len");
+        match err {
+            StoreError::Corrupt(msg) => assert!(msg.contains("txstat"), "{msg}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(checked_blob_len(4, 32).unwrap(), 4);
     }
 
     #[test]

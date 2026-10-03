@@ -1756,10 +1756,12 @@ impl TxTable {
                 cold.push((create_fk, vout, spend_fk, spend_vin));
                 continue;
             }
-            let cur = self.spent.with_bytes_at(abs, META_LEN, |raw| {
-                let (flags, field, field_vin) = decode_spent_slot(raw)?;
-                Ok((field, flags, field_vin))
-            });
+            let cur = self
+                .spent
+                .with_bytes_at_published(body_pub, abs, META_LEN, |raw| {
+                    let (flags, field, field_vin) = decode_spent_slot(raw)?;
+                    Ok((field, flags, field_vin))
+                });
             let Ok((field, flags, field_vin)) = cur else {
                 cold.push((create_fk, vout, spend_fk, spend_vin));
                 continue;
