@@ -44,7 +44,8 @@ fn assemble_parent_mtp_and_bits(
             )));
         }
     }
-    let mtp = median_time_past_times(&times);
+    let mtp = median_time_past_times(&times)
+        .map_err(|_| ConsensusError::BadHeader("empty median time"))?;
     if header.time <= mtp {
         return Err(ConsensusError::BadHeader("timestamp <= median-time-past"));
     }
@@ -80,7 +81,8 @@ fn assemble_chained_header(
     if header.prev_blockhash.to_byte_array() != prev.hash {
         return Err(ConsensusError::BadPrev);
     }
-    let mtp = median_time_past_times(time_window);
+    let mtp = median_time_past_times(time_window)
+        .map_err(|_| ConsensusError::BadHeader("empty median time"))?;
     if header.time <= mtp {
         return Err(ConsensusError::BadHeader("timestamp <= median-time-past"));
     }

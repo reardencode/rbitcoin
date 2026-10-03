@@ -628,6 +628,8 @@ pub struct MempoolHub {
     accept_gen: Mutex<HashMap<Wtxid, u64>>,
     /// Mempool expiry in seconds (default 336h).
     expiry_secs: AtomicU64,
+    /// Next index into `wtxid_by_txid` for a bounded expiry scan.
+    expiry_cursor: AtomicU64,
     /// Min-relay overlay (sat/kvB). Session FeeFilter reads this
     /// without taking `inner`.
     min_relay_sat_kvb: AtomicU64,
@@ -761,6 +763,7 @@ impl MempoolHub {
             next_accept_gen: AtomicU64::new(1),
             accept_gen: Mutex::new(HashMap::new()),
             expiry_secs: AtomicU64::new(DEFAULT_MEMPOOL_EXPIRY_SECS),
+            expiry_cursor: AtomicU64::new(0),
             min_relay_sat_kvb: AtomicU64::new(
                 rbitcoin_consensus::policy::MIN_RELAY_FEE_RATE_SAT_PER_KVB,
             ),
@@ -1150,20 +1153,37 @@ impl MempoolHub {
             return 0;
         }
         self.meter_expire_full_scans.fetch_add(1, Ordering::Relaxed);
+        const EXPIRE_SCAN: usize = 256;
+        let start = self.expiry_cursor.load(Ordering::Relaxed) as usize;
         let expired_roots: Vec<Txid> = {
             let ats = self.accept_at.lock().unwrap();
             let by_tx = self.wtxid_by_txid.lock().unwrap();
-            by_tx
-                .iter()
-                .filter_map(|(txid, wtxid)| {
-                    let at = ats.get(wtxid)?;
-                    if now.saturating_sub(*at) >= lim {
-                        Some(*txid)
-                    } else {
-                        None
-                    }
-                })
-                .collect()
+            let mut skipped = 0usize;
+            let mut scanned = 0usize;
+            let mut roots = Vec::new();
+            for (txid, wtxid) in by_tx.iter() {
+                if skipped < start {
+                    skipped += 1;
+                    continue;
+                }
+                scanned += 1;
+                if ats
+                    .get(wtxid)
+                    .is_some_and(|at| now.saturating_sub(*at) >= lim)
+                {
+                    roots.push(*txid);
+                }
+                if scanned >= EXPIRE_SCAN {
+                    break;
+                }
+            }
+            let next = if by_tx.is_empty() || skipped.saturating_add(scanned) >= by_tx.len() {
+                0
+            } else {
+                skipped.saturating_add(scanned)
+            };
+            self.expiry_cursor.store(next as u64, Ordering::Relaxed);
+            roots
         };
         if expired_roots.is_empty() {
             return 0;
@@ -1572,7 +1592,7 @@ impl MempoolHub {
             return;
         };
         if g.len() >= 4_096 {
-            g.clear();
+            return;
         }
         g.insert(wtxid);
     }
@@ -3691,6 +3711,51 @@ mod tests {
             .as_nanos();
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("rbitcoin-txrelay-{n}-{seq}"))
+    }
+
+    #[test]
+    fn recent_reject_at_the_cap_does_not_clear() {
+        let dir = tmp();
+        let mdir = tmp();
+        let q = Query::open_or_create_tiny(&dir).unwrap();
+        let hub = MempoolHub::open(&mdir, std::sync::Arc::new(q)).unwrap();
+        let first = bitcoin::Wtxid::from_byte_array({
+            let mut b = [0u8; 32];
+            b[0] = 1;
+            b
+        });
+        hub.note_recent_reject(first);
+        // 2..4097 is 4095 ids and does not collide with `first` (byte 0 == 1).
+        for i in 2..4_097u32 {
+            let mut b = [0u8; 32];
+            b[0..4].copy_from_slice(&i.to_le_bytes());
+            hub.note_recent_reject(bitcoin::Wtxid::from_byte_array(b));
+        }
+        let extra = bitcoin::Wtxid::from_byte_array([0xff; 32]);
+        hub.note_recent_reject(extra);
+        assert!(hub.try_recent_reject(&first));
+        assert!(!hub.try_recent_reject(&extra));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&mdir);
+    }
+
+    #[test]
+    fn expire_stale_drops_old_tx_without_a_new_accept() {
+        let (store_dir, q, cbs) = pad_one_cb();
+        let dir = tmp();
+        let hub = MempoolHub::open(&dir, q).unwrap();
+        hub.set_relay_enabled(true);
+        let tx = spend_true(cbs[0], 1_000, ScriptBuf::from_bytes(vec![0x51]));
+        let tid = tx.compute_txid();
+        hub.accept_tx(&tx).expect("admit");
+        assert_eq!(hub.live_count(), 1);
+        hub.set_expiry_hours(1);
+        hub.note_mock_now(hub.relay_now_secs() + 3600 + 5);
+        assert_eq!(hub.expire_stale(), 1);
+        assert_eq!(hub.live_count(), 0);
+        assert!(!hub.contains(&tid));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&store_dir);
     }
 
     fn record_fee_sample(hub: &MempoolHub, height: u32, rate_sat_kvb: u64) {

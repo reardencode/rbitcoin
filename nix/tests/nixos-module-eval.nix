@@ -216,8 +216,26 @@ assert builtins.match ".*--network regtest.*" execStart != null;
 assert builtins.match ".*--listen 127.0.0.1:18444.*" execStart != null;
 assert builtins.match ".*--rpc-listen 127.0.0.1:18443.*" execStart != null;
 assert builtins.match ".*--rest.*" execStart == null;
+assert builtins.match ".*--milestone.*" (
+  defaultSystem.config.systemd.services.rbitcoin.serviceConfig.ExecStart
+) == null;
+assert builtins.match ".*--milestone 100.*" (
+  (nixpkgs.lib.nixosSystem {
+    inherit (pkgs.stdenv.hostPlatform) system;
+    modules = [
+      module
+      {
+        services.rbitcoin = {
+          enable = true;
+          package = fakePackage;
+          milestone = 100;
+        };
+      }
+    ];
+  }).config.systemd.services.rbitcoin.serviceConfig.ExecStart
+) != null;
 assert builtins.match ".*--rest.*" (
-  nixpkgs.lib.nixosSystem {
+  (nixpkgs.lib.nixosSystem {
     inherit (pkgs.stdenv.hostPlatform) system;
     modules = [
       module
@@ -230,8 +248,7 @@ assert builtins.match ".*--rest.*" (
         };
       }
     ];
-  }
-  .config.systemd.services.rbitcoin.serviceConfig.ExecStart
+  }).config.systemd.services.rbitcoin.serviceConfig.ExecStart
 ) != null;
 assert builtins.match ".*--rpc-socket /run/rbitcoin/rpc.sock.*" execStart != null;
 assert builtins.match ".*--rpc-cookie-file /run/rbitcoin/rpc.cookie.*" execStart != null;

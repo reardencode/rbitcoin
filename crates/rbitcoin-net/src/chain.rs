@@ -46,17 +46,27 @@ struct HeaderSyncNode {
 struct HeldBodies {
     by_hash: HashMap<BlockHash, (Arc<Block>, u64)>,
     next_seq: u64,
+    bytes: usize,
 }
 
 impl HeldBodies {
     const CAP: usize = 320;
     const STALE_BELOW: u32 = 288;
+    /// One honest max block. A larger body is not held.
+    const MAX_BLOCK_SERIALIZED: usize = 4_000_000;
+    /// Count cap times one max block. Honest fills are not evicted early.
+    const BYTE_CAP: usize = Self::CAP * Self::MAX_BLOCK_SERIALIZED;
 
     fn new() -> Self {
         Self {
             by_hash: HashMap::new(),
             next_seq: 1,
+            bytes: 0,
         }
+    }
+
+    fn wire_len(block: &Block) -> usize {
+        block.total_size()
     }
 
     fn get(&self, hash: &BlockHash) -> Option<&Block> {
@@ -92,7 +102,12 @@ impl HeldBodies {
         if self.by_hash.contains_key(&hash) {
             return;
         }
-        if self.by_hash.len() >= Self::CAP {
+        let nbytes = Self::wire_len(&block);
+        if nbytes > Self::MAX_BLOCK_SERIALIZED {
+            return;
+        }
+        while self.by_hash.len() >= Self::CAP || self.bytes.saturating_add(nbytes) > Self::BYTE_CAP
+        {
             let victim = self
                 .by_hash
                 .iter()
@@ -106,16 +121,26 @@ impl HeldBodies {
                         .map(|(h, _)| *h)
                 });
             if let Some(k) = victim {
-                self.by_hash.remove(&k);
+                if let Some((old, _)) = self.by_hash.remove(&k) {
+                    self.bytes = self.bytes.saturating_sub(Self::wire_len(&old));
+                }
+            } else {
+                break;
             }
+        }
+        if self.by_hash.len() >= Self::CAP || self.bytes.saturating_add(nbytes) > Self::BYTE_CAP {
+            return;
         }
         let seq = self.next_seq;
         self.next_seq = self.next_seq.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(nbytes);
         self.by_hash.insert(hash, (block, seq));
     }
 
     fn remove(&mut self, hash: &BlockHash) {
-        self.by_hash.remove(hash);
+        if let Some((old, _)) = self.by_hash.remove(hash) {
+            self.bytes = self.bytes.saturating_sub(Self::wire_len(&old));
+        }
     }
 }
 
@@ -1451,7 +1476,7 @@ impl ChainHub {
                 None => break,
             }
         }
-        rbitcoin_primitives::median_time_past_times(&times)
+        rbitcoin_primitives::median_time_past_times(&times).unwrap_or(parent.time)
     }
 
     fn expected_bits_off_tip(

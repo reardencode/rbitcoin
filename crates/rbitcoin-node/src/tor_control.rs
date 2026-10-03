@@ -223,10 +223,22 @@ impl TorControl {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct HiddenService {
     pub service_id: String,
     pub private_key: Option<String>,
+}
+
+impl std::fmt::Debug for HiddenService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HiddenService")
+            .field("service_id", &self.service_id)
+            .field(
+                "private_key",
+                &self.private_key.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

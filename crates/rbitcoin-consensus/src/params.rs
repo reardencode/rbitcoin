@@ -459,7 +459,7 @@ pub const MAINNET_MIN_CHAIN_WORK: &str =
 pub fn default_milestone_height(network: rbitcoin_primitives::Network) -> u32 {
     match network {
         rbitcoin_primitives::Network::Mainnet => 840_000,
-        rbitcoin_primitives::Network::Testnet => 2_500_000,
+        rbitcoin_primitives::Network::Testnet => 0,
         rbitcoin_primitives::Network::Signet => 0,
         rbitcoin_primitives::Network::Regtest => 0,
     }

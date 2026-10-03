@@ -112,6 +112,8 @@ let
   ++ optional cfg.cjdns.reachable "--cjdns-reachable"
   ++ optional cfg.esplora.hiddenService "--esplora-onion"
   ++ optional cfg.pruneSeqSigWit "--prune-seqsigwit"
+  ++ optional (cfg.milestone != null) "--milestone"
+  ++ optional (cfg.milestone != null) (toString cfg.milestone)
   ++ cfg.extraArgs;
 in
 {
@@ -133,6 +135,17 @@ in
       type = types.path;
       default = "/var/lib/rbitcoin";
       description = "Directory for the node store, mempool, peers, logs, and RPC cookie.";
+    };
+
+    milestone = mkOption {
+      type = types.nullOr types.ints.unsigned;
+      default = null;
+      example = 840000;
+      description = ''
+        Pass `--milestone HEIGHT`. Null omits the flag: mainnet keeps the
+        anchored script-skip default, and testnet checks every script.
+        An explicit height is height-only.
+      '';
     };
 
     coldDataDir = mkOption {

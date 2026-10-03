@@ -10,10 +10,16 @@ pub fn install_i2p_dialer(dialer: crate::i2p_sam::I2pDialer) {
     crate::i2p_sam::install(dialer);
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct ProxyCreds {
     pub(crate) username: Vec<u8>,
     pub(crate) password: Vec<u8>,
+}
+
+impl std::fmt::Debug for ProxyCreds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProxyCreds(<redacted>)")
+    }
 }
 
 impl ProxyCreds {

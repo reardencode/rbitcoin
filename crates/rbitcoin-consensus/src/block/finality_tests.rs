@@ -93,8 +93,8 @@ fn bip68_disable_flag_and_time_type() {
     ));
 }
 
-/// Unresolved coin age (missing slice or height/MTP 0) must fail *closed*.
-/// Same-block callers pass spend height / prev MTP — never 0.
+/// A missing height slice or a zero coin MTP fails closed.
+/// Height 0 is the genesis coin. Same-block callers pass spend height.
 #[test]
 fn bip68_unresolved_coin_age_fails_closed() {
     let type_flag = 1u32 << 22;
@@ -102,8 +102,9 @@ fn bip68_unresolved_coin_age_fails_closed() {
     let tx_t = bare_tx(2, LockTime::ZERO, Sequence::from_consensus(type_flag | 2));
     // Missing height entry.
     assert!(!sequence_locks_satisfied(&tx_h, &[], &[0], 110, 1_000_000));
-    // Height 0 = unresolved (not genesis spendable).
-    assert!(!sequence_locks_satisfied(&tx_h, &[0], &[0], 110, 1_000_000));
+    // Height 0 is the genesis coin (relative height 10 spends from block 10).
+    assert!(sequence_locks_satisfied(&tx_h, &[0], &[0], 10, 1_000_000));
+    assert!(!sequence_locks_satisfied(&tx_h, &[0], &[0], 9, 1_000_000));
     // Time-type with MTP 0 / missing.
     assert!(!sequence_locks_satisfied(
         &tx_t,
@@ -121,6 +122,98 @@ fn bip68_unresolved_coin_age_fails_closed() {
     ));
     // Control: known ages still work.
     assert!(sequence_locks_satisfied(&tx_h, &[100], &[0], 110, 0));
+}
+
+#[test]
+fn bip68_height_zero_time_lock_uses_the_median() {
+    let type_flag = 1u32 << 22;
+    let tx = bare_tx(2, LockTime::ZERO, Sequence::from_consensus(type_flag));
+    let mtp = 1_231_006_505u32;
+    assert!(
+        !sequence_locks_satisfied(&tx, &[0], &[0], 1, mtp),
+        "a zero median is unresolved"
+    );
+    assert!(sequence_locks_satisfied(&tx, &[0], &[mtp], 1, mtp));
+    assert!(!sequence_locks_satisfied(
+        &tx,
+        &[0],
+        &[mtp],
+        1,
+        mtp.saturating_sub(1)
+    ));
+
+    // The median comes from the confirmed genesis header through
+    // `structural_bip68`, not from a caller-supplied MTP slice.
+    let (_dir, query) = rbitcoin_query::testutil::tiny_query_labeled("bip68-h0");
+    let header_fk = query
+        .store()
+        .put_header(&rbitcoin_store::HeaderRecord {
+            timestamp: mtp,
+            hash: [0x11; 32],
+            ..Default::default()
+        })
+        .unwrap();
+    query
+        .store()
+        .confirmed
+        .set(rbitcoin_primitives::Height(0), header_fk)
+        .unwrap();
+    query.store().rebuild_height_fence().unwrap();
+    let params = Box::leak(Box::new(crate::params::ChainParams::regtest()));
+    let ctx = super::ValidationContext::at(
+        params,
+        rbitcoin_primitives::Height(1),
+        crate::milestone::Milestone::NONE,
+    );
+    let create = rbitcoin_primitives::Fk(1);
+    let mut create_heights = rbitcoin_query::FkMap::default();
+    create_heights.insert(create, 0);
+    let spends = [([0u8; 32], 0u32, rbitcoin_primitives::Fk::NULL, create, 0u32)];
+    let block = height_zero_timelock_block(type_flag);
+    super::structural_bip68(
+        &query,
+        &block,
+        &ctx,
+        &spends,
+        &create_heights,
+        &mut rbitcoin_query::U32Map::default(),
+    )
+    .expect("height 0 time lock uses the genesis median");
+    let too_far = height_zero_timelock_block(type_flag | 1);
+    let err = super::structural_bip68(
+        &query,
+        &too_far,
+        &ctx,
+        &spends,
+        &create_heights,
+        &mut rbitcoin_query::U32Map::default(),
+    )
+    .expect_err("512s relative to the genesis median is not final at height 1");
+    assert!(
+        format!("{err}").contains("nonfinal"),
+        "structural path must apply the median, got {err}"
+    );
+}
+
+fn height_zero_timelock_block(sequence: u32) -> bitcoin::Block {
+    use bitcoin::block::{Header, Version};
+    use bitcoin::hashes::Hash;
+    use bitcoin::{Block, BlockHash, CompactTarget, TxMerkleNode};
+    let spend = bare_tx(2, LockTime::ZERO, Sequence::from_consensus(sequence));
+    let coinbase = bare_tx(1, LockTime::ZERO, Sequence::MAX);
+    let mut block = Block {
+        header: Header {
+            version: Version::from_consensus(1),
+            prev_blockhash: BlockHash::from_byte_array([0; 32]),
+            merkle_root: TxMerkleNode::from_byte_array([0; 32]),
+            time: 1_231_006_505,
+            bits: CompactTarget::from_consensus(0x1d00_ffff),
+            nonce: 0,
+        },
+        txdata: vec![coinbase, spend],
+    };
+    block.header.merkle_root = block.compute_merkle_root().unwrap();
+    block
 }
 
 /// Height-type locks ignore coin MTP (write path may leave mtps as 0).

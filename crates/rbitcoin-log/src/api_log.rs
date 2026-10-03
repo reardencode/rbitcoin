@@ -23,7 +23,14 @@ pub fn init_api_log(path: impl AsRef<Path>) -> std::io::Result<()> {
             std::fs::create_dir_all(parent)?;
         }
     }
-    let f = OpenOptions::new().create(true).append(true).open(path)?;
+    let mut opts = OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let f = opts.open(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

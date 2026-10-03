@@ -65,7 +65,14 @@ pub struct InvalidHashSet {
 }
 
 impl InvalidHashSet {
+    /// The set does not grow past this. A hash that does not fit is still
+    /// invalid for the decision that just failed it; later lookups may miss it.
+    pub const CAP: usize = 4_096;
+
     pub fn mark(&mut self, hash: [u8; 32]) {
+        if self.hashes.len() >= Self::CAP && !self.hashes.contains(&hash) {
+            return;
+        }
         self.hashes.insert(hash);
     }
 
@@ -123,6 +130,22 @@ mod tests {
         assert!(work_better(w(2), w(1)));
         assert!(!work_better(w(1), w(2)));
         assert!(!work_better(w(1), w(1)));
+    }
+
+    #[test]
+    fn invalid_hash_set_stops_at_the_cap() {
+        let mut set = InvalidHashSet::default();
+        for i in 0..InvalidHashSet::CAP {
+            let mut h = [0u8; 32];
+            h[0..4].copy_from_slice(&(i as u32).to_le_bytes());
+            set.mark(h);
+        }
+        let extra = [0xff; 32];
+        set.mark(extra);
+        assert!(!set.contains(extra), "past the cap is not stored");
+        let mut first = [0u8; 32];
+        first[0..4].copy_from_slice(&0u32.to_le_bytes());
+        assert!(set.contains(first), "the set is not cleared");
     }
 
     #[test]
