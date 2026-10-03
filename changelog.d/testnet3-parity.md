@@ -10,3 +10,8 @@ Fixed
   height alone, and testnet had no default minimum chain work. Testnet3
   now uses Core's default minimum chain work, which also gates IBD state,
   relay, and low-work header handling until the chain reaches it.
+- **Testnet3 header batches after a min-difficulty block.** A header
+  within 20 minutes of a min-difficulty parent now takes the last
+  non-min-difficulty `nBits` even when that header sits earlier in the
+  same `headers` reply, as Bitcoin Core does. Before, the walk expected
+  the min-difficulty limit, rejected the batch, and dropped the peer.
