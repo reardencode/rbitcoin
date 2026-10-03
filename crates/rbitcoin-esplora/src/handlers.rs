@@ -111,7 +111,8 @@ fn median_time_past(query: &Query, height: Height) -> Result<u32, rbitcoin_query
             .ok_or(rbitcoin_store::StoreError::NotFound)?;
         times.push(rec.timestamp);
     }
-    Ok(median_time_past_times(&times))
+    median_time_past_times(&times)
+        .map_err(|_| rbitcoin_store::StoreError::Corrupt("invariant: empty median time"))
 }
 
 pub async fn block_json(State(st): State<AppState>, Path(hash_hex): Path<String>) -> Response {

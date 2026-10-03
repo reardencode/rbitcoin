@@ -2264,7 +2264,10 @@ fn batch_context_ok(
         let mtp = if times.len() < 11 {
             0
         } else {
-            rbitcoin_primitives::median_time_past_times(&times)
+            match rbitcoin_primitives::median_time_past_times(&times) {
+                Ok(mtp) => mtp,
+                Err(_) => return false,
+            }
         };
         parent_hash = hash;
         let Some(bits) = expected_lookahead_bits(hub, height, &parent, hdr.time, st, diff) else {
@@ -4534,7 +4537,7 @@ mod tests {
                 .tip
                 .times
                 .clone();
-            let mtp = rbitcoin_primitives::median_time_past_times(&side_times);
+            let mtp = rbitcoin_primitives::median_time_past_times(&side_times).unwrap();
             let invalid = mine_at(side12.block_hash(), 40, mtp);
             apply(&mut st, &hub, 1, vec![invalid]);
             assert_eq!(st.header_walk.tip_hash(), Some(current_tip));
@@ -5378,7 +5381,7 @@ mod tests {
 
         apply(&mut st, &hub, 0, vec![]);
         assert_eq!(st.header_walk.tip_hash(), Some(tip.block_hash()));
-        let mtp = rbitcoin_primitives::median_time_past_times(&st.header_walk.tip.times);
+        let mtp = rbitcoin_primitives::median_time_past_times(&st.header_walk.tip.times).unwrap();
         let invalid = mine_at(tip.block_hash(), 14, mtp);
         apply(&mut st, &hub, 0, vec![invalid]);
         assert_eq!(st.header_walk.tip_hash(), Some(tip.block_hash()));

@@ -138,7 +138,8 @@ pub(crate) fn check_header_version_and_future_time(
 /// incomplete — not permanent `BadPrev` (that silently split batches to n=1).
 pub fn median_time_past(query: &Query, height: Height) -> Result<u32, ConsensusError> {
     if let Some((n, buf)) = query.store().mtp_times_at(height) {
-        return Ok(median_time_past_times(&buf[..n as usize]));
+        return median_time_past_times(&buf[..n as usize])
+            .map_err(|_| ConsensusError::BadHeader("empty median time"));
     }
     let mut times = Vec::with_capacity(11);
     let start = height.0.saturating_sub(10);
@@ -159,14 +160,15 @@ pub fn median_time_past(query: &Query, height: Height) -> Result<u32, ConsensusE
         }
         return Err(ConsensusError::BadPrev);
     }
-    Ok(median_time_past_times(&times))
+    median_time_past_times(&times).map_err(|_| ConsensusError::BadHeader("empty median time"))
 }
 
 /// MTP from the confirmed chain only (write structural). Tip-ahead heights
 /// must be carried on [`crate::confirm_run`] `Prepared::prev_mtp`.
 pub fn median_time_past_store(query: &Query, height: Height) -> Result<u32, ConsensusError> {
     if let Some((n, buf)) = query.store().mtp_times_at(height) {
-        return Ok(median_time_past_times(&buf[..n as usize]));
+        return median_time_past_times(&buf[..n as usize])
+            .map_err(|_| ConsensusError::BadHeader("empty median time"));
     }
     let mut times = Vec::with_capacity(11);
     let start = height.0.saturating_sub(10);
@@ -179,7 +181,7 @@ pub fn median_time_past_store(query: &Query, height: Height) -> Result<u32, Cons
             "confirm: write MTP missing confirmed header (carry prev_mtp)",
         )));
     }
-    Ok(median_time_past_times(&times))
+    median_time_past_times(&times).map_err(|_| ConsensusError::BadHeader("empty median time"))
 }
 
 pub use rbitcoin_primitives::median_time_past_times;
@@ -364,10 +366,10 @@ mod median_time_past_tests {
 
     #[test]
     fn mtp_times_picks_middle_of_sorted() {
-        assert_eq!(median_time_past_times(&[3, 1, 2]), 2);
-        assert_eq!(median_time_past_times(&[10]), 10);
+        assert_eq!(median_time_past_times(&[3, 1, 2]).unwrap(), 2);
+        assert_eq!(median_time_past_times(&[10]).unwrap(), 10);
         // Even length: Core takes sorted[len/2] (upper middle).
-        assert_eq!(median_time_past_times(&[1, 2, 3, 4]), 3);
+        assert_eq!(median_time_past_times(&[1, 2, 3, 4]).unwrap(), 3);
     }
 
     fn temp_q() -> (std::path::PathBuf, Query) {
@@ -452,7 +454,7 @@ mod median_time_past_tests {
             .mtp_times_at(Height(2))
             .expect("ring covers confirmed tip");
         assert_eq!(n, 3);
-        assert_eq!(median_time_past_times(&buf[..3]), 1010);
+        assert_eq!(median_time_past_times(&buf[..3]).unwrap(), 1010);
 
         // Height above tip with no plan → incomplete load error (not BadPrev).
         let err = median_time_past(&q, Height(5)).unwrap_err();
@@ -487,29 +489,29 @@ mod median_time_past_tests {
             parent_hash = Some(hdr.hash);
             prev = q.connect_block(Height(h), &hdr, &[ta]).unwrap();
         }
-        let want11 = median_time_past_times(&times[1..]);
+        let want11 = median_time_past_times(&times[1..]).unwrap();
         assert_eq!(median_time_past_store(&q, Height(11)).unwrap(), want11);
         assert_eq!(median_time_past(&q, Height(11)).unwrap(), want11);
         let (n, buf) = q.store().mtp_times_at(Height(11)).expect("ring at tip");
         assert_eq!(n, 11);
-        assert_eq!(median_time_past_times(&buf[..11]), want11);
+        assert_eq!(median_time_past_times(&buf[..11]).unwrap(), want11);
         assert!(
             q.store().mtp_times_at(Height(5)).is_none(),
             "historical MTP is not the tip ring"
         );
         assert_eq!(
             median_time_past_store(&q, Height(5)).unwrap(),
-            median_time_past_times(&times[0..=5])
+            median_time_past_times(&times[0..=5]).unwrap()
         );
 
         q.disconnect_tip().unwrap();
-        let want10 = median_time_past_times(&times[0..=10]);
+        let want10 = median_time_past_times(&times[0..=10]).unwrap();
         assert_eq!(median_time_past_store(&q, Height(10)).unwrap(), want10);
         let (n, buf) = q
             .store()
             .mtp_times_at(Height(10))
             .expect("ring rebuilt after pop");
-        assert_eq!(median_time_past_times(&buf[..n as usize]), want10);
+        assert_eq!(median_time_past_times(&buf[..n as usize]).unwrap(), want10);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

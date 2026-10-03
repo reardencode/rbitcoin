@@ -1451,7 +1451,7 @@ impl ChainHub {
                 None => break,
             }
         }
-        rbitcoin_primitives::median_time_past_times(&times)
+        rbitcoin_primitives::median_time_past_times(&times).unwrap_or(parent.time)
     }
 
     fn expected_bits_off_tip(
