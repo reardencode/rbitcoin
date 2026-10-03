@@ -325,7 +325,7 @@ Asmap: --asmap PATH loads a Core ip_asn.dat (relative to datadir). Unset tries {
 Milestone: skip script/sig checks at/below HEIGHT.\n\
   Defaults: mainnet 840000 anchored to block 0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5\n\
   (skip only on that header path, and only when header work meets min chain work),\n\
-  signet 0, testnet 2500000, regtest 0. Explicit HEIGHT is height-only. Use 0 for full scripts.\n\
+  signet 0, testnet 0, regtest 0. Explicit HEIGHT is height-only. Use 0 for full scripts.\n\
 Check-blocks: --check-blocks N revalidates the last N confirmed heights on open (default 6; 0 = all).\n\
 Mempool: --mempool-size-mb (default ~300 MiB weight budget).\n\
 Peers: --max-outbound (default 16 live download), --max-inbound (default 125).\n\
@@ -827,6 +827,12 @@ mod tests {
         let signet = ready_config(["rbitcoin-node", "--network=signet"]);
         assert_eq!(signet.milestone_height, 0);
         assert!(!signet.milestone().skips_scripts_at(1));
+        let testnet = ready_config(["rbitcoin-node", "--network=testnet"]);
+        assert_eq!(testnet.milestone_height, 0);
+        assert!(
+            !testnet.milestone().skips_scripts_at(1),
+            "omitted testnet milestone checks scripts"
+        );
         let signet_skip = ready_config([
             "rbitcoin-node",
             "--network=signet",

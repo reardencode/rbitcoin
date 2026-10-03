@@ -81,7 +81,7 @@ Clean smoke:
 | `--tor-control-password PASS` | `tor_control_password=` | unset — cookie AUTH unless set |
 | `--i2p-sam [HOST:PORT]` | `i2p_sam=` | unset — no SAM; omit ADDR → `127.0.0.1:7656` |
 | `--i2p-accept-incoming` | `i2p_accept_incoming=` | **off** — persist `{datadir}/i2p/p2p.priv` and STREAM FORWARD to the P2P bind |
-| `--milestone HEIGHT` | `milestone=` | mainnet anchor at 840000; signet 0; explicit height is height-only |
+| `--milestone HEIGHT` | `milestone=` | mainnet anchor at 840000; signet and testnet 0; explicit height is height-only |
 | `--max-outbound N` | `max_outbound=` | 16 live download peers |
 | `--max-inbound N` | `max_inbound=` | 125 inbound sessions; **0** = no inbound slots (outbound-only) |
 | `--mempool-size-mb N` | `mempool_size_mb=` | ~300 MiB weight |
