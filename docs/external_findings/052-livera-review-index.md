@@ -18,25 +18,25 @@ steps.
 | M1 | medium | Block getdata can queue past the send budget | fixed | `getdata_stops_when_send_budget_is_already_over` ([057](./057-block-getdata-budget.md)) |
 | M2 | medium | Silent-payment scan span is unbounded when start is set | fixed | `parse_sub_labels_start_and_networks`, `sp_scan_stops_when_the_client_hangs_up` ([065](./065-sp-scan-window.md)) |
 | M3 | medium | RPC listener has no accept timeout; long-poll holds a permit | fixed | `long_poll_does_not_hold_the_work_queue`, `wait_timeout_ms_caps_at_two_minutes` ([066](./066-rpc-wait-cap.md)) |
-| M4 | medium | fuse8 segment length need not be a power of two | open | — |
-| M5 | medium | Class A bulk read ignores the published end | open | — |
+| M4 | medium | fuse8 segment length need not be a power of two | fixed | `fuse8_segment_length_must_be_power_of_two` |
+| M5 | medium | Class A bulk read ignores the published end | fixed | `body_read_past_published_end_is_corrupt`, `create_loc_read_past_published_end_is_corrupt` |
 | M6 | medium | Testnet milestone is height-only | open | — |
 | M7 | medium | Mempool inv is one message per transaction | fixed | `tx_inv_over_one_thousand_is_two_messages` ([058](./058-tx-inv-batch.md)) |
 | M8 | medium | Pending blocks and orphans are count-capped only | open | — |
-| M9 | high | io_uring drop can free a buffer the kernel still owns | open | — |
+| M9 | high | io_uring drop can free a buffer the kernel still owns | fixed | `drain_guard_drop_with_leftover_pending_does_not_abort` |
 | M10 | low | Secret types derive Debug; create-then-chmod | open | — |
 | L1 | low | Height-0 BIP68 time lock uses median time 0 | open | — |
 | L4 | low | Empty median time panics | open | — |
 | L5 | low | Version nonce is not a CSPRNG | open | — |
 | L6 | low | Recent-reject set clears at the cap | open | — |
-| L8 | low | Manifest and txstat lengths allocate before a size check | open | — |
+| L8 | low | Manifest and txstat lengths allocate before a size check | fixed | `manifest_length_past_the_file_is_corrupt`, `txstat_blob_longer_than_the_file_is_corrupt` |
 | L9 | low | Tor control password on argv | open | — |
-| L10 | low | Datadir lock follows a symlink | open | — |
+| L10 | low | Datadir lock follows a symlink | fixed | `lock_file_does_not_follow_a_symlink` |
 | L11 | low | Conf parse errors echo the raw line | open | — |
 | L12 | low | Invalid-hash set grows without a cap | open | — |
 | L13 | low | Rate window grants two budgets at the boundary | fixed | `rate_limiter_boundary_does_not_grant_a_second_budget` ([059](./059-rate-window-boundary.md)) |
 | L14 | low | Mempool expiry runs only on admission | open | — |
-| L15 | low | Write jobs form a mutable slice over a shared buffer | open | — |
+| L15 | low | Write jobs form a mutable slice over a shared buffer | fixed | pool write arm uses a shared slice |
 | L2 | — | P2PKH fast path skips FindAndDelete | rejected | The fast path is the 25-byte template. A DER signature does not fit in that scriptCode, so FindAndDelete cannot change it. |
 | L3 | — | Witness-v0 strict DER independent of BIP66 | rejected | BIP141 witness verification is strict DER. Mainnet, testnet, signet, and regtest are unaffected. |
 | L7 | low | Rewind deeper than 1024 is refused | won't-fix | `REWIND_MAX_DEPTH` is a deliberate denial-of-service cap. Removing it needs an operator decision. No new knob. |
