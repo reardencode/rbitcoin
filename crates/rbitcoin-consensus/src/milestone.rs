@@ -6,10 +6,10 @@ use bitcoin::hashes::Hash;
 /// contiguous tip confirm. Only pure-Rust script/signature verification is gated.
 ///
 /// A height-only milestone (`anchor: None`) is the explicit `--milestone HEIGHT`
-/// speed switch. The mainnet default also carries [`MilestoneAnchor`]: skip
-/// only when this block and the anchor hash are the header-path occupants at
-/// their heights and best-header work meets `min_work_be`. Lookups are the
-/// caller's; this type does not walk ancestors.
+/// speed switch. The mainnet and testnet3 defaults also carry
+/// [`MilestoneAnchor`]: skip only when this block and the anchor hash are the
+/// header-path occupants at their heights and best-header work meets
+/// `min_work_be`. Lookups are the caller's; this type does not walk ancestors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MilestoneAnchor {
     pub hash: bitcoin::BlockHash,

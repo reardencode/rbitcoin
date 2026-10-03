@@ -1,7 +1,7 @@
 use crate::error::NodeError;
 use bitcoin::hex::FromHex;
 use bitcoin::ScriptBuf;
-use rbitcoin_consensus::{mainnet_milestone_anchor, ChainParams, Milestone};
+use rbitcoin_consensus::{default_milestone_anchor, ChainParams, Milestone};
 use rbitcoin_esplora::EsploraListen;
 use rbitcoin_primitives::{
     Network, DEFAULT_ELECTRUM_PORT, DEFAULT_ESPLORA_PORT, DEFAULT_HEALTH_PORT,
@@ -492,14 +492,14 @@ impl NodeConfig {
             return Milestone::NONE;
         }
         // Explicit `--milestone HEIGHT` stays height-only. The omitted mainnet
-        // default also requires the block-840000 hash and min chain work.
-        if !self.milestone_explicit && self.network == Network::Mainnet {
-            Milestone {
+        // and testnet3 defaults also require the block hash at the default
+        // height and min chain work.
+        match default_milestone_anchor(self.network) {
+            Some(anchor) if !self.milestone_explicit => Milestone {
                 height: self.milestone_height,
-                anchor: Some(mainnet_milestone_anchor()),
-            }
-        } else {
-            Milestone::height(self.milestone_height)
+                anchor: Some(anchor),
+            },
+            _ => Milestone::height(self.milestone_height),
         }
     }
 

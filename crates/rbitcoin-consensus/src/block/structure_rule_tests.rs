@@ -933,12 +933,19 @@ fn p3_default_milestone_heights() {
     assert_eq!(default_milestone_height(Network::Mainnet), 840_000);
     assert_eq!(default_milestone_height(Network::Testnet), 2_500_000);
     assert_eq!(default_milestone_height(Network::Signet), 0);
-    let anchor = crate::mainnet_milestone_anchor();
+    let anchor = crate::default_milestone_anchor(Network::Mainnet).unwrap();
     assert_eq!(
         anchor.hash.to_string(),
         crate::params::MAINNET_MILESTONE_HASH
     );
     assert_ne!(anchor.min_work_be, [0u8; 32]);
+    let testnet = crate::default_milestone_anchor(Network::Testnet).unwrap();
+    assert_eq!(
+        testnet.hash.to_string(),
+        crate::params::TESTNET_MILESTONE_HASH
+    );
+    assert!(crate::default_milestone_anchor(Network::Signet).is_none());
+    assert!(crate::default_milestone_anchor(Network::Regtest).is_none());
 }
 
 #[test]
