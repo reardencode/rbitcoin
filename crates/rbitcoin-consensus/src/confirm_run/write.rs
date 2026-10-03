@@ -64,6 +64,7 @@ fn finish_already_committed_write(
 
 struct ArchivePlanNs {
     pins: FkMap<rbitcoin_query::CreatePin>,
+    class_a_wave: crate::block::ClassAWave,
     class_a_ns: u64,
     ensure_ns: u64,
     plan_take_ns: u64,
@@ -76,6 +77,7 @@ fn apply_archive_plan(
 ) -> Result<ArchivePlanNs, ConsensusError> {
     let mut ns = ArchivePlanNs {
         pins: FkMap::default(),
+        class_a_wave: crate::block::ClassAWave::default(),
         class_a_ns: 0,
         ensure_ns: 0,
         plan_take_ns: 0,
@@ -130,6 +132,11 @@ fn apply_archive_plan(
     if let Some(last) = batch.prepared.last() {
         query.set_class_a_hi(Some(last.height.0));
     }
+    // The overlay is proven only for rows this commit wrote. A plan trimmed
+    // at commit wrote fewer rows than `planned_fks` names.
+    if loc.len() == planned_fks.len() {
+        ns.class_a_wave = crate::block::ClassAWave::new(planned_fks);
+    }
     Ok(ns)
 }
 
@@ -163,6 +170,7 @@ pub fn confirm_write_phase(
 
     let ArchivePlanNs {
         pins: write_create_pins,
+        class_a_wave,
         class_a_ns,
         mut ensure_ns,
         plan_take_ns,
@@ -206,6 +214,7 @@ pub fn confirm_write_phase(
                 &batch.wire_blocks,
                 &batch.batch_parents,
                 &abs_jobs,
+                &class_a_wave,
                 &mut reuse.borrow_mut(),
             )
         })?;
