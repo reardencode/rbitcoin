@@ -284,6 +284,59 @@ fn cached_confirming_hash_loads_once_per_height() {
     assert_eq!(loads, 2, "same height must not load twice");
 }
 
+/// A subscribe that answered `null` (no history) dedups a later push that is
+/// still empty, and an empty status goes out as `null`, never `""`.
+#[test]
+fn null_status_is_recorded_and_deduplicated() {
+    assert_eq!(status_json(String::new()), Value::Null);
+    assert_eq!(status_json("ab".into()), json!("ab"));
+    let sh = [7u8; 32];
+    let subs: HashSet<[u8; 32]> = [sh].into_iter().collect();
+    let mut last = HashMap::new();
+    record_sent_status(&mut last, sh, &Value::Null);
+    assert!(take_new_status(&mut last, &subs, sh, String::new()).is_none());
+    assert_eq!(
+        take_new_status(&mut last, &subs, sh, "cd".into()).as_deref(),
+        Some("cd")
+    );
+    record_sent_status(&mut last, sh, &json!("ef"));
+    assert!(take_new_status(&mut last, &subs, sh, "ef".into()).is_none());
+    assert_eq!(
+        take_new_status(&mut last, &subs, sh, String::new()).as_deref(),
+        Some("")
+    );
+}
+
+/// The block/reorg restatus push sends `null` when a watched script's status
+/// was last sent non-empty and its history is now empty, once: the next pass
+/// is deduplicated.
+#[tokio::test]
+async fn block_restatus_pushes_null_for_emptied_history() {
+    let (_dir, q) = tmp_store();
+    let q = Arc::new(q);
+    let sh = script_hash(&[0x51]);
+    let subs: HashSet<[u8; 32]> = [sh].into_iter().collect();
+    let mut last = HashMap::from([(sh, "aa".to_string())]);
+    let mut out = Vec::new();
+    emit_sh_notes(&mut out, &q, None, &subs, &mut last, None)
+        .await
+        .unwrap();
+    let lines: Vec<Value> = std::str::from_utf8(&out)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0]["method"], "blockchain.scripthash.subscribe");
+    assert_eq!(lines[0]["params"][0], json!(hash_hex_rev(&sh)));
+    assert_eq!(lines[0]["params"][1], Value::Null, "{lines:?}");
+    let mut again = Vec::new();
+    emit_sh_notes(&mut again, &q, None, &subs, &mut last, None)
+        .await
+        .unwrap();
+    assert!(again.is_empty(), "still empty: no second push");
+}
+
 #[test]
 fn drop_unsubscribed_status_clears_idle_hashes() {
     let mut last = HashMap::new();
@@ -893,6 +946,26 @@ async fn chain_view_reorg_notifies_dropped_scripthash() {
     let status0 = first["result"].as_str().unwrap().to_string();
     assert!(!status0.is_empty());
     let _ = hfk0;
+    // A never-used script answers null, and that null is remembered: the
+    // reorg below restatuses every sub, and this one must not be pushed.
+    let fresh = electrum_scripthash_hex(&[0x52]);
+    let mut line = serde_json::to_string(&json!({
+        "jsonrpc":"2.0","id":2,"method":"blockchain.scripthash.subscribe","params":[fresh]
+    }))
+    .unwrap();
+    line.push('\n');
+    reader.get_mut().write_all(line.as_bytes()).await.unwrap();
+    resp.clear();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        reader.read_line(&mut resp),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let fresh_reply: Value = serde_json::from_str(&resp).unwrap();
+    assert_eq!(fresh_reply["id"], 2, "{fresh_reply}");
+    assert_eq!(fresh_reply["result"], Value::Null, "{fresh_reply}");
 
     q.disconnect_tip().unwrap();
     let mut hash_b = [0u8; 32];
@@ -952,10 +1025,32 @@ async fn chain_view_reorg_notifies_dropped_scripthash() {
         push["method"].as_str(),
         Some("blockchain.scripthash.subscribe")
     );
-    assert_ne!(
-        push["params"][1].as_str().unwrap_or("missing"),
-        status0,
-        "dropped history must change status"
+    assert_eq!(push["params"][0], json!(sh), "{push}");
+    assert_eq!(
+        push["params"][1],
+        Value::Null,
+        "the reorg dropped the script's only tx, so its status is null: {push}"
+    );
+    // The connection is serial: a redundant push for the fresh script would
+    // arrive before this ping's reply.
+    let mut line = serde_json::to_string(&json!({
+        "jsonrpc":"2.0","id":3,"method":"server.ping","params":[]
+    }))
+    .unwrap();
+    line.push('\n');
+    reader.get_mut().write_all(line.as_bytes()).await.unwrap();
+    resp.clear();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        reader.read_line(&mut resp),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let next: Value = serde_json::from_str(&resp).unwrap();
+    assert_eq!(
+        next["id"], 3,
+        "no push for the still-empty fresh script: {next}"
     );
 
     handle.shutdown().await;
@@ -1437,7 +1532,7 @@ fn dispatch_param_type_edges_and_subscribe_cap() {
         &mut sh_subs,
     )
     .unwrap();
-    assert!(again.as_str().is_some());
+    assert_eq!(again, Value::Null, "empty store: no history, null status");
     let dropped = dispatch(
         "blockchain.scripthash.unsubscribe",
         &json!([sh]),

@@ -1110,7 +1110,9 @@ async fn electrum_mempool_notify_follows_funding_and_rbf() {
         json!([sh.clone()]),
     )
     .await;
-    assert!(v.get("result").is_some(), "{v}");
+    // No history: status is null (protocol), not "". Sparrow reads any
+    // non-null status as a used address and keeps deriving past its gap.
+    assert_eq!(v["result"], Value::Null, "{v}");
 
     let spend = |outputs: Vec<TxOut>| Transaction {
         version: TxVersion::TWO,
@@ -1160,7 +1162,11 @@ async fn electrum_mempool_notify_follows_funding_and_rbf() {
         1,
         "RBF victim's hash is restatused: {pushes:?}"
     );
-    assert_ne!(for_sh[0]["params"][1], funded_status, "{pushes:?}");
+    assert_eq!(
+        for_sh[0]["params"][1],
+        Value::Null,
+        "victim's history is empty again, so its status is null: {pushes:?}"
+    );
 
     handle.shutdown().await;
 }

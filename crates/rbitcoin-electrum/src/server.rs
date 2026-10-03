@@ -526,7 +526,7 @@ where
                                 let msg = json!({
                                     "jsonrpc": "2.0",
                                     "method": "blockchain.scripthash.subscribe",
-                                    "params": [hash_hex_rev(sh), status]
+                                    "params": [hash_hex_rev(sh), status_json(status)]
                                 });
                                 let _ = write_line(&mut writer, &msg).await;
                             }
@@ -692,10 +692,8 @@ where
                 let resp = match result {
                     Ok(v) => {
                         if method == "blockchain.scripthash.subscribe" {
-                            if let (Ok(sh), Some(status)) =
-                                (param_scripthash(&params_v, 0), v.as_str())
-                            {
-                                last_sent_status.insert(sh, status.to_string());
+                            if let Ok(sh) = param_scripthash(&params_v, 0) {
+                                record_sent_status(&mut last_sent_status, sh, &v);
                             }
                         } else if method == "blockchain.scripthash.unsubscribe" {
                             // Exact and O(1): a resubscribe must not be
@@ -1300,6 +1298,31 @@ fn drop_unsubscribed_status(
     }
 }
 
+/// Electrum status on the wire: `null` for a script with no history, else the
+/// hex digest. Internally "no history" is the empty string, so dedup compares
+/// one type.
+fn status_json(status: String) -> Value {
+    if status.is_empty() {
+        Value::Null
+    } else {
+        Value::String(status)
+    }
+}
+
+/// Remember the status a `scripthash.subscribe` reply sent, so the next push
+/// for an unchanged hash (including a still-empty one) is deduplicated.
+fn record_sent_status(last_sent: &mut HashMap<[u8; 32], String>, sh: [u8; 32], sent: &Value) {
+    match sent {
+        Value::Null => {
+            last_sent.insert(sh, String::new());
+        }
+        Value::String(s) => {
+            last_sent.insert(sh, s.clone());
+        }
+        _ => {}
+    }
+}
+
 fn take_new_status(
     last_sent: &mut HashMap<[u8; 32], String>,
     sh_subs: &HashSet<[u8; 32]>,
@@ -1337,7 +1360,7 @@ async fn emit_sh_notes<W: AsyncWrite + Unpin>(
         let msg = json!({
             "jsonrpc": "2.0",
             "method": "blockchain.scripthash.subscribe",
-            "params": [hash_hex_rev(&sh), status]
+            "params": [hash_hex_rev(&sh), status_json(status)]
         });
         write_line(writer, &msg).await?;
     }
@@ -1842,7 +1865,7 @@ fn dispatch_pinned(
                     .map_err(|e| e.to_string())?;
                 scripthash_status(Some(query), &hist)?
             };
-            Ok(json!(status))
+            Ok(status_json(status))
         }
         "blockchain.scripthash.unsubscribe" => {
             let sh = param_scripthash(params, 0)?;
