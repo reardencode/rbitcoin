@@ -11,14 +11,15 @@ use rbitcoin_store::{
     encode_txout_meta_and_outs, encode_unspent_output_into_secret, ensure_nofile_budget,
     free_gib_label, is_probe_exhausted_error, is_store_corrupt_display, leftover_probe_diag_ready,
     leftover_probe_diag_recorded, list_materialize_claims, list_runs, load_tweak_wave,
-    materialize_sh_unsorted_from_class_a, merkle_root_from_txids, next_run_path, output_flags,
-    script_hash, sh_heads_insert_capped, spend_ann_backend, spend_meta_backend, spent_abs,
-    unsorted_collect_workers, unsorted_done_last_fk, unsorted_pack_workers, unsorted_shard_dir,
-    write_sorted_run, BlockQueue, ColdProgress, FkMap, FkSet, HeadOpenOpts, HeadResizeSizeSnapshot,
-    HeadScale, HeaderRecord, HeightFence, IdxBodyJob, IdxBodyMode, InputRecord, OutputRecord,
-    PackedCreate, PointRecord, QueuedBlockMeta, ReadIoBackend, ScriptHashRecord, ShHeadValue,
-    SpTweaksTable, Store, StoreError, StoreLayout, StoreSecret, TakenRaw, TxRecord, U32Map,
-    U64IdentityHasher, U64Map, U64Set, WriteIoBackend, INCLUDE_HWM_NAME, SH_HEADS_CAP,
+    materialize_sh_unsorted_from_class_a, merkle_root_from_txids, merkle_root_mutated,
+    next_run_path, output_flags, script_hash, sh_heads_insert_capped, spend_ann_backend,
+    spend_meta_backend, spent_abs, unsorted_collect_workers, unsorted_done_last_fk,
+    unsorted_pack_workers, unsorted_shard_dir, write_sorted_run, BlockQueue, ColdProgress, FkMap,
+    FkSet, HeadOpenOpts, HeadResizeSizeSnapshot, HeadScale, HeaderRecord, HeightFence, IdxBodyJob,
+    IdxBodyMode, InputRecord, OutputRecord, PackedCreate, PointRecord, QueuedBlockMeta,
+    ReadIoBackend, ScriptHashRecord, ShHeadValue, SpTweaksTable, Store, StoreError, StoreLayout,
+    StoreSecret, TakenRaw, TxRecord, U32Map, U64IdentityHasher, U64Map, U64Set, WriteIoBackend,
+    INCLUDE_HWM_NAME, SH_HEADS_CAP,
 };
 
 #[test]
@@ -63,6 +64,7 @@ fn crate_root_exports_cross_crate_names() {
     let _ = leftover_probe_diag_recorded;
     let _ = load_tweak_wave;
     let _ = merkle_root_from_txids;
+    let _ = merkle_root_mutated;
     let _ = next_run_path;
     let _ = script_hash;
     let _ = sh_heads_insert_capped;
