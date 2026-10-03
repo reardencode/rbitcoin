@@ -824,13 +824,6 @@ pub(crate) fn apply_confirm_reject(
             f.request_single_block(until);
         }
     }
-    if class != ConfirmRejectClass::Cancelled && class != ConfirmRejectClass::EngineFault {
-        if let Some(q) = query {
-            let tip = hub.and_then(|h| h.tip_height());
-            q.set_lookup_taken_hi(tip);
-            q.set_lookup_started_hi(tip);
-        }
-    }
     if class.is_soft() {
         apply_soft_wire_reject(st, height, hash, err, query, hub);
         return;

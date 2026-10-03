@@ -1316,28 +1316,23 @@ fn ibd_bad_prev_fork() {
     assert!(st.halt.is_some(), "second engine fault halts IBD");
     assert!(!st.body.is_rejected(&h(0x5b)));
 
-    // With the hub: a post-lookup reject rewinds lookup to the tip, except
-    // cancel. An engine fault neither isolates nor rewinds.
+    // With the hub: IBD leaves lookup where it is. The confirm thread
+    // re-armed it when it rejected, and lookup may since have taken a body
+    // the reject offered back.
     let mut st = IbdWorkState::new(Vec::new(), hub.tip_hash(), Some(t));
     st.record_height(h(0x5a), t + 2);
-    for (err, rewind) in [
-        ("consensus: bad block: merkle root mismatch", true),
-        ("consensus: store: corrupt record: archive: parent create_fk unresolved (contiguous batch required)", false),
-        ("invariant: create.loc hole after count", false),
-        ("connect height not tip+1", true),
-        ("consensus: prevout already spent on best chain", true),
-        ("confirm cancelled", false),
+    for err in [
+        "consensus: bad block: merkle root mismatch",
+        "consensus: store: corrupt record: archive: parent create_fk unresolved (contiguous batch required)",
+        "connect height not tip+1",
+        "consensus: prevout already spent on best chain",
+        "confirm cancelled",
     ] {
         hub.query.set_lookup_taken_hi(Some(t + 2));
         hub.query.set_lookup_started_hi(Some(t + 2));
-        assert!(hub.query.lookup_already_taken(t + 2));
         apply_confirm_reject(&mut st, t + 2, h(0x5a), err, q, Some(&hub));
-        let want = if rewind { Some(t) } else { Some(t + 2) };
-        assert_eq!(hub.query.lookup_taken_hi(), want, "{err}");
-        if rewind {
-            assert_eq!(hub.query.lookup_started_hi(), Some(t), "{err}");
-            assert!(!hub.query.lookup_already_taken(t + 2), "{err}");
-        }
+        assert_eq!(hub.query.lookup_taken_hi(), Some(t + 2), "{err}");
+        assert_eq!(hub.query.lookup_started_hi(), Some(t + 2), "{err}");
     }
     let mut st = IbdWorkState::new(Vec::new(), hub.tip_hash(), Some(t));
     st.record_height(h(0x5b), t + 2);
@@ -2218,6 +2213,110 @@ fn ibd_batched_mutated_body_is_isolated_to_its_block() {
         !rig.st.slots[1].alive,
         "the mutated body's sender is dropped"
     );
+    rig.finish();
+}
+
+/// tip+1 and tip+2 write in one batch and tip+2 breaks its BIP68 relative
+/// lock, which only the write phase checks. The write hands the batch back
+/// and offers it to the body queue, isolated: tip+1 connects from the
+/// offered-back body with no second getdata and no stale-plan retry, and
+/// tip+2 alone is rejected as invalid.
+#[test]
+fn batched_write_reject_offers_the_wave_back() {
+    use super::super::assign::tests::lock_default_assign_stop;
+    use super::super::confirm::ConfirmEvent;
+    use super::super::state::InflightReq;
+    use bitcoin::{ScriptBuf, Sequence};
+    use rbitcoin_consensus::mine_regtest_paying;
+    use std::time::{Duration, Instant};
+
+    let _env = lock_default_assign_stop();
+    let mut rig = WireRig::new("write-reject", 2);
+    let (t, cbs) = (rig.t, rig.cbs.clone());
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+    let b1 = mine_regtest_paying(
+        rig.tip,
+        rig.tip_time + 600,
+        t + 1,
+        spk.clone(),
+        vec![WireRig::spend(cbs[0])],
+    );
+    let mut locked = WireRig::spend(cbs[1]);
+    locked.version = bitcoin::transaction::Version::TWO;
+    locked.input[0].sequence = Sequence::from_height(1000);
+    let b2 = mine_regtest_paying(
+        b1.block_hash(),
+        rig.tip_time + 1200,
+        t + 2,
+        spk,
+        vec![locked],
+    );
+    let (h1, h2) = (b1.block_hash(), b2.block_hash());
+    rig.plant(&[&b1, &b2]);
+    for (peer, body) in [(1, &b1), (2, &b2)] {
+        let hash = body.block_hash();
+        rig.st.slots[peer - 1].in_flight.insert(hash);
+        rig.st.inflight.insert(hash, InflightReq::new(peer));
+        rig.deliver(peer, body);
+    }
+    rig.start_engine();
+
+    // Hold the rejects until tip+1 has connected, so IBD cannot be the
+    // one that brings its body back.
+    let rx = &rig.engine.as_ref().unwrap().1;
+    let (held_tx, held) = std::sync::mpsc::channel();
+    let mut seen = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while rig.hub.tip_hash() != Some(h1) {
+        assert!(Instant::now() < deadline, "tip+1 never connected: {seen:?}");
+        let Ok(ev) = rx.recv_timeout(Duration::from_millis(5)) else {
+            continue;
+        };
+        if let ConfirmEvent::Reject {
+            hash,
+            class,
+            batch_len,
+            ..
+        } = &ev
+        {
+            seen.push((*hash, *class, *batch_len));
+        }
+        held_tx.send(ev).unwrap();
+    }
+    drop(held_tx);
+    assert_eq!(
+        seen,
+        [(h1, ConfirmRejectClass::Cascade, 2)],
+        "the retake stamps a fresh plan"
+    );
+    super::apply_confirm_events(
+        &mut rig.st,
+        &rig.hub,
+        &held,
+        &rig.write_next,
+        &std::sync::atomic::AtomicU32::new(0),
+        &mut rig.progress,
+        Some(&rig.feed),
+    );
+
+    let mut asked_h1 = false;
+    let rejects = rig.pump(
+        |_, hash| {
+            asked_h1 |= hash == h1;
+            if hash == h1 {
+                b1.clone()
+            } else {
+                b2.clone()
+            }
+        },
+        |st, _, _| st.body.is_rejected(&h2),
+    );
+    assert!(!asked_h1, "tip+1 came back from the reject, not a getdata");
+    assert_eq!(
+        rejects.last(),
+        Some(&(h2, ConfirmRejectClass::ConsensusInvalid, 1))
+    );
+    assert_eq!(rig.hub.tip_hash(), Some(h1));
     rig.finish();
 }
 

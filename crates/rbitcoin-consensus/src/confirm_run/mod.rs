@@ -74,7 +74,10 @@ use pin::ensure_spend_abs_layouts;
 use pin::{collect_spend_abs_after_fill, pin_for_wire_batch};
 pub use scripts::{confirm_scripts_phase, drive_script_waves_with};
 pub(crate) use write::finish_post_commit;
-pub use write::{confirm_write_phase, finish_post_commit_hashes, replay_spend_annotations};
+pub use write::{
+    confirm_write_phase, confirm_write_phase_or_return, finish_post_commit_hashes,
+    replay_spend_annotations,
+};
 #[cfg(test)]
 use write::{
     fill_planned_create_layout_after_commit, write_batch_vs_tip, write_height_needed,
@@ -354,6 +357,11 @@ impl ScriptOkBatch {
     /// Parent handles in this batch (may share Arc payloads with other batches).
     pub fn parent_count(&self) -> usize {
         self.batch_parents.len()
+    }
+
+    /// Wire blocks in the same order as [`Self::heights_hashes`].
+    pub fn wire_blocks(&self) -> &[Arc<Block>] {
+        &self.wire_blocks
     }
 
     /// Wire headers in the same order as [`Self::heights_hashes`].

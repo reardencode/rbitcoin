@@ -533,6 +533,40 @@ fn reoffer_blocks_to_body_queue<'a>(
     }
 }
 
+/// A write or scripts reject: lookup took the wave's bodies off the body
+/// queue. Re-arm lookup at the tip, which bumps the generation so load
+/// drops its look-ahead plan before the next wave. When the wave is retried
+/// (a cascade, or a batched reject being isolated), turn on isolation
+/// before the re-arm and offer its bodies back after it, so lookup cannot
+/// rebuild the same wave from them. Returns false when the class does not
+/// re-arm (cancel, engine fault).
+fn rearm_after_reject(
+    hub: &ChainHub,
+    feed: &ConfirmFeed,
+    class: ConfirmRejectClass,
+    wave: &[(u32, BlockHash, &bitcoin::Block)],
+) -> bool {
+    if matches!(
+        class,
+        ConfirmRejectClass::Cancelled | ConfirmRejectClass::EngineFault
+    ) {
+        return false;
+    }
+    let retried = class.isolate_if_batched(wave.len()) == ConfirmRejectClass::Cascade;
+    if let Some(&(first_h, _, _)) = wave.first() {
+        if retried && wave.len() > 1 {
+            feed.request_single_block(first_h.saturating_add(wave.len() as u32 - 1));
+        }
+    }
+    hub.query.set_lookup_taken_hi(hub.tip_height());
+    hub.query.set_lookup_started_hi(hub.tip_height());
+    if retried {
+        reoffer_blocks_to_body_queue(hub, wave.iter().copied());
+        feed.notify();
+    }
+    true
+}
+
 /// Stamp/pin fail: drop speculative fks, bump the feed epoch, re-offer to BQ.
 /// A one-block wave drops its failing block. A batched reject names the first
 /// hash but may be any block's fault, so every block goes back and the retry
@@ -702,6 +736,9 @@ pub(crate) struct LoadBatch {
     pub drop_inflight_below: Option<u32>,
     /// [`ConfirmFeed::epoch`] when lookup built this batch.
     pub epoch: u64,
+    /// [`rbitcoin_query::Query::lookup_taken_gen`] when lookup selected the
+    /// wave. Load drops its look-ahead plan when this changes.
+    pub gen: u32,
 }
 
 #[allow(clippy::type_complexity)] // packed row / pin / script-hash tuple is the on-disk shape
@@ -819,6 +856,7 @@ pub(crate) fn load_batches_from_wave(
             parent_ids: Some(chunk_parent_ids(wave_ids, chunk)),
             drop_inflight_below: None,
             epoch: 0,
+            gen: 0,
         });
         i = end;
     }
@@ -1414,8 +1452,9 @@ pub(crate) fn spawn_confirm_engine(
     let (write_tx, write_rx) =
         std::sync::mpsc::sync_channel::<rbitcoin_consensus::ScriptOkBatch>(caps.write);
     let (load_tx, load_rx) = std::sync::mpsc::sync_channel::<LoadBatch>(caps.load);
-    // Write reject: plan drops reserved fks + last_loaded so re-lookup after
-    // Class A partial commit does not drift next_tx_start.
+    // A write fault that does not re-arm lookup: plan drops reserved fks +
+    // last_loaded so re-lookup after Class A partial commit does not drift
+    // next_tx_start. A re-arm resets load through the lookup generation.
     let load_ahead_reset = Arc::new(AtomicBool::new(false));
 
     let hub_wb = Arc::clone(&hub);
@@ -1488,7 +1527,7 @@ pub(crate) fn spawn_confirm_engine(
                     .iter()
                     .map(|&(h, raw)| (h, BlockHash::from_byte_array(raw)))
                     .collect();
-                match rbitcoin_consensus::confirm_write_phase(
+                match rbitcoin_consensus::confirm_write_phase_or_return(
                     &hub_wb.query,
                     &hub_wb.params,
                     hub_wb.milestone,
@@ -1544,7 +1583,7 @@ pub(crate) fn spawn_confirm_engine(
                             );
                         }
                     }
-                    Err(e) => {
+                    Err((e, failed)) => {
                         confirm_thr_stats::add_write_work(&stats, t0.elapsed());
                         let mut err = e;
                         let msg = err.to_string();
@@ -1648,7 +1687,6 @@ pub(crate) fn spawn_confirm_engine(
                             feed_wb.finish(heights_hashes.iter().map(|(h, _)| *h));
                             continue;
                         }
-                        load_ahead_reset_wb.store(true, Ordering::Release);
                         feed_wb.finish(heights_hashes.iter().map(|(h, _)| *h));
                         loop_stats_wb
                             .confirm_reject_stops
@@ -1657,6 +1695,16 @@ pub(crate) fn spawn_confirm_engine(
                             "ibd: confirm write reject @ {height} batch_parts={parts}: {err}"
                         );
                         let class = ConfirmRejectClass::from_consensus(&err);
+                        let t_rearm = Instant::now();
+                        let wave: Vec<(u32, BlockHash, &bitcoin::Block)> = meta
+                            .iter()
+                            .zip(failed.wire_blocks())
+                            .map(|(&(h, ha), b)| (h, ha, b.as_ref()))
+                            .collect();
+                        if !rearm_after_reject(&hub_wb, &feed_wb, class, &wave) {
+                            load_ahead_reset_wb.store(true, Ordering::Release);
+                        }
+                        confirm_thr_stats::add_write_work(&stats, t_rearm.elapsed());
                         let _ = emit_confirm_reject(
                             &event_tx_wb,
                             &feed_wb,
@@ -1760,12 +1808,14 @@ pub(crate) fn spawn_confirm_engine(
                         .confirm_reject_stops
                         .fetch_add(1, Ordering::Relaxed);
                     warn!("ibd: confirm scripts reject @ {height} (batch first {hash}): {e}");
+                    let class = ConfirmRejectClass::from_consensus(&e);
+                    rearm_after_reject(&hub_sc, &feed_sc, class, &[]);
                     let _ = emit_confirm_reject(
                         &event_tx_sc,
                         &feed_sc,
                         height,
                         hash,
-                        ConfirmRejectClass::from_consensus(&e),
+                        class,
                         msg,
                         meta.heights_hashes.len(),
                     );
@@ -1794,15 +1844,13 @@ pub(crate) fn spawn_confirm_engine(
                 "ibd: confirm load on dedicated OS thread (claim resolve-complete → stamp+pin)"
             );
             let mut lookup_ahead = LoadAheadState::new(&hub_load);
+            let mut stamped_gen: Option<u32> = None;
             let stats = hub_load.query.confirm_stats_arc();
             loop {
                 if feed_load.stopped() || hub_load.query.confirm_cancelled() {
                     break;
                 }
                 let t_hygiene = Instant::now();
-                if load_ahead_reset_load.swap(false, Ordering::AcqRel) {
-                    lookup_ahead.clear_all(&hub_load);
-                }
                 lookup_ahead.apply_disconnect(&hub_load);
                 confirm_thr_stats::add_load_prune(&stats, t_hygiene.elapsed());
                 if feed_load.stopped() {
@@ -1827,6 +1875,7 @@ pub(crate) fn spawn_confirm_engine(
                 queues_load.note_load_recv(n, wire);
                 let parent_ids = lb.parent_ids;
                 let claim_epoch = lb.epoch;
+                let wave_gen = lb.gen;
                 if claim_epoch != feed_load.epoch() {
                     debug!(
                         "ibd: confirm load drop stale plan epoch={claim_epoch} live={}",
@@ -1864,6 +1913,17 @@ pub(crate) fn spawn_confirm_engine(
                 let batch = (batch, 0u32);
 
                 let (batch, _batch_inputs) = batch;
+                // After the recv: a rejected wave's bodies are offered back
+                // and retaken at once, so a reset seen only before the recv
+                // lets the retake stamp from the plan it just failed with.
+                let t_reset = Instant::now();
+                if load_ahead_reset_load.swap(false, Ordering::AcqRel)
+                    || stamped_gen != Some(wave_gen)
+                {
+                    lookup_ahead.clear_all(&hub_load);
+                }
+                stamped_gen = Some(wave_gen);
+                confirm_thr_stats::add_load_prune(&stats, t_reset.elapsed());
                 if batch.is_empty() {
                     if drop_below.is_some() {
                         let t_prune = Instant::now();
@@ -2292,6 +2352,7 @@ pub(crate) fn spawn_confirm_engine(
                             let epoch = feed.epoch();
                             for batch in &mut batches {
                                 batch.epoch = epoch;
+                                batch.gen = taken_gen;
                             }
                             for batch in batches {
                                 let t_send = Instant::now();

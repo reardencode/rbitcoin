@@ -184,6 +184,7 @@ fn split_wave_into_load_batches_is_eight_by_8000() {
         parent_ids: None,
         drop_inflight_below: None,
         epoch: 0,
+        gen: 0,
     }
     .items
     .is_empty());
@@ -445,6 +446,7 @@ fn load_recv_is_lookup_order() {
         parent_ids: None,
         drop_inflight_below: None,
         epoch: 0,
+        gen: 0,
     })
     .unwrap();
     tx.send(LoadBatch {
@@ -452,6 +454,7 @@ fn load_recv_is_lookup_order() {
         parent_ids: None,
         drop_inflight_below: Some(7),
         epoch: 0,
+        gen: 0,
     })
     .unwrap();
     let a = rx.recv().unwrap();
@@ -483,6 +486,7 @@ fn load_stamp_items_keep_pres() {
         parent_ids: None,
         drop_inflight_below: None,
         epoch: 0,
+        gen: 0,
     };
     let items = load_stamp_items(lb.items.into_iter().map(|(h, _, w)| (h, w.block, w.pres)));
     assert_eq!(items.len(), 1);
@@ -504,6 +508,7 @@ fn lookup_blocks_when_loadq_full() {
             parent_ids: None,
             drop_inflight_below: None,
             epoch: 0,
+            gen: 0,
         })
         .unwrap();
     }
@@ -513,6 +518,7 @@ fn lookup_blocks_when_loadq_full() {
             parent_ids: None,
             drop_inflight_below: None,
             epoch: 0,
+            gen: 0,
         })
         .is_err(),
         "9th send must wait / fail while loadq is full"
@@ -523,6 +529,7 @@ fn lookup_blocks_when_loadq_full() {
         parent_ids: None,
         drop_inflight_below: None,
         epoch: 0,
+        gen: 0,
     })
     .unwrap();
 }
@@ -1789,4 +1796,73 @@ fn load_fail_rewind_requeues_the_wave(hub: &crate::chain::ChainHub, tip: BlockHa
     );
     assert!(!solo.single_block());
     assert!(!hub.query.block_queue_has_height(t + 1));
+}
+
+/// A write or scripts reject re-arms lookup at the tip. A retried batched
+/// wave turns on isolation and goes back on the body queue; a one-block
+/// consensus reject does not.
+#[test]
+fn reject_rearms_lookup_and_requeues_a_retried_wave() {
+    use super::{rearm_after_reject, ConfirmRejectClass};
+    use rbitcoin_consensus::mine_empty_regtest;
+
+    let (dir, hub0) = crate::chain::tiny_regtest_hub_labeled("rearm-reject");
+    let hub = Arc::new(hub0);
+    hub.ensure_genesis().unwrap();
+    let tip = hub.tip_hash().unwrap();
+    let time = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest)
+        .header
+        .time;
+    let b1 = mine_empty_regtest(tip, time + 600, 1);
+    let b2 = mine_empty_regtest(b1.block_hash(), time + 1200, 2);
+    let wave = [(1, b1.block_hash(), &b1), (2, b2.block_hash(), &b2)];
+
+    let feed = ConfirmFeed::new();
+    hub.query.set_lookup_taken_hi(Some(2));
+    assert!(rearm_after_reject(
+        &hub,
+        &feed,
+        ConfirmRejectClass::ConsensusInvalid,
+        &wave[..1],
+    ));
+    assert_eq!(hub.query.lookup_taken_hi(), Some(0));
+    assert!(
+        !hub.query.block_queue_has_height(1),
+        "invalid block dropped"
+    );
+    assert!(!feed.single_block());
+
+    for class in [
+        ConfirmRejectClass::Cascade,
+        ConfirmRejectClass::ConsensusInvalid,
+    ] {
+        let feed = ConfirmFeed::new();
+        hub.query.set_lookup_taken_hi(Some(2));
+        let gen = hub.query.lookup_taken_gen();
+        assert!(rearm_after_reject(&hub, &feed, class, &wave));
+        assert_ne!(hub.query.lookup_taken_gen(), gen, "{class:?}: load resets");
+        assert_eq!(hub.query.lookup_taken_hi(), Some(0), "{class:?}");
+        assert_eq!(feed.isolate_until(), 2, "{class:?}: isolated");
+        assert!(
+            hub.query.block_queue_has_height(1) && hub.query.block_queue_has_height(2),
+            "{class:?}: retried wave is back on the queue"
+        );
+        for ht in [1, 2] {
+            hub.query.block_queue_dequeue_height(ht).unwrap();
+        }
+    }
+
+    hub.query.set_lookup_taken_hi(Some(2));
+    assert!(!rearm_after_reject(
+        &hub,
+        &feed,
+        ConfirmRejectClass::EngineFault,
+        &wave
+    ));
+    assert_eq!(
+        hub.query.lookup_taken_hi(),
+        Some(2),
+        "engine fault keeps lookup"
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }

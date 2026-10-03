@@ -17,6 +17,10 @@ Fixed
   confirm lookup at the tip. A lookup pass that started before the reject
   could then move the restart point past those bodies, so they were never
   confirmed and IBD waited on blocks it already had.
+- **IBD retries a rejected batch from the bodies it already has.** When
+  a batch fails in the write stage and is retried one block at a time,
+  its bodies go back on the body queue. Before, IBD downloaded them
+  again.
 - **IBD disconnects a peer that sends a mutated block.** The peer's
   address also cools down, so the block is requested from another peer
   when one is available. A `noban` peer stays connected, as in Bitcoin
