@@ -261,10 +261,11 @@ pub(crate) fn apply_block_transactions(
     finish_reconstructed(hsi.header, txdata)
 }
 
-/// BIP152: filled slots must merkle to the compact header (empty → getdata).
+/// BIP152: filled slots must merkle to the compact header and not be a
+/// Core `IsBlockMutated` body (empty → getdata).
 fn finish_reconstructed(header: Header, txdata: Vec<Transaction>) -> Result<Block, Vec<u64>> {
     let block = Block { header, txdata };
-    if !block.check_merkle_root() {
+    if !block.check_merkle_root() || rbitcoin_consensus::block_mutated_without_coinbase(&block) {
         return Err(Vec::new());
     }
     Ok(block)
@@ -664,6 +665,18 @@ mod tests {
         assert!(
             missing.is_empty(),
             "merkle-mutated fill must getdata (empty missing), got {missing:?}"
+        );
+    }
+
+    #[test]
+    fn prefilled_64_byte_body_without_coinbase_is_not_a_block() {
+        let inner = crate::chain::sixty_four_byte_body(BlockHash::all_zeros(), 1);
+        let hsi = HeaderAndShortIds::from_block(&inner, 6, 2, &[]).unwrap();
+        let empty: HashMap<ShortId, Vec<&Transaction>> = HashMap::new();
+        let missing = try_reconstruct(&hsi, &empty, 2).expect_err("possible inner merkle node");
+        assert!(
+            missing.is_empty(),
+            "a mutated fill must getdata the full block, got {missing:?}"
         );
     }
 
