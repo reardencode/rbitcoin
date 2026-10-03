@@ -344,6 +344,21 @@ impl CreateLoc {
         if windows.is_empty() {
             return Ok(());
         }
+        // One published-length load. A full slab pread would succeed past it.
+        let published = self.loc.logical_len();
+        if published == 0 {
+            return Err(StoreError::Corrupt(
+                "invariant: body read missing published end",
+            ));
+        }
+        for w in windows.iter() {
+            let end = loc_file_off(w.win_first, SLOT).saturating_add(w.buf.len() as u64);
+            if end > published {
+                return Err(StoreError::Corrupt(
+                    "invariant: body read past published end",
+                ));
+            }
+        }
         let fd = self.loc.read_fd();
         let mut ops: Vec<ReadOp<'_>> = Vec::with_capacity(windows.len());
         for w in windows.iter_mut() {
@@ -588,6 +603,19 @@ mod tests {
         blob[8..16].copy_from_slice(&logical.to_le_bytes());
         blob.extend_from_slice(&payload);
         std::fs::write(dir.join("create.loc.ovf"), blob).unwrap();
+    }
+
+    #[test]
+    fn create_loc_read_past_published_end_is_corrupt() {
+        let dir = TempDir::labeled("create-loc-pub").unwrap();
+        let loc = CreateLoc::create(dir.path()).unwrap();
+        loc.append(&chain(&[1], &[16])).unwrap();
+        loc.loc.set_logical_len(FILE_HEADER_LEN as u64).unwrap();
+        match loc.range_batch(&[Fk(1)]) {
+            Err(StoreError::Corrupt(msg)) => assert!(msg.contains("published"), "{msg}"),
+            Ok(v) => panic!("read past published end returned {v:?}"),
+            Err(other) => panic!("{other}"),
+        }
     }
 
     #[test]

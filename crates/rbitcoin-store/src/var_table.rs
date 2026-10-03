@@ -442,11 +442,29 @@ impl VarTable {
         Ok(n)
     }
 
+    /// One Acquire load of the published end. Not the `(count, end)` seqlock:
+    /// callers that already hold that pair still reject a span past this end.
+    fn require_published_body(&self, offset: u64, len: u64) -> Result<(), StoreError> {
+        let published = self.published_body_end.load(Ordering::Acquire);
+        if published == 0 {
+            return Err(StoreError::Corrupt(
+                "invariant: body read missing published end",
+            ));
+        }
+        if offset.saturating_add(len) > published {
+            return Err(StoreError::Corrupt(
+                "invariant: body read past published end",
+            ));
+        }
+        Ok(())
+    }
+
     /// Class A body pread via bulk_io.
     fn read_body_bulk(&self, offset: u64, buf: &mut [u8]) -> Result<(), StoreError> {
         if buf.is_empty() {
             return Ok(());
         }
+        self.require_published_body(offset, buf.len() as u64)?;
         let rc = crate::bulk_io::pread_single(self.body.read_fd(), offset, buf);
         if rc < 0 {
             return Err(StoreError::io(
@@ -464,6 +482,7 @@ impl VarTable {
         if buf.is_empty() {
             return Ok(());
         }
+        self.require_published_body(offset, buf.len() as u64)?;
         use crate::bulk_io::ReadOp;
         use crate::io_backend::ReadIoBackend;
         let mut ops = [ReadOp {
@@ -528,6 +547,24 @@ mod tests {
 
     fn read_at(t: &VarTable, off: u64, len: u64) -> Vec<u8> {
         t.with_bytes_at(off, len, |b| Ok(b.to_vec())).unwrap()
+    }
+
+    #[test]
+    fn body_read_past_published_end_is_corrupt() {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let id = N.fetch_add(1, AtomicOrdering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("rbitcoin-var-pub-{id}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let t = VarTable::create(&dir, "tx", TableKind::TxOut).unwrap();
+        let err = t
+            .with_bytes_at(FILE_HEADER_LEN as u64, 16, |_| Ok(()))
+            .expect_err("past published end");
+        match err {
+            StoreError::Corrupt(msg) => assert!(msg.contains("published"), "{msg}"),
+            other => panic!("{other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
