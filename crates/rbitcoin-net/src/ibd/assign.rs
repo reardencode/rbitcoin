@@ -1654,6 +1654,7 @@ pub(in crate::ibd) mod tests {
         assert!(st.slots[0].rate.work_started_ms <= t1);
         let _ = std::fs::remove_dir_all(dir);
     }
+
     /// Off-path getdata (mainnet 08:16:23: ordered empty, h2h=0, inflight=7)
     /// must not occupy slots; tip+1 and live awaiting-reorg need stay.
     /// Speculative explore-need at an empty remainder is leftover — drop it.

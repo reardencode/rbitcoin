@@ -2916,8 +2916,16 @@ async fn serve_getdata(
     let mut notfound: Vec<Inventory> = Vec::new();
     for item in inv {
         match item {
-            Inventory::Block(h) | Inventory::WitnessBlock(h) => {
-                serve_getdata_full_block(hub, out_tx, session, inflight, h).await?;
+            // Unknown hash: Core ProcessGetData answers notfound. Silence
+            // holds the requester's getdata until the stall floor.
+            // `knows_header` is the index check. `header_of` reconstructs
+            // the block on this async task. A missing body is `false` from
+            // the blocking encode.
+            Inventory::Block(h) | Inventory::WitnessBlock(h)
+                if !hub.knows_header(h)
+                    || !serve_getdata_full_block(hub, out_tx, session, inflight, h).await? =>
+            {
+                notfound.push(*item);
             }
             Inventory::CompactBlock(h) => {
                 serve_getdata_compact(hub, out_tx, follow, session, inflight, h)?;
@@ -2946,12 +2954,9 @@ async fn serve_getdata_full_block(
     session: Option<&crate::peers::LivePeer>,
     inflight: Option<&AtomicUsize>,
     h: &bitcoin::BlockHash,
-) -> Result<(), NetError> {
+) -> Result<bool, NetError> {
     if inflight.is_some_and(|n| n.load(Ordering::SeqCst) >= MAX_SERVE_BLOCKS) {
-        return Ok(());
-    }
-    if !hub.stale_relay_allowed(h) {
-        return Ok(());
+        return Ok(true);
     }
     let query = Arc::clone(&hub.query);
     let cache = Arc::clone(&hub.cache);
@@ -2962,10 +2967,17 @@ async fn serve_getdata_full_block(
     })
     .await
     .map_err(|_| NetError::Protocol("serve reconstruct join failed"))??;
-    if let Some(bytes) = encoded {
-        let _ = try_queue_served_encoded(session, out_tx, inflight, bytes)?;
+    let Some(bytes) = encoded else {
+        // Header-only or pruned. Notfound comes from this blocking encode,
+        // not from reconstructing the block on the async task.
+        return Ok(false);
+    };
+    // A body we have but will not relay (month-old side block) stays silent.
+    if !hub.stale_relay_allowed(h) {
+        return Ok(true);
     }
-    Ok(())
+    let _ = try_queue_served_encoded(session, out_tx, inflight, bytes)?;
+    Ok(true)
 }
 
 fn serve_getdata_compact(

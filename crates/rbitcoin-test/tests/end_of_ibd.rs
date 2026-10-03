@@ -838,7 +838,7 @@ async fn sh_interrupt_journey() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn end_of_ibd_work_fork() {
     let _live = live_p2p_lock().await;
-    let wall = llvm_cov_wall(150, 300);
+    let wall = llvm_cov_wall(30, 90);
     tokio::time::timeout(wall, work_fork_journey())
         .await
         .expect("end_of_ibd_work_fork wall");

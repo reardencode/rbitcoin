@@ -2326,7 +2326,10 @@ async fn node_listen_and_exit() {
     cfg.listen.electrum = Some(held_electrum.local_addr().unwrap());
     cfg.rpc.listen = Some(held_rpc.local_addr().unwrap());
     cfg.listen.health = Some(health_addr);
-    cfg.max_run_secs = Some(15);
+    // Deadline starts at tip-follow entry, after `/readyz` has left bring-up.
+    // Two seconds outlives that probe. The process then exits on the timer
+    // because the held RPC port cannot take `stop`.
+    cfg.max_run_secs = Some(2);
     let node = spawn_run_p2p(cfg);
     wait_listeners(&[health_addr]).await;
     assert_eq!(

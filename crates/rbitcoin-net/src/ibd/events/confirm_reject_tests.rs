@@ -572,6 +572,13 @@ fn apply_peer_event_body_and_control_surface() {
     );
     assert!(!st.body.is_pending(&notfound_hash));
     assert!(st.body.is_missing(&notfound_hash));
+    let mut room = 4usize;
+    let mut issued = 0u64;
+    assert!(
+        super::super::assign::issue_one(&mut st, 1, notfound_hash, &mut room, &mut issued),
+        "notfound does not ban the peer"
+    );
+    assert!(st.slots[0].in_flight.contains(&notfound_hash));
 
     // Headers: attach height from tip parent and order.
     let hdr = dummy_header(gen, 1);
