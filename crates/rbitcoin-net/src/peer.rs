@@ -3519,6 +3519,7 @@ async fn on_block(
     let hash = block.block_hash();
     if !block.check_merkle_root() {
         rbitcoin_log::info!("Block mutated: bad-txnmrklroot, hashMerkleRoot mismatch");
+        take_requested_block(hub, &mut follow.requested_blocks, &hash);
         punish_disconnect(&mut follow.ban_score, session);
         return Ok(());
     }
