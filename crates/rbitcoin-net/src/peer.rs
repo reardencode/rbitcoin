@@ -1345,6 +1345,9 @@ fn on_headers_poll(
     if !skip {
         let _ = queue_getheaders(out_tx, hub, session, false, None);
     }
+    if let Some(mp) = hub.mempool() {
+        let _ = mp.expire_stale();
+    }
 }
 
 fn on_tx_announce(
