@@ -8,3 +8,7 @@ Fixed
   Witness sigops count on every block with the WITNESS flag. On a regtest
   chain with a later `-testactivationheight=segwit@N`, a v0 witness
   program spend below `N` is now held to the witness rules.
+- **P2PKH spends enforce the 520-byte push limit.** The P2PKH fast path
+  accepted a scriptSig push over 520 bytes (for example a pre-BIP66
+  signature with junk before the hashtype). It now falls back to the
+  interpreter, which rejects it as Core does.
