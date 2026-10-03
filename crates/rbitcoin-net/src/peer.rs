@@ -3522,6 +3522,12 @@ async fn on_block(
         punish_disconnect(&mut follow.ban_score, session);
         return Ok(());
     }
+    if rbitcoin_consensus::block_mutated_without_coinbase(block) {
+        rbitcoin_log::info!("Block mutated: 64-byte transaction without a coinbase");
+        take_requested_block(hub, &mut follow.requested_blocks, &hash);
+        punish_disconnect(&mut follow.ban_score, session);
+        return Ok(());
+    }
     if let Some(s) = session {
         s.note_block_from_peer(hash);
         s.note_best_known(hash);
