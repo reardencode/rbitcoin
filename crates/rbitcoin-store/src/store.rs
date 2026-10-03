@@ -281,6 +281,9 @@ pub struct Store {
     mtp_ring: std::sync::RwLock<MtpRing>,
     /// Latest confirm height plus one. Zero means no snapshot yet.
     spend_snapshot: std::sync::atomic::AtomicU64,
+    /// First height of a confirm write whose spend annotate has not finished,
+    /// plus one. Zero means none.
+    spend_annotate_from: std::sync::atomic::AtomicU64,
     #[cfg(debug_assertions)]
     tx_full_log: std::sync::Mutex<Vec<u64>>,
     #[cfg(debug_assertions)]
@@ -369,6 +372,7 @@ impl Store {
             height_fence: std::sync::RwLock::new(HeightFence::empty()),
             mtp_ring: std::sync::RwLock::new(MtpRing::empty()),
             spend_snapshot: std::sync::atomic::AtomicU64::new(0),
+            spend_annotate_from: std::sync::atomic::AtomicU64::new(0),
             path,
             cold_path,
             head_scale: layout.head_scale,
@@ -431,6 +435,7 @@ impl Store {
             height_fence: std::sync::RwLock::new(height_fence),
             mtp_ring: std::sync::RwLock::new(MtpRing::empty()),
             spend_snapshot: std::sync::atomic::AtomicU64::new(0),
+            spend_annotate_from: std::sync::atomic::AtomicU64::new(0),
             path,
             cold_path,
             head_scale: layout.head_scale,
@@ -1596,6 +1601,34 @@ impl Store {
             0 => None,
             v => Some(v.saturating_sub(1) as u32),
         }
+    }
+
+    /// A confirm write from `height` may connect blocks before their spends
+    /// are annotated. Keeps the lowest pending height.
+    pub fn note_spend_annotate_pending(&self, height: u32) {
+        use std::sync::atomic::Ordering;
+        let v = u64::from(height).saturating_add(1);
+        let _ = self
+            .spend_annotate_from
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                (cur == 0 || v < cur).then_some(v)
+            });
+    }
+
+    /// Lowest height whose spend annotate did not finish in this process.
+    pub fn spend_annotate_pending(&self) -> Option<u32> {
+        use std::sync::atomic::Ordering;
+        match self.spend_annotate_from.load(Ordering::Acquire) {
+            0 => None,
+            v => Some(v.saturating_sub(1) as u32),
+        }
+    }
+
+    /// Every connected height has its spends annotated. Call only after the
+    /// annotate or replay through the tip has returned `Ok`.
+    pub fn clear_spend_annotate_pending(&self) {
+        use std::sync::atomic::Ordering;
+        self.spend_annotate_from.store(0, Ordering::Release);
     }
 
     /// `sync_data` the replay stems, then publish `A = D = height` when the

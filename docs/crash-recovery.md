@@ -62,6 +62,7 @@ Open revalidation runs in `Query::open_or_create` **before** P2P can extend tip.
 - Best-chain spentness: annotation + `is_confirmed_strong(spender)`. Same-batch pre-fill is not strong until this batch's Class C.
 - Kill-safe for a stale annotation: non-strong fields do not false-positive if the filter is applied.
 - A missing annotation is not kill-safe. Open replays `(A, tip]` from the block bodies, then advances `A` only after `sync_data`. `A` never exceeds tip. Disconnect below `A` lowers `A`.
+- A confirm write that fails after its tip commit (live index seal, spend annotate) leaves its first height pending in process. The next confirm write replays `[pending, tip]` before structural, and returns the replay error without validating if that fails. The spend snapshot does not advance past the pending heights, so `rbtc-spend-sync` does not publish `A` over them.
 - No `point.head` (v4 open-hash multimap removed).
 - Class A is **three stems** (`txout` / `seqsigwit` / `spent`); bare-meta puts are rejected. Packed `tx.body` with creates is refused on open.
 
