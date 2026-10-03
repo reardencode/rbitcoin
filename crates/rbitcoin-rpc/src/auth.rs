@@ -5,9 +5,15 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Bearer token accepted by the RPC server.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RpcAuth {
     pub token: String,
+}
+
+impl std::fmt::Debug for RpcAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RpcAuth(<redacted>)")
+    }
 }
 
 impl RpcAuth {
@@ -75,6 +81,21 @@ pub fn read_cookie_file(path: &Path) -> Result<RpcCookie, String> {
             "RPC cookie {}: expected username:password",
             path.display()
         ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static WARNED: AtomicBool = AtomicBool::new(false);
+        if let Ok(meta) = fs::metadata(path) {
+            let mode = meta.permissions().mode() & 0o777;
+            if mode & 0o077 != 0 && !WARNED.swap(true, Ordering::Relaxed) {
+                rbitcoin_log::warn!(
+                    "rpc: cookie {} mode {mode:o} is group or world accessible",
+                    path.display()
+                );
+            }
+        }
     }
     Ok(RpcCookie { credentials })
 }
@@ -174,6 +195,14 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("rbitcoin-rpc-auth-{n}"))
+    }
+
+    #[test]
+    fn debug_does_not_print_the_token() {
+        let auth = RpcAuth::new("secret-token");
+        let shown = format!("{auth:?}");
+        assert!(!shown.contains("secret-token"), "{shown}");
+        assert!(shown.contains("redacted"), "{shown}");
     }
 
     #[test]

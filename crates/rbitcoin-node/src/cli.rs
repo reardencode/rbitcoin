@@ -146,6 +146,15 @@ fn apply_operator_kvs(config: &mut NodeConfig, kvs: Vec<(String, String)>) -> Re
             config.listen.seednodes.clear();
             saw_seednode = true;
         }
+        if key == "tor_control_password" {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static WARNED: AtomicBool = AtomicBool::new(false);
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                rbitcoin_log::warn!(
+                    "node: --tor-control-password puts the password on the command line"
+                );
+            }
+        }
         match config.apply_kv(&key, &val) {
             Ok(ConfApply::Applied) => {}
             Ok(ConfApply::Unknown(k)) => {

@@ -27,9 +27,15 @@ pub const SECRET_FILE: &str = "store.secret";
 pub const SECRET_LEN: usize = 32;
 
 /// Process-owned datadir secret (clone cheaply via Arc at higher layers).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct StoreSecret {
     bytes: [u8; SECRET_LEN],
+}
+
+impl std::fmt::Debug for StoreSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StoreSecret(<redacted>)")
+    }
 }
 
 impl StoreSecret {
@@ -56,16 +62,14 @@ impl StoreSecret {
     /// Persist under `store_dir/store.secret`.
     pub fn write_to_store_dir(&self, store_dir: &Path) -> Result<(), StoreError> {
         let path = secret_path(store_dir);
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|e| StoreError::io(&path, e))?;
+        let mut opts = OpenOptions::new();
+        opts.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
         }
+        let mut f = opts.open(&path).map_err(|e| StoreError::io(&path, e))?;
         f.write_all(&self.bytes)
             .map_err(|e| StoreError::io(&path, e))?;
         f.sync_all().map_err(|e| StoreError::io(&path, e))?;
@@ -168,6 +172,14 @@ mod tests {
 
     fn temp_dir() -> crate::testutil::TempDir {
         crate::testutil::TempDir::labeled("secret").unwrap()
+    }
+
+    #[test]
+    fn debug_does_not_print_secret_bytes() {
+        let s = StoreSecret::from_bytes([0xab; SECRET_LEN]);
+        let shown = format!("{s:?}");
+        assert!(!shown.contains("abab"), "{shown}");
+        assert!(shown.contains("redacted"), "{shown}");
     }
 
     #[test]

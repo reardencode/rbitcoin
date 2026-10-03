@@ -621,7 +621,9 @@ impl NodeConfig {
             return Err(NodeError::Config("--metrics needs --health-listen".into()));
         }
         if self.rpc.rest && self.rpc.listen.is_none() && !self.rpc.socket {
-            return Err(NodeError::Config("--rest needs --rpc or --rpc-listen".into()));
+            return Err(NodeError::Config(
+                "--rest needs --rpc or --rpc-listen".into(),
+            ));
         }
         self.validate_only_net()?;
         self.validate_hidden_inbound()?;
@@ -864,13 +866,24 @@ impl NodeConfig {
                         continue;
                     }
                     return Err(NodeError::Config(format!(
-                        "conf {}:{}: expected key=value (got `{line}`)",
+                        "conf {}:{}: expected key=value",
                         path.display(),
                         lineno + 1
                     )));
                 }
             };
-            match self.apply_kv(key, val)? {
+            let applied = match self.apply_kv(key, val) {
+                Ok(v) => v,
+                Err(NodeError::Config(msg)) => {
+                    return Err(NodeError::Config(format!(
+                        "conf {}:{}: {msg}",
+                        path.display(),
+                        lineno + 1
+                    )));
+                }
+                Err(other) => return Err(other),
+            };
+            match applied {
                 ConfApply::Applied => {}
                 ConfApply::Unknown(other) => {
                     rbitcoin_log::warn!(
@@ -977,6 +990,11 @@ impl NodeConfig {
                 self.tor.cookie = Some(PathBuf::from(val));
             }
             "tor_control_password" => {
+                if val.bytes().any(|b| b == b'\n' || b == b'\r' || b == 0) {
+                    return Err(NodeError::Config(
+                        "tor control password must not contain CR, LF, or NUL".into(),
+                    ));
+                }
                 self.tor.password = Some(val.to_string());
             }
             "i2p_sam" => {
@@ -1533,6 +1551,35 @@ mod tests {
             ConfApply::Applied
         );
         assert_eq!(c.rpc.work_queue, Some(4));
+    }
+
+    #[test]
+    fn conf_error_names_the_file_and_line() {
+        let dir = std::env::temp_dir().join(format!("rbitcoin-conf-line-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bad.conf");
+        std::fs::write(&path, "secret-token-xyz\n").unwrap();
+        let err = NodeConfig::default()
+            .merge_conf_file(&path)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("bad.conf:1"), "{err}");
+        assert!(err.contains("expected key=value"), "{err}");
+        assert!(!err.contains("secret-token-xyz"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tor_control_password_rejects_a_line_break() {
+        let mut c = NodeConfig::default();
+        let err = c
+            .apply_kv("tor_control_password", "a\nb")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("CR"), "{err}");
+        c.apply_kv("tor_control_password", "pw").unwrap();
+        assert_eq!(c.tor.password.as_deref(), Some("pw"));
     }
 
     #[test]
