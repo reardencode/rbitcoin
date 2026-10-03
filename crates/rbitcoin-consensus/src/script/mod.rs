@@ -190,7 +190,13 @@ pub(crate) fn verify_input<'a>(
     }
 }
 
+/// Core `IsPayToAnchor`: witness v1 program `0x4e73`.
+const PAY_TO_ANCHOR_PROGRAM: [u8; 2] = [0x4e, 0x73];
+
 /// BIP141 native witness program (any version). `scriptSig` must be empty.
+///
+/// Policy: a v1 32-byte program before Taproot and pay-to-anchor succeed
+/// without DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM, as in Core.
 #[inline]
 #[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 fn verify_native_witness<'a>(
@@ -220,6 +226,8 @@ fn verify_native_witness<'a>(
         (1, 32) if job.taproot_active => {
             p2tr::verify(job, input_index, tx, sighash_cache(cache, tx), tap_spent)
         }
+        (1, 32) => Ok(()),
+        (1, 2) if program == PAY_TO_ANCHOR_PROGRAM => Ok(()),
         _ => {
             if job.discourage_upgradable_witness {
                 return Err(ConsensusError::Script(

@@ -147,3 +147,22 @@ fn empty_sig_still_checks_pubkey_encoding() {
     let err = script::verify_job_all_inputs(&typed).expect_err("WITNESS_PUBKEYTYPE");
     assert!(format!("{err}").contains("WITNESS_PUBKEYTYPE"), "{err}");
 }
+
+/// Core `VerifyWitnessProgram`: pay-to-anchor and a v1 32-byte program
+/// before Taproot activates succeed without reaching the
+/// DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM branch.
+#[test]
+fn discourage_skips_native_p2a_and_pre_taproot_v1() {
+    let p2a = vec![0x51, 0x02, 0x4e, 0x73];
+    let tx = spend(Vec::new(), &[]);
+    let anchor = job(p2a, tx.clone(), |f| f.discourage_upgradable_witness = true);
+    script::verify_job_all_inputs(&anchor).expect("P2A is not discouraged");
+
+    let mut v1 = vec![0x51, 0x20];
+    v1.extend_from_slice(&[0x11; 32]);
+    let pre_taproot = job(v1, tx, |f| {
+        f.taproot_active = false;
+        f.discourage_upgradable_witness = true;
+    });
+    script::verify_job_all_inputs(&pre_taproot).expect("v1/32 before Taproot");
+}
