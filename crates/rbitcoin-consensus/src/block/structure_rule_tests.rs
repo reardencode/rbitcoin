@@ -5,8 +5,9 @@ use super::{
     block_has_witness_from_pres, block_subsidy, check_tx_local, is_p2sh_script, is_p2wpkh_program,
     is_p2wsh_program, last_script_push, merkle_root_bytes, script_sigop_count,
     validate_block_structure, validate_block_structure_with_pres, witness_commitment_script,
-    ScriptCheckJob, TxPrecompute, ValidationContext, BIP16_EXCEPTION_MAINNET,
+    ScriptCheckJob, ScriptVerifyFlags, TxPrecompute, ValidationContext, BIP16_EXCEPTION_MAINNET,
     MAX_BLOCK_STRIPPED_SIZE, MAX_BLOCK_TX_COUNT, MAX_BLOCK_WEIGHT, MIN_TX_WEIGHT,
+    TAPROOT_EXCEPTION_MAINNET,
 };
 use crate::error::ConsensusError;
 use crate::milestone::Milestone;
@@ -2403,6 +2404,31 @@ fn bip16_testnet3_exception_block() {
     neighbor[0] ^= 1;
     assert!(bip16_active_from_prev_mtp(&p, 1, &neighbor, u32::MAX));
     assert!(bip16_active_from_prev_mtp(&p, 1, &[1u8; 32], 0));
+}
+
+/// Core `GetBlockScriptFlags`: P2SH, WITNESS, and TAPROOT are on for every
+/// block. An exception hash replaces that set. DERSIG and NULLDUMMY stay
+/// height-gated.
+#[test]
+fn script_flags_follow_core_exception_table() {
+    let mut rt = params();
+    rt.apply_test_activation_height("segwit", 1_000).unwrap();
+    rt.apply_test_activation_height("dersig", 1_000).unwrap();
+    let rt = Box::leak(Box::new(rt));
+    let ctx = ValidationContext::at(rt, Height(10), Milestone::NONE);
+    let f = ScriptVerifyFlags::consensus_at(&ctx, &[1u8; 32], true);
+    assert!(f.bip16_active && f.witness_active && f.taproot_active);
+    assert!(!f.null_dummy && !f.bip66_active);
+
+    let main = Box::leak(Box::new(ChainParams::mainnet()));
+    let ctx = ValidationContext::at(main, Height(170_060), Milestone::NONE);
+    let f = ScriptVerifyFlags::consensus_at(&ctx, &BIP16_EXCEPTION_MAINNET, false);
+    assert!(!f.bip16_active && !f.witness_active && !f.taproot_active);
+
+    let ctx = ValidationContext::at(main, Height(692_261), Milestone::NONE);
+    let f = ScriptVerifyFlags::consensus_at(&ctx, &TAPROOT_EXCEPTION_MAINNET, true);
+    assert!(f.bip16_active && f.witness_active && !f.taproot_active);
+    assert!(f.null_dummy && f.bip66_active);
 }
 
 /// Confirm jobs share wire Arc — same Transaction address, no deep clone.

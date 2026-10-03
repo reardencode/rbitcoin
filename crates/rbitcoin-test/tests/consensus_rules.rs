@@ -471,3 +471,61 @@ fn header_and_spending_boundaries() {
     pin_bip68_time_lock(&q, &params, child_txid, good.block_hash(), time);
     pin_subsidy_interval_two_overlay();
 }
+
+// ─── Script flags (Core `GetBlockScriptFlags`) ──────────────────────────────
+
+/// Core sets WITNESS on every block, not from the segwit height. Below the
+/// overlaid segwit height a v0 program spend with an empty witness still
+/// fails (native and P2SH-nested), and a native spend with a non-empty
+/// scriptSig fails, where a bare-script read of the program would leave a
+/// true stack.
+#[test]
+fn witness_program_rules_bind_below_segwit_height() {
+    use bitcoin::script::{Builder, PushBytesBuf};
+    use bitcoin::ScriptBuf;
+
+    let (_td, q, mut params) = regtest_q();
+    params
+        .apply_test_activation_height("segwit", 1_000)
+        .unwrap();
+    connect_genesis(&q, &params);
+    let g = regtest_genesis();
+    let b1 = mine_regtest_block(g.block_hash(), g.header.time + 600, 1, vec![]);
+    accept_and_connect_block(&q, &params, Height(1), &b1, Milestone::NONE).unwrap();
+    let cb_txid = b1.txdata[0].compute_txid();
+    let (tip, time) = pad_empty_from(&q, &params, b1.block_hash(), b1.header.time, 2, 100);
+    assert!(!params.segwit_active_at(101));
+
+    let mut v0_program = vec![0x00, 0x14];
+    v0_program.extend([0x11u8; 20]);
+    let v0_program = ScriptBuf::from_bytes(v0_program);
+    let p2sh_v0 = ScriptBuf::new_p2sh(&v0_program.script_hash());
+    let redeem_push = PushBytesBuf::try_from(v0_program.to_bytes()).unwrap();
+
+    for (spk, script_sig, case) in [
+        (v0_program.clone(), ScriptBuf::new(), "native P2WPKH"),
+        (
+            v0_program.clone(),
+            Builder::new().push_int(1).into_script(),
+            "native P2WPKH with a scriptSig",
+        ),
+        (
+            p2sh_v0,
+            Builder::new().push_slice(&redeem_push).into_script(),
+            "P2SH-P2WPKH",
+        ),
+    ] {
+        let mut fund = spend_anyone_can_spend(cb_txid, 0, Amount::from_sat(49_0000_0000));
+        fund.output[0].script_pubkey = spk;
+        let mut spend =
+            spend_anyone_can_spend(fund.compute_txid(), 0, Amount::from_sat(48_0000_0000));
+        spend.input[0].script_sig = script_sig;
+        let block = mine_regtest_block(tip, time + 600, 101, vec![fund, spend]);
+        let err = accept_and_connect_block(&q, &params, Height(101), &block, Milestone::NONE);
+        assert!(
+            matches!(err, Err(ConsensusError::Script(_))),
+            "{case} below segwit height: {err:?}"
+        );
+        assert_eq!(q.tip_height(), Some(Height(100)));
+    }
+}
