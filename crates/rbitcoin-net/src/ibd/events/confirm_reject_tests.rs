@@ -2060,3 +2060,53 @@ fn cascade_refetches_its_own_taken_body() {
     assert!(rejects.is_empty(), "{rejects:?}");
     rig.finish();
 }
+
+/// While isolated, lookup takes tip+2 only after tip+1 has connected: no
+/// block is claimed while the one before it is still in the pipeline.
+#[test]
+fn isolation_claims_one_block_at_a_time() {
+    use super::super::assign::tests::lock_default_assign_stop;
+    use super::super::state::InflightReq;
+    use bitcoin::ScriptBuf;
+    use rbitcoin_consensus::mine_regtest_paying;
+    use std::time::{Duration, Instant};
+
+    let _env = lock_default_assign_stop();
+    let mut rig = WireRig::new("isolate-serial", 1);
+    let (t, cbs) = (rig.t, rig.cbs.clone());
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+    let b1 = mine_regtest_paying(
+        rig.tip,
+        rig.tip_time + 600,
+        t + 1,
+        spk.clone(),
+        vec![WireRig::spend(cbs[0])],
+    );
+    let b2 = mine_regtest_paying(
+        b1.block_hash(),
+        rig.tip_time + 1200,
+        t + 2,
+        spk,
+        vec![WireRig::spend(cbs[1])],
+    );
+    rig.plant(&[&b1, &b2]);
+    for b in [&b1, &b2] {
+        rig.st.slots[0].in_flight.insert(b.block_hash());
+        rig.st.inflight.insert(b.block_hash(), InflightReq::new(1));
+        rig.deliver(1, b);
+    }
+    rig.feed.request_single_block(u32::MAX - 1);
+    rig.start_engine();
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut ahead = 0;
+    while rig.hub.tip_height() != Some(t + 2) {
+        assert!(Instant::now() < deadline, "stall");
+        let tip = rig.hub.tip_height().unwrap();
+        let taken = rig.hub.query.lookup_taken_hi().unwrap_or(tip);
+        ahead = ahead.max(taken.saturating_sub(tip));
+        std::thread::sleep(Duration::from_micros(100));
+    }
+    assert!(ahead <= 1, "lookup ran {ahead} blocks past the tip");
+    rig.finish();
+}

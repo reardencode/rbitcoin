@@ -2195,14 +2195,29 @@ pub(crate) fn spawn_confirm_engine(
                     confirm_thr_stats::add_lookup_claim(&stats, t_wait.elapsed());
                     continue;
                 }
-                let run_max = if feed.single_block() {
-                    1usize
+                // Isolation retries one block through the whole pipeline. A
+                // reject while an earlier block is still in write would
+                // rewind under it and stamp the next plan from stale fks.
+                let single = feed.single_block();
+                if single && (!skip.is_empty() || hub.query.lookup_taken_hi() > tip) {
+                    let t_wait = Instant::now();
+                    confirm_thr_stats::add_lookup_other(&stats, t_wait.duration_since(t_sel));
+                    let g = feed.inner.lock().unwrap();
+                    if feed.stopped() {
+                        break;
+                    }
+                    let _ = feed.cv.wait_timeout(g, Duration::from_millis(20)).unwrap();
+                    confirm_thr_stats::add_lookup_claim(&stats, t_wait.elapsed());
+                    continue;
+                }
+                let run_max = if single { 1 } else { CONFIRM_RUN_MAX_BLOCKS };
+                let max_blocks = if single {
+                    1
                 } else {
-                    CONFIRM_RUN_MAX_BLOCKS
+                    remaining
+                        .saturating_mul(run_max)
+                        .min(rbitcoin_consensus::BQ_RESOLVE_WAVE_MAX_BLOCKS)
                 };
-                let max_blocks = remaining
-                    .saturating_mul(run_max)
-                    .min(rbitcoin_consensus::BQ_RESOLVE_WAVE_MAX_BLOCKS);
                 let max_inputs = (remaining as u32)
                     .saturating_mul(confirm_batch_max_inputs())
                     .min(rbitcoin_consensus::BQ_RESOLVE_WAVE_MAX_INPUTS);
