@@ -183,6 +183,11 @@ test bytes are RAM.
 
 **Speed / reliability (default suite):** prefer `pad_empty_from` / `build_mature_regtest_with_spend` **once per journey** (tx_relay live hub, Electrum protocol, core_analogs assumevalid+mempool) over remine pads; SH run-builder sleeps are 1 ms under `cfg(test)` (40 ms in production). `pin_compose_multi_pack_timed` keeps functional + layout/covered short-circuit gates (multi-ms floor); sticky vs cold assemble is log-only (not a hard timing assert). Schema-13 wire rebuild must stamp create identity from `txid.body` — zero batch identity is treated as missing (regression covered by the spend reconstruct in `consensus_mature_chain_spend_reconstruct_and_scripthash` + multi-vout confirm scenarios). Coverage vs speed: prefer **one** scenario at the real entry over N micro-opens that only paint lines; when adding coverage for reduce/materialize, use a **tiny** target, not production stream depth.
 
+### Test size contract
+
+Size by resource (Small/Medium/Large) is defined in [`docs/test-size.md`](docs/test-size.md) — that file owns the contract by what the test does, not which helper it calls. `TESTING.md` owns only the time budgets (≤3min warm) and points here. Small = pure/in-process no sleep/fs/net, Medium = repository-local integration that touches filesystem (TempDir/TestDatadir with bounded teardown) or localhost `:0` only — examples: `tiny_store`/`tiny_query`/`TestDatadir`, Large = tests requiring external processes, external networks/overlays, or Core differential; normally outside fast default feedback (e.g. `core-functional`, `overlay-functional`).
+
+
 ## Coverage
 
 | Metric | Required |
