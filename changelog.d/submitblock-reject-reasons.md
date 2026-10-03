@@ -6,3 +6,7 @@ Fixed
 - **A coinbase scriptSig shorter than two bytes is `bad-cb-length` once
   BIP34 is active.** The height check ran first and reported the BIP34
   failure. Bitcoin Core checks the length first.
+- **`submitblock` checks the merkle root before the transactions.** A
+  body the header does not commit to reported a transaction reason such
+  as `bad-cb-missing` or `bad-txns-duplicate`. It now reports
+  `bad-txnmrklroot`, as Bitcoin Core does.

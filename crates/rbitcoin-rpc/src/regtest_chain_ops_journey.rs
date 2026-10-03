@@ -536,6 +536,15 @@ fn chain_ops_submit_rejects(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub, p2wp
     let r = dispatch(ctx, "submitblock", vec![json!(block_hex(&bad))]).unwrap();
     assert_eq!(r, "bad-txnmrklroot");
 
+    // Core CheckMerkleRoot runs before every body rule, so each body below
+    // is committed to by its header first.
+    let commit = |mut block: Block| {
+        block.header.merkle_root = block
+            .compute_merkle_root()
+            .unwrap_or_else(|| bitcoin::TxMerkleNode::from_byte_array([0; 32]));
+        regrind(&mut block);
+        block
+    };
     let mut empty = mine(1);
     empty.txdata.clear();
     let mut no_cb = mine(2);
@@ -543,8 +552,8 @@ fn chain_ops_submit_rejects(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub, p2wp
         txid: Txid::from_byte_array([0x11; 32]),
         vout: 0,
     };
-    let mut dup = mine(3);
-    dup.txdata.push(dup.txdata[0].clone());
+    let mut uncommitted = mine(3);
+    uncommitted.txdata.push(uncommitted.txdata[0].clone());
     let spend = |prev: OutPoint, sat: u64| Transaction {
         version: TxVersion::TWO,
         lock_time: LockTime::ZERO,
@@ -569,11 +578,11 @@ fn chain_ops_submit_rejects(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub, p2wp
     };
     miss.txdata.push(spend(ghost, 1));
     for (block, want) in [
-        (empty, "bad-blk-length"),
-        (no_cb, "bad-cb-missing"),
-        (dup, "bad-txns-duplicate"),
-        (below, "bad-txns-in-belowout"),
-        (miss, "bad-txns-inputs-missingorspent"),
+        (commit(empty), "bad-blk-length"),
+        (commit(no_cb), "bad-cb-missing"),
+        (uncommitted, "bad-txnmrklroot"),
+        (commit(below), "bad-txns-in-belowout"),
+        (commit(miss), "bad-txns-inputs-missingorspent"),
     ] {
         let r = dispatch(ctx, "submitblock", vec![json!(block_hex(&block))]).unwrap();
         assert_eq!(r, want);
