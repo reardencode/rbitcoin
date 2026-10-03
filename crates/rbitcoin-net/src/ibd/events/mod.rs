@@ -884,9 +884,9 @@ fn apply_soft_wire_reject(
         let _ = q.block_queue_dequeue_height(height);
         if crate::chain::reject_is_mutated(err) {
             match q.clear_archived_body(hash.as_byte_array()) {
-                Ok(true) => warn!(
-                    "ibd: cleared corrupt Class A body for {hash} @{height} (merkle mismatch)"
-                ),
+                Ok(true) => {
+                    warn!("ibd: cleared corrupt Class A body for {hash} @{height} (mutated body)")
+                }
                 Ok(false) => {}
                 Err(e) => warn!("ibd: clear Class A body {hash} @{height}: {e}"),
             }

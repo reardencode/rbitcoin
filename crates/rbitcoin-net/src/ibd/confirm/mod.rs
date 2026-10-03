@@ -416,7 +416,7 @@ impl ConfirmRejectClass {
         match err {
             ConsensusError::Cancelled => Self::Cancelled,
             ConsensusError::BadPrev => Self::SoftWire,
-            ConsensusError::BadBlock("merkle root mismatch") => Self::SoftWire,
+            ConsensusError::BadBlock(r) if crate::chain::reject_is_mutated(r) => Self::SoftWire,
             ConsensusError::BadHeader("missing retarget first header") => Self::SoftWire,
             ConsensusError::BadBlock(_)
             | ConsensusError::BadTx(_)

@@ -14,5 +14,14 @@ mutations (`reject_is_mutated`), shared by connect and the two IBD reject
 paths. A weight failure after a matching commitment is still cached: the
 commitment is in the coinbase txid, so it is this block.
 
+**Follow-up (2026-10):** the typed IBD confirm path
+(`ConfirmRejectClass::from_consensus`) only treated `merkle root mismatch`
+as soft, so a witness mutation still blacklisted the hash during IBD. It
+now consults `reject_is_mutated` too. Block structure also checks the
+merkle root (with the CVE-2012-2459 repeated-tail flag,
+`bad-txns-duplicate`) before every other body rule, so a body the header
+does not commit to is never blamed on the hash.
+
 **Regression:** `rbitcoin-net`
-`chain::tests::hostile_peer_session`
+`chain::tests::hostile_peer_session`,
+`ibd::events::confirm_reject_tests::ibd_mutated_body_is_refetched_not_blacklisted`

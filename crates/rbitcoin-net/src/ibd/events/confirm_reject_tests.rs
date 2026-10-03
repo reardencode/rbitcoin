@@ -100,10 +100,33 @@ fn confirm_reject_class_matches_substring_table() {
         ConfirmRejectClass::from_consensus(&ConsensusError::BadPrev),
         ConfirmRejectClass::SoftWire
     );
-    assert_eq!(
-        ConfirmRejectClass::from_consensus(&ConsensusError::BadBlock("merkle root mismatch")),
-        ConfirmRejectClass::SoftWire
-    );
+    // Core BLOCK_MUTATED: the body, not the hash, is at fault.
+    for mutated in [
+        "merkle root mismatch",
+        "bad-txns-duplicate",
+        "missing witness commitment",
+        "witness commitment mismatch",
+        "bad-witness-nonce-size",
+        "unexpected witness before segwit",
+    ] {
+        assert_eq!(
+            ConfirmRejectClass::from_consensus(&ConsensusError::BadBlock(mutated)),
+            ConfirmRejectClass::SoftWire,
+            "{mutated}"
+        );
+    }
+    // Past the merkle check the header commits to these txs.
+    for invalid in [
+        "duplicate txid",
+        "coinbase not first",
+        "block weight too large",
+    ] {
+        assert_eq!(
+            ConfirmRejectClass::from_consensus(&ConsensusError::BadBlock(invalid)),
+            ConfirmRejectClass::ConsensusInvalid,
+            "{invalid}"
+        );
+    }
     assert_eq!(
         ConfirmRejectClass::from_consensus(&ConsensusError::BadHeader(
             "missing retarget first header"
@@ -1671,5 +1694,173 @@ fn ibd_bad_prev_fork() {
     assert!(!st.body.is_rejected(&a1) && !st.body.is_known_archived(&a1));
     assert!(!hub.query.store().header_txs.has_body(hfk).unwrap());
 
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A peer answers the getdata for tip+1 with a body the header does not
+/// commit to: no txs, a repeated tail (CVE-2012-2459), or witness the
+/// coinbase does not commit to. Each confirm reject is mutated wire: the
+/// body leaves the queue, the hash stays off the invalid set and is
+/// re-requested, and the honest body then connects.
+#[test]
+fn ibd_mutated_body_is_refetched_not_blacklisted() {
+    use super::super::assign::tests::{dummy_slot, lock_default_assign_stop};
+    use super::super::confirm::{spawn_confirm_engine, ConfirmEvent, ConfirmFeed};
+    use super::super::peer_io::PeerEvent;
+    use super::super::state::InflightReq;
+    use super::super::status::LoopStats;
+    use super::{apply_confirm_events, apply_peer_event};
+    use crate::seeds::AddrMan;
+    use bitcoin::absolute::LockTime;
+    use bitcoin::consensus::serialize;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
+    use rbitcoin_consensus::{mine_regtest_paying, pad_empty_from, ChainParams};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::atomic::AtomicU32;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let _env = lock_default_assign_stop();
+    let (dir, hub0) = crate::chain::tiny_regtest_hub_labeled("mutated-body");
+    hub0.query.enter_direct_index_mode().unwrap();
+    let hub = Arc::new(hub0);
+    hub.ensure_genesis().unwrap();
+    let params = ChainParams::regtest();
+    let gen_time = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest)
+        .header
+        .time;
+    let last = params.coinbase_maturity() + 2;
+    let (tip, tip_time, cbs) = pad_empty_from(
+        &hub.query,
+        &params,
+        hub.tip_hash().unwrap(),
+        gen_time,
+        1,
+        last,
+        2,
+    );
+    let t = hub.tip_height().unwrap();
+    let spend = |prev: Txid| Transaction {
+        version: TxVersion::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: prev,
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(49_0000_0000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let honest = mine_regtest_paying(
+        tip,
+        tip_time + 600,
+        t + 1,
+        ScriptBuf::from_bytes(vec![0x51]),
+        vec![spend(cbs[0]), spend(cbs[1])],
+    );
+    let hash = honest.block_hash();
+    let raw = hash.to_byte_array();
+    let under_header = |txdata: Vec<Transaction>| bitcoin::Block {
+        header: honest.header,
+        txdata,
+    };
+    let mut repeated = honest.txdata.clone();
+    repeated.push(repeated[2].clone());
+    let mut witness = honest.txdata.clone();
+    witness[1].input[0].witness = Witness::from_slice(&[[0x01]]);
+
+    let feed = Arc::new(ConfirmFeed::new());
+    let (ev_tx, ev_rx) = std::sync::mpsc::channel();
+    let (engine, _queues) = spawn_confirm_engine(
+        Arc::clone(&hub),
+        Arc::clone(&feed),
+        ev_tx,
+        Arc::new(AtomicU32::new(0)),
+        Arc::new(LoopStats::default()),
+    );
+    let mut st = IbdWorkState::new(vec![dummy_slot(1)], Some(tip), Some(t));
+    st.record_height(hash, t + 1);
+    st.header_fks
+        .insert(hash, hub.ensure_header_fk(&honest.header).unwrap());
+    let write_next = AtomicU32::new(t + 1);
+    let mut book = AddrMan::new();
+    let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1);
+    let mut progress = Instant::now();
+    // Answer the getdata with `body`, then apply confirm events until a
+    // reject (its class) or tip+1 connects (`None`).
+    let mut serve = |st: &mut IbdWorkState, body: &bitcoin::Block| {
+        st.slots[0].in_flight.insert(hash);
+        st.inflight.insert(hash, InflightReq::new(1));
+        apply_peer_event(
+            st,
+            &hub,
+            PeerEvent::BlockFramed {
+                peer: 1,
+                hash,
+                payload: serialize(body),
+            },
+            &write_next,
+            &mut book,
+            local,
+            Some(&feed),
+        );
+        assert!(hub.query.block_queue_has_hash(&raw), "body queued");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            assert!(Instant::now() < deadline, "no confirm verdict");
+            let Ok(ev) = ev_rx.recv_timeout(Duration::from_millis(5)) else {
+                continue;
+            };
+            let class = match &ev {
+                ConfirmEvent::Reject { class, .. } => Some(*class),
+                ConfirmEvent::Accepted { .. } => None,
+            };
+            let (tx, rx) = std::sync::mpsc::channel();
+            tx.send(ev).unwrap();
+            drop(tx);
+            apply_confirm_events(
+                st,
+                &hub,
+                &rx,
+                &write_next,
+                &AtomicU32::new(0),
+                &mut progress,
+                Some(&feed),
+            );
+            if class.is_some() || hub.tip_height() == Some(t + 1) {
+                return class;
+            }
+        }
+    };
+
+    for (what, txdata) in [
+        ("no txs", vec![]),
+        ("repeated tail", repeated),
+        ("uncommitted witness", witness),
+    ] {
+        let class = serve(&mut st, &under_header(txdata));
+        assert_eq!(class, Some(ConfirmRejectClass::SoftWire), "{what}");
+        assert!(!st.body.is_rejected(&hash), "{what}");
+        assert!(!st.reorg.invalid.contains(raw), "{what}");
+        assert!(
+            !hub.query.block_queue_has_hash(&raw),
+            "{what}: body dropped"
+        );
+        assert!(!st.body.skip_download(&hub, &hash), "{what}: re-get");
+        assert_eq!(hub.tip_height(), Some(t), "{what}");
+    }
+    assert_eq!(serve(&mut st, &honest), None);
+    assert_eq!(hub.tip_hash(), Some(hash));
+
+    feed.request_stop();
+    feed.notify();
+    let _ = engine.join();
     let _ = std::fs::remove_dir_all(dir);
 }

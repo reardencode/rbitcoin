@@ -31,7 +31,7 @@ rbitcoin reference, or redteam static analysis). Numbered reports live beside th
 | [038](./038-tip-accept-lifetime.md) | high | Async tip-accept job must not borrow a dropped hub | fixed | `owned_job_finishes_after_waiter_abort` |
 | [036](./036-electrum-public-surface.md) | critical | Public Electrum scan secret, join, and subscription caps | fixed | `sh_history_caps` |
 | [035](./035-bip30-bip34-ancestry.md) | low | BIP30 skipped on signet after height 1 | fixed | `buried_rules_and_a_lying_header_path` |
-| [034](./034-witness-padding-not-cached.md) | high | Witness padding cached as an invalid block hash | fixed | `hostile_peer_session` |
+| [034](./034-witness-padding-not-cached.md) | high | Witness padding cached as an invalid block hash | fixed | `hostile_peer_session`, `ibd_mutated_body_is_refetched_not_blacklisted` |
 | [033](./033-ibd-intake-bounds.md) | critical | IBD path state and body bytes before validation | fixed | `rejected_header_batch_does_not_grow_path_or_explore` |
 | [030](./030-header-accept.md) | critical | Invalid header held; zero prev wipes tip | fixed | `hostile_peer_session` |
 | [029](./029-compact-tx-count.md) | critical | Compact block tx count and one partial per peer | fixed | `reconstruct_rejects_tx_count_above_weight_ratio`, `hostile_peer_session` |
