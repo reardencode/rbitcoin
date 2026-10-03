@@ -95,6 +95,8 @@ pub fn script_flag_paren(token: &str) -> &str {
 pub fn block_reject_reason(err: &ConsensusError) -> String {
     match err {
         ConsensusError::BadTx("not final" | "bad-txns-nonfinal") => "bad-txns-nonfinal".into(),
+        ConsensusError::BadTx("no inputs") => "bad-txns-vin-empty".into(),
+        ConsensusError::BadTx("no outputs") => "bad-txns-vout-empty".into(),
         ConsensusError::BadTx(s) => (*s).into(),
         ConsensusError::BadBlock("no transactions" | "block stripped size too large") => {
             "bad-blk-length".into()
@@ -248,6 +250,10 @@ mod tests {
         assert_eq!(
             block_reject_reason(&ConsensusError::BadBlock("coinbase excess value")),
             "bad-cb-amount"
+        );
+        assert_eq!(
+            block_reject_reason(&ConsensusError::BadTx("no inputs")),
+            "bad-txns-vin-empty"
         );
         for bip34 in ["bip34 height encoding", "bip34 coinbase script empty"] {
             assert_eq!(

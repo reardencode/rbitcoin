@@ -15,3 +15,6 @@ Fixed
   that reason for a repeat that leaves the merkle root unchanged. A second
   coinbase is now `bad-cb-multiple`, and any other repeat is
   `bad-txns-inputs-missingorspent`.
+- **A transaction with no outputs or no inputs gets Bitcoin Core's reason.**
+  `submitblock` and the block reject log said `no outputs` and `no inputs`.
+  They now say `bad-txns-vout-empty` and `bad-txns-vin-empty`.
