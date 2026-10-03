@@ -16,7 +16,7 @@ steps.
 | H5 | high | IBD reader credits unsolicited data as progress | fixed | `unsolicited_block_does_not_refresh_progress` ([062](./062-ibd-requested-progress.md)) |
 | N1 | medium | Inv getdata does not charge the send budget | fixed | `inv_getdata_charges_send_budget` ([056](./056-inv-getdata-budget.md)) |
 | M1 | medium | Block getdata can queue past the send budget | fixed | `getdata_stops_when_send_budget_is_already_over` ([057](./057-block-getdata-budget.md)) |
-| M2 | medium | Silent-payment scan span is unbounded when start is set | open | — |
+| M2 | medium | Silent-payment scan span is unbounded when start is set | fixed | `parse_sub_labels_start_and_networks`, `sp_scan_stops_when_the_client_hangs_up` |
 | M3 | medium | RPC listener has no accept timeout; long-poll holds a permit | open | — |
 | M4 | medium | fuse8 segment length need not be a power of two | open | — |
 | M5 | medium | Class A bulk read ignores the published end | open | — |

@@ -17,7 +17,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, Notify, Semaphore};
 use tokio::task::JoinHandle;
@@ -570,6 +570,7 @@ where
                 let params_v = req.get("params").cloned().unwrap_or(json!([]));
                 if method == "blockchain.silentpayments.subscribe" {
                     serve_sp_subscribe(
+                        &mut reader,
                         &mut writer,
                         &query,
                         &params,
@@ -738,7 +739,8 @@ where
 /// Tweaks stream: JSON-RPC result = first height, then one notify per
 /// following height, then `{"message":"done"}`. Honor `count` through tip.
 /// Answer `server.ping` while computing.
-async fn serve_sp_subscribe<W>(
+async fn serve_sp_subscribe<R, W>(
+    reader: &mut R,
     writer: &mut W,
     query: &Arc<Query>,
     chain: &Arc<ChainParams>,
@@ -748,6 +750,7 @@ async fn serve_sp_subscribe<W>(
     conn: &mut ElectrumConn,
 ) -> Result<(), std::io::Error>
 where
+    R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
     let tip = query.tip_height().map(|h| h.0);
@@ -782,7 +785,8 @@ where
     write_line(writer, &rpc_result(&id, &result, None)).await?;
     conn.sp_scan_busy = true;
     let last = tip.unwrap_or(sub.start);
-    let hits = scan_sp_off_connection(query, chain, &sub, last).await;
+    let scanned = scan_sp_off_connection(reader, query, chain, &sub, last).await;
+    let hits = scanned.hits;
     conn.sp_scan_busy = false;
     let note = json!({
         "jsonrpc": "2.0",
@@ -901,16 +905,41 @@ fn sp_scan_ranges(start: u32, last: u32) -> Vec<(u32, u32)> {
     ranges
 }
 
-async fn scan_sp_off_connection(
+struct SpScan {
+    hits: Vec<Value>,
+    /// Chunks scanned before the client hung up.
+    chunks: usize,
+}
+
+/// One poll. `fill_buf` does not consume: an empty ready buffer is EOF,
+/// and pending means the client is still connected. A zero timeout can
+/// poll twice, so this does not use one.
+fn peer_hung_up<R: AsyncBufRead + Unpin>(reader: &mut R) -> bool {
+    let waker = std::task::Waker::noop();
+    let mut cx = std::task::Context::from_waker(&waker);
+    let mut fut = std::pin::pin!(reader.fill_buf());
+    match std::future::Future::poll(fut.as_mut(), &mut cx) {
+        std::task::Poll::Ready(Ok(buf)) => buf.is_empty(),
+        std::task::Poll::Ready(Err(_)) => true,
+        std::task::Poll::Pending => false,
+    }
+}
+
+async fn scan_sp_off_connection<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
     query: &Arc<Query>,
     chain: &Arc<ChainParams>,
     sub: &crate::silent_scan::SpSub,
     last: u32,
-) -> Vec<Value> {
+) -> SpScan {
     use crate::silent_scan::SP_SCAN_PERMITS;
     static PERMITS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(SP_SCAN_PERMITS);
     let mut hits = Vec::new();
+    let mut chunks = 0usize;
     for (from, end) in sp_scan_ranges(sub.start, last) {
+        if peer_hung_up(reader) {
+            break;
+        }
         let Ok(permit) = PERMITS.acquire().await else {
             break;
         };
@@ -925,8 +954,9 @@ async fn scan_sp_off_connection(
         .unwrap_or_default();
         drop(permit);
         hits.extend(chunk);
+        chunks += 1;
     }
-    hits
+    SpScan { hits, chunks }
 }
 
 #[allow(clippy::too_many_arguments)] // matches handle_client call-site

@@ -66,11 +66,10 @@ pub fn parse_sub(params: &Value, network: Network, tip: Option<u32>) -> Result<S
         return Err("too many silent payment labels".into());
     }
     let start = start.min(tip.unwrap_or(start));
-    // A missing or zero start is the whole chain. Bound it to a recent window.
-    let start = if start == 0 {
-        tip.unwrap_or(0).saturating_sub(SP_HISTORY_WINDOW)
-    } else {
-        start
+    // Any start, including a nonzero one, stays inside the recent window.
+    let start = match tip {
+        Some(tip_h) => start.max(tip_h.saturating_sub(SP_HISTORY_WINDOW)),
+        None => start,
     };
     let address = encode_sp_address(network, &scan, &spend);
     Ok(SpSub {
@@ -198,6 +197,9 @@ mod tests {
         assert_eq!(null_start.start, 0);
         let bounded = parse_sub(&json!([scan, spend, 0]), Network::Regtest, Some(1_000)).unwrap();
         assert_eq!(bounded.start, 1_000 - SP_HISTORY_WINDOW);
+        let wide = parse_sub(&json!([scan, spend, 1]), Network::Regtest, Some(10_000)).unwrap();
+        assert_eq!(wide.start, 10_000 - SP_HISTORY_WINDOW);
+        assert!(10_000 - wide.start <= SP_HISTORY_WINDOW);
         let bad_spend = match parse_sub(&json!([scan, "02"]), Network::Regtest, Some(0)) {
             Err(e) => e,
             Ok(_) => panic!("spend"),
