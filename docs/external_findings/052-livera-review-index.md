@@ -6,22 +6,22 @@ steps.
 
 | Id | Severity | Topic | Status | Regression |
 |----|----------|--------|--------|------------|
-| C1 | critical | Unbounded parent-request tracker | fixed | `parent_req_stops_at_per_peer_cap`, `parent_req_stops_at_global_cap`, `second_peer_take_due_does_not_drop_other_peers_keys` |
-| N2 | low | Wtxid follow-up requested as a txid | fixed | `wtxid_followup_is_requested_as_wtx` |
-| H1 | high | Decoy and invalid-type packets skip the rate window | fixed | `decoy_packet_is_handed_to_the_rate_hook` |
+| C1 | critical | Unbounded parent-request tracker | fixed | `parent_req_stops_at_per_peer_cap`, `parent_req_stops_at_global_cap`, `second_peer_take_due_does_not_drop_other_peers_keys` ([053](./053-parent-req-cap.md)) |
+| N2 | low | Wtxid follow-up requested as a txid | fixed | `wtxid_followup_is_requested_as_wtx` ([054](./054-wtxid-getdata.md)) |
+| H1 | high | Decoy and invalid-type packets skip the rate window | fixed | `decoy_packet_is_handed_to_the_rate_hook` ([055](./055-decoy-rate.md)) |
 | H2 | high | Inbound eviction drops the longest-connected peer | open | — |
 | H2-ban | high | Misbehavior disconnect is not remembered | open | — |
 | H3 | high | REST always on and shares the RPC work queue | open | — |
 | H4 | medium | Silent-payment unsubscribe logs the scan secret | open | — |
 | H5 | high | IBD reader credits unsolicited data as progress | open | — |
-| N1 | medium | Inv getdata does not charge the send budget | fixed | `inv_getdata_charges_send_budget` |
-| M1 | medium | Block getdata can queue past the send budget | fixed | `getdata_stops_when_send_budget_is_already_over` |
+| N1 | medium | Inv getdata does not charge the send budget | fixed | `inv_getdata_charges_send_budget` ([056](./056-inv-getdata-budget.md)) |
+| M1 | medium | Block getdata can queue past the send budget | fixed | `getdata_stops_when_send_budget_is_already_over` ([057](./057-block-getdata-budget.md)) |
 | M2 | medium | Silent-payment scan span is unbounded when start is set | open | — |
 | M3 | medium | RPC listener has no accept timeout; long-poll holds a permit | open | — |
 | M4 | medium | fuse8 segment length need not be a power of two | open | — |
 | M5 | medium | Class A bulk read ignores the published end | open | — |
 | M6 | medium | Testnet milestone is height-only | open | — |
-| M7 | medium | Mempool inv is one message per transaction | fixed | `tx_inv_over_one_thousand_is_two_messages` |
+| M7 | medium | Mempool inv is one message per transaction | fixed | `tx_inv_over_one_thousand_is_two_messages` ([058](./058-tx-inv-batch.md)) |
 | M8 | medium | Pending blocks and orphans are count-capped only | open | — |
 | M9 | high | io_uring drop can free a buffer the kernel still owns | open | — |
 | M10 | low | Secret types derive Debug; create-then-chmod | open | — |
@@ -34,7 +34,7 @@ steps.
 | L10 | low | Datadir lock follows a symlink | open | — |
 | L11 | low | Conf parse errors echo the raw line | open | — |
 | L12 | low | Invalid-hash set grows without a cap | open | — |
-| L13 | low | Rate window grants two budgets at the boundary | fixed | `rate_limiter_boundary_does_not_grant_a_second_budget` |
+| L13 | low | Rate window grants two budgets at the boundary | fixed | `rate_limiter_boundary_does_not_grant_a_second_budget` ([059](./059-rate-window-boundary.md)) |
 | L14 | low | Mempool expiry runs only on admission | open | — |
 | L15 | low | Write jobs form a mutable slice over a shared buffer | open | — |
 | L2 | — | P2PKH fast path skips FindAndDelete | rejected | The fast path is the 25-byte template. A DER signature does not fit in that scriptCode, so FindAndDelete cannot change it. |

@@ -10,3 +10,4 @@ Security
   window on tip-follow and IBD, and disconnect once that window is over.
 - Batch mempool transaction announcements into one inv per thousand,
   still charged against the per-peer send budget.
+- Findings write-ups: 053, 054, 055, 056, 057, 058, 059.
