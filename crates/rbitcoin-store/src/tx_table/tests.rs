@@ -3126,7 +3126,9 @@ fn put_full_aligns_record_starts_and_txid_prefix() {
         assert_eq!(outs.len(), 1);
         // Body meta is LAYOUT17 flags, not a leading txid.
         let mut prefix = [0u8; 1];
-        t.body.read_prefix_at(off, len, &mut prefix).unwrap();
+        t.body
+            .read_prefix_at_published(t.body.body_published_len(), off, len, &mut prefix)
+            .unwrap();
         assert_eq!(prefix[0] & 0x80, 0x80, "body starts with LAYOUT17");
     }
     // Multi-batch: second batch pads from previous end.

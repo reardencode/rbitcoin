@@ -129,7 +129,7 @@ impl VarTable {
         }
         let n = usize::try_from(len).map_err(|_| StoreError::Corrupt("body span too large"))?;
         let mut buf = vec![0u8; n];
-        self.read_body_pread(offset, &mut buf)?;
+        self.read_body_pread(self.body_published_len(), offset, &mut buf)?;
         Ok(buf)
     }
 
@@ -155,14 +155,39 @@ impl VarTable {
         len: u64,
         f: impl FnOnce(&[u8]) -> Result<R, StoreError>,
     ) -> Result<R, StoreError> {
+        self.with_bytes_at_published(self.body_published_len(), offset, len, f)
+    }
+
+    /// [`Self::with_bytes_at`] against a published end the caller already took.
+    ///
+    /// Compares `offset + len` to `published` only. Does not load
+    /// `published_body_end` again.
+    pub(crate) fn with_bytes_at_published<R>(
+        &self,
+        published: u64,
+        offset: u64,
+        len: u64,
+        f: impl FnOnce(&[u8]) -> Result<R, StoreError>,
+    ) -> Result<R, StoreError> {
         let mut buf = Vec::new();
-        self.with_bytes_at_into(offset, len, &mut buf, f)
+        self.with_bytes_at_into_published(published, offset, len, &mut buf, f)
     }
 
     /// Like [`Self::with_bytes_at`] into a caller buffer. Pread overwrites
     /// `buf`; it is not zero-filled first.
     pub fn with_bytes_at_into<R>(
         &self,
+        offset: u64,
+        len: u64,
+        buf: &mut Vec<u8>,
+        f: impl FnOnce(&[u8]) -> Result<R, StoreError>,
+    ) -> Result<R, StoreError> {
+        self.with_bytes_at_into_published(self.body_published_len(), offset, len, buf, f)
+    }
+
+    fn with_bytes_at_into_published<R>(
+        &self,
+        published: u64,
         offset: u64,
         len: u64,
         buf: &mut Vec<u8>,
@@ -183,7 +208,7 @@ impl VarTable {
             // SAFETY: `n` bytes of spare capacity; pread fills them before set_len.
             unsafe { std::slice::from_raw_parts_mut(spare.as_mut_ptr().cast::<u8>(), n) }
         };
-        self.read_body_bulk(offset, dst)?;
+        self.read_body_bulk(published, offset, dst)?;
         // SAFETY: `read_body_bulk` wrote `n` bytes into spare capacity.
         unsafe {
             buf.set_len(n);
@@ -202,7 +227,7 @@ impl VarTable {
             return f(&[]);
         }
         let mut buf = vec![0u8; len as usize];
-        self.read_body_pread(offset, &mut buf)?;
+        self.read_body_pread(self.body_published_len(), offset, &mut buf)?;
         f(&buf)
     }
 
@@ -425,8 +450,12 @@ impl VarTable {
     }
 
     /// Read only the first `buf.len()` bytes at absolute body `(offset, len)`.
-    pub fn read_prefix_at(
+    ///
+    /// `published` is the end the caller already paired with the record count.
+    /// This does not load `published_body_end` again.
+    pub(crate) fn read_prefix_at_published(
         &self,
+        published: u64,
         offset: u64,
         len: u64,
         buf: &mut [u8],
@@ -438,14 +467,13 @@ impl VarTable {
         if n == 0 {
             return Ok(0);
         }
-        self.read_body_bulk(offset, &mut buf[..n])?;
+        self.read_body_bulk(published, offset, &mut buf[..n])?;
         Ok(n)
     }
 
-    /// One Acquire load of the published end. Not the `(count, end)` seqlock:
-    /// callers that already hold that pair still reject a span past this end.
-    fn require_published_body(&self, offset: u64, len: u64) -> Result<(), StoreError> {
-        let published = self.published_body_end.load(Ordering::Acquire);
+    /// Compare `offset + len` to the caller's published-end integer.
+    /// No atomic load: a fresh `published_body_end` can disagree with that snapshot.
+    fn require_published_body(published: u64, offset: u64, len: u64) -> Result<(), StoreError> {
         if published == 0 {
             return Err(StoreError::Corrupt(
                 "invariant: body read missing published end",
@@ -460,11 +488,16 @@ impl VarTable {
     }
 
     /// Class A body pread via bulk_io.
-    fn read_body_bulk(&self, offset: u64, buf: &mut [u8]) -> Result<(), StoreError> {
+    fn read_body_bulk(
+        &self,
+        published: u64,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Result<(), StoreError> {
         if buf.is_empty() {
             return Ok(());
         }
-        self.require_published_body(offset, buf.len() as u64)?;
+        Self::require_published_body(published, offset, buf.len() as u64)?;
         let rc = crate::bulk_io::pread_single(self.body.read_fd(), offset, buf);
         if rc < 0 {
             return Err(StoreError::io(
@@ -478,11 +511,16 @@ impl VarTable {
         Ok(())
     }
 
-    fn read_body_pread(&self, offset: u64, buf: &mut [u8]) -> Result<(), StoreError> {
+    fn read_body_pread(
+        &self,
+        published: u64,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Result<(), StoreError> {
         if buf.is_empty() {
             return Ok(());
         }
-        self.require_published_body(offset, buf.len() as u64)?;
+        Self::require_published_body(published, offset, buf.len() as u64)?;
         use crate::bulk_io::ReadOp;
         use crate::io_backend::ReadIoBackend;
         let mut ops = [ReadOp {
@@ -560,6 +598,37 @@ mod tests {
         let err = t
             .with_bytes_at(FILE_HEADER_LEN as u64, 16, |_| Ok(()))
             .expect_err("past published end");
+        match err {
+            StoreError::Corrupt(msg) => assert!(msg.contains("published"), "{msg}"),
+            other => panic!("{other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A caller that already paired `(count, end)` still reads inside that
+    /// end after a later shrink. A fresh load of the shrunk end is corrupt.
+    #[test]
+    fn body_read_uses_the_caller_published_end() {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let id = N.fetch_add(1, AtomicOrdering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("rbitcoin-var-snap-{id}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let t = VarTable::create(&dir, "tx", TableKind::TxOut).unwrap();
+        let (_fks, starts, _) = put_batch(&t, 1, 64, |_i, buf| {
+            buf.extend_from_slice(&[0xab; 16]);
+        })
+        .unwrap();
+        let (_count, end) = t.published_meta();
+        let off = starts[0];
+        t.truncate_body_to(0, FILE_HEADER_LEN as u64).unwrap();
+        let body = t
+            .with_bytes_at_published(end, off, 16, |b| Ok(b.to_vec()))
+            .expect("snapshot end still covers the record");
+        assert_eq!(body, vec![0xab; 16]);
+        let err = t
+            .with_bytes_at(off, 16, |_| Ok(()))
+            .expect_err("fresh published end is the shrink");
         match err {
             StoreError::Corrupt(msg) => assert!(msg.contains("published"), "{msg}"),
             other => panic!("{other:?}"),
@@ -750,9 +819,16 @@ mod tests {
         let len = starts[1] - off;
         assert_eq!(off % 8, 0);
         let mut prefix = [0u8; 4];
-        assert_eq!(t.read_prefix_at(off, len, &mut prefix).unwrap(), 4);
+        assert_eq!(
+            t.read_prefix_at_published(end, off, len, &mut prefix)
+                .unwrap(),
+            4
+        );
         assert_eq!(prefix, [0, 0, 0, 0]);
-        assert_eq!(t.read_prefix_at(off, len, &mut []).unwrap(), 0);
+        assert_eq!(
+            t.read_prefix_at_published(end, off, len, &mut []).unwrap(),
+            0
+        );
         t.with_bytes_at(off, len, |b| {
             assert!(b.len() >= 16);
             Ok(())
