@@ -8,3 +8,4 @@ Security
 - RPC waits are capped at two minutes, the listener accepts at most 256
   connections, and a long-poll does not hold a work-queue slot.
 - API logs strip `xprv` / `tprv` material and silent-payment scan secrets.
+- Findings write-ups: 063, 064, 065, 066.

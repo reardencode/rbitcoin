@@ -11,13 +11,13 @@ steps.
 | H1 | high | Decoy and invalid-type packets skip the rate window | fixed | `decoy_packet_is_handed_to_the_rate_hook` ([055](./055-decoy-rate.md)) |
 | H2 | high | Inbound eviction drops the longest-connected peer | fixed | `eviction_drops_the_newest_in_the_largest_netgroup` ([060](./060-evict-newest-netgroup.md)) |
 | H2-ban | high | Misbehavior disconnect is not remembered | fixed | `misbehavior_disconnect_refuses_the_same_address` ([061](./061-misbehavior-remembered.md)) |
-| H3 | high | REST always on and shares the RPC work queue | fixed | `rest_is_404_without_the_flag` |
-| H4 | medium | Silent-payment unsubscribe logs the scan secret | fixed | `api_call_redacts_scan_secrets_and_ext_privkeys` |
+| H3 | high | REST always on and shares the RPC work queue | fixed | `rest_is_404_without_the_flag` ([063](./063-rest-own-queue.md)) |
+| H4 | medium | Silent-payment unsubscribe logs the scan secret | fixed | `api_call_redacts_scan_secrets_and_ext_privkeys` ([064](./064-api-log-redaction.md)) |
 | H5 | high | IBD reader credits unsolicited data as progress | fixed | `unsolicited_block_does_not_refresh_progress` ([062](./062-ibd-requested-progress.md)) |
 | N1 | medium | Inv getdata does not charge the send budget | fixed | `inv_getdata_charges_send_budget` ([056](./056-inv-getdata-budget.md)) |
 | M1 | medium | Block getdata can queue past the send budget | fixed | `getdata_stops_when_send_budget_is_already_over` ([057](./057-block-getdata-budget.md)) |
-| M2 | medium | Silent-payment scan span is unbounded when start is set | fixed | `parse_sub_labels_start_and_networks`, `sp_scan_stops_when_the_client_hangs_up` |
-| M3 | medium | RPC listener has no accept timeout; long-poll holds a permit | fixed | `long_poll_does_not_hold_the_work_queue`, `wait_timeout_ms_caps_at_two_minutes` |
+| M2 | medium | Silent-payment scan span is unbounded when start is set | fixed | `parse_sub_labels_start_and_networks`, `sp_scan_stops_when_the_client_hangs_up` ([065](./065-sp-scan-window.md)) |
+| M3 | medium | RPC listener has no accept timeout; long-poll holds a permit | fixed | `long_poll_does_not_hold_the_work_queue`, `wait_timeout_ms_caps_at_two_minutes` ([066](./066-rpc-wait-cap.md)) |
 | M4 | medium | fuse8 segment length need not be a power of two | open | — |
 | M5 | medium | Class A bulk read ignores the published end | open | — |
 | M6 | medium | Testnet milestone is height-only | open | — |
