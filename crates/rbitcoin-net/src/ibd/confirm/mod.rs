@@ -467,9 +467,9 @@ impl ConfirmRejectClass {
     }
 
     /// Multi-block waves attribute rejects to the first hash. Do not blacklist
-    /// that hash — isolate by retrying one block at a time.
+    /// or re-get that hash — isolate by retrying one block at a time.
     pub(crate) fn isolate_if_batched(self, batch_len: usize) -> Self {
-        if self == Self::ConsensusInvalid && batch_len > 1 {
+        if matches!(self, Self::ConsensusInvalid | Self::SoftWire) && batch_len > 1 {
             Self::Cascade
         } else {
             self
@@ -533,21 +533,29 @@ fn reoffer_blocks_to_body_queue<'a>(
     }
 }
 
-/// Stamp/pin fail: drop speculative fks, bump the feed epoch, re-offer tail to BQ.
-fn load_fail_rewind_wave<'a>(
+/// Stamp/pin fail: drop speculative fks, bump the feed epoch, re-offer to BQ.
+/// A one-block wave drops its failing block. A batched reject names the first
+/// hash but may be any block's fault, so every block goes back and the retry
+/// runs one block at a time.
+fn load_fail_rewind_wave(
     feed: &ConfirmFeed,
     hub: &ChainHub,
     lookup_ahead: &mut LoadAheadState,
     first_h: u32,
-    tail: impl IntoIterator<Item = (u32, BlockHash, &'a bitcoin::Block)>,
+    wave: &[(u32, BlockHash, &bitcoin::Block)],
 ) {
-    let tail: Vec<_> = tail.into_iter().collect();
-    reoffer_blocks_to_body_queue(hub, tail.iter().copied());
     lookup_ahead.clear_all(hub);
     feed.finish(std::iter::once(first_h));
     feed.clear();
+    // After `clear` (which drops isolation) and before the re-offer, so
+    // lookup cannot rebuild the same wave.
+    if wave.len() > 1 {
+        feed.request_single_block(first_h.saturating_add(wave.len() as u32 - 1));
+    }
     hub.query.set_lookup_taken_hi(hub.tip_height());
     hub.query.set_lookup_started_hi(hub.tip_height());
+    reoffer_blocks_to_body_queue(hub, wave[usize::from(wave.len() == 1)..].iter().copied());
+    feed.notify();
 }
 
 pub(crate) fn lookup_ready_hash(feed: &ConfirmFeed, height: u32) -> Option<BlockHash> {
@@ -1963,9 +1971,10 @@ pub(crate) fn spawn_confirm_engine(
                                 &hub_load,
                                 &mut lookup_ahead,
                                 expect_h,
-                                wire_batch.iter().skip(1).filter_map(|(h, ha, w)| {
-                                    (!hub_load.has_block(ha)).then_some((*h, *ha, w.block.as_ref()))
-                                }),
+                                &wire_batch
+                                    .iter()
+                                    .map(|(h, ha, w)| (*h, *ha, w.block.as_ref()))
+                                    .collect::<Vec<_>>(),
                             );
                         }
                         loop_stats_load
@@ -2120,9 +2129,10 @@ pub(crate) fn spawn_confirm_engine(
                             &hub_load,
                             &mut lookup_ahead,
                             expect_h,
-                            wire_batch.iter().skip(1).filter_map(|(h, ha, w)| {
-                                (!hub_load.has_block(ha)).then_some((*h, *ha, w.block.as_ref()))
-                            }),
+                            &wire_batch
+                                .iter()
+                                .map(|(h, ha, w)| (*h, *ha, w.block.as_ref()))
+                                .collect::<Vec<_>>(),
                         );
                         loop_stats_load
                             .confirm_reject_stops

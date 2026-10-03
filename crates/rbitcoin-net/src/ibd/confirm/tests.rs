@@ -1105,7 +1105,7 @@ fn confirm_feed_clear_drops_queued_plans() {
 }
 
 #[test]
-fn isolate_if_batched_downgrades_multi_block_consensus() {
+fn isolate_if_batched_downgrades_multi_block_consensus_and_wire() {
     use super::ConfirmRejectClass;
     assert_eq!(
         ConfirmRejectClass::ConsensusInvalid.isolate_if_batched(1),
@@ -1113,6 +1113,14 @@ fn isolate_if_batched_downgrades_multi_block_consensus() {
     );
     assert_eq!(
         ConfirmRejectClass::ConsensusInvalid.isolate_if_batched(8),
+        ConfirmRejectClass::Cascade
+    );
+    assert_eq!(
+        ConfirmRejectClass::SoftWire.isolate_if_batched(1),
+        ConfirmRejectClass::SoftWire
+    );
+    assert_eq!(
+        ConfirmRejectClass::SoftWire.isolate_if_batched(8),
         ConfirmRejectClass::Cascade
     );
     assert_eq!(
@@ -1425,9 +1433,8 @@ fn lookup_ready_hash_none_when_missing() {
 #[test]
 fn ibd_confirm_pin_fault() {
     use super::{
-        finish_connected_write_after_session_fault, load_fail_rewind_wave,
-        reoffer_blocks_to_body_queue, spawn_confirm_engine, write_batch_is_stale, ConfirmEvent,
-        LoadAheadState,
+        finish_connected_write_after_session_fault, reoffer_blocks_to_body_queue,
+        spawn_confirm_engine, write_batch_is_stale, ConfirmEvent, LoadAheadState,
     };
     use crate::ibd::status::LoopStats;
     use bitcoin::absolute::LockTime;
@@ -1442,7 +1449,6 @@ fn ibd_confirm_pin_fault() {
     use rbitcoin_query::testutil::FixtureChain as _;
     use rbitcoin_query::{ArchiveWritePlan, TxApply};
     use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
-    use std::collections::HashSet;
     use std::sync::atomic::AtomicU32;
     use std::time::{Duration, Instant};
 
@@ -1594,51 +1600,8 @@ fn ibd_confirm_pin_fault() {
         "past tip+1 is not the live batch"
     );
 
-    // A load wave fails at tip+1: pins clear, the epoch drops same-wave
-    // loads, lookup rewinds to the tip, and the tail body goes back on the
-    // body queue, not feed.ready.
-    let fail_feed = ConfirmFeed::new();
-    let mut st = LoadAheadState::new(&hub);
-    let body0 = hub.query.tx_body_count();
-    let mut plan = ArchiveWritePlan::empty();
-    plan.planned_fks = vec![Fk(body0 + 10)];
-    st.note_lookup_ok(&plan, t + 1, [1u8; 32]);
-    let pin = test_pin(body0 + 10);
-    st.in_flight
-        .note_pins(std::iter::once((plan.planned_fks[0], &pin)), Some(t + 1));
-    assert!(st.in_flight.entry_count() > 0);
-    {
-        let mut g = fail_feed.inner.lock().unwrap();
-        g.inflight.insert(t + 1);
-        g.inflight.insert(t + 2);
-    }
+    load_fail_rewind_requeues_the_wave(&hub, tip, tip_time);
     let tail = mine_empty_regtest(tip, tip_time + 600, t + 1);
-    hub.query.set_lookup_taken_hi(Some(t + 2));
-    load_fail_rewind_wave(
-        &fail_feed,
-        &hub,
-        &mut st,
-        t + 1,
-        std::iter::once((t + 2, tail.block_hash(), &tail)),
-    );
-    assert_eq!(st.in_flight.entry_count(), 0, "pin/stamp fail clears all");
-    assert_eq!(fail_feed.epoch(), 1);
-    assert_eq!(hub.query.lookup_taken_hi(), Some(t));
-    assert_eq!(
-        hub.query.block_queue_payload(t + 2).unwrap().as_deref(),
-        Some(serialize(&tail).as_slice())
-    );
-    assert_eq!(
-        hub.query
-            .block_queue_unresolved_heights(t + 2, &HashSet::new(), 4),
-        vec![t + 2],
-        "the tail is claimable again"
-    );
-    {
-        let g = fail_feed.inner.lock().unwrap();
-        assert!(!g.ready.contains_key(&(t + 1)) && !g.ready.contains_key(&(t + 2)));
-    }
-    hub.query.block_queue_dequeue_height(t + 2).unwrap();
 
     // A stale load queue only restores the body queue; lookup stays taken.
     hub.query.set_lookup_taken_hi(Some(t + 3));
@@ -1747,4 +1710,83 @@ fn ibd_confirm_pin_fault() {
     assert_eq!(hub.query.block_queue_dequeue_height(t + 1).unwrap(), 1);
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A two-block load wave fails, named by tip+1: pins clear, the epoch drops
+/// same-wave loads, lookup rewinds to the tip, the retry is one block at a
+/// time, and both bodies go back on the body queue, not feed.ready. A
+/// one-block wave drops the block that failed.
+fn load_fail_rewind_requeues_the_wave(hub: &crate::chain::ChainHub, tip: BlockHash, tip_time: u32) {
+    use super::{load_fail_rewind_wave, LoadAheadState};
+    use bitcoin::consensus::encode::serialize;
+    use rbitcoin_consensus::mine_empty_regtest;
+    use rbitcoin_query::ArchiveWritePlan;
+    use std::collections::HashSet;
+
+    let t = hub.tip_height().unwrap();
+    let fail_feed = ConfirmFeed::new();
+    let mut st = LoadAheadState::new(hub);
+    let body0 = hub.query.tx_body_count();
+    let mut plan = ArchiveWritePlan::empty();
+    plan.planned_fks = vec![Fk(body0 + 10)];
+    st.note_lookup_ok(&plan, t + 1, [1u8; 32]);
+    let pin = test_pin(body0 + 10);
+    st.in_flight
+        .note_pins(std::iter::once((plan.planned_fks[0], &pin)), Some(t + 1));
+    assert!(st.in_flight.entry_count() > 0);
+    {
+        let mut g = fail_feed.inner.lock().unwrap();
+        g.inflight.insert(t + 1);
+        g.inflight.insert(t + 2);
+    }
+    let head = mine_empty_regtest(tip, tip_time + 600, t + 1);
+    let tail = mine_empty_regtest(head.block_hash(), tip_time + 1200, t + 2);
+    hub.query.set_lookup_taken_hi(Some(t + 2));
+    load_fail_rewind_wave(
+        &fail_feed,
+        hub,
+        &mut st,
+        t + 1,
+        &[
+            (t + 1, head.block_hash(), &head),
+            (t + 2, tail.block_hash(), &tail),
+        ],
+    );
+    assert_eq!(st.in_flight.entry_count(), 0, "pin/stamp fail clears all");
+    assert_eq!(fail_feed.epoch(), 1);
+    assert_eq!(hub.query.lookup_taken_hi(), Some(t));
+    assert_eq!(
+        fail_feed.isolate_until(),
+        t + 2,
+        "retry one block at a time"
+    );
+    for (ht, b) in [(t + 1, &head), (t + 2, &tail)] {
+        assert_eq!(
+            hub.query.block_queue_payload(ht).unwrap().as_deref(),
+            Some(serialize(b).as_slice())
+        );
+    }
+    assert_eq!(
+        hub.query
+            .block_queue_unresolved_heights(t + 1, &HashSet::new(), 4),
+        vec![t + 1, t + 2],
+        "the wave is claimable again"
+    );
+    {
+        let g = fail_feed.inner.lock().unwrap();
+        assert!(!g.ready.contains_key(&(t + 1)) && !g.ready.contains_key(&(t + 2)));
+    }
+    hub.query.block_queue_dequeue_height(t + 1).unwrap();
+    hub.query.block_queue_dequeue_height(t + 2).unwrap();
+
+    let solo = ConfirmFeed::new();
+    load_fail_rewind_wave(
+        &solo,
+        hub,
+        &mut st,
+        t + 1,
+        &[(t + 1, head.block_hash(), &head)],
+    );
+    assert!(!solo.single_block());
+    assert!(!hub.query.block_queue_has_height(t + 1));
 }

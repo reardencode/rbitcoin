@@ -893,6 +893,11 @@ fn apply_soft_wire_reject(
         }
     }
     if !bad_prev {
+        // A batched soft reject was isolated as a cascade. It landed here on
+        // its own block, so it does not count toward the cascade halt. This
+        // also clears a count for another hash: the tip+1 retry got a
+        // verdict, so the pipeline is not stuck repeating that cascade.
+        st.cascade_at = None;
         st.body.mark_missing(hash);
         st.body.demote_known(hash);
         st.reopen_for_densify(&[hash]);

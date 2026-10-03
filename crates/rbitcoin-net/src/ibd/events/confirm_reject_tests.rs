@@ -2110,3 +2110,89 @@ fn isolation_claims_one_block_at_a_time() {
     assert!(ahead <= 1, "lookup ran {ahead} blocks past the tip");
     rig.finish();
 }
+
+/// tip+1 and tip+2 confirm in one wave and peer 2 serves a mutated tip+2.
+/// The wave reject names tip+1, so it is isolated and retried one block at
+/// a time: tip+2 is rejected under its own hash. Assign asks again for
+/// every body the rewind dropped, and both honest bodies connect.
+#[test]
+fn ibd_batched_mutated_body_is_isolated_to_its_block() {
+    use super::super::assign::tests::lock_default_assign_stop;
+    use super::super::state::InflightReq;
+    use bitcoin::ScriptBuf;
+    use rbitcoin_consensus::mine_regtest_paying;
+
+    let _env = lock_default_assign_stop();
+    let mut rig = WireRig::new("batched-mutated", 3);
+    let (t, cbs) = (rig.t, rig.cbs.clone());
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+    let b1 = mine_regtest_paying(
+        rig.tip,
+        rig.tip_time + 600,
+        t + 1,
+        spk.clone(),
+        vec![WireRig::spend(cbs[0])],
+    );
+    let b2 = mine_regtest_paying(
+        b1.block_hash(),
+        rig.tip_time + 1200,
+        t + 2,
+        spk,
+        vec![WireRig::spend(cbs[1])],
+    );
+    let (h1, h2) = (b1.block_hash(), b2.block_hash());
+    let mut repeated = b2.clone();
+    repeated.txdata.push(repeated.txdata[1].clone());
+    rig.plant(&[&b1, &b2]);
+    // Both bodies are queued before the engine starts, so one wave holds them.
+    for (peer, body) in [(1, &b1), (2, &repeated)] {
+        let hash = body.block_hash();
+        rig.st.slots[peer - 1].in_flight.insert(hash);
+        rig.st.inflight.insert(hash, InflightReq::new(peer));
+        rig.deliver(peer, body);
+    }
+    rig.start_engine();
+
+    let rejects = rig.pump(
+        |peer, hash| match (hash == h1, peer) {
+            (true, _) => b1.clone(),
+            (false, 2) => repeated.clone(),
+            (false, _) => b2.clone(),
+        },
+        |_, hub, _| hub.tip_hash() == Some(h2),
+    );
+    assert_eq!(
+        rejects[0],
+        (h1, ConfirmRejectClass::Cascade, 2),
+        "one wave, named by tip+1, is isolated"
+    );
+    assert!(
+        rejects[1..]
+            .iter()
+            .all(|r| *r == (h2, ConfirmRejectClass::SoftWire, 1)),
+        "only the mutated block is rejected as wire, alone: {rejects:?}"
+    );
+    assert!(rejects.len() > 1, "{rejects:?}");
+    assert_eq!(rig.hub.tip_height(), Some(t + 2));
+    rig.finish();
+}
+
+/// A mutated head of a batch is isolated as a cascade and then lands as a
+/// one-block soft reject. Repeats at the same tip, one per serving peer, do
+/// not reach the cascade halt.
+#[test]
+fn isolated_soft_reject_does_not_count_toward_cascade_halt() {
+    let mut st = IbdWorkState::new(Vec::new(), Some(h(0)), Some(0));
+    let hash = h(1);
+    st.record_height(hash, 1);
+    let err = "consensus: bad block: merkle root mismatch";
+    for _ in 0..4 {
+        for (class, batch_len) in [
+            (ConfirmRejectClass::Cascade, 2),
+            (ConfirmRejectClass::SoftWire, 1),
+        ] {
+            apply_confirm_reject_class(&mut st, 1, hash, class, err, None, None, batch_len, None);
+        }
+    }
+    assert!(st.halt.is_none(), "{:?}", st.halt);
+}

@@ -10,6 +10,8 @@ Fixed
   copy of the block: it drops the body and requests the block again.
   That request is no longer skipped: before, near the end of IBD, a
   block whose bad body was dropped could wait forever.
+  When the bad body is checked in a batch with other blocks, IBD retries
+  the batch one block at a time, so only the bad body is dropped.
 - **A block with a second coinbase or a repeated transaction is now
   remembered as invalid.** These blocks reported `bad-txns-duplicate`,
   the reason Bitcoin Core keeps for a mutated body, so the node did not
