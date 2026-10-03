@@ -59,10 +59,10 @@ pub fn verify_tx_scripts_detached_forks(
 }
 
 pub use block::{
-    bip34_height_script, bip68_active_for_tx, block_has_witness, block_subsidy, check_block_wire,
-    is_final_tx, sequence_locks_satisfied, tx_sigop_cost, validate_block_structure,
-    witness_commitment_script, ValidationContext, MAX_BLOCK_TX_COUNT, MAX_BLOCK_WEIGHT,
-    MIN_TX_WEIGHT,
+    bip34_height_script, bip68_active_for_tx, block_has_witness, block_mutated_without_coinbase,
+    block_subsidy, check_block_wire, is_final_tx, sequence_locks_satisfied, tx_sigop_cost,
+    validate_block_structure, witness_commitment_script, ValidationContext, MAX_BLOCK_TX_COUNT,
+    MAX_BLOCK_WEIGHT, MIN_TX_WEIGHT,
 };
 pub(crate) use block::{validate_block_structure_hashed, TxPrecompute};
 pub use clock::{with_now, NodeClock};

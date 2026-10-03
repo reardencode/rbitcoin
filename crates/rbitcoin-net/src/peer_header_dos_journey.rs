@@ -863,6 +863,84 @@ async fn noban_bad_block_is_not_punished(
     peers.set_noban(false);
 }
 
+/// Core `IsBlockMutated`: a coinbase-less body with a 64-byte tx is dropped
+/// and punished before relay or accept. Its hash is not cached as failed.
+async fn sixty_four_byte_body_is_mutated(
+    hub: &crate::chain::ChainHub,
+    peers: &std::sync::Arc<crate::peers::PeerHub>,
+) {
+    let tip = hub.tip_hash().unwrap();
+    let time = hub.tip_header().unwrap().time.saturating_add(1);
+    let inner = crate::chain::sixty_four_byte_body(tip, time);
+    let hash = inner.block_hash();
+    let (out_tx, _rx) = mpsc::unbounded_channel();
+    let sender = live_peer(peers, 18474, 23, true);
+    let mut follow = PeerFollowState::new();
+    follow.requested_blocks.insert(hash);
+    hub.note_asked_block(hash);
+    rbitcoin_log::capture_logs(true);
+    on_block(hub, &out_tx, &mut follow, Some(sender.as_ref()), &inner)
+        .await
+        .unwrap();
+    assert!(
+        logs_have("Block mutated: 64-byte transaction without a coinbase"),
+        "the drop names the mutation"
+    );
+    assert!(
+        sender.stop.load(Ordering::SeqCst),
+        "Core punishes a mutated block"
+    );
+    assert!(
+        !hub.is_block_invalid(&hash),
+        "the header's real body must stay acceptable"
+    );
+    assert!(!hub.knows_header(&hash), "a mutated body adds no header");
+    assert!(
+        !hub.already_have_or_asked_block(&hash),
+        "a mutated drop forgets the ask so another peer can serve the real body"
+    );
+    assert!(!follow.requested_blocks.contains(&hash));
+    assert_eq!(hub.tip_hash(), Some(tip));
+}
+
+/// Core `RemoveBlockRequest` on a merkle-mismatch drop: the body is not the
+/// header's, so another peer must be free to serve the real one.
+async fn merkle_mismatch_forgets_the_ask(
+    hub: &crate::chain::ChainHub,
+    peers: &std::sync::Arc<crate::peers::PeerHub>,
+) {
+    let tip = hub.tip_hash().unwrap();
+    let time = hub.tip_header().unwrap().time.saturating_add(2);
+    let mut wrong = crate::chain::sixty_four_byte_body(tip, time);
+    let hash = wrong.block_hash();
+    wrong.txdata[0].output[0].value = bitcoin::Amount::from_sat(1);
+    assert!(!wrong.check_merkle_root());
+    let (out_tx, _rx) = mpsc::unbounded_channel();
+    let sender = live_peer(peers, 18475, 24, true);
+    let mut follow = PeerFollowState::new();
+    follow.requested_blocks.insert(hash);
+    hub.note_asked_block(hash);
+    rbitcoin_log::capture_logs(true);
+    on_block(hub, &out_tx, &mut follow, Some(sender.as_ref()), &wrong)
+        .await
+        .unwrap();
+    assert!(
+        logs_have("Block mutated: bad-txnmrklroot, hashMerkleRoot mismatch"),
+        "the drop names the mutation"
+    );
+    assert!(
+        sender.stop.load(Ordering::SeqCst),
+        "Core punishes a mutated block"
+    );
+    assert!(!hub.is_block_invalid(&hash));
+    assert!(
+        !hub.already_have_or_asked_block(&hash),
+        "a mutated drop forgets the ask so another peer can serve the real body"
+    );
+    assert!(!follow.requested_blocks.contains(&hash));
+    assert_eq!(hub.tip_hash(), Some(tip));
+}
+
 /// A block whose header fails contextual checks still logs Core's reject reason.
 async fn rejected_header_logs_core_reason(hub: &crate::chain::ChainHub) {
     use bitcoin::block::Version;
@@ -1115,6 +1193,8 @@ async fn peer_header_dos_and_self_announce() {
     tall_unknown_parent_skips_reconstruct(&hub, &peers).await;
     header_reject_punishes_except_time(&hub).await;
     noban_bad_block_is_not_punished(&hub, &peers).await;
+    sixty_four_byte_body_is_mutated(&hub, &peers).await;
+    merkle_mismatch_forgets_the_ask(&hub, &peers).await;
     rejected_header_logs_core_reason(&hub).await;
 
     let tip = hub.tip_height().unwrap();
