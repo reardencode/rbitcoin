@@ -64,6 +64,7 @@ fn finish_already_committed_write(
 
 struct ArchivePlanNs {
     pins: FkMap<rbitcoin_query::CreatePin>,
+    class_a_wave: crate::block::ClassAWave,
     class_a_ns: u64,
     ensure_ns: u64,
     plan_take_ns: u64,
@@ -76,6 +77,7 @@ fn apply_archive_plan(
 ) -> Result<ArchivePlanNs, ConsensusError> {
     let mut ns = ArchivePlanNs {
         pins: FkMap::default(),
+        class_a_wave: crate::block::ClassAWave::default(),
         class_a_ns: 0,
         ensure_ns: 0,
         plan_take_ns: 0,
@@ -130,6 +132,11 @@ fn apply_archive_plan(
     if let Some(last) = batch.prepared.last() {
         query.set_class_a_hi(Some(last.height.0));
     }
+    // The overlay is proven only for rows this commit wrote. A plan trimmed
+    // at commit wrote fewer rows than `planned_fks` names.
+    if loc.len() == planned_fks.len() {
+        ns.class_a_wave = crate::block::ClassAWave::new(planned_fks);
+    }
     Ok(ns)
 }
 
@@ -158,11 +165,13 @@ pub fn confirm_write_phase(
         }
         WriteBatchVsTip::AllNew => {}
     }
+    annotate_pending_spends(query)?;
 
     let t_wall = Instant::now();
 
     let ArchivePlanNs {
         pins: write_create_pins,
+        class_a_wave,
         class_a_ns,
         mut ensure_ns,
         plan_take_ns,
@@ -206,12 +215,16 @@ pub fn confirm_write_phase(
                 &batch.wire_blocks,
                 &batch.batch_parents,
                 &abs_jobs,
+                &class_a_wave,
                 &mut reuse.borrow_mut(),
             )
         })?;
         let structural_ns = t_struct.elapsed().as_nanos() as u64;
 
         let n_blocks = batch.prepared.len();
+        if let Some(first) = batch.prepared.first() {
+            query.store().note_spend_annotate_pending(first.height.0);
+        }
         let cc0 = query.confirm_stats().class_c_ns.load(Ordering::Relaxed);
         let t_cc = Instant::now();
         let out = class_c_commit(query, &mut batch.prepared, &write_create_pins)?;
@@ -237,6 +250,7 @@ pub fn confirm_write_phase(
         }
 
         let spend_ann_ns = post_commit(query, &slots)?;
+        query.store().clear_spend_annotate_pending();
         if let Some(tip) = query.tip_height() {
             query.store().note_spend_snapshot(tip.0);
         }
@@ -388,8 +402,36 @@ fn publish_spend_marker(query: &Query, tip: u32) -> Result<(), ConsensusError> {
 }
 
 fn rewrite_spend_heights(query: &Query, annotated: u32, tip: u32) -> Result<u32, ConsensusError> {
-    let start = annotated + 1;
     rbitcoin_log::info!("store: replay spend annotations ({annotated}, {tip}]");
+    let replayed = annotate_spend_heights(query, annotated + 1, tip)?;
+    publish_spend_marker(query, tip)?;
+    Ok(replayed)
+}
+
+/// Finish the spend annotate a failed confirm write left after its tip commit.
+///
+/// The next batch's spentness reads those slots, so it must not run until they
+/// are written. A replay that fails returns the error and the batch does not run.
+fn annotate_pending_spends(query: &Query) -> Result<(), ConsensusError> {
+    let Some(from) = query.store().spend_annotate_pending() else {
+        return Ok(());
+    };
+    if let Some(tip) = query.tip_height().map(|h| h.0).filter(|&t| t >= from) {
+        rbitcoin_log::warn!(
+            "confirm: replay spend annotations [{from}, {tip}] after a failed write"
+        );
+        let t = Instant::now();
+        annotate_spend_heights(query, from, tip)?;
+        rbitcoin_query::note_confirm(
+            &query.confirm_stats().spend_replay_ns,
+            t.elapsed().as_nanos() as u64,
+        );
+    }
+    query.store().clear_spend_annotate_pending();
+    Ok(())
+}
+
+fn annotate_spend_heights(query: &Query, start: u32, tip: u32) -> Result<u32, ConsensusError> {
     let heights: Vec<u32> = (start..=tip).collect();
     let replayed = heights.len() as u32;
     let started = std::time::Instant::now();
@@ -417,7 +459,6 @@ fn rewrite_spend_heights(query: &Query, annotated: u32, tip: u32) -> Result<u32,
             logged_at = std::time::Instant::now();
         }
     }
-    publish_spend_marker(query, tip)?;
     Ok(replayed)
 }
 

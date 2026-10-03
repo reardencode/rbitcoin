@@ -226,6 +226,9 @@ pub(crate) struct IbdPerfSample {
     pub ann_pread_skip: u64,
     /// Periodic Class A `sync_data` that advances the spend-durable marker.
     pub ann_sync_ms: u64,
+    /// Pending spend annotate a failed write left, replayed before the next
+    /// write. Nested in `spend=`, not an exclusive write token.
+    pub spend_replay_ms: u64,
     /// Structural meta bulk read wall ms / peek count.
     pub meta_ms: u64,
     pub meta_n: u64,
@@ -499,6 +502,7 @@ impl Default for IbdPerfSample {
             ann_n: 0,
             ann_pread_skip: 0,
             ann_sync_ms: 0,
+            spend_replay_ms: 0,
             meta_ms: 0,
             meta_n: 0,
             ovl_n: 0,
@@ -902,6 +906,7 @@ pub(crate) fn sample(
     let ann_n = w.spend_ann_n;
     let ann_pread_skip = w.spend_ann_pread_skip;
     let ann_sync_ns = w.spend_durable_ns;
+    let spend_replay_ns = w.spend_replay_ns;
     let meta_ns = w.spend_meta_ns;
     let meta_n = w.spend_meta_n;
     let ovl_n = w.spend_overlay_skip_n;
@@ -1015,6 +1020,7 @@ pub(crate) fn sample(
         ann_n,
         ann_pread_skip,
         ann_sync_ms: ns_ms(ann_sync_ns),
+        spend_replay_ms: ns_ms(spend_replay_ns),
         meta_ms: ns_ms(meta_ns),
         meta_n,
         ovl_n,
@@ -1534,6 +1540,7 @@ pub(crate) fn format_info(s: &IbdPerfSample) -> String {
         s.meta_n,
     ));
     append_nz(&mut out, "ovl_n", s.ovl_n);
+    append_nz(&mut out, "spend_replay_ms", s.spend_replay_ms);
     if s.arch_write_body_ms > 0 || s.arch_write_head_ms > 0 || s.arch_write_htxs_ms > 0 {
         out.push_str(&format!(
             " class_a_sub(body={} head={} htxs={} txstat={} reserve={})",
@@ -2286,6 +2293,15 @@ mod tests {
         assert!(line.contains("meta="), "{line}");
         assert!(line.contains("ovl_n=12"), "{line}");
         assert!(!line.contains("same_n=12"), "{line}");
+    }
+
+    #[test]
+    fn format_info_spend_replay_only_when_it_ran() {
+        let mut s = IbdPerfSample::default();
+        assert!(!format_info(&s).contains("spend_replay"));
+        s.spend_replay_ms = 7;
+        let line = format_info(&s);
+        assert!(line.contains("spend_replay_ms=7"), "{line}");
     }
 
     /// Optional stamp_sub / head_loc / lookup_sub / plan_batch tokens on the

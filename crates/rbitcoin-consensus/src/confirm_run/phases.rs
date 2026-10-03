@@ -247,6 +247,7 @@ pub(super) fn structural_run(
     wire_blocks: &[Arc<Block>],
     batch_parents: &rbitcoin_query::BatchParents,
     abs_jobs: &[Vec<crate::block::StructuralAbsJob>],
+    class_a_wave: &crate::block::ClassAWave,
     reuse: &mut StructuralReuse,
 ) -> Result<(crate::block::StructuralPhaseNs, crate::block::AnnotateSlots), ConsensusError> {
     use crate::block::StructuralPhaseNs;
@@ -282,6 +283,7 @@ pub(super) fn structural_run(
             batch_parents,
             &mut mtp_cache,
             &index,
+            class_a_wave,
             &mut reuse.scratch,
             Some(&abs_jobs[i]),
         )?;

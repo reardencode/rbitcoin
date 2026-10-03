@@ -271,3 +271,245 @@ fn replay_status_is_ten_seconds() {
     assert!(!super::write::replay_status_due(9_999));
     assert!(super::write::replay_status_due(10_000));
 }
+
+/// Y is archived in a rejected batch, so its spend of X's output is never
+/// annotated and X's archive wave had no overlay for it. After X is
+/// disconnected, the run `[X, Y]` has no archive plan. It must still write
+/// the spend, or a later block can spend the same output again.
+#[test]
+fn rerun_without_archive_plan_annotates_a_spend_of_a_run_create() {
+    let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("spend-rerun");
+    let params = ChainParams::regtest();
+    let ms = Milestone::NONE;
+    let maturity = params.coinbase_maturity();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, ms).unwrap();
+    let mut tip = genesis.block_hash();
+    let mut tip_time = genesis.header.time;
+    let b1 = mine(tip, tip_time + 600, 1, Vec::new());
+    let c1 = b1.txdata[0].compute_txid();
+    accept_and_connect_block(&q, &params, Height(1), &b1, ms).unwrap();
+    tip = b1.block_hash();
+    tip_time = b1.header.time;
+    for h in 2..=maturity + 1 {
+        let b = mine(tip, tip_time + 600, h, Vec::new());
+        accept_and_connect_block(&q, &params, Height(h), &b, ms).unwrap();
+        tip = b.block_hash();
+        tip_time = b.header.time;
+    }
+
+    let hx = maturity + 2;
+    let t = spend_one(c1, Amount::from_sat(49_0000_0000));
+    let tid = t.compute_txid();
+    let x = mine(tip, tip_time + 600, hx, vec![t]);
+    accept_and_connect_block(&q, &params, Height(hx), &x, ms).unwrap();
+
+    let y = mine(
+        x.block_hash(),
+        x.header.time + 600,
+        hx + 1,
+        vec![spend_one(tid, Amount::from_sat(48_0000_0000))],
+    );
+    let z_bad = mine(
+        y.block_hash(),
+        y.header.time + 600,
+        hx + 2,
+        vec![spend_one(
+            x.txdata[0].compute_txid(),
+            Amount::from_sat(1_0000_0000),
+        )],
+    );
+    let err = crate::confirm_wire_run(
+        &q,
+        &params,
+        ms,
+        &[(Height(hx + 1), y.clone()), (Height(hx + 2), z_bad)],
+    )
+    .expect_err("an immature coinbase spend must reject the batch");
+    assert!(
+        matches!(err, ConsensusError::BadTx("coinbase immature")),
+        "{err}"
+    );
+    assert_eq!(q.tip_height(), Some(Height(hx)));
+    assert!(
+        q.tx_fk_by_txid(y.txdata[1].compute_txid().as_byte_array())
+            .unwrap()
+            .is_some(),
+        "Class A commits Y before structural rejects the batch"
+    );
+
+    q.disconnect_tip().unwrap();
+    assert_eq!(q.tip_height(), Some(Height(hx - 1)));
+    crate::confirm_wire_run(
+        &q,
+        &params,
+        ms,
+        &[(Height(hx), x.clone()), (Height(hx + 1), y.clone())],
+    )
+    .unwrap();
+    assert_eq!(q.tip_height(), Some(Height(hx + 1)));
+    assert!(
+        q.is_outpoint_spent(tid.as_byte_array(), 0).unwrap(),
+        "Y's spend of X's output must be on disk"
+    );
+
+    let respend = mine(
+        y.block_hash(),
+        y.header.time + 600,
+        hx + 2,
+        vec![spend_one(tid, Amount::from_sat(46_0000_0000))],
+    );
+    let err = accept_and_connect_block(&q, &params, Height(hx + 2), &respend, ms)
+        .expect_err("an output spent at the tip must not be spent again");
+    assert!(matches!(err, ConsensusError::PrevoutSpent), "{err}");
+    let _ = dir;
+}
+
+/// A stage after the tip commit fails, so Y is connected without its spend
+/// annotation. The next block must not validate against that state.
+///
+/// Turning the filter index on after live append started leaves its
+/// watermark at 0, so the live seal for Y fails after Class C.
+#[test]
+fn failed_post_tip_stage_does_not_let_the_next_block_respend() {
+    let _gate = crate::script_pool::steal_test_gate();
+    let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("spend-post-tip");
+    let params = ChainParams::regtest();
+    let ms = Milestone::NONE;
+    let maturity = params.coinbase_maturity();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, ms).unwrap();
+    let mut tip = genesis.block_hash();
+    let mut tip_time = genesis.header.time;
+    let b1 = mine(tip, tip_time + 600, 1, Vec::new());
+    let c1 = b1.txdata[0].compute_txid();
+    accept_and_connect_block(&q, &params, Height(1), &b1, ms).unwrap();
+    tip = b1.block_hash();
+    tip_time = b1.header.time;
+    for h in 2..=maturity + 1 {
+        let b = mine(tip, tip_time + 600, h, Vec::new());
+        accept_and_connect_block(&q, &params, Height(h), &b, ms).unwrap();
+        tip = b.block_hash();
+        tip_time = b.header.time;
+    }
+    q.set_sptweaks_enabled(true, Height(0)).unwrap();
+    crate::prepare_live_indexes(&q).unwrap();
+    assert!(q.index_live());
+    q.set_block_filter_index(true).unwrap();
+    assert_eq!(q.filter_index_next(), Some(0));
+
+    let hy = maturity + 2;
+    let y = mine(
+        tip,
+        tip_time + 600,
+        hy,
+        vec![spend_one(c1, Amount::from_sat(49_0000_0000))],
+    );
+    let err = accept_and_connect_block(&q, &params, Height(hy), &y, ms)
+        .expect_err("the live seal finds a watermark that is not this batch");
+    assert!(
+        matches!(
+            err,
+            ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
+                "invariant: live index commit"
+            ))
+        ),
+        "{err}"
+    );
+    assert_eq!(q.tip_height(), Some(Height(hy)), "Class C committed Y");
+
+    let respend = mine(
+        y.block_hash(),
+        y.header.time + 600,
+        hy + 1,
+        vec![spend_one(c1, Amount::from_sat(48_0000_0000))],
+    );
+    let err = accept_and_connect_block(&q, &params, Height(hy + 1), &respend, ms)
+        .expect_err("an output Y spent must not be spent again");
+    assert_eq!(q.tip_height(), Some(Height(hy)), "{err}");
+    assert!(matches!(err, ConsensusError::PrevoutSpent), "{err}");
+    assert!(q.is_outpoint_spent(c1.as_byte_array(), 0).unwrap());
+    assert!(
+        q.confirm_stats().take_window().spend_replay_ns > 0,
+        "the replay is timed"
+    );
+    let _ = dir;
+}
+
+/// A reorg drops the tip below the spend snapshot, and the reconnect fails
+/// after its tip commit. The checkpoint must not publish the old snapshot
+/// over the reconnected height, or the next open does not replay its spends.
+#[test]
+fn checkpoint_after_reorg_does_not_skip_the_reconnected_spends() {
+    let _gate = crate::script_pool::steal_test_gate();
+    let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("spend-reorg-snapshot");
+    let params = ChainParams::regtest();
+    let ms = Milestone::NONE;
+    let maturity = params.coinbase_maturity();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, ms).unwrap();
+    let mut tip = genesis.block_hash();
+    let mut tip_time = genesis.header.time;
+    let b1 = mine(tip, tip_time + 600, 1, Vec::new());
+    let c1 = b1.txdata[0].compute_txid();
+    accept_and_connect_block(&q, &params, Height(1), &b1, ms).unwrap();
+    tip = b1.block_hash();
+    tip_time = b1.header.time;
+    for h in 2..=maturity + 1 {
+        let b = mine(tip, tip_time + 600, h, Vec::new());
+        accept_and_connect_block(&q, &params, Height(h), &b, ms).unwrap();
+        tip = b.block_hash();
+        tip_time = b.header.time;
+    }
+
+    let hy = maturity + 2;
+    let x = mine(tip, tip_time + 600, hy, Vec::new());
+    accept_and_connect_block(&q, &params, Height(hy), &x, ms).unwrap();
+    q.disconnect_tip().unwrap();
+    assert_eq!(q.tip_height(), Some(Height(hy - 1)));
+
+    q.set_sptweaks_enabled(true, Height(0)).unwrap();
+    crate::prepare_live_indexes(&q).unwrap();
+    q.set_block_filter_index(true).unwrap();
+    let y = mine(
+        tip,
+        tip_time + 1_200,
+        hy,
+        vec![spend_one(c1, Amount::from_sat(49_0000_0000))],
+    );
+    let err = accept_and_connect_block(&q, &params, Height(hy), &y, ms)
+        .expect_err("the live seal finds a watermark that is not this batch");
+    assert!(
+        matches!(
+            err,
+            ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
+                "invariant: live index commit"
+            ))
+        ),
+        "{err}"
+    );
+    assert_eq!(q.tip_height(), Some(Height(hy)), "Class C committed Y");
+
+    let q = std::sync::Arc::new(q);
+    rbitcoin_query::SpendSync::spawn(std::sync::Arc::clone(&q)).shutdown();
+    let store = q.store().path().to_path_buf();
+    drop(q);
+
+    let q = rbitcoin_query::Query::open_or_create_tiny(&store).unwrap();
+    crate::replay_spend_annotations(&q).unwrap();
+    assert!(
+        q.is_outpoint_spent(c1.as_byte_array(), 0).unwrap(),
+        "open must replay Y's spend"
+    );
+    let respend = mine(
+        y.block_hash(),
+        y.header.time + 600,
+        hy + 1,
+        vec![spend_one(c1, Amount::from_sat(48_0000_0000))],
+    );
+    let err = accept_and_connect_block(&q, &params, Height(hy + 1), &respend, ms)
+        .expect_err("an output Y spent must not be spent again");
+    assert_eq!(q.tip_height(), Some(Height(hy)), "{err}");
+    assert!(matches!(err, ConsensusError::PrevoutSpent), "{err}");
+    let _ = dir;
+}

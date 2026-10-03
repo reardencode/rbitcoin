@@ -171,6 +171,9 @@ confirm_window! {
     spend_ann_n,
     spend_ann_pread_skip,
     spend_durable_ns,
+    // Pending spend annotate replayed before a write after a failed one.
+    // Nested in utxo_apply_ns (the replay runs post_commit).
+    spend_replay_ns,
     spend_meta_ns,
     spend_meta_n,
     spend_overlay_skip_n,

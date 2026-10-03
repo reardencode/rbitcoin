@@ -1460,6 +1460,7 @@ fn structural_same_batch_overlay_skips_meta_pread() {
         &bp,
         &mut mtp,
         &run,
+        &crate::block::ClassAWave::new(fks.clone()),
         &mut scratch,
         None,
     )
@@ -1607,6 +1608,7 @@ fn structural_scratch_second_block_does_not_replay_first_slots() {
             &bp,
             &mut mtp,
             &run,
+            &crate::block::ClassAWave::default(),
             &mut scratch,
             None,
         )
@@ -3104,6 +3106,7 @@ fn structural_pinned_without_abs_is_invariant_error() {
         &bp,
         &mut mtp,
         &heights,
+        &crate::block::ClassAWave::default(),
         &mut crate::block::StructuralScratch::default(),
         None,
     )
@@ -3428,6 +3431,7 @@ fn structural_run_clears_reused_scratch_between_batches() {
             &wire,
             &bp,
             &jobs,
+            &crate::block::ClassAWave::default(),
             reuse,
         )
         .expect("reused scratch still connects")

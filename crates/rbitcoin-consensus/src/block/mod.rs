@@ -1556,6 +1556,7 @@ pub(crate) fn structural_validate_spends(
     batch_parents: &rbitcoin_query::BatchParents,
     mtp_cache: &mut U32Map<u32>,
     run_create_height: &RunCreateHeight,
+    class_a_wave: &ClassAWave,
     scratch: &mut StructuralScratch,
     precomputed_abs: Option<&[StructuralAbsJob]>,
 ) -> Result<StructuralPhaseNs, ConsensusError> {
@@ -1579,7 +1580,7 @@ pub(crate) fn structural_validate_spends(
     let mut spent_strong_ns = 0u64;
     let mut multi_list_ns = 0u64;
     if !scratch.abs_jobs.is_empty() {
-        fill_overlay_skip(spends, run_create_height, scratch);
+        fill_overlay_skip(spends, class_a_wave, scratch);
         let loaded = structural_load_durable_spent(query, tip, scratch)?;
         multi_list_ns = loaded.0;
         spent_strong_ns = loaded.1;
@@ -1624,6 +1625,25 @@ pub(crate) fn structural_validate_spends(
 }
 
 pub(crate) type StructuralAbsJob = (u64, u32, u64, rbitcoin_primitives::Fk, u32);
+
+/// Creates this write batch's Class A append committed.
+///
+/// Only these spent slots carry the same-batch sole-spender overlay. A run
+/// create archived by an earlier wave has whatever that wave and later
+/// annotates left on disk, so structural reads and annotates it.
+#[derive(Default)]
+pub(crate) struct ClassAWave(Vec<rbitcoin_primitives::Fk>);
+
+impl ClassAWave {
+    pub(crate) fn new(mut fks: Vec<rbitcoin_primitives::Fk>) -> Self {
+        fks.sort_unstable_by_key(|f| f.0);
+        Self(fks)
+    }
+
+    fn contains(&self, fk: rbitcoin_primitives::Fk) -> bool {
+        self.0.binary_search_by_key(&fk.0, |f| f.0).is_ok()
+    }
+}
 
 /// Create heights for one write batch.
 ///
@@ -1721,11 +1741,11 @@ fn fill_overlay_skip(
         rbitcoin_primitives::Fk,
         u32,
     )],
-    run_create_height: &RunCreateHeight,
+    class_a_wave: &ClassAWave,
     scratch: &mut StructuralScratch,
 ) {
     for &(_, vout, sfk, cfk, vin) in spends {
-        if run_create_height.get(cfk).is_none() {
+        if !class_a_wave.contains(cfk) {
             continue;
         }
         let Some(id) = cfk.get() else {
@@ -2465,12 +2485,14 @@ mod overlay_meta_skip_tests {
 
     #[test]
     fn overlay_meta_skip_omits_matching_abs() {
+        let wave = ClassAWave::new(vec![Fk(10)]);
         let mut map = FkMap::default();
         map.insert(Fk(10), (5, false));
         let run = RunCreateHeight::Map(map);
+        assert_eq!(run.create(Fk(10)), Some((5, false)));
         let spends = spends(&[(0, Fk(11), Fk(10), 0)]);
         let mut scratch = StructuralScratch::default();
-        fill_overlay_skip(&spends, &run, &mut scratch);
+        fill_overlay_skip(&spends, &wave, &mut scratch);
         assert!(overlay_meta_is_skip(10, 0, Fk(11), 0, &scratch.skip));
         assert!(!overlay_meta_is_skip(10, 0, Fk(11), 1, &scratch.skip));
         assert!(!overlay_meta_is_skip(10, 1, Fk(11), 0, &scratch.skip));
@@ -2479,22 +2501,24 @@ mod overlay_meta_skip_tests {
 
     #[test]
     fn overlay_meta_skip_keeps_conflicting_spender_on_disk_list() {
+        let wave = ClassAWave::new(vec![Fk(10)]);
         let mut map = FkMap::default();
         map.insert(Fk(10), (5, false));
         let run = RunCreateHeight::Map(map);
+        assert_eq!(run.create(Fk(10)), Some((5, false)));
         let spends = spends(&[(0, Fk(11), Fk(10), 0), (0, Fk(12), Fk(10), 0)]);
         let mut scratch = StructuralScratch::default();
-        fill_overlay_skip(&spends, &run, &mut scratch);
+        fill_overlay_skip(&spends, &wave, &mut scratch);
         assert!(!overlay_meta_is_skip(10, 0, Fk(11), 0, &scratch.skip));
         assert!(!overlay_meta_is_skip(10, 0, Fk(12), 0, &scratch.skip));
     }
 
     #[test]
     fn overlay_meta_skip_historical_create_stays_on_disk() {
-        let run = RunCreateHeight::Spans(Vec::new());
+        let wave = ClassAWave::default();
         let spends = spends(&[(0, Fk(11), Fk(10), 0)]);
         let mut scratch = StructuralScratch::default();
-        fill_overlay_skip(&spends, &run, &mut scratch);
+        fill_overlay_skip(&spends, &wave, &mut scratch);
         assert!(!overlay_meta_is_skip(10, 0, Fk(11), 0, &scratch.skip));
     }
 }
