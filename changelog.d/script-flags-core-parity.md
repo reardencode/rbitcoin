@@ -12,3 +12,8 @@ Fixed
   accepted a scriptSig push over 520 bytes (for example a pre-BIP66
   signature with junk before the hashtype). It now falls back to the
   interpreter, which rejects it as Core does.
+- **P2WPKH signatures follow the DERSIG flag.** The P2WPKH fast path
+  (native and P2SH-nested) required strict DER on every block. Core
+  applies strict DER to v0 witness signatures only when BIP66 is active,
+  and caps each witness element at 520 bytes. Both now match Core; this
+  shows on a regtest chain with dersig activated after segwit.
