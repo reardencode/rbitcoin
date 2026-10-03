@@ -1321,9 +1321,6 @@ fn checksig_legacy(
     pubkey: &[u8],
     ctx: &EvalContext<'_>,
 ) -> Result<bool, ConsensusError> {
-    if sig.is_empty() {
-        return Ok(false);
-    }
     let base = script_code_bytes(ctx);
     let deleted: Vec<u8>;
     let script_code: &[u8] = if ctx.sig_version == SigVersion::Base {
@@ -1336,7 +1333,7 @@ fn checksig_legacy(
         base
     };
     let ok = ecdsa_sig_matches(sig, pubkey, ctx, script_code)?;
-    if !ok && ctx.nullfail {
+    if !ok && ctx.nullfail && !sig.is_empty() {
         return Err(ConsensusError::Script("NULLFAIL".into()));
     }
     Ok(ok)
@@ -1344,8 +1341,8 @@ fn checksig_legacy(
 
 /// One ECDSA signature / pubkey comparison against `script_code`.
 ///
-/// Empty signature → false. Encoding failures under DERSIG / LOW_S /
-/// STRICTENC / WITNESS_PUBKEYTYPE hard-fail. A signature that does not verify
+/// Encoding failures under DERSIG / LOW_S / STRICTENC / WITNESS_PUBKEYTYPE
+/// hard-fail, then an empty signature is false. A signature that does not verify
 /// is false; NULLFAIL belongs to the calling opcode (CHECKMULTISIG applies it
 /// only after the whole key walk fails).
 fn ecdsa_sig_matches(
@@ -1354,10 +1351,10 @@ fn ecdsa_sig_matches(
     ctx: &EvalContext<'_>,
     script_code: &[u8],
 ) -> Result<bool, ConsensusError> {
+    checksig_legacy_encodings(sig, pubkey, ctx)?;
     if sig.is_empty() {
         return Ok(false);
     }
-    checksig_legacy_encodings(sig, pubkey, ctx)?;
 
     // Pre-DERSIG: malformed DER that slipped encoding → false.
     let Ok((ecdsa_sig, sighash_ty)) = crypto::parse_der_sig(sig, false) else {
@@ -1372,11 +1369,29 @@ fn ecdsa_sig_matches(
     Ok(crypto::verify_ecdsa(sighash, &ecdsa_sig, &pk))
 }
 
+/// Core `CheckSignatureEncoding` then `CheckPubKeyEncoding`. An empty
+/// signature skips only the signature checks.
 fn checksig_legacy_encodings(
     sig: &[u8],
     pubkey: &[u8],
     ctx: &EvalContext<'_>,
 ) -> Result<(), ConsensusError> {
+    if !sig.is_empty() {
+        check_signature_encoding(sig, ctx)?;
+    }
+    if ctx.strictenc && !crypto::is_compressed_or_uncompressed_pubkey(pubkey) {
+        return Err(ConsensusError::Script("PUBKEYTYPE".into()));
+    }
+    if ctx.witness_pubkeytype
+        && ctx.sig_version == SigVersion::WitnessV0
+        && !crypto::is_compressed_pubkey(pubkey)
+    {
+        return Err(ConsensusError::Script("WITNESS_PUBKEYTYPE".into()));
+    }
+    Ok(())
+}
+
+fn check_signature_encoding(sig: &[u8], ctx: &EvalContext<'_>) -> Result<(), ConsensusError> {
     let need_der = ctx.bip66_active || ctx.low_s || ctx.strictenc;
     if need_der && !crypto::is_valid_signature_encoding(sig) {
         return Err(ConsensusError::Script("SIG_DER".into()));
@@ -1390,15 +1405,6 @@ fn checksig_legacy_encodings(
     }
     if ctx.strictenc && !crypto::is_defined_hashtype(sig) {
         return Err(ConsensusError::Script("SIG_HASHTYPE".into()));
-    }
-    if ctx.strictenc && !crypto::is_compressed_or_uncompressed_pubkey(pubkey) {
-        return Err(ConsensusError::Script("PUBKEYTYPE".into()));
-    }
-    if ctx.witness_pubkeytype
-        && ctx.sig_version == SigVersion::WitnessV0
-        && !crypto::is_compressed_pubkey(pubkey)
-    {
-        return Err(ConsensusError::Script("WITNESS_PUBKEYTYPE".into()));
     }
     Ok(())
 }
