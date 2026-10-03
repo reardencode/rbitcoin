@@ -631,6 +631,13 @@ pub(crate) const BIP16_EXCEPTION_MAINNET: [u8; 32] = [
     0xed, 0x23, 0x97, 0xf4, 0xf4, 0xeb, 0x6e, 0x75, 0xdc, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
+/// Testnet3 BIP16 exception block, Core `CTestNetParams` `script_flag_exceptions`.
+const BIP16_EXCEPTION_TESTNET3: [u8; 32] = [
+    // little-endian display hash 00000000dd30457c001f4095d208cc1296b0eed002427aa599874af7a432b105
+    0x05, 0xb1, 0x32, 0xa4, 0xf7, 0x4a, 0x87, 0x99, 0xa5, 0x7a, 0x42, 0x02, 0xd0, 0xee, 0xb0, 0x96,
+    0x12, 0xcc, 0x08, 0xd2, 0x95, 0x40, 0x1f, 0x00, 0x7c, 0x45, 0x30, 0xdd, 0x00, 0x00, 0x00, 0x00,
+];
+
 /// BIP16 P2SH from **precomputed** prev MTP + block hash (no header re-walk, no rehash).
 ///
 /// Callers must pass the same prev-block MTP used for BIP113 / header MTP checks
@@ -645,14 +652,17 @@ pub(crate) fn bip16_active_from_prev_mtp(
     if *block_hash == BIP16_EXCEPTION_MAINNET {
         return false;
     }
+    if params.network == bitcoin::Network::Testnet && *block_hash == BIP16_EXCEPTION_TESTNET3 {
+        return false;
+    }
     if height == 0 {
         return false;
     }
     // Modern Core buries P2SH: validation.cpp sets SCRIPT_VERIFY_P2SH on every
-    // block except the named BIP16Exception (handled above). The historical
-    // "prev MTP >= 2012-04-01" gate is gone — keeping it splits from Core on
-    // regtest and any early-MTP chain (redeemScript never runs).
-    let _ = (params, prev_mtp);
+    // block except the named per-network exceptions (handled above). The
+    // historical "prev MTP >= 2012-04-01" gate is gone — keeping it splits
+    // from Core on regtest and any early-MTP chain (redeemScript never runs).
+    let _ = prev_mtp;
     true
 }
 

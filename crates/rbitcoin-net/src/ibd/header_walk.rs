@@ -2248,6 +2248,9 @@ fn batch_context_ok(
     };
     let mut times = times_ending_at(st, hub, parent.block_hash());
     let mut parent_hash = parent.block_hash();
+    // The min-difficulty walk-back can land on a header earlier in this
+    // reply, so the snapshot advances with the batch.
+    let mut diff = *diff;
     for hdr in headers {
         let hash = hdr.block_hash();
         if hdr.prev_blockhash != parent_hash {
@@ -2267,7 +2270,7 @@ fn batch_context_ok(
             rbitcoin_primitives::median_time_past_times(&times)
         };
         parent_hash = hash;
-        let Some(bits) = expected_lookahead_bits(hub, height, &parent, hdr.time, st, diff) else {
+        let Some(bits) = expected_lookahead_bits(hub, height, &parent, hdr.time, st, &diff) else {
             return false;
         };
         if rbitcoin_consensus::validate_header_on_parent(
@@ -2285,6 +2288,8 @@ fn batch_context_ok(
             times.remove(0);
         }
         times.push(hdr.time);
+        note_period_snap(&mut diff, hub, *hdr, height);
+        note_full_diff_snap(&mut diff, hub, hdr, height);
         parent = *hdr;
     }
     true
@@ -5434,6 +5439,46 @@ mod tests {
         assert_eq!(st.header_walk.tip_hash(), Some(tip.block_hash()));
         assert!(!st.slots[0].alive);
         assert!(st.addr_cooldown.contains_key(&addr));
+    }
+
+    /// Core `GetNextWorkRequired`: a header within 20 minutes of a
+    /// min-difficulty parent takes the last non-limit `nBits`, even when that
+    /// header is earlier in the same reply.
+    #[test]
+    fn min_difficulty_walk_back_finds_a_retarget_in_the_same_batch() {
+        let (_dir, mut hub) = crate::chain::tiny_regtest_hub_labeled("header-walk-mindiff-batch");
+        hub.ensure_genesis().unwrap();
+        arm_retarget(&mut hub);
+        let gen = hub.tip_hash().unwrap();
+        let genesis = hub.header_of(&gen).unwrap();
+        let mut chain = extend_chain(&hub, &genesis, &[], 20, 1);
+        hub.params.btc.allow_min_difficulty_blocks = true;
+        let limit = hub.params.pow_limit.to_compact_lossy();
+        let retarget = chain[19];
+        assert_ne!(retarget.bits, limit, "height 20 retargets above the limit");
+        let spacing = hub.params.btc.pow_target_spacing as u32;
+        let min_diff = mine_bits(
+            retarget.block_hash(),
+            21,
+            retarget.time + 2 * spacing + 1,
+            limit,
+            1,
+        );
+        let next = mine_bits(
+            min_diff.block_hash(),
+            22,
+            min_diff.time + 1,
+            retarget.bits,
+            1,
+        );
+        chain.extend([min_diff, next]);
+        let (s0, _rx0) = slot(0);
+        let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
+        fill_queue(&mut st);
+        assert!(send_getheaders(&mut st, &hub).unwrap());
+        apply(&mut st, &hub, 0, chain);
+        assert!(st.slots[0].alive);
+        assert_eq!(st.header_walk.tip_hash(), Some(next.block_hash()));
     }
 
     #[test]

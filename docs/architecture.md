@@ -211,10 +211,10 @@ Workspace Cargo.toml explicitly avoids enabling bitcoin’s `bitcoinconsensus`
 feature. Script verification is a pure function of `(tx, input_index, prevout)`
 after connect resolves prevouts.
 
-**Milestone (assumevalid-style):** default mainnet names block 840000 and
-skips **script/sig** checks only on that header path when chain work meets
-the floor. An explicit `--milestone HEIGHT` is height-only. Signet’s default
-is full scripts. Flags and honesty: [`OPERATOR.md`](../OPERATOR.md).
+**Milestone (assumevalid-style):** default mainnet names block 840000
+(testnet3: block 2500000) and skips **script/sig** checks only on that
+header path when chain work meets the floor. An explicit
+`--milestone HEIGHT` is height-only. Signet’s default is full scripts. Flags and honesty: [`OPERATOR.md`](../OPERATOR.md).
 
 Test matrix for rules we own: [`docs/consensus-tests.md`](./consensus-tests.md).
 Map of every owner: [`docs/README.md`](./README.md).

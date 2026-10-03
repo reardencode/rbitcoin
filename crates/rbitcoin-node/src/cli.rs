@@ -1,7 +1,7 @@
 use crate::config::{ConfApply, NodeConfig};
 use crate::inhibit::SuspendInhibit;
 use crate::run::{run_node, run_p2p};
-use rbitcoin_consensus::{default_milestone_height, mainnet_min_chain_work_be};
+use rbitcoin_consensus::{default_milestone_height, default_min_chain_work_be};
 use rbitcoin_log::{self, error, info, warn, Level};
 use rbitcoin_store::HeadScale;
 use std::ffi::OsString;
@@ -171,10 +171,8 @@ fn finish_operator_config(
     if !config.milestone_explicit {
         config.milestone_height = default_milestone_height(config.network);
     }
-    if config.minimum_chain_work.is_none()
-        && config.network == rbitcoin_primitives::Network::Mainnet
-    {
-        config.minimum_chain_work = Some(mainnet_min_chain_work_be());
+    if config.minimum_chain_work.is_none() {
+        config.minimum_chain_work = default_min_chain_work_be(config.network);
     }
     config.smoke = smoke;
     config.absorb_inbound_env();
@@ -323,9 +321,10 @@ Log level: error|warn|info|debug|trace|off (CLI > conf log_level > RBITCOIN_LOG 
 API log: --api-log PATH writes one JSON line per Electrum/Esplora/RPC call (also TRACE `api:`).\n\
 Asmap: --asmap PATH loads a Core ip_asn.dat (relative to datadir). Unset tries {{datadir}}/ip_asn.dat.\n\
 Milestone: skip script/sig checks at/below HEIGHT.\n\
-  Defaults: mainnet 840000 anchored to block 0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5\n\
-  (skip only on that header path, and only when header work meets min chain work),\n\
-  signet 0, testnet 2500000, regtest 0. Explicit HEIGHT is height-only. Use 0 for full scripts.\n\
+  Defaults: mainnet 840000 anchored to block 0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5,\n\
+  testnet 2500000 anchored to block 0000000000000093bcb68c03a9a168ae252572d348a2eaeba2cdf9231d73206f\n\
+  (skip only on that header path, and only when header work meets that network's min chain work),\n\
+  signet 0, regtest 0. Explicit HEIGHT is height-only. Use 0 for full scripts.\n\
 Check-blocks: --check-blocks N revalidates the last N confirmed heights on open (default 6; 0 = all).\n\
 Mempool: --mempool-size-mb (default ~300 MiB weight budget).\n\
 Peers: --max-outbound (default 16 live download), --max-inbound (default 125).\n\
@@ -988,6 +987,53 @@ mod tests {
     }
 
     include!("overlay_config_journey.rs");
+
+    /// Testnet3 default milestone: Core's assumeutxo block at 2_500_000 and
+    /// Core `CTestNetParams` `nMinimumChainWork`, like mainnet's 840_000.
+    #[test]
+    fn testnet3_default_milestone_is_anchored() {
+        use bitcoin::hashes::Hash;
+        let _g = OPERATOR_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let cfg = ready_config(["rbitcoin-node", "--network", "testnet"]);
+        assert_eq!(cfg.network, Network::Testnet);
+        let m = cfg.milestone();
+        assert_eq!(m.height, 2_500_000);
+        let anchor = m.anchor.expect("testnet3 default milestone is anchored");
+        assert_eq!(
+            anchor.hash.to_string(),
+            "0000000000000093bcb68c03a9a168ae252572d348a2eaeba2cdf9231d73206f"
+        );
+        let mut min_work = [0u8; 32];
+        min_work[22..]
+            .copy_from_slice(&[0x17, 0xf4, 0x9f, 0x70, 0x21, 0x47, 0xf1, 0x0c, 0x0e, 0xb6]);
+        assert_eq!(anchor.min_work_be, min_work);
+        assert!(cfg.meets_minimum_chain_work(min_work));
+        let mut below = min_work;
+        below[31] -= 1;
+        assert!(!cfg.meets_minimum_chain_work(below));
+
+        // A chain without the anchor at 2_500_000 runs scripts at any height.
+        let block = [0x22u8; 32];
+        let other_chain = |h: u32| (h == 100).then_some(block).or(Some([0x33; 32]));
+        assert!(!m.skips_scripts_at(100));
+        assert!(!m.skips_scripts(100, &block, other_chain, Some([0xff; 32])));
+        let anchored = |h: u32| match h {
+            100 => Some(block),
+            2_500_000 => Some(anchor.hash.to_byte_array()),
+            _ => None,
+        };
+        assert!(!m.skips_scripts(100, &block, anchored, Some(below)));
+        assert!(m.skips_scripts(100, &block, anchored, Some(min_work)));
+
+        // Explicit `--milestone HEIGHT` stays height-only.
+        let explicit = ready_config(["rbitcoin-node", "--network", "testnet", "--milestone", "10"]);
+        assert_eq!(
+            explicit.milestone(),
+            rbitcoin_consensus::Milestone::height(10)
+        );
+    }
 
     #[test]
     fn electrum_max_subs_cli_conf_and_bounds() {
