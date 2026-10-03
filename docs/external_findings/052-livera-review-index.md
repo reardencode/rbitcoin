@@ -20,22 +20,22 @@ steps.
 | M3 | medium | RPC listener has no accept timeout; long-poll holds a permit | fixed | `long_poll_does_not_hold_the_work_queue`, `wait_timeout_ms_caps_at_two_minutes` ([066](./066-rpc-wait-cap.md)) |
 | M4 | medium | fuse8 segment length need not be a power of two | fixed | `fuse8_segment_length_must_be_power_of_two` ([067](./067-fuse8-segment.md)) |
 | M5 | medium | Class A bulk read ignores the published end | fixed | `body_read_past_published_end_is_corrupt`, `create_loc_read_past_published_end_is_corrupt`, `body_read_uses_the_caller_published_end`, `create_loc_window_read_uses_the_planned_published_end` ([068](./068-published-end.md)) |
-| M6 | medium | Testnet milestone is height-only | open | — |
+| M6 | medium | Testnet milestone is height-only | fixed | `p3_default_milestone_heights`, `operator_conf_and_argv` |
 | M7 | medium | Mempool inv is one message per transaction | fixed | `tx_inv_over_one_thousand_is_two_messages` ([058](./058-tx-inv-batch.md)) |
-| M8 | medium | Pending blocks and orphans are count-capped only | open | — |
+| M8 | medium | Pending blocks and orphans are count-capped only | fixed | `pending_block_over_four_megabytes_is_not_parked`, `one_peer_cannot_fill_the_orphanage` |
 | M9 | high | io_uring drop can free a buffer the kernel still owns | fixed | `drain_guard_drop_with_leftover_pending_does_not_abort` ([069](./069-uring-drop-drain.md)) |
-| M10 | low | Secret types derive Debug; create-then-chmod | open | — |
-| L1 | low | Height-0 BIP68 time lock uses median time 0 | open | — |
-| L4 | low | Empty median time panics | open | — |
-| L5 | low | Version nonce is not a CSPRNG | open | — |
-| L6 | low | Recent-reject set clears at the cap | open | — |
+| M10 | low | Secret types derive Debug; create-then-chmod | fixed | `debug_does_not_print_secret_bytes`, `debug_does_not_print_the_token` |
+| L1 | low | Height-0 BIP68 time lock uses median time 0 | fixed | `bip68_height_zero_time_lock_uses_the_median` |
+| L4 | low | Empty median time panics | fixed | `empty_median_time_is_an_error` |
+| L5 | low | Version nonce is not a CSPRNG | fixed | `rand_nonce_changes` |
+| L6 | low | Recent-reject set clears at the cap | fixed | `recent_reject_at_the_cap_does_not_clear` |
 | L8 | low | Manifest and txstat lengths allocate before a size check | fixed | `manifest_length_past_the_file_is_corrupt`, `txstat_blob_longer_than_the_file_is_corrupt` ([070](./070-manifest-length.md)) |
-| L9 | low | Tor control password on argv | open | — |
+| L9 | low | Tor control password on argv | fixed | `tor_control_password_rejects_a_line_break` |
 | L10 | low | Datadir lock follows a symlink | fixed | `lock_file_does_not_follow_a_symlink` ([071](./071-datadir-lock-symlink.md)) |
-| L11 | low | Conf parse errors echo the raw line | open | — |
-| L12 | low | Invalid-hash set grows without a cap | open | — |
+| L11 | low | Conf parse errors echo the raw line | fixed | `conf_error_names_the_file_and_line` |
+| L12 | low | Invalid-hash set grows without a cap | fixed | `invalid_hash_set_stops_at_the_cap` |
 | L13 | low | Rate window grants two budgets at the boundary | fixed | `rate_limiter_boundary_does_not_grant_a_second_budget` ([059](./059-rate-window-boundary.md)) |
-| L14 | low | Mempool expiry runs only on admission | open | — |
+| L14 | low | Mempool expiry runs only on admission | fixed | `expire_stale_drops_old_tx_without_a_new_accept`, `hub_live_journey` |
 | L15 | low | Write jobs form a mutable slice over a shared buffer | fixed | pool write arm uses a shared slice ([072](./072-pool-write-slice.md)) |
 | L2 | — | P2PKH fast path skips FindAndDelete | rejected | The fast path is the 25-byte template. A DER signature does not fit in that scriptCode, so FindAndDelete cannot change it. |
 | L3 | — | Witness-v0 strict DER independent of BIP66 | rejected | BIP141 witness verification is strict DER. Mainnet, testnet, signet, and regtest are unaffected. |
