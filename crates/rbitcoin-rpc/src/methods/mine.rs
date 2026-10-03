@@ -1039,10 +1039,7 @@ pub fn submit_received_block(hub: &rbitcoin_net::ChainHub, block: Block) -> Subm
         Ok(AcceptOutcome::IgnoredWeaker) => SubmitBlockOutcome::IgnoredWeaker,
         Err(e) => {
             let reason = submit_reject_reason(&e);
-            if reason != "bad-txnmrklroot"
-                && reason != "high-hash"
-                && reason != "prev-blk-not-found"
-            {
+            if !e.is_mutated() && reason != "high-hash" && reason != "prev-blk-not-found" {
                 hub.note_invalid_block(hash);
                 let _ = hub.ensure_header(&block.header);
             }
