@@ -20,7 +20,8 @@ use crate::error::ConsensusError;
 /// - `scriptSig` must **byte-equal** the minimal single-push encoding of that redeem
 ///   (`WITNESS_MALLEATED_P2SH` otherwise — multi-push or non-minimal encoding).
 /// - Dispatch: v0/20 → P2WPKH, v0/32 → P2WSH, v0 other → `WITNESS_PROGRAM_WRONG_LENGTH`,
-///   v1..=16 → anyone-can-spend success (no BIP341 on P2SH-wrapped programs).
+///   v1..=16 → anyone-can-spend success (no BIP341 on P2SH-wrapped programs) unless
+///   `discourage_upgradable_witness`.
 ///
 /// Non-witness redeems return `None` so the caller falls through to
 /// [`verify_p2sh_legacy`] (legacy multisig multi-push, etc.).
@@ -61,6 +62,9 @@ pub(crate) fn try_p2sh_nested_segwit(
     }
 
     Some(match (version, program.len()) {
+        (0, 20) if super::needs_interpreted_ecdsa(job) => {
+            p2wpkh::verify_interpreted(job, input_index, tx, program)
+        }
         (0, 20) => {
             let mut keyhash = [0u8; 20];
             keyhash.copy_from_slice(program);
@@ -74,7 +78,11 @@ pub(crate) fn try_p2sh_nested_segwit(
         (0, _) => Err(ConsensusError::Script(
             "WITNESS_PROGRAM_WRONG_LENGTH".into(),
         )),
-        // v1..=16 in P2SH: Core VerifyWitnessProgram else-branch → success (ACS).
+        // v1..=16 in P2SH: Core VerifyWitnessProgram else-branch (no Taproot,
+        // no anchor when `is_p2sh`) → success unless discouraged.
+        _ if job.discourage_upgradable_witness => Err(ConsensusError::Script(
+            "DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM".into(),
+        )),
         _ => Ok(()),
     })
 }
