@@ -1977,3 +1977,86 @@ fn ibd_mutated_body_is_refetched_not_blacklisted() {
     assert!(rejects.is_empty(), "{rejects:?}");
     rig.finish();
 }
+
+/// A write-side cascade (a plan a rewind left stale) names tip+1, whose
+/// body lookup already took off the queue. That body is fetched again and
+/// connects. A queued body above it is left alone, and a reject above
+/// tip+1 does not re-request tip+1 while it may still be in scripts or
+/// write.
+#[test]
+fn cascade_refetches_its_own_taken_body() {
+    use super::super::assign::tests::lock_default_assign_stop;
+    use super::super::state::InflightReq;
+    use bitcoin::ScriptBuf;
+    use rbitcoin_consensus::mine_regtest_paying;
+
+    let _env = lock_default_assign_stop();
+    let mut rig = WireRig::new("cascade-taken", 1);
+    let (t, cbs) = (rig.t, rig.cbs.clone());
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+    let b1 = mine_regtest_paying(
+        rig.tip,
+        rig.tip_time + 600,
+        t + 1,
+        spk.clone(),
+        vec![WireRig::spend(cbs[0])],
+    );
+    let b2 = mine_regtest_paying(
+        b1.block_hash(),
+        rig.tip_time + 1200,
+        t + 2,
+        spk,
+        vec![WireRig::spend(cbs[1])],
+    );
+    let (h1, h2) = (b1.block_hash(), b2.block_hash());
+    rig.plant(&[&b1, &b2]);
+    rig.st.body.mark_pending(h1);
+    rig.st.slots[0].in_flight.insert(h2);
+    rig.st.inflight.insert(h2, InflightReq::new(1));
+    rig.deliver(1, &b2);
+    let stale =
+        "store: corrupt record: tx put_full_batch fk mismatch (plan not committed in order)";
+    let hub = std::sync::Arc::clone(&rig.hub);
+    let reject = |st: &mut IbdWorkState, ht: u32, hash, class, err: &str| {
+        apply_confirm_reject_class(
+            st,
+            ht,
+            hash,
+            class,
+            err,
+            Some(&hub.query),
+            Some(&hub),
+            1,
+            None,
+        );
+    };
+
+    // tip+1 is pending with no queue wire, as while it is in scripts or
+    // write. Rejects at tip+2 leave it alone.
+    let soft = "consensus: bad header: missing retarget first header";
+    reject(&mut rig.st, t + 2, h2, ConfirmRejectClass::SoftWire, soft);
+    assert!(rig.st.body.is_missing(&h2));
+    rig.st.slots[0].in_flight.insert(h2);
+    rig.st.inflight.insert(h2, InflightReq::new(1));
+    rig.deliver(1, &b2);
+    reject(&mut rig.st, t + 2, h2, ConfirmRejectClass::Cascade, stale);
+    assert!(
+        rig.st.body.is_pending(&h1),
+        "in-pipeline tip+1 is not re-asked"
+    );
+    assert!(rig.st.body.is_pending(&h2), "queued body stays");
+
+    rig.st.densify_scan_lo = t + 3;
+    reject(&mut rig.st, t + 1, h1, ConfirmRejectClass::Cascade, stale);
+    assert!(rig.st.body.is_missing(&h1), "taken body is fetched again");
+    assert_eq!(rig.st.densify_scan_lo, t + 1);
+    assert!(rig.st.body.is_pending(&h2), "queued body stays");
+
+    rig.start_engine();
+    let rejects = rig.pump(
+        |_, hash| if hash == h1 { b1.clone() } else { b2.clone() },
+        |_, hub, _| hub.tip_hash() == Some(h2),
+    );
+    assert!(rejects.is_empty(), "{rejects:?}");
+    rig.finish();
+}

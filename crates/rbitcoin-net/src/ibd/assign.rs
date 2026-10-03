@@ -907,7 +907,7 @@ fn cover_first_pre_hole(
 /// forever. Tip-hole cover and reorg densify (1b) share this; only walks the
 /// small hole/need lists (not the full pending map).
 #[inline]
-fn demote_zombie_pending_for_fetch(
+pub(in crate::ibd) fn demote_zombie_pending_for_fetch(
     body: &mut super::body::BodyPresence,
     hub: &ChainHub,
     hash: BlockHash,
