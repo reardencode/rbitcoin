@@ -2839,7 +2839,8 @@ async fn node_run_p2p_short() {
             let rows = peers["result"].as_array().expect("getpeerinfo array");
             assert_eq!(rows.len(), 1, "{peers}");
             assert_eq!(rows[0]["inbound"], false, "{peers}");
-            assert_eq!(rows[0]["connection_type"], "outbound-full-relay", "{peers}");
+            // Core reports a `-connect` peer as `manual`.
+            assert_eq!(rows[0]["connection_type"], "manual", "{peers}");
             assert_eq!(rows[0]["transport_protocol_type"], "v2", "{peers}");
             assert!(
                 rows[0]["bytesrecv"].as_u64().unwrap_or(0) > 0,

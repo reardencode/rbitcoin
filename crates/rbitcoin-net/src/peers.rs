@@ -1766,10 +1766,13 @@ impl PeerHub {
         self.forcerelay_perm.load(Ordering::Relaxed)
     }
 
+    /// Core `fPreferredDownload` counts `manual` (`addnode`, `--connect`)
+    /// outbound peers, so a node dialled only that way can still replace a
+    /// stalling headers-sync peer.
     fn is_preferred_download(p: &LivePeer) -> bool {
         matches!(
             p.conn_type,
-            PeerConnType::OutboundFullRelay | PeerConnType::BlockRelay
+            PeerConnType::OutboundFullRelay | PeerConnType::BlockRelay | PeerConnType::Manual
         )
     }
 
@@ -2381,35 +2384,32 @@ impl PeerHub {
         }
     }
 
-    fn remembered_redials(&self) -> Vec<(String, PeerConnType)> {
-        let mut out = Vec::new();
-        for host in self
+    fn remembered_redials(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
             .manual_hosts
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-        {
-            out.push((host.clone(), PeerConnType::Manual));
-        }
-        for host in self
-            .connect_hosts
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-        {
-            out.push((host.clone(), PeerConnType::OutboundFullRelay));
-        }
+            .cloned()
+            .collect();
+        out.extend(
+            self.connect_hosts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .cloned(),
+        );
         out
     }
 
-    /// One dial per resolved endpoint in this pass. `addnode add` and
-    /// `--connect` of the same host share that dial (Manual wins). A later
-    /// pass dials again when the session is still not live. DNS lookup is
-    /// synchronous; callers on a Tokio worker use
-    /// [`Self::redial_remembered_off_runtime`].
+    /// One `manual` dial per resolved endpoint in this pass, as Core dials
+    /// `-addnode` and `-connect`. `addnode add` and `--connect` of the same
+    /// host share that dial. A later pass dials again when the session is
+    /// still not live. DNS lookup is synchronous; callers on a Tokio worker
+    /// use [`Self::redial_remembered_off_runtime`].
     pub fn redial_remembered_with(&self, resolve: impl Fn(&str) -> Result<DialTarget, String>) {
         let mut seen = HashSet::<String>::new();
-        for (host, typ) in self.remembered_redials() {
+        for host in self.remembered_redials() {
             let Ok(target) = resolve(&host) else {
                 continue;
             };
@@ -2419,7 +2419,7 @@ impl PeerHub {
             if self.is_target_live(&target) {
                 continue;
             }
-            let _ = self.dial_target(target, typ);
+            let _ = self.dial_target(target, PeerConnType::Manual);
         }
     }
 
@@ -3147,9 +3147,10 @@ mod tests {
     }
 
     #[test]
-    fn session_heartbeat_keeps_sole_preferred_headers_sync_peer() {
+    fn session_heartbeat_replaces_stalled_headers_sync_peer_only_with_another_preferred() {
         let hub = PeerHub::new();
         let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1);
+        let b = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2);
         let outbound = hub.register(
             a,
             a,
@@ -3166,6 +3167,15 @@ mod tests {
             "must not disconnect the only preferred download peer"
         );
         assert!(outbound.is_sync_started());
+
+        // An addnode / --connect peer is `manual`. Core counts it as a
+        // preferred download peer, so the stalled sync peer can go.
+        let _manual = hub.register(b, b, &ver("/rbitcoin:0.1.0/"), false, PeerConnType::Manual);
+        hub.on_session_heartbeat();
+        assert!(
+            outbound.stop.load(Ordering::SeqCst),
+            "a live manual peer must let the stalled headers-sync peer be replaced"
+        );
     }
 
     #[test]
@@ -3347,6 +3357,16 @@ mod tests {
             "addnode and --connect of one endpoint share one dial per pass: {got:?}"
         );
         assert!(matches!(got[0].typ, PeerConnType::Manual));
+
+        // A --connect host on its own redials as `manual` too (Core `-connect`).
+        let hub = PeerHub::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        hub.set_dialer(tx);
+        hub.set_connect_hosts(vec!["127.0.0.1:18445".into()], 18444);
+        hub.redial_remembered();
+        let got = take_dials(&mut rx);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(matches!(got[0].typ, PeerConnType::Manual), "{got:?}");
     }
 
     #[tokio::test]

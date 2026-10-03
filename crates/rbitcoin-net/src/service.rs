@@ -350,6 +350,17 @@ impl P2PNode {
     }
 
     pub async fn follow_from_net(&mut self, peer: crate::NetAddr) -> Result<(), NetError> {
+        self.follow_from_net_as(peer, PeerConnType::OutboundFullRelay)
+            .await
+    }
+
+    /// [`Self::follow_from_net`] with the session's `connection_type`
+    /// (`Manual` for a `--connect` target).
+    pub async fn follow_from_net_as(
+        &mut self,
+        peer: crate::NetAddr,
+        typ: PeerConnType,
+    ) -> Result<(), NetError> {
         let target = DialTarget::from_net(peer);
         let prepared = prepare_outbound_session(
             target,
@@ -359,7 +370,7 @@ impl P2PNode {
             self.peers.clone(),
             self.user_agent.clone(),
             self.follow_live.clone(),
-            PeerConnType::OutboundFullRelay,
+            typ,
             self.dialer.clone(),
         )
         .await?;

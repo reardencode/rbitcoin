@@ -1,4 +1,4 @@
-use crate::config::{parse_btc_to_sat, NodeConfig};
+use crate::config::{parse_btc_to_sat, ListenOpts, NodeConfig};
 use crate::error::NodeError;
 use crate::health::{run_health, NodeStatus, Phase};
 use crate::regtest_rpc::HubRegtest;
@@ -593,6 +593,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     let mut pinned = config.listen.connect.clone();
     pinned.extend(dns_resolved);
     let targets = follow_dial_targets(&pinned, &addrman, max_out, &occupied);
+    let follow_type = follow_dial_type(&pinned);
     let ibd_targets = follow_dial_targets(&pinned, &addrman, candidate_n, &occupied);
     status.enter(Phase::CatchUp);
     let catch_up = run_ibd_or_skip(
@@ -683,7 +684,11 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         );
     }
 
-    if tip_follow_ready && !shutdown.requested() && addrman.is_empty() {
+    if tip_follow_ready
+        && !shutdown.requested()
+        && addrman.is_empty()
+        && seednodes_allowed(&config.listen)
+    {
         for raw in &config.listen.seednodes {
             let addr = match resolve_seednode(raw, config.network) {
                 Ok(a) => a,
@@ -699,7 +704,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             }
         }
     }
-    if !shutdown.requested() && !config.listen.seednodes.is_empty() && !addrman.is_empty() {
+    if !shutdown.requested() && !addrman.is_empty() && seednodes_allowed(&config.listen) {
         const ADD_NEXT_SEEDNODE_SECS: u64 = 10;
         let seeds = config.listen.seednodes.clone();
         let network = config.network;
@@ -746,7 +751,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         let follow_n = targets.len().min(max_out.min(3));
         if catch_up.dial_failed_all() {
             for peer in targets.iter().take(follow_n) {
-                if let Err(e) = node.peers.dial_net(*peer, PeerConnType::OutboundFullRelay) {
+                if let Err(e) = node.peers.dial_net(*peer, follow_type) {
                     warn!("node: follow dial {peer}: {e}");
                 }
             }
@@ -765,7 +770,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                         warn!("signal: skip remaining follow connects");
                         break;
                     }
-                    result = tokio::time::timeout(to, node.follow_from_net(*peer)) => {
+                    result = tokio::time::timeout(to, node.follow_from_net_as(*peer, follow_type)) => {
                         match result {
                             Ok(Ok(())) => {
                                 info!(
@@ -2108,6 +2113,24 @@ pub(crate) fn follow_dial_targets(
     }
 }
 
+/// Session type for the tip-follow dials of `targets`. `--connect` targets
+/// are `manual`, as Core dials `-connect` (`getpeerinfo.connection_type`).
+pub(crate) fn follow_dial_type(connect: &[rbitcoin_net::NetAddr]) -> PeerConnType {
+    if connect.is_empty() {
+        PeerConnType::OutboundFullRelay
+    } else {
+        PeerConnType::Manual
+    }
+}
+
+/// Whether `--seednode` may be dialled as addr-fetch: at startup with an
+/// empty addrman, or by the 10 s fallback when fewer than 2 outbound
+/// full-relay peers are live. Core never dials seednodes under `-connect`.
+/// `--connect` peers are `manual`, so they would never hold the fallback off.
+pub(crate) fn seednodes_allowed(listen: &ListenOpts) -> bool {
+    !listen.seednodes.is_empty() && !listen.has_pinned_connect()
+}
+
 /// Whether this wake should run the stale-tip redial check.
 ///
 /// Perf (5s) and RPC-stop (50ms) ticks must still evaluate stale. A one-shot
@@ -2252,6 +2275,27 @@ mod tests {
             8333,
         ))];
         assert_eq!(follow_dial_targets(&connect, &am, 8, &occupied), want);
+        // Core reports `-connect` peers as `manual`; addrman picks are full relay.
+        assert_eq!(follow_dial_type(&connect), PeerConnType::Manual);
+        assert_eq!(follow_dial_type(&[]), PeerConnType::OutboundFullRelay);
+    }
+
+    #[test]
+    fn seednodes_are_off_under_connect() {
+        let mut listen = NodeConfig::default().listen;
+        assert!(!seednodes_allowed(&listen), "no seednodes");
+        listen.seednodes = vec!["127.0.0.1:18444".into()];
+        assert!(seednodes_allowed(&listen));
+        listen.connect = vec![rbitcoin_net::NetAddr::Ip(
+            "127.0.0.1:18445".parse().unwrap(),
+        )];
+        assert!(
+            !seednodes_allowed(&listen),
+            "Core skips seednodes under -connect"
+        );
+        listen.connect.clear();
+        listen.connect_dns = vec!["localhost:18445".into()];
+        assert!(!seednodes_allowed(&listen), "a --connect hostname pins too");
     }
 
     #[test]
