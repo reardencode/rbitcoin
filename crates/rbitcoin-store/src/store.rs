@@ -1589,10 +1589,23 @@ impl Store {
     ///
     /// This is not a durability claim. The checkpoint thread reads it before
     /// `sync_data` and publishes that height only.
+    ///
+    /// Stores `min(tip, confirmed tip)`. The caller may have read `tip` before
+    /// a disconnect lowered the chain and the snapshot, and a reconnect above
+    /// the new tip is not annotated yet. The confirmed tip is read inside the
+    /// update, so a clamp that lands first makes this retry against the
+    /// lowered tip.
     pub fn note_spend_snapshot(&self, tip: u32) {
         use std::sync::atomic::Ordering;
-        self.spend_snapshot
-            .store(u64::from(tip).saturating_add(1), Ordering::Release);
+        let _ = self
+            .spend_snapshot
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                let want = self
+                    .confirmed
+                    .tip_height()
+                    .map_or(0, |h| u64::from(tip.min(h.0)) + 1);
+                (want != cur).then_some(want)
+            });
     }
 
     pub fn spend_snapshot_height(&self) -> Option<u32> {
@@ -1633,6 +1646,10 @@ impl Store {
 
     /// `sync_data` the replay stems, then publish `A = D = height` when the
     /// confirmed tip is still at least `height`. A lower tip leaves the marker.
+    ///
+    /// A pending spend annotate caps the published height below its first
+    /// height, so open still replays it. With pending from genesis, nothing is
+    /// published.
     pub fn checkpoint_spend_through(&self, height: u32) -> Result<(), StoreError> {
         self.txs.sync_replay_data()?;
         self.spenders.sync_data_only()?;
@@ -1642,11 +1659,30 @@ impl Store {
         if tip < height {
             return Ok(());
         }
+        let height = match self.spend_annotate_pending() {
+            Some(p) if p <= height => match p.checked_sub(1) {
+                Some(h) => h,
+                None => return Ok(()),
+            },
+            _ => height,
+        };
         crate::spend_durable::SpendDurable::new(height, height).store(self.path())
     }
 
     /// A disconnect below the marker lowers both heights to the new tip.
+    ///
+    /// The spend snapshot drops to the new tip too. A reconnect above it is not
+    /// annotated until its write finishes, so the checkpoint must not publish
+    /// the old snapshot over it.
     pub fn clamp_spend_durable(&self) -> Result<(), StoreError> {
+        use std::sync::atomic::Ordering;
+        let new_tip = self.confirmed.tip_height().map(|h| u64::from(h.0) + 1);
+        let _ = self
+            .spend_snapshot
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                let low = cur.min(new_tip.unwrap_or(0));
+                (low != cur).then_some(low)
+            });
         let Some(marker) = crate::spend_durable::SpendDurable::load(self.path())? else {
             return Ok(());
         };

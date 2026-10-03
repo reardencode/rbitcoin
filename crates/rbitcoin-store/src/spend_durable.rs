@@ -199,4 +199,73 @@ mod tests {
         assert_eq!((m.annotated_through(), m.durable_through()), (0, 0));
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A confirm write reads its tip, then a disconnect lowers the tip and the
+    /// snapshot. The write's note must not raise the snapshot back over the
+    /// new tip, or the checkpoint publishes a height a reconnect has not
+    /// annotated.
+    #[test]
+    fn stale_snapshot_note_after_disconnect_stays_at_the_tip() {
+        let dir = std::env::temp_dir().join(format!(
+            "rbitcoin-spend-stale-note-{}-{}",
+            std::process::id(),
+            unix_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let s = crate::Store::create_tiny(&dir).unwrap();
+        for h in 0..=7u32 {
+            s.confirmed
+                .set(
+                    rbitcoin_primitives::Height(h),
+                    rbitcoin_primitives::Fk(u64::from(h) + 1),
+                )
+                .unwrap();
+        }
+        let write_read_tip = s.tip_height().unwrap().0;
+        s.note_spend_snapshot(write_read_tip);
+        for h in (5..=7u32).rev() {
+            s.confirmed
+                .disconnect_tip(rbitcoin_primitives::Height(h))
+                .unwrap();
+        }
+        s.clamp_spend_durable().unwrap();
+        assert_eq!(s.spend_snapshot_height(), Some(4));
+
+        s.note_spend_snapshot(write_read_tip);
+        assert_eq!(s.spend_snapshot_height(), Some(4));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A write that failed after its tip commit left heights from 5 pending.
+    /// The checkpoint must not publish A at or above them, whatever the
+    /// snapshot says, so open still replays them.
+    #[test]
+    fn checkpoint_stops_below_a_pending_annotate() {
+        let dir = std::env::temp_dir().join(format!(
+            "rbitcoin-spend-pending-ckpt-{}-{}",
+            std::process::id(),
+            unix_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let s = crate::Store::create_tiny(&dir).unwrap();
+        s.confirmed
+            .set(rbitcoin_primitives::Height(7), rbitcoin_primitives::Fk(1))
+            .unwrap();
+        s.note_spend_snapshot(7);
+        s.note_spend_annotate_pending(5);
+        s.checkpoint_spend_through(7).unwrap();
+        let m = SpendDurable::load(s.path()).unwrap().unwrap();
+        assert_eq!((m.annotated_through(), m.durable_through()), (4, 4));
+
+        s.note_spend_annotate_pending(0);
+        let _ = std::fs::remove_file(s.path().join(SPEND_DURABLE_NAME));
+        s.checkpoint_spend_through(7).unwrap();
+        assert!(SpendDurable::load(s.path()).unwrap().is_none());
+
+        s.clear_spend_annotate_pending();
+        s.checkpoint_spend_through(7).unwrap();
+        let m = SpendDurable::load(s.path()).unwrap().unwrap();
+        assert_eq!((m.annotated_through(), m.durable_through()), (7, 7));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
