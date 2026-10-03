@@ -22,6 +22,10 @@ pub const MAX_PROTOCOL_MESSAGE_LENGTH: usize = 4_000_000;
 /// Bitcoin Core `MAX_INV_SZ` — max inventory items in inv/getdata/notfound.
 pub const MAX_INV_SIZE: usize = 50_000;
 
+/// Tx announcements per `inv`. Separate from [`MAX_INV_SIZE`]: one message
+/// stays at a thousand even though the wire cap is fifty thousand.
+pub const TX_INV_BATCH: usize = 1_000;
+
 /// Bitcoin Core `MAX_HEADERS_RESULTS` — max headers in a `headers` message.
 pub const MAX_HEADERS_RESULTS: usize = 2_000;
 

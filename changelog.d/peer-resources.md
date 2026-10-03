@@ -8,3 +8,5 @@ Security
   not grant a second full budget.
 - Count v2 decoy packets and unknown message types in the per-peer rate
   window on tip-follow and IBD, and disconnect once that window is over.
+- Batch mempool transaction announcements into one inv per thousand,
+  still charged against the per-peer send budget.

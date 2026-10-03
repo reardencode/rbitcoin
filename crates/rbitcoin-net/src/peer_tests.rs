@@ -2959,6 +2959,118 @@ async fn getdata_stops_when_send_budget_is_already_over() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// 1001 due wtxids are two inv messages, and both charge the send budget.
+#[tokio::test(flavor = "current_thread")]
+async fn tx_inv_over_one_thousand_is_two_messages() {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{Amount, OutPoint, Sequence, TxIn, TxOut, Witness};
+
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("inv-batch");
+    hub.ensure_genesis().unwrap();
+    hub.generate_to_script(101, op_true(), vec![]).unwrap();
+    let t = hub.tip_header().unwrap().time;
+    hub.clock.set_mock(i64::from(t) + 1);
+    assert!(!hub.in_ibd(), "tx inv batch pin is not IBD");
+    let coinbase = hub
+        .query
+        .reconstruct_block_at_height(rbitcoin_primitives::Height(1))
+        .unwrap()
+        .txdata[0]
+        .clone();
+    let each = coinbase.output[0].value.to_sat() / 2 / 1001;
+    assert!(each > 2_000, "coinbase must fund 1001 spends");
+    let fanout = bitcoin::Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: coinbase.compute_txid(),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        }],
+        output: (0..1001)
+            .map(|_| TxOut {
+                value: Amount::from_sat(each),
+                script_pubkey: op_true(),
+            })
+            .collect(),
+    };
+    hub.generate_to_script(1, op_true(), vec![fanout.clone()])
+        .unwrap();
+    let mp = crate::tx_relay::MempoolHub::open(dir.join("mp"), std::sync::Arc::clone(&hub.query))
+        .unwrap();
+    mp.set_relay_enabled(true);
+    assert!(hub.attach_mempool(mp).is_ok());
+    let mempool = hub.mempool().unwrap();
+    let parent = fanout.compute_txid();
+    for vout in 0..1001u32 {
+        let child = bitcoin::Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint { txid: parent, vout },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(each - 1_000),
+                script_pubkey: op_true(),
+            }],
+        };
+        mempool
+            .accept_tx(&child)
+            .unwrap_or_else(|e| panic!("accept vout {vout}: {e}"));
+    }
+    let peers = crate::peers::PeerHub::new();
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 9));
+    let ver = bitcoin::p2p::message_network::VersionMessage {
+        version: 70016,
+        services: bitcoin::p2p::ServiceFlags::NETWORK,
+        timestamp: 0,
+        receiver: bitcoin::p2p::address::Address::new(&addr, bitcoin::p2p::ServiceFlags::NONE),
+        sender: bitcoin::p2p::address::Address::new(&addr, bitcoin::p2p::ServiceFlags::NONE),
+        nonce: 9,
+        user_agent: "/rbitcoin:test/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    let peer = peers.register(
+        addr,
+        addr,
+        &ver,
+        false,
+        crate::peers::PeerConnType::OutboundFullRelay,
+    );
+    peer.request_tx_inv();
+    let (out_tx, mut rx) = mpsc::unbounded_channel();
+    let before = peer.send_queued();
+    queue_due_tx_invs(&hub, peer.as_ref(), &CappedSet::new(), &out_tx);
+    let mut msgs = 0usize;
+    let mut items = 0usize;
+    while let Ok(msg) = rx.try_recv() {
+        match msg.expect_msg() {
+            NetworkMessage::Inv(v) => {
+                msgs += 1;
+                assert!(v.len() <= 1000, "one inv holds at most 1000");
+                items += v.len();
+            }
+            other => panic!("expected inv, got {other:?}"),
+        }
+    }
+    assert_eq!(items, 1001, "every accepted tx is announced");
+    assert_eq!(msgs, 2, "1001 tx invs are two messages");
+    assert!(
+        peer.send_queued() > before,
+        "batched inv must charge the send budget"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// FNV-1a of the address bytes. Duplicated here so a broken mixer in
 /// `addr_relay_key` cannot satisfy the assertion by changing both sides.
 fn addr_key_oracle(msg: &bitcoin::p2p::address::AddrV2Message) -> u64 {

@@ -21,7 +21,7 @@ steps.
 | M4 | medium | fuse8 segment length need not be a power of two | open | — |
 | M5 | medium | Class A bulk read ignores the published end | open | — |
 | M6 | medium | Testnet milestone is height-only | open | — |
-| M7 | medium | Mempool inv is one message per transaction | open | — |
+| M7 | medium | Mempool inv is one message per transaction | fixed | `tx_inv_over_one_thousand_is_two_messages` |
 | M8 | medium | Pending blocks and orphans are count-capped only | open | — |
 | M9 | high | io_uring drop can free a buffer the kernel still owns | open | — |
 | M10 | low | Secret types derive Debug; create-then-chmod | open | — |

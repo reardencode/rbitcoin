@@ -6,7 +6,9 @@ use crate::chain::{
     received_getdata_wtx_log, received_tx_log, synchronizing_blockheaders_log, AcceptOutcome,
     ChainHub,
 };
-use crate::codec::{FramedMessage, MAX_HEADERS_RESULTS, MAX_INV_SIZE, MAX_LOCATOR_SZ};
+use crate::codec::{
+    FramedMessage, MAX_HEADERS_RESULTS, MAX_INV_SIZE, MAX_LOCATOR_SZ, TX_INV_BATCH,
+};
 use crate::error::NetError;
 use crate::msg_decode::decode_framed_offload;
 use crate::peer_dos::{PeerRateLimiter, OVERSIZE_BAN_SCORE, RATE_LIMIT_BAN_SCORE};
@@ -2187,7 +2189,7 @@ pub fn force_announce_txid(hub: &ChainHub, peers: &crate::peers::PeerHub, txid: 
             continue;
         };
         s.note_announced_wtx(w);
-        let _ = queue_accounted(Some(&s), &out, NetworkMessage::Inv(vec![Inventory::WTx(w)]));
+        queue_tx_inv_batches(&s, &out, vec![Inventory::WTx(w)]);
         if let Some(seq) = mp.relay_seq_of(&w) {
             s.note_tx_inv_seq(s.last_inv_sequence().max(seq.saturating_add(1)));
         }
@@ -2317,6 +2319,7 @@ fn queue_due_tx_invs(
         let Some(live_wtx) = mp.try_list_live_wtxids() else {
             return;
         };
+        let mut due = Vec::new();
         for (txid, w) in live_wtx {
             if !tx_inv_candidate_ok(
                 mp,
@@ -2330,16 +2333,13 @@ fn queue_due_tx_invs(
                 continue;
             }
             session.note_announced_wtx(w);
-            let _ = queue_accounted(
-                Some(session),
-                out_tx,
-                NetworkMessage::Inv(vec![Inventory::WTx(w)]),
-            );
+            due.push(Inventory::WTx(w));
             n += 1;
             if let Some(seq) = mp.relay_seq_of(&w) {
                 max_ann = max_ann.max(seq.saturating_add(1));
             }
         }
+        queue_tx_inv_batches(session, out_tx, due);
         if let Some((due, gen)) = mp.try_age_inv_watermark(mp_now) {
             session.note_age_inv_seen(due, gen);
         }
@@ -2348,6 +2348,7 @@ fn queue_due_tx_invs(
             return;
         };
         session.note_age_inv_seen(last.0, last.1);
+        let mut due = Vec::new();
         for (txid, w) in due_wtx {
             if !tx_inv_candidate_ok(
                 mp,
@@ -2361,16 +2362,13 @@ fn queue_due_tx_invs(
                 continue;
             }
             session.note_announced_wtx(w);
-            let _ = queue_accounted(
-                Some(session),
-                out_tx,
-                NetworkMessage::Inv(vec![Inventory::WTx(w)]),
-            );
+            due.push(Inventory::WTx(w));
             n += 1;
             if let Some(seq) = mp.relay_seq_of(&w) {
                 max_ann = max_ann.max(seq.saturating_add(1));
             }
         }
+        queue_tx_inv_batches(session, out_tx, due);
     }
     if n > 0 {
         // Only INV txs that existed when this INV was built.
@@ -4781,6 +4779,20 @@ pub(crate) fn outbound_feefilter_sats(
 
 fn queue_out(out: &mpsc::UnboundedSender<PeerOut>, msg: NetworkMessage) -> Result<(), NetError> {
     queue_accounted(None, out, msg)
+}
+
+/// Send filtered tx announcements in [`TX_INV_BATCH`] chunks.
+///
+/// The caller already owns the filtered inventories. Chunking does not clone
+/// the live wtxid set and does not hold the mempool lock across the send.
+fn queue_tx_inv_batches(
+    session: &crate::peers::LivePeer,
+    out_tx: &mpsc::UnboundedSender<PeerOut>,
+    inv: Vec<Inventory>,
+) {
+    for chunk in inv.chunks(TX_INV_BATCH) {
+        let _ = queue_accounted(Some(session), out_tx, NetworkMessage::Inv(chunk.to_vec()));
+    }
 }
 
 fn queue_accounted(
