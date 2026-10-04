@@ -855,7 +855,7 @@ impl ScriptVerifyFlags {
     ) -> Self {
         let bip16 = bip16_active_from_prev_mtp(params, height, block_hash, prev_mtp);
         let ctx = ValidationContext::at(params, Height(height), Milestone::NONE);
-        Self::consensus_at(&ctx, bip16)
+        Self::consensus_at(&ctx, block_hash, bip16)
     }
 }
 
