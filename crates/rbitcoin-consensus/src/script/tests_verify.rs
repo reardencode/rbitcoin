@@ -1420,4 +1420,3 @@ fn legacy_multisig_empty_sig_deletes_op_0_from_script_code() {
         .expect_err("CONST_SCRIPTCODE: the empty sig deletes an OP_0");
     assert!(format!("{err}").contains("SIG_FINDANDDELETE"), "{err}");
 }
-
