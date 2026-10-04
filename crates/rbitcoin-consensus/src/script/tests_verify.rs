@@ -1214,3 +1214,129 @@ fn p2wsh_witness_script_larger_than_520_is_valid() {
         "P2WSH witnessScript >520 must verify (Core ExecuteWitnessScript after SpanPopBack)",
     );
 }
+
+/// Core pushes every scriptSig element through the interpreter's
+/// MAX_SCRIPT_ELEMENT_SIZE check. Pre-BIP66 lax DER ignores junk after S, so
+/// a valid signature padded past 520 bytes must still fail on push size.
+#[test]
+fn p2pkh_signature_push_over_520_rejected_pre_bip66() {
+    let secp = Secp256k1::new();
+    let sk = SecretKey::from_slice(&[3u8; 32]).unwrap();
+    let pk_bytes = bitcoin::PublicKey::new(sk.public_key(&secp)).to_bytes();
+    let spk = ScriptBuf::new_p2pkh(&bitcoin::PubkeyHash::hash(&pk_bytes));
+    let prevout = TxOut {
+        value: Amount::from_sat(50_000),
+        script_pubkey: spk.clone(),
+    };
+    let mut tx = Transaction {
+        version: bitcoin::transaction::Version::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(49_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let sighash = SighashCache::new(&tx)
+        .legacy_signature_hash(0, &spk, EcdsaSighashType::All as u32)
+        .unwrap();
+    let der = secp
+        .sign_ecdsa(&Message::from_digest(sighash.to_byte_array()), &sk)
+        .serialize_der()
+        .to_vec();
+
+    let mut verdicts = Vec::new();
+    for junk in [0usize, 400, 460] {
+        let mut sig = der.clone();
+        sig.extend(std::iter::repeat_n(0xeeu8, junk));
+        sig.push(EcdsaSighashType::All as u8);
+        let sig = bitcoin::script::PushBytesBuf::try_from(sig).unwrap();
+        let pk = bitcoin::script::PushBytesBuf::try_from(pk_bytes.clone()).unwrap();
+        tx.input[0].script_sig = bitcoin::script::Builder::new()
+            .push_slice(&sig)
+            .push_slice(&pk)
+            .into_script();
+        let flags = crate::block::ScriptVerifyFlags::buried(true, true, false, true, true);
+        let job = ScriptCheckJob::new(vec![prevout.clone()], tx.clone(), flags);
+        verdicts.push((sig.len(), script::verify_job_all_inputs(&job).is_ok()));
+    }
+    assert!(verdicts[2].0 > 520, "{verdicts:?}");
+    assert_eq!(
+        verdicts.iter().map(|v| v.1).collect::<Vec<_>>(),
+        [true, true, false],
+        "{verdicts:?}"
+    );
+}
+
+/// Core applies strict DER to v0 witness signatures only under
+/// SCRIPT_VERIFY_DERSIG, and caps every witness element at 520 bytes. A
+/// regtest chain with dersig activated after segwit sees both sides.
+#[test]
+fn p2wpkh_der_follows_bip66_flag_and_push_size() {
+    let secp = Secp256k1::new();
+    let sk = SecretKey::from_slice(&[5u8; 32]).unwrap();
+    let pk_bytes = bitcoin::PublicKey::new(sk.public_key(&secp)).to_bytes();
+    let program = ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::hash(&pk_bytes));
+    let redeem = bitcoin::script::PushBytesBuf::try_from(program.to_bytes()).unwrap();
+    let nested_sig = bitcoin::script::Builder::new()
+        .push_slice(&redeem)
+        .into_script();
+
+    let verdict = |nested: bool, junk: usize, bip66: bool| {
+        let spk = if nested {
+            ScriptBuf::new_p2sh(&program.script_hash())
+        } else {
+            program.clone()
+        };
+        let prevout = TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey: spk,
+        };
+        let mut tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: if nested {
+                    nested_sig.clone()
+                } else {
+                    ScriptBuf::new()
+                },
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(49_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let sighash = SighashCache::new(&tx)
+            .p2wpkh_signature_hash(0, &program, prevout.value, EcdsaSighashType::All)
+            .unwrap();
+        let mut sig = secp
+            .sign_ecdsa(&Message::from_digest(sighash.to_byte_array()), &sk)
+            .serialize_der()
+            .to_vec();
+        sig.extend(std::iter::repeat_n(0xeeu8, junk));
+        sig.push(EcdsaSighashType::All as u8);
+        tx.input[0].witness = Witness::from_slice(&[sig.as_slice(), pk_bytes.as_slice()]);
+        let flags = crate::block::ScriptVerifyFlags::buried(true, true, bip66, true, true);
+        let job = ScriptCheckJob::new(vec![prevout], tx, flags);
+        script::verify_job_all_inputs(&job).is_ok()
+    };
+
+    for nested in [false, true] {
+        assert!(verdict(nested, 0, true), "nested={nested} strict DER");
+        assert!(!verdict(nested, 1, true), "nested={nested} junk with BIP66");
+        assert!(
+            verdict(nested, 1, false),
+            "nested={nested} junk before BIP66"
+        );
+        assert!(!verdict(nested, 460, false), "nested={nested} 520-byte cap");
+    }
+}
