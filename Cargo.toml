@@ -55,7 +55,7 @@ tower-http = { version = "0.7", features = ["limit", "timeout"] }
 # No `bitcoinconsensus` feature — we verify scripts in pure Rust (see rbitcoin-consensus::script).
 bitcoin = { version = "0.32.102", default-features = true }
 bitcoin_hashes = "0.14.101"
-miniscript = { version = "12.3.7", default-features = false, features = ["std"] }
+miniscript = { version = "13.0.1", default-features = false, features = ["std"] }
 # BIP324 v2 encrypted P2P transport (tokio async ProtocolReader/Writer).
 bip324 = { version = "0.11", default-features = true, features = ["tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "rt", "signal", "fs"] }
