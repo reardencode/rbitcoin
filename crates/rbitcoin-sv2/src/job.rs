@@ -4,13 +4,17 @@
 
 use crate::messages::ValidateCustomJob;
 use crate::template::{self, Job};
-use bitcoin::hashes::Hash;
+use bitcoin::hashes::{sha256d, Hash};
 use bitcoin::{block, Block, BlockHash, Transaction, TxMerkleNode, Wtxid};
 use rbitcoin_net::ChainHub;
+use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 
 pub(crate) enum Verdict {
+    /// 0-indexed positions in `wtxid_list` neither the mempool nor
+    /// `transaction_list` resolves.
+    Missing(Vec<u16>),
     /// Consensus-valid on the tip: the fee total and the job to retain.
     Valid { fees: u64, job: Job },
     /// `ValidateCustomJob.Error.error_code`: a Core reject string or one of
@@ -35,18 +39,38 @@ fn check(chain: &ChainHub, m: &ValidateCustomJob) -> io::Result<Verdict> {
     else {
         return Ok(Verdict::Rejected("bad-cb-decode".into()));
     };
+    // The wtxid is the hash of the serialization as sent, so a supplied tx
+    // is matched to its slot without decoding it.
+    let supplied: HashMap<[u8; 32], &[u8]> = m
+        .transaction_list
+        .iter()
+        .map(|raw| {
+            (
+                sha256d::Hash::hash(raw.as_ref()).to_byte_array(),
+                raw.as_ref(),
+            )
+        })
+        .collect();
     let mut txs = Vec::with_capacity(m.wtxid_list.len());
-    for w in m.wtxid_list.iter() {
+    let mut missing = Vec::new();
+    for (pos, w) in m.wtxid_list.iter().enumerate() {
         let w: [u8; 32] = w.as_ref().try_into().expect("U256 is 32 bytes");
-        let Some(tx) = chain
-            .mempool()
-            .and_then(|mp| mp.get_tx_by_wtxid(&Wtxid::from_byte_array(w)))
-        else {
-            return Err(io::Error::other(
-                "sv2: ValidateCustomJob wtxid not in the mempool",
-            ));
+        let tx = match supplied.get(&w) {
+            Some(raw) => match bitcoin::consensus::deserialize::<Transaction>(raw) {
+                Ok(tx) => Some(tx),
+                Err(_) => return Ok(Verdict::Rejected("bad-missing-tx".into())),
+            },
+            None => chain
+                .mempool()
+                .and_then(|mp| mp.get_tx_by_wtxid(&Wtxid::from_byte_array(w))),
         };
-        txs.push(tx);
+        match tx {
+            Some(tx) => txs.push(tx),
+            None => missing.push(u16::try_from(pos).expect("Seq064K holds at most 65535")),
+        }
+    }
+    if !missing.is_empty() {
+        return Ok(Verdict::Missing(missing));
     }
     let next = template::next_header(chain)?;
     let mut leaves = Vec::with_capacity(1 + txs.len());

@@ -15,7 +15,8 @@ use rbitcoin_primitives::Height;
 use rbitcoin_query::{confirm_scripts_phase, expected_next_bits, median_time_past};
 use rbitcoin_store::merkle_root_from_txids;
 use rbitcoin_sv2::messages::{
-    ValidateCustomJob, ValidateCustomJobSuccess, MESSAGE_TYPE_VALIDATE_CUSTOM_JOB,
+    ValidateCustomJob, ValidateCustomJobMissingTransactions, ValidateCustomJobSuccess,
+    MESSAGE_TYPE_VALIDATE_CUSTOM_JOB, MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_MISSING_TRANSACTIONS,
     MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_SUCCESS, REQUIRES_JOB_VALIDATION,
 };
 use rbitcoin_sv2::testutil::TpClient;
@@ -1574,6 +1575,48 @@ async fn validate_custom_job_prices_and_retains_the_declared_job() {
     assert_eq!(
         (ok.request_id, ok.template_id, ok.fees),
         (9, last + 1, 5_000)
+    );
+    expect_retained(&mut c, ok.template_id, &[&a, &b]).await;
+
+    tp.shutdown().await;
+}
+
+/// §4.1–4.2: a wtxid the TP cannot resolve answers `MissingTransactions`
+/// with its 0-indexed position; the same job resent with that tx in
+/// `transaction_list` validates, and the supplied tx is retained with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn validate_custom_job_asks_for_and_accepts_missing_transactions() {
+    let tc = shared_regtest(2);
+    mock_live_tip(&tc);
+    let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
+    let a = spend(tc.coinbases[0], 3_000, cheap.clone());
+    let b = spend(tc.coinbases[1], 2_000, cheap);
+    tc.mempool.accept_tx(&a).expect("mempool accept");
+    let (tp, mut c) = connect_tp(&tc, REQUIRES_JOB_VALIDATION).await;
+    c.coinbase_output_constraints(0, 0).await.unwrap();
+    let last = expect_template(&mut c, &tc, &[&a], true).await;
+
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let coinbase = job_coinbase(height, subsidy + 5_000, &[&a, &b]);
+    let mut job = Job::on_tip(&tc, 4, &coinbase, &[&a, &b]);
+    job.send(&mut c).await;
+    let mut f = recv_in_time(&mut c).await;
+    assert_eq!(
+        f.msg_type,
+        MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_MISSING_TRANSACTIONS
+    );
+    let m: ValidateCustomJobMissingTransactions =
+        binary_sv2::from_bytes(&mut f.payload).expect("decode");
+    assert_eq!(m.request_id, 4);
+    assert_eq!(m.unknown_tx_position_list.into_inner(), vec![1u16]);
+
+    job.supplied = vec![serialize(&b)];
+    job.send(&mut c).await;
+    let ok = expect_job_success(&mut c).await;
+    assert_eq!(
+        (ok.request_id, ok.template_id, ok.fees),
+        (4, last + 1, 5_000)
     );
     expect_retained(&mut c, ok.template_id, &[&a, &b]).await;
 

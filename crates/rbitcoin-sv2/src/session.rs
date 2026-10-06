@@ -2,9 +2,10 @@
 
 use crate::job::{self, Verdict};
 use crate::messages::{
-    ValidateCustomJobError, ValidateCustomJobSuccess, MESSAGE_TYPE_VALIDATE_CUSTOM_JOB,
-    MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_ERROR, MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_SUCCESS,
-    REQUIRES_JOB_VALIDATION,
+    ValidateCustomJobError, ValidateCustomJobMissingTransactions, ValidateCustomJobSuccess,
+    MESSAGE_TYPE_VALIDATE_CUSTOM_JOB, MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_ERROR,
+    MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_MISSING_TRANSACTIONS,
+    MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_SUCCESS, REQUIRES_JOB_VALIDATION,
 };
 use crate::template;
 use crate::transport::{Frame, NoiseConn, NoiseWriter};
@@ -647,6 +648,15 @@ impl Session {
         };
         let wire = |e: binary_sv2::Error| io::Error::other(format!("sv2 ValidateCustomJob: {e:?}"));
         match verdict {
+            Verdict::Missing(positions) => {
+                let reply = ValidateCustomJobMissingTransactions {
+                    request_id,
+                    unknown_tx_position_list: Seq064K::new(positions).map_err(wire)?,
+                };
+                self.conn
+                    .send(MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_MISSING_TRANSACTIONS, reply)
+                    .await
+            }
             Verdict::Valid { fees, job } => {
                 self.templates.last_id += 1;
                 let template_id = self.templates.last_id;
