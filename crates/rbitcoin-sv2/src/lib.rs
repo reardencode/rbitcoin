@@ -4,6 +4,7 @@
 //! `docs/sv2-template-provider.md`.
 
 mod job;
+#[doc(hidden)]
 pub mod messages;
 #[doc(hidden)]
 pub mod session;

@@ -721,7 +721,7 @@ pub fn setup_error(m: &SetupConnection) -> Option<(u32, &'static str)> {
     if !(m.min_version..=m.max_version).contains(&TDP_VERSION) {
         return Some((0, ERROR_CODE_SETUP_CONNECTION_PROTOCOL_VERSION_MISMATCH));
     }
-    // sv2-job-validation-draft §3 defines bit 0; every other set bit is
+    // docs/sv2-job-validation.md §3 defines bit 0; every other set bit is
     // unsupported.
     if m.flags & !REQUIRES_JOB_VALIDATION != 0 {
         return Some((
