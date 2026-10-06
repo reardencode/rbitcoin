@@ -548,33 +548,18 @@ struct FirstTemplate {
     coinbase: Vec<u8>,
 }
 
-async fn first_template(tc: &TestChain) -> FirstTemplate {
-    first_template_every(tc, TEMPLATE_INTERVAL).await
+async fn first_template(tc: &TestChain, flags: u32) -> FirstTemplate {
+    first_template_every(tc, flags, TEMPLATE_INTERVAL).await
 }
 
 /// [`first_template`] on a session that checks fees every `template_interval`.
-async fn first_template_every(tc: &TestChain, template_interval: Duration) -> FirstTemplate {
+async fn first_template_every(
+    tc: &TestChain,
+    flags: u32,
+    template_interval: Duration,
+) -> FirstTemplate {
     mock_live_tip(tc);
-    let tp = run_sv2_tp(Sv2TpConfig {
-        listen: "127.0.0.1:0".parse().unwrap(),
-        chain: Arc::clone(&tc.chain),
-        authority_secret: [7; 32],
-        cert_validity: Duration::from_secs(3600),
-        stale_grace: Duration::from_secs(10),
-        setup_timeout: SETUP_TIMEOUT,
-        idle_timeout: None,
-        write_timeout: WRITE_TIMEOUT,
-        fee_delta: FEE_DELTA,
-        template_interval,
-        constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
-    })
-    .await
-    .expect("listen");
-    let mut c = TpClient::connect(tp.local_addr, tp.authority_pubkey)
-        .await
-        .expect("handshake");
-    c.setup_connection(2, 2, 2, 0).await.unwrap();
-    c.recv().await.expect("setup reply");
+    let (tp, mut c) = connect_tp_every(tc, flags, template_interval).await;
     c.coinbase_output_constraints(0, 0).await.unwrap();
 
     let mut f = recv_in_time(&mut c).await;
@@ -642,7 +627,7 @@ async fn submit_solution_checks_pow_before_accept() {
         version,
         mut header,
         coinbase,
-    } = first_template(&tc).await;
+    } = first_template(&tc, 0).await;
     let tip = header.prev_blockhash;
 
     while header.validate_pow(header.target()).is_ok() {
@@ -690,7 +675,7 @@ async fn submit_solution_without_coinbase_witness_is_accepted() {
         version,
         mut header,
         coinbase,
-    } = first_template(&tc).await;
+    } = first_template(&tc, 0).await;
     let mut bare: Transaction = bitcoin::consensus::deserialize(&coinbase).unwrap();
     bare.input[0].witness = Witness::new();
     while header.validate_pow(header.target()).is_err() {
@@ -727,7 +712,7 @@ async fn submit_solution_without_witness_commitment_is_accepted() {
         version,
         mut header,
         coinbase,
-    } = first_template(&tc).await;
+    } = first_template(&tc, 0).await;
     let mut bare: Transaction = bitcoin::consensus::deserialize(&coinbase).unwrap();
     bare.input[0].witness = Witness::new();
     bare.output.truncate(1);
@@ -769,7 +754,7 @@ async fn submit_solution_ahead_of_the_rolled_time_is_accepted() {
         version,
         mut header,
         coinbase,
-    } = first_template(&tc).await;
+    } = first_template(&tc, 0).await;
     header.time += 5;
     while header.validate_pow(header.target()).is_err() {
         header.nonce += 1;
@@ -959,7 +944,7 @@ async fn same_prev_hash_template_keeps_the_sent_bits() {
         version,
         mut header,
         coinbase,
-    } = first_template(&tc).await;
+    } = first_template(&tc, 0).await;
 
     let spacing = tc.chain.params.btc.pow_target_spacing as u32;
     tc.chain
@@ -1102,7 +1087,7 @@ async fn fee_pushes_keep_older_same_tip_templates_solvable() {
         version,
         mut header,
         coinbase,
-    } = first_template_every(&tc, interval).await;
+    } = first_template_every(&tc, 0, interval).await;
 
     let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
     let mut txs = (0..3)
@@ -1260,7 +1245,7 @@ async fn fee_pushes_stay_an_interval_apart_under_steady_admission() {
 async fn idle_session_checks_each_interval_and_does_not_rebuild() {
     let tc = shared_regtest(0);
     let interval = Duration::from_millis(250);
-    let FirstTemplate { tp, c, .. } = first_template_every(&tc, interval).await;
+    let FirstTemplate { tp, c, .. } = first_template_every(&tc, 0, interval).await;
     tokio::time::pause();
     let stats = tp.stats();
     assert_eq!(stats.builds.totals().0, 1, "the first template");
@@ -1351,7 +1336,7 @@ async fn template_target_follows_the_regtest_pow_overlay() {
         version,
         mut header,
         coinbase,
-    } = first_template(&tc).await;
+    } = first_template(&tc, 0).await;
     assert_eq!(header.bits.to_consensus(), OVERLAY);
 
     while header.validate_pow(header.target()).is_err() {
@@ -1390,7 +1375,7 @@ async fn submit_solution_past_the_min_diff_gap_is_dropped() {
         version,
         mut header,
         coinbase,
-    } = first_template(&tc).await;
+    } = first_template(&tc, 0).await;
     assert_eq!(header.bits.to_consensus(), OVERLAY);
     let tip = header.prev_blockhash;
     let spacing = tc.chain.params.btc.pow_target_spacing as u32;
@@ -1416,6 +1401,15 @@ async fn submit_solution_past_the_min_diff_gap_is_dropped() {
 
 /// A live TP on `tc` with one session past `SetupConnection(flags)`.
 async fn connect_tp(tc: &TestChain, flags: u32) -> (rbitcoin_sv2::Sv2TpHandle, TpClient) {
+    connect_tp_every(tc, flags, TEMPLATE_INTERVAL).await
+}
+
+/// [`connect_tp`] on a TP that checks fees every `template_interval`.
+async fn connect_tp_every(
+    tc: &TestChain,
+    flags: u32,
+    template_interval: Duration,
+) -> (rbitcoin_sv2::Sv2TpHandle, TpClient) {
     let tp = run_sv2_tp(Sv2TpConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         chain: Arc::clone(&tc.chain),
@@ -1426,7 +1420,7 @@ async fn connect_tp(tc: &TestChain, flags: u32) -> (rbitcoin_sv2::Sv2TpHandle, T
         idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
-        template_interval: TEMPLATE_INTERVAL,
+        template_interval,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
     })
     .await
@@ -1697,6 +1691,67 @@ async fn validate_custom_job_rejects_untrusted_input_in_order() {
         e.error_code.as_utf8_or_hex(),
         "template-id-not-found",
         "a rejected job must not take a template id"
+    );
+
+    tp.shutdown().await;
+}
+
+/// §4.5: a `SubmitSolution` on a validated job's template id is assembled
+/// from the retained job and the JDS's final coinbase (extranonce in place
+/// of the placeholder) and accepted like one for a pushed template.
+#[tokio::test(flavor = "multi_thread")]
+async fn submit_solution_for_a_validated_job_becomes_the_tip() {
+    let tc = shared_regtest(2);
+    let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
+    let a = spend(tc.coinbases[0], 3_000, cheap.clone());
+    let b = spend(tc.coinbases[1], 2_000, cheap);
+    for tx in [&a, &b] {
+        tc.mempool.accept_tx(tx).expect("mempool accept");
+    }
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id: last,
+        version,
+        header: sent,
+        ..
+    } = first_template(&tc, REQUIRES_JOB_VALIDATION).await;
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let mut coinbase = job_coinbase(height, subsidy + 5_000, &[&a, &b]);
+    Job::on_tip(&tc, 1, &coinbase, &[&a, &b]).send(&mut c).await;
+    let ok = expect_job_success(&mut c).await;
+    assert_eq!(ok.template_id, last + 1);
+
+    let mut script_sig = bip34_height_script(height);
+    script_sig.extend_from_slice(&[0x42; 8]);
+    coinbase.input[0].script_sig = ScriptBuf::from_bytes(script_sig);
+    let mut leaves = vec![coinbase.compute_txid().to_byte_array()];
+    leaves.extend([&a, &b].iter().map(|tx| tx.compute_txid().to_byte_array()));
+    let mut header = bitcoin::block::Header {
+        merkle_root: bitcoin::TxMerkleNode::from_byte_array(merkle_root_from_txids(&leaves)),
+        ..sent
+    };
+    while header.validate_pow(header.target()).is_err() {
+        header.nonce += 1;
+    }
+    c.submit_solution(
+        ok.template_id,
+        version,
+        header.time,
+        header.nonce,
+        &serialize(&coinbase),
+    )
+    .await
+    .unwrap();
+    let f = recv_in_time(&mut c).await;
+    assert_eq!(
+        f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE,
+        "the new tip's template"
+    );
+    assert_eq!(
+        tc.chain.tip_header().unwrap().block_hash(),
+        header.block_hash()
     );
 
     tp.shutdown().await;
