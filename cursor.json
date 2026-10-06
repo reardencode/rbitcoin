@@ -1,0 +1,8 @@
+{
+  "new_base": "cdfdaa0ef2b1fea88a1580adce5e42b6213aebac",
+  "new_skip": 1512,
+  "old_index": 25,
+  "new_cap_used": true,
+  "run_id": "37426263931",
+  "old_name": "crates/rbitcoin-cli/src/lib.rs:111:15: replace += with -= in parse_args"
+}

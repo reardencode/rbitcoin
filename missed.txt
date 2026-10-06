@@ -1,0 +1,26 @@
+# 37426263931 1 3ef3c8fc4ba7da31476496e2004ae7ae9c28a2e0
+MISSED   crates/rbitcoin-net/src/peer_dos.rs:83:74: replace / with % in PeerRateLimiter::note_at in 11s build + 82s test
+MISSED   crates/rbitcoin-net/src/peer_dos.rs:83:59: replace * with / in PeerRateLimiter::note_at in 11s build + 81s test
+MISSED   crates/rbitcoin-net/src/peer_dos.rs:96:20: replace < with <= in PeerRateLimiter::roll in 11s build + 81s test
+MISSED   crates/rbitcoin-net/src/peers.rs:1038:17: replace > with >= in LivePeer::take_ping_action in 11s build + 82s test
+MISSED   crates/rbitcoin-net/src/peers.rs:1042:56: replace > with >= in LivePeer::take_ping_action in 11s build + 81s test
+MISSED   crates/rbitcoin-net/src/peers.rs:1218:35: replace - with + in connection_counts in 11s build + 83s test
+MISSED   crates/rbitcoin-net/src/peers.rs:1913:57: replace * with + in 11s build + 81s test
+MISSED   crates/rbitcoin-net/src/peers.rs:1913:57: replace * with / in 11s build + 81s test
+MISSED   crates/rbitcoin-net/src/peers.rs:1913:52: replace * with + in 11s build + 81s test
+MISSED   crates/rbitcoin-net/src/peers.rs:1916:56: replace * with + in 11s build + 81s test
+MISSED   crates/rbitcoin-net/src/peers.rs:1924:39: replace > with >= in PeerHub::sweep_discouraged in 11s build + 81s test
+MISSED   crates/rbitcoin-net/src/peers.rs:1956:12: delete ! in PeerHub::note_slot_evict in 11s build + 81s test
+MISSED   crates/rbitcoin-net/src/peers.rs:1972:41: replace > with >= in PeerHub::inbound_discouraged in 11s build + 82s test
+MISSED   crates/rbitcoin-net/src/peers.rs:1981:41: replace > with >= in PeerHub::inbound_discouraged in 11s build + 82s test
+MISSED   crates/rbitcoin-net/src/seeds.rs:382:75: replace < with == in AddrMan::take_dial_candidates_net in 11s build + 81s test
+MISSED   crates/rbitcoin-net/src/seeds.rs:382:75: replace < with > in AddrMan::take_dial_candidates_net in 11s build + 81s test
+MISSED   crates/rbitcoin-net/src/seeds.rs:382:75: replace < with <= in AddrMan::take_dial_candidates_net in 11s build + 82s test
+MISSED   crates/rbitcoin-net/src/seeds.rs:387:21: replace && with || in AddrMan::take_dial_candidates_net in 11s build + 83s test
+MISSED   crates/rbitcoin-net/src/seeds.rs:386:21: replace && with || in AddrMan::take_dial_candidates_net in 11s build + 81s test
+MISSED   crates/rbitcoin-net/src/seeds.rs:385:23: replace < with <= in AddrMan::take_dial_candidates_net in 11s build + 80s test
+MISSED   crates/rbitcoin-net/src/seeds.rs:391:27: delete ! in AddrMan::take_dial_candidates_net in 11s build + 82s test
+MISSED   crates/rbitcoin-net/src/seeds.rs:396:31: delete ! in AddrMan::take_dial_candidates_net in 11s build + 82s test
+MISSED   crates/rbitcoin-net/src/seeds.rs:422:64: replace < with == in AddrMan::recently_attempted_addr in 11s build + 82s test
+MISSED   crates/rbitcoin-net/src/seeds.rs:422:64: replace < with > in AddrMan::recently_attempted_addr in 11s build + 82s test
+MISSED   crates/rbitcoin-net/src/seeds.rs:422:64: replace < with <= in AddrMan::recently_attempted_addr in 11s build + 82s test
