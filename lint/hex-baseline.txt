@@ -45,3 +45,4 @@ crates/rbitcoin-store/src/store.rs	3
 crates/rbitcoin-store/src/store_secret.rs	2
 crates/rbitcoin-store/src/tx_table/mod.rs	1
 crates/rbitcoin-store/src/tx_table/packed.rs	2
+crates/rbitcoin-sv2/src/messages.rs	4
