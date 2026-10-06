@@ -4,7 +4,7 @@
 use binary_sv2::{Seq0255, B0255, B064K, U256};
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::Hash;
-use bitcoin::{Amount, ScriptBuf, Target, Transaction, TxOut};
+use bitcoin::{Amount, CompactTarget, ScriptBuf, Target, Transaction, TxOut};
 use rbitcoin_consensus::{
     bip34_height_script, block_subsidy, witness_commitment_script, MAX_BLOCK_WEIGHT,
 };
@@ -28,6 +28,7 @@ pub const COINBASE_BASE_WU: u64 = 1168;
 #[doc(hidden)]
 pub const MIN_COINBASE_RESERVE_WU: u64 = 2000;
 
+/// A `NewTemplate`: the coinbase split the client completes, over a [`Job`].
 #[derive(Clone)]
 pub struct Template {
     pub version: u32,
@@ -35,6 +36,15 @@ pub struct Template {
     pub value_remaining: u64,
     /// The witness commitment output, serialized with no count prefix.
     pub coinbase_outputs: Vec<u8>,
+    pub job: Job,
+}
+
+/// What a session retains under a template id, for a built template or a
+/// validated custom job: the header fields a `SubmitSolution` is assembled
+/// with and the txs `RequestTransactionData` returns.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct Job {
     pub merkle_path: Vec<[u8; 32]>,
     pub prev_hash: [u8; 32],
     pub header_timestamp: u32,
@@ -65,47 +75,89 @@ impl Template {
             coinbase_tx_outputs_count: 1,
             coinbase_tx_outputs: B064K::try_from(&self.coinbase_outputs[..])?,
             coinbase_tx_locktime: 0,
-            merkle_path: Seq0255::new(self.merkle_path.iter().map(U256::from).collect())?,
+            merkle_path: Seq0255::new(self.job.merkle_path.iter().map(U256::from).collect())?,
         })
     }
 
     pub fn to_prev_hash(&self, template_id: u64) -> SetNewPrevHash<'_> {
         SetNewPrevHash {
             template_id,
-            prev_hash: U256::from(&self.prev_hash),
-            header_timestamp: self.header_timestamp,
-            n_bits: self.n_bits,
-            target: U256::from(&self.target),
+            prev_hash: U256::from(&self.job.prev_hash),
+            header_timestamp: self.job.header_timestamp,
+            n_bits: self.job.n_bits,
+            target: U256::from(&self.job.target),
         }
     }
 }
 
-/// Template on the stripped tip for one client's coinbase constraints. The
-/// client's sigops replace the default reserve (Core `BlockAssembler`).
-/// `Ok(None)` when that tip has not been recorded, or is no longer the
-/// header at its height. Takes the mempool lock and reads the store:
+/// Header fields the tip fixes for the next block. Reads the store:
 /// blocking region only.
+#[derive(Clone, Copy)]
+pub(crate) struct NextHeader {
+    pub height: u32,
+    pub prev_hash: [u8; 32],
+    /// MTP + 1, or the node clock when later.
+    pub time: u32,
+    pub bits: CompactTarget,
+}
+
+impl NextHeader {
+    pub fn job(&self, merkle_path: Vec<[u8; 32]>, txs: Vec<Arc<Transaction>>) -> Job {
+        Job {
+            merkle_path,
+            prev_hash: self.prev_hash,
+            header_timestamp: self.time,
+            n_bits: self.bits.to_consensus(),
+            target: Target::from_compact(self.bits).to_le_bytes(),
+            txs,
+        }
+    }
+}
+
+pub(crate) fn next_header(chain: &ChainHub) -> io::Result<NextHeader> {
+    let tip = chain
+        .query
+        .tip_height()
+        .ok_or_else(|| io::Error::other("sv2: no tip"))?;
+    next_header_at(chain, tip)
+}
+
+fn next_header_at(chain: &ChainHub, tip: Height) -> io::Result<NextHeader> {
+    let header = chain
+        .query
+        .wire_header_at_height(tip)
+        .map_err(|e| io::Error::other(format!("sv2: tip header: {e}")))?;
+    let height = tip.0 + 1;
+    let time = next_block_mintime(&chain.query, &chain.params, tip)
+        .map_err(|e| io::Error::other(format!("sv2: tip mintime: {e}")))?
+        .max(chain.clock.now_secs() as u32);
+    let bits = expected_next_bits(&chain.query, &chain.params, Height(height), time)
+        .map_err(|e| io::Error::other(format!("sv2: next bits: {e}")))?;
+    Ok(NextHeader {
+        height,
+        prev_hash: header.block_hash().to_byte_array(),
+        time,
+        bits,
+    })
+}
+
+/// Template on the stripped tip for one client's coinbase constraints.
+/// Returns `None` if that tip is missing or no longer at its height.
 #[doc(hidden)]
 pub fn build(
     chain: &ChainHub,
     max_additional_size: u32,
     max_additional_sigops: u16,
 ) -> io::Result<Option<Template>> {
-    let Some((prev, stamp)) = prepare_stamp(chain)? else {
+    let Some(next) = prepare_next(chain)? else {
         return Ok(None);
     };
-    build_stamped(
-        chain,
-        max_additional_size,
-        max_additional_sigops,
-        prev,
-        stamp,
-    )
+    build_next(chain, max_additional_size, max_additional_sigops, next)
 }
 
-/// Timestamp and `nBits` for `prev`, using the same rules as [`build`].
+/// The header fields a child of `prev` takes.
 /// `Ok(None)` when `prev` is not the header at its height.
-pub(crate) fn stamp_for(chain: &ChainHub, prev: [u8; 32]) -> io::Result<Option<TemplateStamp>> {
+pub(crate) fn next_header_on(chain: &ChainHub, prev: [u8; 32]) -> io::Result<Option<NextHeader>> {
     let Some(tip) = chain
         .query
         .height_of_hash(&prev)
@@ -113,50 +165,30 @@ pub(crate) fn stamp_for(chain: &ChainHub, prev: [u8; 32]) -> io::Result<Option<T
     else {
         return Ok(None);
     };
-    let header = chain
-        .query
-        .wire_header_at_height(tip)
-        .map_err(|e| io::Error::other(format!("sv2: tip header: {e}")))?;
-    if header.block_hash().to_byte_array() != prev {
-        return Ok(None);
-    }
-    let header_timestamp = next_block_mintime(&chain.query, &chain.params, tip)
-        .map_err(|e| io::Error::other(format!("sv2: tip mintime: {e}")))?
-        .max(chain.clock.now_secs() as u32);
-    let bits = expected_next_bits(
-        &chain.query,
-        &chain.params,
-        Height(tip.0 + 1),
-        header_timestamp,
-    )
-    .map_err(|e| io::Error::other(format!("sv2: next bits: {e}")))?;
-    Ok(Some(TemplateStamp {
-        header_timestamp,
-        n_bits: bits.to_consensus(),
-    }))
+    let next = next_header_at(chain, tip)?;
+    Ok((next.prev_hash == prev).then_some(next))
 }
 
 /// `template_prev` plus the bits and time a template on that tip would use.
 /// `Ok(None)` when the pool has not recorded a stripped tip.
-pub(crate) fn prepare_stamp(chain: &ChainHub) -> io::Result<Option<([u8; 32], TemplateStamp)>> {
+pub(crate) fn prepare_next(chain: &ChainHub) -> io::Result<Option<NextHeader>> {
     let Some(prev) = chain.mempool().and_then(|m| m.template_prev()) else {
         return Ok(None);
     };
-    Ok(stamp_for(chain, prev)?.map(|stamp| (prev, stamp)))
+    next_header_on(chain, prev)
 }
 
-/// [`build`] with a timestamp and `nBits` already chosen. The flight key
-/// carries those values, so a cached template matches the key that built it.
-pub(crate) fn build_stamped(
+/// [`build`] with the header fields already chosen. The flight key carries
+/// those values, so a cached template matches the key that built it.
+pub(crate) fn build_next(
     chain: &ChainHub,
     max_additional_size: u32,
     max_additional_sigops: u16,
-    prev: [u8; 32],
-    stamp: TemplateStamp,
+    next: NextHeader,
 ) -> io::Result<Option<Template>> {
     let Some(tip) = chain
         .query
-        .height_of_hash(&prev)
+        .height_of_hash(&next.prev_hash)
         .map_err(|e| io::Error::other(format!("sv2: template tip: {e}")))?
     else {
         return Ok(None);
@@ -165,16 +197,14 @@ pub(crate) fn build_stamped(
         .query
         .wire_header_at_height(tip)
         .map_err(|e| io::Error::other(format!("sv2: tip header: {e}")))?;
-    if header.block_hash().to_byte_array() != prev {
+    if header.block_hash().to_byte_array() != next.prev_hash {
         return Ok(None);
     }
-    let height = tip.0 + 1;
     let testdummy = chain
         .query
         .testdummy_state(&chain.params, tip)
         .map_err(|e| io::Error::other(format!("sv2: versionbits: {e}")))?;
-    let header_timestamp = stamp.header_timestamp;
-    let bits = bitcoin::CompactTarget::from_consensus(stamp.n_bits);
+    let height = next.height;
     let reserve =
         (COINBASE_BASE_WU + 4 * u64::from(max_additional_size)).max(MIN_COINBASE_RESERVE_WU);
     let budget = SelectBudget {
@@ -203,20 +233,11 @@ pub(crate) fn build_stamped(
         coinbase_prefix: bip34_height_script(height),
         value_remaining: (block_subsidy(height, &chain.params) as u64).saturating_add(fees),
         coinbase_outputs: serialize(&commitment),
-        merkle_path: rbitcoin_store::merkle_branch(&leaves, 0),
-        prev_hash: header.block_hash().to_byte_array(),
-        header_timestamp,
-        n_bits: bits.to_consensus(),
-        target: Target::from_compact(bits).to_le_bytes(),
-        txs: selected.into_iter().map(|(tx, _)| tx).collect(),
+        job: next.job(
+            rbitcoin_store::merkle_branch(&leaves, 0),
+            selected.into_iter().map(|(tx, _)| tx).collect(),
+        ),
     }))
-}
-
-/// Timestamp and `nBits` frozen into a [`TemplateKey`] before the build.
-#[derive(Clone, Copy)]
-pub(crate) struct TemplateStamp {
-    pub header_timestamp: u32,
-    pub n_bits: u32,
 }
 
 /// One template build. Sessions that share this key share one build.
@@ -255,9 +276,9 @@ impl Default for TemplateFlight {
 }
 
 fn template_matches(key: &TemplateKey, t: &Template) -> bool {
-    t.prev_hash == key.prev_hash
-        && t.header_timestamp == key.header_timestamp
-        && t.n_bits == key.n_bits
+    t.job.prev_hash == key.prev_hash
+        && t.job.header_timestamp == key.header_timestamp
+        && t.job.n_bits == key.n_bits
 }
 
 impl TemplateFlight {

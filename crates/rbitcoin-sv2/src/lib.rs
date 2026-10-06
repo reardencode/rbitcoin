@@ -3,6 +3,7 @@
 //! Noise_NX over TCP is the only transport. Plan and constraints:
 //! `docs/sv2-template-provider.md`.
 
+mod job;
 pub mod messages;
 #[doc(hidden)]
 pub mod session;

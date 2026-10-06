@@ -1,6 +1,11 @@
 //! One TDP session: Noise handshake, `SetupConnection`, then TDP messages.
 
-use crate::messages::REQUIRES_JOB_VALIDATION;
+use crate::job::{self, Verdict};
+use crate::messages::{
+    ValidateCustomJobError, ValidateCustomJobSuccess, MESSAGE_TYPE_VALIDATE_CUSTOM_JOB,
+    MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_ERROR, MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_SUCCESS,
+    REQUIRES_JOB_VALIDATION,
+};
 use crate::template;
 use crate::transport::{Frame, NoiseConn, NoiseWriter};
 use crate::Sv2TpStats;
@@ -85,13 +90,15 @@ pub struct Templates {
     pub sent_bits: Option<(u32, [u8; 32])>,
     /// A template was built since the last tip event.
     pub built_since_tip: bool,
+    /// Fee delta is measured against the last pushed template.
+    pub last_value_remaining: Option<u64>,
     pub retained: VecDeque<Retained>,
 }
 
 #[doc(hidden)]
 pub struct Retained {
     pub id: u64,
-    pub t: template::Template,
+    pub job: template::Job,
     pub prev_sent: (u32, Instant),
     /// Set once the tip moves on.
     pub retire_at: Option<Instant>,
@@ -99,13 +106,13 @@ pub struct Retained {
 
 impl Templates {
     #[doc(hidden)]
-    pub fn retain(&mut self, id: u64, t: template::Template, prev_sent: (u32, Instant)) {
+    pub fn retain(&mut self, id: u64, job: template::Job, prev_sent: (u32, Instant)) {
         if self.retained.len() == MAX_RETAINED {
             self.retained.pop_front();
         }
         self.retained.push_back(Retained {
             id,
-            t,
+            job,
             prev_sent,
             retire_at: None,
         });
@@ -164,9 +171,9 @@ pub async fn serve(
     let setup = async {
         let mut conn = NoiseConn::accept(stream, responder, write_timeout).await?;
         let frame = conn.recv().await?;
-        Ok::<_, io::Error>(on_setup(&mut conn, frame).await?.then_some(conn))
+        Ok::<_, io::Error>(on_setup(&mut conn, frame).await?.map(|flags| (conn, flags)))
     };
-    let Some(conn) = tokio::time::timeout_at(deadline, setup)
+    let Some((conn, flags)) = tokio::time::timeout_at(deadline, setup)
         .await
         .map_err(|_| missed_setup_deadline())??
     else {
@@ -193,6 +200,7 @@ pub async fn serve(
         constraints_cooldown,
         stats,
         flight,
+        job_validation: flags & REQUIRES_JOB_VALIDATION != 0,
         constraints: None,
         templates: Templates::default(),
         built_at: None,
@@ -227,6 +235,8 @@ pub struct Session {
     pub stats: Arc<Sv2TpStats>,
     /// Shared with every session on this listener.
     flight: Arc<template::TemplateFlight>,
+    /// `SetupConnection` negotiated `REQUIRES_JOB_VALIDATION`.
+    job_validation: bool,
     /// Last `CoinbaseOutputConstraints`: `(max_additional_size, sigops)`.
     pub constraints: Option<(u32, u16)>,
     pub templates: Templates,
@@ -358,6 +368,9 @@ impl Session {
                 on_request_transaction_data(&mut self.conn, frame, &self.templates).await?;
             }
             MESSAGE_TYPE_SUBMIT_SOLUTION => self.on_submit_solution(frame).await?,
+            MESSAGE_TYPE_VALIDATE_CUSTOM_JOB if self.job_validation => {
+                self.on_validate_custom_job(frame).await?;
+            }
             t => rbitcoin_log::info!("sv2: ignoring message {t:#x}"),
         }
         Ok(true)
@@ -406,12 +419,12 @@ impl Session {
                 return Ok(());
             }
         };
-        let Some(last) = self.templates.retained.back() else {
+        let Some(last) = self.templates.last_value_remaining else {
             return Ok(());
         };
         // Same prev hash, same height: value_remaining differs by fees only.
-        if self.templates.current_prev == Some(t.prev_hash)
-            && t.value_remaining >= last.t.value_remaining.saturating_add(self.fee_push.delta)
+        if self.templates.current_prev == Some(t.job.prev_hash)
+            && t.value_remaining >= last.saturating_add(self.fee_push.delta)
         {
             self.send(t).await?;
         }
@@ -435,15 +448,15 @@ impl Session {
         // and time on the same thread, before the flight, so the cached
         // template is the one this key names.
         let chain = Arc::clone(&self.chain);
-        let prepared = rbitcoin_net::off_pool(move || template::prepare_stamp(&chain)).await?;
-        let t = if let Some((prev, stamp)) = prepared {
+        let prepared = rbitcoin_net::off_pool(move || template::prepare_next(&chain)).await?;
+        let t = if let Some(next) = prepared {
             let key = template::TemplateKey {
-                prev_hash: prev,
+                prev_hash: next.prev_hash,
                 max_additional_size: size,
                 max_additional_sigops: sigops,
                 template_updates: updates,
-                header_timestamp: stamp.header_timestamp,
-                n_bits: stamp.n_bits,
+                header_timestamp: next.time,
+                n_bits: next.bits.to_consensus(),
             };
             let c = Arc::clone(&self.chain);
             let stats = Arc::clone(&self.stats);
@@ -455,7 +468,7 @@ impl Session {
                         return Ok(None);
                     }
                     let started = std::time::Instant::now();
-                    let t = template::build_stamped(&c, size, sigops, prev, stamp)?;
+                    let t = template::build_next(&c, size, sigops, next)?;
                     if t.is_some() {
                         stats.builds.note(micros(started.elapsed()));
                     }
@@ -481,18 +494,19 @@ impl Session {
         self.templates.last_id += 1;
         let template_id = self.templates.last_id;
         // sv2-spec 07 §7.3: a template on a new prev hash is future, then activated.
-        let new_prev = self.templates.current_prev != Some(t.prev_hash);
+        let new_prev = self.templates.current_prev != Some(t.job.prev_hash);
         // §7.4: nBits comes once per prev hash. On min-difficulty networks the
         // build's bits follow the clock; a solution on this template is hashed
         // with the bits the client was sent.
         if let Some((n_bits, target)) = self.templates.sent_bits.filter(|_| !new_prev) {
-            t.n_bits = n_bits;
-            t.target = target;
+            t.job.n_bits = n_bits;
+            t.job.target = target;
         }
         let msg = t
             .to_message(template_id, new_prev)
             .map_err(|e| io::Error::other(format!("sv2 NewTemplate: {e:?}")))?;
         self.conn.send(MESSAGE_TYPE_NEW_TEMPLATE, msg).await?;
+        self.templates.last_value_remaining = Some(t.value_remaining);
         let sent = Instant::now();
         self.built_at = Some(sent);
         self.fee_check_at = Some(sent + self.fee_push.interval);
@@ -502,16 +516,16 @@ impl Session {
                 .send(MESSAGE_TYPE_SET_NEW_PREV_HASH, t.to_prev_hash(template_id))
                 .await?;
             let now = Instant::now();
-            self.templates.current_prev = Some(t.prev_hash);
-            self.templates.prev_sent = Some((t.header_timestamp, now));
-            self.templates.sent_bits = Some((t.n_bits, t.target));
+            self.templates.current_prev = Some(t.job.prev_hash);
+            self.templates.prev_sent = Some((t.job.header_timestamp, now));
+            self.templates.sent_bits = Some((t.job.n_bits, t.job.target));
             self.templates.start_grace(now + self.stale_grace);
         }
         let prev_sent = self
             .templates
             .prev_sent
             .ok_or_else(|| io::Error::other("sv2: template before SetNewPrevHash"))?;
-        self.templates.retain(template_id, t, prev_sent);
+        self.templates.retain(template_id, t.job, prev_sent);
         Ok(())
     }
 
@@ -551,15 +565,15 @@ impl Session {
         // and hash of every template tx plus ChainHub's connect path.
         let root = rbitcoin_store::merkle_root_from_branch(
             coinbase.compute_txid().to_byte_array(),
-            &r.t.merkle_path,
+            &r.job.merkle_path,
             0,
         );
         let header = block::Header {
             version: block::Version::from_consensus(m.version as i32),
-            prev_blockhash: BlockHash::from_byte_array(r.t.prev_hash),
+            prev_blockhash: BlockHash::from_byte_array(r.job.prev_hash),
             merkle_root: TxMerkleNode::from_byte_array(root),
             time: m.header_timestamp,
-            bits: CompactTarget::from_consensus(r.t.n_bits),
+            bits: CompactTarget::from_consensus(r.job.n_bits),
             nonce: m.header_nonce,
         };
         if header.validate_pow(header.target()).is_err() {
@@ -604,9 +618,9 @@ impl Session {
                 m.header_timestamp
             );
         }
-        let mut txdata = Vec::with_capacity(1 + r.t.txs.len());
+        let mut txdata = Vec::with_capacity(1 + r.job.txs.len());
         txdata.push(coinbase);
-        txdata.extend(r.t.txs.iter().map(|tx| Transaction::clone(tx)));
+        txdata.extend(r.job.txs.iter().map(|tx| Transaction::clone(tx)));
         let block = Block { header, txdata };
         let hash = block.block_hash();
         let outcome = self.chain.accept_block_async(block).await;
@@ -615,6 +629,52 @@ impl Session {
             Err(e) => rbitcoin_log::info!("sv2: SubmitSolution {hash} rejected: {e}"),
         }
         Ok(())
+    }
+
+    /// docs/sv2-job-validation.md §4: a valid job is retained under the next
+    /// template id and answered `Success`; a rejected one answers `Error`.
+    async fn on_validate_custom_job(&mut self, frame: Frame) -> io::Result<()> {
+        let c = Arc::clone(&self.chain);
+        let verdict = tokio::task::spawn_blocking(move || {
+            let _g = BlockingRegion::enter();
+            job::validate(&c, frame.payload)
+        })
+        .await
+        .map_err(io::Error::other)??;
+        let Some((request_id, verdict)) = verdict else {
+            rbitcoin_log::info!("sv2: undecodable ValidateCustomJob");
+            return Ok(());
+        };
+        let wire = |e: binary_sv2::Error| io::Error::other(format!("sv2 ValidateCustomJob: {e:?}"));
+        match verdict {
+            Verdict::Valid { fees, job } => {
+                self.templates.last_id += 1;
+                let template_id = self.templates.last_id;
+                let prev_sent = self
+                    .templates
+                    .prev_sent
+                    .unwrap_or((job.header_timestamp, Instant::now()));
+                self.templates.retain(template_id, job, prev_sent);
+                let reply = ValidateCustomJobSuccess {
+                    request_id,
+                    template_id,
+                    fees,
+                };
+                self.conn
+                    .send(MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_SUCCESS, reply)
+                    .await
+            }
+            Verdict::Rejected(code) => {
+                let reply = ValidateCustomJobError {
+                    request_id,
+                    error_code: Str0255::try_from(code.as_str()).map_err(wire)?,
+                    error_details: B064K::try_from(&[][..]).map_err(wire)?,
+                };
+                self.conn
+                    .send(MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_ERROR, reply)
+                    .await
+            }
+        }
     }
 }
 
@@ -662,15 +722,15 @@ pub fn setup_error(m: &SetupConnection) -> Option<(u32, &'static str)> {
     None
 }
 
-/// `false`: close the session.
-pub async fn on_setup(conn: &mut NoiseConn, mut frame: Frame) -> io::Result<bool> {
+/// The negotiated flags; `None`: close the session.
+pub async fn on_setup(conn: &mut NoiseConn, mut frame: Frame) -> io::Result<Option<u32>> {
     if frame.msg_type != MESSAGE_TYPE_SETUP_CONNECTION {
         rbitcoin_log::info!("sv2: message {:#x} before SetupConnection", frame.msg_type);
-        return Ok(false);
+        return Ok(None);
     }
     let Ok(setup) = binary_sv2::from_bytes::<SetupConnection>(&mut frame.payload) else {
         rbitcoin_log::info!("sv2: undecodable SetupConnection");
-        return Ok(false);
+        return Ok(None);
     };
     if let Some((flags, code)) = setup_error(&setup) {
         let error_code = Str0255::try_from(code)
@@ -678,7 +738,7 @@ pub async fn on_setup(conn: &mut NoiseConn, mut frame: Frame) -> io::Result<bool
         let reply = SetupConnectionError { flags, error_code };
         conn.send(MESSAGE_TYPE_SETUP_CONNECTION_ERROR, reply)
             .await?;
-        return Ok(false);
+        return Ok(None);
     }
     let reply = SetupConnectionSuccess {
         used_version: TDP_VERSION,
@@ -686,7 +746,7 @@ pub async fn on_setup(conn: &mut NoiseConn, mut frame: Frame) -> io::Result<bool
     };
     conn.send(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, reply)
         .await?;
-    Ok(true)
+    Ok(Some(setup.flags))
 }
 
 /// An id this session was sent but no longer retains is stale; any other
@@ -701,7 +761,7 @@ pub async fn on_request_transaction_data(
         rbitcoin_log::info!("sv2: undecodable RequestTransactionData");
         return Ok(());
     };
-    let Some(Retained { t, .. }) = templates.get(template_id) else {
+    let Some(Retained { job, .. }) = templates.get(template_id) else {
         let code = if template_id <= templates.last_id {
             ERROR_CODE_REQUEST_TRANSACTION_DATA_STALE_TEMPLATE_ID
         } else {
@@ -716,7 +776,7 @@ pub async fn on_request_transaction_data(
             .send(MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR, reply)
             .await;
     };
-    let raw: Vec<Vec<u8>> = t
+    let raw: Vec<Vec<u8>> = job
         .txs
         .iter()
         .map(|tx| bitcoin::consensus::encode::serialize(tx.as_ref()))

@@ -2,7 +2,7 @@
 //! The second caller waits on the session task. The build closure is the
 //! production `TemplateFlight` path.
 
-use rbitcoin_sv2::template::{Template, TemplateFlight, TemplateKey};
+use rbitcoin_sv2::template::{Job, Template, TemplateFlight, TemplateKey};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,12 +24,14 @@ fn dummy() -> Template {
         coinbase_prefix: Vec::new(),
         value_remaining: 50,
         coinbase_outputs: Vec::new(),
-        merkle_path: Vec::new(),
-        prev_hash: [7u8; 32],
-        header_timestamp: 1,
-        n_bits: 1,
-        target: [1u8; 32],
-        txs: Vec::new(),
+        job: Job {
+            merkle_path: Vec::new(),
+            prev_hash: [7u8; 32],
+            header_timestamp: 1,
+            n_bits: 1,
+            target: [1u8; 32],
+            txs: Vec::new(),
+        },
     }
 }
 
@@ -106,7 +108,7 @@ fn one_build_serves_the_same_key_and_a_different_budget_builds_again() {
             .get_or_build(other_bits, move || {
                 n.fetch_add(1, Ordering::SeqCst);
                 let mut built = dummy();
-                built.n_bits = 2;
+                built.job.n_bits = 2;
                 Ok(Some(built))
             })
             .await
@@ -118,7 +120,7 @@ fn one_build_serves_the_same_key_and_a_different_budget_builds_again() {
             .get_or_build(other_time, move || {
                 n.fetch_add(1, Ordering::SeqCst);
                 let mut built = dummy();
-                built.header_timestamp = 2;
+                built.job.header_timestamp = 2;
                 Ok(Some(built))
             })
             .await
@@ -153,7 +155,7 @@ fn one_build_serves_the_same_key_and_a_different_budget_builds_again() {
             .get_or_build(odd, move || {
                 n.fetch_add(1, Ordering::SeqCst);
                 let mut built = dummy();
-                built.prev_hash = [1u8; 32];
+                built.job.prev_hash = [1u8; 32];
                 Ok(Some(built))
             })
             .await
