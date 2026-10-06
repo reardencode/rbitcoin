@@ -15,8 +15,9 @@ use rbitcoin_primitives::Height;
 use rbitcoin_query::{confirm_scripts_phase, expected_next_bits, median_time_past};
 use rbitcoin_store::merkle_root_from_txids;
 use rbitcoin_sv2::messages::{
-    ValidateCustomJob, ValidateCustomJobMissingTransactions, ValidateCustomJobSuccess,
-    MESSAGE_TYPE_VALIDATE_CUSTOM_JOB, MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_MISSING_TRANSACTIONS,
+    ValidateCustomJob, ValidateCustomJobError, ValidateCustomJobMissingTransactions,
+    ValidateCustomJobSuccess, MESSAGE_TYPE_VALIDATE_CUSTOM_JOB,
+    MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_ERROR, MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_MISSING_TRANSACTIONS,
     MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_SUCCESS, REQUIRES_JOB_VALIDATION,
 };
 use rbitcoin_sv2::testutil::TpClient;
@@ -28,7 +29,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use template_distribution_sv2::{
-    NewTemplate, RequestTransactionDataSuccess, SetNewPrevHash, MESSAGE_TYPE_NEW_TEMPLATE,
+    NewTemplate, RequestTransactionDataError, RequestTransactionDataSuccess, SetNewPrevHash,
+    MESSAGE_TYPE_NEW_TEMPLATE, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR,
     MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS, MESSAGE_TYPE_SET_NEW_PREV_HASH,
 };
 
@@ -1522,6 +1524,14 @@ impl Job {
     }
 }
 
+async fn expect_job_error(c: &mut TpClient, request_id: u32, code: &str) {
+    let mut f = recv_in_time(c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_ERROR, "{code}");
+    let e: ValidateCustomJobError = binary_sv2::from_bytes(&mut f.payload).expect("decode");
+    assert_eq!(e.request_id, request_id);
+    assert_eq!(e.error_code.as_utf8_or_hex(), code);
+}
+
 async fn expect_job_success(c: &mut TpClient) -> ValidateCustomJobSuccess {
     let mut f = recv_in_time(c).await;
     assert_eq!(
@@ -1619,6 +1629,75 @@ async fn validate_custom_job_asks_for_and_accepts_missing_transactions() {
         (4, last + 1, 5_000)
     );
     expect_retained(&mut c, ok.template_id, &[&a, &b]).await;
+
+    tp.shutdown().await;
+}
+
+/// §4.1 and §4.4: everything in a job comes from a JDC. The checks run in
+/// order before any mempool lookup or transaction decode: a prev hash off
+/// the tip, a repeated wtxid, a supplied tx nobody declared (or one that
+/// does not decode), an undecodable coinbase, then the proposal check's own
+/// reject string. While the tip is stale (IBD) every job is
+/// `job-validation-unavailable`. Nothing is retained on an error.
+#[tokio::test(flavor = "multi_thread")]
+async fn validate_custom_job_rejects_untrusted_input_in_order() {
+    let tc = shared_regtest(2);
+    let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
+    let a = spend(tc.coinbases[0], 3_000, cheap.clone());
+    let b = spend(tc.coinbases[1], 2_000, cheap);
+    for tx in [&a, &b] {
+        tc.mempool.accept_tx(tx).expect("mempool accept");
+    }
+    let (tp, mut c) = connect_tp(&tc, REQUIRES_JOB_VALIDATION).await;
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let coinbase = job_coinbase(height, subsidy + 5_000, &[&a, &b]);
+
+    // The padded tip is far in the past: the node is in IBD.
+    Job::on_tip(&tc, 1, &coinbase, &[&a, &b]).send(&mut c).await;
+    expect_job_error(&mut c, 1, "job-validation-unavailable").await;
+    mock_live_tip(&tc);
+    c.coinbase_output_constraints(0, 0).await.unwrap();
+    let last = expect_template(&mut c, &tc, &[&a, &b], true).await;
+
+    let mut stale = Job::on_tip(&tc, 2, &coinbase, &[&a, &b]);
+    stale.prev_hash = [0xab; 32];
+    stale.send(&mut c).await;
+    expect_job_error(&mut c, 2, "stale-prevhash").await;
+
+    Job::on_tip(&tc, 3, &coinbase, &[&a, &a]).send(&mut c).await;
+    expect_job_error(&mut c, 3, "duplicate-wtxid").await;
+
+    let mut undeclared = Job::on_tip(&tc, 4, &coinbase, &[&a]);
+    undeclared.supplied = vec![serialize(&b)];
+    undeclared.send(&mut c).await;
+    expect_job_error(&mut c, 4, "bad-missing-tx").await;
+
+    let blob = vec![0xee; 40];
+    let mut garbage = Job::on_tip(&tc, 5, &coinbase, &[]);
+    garbage.wtxids = vec![sha256d::Hash::hash(&blob).to_byte_array()];
+    garbage.supplied = vec![blob];
+    garbage.send(&mut c).await;
+    expect_job_error(&mut c, 5, "bad-missing-tx").await;
+
+    let mut bad_cb = Job::on_tip(&tc, 6, &coinbase, &[&a, &b]);
+    bad_cb.coinbase = vec![0xcc; 20];
+    bad_cb.send(&mut c).await;
+    expect_job_error(&mut c, 6, "bad-cb-decode").await;
+
+    let fat = job_coinbase(height, subsidy + 5_001, &[&a, &b]);
+    Job::on_tip(&tc, 7, &fat, &[&a, &b]).send(&mut c).await;
+    expect_job_error(&mut c, 7, "bad-cb-amount").await;
+
+    c.request_transaction_data(last + 1).await.unwrap();
+    let mut f = recv_in_time(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR);
+    let e: RequestTransactionDataError = binary_sv2::from_bytes(&mut f.payload).unwrap();
+    assert_eq!(
+        e.error_code.as_utf8_or_hex(),
+        "template-id-not-found",
+        "a rejected job must not take a template id"
+    );
 
     tp.shutdown().await;
 }
