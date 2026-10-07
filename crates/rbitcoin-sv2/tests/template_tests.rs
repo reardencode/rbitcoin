@@ -1433,12 +1433,14 @@ async fn connect_tp_every(
     (tp, c)
 }
 
-/// A JDS-shaped placeholder coinbase: BIP34 height then 8 extranonce bytes,
-/// one payout, and the witness commitment over `txs` with a zero reserved
-/// value in the witness.
+const EXTRANONCE_LEN: usize = 8;
+
+/// A JDS-shaped coinbase: BIP34 height then the extranonce, one payout, and
+/// the witness commitment over `txs` with a zero reserved value in the
+/// witness.
 fn job_coinbase(height: u32, payout: u64, txs: &[&Transaction]) -> Transaction {
     let mut script_sig = bip34_height_script(height);
-    script_sig.extend_from_slice(&[0u8; 8]);
+    script_sig.extend_from_slice(&[0u8; EXTRANONCE_LEN]);
     Transaction {
         version: Version::TWO,
         lock_time: LockTime::ZERO,
@@ -1464,33 +1466,37 @@ fn job_coinbase(height: u32, payout: u64, txs: &[&Transaction]) -> Transaction {
     }
 }
 
+/// Where a segwit coinbase's scriptSig starts in its serialization: version,
+/// BIP144 marker and flag, the one-input count, the null prevout, and the
+/// one-byte scriptSig length.
+const SCRIPT_SIG_AT: usize = 4 + 2 + 1 + 36 + 1;
+
 /// One `ProposeTemplate` as owned fields, so a test can bend any of them.
 struct Job {
     request_id: u32,
-    prev_hash: [u8; 32],
     version: u32,
-    coinbase: Vec<u8>,
+    coinbase_prefix: Vec<u8>,
+    coinbase_suffix: Vec<u8>,
     wtxids: Vec<[u8; 32]>,
     supplied: Vec<Vec<u8>>,
 }
 
 impl Job {
-    fn on_tip(
+    /// The `DeclareMiningJob` split a JDS relays: the prefix ends where the
+    /// extranonce starts (the scriptSig tail), the suffix starts at nSequence.
+    fn declare(
         tc: &TestChain,
         request_id: u32,
         coinbase: &Transaction,
         declared: &[&Transaction],
     ) -> Self {
+        let raw = serialize(coinbase);
+        let split = SCRIPT_SIG_AT + coinbase.input[0].script_sig.len() - EXTRANONCE_LEN;
         Job {
             request_id,
-            prev_hash: tc
-                .chain
-                .tip_header()
-                .expect("tip")
-                .block_hash()
-                .to_byte_array(),
             version: tc.chain.gbt_block_version(None) as u32,
-            coinbase: serialize(coinbase),
+            coinbase_prefix: raw[..split].to_vec(),
+            coinbase_suffix: raw[split + EXTRANONCE_LEN..].to_vec(),
             wtxids: declared
                 .iter()
                 .map(|tx| tx.compute_wtxid().to_byte_array())
@@ -1502,10 +1508,11 @@ impl Job {
     async fn send(&self, c: &mut TpClient) {
         let msg = ProposeTemplate {
             request_id: self.request_id,
-            prev_hash: U256::from(&self.prev_hash),
             version: self.version,
-            coinbase_tx: B064K::try_from(&self.coinbase[..]).unwrap(),
+            coinbase_tx_prefix: B064K::try_from(&self.coinbase_prefix[..]).unwrap(),
+            coinbase_tx_suffix: B064K::try_from(&self.coinbase_suffix[..]).unwrap(),
             wtxid_list: Seq064K::new(self.wtxids.iter().map(U256::from).collect()).unwrap(),
+            excess_data: B064K::try_from(&[][..]).unwrap(),
             transaction_list: Seq064K::new(
                 self.supplied
                     .iter()
@@ -1526,14 +1533,28 @@ async fn expect_job_error(c: &mut TpClient, request_id: u32, code: &str) {
     assert_eq!(e.error_code.as_utf8_or_hex(), code);
 }
 
-async fn expect_job_success(c: &mut TpClient) -> ProposeTemplateSuccess {
+/// `Success` names the tip the job was validated on, next to the id it is
+/// retained under and the declared fee sum.
+async fn expect_job_success(
+    c: &mut TpClient,
+    tc: &TestChain,
+    request_id: u32,
+    template_id: u64,
+    fees: u64,
+) {
     let mut f = recv_in_time(c).await;
     assert_eq!(
         f.msg_type, MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS,
         "{:?}",
         f.payload
     );
-    binary_sv2::from_bytes(&mut f.payload).expect("decode")
+    let ok: ProposeTemplateSuccess = binary_sv2::from_bytes(&mut f.payload).expect("decode");
+    let tip = tc.chain.tip_header().expect("tip").block_hash();
+    assert_eq!(
+        (ok.request_id, ok.template_id, ok.fees),
+        (request_id, template_id, fees)
+    );
+    assert_eq!(ok.prev_hash.as_ref(), tip.as_byte_array(), "validated tip");
 }
 
 /// The retained job answers `RequestTransactionData` with the declared txs
@@ -1553,10 +1574,10 @@ async fn expect_retained(c: &mut TpClient, template_id: u64, txs: &[&Transaction
     assert_eq!(got, want, "retained txs in declared order");
 }
 
-/// docs/sv2-job-validation.md §4.1–4.3: a job on the tip whose txs are all
-/// in the mempool and whose coinbase pays subsidy + fees is answered
-/// `Success` with the next template id and the declared fee sum, and is
-/// retained like a template.
+/// docs/sv2-job-validation.md §4.1–4.3: a job whose txs are all in the
+/// mempool and whose coinbase pays subsidy + fees is answered `Success` with
+/// the next template id, the declared fee sum, and the tip it was validated
+/// on, and is retained like a template.
 #[tokio::test(flavor = "multi_thread")]
 async fn propose_template_prices_and_retains_the_declared_job() {
     let tc = shared_regtest(2);
@@ -1574,13 +1595,11 @@ async fn propose_template_prices_and_retains_the_declared_job() {
     let height = tc.chain.query.tip_height().unwrap().0 + 1;
     let subsidy = block_subsidy(height, &tc.chain.params) as u64;
     let coinbase = job_coinbase(height, subsidy + 5_000, &[&a, &b]);
-    Job::on_tip(&tc, 9, &coinbase, &[&a, &b]).send(&mut c).await;
-    let ok = expect_job_success(&mut c).await;
-    assert_eq!(
-        (ok.request_id, ok.template_id, ok.fees),
-        (9, last + 1, 5_000)
-    );
-    expect_retained(&mut c, ok.template_id, &[&a, &b]).await;
+    Job::declare(&tc, 9, &coinbase, &[&a, &b])
+        .send(&mut c)
+        .await;
+    expect_job_success(&mut c, &tc, 9, last + 1, 5_000).await;
+    expect_retained(&mut c, last + 1, &[&a, &b]).await;
 
     tp.shutdown().await;
 }
@@ -1603,7 +1622,7 @@ async fn propose_template_asks_for_and_accepts_missing_transactions() {
     let height = tc.chain.query.tip_height().unwrap().0 + 1;
     let subsidy = block_subsidy(height, &tc.chain.params) as u64;
     let coinbase = job_coinbase(height, subsidy + 5_000, &[&a, &b]);
-    let mut job = Job::on_tip(&tc, 4, &coinbase, &[&a, &b]);
+    let mut job = Job::declare(&tc, 4, &coinbase, &[&a, &b]);
     job.send(&mut c).await;
     let mut f = recv_in_time(&mut c).await;
     assert_eq!(
@@ -1617,22 +1636,20 @@ async fn propose_template_asks_for_and_accepts_missing_transactions() {
 
     job.supplied = vec![serialize(&b)];
     job.send(&mut c).await;
-    let ok = expect_job_success(&mut c).await;
-    assert_eq!(
-        (ok.request_id, ok.template_id, ok.fees),
-        (4, last + 1, 5_000)
-    );
-    expect_retained(&mut c, ok.template_id, &[&a, &b]).await;
+    expect_job_success(&mut c, &tc, 4, last + 1, 5_000).await;
+    expect_retained(&mut c, last + 1, &[&a, &b]).await;
 
     tp.shutdown().await;
 }
 
 /// §4.1 and §4.4: everything in a job comes from a JDC. The checks run in
-/// order before any mempool lookup or transaction decode: a prev hash off
-/// the tip, a repeated wtxid, a supplied tx nobody declared (or one that
-/// does not decode), an undecodable coinbase, then the proposal check's own
-/// reject string. While the tip is stale (IBD) every job is
-/// `job-validation-unavailable`. Nothing is retained on an error.
+/// order before any mempool lookup or transaction decode: a repeated wtxid,
+/// a supplied tx nobody declared (or one that does not decode), a coinbase
+/// prefix that does not parse or a coinbase that does not decode, then the
+/// proposal check's own reject string: a declaration from before the tip
+/// moved fails its BIP34 height, an overpaying coinbase its amount. While
+/// the tip is stale (IBD) every job is `job-validation-unavailable`.
+/// Nothing is retained on an error.
 #[tokio::test(flavor = "multi_thread")]
 async fn propose_template_rejects_untrusted_input_in_order() {
     let tc = shared_regtest(2);
@@ -1648,40 +1665,54 @@ async fn propose_template_rejects_untrusted_input_in_order() {
     let coinbase = job_coinbase(height, subsidy + 5_000, &[&a, &b]);
 
     // The padded tip is far in the past: the node is in IBD.
-    Job::on_tip(&tc, 1, &coinbase, &[&a, &b]).send(&mut c).await;
+    Job::declare(&tc, 1, &coinbase, &[&a, &b])
+        .send(&mut c)
+        .await;
     expect_job_error(&mut c, 1, "job-validation-unavailable").await;
     mock_live_tip(&tc);
     c.coinbase_output_constraints(0, 0).await.unwrap();
     let last = expect_template(&mut c, &tc, &[&a, &b], true).await;
 
-    let mut stale = Job::on_tip(&tc, 2, &coinbase, &[&a, &b]);
-    stale.prev_hash = [0xab; 32];
-    stale.send(&mut c).await;
-    expect_job_error(&mut c, 2, "stale-prevhash").await;
+    Job::declare(&tc, 2, &coinbase, &[&a, &a])
+        .send(&mut c)
+        .await;
+    expect_job_error(&mut c, 2, "duplicate-wtxid").await;
 
-    Job::on_tip(&tc, 3, &coinbase, &[&a, &a]).send(&mut c).await;
-    expect_job_error(&mut c, 3, "duplicate-wtxid").await;
-
-    let mut undeclared = Job::on_tip(&tc, 4, &coinbase, &[&a]);
+    let mut undeclared = Job::declare(&tc, 3, &coinbase, &[&a]);
     undeclared.supplied = vec![serialize(&b)];
     undeclared.send(&mut c).await;
-    expect_job_error(&mut c, 4, "bad-missing-tx").await;
+    expect_job_error(&mut c, 3, "bad-missing-tx").await;
 
     let blob = vec![0xee; 40];
-    let mut garbage = Job::on_tip(&tc, 5, &coinbase, &[]);
+    let mut garbage = Job::declare(&tc, 4, &coinbase, &[]);
     garbage.wtxids = vec![sha256d::Hash::hash(&blob).to_byte_array()];
     garbage.supplied = vec![blob];
     garbage.send(&mut c).await;
-    expect_job_error(&mut c, 5, "bad-missing-tx").await;
+    expect_job_error(&mut c, 4, "bad-missing-tx").await;
 
-    let mut bad_cb = Job::on_tip(&tc, 6, &coinbase, &[&a, &b]);
-    bad_cb.coinbase = vec![0xcc; 20];
-    bad_cb.send(&mut c).await;
+    // More scriptSig bytes than the length the prefix declares.
+    let mut short_sig = Job::declare(&tc, 5, &coinbase, &[&a, &b]);
+    short_sig.coinbase_prefix.extend_from_slice(&[0; 16]);
+    short_sig.send(&mut c).await;
+    expect_job_error(&mut c, 5, "bad-cb-decode").await;
+
+    let mut two_inputs = Job::declare(&tc, 6, &coinbase, &[&a, &b]);
+    two_inputs.coinbase_prefix[4 + 2] = 2;
+    two_inputs.send(&mut c).await;
     expect_job_error(&mut c, 6, "bad-cb-decode").await;
 
+    let mut bad_cb = Job::declare(&tc, 7, &coinbase, &[&a, &b]);
+    bad_cb.coinbase_suffix.truncate(3);
+    bad_cb.send(&mut c).await;
+    expect_job_error(&mut c, 7, "bad-cb-decode").await;
+
+    let old = job_coinbase(height - 1, subsidy + 5_000, &[&a, &b]);
+    Job::declare(&tc, 8, &old, &[&a, &b]).send(&mut c).await;
+    expect_job_error(&mut c, 8, "bad-cb-height").await;
+
     let fat = job_coinbase(height, subsidy + 5_001, &[&a, &b]);
-    Job::on_tip(&tc, 7, &fat, &[&a, &b]).send(&mut c).await;
-    expect_job_error(&mut c, 7, "bad-cb-amount").await;
+    Job::declare(&tc, 9, &fat, &[&a, &b]).send(&mut c).await;
+    expect_job_error(&mut c, 9, "bad-cb-amount").await;
 
     c.request_transaction_data(last + 1).await.unwrap();
     let mut f = recv_in_time(&mut c).await;
@@ -1719,12 +1750,13 @@ async fn submit_solution_for_a_validated_job_becomes_the_tip() {
     let height = tc.chain.query.tip_height().unwrap().0 + 1;
     let subsidy = block_subsidy(height, &tc.chain.params) as u64;
     let mut coinbase = job_coinbase(height, subsidy + 5_000, &[&a, &b]);
-    Job::on_tip(&tc, 1, &coinbase, &[&a, &b]).send(&mut c).await;
-    let ok = expect_job_success(&mut c).await;
-    assert_eq!(ok.template_id, last + 1);
+    Job::declare(&tc, 1, &coinbase, &[&a, &b])
+        .send(&mut c)
+        .await;
+    expect_job_success(&mut c, &tc, 1, last + 1, 5_000).await;
 
     let mut script_sig = bip34_height_script(height);
-    script_sig.extend_from_slice(&[0x42; 8]);
+    script_sig.extend_from_slice(&[0x42; EXTRANONCE_LEN]);
     coinbase.input[0].script_sig = ScriptBuf::from_bytes(script_sig);
     let mut leaves = vec![coinbase.compute_txid().to_byte_array()];
     leaves.extend([&a, &b].iter().map(|tx| tx.compute_txid().to_byte_array()));
@@ -1736,7 +1768,7 @@ async fn submit_solution_for_a_validated_job_becomes_the_tip() {
         header.nonce += 1;
     }
     c.submit_solution(
-        ok.template_id,
+        last + 1,
         version,
         header.time,
         header.nonce,

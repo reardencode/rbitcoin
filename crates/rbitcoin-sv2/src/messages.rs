@@ -19,16 +19,20 @@ pub const MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS: u8 = 0x79;
 pub const MESSAGE_TYPE_PROPOSE_TEMPLATE_ERROR: u8 = 0x7a;
 
 /// Client → TP: is this custom job a consensus-valid block on the TP tip?
+/// The `DeclareMiningJob` subset a node needs, relayed unchanged: the
+/// coinbase split around the extranonce and the declared wtxids.
 /// `transaction_list` carries the txs a prior
 /// [`ProposeTemplateMissingTransactions`] asked for, in that order.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[doc(hidden)]
 pub struct ProposeTemplate<'decoder> {
     pub request_id: u32,
-    pub prev_hash: U256<'decoder>,
     pub version: u32,
-    pub coinbase_tx: B064K<'decoder>,
+    pub coinbase_tx_prefix: B064K<'decoder>,
+    pub coinbase_tx_suffix: B064K<'decoder>,
     pub wtxid_list: Seq064K<'decoder, U256<'decoder>>,
+    /// Opaque to the TP (TDP 7.6 semantics belong to the Pool).
+    pub excess_data: B064K<'decoder>,
     pub transaction_list: Seq064K<'decoder, B016M<'decoder>>,
 }
 
@@ -40,13 +44,14 @@ pub struct ProposeTemplateMissingTransactions<'decoder> {
     pub unknown_tx_position_list: Seq064K<'decoder, u16>,
 }
 
-/// TP → client: the job is valid and retained under `template_id`, which
-/// shares the `NewTemplate.template_id` namespace.
+/// TP → client: the job is valid on the tip `prev_hash` and retained under
+/// `template_id`, which shares the `NewTemplate.template_id` namespace.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[doc(hidden)]
-pub struct ProposeTemplateSuccess {
+pub struct ProposeTemplateSuccess<'decoder> {
     pub request_id: u32,
     pub template_id: u64,
+    pub prev_hash: U256<'decoder>,
     pub fees: u64,
 }
 
@@ -84,15 +89,17 @@ mod tests {
     #[test]
     fn job_validation_messages_round_trip() {
         let (h1, h2, h3) = ([1u8; 32], [2u8; 32], [3u8; 32]);
-        let (coinbase, tx, details) = ([0xc0u8; 100], [0xeeu8; 300], [1u8, 2, 3]);
+        let (prefix, suffix, tx, details) =
+            ([0xc0u8; 50], [0xc1u8; 100], [0xeeu8; 300], [1u8, 2, 3]);
         let mut bytes = Vec::new();
         round_trip(
             ProposeTemplate {
                 request_id: 7,
-                prev_hash: U256::from(&h1),
                 version: 0x2000_0000,
-                coinbase_tx: B064K::try_from(&coinbase[..]).unwrap(),
+                coinbase_tx_prefix: B064K::try_from(&prefix[..]).unwrap(),
+                coinbase_tx_suffix: B064K::try_from(&suffix[..]).unwrap(),
                 wtxid_list: Seq064K::new(vec![U256::from(&h2), U256::from(&h3)]).unwrap(),
+                excess_data: B064K::try_from(&details[..]).unwrap(),
                 transaction_list: Seq064K::new(vec![B016M::try_from(&tx[..]).unwrap()]).unwrap(),
             },
             &mut bytes,
@@ -110,6 +117,7 @@ mod tests {
             ProposeTemplateSuccess {
                 request_id: 7,
                 template_id: u64::MAX,
+                prev_hash: U256::from(&h1),
                 fees: 12_345,
             },
             &mut bytes,
@@ -118,7 +126,7 @@ mod tests {
         round_trip(
             ProposeTemplateError {
                 request_id: 7,
-                error_code: Str0255::try_from("stale-prevhash").unwrap(),
+                error_code: Str0255::try_from("bad-cb-decode").unwrap(),
                 error_details: B064K::try_from(&details[..]).unwrap(),
             },
             &mut bytes,

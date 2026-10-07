@@ -4,6 +4,7 @@
 
 use crate::messages::ProposeTemplate;
 use crate::template::{self, Job};
+use bitcoin::consensus::encode::{deserialize_partial, VarInt};
 use bitcoin::hashes::{sha256d, Hash};
 use bitcoin::{block, Block, BlockHash, Transaction, TxMerkleNode, Wtxid};
 use rbitcoin_net::ChainHub;
@@ -44,9 +45,6 @@ fn check(chain: &ChainHub, m: &ProposeTemplate) -> io::Result<Verdict> {
         return rejected("job-validation-unavailable");
     }
     let next = template::next_header(chain)?;
-    if m.prev_hash.as_ref() != next.prev_hash {
-        return rejected("stale-prevhash");
-    }
     let mut declared = HashSet::with_capacity(m.wtxid_list.len());
     for w in m.wtxid_list.iter() {
         if !declared.insert(w.as_ref()) {
@@ -68,8 +66,17 @@ fn check(chain: &ChainHub, m: &ProposeTemplate) -> io::Result<Verdict> {
     if supplied.keys().any(|w| !declared.contains(&w[..])) {
         return rejected("bad-missing-tx");
     }
-    let Ok(coinbase) = bitcoin::consensus::deserialize::<Transaction>(m.coinbase_tx.as_ref())
-    else {
+    let Some(extranonce) = extranonce_len(m.coinbase_tx_prefix.as_ref()) else {
+        return rejected("bad-cb-decode");
+    };
+    let zeros = vec![0u8; extranonce];
+    let raw = [
+        m.coinbase_tx_prefix.as_ref(),
+        &zeros[..],
+        m.coinbase_tx_suffix.as_ref(),
+    ]
+    .concat();
+    let Ok(coinbase) = bitcoin::consensus::deserialize::<Transaction>(&raw) else {
         return rejected("bad-cb-decode");
     };
     let mut txs = Vec::with_capacity(m.wtxid_list.len());
@@ -126,4 +133,81 @@ fn check(chain: &ChainHub, m: &ProposeTemplate) -> io::Result<Verdict> {
         fees,
         job: next.job(rbitcoin_store::merkle_branch(&leaves, 0), txs),
     })
+}
+
+/// §4.1: `coinbase_tx_prefix` ends inside the scriptSig and
+/// `coinbase_tx_suffix` starts at nSequence, so the extranonce is the
+/// scriptSig length the prefix declares minus the scriptSig bytes it
+/// carries. `None`: not one input, a length outside the coinbase bounds
+/// (2..=100), or fewer bytes declared than present.
+fn extranonce_len(prefix: &[u8]) -> Option<usize> {
+    let mut at = 4;
+    // BIP144: a zero where the input count would be, then flag 1.
+    if prefix.get(4..6) == Some(&[0u8, 1][..]) {
+        at += 2;
+    }
+    let (inputs, n) = compact_size(prefix.get(at..)?)?;
+    if inputs != 1 {
+        return None;
+    }
+    at += n + 36;
+    let (len, n) = compact_size(prefix.get(at..)?)?;
+    at += n;
+    if !(2..=100).contains(&len) {
+        return None;
+    }
+    (len as usize).checked_sub(prefix.len() - at)
+}
+
+fn compact_size(bytes: &[u8]) -> Option<(u64, usize)> {
+    let (v, n) = deserialize_partial::<VarInt>(bytes).ok()?;
+    Some((v.0, n))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extranonce_len;
+
+    fn prefix(segwit: bool, inputs: u8, len: u8, present: usize) -> Vec<u8> {
+        let mut p = vec![2, 0, 0, 0];
+        if segwit {
+            p.extend([0, 1]);
+        }
+        p.push(inputs);
+        p.extend([0; 32]);
+        p.extend([0xff; 4]);
+        p.push(len);
+        p.resize(p.len() + present, 0x51);
+        p
+    }
+
+    #[test]
+    fn extranonce_is_the_declared_script_sig_length_past_the_prefix() {
+        assert_eq!(extranonce_len(&prefix(false, 1, 11, 3)), Some(8));
+        assert_eq!(extranonce_len(&prefix(true, 1, 11, 3)), Some(8));
+        assert_eq!(extranonce_len(&prefix(true, 1, 3, 3)), Some(0));
+        assert_eq!(extranonce_len(&prefix(true, 1, 100, 0)), Some(100));
+        assert_eq!(extranonce_len(&prefix(true, 2, 11, 3)), None, "two inputs");
+        assert_eq!(
+            extranonce_len(&prefix(true, 1, 2, 3)),
+            None,
+            "shorter than present"
+        );
+        assert_eq!(
+            extranonce_len(&prefix(true, 1, 101, 0)),
+            None,
+            "over the coinbase max"
+        );
+        assert_eq!(
+            extranonce_len(&prefix(true, 1, 1, 0)),
+            None,
+            "under the coinbase min"
+        );
+        assert_eq!(
+            extranonce_len(&prefix(true, 1, 11, 3)[..40]),
+            None,
+            "truncated"
+        );
+        assert_eq!(extranonce_len(&[]), None);
+    }
 }

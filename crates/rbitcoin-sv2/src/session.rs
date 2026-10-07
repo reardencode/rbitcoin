@@ -10,7 +10,7 @@ use crate::messages::{
 use crate::template;
 use crate::transport::{Frame, NoiseConn, NoiseWriter};
 use crate::Sv2TpStats;
-use binary_sv2::{Seq064K, Str0255, B016M, B064K};
+use binary_sv2::{Seq064K, Str0255, B016M, B064K, U256};
 use bitcoin::hashes::Hash;
 use bitcoin::{block, Block, BlockHash, CompactTarget, Transaction, TxMerkleNode, Witness};
 use common_messages_sv2::{
@@ -664,10 +664,12 @@ impl Session {
                     .templates
                     .prev_sent
                     .unwrap_or((job.header_timestamp, Instant::now()));
+                let prev_hash = job.prev_hash;
                 self.templates.retain(template_id, job, prev_sent);
                 let reply = ProposeTemplateSuccess {
                     request_id,
                     template_id,
+                    prev_hash: U256::from(&prev_hash),
                     fees,
                 };
                 self.conn

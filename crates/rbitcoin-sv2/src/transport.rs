@@ -26,18 +26,18 @@ pub struct Frame {
 /// make the session buffer ~16 MB per frame.
 pub const MAX_CLIENT_PAYLOAD: usize = 20 + 2 + u16::MAX as usize;
 
-/// Largest `ProposeTemplate` payload: 40 fixed bytes, a `B064K` coinbase,
-/// a full `SEQ0_64K[U256]` wtxid list, and a `SEQ0_64K[B016M]` transaction
-/// list whose txs together fit a block (weight is never below serialized
-/// size) with a 3-byte length each.
+/// Largest `ProposeTemplate` payload: 8 fixed bytes, three `B064K` fields
+/// (coinbase prefix, suffix, excess data), a full `SEQ0_64K[U256]` wtxid
+/// list, and a `SEQ0_64K[B016M]` transaction list whose txs together fit a
+/// block (weight is never below serialized size) with a 3-byte length each.
 ///
 /// RAM trade (CONTRIBUTING 9): a session buffers one in-flight client frame
-/// of at most this size (~6.4 MB), so at `MAX_SESSIONS` client frames hold
-/// ≤ ~51 MB on top of template retention (lib.rs).
+/// of at most this size (~6.5 MB), so at `MAX_SESSIONS` client frames hold
+/// ≤ ~52 MB on top of template retention (lib.rs).
 #[doc(hidden)]
 pub const MAX_PROPOSE_TEMPLATE_PAYLOAD: usize = {
     const SEQ: usize = u16::MAX as usize;
-    4 + 32 + 4 + (2 + SEQ) + (2 + SEQ * 32) + (2 + SEQ * 3 + MAX_BLOCK_WEIGHT as usize)
+    4 + 4 + 3 * (2 + SEQ) + (2 + SEQ * 32) + (2 + SEQ * 3 + MAX_BLOCK_WEIGHT as usize)
 };
 
 /// Payload cap by client message type.
