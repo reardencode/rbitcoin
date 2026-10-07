@@ -577,8 +577,12 @@ when fees rise enough to matter, throttled. Requires Plan B.
 holds, fetches the transactions the node lacks, and submits the found block
 by `template_id`. Wire contract: [`sv2-job-validation.md`](./sv2-job-validation.md)
 (proposed TDP messages 0x77–0x7a and `SetupConnection` flag bit 0, for
-sv2-spec discussion #239, which supersedes #217). Requires Plan B. Ships no
-flag: a session opts in with `REQUIRES_JOB_VALIDATION`.
+sv2-spec discussion #239, which supersedes #217). Requires Plan B and Plan C: the
+branch is stacked on `sv2/plan-c-fee-push` (reardencode PRs #949 then #951)
+for the shared `Arc<Transaction>` bodies and the 64-slot same-tip ring that
+retains validated jobs. The Core-IPC sibling implementation is
+stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
+`REQUIRES_JOB_VALIDATION`.
 
 ### D1 — Block proposal check on `ChainHub`
 
