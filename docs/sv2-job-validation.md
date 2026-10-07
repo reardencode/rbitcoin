@@ -1,7 +1,9 @@
 # Stratum V2: Custom Job Validation over the Template Distribution Protocol
 
-Draft for discussion on [sv2-spec#217](https://github.com/stratum-mining/sv2-spec/issues/217).
-Written as new core Template Distribution Protocol (TDP) messages so it can be
+Draft for [sv2-spec discussion #239](https://github.com/stratum-mining/sv2-spec/discussions/239)
+(`ProposeTemplate`, plebhash, 2026-10-06), which supersedes
+[sv2-spec#217](https://github.com/stratum-mining/sv2-spec/issues/217), where
+this started. Written as new core Template Distribution Protocol (TDP) messages so it can be
 folded into `07-Template-Distribution-Protocol.md` and `08-Message-Types.md`.
 Section 6 lists the open questions, including the extension alternative.
 
@@ -18,9 +20,10 @@ similar)", Section 6.1).
 This document adds four TDP messages and one `SetupConnection` flag so that a
 JDS can validate a declared Custom Job, and later submit its solution, through
 any Template Provider (TP) over the authenticated TDP connection it already
-uses. The exchange mirrors the flow the Job Declaration Protocol already
-imposes on JDS: look transactions up by `wtxid`, ask JDC for the ones nobody
-has, validate, and submit the solution by reference.
+uses. The request carries the subset of `DeclareMiningJob` a node needs,
+relayed unchanged. The exchange mirrors the flow the Job Declaration Protocol
+already imposes on JDS: look transactions up by `wtxid`, ask JDC for the ones
+nobody has, validate, and submit the solution by reference.
 
 ## 1. Motivation
 
@@ -50,12 +53,12 @@ has, validate, and submit the solution by reference.
 ```
 JDC                      JDS                             TP
  |-- DeclareMiningJob --->|                               |
- |                        |-- ProposeTemplate --------->|  wtxid_list, coinbase, no txs
+ |                        |-- ProposeTemplate --------->|  version, coinbase prefix/suffix, wtxid_list, no txs
  |                        |<- ProposeTemplate.MissingTransactions   (only if TP lacks some)
  |<- ProvideMissingTransactions                           |
  |-- ProvideMissingTransactions.Success ->|               |
  |                        |-- ProposeTemplate --------->|  same job + transaction_list
- |                        |<- ProposeTemplate.Success --|  template_id, fees
+ |                        |<- ProposeTemplate.Success --|  template_id, prev_hash, fees
  |<- DeclareMiningJob.Success             |               |
  ...
  |-- PushSolution ------->|                               |
@@ -65,6 +68,10 @@ JDC                      JDS                             TP
 - `ProposeTemplate` is stateless on the server side across the
   missing-transactions round trip: the second request repeats the job and adds
   the transactions. The TP MUST NOT require any state from the first request.
+- `ProposeTemplate` carries no `prev_hash`: `DeclareMiningJob` has none, so a
+  JDS cannot supply one without guessing. The TP validates against its own
+  current tip and names that tip in `ProposeTemplate.Success.prev_hash`, which
+  the JDS keeps to check `PushSolution.prev_hash` against.
 - `ProposeTemplate.Success` assigns a `template_id` from the same namespace as
   `NewTemplate.template_id`. The solution is then sent with the existing
   `SubmitSolution` message (Section 7.8). No new submission message is needed.
@@ -101,35 +108,44 @@ Asks the Template Provider whether a Custom Job, declared to the client via
 `DeclareMiningJob`, would produce a consensus-valid block on top of the
 server's current chain tip.
 
-| Field Name       | Data Type        | Description                                                                                                                                                                                                                                                                              |
-| ---------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| request_id       | U32              | Unique identifier for pairing the response                                                                                                                                                                                                                                               |
-| prev_hash        | U256             | Hash of the block the Custom Job builds on, as it would appear in the block header                                                                                                                                                                                                      |
-| version          | U32              | Block header version field as declared in `DeclareMiningJob.version`. BIP323 general-purpose bits are ignored by the server                                                                                                                                                              |
-| coinbase_tx      | B0_64K           | Full serialized coinbase transaction, with the extranonce region filled with placeholder bytes of the correct length. If the coinbase is a SegWit transaction, BIP141 fields (marker, flag, witness count, witness length, witness reserved value) MUST NOT be stripped                 |
-| wtxid_list       | SEQ0_64K[U256]   | `wtxid` of every transaction in the Custom Job, in block order, excluding the coinbase. Copied from `DeclareMiningJob.wtxid_list`                                                                                                                                                         |
-| transaction_list | SEQ0_64K[B0_16M] | Full transactions the server reported in `ProposeTemplate.MissingTransactions`, in the order they were requested. Empty on the first request. Each transaction MUST be relayed exactly as received from JDC in `ProvideMissingTransactions.Success`, without parsing or re-encoding    |
+| Field Name         | Data Type        | Description                                                                                                                                                                                                                                                                              |
+| ------------------ | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| request_id         | U32              | Unique identifier for pairing the response                                                                                                                                                                                                                                               |
+| version            | U32              | Block header version field as declared in `DeclareMiningJob.version`. BIP323 general-purpose bits are ignored by the server                                                                                                                                                              |
+| coinbase_tx_prefix | B0_64K           | `DeclareMiningJob.coinbase_tx_prefix` unchanged: the serialized coinbase up to and including the scriptSig bytes before the extranonce                                                                                                                                                   |
+| coinbase_tx_suffix | B0_64K           | `DeclareMiningJob.coinbase_tx_suffix` unchanged: the serialized coinbase from the input's `nSequence` on. If the coinbase is a SegWit transaction, BIP141 fields (marker and flag in the prefix; witness count, witness length, witness reserved value in the suffix) MUST NOT be stripped |
+| wtxid_list         | SEQ0_64K[U256]   | `wtxid` of every transaction in the Custom Job, in block order, excluding the coinbase. Copied from `DeclareMiningJob.wtxid_list`                                                                                                                                                         |
+| excess_data        | B0_64K           | `DeclareMiningJob.excess_data` unchanged. Opaque to the server; its meaning is between JDC and Pool (Section 7.6)                                                                                                                                                                         |
+| transaction_list   | SEQ0_64K[B0_16M] | Full transactions the server reported in `ProposeTemplate.MissingTransactions`, in the order they were requested. Empty on the first request. Each transaction MUST be relayed exactly as received from JDC in `ProvideMissingTransactions.Success`, without parsing or re-encoding    |
 
-The client derives the extranonce length as the scriptSig length encoded in
-`DeclareMiningJob.coinbase_tx_prefix` minus the scriptSig bytes present in the
-prefix. This assumes the extranonce is the final part of the scriptSig, so
-`coinbase_tx_suffix` begins at `nSequence`. That is how `NewExtendedMiningJob`
-splits the coinbase in practice and what the reference JDS already assumes,
-but the Job Declaration Protocol does not state it; see Section 6. The
-placeholder value is irrelevant: the server does not
-check the merkle root or proof of work, and every other coinbase check (size,
-weight, BIP34 height push, output values, witness commitment) is independent
-of the extranonce bytes.
+The server reconstructs a placeholder coinbase as `coinbase_tx_prefix` ||
+`E` zero bytes || `coinbase_tx_suffix`, where `E` is the scriptSig length
+the prefix encodes minus the scriptSig bytes the prefix carries: parse the
+version (4 bytes), the BIP144 marker `0x00` and flag `0x01` when present, the
+input count (MUST be 1), the 36-byte prevout, and the scriptSig length `L` as
+a CompactSize, leaving `P` bytes; `E = L - P`. The server MUST require
+`2 <= L <= 100` and `P <= L`, and MUST reply `bad-cb-decode` when the prefix
+does not parse this way or the reconstructed bytes do not decode as a
+transaction. This assumes the extranonce is the final part of the scriptSig,
+so `coinbase_tx_suffix` begins at `nSequence`. That is how
+`NewExtendedMiningJob` splits the coinbase in practice and what the reference
+JDS already assumes, but the Job Declaration Protocol does not state it; see
+Section 6. The placeholder value is irrelevant: the server does not check the
+merkle root or proof of work, and every other coinbase check (size, weight,
+BIP34 height push, output values, witness commitment) is independent of the
+extranonce bytes.
 
 The server resolves each `wtxid` against its mempool and against
 `transaction_list`. If any transaction is still unknown, it MUST reply
 `ProposeTemplate.MissingTransactions`. Otherwise it MUST validate the job as
-a block on top of `prev_hash` with the following rules, and reply either
-`ProposeTemplate.Success` or `ProposeTemplate.Error`:
+a block on top of its current chain tip with the following rules, and reply
+either `ProposeTemplate.Success` or `ProposeTemplate.Error`:
 
-- `prev_hash` MUST equal the server's current chain tip. Otherwise the server
-  MUST reply with error code `stale-prevhash`. The server MUST NOT accept a
-  job on a tip it has already left.
+- The server validates against its own current tip and reports that tip in
+  `ProposeTemplate.Success.prev_hash`. There is no stale-tip error code: a
+  job declared for a tip the server has since left fails the checks below on
+  its own, normally the BIP34 height push (`bad-cb-height`) or an input the
+  new tip spent; a job that still passes on the new tip is valid there.
 - `wtxid_list` MUST contain no duplicates, and every entry of
   `transaction_list` MUST hash to a `wtxid` that the server reported missing.
   Otherwise reply `duplicate-wtxid` or `bad-missing-tx`. These checks MUST run
@@ -138,10 +154,10 @@ a block on top of `prev_hash` with the following rules, and reply either
   block except the proof-of-work check and the merkle-root check. This
   includes: transaction validity and input availability against the UTXO set
   and the mempool, transaction ordering, block weight and sigop limits with
-  `coinbase_tx` counted as sent, coinbase scriptSig length and BIP34 height,
-  coinbase output value not exceeding subsidy plus fees, and the BIP141
-  witness commitment computed over `wtxid_list` with the witness reserved
-  value taken from `coinbase_tx`. This is the check performed by
+  the reconstructed coinbase counted, coinbase scriptSig length and BIP34
+  height, coinbase output value not exceeding subsidy plus fees, and the
+  BIP141 witness commitment computed over `wtxid_list` with the witness
+  reserved value taken from `coinbase_tx_suffix`. This is the check performed by
   `getblocktemplate` in `proposal` mode and by Bitcoin Core's IPC
   `checkBlock` with `checkMerkleRoot=false` and `checkPow=false`.
 - The server MUST NOT reject a consensus-valid job on local policy grounds
@@ -182,10 +198,12 @@ the job and will accept a `SubmitSolution` for it.
 | ----------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | request_id  | U32       | Identifier of the original `ProposeTemplate` request                                                                                                                                  |
 | template_id | U64       | Server's identification of the validated job. Drawn from the same strictly increasing namespace as `NewTemplate.template_id`, so it can be used in `SubmitSolution` and `RequestTransactionData` |
+| prev_hash   | U256      | Hash of the server's chain tip the job was validated on, as it would appear in the block header. The client keeps it to compare against `PushSolution.prev_hash`                      |
 | fees        | U64       | Sum of the fees of the transactions in `wtxid_list`, in satoshis                                                                                                                       |
 
 The server MUST retain the validated job (its `wtxid_list`, the transactions
-it received in `transaction_list`, and `coinbase_tx` for size accounting)
+it received in `transaction_list`, and the reconstructed coinbase for size
+accounting)
 until a newer `ProposeTemplate.Success` is sent on the same connection or
 the connection closes, whichever comes first. This matches the guarantee JDS
 gives JDC in Section 6.4.9: `PushSolution` is only guaranteed to be valid for
@@ -196,8 +214,10 @@ its own templates.
 ### 4.4 `ProposeTemplate.Error` (Server -> Client)
 
 The job was not validated. The client decides what to tell JDC; it SHOULD map
-consensus rejections to `DeclareMiningJob.Error` and SHOULD NOT treat
-`stale-prevhash` on a tip the client has not yet seen as a JDC fault.
+consensus rejections to `DeclareMiningJob.Error` and SHOULD NOT treat the
+rejection of a job declared on a tip the server has since left (a
+`bad-cb-height` for a job the client knows was built on the previous
+`ProposeTemplate.Success.prev_hash`) as a JDC fault.
 
 | Field Name    | Data Type | Description                                            |
 | ------------- | --------- | ------------------------------------------------------ |
@@ -211,16 +231,18 @@ rejection strings (`bad-txns-inputs-missingorspent`, `bad-cb-length`,
 
 | error_code                | Meaning                                                              |
 | ------------------------- | -------------------------------------------------------------------- |
-| stale-prevhash            | `prev_hash` is not the server's current tip                           |
 | duplicate-wtxid           | `wtxid_list` contains the same `wtxid` more than once                |
 | bad-missing-tx            | An entry of `transaction_list` does not hash to a requested `wtxid`  |
+| bad-cb-decode             | `coinbase_tx_prefix` does not parse as one input with a scriptSig length covering the bytes present, or the reconstructed coinbase does not decode |
 | job-validation-unavailable | The server cannot validate now (for example, initial block download) |
 
 ### 4.5 `SubmitSolution` for validated jobs
 
-When the client receives `PushSolution` from JDC it MUST reconstruct the full
-coinbase (`coinbase_tx_prefix` || `extranonce` || `coinbase_tx_suffix`) and
-send `SubmitSolution` (Section 7.8) with `template_id` set to the value from
+When the client receives `PushSolution` from JDC it SHOULD check
+`PushSolution.prev_hash` against the `ProposeTemplate.Success.prev_hash`
+stored with the declaration, then MUST reconstruct the full coinbase
+(`coinbase_tx_prefix` || `extranonce` || `coinbase_tx_suffix`) and send
+`SubmitSolution` (Section 7.8) with `template_id` set to the value from
 `ProposeTemplate.Success`, and `version`, `ntime`, `nonce` and `coinbase_tx`
 from the solution.
 
@@ -255,12 +277,18 @@ All four are core messages and carry `extension_type = 0x0000`.
   `extension_type = 0x0003`. The `SetupConnection` flag in Section 3 gives
   negotiation without requiring extension `0x0001` in TPs, which is why the
   draft uses it. The field tables are identical either way.
-- **Extranonce position.** Section 4.1's placeholder construction needs the
-  extranonce to be the tail of the scriptSig. Either the Job Declaration
-  Protocol should state that `DeclareMiningJob.coinbase_tx_suffix` begins at
-  `nSequence`, or `DeclareMiningJob` should carry the extranonce size. The
-  reference JDS has the same dependency today when it rebuilds the coinbase
-  for Core's `checkBlock` (`sv2-apps#645`).
+- **Extranonce position.** The server-side placeholder construction in
+  Section 4.1 needs the extranonce to be the tail of the scriptSig. Either
+  the Job Declaration Protocol should state that
+  `DeclareMiningJob.coinbase_tx_suffix` begins at `nSequence`, or
+  `DeclareMiningJob` should carry the extranonce size. The reference JDS has
+  the same dependency today when it rebuilds the coinbase for Core's
+  `checkBlock` (`sv2-apps#645`).
+- **No `prev_hash` in the request.** `DeclareMiningJob` carries none, so a
+  JDS would have to guess one; the request would also go stale in flight. The
+  server validates on its own tip and names it in `Success` (discussion #239).
+  A declaration from before a tip change is caught by the BIP34 height push,
+  not by a dedicated code.
 - **Coinbase-only mode.** Out of scope. In Coinbase-only mode neither Pool nor
   JDS learns the transaction set, so a node has nothing to validate beyond the
   coinbase, which `SetCustomMiningJob` already carries to the Pool. A
@@ -296,12 +324,12 @@ All four are core messages and carry `extension_type = 0x0000`.
 
 | JDP event                            | TDP action                                                                    |
 | ------------------------------------ | ----------------------------------------------------------------------------- |
-| `DeclareMiningJob`                   | `ProposeTemplate` with `wtxid_list` copied, `coinbase_tx` from prefix + placeholder + suffix, empty `transaction_list` |
+| `DeclareMiningJob`                   | `ProposeTemplate` with `version`, `coinbase_tx_prefix`, `coinbase_tx_suffix`, `wtxid_list`, `excess_data` copied unchanged, empty `transaction_list` |
 | `ProposeTemplate.MissingTransactions` | `ProvideMissingTransactions` with the position list copied                  |
 | `ProvideMissingTransactions.Success` | `ProposeTemplate` again with `transaction_list` copied                       |
-| `ProposeTemplate.Success`          | `DeclareMiningJob.Success`; store `template_id` with the declaration           |
+| `ProposeTemplate.Success`          | `DeclareMiningJob.Success`; store `template_id` and `prev_hash` with the declaration |
 | `ProposeTemplate.Error`            | `DeclareMiningJob.Error` with the error code                                  |
-| `PushSolution`                       | `SubmitSolution(template_id, version, ntime, nonce, coinbase_tx)`              |
+| `PushSolution`                       | Check `prev_hash` against the stored one, then `SubmitSolution(template_id, version, ntime, nonce, coinbase_tx)` |
 
 No mempool mirror is needed on the JDS side. In `sv2-apps` this is a second
 `JobValidationEngine` implementation next to `BitcoinCoreIPCEngine`, and the
@@ -325,12 +353,18 @@ dependency.
 
 ## 8. Prior art
 
+- [sv2-spec discussion #239](https://github.com/stratum-mining/sv2-spec/discussions/239):
+  "RFC: `ProposeTemplate`" (plebhash, 2026-10-06), supersedes #217. Names the
+  message and carries the subset of `DeclareMiningJob` a node needs
+  (`request_id`, `version`, `coinbase_tx_prefix`, `coinbase_tx_suffix`,
+  `wtxid_list`, `excess_data`), with no `prev_hash`. This draft follows it
+  and adds the missing-transactions reply, `transaction_list` on the repeated
+  request, and `prev_hash` and `fees` in `Success`.
 - [sv2-spec#217](https://github.com/stratum-mining/sv2-spec/issues/217):
   "consider adding a new TDP message for custom job validation" (plebhash,
-  2026-08-31, open, no comments). Proposes message `X`, `X.Error` triggering
+  2026-08-31). Proposes message `X`, `X.Error` triggering
   `ProvideMissingTransactions`, `X.Success` gating `DeclareMiningJob.Success`,
-  and asks whether Coinbase-only mode could use it. This draft is a concrete
-  answer to it.
+  and asks whether Coinbase-only mode could use it. Where this draft started.
 - [sv2-spec#170](https://github.com/stratum-mining/sv2-spec/issues/170)
   (closed): `DeclareMiningJob` moved from `txid` to `wtxid` so JDS cannot match
   a transaction with a different witness. Names `getblocktemplate` `proposal`
@@ -360,8 +394,8 @@ dependency.
   [#645](https://github.com/stratum-mining/sv2-apps/issues/645),
   [#795](https://github.com/stratum-mining/sv2-apps/issues/795),
   [#796](https://github.com/stratum-mining/sv2-apps/issues/796): JDS
-  hardening issues that shaped Section 4.1's rules (stale detection by
-  `prev_hash` only, payout versus fees, coinbase prefix reconstruction,
-  staging supplied transactions, duplicate `wtxid` amplification).
+  hardening issues that shaped Section 4.1's rules (stale detection, payout
+  versus fees, coinbase prefix reconstruction, staging supplied
+  transactions, duplicate `wtxid` amplification).
 - `06-Job-Declaration-Protocol.md` Section 6.1 ("RPCs (or similar)") and
   Sections 6.4.7 to 6.4.9, whose encodings this draft copies.

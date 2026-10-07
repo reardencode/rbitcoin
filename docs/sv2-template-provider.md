@@ -100,8 +100,9 @@ Do not copy them here.
   receives a multi-MB `RequestTransactionData.Success`. The 30 s close is
   the operator page above.
 - Client frame cap, per message type: a `ProposeTemplate` payload over
-  `MAX_PROPOSE_TEMPLATE_PAYLOAD` (~6.4 MB: 40 fixed bytes, a `B064K`
-  coinbase, 65535 wtxids, and a block's worth of `B016M` txs) closes the
+  `MAX_PROPOSE_TEMPLATE_PAYLOAD` (~6.5 MB: 8 fixed bytes, three `B064K`
+  fields for the coinbase prefix, suffix, and excess data, 65535 wtxids,
+  and a block's worth of `B016M` txs) closes the
   session; every other client payload closes past `MAX_CLIENT_PAYLOAD`
   (65557 bytes: `SubmitSolution`'s 20 fixed bytes plus a full `B064K`
   coinbase). codec_sv2 decrypts the header into a private buffer and reads
@@ -109,7 +110,7 @@ Do not copy them here.
   frame: the reader counts encrypted bytes per frame against the larger
   cap and closes before reading the chunk that would pass it, then applies
   the per-type cap once the frame is whole. Named RAM trade: one in-flight
-  client frame of ≤ ~6.4 MB per session, ≤ ~51 MB at `MAX_SESSIONS`,
+  client frame of ≤ ~6.5 MB per session, ≤ ~52 MB at `MAX_SESSIONS`,
   instead of the ~16 MB the 24-bit length allows.
 - Per-session budget: weight `MAX_BLOCK_WEIGHT − max(1168 +
   4·coinbase_output_max_additional_size, 2000)` WU (sv2-spec 07 §7.1);
@@ -576,8 +577,8 @@ when fees rise enough to matter, throttled. Requires Plan B.
 holds, fetches the transactions the node lacks, and submits the found block
 by `template_id`. Wire contract: [`sv2-job-validation.md`](./sv2-job-validation.md)
 (proposed TDP messages 0x77–0x7a and `SetupConnection` flag bit 0, for
-sv2-spec#217). Requires Plan B. Ships no flag: a session opts in with
-`REQUIRES_JOB_VALIDATION`.
+sv2-spec discussion #239, which supersedes #217). Requires Plan B. Ships no
+flag: a session opts in with `REQUIRES_JOB_VALIDATION`.
 
 ### D1 — Block proposal check on `ChainHub`
 
@@ -619,14 +620,15 @@ sv2-spec#217). Requires Plan B. Ships no flag: a session opts in with
   `ProposeTemplate` over its cap close it.
 - **Green:** `FrameCap { max_frame, payload: fn(u8) -> usize }`: read
   against the largest client message, apply the per-type cap once whole.
-- **RAM trade:** one in-flight client frame of ≤ ~6.4 MB per session,
-  ≤ ~51 MB at `MAX_SESSIONS`.
+- **RAM trade:** one in-flight client frame of ≤ ~6.5 MB per session,
+  ≤ ~52 MB at `MAX_SESSIONS`.
 
 ### D4 — ProposeTemplate happy path
 
 - **Contract:** on a session that negotiated the flag, a
-  `ProposeTemplate` whose `prev_hash` is the tip, whose `wtxid_list` is
-  all in the mempool, and whose placeholder coinbase pays ≤ subsidy + fees
+  `ProposeTemplate` whose `prev_hash` is the tip (field dropped in D9),
+  whose `wtxid_list` is all in the mempool, and whose placeholder coinbase
+  pays ≤ subsidy + fees
   is answered `Success{request_id, template_id, fees}`: `template_id` is
   the next id in the session's counter, `fees` the sum over the declared
   txs. The job is retained exactly like a template, so
@@ -682,7 +684,8 @@ sv2-spec#217). Requires Plan B. Ships no flag: a session opts in with
 
 - **Contract:** `Error.error_code` in this order, before any mempool
   lookup or transaction decode: `job-validation-unavailable` while
-  `in_ibd()` (the template gate), `stale-prevhash`, `duplicate-wtxid`,
+  `in_ibd()` (the template gate), `stale-prevhash` (dropped in D9),
+  `duplicate-wtxid`,
   `bad-missing-tx` (a supplied tx whose hash is not in `wtxid_list`, or a
   declared blob that does not decode), `bad-cb-decode` (this TP's code;
   the draft has none for an undecodable coinbase), then the proposal
@@ -716,10 +719,52 @@ sv2-spec#217). Requires Plan B. Ships no flag: a session opts in with
   `docs/operator/interfaces.md`, the COMPAT row, and a `changelog.d`
   fragment.
 
+### D8 — Rename to `ProposeTemplate`
+
+- **Contract:** sv2-spec discussion #239 (plebhash, 2026-10-06) supersedes
+  #217 and names the message `ProposeTemplate`; `.MissingTransactions`,
+  `.Success`, `.Error` follow. Pure rename: structs, message-type consts,
+  the frame cap, the session handler, journey names, log strings, this
+  plan, the draft, the operator doc, the COMPAT row, the changelog
+  fragment. No behaviour change.
+- **Verify:** `cargo test -p rbitcoin-sv2 --lib`; `rg ValidateCustomJob`
+  empty.
+
+### D9 — The `DeclareMiningJob` subset; `Success` names the tip
+
+- **Contract:** `ProposeTemplate` carries what a JDS has from
+  `DeclareMiningJob` and nothing it would have to invent: `request_id`,
+  `version`, `coinbase_tx_prefix`, `coinbase_tx_suffix`, `wtxid_list`,
+  `excess_data` (opaque here), plus `transaction_list`. No `prev_hash`:
+  the TP validates on its current tip and `Success` carries that tip as
+  `prev_hash` next to `template_id` and `fees`. The TP builds the
+  placeholder coinbase: `E = L − P` from the prefix (version, BIP144
+  marker and flag when present, an input count that MUST be 1, the
+  prevout, scriptSig length `L`, `P` bytes present; `2 ≤ L ≤ 100`,
+  `P ≤ L`), coinbase = prefix ‖ zeros(E) ‖ suffix. A prefix that does not
+  parse, or a result that does not decode, is `bad-cb-decode`.
+  `stale-prevhash` is gone: a declaration from before the tip moved fails
+  the proposal check on its own (`bad-cb-height` for its BIP34 push).
+- **Red:** the four journeys send prefix/suffix and `expect_job_success`
+  asserts `Success.prev_hash == tip`;
+  `propose_template_rejects_untrusted_input_in_order` swaps the stale case
+  for an old-height declaration (`bad-cb-height`) and adds a prefix with
+  more scriptSig bytes than its length declares, a two-input prefix, and a
+  truncated suffix (all `bad-cb-decode`); `job_validation_messages_round_trip`
+  carries the new fields. Red was the compile error on the new fields.
+- **Green:** `messages.rs` fields; `job::extranonce_len` (unit-tested for
+  the legacy and segwit-marker prefix and each rejection) and the
+  placeholder assembly ahead of the coinbase decode; the request
+  `prev_hash` comparison dropped; `Success.prev_hash` from the retained
+  job's header. `MAX_PROPOSE_TEMPLATE_PAYLOAD` re-priced for three
+  `B064K` fields (~6.5 MB).
+- **Verify:** `cargo test -p rbitcoin-sv2 --lib`.
+
 ### Test budget
 
-Units: the messages round trip, `rbitcoin-net` `check_block_proposal_*`,
-`rbitcoin-rpc` GBT proposal `bad-cb-amount`. Journeys in `rbitcoin-sv2`
+Units: the messages round trip, `job::extranonce_len`, `rbitcoin-net`
+`check_block_proposal_*`, `rbitcoin-rpc` GBT proposal `bad-cb-amount`.
+Journeys in `rbitcoin-sv2`
 `template_tests`: four, each one TP and one session on the shared regtest
 pad. No `rbitcoin-test` node journey yet (follow-up with a JDS client).
 
@@ -750,6 +795,11 @@ pad. No `rbitcoin-test` node journey yet (follow-up with a JDS client).
 - The IBD gate (`job-validation-unavailable`) and `bad-cb-decode` are
   this TP's choices within the draft's "recommended" list and should
   follow the upstream text once it settles.
+- The extranonce-tail assumption (the suffix starts at `nSequence`) now
+  lives in this TP's `extranonce_len`, not in the JDS. A JDC whose
+  extranonce is not the scriptSig tail gets `bad-cb-decode` or a coinbase
+  check failure here; the draft asks the Job Declaration Protocol to state
+  the split (§6).
 - No policy is applied (the draft forbids it); `fees` lets the pool
   price the declared coinbase.
 - The JDS role itself, and a `rbitcoin-test` journey driving a JDS
