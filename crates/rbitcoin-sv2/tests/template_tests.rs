@@ -15,10 +15,10 @@ use rbitcoin_primitives::Height;
 use rbitcoin_query::{confirm_scripts_phase, expected_next_bits, median_time_past};
 use rbitcoin_store::merkle_root_from_txids;
 use rbitcoin_sv2::messages::{
-    ValidateCustomJob, ValidateCustomJobError, ValidateCustomJobMissingTransactions,
-    ValidateCustomJobSuccess, MESSAGE_TYPE_VALIDATE_CUSTOM_JOB,
-    MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_ERROR, MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_MISSING_TRANSACTIONS,
-    MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_SUCCESS, REQUIRES_JOB_VALIDATION,
+    ProposeTemplate, ProposeTemplateError, ProposeTemplateMissingTransactions,
+    ProposeTemplateSuccess, MESSAGE_TYPE_PROPOSE_TEMPLATE, MESSAGE_TYPE_PROPOSE_TEMPLATE_ERROR,
+    MESSAGE_TYPE_PROPOSE_TEMPLATE_MISSING_TRANSACTIONS, MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS,
+    REQUIRES_JOB_VALIDATION,
 };
 use rbitcoin_sv2::testutil::TpClient;
 use rbitcoin_sv2::{
@@ -1464,7 +1464,7 @@ fn job_coinbase(height: u32, payout: u64, txs: &[&Transaction]) -> Transaction {
     }
 }
 
-/// One `ValidateCustomJob` as owned fields, so a test can bend any of them.
+/// One `ProposeTemplate` as owned fields, so a test can bend any of them.
 struct Job {
     request_id: u32,
     prev_hash: [u8; 32],
@@ -1500,7 +1500,7 @@ impl Job {
     }
 
     async fn send(&self, c: &mut TpClient) {
-        let msg = ValidateCustomJob {
+        let msg = ProposeTemplate {
             request_id: self.request_id,
             prev_hash: U256::from(&self.prev_hash),
             version: self.version,
@@ -1514,22 +1514,22 @@ impl Job {
             )
             .unwrap(),
         };
-        c.send(MESSAGE_TYPE_VALIDATE_CUSTOM_JOB, msg).await.unwrap();
+        c.send(MESSAGE_TYPE_PROPOSE_TEMPLATE, msg).await.unwrap();
     }
 }
 
 async fn expect_job_error(c: &mut TpClient, request_id: u32, code: &str) {
     let mut f = recv_in_time(c).await;
-    assert_eq!(f.msg_type, MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_ERROR, "{code}");
-    let e: ValidateCustomJobError = binary_sv2::from_bytes(&mut f.payload).expect("decode");
+    assert_eq!(f.msg_type, MESSAGE_TYPE_PROPOSE_TEMPLATE_ERROR, "{code}");
+    let e: ProposeTemplateError = binary_sv2::from_bytes(&mut f.payload).expect("decode");
     assert_eq!(e.request_id, request_id);
     assert_eq!(e.error_code.as_utf8_or_hex(), code);
 }
 
-async fn expect_job_success(c: &mut TpClient) -> ValidateCustomJobSuccess {
+async fn expect_job_success(c: &mut TpClient) -> ProposeTemplateSuccess {
     let mut f = recv_in_time(c).await;
     assert_eq!(
-        f.msg_type, MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_SUCCESS,
+        f.msg_type, MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS,
         "{:?}",
         f.payload
     );
@@ -1558,7 +1558,7 @@ async fn expect_retained(c: &mut TpClient, template_id: u64, txs: &[&Transaction
 /// `Success` with the next template id and the declared fee sum, and is
 /// retained like a template.
 #[tokio::test(flavor = "multi_thread")]
-async fn validate_custom_job_prices_and_retains_the_declared_job() {
+async fn propose_template_prices_and_retains_the_declared_job() {
     let tc = shared_regtest(2);
     mock_live_tip(&tc);
     let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
@@ -1589,7 +1589,7 @@ async fn validate_custom_job_prices_and_retains_the_declared_job() {
 /// with its 0-indexed position; the same job resent with that tx in
 /// `transaction_list` validates, and the supplied tx is retained with it.
 #[tokio::test(flavor = "multi_thread")]
-async fn validate_custom_job_asks_for_and_accepts_missing_transactions() {
+async fn propose_template_asks_for_and_accepts_missing_transactions() {
     let tc = shared_regtest(2);
     mock_live_tip(&tc);
     let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
@@ -1608,9 +1608,9 @@ async fn validate_custom_job_asks_for_and_accepts_missing_transactions() {
     let mut f = recv_in_time(&mut c).await;
     assert_eq!(
         f.msg_type,
-        MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_MISSING_TRANSACTIONS
+        MESSAGE_TYPE_PROPOSE_TEMPLATE_MISSING_TRANSACTIONS
     );
-    let m: ValidateCustomJobMissingTransactions =
+    let m: ProposeTemplateMissingTransactions =
         binary_sv2::from_bytes(&mut f.payload).expect("decode");
     assert_eq!(m.request_id, 4);
     assert_eq!(m.unknown_tx_position_list.into_inner(), vec![1u16]);
@@ -1634,7 +1634,7 @@ async fn validate_custom_job_asks_for_and_accepts_missing_transactions() {
 /// reject string. While the tip is stale (IBD) every job is
 /// `job-validation-unavailable`. Nothing is retained on an error.
 #[tokio::test(flavor = "multi_thread")]
-async fn validate_custom_job_rejects_untrusted_input_in_order() {
+async fn propose_template_rejects_untrusted_input_in_order() {
     let tc = shared_regtest(2);
     let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
     let a = spend(tc.coinbases[0], 3_000, cheap.clone());

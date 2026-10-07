@@ -3,9 +3,9 @@ use common_messages_sv2::{
     SetupConnectionError, SetupConnectionSuccess, MESSAGE_TYPE_SETUP_CONNECTION_ERROR,
     MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
 };
-use rbitcoin_sv2::messages::{MESSAGE_TYPE_VALIDATE_CUSTOM_JOB, REQUIRES_JOB_VALIDATION};
+use rbitcoin_sv2::messages::{MESSAGE_TYPE_PROPOSE_TEMPLATE, REQUIRES_JOB_VALIDATION};
 use rbitcoin_sv2::testutil::TpClient;
-use rbitcoin_sv2::transport::MAX_VALIDATE_CUSTOM_JOB_PAYLOAD;
+use rbitcoin_sv2::transport::MAX_PROPOSE_TEMPLATE_PAYLOAD;
 use rbitcoin_sv2::{
     run_sv2_tp, Sv2TpConfig, CONSTRAINTS_COOLDOWN_TEST, FEE_DELTA, MAX_IDLE_TIMEOUT, MAX_SESSIONS,
     MAX_STALE_GRACE, MAX_TEMPLATE_INTERVAL, MIN_TEMPLATE_INTERVAL, SETUP_TIMEOUT,
@@ -395,7 +395,7 @@ async fn client_that_stops_reading_is_dropped_at_the_write_deadline() {
 }
 
 /// Each client message type has its own payload cap: the largest legitimate
-/// `SubmitSolution` and a `ValidateCustomJob` well past it keep the session;
+/// `SubmitSolution` and a `ProposeTemplate` well past it keep the session;
 /// a frame over the cap for its type closes it.
 #[tokio::test]
 async fn oversized_client_frame_closes_the_session() {
@@ -431,16 +431,16 @@ async fn oversized_client_frame_closes_the_session() {
         .expect("open after a max-size SubmitSolution");
     assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR);
 
-    // No handler yet: a ValidateCustomJob under its own cap is read and ignored.
+    // No handler yet: a ProposeTemplate under its own cap is read and ignored.
     let big = vec![0u8; 200 << 10];
-    c.send_bytes(MESSAGE_TYPE_VALIDATE_CUSTOM_JOB, &big)
+    c.send_bytes(MESSAGE_TYPE_PROPOSE_TEMPLATE, &big)
         .await
         .unwrap();
     c.request_transaction_data(1).await.unwrap();
     let f = c
         .recv()
         .await
-        .expect("open after a 200 KiB ValidateCustomJob");
+        .expect("open after a 200 KiB ProposeTemplate");
     assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR);
 
     let _ = c.send_bytes(MESSAGE_TYPE_SUBMIT_SOLUTION, &big).await;
@@ -454,12 +454,12 @@ async fn oversized_client_frame_closes_the_session() {
     c.recv().await.expect("setup reply");
     let _ = c
         .send_bytes(
-            MESSAGE_TYPE_VALIDATE_CUSTOM_JOB,
-            &vec![0u8; MAX_VALIDATE_CUSTOM_JOB_PAYLOAD + 1],
+            MESSAGE_TYPE_PROPOSE_TEMPLATE,
+            &vec![0u8; MAX_PROPOSE_TEMPLATE_PAYLOAD + 1],
         )
         .await;
     c.request_transaction_data(1).await.ok();
-    assert_closed(&mut c, "a ValidateCustomJob over its cap").await;
+    assert_closed(&mut c, "a ProposeTemplate over its cap").await;
     tp.shutdown().await;
 }
 

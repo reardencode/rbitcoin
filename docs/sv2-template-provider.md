@@ -99,8 +99,8 @@ Do not copy them here.
 - Write deadline is per write call, not per frame, so a slow reader still
   receives a multi-MB `RequestTransactionData.Success`. The 30 s close is
   the operator page above.
-- Client frame cap, per message type: a `ValidateCustomJob` payload over
-  `MAX_VALIDATE_CUSTOM_JOB_PAYLOAD` (~6.4 MB: 40 fixed bytes, a `B064K`
+- Client frame cap, per message type: a `ProposeTemplate` payload over
+  `MAX_PROPOSE_TEMPLATE_PAYLOAD` (~6.4 MB: 40 fixed bytes, a `B064K`
   coinbase, 65535 wtxids, and a block's worth of `B016M` txs) closes the
   session; every other client payload closes past `MAX_CLIENT_PAYLOAD`
   (65557 bytes: `SubmitSolution`'s 20 fixed bytes plus a full `B064K`
@@ -569,7 +569,7 @@ when fees rise enough to matter, throttled. Requires Plan B.
 
 ---
 
-## Plan D — Custom job validation (TDP `ValidateCustomJob`)
+## Plan D — Custom job validation (TDP `ProposeTemplate`)
 
 **Goal:** a Job Declarator Server in Full-Template mode checks a JDC's
 `DeclareMiningJob` against this node over the TDP connection it already
@@ -601,7 +601,7 @@ sv2-spec#217). Requires Plan B. Ships no flag: a session opts in with
 
 ### D2 — Messages and the setup flag
 
-- **Contract:** `messages.rs` carries `ValidateCustomJob`,
+- **Contract:** `messages.rs` carries `ProposeTemplate`,
   `.MissingTransactions`, `.Success`, `.Error` (0x77–0x7a) as binary_sv2
   structs, and `REQUIRES_JOB_VALIDATION`. Setup accepts bit 0 and echoes
   it; any other set bit is still `unsupported-feature-flags`.
@@ -612,20 +612,20 @@ sv2-spec#217). Requires Plan B. Ships no flag: a session opts in with
 ### D3 — Client frame cap per message type
 
 - **Contract:** the [Constraints](#constraints-all-plans) frame cap, per
-  type. `ValidateCustomJob` may carry a block's worth of transactions;
+  type. `ProposeTemplate` may carry a block's worth of transactions;
   every other client type still closes past 65557 bytes.
 - **Red:** `oversized_client_frame_closes_the_session` — a 200 KiB
-  `ValidateCustomJob` keeps the session, a 200 KiB `SubmitSolution` and a
-  `ValidateCustomJob` over its cap close it.
+  `ProposeTemplate` keeps the session, a 200 KiB `SubmitSolution` and a
+  `ProposeTemplate` over its cap close it.
 - **Green:** `FrameCap { max_frame, payload: fn(u8) -> usize }`: read
   against the largest client message, apply the per-type cap once whole.
 - **RAM trade:** one in-flight client frame of ≤ ~6.4 MB per session,
   ≤ ~51 MB at `MAX_SESSIONS`.
 
-### D4 — ValidateCustomJob happy path
+### D4 — ProposeTemplate happy path
 
 - **Contract:** on a session that negotiated the flag, a
-  `ValidateCustomJob` whose `prev_hash` is the tip, whose `wtxid_list` is
+  `ProposeTemplate` whose `prev_hash` is the tip, whose `wtxid_list` is
   all in the mempool, and whose placeholder coinbase pays ≤ subsidy + fees
   is answered `Success{request_id, template_id, fees}`: `template_id` is
   the next id in the session's counter, `fees` the sum over the declared
@@ -633,7 +633,7 @@ sv2-spec#217). Requires Plan B. Ships no flag: a session opts in with
   `RequestTransactionData` returns the declared txs in block order and
   `SubmitSolution` finds it. Without the flag the message is ignored (the
   D3 journey already pins that).
-- **Red:** `validate_custom_job_prices_and_retains_the_declared_job` —
+- **Red:** `propose_template_prices_and_retains_the_declared_job` —
   two legacy spends with known fees in the mempool, a JDS-shaped coinbase
   (BIP34 push + 8 placeholder bytes, payout = subsidy + fees, witness
   commitment with a zero reserved value); `Success` with `fees` = 5 000
@@ -667,7 +667,7 @@ sv2-spec#217). Requires Plan B. Ships no flag: a session opts in with
   (0-indexed positions in `wtxid_list`); the same job resent with those
   txs in `transaction_list` validates and the supplied txs are retained
   with it. The TP keeps no state across the round trip.
-- **Red:** `validate_custom_job_asks_for_and_accepts_missing_transactions`
+- **Red:** `propose_template_asks_for_and_accepts_missing_transactions`
   — one of two spends not in the mempool → `[1]`; resend with it
   supplied → `Success` with the full fee sum and both txs retained. Red
   was the session closing (D4's placeholder treated an unknown wtxid as
@@ -688,7 +688,7 @@ sv2-spec#217). Requires Plan B. Ships no flag: a session opts in with
   the draft has none for an undecodable coinbase), then the proposal
   check's reject string (`bad-cb-amount` for an overpaying coinbase).
   Nothing is retained and no id is taken on an error.
-- **Red:** `validate_custom_job_rejects_untrusted_input_in_order` — seven
+- **Red:** `propose_template_rejects_untrusted_input_in_order` — seven
   sends on one session, then `RequestTransactionData(last + 1)` answers
   `template-id-not-found`. Red was `Success` for the first send.
 - **Green:** the checks in `job::check`, ahead of resolution.

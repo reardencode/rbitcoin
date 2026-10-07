@@ -2,7 +2,7 @@
 //! (docs/sv2-job-validation.md §4): resolve the declared wtxids, check the
 //! job as a block proposal on the tip, and shape it for retention.
 
-use crate::messages::ValidateCustomJob;
+use crate::messages::ProposeTemplate;
 use crate::template::{self, Job};
 use bitcoin::hashes::{sha256d, Hash};
 use bitcoin::{block, Block, BlockHash, Transaction, TxMerkleNode, Wtxid};
@@ -17,18 +17,18 @@ pub(crate) enum Verdict {
     Missing(Vec<u16>),
     /// Consensus-valid on the tip: the fee total and the job to retain.
     Valid { fees: u64, job: Job },
-    /// `ValidateCustomJob.Error.error_code`: a Core reject string or one of
+    /// `ProposeTemplate.Error.error_code`: a Core reject string or one of
     /// the draft's own codes.
     Rejected(String),
 }
 
 /// Reads the store and the mempool: blocking region only. `None`: the
-/// payload is not a `ValidateCustomJob`.
+/// payload is not a `ProposeTemplate`.
 pub(crate) fn validate(
     chain: &ChainHub,
     mut payload: Vec<u8>,
 ) -> io::Result<Option<(u32, Verdict)>> {
-    let Ok(m) = binary_sv2::from_bytes::<ValidateCustomJob>(&mut payload) else {
+    let Ok(m) = binary_sv2::from_bytes::<ProposeTemplate>(&mut payload) else {
         return Ok(None);
     };
     Ok(Some((m.request_id, check(chain, &m)?)))
@@ -37,7 +37,7 @@ pub(crate) fn validate(
 /// §4.1 and §4.4, in order. The draft's own codes run before any mempool
 /// lookup or transaction decode, so a 32-byte wtxid is never amplified into
 /// a copy or an allocation the job did not declare.
-fn check(chain: &ChainHub, m: &ValidateCustomJob) -> io::Result<Verdict> {
+fn check(chain: &ChainHub, m: &ProposeTemplate) -> io::Result<Verdict> {
     let rejected = |code: &str| Ok(Verdict::Rejected(code.into()));
     // Same gate as the templates: a stale tip validates nothing.
     if chain.in_ibd() {

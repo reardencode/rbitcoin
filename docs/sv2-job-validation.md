@@ -50,22 +50,22 @@ has, validate, and submit the solution by reference.
 ```
 JDC                      JDS                             TP
  |-- DeclareMiningJob --->|                               |
- |                        |-- ValidateCustomJob --------->|  wtxid_list, coinbase, no txs
- |                        |<- ValidateCustomJob.MissingTransactions   (only if TP lacks some)
+ |                        |-- ProposeTemplate --------->|  wtxid_list, coinbase, no txs
+ |                        |<- ProposeTemplate.MissingTransactions   (only if TP lacks some)
  |<- ProvideMissingTransactions                           |
  |-- ProvideMissingTransactions.Success ->|               |
- |                        |-- ValidateCustomJob --------->|  same job + transaction_list
- |                        |<- ValidateCustomJob.Success --|  template_id, fees
+ |                        |-- ProposeTemplate --------->|  same job + transaction_list
+ |                        |<- ProposeTemplate.Success --|  template_id, fees
  |<- DeclareMiningJob.Success             |               |
  ...
  |-- PushSolution ------->|                               |
  |                        |-- SubmitSolution(template_id)>|  existing 7.8 message
 ```
 
-- `ValidateCustomJob` is stateless on the server side across the
+- `ProposeTemplate` is stateless on the server side across the
   missing-transactions round trip: the second request repeats the job and adds
   the transactions. The TP MUST NOT require any state from the first request.
-- `ValidateCustomJob.Success` assigns a `template_id` from the same namespace as
+- `ProposeTemplate.Success` assigns a `template_id` from the same namespace as
   `NewTemplate.template_id`. The solution is then sent with the existing
   `SubmitSolution` message (Section 7.8). No new submission message is needed.
 - A JDS connection is an ordinary TDP client. It MUST still open with
@@ -82,7 +82,7 @@ Flags usable in `SetupConnection.flags` and `SetupConnection.Error.flags`
 
 | Field Name              | Bit | Description                                                                                                                                 |
 | ----------------------- | --- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| REQUIRES_JOB_VALIDATION | 0   | The client intends to send `ValidateCustomJob`. A server that does not support it MUST reply `SetupConnection.Error` with `unsupported-feature-flags`. |
+| REQUIRES_JOB_VALIDATION | 0   | The client intends to send `ProposeTemplate`. A server that does not support it MUST reply `SetupConnection.Error` with `unsupported-feature-flags`. |
 
 Flags in `SetupConnection.Success.flags` (Server -> Client):
 
@@ -90,12 +90,12 @@ Flags in `SetupConnection.Success.flags` (Server -> Client):
 | ----------------------- | --- | --------------------------------------------------------------------------- |
 | REQUIRES_JOB_VALIDATION | 0   | Set when the server accepted the client's `REQUIRES_JOB_VALIDATION` request |
 
-A client MUST NOT send `ValidateCustomJob` on a connection where this flag was
+A client MUST NOT send `ProposeTemplate` on a connection where this flag was
 not set and accepted.
 
 ## 4. Messages
 
-### 4.1 `ValidateCustomJob` (Client -> Server)
+### 4.1 `ProposeTemplate` (Client -> Server)
 
 Asks the Template Provider whether a Custom Job, declared to the client via
 `DeclareMiningJob`, would produce a consensus-valid block on top of the
@@ -108,7 +108,7 @@ server's current chain tip.
 | version          | U32              | Block header version field as declared in `DeclareMiningJob.version`. BIP323 general-purpose bits are ignored by the server                                                                                                                                                              |
 | coinbase_tx      | B0_64K           | Full serialized coinbase transaction, with the extranonce region filled with placeholder bytes of the correct length. If the coinbase is a SegWit transaction, BIP141 fields (marker, flag, witness count, witness length, witness reserved value) MUST NOT be stripped                 |
 | wtxid_list       | SEQ0_64K[U256]   | `wtxid` of every transaction in the Custom Job, in block order, excluding the coinbase. Copied from `DeclareMiningJob.wtxid_list`                                                                                                                                                         |
-| transaction_list | SEQ0_64K[B0_16M] | Full transactions the server reported in `ValidateCustomJob.MissingTransactions`, in the order they were requested. Empty on the first request. Each transaction MUST be relayed exactly as received from JDC in `ProvideMissingTransactions.Success`, without parsing or re-encoding    |
+| transaction_list | SEQ0_64K[B0_16M] | Full transactions the server reported in `ProposeTemplate.MissingTransactions`, in the order they were requested. Empty on the first request. Each transaction MUST be relayed exactly as received from JDC in `ProvideMissingTransactions.Success`, without parsing or re-encoding    |
 
 The client derives the extranonce length as the scriptSig length encoded in
 `DeclareMiningJob.coinbase_tx_prefix` minus the scriptSig bytes present in the
@@ -123,9 +123,9 @@ of the extranonce bytes.
 
 The server resolves each `wtxid` against its mempool and against
 `transaction_list`. If any transaction is still unknown, it MUST reply
-`ValidateCustomJob.MissingTransactions`. Otherwise it MUST validate the job as
+`ProposeTemplate.MissingTransactions`. Otherwise it MUST validate the job as
 a block on top of `prev_hash` with the following rules, and reply either
-`ValidateCustomJob.Success` or `ValidateCustomJob.Error`:
+`ProposeTemplate.Success` or `ProposeTemplate.Error`:
 
 - `prev_hash` MUST equal the server's current chain tip. Otherwise the server
   MUST reply with error code `stale-prevhash`. The server MUST NOT accept a
@@ -146,54 +146,54 @@ a block on top of `prev_hash` with the following rules, and reply either
   `checkBlock` with `checkMerkleRoot=false` and `checkPow=false`.
 - The server MUST NOT reject a consensus-valid job on local policy grounds
   (standardness, minimum relay fee, mempool limits). Policy belongs to the
-  Pool, which can use `ValidateCustomJob.Success.fees` for it.
+  Pool, which can use `ProposeTemplate.Success.fees` for it.
 - The server MUST set `nBits` from its own view of the chain and MAY use its
   current time for `nTime` when it needs a header for contextual checks. The
   client does not supply them.
 
-### 4.2 `ValidateCustomJob.MissingTransactions` (Server -> Client)
+### 4.2 `ProposeTemplate.MissingTransactions` (Server -> Client)
 
 The server does not know some of the transactions in `wtxid_list`. The client
 is expected to obtain them from JDC via `ProvideMissingTransactions` and send
-a new `ValidateCustomJob` with `transaction_list` filled.
+a new `ProposeTemplate` with `transaction_list` filled.
 
 | Field Name               | Data Type     | Description                                                                                                                                                    |
 | ------------------------ | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| request_id               | U32           | Identifier of the original `ValidateCustomJob` request                                                                                                           |
+| request_id               | U32           | Identifier of the original `ProposeTemplate` request                                                                                                           |
 | unknown_tx_position_list | SEQ0_64K[U16] | Positions in `wtxid_list` of the transactions the server lacks, 0-indexed, not including the coinbase. Same encoding as `ProvideMissingTransactions.unknown_tx_position_list` |
 
 The positions are relative to `wtxid_list`, which is a copy of
 `DeclareMiningJob.wtxid_list`, so the client can copy this field into
 `ProvideMissingTransactions.unknown_tx_position_list` unchanged, and copy
 `ProvideMissingTransactions.Success.transaction_list` into
-`ValidateCustomJob.transaction_list` unchanged.
+`ProposeTemplate.transaction_list` unchanged.
 
-A server MAY reply `ValidateCustomJob.MissingTransactions` to a request whose
+A server MAY reply `ProposeTemplate.MissingTransactions` to a request whose
 `transaction_list` is non-empty, for example when a transaction left its
 mempool between the two requests. A client SHOULD bound how many times it
 retries one declaration.
 
-### 4.3 `ValidateCustomJob.Success` (Server -> Client)
+### 4.3 `ProposeTemplate.Success` (Server -> Client)
 
 The job is consensus-valid on the server's current tip. The server has stored
 the job and will accept a `SubmitSolution` for it.
 
 | Field Name  | Data Type | Description                                                                                                                                                                            |
 | ----------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| request_id  | U32       | Identifier of the original `ValidateCustomJob` request                                                                                                                                  |
+| request_id  | U32       | Identifier of the original `ProposeTemplate` request                                                                                                                                  |
 | template_id | U64       | Server's identification of the validated job. Drawn from the same strictly increasing namespace as `NewTemplate.template_id`, so it can be used in `SubmitSolution` and `RequestTransactionData` |
 | fees        | U64       | Sum of the fees of the transactions in `wtxid_list`, in satoshis                                                                                                                       |
 
 The server MUST retain the validated job (its `wtxid_list`, the transactions
 it received in `transaction_list`, and `coinbase_tx` for size accounting)
-until a newer `ValidateCustomJob.Success` is sent on the same connection or
+until a newer `ProposeTemplate.Success` is sent on the same connection or
 the connection closes, whichever comes first. This matches the guarantee JDS
 gives JDC in Section 6.4.9: `PushSolution` is only guaranteed to be valid for
 the most recent declaration. The server SHOULD retain jobs validated against
 the previous tip for a short grace period after a tip change, as it does for
 its own templates.
 
-### 4.4 `ValidateCustomJob.Error` (Server -> Client)
+### 4.4 `ProposeTemplate.Error` (Server -> Client)
 
 The job was not validated. The client decides what to tell JDC; it SHOULD map
 consensus rejections to `DeclareMiningJob.Error` and SHOULD NOT treat
@@ -201,7 +201,7 @@ consensus rejections to `DeclareMiningJob.Error` and SHOULD NOT treat
 
 | Field Name    | Data Type | Description                                            |
 | ------------- | --------- | ------------------------------------------------------ |
-| request_id    | U32       | Identifier of the original `ValidateCustomJob` request   |
+| request_id    | U32       | Identifier of the original `ProposeTemplate` request   |
 | error_code    | STR0_255  | Human-readable error code(s)                           |
 | error_details | B0_64K    | Optional data providing further details to given error |
 
@@ -221,7 +221,7 @@ rejection strings (`bad-txns-inputs-missingorspent`, `bad-cb-length`,
 When the client receives `PushSolution` from JDC it MUST reconstruct the full
 coinbase (`coinbase_tx_prefix` || `extranonce` || `coinbase_tx_suffix`) and
 send `SubmitSolution` (Section 7.8) with `template_id` set to the value from
-`ValidateCustomJob.Success`, and `version`, `ntime`, `nonce` and `coinbase_tx`
+`ProposeTemplate.Success`, and `version`, `ntime`, `nonce` and `coinbase_tx`
 from the solution.
 
 The server MUST treat such a `SubmitSolution` as it treats one for its own
@@ -240,10 +240,10 @@ Additions to Section 8, Template Distribution Protocol:
 
 | Message Type (8-bit) | channel_msg bit | Message Name                            |
 | -------------------- | --------------- | --------------------------------------- |
-| 0x77                 | 0               | ValidateCustomJob                       |
-| 0x78                 | 0               | ValidateCustomJob.MissingTransactions   |
-| 0x79                 | 0               | ValidateCustomJob.Success               |
-| 0x7a                 | 0               | ValidateCustomJob.Error                 |
+| 0x77                 | 0               | ProposeTemplate                       |
+| 0x78                 | 0               | ProposeTemplate.MissingTransactions   |
+| 0x79                 | 0               | ProposeTemplate.Success               |
+| 0x7a                 | 0               | ProposeTemplate.Error                 |
 
 All four are core messages and carry `extension_type = 0x0000`.
 
@@ -264,16 +264,16 @@ All four are core messages and carry `extension_type = 0x0000`.
 - **Coinbase-only mode.** Out of scope. In Coinbase-only mode neither Pool nor
   JDS learns the transaction set, so a node has nothing to validate beyond the
   coinbase, which `SetCustomMiningJob` already carries to the Pool. A
-  zero-knowledge extension could later reuse `ValidateCustomJob.Success.fees`
+  zero-knowledge extension could later reuse `ProposeTemplate.Success.fees`
   as the quantity being proven.
 - **Node load.** Full block validation without proof of work is CPU-heavy and
   in Bitcoin Core currently serialises on `cs_main`, so validations on a node
   that also produces the Pool's templates can delay block processing
-  (`sv2-apps#120`). A server MAY process `ValidateCustomJob` requests
+  (`sv2-apps#120`). A server MAY process `ProposeTemplate` requests
   sequentially and MAY bound the number queued per connection; operators
   SHOULD run a dedicated TP for job validation. A client SHOULD apply a
   timeout before falling back.
-- **Untrusted input.** Everything in `ValidateCustomJob` originates from a
+- **Untrusted input.** Everything in `ProposeTemplate` originates from a
   JDC. The server MUST enforce the `duplicate-wtxid` and `bad-missing-tx`
   checks and the block weight limit before decoding or storing transactions,
   so that a 32-byte `wtxid` cannot be amplified into a large allocation
@@ -296,11 +296,11 @@ All four are core messages and carry `extension_type = 0x0000`.
 
 | JDP event                            | TDP action                                                                    |
 | ------------------------------------ | ----------------------------------------------------------------------------- |
-| `DeclareMiningJob`                   | `ValidateCustomJob` with `wtxid_list` copied, `coinbase_tx` from prefix + placeholder + suffix, empty `transaction_list` |
-| `ValidateCustomJob.MissingTransactions` | `ProvideMissingTransactions` with the position list copied                  |
-| `ProvideMissingTransactions.Success` | `ValidateCustomJob` again with `transaction_list` copied                       |
-| `ValidateCustomJob.Success`          | `DeclareMiningJob.Success`; store `template_id` with the declaration           |
-| `ValidateCustomJob.Error`            | `DeclareMiningJob.Error` with the error code                                  |
+| `DeclareMiningJob`                   | `ProposeTemplate` with `wtxid_list` copied, `coinbase_tx` from prefix + placeholder + suffix, empty `transaction_list` |
+| `ProposeTemplate.MissingTransactions` | `ProvideMissingTransactions` with the position list copied                  |
+| `ProvideMissingTransactions.Success` | `ProposeTemplate` again with `transaction_list` copied                       |
+| `ProposeTemplate.Success`          | `DeclareMiningJob.Success`; store `template_id` with the declaration           |
+| `ProposeTemplate.Error`            | `DeclareMiningJob.Error` with the error code                                  |
 | `PushSolution`                       | `SubmitSolution(template_id, version, ntime, nonce, coinbase_tx)`              |
 
 No mempool mirror is needed on the JDS side. In `sv2-apps` this is a second
@@ -310,7 +310,7 @@ Pool's "`[jds]` requires `BitcoinCoreIpc`" startup check becomes "requires
 
 ### 7.2 Template Provider on Bitcoin Core (`sv2-tp`)
 
-`ValidateCustomJob` maps onto `getTransactionsByWitnessID` (Core v32) for the
+`ProposeTemplate` maps onto `getTransactionsByWitnessID` (Core v32) for the
 lookup and `checkBlock(checkMerkleRoot=false, checkPow=false)` for validation,
 or onto `TxCollection` (`collectTxs`, `unknownTxPos`, `addMissingTxs`,
 `makeTemplate`) once bitcoin/bitcoin#35671 lands. `SubmitSolution` for a
@@ -350,7 +350,7 @@ dependency.
   `wtxid`, report unknown positions, add missing, `makeTemplate`, submit the
   solution by reference) is the flow Sections 2 and 4 encode. The thread also
   records the hazard of server-side state across the missing-transactions
-  round trip, which is why `ValidateCustomJob` is stateless until `Success`.
+  round trip, which is why `ProposeTemplate` is stateless until `Success`.
 - [sv2-apps#299](https://github.com/stratum-mining/sv2-apps/pull/299): JDS
   refactor that removed the JSON-RPC backend and folded JDS into the Pool.
   [sv2-apps#26](https://github.com/stratum-mining/sv2-apps/issues/26) gives the

@@ -1,6 +1,6 @@
 //! Noise_NX transport over one TCP stream: handshake, then encrypted SV2 frames.
 
-use crate::messages::MESSAGE_TYPE_VALIDATE_CUSTOM_JOB;
+use crate::messages::MESSAGE_TYPE_PROPOSE_TEMPLATE;
 use binary_sv2::{GetSize, Serialize};
 use codec_sv2::{
     Decoded, Decrypted, Handshake, MessageFrame, NoiseDecoder, NoiseEncoder, TransportDecryptState,
@@ -20,13 +20,13 @@ pub struct Frame {
     pub payload: Vec<u8>,
 }
 
-/// Largest client→TP payload for every message but `ValidateCustomJob`:
+/// Largest client→TP payload for every message but `ProposeTemplate`:
 /// `SubmitSolution`, 20 fixed bytes plus a `B064K` coinbase (2-byte length,
 /// ≤ 65535 bytes). The 24-bit frame length would otherwise let a client
 /// make the session buffer ~16 MB per frame.
 pub const MAX_CLIENT_PAYLOAD: usize = 20 + 2 + u16::MAX as usize;
 
-/// Largest `ValidateCustomJob` payload: 40 fixed bytes, a `B064K` coinbase,
+/// Largest `ProposeTemplate` payload: 40 fixed bytes, a `B064K` coinbase,
 /// a full `SEQ0_64K[U256]` wtxid list, and a `SEQ0_64K[B016M]` transaction
 /// list whose txs together fit a block (weight is never below serialized
 /// size) with a 3-byte length each.
@@ -35,7 +35,7 @@ pub const MAX_CLIENT_PAYLOAD: usize = 20 + 2 + u16::MAX as usize;
 /// of at most this size (~6.4 MB), so at `MAX_SESSIONS` client frames hold
 /// ≤ ~51 MB on top of template retention (lib.rs).
 #[doc(hidden)]
-pub const MAX_VALIDATE_CUSTOM_JOB_PAYLOAD: usize = {
+pub const MAX_PROPOSE_TEMPLATE_PAYLOAD: usize = {
     const SEQ: usize = u16::MAX as usize;
     4 + 32 + 4 + (2 + SEQ) + (2 + SEQ * 32) + (2 + SEQ * 3 + MAX_BLOCK_WEIGHT as usize)
 };
@@ -43,7 +43,7 @@ pub const MAX_VALIDATE_CUSTOM_JOB_PAYLOAD: usize = {
 /// Payload cap by client message type.
 const fn client_payload_cap(msg_type: u8) -> usize {
     match msg_type {
-        MESSAGE_TYPE_VALIDATE_CUSTOM_JOB => MAX_VALIDATE_CUSTOM_JOB_PAYLOAD,
+        MESSAGE_TYPE_PROPOSE_TEMPLATE => MAX_PROPOSE_TEMPLATE_PAYLOAD,
         _ => MAX_CLIENT_PAYLOAD,
     }
 }
@@ -73,7 +73,7 @@ impl FrameCap {
     /// Client→TP: the largest client message while reading, then
     /// [`client_payload_cap`] for the type.
     const CLIENT: Self = Self {
-        max_frame: encrypted_frame_len(MAX_VALIDATE_CUSTOM_JOB_PAYLOAD),
+        max_frame: encrypted_frame_len(MAX_PROPOSE_TEMPLATE_PAYLOAD),
         payload: client_payload_cap,
     };
     /// TP→client: the 24-bit frame length only.

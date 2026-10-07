@@ -2,10 +2,10 @@
 
 use crate::job::{self, Verdict};
 use crate::messages::{
-    ValidateCustomJobError, ValidateCustomJobMissingTransactions, ValidateCustomJobSuccess,
-    MESSAGE_TYPE_VALIDATE_CUSTOM_JOB, MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_ERROR,
-    MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_MISSING_TRANSACTIONS,
-    MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_SUCCESS, REQUIRES_JOB_VALIDATION,
+    ProposeTemplateError, ProposeTemplateMissingTransactions, ProposeTemplateSuccess,
+    MESSAGE_TYPE_PROPOSE_TEMPLATE, MESSAGE_TYPE_PROPOSE_TEMPLATE_ERROR,
+    MESSAGE_TYPE_PROPOSE_TEMPLATE_MISSING_TRANSACTIONS, MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS,
+    REQUIRES_JOB_VALIDATION,
 };
 use crate::template;
 use crate::transport::{Frame, NoiseConn, NoiseWriter};
@@ -369,8 +369,8 @@ impl Session {
                 on_request_transaction_data(&mut self.conn, frame, &self.templates).await?;
             }
             MESSAGE_TYPE_SUBMIT_SOLUTION => self.on_submit_solution(frame).await?,
-            MESSAGE_TYPE_VALIDATE_CUSTOM_JOB if self.job_validation => {
-                self.on_validate_custom_job(frame).await?;
+            MESSAGE_TYPE_PROPOSE_TEMPLATE if self.job_validation => {
+                self.on_propose_template(frame).await?;
             }
             t => rbitcoin_log::info!("sv2: ignoring message {t:#x}"),
         }
@@ -634,7 +634,7 @@ impl Session {
 
     /// docs/sv2-job-validation.md §4: a valid job is retained under the next
     /// template id and answered `Success`; a rejected one answers `Error`.
-    async fn on_validate_custom_job(&mut self, frame: Frame) -> io::Result<()> {
+    async fn on_propose_template(&mut self, frame: Frame) -> io::Result<()> {
         let c = Arc::clone(&self.chain);
         let verdict = tokio::task::spawn_blocking(move || {
             let _g = BlockingRegion::enter();
@@ -643,18 +643,18 @@ impl Session {
         .await
         .map_err(io::Error::other)??;
         let Some((request_id, verdict)) = verdict else {
-            rbitcoin_log::info!("sv2: undecodable ValidateCustomJob");
+            rbitcoin_log::info!("sv2: undecodable ProposeTemplate");
             return Ok(());
         };
-        let wire = |e: binary_sv2::Error| io::Error::other(format!("sv2 ValidateCustomJob: {e:?}"));
+        let wire = |e: binary_sv2::Error| io::Error::other(format!("sv2 ProposeTemplate: {e:?}"));
         match verdict {
             Verdict::Missing(positions) => {
-                let reply = ValidateCustomJobMissingTransactions {
+                let reply = ProposeTemplateMissingTransactions {
                     request_id,
                     unknown_tx_position_list: Seq064K::new(positions).map_err(wire)?,
                 };
                 self.conn
-                    .send(MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_MISSING_TRANSACTIONS, reply)
+                    .send(MESSAGE_TYPE_PROPOSE_TEMPLATE_MISSING_TRANSACTIONS, reply)
                     .await
             }
             Verdict::Valid { fees, job } => {
@@ -665,23 +665,23 @@ impl Session {
                     .prev_sent
                     .unwrap_or((job.header_timestamp, Instant::now()));
                 self.templates.retain(template_id, job, prev_sent);
-                let reply = ValidateCustomJobSuccess {
+                let reply = ProposeTemplateSuccess {
                     request_id,
                     template_id,
                     fees,
                 };
                 self.conn
-                    .send(MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_SUCCESS, reply)
+                    .send(MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS, reply)
                     .await
             }
             Verdict::Rejected(code) => {
-                let reply = ValidateCustomJobError {
+                let reply = ProposeTemplateError {
                     request_id,
                     error_code: Str0255::try_from(code.as_str()).map_err(wire)?,
                     error_details: B064K::try_from(&[][..]).map_err(wire)?,
                 };
                 self.conn
-                    .send(MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_ERROR, reply)
+                    .send(MESSAGE_TYPE_PROPOSE_TEMPLATE_ERROR, reply)
                     .await
             }
         }
