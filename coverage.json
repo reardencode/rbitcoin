@@ -4,11 +4,11 @@
   "message": "93.30%",
   "color": "brightgreen",
   "pct": 93.3,
-  "lh": 149038,
-  "lf": 159740,
+  "lh": 149051,
+  "lf": 159756,
   "gate": 92,
   "scope": "production",
-  "sha": "0e043fb69863",
+  "sha": "21b9c6b18638",
   "date": "2026-10-07",
   "crates": [
     {
@@ -19,7 +19,7 @@
     },
     {
       "name": "rbitcoin-consensus",
-      "lh": 18578,
+      "lh": 18579,
       "lf": 19530,
       "pct": 95.13
     },
@@ -49,15 +49,15 @@
     },
     {
       "name": "rbitcoin-net",
-      "lh": 47649,
-      "lf": 50742,
+      "lh": 47664,
+      "lf": 50758,
       "pct": 93.9
     },
     {
       "name": "rbitcoin-node",
-      "lh": 5501,
+      "lh": 5509,
       "lf": 6465,
-      "pct": 85.09
+      "pct": 85.21
     },
     {
       "name": "rbitcoin-primitives",
@@ -67,9 +67,9 @@
     },
     {
       "name": "rbitcoin-query",
-      "lh": 12836,
+      "lh": 12835,
       "lf": 13698,
-      "pct": 93.71
+      "pct": 93.7
     },
     {
       "name": "rbitcoin-rpc",
@@ -79,9 +79,9 @@
     },
     {
       "name": "rbitcoin-store",
-      "lh": 36136,
+      "lh": 36126,
       "lf": 39087,
-      "pct": 92.45
+      "pct": 92.42
     },
     {
       "name": "rbitcoin-sv2",
