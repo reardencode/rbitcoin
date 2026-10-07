@@ -657,7 +657,7 @@ impl Session {
                     .send(MESSAGE_TYPE_PROPOSE_TEMPLATE_MISSING_TRANSACTIONS, reply)
                     .await
             }
-            Verdict::Valid { fees, job } => {
+            Verdict::Valid(job) => {
                 self.templates.last_id += 1;
                 let template_id = self.templates.last_id;
                 let prev_sent = self
@@ -670,7 +670,6 @@ impl Session {
                     request_id,
                     template_id,
                     prev_hash: U256::from(&prev_hash),
-                    fees,
                 };
                 self.conn
                     .send(MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS, reply)

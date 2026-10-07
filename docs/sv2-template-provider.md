@@ -629,9 +629,9 @@ flag: a session opts in with `REQUIRES_JOB_VALIDATION`.
   `ProposeTemplate` whose `prev_hash` is the tip (field dropped in D9),
   whose `wtxid_list` is all in the mempool, and whose placeholder coinbase
   pays ≤ subsidy + fees
-  is answered `Success{request_id, template_id, fees}`: `template_id` is
-  the next id in the session's counter, `fees` the sum over the declared
-  txs. The job is retained exactly like a template, so
+  is answered `Success{request_id, template_id}` (D9 adds `prev_hash`; D10
+  drops the `fees` this step carried): `template_id` is the next id in the
+  session's counter. The job is retained exactly like a template, so
   `RequestTransactionData` returns the declared txs in block order and
   `SubmitSolution` finds it. Without the flag the message is ignored (the
   D3 journey already pins that).
@@ -737,7 +737,7 @@ flag: a session opts in with `REQUIRES_JOB_VALIDATION`.
   `version`, `coinbase_tx_prefix`, `coinbase_tx_suffix`, `wtxid_list`,
   `excess_data` (opaque here), plus `transaction_list`. No `prev_hash`:
   the TP validates on its current tip and `Success` carries that tip as
-  `prev_hash` next to `template_id` and `fees`. The TP builds the
+  `prev_hash` next to `template_id`. The TP builds the
   placeholder coinbase: `E = L − P` from the prefix (version, BIP144
   marker and flag when present, an input count that MUST be 1, the
   prevout, scriptSig length `L`, `P` bytes present; `2 ≤ L ≤ 100`,
@@ -760,6 +760,27 @@ flag: a session opts in with `REQUIRES_JOB_VALIDATION`.
   `B064K` fields (~6.5 MB).
 - **Verify:** `cargo test -p rbitcoin-sv2 --lib`.
 
+### D10 — Drop `fees` from `Success`; retain jobs like templates
+
+- **Contract:** `ProposeTemplate.Success` is `{request_id, template_id,
+  prev_hash}`. Bitcoin Core's IPC cannot produce a fee total for an
+  externally proposed block (`checkBlock` returns only reason, debug and
+  result; a `TxCollection.makeTemplate` template throws on `getTxFees`), so
+  `sv2-tp` would have to send 0, and one field with two meanings across TPs
+  is worse than none. `bad-cb-amount` already bounds the coinbase at
+  subsidy + fees and the Pool reads the claimed value from the coinbase. A
+  validated job is retained exactly as a template is: the same
+  `MAX_RETAINED` ring (oldest first) and the same stale grace after a tip
+  change. A JDS multiplexes many JDCs over one connection, so "the latest
+  validated job" is not a unit worth pinning; the 64-slot same-tip ring from
+  C1 is the guarantee, and the draft (§4.3) now says so.
+- **Red:** `job_validation_messages_round_trip` and `expect_job_success`
+  without `fees`; Red was `E0063` on the struct literal.
+- **Green:** the field, `Verdict::Valid { fees, .. }` and the reply plumbing
+  removed. `check_block_proposal` keeps returning `Ok(fees)`: D1 cross-crate
+  API that GBT proposal mode may read.
+- **Verify:** `cargo test -p rbitcoin-sv2 --lib`.
+
 ### Test budget
 
 Units: the messages round trip, `job::extranonce_len`, `rbitcoin-net`
@@ -779,11 +800,11 @@ pad. No `rbitcoin-test` node journey yet (follow-up with a JDS client).
   the flag and cost one proposal check per request. Bind to loopback or
   firewall the port (the same advice as for templates).
 - `SetupConnection.Success.flags` echoes the request flags verbatim.
-- Retention shares the `MAX_RETAINED` (3) slots with templates: on one
-  tip a JDS session that also receives constraints rebuilds (or Plan C
-  pushes) can see a validated job evicted before its solution arrives.
-  The draft asks for retention until a newer `Success` or close; a slot
-  per kind, or a larger cap for flagged sessions, is a follow-up.
+- Retention is the template rule (D10): a validated job shares the
+  session's `MAX_RETAINED` (64) ring with templates and the same stale
+  grace. Past 64 same-tip pushes and validations the oldest goes; a
+  `SubmitSolution` for it is dropped and JDC's own propagation (JDP 6.4.9)
+  covers the block.
 - A job is retained with the nBits its validation header used. On
   min-difficulty networks that can differ from the sent
   `SetNewPrevHash.n_bits` (the Plan B risk); mainnet and signet bits
@@ -800,8 +821,8 @@ pad. No `rbitcoin-test` node journey yet (follow-up with a JDS client).
   extranonce is not the scriptSig tail gets `bad-cb-decode` or a coinbase
   check failure here; the draft asks the Job Declaration Protocol to state
   the split (§6).
-- No policy is applied (the draft forbids it); `fees` lets the pool
-  price the declared coinbase.
+- No policy is applied (the draft forbids it); the Pool prices the
+  declared coinbase from the coinbase itself.
 - The JDS role itself, and a `rbitcoin-test` journey driving a JDS
   client, stay out.
 

@@ -58,7 +58,7 @@ JDC                      JDS                             TP
  |<- ProvideMissingTransactions                           |
  |-- ProvideMissingTransactions.Success ->|               |
  |                        |-- ProposeTemplate --------->|  same job + transaction_list
- |                        |<- ProposeTemplate.Success --|  template_id, prev_hash, fees
+ |                        |<- ProposeTemplate.Success --|  template_id, prev_hash
  |<- DeclareMiningJob.Success             |               |
  ...
  |-- PushSolution ------->|                               |
@@ -162,7 +162,7 @@ either `ProposeTemplate.Success` or `ProposeTemplate.Error`:
   `checkBlock` with `checkMerkleRoot=false` and `checkPow=false`.
 - The server MUST NOT reject a consensus-valid job on local policy grounds
   (standardness, minimum relay fee, mempool limits). Policy belongs to the
-  Pool, which can use `ProposeTemplate.Success.fees` for it.
+  Pool, which prices the declared coinbase from the coinbase itself.
 - The server MUST set `nBits` from its own view of the chain and MAY use its
   current time for `nTime` when it needs a header for contextual checks. The
   client does not supply them.
@@ -199,17 +199,17 @@ the job and will accept a `SubmitSolution` for it.
 | request_id  | U32       | Identifier of the original `ProposeTemplate` request                                                                                                                                  |
 | template_id | U64       | Server's identification of the validated job. Drawn from the same strictly increasing namespace as `NewTemplate.template_id`, so it can be used in `SubmitSolution` and `RequestTransactionData` |
 | prev_hash   | U256      | Hash of the server's chain tip the job was validated on, as it would appear in the block header. The client keeps it to compare against `PushSolution.prev_hash`                      |
-| fees        | U64       | Sum of the fees of the transactions in `wtxid_list`, in satoshis                                                                                                                       |
 
-The server MUST retain the validated job (its `wtxid_list`, the transactions
-it received in `transaction_list`, and the reconstructed coinbase for size
-accounting)
-until a newer `ProposeTemplate.Success` is sent on the same connection or
-the connection closes, whichever comes first. This matches the guarantee JDS
-gives JDC in Section 6.4.9: `PushSolution` is only guaranteed to be valid for
-the most recent declaration. The server SHOULD retain jobs validated against
-the previous tip for a short grace period after a tip change, as it does for
-its own templates.
+The server MUST retain the validated job (its transactions in block order
+and the header fields a `SubmitSolution` is assembled with) under the same
+rules as its own templates: it is retired after the stale grace that follows
+a tip change, and it MAY be evicted oldest-first by a per-connection cap on
+retained templates and jobs, which SHOULD be at least 64. A JDS multiplexes
+many JDCs over one connection, so no single job is "the latest"; a
+`SubmitSolution` for an id the server no longer retains is dropped (Section
+7.8 has no reply) and `RequestTransactionData` for it answers
+`stale-template-id` or `template-id-not-found`. See Section 7.1 for what the
+JDS does with that.
 
 ### 4.4 `ProposeTemplate.Error` (Server -> Client)
 
@@ -291,9 +291,7 @@ All four are core messages and carry `extension_type = 0x0000`.
   not by a dedicated code.
 - **Coinbase-only mode.** Out of scope. In Coinbase-only mode neither Pool nor
   JDS learns the transaction set, so a node has nothing to validate beyond the
-  coinbase, which `SetCustomMiningJob` already carries to the Pool. A
-  zero-knowledge extension could later reuse `ProposeTemplate.Success.fees`
-  as the quantity being proven.
+  coinbase, which `SetCustomMiningJob` already carries to the Pool.
 - **Node load.** Full block validation without proof of work is CPU-heavy and
   in Bitcoin Core currently serialises on `cs_main`, so validations on a node
   that also produces the Pool's templates can delay block processing
@@ -306,10 +304,19 @@ All four are core messages and carry `extension_type = 0x0000`.
   checks and the block weight limit before decoding or storing transactions,
   so that a 32-byte `wtxid` cannot be amplified into a large allocation
   (`sv2-apps#796`, `#795`).
-- **Why `fees` is in `Success`.** The Pool needs the fee revenue of a Custom
-  Job to compare the declared coinbase value against what the template is
-  worth (`sv2-apps#610`). The server computes it while checking the coinbase
-  output value, so returning it costs nothing.
+- **Why `fees` is not in `Success`.** An earlier draft returned the fee total
+  so the Pool could price the declared coinbase (`sv2-apps#610`). Bitcoin
+  Core's IPC cannot produce it for an externally proposed block: `checkBlock`
+  returns only a reason, a debug string and a result, and a template from
+  `TxCollection.makeTemplate` throws on `getTxFees`, so `sv2-tp` would have
+  to send 0. One field with two meanings across TPs is worse than none. The
+  coinbase check already bounds the payout at subsidy plus fees
+  (`bad-cb-amount`), and the Pool reads the claimed value from the coinbase.
+- **`template_id` is per connection.** `ProposeTemplate.Success.template_id`
+  MUST be unique within a connection and MUST NOT collide with a
+  `NewTemplate.template_id` sent on it. The server MAY draw it from a
+  per-connection counter (rbitcoin) or a server-global one (`sv2-tp`); a
+  client MUST NOT compare ids across connections.
 - **Why positions, not `wtxid`s, in `MissingTransactions`.** Section 6.4.7
   uses positions, so the JDS relays the list unchanged. A `wtxid` list would
   force the JDS to translate.
@@ -330,6 +337,11 @@ All four are core messages and carry `extension_type = 0x0000`.
 | `ProposeTemplate.Success`          | `DeclareMiningJob.Success`; store `template_id` and `prev_hash` with the declaration |
 | `ProposeTemplate.Error`            | `DeclareMiningJob.Error` with the error code                                  |
 | `PushSolution`                       | Check `prev_hash` against the stored one, then `SubmitSolution(template_id, version, ntime, nonce, coinbase_tx)` |
+
+Solutions are keyed by `template_id`. When the server has already dropped
+the job (Section 4.3), the `SubmitSolution` is lost silently; the JDS needs no
+fallback, because Section 6.4.9 already has JDC propagate the block itself and
+the JDS submission is redundancy.
 
 No mempool mirror is needed on the JDS side. In `sv2-apps` this is a second
 `JobValidationEngine` implementation next to `BitcoinCoreIPCEngine`, and the
@@ -359,7 +371,7 @@ dependency.
   (`request_id`, `version`, `coinbase_tx_prefix`, `coinbase_tx_suffix`,
   `wtxid_list`, `excess_data`), with no `prev_hash`. This draft follows it
   and adds the missing-transactions reply, `transaction_list` on the repeated
-  request, and `prev_hash` and `fees` in `Success`.
+  request, and `prev_hash` in `Success`.
 - [sv2-spec#217](https://github.com/stratum-mining/sv2-spec/issues/217):
   "consider adding a new TDP message for custom job validation" (plebhash,
   2026-08-31). Proposes message `X`, `X.Error` triggering

@@ -52,7 +52,6 @@ pub struct ProposeTemplateSuccess<'decoder> {
     pub request_id: u32,
     pub template_id: u64,
     pub prev_hash: U256<'decoder>,
-    pub fees: u64,
 }
 
 /// TP → client: the job was not validated.
@@ -118,7 +117,6 @@ mod tests {
                 request_id: 7,
                 template_id: u64::MAX,
                 prev_hash: U256::from(&h1),
-                fees: 12_345,
             },
             &mut bytes,
         );

@@ -1533,15 +1533,9 @@ async fn expect_job_error(c: &mut TpClient, request_id: u32, code: &str) {
     assert_eq!(e.error_code.as_utf8_or_hex(), code);
 }
 
-/// `Success` names the tip the job was validated on, next to the id it is
-/// retained under and the declared fee sum.
-async fn expect_job_success(
-    c: &mut TpClient,
-    tc: &TestChain,
-    request_id: u32,
-    template_id: u64,
-    fees: u64,
-) {
+/// `Success` names the tip the job was validated on next to the id it is
+/// retained under, and nothing else: the fee total is not on the wire.
+async fn expect_job_success(c: &mut TpClient, tc: &TestChain, request_id: u32, template_id: u64) {
     let mut f = recv_in_time(c).await;
     assert_eq!(
         f.msg_type, MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS,
@@ -1550,10 +1544,7 @@ async fn expect_job_success(
     );
     let ok: ProposeTemplateSuccess = binary_sv2::from_bytes(&mut f.payload).expect("decode");
     let tip = tc.chain.tip_header().expect("tip").block_hash();
-    assert_eq!(
-        (ok.request_id, ok.template_id, ok.fees),
-        (request_id, template_id, fees)
-    );
+    assert_eq!((ok.request_id, ok.template_id), (request_id, template_id));
     assert_eq!(ok.prev_hash.as_ref(), tip.as_byte_array(), "validated tip");
 }
 
@@ -1576,8 +1567,8 @@ async fn expect_retained(c: &mut TpClient, template_id: u64, txs: &[&Transaction
 
 /// docs/sv2-job-validation.md §4.1–4.3: a job whose txs are all in the
 /// mempool and whose coinbase pays subsidy + fees is answered `Success` with
-/// the next template id, the declared fee sum, and the tip it was validated
-/// on, and is retained like a template.
+/// the next template id and the tip it was validated on, and is retained
+/// like a template.
 #[tokio::test(flavor = "multi_thread")]
 async fn propose_template_prices_and_retains_the_declared_job() {
     let tc = shared_regtest(2);
@@ -1598,7 +1589,7 @@ async fn propose_template_prices_and_retains_the_declared_job() {
     Job::declare(&tc, 9, &coinbase, &[&a, &b])
         .send(&mut c)
         .await;
-    expect_job_success(&mut c, &tc, 9, last + 1, 5_000).await;
+    expect_job_success(&mut c, &tc, 9, last + 1).await;
     expect_retained(&mut c, last + 1, &[&a, &b]).await;
 
     tp.shutdown().await;
@@ -1636,7 +1627,7 @@ async fn propose_template_asks_for_and_accepts_missing_transactions() {
 
     job.supplied = vec![serialize(&b)];
     job.send(&mut c).await;
-    expect_job_success(&mut c, &tc, 4, last + 1, 5_000).await;
+    expect_job_success(&mut c, &tc, 4, last + 1).await;
     expect_retained(&mut c, last + 1, &[&a, &b]).await;
 
     tp.shutdown().await;
@@ -1753,7 +1744,7 @@ async fn submit_solution_for_a_validated_job_becomes_the_tip() {
     Job::declare(&tc, 1, &coinbase, &[&a, &b])
         .send(&mut c)
         .await;
-    expect_job_success(&mut c, &tc, 1, last + 1, 5_000).await;
+    expect_job_success(&mut c, &tc, 1, last + 1).await;
 
     let mut script_sig = bip34_height_script(height);
     script_sig.extend_from_slice(&[0x42; EXTRANONCE_LEN]);
