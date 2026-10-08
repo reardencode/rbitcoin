@@ -633,9 +633,9 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   `ProposeTemplate` whose `prev_hash` is the tip (field dropped in D9),
   whose `wtxid_list` is all in the mempool, and whose placeholder coinbase
   pays ≤ subsidy + fees
-  is answered `Success{request_id, template_id}` (D9 adds `prev_hash`; D10
-  drops the `fees` this step carried): `template_id` is the next id in the
-  session's counter. The job is retained exactly like a template, so
+  is answered `Success{request_id, template_id, fees}` (D9 adds
+  `prev_hash`): `template_id` is the next id in the session's counter. The
+  job is retained exactly like a template, so
   `RequestTransactionData` returns the declared txs in block order and
   `SubmitSolution` finds it. Without the flag the message is ignored (the
   D3 journey already pins that).
@@ -764,25 +764,28 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   `B064K` fields (~6.5 MB).
 - **Verify:** `cargo test -p rbitcoin-sv2 --lib`.
 
-### D10 — Drop `fees` from `Success`; retain jobs like templates
+### D10 — Return `fees` in `Success`; retain jobs like templates
 
 - **Contract:** `ProposeTemplate.Success` is `{request_id, template_id,
-  prev_hash}`. Bitcoin Core's IPC cannot produce a fee total for an
-  externally proposed block (`checkBlock` returns only reason, debug and
-  result; a `TxCollection.makeTemplate` template throws on `getTxFees`), so
-  `sv2-tp` would have to send 0, and one field with two meanings across TPs
-  is worse than none. `bad-cb-amount` already bounds the coinbase at
-  subsidy + fees and the Pool reads the claimed value from the coinbase. A
-  validated job is retained exactly as a template is: the same
+  prev_hash, fees}`; `fees` is the fee total of the declared transactions as
+  `ChainHub::check_block_proposal` computed it. Only the validating node can
+  derive it (sum of inputs minus sum of outputs per transaction needs the
+  UTXO set) and it computes it anyway for `bad-cb-amount`; the Pool
+  otherwise has only the coinbase's claimed value, which that check makes a
+  lower bound. Bitcoin Core's IPC does not expose it today (`checkBlock`
+  returns only reason, debug and result; a `TxCollection.makeTemplate`
+  template throws on `getTxFees`); the gap is raised on bitcoin/bitcoin#35671
+  rather than designed around. A validated job is retained exactly as a
+  template is: the same
   `MAX_RETAINED` ring (oldest first) and the same stale grace after a tip
   change. A JDS multiplexes many JDCs over one connection, so "the latest
   validated job" is not a unit worth pinning; the 64-slot same-tip ring from
   C1 is the guarantee, and the draft (§4.3) now says so.
 - **Red:** `job_validation_messages_round_trip` and `expect_job_success`
-  without `fees`; Red was `E0063` on the struct literal.
-- **Green:** the field, `Verdict::Valid { fees, .. }` and the reply plumbing
-  removed. `check_block_proposal` keeps returning `Ok(fees)`: D1 cross-crate
-  API that GBT proposal mode may read.
+  with `fees`; Red was `E0560` on the struct literal.
+- **Green:** the field, `Verdict::Valid { fees, job }` and the reply
+  plumbing. `check_block_proposal` returns `Ok(fees)`: D1 cross-crate API
+  that GBT proposal mode also reads.
 - **Verify:** `cargo test -p rbitcoin-sv2 --lib`.
 
 ### Test budget

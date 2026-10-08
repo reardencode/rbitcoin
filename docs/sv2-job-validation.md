@@ -1,3 +1,4 @@
+| fees        | U64       | Sum of the fees of the transactions in `wtxid_list`, in satoshis, as computed by the TP's validation                                                                                   |
 # Stratum V2: Custom Job Validation over the Template Distribution Protocol
 
 Draft for [sv2-spec discussion #239](https://github.com/stratum-mining/sv2-spec/discussions/239)
@@ -58,7 +59,7 @@ JDC                      JDS                             TP
  |<- ProvideMissingTransactions                           |
  |-- ProvideMissingTransactions.Success ->|               |
  |                        |-- ProposeTemplate --------->|  same job + transaction_list
- |                        |<- ProposeTemplate.Success --|  template_id, prev_hash
+ |                        |<- ProposeTemplate.Success --|  template_id, prev_hash, fees
  |<- DeclareMiningJob.Success             |               |
  ...
  |-- PushSolution ------->|                               |
@@ -304,14 +305,15 @@ All four are core messages and carry `extension_type = 0x0000`.
   checks and the block weight limit before decoding or storing transactions,
   so that a 32-byte `wtxid` cannot be amplified into a large allocation
   (`sv2-apps#796`, `#795`).
-- **Why `fees` is not in `Success`.** An earlier draft returned the fee total
-  so the Pool could price the declared coinbase (`sv2-apps#610`). Bitcoin
-  Core's IPC cannot produce it for an externally proposed block: `checkBlock`
-  returns only a reason, a debug string and a result, and a template from
-  `TxCollection.makeTemplate` throws on `getTxFees`, so `sv2-tp` would have
-  to send 0. One field with two meanings across TPs is worse than none. The
-  coinbase check already bounds the payout at subsidy plus fees
-  (`bad-cb-amount`), and the Pool reads the claimed value from the coinbase.
+- **Why `fees` is in `Success`.** The fee total (sum of inputs minus sum of
+  outputs per transaction) needs the UTXO set, so only the validating node
+  can derive it, and it computes it anyway for `bad-cb-amount`. Without it
+  the Pool has only the value the coinbase claims, which that check makes a
+  lower bound on the real total, not the total (`sv2-apps#610`). Bitcoin
+  Core's IPC does not expose it today: `checkBlock` returns only a reason, a
+  debug string and a result, and a template from `TxCollection.makeTemplate`
+  throws on `getTxFees`. That gap is raised on bitcoin/bitcoin#35671 rather
+  than designed around.
 - **`template_id` is per connection.** `ProposeTemplate.Success.template_id`
   MUST be unique within a connection and MUST NOT collide with a
   `NewTemplate.template_id` sent on it. The server MAY draw it from a
@@ -334,7 +336,7 @@ All four are core messages and carry `extension_type = 0x0000`.
 | `DeclareMiningJob`                   | `ProposeTemplate` with `version`, `coinbase_tx_prefix`, `coinbase_tx_suffix`, `wtxid_list`, `excess_data` copied unchanged, empty `transaction_list` |
 | `ProposeTemplate.MissingTransactions` | `ProvideMissingTransactions` with the position list copied                  |
 | `ProvideMissingTransactions.Success` | `ProposeTemplate` again with `transaction_list` copied                       |
-| `ProposeTemplate.Success`          | `DeclareMiningJob.Success`; store `template_id` and `prev_hash` with the declaration |
+| `ProposeTemplate.Success`          | `DeclareMiningJob.Success`; store `template_id` and `prev_hash` with the declaration; pass `fees` to the Pool, which prices the declared coinbase against it |
 | `ProposeTemplate.Error`            | `DeclareMiningJob.Error` with the error code                                  |
 | `PushSolution`                       | Check `prev_hash` against the stored one, then `SubmitSolution(template_id, version, ntime, nonce, coinbase_tx)` |
 

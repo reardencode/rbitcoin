@@ -16,8 +16,8 @@ pub(crate) enum Verdict {
     /// 0-indexed positions in `wtxid_list` neither the mempool nor
     /// `transaction_list` resolves.
     Missing(Vec<u16>),
-    /// Consensus-valid on the tip: the job to retain.
-    Valid(Job),
+    /// Consensus-valid on the tip: the fee total and the job to retain.
+    Valid { fees: u64, job: Job },
     /// `ProposeTemplate.Error.error_code`: a Core reject string or one of
     /// the draft's own codes.
     Rejected(String),
@@ -119,18 +119,20 @@ fn check(chain: &ChainHub, m: &ProposeTemplate) -> io::Result<Verdict> {
     // (every spend against the chain, structure, weight, sigops, coinbase
     // value; no scripts, no PoW), on the blocking pool. A JDS sends one per
     // declaration; a flood costs blocking threads, not the reactor.
-    if let Err(code) = chain.check_block_proposal(&block) {
-        return Ok(Verdict::Rejected(code));
-    }
+    let fees = match chain.check_block_proposal(&block) {
+        Ok(fees) => fees,
+        Err(code) => return Ok(Verdict::Rejected(code)),
+    };
     let txs = block
         .txdata
         .split_off(1)
         .into_iter()
         .map(Arc::new)
         .collect();
-    Ok(Verdict::Valid(
-        next.job(rbitcoin_store::merkle_branch(&leaves, 0), txs),
-    ))
+    Ok(Verdict::Valid {
+        fees,
+        job: next.job(rbitcoin_store::merkle_branch(&leaves, 0), txs),
+    })
 }
 
 /// §4.1: `coinbase_tx_prefix` ends inside the scriptSig and

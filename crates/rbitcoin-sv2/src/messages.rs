@@ -46,12 +46,15 @@ pub struct ProposeTemplateMissingTransactions<'decoder> {
 
 /// TP → client: the job is valid on the tip `prev_hash` and retained under
 /// `template_id`, which shares the `NewTemplate.template_id` namespace.
+/// `fees` is the fee total of the declared transactions as the node's
+/// validation computed it.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[doc(hidden)]
 pub struct ProposeTemplateSuccess<'decoder> {
     pub request_id: u32,
     pub template_id: u64,
     pub prev_hash: U256<'decoder>,
+    pub fees: u64,
 }
 
 /// TP → client: the job was not validated.
@@ -117,6 +120,7 @@ mod tests {
                 request_id: 7,
                 template_id: u64::MAX,
                 prev_hash: U256::from(&h1),
+                fees: 12_345,
             },
             &mut bytes,
         );
