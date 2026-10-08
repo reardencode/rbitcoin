@@ -895,6 +895,15 @@ several times the accept wall). No `rbitcoin-test` node journey yet
   client, stay out.
 
 ---
+- `check_block_proposal` decodes a parent transaction once per spending
+  input (`chain_txout` → `tx_output_at_fk` → full parent decode), so a
+  fan-out parent with N children costs N decodes of the same tx: the D11
+  journey's 1200-input proposal takes ~1.4 s for that reason alone.
+  Follow-up in `rbitcoin-net`: cache decoded parents for the duration of
+  one check (RAM trade bounded by the block's distinct parents). The D11
+  journey's timing margin depends on this slowness; when the cache lands
+  the journey needs a different heavy shape (many distinct parents) or a
+  different observable.
 
 ## Test budget
 
