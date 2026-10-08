@@ -299,7 +299,10 @@ All four are core messages and carry `extension_type = 0x0000`.
   (`sv2-apps#120`). A server MAY process `ProposeTemplate` requests
   sequentially and MAY bound the number queued per connection; operators
   SHOULD run a dedicated TP for job validation. A client SHOULD apply a
-  timeout before falling back.
+  timeout before falling back. A server SHOULD NOT let a validation delay
+  the other messages on the connection, `SubmitSolution` above all
+  (rbitcoin validates off the session loop, four at a time per connection,
+  the rest queued in arrival order).
 - **Untrusted input.** Everything in `ProposeTemplate` originates from a
   JDC. The server MUST enforce the `duplicate-wtxid` and `bad-missing-tx`
   checks and the block weight limit before decoding or storing transactions,

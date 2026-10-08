@@ -23,32 +23,24 @@ pub(crate) enum Verdict {
     Rejected(String),
 }
 
-/// Reads the store and the mempool: blocking region only. `None`: the
-/// payload is not a `ProposeTemplate`.
-pub(crate) fn validate(
-    chain: &ChainHub,
-    mut payload: Vec<u8>,
-) -> io::Result<Option<(u32, Verdict)>> {
-    let Ok(m) = binary_sv2::from_bytes::<ProposeTemplate>(&mut payload) else {
-        return Ok(None);
-    };
-    Ok(Some((m.request_id, check(chain, &m)?)))
+/// `None`: the payload is not a `ProposeTemplate`.
+pub(crate) fn decode(payload: &mut [u8]) -> Option<ProposeTemplate<'_>> {
+    binary_sv2::from_bytes(payload).ok()
 }
 
-/// §4.1 and §4.4, in order. The draft's own codes run before any mempool
-/// lookup or transaction decode, so a 32-byte wtxid is never amplified into
-/// a copy or an allocation the job did not declare.
-fn check(chain: &ChainHub, m: &ProposeTemplate) -> io::Result<Verdict> {
-    let rejected = |code: &str| Ok(Verdict::Rejected(code.into()));
-    // Same gate as the templates: a stale tip validates nothing.
-    if chain.in_ibd() {
-        return rejected("job-validation-unavailable");
-    }
-    let next = template::next_header(chain)?;
+/// §4.1 and §4.4: the draft's own codes, before any mempool lookup or
+/// transaction decode, so a 32-byte wtxid is never amplified into a copy or
+/// an allocation the job did not declare. `Ok` is the supplied txs keyed by
+/// the wtxid of their bytes as sent; `Err` is the `Error.error_code`. No
+/// chain read, so the session runs it on arrival; [`validate`] runs it
+/// again and stays complete on its own.
+pub(crate) fn precheck<'m>(
+    m: &'m ProposeTemplate<'_>,
+) -> Result<HashMap<[u8; 32], &'m [u8]>, &'static str> {
     let mut declared = HashSet::with_capacity(m.wtxid_list.len());
     for w in m.wtxid_list.iter() {
         if !declared.insert(w.as_ref()) {
-            return rejected("duplicate-wtxid");
+            return Err("duplicate-wtxid");
         }
     }
     // The wtxid is the hash of the serialization as sent, so a supplied tx
@@ -64,8 +56,36 @@ fn check(chain: &ChainHub, m: &ProposeTemplate) -> io::Result<Verdict> {
         })
         .collect();
     if supplied.keys().any(|w| !declared.contains(&w[..])) {
-        return rejected("bad-missing-tx");
+        return Err("bad-missing-tx");
     }
+    Ok(supplied)
+}
+
+/// Reads the store and the mempool: blocking region only. `payload` was
+/// [`decode`]d once already; a second failure is a broken invariant.
+pub(crate) fn validate(chain: &ChainHub, mut payload: Vec<u8>) -> io::Result<(u32, Verdict)> {
+    let m = decode(&mut payload).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "sv2: ProposeTemplate stopped decoding",
+        )
+    })?;
+    Ok((m.request_id, check(chain, &m)?))
+}
+
+/// §4.1 and §4.4 in order: the gate, [`precheck`] again, the coinbase,
+/// the resolution, then the proposal check.
+fn check(chain: &ChainHub, m: &ProposeTemplate) -> io::Result<Verdict> {
+    let rejected = |code: &str| Ok(Verdict::Rejected(code.into()));
+    // Same gate as the templates: a stale tip validates nothing.
+    if chain.in_ibd() {
+        return rejected("job-validation-unavailable");
+    }
+    let next = template::next_header(chain)?;
+    let supplied = match precheck(m) {
+        Ok(supplied) => supplied,
+        Err(code) => return rejected(code),
+    };
     let Some(extranonce) = extranonce_len(m.coinbase_tx_prefix.as_ref()) else {
         return rejected("bad-cb-decode");
     };

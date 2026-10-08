@@ -1643,13 +1643,14 @@ async fn propose_template_asks_for_and_accepts_missing_transactions() {
 }
 
 /// §4.1 and §4.4: everything in a job comes from a JDC. The checks run in
-/// order before any mempool lookup or transaction decode: a repeated wtxid,
-/// a supplied tx nobody declared (or one that does not decode), a coinbase
-/// prefix that does not parse or a coinbase that does not decode, then the
-/// proposal check's own reject string: a declaration from before the tip
-/// moved fails its BIP34 height, an overpaying coinbase its amount. While
-/// the tip is stale (IBD) every job is `job-validation-unavailable`.
-/// Nothing is retained on an error.
+/// order before any mempool lookup or transaction decode: a repeated wtxid
+/// or a supplied tx nobody declared is refused on arrival, even while the
+/// tip is stale (IBD) and every other job is `job-validation-unavailable`;
+/// then a declared blob that does not decode, a coinbase prefix that does
+/// not parse or a coinbase that does not decode, then the proposal check's
+/// own reject string: a declaration from before the tip moved fails its
+/// BIP34 height, an overpaying coinbase its amount. Nothing is retained on
+/// an error.
 #[tokio::test(flavor = "multi_thread")]
 async fn propose_template_rejects_untrusted_input_in_order() {
     let tc = shared_regtest(2);
@@ -1669,6 +1670,10 @@ async fn propose_template_rejects_untrusted_input_in_order() {
         .send(&mut c)
         .await;
     expect_job_error(&mut c, 1, "job-validation-unavailable").await;
+    Job::declare(&tc, 10, &coinbase, &[&a, &a])
+        .send(&mut c)
+        .await;
+    expect_job_error(&mut c, 10, "duplicate-wtxid").await;
     mock_live_tip(&tc);
     c.coinbase_output_constraints(0, 0).await.unwrap();
     let last = expect_template(&mut c, &tc, &[&a, &b], true).await;
@@ -1784,6 +1789,147 @@ async fn submit_solution_for_a_validated_job_becomes_the_tip() {
     assert_eq!(
         tc.chain.tip_header().unwrap().block_hash(),
         header.block_hash()
+    );
+
+    tp.shutdown().await;
+}
+
+/// A proposal's validation runs off the session loop: a
+/// `RequestTransactionData` and a `SubmitSolution` sent while a heavy
+/// `ProposeTemplate` is still validating are answered, and the solution
+/// becomes the tip and pushes its `NewTemplate`, before the proposal's reply,
+/// which then takes the next template id and names the tip it was validated
+/// on. The proposal supplies 1200 spends of one confirmed fan-out, so
+/// validating it is the costly frame (over a second unoptimized; most of the
+/// test's wall) while the solved block is coinbase-only. The same proposal
+/// alone measures that wall first. The request, which has no blocking work
+/// and no disk behind it, must be answered in a small fraction of the
+/// validation it overlapped, or the order would be luck, not the contract;
+/// the solution's accept has a tip write (an fsync) behind it, so its margin
+/// is the validation wall itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_template_validation_does_not_delay_other_frames() {
+    let tc = shared_regtest(1);
+    let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
+    let outs = 1_200u64;
+    let each = (50_0000_0000 - 10_000) / outs;
+    let mut fanout = spend(tc.coinbases[0], 10_000, cheap.clone());
+    fanout.output = vec![
+        TxOut {
+            value: Amount::from_sat(each),
+            script_pubkey: cheap.clone(),
+        };
+        outs as usize
+    ];
+    let tip = tc.chain.tip_header().expect("tip");
+    let h = tc.chain.query.tip_height().expect("tip height").0;
+    let block = mine_regtest_paying(
+        tip.block_hash(),
+        tip.time + 1,
+        h + 1,
+        cheap.clone(),
+        vec![fanout.clone()],
+    );
+    tc.chain.accept_block(block).expect("accept fan-out");
+    let fanout_txid = fanout.compute_txid();
+    let spends: Vec<Transaction> = (0..outs as u32)
+        .map(|vout| Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: fanout_txid,
+                    vout,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(each - 1_000),
+                script_pubkey: cheap.clone(),
+            }],
+        })
+        .collect();
+    let declared: Vec<&Transaction> = spends.iter().collect();
+
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id,
+        version,
+        mut header,
+        coinbase,
+    } = first_template(&tc, REQUIRES_JOB_VALIDATION).await;
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let fees = outs * 1_000;
+    let mut job = Job::declare(
+        &tc,
+        1,
+        &job_coinbase(height, subsidy + fees, &declared),
+        &declared,
+    );
+    // Supplied, not pooled: the template above stays coinbase-only.
+    job.supplied = spends.iter().map(serialize).collect();
+
+    let asked = tokio::time::Instant::now();
+    job.send(&mut c).await;
+    expect_job_success(&mut c, &tc, 1, template_id + 1, fees).await;
+    let alone = asked.elapsed();
+
+    while header.validate_pow(header.target()).is_err() {
+        header.nonce += 1;
+    }
+    job.request_id = 2;
+    let proposed = tokio::time::Instant::now();
+    job.send(&mut c).await;
+    // Past the tip check at the head of the proposal check (a few percent
+    // of the wall), so the solution cannot cut this validation short.
+    tokio::time::sleep(alone / 8).await;
+    let requested = tokio::time::Instant::now();
+    c.request_transaction_data(template_id).await.unwrap();
+    c.submit_solution(template_id, version, header.time, header.nonce, &coinbase)
+        .await
+        .unwrap();
+    let f = recv_in_time(&mut c).await;
+    let requested = requested.elapsed();
+    assert_eq!(
+        f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
+        "the request's reply must precede the proposal's (validation alone {alone:?})"
+    );
+    let f = recv_in_time(&mut c).await;
+    assert_eq!(
+        f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE,
+        "the solved tip's template must precede the proposal reply"
+    );
+    assert_eq!(
+        tc.chain.tip_header().unwrap().block_hash(),
+        header.block_hash()
+    );
+    let pushed = check_template(&mut c, &tc, f, &[], true).await;
+    assert_eq!(pushed, template_id + 2);
+
+    let mut f = recv_in_time(&mut c).await;
+    let replied = proposed.elapsed();
+    assert_eq!(
+        f.msg_type, MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS,
+        "{:?}",
+        f.payload
+    );
+    let ok: ProposeTemplateSuccess = binary_sv2::from_bytes(&mut f.payload).expect("decode");
+    assert_eq!(
+        (ok.request_id, ok.template_id, ok.fees),
+        (2, template_id + 3, fees)
+    );
+    assert_eq!(
+        ok.prev_hash.as_ref(),
+        header.prev_blockhash.as_byte_array(),
+        "validated on the tip it started on"
+    );
+    assert!(
+        requested * 4 < replied,
+        "request answered in {requested:?} against a validation of {replied:?}"
     );
 
     tp.shutdown().await;

@@ -11,6 +11,9 @@ Added
   `SubmitSolution` accepts like one of the node's own templates; the job is
   retained like one too (same ring, same stale grace). Duplicated,
   undeclared, or malformed input is refused before anything is decoded.
+  Validation runs off the session loop, up to four at once per
+  connection, so a `SubmitSolution` or a tip push never waits behind
+  another client's proposal.
 
 Changed
 

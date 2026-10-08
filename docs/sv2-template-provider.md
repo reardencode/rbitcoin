@@ -81,12 +81,14 @@ Do not copy them here.
 - `binary_sv2` byte-buffer types and `noise_sv2`'s `secp256k1` 0.28 stay
   inside `rbitcoin-sv2`; consensus decode uses the workspace
   `rust-bitcoin`. No sv2 types in other crates' APIs.
-- Reactor rule: template builds and solution assembly run in a blocking
-  region, never on tokio workers. `MempoolHub` accessors assert
-  not-reactor. Sessions that share a previous-block hash, coinbase size,
-  coinbase sigops, and `template_updates` share one build. The second
-  session waits on its task before it takes a blocking-pool thread. A
-  missed build (`None`) is not reused.
+- Reactor rule: template builds, solution assembly, and proposal
+  validation run in a blocking region, never on tokio workers.
+  `MempoolHub` accessors assert not-reactor. Sessions that share a
+  previous-block hash, coinbase size, coinbase sigops, and
+  `template_updates` share one build. The second session waits on its task
+  before it takes a blocking-pool thread. A missed build (`None`) is not
+  reused. A proposal validation also runs off its session loop (D11): the
+  session never waits on one.
 - Named RAM trade (CONTRIBUTING 9): each session retains its templates
   (up to 64) holding the mempool's own `Arc<Transaction>` bodies, about
   24 KB of pointers per full template while the txs are still pooled.
@@ -687,14 +689,15 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
 ### D5b — Untrusted-input rejections
 
 - **Contract:** `Error.error_code` in this order, before any mempool
-  lookup or transaction decode: `job-validation-unavailable` while
-  `in_ibd()` (the template gate), `stale-prevhash` (dropped in D9),
-  `duplicate-wtxid`,
-  `bad-missing-tx` (a supplied tx whose hash is not in `wtxid_list`, or a
-  declared blob that does not decode), `bad-cb-decode` (this TP's code;
-  the draft has none for an undecodable coinbase), then the proposal
-  check's reject string (`bad-cb-amount` for an overpaying coinbase).
-  Nothing is retained and no id is taken on an error.
+  lookup or transaction decode: `duplicate-wtxid` and `bad-missing-tx` (a
+  supplied tx whose hash is not in `wtxid_list`) on arrival, with no chain
+  read (D11 moved them ahead of the gate); then, on the blocking thread,
+  `job-validation-unavailable` while `in_ibd()` (the template gate),
+  `stale-prevhash` (dropped in D9), `bad-missing-tx` for a declared blob
+  that does not decode, `bad-cb-decode` (this TP's code; the draft has none
+  for an undecodable coinbase), then the proposal check's reject string
+  (`bad-cb-amount` for an overpaying coinbase). Nothing is retained and no
+  id is taken on an error.
 - **Red:** `propose_template_rejects_untrusted_input_in_order` — seven
   sends on one session, then `RequestTransactionData(last + 1)` answers
   `template-id-not-found`. Red was `Success` for the first send.
@@ -788,13 +791,61 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   that GBT proposal mode also reads.
 - **Verify:** `cargo test -p rbitcoin-sv2 --lib`.
 
+### D11 — Validation off the session loop
+
+- **Contract:** a `ProposeTemplate` validation never delays the other
+  frames or loop branches of its session. `SubmitSolution`,
+  `RequestTransactionData`, tip pushes, fee checks, and retire timers run
+  while a validation is in flight; `ProposeTemplate.Success` / `.Error` is
+  sent when the validation completes, paired by `request_id`, and the job
+  is retained when that reply is sent (so it takes the template id current
+  then). Up to `MAX_INFLIGHT_VALIDATIONS` (4) validations run at once per
+  session; further proposals wait in arrival order and are not refused.
+  Session end aborts the in-flight set. Before D11 `on_frame` awaited the
+  validation inline inside the session `select!`, so a JDS multiplexing
+  many JDCs over one connection could have a found block's
+  `SubmitSolution` sit behind another JDC's validation.
+- **Red:** `propose_template_validation_does_not_delay_other_frames` —
+  1200 supplied spends of one confirmed fan-out make the validation the
+  costly frame (over a second unoptimized: `tx_output_at_fk` decodes the
+  fan-out's outputs once per input) while the solved block is
+  coinbase-only. The proposal alone measures that wall; the same proposal
+  is sent again, then past its tip check (an eighth of that wall) a
+  `RequestTransactionData` and a `SubmitSolution` for the empty template.
+  The request's reply and the `NewTemplate` for the solved tip must arrive
+  before the proposal's reply, which takes the next id and names the tip
+  it started on. The request, with no blocking work behind it, must be
+  answered in under a quarter of the validation it overlapped, or the
+  order was luck, not the contract; the solution's margin is the wall
+  itself, since its accept ends in a tip write (an fsync, 94 ms here and
+  647 ms once under the parallel suite), which a ratio guard cannot sit
+  on. Red was `Success` as the first frame, the solution 527 ms behind a
+  696 ms validation.
+- **Green:** `on_frame` decodes the proposal and runs `job::precheck`
+  (`duplicate-wtxid`, `bad-missing-tx`; no chain read) on arrival, replying
+  at once on failure; otherwise the payload joins a FIFO and
+  `start_validations` fills a `JoinSet` of `spawn_blocking` +
+  `BlockingRegion` tasks up to the bound. A new `select!` arm takes each
+  finished verdict and calls the one `reply_propose` path (retain on
+  `Valid`, then the reply). `job::validate` stays complete on its own
+  (the precheck runs again inside it).
+- **CPU and RAM trade:** four full proposal checks at once per session,
+  each on a blocking thread with up to a block of decoded txs; waiting
+  proposals hold their payloads (≤ `MAX_PROPOSE_TEMPLATE_PAYLOAD` each),
+  depth bounded by the client's burst (one job per JDC per tip change for a
+  JDS), not by this TP: see Risks.
+- **Verify:** `cargo test -p rbitcoin-sv2 --lib`; the journey 20 times in
+  a loop.
+
 ### Test budget
 
 Units: the messages round trip, `job::extranonce_len`, `rbitcoin-net`
 `check_block_proposal_*`, `rbitcoin-rpc` GBT proposal `bad-cb-amount`.
 Journeys in `rbitcoin-sv2`
-`template_tests`: four, each one TP and one session on the shared regtest
-pad. No `rbitcoin-test` node journey yet (follow-up with a JDS client).
+`template_tests`: five, each one TP and one session on the shared regtest
+pad; the D11 journey is the one over 2 s (the margin needs a validation
+several times the accept wall). No `rbitcoin-test` node journey yet
+(follow-up with a JDS client).
 
 ### Risks / follow-ups
 
@@ -806,6 +857,16 @@ pad. No `rbitcoin-test` node journey yet (follow-up with a JDS client).
 - No operator opt-out flag: any client that can reach the port may set
   the flag and cost one proposal check per request. Bind to loopback or
   firewall the port (the same advice as for templates).
+- The waiting-proposal queue (D11) has no depth cap: a client that sends
+  well-formed, expensive proposals faster than four blocking threads
+  validate them grows it by one payload each (≤ ~6.5 MB). A refusal or a
+  flood close would cut off a JDS at a tip change, when every JDC declares
+  at once; the trust model above (who reaches the port) is the bound. A
+  byte cap with an `Error` past it is the follow-up if that model changes.
+- A job whose validation straddles a tip change is retained after the
+  push for the new tip, so it misses that tip's stale grace and stays in
+  the ring until pushed out. `Success.prev_hash` names the old tip, so the
+  JDS discards it; a solution on it is a side block, not the tip.
 - `SetupConnection.Success.flags` echoes the request flags verbatim.
 - Retention is the template rule (D10): a validated job shares the
   session's `MAX_RETAINED` (64) ring with templates and the same stale
