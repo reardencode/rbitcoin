@@ -14,8 +14,3 @@ Added
   Validation runs off the session loop, up to four at once per
   connection, so a `SubmitSolution` or a tip push never waits behind
   another client's proposal.
-
-Changed
-
-- **`getblocktemplate` proposal mode rejects an overpaying coinbase** with
-  `bad-cb-amount`, as Bitcoin Core does.

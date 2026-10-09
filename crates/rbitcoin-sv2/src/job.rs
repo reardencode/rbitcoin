@@ -137,7 +137,7 @@ fn check(chain: &ChainHub, m: &ProposeTemplate) -> io::Result<Verdict> {
     let mut block = Block { header, txdata };
     // CPU trade (CONTRIBUTING 9): one full proposal check per request
     // (every spend against the chain, structure, weight, sigops, coinbase
-    // value; no scripts, no PoW), on the blocking pool. A JDS sends one per
+    // value, scripts; no PoW), on the blocking pool. A JDS sends one per
     // declaration; a flood costs blocking threads, not the reactor.
     let fees = match chain.check_block_proposal(&block) {
         Ok(fees) => fees,

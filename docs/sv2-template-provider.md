@@ -579,10 +579,16 @@ when fees rise enough to matter, throttled. Requires Plan B.
 holds, fetches the transactions the node lacks, and submits the found block
 by `template_id`. Wire contract: [`sv2-job-validation.md`](./sv2-job-validation.md)
 (proposed TDP messages 0x77–0x7a and `SetupConnection` flag bit 0, for
-sv2-spec discussion #239, which supersedes #217). Requires Plan B and Plan C: the
-branch is stacked on `sv2/plan-c-fee-push` (reardencode PRs #949 then #951)
-for the shared `Arc<Transaction>` bodies and the 64-slot same-tip ring that
-retains validated jobs. The Core-IPC sibling implementation is
+sv2-spec discussion #239, which supersedes #217). Requires Plan B and Plan C
+(merged as #949 and #951: the shared `Arc<Transaction>` bodies and the
+64-slot same-tip ring that retains validated jobs) and the proposal-check
+stack on `ChainHub`, merged as #959, #961, #963, #967, #968, and #969. That
+check is the job-validation hot path: a JDS asks once per JDC declaration,
+dozens of times a minute per pool, so before this plan could ship it had
+to become one decode per parent (#961, #968), bounded in memory (#968),
+right about spent coins after a reorg (#968, #969), and complete (immature
+coinbases and structure before spends in #963, script execution and the
+fee-overflow checks in #967). The Core-IPC sibling implementation is
 stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
 `REQUIRES_JOB_VALIDATION`.
 
@@ -594,8 +600,10 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   `time-too-old` / `time-too-new`, every spend against the block and the
   confirmed chain, then structure (merkle, weight, sigops, BIP34 height,
   witness commitment) and the coinbase priced at subsidy + fees
-  (`bad-cb-amount`, after CheckBlock as in Core's ConnectBlock). `Ok` is
-  the fee total. No PoW, no scripts, no UTXO write.
+  (`bad-cb-amount`, after CheckBlock as in Core's ConnectBlock), then the
+  scripts of every spend (#967). `Ok` is the fee total. No PoW, no UTXO
+  write. Merged as #959; #963, #967, #968, and #969 extended it (see the
+  Plan D intro).
 - **Red:** `cargo test -p rbitcoin-net --lib check_block_proposal` — tip
   child passes, other parent rejects, `bad-cb-amount` after structure,
   `Ok(fees)`; `rbitcoin-rpc` `methods_tests` pins GBT proposal mode
@@ -664,7 +672,7 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   gains a typed `send`.
 - **CPU trade:** one full proposal check per request on the blocking pool
   (every spend against the chain, structure, weight, sigops, coinbase
-  value; no scripts, no PoW). A JDS sends one per declaration; a flood
+  value, scripts; no PoW). A JDS sends one per declaration; a flood
   costs blocking threads, not the reactor, and D3 bounds its RAM.
 - **Verify:** `cargo test -p rbitcoin-sv2 --lib`.
 
@@ -853,11 +861,6 @@ validations of 400 supplied spends). No `rbitcoin-test` node journey yet
 
 ### Risks / follow-ups
 
-- No script execution in the proposal check: mempool txs were
-  script-checked at accept; `transaction_list` txs are not. A JDC can
-  declare a job with an invalid-script tx that validates here and fails
-  at `accept_block`. Core's `TestBlockValidity` runs scripts; running
-  `confirm_scripts_phase` on the supplied txs only is the follow-up.
 - No operator opt-out flag: any client that can reach the port may set
   the flag and cost one proposal check per request. Bind to loopback or
   firewall the port (the same advice as for templates).
@@ -867,10 +870,14 @@ validations of 400 supplied spends). No `rbitcoin-test` node journey yet
   flood close would cut off a JDS at a tip change, when every JDC declares
   at once; the trust model above (who reaches the port) is the bound. A
   byte cap with an `Error` past it is the follow-up if that model changes.
-- A job whose validation straddles a tip change is retained after the
-  push for the new tip, so it misses that tip's stale grace and stays in
-  the ring until pushed out. `Success.prev_hash` names the old tip, so the
-  JDS discards it; a solution on it is a side block, not the tip.
+- A job whose validation straddles a tip change ends one of two ways.
+  Past the proposal check's tip read it is retained after the push for the
+  new tip, so it misses that tip's stale grace and stays in the ring until
+  pushed out; `Success.prev_hash` names the old tip, so the JDS discards
+  it, and a solution on it is a side block, not the tip. Before that read
+  the check rejects it (`inconclusive-not-best-prevblk`, or
+  `bad-cb-height` when the header was read after the move). The D11
+  journey accepts either.
 - `SetupConnection.Success.flags` echoes the request flags verbatim.
 - Retention is the template rule (D10): a validated job shares the
   session's `MAX_RETAINED` (64) ring with templates and the same stale
@@ -897,17 +904,6 @@ validations of 400 supplied spends). No `rbitcoin-test` node journey yet
   declared coinbase from the coinbase itself.
 - The JDS role itself, and a `rbitcoin-test` journey driving a JDS
   client, stay out.
-
----
-- `check_block_proposal` decodes a parent transaction once per spending
-  input (`chain_txout` → `tx_output_at_fk` → full parent decode), so a
-  fan-out parent with N children costs N decodes of the same tx: the D11
-  journey's 1200-input proposal takes ~1.4 s for that reason alone.
-  Follow-up in `rbitcoin-net`: cache decoded parents for the duration of
-  one check (RAM trade bounded by the block's distinct parents). The D11
-  journey's timing margin depends on this slowness; when the cache lands
-  the journey needs a different heavy shape (many distinct parents) or a
-  different observable.
 
 ## Test budget
 
