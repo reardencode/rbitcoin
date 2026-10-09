@@ -1794,24 +1794,24 @@ async fn submit_solution_for_a_validated_job_becomes_the_tip() {
     tp.shutdown().await;
 }
 
-/// A proposal's validation runs off the session loop: a
-/// `RequestTransactionData` and a `SubmitSolution` sent while a heavy
-/// `ProposeTemplate` is still validating are answered, and the solution
-/// becomes the tip and pushes its `NewTemplate`, before the proposal's reply,
-/// which then takes the next template id and names the tip it was validated
-/// on. The proposal supplies 1200 spends of one confirmed fan-out, so
-/// validating it is the costly frame (over a second unoptimized; most of the
-/// test's wall) while the solved block is coinbase-only. The same proposal
-/// alone measures that wall first. The request, which has no blocking work
-/// and no disk behind it, must be answered in a small fraction of the
-/// validation it overlapped, or the order would be luck, not the contract;
-/// the solution's accept has a tip write (an fsync) behind it, so its margin
-/// is the validation wall itself.
+/// A proposal's validation runs off the session loop. The proposal supplies
+/// a few hundred spends of one confirmed fan-out, so validating it is the
+/// costly frame (tens of milliseconds) while every template stays
+/// coinbase-only; the proposal alone measures that wall first. A
+/// `RequestTransactionData` sent right behind a second copy is answered
+/// before that copy's `Success`, in a small fraction of the validation it
+/// overlapped: the request has no blocking work behind it, so a slower
+/// answer would mean the loop waited on the validation and the order was
+/// luck. A `SubmitSolution` sent behind a third copy is accepted while that
+/// copy validates and pushes the solved tip's `NewTemplate`. Its accept ends
+/// in a tip write, so it is not ordered against the copy's reply, which is
+/// the straddle the plan names: `Success` on the tip the validation started
+/// on, or the proposal check's own reject once the tip moved first.
 #[tokio::test(flavor = "multi_thread")]
 async fn propose_template_validation_does_not_delay_other_frames() {
     let tc = shared_regtest(1);
     let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
-    let outs = 1_200u64;
+    let outs = 400u64;
     let each = (50_0000_0000 - 10_000) / outs;
     let mut fanout = spend(tc.coinbases[0], 10_000, cheap.clone());
     fanout.output = vec![
@@ -1870,7 +1870,7 @@ async fn propose_template_validation_does_not_delay_other_frames() {
         &job_coinbase(height, subsidy + fees, &declared),
         &declared,
     );
-    // Supplied, not pooled: the template above stays coinbase-only.
+    // Supplied, not pooled: the templates stay coinbase-only.
     job.supplied = spends.iter().map(serialize).collect();
 
     let asked = tokio::time::Instant::now();
@@ -1878,59 +1878,76 @@ async fn propose_template_validation_does_not_delay_other_frames() {
     expect_job_success(&mut c, &tc, 1, template_id + 1, fees).await;
     let alone = asked.elapsed();
 
-    while header.validate_pow(header.target()).is_err() {
-        header.nonce += 1;
-    }
     job.request_id = 2;
     let proposed = tokio::time::Instant::now();
     job.send(&mut c).await;
-    // Past the tip check at the head of the proposal check (a few percent
-    // of the wall), so the solution cannot cut this validation short.
-    tokio::time::sleep(alone / 8).await;
-    let requested = tokio::time::Instant::now();
     c.request_transaction_data(template_id).await.unwrap();
-    c.submit_solution(template_id, version, header.time, header.nonce, &coinbase)
-        .await
-        .unwrap();
     let f = recv_in_time(&mut c).await;
-    let requested = requested.elapsed();
+    let requested = proposed.elapsed();
     assert_eq!(
         f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
         "the request's reply must precede the proposal's (validation alone {alone:?})"
     );
-    let f = recv_in_time(&mut c).await;
-    assert_eq!(
-        f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE,
-        "the solved tip's template must precede the proposal reply"
-    );
-    assert_eq!(
-        tc.chain.tip_header().unwrap().block_hash(),
-        header.block_hash()
-    );
-    let pushed = check_template(&mut c, &tc, f, &[], true).await;
-    assert_eq!(pushed, template_id + 2);
-
-    let mut f = recv_in_time(&mut c).await;
+    expect_job_success(&mut c, &tc, 2, template_id + 2, fees).await;
     let replied = proposed.elapsed();
-    assert_eq!(
-        f.msg_type, MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS,
-        "{:?}",
-        f.payload
-    );
-    let ok: ProposeTemplateSuccess = binary_sv2::from_bytes(&mut f.payload).expect("decode");
-    assert_eq!(
-        (ok.request_id, ok.template_id, ok.fees),
-        (2, template_id + 3, fees)
-    );
-    assert_eq!(
-        ok.prev_hash.as_ref(),
-        header.prev_blockhash.as_byte_array(),
-        "validated on the tip it started on"
-    );
     assert!(
         requested * 4 < replied,
         "request answered in {requested:?} against a validation of {replied:?}"
     );
+
+    while header.validate_pow(header.target()).is_err() {
+        header.nonce += 1;
+    }
+    job.request_id = 3;
+    job.send(&mut c).await;
+    c.submit_solution(template_id, version, header.time, header.nonce, &coinbase)
+        .await
+        .unwrap();
+    let mut pushed = None;
+    let mut verdict = None;
+    for _ in 0..2 {
+        let mut f = recv_in_time(&mut c).await;
+        match f.msg_type {
+            MESSAGE_TYPE_NEW_TEMPLATE => {
+                assert_eq!(
+                    tc.chain.tip_header().unwrap().block_hash(),
+                    header.block_hash(),
+                    "the solution became the tip before its template was pushed"
+                );
+                pushed = Some(check_template(&mut c, &tc, f, &[], true).await);
+            }
+            MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS => {
+                let ok: ProposeTemplateSuccess =
+                    binary_sv2::from_bytes(&mut f.payload).expect("decode");
+                assert_eq!((ok.request_id, ok.fees), (3, fees));
+                assert_eq!(
+                    ok.prev_hash.as_ref(),
+                    header.prev_blockhash.as_byte_array(),
+                    "validated on the tip it started on"
+                );
+                verdict = Some(Some(ok.template_id));
+            }
+            MESSAGE_TYPE_PROPOSE_TEMPLATE_ERROR => {
+                let e: ProposeTemplateError =
+                    binary_sv2::from_bytes(&mut f.payload).expect("decode");
+                assert_eq!(e.request_id, 3);
+                assert!(
+                    ["inconclusive-not-best-prevblk", "bad-cb-height"]
+                        .contains(&e.error_code.as_utf8_or_hex().as_str()),
+                    "a tip change mid-validation fails the proposal check: {}",
+                    e.error_code.as_utf8_or_hex()
+                );
+                verdict = Some(None);
+            }
+            t => panic!("unexpected frame {t:#x}"),
+        }
+    }
+    let pushed = pushed.expect("the solved tip's template");
+    let mut ids = vec![pushed];
+    ids.extend(verdict.expect("the proposal's reply"));
+    ids.sort_unstable();
+    let want: Vec<u64> = (template_id + 3..template_id + 3 + ids.len() as u64).collect();
+    assert_eq!(ids, want, "ids follow the order the loop replied in");
 
     tp.shutdown().await;
 }

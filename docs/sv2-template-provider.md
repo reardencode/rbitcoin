@@ -806,20 +806,24 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   many JDCs over one connection could have a found block's
   `SubmitSolution` sit behind another JDC's validation.
 - **Red:** `propose_template_validation_does_not_delay_other_frames` —
-  1200 supplied spends of one confirmed fan-out make the validation the
-  costly frame (over a second unoptimized: `tx_output_at_fk` decodes the
-  fan-out's outputs once per input) while the solved block is
-  coinbase-only. The proposal alone measures that wall; the same proposal
-  is sent again, then past its tip check (an eighth of that wall) a
-  `RequestTransactionData` and a `SubmitSolution` for the empty template.
-  The request's reply and the `NewTemplate` for the solved tip must arrive
-  before the proposal's reply, which takes the next id and names the tip
-  it started on. The request, with no blocking work behind it, must be
-  answered in under a quarter of the validation it overlapped, or the
-  order was luck, not the contract; the solution's margin is the wall
-  itself, since its accept ends in a tip write (an fsync, 94 ms here and
-  647 ms once under the parallel suite), which a ratio guard cannot sit
-  on. Red was `Success` as the first frame, the solution 527 ms behind a
+  400 supplied spends of one confirmed fan-out make the validation the
+  costly frame (about 85 ms on the parent-once proposal check) while every
+  template stays coinbase-only. The proposal alone measures that wall. A
+  `RequestTransactionData` for the empty template is sent right behind a
+  second copy; its reply must arrive before that copy's `Success`, in under
+  a quarter of the validation it overlapped: the request has no blocking
+  work behind it, so a slower answer means the loop waited and the order
+  was luck. A `SubmitSolution` behind a third copy is accepted while it
+  validates and pushes the solved tip's `NewTemplate`; its accept ends in a
+  tip write (an fsync), so the journey does not order it against that
+  copy's reply, which is the straddle named under Risks: `Success` on the
+  tip the validation started on, or the proposal check's reject once the
+  tip moved first. The first shape (1200 inputs, the solution ordered
+  before the reply) owed its margin to the per-input parent decode that
+  #968 removed; on the merged check it failed 10 of 10 runs (`Success`
+  before the solved tip's template, or `inconclusive-not-best-prevblk`
+  when the tip moved first), which was Red for this shape. The original
+  Red was `Success` as the first frame, the solution 527 ms behind a
   696 ms validation.
 - **Green:** `on_frame` decodes the proposal and runs `job::precheck`
   (`duplicate-wtxid`, `bad-missing-tx`; no chain read) on arrival, replying
@@ -834,7 +838,7 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   proposals hold their payloads (≤ `MAX_PROPOSE_TEMPLATE_PAYLOAD` each),
   depth bounded by the client's burst (one job per JDC per tip change for a
   JDS), not by this TP: see Risks.
-- **Verify:** `cargo test -p rbitcoin-sv2 --lib`; the journey 20 times in
+- **Verify:** `cargo test -p rbitcoin-sv2 --lib`; the journey 10 times in
   a loop.
 
 ### Test budget
@@ -843,8 +847,8 @@ Units: the messages round trip, `job::extranonce_len`, `rbitcoin-net`
 `check_block_proposal_*`, `rbitcoin-rpc` GBT proposal `bad-cb-amount`.
 Journeys in `rbitcoin-sv2`
 `template_tests`: five, each one TP and one session on the shared regtest
-pad; the D11 journey is the one over 2 s (the margin needs a validation
-several times the accept wall). No `rbitcoin-test` node journey yet
+pad; the D11 journey is the heaviest (a fan-out block, then three
+validations of 400 supplied spends). No `rbitcoin-test` node journey yet
 (follow-up with a JDS client).
 
 ### Risks / follow-ups
