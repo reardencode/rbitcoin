@@ -24,3 +24,18 @@ MISSED   crates/rbitcoin-net/src/seeds.rs:396:31: delete ! in AddrMan::take_dial
 MISSED   crates/rbitcoin-net/src/seeds.rs:422:64: replace < with == in AddrMan::recently_attempted_addr in 11s build + 82s test
 MISSED   crates/rbitcoin-net/src/seeds.rs:422:64: replace < with > in AddrMan::recently_attempted_addr in 11s build + 82s test
 MISSED   crates/rbitcoin-net/src/seeds.rs:422:64: replace < with <= in AddrMan::recently_attempted_addr in 11s build + 82s test
+# 37895507758 1 8ea2f8dea5db751503b5f577fa74e3c56294d0c0
+MISSED   crates/rbitcoin-net/src/fee_history_file.rs:189:28: replace == with != in load in 12s build + 77s test
+MISSED   crates/rbitcoin-net/src/peer.rs:1551:65: replace < with == in tx_announce_below_feefilter in 17s build + 82s test
+MISSED   crates/rbitcoin-net/src/peer.rs:1551:65: replace < with > in tx_announce_below_feefilter in 10s build + 87s test
+MISSED   crates/rbitcoin-net/src/peer.rs:1551:65: replace < with <= in tx_announce_below_feefilter in 10s build + 115s test
+MISSED   crates/rbitcoin-net/src/peer.rs:1668:40: replace && with || in peer_session_with in 17s build + 81s test
+MISSED   crates/rbitcoin-net/src/peer.rs:2297:89: replace < with <= in force_announce_txid in 10s build + 76s test
+MISSED   crates/rbitcoin-net/src/peer.rs:2385:21: replace && with || in tx_inv_candidate_ok in 11s build + 79s test
+MISSED   crates/rbitcoin-net/src/peer.rs:2385:17: replace > with == in tx_inv_candidate_ok in 11s build + 77s test
+MISSED   crates/rbitcoin-net/src/peer.rs:2385:85: replace < with == in tx_inv_candidate_ok in 10s build + 78s test
+MISSED   crates/rbitcoin-net/src/peer.rs:2385:85: replace < with > in tx_inv_candidate_ok in 11s build + 76s test
+MISSED   crates/rbitcoin-net/src/peer.rs:2385:85: replace < with <= in tx_inv_candidate_ok in 10s build + 86s test
+MISSED   crates/rbitcoin-net/src/peer.rs:3344:38: replace > with >= in getblocktxn_reply in 10s build + 83s test
+MISSED   crates/rbitcoin-net/src/peer.rs:3469:13: delete match arm Inventory::Transaction(txid) | Inventory::WitnessTransaction(txid) in on_notfound in 18s build + 79s test
+MISSED   crates/rbitcoin-consensus/src/block/mod.rs:355:34: replace || with && in apply_witness_commitment in 11s build + 75s test
