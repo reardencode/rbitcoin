@@ -578,7 +578,7 @@ when fees rise enough to matter, throttled. Requires Plan B.
 `DeclareMiningJob` against this node over the TDP connection it already
 holds, fetches the transactions the node lacks, and submits the found block
 by `template_id`. Wire contract: [`sv2-job-validation.md`](./sv2-job-validation.md)
-(proposed TDP messages 0x77–0x7a and `SetupConnection` flag bit 0, for
+(proposed TDP messages 0x77–0x7b and `SetupConnection` flag bit 0, for
 sv2-spec discussion #239, which supersedes #217). Requires Plan B and Plan C
 (merged as #949 and #951: the shared `Arc<Transaction>` bodies and the
 64-slot same-tip ring that retains validated jobs) and the proposal-check
@@ -617,7 +617,8 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
 ### D2 — Messages and the setup flag
 
 - **Contract:** `messages.rs` carries `ProposeTemplate`,
-  `.MissingTransactions`, `.Success`, `.Error` (0x77–0x7a) as binary_sv2
+  `.MissingTransactions` (the `ProvideMissingTransactions` pair since D12),
+  `.Success`, `.Error` (0x77–0x7a) as binary_sv2
   structs, and `REQUIRES_JOB_VALIDATION`. Setup accepts bit 0 and echoes
   it; any other set bit is still `unsupported-feature-flags`.
 - **Red:** `job_validation_messages_round_trip`;
@@ -682,7 +683,8 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   resolves → `MissingTransactions{request_id, unknown_tx_position_list}`
   (0-indexed positions in `wtxid_list`); the same job resent with those
   txs in `transaction_list` validates and the supplied txs are retained
-  with it. The TP keeps no state across the round trip.
+  with it. The TP keeps no state across the round trip (reversed in D12:
+  the TP holds the proposal and the txs arrive in their own message).
 - **Red:** `propose_template_asks_for_and_accepts_missing_transactions`
   — one of two spends not in the mempool → `[1]`; resend with it
   supplied → `Success` with the full fee sum and both txs retained. Red
@@ -750,7 +752,7 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
 - **Contract:** `ProposeTemplate` carries what a JDS has from
   `DeclareMiningJob` and nothing it would have to invent: `request_id`,
   `version`, `coinbase_tx_prefix`, `coinbase_tx_suffix`, `wtxid_list`,
-  `excess_data` (opaque here), plus `transaction_list`. No `prev_hash`:
+  `excess_data` (opaque here), plus `transaction_list` (dropped in D12). No `prev_hash`:
   the TP validates on its current tip and `Success` carries that tip as
   `prev_hash` next to `template_id`. The TP builds the
   placeholder coinbase: `E = L − P` from the prefix (version, BIP144
@@ -849,6 +851,53 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
 - **Verify:** `cargo test -p rbitcoin-sv2 --lib`; the journey 10 times in
   a loop.
 
+### D12 — Missing transactions as a request/provide pair
+
+- **Contract:** sv2-spec#239 (Sjors, 2026-10-08; agreed): the missing leg
+  is proper messages reusing JDP 6.4.7 and 6.4.8 under TDP numbers.
+  `ProposeTemplate` carries no `transaction_list`; the TP answers
+  `ProvideMissingTransactions {request_id, unknown_tx_position_list}` (0x78)
+  and the client returns `ProvideMissingTransactions.Success {request_id,
+  transaction_list}` (0x7b). A JDS copies both payloads between the TP and
+  its JDC, changing only the message type. The TP holds a proposal it asked
+  about under its `request_id`: `job::Proposal` (wtxids and the coinbase
+  split, no txs), at most `MAX_PENDING_PROPOSALS` (8) per session with the
+  oldest dropped, for `provide_timeout` (`PROVIDE_TIMEOUT` 30 s, a
+  `Sv2TpConfig` field like `setup_timeout`) checked in the retire arm. A
+  provide for an id the session does not hold, already consumed, or
+  expired is `ProposeTemplate.Error unknown-request-id`; a proposal under
+  an id still queued, in flight, or held is `duplicate-request-id`; a
+  provide that does not cover every requested position, supplies a tx the
+  TP did not ask for, or one that does not decode, is `bad-missing-tx` and
+  ends that exchange (the first two before any decode). These edge rules
+  match sv2-tp #137. A validation still short of a tx asks again for every position
+  the mempool lacks, the supplied ones included, since nothing is held
+  across the round trip but the proposal. The block-sized client frame cap
+  moves to `ProvideMissingTransactions.Success` (~4.2 MB);
+  `ProposeTemplate` is wtxids plus coinbase (~2.3 MB).
+- **Red:** `propose_template_asks_for_and_accepts_missing_transactions`
+  rewritten around the round trip: `unknown-request-id` before, after, and
+  past a 1 s `provide_timeout`; `duplicate-request-id` while held;
+  `bad-missing-tx` for a tx not asked for, a provide short of a requested
+  position (answered `ProvideMissingTransactions` again before), and a
+  blob under the declared wtxid; nine holds dropping the first; only the
+  completed jobs take ids. The D11 journey completes each copy through its
+  provide and refuses a `ProposeTemplate` under the id in flight
+  (`duplicate-request-id`; before, it was validated a second time);
+  `oversized_client_frame_closes_the_session` gains a provide past the
+  `ProposeTemplate` cap that keeps the session. Red was the compile
+  failure against the one-message shape (no table, no 0x7b handler; the
+  old session logged `ignoring message 0x7b`).
+- **Green:** `job::Proposal` (owned decode, `precheck`, `accept_supplied`
+  with the coverage count) and `job::validate(&Proposal, &Supplied)`;
+  `Session.pending` as a `VecDeque<Pending>` with `hold` and expiry folded
+  into the retire timer, `Session.open` for the ids queued or in flight;
+  `Work { proposal, supplied }` through the FIFO and the `JoinSet`; the two
+  payload caps in `transport.rs`.
+- **RAM trade:** ≤ 8 × ~2.2 MiB held per session, no transactions; one
+  in-flight client frame ≤ ~4.2 MB, ≤ ~34 MB at `MAX_SESSIONS`.
+- **Verify:** `cargo test -p rbitcoin-sv2 --lib`.
+
 ### Test budget
 
 Units: the messages round trip, `job::extranonce_len`, `rbitcoin-net`
@@ -888,10 +937,17 @@ validations of 400 supplied spends). No `rbitcoin-test` node journey yet
   min-difficulty networks that can differ from the sent
   `SetNewPrevHash.n_bits` (the Plan B risk); mainnet and signet bits
   depend only on the prev hash.
-- `transaction_list` matching hashes the bytes as sent: a legacy tx
-  relayed in segwit-marker form hashes differently from its wtxid and is
-  `bad-missing-tx`. The draft requires the bytes exactly as JDC sent
-  them, which is the serialization the wtxid was computed over.
+- `ProvideMissingTransactions.Success` matching hashes the bytes as sent:
+  a legacy tx relayed in segwit-marker form hashes differently from its
+  wtxid and is `bad-missing-tx`. The draft requires the bytes exactly as
+  JDC sent them, which is the serialization the wtxid was computed over.
+- A held proposal dropped by the bound (D12) or the timeout surfaces only
+  as `unknown-request-id` on its provide; the JDS proposes again. A JDS
+  with more than eight JDCs short of transactions at one tip change loses
+  the oldest round trips to that bound; raise `MAX_PENDING_PROPOSALS` if a
+  pool reports it (each hold is wtxids and a coinbase, not a block).
+- The message numbers 0x78 and 0x7b for the provide pair are this draft's
+  proposal; #239 has assigned none yet.
 - The IBD gate (`job-validation-unavailable`) and `bad-cb-decode` are
   this TP's choices within the draft's "recommended" list and should
   follow the upstream text once it settles.

@@ -1,4 +1,3 @@
-| fees        | U64       | Sum of the fees of the transactions in `wtxid_list`, in satoshis, as computed by the TP's validation                                                                                   |
 # Stratum V2: Custom Job Validation over the Template Distribution Protocol
 
 Draft for [sv2-spec discussion #239](https://github.com/stratum-mining/sv2-spec/discussions/239)
@@ -18,11 +17,13 @@ block, and later propagate the block when JDC sends `PushSolution`. The
 specification leaves how JDS talks to its Bitcoin node undefined ("RPCs (or
 similar)", Section 6.1).
 
-This document adds four TDP messages and one `SetupConnection` flag so that a
+This document adds five TDP messages and one `SetupConnection` flag so that a
 JDS can validate a declared Custom Job, and later submit its solution, through
 any Template Provider (TP) over the authenticated TDP connection it already
 uses. The request carries the subset of `DeclareMiningJob` a node needs,
-relayed unchanged. The exchange mirrors the flow the Job Declaration Protocol
+relayed unchanged; the missing-transactions leg reuses the Job Declaration
+Protocol's own `ProvideMissingTransactions` pair, relayed unchanged in both
+directions. The exchange mirrors the flow the Job Declaration Protocol
 already imposes on JDS: look transactions up by `wtxid`, ask JDC for the ones
 nobody has, validate, and submit the solution by reference.
 
@@ -45,30 +46,34 @@ nobody has, validate, and submit the solution by reference.
   without resending the block. This proposal is that flow expressed as TDP
   messages, so `sv2-tp` can serve it on top of Core IPC, and a node with a
   native TP can serve it directly.
-- Validation by `wtxid` position lets JDS relay `ProvideMissingTransactions`
-  and `ProvideMissingTransactions.Success` payloads between JDC and TP without
-  parsing them, as Sections 6.4.7 and 6.4.8 already require.
+- Validation by `wtxid` position lets JDS relay the TP's
+  `ProvideMissingTransactions` to JDC and JDC's
+  `ProvideMissingTransactions.Success` to the TP byte for byte, as Sections
+  6.4.7 and 6.4.8 already require of it; only the message type changes.
 
 ## 2. Overview
 
 ```
 JDC                      JDS                             TP
  |-- DeclareMiningJob --->|                               |
- |                        |-- ProposeTemplate --------->|  version, coinbase prefix/suffix, wtxid_list, no txs
- |                        |<- ProposeTemplate.MissingTransactions   (only if TP lacks some)
- |<- ProvideMissingTransactions                           |
+ |                        |-- ProposeTemplate --------->|  version, coinbase prefix/suffix, wtxid_list; no txs
+ |                        |<- ProvideMissingTransactions |  only if the TP lacks some; the TP holds the proposal
+ |<- ProvideMissingTransactions           |               |  same payload, JDP message type
  |-- ProvideMissingTransactions.Success ->|               |
- |                        |-- ProposeTemplate --------->|  same job + transaction_list
- |                        |<- ProposeTemplate.Success --|  template_id, prev_hash, fees
+ |                        |-- ProvideMissingTransactions.Success ->|  same payload, TDP message type
+ |                        |<- ProposeTemplate.Success --|  request_id, template_id, prev_hash, fees
  |<- DeclareMiningJob.Success             |               |
  ...
  |-- PushSolution ------->|                               |
  |                        |-- SubmitSolution(template_id)>|  existing 7.8 message
 ```
 
-- `ProposeTemplate` is stateless on the server side across the
-  missing-transactions round trip: the second request repeats the job and adds
-  the transactions. The TP MUST NOT require any state from the first request.
+- The TP holds a proposal it answered `ProvideMissingTransactions` under
+  its `request_id` until the `ProvideMissingTransactions.Success` arrives
+  or a timeout passes (Section 4.1). `request_id` pairs the whole exchange,
+  as it pairs `DeclareMiningJob` with its `ProvideMissingTransactions` in
+  Section 6.4.7. The JDS relays the two provide messages without parsing
+  them.
 - `ProposeTemplate` carries no `prev_hash`: `DeclareMiningJob` has none, so a
   JDS cannot supply one without guessing. The TP validates against its own
   current tip and names that tip in `ProposeTemplate.Success.prev_hash`, which
@@ -117,7 +122,6 @@ server's current chain tip.
 | coinbase_tx_suffix | B0_64K           | `DeclareMiningJob.coinbase_tx_suffix` unchanged: the serialized coinbase from the input's `nSequence` on. If the coinbase is a SegWit transaction, BIP141 fields (marker and flag in the prefix; witness count, witness length, witness reserved value in the suffix) MUST NOT be stripped |
 | wtxid_list         | SEQ0_64K[U256]   | `wtxid` of every transaction in the Custom Job, in block order, excluding the coinbase. Copied from `DeclareMiningJob.wtxid_list`                                                                                                                                                         |
 | excess_data        | B0_64K           | `DeclareMiningJob.excess_data` unchanged. Opaque to the server; its meaning is between JDC and Pool (Section 7.6)                                                                                                                                                                         |
-| transaction_list   | SEQ0_64K[B0_16M] | Full transactions the server reported in `ProposeTemplate.MissingTransactions`, in the order they were requested. Empty on the first request. Each transaction MUST be relayed exactly as received from JDC in `ProvideMissingTransactions.Success`, without parsing or re-encoding    |
 
 The server reconstructs a placeholder coinbase as `coinbase_tx_prefix` ||
 `E` zero bytes || `coinbase_tx_suffix`, where `E` is the scriptSig length
@@ -136,21 +140,30 @@ merkle root or proof of work, and every other coinbase check (size, weight,
 BIP34 height push, output values, witness commitment) is independent of the
 extranonce bytes.
 
-The server resolves each `wtxid` against its mempool and against
-`transaction_list`. If any transaction is still unknown, it MUST reply
-`ProposeTemplate.MissingTransactions`. Otherwise it MUST validate the job as
-a block on top of its current chain tip with the following rules, and reply
-either `ProposeTemplate.Success` or `ProposeTemplate.Error`:
+The server resolves each `wtxid` against its mempool. If any transaction is
+unknown, it MUST reply `ProvideMissingTransactions` (Section 4.2) and hold
+the proposal under its `request_id`: it MUST keep the proposal available for
+a `ProvideMissingTransactions.Success` (Section 4.3) for at least N seconds
+(RECOMMENDED 30) and MAY bound the proposals held per connection, dropping
+the oldest. A `ProvideMissingTransactions.Success` for a `request_id` the
+server does not hold, no longer holds, or has already consumed is answered
+`ProposeTemplate.Error` with `unknown-request-id`; a `ProposeTemplate` whose
+`request_id` the server has accepted and not yet answered, or still holds,
+is answered `duplicate-request-id`.
+Once every transaction is known, from the mempool or the provide, the server
+MUST validate the job as a block on top of its current chain tip with the
+following rules, and reply either `ProposeTemplate.Success` or
+`ProposeTemplate.Error`:
 
 - The server validates against its own current tip and reports that tip in
   `ProposeTemplate.Success.prev_hash`. There is no stale-tip error code: a
   job declared for a tip the server has since left fails the checks below on
   its own, normally the BIP34 height push (`bad-cb-height`) or an input the
   new tip spent; a job that still passes on the new tip is valid there.
-- `wtxid_list` MUST contain no duplicates, and every entry of
-  `transaction_list` MUST hash to a `wtxid` that the server reported missing.
-  Otherwise reply `duplicate-wtxid` or `bad-missing-tx`. These checks MUST run
-  before any transaction is decoded or copied.
+- `wtxid_list` MUST contain no duplicates (`duplicate-wtxid`), and every
+  entry of `ProvideMissingTransactions.Success.transaction_list` MUST hash to
+  a `wtxid` at a position the server asked for (`bad-missing-tx`). Both
+  checks MUST run before any transaction is decoded or copied.
 - The server MUST apply every consensus check it would apply to a received
   block except the proof-of-work check and the merkle-root check. This
   includes: transaction validity and input availability against the UTXO set
@@ -168,29 +181,50 @@ either `ProposeTemplate.Success` or `ProposeTemplate.Error`:
   current time for `nTime` when it needs a header for contextual checks. The
   client does not supply them.
 
-### 4.2 `ProposeTemplate.MissingTransactions` (Server -> Client)
+### 4.2 `ProvideMissingTransactions` (Server -> Client)
 
-The server does not know some of the transactions in `wtxid_list`. The client
-is expected to obtain them from JDC via `ProvideMissingTransactions` and send
-a new `ProposeTemplate` with `transaction_list` filled.
+The server does not know some of the transactions in `wtxid_list` and holds
+the proposal. The field layout is `ProvideMissingTransactions` of Section
+6.4.7 of the Job Declaration Protocol under a TDP message type, so the
+client copies the payload to JDC as its own `ProvideMissingTransactions`.
 
-| Field Name               | Data Type     | Description                                                                                                                                                    |
-| ------------------------ | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| request_id               | U32           | Identifier of the original `ProposeTemplate` request                                                                                                           |
-| unknown_tx_position_list | SEQ0_64K[U16] | Positions in `wtxid_list` of the transactions the server lacks, 0-indexed, not including the coinbase. Same encoding as `ProvideMissingTransactions.unknown_tx_position_list` |
+| Field Name               | Data Type     | Description                                                                                                                      |
+| ------------------------ | ------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| request_id               | U32           | Identifier of the original `ProposeTemplate` request                                                                             |
+| unknown_tx_position_list | SEQ0_64K[U16] | Positions in `wtxid_list` of the transactions the server lacks, 0-indexed, not including the coinbase. As in Section 6.4.7      |
 
 The positions are relative to `wtxid_list`, which is a copy of
-`DeclareMiningJob.wtxid_list`, so the client can copy this field into
-`ProvideMissingTransactions.unknown_tx_position_list` unchanged, and copy
-`ProvideMissingTransactions.Success.transaction_list` into
-`ProposeTemplate.transaction_list` unchanged.
+`DeclareMiningJob.wtxid_list`, so they are JDC's positions too.
 
-A server MAY reply `ProposeTemplate.MissingTransactions` to a request whose
-`transaction_list` is non-empty, for example when a transaction left its
-mempool between the two requests. A client SHOULD bound how many times it
-retries one declaration.
+A server MAY answer a `ProvideMissingTransactions.Success` with another
+`ProvideMissingTransactions`, for example when a transaction left its
+mempool between the two. A server that holds no transactions across the
+round trip then names every position it still lacks, the ones already
+supplied included. A client SHOULD bound how many times it retries one
+declaration.
 
-### 4.3 `ProposeTemplate.Success` (Server -> Client)
+### 4.3 `ProvideMissingTransactions.Success` (Client -> Server)
+
+The transactions a `ProvideMissingTransactions` asked for. The field layout
+is `ProvideMissingTransactions.Success` of Section 6.4.8, so the client
+copies JDC's payload under the TDP message type.
+
+| Field Name       | Data Type        | Description                                                                                                                                                                  |
+| ---------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| request_id       | U32              | Identifier of the original `ProposeTemplate` request                                                                                                                         |
+| transaction_list | SEQ0_64K[B0_16M] | The transactions at the requested positions, in the order they were requested. Each MUST be relayed exactly as received from JDC, without parsing or re-encoding             |
+
+The server MUST check that every entry hashes to a requested `wtxid` and
+that every requested position is covered, before decoding any of them: a
+provide that is short, carries a transaction nobody asked for, or carries
+one that does not decode is `ProposeTemplate.Error` with `bad-missing-tx`.
+Otherwise the server completes the validation of Section 4.1 with the
+supplied transactions merged in and replies `ProposeTemplate.Success` or
+`ProposeTemplate.Error`. The proposal is no longer held either way; a second
+`ProvideMissingTransactions.Success` for the same `request_id` is
+`unknown-request-id`.
+
+### 4.4 `ProposeTemplate.Success` (Server -> Client)
 
 The job is consensus-valid on the server's current tip. The server has stored
 the job and will accept a `SubmitSolution` for it.
@@ -200,6 +234,7 @@ the job and will accept a `SubmitSolution` for it.
 | request_id  | U32       | Identifier of the original `ProposeTemplate` request                                                                                                                                  |
 | template_id | U64       | Server's identification of the validated job. Drawn from the same strictly increasing namespace as `NewTemplate.template_id`, so it can be used in `SubmitSolution` and `RequestTransactionData` |
 | prev_hash   | U256      | Hash of the server's chain tip the job was validated on, as it would appear in the block header. The client keeps it to compare against `PushSolution.prev_hash`                      |
+| fees        | U64       | Sum of the fees of the transactions in `wtxid_list`, in satoshis, as computed by the server's validation                                                                               |
 
 The server MUST retain the validated job (its transactions in block order
 and the header fields a `SubmitSolution` is assembled with) under the same
@@ -212,7 +247,7 @@ many JDCs over one connection, so no single job is "the latest"; a
 `stale-template-id` or `template-id-not-found`. See Section 7.1 for what the
 JDS does with that.
 
-### 4.4 `ProposeTemplate.Error` (Server -> Client)
+### 4.5 `ProposeTemplate.Error` (Server -> Client)
 
 The job was not validated. The client decides what to tell JDC; it SHOULD map
 consensus rejections to `DeclareMiningJob.Error` and SHOULD NOT treat the
@@ -233,11 +268,13 @@ rejection strings (`bad-txns-inputs-missingorspent`, `bad-cb-length`,
 | error_code                | Meaning                                                              |
 | ------------------------- | -------------------------------------------------------------------- |
 | duplicate-wtxid           | `wtxid_list` contains the same `wtxid` more than once                |
-| bad-missing-tx            | An entry of `transaction_list` does not hash to a requested `wtxid`  |
+| bad-missing-tx            | `ProvideMissingTransactions.Success.transaction_list` does not cover every requested position, or an entry does not hash to a requested `wtxid` or does not decode as a transaction |
+| unknown-request-id        | `ProvideMissingTransactions.Success.request_id` names no proposal the server holds: never asked about, already answered, dropped under the per-connection bound, or past the hold timeout |
+| duplicate-request-id      | `ProposeTemplate.request_id` names a proposal the server has accepted and not yet answered, or still holds for its missing transactions |
 | bad-cb-decode             | `coinbase_tx_prefix` does not parse as one input with a scriptSig length covering the bytes present, or the reconstructed coinbase does not decode |
 | job-validation-unavailable | The server cannot validate now (for example, initial block download) |
 
-### 4.5 `SubmitSolution` for validated jobs
+### 4.6 `SubmitSolution` for validated jobs
 
 When the client receives `PushSolution` from JDC it SHOULD check
 `PushSolution.prev_hash` against the `ProposeTemplate.Success.prev_hash`
@@ -263,17 +300,22 @@ Additions to Section 8, Template Distribution Protocol:
 
 | Message Type (8-bit) | channel_msg bit | Message Name                            |
 | -------------------- | --------------- | --------------------------------------- |
-| 0x77                 | 0               | ProposeTemplate                       |
-| 0x78                 | 0               | ProposeTemplate.MissingTransactions   |
-| 0x79                 | 0               | ProposeTemplate.Success               |
-| 0x7a                 | 0               | ProposeTemplate.Error                 |
+| 0x77                 | 0               | ProposeTemplate                         |
+| 0x78                 | 0               | ProvideMissingTransactions              |
+| 0x79                 | 0               | ProposeTemplate.Success                 |
+| 0x7a                 | 0               | ProposeTemplate.Error                   |
+| 0x7b                 | 0               | ProvideMissingTransactions.Success      |
 
-All four are core messages and carry `extension_type = 0x0000`.
+All five are core messages and carry `extension_type = 0x0000`. The two
+`ProvideMissingTransactions` numbers are this draft's proposal; discussion
+#239 has agreed on the request/provide shape but assigned no numbers yet.
+The names repeat the Job Declaration Protocol's on purpose, as
+`SetNewPrevHash` is both 0x20 and 0x72: the payloads are the same.
 
 ## 6. Design notes and open questions
 
 - **Core messages or an extension.** Issue 217 proposes a core TDP message.
-  The same four messages could instead be extension `0x0003`, negotiated with
+  The same five messages could instead be extension `0x0003`, negotiated with
   `RequestExtensions` (extension `0x0001`) and framed with
   `extension_type = 0x0003`. The `SetupConnection` flag in Section 3 gives
   negotiation without requiring extension `0x0001` in TPs, which is why the
@@ -303,6 +345,13 @@ All four are core messages and carry `extension_type = 0x0000`.
   the other messages on the connection, `SubmitSolution` above all
   (rbitcoin validates off the session loop, four at a time per connection,
   the rest queued in arrival order).
+- **At the in-flight bound: queue or refuse (open).** A server that runs a
+  bounded number of validations at once has two choices for the next
+  proposal: rbitcoin queues it in arrival order with no depth cap (four in
+  flight per connection), sv2-tp refuses it with
+  `job-validation-unavailable`. A JDS should cope with both, a refusal as
+  a retry after a backoff and a queue as a longer wait under its own
+  timeout, but the thread should settle which the text recommends.
 - **Untrusted input.** Everything in `ProposeTemplate` originates from a
   JDC. The server MUST enforce the `duplicate-wtxid` and `bad-missing-tx`
   checks and the block weight limit before decoding or storing transactions,
@@ -322,9 +371,20 @@ All four are core messages and carry `extension_type = 0x0000`.
   `NewTemplate.template_id` sent on it. The server MAY draw it from a
   per-connection counter (rbitcoin) or a server-global one (`sv2-tp`); a
   client MUST NOT compare ids across connections.
-- **Why positions, not `wtxid`s, in `MissingTransactions`.** Section 6.4.7
-  uses positions, so the JDS relays the list unchanged. A `wtxid` list would
-  force the JDS to translate.
+- **Why the TP holds state.** An earlier draft repeated the whole
+  `ProposeTemplate` with a `transaction_list`, so the TP needed nothing
+  between the two requests. Sjors (#239, 2026-10-08) asked for the missing
+  leg to be proper request and provide messages, conceptually the existing
+  ones, which is also how `TxCollection` works in Bitcoin Core: `collectTxs`
+  returns the handle whose `unknownTxPos` the TP reports and whose
+  `addMissingTxs` the provide feeds, so the handle is the held proposal. A
+  held proposal costs its `wtxid_list` and coinbase split, not transactions,
+  so a bounded table per connection is enough (rbitcoin: 8 proposals, 30 s).
+  A dropped or expired hold surfaces as `unknown-request-id` and the JDS
+  proposes again; that is the one recovery path.
+- **Why positions, not `wtxid`s, in `ProvideMissingTransactions`.** Section
+  6.4.7 uses positions, so the JDS relays the list unchanged. A `wtxid` list
+  would force the JDS to translate.
 - **Why no separate `SubmitBlock`.** The server already holds the validated
   transaction set; resending up to 4 MB at block-find time only adds latency.
   Reusing `SubmitSolution` is also what `TxCollection.makeTemplate` followed by
@@ -336,11 +396,11 @@ All four are core messages and carry `extension_type = 0x0000`.
 
 | JDP event                            | TDP action                                                                    |
 | ------------------------------------ | ----------------------------------------------------------------------------- |
-| `DeclareMiningJob`                   | `ProposeTemplate` with `version`, `coinbase_tx_prefix`, `coinbase_tx_suffix`, `wtxid_list`, `excess_data` copied unchanged, empty `transaction_list` |
-| `ProposeTemplate.MissingTransactions` | `ProvideMissingTransactions` with the position list copied                  |
-| `ProvideMissingTransactions.Success` | `ProposeTemplate` again with `transaction_list` copied                       |
+| `DeclareMiningJob`                   | `ProposeTemplate` with `version`, `coinbase_tx_prefix`, `coinbase_tx_suffix`, `wtxid_list`, `excess_data` copied unchanged |
+| `ProvideMissingTransactions` (from the TP) | `ProvideMissingTransactions` to JDC: the payload copied, the JDP message type |
+| `ProvideMissingTransactions.Success` (from JDC) | `ProvideMissingTransactions.Success` to the TP: the payload copied, the TDP message type |
 | `ProposeTemplate.Success`          | `DeclareMiningJob.Success`; store `template_id` and `prev_hash` with the declaration; pass `fees` to the Pool, which prices the declared coinbase against it |
-| `ProposeTemplate.Error`            | `DeclareMiningJob.Error` with the error code                                  |
+| `ProposeTemplate.Error`            | `DeclareMiningJob.Error` with the error code; on `unknown-request-id` after a slow JDC, a new `ProposeTemplate` instead |
 | `PushSolution`                       | Check `prev_hash` against the stored one, then `SubmitSolution(template_id, version, ntime, nonce, coinbase_tx)` |
 
 Solutions are keyed by `template_id`. When the server has already dropped
@@ -358,7 +418,8 @@ Pool's "`[jds]` requires `BitcoinCoreIpc`" startup check becomes "requires
 `ProposeTemplate` maps onto `getTransactionsByWitnessID` (Core v32) for the
 lookup and `checkBlock(checkMerkleRoot=false, checkPow=false)` for validation,
 or onto `TxCollection` (`collectTxs`, `unknownTxPos`, `addMissingTxs`,
-`makeTemplate`) once bitcoin/bitcoin#35671 lands. `SubmitSolution` for a
+`makeTemplate`) once bitcoin/bitcoin#35671 lands; the held proposal of
+Section 4.1 is then the `TxCollection` handle itself. `SubmitSolution` for a
 validated job maps onto `submitBlock` or `BlockTemplate.submitSolution`.
 
 ### 7.3 Template Provider in a node
@@ -374,9 +435,11 @@ dependency.
   "RFC: `ProposeTemplate`" (plebhash, 2026-10-06), supersedes #217. Names the
   message and carries the subset of `DeclareMiningJob` a node needs
   (`request_id`, `version`, `coinbase_tx_prefix`, `coinbase_tx_suffix`,
-  `wtxid_list`, `excess_data`), with no `prev_hash`. This draft follows it
-  and adds the missing-transactions reply, `transaction_list` on the repeated
-  request, and `prev_hash` in `Success`.
+  `wtxid_list`, `excess_data`), with no `prev_hash`. Sjors (2026-10-08)
+  asked for the missing leg to be proper request and provide messages
+  reusing the existing ones, mandatory `template_id`, and no second flag.
+  This draft follows both: the `ProvideMissingTransactions` pair under TDP
+  numbers, and `prev_hash` and `fees` in `Success`.
 - [sv2-spec#217](https://github.com/stratum-mining/sv2-spec/issues/217):
   "consider adding a new TDP message for custom job validation" (plebhash,
   2026-08-31). Proposes message `X`, `X.Error` triggering
@@ -399,9 +462,10 @@ dependency.
   [bitcoin/bitcoin#35671](https://github.com/bitcoin/bitcoin/pull/35671)
   (open): `TxCollection`. The combined flow written up there (collect by
   `wtxid`, report unknown positions, add missing, `makeTemplate`, submit the
-  solution by reference) is the flow Sections 2 and 4 encode. The thread also
-  records the hazard of server-side state across the missing-transactions
-  round trip, which is why `ProposeTemplate` is stateless until `Success`.
+  solution by reference) is the flow Sections 2 and 4 encode. The handle
+  `collectTxs` returns is the state a TP holds across the round trip; this
+  draft bounds that state per connection (Section 4.1) instead of avoiding
+  it.
 - [sv2-apps#299](https://github.com/stratum-mining/sv2-apps/pull/299): JDS
   refactor that removed the JSON-RPC backend and folded JDS into the Pool.
   [sv2-apps#26](https://github.com/stratum-mining/sv2-apps/issues/26) gives the
