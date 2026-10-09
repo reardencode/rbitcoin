@@ -1,8 +1,8 @@
 {
   "new_base": "cdfdaa0ef2b1fea88a1580adce5e42b6213aebac",
   "new_skip": 1732,
-  "old_index": 141,
+  "old_index": 772,
   "new_cap_used": true,
   "run_id": "37895507758",
-  "old_name": "crates/rbitcoin-consensus/src/block/mod.rs:398:11: replace += with *= in last_script_push"
+  "old_name": "crates/rbitcoin-consensus/src/header.rs:303:11: replace -= with /= in min_diff_bits"
 }
