@@ -2581,6 +2581,7 @@ pub async fn start_sv2_tp(
         setup_timeout: rbitcoin_sv2::SETUP_TIMEOUT,
         idle_timeout: (!config.sv2_tp_idle_timeout.is_zero()).then_some(config.sv2_tp_idle_timeout),
         write_timeout: rbitcoin_sv2::WRITE_TIMEOUT,
+        provide_timeout: rbitcoin_sv2::PROVIDE_TIMEOUT,
         fee_delta: config.sv2_tp_fee_delta,
         template_interval: config.sv2_tp_template_interval,
         constraints_cooldown: config.sv2_tp_constraints_cooldown,

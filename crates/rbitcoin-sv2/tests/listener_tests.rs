@@ -3,12 +3,15 @@ use common_messages_sv2::{
     SetupConnectionError, SetupConnectionSuccess, MESSAGE_TYPE_SETUP_CONNECTION_ERROR,
     MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
 };
-use rbitcoin_sv2::messages::{MESSAGE_TYPE_PROPOSE_TEMPLATE, REQUIRES_JOB_VALIDATION};
+use rbitcoin_sv2::messages::{
+    MESSAGE_TYPE_PROPOSE_TEMPLATE, MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS,
+    REQUIRES_JOB_VALIDATION,
+};
 use rbitcoin_sv2::testutil::TpClient;
 use rbitcoin_sv2::transport::MAX_PROPOSE_TEMPLATE_PAYLOAD;
 use rbitcoin_sv2::{
     run_sv2_tp, Sv2TpConfig, CONSTRAINTS_COOLDOWN_TEST, FEE_DELTA, MAX_IDLE_TIMEOUT, MAX_SESSIONS,
-    MAX_STALE_GRACE, MAX_TEMPLATE_INTERVAL, MIN_TEMPLATE_INTERVAL, SETUP_TIMEOUT,
+    MAX_STALE_GRACE, MAX_TEMPLATE_INTERVAL, MIN_TEMPLATE_INTERVAL, PROVIDE_TIMEOUT, SETUP_TIMEOUT,
     TEMPLATE_INTERVAL, WRITE_TIMEOUT,
 };
 use std::io;
@@ -69,6 +72,7 @@ async fn setup_connection_success_errors_and_session_cap() {
         setup_timeout: SETUP_TIMEOUT,
         idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
@@ -142,6 +146,7 @@ async fn authority_key_prints_in_key_utils_base58check() {
         setup_timeout: SETUP_TIMEOUT,
         idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
@@ -179,6 +184,7 @@ async fn silent_sockets_are_dropped_at_the_setup_deadline() {
         setup_timeout,
         idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
@@ -223,6 +229,7 @@ async fn session_without_constraints_is_dropped_at_the_setup_deadline() {
         setup_timeout,
         idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
@@ -304,6 +311,7 @@ async fn session_silent_after_constraints_is_dropped_at_the_idle_deadline() {
         setup_timeout,
         idle_timeout: Some(setup_timeout),
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
@@ -344,6 +352,7 @@ async fn client_that_stops_reading_is_dropped_at_the_write_deadline() {
         setup_timeout: SETUP_TIMEOUT,
         idle_timeout: None,
         write_timeout,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
@@ -395,8 +404,9 @@ async fn client_that_stops_reading_is_dropped_at_the_write_deadline() {
 }
 
 /// Each client message type has its own payload cap: the largest legitimate
-/// `SubmitSolution` and a `ProposeTemplate` well past it keep the session;
-/// a frame over the cap for its type closes it.
+/// `SubmitSolution`, a `ProposeTemplate` well past it, and a
+/// `ProvideMissingTransactions.Success` past the `ProposeTemplate` cap keep
+/// the session; a frame over the cap for its type closes it.
 #[tokio::test]
 async fn oversized_client_frame_closes_the_session() {
     let tc = shared_regtest(0);
@@ -410,6 +420,7 @@ async fn oversized_client_frame_closes_the_session() {
         setup_timeout: SETUP_TIMEOUT,
         idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
@@ -431,7 +442,8 @@ async fn oversized_client_frame_closes_the_session() {
         .expect("open after a max-size SubmitSolution");
     assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR);
 
-    // No handler yet: a ProposeTemplate under its own cap is read and ignored.
+    // Without the flag a ProposeTemplate under its own cap is read and
+    // ignored.
     let big = vec![0u8; 200 << 10];
     c.send_bytes(MESSAGE_TYPE_PROPOSE_TEMPLATE, &big)
         .await
@@ -452,12 +464,17 @@ async fn oversized_client_frame_closes_the_session() {
         .expect("handshake");
     c.setup_connection(TDP, 2, 2, 0).await.unwrap();
     c.recv().await.expect("setup reply");
-    let _ = c
-        .send_bytes(
-            MESSAGE_TYPE_PROPOSE_TEMPLATE,
-            &vec![0u8; MAX_PROPOSE_TEMPLATE_PAYLOAD + 1],
-        )
-        .await;
+    let over = vec![0u8; MAX_PROPOSE_TEMPLATE_PAYLOAD + 1];
+    c.send_bytes(MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS, &over)
+        .await
+        .unwrap();
+    c.request_transaction_data(1).await.unwrap();
+    let f = c
+        .recv()
+        .await
+        .expect("open after a ProvideMissingTransactions.Success past the ProposeTemplate cap");
+    assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR);
+    let _ = c.send_bytes(MESSAGE_TYPE_PROPOSE_TEMPLATE, &over).await;
     c.request_transaction_data(1).await.ok();
     assert_closed(&mut c, "a ProposeTemplate over its cap").await;
     tp.shutdown().await;
@@ -493,6 +510,7 @@ async fn out_of_range_timing_refuses_to_start() {
             setup_timeout: SETUP_TIMEOUT,
             idle_timeout: None,
             write_timeout: WRITE_TIMEOUT,
+            provide_timeout: PROVIDE_TIMEOUT,
             fee_delta: FEE_DELTA,
             template_interval,
             constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
@@ -511,6 +529,7 @@ async fn out_of_range_timing_refuses_to_start() {
         setup_timeout: SETUP_TIMEOUT,
         idle_timeout: Some(MAX_IDLE_TIMEOUT + over),
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,

@@ -1,10 +1,11 @@
 //! One TDP session: Noise handshake, `SetupConnection`, then TDP messages.
 
-use crate::job::{self, Verdict};
+use crate::job::{self, Proposal, Supplied, Verdict};
 use crate::messages::{
-    ProposeTemplateError, ProposeTemplateMissingTransactions, ProposeTemplateSuccess,
-    MESSAGE_TYPE_PROPOSE_TEMPLATE, MESSAGE_TYPE_PROPOSE_TEMPLATE_ERROR,
-    MESSAGE_TYPE_PROPOSE_TEMPLATE_MISSING_TRANSACTIONS, MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS,
+    ProposeTemplateError, ProposeTemplateSuccess, ProvideMissingTransactions,
+    ProvideMissingTransactionsSuccess, MESSAGE_TYPE_PROPOSE_TEMPLATE,
+    MESSAGE_TYPE_PROPOSE_TEMPLATE_ERROR, MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS,
+    MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS, MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS,
     REQUIRES_JOB_VALIDATION,
 };
 use crate::template;
@@ -75,12 +76,22 @@ pub fn constraints_rebuild_at(
 /// CPU and RAM trade (CONTRIBUTING 9): this many `ProposeTemplate`
 /// validations run at once per session, each one full proposal check on a
 /// blocking thread holding up to a block of decoded transactions. Later
-/// proposals wait in arrival order, each holding its payload (at most
-/// `MAX_PROPOSE_TEMPLATE_PAYLOAD`), and are not refused: a JDS declares one
-/// job per JDC at every tip change, so a burst is the normal shape. The
-/// queue has no cap of its own (docs/sv2-template-provider.md, Plan D
-/// risks).
+/// proposals wait in arrival order, each holding its wtxids and the
+/// transactions its JDS supplied (at most
+/// `MAX_PROVIDE_MISSING_TRANSACTIONS_PAYLOAD`), and are not refused: a JDS
+/// declares one job per JDC at every tip change, so a burst is the normal
+/// shape. The queue has no cap of its own (docs/sv2-template-provider.md,
+/// Plan D risks).
 const MAX_INFLIGHT_VALIDATIONS: usize = 4;
+
+/// RAM trade (CONTRIBUTING 9): a proposal the TP answered
+/// `ProvideMissingTransactions` waits here for the `.Success`, holding its
+/// wtxids (≤ 2 MiB) and coinbase split (≤ 128 KiB) but no transactions:
+/// ≤ 8 × ~2.2 MiB per session. Past the bound the oldest is dropped, and a
+/// provide for it is `unknown-request-id`, the same recovery a JDS runs
+/// when the hold timed out.
+#[doc(hidden)]
+pub const MAX_PENDING_PROPOSALS: usize = 8;
 
 /// Fee-delta push settings (docs/sv2-template-provider.md C1).
 #[derive(Clone, Copy)]
@@ -113,6 +124,20 @@ pub struct Retained {
     pub prev_sent: (u32, Instant),
     /// Set once the tip moves on.
     pub retire_at: Option<Instant>,
+}
+
+/// A proposal waiting for its `ProvideMissingTransactions.Success`.
+struct Pending {
+    proposal: Arc<Proposal>,
+    /// The positions the `ProvideMissingTransactions` named.
+    missing: Vec<u16>,
+    expires_at: Instant,
+}
+
+/// A proposal and what its JDS supplied, waiting for a validation slot.
+struct Work {
+    proposal: Arc<Proposal>,
+    supplied: Supplied,
 }
 
 impl Templates {
@@ -173,6 +198,7 @@ pub async fn serve(
     setup_timeout: Duration,
     idle_timeout: Option<Duration>,
     write_timeout: Duration,
+    provide_timeout: Duration,
     fee_push: FeePush,
     constraints_cooldown: Duration,
     stats: Arc<Sv2TpStats>,
@@ -207,6 +233,7 @@ pub async fn serve(
         conn: writer,
         chain,
         stale_grace,
+        provide_timeout,
         fee_push,
         constraints_cooldown,
         stats,
@@ -224,6 +251,8 @@ pub async fn serve(
         seen_updates: 0,
         validations: JoinSet::new(),
         queued: VecDeque::new(),
+        pending: VecDeque::new(),
+        open: Vec::new(),
     };
     s.run(&mut frames, deadline, idle_timeout).await
 }
@@ -243,6 +272,7 @@ pub struct Session {
     pub conn: NoiseWriter,
     pub chain: Arc<ChainHub>,
     pub stale_grace: Duration,
+    pub provide_timeout: Duration,
     pub fee_push: FeePush,
     pub constraints_cooldown: Duration,
     pub stats: Arc<Sv2TpStats>,
@@ -272,9 +302,14 @@ pub struct Session {
     pub seen_updates: u64,
     /// `ProposeTemplate` validations in flight, at most
     /// `MAX_INFLIGHT_VALIDATIONS`. Started blocking work outlives the session.
-    validations: JoinSet<io::Result<(u32, Verdict)>>,
+    validations: JoinSet<io::Result<(Arc<Proposal>, Verdict)>>,
     /// Prechecked proposals waiting for a validation slot, oldest first.
-    queued: VecDeque<Vec<u8>>,
+    queued: VecDeque<Work>,
+    /// Proposals waiting for their missing transactions, oldest first, at
+    /// most `MAX_PENDING_PROPOSALS`.
+    pending: VecDeque<Pending>,
+    /// Request ids accepted and not yet answered: queued or in flight.
+    open: Vec<u32>,
 }
 
 impl Session {
@@ -291,7 +326,12 @@ impl Session {
         let mut tips = self.chain.subscribe_tips();
         let mut idle_at = idle_timeout.map(|t| Instant::now() + t);
         loop {
-            let retire_at = self.templates.next_retire();
+            let retire_at = self
+                .templates
+                .next_retire()
+                .into_iter()
+                .chain(self.pending.front().map(|p| p.expires_at))
+                .min();
             tokio::select! {
                 f = frames.recv() => {
                     let Some(f) = f else { return Ok(()) };
@@ -306,14 +346,21 @@ impl Session {
                     Err(RecvError::Closed) => return Ok(()),
                 },
                 Some(done) = self.validations.join_next(), if !self.validations.is_empty() => {
-                    let (request_id, verdict) = done.map_err(io::Error::other)??;
+                    let (proposal, verdict) = done.map_err(io::Error::other)??;
+                    let request_id = proposal.request_id;
+                    self.open.retain(|&id| id != request_id);
+                    if let Verdict::Missing(positions) = &verdict {
+                        self.hold(proposal, positions.clone());
+                    }
                     self.reply_propose(request_id, verdict).await?;
                     self.start_validations();
                 }
                 _ = tokio::time::sleep_until(retire_at.unwrap_or_else(Instant::now)),
                     if retire_at.is_some() =>
                 {
-                    self.templates.retire(Instant::now());
+                    let now = Instant::now();
+                    self.templates.retire(now);
+                    self.pending.retain(|p| p.expires_at > now);
                 }
                 _ = tokio::time::sleep_until(self.rebuild_at.unwrap_or_else(Instant::now)),
                     if self.rebuild_at.is_some() =>
@@ -392,18 +439,65 @@ impl Session {
             }
             MESSAGE_TYPE_SUBMIT_SOLUTION => self.on_submit_solution(frame).await?,
             MESSAGE_TYPE_PROPOSE_TEMPLATE if self.job_validation => {
-                let Some(m) = job::decode(&mut frame.payload) else {
+                let Some(p) = Proposal::decode(&mut frame.payload) else {
                     rbitcoin_log::info!("sv2: undecodable ProposeTemplate");
                     return Ok(true);
                 };
-                let request_id = m.request_id;
-                if let Err(code) = job::precheck(&m) {
-                    self.reply_propose(request_id, Verdict::Rejected(code.into()))
+                let held = self.open.contains(&p.request_id)
+                    || self
+                        .pending
+                        .iter()
+                        .any(|w| w.proposal.request_id == p.request_id);
+                let code = if held {
+                    Err("duplicate-request-id")
+                } else {
+                    p.precheck()
+                };
+                if let Err(code) = code {
+                    self.reply_propose(p.request_id, Verdict::Rejected(code.into()))
                         .await?;
                     return Ok(true);
                 }
-                self.queued.push_back(frame.payload);
+                self.open.push(p.request_id);
+                self.queued.push_back(Work {
+                    proposal: Arc::new(p),
+                    supplied: Supplied::new(),
+                });
                 self.start_validations();
+            }
+            MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS if self.job_validation => {
+                let Ok(m) =
+                    binary_sv2::from_bytes::<ProvideMissingTransactionsSuccess>(&mut frame.payload)
+                else {
+                    rbitcoin_log::info!("sv2: undecodable ProvideMissingTransactions.Success");
+                    return Ok(true);
+                };
+                let at = self
+                    .pending
+                    .iter()
+                    .position(|w| w.proposal.request_id == m.request_id);
+                let Some(Pending {
+                    proposal, missing, ..
+                }) = at.and_then(|at| self.pending.remove(at))
+                else {
+                    self.reply_propose(
+                        m.request_id,
+                        Verdict::Rejected("unknown-request-id".into()),
+                    )
+                    .await?;
+                    return Ok(true);
+                };
+                match proposal.accept_supplied(&missing, &m.transaction_list) {
+                    Ok(supplied) => {
+                        self.open.push(m.request_id);
+                        self.queued.push_back(Work { proposal, supplied });
+                        self.start_validations();
+                    }
+                    Err(code) => {
+                        self.reply_propose(m.request_id, Verdict::Rejected(code.into()))
+                            .await?;
+                    }
+                }
             }
             t => rbitcoin_log::info!("sv2: ignoring message {t:#x}"),
         }
@@ -670,29 +764,44 @@ impl Session {
     /// comes from the `join_next` arm, paired by `request_id`.
     fn start_validations(&mut self) {
         while self.validations.len() < MAX_INFLIGHT_VALIDATIONS {
-            let Some(payload) = self.queued.pop_front() else {
+            let Some(Work { proposal, supplied }) = self.queued.pop_front() else {
                 return;
             };
             let c = Arc::clone(&self.chain);
             self.validations.spawn_blocking(move || {
                 let _g = BlockingRegion::enter();
-                job::validate(&c, payload)
+                let verdict = job::validate(&c, &proposal, &supplied)?;
+                Ok((proposal, verdict))
             });
         }
     }
 
+    /// docs/sv2-job-validation.md §4.2: keep the proposal for its
+    /// `ProvideMissingTransactions.Success`, `provide_timeout` at most.
+    fn hold(&mut self, proposal: Arc<Proposal>, missing: Vec<u16>) {
+        if self.pending.len() == MAX_PENDING_PROPOSALS {
+            self.pending.pop_front();
+        }
+        self.pending.push_back(Pending {
+            proposal,
+            missing,
+            expires_at: Instant::now() + self.provide_timeout,
+        });
+    }
+
     /// docs/sv2-job-validation.md §4: a valid job is retained under the next
-    /// template id and answered `Success`; a rejected one answers `Error`.
+    /// template id and answered `Success`; a rejected one answers `Error`; one
+    /// the mempool cannot complete is asked for its missing transactions.
     async fn reply_propose(&mut self, request_id: u32, verdict: Verdict) -> io::Result<()> {
         let wire = |e: binary_sv2::Error| io::Error::other(format!("sv2 ProposeTemplate: {e:?}"));
         match verdict {
             Verdict::Missing(positions) => {
-                let reply = ProposeTemplateMissingTransactions {
+                let reply = ProvideMissingTransactions {
                     request_id,
                     unknown_tx_position_list: Seq064K::new(positions).map_err(wire)?,
                 };
                 self.conn
-                    .send(MESSAGE_TYPE_PROPOSE_TEMPLATE_MISSING_TRANSACTIONS, reply)
+                    .send(MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS, reply)
                     .await
             }
             Verdict::Valid { fees, job } => {

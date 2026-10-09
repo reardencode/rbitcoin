@@ -4,6 +4,7 @@
 
 use crate::messages::ProposeTemplate;
 use crate::template::{self, Job};
+use binary_sv2::{Seq064K, B016M};
 use bitcoin::consensus::encode::{deserialize_partial, VarInt};
 use bitcoin::hashes::{sha256d, Hash};
 use bitcoin::{block, Block, BlockHash, Transaction, TxMerkleNode, Wtxid};
@@ -13,8 +14,9 @@ use std::io;
 use std::sync::Arc;
 
 pub(crate) enum Verdict {
-    /// 0-indexed positions in `wtxid_list` neither the mempool nor
-    /// `transaction_list` resolves.
+    /// 0-indexed positions in `wtxid_list` the mempool does not resolve,
+    /// the supplied ones included: the TP holds no transactions across the
+    /// round trip, so what it was given once it asks for again.
     Missing(Vec<u16>),
     /// Consensus-valid on the tip: the fee total and the job to retain.
     Valid { fees: u64, job: Job },
@@ -23,108 +25,129 @@ pub(crate) enum Verdict {
     Rejected(String),
 }
 
-/// `None`: the payload is not a `ProposeTemplate`.
-pub(crate) fn decode(payload: &mut [u8]) -> Option<ProposeTemplate<'_>> {
-    binary_sv2::from_bytes(payload).ok()
+/// A `ProposeTemplate` as the session keeps it: owned, so it outlives its
+/// frame while the TP waits for the transactions it asked for. `excess_data`
+/// is not kept (opaque to the TP).
+pub(crate) struct Proposal {
+    pub request_id: u32,
+    version: u32,
+    coinbase_prefix: Vec<u8>,
+    coinbase_suffix: Vec<u8>,
+    wtxids: Vec<[u8; 32]>,
 }
 
-/// §4.1 and §4.4: the draft's own codes, before any mempool lookup or
-/// transaction decode, so a 32-byte wtxid is never amplified into a copy or
-/// an allocation the job did not declare. `Ok` is the supplied txs keyed by
-/// the wtxid of their bytes as sent; `Err` is the `Error.error_code`. No
-/// chain read, so the session runs it on arrival; [`validate`] runs it
-/// again and stays complete on its own.
-pub(crate) fn precheck<'m>(
-    m: &'m ProposeTemplate<'_>,
-) -> Result<HashMap<[u8; 32], &'m [u8]>, &'static str> {
-    let mut declared = HashSet::with_capacity(m.wtxid_list.len());
-    for w in m.wtxid_list.iter() {
-        if !declared.insert(w.as_ref()) {
-            return Err("duplicate-wtxid");
+/// Supplied transactions keyed by the wtxid of their bytes as sent.
+pub(crate) type Supplied = HashMap<[u8; 32], Vec<u8>>;
+
+impl Proposal {
+    /// `None`: the payload is not a `ProposeTemplate`.
+    pub(crate) fn decode(payload: &mut [u8]) -> Option<Self> {
+        let m: ProposeTemplate = binary_sv2::from_bytes(payload).ok()?;
+        Some(Self {
+            request_id: m.request_id,
+            version: m.version,
+            coinbase_prefix: m.coinbase_tx_prefix.as_ref().to_vec(),
+            coinbase_suffix: m.coinbase_tx_suffix.as_ref().to_vec(),
+            wtxids: m
+                .wtxid_list
+                .iter()
+                .map(|w| w.as_ref().try_into().expect("U256 is 32 bytes"))
+                .collect(),
+        })
+    }
+
+    /// §4.1: `wtxid_list` has no duplicates. No chain read, so the session
+    /// runs it on arrival; [`validate`] runs it again and stays complete on
+    /// its own.
+    pub(crate) fn precheck(&self) -> Result<(), &'static str> {
+        let mut declared = HashSet::with_capacity(self.wtxids.len());
+        if self.wtxids.iter().all(|w| declared.insert(w)) {
+            Ok(())
+        } else {
+            Err("duplicate-wtxid")
         }
     }
-    // The wtxid is the hash of the serialization as sent, so a supplied tx
-    // is matched to its slot without decoding it.
-    let supplied: HashMap<[u8; 32], &[u8]> = m
-        .transaction_list
-        .iter()
-        .map(|raw| {
-            (
-                sha256d::Hash::hash(raw.as_ref()).to_byte_array(),
-                raw.as_ref(),
-            )
-        })
-        .collect();
-    if supplied.keys().any(|w| !declared.contains(&w[..])) {
-        return Err("bad-missing-tx");
+
+    /// §4.3: every supplied transaction hashes to a wtxid at one of the
+    /// positions the TP asked for, and every asked position is covered,
+    /// before any of them is decoded or copied, so a transaction nobody
+    /// asked for costs one hash and a short provide costs none. `Err` is
+    /// the `Error.error_code`.
+    pub(crate) fn accept_supplied(
+        &self,
+        missing: &[u16],
+        transaction_list: &Seq064K<'_, B016M<'_>>,
+    ) -> Result<Supplied, &'static str> {
+        let asked: HashSet<&[u8; 32]> = missing
+            .iter()
+            .filter_map(|&pos| self.wtxids.get(usize::from(pos)))
+            .collect();
+        let mut supplied = Supplied::with_capacity(transaction_list.len());
+        for raw in transaction_list.iter() {
+            let w = sha256d::Hash::hash(raw.as_ref()).to_byte_array();
+            if !asked.contains(&w) {
+                return Err("bad-missing-tx");
+            }
+            supplied.insert(w, raw.as_ref().to_vec());
+        }
+        if supplied.len() != asked.len() {
+            return Err("bad-missing-tx");
+        }
+        Ok(supplied)
     }
-    Ok(supplied)
 }
 
-/// Reads the store and the mempool: blocking region only. `payload` was
-/// [`decode`]d once already; a second failure is a broken invariant.
-pub(crate) fn validate(chain: &ChainHub, mut payload: Vec<u8>) -> io::Result<(u32, Verdict)> {
-    let m = decode(&mut payload).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "sv2: ProposeTemplate stopped decoding",
-        )
-    })?;
-    Ok((m.request_id, check(chain, &m)?))
-}
-
-/// §4.1 and §4.4 in order: the gate, [`precheck`] again, the coinbase,
-/// the resolution, then the proposal check.
-fn check(chain: &ChainHub, m: &ProposeTemplate) -> io::Result<Verdict> {
+/// Reads the store and the mempool: blocking region only.
+pub(crate) fn validate(chain: &ChainHub, p: &Proposal, supplied: &Supplied) -> io::Result<Verdict> {
     let rejected = |code: &str| Ok(Verdict::Rejected(code.into()));
     // Same gate as the templates: a stale tip validates nothing.
     if chain.in_ibd() {
         return rejected("job-validation-unavailable");
     }
     let next = template::next_header(chain)?;
-    let supplied = match precheck(m) {
-        Ok(supplied) => supplied,
-        Err(code) => return rejected(code),
-    };
-    let Some(extranonce) = extranonce_len(m.coinbase_tx_prefix.as_ref()) else {
+    if let Err(code) = p.precheck() {
+        return rejected(code);
+    }
+    let Some(extranonce) = extranonce_len(&p.coinbase_prefix) else {
         return rejected("bad-cb-decode");
     };
     let zeros = vec![0u8; extranonce];
-    let raw = [
-        m.coinbase_tx_prefix.as_ref(),
-        &zeros[..],
-        m.coinbase_tx_suffix.as_ref(),
-    ]
-    .concat();
+    let raw = [&p.coinbase_prefix[..], &zeros[..], &p.coinbase_suffix[..]].concat();
     let Ok(coinbase) = bitcoin::consensus::deserialize::<Transaction>(&raw) else {
         return rejected("bad-cb-decode");
     };
-    let mut txs = Vec::with_capacity(m.wtxid_list.len());
+    let mut txs = Vec::with_capacity(p.wtxids.len());
     let mut missing = Vec::new();
-    for (pos, w) in m.wtxid_list.iter().enumerate() {
-        let w: [u8; 32] = w.as_ref().try_into().expect("U256 is 32 bytes");
-        let tx = match supplied.get(&w) {
+    let mut provided = Vec::new();
+    for (pos, w) in p.wtxids.iter().enumerate() {
+        let pos = u16::try_from(pos).expect("Seq064K holds at most 65535");
+        let tx = match supplied.get(w) {
             Some(raw) => match bitcoin::consensus::deserialize::<Transaction>(raw) {
-                Ok(tx) => Some(tx),
+                Ok(tx) => {
+                    provided.push(pos);
+                    Some(tx)
+                }
                 Err(_) => return rejected("bad-missing-tx"),
             },
             None => chain
                 .mempool()
-                .and_then(|mp| mp.get_tx_by_wtxid(&Wtxid::from_byte_array(w))),
+                .and_then(|mp| mp.get_tx_by_wtxid(&Wtxid::from_byte_array(*w))),
         };
         match tx {
             Some(tx) => txs.push(tx),
-            None => missing.push(u16::try_from(pos).expect("Seq064K holds at most 65535")),
+            None => missing.push(pos),
         }
     }
     if !missing.is_empty() {
+        missing.extend(provided);
+        missing.sort_unstable();
         return Ok(Verdict::Missing(missing));
     }
     let mut leaves = Vec::with_capacity(1 + txs.len());
     leaves.push(coinbase.compute_txid().to_byte_array());
     leaves.extend(txs.iter().map(|tx| tx.compute_txid().to_byte_array()));
     let header = block::Header {
-        version: block::Version::from_consensus(m.version as i32),
+        version: block::Version::from_consensus(p.version as i32),
         prev_blockhash: BlockHash::from_byte_array(next.prev_hash),
         merkle_root: TxMerkleNode::from_byte_array(rbitcoin_store::merkle_root_from_txids(&leaves)),
         time: next.time,

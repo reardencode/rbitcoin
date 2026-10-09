@@ -1,6 +1,7 @@
 //! Job-validation extension to TDP (`docs/sv2-job-validation.md` §3–5):
-//! the `SetupConnection` flag and the four `ProposeTemplate` messages a
-//! Job Declarator Server uses to have this TP check a custom job.
+//! the `SetupConnection` flag, the `ProposeTemplate` request and its two
+//! replies, and the `ProvideMissingTransactions` pair a Job Declarator
+//! Server relays between this TP and its JDC.
 
 use binary_sv2::{Deserialize, Seq064K, Serialize, Str0255, B016M, B064K, U256};
 
@@ -12,17 +13,19 @@ pub const REQUIRES_JOB_VALIDATION: u32 = 1 << 0;
 #[doc(hidden)]
 pub const MESSAGE_TYPE_PROPOSE_TEMPLATE: u8 = 0x77;
 #[doc(hidden)]
-pub const MESSAGE_TYPE_PROPOSE_TEMPLATE_MISSING_TRANSACTIONS: u8 = 0x78;
+pub const MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS: u8 = 0x78;
 #[doc(hidden)]
 pub const MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS: u8 = 0x79;
 #[doc(hidden)]
 pub const MESSAGE_TYPE_PROPOSE_TEMPLATE_ERROR: u8 = 0x7a;
+#[doc(hidden)]
+pub const MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS: u8 = 0x7b;
 
 /// Client → TP: is this custom job a consensus-valid block on the TP tip?
 /// The `DeclareMiningJob` subset a node needs, relayed unchanged: the
-/// coinbase split around the extranonce and the declared wtxids.
-/// `transaction_list` carries the txs a prior
-/// [`ProposeTemplateMissingTransactions`] asked for, in that order.
+/// coinbase split around the extranonce and the declared wtxids. Carries no
+/// transactions; the TP asks for the ones it lacks with
+/// [`ProvideMissingTransactions`].
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[doc(hidden)]
 pub struct ProposeTemplate<'decoder> {
@@ -33,15 +36,24 @@ pub struct ProposeTemplate<'decoder> {
     pub wtxid_list: Seq064K<'decoder, U256<'decoder>>,
     /// Opaque to the TP (TDP 7.6 semantics belong to the Pool).
     pub excess_data: B064K<'decoder>,
-    pub transaction_list: Seq064K<'decoder, B016M<'decoder>>,
 }
 
 /// TP → client: 0-indexed positions in `wtxid_list` the TP cannot resolve.
+/// The layout of JDP 6.4.7, so a JDS copies the payload to its JDC.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[doc(hidden)]
-pub struct ProposeTemplateMissingTransactions<'decoder> {
+pub struct ProvideMissingTransactions<'decoder> {
     pub request_id: u32,
     pub unknown_tx_position_list: Seq064K<'decoder, u16>,
+}
+
+/// Client → TP: the transactions a [`ProvideMissingTransactions`] asked
+/// for, in that order. The layout of JDP 6.4.8, copied from the JDC.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct ProvideMissingTransactionsSuccess<'decoder> {
+    pub request_id: u32,
+    pub transaction_list: Seq064K<'decoder, B016M<'decoder>>,
 }
 
 /// TP → client: the job is valid on the tip `prev_hash` and retained under
@@ -102,15 +114,22 @@ mod tests {
                 coinbase_tx_suffix: B064K::try_from(&suffix[..]).unwrap(),
                 wtxid_list: Seq064K::new(vec![U256::from(&h2), U256::from(&h3)]).unwrap(),
                 excess_data: B064K::try_from(&details[..]).unwrap(),
-                transaction_list: Seq064K::new(vec![B016M::try_from(&tx[..]).unwrap()]).unwrap(),
             },
             &mut bytes,
         );
         let mut bytes = Vec::new();
         round_trip(
-            ProposeTemplateMissingTransactions {
+            ProvideMissingTransactions {
                 request_id: 7,
                 unknown_tx_position_list: Seq064K::new(vec![0u16, 5, u16::MAX]).unwrap(),
+            },
+            &mut bytes,
+        );
+        let mut bytes = Vec::new();
+        round_trip(
+            ProvideMissingTransactionsSuccess {
+                request_id: 7,
+                transaction_list: Seq064K::new(vec![B016M::try_from(&tx[..]).unwrap()]).unwrap(),
             },
             &mut bytes,
         );
