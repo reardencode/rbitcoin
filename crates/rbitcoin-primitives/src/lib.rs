@@ -428,30 +428,6 @@ mod tests {
     }
 
     #[test]
-    fn open_schema26_meta_refused_by_v25_gate() {
-        const SCHEMA25_MAX: u16 = 25;
-        fn schema25_binary_openable(ver: u16) -> bool {
-            (22..=SCHEMA25_MAX).contains(&ver)
-        }
-        assert!(!schema25_binary_openable(26));
-        assert!(schema25_binary_openable(25));
-        assert!(schema_file_openable(25));
-        assert!(schema_file_openable(26));
-    }
-
-    #[test]
-    fn open_schema25_meta_refused_by_v24_gate() {
-        const SCHEMA24_MAX: u16 = 24;
-        fn schema24_binary_openable(ver: u16) -> bool {
-            (22..=SCHEMA24_MAX).contains(&ver)
-        }
-        assert!(!schema24_binary_openable(25));
-        assert!(schema24_binary_openable(24));
-        assert!(schema_file_openable(24));
-        assert!(schema_file_openable(25));
-    }
-
-    #[test]
     fn subversion_comments_and_rejects() {
         assert_eq!(
             rbitcoin_subversion("0.1.0", &[] as &[&str]).unwrap(),

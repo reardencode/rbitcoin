@@ -96,7 +96,6 @@ pub struct BlockQueue {
     /// First-wins height → id. Height APIs must not walk `index.values()`.
     height_to_id: HashMap<u32, u64>,
     bytes: u64,
-    raw_clones: AtomicU64,
 }
 
 #[derive(Debug, Clone)]
@@ -124,17 +123,11 @@ impl BlockQueue {
             index: BTreeMap::new(),
             height_to_id: HashMap::new(),
             bytes: 0,
-            raw_clones: AtomicU64::new(0),
         })
     }
 
     pub fn bytes(&self) -> u64 {
         self.bytes
-    }
-
-    /// Take-and-reset raw payload clone count (instance stats).
-    pub fn take_raw_clone_n(&self) -> u64 {
-        self.raw_clones.swap(0, Ordering::Relaxed)
     }
 
     pub fn count(&self) -> usize {
@@ -405,8 +398,7 @@ impl BlockQueue {
 
     /// Another handle on the still-raw frame. Promoted / missing → `None`.
     ///
-    /// Clones the `Arc`, not the bytes. [`Self::take_raw_clone_n`] counts
-    /// `raw_payloads` materializations only.
+    /// Clones the `Arc`, not the bytes.
     pub fn raw_payload(&self, height: u32) -> Option<Arc<Vec<u8>>> {
         match self.entry_for_height(height).map(|e| &e.body) {
             Some(QueuedBody::Raw(v)) => Some(Arc::clone(v)),
@@ -426,7 +418,6 @@ impl BlockQueue {
                 continue;
             }
             if let QueuedBody::Raw(v) = &e.body {
-                self.raw_clones.fetch_add(1, Ordering::Relaxed);
                 out.push((e.height, v.as_slice().to_vec()));
             }
         }
@@ -793,18 +784,15 @@ mod tests {
         for h in 0..8u32 {
             q.enqueue(h, [h as u8; 32], 1, &[h as u8; 8]).unwrap();
         }
-        let _ = q.take_raw_clone_n();
         assert!(q.has_raw(3));
         let first = q.raw_payload(3).unwrap();
         let second = q.raw_payload(3).unwrap();
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(first.as_slice(), &[3u8; 8]);
-        assert_eq!(q.take_raw_clone_n(), 0, "an Arc bump is not a frame copy");
         let taken = q.take_raw(3).unwrap();
         assert_eq!(taken.payload.as_slice(), first.as_slice());
         assert!(!q.has_raw(3));
         assert!(q.raw_payload(3).is_none());
-        assert_eq!(q.take_raw_clone_n(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

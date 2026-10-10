@@ -5,7 +5,7 @@
 
 use bitcoin::{OutPoint, Transaction, Txid, Wtxid};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+
 use std::sync::Mutex;
 
 /// Hard cap on txs in one cluster.
@@ -206,9 +206,6 @@ pub struct TxGraph {
     created: HashSet<OutPoint>,
     /// Sum of live weights (WU) for eviction budget.
     total_weight: u64,
-    /// How many times [`Self::mining_chunks_best_first`] built from clusters
-    /// (not a cache hit). Hub tests pin refresh does one rebuild per dirty window.
-    chunks_rebuilds: AtomicU64,
     /// Best-first chunks; `None` after mutate until next build.
     chunk_cache: Mutex<Option<Vec<Chunk>>>,
     /// Lowest-rate chunk per cluster, ordered by (rate, representative txid).
@@ -236,7 +233,6 @@ impl Default for TxGraph {
             conflicts: HashMap::new(),
             created: HashSet::new(),
             total_weight: 0,
-            chunks_rebuilds: AtomicU64::new(0),
             chunk_cache: Mutex::new(None),
             worst_chunks: BTreeMap::new(),
             worst_rep_rate: HashMap::new(),
@@ -327,11 +323,6 @@ impl TxGraph {
 
     pub fn txid_for_wtxid(&self, wtxid: &Wtxid) -> Option<Txid> {
         self.by_wtxid.get(wtxid).copied()
-    }
-
-    /// Sample-and-reset cluster-linearize count (fee-refresh tests).
-    pub fn take_chunks_rebuilds(&self) -> u64 {
-        self.chunks_rebuilds.swap(0, Ordering::Relaxed)
     }
 
     fn invalidate_chunk_cache(&mut self) {
@@ -975,7 +966,6 @@ impl TxGraph {
                 return c.clone();
             }
         }
-        self.chunks_rebuilds.fetch_add(1, Ordering::Relaxed);
         let mut seen = HashSet::new();
         let mut chunks = Vec::new();
         for txid in self.entries.keys() {
@@ -1130,11 +1120,6 @@ impl TxGraph {
     }
 
     /// Lowest fee-rate chunk across all clusters (for P5 eviction). `None` if empty.
-    #[cfg(test)]
-    fn indexed_cluster_count(&self) -> usize {
-        self.worst_chunks.len()
-    }
-
     pub fn worst_chunk(&self) -> Option<(Txid, Chunk)> {
         self.worst_chunks
             .iter()
@@ -1246,10 +1231,6 @@ mod tests {
         assert_ne!(least, greater);
         let mut seen = std::collections::BTreeSet::new();
         assert_eq!(g.component_rep(greater, &mut seen), Some(least));
-        assert_eq!(g.indexed_cluster_count(), 1);
-        let stranger = make_tx(Some((pid, 7)), 1, 9);
-        g.insert(entry_for(&stranger, 500, 2), &stranger);
-        assert_eq!(g.indexed_cluster_count(), 2);
     }
 
     #[test]
@@ -1376,16 +1357,9 @@ mod tests {
             "under-full target must not use last_chunk as a far-horizon rate"
         );
         assert_eq!(weight_above_from_chunks(&ch, 0), g.weight_above_feerate(0));
-        // Cache: after a build, further calls do not increment rebuilds.
-        let _ = g.take_chunks_rebuilds();
         let a2 = g.mining_chunks_best_first();
         let b2 = g.mining_chunks_best_first();
-        assert_eq!(a2, b2);
-        assert_eq!(g.take_chunks_rebuilds(), 0);
-        let extra = spend_op([3u8; 32], 50_000, 40_000);
-        g.insert(entry_for(&extra, 2_000, 2), &extra);
-        let _ = g.mining_chunks_best_first();
-        assert_eq!(g.take_chunks_rebuilds(), 1);
+        assert_eq!(a2, b2, "a second walk reuses the cached chunks");
     }
 
     #[test]

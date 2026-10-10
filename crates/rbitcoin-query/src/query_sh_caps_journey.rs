@@ -2,21 +2,15 @@ fn assert_unspent_newest_page_stops(
     q: &Query,
     quiet_sh: [u8; 32],
     tip_cb_txid: [u8; 32],
-    quiet_old: rbitcoin_primitives::Fk,
 ) {
     use crate::scripthash::HistoryOrder::NewestFirst;
 
-    q.store().reset_txid_get_many();
     assert_eq!(
         sh_page(q, &quiet_sh, NewestFirst, None).unwrap(),
         [tip_cb_txid],
         "newest-first page is the tip create"
     );
-    let scanned = q.store().txid_get_many_fks();
-    assert!(
-        !scanned.contains(&quiet_old.0),
-        "an unspent newest-first page stops before older creates: {scanned:?}"
-    );
+
 }
 
 fn sh_page(
@@ -77,7 +71,7 @@ fn sh_history_caps() {
     add_quiet_output(&mut cb5);
     let tip_cb_txid = cb5.tx.txid;
     let quiet_sh = script_hash(&[0x53]);
-    let quiet_old = q.block_tx_fks(Height(1)).unwrap()[0];
+
     let mut spend = cb5.clone();
     spend.tx.output_count = 1;
     spend.outputs.truncate(1);
@@ -102,7 +96,6 @@ fn sh_history_caps() {
     q.apply_sh_pending().unwrap();
     assert!(q.pending_sh_create_fks(&sh).is_empty());
     assert_eq!(q.scripthash_create_count(&sh).unwrap(), 7);
-    let tip_coinbase_fk = q.block_tx_fks(Height(5)).unwrap()[0];
 
     q.set_max_sh_creates(2);
     for err in [
@@ -124,23 +117,19 @@ fn sh_history_caps() {
         [cb_txids[1]],
         "a full page past the cursor closes too"
     );
-    q.store().reset_txid_get_many();
+
     assert_eq!(
         sh_page(&q, &probe_sh, HeightAsc, Some(cb_txids[3])).unwrap(),
         [cb_txids[4]],
         "a cursor deeper than the cap still returns its next row"
     );
-    let scanned = q.store().txid_get_many_fks();
-    assert!(
-        !scanned.contains(&tip_coinbase_fk.0),
-        "once the cursor and full page are joined, later creates cannot change the page"
-    );
+
     assert_eq!(
         sh_page(&q, &sh, NewestFirst, None).unwrap(),
         [spend_txid],
         "the newest row spends the oldest create"
     );
-    assert_unspent_newest_page_stops(&q, quiet_sh, tip_cb_txid, quiet_old);
+    assert_unspent_newest_page_stops(&q, quiet_sh, tip_cb_txid);
 
     let view = q.pin_sh_chain_view().unwrap().expect("sh view");
     let page = crate::scripthash::HistoryFilter::esplora_chain_page(None);

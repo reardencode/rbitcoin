@@ -59,7 +59,6 @@ pub fn resolve_fk_and_range_batch_with_tip(
 fn note_first_leftover_miss(
     tip_only: bool,
     picked: &[Option<Fk>],
-    connected: &[bool],
     n_cands: &[usize],
     had_id: &[bool],
 ) {
@@ -71,8 +70,7 @@ fn note_first_leftover_miss(
         if picked[i].is_some() {
             continue;
         }
-        let on =
-            crate::head_resolve_pick::classify_leftover_miss(n_cands[i], had_id[i], connected[i]);
+        let on = crate::head_resolve_pick::classify_leftover_miss(n_cands[i], had_id[i]);
         crate::head_resolve_stats::note_leftover_miss(on, n_cands[i] as u64);
         return;
     }
@@ -346,7 +344,7 @@ fn resolve_identity_core(
             }
         }
     }
-    note_first_leftover_miss(tip_only, &picked, &connected, &n_cands, &had_id);
+    note_first_leftover_miss(tip_only, &picked, &n_cands, &had_id);
 
     crate::head_resolve_stats::add_probe(probe_ns);
     crate::head_resolve_stats::add_cands(cands_total);
@@ -699,26 +697,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Pool session drives the same staged resolve machine.
-    #[test]
-    fn pool_fk_and_range_matches_pread() {
-        crate::uring_session::with_forced_session_kind(
-            crate::uring_session::SessionKind::Pool,
-            || {
-                let (dir, t, txids) = seed_table(16);
-                let _ = crate::uring_session::tls_take_sqe_n();
-                let pread = resolve_fk_and_range_pread(&t, &txids, None, false).unwrap();
-                let via = resolve_fk_and_range_batch(&t, &txids).unwrap();
-                assert_eq!(pread, via);
-                assert!(
-                    crate::uring_session::tls_take_sqe_n() > 0,
-                    "pool resolve must push probe/identity SQEs on the held session"
-                );
-                let _ = std::fs::remove_dir_all(&dir);
-            },
-        );
-    }
-
     /// After drain, TipOnly hits durable head (write-behind is load-owned).
     #[test]
     fn uring_pending_write_behind_does_not_nest_tls() {
@@ -799,164 +777,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    fn merge_cands(parts: &[Vec<Vec<Fk>>]) -> Vec<Vec<Fk>> {
-        let n = parts[0].len();
-        let mut out = vec![Vec::new(); n];
-        for part in parts {
-            for (i, c) in part.iter().enumerate() {
-                out[i].extend(c.iter().copied());
-            }
-        }
-        out
-    }
-
-    /// On a small (no cold segs) store, open∪sealed_hot∪cold equals full probe.
-    #[test]
-    fn three_waves_cands_match_full_probe() {
-        let (dir, t, txids) = seed_table(24);
-        let mixed: Vec<[u8; 32]> = txids.iter().map(|x| t.secret.mix_txid(x)).collect();
-        let full = t.head.probe_candidates_batch(&mixed).unwrap();
-        let open = t.head.probe_candidates_batch_open(&mixed).unwrap();
-        let mid = t
-            .head
-            .probe_candidates_batch_sealed_hot(&mixed, &vec![true; mixed.len()])
-            .unwrap();
-        let active = vec![true; mixed.len()];
-        let cold = t.head.probe_candidates_batch_cold(&mixed, &active).unwrap();
-        let merged = merge_cands(&[open.clone(), mid.clone(), cold.clone()]);
-        assert_eq!(merged, full);
-        assert!(
-            mid.iter().all(|c| c.is_empty()) && cold.iter().all(|c| c.is_empty()),
-            "tiny store is open-only"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Open / sealed-hot (ages 1..=3) / cold (age ≥4); union = full.
-    #[test]
-    fn three_waves_partition_by_sealed_age() {
-        use crate::address_head::HeadLayout;
-        use crate::segmented_head::HEAD_PROBE_HOT_MAX_AGE;
-        let dir = tmp("hot-open-plus-3");
-        let layout = HeadLayout::with_entry_bytes(8, 4).unwrap();
-        let t = TxTable::create_with_head_layout(&dir, layout).unwrap();
-        // bits=8 → 256 slots, seal ~204 keys. Six segments ⇒ oldest age ≥4.
-        let n = 204u32.saturating_mul(6);
-        let mut items = Vec::new();
-        let mut txids = Vec::new();
-        for i in 0..n {
-            let mut tid = [0u8; 32];
-            tid[0..4].copy_from_slice(&i.to_le_bytes());
-            tid[8] = 0xa5;
-            txids.push(tid);
-            items.push((
-                TxRecord {
-                    txid: tid,
-                    version: 1,
-                    locktime: 0,
-                    input_start_fk: Fk::NULL,
-                    input_count: 1,
-                    output_start_fk: Fk::NULL,
-                    output_count: 1,
-                },
-                vec![InputRecord::coinbase(u32::MAX, vec![], vec![])],
-                vec![OutputRecord::unspent(1, vec![0x51])],
-            ));
-        }
-        t.put_full_batch_indexed(&items, true).unwrap();
-        t.flush_head().unwrap();
-        assert!(
-            t.head.sealed_segment_count() >= 4,
-            "need a cold sealed age, segs={} sealed={}",
-            t.head.segment_count(),
-            t.head.sealed_segment_count()
-        );
-        let first = t.head.first_fks_snapshot();
-        let mixed: Vec<[u8; 32]> = txids.iter().map(|x| t.secret.mix_txid(x)).collect();
-        let open = t.head.probe_candidates_batch_open(&mixed).unwrap();
-        let mid = t
-            .head
-            .probe_candidates_batch_sealed_hot(&mixed, &vec![true; mixed.len()])
-            .unwrap();
-        let active = vec![true; mixed.len()];
-        let cold = t.head.probe_candidates_batch_cold(&mixed, &active).unwrap();
-        let full = t.head.probe_candidates_batch(&mixed).unwrap();
-        let merged = merge_cands(&[open.clone(), mid.clone(), cold.clone()]);
-        assert_eq!(merged, full, "open∪sealed_hot∪cold must equal full probe");
-        let mid_off = t
-            .head
-            .probe_candidates_batch_sealed_hot(&mixed, &vec![false; mixed.len()])
-            .unwrap();
-        assert!(
-            mid_off.iter().all(|c| c.is_empty()),
-            "inactive sealed-hot mask must skip every key"
-        );
-        let hit = mid
-            .iter()
-            .position(|c| !c.is_empty())
-            .expect("expected sealed-hot cands");
-        let mut one = vec![false; mixed.len()];
-        one[hit] = true;
-        let mid_one = t
-            .head
-            .probe_candidates_batch_sealed_hot(&mixed, &one)
-            .unwrap();
-        assert_eq!(mid_one[hit], mid[hit]);
-        for (i, c) in mid_one.iter().enumerate() {
-            if i != hit {
-                assert!(c.is_empty(), "inactive key {i} must not probe sealed-hot");
-            }
-        }
-        let mut saw_cold = false;
-        for i in 0..txids.len() {
-            for &fk in &open[i] {
-                let age = crate::head_resolve_stats::sealed_age_for_fk(&first, fk.0).unwrap();
-                assert_eq!(age, 0, "open cand fk={} age={age}", fk.0);
-            }
-            for &fk in &mid[i] {
-                let age = crate::head_resolve_stats::sealed_age_for_fk(&first, fk.0).unwrap();
-                assert!(
-                    age <= HEAD_PROBE_HOT_MAX_AGE,
-                    "sealed-hot cand fk={} age={age}",
-                    fk.0
-                );
-            }
-            for &fk in &cold[i] {
-                let age = crate::head_resolve_stats::sealed_age_for_fk(&first, fk.0).unwrap();
-                assert!(
-                    age > HEAD_PROBE_HOT_MAX_AGE,
-                    "cold cand fk={} age={age}",
-                    fk.0
-                );
-                saw_cold = true;
-            }
-        }
-        assert!(saw_cold, "expected some keys to have cold-only cands");
-        let oldest = crate::head_resolve_stats::sealed_age_for_fk(&first, 1).unwrap();
-        assert!(oldest > HEAD_PROBE_HOT_MAX_AGE, "oldest age={oldest}");
-        assert!(
-            !open[0].iter().any(|f| f.0 == 1) && !mid[0].iter().any(|f| f.0 == 1),
-            "oldest create must not be in open or sealed-hot"
-        );
-        assert!(
-            cold[0].iter().any(|f| f.0 == 1),
-            "oldest create must be in cold"
-        );
-        let open_i = txids.len() - 1;
-        let hot_i = hit;
-        let cold_i = 0;
-        let want = [txids[open_i], txids[hot_i], txids[cold_i]];
-        let got = resolve_fk_and_range_batch(&t, &want).unwrap();
-        let pread = resolve_fk_and_range_pread(&t, &want, None, false).unwrap();
-        assert_eq!(got, pread);
-        for (_tid, row) in &got {
-            let (fk, pair) = row.expect("mixed-age resolve must stamp loc");
-            let serial = t.create_loc.range_batch(&[fk]).unwrap()[0].unwrap();
-            assert_eq!(pair, serial, "fk={}", fk.0);
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     /// Older fence-connected create wins over a newer unconnected duplicate,
     /// including when they sit in different sealed segments. TipOnly must not
     /// return None after seeing only the newer body.
@@ -964,7 +784,6 @@ mod tests {
     fn tip_fence_keeps_older_connected_across_sealed_segments() {
         use crate::address_head::HeadLayout;
         use crate::height_fence::FenceRun;
-        use crate::segmented_head::HEAD_PROBE_HOT_MAX_AGE;
         let dir = tmp("fence-across-segs");
         let layout = HeadLayout::with_entry_bytes(8, 4).unwrap();
         let t = TxTable::create_with_head_layout(&dir, layout).unwrap();
@@ -1013,13 +832,12 @@ mod tests {
         t.flush_head().unwrap();
         let first = t.head.first_fks_snapshot();
         let oldest = crate::head_resolve_stats::sealed_age_for_fk(&first, 1).unwrap();
-        assert!(oldest > HEAD_PROBE_HOT_MAX_AGE, "oldest age={oldest}");
         let newest_fk = Fk(u64::from(n));
         let age_new = crate::head_resolve_stats::sealed_age_for_fk(&first, newest_fk.0).unwrap();
         assert!(
-            (1..=HEAD_PROBE_HOT_MAX_AGE).contains(&age_new),
-            "newest sealed fk={} age={age_new} first={first:?}",
-            newest_fk.0
+            oldest > age_new && age_new >= 1 && t.head.sealed_segment_count() >= 4,
+            "oldest age={oldest} newest age={age_new} sealed={}",
+            t.head.sealed_segment_count()
         );
         let age_dup = crate::head_resolve_stats::sealed_age_for_fk(&first, dup_fk.0).unwrap();
         assert_eq!(

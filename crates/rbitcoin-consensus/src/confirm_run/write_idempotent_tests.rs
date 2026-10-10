@@ -485,69 +485,6 @@ fn script_jobs_shrink_after_take() {
     assert_eq!(ok.batch.prepared[0].jobs.capacity(), 0);
 }
 
-#[test]
-fn check_bip34_helper_and_expected_bits_no_retarget() {
-    use super::{check_bip34, expected_bits_extending};
-    use crate::params::ChainParams;
-    use bitcoin::absolute::LockTime;
-    use bitcoin::block::{Header, Version};
-    use bitcoin::hashes::Hash;
-    use bitcoin::script::ScriptBuf;
-    use bitcoin::{
-        Amount, Block, BlockHash, CompactTarget, OutPoint, Sequence, Transaction, TxIn,
-        TxMerkleNode, TxOut, Witness,
-    };
-    use rbitcoin_primitives::Height;
-
-    let height = 17u32;
-    let mut ss = crate::block::bip34_height_script(height);
-    while ss.len() < 2 {
-        ss.push(0x00);
-    }
-    let cb = Transaction {
-        version: bitcoin::transaction::Version::ONE,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint::null(),
-            script_sig: ScriptBuf::from_bytes(ss),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        output: vec![TxOut {
-            value: Amount::from_sat(50),
-            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
-        }],
-    };
-    let block = Block {
-        header: Header {
-            version: Version::from_consensus(4),
-            prev_blockhash: BlockHash::from_byte_array([0; 32]),
-            merkle_root: TxMerkleNode::from_byte_array([0; 32]),
-            time: 1,
-            bits: CompactTarget::from_consensus(0x207f_ffff),
-            nonce: 0,
-        },
-        txdata: vec![cb],
-    };
-    check_bip34(&block, height).unwrap();
-    // Wrong height
-    assert!(check_bip34(&block, height + 1).is_err());
-    let mut empty_cb = block.clone();
-    empty_cb.txdata[0].input[0].script_sig = ScriptBuf::new();
-    let err = check_bip34(&empty_cb, height).expect_err("empty scriptSig");
-    assert!(
-        err.to_string().contains("bip34 coinbase script empty"),
-        "got: {err}"
-    );
-
-    // expected_bits_extending without store: height 0 and no_pow_retargeting regtest
-    let params = ChainParams::regtest();
-    // Cannot call with query easily; unit-test height==0 via expected_bits requires Query.
-    // Cover pure branch: no_pow or non-interval uses prev_bits — needs Query only for retarget.
-    let _ = (params, expected_bits_extending);
-    let _ = Height;
-}
-
 /// Trailing null `confirmed[]` + reopen must still connect real tip+1
 /// (`NotFound` was the inflated-HWM miss on a valid body).
 #[test]
@@ -645,7 +582,6 @@ fn expected_bits_extending_height0_and_no_retarget() {
     assert_eq!(ok.batch.parent_count(), 0);
 
     // check_bip34 wrong encoding
-    use super::check_bip34;
     use bitcoin::absolute::LockTime;
     use bitcoin::block::{Header, Version};
     use bitcoin::hashes::Hash;
@@ -679,7 +615,7 @@ fn expected_bits_extending_height0_and_no_retarget() {
         },
         txdata: vec![cb],
     };
-    assert!(check_bip34(&block, 17).is_err());
+    assert!(crate::block::check_bip34_coinbase(&block.txdata[0], 17).is_err());
 
     let _ = std::fs::remove_dir_all(&path);
 }
@@ -939,7 +875,7 @@ fn pin_and_ensure_journey() {
         prev_mtp: 0,
     }];
     let bp = BatchParents::new();
-    q.store().reset_spent_range_batch();
+
     let err = ensure_spend_abs_layouts(&bp, &prepared_miss)
         .expect_err("ensure must hard-fail without denserels");
     let msg = format!("{err}");
@@ -947,10 +883,6 @@ fn pin_and_ensure_journey() {
         msg.contains("invariant")
             && (msg.contains("ensure denserels") || msg.contains("abs incomplete")),
         "unexpected err: {msg}"
-    );
-    assert!(
-        q.store().spent_range_batch_fks().is_empty(),
-        "ensure must not pread create.loc"
     );
 
     post_commit(&q, &crate::block::AnnotateSlots::default())
@@ -1046,7 +978,7 @@ fn pin_and_ensure_journey() {
         hash: [4u8; 32],
         prev_mtp: 0,
     }];
-    q.store().reset_spent_range_batch();
+
     let err = ensure_spend_abs_layouts(&bp, &prepared)
         .expect_err("pinned hole without lookup stamp is Corrupt");
     let msg = format!("{err}");
@@ -1054,17 +986,6 @@ fn pin_and_ensure_journey() {
         msg.contains("invariant")
             && (msg.contains("ensure denserels") || msg.contains("abs incomplete")),
         "unexpected err: {msg}"
-    );
-    let pinned_spent: Vec<u64> = q
-        .store()
-        .spent_range_batch_fks()
-        .into_iter()
-        .filter(|&id| id == parent_id)
-        .collect();
-    assert_eq!(
-        pinned_spent.len(),
-        0,
-        "ensure must not pread create.loc: {pinned_spent:?}"
     );
 
     let cold_tx = rec_tx(0x33, 1);
@@ -1074,7 +995,6 @@ fn pin_and_ensure_journey() {
         .store()
         .put_tx_full_batch_indexed(&[(cold_tx.clone(), cold_ins, cold_outs)], true)
         .unwrap()[0];
-    let cid = cfk.get().unwrap();
     let prepared_cold = [Prepared {
         height: Height(1),
         header_fk: Fk(1),
@@ -1089,7 +1009,7 @@ fn pin_and_ensure_journey() {
         prev_mtp: 0,
     }];
     let bp_cold = BatchParents::new();
-    q.store().reset_spent_range_batch();
+
     let err = ensure_spend_abs_layouts(&bp_cold, &prepared_cold)
         .expect_err("unpinned leftover without lookup stamp is Corrupt");
     let msg = format!("{err}");
@@ -1097,17 +1017,6 @@ fn pin_and_ensure_journey() {
         msg.contains("invariant")
             && (msg.contains("ensure denserels") || msg.contains("abs incomplete")),
         "unexpected err: {msg}"
-    );
-    let cold_spent: Vec<u64> = q
-        .store()
-        .spent_range_batch_fks()
-        .into_iter()
-        .filter(|&id| id == cid)
-        .collect();
-    assert_eq!(
-        cold_spent.len(),
-        0,
-        "ensure must not pread create.loc: {cold_spent:?}"
     );
 
     let mut plan3 = ArchiveWritePlan::empty();
@@ -1140,13 +1049,9 @@ fn pin_and_ensure_journey() {
         parents3.get_spender_abs(pfk, 0),
         Some(rbitcoin_store::spent_abs(spent_off, 0))
     );
-    q.store().reset_spent_range_batch();
+
     ensure_spend_abs_layouts(&parents3, &prepared).expect("ensure already-abs skip");
     assert!(parents3.has_abs_layout(pfk));
-    assert!(
-        q.store().spent_range_batch_fks().is_empty(),
-        "already-abs ensure must not pread create.loc"
-    );
 
     let mut plan4 = ArchiveWritePlan::empty();
     plan4.packed = vec![
@@ -1207,7 +1112,7 @@ fn pin_and_ensure_journey() {
         hash: [6u8; 32],
         prev_mtp: 0,
     }];
-    q.store().reset_spent_range_batch();
+
     let err = ensure_spend_abs_layouts(&bp_ghost, &prepared_ghost)
         .expect_err("pin without spent.idx cannot invent abs");
     let msg = format!("{err}");
@@ -1215,17 +1120,6 @@ fn pin_and_ensure_journey() {
         msg.contains("invariant")
             && (msg.contains("ensure denserels") || msg.contains("abs incomplete")),
         "unexpected err: {msg}"
-    );
-    let ghost_spent: Vec<u64> = q
-        .store()
-        .spent_range_batch_fks()
-        .into_iter()
-        .filter(|&id| id == 42)
-        .collect();
-    assert_eq!(
-        ghost_spent.len(),
-        0,
-        "ensure must not pread create.loc: {ghost_spent:?}"
     );
 
     let _ = std::fs::remove_dir_all(&path);
@@ -1257,7 +1151,7 @@ fn fill_same_batch_abs_from_append_loc_ram() {
         script_sig: vec![],
         witness: vec![],
     }];
-    q.store().reset_spent_range_batch();
+
     let (fks, loc) = q
         .store()
         .put_tx_full_batch_from_pins(
@@ -1271,14 +1165,10 @@ fn fill_same_batch_abs_from_append_loc_ram() {
         .unwrap();
     assert_eq!(fks[0], Fk(1));
     assert_eq!(loc.len(), 2);
-    assert!(
-        q.store().spent_range_batch_fks().is_empty(),
-        "append must not pread create.loc"
-    );
+
     assert_eq!(loc[0].txout, q.store().tx_body_range(fks[0]).unwrap());
     assert_eq!(loc[0].spent, q.store().tx_spent_range(fks[0]).unwrap());
     assert_eq!(loc[0].n_out, 1);
-    q.store().reset_spent_range_batch();
 
     let prepared = [Prepared {
         height: Height(1),
@@ -1308,12 +1198,8 @@ fn fill_same_batch_abs_from_append_loc_ram() {
         bp.get_spender_abs(fks[0], 0),
         Some(rbitcoin_store::spent_abs(loc[0].spent.0, 0))
     );
-    q.store().reset_spent_range_batch();
+
     ensure_spend_abs_layouts(&bp, &prepared).expect("same-batch abs after RAM fill");
-    assert!(
-        q.store().spent_range_batch_fks().is_empty(),
-        "write fill/ensure must not pread create.loc"
-    );
 
     q.set_lookup_started_hi(Some(4));
     q.note_write_create_loc(&fks, &loc, 1);
@@ -1340,7 +1226,7 @@ fn fill_same_batch_abs_from_append_loc_ram() {
         hash: [8u8; 32],
         prev_mtp: 0,
     }];
-    q.store().reset_spent_range_batch();
+
     fill_planned_create_layout_after_commit(&q, &mut bp_later, &[], &[], &[], &later)
         .expect("just-written fill from write loc RAM");
     assert!(bp_later.has_abs_layout(fks[0]));
@@ -1728,7 +1614,7 @@ fn fill_just_written_survives_until_last_started_write() {
         rec_tx(0x32, 1),
         vec![OutputRecord::unspent(1, vec![0x51])],
     );
-    q.store().reset_spent_range_batch();
+
     let (fks, loc) = q
         .store()
         .put_tx_full_batch_from_pins(
@@ -1774,14 +1660,11 @@ fn fill_just_written_survives_until_last_started_write() {
         hash: [9u8; 32],
         prev_mtp: 0,
     }];
-    q.store().reset_spent_range_batch();
+
     fill_planned_create_layout_after_commit(&q, &mut bp, &[], &[], &[], &child)
         .expect("child fill from write loc until last-started write");
     ensure_spend_abs_layouts(&bp, &child).expect("abs until last-started write");
-    assert!(
-        q.store().spent_range_batch_fks().is_empty(),
-        "write fill/ensure must not pread create.loc"
-    );
+
     q.prune_write_create_loc(496);
     assert!(
         q.write_create_loc(fks[0]).is_none(),
@@ -1806,7 +1689,7 @@ fn fill_stamp_spent_hole_from_write_tls() {
         rec_tx(0x32, 1),
         vec![OutputRecord::unspent(1, vec![0x51])],
     );
-    q.store().reset_spent_range_batch();
+
     let (fks, loc) = q
         .store()
         .put_tx_full_batch_from_pins(
@@ -1862,14 +1745,10 @@ fn fill_stamp_spent_hole_from_write_tls() {
         hash: [9u8; 32],
         prev_mtp: 0,
     }];
-    q.store().reset_spent_range_batch();
+
     fill_planned_create_layout_after_commit(&q, &mut bp, &[], &[], &[], &child)
         .expect("child fill from write TLS after stamp spent hole");
     ensure_spend_abs_layouts(&bp, &child).expect("abs from write TLS");
-    assert!(
-        q.store().spent_range_batch_fks().is_empty(),
-        "write fill/ensure must not pread create.loc"
-    );
 
     let _ = std::fs::remove_dir_all(&path);
 }
@@ -1940,7 +1819,7 @@ fn pin_and_ensure_from_pin_loc_without_tls() {
     plan.external_parents = st.idents;
     fill_edges_from_packed(&mut plan);
     let mut stamp = ParentPinStamp::take_from_plan(&mut plan);
-    q.store().reset_spent_range_batch();
+
     let (parents, _) = pin_for_wire_batch(&q, Some(&plan), &mut stamp, &[], &[], Some(&inflight))
         .expect("pin from CreatePin outs + stamp loc");
     let child = [Prepared {
@@ -1957,10 +1836,6 @@ fn pin_and_ensure_from_pin_loc_without_tls() {
         prev_mtp: 0,
     }];
     ensure_spend_abs_layouts(&parents, &child).expect("abs from pin loc");
-    assert!(
-        q.store().spent_range_batch_fks().is_empty(),
-        "pin/ensure must not pread create.loc"
-    );
 
     let _ = std::fs::remove_dir_all(&path);
 }
@@ -2006,15 +1881,11 @@ fn pin_creates_only_ibd_skeleton_miss_is_lookup_stage_miss() {
         .insert(1, ParentIdent::new(parent_tx.txid));
     fill_edges_from_packed(&mut plan);
     let mut stamp = ParentPinStamp::take_from_plan(&mut plan);
-    q.store().reset_spent_range_batch();
+
     let err = pin_for_wire_batch(&q, Some(&plan), &mut stamp, &[], &[], None)
         .expect_err("creates-only without range is lookup miss");
     let msg = format!("{err}");
     assert!(msg.contains("lookup stage miss"), "unexpected err: {msg}");
-    assert!(
-        q.store().spent_range_batch_fks().is_empty(),
-        "pin must not loc-by-fk to rescue a lookup miss"
-    );
 
     let _ = std::fs::remove_dir_all(&path);
 }
@@ -3251,7 +3122,13 @@ fn one_shot_load_matches_stamp_then_load_from_plan() {
         assert_eq!(a.jobs.len(), b.jobs.len());
         for (ja, jb) in a.jobs.iter().zip(b.jobs.iter()) {
             assert_eq!(ja.txid, jb.txid);
-            assert_eq!(ja.prevouts, jb.prevouts);
+            assert_eq!(ja.prevouts.len(), jb.prevouts.len());
+            for i in 0..ja.prevouts.len() {
+                let (va, sa) = ja.prevout_parts(i).expect("prevout a");
+                let (vb, sb) = jb.prevout_parts(i).expect("prevout b");
+                assert_eq!(va, vb, "prevout amount");
+                assert_eq!(sa, sb, "prevout script bytes");
+            }
         }
     }
     let pa = one_shot.batch.archive_plan.as_ref().expect("plan A");

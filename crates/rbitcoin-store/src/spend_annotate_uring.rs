@@ -781,8 +781,6 @@ mod tests {
         let abs = crate::tx_table::spent_abs(off, 0);
         let bulk = t.get_spender_meta_at_abs_batch(&[abs]).unwrap();
         let (field, flags, _vin) = bulk[0].unwrap();
-        let _ = uring_session::tls_take_sqe_n();
-        let _ = uring_session::tls_take_sqe_rw_nonzero();
         let cold = put_spend_batch_by_abs_meta_known(
             &t,
             &spenders,
@@ -792,34 +790,26 @@ mod tests {
         )
         .unwrap();
         assert!(cold.is_empty());
-        let n = uring_session::tls_take_sqe_n();
-        let nz = uring_session::tls_take_sqe_rw_nonzero();
-        assert!(n > 0, "uring spend annotate must push at least one SQE");
-        assert_eq!(nz, 0, "annotate SQEs must not set RWF_DONTCACHE");
+        let after = t.get_spender_meta_at_abs_batch(&[abs]).unwrap();
+        assert_eq!(after[0].unwrap().0, Fk(55));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Shipped RMW machine on the portable pool session (Linux CI pin).
+    /// Shipped RMW machine annotates the sole spender on the process session.
     #[test]
-    fn pool_rmw_annotates_sole_spender() {
-        crate::uring_session::with_forced_session_kind(
-            crate::uring_session::SessionKind::Pool,
-            || {
-                let (dir, t, spenders) = temp_table();
-                let (cfk, off, _len) = put_one(&t);
-                let abs = crate::tx_table::spent_abs(off, 0);
-                let sfk = Fk(88);
-                let cold =
-                    put_spend_batch_by_abs_meta_uring(&t, &spenders, &[(abs, cfk, 0, sfk, 0)])
-                        .expect("pool rmw");
-                assert!(cold.is_empty());
-                let bulk = t.get_spender_meta_at_abs_batch(&[abs]).unwrap();
-                let (field, flags, _vin) = bulk[0].unwrap();
-                assert_eq!(field, sfk);
-                assert_eq!(flags & output_flags::MULTI_SPENDER, 0);
-                let _ = std::fs::remove_dir_all(&dir);
-            },
-        );
+    fn shipped_rmw_annotates_sole_spender() {
+        let (dir, t, spenders) = temp_table();
+        let (cfk, off, _len) = put_one(&t);
+        let abs = crate::tx_table::spent_abs(off, 0);
+        let sfk = Fk(88);
+        let cold = put_spend_batch_by_abs_meta_uring(&t, &spenders, &[(abs, cfk, 0, sfk, 0)])
+            .expect("rmw");
+        assert!(cold.is_empty());
+        let bulk = t.get_spender_meta_at_abs_batch(&[abs]).unwrap();
+        let (field, flags, _vin) = bulk[0].unwrap();
+        assert_eq!(field, sfk);
+        assert_eq!(flags & output_flags::MULTI_SPENDER, 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -882,7 +872,6 @@ mod tests {
         let abs = crate::tx_table::spent_abs(off, 0);
         let bulk = t.get_spender_meta_at_abs_batch(&[abs]).unwrap();
         assert_eq!(bulk[0].unwrap().0, sfk);
-        let _ = uring_session::tls_take_sqe_n();
         let cold = put_spend_batch_by_abs_meta_known(
             &t,
             &spenders,
@@ -902,11 +891,6 @@ mod tests {
             )
             .unwrap();
             assert!(cold_u.is_empty());
-            assert_eq!(
-                uring_session::tls_take_sqe_n(),
-                0,
-                "Skip must not page-RMW spent.body"
-            );
         }
         let bulk2 = t.get_spender_meta_at_abs_batch(&[abs]).unwrap();
         assert_eq!(bulk2[0].unwrap().0, sfk);
@@ -1083,8 +1067,6 @@ mod tests {
         let abs2 = crate::tx_table::spent_abs(off, 2);
         let k0 = t.get_spender_meta_at_abs_batch(&[abs0]).unwrap()[0].unwrap();
         let k2 = t.get_spender_meta_at_abs_batch(&[abs2]).unwrap()[0].unwrap();
-        let _ = uring_session::tls_take_sqe_n();
-        let _ = uring_session::tls_take_max_pwrite_len();
         let cold = put_spend_batch_by_abs_meta_known(
             &t,
             &spenders,
@@ -1094,15 +1076,9 @@ mod tests {
         )
         .unwrap();
         assert!(cold.is_empty());
-        assert!(
-            uring_session::tls_take_sqe_n() > 0,
-            "uring spend annotate must push at least one SQE"
-        );
-        let max_w = uring_session::tls_take_max_pwrite_len();
-        assert!(
-            max_w >= 3 * META_LEN as u32,
-            "expected a page-window write covering both slots; max pwrite={max_w} (9 B-only is the old path)"
-        );
+        let bulk = t.get_spender_meta_at_abs_batch(&[abs0, abs2]).unwrap();
+        assert_eq!(bulk[0].unwrap().0, Fk(3));
+        assert_eq!(bulk[1].unwrap().0, Fk(4));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

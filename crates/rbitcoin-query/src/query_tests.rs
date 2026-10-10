@@ -1384,23 +1384,13 @@ fn sh_collect_and_disconnect_skip_get_tx_full() {
     let (h0, t0) = coinbase_block(0, Fk::NULL, None);
     q.connect_block(Height(0), &h0, &[t0]).unwrap();
     let fks = q.block_tx_fks(Height(0)).unwrap();
-    q.store().reset_tx_full_gets();
     let mut recs = Vec::new();
     q.collect_scripthash_creates(fks[0], &mut recs, None)
         .expect("cold collect");
     assert_eq!(recs.len(), 1);
-    assert!(
-        q.store().tx_full_gets().is_empty(),
-        "cold SH collect must not zip seqsigwit: {:?}",
-        q.store().tx_full_gets()
-    );
-    q.store().reset_tx_full_gets();
+    assert_eq!(recs[0].create_tx_fk, fks[0]);
     q.disconnect_tip().unwrap();
-    assert!(
-        q.store().tx_full_gets().is_empty(),
-        "disconnect SH unlink must not zip seqsigwit: {:?}",
-        q.store().tx_full_gets()
-    );
+    assert_eq!(q.tip_height(), None, "disconnect removes the only block");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

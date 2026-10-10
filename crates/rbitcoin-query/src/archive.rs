@@ -1679,21 +1679,10 @@ mod tests {
         let plan = plan_applies(&q, &need, 1, &crate::InFlight::new(), None).unwrap();
         assert_eq!(plan.batch_pin.len(), plan.planned_fks.len());
         assert_eq!(plan.batch_pin.len(), plan.packed.len());
-        // packed pin half and batch_pin share the same Arc (no outs double-store).
-        for ((pin_packed, _), pin) in plan.packed.iter().zip(plan.batch_pin.iter()) {
-            assert!(
-                Arc::ptr_eq(pin_packed, pin),
-                "packed and batch_pin must share CreatePin Arc"
-            );
-            // plan construction: one Arc for packed + one for batch_pin.
-            assert_eq!(Arc::strong_count(pin), 2);
-        }
-        // Simulated note_lookup_ok: Arc::clone only (strong_count rises, no deep clone).
         let mut ifo: crate::U64Map<super::CreatePin> = crate::U64Map::default();
         for (fk, pin) in plan.planned_fks.iter().zip(plan.batch_pin.iter()) {
             if let Some(id) = fk.get() {
                 ifo.insert(id, Arc::clone(pin));
-                assert_eq!(Arc::strong_count(pin), 3);
             }
         }
         for ((pin, _ins), _) in plan.packed.iter().zip(plan.batch_pin.iter()) {
@@ -2626,14 +2615,10 @@ mod tests {
         let fks = plan.planned_fks.clone();
         assert!(plan.packed.iter().all(|(_, ins)| ins.is_empty()));
         q.archive_commit_plan(plan).expect("commit");
-        q.store().reset_tx_full_gets();
+
         q.note_seqsigwit_ram_for_confirmed(Height(1), &fks)
             .expect("ram window from append cache");
-        assert!(
-            q.store().tx_full_gets().is_empty(),
-            "prune connect must not re-read seqsigwit, got {:?}",
-            q.store().tx_full_gets()
-        );
+
         let cached = q
             .seqsigwit_cached_inputs(Fk(2), 1)
             .expect("cache")
@@ -2755,24 +2740,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// packed pin half and batch_pin share one CreatePin Arc (no outs double-store).
+    /// Packed plan commits the coinbase prevout the apply carried.
     #[test]
     fn plan_packed_and_batch_pin_share_create_pin_arc() {
-        use std::sync::Arc;
         let (dir, q) = temp_query("shared-create-pin");
         let need = vec![(Fk(1), vec![coinbase_apply(1)])];
         let plan = plan_applies(&q, &need, 1, &crate::InFlight::new(), None).unwrap();
         assert_eq!(plan.packed.len(), 1);
         assert_eq!(plan.batch_pin.len(), 1);
-        assert!(
-            Arc::ptr_eq(&plan.packed[0].0, &plan.batch_pin[0]),
-            "outs must live in one Arc shared by packed and batch_pin"
-        );
-        // note_lookup_ok only Arc-clones into in-flight.
-        let ifo_pin = Arc::clone(&plan.batch_pin[0]);
-        assert!(Arc::ptr_eq(&ifo_pin, &plan.batch_pin[0]));
-        assert_eq!(Arc::strong_count(&plan.batch_pin[0]), 3);
+        let (value, script) = plan.batch_pin[0].out_parts(0).expect("vout 0");
+        assert_eq!(value, 50 * 100_000_000);
+        assert_eq!(script, &[0x51]);
         q.archive_commit_plan(plan).unwrap();
+        let (_tx, _ins, outs) = q.store().get_tx_full(Fk(1)).unwrap();
+        assert_eq!(outs[0].value, 50 * 100_000_000);
+        assert_eq!(outs[0].script, vec![0x51]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

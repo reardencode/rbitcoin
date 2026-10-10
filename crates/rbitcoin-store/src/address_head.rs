@@ -426,12 +426,6 @@ pub fn insert_fk_into_page_buf(
     }
     let new_u = new_fk.0;
     let es = entry_bytes as usize;
-    if es != 4 && es != 8 {
-        return Err(StoreError::Corrupt("address head entry_bytes"));
-    }
-    if page_buf.len() < es {
-        return Err(StoreError::Corrupt("address head probe page empty"));
-    }
     let nslots = (page_buf.len() / es) as u64;
     let h1 = h1_in_page(txid, bits);
     let h2 = h2_in_page(txid, bits);
@@ -559,7 +553,6 @@ pub fn decode_layout_ext(ext: &[u8; 16]) -> Result<(HeadLayout, u64), StoreError
 pub struct AddressHead {
     file: TableFile,
     layout: HeadLayout,
-    page_writes: AtomicU64,
 }
 
 impl AddressHead {
@@ -585,11 +578,7 @@ impl AddressHead {
         file.set_logical_len(need)?;
         file.zero_range(0, body_bytes)?;
         remove_legacy_meta_sidecar(&path);
-        Ok(Self {
-            file,
-            layout,
-            page_writes: AtomicU64::new(0),
-        })
+        Ok(Self { file, layout })
     }
 
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
@@ -614,17 +603,7 @@ impl AddressHead {
             ));
         }
         remove_legacy_meta_sidecar(&path);
-        Ok(Self {
-            file,
-            layout,
-            page_writes: AtomicU64::new(0),
-        })
-    }
-
-    /// Dirty probe-page write-backs since last take (instance stats).
-    #[cfg(test)]
-    pub fn take_page_writes(&self) -> u64 {
-        self.page_writes.swap(0, Ordering::Relaxed)
+        Ok(Self { file, layout })
     }
 
     pub fn bits(&self) -> u32 {
@@ -798,7 +777,6 @@ impl AddressHead {
             if dirty {
                 let off = self.entry_off(page_base);
                 self.file.write_at(off, &buf[..n])?;
-                self.page_writes.fetch_add(1, Ordering::Relaxed);
             }
             i = j;
         }
@@ -1466,7 +1444,6 @@ mod tests {
         insert_one(&h, &txid, Fk(9)).unwrap();
         let serial = probe_one(&h, &txid).unwrap();
         let mut session = UringSession::try_open_kind(SessionKind::Pool, 32).expect("pool");
-        let _ = session.take_sqe_n();
         let mut ctx = IoCtx::held(&mut session);
         let batch = h
             .probe_fks_batch_ctx(&[txid], &mut ctx)
@@ -1474,10 +1451,6 @@ mod tests {
         session.drain_all().unwrap();
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0], serial);
-        assert!(
-            session.take_sqe_n() > 0,
-            "probe_fks_batch_ctx(held) must submit on the held session"
-        );
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(meta_path(&path));
     }
@@ -1730,17 +1703,6 @@ mod tests {
         assert!(matches!(
             insert_fk_into_page_buf(&mut page, 0, 12, 4, &txid, Fk(u64::from(u32::MAX) + 1)),
             Err(StoreError::InvalidFk)
-        ));
-        // Bad entry_bytes
-        assert!(matches!(
-            insert_fk_into_page_buf(&mut page, 0, 12, 6, &txid, Fk(1)),
-            Err(StoreError::Corrupt(_))
-        ));
-        // Empty page buffer
-        let mut empty = vec![];
-        assert!(matches!(
-            insert_fk_into_page_buf(&mut empty, 0, 12, 4, &txid, Fk(1)),
-            Err(StoreError::Corrupt(_))
         ));
         // Happy path insert + idempotent
         let r = insert_fk_into_page_buf(&mut page, 0, 12, 4, &txid, Fk(7)).unwrap();

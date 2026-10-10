@@ -768,16 +768,6 @@ pub(crate) fn confirm_batch_max_inputs() -> u32 {
     CONFIRM_BATCH_INPUTS_DEFAULT
 }
 
-/// Σ `tx.input.len()` over a decoded block (test oracle for stamped `n_inputs`).
-#[cfg(test)]
-pub(crate) fn block_input_count(block: &bitcoin::Block) -> u32 {
-    block
-        .txdata
-        .iter()
-        .map(|tx| tx.input.len() as u32)
-        .fold(0u32, u32::saturating_add)
-}
-
 /// Whether the packed run should stop **after** accepting a block that left
 /// `sum_inputs` / `n_blocks` in this state (soft overshoot + hard block cap).
 #[inline]

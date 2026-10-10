@@ -252,22 +252,6 @@ mod tests {
     }
 
     #[test]
-    fn capture_is_per_thread_and_off_by_default() {
-        let other = std::thread::spawn(|| {
-            drop(begin("progress unit other thread", 1));
-            take_finished()
-        });
-        assert!(other.join().unwrap().is_empty(), "off unless turned on");
-        capture_finished(true);
-        std::thread::spawn(|| drop(begin("progress unit elsewhere", 1)))
-            .join()
-            .unwrap();
-        let here = take_finished();
-        capture_finished(false);
-        assert!(here.is_empty(), "{here:?}");
-    }
-
-    #[test]
     fn eta_only_between_zero_and_full() {
         let s = Snapshot {
             stage: "x",

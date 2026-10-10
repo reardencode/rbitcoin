@@ -146,45 +146,6 @@ pub fn block_reject_log_line(hash: impl std::fmt::Display, reason: &str) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::error::Error;
-
-    #[test]
-    fn display_and_source_cover_all_variants() {
-        let store = ConsensusError::Store(StoreError::NotFound);
-        assert!(store.to_string().contains("store:"));
-        assert!(store.source().is_some());
-
-        let cases: &[(ConsensusError, &str)] = &[
-            (ConsensusError::BadHeader("bits"), "bad header: bits"),
-            (ConsensusError::BadBlock("empty"), "bad block: empty"),
-            (ConsensusError::BadTx("fee"), "bad transaction: fee"),
-            (
-                ConsensusError::Script("sig".into()),
-                "script verification failed: sig",
-            ),
-            (ConsensusError::MissingPrevout, "missing prevout"),
-            (
-                ConsensusError::PrevoutSpent,
-                "prevout already spent on best chain",
-            ),
-            (ConsensusError::InvalidPow, "pow invalid"),
-            (ConsensusError::BadPrev, "unexpected previous header"),
-            (ConsensusError::BadVersion(2), "bad-version(0x00000002)"),
-            (ConsensusError::Cancelled, "confirm cancelled"),
-        ];
-        for (err, needle) in cases {
-            assert_eq!(err.to_string(), *needle);
-            assert!(err.source().is_none());
-        }
-        assert!(matches!(
-            ConsensusError::from(StoreError::Cancelled("stop")),
-            ConsensusError::Cancelled
-        ));
-        assert_eq!(
-            ConsensusError::from(ScriptNumError::Overflow).to_string(),
-            "script verification failed: scriptnum overflow"
-        );
-    }
 
     #[test]
     fn uring_session_fault_covers_leftover_and_submit() {

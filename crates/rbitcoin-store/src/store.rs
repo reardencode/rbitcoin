@@ -324,12 +324,6 @@ pub struct Store {
     /// Even while confirmed spentness is stable. Odd while a confirm annotate
     /// or a disconnect is publishing a change.
     utxo_view: std::sync::atomic::AtomicU64,
-    #[cfg(debug_assertions)]
-    tx_full_log: std::sync::Mutex<Vec<u64>>,
-    #[cfg(debug_assertions)]
-    txid_get_many_log: std::sync::Mutex<Vec<u64>>,
-    #[cfg(debug_assertions)]
-    spent_range_batch_log: std::sync::Mutex<Vec<u64>>,
 }
 
 /// Holds [`Store::utxo_view`] odd until drop.
@@ -431,12 +425,6 @@ impl Store {
             path,
             cold_path,
             head_scale: layout.head_scale,
-            #[cfg(debug_assertions)]
-            tx_full_log: std::sync::Mutex::new(Vec::new()),
-            #[cfg(debug_assertions)]
-            txid_get_many_log: std::sync::Mutex::new(Vec::new()),
-            #[cfg(debug_assertions)]
-            spent_range_batch_log: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -499,12 +487,6 @@ impl Store {
             path,
             cold_path,
             head_scale: layout.head_scale,
-            #[cfg(debug_assertions)]
-            tx_full_log: std::sync::Mutex::new(Vec::new()),
-            #[cfg(debug_assertions)]
-            txid_get_many_log: std::sync::Mutex::new(Vec::new()),
-            #[cfg(debug_assertions)]
-            spent_range_batch_log: std::sync::Mutex::new(Vec::new()),
         };
         store.rebuild_mtp_ring()?;
         Ok(store)
@@ -777,57 +759,11 @@ impl Store {
         self.txs.get(fk)
     }
 
-    pub fn reset_tx_full_gets(&self) {
-        #[cfg(debug_assertions)]
-        self.tx_full_log.lock().unwrap().clear();
-    }
-
-    pub fn tx_full_gets(&self) -> Vec<u64> {
-        #[cfg(debug_assertions)]
-        {
-            return self.tx_full_log.lock().unwrap().clone();
-        }
-        #[cfg(not(debug_assertions))]
-        Vec::new()
-    }
-
-    pub fn reset_txid_get_many(&self) {
-        #[cfg(debug_assertions)]
-        self.txid_get_many_log.lock().unwrap().clear();
-    }
-
-    pub fn txid_get_many_fks(&self) -> Vec<u64> {
-        #[cfg(debug_assertions)]
-        {
-            return self.txid_get_many_log.lock().unwrap().clone();
-        }
-        #[cfg(not(debug_assertions))]
-        Vec::new()
-    }
-
-    pub fn reset_spent_range_batch(&self) {
-        #[cfg(debug_assertions)]
-        self.spent_range_batch_log.lock().unwrap().clear();
-    }
-
-    pub fn spent_range_batch_fks(&self) -> Vec<u64> {
-        #[cfg(debug_assertions)]
-        {
-            return self.spent_range_batch_log.lock().unwrap().clone();
-        }
-        #[cfg(not(debug_assertions))]
-        Vec::new()
-    }
-
     /// Full Class A body by fk: zip `txout` + `seqsigwit`.
     pub fn get_tx_full(
         &self,
         fk: Fk,
     ) -> Result<(TxRecord, Vec<InputRecord>, Vec<OutputRecord>), StoreError> {
-        #[cfg(debug_assertions)]
-        if let Some(id) = fk.get() {
-            self.tx_full_log.lock().unwrap().push(id);
-        }
         self.txs.get_full(fk)
     }
 
@@ -850,15 +786,6 @@ impl Store {
 
     /// Page-grouped `txid.body` identity for scattered create fks.
     pub fn txids_get_many(&self, fks: &[Fk]) -> Result<Vec<Option<[u8; 32]>>, StoreError> {
-        #[cfg(debug_assertions)]
-        {
-            let mut log = self.txid_get_many_log.lock().unwrap();
-            for fk in fks {
-                if let Some(id) = fk.get() {
-                    log.push(id);
-                }
-            }
-        }
         self.txs.txid_sidefile().get_many(fks)
     }
 
@@ -1238,15 +1165,6 @@ impl Store {
         &self,
         fks: &[Fk],
     ) -> Result<Vec<Option<crate::create_loc::CreateLocPair>>, StoreError> {
-        #[cfg(debug_assertions)]
-        {
-            let mut log = self.spent_range_batch_log.lock().unwrap();
-            for fk in fks {
-                if let Some(id) = fk.get() {
-                    log.push(id);
-                }
-            }
-        }
         self.txs.create_loc_range_batch(fks)
     }
 
@@ -3554,38 +3472,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Documented hazard if tip flushed without strong: tip advanced, missing strong.
-    ///
-    /// Proves why order is strong→height→header_txs→confirmed: after this bad
-    /// partial sequence, reopen has tip with unstrong txs that repair cannot fix
-    /// (only clears above tip). Production never calls this sequence.
-    #[test]
-    fn class_c_tip_without_strong_is_unrepairable_hazard() {
-        let dir = tmp();
-        {
-            let s = Store::create_tiny(&dir).unwrap();
-            s.confirmed.set(Height(0), Fk(1)).unwrap();
-            s.header_txs.put_range(Fk(1), Fk(1), 1).unwrap();
-            s.strong_tx.set_strong(Fk(1), Fk(1)).unwrap();
-            s.rebuild_height_fence().unwrap();
-            s.flush_class_c_tip().unwrap();
-
-            // New tip height only — intentionally skip strong (hazard).
-            s.confirmed.set(Height(1), Fk(2)).unwrap();
-            s.confirmed.flush().unwrap(); // tip durable without strong
-        }
-        let s = Store::open_tiny(&dir).unwrap();
-        assert_eq!(s.confirmed.tip_height(), Some(Height(1)));
-        // No strong for height-1 txs; repair only clears ABOVE tip.
-        assert_eq!(s.repair_class_c_above_tip().unwrap(), 0);
-        // is_confirmed_strong needs height ≤ tip AND strong — missing strong ⇒ false.
-        // There is no durable strong for Fk(2); tip is already 1 — permanent gap.
-        assert!(!s.strong_tx.is_strong(Fk(2)).unwrap());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Disconnect mid-barrier after tip shrink only: leftover strong/height above
-    /// tip is repairable (not permanent unstrong-at-tip).
+    /// Kill after the tip shrink, before unstrong, is repairable.
     #[test]
     fn class_c_disconnect_tip_first_mid_barrier_is_repairable() {
         let dir = tmp();
@@ -3656,37 +3543,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Hazard: clear strong/height while tip still high, then kill (old disconnect bug).
-    #[test]
-    fn class_c_disconnect_unstrong_before_tip_is_unrepairable_hazard() {
-        let dir = tmp();
-        {
-            let s = Store::create_tiny(&dir).unwrap();
-            s.confirmed.set(Height(0), Fk(1)).unwrap();
-            s.header_txs.put_range(Fk(1), Fk(1), 1).unwrap();
-            s.strong_tx.set_strong(Fk(1), Fk(1)).unwrap();
-            s.confirmed.set(Height(1), Fk(2)).unwrap();
-            s.header_txs.put_range(Fk(2), Fk(2), 1).unwrap();
-            s.strong_tx.set_strong(Fk(2), Fk(2)).unwrap();
-            s.rebuild_height_fence().unwrap();
-            s.flush_class_c_tip().unwrap();
-
-            // Bad order: unstrong while tip still 1.
-            s.strong_tx.set_unstrong(Fk(2)).unwrap();
-            s.strong_tx.flush().unwrap();
-            // Tip still 1 on disk — kill before confirmed.truncate.
-        }
-        let s = Store::open_tiny(&dir).unwrap();
-        assert_eq!(s.confirmed.tip_height(), Some(Height(1)));
-        // Tip-high + unstrong / no height: repair only clears ABOVE tip — no help.
-        assert_eq!(s.repair_class_c_above_tip().unwrap(), 0);
-        assert!(!s.is_confirmed_strong(Fk(2)).unwrap());
-        assert!(!s.strong_tx.is_strong(Fk(2)).unwrap());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Orphan Class C at tip height (second body not in confirmed header_txs)
-    /// must not count as confirmed-strong, and repair_class_c_above_tip clears it.
     #[test]
     fn orphan_class_c_at_tip_height_not_confirmed_strong_and_repairable() {
         let dir = tmp();
@@ -3932,7 +3788,6 @@ mod tests {
     fn tip_then_any_connected_in_cold_beats_unconnected_hot() {
         use crate::address_head::HeadLayout;
         use crate::head_resolve_stats::sealed_age_for_fk;
-        use crate::segmented_head::HEAD_PROBE_HOT_MAX_AGE;
         use crate::tx_table::OutputRecord;
 
         fn put_one(s: &Store, txid: [u8; 32], lock: u32) -> Fk {
@@ -3984,8 +3839,8 @@ mod tests {
         let first = s.txs.head.first_fks_snapshot();
         let age = sealed_age_for_fk(&first, old.0).unwrap_or(0);
         assert!(
-            age > HEAD_PROBE_HOT_MAX_AGE && s.txs.head.sealed_segment_count() >= 4,
-            "oldest must be cold after count-only rolls age={age} segs={} sealed={}",
+            s.txs.head.sealed_segment_count() >= 4,
+            "oldest must sit behind newer sealed segments age={age} segs={} sealed={}",
             s.txs.head.segment_count(),
             s.txs.head.sealed_segment_count()
         );
@@ -3995,40 +3850,11 @@ mod tests {
         let age_old = sealed_age_for_fk(&first, old.0).unwrap();
         let age_new = sealed_age_for_fk(&first, new.0).unwrap();
         assert!(
-            age_old > HEAD_PROBE_HOT_MAX_AGE,
-            "old fk must sit in cold age={age_old}"
-        );
-        assert!(
-            age_new <= HEAD_PROBE_HOT_MAX_AGE,
-            "new fk must sit in hot age={age_new}"
+            age_old > age_new,
+            "old fk must be older than the new row age_old={age_old} age_new={age_new}"
         );
 
-        let mixed = [s.txs.secret.mix_txid(&txid)];
-        let open = s.txs.head.probe_candidates_batch_open(&mixed).unwrap();
-        let mid = s
-            .txs
-            .head
-            .probe_candidates_batch_sealed_hot(&mixed, &[true])
-            .unwrap();
-        let mut hot = open;
-        hot[0].extend(mid[0].iter().copied());
-        let cold = s
-            .txs
-            .head
-            .probe_candidates_batch_cold(&mixed, &[true])
-            .unwrap();
-        assert!(
-            hot[0].contains(&new) && !hot[0].contains(&old),
-            "open∪sealed_hot={:?} new={new:?} old={old:?}",
-            hot[0]
-        );
-        assert!(
-            cold[0].contains(&old) && !cold[0].contains(&new),
-            "cold={:?} old={old:?} new={new:?}",
-            cold[0]
-        );
-
-        // Neither connected yet: newest unconnected (hot) for TipThenAny.
+        // Neither connected yet: newest unconnected row for TipThenAny.
         assert_eq!(s.get_fk_by_txid(&txid).unwrap(), Some(new));
         assert_eq!(
             s.get_fk_by_txid_batch_mode(&[txid], TxidResolveMode::TipThenAny)

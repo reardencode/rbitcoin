@@ -11,52 +11,6 @@ use rbitcoin_log::{info, warn};
 use rbitcoin_primitives::Height;
 use std::collections::{HashMap, HashSet};
 
-/// Classification of tip+1 `unexpected previous header` (BadPrev).
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BadPrevClass {
-    /// Wire prev is not a known header — soft re-get only.
-    CorruptWire { wire_prev: BlockHash },
-    /// Wire prev is a known header that is not the current tip (competing path).
-    CompetingPath {
-        /// Parent of the rejected tip+1 body (winning sibling / branch tip).
-        winning_prev: BlockHash,
-        /// Current best tip (losing fork when this is the mainnet class stall).
-        losing_tip: BlockHash,
-    },
-}
-
-/// Classify a BadPrev / unexpected-previous reject at confirm tip+1.
-///
-/// `wire_prev` is the previous-block hash from the rejected block header.
-/// `tip_hash` is the current best tip hash.
-#[cfg(test)]
-pub fn classify_bad_prev(
-    hub: &ChainHub,
-    wire_prev: BlockHash,
-    tip_hash: BlockHash,
-) -> BadPrevClass {
-    if wire_prev == tip_hash {
-        // Same as tip — not a competing reorg signal (should not be BadPrev).
-        return BadPrevClass::CorruptWire { wire_prev };
-    }
-    let known = hub
-        .query
-        .get_header_by_hash(&wire_prev.to_byte_array())
-        .ok()
-        .flatten()
-        .is_some()
-        || hub.has_block(&wire_prev);
-    if known {
-        BadPrevClass::CompetingPath {
-            winning_prev: wire_prev,
-            losing_tip: tip_hash,
-        }
-    } else {
-        BadPrevClass::CorruptWire { wire_prev }
-    }
-}
-
 /// Whether a confirm reject string is the soft BadPrev class.
 pub fn is_bad_prev_err(err: &str) -> bool {
     err.contains("unexpected previous header") || err.contains("unexpected previous")
@@ -357,33 +311,6 @@ fn connecting_hashes_heavier_disconnected_n(
         return Ok(None);
     }
     Ok(Some(path))
-}
-
-/// Register a connecting-hash search for a heavier header path that does not
-/// meet the current tip. Explore tip is the **shortest** prefix that beats
-/// current tip work — not the header horizon.
-#[cfg(test)]
-pub fn note_disconnected_heavier(
-    reorg: &mut IbdReorgState,
-    hub: &ChainHub,
-    candidate: BlockHash,
-) -> Result<bool, NetError> {
-    let Some(path) = connecting_hashes_heavier_disconnected(hub, candidate)? else {
-        return Ok(false);
-    };
-    let tip_idx = shortest_heavier_header_prefix(hub, &path)?.unwrap_or(path.len() - 1);
-    let end = (tip_idx + 1).min(path.len()).min(IbdReorgState::HELD_CAP);
-    if end == 0 {
-        return Ok(false);
-    }
-    let prefix = &path[..end];
-    let explore_tip = prefix[prefix.len() - 1];
-    reorg.register_explore(prefix.iter().copied(), Some(explore_tip));
-    info!(
-        "ibd: heavier chain does not connect at tip — search {} connecting block(s) to {explore_tip} (candidate {candidate})",
-        prefix.len()
-    );
-    Ok(true)
 }
 
 /// Work-path hashes that may start a connecting search.
@@ -701,57 +628,6 @@ mod tests {
     }
 
     #[test]
-    fn classify_corrupt_vs_competing() {
-        let (dir, hub) = tmp_hub();
-        hub.ensure_genesis().unwrap();
-        let gen = hub.tip_hash().unwrap();
-        let lose = mine(gen, 1_500_000_100, 1);
-        let win = {
-            let mut b = mine(gen, 1_500_000_101, 1);
-            if b.block_hash() == lose.block_hash() {
-                let target = Target::from_compact(b.header.bits);
-                for nonce in 0..u32::MAX {
-                    b.header.nonce = nonce;
-                    if b.header.validate_pow(target).is_ok() && b.block_hash() != lose.block_hash()
-                    {
-                        break;
-                    }
-                }
-            }
-            b
-        };
-        hub.accept_block(lose.clone()).unwrap();
-        // Winning sibling header known but not tip.
-        hub.ensure_header(&win.header).unwrap();
-        let tip = hub.tip_hash().unwrap();
-        assert_eq!(tip, lose.block_hash());
-
-        match classify_bad_prev(&hub, win.block_hash(), tip) {
-            BadPrevClass::CompetingPath {
-                winning_prev,
-                losing_tip,
-            } => {
-                assert_eq!(winning_prev, win.block_hash());
-                assert_eq!(losing_tip, lose.block_hash());
-            }
-            other => panic!("expected CompetingPath, got {other:?}"),
-        }
-        let unknown = BlockHash::from_byte_array([0xde; 32]);
-        match classify_bad_prev(&hub, unknown, tip) {
-            BadPrevClass::CorruptWire { wire_prev } => assert_eq!(wire_prev, unknown),
-            other => panic!("expected CorruptWire, got {other:?}"),
-        }
-        assert!(is_bad_prev_err("consensus: unexpected previous header"));
-        assert!(!is_bad_prev_err("script verification failed"));
-        // Same-as-tip wire prev → CorruptWire class (not CompetingPath).
-        match classify_bad_prev(&hub, tip, tip) {
-            BadPrevClass::CorruptWire { wire_prev } => assert_eq!(wire_prev, tip),
-            other => panic!("expected CorruptWire for tip==prev, got {other:?}"),
-        }
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
     fn header_hashes_to_best_ancestor_walks_mid_path() {
         let (dir, hub) = tmp_hub();
         hub.ensure_genesis().unwrap();
@@ -901,61 +777,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Register only the shortest prefix that beats tip work; apply it once
-    /// those connecting bodies are held — no BadPrev, no full-horizon gather.
-    #[test]
-    fn note_disconnected_heavier_fetches_connecting_prefix_and_reorgs() {
-        let (dir, hub) = tmp_hub();
-        hub.ensure_genesis().unwrap();
-        let gen = hub.tip_hash().unwrap();
-        let l1 = mine(gen, 1_500_061_100, 1);
-        hub.accept_block(l1.clone()).unwrap();
-        let l2 = mine(l1.block_hash(), 1_500_061_200, 2);
-        hub.accept_block(l2.clone()).unwrap();
-
-        let w1 = distinct_sib(mine(gen, 1_500_061_101, 1), l1.block_hash());
-        hub.ensure_header(&w1.header).unwrap();
-        let w2 = mine(w1.block_hash(), 1_500_061_201, 2);
-        hub.ensure_header(&w2.header).unwrap();
-        let w3 = mine(w2.block_hash(), 1_500_061_301, 3);
-        hub.ensure_header(&w3.header).unwrap();
-        let w4 = mine(w3.block_hash(), 1_500_061_401, 4);
-        hub.ensure_header(&w4.header).unwrap();
-        let w5 = mine(w4.block_hash(), 1_500_061_501, 5);
-        hub.ensure_header(&w5.header).unwrap();
-
-        let mut reorg = IbdReorgState::new();
-        assert!(
-            note_disconnected_heavier(&mut reorg, &hub, w5.block_hash()).unwrap(),
-            "must register a connecting search for the heavier disconnected path"
-        );
-        let need = reorg.need_getdata();
-        assert!(
-            need.contains(&w1.block_hash())
-                && need.contains(&w2.block_hash())
-                && need.contains(&w3.block_hash()),
-            "must search for connecting mids; need={need:?}"
-        );
-        assert!(
-            !need.contains(&w5.block_hash()),
-            "must not wait to gather the whole heavier horizon; need={need:?}"
-        );
-        assert_eq!(
-            reorg.explore_tips(),
-            &[w3.block_hash()],
-            "explore tip is the shortest prefix that beats loser work"
-        );
-
-        reorg.hold_body(w1.clone());
-        reorg.hold_body(w2.clone());
-        reorg.hold_body(w3.clone());
-        assert!(
-            reorg.need_getdata().is_empty(),
-            "held connecting prefix satisfies explore need"
-        );
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
     /// Work-path tip+1 / far header (no resume seed) still registers the
     /// connecting prefix — the live IBD hook, not BadPrev.
     #[test]
@@ -993,6 +814,78 @@ mod tests {
             st.reorg.need_getdata().is_empty(),
             "winner is a linear extension after rewind; need={:?}",
             st.reorg.need_getdata()
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A real block whose prev is not a stored header fails the live confirm
+    /// load as BadPrev. That reject is soft reget: the tip stays, the slot is
+    /// evicted, and the hash is not blacklisted or fetched again.
+    #[test]
+    fn unknown_prev_header_is_soft_reget_not_a_rewind() {
+        use super::super::confirm::ConfirmRejectClass;
+        use super::super::events::apply_confirm_reject;
+
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let tip = mine(gen, 1_500_080_100, 1);
+        hub.accept_block(tip).unwrap();
+        assert_eq!(hub.tip_height(), Some(1));
+
+        let unknown = BlockHash::from_byte_array([0x9e; 32]);
+        assert!(
+            hub.query
+                .get_header_by_hash(&unknown.to_byte_array())
+                .unwrap()
+                .is_none(),
+            "prev must not be a stored header"
+        );
+        let orphan = mine(unknown, 1_500_080_200, 2);
+        let err = match hub.confirm_wire_load_phase(&[(Height(2), orphan.clone())]) {
+            Err(e) => e,
+            Ok(_) => panic!("unknown prev must fail confirm load"),
+        };
+        assert!(
+            matches!(err, NetError::BadPrev),
+            "live load maps ConsensusError::BadPrev, got {err}"
+        );
+        let msg = err.to_string();
+        let class = ConfirmRejectClass::from_net(&err);
+        assert_eq!(class, ConfirmRejectClass::SoftWire, "{msg}");
+        assert!(is_bad_prev_err(&msg), "{msg}");
+
+        let mut st =
+            super::super::state::IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
+        st.headers_done = true;
+        st.record_height(orphan.block_hash(), 2);
+        apply_confirm_reject(
+            &mut st,
+            2,
+            orphan.block_hash(),
+            class,
+            &msg,
+            Some(hub.query.as_ref()),
+            Some(&hub),
+            1,
+            None,
+            None,
+        );
+        assert_eq!(hub.tip_height(), Some(1), "unknown prev must not rewind");
+        assert!(!st.headers_done, "soft reget clears the header latch");
+        assert!(
+            !st.height_to_hash.contains_key(&2),
+            "the rejected slot is evicted"
+        );
+        assert!(
+            !st.reorg
+                .invalid
+                .contains(orphan.block_hash().to_byte_array()),
+            "soft reget does not blacklist"
+        );
+        assert!(
+            !st.reorg.need_getdata().contains(&orphan.block_hash()),
+            "BadPrev does not re-get the same hash"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

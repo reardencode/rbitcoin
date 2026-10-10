@@ -26,8 +26,6 @@ mod tx_precompute;
 mod wave_prevout;
 mod write_create_loc;
 
-#[cfg(debug_assertions)]
-pub use combined_stage::{body_ok_reads, reset_body_ok_reads};
 pub use combined_stage::{load_creates_once, CombinedCreate};
 pub use reconstruct::{BlockTxStatRows, StampedTxstatBlock};
 pub use resolved_wire::{BlockQueueWaveIntake, ResolvedWire};
@@ -1698,12 +1696,6 @@ impl Query {
     ) -> Result<Option<std::sync::Arc<Vec<u8>>>, QueryError> {
         let g = self.block_queue.lock().unwrap();
         Ok(g.raw_payload(height))
-    }
-
-    /// Take-and-reset BQ raw-payload clone count (instance stats).
-    pub fn block_queue_take_raw_clone_n(&self) -> u64 {
-        let g = self.block_queue.lock().unwrap();
-        g.take_raw_clone_n()
     }
 
     /// Payload for a block **hash** if present on the RAM queue (any height).

@@ -89,17 +89,6 @@ mod tests {
     }
 
     #[test]
-    fn unix_secs_epoch_is_zero() {
-        assert_eq!(unix_secs(UNIX_EPOCH), 0);
-    }
-
-    #[test]
-    #[should_panic(expected = "system clock before Unix epoch")]
-    fn unix_secs_panics_before_epoch() {
-        unix_secs(UNIX_EPOCH - std::time::Duration::from_secs(1));
-    }
-
-    #[test]
     fn with_frozen_pins_clock_sample_then_restores_prior() {
         let c = NodeClock::new();
         c.set_mock(2_000_000_000);

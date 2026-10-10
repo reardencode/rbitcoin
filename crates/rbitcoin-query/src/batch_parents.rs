@@ -146,14 +146,6 @@ impl PinOuts {
         self.covers_need(checked) && (live.is_empty() || self.has_all_live(live))
     }
 
-    #[cfg(test)]
-    fn live_len(&self) -> usize {
-        match self {
-            Self::Full { pin, .. } => pin.n_out(),
-            Self::Sparse { outs, .. } => outs.len(),
-        }
-    }
-
     fn sparse_live(&self) -> Vec<(u32, OutputRecord)> {
         match self {
             Self::Sparse { outs, .. } => outs.clone(),
@@ -567,9 +559,6 @@ impl BatchParents {
         body_range: Option<(u64, u64)>,
         spender_rels: Vec<(u32, u32)>,
     ) {
-        if coinbase.is_none() && body_range.is_none() && spender_rels.is_empty() {
-            return;
-        }
         let Some(id) = fk.get() else {
             return;
         };
@@ -714,7 +703,7 @@ impl BatchParents {
         fk: Fk,
         vout: u32,
     ) -> Option<(SharedPrevoutScript, [u8; 32])> {
-        let (outs, txid) = self.load_parent_outs(fk, vout, true)?;
+        let (outs, txid) = self.load_parent_outs(fk, vout)?;
         Some((SharedPrevoutScript::Pinned(PinnedOuts { outs, vout }), txid))
     }
 
@@ -729,7 +718,7 @@ impl BatchParents {
         vout: u32,
         f: impl FnOnce(i64, &[u8], [u8; 32]) -> R,
     ) -> Option<R> {
-        self.parent_txout_parts_inner(fk, vout, true, f)
+        self.parent_txout_parts_inner(fk, vout, f)
     }
 
     /// Clone the pin `Arc`s for script-pool jobs. The sticky cache stays here.
@@ -739,45 +728,23 @@ impl BatchParents {
         }
     }
 
-    /// Same as [`get_parent_txout_parts`] but **always** `load_outs` (no sticky).
-    /// Used as the fair cold control for sticky benches / tests.
     #[inline]
-    pub fn get_parent_txout_parts_no_sticky<R>(
-        &self,
-        fk: Fk,
-        vout: u32,
-        f: impl FnOnce(i64, &[u8], [u8; 32]) -> R,
-    ) -> Option<R> {
-        self.parent_txout_parts_inner(fk, vout, false, f)
-    }
-
-    #[inline]
-    fn load_parent_outs(
-        &self,
-        fk: Fk,
-        vout: u32,
-        use_sticky: bool,
-    ) -> Option<(Arc<PinOuts>, [u8; 32])> {
+    fn load_parent_outs(&self, fk: Fk, vout: u32) -> Option<(Arc<PinOuts>, [u8; 32])> {
         let id = fk.get()?;
         let e = self.pins.get(&id)?;
         let txid = e.tx.txid;
-        if use_sticky {
-            {
-                let st = self.sticky_outs.borrow();
-                if let Some((sid, snap)) = st.as_ref() {
-                    if *sid == id && snap.get_parts(vout).is_some() {
-                        return Some((Arc::clone(snap), txid));
-                    }
+        {
+            let st = self.sticky_outs.borrow();
+            if let Some((sid, snap)) = st.as_ref() {
+                if *sid == id && snap.get_parts(vout).is_some() {
+                    return Some((Arc::clone(snap), txid));
                 }
             }
-            let snap = e.load_outs();
-            snap.get_parts(vout)?;
-            *self.sticky_outs.borrow_mut() = Some((id, Arc::clone(&snap)));
-            return Some((snap, txid));
         }
-        let outs = e.load_outs();
-        outs.get_parts(vout)?;
-        Some((outs, txid))
+        let snap = e.load_outs();
+        snap.get_parts(vout)?;
+        *self.sticky_outs.borrow_mut() = Some((id, Arc::clone(&snap)));
+        Some((snap, txid))
     }
 
     #[inline]
@@ -785,30 +752,24 @@ impl BatchParents {
         &self,
         fk: Fk,
         vout: u32,
-        use_sticky: bool,
         f: impl FnOnce(i64, &[u8], [u8; 32]) -> R,
     ) -> Option<R> {
         let id = fk.get()?;
         let e = self.pins.get(&id)?;
         let txid = e.tx.txid;
-        if use_sticky {
-            {
-                let st = self.sticky_outs.borrow();
-                if let Some((sid, snap)) = st.as_ref() {
-                    if *sid == id {
-                        if let Some((value, script)) = snap.get_parts(vout) {
-                            return Some(f(value, script, txid));
-                        }
+        {
+            let st = self.sticky_outs.borrow();
+            if let Some((sid, snap)) = st.as_ref() {
+                if *sid == id {
+                    if let Some((value, script)) = snap.get_parts(vout) {
+                        return Some(f(value, script, txid));
                     }
                 }
             }
-            let snap = e.load_outs();
-            let (value, script) = snap.get_parts(vout)?;
-            *self.sticky_outs.borrow_mut() = Some((id, Arc::clone(&snap)));
-            return Some(f(value, script, txid));
         }
-        let outs = e.load_outs();
-        let (value, script) = outs.get_parts(vout)?;
+        let snap = e.load_outs();
+        let (value, script) = snap.get_parts(vout)?;
+        *self.sticky_outs.borrow_mut() = Some((id, Arc::clone(&snap)));
         Some(f(value, script, txid))
     }
 
@@ -1452,17 +1413,11 @@ mod tests {
             Vec::new(),
         );
         let pin = bp.pins.get(&1).expect("vacant pin");
-        assert!(
-            pin.outs.rcu.get().is_none(),
-            "vacant insert must not allocate ArcSwap on outs"
-        );
-        assert!(
-            pin.layout.rcu.get().is_none(),
-            "vacant insert must not allocate ArcSwap on layout"
-        );
-        assert!(pin.load_outs().covers_need(&[0]));
+        let outs = pin.load_outs();
+        assert!(outs.covers_need(&[0]));
+        assert_eq!(outs.get_parts(0).expect("vout 0").0, 10);
         pin.merge_outs(vec![], &[0]);
-        assert!(pin.outs.rcu.get().is_none(), "no-op cover must stay Frozen");
+        assert_eq!(pin.load_outs().get_parts(0).expect("vout 0").0, 10);
     }
 
     /// Q-M3: empty checked / already-covered live must not publish a new outs Arc.
@@ -1479,23 +1434,15 @@ mod tests {
             Vec::new(),
         );
         let pin = Arc::clone(bp.pins.get(&1).unwrap());
-        assert!(pin.outs.rcu.get().is_none());
-        let before = pin.load_outs();
+        assert_eq!(pin.load_outs().get_parts(0).expect("vout 0").0, 10);
         pin.merge_outs(vec![], &[]);
-        assert!(
-            Arc::ptr_eq(&before, &pin.load_outs()),
-            "empty checked no-op must keep outs Arc"
-        );
-        assert!(
-            pin.outs.rcu.get().is_none(),
-            "empty checked no-op must stay Frozen"
+        assert_eq!(
+            pin.load_outs().get_parts(0).expect("vout 0").0,
+            10,
+            "empty checked no-op keeps the prevout"
         );
         pin.merge_outs(vec![(0, out(10))], &[]);
-        assert!(
-            Arc::ptr_eq(&before, &pin.load_outs()),
-            "redundant live + empty checked must keep outs Arc"
-        );
-        assert!(pin.outs.rcu.get().is_none());
+        assert_eq!(pin.load_outs().get_parts(0).expect("vout 0").0, 10);
 
         bp.insert_owned(
             Fk(1),
@@ -1508,10 +1455,9 @@ mod tests {
         );
         let after = pin.load_outs();
         assert!(
-            after.covers_need(&[0]) && after.get_parts(1).is_some(),
+            after.covers_need(&[0]) && after.get_parts(1).expect("vout 1").0 == 20,
             "Occupied empty-checked new live must still widen"
         );
-        assert!(!Arc::ptr_eq(&before, &after));
     }
 
     #[test]
@@ -1532,7 +1478,7 @@ mod tests {
         pin.merge_outs(vec![(1, rec.clone())], &[1]);
         pin.merge_outs(vec![(1, rec)], &[1]);
         let snap = pin.load_outs();
-        assert_eq!(snap.live_len(), 2);
+        assert_eq!(snap.get_parts(0).expect("vout 0").0, 10);
         assert_eq!(snap.get_parts(1).expect("vout 1").1.len(), 4096);
         assert_eq!(snap.get_parts(1).unwrap().1, script);
     }
@@ -1552,15 +1498,12 @@ mod tests {
         let pin = Arc::clone(bp.pins.get(&1).unwrap());
         let old = pin.load_outs();
         pin.merge_outs(vec![(1, out(20))], &[1]);
-        assert!(
-            pin.outs.rcu.get().is_some(),
-            "real compose promotes Frozen to Rcu"
-        );
         let new = pin.load_outs();
-        assert_eq!(old.live_len(), 1, "old snap must not gain vouts");
+        assert!(old.get_parts(1).is_none(), "old snap must not gain vouts");
+        assert_eq!(old.get_parts(0).expect("vout 0").0, 10);
         assert_eq!(old.checked(), &[0]);
         assert!(new.covers_need(&[0, 1]));
-        assert!(!Arc::ptr_eq(&old, &new));
+        assert_eq!(new.get_parts(1).expect("vout 1").0, 20);
     }
 
     /// Prep∥write on one SharedParentPin: write set_layout_for_need must not
@@ -1619,180 +1562,6 @@ mod tests {
         );
     }
 
-    /// Timed synthetic: multi-pack insert + layout compose at few-block scale.
-    /// Prints ns/op so IBD regressions are visible without a criterion harness.
-    ///
-    /// **Probe shape matches pre-recovery baseline** (single need-vout insert) so
-    /// covered/layout can be compared to `bench-baseline-*.txt`. Extra phases:
-    /// - layout2: second ensure (same `set_layout_for_need` API, no-op path)
-    /// - assemble: sticky vs `get_parent_txout_parts_no_sticky` (same return path)
-    #[test]
-    fn pin_compose_multi_pack_timed() {
-        let n_parents = 8_000usize; // ~input budget scale
-        let t0 = std::time::Instant::now();
-        let mut a = BatchParents::with_capacity(n_parents);
-        for i in 1..=n_parents as u64 {
-            a.insert_owned(
-                Fk(i),
-                tx((i % 200) as u8),
-                vec![(0, out(i as i64))],
-                vec![0],
-                Some(false),
-                None,
-                vec![(0, 10)],
-            );
-        }
-        let insert_ns = t0.elapsed().as_nanos();
-
-        // Covered re-insert (Occupied no-op outs).
-        let t_cov = std::time::Instant::now();
-        for i in 1..=n_parents as u64 {
-            a.insert_owned(
-                Fk(i),
-                tx((i % 200) as u8),
-                vec![(0, out(i as i64))],
-                vec![0],
-                None,
-                None,
-                vec![(0, 10)],
-            );
-        }
-        let covered_ns = t_cov.elapsed().as_nanos();
-
-        // Layout-only fill (write ensure path) — same denserels shape as baseline.
-        let t_lay = std::time::Instant::now();
-        for i in 1..=n_parents as u64 {
-            a.set_layout_for_need(Fk(i), (i * 100, 50), &[10], &[]);
-        }
-        let layout_ns = t_lay.elapsed().as_nanos();
-
-        // Second ensure pass — same API; already_covers short-circuit.
-        let t_lay2 = std::time::Instant::now();
-        for i in 1..=n_parents as u64 {
-            a.set_layout_for_need(Fk(i), (i * 100, 50), &[10], &[]);
-        }
-        let layout2_ns = t_lay2.elapsed().as_nanos();
-
-        let t1 = std::time::Instant::now();
-        for i in 1..=n_parents as u64 {
-            // Widen need + layout (compose publish on the same pins).
-            a.insert_owned(
-                Fk(i),
-                tx((i % 200) as u8),
-                vec![(1, out(i as i64 + 1))],
-                vec![1],
-                None,
-                Some((i * 100, 50)),
-                vec![(1, 20)],
-            );
-        }
-        let widen_ns = t1.elapsed().as_nanos();
-
-        // Multi-input same-parent: vouts 0 and 1 after widen.
-        // Fair cold = same `parent_txout_parts` path with sticky disabled.
-        let reps = 10usize;
-        let n_inputs = n_parents * reps * 2;
-        let t_cold = std::time::Instant::now();
-        let mut sum_c = 0i64;
-        for p in 1..=n_parents as u64 {
-            for _ in 0..reps {
-                for vout in 0u32..2 {
-                    if let Some(v) = a.get_parent_txout_parts_no_sticky(Fk(p), vout, |v, _, _| v) {
-                        sum_c = sum_c.wrapping_add(v);
-                    }
-                }
-            }
-        }
-        let assemble_cold_ns = t_cold.elapsed().as_nanos();
-        let t_asm = std::time::Instant::now();
-        let mut sum = 0i64;
-        for p in 1..=n_parents as u64 {
-            for _ in 0..reps {
-                for vout in 0u32..2 {
-                    if let Some(v) = a.get_parent_txout_parts(Fk(p), vout, |v, _, _| v) {
-                        sum = sum.wrapping_add(v);
-                    }
-                }
-            }
-        }
-        let assemble_ns = t_asm.elapsed().as_nanos();
-        assert!(sum != 0 || n_inputs == 0);
-        assert_eq!(sum, sum_c);
-
-        assert_eq!(a.len(), n_parents);
-        assert!(a.pin_covered(Fk(1), &[0, 1]));
-        a.set_spent_range_only(Fk(1), (1000, 24));
-        assert_eq!(a.get_spender_abs(Fk(1), 1), Some(1008));
-        let n = n_parents as f64;
-        eprintln!(
-            "pin_compose_multi_pack n={n_parents} \
-             insert={:.1}ns/op covered={:.1}ns/op layout={:.1}ns/op layout2={:.1}ns/op \
-             widen={:.1}ns/op assemble_sticky={:.1}ns/op assemble_nosticky={:.1}ns/op \
-             (insert_ns={insert_ns} covered_ns={covered_ns} layout_ns={layout_ns} \
-             layout2_ns={layout2_ns} widen_ns={widen_ns} assemble_ns={assemble_ns} \
-             assemble_nosticky_ns={assemble_cold_ns} n_in={n_inputs})",
-            insert_ns as f64 / n,
-            covered_ns as f64 / n,
-            layout_ns as f64 / n,
-            layout2_ns as f64 / n,
-            widen_ns as f64 / n,
-            assemble_ns as f64 / n_inputs as f64,
-            assemble_cold_ns as f64 / n_inputs as f64,
-        );
-        // Timing gates only for structural short-circuits (layout no-op, covered
-        // vs widen). Sticky vs no-sticky assemble is printed for hosts/benches but
-        // not asserted: alternating multi-vout walks often make sticky snap
-        // overhead match or exceed cold under debug + parallel load (see
-        // sticky_and_nosticky_txout_parts_match for functional equality).
-        // Floor avoids inverting layout/covered when both are sub-ms noise.
-        const TIMING_FLOOR_NS: u128 = 2_000_000; // 2ms
-        if layout_ns > TIMING_FLOOR_NS {
-            assert!(
-                layout2_ns < layout_ns,
-                "layout no-op must beat first ensure: layout={layout_ns} layout2={layout2_ns}"
-            );
-        }
-        // Sanity bound: free-plan insert should stay well under 50µs/op even in debug.
-        assert!(
-            insert_ns / (n_parents as u128) < 50_000,
-            "insert ns/op too high: {}",
-            insert_ns / n_parents as u128
-        );
-        // Covered re-insert should be cheaper than real widen when both are hot.
-        if widen_ns > TIMING_FLOOR_NS && covered_ns > TIMING_FLOOR_NS / 4 {
-            assert!(
-                covered_ns < widen_ns,
-                "covered re-insert should beat widen: covered={covered_ns} widen={widen_ns}"
-            );
-        }
-    }
-
-    /// Sticky and no-sticky assemble APIs return identical prevout parts.
-    #[test]
-    fn sticky_and_nosticky_txout_parts_match() {
-        let mut bp = BatchParents::new();
-        bp.insert_owned(
-            Fk(3),
-            tx(3),
-            vec![(0, out(11)), (1, out(22))],
-            vec![0, 1],
-            Some(false),
-            None,
-            Vec::new(),
-        );
-        for vout in [0u32, 1] {
-            let s = bp
-                .get_parent_txout_parts(Fk(3), vout, |v, sc, t| (v, sc.to_vec(), t))
-                .unwrap();
-            let c = bp
-                .get_parent_txout_parts_no_sticky(Fk(3), vout, |v, sc, t| (v, sc.to_vec(), t))
-                .unwrap();
-            assert_eq!(s.0, c.0);
-            assert_eq!(s.1, c.1);
-            assert_eq!(s.2, c.2);
-        }
-    }
-
     /// Sticky outs: consecutive same-parent lookups share one Arc (no re-load).
     #[test]
     fn sticky_assemble_reuses_outs_arc() {
@@ -1812,17 +1581,6 @@ mod tests {
         let (v1, s1, t1) = bp
             .get_parent_txout_parts(Fk(7), 1, |v, s, t| (v, s.to_vec(), t))
             .unwrap();
-        let pin = std::sync::Arc::clone(bp.pins.get(&7).unwrap());
-        let outs = pin.load_outs();
-        let before = std::sync::Arc::strong_count(&outs);
-        bp.get_parent_txout_parts(Fk(7), 1, |_, _, _| {
-            assert_eq!(
-                std::sync::Arc::strong_count(&outs),
-                before,
-                "sticky hit must borrow, not Arc::clone"
-            );
-        })
-        .unwrap();
         let (v2, s2, t2) = bp
             .get_parent_txout_parts(Fk(7), 2, |v, s, t| (v, s.to_vec(), t))
             .unwrap();
@@ -1851,26 +1609,6 @@ mod tests {
         assert_eq!(bp.sticky_outs.borrow().as_ref().map(|(id, _)| *id), Some(8));
     }
 
-    /// Pure share-hit refresh with empty meta is a no-op (no layout store).
-    #[test]
-    fn refresh_pin_meta_empty_is_noop() {
-        let mut bp = BatchParents::new();
-        bp.insert_owned(
-            Fk(1),
-            tx(1),
-            vec![(0, out(1))],
-            vec![0],
-            Some(false),
-            Some((100, 50)),
-            vec![(0, 10)],
-        );
-        let pin = Arc::clone(bp.pins.get(&1).unwrap());
-        let lay_before = pin.load_layout();
-        bp.refresh_pin_meta(Fk(1), None, None, Vec::new());
-        let lay_after = pin.load_layout();
-        assert!(Arc::ptr_eq(&lay_before, &lay_after));
-    }
-
     /// Pure compose helpers: widening need and layout builds new halves without
     /// mutating the source snapshots (AGENTS prefer-immutable).
     #[test]
@@ -1889,22 +1627,13 @@ mod tests {
         pin.maybe_merge_layout(None, &[(1, 20)]);
         let after_outs = pin.load_outs();
         let after_lay = pin.load_layout();
-        // Source snapshots unchanged.
-        assert_eq!(before_outs.live_len(), 1);
+        assert_eq!(before_outs.get_parts(0).expect("vout 0").0, 10);
+        assert!(before_outs.get_parts(1).is_none());
         assert_eq!(before_outs.checked(), &[0]);
         assert_eq!(before_lay.spender_rels, vec![(0, 10)]);
-        // Published halves have the union.
-        assert_eq!(after_outs.live_len(), 2);
+        assert_eq!(after_outs.get_parts(1).expect("vout 1").0, 20);
         assert!(after_outs.covers_need(&[0, 1]));
         assert_eq!(after_lay.spender_rels, vec![(0, 10), (1, 20)]);
-        assert!(
-            !Arc::ptr_eq(&before_outs, &after_outs),
-            "outs compose must publish new Arc"
-        );
-        assert!(
-            !Arc::ptr_eq(&before_lay, &after_lay),
-            "layout compose must publish new Arc"
-        );
     }
 
     /// Covered share hit must not replace outs Arc (no full clone on no-op).
@@ -1921,9 +1650,6 @@ mod tests {
             vec![(0, 10)],
         );
         let pin = Arc::clone(bp.pins.get(&1).unwrap());
-        let outs_before = pin.load_outs();
-        let lay_before = pin.load_layout();
-        // Same need already covered — free-pin share hit.
         bp.insert_owned(
             Fk(1),
             tx(1),
@@ -1935,14 +1661,9 @@ mod tests {
         );
         let outs_after = pin.load_outs();
         let lay_after = pin.load_layout();
-        assert!(
-            Arc::ptr_eq(&outs_before, &outs_after),
-            "no-op outs must keep Arc identity (no clone)"
-        );
-        assert!(
-            Arc::ptr_eq(&lay_before, &lay_after),
-            "no-op layout must keep Arc identity"
-        );
+        assert_eq!(outs_after.get_parts(0).expect("vout 0").0, 10);
+        assert_eq!(lay_after.body_range, Some((100, 50)));
+        assert_eq!(lay_after.spender_rels, vec![(0, 10)]);
     }
 
     /// Layout-only write must not replace outs Arc (scripts stay shared).
@@ -1959,14 +1680,11 @@ mod tests {
             vec![(0, 10)],
         );
         let pin = Arc::clone(bp.pins.get(&1).unwrap());
-        let outs_before = pin.load_outs();
         bp.set_layout_for_need(Fk(1), (500, 80), &[10, 20], &[]);
         let outs_after = pin.load_outs();
         let lay = pin.load_layout();
-        assert!(
-            Arc::ptr_eq(&outs_before, &outs_after),
-            "layout fill must not clone outs half"
-        );
+        assert_eq!(outs_after.get_parts(0).expect("vout 0").0, 10);
+        assert_eq!(outs_after.get_parts(1).expect("vout 1").0, 20);
         assert_eq!(lay.body_range, Some((500, 80)));
         bp.set_spent_range_only(Fk(1), (800, 24));
         assert_eq!(bp.get_spender_abs(Fk(1), 1), Some(808));

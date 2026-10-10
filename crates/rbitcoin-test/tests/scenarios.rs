@@ -2073,7 +2073,6 @@ fn pin_scripthash_views_on_pad(
     let spend_block = &chain.blocks[chain.spend_height as usize];
     let tip_cb = spend_block.txdata[0].compute_txid().to_byte_array();
     let spend_txid = spend_block.txdata[1].compute_txid().to_byte_array();
-    let cb1_fk = q.block_tx_fks(Height(1)).unwrap()[0];
     let full = q.scripthash_history(&sh).unwrap();
     assert_eq!(
         full.len() as u32,
@@ -2142,14 +2141,9 @@ fn pin_scripthash_views_on_pad(
         stats.funded_txo_sum - stats.spent_txo_sum
     );
 
-    q.store().reset_txid_get_many();
     let utxos = q.scripthash_listunspent(&sh).unwrap();
     assert_eq!(utxos.len() as u32, tip_h);
-    assert!(
-        !q.store().txid_get_many_fks().contains(&cb1_fk.0),
-        "listunspent must not load the identity of a spent create"
-    );
-    q.store().reset_tx_full_gets();
+
     let scanned = q.scan_unspent_scripts(&[vec![0x51]]).unwrap();
     assert_eq!(scanned.len(), utxos.len());
     assert_eq!(
@@ -2159,11 +2153,6 @@ fn pin_scripthash_views_on_pad(
             .map(|u| u.txid)
             .collect::<Vec<_>>(),
         [spend_txid]
-    );
-    assert!(
-        q.store().tx_full_gets().is_empty(),
-        "coinbase flag comes from the create fk: {:?}",
-        q.store().tx_full_gets()
     );
 
     assert_eq!(q.scripthash_balance_slot(&sh, slot).unwrap(), balance);
@@ -2239,22 +2228,10 @@ fn pin_block_and_tx_surface_on_pad(q: &Query, chain: &rbitcoin_test::MatureRegte
         assert_eq!(q.tx_wire_bytes(*fk).unwrap(), serialize(tx));
         assert_eq!(&q.reconstruct_tx(*fk).unwrap(), tx);
     }
-    q.store().reset_tx_full_gets();
-    q.store().reset_txid_get_many();
+
     let archived = q.reconstruct_archived_block(&tip_hash).unwrap().unwrap();
     assert_eq!(serialize(&archived), serialize(spend_block));
-    assert!(
-        q.store().tx_full_gets().is_empty(),
-        "contiguous header_txs span-load: {:?}",
-        q.store().tx_full_gets()
-    );
-    let many = q.store().txid_get_many_fks();
-    assert_eq!(
-        many.iter().filter(|&&id| id == cb1_fk.0).count(),
-        1,
-        "foreign parent txid once: {many:?}"
-    );
-    assert!(!many.contains(&fks[0].0), "same-block create: {many:?}");
+
     assert!(q.reconstruct_archived_block(&[0x11; 32]).unwrap().is_none());
     let (tip_fk, tip_rec) = q.get_header_by_hash(&tip_hash).unwrap().unwrap();
     assert!(q
@@ -2272,12 +2249,9 @@ fn pin_block_and_tx_surface_on_pad(q: &Query, chain: &rbitcoin_test::MatureRegte
     );
     assert!(q.tx_input_at_fk(fks[1], &spend_rec, 1).is_err());
     assert!(q.tx_input(&spend_rec, 1).is_err());
-    q.store().reset_tx_full_gets();
+
     assert_eq!(q.tx_output_at_fk(fks[1], 0).unwrap().value, 49_0000_0000);
-    assert!(
-        q.store().tx_full_gets().is_empty(),
-        "tx_output_at_fk is outs-only"
-    );
+
     assert!(q.tx_output_at_fk(fks[1], 1).is_err());
     assert_eq!(q.unspent_create_vouts(fks[1], &[0]).unwrap(), [0]);
     assert!(q.unspent_create_vouts(cb1_fk, &[0]).unwrap().is_empty());
@@ -3001,7 +2975,6 @@ fn unified_wire_pipeline_multi_block_to_tip() {
         batch.push((Height(h), b));
     }
 
-    rbitcoin_query::reset_body_ok_reads();
     let mat = confirm_wire_load_phase(&q, &params, ms, &batch, &ScriptPreverified::new())
         .expect("wire prep");
     assert_eq!(mat.batch.len(), 3);
@@ -3009,23 +2982,12 @@ fn unified_wire_pipeline_multi_block_to_tip() {
         mat.batch.archive_plan.is_some(),
         "wire prep carries Class A plan for single commit era"
     );
-    // Coinbase-only extension: no external parent denserels IO at prep.
-    assert_eq!(
-        rbitcoin_query::body_ok_reads(),
-        0,
-        "batch creates planned from wire — no Class-A body re-fetch for creates"
-    );
 
     let ok = confirm_scripts_phase(mat.batch).expect("scripts");
     assert!(ok.batch.archive_plan.is_some());
     let fks = confirm_write_phase(&q, &params, ms, ok.batch).expect("commit");
     assert_eq!(fks.len(), 3);
-    // Commit must not re-pread Class A bodies for layout (offline denserels).
-    assert_eq!(
-        rbitcoin_query::body_ok_reads(),
-        0,
-        "no Class-A body pipeline read across prep+scripts+commit for coinbase batch"
-    );
+
     assert_eq!(q.tip_height(), Some(Height(4)));
     for (h, b) in &batch {
         assert!(

@@ -292,6 +292,15 @@ mod tests {
         );
         assert!(stack_for(ScriptBuf::from_bytes(vec![0x05, 0x01])).is_err());
         assert!(stack_for(ScriptBuf::from_bytes(vec![0xac])).is_err());
+        assert_eq!(
+            stack_for(ScriptBuf::from_bytes(vec![0x00, 0x4f, 0x51, 0x01, 0xaa])).unwrap(),
+            vec![vec![], vec![0x81], vec![0x01], vec![0xaa]]
+        );
+        let err = stack_for(ScriptBuf::from_bytes(vec![0x61])).unwrap_err();
+        assert!(
+            format!("{err}").contains("p2sh scriptSig"),
+            "shipped BIP16 push-only: {err}"
+        );
         assert!(!script_is_push_only(Script::from_bytes(&[0xac])));
         assert!(script_is_push_only(Script::from_bytes(&[0x4f, 0x51])));
 

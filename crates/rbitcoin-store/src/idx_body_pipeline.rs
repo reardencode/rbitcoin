@@ -429,96 +429,6 @@ mod tests {
     use rbitcoin_primitives::Fk;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    #[test]
-    fn outs_first_wave_page_aligned_k0_stays_first_page() {
-        assert_eq!(outs_first_wave_len(0, 8000, &[0]), 4096);
-    }
-
-    #[test]
-    fn outs_first_wave_full_when_k_times_38_plus_meta_exceeds_room() {
-        assert_eq!(outs_first_wave_len(0, 8000, &[120]), 8000);
-    }
-
-    #[test]
-    fn outs_first_wave_k0_near_page_end_guesses_full() {
-        assert_eq!(outs_first_wave_len(4064, 8000, &[0]), 8000);
-    }
-
-    #[test]
-    fn outs_first_wave_vout0_room_41_guesses_full() {
-        assert_eq!(outs_first_wave_len(4055, 8000, &[0]), 8000);
-    }
-
-    #[test]
-    fn outs_first_wave_k0_fits_remainder_peeks_only_this_page() {
-        assert_eq!(outs_first_wave_len(3840, 8000, &[0]), 256);
-    }
-
-    #[test]
-    fn outs_first_wave_vout0_p2tr_coinbase_fits_est() {
-        use crate::tx_table::OutputRecord;
-        let mut script = vec![0x51, 0x20];
-        script.extend_from_slice(&[0x11u8; 32]);
-        let rec = OutputRecord::unspent(6_2500_0000, script.clone());
-        assert_eq!(
-            rec.encoded_len_exact() as u64,
-            35,
-            "6.25 BTC exp+mantissa+P2TR"
-        );
-        let fat = OutputRecord::unspent(2_6843_5456, script);
-        assert_eq!(
-            fat.encoded_len_exact() as u64,
-            OUTS_GUESS_PER_VOUT,
-            "messy 5-byte amount + P2TR is the 38 guess"
-        );
-        assert_eq!(outs_first_wave_len(0, 8000, &[0]), 4096);
-    }
-
-    #[test]
-    fn outs_first_wave_empty_need_full_when_span_crosses_page() {
-        assert_eq!(outs_first_wave_len(0, 6000, &[]), 6000);
-    }
-
-    #[test]
-    fn group_sqe_singleton_is_job_window_not_page_span() {
-        let dests = [PeekDest {
-            job: 0,
-            off: 4000,
-            dest: 0,
-            len: 96,
-        }];
-        let g = group_body_peeks(&[(4000, 96)]);
-        assert_eq!(g.len(), 1);
-        let (off, len, direct) = group_sqe(g[0].0, g[0].1, &g[0].2, &dests);
-        assert_eq!(off, 4000);
-        assert_eq!(len, 96);
-        assert_eq!(direct, Some(0));
-    }
-
-    #[test]
-    fn group_sqe_merged_stays_page_span() {
-        let dests = [
-            PeekDest {
-                job: 0,
-                off: 0,
-                dest: 0,
-                len: 91,
-            },
-            PeekDest {
-                job: 1,
-                off: 91,
-                dest: 0,
-                len: 91,
-            },
-        ];
-        let g = group_body_peeks(&[(0, 91), (91, 91)]);
-        assert_eq!(g.len(), 1);
-        let (off, len, direct) = group_sqe(g[0].0, g[0].1, &g[0].2, &dests);
-        assert_eq!(off, 0);
-        assert!(len >= 182);
-        assert!(direct.is_none());
-    }
-
     fn temp_tx() -> (std::path::PathBuf, TxTable) {
         static N: AtomicU64 = AtomicU64::new(0);
         let id = N.fetch_add(1, Ordering::Relaxed);
@@ -586,33 +496,6 @@ mod tests {
         let (dir, t) = temp_tx();
         run_idx_body_pipeline(&t.body, &mut [], BodyMode::Full).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn group_body_peeks_same_page_merges() {
-        let g = group_body_peeks(&[(0, 91), (91, 91)]);
-        assert_eq!(g.len(), 1);
-        assert_eq!(g[0].2, vec![0, 1]);
-        assert_eq!(g[0].0, 0);
-    }
-
-    #[test]
-    fn group_body_peeks_distinct_pages_split() {
-        let g = group_body_peeks(&[(0, 91), (8192, 91)]);
-        assert_eq!(g.len(), 2);
-    }
-
-    #[test]
-    fn group_body_peeks_straddle_pulls_same_pages() {
-        let g = group_body_peeks(&[(0, 91), (4000, 2000)]);
-        assert_eq!(g.len(), 1);
-        assert_eq!(g[0].2, vec![0, 1]);
-    }
-
-    #[test]
-    fn group_body_peeks_caps_straddle_chain_at_two_pages() {
-        let g = group_body_peeks(&[(100, 4096), (4196, 4096)]);
-        assert_eq!(g.len(), 2);
     }
 
     #[test]

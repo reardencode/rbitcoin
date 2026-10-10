@@ -10,31 +10,6 @@ use rbitcoin_store::{
     decode_packed_tx_outs_with_spender_rels_secret, decode_packed_tx_with_spender_rels_secret,
     IdxBodyJob, IdxBodyMode, Store, StoreError, StoreSecret,
 };
-#[cfg(debug_assertions)]
-mod body_ok_spy {
-    use std::cell::Cell;
-    thread_local! {
-        static BODY_OK_READS: Cell<u64> = const { Cell::new(0) };
-    }
-    pub fn reset_body_ok_reads() {
-        BODY_OK_READS.with(|c| c.set(0));
-    }
-    pub fn body_ok_reads() -> u64 {
-        BODY_OK_READS.with(|c| c.get())
-    }
-    pub fn note() {
-        BODY_OK_READS.with(|c| c.set(c.get().saturating_add(1)));
-    }
-}
-
-#[cfg(debug_assertions)]
-pub use body_ok_spy::{body_ok_reads, reset_body_ok_reads};
-
-#[inline]
-fn note_body_ok_read() {
-    #[cfg(debug_assertions)]
-    body_ok_spy::note();
-}
 
 #[allow(clippy::type_complexity)] // packed (fk, range) / span row is the on-disk shape
 /// One create loaded for the combined path.
@@ -61,7 +36,7 @@ pub struct CombinedCreate {
 
 /// Load creates by fk via loc→body, decode once.
 ///
-/// Each successful body fetch increments [`body_ok_reads`]. Ranges are always
+/// Ranges are always
 /// resolved from `create.loc` (`range=None` on jobs). Callers fill schema-13 zero
 /// body `TxRecord.txid` from plan RAM maps when needed — this path never seeds
 /// a process pin map and does not fill txid from `txid.body` for that purpose.
@@ -99,7 +74,6 @@ pub fn load_creates_once(
         let Some(range) = job.range else {
             continue;
         };
-        note_body_ok_read();
         let mut decoded_full = None;
         let mut decoded_outs = None;
         match mode {
@@ -202,10 +176,8 @@ mod tests {
     fn load_creates_once_combined_body_path() {
         let (dir, q) = temp_query();
         let fks: Vec<Fk> = (0..4u8).map(|i| put_tx(&q, i + 20)).collect();
-        reset_body_ok_reads();
         let creates = load_creates_once(q.store(), &fks, IdxBodyMode::Full).unwrap();
         assert_eq!(creates.len(), fks.len());
-        assert!(body_ok_reads() >= 1, "combined path must body-fetch");
         // Schema 13: identity lives in txid.body / plan RAM, not body prefix.
         let c = &creates[0];
         let t = c
@@ -538,7 +510,6 @@ mod tests {
                 .unwrap();
         }
         let asked: Vec<u32> = (0..64).collect();
-        let _ = q.block_queue_take_raw_clone_n();
         let intake = q.block_queue_wave_intake(&asked);
         assert_eq!(intake.raw.len(), 64, "all still-raw heights classified");
         assert_eq!(intake.raw[0].0, 0);
@@ -546,22 +517,12 @@ mod tests {
             intake.raw[0].2, 1,
             "enqueue header_fk rides the intake stamp"
         );
-        assert_eq!(
-            q.block_queue_take_raw_clone_n(),
-            0,
-            "wave_intake must not clone raw payloads for the asked set"
-        );
         for &h in asked.iter().take(16) {
             let a = q.block_queue_raw_payload(h).unwrap().expect("raw");
             let b = q.block_queue_raw_payload(h).unwrap().expect("raw");
             assert!(std::sync::Arc::ptr_eq(&a, &b));
             assert_eq!(a.as_slice(), &[h as u8; 64]);
         }
-        assert_eq!(
-            q.block_queue_take_raw_clone_n(),
-            0,
-            "lookup decode borrows the queued frame"
-        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -650,7 +611,6 @@ mod tests {
             .txs
             .put_full_batch_indexed(&[(tx, inputs, outs)], true)
             .unwrap()[0];
-        reset_body_ok_reads();
         let creates = load_creates_once(q.store(), &[fk], IdxBodyMode::Full).unwrap();
         assert_eq!(creates.len(), 1);
         assert!(

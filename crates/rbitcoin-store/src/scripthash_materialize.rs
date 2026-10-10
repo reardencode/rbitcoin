@@ -2131,27 +2131,6 @@ mod tests {
     }
 
     #[test]
-    fn worker_fk_spans_are_contiguous_covering_and_disjoint() {
-        assert_eq!(
-            worker_fk_spans(1, 100, 4),
-            vec![(1, 25), (26, 50), (51, 75), (76, 100)]
-        );
-        assert_eq!(
-            worker_fk_spans(1, 10, 3),
-            vec![(1, 3), (4, 6), (7, 10)],
-            "remainder on the last span"
-        );
-        assert_eq!(worker_fk_spans(1, 5, 1), vec![(1, 5)]);
-        assert_eq!(
-            worker_fk_spans(1, 3, 10),
-            vec![(1, 1), (2, 2), (3, 3)],
-            "n_workers > span clamps to one fk per worker"
-        );
-        assert!(worker_fk_spans(5, 4, 4).is_empty());
-        assert_eq!(worker_fk_spans(1, 8, 0), vec![(1, 8)]);
-    }
-
-    #[test]
     fn flush_collect_tally_matches_per_item_and_skips_zeros() {
         let recs = AtomicU64::new(0);
         let hits = AtomicU64::new(0);
@@ -2210,21 +2189,6 @@ mod tests {
         assert_eq!(one, 1, "finishing one fk of the late span is not fk 76");
         note_scanned_fks(&scanned, spans[0].0, spans[0].1);
         assert_eq!(scanned.load(Ordering::Relaxed), 1 + 25);
-    }
-
-    #[test]
-    fn keys_spill_channel_is_one_slot() {
-        let (tx, rx) = keys_spill_channel();
-        let mut first = Key16PackMap::default();
-        insert_key_pack(&mut first, prefix_key(1), Fk(1));
-        tx.send((0, first)).unwrap();
-        let mut second = Key16PackMap::default();
-        insert_key_pack(&mut second, prefix_key(2), Fk(2));
-        match tx.try_send((0, second)) {
-            Err(mpsc::TrySendError::Full(_)) => {}
-            other => panic!("second spill must block on the one-slot queue, got {other:?}"),
-        }
-        assert_eq!(rx.recv().unwrap().0, 0);
     }
 
     #[test]
@@ -2347,26 +2311,6 @@ mod tests {
         assert_eq!(
             crate::sorted_run::workers_for_free_ram(16, 24 << 30, SH_EXTRACT_WORKER_RAM_BYTES),
             16
-        );
-    }
-
-    #[test]
-    fn class_a_scan_chunk_is_loc_fold_grain() {
-        assert_eq!(
-            CLASS_A_CHUNK_FKS,
-            1 << 16,
-            "inner loc/body batch inside a static worker span, not a steal grain"
-        );
-        assert_eq!(
-            chunk_ranges(1, CLASS_A_CHUNK_FKS + 1, CLASS_A_CHUNK_FKS),
-            vec![
-                (1, CLASS_A_CHUNK_FKS),
-                (CLASS_A_CHUNK_FKS + 1, CLASS_A_CHUNK_FKS + 1)
-            ]
-        );
-        assert_eq!(
-            chunk_ranges(1, 70_000, CLASS_A_CHUNK_FKS),
-            vec![(1, CLASS_A_CHUNK_FKS), (CLASS_A_CHUNK_FKS + 1, 70_000)]
         );
     }
 

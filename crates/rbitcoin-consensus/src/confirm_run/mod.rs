@@ -71,7 +71,7 @@ pub use lookup::{
 };
 use phases::{assemble_run, Assembled};
 #[cfg(test)]
-use phases::{check_bip34, expected_bits_extending, post_commit};
+use phases::{expected_bits_extending, post_commit};
 #[cfg(test)]
 use pin::ensure_spend_abs_layouts;
 use pin::{collect_spend_abs_after_fill, pin_for_wire_batch};

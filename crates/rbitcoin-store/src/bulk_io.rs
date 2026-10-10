@@ -66,9 +66,6 @@ pub fn io_uring_enabled() -> bool {
         1 => true,
         2 => false,
         _ => {
-            if crate::uring_session::forced_session_kind().is_some() {
-                return true;
-            }
             let want = match parse_io_token() {
                 Some(IoToken::Pread) => false,
                 Some(_) | None => true,
@@ -117,9 +114,6 @@ fn parse_io_token() -> Option<IoToken> {
 /// Backend [`crate::uring_session::UringSession::try_open`] should open.
 pub fn resolved_session_kind() -> crate::uring_session::SessionKind {
     use crate::uring_session::SessionKind;
-    if let Some(k) = crate::uring_session::forced_session_kind() {
-        return k;
-    }
     match parse_io_token() {
         Some(IoToken::Pool) => SessionKind::Pool,
         Some(IoToken::Iocp) => SessionKind::Iocp,
@@ -791,56 +785,42 @@ mod tests {
 
     #[test]
     fn pread_batch_on_pool_session() {
-        use crate::uring_session::{with_forced_session_kind, SessionKind};
-        with_forced_session_kind(SessionKind::Pool, || {
-            let dir = std::env::temp_dir().join(format!(
-                "rbitcoin-pread-pool-{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            let _ = std::fs::create_dir_all(&dir);
-            let path = dir.join("blob");
-            let mut f = std::fs::File::create(&path).unwrap();
-            f.write_all(b"pool-session-bytes!!").unwrap();
-            f.flush().unwrap();
-            let f = std::fs::File::open(&path).unwrap();
-            let fd = crate::io_handle::IoHandle::from_file(&f);
-            let mut b = [0u8; 4];
-            let mut ops = [ReadOp {
-                fd,
-                offset: 0,
-                buf: &mut b[..],
-                result: i32::MIN,
-            }];
-            pread_batch(&mut ops);
-            assert_eq!(ops[0].result, 4);
-            assert_eq!(&b, b"pool");
-
-            // Held-session path (head-resolve ID / idx) must also work on pool.
-            let mut sess = crate::uring_session::UringSession::try_open_kind(
-                crate::uring_session::SessionKind::Pool,
-                32,
-            )
-            .expect("held pool");
-            let mut b2 = [0u8; 4];
-            let mut ops2 = [ReadOp {
-                fd,
-                offset: 5,
-                buf: &mut b2[..],
-                result: i32::MIN,
-            }];
-            assert!(
-                pread_batch_on_ctx(&mut crate::IoCtx::held(&mut sess), &mut ops2)
-                    .expect("held pool pread"),
-                "pread_batch_on_ctx(held) must succeed on pool (not a linux-only stub)"
-            );
-            assert_eq!(ops2[0].result, 4);
-            assert_eq!(&b2, b"sess");
-            sess.drain_all().unwrap();
-            let _ = std::fs::remove_dir_all(&dir);
-        });
+        let dir = std::env::temp_dir().join(format!(
+            "rbitcoin-pread-pool-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("blob");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(b"pool-session-bytes!!").unwrap();
+        f.flush().unwrap();
+        let f = std::fs::File::open(&path).unwrap();
+        let fd = crate::io_handle::IoHandle::from_file(&f);
+        // Held-session path (head-resolve ID / idx) on an explicit pool open.
+        let mut sess = crate::uring_session::UringSession::try_open_kind(
+            crate::uring_session::SessionKind::Pool,
+            32,
+        )
+        .expect("held pool");
+        let mut b2 = [0u8; 4];
+        let mut ops2 = [ReadOp {
+            fd,
+            offset: 5,
+            buf: &mut b2[..],
+            result: i32::MIN,
+        }];
+        assert!(
+            pread_batch_on_ctx(&mut crate::IoCtx::held(&mut sess), &mut ops2)
+                .expect("held pool pread"),
+            "pread_batch_on_ctx(held) must succeed on pool (not a linux-only stub)"
+        );
+        assert_eq!(ops2[0].result, 4);
+        assert_eq!(&b2, b"sess");
+        sess.drain_all().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

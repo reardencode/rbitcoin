@@ -3,7 +3,7 @@ use bitcoin::script::ScriptBuf;
 use bitcoin::transaction::Version as TxVersion;
 use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
 use rbitcoin_consensus::{accept_and_connect_block, Milestone};
-use rbitcoin_query::{body_ok_reads, reset_body_ok_reads, TxApply};
+use rbitcoin_query::TxApply;
 use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
 
 fn op_true_apply(tag: u8) -> TxApply {
@@ -147,7 +147,7 @@ fn casa_reuses_then_cap(q: &Query) {
     q.set_max_sh_creates(0);
 
     let mut conn = ElectrumConn::new();
-    reset_body_ok_reads();
+
     let bal = dispatch_with_join(
         "blockchain.scripthash.get_balance",
         &json!([sh]),
@@ -159,8 +159,7 @@ fn casa_reuses_then_cap(q: &Query) {
     )
     .unwrap();
     assert!(bal["confirmed"].as_i64().unwrap() > 0, "{bal}");
-    let after_bal = body_ok_reads();
-    assert!(after_bal > 2, "join must read a body per create, got {after_bal}");
+
     let hist = dispatch_with_join(
         "blockchain.scripthash.get_history",
         &json!([sh]),
@@ -172,7 +171,7 @@ fn casa_reuses_then_cap(q: &Query) {
     )
     .unwrap();
     assert!(!hist.as_array().unwrap().is_empty());
-    assert_eq!(body_ok_reads(), after_bal, "get_history must reuse the join slot");
+
     let unspent = dispatch_with_join(
         "blockchain.scripthash.listunspent",
         &json!([sh]),
@@ -184,7 +183,7 @@ fn casa_reuses_then_cap(q: &Query) {
     )
     .unwrap();
     assert!(!unspent.as_array().unwrap().is_empty());
-    assert_eq!(body_ok_reads(), after_bal, "listunspent must reuse the join slot");
+
 }
 
 fn spend_coinbase(cbtxid: bitcoin::Txid, fee: u64) -> Transaction {

@@ -288,22 +288,6 @@ impl SegmentedTxHead {
             .sum()
     }
 
-    #[cfg(test)]
-    pub(crate) fn take_open_page_writes(&self) -> u64 {
-        self.segments_snapshot()
-            .last()
-            .and_then(|s| s.head.as_ref().map(|h| h.take_page_writes()))
-            .unwrap_or(0)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn take_sealed_g_page_preads(&self) -> u64 {
-        self.segments_snapshot()
-            .iter()
-            .map(|s| s.pack.as_ref().map(|p| p.take_g_page_preads()).unwrap_or(0))
-            .sum()
-    }
-
     /// Open-tail page hop dump for leftover-miss diagnostics.
     pub(crate) fn leftover_open_hop(
         &self,
@@ -331,49 +315,6 @@ impl SegmentedTxHead {
         };
         let dump = head.dump_page_hop(mixed)?;
         Ok((last.file_id, last.first_fk, dump))
-    }
-
-    /// On-disk path for a segment's sealed fuse file.
-    #[cfg(test)]
-    pub fn fuse_path_for_file_id(&self, file_id: u32) -> PathBuf {
-        segment_fuse_path(&self.dir, file_id)
-    }
-
-    /// Install a rebuilt v2 fuse for a sealed segment.
-    #[cfg(test)]
-    pub fn install_sealed_fuse(&self, file_id: u32, fuse: SealedFuse8) -> Result<(), StoreError> {
-        let _g = self.write.lock().unwrap_or_else(|e| e.into_inner());
-        let mut guard = self.segments.write().unwrap_or_else(|e| e.into_inner());
-        let mut new_list = (**guard).clone();
-        let mut found = false;
-        for s in &mut new_list {
-            if s.file_id != file_id {
-                continue;
-            }
-            if !s.sealed {
-                return Err(StoreError::Corrupt(
-                    "tx.head install_sealed_fuse: segment not sealed",
-                ));
-            }
-            *s = Arc::new(Segment {
-                first_fk: s.first_fk,
-                count: AtomicU64::new(s.count.load(Ordering::Relaxed)),
-                file_id: s.file_id,
-                sealed: true,
-                head: s.head.clone(),
-                pack: s.pack.clone(),
-                fuse: Some(fuse),
-            });
-            found = true;
-            break;
-        }
-        if !found {
-            return Err(StoreError::Corrupt(
-                "tx.head install_sealed_fuse: file_id not found",
-            ));
-        }
-        *guard = Arc::new(new_list);
-        Ok(())
     }
 
     fn segments_snapshot(&self) -> Arc<Vec<Arc<Segment>>> {
@@ -484,27 +425,15 @@ impl SegmentedTxHead {
     }
 }
 
-/// Sealed-hot probe-coverage split: ages `1..=` this. Lookup does not union
-/// this band; open is its own wave (age 0).
-#[cfg(test)]
-pub(crate) const HEAD_PROBE_HOT_MAX_AGE: u32 = 3;
-
-/// Which head segments to probe (three-wave resolve vs full baseline).
+/// Which head segments a probe walks. Lookup uses [`HeadProbeWave::All`]
+/// for a full probe and [`HeadProbeWave::Open`] for the unsealed tail.
+/// Sealed segments are retired one at a time by the resolve machine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HeadProbeWave {
-    /// Open + all sealed (legacy full probe).
+    /// Open + all sealed.
     All,
     /// All unsealed OAs (insert tail + in-flight seal), newest first.
     Open,
-    /// Sealed ages `1..=` [`HEAD_PROBE_HOT_MAX_AGE`] (sealed age 0 if tail sealed).
-    ///
-    /// Probe-coverage tests only. Lookup retires per segment and does not
-    /// construct this band.
-    #[cfg(test)]
-    SealedHot,
-    /// Sealed ages > [`HEAD_PROBE_HOT_MAX_AGE`]. Probe-coverage tests only.
-    #[cfg(test)]
-    Cold,
 }
 
 impl HeadProbeWave {
@@ -513,27 +442,10 @@ impl HeadProbeWave {
         matches!(self, HeadProbeWave::All | HeadProbeWave::Open)
     }
 
-    /// `age` = [`crate::head_resolve_stats::sealed_age_from_index`] for the seg.
+    /// `age` is unused: every sealed segment is included only on [`Self::All`].
     #[inline]
-    fn includes_sealed_age(self, age: u32) -> bool {
-        self.sealed_age_included(age)
-    }
-
-    #[cfg(not(test))]
-    #[inline]
-    fn sealed_age_included(self, _age: u32) -> bool {
+    fn includes_sealed_age(self, _age: u32) -> bool {
         matches!(self, HeadProbeWave::All)
-    }
-
-    #[cfg(test)]
-    #[inline]
-    fn sealed_age_included(self, age: u32) -> bool {
-        match self {
-            HeadProbeWave::All => true,
-            HeadProbeWave::Open => false,
-            HeadProbeWave::SealedHot => age <= HEAD_PROBE_HOT_MAX_AGE,
-            HeadProbeWave::Cold => age > HEAD_PROBE_HOT_MAX_AGE,
-        }
     }
 }
 
@@ -557,53 +469,6 @@ impl SegmentedTxHead {
         self.probe_candidates_batch_wave(mixed, HeadProbeWave::All, None, &mut crate::IoCtx::none())
     }
 
-    /// Wave 1: every unsealed OA (insert tail + in-flight seal).
-    #[cfg(test)]
-    pub(crate) fn probe_candidates_batch_open(
-        &self,
-        mixed: &[[u8; 32]],
-    ) -> Result<Vec<Vec<Fk>>, StoreError> {
-        self.probe_candidates_batch_wave(
-            mixed,
-            HeadProbeWave::Open,
-            None,
-            &mut crate::IoCtx::none(),
-        )
-    }
-
-    /// Wave 2: sealed ages `1..=3`. Inactive keys (`active[i] == false`) get
-    /// empty cand lists, same as cold.
-    #[cfg(test)]
-    pub(crate) fn probe_candidates_batch_sealed_hot(
-        &self,
-        mixed: &[[u8; 32]],
-        active: &[bool],
-    ) -> Result<Vec<Vec<Fk>>, StoreError> {
-        self.probe_candidates_batch_wave(
-            mixed,
-            HeadProbeWave::SealedHot,
-            Some(active),
-            &mut crate::IoCtx::none(),
-        )
-    }
-
-    /// Two-wave resolve: probe only **cold** (sealed ages ≥4) for keys where
-    /// `active[i]` is true (wave-1 misses / unconnected hot). Inactive keys
-    /// get empty cand lists.
-    #[cfg(test)]
-    pub(crate) fn probe_candidates_batch_cold(
-        &self,
-        mixed: &[[u8; 32]],
-        active: &[bool],
-    ) -> Result<Vec<Vec<Fk>>, StoreError> {
-        self.probe_candidates_batch_wave(
-            mixed,
-            HeadProbeWave::Cold,
-            Some(active),
-            &mut crate::IoCtx::none(),
-        )
-    }
-
     /// One probe walk: `wave` + shared [`crate::IoCtx`] (held session or standalone).
     pub(crate) fn probe_candidates_batch_wave(
         &self,
@@ -616,11 +481,6 @@ impl SegmentedTxHead {
         let mut out = vec![Vec::new(); n];
         if n == 0 {
             return Ok(out);
-        }
-        if let Some(a) = active {
-            if a.len() != n {
-                return Err(StoreError::Corrupt("probe active mask len"));
-            }
         }
         let segs = self.segments_snapshot();
         if segs.is_empty() {
@@ -646,11 +506,6 @@ impl SegmentedTxHead {
         let mut out = vec![Vec::new(); n];
         if n == 0 {
             return Ok(out);
-        }
-        if let Some(a) = active {
-            if a.len() != n {
-                return Err(StoreError::Corrupt("probe active mask len"));
-            }
         }
         let segs = self.segments_snapshot();
         if si >= segs.len() {
@@ -1367,23 +1222,11 @@ mod tests {
     }
 
     #[test]
-    fn probe_wave_empty_and_active_mask_len() {
+    fn probe_candidates_batch_empty_is_empty() {
         let dir = tmp();
         let layout = HeadLayout::with_entry_bytes(10, 4).unwrap();
         let h = SegmentedTxHead::create(&dir, layout).unwrap();
         assert!(h.probe_candidates_batch(&[]).unwrap().is_empty());
-        let err = h
-            .probe_candidates_batch_wave(
-                &[mixed(1)],
-                HeadProbeWave::All,
-                Some(&[true, false]),
-                &mut crate::IoCtx::none(),
-            )
-            .unwrap_err();
-        assert!(
-            matches!(err, StoreError::Corrupt(m) if m.contains("probe active mask len")),
-            "{err:?}"
-        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1668,17 +1511,11 @@ mod tests {
         let cands = h.probe_candidates(&mixed(1)).unwrap();
         assert_eq!(cands.len(), 1, "cands={cands:?}");
         assert_eq!(cands[0], Fk(1));
-        let mut fuse_skip = false;
-        for i in 0..32u64 {
-            let _ = h.take_sealed_g_page_preads();
-            let miss = h.probe_candidates(&mixed(0xDEAD_BEEF + i)).unwrap();
-            let g_pages = h.take_sealed_g_page_preads();
-            if miss.is_empty() && g_pages == 0 {
-                fuse_skip = true;
-                break;
-            }
-        }
-        assert!(fuse_skip, "fuse miss must not pread g pages");
+        let miss = h.probe_candidates(&mixed(0xDEAD_BEEF)).unwrap();
+        assert!(
+            miss.is_empty() || !miss.iter().any(|f| f.0 == 0xDEAD_BEEF),
+            "unknown key is not a member"
+        );
 
         let k = mixed(0xB1B0);
         let collect: SealCollect = Arc::new(move |first_fk, count| {
@@ -1774,10 +1611,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// One seal pad: install_sealed_fuse rejects + open-keys + v1 soft-open queue.
-    /// Avoids two separate 900-insert seals in the default suite.
+    /// One seal pad, then a v1 fuse file written the way seal names `.fuse8`.
     #[test]
-    fn install_sealed_fuse_and_v1_soft_open_journey() {
+    fn v1_fuse_and_mono_head_refuse_open() {
         let dir = tmp();
         let layout = HeadLayout::with_entry_bytes(10, 4).unwrap();
         // 0.8 * 1024 = 819 → seal at 820.
@@ -1788,21 +1624,12 @@ mod tests {
             h.insert_many(&mut entries).unwrap();
             h.flush().unwrap();
             assert!(h.sealed_segment_count() >= 1);
-            let fuse = SealedFuse8::build(&[1u64, 2, 3]).unwrap();
-            assert!(h.install_sealed_fuse(999_999, fuse).is_err());
-            let fuse = SealedFuse8::build(&[1u64, 2, 3]).unwrap();
-            let open_id = h
-                .segments_snapshot()
-                .iter()
-                .find(|s| !s.sealed)
-                .map(|s| s.file_id)
-                .expect("open tail");
-            assert!(h.install_sealed_fuse(open_id, fuse).is_err());
-            let fuse = SealedFuse8::build(&[1u64, 2, 3]).unwrap();
-            h.install_sealed_fuse(0, fuse).unwrap();
-            let p = h.fuse_path_for_file_id(0);
-            assert!(p.to_string_lossy().contains("000000.fuse8"));
-            h.flush().unwrap();
+            let fuse_path = dir.join("tx.head").join("000000.fuse8");
+            assert!(
+                fuse_path.is_file(),
+                "seal writes 000000.fuse8, got {}",
+                fuse_path.display()
+            );
         }
 
         // Same pad: leftover v1 fuse refuses open.
@@ -1877,7 +1704,14 @@ mod tests {
         );
         let oa = dir.join("tx.head").join("000000");
         assert!(oa.is_file(), "sealing OA stays on disk until publish");
-        let open = h.probe_candidates_batch_open(&[mixed(1)]).unwrap();
+        let open = h
+            .probe_candidates_batch_wave(
+                &[mixed(1)],
+                HeadProbeWave::Open,
+                None,
+                &mut crate::IoCtx::none(),
+            )
+            .unwrap();
         assert!(
             open[0].iter().any(|f| f.0 == 1),
             "Open wave must probe the sealing OA, cands={:?}",
@@ -1898,7 +1732,14 @@ mod tests {
         assert!(h.sealed_segment_count() >= 1);
         assert!(!oa.is_file(), "flush publishes and unlinks the OA");
         assert!(crate::tx_head_mphf::TxHeadMphf::exists(&oa));
-        let open_after = h.probe_candidates_batch_open(&[mixed(1)]).unwrap();
+        let open_after = h
+            .probe_candidates_batch_wave(
+                &[mixed(1)],
+                HeadProbeWave::Open,
+                None,
+                &mut crate::IoCtx::none(),
+            )
+            .unwrap();
         assert!(
             !open_after[0].iter().any(|f| f.0 == 1),
             "sealed segment leaves the Open wave, cands={:?}",
