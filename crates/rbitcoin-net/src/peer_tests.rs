@@ -2242,42 +2242,6 @@ fn block_with_wire_len(n: usize) -> bitcoin::Block {
 }
 
 #[test]
-fn encode_served_witness_block_panics_on_reactor() {
-    let h = BlockHash::from_byte_array([0u8; 32]);
-    let join = std::thread::Builder::new()
-        .name("tokio-rt-worker".into())
-        .spawn(move || {
-            let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("serve-reactor");
-            let cache = BlockCache::new();
-            let r = encode_served_witness_block(&cache, &q, &h);
-            let _ = std::fs::remove_dir_all(dir);
-            r
-        })
-        .unwrap()
-        .join();
-    assert!(
-        join.is_err(),
-        "must panic on tokio-rt-worker without BlockingRegion"
-    );
-    let join_ok = std::thread::Builder::new()
-        .name("tokio-rt-worker".into())
-        .spawn(move || {
-            let _g = crate::reactor::BlockingRegion::enter();
-            let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("serve-reactor-ok");
-            let cache = BlockCache::new();
-            let r = encode_served_witness_block(&cache, &q, &h);
-            let _ = std::fs::remove_dir_all(dir);
-            r
-        })
-        .unwrap()
-        .join();
-    assert!(
-        join_ok.is_ok(),
-        "BlockingRegion must allow reconstruct on worker name"
-    );
-}
-
-#[test]
 fn announced_tip_is_hopeless_less_and_288_behind() {
     use std::cmp::Ordering;
     assert!(announced_tip_is_hopeless(

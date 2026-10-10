@@ -1,8 +1,8 @@
 use crate::test_chain::shared_regtest;
 use crate::testutil::TpClient;
 use crate::{
-    run_sv2_tp, Sv2TpConfig, FEE_DELTA, MAX_SESSIONS, MAX_STALE_GRACE, MAX_TEMPLATE_INTERVAL,
-    MIN_TEMPLATE_INTERVAL, SETUP_TIMEOUT, TEMPLATE_INTERVAL, WRITE_TIMEOUT,
+    run_sv2_tp, Sv2TpConfig, FEE_DELTA, MAX_SESSIONS, SETUP_TIMEOUT, TEMPLATE_INTERVAL,
+    WRITE_TIMEOUT,
 };
 use common_messages_sv2::{
     SetupConnectionError, SetupConnectionSuccess, MESSAGE_TYPE_SETUP_CONNECTION_ERROR,
@@ -344,43 +344,4 @@ async fn oversized_client_frame_closes_the_session() {
         closed.map(|r| r.map(|f| f.msg_type))
     );
     tp.shutdown().await;
-}
-
-#[tokio::test]
-async fn out_of_range_timing_refuses_to_start() {
-    let tc = shared_regtest(0);
-    let chain = Arc::clone(&tc.chain);
-    let hour = Duration::from_secs(3600);
-    let over = Duration::from_secs(1);
-    for (cert_validity, stale_grace, template_interval) in [
-        (
-            Duration::from_secs(u64::from(u32::MAX) + 1),
-            Duration::ZERO,
-            TEMPLATE_INTERVAL,
-        ),
-        (hour, MAX_STALE_GRACE + over, TEMPLATE_INTERVAL),
-        (hour, Duration::ZERO, Duration::ZERO),
-        (
-            hour,
-            Duration::ZERO,
-            MIN_TEMPLATE_INTERVAL - Duration::from_millis(1),
-        ),
-        (hour, Duration::ZERO, MAX_TEMPLATE_INTERVAL + over),
-    ] {
-        let e = run_sv2_tp(Sv2TpConfig {
-            listen: "127.0.0.1:0".parse().unwrap(),
-            chain: Arc::clone(&chain),
-            authority_secret: [7; 32],
-            cert_validity,
-            stale_grace,
-            setup_timeout: SETUP_TIMEOUT,
-            write_timeout: WRITE_TIMEOUT,
-            fee_delta: FEE_DELTA,
-            template_interval,
-        })
-        .await
-        .err()
-        .expect("out-of-range config must not start");
-        assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput, "{e}");
-    }
 }

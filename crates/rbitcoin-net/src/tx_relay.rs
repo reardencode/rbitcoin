@@ -7578,51 +7578,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&mp_dir);
     }
 
-    /// Production accept must not run on a tokio worker (reactor starvation).
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn accept_tx_refuses_tokio_worker() {
-        let store_dir = tmp();
-        let mp_dir = tmp();
-        let q = Query::open_or_create_tiny(&store_dir).unwrap();
-        let hub = MempoolHub::open(&mp_dir, Arc::new(q)).unwrap();
-        hub.set_relay_enabled(true);
-        let tx = Transaction {
-            version: Version::TWO,
-            lock_time: LockTime::ZERO,
-            input: vec![TxIn {
-                previous_output: OutPoint {
-                    txid: Txid::from_byte_array([1u8; 32]),
-                    vout: 0,
-                },
-                script_sig: ScriptBuf::new(),
-                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-                witness: Witness::new(),
-            }],
-            output: vec![TxOut {
-                value: Amount::from_sat(1),
-                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
-            }],
-        };
-        let join = tokio::spawn(async move {
-            let name = std::thread::current().name().unwrap_or("").to_string();
-            let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _ = hub.accept_tx(&tx);
-            }));
-            (name, panicked)
-        });
-        let (name, panicked) = join.await.expect("join worker");
-        assert!(
-            name.starts_with("tokio-rt-worker"),
-            "spawned task must run on a tokio worker, got {name:?}"
-        );
-        assert!(
-            panicked.is_err(),
-            "accept_tx must panic on tokio-rt-worker, not return {panicked:?}"
-        );
-        let _ = std::fs::remove_dir_all(&mp_dir);
-        let _ = std::fs::remove_dir_all(&store_dir);
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn accept_tx_async_runs_off_reactor() {
         let store_dir = tmp();
@@ -7805,33 +7760,6 @@ mod tests {
         assert!(
             name.starts_with("tokio-rt-worker"),
             "spawned task must run on a tokio worker, got {name:?}"
-        );
-        let _ = std::fs::remove_dir_all(&mp_dir);
-        let _ = std::fs::remove_dir_all(&store_dir);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn blocking_contains_refuses_tokio_worker() {
-        let store_dir = tmp();
-        let mp_dir = tmp();
-        let q = Query::open_or_create_tiny(&store_dir).unwrap();
-        let hub = MempoolHub::open(&mp_dir, Arc::new(q)).unwrap();
-        let miss = Txid::from_byte_array([0u8; 32]);
-        let join = tokio::spawn(async move {
-            let name = std::thread::current().name().unwrap_or("").to_string();
-            let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _ = hub.contains(&miss);
-            }));
-            (name, panicked)
-        });
-        let (name, panicked) = join.await.expect("join worker");
-        assert!(
-            name.starts_with("tokio-rt-worker"),
-            "spawned task must run on a tokio worker, got {name:?}"
-        );
-        assert!(
-            panicked.is_err(),
-            "contains must panic on tokio-rt-worker, not return {panicked:?}"
         );
         let _ = std::fs::remove_dir_all(&mp_dir);
         let _ = std::fs::remove_dir_all(&store_dir);

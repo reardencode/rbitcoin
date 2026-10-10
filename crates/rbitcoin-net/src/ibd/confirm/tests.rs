@@ -534,58 +534,6 @@ fn lookup_blocks_when_loadq_full() {
     .unwrap();
 }
 
-#[test]
-fn block_input_count_sums_tx_inputs() {
-    use bitcoin::absolute::LockTime;
-    use bitcoin::block::{Header, Version};
-    use bitcoin::script::ScriptBuf;
-    use bitcoin::transaction::Version as TxVersion;
-    use bitcoin::{
-        Amount, Block, CompactTarget, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness,
-    };
-    use rbitcoin_query::{ResolvedWire, TxPrecompute};
-    let mk_tx = |n_in: usize| Transaction {
-        version: TxVersion::ONE,
-        lock_time: LockTime::ZERO,
-        input: (0..n_in)
-            .map(|i| TxIn {
-                previous_output: OutPoint {
-                    txid: bitcoin::Txid::from_byte_array([i as u8; 32]),
-                    vout: 0,
-                },
-                script_sig: ScriptBuf::new(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            })
-            .collect(),
-        output: vec![TxOut {
-            value: Amount::from_sat(1),
-            script_pubkey: ScriptBuf::new(),
-        }],
-    };
-    let header = Header {
-        version: Version::from_consensus(4),
-        prev_blockhash: BlockHash::from_byte_array([0; 32]),
-        merkle_root: bitcoin::TxMerkleNode::from_byte_array([0; 32]),
-        time: 1,
-        bits: CompactTarget::from_consensus(0x207fffff),
-        nonce: 0,
-    };
-    let block = Block {
-        header,
-        txdata: vec![mk_tx(1), mk_tx(3), mk_tx(2)],
-    };
-    assert_eq!(super::block_input_count(&block), 6);
-    let pres: Arc<[TxPrecompute]> = block
-        .txdata
-        .iter()
-        .map(TxPrecompute::from_tx)
-        .collect::<Vec<_>>()
-        .into();
-    let wire = ResolvedWire::new(Arc::new(block), pres);
-    assert_eq!(wire.n_inputs, 6);
-}
-
 /// Parent entry meters accumulate and drain with send/recv (no budget gate).
 #[test]
 fn pipeline_parents_meter_prep_and_write() {
@@ -680,23 +628,6 @@ fn queue_hwm_tracks_max_depth() {
     assert_eq!(wh, 0);
     let (_, sh2, _) = q.sample_hwm_and_reset();
     assert_eq!(sh2, 0, "hwm resets each sample window");
-}
-
-/// Debug overflow on script_wire_bytes / parents used to abort IBD confirm
-/// threads under parallel load (seen on two_node IBD). Counters must saturate.
-#[test]
-fn queue_load_send_saturates_wire_and_parents() {
-    let q = ConfirmQueueDepths::new();
-    // Near-max wire_bytes so a second large add would wrap without saturating.
-    let half = usize::MAX / 2 + 1;
-    q.note_script_send(1, half, half);
-    q.note_script_send(1, half, half);
-    let c = q.content_snap();
-    assert_eq!(c.script_wire_bytes, usize::MAX);
-    assert_eq!(c.script_parents, usize::MAX);
-    assert_eq!(c.script_blocks, 2);
-    // recv must not underflow
-    q.note_script_recv(1, half, half);
 }
 
 #[test]

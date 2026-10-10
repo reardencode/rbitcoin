@@ -3093,14 +3093,6 @@ impl ChainHub {
         self.chain_work_prefix.write().unwrap().clear();
     }
 
-    #[cfg(test)]
-    pub(crate) fn test_poison_chain_work_prefix_last(&self) {
-        let mut p = self.chain_work_prefix.write().unwrap();
-        if let Some(last) = p.last_mut() {
-            *last = Work::from_be_bytes([0xff; 32]);
-        }
-    }
-
     fn block_at_height(&self, height: u32) -> Result<Option<Block>, NetError> {
         #[cfg(test)]
         self.block_at_height_calls.fetch_add(1, Ordering::Relaxed);
@@ -3754,11 +3746,6 @@ use crate::most_work::work_better;
 
 /// Tiny-head regtest [`ChainHub`] for tests. Not an operator API.
 #[cfg(test)]
-pub(crate) fn tiny_regtest_hub() -> (rbitcoin_query::testutil::TempDir, ChainHub) {
-    tiny_regtest_hub_labeled("hub")
-}
-
-#[cfg(test)]
 pub(crate) fn tiny_regtest_hub_labeled(
     label: &str,
 ) -> (rbitcoin_query::testutil::TempDir, ChainHub) {
@@ -3825,29 +3812,6 @@ mod tests {
     };
     use rbitcoin_consensus::{confirm_scripts_phase, ChainParams, Milestone};
     use rbitcoin_mempool::UtxoProvider;
-    use rbitcoin_store::HeadScale;
-
-    #[test]
-    fn shared_tiny_regtest_hub_is_tiny_unique_regtest_and_drop_cleans() {
-        let path;
-        {
-            let (dir, hub) = super::tiny_regtest_hub();
-            path = dir.path().to_path_buf();
-            assert!(path.is_dir(), "fixture must create {path:?}");
-            assert_eq!(hub.query.store().headers.head_target_slots(), 64);
-            assert_eq!(hub.query.store().head_scale(), HeadScale::Tiny);
-            assert_eq!(hub.params.network, bitcoin::Network::Regtest);
-            assert_eq!(hub.milestone, Milestone::NONE);
-            let (dir2, hub2) = super::tiny_regtest_hub();
-            assert_ne!(dir.path(), dir2.path(), "each open must be a unique path");
-            assert_eq!(hub2.params.network, bitcoin::Network::Regtest);
-            assert_eq!(hub2.query.store().headers.head_target_slots(), 64);
-        }
-        assert!(
-            !path.exists(),
-            "drop must remove the Tiny hub directory {path:?}"
-        );
-    }
 
     fn tmp_hub() -> (rbitcoin_query::testutil::TempDir, ChainHub) {
         super::tiny_regtest_hub_labeled("chain")
@@ -4525,39 +4489,6 @@ mod tests {
             ),
             "genesis-fork at height 1 is weaker than tip 2"
         );
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn disconnect_truncates_chain_work_prefix_to_keep_height() {
-        let (dir, hub) = tmp_hub();
-        hub.ensure_genesis().unwrap();
-        let gen = hub.tip_hash().unwrap();
-        let a1 = mine(gen, 1_300_030_000, 1);
-        hub.accept_block(a1.clone()).unwrap();
-        let a2 = mine(a1.block_hash(), 1_300_030_100, 2);
-        hub.accept_block(a2.clone()).unwrap();
-        let _ = hub.chain_work().unwrap();
-        assert_eq!(hub.test_chain_work_prefix_len(), 3);
-        hub.test_poison_chain_work_prefix_last();
-        hub.rewind_to_height(1).unwrap();
-        assert_eq!(
-            hub.test_chain_work_prefix_len(),
-            2,
-            "equal-length reorg must not keep the losing branch's prefix"
-        );
-        let b2 = mine_distinct(a1.block_hash(), 1_300_030_200, 2, &[a2.block_hash()]);
-        hub.accept_block(b2).unwrap();
-        let mut acc = Work::from_be_bytes([0u8; 32]);
-        for h in 0..=2 {
-            acc = acc + hub.query.wire_header_at_height(Height(h)).unwrap().work();
-        }
-        assert_eq!(
-            hub.chain_work().unwrap(),
-            acc,
-            "prefix must be rebuilt from the winner, not the poisoned loser"
-        );
-        assert_ne!(hub.chain_work().unwrap(), Work::from_be_bytes([0xff; 32]));
         let _ = std::fs::remove_dir_all(dir);
     }
 

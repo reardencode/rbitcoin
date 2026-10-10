@@ -411,11 +411,6 @@ pub(super) fn post_commit(
     Ok(spend_ann_ns)
 }
 
-#[cfg(test)]
-pub(super) fn check_bip34(block: &Block, height: u32) -> Result<(), ConsensusError> {
-    crate::block::check_bip34_coinbase(&block.txdata[0], height)
-}
-
 pub(super) fn expected_bits_extending(
     query: &Query,
     params: &ChainParams,

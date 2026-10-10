@@ -485,69 +485,6 @@ fn script_jobs_shrink_after_take() {
     assert_eq!(ok.batch.prepared[0].jobs.capacity(), 0);
 }
 
-#[test]
-fn check_bip34_helper_and_expected_bits_no_retarget() {
-    use super::{check_bip34, expected_bits_extending};
-    use crate::params::ChainParams;
-    use bitcoin::absolute::LockTime;
-    use bitcoin::block::{Header, Version};
-    use bitcoin::hashes::Hash;
-    use bitcoin::script::ScriptBuf;
-    use bitcoin::{
-        Amount, Block, BlockHash, CompactTarget, OutPoint, Sequence, Transaction, TxIn,
-        TxMerkleNode, TxOut, Witness,
-    };
-    use rbitcoin_primitives::Height;
-
-    let height = 17u32;
-    let mut ss = crate::block::bip34_height_script(height);
-    while ss.len() < 2 {
-        ss.push(0x00);
-    }
-    let cb = Transaction {
-        version: bitcoin::transaction::Version::ONE,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint::null(),
-            script_sig: ScriptBuf::from_bytes(ss),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        output: vec![TxOut {
-            value: Amount::from_sat(50),
-            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
-        }],
-    };
-    let block = Block {
-        header: Header {
-            version: Version::from_consensus(4),
-            prev_blockhash: BlockHash::from_byte_array([0; 32]),
-            merkle_root: TxMerkleNode::from_byte_array([0; 32]),
-            time: 1,
-            bits: CompactTarget::from_consensus(0x207f_ffff),
-            nonce: 0,
-        },
-        txdata: vec![cb],
-    };
-    check_bip34(&block, height).unwrap();
-    // Wrong height
-    assert!(check_bip34(&block, height + 1).is_err());
-    let mut empty_cb = block.clone();
-    empty_cb.txdata[0].input[0].script_sig = ScriptBuf::new();
-    let err = check_bip34(&empty_cb, height).expect_err("empty scriptSig");
-    assert!(
-        err.to_string().contains("bip34 coinbase script empty"),
-        "got: {err}"
-    );
-
-    // expected_bits_extending without store: height 0 and no_pow_retargeting regtest
-    let params = ChainParams::regtest();
-    // Cannot call with query easily; unit-test height==0 via expected_bits requires Query.
-    // Cover pure branch: no_pow or non-interval uses prev_bits — needs Query only for retarget.
-    let _ = (params, expected_bits_extending);
-    let _ = Height;
-}
-
 /// Trailing null `confirmed[]` + reopen must still connect real tip+1
 /// (`NotFound` was the inflated-HWM miss on a valid body).
 #[test]
@@ -645,7 +582,6 @@ fn expected_bits_extending_height0_and_no_retarget() {
     assert_eq!(ok.batch.parent_count(), 0);
 
     // check_bip34 wrong encoding
-    use super::check_bip34;
     use bitcoin::absolute::LockTime;
     use bitcoin::block::{Header, Version};
     use bitcoin::hashes::Hash;
@@ -679,7 +615,7 @@ fn expected_bits_extending_height0_and_no_retarget() {
         },
         txdata: vec![cb],
     };
-    assert!(check_bip34(&block, 17).is_err());
+    assert!(crate::block::check_bip34_coinbase(&block.txdata[0], 17).is_err());
 
     let _ = std::fs::remove_dir_all(&path);
 }

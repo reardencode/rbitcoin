@@ -449,13 +449,6 @@ mod coverage_tests {
     }
 
     #[test]
-    fn last_write_phase_ms() {
-        use rbitcoin_query::LastWritePhases;
-        assert_eq!(LastWritePhases::ms(3_000_000), 3);
-        assert_eq!(LastWritePhases::ms(500_000), 0);
-    }
-
-    #[test]
     fn verify_tx_scripts_detached_acs_job() {
         let tx = Transaction {
             version: TxVersion::TWO,

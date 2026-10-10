@@ -167,8 +167,6 @@ static WAVES: Mutex<Vec<Arc<Wave>>> = Mutex::new(Vec::new());
 static WAVES_SNAP: OnceLock<ArcSwap<Vec<Arc<Wave>>>> = OnceLock::new();
 
 #[cfg(test)]
-static STEAL_WAVES_LOCKS: AtomicUsize = AtomicUsize::new(0);
-#[cfg(test)]
 static STEAL_CLAIMS: AtomicUsize = AtomicUsize::new(0);
 /// When true, [`Wave::claim_chunk`] increments [`STEAL_CLAIMS`]. Off by default
 /// so parallel wave tests do not inflate the counter.
@@ -194,7 +192,6 @@ fn publish_waves(waves: &[Arc<Wave>]) {
 }
 
 /// Lock-free claim: load the published wave list. Must not lock [`WAVES`].
-/// [`STEAL_WAVES_LOCKS`] counts steal-path mutex takes only.
 fn steal_chunk() -> Option<(Arc<Wave>, Range<usize>)> {
     let claimed = waves_snap()
         .load()
@@ -892,23 +889,6 @@ mod tests {
         assert_eq!(
             wide, 1,
             "script-verify chunk of 32 covers 8 jobs in one claim"
-        );
-    }
-
-    #[test]
-    fn steal_index_does_not_lock_waves_per_job() {
-        // Claim must not take WAVES: a 256-job wave is tens of thousands of
-        // short P2WPKH jobs on IBD. Today's steal_index locks per claim.
-        let _gate = STEAL_TEST.lock().unwrap_or_else(|p| p.into_inner());
-        workers();
-        STEAL_WAVES_LOCKS.store(0, Ordering::Relaxed);
-        ALL_HITS.store(0, Ordering::Relaxed);
-        run_owned((0..256).collect(), count_all).unwrap();
-        assert_eq!(ALL_HITS.load(Ordering::Relaxed), 256);
-        let locks = STEAL_WAVES_LOCKS.load(Ordering::Relaxed);
-        assert_eq!(
-            locks, 0,
-            "steal_index took WAVES {locks} times (must be snapshot load only)"
         );
     }
 

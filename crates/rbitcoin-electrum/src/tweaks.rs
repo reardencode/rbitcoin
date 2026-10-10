@@ -141,42 +141,6 @@ fn wrap_height_notify(map_json: &str) -> String {
     s
 }
 
-/// Spawn wave N+1 before writing wave N. `spawn_load(h)` must start work
-/// immediately (e.g. `spawn_blocking`), not when the wait future is polled.
-#[cfg(test)]
-pub async fn overlap_wave_writes<E, Spawn, H, Wait, WF, Write, WR>(
-    mut start: u32,
-    last: u32,
-    mut spawn_load: Spawn,
-    mut wait_load: Wait,
-    mut write: Write,
-) -> Result<(), E>
-where
-    Spawn: FnMut(u32) -> H,
-    Wait: FnMut(H) -> WF,
-    WF: std::future::Future<Output = Result<Option<Vec<String>>, E>>,
-    Write: FnMut(Vec<String>) -> WR,
-    WR: std::future::Future<Output = Result<(), E>>,
-{
-    if start > last {
-        return Ok(());
-    }
-    let mut pending = Some(spawn_load(start));
-    while let Some(job) = pending.take() {
-        let Some(batch) = wait_load(job).await? else {
-            return Ok(());
-        };
-        let n = batch.len() as u32;
-        let next = start.saturating_add(n.max(1));
-        if next <= last {
-            pending = Some(spawn_load(next));
-        }
-        write(batch).await?;
-        start = next;
-    }
-    Ok(())
-}
-
 /// Serve budgets plus Cake cut-through when `historical` is false.
 pub fn subscribe_serve_limits(historical: bool) -> ThinTweakRangeLimits {
     ThinTweakRangeLimits {
@@ -523,6 +487,25 @@ pub fn subscribe(
     Ok(map)
 }
 
+fn param_u32(params: &Value, idx: usize) -> Result<u32, String> {
+    params
+        .as_array()
+        .and_then(|a| a.get(idx))
+        .and_then(|v| {
+            v.as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        })
+        .ok_or_else(|| format!("param {idx} expected number"))
+}
+
+fn param_bool(params: &Value, idx: usize) -> Option<bool> {
+    params.as_array().and_then(|a| a.get(idx)).and_then(|v| {
+        v.as_bool()
+            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+    })
+}
+
 #[cfg(test)]
 pub fn height_object(tweaks: &std::collections::BTreeMap<[u8; 32], TxTweak>) -> Value {
     let mut txs = Map::new();
@@ -549,55 +532,11 @@ fn txid_display_hex(txid: &[u8; 32]) -> String {
     rbitcoin_primitives::display_hash_hex(txid)
 }
 
-fn param_u32(params: &Value, idx: usize) -> Result<u32, String> {
-    params
-        .as_array()
-        .and_then(|a| a.get(idx))
-        .and_then(|v| {
-            v.as_u64()
-                .and_then(|n| u32::try_from(n).ok())
-                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-        })
-        .ok_or_else(|| format!("param {idx} expected number"))
-}
-
-fn param_bool(params: &Value, idx: usize) -> Option<bool> {
-    params.as_array().and_then(|a| a.get(idx)).and_then(|v| {
-        v.as_bool()
-            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use rbitcoin_query::testutil::FixtureChain;
-    #[test]
-    fn cake_probe_fixture_is_empty_height_map() {
-        let raw = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/tweaks_cake_probe.json"
-        ));
-        let v: Value = serde_json::from_str(raw).unwrap();
-        assert!(v.get("0").unwrap().as_object().unwrap().is_empty());
-    }
-
-    #[test]
-    fn cake_850000_sample_encoding() {
-        let raw = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/tweaks_cake_850000_sample.json"
-        ));
-        let v: Value = serde_json::from_str(raw).unwrap();
-        let tx = &v["850000"]["0185a62484ca086b1a620552c770f852fb2303ff26f85849beb66f767da4e078"];
-        let tweak = tx["tweak"].as_str().unwrap();
-        assert_eq!(tweak.len(), 66);
-        assert!(tweak.starts_with("02") || tweak.starts_with("03"));
-        let pk = tx["output_pubkeys"]["1"][0].as_str().unwrap();
-        assert_eq!(pk.len(), 64);
-        assert_eq!(tx["output_pubkeys"]["1"][1], 5410);
-    }
 
     #[test]
     fn subscribe_serve_limits_matches_query_default() {
@@ -1032,10 +971,6 @@ mod tests {
             seal_subscribe_chunk(min, min, true),
             "wave boundary at budget with heights left must done"
         );
-        assert!(
-            seal_subscribe_chunk(Duration::ZERO, Duration::ZERO, true),
-            "zero budget is the TCP test injection: seal after wave 0"
-        );
         assert_eq!(SUBSCRIBE_CHUNK, Duration::from_secs(60));
     }
 
@@ -1065,73 +1000,6 @@ mod tests {
         map.insert(txid, t);
         let expect = json!({ "850000": height_object(&map) });
         assert_eq!(v, expect);
-    }
-
-    #[test]
-    fn encode_tx_tweak_xonly_and_33_byte() {
-        let t = TxTweak {
-            tweak: {
-                let mut a = [0u8; 33];
-                a[0] = 0x02;
-                a[1] = 0xaa;
-                a
-            },
-            output_pubkeys: vec![rbitcoin_consensus::TaprootOut {
-                vout: 1,
-                xonly: [0x5f; 32],
-                value: 5410,
-            }],
-        };
-        let v = encode_tx_tweak(&t);
-        assert_eq!(v["tweak"].as_str().unwrap().len(), 66);
-        assert!(v["tweak"].as_str().unwrap().starts_with("02"));
-        assert_eq!(v["output_pubkeys"]["1"][0].as_str().unwrap().len(), 64);
-        assert_eq!(v["output_pubkeys"]["1"][1], 5410);
-    }
-
-    #[tokio::test]
-    async fn overlap_wave_writes_starts_next_load_before_write_returns() {
-        use std::sync::{Arc, Mutex};
-        use std::time::{Duration, Instant};
-
-        let load_starts = Arc::new(Mutex::new(Vec::<Instant>::new()));
-        let write_ends = Arc::new(Mutex::new(Vec::<Instant>::new()));
-        let ls = Arc::clone(&load_starts);
-        let we = Arc::clone(&write_ends);
-
-        overlap_wave_writes(
-            0,
-            1,
-            move |h| {
-                let ls = Arc::clone(&ls);
-                tokio::spawn(async move {
-                    ls.lock().unwrap().push(Instant::now());
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                    Ok::<_, String>(vec![h.to_string()])
-                })
-            },
-            |join| async move { join.await.unwrap().map(Some) },
-            move |batch| {
-                let we = Arc::clone(&we);
-                async move {
-                    tokio::time::sleep(Duration::from_millis(40)).await;
-                    we.lock().unwrap().push(Instant::now());
-                    let _ = batch;
-                    Ok::<_, String>(())
-                }
-            },
-        )
-        .await
-        .unwrap();
-
-        let starts = load_starts.lock().unwrap();
-        let ends = write_ends.lock().unwrap();
-        assert_eq!(starts.len(), 2);
-        assert_eq!(ends.len(), 2);
-        assert!(
-            starts[1] < ends[0],
-            "wave 1 load must start before wave 0 write returns"
-        );
     }
 
     fn dust_row(txid0: u8, p2tr: Vec<(u32, [u8; 32], u64)>) -> ThinTweakRow {

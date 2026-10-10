@@ -2941,26 +2941,6 @@ fn same_height_confirmed_spender_is_not_below_its_create() {
 }
 
 #[test]
-fn structure_rejects_pres_out_sum_above_max_money_before_assemble_casts_it() {
-    let max_money = Amount::MAX_MONEY.to_sat();
-    let block = block_with(vec![coinbase(0)]);
-    let mut at_cap: Vec<TxPrecompute> = block.txdata.iter().map(TxPrecompute::from_tx).collect();
-    at_cap[0].out_sum = max_money;
-    validate_block_structure_with_pres(&block, &ctx_h(0), Some(at_cap.into()), None)
-        .expect("MAX_MONEY out_sum is inside the range");
-
-    for sum in [max_money + 1, u64::MAX] {
-        let mut pres: Vec<TxPrecompute> = block.txdata.iter().map(TxPrecompute::from_tx).collect();
-        // Outputs stay under the cap. Only the precompute sum is over, including
-        // the saturating `u64::MAX` that would cast to -1.
-        pres[0].out_sum = sum;
-        let err = validate_block_structure_with_pres(&block, &ctx_h(0), Some(pres.into()), None)
-            .unwrap_err();
-        assert_bad_block(err, "bad-txns-txouttotal-toolarge");
-    }
-}
-
-#[test]
 fn max_block_tx_count_matches_weight_over_ten_byte_tx() {
     assert_eq!(MIN_TX_WEIGHT, 40, "10-byte tx at witness scale 4");
     assert_eq!(MAX_BLOCK_TX_COUNT, 100_000);

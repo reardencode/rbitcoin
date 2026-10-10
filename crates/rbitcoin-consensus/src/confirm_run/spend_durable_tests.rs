@@ -339,12 +339,6 @@ fn confirms_past_eight_batches_wait_for_an_explicit_checkpoint() {
     let _ = dir;
 }
 
-#[test]
-fn replay_status_is_ten_seconds() {
-    assert!(!super::write::replay_status_due(9_999));
-    assert!(super::write::replay_status_due(10_000));
-}
-
 /// Y is archived in a rejected batch, so its spend of X's output is never
 /// annotated and X's archive wave had no overlay for it. After X is
 /// disconnected, the run `[X, Y]` has no archive plan. It must still write

@@ -385,10 +385,6 @@ pub fn finish_post_commit_hashes(
 const REPLAY_BATCH: usize = 8;
 const REPLAY_STATUS_MS: u64 = 10_000;
 
-pub(super) fn replay_status_due(elapsed_ms: u64) -> bool {
-    elapsed_ms >= REPLAY_STATUS_MS
-}
-
 /// Rewrite spend annotations above the durable marker, then `sync_data` and advance it.
 ///
 /// Idempotent. A missing marker has no device-flushed cursor, so every height
@@ -492,7 +488,7 @@ fn annotate_spend_heights(query: &Query, start: u32, tip: u32) -> Result<u32, Co
         finish_post_commit_hashes(query, &items)?;
         done = done.saturating_add(chunk.len() as u32);
         let elapsed = logged_at.elapsed().as_millis() as u64;
-        if replay_status_due(elapsed) {
+        if elapsed >= REPLAY_STATUS_MS {
             let h = *chunk.last().unwrap_or(&tip);
             rbitcoin_log::info!("store: replay spend annotations {done}/{replayed} height={h}");
             logged_at = std::time::Instant::now();

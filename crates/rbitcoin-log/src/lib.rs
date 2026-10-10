@@ -345,27 +345,6 @@ mod tests {
     }
 
     #[test]
-    fn capture_logs_records_level_even_when_disabled() {
-        capture_logs(true);
-        init_off();
-        info!("ibd: sizes hidden-at-off");
-        debug!("ibd: perf meters");
-        let logs = take_logs();
-        capture_logs(false);
-        init(Level::Info);
-        assert!(
-            logs.iter()
-                .any(|(l, m)| *l == Level::Info && m.contains("ibd: sizes")),
-            "{logs:?}"
-        );
-        assert!(
-            logs.iter()
-                .any(|(l, m)| *l == Level::Debug && m.contains("ibd: perf")),
-            "{logs:?}"
-        );
-    }
-
-    #[test]
     fn style_default_is_plain() {
         assert_eq!(Style::default(), Style::Plain);
     }

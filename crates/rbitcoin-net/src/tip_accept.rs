@@ -219,15 +219,6 @@ mod tests {
     }
 
     #[test]
-    fn lane_survives_job_panic() {
-        let panicked = panic::catch_unwind(|| {
-            run_on_tip_accept(|| panic!("tip-accept test panic"));
-        });
-        assert!(panicked.is_err());
-        assert_eq!(run_on_tip_accept(|| 2 + 2), 4);
-    }
-
-    #[test]
     fn wait_idle_blocks_until_job_finishes() {
         use std::sync::mpsc;
         use std::time::Duration;

@@ -1685,18 +1685,6 @@ mod success_and_disabled_tests {
     }
 
     #[test]
-    fn tapscript_empty_checksigverify_fails() {
-        // empty sig + 32-byte key + CHECKSIGVERIFY → EmptySig verify error
-        let mut script = vec![0x00]; // empty sig
-        script.push(0x20); // push 32
-        script.extend_from_slice(&[0x02; 32]); // xonly-ish key (may fail xonly parse → false)
-        script.push(0xad); // CHECKSIGVERIFY
-                           // May error on empty verify or invalid key — either covers tapscript arms
-        let r = eval(&script, SigVersion::TapScript);
-        assert!(r.is_err() || r.is_ok());
-    }
-
-    #[test]
     fn tapscript_checksigadd_empty_sig_keeps_n() {
         // stack: empty_sig, n=2, unknown_key(1 byte) → CHECKSIGADD → n=2; OP_TRUE
         // Unknown key + empty sig → EmptySig path; push n.
@@ -1944,17 +1932,6 @@ mod success_and_disabled_tests {
     }
 
     #[test]
-    fn cleanstack_and_true_top_helpers() {
-        assert!(require_clean_true(&[vec![0x01]]).is_ok());
-        assert!(require_clean_true(&[]).is_err());
-        assert!(require_clean_true(&[vec![0x01], vec![0x01]]).is_err());
-        assert!(require_clean_true(&[vec![]]).is_err());
-        assert!(require_true_top(&[vec![], vec![0x01]]).is_ok());
-        assert!(require_true_top(&[]).is_err());
-        assert!(require_true_top(&[vec![]]).is_err());
-    }
-
-    #[test]
     fn script_sig_pushes_op_n_and_1negate() {
         let mut stack = Vec::new();
         // OP_0, OP_1NEGATE, OP_1, push bytes
@@ -2135,19 +2112,6 @@ mod success_and_disabled_tests {
     }
 
     #[test]
-    fn minimal_if_and_cast_bool_negzero() {
-        assert!(is_minimal_if_arg(&[]));
-        assert!(is_minimal_if_arg(&[0x01]));
-        assert!(!is_minimal_if_arg(&[0x00]));
-        assert!(!is_minimal_if_arg(&[0x01, 0x00]));
-        // negative zero is false
-        assert!(!cast_to_bool(&[0x80]));
-        assert!(cast_to_bool(&[0x01]));
-        assert!(!cast_to_bool(&[]));
-        assert!(!cast_to_bool(&[0x00, 0x00]));
-    }
-
-    #[test]
     fn minimalif_rejects_nonminimal_arg() {
         // TapScript MINIMALIF: push byte 0x00 (non-minimal false), IF, TRUE, ENDIF.
         // OP_0 empty is minimal; length-1 push of 0x00 is not.
@@ -2303,20 +2267,20 @@ mod success_and_disabled_tests {
         assert!(format!("{err}").contains("stack size"), "got {err}");
     }
 
+    /// Short `OP_PUSHDATA4` inside a legacy scriptCode. The payload must not be
+    /// read as an opcode: needle `11 11 11` is encoded `03 11 11 11` and sits
+    /// inside the four-byte push, so FindAndDelete leaves the script unchanged.
     #[test]
-    fn find_and_delete_pushdata4() {
-        // Needle uses PUSHDATA4 only when data.len() > 0xffff.
-        let data = vec![0x44u8; 0x10000];
-        let mut sc = vec![0x4e];
-        sc.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        sc.extend_from_slice(&data);
-        sc.push(0x51);
-        assert_eq!(find_and_delete(&sc, &data), vec![0x51]);
-        // Truncated PUSHDATA4 length field is copied/broken out without panic.
+    fn find_and_delete_short_pushdata4_payload_is_not_an_opcode() {
+        let script = vec![0x4e, 0x04, 0x00, 0x00, 0x00, 0x03, 0x11, 0x11, 0x11, 0x51];
+        let needle = [0x11u8, 0x11, 0x11];
+        let out = find_and_delete(&script, &needle);
+        assert_eq!(out, script);
+        assert_eq!(out.last(), Some(&0x51));
+        assert!(out.windows(3).any(|w| w == needle));
         let short = vec![0x4e, 0x01, 0x00];
-        let out = find_and_delete(&short, &[0xff]);
-        assert!(!out.is_empty() || out.is_empty());
-        assert_eq!(out[0], 0x4e);
+        let truncated = find_and_delete(&short, &[0xff]);
+        assert_eq!(truncated.first(), Some(&0x4e));
     }
 }
 

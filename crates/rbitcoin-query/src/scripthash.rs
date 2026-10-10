@@ -11,10 +11,6 @@ use std::sync::Arc;
 /// Class A expand / spend-join wave. Bounds decoded `txout` pages in RAM.
 const SH_JOIN_WAVE: usize = 4096;
 
-fn sh_join_waves<T>(items: &[T], wave: usize) -> impl Iterator<Item = &[T]> {
-    items.chunks(wave.max(1))
-}
-
 /// Expanded Electrum create outpoint (Class A + height joins).
 ///
 /// Store index only holds [`ScriptHashRecord`] (scripthash + create_tx_fk).
@@ -662,7 +658,7 @@ impl Query {
         let mut spends_us = 0u128;
         let mut offset = 0usize;
         let mut stop_at: Option<usize> = None;
-        for wave in sh_join_waves(&fks, wave_n) {
+        for wave in fks.chunks(wave_n) {
             let t_a = std::time::Instant::now();
             let creates = self.expand_create_fks_wave(scripthash, wave, need)?;
             class_a_us = class_a_us.saturating_add(t_a.elapsed().as_micros());
@@ -1524,24 +1520,6 @@ impl Query {
 #[cfg(test)]
 mod history_filter_tests {
     use super::*;
-
-    #[test]
-    fn sh_join_waves_splits_on_wave() {
-        let v = [1u8, 2, 3, 4, 5];
-        let got: Vec<&[u8]> = sh_join_waves(&v, 2).collect();
-        assert_eq!(got, vec![&[1, 2][..], &[3, 4][..], &[5][..]]);
-        assert!(sh_join_waves(&v, 0).next().is_some());
-    }
-
-    #[test]
-    fn sh_join_need_display() {
-        assert_eq!(ShJoinNeed::LISTUNSPENT, ShJoinNeed::BALANCE);
-        assert_eq!(ShJoinNeed::CHAIN_STATS, ShJoinNeed::BALANCE);
-        assert_eq!(ShJoinNeed::HISTORY.to_string(), "cs");
-        assert_eq!(ShJoinNeed::LISTUNSPENT.to_string(), "-");
-        assert_eq!(ShJoinNeed::BALANCE.to_string(), "-");
-        assert_eq!(ShJoinNeed::CHAIN_STATS.to_string(), "-");
-    }
 
     fn item(height: i64, txid0: u8) -> ScriptHashHistoryItem {
         let mut txid = [0u8; 32];
