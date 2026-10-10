@@ -93,3 +93,17 @@ MISSED   crates/rbitcoin-consensus/src/policy.rs:111:51: replace > with >= in is
 MISSED   crates/rbitcoin-consensus/src/policy.rs:149:15: replace > with >= in check_libre_shape in 12s build + 106s test
 MISSED   crates/rbitcoin-consensus/src/script/mod.rs:81:40: replace match guard !msg.contains("txid=") with true in annotate_script_err in 12s build + 93s test
 MISSED   crates/rbitcoin-consensus/src/script/mod.rs:327:44: replace - with / in crypto::parse_der_sig in 13s build + 87s test
+# 38030947097 2 58d9db43f9f02843e30f5889c147c7132f5242be
+MISSED   crates/rbitcoin-consensus/src/script/mod.rs:375:18: replace > with >= in crypto::is_valid_signature_encoding in 13s build + 67s test
+MISSED   crates/rbitcoin-consensus/src/script/mod.rs:382:18: replace > with >= in crypto::is_valid_signature_encoding in 12s build + 69s test
+MISSED   crates/rbitcoin-consensus/src/script/mod.rs:417:27: replace match guard pk.len() == 65 with true in crypto::is_compressed_or_uncompressed_pubkey in 13s build + 70s test
+MISSED   crates/rbitcoin-consensus/src/script/mod.rs:424:49: replace && with || in crypto::is_compressed_pubkey in 13s build + 67s test
+MISSED   crates/rbitcoin-consensus/src/script_pool.rs:129:9: replace Wave::has_unclaimed -> bool with false in 11s build + 68s test
+MISSED   crates/rbitcoin-consensus/src/script_pool.rs:129:9: delete ! in Wave::has_unclaimed in 11s build + 68s test
+MISSED   crates/rbitcoin-consensus/src/script_pool.rs:129:83: replace < with == in Wave::has_unclaimed in 11s build + 80s test
+MISSED   crates/rbitcoin-consensus/src/script_pool.rs:129:83: replace < with <= in Wave::has_unclaimed in 10s build + 69s test
+MISSED   crates/rbitcoin-consensus/src/script_pool.rs:220:5: replace help_steal -> bool with true in 12s build + 68s test
+MISSED   crates/rbitcoin-consensus/src/script_pool.rs:220:5: replace help_steal -> bool with false in 10s build + 72s test
+MISSED   crates/rbitcoin-consensus/src/signet.rs:226:19: replace > with >= in extract_header_payload in 12s build + 75s test
+MISSED   crates/rbitcoin-consensus/src/signet.rs:286:18: replace < with <= in read_script in 13s build + 68s test
+MISSED   crates/rbitcoin-consensus/src/signet.rs:302:22: replace < with <= in read_witness_stack in 13s build + 67s test
