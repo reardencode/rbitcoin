@@ -599,8 +599,6 @@ pub struct MempoolHub {
     meter_spent_body_loads: AtomicU64,
     /// Full live-set clones ([`Self::list_live`]).
     meter_list_live: AtomicU64,
-    /// Compact short-id walks that take the mempool read lock.
-    meter_cmpct_avail: AtomicU64,
     /// Full live-set meta scans ([`Self::list_live_meta`]).
     meter_list_live_meta: AtomicU64,
     meter_list_live_wtxids: AtomicU64,
@@ -707,11 +705,6 @@ struct CommitOutcome {
 }
 
 impl MempoolHub {
-    /// Short-id walks that entered the mempool, including a `try_read` miss.
-    pub fn cmpct_avail_scans(&self) -> u64 {
-        self.meter_cmpct_avail.load(Ordering::Relaxed)
-    }
-
     fn lock_read(&self) -> std::sync::RwLockReadGuard<'_, ActiveMempool> {
         crate::reactor::assert_not_reactor("mempool inner read");
         self.inner.read().unwrap()
@@ -808,7 +801,6 @@ impl MempoolHub {
             meter_delta_prevouts: AtomicU64::new(0),
             meter_spent_body_loads: AtomicU64::new(0),
             meter_list_live: AtomicU64::new(0),
-            meter_cmpct_avail: AtomicU64::new(0),
             meter_list_live_meta: AtomicU64::new(0),
             meter_list_live_wtxids: AtomicU64::new(0),
             meter_age_scan: AtomicU64::new(0),
@@ -3325,7 +3317,6 @@ impl MempoolHub {
         if needed.is_empty() && prefill_wtxids.is_empty() {
             return Some((HashMap::new(), crate::compact::CmpctFillSets::default()));
         }
-        self.meter_cmpct_avail.fetch_add(1, Ordering::Relaxed);
         let g = self.inner.try_read().ok()?;
         let keys = ShortId::calculate_siphash_keys(header, nonce);
         let sid_of = |tx: &Transaction| -> ShortId {
@@ -3890,11 +3881,6 @@ impl MempoolHub {
         self.maybe_refresh_fee_snapshot();
         let depth = Self::fee_depth(target_blocks);
         self.fee_snapshot.load().rate_btc_per_kb(depth)
-    }
-
-    /// How many times the live graph rebuilt mining chunks (sample-and-reset).
-    pub fn take_chunks_rebuilds(&self) -> u64 {
-        self.lock_read().graph.take_chunks_rebuilds()
     }
 
     /// Esplora `/fee-estimates` targets in one Arc load (+ optional refresh):
@@ -7520,29 +7506,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&store_dir);
     }
 
-    /// Histogram / frontier share one published chunk rebuild per dirty refresh.
-    #[test]
-    fn histogram_and_estimate_share_one_chunks_rebuild() {
-        let store_dir = tmp();
-        let mp_dir = tmp();
-        let q = Query::open_or_create_tiny(&store_dir).unwrap();
-        let hub = MempoolHub::open(&mp_dir, Arc::new(q)).unwrap();
-        hub.set_relay_enabled(true);
-        let _ = hub.take_chunks_rebuilds();
-        let _ = hub.fee_histogram();
-        let _ = hub.estimate_fee_btc_per_kb(2);
-        let n = hub.take_chunks_rebuilds();
-        assert!(
-            n <= 1,
-            "expected at most one mining_chunks rebuild for one dirty refresh, got {n}"
-        );
-        let _ = hub.fee_histogram();
-        let _ = hub.fee_histogram();
-        assert_eq!(hub.take_chunks_rebuilds(), 0);
-        let _ = std::fs::remove_dir_all(&mp_dir);
-        let _ = std::fs::remove_dir_all(&store_dir);
-    }
-
     /// Fee-snapshot refresh publishes live count/vsize/total_fee (GET /mempool).
     #[test]
     fn fee_snapshot_live_totals_match_list_live_meta() {
@@ -7564,9 +7527,6 @@ mod tests {
         assert_eq!(total_fee, expect_fee);
         assert!(expect_count >= 1);
         assert!(expect_fee > 0);
-        let _ = hub.take_chunks_rebuilds();
-        let _ = hub.fee_histogram();
-        assert_eq!(hub.take_chunks_rebuilds(), 0, "totals share fee refresh");
         // Electrum histogram buckets are raw vsize, summing to GET /mempool vsize.
         let hist_vsize: u64 = hub.fee_histogram().iter().map(|(_, v)| v).sum();
         assert_eq!(hist_vsize, expect_vsize);

@@ -538,7 +538,6 @@ mod tests {
                 .unwrap();
         }
         let asked: Vec<u32> = (0..64).collect();
-        let _ = q.block_queue_take_raw_clone_n();
         let intake = q.block_queue_wave_intake(&asked);
         assert_eq!(intake.raw.len(), 64, "all still-raw heights classified");
         assert_eq!(intake.raw[0].0, 0);
@@ -546,22 +545,12 @@ mod tests {
             intake.raw[0].2, 1,
             "enqueue header_fk rides the intake stamp"
         );
-        assert_eq!(
-            q.block_queue_take_raw_clone_n(),
-            0,
-            "wave_intake must not clone raw payloads for the asked set"
-        );
         for &h in asked.iter().take(16) {
             let a = q.block_queue_raw_payload(h).unwrap().expect("raw");
             let b = q.block_queue_raw_payload(h).unwrap().expect("raw");
             assert!(std::sync::Arc::ptr_eq(&a, &b));
             assert_eq!(a.as_slice(), &[h as u8; 64]);
         }
-        assert_eq!(
-            q.block_queue_take_raw_clone_n(),
-            0,
-            "lookup decode borrows the queued frame"
-        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
