@@ -452,43 +452,6 @@ impl HashHead {
         s.occupied >= Self::max_occupied(s.slots)
     }
 
-    /// Minimum power-of-two slot count so `keys` stay under load factor 7/8.
-    #[cfg(test)]
-    fn slots_for_keys(keys: u64) -> u64 {
-        if keys == 0 {
-            return DEFAULT_SLOTS;
-        }
-        // keys/slots < NUM/DEN  ⇒  slots > keys * DEN / NUM
-        let min = keys
-            .saturating_mul(MAX_LOAD_DEN)
-            .div_ceil(MAX_LOAD_NUM)
-            .max(1);
-        min.next_power_of_two().max(DEFAULT_SLOTS)
-    }
-
-    /// Ensure an **empty** table can hold `additional` keys (load 7/8).
-    ///
-    /// Occupied tables do not grow; overflow is [`HASH_HEAD_FULL`].
-    #[cfg(test)]
-    pub fn reserve_additional(&self, additional: u64) -> Result<(), StoreError> {
-        if additional == 0 {
-            return Ok(());
-        }
-        let (occupied, slots) = {
-            let state = self.state.lock().unwrap();
-            (state.occupied, state.slots)
-        };
-        let target_keys = occupied.saturating_add(additional);
-        let need = Self::slots_for_keys(target_keys);
-        if need <= slots {
-            return Ok(());
-        }
-        if occupied != 0 {
-            return Err(StoreError::Corrupt(HASH_HEAD_FULL));
-        }
-        self.grow_empty_to(need)
-    }
-
     /// First mapped fk for this full key prefix (newest in multi lists).
     ///
     /// Callers that need exact identity must verify the body (txid/hash) or use
@@ -655,30 +618,6 @@ impl HashHead {
 
         self.file.write_at(FILE_HEADER_LEN as u64, &table)?;
         self.state.lock().unwrap().occupied = occupied;
-        Ok(())
-    }
-
-    /// Expand an **empty** table to `new_slots` (power of two). Occupied tables
-    /// must not call this (that is the old in-place rehash).
-    #[cfg(test)]
-    fn grow_empty_to(&self, new_slots: u64) -> Result<(), StoreError> {
-        let new_slots = new_slots.max(2).next_power_of_two();
-        let (old_slots, occupied) = {
-            let state = self.state.lock().unwrap();
-            (state.slots, state.occupied)
-        };
-        if occupied != 0 {
-            return Err(StoreError::Corrupt(HASH_HEAD_FULL));
-        }
-        if new_slots <= old_slots {
-            return Ok(());
-        }
-        let new_bytes = SLOT_SIZE as u64 * new_slots;
-        let need = FILE_HEADER_LEN as u64 + new_bytes;
-        self.file.ensure_capacity(need)?;
-        self.file.set_logical_len(need)?;
-        self.file.zero_range(FILE_HEADER_LEN as u64, new_bytes)?;
-        self.state.lock().unwrap().slots = new_slots;
         Ok(())
     }
 
@@ -1049,33 +988,17 @@ mod tests {
     }
 
     #[test]
-    fn reserve_additional_grows_before_insert() {
-        let path = tmp_path();
-        let h = HashHead::create_with_slots(&path, DEFAULT_SLOTS).unwrap();
-        h.reserve_additional(10_000).unwrap();
-        let mut batch = Vec::new();
-        for i in 0u64..5_000 {
-            let mut key = [0u8; 32];
-            key[0..8].copy_from_slice(&i.to_le_bytes());
-            batch.push((key, Fk(i + 1)));
-        }
-        h.insert_many(&batch).unwrap();
-        assert_eq!(h.occupied(), 5_000);
-        cleanup_hh(&path);
-    }
-
-    #[test]
     fn bulk_fill_empty_roundtrip() {
         // Cold materialize path: empty table + pre-size + one insert_many.
         let path = tmp_path();
-        let h = HashHead::create_with_slots(&path, DEFAULT_SLOTS).unwrap();
+        // 20_000 keys at load 7/8 need 32_768 slots. create_with_slots is the live presize.
+        let h = HashHead::create_with_slots(&path, 32_768).unwrap();
         let mut batch = Vec::new();
         for i in 0u64..20_000 {
             let mut key = [0u8; 32];
             key[0..8].copy_from_slice(&i.to_le_bytes());
             batch.push((key, Fk(i + 1)));
         }
-        h.reserve_additional(batch.len() as u64).unwrap();
         assert_eq!(h.occupied(), 0);
         h.insert_many(&batch).unwrap();
         assert_eq!(h.occupied(), 20_000);
@@ -1094,22 +1017,6 @@ mod tests {
         h.insert_many(&more).unwrap();
         assert_eq!(h.occupied(), 21_000);
         assert_eq!(h.get(&[0u8; 32]).unwrap(), Some(Fk(1)));
-        cleanup_hh(&path);
-    }
-
-    #[test]
-    fn reserve_additional_jumps_to_target_slots() {
-        // Formerly doubled in a loop (log₂ empty rehashes). One jump to capacity.
-        let path = tmp_path();
-        let h = HashHead::create_with_slots(&path, DEFAULT_SLOTS).unwrap();
-        assert_eq!(h.state.lock().unwrap().slots, 64);
-        h.reserve_additional(10_000).unwrap();
-        let slots = h.state.lock().unwrap().slots;
-        // slots_for_keys(10000) = next_pow2(ceil(10000*8/7)) = next_pow2(11429) = 16384
-        assert_eq!(slots, 16_384);
-        // Second reserve for same size is a no-op (no smaller/equal grow).
-        h.reserve_additional(10_000).unwrap();
-        assert_eq!(h.state.lock().unwrap().slots, 16_384);
         cleanup_hh(&path);
     }
 
@@ -1342,7 +1249,6 @@ mod tests {
         let path = tmp_path();
         let h = HashHead::create_with_slots(&path, 16).unwrap();
         h.insert_many(&[]).unwrap();
-        h.reserve_additional(0).unwrap();
         assert!(h.get(&[0u8; 32]).unwrap().is_none());
         assert!(h.get_all(&[0u8; 32]).unwrap().is_empty());
         // multi chain walk

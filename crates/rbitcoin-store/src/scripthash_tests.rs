@@ -820,7 +820,7 @@ fn leftover_live_oa_main_open_refuses() {
     put_create(&t, rec(script_hash(&[0x01]), 1, 0));
     t.flush().unwrap();
     drop(t);
-    ShardedScriptHashHead::create_sharded(dir.join("scripthash.head"), 1, 64).unwrap();
+    std::fs::write(dir.join("scripthash.head"), b"leftover-oa").unwrap();
     match ScriptHashTable::open_tiny(&dir) {
         Ok(_) => panic!("leftover OA main must refuse"),
         Err(StoreError::Layout(m)) => {
@@ -2097,7 +2097,8 @@ fn open_migrates_legacy_head_when_runs_present() {
         let dir = tmp();
         let _t = ScriptHashTable::create_tiny(&dir).unwrap();
         drop(_t);
-        ShardedScriptHashHead::create_sharded(dir.join("scripthash.head"), 16, 64).unwrap();
+        std::fs::create_dir_all(dir.join("scripthash.head")).unwrap();
+        std::fs::write(dir.join("scripthash.head").join("00"), b"leftover-oa").unwrap();
 
         let runs_dir = dir.join("scripthash.runs");
         std::fs::create_dir_all(&runs_dir).unwrap();
@@ -2120,7 +2121,8 @@ fn open_refuses_legacy_head_without_runs() {
         let dir = tmp();
         let _t = ScriptHashTable::create_tiny(&dir).unwrap();
         drop(_t);
-        ShardedScriptHashHead::create_sharded(dir.join("scripthash.head"), 16, 64).unwrap();
+        std::fs::create_dir_all(dir.join("scripthash.head")).unwrap();
+        std::fs::write(dir.join("scripthash.head").join("00"), b"leftover-oa").unwrap();
         match ScriptHashTable::open_tiny(&dir) {
             Err(StoreError::Layout(m)) => {
                 assert!(m.contains("scripthash*"), "{m}");

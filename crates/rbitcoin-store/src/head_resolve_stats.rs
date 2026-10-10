@@ -51,7 +51,6 @@ fn miss_on_code(on: LeftoverMissOn) -> u64 {
     match on {
         LeftoverMissOn::Head => 1,
         LeftoverMissOn::Body => 2,
-        LeftoverMissOn::Idx => 3,
         LeftoverMissOn::Fence => 4,
     }
 }
@@ -60,7 +59,6 @@ fn miss_on_from_code(code: u64) -> Option<LeftoverMissOn> {
     match code {
         1 => Some(LeftoverMissOn::Head),
         2 => Some(LeftoverMissOn::Body),
-        3 => Some(LeftoverMissOn::Idx),
         4 => Some(LeftoverMissOn::Fence),
         _ => None,
     }

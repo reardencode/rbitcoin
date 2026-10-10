@@ -9,8 +9,6 @@ use crate::file::{GrowPolicy, TableFile, FILE_HEADER_LEN};
 use crate::fuse8_filter::SealedFuse8;
 use crate::hashhead::{sh_main_shard_count, HeadScale};
 use crate::io_backend::ReadIoBackend;
-#[cfg(test)]
-use crate::scripthash_head::ShardedScriptHashHead;
 use crate::scripthash_head::{
     prefix_shard_of, sh_per_shard_key_budget, sh_unique_hint_default, ScriptHashHead,
 };

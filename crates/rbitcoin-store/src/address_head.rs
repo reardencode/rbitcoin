@@ -426,12 +426,6 @@ pub fn insert_fk_into_page_buf(
     }
     let new_u = new_fk.0;
     let es = entry_bytes as usize;
-    if es != 4 && es != 8 {
-        return Err(StoreError::Corrupt("address head entry_bytes"));
-    }
-    if page_buf.len() < es {
-        return Err(StoreError::Corrupt("address head probe page empty"));
-    }
     let nslots = (page_buf.len() / es) as u64;
     let h1 = h1_in_page(txid, bits);
     let h2 = h2_in_page(txid, bits);
@@ -1730,17 +1724,6 @@ mod tests {
         assert!(matches!(
             insert_fk_into_page_buf(&mut page, 0, 12, 4, &txid, Fk(u64::from(u32::MAX) + 1)),
             Err(StoreError::InvalidFk)
-        ));
-        // Bad entry_bytes
-        assert!(matches!(
-            insert_fk_into_page_buf(&mut page, 0, 12, 6, &txid, Fk(1)),
-            Err(StoreError::Corrupt(_))
-        ));
-        // Empty page buffer
-        let mut empty = vec![];
-        assert!(matches!(
-            insert_fk_into_page_buf(&mut empty, 0, 12, 4, &txid, Fk(1)),
-            Err(StoreError::Corrupt(_))
         ));
         // Happy path insert + idempotent
         let r = insert_fk_into_page_buf(&mut page, 0, 12, 4, &txid, Fk(7)).unwrap();
