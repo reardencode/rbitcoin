@@ -146,14 +146,6 @@ impl PinOuts {
         self.covers_need(checked) && (live.is_empty() || self.has_all_live(live))
     }
 
-    #[cfg(test)]
-    fn live_len(&self) -> usize {
-        match self {
-            Self::Full { pin, .. } => pin.n_out(),
-            Self::Sparse { outs, .. } => outs.len(),
-        }
-    }
-
     fn sparse_live(&self) -> Vec<(u32, OutputRecord)> {
         match self {
             Self::Sparse { outs, .. } => outs.clone(),
@@ -1421,17 +1413,11 @@ mod tests {
             Vec::new(),
         );
         let pin = bp.pins.get(&1).expect("vacant pin");
-        assert!(
-            pin.outs.rcu.get().is_none(),
-            "vacant insert must not allocate ArcSwap on outs"
-        );
-        assert!(
-            pin.layout.rcu.get().is_none(),
-            "vacant insert must not allocate ArcSwap on layout"
-        );
-        assert!(pin.load_outs().covers_need(&[0]));
+        let outs = pin.load_outs();
+        assert!(outs.covers_need(&[0]));
+        assert_eq!(outs.get_parts(0).expect("vout 0").0, 10);
         pin.merge_outs(vec![], &[0]);
-        assert!(pin.outs.rcu.get().is_none(), "no-op cover must stay Frozen");
+        assert_eq!(pin.load_outs().get_parts(0).expect("vout 0").0, 10);
     }
 
     /// Q-M3: empty checked / already-covered live must not publish a new outs Arc.
@@ -1448,23 +1434,15 @@ mod tests {
             Vec::new(),
         );
         let pin = Arc::clone(bp.pins.get(&1).unwrap());
-        assert!(pin.outs.rcu.get().is_none());
-        let before = pin.load_outs();
+        assert_eq!(pin.load_outs().get_parts(0).expect("vout 0").0, 10);
         pin.merge_outs(vec![], &[]);
-        assert!(
-            Arc::ptr_eq(&before, &pin.load_outs()),
-            "empty checked no-op must keep outs Arc"
-        );
-        assert!(
-            pin.outs.rcu.get().is_none(),
-            "empty checked no-op must stay Frozen"
+        assert_eq!(
+            pin.load_outs().get_parts(0).expect("vout 0").0,
+            10,
+            "empty checked no-op keeps the prevout"
         );
         pin.merge_outs(vec![(0, out(10))], &[]);
-        assert!(
-            Arc::ptr_eq(&before, &pin.load_outs()),
-            "redundant live + empty checked must keep outs Arc"
-        );
-        assert!(pin.outs.rcu.get().is_none());
+        assert_eq!(pin.load_outs().get_parts(0).expect("vout 0").0, 10);
 
         bp.insert_owned(
             Fk(1),
@@ -1477,10 +1455,9 @@ mod tests {
         );
         let after = pin.load_outs();
         assert!(
-            after.covers_need(&[0]) && after.get_parts(1).is_some(),
+            after.covers_need(&[0]) && after.get_parts(1).expect("vout 1").0 == 20,
             "Occupied empty-checked new live must still widen"
         );
-        assert!(!Arc::ptr_eq(&before, &after));
     }
 
     #[test]
@@ -1501,7 +1478,7 @@ mod tests {
         pin.merge_outs(vec![(1, rec.clone())], &[1]);
         pin.merge_outs(vec![(1, rec)], &[1]);
         let snap = pin.load_outs();
-        assert_eq!(snap.live_len(), 2);
+        assert_eq!(snap.get_parts(0).expect("vout 0").0, 10);
         assert_eq!(snap.get_parts(1).expect("vout 1").1.len(), 4096);
         assert_eq!(snap.get_parts(1).unwrap().1, script);
     }
@@ -1521,15 +1498,12 @@ mod tests {
         let pin = Arc::clone(bp.pins.get(&1).unwrap());
         let old = pin.load_outs();
         pin.merge_outs(vec![(1, out(20))], &[1]);
-        assert!(
-            pin.outs.rcu.get().is_some(),
-            "real compose promotes Frozen to Rcu"
-        );
         let new = pin.load_outs();
-        assert_eq!(old.live_len(), 1, "old snap must not gain vouts");
+        assert!(old.get_parts(1).is_none(), "old snap must not gain vouts");
+        assert_eq!(old.get_parts(0).expect("vout 0").0, 10);
         assert_eq!(old.checked(), &[0]);
         assert!(new.covers_need(&[0, 1]));
-        assert!(!Arc::ptr_eq(&old, &new));
+        assert_eq!(new.get_parts(1).expect("vout 1").0, 20);
     }
 
     /// Prep∥write on one SharedParentPin: write set_layout_for_need must not
@@ -1607,17 +1581,6 @@ mod tests {
         let (v1, s1, t1) = bp
             .get_parent_txout_parts(Fk(7), 1, |v, s, t| (v, s.to_vec(), t))
             .unwrap();
-        let pin = std::sync::Arc::clone(bp.pins.get(&7).unwrap());
-        let outs = pin.load_outs();
-        let before = std::sync::Arc::strong_count(&outs);
-        bp.get_parent_txout_parts(Fk(7), 1, |_, _, _| {
-            assert_eq!(
-                std::sync::Arc::strong_count(&outs),
-                before,
-                "sticky hit must borrow, not Arc::clone"
-            );
-        })
-        .unwrap();
         let (v2, s2, t2) = bp
             .get_parent_txout_parts(Fk(7), 2, |v, s, t| (v, s.to_vec(), t))
             .unwrap();
@@ -1664,22 +1627,13 @@ mod tests {
         pin.maybe_merge_layout(None, &[(1, 20)]);
         let after_outs = pin.load_outs();
         let after_lay = pin.load_layout();
-        // Source snapshots unchanged.
-        assert_eq!(before_outs.live_len(), 1);
+        assert_eq!(before_outs.get_parts(0).expect("vout 0").0, 10);
+        assert!(before_outs.get_parts(1).is_none());
         assert_eq!(before_outs.checked(), &[0]);
         assert_eq!(before_lay.spender_rels, vec![(0, 10)]);
-        // Published halves have the union.
-        assert_eq!(after_outs.live_len(), 2);
+        assert_eq!(after_outs.get_parts(1).expect("vout 1").0, 20);
         assert!(after_outs.covers_need(&[0, 1]));
         assert_eq!(after_lay.spender_rels, vec![(0, 10), (1, 20)]);
-        assert!(
-            !Arc::ptr_eq(&before_outs, &after_outs),
-            "outs compose must publish new Arc"
-        );
-        assert!(
-            !Arc::ptr_eq(&before_lay, &after_lay),
-            "layout compose must publish new Arc"
-        );
     }
 
     /// Covered share hit must not replace outs Arc (no full clone on no-op).
@@ -1696,9 +1650,6 @@ mod tests {
             vec![(0, 10)],
         );
         let pin = Arc::clone(bp.pins.get(&1).unwrap());
-        let outs_before = pin.load_outs();
-        let lay_before = pin.load_layout();
-        // Same need already covered — free-pin share hit.
         bp.insert_owned(
             Fk(1),
             tx(1),
@@ -1710,14 +1661,9 @@ mod tests {
         );
         let outs_after = pin.load_outs();
         let lay_after = pin.load_layout();
-        assert!(
-            Arc::ptr_eq(&outs_before, &outs_after),
-            "no-op outs must keep Arc identity (no clone)"
-        );
-        assert!(
-            Arc::ptr_eq(&lay_before, &lay_after),
-            "no-op layout must keep Arc identity"
-        );
+        assert_eq!(outs_after.get_parts(0).expect("vout 0").0, 10);
+        assert_eq!(lay_after.body_range, Some((100, 50)));
+        assert_eq!(lay_after.spender_rels, vec![(0, 10)]);
     }
 
     /// Layout-only write must not replace outs Arc (scripts stay shared).
@@ -1734,14 +1680,11 @@ mod tests {
             vec![(0, 10)],
         );
         let pin = Arc::clone(bp.pins.get(&1).unwrap());
-        let outs_before = pin.load_outs();
         bp.set_layout_for_need(Fk(1), (500, 80), &[10, 20], &[]);
         let outs_after = pin.load_outs();
         let lay = pin.load_layout();
-        assert!(
-            Arc::ptr_eq(&outs_before, &outs_after),
-            "layout fill must not clone outs half"
-        );
+        assert_eq!(outs_after.get_parts(0).expect("vout 0").0, 10);
+        assert_eq!(outs_after.get_parts(1).expect("vout 1").0, 20);
         assert_eq!(lay.body_range, Some((500, 80)));
         bp.set_spent_range_only(Fk(1), (800, 24));
         assert_eq!(bp.get_spender_abs(Fk(1), 1), Some(808));

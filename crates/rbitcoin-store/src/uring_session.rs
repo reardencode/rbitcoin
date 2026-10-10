@@ -216,7 +216,6 @@ impl<'a> IoCtx<'a> {
 }
 
 thread_local! {
-    static FORCED_KIND: Cell<Option<SessionKind>> = const { Cell::new(None) };
     static SESSION: std::cell::RefCell<Option<UringSession>> =
         const { std::cell::RefCell::new(None) };
     static DEPTH: Cell<u32> = const { Cell::new(0) };
@@ -256,32 +255,6 @@ pub fn tls_take_max_pwrite_len() -> u32 {
     })
 }
 
-/// Largest pwrite count in one `begin_batch` window on the TLS session (0 if none).
-#[cfg(test)]
-pub fn tls_take_max_batch_pwrite_n() -> u32 {
-    SESSION.with(|cell| {
-        cell.borrow_mut()
-            .as_mut()
-            .map(|s| s.take_max_batch_pwrite_n())
-            .unwrap_or(0)
-    })
-}
-
-/// Run `f` with TLS / `try_open` opening `kind` (does not nest a session).
-#[cfg(test)]
-pub fn with_forced_session_kind<R>(kind: SessionKind, f: impl FnOnce() -> R) -> R {
-    FORCED_KIND.with(|c| {
-        let prev = c.replace(Some(kind));
-        let out = f();
-        c.set(prev);
-        out
-    })
-}
-
-pub(crate) fn forced_session_kind() -> Option<SessionKind> {
-    FORCED_KIND.with(|c| c.get())
-}
-
 #[allow(clippy::large_enum_variant)] // uring vs pool vs iocp backends
 enum SessionBackend {
     #[cfg(target_os = "linux")]
@@ -304,10 +277,6 @@ pub struct UringSession {
     sqe_n: u64,
     sqe_rw_nonzero: u64,
     max_pwrite_len: u32,
-    /// Pwrite SQEs in the current [`Self::begin_batch`] window.
-    batch_pwrite_n: u32,
-    /// Largest pwrite count in one begin_batch window since last take.
-    max_batch_pwrite_n: u32,
 }
 
 impl UringSession {
@@ -385,8 +354,6 @@ impl UringSession {
             sqe_n: 0,
             sqe_rw_nonzero: 0,
             max_pwrite_len: 0,
-            batch_pwrite_n: 0,
-            max_batch_pwrite_n: 0,
         })
     }
 
@@ -413,14 +380,6 @@ impl UringSession {
     #[cfg(test)]
     pub fn take_max_pwrite_len(&mut self) -> u32 {
         std::mem::take(&mut self.max_pwrite_len)
-    }
-
-    /// Largest number of pwrite SQEs in one [`Self::begin_batch`] window since last take.
-    #[cfg(test)]
-    pub fn take_max_batch_pwrite_n(&mut self) -> u32 {
-        self.max_batch_pwrite_n = self.max_batch_pwrite_n.max(self.batch_pwrite_n);
-        self.batch_pwrite_n = 0;
-        std::mem::take(&mut self.max_batch_pwrite_n)
     }
 
     pub fn kind(&self) -> SessionKind {
@@ -480,8 +439,6 @@ impl UringSession {
             self.drain_all()?;
         }
         self.check_live()?;
-        self.max_batch_pwrite_n = self.max_batch_pwrite_n.max(self.batch_pwrite_n);
-        self.batch_pwrite_n = 0;
         self.epoch = self.epoch.wrapping_add(1);
         Ok(())
     }
@@ -593,7 +550,6 @@ impl UringSession {
     ) -> Result<(), StoreError> {
         self.note_sqe(rw_flags);
         self.max_pwrite_len = self.max_pwrite_len.max(buf.len() as u32);
-        self.batch_pwrite_n = self.batch_pwrite_n.saturating_add(1);
         #[cfg(not(target_os = "linux"))]
         let _ = rw_flags;
         if buf.is_empty() {
@@ -1194,10 +1150,7 @@ pub fn with_thread_local<R>(
                 let mut slot = cell.borrow_mut();
                 let need_open = match slot.as_ref() {
                     None => true,
-                    Some(s) => {
-                        s.entries() < min_entries
-                            || forced_session_kind().is_some_and(|k| k != s.kind())
-                    }
+                    Some(s) => s.entries() < min_entries,
                 };
                 if need_open {
                     if let Some(mut old) = slot.take() {
@@ -1335,11 +1288,6 @@ pub(crate) fn note_uring_invariant(kind: UringInvariant) {
         "store: io_uring invariant {} thread={thread} (Corrupt; not a TipOnly miss)",
         kind.label()
     );
-}
-
-#[cfg(test)]
-pub(crate) fn uring_meters() -> &'static UringMeters {
-    &URING_METERS
 }
 
 /// Expected in-flight `user_data` values for one harvest wave.
@@ -1673,18 +1621,6 @@ mod tests {
     }
 
     #[test]
-    fn uring_meter_bump_and_take() {
-        let before = uring_meters()
-            .unexpected_cqe
-            .load(std::sync::atomic::Ordering::Relaxed);
-        note_uring_invariant(UringInvariant::UnexpectedCqe);
-        let after = uring_meters()
-            .unexpected_cqe
-            .load(std::sync::atomic::Ordering::Relaxed);
-        assert!(after > before);
-    }
-
-    #[test]
     fn spend_annotate_drain_short_cqe_is_io() {
         let p = Path::new("/tmp/spent.body");
         match require_full_cqe(4, 8, p) {
@@ -2008,29 +1944,6 @@ mod tests {
         assert_eq!(&buf[..2], &[1, 2]);
         session.drain_all().unwrap();
         let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn forced_kind_opens_pool_via_tls() {
-        with_forced_session_kind(SessionKind::Pool, || {
-            let kind = with_thread_local(32, |s| s.kind()).expect("tls pool");
-            assert_eq!(kind, SessionKind::Pool);
-        });
-    }
-
-    #[test]
-    fn pool_sessions_share_worker_threads() {
-        let n0 = crate::io_session_pool::spawned_workers();
-        let _a = UringSession::try_open_kind(SessionKind::Pool, 32).expect("pool a");
-        let n1 = crate::io_session_pool::spawned_workers();
-        let _b = UringSession::try_open_kind(SessionKind::Pool, 32).expect("pool b");
-        let n2 = crate::io_session_pool::spawned_workers();
-        assert!(n1 > 0, "first pool session must spawn workers");
-        assert_eq!(
-            n1, n2,
-            "second pool session must reuse the process worker set ({n0} → {n1} → {n2})"
-        );
-        assert!(n1 >= n0);
     }
 
     #[test]

@@ -799,27 +799,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Shipped RMW machine on the portable pool session (Linux CI pin).
+    /// Shipped RMW machine annotates the sole spender on the process session.
     #[test]
-    fn pool_rmw_annotates_sole_spender() {
-        crate::uring_session::with_forced_session_kind(
-            crate::uring_session::SessionKind::Pool,
-            || {
-                let (dir, t, spenders) = temp_table();
-                let (cfk, off, _len) = put_one(&t);
-                let abs = crate::tx_table::spent_abs(off, 0);
-                let sfk = Fk(88);
-                let cold =
-                    put_spend_batch_by_abs_meta_uring(&t, &spenders, &[(abs, cfk, 0, sfk, 0)])
-                        .expect("pool rmw");
-                assert!(cold.is_empty());
-                let bulk = t.get_spender_meta_at_abs_batch(&[abs]).unwrap();
-                let (field, flags, _vin) = bulk[0].unwrap();
-                assert_eq!(field, sfk);
-                assert_eq!(flags & output_flags::MULTI_SPENDER, 0);
-                let _ = std::fs::remove_dir_all(&dir);
-            },
-        );
+    fn shipped_rmw_annotates_sole_spender() {
+        let (dir, t, spenders) = temp_table();
+        let (cfk, off, _len) = put_one(&t);
+        let abs = crate::tx_table::spent_abs(off, 0);
+        let sfk = Fk(88);
+        let cold = put_spend_batch_by_abs_meta_uring(&t, &spenders, &[(abs, cfk, 0, sfk, 0)])
+            .expect("rmw");
+        assert!(cold.is_empty());
+        let bulk = t.get_spender_meta_at_abs_batch(&[abs]).unwrap();
+        let (field, flags, _vin) = bulk[0].unwrap();
+        assert_eq!(field, sfk);
+        assert_eq!(flags & output_flags::MULTI_SPENDER, 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

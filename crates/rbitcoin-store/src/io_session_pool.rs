@@ -15,13 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 
-static SPAWNED_WORKERS: AtomicUsize = AtomicUsize::new(0);
 static GLOBAL_POOL: OnceLock<Arc<SharedPool>> = OnceLock::new();
-
-#[cfg(test)]
-pub(crate) fn spawned_workers() -> usize {
-    SPAWNED_WORKERS.load(Ordering::Relaxed)
-}
 
 struct Job {
     handle: IoHandle,
@@ -63,7 +57,6 @@ fn global_pool(n_workers: usize) -> Arc<SharedPool> {
                     .name("rbtc-io-pool".into())
                     .spawn(move || worker_loop(sh))
                     .expect("spawn io pool worker");
-                SPAWNED_WORKERS.fetch_add(1, Ordering::Relaxed);
             }
             pool
         })

@@ -553,7 +553,6 @@ pub fn decode_layout_ext(ext: &[u8; 16]) -> Result<(HeadLayout, u64), StoreError
 pub struct AddressHead {
     file: TableFile,
     layout: HeadLayout,
-    page_writes: AtomicU64,
 }
 
 impl AddressHead {
@@ -579,11 +578,7 @@ impl AddressHead {
         file.set_logical_len(need)?;
         file.zero_range(0, body_bytes)?;
         remove_legacy_meta_sidecar(&path);
-        Ok(Self {
-            file,
-            layout,
-            page_writes: AtomicU64::new(0),
-        })
+        Ok(Self { file, layout })
     }
 
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
@@ -608,17 +603,7 @@ impl AddressHead {
             ));
         }
         remove_legacy_meta_sidecar(&path);
-        Ok(Self {
-            file,
-            layout,
-            page_writes: AtomicU64::new(0),
-        })
-    }
-
-    /// Dirty probe-page write-backs since last take (instance stats).
-    #[cfg(test)]
-    pub fn take_page_writes(&self) -> u64 {
-        self.page_writes.swap(0, Ordering::Relaxed)
+        Ok(Self { file, layout })
     }
 
     pub fn bits(&self) -> u32 {
@@ -792,7 +777,6 @@ impl AddressHead {
             if dirty {
                 let off = self.entry_off(page_base);
                 self.file.write_at(off, &buf[..n])?;
-                self.page_writes.fetch_add(1, Ordering::Relaxed);
             }
             i = j;
         }

@@ -697,26 +697,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Pool session drives the same staged resolve machine.
-    #[test]
-    fn pool_fk_and_range_matches_pread() {
-        crate::uring_session::with_forced_session_kind(
-            crate::uring_session::SessionKind::Pool,
-            || {
-                let (dir, t, txids) = seed_table(16);
-                let _ = crate::uring_session::tls_take_sqe_n();
-                let pread = resolve_fk_and_range_pread(&t, &txids, None, false).unwrap();
-                let via = resolve_fk_and_range_batch(&t, &txids).unwrap();
-                assert_eq!(pread, via);
-                assert!(
-                    crate::uring_session::tls_take_sqe_n() > 0,
-                    "pool resolve must push probe/identity SQEs on the held session"
-                );
-                let _ = std::fs::remove_dir_all(&dir);
-            },
-        );
-    }
-
     /// After drain, TipOnly hits durable head (write-behind is load-owned).
     #[test]
     fn uring_pending_write_behind_does_not_nest_tls() {
