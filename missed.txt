@@ -72,3 +72,24 @@ MISSED   crates/rbitcoin-consensus/src/convert.rs:87:49: replace == with != in t
 MISSED   crates/rbitcoin-consensus/src/header.rs:156:14: replace > with == in median_time_past in 12s build + 71s test
 MISSED   crates/rbitcoin-consensus/src/header.rs:156:14: replace > with < in median_time_past in 10s build + 68s test
 MISSED   crates/rbitcoin-consensus/src/header.rs:156:14: replace > with >= in median_time_past in 10s build + 84s test
+# 38030947097 1 58d9db43f9f02843e30f5889c147c7132f5242be
+MISSED   crates/rbitcoin-net/src/peer.rs:1551:65: replace < with == in tx_announce_below_feefilter in 20s build + 103s test
+MISSED   crates/rbitcoin-net/src/peer.rs:1551:65: replace < with > in tx_announce_below_feefilter in 11s build + 108s test
+MISSED   crates/rbitcoin-net/src/peer.rs:1551:65: replace < with <= in tx_announce_below_feefilter in 11s build + 95s test
+MISSED   crates/rbitcoin-net/src/peer.rs:1668:40: replace && with || in peer_session_with in 19s build + 92s test
+MISSED   crates/rbitcoin-net/src/peer.rs:2297:25: replace && with || in force_announce_txid in 19s build + 87s test
+MISSED   crates/rbitcoin-net/src/peer.rs:2297:89: replace < with <= in force_announce_txid in 11s build + 89s test
+MISSED   crates/rbitcoin-net/src/peer.rs:2385:21: replace && with || in tx_inv_candidate_ok in 11s build + 98s test
+MISSED   crates/rbitcoin-net/src/peer.rs:2385:17: replace > with == in tx_inv_candidate_ok in 11s build + 96s test
+MISSED   crates/rbitcoin-net/src/peer.rs:2385:85: replace < with == in tx_inv_candidate_ok in 11s build + 91s test
+MISSED   crates/rbitcoin-net/src/peer.rs:2385:85: replace < with > in tx_inv_candidate_ok in 11s build + 93s test
+MISSED   crates/rbitcoin-net/src/peer.rs:2385:85: replace < with <= in tx_inv_candidate_ok in 11s build + 97s test
+MISSED   crates/rbitcoin-net/src/peer.rs:3344:38: replace > with >= in getblocktxn_reply in 11s build + 98s test
+MISSED   crates/rbitcoin-net/src/peer.rs:3469:13: delete match arm Inventory::Transaction(txid) | Inventory::WitnessTransaction(txid) in on_notfound in 20s build + 92s test
+MISSED   crates/rbitcoin-consensus/src/params.rs:122:75: replace * with + in ChainParams::signet in 72s build + 95s test
+MISSED   crates/rbitcoin-consensus/src/policy.rs:96:24: replace < with > in check_libre_annex in 12s build + 102s test
+MISSED   crates/rbitcoin-consensus/src/policy.rs:102:48: replace && with || in check_libre_annex in 12s build + 92s test
+MISSED   crates/rbitcoin-consensus/src/policy.rs:111:51: replace > with >= in is_unspendable in 12s build + 92s test
+MISSED   crates/rbitcoin-consensus/src/policy.rs:149:15: replace > with >= in check_libre_shape in 12s build + 106s test
+MISSED   crates/rbitcoin-consensus/src/script/mod.rs:81:40: replace match guard !msg.contains("txid=") with true in annotate_script_err in 12s build + 93s test
+MISSED   crates/rbitcoin-consensus/src/script/mod.rs:327:44: replace - with / in crypto::parse_der_sig in 13s build + 87s test

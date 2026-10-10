@@ -1,8 +1,8 @@
 {
   "new_base": "cdfdaa0ef2b1fea88a1580adce5e42b6213aebac",
-  "new_skip": 1732,
-  "old_index": 772,
+  "new_skip": 1873,
+  "old_index": 1031,
   "new_cap_used": true,
-  "run_id": "37895507758",
-  "old_name": "crates/rbitcoin-consensus/src/header.rs:303:11: replace -= with /= in min_diff_bits"
+  "run_id": "38030947097",
+  "old_name": "crates/rbitcoin-consensus/src/script/mod.rs:366:18: replace == with != in crypto::is_valid_signature_encoding"
 }
