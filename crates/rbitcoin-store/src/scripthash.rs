@@ -34,7 +34,7 @@ use bitcoin_hashes::{sha256, Hash};
 use rbitcoin_primitives::{uleb128_len, Fk, TableKind};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, RwLock};
 
 /// Durable cold-materialize resume marker (next to `scripthash.head`).
@@ -299,7 +299,6 @@ pub struct ScriptHashTable {
     allocs: Vec<Mutex<AllocState>>,
     /// Dir-variant ovf alloc. Shared: `None` (ovf uses `allocs[0]`).
     ovf_alloc: Option<Mutex<AllocState>>,
-    page_ios: AtomicU64,
 }
 
 struct OvfL1 {
@@ -636,15 +635,10 @@ fn leftover_oa_overflow(dir: &Path) -> bool {
     })
 }
 
-fn paged_first_from_last(
-    body: &TableFile,
-    last_page: u64,
-    page_ios: &AtomicU64,
-) -> Result<u64, StoreError> {
+fn paged_first_from_last(body: &TableFile, last_page: u64) -> Result<u64, StoreError> {
     if last_page == 0 {
         return Ok(0);
     }
-    page_ios.fetch_add(1, Ordering::Relaxed);
     let mut page = [0u8; SH_PAGE_SIZE];
     body.read_at(last_page, &mut page)?;
     sh_page_first_off(sh_page_as_array(&page)?)
@@ -653,13 +647,7 @@ fn paged_first_from_last(
 /// Cap on a contiguous megakey span pread (64 MiB ≈ 16k pages).
 const SH_PAGE_SPAN_MAX: u64 = 64 * 1024 * 1024;
 
-fn read_sh_page_bytes(
-    body: &TableFile,
-    off: u64,
-    buf: &mut [u8],
-    page_ios: &AtomicU64,
-) -> Result<(), StoreError> {
-    page_ios.fetch_add(1, Ordering::Relaxed);
+fn read_sh_page_bytes(body: &TableFile, off: u64, buf: &mut [u8]) -> Result<(), StoreError> {
     if buf.is_empty() {
         return Ok(());
     }
@@ -715,10 +703,9 @@ fn collect_page_chain_span(
     body: &TableFile,
     first_page: u64,
     n_pages: usize,
-    page_ios: &AtomicU64,
 ) -> Result<Option<(Vec<Fk>, u64)>, StoreError> {
     let mut buf = vec![0u8; n_pages.saturating_mul(SH_PAGE_SIZE)];
-    read_sh_page_bytes(body, first_page, &mut buf, page_ios)?;
+    read_sh_page_bytes(body, first_page, &mut buf)?;
     let mut out = Vec::new();
     let mut prev_last = None;
     let mut last_next = 0u64;
@@ -740,11 +727,7 @@ fn collect_page_chain_span(
     Ok(Some((out, last_next)))
 }
 
-fn collect_page_chain_linked(
-    body: &TableFile,
-    first_page: u64,
-    page_ios: &AtomicU64,
-) -> Result<Vec<Fk>, StoreError> {
+fn collect_page_chain_linked(body: &TableFile, first_page: u64) -> Result<Vec<Fk>, StoreError> {
     let mut out = Vec::new();
     let mut prev_last: Option<u64> = None;
     let mut cur = [0u8; SH_PAGE_SIZE];
@@ -752,7 +735,7 @@ fn collect_page_chain_linked(
     if first_page == 0 {
         return Ok(out);
     }
-    read_sh_page_bytes(body, first_page, &mut cur, page_ios)?;
+    read_sh_page_bytes(body, first_page, &mut cur)?;
     loop {
         let at = out.len();
         let next = sh_page_decode_slice_into(&cur, &mut out)?;
@@ -760,22 +743,18 @@ fn collect_page_chain_linked(
         if next == 0 {
             break;
         }
-        read_sh_page_bytes(body, next, &mut nxt, page_ios)?;
+        read_sh_page_bytes(body, next, &mut nxt)?;
         cur = nxt;
     }
     Ok(out)
 }
 
-fn collect_extent_then_tail(
-    body: &TableFile,
-    last_page: u64,
-    page_ios: &AtomicU64,
-) -> Result<Vec<Fk>, StoreError> {
+fn collect_extent_then_tail(body: &TableFile, last_page: u64) -> Result<Vec<Fk>, StoreError> {
     if last_page == 0 {
         return Err(StoreError::Corrupt("scripthash extent: null last_page"));
     }
     let mut last_buf = [0u8; SH_PAGE_SIZE];
-    read_sh_page_bytes(body, last_page, &mut last_buf, page_ios)?;
+    read_sh_page_bytes(body, last_page, &mut last_buf)?;
     let last_arr = sh_page_as_array(&last_buf)?;
     let Some((base, n)) = sh_page_extent(last_arr)? else {
         return Err(StoreError::Corrupt("scripthash extent last page not ver=2"));
@@ -789,10 +768,10 @@ fn collect_extent_then_tail(
         if first == 0 {
             return Err(StoreError::Corrupt("scripthash extent span overflow"));
         }
-        return collect_page_chain_linked(body, first, page_ios);
+        return collect_page_chain_linked(body, first);
     }
     let last_in_ext = base.saturating_add(((n - 1) as u64).saturating_mul(SH_PAGE_SIZE as u64));
-    let (mut out, tail_off) = collect_page_chain_span(body, base, n, page_ios)?.ok_or(
+    let (mut out, tail_off) = collect_page_chain_span(body, base, n)?.ok_or(
         StoreError::Corrupt("scripthash extent prefix next links broken"),
     )?;
     if last_page == last_in_ext {
@@ -806,7 +785,7 @@ fn collect_extent_then_tail(
     let mut prev_last = out.last().map(|fk| fk.0);
     let mut cur = [0u8; SH_PAGE_SIZE];
     let mut nxt = [0u8; SH_PAGE_SIZE];
-    read_sh_page_bytes(body, tail_off, &mut cur, page_ios)?;
+    read_sh_page_bytes(body, tail_off, &mut cur)?;
     loop {
         let at = out.len();
         let next = sh_page_decode_slice_into(&cur, &mut out)?;
@@ -814,7 +793,7 @@ fn collect_extent_then_tail(
         if next == 0 {
             break;
         }
-        read_sh_page_bytes(body, next, &mut nxt, page_ios)?;
+        read_sh_page_bytes(body, next, &mut nxt)?;
         cur = nxt;
     }
     Ok(out)
@@ -879,7 +858,6 @@ impl ScriptHashTable {
                 .into_boxed_slice(),
             allocs,
             ovf_alloc: Some(Mutex::new(ovf_st)),
-            page_ios: AtomicU64::new(0),
         })
     }
 
@@ -964,7 +942,6 @@ impl ScriptHashTable {
             pack_marked,
             allocs,
             ovf_alloc,
-            page_ios: AtomicU64::new(0),
         };
         // v1 = schema-13 slabs; v2 = schema-14 pages; v3 = schema-15 slabs.
         // Field layout is the same; only an empty older header upgrades silently.
@@ -1394,23 +1371,6 @@ impl ScriptHashTable {
         }
     }
 
-    #[cfg(test)]
-    fn sorted_main_pread_count(&self, shard: usize) -> u64 {
-        self.sorted_main
-            .get(shard)
-            .and_then(|s| s.read().unwrap().as_ref().map(|h| h.pread_count()))
-            .unwrap_or(0)
-    }
-
-    #[cfg(test)]
-    fn reset_sorted_main_preads(&self) {
-        for slot in self.sorted_main.iter() {
-            if let Some(h) = slot.read().unwrap().as_ref() {
-                h.reset_pread_count();
-            }
-        }
-    }
-
     /// Test-only: set alloc `live_count = 0` without clearing head slots.
     ///
     /// Models crash mid-finish after deferred heads landed but before the
@@ -1501,7 +1461,6 @@ impl ScriptHashTable {
             return Ok(0);
         };
         let mut page = [0u8; SH_PAGE_SIZE];
-        self.page_ios.fetch_add(1, Ordering::Relaxed);
         body.read_at(last_page, &mut page)?;
         let n = crate::scripthash_pages::sh_page_extent_creates(&page);
         if n > 0 {
@@ -1531,11 +1490,6 @@ impl ScriptHashTable {
             .into_iter()
             .map(|fk| (fk, ScriptHashRecord::from_fk(*scripthash, fk)))
             .collect())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn take_page_ios(&self) -> u64 {
-        self.page_ios.swap(0, Ordering::Relaxed)
     }
 
     /// Max durable create_tx_fk for a head value (**last page only** when paged).
@@ -2005,9 +1959,7 @@ impl ScriptHashTable {
                 }
                 Ok(got)
             }
-            ShHeadValue::Extent { last_page } => {
-                collect_extent_then_tail(body, *last_page, &self.page_ios)
-            }
+            ShHeadValue::Extent { last_page } => collect_extent_then_tail(body, *last_page),
         }
     }
 
@@ -2095,7 +2047,7 @@ impl ScriptHashTable {
                 Ok(new_val)
             }
             ShHeadValue::Extent { last_page } => {
-                let first = paged_first_from_last(body, *last_page, &self.page_ios)?;
+                let first = paged_first_from_last(body, *last_page)?;
                 let last = self.append_fks_to_pages(body, alloc, first, *last_page, new_ents)?;
                 Ok(ShHeadValue::extent(last))
             }
@@ -2350,7 +2302,7 @@ impl ScriptHashTable {
     ) -> Result<(), StoreError> {
         match old {
             ShHeadValue::Extent { last_page } => {
-                let mut off = paged_first_from_last(body, *last_page, &self.page_ios)?;
+                let mut off = paged_first_from_last(body, *last_page)?;
                 while off != 0 {
                     let mut page = [0u8; SH_PAGE_SIZE];
                     body.read_at(off, &mut page)?;
@@ -2957,16 +2909,6 @@ impl<'a> ScriptHashBulkSession<'a> {
     fn return_fk_scratch(&mut self, mut buf: Vec<u64>) {
         buf.clear();
         self.fk_scratch = buf;
-    }
-
-    #[cfg(test)]
-    fn fk_scratch_capacity(&self) -> usize {
-        self.fk_scratch.capacity().max(
-            self.open_key
-                .as_ref()
-                .map(|o| o.buf.capacity())
-                .unwrap_or(0),
-        )
     }
 
     /// Head shards fully installed so far.

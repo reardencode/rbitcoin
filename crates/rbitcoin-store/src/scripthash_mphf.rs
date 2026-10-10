@@ -11,7 +11,6 @@ use crate::scripthash_layout::{pack8, unpack8, ShHeadKey, ShHeadValue, SH_HEAD_K
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct MphfHead {
     base: PathBuf,
@@ -19,7 +18,6 @@ pub struct MphfHead {
     val_file: File,
     mphf: BdzMphf,
     tags_off: u64,
-    preads: AtomicU64,
 }
 
 pub fn mphf_path(base: &Path) -> PathBuf {
@@ -60,16 +58,6 @@ impl MphfHead {
 
     pub fn occ_bytes_resident(&self) -> usize {
         self.mphf.occ_bytes_resident()
-    }
-
-    #[cfg(test)]
-    pub fn pread_count(&self) -> u64 {
-        self.preads.load(Ordering::Relaxed)
-    }
-
-    #[cfg(test)]
-    pub fn reset_pread_count(&self) {
-        self.preads.store(0, Ordering::Relaxed)
     }
 
     pub fn flush(&self) -> Result<(), StoreError> {
@@ -195,7 +183,6 @@ impl MphfHead {
             val_file,
             mphf,
             tags_off,
-            preads: AtomicU64::new(0),
         })
     }
 
@@ -239,7 +226,6 @@ impl MphfHead {
         let ku = mix_key16(key);
         let slot = u64::from(self.mphf.index(ku)?);
         let mut tag = [0u8; 8];
-        self.preads.fetch_add(1, Ordering::Relaxed);
         pread_file_exact(&self.mphf_file, self.tags_off + slot * 8, &mut tag)
             .map_err(|e| StoreError::io(mphf_path(&self.base), e))?;
         if u64::from_le_bytes(tag) != ku {
@@ -250,7 +236,6 @@ impl MphfHead {
 
     fn read_val(&self, slot: u64) -> Result<ShHeadValue, StoreError> {
         let mut buf = [0u8; 8];
-        self.preads.fetch_add(1, Ordering::Relaxed);
         pread_file_exact(&self.val_file, slot * 8, &mut buf)
             .map_err(|e| StoreError::io(val_path(&self.base), e))?;
         unpack8(u64::from_le_bytes(buf))

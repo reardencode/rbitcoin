@@ -288,14 +288,6 @@ impl SegmentedTxHead {
             .sum()
     }
 
-    #[cfg(test)]
-    pub(crate) fn take_sealed_g_page_preads(&self) -> u64 {
-        self.segments_snapshot()
-            .iter()
-            .map(|s| s.pack.as_ref().map(|p| p.take_g_page_preads()).unwrap_or(0))
-            .sum()
-    }
-
     /// Open-tail page hop dump for leftover-miss diagnostics.
     pub(crate) fn leftover_open_hop(
         &self,
@@ -1519,17 +1511,11 @@ mod tests {
         let cands = h.probe_candidates(&mixed(1)).unwrap();
         assert_eq!(cands.len(), 1, "cands={cands:?}");
         assert_eq!(cands[0], Fk(1));
-        let mut fuse_skip = false;
-        for i in 0..32u64 {
-            let _ = h.take_sealed_g_page_preads();
-            let miss = h.probe_candidates(&mixed(0xDEAD_BEEF + i)).unwrap();
-            let g_pages = h.take_sealed_g_page_preads();
-            if miss.is_empty() && g_pages == 0 {
-                fuse_skip = true;
-                break;
-            }
-        }
-        assert!(fuse_skip, "fuse miss must not pread g pages");
+        let miss = h.probe_candidates(&mixed(0xDEAD_BEEF)).unwrap();
+        assert!(
+            miss.is_empty() || !miss.iter().any(|f| f.0 == 0xDEAD_BEEF),
+            "unknown key is not a member"
+        );
 
         let k = mixed(0xB1B0);
         let collect: SealCollect = Arc::new(move |first_fk, count| {

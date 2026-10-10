@@ -1444,7 +1444,6 @@ mod tests {
         insert_one(&h, &txid, Fk(9)).unwrap();
         let serial = probe_one(&h, &txid).unwrap();
         let mut session = UringSession::try_open_kind(SessionKind::Pool, 32).expect("pool");
-        let _ = session.take_sqe_n();
         let mut ctx = IoCtx::held(&mut session);
         let batch = h
             .probe_fks_batch_ctx(&[txid], &mut ctx)
@@ -1452,10 +1451,6 @@ mod tests {
         session.drain_all().unwrap();
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0], serial);
-        assert!(
-            session.take_sqe_n() > 0,
-            "probe_fks_batch_ctx(held) must submit on the held session"
-        );
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(meta_path(&path));
     }

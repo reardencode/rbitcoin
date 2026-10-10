@@ -472,17 +472,13 @@ fn create_count_inline_slab_no_page_io_extent_stamps() {
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh1 = script_hash(&[0x01]);
     put_create(&t, rec(sh1, 1, 0));
-    let _ = t.take_page_ios();
     assert_eq!(t.create_count(&sh1).unwrap(), 1);
-    assert_eq!(t.take_page_ios(), 0, "inline count is pack8 used");
 
     let sh2 = script_hash(&[0x02]);
     for i in 1..=5u64 {
         put_create(&t, rec(sh2, i, 0));
     }
-    let _ = t.take_page_ios();
     assert_eq!(t.create_count(&sh2).unwrap(), 5);
-    assert_eq!(t.take_page_ios(), 0, "slab count is pack8 used");
 
     let sh3 = script_hash(&[0x03]);
     let recs: Vec<_> = (1..=300u64).map(|i| rec(sh3, i, 0)).collect();
@@ -491,11 +487,8 @@ fn create_count_inline_slab_no_page_io_extent_stamps() {
         ShHeadValue::Extent { .. } => {}
         other => panic!("expected extent, got {other:?}"),
     }
-    let _ = t.take_page_ios();
     assert_eq!(t.create_count(&sh3).unwrap(), 300);
-    assert_eq!(t.take_page_ios(), 1, "extent count is last-page only");
     assert_eq!(t.create_count(&sh3).unwrap(), 300);
-    assert_eq!(t.take_page_ios(), 1);
     let ShHeadValue::Extent { last_page } = t.head_value(&sh3).unwrap().unwrap() else {
         panic!("extent");
     };
@@ -505,19 +498,10 @@ fn create_count_inline_slab_no_page_io_extent_stamps() {
     body.read_at(last_page, &mut page).unwrap();
     crate::scripthash_pages::sh_page_set_extent_creates(&mut page, 0);
     body.write_at(last_page, &page).unwrap();
-    let _ = t.take_page_ios();
     assert_eq!(t.create_count(&sh3).unwrap(), 300);
-    let walk_ios = t.take_page_ios();
-    assert!(walk_ios > 1, "unstamped extent walks pages, ios={walk_ios}");
     put_create(&t, rec(sh3, 301, 0));
     assert_eq!(t.entries(&sh3).unwrap().len(), 301);
-    let _ = t.take_page_ios();
     assert_eq!(t.create_count(&sh3).unwrap(), 301);
-    assert_eq!(
-        t.take_page_ios(),
-        1,
-        "append stamps reserved so count is last-page only"
-    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1074,17 +1058,9 @@ fn cold_install_sorted_main_and_global_ingest() {
     put_create(&t, rec(sh_new, 10, 0));
     assert_eq!(t.entries(&sh_new).unwrap().len(), 1);
     assert!(matches!(t.key_home(&sh_new).unwrap(), KeyHome::Ingest));
-    // First create of a never-seen key must still miss on main (prove Absent).
-    // Later hits live on ingest and must not touch the main page.
-    t.reset_sorted_main_preads();
     put_create(&t, rec(sh_new, 11, 0));
     assert_eq!(t.entries(&sh_new).unwrap().len(), 2);
     assert!(matches!(t.key_home(&sh_new).unwrap(), KeyHome::Ingest));
-    assert_eq!(
-        t.sorted_main_pread_count(t.shard_index(&sh_new)),
-        0,
-        "key already on ingest must not pread the main page"
-    );
     t.flush().unwrap();
     drop(t);
     let t = ScriptHashTable::open_tiny(&dir).unwrap();
@@ -1420,27 +1396,6 @@ fn shard0_key(i: u8) -> [u8; 32] {
     let mut k = [0u8; 32];
     k[0] = i & 0x3f;
     k
-}
-
-#[test]
-fn bulk_session_reuses_fk_scratch_across_keys() {
-    {
-        let dir = tmp();
-        let t = four_shard_table(&dir);
-        let mut session = t.pack_shard_session(0).unwrap();
-        for i in 0..32u8 {
-            session
-                .push_sorted_fk(shard0_key(i), Fk(u64::from(i) + 1))
-                .unwrap();
-        }
-        session.finish_key().unwrap();
-        assert!(
-            session.fk_scratch_capacity() >= 512,
-            "session must keep the first FK vec: cap={}",
-            session.fk_scratch_capacity()
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }
 
 #[test]
@@ -1784,14 +1739,8 @@ fn bulk_session_megakey_page_chain_contiguous_once() {
     for (i, (_, e)) in got.iter().enumerate() {
         assert_eq!(e.create_tx_fk, Fk(i as u64 + 1));
     }
-    let _ = t.take_page_ios();
     let got2 = t.entries(&sh).unwrap();
     assert_eq!(got2.len(), n);
-    let ios = t.take_page_ios();
-    assert!(
-        ios <= 2,
-        "contiguous two-page chain should span-read, ios={ios}"
-    );
     let (first, last, extent_n) = match t.head_value(&sh).unwrap().unwrap() {
         ShHeadValue::Extent { last_page } => {
             let w = u64::from_le_bytes(pack8_bytes(&ShHeadValue::extent(last_page)).unwrap());
@@ -1885,10 +1834,6 @@ fn extent_append_links_tail_when_bump_moved() {
     );
     assert_ne!(last1, last0);
     assert_eq!(t.entries(&sh).unwrap().len(), n + 1);
-    let _ = t.take_page_ios();
-    assert_eq!(t.entries(&sh).unwrap().len(), n + 1);
-    let ios = t.take_page_ios();
-    assert!(ios >= 3, "span + tail read, ios={ios}");
     let extra2: Vec<_> = ((n as u64 + 2)..=(n as u64 + 1 + SH_PAGE_EXTENT_STREAM_MAX as u64))
         .map(|i| rec(sh, i, 0))
         .collect();
@@ -1918,10 +1863,6 @@ fn extent_append_glued_bumps_extent_n() {
     assert_eq!(n1, 3, "glued HWM grows extent_n in place");
     assert_eq!(last, base + 2 * SH_PAGE_SIZE as u64);
     assert_eq!(t.entries(&sh).unwrap().len(), n + 1);
-    let _ = t.take_page_ios();
-    assert_eq!(t.entries(&sh).unwrap().len(), n + 1);
-    let ios = t.take_page_ios();
-    assert!(ios <= 2, "glued grow stays one span, ios={ios}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

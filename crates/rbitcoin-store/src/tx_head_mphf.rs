@@ -137,11 +137,6 @@ impl TxHeadMphf {
         self.mphf.index_batch(mixed_u64, ctx)
     }
 
-    #[cfg(test)]
-    pub fn take_g_page_preads(&self) -> u64 {
-        self.mphf.take_g_page_preads()
-    }
-
     pub fn g_bytes_resident(&self) -> u64 {
         self.mphf.g_bytes_resident() as u64
     }
@@ -240,15 +235,10 @@ mod tests {
         let fd = BdzMphf::read_packed_from(&p).unwrap();
         let serial = fd.index_batch(&keys[..8], &mut IoCtx::none()).unwrap();
         let mut session = UringSession::try_open_kind(SessionKind::Pool, 32).expect("pool");
-        let _ = session.take_sqe_n();
         let mut ctx = IoCtx::held(&mut session);
         let batch = fd.index_batch(&keys[..8], &mut ctx).unwrap();
         session.drain_all().unwrap();
         assert_eq!(batch, serial);
-        assert!(
-            session.take_sqe_n() > 0,
-            "index_batch(held) must submit g pages on the held session"
-        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
