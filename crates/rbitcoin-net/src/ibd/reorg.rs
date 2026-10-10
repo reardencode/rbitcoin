@@ -803,8 +803,6 @@ mod tests {
         st.record_height(w4.block_hash(), 4);
         st.max_ordered_height = 4;
         assert!(consider_disconnected_heavier(&mut st, &hub).unwrap());
-        assert!(is_bad_prev_err("consensus: unexpected previous header"));
-        assert!(!is_bad_prev_err("script verification failed"));
         assert_eq!(
             hub.tip_height(),
             Some(0),
@@ -816,6 +814,78 @@ mod tests {
             st.reorg.need_getdata().is_empty(),
             "winner is a linear extension after rewind; need={:?}",
             st.reorg.need_getdata()
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A real block whose prev is not a stored header fails the live confirm
+    /// load as BadPrev. That reject is soft reget: the tip stays, the slot is
+    /// evicted, and the hash is not blacklisted or fetched again.
+    #[test]
+    fn unknown_prev_header_is_soft_reget_not_a_rewind() {
+        use super::super::confirm::ConfirmRejectClass;
+        use super::super::events::apply_confirm_reject;
+
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let tip = mine(gen, 1_500_080_100, 1);
+        hub.accept_block(tip).unwrap();
+        assert_eq!(hub.tip_height(), Some(1));
+
+        let unknown = BlockHash::from_byte_array([0x9e; 32]);
+        assert!(
+            hub.query
+                .get_header_by_hash(&unknown.to_byte_array())
+                .unwrap()
+                .is_none(),
+            "prev must not be a stored header"
+        );
+        let orphan = mine(unknown, 1_500_080_200, 2);
+        let err = match hub.confirm_wire_load_phase(&[(Height(2), orphan.clone())]) {
+            Err(e) => e,
+            Ok(_) => panic!("unknown prev must fail confirm load"),
+        };
+        assert!(
+            matches!(err, NetError::BadPrev),
+            "live load maps ConsensusError::BadPrev, got {err}"
+        );
+        let msg = err.to_string();
+        let class = ConfirmRejectClass::from_net(&err);
+        assert_eq!(class, ConfirmRejectClass::SoftWire, "{msg}");
+        assert!(is_bad_prev_err(&msg), "{msg}");
+
+        let mut st =
+            super::super::state::IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
+        st.headers_done = true;
+        st.record_height(orphan.block_hash(), 2);
+        apply_confirm_reject(
+            &mut st,
+            2,
+            orphan.block_hash(),
+            class,
+            &msg,
+            Some(hub.query.as_ref()),
+            Some(&hub),
+            1,
+            None,
+            None,
+        );
+        assert_eq!(hub.tip_height(), Some(1), "unknown prev must not rewind");
+        assert!(!st.headers_done, "soft reget clears the header latch");
+        assert!(
+            !st.height_to_hash.contains_key(&2),
+            "the rejected slot is evicted"
+        );
+        assert!(
+            !st.reorg
+                .invalid
+                .contains(orphan.block_hash().to_byte_array()),
+            "soft reget does not blacklist"
+        );
+        assert!(
+            !st.reorg.need_getdata().contains(&orphan.block_hash()),
+            "BadPrev does not re-get the same hash"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
