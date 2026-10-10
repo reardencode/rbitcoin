@@ -51,7 +51,8 @@ into `AGENTS.md`.
 | [`core-functional.md`](./core-functional.md) | Core v31.1 functional harness. |
 | [`overlay-functional.md`](./overlay-functional.md) | Private Tor / i2pd / cjdns mesh harness (labeled / nightly). |
 | [`how-we-plan.md`](./how-we-plan.md) | Agent contract (cycle, Agent RAM, keep-compiling), then human rationale. |
-| [`sv2-template-provider.md`](./sv2-template-provider.md) | SV2 Template Distribution Protocol server roadmap (**Q-64**): Step 0 finding and plans A–C. Live flags/COMPAT rows land in OPERATOR/COMPAT with the plan that ships them. |
+| [`sv2-template-provider.md`](./sv2-template-provider.md) | SV2 Template Distribution Protocol server roadmap (**Q-64**): Step 0 finding and plans A–D. Live flags/COMPAT rows land in OPERATOR/COMPAT with the plan that ships them. |
+| [`sv2-job-validation.md`](./sv2-job-validation.md) | Proposed TDP messages for JDS job validation (`ProposeTemplate`, sv2-spec discussion #239); owner of the wire contract until it lands upstream. Plan D in `sv2-template-provider.md` is the implementation. |
 | [`releases.md`](./releases.md) | Tag `vX.Y.Z`, `vX.Y.x` patch line, `.99` bump, Highlights / GitHub notes. |
 | [`code-shape.md`](./code-shape.md) | Control flow, types, naming, composition (CONTRIBUTING principle 10). Named extracts: quality.md **Q-61** (Completed). Clippy: no workspace `allow` list; leftover lints are site-local with a reason. |
 | [`quality.md`](./quality.md) | Living quality roadmap (Open + Won't-fix + Parked + Protect). |

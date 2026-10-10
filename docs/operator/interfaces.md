@@ -305,6 +305,14 @@ template build per session. An undecodable
 that misses the template target is logged and dropped. A `header_timestamp`
 outside the sv2 rolling window (a miner clock running ahead) is logged and
 still submitted; block validation applies the consensus time rules.
+A client that sets `SetupConnection` flag bit 0 (`REQUIRES_JOB_VALIDATION`)
+can send `ProposeTemplate` (proposed TDP messages, sv2-spec discussion #239):
+the node checks a Job Declarator Server's declared job as a block on its tip
+(no proof of work; no script checks beyond what mempool admission already
+ran), asks for the transactions it lacks, and retains a valid job under a
+template id that `SubmitSolution` accepts, naming the tip it validated on.
+Without the flag the messages are ignored. There is
+no operator switch; the flag is per session.
 
 There is no client authentication. Noise NX proves the TP's authority key
 to the client, not the client to the TP, so anyone who can reach the port
