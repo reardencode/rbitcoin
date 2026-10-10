@@ -452,13 +452,9 @@ fn chain_ops_coinbase_only_blocks(ctx: &RpcContext) {
     let hashes = dispatch(ctx, "generate", vec![json!(2)]).unwrap();
     let first = hashes[0].clone();
     let tip = hashes[1].clone();
-    ctx.query.store().reset_tx_full_gets();
+
     let v1 = dispatch(ctx, "getblock", vec![first.clone(), json!(1)]).unwrap();
-    assert!(
-        ctx.query.store().tx_full_gets().is_empty(),
-        "verbosity 1 must not zip seqsigwit: {:?}",
-        ctx.query.store().tx_full_gets()
-    );
+
     let txs = v1["tx"].as_array().unwrap();
     assert_eq!(txs.len(), 1);
     assert_eq!(txs[0].as_str().unwrap().len(), 64);

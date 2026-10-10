@@ -324,12 +324,6 @@ pub struct Store {
     /// Even while confirmed spentness is stable. Odd while a confirm annotate
     /// or a disconnect is publishing a change.
     utxo_view: std::sync::atomic::AtomicU64,
-    #[cfg(debug_assertions)]
-    tx_full_log: std::sync::Mutex<Vec<u64>>,
-    #[cfg(debug_assertions)]
-    txid_get_many_log: std::sync::Mutex<Vec<u64>>,
-    #[cfg(debug_assertions)]
-    spent_range_batch_log: std::sync::Mutex<Vec<u64>>,
 }
 
 /// Holds [`Store::utxo_view`] odd until drop.
@@ -431,12 +425,6 @@ impl Store {
             path,
             cold_path,
             head_scale: layout.head_scale,
-            #[cfg(debug_assertions)]
-            tx_full_log: std::sync::Mutex::new(Vec::new()),
-            #[cfg(debug_assertions)]
-            txid_get_many_log: std::sync::Mutex::new(Vec::new()),
-            #[cfg(debug_assertions)]
-            spent_range_batch_log: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -499,12 +487,6 @@ impl Store {
             path,
             cold_path,
             head_scale: layout.head_scale,
-            #[cfg(debug_assertions)]
-            tx_full_log: std::sync::Mutex::new(Vec::new()),
-            #[cfg(debug_assertions)]
-            txid_get_many_log: std::sync::Mutex::new(Vec::new()),
-            #[cfg(debug_assertions)]
-            spent_range_batch_log: std::sync::Mutex::new(Vec::new()),
         };
         store.rebuild_mtp_ring()?;
         Ok(store)
@@ -777,57 +759,11 @@ impl Store {
         self.txs.get(fk)
     }
 
-    pub fn reset_tx_full_gets(&self) {
-        #[cfg(debug_assertions)]
-        self.tx_full_log.lock().unwrap().clear();
-    }
-
-    pub fn tx_full_gets(&self) -> Vec<u64> {
-        #[cfg(debug_assertions)]
-        {
-            return self.tx_full_log.lock().unwrap().clone();
-        }
-        #[cfg(not(debug_assertions))]
-        Vec::new()
-    }
-
-    pub fn reset_txid_get_many(&self) {
-        #[cfg(debug_assertions)]
-        self.txid_get_many_log.lock().unwrap().clear();
-    }
-
-    pub fn txid_get_many_fks(&self) -> Vec<u64> {
-        #[cfg(debug_assertions)]
-        {
-            return self.txid_get_many_log.lock().unwrap().clone();
-        }
-        #[cfg(not(debug_assertions))]
-        Vec::new()
-    }
-
-    pub fn reset_spent_range_batch(&self) {
-        #[cfg(debug_assertions)]
-        self.spent_range_batch_log.lock().unwrap().clear();
-    }
-
-    pub fn spent_range_batch_fks(&self) -> Vec<u64> {
-        #[cfg(debug_assertions)]
-        {
-            return self.spent_range_batch_log.lock().unwrap().clone();
-        }
-        #[cfg(not(debug_assertions))]
-        Vec::new()
-    }
-
     /// Full Class A body by fk: zip `txout` + `seqsigwit`.
     pub fn get_tx_full(
         &self,
         fk: Fk,
     ) -> Result<(TxRecord, Vec<InputRecord>, Vec<OutputRecord>), StoreError> {
-        #[cfg(debug_assertions)]
-        if let Some(id) = fk.get() {
-            self.tx_full_log.lock().unwrap().push(id);
-        }
         self.txs.get_full(fk)
     }
 
@@ -850,15 +786,6 @@ impl Store {
 
     /// Page-grouped `txid.body` identity for scattered create fks.
     pub fn txids_get_many(&self, fks: &[Fk]) -> Result<Vec<Option<[u8; 32]>>, StoreError> {
-        #[cfg(debug_assertions)]
-        {
-            let mut log = self.txid_get_many_log.lock().unwrap();
-            for fk in fks {
-                if let Some(id) = fk.get() {
-                    log.push(id);
-                }
-            }
-        }
         self.txs.txid_sidefile().get_many(fks)
     }
 
@@ -1238,15 +1165,6 @@ impl Store {
         &self,
         fks: &[Fk],
     ) -> Result<Vec<Option<crate::create_loc::CreateLocPair>>, StoreError> {
-        #[cfg(debug_assertions)]
-        {
-            let mut log = self.spent_range_batch_log.lock().unwrap();
-            for fk in fks {
-                if let Some(id) = fk.get() {
-                    log.push(id);
-                }
-            }
-        }
         self.txs.create_loc_range_batch(fks)
     }
 

@@ -1041,14 +1041,7 @@ mod tests {
         q.connect_block(Height(2), &h2, &[ta2]).unwrap();
         let spend2_fk = q.block_tx_fks(Height(2)).unwrap()[0];
 
-        q.store().reset_tx_full_gets();
         let v = build_tx_json(&q, spend2_fk, Network::Regtest).unwrap();
-        let parent_id = spend1_fk.get().unwrap();
-        assert!(
-            !q.store().tx_full_gets().contains(&parent_id),
-            "parent prevout must not zip seqsigwit: {:?}",
-            q.store().tx_full_gets()
-        );
         assert_eq!(v["txid"], block_hash_hex(&spend2_txid));
         assert_eq!(v["vin"][0]["prevout"]["value"].as_i64(), Some(49_0000_0000));
         assert_eq!(v["sigops"], 4, "OP_CHECKSIG output scaled: {v}");

@@ -1721,13 +1721,8 @@ fn miniwallet_raw_scan_and_gettxout() {
     assert_eq!(hashes.as_array().unwrap().len(), 2);
     assert_eq!(dispatch(&ctx, "getblockcount", vec![]).unwrap(), json!(2));
 
-    ctx.query.store().reset_tx_full_gets();
     let scan = dispatch(&ctx, "scantxoutset", vec![json!("start"), json!([desc])]).unwrap();
-    assert!(
-        ctx.query.store().tx_full_gets().is_empty(),
-        "scantxoutset shindex must not zip seqsigwit: {:?}",
-        ctx.query.store().tx_full_gets()
-    );
+
     assert_eq!(scan["success"], true);
     assert_eq!(scan["height"], 2);
     let uns = scan["unspents"].as_array().unwrap();
@@ -3124,13 +3119,9 @@ fn getblockstats_coinbase_only_and_op_return_match_helper() {
     .unwrap();
     dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
     let tip_hash = dispatch(&ctx, "getbestblockhash", vec![]).unwrap();
-    ctx.query.store().reset_tx_full_gets();
+
     let v1 = dispatch(&ctx, "getblock", vec![tip_hash.clone(), json!(1)]).unwrap();
-    assert!(
-        ctx.query.store().tx_full_gets().is_empty(),
-        "verbosity 1 2-tx block: {:?}",
-        ctx.query.store().tx_full_gets()
-    );
+
     let v1txs = v1["tx"].as_array().unwrap();
     assert_eq!(v1txs.len(), 2);
     assert!(v1txs

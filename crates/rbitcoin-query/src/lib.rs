@@ -26,8 +26,6 @@ mod tx_precompute;
 mod wave_prevout;
 mod write_create_loc;
 
-#[cfg(debug_assertions)]
-pub use combined_stage::{body_ok_reads, reset_body_ok_reads};
 pub use combined_stage::{load_creates_once, CombinedCreate};
 pub use reconstruct::{BlockTxStatRows, StampedTxstatBlock};
 pub use resolved_wire::{BlockQueueWaveIntake, ResolvedWire};
