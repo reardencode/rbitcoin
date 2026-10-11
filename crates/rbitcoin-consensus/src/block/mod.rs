@@ -2794,3 +2794,5 @@ mod finality_tests;
 mod sigop_cost_tests;
 #[cfg(test)]
 mod structure_rule_tests;
+#[cfg(test)]
+mod taproot_batch_bench_tests;
