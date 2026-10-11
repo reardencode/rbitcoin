@@ -4,8 +4,8 @@ use super::index::{self, IndexJob};
 use super::*;
 use crate::block::{verify_one_script_job, ScriptCheckJob};
 use crate::script_pool::{
-    fg_has_unclaimed, help_steal, set_script_publisher, start_for_each_owned,
-    start_for_each_pooled, OwnedWave,
+    fg_has_unclaimed, help_steal, set_script_publisher, start_for_each_pooled,
+    start_for_each_slice_owned, OwnedWave,
 };
 use std::collections::VecDeque;
 use std::sync::{Arc, OnceLock};
@@ -72,8 +72,9 @@ fn outcome_from(
     }
 }
 
-fn apply_script(job: &ScriptCheckJob) -> Result<(), ConsensusError> {
-    verify_one_script_job(job)
+/// One steal chunk shares one Schnorr / Taproot tweak batch.
+fn apply_script_chunk(jobs: &[ScriptCheckJob]) -> Result<(), ConsensusError> {
+    crate::script::batch::batched(|| jobs.iter().try_for_each(verify_one_script_job))
 }
 
 struct Inflight {
@@ -104,7 +105,7 @@ impl Inflight {
             Err(e) => return Err((e, meta)),
         };
         let index_started = index_jobs.started;
-        let script_wave = match start_for_each_owned(scripts, apply_script) {
+        let script_wave = match start_for_each_slice_owned(scripts, apply_script_chunk) {
             Ok(w) => w,
             Err(e) => return Err((e, meta)),
         };

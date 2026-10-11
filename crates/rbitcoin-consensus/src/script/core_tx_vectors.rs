@@ -438,7 +438,7 @@ fn verify_parsed_tx(tx: &Transaction, prevouts: Vec<TxOut>, flags: &TxFlags) -> 
         }
     }
     let job = flags_to_job(tx.clone(), prevouts, flags);
-    script::verify_job_all_inputs(&job).map_err(|e| format!("{e}"))
+    script::batch::verify_job_both_ways(&job).map_err(|e| format!("{e}"))
 }
 
 fn run_tx_corpus(name: &str, expect_ok: bool) -> (u32, u32, u32, Vec<String>) {

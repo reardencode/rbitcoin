@@ -1,6 +1,6 @@
 //! Lightweight parallel script-check pool (replaces rayon on the hot path).
 //!
-//! Production: (1) [`start_for_each_owned`] steals **chunks** of jobs on
+//! Production: (1) [`start_for_each_slice_owned`] steals **chunks** of jobs on
 //! the process-wide `rbtc-scripts-*` workers; (2) [`spawn_detached`] /
 //! [`run_detached_join`] for mempool accept. IBD confirm scripts publish waves
 //! from the stage thread — steal workers must not `wait_done` on this pool.
@@ -35,10 +35,10 @@ fn on_steal_worker() -> bool {
     ON_STEAL_WORKER.with(|c| c.get())
 }
 
-/// Type-erased `f(&items[i])`. `ctx` is valid until the publisher drops the
-/// owning [`OwnedWave`] (after [`Wave::is_complete`]).
+/// Type-erased run over `items[range]`. `ctx` is valid until the publisher
+/// drops the owning [`OwnedWave`] (after [`Wave::is_complete`]).
 struct Apply {
-    f: unsafe fn(*const (), usize) -> Result<(), ConsensusError>,
+    f: unsafe fn(*const (), Range<usize>, &AtomicBool) -> Result<(), ConsensusError>,
     ctx: *const (),
 }
 
@@ -107,18 +107,12 @@ impl Wave {
     fn run_chunk(&self, range: Range<usize>) {
         // SAFETY: `in_wave` was incremented before `next`; publisher keeps
         // `ctx` live until `is_complete` (then `OwnedWave` Drop unpublished).
-        for i in range {
-            if self.failed.load(Ordering::Acquire) {
-                break;
-            }
-            let r = unsafe { (self.apply.f)(self.apply.ctx, i) };
-            if let Err(e) = r {
-                self.failed.store(true, Ordering::Release);
-                let mut g = self.first_err.lock().unwrap_or_else(|p| p.into_inner());
-                if g.is_none() {
-                    *g = Some(e);
-                }
-                break;
+        let r = unsafe { (self.apply.f)(self.apply.ctx, range, &self.failed) };
+        if let Err(e) = r {
+            self.failed.store(true, Ordering::Release);
+            let mut g = self.first_err.lock().unwrap_or_else(|p| p.into_inner());
+            if g.is_none() {
+                *g = Some(e);
             }
         }
         self.in_wave.fetch_sub(1, Ordering::AcqRel);
@@ -227,9 +221,33 @@ pub(crate) fn help_steal() -> bool {
     true
 }
 
+/// One call per item, or one call per claimed chunk.
+enum ApplyFn<T> {
+    Each(fn(&T) -> Result<(), ConsensusError>),
+    Slice(fn(&[T]) -> Result<(), ConsensusError>),
+}
+
+impl<T> ApplyFn<T> {
+    /// `Each` stops early once another worker has failed the wave.
+    fn run(&self, items: &[T], failed: &AtomicBool) -> Result<(), ConsensusError> {
+        match self {
+            Self::Each(f) => {
+                for item in items {
+                    if failed.load(Ordering::Acquire) {
+                        break;
+                    }
+                    f(item)?;
+                }
+                Ok(())
+            }
+            Self::Slice(f) => f(items),
+        }
+    }
+}
+
 struct ApplyCtx<T> {
     items: *const T,
-    f: fn(&T) -> Result<(), ConsensusError>,
+    f: ApplyFn<T>,
 }
 
 unsafe impl<T: Sync> Send for ApplyCtx<T> {}
@@ -282,6 +300,7 @@ fn unpublish_fg(wave: &Arc<Wave>) {
 
 /// Publish `items` for steal workers without waiting. `None` = already done
 /// (empty or single-item ran inline). Claims [`STEAL_CHUNK`] jobs at a time.
+#[cfg(test)]
 pub(crate) fn start_for_each_owned<T: Sync>(
     items: Vec<T>,
     f: fn(&T) -> Result<(), ConsensusError>,
@@ -289,19 +308,29 @@ pub(crate) fn start_for_each_owned<T: Sync>(
     start_for_each_owned_chunk(items, f, STEAL_CHUNK)
 }
 
-/// Same as [`start_for_each_owned`] with an explicit claim size. `chunk` of 0
+/// Publish `items` for steal workers without waiting. `f` gets each claimed
+/// chunk (up to [`STEAL_CHUNK`] items) in one call, so it can share work
+/// across the chunk. `None` = already done (empty or single-item ran inline).
+pub(crate) fn start_for_each_slice_owned<T: Sync>(
+    items: Vec<T>,
+    f: fn(&[T]) -> Result<(), ConsensusError>,
+) -> Result<Option<OwnedWave<T>>, ConsensusError> {
+    start_wave(items, ApplyFn::Slice(f), STEAL_CHUNK, true)
+}
+
+/// One `f` call per item, claiming `chunk` items at a time. `chunk` of 0
 /// is treated as 1. Empty and single-item lists still run inline.
 pub(crate) fn start_for_each_owned_chunk<T: Sync>(
     items: Vec<T>,
     f: fn(&T) -> Result<(), ConsensusError>,
     chunk: usize,
 ) -> Result<Option<OwnedWave<T>>, ConsensusError> {
-    start_wave(items, f, chunk, true)
+    start_wave(items, ApplyFn::Each(f), chunk, true)
 }
 
-/// Like [`start_for_each_owned`], but a single job is still published.
+/// Like [`start_for_each_owned_chunk`], but a single job is still published.
 ///
-/// [`start_for_each_owned`] runs a single item on the caller. The index wave
+/// [`start_for_each_owned_chunk`] runs a single item on the caller. The index wave
 /// must not do that: one filter would block `ibd-confirm` inside `start`.
 /// `chunk` of 0 is treated as 1.
 pub(crate) fn start_for_each_pooled<T: Sync>(
@@ -309,12 +338,12 @@ pub(crate) fn start_for_each_pooled<T: Sync>(
     f: fn(&T) -> Result<(), ConsensusError>,
     chunk: usize,
 ) -> Result<Option<OwnedWave<T>>, ConsensusError> {
-    start_wave(items, f, chunk, false)
+    start_wave(items, ApplyFn::Each(f), chunk, false)
 }
 
 fn start_wave<T: Sync>(
     items: Vec<T>,
-    f: fn(&T) -> Result<(), ConsensusError>,
+    f: ApplyFn<T>,
     chunk: usize,
     inline_single: bool,
 ) -> Result<Option<OwnedWave<T>>, ConsensusError> {
@@ -327,7 +356,7 @@ fn start_wave<T: Sync>(
         return Ok(None);
     }
     if inline_single && items.len() == 1 {
-        f(&items[0])?;
+        f.run(&items, &AtomicBool::new(false))?;
         return Ok(None);
     }
     let items = items.into_boxed_slice();
@@ -335,9 +364,14 @@ fn start_wave<T: Sync>(
         items: items.as_ptr(),
         f,
     });
-    unsafe fn apply<T>(ptr: *const (), i: usize) -> Result<(), ConsensusError> {
+    unsafe fn apply<T>(
+        ptr: *const (),
+        range: Range<usize>,
+        failed: &AtomicBool,
+    ) -> Result<(), ConsensusError> {
         let ctx = unsafe { &*(ptr as *const ApplyCtx<T>) };
-        (ctx.f)(unsafe { &*ctx.items.add(i) })
+        let items = unsafe { std::slice::from_raw_parts(ctx.items.add(range.start), range.len()) };
+        ctx.f.run(items, failed)
     }
     let wave = Arc::new(Wave {
         n: items.len(),
@@ -660,6 +694,58 @@ mod tests {
             Err(e) => e,
         };
         assert!(format!("{err}").contains("boom"));
+    }
+
+    static SLICE_SEEN: Mutex<Vec<(u32, usize)>> = Mutex::new(Vec::new());
+    fn record_slice(items: &[u32]) -> Result<(), ConsensusError> {
+        let first = *items.first().expect("non-empty chunk");
+        for (k, v) in items.iter().enumerate() {
+            assert_eq!(*v, first + k as u32, "chunk must be contiguous");
+        }
+        SLICE_SEEN
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push((first, items.len()));
+        Ok(())
+    }
+
+    /// Each steal claim runs as one call over a contiguous slice.
+    #[test]
+    fn slice_wave_runs_each_claim_as_one_call() {
+        let _gate = STEAL_TEST.lock().unwrap_or_else(|p| p.into_inner());
+        SLICE_SEEN.lock().unwrap_or_else(|p| p.into_inner()).clear();
+        let n = STEAL_CHUNK as u32 * 3 + 5;
+        if let Some(w) = start_for_each_slice_owned((0..n).collect(), record_slice).unwrap() {
+            w.finish().unwrap();
+        }
+        let mut seen = SLICE_SEEN.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        seen.sort_unstable();
+        assert_eq!(
+            seen,
+            vec![
+                (0, STEAL_CHUNK),
+                (STEAL_CHUNK as u32, STEAL_CHUNK),
+                (STEAL_CHUNK as u32 * 2, STEAL_CHUNK),
+                (STEAL_CHUNK as u32 * 3, 5),
+            ]
+        );
+    }
+
+    fn boom_slice(items: &[u32]) -> Result<(), ConsensusError> {
+        items.iter().try_for_each(boom_at_seven)
+    }
+
+    #[test]
+    fn slice_wave_first_error_surfaces_and_single_runs_inline() {
+        let _gate = STEAL_TEST.lock().unwrap_or_else(|p| p.into_inner());
+        let err = match start_for_each_slice_owned((0..64u32).collect(), boom_slice) {
+            Ok(Some(w)) => w.finish().expect_err("slice wave must fail"),
+            Ok(None) => panic!("expected a published slice wave"),
+            Err(e) => e,
+        };
+        assert!(format!("{err}").contains("boom"));
+        let inline = start_for_each_slice_owned(vec![7u32], boom_slice);
+        assert!(inline.is_err(), "single item runs inline on the caller");
     }
 
     #[test]

@@ -45,6 +45,9 @@ refreshing; do not check copies into `tests/fixtures/`.
 2. Parse Core script language / hex txs.
 3. Build Core-style **credit/spend** txs (script_tests) or deserialize fixture txs (tx_*).
 4. Call shipped **`verify_job_all_inputs(ScriptCheckJob)`** (or bare EvalScript+P2SH path when `WITNESS` flag is off — Core treats v0 programs as bare without that flag).
+   `script_tests`, `tx_*`, and BIP341 rows also run under the block-confirm
+   Taproot batch (`script::batch::verify_job_both_ways`); the two verdicts
+   must match.
 5. Compare accept/reject to Core’s expected code. Named error codes only require **reject**, not exact code string.
 
 ### No allowlist
@@ -147,6 +150,7 @@ version floors and exact +2h).
 | C40 | A tx's output sum ≤ its input sum | `in==out` accepts | `in+1` rejects. `header_and_spending_boundaries` |
 | C41 | BIP68 relative finality | `nSequence=10` at height 101 accepts; time-type after MTP | `nSequence=200` at 101 rejects; `finality_tests` 109/110 |
 | C42 | An input binds only to an output from an earlier block or an earlier tx in its own block, also inside one multi-block confirm batch (Core connects one block at a time) | `MissingPrevout` (`bad-txns-inputs-missingorspent`) | `consensus_rules::same_batch_spend_of_a_later_block_is_missing`; IBD isolation `batched_spend_of_a_later_block_is_rejected_alone` ([087](./external_findings/087-forward-spend-in-batch.md)); same block: `header_and_spending_boundaries` ([005](./external_findings/005-non-topological-block-accepted.md)) |
+| C43 | Block confirm batch-verifies Taproot key-path and tapscript Schnorr signatures and BIP341 tweak checks per script chunk. A failed batch re-runs the chunk input by input; batched and input-by-input verdicts agree on every Core corpus row | reject names the failing `txid` / `vin` | `script::batch::tests::*`; `batched_chunk_names_the_bad_key_path_spend`; `core_bip341_corrupt_key_path_sig_rejects_both_ways`; corpus rows through `verify_job_both_ways` |
 
 ## Adding a new rule
 

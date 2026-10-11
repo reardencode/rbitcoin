@@ -12,6 +12,7 @@ rbitcoin-primitives = { workspace = true }
 rbitcoin-query = { workspace = true }
 rbitcoin-store = { workspace = true }
 rbitcoin-log = { workspace = true }
+rbitcoin-secp256k1-batch = { workspace = true }
 arc-swap = { workspace = true }
 bitcoin = { workspace = true }
 bitcoin_hashes = { workspace = true }

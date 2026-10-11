@@ -31,7 +31,7 @@ const OVERWEIGHT_WU: u64 = 4_000_001;
 // Floresta packs declare 128 MiB; ruzstd 0.9 default max is 100 MiB.
 const FIXTURE_ZSTD_WINDOW: u64 = 128 * 1024 * 1024;
 
-fn fixture_dir() -> PathBuf {
+pub(super) fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/block_866342")
 }
 
@@ -47,14 +47,18 @@ fn decode_zstd(path: &Path) -> Vec<u8> {
     out
 }
 
-fn load_block() -> Block {
+pub(super) fn load_block() -> Block {
     let raw = decode_zstd(&fixture_dir().join("raw.zst"));
     deserialize(&raw).expect("block 866342 wire")
 }
 
-fn prevouts_from_json_zst(path: &Path) -> Vec<TxOut> {
-    let bytes = decode_zstd(path);
-    let v: Value = serde_json::from_slice(&bytes).expect("spent_utxos json");
+pub(super) fn prevouts_from_json_zst(path: &Path) -> Vec<TxOut> {
+    prevouts_from_json(&decode_zstd(path))
+}
+
+/// Floresta `spent_utxos` shape: `[{"txout": {"value", "script_pubkey"}}, …]`.
+pub(super) fn prevouts_from_json(bytes: &[u8]) -> Vec<TxOut> {
+    let v: Value = serde_json::from_slice(bytes).expect("spent_utxos json");
     let arr = v.as_array().expect("spent_utxos array");
     arr.iter()
         .map(|u| {
@@ -122,6 +126,30 @@ fn oversized_866342(mut block: Block) -> Block {
     block
 }
 
+/// One job per non-coinbase tx, prevouts taken in input order.
+pub(super) fn script_jobs(block: Block, prevouts: Vec<TxOut>) -> Vec<ScriptCheckJob> {
+    let arc = Arc::new(block);
+    let mut stxos = prevouts.into_iter();
+    let jobs = (1..arc.txdata.len())
+        .map(|i| {
+            let tx = &arc.txdata[i];
+            let prevs = tx
+                .input
+                .iter()
+                .map(|_| stxos.next().expect("stxos short"))
+                .collect();
+            ScriptCheckJob::from_parts(
+                tx.compute_txid().to_byte_array(),
+                crate::block::JobPrevouts::owned(prevs),
+                crate::block::JobTx::shared(Arc::clone(&arc), i),
+                crate::block::ScriptVerifyFlags::buried(true, true, true, true, true),
+            )
+        })
+        .collect();
+    assert!(stxos.next().is_none(), "leftover spent_utxos");
+    jobs
+}
+
 #[test]
 fn block_866342_structure_scripts_and_overweight() {
     let t0 = Instant::now();
@@ -145,29 +173,10 @@ fn block_866342_structure_scripts_and_overweight() {
 
     let n_tx = block.txdata.len();
     let fat = oversized_866342(block.clone());
-    let arc = Arc::new(block);
-    let mut stxos = prevouts.into_iter();
-    for i in 1..n_tx {
-        let tx = &arc.txdata[i];
-        let mut prevs = Vec::with_capacity(tx.input.len());
-        for _ in &tx.input {
-            prevs.push(stxos.next().expect("stxos short"));
-        }
-        let txid = tx.compute_txid().to_byte_array();
-        let job = ScriptCheckJob::from_parts(
-            txid,
-            crate::block::JobPrevouts::owned(prevs),
-            crate::block::JobTx::shared(Arc::clone(&arc), i),
-            crate::block::ScriptVerifyFlags::buried(true, true, true, true, true),
-        );
-        crate::script::verify_job_all_inputs(&job).unwrap_or_else(|e| {
-            panic!(
-                "866342 scripts tx index {i} txid={} {e}",
-                arc.txdata[i].compute_txid()
-            )
-        });
+    for job in script_jobs(block, prevouts) {
+        crate::script::verify_job_all_inputs(&job)
+            .unwrap_or_else(|e| panic!("866342 scripts txid={} {e}", job.tx.compute_txid()));
     }
-    assert!(stxos.next().is_none(), "leftover spent_utxos");
 
     assert_eq!(fat.weight().to_wu(), OVERWEIGHT_WU);
     let err = validate_block_structure_hashed(&fat, &ctx).expect_err("overweight");

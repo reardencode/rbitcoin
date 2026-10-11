@@ -1429,18 +1429,13 @@ fn checksig_schnorr(
     } else {
         return Ok(false);
     };
-    let xonly = bitcoin::key::XOnlyPublicKey::from_slice(pubkey)
-        .map_err(|_| ConsensusError::Script("tapscript xonly".into()))?;
-    let schnorr = match bitcoin::secp256k1::schnorr::Signature::from_slice(sig_bytes) {
-        Ok(s) => s,
-        Err(_) => return Ok(false),
-    };
     let exec = ctx.tapscript.as_ref().ok_or_else(|| {
         ConsensusError::Script("invariant: tapscript spend without tapleaf hash".into())
     })?;
     let sighash = exec.signature_hash(sighash_ty, ctx.codeseparator_pos.get())?;
-    let msg = bitcoin::secp256k1::Message::from_digest(sighash);
-    Ok(crypto::SECP.with(|secp| secp.verify_schnorr(&schnorr, &msg, &xonly).is_ok()))
+    let sig: &[u8; 64] = sig_bytes.try_into().expect("64-byte signature");
+    let pubkey: &[u8; 32] = pubkey.try_into().expect("32-byte tapscript key");
+    Ok(super::batch::verify_schnorr(sig, &sighash, pubkey))
 }
 
 fn sighash_for_script(
