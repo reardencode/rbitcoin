@@ -106,7 +106,7 @@ fn unknown_leaf_spend(spk_hex: &str, script: &[u8], control_hex: &str) -> Result
         }],
     };
     let job = taproot_job(tx, vec![prevout]);
-    script::verify_job_all_inputs(&job).map_err(|e| e.to_string())
+    script::batch::verify_job_both_ways(&job).map_err(|e| e.to_string())
 }
 
 #[test]
@@ -140,7 +140,7 @@ fn core_bip341_wallet_vectors_all_rows() {
             Ok(tx) => {
                 total += 1;
                 let job = taproot_job(tx, prevouts.clone());
-                match script::verify_job_all_inputs(&job) {
+                match script::batch::verify_job_both_ways(&job) {
                     Ok(()) => pass += 1,
                     Err(e) => {
                         fail += 1;
@@ -279,7 +279,36 @@ fn core_bip341_fully_signed_tamper_rejects() {
     let tx: Transaction = deserialize(&raw).expect("still a tx");
     let job = taproot_job(tx, prevouts);
     assert!(
-        script::verify_job_all_inputs(&job).is_err(),
+        script::batch::verify_job_both_ways(&job).is_err(),
         "tampered fullySignedTx must reject"
     );
+}
+
+/// Corrupt one Taproot key-path signature at a time. Input-by-input and
+/// batched verify must both reject it.
+#[test]
+fn core_bip341_corrupt_key_path_sig_rejects_both_ways() {
+    let root = load_root();
+    let mut corrupted = 0u32;
+    for vec in root["keyPathSpending"].as_array().expect("keyPathSpending") {
+        let prevouts = utxos_spent(&vec["given"]["utxosSpent"]).expect("utxos");
+        let raw = decode_hex(vec["auxiliary"]["fullySignedTx"].as_str().unwrap()).unwrap();
+        let tx: Transaction = deserialize(&raw).expect("fullySignedTx");
+        for (i, prevout) in prevouts.iter().enumerate() {
+            if !prevout.script_pubkey.is_p2tr() || tx.input[i].witness.len() != 1 {
+                continue;
+            }
+            let mut bad = tx.clone();
+            let mut sig = bad.input[i].witness.nth(0).unwrap().to_vec();
+            sig[63] ^= 1;
+            bad.input[i].witness = Witness::from_slice(&[sig]);
+            let job = taproot_job(bad, prevouts.clone());
+            assert!(
+                script::batch::verify_job_both_ways(&job).is_err(),
+                "corrupt signature on input {i} must reject"
+            );
+            corrupted += 1;
+        }
+    }
+    assert!(corrupted >= 5, "corrupted {corrupted} key-path signatures");
 }

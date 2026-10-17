@@ -5,6 +5,7 @@ members = [
     "crates/rbitcoin-log",
     "crates/rbitcoin-store",
     "crates/rbitcoin-query",
+    "crates/rbitcoin-secp256k1-batch",
     "crates/rbitcoin-consensus",
     "crates/rbitcoin-mempool",
     "crates/rbitcoin-net",
@@ -32,6 +33,7 @@ rbitcoin-primitives = { path = "crates/rbitcoin-primitives" }
 rbitcoin-log = { path = "crates/rbitcoin-log" }
 rbitcoin-store = { path = "crates/rbitcoin-store" }
 rbitcoin-query = { path = "crates/rbitcoin-query" }
+rbitcoin-secp256k1-batch = { path = "crates/rbitcoin-secp256k1-batch" }
 rbitcoin-consensus = { path = "crates/rbitcoin-consensus" }
 rbitcoin-mempool = { path = "crates/rbitcoin-mempool" }
 rbitcoin-net = { path = "crates/rbitcoin-net" }

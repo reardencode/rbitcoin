@@ -1,18 +1,18 @@
 //! Taproot (P2TR) verification: BIP341 key-path and script-path.
 //!
-//! Script-path fully re-checks the BIP341 output-key commitment via
-//! [`bitcoin::taproot::ControlBlock::verify_taproot_commitment`] (merkle path +
-//! `TapTweak` + `tweak_add_check` against the prevout x-only key).
+//! Script-path fully re-checks the BIP341 output-key commitment (merkle path +
+//! `TapTweak` + tweak check against the prevout x-only key). Signature and
+//! tweak checks go through [`super::batch`], which defers them in block
+//! confirm.
 
 use bitcoin::consensus::Encodable;
-use bitcoin::hashes::Hash;
-use bitcoin::key::XOnlyPublicKey;
+use bitcoin::hashes::{Hash, HashEngine};
 use bitcoin::script::Script;
-use bitcoin::secp256k1::{Message, Parity};
 use bitcoin::sighash::TapSighashType;
 use bitcoin::taproot::{TapLeafHash, TapNodeHash, TapTweakHash};
 use bitcoin::{Transaction, Witness};
 
+use super::batch;
 use super::crypto;
 use super::interpreter::{self, EvalContext, SigVersion};
 use crate::block::ScriptCheckJob;
@@ -83,11 +83,6 @@ fn verify_key_path(
         return Err(ConsensusError::Script("p2tr sig len".into()));
     };
 
-    let xonly = XOnlyPublicKey::from_slice(output_key)
-        .map_err(|_| ConsensusError::Script("p2tr xonly".into()))?;
-    let sig = bitcoin::secp256k1::schnorr::Signature::from_slice(sig_bytes)
-        .map_err(|_| ConsensusError::Script("p2tr schnorr parse".into()))?;
-
     // BIP341: when the annex is present it is part of spend_type / sighash.
     // Key path is the same message as script path with ext flag 0 (`leaf` absent).
     let annex_hash = bip341_annex(&input.witness).map(crypto::annex_hash);
@@ -101,11 +96,12 @@ fn verify_key_path(
         None,
         &single,
     )?;
-    let msg = Message::from_digest(sighash);
-    crypto::SECP.with(|secp| {
-        secp.verify_schnorr(&sig, &msg, &xonly)
-            .map_err(|_| ConsensusError::Script("p2tr schnorr".into()))
-    })
+    let sig: &[u8; 64] = sig_bytes.try_into().expect("64-byte signature");
+    let output_key: &[u8; 32] = output_key.try_into().expect("32-byte program");
+    if !batch::verify_schnorr(sig, &sighash, output_key) {
+        return Err(ConsensusError::Script("p2tr schnorr".into()));
+    }
+    Ok(())
 }
 
 const TAPSCRIPT_LEAF: u8 = 0xc0;
@@ -128,15 +124,11 @@ fn verify_control_commitment(
         return Err(ConsensusError::Script("TAPROOT_WRONG_CONTROL_SIZE".into()));
     }
     let leaf = control[0] & 0xfe;
-    let parity = if control[0] & 1 == 0 {
-        Parity::Even
-    } else {
-        Parity::Odd
-    };
-    let internal = XOnlyPublicKey::from_slice(&control[1..CONTROL_BASE])
-        .map_err(|_| ConsensusError::Script("WITNESS_PROGRAM_MISMATCH".into()))?;
-    let output_key = XOnlyPublicKey::from_slice(output_key_bytes)
-        .map_err(|_| ConsensusError::Script("WITNESS_PROGRAM_MISMATCH".into()))?;
+    let odd = control[0] & 1 == 1;
+    let internal: &[u8; 32] = control[1..CONTROL_BASE]
+        .try_into()
+        .expect("32-byte internal key");
+    let output_key: &[u8; 32] = output_key_bytes.try_into().expect("32-byte program");
 
     let mut eng = TapLeafHash::engine();
     leaf.consensus_encode(&mut eng)
@@ -155,9 +147,12 @@ fn verify_control_commitment(
         );
         curr = TapNodeHash::from_node_hashes(curr, node);
     }
-    let tweak = TapTweakHash::from_key_and_tweak(internal, Some(curr)).to_scalar();
-    let ok = crypto::SECP.with(|secp| internal.tweak_add_check(secp, &output_key, parity, tweak));
-    if !ok {
+    // `TapTweakHash::from_key_and_tweak` over the raw key bytes.
+    let mut eng = TapTweakHash::engine();
+    eng.input(internal);
+    eng.input(curr.as_ref());
+    let tweak = TapTweakHash::from_engine(eng).to_byte_array();
+    if !batch::tweak_add_check(output_key, odd, internal, &tweak) {
         return Err(ConsensusError::Script("WITNESS_PROGRAM_MISMATCH".into()));
     }
     Ok((leaf, tapleaf_hash))
@@ -215,8 +210,8 @@ mod bip341_tests {
     use super::*;
     use crate::script;
     use bitcoin::absolute::LockTime;
-    use bitcoin::key::{TapTweak, TweakedKeypair};
-    use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey};
+    use bitcoin::key::{TapTweak, TweakedKeypair, XOnlyPublicKey};
+    use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
     use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
     use bitcoin::taproot::{ControlBlock, LeafVersion, TaprootBuilder};
     use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
@@ -706,6 +701,74 @@ mod bip341_tests {
             pre: std::sync::OnceLock::new(),
         };
         script::verify_job_all_inputs(&job).expect("p2tr key path");
+    }
+
+    /// One key-path spend; `corrupt` flips a bit in the signature.
+    fn key_path_job(seed: u8, corrupt: bool) -> ScriptCheckJob {
+        let secp = Secp256k1::new();
+        let kp = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[seed; 32]).unwrap());
+        let tweaked: TweakedKeypair = kp.tap_tweak(&secp, None);
+        let prevout = TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey: p2tr_spk(tweaked.to_keypair().x_only_public_key().0),
+        };
+        let mut tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(u64::from(seed) * 1_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let sighash = SighashCache::new(&tx)
+            .taproot_key_spend_signature_hash(
+                0,
+                &Prevouts::All(std::slice::from_ref(&prevout)),
+                TapSighashType::Default,
+            )
+            .unwrap();
+        let sig = secp.sign_schnorr_no_aux_rand(
+            &Message::from_digest(sighash.to_byte_array()),
+            &tweaked.to_keypair(),
+        );
+        let mut sig = sig.serialize();
+        if corrupt {
+            sig[63] ^= 1;
+        }
+        tx.input[0].witness = Witness::from_slice(&[sig.as_slice()]);
+        ScriptCheckJob {
+            txid: [0u8; 32],
+            prevouts: crate::block::JobPrevouts::owned(vec![prevout]),
+            tx: crate::block::JobTx::owned(tx),
+            flags: crate::block::ScriptVerifyFlags::buried(true, true, true, true, true),
+            pre: std::sync::OnceLock::new(),
+        }
+    }
+
+    fn run_chunk(jobs: &[ScriptCheckJob]) -> Result<(), ConsensusError> {
+        crate::script::batch::batched(|| {
+            jobs.iter()
+                .try_for_each(crate::block::verify_one_script_job)
+        })
+    }
+
+    /// A block chunk shares one batch. A bad key-path signature fails it, and
+    /// the error names the spend that carried it.
+    #[test]
+    fn batched_chunk_names_the_bad_key_path_spend() {
+        let good: Vec<_> = (10..16).map(|s| key_path_job(s, false)).collect();
+        run_chunk(&good).expect("valid chunk");
+        let jobs: Vec<_> = (10..16).map(|s| key_path_job(s, s == 13)).collect();
+        let msg = run_chunk(&jobs).expect_err("bad signature").to_string();
+        let bad_txid = jobs[3].tx.compute_txid().to_string();
+        assert!(msg.contains("p2tr schnorr"), "{msg}");
+        assert!(msg.contains(&bad_txid), "{msg}");
     }
 
     /// Finding 008: 65-byte key-path sig with sighash byte 0x00 is invalid (BIP341).

@@ -4,6 +4,7 @@
 //! Prevouts are resolved by connect (wave / light UTXO create_fk /
 //! same-block) — not a full coins cache.
 
+pub(crate) mod batch;
 mod classify;
 pub(crate) mod interpreter;
 mod nested;

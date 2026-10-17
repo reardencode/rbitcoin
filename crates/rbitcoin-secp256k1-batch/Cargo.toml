@@ -1,0 +1,21 @@
+[package]
+name = "rbitcoin-secp256k1-batch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "BIP340 Schnorr and BIP341 tweak batch verification (vendored libsecp256k1 batch module)"
+build = "build.rs"
+links = "rbtc_secp256k1"
+
+[dependencies]
+
+[dev-dependencies]
+bitcoin = { workspace = true }
+
+[build-dependencies]
+cc = "1"
+
+[lints]
+workspace = true

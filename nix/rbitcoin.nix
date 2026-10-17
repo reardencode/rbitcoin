@@ -27,14 +27,19 @@
 
 let
   # Cargo-aware source (crane) + drop local noise that would bust the NAR hash.
+  # The vendored libsecp256k1 batch module is C, which crane's filter drops.
   src = lib.cleanSourceWith {
-    src = craneLib.cleanCargoSource ../.;
+    src = lib.cleanSource ../.;
     filter =
       path: type:
       let
         base = baseNameOf path;
       in
-      !(lib.hasPrefix "datadir" base)
+      (
+        craneLib.filterCargoSources path type
+        || lib.hasInfix "/crates/rbitcoin-secp256k1-batch/depend" path
+      )
+      && !(lib.hasPrefix "datadir" base)
       && !(lib.hasSuffix ".log" base)
       && base != "coverage"
       && base != ".coverage"

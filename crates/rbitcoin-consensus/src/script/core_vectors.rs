@@ -9,7 +9,6 @@
 
 use super::core_script::assemble_script as assemble;
 use super::interpreter::{self, EvalContext, SigVersion};
-use super::verify_job_all_inputs;
 use crate::block::{JobTx, ScriptCheckJob};
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
@@ -415,7 +414,7 @@ fn run_script_row(
         },
         pre: std::sync::OnceLock::new(),
     };
-    verify_job_all_inputs(&job).map_err(|e| format!("{e}"))
+    super::batch::verify_job_both_ways(&job).map_err(|e| format!("{e}"))
 }
 
 /// Core EvalScript(scriptSig)+EvalScript(scriptPubKey) with optional P2SH redeem.
