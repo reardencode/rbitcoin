@@ -3,6 +3,8 @@
 //! Noise_NX over TCP is the only transport. Plan and constraints:
 //! `docs/sv2-template-provider.md`.
 
+mod job;
+mod messages;
 mod session;
 mod template;
 pub mod testutil;
@@ -34,6 +36,10 @@ pub const SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Default [`Sv2TpConfig::write_timeout`].
 pub const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default [`Sv2TpConfig::provide_timeout`]: a JDS relays the request to
+/// its JDC and the answer back, so the wait is two hops over the internet.
+pub const PROVIDE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Default [`Sv2TpConfig::fee_delta`] (stratum-mining `sv2-tp`
 /// `-sv2feedelta`).
@@ -74,6 +80,11 @@ pub struct Sv2TpConfig {
     /// A socket write that makes no progress this long closes the session,
     /// so a client that stops reading cannot hold a slot.
     pub write_timeout: Duration,
+    /// How long a `ProposeTemplate` the node answered
+    /// `ProvideMissingTransactions` waits for the
+    /// `ProvideMissingTransactions.Success`; a later one is
+    /// `unknown-request-id`.
+    pub provide_timeout: Duration,
     /// With the tip unchanged, a rebuild is pushed only when its fees are at
     /// least this many sats above the session's last template.
     pub fee_delta: u64,
@@ -167,6 +178,7 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
     let stale_grace = config.stale_grace;
     let setup_timeout = config.setup_timeout;
     let write_timeout = config.write_timeout;
+    let provide_timeout = config.provide_timeout;
     let fee_push = session::FeePush {
         delta: config.fee_delta,
         interval: config.template_interval,
@@ -224,6 +236,7 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
                     stale_grace,
                     setup_timeout,
                     write_timeout,
+                    provide_timeout,
                     fee_push,
                     stats,
                 )

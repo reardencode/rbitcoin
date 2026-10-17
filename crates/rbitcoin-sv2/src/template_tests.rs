@@ -1,6 +1,18 @@
+use crate::messages::{
+    ProposeTemplate, ProposeTemplateError, ProposeTemplateSuccess, ProvideMissingTransactions,
+    ProvideMissingTransactionsSuccess, MESSAGE_TYPE_PROPOSE_TEMPLATE,
+    MESSAGE_TYPE_PROPOSE_TEMPLATE_ERROR, MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS,
+    MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS, MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS,
+    REQUIRES_JOB_VALIDATION,
+};
+use crate::session::MAX_PENDING_PROPOSALS;
 use crate::test_chain::{padded_chain_with, shared_regtest, TestChain};
 use crate::testutil::TpClient;
-use crate::{run_sv2_tp, Sv2TpConfig, FEE_DELTA, SETUP_TIMEOUT, TEMPLATE_INTERVAL, WRITE_TIMEOUT};
+use crate::{
+    run_sv2_tp, Sv2TpConfig, FEE_DELTA, PROVIDE_TIMEOUT, SETUP_TIMEOUT, TEMPLATE_INTERVAL,
+    WRITE_TIMEOUT,
+};
+use binary_sv2::{Seq064K, B016M, B064K, U256};
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::{sha256d, Hash};
 use bitcoin::{
@@ -18,7 +30,9 @@ use rbitcoin_store::merkle_root_from_txids;
 use std::sync::Arc;
 use std::time::Duration;
 use template_distribution_sv2::{
-    NewTemplate, SetNewPrevHash, MESSAGE_TYPE_NEW_TEMPLATE, MESSAGE_TYPE_SET_NEW_PREV_HASH,
+    NewTemplate, RequestTransactionDataError, RequestTransactionDataSuccess, SetNewPrevHash,
+    MESSAGE_TYPE_NEW_TEMPLATE, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR,
+    MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS, MESSAGE_TYPE_SET_NEW_PREV_HASH,
 };
 
 const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
@@ -184,6 +198,7 @@ async fn template_budget_fees_coinbase_and_merkle_path() {
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
     })
@@ -237,6 +252,7 @@ async fn template_resent_constraints_do_not_rebuild() {
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
     })
@@ -279,6 +295,7 @@ async fn template_constraint_rebuilds_are_rate_limited() {
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
     })
@@ -316,6 +333,7 @@ async fn sync_gate_holds_constraints_until_a_fresh_tip() {
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
     })
@@ -370,6 +388,7 @@ async fn constraints_while_ibd_keep_the_last_budget() {
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
     })
@@ -424,31 +443,18 @@ struct FirstTemplate {
     coinbase: Vec<u8>,
 }
 
-async fn first_template(tc: &TestChain) -> FirstTemplate {
-    first_template_every(tc, TEMPLATE_INTERVAL).await
+async fn first_template(tc: &TestChain, flags: u32) -> FirstTemplate {
+    first_template_every(tc, flags, TEMPLATE_INTERVAL).await
 }
 
 /// [`first_template`] on a session that checks fees every `template_interval`.
-async fn first_template_every(tc: &TestChain, template_interval: Duration) -> FirstTemplate {
+async fn first_template_every(
+    tc: &TestChain,
+    flags: u32,
+    template_interval: Duration,
+) -> FirstTemplate {
     mock_live_tip(tc);
-    let tp = run_sv2_tp(Sv2TpConfig {
-        listen: "127.0.0.1:0".parse().unwrap(),
-        chain: Arc::clone(&tc.chain),
-        authority_secret: [7; 32],
-        cert_validity: Duration::from_secs(3600),
-        stale_grace: Duration::from_secs(10),
-        setup_timeout: SETUP_TIMEOUT,
-        write_timeout: WRITE_TIMEOUT,
-        fee_delta: FEE_DELTA,
-        template_interval,
-    })
-    .await
-    .expect("listen");
-    let mut c = TpClient::connect(tp.local_addr, tp.authority_pubkey)
-        .await
-        .expect("handshake");
-    c.setup_connection(2, 2, 2, 0).await.unwrap();
-    c.recv().await.expect("setup reply");
+    let (tp, mut c) = connect_tp_with(tc, flags, template_interval, PROVIDE_TIMEOUT).await;
     c.coinbase_output_constraints(0, 0).await.unwrap();
 
     let mut f = recv_in_time(&mut c).await;
@@ -516,7 +522,7 @@ async fn submit_solution_checks_pow_before_accept() {
         version,
         mut header,
         coinbase,
-    } = first_template(&tc).await;
+    } = first_template(&tc, 0).await;
     let tip = header.prev_blockhash;
 
     while header.validate_pow(header.target()).is_ok() {
@@ -566,7 +572,7 @@ async fn submit_solution_without_coinbase_witness_is_accepted() {
         version,
         mut header,
         coinbase,
-    } = first_template(&tc).await;
+    } = first_template(&tc, 0).await;
     let mut bare: Transaction = bitcoin::consensus::deserialize(&coinbase).unwrap();
     bare.input[0].witness = Witness::new();
     while header.validate_pow(header.target()).is_err() {
@@ -603,7 +609,7 @@ async fn submit_solution_without_witness_commitment_is_accepted() {
         version,
         mut header,
         coinbase,
-    } = first_template(&tc).await;
+    } = first_template(&tc, 0).await;
     let mut bare: Transaction = bitcoin::consensus::deserialize(&coinbase).unwrap();
     bare.input[0].witness = Witness::new();
     bare.output.truncate(1);
@@ -645,7 +651,7 @@ async fn submit_solution_ahead_of_the_rolled_time_is_accepted() {
         version,
         mut header,
         coinbase,
-    } = first_template(&tc).await;
+    } = first_template(&tc, 0).await;
     header.time += 5;
     while header.validate_pow(header.target()).is_err() {
         header.nonce += 1;
@@ -675,6 +681,7 @@ async fn constraints_flood_closes_the_session() {
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
     })
@@ -727,6 +734,7 @@ async fn tip_event_rebuilds_a_template_built_on_its_prev_hash() {
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
     })
@@ -781,7 +789,7 @@ async fn same_prev_hash_template_keeps_the_sent_bits() {
         version,
         mut header,
         coinbase,
-    } = first_template(&tc).await;
+    } = first_template(&tc, 0).await;
 
     let spacing = tc.chain.params.btc.pow_target_spacing as u32;
     tc.chain
@@ -826,6 +834,7 @@ async fn fee_push_after_the_interval_past_the_delta() {
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: 1_000,
         template_interval: interval,
     })
@@ -923,7 +932,7 @@ async fn fee_pushes_keep_older_same_tip_templates_solvable() {
         version,
         mut header,
         coinbase,
-    } = first_template_every(&tc, interval).await;
+    } = first_template_every(&tc, 0, interval).await;
 
     let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
     let mut txs = (0..3)
@@ -1016,6 +1025,7 @@ async fn fee_pushes_stay_an_interval_apart_under_steady_admission() {
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: interval,
     })
@@ -1085,7 +1095,7 @@ async fn fee_pushes_stay_an_interval_apart_under_steady_admission() {
 async fn idle_session_checks_each_interval_and_does_not_rebuild() {
     let tc = shared_regtest(0);
     let interval = Duration::from_millis(250);
-    let FirstTemplate { tp, c, .. } = first_template_every(&tc, interval).await;
+    let FirstTemplate { tp, c, .. } = first_template_every(&tc, 0, interval).await;
     let stats = tp.stats();
     assert_eq!(stats.builds.totals().0, 1, "the first template");
     tokio::time::sleep(4 * interval + interval / 2).await;
@@ -1096,5 +1106,653 @@ async fn idle_session_checks_each_interval_and_does_not_rebuild() {
     );
     assert_eq!(stats.builds.totals().0, 1, "an idle mempool is not rebuilt");
     drop(c);
+    tp.shutdown().await;
+}
+
+/// A live TP on `tc` with one session past `SetupConnection(flags)`.
+async fn connect_tp(tc: &TestChain, flags: u32) -> (crate::Sv2TpHandle, TpClient) {
+    connect_tp_with(tc, flags, TEMPLATE_INTERVAL, PROVIDE_TIMEOUT).await
+}
+
+/// [`connect_tp`] on a TP that checks fees every `template_interval` and
+/// holds a proposal waiting for its missing txs for `provide_timeout`.
+async fn connect_tp_with(
+    tc: &TestChain,
+    flags: u32,
+    template_interval: Duration,
+    provide_timeout: Duration,
+) -> (crate::Sv2TpHandle, TpClient) {
+    let tp = run_sv2_tp(Sv2TpConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        chain: Arc::clone(&tc.chain),
+        authority_secret: [7; 32],
+        cert_validity: Duration::from_secs(3600),
+        stale_grace: Duration::from_secs(10),
+        setup_timeout: SETUP_TIMEOUT,
+        write_timeout: WRITE_TIMEOUT,
+        provide_timeout,
+        fee_delta: FEE_DELTA,
+        template_interval,
+    })
+    .await
+    .expect("listen");
+    let mut c = TpClient::connect(tp.local_addr, tp.authority_pubkey)
+        .await
+        .expect("handshake");
+    c.setup_connection(2, 2, 2, flags).await.unwrap();
+    c.recv().await.expect("setup reply");
+    (tp, c)
+}
+
+const EXTRANONCE_LEN: usize = 8;
+
+/// A JDS-shaped coinbase: BIP34 height then the extranonce, one payout, and
+/// the witness commitment over `txs` with a zero reserved value in the
+/// witness.
+fn job_coinbase(height: u32, payout: u64, txs: &[&Transaction]) -> Transaction {
+    let mut script_sig = bip34_height_script(height);
+    script_sig.extend_from_slice(&[0u8; EXTRANONCE_LEN]);
+    Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::from_bytes(script_sig),
+            sequence: Sequence::MAX,
+            witness: Witness::from_slice(&[[0u8; 32]]),
+        }],
+        output: vec![
+            TxOut {
+                value: Amount::from_sat(payout),
+                script_pubkey: ScriptBuf::from_bytes(vec![OP_TRUE]),
+            },
+            TxOut {
+                value: Amount::ZERO,
+                script_pubkey: ScriptBuf::from_bytes(witness_commitment_script(
+                    txs.iter().map(|tx| tx.compute_wtxid().to_byte_array()),
+                    &[0u8; 32],
+                )),
+            },
+        ],
+    }
+}
+
+/// Where a segwit coinbase's scriptSig starts in its serialization: version,
+/// BIP144 marker and flag, the one-input count, the null prevout, and the
+/// one-byte scriptSig length.
+const SCRIPT_SIG_AT: usize = 4 + 2 + 1 + 36 + 1;
+
+/// One `ProposeTemplate` as owned fields, so a test can bend any of them.
+struct Job {
+    request_id: u32,
+    version: u32,
+    coinbase_prefix: Vec<u8>,
+    coinbase_suffix: Vec<u8>,
+    wtxids: Vec<[u8; 32]>,
+}
+
+impl Job {
+    /// The `DeclareMiningJob` split a JDS relays: the prefix ends where the
+    /// extranonce starts (the scriptSig tail), the suffix starts at nSequence.
+    fn declare(
+        tc: &TestChain,
+        request_id: u32,
+        coinbase: &Transaction,
+        declared: &[&Transaction],
+    ) -> Self {
+        let raw = serialize(coinbase);
+        let split = SCRIPT_SIG_AT + coinbase.input[0].script_sig.len() - EXTRANONCE_LEN;
+        Job {
+            request_id,
+            version: tc.chain.gbt_block_version() as u32,
+            coinbase_prefix: raw[..split].to_vec(),
+            coinbase_suffix: raw[split + EXTRANONCE_LEN..].to_vec(),
+            wtxids: declared
+                .iter()
+                .map(|tx| tx.compute_wtxid().to_byte_array())
+                .collect(),
+        }
+    }
+
+    async fn send(&self, c: &mut TpClient) {
+        let msg = ProposeTemplate {
+            request_id: self.request_id,
+            version: self.version,
+            coinbase_tx_prefix: B064K::try_from(&self.coinbase_prefix[..]).unwrap(),
+            coinbase_tx_suffix: B064K::try_from(&self.coinbase_suffix[..]).unwrap(),
+            wtxid_list: Seq064K::new(self.wtxids.iter().map(U256::from).collect()).unwrap(),
+            excess_data: B064K::try_from(&[][..]).unwrap(),
+        };
+        c.send(MESSAGE_TYPE_PROPOSE_TEMPLATE, msg).await.unwrap();
+    }
+}
+
+/// The TP asks for `positions` of `request_id`'s `wtxid_list`.
+async fn expect_missing(c: &mut TpClient, request_id: u32, positions: &[u16]) {
+    let mut f = recv_in_time(c).await;
+    assert_eq!(
+        f.msg_type, MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS,
+        "{:?}",
+        f.payload
+    );
+    let m: ProvideMissingTransactions = binary_sv2::from_bytes(&mut f.payload).expect("decode");
+    assert_eq!(m.request_id, request_id);
+    assert_eq!(m.unknown_tx_position_list.into_inner(), positions);
+}
+
+/// The JDS leg of the round trip: `txs` as the JDC serialized them, under
+/// the `request_id` the TP asked with.
+async fn provide(c: &mut TpClient, request_id: u32, txs: &[Vec<u8>]) {
+    let msg = ProvideMissingTransactionsSuccess {
+        request_id,
+        transaction_list: Seq064K::new(
+            txs.iter()
+                .map(|t| B016M::try_from(&t[..]).unwrap())
+                .collect(),
+        )
+        .unwrap(),
+    };
+    c.send(MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS, msg)
+        .await
+        .unwrap();
+}
+
+async fn expect_job_error(c: &mut TpClient, request_id: u32, code: &str) {
+    let mut f = recv_in_time(c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_PROPOSE_TEMPLATE_ERROR, "{code}");
+    let e: ProposeTemplateError = binary_sv2::from_bytes(&mut f.payload).expect("decode");
+    assert_eq!(e.request_id, request_id);
+    assert_eq!(e.error_code.as_utf8_or_hex(), code);
+}
+
+/// `Success` names the tip the job was validated on, next to the id it is
+/// retained under and the fee total of the declared transactions.
+async fn expect_job_success(
+    c: &mut TpClient,
+    tc: &TestChain,
+    request_id: u32,
+    template_id: u64,
+    fees: u64,
+) {
+    let mut f = recv_in_time(c).await;
+    assert_eq!(
+        f.msg_type, MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS,
+        "{:?}",
+        f.payload
+    );
+    let ok: ProposeTemplateSuccess = binary_sv2::from_bytes(&mut f.payload).expect("decode");
+    let tip = tc.chain.tip_header().expect("tip").block_hash();
+    assert_eq!(
+        (ok.request_id, ok.template_id, ok.fees),
+        (request_id, template_id, fees)
+    );
+    assert_eq!(ok.prev_hash.as_ref(), tip.as_byte_array(), "validated tip");
+}
+
+/// The retained job answers `RequestTransactionData` with the declared txs
+/// in block order, exactly like a built template.
+async fn expect_retained(c: &mut TpClient, template_id: u64, txs: &[&Transaction]) {
+    c.request_transaction_data(template_id).await.unwrap();
+    let mut f = recv_in_time(c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS);
+    let d: RequestTransactionDataSuccess = binary_sv2::from_bytes(&mut f.payload).unwrap();
+    assert_eq!(d.template_id, template_id);
+    let got: Vec<Vec<u8>> = d
+        .transaction_list
+        .iter()
+        .map(|t| t.as_ref().to_vec())
+        .collect();
+    let want: Vec<Vec<u8>> = txs.iter().map(serialize).collect();
+    assert_eq!(got, want, "retained txs in declared order");
+}
+
+/// docs/sv2-job-validation.md §4.1–4.3: a job whose txs are all in the
+/// mempool and whose coinbase pays subsidy + fees is answered `Success` with
+/// the next template id, the declared fee sum, and the tip it was validated
+/// on, and is retained like a template.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_template_prices_and_retains_the_declared_job() {
+    let tc = shared_regtest(2);
+    mock_live_tip(&tc);
+    let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
+    let a = spend(tc.coinbases[0], 3_000, cheap.clone());
+    let b = spend(tc.coinbases[1], 2_000, cheap);
+    for tx in [&a, &b] {
+        tc.mempool.accept_tx(tx).expect("mempool accept");
+    }
+    let (tp, mut c) = connect_tp(&tc, REQUIRES_JOB_VALIDATION).await;
+    c.coinbase_output_constraints(0, 0).await.unwrap();
+    let last = expect_template(&mut c, &tc, &[&a, &b], true).await;
+
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let coinbase = job_coinbase(height, subsidy + 5_000, &[&a, &b]);
+    Job::declare(&tc, 9, &coinbase, &[&a, &b])
+        .send(&mut c)
+        .await;
+    expect_job_success(&mut c, &tc, 9, last + 1, 5_000).await;
+    expect_retained(&mut c, last + 1, &[&a, &b]).await;
+
+    tp.shutdown().await;
+}
+
+/// §4.1–4.2: a wtxid the TP cannot resolve answers `ProvideMissingTransactions`
+/// with its 0-indexed position and holds the proposal under its
+/// `request_id`; the JDS's `ProvideMissingTransactions.Success` for that id
+/// completes the validation with the supplied tx merged in, and the tx is
+/// retained with the job. The hold is per request: a provide for an id the
+/// TP never asked about, already consumed, or held past `provide_timeout`
+/// is `unknown-request-id`; a second proposal under an id still waiting is
+/// `duplicate-request-id`; a provide that does not cover every requested
+/// position, supplies a tx the TP did not ask for, or one that does not
+/// decode, is `bad-missing-tx` and ends that exchange. The
+/// hold is bounded: past `MAX_PENDING_PROPOSALS` waiting proposals the
+/// oldest is dropped and its provide is `unknown-request-id` too. No
+/// rejected or dropped proposal takes a template id.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_template_asks_for_and_accepts_missing_transactions() {
+    let tc = shared_regtest(2);
+    mock_live_tip(&tc);
+    let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
+    let a = spend(tc.coinbases[0], 3_000, cheap.clone());
+    let b = spend(tc.coinbases[1], 2_000, cheap.clone());
+    // Decodable and unknown to the mempool, like `b`; never validated.
+    let sibling = spend(tc.coinbases[1], 2_500, cheap);
+    tc.mempool.accept_tx(&a).expect("mempool accept");
+    let provide_timeout = Duration::from_secs(1);
+    let (tp, mut c) = connect_tp_with(
+        &tc,
+        REQUIRES_JOB_VALIDATION,
+        TEMPLATE_INTERVAL,
+        provide_timeout,
+    )
+    .await;
+    c.coinbase_output_constraints(0, 0).await.unwrap();
+    let last = expect_template(&mut c, &tc, &[&a], true).await;
+
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let coinbase = job_coinbase(height, subsidy + 5_000, &[&a, &b]);
+    let raw_b = serialize(&b);
+
+    provide(&mut c, 77, std::slice::from_ref(&raw_b)).await;
+    expect_job_error(&mut c, 77, "unknown-request-id").await;
+
+    let job = Job::declare(&tc, 4, &coinbase, &[&a, &b]);
+    job.send(&mut c).await;
+    expect_missing(&mut c, 4, &[1]).await;
+    job.send(&mut c).await;
+    expect_job_error(&mut c, 4, "duplicate-request-id").await;
+    provide(&mut c, 4, std::slice::from_ref(&raw_b)).await;
+    expect_job_success(&mut c, &tc, 4, last + 1, 5_000).await;
+    expect_retained(&mut c, last + 1, &[&a, &b]).await;
+    provide(&mut c, 4, std::slice::from_ref(&raw_b)).await;
+    expect_job_error(&mut c, 4, "unknown-request-id").await;
+
+    Job::declare(&tc, 5, &coinbase, &[&a, &b])
+        .send(&mut c)
+        .await;
+    expect_missing(&mut c, 5, &[1]).await;
+    provide(&mut c, 5, &[serialize(&a)]).await;
+    expect_job_error(&mut c, 5, "bad-missing-tx").await;
+    provide(&mut c, 5, std::slice::from_ref(&raw_b)).await;
+    expect_job_error(&mut c, 5, "unknown-request-id").await;
+
+    Job::declare(&tc, 6, &coinbase, &[&a, &b, &sibling])
+        .send(&mut c)
+        .await;
+    expect_missing(&mut c, 6, &[1, 2]).await;
+    provide(&mut c, 6, std::slice::from_ref(&raw_b)).await;
+    expect_job_error(&mut c, 6, "bad-missing-tx").await;
+    provide(&mut c, 6, &[raw_b.clone(), serialize(&sibling)]).await;
+    expect_job_error(&mut c, 6, "unknown-request-id").await;
+
+    let blob = vec![0xee; 40];
+    let mut garbage = Job::declare(&tc, 8, &coinbase, &[]);
+    garbage.wtxids = vec![sha256d::Hash::hash(&blob).to_byte_array()];
+    garbage.send(&mut c).await;
+    expect_missing(&mut c, 8, &[0]).await;
+    provide(&mut c, 8, &[blob]).await;
+    expect_job_error(&mut c, 8, "bad-missing-tx").await;
+
+    for id in 10..10 + MAX_PENDING_PROPOSALS as u32 + 1 {
+        Job::declare(&tc, id, &coinbase, &[&a, &b])
+            .send(&mut c)
+            .await;
+        expect_missing(&mut c, id, &[1]).await;
+    }
+    provide(&mut c, 10, std::slice::from_ref(&raw_b)).await;
+    expect_job_error(&mut c, 10, "unknown-request-id").await;
+    provide(&mut c, 11, std::slice::from_ref(&raw_b)).await;
+    expect_job_success(&mut c, &tc, 11, last + 2, 5_000).await;
+
+    Job::declare(&tc, 7, &coinbase, &[&a, &b])
+        .send(&mut c)
+        .await;
+    expect_missing(&mut c, 7, &[1]).await;
+    tokio::time::sleep(provide_timeout + provide_timeout / 2).await;
+    provide(&mut c, 7, &[raw_b]).await;
+    expect_job_error(&mut c, 7, "unknown-request-id").await;
+
+    c.request_transaction_data(last + 3).await.unwrap();
+    let mut f = recv_in_time(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR);
+    let e: RequestTransactionDataError = binary_sv2::from_bytes(&mut f.payload).unwrap();
+    assert_eq!(
+        e.error_code.as_utf8_or_hex(),
+        "template-id-not-found",
+        "only the two completed jobs took ids"
+    );
+
+    tp.shutdown().await;
+}
+
+/// §4.1 and §4.4: everything in a job comes from a JDC. The checks run in
+/// order before any mempool lookup or transaction decode: a repeated wtxid
+/// is refused on arrival, even while the tip is stale (IBD) and every other
+/// job is `job-validation-unavailable`; then a coinbase prefix that does
+/// not parse or a coinbase that does not decode, then the proposal check's
+/// own reject string: a declaration from before the tip moved fails its
+/// BIP34 height, an overpaying coinbase its amount. Nothing is retained on
+/// an error.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_template_rejects_untrusted_input_in_order() {
+    let tc = shared_regtest(2);
+    let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
+    let a = spend(tc.coinbases[0], 3_000, cheap.clone());
+    let b = spend(tc.coinbases[1], 2_000, cheap);
+    for tx in [&a, &b] {
+        tc.mempool.accept_tx(tx).expect("mempool accept");
+    }
+    let (tp, mut c) = connect_tp(&tc, REQUIRES_JOB_VALIDATION).await;
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let coinbase = job_coinbase(height, subsidy + 5_000, &[&a, &b]);
+
+    // The padded tip is far in the past: the node is in IBD.
+    Job::declare(&tc, 1, &coinbase, &[&a, &b])
+        .send(&mut c)
+        .await;
+    expect_job_error(&mut c, 1, "job-validation-unavailable").await;
+    Job::declare(&tc, 10, &coinbase, &[&a, &a])
+        .send(&mut c)
+        .await;
+    expect_job_error(&mut c, 10, "duplicate-wtxid").await;
+    mock_live_tip(&tc);
+    c.coinbase_output_constraints(0, 0).await.unwrap();
+    let last = expect_template(&mut c, &tc, &[&a, &b], true).await;
+
+    Job::declare(&tc, 2, &coinbase, &[&a, &a])
+        .send(&mut c)
+        .await;
+    expect_job_error(&mut c, 2, "duplicate-wtxid").await;
+
+    // More scriptSig bytes than the length the prefix declares.
+    let mut short_sig = Job::declare(&tc, 5, &coinbase, &[&a, &b]);
+    short_sig.coinbase_prefix.extend_from_slice(&[0; 16]);
+    short_sig.send(&mut c).await;
+    expect_job_error(&mut c, 5, "bad-cb-decode").await;
+
+    let mut two_inputs = Job::declare(&tc, 6, &coinbase, &[&a, &b]);
+    two_inputs.coinbase_prefix[4 + 2] = 2;
+    two_inputs.send(&mut c).await;
+    expect_job_error(&mut c, 6, "bad-cb-decode").await;
+
+    let mut bad_cb = Job::declare(&tc, 7, &coinbase, &[&a, &b]);
+    bad_cb.coinbase_suffix.truncate(3);
+    bad_cb.send(&mut c).await;
+    expect_job_error(&mut c, 7, "bad-cb-decode").await;
+
+    let old = job_coinbase(height - 1, subsidy + 5_000, &[&a, &b]);
+    Job::declare(&tc, 8, &old, &[&a, &b]).send(&mut c).await;
+    expect_job_error(&mut c, 8, "bad-cb-height").await;
+
+    let fat = job_coinbase(height, subsidy + 5_001, &[&a, &b]);
+    Job::declare(&tc, 9, &fat, &[&a, &b]).send(&mut c).await;
+    expect_job_error(&mut c, 9, "bad-cb-amount").await;
+
+    c.request_transaction_data(last + 1).await.unwrap();
+    let mut f = recv_in_time(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR);
+    let e: RequestTransactionDataError = binary_sv2::from_bytes(&mut f.payload).unwrap();
+    assert_eq!(
+        e.error_code.as_utf8_or_hex(),
+        "template-id-not-found",
+        "a rejected job must not take a template id"
+    );
+
+    tp.shutdown().await;
+}
+
+/// §4.5: a `SubmitSolution` on a validated job's template id is assembled
+/// from the retained job and the JDS's final coinbase (extranonce in place
+/// of the placeholder) and accepted like one for a pushed template.
+#[tokio::test(flavor = "multi_thread")]
+async fn submit_solution_for_a_validated_job_becomes_the_tip() {
+    let tc = shared_regtest(2);
+    let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
+    let a = spend(tc.coinbases[0], 3_000, cheap.clone());
+    let b = spend(tc.coinbases[1], 2_000, cheap);
+    for tx in [&a, &b] {
+        tc.mempool.accept_tx(tx).expect("mempool accept");
+    }
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id: last,
+        version,
+        header: sent,
+        ..
+    } = first_template(&tc, REQUIRES_JOB_VALIDATION).await;
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let mut coinbase = job_coinbase(height, subsidy + 5_000, &[&a, &b]);
+    Job::declare(&tc, 1, &coinbase, &[&a, &b])
+        .send(&mut c)
+        .await;
+    expect_job_success(&mut c, &tc, 1, last + 1, 5_000).await;
+
+    let mut script_sig = bip34_height_script(height);
+    script_sig.extend_from_slice(&[0x42; EXTRANONCE_LEN]);
+    coinbase.input[0].script_sig = ScriptBuf::from_bytes(script_sig);
+    let mut leaves = vec![coinbase.compute_txid().to_byte_array()];
+    leaves.extend([&a, &b].iter().map(|tx| tx.compute_txid().to_byte_array()));
+    let mut header = bitcoin::block::Header {
+        merkle_root: bitcoin::TxMerkleNode::from_byte_array(merkle_root_from_txids(&leaves)),
+        ..sent
+    };
+    while header.validate_pow(header.target()).is_err() {
+        header.nonce += 1;
+    }
+    c.submit_solution(
+        last + 1,
+        version,
+        header.time,
+        header.nonce,
+        &serialize(&coinbase),
+    )
+    .await
+    .unwrap();
+    let f = recv_in_time(&mut c).await;
+    assert_eq!(
+        f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE,
+        "the new tip's template"
+    );
+    assert_eq!(
+        tc.chain.tip_header().unwrap().block_hash(),
+        header.block_hash()
+    );
+
+    tp.shutdown().await;
+}
+
+/// A proposal's validation runs off the session loop. The proposal declares
+/// a few hundred spends of one confirmed fan-out that the mempool lacks, so
+/// each copy is asked for all of them and the costly frame (tens of
+/// milliseconds) is the `ProvideMissingTransactions.Success` that completes
+/// it, while every template stays coinbase-only; the first copy measures
+/// that wall. A `RequestTransactionData` sent right behind the second copy's
+/// provide is answered before that copy's `Success`, in a small fraction of
+/// the validation it overlapped: the request has no blocking work behind
+/// it, so a slower answer would mean the loop waited on the validation and
+/// the order was luck; a `ProposeTemplate` under the id in flight is refused
+/// `duplicate-request-id` on arrival the same way. A `SubmitSolution` sent
+/// behind the third copy's
+/// provide is accepted while that copy validates and pushes the solved
+/// tip's `NewTemplate`. Its accept ends in a tip write, so it is not ordered
+/// against the copy's reply, which is the straddle the plan names:
+/// `Success` on the tip the validation started on, or the proposal check's
+/// own reject once the tip moved first.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_template_validation_does_not_delay_other_frames() {
+    let tc = shared_regtest(1);
+    let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
+    let outs = 400u64;
+    let each = (50_0000_0000 - 10_000) / outs;
+    let mut fanout = spend(tc.coinbases[0], 10_000, cheap.clone());
+    fanout.output = vec![
+        TxOut {
+            value: Amount::from_sat(each),
+            script_pubkey: cheap.clone(),
+        };
+        outs as usize
+    ];
+    let tip = tc.chain.tip_header().expect("tip");
+    let h = tc.chain.query.tip_height().expect("tip height").0;
+    let block = mine_regtest_paying(
+        tip.block_hash(),
+        tip.time + 1,
+        h + 1,
+        cheap.clone(),
+        vec![fanout.clone()],
+    );
+    tc.chain.accept_block(block).expect("accept fan-out");
+    let fanout_txid = fanout.compute_txid();
+    let spends: Vec<Transaction> = (0..outs as u32)
+        .map(|vout| Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: fanout_txid,
+                    vout,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(each - 1_000),
+                script_pubkey: cheap.clone(),
+            }],
+        })
+        .collect();
+    let declared: Vec<&Transaction> = spends.iter().collect();
+
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id,
+        version,
+        mut header,
+        coinbase,
+    } = first_template(&tc, REQUIRES_JOB_VALIDATION).await;
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let fees = outs * 1_000;
+    let mut job = Job::declare(
+        &tc,
+        1,
+        &job_coinbase(height, subsidy + fees, &declared),
+        &declared,
+    );
+    // Provided, not pooled: the templates stay coinbase-only.
+    let supplied: Vec<Vec<u8>> = spends.iter().map(serialize).collect();
+    let all: Vec<u16> = (0..outs as u16).collect();
+
+    job.send(&mut c).await;
+    expect_missing(&mut c, 1, &all).await;
+    let asked = tokio::time::Instant::now();
+    provide(&mut c, 1, &supplied).await;
+    expect_job_success(&mut c, &tc, 1, template_id + 1, fees).await;
+    let alone = asked.elapsed();
+
+    job.request_id = 2;
+    job.send(&mut c).await;
+    expect_missing(&mut c, 2, &all).await;
+    let proposed = tokio::time::Instant::now();
+    provide(&mut c, 2, &supplied).await;
+    job.send(&mut c).await;
+    c.request_transaction_data(template_id).await.unwrap();
+    expect_job_error(&mut c, 2, "duplicate-request-id").await;
+    let f = recv_in_time(&mut c).await;
+    let requested = proposed.elapsed();
+    assert_eq!(
+        f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
+        "the request's reply must precede the proposal's (validation alone {alone:?})"
+    );
+    expect_job_success(&mut c, &tc, 2, template_id + 2, fees).await;
+    let replied = proposed.elapsed();
+    assert!(
+        requested * 4 < replied,
+        "request answered in {requested:?} against a validation of {replied:?}"
+    );
+
+    while header.validate_pow(header.target()).is_err() {
+        header.nonce += 1;
+    }
+    job.request_id = 3;
+    job.send(&mut c).await;
+    expect_missing(&mut c, 3, &all).await;
+    provide(&mut c, 3, &supplied).await;
+    c.submit_solution(template_id, version, header.time, header.nonce, &coinbase)
+        .await
+        .unwrap();
+    let mut pushed = None;
+    let mut verdict = None;
+    for _ in 0..2 {
+        let mut f = recv_in_time(&mut c).await;
+        match f.msg_type {
+            MESSAGE_TYPE_NEW_TEMPLATE => {
+                assert_eq!(
+                    tc.chain.tip_header().unwrap().block_hash(),
+                    header.block_hash(),
+                    "the solution became the tip before its template was pushed"
+                );
+                pushed = Some(check_template(&mut c, &tc, f, &[], true).await);
+            }
+            MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS => {
+                let ok: ProposeTemplateSuccess =
+                    binary_sv2::from_bytes(&mut f.payload).expect("decode");
+                assert_eq!((ok.request_id, ok.fees), (3, fees));
+                assert_eq!(
+                    ok.prev_hash.as_ref(),
+                    header.prev_blockhash.as_byte_array(),
+                    "validated on the tip it started on"
+                );
+                verdict = Some(Some(ok.template_id));
+            }
+            MESSAGE_TYPE_PROPOSE_TEMPLATE_ERROR => {
+                let e: ProposeTemplateError =
+                    binary_sv2::from_bytes(&mut f.payload).expect("decode");
+                assert_eq!(e.request_id, 3);
+                assert!(
+                    ["inconclusive-not-best-prevblk", "bad-cb-height"]
+                        .contains(&e.error_code.as_utf8_or_hex().as_str()),
+                    "a tip change mid-validation fails the proposal check: {}",
+                    e.error_code.as_utf8_or_hex()
+                );
+                verdict = Some(None);
+            }
+            t => panic!("unexpected frame {t:#x}"),
+        }
+    }
+    let pushed = pushed.expect("the solved tip's template");
+    let mut ids = vec![pushed];
+    ids.extend(verdict.expect("the proposal's reply"));
+    ids.sort_unstable();
+    let want: Vec<u64> = (template_id + 3..template_id + 3 + ids.len() as u64).collect();
+    assert_eq!(ids, want, "ids follow the order the loop replied in");
+
     tp.shutdown().await;
 }
