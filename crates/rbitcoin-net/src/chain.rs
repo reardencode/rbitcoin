@@ -2179,8 +2179,13 @@ impl ChainHub {
             }
         }
 
+        // Core `ResetBlockFailureFlags` + `ActivateBestChain`. Restored paths
+        // that continue one another connect as one branch, heaviest first.
+        let mut paths = paths;
+        paths.sort_by_key(|path| path.first().and_then(|h| self.stored_header_height(h)));
+        let mut branches: Vec<Vec<Block>> = Vec::new();
         for path in paths {
-            let mut branch = Vec::new();
+            let mut blocks = Vec::new();
             for h in &path {
                 if self.is_connected(h) {
                     continue;
@@ -2188,23 +2193,47 @@ impl ChainHub {
                 let Some(b) = self.load_side_body(h) else {
                     break;
                 };
-                branch.push(b);
+                blocks.push(b);
             }
-            if !branch.is_empty() {
-                match self.accept_branch_inner(&branch) {
-                    Err(NetError::Protocol(s)) if s.contains("branch parent not on chain") => {}
-                    Err(e) => return Err(e),
-                    Ok(_) => {}
-                }
+            let Some(parent) = blocks.first().map(|b| b.header.prev_blockhash) else {
+                continue;
+            };
+            match branches
+                .iter_mut()
+                .find(|branch| branch.last().map(Block::block_hash) == Some(parent))
+            {
+                Some(branch) => branch.extend(blocks),
+                None => branches.push(blocks),
             }
         }
-        if !self.is_connected(&hash) {
+        let restored = branches.iter().flatten().any(|b| b.block_hash() == hash);
+        if !restored && !self.is_connected(&hash) {
             if let Some(branch) = self.assemble_side_branch(hash) {
-                match self.accept_branch_inner(&branch) {
-                    Err(NetError::Protocol(s)) if s.contains("branch parent not on chain") => {}
-                    Err(e) => return Err(e),
-                    Ok(_) => {}
+                branches.push(branch);
+            }
+        }
+        let mut ranked = Vec::with_capacity(branches.len());
+        for branch in branches {
+            let Ok(work) = self.branch_chain_work(&branch) else {
+                continue;
+            };
+            ranked.push((work, branch));
+        }
+        ranked.sort_by_key(|(work, _)| std::cmp::Reverse(*work));
+        for (_, branch) in ranked {
+            match self.accept_branch_inner(&branch) {
+                // A restored archive tip that loses stays a valid fork, so a
+                // later invalidateblock can fall back to it.
+                Ok(AcceptOutcome::IgnoredWeaker) => {
+                    if let Some(tip) = branch.last().map(Block::block_hash) {
+                        if self.held_body(&tip).is_none() {
+                            self.fork_tips.write().unwrap().insert(tip);
+                        }
+                    }
                 }
+                Err(NetError::Protocol(s)) if s.contains("branch parent not on chain") => {}
+                Err(e) => return Err(e),
+                Ok(_) => {}
             }
         }
         Ok(())
@@ -4248,6 +4277,140 @@ mod tests {
             Some(a1_hash),
             "a precious archive block that is not held replaces the block just received"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Core `reconsiderblock` clears the marks, then activates the most-work
+    /// chain. Here the restored a8..a10 outweighs b8..b9 only as a whole.
+    #[test]
+    fn reconsider_activates_the_most_work_chain() {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let t0 = hub.tip_header().unwrap().time;
+        let mut a = Vec::new();
+        let mut prev = gen;
+        for h in 1..=10u32 {
+            let b = mine(prev, t0 + h, h);
+            prev = b.block_hash();
+            a.push(prev);
+            hub.accept_block(b).unwrap();
+        }
+        hub.invalidate_block(a[9]).unwrap();
+        hub.invalidate_block(a[7]).unwrap();
+        assert_eq!(hub.tip_hash(), Some(a[6]));
+        let b8 = mine_distinct(a[6], t0 + 20, 8, &[a[7]]);
+        let b9 = mine(b8.block_hash(), t0 + 21, 9);
+        hub.accept_block(b8).unwrap();
+        hub.accept_block(b9).unwrap();
+        hub.reconsider_block(a[7]).unwrap();
+        assert_eq!(hub.tip_hash(), Some(a[9]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A block a reconsider made valid again is still a fallback when a later
+    /// `invalidateblock` shrinks the chain (Core's `InvalidateBlock` re-adds
+    /// every valid block with enough work as a candidate).
+    #[test]
+    fn invalidate_falls_back_to_a_reconsidered_block() {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let t0 = hub.tip_header().unwrap().time;
+        let mut a = Vec::new();
+        let mut prev = gen;
+        for h in 1..=5u32 {
+            let b = mine(prev, t0 + h, h);
+            prev = b.block_hash();
+            a.push(prev);
+            hub.accept_block(b).unwrap();
+        }
+        hub.invalidate_block(a[4]).unwrap();
+        let b5 = mine_distinct(a[3], t0 + 20, 5, &[a[4]]);
+        let b5_hash = b5.block_hash();
+        let b6 = mine(b5_hash, t0 + 21, 6);
+        hub.accept_block(b5).unwrap();
+        hub.accept_block(b6).unwrap();
+        hub.reconsider_block(a[4]).unwrap();
+        assert_eq!(hub.tip_height(), Some(6));
+        hub.invalidate_block(b5_hash).unwrap();
+        assert_eq!(hub.tip_hash(), Some(a[4]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An invalid held side branch does not stop reconsider: the restored
+    /// path still connects.
+    #[test]
+    fn reconsider_restores_past_an_invalid_held_branch() {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let t0 = hub.tip_header().unwrap().time;
+        let mut a = Vec::new();
+        let mut prev = gen;
+        for h in 1..=4u32 {
+            let b = mine(prev, t0 + h, h);
+            prev = b.block_hash();
+            a.push(prev);
+            hub.accept_block(b).unwrap();
+        }
+        let mut bad = mine(a[0], t0 + 20, 2);
+        let cb = &mut bad.txdata[0].output[0].value;
+        *cb = Amount::from_sat(cb.to_sat() + 1);
+        bad.header.merkle_root = bad.compute_merkle_root().unwrap();
+        rbitcoin_consensus::grind_regtest_pow(&mut bad.header);
+        let b3 = mine(bad.block_hash(), t0 + 21, 3);
+        let b4 = mine(b3.block_hash(), t0 + 22, 4);
+        for b in [bad, b3, b4] {
+            let _ = hub.accept_received_block(b);
+        }
+        assert_eq!(hub.tip_hash(), Some(a[3]));
+        let _ = hub.invalidate_block(a[1]);
+        assert_eq!(hub.tip_hash(), Some(a[0]));
+        hub.reconsider_block(a[1]).unwrap();
+        assert_eq!(hub.tip_hash(), Some(a[3]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Reconsider makes only a restored archive tip that loses a fork tip. A
+    /// header-only descendant stays `headers-only`, and a connected block
+    /// is never listed as a fork.
+    #[test]
+    fn reconsider_keeps_header_only_and_connected_blocks_out_of_forks() {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let t0 = hub.tip_header().unwrap().time;
+        let mut a = Vec::new();
+        let mut prev = gen;
+        for h in 1..=3u32 {
+            let b = mine(prev, t0 + h, h);
+            prev = b.block_hash();
+            a.push(prev);
+            hub.accept_block(b).unwrap();
+        }
+        let a4 = mine(a[2], t0 + 4, 4);
+        hub.ensure_header(&a4.header).unwrap();
+        hub.invalidate_block(a[1]).unwrap();
+        hub.reconsider_block(a4.block_hash()).unwrap();
+        assert_eq!(hub.tip_hash(), Some(a[2]));
+        let status = |hash: BlockHash| {
+            hub.chaintips()
+                .into_iter()
+                .find(|t| t.hash == hash)
+                .map(|t| t.status)
+        };
+        assert_eq!(status(a4.block_hash()), Some("headers-only"));
+
+        hub.reconsider_block(a[1]).unwrap();
+        let mut prev = a[0];
+        for h in 2..=4u32 {
+            let b = mine_distinct(prev, t0 + 20 + h, h, &a);
+            prev = b.block_hash();
+            let _ = hub.accept_received_block(b);
+        }
+        assert_eq!(hub.tip_hash(), Some(prev));
+        assert_eq!(status(a[1]), None);
         let _ = std::fs::remove_dir_all(dir);
     }
 
