@@ -13,6 +13,7 @@ pub struct WorkOverflow;
 /// Sum header work values (Bitcoin most-work accumulation).
 /// Overflow is an error. Addition is byte-wise so a full `Work` does not
 /// hit rust-bitcoin's debug overflow assert.
+// btc-lean: BLK-115 INV-140
 pub fn sum_work(iter: impl Iterator<Item = Work>) -> Result<Work, WorkOverflow> {
     let mut acc: Option<Work> = None;
     for w in iter {
@@ -41,6 +42,7 @@ fn checked_add_work(a: Work, b: Work) -> Result<Work, WorkOverflow> {
 }
 
 /// `Header::work` panics in debug when `bits` is a zero target.
+// btc-lean: BLK-113 INV-141
 pub fn header_work_checked(header: &bitcoin::block::Header) -> Result<Work, WorkOverflow> {
     if header.bits.to_consensus() == 0 {
         return Err(WorkOverflow);
@@ -101,6 +103,7 @@ mod tests {
     }
 
     #[test]
+    // btc-lean: BLK-113 INV-141
     fn sum_work_and_work_better() {
         let z = Work::from_be_bytes([0u8; 32]);
         assert_eq!(sum_work(std::iter::empty()).unwrap(), z);

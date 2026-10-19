@@ -178,6 +178,7 @@ impl ChainParams {
     /// BIP34 coinbase-height push required at this height?
     #[inline]
     pub fn bip34_active_at(&self, height: u32) -> bool {
+        // btc-lean: BLK-071 BLK-072 INV-127
         height >= self.btc.bip34_height
     }
 
@@ -233,6 +234,7 @@ impl ChainParams {
 
     /// BIP65 CLTV active?
     #[inline]
+    // btc-lean: BLK-081 BLK-082
     pub fn bip65_active_at(&self, height: u32) -> bool {
         height >= self.btc.bip65_height
     }
@@ -328,6 +330,7 @@ impl ChainParams {
     /// Testnet3: ~2011968 (Inquisition `TaprootHeight`; Core may still use
     /// versionbits — we pin buried for script flags).
     #[inline]
+    // btc-lean: TPR-075
     pub fn taproot_active_at(&self, height: u32) -> bool {
         height >= self.taproot_height()
     }
@@ -423,6 +426,7 @@ pub fn check_genesis_hash(params: &ChainParams, hash: BlockHash) -> bool {
     hash == params.genesis_hash
 }
 
+// btc-lean: BLK-111 BLK-112
 pub fn genesis_block(params: &ChainParams) -> bitcoin::block::Block {
     constants::genesis_block(params.network)
 }
@@ -462,6 +466,7 @@ mod tests {
     #[test]
     fn bip34_hash_gates_bip30_like_core() {
         let main = ChainParams::mainnet();
+        // btc-lean: BLK-071 BLK-072 BLK-081 BLK-082 BLK-111 BLK-112 INV-127
         assert_eq!(main.btc.bip34_height, 227_931);
         let hash = main.bip34_hash.expect("mainnet BIP34 hash");
         // Core chainparams `consensus.BIP34Hash` (block 227931). A look-alike
@@ -532,6 +537,7 @@ mod tests {
         assert_eq!(p.btc.bip34_height, 227_931);
         assert_eq!(p.csv_height(), 419_328);
         assert_eq!(p.segwit_height(), 481_824);
+        // btc-lean: TPR-075
         assert_eq!(p.taproot_height(), 709_632);
         assert!(!p.segwit_active_at(481_823));
         assert!(p.segwit_active_at(481_824));

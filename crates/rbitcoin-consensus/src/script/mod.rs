@@ -47,6 +47,7 @@ pub(crate) use classify::is_anyone_can_spend;
 ///
 /// On failure, [`ConsensusError::Script`] messages are annotated with `txid=` and
 /// `vin=` so IBD logs name the failing spend (batch-first height alone is not enough).
+// btc-lean: TXV-058
 pub(crate) fn verify_job_all_inputs(job: &ScriptCheckJob) -> Result<(), ConsensusError> {
     // JobTx may be shared wire Arc — always take &Transaction (not &JobTx).
     let tx: &Transaction = &job.tx;
@@ -427,6 +428,7 @@ pub(crate) mod crypto {
         matches!(pk.first(), Some(0x02 | 0x03)) && pk.len() == 33
     }
 
+    // btc-lean: SWT-066
     fn sighash_midstate(h: Option<[u8; 32]>) -> Result<[u8; 32], ConsensusError> {
         h.ok_or_else(|| ConsensusError::Script("invariant: sighash midstate missing".into()))
     }
@@ -436,6 +438,7 @@ pub(crate) mod crypto {
     /// `script_code` is the BIP143 scriptCode (for P2WPKH: the
     /// `OP_DUP OP_HASH160 <keyhash> OP_EQUALVERIFY OP_CHECKSIG` template; for
     /// P2WSH: the witness script).
+    // btc-lean: INV-071 SCR-140 SCR-141 SWT-042 SWT-052
     pub fn bip143_signature_hash(
         tx: &bitcoin::Transaction,
         input_index: usize,
@@ -465,18 +468,21 @@ pub(crate) mod crypto {
         };
         let zero = [0u8; 32];
 
+        // btc-lean: SWT-043
         let hash_prevouts: [u8; 32] = if !anyone_can_pay {
             sighash_midstate(pre.hash_prevouts())?
         } else {
             zero
         };
 
+        // btc-lean: SWT-044
         let hash_sequence: [u8; 32] = if !anyone_can_pay && base != Single && base != None {
             sighash_midstate(pre.hash_sequence())?
         } else {
             zero
         };
 
+        // btc-lean: SWT-045 SWT-046
         let hash_outputs: [u8; 32] = if base != Single && base != None {
             sighash_midstate(pre.hash_outputs())?
         } else if base == Single && input_index < tx.output.len() {
@@ -505,6 +511,7 @@ pub(crate) mod crypto {
                 .map_err(|_| ConsensusError::Script("bip143 scriptCode".into()))?;
             amount
                 .consensus_encode(&mut eng)
+                // btc-lean: SWT-050 SWT-055
                 .map_err(|_| ConsensusError::Script("bip143 amount".into()))?;
             txin.sequence
                 .consensus_encode(&mut eng)
@@ -515,6 +522,7 @@ pub(crate) mod crypto {
             .consensus_encode(&mut eng)
             .map_err(|_| ConsensusError::Script("bip143 locktime".into()))?;
         // Core: raw nHashType as uint32 LE — not the normalized enum value.
+        // btc-lean: SWT-051 SWT-053
         eng.input(&raw_ty.to_le_bytes());
         Ok(sha256d::Hash::from_engine(eng).to_byte_array())
     }
@@ -525,6 +533,7 @@ pub(crate) mod crypto {
     /// 0x01/02/03/81/82/83), use rust-bitcoin's [`SighashCache`] midstate
     /// (hashPrevouts/hashSequence/hashOutputs once per tx). Slow path: non-standard
     /// raw types (e.g. mainnet `0x65`) need our raw-uint32 encoder.
+    // btc-lean: SWT-047
     pub fn bip143_p2wpkh_signature_hash(
         tx: &bitcoin::Transaction,
         input_index: usize,
@@ -547,6 +556,7 @@ pub(crate) mod crypto {
     }
 
     /// P2WSH / WitnessV0 BIP143 using [`crate::TxPrecompute`] midstates.
+    // btc-lean: SWT-048
     pub fn bip143_p2wsh_signature_hash(
         tx: &bitcoin::Transaction,
         input_index: usize,
@@ -596,6 +606,7 @@ pub(crate) mod crypto {
     }
 
     /// SHA256 of `compact_size(annex) || annex` (BIP341, annex includes `0x50`).
+    // btc-lean: TPR-006
     pub fn annex_hash(annex: &[u8]) -> [u8; 32] {
         use bitcoin::consensus::encode::VarInt;
         use bitcoin::consensus::Encodable;
@@ -613,6 +624,8 @@ pub(crate) mod crypto {
     /// and `Some((tapleaf, codesep))` on the script path (ext flag 1).
     ///
     /// Prevout scripts are borrowed from `job`. This does not allocate `TxOut`.
+    // btc-lean: SCR-162 SCR-164 SCR-165 SCR-166 SCR-169 TPR-014 TPR-030 TPR-032 TPR-042 TPR-044
+    // btc-lean: TPR-046
     pub fn tap_signature_hash(
         job: &crate::block::ScriptCheckJob,
         input_index: usize,

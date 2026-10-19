@@ -24,6 +24,7 @@ pub struct ParentHeader {
 /// On success the value is that parent median, sorted once. Genesis has no
 /// parent window and returns `0`.
 #[allow(clippy::too_many_arguments)] // each argument is one caller fact
+                                     // btc-lean: BLK-040 BLK-041 INV-098
 pub fn check_header(
     params: &ChainParams,
     height: Height,
@@ -53,6 +54,7 @@ pub fn check_header(
     }
     let mtp = median_time_past_times(mtp_times)
         .map_err(|_| ConsensusError::BadHeader("empty median time"))?;
+    // btc-lean: BLK-057 INV-099
     if header.time <= mtp {
         return Err(ConsensusError::BadHeader("timestamp <= median-time-past"));
     }
@@ -106,11 +108,13 @@ pub fn validate_header_on_parent(
 }
 
 /// POW vs a **caller-computed** header hash (no second SHA256d).
+// btc-lean: BLK-003 BLK-039
 pub fn pow_hash_meets_target(
     hash: [u8; 32],
     bits: CompactTarget,
     pow_limit: Target,
 ) -> Result<(), ConsensusError> {
+    // btc-lean: BLK-037
     let target = Target::from_compact(bits);
     if target > pow_limit {
         return Err(ConsensusError::BadHeader("target above pow limit"));
@@ -133,6 +137,7 @@ pub fn check_header_version_and_future_time(
     const MAX_FUTURE_BLOCK_TIME: u64 = 2 * 60 * 60;
     let now = crate::clock::current_now();
     if u64::from(header.time) > now.saturating_add(MAX_FUTURE_BLOCK_TIME) {
+        // btc-lean: BLK-058 INV-101
         return Err(ConsensusError::BadHeader("timestamp too far in future"));
     }
     let ver = header.version.to_consensus();
@@ -140,6 +145,7 @@ pub fn check_header_version_and_future_time(
         || (params.bip66_active_at(height.0) && ver < 3)
         || (params.bip65_active_at(height.0) && ver < 4)
     {
+        // btc-lean: BLK-001 BLK-060 BLK-061 BLK-062 INV-102
         return Err(ConsensusError::BadVersion(ver));
     }
     Ok(())
@@ -179,6 +185,7 @@ pub fn next_work_bits(
     }
     let first_time = period_first_time?;
     let timespan = u64::from(prev_time.saturating_sub(first_time));
+    // btc-lean: BLK-038 BLK-042 BLK-044 BLK-045 BLK-046 BLK-048 BLK-054 INV-094 INV-096 INV-097
     Some(CompactTarget::from_next_work_required(
         prev_bits,
         timespan,
@@ -186,6 +193,7 @@ pub fn next_work_bits(
     ))
 }
 
+// btc-lean: BLK-043 BLK-049 BLK-050 BLK-051 BLK-052 BLK-053 INV-095
 fn min_diff_bits(
     params: &ChainParams,
     height: u32,
@@ -377,6 +385,10 @@ mod median_time_past_tests {
     }
 
     #[test]
+    // btc-lean: BLK-001 BLK-037 BLK-038 BLK-039 BLK-040 BLK-041 BLK-042 BLK-043 BLK-044 BLK-045
+    // btc-lean: BLK-046 BLK-048 BLK-049 BLK-050 BLK-051 BLK-052 BLK-053 BLK-054 BLK-056 BLK-057
+    // btc-lean: BLK-058 BLK-060 BLK-061 BLK-062 INV-094 INV-095 INV-096 INV-097 INV-098 INV-099
+    // btc-lean: INV-101 INV-102
     fn check_header_rejects_without_a_store() {
         let params = ChainParams::mainnet();
         let genesis = crate::params::genesis_block(&params);
@@ -562,6 +574,7 @@ mod median_time_past_tests {
     }
 
     #[test]
+    // btc-lean: BLK-130
     fn h8_timestamp_exactly_two_hours_accepts_plus_one_rejects() {
         let params = ChainParams::regtest();
         let mut h = crate::params::genesis_block(&params).header;

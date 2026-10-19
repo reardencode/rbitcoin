@@ -52,6 +52,7 @@ pub fn validate_signet_block_solution(
 }
 
 /// BIP325 `to_spend` / `to_sign` pair. The challenge script is `to_sign`'s prevout.
+// btc-lean: BLK-126 INV-086
 pub fn signet_challenge_transactions(
     block: &Block,
     challenge: &Script,
@@ -699,6 +700,7 @@ mod tests {
     }
 
     #[test]
+    // btc-lean: BLK-126 INV-086
     fn witness_commitment_index_finds_magic() {
         let raw = include_bytes!("../tests/fixtures/signet_block_1.bin");
         let block: Block = deserialize(raw).unwrap();

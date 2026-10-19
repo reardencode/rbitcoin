@@ -622,6 +622,7 @@ fn s5_rejects_duplicate_txid() {
 }
 
 #[test]
+// btc-lean: BLK-010 INV-085
 fn s6_rejects_merkle_root_mismatch() {
     let good = block_with(vec![coinbase(0), non_coinbase_spend(1)]);
     validate_block_structure(&good, &ctx_h(0)).unwrap();
@@ -635,6 +636,11 @@ fn s6_rejects_merkle_root_mismatch() {
 /// the merkle check, so a body the header does not commit to fails as a
 /// merkle mismatch, never as a rule the hash could be blamed for.
 #[test]
+// btc-lean: BLK-002 BLK-022 BLK-023 BLK-024 BLK-025 BLK-026 BLK-027 BLK-028 BLK-029 BLK-030 BLK-031
+// btc-lean: BLK-032 BLK-092 BLK-093 BLK-095 BLK-096 BLK-097 BLK-098 BLK-099 BLK-100 BLK-109 BLK-110
+// btc-lean: INV-007 INV-009 INV-010 INV-104 INV-105 INV-106 INV-107 INV-110 INV-111 INV-112 INV-113
+// btc-lean: TXV-004 TXV-005 TXV-006 TXV-007 TXV-008 TXV-009 TXV-010 TXV-011 TXV-012 TXV-013 TXV-014
+// btc-lean: TXV-015 TXV-016 TXV-024 TXV-063 TXV-064 TXV-065 TXV-068 TXV-071 TXV-072 TXV-074
 fn body_rules_run_after_the_header_merkle_check() {
     let cb = coinbase(1);
     let (a, b) = (non_coinbase_spend(1), non_coinbase_spend(2));
@@ -905,6 +911,7 @@ fn witness_commitment_script_honors_reserved() {
 }
 
 #[test]
+// btc-lean: BLK-089 BLK-090 INV-033
 fn p1_block_subsidy_halvings() {
     let main = ChainParams::mainnet();
     assert_eq!(block_subsidy(0, &main), 50_0000_0000);
@@ -1197,6 +1204,7 @@ fn s8_coinbase_witness_without_commitment_is_missing() {
 /// Length 2 is the floor. Height 1's BIP34 push is one byte (`OP_1`); the
 /// length rule rejects that encoding before the height check.
 #[test]
+// btc-lean: INV-008
 fn s9_coinbase_scriptsig_length_two_accepts_one_rejects() {
     let cb = coinbase(1);
     assert_eq!(cb.input[0].script_sig.len(), 2);
@@ -3090,6 +3098,7 @@ fn s14_stripped_size_1_000_000_accepts_1_000_001_rejects() {
 }
 
 #[test]
+// btc-lean: INV-001 TXV-001
 fn s15_rejects_empty_vin() {
     validate_block_structure(
         &block_with(vec![coinbase(0), non_coinbase_spend(1)]),
@@ -3112,6 +3121,7 @@ fn s15_rejects_empty_vin() {
 }
 
 #[test]
+// btc-lean: INV-003 TXV-003
 fn s16_tx_stripped_size_1_000_000_accepts_1_000_001_rejects() {
     let mut lo = 0usize;
     let mut hi = MAX_BLOCK_STRIPPED_SIZE;
@@ -3255,6 +3265,7 @@ fn max_money_fits_in_i64_so_the_assemble_cast_is_in_range() {
 }
 
 #[test]
+// btc-lean: INV-004 INV-005 INV-006 INV-024 INV-029 INV-032 INV-034
 fn assemble_without_pres_sums_zero_and_rejects_over_max() {
     fn one(sats: u64) -> Transaction {
         Transaction {

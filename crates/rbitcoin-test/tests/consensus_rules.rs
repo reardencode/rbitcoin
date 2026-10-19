@@ -445,6 +445,9 @@ fn same_batch_spend_of_a_later_block_is_missing() {
 
 #[allow(clippy::cognitive_complexity)] // one fixture, many boundary arms
 #[test]
+// btc-lean: BLK-015 BLK-016 BLK-017 BLK-018 BLK-019 BLK-020 BLK-021 BLK-102 BLK-103 BLK-104 INV-027
+// btc-lean: INV-028 INV-088 INV-089 INV-090 INV-091 INV-092 INV-093 INV-109 SWT-029 SWT-030 SWT-031
+// btc-lean: SWT-032 SWT-033 SWT-034 SWT-035 TXV-020 TXV-021 TXV-070
 fn header_and_spending_boundaries() {
     use bitcoin::absolute::LockTime;
     use bitcoin::transaction::Version as TxVersion;
@@ -685,6 +688,7 @@ fn header_and_spending_boundaries() {
     let empty_block = mine_regtest_block(tip, time, 101, vec![empty_out]);
     let err = accept_and_connect_block(&q, &params, Height(101), &empty_block, Milestone::NONE);
     assert!(
+        // btc-lean: INV-002 TXV-002
         matches!(err, Err(ConfirmError::Rules(ConsensusError::BadTx(s))) if s.contains("no outputs")),
         "non-coinbase empty vout: {err:?}"
     );

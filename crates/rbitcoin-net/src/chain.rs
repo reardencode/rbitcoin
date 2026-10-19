@@ -327,6 +327,7 @@ pub(crate) fn reject_is_mutated(reason: &str) -> bool {
 /// its reason. The returned error keeps the store-facing Display string.
 /// A consensus header failure names the block so it can be marked invalid.
 /// A store fault stays a store fault: it must not be cached as `BLOCK_FAILED`.
+// btc-lean: BLK-119 BLK-120 BLK-121 INV-144
 fn connect_failed_for_header(hash: [u8; 32], e: NetError) -> NetError {
     match e {
         NetError::Consensus(msg) => NetError::ConnectFailed { hash, msg },
@@ -334,6 +335,7 @@ fn connect_failed_for_header(hash: [u8; 32], e: NetError) -> NetError {
     }
 }
 
+// btc-lean: BLK-059 BLK-063 BLK-064 BLK-114 INV-145
 fn header_reject(header: &Header, e: &rbitcoin_query::ConfirmError) -> NetError {
     if e.is_cancelled() {
         return NetError::Cancelled;
@@ -458,6 +460,7 @@ pub struct ChainTipInfo {
 /// Equal total work prefers the precious tip, then the earlier held tip.
 /// A precious hash missing from the hold map has sequence `u64::MAX`; the
 /// precious bit wins before that comparison.
+// btc-lean: BLK-065 BLK-116 BLK-117 INV-143
 fn held_branch_beats(
     candidate: Work,
     candidate_precious: bool,
@@ -795,6 +798,7 @@ impl ChainHub {
     }
 
     /// True when tip work meets `-minimumchainwork` (or the flag is unset).
+    // btc-lean: INV-147
     pub fn meets_minimum_chain_work(&self) -> bool {
         let min = *self.minimum_chain_work.read().unwrap();
         match min {
@@ -5392,6 +5396,8 @@ mod tests {
     /// window past which an unrequested header is too far ahead.
     #[test]
     #[allow(clippy::cognitive_complexity)] // one hub, many chain-edge arms
+                                           // btc-lean: BLK-059 BLK-063 BLK-064 BLK-065 BLK-114 BLK-115 BLK-116 BLK-117 BLK-118 BLK-119
+                                           // btc-lean: BLK-120 BLK-121 INV-140 INV-143 INV-144 INV-145
     fn chain_edges_pin_work_headers_and_reopen() {
         let (dir, hub) = tmp_hub();
         hub.ensure_genesis().unwrap();

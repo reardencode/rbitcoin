@@ -35,6 +35,7 @@ impl NodeClock {
         self.attempt_at.load(Ordering::SeqCst)
     }
 
+    // btc-lean: BLK-130
     pub fn now_secs(&self) -> u64 {
         let m = self.mock.load(Ordering::Relaxed);
         if m > 0 {

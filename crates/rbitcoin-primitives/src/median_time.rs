@@ -7,6 +7,7 @@ pub fn median_time_past_times(times: &[u32]) -> Result<u32, &'static str> {
     }
     let mut sorted = times.to_vec();
     sorted.sort_unstable();
+    // btc-lean: BLK-056
     Ok(sorted[sorted.len() / 2])
 }
 

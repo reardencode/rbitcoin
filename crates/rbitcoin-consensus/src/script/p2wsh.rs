@@ -8,6 +8,7 @@ use super::interpreter::{self, EvalContext, SigVersion};
 use crate::block::ScriptCheckJob;
 use crate::error::ConsensusError;
 
+// btc-lean: SWT-009
 pub(crate) fn verify(
     job: &ScriptCheckJob,
     input_index: usize,
@@ -27,6 +28,7 @@ pub(crate) fn verify_with_scripthash(
     scripthash: &[u8; 32],
 ) -> Result<(), ConsensusError> {
     let input = &tx.input[input_index];
+    // btc-lean: SCR-055 SCR-134 SCR-137 SWT-007
     if input.witness.is_empty() {
         return Err(ConsensusError::Script("p2wsh empty witness".into()));
     }
@@ -40,6 +42,7 @@ pub(crate) fn verify_with_scripthash(
         .nth(wit_len - 1)
         .ok_or_else(|| ConsensusError::Script("p2wsh witness".into()))?;
     let actual = crypto::sha256(script_bytes);
+    // btc-lean: SCR-133 SCR-135 SWT-008
     if &actual != scripthash {
         return Err(ConsensusError::Script("p2wsh script hash".into()));
     }
@@ -64,6 +67,7 @@ pub(crate) fn execute_witness_v0<'w>(
 ) -> Result<(), ConsensusError> {
     let mut stack: Vec<Vec<u8>> = Vec::with_capacity(items.size_hint().0);
     for item in items {
+        // btc-lean: SWT-010
         if item.len() > interpreter::MAX_SCRIPT_ELEMENT_SIZE {
             return Err(ConsensusError::Script("PUSH_SIZE".into()));
         }
@@ -85,6 +89,7 @@ mod tests {
     use bitcoin::{Amount, OutPoint, Sequence, TxIn, TxOut, Witness};
 
     #[test]
+    // btc-lean: SWT-007 SWT-008 SWT-009
     fn empty_witness_and_hash_mismatch() {
         let mut spk = vec![0x00, 0x20];
         spk.extend([0u8; 32]);

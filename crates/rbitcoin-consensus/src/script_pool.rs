@@ -440,6 +440,7 @@ fn workers() -> &'static ScriptWorkers {
         epoch: AtomicUsize::new(0),
     });
     SPAWN.get_or_init(|| {
+        // btc-lean: BLK-124
         let n = thread::available_parallelism()
             .map(|p| p.get())
             .unwrap_or(4)

@@ -3,6 +3,7 @@
 use super::bip34_height_script;
 
 #[test]
+// btc-lean: BLK-069 BLK-070 INV-103
 fn small_heights_use_op_n() {
     assert_eq!(bip34_height_script(0), vec![0x00]);
     for h in 1u32..=16 {

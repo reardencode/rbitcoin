@@ -72,6 +72,7 @@ pub fn add_sigops(cost: u64, legacy: u64, input: u64) -> Result<u64, ConsensusEr
     Ok(next)
 }
 
+// btc-lean: BLK-103 TXV-024
 pub fn fee_from_values(value_in: i64, value_out: i64) -> Result<i64, ConsensusError> {
     if value_out > value_in {
         return Err(ConsensusError::BadTx("in < out"));
@@ -96,6 +97,7 @@ pub fn add_value_in(value_in: i64, sat: u64) -> Result<i64, ConsensusError> {
         .ok_or(ConsensusError::BadTx("value in overflow"))
 }
 
+// btc-lean: BLK-100 BLK-109 INV-028 INV-107 TXV-021 TXV-070
 pub fn reject_genesis_coinbase_spend(is_genesis: bool) -> Result<(), ConsensusError> {
     if is_genesis {
         Err(ConsensusError::MissingPrevout)
@@ -114,6 +116,7 @@ pub fn reject_duplicate_input(inserted: bool) -> Result<(), ConsensusError> {
 
 /// Same-block prevout. A later create is not yet a coin. The coinbase of this
 /// block is immature.
+// btc-lean: BLK-095 BLK-096 BLK-098 INV-104 INV-105 INV-106 INV-113 TXV-063
 pub fn reject_same_block_create(
     prev_index: usize,
     spend_index: usize,
@@ -127,6 +130,7 @@ pub fn reject_same_block_create(
     Ok(())
 }
 
+// btc-lean: BLK-097 BLK-099 BLK-102 BLK-110 INV-027 INV-109 INV-110 TXV-020 TXV-064 TXV-065 TXV-072
 pub fn reject_unresolved_spend(missing: bool) -> Result<(), ConsensusError> {
     if missing {
         Err(ConsensusError::MissingPrevout)

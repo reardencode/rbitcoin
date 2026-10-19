@@ -19,6 +19,9 @@ fn spks(prevouts: &[TxOut]) -> Vec<&[u8]> {
 }
 
 #[test]
+// btc-lean: BLK-033 BLK-034 BLK-035 BLK-036 INV-035 INV-036 INV-037 INV-038 INV-039 INV-040 SWT-017
+// btc-lean: SWT-018 SWT-019 SWT-021 SWT-022 SWT-023 SWT-024 SWT-026 SWT-027 TXV-049 TXV-050 TXV-051
+// btc-lean: TXV-052 TXV-053 TXV-054
 fn legacy_sigop_cost_scales_checksig() {
     let tx = Transaction {
         version: TxVersion::TWO,
@@ -262,6 +265,7 @@ fn p2sh_sigops_from_redeem() {
 }
 
 #[test]
+// btc-lean: SWT-025
 fn witness_p2wpkh_counts_one() {
     let mut spk = vec![0x00, 0x14];
     spk.extend([0u8; 20]);
@@ -291,6 +295,7 @@ fn witness_p2wpkh_counts_one() {
 
 /// Empty P2WSH has no witness script to count. A v1 program is not P2WPKH or P2WSH.
 #[test]
+// btc-lean: SWT-028 TPR-069
 fn witness_empty_p2wsh_and_v1_program_cost_zero() {
     let spend = |spk: Vec<u8>| {
         let prevouts = vec![TxOut {

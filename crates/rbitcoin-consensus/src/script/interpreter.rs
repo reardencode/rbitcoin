@@ -69,6 +69,7 @@ impl PreTapscript {
 /// If any of these appears in a **tapscript** during decoding, the script is
 /// unconditionally valid.
 /// Classic disabled opcodes (legacy / witness v0) — consensus fail if executed.
+// btc-lean: INV-045 INV-063 INV-064 SCR-092 SCR-170
 fn is_disabled_legacy(code: u8) -> bool {
     matches!(
         code,
@@ -89,6 +90,7 @@ fn is_disabled_legacy(code: u8) -> bool {
     )
 }
 
+// btc-lean: SCR-152 SCR-153 SCR-154 SCR-172 TPR-062
 fn is_op_success(code: u8) -> bool {
     matches!(
         code,
@@ -283,6 +285,7 @@ impl<'a> EvalContext<'a> {
             minimal_if: false,
             witness_pubkeytype: false,
             const_scriptcode: false,
+            // btc-lean: SCR-167
             codeseparator_pos: Cell::new(0xFFFF_FFFF),
             codeseparator_script_off: Cell::new(None),
             cache: RefCell::new(None),
@@ -347,6 +350,7 @@ impl<'a> EvalContext<'a> {
 }
 
 /// BIP141 / BIP342: exactly one true value on the stack (witness / tapscript).
+// btc-lean: SCR-008 SCR-138 SWT-012
 pub(crate) fn require_clean_true(stack: &[Vec<u8>]) -> Result<(), ConsensusError> {
     if stack.len() != 1 {
         return Err(ConsensusError::Script("cleanstack".into()));
@@ -362,6 +366,7 @@ pub(crate) fn require_clean_true(stack: &[Vec<u8>]) -> Result<(), ConsensusError
 /// **Not** cleanstack — BIP62 CLEANSTACK was never activated for non-witness
 /// consensus. Requiring `len==1` falsely rejected valid P2SH (signet 219477).
 pub(crate) fn require_true_top(stack: &[Vec<u8>]) -> Result<(), ConsensusError> {
+    // btc-lean: INV-048 SCR-002 SCR-004 SCR-056 SCR-077
     if stack.is_empty() || !bitcoin::script::read_scriptbool(stack.last().unwrap()) {
         return Err(ConsensusError::Script("script false".into()));
     }
@@ -450,6 +455,8 @@ impl ConditionStack {
 
 /// Evaluate `script`. On success returns `true` if cleanstack must still be
 /// checked; `false` if the script already fully succeeded (e.g. OP_SUCCESS).
+// btc-lean: INV-062 SCR-001 SCR-003 SCR-017 TPR-059 TPR-060 TPR-061 TPR-063 TPR-064 TPR-065 TPR-066
+// btc-lean: TPR-067 TPR-068
 pub(crate) fn eval_script(
     script: &Script,
     stack: &mut Vec<Vec<u8>>,
@@ -458,6 +465,7 @@ pub(crate) fn eval_script(
     let bytes = script.as_bytes();
     // BIP342: OP_SUCCESSx anywhere in tapscript → unconditional success *before*
     // size / stack limits (even unparseable tails pass).
+    // btc-lean: INV-061
     if ctx.sig_version == SigVersion::TapScript && tapscript_has_op_success(script) {
         return Ok(false);
     }
@@ -472,6 +480,7 @@ pub(crate) fn eval_script(
         }
     }
     // Legacy / v0 only: 10k script size. Tapscript: no explicit size limit.
+    // btc-lean: INV-041 SCR-018 SCR-019 SWT-011
     if ctx.sig_version != SigVersion::TapScript && bytes.len() > MAX_SCRIPT_SIZE_LEGACY {
         return Err(ConsensusError::Script("script too large".into()));
     }
@@ -479,6 +488,7 @@ pub(crate) fn eval_script(
     let mut altstack: Vec<Vec<u8>> = Vec::new();
     let mut cond_stack = ConditionStack::default();
     let mut op_count = 0usize;
+    // btc-lean: SCR-155 TPR-073 TPR-074
     let enforce_op_limit = ctx.sig_version != SigVersion::TapScript;
     // TapScript always MINIMALIF. SCRIPT_VERIFY_MINIMALIF applies to witness v0
     // (and tapscript); bare/Base scripts ignore the flag (Core fixture #1197).
@@ -489,6 +499,7 @@ pub(crate) fn eval_script(
     // Prefer instruction_indices so OP_CODESEPARATOR can set Base/WitnessV0
     // scriptCode byte offsets (BIP143 / Core pbegincodehash).
     for item in script.instruction_indices() {
+        // btc-lean: SCR-045
         let (byte_index, ins) = item.map_err(|_| ConsensusError::Script("script parse".into()))?;
         let this_pos = opcode_pos;
         opcode_pos = opcode_pos.saturating_add(1);
@@ -498,6 +509,7 @@ pub(crate) fn eval_script(
             Instruction::PushBytes(b) => {
                 // Core: MAX_SCRIPT_ELEMENT_SIZE even in unexecuted branches.
                 let data = b.as_bytes();
+                // btc-lean: INV-042 SCR-020 SCR-021
                 if data.len() > MAX_SCRIPT_ELEMENT_SIZE {
                     return Err(ConsensusError::Script("push too large".into()));
                 }
@@ -506,6 +518,7 @@ pub(crate) fn eval_script(
                 if executing {
                     if ctx.minimal_data {
                         let opcode = bytes.get(byte_index).copied().unwrap_or(0);
+                        // btc-lean: INV-046 SCR-047 SCR-048 SCR-049
                         if !check_minimal_push(data, opcode) {
                             return Err(ConsensusError::Script("MINIMALDATA".into()));
                         }
@@ -520,6 +533,8 @@ pub(crate) fn eval_script(
                 // including OP_IF / NOTIF / ELSE / ENDIF.
                 if enforce_op_limit && code > 0x60 {
                     op_count += 1;
+                    // btc-lean: INV-043 SCR-022 SCR-023 SCR-024 SCR-025 SCR-028 SCR-067 SCR-113
+                    // btc-lean: SCR-171
                     if op_count > MAX_OPS_LEGACY {
                         return Err(ConsensusError::Script("op count".into()));
                     }
@@ -558,6 +573,7 @@ pub(crate) fn eval_script(
                         cond_stack.toggle_top();
                         continue;
                     }
+                    // btc-lean: SCR-064
                     0x68 => {
                         if cond_stack.is_empty() {
                             return Err(ConsensusError::Script("OP_ENDIF".into()));
@@ -569,6 +585,7 @@ pub(crate) fn eval_script(
                 }
 
                 // Core: OP_VERIF / OP_VERNOTIF always fail (even unexecuted).
+                // btc-lean: SCR-065
                 if code == 0x65 || code == 0x66 {
                     return Err(ConsensusError::Script("OP_VERIF".into()));
                 }
@@ -579,6 +596,7 @@ pub(crate) fn eval_script(
                     )));
                 }
                 // CONST_SCRIPTCODE: OP_CODESEPARATOR rejected in Base even unexecuted.
+                // btc-lean: SCR-100
                 if code == 0xab && ctx.const_scriptcode && ctx.sig_version == SigVersion::Base {
                     return Err(ConsensusError::Script("OP_CODESEPARATOR".into()));
                 }
@@ -597,8 +615,10 @@ pub(crate) fn eval_script(
                     // OP_VERIF, and OP_RETURN fail from the unknown-opcode arm
                     // (OP_VERIF already returned above, including unexecuted).
                     0x4f => push(stack, altstack.len(), vec![0x81])?,
+                    // btc-lean: SCR-033 SCR-046
                     n if (0x51..=0x60).contains(&n) => push(stack, altstack.len(), vec![n - 0x50])?,
                     0x61 => {}
+                    // btc-lean: SCR-068
                     0x69 => {
                         let v = pop(stack)?;
                         if !bitcoin::script::read_scriptbool(&v) {
@@ -606,6 +626,7 @@ pub(crate) fn eval_script(
                         }
                     }
 
+                    // btc-lean: SCR-031 SCR-073
                     0x6b => {
                         let v = pop(stack)?;
                         altstack.push(v);
@@ -742,6 +763,7 @@ pub(crate) fn eval_script(
                             return Err(ConsensusError::Script("OP_EQUALVERIFY".into()));
                         }
                     }
+                    // btc-lean: SCR-087 SCR-088 SCR-090
                     0x8b => {
                         let v = decode_i64(&pop(stack)?, rm)?;
                         push(stack, altstack.len(), scriptnum_encode(v.saturating_add(1)))?;
@@ -801,6 +823,7 @@ pub(crate) fn eval_script(
                         let a = decode_i64(&pop(stack)?, rm)?;
                         push(stack, altstack.len(), scriptnum_encode(a.max(b)))?;
                     }
+                    // btc-lean: SCR-089
                     0xa5 => {
                         let max = decode_i64(&pop(stack)?, rm)?;
                         let min = decode_i64(&pop(stack)?, rm)?;
@@ -822,6 +845,7 @@ pub(crate) fn eval_script(
                         let v = pop(stack)?;
                         push(stack, altstack.len(), crypto::sha256(&v).to_vec())?;
                     }
+                    // btc-lean: SCR-093 SCR-094 SCR-095
                     0xa9 => {
                         let v = pop(stack)?;
                         push(stack, altstack.len(), crypto::hash160(&v).to_vec())?;
@@ -835,16 +859,19 @@ pub(crate) fn eval_script(
                     0xab => {
                         // Tapscript: instruction index. Base/v0: scriptCode after this opcode.
                         // CONST_SCRIPTCODE already returned above, including unexecuted.
+                        // btc-lean: INV-057 SCR-096 SCR-097 SCR-167
                         ctx.codeseparator_pos.set(this_pos);
                         ctx.codeseparator_script_off
                             .set(Some(byte_index.saturating_add(1)));
                     }
+                    // btc-lean: INV-078 SCR-109 SCR-111 SCR-117 SCR-136
                     0xac => op_checksig(stack, altstack.len(), ctx, false)?,
                     0xad => op_checksig(stack, altstack.len(), ctx, true)?,
                     0xba => {
                         if ctx.sig_version != SigVersion::TapScript {
                             return Err(ConsensusError::Script("unknown opcode 0xba".into()));
                         }
+                        // btc-lean: TPR-056
                         op_checksigadd(stack, altstack.len(), ctx)?;
                     }
                     0xae => {
@@ -864,6 +891,8 @@ pub(crate) fn eval_script(
                         };
                         op_checkmultisig(stack, altstack.len(), ctx, true, &mut op_count, pre)?;
                     }
+                    // btc-lean: INV-022 SCR-122 SCR-123 SCR-124 SCR-126 SCR-132 TXV-043 TXV-044
+                    // btc-lean: TXV-045
                     0xb1 => {
                         // BIP65: pre-activation is NOP.
                         if !ctx.bip65_active {
@@ -888,6 +917,8 @@ pub(crate) fn eval_script(
                             return Err(ConsensusError::Script("CLTV final sequence".into()));
                         }
                     }
+                    // btc-lean: INV-023 SCR-125 SCR-127 SCR-128 SCR-129 SCR-130 SCR-131 TXV-046
+                    // btc-lean: TXV-047 TXV-048
                     0xb2 => {
                         // BIP112: decode (5-byte) → disable-flag NOP → version < 2 fails
                         // (not NOP). docs/external_findings/004-csv-nop-and-scriptnum-width.md
@@ -912,11 +943,13 @@ pub(crate) fn eval_script(
                             return Err(ConsensusError::Script("CSV".into()));
                         }
                     }
+                    // btc-lean: SCR-071 SCR-072
                     0xb0 | 0xb3 | 0xb4 | 0xb5 | 0xb6 | 0xb7 | 0xb8 | 0xb9 => {}
                     _ => {
                         // OP_SUCCESS returned before this loop. Disabled opcodes
                         // already returned above.
                         return Err(ConsensusError::Script(format!(
+                            // btc-lean: SCR-066 SCR-069 SCR-174
                             "unknown opcode 0x{code:02x}"
                         )));
                     }
@@ -925,6 +958,7 @@ pub(crate) fn eval_script(
         }
     }
 
+    // btc-lean: INV-047 SCR-061 SCR-062 SCR-063
     if !cond_stack.is_empty() {
         return Err(ConsensusError::Script("unbalanced IF".into()));
     }
@@ -953,6 +987,7 @@ fn sequence_csv_ok(seq: Sequence, csv: u32) -> bool {
     (csv_masked & 0xffff) <= (seq_masked & 0xffff)
 }
 
+// btc-lean: SWT-054 TPR-055
 fn op_checksig(
     stack: &mut Vec<Vec<u8>>,
     alt_len: usize,
@@ -1030,6 +1065,7 @@ fn op_checksig_tapscript(
     Ok(())
 }
 
+// btc-lean: SCR-040 TPR-022 TPR-071
 fn tapscript_init_weight(tx: &Transaction, input_index: usize, sig_version: SigVersion) -> i64 {
     if sig_version != SigVersion::TapScript {
         return 0;
@@ -1055,6 +1091,7 @@ fn tapscript_sig_result(
             return Err(ConsensusError::Script("tapscript validation weight".into()));
         }
     }
+    // btc-lean: INV-054
     if pubkey.is_empty() {
         return Err(ConsensusError::Script("tapscript empty pubkey".into()));
     }
@@ -1074,6 +1111,8 @@ fn tapscript_sig_result(
     Ok(TapSigResult::Valid)
 }
 
+// btc-lean: INV-049 INV-060 SCR-026 SCR-027 SCR-032 SCR-043 SCR-114 SCR-116 SCR-118 SCR-119 SCR-120
+// btc-lean: SCR-121 SWT-063 SWT-064 SWT-065
 fn op_checkmultisig(
     stack: &mut Vec<Vec<u8>>,
     alt_len: usize,
@@ -1180,6 +1219,7 @@ fn checkmultisig_pairs(
 ///
 /// Consensus: empty `data` is Core's `CScript() << vchSig` = the push `0x00`,
 /// so an empty signature deletes every OP_0 opcode.
+// btc-lean: INV-056 SCR-098 SCR-099 SCR-101 SCR-115 SCR-139
 pub(crate) fn find_and_delete(script: &[u8], data: &[u8]) -> Vec<u8> {
     let mut needle = Vec::with_capacity(data.len() + 3);
     if data.len() < 0x4c {
@@ -1362,6 +1402,7 @@ fn ecdsa_sig_matches(
     let Ok((ecdsa_sig, sighash_ty)) = crypto::parse_der_sig(sig, false) else {
         return Ok(false);
     };
+    // btc-lean: SCR-112
     let Ok(pk) = crypto::parse_pubkey(pubkey) else {
         return Ok(false);
     };
@@ -1394,11 +1435,14 @@ fn checksig_legacy_encodings(
     Ok(())
 }
 
+// btc-lean: INV-050 INV-051 INV-052 INV-053 SCR-041 SCR-042 SCR-102 SCR-103 SCR-104 SCR-106
+// btc-lean: SCR-107 SCR-108 SCR-110 SCR-179 SGN-111 SWT-058 SWT-059 SWT-060 SWT-061
 fn check_signature_encoding(sig: &[u8], ctx: &EvalContext<'_>) -> Result<(), ConsensusError> {
     let need_der = ctx.bip66_active || ctx.low_s || ctx.strictenc;
     if need_der && !crypto::is_valid_signature_encoding(sig) {
         return Err(ConsensusError::Script("SIG_DER".into()));
     }
+    // btc-lean: SGN-108
     if ctx.low_s {
         // LOW_S already required BIP66 encoding above, so the lax parse hits.
         let (ecdsa, _) = crypto::parse_der_sig(sig, false).expect("BIP66 signature parses");
@@ -1413,6 +1457,7 @@ fn check_signature_encoding(sig: &[u8], ctx: &EvalContext<'_>) -> Result<(), Con
 }
 
 /// BIP340 Schnorr verify for a 32-byte x-only pubkey in tapscript (leaf sighash).
+// btc-lean: INV-055 TPR-057 TPR-058
 fn checksig_schnorr(
     sig: &[u8],
     pubkey: &[u8],
@@ -1476,6 +1521,7 @@ fn sighash_for_script(
 }
 
 fn push(stack: &mut Vec<Vec<u8>>, alt_len: usize, v: Vec<u8>) -> Result<(), ConsensusError> {
+    // btc-lean: INV-044 SCR-029
     if stack.len().saturating_add(alt_len).saturating_add(1) > MAX_STACK_SIZE {
         return Err(ConsensusError::Script("stack size".into()));
     }
@@ -1489,6 +1535,7 @@ fn pop(stack: &mut Vec<Vec<u8>>) -> Result<Vec<u8>, ConsensusError> {
         .ok_or_else(|| ConsensusError::Script("stack empty".into()))
 }
 
+// btc-lean: SCR-030 SCR-074 SCR-078
 fn require_n(stack: &[Vec<u8>], n: usize) -> Result<(), ConsensusError> {
     if stack.len() < n {
         return Err(ConsensusError::Script("stack empty".into()));
@@ -1510,6 +1557,7 @@ fn decode_i64(v: &[u8], require_minimal: bool) -> Result<i64, rbitcoin_primitive
 }
 
 /// BIP342 MINIMALIF: IF/NOTIF argument is empty vector or single-byte 0x01 only.
+// btc-lean: INV-059 SCR-058 SCR-059 SCR-060 SCR-178 SCR-183 SWT-062
 fn is_minimal_if_arg(v: &[u8]) -> bool {
     v.is_empty() || v == [0x01]
 }

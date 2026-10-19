@@ -23,6 +23,9 @@ fn bare_tx(version: i32, lock_time: LockTime, sequence: Sequence) -> Transaction
 }
 
 #[test]
+// btc-lean: BLK-066 BLK-067 BLK-068 INV-011 INV-012 INV-013 INV-014 INV-015 INV-016 INV-017 INV-018
+// btc-lean: INV-019 INV-020 INV-021 INV-108 TXV-027 TXV-028 TXV-029 TXV-030 TXV-031 TXV-032 TXV-034
+// btc-lean: TXV-035 TXV-036 TXV-037 TXV-038 TXV-039 TXV-040
 fn sequence_final_ignores_locktime() {
     let tx = bare_tx(1, LockTime::from_height(100).unwrap(), Sequence::MAX);
     assert!(is_final_tx(&tx, 50, 1_000_000));

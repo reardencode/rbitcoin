@@ -4142,6 +4142,7 @@ mod tests {
     }
 
     #[test]
+    // btc-lean: INV-147
     fn heavier_chain_replaces_checkpoints_and_a_cheap_fork_is_not_stored() {
         let (_dir, mut hub) = crate::chain::tiny_regtest_hub_labeled("header-walk-4");
         hub.ensure_genesis().unwrap();

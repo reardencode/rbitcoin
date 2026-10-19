@@ -18,6 +18,9 @@ use super::interpreter::{self, EvalContext, SigVersion};
 use crate::block::ScriptCheckJob;
 use crate::error::ConsensusError;
 
+// btc-lean: SCR-142 SCR-143 SCR-149 SCR-150 SCR-151 SCR-157 SCR-158 SCR-160 SCR-163 SCR-168
+// btc-lean: TPR-001 TPR-002 TPR-003 TPR-004 TPR-012 TPR-013 TPR-016 TPR-017 TPR-034 TPR-035 TPR-036
+// btc-lean: TPR-037 TPR-038 TPR-040 TPR-041 TPR-047 TPR-048 TPR-049 TPR-050 TPR-052 TPR-053 TPR-054
 pub(crate) fn verify(
     job: &ScriptCheckJob,
     input_index: usize,
@@ -43,6 +46,7 @@ pub(crate) fn verify(
 }
 
 /// BIP341 annex: last witness item, only when `len ≥ 2` and first byte is `0x50`.
+// btc-lean: INV-075 TPR-005 TPR-033 TPR-039
 fn bip341_annex(witness: &Witness) -> Option<&[u8]> {
     if witness.len() < 2 {
         return None;
@@ -55,6 +59,7 @@ fn bip341_annex(witness: &Witness) -> Option<&[u8]> {
     }
 }
 
+// btc-lean: INV-072 SCR-144 SCR-161 TPR-051
 fn verify_key_path(
     job: &ScriptCheckJob,
     input_index: usize,
@@ -102,6 +107,7 @@ fn verify_key_path(
         &single,
     )?;
     let msg = Message::from_digest(sighash);
+    // btc-lean: TPR-007
     crypto::SECP.with(|secp| {
         secp.verify_schnorr(&sig, &msg, &xonly)
             .map_err(|_| ConsensusError::Script("p2tr schnorr".into()))
@@ -114,6 +120,8 @@ const CONTROL_NODE: usize = 32;
 const CONTROL_MAX_NODES: usize = 128;
 
 /// BIP341 commitment. Returns the even leaf version byte and the tapleaf hash.
+// btc-lean: INV-073 SCR-145 SCR-146 SCR-147 SCR-148 TPR-008 TPR-009 TPR-010 TPR-011 TPR-015 TPR-018
+// btc-lean: TPR-019 TPR-020 TPR-083
 fn verify_control_commitment(
     control: &[u8],
     output_key_bytes: &[u8],
@@ -163,6 +171,7 @@ fn verify_control_commitment(
     Ok((leaf, tapleaf_hash))
 }
 
+// btc-lean: SCR-156 SCR-159 TPR-043 TPR-045
 fn verify_script_path(
     job: &ScriptCheckJob,
     input_index: usize,
@@ -194,6 +203,7 @@ fn verify_script_path(
 
     // Unknown leaf versions are valid consensus spends. The script is not run.
     // DISCOURAGE_UPGRADABLE_TAPROOT_VERSION is standardness. Confirm never sets it.
+    // btc-lean: INV-074
     if leaf != TAPSCRIPT_LEAF {
         return Ok(());
     }
@@ -315,6 +325,7 @@ mod bip341_tests {
 
     /// Future leaf `0xc2` and annex leaf `0x50` commit and succeed. Tapscript still runs.
     #[test]
+    // btc-lean: TPR-022 TPR-071
     fn script_path_accepts_leaf_0x50_with_annex_and_0xc2() {
         use bitcoin::consensus::Encodable;
         use bitcoin::key::TapTweak;

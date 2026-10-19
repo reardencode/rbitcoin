@@ -123,6 +123,7 @@ fn oversized_866342(mut block: Block) -> Block {
 }
 
 #[test]
+// btc-lean: BLK-124 TXV-058 TXV-059 TXV-060
 fn block_866342_structure_scripts_and_overweight() {
     let t0 = Instant::now();
     let block = load_block();

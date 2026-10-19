@@ -13,13 +13,16 @@ pub fn merkle_root_from_txids(leaves: &[[u8; 32]]) -> [u8; 32] {
 
 /// [`merkle_root_from_txids`] plus Core's `ComputeMerkleRoot` mutation flag
 /// (CVE-2012-2459).
+// btc-lean: BLK-007
 pub fn merkle_root_mutated(leaves: &[[u8; 32]]) -> ([u8; 32], bool) {
+    // btc-lean: BLK-013
     if leaves.is_empty() {
         return ([0u8; 32], false);
     }
     let mut mutated = false;
     let mut level: Vec<[u8; 32]> = leaves.to_vec();
     while level.len() > 1 {
+        // btc-lean: BLK-011
         mutated |= level.chunks_exact(2).any(|pair| pair[0] == pair[1]);
         level = merkle_parent_level(level);
     }
@@ -29,6 +32,7 @@ pub fn merkle_root_mutated(leaves: &[[u8; 32]]) -> ([u8; 32], bool) {
 /// Sibling hashes from `leaves[index]` up to the root, deepest first. Empty for
 /// one leaf. Folding the leaf with them (left when the index bit is 0)
 /// reproduces [`merkle_root_from_txids`]. The leaf's own value feeds no entry.
+// btc-lean: BLK-129
 pub fn merkle_branch(leaves: &[[u8; 32]], mut index: usize) -> Vec<[u8; 32]> {
     let mut branch = Vec::new();
     let mut level: Vec<[u8; 32]> = leaves.to_vec();
@@ -58,6 +62,7 @@ pub fn merkle_root_from_branch(leaf: [u8; 32], branch: &[[u8; 32]], index: usize
 
 fn merkle_parent_level(mut level: Vec<[u8; 32]>) -> Vec<[u8; 32]> {
     if level.len() % 2 == 1 {
+        // btc-lean: BLK-008
         level.push(level[level.len() - 1]);
     }
     level
@@ -66,6 +71,7 @@ fn merkle_parent_level(mut level: Vec<[u8; 32]>) -> Vec<[u8; 32]> {
         .collect()
 }
 
+// btc-lean: BLK-009
 fn hash256_concat(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
     let mut eng = sha256::HashEngine::default();
     eng.input(a);
@@ -92,6 +98,7 @@ mod tests {
     /// CVE-2012-2459: a repeated tail at any level keeps the root and is
     /// flagged. The shorter list and an unpaired repeat are not.
     #[test]
+    // btc-lean: BLK-007 BLK-008 BLK-009 BLK-011 BLK-013 BLK-014 BLK-129
     fn merkle_mutation_flags_a_repeated_tail_at_any_level() {
         let l: Vec<[u8; 32]> = (1..=6u8).map(|n| [n; 32]).collect();
         let (root3, mutated) = merkle_root_mutated(&l[..3]);

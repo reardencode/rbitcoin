@@ -1234,6 +1234,7 @@ fn chain_ops_header_rejects(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub, p2wp
     assert_eq!(tip_count(ctx), tip_h);
 }
 
+// btc-lean: BLK-012 BLK-125
 fn chain_ops_submit_rejects(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub, p2wpkh: &ScriptBuf) {
     use bitcoin::absolute::LockTime;
     use bitcoin::transaction::Version as TxVersion;

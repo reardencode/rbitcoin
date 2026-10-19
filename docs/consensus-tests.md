@@ -2,6 +2,8 @@
 
 Every consensus rule **we implement** (not delegated wholesale to rust-bitcoin) has an automated test that would fail if the check were removed or inverted.
 
+The pinned `third_party/btc-lean` census (`spec/db/rules.yaml`) is tied to this tree by a `// btc-lean:` comment on the statement that implements or tests each rule. Proven rows with no site are [`btc-lean-gaps.md`](./btc-lean-gaps.md). `status: obsolete` needs no comment. `scripts/btc-lean-census.sh` runs in the `qc` job and checks the pin against the comments and that file. That check is not this matrix and does not transfer Lean proofs onto Rust.
+
 **Out of scope:** secp256k1, which stays the shared library. Script opcode parity against Bitcoin Core is this corpus (`crates/rbitcoin-consensus/tests/fixtures/script_corpus/`) plus Core's JSON (`script_tests.json`, `tx_valid.json`, `tx_invalid.json`, `sighash.json`), both checked against Core v31.1 `VerifyScript`. Not every historical mainnet retarget. One boundary is pinned: height 32256 compact `0x1d00d86a`, plus the quarter, 4×, and pow-limit clamp literals (`mainnet_retarget_32256_matches_core_compact`, `retarget_clamps_timespan_and_caps_at_pow_limit`).
 
 ## Running

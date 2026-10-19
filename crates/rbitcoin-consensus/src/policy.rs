@@ -115,6 +115,7 @@ pub fn check_libre_annex(tx: &Transaction) -> PolicyResult {
 }
 
 /// Core `CScript::IsUnspendable`: leading `OP_RETURN`, or over `MAX_SCRIPT_SIZE`.
+// btc-lean: BLK-093 BLK-094 INV-112 SCR-070 TXV-066 TXV-067
 pub fn is_unspendable(script: &[u8]) -> bool {
     script.first() == Some(&0x6a) || script.len() > 10_000
 }
@@ -373,6 +374,7 @@ mod tests {
         );
         // 10_000 bytes is spendable. One more byte, or equality, is not.
         assert!(!is_unspendable(&[0x51; 10_000]));
+        // btc-lean: BLK-094 TXV-066 TXV-067
         assert!(is_unspendable(&[0x51; 10_001]));
         let mut zero_exact = bare_tx(0);
         zero_exact.output[0].script_pubkey = ScriptBuf::from_bytes(vec![0x51; 10_000]);

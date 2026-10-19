@@ -40,6 +40,7 @@ pub struct TxPrecompute {
 
 impl TxPrecompute {
     /// One walk of `tx` including BIP143/341 midstates. Does not hash spent prevouts.
+    // btc-lean: BLK-006 SWT-041 TXV-018
     pub fn from_tx(tx: &Transaction) -> Self {
         Self::from_tx_inner(tx, true)
     }
@@ -101,6 +102,7 @@ impl TxPrecompute {
         })
     }
 
+    // btc-lean: SWT-068
     fn from_tx_inner(tx: &Transaction, sighash: bool) -> Self {
         let has_witness = uses_segwit_serialization(tx);
         if !has_witness {
@@ -119,6 +121,7 @@ impl TxPrecompute {
 
         base_size += enc(&mut txid_eng, &tx.version);
         total_size += enc(&mut wtxid_eng, &tx.version);
+        // btc-lean: SWT-037 SWT-038 SWT-039 SWT-040
         total_size += enc(&mut wtxid_eng, &0u8);
         total_size += enc(&mut wtxid_eng, &1u8);
 
@@ -166,6 +169,7 @@ impl TxPrecompute {
         total_size += enc(&mut wtxid_eng, &tx.lock_time);
 
         Self {
+            // btc-lean: BLK-005 TXV-017
             txid: sha256d::Hash::from_engine(txid_eng).to_byte_array(),
             wtxid: sha256d::Hash::from_engine(wtxid_eng).to_byte_array(),
             base_size,
@@ -259,6 +263,7 @@ impl TxPrecompute {
         Some(*self.outputs_d.get_or_init(|| sha256_again(&single)))
     }
 
+    // btc-lean: SWT-019 SWT-020 SWT-067 TXV-019
     pub fn weight_wu(&self) -> u64 {
         (self
             .base_size
@@ -838,6 +843,8 @@ mod tests {
     }
 
     #[test]
+    // btc-lean: BLK-003 BLK-005 BLK-006 SWT-020 SWT-037 SWT-038 SWT-039 SWT-040 SWT-041 SWT-067
+    // btc-lean: SWT-068 TXV-017 TXV-018 TXV-019
     fn from_tx_wire_matches_from_tx_on_legacy_and_witness() {
         for tx in [
             legacy_1in(),

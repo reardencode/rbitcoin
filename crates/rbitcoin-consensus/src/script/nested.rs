@@ -27,6 +27,8 @@ use crate::error::ConsensusError;
 /// [`verify_p2sh_legacy`] (legacy multisig multi-push, etc.).
 ///
 /// When `!job.witness_active`, always `None` (pre-segwit: redeem is ordinary Base script).
+// btc-lean: INV-067 INV-068 INV-070 INV-077 SCR-007 SCR-011 SCR-013 SCR-052 SCR-053 SWT-001 SWT-002
+// btc-lean: SWT-003 SWT-004 SWT-015
 pub(crate) fn try_p2sh_nested_segwit(
     job: &ScriptCheckJob,
     input_index: usize,
@@ -90,6 +92,7 @@ pub(crate) fn try_p2sh_nested_segwit(
 }
 
 /// Legacy P2SH: scriptSig is `<…data pushes…> <redeemScript>`; evaluate redeem.
+// btc-lean: INV-066 INV-069 SCR-005 SCR-006 SCR-012 SCR-034 SCR-036 SWT-013 SWT-016
 pub(crate) fn verify_p2sh_legacy(
     job: &ScriptCheckJob,
     input_index: usize,

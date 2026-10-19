@@ -46,7 +46,8 @@ into `AGENTS.md`.
 | [`env-knobs.md`](./env-knobs.md) | Residual `RBITCOIN_*` inventory. |
 | [`experimental-mainnet.md`](./experimental-mainnet.md) | 0.x mainnet runbook (early production / high-scrutiny). |
 | [`rpc.md`](./rpc.md) | Core-class JSON-RPC subset. |
-| [`consensus-tests.md`](./consensus-tests.md) | Rules we own vs Core corpora. |
+| [`consensus-tests.md`](./consensus-tests.md) | Rules we own vs Core corpora. btc-lean rows are `// btc-lean:` comments checked in `qc`. |
+| [`btc-lean-gaps.md`](./btc-lean-gaps.md) | Proven btc-lean rows with no rbitcoin statement, and why. |
 | [`core-functional.md`](./core-functional.md) | Core v31.1 functional harness. |
 | [`overlay-functional.md`](./overlay-functional.md) | Private Tor / i2pd / cjdns mesh harness (labeled / nightly). |
 | [`how-we-plan.md`](./how-we-plan.md) | Agent contract (cycle, Agent RAM, keep-compiling), then human rationale. |

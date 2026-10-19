@@ -47,6 +47,8 @@ fn sighash_row(cells: &[Value]) -> Result<sha256d::Hash, String> {
 }
 
 #[test]
+// btc-lean: SCR-140 SCR-164 SCR-165 SCR-169 SWT-042 SWT-043 SWT-044 SWT-045 SWT-046 SWT-047 SWT-048
+// btc-lean: SWT-049 SWT-050 SWT-051 SWT-052 SWT-053 SWT-054 SWT-055 SWT-066
 fn core_sighash_all_rows() {
     let rows = load_array();
     let mut total = 0u32;

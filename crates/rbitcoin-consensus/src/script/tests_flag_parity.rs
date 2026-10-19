@@ -98,6 +98,7 @@ fn one_of_two() -> Vec<u8> {
 /// fails that comparison and then matches; NULLFAIL only applies when the
 /// whole CHECKMULTISIG fails.
 #[test]
+// btc-lean: INV-051 SCR-179 SWT-059
 fn nullfail_p2wsh_multisig_sig_matching_later_key_accepts() {
     let ws = one_of_two();
     let unsigned = spend(Vec::new(), &[]);
@@ -208,6 +209,10 @@ fn high_s(sig: &[u8]) -> Vec<u8> {
 /// LOW_S and STRICTENC hashtype apply to P2WPKH signatures, native and
 /// P2SH-wrapped, as they do to the same CHECKSIG in any other script.
 #[test]
+// btc-lean: BLK-083 BLK-084 BLK-085 BLK-086 BLK-087 BLK-088 INV-053 INV-128 INV-129 INV-130 INV-131
+// btc-lean: INV-132 INV-133 INV-134 INV-135 INV-136 SCR-015 SCR-016 SCR-175 SCR-176 SCR-177 SCR-180
+// btc-lean: SCR-181 SCR-182 SGN-108 SWT-014 SWT-056 SWT-058 SWT-060 TPR-021 TPR-027 TPR-073 TPR-074
+// btc-lean: TPR-076 TPR-077 TXV-055 TXV-056 TXV-057
 fn p2wpkh_applies_low_s_and_strictenc_hashtype() {
     let program = p2wpkh_program(1);
     let unsigned = spend(Vec::new(), &[]);

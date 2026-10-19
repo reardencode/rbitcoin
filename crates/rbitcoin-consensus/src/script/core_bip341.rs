@@ -110,6 +110,12 @@ fn unknown_leaf_spend(spk_hex: &str, script: &[u8], control_hex: &str) -> Result
 }
 
 #[test]
+// btc-lean: SCR-142 SCR-143 SCR-144 SCR-145 SCR-146 SCR-147 SCR-148 SCR-149 SCR-150 SCR-151 SCR-156
+// btc-lean: SCR-157 SCR-158 SCR-159 SCR-160 SCR-161 SCR-162 SCR-163 SCR-166 SCR-167 SCR-168 TPR-001
+// btc-lean: TPR-002 TPR-003 TPR-004 TPR-005 TPR-006 TPR-007 TPR-008 TPR-009 TPR-010 TPR-011 TPR-012
+// btc-lean: TPR-013 TPR-014 TPR-015 TPR-016 TPR-017 TPR-018 TPR-019 TPR-020 TPR-030 TPR-032 TPR-033
+// btc-lean: TPR-034 TPR-035 TPR-036 TPR-037 TPR-038 TPR-039 TPR-040 TPR-041 TPR-042 TPR-043 TPR-044
+// btc-lean: TPR-045 TPR-046 TPR-047 TPR-048 TPR-049 TPR-050 TPR-051 TPR-052 TPR-053 TPR-054 TPR-083
 fn core_bip341_wallet_vectors_all_rows() {
     let root = load_root();
     let mut total = 0u32;

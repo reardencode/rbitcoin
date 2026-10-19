@@ -740,6 +740,7 @@ fn poison_confirmed_merkle_root(store: &std::path::Path, fk: Fk, rec: &HeaderRec
     std::fs::write(&path, bytes).unwrap();
 }
 
+// btc-lean: BLK-105 BLK-106 BLK-107 BLK-108 INV-116 INV-117
 fn pin_disconnect_to_genesis_reconnect_and_tip_shrink(
     q: Query,
     td: &TestDatadir,

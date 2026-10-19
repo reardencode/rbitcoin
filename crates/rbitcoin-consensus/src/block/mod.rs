@@ -58,24 +58,30 @@ pub const MAX_BLOCK_STRIPPED_SIZE: usize = 1_000_000;
 /// [`MIN_TX_WEIGHT`].
 pub const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
 /// Minimum serializable transaction weight (10 bytes × witness scale 4).
+// btc-lean: SCR-044
 pub const MIN_TX_WEIGHT: u64 = 10 * 4;
 /// Most transactions a valid block can contain.
 pub const MAX_BLOCK_TX_COUNT: usize = (MAX_BLOCK_WEIGHT / MIN_TX_WEIGHT) as usize;
 
 pub fn check_tx_local(tx: &Transaction, base_size: usize) -> Result<(), ConsensusError> {
+    // btc-lean: INV-001 TXV-001
     if tx.input.is_empty() {
         return Err(ConsensusError::BadTx("no inputs"));
     }
+    // btc-lean: INV-002 TXV-002
     if tx.output.is_empty() {
         return Err(ConsensusError::BadTx("no outputs"));
     }
+    // btc-lean: INV-003
     if base_size > MAX_BLOCK_STRIPPED_SIZE {
         return Err(ConsensusError::BadTx("bad-txns-oversize"));
     }
     let mut seen: crate::OutPointSet =
         crate::OutPointSet::with_capacity_and_hasher(tx.input.len(), Default::default());
     for inp in &tx.input {
+        // btc-lean: TXV-059
         if !tx.is_coinbase() && inp.previous_output.is_null() {
+            // btc-lean: INV-009 INV-010 TXV-009 TXV-010
             return Err(ConsensusError::BadTx("bad-txns-prevout-null"));
         }
         let key = (
@@ -83,6 +89,7 @@ pub fn check_tx_local(tx: &Transaction, base_size: usize) -> Result<(), Consensu
             inp.previous_output.vout,
         );
         if !seen.insert(key) {
+            // btc-lean: INV-007 TXV-007
             return Err(ConsensusError::BadTx("bad-txns-inputs-duplicate"));
         }
     }
@@ -105,6 +112,7 @@ pub fn block_mutated_without_coinbase(block: &Block) -> bool {
     if block.txdata.first().is_some_and(Transaction::is_coinbase) {
         return false;
     }
+    // btc-lean: BLK-012 BLK-125
     block.txdata.iter().any(|tx| tx.base_size() == 64)
 }
 
@@ -114,6 +122,7 @@ pub fn block_mutated_without_coinbase(block: &Block) -> bool {
 pub fn check_block_wire(data: &[u8]) -> Result<(), ConsensusError> {
     use bitcoin::consensus::encode::deserialize;
     let block: Block =
+        // btc-lean: TXV-011 TXV-012 TXV-013 TXV-014 TXV-015 TXV-016
         deserialize(data).map_err(|_| ConsensusError::BadBlock("block wire decode"))?;
     let params = ChainParams::regtest();
     validate_block_structure(&block, &ValidationContext::archive_structure(&params))
@@ -140,6 +149,7 @@ pub(crate) fn validate_block_structure_precomputed(
 }
 
 fn reject_bad_block_tx_layout(block: &Block, pres: &[TxPrecompute]) -> Result<(), ConsensusError> {
+    // btc-lean: BLK-002 BLK-022 BLK-030 INV-085 TXV-068 TXV-071 TXV-074
     if block.txdata.is_empty() {
         return Err(ConsensusError::BadBlock("no transactions"));
     }
@@ -161,6 +171,7 @@ fn reject_bad_block_tx_layout(block: &Block, pres: &[TxPrecompute]) -> Result<()
 /// Like [`validate_block_structure_precomputed`], reusing lookup-stashed pres
 /// when `pres` is `Some` (no second `from_tx`). Length must match `txdata`.
 /// Caller Arc is returned as-is (refcount only).
+// btc-lean: BLK-031
 pub fn validate_block_structure_with_pres(
     block: &Block,
     ctx: &ValidationContext<'_>,
@@ -184,6 +195,7 @@ pub fn validate_block_structure_with_pres(
     // not commit to is the peer's fault, not the block hash's.
     let txids: Vec<[u8; 32]> = pres.iter().map(|p| p.txid).collect();
     let (merkle, mutated) = rbitcoin_primitives::merkle_root_mutated(&txids);
+    // btc-lean: BLK-010
     if merkle != block.header.merkle_root.to_byte_array() {
         return Err(ConsensusError::BadBlock("merkle root mismatch"));
     }
@@ -196,6 +208,7 @@ pub fn validate_block_structure_with_pres(
     // a merkle mismatch, and before ContextualCheckBlock's BIP34 height.
     let cb_ss = block.txdata[0].input[0].script_sig.len();
     if !(2..=100).contains(&cb_ss) {
+        // btc-lean: BLK-027 BLK-028 INV-008 TXV-008
         return Err(ConsensusError::BadBlock("bad-cb-length"));
     }
 
@@ -213,7 +226,9 @@ pub fn validate_block_structure_with_pres(
     let total = 80usize
         .saturating_add(tx_count_vi)
         .saturating_add(pres.iter().map(|p| p.total_size).sum());
+    // btc-lean: BLK-025
     let weight_wu = (base.saturating_mul(3).saturating_add(total)) as u64;
+    // btc-lean: BLK-023 BLK-024 BLK-029 BLK-032
     if base > MAX_BLOCK_STRIPPED_SIZE {
         return Err(ConsensusError::BadBlock("block stripped size too large"));
     }
@@ -225,6 +240,7 @@ pub fn validate_block_structure_with_pres(
     // Witness bytes are not in the block hash. Check them before weight so
     // padding cannot be cached as a failed hash.
     reject_witness_malleation(block, ctx, pres.as_ref())?;
+    // btc-lean: BLK-021 BLK-026 INV-037 INV-093 SWT-017 SWT-018 TXV-003
     if weight_wu > MAX_BLOCK_WEIGHT {
         return Err(ConsensusError::BadBlock("block weight too large"));
     }
@@ -244,6 +260,7 @@ pub fn validate_block_structure_with_pres(
             }
         }
         if exceeds_max_money(p.out_sum) {
+            // btc-lean: INV-006 INV-029 INV-032 TXV-006
             return Err(ConsensusError::BadBlock("bad-txns-txouttotal-toolarge"));
         }
     }
@@ -256,6 +273,9 @@ pub fn validate_block_structure_with_pres(
             cost = cost.saturating_add(p.sigops.saturating_mul(WITNESS_SCALE));
         }
         if cost > MAX_BLOCK_SIGOPS_COST {
+            // btc-lean: BLK-033 BLK-034 BLK-035 BLK-036 INV-035 INV-036 INV-038 INV-039 INV-040
+            // btc-lean: SWT-021 SWT-022 SWT-023 SWT-024 SWT-026 SWT-027 TXV-049 TXV-050 TXV-051
+            // btc-lean: TXV-052 TXV-053 TXV-054
             return Err(ConsensusError::BadBlock("bad-blk-sigops"));
         }
     }
@@ -271,6 +291,8 @@ pub fn validate_block_structure_with_pres(
 }
 
 /// Witness commitment before weight. Padding is not the block hash's fault.
+// btc-lean: BLK-015 BLK-016 BLK-018 BLK-019 BLK-020 SWT-029 SWT-031 SWT-032 SWT-033
+// btc-lean: SWT-034 SWT-035
 fn reject_witness_malleation(
     block: &Block,
     ctx: &ValidationContext<'_>,
@@ -299,6 +321,7 @@ fn coinbase_has_witness_commitment(block: &Block) -> bool {
 }
 
 /// Last BIP141 `OP_RETURN` witness commitment (exact 38-byte `6a24aa21a9ed` prefix).
+// btc-lean: INV-088 INV-089 INV-090 INV-091 INV-092
 pub fn witness_commitment_vout_index(coinbase: &Transaction) -> Option<usize> {
     const MAGIC: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
     coinbase
@@ -333,6 +356,7 @@ pub fn witness_commitment_script(
     reserved: &[u8; 32],
 ) -> Vec<u8> {
     const MAGIC: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+    // btc-lean: BLK-014
     let mut leaves = vec![[0u8; 32]];
     leaves.extend(non_cb_wtxids);
     let witness_root = merkle_root_bytes(&leaves);
@@ -467,6 +491,7 @@ fn p2sh_sigop_count(tx: &Transaction, prev_spks: &[&[u8]]) -> u64 {
 }
 
 /// BIP141 witness sigop count (not witness-scaled).
+// btc-lean: SCR-035 SCR-037 SCR-038 SWT-028 TPR-069
 fn witness_sigops_one(inp: &bitcoin::TxIn, spk: &[u8]) -> u64 {
     let mut program = spk;
     if Script::from_bytes(program).is_p2sh() {
@@ -559,6 +584,7 @@ fn check_witness_commitment_with_wtxids(
     }
     let mut buf = [0u8; 64];
     buf[0..32].copy_from_slice(&witness_root);
+    // btc-lean: BLK-017 SWT-030
     buf[32..64].copy_from_slice(reserved);
     let hash = sha256d::Hash::hash(&buf);
     if hash.to_byte_array() != committed {
@@ -574,6 +600,7 @@ pub fn merkle_root_bytes(leaves: &[[u8; 32]]) -> [u8; 32] {
 
 /// BIP34: coinbase scriptSig must start with the block height as a script integer
 /// push: 0 → `OP_0`; 1..=16 → `OP_1`..=`OP_16`; else minimal sign-aware little-endian.
+// btc-lean: BLK-069 BLK-070 INV-103
 pub fn check_bip34_coinbase(coinbase: &Transaction, height: u32) -> Result<(), ConsensusError> {
     let script = &coinbase.input[0].script_sig;
     let bytes = script.as_bytes();
@@ -815,6 +842,10 @@ impl ScriptVerifyFlags {
     /// Core `GetBlockScriptFlags` for `block_hash` at `ctx`. `bip16_active` is
     /// false only for a BIP16 exception block or genesis.
     #[inline]
+    // btc-lean: BLK-083 BLK-084 BLK-085 BLK-086 BLK-087 BLK-088 INV-128 INV-129 INV-130 INV-131
+    // btc-lean: INV-132 INV-133 INV-134 INV-135 INV-136 SCR-015 SCR-016 SCR-175 SCR-176 SCR-177
+    // btc-lean: SCR-180 SCR-181 SCR-182 SWT-014 SWT-056 TPR-021 TPR-027 TPR-076 TPR-077 TXV-055
+    // btc-lean: TXV-056 TXV-057 TXV-060
     pub fn consensus_at(
         ctx: &ValidationContext<'_>,
         block_hash: &[u8; 32],
@@ -1075,6 +1106,7 @@ pub fn should_use_pres(ti: usize, len: usize) -> bool {
 /// cannot become negative when `money_range_out_sum` or
 /// `assemble_tx_value_out` casts it.
 #[inline]
+// btc-lean: INV-004 INV-005 INV-024 INV-034 TXV-004 TXV-005
 pub fn exceeds_max_money(sats: u64) -> bool {
     sats > Amount::MAX_MONEY.to_sat()
 }
@@ -1112,6 +1144,7 @@ pub fn assemble_tx_value_out(
     }
 }
 
+// btc-lean: BLK-089 BLK-090
 pub fn check_coinbase_subsidy(
     block: &Block,
     ctx: &ValidationContext<'_>,
@@ -1208,6 +1241,7 @@ pub fn block_subsidy(height: u32, params: &ChainParams) -> i64 {
     if halvings >= 64 {
         return 0;
     }
+    // btc-lean: INV-033
     50_0000_0000i64 >> halvings
 }
 
@@ -1218,6 +1252,9 @@ pub const LOCKTIME_THRESHOLD: u32 = 500_000_000;
 ///
 /// `lock_time_cutoff` is the comparison time: **MTP of the previous block** after
 /// BIP113 (CSV package), else the block header timestamp.
+// btc-lean: BLK-066 BLK-067 BLK-068 INV-011 INV-012 INV-013 INV-014 INV-015 INV-016 INV-017 INV-018
+// btc-lean: INV-019 INV-020 INV-021 INV-108 TXV-027 TXV-028 TXV-029 TXV-030 TXV-031 TXV-032 TXV-034
+// btc-lean: TXV-035 TXV-036 TXV-037 TXV-038 TXV-039 TXV-040
 pub fn is_final_tx(tx: &Transaction, block_height: u32, lock_time_cutoff: u32) -> bool {
     let lt = tx.lock_time.to_consensus_u32();
     if lt == 0 {
@@ -1249,6 +1286,7 @@ pub fn bip68_active_for_tx(tx: &Transaction) -> bool {
 /// the creating block. Height 0 is the genesis coin; its median is that
 /// block's timestamp, not 0. A missing height slice or a zero median fails closed.
 /// `block_height` = containing block; `block_prev_mtp` = MTP of previous block.
+// btc-lean: BLK-104
 pub fn sequence_locks_satisfied(
     tx: &Transaction,
     prev_heights: &[u32],

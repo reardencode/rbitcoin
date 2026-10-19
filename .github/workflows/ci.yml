@@ -69,6 +69,13 @@ jobs:
         run: cargo deny check
       - name: contract-assert self-test
         run: ./scripts/contract-assert.test.sh
+      # One qc step: self-test, then the pinned census. actions/checkout
+      # does not init submodules; only this gitlink is needed here.
+      - name: btc-lean census
+        run: |
+          ./scripts/btc-lean-census.test.sh
+          git submodule update --init --depth 1 third_party/btc-lean
+          ./scripts/btc-lean-census.sh
       - name: stage-musl-artifacts self-test
         run: ./scripts/stage-musl-artifacts.test.sh
       - name: stage-native-artifacts self-test

@@ -51,6 +51,8 @@ pub fn scriptnum_is_minimal(vch: &[u8]) -> bool {
     true
 }
 
+// btc-lean: INV-058 SCR-050 SCR-051 SCR-057 SCR-075 SCR-076 SCR-079 SCR-080 SCR-081 SCR-082 SCR-083
+// btc-lean: SCR-084 SCR-085 SCR-086 SCR-091 SCR-105
 pub fn scriptnum_decode(v: &[u8], require_minimal: bool) -> Result<i64, ScriptNumError> {
     scriptnum_decode_width(v, 4, require_minimal)
 }

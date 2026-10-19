@@ -8,6 +8,7 @@ use crate::block::ScriptCheckJob;
 use crate::error::ConsensusError;
 use crate::TxPrecompute;
 
+// btc-lean: SWT-005 SWT-006 SWT-049
 pub(crate) fn verify(
     job: &ScriptCheckJob,
     input_index: usize,

@@ -2,3 +2,7 @@
 	path = third_party/bitcoin
 	url = https://github.com/bitcoin/bitcoin.git
 	shallow = true
+[submodule "third_party/btc-lean"]
+	path = third_party/btc-lean
+	url = https://github.com/Rob1Ham/btc-lean.git
+	shallow = true

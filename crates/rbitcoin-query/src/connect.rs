@@ -1014,6 +1014,7 @@ impl Query {
         self.disconnect_tip_body(false)
     }
 
+    // btc-lean: BLK-092 BLK-105 BLK-106 BLK-107 BLK-108 BLK-118 INV-111 INV-116 INV-117
     fn disconnect_tip_body(&self, drop_pending: bool) -> Result<(), QueryError> {
         let _utxo_view = self.store.hold_utxo_view();
         let height = self

@@ -83,6 +83,7 @@ fn make_p2wpkh_spend() -> (ScriptCheckJob, bool) {
 }
 
 #[test]
+// btc-lean: SWT-005 SWT-006
 fn p2wpkh_bad_signature_rejects() {
     let (mut job, _) = make_p2wpkh_spend();
     // Corrupt last byte of witness sig

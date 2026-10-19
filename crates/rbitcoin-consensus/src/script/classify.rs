@@ -44,6 +44,7 @@ pub(crate) fn classify(script: &Script) -> ScriptKind {
     } else if script.is_p2pkh() {
         ScriptKind::P2pkh
     } else if script.is_p2sh() {
+        // btc-lean: SCR-054
         ScriptKind::P2sh
     } else {
         ScriptKind::Bare

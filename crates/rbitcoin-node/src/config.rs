@@ -1578,6 +1578,7 @@ fn parse_conf_bool(val: &str) -> Result<bool, String> {
 }
 
 /// `--min-chain-work=<hex>` (optional `0x`, at most 64 hex digits).
+// btc-lean: BLK-122 INV-149
 pub fn parse_minimum_chain_work(spec: &str) -> Result<[u8; 32], String> {
     let hex = spec
         .strip_prefix("0x")
@@ -2238,6 +2239,7 @@ mod tests {
             cfg.apply_kv("min-chain-work", "0x65").unwrap(),
             ConfApply::Applied
         );
+        // btc-lean: BLK-122 INV-149
         assert!(cfg.minimum_chain_work.is_some());
         assert_eq!(
             cfg.apply_kv("max-tip-age", "3600").unwrap(),
