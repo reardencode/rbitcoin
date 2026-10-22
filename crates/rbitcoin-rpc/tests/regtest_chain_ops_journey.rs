@@ -1097,8 +1097,9 @@ fn chain_ops_mocktime(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub, p2wpkh: &S
         (mock..mock + 600).contains(&t),
         "generate time {t} should honor mock {mock}"
     );
+    let parent = hub.tip_hash().unwrap();
     let far = rbitcoin_consensus::mine_regtest_paying(
-        hub.tip_hash().unwrap(),
+        parent,
         (mock + 3 * 3600) as u32,
         3,
         p2wpkh.clone(),
@@ -1106,6 +1107,23 @@ fn chain_ops_mocktime(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub, p2wpkh: &S
     );
     let r = dispatch(ctx, "submitblock", vec![json!(block_hex(&far))]).unwrap();
     assert_eq!(r, "time-too-new", "future header vs mock now");
+    dispatch(ctx, "setmocktime", vec![json!(mock + 3 * 3600)]).unwrap();
+    let r = dispatch(ctx, "submitblock", vec![json!(block_hex(&far))]).unwrap();
+    assert!(r.is_null(), "same block once the clock catches up: {r}");
+    assert_eq!(best_hash(ctx), json!(far.block_hash().to_string()));
+
+    let sibling = rbitcoin_consensus::mine_regtest_paying(
+        parent,
+        (mock + 6 * 3600) as u32,
+        3,
+        p2wpkh.clone(),
+        vec![],
+    );
+    for attempt in ["first", "second"] {
+        let r = dispatch(ctx, "submitblock", vec![json!(block_hex(&sibling))]).unwrap();
+        assert_eq!(r, "time-too-new", "{attempt} submit of a future fork block");
+    }
+    assert_eq!(best_hash(ctx), json!(far.block_hash().to_string()));
     dispatch(ctx, "setmocktime", vec![json!(0)]).unwrap();
 }
 

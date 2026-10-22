@@ -734,26 +734,29 @@ async fn p2p_timeout_getaddr_and_keepalive_ping() {
         seed.peers.set_addrman(Arc::new(Mutex::new(many)));
         let t = seed.peers.now_secs();
         seed.peers.set_mock_now(t + 24 * 60 * 60 + 1);
+        let replies = peer.peers.addrfetch_replies();
         peer.peers
             .addconnection(seed.local_addr, PeerConnType::AddrFetch)
             .expect("second addrfetch dial");
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-        let mut saw_fetch = false;
-        loop {
-            let fetching = peer
-                .peers
-                .snapshot()
-                .into_iter()
-                .any(|p| p.conn_type == PeerConnType::AddrFetch);
-            saw_fetch |= fetching;
-            if saw_fetch && !fetching {
-                break;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                panic!("an addr list longer than one must complete the fetch (saw={saw_fetch})");
-            }
-            tokio::task::yield_now().await;
-        }
+        wait_ms_until(
+            llvm_cov_wall(3, 9).as_millis() as u64,
+            || {
+                peer.peers.addrfetch_replies() > replies
+                    && !peer
+                        .peers
+                        .snapshot()
+                        .into_iter()
+                        .any(|p| p.conn_type == PeerConnType::AddrFetch)
+            },
+            || {
+                format!(
+                    "an addr list longer than one must complete the fetch (replies={} peers={:?})",
+                    peer.peers.addrfetch_replies() - replies,
+                    peer.peers.snapshot()
+                )
+            },
+        )
+        .await;
 
         seed.shutdown().await;
         peer.shutdown().await;

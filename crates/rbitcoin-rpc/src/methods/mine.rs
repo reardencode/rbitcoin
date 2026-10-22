@@ -1024,6 +1024,7 @@ pub fn submit_received_block(hub: &rbitcoin_net::ChainHub, mut block: Block) -> 
                 && reason != "bad-txnmrklroot"
                 && reason != "high-hash"
                 && reason != "prev-blk-not-found"
+                && reason != "time-too-new"
             {
                 hub.note_invalid_block(hash);
                 let _ = hub.ensure_header(&block.header);
@@ -1284,6 +1285,9 @@ pub fn submit_reject_reason(e: &rbitcoin_net::NetError) -> String {
     }
     if s.contains("signet solution invalid") {
         return "bad-signet-blksig".into();
+    }
+    if s.contains("timestamp too far in future") {
+        return "time-too-new".into();
     }
     for needle in [
         "bad-txns-nonfinal",
