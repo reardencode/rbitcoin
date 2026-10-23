@@ -99,6 +99,16 @@ pub fn is_disabled_legacy(code: u8) -> bool {
 
 #[doc(hidden)]
 pub fn is_op_success(code: u8) -> bool {
+    is_op_success_under(code, crate::heretical::HereticalFlags::default())
+}
+
+/// BIP342 OP_SUCCESS.
+///
+/// `SIGHASH_ANYPREVOUT` is a public-key upgrade, not an `OP_SUCCESS` byte, so
+/// an active deployment does not change this set. `flags` is part of the
+/// signature the script verifier already threads through.
+#[doc(hidden)]
+pub fn is_op_success_under(code: u8, _flags: crate::heretical::HereticalFlags) -> bool {
     matches!(
         code,
         80 | 98
@@ -124,6 +134,15 @@ pub fn is_op_success(code: u8) -> bool {
 
 /// BIP342: scan tapscript for OP_SUCCESSx. Returns true if script is immediately valid.
 pub fn tapscript_has_op_success(script: &Script) -> bool {
+    tapscript_has_op_success_with(script, crate::heretical::HereticalFlags::default())
+}
+
+/// [`tapscript_has_op_success`] with Inquisition deployments applied.
+#[doc(hidden)]
+pub fn tapscript_has_op_success_with(
+    script: &Script,
+    flags: crate::heretical::HereticalFlags,
+) -> bool {
     let bytes = script.as_bytes();
     let mut i = 0usize;
     while i < bytes.len() {
@@ -157,7 +176,7 @@ pub fn tapscript_has_op_success(script: &Script) -> bool {
                 i = i.saturating_add(5).saturating_add(n);
             }
             _ => {
-                if is_op_success(op) {
+                if is_op_success_under(op, flags) {
                     return true;
                 }
                 i += 1;
@@ -198,6 +217,8 @@ pub struct EvalContext<'a> {
     pub witness_pubkeytype: bool,
     /// Reject CODESEPARATOR / FindAndDelete that would mutate scriptCode.
     pub const_scriptcode: bool,
+    /// Inquisition opcodes for this spend. Off unless the job's flags set it.
+    pub heretical: crate::heretical::HereticalFlags,
     /// BIP342: instruction index of last executed OP_CODESEPARATOR, or `0xFFFFFFFF`.
     ///
     /// Counted one per instruction, not byte offset.
@@ -293,6 +314,7 @@ impl<'a> EvalContext<'a> {
             minimal_if: false,
             witness_pubkeytype: false,
             const_scriptcode: false,
+            heretical: crate::heretical::HereticalFlags::default(),
             codeseparator_pos: Cell::new(0xFFFF_FFFF),
             codeseparator_script_off: Cell::new(None),
             cache: RefCell::new(None),
@@ -318,6 +340,7 @@ impl<'a> EvalContext<'a> {
         self.minimal_if = job.minimal_if;
         self.witness_pubkeytype = job.witness_pubkeytype;
         self.const_scriptcode = job.const_scriptcode;
+        self.heretical = job.heretical;
         if job.low_s || job.strictenc {
             self.bip66_active = true;
         }
@@ -474,7 +497,9 @@ pub fn eval_script(
     let bytes = script.as_bytes();
     // BIP342: OP_SUCCESSx anywhere in tapscript → unconditional success *before*
     // size / stack limits (even unparseable tails pass).
-    if ctx.sig_version == SigVersion::TapScript && tapscript_has_op_success(script) {
+    if ctx.sig_version == SigVersion::TapScript
+        && tapscript_has_op_success_with(script, ctx.heretical)
+    {
         return Ok(false);
     }
     if ctx.sig_version == SigVersion::TapScript {
@@ -1082,6 +1107,18 @@ pub fn tapscript_sig_result(
     if pubkey.is_empty() {
         return Err(ConsensusError::Script("tapscript empty pubkey".into()));
     }
+    // BIP118: 0x01 or 0x01 || xonly. Inactive deployments stay upgradable keys.
+    if ctx.heretical.apo {
+        if let Some(key) = apo_xonly(pubkey, ctx)? {
+            if sig.is_empty() {
+                return Ok(TapSigResult::EmptySig);
+            }
+            if !checksig_schnorr_apo(sig, key, ctx)? {
+                return Err(ConsensusError::Script("tapscript CHECKSIG failed".into()));
+            }
+            return Ok(TapSigResult::Valid);
+        }
+    }
     // Unknown public key type (not 32 bytes): treat signature as valid (soft-fork hook).
     if pubkey.len() != 32 {
         if sig.is_empty() {
@@ -1449,6 +1486,63 @@ pub fn check_signature_encoding(sig: &[u8], ctx: &EvalContext<'_>) -> Result<(),
         return Err(ConsensusError::Script("SIG_HASHTYPE".into()));
     }
     Ok(())
+}
+
+/// BIP118 pubkey: `0x01`, or `0x01 || xonly`. `None` is some other length.
+fn apo_xonly(pubkey: &[u8], ctx: &EvalContext<'_>) -> Result<Option<[u8; 32]>, ConsensusError> {
+    if pubkey.len() == 1 && pubkey[0] == 0x01 {
+        let key = ctx
+            .tapscript
+            .as_ref()
+            .and_then(|exec| exec.internal_key())
+            .ok_or_else(|| ConsensusError::Script("OP_INTERNALKEY missing".into()))?;
+        return Ok(Some(key));
+    }
+    if pubkey.len() == 33 && pubkey[0] == 0x01 {
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&pubkey[1..]);
+        return Ok(Some(key));
+    }
+    Ok(None)
+}
+
+fn apo_hashtype_ok(hash_type: u8) -> bool {
+    matches!(
+        hash_type,
+        0 | 1 | 2 | 3 | 0x81 | 0x82 | 0x83 | 0x41 | 0x42 | 0x43 | 0xc1 | 0xc2 | 0xc3
+    )
+}
+
+/// BIP118 Schnorr check. Hash types `0x41`/`0xc1` are not [`TapSighashType`].
+fn checksig_schnorr_apo(
+    sig: &[u8],
+    pubkey: [u8; 32],
+    ctx: &EvalContext<'_>,
+) -> Result<bool, ConsensusError> {
+    let (sig_bytes, hash_type) = if sig.len() == 64 {
+        (sig, 0u8)
+    } else if sig.len() == 65 {
+        if sig[64] == 0x00 {
+            return Ok(false);
+        }
+        (&sig[..64], sig[64])
+    } else {
+        return Ok(false);
+    };
+    if !apo_hashtype_ok(hash_type) {
+        return Err(ConsensusError::Script("tapscript sighash".into()));
+    }
+    let exec = ctx.tapscript.as_ref().ok_or_else(|| {
+        ConsensusError::Script("invariant: tapscript spend without tapleaf hash".into())
+    })?;
+    let sighash = exec.anyprevout_hash(hash_type, ctx.codeseparator_pos.get())?;
+    let xonly = bitcoin::key::XOnlyPublicKey::from_slice(&pubkey)
+        .map_err(|_| ConsensusError::Script("tapscript xonly".into()))?;
+    // `from_slice` rejects only a length other than 64. `sig_bytes` is that long.
+    let schnorr = bitcoin::secp256k1::schnorr::Signature::from_slice(sig_bytes)
+        .expect("64-byte schnorr slice");
+    let msg = bitcoin::secp256k1::Message::from_digest(sighash);
+    Ok(crypto::SECP.with(|secp| secp.verify_schnorr(&schnorr, &msg, &xonly).is_ok()))
 }
 
 /// BIP340 Schnorr verify for a 32-byte x-only pubkey in tapscript (leaf sighash).

@@ -45,6 +45,7 @@ fn witness_job(spk: Vec<u8>, script_sig: Vec<u8>, witness: Vec<Vec<u8>>) -> Scri
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     }
@@ -131,6 +132,7 @@ fn empty_prevouts_and_index_errors() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -165,6 +167,7 @@ fn empty_prevouts_and_index_errors() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -345,6 +348,7 @@ fn taproot_inactive_is_anyone_can_spend() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -493,8 +497,14 @@ fn tapscript_sighash_matches_rust_bitcoin_on_every_hash_type() {
     let tap_spent = crypto::TapSpentHashes::default();
     for annex in [None, Some(&annex_bytes[..])] {
         for input_index in 0..tx.input.len() {
-            let exec =
-                crypto::TapscriptExecData::new(&job, input_index, &tap_spent, leaf_hash, annex);
+            let exec = crypto::TapscriptExecData::new(
+                &job,
+                input_index,
+                &tap_spent,
+                leaf_hash,
+                annex,
+                [0u8; 32],
+            );
             let annex_oracle = annex.map(|a| Annex::new(a).unwrap());
             let annex_hash = annex.map(crypto::annex_hash);
             for ty in types {
@@ -554,7 +564,8 @@ fn tapscript_sighash_matches_rust_bitcoin_on_every_hash_type() {
     let short_job =
         rbitcoin_consensus::block::ScriptCheckJob::new(prevouts[..2].to_vec(), tx.clone(), flags);
     let tap_spent = crypto::TapSpentHashes::default();
-    let exec = crypto::TapscriptExecData::new(&short_job, 0, &tap_spent, leaf_hash, None);
+    let exec =
+        crypto::TapscriptExecData::new(&short_job, 0, &tap_spent, leaf_hash, None, [0u8; 32]);
     assert!(exec.signature_hash(TapSighashType::Default, 0).is_err());
 }
 
@@ -607,6 +618,7 @@ fn bip16_inactive_treats_p2sh_as_bare() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };

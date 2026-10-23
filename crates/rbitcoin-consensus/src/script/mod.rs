@@ -728,18 +728,22 @@ pub mod crypto {
         spent: &'a TapSpentHashes,
         tapleaf_hash: bitcoin::TapLeafHash,
         annex_hash: Option<[u8; 32]>,
+        /// Taproot internal key (`control[1..33]`). A 1-byte ANYPREVOUT key signs this.
+        internal_key: [u8; 32],
         single_output_hash: std::cell::OnceCell<Option<[u8; 32]>>,
     }
 
     impl<'a> TapscriptExecData<'a> {
         /// `annex` is the BIP341 annex including its `0x50` tag. `spent`
-        /// belongs to `job`'s transaction.
+        /// belongs to `job`'s transaction. `internal_key` is the x-only key
+        /// from the control block.
         pub fn new(
             job: &'a crate::block::ScriptCheckJob,
             input_index: usize,
             spent: &'a TapSpentHashes,
             tapleaf_hash: bitcoin::TapLeafHash,
             annex: Option<&[u8]>,
+            internal_key: [u8; 32],
         ) -> Self {
             Self {
                 job,
@@ -747,8 +751,13 @@ pub mod crypto {
                 spent,
                 tapleaf_hash,
                 annex_hash: annex.map(annex_hash),
+                internal_key,
                 single_output_hash: std::cell::OnceCell::new(),
             }
+        }
+
+        pub fn internal_key(&self) -> Option<[u8; 32]> {
+            Some(self.internal_key)
         }
 
         /// BIP341 signature message hash with BIP342 extension (Core
@@ -765,6 +774,26 @@ pub mod crypto {
                 self.spent,
                 self.annex_hash,
                 Some((self.tapleaf_hash, codeseparator_pos)),
+                &self.single_output_hash,
+            )
+        }
+
+        /// BIP118 signature hash (key version 1). `hash_type` is the raw byte,
+        /// including `0x41` / `0xc1`, which [`bitcoin::sighash::TapSighashType`]
+        /// rejects.
+        pub fn anyprevout_hash(
+            &self,
+            hash_type: u8,
+            codeseparator_pos: u32,
+        ) -> Result<[u8; 32], ConsensusError> {
+            tap_anyprevout_hash(
+                self.job,
+                self.input_index,
+                hash_type,
+                self.spent,
+                self.annex_hash,
+                self.tapleaf_hash,
+                codeseparator_pos,
                 &self.single_output_hash,
             )
         }
@@ -791,6 +820,132 @@ pub mod crypto {
     pub fn sha256(data: &[u8]) -> [u8; 32] {
         use bitcoin::hashes::sha256;
         *sha256::Hash::hash(data).as_byte_array()
+    }
+
+    /// BIP118 `SignatureHashSchnorr` for key version 1.
+    ///
+    /// The existing [`tap_signature_hash`] stays BIP341 key version 0.
+    #[allow(clippy::too_many_arguments)]
+    pub fn tap_anyprevout_hash(
+        job: &crate::block::ScriptCheckJob,
+        input_index: usize,
+        hash_type: u8,
+        spent: &TapSpentHashes,
+        annex_hash: Option<[u8; 32]>,
+        tapleaf_hash: bitcoin::TapLeafHash,
+        codeseparator_pos: u32,
+        single_output_hash: &std::cell::OnceCell<Option<[u8; 32]>>,
+    ) -> Result<[u8; 32], ConsensusError> {
+        use bitcoin::consensus::Encodable;
+        use bitcoin::hashes::{sha256, Hash, HashEngine};
+        use bitcoin::sighash::TapSighash;
+
+        const SIGHASH_ALL: u8 = 0x01;
+        const SIGHASH_SINGLE: u8 = 0x03;
+        const SIGHASH_ANYONECANPAY: u8 = 0x80;
+        const SIGHASH_ANYPREVOUT: u8 = 0x40;
+        const SIGHASH_ANYPREVOUTANYSCRIPT: u8 = 0xc0;
+        const KEY_VERSION_APO: u8 = 1;
+
+        let tx = &*job.tx;
+        let Some(txin) = tx.input.get(input_index) else {
+            return Err(ConsensusError::Script("tapscript sighash input".into()));
+        };
+        if job.prevouts.len() != tx.input.len() {
+            return Err(ConsensusError::Script("tapscript sighash prevouts".into()));
+        }
+        let pre = job.pre();
+        let output_type = if hash_type == 0 {
+            SIGHASH_ALL
+        } else {
+            hash_type & 0x03
+        };
+        let input_type = hash_type & 0xc0;
+        let ext_flag = 1u8;
+
+        let mut eng = TapSighash::engine();
+        eng.input(&[0, hash_type]);
+        tx.version
+            .consensus_encode(&mut eng)
+            .expect("hash engines do not error");
+        tx.lock_time
+            .consensus_encode(&mut eng)
+            .expect("hash engines do not error");
+        let standard_inputs = input_type != SIGHASH_ANYONECANPAY
+            && input_type != SIGHASH_ANYPREVOUT
+            && input_type != SIGHASH_ANYPREVOUTANYSCRIPT;
+        if standard_inputs {
+            let [sha_amounts, sha_scriptpubkeys] = spent.get(job)?;
+            eng.input(&sighash_midstate(pre.sha_prevouts)?);
+            eng.input(&sha_amounts);
+            eng.input(&sha_scriptpubkeys);
+            eng.input(&sighash_midstate(pre.sha_sequences)?);
+        }
+        if output_type == SIGHASH_ALL {
+            eng.input(&sighash_midstate(pre.sha_outputs)?);
+        }
+        eng.input(&[(ext_flag << 1) | u8::from(annex_hash.is_some())]);
+        if input_type == SIGHASH_ANYONECANPAY {
+            let (value, script) = job.prevout_parts(input_index)?;
+            txin.previous_output
+                .consensus_encode(&mut eng)
+                .expect("hash engines do not error");
+            encode_spent_output(&mut eng, value, script);
+            txin.sequence
+                .consensus_encode(&mut eng)
+                .expect("hash engines do not error");
+        } else if input_type == SIGHASH_ANYPREVOUT {
+            let (value, script) = job.prevout_parts(input_index)?;
+            encode_spent_output(&mut eng, value, script);
+            txin.sequence
+                .consensus_encode(&mut eng)
+                .expect("hash engines do not error");
+        } else if input_type == SIGHASH_ANYPREVOUTANYSCRIPT {
+            txin.sequence
+                .consensus_encode(&mut eng)
+                .expect("hash engines do not error");
+        } else {
+            eng.input(&(input_index as u32).to_le_bytes());
+        }
+        if let Some(annex_hash) = annex_hash {
+            eng.input(&annex_hash);
+        }
+        if output_type == SIGHASH_SINGLE {
+            let output_hash = single_output_hash.get_or_init(|| {
+                tx.output.get(input_index).map(|out| {
+                    let mut out_eng = sha256::Hash::engine();
+                    out.consensus_encode(&mut out_eng)
+                        .expect("hash engines do not error");
+                    sha256::Hash::from_engine(out_eng).to_byte_array()
+                })
+            });
+            let output_hash = output_hash
+                .ok_or_else(|| ConsensusError::Script("tapscript sighash single".into()))?;
+            eng.input(&output_hash);
+        }
+        if input_type != SIGHASH_ANYPREVOUTANYSCRIPT {
+            eng.input(tapleaf_hash.as_byte_array());
+        }
+        eng.input(&[KEY_VERSION_APO]);
+        eng.input(&codeseparator_pos.to_le_bytes());
+        Ok(TapSighash::from_engine(eng).to_byte_array())
+    }
+
+    fn encode_spent_output(eng: &mut impl bitcoin::hashes::HashEngine, value: u64, script: &[u8]) {
+        let n = i64::try_from(value).unwrap_or(i64::MAX);
+        eng.input(&n.to_le_bytes());
+        // Compact size, then the script bytes. Same encoding as `CTxOut`.
+        let len = script.len();
+        if len < 253 {
+            eng.input(&[len as u8]);
+        } else if len <= u16::MAX as usize {
+            eng.input(&[253]);
+            eng.input(&(len as u16).to_le_bytes());
+        } else {
+            eng.input(&[254]);
+            eng.input(&(len as u32).to_le_bytes());
+        }
+        eng.input(script);
     }
 
     pub fn sha1(data: &[u8]) -> [u8; 20] {

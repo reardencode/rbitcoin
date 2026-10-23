@@ -182,6 +182,7 @@ pub fn flags_to_ours(flags: u32) -> ScriptVerifyFlags {
         discourage_upgradable_witness: flags & DISCOURAGE_UPGRADABLE_WITNESS != 0,
         const_scriptcode: flags & CONST_SCRIPTCODE != 0,
         cleanstack: flags & CLEANSTACK != 0,
+        heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
     }
 }
 

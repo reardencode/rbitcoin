@@ -206,7 +206,16 @@ pub fn verify_script_path(
         return Ok(());
     }
 
-    let exec = crypto::TapscriptExecData::new(job, input_index, tap_spent, tapleaf_hash, annex);
+    let mut internal_key = [0u8; 32];
+    internal_key.copy_from_slice(&control_bytes[1..CONTROL_BASE]);
+    let exec = crypto::TapscriptExecData::new(
+        job,
+        input_index,
+        tap_spent,
+        tapleaf_hash,
+        annex,
+        internal_key,
+    );
     let ctx = EvalContext::from_job(job, tx, input_index, script, SigVersion::TapScript)?
         .with_tapscript(exec);
     if interpreter::eval_script(script, &mut stack, &ctx)? {
