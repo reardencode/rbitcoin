@@ -796,6 +796,8 @@ pub enum LookupFaultAction {
     Ignore,
     Warn,
     RejectEngineFault,
+    /// The wave saw the confirm cancel (IBD teardown): leave the lookup loop.
+    Stop,
 }
 
 impl LookupFaultPolicy {
@@ -804,6 +806,9 @@ impl LookupFaultPolicy {
     }
 
     pub fn on_err(&mut self, e: &rbitcoin_query::ConfirmError) -> LookupFaultAction {
+        if e.is_cancelled() {
+            return LookupFaultAction::Stop;
+        }
         let backpressure = matches!(
             e,
             rbitcoin_query::ConfirmError::Store(se) if se.is_io_backpressure()
@@ -3024,6 +3029,10 @@ pub fn spawn_confirm_engine(
                                 warn!("ibd: bq resolve wave uring recover: {e}");
                             } else {
                                 match lookup_faults.on_err(&e) {
+                                    LookupFaultAction::Stop => {
+                                        info!("ibd: confirm lookup cancelled mid-wave");
+                                        break;
+                                    }
                                     LookupFaultAction::Ignore => {
                                         debug!("ibd: bq resolve wave: {e}");
                                     }

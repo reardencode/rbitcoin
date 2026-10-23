@@ -934,3 +934,83 @@ fn take_after_a_rearm_leaves_its_rows_queued() {
     assert!(!q.block_queue_has_height(1) && !q.block_queue_has_height(2));
     let _ = std::fs::remove_dir_all(&path);
 }
+
+/// IBD teardown sets the confirm cancel, then joins the lookup thread. A wave
+/// under that flag returns cancelled instead of resolving its TipOnly need: a
+/// full wave is up to 64k cold reads, most of an hour on a busy HDD.
+#[test]
+fn wave_under_confirm_cancel_returns_cancelled() {
+    let (path, q) = tmp_query();
+    let params = ChainParams::regtest();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+    let g_cb = genesis.txdata[0].compute_txid();
+    let b1 = mine_with_txs(
+        genesis.block_hash(),
+        genesis.header.time + 600,
+        1,
+        vec![spend_op_true(g_cb, 0, Amount::from_sat(49_0000_0000))],
+    );
+    q.block_queue_enqueue(1, b1.block_hash().to_byte_array(), 1, &serialize(&b1))
+        .unwrap();
+    q.request_confirm_cancel();
+    let err = match confirm_bq_resolve_wave_capped(
+        &q,
+        &params,
+        Milestone::NONE,
+        &[1],
+        BQ_RESOLVE_WAVE_MAX_BLOCKS,
+        BQ_RESOLVE_WAVE_MAX_INPUTS,
+    ) {
+        Ok(_) => panic!("a wave under the confirm cancel must not resolve"),
+        Err(e) => e,
+    };
+    assert!(err.is_cancelled(), "want cancelled, got {err:?}");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+/// The cancellable batch resolves in pieces under one fence snapshot and asks
+/// before each piece: uncancelled it returns the rows the one-shot batch
+/// does, and a cancel after the first piece stops before the second.
+#[test]
+fn txid_batch_asks_cancel_before_each_piece() {
+    let (path, q) = tmp_query();
+    let params = ChainParams::regtest();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+    let mut txids = vec![genesis.txdata[0].compute_txid().to_byte_array()];
+    let mut prev = genesis.block_hash();
+    let mut time = genesis.header.time;
+    for h in 1..=2u32 {
+        time += 600;
+        let b = mine_with_txs(prev, time, h, vec![]);
+        accept_and_connect_block(&q, &params, Height(h), &b, Milestone::NONE).unwrap();
+        txids.push(b.txdata[0].compute_txid().to_byte_array());
+        prev = b.block_hash();
+    }
+    let whole = q.store().get_fk_by_txid_batch(&txids).unwrap();
+    assert!(
+        whole.iter().all(|(_, row)| row.is_some()),
+        "connected coinbases resolve"
+    );
+    let pieces = q
+        .store()
+        .get_fk_by_txid_batch_cancellable(&txids, 1, &|| false)
+        .unwrap();
+    assert_eq!(pieces, whole);
+
+    let asked = std::cell::Cell::new(0u32);
+    let err = q
+        .store()
+        .get_fk_by_txid_batch_cancellable(&txids, 1, &|| {
+            asked.set(asked.get() + 1);
+            asked.get() > 1
+        })
+        .unwrap_err();
+    assert!(
+        matches!(err, rbitcoin_store::StoreError::Cancelled(_)),
+        "{err:?}"
+    );
+    assert_eq!(asked.get(), 2, "one ask per piece, stopping at the second");
+    let _ = std::fs::remove_dir_all(&path);
+}
