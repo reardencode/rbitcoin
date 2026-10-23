@@ -99,6 +99,16 @@ pub fn is_disabled_legacy(code: u8) -> bool {
 
 #[doc(hidden)]
 pub fn is_op_success(code: u8) -> bool {
+    is_op_success_under(code, crate::heretical::HereticalFlags::default())
+}
+
+/// BIP342 OP_SUCCESS.
+///
+/// `OP_CHECKTEMPLATEVERIFY` is `OP_NOP4`, not an `OP_SUCCESS` byte, so an
+/// active deployment does not change this set. `flags` is part of the
+/// signature the script verifier already threads through.
+#[doc(hidden)]
+pub fn is_op_success_under(code: u8, _flags: crate::heretical::HereticalFlags) -> bool {
     matches!(
         code,
         80 | 98
@@ -124,6 +134,15 @@ pub fn is_op_success(code: u8) -> bool {
 
 /// BIP342: scan tapscript for OP_SUCCESSx. Returns true if script is immediately valid.
 pub fn tapscript_has_op_success(script: &Script) -> bool {
+    tapscript_has_op_success_with(script, crate::heretical::HereticalFlags::default())
+}
+
+/// [`tapscript_has_op_success`] with Inquisition deployments applied.
+#[doc(hidden)]
+pub fn tapscript_has_op_success_with(
+    script: &Script,
+    flags: crate::heretical::HereticalFlags,
+) -> bool {
     let bytes = script.as_bytes();
     let mut i = 0usize;
     while i < bytes.len() {
@@ -157,7 +176,7 @@ pub fn tapscript_has_op_success(script: &Script) -> bool {
                 i = i.saturating_add(5).saturating_add(n);
             }
             _ => {
-                if is_op_success(op) {
+                if is_op_success_under(op, flags) {
                     return true;
                 }
                 i += 1;
@@ -198,6 +217,8 @@ pub struct EvalContext<'a> {
     pub witness_pubkeytype: bool,
     /// Reject CODESEPARATOR / FindAndDelete that would mutate scriptCode.
     pub const_scriptcode: bool,
+    /// Inquisition opcodes for this spend. Off unless the job's flags set it.
+    pub heretical: crate::heretical::HereticalFlags,
     /// BIP342: instruction index of last executed OP_CODESEPARATOR, or `0xFFFFFFFF`.
     ///
     /// Counted one per instruction, not byte offset.
@@ -293,6 +314,7 @@ impl<'a> EvalContext<'a> {
             minimal_if: false,
             witness_pubkeytype: false,
             const_scriptcode: false,
+            heretical: crate::heretical::HereticalFlags::default(),
             codeseparator_pos: Cell::new(0xFFFF_FFFF),
             codeseparator_script_off: Cell::new(None),
             cache: RefCell::new(None),
@@ -318,6 +340,7 @@ impl<'a> EvalContext<'a> {
         self.minimal_if = job.minimal_if;
         self.witness_pubkeytype = job.witness_pubkeytype;
         self.const_scriptcode = job.const_scriptcode;
+        self.heretical = job.heretical;
         if job.low_s || job.strictenc {
             self.bip66_active = true;
         }
@@ -474,7 +497,9 @@ pub fn eval_script(
     let bytes = script.as_bytes();
     // BIP342: OP_SUCCESSx anywhere in tapscript → unconditional success *before*
     // size / stack limits (even unparseable tails pass).
-    if ctx.sig_version == SigVersion::TapScript && tapscript_has_op_success(script) {
+    if ctx.sig_version == SigVersion::TapScript
+        && tapscript_has_op_success_with(script, ctx.heretical)
+    {
         return Ok(false);
     }
     if ctx.sig_version == SigVersion::TapScript {
@@ -928,7 +953,8 @@ pub fn eval_script(
                             return Err(ConsensusError::Script("CSV".into()));
                         }
                     }
-                    0xb0 | 0xb3 | 0xb4 | 0xb5 | 0xb6 | 0xb7 | 0xb8 | 0xb9 => {}
+                    0xb3 => op_checktemplateverify(stack, ctx)?,
+                    0xb0 | 0xb4 | 0xb5 | 0xb6 | 0xb7 | 0xb8 | 0xb9 => {}
                     _ => {
                         // OP_SUCCESS returned before this loop. Disabled opcodes
                         // already returned above.
@@ -1447,6 +1473,23 @@ pub fn check_signature_encoding(sig: &[u8], ctx: &EvalContext<'_>) -> Result<(),
     }
     if ctx.strictenc && !crypto::is_defined_hashtype(sig) {
         return Err(ConsensusError::Script("SIG_HASHTYPE".into()));
+    }
+    Ok(())
+}
+
+/// BIP119 `OP_CHECKTEMPLATEVERIFY` (`OP_NOP4`). A non-32-byte argument stays a NOP.
+fn op_checktemplateverify(stack: &[Vec<u8>], ctx: &EvalContext<'_>) -> Result<(), ConsensusError> {
+    if !ctx.heretical.ctv {
+        return Ok(());
+    }
+    require_n(stack, 1)?;
+    let top = stack.last().expect("require_n checked");
+    if top.len() != 32 {
+        return Ok(());
+    }
+    let expect = crypto::ctv_default_hash(ctx.tx, ctx.pre.as_ref(), ctx.input_index as u32)?;
+    if top.as_slice() != expect.as_slice() {
+        return Err(ConsensusError::Script("TEMPLATE_MISMATCH".into()));
     }
     Ok(())
 }

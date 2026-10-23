@@ -432,6 +432,45 @@ pub mod crypto {
         h.ok_or_else(|| ConsensusError::Script("invariant: sighash midstate missing".into()))
     }
 
+    /// BIP119 default template hash (single SHA256, not tagged).
+    ///
+    /// Counts are `u32`, not compact size. `sha_sequences` and `sha_outputs`
+    /// are already the single SHA256. When every scriptSig is empty the
+    /// scriptSig hash is omitted, not hashed as empty scripts.
+    pub fn ctv_default_hash(
+        tx: &bitcoin::Transaction,
+        pre: &crate::TxPrecompute,
+        input_index: u32,
+    ) -> Result<[u8; 32], ConsensusError> {
+        use bitcoin::consensus::Encodable;
+        use bitcoin::hashes::{sha256, Hash, HashEngine};
+
+        let sequences = sighash_midstate(pre.sha_sequences)?;
+        let outputs = sighash_midstate(pre.sha_outputs)?;
+        let mut eng = sha256::Hash::engine();
+        tx.version
+            .consensus_encode(&mut eng)
+            .expect("hash engines do not error");
+        tx.lock_time
+            .consensus_encode(&mut eng)
+            .expect("hash engines do not error");
+        if tx.input.iter().any(|inp| !inp.script_sig.is_empty()) {
+            let mut scripts = sha256::Hash::engine();
+            for inp in &tx.input {
+                inp.script_sig
+                    .consensus_encode(&mut scripts)
+                    .expect("hash engines do not error");
+            }
+            eng.input(sha256::Hash::from_engine(scripts).as_byte_array());
+        }
+        eng.input(&(tx.input.len() as u32).to_le_bytes());
+        eng.input(&sequences);
+        eng.input(&(tx.output.len() as u32).to_le_bytes());
+        eng.input(&outputs);
+        eng.input(&input_index.to_le_bytes());
+        Ok(sha256::Hash::from_engine(eng).to_byte_array())
+    }
+
     /// BIP143 signature hash with **raw** `nHashType` (last byte of the sig push).
     ///
     /// `script_code` is the BIP143 scriptCode (for P2WPKH: the

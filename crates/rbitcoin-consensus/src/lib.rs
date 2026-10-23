@@ -6,6 +6,7 @@ pub mod clock;
 #[doc(hidden)]
 pub mod error;
 pub mod header;
+pub mod heretical;
 #[doc(hidden)]
 pub mod id_map;
 #[doc(hidden)]
@@ -97,6 +98,7 @@ pub use block::{
 pub use clock::{with_now, NodeClock};
 pub use error::{block_reject_log_line, block_reject_reason, script_flag_paren, ConsensusError};
 pub use header::{check_header, next_work_bits, validate_header_on_parent, ParentHeader};
+pub use heretical::HereticalFlags;
 pub use id_map::{IdMap, OutPointHasher, OutPointSet, TxidHasher, TxidMap, TxidSet};
 pub use milestone::{Milestone, MilestoneAnchor};
 pub use params::{

@@ -45,6 +45,7 @@ fn witness_job(spk: Vec<u8>, script_sig: Vec<u8>, witness: Vec<Vec<u8>>) -> Scri
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     }
@@ -131,6 +132,7 @@ fn empty_prevouts_and_index_errors() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -165,6 +167,7 @@ fn empty_prevouts_and_index_errors() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -345,6 +348,7 @@ fn taproot_inactive_is_anyone_can_spend() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -607,6 +611,7 @@ fn bip16_inactive_treats_p2sh_as_bare() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };

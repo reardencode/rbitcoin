@@ -98,6 +98,7 @@ fn make_script_path_spend_with(
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -180,6 +181,7 @@ fn script_path_accepts_leaf_0x50_with_annex_and_0xc2() {
                 discourage_upgradable_witness: false,
                 const_scriptcode: false,
                 cleanstack: false,
+                heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
             },
             pre: std::sync::OnceLock::new(),
         }
@@ -259,6 +261,7 @@ fn unknown_leaf_succeeds_past_witness_limits() {
                 discourage_upgradable_witness: false,
                 const_scriptcode: false,
                 cleanstack: false,
+                heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
             },
             pre: std::sync::OnceLock::new(),
         }
@@ -530,6 +533,7 @@ fn empty_witness_and_bad_sig_len() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -600,6 +604,7 @@ fn key_path_accepts_valid_schnorr() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -667,6 +672,7 @@ fn key_path_rejects_65_byte_sighash_byte_zero() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -754,6 +760,7 @@ fn key_path_annex_must_enter_sighash() {
                 discourage_upgradable_witness: false,
                 const_scriptcode: false,
                 cleanstack: false,
+                heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
             },
             pre: std::sync::OnceLock::new(),
         };
@@ -799,6 +806,7 @@ fn key_path_annex_must_enter_sighash() {
                 discourage_upgradable_witness: false,
                 const_scriptcode: false,
                 cleanstack: false,
+                heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
             },
             pre: std::sync::OnceLock::new(),
         };
@@ -874,6 +882,7 @@ fn key_path_empty_annex_payload() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -973,6 +982,7 @@ fn script_path_annex_checksig() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -1263,6 +1273,7 @@ fn script_path_two_leaf_merkle_path() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -1386,6 +1397,7 @@ fn script_path_codeseparator_checksig_chain() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -1440,6 +1452,7 @@ fn key_path_rejects_bad_sig() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };

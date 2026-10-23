@@ -785,6 +785,10 @@ pub struct ScriptVerifyFlags {
     /// SCRIPT_VERIFY_CLEANSTACK for legacy bare and P2SH. Witness v0 already
     /// requires a clean stack. Production confirm leaves this off.
     pub cleanstack: bool,
+    /// `OP_CHECKTEMPLATEVERIFY` on the default signet. Buried and fixture
+    /// literals leave this off. [`Self::consensus_at`] sets it from the chain
+    /// height.
+    pub heretical: crate::heretical::HereticalFlags,
 }
 
 impl ScriptVerifyFlags {
@@ -813,6 +817,7 @@ impl ScriptVerifyFlags {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: crate::heretical::HereticalFlags::OFF,
         }
     }
 
@@ -846,6 +851,7 @@ impl ScriptVerifyFlags {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: ctx.params.heretical_at(h),
         }
     }
 
