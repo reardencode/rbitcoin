@@ -340,6 +340,16 @@ impl ChainParams {
             Network::Regtest => 0,
         }
     }
+
+    /// BIP 448 opcodes at `height`.
+    ///
+    /// Default signet uses the Inquisition buried heights. Regtest enables
+    /// the opcodes at every height. Every other network, including a custom
+    /// signet, is off.
+    #[inline]
+    pub fn heretical_at(&self, height: u32) -> crate::heretical::HereticalFlags {
+        crate::heretical::flags_at(self, height)
+    }
 }
 
 #[doc(hidden)]

@@ -99,6 +99,25 @@ pub fn is_disabled_legacy(code: u8) -> bool {
 
 #[doc(hidden)]
 pub fn is_op_success(code: u8) -> bool {
+    is_op_success_under(code, crate::heretical::HereticalFlags::default())
+}
+
+/// BIP342 OP_SUCCESS, minus BIP 448 opcodes whose deployment is active.
+///
+/// An active `OP_CHECKSIGFROMSTACK` / `OP_INTERNALKEY` / `OP_TEMPLATEHASH`
+/// is executed. While the deployment is off, the byte still succeeds the
+/// whole tapscript, including an untaken branch.
+#[doc(hidden)]
+pub fn is_op_success_under(code: u8, flags: crate::heretical::HereticalFlags) -> bool {
+    if flags.internal_key && code == 0xcb {
+        return false;
+    }
+    if flags.csfs && code == 0xcc {
+        return false;
+    }
+    if flags.template_hash && code == 0xce {
+        return false;
+    }
     matches!(
         code,
         80 | 98
@@ -124,6 +143,15 @@ pub fn is_op_success(code: u8) -> bool {
 
 /// BIP342: scan tapscript for OP_SUCCESSx. Returns true if script is immediately valid.
 pub fn tapscript_has_op_success(script: &Script) -> bool {
+    tapscript_has_op_success_with(script, crate::heretical::HereticalFlags::default())
+}
+
+/// [`tapscript_has_op_success`] with Inquisition deployments applied.
+#[doc(hidden)]
+pub fn tapscript_has_op_success_with(
+    script: &Script,
+    flags: crate::heretical::HereticalFlags,
+) -> bool {
     let bytes = script.as_bytes();
     let mut i = 0usize;
     while i < bytes.len() {
@@ -157,7 +185,7 @@ pub fn tapscript_has_op_success(script: &Script) -> bool {
                 i = i.saturating_add(5).saturating_add(n);
             }
             _ => {
-                if is_op_success(op) {
+                if is_op_success_under(op, flags) {
                     return true;
                 }
                 i += 1;
@@ -198,6 +226,8 @@ pub struct EvalContext<'a> {
     pub witness_pubkeytype: bool,
     /// Reject CODESEPARATOR / FindAndDelete that would mutate scriptCode.
     pub const_scriptcode: bool,
+    /// Inquisition opcodes for this spend. Off unless the job's flags set it.
+    pub heretical: crate::heretical::HereticalFlags,
     /// BIP342: instruction index of last executed OP_CODESEPARATOR, or `0xFFFFFFFF`.
     ///
     /// Counted one per instruction, not byte offset.
@@ -293,6 +323,7 @@ impl<'a> EvalContext<'a> {
             minimal_if: false,
             witness_pubkeytype: false,
             const_scriptcode: false,
+            heretical: crate::heretical::HereticalFlags::default(),
             codeseparator_pos: Cell::new(0xFFFF_FFFF),
             codeseparator_script_off: Cell::new(None),
             cache: RefCell::new(None),
@@ -318,6 +349,7 @@ impl<'a> EvalContext<'a> {
         self.minimal_if = job.minimal_if;
         self.witness_pubkeytype = job.witness_pubkeytype;
         self.const_scriptcode = job.const_scriptcode;
+        self.heretical = job.heretical;
         if job.low_s || job.strictenc {
             self.bip66_active = true;
         }
@@ -474,7 +506,9 @@ pub fn eval_script(
     let bytes = script.as_bytes();
     // BIP342: OP_SUCCESSx anywhere in tapscript → unconditional success *before*
     // size / stack limits (even unparseable tails pass).
-    if ctx.sig_version == SigVersion::TapScript && tapscript_has_op_success(script) {
+    if ctx.sig_version == SigVersion::TapScript
+        && tapscript_has_op_success_with(script, ctx.heretical)
+    {
         return Ok(false);
     }
     if ctx.sig_version == SigVersion::TapScript {
@@ -929,6 +963,9 @@ pub fn eval_script(
                         }
                     }
                     0xb0 | 0xb3 | 0xb4 | 0xb5 | 0xb6 | 0xb7 | 0xb8 | 0xb9 => {}
+                    0xcb => op_internalkey(stack, altstack.len(), ctx)?,
+                    0xcc => op_checksigfromstack(stack, altstack.len(), ctx)?,
+                    0xce => op_templatehash(stack, altstack.len(), ctx)?,
                     _ => {
                         // OP_SUCCESS returned before this loop. Disabled opcodes
                         // already returned above.
@@ -1449,6 +1486,79 @@ pub fn check_signature_encoding(sig: &[u8], ctx: &EvalContext<'_>) -> Result<(),
         return Err(ConsensusError::Script("SIG_HASHTYPE".into()));
     }
     Ok(())
+}
+
+/// BIP349 `OP_INTERNALKEY`. Pushes the 32-byte internal key. Pops nothing.
+fn op_internalkey(
+    stack: &mut Vec<Vec<u8>>,
+    alt_len: usize,
+    ctx: &EvalContext<'_>,
+) -> Result<(), ConsensusError> {
+    if ctx.sig_version != SigVersion::TapScript {
+        return Err(ConsensusError::Script("unknown opcode 0xcb".into()));
+    }
+    let key = ctx
+        .tapscript
+        .as_ref()
+        .and_then(|exec| exec.internal_key())
+        .ok_or_else(|| ConsensusError::Script("OP_INTERNALKEY missing".into()))?;
+    push(stack, alt_len, key.to_vec())
+}
+
+/// BIP348 `OP_CHECKSIGFROMSTACK`. No VERIFY form. The message is not pre-hashed.
+fn op_checksigfromstack(
+    stack: &mut Vec<Vec<u8>>,
+    alt_len: usize,
+    ctx: &EvalContext<'_>,
+) -> Result<(), ConsensusError> {
+    if ctx.sig_version != SigVersion::TapScript {
+        return Err(ConsensusError::Script("unknown opcode 0xcc".into()));
+    }
+    require_n(stack, 3)?;
+    let pubkey = pop(stack)?;
+    let msg = pop(stack)?;
+    let sig = pop(stack)?;
+    let success = !sig.is_empty();
+    if success {
+        let left = ctx.validation_weight_left.get() - TAPSCRIPT_VALIDATION_WEIGHT_PER_SIGOP;
+        ctx.validation_weight_left.set(left);
+        if left < 0 {
+            return Err(ConsensusError::Script("tapscript validation weight".into()));
+        }
+    }
+    if pubkey.is_empty() {
+        return Err(ConsensusError::Script("tapscript empty pubkey".into()));
+    } else if pubkey.len() == 32 && success {
+        if sig.len() != 64 {
+            return Err(ConsensusError::Script("CSFS sig size".into()));
+        }
+        if !crypto::verify_schnorr_message(&sig, &msg, &pubkey)? {
+            return Err(ConsensusError::Script("CSFS failed".into()));
+        }
+    }
+    let encoded = if success { vec![0x01] } else { Vec::new() };
+    push(stack, alt_len, encoded)
+}
+
+/// BIP446 `OP_TEMPLATEHASH`. Pushes the tagged hash. Pops nothing.
+fn op_templatehash(
+    stack: &mut Vec<Vec<u8>>,
+    alt_len: usize,
+    ctx: &EvalContext<'_>,
+) -> Result<(), ConsensusError> {
+    if ctx.sig_version != SigVersion::TapScript {
+        return Err(ConsensusError::Script("unknown opcode 0xce".into()));
+    }
+    let exec = ctx.tapscript.as_ref().ok_or_else(|| {
+        ConsensusError::Script("invariant: tapscript spend without tapleaf hash".into())
+    })?;
+    let hash = crypto::template_hash(
+        ctx.tx,
+        ctx.pre.as_ref(),
+        ctx.input_index as u32,
+        exec.annex_hash(),
+    )?;
+    push(stack, alt_len, hash.to_vec())
 }
 
 /// BIP340 Schnorr verify for a 32-byte x-only pubkey in tapscript (leaf sighash).

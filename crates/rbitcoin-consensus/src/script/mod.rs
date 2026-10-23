@@ -728,18 +728,22 @@ pub mod crypto {
         spent: &'a TapSpentHashes,
         tapleaf_hash: bitcoin::TapLeafHash,
         annex_hash: Option<[u8; 32]>,
+        /// BIP341 internal key (`control[1..33]`). `OP_INTERNALKEY` pushes it.
+        internal_key: [u8; 32],
         single_output_hash: std::cell::OnceCell<Option<[u8; 32]>>,
     }
 
     impl<'a> TapscriptExecData<'a> {
         /// `annex` is the BIP341 annex including its `0x50` tag. `spent`
-        /// belongs to `job`'s transaction.
+        /// belongs to `job`'s transaction. `internal_key` is the x-only key
+        /// from the control block.
         pub fn new(
             job: &'a crate::block::ScriptCheckJob,
             input_index: usize,
             spent: &'a TapSpentHashes,
             tapleaf_hash: bitcoin::TapLeafHash,
             annex: Option<&[u8]>,
+            internal_key: [u8; 32],
         ) -> Self {
             Self {
                 job,
@@ -747,8 +751,17 @@ pub mod crypto {
                 spent,
                 tapleaf_hash,
                 annex_hash: annex.map(annex_hash),
+                internal_key,
                 single_output_hash: std::cell::OnceCell::new(),
             }
+        }
+
+        pub fn internal_key(&self) -> Option<[u8; 32]> {
+            Some(self.internal_key)
+        }
+
+        pub fn annex_hash(&self) -> Option<[u8; 32]> {
+            self.annex_hash
         }
 
         /// BIP341 signature message hash with BIP342 extension (Core
@@ -791,6 +804,82 @@ pub mod crypto {
     pub fn sha256(data: &[u8]) -> [u8; 32] {
         use bitcoin::hashes::sha256;
         *sha256::Hash::hash(data).as_byte_array()
+    }
+
+    /// BIP340 verify of a message that is not pre-hashed.
+    ///
+    /// `secp256k1` 0.29's [`secp256k1::schnorr::Signature::verify`] hardcodes
+    /// a 32-byte message. BIP348 signs the raw stack element, so this calls
+    /// `secp256k1_schnorrsig_verify` with that length. A 32-byte message is
+    /// ordinary BIP340.
+    pub fn verify_schnorr_message(
+        sig64: &[u8],
+        msg: &[u8],
+        pubkey32: &[u8],
+    ) -> Result<bool, ConsensusError> {
+        use bitcoin::secp256k1::ffi::{self, CPtr};
+
+        if sig64.len() != 64 || pubkey32.len() != 32 {
+            return Ok(false);
+        }
+        let sig = bitcoin::secp256k1::schnorr::Signature::from_slice(sig64)
+            .map_err(|_| ConsensusError::Script("schnorr sig".into()))?;
+        let pk = bitcoin::key::XOnlyPublicKey::from_slice(pubkey32)
+            .map_err(|_| ConsensusError::Script("tapscript xonly".into()))?;
+        let ok = SECP.with(|secp| {
+            // SAFETY: `sig` is 64 bytes, `pk` is a parsed x-only key, and
+            // `msg` is the caller's buffer for this call. libsecp256k1 reads
+            // `msg_len` bytes and does not retain the pointers.
+            unsafe {
+                ffi::secp256k1_schnorrsig_verify(
+                    secp.ctx().as_ptr(),
+                    sig.as_c_ptr(),
+                    msg.as_ptr(),
+                    msg.len(),
+                    pk.as_c_ptr(),
+                ) == 1
+            }
+        });
+        Ok(ok)
+    }
+
+    /// BIP446 tagged hash, tag `"TemplateHash"`.
+    ///
+    /// Commits to version, locktime, sequence hash, output hash, this input
+    /// index, and the annex. It does not commit to prevouts, amounts, or scripts.
+    pub fn template_hash(
+        tx: &bitcoin::Transaction,
+        pre: &crate::TxPrecompute,
+        input_index: u32,
+        annex_hash: Option<[u8; 32]>,
+    ) -> Result<[u8; 32], ConsensusError> {
+        use bitcoin::consensus::Encodable;
+        use bitcoin::hashes::{sha256, Hash, HashEngine};
+
+        let mut eng = tagged_sha256_engine("TemplateHash");
+        tx.version
+            .consensus_encode(&mut eng)
+            .expect("hash engines do not error");
+        tx.lock_time
+            .consensus_encode(&mut eng)
+            .expect("hash engines do not error");
+        eng.input(&sighash_midstate(pre.sha_sequences)?);
+        eng.input(&sighash_midstate(pre.sha_outputs)?);
+        eng.input(&[u8::from(annex_hash.is_some())]);
+        eng.input(&input_index.to_le_bytes());
+        if let Some(hash) = annex_hash {
+            eng.input(&hash);
+        }
+        Ok(sha256::Hash::from_engine(eng).to_byte_array())
+    }
+
+    fn tagged_sha256_engine(tag: &str) -> bitcoin::hashes::sha256::HashEngine {
+        use bitcoin::hashes::{sha256, Hash, HashEngine};
+        let tag_hash = sha256::Hash::hash(tag.as_bytes());
+        let mut eng = sha256::Hash::engine();
+        eng.input(tag_hash.as_byte_array());
+        eng.input(tag_hash.as_byte_array());
+        eng
     }
 
     pub fn sha1(data: &[u8]) -> [u8; 20] {

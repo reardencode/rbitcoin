@@ -244,6 +244,7 @@ fn flags_to_job(tx: Transaction, prevouts: Vec<TxOut>, flags: &TxFlags) -> Scrip
             discourage_upgradable_witness: flags.discourage_upgradable_witness,
             const_scriptcode: flags.const_scriptcode,
             cleanstack: flags.cleanstack,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     }
