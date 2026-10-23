@@ -3,11 +3,9 @@
 //!
 //! Clients already know their scripthashes / txids.
 //!
-//! `server.version[0]` is `rbitcoin-electrs <workspace.package.version> electrumx`.
+//! `server.version[0]` is `rbitcoin-electrs <workspace.package.version>`.
 //! We are not electrs. Cake Wallet `getNodeIsElectrs()` requires the
 //! substring `electrs` before it will probe `blockchain.tweaks.subscribe`.
-//! Sparrow batches when it sees `electrumx`; BlueWallet batches unless the
-//! string starts with `electrs`.
 //! Other tweaks clients (kiss-bdk) use the same stream without that probe.
 
 #![forbid(unsafe_code)]

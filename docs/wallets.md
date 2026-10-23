@@ -102,10 +102,10 @@ balances and history.
 | Wallet | Setting that works |
 |--------|--------------------|
 | Electrum desktop, including Electrum's Lightning | Server `127.0.0.1:50001:t` (the trailing `t` is plain TCP). Behind a TLS proxy, `host:443:s`. |
-| Sparrow, private Electrum | Server type **Private Electrum**, TCP `127.0.0.1:50001`. Sparrow sees `electrumx` in `server.version[0]` and sends address lookups as JSON-RPC batches. Silent Payments uses Frigate `blockchain.silentpayments.subscribe`, which is implemented. Add `--sp-tweaks` so that scan is indexed. Sparrow's **Bitcoin Core** server type imports a descriptor wallet and does not apply. |
+| Sparrow, private Electrum | Server type **Private Electrum**, TCP `127.0.0.1:50001`. Silent Payments uses Frigate `blockchain.silentpayments.subscribe`, which is implemented. Add `--sp-tweaks` so that scan is indexed. Sparrow's **Bitcoin Core** server type imports a descriptor wallet and does not apply. |
 | Liana v7+ | Backend **Electrum server** at `127.0.0.1:50001`. The bitcoind backend wants Core's descriptor wallet (Core 24+, 26+ for Taproot) and does not apply. |
 | Specter Desktop 2.0 | **External Electrum**. The Bitcoin Core connection needs `disablewallet=0` and wallet RPC, which this node does not serve. |
-| Cake Wallet | Electrum server as above, plus `--sp-tweaks` and `--sp-tweaks-dust 546` (Cake's electrs dust floor; our default is 1000). `server.version[0]` is `rbitcoin-electrs <ver> electrumx` so Cake's electrs probe will call `blockchain.tweaks.subscribe`. A Cake build that still hardcodes `electrs.cakewallet.com` will not use the server you typed. |
+| Cake Wallet | Electrum server as above, plus `--sp-tweaks` and `--sp-tweaks-dust 546` (Cake's electrs dust floor; our default is 1000). `server.version[0]` is `rbitcoin-electrs <ver>` so Cake's electrs probe will call `blockchain.tweaks.subscribe`. A Cake build that still hardcodes `electrs.cakewallet.com` will not use the server you typed. |
 | BlueWallet, Stack Wallet, Keeper, Nunchuk, BitBox App, Envoy / Passport, Caravan, MyCitadel, Blockstream Green personal server | The app's custom Electrum or Esplora field. Same listeners as the table above. |
 | BDK wallets on Esplora (Alby Hub's chain source, and the same client shape Mutiny used) | `http://127.0.0.1:3000`, or TLS in front of that port. |
 

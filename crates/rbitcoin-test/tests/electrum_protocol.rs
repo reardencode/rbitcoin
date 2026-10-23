@@ -255,89 +255,6 @@ async fn rpc(stream: &mut TcpStream, id: u64, method: &str, params: Value) -> Va
     serde_json::from_str(&resp_line).unwrap()
 }
 
-fn dotted_at_least(version: &str, min: &[u64]) -> bool {
-    let parts: Option<Vec<u64>> = version.split('.').map(|p| p.parse().ok()).collect();
-    parts.is_some_and(|p| p.as_slice() >= min)
-}
-
-/// `server.version[0]` as the wallets that branch on it read it.
-/// Sparrow `ElectrumServer.getServerCapability` (lowercased): batches when it
-/// contains `electrumx`, or starts with `electrs/` and the version before the
-/// first `-` is at least 0.9.0. BlueWallet `BlueElectrum.ts` (case-sensitive):
-/// a string starting `ElectrumPersonalServer`, `electrs` or `Fulcrum` stops
-/// batching unless the first space-separated word is `electrs` at 0.9.0 or
-/// `Fulcrum` at 1.9.0 or later. Cake `getNodeIsElectrs` (lowercased) probes
-/// tweaks only when it contains `electrs`.
-fn assert_wallets_read(server: &str) {
-    let lower = server.to_ascii_lowercase();
-    let sparrow = lower.contains("electrumx")
-        || lower
-            .strip_prefix("electrs/")
-            .is_some_and(|rest| dotted_at_least(rest.split('-').next().unwrap_or(""), &[0, 9, 0]));
-    assert!(
-        sparrow,
-        "Sparrow would send one request per line for {server:?}"
-    );
-    let mut words = server.split(' ');
-    let implementation = words.next().unwrap_or("");
-    let version = words.next().unwrap_or("");
-    let bluewallet = !["ElectrumPersonalServer", "electrs", "Fulcrum"]
-        .iter()
-        .any(|p| server.starts_with(p))
-        || match implementation {
-            "electrs" => dotted_at_least(version, &[0, 9, 0]),
-            "Fulcrum" => dotted_at_least(version, &[1, 9, 0]),
-            _ => false,
-        };
-    assert!(bluewallet, "BlueWallet would stop batching for {server:?}");
-    assert!(
-        lower.contains("electrs"),
-        "Cake would skip the tweaks probe for {server:?}"
-    );
-}
-
-/// The page Sparrow sends once it batches: one line, string ids, scripthash
-/// reads. Each slot carries what the same call alone returns, chain-tip stamp
-/// included, and a bad slot does not spoil its neighbours.
-async fn sparrow_batch_matches_single_calls(stream: &mut TcpStream) {
-    let sh = electrum_scripthash_hex(&[0x51]);
-    let methods = [
-        "blockchain.scripthash.get_history",
-        "blockchain.scripthash.get_balance",
-        "blockchain.scripthash.listunspent",
-    ];
-    let mut singles = Vec::new();
-    for (i, method) in methods.iter().enumerate() {
-        singles.push(rpc(stream, 60 + i as u64, method, json!([sh])).await);
-    }
-    let mut items: Vec<Value> = methods
-        .iter()
-        .map(|m| json!({"jsonrpc":"2.0","id": format!("m/0/{m}"),"method": m,"params":[sh]}))
-        .collect();
-    items.insert(
-        1,
-        json!({"jsonrpc":"2.0","id":"bad","method":"blockchain.scripthash.get_balance","params":["zz"]}),
-    );
-    let mut line = serde_json::to_string(&items).unwrap();
-    line.push('\n');
-    stream.write_all(line.as_bytes()).await.unwrap();
-    let batch = read_notify(stream, "sparrow batch").await;
-    let slots = batch.as_array().expect("batch answer is one array line");
-    assert_eq!(slots.len(), items.len(), "{batch}");
-    for (slot, item) in slots.iter().zip(&items) {
-        assert_eq!(slot["id"], item["id"], "{batch}");
-    }
-    assert!(slots[1].get("result").is_none(), "{batch}");
-    assert!(slots[1]["error"]["message"].as_str().is_some(), "{batch}");
-    let good = [&slots[0], &slots[2], &slots[3]];
-    for (slot, single) in good.into_iter().zip(&singles) {
-        assert!(single.get("error").is_none(), "{single}");
-        assert_eq!(slot["result"], single["result"], "{batch}");
-        assert_eq!(slot["chain_tip"], single["chain_tip"], "{batch}");
-        assert!(slot["chain_tip"].is_string(), "{batch}");
-    }
-}
-
 async fn read_notify(stream: &mut TcpStream, label: &str) -> Value {
     let mut reader = BufReader::new(&mut *stream);
     let mut resp_line = String::new();
@@ -583,6 +500,10 @@ async fn electrum_server_version_history_balance() {
     assert_eq!(ver[1].as_str(), Some("1.4"));
     let server = ver[0].as_str().expect("server.version[0]");
     assert!(
+        server.to_ascii_lowercase().contains("electrs"),
+        "Cake skips tweaks unless version[0] contains electrs, got {server:?}"
+    );
+    assert!(
         server.to_ascii_lowercase().contains("rbitcoin"),
         "version[0] must still identify rbitcoin, got {server:?}"
     );
@@ -590,7 +511,6 @@ async fn electrum_server_version_history_balance() {
         server.contains(env!("CARGO_PKG_VERSION")),
         "version[0] must track workspace.package.version, got {server:?}"
     );
-    assert_wallets_read(server);
 
     let sh_hex = electrum_scripthash_hex(&[0x51]);
     let req = json!({
@@ -735,8 +655,6 @@ async fn electrum_server_version_history_balance() {
     mempool_status_matches_history_row_order(&mut stream, &hub, &chain).await;
 
     pin_wallet_protocol_1_6(&mut stream).await;
-
-    sparrow_batch_matches_single_calls(&mut stream).await;
 
     let sh_hex = electrum_scripthash_hex(&[0x51]);
     let v = rpc(

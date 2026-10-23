@@ -30,14 +30,11 @@ pub const PROTOCOL_MAX: &str = "1.6";
 // Dialect version: trailing `asof:<blockhash>`. Not a dotted-int; `protocol_max` stays 1.6.
 #[doc(hidden)]
 pub const PROTOCOL_ASOF: &str = "1.4.2-asof";
-/// First `server.version` element, read by wallets that branch on it.
-/// Sparrow sends JSON-RPC batches when the lowercased string contains
-/// `electrumx`. BlueWallet stops batching only when it starts with
-/// `electrs`, so it keeps batching. Cake Wallet `getNodeIsElectrs()` probes
-/// `blockchain.tweaks.subscribe [0, 1, false]` when it contains `electrs`.
+/// First `server.version` element. Cake Wallet `getNodeIsElectrs()` requires
+/// this string (lowercased) to contain `electrs` before it will probe
+/// `blockchain.tweaks.subscribe [0, 1, false]`.
 #[doc(hidden)]
-pub const SERVER_VERSION: &str =
-    concat!("rbitcoin-electrs ", env!("CARGO_PKG_VERSION"), " electrumx");
+pub const SERVER_VERSION: &str = concat!("rbitcoin-electrs ", env!("CARGO_PKG_VERSION"));
 
 /// One JSON-RPC request line. Junk is `None`; must not panic.
 pub fn parse_electrum_request_line(line: &str) -> Option<Value> {
@@ -68,11 +65,6 @@ pub fn meter_dispatch_wall(us: u64) {
 pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
 /// Max request payload bytes (Electrum: one JSON-RPC line incl. `\n`; Esplora: body).
 pub const DEFAULT_MAX_LINE_BYTES: usize = 1_048_576;
-/// Max requests in one JSON-RPC batch line: the work one line can queue on
-/// a connection. Reply RAM is bounded separately by writing the reply one
-/// slot at a time. Fulcrum's default `max_batch`; Sparrow pages at 100.
-#[doc(hidden)]
-pub const MAX_BATCH_ITEMS: usize = 345;
 /// Alias for shared docs / Esplora body cap ([`DEFAULT_MAX_LINE_BYTES`]).
 pub const DEFAULT_MAX_REQUEST_BYTES: usize = DEFAULT_MAX_LINE_BYTES;
 /// Max scripthash subscriptions per Electrum connection (notify fan-out).
@@ -257,11 +249,6 @@ pub async fn run_electrum(
                         continue;
                     };
                     rbitcoin_log::info!("electrum: connect {peer}");
-                    // Replies, batch slots included, are small writes the
-                    // client waits on whole; Nagle would hold them for an ACK.
-                    if let Err(e) = stream.set_nodelay(true) {
-                        rbitcoin_log::warn!("electrum: {peer} set_nodelay: {e}");
-                    }
                     let q = query.clone();
                     let cfg = config.clone();
                     let p = params.clone();
@@ -609,65 +596,165 @@ where
                     Some(v) => v,
                     None => continue,
                 };
-                let ctx = RequestCtx {
-                    peer,
-                    query: &query,
-                    config: &config,
-                    params: &params,
-                    mempool: &mempool,
-                };
-                let resp = match req {
-                    Value::Array(items) => {
-                        answer_batch(
-                            &ctx,
-                            &mut conn,
-                            &mut last_sent_status,
-                            &mut writer,
-                            idle,
-                            items,
-                        )
-                        .await?;
-                        continue;
-                    }
-                    req => match request_stream(&req) {
-                        Some(stream) => {
-                            let id = req.get("id").cloned().unwrap_or(Value::Null);
-                            let params_v = req.get("params").cloned().unwrap_or(json!([]));
-                            match stream {
-                                ElectrumStream::SilentPayments => {
-                                    serve_sp_subscribe(
-                                        &mut reader,
-                                        &mut writer,
-                                        &query,
-                                        &params,
-                                        &peer,
-                                        id,
-                                        &params_v,
-                                        idle,
-                                        &mut conn,
+                let id = req.get("id").cloned().unwrap_or(Value::Null);
+                let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                let params_v = req.get("params").cloned().unwrap_or(json!([]));
+                if method == "blockchain.silentpayments.subscribe" {
+                    serve_sp_subscribe(
+                        &mut reader,
+                        &mut writer,
+                        &query,
+                        &params,
+                        &peer,
+                        id,
+                        &params_v,
+                        idle,
+                        &mut conn,
+                    )
+                    .await?;
+                    continue;
+                }
+                if method == "blockchain.tweaks.subscribe" {
+                    serve_tweaks_subscribe(
+                        &mut reader,
+                        &mut writer,
+                        &query,
+                        &params,
+                        &peer,
+                        id,
+                        &params_v,
+                        idle,
+                        max_line,
+                        config.tweaks_min_dust,
+                    )
+                    .await?;
+                    continue;
+                }
+                let t0 = Instant::now();
+                let mut stamped: Option<ChainView> = None;
+                let result = if method_stays_on_worker(method) {
+                    dispatch_with_join(
+                        method,
+                        &params_v,
+                        &query,
+                        &config,
+                        &params,
+                        mempool.as_deref(),
+                        &mut conn,
+                    )
+                } else {
+                    let q = Arc::clone(&query);
+                    let cfg = Arc::clone(&config);
+                    let p = Arc::clone(&params);
+                    let mp = mempool.clone();
+                    let method_owned = method.to_string();
+                    let params_owned = params_v.clone();
+                    // Move the sub sets in and back (`conn = work` below): a
+                    // clone per request made a wallet's N-address sync O(N²).
+                    // A JoinError ends the connection, so nothing reuses them.
+                    let mut work = ElectrumConn {
+                        protocol: conn.protocol.clone(),
+                        header_sub: conn.header_sub,
+                        sh_subs: std::mem::take(&mut conn.sh_subs),
+                        sh_join: conn.sh_join.take(),
+                        outpoint_subs: std::mem::take(&mut conn.outpoint_subs),
+                        sp_sub: conn.sp_sub.clone(),
+                        sp_scan_busy: conn.sp_scan_busy,
+                    };
+                    let stamp = method_stamps_chain_tip(&method_owned);
+                    match tokio::task::spawn_blocking(move || {
+                        let _g = BlockingRegion::enter();
+                        let asof_ok = work.protocol.as_str() == PROTOCOL_ASOF;
+                        let (r, view) = if stamp {
+                            electrum_at_chain_view(
+                                &q,
+                                &method_owned,
+                                &params_owned,
+                                asof_ok,
+                                |q, params, view, is_asof| {
+                                    dispatch_pinned(
+                                        &method_owned,
+                                        params,
+                                        q,
+                                        &cfg,
+                                        &p,
+                                        mp.as_deref(),
+                                        &mut work,
+                                        view,
+                                        is_asof,
                                     )
-                                    .await?
-                                }
-                                ElectrumStream::Tweaks => {
-                                    serve_tweaks_subscribe(
-                                        &mut reader,
-                                        &mut writer,
-                                        &query,
-                                        &params,
-                                        &peer,
-                                        id,
-                                        &params_v,
-                                        idle,
-                                        max_line,
-                                        config.tweaks_min_dust,
-                                    )
-                                    .await?
-                                }
-                            }
-                            continue;
+                                },
+                            )
+                        } else {
+                            (
+                                dispatch_pinned(
+                                    &method_owned,
+                                    &params_owned,
+                                    &q,
+                                    &cfg,
+                                    &p,
+                                    mp.as_deref(),
+                                    &mut work,
+                                    None,
+                                    false,
+                                ),
+                                None,
+                            )
+                        };
+                        (r, work, view)
+                    })
+                    .await
+                    {
+                        Ok((r, work, view)) => {
+                            conn = work;
+                            stamped = view;
+                            r
                         }
-                        None => answer_one(&ctx, &mut conn, &mut last_sent_status, &req).await?,
-                    },
+                        Err(e) => {
+                            return Err(std::io::Error::other(format!(
+                                "electrum dispatch join: {e}"
+                            )));
+                        }
+                    }
+                };
+                drop_unsubscribed_status(&mut last_sent_status, &conn.sh_subs);
+                let wall_ms = t0.elapsed().as_millis() as u64;
+                meter_dispatch_wall(t0.elapsed().as_micros() as u64);
+                let params_s = serde_json::to_string(&params_v).unwrap_or_else(|_| "[]".into());
+                let resp = match result {
+                    Ok(v) => {
+                        if method == "blockchain.scripthash.subscribe" {
+                            if let Ok(sh) = param_scripthash(&params_v, 0) {
+                                record_sent_status(&mut last_sent_status, sh, &v);
+                            }
+                        } else if method == "blockchain.scripthash.unsubscribe" {
+                            // Exact and O(1): a resubscribe must not be
+                            // deduplicated against a status sent before.
+                            if let Ok(sh) = param_scripthash(&params_v, 0) {
+                                last_sent_status.remove(&sh);
+                            }
+                        }
+                        rbitcoin_log::api_call(
+                            "electrum",
+                            &peer.to_string(),
+                            method,
+                            &params_s,
+                            wall_ms,
+                            None,
+                        );
+                        rpc_result(&id, &v, stamped.as_ref())
+                    }
+                    Err(e) => {
+                        rbitcoin_log::api_call(
+                            "electrum",
+                            &peer.to_string(),
+                            method,
+                            &params_s,
+                            wall_ms,
+                            Some(&e),
+                        );
+                        json!({"jsonrpc":"2.0","id": id, "error": {"code": 1, "message": e}})
+                    }
                 };
                 write_line(&mut writer, &resp, idle).await?;
                 let _ = &notify;
@@ -675,237 +762,6 @@ where
         }
     }
     Ok(())
-}
-
-/// The connection's fixed inputs to one request.
-struct RequestCtx<'a> {
-    peer: SocketAddr,
-    query: &'a Arc<Query>,
-    config: &'a Arc<ElectrumConfig>,
-    params: &'a Arc<ChainParams>,
-    mempool: &'a Option<Arc<MempoolHub>>,
-}
-
-/// Methods that answer with more than one line. They own the connection
-/// until the stream ends, so they cannot sit in a batch.
-enum ElectrumStream {
-    SilentPayments,
-    Tweaks,
-}
-
-fn request_stream(req: &Value) -> Option<ElectrumStream> {
-    match req.get("method").and_then(|m| m.as_str())? {
-        "blockchain.silentpayments.subscribe" => Some(ElectrumStream::SilentPayments),
-        "blockchain.tweaks.subscribe" => Some(ElectrumStream::Tweaks),
-        _ => None,
-    }
-}
-
-fn invalid_request(id: Value, message: &str) -> Value {
-    json!({"jsonrpc":"2.0","id": id, "error": {"code": -32600, "message": message}})
-}
-
-/// JSON-RPC 2.0 batch, one array line on the wire. Each slot is written as
-/// soon as it is answered, so socket backpressure holds the connection to
-/// about one reply instead of the whole array. Items run in order because
-/// each moves `conn` in and out of the blocking pool. A batch of only
-/// notifications writes nothing.
-async fn answer_batch<W: AsyncWrite + Unpin>(
-    ctx: &RequestCtx<'_>,
-    conn: &mut ElectrumConn,
-    last_sent: &mut HashMap<[u8; 32], String>,
-    writer: &mut W,
-    idle: Duration,
-    items: Vec<Value>,
-) -> Result<(), std::io::Error> {
-    if items.is_empty() {
-        return write_line(writer, &invalid_request(Value::Null, "empty batch"), idle).await;
-    }
-    if items.len() > MAX_BATCH_ITEMS {
-        return write_line(
-            writer,
-            &invalid_request(Value::Null, "batch too large"),
-            idle,
-        )
-        .await;
-    }
-    let mut opened = false;
-    for item in &items {
-        let Some(answer) = answer_batch_item(ctx, conn, last_sent, item).await? else {
-            continue;
-        };
-        let mut slot = vec![if opened { b',' } else { b'[' }];
-        slot.extend(serde_json::to_vec(&answer).unwrap_or_else(|_| b"{}".to_vec()));
-        opened = true;
-        write_bytes_within(writer, &slot, idle).await?;
-    }
-    if opened {
-        write_bytes_within(writer, b"]\n", idle).await?;
-    }
-    Ok(())
-}
-
-/// `None` for a notification (no `id` member, unlike `"id": null`). It is
-/// not run: no reply means no slot write to hold back a client that stops
-/// reading, and Electrum clients never send notifications.
-async fn answer_batch_item(
-    ctx: &RequestCtx<'_>,
-    conn: &mut ElectrumConn,
-    last_sent: &mut HashMap<[u8; 32], String>,
-    item: &Value,
-) -> Result<Option<Value>, std::io::Error> {
-    let Some(obj) = item.as_object() else {
-        return Ok(Some(invalid_request(Value::Null, "Invalid Request")));
-    };
-    let Some(id) = obj.get("id") else {
-        return Ok(None);
-    };
-    if request_stream(item).is_some() {
-        return Ok(Some(invalid_request(
-            id.clone(),
-            "streaming method cannot be sent in a batch",
-        )));
-    }
-    answer_one(ctx, conn, last_sent, item).await.map(Some)
-}
-
-/// One request/response method. `Err` is a dispatch task that died, which
-/// ends the connection.
-async fn answer_one(
-    ctx: &RequestCtx<'_>,
-    conn: &mut ElectrumConn,
-    last_sent: &mut HashMap<[u8; 32], String>,
-    req: &Value,
-) -> Result<Value, std::io::Error> {
-    let id = req.get("id").cloned().unwrap_or(Value::Null);
-    let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
-    let params_v = req.get("params").cloned().unwrap_or(json!([]));
-    let t0 = Instant::now();
-    let mut stamped: Option<ChainView> = None;
-    let result = if method_stays_on_worker(method) {
-        dispatch_with_join(
-            method,
-            &params_v,
-            ctx.query,
-            ctx.config,
-            ctx.params,
-            ctx.mempool.as_deref(),
-            conn,
-        )
-    } else {
-        let q = Arc::clone(ctx.query);
-        let cfg = Arc::clone(ctx.config);
-        let p = Arc::clone(ctx.params);
-        let mp = ctx.mempool.clone();
-        let method_owned = method.to_string();
-        let params_owned = params_v.clone();
-        // Move the sub sets in and back (`*conn = work` below): a
-        // clone per request made a wallet's N-address sync O(N²).
-        // A JoinError ends the connection, so nothing reuses them.
-        let mut work = ElectrumConn {
-            protocol: conn.protocol.clone(),
-            header_sub: conn.header_sub,
-            sh_subs: std::mem::take(&mut conn.sh_subs),
-            sh_join: conn.sh_join.take(),
-            outpoint_subs: std::mem::take(&mut conn.outpoint_subs),
-            sp_sub: conn.sp_sub.clone(),
-            sp_scan_busy: conn.sp_scan_busy,
-        };
-        let stamp = method_stamps_chain_tip(&method_owned);
-        match tokio::task::spawn_blocking(move || {
-            let _g = BlockingRegion::enter();
-            let asof_ok = work.protocol.as_str() == PROTOCOL_ASOF;
-            let (r, view) = if stamp {
-                electrum_at_chain_view(
-                    &q,
-                    &method_owned,
-                    &params_owned,
-                    asof_ok,
-                    |q, params, view, is_asof| {
-                        dispatch_pinned(
-                            &method_owned,
-                            params,
-                            q,
-                            &cfg,
-                            &p,
-                            mp.as_deref(),
-                            &mut work,
-                            view,
-                            is_asof,
-                        )
-                    },
-                )
-            } else {
-                (
-                    dispatch_pinned(
-                        &method_owned,
-                        &params_owned,
-                        &q,
-                        &cfg,
-                        &p,
-                        mp.as_deref(),
-                        &mut work,
-                        None,
-                        false,
-                    ),
-                    None,
-                )
-            };
-            (r, work, view)
-        })
-        .await
-        {
-            Ok((r, work, view)) => {
-                *conn = work;
-                stamped = view;
-                r
-            }
-            Err(e) => {
-                return Err(std::io::Error::other(format!(
-                    "electrum dispatch join: {e}"
-                )));
-            }
-        }
-    };
-    drop_unsubscribed_status(last_sent, &conn.sh_subs);
-    let wall_ms = t0.elapsed().as_millis() as u64;
-    meter_dispatch_wall(t0.elapsed().as_micros() as u64);
-    let params_s = serde_json::to_string(&params_v).unwrap_or_else(|_| "[]".into());
-    Ok(match result {
-        Ok(v) => {
-            if method == "blockchain.scripthash.subscribe" {
-                if let Ok(sh) = param_scripthash(&params_v, 0) {
-                    record_sent_status(last_sent, sh, &v);
-                }
-            } else if method == "blockchain.scripthash.unsubscribe" {
-                // Exact and O(1): a resubscribe must not be
-                // deduplicated against a status sent before.
-                if let Ok(sh) = param_scripthash(&params_v, 0) {
-                    last_sent.remove(&sh);
-                }
-            }
-            rbitcoin_log::api_call(
-                "electrum",
-                &ctx.peer.to_string(),
-                method,
-                &params_s,
-                wall_ms,
-                None,
-            );
-            rpc_result(&id, &v, stamped.as_ref())
-        }
-        Err(e) => {
-            rbitcoin_log::api_call(
-                "electrum",
-                &ctx.peer.to_string(),
-                method,
-                &params_s,
-                wall_ms,
-                Some(&e),
-            );
-            json!({"jsonrpc":"2.0","id": id, "error": {"code": 1, "message": e}})
-        }
-    })
 }
 
 #[allow(clippy::too_many_arguments)] // call-site args stay unbundled
