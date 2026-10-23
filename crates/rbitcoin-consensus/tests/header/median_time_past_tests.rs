@@ -176,6 +176,7 @@ fn check_header_rejects_without_a_store() {
         None,
         &[],
         None,
+        None,
         |_| None,
     )
     .unwrap_err();
@@ -199,6 +200,7 @@ fn check_header_rejects_without_a_store() {
         None,
         &[parent.time],
         None,
+        None,
         |_| None,
     )
     .unwrap_err();
@@ -212,6 +214,7 @@ fn check_header_rejects_without_a_store() {
         [0xff; 32],
         Some(parent),
         &[parent.time],
+        None,
         None,
         |_| None,
     )
@@ -227,6 +230,7 @@ fn check_header_rejects_without_a_store() {
         [0xff; 32],
         Some(parent),
         &[parent.time],
+        None,
         None,
         |_| None,
     )
@@ -246,6 +250,7 @@ fn check_header_rejects_without_a_store() {
         Some(parent),
         &[parent.time],
         None,
+        None,
         |_| None,
     )
     .unwrap_err();
@@ -263,6 +268,7 @@ fn check_header_rejects_without_a_store() {
         Some(parent),
         &[parent.time],
         None,
+        None,
         |_| None,
     )
     .unwrap_err();
@@ -276,6 +282,7 @@ fn check_header_rejects_without_a_store() {
         [0xff; 32],
         Some(parent),
         &[parent.time],
+        None,
         None,
         |_| Some(parent.bits),
     )
@@ -297,6 +304,7 @@ fn check_header_returns_the_median_it_checked() {
         genesis.block_hash().to_byte_array(),
         None,
         &[],
+        None,
         None,
         |_| None,
     )
@@ -321,6 +329,7 @@ fn check_header_returns_the_median_it_checked() {
             bits: genesis.header.bits,
         }),
         &times,
+        None,
         None,
         |_| None,
     )
@@ -366,6 +375,7 @@ fn waived_median_keeps_the_window() {
             bits: genesis.header.bits,
         }),
         &[parent_time],
+        None,
         None,
         |_| None,
     )

@@ -47,6 +47,7 @@ pub fn assemble_parent_mtp_and_bits(
         "confirm: load incomplete (parent header plan missing above tip)",
     )))?;
     let period_first = retarget_first_time(query, params, height.0)?;
+    let period_open = crate::header_read::period_open_time(query, params, height.0)?;
     let mtp = rbitcoin_consensus::check_header(
         params,
         height,
@@ -55,6 +56,7 @@ pub fn assemble_parent_mtp_and_bits(
         Some(parent),
         &times,
         period_first,
+        period_open,
         |h| header_bits_plan_or_store(query, h),
     )?;
     Ok((mtp, times))
@@ -71,6 +73,7 @@ pub fn assemble_chained_header(
     time_window: &[u32],
 ) -> Result<u32, ConfirmError> {
     let period_first = retarget_first_time(query, params, height.0)?;
+    let period_open = crate::header_read::period_open_time(query, params, height.0)?;
     Ok(rbitcoin_consensus::check_header(
         params,
         height,
@@ -83,6 +86,7 @@ pub fn assemble_chained_header(
         }),
         time_window,
         period_first,
+        period_open,
         |h| header_bits_plan_or_store(query, h),
     )?)
 }

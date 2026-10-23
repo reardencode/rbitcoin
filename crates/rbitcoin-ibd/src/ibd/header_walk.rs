@@ -2943,11 +2943,14 @@ pub fn batch_context_ok(
             accepted = false;
             break;
         };
+        let period_open = period_open_time(hub, height, st, &diff);
         if let Err(e) = rbitcoin_consensus::validate_header_on_parent(
             &hub.params,
             rbitcoin_primitives::Height(height),
             hdr,
             mtp,
+            parent.time,
+            period_open,
             bits,
         ) {
             stopped = Some((height, hash.to_byte_array(), e));
@@ -3003,6 +3006,25 @@ pub fn expected_lookahead_bits(
         period_first_time(hub, height, st, diff),
         |h| lookahead_bits_at(diff, st, hub, h),
     )
+}
+
+/// Timestamp of the period-open header when BIP 54's negative-interval
+/// check applies. `None` when the check is off, or when that header is not
+/// in the snap or the header store (the caller then fails closed).
+#[doc(hidden)]
+pub fn period_open_time(
+    hub: &ChainHub,
+    height: u32,
+    st: &IbdWorkState,
+    diff: &DiffSnap,
+) -> Option<u32> {
+    let open_h = hub.params.bip54_period_open_height(height)?;
+    if diff.period_height == open_h {
+        if let Some(header) = diff.period_header {
+            return Some(header.time);
+        }
+    }
+    header_on_store(st, hub, open_h).map(|header| header.time)
 }
 
 #[doc(hidden)]

@@ -67,6 +67,7 @@ fn verify_pubkey_hash_mismatch() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };

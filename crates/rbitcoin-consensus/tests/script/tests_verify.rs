@@ -78,6 +78,7 @@ fn make_p2wpkh_spend() -> (ScriptCheckJob, bool) {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -159,6 +160,7 @@ fn mainnet_508011_nested_p2wpkh_raw_sighash_0x65() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -214,6 +216,7 @@ fn pretaproot_v1_witness_program_anyone_can_spend() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -262,6 +265,7 @@ fn empty_script_pubkey_rejects() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -328,6 +332,7 @@ fn p2sh_legacy_multi_push_op_true_accepts() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -376,6 +381,7 @@ fn mainnet_block_183_high_s_p2pk_accepts() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -428,6 +434,7 @@ fn mainnet_block_110300_sighash_type_zero_p2pkh() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -488,6 +495,7 @@ fn mainnet_block_124276_lax_der_pre_bip66() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -654,6 +662,7 @@ fn mainnet_block_170060_pre_bip16_p2sh_as_bare() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -722,6 +731,7 @@ fn mainnet_block_163685_scriptsig_codeseparator_checkmultisig() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -779,6 +789,7 @@ fn mainnet_block_140493_high_bit_s_lax_der_p2pkh() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -878,6 +889,7 @@ fn mainnet_block_443992_p2sh_codeseparator_scriptcode() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -928,6 +940,7 @@ fn cltv_in_scriptsig_with_op_true_spk_enforced() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -983,6 +996,7 @@ fn unknown_witness_v16_accepts_without_discourage() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -1032,6 +1046,7 @@ fn unknown_witness_v16_malleated_scriptsig() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -1086,6 +1101,7 @@ fn unknown_witness_v16_discourage_rejects() {
             discourage_upgradable_witness: true,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -1142,6 +1158,7 @@ fn p2wsh_oversized_witness_element_rejected() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };
@@ -1212,6 +1229,7 @@ fn p2wsh_witness_script_larger_than_520_is_valid() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     };

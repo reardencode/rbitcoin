@@ -1838,16 +1838,27 @@ impl ChainHub {
 
     /// Off-tip header checks. `validate_header` is only for a confirmed parent,
     /// and that is the call which opens [`rbitcoin_consensus::TrustCollect`].
+    #[allow(clippy::too_many_arguments)] // call-site args stay unbundled
     fn apply_off_tip_header(
         query: &rbitcoin_query::Query,
         params: &ChainParams,
         header: &Header,
         height: u32,
         mtp: u32,
+        parent_time: u32,
+        period_open_time: Option<u32>,
         expected: CompactTarget,
     ) -> Result<(), NetError> {
         soften_parent_header(query, header, height, || {
-            validate_header_on_parent(params, Height(height), header, mtp, expected)
+            validate_header_on_parent(
+                params,
+                Height(height),
+                header,
+                mtp,
+                parent_time,
+                period_open_time,
+                expected,
+            )
         })
         .map_err(|e| header_reject(header, &rbitcoin_query::ConfirmError::from(e)))
     }
@@ -1882,13 +1893,17 @@ impl ChainHub {
             .ok_or_else(|| NetError::Consensus("header parent height unknown".into()))?;
         let mtp = self.mtp_off_tip(&parent, in_batch);
         let expected = self.expected_bits_off_tip(header, &parent, parent_height, in_batch)?;
+        let height = parent_height.saturating_add(1);
+        let period_open = self.bip54_open_off_tip(&parent, parent_height, height, in_batch);
         // `validate_header` opens the collector, and it only runs for a confirmed parent.
         Self::apply_off_tip_header(
             self.query.as_ref(),
             &self.params,
             header,
-            parent_height.saturating_add(1),
+            height,
             mtp,
+            parent.time,
+            period_open,
             expected,
         )
     }
@@ -2022,6 +2037,21 @@ impl ChainHub {
             bits = hdr.bits;
         }
         bits
+    }
+
+    /// Timestamp of the period-open header when BIP 54 compares the last
+    /// block of a difficulty period. `None` when that check is off.
+    #[doc(hidden)]
+    pub fn bip54_open_off_tip(
+        &self,
+        parent: &Header,
+        parent_height: u32,
+        height: u32,
+        in_batch: &HashMap<[u8; 32], HeaderSyncNode>,
+    ) -> Option<u32> {
+        let open_h = self.params.bip54_period_open_height(height)?;
+        self.header_along_off_tip(parent, parent_height, open_h, in_batch)
+            .map(|header| header.time)
     }
 
     #[doc(hidden)]
@@ -3133,19 +3163,20 @@ impl ChainHub {
                         .map_err(|e| header_reject(&b.header, &e))
                     } else {
                         let parent = &blocks[i - 1].header;
+                        let parent_height = height.saturating_sub(1);
                         let mtp = self.mtp_off_tip(parent, &batch);
-                        let expected = self.expected_bits_off_tip(
-                            &b.header,
-                            parent,
-                            height.saturating_sub(1),
-                            &batch,
-                        )?;
+                        let expected =
+                            self.expected_bits_off_tip(&b.header, parent, parent_height, &batch)?;
+                        let period_open =
+                            self.bip54_open_off_tip(parent, parent_height, height, &batch);
                         soften_parent_header(self.query.as_ref(), &b.header, height, || {
                             validate_header_on_parent(
                                 &self.params,
                                 Height(height),
                                 &b.header,
                                 mtp,
+                                parent.time,
+                                period_open,
                                 expected,
                             )
                         })

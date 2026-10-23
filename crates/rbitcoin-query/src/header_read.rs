@@ -54,6 +54,11 @@ pub fn validate_header_hashed(
     } else {
         None
     };
+    let period_open = if parent.is_some() {
+        period_open_time(query, params, height.0)?
+    } else {
+        None
+    };
     let own_guard = crate::confirm_run::confirm_waive(query) && !rbitcoin_consensus::collecting();
     let guard = own_guard.then(rbitcoin_consensus::TrustCollect::enter);
     let result = check_header(
@@ -64,6 +69,7 @@ pub fn validate_header_hashed(
         parent,
         &times,
         period_first,
+        period_open,
         |h| {
             header_bits_at(query, Height(h))
                 .ok()
@@ -179,6 +185,28 @@ pub fn expected_next_bits(
 /// `period_first_time` is the timestamp of the header at `height - interval`
 /// when `height` is a retarget boundary. `bits_at` supplies earlier `nBits`
 /// for the testnet min-difficulty walk. `None` means an ancestor is missing.
+/// Timestamp of the first block of the difficulty period, when BIP 54's
+/// negative-interval check applies. Missing when the check applies is a
+/// header failure.
+pub fn period_open_time(
+    query: &Query,
+    params: &ChainParams,
+    height: u32,
+) -> Result<Option<u32>, ConfirmError> {
+    let Some(open_h) = params.bip54_period_open_height(height) else {
+        return Ok(None);
+    };
+    if let Some((_fk, rec)) = query.header_at_height(Height(open_h))? {
+        return Ok(Some(rec.timestamp));
+    }
+    if let Some(plan) = query.confirm_parent_cache().get_header_plan(open_h) {
+        return Ok(Some(plan.header_rec.timestamp));
+    }
+    Err(ConfirmError::from(
+        rbitcoin_consensus::ConsensusError::BadHeader("missing bip54 period open"),
+    ))
+}
+
 pub fn period_first_time(
     query: &Query,
     params: &ChainParams,

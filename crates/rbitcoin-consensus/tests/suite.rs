@@ -3,6 +3,7 @@ mod clock;
 mod error;
 mod header;
 mod id_map;
+mod inquisition;
 mod milestone;
 mod params;
 mod policy;

@@ -234,10 +234,20 @@ pub fn validate_block_structure_with_pres(
         return Err(ConsensusError::BadBlock("block weight too large"));
     }
 
+    // BIP 54: a 64-byte witness-stripped transaction is consensus-invalid,
+    // including the coinbase. The no-coinbase mutation check above does not
+    // cover a block that has a coinbase. Not a trust-peer waiver.
+    if ctx.enforce_height_gates && ctx.params.heretical_at(ctx.height.0).consensus_cleanup {
+        reject_bip54_tx_size(&pres)?;
+    }
+
     // BIP34 only after the network's buried height (mainnet 227931). From
     // height 1 this rejects mainnet block 1.
     if ctx.enforce_height_gates && ctx.params.bip34_active_at(ctx.height.0) {
         check_bip34_coinbase(&block.txdata[0], ctx.height.0)?;
+    }
+    if ctx.enforce_height_gates && ctx.params.heretical_at(ctx.height.0).consensus_cleanup {
+        reject_bip54_coinbase(block, ctx.height.0)?;
     }
 
     // Money-range gate on the precompute path. `assemble_tx_value_out` applies
@@ -382,6 +392,80 @@ pub fn apply_witness_commitment(block: &mut Block) {
     if let Some(root) = block.compute_merkle_root() {
         block.header.merkle_root = root;
     }
+}
+
+/// BIP 54: witness-stripped size of 64 is invalid once consensus cleanup is on.
+pub fn reject_bip54_tx_size(pres: &[TxPrecompute]) -> Result<(), ConsensusError> {
+    if pres
+        .iter()
+        .any(|p| p.base_size == crate::heretical::INVALID_TX_NONWITNESS_SIZE)
+    {
+        return Err(ConsensusError::BadBlock("bad-txns-size"));
+    }
+    Ok(())
+}
+
+/// BIP 54 coinbase: `nLockTime == height - 1` and `nSequence` is not final.
+///
+/// Height 0 has no previous height. Inquisition skips the check there.
+pub fn reject_bip54_coinbase(block: &Block, height: u32) -> Result<(), ConsensusError> {
+    if height == 0 {
+        return Ok(());
+    }
+    let Some(cb) = block.txdata.first() else {
+        return Err(ConsensusError::BadBlock("no transactions"));
+    };
+    let Some(input) = cb.input.first() else {
+        return Err(ConsensusError::BadBlock("bad-cb-sequence"));
+    };
+    if cb.lock_time.to_consensus_u32() != height - 1 {
+        return Err(ConsensusError::BadBlock("bad-cb-locktime"));
+    }
+    if input.sequence.is_final() {
+        return Err(ConsensusError::BadBlock("bad-cb-sequence"));
+    }
+    Ok(())
+}
+
+/// Legacy sigops BIP 54 counts where they can execute.
+///
+/// `scriptSig` is accurate. A P2SH prevout counts the redeem script only.
+/// Any other prevout counts its own accurate sigops. Witness sigops are not
+/// included.
+pub fn bip54_input_sigops(script_sig: &[u8], prev_spk: &[u8]) -> u64 {
+    let mut n = script_sigop_count(script_sig, true);
+    if Script::from_bytes(prev_spk).is_p2sh() {
+        n = n.saturating_add(
+            last_script_push(script_sig)
+                .map(|redeem| script_sigop_count(redeem, true))
+                .unwrap_or(0),
+        );
+    } else {
+        n = n.saturating_add(script_sigop_count(prev_spk, true));
+    }
+    n
+}
+
+/// Reject a non-coinbase transaction whose executed legacy sigops exceed
+/// [`crate::heretical::MAX_TX_BIP54_SIGOPS`].
+pub fn reject_bip54_legacy_sigops(
+    tx: &Transaction,
+    prev_spks: &[&[u8]],
+) -> Result<(), ConsensusError> {
+    if tx.is_coinbase() {
+        return Ok(());
+    }
+    if prev_spks.len() != tx.input.len() {
+        return Err(ConsensusError::BadBlock("bad-txns-legacy-sigops"));
+    }
+    let mut sigops = 0u64;
+    for (inp, spk) in tx.input.iter().zip(prev_spks.iter()) {
+        sigops = sigops.saturating_add(bip54_input_sigops(inp.script_sig.as_bytes(), spk));
+        if sigops > crate::heretical::MAX_TX_BIP54_SIGOPS {
+            return Err(ConsensusError::BadBlock("bad-txns-legacy-sigops"));
+        }
+    }
+    Ok(())
 }
 
 /// Core-style legacy sigop count (CHECKSIG=1, CHECKMULTISIG=20 or accurate N).
@@ -785,6 +869,10 @@ pub struct ScriptVerifyFlags {
     /// SCRIPT_VERIFY_CLEANSTACK for legacy bare and P2SH. Witness v0 already
     /// requires a clean stack. Production confirm leaves this off.
     pub cleanstack: bool,
+    /// BIP 54 consensus cleanup on the default signet. Buried and fixture
+    /// literals leave this off. [`Self::consensus_at`] sets it from the chain
+    /// height.
+    pub heretical: crate::heretical::HereticalFlags,
 }
 
 impl ScriptVerifyFlags {
@@ -813,6 +901,7 @@ impl ScriptVerifyFlags {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: crate::heretical::HereticalFlags::OFF,
         }
     }
 
@@ -846,6 +935,7 @@ impl ScriptVerifyFlags {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
+            heretical: ctx.params.heretical_at(h),
         }
     }
 

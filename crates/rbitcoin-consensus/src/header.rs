@@ -18,8 +18,10 @@ pub struct ParentHeader {
 /// Header rules from the header bytes plus caller facts. No datadir.
 ///
 /// `mtp_times` ends at the parent (up to 11 timestamps). `period_first_time`
-/// is the header `interval` blocks before a retarget height. `bits_at` supplies
-/// earlier `nBits` for the testnet min-difficulty walk.
+/// is the header `interval` blocks before a retarget height. `period_open_time`
+/// is the first header of this difficulty period when `height` is the last
+/// block of that period. BIP 54 reads it; other networks pass `None`.
+/// `bits_at` supplies earlier `nBits` for the testnet min-difficulty walk.
 ///
 /// On success the value is that parent median, sorted once. Genesis has no
 /// parent window and returns `0`.
@@ -32,6 +34,7 @@ pub fn check_header(
     parent: Option<ParentHeader>,
     mtp_times: &[u32],
     period_first_time: Option<u32>,
+    period_open_time: Option<u32>,
     mut bits_at: impl FnMut(u32) -> Option<CompactTarget>,
 ) -> Result<u32, ConsensusError> {
     let hash_bh = bitcoin::BlockHash::from_byte_array(hash);
@@ -73,6 +76,16 @@ pub fn check_header(
     }
 
     let interval = params.difficulty_adjustment_interval();
+    // BIP 54 is not a trust-peer waiver. A timewarp header stays invalid.
+    if params.heretical_at(height.0).consensus_cleanup {
+        crate::heretical::bip54_header_time(
+            parent.time,
+            header.time,
+            height.0,
+            interval,
+            period_open_time,
+        )?;
+    }
     if interval > 0
         && height.0.is_multiple_of(interval)
         && !params.no_pow_retargeting()
@@ -99,12 +112,18 @@ pub fn check_header(
     Ok(mtp)
 }
 
-/// Validate header linkage, MTP, difficulty bits, and proof-of-work.
+/// Validate header linkage, MTP, BIP 54 time, difficulty bits, and proof-of-work.
+///
+/// `parent_time` is the previous block's timestamp. `period_open_time` is the
+/// first header of this difficulty period when BIP 54's negative-interval
+/// check applies. Callers pass `None` when that check is off.
 pub fn validate_header_on_parent(
     params: &ChainParams,
     height: Height,
     header: &Header,
     parent_mtp: u32,
+    parent_time: u32,
+    period_open_time: Option<u32>,
     expected_bits: CompactTarget,
 ) -> Result<(), ConsensusError> {
     if header.time <= parent_mtp {
@@ -115,6 +134,15 @@ pub fn validate_header_on_parent(
     }
     if let Err(e) = check_header_version_and_future_time(params, height, header) {
         crate::trust::soften_at(Some(height.0), e)?;
+    }
+    if params.heretical_at(height.0).consensus_cleanup {
+        crate::heretical::bip54_header_time(
+            parent_time,
+            header.time,
+            height.0,
+            params.difficulty_adjustment_interval(),
+            period_open_time,
+        )?;
     }
     if header.bits != expected_bits {
         return Err(ConsensusError::BadHeader("incorrect proof of work bits"));

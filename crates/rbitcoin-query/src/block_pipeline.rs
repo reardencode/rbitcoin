@@ -417,6 +417,7 @@ pub fn assemble_non_cb_inputs(
         };
     let edges = spend_fk.and_then(|fk| fk.get().and_then(|id| spend_edges.get(&id)));
     let mut tx_in_sigops = 0u64;
+    let mut bip54_sigops = 0u64;
     for (ii, input) in tx.input.iter().enumerate() {
         let op = input.previous_output;
         let key = (op.txid.to_byte_array(), op.vout);
@@ -458,6 +459,18 @@ pub fn assemble_non_cb_inputs(
         )?;
         let create_fk = prev_out.create_fk;
         tx_in_sigops = tx_in_sigops.saturating_add(prev_out.input_sigops);
+        if flags.heretical.consensus_cleanup {
+            bip54_sigops =
+                bip54_sigops.saturating_add(rbitcoin_consensus::block::bip54_input_sigops(
+                    input.script_sig.as_bytes(),
+                    prev_out.txout.script_pubkey.as_bytes(),
+                ));
+            if bip54_sigops > rbitcoin_consensus::heretical::MAX_TX_BIP54_SIGOPS {
+                return Err(ConfirmError::from(
+                    rbitcoin_consensus::ConsensusError::BadBlock("bad-txns-legacy-sigops"),
+                ));
+            }
+        }
         spends.push((
             key.0,
             key.1,

@@ -340,6 +340,22 @@ impl ChainParams {
             Network::Regtest => 0,
         }
     }
+
+    /// BIP 54 consensus cleanup at `height`.
+    ///
+    /// Default signet uses the Inquisition buried height. Regtest leaves the
+    /// cleanup off. Every other network, including a custom signet, is off.
+    #[inline]
+    pub fn heretical_at(&self, height: u32) -> crate::heretical::HereticalFlags {
+        crate::heretical::flags_at(self, height)
+    }
+
+    /// Header height whose timestamp BIP 54 compares against the last block
+    /// of a difficulty period. `None` when that check does not apply.
+    #[inline]
+    pub fn bip54_period_open_height(&self, height: u32) -> Option<u32> {
+        crate::heretical::period_open_height(self, height)
+    }
 }
 
 #[doc(hidden)]
