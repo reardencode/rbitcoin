@@ -653,6 +653,265 @@ fn trust_peer_skips_high_bandwidth() {
     );
 }
 
+/// A fresh tip with transaction relay still off has an empty pool and is
+/// not receiving the transactions a compact block would need. Selection
+/// waits for that relay bit. `-blocksonly` never selects.
+#[test]
+fn hb_selects_when_tx_relay_starts() {
+    use rbitcoin_net::peer::maybe_select_hb_if_relay;
+
+    let (dir, chain) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hb-before-relay");
+    let mp = rbitcoin_net::tx_relay::MempoolHub::open(
+        dir.path().join("mp"),
+        std::sync::Arc::clone(&chain.query),
+    )
+    .unwrap();
+    assert!(chain.attach_mempool(std::sync::Arc::clone(&mp)).is_ok());
+    assert!(chain.in_ibd(), "regtest genesis is older than 24h");
+    assert!(!mp.relay_enabled());
+
+    let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1);
+    let join = |hub: &Arc<PeerHub>, addr: SocketAddr| {
+        hub.register(
+            addr,
+            bind,
+            &ver("/rbitcoin:0.1.0/"),
+            true,
+            PeerConnType::Inbound,
+        )
+    };
+    let during = PeerHub::new();
+    let ibd_peer = join(&during, "1.2.3.4:8333".parse().unwrap());
+    maybe_select_hb_if_relay(&chain, Some(&ibd_peer));
+    assert!(
+        !ibd_peer.hb_to.load(Ordering::Relaxed),
+        "IBD must not select a high-bandwidth peer"
+    );
+
+    chain.finished_ibd.store(true, Ordering::Release);
+    assert!(!chain.in_ibd());
+    assert!(
+        !mp.relay_enabled(),
+        "peer tx relay stays off through the pack"
+    );
+    maybe_select_hb_if_relay(&chain, Some(&ibd_peer));
+    assert!(
+        !ibd_peer.hb_to.load(Ordering::Relaxed),
+        "a fresh tip does not select high-bandwidth while tx relay is off"
+    );
+    mp.set_relay_enabled(true);
+    maybe_select_hb_if_relay(&chain, Some(&ibd_peer));
+    assert!(
+        ibd_peer.hb_to.load(Ordering::Relaxed),
+        "tx relay selects a high-bandwidth peer"
+    );
+
+    chain.set_blocks_only(true);
+    let quiet = PeerHub::new();
+    let blocked = join(&quiet, "1.2.3.5:8333".parse().unwrap());
+    maybe_select_hb_if_relay(&chain, Some(&blocked));
+    assert!(
+        !blocked.hb_to.load(Ordering::Relaxed),
+        "blocksonly must not select a high-bandwidth peer"
+    );
+}
+
+/// Compact getdata follows transaction relay. A hub with no mempool already
+/// asks during IBD. `-blocksonly` never does.
+#[test]
+fn compact_getdata_follows_tx_relay() {
+    use rbitcoin_net::peer::getdata_use_compact;
+
+    let (dir, chain) = rbitcoin_net::chain::tiny_regtest_hub_labeled("cmpct-getdata");
+    let mp = rbitcoin_net::tx_relay::MempoolHub::open(
+        dir.path().join("mp"),
+        std::sync::Arc::clone(&chain.query),
+    )
+    .unwrap();
+    assert!(chain.attach_mempool(std::sync::Arc::clone(&mp)).is_ok());
+    assert!(chain.in_ibd());
+    assert!(!mp.relay_enabled());
+    assert!(!getdata_use_compact(&chain, 2), "IBD asks for a full block");
+    assert!(!getdata_use_compact(&chain, 1));
+
+    chain.finished_ibd.store(true, Ordering::Release);
+    assert!(!chain.in_ibd());
+    assert!(
+        !getdata_use_compact(&chain, 2),
+        "a fresh tip asks for a full block while tx relay is off"
+    );
+    mp.set_relay_enabled(true);
+    assert!(
+        getdata_use_compact(&chain, 2),
+        "tx relay asks for a compact block"
+    );
+    assert!(
+        !getdata_use_compact(&chain, 1),
+        "compact v1 is not a getdata request"
+    );
+    chain.set_blocks_only(true);
+    assert!(
+        !getdata_use_compact(&chain, 2),
+        "blocksonly keeps a full-block getdata"
+    );
+
+    let (_bare_dir, bare) = rbitcoin_net::chain::tiny_regtest_hub_labeled("cmpct-getdata-bare");
+    assert!(bare.in_ibd());
+    assert!(
+        getdata_use_compact(&bare, 2),
+        "a hub with no mempool already uses compact getdata"
+    );
+}
+
+/// After the scripthash pack the index is in tip mode. The block that
+/// leaves IBD turns transaction relay on, sends the fee filter, and selects
+/// the peer. During the pack (direct mode) that block does neither. A stale
+/// accept and `-blocksonly` do not select.
+#[tokio::test]
+async fn leaving_ibd_starts_tx_relay_and_high_bandwidth_in_tip_mode() {
+    use rbitcoin_net::chain::AcceptOutcome;
+    use rbitcoin_net::peer::accept_received_from_peer;
+
+    let (dir, chain) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hb-leaving");
+    chain.ensure_genesis().unwrap();
+    let mp = rbitcoin_net::tx_relay::MempoolHub::open(
+        dir.path().join("mp"),
+        std::sync::Arc::clone(&chain.query),
+    )
+    .unwrap();
+    assert!(chain.attach_mempool(std::sync::Arc::clone(&mp)).is_ok());
+    assert!(chain.in_ibd());
+    assert!(!mp.relay_enabled());
+
+    let peers = PeerHub::new();
+    let peer = peers.register(
+        "1.2.3.4:8333".parse().unwrap(),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1),
+        &ver("/rbitcoin:0.1.0/"),
+        false,
+        PeerConnType::OutboundFullRelay,
+    );
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    peer.attach_out(out_tx);
+    let now = chain.clock.now_secs() as u32;
+    let block = rbitcoin_consensus::mine_empty_regtest(chain.tip_hash().unwrap(), now, 1);
+    let got = accept_received_from_peer(&chain, block, Some(&peer))
+        .await
+        .expect("fresh tip connects");
+    assert!(matches!(got, AcceptOutcome::Accepted { .. }));
+    assert!(!chain.in_ibd());
+    assert!(
+        mp.relay_enabled(),
+        "a tip-mode block that leaves IBD enables tx relay"
+    );
+    assert!(
+        peer.hb_to.load(Ordering::Relaxed),
+        "that peer is high-bandwidth once relay is on"
+    );
+    assert!(
+        mp.take_fee_backfill_due(),
+        "the relay edge owes fee-history preload"
+    );
+    let mut saw_fee = false;
+    while let Ok(out) = out_rx.try_recv() {
+        if matches!(out.expect_msg(), NetworkMessage::FeeFilter(_)) {
+            saw_fee = true;
+        }
+    }
+    assert!(saw_fee, "the relay edge sends one fee filter");
+
+    let (dir_direct, direct) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hb-leaving-direct");
+    direct.ensure_genesis().unwrap();
+    direct
+        .query
+        .enter_direct_index_mode()
+        .expect("direct mode is the pack");
+    let direct_mp = rbitcoin_net::tx_relay::MempoolHub::open(
+        dir_direct.path().join("mp"),
+        std::sync::Arc::clone(&direct.query),
+    )
+    .unwrap();
+    assert!(direct
+        .attach_mempool(std::sync::Arc::clone(&direct_mp))
+        .is_ok());
+    let direct_peers = PeerHub::new();
+    let direct_peer = direct_peers.register(
+        "1.2.3.7:8333".parse().unwrap(),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1),
+        &ver("/rbitcoin:0.1.0/"),
+        false,
+        PeerConnType::OutboundFullRelay,
+    );
+    let direct_now = direct.clock.now_secs() as u32;
+    let direct_block =
+        rbitcoin_consensus::mine_empty_regtest(direct.tip_hash().unwrap(), direct_now, 1);
+    accept_received_from_peer(&direct, direct_block, Some(&direct_peer))
+        .await
+        .expect("pack-window tip connects");
+    assert!(!direct.in_ibd());
+    assert!(
+        !direct_mp.relay_enabled(),
+        "the pack does not enable tx relay"
+    );
+    assert!(!direct_peer.hb_to.load(Ordering::Relaxed));
+    assert!(!direct_mp.take_fee_backfill_due());
+
+    let (dir_old, old) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hb-leaving-stale");
+    old.ensure_genesis().unwrap();
+    let old_mp = rbitcoin_net::tx_relay::MempoolHub::open(
+        dir_old.path().join("mp"),
+        std::sync::Arc::clone(&old.query),
+    )
+    .unwrap();
+    assert!(old.attach_mempool(std::sync::Arc::clone(&old_mp)).is_ok());
+    let old_peers = PeerHub::new();
+    let old_peer = old_peers.register(
+        "1.2.3.5:8333".parse().unwrap(),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1),
+        &ver("/rbitcoin:0.1.0/"),
+        false,
+        PeerConnType::OutboundFullRelay,
+    );
+    let stale = old.clock.now_secs() as u32 - 2 * 24 * 3600;
+    let stale_block = rbitcoin_consensus::mine_empty_regtest(old.tip_hash().unwrap(), stale, 1);
+    accept_received_from_peer(&old, stale_block, Some(&old_peer))
+        .await
+        .expect("stale tip connects");
+    assert!(old.in_ibd());
+    assert!(!old_peer.hb_to.load(Ordering::Relaxed));
+    assert!(!old_mp.relay_enabled());
+
+    let (dir_bo, bo) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hb-leaving-bo");
+    bo.ensure_genesis().unwrap();
+    bo.set_blocks_only(true);
+    let bo_mp = rbitcoin_net::tx_relay::MempoolHub::open(
+        dir_bo.path().join("mp"),
+        std::sync::Arc::clone(&bo.query),
+    )
+    .unwrap();
+    assert!(bo.attach_mempool(std::sync::Arc::clone(&bo_mp)).is_ok());
+    let bo_peers = PeerHub::new();
+    let bo_peer = bo_peers.register(
+        "1.2.3.6:8333".parse().unwrap(),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1),
+        &ver("/rbitcoin:0.1.0/"),
+        false,
+        PeerConnType::OutboundFullRelay,
+    );
+    let bo_now = bo.clock.now_secs() as u32;
+    let bo_block = rbitcoin_consensus::mine_empty_regtest(bo.tip_hash().unwrap(), bo_now, 1);
+    accept_received_from_peer(&bo, bo_block, Some(&bo_peer))
+        .await
+        .expect("blocksonly tip connects");
+    assert!(!bo.in_ibd());
+    assert!(
+        !bo_peer.hb_to.load(Ordering::Relaxed),
+        "blocksonly does not select a high-bandwidth peer"
+    );
+    assert!(!bo_mp.relay_enabled());
+    assert!(!bo_mp.pool_maintained());
+}
+
 fn hold_session(hub: &Arc<PeerHub>, addr: SocketAddr) -> Arc<LivePeer> {
     let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1);
     hub.register(

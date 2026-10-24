@@ -379,6 +379,133 @@ fn connect_nongenesis_incomplete_stays_in_ibd() {
     );
 }
 
+/// Catch-up can leave a full-relay peer connected. When indexing finishes
+/// on a tip that is already fresh, that peer must get one fee filter as
+/// relay turns on, and fee-history preload is taken once. A second pass,
+/// `-blocksonly`, and a stale tip send nothing.
+#[tokio::test]
+async fn indexing_finished_sends_feefilter_once_when_the_tip_is_fresh() {
+    use bitcoin::p2p::address::Address;
+    use bitcoin::p2p::message::NetworkMessage;
+    use bitcoin::p2p::message_network::VersionMessage;
+    use bitcoin::p2p::ServiceFlags;
+    use rbitcoin_consensus::{ChainParams, Milestone};
+    use rbitcoin_net::{Dialer, MempoolHub, P2PNode, PeerConnType, PeerOut};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    struct Edge {
+        node: P2PNode,
+        mempool: Arc<MempoolHub>,
+        config: NodeConfig,
+        rx: mpsc::UnboundedReceiver<PeerOut>,
+        floor: i64,
+    }
+
+    async fn world(blocksonly: bool, fresh: bool) -> Edge {
+        let dir = scratch_dir(if fresh && !blocksonly {
+            "index-fee"
+        } else if blocksonly {
+            "index-fee-bo"
+        } else {
+            "index-fee-stale"
+        });
+        let mut config = tiny_regtest(&dir);
+        config.mempool.blocksonly = blocksonly;
+        let node = P2PNode::start_outbound_only(
+            Query::open_or_create_tiny(dir.join("store")).unwrap(),
+            ChainParams::regtest(),
+            Milestone::NONE,
+            "/rbitcoin:test/".into(),
+            0,
+            Dialer::Direct,
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+        if fresh {
+            node.hub.finished_ibd.store(true, Ordering::Release);
+        }
+        let mempool = MempoolHub::open(dir.join("mempool"), Arc::clone(&node.query)).unwrap();
+        assert!(
+            node.hub.attach_mempool(Arc::clone(&mempool)).is_ok(),
+            "mempool attaches once"
+        );
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+        let ver = VersionMessage {
+            version: 70016,
+            services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+            timestamp: 0,
+            receiver: Address::new(&addr, ServiceFlags::NONE),
+            sender: Address::new(&addr, ServiceFlags::NONE),
+            nonce: 1,
+            user_agent: "/rbitcoin:test/".into(),
+            start_height: 0,
+            relay: true,
+        };
+        let peer = node
+            .peers
+            .register(addr, addr, &ver, false, PeerConnType::OutboundFullRelay);
+        let (tx, rx) = mpsc::unbounded_channel();
+        peer.attach_out(tx);
+        let floor = node.hub.feefilter_sat_kvb() as i64;
+        Edge {
+            node,
+            mempool,
+            config,
+            rx,
+            floor,
+        }
+    }
+
+    async fn run_edge(edge: &Edge) {
+        sync_tx_relay(&edge.node, &edge.config, &edge.mempool)
+            .await
+            .unwrap();
+    }
+
+    let mut fresh = world(false, true).await;
+    assert!(
+        !fresh.node.hub.in_ibd() && !fresh.mempool.relay_enabled(),
+        "the tip is fresh and relay has not flipped"
+    );
+    run_edge(&fresh).await;
+    match fresh.rx.try_recv() {
+        Ok(PeerOut::Msg(NetworkMessage::FeeFilter(fee))) => {
+            assert_eq!(fee, fresh.floor, "the filter is the post-IBD floor");
+        }
+        other => panic!("indexing finished must queue one feefilter, got {other:?}"),
+    }
+    assert!(fresh.rx.try_recv().is_err(), "one filter, not a burst");
+    assert!(fresh.mempool.relay_enabled());
+    assert!(
+        !fresh.mempool.take_fee_backfill_due(),
+        "preload is taken on that same edge"
+    );
+    run_edge(&fresh).await;
+    assert!(
+        fresh.rx.try_recv().is_err(),
+        "a second pass does not send another filter"
+    );
+    assert!(!fresh.mempool.take_fee_backfill_due());
+    fresh.node.shutdown().await;
+
+    let mut blocks = world(true, true).await;
+    run_edge(&blocks).await;
+    assert!(blocks.rx.try_recv().is_err(), "-blocksonly sends no filter");
+    assert!(!blocks.mempool.relay_enabled());
+    blocks.node.shutdown().await;
+
+    let mut stale = world(false, false).await;
+    assert!(stale.node.hub.in_ibd(), "regtest genesis is still IBD");
+    run_edge(&stale).await;
+    assert!(stale.rx.try_recv().is_err(), "a stale tip sends no filter");
+    assert!(!stale.mempool.relay_enabled());
+    stale.node.shutdown().await;
+}
+
 #[test]
 fn relay_requires_min_chain_work_even_when_following() {
     assert!(!relay_while_following(false, false, false));

@@ -839,14 +839,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     },
                 ));
             }
-            if relay_while_following(
-                tip_meets_min_work(&config, &node.hub),
-                config.mempool.blocksonly,
-                node.hub.in_ibd(),
-            ) {
-                mempool_blocking(&mempool, |mp| mp.set_relay_enabled(true)).await?;
-                spawn_fee_history_backfill(&mempool);
-            }
+            sync_tx_relay(&node, &config, &mempool).await?;
             let mp_live = mempool_blocking(&mempool, MempoolHub::live_count).await?;
             info!(
                 "node: catch-up complete tip={:?} — tip tracking + block/tx relay \
@@ -936,8 +929,10 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         // were registered before catch-up (`set_connect_hosts`).
         node.peers.set_connect_addrs(config.listen.connect.clone());
         // Materialize can outlast the miner. Do not publish Electrum until
-        // the follow `getheaders` round is connected and indexed.
-        wait_wallet_history(&node, config.shindex, &shutdown, header_mark).await;
+        // the follow `getheaders` round is connected and indexed. Tx relay
+        // still flips inside that wait. High-bandwidth selection and compact
+        // getdata follow that bit. A tip announcement stays a compact block.
+        wait_wallet_history(&node, &config, &shutdown, header_mark, &mempool).await?;
     }
 
     let (mut electrum_handles, mut electrum_bridge, electrum_onion) = start_electrum_if_ready(
@@ -1312,18 +1307,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 let ibd = node.hub.in_ibd();
                 h.initial_block_download
                     .store(!minwork || ibd, Ordering::SeqCst);
-                let want_relay = !config.mempool.blocksonly && minwork && !ibd;
-                if want_relay != mempool.relay_enabled() {
-                    mempool_blocking(&mempool, move |mp| mp.set_relay_enabled(want_relay)).await?;
-                    if want_relay {
-                        spawn_fee_history_backfill(&mempool);
-                        info!("ibd: leaving IBD — enabling tx relay");
-                    } else {
-                        info!("ibd: entering IBD — pausing tx relay");
-                    }
-                    node.peers
-                        .queue_feefilter_all(node.hub.feefilter_sat_kvb() as i64);
-                }
+                sync_tx_relay(&node, &config, &mempool).await?;
             }
             if matches!(wake, TipFollowWake::Stop) {
                 break;
@@ -2238,19 +2222,64 @@ pub async fn start_i2p_named_forward(
     Ok(sam)
 }
 
+/// Turn peer tx relay on or off to match IBD. One place for indexing
+/// finished, [`wait_wallet_history`], and the tip-follow loop.
+pub async fn sync_tx_relay(
+    node: &P2PNode,
+    config: &NodeConfig,
+    mempool: &Arc<MempoolHub>,
+) -> Result<(), NodeError> {
+    let want = relay_while_following(
+        tip_meets_min_work(config, &node.hub),
+        config.mempool.blocksonly,
+        node.hub.in_ibd(),
+    );
+    if want == mempool.relay_enabled() {
+        // A tip-mode accept may have set the bit and left preload due.
+        if want {
+            let due = mempool_blocking(mempool, MempoolHub::take_fee_backfill_due).await?;
+            if due {
+                spawn_fee_history_backfill(mempool);
+            }
+        }
+        return Ok(());
+    }
+    let edge = mempool_blocking(mempool, move |mp| mp.apply_relay_edge(want)).await?;
+    // A purge fault leaves the bit unchanged. The next wake retries. Do not
+    // tell peers relay is on, or log that it flipped, until the store moved.
+    let Some(backfill) = edge else {
+        return Ok(());
+    };
+    node.peers
+        .queue_feefilter_all(node.hub.feefilter_sat_kvb() as i64);
+    if want {
+        info!("ibd: leaving IBD — enabling tx relay");
+    } else {
+        info!("ibd: entering IBD — pausing tx relay");
+    }
+    if backfill {
+        spawn_fee_history_backfill(mempool);
+    }
+    Ok(())
+}
+
 /// Wallet bind waits out one follow `getheaders` round.
 ///
 /// Scripthash materialize holds the process before dial. The miner can add
 /// a block in that window. Opening Electrum on the pre-dial tip serves a
-/// history that does not include it.
+/// history that does not include it. Relay follows IBD on each tick of this
+/// wait, so peer announcements and the fee filter start before the
+/// tip-follow loop. High-bandwidth selection follows that same bit.
 pub async fn wait_wallet_history(
     node: &P2PNode,
-    shindex: bool,
+    config: &NodeConfig,
     shutdown: &Shutdown,
     mark: (u64, u64),
-) {
+    mempool: &Arc<MempoolHub>,
+) -> Result<(), NodeError> {
+    sync_tx_relay(node, config, mempool).await?;
     if node.follow_live_count() == 0 {
-        return;
+        return Ok(());
     }
     let (sent0, reply0) = mark;
     let started = Instant::now();
@@ -2258,18 +2287,19 @@ pub async fn wait_wallet_history(
     let unsent_limit = Duration::from_secs(2);
     loop {
         if shutdown.requested() || started.elapsed() >= deadline {
-            return;
+            return Ok(());
         }
+        sync_tx_relay(node, config, mempool).await?;
         let sent = node.hub.initial_getheaders_sent().saturating_sub(sent0);
         let replies = node.hub.headers_reply_count().saturating_sub(reply0);
         let tip = node.tip_height().unwrap_or(0);
         let best = node.hub.best_header_height();
-        let sh_ok = !shindex || node.hub.query.sh_is_tip_ready();
+        let sh_ok = !config.shindex || node.hub.query.sh_is_tip_ready();
         if sent > 0 && replies >= sent && best <= tip && sh_ok {
-            return;
+            return Ok(());
         }
         if sent == 0 && started.elapsed() >= unsent_limit {
-            return;
+            return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }

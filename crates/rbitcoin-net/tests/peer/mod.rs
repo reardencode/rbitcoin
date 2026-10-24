@@ -5212,6 +5212,89 @@ fn hb_relay_skips_the_build_when_no_peer_is_offered_it() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Outbound compact push follows transaction relay. A fresh tip with relay
+/// still off has nothing in the pool for the next block, so an offered peer
+/// gets a header path instead. IBD and `-blocksonly` do not push one either.
+#[tokio::test]
+async fn compact_push_follows_tx_relay() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("cmpct-push-pack");
+    hub.ensure_genesis().unwrap();
+    hub.set_prefill_compact(true);
+    let mp = rbitcoin_net::tx_relay::MempoolHub::open(
+        dir.path().join("mp"),
+        std::sync::Arc::clone(&hub.query),
+    )
+    .unwrap();
+    assert!(hub.attach_mempool(std::sync::Arc::clone(&mp)).is_ok());
+    assert!(hub.in_ibd());
+    assert!(!mp.relay_enabled());
+    let genesis = hub.tip_hash().unwrap();
+    let block = hb_tip_child(&hub);
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let from = live_peer(&peers, 18530, 51, false);
+    let target = live_peer(&peers, 18531, 52, false);
+    target.set_hb_from(true);
+    target.note_best_known(genesis);
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    target.attach_out(out_tx);
+    relay_new_pow_valid_block(&hub, &block, Some(from.as_ref())).await;
+    assert!(
+        out_rx.try_recv().is_err(),
+        "IBD does not push a compact block"
+    );
+
+    hub.finished_ibd
+        .store(true, std::sync::atomic::Ordering::Release);
+    assert!(!hub.in_ibd());
+    relay_new_pow_valid_block(&hub, &block, Some(from.as_ref())).await;
+    assert!(
+        out_rx.try_recv().is_err(),
+        "a fresh tip does not push a compact block while tx relay is off"
+    );
+    mp.set_relay_enabled(true);
+    relay_new_pow_valid_block(&hub, &block, Some(from.as_ref())).await;
+    assert!(
+        matches!(
+            out_rx.try_recv().map(PeerOut::expect_msg),
+            Ok(NetworkMessage::CmpctBlock(_))
+        ),
+        "tx relay pushes a compact block"
+    );
+    assert!(
+        out_rx.try_recv().is_err(),
+        "one compact block, not a fee filter"
+    );
+    assert!(mp.relay_enabled(), "a compact push does not clear tx relay");
+
+    let (bo_dir, bo) = rbitcoin_net::chain::tiny_regtest_hub_labeled("cmpct-push-bo");
+    bo.ensure_genesis().unwrap();
+    bo.set_prefill_compact(true);
+    bo.set_blocks_only(true);
+    bo.finished_ibd
+        .store(true, std::sync::atomic::Ordering::Release);
+    let bo_mp = rbitcoin_net::tx_relay::MempoolHub::open(
+        bo_dir.path().join("mp"),
+        std::sync::Arc::clone(&bo.query),
+    )
+    .unwrap();
+    assert!(bo.attach_mempool(std::sync::Arc::clone(&bo_mp)).is_ok());
+    let bo_tip = bo.tip_hash().unwrap();
+    let bo_block = hb_tip_child(&bo);
+    let bo_peers = rbitcoin_net::peers::PeerHub::new();
+    let bo_from = live_peer(&bo_peers, 18532, 53, false);
+    let bo_target = live_peer(&bo_peers, 18533, 54, false);
+    bo_target.set_hb_from(true);
+    bo_target.note_best_known(bo_tip);
+    let (bo_tx, mut bo_rx) = mpsc::unbounded_channel();
+    bo_target.attach_out(bo_tx);
+    relay_new_pow_valid_block(&bo, &bo_block, Some(bo_from.as_ref())).await;
+    assert!(
+        bo_rx.try_recv().is_err(),
+        "blocksonly does not push a compact block"
+    );
+    assert!(!bo_mp.relay_enabled());
+}
+
 /// One offered high-bandwidth peer builds the prefill and short ids off the
 /// worker. `assert_not_reactor` panics if that build stays on `tokio-rt-worker`.
 #[test]
