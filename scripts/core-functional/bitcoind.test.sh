@@ -71,13 +71,55 @@ if printf '%s' "$OUT" | grep -q -- "--network regtest" \
   && printf '%s' "$OUT" | grep -q -- "--listen 0.0.0.0:18444" \
   && printf '%s' "$OUT" | grep -q -- "--listen 127.0.0.1:18445" \
   && printf '%s' "$OUT" | grep -q -- "--no-seeds" \
-  && printf '%s' "$OUT" | grep -q -- "--log-level debug"; then
+  && printf '%s' "$OUT" | grep -q -- "--log-level debug" \
+  && ! printf '%s' "$OUT" | grep -q -- "--sh-index"; then
   echo "ok - print-cmd maps conf + -debug"
   PASS=$((PASS + 1))
 else
   echo "not ok - print-cmd maps conf + -debug (got: $OUT)"
   FAIL=$((FAIL + 1))
 fi
+
+# Core's runner uses `{script}_{n}/node{i}`. Address history gets
+# --sh-index. Mining and compact-block scripts do not. Esplora stays on.
+sh_cmd() {
+  local parent="$1"
+  local dd="$WORKDIR/$parent/node0"
+  mkdir -p "$dd"
+  cp "$DATADIR/bitcoin.conf" "$dd/bitcoin.conf"
+  "$SHIM" --print-cmd -datadir="$dd" -regtest 2>/dev/null
+}
+assert_sh_off() {
+  local parent="$1"
+  local out
+  out="$(sh_cmd "$parent")" || true
+  if printf '%s' "$out" | grep -q -- "--esplora-listen" \
+    && ! printf '%s' "$out" | grep -q -- "--sh-index"; then
+    echo "ok - $parent starts without --sh-index"
+    PASS=$((PASS + 1))
+  else
+    echo "not ok - $parent starts without --sh-index (got: $out)"
+    FAIL=$((FAIL + 1))
+  fi
+}
+assert_sh_on() {
+  local parent="$1"
+  local out
+  out="$(sh_cmd "$parent")" || true
+  if printf '%s' "$out" | grep -q -- "--sh-index" \
+    && printf '%s' "$out" | grep -q -- "--esplora-listen"; then
+    echo "ok - $parent starts with --sh-index"
+    PASS=$((PASS + 1))
+  else
+    echo "not ok - $parent starts with --sh-index (got: $out)"
+    FAIL=$((FAIL + 1))
+  fi
+}
+assert_sh_off "p2p_compactblocks_hb_0"
+assert_sh_off "feature_nulldummy_0"
+assert_sh_off "p2p_v2_misbehaving_0"
+assert_sh_on "rpc_getblockstats_0"
+assert_sh_on "mempool_accept_wtxid_12"
 
 # TestNode always passes -debug and -loglevel=trace; take the more verbose.
 OUTT="$("$SHIM" --print-cmd -datadir="$DATADIR" -regtest -debug -loglevel=trace 2>/dev/null)"

@@ -38,7 +38,13 @@ never calls this.
 `scripts/core-functional/bitcoind` is the TestNode binary: `-datadir=DIR`
 → `--datadir DIR/regtest` (`bitcoind.pid` under `DIR/regtest`),
 `-rpcport`/`-port`/`bitcoin.conf` → `--rpc-listen` / `--listen` on
-127.0.0.1, `--no-seeds`. The node writes `{datadir}/rpc.token` (Bearer);
+127.0.0.1, `--no-seeds`. It adds `--sh-index` only when the datadir parent
+is `{script}_{n}` for a run test that reads address or scripthash history
+(MiniWallet `scantxoutset`, or the wallet shim's send and balance calls).
+Other nodes, including `p2p_compactblocks_hb.py`, start without that index,
+so a fresh regtest does not pack an empty scripthash index before it can
+relay. Esplora still listens; address routes fail closed until the flag is
+on. The node writes `{datadir}/rpc.token` (Bearer);
 the shim mirrors `__cookie__:<token>` to `{datadir}/.cookie` so Core
 TestNode cookie + HTTP Basic still work on the **proxy** public port. The
 proxy forwards `Authorization: Bearer` to the node (TCP is Bearer, plus

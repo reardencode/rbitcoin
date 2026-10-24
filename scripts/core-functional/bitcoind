@@ -34,6 +34,57 @@ from rpc_wallet import register_wallet
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 
+# Run tests that read address or scripthash history (MiniWallet
+# scantxoutset, or the wallet shim's send / balance / listunspent).
+# Core's runner names the datadir parent `{script}_{n}`. Every other
+# node skips the empty collect and can leave IBD without waiting on it.
+_SH_INDEX_TESTS = frozenset(
+    {
+        "feature_bip68_sequence.py",
+        "feature_cltv.py",
+        "feature_csv_activation.py",
+        "feature_dersig.py",
+        "feature_framework_miniwallet.py",
+        "mempool_accept_wtxid.py",
+        "mempool_cluster.py",
+        "mempool_expiry.py",
+        "mempool_limit.py",
+        "mempool_package_limits.py",
+        "mempool_packages.py",
+        "mempool_reorg.py",
+        "mempool_resurrect.py",
+        "mempool_spend_coinbase.py",
+        "mempool_unbroadcast.py",
+        "mining_getblocktemplate_longpoll.py",
+        "mining_prioritisetransaction.py",
+        "mining_template_verification.py",
+        "p2p_blocksonly.py",
+        "p2p_compactblocks.py",
+        "p2p_feefilter.py",
+        "p2p_leak_tx.py",
+        "p2p_mutated_blocks.py",
+        "p2p_orphan_handling.py",
+        "p2p_permissions.py",
+        "p2p_tx_privacy.py",
+        "rpc_createmultisig.py",
+        "rpc_generate.py",
+        "rpc_getblockstats.py",
+        "rpc_orphans.py",
+        "rpc_packages.py",
+        "wallet_txn_clone.py",
+        "wallet_txn_doublespend.py",
+    }
+)
+
+
+def wants_sh_index(datadir: Path) -> bool:
+    """True when this Core datadir belongs to a history-reading run test."""
+    match = re.fullmatch(r"(.+)_(\d+)", datadir.parent.name)
+    if match is None:
+        return False
+    return f"{match.group(1)}.py" in _SH_INDEX_TESTS
+
+
 def publish_cookie_file(path: Path, line: str) -> None:
     """Publish `DIR/regtest/.cookie` so a reader never sees a torn line.
 
@@ -723,7 +774,10 @@ def translate(
         "--listen",
         listens[0],
         "--no-seeds",
-        "--sh-index",
+    ]
+    if wants_sh_index(datadir):
+        cmd.append("--sh-index")
+    cmd += [
         "--esplora-listen",
         f"127.0.0.1:{esplora_port(int(rpcport))}",
     ]
