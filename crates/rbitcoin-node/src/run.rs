@@ -407,6 +407,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         );
     }
     node.hub.set_minimum_chain_work(config.minimum_chain_work);
+    node.hub.set_blocks_only(config.mempool.blocksonly);
     if let Some(secs) = config.max_tip_age_secs {
         node.hub.set_max_tip_age_secs(secs);
     }

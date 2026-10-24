@@ -649,6 +649,8 @@ pub struct ChainHub {
     pub chain_work_prefix: RwLock<Vec<Work>>,
     /// Once the relay-inhibited latch clears, stay out.
     pub finished_ibd: AtomicBool,
+    /// `-blocksonly`. A fresh tip must not enable tx relay.
+    pub blocks_only: AtomicBool,
     /// Initial `getheaders` queued by follow sessions since process start.
     pub initial_getheaders_sent: AtomicU64,
     /// `headers` messages applied since process start (including empty).
@@ -773,6 +775,7 @@ impl ChainHub {
             asked_blocks: RwLock::new(HashSet::new()),
             chain_work_prefix: RwLock::new(Vec::new()),
             finished_ibd: AtomicBool::new(false),
+            blocks_only: AtomicBool::new(false),
             initial_getheaders_sent: AtomicU64::new(0),
             headers_replies: AtomicU64::new(0),
             header_inv_challenge: AtomicBool::new(false),
@@ -926,6 +929,33 @@ impl ChainHub {
     /// Min-chain-work floor. Below the floor: no getheaders serve, no tip relay.
     pub fn set_minimum_chain_work(&self, w: Option<[u8; 32]>) {
         *self.minimum_chain_work.write().unwrap() = w;
+    }
+
+    /// `-blocksonly`: the accept path must not maintain the pool or relay.
+    pub fn set_blocks_only(&self, on: bool) {
+        self.blocks_only.store(on, Ordering::Release);
+    }
+
+    /// Start pool maintenance when this connect is what leaves IBD.
+    ///
+    /// Does not change peer relay. A regtest `generate` during the scripthash
+    /// pack still needs a maintained pool for `getblocktemplate`. `was_ibd`
+    /// is `in_ibd()` from before the block landed, so a tip that was already
+    /// fresh does not start maintenance again. Call this after the template
+    /// hold is dropped so the purge can take the same mutex.
+    pub fn maintain_pool_after_ibd(&self, was_ibd: bool) {
+        if !was_ibd || self.blocks_only.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(mp) = self.mempool() else {
+            return;
+        };
+        if mp.pool_maintained() || self.in_ibd() {
+            return;
+        }
+        if mp.begin_pool_maintenance() {
+            info!("ibd: leaving IBD — maintaining the mempool");
+        }
     }
 
     /// Claimed nBits meet `pow_limit` and the hash meets that target.
@@ -2188,7 +2218,10 @@ impl ChainHub {
         if let Some(mp) = self.mempool() {
             mp.clear_recent_rejects();
             let mut stripped: Option<[u8; 32]> = None;
-            if mp.relay_enabled() {
+            // Catch-up can still write blocks after maintenance starts.
+            // Strip those too. Reconstructing before the latch would pace
+            // IBD on the pool. Recently-confirmed filtering stays with relay.
+            if mp.pool_maintained() {
                 for &(height, hash) in need_meta {
                     mp.note_block_fee_history(Height(height));
                     let Ok(Some(block)) =
@@ -2196,7 +2229,9 @@ impl ChainHub {
                     else {
                         break;
                     };
-                    mp.note_recent_confirmed(&block.txdata);
+                    if mp.relay_enabled() {
+                        mp.note_recent_confirmed(&block.txdata);
+                    }
                     let ids: Vec<_> = block.txdata.iter().map(|t| t.compute_txid()).collect();
                     let spent = spent_outpoints(&block.txdata);
                     let n = mp.remove_for_block_spent(&ids, &spent);
@@ -3720,6 +3755,9 @@ impl ChainHub {
         // new query tip before the pool strip is recorded.
         let mp_hold = self.mempool().cloned();
         let mut template_hold = mp_hold.as_ref().map(|mp| mp.template_hold());
+        // Sampled before the new tip. A later connect uses this only to
+        // skip starting maintenance.
+        let was_ibd = self.in_ibd();
         let hash = block.block_hash();
         let header = block.header;
         tip_accept_stats_reset(&self.query);
@@ -3789,7 +3827,7 @@ impl ChainHub {
             let spent = spent_outpoints(&block.txdata);
             let n = mp.remove_for_block_spent(&ids, &spent);
             rbitcoin_log::debug!("mempool: removed {n} confirmed tx(s) @ height {height}");
-            if mp.relay_enabled() {
+            if mp.pool_maintained() {
                 mp.note_block_fee_history(Height(height));
                 if let Some(hold) = template_hold.as_mut() {
                     hold.commit(hash.to_byte_array());
@@ -3807,8 +3845,11 @@ impl ChainHub {
         info!("{}", log_update_tip_line(height, &hash, &header, tx_count));
         log_tip_accept_sh(&self.query, height, tx_count, wall_ns, mp_strip_ns, pres_ns);
         // Record the stripped tip before the announcement, so a builder that
-        // wakes on this event already sees the new mark.
+        // wakes on this event already sees the new mark. Maintenance starts
+        // here, after that hold, so a template built on the event is not
+        // refused for a catch-up pool. This call does not change peer relay.
         drop(template_hold);
+        self.maintain_pool_after_ibd(was_ibd);
         let event = TipEvent {
             height,
             hash,

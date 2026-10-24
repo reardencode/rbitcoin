@@ -1780,7 +1780,95 @@ fn purge_confirmed_drops_relay_maps() {
     let _ = std::fs::remove_dir_all(&store);
 }
 
-/// While relay is off, per-block remove is deferred; enabling relay runs purge.
+/// The maintained flag is the Ready bit for listing and `generate`. It must
+/// stay clear while `begin_pool_maintenance` is still waiting on the template
+/// lock, which it holds across the purge.
+#[test]
+fn maintenance_flag_stays_clear_until_the_purge_lock() {
+    let dir = tmp();
+    let store_dir = tmp();
+    let q = Query::open_or_create_tiny(&store_dir).unwrap();
+    let mp = MempoolHub::open(&dir, Arc::new(q)).unwrap();
+    let hold = mp.template_hold();
+    let bg = Arc::clone(&mp);
+    let started = std::thread::spawn(move || bg.begin_pool_maintenance());
+    for _ in 0..40 {
+        if started.is_finished() || mp.pool_maintained() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        !started.is_finished(),
+        "begin returned while the template hold was still held"
+    );
+    assert!(
+        !mp.pool_maintained(),
+        "maintenance became visible before the purge could take the template lock"
+    );
+    drop(hold);
+    started.join().expect("begin");
+    assert!(mp.pool_maintained());
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&store_dir);
+}
+
+/// A connect waiting on `template_prev` must see maintenance and the leaving
+/// tip's fee sample. Both are stored before that lock is released.
+fn on_maint_publish(mp: &MempoolHub) {
+    assert!(
+        mp.pool_maintained(),
+        "maintenance flag was still clear inside the template lock"
+    );
+    let height = mp.query.tip_height().expect("tip").0;
+    assert!(
+        mp.block_p10_history.lock().unwrap().get(height).is_some(),
+        "leaving tip was not in fee history inside the template lock"
+    );
+}
+
+#[test]
+fn maintenance_is_published_before_the_template_lock_releases() {
+    let (store, q, _cbs) = copy_maturity_pad(3);
+    let dir = tmp();
+    let mp = MempoolHub::open(&dir, q).unwrap();
+    MempoolHub::set_maint_publish_hook(on_maint_publish);
+    assert!(mp.begin_pool_maintenance());
+    assert!(mp.pool_maintained());
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&store);
+}
+
+/// Callers queue a feefilter only when the stored relay bit changes. A second
+/// call, and a purge that does not publish, are not an edge.
+#[test]
+fn relay_edge_reports_a_change_only_when_the_bit_moves() {
+    let dir = tmp();
+    let store_dir = tmp();
+    let q = Query::open_or_create_tiny(&store_dir).unwrap();
+    let mp = MempoolHub::open(&dir, Arc::new(q)).unwrap();
+    assert_eq!(mp.apply_relay_edge(true), Some(true));
+    assert!(mp.relay_enabled());
+    assert!(mp.pool_maintained());
+    assert!(
+        !mp.take_fee_backfill_due(),
+        "the on edge consumes the preload bit"
+    );
+    assert_eq!(
+        mp.apply_relay_edge(true),
+        None,
+        "a second on is not an edge"
+    );
+    assert_eq!(mp.apply_relay_edge(false), Some(false));
+    assert!(!mp.relay_enabled());
+    assert!(mp.pool_maintained(), "pausing relay keeps pool maintenance");
+    assert_eq!(mp.apply_relay_edge(false), None);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&store_dir);
+}
+
+/// Before maintenance begins, per-block remove is deferred. Enabling relay
+/// starts maintenance and runs the purge.
 #[test]
 fn remove_for_block_skipped_until_relay_then_purge() {
     let dir = tmp();
@@ -1788,9 +1876,10 @@ fn remove_for_block_skipped_until_relay_then_purge() {
     let q = Query::open_or_create_tiny(&store_dir).unwrap();
     let mp = MempoolHub::open(&dir, Arc::new(q)).unwrap();
     assert!(!mp.relay_enabled());
+    assert!(!mp.pool_maintained());
     let dummy = Txid::from_byte_array([9u8; 32]);
     mp.prioritise_tx(dummy, 3);
-    // Strip stays deferred while relay is off. The mined delta still drops.
+    // Strip stays deferred until maintenance begins. The mined delta still drops.
     assert_eq!(mp.remove_for_block(&[dummy]), 0);
     assert_eq!(
         mp.fee_delta(&dummy),
@@ -1800,6 +1889,7 @@ fn remove_for_block_skipped_until_relay_then_purge() {
     // Enabling relay runs purge (empty → 0) and arms per-block strip.
     mp.set_relay_enabled(true);
     assert!(mp.relay_enabled());
+    assert!(mp.pool_maintained());
     assert_eq!(mp.purge_confirmed_on_chain(), 0);
     // Still no-op for unknown txid, but path is live.
     assert_eq!(mp.remove_for_block(&[dummy]), 0);

@@ -218,11 +218,12 @@ impl RpcRegtest for HubRegtest {
 /// Whether `getblocktemplate`, `getrawmempool`, and pool-reading `generate`
 /// may use the live pool.
 pub(crate) enum PoolListing {
-    /// Relay is on. The pool is stripped before each tip announcement.
+    /// The pool is maintained: stripped as blocks connect. Peer relay may
+    /// still be off.
     Ready,
-    /// Relay is still off because catch-up has not finished the purge.
+    /// Maintenance has not started, so confirmed txs may still sit in the pool.
     Downloading,
-    /// `-blocksonly`. Relay never turns on.
+    /// `-blocksonly`. The pool is never maintained.
     Blocksonly,
 }
 
@@ -237,7 +238,7 @@ impl RpcContext {
         if self.blocksonly {
             return PoolListing::Blocksonly;
         }
-        if self.mempool.as_ref().is_none_or(|m| m.relay_enabled()) {
+        if self.mempool.as_ref().is_none_or(|m| m.pool_maintained()) {
             PoolListing::Ready
         } else {
             PoolListing::Downloading
