@@ -6,6 +6,10 @@ use bitcoin::{OutPoint, TxIn, TxOut, Witness};
 use rbitcoin_consensus::error::ConsensusError;
 use rbitcoin_consensus::script::interpreter::*;
 
+fn fad(script: &[u8], data: &[u8]) -> Vec<u8> {
+    find_and_delete(script, ScriptElem::new(data).unwrap())
+}
+
 fn eval(script_bytes: &[u8], sig_version: SigVersion) -> Result<bool, ConsensusError> {
     eval_with_null_dummy(script_bytes, sig_version, false)
 }
@@ -539,10 +543,10 @@ fn find_and_delete_pushdata_lengths() {
     let mut script = vec![0x03];
     script.extend_from_slice(&data);
     script.push(0x51);
-    let out = find_and_delete(&script, &data);
+    let out = fad(&script, &data);
     assert_eq!(out, vec![0x51]);
     assert_eq!(
-        find_and_delete(&[0x00, 0x00, 0x02, 0x00, 0x00, 0x51], &[]),
+        fad(&[0x00, 0x00, 0x02, 0x00, 0x00, 0x51], &[]),
         vec![0x02, 0x00, 0x00, 0x51]
     );
 
@@ -551,7 +555,7 @@ fn find_and_delete_pushdata_lengths() {
     let mut sc = vec![0x4c, 80];
     sc.extend_from_slice(&big);
     sc.push(0x52);
-    let out2 = find_and_delete(&sc, &big);
+    let out2 = fad(&sc, &big);
     assert_eq!(out2, vec![0x52]);
 
     // PUSHDATA2
@@ -560,34 +564,28 @@ fn find_and_delete_pushdata_lengths() {
     sc2.extend_from_slice(&(300u16).to_le_bytes());
     sc2.extend_from_slice(&bigger);
     sc2.push(0x53);
-    assert_eq!(find_and_delete(&sc2, &bigger), vec![0x53]);
+    assert_eq!(fad(&sc2, &bigger), vec![0x53]);
 
     // Non-matching copy through PUSHDATA encodings
     let passthrough = vec![0x4c, 0x01, 0xaa, 0x4d, 0x01, 0x00, 0xbb];
-    assert_eq!(find_and_delete(&passthrough, &[0xff]), passthrough);
+    assert_eq!(fad(&passthrough, &[0xff]), passthrough);
 
     // Length 76 is PUSHDATA1, not a direct push.
     let wide = vec![0x44u8; 76];
     let mut wide_script = vec![0x4c, 76];
     wide_script.extend_from_slice(&wide);
     wide_script.push(0x51);
-    assert_eq!(find_and_delete(&wide_script, &wide), vec![0x51]);
+    assert_eq!(fad(&wide_script, &wide), vec![0x51]);
 
     // Truncated PUSHDATA2 stops before the missing length byte.
-    assert_eq!(find_and_delete(&[0x4d, 0x01], &[0xff]), vec![0x4d]);
+    assert_eq!(fad(&[0x4d, 0x01], &[0xff]), vec![0x4d]);
     // Truncated PUSHDATA4 of four bytes: three length bytes are not enough.
-    assert_eq!(
-        find_and_delete(&[0x4e, 0x01, 0x00, 0x00], &[0xff]),
-        vec![0x4e]
-    );
+    assert_eq!(fad(&[0x4e, 0x01, 0x00, 0x00], &[0xff]), vec![0x4e]);
 
     let needle = [0x11u8, 0x11, 0x11];
     let mut pd2 = vec![0x4d, 0x02, 0x00, 0xaa, 0xbb];
     pd2.extend_from_slice(&[0x03, 0x11, 0x11, 0x11]);
-    assert_eq!(
-        find_and_delete(&pd2, &needle),
-        vec![0x4d, 0x02, 0x00, 0xaa, 0xbb]
-    );
+    assert_eq!(fad(&pd2, &needle), vec![0x4d, 0x02, 0x00, 0xaa, 0xbb]);
 
     // NOPs after the payload: a direct-push opcode here would swallow the needle.
     // Index 10 and 15 differ from the zero length bytes at i+2 and i+3.
@@ -595,7 +593,7 @@ fn find_and_delete_pushdata_lengths() {
     pd4.extend_from_slice(&[0x4e, 0x01, 0x00, 0x00, 0x00, 0xee]);
     pd4.extend_from_slice(&[0x61; 6]);
     pd4.extend_from_slice(&[0x03, 0x11, 0x11, 0x11]);
-    let out4 = find_and_delete(&pd4, &needle);
+    let out4 = fad(&pd4, &needle);
     assert!(out4.contains(&0xee), "{out4:?}");
     assert!(
         out4.windows(3).all(|w| w != needle),
@@ -977,11 +975,11 @@ fn stack_and_altstack_share_max_size_on_pushdata() {
 fn find_and_delete_short_pushdata4_payload_is_not_an_opcode() {
     let script = vec![0x4e, 0x04, 0x00, 0x00, 0x00, 0x03, 0x11, 0x11, 0x11, 0x51];
     let needle = [0x11u8, 0x11, 0x11];
-    let out = find_and_delete(&script, &needle);
+    let out = fad(&script, &needle);
     assert_eq!(out, script);
     assert_eq!(out.last(), Some(&0x51));
     assert!(out.windows(3).any(|w| w == needle));
     let short = vec![0x4e, 0x01, 0x00];
-    let truncated = find_and_delete(&short, &[0xff]);
+    let truncated = fad(&short, &[0xff]);
     assert_eq!(truncated.first(), Some(&0x4e));
 }

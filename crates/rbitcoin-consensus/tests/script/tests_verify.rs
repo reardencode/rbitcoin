@@ -57,11 +57,11 @@ fn make_p2wpkh_spend() -> (ScriptCheckJob, bool) {
 
     tx.input[0].witness = Witness::from_slice(&[sig_raw.as_slice(), pk_bytes.as_slice()]);
 
-    let job = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![prevout]),
-        tx: rbitcoin_consensus::block::JobTx::owned(tx.clone()),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+    let job = {
+        let txid = [0u8; 32];
+        let prevouts = vec![prevout];
+        let tx = tx.clone();
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
             bip66_active: true,
@@ -78,8 +78,8 @@ fn make_p2wpkh_spend() -> (ScriptCheckJob, bool) {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     (job, true)
 }
@@ -138,11 +138,10 @@ fn mainnet_508011_nested_p2wpkh_raw_sighash_0x65() {
             decode_hex("a914e93f9e95f6d5cb1736a94de992d0d18819072fa587").expect("spk"),
         ),
     };
-    let job = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![prevout]),
-        tx: rbitcoin_consensus::block::JobTx::owned(tx),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+    let job = {
+        let txid = [0u8; 32];
+        let prevouts = vec![prevout];
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
             bip66_active: true,
@@ -159,8 +158,8 @@ fn mainnet_508011_nested_p2wpkh_raw_sighash_0x65() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     script::verify_job_all_inputs(&job).unwrap_or_else(|e| {
         panic!(
@@ -193,11 +192,11 @@ fn pretaproot_v1_witness_program_anyone_can_spend() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    let job = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![prevout]),
-        tx: rbitcoin_consensus::block::JobTx::owned(tx.clone()),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+    let job = {
+        let txid = [0u8; 32];
+        let prevouts = vec![prevout];
+        let tx = tx.clone();
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
             bip66_active: true,
@@ -214,8 +213,8 @@ fn pretaproot_v1_witness_program_anyone_can_spend() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     script::verify_job_all_inputs(&job).expect("pre-taproot v1 ACS");
 }
@@ -241,11 +240,11 @@ fn empty_script_pubkey_rejects() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    let job = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![prevout]),
-        tx: rbitcoin_consensus::block::JobTx::owned(tx.clone()),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+    let job = {
+        let txid = [0u8; 32];
+        let prevouts = vec![prevout];
+        let tx = tx.clone();
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
             bip66_active: true,
@@ -262,8 +261,8 @@ fn empty_script_pubkey_rejects() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     assert!(
         script::verify_job_all_inputs(&job).is_err(),
@@ -307,11 +306,11 @@ fn p2sh_legacy_multi_push_op_true_accepts() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    let job = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![prevout]),
-        tx: rbitcoin_consensus::block::JobTx::owned(tx.clone()),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+    let job = {
+        let txid = [0u8; 32];
+        let prevouts = vec![prevout];
+        let tx = tx.clone();
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
             bip66_active: true,
@@ -328,8 +327,8 @@ fn p2sh_legacy_multi_push_op_true_accepts() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     script::verify_job_all_inputs(&job).expect("p2sh multi-push legacy");
 }
@@ -355,11 +354,11 @@ fn mainnet_block_183_high_s_p2pk_accepts() {
     ))
     .unwrap();
     let vout = spend.input[0].previous_output.vout as usize;
-    let job = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![prev.output[vout].clone()]),
-        tx: rbitcoin_consensus::block::JobTx::owned(spend),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+    let job = {
+        let txid = [0u8; 32];
+        let prevouts = vec![prev.output[vout].clone()];
+        let tx = spend;
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
             bip66_active: true,
@@ -376,8 +375,8 @@ fn mainnet_block_183_high_s_p2pk_accepts() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     script::verify_job_all_inputs(&job).expect("mainnet 183 high-S P2PK must verify");
 }
@@ -407,11 +406,11 @@ fn mainnet_block_110300_sighash_type_zero_p2pkh() {
     // Last byte of first push is 0x00 (hashtype 0).
     let ss = spend.input[0].script_sig.as_bytes();
     assert_eq!(ss[1 + 72], 0x00);
-    let job = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![prev.output[0].clone()]),
-        tx: rbitcoin_consensus::block::JobTx::owned(spend),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+    let job = {
+        let txid = [0u8; 32];
+        let prevouts = vec![prev.output[0].clone()];
+        let tx = spend;
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
             bip66_active: true,
@@ -428,8 +427,8 @@ fn mainnet_block_110300_sighash_type_zero_p2pkh() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     script::verify_job_all_inputs(&job).expect("hashtype 0 P2PKH must verify");
 }
@@ -467,14 +466,14 @@ fn mainnet_block_124276_lax_der_pre_bip66() {
         "fixture must be lax-parseable"
     );
 
-    let mut job = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![prev.output[0].clone()]),
-        tx: rbitcoin_consensus::block::JobTx::owned(spend),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+    let mut job = {
+        let txid = [0u8; 32];
+        let prevouts = vec![prev.output[0].clone()];
+        let tx = spend;
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
-            bip66_active: false, // height 124276 << bip66 363725
+            bip66_active: false,
             bip16_active: true,
             taproot_active: true,
             minimal_if: false,
@@ -488,8 +487,8 @@ fn mainnet_block_124276_lax_der_pre_bip66() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     script::verify_job_all_inputs(&job).expect("pre-BIP66 lax DER must verify");
 
@@ -633,15 +632,15 @@ fn mainnet_block_170060_pre_bip16_p2sh_as_bare() {
     assert_eq!(spk[0], 0xa9);
     assert_eq!(spk[spk.len() - 1], 0x87);
 
-    let mut job = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![prev.output[vout].clone()]),
-        tx: rbitcoin_consensus::block::JobTx::owned(spend.clone()),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+    let mut job = {
+        let txid = [0u8; 32];
+        let prevouts = vec![prev.output[vout].clone()];
+        let tx = spend.clone();
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: false,
             bip112_active: false,
             bip66_active: false,
-            bip16_active: false, // pre-BIP16 / exception block
+            bip16_active: false,
             taproot_active: true,
             minimal_if: false,
             nullfail: false,
@@ -654,8 +653,8 @@ fn mainnet_block_170060_pre_bip16_p2sh_as_bare() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     script::verify_job_all_inputs(&job).expect("pre-BIP16 P2SH-shape must verify as bare");
 
@@ -697,15 +696,11 @@ fn mainnet_block_163685_scriptsig_codeseparator_checkmultisig() {
     // Bare scriptPubKey: push20 + OP_NOP2/CLTV (0xb1) + OP_DROP.
     assert_eq!(prev.output[1].script_pubkey.as_bytes()[21], 0xb1);
 
-    let job = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![
-            prev.output[0].clone(),
-            prev.output[1].clone(),
-        ]),
-        tx: rbitcoin_consensus::block::JobTx::owned(spend),
-        // height 163685: pre-BIP65 / pre-BIP66 / pre-CSV
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+    let job = {
+        let txid = [0u8; 32];
+        let prevouts = vec![prev.output[0].clone(), prev.output[1].clone()];
+        let tx = spend;
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: false,
             bip112_active: false,
             bip66_active: false,
@@ -722,8 +717,8 @@ fn mainnet_block_163685_scriptsig_codeseparator_checkmultisig() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     script::verify_job_all_inputs(&job)
         .expect("bare CODESEPARATOR+CHECKMULTISIG scriptSig must verify");
@@ -758,14 +753,14 @@ fn mainnet_block_140493_high_bit_s_lax_der_p2pkh() {
     let vout = spend.input[0].previous_output.vout as usize;
     assert_eq!(vout, 1);
 
-    let mut job = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![prev.output[vout].clone()]),
-        tx: rbitcoin_consensus::block::JobTx::owned(spend),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+    let mut job = {
+        let txid = [0u8; 32];
+        let prevouts = vec![prev.output[vout].clone()];
+        let tx = spend;
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
-            bip66_active: false, // height 140493 << bip66 363725
+            bip66_active: false,
             bip16_active: true,
             taproot_active: true,
             minimal_if: false,
@@ -779,8 +774,8 @@ fn mainnet_block_140493_high_bit_s_lax_der_p2pkh() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     script::verify_job_all_inputs(&job).expect("pre-BIP66 high-bit-S DER must verify");
 
@@ -795,7 +790,10 @@ fn mainnet_block_140493_high_bit_s_lax_der_p2pkh() {
     }
     fn same(job: &rbitcoin_consensus::block::ScriptCheckJob) -> (String, String) {
         let tx: &bitcoin::Transaction = &job.tx;
-        let bare = script_flag_msg(script::verify_bare(job, 0, tx));
+        let bare = script_flag_msg({
+            let i = job.inputs().next().unwrap();
+            script::verify_bare(job, i, tx)
+        });
         let shipped = script_flag_msg(script::verify_job_all_inputs(job));
         (shipped, bare)
     }
@@ -857,14 +855,14 @@ fn mainnet_block_443992_p2sh_codeseparator_scriptcode() {
         value: Amount::from_sat(70_000),
         script_pubkey: ScriptBuf::from_bytes(hx("a9143ae52dbc43c884ef43211a43082d01a0091ef1e387")),
     };
-    let job = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![prevout]),
-        tx: rbitcoin_consensus::block::JobTx::owned(spend),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
-            bip65_active: true,  // 388381
-            bip112_active: true, // 419328
-            bip66_active: true,  // 363725
+    let job = {
+        let txid = [0u8; 32];
+        let prevouts = vec![prevout];
+        let tx = spend;
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
+            bip65_active: true,
+            bip112_active: true,
+            bip66_active: true,
             bip16_active: true,
             taproot_active: true,
             minimal_if: false,
@@ -878,8 +876,8 @@ fn mainnet_block_443992_p2sh_codeseparator_scriptcode() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     script::verify_job_all_inputs(&job)
         .expect("P2SH redeem with CODESEPARATOR must verify under Core scriptCode rules");
@@ -907,11 +905,10 @@ fn cltv_in_scriptsig_with_op_true_spk_enforced() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    let job = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![prevout]),
-        tx: rbitcoin_consensus::block::JobTx::owned(tx),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+    let job = {
+        let txid = [0u8; 32];
+        let prevouts = vec![prevout];
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: false,
             bip66_active: false,
@@ -928,8 +925,8 @@ fn cltv_in_scriptsig_with_op_true_spk_enforced() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     let err = script::verify_job_all_inputs(&job).expect_err("CLTV in scriptSig must run");
     assert!(
@@ -962,11 +959,10 @@ fn unknown_witness_v16_accepts_without_discourage() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    let job = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![prevout]),
-        tx: rbitcoin_consensus::block::JobTx::owned(tx),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+    let job = {
+        let txid = [0u8; 32];
+        let prevouts = vec![prevout];
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
             bip66_active: true,
@@ -983,8 +979,8 @@ fn unknown_witness_v16_accepts_without_discourage() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     script::verify_job_all_inputs(&job).expect("unknown v16 ACS without discourage");
 }
@@ -1011,11 +1007,10 @@ fn unknown_witness_v16_malleated_scriptsig() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    let job = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![prevout]),
-        tx: rbitcoin_consensus::block::JobTx::owned(tx),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+    let job = {
+        let txid = [0u8; 32];
+        let prevouts = vec![prevout];
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
             bip66_active: true,
@@ -1032,8 +1027,8 @@ fn unknown_witness_v16_malleated_scriptsig() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     let err = script::verify_job_all_inputs(&job).expect_err("malleated");
     assert!(
@@ -1065,11 +1060,10 @@ fn unknown_witness_v16_discourage_rejects() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    let job = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![prevout]),
-        tx: rbitcoin_consensus::block::JobTx::owned(tx),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+    let job = {
+        let txid = [0u8; 32];
+        let prevouts = vec![prevout];
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
             bip66_active: true,
@@ -1086,8 +1080,8 @@ fn unknown_witness_v16_discourage_rejects() {
             discourage_upgradable_witness: true,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     let err = script::verify_job_all_inputs(&job).expect_err("discourage");
     assert!(format!("{err}").contains("DISCOURAGE"), "got {err}");
@@ -1121,11 +1115,10 @@ fn p2wsh_oversized_witness_element_rejected() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    let job = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![prevout]),
-        tx: rbitcoin_consensus::block::JobTx::owned(tx),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+    let job = {
+        let txid = [0u8; 32];
+        let prevouts = vec![prevout];
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
             bip66_active: true,
@@ -1142,8 +1135,8 @@ fn p2wsh_oversized_witness_element_rejected() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     let err = script::verify_job_all_inputs(&job).expect_err("oversized element");
     let s = format!("{err}");
@@ -1191,11 +1184,10 @@ fn p2wsh_witness_script_larger_than_520_is_valid() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    let job = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![prevout]),
-        tx: rbitcoin_consensus::block::JobTx::owned(tx),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+    let job = {
+        let txid = [0u8; 32];
+        let prevouts = vec![prevout];
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
             bip66_active: true,
@@ -1212,8 +1204,8 @@ fn p2wsh_witness_script_larger_than_520_is_valid() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     script::verify_job_all_inputs(&job).expect(
         "P2WSH witnessScript >520 must verify (Core ExecuteWitnessScript after SpanPopBack)",

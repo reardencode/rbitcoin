@@ -6,20 +6,20 @@ use bitcoin::Transaction;
 use super::{crypto, interpreter, p2wsh};
 use crate::block::ScriptCheckJob;
 use crate::error::ConsensusError;
-use crate::TxPrecompute;
+use crate::TxScriptPrecompute;
 
 pub fn verify(
     job: &ScriptCheckJob,
-    input_index: usize,
+    input_index: crate::block::InputIndex,
     tx: &Transaction,
-    pre: &TxPrecompute,
+    pre: &TxScriptPrecompute,
 ) -> Result<(), ConsensusError> {
     let spk = job.prevout_script(input_index)?;
     debug_assert!(spk.len() == 22 && spk[0] == 0x00 && spk[1] == 0x14);
     let mut keyhash = [0u8; 20];
     keyhash.copy_from_slice(&spk[2..22]);
 
-    let input = &tx.input[input_index];
+    let input = &tx.input[input_index.get()];
     if input.witness.len() != 2 {
         return Err(ConsensusError::Script("p2wpkh witness len".into()));
     }
@@ -40,13 +40,13 @@ pub fn verify(
 /// Nested P2SH-P2WPKH: `witness_program` is the 22-byte redeem (not outer P2SH spk).
 pub fn verify_with_keyhash(
     job: &ScriptCheckJob,
-    input_index: usize,
+    input_index: crate::block::InputIndex,
     tx: &Transaction,
     keyhash: &[u8; 20],
     witness_program: &[u8],
-    pre: &TxPrecompute,
+    pre: &TxScriptPrecompute,
 ) -> Result<(), ConsensusError> {
-    let input = &tx.input[input_index];
+    let input = &tx.input[input_index.get()];
     if input.witness.len() != 2 {
         return Err(ConsensusError::Script("p2wpkh witness len".into()));
     }
@@ -99,11 +99,11 @@ pub fn check_element_sizes(sig_raw: &[u8], pubkey_raw: &[u8]) -> Result<(), Cons
 /// or NULLFAIL is set; the typed paths above do not apply those flags.
 pub fn verify_interpreted(
     job: &ScriptCheckJob,
-    input_index: usize,
+    input_index: crate::block::InputIndex,
     tx: &Transaction,
     keyhash: &[u8],
 ) -> Result<(), ConsensusError> {
-    let witness = &tx.input[input_index].witness;
+    let witness = &tx.input[input_index.get()].witness;
     if witness.len() != 2 {
         return Err(ConsensusError::Script("p2wpkh witness len".into()));
     }

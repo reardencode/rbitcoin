@@ -10,13 +10,13 @@ use bitcoin::{Amount, OutPoint, Sequence, TxIn, TxOut, Witness};
 fn empty_witness_and_hash_mismatch() {
     let mut spk = vec![0x00, 0x20];
     spk.extend([0u8; 32]);
-    let job = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![TxOut {
+    let job = {
+        let txid = [0u8; 32];
+        let prevouts = vec![TxOut {
             value: Amount::from_sat(10),
             script_pubkey: ScriptBuf::from_bytes(spk),
-        }]),
-        tx: rbitcoin_consensus::block::JobTx::owned(Transaction {
+        }];
+        let tx = Transaction {
             version: bitcoin::transaction::Version::TWO,
             lock_time: LockTime::ZERO,
             input: vec![TxIn {
@@ -29,8 +29,8 @@ fn empty_witness_and_hash_mismatch() {
                 value: Amount::from_sat(1),
                 script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
             }],
-        }),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+        };
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
             bip66_active: true,
@@ -47,12 +47,20 @@ fn empty_witness_and_hash_mismatch() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
-    assert!(verify(&job, 0, &job.tx).is_err());
+    assert!({
+        let i = job.inputs().next().unwrap();
+        verify(&job, i, &job.tx)
+    }
+    .is_err());
 
     let mut job2 = job;
     job2.tx.input[0].witness = Witness::from_slice(&[vec![0x51]]); // OP_TRUE script
-    assert!(verify_with_scripthash(&job2, 0, &job2.tx, &[0u8; 32]).is_err());
+    assert!({
+        let i = job2.inputs().next().unwrap();
+        verify_with_scripthash(&job2, i, &job2.tx, &[0u8; 32])
+    }
+    .is_err());
 }

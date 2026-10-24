@@ -1852,13 +1852,14 @@ impl MempoolHub {
         if self.lock_read().live_count() == 0 {
             return rbitcoin_query::pres_for_tip(txs, true, |_| false);
         }
-        let mut v: Vec<_> = txs
+        let connects: Vec<_> = txs
             .iter()
-            .map(rbitcoin_query::TxPrecompute::from_tx_connect)
+            .map(|tx| rbitcoin_query::TxPrecompute::from_tx_connect(tx).into_connect())
             .collect();
         let skip = {
             let g = self.lock_read();
-            v.iter()
+            connects
+                .iter()
                 .filter(|p| {
                     let id = Txid::from_byte_array(p.txid);
                     g.graph.get(&id).is_some_and(|e| {
@@ -1868,11 +1869,19 @@ impl MempoolHub {
                 .map(|p| p.txid)
                 .collect::<HashSet<_>>()
         };
-        for (tx, p) in txs.iter().zip(v.iter_mut()) {
-            if !skip.contains(&p.txid) {
-                p.fill_sighash_midstates(tx);
-            }
-        }
+        let v: Vec<_> = txs
+            .iter()
+            .zip(connects)
+            .map(|(tx, c)| {
+                if skip.contains(&c.txid) {
+                    rbitcoin_query::TxPrecompute::Connect(c)
+                } else {
+                    rbitcoin_query::TxPrecompute::Script(
+                        rbitcoin_query::TxScriptPrecompute::from_connect(c, tx),
+                    )
+                }
+            })
+            .collect();
         (std::sync::Arc::from(v), skip)
     }
 

@@ -514,11 +514,11 @@ fn unbroadcast_survives_reopen_and_logs_confirm_before_broadcast() {
     assert_eq!(skip.len(), 1);
     assert!(skip.contains(&live_id));
     assert!(
-        pres[0].sha_prevouts.is_none(),
+        pres[0].sha_prevouts().is_none(),
         "live graph tx must skip sighash midstates"
     );
     assert!(
-        pres[1].sha_prevouts.is_some(),
+        pres[1].sha_prevouts().is_some(),
         "non-live must fill midstates after connect ids"
     );
     let wire = spend_true(cbs[8], 1_000, spk.clone());

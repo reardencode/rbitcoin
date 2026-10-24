@@ -180,15 +180,29 @@ fn p2wpkh_program(key: u8) -> Vec<u8> {
 
 /// BIP143 P2WPKH signature over the raw `hashtype` byte.
 fn sign_p2wpkh(tx: &Transaction, program: &[u8], key: u8, hashtype: u8) -> Vec<u8> {
-    let pre = rbitcoin_consensus::TxPrecompute::from_tx(tx);
-    let digest = rbitcoin_consensus::script::crypto::bip143_p2wpkh_signature_hash(
-        tx,
-        0,
-        Script::from_bytes(program),
-        VALUE,
-        u32::from(hashtype),
-        &pre,
-    )
+    let pre = rbitcoin_consensus::TxScriptPrecompute::from_tx(tx);
+    let digest = {
+        let _idx_job = rbitcoin_consensus::block::ScriptCheckJob::new(
+            vec![
+                bitcoin::TxOut {
+                    value: bitcoin::Amount::ZERO,
+                    script_pubkey: bitcoin::script::ScriptBuf::new(),
+                };
+                tx.input.len()
+            ],
+            (*tx).clone(),
+            rbitcoin_consensus::block::ScriptVerifyFlags::buried(false, false, false, false, false),
+        );
+        let i = _idx_job.inputs().next().unwrap();
+        rbitcoin_consensus::script::crypto::bip143_p2wpkh_signature_hash(
+            tx,
+            i,
+            Script::from_bytes(program),
+            VALUE,
+            u32::from(hashtype),
+            &pre,
+        )
+    }
     .unwrap();
     der_with_hashtype(digest, key, hashtype)
 }

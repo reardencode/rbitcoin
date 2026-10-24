@@ -87,7 +87,8 @@ pub use index_writebehind::{
 };
 pub use rbitcoin_consensus::{
     block_wire_len_from_pres, decode_block_precomputes, pres_for_tip, IdMap, OutPointHasher,
-    OutPointSet, TxPrecompute, TxidHasher, TxidMap, TxidSet,
+    OutPointSet, TxConnectPrecompute, TxPrecompute, TxScriptPrecompute, TxidHasher, TxidMap,
+    TxidSet,
 };
 pub use reconstruct::{BlockTxStatRows, StampedTxstatBlock};
 pub use regtest_pad::pad_empty_from;

@@ -20,7 +20,7 @@ use crate::error::ConsensusError;
 
 pub fn verify(
     job: &ScriptCheckJob,
-    input_index: usize,
+    input_index: crate::block::InputIndex,
     tx: &Transaction,
     tap_spent: &crypto::TapSpentHashes,
 ) -> Result<(), ConsensusError> {
@@ -28,7 +28,7 @@ pub fn verify(
     debug_assert!(spk.len() == 34 && spk[0] == 0x51 && spk[1] == 0x20);
     let output_key = &spk[2..34];
 
-    let input = &tx.input[input_index];
+    let input = &tx.input[input_index.get()];
     let wit_len = input.witness.len();
     if wit_len == 0 {
         return Err(ConsensusError::Script("p2tr empty witness".into()));
@@ -59,12 +59,12 @@ pub fn bip341_annex(witness: &Witness) -> Option<&[u8]> {
 #[doc(hidden)]
 pub fn verify_key_path(
     job: &ScriptCheckJob,
-    input_index: usize,
+    input_index: crate::block::InputIndex,
     tx: &Transaction,
     output_key: &[u8],
     tap_spent: &crypto::TapSpentHashes,
 ) -> Result<(), ConsensusError> {
-    let input = &tx.input[input_index];
+    let input = &tx.input[input_index.get()];
     let sig_raw = input
         .witness
         .nth(0)
@@ -173,12 +173,12 @@ pub fn verify_control_commitment(
 #[doc(hidden)]
 pub fn verify_script_path(
     job: &ScriptCheckJob,
-    input_index: usize,
+    input_index: crate::block::InputIndex,
     tx: &Transaction,
     output_key_bytes: &[u8],
     tap_spent: &crypto::TapSpentHashes,
 ) -> Result<(), ConsensusError> {
-    let input = &tx.input[input_index];
+    let input = &tx.input[input_index.get()];
     let mut items: Vec<Vec<u8>> = (0..input.witness.len())
         .filter_map(|i| input.witness.nth(i).map(|b| b.to_vec()))
         .collect();

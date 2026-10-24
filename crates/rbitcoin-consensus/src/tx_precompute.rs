@@ -2,7 +2,7 @@
 //! `PrecomputedTransactionData` shape).
 //!
 //! Structure and scripts share this. Spent amounts/scripts are filled later
-//! via [`TxPrecompute::finish_spent`] or [`TxPrecompute::finish_spent_parts`]
+//! via [`TxScriptPrecompute::finish_spent`] or [`TxScriptPrecompute::finish_spent_parts`]
 //! when prevouts exist.
 
 use bitcoin::consensus::encode::{Encodable, VarInt};
@@ -10,12 +10,13 @@ use bitcoin::hashes::{sha256, sha256d, Hash, HashEngine};
 use bitcoin::{Script, Transaction, TxOut};
 use rbitcoin_primitives::script_sigop_count;
 use std::collections::HashSet;
+use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-/// Job-local hash cache: this tx's ids plus Core-style common midstates.
+/// Ids, sizes, sigops, and `out_sum`. No sighash midstates.
 #[derive(Clone, Debug)]
-pub struct TxPrecompute {
+pub struct TxConnectPrecompute {
     pub txid: [u8; 32],
     pub wtxid: [u8; 32],
     pub base_size: usize,
@@ -24,11 +25,26 @@ pub struct TxPrecompute {
     pub out_sum: u64,
     /// BIP144 serialization (`uses_segwit_serialization`).
     pub has_witness: bool,
-    /// Single SHA256 of all outpoints (BIP341 / rust-bitcoin `CommonCache`).
-    /// `None` after [`Self::from_tx_connect`] (scripts skipped).
-    pub sha_prevouts: Option<[u8; 32]>,
-    pub sha_sequences: Option<[u8; 32]>,
-    pub sha_outputs: Option<[u8; 32]>,
+}
+
+impl TxConnectPrecompute {
+    pub fn weight_wu(&self) -> u64 {
+        (self
+            .base_size
+            .saturating_mul(3)
+            .saturating_add(self.total_size)) as u64
+    }
+}
+
+/// Connect facts plus BIP143/BIP341 common midstates. The three arrays are
+/// always present. Spent amount and script hashes are filled by
+/// [`TxScriptPrecompute::finish_spent`].
+#[derive(Clone, Debug)]
+pub struct TxScriptPrecompute {
+    pub connect: TxConnectPrecompute,
+    pub sha_prevouts: [u8; 32],
+    pub sha_sequences: [u8; 32],
+    pub sha_outputs: [u8; 32],
     /// Single SHA256 of spent amounts / scriptPubKeys (after [`Self::finish_spent`]).
     pub sha_amounts: Option<[u8; 32]>,
     pub sha_scriptpubkeys: Option<[u8; 32]>,
@@ -36,6 +52,112 @@ pub struct TxPrecompute {
     pub prevouts_d: OnceLock<[u8; 32]>,
     pub sequences_d: OnceLock<[u8; 32]>,
     pub outputs_d: OnceLock<[u8; 32]>,
+}
+
+impl Deref for TxScriptPrecompute {
+    type Target = TxConnectPrecompute;
+    fn deref(&self) -> &Self::Target {
+        &self.connect
+    }
+}
+
+/// One block row: connect-only for a live mempool tx, script midstates otherwise.
+///
+/// The script row is larger because it keeps the three midstates. Boxing it
+/// would allocate once per transaction on the confirm pres slice.
+#[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)]
+pub enum TxPrecompute {
+    Connect(TxConnectPrecompute),
+    Script(TxScriptPrecompute),
+}
+
+impl Deref for TxPrecompute {
+    type Target = TxConnectPrecompute;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Connect(c) => c,
+            Self::Script(s) => &s.connect,
+        }
+    }
+}
+
+impl TxPrecompute {
+    pub fn as_script(&self) -> Option<&TxScriptPrecompute> {
+        match self {
+            Self::Connect(_) => None,
+            Self::Script(s) => Some(s),
+        }
+    }
+
+    pub fn into_connect(self) -> TxConnectPrecompute {
+        match self {
+            Self::Connect(c) => c,
+            Self::Script(s) => s.connect,
+        }
+    }
+
+    pub fn sha_prevouts(&self) -> Option<[u8; 32]> {
+        self.as_script().map(|s| s.sha_prevouts)
+    }
+
+    pub fn sha_sequences(&self) -> Option<[u8; 32]> {
+        self.as_script().map(|s| s.sha_sequences)
+    }
+
+    pub fn sha_outputs(&self) -> Option<[u8; 32]> {
+        self.as_script().map(|s| s.sha_outputs)
+    }
+
+    pub fn sha_amounts(&self) -> Option<[u8; 32]> {
+        self.as_script().and_then(|s| s.sha_amounts)
+    }
+
+    pub fn sha_scriptpubkeys(&self) -> Option<[u8; 32]> {
+        self.as_script().and_then(|s| s.sha_scriptpubkeys)
+    }
+
+    pub fn hash_prevouts(&self) -> Option<[u8; 32]> {
+        self.as_script().map(|s| s.hash_prevouts())
+    }
+
+    pub fn hash_sequence(&self) -> Option<[u8; 32]> {
+        self.as_script().map(|s| s.hash_sequence())
+    }
+
+    pub fn hash_outputs(&self) -> Option<[u8; 32]> {
+        self.as_script().map(|s| s.hash_outputs())
+    }
+
+    pub fn finish_spent(&mut self, prevouts: &[TxOut]) {
+        if let Self::Script(s) = self {
+            s.finish_spent(prevouts);
+        }
+    }
+}
+
+fn pack_precompute(
+    connect: TxConnectPrecompute,
+    sha_prevouts: Option<[u8; 32]>,
+    sha_sequences: Option<[u8; 32]>,
+    sha_outputs: Option<[u8; 32]>,
+) -> TxPrecompute {
+    match (sha_prevouts, sha_sequences, sha_outputs) {
+        (Some(sha_prevouts), Some(sha_sequences), Some(sha_outputs)) => {
+            TxPrecompute::Script(TxScriptPrecompute {
+                connect,
+                sha_prevouts,
+                sha_sequences,
+                sha_outputs,
+                sha_amounts: None,
+                sha_scriptpubkeys: None,
+                prevouts_d: OnceLock::new(),
+                sequences_d: OnceLock::new(),
+                outputs_d: OnceLock::new(),
+            })
+        }
+        _ => TxPrecompute::Connect(connect),
+    }
 }
 
 impl TxPrecompute {
@@ -82,23 +204,20 @@ impl TxPrecompute {
                 (wtxid, wire.len(), [None, None, None])
             };
         let (sigops, out_sum) = sigops_and_out_sum(tx);
-        Some(Self {
-            txid,
-            wtxid,
-            base_size,
-            total_size: wire.len(),
-            sigops,
-            out_sum,
-            has_witness,
+        Some(pack_precompute(
+            TxConnectPrecompute {
+                txid,
+                wtxid,
+                base_size,
+                total_size: wire.len(),
+                sigops,
+                out_sum,
+                has_witness,
+            },
             sha_prevouts,
             sha_sequences,
             sha_outputs,
-            sha_amounts: None,
-            sha_scriptpubkeys: None,
-            prevouts_d: OnceLock::new(),
-            sequences_d: OnceLock::new(),
-            outputs_d: OnceLock::new(),
-        })
+        ))
     }
 
     #[doc(hidden)]
@@ -166,23 +285,20 @@ impl TxPrecompute {
         base_size += enc(&mut txid_eng, &tx.lock_time);
         total_size += enc(&mut wtxid_eng, &tx.lock_time);
 
-        Self {
-            txid: sha256d::Hash::from_engine(txid_eng).to_byte_array(),
-            wtxid: sha256d::Hash::from_engine(wtxid_eng).to_byte_array(),
-            base_size,
-            total_size,
-            sigops,
-            out_sum,
-            has_witness,
-            sha_prevouts: sha_prev.map(|e| sha256::Hash::from_engine(e).to_byte_array()),
-            sha_sequences: sha_seq.map(|e| sha256::Hash::from_engine(e).to_byte_array()),
-            sha_outputs: sha_out.map(|e| sha256::Hash::from_engine(e).to_byte_array()),
-            sha_amounts: None,
-            sha_scriptpubkeys: None,
-            prevouts_d: OnceLock::new(),
-            sequences_d: OnceLock::new(),
-            outputs_d: OnceLock::new(),
-        }
+        pack_precompute(
+            TxConnectPrecompute {
+                txid: sha256d::Hash::from_engine(txid_eng).to_byte_array(),
+                wtxid: sha256d::Hash::from_engine(wtxid_eng).to_byte_array(),
+                base_size,
+                total_size,
+                sigops,
+                out_sum,
+                has_witness,
+            },
+            sha_prev.map(|e| sha256::Hash::from_engine(e).to_byte_array()),
+            sha_seq.map(|e| sha256::Hash::from_engine(e).to_byte_array()),
+            sha_out.map(|e| sha256::Hash::from_engine(e).to_byte_array()),
+        )
     }
 
     /// Non-witness tx: stripped == wire, so one SHA256d engine (wtxid = txid).
@@ -224,17 +340,40 @@ impl TxPrecompute {
         }
         base_size += enc(&mut eng, &tx.lock_time);
         let txid = sha256d::Hash::from_engine(eng).to_byte_array();
+        pack_precompute(
+            TxConnectPrecompute {
+                txid,
+                wtxid: txid,
+                base_size,
+                total_size: base_size,
+                sigops,
+                out_sum,
+                has_witness: false,
+            },
+            sha_prev.map(|e| sha256::Hash::from_engine(e).to_byte_array()),
+            sha_seq.map(|e| sha256::Hash::from_engine(e).to_byte_array()),
+            sha_out.map(|e| sha256::Hash::from_engine(e).to_byte_array()),
+        )
+    }
+}
+
+impl TxScriptPrecompute {
+    /// One walk of `tx` including BIP143/341 midstates. Does not hash spent prevouts.
+    pub fn from_tx(tx: &Transaction) -> Self {
+        match TxPrecompute::from_tx_inner(tx, true) {
+            TxPrecompute::Script(s) => s,
+            TxPrecompute::Connect(connect) => Self::from_connect(connect, tx),
+        }
+    }
+
+    /// Midstates on an already-walked connect row. Does not rehash the txid.
+    pub fn from_connect(connect: TxConnectPrecompute, tx: &Transaction) -> Self {
+        let [sha_prevouts, sha_sequences, sha_outputs] = sighash_midstates(tx);
         Self {
-            txid,
-            wtxid: txid,
-            base_size,
-            total_size: base_size,
-            sigops,
-            out_sum,
-            has_witness: false,
-            sha_prevouts: sha_prev.map(|e| sha256::Hash::from_engine(e).to_byte_array()),
-            sha_sequences: sha_seq.map(|e| sha256::Hash::from_engine(e).to_byte_array()),
-            sha_outputs: sha_out.map(|e| sha256::Hash::from_engine(e).to_byte_array()),
+            connect,
+            sha_prevouts,
+            sha_sequences,
+            sha_outputs,
             sha_amounts: None,
             sha_scriptpubkeys: None,
             prevouts_d: OnceLock::new(),
@@ -243,40 +382,25 @@ impl TxPrecompute {
         }
     }
 
-    /// BIP143 `hashPrevouts` = SHA256(sha_prevouts). `None` after [`Self::from_tx_connect`].
+    /// BIP143 `hashPrevouts` = SHA256(sha_prevouts).
     ///
     /// The second compression is cached. Ten CHECKSIGs share one block.
-    pub fn hash_prevouts(&self) -> Option<[u8; 32]> {
-        let single = self.sha_prevouts?;
-        Some(*self.prevouts_d.get_or_init(|| sha256_again(&single)))
+    pub fn hash_prevouts(&self) -> [u8; 32] {
+        *self
+            .prevouts_d
+            .get_or_init(|| sha256_again(&self.sha_prevouts))
     }
 
-    pub fn hash_sequence(&self) -> Option<[u8; 32]> {
-        let single = self.sha_sequences?;
-        Some(*self.sequences_d.get_or_init(|| sha256_again(&single)))
+    pub fn hash_sequence(&self) -> [u8; 32] {
+        *self
+            .sequences_d
+            .get_or_init(|| sha256_again(&self.sha_sequences))
     }
 
-    pub fn hash_outputs(&self) -> Option<[u8; 32]> {
-        let single = self.sha_outputs?;
-        Some(*self.outputs_d.get_or_init(|| sha256_again(&single)))
-    }
-
-    pub fn weight_wu(&self) -> u64 {
-        (self
-            .base_size
-            .saturating_mul(3)
-            .saturating_add(self.total_size)) as u64
-    }
-
-    /// BIP143/341 common hashes on a [`Self::from_tx_connect`] row (no txid walk).
-    pub fn fill_sighash_midstates(&mut self, tx: &Transaction) {
-        if self.sha_prevouts.is_some() {
-            return;
-        }
-        let [sha_prevouts, sha_sequences, sha_outputs] = sighash_midstates(tx);
-        self.sha_prevouts = sha_prevouts;
-        self.sha_sequences = sha_sequences;
-        self.sha_outputs = sha_outputs;
+    pub fn hash_outputs(&self) -> [u8; 32] {
+        *self
+            .outputs_d
+            .get_or_init(|| sha256_again(&self.sha_outputs))
     }
 
     /// BIP341 spent midstates. Call when `prevouts.len() == tx.input.len()`.
@@ -326,13 +450,16 @@ pub fn pres_for_tip(
     let mut skip = HashSet::new();
     let mut v = Vec::with_capacity(txs.len());
     for tx in txs {
-        let mut c = TxPrecompute::from_tx_connect(tx);
+        let c = TxPrecompute::from_tx_connect(tx);
         if is_live(c.txid) {
             skip.insert(c.txid);
+            v.push(c);
         } else {
-            c.fill_sighash_midstates(tx);
+            v.push(TxPrecompute::Script(TxScriptPrecompute::from_connect(
+                c.into_connect(),
+                tx,
+            )));
         }
-        v.push(c);
     }
     (Arc::from(v), skip)
 }
@@ -502,7 +629,7 @@ pub fn sigops_and_out_sum(tx: &Transaction) -> (u64, u64) {
 }
 
 #[doc(hidden)]
-pub fn sighash_midstates(tx: &Transaction) -> SighashMidstates {
+pub fn sighash_midstates(tx: &Transaction) -> [[u8; 32]; 3] {
     let mut sha_prev = sha256::Hash::engine();
     let mut sha_seq = sha256::Hash::engine();
     let mut sha_out = sha256::Hash::engine();
@@ -514,9 +641,9 @@ pub fn sighash_midstates(tx: &Transaction) -> SighashMidstates {
         let _ = txout.consensus_encode(&mut sha_out);
     }
     [
-        Some(sha256::Hash::from_engine(sha_prev).to_byte_array()),
-        Some(sha256::Hash::from_engine(sha_seq).to_byte_array()),
-        Some(sha256::Hash::from_engine(sha_out).to_byte_array()),
+        sha256::Hash::from_engine(sha_prev).to_byte_array(),
+        sha256::Hash::from_engine(sha_seq).to_byte_array(),
+        sha256::Hash::from_engine(sha_out).to_byte_array(),
     ]
 }
 

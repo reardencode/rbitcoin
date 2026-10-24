@@ -351,15 +351,20 @@ pub fn assemble_non_cb_tx(
         let t_job = Instant::now();
         let mut job = match (wire, prevouts) {
             (Some(w), rbitcoin_consensus::block::JobPrevouts::Shared(v)) => {
-                rbitcoin_consensus::block::ScriptCheckJob::from_parts(
+                rbitcoin_consensus::block::ScriptCheckJob::try_from_parts(
                     txid,
                     rbitcoin_consensus::block::JobPrevouts::Shared(v),
                     rbitcoin_consensus::block::JobTx::shared(Arc::clone(w), ti),
                     flags,
-                )
+                )?
             }
             (None, rbitcoin_consensus::block::JobPrevouts::Owned(v)) => {
-                rbitcoin_consensus::block::ScriptCheckJob::with_txid(txid, v, tx.clone(), flags)
+                rbitcoin_consensus::block::ScriptCheckJob::try_with_txid(
+                    txid,
+                    v,
+                    tx.clone(),
+                    flags,
+                )?
             }
             _ => {
                 return Err(ConfirmError::Store(rbitcoin_store::StoreError::Corrupt(

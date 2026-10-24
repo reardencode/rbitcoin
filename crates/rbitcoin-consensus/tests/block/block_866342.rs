@@ -159,12 +159,13 @@ fn block_866342_structure_scripts_and_overweight() {
             prevs.push(stxos.next().expect("stxos short"));
         }
         let txid = tx.compute_txid().to_byte_array();
-        let job = ScriptCheckJob::from_parts(
+        let job = ScriptCheckJob::try_from_parts(
             txid,
             rbitcoin_consensus::block::JobPrevouts::owned(prevs),
             rbitcoin_consensus::block::JobTx::shared(Arc::clone(&arc), i),
             rbitcoin_consensus::block::ScriptVerifyFlags::buried(true, true, true, true, true),
-        );
+        )
+        .expect("prevouts");
         rbitcoin_consensus::script::verify_job_all_inputs(&job).unwrap_or_else(|e| {
             panic!(
                 "866342 scripts tx index {i} txid={} {e}",

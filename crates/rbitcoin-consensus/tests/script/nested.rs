@@ -41,14 +41,13 @@ fn p2sh_spk(redeem: &[u8]) -> ScriptBuf {
 }
 
 fn job_for(tx: Transaction, spk: ScriptBuf, witness_active: bool) -> ScriptCheckJob {
-    ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![TxOut {
+    {
+        let txid = [0u8; 32];
+        let prevouts = vec![TxOut {
             value: Amount::from_sat(1),
             script_pubkey: spk,
-        }]),
-        tx: rbitcoin_consensus::block::JobTx::owned(tx),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+        }];
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
             bip66_active: true,
@@ -65,32 +64,48 @@ fn job_for(tx: Transaction, spk: ScriptBuf, witness_active: bool) -> ScriptCheck
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     }
 }
 
 fn try_nested(
     job: &ScriptCheckJob,
     cache: &mut SighashCache<&Transaction>,
-    pre: &rbitcoin_consensus::TxPrecompute,
+    pre: &rbitcoin_consensus::TxScriptPrecompute,
 ) -> Option<Result<(), ConsensusError>> {
-    match p2sh_script_sig_stack(job, 0, &job.tx) {
+    let stack = {
+        let i = job.inputs().next().unwrap();
+        p2sh_script_sig_stack(job, i, &job.tx)
+    };
+    match stack {
         Err(e) => Some(Err(e)),
-        Ok(items) => try_p2sh_nested_segwit(job, 0, &job.tx, cache, pre, &items),
+        Ok(items) => {
+            let i = job.inputs().next().unwrap();
+            try_p2sh_nested_segwit(job, i, &job.tx, cache, pre, &items)
+        }
     }
 }
 
 fn verify_legacy(job: &ScriptCheckJob) -> Result<(), ConsensusError> {
-    let stack = p2sh_script_sig_stack(job, 0, &job.tx)?;
-    verify_p2sh_legacy(job, 0, &job.tx, stack)
+    let stack = {
+        let i = job.inputs().next().unwrap();
+        p2sh_script_sig_stack(job, i, &job.tx)
+    }?;
+    {
+        let i = job.inputs().next().unwrap();
+        verify_p2sh_legacy(job, i, &job.tx, stack)
+    }
 }
 
 fn stack_for(ss: ScriptBuf) -> Result<Vec<Vec<u8>>, ConsensusError> {
     let mut tx = dummy_tx();
     tx.input[0].script_sig = ss;
     let job = job_for(tx, p2sh_spk(&[0x51]), true);
-    p2sh_script_sig_stack(&job, 0, &job.tx)
+    {
+        let i = job.inputs().next().unwrap();
+        p2sh_script_sig_stack(&job, i, &job.tx)
+    }
 }
 
 #[test]
@@ -211,7 +226,7 @@ fn p2sh_nested_non_minimal_redeem_push_malleated() {
     let r = try_nested(
         &job,
         &mut cache,
-        &rbitcoin_consensus::TxPrecompute::from_tx(&job.tx),
+        &rbitcoin_consensus::TxScriptPrecompute::from_tx(&job.tx),
     );
     match r {
         Some(Err(e)) => {
@@ -244,7 +259,7 @@ fn p2sh_nested_multi_push_witness_program_malleated() {
     let r = try_nested(
         &job,
         &mut cache,
-        &rbitcoin_consensus::TxPrecompute::from_tx(&job.tx),
+        &rbitcoin_consensus::TxScriptPrecompute::from_tx(&job.tx),
     );
     match r {
         Some(Err(e)) => {
@@ -274,7 +289,7 @@ fn p2sh_nested_v0_wrong_length_program_rejected() {
     let r = try_nested(
         &job,
         &mut cache,
-        &rbitcoin_consensus::TxPrecompute::from_tx(&job.tx),
+        &rbitcoin_consensus::TxScriptPrecompute::from_tx(&job.tx),
     );
     match r {
         Some(Err(e)) => {
@@ -305,7 +320,7 @@ fn p2sh_nested_inactive_witness_flag_returns_none() {
         try_nested(
             &job,
             &mut cache,
-            &rbitcoin_consensus::TxPrecompute::from_tx(&job.tx)
+            &rbitcoin_consensus::TxScriptPrecompute::from_tx(&job.tx)
         )
         .is_none(),
         "without witness_active nested must not fire"
@@ -326,7 +341,7 @@ fn p2sh_legacy_multi_push_non_witness_fallthrough() {
         try_nested(
             &job,
             &mut cache,
-            &rbitcoin_consensus::TxPrecompute::from_tx(&job.tx)
+            &rbitcoin_consensus::TxScriptPrecompute::from_tx(&job.tx)
         )
         .is_none(),
         "non-witness multi-push must not enter nested gate"
@@ -351,7 +366,7 @@ fn p2sh_nested_v1_program_anyone_can_spend() {
     let r = try_nested(
         &job,
         &mut cache,
-        &rbitcoin_consensus::TxPrecompute::from_tx(&job.tx),
+        &rbitcoin_consensus::TxScriptPrecompute::from_tx(&job.tx),
     );
     assert!(matches!(r, Some(Ok(()))), "v1-in-P2SH ACS, got {r:?}");
 }
@@ -368,14 +383,14 @@ fn try_nested_error_paths() {
     let mut ss = vec![redeem.len() as u8];
     ss.extend_from_slice(&redeem);
     tx.input[0].script_sig = ScriptBuf::from_bytes(ss);
-    let job = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![TxOut {
+    let job = {
+        let txid = [0u8; 32];
+        let prevouts = vec![TxOut {
             value: Amount::from_sat(1),
-            script_pubkey: ScriptBuf::from_bytes(vec![0x51]), // not 23-byte P2SH
-        }]),
-        tx: rbitcoin_consensus::block::JobTx::owned(tx.clone()),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }];
+        let tx = tx.clone();
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
             bip66_active: true,
@@ -392,26 +407,26 @@ fn try_nested_error_paths() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     let mut cache = SighashCache::new(&*job.tx);
     let r = try_nested(
         &job,
         &mut cache,
-        &rbitcoin_consensus::TxPrecompute::from_tx(&job.tx),
+        &rbitcoin_consensus::TxScriptPrecompute::from_tx(&job.tx),
     );
     assert!(matches!(r, Some(Err(_))));
 
     // Wrong redeem hash
-    let job2 = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![TxOut {
+    let job2 = {
+        let txid = [0u8; 32];
+        let prevouts = vec![TxOut {
             value: Amount::from_sat(1),
             script_pubkey: p2sh_spk(&[0xff]),
-        }]),
-        tx: rbitcoin_consensus::block::JobTx::owned(tx.clone()),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+        }];
+        let tx = tx.clone();
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
             bip66_active: true,
@@ -428,15 +443,15 @@ fn try_nested_error_paths() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     let mut cache2 = SighashCache::new(&*job2.tx);
     assert!(matches!(
         try_nested(
             &job2,
             &mut cache2,
-            &rbitcoin_consensus::TxPrecompute::from_tx(&job2.tx)
+            &rbitcoin_consensus::TxScriptPrecompute::from_tx(&job2.tx)
         ),
         Some(Err(_))
     ));
@@ -451,14 +466,14 @@ fn try_nested_error_paths() {
     ss2.extend_from_slice(&redeem_wsh);
     let mut tx3 = dummy_tx();
     tx3.input[0].script_sig = ScriptBuf::from_bytes(ss2);
-    let job3 = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![TxOut {
+    let job3 = {
+        let txid = [0u8; 32];
+        let prevouts = vec![TxOut {
             value: Amount::from_sat(1),
-            script_pubkey: ScriptBuf::from_bytes(vec![0x00]), // short spk
-        }]),
-        tx: rbitcoin_consensus::block::JobTx::owned(tx3.clone()),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+            script_pubkey: ScriptBuf::from_bytes(vec![0x00]),
+        }];
+        let tx = tx3.clone();
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
             bip66_active: true,
@@ -475,27 +490,27 @@ fn try_nested_error_paths() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     let mut c3 = SighashCache::new(&*job3.tx);
     assert!(matches!(
         try_nested(
             &job3,
             &mut c3,
-            &rbitcoin_consensus::TxPrecompute::from_tx(&job3.tx)
+            &rbitcoin_consensus::TxScriptPrecompute::from_tx(&job3.tx)
         ),
         Some(Err(_))
     ));
     // wrong hash
-    let job4 = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![TxOut {
+    let job4 = {
+        let txid = [0u8; 32];
+        let prevouts = vec![TxOut {
             value: Amount::from_sat(1),
             script_pubkey: p2sh_spk(&[0x01]),
-        }]),
-        tx: rbitcoin_consensus::block::JobTx::owned(tx3.clone()),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+        }];
+        let tx = tx3.clone();
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
             bip66_active: true,
@@ -512,15 +527,15 @@ fn try_nested_error_paths() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     let mut c4 = SighashCache::new(&*job4.tx);
     assert!(matches!(
         try_nested(
             &job4,
             &mut c4,
-            &rbitcoin_consensus::TxPrecompute::from_tx(&job4.tx)
+            &rbitcoin_consensus::TxScriptPrecompute::from_tx(&job4.tx)
         ),
         Some(Err(_))
     ));
@@ -528,14 +543,14 @@ fn try_nested_error_paths() {
     // Multi-push non-witness → None (fallthrough)
     let mut tx5 = dummy_tx();
     tx5.input[0].script_sig = ScriptBuf::from_bytes(vec![0x01, 0xaa, 0x01, 0xbb]);
-    let job5 = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![TxOut {
+    let job5 = {
+        let txid = [0u8; 32];
+        let prevouts = vec![TxOut {
             value: Amount::from_sat(1),
             script_pubkey: p2sh_spk(&[0xaa]),
-        }]),
-        tx: rbitcoin_consensus::block::JobTx::owned(tx5.clone()),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+        }];
+        let tx = tx5.clone();
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
             bip66_active: true,
@@ -552,14 +567,14 @@ fn try_nested_error_paths() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     let mut c5 = SighashCache::new(&*job5.tx);
     assert!(try_nested(
         &job5,
         &mut c5,
-        &rbitcoin_consensus::TxPrecompute::from_tx(&job5.tx)
+        &rbitcoin_consensus::TxScriptPrecompute::from_tx(&job5.tx)
     )
     .is_none());
 
@@ -567,14 +582,14 @@ fn try_nested_error_paths() {
     assert!(verify_legacy(&job3).is_err());
     let mut tx_empty = dummy_tx();
     tx_empty.input[0].script_sig = ScriptBuf::new();
-    let job_e = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![TxOut {
+    let job_e = {
+        let txid = [0u8; 32];
+        let prevouts = vec![TxOut {
             value: Amount::from_sat(1),
             script_pubkey: p2sh_spk(&[0x51]),
-        }]),
-        tx: rbitcoin_consensus::block::JobTx::owned(tx_empty.clone()),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+        }];
+        let tx = tx_empty.clone();
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
             bip66_active: true,
@@ -591,21 +606,21 @@ fn try_nested_error_paths() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     assert!(verify_legacy(&job_e).is_err());
     // Hash mismatch on legacy
     let mut tx_leg = dummy_tx();
     tx_leg.input[0].script_sig = ScriptBuf::from_bytes(vec![0x01, 0x51]);
-    let job_h = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![TxOut {
+    let job_h = {
+        let txid = [0u8; 32];
+        let prevouts = vec![TxOut {
             value: Amount::from_sat(1),
             script_pubkey: p2sh_spk(&[0xff]),
-        }]),
-        tx: rbitcoin_consensus::block::JobTx::owned(tx_leg.clone()),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+        }];
+        let tx = tx_leg.clone();
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
             bip66_active: true,
@@ -622,8 +637,8 @@ fn try_nested_error_paths() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     assert!(verify_legacy(&job_h).is_err());
 }
@@ -640,14 +655,14 @@ fn try_nested_matching_hash_enters_witness_verify() {
     ss.extend_from_slice(&redeem_wsh);
     let mut tx = dummy_tx();
     tx.input[0].script_sig = ScriptBuf::from_bytes(ss);
-    let job = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![TxOut {
+    let job = {
+        let txid = [0u8; 32];
+        let prevouts = vec![TxOut {
             value: Amount::from_sat(1),
             script_pubkey: p2sh_spk(&redeem_wsh),
-        }]),
-        tx: rbitcoin_consensus::block::JobTx::owned(tx.clone()),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+        }];
+        let tx = tx.clone();
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
             bip66_active: true,
@@ -664,8 +679,8 @@ fn try_nested_matching_hash_enters_witness_verify() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     // Empty witness → p2wsh fails, but nested path reached scripthash copy + call.
     let mut c = SighashCache::new(&*job.tx);
@@ -673,7 +688,7 @@ fn try_nested_matching_hash_enters_witness_verify() {
         try_nested(
             &job,
             &mut c,
-            &rbitcoin_consensus::TxPrecompute::from_tx(&job.tx)
+            &rbitcoin_consensus::TxScriptPrecompute::from_tx(&job.tx)
         ),
         Some(Err(_))
     ));
@@ -687,14 +702,14 @@ fn try_nested_matching_hash_enters_witness_verify() {
     ss2.extend_from_slice(&redeem_wpkh);
     let mut tx2 = dummy_tx();
     tx2.input[0].script_sig = ScriptBuf::from_bytes(ss2);
-    let job2 = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![TxOut {
+    let job2 = {
+        let txid = [0u8; 32];
+        let prevouts = vec![TxOut {
             value: Amount::from_sat(1),
             script_pubkey: p2sh_spk(&redeem_wpkh),
-        }]),
-        tx: rbitcoin_consensus::block::JobTx::owned(tx2.clone()),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+        }];
+        let tx = tx2.clone();
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
             bip66_active: true,
@@ -711,15 +726,15 @@ fn try_nested_matching_hash_enters_witness_verify() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     let mut cache = SighashCache::new(&*job2.tx);
     assert!(matches!(
         try_nested(
             &job2,
             &mut cache,
-            &rbitcoin_consensus::TxPrecompute::from_tx(&job2.tx)
+            &rbitcoin_consensus::TxScriptPrecompute::from_tx(&job2.tx)
         ),
         Some(Err(_))
     ));
@@ -731,14 +746,14 @@ fn try_nested_matching_hash_enters_witness_verify() {
     // stack push 0xaa + redeem OP_TRUE
     let mut tx3 = dummy_tx();
     tx3.input[0].script_sig = ScriptBuf::from_bytes(ss3);
-    let job3 = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![TxOut {
+    let job3 = {
+        let txid = [0u8; 32];
+        let prevouts = vec![TxOut {
             value: Amount::from_sat(1),
             script_pubkey: p2sh_spk(&redeem),
-        }]),
-        tx: rbitcoin_consensus::block::JobTx::owned(tx3.clone()),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+        }];
+        let tx = tx3.clone();
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
             bip66_active: true,
@@ -755,8 +770,8 @@ fn try_nested_matching_hash_enters_witness_verify() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     assert!(verify_legacy(&job3).is_ok());
 
@@ -769,46 +784,4 @@ fn try_nested_matching_hash_enters_witness_verify() {
 #[test]
 fn push_only_scan_rejects_a_truncated_script() {
     assert!(!Script::from_bytes(&[0x4e, 0x01]).is_push_only());
-}
-
-#[test]
-fn nested_segwit_reports_a_missing_prevout() {
-    let program = {
-        let mut v = vec![0x00, 0x14];
-        v.extend_from_slice(&[0x02; 20]);
-        v
-    };
-    let mut script_sig = vec![program.len() as u8];
-    script_sig.extend_from_slice(&program);
-    let tx = Transaction {
-        version: bitcoin::transaction::Version::TWO,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint::null(),
-            script_sig: ScriptBuf::from_bytes(script_sig),
-            sequence: Sequence::MAX,
-            witness: Witness::from_slice(&[program.as_slice()]),
-        }],
-        output: vec![],
-    };
-    let job = ScriptCheckJob::from_parts(
-        [0u8; 32],
-        rbitcoin_consensus::block::JobPrevouts::Shared(vec![
-            rbitcoin_consensus::block::SharedPrevout::Wire {
-                tx_index: 0,
-                vout: 0,
-            },
-        ]),
-        rbitcoin_consensus::block::JobTx::owned(tx),
-        rbitcoin_consensus::block::ScriptVerifyFlags::buried(false, false, false, true, false),
-    );
-    let got = try_p2sh_nested_segwit(
-        &job,
-        0,
-        &job.tx,
-        &mut bitcoin::sighash::SighashCache::new(&job.tx),
-        job.pre(),
-        &[program],
-    );
-    assert!(got.unwrap().is_err());
 }

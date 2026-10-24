@@ -53,7 +53,7 @@ pub fn verify_tx_scripts_detached_forks(
     taproot_active: bool,
 ) -> Result<(), ConsensusError> {
     script_pool::run_detached_join(move || {
-        let job = ScriptCheckJob::new(
+        let job = ScriptCheckJob::try_new(
             prevouts,
             tx,
             crate::block::ScriptVerifyFlags::buried(
@@ -63,7 +63,7 @@ pub fn verify_tx_scripts_detached_forks(
                 bip16_active,
                 taproot_active,
             ),
-        );
+        )?;
         crate::script::verify_job_all_inputs(&job)
     })
     .unwrap_or(Err(ConsensusError::BadBlock("script worker disconnected")))
@@ -80,7 +80,7 @@ pub fn verify_tx_scripts_with_flags(
     flags: crate::block::ScriptVerifyFlags,
 ) -> Result<(), ConsensusError> {
     script_pool::run_detached_join(move || {
-        let job = ScriptCheckJob::new(prevouts, tx, flags);
+        let job = ScriptCheckJob::try_new(prevouts, tx, flags)?;
         crate::script::verify_job_all_inputs(&job)
     })
     .unwrap_or(Err(ConsensusError::BadBlock("script worker disconnected")))
@@ -90,7 +90,7 @@ pub use block::validate_block_structure_hashed;
 pub use block::{
     bip34_height_script, bip68_active_for_tx, block_has_witness, block_mutated_without_coinbase,
     block_subsidy, check_block_wire, is_final_tx, sequence_locks_satisfied, tx_sigop_cost,
-    validate_block_structure, witness_commitment_script, witness_commitment_vout_index,
+    validate_block_structure, witness_commitment_script, witness_commitment_vout_index, InputIndex,
     ScriptVerifyFlags, ValidationContext, BIP16_EXCEPTION_MAINNET, MAX_BLOCK_TX_COUNT,
     MAX_BLOCK_WEIGHT, MIN_TX_WEIGHT, TAPROOT_EXCEPTION_MAINNET,
 };
@@ -119,5 +119,6 @@ pub use trust::{
     reason_is_warn_and_apply, soften, soften_at, TrustCollect,
 };
 pub use tx_precompute::{
-    block_wire_len_from_pres, decode_block_precomputes, pres_for_tip, TxPrecompute,
+    block_wire_len_from_pres, decode_block_precomputes, pres_for_tip, TxConnectPrecompute,
+    TxPrecompute, TxScriptPrecompute,
 };

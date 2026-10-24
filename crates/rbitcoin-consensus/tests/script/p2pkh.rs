@@ -43,14 +43,14 @@ fn verify_pubkey_hash_mismatch() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    let job = ScriptCheckJob {
-        txid: [0u8; 32],
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![TxOut {
+    let job = {
+        let txid = [0u8; 32];
+        let prevouts = vec![TxOut {
             value: Amount::from_sat(10),
             script_pubkey: ScriptBuf::from_bytes(spk),
-        }]),
-        tx: rbitcoin_consensus::block::JobTx::owned(tx.clone()),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+        }];
+        let tx = tx.clone();
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: true,
             bip112_active: true,
             bip66_active: true,
@@ -67,10 +67,14 @@ fn verify_pubkey_hash_mismatch() {
             discourage_upgradable_witness: false,
             const_scriptcode: false,
             cleanstack: false,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     };
     let mut cache = SighashCache::new(&*job.tx);
-    let err = verify(&job, 0, &job.tx, &mut cache).unwrap_err();
+    let err = {
+        let i = job.inputs().next().unwrap();
+        verify(&job, i, &job.tx, &mut cache)
+    }
+    .unwrap_err();
     assert!(format!("{err}").contains("p2pkh"));
 }

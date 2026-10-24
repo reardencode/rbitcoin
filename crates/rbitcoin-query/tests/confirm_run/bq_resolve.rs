@@ -337,7 +337,7 @@ fn bq_resolve_wave_attaches_tiponly_hits_multi_height() {
     assert!(!q.block_queue_has_height(2));
     let spend_pre = &wave.items[0].2.pres[1];
     assert!(
-        spend_pre.sha_prevouts.is_some(),
+        spend_pre.sha_prevouts().is_some(),
         "Milestone::NONE must from_tx_wire (sighash midstates present)"
     );
     assert_eq!(spend_pre.txid, b1.txdata[1].compute_txid().to_byte_array());
@@ -364,9 +364,9 @@ fn bq_resolve_wave_connect_precompute_omits_midstates() {
     assert_eq!(wave.items.len(), 1);
     let spend_pre = &wave.items[0].2.pres[1];
     assert_eq!(spend_pre.txid, expect_txid);
-    assert_eq!(spend_pre.sha_prevouts, None);
-    assert_eq!(spend_pre.sha_sequences, None);
-    assert_eq!(spend_pre.sha_outputs, None);
+    assert_eq!(spend_pre.sha_prevouts(), None);
+    assert_eq!(spend_pre.sha_sequences(), None);
+    assert_eq!(spend_pre.sha_outputs(), None);
     let _ = std::fs::remove_dir_all(&path);
 }
 

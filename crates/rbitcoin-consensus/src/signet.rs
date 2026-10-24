@@ -343,11 +343,11 @@ pub fn verify_challenge_spend(
         value: to_spend.output[0].value,
         script_pubkey: ScriptBuf::from_bytes(challenge.as_bytes().to_vec()),
     };
-    let mut job = ScriptCheckJob::new(
+    let mut job = ScriptCheckJob::try_new(
         vec![prevout],
         to_sign.clone(),
         crate::block::ScriptVerifyFlags::buried(false, false, true, true, false),
-    );
+    )?;
     job.null_dummy = true;
     job.witness_active = true;
     match crate::script::verify_job_all_inputs(&job) {

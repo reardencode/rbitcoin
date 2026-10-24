@@ -10,7 +10,7 @@ use crate::error::ConsensusError;
 
 pub fn verify(
     job: &ScriptCheckJob,
-    input_index: usize,
+    input_index: crate::block::InputIndex,
     tx: &Transaction,
 ) -> Result<(), ConsensusError> {
     let spk = job.prevout_script(input_index)?;
@@ -22,11 +22,11 @@ pub fn verify(
 
 pub fn verify_with_scripthash(
     job: &ScriptCheckJob,
-    input_index: usize,
+    input_index: crate::block::InputIndex,
     tx: &Transaction,
     scripthash: &[u8; 32],
 ) -> Result<(), ConsensusError> {
-    let input = &tx.input[input_index];
+    let input = &tx.input[input_index.get()];
     if input.witness.is_empty() {
         return Err(ConsensusError::Script("p2wsh empty witness".into()));
     }
@@ -57,7 +57,7 @@ pub fn verify_with_scripthash(
 /// at most 520 bytes, then `script` runs and must leave exactly one true item.
 pub fn execute_witness_v0<'w>(
     job: &ScriptCheckJob,
-    input_index: usize,
+    input_index: crate::block::InputIndex,
     tx: &Transaction,
     script: &Script,
     items: impl Iterator<Item = &'w [u8]>,

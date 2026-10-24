@@ -28,18 +28,22 @@ fn eval_md(script_bytes: &[u8], md: bool) -> Result<(), String> {
     require_true_top(&stack).map_err(|e| format!("{e}"))
 }
 
+fn push_is_minimal(data: &[u8], opcode: u8) -> bool {
+    check_minimal_push(ScriptElem::new(data).unwrap(), opcode)
+}
+
 #[test]
 fn check_minimal_push_table() {
-    assert!(check_minimal_push(&[], 0x00));
-    assert!(!check_minimal_push(&[], 0x4c)); // empty must be OP_0
-    assert!(check_minimal_push(&[5], 0x55)); // OP_5
-    assert!(!check_minimal_push(&[5], 0x01)); // direct push of 5 non-minimal
-    assert!(check_minimal_push(&[0x81], 0x4f)); // OP_1NEGATE
-    assert!(!check_minimal_push(&[0x81], 0x01));
-    assert!(check_minimal_push(&[0x00], 0x01)); // one zero byte is fine
-    assert!(check_minimal_push(&[0x11], 0x01)); // 17 as direct push
-    assert!(check_minimal_push(&[0u8; 76], 0x4c)); // PUSHDATA1 for 76
-    assert!(!check_minimal_push(&[0u8; 76], 0x4d));
+    assert!(push_is_minimal(&[], 0x00));
+    assert!(!push_is_minimal(&[], 0x4c)); // empty must be OP_0
+    assert!(push_is_minimal(&[5], 0x55)); // OP_5
+    assert!(!push_is_minimal(&[5], 0x01)); // direct push of 5 non-minimal
+    assert!(push_is_minimal(&[0x81], 0x4f)); // OP_1NEGATE
+    assert!(!push_is_minimal(&[0x81], 0x01));
+    assert!(push_is_minimal(&[0x00], 0x01)); // one zero byte is fine
+    assert!(push_is_minimal(&[0x11], 0x01)); // 17 as direct push
+    assert!(push_is_minimal(&[0u8; 76], 0x4c)); // PUSHDATA1 for 76
+    assert!(!push_is_minimal(&[0u8; 76], 0x4d));
 }
 
 #[test]
@@ -142,7 +146,14 @@ fn dersig_hard_fails_invalid_encoding() {
     let mut flags =
         rbitcoin_consensus::block::ScriptVerifyFlags::buried(false, false, false, false, false);
     flags.low_s = true;
-    let job = rbitcoin_consensus::block::ScriptCheckJob::new(vec![], tx.clone(), flags);
+    let job = rbitcoin_consensus::block::ScriptCheckJob::new(
+        vec![TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::new(),
+        }],
+        tx.clone(),
+        flags,
+    );
     let ctx_low_s = EvalContext::new_with_flags(
         &tx,
         0,

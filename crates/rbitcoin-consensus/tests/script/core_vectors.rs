@@ -10,7 +10,6 @@ use bitcoin::Transaction;
 use rbitcoin_consensus::block::ScriptCheckJob;
 
 use super::core_script::{assemble_script as assemble, credit_and_spend, SpendShape};
-use rbitcoin_consensus::block::JobTx;
 use rbitcoin_consensus::script::interpreter::{self, EvalContext, SigVersion};
 use rbitcoin_consensus::script::verify_job_all_inputs;
 
@@ -309,11 +308,11 @@ fn script_row_job(
         shape,
     );
     let prev = credit.output[0].clone();
-    ScriptCheckJob {
-        txid: spend.compute_txid().to_byte_array(),
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(vec![prev]),
-        tx: JobTx::owned(spend),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+    {
+        let txid = spend.compute_txid().to_byte_array();
+        let prevouts = vec![prev];
+        let tx = spend;
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: flags.cltv,
             bip112_active: flags.csv,
             bip66_active: flags.dersig || flags.strictenc || flags.low_s,
@@ -333,8 +332,8 @@ fn script_row_job(
                 .any(|e| e == "DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM"),
             const_scriptcode: flags.extra.iter().any(|e| e == "CONST_SCRIPTCODE"),
             cleanstack: flags.cleanstack,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     }
 }
 
@@ -746,15 +745,29 @@ fn corpus_fast_paths_call_typed_verifiers() {
         &spend.flags,
         SpendShape::default(),
     );
-    let spk = Script::from_bytes(job.prevout_script(0).expect("prevout"));
+    let spk = Script::from_bytes(
+        {
+            let i = job.inputs().next().unwrap();
+            job.prevout_script(i)
+        }
+        .expect("prevout"),
+    );
     assert_eq!(classify(spk), ScriptKind::P2pkh);
     assert!(!needs_interpreted_ecdsa(&job));
     let owned = Transaction::clone(&job.tx);
     let mut cache = SighashCache::new(&owned);
-    p2pkh::verify(&job, 0, &owned, &mut cache).expect("p2pkh typed accept");
+    {
+        let i = job.inputs().next().unwrap();
+        p2pkh::verify(&job, i, &owned, &mut cache)
+    }
+    .expect("p2pkh typed accept");
     let tx: &Transaction = &job.tx;
     let mut dispatch_cache = None;
-    verify_input(&job, 0, tx, &mut dispatch_cache, job.pre(), &tap).expect("p2pkh dispatch");
+    {
+        let i = job.inputs().next().unwrap();
+        verify_input(&job, i, tx, &mut dispatch_cache, job.pre(), &tap)
+    }
+    .expect("p2pkh dispatch");
     let mut policy = script_row_job(
         &spend.sig,
         &spend.pk,
@@ -775,11 +788,21 @@ fn corpus_fast_paths_call_typed_verifiers() {
         &spend.flags,
         SpendShape::default(),
     );
-    let spk = Script::from_bytes(job.prevout_script(0).expect("prevout"));
+    let spk = Script::from_bytes(
+        {
+            let i = job.inputs().next().unwrap();
+            job.prevout_script(i)
+        }
+        .expect("prevout"),
+    );
     assert_ne!(classify(spk), ScriptKind::P2pkh);
     let tx: &Transaction = &job.tx;
     let mut dispatch_cache = None;
-    assert!(verify_input(&job, 0, tx, &mut dispatch_cache, job.pre(), &tap).is_err());
+    assert!({
+        let i = job.inputs().next().unwrap();
+        verify_input(&job, i, tx, &mut dispatch_cache, job.pre(), &tap)
+    }
+    .is_err());
 
     let spend = corpus_spend(&rows, "p2pkh-fad-collision");
     let job = script_row_job(
@@ -790,18 +813,32 @@ fn corpus_fast_paths_call_typed_verifiers() {
         &spend.flags,
         SpendShape::default(),
     );
-    let spk = Script::from_bytes(job.prevout_script(0).expect("prevout"));
+    let spk = Script::from_bytes(
+        {
+            let i = job.inputs().next().unwrap();
+            job.prevout_script(i)
+        }
+        .expect("prevout"),
+    );
     assert_eq!(classify(spk), ScriptKind::P2pkh);
     let owned = Transaction::clone(&job.tx);
     let mut cache = SighashCache::new(&owned);
-    let err = p2pkh::verify(&job, 0, &owned, &mut cache).expect_err("collision");
+    let err = {
+        let i = job.inputs().next().unwrap();
+        p2pkh::verify(&job, i, &owned, &mut cache)
+    }
+    .expect_err("collision");
     assert!(
         !rbitcoin_consensus::script::p2pkh_scriptsig_shape_error(&err),
         "{err}"
     );
     let tx: &Transaction = &job.tx;
     let mut dispatch_cache = None;
-    assert!(verify_input(&job, 0, tx, &mut dispatch_cache, job.pre(), &tap).is_err());
+    assert!({
+        let i = job.inputs().next().unwrap();
+        verify_input(&job, i, tx, &mut dispatch_cache, job.pre(), &tap)
+    }
+    .is_err());
 
     let spend = corpus_spend(&rows, "p2wpkh-fast-ok");
     let job = script_row_job(
@@ -812,14 +849,28 @@ fn corpus_fast_paths_call_typed_verifiers() {
         &spend.flags,
         SpendShape::default(),
     );
-    let spk = Script::from_bytes(job.prevout_script(0).expect("prevout"));
+    let spk = Script::from_bytes(
+        {
+            let i = job.inputs().next().unwrap();
+            job.prevout_script(i)
+        }
+        .expect("prevout"),
+    );
     let (version, program) = witness_program(spk).expect("v0 program");
     assert_eq!((version, program.len()), (0, 20));
     assert!(!needs_interpreted_ecdsa(&job));
     let tx: &Transaction = &job.tx;
-    p2wpkh::verify(&job, 0, tx, job.pre()).expect("p2wpkh typed accept");
+    {
+        let i = job.inputs().next().unwrap();
+        p2wpkh::verify(&job, i, tx, job.pre())
+    }
+    .expect("p2wpkh typed accept");
     let mut dispatch_cache = None;
-    verify_input(&job, 0, tx, &mut dispatch_cache, job.pre(), &tap).expect("p2wpkh dispatch");
+    {
+        let i = job.inputs().next().unwrap();
+        verify_input(&job, i, tx, &mut dispatch_cache, job.pre(), &tap)
+    }
+    .expect("p2wpkh dispatch");
 
     let spend = corpus_spend(&rows, "p2wpkh-fast-mutated");
     let job = script_row_job(
@@ -830,11 +881,21 @@ fn corpus_fast_paths_call_typed_verifiers() {
         &spend.flags,
         SpendShape::default(),
     );
-    let spk = Script::from_bytes(job.prevout_script(0).expect("prevout"));
+    let spk = Script::from_bytes(
+        {
+            let i = job.inputs().next().unwrap();
+            job.prevout_script(i)
+        }
+        .expect("prevout"),
+    );
     let (version, program) = witness_program(spk).expect("still a v0 program");
     assert_eq!((version, program.len()), (0, 20));
     let tx: &Transaction = &job.tx;
-    assert!(p2wpkh::verify(&job, 0, tx, job.pre()).is_err());
+    assert!({
+        let i = job.inputs().next().unwrap();
+        p2wpkh::verify(&job, i, tx, job.pre())
+    }
+    .is_err());
 
     let spend = corpus_spend(&rows, "p2tr-keypath-ok");
     let job = script_row_job(
@@ -846,9 +907,17 @@ fn corpus_fast_paths_call_typed_verifiers() {
         SpendShape::default(),
     );
     let tx: &Transaction = &job.tx;
-    p2tr::verify(&job, 0, tx, &tap).expect("key path typed accept");
+    {
+        let i = job.inputs().next().unwrap();
+        p2tr::verify(&job, i, tx, &tap)
+    }
+    .expect("key path typed accept");
     let mut dispatch_cache = None;
-    verify_input(&job, 0, tx, &mut dispatch_cache, job.pre(), &tap).expect("p2tr dispatch");
+    {
+        let i = job.inputs().next().unwrap();
+        verify_input(&job, i, tx, &mut dispatch_cache, job.pre(), &tap)
+    }
+    .expect("p2tr dispatch");
 
     let spend = corpus_spend(&rows, "p2tr-keypath-mutated");
     let job = script_row_job(
@@ -860,7 +929,11 @@ fn corpus_fast_paths_call_typed_verifiers() {
         SpendShape::default(),
     );
     let tx: &Transaction = &job.tx;
-    assert!(p2tr::verify(&job, 0, tx, &tap).is_err());
+    assert!({
+        let i = job.inputs().next().unwrap();
+        p2tr::verify(&job, i, tx, &tap)
+    }
+    .is_err());
 
     let spend = corpus_spend(&rows, "p2pkh-fast-ok");
     let mut sig = spend.sig;
@@ -877,6 +950,10 @@ fn corpus_fast_paths_call_typed_verifiers() {
     );
     let owned = Transaction::clone(&job.tx);
     let mut cache = SighashCache::new(&owned);
-    let err = p2pkh::verify(&job, 0, &owned, &mut cache).expect_err("bad hashtype");
+    let err = {
+        let i = job.inputs().next().unwrap();
+        p2pkh::verify(&job, i, &owned, &mut cache)
+    }
+    .expect_err("bad hashtype");
     assert!(format!("{err}").contains("ecdsa"), "{err}");
 }

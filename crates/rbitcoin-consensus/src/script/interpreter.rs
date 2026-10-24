@@ -29,6 +29,27 @@ use rbitcoin_primitives::{scriptnum_decode_width, scriptnum_encode};
 pub const MAX_STACK_SIZE: usize = 1000;
 /// Push / witness stack item cap.
 pub const MAX_SCRIPT_ELEMENT_SIZE: usize = 520;
+
+/// Bytes a script push or witness element may hold.
+///
+/// The parser rejects a longer push before this value exists. `find_and_delete`
+/// and `check_minimal_push` take it so a 65_536-byte needle cannot be built.
+#[derive(Clone, Copy)]
+pub struct ScriptElem<'a>(&'a [u8]);
+
+impl<'a> ScriptElem<'a> {
+    pub fn new(data: &'a [u8]) -> Result<Self, ConsensusError> {
+        if data.len() > MAX_SCRIPT_ELEMENT_SIZE {
+            return Err(ConsensusError::Script("push too large".into()));
+        }
+        Ok(Self(data))
+    }
+
+    #[inline]
+    pub fn as_bytes(self) -> &'a [u8] {
+        self.0
+    }
+}
 /// BIP342 `VALIDATION_WEIGHT_OFFSET` / `VALIDATION_WEIGHT_PER_SIGOP_PASSED`.
 #[doc(hidden)]
 pub const TAPSCRIPT_VALIDATION_WEIGHT_OFFSET: i64 = 50;
@@ -169,7 +190,7 @@ pub fn tapscript_has_op_success(script: &Script) -> bool {
 
 pub struct EvalContext<'a> {
     pub tx: &'a Transaction,
-    pub input_index: usize,
+    pub input_index: crate::block::InputIndex,
     pub amount: Amount,
     /// scriptCode for sighash (redeem / witness script).
     pub script_code: &'a Script,
@@ -210,7 +231,7 @@ pub struct EvalContext<'a> {
     /// Legacy midstate. Created on first use (WitnessV0 uses `pre`, tapscript `tapscript`).
     pub cache: RefCell<Option<SighashCache<&'a Transaction>>>,
     /// Structure/lookup midstates (WitnessV0 BIP143).
-    pub pre: Cow<'a, crate::TxPrecompute>,
+    pub pre: Cow<'a, crate::TxScriptPrecompute>,
     /// BIP342 remaining validation weight (`50 + witness serialized size`).
     pub validation_weight_left: Cell<i64>,
     /// Tapscript only: per-input sighash facts from the script-path spend.
@@ -259,7 +280,7 @@ impl<'a> EvalContext<'a> {
             bip65_active,
             bip112_active,
             bip66_active,
-            Cow::Owned(crate::TxPrecompute::from_tx(tx)),
+            Cow::Owned(crate::TxScriptPrecompute::from_tx(tx)),
         )
     }
 
@@ -274,8 +295,9 @@ impl<'a> EvalContext<'a> {
         bip65_active: bool,
         bip112_active: bool,
         bip66_active: bool,
-        pre: Cow<'a, crate::TxPrecompute>,
+        pre: Cow<'a, crate::TxScriptPrecompute>,
     ) -> Self {
+        let input_index = crate::block::InputIndex::in_tx(tx, input_index).expect("input index");
         Self {
             tx,
             input_index,
@@ -297,7 +319,11 @@ impl<'a> EvalContext<'a> {
             codeseparator_script_off: Cell::new(None),
             cache: RefCell::new(None),
             pre,
-            validation_weight_left: Cell::new(tapscript_init_weight(tx, input_index, sig_version)),
+            validation_weight_left: Cell::new(tapscript_init_weight(
+                tx,
+                input_index.get(),
+                sig_version,
+            )),
             tapscript: None,
         }
     }
@@ -332,18 +358,14 @@ impl<'a> EvalContext<'a> {
     pub fn from_job(
         job: &'a crate::block::ScriptCheckJob,
         tx: &'a Transaction,
-        input_index: usize,
+        input_index: crate::block::InputIndex,
         script_code: &'a Script,
         sig_version: SigVersion,
     ) -> Result<Self, ConsensusError> {
-        let amount = if input_index < job.prevouts.len() {
-            job.prevout_amount(input_index)?
-        } else {
-            Amount::ZERO
-        };
+        let amount = job.prevout_amount(input_index)?;
         Ok(Self::from_eval_parts(
             tx,
-            input_index,
+            input_index.get(),
             amount,
             script_code,
             sig_version,
@@ -514,15 +536,13 @@ pub fn eval_script(
             Instruction::PushBytes(b) => {
                 // Core: MAX_SCRIPT_ELEMENT_SIZE even in unexecuted branches.
                 let data = b.as_bytes();
-                if data.len() > MAX_SCRIPT_ELEMENT_SIZE {
-                    return Err(ConsensusError::Script("push too large".into()));
-                }
+                let elem = ScriptElem::new(data)?;
                 // Core MINIMALDATA: CheckMinimalPush only when the push executes
                 // (unexecuted IF branches ignore non-minimal encodings).
                 if executing {
                     if ctx.minimal_data {
                         let opcode = bytes.get(byte_index).copied().unwrap_or(0);
-                        if !check_minimal_push(data, opcode) {
+                        if !check_minimal_push(elem, opcode) {
                             return Err(ConsensusError::Script("MINIMALDATA".into()));
                         }
                     }
@@ -900,7 +920,7 @@ pub fn eval_script(
                         if locktime > tx_lock {
                             return Err(ConsensusError::Script("CLTV".into()));
                         }
-                        if ctx.tx.input[ctx.input_index].sequence.is_final() {
+                        if ctx.tx.input[ctx.input_index.get()].sequence.is_final() {
                             return Err(ConsensusError::Script("CLTV final sequence".into()));
                         }
                     }
@@ -923,7 +943,7 @@ pub fn eval_script(
                         if (ctx.tx.version.0 as u32) < 2 {
                             return Err(ConsensusError::Script("CSV version".into()));
                         }
-                        let seq = ctx.tx.input[ctx.input_index].sequence;
+                        let seq = ctx.tx.input[ctx.input_index.get()].sequence;
                         if !sequence_csv_ok(seq, csv as u32) {
                             return Err(ConsensusError::Script("CSV".into()));
                         }
@@ -1142,7 +1162,7 @@ pub fn op_checkmultisig(
     let script_code: Cow<'_, [u8]> = if ver == PreTapscript::Base {
         let mut sc = original.to_vec();
         for sig in &sigs {
-            sc = find_and_delete(&sc, sig);
+            sc = find_and_delete(&sc, ScriptElem::new(sig)?);
         }
         if ctx.const_scriptcode && sc != original {
             return Err(ConsensusError::Script("SIG_FINDANDDELETE".into()));
@@ -1226,9 +1246,10 @@ pub fn encode_push(out: &mut Vec<u8>, data: &[u8]) {
 ///
 /// Consensus: empty `data` is Core's `CScript() << vchSig` = the push `0x00`,
 /// so an empty signature deletes every OP_0 opcode.
-pub fn find_and_delete(script: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut needle = Vec::with_capacity(data.len() + 5);
-    encode_push(&mut needle, data);
+pub fn find_and_delete(script: &[u8], data: ScriptElem<'_>) -> Vec<u8> {
+    let raw = data.as_bytes();
+    let mut needle = Vec::with_capacity(raw.len() + 5);
+    encode_push(&mut needle, raw);
 
     let mut out = Vec::with_capacity(script.len());
     let mut i = 0usize;
@@ -1361,7 +1382,7 @@ pub fn checksig_legacy(
     let base = script_code_bytes(ctx);
     let deleted: Vec<u8>;
     let script_code: &[u8] = if ver == PreTapscript::Base {
-        deleted = find_and_delete(base, sig);
+        deleted = find_and_delete(base, ScriptElem::new(sig)?);
         if ctx.const_scriptcode && deleted.as_slice() != base {
             return Err(ConsensusError::Script("SIG_FINDANDDELETE".into()));
         }
@@ -1501,7 +1522,7 @@ pub fn sighash_for_script(
             let mut slot = ctx.cache.borrow_mut();
             let cache = slot.get_or_insert_with(|| SighashCache::new(ctx.tx));
             let h = cache
-                .legacy_signature_hash(ctx.input_index, script_code, ty_raw)
+                .legacy_signature_hash(ctx.input_index.get(), script_code, ty_raw)
                 .map_err(|_| ConsensusError::Script("legacy sighash".into()))?;
             Ok(h.to_byte_array())
         }
@@ -1565,7 +1586,8 @@ pub fn bool_encode(b: bool) -> Vec<u8> {
 
 /// Data must use the shortest opcode form.
 #[doc(hidden)]
-pub fn check_minimal_push(data: &[u8], opcode: u8) -> bool {
+pub fn check_minimal_push(data: ScriptElem<'_>, opcode: u8) -> bool {
+    let data = data.as_bytes();
     if data.is_empty() {
         return opcode == 0x00;
     }
@@ -1581,10 +1603,8 @@ pub fn check_minimal_push(data: &[u8], opcode: u8) -> bool {
     if data.len() <= 255 {
         return opcode == 0x4c;
     }
-    if data.len() <= 65535 {
-        return opcode == 0x4d;
-    }
-    true
+    // 256..=520. PUSHDATA4 cannot be minimal: the element type stops at 520.
+    opcode == 0x4d
 }
 
 #[doc(hidden)]

@@ -29,17 +29,17 @@ use crate::error::ConsensusError;
 /// When `!job.witness_active`, always `None` (pre-segwit: redeem is ordinary Base script).
 pub fn try_p2sh_nested_segwit(
     job: &ScriptCheckJob,
-    input_index: usize,
+    input_index: crate::block::InputIndex,
     tx: &Transaction,
     _cache: &mut SighashCache<&Transaction>,
-    pre: &crate::TxPrecompute,
+    pre: &crate::TxScriptPrecompute,
     items: &[Vec<u8>],
 ) -> Option<Result<(), ConsensusError>> {
     if !job.witness_active {
         return None;
     }
 
-    let script_sig = &tx.input[input_index].script_sig;
+    let script_sig = &tx.input[input_index.get()].script_sig;
     if items.is_empty() {
         return None;
     }
@@ -92,7 +92,7 @@ pub fn try_p2sh_nested_segwit(
 /// Legacy P2SH: scriptSig is `<…data pushes…> <redeemScript>`; evaluate redeem.
 pub fn verify_p2sh_legacy(
     job: &ScriptCheckJob,
-    input_index: usize,
+    input_index: crate::block::InputIndex,
     tx: &Transaction,
     mut stack: Vec<Vec<u8>>,
 ) -> Result<(), ConsensusError> {
@@ -117,10 +117,10 @@ pub fn verify_p2sh_legacy(
 
 pub fn p2sh_script_sig_stack(
     job: &ScriptCheckJob,
-    input_index: usize,
+    input_index: crate::block::InputIndex,
     tx: &Transaction,
 ) -> Result<Vec<Vec<u8>>, ConsensusError> {
-    let script_sig = tx.input[input_index].script_sig.as_script();
+    let script_sig = tx.input[input_index.get()].script_sig.as_script();
     let ctx = EvalContext::from_job(job, tx, input_index, script_sig, SigVersion::Base)?;
     let mut stack = Vec::new();
     let _ = interpreter::eval_script(script_sig, &mut stack, &ctx)?;

@@ -3142,7 +3142,7 @@ fn one_shot_load_matches_stamp_then_load_from_plan() {
         for (ja, jb) in a.jobs.iter().zip(b.jobs.iter()) {
             assert_eq!(ja.txid, jb.txid);
             assert_eq!(ja.prevouts.len(), jb.prevouts.len());
-            for i in 0..ja.prevouts.len() {
+            for i in ja.inputs() {
                 let (va, sa) = ja.prevout_parts(i).expect("prevout a");
                 let (vb, sb) = jb.prevout_parts(i).expect("prevout b");
                 assert_eq!(va, vb, "prevout amount");

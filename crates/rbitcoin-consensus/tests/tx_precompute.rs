@@ -53,20 +53,20 @@ fn assert_matches_rust_bitcoin(tx: &Transaction) {
     assert_eq!(p.weight_wu(), tx.weight().to_wu(), "weight");
     assert_eq!(p.sigops, oracle_sigops(tx), "sigops");
     assert_eq!(
-        p.sha_prevouts,
+        p.sha_prevouts(),
         Some(oracle_sha_prevouts(tx)),
         "sha_prevouts"
     );
     assert_eq!(
-        p.sha_sequences,
+        p.sha_sequences(),
         Some(oracle_sha_sequences(tx)),
         "sha_sequences"
     );
-    assert_eq!(p.sha_outputs, Some(oracle_sha_outputs(tx)), "sha_outputs");
+    assert_eq!(p.sha_outputs(), Some(oracle_sha_outputs(tx)), "sha_outputs");
     assert_eq!(
         p.hash_prevouts(),
         Some(
-            sha256::Hash::from_byte_array(p.sha_prevouts.unwrap())
+            sha256::Hash::from_byte_array(p.sha_prevouts().unwrap())
                 .hash_again()
                 .to_byte_array()
         )
@@ -84,9 +84,9 @@ fn assert_connect_matches_ids(tx: &Transaction) {
     assert_eq!(c.sigops, full.sigops, "sigops");
     assert_eq!(c.out_sum, full.out_sum, "out_sum");
     assert_eq!(c.has_witness, full.has_witness, "has_witness");
-    assert_eq!(c.sha_prevouts, None);
-    assert_eq!(c.sha_sequences, None);
-    assert_eq!(c.sha_outputs, None);
+    assert_eq!(c.sha_prevouts(), None);
+    assert_eq!(c.sha_sequences(), None);
+    assert_eq!(c.sha_outputs(), None);
     assert_eq!(c.hash_prevouts(), None);
     assert_eq!(c.hash_sequence(), None);
     assert_eq!(c.hash_outputs(), None);
@@ -225,11 +225,11 @@ fn assert_wire_matches_from_tx(tx: &Transaction) {
     assert_eq!(w.sigops, full.sigops, "sigops");
     assert_eq!(w.out_sum, full.out_sum, "out_sum");
     assert_eq!(w.has_witness, full.has_witness, "has_witness");
-    assert_eq!(w.sha_prevouts, full.sha_prevouts);
+    assert_eq!(w.sha_prevouts(), full.sha_prevouts());
     let c = TxPrecompute::from_tx_wire(tx, &raw, false).expect("spans");
     assert_eq!(c.txid, full.txid);
     assert_eq!(c.wtxid, full.wtxid);
-    assert_eq!(c.sha_prevouts, None);
+    assert_eq!(c.sha_prevouts(), None);
     if !c.has_witness {
         assert_eq!(c.txid, c.wtxid, "legacy wtxid == txid");
     }
@@ -275,9 +275,9 @@ fn sighash_midstates_come_from_wire_spans() {
     assert_eq!(mids[1], Some(oracle_sha_sequences(&tx)));
     assert_eq!(mids[2], Some(oracle_sha_outputs(&tx)));
     let w = TxPrecompute::from_tx_wire(&tx, &raw, true).expect("wire");
-    assert_eq!(w.sha_prevouts, mids[0]);
-    assert_eq!(w.sha_sequences, mids[1]);
-    assert_eq!(w.sha_outputs, mids[2]);
+    assert_eq!(w.sha_prevouts(), mids[0]);
+    assert_eq!(w.sha_sequences(), mids[1]);
+    assert_eq!(w.sha_outputs(), mids[2]);
     let mut prevouts = Vec::new();
     let mut sequences = Vec::new();
     for input in &tx.input {
@@ -292,32 +292,33 @@ fn sighash_midstates_come_from_wire_spans() {
         output.consensus_encode(&mut outputs).unwrap();
     }
     assert_eq!(
-        w.sha_prevouts.unwrap(),
+        w.sha_prevouts().unwrap(),
         sha256::Hash::hash(&prevouts).to_byte_array()
     );
     assert_eq!(
         w.hash_prevouts().unwrap(),
         sha256d::Hash::hash(&prevouts).to_byte_array()
     );
-    assert_eq!(w.hash_prevouts(), w.prevouts_d.get().copied());
+    let script = w.as_script().expect("wire sighash");
+    assert_eq!(w.hash_prevouts(), script.prevouts_d.get().copied());
     assert_eq!(
-        w.sha_sequences.unwrap(),
+        w.sha_sequences().unwrap(),
         sha256::Hash::hash(&sequences).to_byte_array()
     );
     assert_eq!(
         w.hash_sequence().unwrap(),
         sha256d::Hash::hash(&sequences).to_byte_array()
     );
-    assert_eq!(w.hash_sequence(), w.sequences_d.get().copied());
+    assert_eq!(w.hash_sequence(), script.sequences_d.get().copied());
     assert_eq!(
-        w.sha_outputs.unwrap(),
+        w.sha_outputs().unwrap(),
         sha256::Hash::hash(&outputs).to_byte_array()
     );
     assert_eq!(
         w.hash_outputs().unwrap(),
         sha256d::Hash::hash(&outputs).to_byte_array()
     );
-    assert_eq!(w.hash_outputs(), w.outputs_d.get().copied());
+    assert_eq!(w.hash_outputs(), script.outputs_d.get().copied());
 }
 
 #[test]
@@ -404,7 +405,7 @@ fn decode_block_precomputes_hashes_payload_slices() {
     let want = TxPrecompute::from_tx_connect(&genesis.txdata[0]);
     assert_eq!(pres[0].txid, want.txid);
     assert_eq!(pres[0].wtxid, want.wtxid);
-    assert_eq!(pres[0].sha_prevouts, None);
+    assert_eq!(pres[0].sha_prevouts(), None);
 }
 
 /// Queue-depth bytes are header + tx-count + each pres wire length.
@@ -436,11 +437,12 @@ fn pres_for_tip_connects_live_and_hashes_the_rest() {
     assert_eq!(pres.len(), 2);
     assert_eq!(pres[0].txid, live_id);
     assert_eq!(
-        pres[0].sha_prevouts, None,
+        pres[0].sha_prevouts(),
+        None,
         "live tx must skip sighash midstates"
     );
     assert_eq!(
-        pres[1].sha_prevouts,
+        pres[1].sha_prevouts(),
         Some(oracle_sha_prevouts(&other)),
         "non-live must keep midstates"
     );
@@ -455,23 +457,21 @@ fn pres_for_tip_empty_live_set_uses_from_tx() {
         panic!("empty live-set must not probe")
     });
     assert!(skip.is_empty());
-    assert_eq!(pres[0].sha_prevouts, Some(oracle_sha_prevouts(&tx)));
+    assert_eq!(pres[0].sha_prevouts(), Some(oracle_sha_prevouts(&tx)));
 }
 
 #[test]
-fn fill_sighash_midstates_matches_from_tx() {
+fn from_connect_midstates_match_from_tx() {
     let tx = p2wpkh_like();
-    let mut c = TxPrecompute::from_tx_connect(&tx);
-    assert!(c.sha_prevouts.is_none());
-    c.fill_sighash_midstates(&tx);
-    let full = TxPrecompute::from_tx(&tx);
-    assert_eq!(c.txid, full.txid);
-    assert_eq!(c.wtxid, full.wtxid);
-    assert_eq!(c.sha_prevouts, full.sha_prevouts);
-    assert_eq!(c.sha_sequences, full.sha_sequences);
-    assert_eq!(c.sha_outputs, full.sha_outputs);
-    c.fill_sighash_midstates(&tx);
-    assert_eq!(c.sha_prevouts, full.sha_prevouts);
+    let c = TxPrecompute::from_tx_connect(&tx);
+    assert!(c.sha_prevouts().is_none());
+    let filled = TxScriptPrecompute::from_connect(c.into_connect(), &tx);
+    let full = TxScriptPrecompute::from_tx(&tx);
+    assert_eq!(filled.txid, full.txid);
+    assert_eq!(filled.wtxid, full.wtxid);
+    assert_eq!(filled.sha_prevouts, full.sha_prevouts);
+    assert_eq!(filled.sha_sequences, full.sha_sequences);
+    assert_eq!(filled.sha_outputs, full.sha_outputs);
 }
 
 #[test]
@@ -490,11 +490,11 @@ fn tx_precompute_finish_spent_matches_amount_spk_walk() {
     prev.value.consensus_encode(&mut ea).unwrap();
     prev.script_pubkey.consensus_encode(&mut es).unwrap();
     assert_eq!(
-        p.sha_amounts,
+        p.sha_amounts(),
         Some(sha256::Hash::from_engine(ea).to_byte_array())
     );
     assert_eq!(
-        p.sha_scriptpubkeys,
+        p.sha_scriptpubkeys(),
         Some(sha256::Hash::from_engine(es).to_byte_array())
     );
 }

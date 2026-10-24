@@ -11,7 +11,7 @@ use crate::error::ConsensusError;
 
 pub fn verify(
     job: &ScriptCheckJob,
-    input_index: usize,
+    input_index: crate::block::InputIndex,
     tx: &Transaction,
     cache: &mut SighashCache<&Transaction>,
 ) -> Result<(), ConsensusError> {
@@ -20,7 +20,7 @@ pub fn verify(
     debug_assert!(spk.len() == 25);
     let keyhash = &spk[3..23];
 
-    let input = &tx.input[input_index];
+    let input = &tx.input[input_index.get()];
     let (sig_raw, pubkey_raw) = parse_two_pushes(input.script_sig.as_script())?;
 
     let pk_hash = crypto::hash160(&pubkey_raw);
@@ -34,7 +34,7 @@ pub fn verify(
     let script_code = Script::from_bytes(job.prevout_script(input_index)?);
     // Raw hashtype byte (may be 0 — must not normalize to SIGHASH_ALL).
     let sighash = cache
-        .legacy_signature_hash(input_index, script_code, sighash_ty)
+        .legacy_signature_hash(input_index.get(), script_code, sighash_ty)
         .map_err(|_| ConsensusError::Script("p2pkh sighash".into()))?;
     if crypto::verify_ecdsa(sighash.to_byte_array(), &sig, &pubkey) {
         Ok(())

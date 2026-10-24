@@ -328,7 +328,7 @@ pub fn block_has_witness(block: &Block) -> bool {
         .any(|tx| tx.input.iter().any(|i| !i.witness.is_empty()))
 }
 
-/// Same as [`block_has_witness`] from [`TxPrecompute::has_witness`] (no second walk).
+/// Same as [`block_has_witness`] from each row's `has_witness` flag (no second walk).
 #[inline]
 pub fn block_has_witness_from_pres(pres: &[TxPrecompute]) -> bool {
     pres.iter().any(|p| p.has_witness)
@@ -908,11 +908,36 @@ impl JobPrevouts {
     }
 }
 
+/// Input index yielded by [`ScriptCheckJob::inputs`].
+///
+/// Only a job builds this. A bare `usize` cannot name an input the transaction
+/// does not have.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct InputIndex(u32);
+
+impl InputIndex {
+    #[inline]
+    pub fn get(self) -> usize {
+        self.0 as usize
+    }
+
+    /// Index `i` of `tx`. Out of range is a caller bug, not a script result.
+    #[inline]
+    pub(crate) fn in_tx(tx: &Transaction, i: usize) -> Result<Self, ConsensusError> {
+        if i >= tx.input.len() {
+            return Err(ConsensusError::Script("input index".into()));
+        }
+        Ok(Self(i as u32))
+    }
+}
+
 /// Script-verify job for one non-coinbase create.
 ///
 /// Confirm assemble attaches the wire [`Arc<Block>`] (no tx deep-clone). `txid`
 /// is the structure/plan hash so scripts can probe mempool preverified without
-/// re-hashing.
+/// re-hashing. Prevouts and inputs have the same length; build with
+/// [`ScriptCheckJob::try_new`] or [`ScriptCheckJob::try_from_parts`].
+#[non_exhaustive]
 pub struct ScriptCheckJob {
     /// Wire txid (assemble / [`Self::new`]); used for mempool preverified skip.
     pub txid: [u8; 32],
@@ -947,15 +972,25 @@ pub enum JobPre {
 }
 
 impl ScriptCheckJob {
+    /// One index per input. Empty when `vin` is empty.
+    #[inline]
+    pub fn inputs(&self) -> impl Iterator<Item = InputIndex> {
+        let n = self.tx.input.len() as u32;
+        (0..n).map(InputIndex)
+    }
+
     /// Build a job hashing `tx` once for [`Self::txid`] (tests / detached verify).
+    ///
+    /// Panics when `prevouts.len() != tx.input.len()`. Callers that must surface
+    /// that as [`ConsensusError::Script`] use [`Self::try_new`].
     #[inline]
     pub fn new(prevouts: Vec<TxOut>, tx: Transaction, flags: ScriptVerifyFlags) -> Self {
-        use bitcoin::hashes::Hash;
-        let txid = tx.compute_txid().to_byte_array();
-        Self::with_txid(txid, prevouts, tx, flags)
+        Self::try_new(prevouts, tx, flags).expect("prevout count")
     }
 
     /// Owned-tx path (tests / benches / unit connect): reuse precomputed txid.
+    ///
+    /// Panics when `prevouts.len() != tx.input.len()`.
     #[inline]
     pub fn with_txid(
         txid: [u8; 32],
@@ -963,12 +998,57 @@ impl ScriptCheckJob {
         tx: Transaction,
         flags: ScriptVerifyFlags,
     ) -> Self {
-        Self::from_parts(txid, JobPrevouts::owned(prevouts), JobTx::owned(tx), flags)
+        Self::try_with_txid(txid, prevouts, tx, flags).expect("prevout count")
     }
 
-    /// Single construction site for activation + production standardness defaults.
+    /// Build a job hashing `tx` once for [`Self::txid`] (tests / detached verify).
     #[inline]
-    pub fn from_parts(
+    pub fn try_new(
+        prevouts: Vec<TxOut>,
+        tx: Transaction,
+        flags: ScriptVerifyFlags,
+    ) -> Result<Self, ConsensusError> {
+        use bitcoin::hashes::Hash;
+        let txid = tx.compute_txid().to_byte_array();
+        Self::try_with_txid(txid, prevouts, tx, flags)
+    }
+
+    /// Owned-tx path (tests / benches / unit connect): reuse precomputed txid.
+    #[inline]
+    pub fn try_with_txid(
+        txid: [u8; 32],
+        prevouts: Vec<TxOut>,
+        tx: Transaction,
+        flags: ScriptVerifyFlags,
+    ) -> Result<Self, ConsensusError> {
+        Self::try_from_parts(txid, JobPrevouts::owned(prevouts), JobTx::owned(tx), flags)
+    }
+
+    /// Rejects a prevout list whose length is not `vin`.
+    #[inline]
+    pub fn try_from_parts(
+        txid: [u8; 32],
+        prevouts: JobPrevouts,
+        tx: JobTx,
+        flags: ScriptVerifyFlags,
+    ) -> Result<Self, ConsensusError> {
+        if prevouts.len() != tx.input.len() {
+            return Err(ConsensusError::Script("prevout count".into()));
+        }
+        if let JobPrevouts::Shared(slots) = &prevouts {
+            for slot in slots {
+                if let SharedPrevout::Wire { tx_index, vout } = slot {
+                    if tx.output_at(*tx_index, *vout).is_none() {
+                        return Err(ConsensusError::MissingPrevout);
+                    }
+                }
+            }
+        }
+        Ok(Self::from_parts(txid, prevouts, tx, flags))
+    }
+
+    #[inline]
+    fn from_parts(
         txid: [u8; 32],
         prevouts: JobPrevouts,
         tx: JobTx,
@@ -999,23 +1079,24 @@ impl ScriptCheckJob {
 
     /// Amount and script bytes for input `i`.
     ///
-    /// Shared wire prevouts read the job's block. Pinned prevouts read the outs
-    /// `Arc`. A missing vout is `Corrupt`, not an empty script.
-    pub fn prevout_parts(&self, i: usize) -> Result<(u64, &[u8]), ConsensusError> {
+    /// Shared wire prevouts read the job's block. A wire slot past `n_out` is
+    /// [`ConsensusError::MissingPrevout`] from [`Self::try_from_parts`]. Pinned
+    /// prevouts read the outs `Arc`.
+    pub fn prevout_parts(&self, i: InputIndex) -> Result<(u64, &[u8]), ConsensusError> {
+        let i = i.get();
         match &self.prevouts {
             JobPrevouts::Owned(v) => {
-                let o = v
-                    .get(i)
-                    .ok_or(ConsensusError::Internal("invariant: prevout index"))?;
+                let o = &v[i];
                 Ok((o.value.to_sat(), o.script_pubkey.as_bytes()))
             }
             JobPrevouts::Shared(v) => {
-                let slot = v
-                    .get(i)
-                    .ok_or(ConsensusError::Internal("invariant: prevout index"))?;
+                let slot = &v[i];
                 match slot {
                     SharedPrevout::Wire { tx_index, vout } => {
-                        let o = self.wire_output(*tx_index, *vout)?;
+                        let o = self
+                            .tx
+                            .output_at(*tx_index, *vout)
+                            .expect("wire prevout resolved when the job was built");
                         Ok((o.value.to_sat(), o.script_pubkey.as_bytes()))
                     }
                     SharedPrevout::Pinned { outs, vout } => outs
@@ -1026,30 +1107,25 @@ impl ScriptCheckJob {
         }
     }
 
-    #[doc(hidden)]
-    pub fn wire_output(&self, tx_index: u32, vout: u32) -> Result<&TxOut, ConsensusError> {
-        self.tx
-            .output_at(tx_index, vout)
-            .ok_or(ConsensusError::Internal("invariant: wire prevout"))
-    }
-
     #[inline]
-    pub fn prevout_script(&self, i: usize) -> Result<&[u8], ConsensusError> {
+    pub fn prevout_script(&self, i: InputIndex) -> Result<&[u8], ConsensusError> {
         self.prevout_parts(i).map(|(_, script)| script)
     }
 
     #[inline]
-    pub fn prevout_amount(&self, i: usize) -> Result<Amount, ConsensusError> {
+    pub fn prevout_amount(&self, i: InputIndex) -> Result<Amount, ConsensusError> {
         self.prevout_parts(i)
             .map(|(value, _)| Amount::from_sat(value))
     }
 
     #[inline]
-    pub fn pre(&self) -> &crate::TxPrecompute {
-        match self.job_pre() {
+    pub fn pre(&self) -> &crate::TxScriptPrecompute {
+        let row = match self.job_pre() {
             JobPre::Owned(a) => a.as_ref(),
             JobPre::Slice { slice, idx } => &slice[*idx],
-        }
+        };
+        row.as_script()
+            .expect("script verify uses a precompute that has midstates")
     }
 }
 
@@ -1179,16 +1255,14 @@ pub fn reject_one_create(
 #[doc(hidden)]
 pub fn job_needs_script_check(job: &ScriptCheckJob) -> bool {
     let tx: &bitcoin::Transaction = &job.tx;
-    for i in 0..job.prevouts.len() {
+    for i in job.inputs() {
         let Ok(spk) = job.prevout_script(i) else {
             return true;
         };
         if !is_anyone_can_spend(Script::from_bytes(spk)) {
             return true;
         }
-        let Some(vin) = tx.input.get(i) else {
-            return true;
-        };
+        let vin = &tx.input[i.get()];
         if !vin.script_sig.is_empty() || !vin.witness.is_empty() {
             return true;
         }

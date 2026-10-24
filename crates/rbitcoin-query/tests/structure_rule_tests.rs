@@ -182,22 +182,29 @@ fn script_jobs_from_same_pres_slice_share_pre() {
     let spend = non_coinbase_spend(1);
     let pres: std::sync::Arc<[TxPrecompute]> =
         std::sync::Arc::from([TxPrecompute::from_tx(&spend)]);
+    let prevouts = vec![
+        bitcoin::TxOut {
+            value: bitcoin::Amount::ZERO,
+            script_pubkey: bitcoin::ScriptBuf::new(),
+        };
+        spend.input.len()
+    ];
     let job_a = ScriptCheckJob::with_txid(
         pres[0].txid,
-        vec![],
+        prevouts.clone(),
         spend.clone(),
         ScriptVerifyFlags::buried(true, true, true, true, true),
     )
     .with_pre_slice(std::sync::Arc::clone(&pres), 0);
     let job_b = ScriptCheckJob::with_txid(
         pres[0].txid,
-        vec![],
+        prevouts,
         spend,
         ScriptVerifyFlags::buried(true, true, true, true, true),
     )
     .with_pre_slice(std::sync::Arc::clone(&pres), 0);
     assert!(
-        std::ptr::eq(job_a.pre(), &pres[0]),
+        std::ptr::eq(job_a.pre(), pres[0].as_script().expect("script precompute")),
         "job pre must be the slice element, not a cloned TxPrecompute"
     );
     assert!(
@@ -1460,14 +1467,22 @@ fn script_job_shares_prevout_script() {
     )
     .expect("assemble shared prevouts");
     assert_eq!(jobs.len(), 2);
-    let hist = jobs[0].prevout_script(0).expect("historical script");
+    let hist = {
+        let i = jobs[0].inputs().next().unwrap();
+        jobs[0].prevout_script(i)
+    }
+    .expect("historical script");
     assert_eq!(hist, hist_script.as_slice());
     assert_eq!(
         hist.as_ptr(),
         pin_ptr,
         "historical prevout script is the pin allocation"
     );
-    let same = jobs[1].prevout_script(0).expect("same-block script");
+    let same = {
+        let i = jobs[1].inputs().next().unwrap();
+        jobs[1].prevout_script(i)
+    }
+    .expect("same-block script");
     assert_eq!(same, wire.txdata[1].output[0].script_pubkey.as_bytes());
     assert_eq!(
         same.as_ptr(),
@@ -3041,7 +3056,7 @@ fn script_job_shared_tx_is_wire_pointer() {
     };
     let block = Arc::new(block_with(vec![coinbase(1), spend]));
     let tid = block.txdata[1].compute_txid().to_byte_array();
-    let job = ScriptCheckJob::from_parts(
+    let job = ScriptCheckJob::try_from_parts(
         tid,
         rbitcoin_consensus::block::JobPrevouts::owned(vec![TxOut {
             value: Amount::from_sat(50_0000_0000),
@@ -3049,7 +3064,8 @@ fn script_job_shared_tx_is_wire_pointer() {
         }]),
         rbitcoin_consensus::block::JobTx::shared(Arc::clone(&block), 1),
         ScriptVerifyFlags::buried(true, true, true, true, true),
-    );
+    )
+    .expect("prevouts");
     assert!(std::ptr::eq(
         &*job.tx as *const Transaction,
         &block.txdata[1] as *const Transaction

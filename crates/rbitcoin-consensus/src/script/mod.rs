@@ -43,21 +43,16 @@ pub use classify::is_anyone_can_spend;
 pub fn verify_job_all_inputs(job: &ScriptCheckJob) -> Result<(), ConsensusError> {
     // JobTx may be shared wire Arc — always take &Transaction (not &JobTx).
     let tx: &Transaction = &job.tx;
-    let n = job.prevouts.len();
-    if n != tx.input.len() {
-        return Err(ConsensusError::Script("prevout count".into()));
-    }
-    if n == 0 {
+    let mut inputs = job.inputs();
+    let Some(first) = inputs.next() else {
         return Ok(());
-    }
+    };
     let mut cache = None;
     let pre = job.pre();
     let tap_spent = crypto::TapSpentHashes::default();
-    if n == 1 {
-        return verify_input(job, 0, tx, &mut cache, pre, &tap_spent)
-            .map_err(|e| annotate_script_err(e, job, 0));
-    }
-    for ii in 0..n {
+    verify_input(job, first, tx, &mut cache, pre, &tap_spent)
+        .map_err(|e| annotate_script_err(e, job, first))?;
+    for ii in inputs {
         verify_input(job, ii, tx, &mut cache, pre, &tap_spent)
             .map_err(|e| annotate_script_err(e, job, ii))?;
     }
@@ -69,7 +64,7 @@ pub fn verify_job_all_inputs(job: &ScriptCheckJob) -> Result<(), ConsensusError>
 pub fn annotate_script_err(
     err: ConsensusError,
     job: &ScriptCheckJob,
-    input_index: usize,
+    input_index: crate::block::InputIndex,
 ) -> ConsensusError {
     match err {
         ConsensusError::Script(msg) if !msg.contains("txid=") => {
@@ -78,7 +73,7 @@ pub fn annotate_script_err(
             } else {
                 job.tx.compute_txid()
             };
-            ConsensusError::Script(format!("{msg} txid={txid} vin={input_index}"))
+            ConsensusError::Script(format!("{msg} txid={txid} vin={}", input_index.get()))
         }
         other => other,
     }
@@ -102,17 +97,14 @@ pub fn sighash_cache<'a, 't>(
 
 pub fn verify_input<'a>(
     job: &ScriptCheckJob,
-    input_index: usize,
+    input_index: crate::block::InputIndex,
     tx: &'a Transaction,
     cache: &mut Option<bitcoin::sighash::SighashCache<&'a Transaction>>,
-    pre: &crate::TxPrecompute,
+    pre: &crate::TxScriptPrecompute,
     tap_spent: &crypto::TapSpentHashes,
 ) -> Result<(), ConsensusError> {
-    if input_index >= job.prevouts.len() || input_index >= tx.input.len() {
-        return Err(ConsensusError::Script("input index".into()));
-    }
     let spk = bitcoin::script::Script::from_bytes(job.prevout_script(input_index)?);
-    let input = &tx.input[input_index];
+    let input = &tx.input[input_index.get()];
     let has_witness = !input.witness.is_empty();
 
     if job.witness_active {
@@ -183,14 +175,14 @@ pub const PAY_TO_ANCHOR_PROGRAM: [u8; 2] = [0x4e, 0x73];
 #[doc(hidden)]
 pub fn verify_native_witness(
     job: &ScriptCheckJob,
-    input_index: usize,
+    input_index: crate::block::InputIndex,
     tx: &Transaction,
-    pre: &crate::TxPrecompute,
+    pre: &crate::TxScriptPrecompute,
     tap_spent: &crypto::TapSpentHashes,
     version: u8,
     program: &[u8],
 ) -> Result<(), ConsensusError> {
-    if !tx.input[input_index].script_sig.is_empty() {
+    if !tx.input[input_index.get()].script_sig.is_empty() {
         return Err(ConsensusError::Script("WITNESS_MALLEATED".into()));
     }
     // Core runs the scriptPubKey first. A false program is EVAL_FALSE for every
@@ -246,7 +238,7 @@ pub fn p2pkh_scriptsig_shape_error(err: &ConsensusError) -> bool {
 #[doc(hidden)]
 pub fn verify_bare(
     job: &ScriptCheckJob,
-    input_index: usize,
+    input_index: crate::block::InputIndex,
     tx: &Transaction,
 ) -> Result<(), ConsensusError> {
     // Fully run scriptSig, then scriptPubKey, sharing one stack. scriptSig is
@@ -254,7 +246,7 @@ pub fn verify_bare(
     // only). Mainnet block 163685 has bare spends whose scriptSig runs
     // `OP_CODESEPARATOR` + `OP_CHECKMULTISIG` (sig left of codesep; pubkey script
     // after), then a pre-BIP65 `OP_NOP2`/`CLTV`+`DROP` scriptPubKey.
-    let input = &tx.input[input_index];
+    let input = &tx.input[input_index.get()];
     let mut stack: Vec<Vec<u8>> = Vec::new();
     let ss = input.script_sig.as_script();
     if !ss.as_bytes().is_empty() {
@@ -428,10 +420,6 @@ pub mod crypto {
         matches!(pk.first(), Some(0x02 | 0x03)) && pk.len() == 33
     }
 
-    fn sighash_midstate(h: Option<[u8; 32]>) -> Result<[u8; 32], ConsensusError> {
-        h.ok_or_else(|| ConsensusError::Script("invariant: sighash midstate missing".into()))
-    }
-
     /// BIP143 signature hash with **raw** `nHashType` (last byte of the sig push).
     ///
     /// `script_code` is the BIP143 scriptCode (for P2WPKH: the
@@ -439,19 +427,16 @@ pub mod crypto {
     /// P2WSH: the witness script).
     pub fn bip143_signature_hash(
         tx: &bitcoin::Transaction,
-        input_index: usize,
+        input_index: crate::block::InputIndex,
         script_code: &bitcoin::Script,
         amount: bitcoin::Amount,
         raw_ty: u32,
-        pre: &crate::TxPrecompute,
+        pre: &crate::TxScriptPrecompute,
     ) -> Result<[u8; 32], ConsensusError> {
         use bitcoin::consensus::Encodable;
         use bitcoin::hashes::{sha256d, Hash, HashEngine};
         use bitcoin::sighash::EcdsaSighashType;
 
-        if input_index >= tx.input.len() {
-            return Err(ConsensusError::Script("bip143 input index".into()));
-        }
         use EcdsaSighashType::*;
         let mapped = EcdsaSighashType::from_consensus(raw_ty);
         // `split_anyonecanpay_flag` is crate-private in rust-bitcoin 0.32.
@@ -467,22 +452,22 @@ pub mod crypto {
         let zero = [0u8; 32];
 
         let hash_prevouts: [u8; 32] = if !anyone_can_pay {
-            sighash_midstate(pre.hash_prevouts())?
+            pre.hash_prevouts()
         } else {
             zero
         };
 
         let hash_sequence: [u8; 32] = if !anyone_can_pay && base != Single && base != None {
-            sighash_midstate(pre.hash_sequence())?
+            pre.hash_sequence()
         } else {
             zero
         };
 
         let hash_outputs: [u8; 32] = if base != Single && base != None {
-            sighash_midstate(pre.hash_outputs())?
-        } else if base == Single && input_index < tx.output.len() {
+            pre.hash_outputs()
+        } else if base == Single && input_index.get() < tx.output.len() {
             let mut eng = sha256d::Hash::engine();
-            tx.output[input_index]
+            tx.output[input_index.get()]
                 .consensus_encode(&mut eng)
                 .map_err(|_| ConsensusError::Script("bip143 single output".into()))?;
             sha256d::Hash::from_engine(eng).to_byte_array()
@@ -497,7 +482,7 @@ pub mod crypto {
         eng.input(&hash_prevouts);
         eng.input(&hash_sequence);
         {
-            let txin = &tx.input[input_index];
+            let txin = &tx.input[input_index.get()];
             txin.previous_output
                 .consensus_encode(&mut eng)
                 .map_err(|_| ConsensusError::Script("bip143 outpoint".into()))?;
@@ -528,11 +513,11 @@ pub mod crypto {
     /// raw types (e.g. mainnet `0x65`) need our raw-uint32 encoder.
     pub fn bip143_p2wpkh_signature_hash(
         tx: &bitcoin::Transaction,
-        input_index: usize,
+        input_index: crate::block::InputIndex,
         script_pubkey: &bitcoin::Script,
         amount: bitcoin::Amount,
         raw_ty: u32,
-        pre: &crate::TxPrecompute,
+        pre: &crate::TxScriptPrecompute,
     ) -> Result<[u8; 32], ConsensusError> {
         let script_code = script_pubkey
             .p2wpkh_script_code()
@@ -550,11 +535,11 @@ pub mod crypto {
     /// P2WSH / WitnessV0 BIP143 using [`crate::TxPrecompute`] midstates.
     pub fn bip143_p2wsh_signature_hash(
         tx: &bitcoin::Transaction,
-        input_index: usize,
+        input_index: crate::block::InputIndex,
         witness_script: &bitcoin::Script,
         amount: bitcoin::Amount,
         raw_ty: u32,
-        pre: &crate::TxPrecompute,
+        pre: &crate::TxScriptPrecompute,
     ) -> Result<[u8; 32], ConsensusError> {
         bip143_signature_hash(tx, input_index, witness_script, amount, raw_ty, pre)
     }
@@ -578,8 +563,9 @@ pub mod crypto {
             }
             let mut failed: Option<ConsensusError> = None;
             let mut spent = job.pre().clone();
-            let n = job.prevouts.len();
-            let ok = spent.finish_spent_parts(n, |i| match job.prevout_parts(i) {
+            let inputs: Vec<_> = job.inputs().collect();
+            let n = inputs.len();
+            let ok = spent.finish_spent_parts(n, |i| match job.prevout_parts(inputs[i]) {
                 Ok((value, script)) => Some((value as i64, script)),
                 Err(e) => {
                     failed = Some(e);
@@ -593,8 +579,8 @@ pub mod crypto {
                 );
             }
             let hashes = [
-                sighash_midstate(spent.sha_amounts)?,
-                sighash_midstate(spent.sha_scriptpubkeys)?,
+                spent.sha_amounts.expect("finish_spent set amounts"),
+                spent.sha_scriptpubkeys.expect("finish_spent set scripts"),
             ];
             Ok(*self.0.get_or_init(|| hashes))
         }
@@ -620,7 +606,7 @@ pub mod crypto {
     /// Prevout scripts are borrowed from `job`. This does not allocate `TxOut`.
     pub fn tap_signature_hash(
         job: &crate::block::ScriptCheckJob,
-        input_index: usize,
+        input_index: crate::block::InputIndex,
         hash_type: bitcoin::sighash::TapSighashType,
         spent: &TapSpentHashes,
         annex_hash: Option<[u8; 32]>,
@@ -637,12 +623,7 @@ pub mod crypto {
         const KEY_VERSION: u8 = 0;
 
         let tx = &*job.tx;
-        let Some(txin) = tx.input.get(input_index) else {
-            return Err(ConsensusError::Script("tapscript sighash input".into()));
-        };
-        if job.prevouts.len() != tx.input.len() {
-            return Err(ConsensusError::Script("tapscript sighash prevouts".into()));
-        }
+        let txin = &tx.input[input_index.get()];
         let pre = job.pre();
         let hash_type = hash_type as u8;
         let output_type = match hash_type {
@@ -662,13 +643,13 @@ pub mod crypto {
             .expect("hash engines do not error");
         if !anyone_can_pay {
             let [sha_amounts, sha_scriptpubkeys] = spent.get(job)?;
-            eng.input(&sighash_midstate(pre.sha_prevouts)?);
+            eng.input(&pre.sha_prevouts);
             eng.input(&sha_amounts);
             eng.input(&sha_scriptpubkeys);
-            eng.input(&sighash_midstate(pre.sha_sequences)?);
+            eng.input(&pre.sha_sequences);
         }
         if output_type == SIGHASH_ALL {
-            eng.input(&sighash_midstate(pre.sha_outputs)?);
+            eng.input(&pre.sha_outputs);
         }
         eng.input(&[(ext_flag << 1) | u8::from(annex_hash.is_some())]);
         if anyone_can_pay {
@@ -686,14 +667,14 @@ pub mod crypto {
                 .consensus_encode(&mut eng)
                 .expect("hash engines do not error");
         } else {
-            eng.input(&(input_index as u32).to_le_bytes());
+            eng.input(&(input_index.get() as u32).to_le_bytes());
         }
         if let Some(annex_hash) = &annex_hash {
             eng.input(annex_hash);
         }
         if output_type == SIGHASH_SINGLE {
             let output_hash = single_output_hash.get_or_init(|| {
-                tx.output.get(input_index).map(|out| {
+                tx.output.get(input_index.get()).map(|out| {
                     let mut out_eng = sha256::Hash::engine();
                     out.consensus_encode(&mut out_eng)
                         .expect("hash engines do not error");
@@ -724,7 +705,7 @@ pub mod crypto {
     /// quadratic in the input count.
     pub struct TapscriptExecData<'a> {
         job: &'a crate::block::ScriptCheckJob,
-        input_index: usize,
+        input_index: crate::block::InputIndex,
         spent: &'a TapSpentHashes,
         tapleaf_hash: bitcoin::TapLeafHash,
         annex_hash: Option<[u8; 32]>,
@@ -736,7 +717,7 @@ pub mod crypto {
         /// belongs to `job`'s transaction.
         pub fn new(
             job: &'a crate::block::ScriptCheckJob,
-            input_index: usize,
+            input_index: crate::block::InputIndex,
             spent: &'a TapSpentHashes,
             tapleaf_hash: bitcoin::TapLeafHash,
             annex: Option<&[u8]>,

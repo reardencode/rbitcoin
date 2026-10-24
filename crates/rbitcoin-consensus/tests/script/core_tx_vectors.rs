@@ -11,7 +11,6 @@ use rbitcoin_consensus::block::ScriptCheckJob;
 
 use super::core_script::{assemble_script, decode_hex};
 use bitcoin::consensus::deserialize;
-use rbitcoin_consensus::block::JobTx;
 use rbitcoin_consensus::script;
 
 use bitcoin::{Amount, ScriptBuf, TxOut};
@@ -223,11 +222,9 @@ fn fill_implied(f: &mut TxFlags) {
 }
 
 fn flags_to_job(tx: Transaction, prevouts: Vec<TxOut>, flags: &TxFlags) -> ScriptCheckJob {
-    ScriptCheckJob {
-        txid: tx.compute_txid().to_byte_array(),
-        prevouts: rbitcoin_consensus::block::JobPrevouts::owned(prevouts),
-        tx: JobTx::owned(tx),
-        flags: rbitcoin_consensus::block::ScriptVerifyFlags {
+    {
+        let txid = tx.compute_txid().to_byte_array();
+        let flags = rbitcoin_consensus::block::ScriptVerifyFlags {
             bip65_active: flags.cltv,
             bip112_active: flags.csv,
             bip66_active: flags.dersig || flags.strictenc || flags.low_s,
@@ -244,8 +241,8 @@ fn flags_to_job(tx: Transaction, prevouts: Vec<TxOut>, flags: &TxFlags) -> Scrip
             discourage_upgradable_witness: flags.discourage_upgradable_witness,
             const_scriptcode: flags.const_scriptcode,
             cleanstack: flags.cleanstack,
-        },
-        pre: std::sync::OnceLock::new(),
+        };
+        ScriptCheckJob::with_txid(txid, prevouts, tx, flags)
     }
 }
 
