@@ -966,6 +966,9 @@ fn wave_under_confirm_cancel_returns_cancelled() {
         Err(e) => e,
     };
     assert!(err.is_cancelled(), "want cancelled, got {err:?}");
+    // Promote and dequeue sit after the `?`, so a cancelled wave leaves the
+    // height queued for the next session.
+    assert!(q.block_queue_has_height(1));
     let _ = std::fs::remove_dir_all(&path);
 }
 

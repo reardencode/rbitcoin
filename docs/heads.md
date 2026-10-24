@@ -56,8 +56,10 @@ Allowed/Forbidden IO and in-flight prune: [`invariants.md`](./invariants.md).
 Roles: [`concurrency.md`](./concurrency.md).
 
 **lookup** is the only stage that probes `tx.head`: BQ-ahead TipOnly
-`get_fk_by_txid_batch` (open wave, then each sealed segment newest-first;
-a segment runs only for keys still unfinished). In-page hop keeps 8
+`get_fk_by_txid_batch_cancellable` in pieces of 4096 (each piece is one
+open wave, then each sealed segment newest-first; a segment runs only for
+keys still unfinished). One fence snapshot covers every piece. The confirm
+cancel is asked before each piece; a live sync never sets it. In-page hop keeps 8
 `(depth, fk)` on the stack and spills past that. The open OA hop reads a
 read-only map of the slot file; sealed `g` pages still stream on the ring.
 Combined `head_loc` cdf3 was ~90% on late-mainnet — not enough to pay a
