@@ -2671,6 +2671,22 @@ fn rpc_submit_nonstandard_version_is_version() {
             .contains(&parent.compute_txid()),
         "parent must admit: {pkg}"
     );
+    // Spend a confirmed coin. A version-3 child of the version-2 parent
+    // above is a TRUC ancestor mismatch, which is a separate rule.
+    let (_, fresh) = mature_coinbase_spend(&ctx, 4_999_998_000, ScriptBuf::from_bytes(vec![0x51]));
+    let mut v3 = fresh;
+    v3.version = TxVersion::non_standard(3);
+    let v3_hex = rbitcoin_primitives::hex_encode(serialize(&v3));
+    let sent = dispatch(&ctx, "sendrawtransaction", vec![json!(v3_hex)]).unwrap();
+    assert_eq!(
+        sent.as_str().unwrap(),
+        v3.compute_txid().to_string(),
+        "{sent}"
+    );
+    assert!(
+        ctx.mempool.as_ref().unwrap().contains(&v3.compute_txid()),
+        "version 3 must enter the mempool"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 fn child_of(parent: &Transaction, fee_sat: u64) -> Transaction {
@@ -5287,8 +5303,9 @@ fn shipped_rpc_reads_cover_fallback_and_reject_arms() {
     let child_out = dispatch(&ctx, "gettxout", vec![child_id.clone(), json!(0)]).unwrap();
     assert_eq!(child_out["confirmations"], 0, "{child_out}");
 
-    let v3a = loose_tx(3, 0x31, marker_outpoint(0x31), 1);
-    let v3b = loose_tx(3, 0x32, marker_outpoint(0x32), 1);
+    // Version 3 is admitted. 4 stays a version reject (missing inputs never run).
+    let v3a = loose_tx(4, 0x31, marker_outpoint(0x31), 1);
+    let v3b = loose_tx(4, 0x32, marker_outpoint(0x32), 1);
     let versions = dispatch(
         &ctx,
         "testmempoolaccept",

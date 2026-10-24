@@ -129,11 +129,14 @@ pub fn is_unspendable(script: &[u8]) -> bool {
         || script.len() > crate::script::interpreter::MAX_SCRIPT_SIZE_LEGACY
 }
 
+/// A 0-value output that can enter the UTXO set. `OP_RETURN` is not one.
+pub fn is_zero_value_spendable(out: &bitcoin::TxOut) -> bool {
+    out.value.to_sat() == 0 && !is_unspendable(out.script_pubkey.as_bytes())
+}
+
 /// Libre has no dust *limit*; a 0-value spendable output is still dust.
 pub fn zero_value_spendable_is_dust(tx: &Transaction) -> bool {
-    tx.output
-        .iter()
-        .any(|o| o.value.to_sat() == 0 && !is_unspendable(o.script_pubkey.as_bytes()))
+    tx.output.iter().any(is_zero_value_spendable)
 }
 
 /// Libre admission for a single tx given fee and weight (no dust limit, no template ban).
@@ -146,6 +149,17 @@ pub fn check_libre_admission(tx: &Transaction, fee_sat: u64, weight: u64) -> Pol
 /// Libre admission with an explicit min-relay floor (Core `-minrelaytxfee`).
 /// Shape checks that do not need a fee or parent outputs.
 pub fn check_libre_shape(tx: &Transaction, weight: u64) -> PolicyResult {
+    check_libre_shape_inner(tx, weight, false)
+}
+
+/// Same shape rules, but one 0-value spendable output is not dust.
+///
+/// The caller has already required a 0 fee and a child that spends it.
+pub fn check_libre_shape_allow_ephemeral(tx: &Transaction, weight: u64) -> PolicyResult {
+    check_libre_shape_inner(tx, weight, true)
+}
+
+fn check_libre_shape_inner(tx: &Transaction, weight: u64, allow_ephemeral: bool) -> PolicyResult {
     if tx.is_coinbase() {
         return PolicyResult::NonStandard("coinbase");
     }
@@ -161,7 +175,12 @@ pub fn check_libre_shape(tx: &Transaction, weight: u64) -> PolicyResult {
     if tx.output.is_empty() {
         return PolicyResult::NonStandard("no outputs");
     }
-    if zero_value_spendable_is_dust(tx) {
+    let zeros = tx
+        .output
+        .iter()
+        .filter(|o| is_zero_value_spendable(o))
+        .count();
+    if zeros > 1 || (zeros == 1 && !allow_ephemeral) {
         return PolicyResult::NonStandard("dust");
     }
     if weight > MAX_STANDARD_TX_WEIGHT {
