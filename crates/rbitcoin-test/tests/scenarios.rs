@@ -26,6 +26,184 @@ fn exit_success(c: ExitCode) -> bool {
     format!("{c:?}") == format!("{:?}", ExitCode::SUCCESS)
 }
 
+/// `--hot-digest`: an empty store exits 1; a connected store exits 0 and the
+/// line is network, height, display-order tip hash, then the digest hex.
+fn pin_hot_digest(td: &TestDatadir) {
+    let dir = td.path().join("hot-digest");
+    let argv = |d: &std::path::Path| {
+        [
+            "rbitcoin-node",
+            "--datadir",
+            d.to_str().unwrap(),
+            "--network",
+            "regtest",
+            "--head-scale",
+            "tiny",
+            "--log-level",
+            "error",
+            "--hot-digest",
+        ]
+        .map(String::from)
+    };
+    assert_eq!(
+        format!("{:?}", node_cli_main(argv(&dir))),
+        format!("{:?}", ExitCode::FAILURE),
+        "an empty store has no digest"
+    );
+    let handle = run_node(
+        NodeConfig::default()
+            .with_datadir(&dir)
+            .with_network(Network::Regtest)
+            .with_tiny_heads(),
+    )
+    .unwrap();
+    let params = ChainParams::regtest();
+    let genesis = genesis_block(&params);
+    accept_and_connect_block(
+        &handle.query,
+        &params,
+        Height::GENESIS,
+        &genesis,
+        Milestone::NONE,
+    )
+    .unwrap();
+    let digest = handle.query.hot_digest().unwrap().expect("genesis");
+    handle.shutdown().unwrap();
+    assert!(exit_success(node_cli_main(argv(&dir))));
+    let line = rbitcoin_node::cli::hot_digest_line(Network::Regtest, &digest);
+    let fields: Vec<&str> = line.split(' ').collect();
+    assert_eq!(
+        fields[..3],
+        [
+            "regtest",
+            "0",
+            "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
+        ]
+    );
+    assert_eq!(
+        fields[3],
+        digest.digest.map(|b| format!("{b:02x}")).concat()
+    );
+}
+
+/// `--assumehot-from SRC --assumehot HASH`: a wrong hash leaves the new
+/// store empty and exits 1. The right hash imports, the node then opens the
+/// store, and `--hot-digest` on it prints the same digest. Half the pair or a
+/// malformed hash is a usage error (exit 2) before anything is opened.
+fn pin_assumehot(td: &TestDatadir) {
+    let src = td.path().join("assumehot-src");
+    let handle = run_node(
+        NodeConfig::default()
+            .with_datadir(&src)
+            .with_network(Network::Regtest)
+            .with_tiny_heads(),
+    )
+    .unwrap();
+    let params = ChainParams::regtest();
+    accept_and_connect_block(
+        &handle.query,
+        &params,
+        Height::GENESIS,
+        &genesis_block(&params),
+        Milestone::NONE,
+    )
+    .unwrap();
+    let digest = handle.query.hot_digest().unwrap().expect("genesis");
+    // The node's shutdown runs one spend checkpoint (`SpendSync::shutdown`)
+    // before its flush. `run_node`'s handle does not spawn that thread.
+    rbitcoin_query::spend_sync::checkpoint(&handle.query).unwrap();
+    handle.shutdown().unwrap();
+    let want = digest.digest.map(|b| format!("{b:02x}")).concat();
+    let argv = |dst: &std::path::Path, extra: &[&str]| {
+        let mut v: Vec<String> = [
+            "rbitcoin-node",
+            "--datadir",
+            dst.to_str().unwrap(),
+            "--network",
+            "regtest",
+            "--head-scale",
+            "tiny",
+            "--log-level",
+            "error",
+        ]
+        .map(String::from)
+        .to_vec();
+        v.extend(extra.iter().map(|s| s.to_string()));
+        v
+    };
+    let from = src.to_str().unwrap();
+    let code = |c: ExitCode| format!("{c:?}");
+
+    let usage = td.path().join("assumehot-usage");
+    assert_eq!(
+        code(node_cli_main(argv(
+            &usage,
+            &["--assumehot-from", from, "--smoke"]
+        ))),
+        code(ExitCode::from(2)),
+        "--assumehot-from needs --assumehot"
+    );
+    assert_eq!(
+        code(node_cli_main(argv(
+            &usage,
+            &["--assumehot", &want, "--smoke"]
+        ))),
+        code(ExitCode::from(2)),
+        "--assumehot needs --assumehot-from"
+    );
+    assert_eq!(
+        code(node_cli_main(argv(
+            &usage,
+            &["--assumehot-from", from, "--assumehot", "abcd", "--smoke"]
+        ))),
+        code(ExitCode::from(2)),
+        "the hash is 64 hex digits"
+    );
+    assert!(!usage.exists(), "a usage error opens nothing");
+
+    let bad = td.path().join("assumehot-bad");
+    let mut wrong = want.clone().into_bytes();
+    wrong[0] = if wrong[0] == b'0' { b'1' } else { b'0' };
+    let wrong = String::from_utf8(wrong).unwrap();
+    assert_eq!(
+        code(node_cli_main(argv(
+            &bad,
+            &["--assumehot-from", from, "--assumehot", &wrong, "--smoke"]
+        ))),
+        code(ExitCode::FAILURE)
+    );
+    assert_eq!(std::fs::read_dir(bad.join("store")).unwrap().count(), 0);
+
+    // The import opens the source read-write, so a source a node holds is refused.
+    let busy = td.path().join("assumehot-busy");
+    let held = rbitcoin_node::lock::lock_dir(&src).unwrap();
+    assert_eq!(
+        code(node_cli_main(argv(
+            &busy,
+            &["--assumehot-from", from, "--assumehot", &want, "--smoke"]
+        ))),
+        code(ExitCode::FAILURE),
+        "a locked source"
+    );
+    assert_eq!(std::fs::read_dir(busy.join("store")).unwrap().count(), 0);
+    drop(held);
+
+    let good = td.path().join("assumehot-good");
+    assert!(exit_success(node_cli_main(argv(
+        &good,
+        &["--assumehot-from", from, "--assumehot", &want, "--smoke"]
+    ))));
+    let handle = run_node(
+        NodeConfig::default()
+            .with_datadir(&good)
+            .with_network(Network::Regtest)
+            .with_tiny_heads(),
+    )
+    .unwrap();
+    assert_eq!(handle.query.hot_digest().unwrap(), Some(digest));
+    handle.shutdown().unwrap();
+}
+
 fn pin_conf_unknown_key_and_peertimeout(td: &TestDatadir) {
     let unknown_dir = td.path().join("from-conf-unknown");
     std::fs::create_dir_all(&unknown_dir).unwrap();
@@ -444,6 +622,8 @@ fn node_cli_and_surface_smoke() {
         "getblockchaininfo"
     ])));
     pin_argv_usage_errors();
+    pin_hot_digest(&td);
+    pin_assumehot(&td);
     // Electrum without --sh-index still smokes (channel-watch APIs; SH methods fail closed).
     let no_sh = td.path().join("electrum-no-shindex");
     assert!(exit_success(node_cli_main([

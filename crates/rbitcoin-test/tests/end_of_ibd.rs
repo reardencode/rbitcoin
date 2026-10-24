@@ -1542,3 +1542,63 @@ async fn startup_tip_follow_journey() {
     deep_miner.shutdown().await;
     miner.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn assumehot_import_then_follow() {
+    let wall = llvm_cov_wall(60, 180);
+    tokio::time::timeout(wall, assumehot_journey())
+        .await
+        .expect("assumehot_import_then_follow wall");
+}
+
+/// A syncs the fixture and stops cleanly. B imports A's store with no peer
+/// (so only the import can give it the chain and history), then restarts on
+/// the miner, fills the block it missed and follows the next one.
+async fn assumehot_journey() {
+    let (blocks, mut script_a, script_b) = fixture_chain();
+    let miner_dir = TestDatadir::new().unwrap();
+    let miner = start_miner(miner_dir.path().as_path()).await;
+    let miner_addr = miner.local_addr;
+    load_chain(&miner, &blocks);
+    let height = miner.tip_height().unwrap();
+    let hash = miner.hub.tip_hash().unwrap().to_string();
+
+    let a_dir = TestDatadir::new().unwrap();
+    let a = a_dir.path();
+    let node = spawn_run_p2p(syncer_cfg(a.as_path(), miner_addr));
+    let (rpc, electrum) = wait_listeners(a.as_path()).await;
+    wait_caught_up(rpc, electrum, height, &hash, &script_a, &script_b).await;
+    stop_run_p2p(rpc, node).await;
+    let digest = Query::open_or_create_tiny(a_dir.store_path())
+        .unwrap()
+        .hot_digest()
+        .unwrap()
+        .expect("source digest");
+    assert_eq!(digest.height, height);
+
+    let b_dir = TestDatadir::new().unwrap();
+    let b = b_dir.path();
+    let dead: SocketAddr = "127.0.0.1:1".parse().unwrap();
+    let mut cfg = syncer_cfg(b.as_path(), dead);
+    cfg.assumehot = Some((a.to_path_buf(), digest.digest));
+    let node = spawn_run_p2p(cfg);
+    let (rpc, electrum) = wait_listeners(b.as_path()).await;
+    wait_caught_up(rpc, electrum, height, &hash, &script_a, &script_b).await;
+    stop_run_p2p(rpc, node).await;
+    assert!(!b.join("store.import").exists());
+
+    let last = blocks.last().unwrap();
+    let missed = mine_regtest_block(last.block_hash(), last.header.time + 1, height + 1, vec![]);
+    script_a.insert(missed.txdata[0].compute_txid().to_string());
+    miner.ingest_block(missed).unwrap();
+    let height = miner.tip_height().unwrap();
+    let hash = miner.hub.tip_hash().unwrap().to_string();
+    let node = spawn_run_p2p(syncer_cfg(b.as_path(), miner_addr));
+    let (rpc, electrum) = wait_listeners(b.as_path()).await;
+    wait_caught_up(rpc, electrum, height, &hash, &script_a, &script_b).await;
+    let (height, hash) = extend_one(&miner, rpc, electrum, &mut script_a).await;
+    assert_tip_view(rpc, height, &hash).await;
+    assert_eq!(history_txids(electrum, &[0x52]).await, script_b);
+    stop_run_p2p(rpc, node).await;
+    miner.shutdown().await;
+}

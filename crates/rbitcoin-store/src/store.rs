@@ -1506,16 +1506,20 @@ impl Store {
         Ok(out)
     }
 
-    /// Spender tx fks for a create outpoint (no `tx.head`; includes non-strong).
-    pub fn spenders_create(&self, create_tx_fk: Fk, out_index: u32) -> Result<Vec<Fk>, StoreError> {
+    /// Spender `(tx fk, vin)` pairs for a create outpoint (no `tx.head`; includes non-strong).
+    pub fn spenders_create(
+        &self,
+        create_tx_fk: Fk,
+        out_index: u32,
+    ) -> Result<Vec<(Fk, u32)>, StoreError> {
         let mut out = Vec::new();
         point_table::for_each_spender_create(
             &self.txs,
             &self.spenders,
             create_tx_fk,
             out_index,
-            |spending_tx_fk, _vin| {
-                out.push(spending_tx_fk);
+            |spending_tx_fk, vin| {
+                out.push((spending_tx_fk, vin));
                 Ok(true)
             },
         )?;

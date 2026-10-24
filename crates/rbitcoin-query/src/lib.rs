@@ -59,6 +59,8 @@ pub mod connect_facade;
 pub mod convert;
 #[doc(hidden)]
 pub mod header_read;
+#[doc(hidden)]
+pub mod hot_digest;
 
 #[doc(hidden)]
 pub mod index_rows;

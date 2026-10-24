@@ -1181,7 +1181,7 @@ impl Query {
                 continue;
             }
             if flags & output_flags::MULTI_SPENDER != 0 {
-                for fk in self.store.spenders_create(c.create_tx_fk, c.vout)? {
+                for (fk, _vin) in self.store.spenders_create(c.create_tx_fk, c.vout)? {
                     if self.confirmed_strong_in(fk, view)? {
                         per_out[i].push(fk);
                     }
