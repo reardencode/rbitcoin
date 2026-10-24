@@ -1,8 +1,9 @@
 # Releases
 
-How we cut, tag, and publish `vX.Y.Z`. Operator snapshots (musl / Windows /
-Darwin) are [`.github/workflows/release.yml`](../.github/workflows/release.yml)
-on the tag. Byte-identity of those binaries:
+How we cut, tag, and publish `vX.Y.Z`. Operator snapshots (musl x86_64 and
+aarch64 / Windows / Darwin) and the container image are
+[`.github/workflows/release.yml`](../.github/workflows/release.yml) on the tag
+([Release workflow](#release-workflow)). Byte-identity of those binaries:
 [`reproducible-builds.md`](./reproducible-builds.md). This file owns the
 **git / PR / branch** process and is the only release playbook.
 [`.agents/skills/release/SKILL.md`](../.agents/skills/release/SKILL.md) points
@@ -115,6 +116,8 @@ All hermetic pins: `./scripts/release.test.sh` (includes
 | `./scripts/release.sh` | annotated tag on a **ship** version |
 | `./scripts/release.sh --tag-only` | push the tag, not the branch |
 | `./scripts/release-post.sh` | tag + for `X.Y.0` create `vX.Y.x` |
+| `./scripts/docker-tags.sh vX.Y.Z` | image tags: `X.Y.Z`; `X.Y` when newest on its line; `latest` when newest overall |
+| `./scripts/docker-smoke.sh IMAGE SUMS` | image run contract (hashes, version, regtest boot, cli, SIGTERM) |
 
 `--minor` / `--major` require a `.99` tree. `--patch` is refused on `.99`.
 `--dev-next` requires patch `0`.
@@ -127,6 +130,35 @@ git push https://github.com/reardencode/rbitcoin.git refs/heads/vX.Y.x   # X.Y.0
 ```
 
 An operator with SSH `pushurl` may omit `--no-push`.
+
+---
+
+## Release workflow
+
+`release.yml` on a pushed `vX.Y.Z` tag:
+
+| Job | Does |
+|-----|------|
+| `musl-x86_64`, `musl-aarch64` | `.#rbitcoin-musl` natively on `ubuntu-latest` / `ubuntu-24.04-arm` |
+| `docker-amd64`, `docker-arm64` | Image from that arch's binaries on a native runner, then `docker-smoke.sh`. No push |
+| `windows`, `macos`, `nixos-module-runtime` | Native snapshots; NixOS VM test |
+| `github-release` | Needs all of the above. Creates the Release with every asset |
+| `docker-publish` | After the Release. One multi-arch manifest (`linux/amd64`, `linux/arm64`) to GHCR, and to Docker Hub when `vars.DOCKERHUB_REPOSITORY` is set. Tags from `docker-tags.sh` |
+
+The `docker` legs gate the Release because they are the only boot of the
+aarch64 binary before it ships. `docker-publish` rebuilds the image in one
+call from the same staged binaries (the Dockerfile has no `RUN`, so no
+emulation) and `sha256sum -c`s them first.
+
+`workflow_dispatch` runs both builds and both smoke legs and never
+publishes. If `docker-publish` fails after a good Release, rerun that job:
+the same tag gives the same platform manifests.
+
+`docker-publish` runs one tag at a time across the repo (its own
+concurrency group), and each run reads the tag list at its start. Two tags
+cut together, such as `X.Y.0` and a patch on `vX.(Y-1).x`, cannot move
+`latest` or `X.Y` backwards. The group sets `queue: max`, so a third tag
+waits its turn instead of cancelling the one already pending.
 
 ---
 
@@ -225,3 +257,12 @@ bump updates that window and the schema-freeze language.
 
 - Required check **`release-extra`** on protected branches.
 - Retry artifacts only: Actions → **release** → Run workflow (no tag).
+- Docker Hub: create `reardencode/rbitcoin` and an access token with Read &
+  Write on that repository only. Set repo variables `DOCKERHUB_REPOSITORY`
+  (`reardencode/rbitcoin`) and `DOCKERHUB_USERNAME`, and secret
+  `DOCKERHUB_TOKEN`. With the variable unset, `docker-publish` pushes GHCR
+  only.
+- GHCR: after the first `docker-publish`, check that package `rbitcoin` is
+  Public and linked to this repository.
+- The BuildKit image pin in `docker-publish` is bumped by hand. Dependabot
+  does not track it.

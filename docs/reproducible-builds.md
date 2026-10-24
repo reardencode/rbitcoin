@@ -109,16 +109,41 @@ Cut, merge, tag, `vX.Y.x`, and the `.99` bump:
 ```
 
 [`.github/workflows/release.yml`](../.github/workflows/release.yml) builds the
-same three snapshots on that tag and attaches them to a GitHub Release:
+same snapshots on that tag and attaches them to a GitHub Release:
 
 | File | Notes |
 |------|--------|
 | `rbitcoin-node-x86_64-linux` / `rbitcoin-cli-x86_64-linux` | Static musl; **operator** binary |
 | `SHA256SUMS.linux-musl` + `rbitcoin.cdx.json` | Checksums + CycloneDX from `scripts/sbom.sh` |
+| `rbitcoin-*-aarch64-linux` + `SHA256SUMS.linux-musl-aarch64` | Static musl, built natively on `ubuntu-24.04-arm` |
 | `rbitcoin-*-x86_64-windows.exe` + `SHA256SUMS.windows` | CRT-static PE |
 | `rbitcoin-*-aarch64-darwin` + `SHA256SUMS.darwin` | Ad-hoc codesign; not notarized |
 
 `workflow_dispatch` on that workflow builds artifacts only (no Release).
+
+The operator image (`ghcr.io/reardencode/rbitcoin`, `linux/amd64` +
+`linux/arm64`) is those two musl pairs on `FROM scratch`. Each arch's image
+binaries must hash to that arch's `SHA256SUMS` before the Release
+(`scripts/docker-smoke.sh`). To check a pulled image yourself:
+
+```bash
+arch=$(docker version -f '{{.Server.Arch}}')   # or set amd64 / arm64
+case "$arch" in
+  amd64) sums=SHA256SUMS.linux-musl ;;
+  arm64) sums=SHA256SUMS.linux-musl-aarch64 ;;
+esac
+docker create --platform "linux/$arch" --name rbtc-verify ghcr.io/reardencode/rbitcoin:X.Y.Z
+docker cp rbtc-verify:/usr/local/bin/rbitcoin-node .
+docker cp rbtc-verify:/usr/local/bin/rbitcoin-cli .
+docker rm -v rbtc-verify   # -v: also the anonymous /data volume
+sha256sum -c "$sums"
+```
+
+`docker create` runs nothing, so either arch can be checked on any host.
+
+The image build sets `SOURCE_DATE_EPOCH` to the commit time with
+`rewrite-timestamp`, so a rerun gives the same platform manifests. Only the
+provenance attestations differ.
 
 **Byte-identity gate** (`./scripts/repro-check.sh`) still forces two clean
 `--rebuild`s — use it for release verification, not every commit.
@@ -208,7 +233,9 @@ nix build .#rbitcoin-aarch64
 ```
 
 Pulls a full cross toolchain (large). Prefer musl for routine multi-target
-checks when disk or cache is limited.
+checks when disk or cache is limited. This is a dynamic glibc cross, not the
+Release aarch64 binary: that one is `.#rbitcoin-musl` on a native aarch64
+runner.
 
 ## Verify byte-identity (same platform)
 

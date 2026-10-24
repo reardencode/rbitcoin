@@ -5,9 +5,11 @@
 #   github-actions  .github/workflows/*
 #   nix             flake.lock inputs (nixpkgs, crane, …)
 #
-# No Docker / npm / Go / Python app manifests today. Security updates for
-# supported ecosystems still flow from GitHub Advisories when enabled on the
-# repo (Settings → Code security → Dependabot security updates).
+# The Dockerfile is FROM scratch (no base image to bump), and the BuildKit
+# pin in release.yml is manual. No npm / Go / Python app manifests today.
+# Security updates for supported ecosystems still flow from GitHub
+# Advisories when enabled on the repo (Settings → Code security →
+# Dependabot security updates).
 #
 # Nix pin policy (docs/reproducible-builds.md): advance nixpkgs deliberately
 # (~channel cadence), co-bump crane / CI rustc. Dependabot nix PRs are a

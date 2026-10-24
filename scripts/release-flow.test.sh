@@ -208,8 +208,13 @@ assert_ok "release-notes thank the fork on a merge commit" \
   grep -q '@average-gary' <<<"$out"
 assert_ok "release-notes keep that thanks inside Highlights" \
   bash -c "! grep -q '^### Thanks$' <<<'$out'"
+# Thanks name logins as @login. The image line names the reardencode org.
 assert_ok "release-notes omit the bot and the maintainer" \
-  bash -c "! grep -q 'rearden-grok' <<<'$out' && ! grep -q 'reardencode' <<<'$out'"
+  bash -c "! grep -q '@rearden-grok' <<<'$out' && ! grep -q '@reardencode' <<<'$out'"
+assert_ok "release-notes name both Linux musl arches" \
+  grep -q 'musl x86_64 and aarch64' <<<"$out"
+assert_ok "release-notes give the image pull for this version" \
+  grep -qF 'docker pull ghcr.io/reardencode/rbitcoin:0.6.0' <<<"$out"
 assert_ok "release-notes omit detailed Unreleased body" \
   bash -c "! grep -q 'ship this' <<<'$out'"
 assert_ok "release-notes name CHANGELOG section" \

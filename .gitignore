@@ -20,6 +20,8 @@ lcov.info
 # Nix build products / local repro scratch
 /result
 /result-*
+# Staged release / image context (stage-musl-artifacts.sh, Dockerfile)
+/dist/
 # Generated SBOM (scripts/sbom.sh)
 /rbitcoin.cdx.json
 # Lock file created by scripts/core-functional/init-submodule.sh

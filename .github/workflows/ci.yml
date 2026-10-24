@@ -83,6 +83,10 @@ jobs:
         run: ./scripts/stage-musl-artifacts.test.sh
       - name: stage-native-artifacts self-test
         run: ./scripts/stage-native-artifacts.test.sh
+      - name: Dockerfile contract
+        run: ./scripts/dockerfile.test.sh
+      - name: docker-tags self-test
+        run: ./scripts/docker-tags.test.sh
       - name: fuzz-run self-test
         run: ./scripts/fuzz-run.test.sh
       - name: release-pin self-test

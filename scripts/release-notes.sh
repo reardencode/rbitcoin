@@ -127,9 +127,10 @@ hl="$(release_changelog_highlights "$VER" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}
 authors="$(release_thanks_sentence "$hl" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}')"
 note="rbitcoin v${VER}
 
-Linux **musl x86_64** is the operator binary (statically linked).
-Windows is CRT-static PE (no IoRing). Darwin aarch64 is ad-hoc
+Linux **musl x86_64 and aarch64** are the operator binaries (statically
+linked). Windows is CRT-static PE (no IoRing). Darwin aarch64 is ad-hoc
 codesigned, **not notarized** (\`xattr -d com.apple.quarantine\`).
+Image (linux/amd64, linux/arm64): \`docker pull ghcr.io/reardencode/rbitcoin:${VER}\`.
 
 ### Highlights
 

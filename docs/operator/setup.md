@@ -149,8 +149,9 @@ service creates the directory but does not mount or size the volume. Set `datadi
 `environment` for documented advanced `RBITCOIN_*` settings and `extraArgs`
 for daemon flags not represented by module options.
 
-**GitHub Release** (`v*.*.*` tags) is the operator snapshot: Linux musl +
-Windows CRT-static PE + Darwin aarch64 binaries + SHA256SUMS. Cut, merge,
+**GitHub Release** (`v*.*.*` tags) is the operator snapshot: Linux musl
+(x86_64 and aarch64) + Windows CRT-static PE + Darwin aarch64 binaries +
+SHA256SUMS, and the [container image](#container-image). Cut, merge,
 tag, and `vX.Y.x` / `.99` follow-up: [`docs/releases.md`](../../docs/releases.md).
 
 ```bash
@@ -179,6 +180,49 @@ create/open/grow use positional `ReadFile`/`WriteFile` +
 `SetFileInformationByHandle`, not std `Read`/`Write`/`Seek`. Mixed
 Default `--datadir` is cwd-relative `datadir` via `Path::new(".").join("datadir")`
 (`./datadir` on Unix, `.\datadir` on Windows).
+
+### Container image
+
+Each `v*.*.*` tag publishes `ghcr.io/reardencode/rbitcoin` for
+`linux/amd64` and `linux/arm64`, and Docker Hub `reardencode/rbitcoin` once
+the maintainers enable it ([`releases.md`](../releases.md)). The image is
+the Release musl binaries on `FROM scratch`: no shell, no libc, no base
+image. Tags are `X.Y.Z`, `X.Y` (newest patch on that line), and `latest`
+(newest release). A patch on an older line does not move `latest`.
+
+```bash
+docker volume create rbitcoin
+docker run -d --name rbitcoin --stop-timeout 300 \
+  -v rbitcoin:/data -p 8333:8333 \
+  ghcr.io/reardencode/rbitcoin:X.Y.Z \
+  --listen 0.0.0.0:8333 --rpc-listen 127.0.0.1:8332
+docker logs -f rbitcoin
+docker exec rbitcoin rbitcoin-cli getblockchaininfo
+```
+
+- **Datadir.** The image runs as uid 10001 in `/data`, so the default
+  `./datadir` is `/data/datadir`, and `docker exec … rbitcoin-cli` finds the
+  RPC token with no `--datadir`. A new named volume takes that ownership. A
+  bind mount must be writable by 10001 (`chown -R 10001:10001 /srv/rbitcoin`).
+- **Arguments** after the image name go to `rbitcoin-node` unchanged.
+  Network, indexes, and listeners are the same flags as anywhere else.
+- **Stop.** The node flushes the store on SIGTERM. Docker's default stop
+  timeout is 10 s. Use `--stop-timeout 300` (compose:
+  `stop_grace_period: 5m`), the same budget as the NixOS unit.
+- **Listeners.** The loopback address inside a container is the
+  container's own. P2P binds `127.0.0.1` when `--listen` is omitted, so
+  inbound peers need `--listen 0.0.0.0:<port>` and the same port published;
+  without it `-p 8333:8333` reaches nothing and the node is outbound-only.
+  RPC, Electrum, Esplora, and health are opt-in. To reach one from the host,
+  bind it to `0.0.0.0` inside and publish it on host loopback only:
+  `--rpc-listen 0.0.0.0:8332 -p 127.0.0.1:8332:8332`. The health listener
+  is unauthenticated; treat it the same way.
+- **Store IO.** Docker's default seccomp profile blocks `io_uring`. The
+  store logs `completion session unavailable` and uses the `pread` fallback
+  ([`io-modality.md`](../io-modality.md)). A seccomp profile that allows the
+  `io_uring_*` syscalls restores it. Do not run `seccomp=unconfined`.
+- **Verify** the image binaries against the Release checksums:
+  [`reproducible-builds.md`](../reproducible-builds.md).
 
 ### Low-priority service on a shared Linux host
 

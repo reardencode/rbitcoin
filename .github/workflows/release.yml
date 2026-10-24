@@ -1,13 +1,19 @@
 # GitHub Release for annotated tags `v*.*.*` (0.5+).
 #
-# Not a required PR check. Builds the three operator snapshots and
-# attaches them to the tag. Linux musl is the operator binary. Darwin is
-# ad-hoc signed (not notarized). Windows is CRT-static PE (no IoRing).
-# PR CI smokes Windows/Darwin store IO in ci.yml; it does not package.
+# Not a required PR check. Builds the operator snapshots and attaches
+# them to the tag. Linux musl (x86_64 and aarch64, each on a native
+# runner) is the operator binary. Darwin is ad-hoc signed (not notarized).
+# Windows is CRT-static PE (no IoRing). PR CI smokes Windows/Darwin store
+# IO in ci.yml; it does not package.
+#
+# The operator image wraps the musl binaries (Dockerfile). `docker` smokes
+# it per arch on a native runner and gates the Release. `docker-publish`
+# pushes the multi-arch manifest to GHCR, and to Docker Hub when the repo
+# variable DOCKERHUB_REPOSITORY is set, after the Release exists.
 #
 # Triggers:
-#   - push of tag v*.*.* (publishes the Release)
-#   - workflow_dispatch (build artifacts only; no tag → no Release)
+#   - push of tag v*.*.* (publishes the Release and the image)
+#   - workflow_dispatch (build and smoke only; no tag → no Release, no push)
 
 name: release
 
@@ -34,9 +40,17 @@ env:
 
 jobs:
   musl:
-    name: musl
-    runs-on: ubuntu-latest
+    name: musl-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    # Both legs build the same SHA, so either leg's short is the run's.
     outputs:
       short: ${{ steps.meta.outputs.short }}
     steps:
@@ -80,14 +94,15 @@ jobs:
       - name: Cache Nix store
         uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
         with:
-          primary-key: musl-${{ runner.os }}-${{ hashFiles('flake.lock', 'Cargo.lock') }}
-          restore-prefixes-first-match: musl-${{ runner.os }}-
+          primary-key: musl-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'Cargo.lock') }}
+          restore-prefixes-first-match: musl-${{ runner.os }}-${{ runner.arch }}-
           gc-max-store-size-linux: 8G
           purge: true
-          purge-prefixes: musl-${{ runner.os }}-
+          purge-prefixes: musl-${{ runner.os }}-${{ runner.arch }}-
           purge-last-accessed: P7D
           purge-primary-key: never
 
+      # .#rbitcoin-musl is this runner's system: x86_64 or aarch64 static.
       - name: Build musl (flake)
         run: ./scripts/repro-build.sh musl ./result
 
@@ -99,7 +114,7 @@ jobs:
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: rbitcoin-musl-x86_64-linux-${{ steps.meta.outputs.short }}
+          name: rbitcoin-musl-${{ matrix.arch }}-linux-${{ steps.meta.outputs.short }}
           path: |
             dist/rbitcoin-node
             dist/rbitcoin-cli
@@ -107,6 +122,50 @@ jobs:
             dist/rbitcoin.cdx.json
           if-no-files-found: error
           retention-days: 90
+
+  # Per-arch image smoke on a native runner, before the Release. Nothing is
+  # pushed here. This is also the only boot of the aarch64 binary before it
+  # ships, so `publish` needs it.
+  docker:
+    name: docker-${{ matrix.platform }}
+    needs: [musl]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            platform: amd64
+            runner: ubuntu-latest
+          - arch: aarch64
+            platform: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.BUILD_REF }}
+          persist-credentials: false
+
+      - name: Download musl artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHORT: ${{ needs.musl.outputs.short }}
+        run: |
+          set -euo pipefail
+          short="$SHORT"
+          dir="dist/docker/${{ matrix.platform }}"
+          gh run download "${{ github.run_id }}" --repo "${{ github.repository }}" \
+            -n "rbitcoin-musl-${{ matrix.arch }}-linux-${short}" -D "$dir"
+          (cd "$dir" && sha256sum -c SHA256SUMS)
+
+      - name: Build image (native arch)
+        run: docker build -t rbitcoin:smoke -f Dockerfile dist/docker
+
+      - name: Smoke image
+        run: ./scripts/docker-smoke.sh rbitcoin:smoke "dist/docker/${{ matrix.platform }}/SHA256SUMS"
 
   windows:
     name: windows
@@ -233,7 +292,7 @@ jobs:
 
   publish:
     name: github-release
-    needs: [musl, windows, macos, nixos-module-runtime]
+    needs: [musl, docker, windows, macos, nixos-module-runtime]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -247,11 +306,14 @@ jobs:
       - name: Download artifacts
         env:
           GH_TOKEN: ${{ github.token }}
+          SHORT: ${{ needs.musl.outputs.short }}
         run: |
           set -euo pipefail
-          short='${{ needs.musl.outputs.short }}'
+          short="$SHORT"
           gh run download "${{ github.run_id }}" --repo "${{ github.repository }}" \
             -n "rbitcoin-musl-x86_64-linux-${short}" -D musl
+          gh run download "${{ github.run_id }}" --repo "${{ github.repository }}" \
+            -n "rbitcoin-musl-aarch64-linux-${short}" -D musl-aarch64
           gh run download "${{ github.run_id }}" --repo "${{ github.repository }}" \
             -n "rbitcoin-x86_64-windows-${short}" -D windows
           gh run download "${{ github.run_id }}" --repo "${{ github.repository }}" \
@@ -261,6 +323,9 @@ jobs:
           mv dist/SHA256SUMS dist/SHA256SUMS.linux-musl
           mv dist/rbitcoin-node dist/rbitcoin-node-x86_64-linux
           mv dist/rbitcoin-cli dist/rbitcoin-cli-x86_64-linux
+          cp musl-aarch64/rbitcoin-node dist/rbitcoin-node-aarch64-linux
+          cp musl-aarch64/rbitcoin-cli dist/rbitcoin-cli-aarch64-linux
+          cp musl-aarch64/SHA256SUMS dist/SHA256SUMS.linux-musl-aarch64
           cp windows/rbitcoin-node.exe windows/rbitcoin-cli.exe windows/SHA256SUMS dist/
           mv dist/SHA256SUMS dist/SHA256SUMS.windows
           mv dist/rbitcoin-node.exe dist/rbitcoin-node-x86_64-windows.exe
@@ -284,6 +349,9 @@ jobs:
             dist/rbitcoin-node-x86_64-linux \
             dist/rbitcoin-cli-x86_64-linux \
             dist/SHA256SUMS.linux-musl \
+            dist/rbitcoin-node-aarch64-linux \
+            dist/rbitcoin-cli-aarch64-linux \
+            dist/SHA256SUMS.linux-musl-aarch64 \
             dist/rbitcoin.cdx.json \
             dist/rbitcoin-node-x86_64-windows.exe \
             dist/rbitcoin-cli-x86_64-windows.exe \
@@ -291,3 +359,104 @@ jobs:
             dist/rbitcoin-node-aarch64-darwin \
             dist/rbitcoin-cli-aarch64-darwin \
             dist/SHA256SUMS.darwin
+
+  # Multi-arch manifest after the Release exists. The Dockerfile has no
+  # RUN, so this one runner assembles amd64 + arm64 without emulation from
+  # the same staged binaries the `docker` legs smoked (sha256sum -c below).
+  # GHCR always; Docker Hub when vars.DOCKERHUB_REPOSITORY is set (with
+  # vars.DOCKERHUB_USERNAME and secrets.DOCKERHUB_TOKEN). Tags:
+  # scripts/docker-tags.sh.
+  docker-publish:
+    name: docker-publish
+    needs: [musl, publish]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    # One tag at a time across the repo. Each run picks X.Y / latest from
+    # the tags it fetches at its own start, so a tag pushed while another
+    # publishes cannot move them backwards. The workflow group above is per
+    # tag and does not serialize this. queue: max keeps every waiting tag;
+    # the default keeps one and cancels the older pending run.
+    concurrency:
+      group: docker-publish
+      queue: max
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    env:
+      # buildx-stable-1 on 2026-10-22. Pinned so the manifest builder does
+      # not float under a release.
+      BUILDKIT_IMAGE: moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+      DOCKERHUB_REPOSITORY: ${{ vars.DOCKERHUB_REPOSITORY }}
+      DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+    steps:
+      # Full history for the tag list docker-tags.sh compares against.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.BUILD_REF }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download musl artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHORT: ${{ needs.musl.outputs.short }}
+        run: |
+          set -euo pipefail
+          short="$SHORT"
+          for pair in x86_64:amd64 aarch64:arm64; do
+            dir="dist/docker/${pair#*:}"
+            gh run download "${{ github.run_id }}" --repo "${{ github.repository }}" \
+              -n "rbitcoin-musl-${pair%%:*}-linux-${short}" -D "$dir"
+            (cd "$dir" && sha256sum -c SHA256SUMS)
+          done
+
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Log in to Docker Hub
+        if: vars.DOCKERHUB_REPOSITORY != ''
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: printf '%s' "$DOCKERHUB_TOKEN" | docker login docker.io -u "$DOCKERHUB_USERNAME" --password-stdin
+
+      - name: Build and push multi-arch image
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          tags="$(./scripts/docker-tags.sh "$GITHUB_REF_NAME")"
+          images=("ghcr.io/${GITHUB_REPOSITORY,,}")
+          if [[ -n "$DOCKERHUB_REPOSITORY" ]]; then
+            images+=("docker.io/$DOCKERHUB_REPOSITORY")
+          fi
+          refs=()
+          for t in $tags; do
+            for i in "${images[@]}"; do
+              refs+=("$i:$t")
+            done
+          done
+          printf 'push %s\n' "${refs[@]}"
+          tag_args=()
+          for r in "${refs[@]}"; do
+            tag_args+=(--tag "$r")
+          done
+          # Commit time for image and file timestamps, so a rerun of this
+          # tag gives the same platform manifests.
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          export SOURCE_DATE_EPOCH
+          docker buildx create --name rbitcoin-release --driver docker-container \
+            --driver-opt "image=$BUILDKIT_IMAGE" --use
+          docker buildx build --platform linux/amd64,linux/arm64 \
+            --build-arg "VERSION=$ver" --build-arg "REVISION=$(git rev-parse HEAD)" \
+            --provenance=mode=max \
+            --output type=image,push=true,rewrite-timestamp=true \
+            --metadata-file "$RUNNER_TEMP/image.json" \
+            "${tag_args[@]}" \
+            -f Dockerfile dist/docker
+          echo "index digest: $(jq -r '."containerimage.digest"' "$RUNNER_TEMP/image.json")"
+          for i in "${images[@]}"; do
+            docker buildx imagetools inspect "$i:$ver"
+          done
