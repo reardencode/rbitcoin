@@ -102,11 +102,55 @@ pub fn reject_unsolicited_tx(hub: &ChainHub, session: Option<&crate::peers::Live
     !session.is_some_and(|s| s.session_relay_perm())
 }
 
-/// BIP152 HB is only for tx-relay peers. Blocks-only must not send
-/// `sendcmpct(announce=1)`.
+/// Reconstruct compact blocks when this node is not `-blocksonly` and
+/// either it has no mempool or it is accepting transactions.
+///
+/// High-bandwidth selection and compact `getdata` use this. A tip
+/// announcement does not: this node already has the block, and the peer
+/// fills short ids. Coinbase is the prefill when there is nothing to
+/// guess from.
+#[doc(hidden)]
+pub fn compact_blocks_ok(hub: &ChainHub) -> bool {
+    if hub.blocks_only.load(Ordering::Acquire) {
+        return false;
+    }
+    match hub.mempool() {
+        None => true,
+        Some(mp) => mp.relay_enabled(),
+    }
+}
+
+/// A connect that leaves IBD after the scripthash pack starts peer tx relay
+/// before compact selection. The tip-follow loop may not have run yet.
+/// Direct mode is the pack: relay stays off. A purge fault leaves the bit
+/// clear and sends no fee filter.
+fn start_relay_after_tip_connect(hub: &ChainHub, peers: Option<&crate::peers::PeerHub>) {
+    let Some(peers) = peers else {
+        return;
+    };
+    let Some(mp) = hub.mempool() else {
+        return;
+    };
+    if !hub.query.index_mode().is_ok_and(|mode| mode.is_tip()) {
+        return;
+    }
+    let want =
+        hub.meets_minimum_chain_work() && !hub.blocks_only.load(Ordering::Acquire) && !hub.in_ibd();
+    if !want || mp.relay_enabled() {
+        return;
+    }
+    mp.set_relay_enabled(true);
+    if !mp.relay_enabled() {
+        return;
+    }
+    peers.queue_feefilter_all(hub.feefilter_sat_kvb() as i64);
+    rbitcoin_log::info!("ibd: leaving IBD — enabling tx relay");
+}
+
+/// BIP152 HB is only for peers we will take compact blocks from.
 #[doc(hidden)]
 pub fn maybe_select_hb_if_relay(hub: &ChainHub, session: Option<&crate::peers::LivePeer>) {
-    if hub.mempool().is_some_and(|m| !m.relay_enabled()) {
+    if !compact_blocks_ok(hub) {
         return;
     }
     let Some(s) = session else {
@@ -142,16 +186,16 @@ pub async fn accept_received_from_peer(
 ) -> Result<AcceptOutcome, NetError> {
     let waive =
         session.is_some_and(|s| s.peer_hub().is_some_and(|ph| ph.session_is_trusted_peer(s)));
-    let relay_ok = hub.mempool().is_none_or(|m| m.relay_enabled());
-    let hb = if relay_ok {
-        session.and_then(|s| s.peer_hub().map(|ph| (ph, s.id)))
-    } else {
-        None
-    };
+    // Relay may flip inside this connect once the index is in tip mode.
+    // Compact selection reads that bit afterwards.
+    let peers = session.and_then(|s| s.peer_hub());
+    let hb = session.and_then(|s| s.peer_hub().map(|ph| (ph, s.id)));
     if let Some(hub) = hub.shared_arc() {
         return crate::tip_accept::run_on_tip_accept_async(move || {
             let r = hub.accept_received_on_lane(block, waive);
-            note_accepted_hb(&r, &hb);
+            start_relay_after_tip_connect(&hub, peers.as_deref());
+            let chosen = if compact_blocks_ok(&hub) { hb } else { None };
+            note_accepted_hb(&r, &chosen);
             r
         })
         .await;
@@ -160,7 +204,9 @@ pub async fn accept_received_from_peer(
     // borrow outlives the job.
     crate::tip_accept::run_on_tip_accept(|| {
         let r = hub.accept_received_on_lane(block, waive);
-        note_accepted_hb(&r, &hb);
+        start_relay_after_tip_connect(hub, peers.as_deref());
+        let chosen = if compact_blocks_ok(hub) { hb } else { None };
+        note_accepted_hb(&r, &chosen);
         r
     })
 }
@@ -2197,11 +2243,12 @@ pub fn queue_getheaders(
     queue_out(out, NetworkMessage::GetHeaders(gh))
 }
 
-/// BIP152: request `MSG_CMPCT_BLOCK` when the peer speaks compact v2 and we
-/// relay txs. Blocks-only keeps `MSG_WITNESS_BLOCK`.
+/// BIP152: request `MSG_CMPCT_BLOCK` when the peer speaks compact v2 and
+/// [`compact_blocks_ok`] is true. Blocks-only, and a mempool that is not
+/// receiving transactions, keep `MSG_WITNESS_BLOCK`.
 #[doc(hidden)]
 pub fn getdata_use_compact(hub: &ChainHub, peer_cmpct_version: u32) -> bool {
-    peer_cmpct_version == 2 && hub.mempool().is_none_or(|m| m.relay_enabled())
+    peer_cmpct_version == 2 && compact_blocks_ok(hub)
 }
 
 /// Drop inflight body asks the peer never answered so `asked_blocks` cannot
@@ -5269,7 +5316,7 @@ pub async fn relay_new_pow_valid_block(
     if !hub.meets_minimum_chain_work() {
         return;
     }
-    if hub.mempool().is_some_and(|m| !m.relay_enabled()) {
+    if !compact_blocks_ok(hub) {
         return;
     }
     let hash = block.block_hash();

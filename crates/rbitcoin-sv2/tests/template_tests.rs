@@ -223,10 +223,11 @@ async fn template_budget_fees_coinbase_and_merkle_path() {
     tp.shutdown().await;
 }
 
-/// Relay turns on after the catch-up tip has already been consumed. The
-/// session must publish on the template interval, not wait for another block.
+/// The pool is already maintained, then the tip leaves IBD with peer relay
+/// still off. The session must publish on the template interval, not wait
+/// for relay or another block.
 #[tokio::test(flavor = "multi_thread")]
-async fn holding_session_publishes_when_relay_turns_on() {
+async fn holding_session_publishes_when_the_pool_is_maintained() {
     let tc = shared_regtest(0);
     assert!(tc.chain.in_ibd(), "stale pad starts in IBD");
     tc.mempool.set_relay_enabled(false);
@@ -261,10 +262,11 @@ async fn holding_session_publishes_when_relay_turns_on() {
 
     mock_live_tip(&tc);
     assert!(!tc.chain.in_ibd(), "mocked tip leaves IBD");
-    tc.mempool.set_relay_enabled(true);
+    assert!(tc.mempool.pool_maintained());
+    assert!(!tc.mempool.relay_enabled());
     let frame = tokio::time::timeout(interval * 4, recv)
         .await
-        .expect("template after relay turns on")
+        .expect("template once the pool is maintained")
         .expect("sv2 message");
     assert_eq!(frame.msg_type, MESSAGE_TYPE_NEW_TEMPLATE);
     tp.shutdown().await;

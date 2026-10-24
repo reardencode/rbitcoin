@@ -411,9 +411,10 @@ impl Session {
     }
 
     /// Template for the session's constraints. `None` before constraints, while
-    /// in IBD, or while relay is off (including `-blocksonly`). A holding
-    /// session tries again on the template interval, so relay turning on
-    /// after the catch-up tip still publishes.
+    /// in IBD, or before the pool is maintained (`-blocksonly` never starts
+    /// it). A holding session tries again on the template interval, so
+    /// maintenance starting after the catch-up tip still publishes. Peer
+    /// relay can stay off.
     async fn build(&mut self) -> io::Result<Option<template::Template>> {
         let Some((size, sigops)) = self.constraints else {
             return Ok(None);
@@ -426,8 +427,8 @@ impl Session {
         let stats = Arc::clone(&self.stats);
         let t = tokio::task::spawn_blocking(move || {
             let _g = BlockingRegion::enter();
-            let relay_off = c.mempool().is_none_or(|m| !m.relay_enabled());
-            if c.in_ibd() || relay_off {
+            let unmaintained = c.mempool().is_none_or(|m| !m.pool_maintained());
+            if c.in_ibd() || unmaintained {
                 return Ok(None);
             }
             let started = std::time::Instant::now();

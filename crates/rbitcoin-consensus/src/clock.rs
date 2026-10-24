@@ -8,7 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Debug)]
 pub struct NodeClock {
     pub mock: AtomicI64,
-    /// First outbound dial, on this clock. `0` means no dial yet.
+    /// Outbound dial this clock is measuring. `0` means none since startup
+    /// or since [`Self::forget_connection_attempt`].
     /// A later [`Self::set_mock`] does not move it.
     pub attempt_at: AtomicU64,
 }
@@ -21,13 +22,20 @@ impl NodeClock {
         })
     }
 
-    /// Remember the first outbound dial. Later calls keep that sample, so a
-    /// `setmocktime` afterwards still measures from the dial.
+    /// Remember an outbound dial when none is stored. Later calls keep that
+    /// sample, so a `setmocktime` afterwards still measures from the dial.
+    /// [`Self::forget_connection_attempt`] lets the next call record again.
     pub fn note_connection_attempt(&self) {
         let now = self.now_secs().max(1);
         let _ = self
             .attempt_at
             .compare_exchange(0, now, Ordering::SeqCst, Ordering::SeqCst);
+    }
+
+    /// Drop the stored dial so the next [`Self::note_connection_attempt`]
+    /// records again.
+    pub fn forget_connection_attempt(&self) {
+        self.attempt_at.store(0, Ordering::SeqCst);
     }
 
     /// `0` until [`Self::note_connection_attempt`].

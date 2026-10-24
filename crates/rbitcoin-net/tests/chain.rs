@@ -1179,6 +1179,196 @@ fn ibd_accept_does_not_fill_recent_confirmed_wtxid() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Regtest `generate` runs while scripthash materialize still holds the
+/// startup task, so the tip-follow loop has not enabled peer relay yet.
+/// Leaving IBD on this path maintains the pool (purge, then per-block
+/// strip) so `getblocktemplate` can run. It does not tell peers about
+/// transactions or preload fee history (`feature_nulldummy`).
+#[test]
+fn fresh_tip_accept_maintains_pool_without_peer_relay() {
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    let mp =
+        rbitcoin_net::tx_relay::MempoolHub::open(dir.path().join("mp"), Arc::clone(&hub.query))
+            .unwrap();
+    assert!(hub.attach_mempool(Arc::clone(&mp)).is_ok());
+    assert!(hub.in_ibd());
+    assert!(!mp.relay_enabled());
+    let gen = hub.tip_hash().unwrap();
+    let now = hub.clock.now_secs() as u32;
+    hub.accept_block(mine(gen, now, 1)).unwrap();
+    assert!(!hub.in_ibd());
+    assert!(
+        !mp.relay_enabled(),
+        "leaving IBD maintains the pool and leaves peer relay off"
+    );
+    assert!(
+        mp.pool_maintained(),
+        "leaving IBD purges the pool and strips later blocks"
+    );
+    assert!(
+        !mp.take_fee_backfill_due(),
+        "fee-history preload waits until peer relay turns on"
+    );
+    assert!(
+        mp.block_p10_history.lock().unwrap().get(1).is_some(),
+        "the block that leaves IBD is in fee history before peer relay"
+    );
+    // Coinbase at height 1 matures once the tip reaches 101. Those blocks
+    // are still inside the pack, with relay off, and must strip.
+    hub.generate_to_script(100, ScriptBuf::from_bytes(vec![0x51]), vec![])
+        .unwrap();
+    assert!(!mp.relay_enabled());
+    let spend = mature_spend_tx(&hub, 1);
+    let txid = spend.compute_txid();
+    mp.accept_tx(&spend).expect("mature coinbase spend");
+    assert_eq!(mp.live_count(), 1);
+    let prev = hub.tip_hash().unwrap();
+    let time = hub.tip_header().unwrap().time.saturating_add(1);
+    let height = hub.tip_height().unwrap().saturating_add(1);
+    let block = rbitcoin_consensus::mine_regtest_paying(
+        prev,
+        time,
+        height,
+        ScriptBuf::from_bytes(vec![0x51]),
+        vec![spend],
+    );
+    hub.accept_block(block)
+        .expect("block confirms the mempool tx");
+    assert!(
+        !mp.contains(&txid),
+        "a later block strips while peer relay is still off"
+    );
+    assert!(!mp.relay_enabled());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Catch-up can still be writing blocks after the connect that leaves IBD
+/// has latched maintenance. That writer has to strip and move the template
+/// mark while peer relay is still off. `connect_at` never sees those blocks.
+#[test]
+fn bulk_confirm_strips_once_the_pool_is_maintained() {
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    let mp =
+        rbitcoin_net::tx_relay::MempoolHub::open(dir.path().join("mp"), Arc::clone(&hub.query))
+            .unwrap();
+    assert!(hub.attach_mempool(Arc::clone(&mp)).is_ok());
+    let gen = hub.tip_hash().unwrap();
+    let now = hub.clock.now_secs() as u32;
+    hub.accept_block(mine(gen, now, 1)).unwrap();
+    assert!(mp.pool_maintained());
+    assert!(!mp.relay_enabled());
+    hub.generate_to_script(100, ScriptBuf::from_bytes(vec![0x51]), vec![])
+        .unwrap();
+    let spend = mature_spend_tx(&hub, 1);
+    let txid = spend.compute_txid();
+    mp.accept_tx(&spend).expect("mature coinbase spend");
+    let prev = hub.tip_hash().unwrap();
+    let time = hub.tip_header().unwrap().time.saturating_add(1);
+    let height = hub.tip_height().unwrap().saturating_add(1);
+    let block = mine_regtest_paying(
+        prev,
+        time,
+        height,
+        ScriptBuf::from_bytes(vec![0x51]),
+        vec![spend],
+    );
+    let hash = block.block_hash();
+    let header = block.header;
+    rbitcoin_query::accept_and_connect_block(
+        &hub.query,
+        &hub.params,
+        Height(height),
+        &block,
+        hub.milestone,
+    )
+    .expect("connect without the mempool strip");
+    assert!(
+        mp.contains(&txid),
+        "the query connect must leave the pool alone"
+    );
+    let buried = mp.template_prev();
+    hub.note_confirmed_tip(&[(height, hash)], &[header])
+        .expect("bulk confirm");
+    assert!(
+        !mp.contains(&txid),
+        "a catch-up batch after maintenance must drop the confirmed tx"
+    );
+    assert_eq!(
+        mp.template_prev(),
+        Some(hash.to_byte_array()),
+        "templates must follow that batch, not {buried:?}"
+    );
+    assert!(
+        mp.block_p10_history.lock().unwrap().get(height).is_some(),
+        "the catch-up batch is in fee history"
+    );
+    assert!(!mp.relay_enabled());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// `-blocksonly` stays quiet after the same fresh tip. The accept path must
+/// not turn relay on just because the tip left IBD.
+#[test]
+fn fresh_tip_accept_stays_quiet_when_blocks_only() {
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    hub.set_blocks_only(true);
+    let mp =
+        rbitcoin_net::tx_relay::MempoolHub::open(dir.path().join("mp"), Arc::clone(&hub.query))
+            .unwrap();
+    assert!(hub.attach_mempool(Arc::clone(&mp)).is_ok());
+    let gen = hub.tip_hash().unwrap();
+    let now = hub.clock.now_secs() as u32;
+    hub.accept_block(mine(gen, now, 1)).unwrap();
+    assert!(!hub.in_ibd());
+    assert!(!mp.relay_enabled());
+    assert!(!mp.pool_maintained());
+    assert!(!mp.take_fee_backfill_due());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A relay pause after IBD has already ended stays paused, and that later
+/// block does not start maintenance. The catch-up purge runs when relay is
+/// turned on (`peer_blocksonly`).
+#[test]
+fn fresh_tip_does_not_reenable_relay_once_ibd_has_ended() {
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    let mp =
+        rbitcoin_net::tx_relay::MempoolHub::open(dir.path().join("mp"), Arc::clone(&hub.query))
+            .unwrap();
+    assert!(hub.attach_mempool(Arc::clone(&mp)).is_ok());
+    let gen = hub.tip_hash().unwrap();
+    let now = hub.clock.now_secs() as u32;
+    hub.accept_block(mine(gen, now, 1)).unwrap();
+    assert!(
+        !mp.relay_enabled(),
+        "the block that leaves IBD does not enable peer relay"
+    );
+    assert!(mp.pool_maintained());
+    assert!(!mp.take_fee_backfill_due());
+    mp.set_relay_enabled(true);
+    assert!(mp.take_fee_backfill_due());
+    mp.set_relay_enabled(false);
+    assert!(!mp.take_fee_backfill_due());
+    assert!(
+        mp.pool_maintained(),
+        "pausing peer relay leaves maintenance on"
+    );
+    let tip = hub.tip_hash().unwrap();
+    hub.accept_block(mine(tip, now.saturating_add(1), 2))
+        .unwrap();
+    assert!(!hub.in_ibd());
+    assert!(
+        !mp.relay_enabled(),
+        "a fresh tip with relay already paused stays paused"
+    );
+    assert!(mp.pool_maintained());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn feefilter_sat_kvb_is_min_relay_once_tip_is_fresh() {
     let (dir, hub) = tmp_hub();

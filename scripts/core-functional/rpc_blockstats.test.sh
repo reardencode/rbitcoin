@@ -68,5 +68,42 @@ for odd in (["00", 1, 2], [5, 1], [], {}):
     calls.clear()
     got = getblockstats_with_sizes(odd, lambda p: calls.append(p) or "node", lambda _: 1 / 0)
     assert got == "node" and calls == [odd], "a shape the proxy does not own goes to the node as is"
+import socket
+import threading
+import time
+
+from rpc_blockstats import fetch_esplora_json
+
+sock = socket.socket()
+sock.bind(("127.0.0.1", 0))
+port = sock.getsockname()[1]
+
+
+def listen_late():
+    time.sleep(0.2)
+    sock.listen(1)
+    conn, _ = sock.accept()
+    conn.recv(4096)
+    body = b"[1]"
+    conn.sendall(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n" + body
+    )
+    conn.close()
+
+
+threading.Thread(target=listen_late, daemon=True).start()
+got = fetch_esplora_json(
+    f"http://127.0.0.1:{port}", "/block", attempts=20, pause_s=0.05
+)
+assert got == [1], got
+sock.close()
+
+try:
+    fetch_esplora_json("http://127.0.0.1:1", "/nope", attempts=2, pause_s=0.01)
+except RpcError as e:
+    assert e.code == -1 and "Connection refused" in e.message, e
+else:
+    raise AssertionError("a closed port must still surface connection refused")
+
 print("rpc_blockstats: ok")
 PY

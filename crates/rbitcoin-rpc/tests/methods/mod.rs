@@ -930,10 +930,9 @@ fn relay_off_empty_pool_serves_template() {
 
 #[test]
 fn relay_off_refuses_pool_listing_and_mines_coinbase_only() {
-    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let (ctx, dir, _hub) = ctx_from_mature_pad_relay(300_000_000, false);
     let (hex, spend) = mature_coinbase_spend_hex(&ctx, 50_0000_0000 - 1_000);
     dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
-    ctx.mempool.as_ref().unwrap().set_relay_enabled(false);
     let hashes = dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
     let hash = hashes[0].as_str().unwrap();
     let block = dispatch(&ctx, "getblock", vec![json!(hash)]).unwrap();
@@ -947,6 +946,28 @@ fn relay_off_refuses_pool_listing_and_mines_coinbase_only() {
     assert_eq!(gbt["code"], -10, "{gbt}");
     let raw = dispatch(&ctx, "getrawmempool", vec![]).unwrap_err();
     assert_eq!(raw["code"], -10, "{raw}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Peer relay can turn off after the pool is already maintained. Later
+/// blocks still mine and strip the pool, and the template stays available.
+#[test]
+fn relay_pause_keeps_pool_maintenance() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let (hex, spend) = mature_coinbase_spend_hex(&ctx, 50_0000_0000 - 1_000);
+    let txid = spend.compute_txid();
+    dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
+    ctx.mempool.as_ref().unwrap().set_relay_enabled(false);
+    assert!(!ctx.mempool.as_ref().unwrap().relay_enabled());
+    let hashes = dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
+    let hash = hashes[0].as_str().unwrap();
+    let block = dispatch(&ctx, "getblock", vec![json!(hash)]).unwrap();
+    assert_eq!(block["nTx"].as_u64(), Some(2), "{block}");
+    assert!(!ctx.mempool.as_ref().unwrap().contains(&txid));
+    let gbt = dispatch(&ctx, "getblocktemplate", vec![json!({"rules": ["segwit"]})]).unwrap();
+    assert!(gbt.get("height").is_some(), "{gbt}");
+    let raw = dispatch(&ctx, "getrawmempool", vec![]).unwrap();
+    assert_eq!(raw, json!([]), "{raw}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1052,14 +1073,18 @@ fn blocksonly_lists_mempool_mines_and_refuses_template() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Production `-blocksonly` never turns relay on. `generate` still mines the
-/// pool transaction and that txid is gone before the RPC returns. A strip
-/// that no-ops while relay is off would leave it listed.
+/// Production `-blocksonly` never starts maintenance. `generate` still mines
+/// the pool transaction and that txid is gone before the RPC returns.
+/// Connect's strip is off on this pool, so `commit_generated_txids` is what
+/// removes it.
 #[test]
 fn blocksonly_generate_removes_the_tx_it_mines() {
-    let (mut ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let (mut ctx, dir, _hub) = ctx_from_mature_pad_relay(300_000_000, false);
     ctx.blocksonly = true;
-    ctx.mempool.as_ref().unwrap().set_relay_enabled(false);
+    assert!(
+        !ctx.mempool.as_ref().unwrap().pool_maintained(),
+        "strip is on, so this no longer pins commit_generated_txids"
+    );
     let (hex, spend) = mature_coinbase_spend_hex(&ctx, 50_0000_0000 - 1_000);
     let txid = spend.compute_txid();
     dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
@@ -1099,9 +1124,12 @@ fn generate_over_cap_leaves_the_pool() {
 /// the next `generate` would select them again and could not connect them.
 #[test]
 fn generate_later_block_failure_still_drops_the_mined_tx() {
-    let (mut ctx, dir, hub) = ctx_from_mature_pad(300_000_000);
+    let (mut ctx, dir, hub) = ctx_from_mature_pad_relay(300_000_000, false);
     ctx.blocksonly = true;
-    ctx.mempool.as_ref().unwrap().set_relay_enabled(false);
+    assert!(
+        !ctx.mempool.as_ref().unwrap().pool_maintained(),
+        "strip is on, so this no longer pins commit_generated_txids"
+    );
     let (hex, spend) = mature_coinbase_spend_hex(&ctx, 50_0000_0000 - 1_000);
     let txid = spend.compute_txid();
     dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
@@ -1623,7 +1651,7 @@ fn ctx_regtest_hub_on(
     let dir = TempDir::labeled("rpc-gen").expect("temp dir");
     let hub = open_regtest_hub(dir.join("store"), params);
     hub.ensure_genesis().unwrap();
-    regtest_ctx(dir, hub, max_wu)
+    regtest_ctx(dir, hub, max_wu, true)
 }
 
 /// One 101-block regtest chain for tests that only need a mature coinbase.
@@ -1651,12 +1679,19 @@ struct MatureRegtestPad {
 }
 
 fn ctx_from_mature_pad(max_wu: u64) -> (RpcContext, TempDir, Arc<rbitcoin_net::ChainHub>) {
+    ctx_from_mature_pad_relay(max_wu, true)
+}
+
+fn ctx_from_mature_pad_relay(
+    max_wu: u64,
+    relay: bool,
+) -> (RpcContext, TempDir, Arc<rbitcoin_net::ChainHub>) {
     let dir = TempDir::labeled("rpc-gen").expect("temp dir");
     let dest = dir.path().join("store");
     copy_store_tree(&mature_regtest_pad().store, &dest);
     let hub = open_regtest_hub(&dest, rbitcoin_consensus::ChainParams::regtest());
     hub.ensure_genesis().unwrap();
-    regtest_ctx(dir, hub, max_wu)
+    regtest_ctx(dir, hub, max_wu, relay)
 }
 
 #[test]
@@ -1692,12 +1727,15 @@ fn regtest_ctx(
     dir: TempDir,
     hub: Arc<rbitcoin_net::ChainHub>,
     max_wu: u64,
+    relay: bool,
 ) -> (RpcContext, TempDir, Arc<rbitcoin_net::ChainHub>) {
     let mp = MempoolHub::open_with_weight(dir.join("mempool"), hub.query.clone(), max_wu).unwrap();
     // The node attaches this pool before it serves RPC. Connects and
     // disconnects move the template mark on that same pool.
     assert!(hub.attach_mempool(Arc::clone(&mp)).is_ok());
-    mp.set_relay_enabled(true);
+    if relay {
+        mp.set_relay_enabled(true);
+    }
     let ctx = RpcContext {
         query: hub.query.clone(),
         mempool: Some(mp),

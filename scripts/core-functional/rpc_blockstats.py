@@ -7,6 +7,10 @@ the way Core does from the block's Esplora tx JSON (which carries prevouts).
 
 from __future__ import annotations
 
+import json
+import time
+import urllib.error
+import urllib.request
 from typing import Any, Callable
 
 from rpc_proxy import RpcError
@@ -64,6 +68,38 @@ def _param(params: Any, idx: int, name: str) -> Any:
     if isinstance(params, list) and len(params) > idx:
         return params[idx]
     return None
+
+
+def fetch_esplora_json(
+    url: str,
+    path: str,
+    *,
+    attempts: int = 120,
+    pause_s: float = 0.25,
+) -> Any:
+    """GET Esplora JSON, waiting while scripthash materialize still owns startup.
+
+    Esplora binds only after that scan. ``submitblock`` can return first, and
+    ``getblockstats`` then reads ``/block`` and ``/tx`` on this port.
+    """
+    target = url + path
+    last: BaseException | None = None
+    for i in range(attempts):
+        try:
+            with urllib.request.urlopen(target, timeout=10) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.URLError as e:
+            last = e
+            reason = e.reason
+            refused = isinstance(reason, ConnectionRefusedError) or (
+                isinstance(reason, OSError) and getattr(reason, "errno", None) in (111, 61)
+            )
+            if not refused or i + 1 == attempts:
+                raise RpcError(-1, f"<urlopen error {reason}>") from e
+            time.sleep(pause_s)
+        except (TimeoutError, OSError, json.JSONDecodeError) as e:
+            raise RpcError(-1, f"<urlopen error {e}>") from e
+    raise RpcError(-1, f"<urlopen error {last}>")
 
 
 def getblockstats_with_sizes(

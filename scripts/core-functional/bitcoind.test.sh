@@ -71,13 +71,55 @@ if printf '%s' "$OUT" | grep -q -- "--network regtest" \
   && printf '%s' "$OUT" | grep -q -- "--listen 0.0.0.0:18444" \
   && printf '%s' "$OUT" | grep -q -- "--listen 127.0.0.1:18445" \
   && printf '%s' "$OUT" | grep -q -- "--no-seeds" \
-  && printf '%s' "$OUT" | grep -q -- "--log-level debug"; then
+  && printf '%s' "$OUT" | grep -q -- "--log-level debug" \
+  && ! printf '%s' "$OUT" | grep -q -- "--sh-index"; then
   echo "ok - print-cmd maps conf + -debug"
   PASS=$((PASS + 1))
 else
   echo "not ok - print-cmd maps conf + -debug (got: $OUT)"
   FAIL=$((FAIL + 1))
 fi
+
+# Core's runner uses `{script}_{n}/node{i}`. Address history gets
+# --sh-index. Mining and compact-block scripts do not. Esplora stays on.
+sh_cmd() {
+  local parent="$1"
+  local dd="$WORKDIR/$parent/node0"
+  mkdir -p "$dd"
+  cp "$DATADIR/bitcoin.conf" "$dd/bitcoin.conf"
+  "$SHIM" --print-cmd -datadir="$dd" -regtest 2>/dev/null
+}
+assert_sh_off() {
+  local parent="$1"
+  local out
+  out="$(sh_cmd "$parent")" || true
+  if printf '%s' "$out" | grep -q -- "--esplora-listen" \
+    && ! printf '%s' "$out" | grep -q -- "--sh-index"; then
+    echo "ok - $parent starts without --sh-index"
+    PASS=$((PASS + 1))
+  else
+    echo "not ok - $parent starts without --sh-index (got: $out)"
+    FAIL=$((FAIL + 1))
+  fi
+}
+assert_sh_on() {
+  local parent="$1"
+  local out
+  out="$(sh_cmd "$parent")" || true
+  if printf '%s' "$out" | grep -q -- "--sh-index" \
+    && printf '%s' "$out" | grep -q -- "--esplora-listen"; then
+    echo "ok - $parent starts with --sh-index"
+    PASS=$((PASS + 1))
+  else
+    echo "not ok - $parent starts with --sh-index (got: $out)"
+    FAIL=$((FAIL + 1))
+  fi
+}
+assert_sh_off "p2p_compactblocks_hb_0"
+assert_sh_off "feature_nulldummy_0"
+assert_sh_off "p2p_v2_misbehaving_0"
+assert_sh_on "rpc_getblockstats_0"
+assert_sh_on "mempool_accept_wtxid_12"
 
 # TestNode always passes -debug and -loglevel=trace; take the more verbose.
 OUTT="$("$SHIM" --print-cmd -datadir="$DATADIR" -regtest -debug -loglevel=trace 2>/dev/null)"
@@ -711,6 +753,60 @@ if printf '%s' "$OUT_BF" | grep -q -- '--block-filter-index' \
   PASS=$((PASS + 1))
 else
   echo "not ok - -blockfilterindex maps (bare: $OUT_BF zero: $OUT_BF0)"
+  FAIL=$((FAIL + 1))
+fi
+
+# Concurrent readers must never observe a cookie line without ':'.
+# Path.write_text truncates first; Core get_auth_cookie then IndexErrors.
+COOKIE_RACE="$WORKDIR/cookie-race"
+mkdir -p "$COOKIE_RACE"
+if python3 - "$SHIM" "$COOKIE_RACE/.cookie" <<'PY'
+import importlib.machinery
+import importlib.util
+import sys
+import threading
+from pathlib import Path
+
+shim, dest = sys.argv[1], Path(sys.argv[2])
+sys.path.insert(0, str(Path(shim).resolve().parent))
+loader = importlib.machinery.SourceFileLoader("cf_bitcoind", shim)
+spec = importlib.util.spec_from_loader("cf_bitcoind", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+bad = []
+stop = False
+
+def reader():
+    while not stop:
+        try:
+            text = dest.read_text()
+        except OSError:
+            continue
+        if ":" not in text:
+            bad.append(repr(text))
+            return
+
+threads = [threading.Thread(target=reader) for _ in range(4)]
+for t in threads:
+    t.start()
+for i in range(2000):
+    mod.publish_cookie_file(dest, f"__cookie__:tok{i}\n")
+stop = True
+for t in threads:
+    t.join()
+if bad:
+    print("torn", bad[:3])
+    sys.exit(1)
+text = dest.read_text()
+if text != "__cookie__:tok1999\n":
+    print("final", repr(text))
+    sys.exit(1)
+PY
+then
+  echo "ok - cookie publish is never a torn line"
+  PASS=$((PASS + 1))
+else
+  echo "not ok - cookie publish is never a torn line"
   FAIL=$((FAIL + 1))
 fi
 

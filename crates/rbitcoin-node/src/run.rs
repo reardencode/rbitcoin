@@ -407,6 +407,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         );
     }
     node.hub.set_minimum_chain_work(config.minimum_chain_work);
+    node.hub.set_blocks_only(config.mempool.blocksonly);
     if let Some(secs) = config.max_tip_age_secs {
         node.hub.set_max_tip_age_secs(secs);
     }
@@ -838,14 +839,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     },
                 ));
             }
-            if relay_while_following(
-                tip_meets_min_work(&config, &node.hub),
-                config.mempool.blocksonly,
-                node.hub.in_ibd(),
-            ) {
-                mempool_blocking(&mempool, |mp| mp.set_relay_enabled(true)).await?;
-                spawn_fee_history_backfill(&mempool);
-            }
+            sync_tx_relay(&node, &config, &mempool).await?;
             let mp_live = mempool_blocking(&mempool, MempoolHub::live_count).await?;
             info!(
                 "node: catch-up complete tip={:?} — tip tracking + block/tx relay \
@@ -884,6 +878,65 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 warn!("seednode dial {addr}: {e}");
             }
         }
+    }
+    // Arm this before the follow connects. Each connect is awaited, and a
+    // dead proxy holds it for the connect timeout. A wait that starts
+    // afterwards never sees `setmocktime` during that hold. Catch-up already
+    // noted the first dial; drop that sample on this task, before follow
+    // dials, so the wait measures from the follow dial.
+    if tip_follow_ready
+        && !shutdown.requested()
+        && !addrman.is_empty()
+        && seednodes_allowed(&config.listen)
+    {
+        arm_seednode_follow_wait(&node.hub.clock);
+        let seeds = config.listen.seednodes.clone();
+        let network = config.network;
+        let peers = Arc::clone(&node.peers);
+        let clock = Arc::clone(&node.hub.clock);
+        let stop = Arc::clone(&shutdown.flag);
+        tokio::spawn(async move {
+            let started = loop {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                if let Some(at) = seednode_window_start(clock.connection_attempt_at()) {
+                    break at;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            };
+            loop {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                if seednode_delay_elapsed(started, clock.now_secs()) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            if stop.load(Ordering::SeqCst) {
+                return;
+            }
+            if peers.outbound_full_relay_ids().len() >= 2 {
+                return;
+            }
+            for raw in &seeds {
+                let addr = match resolve_seednode(raw, network) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        warn!("seednode {raw}: {e}");
+                        continue;
+                    }
+                };
+                let host = raw.split(':').next().unwrap_or(raw);
+                info!(
+                    "Couldn't connect to peers from addrman after {ADD_NEXT_SEEDNODE_SECS} seconds. Adding seednode ({host}) to addrfetch"
+                );
+                if let Err(e) = peers.dial(addr, PeerConnType::AddrFetch) {
+                    warn!("seednode dial {addr}: {e}");
+                }
+            }
+        });
     }
     if tip_follow_ready && !shutdown.requested() {
         let header_mark = (
@@ -935,8 +988,10 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         // were registered before catch-up (`set_connect_hosts`).
         node.peers.set_connect_addrs(config.listen.connect.clone());
         // Materialize can outlast the miner. Do not publish Electrum until
-        // the follow `getheaders` round is connected and indexed.
-        wait_wallet_history(&node, config.shindex, &shutdown, header_mark).await;
+        // the follow `getheaders` round is connected and indexed. Tx relay
+        // still flips inside that wait. High-bandwidth selection and compact
+        // getdata follow that bit. A tip announcement stays a compact block.
+        wait_wallet_history(&node, &config, &shutdown, header_mark, &mempool).await?;
     }
 
     let (mut electrum_handles, mut electrum_bridge, electrum_onion) = start_electrum_if_ready(
@@ -1001,58 +1056,6 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     }
     if rpc_handle.is_none() && !shutdown.requested() {
         rpc_handle = start_rpc_listener(&config, &node, &mempool, &shared_peers).await;
-    }
-    // The first dial is often during catch-up, before this port accepts.
-    // Measure the 10s from now (RPC is up) once a dial has been noted, so
-    // `setmocktime` in the post-restart window still lands inside it.
-    if !shutdown.requested() && !addrman.is_empty() && seednodes_allowed(&config.listen) {
-        let seeds = config.listen.seednodes.clone();
-        let network = config.network;
-        let peers = Arc::clone(&node.peers);
-        let clock = Arc::clone(&node.hub.clock);
-        let stop = Arc::clone(&shutdown.flag);
-        tokio::spawn(async move {
-            let started = loop {
-                if stop.load(Ordering::SeqCst) {
-                    return;
-                }
-                if clock.connection_attempt_at() != 0 {
-                    break clock.now_secs();
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            };
-            loop {
-                if stop.load(Ordering::SeqCst) {
-                    return;
-                }
-                if seednode_delay_elapsed(started, clock.now_secs()) {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            if stop.load(Ordering::SeqCst) {
-                return;
-            }
-            if peers.outbound_full_relay_ids().len() >= 2 {
-                return;
-            }
-            for raw in &seeds {
-                let addr = match resolve_seednode(raw, network) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        warn!("seednode {raw}: {e}");
-                        continue;
-                    }
-                };
-                let host = raw.split(':').next().unwrap_or(raw);
-                info!(
-                    "Couldn't connect to peers from addrman after {ADD_NEXT_SEEDNODE_SECS} seconds. Adding seednode ({host}) to addrfetch"
-                );
-                if let Err(e) = peers.dial(addr, PeerConnType::AddrFetch) {
-                    warn!("seednode dial {addr}: {e}");
-                }
-            }
-        });
     }
     let sv2_tp = start_sv2_tp(&config, &node.hub).await;
     let sv2_stats = sv2_tp.as_ref().map(Sv2TpHandle::stats);
@@ -1311,18 +1314,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 let ibd = node.hub.in_ibd();
                 h.initial_block_download
                     .store(!minwork || ibd, Ordering::SeqCst);
-                let want_relay = !config.mempool.blocksonly && minwork && !ibd;
-                if want_relay != mempool.relay_enabled() {
-                    mempool_blocking(&mempool, move |mp| mp.set_relay_enabled(want_relay)).await?;
-                    if want_relay {
-                        spawn_fee_history_backfill(&mempool);
-                        info!("ibd: leaving IBD — enabling tx relay");
-                    } else {
-                        info!("ibd: entering IBD — pausing tx relay");
-                    }
-                    node.peers
-                        .queue_feefilter_all(node.hub.feefilter_sat_kvb() as i64);
-                }
+                sync_tx_relay(&node, &config, &mempool).await?;
             }
             if matches!(wake, TipFollowWake::Stop) {
                 break;
@@ -2237,19 +2229,64 @@ pub async fn start_i2p_named_forward(
     Ok(sam)
 }
 
+/// Turn peer tx relay on or off to match IBD. One place for indexing
+/// finished, [`wait_wallet_history`], and the tip-follow loop.
+pub async fn sync_tx_relay(
+    node: &P2PNode,
+    config: &NodeConfig,
+    mempool: &Arc<MempoolHub>,
+) -> Result<(), NodeError> {
+    let want = relay_while_following(
+        tip_meets_min_work(config, &node.hub),
+        config.mempool.blocksonly,
+        node.hub.in_ibd(),
+    );
+    if want == mempool.relay_enabled() {
+        // A tip-mode accept may have set the bit and left preload due.
+        if want {
+            let due = mempool_blocking(mempool, MempoolHub::take_fee_backfill_due).await?;
+            if due {
+                spawn_fee_history_backfill(mempool);
+            }
+        }
+        return Ok(());
+    }
+    let edge = mempool_blocking(mempool, move |mp| mp.apply_relay_edge(want)).await?;
+    // A purge fault leaves the bit unchanged. The next wake retries. Do not
+    // tell peers relay is on, or log that it flipped, until the store moved.
+    let Some(backfill) = edge else {
+        return Ok(());
+    };
+    node.peers
+        .queue_feefilter_all(node.hub.feefilter_sat_kvb() as i64);
+    if want {
+        info!("ibd: leaving IBD — enabling tx relay");
+    } else {
+        info!("ibd: entering IBD — pausing tx relay");
+    }
+    if backfill {
+        spawn_fee_history_backfill(mempool);
+    }
+    Ok(())
+}
+
 /// Wallet bind waits out one follow `getheaders` round.
 ///
 /// Scripthash materialize holds the process before dial. The miner can add
 /// a block in that window. Opening Electrum on the pre-dial tip serves a
-/// history that does not include it.
+/// history that does not include it. Relay follows IBD on each tick of this
+/// wait, so peer announcements and the fee filter start before the
+/// tip-follow loop. High-bandwidth selection follows that same bit.
 pub async fn wait_wallet_history(
     node: &P2PNode,
-    shindex: bool,
+    config: &NodeConfig,
     shutdown: &Shutdown,
     mark: (u64, u64),
-) {
+    mempool: &Arc<MempoolHub>,
+) -> Result<(), NodeError> {
+    sync_tx_relay(node, config, mempool).await?;
     if node.follow_live_count() == 0 {
-        return;
+        return Ok(());
     }
     let (sent0, reply0) = mark;
     let started = Instant::now();
@@ -2257,18 +2294,19 @@ pub async fn wait_wallet_history(
     let unsent_limit = Duration::from_secs(2);
     loop {
         if shutdown.requested() || started.elapsed() >= deadline {
-            return;
+            return Ok(());
         }
+        sync_tx_relay(node, config, mempool).await?;
         let sent = node.hub.initial_getheaders_sent().saturating_sub(sent0);
         let replies = node.hub.headers_reply_count().saturating_sub(reply0);
         let tip = node.tip_height().unwrap_or(0);
         let best = node.hub.best_header_height();
-        let sh_ok = !shindex || node.hub.query.sh_is_tip_ready();
+        let sh_ok = !config.shindex || node.hub.query.sh_is_tip_ready();
         if sent > 0 && replies >= sent && best <= tip && sh_ok {
-            return;
+            return Ok(());
         }
         if sent == 0 && started.elapsed() >= unsent_limit {
-            return;
+            return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
@@ -2775,7 +2813,33 @@ pub fn follow_dial_type(connect: &[rbitcoin_net::NetAddr]) -> PeerConnType {
 #[doc(hidden)]
 pub const ADD_NEXT_SEEDNODE_SECS: u64 = 10;
 
-/// True once `now` is at least 10s after the first outbound dial.
+/// Drop a dial sample taken before tip-follow.
+///
+/// Catch-up records the process's first dial and then drops those
+/// sessions. Call this once on the task that is about to dial follow,
+/// before that dial. The 10s wait then measures from the follow dial.
+#[doc(hidden)]
+pub fn arm_seednode_follow_wait(clock: &rbitcoin_consensus::clock::NodeClock) {
+    clock.forget_connection_attempt();
+}
+
+/// Clock sample that opens the 10s seednode wait.
+///
+/// `None` until the next outbound dial. A later `setmocktime` does not
+/// move this sample, so the wait still ends. Sampling `now` after that
+/// jump would start the wait at the mock, and mock time does not advance.
+/// A catch-up dial is not this sample: [`arm_seednode_follow_wait`] clears
+/// it before follow dials.
+#[doc(hidden)]
+pub fn seednode_window_start(attempt_at: u64) -> Option<u64> {
+    if attempt_at == 0 {
+        None
+    } else {
+        Some(attempt_at)
+    }
+}
+
+/// True once `now` is at least 10s after the sampled outbound dial.
 ///
 /// `started_at == 0` means that dial has not happened. A later `setmocktime`
 /// moves `now` and leaves `started_at` on the dial sample.
