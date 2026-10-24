@@ -157,6 +157,64 @@ fn follow_dial_targets_connect_bypasses_diversity() {
 }
 
 #[test]
+fn seednode_window_ignores_the_catchup_dial() {
+    let clock = rbitcoin_consensus::clock::NodeClock::new();
+    clock.set_mock(1_700_000_000);
+    clock.note_connection_attempt();
+    let catch_up = clock.connection_attempt_at();
+    clock.set_mock((catch_up + 11) as i64);
+    assert!(
+        seednode_delay_elapsed(catch_up, clock.now_secs()),
+        "a catch-up dial is already 11s old when follow starts"
+    );
+    arm_seednode_follow_wait(&clock);
+    assert!(
+        seednode_window_start(clock.connection_attempt_at()).is_none(),
+        "arming the follow wait drops the catch-up sample"
+    );
+    clock.note_connection_attempt();
+    let follow = seednode_window_start(clock.connection_attempt_at()).expect("follow dial");
+    assert_ne!(follow, catch_up);
+    assert!(
+        !seednode_delay_elapsed(follow, clock.now_secs()),
+        "the follow dial is the new sample, so the old jump must not add seeds"
+    );
+    clock.set_mock((follow + 11) as i64);
+    assert_eq!(
+        seednode_window_start(clock.connection_attempt_at()),
+        Some(follow),
+        "setmocktime during the follow hold must not move that sample"
+    );
+    assert!(seednode_delay_elapsed(follow, clock.now_secs()));
+}
+
+#[test]
+fn seednode_window_stays_on_the_dial_when_mock_jumps() {
+    let clock = rbitcoin_consensus::clock::NodeClock::new();
+    clock.set_mock(1_700_000_000);
+    assert!(
+        seednode_window_start(clock.connection_attempt_at()).is_none(),
+        "no dial yet"
+    );
+    clock.note_connection_attempt();
+    let started = seednode_window_start(clock.connection_attempt_at()).expect("dial sample");
+    clock.set_mock((started + 11) as i64);
+    assert_eq!(
+        seednode_window_start(clock.connection_attempt_at()),
+        Some(started),
+        "setmocktime must not move the dial sample"
+    );
+    assert!(
+        seednode_delay_elapsed(started, clock.now_secs()),
+        "setmocktime(now+11) after the dial opens the seednode window"
+    );
+    assert!(
+        !seednode_delay_elapsed(clock.now_secs(), clock.now_secs()),
+        "sampling the clock after the jump starts the wait at the mock"
+    );
+}
+
+#[test]
 fn seednode_delay_starts_at_the_first_dial() {
     assert!(
         !seednode_delay_elapsed(0, 1_700_000_011),
