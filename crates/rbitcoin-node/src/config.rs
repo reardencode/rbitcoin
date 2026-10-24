@@ -421,6 +421,36 @@ pub struct NodeConfig {
     pub trust_peer: Option<rbitcoin_net::NetAddr>,
     /// `--trust-peer` clearnet DNS name. Mutually exclusive with [`Self::trust_peer`].
     pub trust_peer_host: Option<String>,
+    /// Set by [`Self::seal_trust_peer`] after listen, seeds, and inbound are frozen.
+    trust_seal: Option<TrustPeerSeal>,
+}
+
+/// Marker that [`TrustPeerSeal::try_new`] accepted listen, seeds, and inbound.
+///
+/// There is no field to flip after that check. A config that names a trust
+/// peer and never sealed still runs `try_new` from [`NodeConfig::validate`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TrustPeerSeal;
+
+impl TrustPeerSeal {
+    fn try_new(listen: &ListenOpts) -> Result<Self, NodeError> {
+        if !matches!(listen.p2p, P2pListen::Off) || listen.listen_onion {
+            return Err(NodeError::Config(
+                "trust-peer cannot be combined with --listen".into(),
+            ));
+        }
+        if listen.max_inbound > 0 {
+            return Err(NodeError::Config(
+                "trust-peer cannot be combined with --max-inbound greater than 0".into(),
+            ));
+        }
+        if listen.use_seeds || !listen.seednodes.is_empty() {
+            return Err(NodeError::Config(
+                "trust-peer cannot be combined with --seed-node".into(),
+            ));
+        }
+        Ok(Self)
+    }
 }
 
 impl Default for NodeConfig {
@@ -487,6 +517,7 @@ impl Default for NodeConfig {
             connect_redial: rbitcoin_net::REDIAL_INTERVAL,
             trust_peer: None,
             trust_peer_host: None,
+            trust_seal: None,
         }
     }
 }
@@ -737,6 +768,7 @@ impl NodeConfig {
         self.listen.use_seeds = false;
         self.listen.max_inbound = 0;
         self.listen.seednodes.clear();
+        self.trust_seal = Some(TrustPeerSeal::try_new(&self.listen)?);
         Ok(())
     }
 
@@ -800,38 +832,19 @@ impl NodeConfig {
     }
 
     /// Sealed `--trust-peer` state: one dial target, no listen, no seeds.
+    ///
+    /// A seal from [`Self::seal_trust_peer`] already passed [`TrustPeerSeal::try_new`].
+    /// A config that names a trust peer and never sealed still fails here.
     fn validate_trust_peer(&self) -> Result<(), NodeError> {
         if !self.trust_peer_set() {
             return Ok(());
         }
-        self.reject_trust_listen()?;
-        self.reject_trust_seeds()?;
+        if self.trust_seal.is_none() {
+            TrustPeerSeal::try_new(&self.listen)?;
+        }
         self.connect_matches_trust_peer()?;
         if self.listen.connect.is_empty() && self.listen.connect_dns.is_empty() {
             return Err(NodeError::Config("trust-peer requires an address".into()));
-        }
-        Ok(())
-    }
-
-    fn reject_trust_listen(&self) -> Result<(), NodeError> {
-        if !matches!(self.listen.p2p, P2pListen::Off) || self.listen.listen_onion {
-            return Err(NodeError::Config(
-                "trust-peer cannot be combined with --listen".into(),
-            ));
-        }
-        if self.listen.max_inbound > 0 {
-            return Err(NodeError::Config(
-                "trust-peer cannot be combined with --max-inbound greater than 0".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn reject_trust_seeds(&self) -> Result<(), NodeError> {
-        if self.listen.use_seeds || !self.listen.seednodes.is_empty() {
-            return Err(NodeError::Config(
-                "trust-peer cannot be combined with --seed-node".into(),
-            ));
         }
         Ok(())
     }

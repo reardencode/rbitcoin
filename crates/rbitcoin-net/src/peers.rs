@@ -266,6 +266,19 @@ pub struct DialRequest {
     pub in_flight: Option<DialInFlight>,
 }
 
+/// [`PeerHub`] with a dial channel already attached.
+pub struct DialReady<'a> {
+    hub: &'a PeerHub,
+    tx: mpsc::UnboundedSender<DialRequest>,
+}
+
+impl DialReady<'_> {
+    pub fn addnode_host(&self, node: &str, cmd: &str, default_port: u16) -> Result<(), String> {
+        self.hub
+            .addnode_host_ready(&self.tx, node, cmd, default_port)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PeerEndpoint {
     pub addr: SocketAddr,
@@ -2312,6 +2325,17 @@ impl PeerHub {
         *self.dial_tx.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
     }
 
+    /// Clone the dial sender. RPC `addnode` takes this and does not match
+    /// on a missing dialer again.
+    pub fn dial_ready(&self) -> Result<DialReady<'_>, String> {
+        let g = self.dial_tx.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = g
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| "no dialer attached".to_string())?;
+        Ok(DialReady { hub: self, tx })
+    }
+
     /// Placeholder row after TCP connect, before VERSION.
     pub fn register_connecting(
         self: &Arc<Self>,
@@ -2632,6 +2656,15 @@ impl PeerHub {
     /// that is connected or still dialling, and the RPC still succeeds.
     #[doc(hidden)]
     pub fn dial_manual_target(&self, target: DialTarget) -> Result<(), String> {
+        let ready = self.dial_ready()?;
+        self.dial_manual_ready(&ready.tx, target)
+    }
+
+    fn dial_manual_ready(
+        &self,
+        tx: &mpsc::UnboundedSender<DialRequest>,
+        target: DialTarget,
+    ) -> Result<(), String> {
         self.trust_allows_target(&target)?;
         // Claim before the live check: a dial registers its session before
         // it drops its claim, so no window shows the endpoint as neither.
@@ -2641,7 +2674,7 @@ impl PeerHub {
         if self.is_target_live(&target) {
             return Ok(());
         }
-        self.send_dial(target, PeerConnType::Manual, Some(claim))
+        self.enqueue_dial(tx, target, PeerConnType::Manual, Some(claim))
     }
 
     pub fn addnode_net(&self, addr: crate::NetAddr, cmd: &str) -> Result<(), String> {
@@ -2673,16 +2706,27 @@ impl PeerHub {
     /// `add` keeps the string when DNS fails so a later redial can succeed.
     /// `onetry` fails if the name does not resolve now.
     pub fn addnode_host(&self, node: &str, cmd: &str, default_port: u16) -> Result<(), String> {
+        let ready = self.dial_ready()?;
+        ready.addnode_host(node, cmd, default_port)
+    }
+
+    fn addnode_host_ready(
+        &self,
+        tx: &mpsc::UnboundedSender<DialRequest>,
+        node: &str,
+        cmd: &str,
+        default_port: u16,
+    ) -> Result<(), String> {
         self.note_default_port(default_port);
         self.trust_allows_spec(node)?;
         match cmd {
-            "onetry" => self.dial_resolved(node),
+            "onetry" => self.dial_resolved_ready(tx, node),
             "add" => {
                 self.manual_hosts
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .insert(node.to_string());
-                let _ = self.dial_resolved(node);
+                let _ = self.dial_resolved_ready(tx, node);
                 Ok(())
             }
             "remove" => {
@@ -2918,6 +2962,15 @@ impl PeerHub {
 
     #[doc(hidden)]
     pub fn dial_resolved(&self, node: &str) -> Result<(), String> {
+        let ready = self.dial_ready()?;
+        self.dial_resolved_ready(&ready.tx, node)
+    }
+
+    fn dial_resolved_ready(
+        &self,
+        tx: &mpsc::UnboundedSender<DialRequest>,
+        node: &str,
+    ) -> Result<(), String> {
         let target = self.host_dial_target(node)?;
         match &target {
             DialTarget::Socket(addr) => {
@@ -2933,7 +2986,7 @@ impl PeerHub {
                     .insert(target.net_addr());
             }
         }
-        self.dial_manual_target(target)
+        self.dial_manual_ready(tx, target)
     }
 
     #[doc(hidden)]
@@ -3163,9 +3216,18 @@ impl PeerHub {
         typ: PeerConnType,
         in_flight: Option<DialInFlight>,
     ) -> Result<(), String> {
+        let ready = self.dial_ready()?;
+        self.enqueue_dial(&ready.tx, target, typ, in_flight)
+    }
+
+    fn enqueue_dial(
+        &self,
+        tx: &mpsc::UnboundedSender<DialRequest>,
+        target: DialTarget,
+        typ: PeerConnType,
+        in_flight: Option<DialInFlight>,
+    ) -> Result<(), String> {
         self.trust_allows_target(&target)?;
-        let g = self.dial_tx.lock().unwrap_or_else(|e| e.into_inner());
-        let tx = g.as_ref().ok_or("no dialer attached")?;
         tx.send(DialRequest {
             target,
             typ,

@@ -1,5 +1,4 @@
 use super::*;
-use bitcoin::hashes::Hash;
 use rbitcoin_net::MempoolHub;
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
@@ -29,40 +28,27 @@ pub fn getnettotals(ctx: &RpcContext) -> Value {
     })
 }
 
-pub fn getpeerinfo(ctx: &RpcContext) -> Value {
-    let Some(hub) = ctx.peers.as_ref() else {
-        return json!([]);
-    };
+pub fn getpeerinfo(ctx: &RpcContext, hub: &rbitcoin_net::PeerHub) -> Value {
+    let chain = ctx.chain.as_deref();
     let rows: Vec<Value> = hub
         .snapshot()
         .into_iter()
-        .map(|p| peerinfo_json(ctx, p))
+        .map(|p| peerinfo_json(chain, p))
         .collect();
     json!(rows)
 }
 
 #[doc(hidden)]
-pub fn peer_header_height(ctx: &RpcContext, hash: &bitcoin::BlockHash) -> Option<i64> {
-    if let Some(c) = ctx.chain.as_ref() {
-        return c.header_height(hash).map(i64::from);
-    }
-    ctx.query
-        .height_of_hash(&hash.to_byte_array())
-        .ok()
-        .flatten()
-        .map(|h| i64::from(h.0))
+pub fn peer_header_height(
+    chain: &rbitcoin_net::ChainHub,
+    hash: &bitcoin::BlockHash,
+) -> Option<i64> {
+    chain.header_height(hash).map(i64::from)
 }
 
 #[doc(hidden)]
-pub fn peer_block_connected(ctx: &RpcContext, hash: &bitcoin::BlockHash) -> bool {
-    if let Some(c) = ctx.chain.as_ref() {
-        return c.is_connected(hash);
-    }
-    ctx.query
-        .height_of_hash(&hash.to_byte_array())
-        .ok()
-        .flatten()
-        .is_some()
+pub fn peer_block_connected(chain: &rbitcoin_net::ChainHub, hash: &bitcoin::BlockHash) -> bool {
+    chain.is_connected(hash)
 }
 
 #[doc(hidden)]
@@ -70,7 +56,7 @@ pub fn outbound_median_time_offset(rows: &[rbitcoin_net::PeerInfo]) -> i64 {
     rbitcoin_net::outbound_time_offset(rows)
 }
 
-pub fn peerinfo_json(ctx: &RpcContext, p: rbitcoin_net::PeerInfo) -> Value {
+pub fn peerinfo_json(chain: Option<&rbitcoin_net::ChainHub>, p: rbitcoin_net::PeerInfo) -> Value {
     let mut recv = serde_json::Map::new();
     for (k, v) in p.bytesrecv_per_msg {
         recv.insert(k, json!(v));
@@ -79,17 +65,17 @@ pub fn peerinfo_json(ctx: &RpcContext, p: rbitcoin_net::PeerInfo) -> Value {
     for (k, v) in p.bytessent_per_msg {
         sent.insert(k, json!(v));
     }
-    let (synced_headers, synced_blocks) = match p.best_known {
-        Some(h) => {
-            let height = peer_header_height(ctx, &h).unwrap_or(-1);
-            let blocks = if peer_block_connected(ctx, &h) {
+    let (synced_headers, synced_blocks) = match (p.best_known, chain) {
+        (Some(h), Some(chain)) => {
+            let height = peer_header_height(chain, &h).unwrap_or(-1);
+            let blocks = if peer_block_connected(chain, &h) {
                 height
             } else {
                 -1
             };
             (height, blocks)
         }
-        None => (-1, -1),
+        _ => (-1, -1),
     };
     let mut row = json!({
         "id": p.id,
@@ -171,13 +157,17 @@ pub fn require_peers(ctx: &RpcContext) -> Result<&rbitcoin_net::PeerHub, Value> 
         .ok_or_else(|| rpc_error(ERR_MISC, "P2P session table not attached"))
 }
 
-pub fn addnode(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
-    params.reject_unknown(&["node", "command", "v2transport"])?;
-    let hub = require_peers(ctx)?;
+pub fn addnode(
+    ctx: &RpcContext,
+    hub: &rbitcoin_net::PeerHub,
+    params: &RpcParams,
+) -> Result<Value, Value> {
     let node = params.req_str(0, "node")?;
     let cmd = params.req_str(1, "command")?;
     let _v2 = params.opt_bool(2, "v2transport")?;
-    hub.addnode_host(node, cmd, ctx.network.default_p2p_port())
+    let ready = hub.dial_ready().map_err(|e| rpc_error(ERR_MISC, e))?;
+    ready
+        .addnode_host(node, cmd, ctx.network.default_p2p_port())
         .map_err(|e| rpc_error(ERR_MISC, e))?;
     Ok(Value::Null)
 }

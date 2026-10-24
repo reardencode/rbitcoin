@@ -407,10 +407,7 @@ fn node_cli_and_surface_smoke() {
     assert_eq!(Network::parse("REGTEST").unwrap(), Network::Regtest);
     assert!(!VERSION.is_empty());
 
-    let cfg = NodeConfig {
-        datadir: std::path::PathBuf::from("").into(),
-        ..NodeConfig::default()
-    };
+    let cfg = NodeConfig::default().with_datadir(std::path::PathBuf::from(""));
     assert!(run_node(cfg).is_err());
     let td = TestDatadir::new().unwrap();
     let file = td.path().join("blocked");

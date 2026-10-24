@@ -807,10 +807,8 @@ fn conf_keys_parse_and_error_paths() {
 
 #[test]
 fn testactivationheight_csv_overlay_on_chain_params() {
-    let mut cfg = NodeConfig {
-        network: Network::Regtest,
-        ..NodeConfig::default()
-    };
+    let mut cfg = NodeConfig::default();
+    cfg.network = Network::Regtest;
     cfg.test_activation_heights.push(("csv".into(), 102));
     let p = cfg.chain_params().unwrap();
     assert_eq!(p.csv_height(), 102);
@@ -822,9 +820,10 @@ fn testactivationheight_csv_overlay_on_chain_params() {
     assert!(plain.prefill_compact);
     assert!(plain.test_activation_heights.is_empty());
     assert_eq!(
-        NodeConfig {
-            network: Network::Regtest,
-            ..NodeConfig::default()
+        {
+            let mut cfg = NodeConfig::default();
+            cfg.network = Network::Regtest;
+            cfg
         }
         .chain_params()
         .unwrap()

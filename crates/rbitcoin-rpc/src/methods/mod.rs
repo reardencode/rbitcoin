@@ -544,13 +544,20 @@ pub fn dispatch_inner(ctx: &RpcContext, method: &str, params: RpcParams) -> Resu
         }
         "getpeerinfo" => {
             params.reject_unknown(&[])?;
-            Ok(getpeerinfo(ctx))
+            let Some(hub) = ctx.peers.as_ref() else {
+                return Ok(json!([]));
+            };
+            Ok(getpeerinfo(ctx, hub))
         }
         "ping" => {
             params.reject_unknown(&[])?;
             ping(ctx)
         }
-        "addnode" => addnode(ctx, &params),
+        "addnode" => {
+            params.reject_unknown(&["node", "command", "v2transport"])?;
+            let hub = require_peers(ctx)?;
+            addnode(ctx, hub, &params)
+        }
         "disconnectnode" => disconnectnode(ctx, &params),
         "addconnection" => addconnection(ctx, &params),
         "addpeeraddress" => addpeeraddress(ctx, &params),

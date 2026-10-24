@@ -1009,16 +1009,7 @@ fn template_follows_blocks_the_hub_connects() {
     dispatch(&ctx, "generate", vec![json!(2)]).unwrap();
     let gbt = dispatch(&ctx, "getblocktemplate", vec![json!({"rules": ["segwit"]})]).unwrap();
     assert_eq!(gbt["height"].as_u64(), Some(3), "{gbt}");
-    let mut bare = ctx_without_chain(&ctx);
-    bare.mempool = None;
-    let bare_gbt = dispatch(
-        &bare,
-        "getblocktemplate",
-        vec![json!({"rules": ["segwit"]})],
-    )
-    .unwrap();
-    assert_eq!(bare_gbt["height"].as_u64(), Some(3), "{bare_gbt}");
-    assert_eq!(dispatch(&bare, "getrawmempool", vec![]).unwrap(), json!([]));
+    assert_eq!(dispatch(&ctx, "getrawmempool", vec![]).unwrap(), json!([]));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3795,33 +3786,6 @@ fn getpeerinfo_synced_heights_from_best_known() {
 }
 
 #[test]
-fn getpeerinfo_synced_heights_via_query_without_chain() {
-    use rbitcoin_net::{PeerConnType, PeerHub};
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-
-    let (mut ctx, dir, chain) = ctx_regtest_hub();
-    let genesis = chain.tip_hash().expect("genesis");
-    ctx.chain = None;
-    let hub = PeerHub::new();
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
-    let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18445);
-    let live = hub.register(
-        addr,
-        bind,
-        &test_version(0, 0),
-        false,
-        PeerConnType::OutboundFullRelay,
-    );
-    live.note_best_known(genesis);
-    ctx.peers = Some(hub);
-    let r = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
-    let row = &r.as_array().unwrap()[0];
-    assert_eq!(row["synced_headers"], json!(0));
-    assert_eq!(row["synced_blocks"], json!(0));
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
 fn getpeerinfo_header_only_best_known_is_not_synced_blocks() {
     use bitcoin::consensus::encode::serialize;
     use rbitcoin_consensus::mine_regtest_paying;
@@ -4047,17 +4011,59 @@ fn getpeerinfo_sent_pingwait_and_limited_services() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Every `P2PNode` attaches a dialer, so no session reaches this arm.
-/// `node_run_p2p_short` owns the connected `addnode` / `disconnectnode` results.
+/// Dispatch is the only missing-hub match for `addnode` and `getpeerinfo`.
+/// `getblocktemplate` builds from the query tip, so an empty store still
+/// reports `no tip`. `getblockchaininfo` keeps its no-hub IBD fallback.
 #[test]
-fn addnode_without_a_dialer_errors() {
+fn addnode_and_getpeerinfo_attach_hubs_at_dispatch() {
     use rbitcoin_net::PeerHub;
-    let (mut ctx, dir) = ctx_empty();
+    let (ctx, dir) = ctx_empty();
+    let add = dispatch(&ctx, "addnode", vec![json!("127.0.0.1:1"), json!("onetry")]).unwrap_err();
+    assert!(
+        add["message"]
+            .as_str()
+            .unwrap()
+            .contains("P2P session table not attached"),
+        "{add}"
+    );
+    assert_eq!(dispatch(&ctx, "getpeerinfo", vec![]).unwrap(), json!([]));
+    let gbt = dispatch(&ctx, "getblocktemplate", vec![json!({"rules": ["segwit"]})]).unwrap_err();
+    assert!(
+        gbt["message"].as_str().unwrap_or("").contains("no tip"),
+        "{gbt}"
+    );
+    let info = dispatch(&ctx, "getblockchaininfo", vec![]).unwrap();
+    assert!(info["initialblockdownload"].is_boolean(), "{info}");
+
+    let (mut ctx, dir2) = ctx_empty();
     let hub = PeerHub::new();
-    ctx.peers = Some(hub);
+    let err = match hub.dial_ready() {
+        Err(e) => e,
+        Ok(_) => panic!("dial_ready succeeded with no dialer"),
+    };
+    assert!(err.contains("no dialer attached"), "{err}");
+    ctx.peers = Some(hub.clone());
     let e = dispatch(&ctx, "addnode", vec![json!("127.0.0.1:1"), json!("onetry")]).unwrap_err();
-    assert!(e["message"].as_str().unwrap().contains("dialer"), "{e}");
+    assert!(
+        e["message"]
+            .as_str()
+            .unwrap()
+            .contains("no dialer attached"),
+        "{e}"
+    );
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    hub.set_dialer(tx);
+    let ready = match hub.dial_ready() {
+        Ok(ready) => ready,
+        Err(e) => panic!("dial_ready after set_dialer: {e}"),
+    };
+    let bad = ready
+        .addnode_host("bad host", "onetry", ctx.network.default_p2p_port())
+        .unwrap_err();
+    assert!(!bad.contains("dialer"), "{bad}");
+    assert!(bad.contains("bad peer address"), "{bad}");
     let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&dir2);
 }
 
 #[test]

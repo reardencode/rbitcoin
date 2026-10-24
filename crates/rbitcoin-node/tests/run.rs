@@ -770,10 +770,8 @@ fn startup_sets_datadir_hdd_on_the_store() {
     let dir = scratch_dir("datadir-hdd");
     let q = Query::open_or_create_tiny(&dir).unwrap();
     assert!(!q.store().datadir_hdd());
-    let cfg = NodeConfig {
-        datadir_hdd: true,
-        ..NodeConfig::default()
-    };
+    let mut cfg = NodeConfig::default();
+    cfg.datadir_hdd = true;
     apply_startup_index_mode(&q, &cfg, 0).unwrap();
     assert!(q.store().datadir_hdd());
     let _ = std::fs::remove_dir_all(&dir);
