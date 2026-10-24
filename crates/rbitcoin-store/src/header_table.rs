@@ -138,6 +138,17 @@ impl HeaderHead {
 
     #[doc(hidden)]
     pub fn open(base: PathBuf, body_count: u64, scale: HeadScale) -> Result<Self, StoreError> {
+        Self::open_to(base, body_count, Some(initial_slots_for(scale)))
+    }
+
+    /// Open at the file's own slots: no grow-part discard and no rewrite.
+    #[doc(hidden)]
+    pub fn open_source(base: PathBuf, body_count: u64) -> Result<Self, StoreError> {
+        Self::open_to(base, body_count, None)
+    }
+
+    /// `target` `None` keeps the first generation's slots as the target.
+    fn open_to(base: PathBuf, body_count: u64, target: Option<u64>) -> Result<Self, StoreError> {
         if base.is_dir() {
             return Err(StoreError::Layout(HEADER_HEAD_DIR_REFUSE.to_string()));
         }
@@ -147,9 +158,11 @@ impl HeaderHead {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "header.head missing"),
             ));
         }
-        crate::hashhead::discard_grow_part(&base);
-        let target_slots = initial_slots_for(scale);
+        if target.is_some() {
+            crate::hashhead::discard_grow_part(&base);
+        }
         let mut gens = vec![HashHead::open(&base)?];
+        let target_slots = target.unwrap_or_else(|| gens[0].slots());
         let mut i = 1usize;
         loop {
             let p = header_gen_path(&base, i);
@@ -277,13 +290,25 @@ impl HeaderTable {
     }
 
     pub fn open_with_scale(dir: &std::path::Path, scale: HeadScale) -> Result<Self, StoreError> {
+        Self::open_head(dir, |base, count| HeaderHead::open(base, count, scale))
+    }
+
+    /// [`HeaderHead::open_source`]: the head keeps the file's slots.
+    pub fn open_source(dir: &std::path::Path) -> Result<Self, StoreError> {
+        Self::open_head(dir, HeaderHead::open_source)
+    }
+
+    fn open_head(
+        dir: &std::path::Path,
+        head: impl FnOnce(PathBuf, u64) -> Result<HeaderHead, StoreError>,
+    ) -> Result<Self, StoreError> {
         let body = TableFile::open(dir.join("header.body"), TableKind::Header)?;
         let body_len = body.logical_len().saturating_sub(FILE_HEADER_LEN as u64);
         if body_len % HEADER_RECORD_LEN as u64 != 0 {
             return Err(StoreError::Corrupt("header body size"));
         }
         let count = body_len / HEADER_RECORD_LEN as u64;
-        let head = HeaderHead::open(dir.join("header.head"), count, scale)?;
+        let head = head(dir.join("header.head"), count)?;
         Ok(Self {
             body,
             head,

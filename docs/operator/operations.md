@@ -63,6 +63,9 @@ Clean smoke:
 |------|------|---------|
 | `--datadir PATH` | `datadir=` | cwd `datadir` (`./datadir` Unix, `.\datadir` Windows) |
 | `--datadir-cold PATH` | `datadir_cold=` | unset — append-only IBD files under `{PATH}/store`: `seqsigwit.*`, `txstat.*`, `input.*`, and (once created) `blockfilter.*` and `sp_tweaks.*`. The pin set stays in `--datadir` |
+| `--hot-digest` | | off — open the store, print `network height tiphash digest` and exit. An empty store exits 1. See [Import a pre-built store](storage.md#import-a-pre-built-store---assumehot) |
+| `--assumehot-from DATADIR` | | unset — CLI only. With `--assumehot`, import `DATADIR/store` into this datadir's empty store before the node opens it. A later start with the same `--assumehot` opens the imported store and ignores both flags |
+| `--assumehot HASH` | | unset — CLI only. The 64-hex digest `--hot-digest` printed on the source. Required with `--assumehot-from` |
 | `--network NET` | `network=` | `mainnet` |
 | `--signet-challenge HEX` | `signet_challenge=` | default global Signet challenge |
 | `--signet-block-time SECS` | `signet_block_time=` | 600; requires a custom challenge |

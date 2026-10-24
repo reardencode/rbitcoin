@@ -922,11 +922,22 @@ pub fn class_a_skew_assert_aligned(
     Ok(())
 }
 
+/// `Ok` when the open may repair; otherwise `what` refuses the store, which
+/// is an `--assumehot` source opened as it is.
+fn may_repair(repair: bool, what: &'static str) -> Result<(), StoreError> {
+    if repair {
+        Ok(())
+    } else {
+        Err(StoreError::Corrupt(what))
+    }
+}
+
 #[doc(hidden)]
 pub fn repair_class_a_count_skew(
     stems: ClassASkewStems<'_>,
     prune_seqsigwit_mode: bool,
     input_existed: bool,
+    repair: bool,
 ) -> Result<bool, StoreError> {
     let n_loc = stems.create_loc.count();
     let n_txids = stems.txids.count();
@@ -961,6 +972,10 @@ pub fn repair_class_a_count_skew(
     if skewed.is_none() && !ahead {
         return Ok(false);
     }
+    may_repair(
+        repair,
+        "source: Class A stems differ in length (a copy cut short)",
+    )?;
     let n_input = stems.input.count();
     rbitcoin_log::warn!(
         "store: Class A count skew loc={n_loc} seqsigwit.loc={n_seqsigwit_loc} \
@@ -1177,14 +1192,20 @@ impl TxTable {
     }
 
     pub fn open_with_opts(dir: &Path, opts: HeadOpenOpts) -> Result<Self, StoreError> {
-        Self::open_seqsigwit(dir, dir, opts)
+        Self::open_seqsigwit(dir, dir, opts, true)
     }
 
     /// Open Class A stems; `seqsigwit` may live in a different directory.
+    ///
+    /// With `repair` false, Class A counts that differ, a `txstat` of another
+    /// length, or a `tx.head` that is unreadable, empty, ahead of or behind
+    /// the bodies refuse the open instead of being trimmed, aligned,
+    /// backfilled or rebuilt: an `--assumehot` source.
     pub fn open_seqsigwit(
         dir: &Path,
         seqsigwit_dir: &Path,
         opts: HeadOpenOpts,
+        repair: bool,
     ) -> Result<Self, StoreError> {
         let prune_seqsigwit_mode = false;
         crate::store::rename_legacy_inwit_files(dir)?;
@@ -1276,9 +1297,11 @@ impl TxTable {
             },
             prune_seqsigwit_mode,
             input_existed,
+            repair,
         )?;
         let n_bodies = create_loc.count();
         if txstat.count() != n_bodies {
+            may_repair(repair, "source: txstat count differs from Class A")?;
             rbitcoin_log::warn!(
                 "store: txstat.body count={} loc={} — aligning to loc",
                 txstat.count(),
@@ -1307,6 +1330,7 @@ impl TxTable {
                     if covered > n_bodies {
                         // Torn Class A truncate: stale head entries past the
                         // bodies would fail a later seal — rebuild instead.
+                        may_repair(repair, "source: tx.head leads Class A")?;
                         rbitcoin_log::warn!(
                             "store: tx.head leads Class A covered={covered} n={n_bodies} \
                              — wipe + rebuild"
@@ -1320,13 +1344,14 @@ impl TxTable {
                         )?
                     } else {
                         if n_bodies > 0 && h.occupied() == 0 {
+                            may_repair(repair, "source: tx.head is empty")?;
                             need_rebuild = true;
                         }
                         h
                     }
                 }
                 Err(e) => {
-                    if crate::segmented_head::is_index_open_refuse(&e) {
+                    if crate::segmented_head::is_index_open_refuse(&e) || !repair {
                         return Err(e);
                     }
                     if n_bodies > 0 {
@@ -1419,6 +1444,7 @@ impl TxTable {
             let n = t.count();
             let covered = t.head.last_inserted_fk();
             if covered < n {
+                may_repair(repair, "source: tx.head lags Class A")?;
                 rbitcoin_log::info!(
                     "store: tx.head lags Class A covered={covered} n={n} — backfill tail"
                 );

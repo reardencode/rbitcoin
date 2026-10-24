@@ -143,7 +143,8 @@ impl Drop for NodeProc {
     }
 }
 
-fn node_bin() -> PathBuf {
+/// The operator CLI binary (`journey-node`), for tests that read its output.
+pub(crate) fn node_bin() -> PathBuf {
     let profile = if cfg!(debug_assertions) {
         "debug"
     } else {
