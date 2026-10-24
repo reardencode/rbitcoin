@@ -80,7 +80,9 @@ jobs:
           save-if: "false"
       - name: tmpfs headroom
         run: df -h /dev/shm && free -m
+      # --no-fail-fast: one timing assert must not cancel the rest of the
+      # suite, or the step duration is not a full run.
       - name: cargo nextest
-        run: cargo nextest run --workspace --exclude rbitcoin-bench
+        run: cargo nextest run --workspace --exclude rbitcoin-bench --no-fail-fast
       - name: bench scripthash pin
         run: cargo nextest run -p rbitcoin-bench --lib hot_corpus_includes_p2a
