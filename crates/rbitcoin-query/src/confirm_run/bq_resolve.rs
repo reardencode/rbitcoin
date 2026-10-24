@@ -1,8 +1,9 @@
 //! BQ-ahead TipOnly parent resolve (lookup wave).
 //!
-//! Pack/hold uses enqueue-stamped Σ inputs (no `Block` decode). Emit runs one
-//! `Store::get_fk_by_txid_batch` (TipOnly) across the selected heights
-//! (soft **64000** inputs / hard **1080** blocks). Hits ride the wave as
+//! Pack/hold uses enqueue-stamped Σ inputs (no `Block` decode). Emit resolves
+//! the selected heights with `Store::get_fk_by_txid_batch_cancellable`
+//! (TipOnly, pieces of 4096 under one fence snapshot; soft **64000** inputs /
+//! hard **1080** blocks). Hits ride the wave as
 //! [`crate::BatchParentIds`] (fk + body_range + spent_range). Does not
 //! claim, structure, or stamp. Same-wave creates are omitted from TipOnly need.
 
@@ -22,6 +23,9 @@ use std::sync::Arc;
 pub const BQ_RESOLVE_WAVE_MAX_BLOCKS: usize = 1080;
 /// Soft max Σ `tx.input` per lookup wave (8× load's 8000; overshoot included).
 pub const BQ_RESOLVE_WAVE_MAX_INPUTS: u32 = 64_000;
+/// TipOnly need resolved per piece; the confirm cancel is asked between
+/// pieces, so IBD teardown waits for one piece rather than a whole wave.
+const BQ_RESOLVE_CANCEL_PIECE_TXIDS: usize = 4096;
 /// Hard min Σ `tx.input` per lookup wave (same number as load's pack).
 ///
 /// Hold a thinner collect when more unresolved BQ heights can still join —
@@ -136,7 +140,7 @@ pub struct BqResolveWaveStats {
     pub precompute_ns: u64,
     /// `push_resolve_keys` (this wave).
     pub collect_ns: u64,
-    /// TipOnly `get_fk_by_txid_batch` (this wave).
+    /// TipOnly `get_fk_by_txid_batch_cancellable` (this wave).
     pub head_ns: u64,
     /// TipOnly `create.loc` fill is inside [`Self::head_ns`] (`idx_ns`): one
     /// batch after identity waves, not on the held probe ring.
@@ -362,7 +366,9 @@ pub fn confirm_bq_resolve_wave_capped(
     if !need.is_empty() {
         let rows = query
             .store()
-            .get_fk_by_txid_batch(&need)
+            .get_fk_by_txid_batch_cancellable(&need, BQ_RESOLVE_CANCEL_PIECE_TXIDS, &|| {
+                query.confirm_cancelled()
+            })
             .map_err(ConfirmError::from)?;
         for (txid, row) in rows {
             if let Some((fk, pair)) = row {

@@ -1679,6 +1679,24 @@ fn lookup_fault_policy_io_halt() {
     assert_eq!(p.on_err(&io), LookupFaultAction::Warn);
 }
 
+/// A wave cut short by the confirm cancel (IBD teardown) is not a fault: the
+/// lookup thread stops, and repeats never add up to a halt that would emit a
+/// reject on the way out.
+#[test]
+fn lookup_fault_policy_stops_on_cancel() {
+    use rbitcoin_ibd::ibd::confirm::{
+        LookupFaultAction, LookupFaultPolicy, LOOKUP_FAULT_HALT_AFTER,
+    };
+    use rbitcoin_store::StoreError;
+
+    let mut p = LookupFaultPolicy::default();
+    let cancelled = rbitcoin_query::ConfirmError::Store(StoreError::Cancelled("txid batch"));
+    for _ in 0..=LOOKUP_FAULT_HALT_AFTER {
+        assert_eq!(p.on_err(&cancelled), LookupFaultAction::Stop);
+    }
+    assert_eq!(p.consecutive, 0);
+}
+
 #[test]
 fn lookup_ready_hash_none_when_missing() {
     let feed = ConfirmFeed::new();
