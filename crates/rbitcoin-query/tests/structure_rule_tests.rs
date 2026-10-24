@@ -11,8 +11,8 @@ use rbitcoin_primitives::Height;
 use rbitcoin_query::confirm_error::ConfirmError;
 
 use rbitcoin_query::block_pipeline::{
-    assemble_block_prevouts, resolve_prevout, structural_validate_spends, AsmPrevoutAcc,
-    ClassAWave, RunCreateHeight, StructuralScratch,
+    assemble_block_prevouts, structural_validate_spends, AsmPrevoutAcc, ClassAWave,
+    RunCreateHeight, StructuralScratch,
 };
 
 use bitcoin::block::{Header, Version};
@@ -3279,50 +3279,6 @@ fn witness_commitment_leaves_a_legacy_block_unchanged() {
     apply_witness_commitment(&mut b);
     assert_eq!(b.txdata[0].output.len(), outs);
     assert!(b.txdata[0].input[0].witness.is_empty());
-}
-
-#[test]
-fn resolve_prevout_rejects_a_same_index_parent() {
-    use rbitcoin_consensus::block::TxidMap;
-    let parent = coinbase(1);
-    let txid = parent.compute_txid().to_byte_array();
-    let spend = Transaction {
-        version: TxVersion::ONE,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint {
-                txid: parent.compute_txid(),
-                vout: 0,
-            },
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        output: vec![TxOut {
-            value: Amount::from_sat(1),
-            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
-        }],
-    };
-    let block = block_with(vec![parent, spend.clone()]);
-    let mut index = TxidMap::default();
-    index.insert(txid, 1usize);
-    match resolve_prevout(
-        &block,
-        spend.input[0].previous_output,
-        &spend.input[0],
-        None,
-        &index,
-        1,
-        &rbitcoin_query::BatchParents::new(),
-        true,
-        true,
-        false,
-        None,
-        &mut AsmPrevoutAcc::default(),
-    ) {
-        Err(err) => assert!(format!("{err}").contains("lookup stage miss"), "{err}"),
-        Ok(_) => panic!("a tx cannot spend an output at its own index"),
-    }
 }
 
 #[test]

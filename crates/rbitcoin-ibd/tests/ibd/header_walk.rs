@@ -2501,7 +2501,9 @@ fn a_heavier_header_chain_keeps_its_context() {
             .tip
             .times
             .clone();
-        let mtp = rbitcoin_primitives::median_time_past_times(&side_times).unwrap();
+        let mtp = rbitcoin_primitives::median_time_past_times(
+            rbitcoin_primitives::MedianWindow::new(&side_times).unwrap(),
+        );
         let invalid = mine_at(side12.block_hash(), 40, mtp);
         apply(&mut st, &hub, 1, vec![invalid]);
         assert_eq!(st.header_walk.tip_hash(), Some(current_tip));
@@ -3373,7 +3375,9 @@ fn restored_checkpoint_times_accept_a_header_under_the_tip_time() {
 
     apply(&mut st, &hub, 0, vec![]);
     assert_eq!(st.header_walk.tip_hash(), Some(tip.block_hash()));
-    let mtp = rbitcoin_primitives::median_time_past_times(&st.header_walk.tip.times).unwrap();
+    let mtp = rbitcoin_primitives::median_time_past_times(
+        rbitcoin_primitives::MedianWindow::new(&st.header_walk.tip.times).unwrap(),
+    );
     let invalid = mine_at(tip.block_hash(), 14, mtp);
     apply(&mut st, &hub, 0, vec![invalid]);
     assert_eq!(st.header_walk.tip_hash(), Some(tip.block_hash()));

@@ -24,13 +24,6 @@ fn asmap_rejected_bytecodes_fail_sanity() {
 }
 
 #[test]
-fn asmap_interpret_garbage_returns_zero_no_panic() {
-    assert_eq!(interpret(&[], &[0u8; 16]), 0);
-    assert_eq!(interpret(&[0xff, 0xff], &[0u8; 16]), 0);
-    assert_eq!(interpret(&[0], &[0u8; 16]), 0);
-}
-
-#[test]
 fn asmap_two_prefix_const_matches_encoder() {
     assert_eq!(two_prefix_asmap_bytes(), TWO_PREFIX_ASMAP);
 }

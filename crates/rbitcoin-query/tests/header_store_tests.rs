@@ -12,7 +12,7 @@ use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
 use rbitcoin_query::testutil::FixtureChain;
 
 use rbitcoin_consensus::{genesis_block, ChainParams, ConsensusError};
-use rbitcoin_primitives::median_time_past_times;
+use rbitcoin_primitives::{median_time_past_times, MedianWindow};
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -97,7 +97,10 @@ fn mtp_from_confirmed_chain_and_missing_above_tip() {
         .mtp_times_at(Height(2))
         .expect("ring covers confirmed tip");
     assert_eq!(n, 3);
-    assert_eq!(median_time_past_times(&buf[..3]).unwrap(), 1010);
+    assert_eq!(
+        median_time_past_times(MedianWindow::new(&buf[..3]).unwrap()),
+        1010
+    );
 
     // Height above tip with no plan → incomplete load error (not BadPrev).
     let err = median_time_past(&q, Height(5)).unwrap_err();
@@ -140,29 +143,35 @@ fn sequential_tip_mtp_matches_ring_and_survives_pop() {
         parent_hash = Some(hdr.hash);
         prev = q.connect_block(Height(h), &hdr, &[ta]).unwrap();
     }
-    let want11 = median_time_past_times(&times[1..]).unwrap();
+    let want11 = median_time_past_times(MedianWindow::new(&times[1..]).unwrap());
     assert_eq!(median_time_past_store(&q, Height(11)).unwrap(), want11);
     assert_eq!(median_time_past(&q, Height(11)).unwrap(), want11);
     let (n, buf) = q.store().mtp_times_at(Height(11)).expect("ring at tip");
     assert_eq!(n, 11);
-    assert_eq!(median_time_past_times(&buf[..11]).unwrap(), want11);
+    assert_eq!(
+        median_time_past_times(MedianWindow::new(&buf[..11]).unwrap()),
+        want11
+    );
     assert!(
         q.store().mtp_times_at(Height(5)).is_none(),
         "historical MTP is not the tip ring"
     );
     assert_eq!(
         median_time_past_store(&q, Height(5)).unwrap(),
-        median_time_past_times(&times[0..=5]).unwrap()
+        median_time_past_times(MedianWindow::new(&times[0..=5]).unwrap())
     );
 
     q.disconnect_tip().unwrap();
-    let want10 = median_time_past_times(&times[0..=10]).unwrap();
+    let want10 = median_time_past_times(MedianWindow::new(&times[0..=10]).unwrap());
     assert_eq!(median_time_past_store(&q, Height(10)).unwrap(), want10);
     let (n, buf) = q
         .store()
         .mtp_times_at(Height(10))
         .expect("ring rebuilt after pop");
-    assert_eq!(median_time_past_times(&buf[..n as usize]).unwrap(), want10);
+    assert_eq!(
+        median_time_past_times(MedianWindow::new(&buf[..n as usize]).unwrap()),
+        want10
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -2920,8 +2920,8 @@ pub fn batch_context_ok(
         let mtp = if times.len() < 11 {
             0
         } else {
-            match rbitcoin_primitives::median_time_past_times(&times) {
-                Ok(mtp) => mtp,
+            match rbitcoin_primitives::MedianWindow::new(&times) {
+                Ok(times) => rbitcoin_primitives::median_time_past_times(times),
                 Err(_) => {
                     stopped = Some((
                         height,

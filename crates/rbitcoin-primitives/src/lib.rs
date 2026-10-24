@@ -27,7 +27,7 @@ pub use hex::{
     scripthash_display_hex, HexToArrayError, HexToBytesError,
 };
 pub use loc_simd::{deinterleave_pairs_u8x8, inclusive_u8x8_times_8};
-pub use median_time::median_time_past_times;
+pub use median_time::{median_time_past_times, MedianWindow};
 pub use merkle::{
     merkle_branch, merkle_root_from_branch, merkle_root_from_txids, merkle_root_mutated,
 };

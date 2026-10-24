@@ -4,7 +4,6 @@ use bitcoin::{CompactTarget, Target};
 use rbitcoin_consensus::error::ConsensusError;
 use rbitcoin_consensus::header::*;
 use rbitcoin_consensus::params::ChainParams;
-use rbitcoin_primitives::median_time_past_times;
 use rbitcoin_primitives::Height;
 
 fn difficulty_float(bits: u32) -> f64 {
@@ -106,10 +105,19 @@ fn retarget_clamps_timespan_and_caps_at_pow_limit() {
 
 #[test]
 fn mtp_times_picks_middle_of_sorted() {
-    assert_eq!(median_time_past_times(&[3, 1, 2]).unwrap(), 2);
-    assert_eq!(median_time_past_times(&[10]).unwrap(), 10);
+    assert_eq!(
+        median_time_past_times(MedianWindow::new(&[3, 1, 2]).unwrap()),
+        2
+    );
+    assert_eq!(
+        median_time_past_times(MedianWindow::new(&[10]).unwrap()),
+        10
+    );
     // Even length: Core takes sorted[len/2] (upper middle).
-    assert_eq!(median_time_past_times(&[1, 2, 3, 4]).unwrap(), 3);
+    assert_eq!(
+        median_time_past_times(MedianWindow::new(&[1, 2, 3, 4]).unwrap()),
+        3
+    );
 }
 
 #[test]
@@ -325,7 +333,10 @@ fn check_header_returns_the_median_it_checked() {
         |_| None,
     )
     .unwrap();
-    assert_eq!(mtp, median_time_past_times(&times).unwrap());
+    assert_eq!(
+        mtp,
+        median_time_past_times(MedianWindow::new(&times).unwrap())
+    );
     assert_eq!(mtp, parent_time);
 }
 

@@ -58,11 +58,11 @@ impl AsMap {
     }
 
     pub fn interpret_ip16(&self, ip16: &[u8; 16]) -> u32 {
-        interpret(&self.bytes, ip16)
+        interpret(self, ip16)
     }
 
     pub fn mapped_as(&self, ip: IpAddr) -> u32 {
-        interpret(&self.bytes, &ip16_for_lookup(ip))
+        interpret(self, &ip16_for_lookup(ip))
     }
 
     pub fn digest_hex8(&self) -> String {
@@ -220,21 +220,22 @@ pub fn bit_width(x: u32) -> u32 {
 /// There is no `pos` bound. At or past the last bit, [`decode_type`] yields
 /// an invalid opcode and this returns 0, the same result as stopping when
 /// `pos` reaches the bit length.
-pub fn interpret(asmap: &[u8], ip16: &[u8; 16]) -> u32 {
+pub fn interpret(asmap: &AsMap, ip16: &[u8; 16]) -> u32 {
+    let bytes = asmap.bytes.as_slice();
     let mut pos = 0usize;
     let mut ip_bit = 0usize;
     let ip_bits_end = 128usize;
     let mut default_asn = 0u32;
     loop {
-        let opcode = decode_type(&mut pos, asmap);
+        let opcode = decode_type(&mut pos, bytes);
         if opcode == RETURN {
-            let asn = decode_asn(&mut pos, asmap);
+            let asn = decode_asn(&mut pos, bytes);
             if asn == INVALID {
                 break;
             }
             return asn;
         } else if opcode == JUMP {
-            let jump = decode_jump(&mut pos, asmap);
+            let jump = decode_jump(&mut pos, bytes);
             if jump == INVALID {
                 break;
             }
@@ -248,7 +249,7 @@ pub fn interpret(asmap: &[u8], ip16: &[u8; 16]) -> u32 {
                 pos += jump as usize;
             }
         } else if opcode == MATCH {
-            let matchv = decode_match(&mut pos, asmap);
+            let matchv = decode_match(&mut pos, bytes);
             if matchv == INVALID {
                 break;
             }
@@ -275,7 +276,7 @@ pub fn interpret(asmap: &[u8], ip16: &[u8; 16]) -> u32 {
                 break;
             }
         } else if opcode == DEFAULT {
-            default_asn = decode_asn(&mut pos, asmap);
+            default_asn = decode_asn(&mut pos, bytes);
             if default_asn == INVALID {
                 break;
             }

@@ -3,8 +3,8 @@ use crate::params::{check_genesis_hash, ChainParams};
 use bitcoin::block::Header;
 use bitcoin::hashes::Hash;
 use bitcoin::{CompactTarget, Target};
-pub use rbitcoin_primitives::median_time_past_times;
 use rbitcoin_primitives::Height;
+pub use rbitcoin_primitives::{median_time_past_times, MedianWindow};
 
 /// Parent header facts for [`check_header`]. Copied so a height above zero can
 /// use the same parent for linkage and for the work calculation.
@@ -51,8 +51,8 @@ pub fn check_header(
     if parent.hash != header.prev_blockhash.to_byte_array() {
         return Err(ConsensusError::BadPrev);
     }
-    let mtp = match median_time_past_times(mtp_times) {
-        Ok(mtp) => mtp,
+    let mtp = match MedianWindow::new(mtp_times) {
+        Ok(times) => median_time_past_times(times),
         Err(_) => {
             crate::trust::soften_at(
                 Some(height.0),

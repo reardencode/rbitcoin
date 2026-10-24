@@ -103,7 +103,8 @@ pub struct AssembleMeters {
 ///
 /// `pending_spent`: pack-local double-spend (early reject before scripts).
 /// `pending_creates`: pack-local `txid → create_fk` (not per-vout).
-/// Same-block outs use `txid_index` (this block, `pj < ti`); meters flush
+/// Same-block outs use `txid_index` when the create index is earlier than
+/// the spender; meters flush
 /// once per block (no per-input Instant / atomics).
 ///
 /// Prevouts resolve from per-batch [`crate::BatchParents`] +
@@ -1444,6 +1445,19 @@ pub fn mtp_at(query: &Query, height: Height, cache: &mut U32Map<u32>) -> Result<
     Ok(t)
 }
 
+/// Create index strictly earlier in this block than the spender.
+struct EarlierIndex(usize);
+
+impl EarlierIndex {
+    fn earlier_than(parent: usize, spender: usize) -> Option<Self> {
+        if parent < spender {
+            Some(Self(parent))
+        } else {
+            None
+        }
+    }
+}
+
 pub struct ResolvedPrevout {
     pub txout: TxOut,
     /// Set when the script bytes stay in a block or pin `Arc`.
@@ -1473,7 +1487,8 @@ pub fn resolve_prevout(
     let prev_txid = op.txid.to_byte_array();
 
     if let Some(&pj) = txid_index.get(&prev_txid) {
-        if pj < spend_ti {
+        if let Some(parent) = EarlierIndex::earlier_than(pj, spend_ti) {
+            let pj = parent.0;
             let v = op.vout as usize;
             let o = rbitcoin_consensus::block::require_same_block_output(block.txdata.get(pj), v)?;
             // Core never puts this script in the coin view. The returned

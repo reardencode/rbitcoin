@@ -2,7 +2,7 @@ use super::*;
 use bitcoin::consensus::{deserialize, Encodable};
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, Block, BlockHash, ScriptBuf, Txid};
-use rbitcoin_primitives::{median_time_past_times, Height};
+use rbitcoin_primitives::{median_time_past_times, Height, MedianWindow};
 
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
@@ -521,7 +521,9 @@ pub fn off_chain_done(
         height,
         prev_hash,
         chainwork,
-        mediantime: median_time_past_times(times).map_err(|e| rpc_error(ERR_MISC, e))?,
+        mediantime: median_time_past_times(
+            MedianWindow::new(times).map_err(|e| rpc_error(ERR_MISC, e))?,
+        ),
     })
 }
 
@@ -573,7 +575,9 @@ pub fn median_time_from_wire(
             }
         }
     }
-    median_time_past_times(&times).map_err(|e| rpc_error(ERR_MISC, e))
+    Ok(median_time_past_times(
+        MedianWindow::new(&times).map_err(|e| rpc_error(ERR_MISC, e))?,
+    ))
 }
 
 #[doc(hidden)]

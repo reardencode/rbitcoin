@@ -313,8 +313,9 @@ pub fn reject_batch_starts_at(height: u32, path_lo: u32) -> Result<(), Consensus
 
 /// A header window with no timestamps is not a median.
 pub fn median_or_bad_header(times: &[u32]) -> Result<u32, ConsensusError> {
-    crate::header::median_time_past_times(times)
-        .map_err(|_| ConsensusError::BadHeader("empty median time"))
+    let window = crate::header::MedianWindow::new(times)
+        .map_err(|_| ConsensusError::BadHeader("empty median time"))?;
+    Ok(crate::header::median_time_past_times(window))
 }
 
 /// `None` from the work walk is a missing ancestor, which is `BadPrev`.
