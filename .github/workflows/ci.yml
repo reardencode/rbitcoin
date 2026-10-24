@@ -21,123 +21,12 @@ env:
   # does not write throwaway dep-graphs.
   CARGO_INCREMENTAL: "0"
 
-# Pin rustc to the nix-shell / crane baseline so fmt/clippy do not drift with
-# every GitHub Actions “stable” bump. Bump intentionally with the toolchain.
-#
-# `qc` is one Ubuntu runner: fmt, ast-grep, unwrap-ratchet, deny, scripts, clippy, then
-# nixos-module-eval. test, windows, and macos each have their own runner.
-# coverage and pread wait for qc and test so a red test does not start them.
-# pread is the Linux libc backend (`RBITCOIN_IO=pread`) for store and query.
-# `test` leaves that variable unset, so Linux stays on io_uring.
-# Mutants are not a PR check. Nightly workspace runs live in mutants.yml.
-# nixos-module-runtime is a labeled job (nixos-module-runtime.yml), not this file.
-# Operator binaries are GitHub Releases (release.yml), not this workflow.
-#
-# GitHub App often cannot push this file; operator `git push` if the branch
-# includes workflow YAML.
+# Timing probe. Do not merge.
+# qc, windows, macos, pread, and coverage are absent so they do not start.
+# `test` is the current suite. `nextest` is the same suite under cargo-nextest.
+# Both restore the shared dep cache and do not save it.
+# `test` leaves RBITCOIN_IO unset, so Linux stays on io_uring.
 jobs:
-  # Quality checks on one runner, cheap steps first. A red fmt does not
-  # install Nix or compile clippy. Check name is `qc`.
-  qc:
-    name: qc
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      CARGO_TARGET_DIR: target/dev
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
-        with:
-          components: rustfmt, clippy
-      - name: cargo fmt --check
-        run: cargo fmt --all -- --check
-      # Not in taiki-e TOOLS.md; install-action falls back to cargo-binstall
-      # (GitHub Release prebuilt). Do not cargo install.
-      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
-        with:
-          tool: ast-grep@0.45.1
-      - name: ast-grep fixture self-test
-        env:
-          CI: "true"
-        run: ./scripts/ast-grep.test.sh
-      - name: ast-grep scan crates
-        run: ./scripts/ast-grep.sh
-      - name: unwrap ratchet self-test
-        run: ./scripts/unwrap-ratchet.test.sh
-      - name: unwrap ratchet
-        run: ./scripts/unwrap-ratchet.sh
-      # Prebuilt cargo-deny — do not cargo install. Pin the action commit.
-      # 0.18.x cannot parse rustsec CVSS 4.0 advisories (2026).
-      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
-        with:
-          tool: cargo-deny@0.20.2
-      - name: cargo deny check
-        run: cargo deny check
-      - name: contract-assert self-test
-        run: ./scripts/contract-assert.test.sh
-      - name: lightning script contracts
-        run: ./scripts/lightning/run.test.sh
-      - name: stage-musl-artifacts self-test
-        run: ./scripts/stage-musl-artifacts.test.sh
-      - name: stage-native-artifacts self-test
-        run: ./scripts/stage-native-artifacts.test.sh
-      - name: fuzz-run self-test
-        run: ./scripts/fuzz-run.test.sh
-      - name: release-pin self-test
-        run: ./scripts/core-functional/release_pin.test.sh
-      - name: fetch-bitcoind self-test
-        run: ./scripts/core-functional/fetch-bitcoind.test.sh
-      - name: miri-run self-test
-        run: ./scripts/miri.test.sh
-      - name: coverage self-test
-        run: ./scripts/coverage.test.sh
-      - name: coverage-crap self-test
-        run: ./scripts/coverage-crap.test.sh
-      - name: release self-test
-        run: ./scripts/release.test.sh
-      - name: release-gate
-        run: ./scripts/release-gate.sh
-      - name: os-smoke self-test
-        run: ./scripts/ci-os-smoke.test.sh
-      - name: pr-checks-watch self-test
-        run: ./scripts/pr-checks-watch.test.sh
-      - name: mutants queue self-test
-        run: ./scripts/mutants-queue.test.sh
-      - name: tmpfs test runner self-test
-        run: ./scripts/tmpfs-test-runner.test.sh
-      - name: overlay-functional runner self-test
-        run: ./scripts/overlay-functional/run.sh.test.sh
-      - name: journeys manifest
-        run: ./scripts/journeys-manifest.test.sh
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: ci-clippy
-          workspaces: ". -> target/dev"
-      - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      # Both shapes TESTING.md names: workspace, and the product set that
-      # nix/rbitcoin.nix and release.yml build (consensus without `corpus`).
-      - name: cargo check --release
-        run: |
-          cargo check --release --workspace
-          cargo check --release -p rbitcoin-node -p rbitcoin-cli -p rbitcoin-store
-      # doc(hidden) pub modules are rustdoc-visible; a broken link is an error.
-      - name: cargo doc
-        run: cargo doc --workspace --no-deps
-      - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
-        with:
-          github_access_token: ${{ github.token }}
-          enable_kvm: false
-      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
-        with:
-          primary-key: nixos-module-eval-${{ runner.os }}-${{ hashFiles('flake.lock') }}
-          restore-prefixes-first-match: nixos-module-eval-${{ runner.os }}-
-          gc-max-store-size-linux: 1G
-      - name: Evaluate NixOS module
-        run: timeout 2m nix build .#checks.x86_64-linux.nixos-module-eval --no-link
-
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -150,11 +39,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+      # 1.95.0 branch tip. a5f673d0 still says toolchain 1.95.0 but is no
+      # longer on that branch, so zizmor reports a new use as an impostor.
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: ci-test
           workspaces: ". -> target/dev"
+          save-if: "false"
       - name: tmpfs headroom
         run: df -h /dev/shm && free -m
       - name: cargo test
@@ -164,143 +56,31 @@ jobs:
       - name: bench scripthash pin
         run: cargo test -p rbitcoin-bench --lib hot_corpus_includes_p2a -- --quiet
 
-  # Windows IOCP store + mmap fuse + query confirm + --smoke. Required. Not a CRT-static snapshot.
-  windows:
-    name: windows
-    runs-on: windows-2022
-    timeout-minutes: 30
-    defaults:
-      run:
-        shell: bash
-    env:
-      CARGO_TARGET_DIR: target/dev
-      RBITCOIN_HEAD_SCALE: tiny
-      RUSTFLAGS: "-D warnings -C target-feature=+crt-static"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # rustc 1.95.0
-        with:
-          targets: x86_64-pc-windows-msvc
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: ci-windows
-          workspaces: ". -> target/dev"
-      - name: store + node smoke
-        run: ./scripts/ci-os-smoke.sh
-
-  # Darwin pool IO + mmap fuse + query confirm + --smoke. Required. Not a notarized / operator zip.
-  macos:
-    name: macos
-    runs-on: macos-26
-    timeout-minutes: 30
-    env:
-      CARGO_TARGET_DIR: target/dev
-      RBITCOIN_HEAD_SCALE: tiny
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # rustc 1.95.0
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: ci-macos-26
-          workspaces: ". -> target/dev"
-      - name: store + node smoke
-        run: ./scripts/ci-os-smoke.sh
-
-  # Linux libc pread. Same wait as coverage: a red `test` does not compile it.
-  # Store and query own bulk IO. The `test` job does not set `RBITCOIN_IO`.
-  pread:
-    name: pread
+  # Same suite, one shared test slot per logical CPU across binaries.
+  # Default nextest test-threads is num-cpus. No per-binary thread pool.
+  nextest:
+    name: nextest
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: [qc, test]
     env:
       CARGO_TARGET_DIR: target/dev
-      RBITCOIN_IO: pread
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: ${{ github.workspace }}/scripts/tmpfs-test-runner.sh
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # 1.95.0 branch tip. a5f673d0 still says toolchain 1.95.0 but is no
-      # longer on that branch, so zizmor reports it as an impostor commit.
       - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: ci-pread
-          workspaces: ". -> target/dev"
-      - name: cargo test store and query
-        run: cargo test -p rbitcoin-store -p rbitcoin-query
-
-  # Line-coverage 91% floor + CRAP --fail-above 30 (allowlist in .cargo-crap.toml).
-  # Slow; waits for qc and test so a red check does not start
-  # this job. Required. Job+step timeouts so a hung llvm-cov test binary
-  # cannot sit until the runner's 6h default.
-  coverage:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    needs: [qc, test]
-    env:
-      # coverage.sh also forces target/cov; set here so rust-cache keys match.
-      CARGO_TARGET_DIR: target/cov
-      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: ${{ github.workspace }}/scripts/tmpfs-test-runner.sh
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
-        with:
-          components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: ci-coverage
-          workspaces: ". -> target/cov"
-      # Prebuilt binary — do not `cargo install` (compiles llvm-cov from crates.io).
-      # Pin the action commit. Unpinned third-party tags are not immutable.
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
-          tool: cargo-llvm-cov@0.6.14,cargo-crap@0.4.3
-      - name: coverage (line gate)
-        timeout-minutes: 15
-        env:
-          COVERAGE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: ./scripts/coverage.sh
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+          tool: cargo-nextest@0.9.149
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          name: coverage-badge
-          path: coverage/badge.json
-          if-no-files-found: error
-          retention-days: 5
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
-        with:
-          name: crap-report
-          path: coverage/crap.json
-          if-no-files-found: ignore
-          retention-days: 5
-
-  # Not a required check. Write token only on green master coverage.
-  coverage-badge:
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
-    needs: coverage
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # This job pushes the coverage badge.
-          persist-credentials: true
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: coverage-badge
-          path: coverage
-      - name: publish coverage badge
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PUBLISH_COVERAGE_BADGE: "1"
-        run: ./scripts/publish-coverage-badge.sh
+          shared-key: ci-test
+          workspaces: ". -> target/dev"
+          save-if: "false"
+      - name: tmpfs headroom
+        run: df -h /dev/shm && free -m
+      - name: cargo nextest
+        run: cargo nextest run --workspace --exclude rbitcoin-bench
+      - name: bench scripthash pin
+        run: cargo nextest run -p rbitcoin-bench --lib hot_corpus_includes_p2a
