@@ -18,7 +18,7 @@ testdummy). Address history is **Electrum / Esplora** with `--sh-index`.
 
 ## `getnetworkinfo.version`
 
-`version` is the hardcoded integer **190000**, Bitcoin Core 0.19.0's
+`version` defaults to the integer **190000**, Bitcoin Core 0.19.0's
 `CLIENT_VERSION` (`10000 * 19` in Core's 0.x packing). Typed RPC clients
 compare this field when they choose a response shape. Below 190000,
 `bitcoincore-rpc`'s `get_blockchain_info` requires the pre-0.19
@@ -39,9 +39,14 @@ an array).
   gate. Packing a later rbitcoin `19.0` or `22.0` the same way would
   collide with a real Core `CLIENT_VERSION`.
 
-The floor stops at 0.19. A higher integer would tell those clients that
+The default stops at 0.19. A higher integer tells those clients that
 later Core RPC is present, including descriptor-wallet calls from 0.21
-(`210000`). It would not change what peers accept.
+(`210000`). It does not change what this node serves or what peers
+accept. `--rpc-client-version N` (conf `rpc_client_version=`, range
+`1` through `1000000`) raises only the reported integer. Leave the
+default unless a chain client refuses to boot below a newer floor.
+Bark captaind (master `2ed8223a8`) requires `310000` because it reads
+`getmempoolentry` chunk fields this node already returns.
 
 ## Operator knobs
 
@@ -56,6 +61,7 @@ later Core RPC is present, including descriptor-wallet calls from 0.21
 | `--sh-index` | **off** | Class B scripthash for Electrum/Esplora address history. RPC by height/hash/txid does not need it |
 | `--block-filter-index` | **off** | BIP158 basic. IBD seals them when the flag is on from the start. A later enable still materializes after catch-up. `NODE_COMPACT_FILTERS` is advertised once filters first reach the tip (`getnetworkinfo` lists `COMPACT_FILTERS`), then for the life of the process. `getblockfilter` serves a sealed height, one block whose parent filter is already sealed, and a stale branch back to that sealed fork point. An unsealed best-chain gap is refused. `/rest/blockfilter/` and P2P still serve only heights the watermark covers. Independent of `--sh-index` |
 | `--rpc-work-queue N` | **16** | In-flight HTTP RPC (Core `-rpcworkqueue`). One POST is one slot (a JSON-RPC array is still one slot). Full permit is HTTP **503** `Work queue depth exceeded`. **0** is the default queue of 16. |
+| `--rpc-client-version N` / conf `rpc_client_version=` | **190000** | Integer `getnetworkinfo.version` reports. Range `1`–`1000000`. Does not add wallet RPC or change any other field. Bark captaind needs `310000`. |
 | `--rest` / conf `rest=` | **off** | Unauthenticated `/rest/` on the RPC listener. Own queue, same depth as `--rpc-work-queue`'s default. The body is read before that permit is taken. Without the flag those paths are 404. |
 
 TLS is external (reverse proxy). Unix socket needs no HTTP header. TCP is
@@ -132,7 +138,7 @@ still wait for durable SH when shindex is on.
 | `getblockheader` / `getblock` (verbosity 0/1/2) | Archive reconstruct. `getblockheader` includes `chainwork`, `target`, and `nextblockhash` when the next active block exists. Genesis omits `previousblockhash`. A header that is stored but not on the active chain (reorg or `invalidateblock`) returns `confirmations: -1` and its own `previousblockhash`. `getblock` returns a Class A body for that hash the same way, or a held never-confirmed body. Verbosity 0/2 below `pruneheight` is `-8` `Block not available (pruned data)`; verbosity 1 (txids) stays. |
 | `getblockstats` | All networks. Stamped `txstat` fee/size/weight/`n_in`. Size and count fields match Core for the keys we return: coinbase is left out of `ins`, fees, `total_size`, `total_weight`, and the segwit totals. `utxo_increase` is every output minus those inputs. `utxo_increase_actual` drops outputs that do not enter the UTXO set (height 0, the two mainnet BIP30-repeat coinbases, unspendable scripts). Omits coins-DB `utxo_size_inc` / `utxo_size_inc_actual` (selecting those names is invalid statistic `-8`). Unstamped leftover reconstructs then lazy-stamps. Reconstruct miss is `block body not in store`. Dummy `blk00000.dat` is shim-only so `rpc_getblockstats.py`'s rename-file needle stays Core-phrased. Pruned unstamped height is `-8` Core pruned text. |
 | `getdifficulty` | From tip bits, 16 significant digits |
-| `getnetworkinfo` / `getconnectioncount` / `getpeerinfo` | BIP324 v2-only; `getpeerinfo` is the live session table. `timeoffset` is VERSION clock minus connect time (`0` before handshake). `synced_headers` is the height of that peer's advertised best block when we know it, else `-1`. `synced_blocks` is that height when the hash is on our best chain, else `-1`. `getnetworkinfo.timeoffset` is the median of outbound handshake-complete offsets (`0` if none). `mapped_as` is present when `--asmap` / `{datadir}/ip_asn.dat` mapped the peer (Core field; omitted without a map or ASN 0). `version` is the fixed integer `190000` (Core 0.19 client version; see [getnetworkinfo.version](#getnetworkinfoversion)). `localservices` matches advertised `NETWORK\|WITNESS\|P2P_V2`, or `NETWORK_LIMITED\|WITNESS\|P2P_V2` under `--prune-seqsigwit`. `localaddresses` lists `--external-ip` (`score` = Core `LOCAL_MANUAL`) |
+| `getnetworkinfo` / `getconnectioncount` / `getpeerinfo` | BIP324 v2-only; `getpeerinfo` is the live session table. `timeoffset` is VERSION clock minus connect time (`0` before handshake). `synced_headers` is the height of that peer's advertised best block when we know it, else `-1`. `synced_blocks` is that height when the hash is on our best chain, else `-1`. `getnetworkinfo.timeoffset` is the median of outbound handshake-complete offsets (`0` if none). `mapped_as` is present when `--asmap` / `{datadir}/ip_asn.dat` mapped the peer (Core field; omitted without a map or ASN 0). `version` defaults to `190000` (Core 0.19 client version; `--rpc-client-version` raises it; see [getnetworkinfo.version](#getnetworkinfoversion)). `localservices` matches advertised `NETWORK\|WITNESS\|P2P_V2`, or `NETWORK_LIMITED\|WITNESS\|P2P_V2` under `--prune-seqsigwit`. `localaddresses` lists `--external-ip` (`score` = Core `LOCAL_MANUAL`) |
 | `getnettotals` | All networks. Raw TCP `totalbytesrecv` / `totalbytessent` on live sessions. `uploadtarget` is a Core-shaped stub (`target` 0). |
 | `ping` | All networks. Queues a ping on each live session (`null`). |
 | `addpeeraddress` | Hidden Core name. Inserts `{address,port}` into addrman RAM (does not rewrite `peers` per call). |

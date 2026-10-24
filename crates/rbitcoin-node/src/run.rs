@@ -178,6 +178,7 @@ pub async fn start_rpc_listener(
         cookie_perms: config.rpc.cookie_perms,
         work_queue: config.rpc.work_queue,
         rest: config.rpc.rest,
+        client_version: config.rpc.client_version,
         subversion: Some(
             rbitcoin_primitives::rbitcoin_subversion(env!("CARGO_PKG_VERSION"), &config.uacomments)
                 .unwrap_or_else(|_| format!("/rbitcoin:{}/", env!("CARGO_PKG_VERSION"))),
@@ -2376,6 +2377,7 @@ pub async fn start_esplora_if_ready(
                 alert_notify: None,
                 alert_fired: Arc::new(AtomicBool::new(false)),
                 blocksonly,
+                client_version: rbitcoin_rpc::methods::RPC_COMPAT_VERSION,
             };
             gbt_template(&ctx).map_err(|v| {
                 v.get("message")

@@ -120,7 +120,7 @@ Per-method notes, auth, and the shindex matrix live in
 |--------------|--------|
 | Control (`help`, `uptime`, `stop`, `getrpcinfo`, `echo`) | done (`syncwithvalidationinterfacequeue` omitted; functional proxy no-op for Core `sync_mempools`) |
 | Blockchain (`getblockchaininfo`, `getblockcount`, `getbestblockhash`, `getblockhash`, `getblock`/`header`, `getdifficulty`, `getblockstats`) | done (`getblockstats` from `txstat` when stamped; size and count fields match Core, including `utxo_increase_actual`; omit coins-DB `utxo_size_*`) |
-| Network (`getnetworkinfo`, `getconnectioncount`, `getpeerinfo`, `addnode`, `disconnectnode`, `addconnection`) | done (BIP324 v2-only; `getnetworkinfo.version` is the fixed Core 0.19 client integer `190000`, semver stays in `subversion`, `protocolversion` is `70016`; peer `timeoffset` / `synced_*` from session state; hostname `addnode` / `--connect` resolve at dial and retry until live) |
+| Network (`getnetworkinfo`, `getconnectioncount`, `getpeerinfo`, `addnode`, `disconnectnode`, `addconnection`) | done (BIP324 v2-only; `getnetworkinfo.version` defaults to the Core 0.19 client integer `190000` and `--rpc-client-version N` / conf `rpc_client_version=` can raise it in `1..=1000000` without changing response shapes; semver stays in `subversion`, `protocolversion` is `70016`; peer `timeoffset` / `synced_*` from session state; hostname `addnode` / `--connect` resolve at dial and retry until live) |
 | Mempool / rawtx (`getmempool*`, `getrawtransaction`, `sendrawtransaction`, `testmempoolaccept`) | done (Libre; RPC `maxfeerate` / `maxburnamount` / `"version"` only) |
 | Coin / MiniWallet (`gettxout`) | done |
 | Index / tips (`getindexinfo`, `getchaintips`, `waitforblock*`) | done (`txindex` = Class A reconstruct) |

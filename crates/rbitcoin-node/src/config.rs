@@ -272,6 +272,8 @@ pub struct RpcOpts {
     pub work_queue: Option<usize>,
     /// Core REST on the RPC listener. Off unless `--rest` / `rest=`.
     pub rest: bool,
+    /// `getnetworkinfo.version`. Default 190000. Bark captaind needs 310000.
+    pub client_version: u64,
 }
 
 impl Default for RpcOpts {
@@ -286,6 +288,7 @@ impl Default for RpcOpts {
             cookie_perms: rbitcoin_rpc::RpcCookiePerms::Owner,
             work_queue: Some(rbitcoin_rpc::DEFAULT_RPC_WORK_QUEUE),
             rest: false,
+            client_version: rbitcoin_rpc::methods::RPC_COMPAT_VERSION,
         }
     }
 }
@@ -1614,6 +1617,10 @@ impl NodeConfig {
                     return Err(NodeError::Config("conf asmap requires a path".into()));
                 }
                 self.asmap = Some(PathBuf::from(val));
+            }
+            "rpc_client_version" => {
+                self.rpc.client_version = rbitcoin_rpc::methods::parse_rpc_client_version(val)
+                    .map_err(NodeError::Config)?;
             }
             "rpc_work_queue" => {
                 let n: usize = val

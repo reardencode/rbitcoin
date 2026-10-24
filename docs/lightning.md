@@ -238,10 +238,11 @@ What LND's startup check actually reads (current `chainreg/taproot_check.go`):
    `script_flags` containing `TAPROOT`; we do not emit `script_flags`, and
    the deployments key is enough for this check.
 
-`getnetworkinfo.version` is `190000`. LND's health check uses `uptime`
-when that integer is at least `150000`, which it is. Raising the integer
-toward a current Core release would advertise wallet RPC that this node
-does not have. See [`rpc.md`](./rpc.md#getnetworkinfoversion).
+`getnetworkinfo.version` defaults to `190000`. LND's health check uses
+`uptime` when that integer is at least `150000`, which it is.
+`--rpc-client-version` can raise the integer for a client that gates on
+it. The flag does not add wallet RPC. See
+[`rpc.md`](./rpc.md#getnetworkinfoversion).
 
 `estimatesmartfee` accepts `estimate_mode` `economical` and `conservative`
 and returns the same 10-minute feerate either way. `initialblockdownload`

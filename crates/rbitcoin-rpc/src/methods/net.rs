@@ -344,9 +344,23 @@ pub fn localaddresses_json(ctx: &RpcContext) -> Value {
 /// Typed clients compare this integer when they pick a response shape.
 /// `bitcoincore-rpc` requires the pre-0.19 `bip9_softforks` map below
 /// 190000 and then rejects our `getblockchaininfo`. This is an RPC shape
-/// floor. P2P stays `protocolversion` 70016. The crate semver stays in
-/// `subversion`.
+/// floor, not a feature claim. P2P stays `protocolversion` 70016. The crate
+/// semver stays in `subversion`. Bark's captaind (master `2ed8223a8`)
+/// refuses a node below 310000 because it reads `getmempoolentry` chunk
+/// fields, which this node already returns. `--rpc-client-version` raises
+/// the reported integer without changing those shapes.
 pub const RPC_COMPAT_VERSION: u64 = 190_000;
+
+/// Inclusive range for `--rpc-client-version` / `rpc_client_version`.
+pub fn parse_rpc_client_version(val: &str) -> Result<u64, String> {
+    let n: u64 = val
+        .parse()
+        .map_err(|e| format!("rpc_client_version: {e}"))?;
+    if !(1..=1_000_000).contains(&n) {
+        return Err("rpc_client_version must be between 1 and 1000000".into());
+    }
+    Ok(n)
+}
 
 pub fn getnetworkinfo(ctx: &RpcContext) -> Value {
     let (cin, cout, timeoffset) = if let Some(hub) = ctx.peers.as_ref() {
@@ -360,7 +374,7 @@ pub fn getnetworkinfo(ctx: &RpcContext) -> Value {
         rbitcoin_net::local_service_flags(ctx.query.prune_seqsigwit(), ctx.peers.as_deref());
     let svc_bits = flags.to_u64();
     json!({
-        "version": RPC_COMPAT_VERSION,
+        "version": ctx.client_version,
         "subversion": ctx.subversion,
         "protocolversion": 70016,
         "localservices": format!("{svc_bits:016x}"),

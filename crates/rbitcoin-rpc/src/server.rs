@@ -154,6 +154,8 @@ pub struct RpcConfig {
     pub alert_notify: Option<String>,
     /// `-blocksonly`. Mining and raw-mempool listing stay off.
     pub blocksonly: bool,
+    /// Reported `getnetworkinfo.version`. `0` means [`crate::methods::RPC_COMPAT_VERSION`].
+    pub client_version: u64,
 }
 
 /// Live RPC server handle.
@@ -255,6 +257,11 @@ pub async fn run_rpc(
         alert_notify: config.alert_notify.clone(),
         alert_fired: Arc::new(AtomicBool::new(false)),
         blocksonly: config.blocksonly,
+        client_version: if config.client_version == 0 {
+            crate::methods::RPC_COMPAT_VERSION
+        } else {
+            config.client_version
+        },
     });
 
     let n = work_queue_permits(config.work_queue);

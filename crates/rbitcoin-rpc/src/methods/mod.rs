@@ -18,6 +18,7 @@ pub use chain::{tip_hash_height, wait_timeout_ms};
 pub const RPC_WAIT_TIMEOUT_MS: u64 = 120_000;
 pub use mine::gbt_longpoll_id;
 pub use mine::{gbt_template, submit_received_block};
+pub use net::{parse_rpc_client_version, RPC_COMPAT_VERSION};
 pub use rest::{dispatch_rest, RestReply};
 thread_local! {
     static HTTP_WAIT_SATISFIED: Cell<bool> = const { Cell::new(false) };
@@ -110,6 +111,8 @@ pub struct RpcContext {
     pub blocksonly: bool,
     /// In-flight RPC methods for `getrpcinfo.active_commands`.
     pub active: Arc<std::sync::Mutex<RpcActive>>,
+    /// `getnetworkinfo.version`. Default [`RPC_COMPAT_VERSION`] (190000).
+    pub client_version: u64,
 }
 
 /// Concurrent `dispatch` entries keyed by id (not a Vec pop).

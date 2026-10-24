@@ -983,8 +983,10 @@ pub fn disconnected_block_value(
         insert_previousblockhash(&mut obj, &hash_hex_display(&prev));
     }
     enrich_block_header_json(&mut obj, ctx, version, bits, None, Some(chainwork));
+    // Core sends size, strippedsize and weight from verbosity 1, for a stale
+    // block too. A reorg-aware client (BDK's emitter) requires them.
+    insert_block_size_fields(&mut obj, block);
     if verbosity >= 2 {
-        insert_block_size_fields(&mut obj, block);
         obj["tx"] = json!(getblock_v2_tx_json(ctx, block));
     }
     Ok(obj)
@@ -1066,6 +1068,11 @@ pub fn gettxout(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
         if let Some(mp) = ctx.mempool.as_ref() {
             let tid = Txid::from_byte_array(want);
             if let Some(tx) = mp.get_tx(&tid) {
+                // Another mempool tx spending this output takes it out of
+                // Core's mempool coins view, as for a confirmed prevout below.
+                if mp.spends_outpoint(&bitcoin::OutPoint { txid: tid, vout: n }) {
+                    return Ok(Value::Null);
+                }
                 if let Some(out) = tx.output.get(n as usize) {
                     return Ok(json!({
                         "bestblock": getbestblockhash(ctx)?,

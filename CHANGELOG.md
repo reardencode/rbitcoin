@@ -13,6 +13,9 @@ before 1.0).
 
 - **Workspace version 0.8.99:** in-tree toward 0.9.0.
   Published GitHub Releases remain 0.8.0; `v0.8.x` is the patch branch.
+- **`getnetworkinfo.version` stays 190000 by default.** `--rpc-client-version N`
+  (conf `rpc_client_version=`, range 1–1000000) raises only that integer.
+  Response shapes do not change. Bark captaind needs 310000.
 
 ## [0.8.0] — 2026-10-09
 

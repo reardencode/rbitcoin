@@ -139,7 +139,28 @@ pub fn sat_btc_json(sat: i64) -> Value {
     Value::Number(s.parse().expect("sat/BTC decimal"))
 }
 
-/// Shared getrawmempool-verbose / getmempoolentry graph + unbroadcast fields.
+/// Core `bip125-replaceable`: this tx or an unconfirmed ancestor signals
+/// BIP 125 (an input sequence at or below 0xfffffffd).
+pub fn signals_bip125(mp: &MempoolHub, txid: &Txid) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![*txid];
+    while let Some(t) = stack.pop() {
+        if !seen.insert(t) {
+            continue;
+        }
+        let Some(tx) = mp.get_tx(&t) else {
+            continue;
+        };
+        if tx.input.iter().any(|i| i.sequence.is_rbf()) {
+            return true;
+        }
+        if let Some((depends, _)) = mp.depends_spentby(&t) {
+            stack.extend(depends);
+        }
+    }
+    false
+}
+
 /// Shared getrawmempool-verbose / getmempoolentry graph + unbroadcast fields.
 pub fn mempool_graph_json(mp: &MempoolHub, txid: &Txid, fee: u64, weight: u64) -> Value {
     // Core `vsize` is sigop-adjusted; `weight` stays raw.
@@ -198,6 +219,7 @@ pub fn mempool_graph_json(mp: &MempoolHub, txid: &Txid, fee: u64, weight: u64) -
         "ancestorfees": afee,
         "chunkweight": chunk_w,
         "unbroadcast": mp.is_unbroadcast(txid),
+        "bip125-replaceable": signals_bip125(mp, txid),
         "depends": depends,
         "spentby": spentby,
         "fees": {

@@ -34,6 +34,18 @@ pub fn allow_local_miner(ctx: &RpcContext) -> bool {
         })
 }
 
+/// One regtest mining call at a time, from pool selection through the block
+/// connect. Core assembles and connects under cs_main; without this, a second
+/// call can select a transaction the first just confirmed and mine it again
+/// (`bad-txns-BIP30`).
+static REGTEST_MINING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn regtest_mining_lock() -> std::sync::MutexGuard<'static, ()> {
+    REGTEST_MINING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 pub fn require_regtest_miner<'a>(
     ctx: &'a RpcContext,
     method: &str,
@@ -146,6 +158,7 @@ pub fn generate_with_mempool(
     if nblocks == 0 {
         return Ok(hashes_json(&[]));
     }
+    let _mining = regtest_mining_lock();
     let listing = ctx.pool_listing();
     // Catch-up leaves confirmed transactions in the pool, so mine the coinbase
     // only. Any other listing is removed when the block that contains it is
@@ -235,6 +248,7 @@ pub fn generateblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Valu
         return Err(rpc_error(ERR_INVALID_PARAMS, "transactions required"));
     }
     let submit = params.opt_bool(2, "submit")?.unwrap_or(true);
+    let _mining = regtest_mining_lock();
     if !submit {
         let block = miner
             .assemble_block_to_script(script, extra)

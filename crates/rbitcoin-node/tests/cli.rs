@@ -73,6 +73,7 @@ fn operator_conf_and_argv() {
         "--startup-notify",
         "--test-activation-height",
         "--rpc-work-queue",
+        "--rpc-client-version",
         "--peer-timeout",
         "--blocks-only",
         "--ua-comment",
@@ -142,6 +143,7 @@ fn operator_conf_and_argv() {
         "--startupnotify",
         "--testactivationheight",
         "--rpcworkqueue",
+        "--rpcclientversion",
         "--checkblocks",
         "--blocksdir",
         "--blocks-dir",
@@ -502,6 +504,37 @@ fn operator_conf_and_argv() {
             .work_queue,
         Some(4)
     );
+    assert_eq!(ready_config(["rbitcoin-node"]).rpc.client_version, 190_000);
+    assert_eq!(
+        ready_config(["rbitcoin-node", "--rpc-client-version=310000"])
+            .rpc
+            .client_version,
+        310_000
+    );
+    assert_eq!(
+        ready_config(["rbitcoin-node", "--rpc-client-version", "1"])
+            .rpc
+            .client_version,
+        1
+    );
+    let mut refused = NodeConfig::default();
+    let zero = refused.apply_kv("rpc_client_version", "0").unwrap_err();
+    assert!(
+        format!("{zero}").contains("between 1 and 1000000"),
+        "{zero}"
+    );
+    assert_eq!(
+        refused.rpc.client_version, 190_000,
+        "a refused value leaves the default"
+    );
+    match operator_config_from_args(["rbitcoin-node", "--rpc-client-version=0"]) {
+        Err(code) => assert_exit(code, ExitCode::from(2)),
+        Ok(other) => panic!("rpc-client-version 0 assembled: {other:?}"),
+    }
+    match operator_config_from_args(["rbitcoin-node", "--rpc-client-version=1000001"]) {
+        Err(code) => assert_exit(code, ExitCode::from(2)),
+        Ok(other) => panic!("rpc-client-version above 1000000 assembled: {other:?}"),
+    }
 }
 
 #[test]

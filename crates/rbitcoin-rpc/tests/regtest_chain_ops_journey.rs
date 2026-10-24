@@ -2297,6 +2297,15 @@ fn chain_ops_generateblock_and_parent_first(ctx: &RpcContext, cbs: &mut TrueCoin
     );
 
     let child_id = dispatch(ctx, "sendrawtransaction", vec![json!(tx_hex(&child))]).unwrap();
+    // Core's mempool coins view: an unconfirmed output that another mempool
+    // tx spends is not a UTXO, and without the mempool it was never one.
+    for include_mempool in [true, false] {
+        let out = dispatch(ctx, "gettxout", vec![parent_id.clone(), json!(0), json!(include_mempool)])
+            .unwrap();
+        assert!(out.is_null(), "include_mempool={include_mempool}: mempool-spent output: {out}");
+    }
+    let unspent = dispatch(ctx, "gettxout", vec![child_id.clone(), json!(0)]).unwrap();
+    assert_eq!(unspent["confirmations"], 0, "{unspent}");
     dispatch(ctx, "generate", vec![json!(1)]).unwrap();
     let tip = best_hash(ctx);
     let mined = dispatch(ctx, "getblock", vec![tip.clone(), json!(1)]).unwrap();
@@ -2635,6 +2644,11 @@ fn chain_ops_invalidate_and_precious(
     assert!(held["difficulty"].as_f64().is_some(), "held difficulty: {held}");
     assert_eq!(held["versionHex"].as_str().expect("held versionHex").len(), 8);
     assert!(held.get("nextblockhash").is_none());
+    // Core's verbosity 1 carries the size fields for a stale block too.
+    assert_eq!(held["size"], sibling.total_size(), "{held}");
+    let stripped = (sibling.weight().to_wu() as usize - sibling.total_size()) / 3;
+    assert_eq!(held["strippedsize"], stripped, "{held}");
+    assert_eq!(held["weight"], sibling.weight().to_wu(), "{held}");
 
     dispatch(ctx, "preciousblock", vec![sib.clone()]).unwrap();
     assert_eq!(best_hash(ctx), sib);

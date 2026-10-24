@@ -55,6 +55,7 @@ fn open_ctx(dir: &TempDir) -> RpcContext {
 
         alert_notify: None,
         alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        client_version: 190_000,
         blocksonly: false,
     }
 }
@@ -709,6 +710,17 @@ fn getnetworkinfo_localrelay_follows_mempool_relay() {
 }
 
 #[test]
+fn getnetworkinfo_version_follows_client_version() {
+    let (mut ctx, dir) = ctx_empty();
+    let def = dispatch(&ctx, "getnetworkinfo", vec![]).unwrap();
+    assert_eq!(def["version"], 190_000, "{def}");
+    ctx.client_version = 310_000;
+    let bumped = dispatch(&ctx, "getnetworkinfo", vec![]).unwrap();
+    assert_eq!(bumped["version"], 310_000, "{bumped}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn blocksonly_sendraw_admits_valid_tx() {
     let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
     ctx.mempool.as_ref().unwrap().set_relay_enabled(false);
@@ -1104,6 +1116,7 @@ fn all_methods_callable_empty_or_error() {
 
         alert_notify: None,
         alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        client_version: 190_000,
         blocksonly: false,
     };
     let mem2 = dispatch(&ctx2, "getmempoolinfo", vec![]).unwrap();
@@ -1222,6 +1235,17 @@ fn mempool_txid_lookups_do_not_list_live() {
 
 /// Graph fields come from the cluster, not stub 1/0. Local sendraw is
 /// unbroadcast until a peer getdata completes.
+/// Core `bip125-replaceable` on each mempool entry.
+fn assert_bip125(entries: &[&Value], want: bool) {
+    for e in entries {
+        assert_eq!(e["bip125-replaceable"], want, "{e}");
+    }
+}
+
+fn verbose_child(ctx: &RpcContext, txid_hex: &str) -> Value {
+    dispatch(ctx, "getrawmempool", vec![json!(true)]).unwrap()[txid_hex].clone()
+}
+
 #[test]
 fn mempool_graph_fields_follow_cluster_and_unbroadcast() {
     use bitcoin::absolute::LockTime;
@@ -1260,7 +1284,7 @@ fn mempool_graph_fields_follow_cluster_and_unbroadcast() {
                 vout: 0,
             },
             script_sig: ScriptBuf::new(),
-            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
         output: vec![TxOut {
@@ -1284,6 +1308,15 @@ fn mempool_graph_fields_follow_cluster_and_unbroadcast() {
     assert_eq!(parent_entry["spentby"], json!([child_hex.clone()]));
     assert_eq!(child_entry["depends"], json!([parent_hex.clone()]));
     assert_eq!(child_entry["spentby"], json!([]));
+    // The child does not signal itself; its unconfirmed parent does.
+    assert_bip125(
+        &[
+            &parent_entry,
+            &child_entry,
+            &verbose_child(&ctx, &child_hex),
+        ],
+        true,
+    );
 
     let verbose = dispatch(&ctx, "getrawmempool", vec![json!(true)]).unwrap();
     assert_eq!(verbose[&child_hex]["ancestorcount"], 2);
@@ -1306,7 +1339,7 @@ fn mempool_graph_fields_follow_cluster_and_unbroadcast() {
                 vout: 0,
             },
             script_sig: ScriptBuf::new(),
-            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
         output: vec![TxOut {
@@ -1326,6 +1359,7 @@ fn mempool_graph_fields_follow_cluster_and_unbroadcast() {
     let local_entry = dispatch(&ctx, "getmempoolentry", vec![json!(local_hex.clone())]).unwrap();
     assert_eq!(local_entry["unbroadcast"], true);
     assert_eq!(local_entry["ancestorcount"], 1);
+    assert_bip125(&[&local_entry], false);
 
     mp.mark_broadcast(&local.compute_txid());
     let info = dispatch(&ctx, "getmempoolinfo", vec![]).unwrap();
@@ -1535,6 +1569,7 @@ fn regtest_ctx(
 
         alert_notify: None,
         alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        client_version: 190_000,
         blocksonly: false,
     };
     (ctx, dir, hub)
@@ -4770,6 +4805,7 @@ fn ctx_without_chain(src: &RpcContext) -> RpcContext {
         active: Arc::clone(&src.active),
         alert_notify: src.alert_notify.clone(),
         alert_fired: Arc::clone(&src.alert_fired),
+        client_version: src.client_version,
         blocksonly: src.blocksonly,
     }
 }
@@ -5524,3 +5560,25 @@ include!("../regtest_chain_ops_journey.rs");
 
 mod chain;
 mod mempool;
+
+/// Two regtest `generate` calls at once, with a transaction in the pool. Core
+/// assembles and connects each block under cs_main, so neither block can
+/// carry a transaction the other just confirmed (`bad-txns-BIP30`).
+#[test]
+fn concurrent_generate_mines_each_pool_tx_once() {
+    let (ctx, _dir, _hub) = ctx_regtest_hub();
+    dispatch(&ctx, "generate", vec![json!(120)]).unwrap();
+    for height in 1..=20u32 {
+        let keep = generated_coinbase_value(&ctx, height) - 1_000;
+        let (hex, _) =
+            spend_generated_coinbase(&ctx, height, keep, ScriptBuf::from_bytes(vec![0x51]));
+        dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
+        std::thread::scope(|s| {
+            let a = s.spawn(|| dispatch(&ctx, "generate", vec![json!(1)]));
+            let b = s.spawn(|| dispatch(&ctx, "generate", vec![json!(1)]));
+            for (name, r) in [("a", a.join().unwrap()), ("b", b.join().unwrap())] {
+                assert!(r.is_ok(), "round {height} generate {name}: {r:?}");
+            }
+        });
+    }
+}
