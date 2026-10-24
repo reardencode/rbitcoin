@@ -1,0 +1,3 @@
+Added
+
+- **`--hot-digest` and `--assumehot` start a node from another node's store.** `--hot-digest` prints `network height tiphash digest` for a store. The digest covers the confirmed chain and its spend state, by height, so it does not depend on `store.secret`, orphans or reorg history. `--assumehot-from DATADIR --assumehot HASH` imports a cleanly stopped, unpruned, current-schema source into an empty `store/`. Neither store may be split with `--datadir-cold`. It holds the source's lock and checks each header and body (scripts are not run). It recomputes spends, fees and indexes in `store.import/` and renames that to `store/` only when the digest matches. Both flags are CLI only. See `docs/operator/storage.md`.

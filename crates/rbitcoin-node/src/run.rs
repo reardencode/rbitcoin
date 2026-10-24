@@ -281,6 +281,9 @@ pub async fn mempool_blocking<T: Send + 'static>(
 pub fn run_node(config: NodeConfig) -> Result<NodeHandle, NodeError> {
     config.ensure_datadir()?;
     let dir_locks = crate::lock::lock_node_dirs(&config)?;
+    if let Some((ref src, digest)) = config.assumehot {
+        assumehot_import(&config, src, digest)?;
+    }
     let query = Query::open_or_create_layout_checkblocks(
         config.store_layout(),
         config.check_blocks_window(),
@@ -293,6 +296,27 @@ pub fn run_node(config: NodeConfig) -> Result<NodeHandle, NodeError> {
         mempool: None,
         _dir_locks: dir_locks,
     })
+}
+
+/// Import `src`'s store into this datadir's empty store before the node opens
+/// it, holding the source datadir's lock. Refusals are one line each; see
+/// `import_hot_store`.
+fn assumehot_import(config: &NodeConfig, src: &Path, digest: [u8; 32]) -> Result<(), NodeError> {
+    let params = config.chain_params()?;
+    let _src_lock = crate::lock::lock_dir(src)?;
+    let dst = config.store_layout();
+    let src_layout = rbitcoin_store::StoreLayout {
+        dir: src.join("store"),
+        cold_dir: None,
+        ..dst.clone()
+    };
+    let d = rbitcoin_query::hot_digest::import_hot_store(src_layout, dst, &params, digest)
+        .map_err(|e| NodeError::Init(e.to_string()))?;
+    info!(
+        "assumehot: imported {}",
+        crate::cli::hot_digest_line(config.network, &d)
+    );
+    Ok(())
 }
 
 /// Long-running P2P (+ optional Electrum): seed resolve, catch-up, persistent follow, progress logs.

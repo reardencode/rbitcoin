@@ -312,6 +312,11 @@ pub struct NodeConfig {
     pub signet_block_time: Option<u64>,
     /// When true, open store and exit (CI / smoke).
     pub smoke: bool,
+    /// When true, print the store's hot digest and exit (`--hot-digest`).
+    pub hot_digest: bool,
+    /// `--assumehot-from DATADIR --assumehot HASH`: import that datadir's
+    /// store into this empty one before starting, checked by digest.
+    pub assumehot: Option<(PathBuf, [u8; 32])>,
     /// Head geometry at store open. Production default is Mainnet. Tests and
     /// `--smoke` pass Tiny so they do not allocate multi‑GiB heads.
     pub head_scale: HeadScale,
@@ -438,6 +443,8 @@ impl Default for NodeConfig {
             signet_challenge: None,
             signet_block_time: None,
             smoke: false,
+            hot_digest: false,
+            assumehot: None,
             head_scale: HeadScale::Mainnet,
             max_run_secs: None,
             shindex: false,
