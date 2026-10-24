@@ -600,6 +600,10 @@ pub struct ActiveMempool {
     /// A flag-off open removes those transactions and their descendants. A
     /// removal that does not finish leaves the mark.
     pub trust_kept: HashSet<Txid>,
+    /// Chain this node validates. `None` in unit tests that open a pool
+    /// directly, so script flags stay pre-Inquisition. The node sets this
+    /// after open.
+    pub chain_params: Option<rbitcoin_consensus::ChainParams>,
 }
 
 /// A parked package member, taken out before admit.
@@ -759,7 +763,33 @@ impl ActiveMempool {
             node_clock: Arc::new(AtomicU64::new(0)),
             loaded_accept: ingested.accept_secs,
             trust_kept: ingested.trust_kept,
+            chain_params: None,
         })
+    }
+
+    /// Signet Inquisition flags for mempool script checks. Unit tests leave
+    /// this unset.
+    pub fn set_chain_params(&mut self, params: rbitcoin_consensus::ChainParams) {
+        self.chain_params = Some(params);
+    }
+
+    /// Buried script flags, with Inquisition opcodes overlaid from the next
+    /// block height when [`Self::set_chain_params`] ran.
+    fn verify_scripts_for_tip(
+        &self,
+        tx: &Transaction,
+        prevouts: Vec<TxOut>,
+        tip: ChainTipCtx,
+    ) -> Result<(), AcceptError> {
+        let mut flags = rbitcoin_consensus::ScriptVerifyFlags::buried(true, true, true, true, true);
+        if let Some(params) = &self.chain_params {
+            flags.heretical = params.heretical_at(tip.height.saturating_add(1));
+        }
+        if flags.heretical == rbitcoin_consensus::HereticalFlags::default() {
+            return verify_tx_scripts(tx, prevouts);
+        }
+        rbitcoin_consensus::verify_tx_scripts_with_flags(prevouts, tx.clone(), flags)
+            .map_err(|e| AcceptError::Script(e.to_string()))
     }
 
     /// Drop every LIVE trust slot and its descendants. A flag-off open uses
@@ -1034,7 +1064,7 @@ impl ActiveMempool {
         )?;
         self.last_accept_stages.utxo_us = prep.utxo_us;
         let t_script = Instant::now();
-        let script_res = verify_tx_scripts(tx, prep.prevouts.clone());
+        let script_res = self.verify_scripts_for_tip(tx, prep.prevouts.clone(), tip);
         self.last_accept_stages.script_us = self
             .last_accept_stages
             .script_us
@@ -2196,7 +2226,7 @@ impl ActiveMempool {
         )?;
         prep.keep_mark = waive;
         prep.keep_accept_secs = accept_secs;
-        if let Err(e) = verify_tx_scripts(tx, prep.prevouts.clone()) {
+        if let Err(e) = self.verify_scripts_for_tip(tx, prep.prevouts.clone(), tip) {
             match trust_script_reason(waive, &e) {
                 Some(reason) => push_trust_warn(&mut prep.trust_warn, reason),
                 None => return Err(e),

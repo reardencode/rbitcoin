@@ -4067,6 +4067,11 @@ impl MempoolHub {
         self.lock_write().set_cluster_limits(count, size_kvb);
     }
 
+    /// Default-signet Inquisition heights for mempool script checks.
+    pub fn set_chain_params(&self, params: rbitcoin_consensus::ChainParams) {
+        self.lock_write().set_chain_params(params);
+    }
+
     /// Core `-bytespersigop` overlay: `0` disables sigop-adjusted sizing.
     pub fn set_bytes_per_sigop(&self, bytes_per_sigop: u64) {
         self.lock_write().set_bytes_per_sigop(bytes_per_sigop);

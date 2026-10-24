@@ -333,6 +333,7 @@ fn script_row_job(
                 .any(|e| e == "DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM"),
             const_scriptcode: flags.extra.iter().any(|e| e == "CONST_SCRIPTCODE"),
             cleanstack: flags.cleanstack,
+            heretical: rbitcoin_consensus::heretical::HereticalFlags::default(),
         },
         pre: std::sync::OnceLock::new(),
     }
