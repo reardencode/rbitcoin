@@ -67,6 +67,7 @@ let
             enable = true;
             openFirewall = true;
             hiddenService = true;
+            maxInflight = 1024;
           };
           health.enable = true;
           metrics = true;
@@ -106,6 +107,7 @@ let
           package = fakePackage;
           electrum.maxSubs = 25000;
           heavyShCreates = 0;
+          esplora.maxInflight = 1024;
           p2p = {
             listen = false;
             maxInbound = 0;
@@ -271,6 +273,7 @@ assert defaultCfg.electrum.hiddenService == false;
 assert defaultCfg.electrum.maxSubs == null;
 assert defaultCfg.heavyShCreates == null;
 assert defaultCfg.esplora.hiddenService == false;
+assert defaultCfg.esplora.maxInflight == null;
 assert defaultCfg.i2p.sam == null;
 assert defaultCfg.i2p.acceptIncoming == false;
 assert defaultCfg.cjdns.reachable == false;
@@ -381,6 +384,8 @@ assert builtins.match ".*--heavy-sh-creates.*" (
 ) == null;
 assert builtins.match ".*--esplora-listen 127.0.0.1:3000.*" execStart != null;
 assert builtins.match ".*--esplora-onion.*" execStart != null;
+assert builtins.match ".*--esplora-max-inflight 1024.*" execStart != null;
+assert builtins.match ".*--esplora-max-inflight.*" listenOffExec == null;
 assert builtins.match ".*--sh-index.*" execStart != null;
 assert builtins.match ".*--sp-tweaks.*" execStart != null;
 assert builtins.match ".*--shindex.*" execStart == null;

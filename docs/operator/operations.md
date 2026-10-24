@@ -106,6 +106,7 @@ Clean smoke:
 | `--esplora-onion[=0\|1]` | `esplora_onion=` | **on** — `ADD_ONION` for Esplora when `--tor-control` is set |
 | `--health-listen [ADDR]` | `health_listen=` | disabled; omit ADDR → `127.0.0.1:9332`. Unauthenticated `GET /healthz`, `/readyz`, and `/progress`, bound before the store opens ([Health probes and metrics](#health-probes-and-metrics)). A bind failure stops the node |
 | `--metrics[=0\|1]` | `metrics=` | **off** — Prometheus `GET /metrics` on the health listener. Refused without `--health-listen` |
+| `--esplora-max-inflight N` | `esplora_max_inflight=` | **256** — Esplora requests in flight across the whole listener (>= 1, at most tokio's semaphore limit). Further requests wait for a slot rather than being refused; the wait counts against the 120 s request timeout (**408**). One wallet rescan can fill it; raise it for a busy public listener. |
 | `--esplora-block-template` | `esplora_block_template=` | **off** — `GET /block-template` is 404; on = GBT JSON (same as RPC template mode) |
 | `--rpc` | `rpc=` | **off** — unix JSON-RPC `{datadir}/rpc.sock` (mode 0600) |
 | `--rpc-listen [ADDR]` | `rpc_listen=` | disabled — implies `--rpc`; omit ADDR → `127.0.0.1` and Core-matching RPC port |

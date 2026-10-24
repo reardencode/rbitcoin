@@ -94,6 +94,10 @@ let
   )
   ++ optional cfg.esplora.enable "--esplora-listen"
   ++ optional cfg.esplora.enable (socket cfg.esplora.address cfg.esplora.port)
+  ++ optional (cfg.esplora.enable && cfg.esplora.maxInflight != null) "--esplora-max-inflight"
+  ++ optional (cfg.esplora.enable && cfg.esplora.maxInflight != null) (
+    toString cfg.esplora.maxInflight
+  )
   ++ optional cfg.health.enable "--health-listen"
   ++ optional cfg.health.enable (socket cfg.health.address cfg.health.port)
   ++ optional cfg.metrics "--metrics"
@@ -549,6 +553,18 @@ in
         type = types.bool;
         default = false;
         description = "ADD_ONION for Esplora when --esplora-listen is on. Implies tor.control 127.0.0.1:9051 if unset. REST and /ws share the TCP port.";
+      };
+
+      maxInflight = mkOption {
+        # Upper bound is tokio's `Semaphore::MAX_PERMITS` on 64-bit (2^61 - 1).
+        type = types.nullOr (types.ints.between 1 2305843009213693951);
+        default = null;
+        example = 1024;
+        description = ''
+          Esplora requests in flight across the whole listener (--esplora-max-inflight).
+          Null keeps the node default (256). Further requests wait for a slot; the
+          wait counts against the request timeout (408).
+        '';
       };
     };
 

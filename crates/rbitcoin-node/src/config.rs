@@ -340,6 +340,9 @@ pub struct NodeConfig {
     /// Max `blockchain.scripthash.subscribe` entries per Electrum connection
     /// (>= 1). Default [`rbitcoin_electrum::DEFAULT_MAX_SCRIPTHASH_SUBS`].
     pub electrum_max_subs: usize,
+    /// Max Esplora requests in flight across the whole listener (>= 1).
+    /// Default [`rbitcoin_electrum::DEFAULT_MAX_CONNECTIONS`].
+    pub esplora_max_inflight: usize,
     /// Opt-in Esplora `GET /block-template` (GBT template JSON). Default off.
     pub esplora_block_template: bool,
     /// Prometheus `GET /metrics` on the health listener. Default off.
@@ -450,6 +453,7 @@ impl Default for NodeConfig {
             max_sh_creates: rbitcoin_query::DEFAULT_MAX_SH_CREATES,
             heavy_sh_creates: rbitcoin_query::DEFAULT_HEAVY_SH_CREATES,
             electrum_max_subs: rbitcoin_electrum::DEFAULT_MAX_SCRIPTHASH_SUBS,
+            esplora_max_inflight: rbitcoin_electrum::DEFAULT_MAX_CONNECTIONS,
             esplora_block_template: false,
             metrics: false,
             esplora_onion: true,
@@ -1327,6 +1331,19 @@ impl NodeConfig {
                     ));
                 }
                 self.electrum_max_subs = n;
+            }
+            "esplora_max_inflight" => {
+                let n: usize = val
+                    .parse()
+                    .map_err(|e| NodeError::Config(format!("conf esplora_max_inflight: {e}")))?;
+                // `Semaphore::new` panics above `MAX_PERMITS`.
+                if n == 0 || n > tokio::sync::Semaphore::MAX_PERMITS {
+                    return Err(NodeError::Config(format!(
+                        "conf esplora_max_inflight must be >= 1 and <= {}",
+                        tokio::sync::Semaphore::MAX_PERMITS
+                    )));
+                }
+                self.esplora_max_inflight = n;
             }
             "esplora_block_template" => {
                 self.esplora_block_template = parse_conf_bool(val)

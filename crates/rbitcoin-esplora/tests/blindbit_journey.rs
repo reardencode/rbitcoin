@@ -456,9 +456,7 @@ async fn blindbit_v1_routes_share_one_inflight_limit() {
         }
     }
     assert_eq!(queued.len(), 3, "a full BlindBit limit makes the next asks wait");
-    // While the listener limit is per route, this route's slots are its own
-    // and this passes either way. It checks the permit order once the
-    // listener limit spans every route.
+    // The listener's last slot is free only if the queued asks hold none.
     let (st, _) = tokio::time::timeout(
         Duration::from_millis(1000),
         http_get(addr, "/blocks/tip/height"),

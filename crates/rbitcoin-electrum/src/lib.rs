@@ -24,7 +24,7 @@ pub mod unspent;
 pub use server::{
     batch_window, electrum_scripthash_hex, parse_electrum_request_line, perf_totals, run_electrum,
     sample_reset_perf, ElectrumConfig, ElectrumHandle, ServeLimits, TipNotify,
-    DEFAULT_MAX_SCRIPTHASH_SUBS, MIN_BLOCKING_POOL,
+    DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_SCRIPTHASH_SUBS, MIN_BLOCKING_POOL,
 };
 pub use tweaks::DEFAULT_TWEAKS_MIN_DUST;
 pub use unspent::{
