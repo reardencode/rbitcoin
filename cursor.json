@@ -1,12 +1,14 @@
 {
-  "new_base": "11db7a6445eebc40f503de9ab0e5b7d236ff042e",
+  "new_base": "8e62e4ce4d60c30abc851cb0893e4b80149ac9e4",
   "new_skip": 0,
-  "old_index": 0,
+  "old_index": 181,
   "new_cap_used": false,
-  "run_id": "",
-  "old_name": "",
-  "new_len": 0,
+  "run_id": "40064915543",
+  "old_name": "crates/rbitcoin-consensus/src/block/mod.rs:420:15: replace += with -= in last_script_push",
+  "new_len": 92,
   "new_remaining": 0,
-  "completed_new": 0,
-  "completed_old": 0
+  "completed_new": 92,
+  "completed_old": 181,
+  "old_len": 30752,
+  "old_remaining": 30571
 }
