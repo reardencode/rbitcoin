@@ -196,13 +196,20 @@ impl Store {
         let Ok(rec) = self.headers.get(fk) else {
             return Ok(());
         };
-        let prev_gen = TipSeal::load(self.path())?
-            .map(|s| s.generation)
-            .unwrap_or(0);
+        let prev = TipSeal::load(self.path())?;
+        let confirmed_len = u64::from(tip.0) + 1;
+        // Open republishes after its tip-window check. An unchanged tip writes
+        // nothing, so opening a clean store leaves its files as they were.
+        if let Some(p) = &prev {
+            if (p.tip_height, p.tip_hash, p.confirmed_len) == (tip.0, rec.hash, confirmed_len) {
+                return Ok(());
+            }
+        }
+        let prev_gen = prev.map(|s| s.generation).unwrap_or(0);
         let seal = TipSeal {
             tip_height: tip.0,
             tip_hash: rec.hash,
-            confirmed_len: u64::from(tip.0) + 1,
+            confirmed_len,
             generation: prev_gen.saturating_add(1),
         };
         seal.store(self.path())

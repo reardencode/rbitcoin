@@ -131,6 +131,74 @@ Class C. Restart the same binary: `tx.head` rebuilds from Class A; with
 repair above tip). Prefer SIGTERM ([Resume / clean stop](#resume--clean-stop)).
 A corrupt file still means wipe/reindex — not an in-process repair.
 
+## Import a pre-built store (`--assumehot`)
+
+A new node can start from another node's store instead of running IBD. You
+trust whoever gave you the digest to name the right chain.
+
+On the source, stop the node with SIGTERM, then print its digest:
+
+```bash
+rbitcoin-node --datadir /srv/rbtc-src --network signet --hot-digest
+# signet 212345 000000…tiphash 3f9a…digest
+```
+
+The last field is the digest. It covers the confirmed chain and its spend
+state, addressed by height. It does not depend on `store.secret`, the schema
+the store started on, orphans, or reorg history, so two honest nodes on the
+same tip print the same digest. Copy the source datadir to the new host, or
+read it in place.
+
+On the new node, start once with both flags and the usual ones:
+
+```bash
+rbitcoin-node --datadir /srv/rbtc --network signet \
+  --assumehot-from /srv/rbtc-src --assumehot 3f9a…digest
+```
+
+Before it opens its own store, the node:
+
+1. takes the source datadir's `.lock` (a running source node is refused);
+2. refuses unless the destination `store/` is empty and has no
+   `--datadir-cold`;
+3. refuses a source that keeps files on a `--datadir-cold`
+   (`seqsigwit.reloc`), is not on the current schema, did not stop cleanly
+   (`tip_seal` or `spend_durable` missing or behind its tip), or is pruned;
+4. walks the source by height into `store.import/` next to `store/`: each
+   header is checked against its parent (proof of work, retarget, time),
+   each body against its header and its height's soft forks (merkle root
+   from recomputed txids, witness commitment, size, BIP34). Each block is
+   then connected as IBD connects it: double spends, coinbase maturity,
+   BIP30, BIP68 and subsidy plus fees are checked, and spends, fees and the
+   indexes are recomputed. Scripts are not run, as with `--milestone` at the
+   source's tip. A connect failure names the run of up to 64 heights it was
+   checked in;
+5. compares the new store's digest with `--assumehot`, records the
+   import in `store.import/assumehot` (height, tip hash, digest), then
+   renames `store.import/` to `store/`. On any refusal or mismatch it
+   deletes `store.import/` and exits 1, leaving `store/` empty.
+
+The import never writes to the source. It opens the source without the
+start-up repairs a node runs: it doesn't recheck the tip window, repair indexes
+or resize `header.head`. A source whose tip is past its `tip_seal` is
+refused, not shrunk back; start it once as a node to repair it.
+
+A later start that still passes the flags finds `store/assumehot`. If it
+names the same digest, the node logs that the store is already imported and
+opens it without touching the source, also after it has followed past the
+imported tip, so the source can be deleted once the import is done. A
+different digest is refused, and so is a non-empty `store/` that no import
+wrote. The flags are CLI only, so a conf file never re-imports.
+
+**Disk:** the destination gets a full rewritten copy, so it needs free space
+about the size of the source `store/`. Neither side may be split with
+`--datadir-cold`: the import reads and writes one `store/` each. The
+destination's head scale comes from its own flags.
+
+**What you skip:** the download and script checks below the imported tip,
+as with `--milestone` at that height. Unlike Core's assumeutxo there is no
+background validation from genesis. See [`COMPAT.md`](../../COMPAT.md).
+
 ## Scripthash index (`--sh-index`)
 
 Class B **scripthash** reverse index is **optional** (default **off**), analogous
