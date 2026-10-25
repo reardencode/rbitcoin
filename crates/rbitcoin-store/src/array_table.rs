@@ -14,9 +14,12 @@
 //!   **suffix** only, then extend HWM — never overwrites published prefix bytes.
 //! - **Truncate**: shrink the HWM only when nothing below the new length is
 //!   dirty; otherwise rewrite from the lowest dirty index, then shrink.
-//! - **In-prefix mutate** (rare for tip Class C): full body rewrite (residual
-//!   mid-pwrite tear risk on same-size published range — mitigated by tip-last
-//!   barrier so `confirmed` is not advanced until strong/height are durable).
+//! - **In-prefix mutate** (rare for tip Class C): rewrite from the lowest
+//!   dirty index, then publish the new length. Residual: a kill inside that
+//!   rewrite reopens a torn published range, or the new prefix over the old
+//!   tail when the table also shrank. Tip-first disconnect flushes the shrink
+//!   alone, so `confirmed` stays on the suffix and shrink paths; tip-last
+//!   connect keeps it from advancing until strong/height are durable.
 //!
 //! Tables over the cap stay pure fd L0 (per-slot write-through: a growing
 //! `set_many` publishes its zero-filled length before its pairs land).
@@ -422,10 +425,9 @@ impl<F: ArrayFile> ArrayTable<F> {
         if !bytes.is_empty() {
             self.file.write_at(Self::offset(from), &bytes)?;
         }
-        if n != disk {
-            let logical = FILE_HEADER_LEN as u64 + n * ELEM;
-            self.file.set_logical_len(logical)?;
-        }
+        // Even when `n == disk`: a failed publish may have moved the file's end.
+        self.file
+            .set_logical_len(FILE_HEADER_LEN as u64 + n * ELEM)?;
         self.disk_len.store(n, Ordering::Release);
         self.note_flush_clean(e0, &mut between);
         Ok(())

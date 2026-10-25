@@ -576,6 +576,37 @@ fn shrink_len_publish_fails_after_store() {
     });
 }
 
+/// A rewrite that grew the file fails its length publish, then the writer
+/// truncates back to the old on-disk length. The next flush must still move
+/// the file's end to it.
+#[test]
+fn grown_rewrite_len_fails_then_truncate_back() {
+    run(Scenario {
+        base: vec![10, 11],
+        writer: vec![Op::Set(0, 20), Op::Set(2, 22), Op::Truncate(2)],
+        flushers: 1,
+        fault: Some((FailAt::SetLenAfterStore, 1)),
+        ..Scenario::default()
+    });
+}
+
+/// Then an append flush starts from a file end that matches `disk_len`.
+#[test]
+fn grown_rewrite_len_fails_then_truncate_back_and_append() {
+    run(Scenario {
+        base: vec![10, 11],
+        writer: vec![
+            Op::Set(0, 20),
+            Op::Set(3, 23),
+            Op::Truncate(2),
+            Op::Set(2, 32),
+        ],
+        flushers: 2,
+        fault: Some((FailAt::SetLenAfterStore, 1)),
+        ..Scenario::default()
+    });
+}
+
 /// A shrinking rewrite lands its bytes, then its length publish fails: the
 /// file holds the new prefix over the old tail (the same image as a kill
 /// between the two writes).
@@ -711,6 +742,30 @@ fn fd_only_many_readers() {
             Op::SetMany(vec![(5, 15), (0, 10)]),
         ],
         readers: vec![vec![0, 4], vec![1, 2], vec![2, 5], vec![4, 0]],
+        ..Scenario::default()
+    });
+}
+
+/// Three flushers, length-publish faults, and a writer that truncates and
+/// regrows across the on-disk length.
+#[cfg(shuttle)]
+#[test]
+fn len_faults_three_flushers_long_writer() {
+    run(Scenario {
+        base: vec![1, 2, 3, 4],
+        writer: vec![
+            Op::Set(4, 14),
+            Op::Set(0, 10),
+            Op::Truncate(3),
+            Op::Set(3, 13),
+            Op::Truncate(4),
+            Op::Set(5, 15),
+            Op::Truncate(2),
+        ],
+        flushers: 3,
+        readers: vec![vec![0, 3, 5]],
+        fault: Some((FailAt::SetLenAfterStore, 2)),
+        residual: Residual::StaleTail,
         ..Scenario::default()
     });
 }
