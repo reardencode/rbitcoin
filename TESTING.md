@@ -133,6 +133,7 @@ Host **gnu** objects are not interchangeable with **musl** release or with
 |------|--------|---------|
 | **Dev** | `target/dev` (`CARGO_TARGET_DIR`; `nix-shell` / `nix develop` set `$PWD/target/dev` when unset — rustup users should export it) | fmt, clippy, `cargo test`, ad-hoc `cargo build` |
 | **Coverage** | `target/cov` (forced in `scripts/coverage.sh`) | `./scripts/coverage.sh` only |
+| **Model** | `target/model-loom`, `target/model-shuttle` (forced in `scripts/model-check.sh`; override `CARGO_TARGET_DIR_MODEL`) | `./scripts/model-check.sh` only |
 | **Musl release** | Nix store via crane (`cargoArtifacts` + app) | `nix build .#rbitcoin-musl` — **not** `./target` |
 
 Override dev dir only when intentional: `CARGO_TARGET_DIR=…` (Nix shell
@@ -326,10 +327,49 @@ matches scalar in default tests). Owner: [`docs/quality.md`](./docs/quality.md).
 | **cargo-crap** | After LCOV, `./scripts/coverage.sh` calls `./scripts/coverage-crap.sh` (skip if `cargo-crap` missing). `--fail-above --threshold 30`; `.cargo-crap.toml` allowlists today's production CRAP>30 functions (remove a name when it scores ≤30). A new failure is answered by deleting branches until one path remains, or by extending the catalog journey that owns the feature so those branches run. Allowlist additions follow [`docs/code-shape.md`](docs/code-shape.md): do not split a Core-faithful opcode loop or an io_uring machine to beat a score. A test whose only effect is to change the CRAP input is not the fix. Dry-run: `CRAP_DRY_RUN=1 ./scripts/coverage-crap.sh`. Self-test: `./scripts/coverage-crap.test.sh` | Rides required `coverage`. No `--fail-regression` (llvm-cov coverage % jitters per function) |
 | **coverage ignore / badge** | `./scripts/coverage.test.sh` (filename ignore, Tier A IBD not skipped, 91% floor, Shields JSON). Publish dry-run: `BADGE_DRY_RUN=1 ./scripts/publish-coverage-badge.sh` | `test` job self-test; `coverage` job writes `coverage/badge.json` and, on green `master`, pushes `badges/coverage.json` |
 | **Miri** | `./scripts/miri.sh` → `cargo +nightly miri test -p rbitcoin-primitives`. Dry-run: `MIRI_DRY_RUN=1 ./scripts/miri.sh`. Self-test: `./scripts/miri.test.sh` | Nightly `miri.yml` (not required). Never `--workspace` |
+| **Model checking (loom / shuttle)** | `./scripts/model-check.sh loom` explores every interleaving of small `ArrayTable` scenarios; `./scripts/model-check.sh shuttle` runs seeded PCT and random schedules on larger ones. Both run `cargo test -p rbitcoin-store --test model` under `--cfg <engine>` (empty in the default build); a test name filter passes through. Loom: `LOOM_MAX_PREEMPTIONS` (suite default when unset), `LOOM_MAX_BRANCHES`, `LOOM_LOG`, `LOOM_LOCATION`. Shuttle: `SHUTTLE_RANDOM_SEED` overrides the fixed seed; a failure prints a schedule for `shuttle::replay`. Suite: `MODEL_LOOM_EXHAUSTIVE=1` drops the preemption bound, `MODEL_SHUTTLE_ITERS` and `MODEL_SHUTTLE_DEPTH` raise the PCT / random budget (Budgets below). | `model.yml` on every PR and `master` push, jobs `loom` and `shuttle` (not required); its nightly schedule runs the deep budget. |
 | **cargo-mutants** | Nightly, not a PR check. `./scripts/mutants-nightly.sh` lists `--workspace` mutants, runs new diff lines first, then walks a cursor through the rest. `rbitcoin-bench` is excluded (`.cargo/mutants.toml` and `--exclude` on both invocations; CLI replaces the config glob). `#[mutants::skip]` on an expression is the won't-test list; those mutants are omitted, not `MISSED`. Each mutant uses `--test-workspace=true` so a higher journey counts, `--baseline=skip`, `-j 1`, test binaries on tmpfs (runner above; the mutants copy stays on disk), 20 minute mutant timeout, 8 hour budget across two jobs of 4 hours (a hosted job dies at 6). While both the new queue and the backlog have mutants, a job starts new batches only until half of its own budget has elapsed, then walks the backlog. Time the new queue does not use goes to the backlog. The second job resumes the cursor and does not open another new window after that half is used. An empty side does not block the other. When the backlog walk finishes, the job sets `new_base` to that job's HEAD, clears `new_skip`, sets `old_index` to 0, sets `old_name` to the first listed mutant, and rebuilds the backlog as every listed mutant at that commit. It keeps walking that backlog for whatever budget remains. The published cursor records `new_len`, `old_len`, `new_remaining`, `old_remaining`, `completed_new`, and `completed_old` for that job. Cursor and `MISSED` lines are pushed to the `mutants-state` branch; that branch wins over the `mutants-cursor` artifact, which is still uploaded and expires after 14 days. Resume continues at the saved backlog mutant name, or at the saved index modulo the current backlog length when that name is gone. A failed push fails the run. `MISSED` is uploaded and does not fail the run. Each invocation passes `--file` for one source file and at most `MUTANTS_BATCH` queued names from that file (default 200). cargo-mutants 27.1.0 emits `..` struct-field deletes without applying `--re`; one file keeps that repeat inside the file under test instead of retesting every such delete in the workspace on every batch. The miss list is `missed.txt` on the `mutants-state` branch. | `mutants.yml` daily `47 0 * * *` (17:47 Pacific during PDT) and `workflow_dispatch`. Each job timeout 270 minutes. |
 
-Artifact silos above are unchanged: ast-grep / Miri dry-run / crap dry-run do
-not write `target/`. `mutants.out/` is gitignored.
+Both model engines run the one scenario file
+`crates/rbitcoin-store/tests/model/main.rs`, which races `set` / `set_many` /
+`truncate` / `get` against `flush_dirty` over an in-memory file with
+`TableFile`'s logical end, persisted HWM, and reopen view, and with faults
+at `write_at` (whole or torn) and at both `set_logical_len` failure points.
+The writer's RAM states form one history and everything observed must come
+from it: each reader's `get` / `len` results fit the states in order; every
+successful flush leaves the file, its reopen, and `disk_len` at one state;
+a restart after the race reopens one state or the in-prefix rewrite
+residual the scenario names ([`docs/crash-recovery.md`](docs/crash-recovery.md));
+one quiescent flush brings everything to the last state; a flush never
+writes below the lowest index the writer touched.
+
+Roles. loom owns small lock-free kernels (`ArrayTable`, `StrongTxTable`,
+head publish order): it models Acquire/Release, which shuttle runs as
+SeqCst, and an ordering bug in those protocols would show only on aarch64.
+It caps at four spawned threads, and exhaustive search of two flushers
+already takes minutes, so the suite runs at preemption bound 3. shuttle
+owns composite scenarios past that cap or longer than loom's bound; PCT's
+hit rate for a depth-d bug does not fall with execution length. Neither
+sees a std primitive, an fd, io_uring, or tokio, so a new model needs its
+seam (`ArrayFile`) first. On the first `ArrayTable` run (2026-10) shuttle
+found nothing loom did not; it earns its job when a scenario needs a fifth
+thread.
+
+Budgets. CI runs loom at preemption bound 3 (35 scenarios, about 9 s) and
+shuttle at 50k PCT depth-3 plus 50k random schedules per scenario (38
+scenarios, about 30 s). The nightly schedule in `model.yml` runs
+`LOOM_MAX_PREEMPTIONS=5` (about 4 min in `--release`) and
+`MODEL_SHUTTLE_ITERS=1000000 MODEL_SHUTTLE_DEPTH=5` with the run id as
+`SHUTTLE_RANDOM_SEED` (about 6 min), so coverage accumulates across nights.
+`MODEL_LOOM_EXHAUSTIVE=1` finishes all but three scenarios inside 15 min.
+Each scenario prints `model: N executions in T` under `--nocapture`. The
+2026-10 deep run (bounds 4 and 5, exhaustive where it finished, four runs
+of 76M shuttle schedules) found nothing beyond the three defects the
+hardened pins had already found at the CI budget.
+
+ast-grep and the Miri and crap dry-runs do not write `target/`. A
+model run writes only its own silo, `target/model-<engine>`. `mutants.out/`
+is gitignored.
 
 ### Mature-chain fixtures
 

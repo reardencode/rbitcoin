@@ -47,7 +47,15 @@ Open revalidation runs in `Query::open_or_create` **before** P2P can extend tip.
   3. Then `set_unstrong` → flush strong.
   - Mid-kill after tip shrink: leftover strong is **not on the new fence** → repairable.
   - Never unstrong while tip is still high — permanent unstrong-at-tip.
-- Append-only tip extension writes **suffix only**. In-prefix full rewrites residual; tip-last connect + tip-first disconnect + BQ re-drive mitigate.
+- Append-only tip extension writes **suffix only**. An in-prefix set rewrites
+  from the lowest dirty index, then publishes the length. Residual: a kill
+  inside that rewrite reopens a torn range; when the table also shrank, a
+  kill between the two writes, or a failed length publish, reopens the new
+  prefix over the old tail. Tip-last connect, tip-first disconnect (the
+  shrink is flushed alone), and BQ re-drive mitigate; the tip window's hash
+  chain catches a stale `confirmed[]` tail and trailing-null trim the zero
+  tears. The model suite names each residual per scenario
+  ([`TESTING.md`](../TESTING.md#structural-lints-crap-miri-mutants)).
 - Prefer **loss of uncommitted tip progress** over **tip-ahead-of-strong** or **tip-high-with-unstrong**.
 
 ## Class A (archive)

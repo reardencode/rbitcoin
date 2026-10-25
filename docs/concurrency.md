@@ -237,6 +237,7 @@ Single Class A writer is intentional. Multi‑GiB **FdOnly grow** is fallocate-o
 (no remap). Hash heads do not rewrite occupied tables while serving; a leftover
 undersized `header.head` may be **rewritten via `header.head.grow` then rename** once on open. Class C tip tables use L2
 write-behind (barrier `flush_class_c_tip`); large tables stay L0.
+That write-behind is model-checked ([TESTING.md](../TESTING.md#structural-lints-crap-miri-mutants), Model checking row).
 See **[io-modality.md](./io-modality.md)** for operator IO levers.
 
 ### Confirm load read pipeline

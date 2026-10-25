@@ -23,7 +23,10 @@ Open the row that matches the change. Leave the other owners closed.
 - IO: `src/io_backend.rs`, `src/io_session_pool.rs`
 - Heads: `src/hashhead.rs`, `src/header_table.rs`, `src/scripthash.rs`
 - Fixtures: `src/testutil.rs` (`TempDir`, `tiny_store`)
+- Model-checked concurrency (loom / shuttle): `tests/model/main.rs`
 
 ## Verify
 
 `cargo test -p rbitcoin-store --test suite`
+
+`./scripts/model-check.sh loom` for changes to `src/array_table.rs` or `src/sync.rs`
