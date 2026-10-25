@@ -1,0 +1,66 @@
+# Model-checked concurrency for rbitcoin-store (`tests/model/main.rs`): loom
+# explores ArrayTable write-behind interleavings up to a preemption bound,
+# shuttle runs seeded PCT and random schedules. Not a required PR check. The
+# engine is a `--cfg`, not a feature, so each job has its own target dir and
+# cache. The nightly schedule raises the budget (TESTING.md, Budgets) and
+# seeds shuttle with the run id, so each night explores new schedules.
+
+name: model
+
+on:
+  pull_request:
+  push:
+    branches: [master, main, "v*.*.x"]
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: model-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  # Actions only. rust-cache restores dep rlibs (not workspace crates) and
+  # strips incremental artifacts before persist; it also sets this so rustc
+  # does not write throwaway dep-graphs.
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  model:
+    name: ${{ matrix.engine }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      # A loom failure and a shuttle failure are separate findings.
+      fail-fast: false
+      matrix:
+        engine: [loom, shuttle]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # 1.95.0 branch tip. a5f673d0 still says toolchain 1.95.0 but is no
+      # longer on that branch, so zizmor reports it as an impostor commit.
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: model-${{ matrix.engine }}
+          workspaces: ". -> target/model-${{ matrix.engine }}"
+      - name: model-check ${{ matrix.engine }}
+        if: github.event_name != 'schedule'
+        run: ./scripts/model-check.sh ${{ matrix.engine }}
+      # Unset variables keep the suite defaults, so the deep knobs live only
+      # on this step.
+      - name: model-check ${{ matrix.engine }} (nightly deep budget)
+        if: github.event_name == 'schedule'
+        env:
+          LOOM_MAX_PREEMPTIONS: "5"
+          MODEL_SHUTTLE_ITERS: "1000000"
+          MODEL_SHUTTLE_DEPTH: "5"
+          SHUTTLE_RANDOM_SEED: ${{ github.run_id }}
+        run: ./scripts/model-check.sh ${{ matrix.engine }} --release
