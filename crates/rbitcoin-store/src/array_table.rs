@@ -31,8 +31,10 @@ use rbitcoin_primitives::TableKind;
 use std::path::Path;
 
 /// Packed dirty generation: `0` is clean. `set` bumps; flush CASes back to `0`.
+/// A bump that reads a clean's `0` acquires it, so the mark that follows sees
+/// that clean's `lo` reset and is not lost.
 pub fn dirty_epoch_bump(epoch: &AtomicU64) {
-    let _ = epoch.try_update(Ordering::Release, Ordering::Relaxed, |e| {
+    let _ = epoch.try_update(Ordering::AcqRel, Ordering::Acquire, |e| {
         Some(e.wrapping_add(1).max(1))
     });
 }

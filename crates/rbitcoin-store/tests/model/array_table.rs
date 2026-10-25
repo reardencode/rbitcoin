@@ -318,6 +318,18 @@ fn in_prefix_set_races_flush() {
     });
 }
 
+/// The second set lands after the flush marked the table clean. Its mark
+/// must see the clean's reset of `dirty_lo`, or the next flush skips it.
+#[test]
+fn in_prefix_set_after_clean_races_flush() {
+    run(Scenario {
+        base: vec![10, 11],
+        writer: vec![Op::Set(0, 20), Op::Set(0, 21)],
+        flushers: 1,
+        ..Scenario::default()
+    });
+}
+
 #[test]
 fn append_then_in_prefix_set_races_flush() {
     run(Scenario {
@@ -501,6 +513,19 @@ fn get_races_append_gap() {
         base: vec![1],
         writer: vec![Op::Set(3, 9)],
         readers: vec![vec![3], vec![2]],
+        ..Scenario::default()
+    });
+}
+
+/// One reader's results must fit the writer's states in order, not just
+/// each value some state.
+#[test]
+fn reader_sees_states_in_order() {
+    run(Scenario {
+        base: vec![5, 6],
+        writer: vec![Op::Set(0, 7), Op::Truncate(1), Op::Set(1, 8)],
+        flushers: 1,
+        readers: vec![vec![1, 0]],
         ..Scenario::default()
     });
 }
