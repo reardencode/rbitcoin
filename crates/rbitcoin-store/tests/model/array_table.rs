@@ -607,6 +607,17 @@ fn torn_growing_rewrite() {
     });
 }
 
+#[test]
+fn fd_only_get_races_truncate() {
+    run(Scenario {
+        base: vec![1, 2, 3],
+        fd_only: true,
+        writer: vec![Op::Truncate(1)],
+        readers: vec![vec![2]],
+        ..Scenario::default()
+    });
+}
+
 /// A reader that has seen the new length must not read the slot as past
 /// the file's end on its next `get`.
 #[test]
@@ -616,6 +627,17 @@ fn fd_only_get_races_set_extend() {
         fd_only: true,
         writer: vec![Op::Set(3, 9)],
         readers: vec![vec![3, 3], vec![2]],
+        ..Scenario::default()
+    });
+}
+
+#[test]
+fn fd_only_truncate_then_set_races_get() {
+    run(Scenario {
+        base: vec![1, 2, 3],
+        fd_only: true,
+        writer: vec![Op::Truncate(1), Op::Set(2, 5)],
+        readers: vec![vec![2]],
         ..Scenario::default()
     });
 }
@@ -646,6 +668,24 @@ fn many_readers_writer_two_flushers() {
         ],
         flushers: 2,
         readers: vec![vec![0, 3], vec![1, 5], vec![3, 0], vec![5, 1]],
+        ..Scenario::default()
+    });
+}
+
+#[cfg(shuttle)]
+#[test]
+fn fd_only_many_readers() {
+    run(Scenario {
+        base: vec![1, 2, 3],
+        fd_only: true,
+        writer: vec![
+            Op::Truncate(1),
+            Op::Set(4, 9),
+            Op::Truncate(2),
+            Op::Set(2, 7),
+            Op::SetMany(vec![(5, 15), (0, 10)]),
+        ],
+        readers: vec![vec![0, 4], vec![1, 2], vec![2, 5], vec![4, 0]],
         ..Scenario::default()
     });
 }

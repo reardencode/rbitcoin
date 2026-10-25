@@ -18,7 +18,8 @@
 //!   mid-pwrite tear risk on same-size published range — mitigated by tip-last
 //!   barrier so `confirmed` is not advanced until strong/height are durable).
 //!
-//! Tables over the cap stay pure fd L0 (per-slot write-through).
+//! Tables over the cap stay pure fd L0 (per-slot write-through: a growing
+//! `set_many` publishes its zero-filled length before its pairs land).
 
 use crate::error::StoreError;
 use crate::file::{TableFile, FILE_HEADER_LEN};
@@ -235,8 +236,13 @@ impl<F: ArrayFile> ArrayTable<F> {
         }
         drop(guard);
         let mut buf = [0u8; 8];
-        self.file.read_at(Self::offset(index), &mut buf)?;
-        Ok(u64::from_le_bytes(buf))
+        match self.file.read_at(Self::offset(index), &mut buf) {
+            // A truncate that landed since the `len` check makes the slot
+            // absent, even once a later set has regrown the file over it.
+            Ok(()) if index < self.len.load(Ordering::Acquire) => Ok(u64::from_le_bytes(buf)),
+            Ok(()) | Err(StoreError::Corrupt(_)) => Ok(0),
+            Err(e) => Err(e),
+        }
     }
 
     pub fn set(&self, index: u64, value: u64) -> Result<(), StoreError> {
