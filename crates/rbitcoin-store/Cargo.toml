@@ -34,5 +34,15 @@ io-uring = "0.7"
 name = "suite"
 path = "tests/suite.rs"
 
+[[test]]
+name = "model"
+path = "tests/model/main.rs"
+
 [lints]
 workspace = true
+
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
+[target.'cfg(shuttle)'.dependencies]
+shuttle = "0.9"

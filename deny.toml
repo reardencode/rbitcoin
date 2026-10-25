@@ -54,6 +54,8 @@ skip = [
     { name = "hex-conservative", version = "=0.3.2" },
     # rand 0.8 (via noise_sv2) still needs getrandom 0.2. Direct deps are 0.4.
     { name = "getrandom", version = "=0.2.17" },
+    # corosensei 0.3 (shuttle, cfg(shuttle) tests only) uses 0.59. The tree is 0.61.
+    { name = "windows-sys", version = "=0.59.0" },
 ]
 
 [sources]
