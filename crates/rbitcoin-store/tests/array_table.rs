@@ -219,6 +219,27 @@ fn write_behind_truncate_flush_reopen() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// A set below the old on-disk length after a truncate was dropped by the
+/// shrink-only flush.
+#[test]
+fn truncate_then_set_below_old_disk_len_persists() {
+    let path = tmp_path();
+    let _ = std::fs::remove_file(&path);
+    {
+        let t = ArrayTable::create(&path, TableKind::Confirmed).unwrap();
+        t.set_many(&[(0, 1), (1, 2), (2, 3), (3, 4)]).unwrap();
+        t.flush().unwrap();
+        t.truncate(2).unwrap();
+        t.set(2, 9).unwrap();
+        t.set(0, 99).unwrap();
+        t.flush().unwrap();
+    }
+    let t = ArrayTable::open(&path, TableKind::Confirmed).unwrap();
+    assert_eq!((t.len(), t.get(0).unwrap(), t.get(2).unwrap()), (3, 99, 9));
+    assert_eq!(t.get(1).unwrap(), 2);
+    let _ = std::fs::remove_file(&path);
+}
+
 /// Tip extension is append-only: after first flush, only suffix is written.
 #[test]
 fn append_only_flush_extends_without_losing_prefix() {

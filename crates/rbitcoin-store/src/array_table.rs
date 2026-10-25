@@ -12,7 +12,8 @@
 //!
 //! - **Append-only** (dirty only at indices ≥ last flushed len): write the new
 //!   **suffix** only, then extend HWM — never overwrites published prefix bytes.
-//! - **Truncate**: shrink HWM only (complete-or-fail length publish).
+//! - **Truncate**: shrink the HWM only when nothing below the new length is
+//!   dirty; otherwise rewrite from the lowest dirty index, then shrink.
 //! - **In-prefix mutate** (rare for tip Class C): full body rewrite (residual
 //!   mid-pwrite tear risk on same-size published range — mitigated by tip-last
 //!   barrier so `confirmed` is not advanced until strong/height are durable).
@@ -318,9 +319,9 @@ impl<F: ArrayFile> ArrayTable<F> {
         if let Some(ref mut v) = *guard {
             v.truncate(new_len as usize);
             self.len.store(new_len, Ordering::Release);
-            // Shrink is a length-only publish; mark dirty from 0 so flush takes
-            // the truncate path (set_logical_len), not an append.
-            self.mark_dirty_index(0);
+            // A plain shrink needs no byte write; a later set below `new_len`
+            // lowers the mark itself.
+            self.mark_dirty_index(new_len);
             return Ok(());
         }
         drop(guard);
@@ -369,7 +370,7 @@ impl<F: ArrayFile> ArrayTable<F> {
         let disk = self.disk_len.load(Ordering::Acquire);
         let dirty_lo = self.dirty_lo.load(Ordering::Acquire);
 
-        if n < disk {
+        if n < disk && dirty_lo >= n {
             drop(guard);
             between(self, FlushStep::Write);
             let logical = FILE_HEADER_LEN as u64 + n * ELEM;

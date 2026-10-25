@@ -104,6 +104,9 @@ struct Scenario {
 enum Residual {
     #[default]
     None,
+    /// A shrinking rewrite landed and its length publish did not: a state's
+    /// prefix over a longer state's tail.
+    StaleTail,
     /// A short write tore the rewritten range.
     Torn(Vec<Vec<u64>>),
 }
@@ -145,10 +148,23 @@ impl History {
         self.0.iter().any(|state| state == image)
     }
 
+    /// `image` is some state followed by the rest of a longer one.
+    fn stale_tail(&self, image: &[u64]) -> bool {
+        self.0.iter().any(|head| {
+            head.len() < image.len()
+                && image.starts_with(head)
+                && self
+                    .0
+                    .iter()
+                    .any(|old| old.len() == image.len() && old[head.len()..] == image[head.len()..])
+        })
+    }
+
     fn allows_crash(&self, image: &[u64], residual: &Residual) -> bool {
         self.contains(image)
             || match residual {
                 Residual::None => false,
+                Residual::StaleTail => self.stale_tail(image),
                 Residual::Torn(images) => images.iter().any(|t| t == image),
             }
     }
@@ -385,6 +401,37 @@ fn two_flushers_race_truncate() {
     });
 }
 
+#[test]
+fn truncate_to_len_writes_nothing() {
+    run(Scenario {
+        base: vec![1, 2],
+        writer: vec![Op::Truncate(2)],
+        flushers: 1,
+        readers: vec![vec![1]],
+        ..Scenario::default()
+    });
+}
+
+#[test]
+fn truncate_then_set_races_flush() {
+    run(Scenario {
+        base: vec![1, 2, 3, 4],
+        writer: vec![Op::Truncate(2), Op::Set(2, 9)],
+        flushers: 1,
+        ..Scenario::default()
+    });
+}
+
+#[test]
+fn two_flushers_race_truncate_then_set_below() {
+    run(Scenario {
+        base: vec![1, 2, 3, 4],
+        writer: vec![Op::Truncate(2), Op::Set(1, 9)],
+        flushers: 2,
+        ..Scenario::default()
+    });
+}
+
 /// The flusher's rewrite from index 2 races a truncate below it.
 #[test]
 fn rewrite_races_truncate_below_from() {
@@ -402,6 +449,26 @@ fn truncate_to_zero_then_regrow_past_disk_len() {
     run(Scenario {
         base: vec![1, 2],
         writer: vec![Op::Truncate(0), Op::Set(3, 9)],
+        flushers: 1,
+        ..Scenario::default()
+    });
+}
+
+#[test]
+fn truncate_below_then_set_above_disk_len() {
+    run(Scenario {
+        base: vec![1, 2, 3],
+        writer: vec![Op::Truncate(1), Op::Set(4, 9)],
+        flushers: 1,
+        ..Scenario::default()
+    });
+}
+
+#[test]
+fn zero_gap_then_truncate_into_it() {
+    run(Scenario {
+        base: vec![1],
+        writer: vec![Op::Set(4, 9), Op::Truncate(2)],
         flushers: 1,
         ..Scenario::default()
     });
@@ -484,6 +551,21 @@ fn shrink_len_publish_fails_after_store() {
     });
 }
 
+/// A shrinking rewrite lands its bytes, then its length publish fails: the
+/// file holds the new prefix over the old tail (the same image as a kill
+/// between the two writes).
+#[test]
+fn shrinking_rewrite_len_fails() {
+    run(Scenario {
+        base: vec![1, 2, 3, 4],
+        writer: vec![Op::Truncate(2), Op::Set(1, 9)],
+        flushers: 1,
+        fault: Some((FailAt::SetLenAfterStore, 1)),
+        residual: Residual::StaleTail,
+        ..Scenario::default()
+    });
+}
+
 /// A short in-prefix rewrite tears the published range: the module doc's
 /// residual risk.
 #[test]
@@ -546,6 +628,24 @@ fn fd_only_set_many_races_reader() {
         fd_only: true,
         writer: vec![Op::SetMany(vec![(4, 24), (1, 21)])],
         readers: vec![vec![0, 4, 1]],
+        ..Scenario::default()
+    });
+}
+
+#[cfg(shuttle)]
+#[test]
+fn many_readers_writer_two_flushers() {
+    run(Scenario {
+        base: vec![1, 2, 3, 4],
+        writer: vec![
+            Op::Set(0, 10),
+            Op::Set(4, 14),
+            Op::Truncate(3),
+            Op::Set(3, 13),
+            Op::SetMany(vec![(1, 11), (5, 15)]),
+        ],
+        flushers: 2,
+        readers: vec![vec![0, 3], vec![1, 5], vec![3, 0], vec![5, 1]],
         ..Scenario::default()
     });
 }
