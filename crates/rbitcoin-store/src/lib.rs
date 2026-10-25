@@ -107,6 +107,8 @@ pub mod spender_table;
 pub mod store;
 #[doc(hidden)]
 pub mod store_secret;
+#[doc(hidden)]
+pub mod sync;
 pub mod testutil;
 #[doc(hidden)]
 pub mod tx_head_mphf;

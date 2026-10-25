@@ -21,10 +21,12 @@
 
 use crate::error::StoreError;
 use crate::file::{TableFile, FILE_HEADER_LEN};
+use crate::sync::atomic::{AtomicU64, Ordering};
+#[cfg(any(loom, shuttle))]
+use crate::sync::TryUpdate as _;
+use crate::sync::{Mutex, RwLock};
 use rbitcoin_primitives::TableKind;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, RwLock};
 
 /// Packed dirty generation: `0` is clean. `set` bumps; flush CASes back to `0`.
 pub fn dirty_epoch_bump(epoch: &AtomicU64) {
@@ -75,8 +77,47 @@ pub fn class_c_inram_max_bytes() -> u64 {
     }
 }
 
-pub struct ArrayTable {
-    pub file: TableFile,
+/// Positional file an [`ArrayTable`] persists through: [`TableFile`] in
+/// production; the model suite substitutes an in-memory file.
+#[doc(hidden)]
+pub trait ArrayFile {
+    fn logical_len(&self) -> u64;
+    /// Fails [`StoreError::Corrupt`] only when the read passes the logical end.
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), StoreError>;
+    fn write_at(&self, offset: u64, bytes: &[u8]) -> Result<(), StoreError>;
+    fn set_logical_len(&self, logical: u64) -> Result<(), StoreError>;
+    fn flush(&self) -> Result<(), StoreError>;
+    fn flush_async(&self) -> Result<(), StoreError>;
+}
+
+impl ArrayFile for TableFile {
+    fn logical_len(&self) -> u64 {
+        TableFile::logical_len(self)
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), StoreError> {
+        TableFile::read_at(self, offset, buf)
+    }
+
+    fn write_at(&self, offset: u64, bytes: &[u8]) -> Result<(), StoreError> {
+        TableFile::write_at(self, offset, bytes)
+    }
+
+    fn set_logical_len(&self, logical: u64) -> Result<(), StoreError> {
+        TableFile::set_logical_len(self, logical)
+    }
+
+    fn flush(&self) -> Result<(), StoreError> {
+        TableFile::flush(self)
+    }
+
+    fn flush_async(&self) -> Result<(), StoreError> {
+        TableFile::flush_async(self)
+    }
+}
+
+pub struct ArrayTable<F: ArrayFile = TableFile> {
+    pub file: F,
     pub len: AtomicU64,
     /// `Some` = L2 authoritative image; `None` = L0 fd-only path.
     pub data: RwLock<Option<Vec<u64>>>,
@@ -92,8 +133,22 @@ pub struct ArrayTable {
 
 impl ArrayTable {
     pub fn create(path: impl AsRef<Path>, kind: TableKind) -> Result<Self, StoreError> {
-        let file = TableFile::create(path.as_ref(), kind)?;
-        Ok(Self {
+        Ok(Self::new(TableFile::create(path.as_ref(), kind)?))
+    }
+
+    pub fn open(path: impl AsRef<Path>, kind: TableKind) -> Result<Self, StoreError> {
+        Self::load(
+            TableFile::open(path.as_ref(), kind)?,
+            class_c_inram_max_bytes(),
+        )
+    }
+}
+
+impl<F: ArrayFile> ArrayTable<F> {
+    /// Empty table over a file with no body.
+    #[doc(hidden)]
+    pub fn new(file: F) -> Self {
+        Self {
             file,
             len: AtomicU64::new(0),
             data: RwLock::new(Some(Vec::new())),
@@ -101,17 +156,19 @@ impl ArrayTable {
             dirty_lo: AtomicU64::new(u64::MAX),
             disk_len: AtomicU64::new(0),
             flush_lock: Mutex::new(()),
-        })
+        }
     }
 
-    pub fn open(path: impl AsRef<Path>, kind: TableKind) -> Result<Self, StoreError> {
-        let file = TableFile::open(path.as_ref(), kind)?;
+    /// Table over an existing body. A body up to `inram_max_bytes` loads into
+    /// RAM (L2); a larger one stays fd-only (L0).
+    #[doc(hidden)]
+    pub fn load(file: F, inram_max_bytes: u64) -> Result<Self, StoreError> {
         let body = file.logical_len().saturating_sub(FILE_HEADER_LEN as u64);
-        if body % ELEM != 0 {
+        if !body.is_multiple_of(ELEM) {
             return Err(StoreError::Corrupt("array table size"));
         }
         let n = body / ELEM;
-        let data = if body <= class_c_inram_max_bytes() {
+        let data = if body <= inram_max_bytes {
             let mut v = vec![0u64; n as usize];
             if n > 0 {
                 let mut bytes = vec![0u8; body as usize];

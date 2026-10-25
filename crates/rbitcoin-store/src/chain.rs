@@ -2,6 +2,7 @@
 
 use crate::array_table::ArrayTable;
 use crate::error::StoreError;
+use crate::sync::atomic::AtomicU64;
 use rbitcoin_primitives::{Fk, Height, TableKind};
 use std::path::Path;
 
@@ -137,26 +138,26 @@ impl ConfirmedTable {
 pub struct StrongTxTable {
     pub bits: crate::file::TableFile,
     /// Number of bits allocated (covers tx fks 1..=n_bits).
-    pub n_bits: std::sync::atomic::AtomicU64,
+    pub n_bits: AtomicU64,
     /// L2 byte image. `strong_tx` stays in this `Vec`; open and create never go FdOnly.
     pub data: std::sync::RwLock<Vec<u8>>,
     /// `0` = clean. Nonzero generation: a bit `set` raced persist if CAS fails.
-    pub dirty_epoch: std::sync::atomic::AtomicU64,
+    pub dirty_epoch: AtomicU64,
     /// Min bit index mutated since last flush (`u64::MAX` = none).
-    pub dirty_lo_bit: std::sync::atomic::AtomicU64,
+    pub dirty_lo_bit: AtomicU64,
     /// Body byte length last flushed to disk (L2).
-    pub disk_bytes: std::sync::atomic::AtomicU64,
+    pub disk_bytes: AtomicU64,
 }
 
 impl StrongTxTable {
     pub fn create(dir: &Path) -> Result<Self, StoreError> {
         Ok(Self {
             bits: crate::file::TableFile::create(dir.join("strong_tx.body"), TableKind::StrongTx)?,
-            n_bits: std::sync::atomic::AtomicU64::new(0),
+            n_bits: AtomicU64::new(0),
             data: std::sync::RwLock::new(Vec::new()),
-            dirty_epoch: std::sync::atomic::AtomicU64::new(0),
-            dirty_lo_bit: std::sync::atomic::AtomicU64::new(u64::MAX),
-            disk_bytes: std::sync::atomic::AtomicU64::new(0),
+            dirty_epoch: AtomicU64::new(0),
+            dirty_lo_bit: AtomicU64::new(u64::MAX),
+            disk_bytes: AtomicU64::new(0),
         })
     }
 
@@ -172,11 +173,11 @@ impl StrongTxTable {
         }
         Ok(Self {
             bits,
-            n_bits: std::sync::atomic::AtomicU64::new(n_bits),
+            n_bits: AtomicU64::new(n_bits),
             data: std::sync::RwLock::new(v),
-            dirty_epoch: std::sync::atomic::AtomicU64::new(0),
-            dirty_lo_bit: std::sync::atomic::AtomicU64::new(u64::MAX),
-            disk_bytes: std::sync::atomic::AtomicU64::new(body),
+            dirty_epoch: AtomicU64::new(0),
+            dirty_lo_bit: AtomicU64::new(u64::MAX),
+            disk_bytes: AtomicU64::new(body),
         })
     }
 

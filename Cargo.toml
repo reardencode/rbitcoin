@@ -82,7 +82,8 @@ warnings = "deny"
 unsafe_op_in_unsafe_fn = "deny"
 # cargo-llvm-cov sets `cfg(coverage)` so diagnostic microbenches can use
 # `#[cfg(not(coverage))]` and stay out of the first-party LCOV denominator.
-unexpected_cfgs = { level = "deny", check-cfg = ['cfg(coverage)'] }
+# `--cfg loom` / `--cfg shuttle` select the model checker's sync primitives (`scripts/model-check.sh`).
+unexpected_cfgs = { level = "deny", check-cfg = ['cfg(coverage)', 'cfg(loom)', 'cfg(shuttle)'] }
 
 # Clippy: CI is `clippy --workspace --all-targets -- -D warnings`.
 # No workspace allow list. A leftover lint is `#[allow(clippy::…)]` on
