@@ -20,7 +20,7 @@ mutants = []
 bitcoin_hashes = { workspace = true }
 # Same crate `bitcoin::hex` re-exports. Not the `bitcoin` crate: store depends
 # on primitives and stays hashes-only.
-hex-conservative = { version = "0.2.2", default-features = false, features = ["alloc"] }
+hex-conservative = { version = "1.1.0", default-features = false, features = ["alloc"] }
 
 [[test]]
 name = "suite"
