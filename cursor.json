@@ -1,14 +1,14 @@
 {
   "new_base": "8e62e4ce4d60c30abc851cb0893e4b80149ac9e4",
-  "new_skip": 214,
-  "old_index": 990,
+  "new_skip": 425,
+  "old_index": 976,
   "new_cap_used": true,
-  "run_id": "40165331423",
-  "old_name": "crates/rbitcoin-consensus/src/script_pool.rs:419:22: replace && with || in start_wave",
-  "new_len": 362,
-  "new_remaining": 148,
-  "completed_new": 0,
-  "completed_old": 82,
-  "old_len": 30777,
-  "old_remaining": 30695
+  "run_id": "40274231112",
+  "old_name": "crates/rbitcoin-consensus/src/script_pool.rs:551:5: replace unregister_idle_worker with ()",
+  "new_len": 705,
+  "new_remaining": 280,
+  "completed_new": 211,
+  "completed_old": 14,
+  "old_len": 30560,
+  "old_remaining": 30546
 }
