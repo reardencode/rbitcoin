@@ -186,7 +186,8 @@ fn orphan_parks_then_promotes(life: &mut Life) {
                 report_orphans: false,
                 min_relay: None,
                 waive: false,
-            },
+                ephemeral_ok: false,
+},
         )
         .unwrap_err();
     assert!(matches!(err, AcceptError::MissingPrevout(_)), "{err}");
@@ -256,7 +257,8 @@ fn full_rbf_and_staged_commit(life: &mut Life) -> (OutPoint, Txid) {
                 report_orphans: false,
                 min_relay: None,
                 waive: false,
-            },
+                ephemeral_ok: false,
+},
         )
         .expect("prevout free at prepare");
     life.accept(&first).unwrap();

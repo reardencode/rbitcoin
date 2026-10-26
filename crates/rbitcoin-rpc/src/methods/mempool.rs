@@ -569,9 +569,14 @@ pub fn submitpackage_topology_disallowed(txs: &[Transaction], dialect: bool) -> 
 }
 
 #[doc(hidden)]
+/// RPC submit admits versions 1, 2, and 3.
+///
+/// P2P still admits any `nVersion`. Version 3 is BIP 431 TRUC, which Bark
+/// captaind uses for tree, forfeit, connector, and CPFP transactions. Other
+/// versions stay an RPC `"version"` reject.
 pub fn rpc_tx_version_nonstandard(tx: &Transaction) -> bool {
-    tx.version != bitcoin::transaction::Version::ONE
-        && tx.version != bitcoin::transaction::Version::TWO
+    let v = tx.version.0;
+    v != 1 && v != 2 && v != 3
 }
 
 #[doc(hidden)]
