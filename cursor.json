@@ -1,14 +1,14 @@
 {
   "new_base": "8e62e4ce4d60c30abc851cb0893e4b80149ac9e4",
   "new_skip": 541,
-  "old_index": 2160,
+  "old_index": 2279,
   "new_cap_used": true,
   "run_id": "40456788768",
-  "old_name": "crates/rbitcoin-consensus/src/script/core_script.rs:13:17: replace < with > in assemble_script",
+  "old_name": "crates/rbitcoin-electrum/src/server.rs:339:60: replace == with != in read_line_capped",
   "new_len": 713,
   "new_remaining": 172,
-  "completed_new": 116,
-  "completed_old": 442,
+  "completed_new": 0,
+  "completed_old": 119,
   "old_len": 30560,
-  "old_remaining": 30118
+  "old_remaining": 30441
 }
