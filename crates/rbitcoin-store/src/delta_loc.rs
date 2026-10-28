@@ -221,29 +221,30 @@ impl DeltaLoc {
         if new_count == cur {
             return Ok(());
         }
+        let n_win = new_count / LOC_WINDOW;
+        let kept = self
+            .ovf_rows
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|r| r.0 <= new_count)
+            .count();
+        // Kept overflow rows are a prefix. A rewrite of that prefix is the
+        // write that used to fail after the locator file was already short.
         self.loc
             .set_logical_len(FILE_HEADER_LEN as u64 + new_count * 2)?;
-        let n_win = new_count / LOC_WINDOW;
         self.off
             .set_logical_len(FILE_HEADER_LEN as u64 + n_win * 8)?;
-        {
-            let mut cps = self.checkpoints.write().unwrap_or_else(|e| e.into_inner());
-            cps.truncate(n_win as usize);
-        }
-        {
-            let mut rows = self.ovf_rows.write().unwrap_or_else(|e| e.into_inner());
-            rows.retain(|r| r.0 <= new_count);
-            let mut blob = Vec::with_capacity(rows.len() * 12);
-            for &(fk, st) in rows.iter() {
-                blob.extend_from_slice(&fk.to_le_bytes());
-                blob.extend_from_slice(&st.to_le_bytes());
-            }
-            self.ovf
-                .set_logical_len(FILE_HEADER_LEN as u64 + blob.len() as u64)?;
-            if !blob.is_empty() {
-                self.ovf.write_at(FILE_HEADER_LEN as u64, &blob)?;
-            }
-        }
+        self.ovf
+            .set_logical_len(FILE_HEADER_LEN as u64 + kept as u64 * 12)?;
+        self.checkpoints
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .truncate(n_win as usize);
+        self.ovf_rows
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|r| r.0 <= new_count);
         self.count.store(new_count, Ordering::Release);
         Ok(())
     }

@@ -143,6 +143,44 @@ fn create_loc_checkpoint_enospc_drops_the_ovf_row_when_shrink_persist_never_land
     assert_eq!(loc.range_batch(&[Fk(1024)]).unwrap()[0].unwrap().n_out, 256);
 }
 
+/// Truncating below a later overflow row keeps the earlier row. That trim
+/// must not rewrite the kept bytes: a disk-full rewrite left the count at
+/// the long end while the locator file was already short.
+#[test]
+fn create_loc_truncate_keeps_count_with_loc_when_ovf_rewrite_is_full() {
+    let dir = TempDir::labeled("create-loc-truncate-ovf").unwrap();
+    let loc = CreateLoc::create(dir.path()).unwrap();
+    let mut n_out = vec![1u32; 2048];
+    n_out[1023] = 256;
+    n_out[2047] = 256;
+    loc.append(&chain(&n_out, &vec![8u64; 2048])).unwrap();
+    let ovf = loc.ovf.io_handle();
+    struct Disarm(rbitcoin_store::io_handle::IoHandle);
+    impl Drop for Disarm {
+        fn drop(&mut self) {
+            rbitcoin_store::io_handle::disarm_pwrite(self.0);
+        }
+    }
+    rbitcoin_store::io_handle::arm_short_pwrite(ovf);
+    let disarm = Disarm(ovf);
+    loc.truncate_to_count(1024)
+        .expect("suffix trim does not rewrite the kept overflow row");
+    drop(disarm);
+    assert_eq!(loc.count(), 1024);
+    assert_eq!(loc.loc.data_len() / SLOT, 1024);
+    let rows = loc
+        .ovf_rows
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    assert_eq!(rows, vec![(1024, 1, 256)]);
+    let path = dir.path().to_path_buf();
+    drop(loc);
+    let loc = CreateLoc::open(&path).unwrap();
+    assert_eq!(loc.count(), 1024);
+    assert_eq!(loc.range_batch(&[Fk(1024)]).unwrap()[0].unwrap().n_out, 256);
+}
+
 #[test]
 fn create_loc_read_past_published_end_is_corrupt() {
     let dir = TempDir::labeled("create-loc-pub").unwrap();
