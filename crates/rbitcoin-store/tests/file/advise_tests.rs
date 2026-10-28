@@ -34,6 +34,38 @@ fn shrink_hwm_persists_the_short_length_after_one_disk_full() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Every high-water persist of a shrink can return disk-full. The shorter
+/// end is still what open loads, because the file itself ends there.
+#[test]
+fn shrink_hwm_cut_keeps_the_short_length_when_persist_never_lands() {
+    static N: AtomicU64 = AtomicU64::new(0);
+    let id = N.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("rbitcoin-shrink-hwm-cut-{id}"));
+    let _ = std::fs::remove_file(&path);
+    let f = TableFile::create(&path, TableKind::TxOut).unwrap();
+    let short = f.logical_len();
+    f.set_logical_len(short + 64).unwrap();
+    let handle = f.io_handle();
+    struct Disarm(rbitcoin_store::io_handle::IoHandle);
+    impl Drop for Disarm {
+        fn drop(&mut self) {
+            rbitcoin_store::io_handle::disarm_pwrite(self.0);
+        }
+    }
+    rbitcoin_store::io_handle::arm_fail_hwm_pwrites(handle, 4);
+    let _disarm = Disarm(handle);
+    f.set_logical_len(short)
+        .expect("shrink keeps the short end when the header write never lands");
+    drop(_disarm);
+    assert_eq!(f.logical_len(), short);
+    drop(f);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), short);
+    let f = TableFile::open(&path, TableKind::TxOut).unwrap();
+    assert_eq!(f.logical_len(), short);
+    drop(f);
+    let _ = std::fs::remove_file(&path);
+}
+
 #[test]
 fn grow_tight_adds_one_mib_not_slab() {
     static N: AtomicU64 = AtomicU64::new(0);

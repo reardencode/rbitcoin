@@ -557,11 +557,25 @@ impl TableFile {
             if let Some(e) = persist_err {
                 if logical > prev {
                     self.published_len.store(prev, Ordering::Release);
+                    return Err(e);
                 }
-                return Err(e);
+                // Readers already append from `logical`. The header still
+                // names `prev`. End the file here so open cannot load `prev`.
+                self.keep_short_end(logical)?;
             }
         }
         self.needs_sync.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// `logical` is the published shorter end. The 8-byte header write did
+    /// not land. Cutting the file makes open's length clamp keep this end.
+    fn keep_short_end(&self, logical: u64) -> Result<(), StoreError> {
+        let file = self.file.lock().unwrap_or_else(|e| e.into_inner());
+        set_file_len(&file, &self.path, logical)?;
+        drop(file);
+        self.file_cap.store(logical, Ordering::Release);
+        let _ = self.persist_hwm(logical);
         Ok(())
     }
 

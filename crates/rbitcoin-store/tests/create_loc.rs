@@ -93,6 +93,56 @@ fn create_loc_checkpoint_enospc_drops_the_ovf_row() {
     assert_eq!(loc.range_batch(&[Fk(1024)]).unwrap()[0].unwrap().n_out, 256);
 }
 
+/// The append publishes loc and overflow, then the checkpoint runs out of
+/// space. Each shrink of those files also runs out of space on every header
+/// retry. The overflow row is still dropped, and the same batch connects
+/// once writes work.
+#[test]
+fn create_loc_checkpoint_enospc_drops_the_ovf_row_when_shrink_persist_never_lands() {
+    let dir = TempDir::labeled("create-loc-ovf-rewind-cut").unwrap();
+    let loc = CreateLoc::create(dir.path()).unwrap();
+    let mut n_out = vec![1u32; 1024];
+    n_out[1023] = 256;
+    let batch = chain(&n_out, &vec![8u64; 1024]);
+    let loc_fd = loc.loc.io_handle();
+    let ovf_fd = loc.ovf.io_handle();
+    let off = loc.off.io_handle();
+    struct Disarm(rbitcoin_store::io_handle::IoHandle);
+    impl Drop for Disarm {
+        fn drop(&mut self) {
+            rbitcoin_store::io_handle::disarm_pwrite(self.0);
+        }
+    }
+    // The append persists each published end once. The shrink then retries
+    // that 8-byte write four times. Five failures cover both.
+    rbitcoin_store::io_handle::arm_fail_hwm_pwrites(loc_fd, 5);
+    rbitcoin_store::io_handle::arm_fail_hwm_pwrites(ovf_fd, 5);
+    rbitcoin_store::io_handle::arm_short_pwrite(off);
+    let _loc_arm = Disarm(loc_fd);
+    let _ovf_arm = Disarm(ovf_fd);
+    let _off_arm = Disarm(off);
+    let err = loc.append(&batch).expect_err("create.off disk full");
+    assert!(matches!(err, StoreError::Io { .. }), "{err}");
+    drop(_loc_arm);
+    drop(_ovf_arm);
+    drop(_off_arm);
+    assert!(
+        loc.ovf_rows
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty(),
+        "ovf row survived a shrink whose header write never landed"
+    );
+    assert_eq!(loc.count(), 0);
+    loc.append(&batch)
+        .expect("retry once the checkpoint write works");
+    assert_eq!(loc.count(), 1024);
+    let path = dir.path().to_path_buf();
+    drop(loc);
+    let loc = CreateLoc::open(&path).unwrap();
+    assert_eq!(loc.range_batch(&[Fk(1024)]).unwrap()[0].unwrap().n_out, 256);
+}
+
 #[test]
 fn create_loc_read_past_published_end_is_corrupt() {
     let dir = TempDir::labeled("create-loc-pub").unwrap();
