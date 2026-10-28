@@ -145,6 +145,9 @@ pub struct TableFile {
     pub kind: TableKind,
     /// Payload/HWM written since last successful `sync_data` (Class C barrier skip).
     pub needs_sync: AtomicBool,
+    /// Header still names a longer end than `published_len`. A grow must store
+    /// the short end before it extends the file, or open loads the old end.
+    hwm_behind: AtomicBool,
     /// One flusher at a time, so a second never returns before the first's sync.
     pub flush_lock: Mutex<()>,
     /// [`GrowPolicy`] as u8. Idx uses 1 MiB; SH body uses 64 KiB; Class A slabs.
@@ -288,6 +291,7 @@ impl TableFile {
             trailing_ext: [0u8; 16],
             kind,
             needs_sync: AtomicBool::new(false),
+            hwm_behind: AtomicBool::new(false),
             flush_lock: Mutex::new(()),
             grow_policy: AtomicU8::new(GrowPolicy::Slab as u8),
         })
@@ -317,6 +321,7 @@ impl TableFile {
             trailing_ext: [0u8; 16],
             kind,
             needs_sync: AtomicBool::new(false),
+            hwm_behind: AtomicBool::new(false),
             flush_lock: Mutex::new(()),
             grow_policy: AtomicU8::new(GrowPolicy::Slab as u8),
         };
@@ -369,6 +374,7 @@ impl TableFile {
                 trailing_ext,
                 kind,
                 needs_sync: AtomicBool::new(false),
+                hwm_behind: AtomicBool::new(false),
                 flush_lock: Mutex::new(()),
                 grow_policy: AtomicU8::new(GrowPolicy::Slab as u8),
             },
@@ -481,7 +487,8 @@ impl TableFile {
         if logical < FILE_HEADER_LEN as u64 {
             logical = FILE_HEADER_LEN as u64;
         }
-        if logical > file_len {
+        let hwm_behind = logical > file_len;
+        if hwm_behind {
             logical = file_len;
         }
 
@@ -495,7 +502,8 @@ impl TableFile {
             trailing_header: false,
             trailing_ext: [0u8; 16],
             kind,
-            needs_sync: AtomicBool::new(false),
+            needs_sync: AtomicBool::new(hwm_behind),
+            hwm_behind: AtomicBool::new(hwm_behind),
             flush_lock: Mutex::new(()),
             grow_policy: AtomicU8::new(GrowPolicy::Slab as u8),
         })
@@ -559,6 +567,9 @@ impl TableFile {
                     self.published_len.store(prev, Ordering::Release);
                     return Err(e);
                 }
+                if logical == prev {
+                    return Err(e);
+                }
                 // Readers already append from `logical`. The header still
                 // names `prev`. End the file here so open cannot load `prev`.
                 self.keep_short_end(logical)?;
@@ -569,13 +580,17 @@ impl TableFile {
     }
 
     /// `logical` is the published shorter end. The 8-byte header write did
-    /// not land. Cutting the file makes open's length clamp keep this end.
+    /// not land. Cutting the file makes open's length clamp keep this end
+    /// until a grow stores that end.
     fn keep_short_end(&self, logical: u64) -> Result<(), StoreError> {
         let file = self.file.lock().unwrap_or_else(|e| e.into_inner());
         set_file_len(&file, &self.path, logical)?;
         drop(file);
         self.file_cap.store(logical, Ordering::Release);
-        let _ = self.persist_hwm(logical);
+        match self.persist_hwm(logical) {
+            Ok(()) => self.hwm_behind.store(false, Ordering::Release),
+            Err(_) => self.hwm_behind.store(true, Ordering::Release),
+        }
         Ok(())
     }
 
@@ -759,6 +774,16 @@ impl TableFile {
     /// Fallocate/`set_len` to `new_cap` and publish `file_cap`.
     #[doc(hidden)]
     pub fn grow_to(&self, new_cap: u64) -> Result<(), StoreError> {
+        if new_cap <= self.file_cap.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        // A cut file can still carry the pre-shrink header. Extending it
+        // makes that longer value loadable again.
+        if self.hwm_behind.load(Ordering::Acquire) {
+            let published = self.published_len.load(Ordering::Acquire);
+            self.persist_hwm(published)?;
+            self.hwm_behind.store(false, Ordering::Release);
+        }
         let file = self.file.lock().unwrap();
         if new_cap <= self.file_cap.load(Ordering::Acquire) {
             return Ok(());

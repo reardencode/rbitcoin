@@ -34,8 +34,9 @@ fn shrink_hwm_persists_the_short_length_after_one_disk_full() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// Every high-water persist of a shrink can return disk-full. The shorter
-/// end is still what open loads, because the file itself ends there.
+/// Every high-water persist of a shrink can return disk-full, including the
+/// write after the file is cut. A later extend must not put the file back
+/// over the stale longer header. Open still loads the shorter end.
 #[test]
 fn shrink_hwm_cut_keeps_the_short_length_when_persist_never_lands() {
     static N: AtomicU64 = AtomicU64::new(0);
@@ -44,7 +45,8 @@ fn shrink_hwm_cut_keeps_the_short_length_when_persist_never_lands() {
     let _ = std::fs::remove_file(&path);
     let f = TableFile::create(&path, TableKind::TxOut).unwrap();
     let short = f.logical_len();
-    f.set_logical_len(short + 64).unwrap();
+    let long = short + 64;
+    f.set_logical_len(long).unwrap();
     let handle = f.io_handle();
     struct Disarm(rbitcoin_store::io_handle::IoHandle);
     impl Drop for Disarm {
@@ -52,14 +54,27 @@ fn shrink_hwm_cut_keeps_the_short_length_when_persist_never_lands() {
             rbitcoin_store::io_handle::disarm_pwrite(self.0);
         }
     }
-    rbitcoin_store::io_handle::arm_fail_hwm_pwrites(handle, 4);
-    let _disarm = Disarm(handle);
+    // Four retries, then the persist after the cut.
+    rbitcoin_store::io_handle::arm_fail_hwm_pwrites(handle, 5);
+    let disarm = Disarm(handle);
     f.set_logical_len(short)
         .expect("shrink keeps the short end when the header write never lands");
-    drop(_disarm);
+    drop(disarm);
     assert_eq!(f.logical_len(), short);
     drop(f);
     assert_eq!(std::fs::metadata(&path).unwrap().len(), short);
+    let f = TableFile::open(&path, TableKind::TxOut).unwrap();
+    assert_eq!(f.logical_len(), short);
+    let handle = f.io_handle();
+    rbitcoin_store::io_handle::arm_fail_hwm_pwrites(handle, 1);
+    let disarm = Disarm(handle);
+    let err = f
+        .set_logical_len(long)
+        .expect_err("extend waits until the short header is stored");
+    assert!(matches!(err, StoreError::Io { .. }), "{err}");
+    drop(disarm);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), short);
+    drop(f);
     let f = TableFile::open(&path, TableKind::TxOut).unwrap();
     assert_eq!(f.logical_len(), short);
     drop(f);
