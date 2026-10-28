@@ -537,13 +537,27 @@ impl TableFile {
             self.write_trailer(logical)?;
             self.published_len.store(logical, Ordering::Release);
         } else {
-            // Readers use this length as the next append start. Publishing it
-            // before the header write sticks a gap the locators do not own
-            // when that write returns disk-full.
+            // Readers use this length as the next append start. A grow that
+            // does not persist must not stay published. A shrink that fails
+            // must stay the shorter length: putting the longer value back
+            // makes the next flush record bytes the locators do not own.
             let prev = self.published_len.load(Ordering::Relaxed);
             self.published_len.store(logical, Ordering::Release);
-            if let Err(e) = self.persist_hwm(logical) {
-                self.published_len.store(prev, Ordering::Release);
+            let attempts = if logical < prev { 4 } else { 1 };
+            let mut persist_err = None;
+            for _ in 0..attempts {
+                match self.persist_hwm(logical) {
+                    Ok(()) => {
+                        persist_err = None;
+                        break;
+                    }
+                    Err(e) => persist_err = Some(e),
+                }
+            }
+            if let Some(e) = persist_err {
+                if logical > prev {
+                    self.published_len.store(prev, Ordering::Release);
+                }
                 return Err(e);
             }
         }

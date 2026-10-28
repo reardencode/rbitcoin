@@ -88,6 +88,54 @@ pub fn create_loc_file(path: &Path, kind: TableKind) -> Result<TableFile, StoreE
     Ok(f)
 }
 
+/// Locator files and RAM rows before one `append`. The count store is last,
+/// so a later disk-full write has already published overflow rows that
+/// `truncate_to_count` will not see.
+struct DeltaSideSnap {
+    loc_len: u64,
+    ovf_len: u64,
+    off_len: u64,
+    ovf_n: usize,
+    cp_n: usize,
+}
+
+impl DeltaSideSnap {
+    fn capture(loc: &DeltaLoc) -> Self {
+        Self {
+            loc_len: loc.loc.logical_len(),
+            ovf_len: loc.ovf.logical_len(),
+            off_len: loc.off.logical_len(),
+            ovf_n: loc.ovf_rows.read().unwrap_or_else(|e| e.into_inner()).len(),
+            cp_n: loc
+                .checkpoints
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+        }
+    }
+
+    fn restore(self, loc: &DeltaLoc) -> Result<(), StoreError> {
+        if loc.loc.logical_len() != self.loc_len {
+            loc.loc.set_logical_len(self.loc_len)?;
+        }
+        if loc.ovf.logical_len() != self.ovf_len {
+            loc.ovf.set_logical_len(self.ovf_len)?;
+        }
+        if loc.off.logical_len() != self.off_len {
+            loc.off.set_logical_len(self.off_len)?;
+        }
+        loc.ovf_rows
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .truncate(self.ovf_n);
+        loc.checkpoints
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .truncate(self.cp_n);
+        Ok(())
+    }
+}
+
 /// Single-plane u16 delta locator (`seqsigwit.loc`: strides, `0` = overflow).
 pub struct DeltaLoc {
     pub loc: TableFile,
@@ -202,6 +250,21 @@ impl DeltaLoc {
 
     /// Append `aligned_len` per record (8-aligned, ≥ 8). `starts[i]` is the body abs.
     pub fn append(&self, starts: &[u64], aligned_lens: &[u64]) -> Result<(), StoreError> {
+        if starts.len() != aligned_lens.len() {
+            return Err(StoreError::Corrupt("invariant: loc append length"));
+        }
+        if starts.is_empty() {
+            return Ok(());
+        }
+        let snap = DeltaSideSnap::capture(self);
+        let outcome = self.append_writes(starts, aligned_lens);
+        if outcome.is_err() {
+            snap.restore(self)?;
+        }
+        outcome
+    }
+
+    fn append_writes(&self, starts: &[u64], aligned_lens: &[u64]) -> Result<(), StoreError> {
         if starts.len() != aligned_lens.len() {
             return Err(StoreError::Corrupt("invariant: loc append length"));
         }

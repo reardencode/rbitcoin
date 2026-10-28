@@ -47,6 +47,54 @@ pub struct CreateLocAppend {
     pub n_out: u32,
 }
 
+/// Locator files and RAM rows before one `append`. The count store is last,
+/// so a later disk-full write has already published overflow rows that
+/// `truncate_to_count` will not see.
+struct CreateSideSnap {
+    loc_len: u64,
+    ovf_len: u64,
+    off_len: u64,
+    ovf_n: usize,
+    cp_n: usize,
+}
+
+impl CreateSideSnap {
+    fn capture(loc: &CreateLoc) -> Self {
+        Self {
+            loc_len: loc.loc.logical_len(),
+            ovf_len: loc.ovf.logical_len(),
+            off_len: loc.off.logical_len(),
+            ovf_n: loc.ovf_rows.read().unwrap_or_else(|e| e.into_inner()).len(),
+            cp_n: loc
+                .checkpoints
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+        }
+    }
+
+    fn restore(self, loc: &CreateLoc) -> Result<(), StoreError> {
+        if loc.loc.logical_len() != self.loc_len {
+            loc.loc.set_logical_len(self.loc_len)?;
+        }
+        if loc.ovf.logical_len() != self.ovf_len {
+            loc.ovf.set_logical_len(self.ovf_len)?;
+        }
+        if loc.off.logical_len() != self.off_len {
+            loc.off.set_logical_len(self.off_len)?;
+        }
+        loc.ovf_rows
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .truncate(self.ovf_n);
+        loc.checkpoints
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .truncate(self.cp_n);
+        Ok(())
+    }
+}
+
 pub struct CreateLoc {
     pub loc: TableFile,
     pub ovf: TableFile,
@@ -149,6 +197,18 @@ impl CreateLoc {
     }
 
     pub fn append(&self, recs: &[CreateLocAppend]) -> Result<(), StoreError> {
+        if recs.is_empty() {
+            return Ok(());
+        }
+        let snap = CreateSideSnap::capture(self);
+        let outcome = self.append_writes(recs);
+        if outcome.is_err() {
+            snap.restore(self)?;
+        }
+        outcome
+    }
+
+    fn append_writes(&self, recs: &[CreateLocAppend]) -> Result<(), StoreError> {
         if recs.is_empty() {
             return Ok(());
         }
