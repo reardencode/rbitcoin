@@ -1,14 +1,14 @@
 {
   "new_base": "8e62e4ce4d60c30abc851cb0893e4b80149ac9e4",
-  "new_skip": 541,
-  "old_index": 2279,
+  "new_skip": 695,
+  "old_index": 2585,
   "new_cap_used": true,
-  "run_id": "40456788768",
-  "old_name": "crates/rbitcoin-electrum/src/server.rs:339:60: replace == with != in read_line_capped",
-  "new_len": 713,
-  "new_remaining": 172,
-  "completed_new": 0,
-  "completed_old": 119,
+  "run_id": "40643324405",
+  "old_name": "crates/rbitcoin-electrum/src/tweaks.rs:107:26: delete ! in height_map_json",
+  "new_len": 715,
+  "new_remaining": 20,
+  "completed_new": 154,
+  "completed_old": 306,
   "old_len": 30560,
-  "old_remaining": 30441
+  "old_remaining": 30254
 }
