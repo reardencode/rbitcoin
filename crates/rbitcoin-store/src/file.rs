@@ -537,8 +537,15 @@ impl TableFile {
             self.write_trailer(logical)?;
             self.published_len.store(logical, Ordering::Release);
         } else {
+            // Readers use this length as the next append start. Publishing it
+            // before the header write sticks a gap the locators do not own
+            // when that write returns disk-full.
+            let prev = self.published_len.load(Ordering::Relaxed);
             self.published_len.store(logical, Ordering::Release);
-            self.persist_hwm(logical)?;
+            if let Err(e) = self.persist_hwm(logical) {
+                self.published_len.store(prev, Ordering::Release);
+                return Err(e);
+            }
         }
         self.needs_sync.store(true, Ordering::Release);
         Ok(())

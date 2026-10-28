@@ -966,6 +966,98 @@ pub fn repair_class_a_count_skew(
     class_a_skew_assert_aligned(&stems, prune_seqsigwit_mode)
 }
 
+/// Published Class A ends before one append. A stem can publish its body
+/// length and then fail a later stem. Those bytes sit ahead of the locator
+/// prefix sum, so the next block's `gettxout` reads them as its own outputs.
+struct ClassAAppendSnap {
+    body_n: u64,
+    body_len: u64,
+    body_pub: u64,
+    spent_n: u64,
+    spent_len: u64,
+    spent_pub: u64,
+    seq_n: u64,
+    seq_len: u64,
+    seq_pub: u64,
+    loc_n: u64,
+    loc_len: u64,
+    seq_loc_n: u64,
+    seq_loc_len: u64,
+    prune: bool,
+}
+
+impl ClassAAppendSnap {
+    fn capture(txs: &TxTable) -> Self {
+        let (body_n, body_pub) = txs.body.published_meta();
+        let (spent_n, spent_pub) = txs.spent.published_meta();
+        let (seq_n, seq_pub) = txs.seqsigwit.published_meta();
+        Self {
+            body_n,
+            body_len: txs.body.body_logical_len(),
+            body_pub,
+            spent_n,
+            spent_len: txs.spent.body_logical_len(),
+            spent_pub,
+            seq_n,
+            seq_len: txs.seqsigwit.body_logical_len(),
+            seq_pub,
+            loc_n: txs.create_loc.count(),
+            loc_len: txs.create_loc.loc.logical_len(),
+            seq_loc_n: txs.seqsigwit_loc.count(),
+            seq_loc_len: txs.seqsigwit_loc.loc.logical_len(),
+            prune: txs.prune_seqsigwit_mode(),
+        }
+    }
+
+    fn restore(self, txs: &TxTable) -> Result<(), StoreError> {
+        rewind_var(&txs.body, self.body_n, self.body_len, self.body_pub)?;
+        rewind_var(&txs.spent, self.spent_n, self.spent_len, self.spent_pub)?;
+        if !self.prune {
+            rewind_var(&txs.seqsigwit, self.seq_n, self.seq_len, self.seq_pub)?;
+            rewind_counted_file(
+                &txs.seqsigwit_loc.loc,
+                txs.seqsigwit_loc.count(),
+                self.seq_loc_n,
+                self.seq_loc_len,
+                |n| txs.seqsigwit_loc.truncate_to_count(n),
+            )?;
+        }
+        rewind_counted_file(
+            &txs.create_loc.loc,
+            txs.create_loc.count(),
+            self.loc_n,
+            self.loc_len,
+            |n| txs.create_loc.truncate_to_count(n),
+        )?;
+        Ok(())
+    }
+}
+
+fn rewind_var(table: &VarTable, n: u64, len: u64, published: u64) -> Result<(), StoreError> {
+    let (count, pub_end) = table.published_meta();
+    let logical = table.body_logical_len();
+    if count == n && logical <= len && pub_end <= published {
+        return Ok(());
+    }
+    table.truncate_body_to(count.min(n), logical.min(len))
+}
+
+fn rewind_counted_file(
+    file: &crate::file::TableFile,
+    count: u64,
+    n: u64,
+    len: u64,
+    truncate: impl FnOnce(u64) -> Result<(), StoreError>,
+) -> Result<(), StoreError> {
+    if count > n {
+        truncate(n)?;
+    }
+    if file.logical_len() > len {
+        file.set_logical_len(len)?;
+    }
+    Ok(())
+}
+
 impl TxTable {
     pub fn create(dir: &Path) -> Result<Self, StoreError> {
         Self::create_with_opts(dir, HeadOpenOpts::MAINNET)
@@ -2674,6 +2766,29 @@ impl TxTable {
         Ok((fks, loc))
     }
 
+    /// Arm short pwrites on one Class A body (`txout`, `seqsigwit`, or `spent`).
+    ///
+    /// The next long writes to that file store an 8-byte prefix and return
+    /// disk-full, and they stay failing until [`Self::disarm_short_body_pwrite`].
+    /// HWM updates are 8 bytes, so a rewind can still publish the old end.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn arm_short_body_pwrite(&self, stem: &str) {
+        let handle = match stem {
+            "txout" => self.body.body_write_fd(),
+            "seqsigwit" => self.seqsigwit.body_write_fd(),
+            "spent" => self.spent.body_write_fd(),
+            _ => panic!("arm_short_body_pwrite: unknown stem {stem}"),
+        };
+        crate::io_handle::arm_short_pwrite(handle);
+    }
+
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn disarm_short_body_pwrite(&self) {
+        crate::io_handle::disarm_short_pwrite();
+    }
+
     #[allow(clippy::too_many_arguments)] // IO/session args stay unbundled
     /// Encode and write `txout` + `seqsigwit` + `spent` bodies as one pwrite wave.
     ///
@@ -2718,48 +2833,55 @@ impl TxTable {
             });
         }
 
-        if self.prune_seqsigwit_mode() {
+        let snap = ClassAAppendSnap::capture(self);
+        let outcome = (|| -> Result<_, StoreError> {
+            if self.prune_seqsigwit_mode() {
+                crate::var_table::write_prepared_bodies_one_wave(
+                    &[(&self.body, &p_out), (&self.spent, &p_sp)],
+                    self.datadir_hdd(),
+                )?;
+                self.create_loc.append(&recs)?;
+                let fks = self.body.finish_prepared(p_out)?;
+                let fks_sp = self.spent.finish_prepared(p_sp)?;
+                if fks != fks_sp {
+                    return Err(StoreError::Corrupt(
+                        "Class A append fk mismatch across stems",
+                    ));
+                }
+                return Ok((fks, loc));
+            }
+
+            let Some(p_in) = self
+                .seqsigwit
+                .prepare_batch_encode(n, est_seqsigwit, encode_in)?
+            else {
+                return Err(StoreError::Corrupt("Class A seqsigwit prepare empty"));
+            };
             crate::var_table::write_prepared_bodies_one_wave(
-                &[(&self.body, &p_out), (&self.spent, &p_sp)],
+                &[
+                    (&self.body, &p_out),
+                    (&self.seqsigwit, &p_in),
+                    (&self.spent, &p_sp),
+                ],
                 self.datadir_hdd(),
             )?;
             self.create_loc.append(&recs)?;
+            self.seqsigwit_loc
+                .append(&p_in.starts, &p_in.aligned_lens())?;
             let fks = self.body.finish_prepared(p_out)?;
+            let fks_in = self.seqsigwit.finish_prepared(p_in)?;
             let fks_sp = self.spent.finish_prepared(p_sp)?;
-            if fks != fks_sp {
+            if fks != fks_in || fks != fks_sp {
                 return Err(StoreError::Corrupt(
                     "Class A append fk mismatch across stems",
                 ));
             }
-            return Ok((fks, loc));
+            Ok((fks, loc))
+        })();
+        if outcome.is_err() {
+            snap.restore(self)?;
         }
-
-        let Some(p_in) = self
-            .seqsigwit
-            .prepare_batch_encode(n, est_seqsigwit, encode_in)?
-        else {
-            return Err(StoreError::Corrupt("Class A seqsigwit prepare empty"));
-        };
-        crate::var_table::write_prepared_bodies_one_wave(
-            &[
-                (&self.body, &p_out),
-                (&self.seqsigwit, &p_in),
-                (&self.spent, &p_sp),
-            ],
-            self.datadir_hdd(),
-        )?;
-        self.create_loc.append(&recs)?;
-        self.seqsigwit_loc
-            .append(&p_in.starts, &p_in.aligned_lens())?;
-        let fks = self.body.finish_prepared(p_out)?;
-        let fks_in = self.seqsigwit.finish_prepared(p_in)?;
-        let fks_sp = self.spent.finish_prepared(p_sp)?;
-        if fks != fks_in || fks != fks_sp {
-            return Err(StoreError::Corrupt(
-                "Class A append fk mismatch across stems",
-            ));
-        }
-        Ok((fks, loc))
+        outcome
     }
 
     pub fn get_by_txid(&self, txid: &[u8; 32]) -> Result<Option<(Fk, TxRecord)>, StoreError> {

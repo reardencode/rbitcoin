@@ -227,6 +227,16 @@ pub fn pwrite_batch(ops: &mut [WriteOp<'_>]) {
     if ops.is_empty() {
         return;
     }
+    // The armed fd must hit `IoHandle::pwrite`. A completion submit would
+    // report a full write and the partial-append fault would not run.
+    #[cfg(debug_assertions)]
+    if ops
+        .iter()
+        .any(|op| crate::io_handle::would_short_pwrite(op.fd, op.buf.len()))
+    {
+        pwrite_batch_fallback(ops);
+        return;
+    }
     if io_uring_enabled() && pwrite_batch_uring(ops) {
         return;
     }

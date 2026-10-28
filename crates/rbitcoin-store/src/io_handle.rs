@@ -83,6 +83,21 @@ impl IoHandle {
         if buf.is_empty() {
             return 0;
         }
+        // A tip-connect test arms one body fd. The prefix is a real pwrite;
+        // the error is what a full filesystem returns after that prefix.
+        // Eight-byte HWM updates stay real so a rewind can publish the old end.
+        #[cfg(debug_assertions)]
+        if buf.len() > 8 && short_pwrite_armed(self) {
+            let n = self.pwrite_sys(offset, &buf[..8]);
+            if n < 0 {
+                return n;
+            }
+            return -disk_full_errno();
+        }
+        self.pwrite_sys(offset, buf)
+    }
+
+    fn pwrite_sys(self, offset: u64, buf: &[u8]) -> i32 {
         #[cfg(unix)]
         {
             // SAFETY: `buf` is the caller's slice. `self.fd` is open.
@@ -105,6 +120,56 @@ impl IoHandle {
             win_pwrite(self.handle, offset, buf)
         }
     }
+}
+
+/// Process-wide: tip connect runs on the tip-accept thread, not the test thread.
+#[cfg(debug_assertions)]
+static SHORT_PWRITE: std::sync::Mutex<Vec<IoHandle>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(debug_assertions)]
+fn disk_full_errno() -> i32 {
+    #[cfg(unix)]
+    {
+        libc::ENOSPC
+    }
+    #[cfg(windows)]
+    {
+        112
+    }
+}
+
+/// Arm `handle` so later pwrites longer than the HWM unit write 8 bytes and
+/// return disk-full. Stays armed until [`disarm_short_pwrite`].
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn arm_short_pwrite(handle: IoHandle) {
+    let mut slots = SHORT_PWRITE.lock().unwrap_or_else(|e| e.into_inner());
+    if !slots.contains(&handle) {
+        slots.push(handle);
+    }
+}
+
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn disarm_short_pwrite() {
+    SHORT_PWRITE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
+
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn would_short_pwrite(handle: IoHandle, len: usize) -> bool {
+    len > 8 && short_pwrite_armed(handle)
+}
+
+#[cfg(debug_assertions)]
+fn short_pwrite_armed(handle: IoHandle) -> bool {
+    SHORT_PWRITE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&handle)
 }
 
 #[cfg(unix)]
