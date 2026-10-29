@@ -143,7 +143,9 @@ pub fn is_op_success(code: u8) -> bool {
     ) || (187..=254).contains(&code)
 }
 
-/// BIP342: scan tapscript for OP_SUCCESSx. Returns true if script is immediately valid.
+/// BIP342: scan tapscript for OP_SUCCESSx. Returns true if the script is valid
+/// before resource limits. This stays a separate walk: an `OP_SUCCESS` after a
+/// prefix that would blow a limit is still valid, and those limits must not run.
 pub fn tapscript_has_op_success(script: &Script) -> bool {
     let bytes = script.as_bytes();
     let mut i = 0usize;
