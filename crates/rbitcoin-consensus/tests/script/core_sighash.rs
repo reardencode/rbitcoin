@@ -38,7 +38,7 @@ fn sighash_row(cells: &[Value]) -> Result<sha256d::Hash, String> {
     let tx: Transaction = deserialize(&tx_bytes).map_err(|e| format!("tx deser: {e}"))?;
     let script_bytes = decode_hex(script_hex)?;
     let stripped = rbitcoin_consensus::script::interpreter::strip_op_codeseparator(&script_bytes);
-    let script = ScriptBuf::from_bytes(stripped);
+    let script = ScriptBuf::from_bytes(stripped.into_owned());
     let cache = SighashCache::new(&tx);
     let h = cache
         .legacy_signature_hash(input_index, script.as_script(), hash_ty)
