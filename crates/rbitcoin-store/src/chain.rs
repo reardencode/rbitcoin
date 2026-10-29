@@ -39,6 +39,12 @@ impl ConfirmedTable {
         Ok(Fk::new(v))
     }
 
+    /// `confirmed[height]` and the tip, from one sample.
+    pub fn get_with_tip(&self, height: Height) -> Result<(Option<Fk>, Option<Height>), StoreError> {
+        let (v, n) = self.arr.get_sample(u64::from(height.0))?;
+        Ok((Fk::new(v), (n != 0).then(|| Height((n - 1) as u32))))
+    }
+
     /// Batch height → header_fk (0-based height indices). Missing/unset → `None`.
     pub fn get_many(&self, heights: &[Height]) -> Result<Vec<Option<Fk>>, StoreError> {
         heights.iter().map(|&h| self.get(h)).collect()

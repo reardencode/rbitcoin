@@ -2027,6 +2027,42 @@ fn getblock_mid_reorg_answers_for_the_requested_hash() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A block that connects while `getblock` reads the body shows in that
+/// answer's `confirmations` and `nextblockhash`: they are read after every
+/// other field.
+#[test]
+fn getblock_reads_the_tip_after_the_body() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let hash = dispatch(&ctx, "getbestblockhash", vec![]).unwrap();
+    let height = dispatch(&ctx, "getblockcount", vec![]).unwrap().as_u64().unwrap();
+    for (n, verbosity) in [1, 2].into_iter().enumerate() {
+        before_next_getblock_finish(|ctx: &RpcContext| {
+            dispatch(ctx, "generate", vec![json!(1)]).unwrap();
+        });
+        let blk = dispatch(&ctx, "getblock", vec![hash.clone(), json!(verbosity)]).unwrap();
+        let next = dispatch(&ctx, "getblockhash", vec![json!(height + 1)]).unwrap();
+        assert_eq!(blk["nextblockhash"], next, "verbosity {verbosity}: {blk}");
+        assert_eq!(blk["confirmations"], json!(n + 2), "verbosity {verbosity}: {blk}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The reads `getblock` makes last (the tip, the next header, and this
+/// block's own `confirmed` slot) are Core's `-32603` when they fail, not a
+/// disconnected block or an answer without `nextblockhash`.
+#[test]
+fn getblock_unreadable_tip_read_is_an_error() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let hash = dispatch(&ctx, "getblockhash", vec![json!(1)]).unwrap();
+    for verbosity in [1, 2] {
+        before_next_getblock_finish(|ctx: &RpcContext| ctx.query.fail_next_header_read_cancelled());
+        let e = dispatch(&ctx, "getblock", vec![hash.clone(), json!(verbosity)])
+            .expect_err("a failed tip read must fail the call");
+        assert_eq!(e["code"], ERR_INTERNAL, "verbosity {verbosity}: {e}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Undo that is stored but unreadable is an error (Core `blockToJSON`), not a
 /// tx row quietly missing its `fee` and `prevout`.
 #[test]
