@@ -2251,6 +2251,39 @@ fn getblock_same_block_parent_placed_when_the_fence_misses() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The stale-branch walk counts `walk_max` blocks below the requested one. A
+/// branch exactly that deep still reaches its active ancestor; one block
+/// deeper does not place the parent, which callers report as Core's `-32603`.
+#[test]
+fn off_chain_create_height_walk_reaches_the_cap() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let (addr, _) = p2wpkh_regtest();
+    let parent_sat = generated_coinbase_value(&ctx, 1);
+    let (parent_hex, parent) =
+        mature_coinbase_spend(&ctx, parent_sat - 1_000, ScriptBuf::from_bytes(vec![0x51]));
+    let first = dispatch(&ctx, "generateblock", vec![json!(addr), json!([parent_hex])]).unwrap()
+        ["hash"]
+        .clone();
+    let height = dispatch(&ctx, "getblock", vec![first.clone(), json!(1)]).unwrap()["height"]
+        .as_u64()
+        .unwrap() as u32;
+    let (child_hex, _) = spend_outpoint(&parent, 0, 1_000);
+    let second = dispatch(&ctx, "generateblock", vec![json!(addr), json!([child_hex])]).unwrap()
+        ["hash"]
+        .clone();
+    dispatch(&ctx, "invalidateblock", vec![first]).unwrap();
+    let hash = parse_hash32_display(second.as_str().unwrap()).unwrap();
+    let (second_fk, _) = ctx.query.get_header_by_hash(&hash).unwrap().unwrap();
+    let parent_txid = parent.compute_txid().to_byte_array();
+    let (parent_fk, _) = ctx.query.get_tx_by_txid(&parent_txid).unwrap().unwrap();
+    // Two stale blocks, then the active ancestor two blocks down.
+    let at_cap = off_chain_create_height(&ctx, second_fk, parent_fk, 2).unwrap();
+    assert_eq!(at_cap, Some(height));
+    let past_cap = off_chain_create_height(&ctx, second_fk, parent_fk, 1).unwrap();
+    assert_eq!(past_cap, None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `previousblockhash` is the header's own parent, not whatever header the
 /// height below now holds.
 #[test]

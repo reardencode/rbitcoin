@@ -459,7 +459,7 @@ fn prevout_place(
     {
         Some(h) => h,
         None => match block {
-            Some(header_fk) => off_chain_create_height(ctx, header_fk, create_fk)?
+            Some(header_fk) => off_chain_create_height(ctx, header_fk, create_fk, OFF_CHAIN_WALK_MAX)?
                 .ok_or_else(undo_unreadable)?,
             None => return Ok(None),
         },
@@ -472,16 +472,19 @@ fn prevout_place(
 
 /// Height of a parent the connected fence does not place: a create in the
 /// off-chain block `header_fk` or one of its off-chain ancestors. Counted up
-/// from the first active ancestor. `None` when the walk does not find it.
-fn off_chain_create_height(
+/// from the first active ancestor, at most `walk_max` blocks below
+/// `header_fk`. `None` when the walk does not find it.
+#[doc(hidden)]
+pub fn off_chain_create_height(
     ctx: &RpcContext,
     header_fk: Fk,
     create_fk: Fk,
+    walk_max: u32,
 ) -> Result<Option<u32>, Value> {
     let q = ctx.query.as_ref();
     let mut cur = header_fk;
     let mut found = None;
-    for depth in 0..OFF_CHAIN_WALK_MAX {
+    for depth in 0..=walk_max {
         let rec = q.get_header(cur).map_err(|_| undo_unreadable())?;
         let span = q
             .store()
