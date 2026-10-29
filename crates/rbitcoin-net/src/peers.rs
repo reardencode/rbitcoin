@@ -2516,12 +2516,52 @@ impl PeerHub {
         inbound: bool,
         conn_type: PeerConnType,
     ) -> Arc<LivePeer> {
+        self.insert_live(self.new_live(id, endpoint, ver, inbound, conn_type))
+    }
+
+    /// The row that replaces connecting row `from` after VERSION, under the
+    /// same id. It keeps `from`'s `conntime`, negotiated flags and socket
+    /// counters, and is complete before it is in the table, so no reader
+    /// sees it half set.
+    pub fn register_handshaken_net(
+        self: &Arc<Self>,
+        from: &LivePeer,
+        endpoint: PeerEndpoint,
+        ver: &VersionMessage,
+        conn_type: PeerConnType,
+        wire: crate::v2::WireBytes,
+    ) -> Arc<LivePeer> {
+        let peer = self.new_live(from.id, endpoint, ver, from.inbound, conn_type);
+        peer.conntime
+            .store(from.conntime.load(Ordering::Relaxed), Ordering::Relaxed);
+        if from.wants_addrv2() {
+            peer.set_wants_addrv2();
+        }
+        if from.wtxid_relay() {
+            peer.set_wtxid_relay();
+        }
+        peer.note_recv("version", 100);
+        peer.note_recv("verack", 0);
+        peer.attach_wire(wire);
+        peer.mark_handshake_complete();
+        self.unregister(from.id);
+        self.insert_live(peer)
+    }
+
+    fn new_live(
+        self: &Arc<Self>,
+        id: u64,
+        endpoint: PeerEndpoint,
+        ver: &VersionMessage,
+        inbound: bool,
+        conn_type: PeerConnType,
+    ) -> Arc<LivePeer> {
         let _ = self
             .next_id
             .fetch_max(id.saturating_add(1), Ordering::Relaxed);
         let services = ver.services.to_u64();
         let connected_at = self.now_secs();
-        let peer = Arc::new(LivePeer {
+        Arc::new(LivePeer {
             id,
             addr: endpoint.addr,
             net: endpoint.net,
@@ -2590,7 +2630,11 @@ impl PeerHub {
             next_local_addr_send: AtomicU64::new(0),
             version_timestamp: ver.timestamp,
             version: ver.version,
-        });
+        })
+    }
+
+    fn insert_live(&self, peer: Arc<LivePeer>) -> Arc<LivePeer> {
+        let id = peer.id;
         self.live
             .write()
             .unwrap_or_else(|e| e.into_inner())

@@ -556,7 +556,7 @@ pub fn spawn_inbound_accept(
                         tokio::sync::oneshot::channel::<tokio::task::AbortHandle>();
                     let h = tokio::spawn(async move {
                         let _session_slot = permit;
-                        let (_ver, reader, writer, wire, tcp_shutdown, sess) =
+                        let (_ver, reader, writer, tcp_shutdown, sess) =
                             match inbound_connect_and_handshake(
                                 stream, magic, our, peer_addr, height, &ua, &peers, our,
                             )
@@ -585,7 +585,6 @@ pub fn spawn_inbound_accept(
                         if let Some(mp) = hub.mempool() {
                             sess.set_inv_gen_floor(mp.next_accept_gen());
                         }
-                        sess.attach_wire(wire);
                         let id = sess.id;
                         let meta = FollowSessionMeta {
                             peer: Some(peer_addr),
@@ -728,36 +727,21 @@ pub async fn prepare_outbound_session(
             return Err(e);
         }
     };
-    let wants_addrv2 = provisional.wants_addrv2();
-    let wtxid_relay = provisional.wtxid_relay();
-    let conntime = provisional.conntime.load(Ordering::Relaxed);
-    peers.unregister(provisional_id);
-    let sess = peers.register_with_id_net(
-        provisional_id,
+    let sess = peers.register_handshaken_net(
+        &provisional,
         crate::peers::PeerEndpoint {
             addr: peer_hint,
             net: peer_net,
             addrbind: bind,
         },
         &ver,
-        false,
         typ,
+        wire,
     );
-    sess.conntime.store(conntime, Ordering::Relaxed);
-    sess.mark_handshake_complete();
-    if wants_addrv2 {
-        sess.set_wants_addrv2();
-    }
-    if wtxid_relay {
-        sess.set_wtxid_relay();
-    }
-    sess.note_recv("version", 100);
-    sess.note_recv("verack", 0);
     sess.attach_tcp_shutdown(tcp_shutdown);
     if let Some(mp) = hub.mempool() {
         sess.set_inv_gen_floor(mp.next_accept_gen());
     }
-    sess.attach_wire(wire);
     let id = sess.id;
     follow_live.fetch_add(1, Ordering::SeqCst);
     Ok(PreparedOutbound {

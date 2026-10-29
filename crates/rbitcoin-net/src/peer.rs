@@ -823,7 +823,6 @@ pub async fn inbound_connect_and_handshake(
         VersionMessage,
         V2Reader,
         V2Writer,
-        crate::v2::WireBytes,
         std::net::TcpStream,
         std::sync::Arc<crate::peers::LivePeer>,
     ),
@@ -889,30 +888,18 @@ pub async fn inbound_connect_and_handshake(
             return Err(NetError::Timeout);
         }
     };
-    let id = sess.id;
-    let wants_addrv2 = sess.wants_addrv2();
-    let wtxid_relay = sess.wtxid_relay();
-    let conntime = sess.conntime.load(Ordering::Relaxed);
-    peers.unregister(id);
-    let sess = peers.register_with_id(
-        id,
-        their_addr,
-        bind,
+    let sess = peers.register_handshaken_net(
+        &sess,
+        crate::peers::PeerEndpoint {
+            addr: their_addr,
+            net: crate::NetAddr::from_socket(their_addr),
+            addrbind: bind,
+        },
         &their_version,
-        true,
         crate::peers::PeerConnType::Inbound,
+        wire,
     );
-    sess.conntime.store(conntime, Ordering::Relaxed);
-    sess.mark_handshake_complete();
-    if wants_addrv2 {
-        sess.set_wants_addrv2();
-    }
-    if wtxid_relay {
-        sess.set_wtxid_relay();
-    }
-    sess.note_recv("version", 100);
-    sess.note_recv("verack", 0);
-    Ok((their_version, reader, writer, wire, tcp_shutdown, sess))
+    Ok((their_version, reader, writer, tcp_shutdown, sess))
 }
 
 #[allow(clippy::too_many_arguments)] // call-site args stay unbundled

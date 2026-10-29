@@ -9,6 +9,27 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 
+/// First handshaken row in the table, polled without sleeping so a row
+/// published before its fields are set is the one seen.
+fn first_handshaken(
+    peers: Arc<rbitcoin_net::peers::PeerHub>,
+    inbound: bool,
+) -> tokio::task::JoinHandle<Option<rbitcoin_net::peers::PeerInfo>> {
+    tokio::task::spawn_blocking(move || {
+        let end = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < end {
+            let row = peers
+                .snapshot()
+                .into_iter()
+                .find(|p| p.inbound == inbound && p.handshake_complete);
+            if row.is_some() {
+                return row;
+            }
+        }
+        None
+    })
+}
+
 #[test]
 fn magic_for_all_networks() {
     assert_eq!(
@@ -337,6 +358,7 @@ async fn outbound_row_keeps_conntime_through_handshake() {
     assert_eq!(connecting.last_recv, 0, "the responder has sent nothing");
     assert_eq!(connecting.version, 0);
     node.peers.set_mock_now(T0 + 30);
+    let watch = first_handshaken(node.peers.clone(), false);
     let _hs = connect_and_handshake_timed(
         Duration::from_secs(5),
         stream,
@@ -350,18 +372,7 @@ async fn outbound_row_keeps_conntime_through_handshake() {
     )
     .await
     .unwrap();
-    let mut done = None;
-    for _ in 0..200 {
-        done = node
-            .peers
-            .snapshot()
-            .into_iter()
-            .find(|p| !p.inbound && p.handshake_complete);
-        if done.is_some() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    let done = watch.await.unwrap();
     node.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
     let done = done.expect("handshaken outbound row");
@@ -415,6 +426,7 @@ async fn listen_onion_loopback_inbound_handshake() {
     assert_eq!((connecting.last_send, connecting.last_recv), (0, 0));
     assert_eq!(connecting.version, 0);
     node.peers.set_mock_now(T0 + 30);
+    let watch = first_handshaken(node.peers.clone(), true);
     let _hs = connect_and_handshake_timed(
         Duration::from_secs(5),
         stream,
@@ -428,18 +440,7 @@ async fn listen_onion_loopback_inbound_handshake() {
     )
     .await
     .unwrap();
-    let mut inbound = None;
-    for _ in 0..200 {
-        inbound = node
-            .peers
-            .snapshot()
-            .into_iter()
-            .find(|p| p.inbound && p.handshake_complete);
-        if inbound.is_some() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    let inbound = watch.await.unwrap();
     node.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
     let inbound = inbound.expect("loopback client must show as inbound in getpeerinfo");
