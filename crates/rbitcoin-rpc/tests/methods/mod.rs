@@ -2185,6 +2185,32 @@ fn getblock_same_block_spend_prevout_active_and_disconnected() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The fence can miss a parent whose block the walk then finds active (a
+/// reconnect between the two reads). The walk places it from that block.
+#[test]
+fn getblock_same_block_parent_placed_when_the_fence_misses() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let (addr, _) = p2wpkh_regtest();
+    let parent_sat = generated_coinbase_value(&ctx, 1);
+    let (parent_hex, parent) =
+        mature_coinbase_spend(&ctx, parent_sat - 1_000, ScriptBuf::from_bytes(vec![0x51]));
+    let (child_hex, _) = spend_outpoint(&parent, 0, 1_000);
+    let tip = dispatch(
+        &ctx,
+        "generateblock",
+        vec![json!(addr), json!([parent_hex, child_hex])],
+    )
+    .unwrap()["hash"]
+        .clone();
+    let height = dispatch(&ctx, "getblock", vec![tip.clone(), json!(1)]).unwrap()["height"].clone();
+    let h = Height(height.as_u64().unwrap() as u32);
+    ctx.query.store().height_fence_pop_tip(h);
+    let blk = dispatch(&ctx, "getblock", vec![tip, json!(3)])
+        .unwrap_or_else(|e| panic!("readable undo must not fail: {e}"));
+    assert_eq!(blk["tx"][2]["vin"][0]["prevout"]["height"], height, "{blk}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `previousblockhash` is the header's own parent, not whatever header the
 /// height below now holds.
 #[test]

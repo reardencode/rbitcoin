@@ -452,12 +452,6 @@ fn off_chain_create_height(
     let mut found = None;
     for depth in 0..OFF_CHAIN_WALK_MAX {
         let rec = q.get_header(cur).map_err(|_| undo_unreadable())?;
-        if let Some(h) = q
-            .confirmed_height_of_hash(&rec.hash)
-            .map_err(|_| undo_unreadable())?
-        {
-            return Ok(found.map(|d| h.0 + depth - d));
-        }
         let span = q
             .store()
             .header_txs
@@ -468,6 +462,14 @@ fn off_chain_create_height(
                 .is_some_and(|(first, n)| (first.0..first.0 + u64::from(n)).contains(&create_fk.0))
         {
             found = Some(depth);
+        }
+        // The span is read first: a reconnect after the fence miss can make
+        // the block holding the parent the active boundary itself.
+        if let Some(h) = q
+            .confirmed_height_of_hash(&rec.hash)
+            .map_err(|_| undo_unreadable())?
+        {
+            return Ok(found.map(|d| h.0 + depth - d));
         }
         if rec.prev_fk.is_null() {
             return Ok(None);
