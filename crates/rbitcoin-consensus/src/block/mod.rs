@@ -1119,7 +1119,12 @@ impl ScriptCheckJob {
     #[doc(hidden)]
     pub fn job_pre(&self) -> &JobPre {
         self.pre.get_or_init(|| {
-            JobPre::Owned(std::sync::Arc::new(crate::TxPrecompute::from_tx(&self.tx)))
+            // Asked for midstates with no stored row. This is the script
+            // fallback, including a coinbase-shaped fixture. IBD stores the
+            // row for a non-coinbase segwit transaction and does not ask here.
+            JobPre::Owned(std::sync::Arc::new(crate::TxPrecompute::Script(
+                crate::TxScriptPrecompute::from_tx(&self.tx),
+            )))
         })
     }
 

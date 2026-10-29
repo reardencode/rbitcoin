@@ -380,7 +380,9 @@ pub fn assemble_non_cb_tx(
                 // A preverified connect row has no midstates. The script stage
                 // drops that job, so attaching it would fail the block first.
                 let connect_only = ps[ti].as_script().is_none();
-                if !(connect_only && preverified.contains(&txid)) {
+                let legacy_midstates =
+                    connect_only && !rbitcoin_consensus::tx_precompute::sighash_midstates_for(tx);
+                if !(connect_only && preverified.contains(&txid)) && !legacy_midstates {
                     job = job.with_pre_slice(Arc::clone(ps), ti)?;
                 }
             }

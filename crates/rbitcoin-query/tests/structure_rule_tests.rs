@@ -179,7 +179,8 @@ fn structure_with_pres_skips_from_tx() {
 #[test]
 fn script_jobs_from_same_pres_slice_share_pre() {
     use TxPrecompute;
-    let spend = non_coinbase_spend(1);
+    let mut spend = non_coinbase_spend(1);
+    spend.input[0].witness = Witness::from_slice(&[vec![0x00]]);
     let pres: std::sync::Arc<[TxPrecompute]> =
         std::sync::Arc::from([TxPrecompute::from_tx(&spend)]);
     let prevouts = vec![

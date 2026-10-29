@@ -48,7 +48,13 @@ pub fn verify_job_all_inputs(job: &ScriptCheckJob) -> Result<(), ConsensusError>
         return Ok(());
     };
     let mut cache = None;
-    let pre = job.pre()?;
+    // Legacy sighash does not read BIP143 midstates. A segwit transaction
+    // loads the stored row, or fills one when the job has none.
+    let pre = if crate::tx_precompute::uses_segwit_serialization(tx) {
+        job.pre()?
+    } else {
+        interpreter::base_sig_precompute()
+    };
     let tap_spent = crypto::TapSpentHashes::default();
     verify_input(job, first, tx, &mut cache, pre, &tap_spent)
         .map_err(|e| annotate_script_err(e, job, first))?;

@@ -175,10 +175,11 @@ impl TxPrecompute {
     /// SHA256d of `version || vin || vout || locktime` on that slice. Legacy
     /// and the 10-byte flag-zero tx hash the whole slice once.
     ///
-    /// `None` when `wire` is not that tx's encoding. `sighash` still fills
-    /// BIP143/341 midstates like [`Self::from_tx`].
+    /// `None` when `wire` is not that tx's encoding. `sighash` fills BIP143/341
+    /// midstates only for a non-coinbase segwit transaction.
     pub fn from_tx_wire(tx: &Transaction, wire: &[u8], sighash: bool) -> Option<Self> {
         let has_witness = uses_segwit_serialization(tx);
+        let sighash = sighash && has_witness && !tx.is_coinbase();
         let wtxid = sha256d::Hash::hash(wire).to_byte_array();
         let (txid, base_size, [sha_prevouts, sha_sequences, sha_outputs]) =
             if has_witness && !flag_zero_tx(tx, wire) {
@@ -223,6 +224,7 @@ impl TxPrecompute {
     #[doc(hidden)]
     pub fn from_tx_inner(tx: &Transaction, sighash: bool) -> Self {
         let has_witness = uses_segwit_serialization(tx);
+        let sighash = sighash && has_witness && !tx.is_coinbase();
         if !has_witness {
             return Self::from_tx_legacy_one_engine(tx, sighash);
         }
@@ -358,12 +360,12 @@ impl TxPrecompute {
 }
 
 impl TxScriptPrecompute {
-    /// One walk of `tx` including BIP143/341 midstates. Does not hash spent prevouts.
+    /// BIP143/341 midstates for a caller that asked for the script row.
+    ///
+    /// The connect walk omits these for a legacy transaction and a coinbase.
+    /// This fills them anyway, including those shapes.
     pub fn from_tx(tx: &Transaction) -> Self {
-        let TxPrecompute::Script(script) = TxPrecompute::from_tx_inner(tx, true) else {
-            unreachable!("sighash walk always packs midstates");
-        };
-        script
+        Self::from_connect(TxPrecompute::from_tx_connect(tx).into_connect(), tx)
     }
 
     /// Midstates on an already-walked connect row. Does not rehash the txid.
@@ -455,11 +457,13 @@ pub fn pres_for_tip(
         if is_live(c.txid) {
             skip.insert(c.txid);
             v.push(c);
-        } else {
+        } else if sighash_midstates_for(tx) {
             v.push(TxPrecompute::Script(TxScriptPrecompute::from_connect(
                 c.into_connect(),
                 tx,
             )));
+        } else {
+            v.push(c);
         }
     }
     (Arc::from(v), skip)
@@ -736,6 +740,12 @@ pub fn sha256_again(single: &[u8; 32]) -> [u8; 32] {
     sha256::Hash::from_byte_array(*single)
         .hash_again()
         .to_byte_array()
+}
+
+/// BIP143/341 common midstates are used only by a non-coinbase segwit transaction.
+#[doc(hidden)]
+pub fn sighash_midstates_for(tx: &Transaction) -> bool {
+    !tx.is_coinbase() && uses_segwit_serialization(tx)
 }
 
 /// rust-bitcoin `Transaction::uses_segwit_serialization` (private).

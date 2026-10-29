@@ -238,6 +238,34 @@ pub struct EvalContext<'a> {
     pub tapscript: Option<crypto::TapscriptExecData<'a>>,
 }
 
+/// Placeholder row for a base sighash. Legacy `CHECKSIG` hashes through
+/// `SighashCache` and does not read these midstates. A witness spend never
+/// borrows this row.
+#[doc(hidden)]
+pub fn base_sig_precompute() -> &'static crate::TxScriptPrecompute {
+    use std::sync::OnceLock;
+    static ROW: OnceLock<crate::TxScriptPrecompute> = OnceLock::new();
+    ROW.get_or_init(|| crate::TxScriptPrecompute {
+        connect: crate::TxConnectPrecompute {
+            txid: [0; 32],
+            wtxid: [0; 32],
+            base_size: 0,
+            total_size: 0,
+            sigops: 0,
+            out_sum: 0,
+            has_witness: false,
+        },
+        sha_prevouts: [0; 32],
+        sha_sequences: [0; 32],
+        sha_outputs: [0; 32],
+        sha_amounts: None,
+        sha_scriptpubkeys: None,
+        prevouts_d: OnceLock::new(),
+        sequences_d: OnceLock::new(),
+        outputs_d: OnceLock::new(),
+    })
+}
+
 impl<'a> EvalContext<'a> {
     #[cfg(debug_assertions)]
     pub fn new(
@@ -364,6 +392,11 @@ impl<'a> EvalContext<'a> {
         sig_version: SigVersion,
     ) -> Result<Self, ConsensusError> {
         let amount = job.prevout_amount(input_index)?;
+        let pre = if sig_version == SigVersion::Base {
+            Cow::Borrowed(base_sig_precompute())
+        } else {
+            Cow::Borrowed(job.pre()?)
+        };
         Ok(Self::from_eval_parts(
             tx,
             input_index.get(),
@@ -373,7 +406,7 @@ impl<'a> EvalContext<'a> {
             job.bip65_active,
             job.bip112_active,
             job.bip66_active,
-            Cow::Borrowed(job.pre()?),
+            pre,
         )?
         .apply_job_flags(job))
     }
