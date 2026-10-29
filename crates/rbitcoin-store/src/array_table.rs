@@ -670,18 +670,42 @@ impl ArrayTable {
         }))
     }
 
-    /// One even generation of [`Self::pread_sample`]. A result read while a
-    /// store ran, error or not, is read again.
+    /// Slots `index` and `index + 1`, and `len`, from one even generation.
+    #[doc(hidden)]
+    pub fn get_pair_sample(&self, index: u64) -> Result<([u64; 2], u64), StoreError> {
+        if !self.in_ram {
+            return self.fd_generation(|| {
+                let (a, len) = self.pread_sample(index)?;
+                let (b, _) = self.pread_sample(index + 1)?;
+                Ok(([a, b], len))
+            });
+        }
+        Ok(seq_read(&self.seq, || {
+            let (a, len) = self.sample_ram(index, Ordering::Relaxed)?;
+            let (b, _) = self.sample_ram(index + 1, Ordering::Relaxed)?;
+            Some(([a, b], len))
+        }))
+    }
+
     fn get_sample_fd(&self, index: u64) -> Result<(u64, u64), StoreError> {
+        self.fd_generation(|| self.pread_sample(index))
+    }
+
+    /// One even generation of fd reads. A result read while a store ran,
+    /// error or not, is read again.
+    fn fd_generation<T>(
+        &self,
+        mut sample: impl FnMut() -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
         loop {
             let g1 = self.seq.load(Ordering::Acquire);
             if g1 & 1 != 0 {
                 crate::sync::spin();
                 continue;
             }
-            let sample = self.pread_sample(index);
+            let read = sample();
             if seq_holds(&self.seq, g1) {
-                return sample;
+                return read;
             }
         }
     }

@@ -114,3 +114,31 @@ fn fd_only_sample_is_one_generation() {
         let _ = std::fs::remove_dir_all(&dir);
     });
 }
+
+/// Two slots and the length against the same reorg shape. Every answer is
+/// one state the writer passed through.
+#[test]
+fn fd_only_pair_sample_is_one_generation() {
+    super::engine::check_at_most(2, || {
+        let dir = std::env::temp_dir().join("rbtc-fd-pair");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let slots = std::sync::Arc::new(open_fd_only(&dir, 3));
+        for (index, value) in [(0, 1), (1, 2), (2, 3)] {
+            slots.set(&ClassCWrite::for_test(), index, value).unwrap();
+        }
+        let slots_w = std::sync::Arc::clone(&slots);
+        let writer = loom::thread::spawn(move || {
+            slots_w.truncate(&ClassCWrite::for_test(), 1).unwrap();
+            slots_w.set(&ClassCWrite::for_test(), 1, 20).unwrap();
+            slots_w.set(&ClassCWrite::for_test(), 2, 30).unwrap();
+        });
+        let reader = loom::thread::spawn(move || match slots.get_pair_sample(1).unwrap() {
+            ([2, 3], 3) | ([0, 0], 1) | ([20, 0], 2) | ([20, 30], 3) => {}
+            (pair, len) => panic!("sample {pair:?} at len {len}"),
+        });
+        writer.join().unwrap();
+        reader.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    });
+}

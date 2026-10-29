@@ -39,10 +39,15 @@ impl ConfirmedTable {
         Ok(Fk::new(v))
     }
 
-    /// `confirmed[height]` and the tip, from one sample.
-    pub fn get_with_tip(&self, height: Height) -> Result<(Option<Fk>, Option<Height>), StoreError> {
-        let (v, n) = self.arr.get_sample(u64::from(height.0))?;
-        Ok((Fk::new(v), (n != 0).then(|| Height((n - 1) as u32))))
+    /// `confirmed[height]`, `confirmed[height + 1]`, and the tip, from one
+    /// sample.
+    pub fn get_pair_with_tip(
+        &self,
+        height: Height,
+    ) -> Result<([Option<Fk>; 2], Option<Height>), StoreError> {
+        let ([at, next], n) = self.arr.get_pair_sample(u64::from(height.0))?;
+        let tip = (n != 0).then(|| Height((n - 1) as u32));
+        Ok(([Fk::new(at), Fk::new(next)], tip))
     }
 
     /// Batch height → header_fk (0-based height indices). Missing/unset → `None`.

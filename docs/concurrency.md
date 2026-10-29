@@ -293,7 +293,7 @@ get retries when the length it sampled does not fit the buffer it loaded. A
 bulk bit scan rechecks the counter once at the end. A table past the RAM cap
 is fd write-through. Its stores take the same sequence counter with no
 flush flag, and a get retries a pread taken while a store ran, so a sample's
-slot and length are one generation. An append pwrites the new
+slot (or two adjacent slots) and length are one generation. An append pwrites the new
 slots, then the file length, then `len`, so a get that sees the new length
 has those bytes. A zero gap pwrites zeros across that new span before the
 named slots. A get that sampled a length a truncate has since shortened
