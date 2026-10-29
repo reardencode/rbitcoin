@@ -69,6 +69,8 @@ pub struct CreateLoc {
     pub checkpoints: RwLock<Vec<(u64, u64)>>,
     pub ovf_rows: RwLock<Vec<(u64, u32, u32)>>,
     pub count: AtomicU64,
+    /// Open dropped a locator prefix. Later truncates do not set this.
+    pub(crate) cut_on_open: bool,
 }
 
 impl CreateLoc {
@@ -80,6 +82,7 @@ impl CreateLoc {
             checkpoints: RwLock::new(Vec::new()),
             ovf_rows: RwLock::new(Vec::new()),
             count: AtomicU64::new(0),
+            cut_on_open: false,
         })
     }
 
@@ -115,16 +118,18 @@ impl CreateLoc {
             }
         }
         let ovf_rows = load_create_ovf(&ovf)?;
-        let opened = Self {
+        let mut opened = Self {
             loc,
             ovf,
             off,
             checkpoints: RwLock::new(checkpoints),
             ovf_rows: RwLock::new(ovf_rows),
             count: AtomicU64::new(full),
+            cut_on_open: false,
         };
         if count < full {
             opened.truncate_to_count(count)?;
+            opened.cut_on_open = true;
         }
         // A row past the overflow header belongs to a create this file does not name.
         let last_ovf = opened
@@ -138,6 +143,7 @@ impl CreateLoc {
             unresolved_ovf_cut(&opened.loc, &opened.ovf, opened.count(), last_ovf, true)?
         {
             opened.truncate_to_count(cut)?;
+            opened.cut_on_open = true;
         }
         Ok(opened)
     }

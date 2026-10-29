@@ -482,6 +482,9 @@ impl Store {
             cold_path,
             head_scale: layout.head_scale,
         };
+        if store.txs.should_align_confirmed() {
+            store.align_confirmed_to_class_a()?;
+        }
         store.rebuild_mtp_ring()?;
         Ok(store)
     }
@@ -1920,6 +1923,9 @@ impl Store {
                 None => return Ok(()),
             },
             _ => height,
+        };
+        let Some(height) = self.spend_height_within_class_a(height)? else {
+            return Ok(());
         };
         self.store_spend_marker(height, height, gen)
     }

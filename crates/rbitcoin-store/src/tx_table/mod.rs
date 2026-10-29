@@ -685,6 +685,8 @@ pub struct TxTable {
     pub prune_seqsigwit_mode: std::sync::atomic::AtomicBool,
     /// `--datadir-hdd`: Class A body stems are one pwrite wave each.
     pub datadir_hdd: std::sync::atomic::AtomicBool,
+    /// This open shortened a Class A prefix. Empty synthetic stores stay false.
+    open_cut: bool,
     /// Per-fk packed `txout` decodes for an outs reader
     /// ([`Self::get_meta_and_outputs`], and [`Self::get`] through it), the
     /// decode the mempool and block-proposal pins count. [`Self::get_full`] is
@@ -927,7 +929,7 @@ pub fn repair_class_a_count_skew(
     stems: ClassASkewStems<'_>,
     prune_seqsigwit_mode: bool,
     input_existed: bool,
-) -> Result<(), StoreError> {
+) -> Result<bool, StoreError> {
     let n_loc = stems.create_loc.count();
     let n_txids = stems.txids.count();
     let n_seqsigwit_loc = stems.seqsigwit_loc.count();
@@ -949,7 +951,7 @@ pub fn repair_class_a_count_skew(
     )
     .map(|n| n.min(covered))
     .or_else(|| (covered < n_loc).then_some(covered)) else {
-        return Ok(());
+        return Ok(false);
     };
     let n_input = stems.input.count();
     rbitcoin_log::warn!(
@@ -966,7 +968,8 @@ pub fn repair_class_a_count_skew(
         in_end,
         prune_seqsigwit_mode,
     )?;
-    class_a_skew_assert_aligned(&stems, prune_seqsigwit_mode)
+    class_a_skew_assert_aligned(&stems, prune_seqsigwit_mode)?;
+    Ok(true)
 }
 
 /// Largest create whose txout, spent, and seqsigwit ranges sit inside the
@@ -980,13 +983,30 @@ pub fn class_a_body_covered_count(
     if !prune_seqsigwit_mode {
         hi = hi.min(stems.seqsigwit_loc.count());
     }
+    covered_within(
+        stems,
+        prune_seqsigwit_mode,
+        hi,
+        stems.body.body_logical_len(),
+        stems.spent.body_logical_len(),
+        stems.seqsigwit.body_logical_len(),
+    )
+}
+
+fn covered_within(
+    stems: &ClassASkewStems<'_>,
+    prune_seqsigwit_mode: bool,
+    mut hi: u64,
+    tx_lim: u64,
+    sp_lim: u64,
+    in_lim: u64,
+) -> Result<u64, StoreError> {
     let mut lo = 0u64;
     while lo < hi {
         let mid = lo + (hi - lo).div_ceil(2);
         let (tx_end, sp_end, in_end) = class_a_skew_stem_ends(stems, mid, prune_seqsigwit_mode)?;
-        let fits = tx_end <= stems.body.body_logical_len()
-            && sp_end <= stems.spent.body_logical_len()
-            && (prune_seqsigwit_mode || in_end <= stems.seqsigwit.body_logical_len());
+        let fits =
+            tx_end <= tx_lim && sp_end <= sp_lim && (prune_seqsigwit_mode || in_end <= in_lim);
         if fits {
             lo = mid;
         } else {
@@ -994,6 +1014,28 @@ pub fn class_a_body_covered_count(
         }
     }
     Ok(lo)
+}
+
+fn file_header_behind(file: &crate::file::TableFile) -> bool {
+    file.header_persist_len() < file.logical_len()
+}
+
+fn durable_loc_count(
+    loc: &crate::file::TableFile,
+    off: &crate::file::TableFile,
+    slot: u64,
+    off_slot: u64,
+) -> u64 {
+    let data = loc
+        .header_persist_len()
+        .saturating_sub(crate::file::FILE_HEADER_LEN as u64);
+    if slot == 0 || !data.is_multiple_of(slot) {
+        return 0;
+    }
+    let off_data = off
+        .header_persist_len()
+        .saturating_sub(crate::file::FILE_HEADER_LEN as u64);
+    crate::delta_loc::checkpoint_fit(data / slot, off_data, off_slot).unwrap_or(0)
 }
 
 fn class_a_loc_pairs(
@@ -1117,6 +1159,7 @@ impl TxTable {
             rebuild_workers: workers,
             prune_seqsigwit_mode: std::sync::atomic::AtomicBool::new(false),
             datadir_hdd: std::sync::atomic::AtomicBool::new(false),
+            open_cut: false,
         })
     }
 
@@ -1247,7 +1290,7 @@ impl TxTable {
         } else {
             crate::input::Input::create(seqsigwit_dir)?
         };
-        repair_class_a_count_skew(
+        let repair_cut = repair_class_a_count_skew(
             ClassASkewStems {
                 create_loc: &create_loc,
                 seqsigwit_loc: &seqsigwit_loc,
@@ -1261,6 +1304,7 @@ impl TxTable {
             prune_seqsigwit_mode,
             input_existed,
         )?;
+        let open_cut = repair_cut || create_loc.cut_on_open || seqsigwit_loc.cut_on_open;
         let n_bodies = create_loc.count();
         if txstat.count() != n_bodies {
             rbitcoin_log::warn!(
@@ -1348,6 +1392,7 @@ impl TxTable {
             rebuild_workers: workers,
             prune_seqsigwit_mode: std::sync::atomic::AtomicBool::new(prune_seqsigwit_mode),
             datadir_hdd: std::sync::atomic::AtomicBool::new(false),
+            open_cut,
         };
         match input_open_tail(t.input.count(), n_bodies, t.seqsigwit.count()) {
             InputOpenTail::Backfill { from } => {
@@ -1609,6 +1654,80 @@ impl TxTable {
 
     pub fn count(&self) -> u64 {
         self.body.count()
+    }
+
+    /// Open shortened Class A, or the archive already has creates.
+    ///
+    /// A store with no creates and no cut is a Class C fixture. A chain with
+    /// creates checks the tip once: the range is one RAM read when it fits.
+    pub(crate) fn should_align_confirmed(&self) -> bool {
+        self.open_cut || self.count() > 0
+    }
+
+    /// Creates whose Class A headers have landed.
+    ///
+    /// No header is behind: two loads per file and the RAM count. A withheld
+    /// header searches the prefix that flush will keep.
+    pub(crate) fn durable_create_count(&self) -> Result<u64, StoreError> {
+        if !self.class_a_header_behind() {
+            return Ok(self.count());
+        }
+        let prune = self.prune_seqsigwit_mode();
+        let mut hi = durable_loc_count(
+            &self.create_loc.loc,
+            &self.create_loc.off,
+            crate::create_loc::SLOT,
+            crate::create_loc::OFF_SLOT,
+        );
+        hi = hi.min(self.create_loc.count());
+        if !prune {
+            hi = hi.min(durable_loc_count(
+                &self.seqsigwit_loc.loc,
+                &self.seqsigwit_loc.off,
+                2,
+                8,
+            ));
+            hi = hi.min(self.seqsigwit_loc.count());
+        }
+        covered_within(
+            &self.skew_stems(),
+            prune,
+            hi,
+            self.body.body.header_persist_len(),
+            self.spent.body.header_persist_len(),
+            self.seqsigwit.body.header_persist_len(),
+        )
+    }
+
+    fn class_a_header_behind(&self) -> bool {
+        let loc = file_header_behind(&self.create_loc.loc)
+            || file_header_behind(&self.create_loc.ovf)
+            || file_header_behind(&self.create_loc.off)
+            || file_header_behind(&self.body.body)
+            || file_header_behind(&self.spent.body);
+        if loc {
+            return true;
+        }
+        if self.prune_seqsigwit_mode() {
+            return false;
+        }
+        file_header_behind(&self.seqsigwit_loc.loc)
+            || file_header_behind(&self.seqsigwit_loc.ovf)
+            || file_header_behind(&self.seqsigwit_loc.off)
+            || file_header_behind(&self.seqsigwit.body)
+    }
+
+    fn skew_stems(&self) -> ClassASkewStems<'_> {
+        ClassASkewStems {
+            create_loc: &self.create_loc,
+            seqsigwit_loc: &self.seqsigwit_loc,
+            body: &self.body,
+            spent: &self.spent,
+            seqsigwit: &self.seqsigwit,
+            txids: &self.txids,
+            txstat: &self.txstat,
+            input: &self.input,
+        }
     }
 
     /// Current `tx.body` logical length (including file header).

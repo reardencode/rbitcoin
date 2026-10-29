@@ -525,6 +525,11 @@ impl TableFile {
         self.published_len.load(Ordering::Acquire)
     }
 
+    /// Length a flush will store. A withheld header stays at the last landed end.
+    pub(crate) fn header_persist_len(&self) -> u64 {
+        self.header_len_to_persist()
+    }
+
     pub fn path(&self) -> &std::path::Path {
         &self.path
     }

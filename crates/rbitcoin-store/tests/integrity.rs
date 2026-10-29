@@ -537,3 +537,142 @@ fn missing_marker_revalidates_from_genesis() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+struct Disarm(rbitcoin_store::io_handle::IoHandle);
+
+impl Drop for Disarm {
+    fn drop(&mut self) {
+        rbitcoin_store::io_handle::disarm_pwrite(self.0);
+    }
+}
+
+fn coinbase(salt: u8) -> (TxRecord, Vec<InputRecord>, Vec<OutputRecord>) {
+    (
+        TxRecord {
+            txid: [salt; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
+        vec![InputRecord::coinbase(u32::MAX, vec![salt], vec![])],
+        vec![OutputRecord::unspent(50, vec![0x51])],
+    )
+}
+
+fn connect_coinbase(
+    s: &Store,
+    write: &rbitcoin_store::ClassCWrite,
+    h: u8,
+    prev: Fk,
+    parent_hash: [u8; 32],
+) -> (Fk, [u8; 32]) {
+    let txid = [h; 32];
+    let (rec, ins, outs) = coinbase(h);
+    let tx_fk = s
+        .put_tx_full_batch_indexed(&[(rec, ins, outs)], false)
+        .unwrap()[0];
+    let merkle = rbitcoin_primitives::merkle_root_from_txids(&[txid]);
+    let header = hdr_merkle(prev, parent_hash, h, merkle);
+    let hash = header.hash;
+    let header_fk = s.put_header(&header).unwrap();
+    s.header_txs.put_range(write, header_fk, tx_fk, 1).unwrap();
+    s.strong_tx.set_strong(write, tx_fk, header_fk).unwrap();
+    s.confirmed
+        .set(write, Height(u32::from(h)), header_fk)
+        .unwrap();
+    (header_fk, hash)
+}
+
+/// Genesis plus eight connects whose locator header does not land.
+/// Returns the header fk of height 1. The process image is still at tip 8.
+fn write_withheld_tail(dir: &std::path::Path) -> (Store, Fk) {
+    let s = Store::create_tiny(dir).unwrap();
+    let write = rbitcoin_store::ClassCWrite::for_test();
+    let (mut prev, mut parent_hash) = connect_coinbase(&s, &write, 0, Fk::NULL, [0u8; 32]);
+    let loc = s.txs.create_loc.loc.read_fd();
+    rbitcoin_store::io_handle::arm_fail_hwm_pwrites(loc, 64);
+    let disarm = Disarm(loc);
+    let mut dropped_header = Fk::NULL;
+    for h in 1u8..=8 {
+        let (header_fk, hash) = connect_coinbase(&s, &write, h, prev, parent_hash);
+        prev = header_fk;
+        parent_hash = hash;
+        if h == 1 {
+            dropped_header = header_fk;
+        }
+    }
+    drop(disarm);
+    s.flush_class_c_tip().unwrap();
+    s.txs.flush().unwrap();
+    assert_eq!(s.confirmed.tip_height(), Some(Height(8)));
+    (s, dropped_header)
+}
+
+/// Eight connects withhold the locator header. The tip stays up. The spend
+/// marker must not call those heights durable, and a marker that already
+/// does must not keep them confirmed across open. Heights 1 and 2 sit below
+/// a six-block window from tip 8.
+#[test]
+fn withheld_class_a_header_does_not_keep_confirmed_blocks() {
+    let dir = tmp();
+    let (s, dropped_header) = write_withheld_tail(&dir);
+    s.note_spend_snapshot(8);
+    s.checkpoint_spend_through(8).unwrap();
+    let marker = rbitcoin_store::spend_durable::SpendDurable::load(s.path())
+        .unwrap()
+        .expect("checkpoint publishes");
+    assert_eq!(
+        marker.durable_through(),
+        0,
+        "a withheld Class A header is not durable through the new tip"
+    );
+    assert_eq!(s.confirmed.tip_height(), Some(Height(8)));
+    rbitcoin_store::spend_durable::SpendDurable::new(8, 8)
+        .store(s.path())
+        .unwrap();
+    drop(s);
+
+    let s = Store::open_tiny(&dir).unwrap();
+    assert_eq!(
+        s.confirmed.tip_height(),
+        Some(Height(0)),
+        "open drops confirmed heights below the checkblocks window"
+    );
+    assert!(
+        !s.header_txs.has_body(dropped_header).unwrap(),
+        "a dropped height must archive again"
+    );
+    assert!(s.txs.get_meta_and_outputs(Fk(1)).is_ok());
+    assert!(s.txs.get_meta_and_outputs(Fk(2)).is_err());
+    let r = s.revalidate_tip_window_n(6).unwrap();
+    assert_eq!(s.confirmed.tip_height(), Some(Height(0)), "{r:?}");
+    let marker = rbitcoin_store::spend_durable::SpendDurable::load(s.path())
+        .unwrap()
+        .unwrap();
+    assert_eq!(marker.durable_through(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The tip shrink is durable after `header_txs` is cleared. A kill between
+/// those two flushes reopens with the high tip and no tx range on the tail.
+#[test]
+fn cleared_header_txs_suffix_reopen_drops_the_tip() {
+    let dir = tmp();
+    let (s, dropped_header) = write_withheld_tail(&dir);
+    let write = rbitcoin_store::ClassCWrite::for_test();
+    for h in 1u32..=8 {
+        let fk = s.confirmed.get(Height(h)).unwrap().unwrap();
+        s.header_txs.clear_body(&write, fk).unwrap();
+    }
+    s.header_txs.flush().unwrap();
+    rbitcoin_store::spend_durable::SpendDurable::new(8, 8)
+        .store(s.path())
+        .unwrap();
+    drop(s);
+
+    let s = Store::open_tiny(&dir).unwrap();
+    assert_eq!(s.confirmed.tip_height(), Some(Height(0)));
+    assert!(!s.header_txs.has_body(dropped_header).unwrap());
+    let _ = std::fs::remove_dir_all(&dir);
+}

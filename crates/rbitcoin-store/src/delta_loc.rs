@@ -188,6 +188,8 @@ pub struct DeltaLoc {
     pub ovf_rows: RwLock<Vec<(u64, u32)>>,
     pub count: AtomicU64,
     pub missing: &'static str,
+    /// Open dropped a locator prefix. Later truncates do not set this.
+    pub(crate) cut_on_open: bool,
 }
 
 impl DeltaLoc {
@@ -207,6 +209,7 @@ impl DeltaLoc {
             } else {
                 CREATE_OVF_MISSING
             },
+            cut_on_open: false,
         })
     }
 
@@ -237,7 +240,7 @@ impl DeltaLoc {
             }
         }
         let ovf_rows = load_u16_ovf(&ovf)?;
-        let opened = Self {
+        let mut opened = Self {
             loc,
             ovf,
             off,
@@ -249,9 +252,11 @@ impl DeltaLoc {
             } else {
                 CREATE_OVF_MISSING
             },
+            cut_on_open: false,
         };
         if count < full {
             opened.truncate_to_count(count)?;
+            opened.cut_on_open = true;
         }
         // A row past the overflow header belongs to a create this file does not name.
         let last_ovf = opened
@@ -265,6 +270,7 @@ impl DeltaLoc {
             unresolved_ovf_cut(&opened.loc, &opened.ovf, opened.count(), last_ovf, false)?
         {
             opened.truncate_to_count(cut)?;
+            opened.cut_on_open = true;
         }
         Ok(opened)
     }

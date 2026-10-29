@@ -602,6 +602,146 @@ impl Store {
         Ok(())
     }
 
+    /// Drop confirmed heights whose tx range ends past the opened Class A prefix.
+    ///
+    /// One range read when the tip already fits. A marker at the tip does not
+    /// narrow this cut: the prefix is the create count open kept.
+    pub(crate) fn align_confirmed_to_class_a(&self) -> Result<(), StoreError> {
+        let Some(bad) = self.class_a_confirmed_cut(self.txs.count())? else {
+            return Ok(());
+        };
+        let Some(tip) = self.confirmed.tip_height() else {
+            return Ok(());
+        };
+        let write = crate::array_table::ClassCWrite::new();
+        for h in bad..=tip.0 {
+            if let Some(fk) = self.confirmed.get(Height(h))? {
+                let _ = self.header_txs.clear_body(&write, fk)?;
+            }
+        }
+        self.header_txs.flush()?;
+        let kept = bad.checked_sub(1);
+        let covered = self.txs.count();
+        match kept {
+            Some(h) => rbitcoin_log::warn!(
+                "store: confirmed tip {} extends past {covered} creates — truncating to {h}",
+                tip.0
+            ),
+            None => rbitcoin_log::warn!(
+                "store: confirmed tip {} extends past {covered} creates — truncating to empty",
+                tip.0
+            ),
+        }
+        let mut report = TipRevalidateReport::default();
+        self.shrink_tip_to(&write, kept, &mut report)
+    }
+
+    /// Height a spend checkpoint may call durable, or `None` when no create is.
+    pub(crate) fn spend_height_within_class_a(
+        &self,
+        height: u32,
+    ) -> Result<Option<u32>, StoreError> {
+        let covered = self.txs.durable_create_count()?;
+        let Some(bad) = self.class_a_confirmed_cut(covered)? else {
+            return Ok(Some(height));
+        };
+        Ok(bad.checked_sub(1).map(|good| good.min(height)))
+    }
+
+    /// First confirmed height whose tx range ends past `covered`, if any.
+    fn class_a_confirmed_cut(&self, covered: u64) -> Result<Option<u32>, StoreError> {
+        let Some(tip) = self.confirmed.tip_height() else {
+            return Ok(None);
+        };
+        if let Some(end) = self.header_tx_end(tip)? {
+            if end <= covered {
+                return Ok(None);
+            }
+            return Ok(Some(self.first_height_past_creates(tip.0, covered)?));
+        }
+        if self.header_tx_end(Height(0))?.is_none() {
+            return Ok(None);
+        }
+        let Some(last) = self.highest_height_with_tx_range(tip.0)? else {
+            return Ok(None);
+        };
+        let Some(end) = self.header_tx_end(Height(last))? else {
+            return Ok(None);
+        };
+        if end > covered {
+            return Ok(Some(self.first_height_past_creates(last, covered)?));
+        }
+        if last < tip.0 {
+            return Ok(Some(last + 1));
+        }
+        Ok(None)
+    }
+
+    fn header_tx_end(&self, height: Height) -> Result<Option<u64>, StoreError> {
+        let Some(fk) = self.confirmed.get(height)? else {
+            return Ok(None);
+        };
+        let Some((first, n)) = self.header_txs.get_range(fk)? else {
+            return Ok(None);
+        };
+        if n == 0 || first.is_null() {
+            return Ok(None);
+        }
+        Ok(Some(first.0.saturating_add(u64::from(n)).saturating_sub(1)))
+    }
+
+    /// `hi` itself ends past `covered`. Heights above `hi` are not searched.
+    fn first_height_past_creates(&self, hi: u32, covered: u64) -> Result<u32, StoreError> {
+        let mut lo = 0u32;
+        let mut hi = hi;
+        let mut found = hi;
+        loop {
+            let mid = lo + (hi - lo) / 2;
+            let past = self
+                .header_tx_end(Height(mid))?
+                .is_some_and(|end| end > covered);
+            if past {
+                found = mid;
+                if mid == lo {
+                    break;
+                }
+                hi = mid - 1;
+            } else if mid == hi {
+                break;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        Ok(found)
+    }
+
+    fn highest_height_with_tx_range(&self, tip: u32) -> Result<Option<u32>, StoreError> {
+        if self.header_tx_end(Height(tip))?.is_some() {
+            return Ok(Some(tip));
+        }
+        let mut lo = 0u32;
+        let mut hi = tip;
+        let mut found = None;
+        loop {
+            let mid = lo + (hi - lo) / 2;
+            if self.header_tx_end(Height(mid))?.is_some() {
+                found = Some(mid);
+                if mid == tip {
+                    break;
+                }
+                lo = mid + 1;
+            } else if mid == 0 {
+                break;
+            } else {
+                hi = mid - 1;
+            }
+            if lo > hi {
+                break;
+            }
+        }
+        Ok(found)
+    }
+
     #[doc(hidden)]
     pub fn persist_class_c_repair(&self) -> Result<(), StoreError> {
         let n = self.repair_class_c_above_tip()?;
