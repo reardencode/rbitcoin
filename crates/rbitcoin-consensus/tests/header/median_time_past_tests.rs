@@ -34,15 +34,9 @@ fn validate_header_on_parent_uses_the_caller_digest() {
     let hash = header.block_hash().to_byte_array();
     rbitcoin_consensus::clock::with_now(1_700_000_000, || {
         validate_header_on_parent(&params, Height(1), &header, 0, header.bits, hash).unwrap();
-        let err = validate_header_on_parent(
-            &params,
-            Height(1),
-            &header,
-            0,
-            header.bits,
-            [0xff; 32],
-        )
-        .unwrap_err();
+        let err =
+            validate_header_on_parent(&params, Height(1), &header, 0, header.bits, [0xff; 32])
+                .unwrap_err();
         assert!(matches!(err, ConsensusError::InvalidPow), "{err:?}");
         let err = validate_header_on_parent(
             &params,
