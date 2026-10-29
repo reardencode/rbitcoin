@@ -11,5 +11,7 @@ Fixed
   does not publish `spend_durable` at the new tip. Open drops confirmed
   blocks whose outputs are no longer in that prefix, including blocks
   below the checkblocks window. A confirmed tip whose `header_txs` anchor
-  was cleared before that drop is not left in place. A real consensus failure
+  was cleared before that drop is not left in place. Removing `class_a_cut`
+  syncs the store directory before open returns, so a later tip flush cannot
+  revive that cut. A real consensus failure
   is still kept in `store/block.invalid`.

@@ -150,10 +150,15 @@ impl ClassACut {
     fn remove(dir: &Path) -> Result<(), StoreError> {
         let p = Self::path(dir);
         match std::fs::remove_file(&p) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(StoreError::io(&p, e)),
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(StoreError::io(&p, e)),
         }
+        // The directory entry is durable before this returns.
+        if let Some(parent) = p.parent() {
+            crate::file::fsync_parent_dir(parent).map_err(|e| StoreError::io(parent, e))?;
+        }
+        Ok(())
     }
 
     fn bad_height(self) -> u32 {

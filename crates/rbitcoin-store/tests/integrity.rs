@@ -726,6 +726,37 @@ fn empty_class_a_cut_reopen_clears_leftover_bodies() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn dir_syncs_to_reopen_empty_tip(with_cut: bool) -> u32 {
+    let dir = tmp();
+    let (s, _) = write_withheld_tail(&dir);
+    let write = rbitcoin_store::ClassCWrite::for_test();
+    let mut report = TipRevalidateReport::default();
+    s.shrink_tip_to(&write, None, &mut report).unwrap();
+    if with_cut {
+        std::fs::write(s.path().join(CLASS_A_CUT_NAME), u32::MAX.to_le_bytes()).unwrap();
+    }
+    drop(s);
+    let before = rbitcoin_store::file::dir_syncs();
+    Store::open_tiny(&dir).unwrap();
+    let delta = rbitcoin_store::file::dir_syncs().wrapping_sub(before);
+    let _ = std::fs::remove_dir_all(&dir);
+    delta
+}
+
+/// The empty tip is already durable and `class_a_cut` is still there. Open
+/// must sync the store directory when it unlinks that file. Otherwise a later
+/// tip flush can make a new tip durable and a power loss puts the cut back.
+#[test]
+fn class_a_cut_unlink_syncs_the_store_directory() {
+    let plain = dir_syncs_to_reopen_empty_tip(false);
+    let cut = dir_syncs_to_reopen_empty_tip(true);
+    assert_eq!(
+        cut,
+        plain + 1,
+        "removing class_a_cut syncs the store directory once more than an open with no cut"
+    );
+}
+
 /// The tip shrink is durable after `header_txs` is cleared. A kill between
 /// those two flushes reopens with the high tip and no tx range on the tail.
 #[test]

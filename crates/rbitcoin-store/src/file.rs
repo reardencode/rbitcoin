@@ -113,11 +113,25 @@ where
     Ok(())
 }
 
+#[cfg(debug_assertions)]
+std::thread_local! {
+    static DIR_SYNC_COUNT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Directory syncs attempted on this thread.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn dir_syncs() -> u32 {
+    DIR_SYNC_COUNT.with(|c| c.get())
+}
+
 /// `fsync` the directory so a renamed dirent survives a crash.
 ///
 /// Windows denies a directory handle (`ERROR_ACCESS_DENIED`), including with
 /// backup semantics. The file itself was already `sync_all`'d before rename.
 pub fn fsync_parent_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(debug_assertions)]
+    DIR_SYNC_COUNT.with(|c| c.set(c.get().saturating_add(1)));
     #[cfg(unix)]
     {
         std::fs::File::open(dir)?.sync_all()
