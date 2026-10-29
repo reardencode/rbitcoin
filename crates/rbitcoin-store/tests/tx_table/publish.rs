@@ -124,6 +124,40 @@ fn short_create_off_reopens_at_the_last_complete_window() {
         .is_err());
 }
 
+/// A spend slot write must not store the body end that a missed locator
+/// header left unpublished. Flush keeps that same end.
+#[test]
+fn spend_annotation_does_not_publish_a_withheld_body_end() {
+    let dir = super::tempfile_dir("spend-withheld-body");
+    let t = TxTable::create_tiny(&dir).unwrap();
+    t.put_full_batch_indexed(&[one(1)], false).unwrap();
+    let spent_end = on_disk_hwm(&t.spent.body);
+    let loc_fd = t.create_loc.loc.io_handle();
+    rbitcoin_store::io_handle::arm_fail_hwm_pwrites(loc_fd, 1);
+    let disarm = Disarm(loc_fd);
+    t.put_full_batch_indexed(&[one(2)], false).unwrap();
+    drop(disarm);
+    assert_eq!(on_disk_hwm(&t.spent.body), spent_end);
+    assert!(t.spent.body_logical_len() > spent_end);
+    let pair = t
+        .create_loc
+        .range_batch(&[rbitcoin_primitives::Fk(1)])
+        .unwrap()[0]
+        .expect("create 1");
+    t.set_output_spender_meta_at(
+        pair.spent.0,
+        pair.spent.1,
+        0,
+        false,
+        rbitcoin_primitives::Fk(1),
+        0,
+    )
+    .unwrap();
+    assert_eq!(on_disk_hwm(&t.spent.body), spent_end);
+    t.spent.body.flush().unwrap();
+    assert_eq!(on_disk_hwm(&t.spent.body), spent_end);
+}
+
 /// A locator header pwrite that misses still publishes RAM, and it does not
 /// store the body header. Flush keeps that old body header. The next connect
 /// writes each header once and reopen sees both creates.

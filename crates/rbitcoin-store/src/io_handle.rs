@@ -85,8 +85,9 @@ impl IoHandle {
         }
         // A tip-connect test arms one body fd. The prefix is a real pwrite;
         // the error is what a full filesystem returns after that prefix.
-        // Eight-byte HWM updates stay real unless `arm_fail_hwm_pwrites` is set,
-        // so a rewind can still publish the old end.
+        // Eight-byte HWM updates stay real unless `arm_fail_hwm_pwrites` is set.
+        // An armed one fails before any byte is stored, so a header retry
+        // cannot observe a short length.
         #[cfg(debug_assertions)]
         if buf.len() == 8 && take_fail_hwm(self) {
             return -disk_full_errno();

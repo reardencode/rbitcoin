@@ -551,44 +551,65 @@ impl TableFile {
         }
         self.ensure_capacity(logical)?;
         if self.trailing_header {
+            let _hold = self.flush_lock.lock().unwrap_or_else(|e| e.into_inner());
             // Trailer rewrite includes HWM; publish after full trailer write.
             self.write_trailer(logical)?;
             self.published_len.store(logical, Ordering::Release);
             self.header_cap.store(0, Ordering::Release);
         } else {
-            // Readers use this length as the next append start. A grow that
-            // does not persist must not stay published. A shrink that fails
-            // must stay the shorter length: putting the longer value back
-            // makes the next flush record bytes the locators do not own.
-            let prev = self.published_len.load(Ordering::Relaxed);
-            self.published_len.store(logical, Ordering::Release);
-            self.header_cap.store(0, Ordering::Release);
-            let attempts = if logical < prev { 4 } else { 1 };
-            let mut persist_err = None;
-            for _ in 0..attempts {
-                match self.persist_hwm(logical) {
-                    Ok(()) => {
-                        persist_err = None;
-                        break;
-                    }
-                    Err(e) => persist_err = Some(e),
-                }
-            }
-            if let Some(e) = persist_err {
-                if logical > prev {
-                    self.published_len.store(prev, Ordering::Release);
-                    self.header_cap.store(0, Ordering::Release);
-                    return Err(e);
-                }
-                if logical == prev {
-                    return Err(e);
-                }
-                // Readers already append from `logical`. The header still
-                // names `prev`. End the file here so open cannot load `prev`.
-                self.keep_short_end(logical)?;
-            }
+            self.publish_prefixed_len(logical)?;
         }
         self.needs_sync.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Store `logical` as the prefixed-header length.
+    ///
+    /// A non-zero `header_cap` is a body end whose locator header did not
+    /// land. A slot patch must not persist or extend past that cap. The
+    /// flush lock covers the length and the cap so flush cannot observe a
+    /// cleared cap with the withheld end.
+    fn publish_prefixed_len(&self, logical: u64) -> Result<(), StoreError> {
+        let _hold = self.flush_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = self.published_len.load(Ordering::Relaxed);
+        let cap = self.header_cap.load(Ordering::Relaxed);
+        if cap != 0 && logical > cap {
+            if logical < prev {
+                self.published_len.store(logical, Ordering::Release);
+            }
+            return Ok(());
+        }
+        // Readers use this length as the next append start. A grow that
+        // does not persist must not stay published. A shrink that fails
+        // must stay the shorter length: putting the longer value back
+        // makes the next flush record bytes the locators do not own.
+        self.published_len.store(logical, Ordering::Release);
+        let attempts = if logical < prev { 4 } else { 1 };
+        let mut persist_err = None;
+        for _ in 0..attempts {
+            match self.persist_hwm(logical) {
+                Ok(()) => {
+                    persist_err = None;
+                    break;
+                }
+                Err(e) => persist_err = Some(e),
+            }
+        }
+        if let Some(e) = persist_err {
+            if logical > prev {
+                self.published_len.store(prev, Ordering::Release);
+                return Err(e);
+            }
+            if logical == prev {
+                return Err(e);
+            }
+            // Readers already append from `logical`. The header still
+            // names `prev`. End the file here so open cannot load `prev`.
+            self.keep_short_end(logical)?;
+        }
+        if cap != 0 {
+            self.header_cap.store(0, Ordering::Release);
+        }
         Ok(())
     }
 
