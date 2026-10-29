@@ -167,6 +167,25 @@ pub fn mine_regtest_paying(
     script_pubkey: ScriptBuf,
     extra_txs: Vec<Transaction>,
 ) -> Block {
+    mine_regtest_paying_bits(
+        prev,
+        time,
+        height,
+        script_pubkey,
+        extra_txs,
+        CompactTarget::from_consensus(REGTEST_POW_BITS),
+    )
+}
+
+/// [`mine_regtest_paying`] at caller-chosen `bits` (the next-work result).
+pub fn mine_regtest_paying_bits(
+    prev: BlockHash,
+    time: u32,
+    height: u32,
+    script_pubkey: ScriptBuf,
+    extra_txs: Vec<Transaction>,
+    bits: CompactTarget,
+) -> Block {
     // Post-BIP65 (regtest height 1) requires nVersion ≥ 4. Core generate uses
     // VERSIONBITS_TOP_BITS; 4 is the buried minimum and enough for dersig/cltv.
     let header = Header {
@@ -174,7 +193,7 @@ pub fn mine_regtest_paying(
         prev_blockhash: prev,
         merkle_root: TxMerkleNode::from_byte_array([0u8; 32]),
         time,
-        bits: CompactTarget::from_consensus(REGTEST_POW_BITS),
+        bits,
         nonce: 0,
     };
     let mut txdata = Vec::with_capacity(1 + extra_txs.len());

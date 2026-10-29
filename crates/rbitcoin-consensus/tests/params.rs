@@ -171,3 +171,49 @@ fn testactivationheight_csv_overlay() {
     let mut main = ChainParams::mainnet();
     assert!(main.apply_test_activation_height("csv", 102).is_err());
 }
+
+#[test]
+fn regtest_pow_bits_overlay_is_regtest_only_and_bounded() {
+    let limit = 0x207f_ffff;
+    let mut p = ChainParams::regtest();
+    assert_eq!(p.regtest_pow_bits_overlay, None);
+    p.apply_regtest_pow_bits(0x200f_ffff).unwrap();
+    assert_eq!(
+        p.regtest_pow_bits_overlay,
+        Some(bitcoin::CompactTarget::from_consensus(0x200f_ffff))
+    );
+    for bits in [
+        limit,       // the pow limit itself is a no-op
+        0x2100_ffff, // easier than the limit
+        0x207f_ffff + 1,
+        0x0000_0000, // zero mantissa
+        0x0300_0000,
+        0x0100_3456, // shifts to a zero target
+        0x2080_0001, // negative
+        0x2300_0001, // overflow
+    ] {
+        let mut p = ChainParams::regtest();
+        assert!(p.apply_regtest_pow_bits(bits).is_err(), "{bits:#x}");
+        assert_eq!(p.regtest_pow_bits_overlay, None);
+    }
+    for mut other in [
+        ChainParams::mainnet(),
+        ChainParams::testnet(),
+        ChainParams::signet(),
+    ] {
+        assert!(other.apply_regtest_pow_bits(0x1d00_ffff).is_err());
+        assert_eq!(other.regtest_pow_bits_overlay, None);
+    }
+
+    assert_eq!(
+        ChainParams::parse_regtest_pow_bits("0x1f7fffff"),
+        Ok(0x1f7f_ffff)
+    );
+    assert_eq!(
+        ChainParams::parse_regtest_pow_bits("1F7fffff"),
+        Ok(0x1f7f_ffff)
+    );
+    for bad in ["", "0x", "zz", "0x123456789", "-1"] {
+        assert!(ChainParams::parse_regtest_pow_bits(bad).is_err(), "{bad}");
+    }
+}

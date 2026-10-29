@@ -177,6 +177,33 @@ pub fn next_work_bits(
     prev_time: u32,
     header_time: u32,
     period_first_time: Option<u32>,
+    bits_at: impl FnMut(u32) -> Option<CompactTarget>,
+) -> Option<CompactTarget> {
+    let bits = next_work_bits_base(
+        params,
+        height,
+        prev_bits,
+        prev_time,
+        header_time,
+        period_first_time,
+        bits_at,
+    )?;
+    Some(apply_regtest_pow_overlay(
+        params,
+        height,
+        bits,
+        prev_time,
+        header_time,
+    ))
+}
+
+fn next_work_bits_base(
+    params: &ChainParams,
+    height: u32,
+    prev_bits: CompactTarget,
+    prev_time: u32,
+    header_time: u32,
+    period_first_time: Option<u32>,
     mut bits_at: impl FnMut(u32) -> Option<CompactTarget>,
 ) -> Option<CompactTarget> {
     if height == 0 {
@@ -205,6 +232,42 @@ pub fn next_work_bits(
     ))
 }
 
+/// Core min-difficulty rule: a block more than 2 spacings after its parent may
+/// use the `pow_limit` bits.
+#[doc(hidden)]
+pub fn min_diff_gap(params: &ChainParams, prev_time: u32, header_time: u32) -> bool {
+    let spacing = params.btc.pow_target_spacing;
+    u64::from(header_time) > u64::from(prev_time).saturating_add(spacing.saturating_mul(2))
+}
+
+/// With the regtest difficulty overlay set, `bits` equal to the `pow_limit`
+/// bits become the overlay unless the min-difficulty time gap applies. That gap
+/// never applies at a retarget boundary. Every next-work path must end here.
+#[doc(hidden)]
+pub fn apply_regtest_pow_overlay(
+    params: &ChainParams,
+    height: u32,
+    bits: CompactTarget,
+    prev_time: u32,
+    header_time: u32,
+) -> CompactTarget {
+    let Some(overlay) = params.regtest_pow_bits_overlay else {
+        return bits;
+    };
+    if height == 0 || bits != params.pow_limit.to_compact_lossy() {
+        return bits;
+    }
+    let interval = params.difficulty_adjustment_interval();
+    let on_boundary = interval != 0 && height.is_multiple_of(interval);
+    if !on_boundary
+        && params.allow_min_difficulty_blocks()
+        && min_diff_gap(params, prev_time, header_time)
+    {
+        return bits;
+    }
+    overlay
+}
+
 #[doc(hidden)]
 pub fn min_diff_bits(
     params: &ChainParams,
@@ -218,8 +281,7 @@ pub fn min_diff_bits(
         return Some(prev_bits);
     }
     let limit = params.pow_limit.to_compact_lossy();
-    let spacing = params.btc.pow_target_spacing;
-    if u64::from(header_time) > u64::from(prev_time).saturating_add(spacing.saturating_mul(2)) {
+    if min_diff_gap(params, prev_time, header_time) {
         return Some(limit);
     }
     let interval = params.difficulty_adjustment_interval();

@@ -1260,3 +1260,38 @@ fn template_time_holds_the_last_of_period_floor() {
     assert_eq!(built.prev_hash, prev.to_byte_array());
     assert_eq!(built.header_timestamp, first_time);
 }
+
+/// Under `regtest_pow_bits_overlay` the template carries the overlay target,
+/// and a solution ground against it becomes the tip.
+#[tokio::test(flavor = "multi_thread")]
+async fn template_target_follows_the_regtest_pow_overlay() {
+    const OVERLAY: u32 = 0x200f_ffff;
+    let mut params = ChainParams::regtest();
+    params.apply_regtest_pow_bits(OVERLAY).unwrap();
+    let tc = padded_chain_with("sv2-pow-overlay", 0, params);
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id,
+        version,
+        mut header,
+        coinbase,
+    } = first_template(&tc).await;
+    assert_eq!(header.bits.to_consensus(), OVERLAY);
+
+    while header.validate_pow(header.target()).is_err() {
+        header.nonce += 1;
+    }
+    c.submit_solution(template_id, version, header.time, header.nonce, &coinbase)
+        .await
+        .unwrap();
+    let f = recv_in_time(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE);
+    assert_eq!(
+        tc.chain.tip_header().unwrap().block_hash(),
+        header.block_hash()
+    );
+    assert_eq!(tc.chain.tip_header().unwrap().bits.to_consensus(), OVERLAY);
+
+    tp.shutdown().await;
+}

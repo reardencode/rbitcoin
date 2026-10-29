@@ -348,7 +348,7 @@ pub fn operator_usage() -> String {
     [--milestone HEIGHT] \\\n\
     [--max-outbound N] [--max-inbound N] \\\n\
     [--mempool-size-mb N] [--mempool-expiry HOURS] \\\n\
-    [--test-activation-height name@HEIGHT] [--persist-mempool[=0|1]] [--trusted] [--always-relay] [--relay] \\\n\
+    [--test-activation-height name@HEIGHT] [--regtest-pow-bits BITS] [--persist-mempool[=0|1]] [--trusted] [--always-relay] [--relay] \\\n\
     [--net-permission SPEC] [--net-permission-bind SPEC] [--net-permission-relay[=0|1]] [--net-permission-force-relay[=0|1]] \\\n\
     [--blocks-only] [--prefill-compact[=0|1]] [--min-relay-tx-fee BTC] \\\n\
     [--limit-cluster-count N] [--limit-cluster-size KVB] [--peer-timeout SECS] \\\n\

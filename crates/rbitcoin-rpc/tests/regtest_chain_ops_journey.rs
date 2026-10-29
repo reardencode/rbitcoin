@@ -3423,3 +3423,66 @@ fn proposal_of_a_known_block_is_a_duplicate() {
     assert!(ctx.query.was_disconnected(&off));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A regtest chain at a fixed harder difficulty (`0x200fffff`, about 1 in 16
+/// hashes): `generate`, the template, a proposal and `submitblock` all follow
+/// the overlay, and the min-difficulty time gap still admits the limit bits.
+#[test]
+fn rpc_regtest_pow_bits_overlay() {
+    const OVERLAY: u32 = 0x200f_ffff;
+    const LIMIT: u32 = 0x207f_ffff;
+    let mut params = rbitcoin_consensus::ChainParams::regtest();
+    params.apply_regtest_pow_bits(OVERLAY).unwrap();
+    let (ctx, dir, _hub) = ctx_regtest_hub_on(params, 300_000_000);
+    let (_addr, p2wpkh) = p2wpkh_regtest();
+
+    let hashes = dispatch(&ctx, "generate", vec![json!(3)]).unwrap();
+    // Block 1 is more than two spacings after the 2011 genesis, so it may use
+    // the limit bits. Every later block follows the overlay.
+    for (i, hash) in hashes.as_array().unwrap().iter().enumerate() {
+        let hdr = dispatch(&ctx, "getblockheader", vec![hash.clone()]).unwrap();
+        let want = if i == 0 { LIMIT } else { OVERLAY };
+        assert_eq!(hdr["bits"], format!("{want:08x}"), "height {}", i + 1);
+    }
+
+    let tmpl = dispatch(&ctx, "getblocktemplate", vec![json!({"rules": ["segwit"]})]).unwrap();
+    assert_eq!(tmpl["bits"], format!("{OVERLAY:08x}"));
+    let target = bitcoin::Target::from_compact(bitcoin::CompactTarget::from_consensus(OVERLAY));
+    assert_eq!(tmpl["target"], format!("{target:064x}"));
+
+    // A block at the old trivial bits is no longer the next work.
+    let tip: Block = {
+        let raw = dispatch(&ctx, "getblock", vec![best_hash(&ctx), json!(0)]).unwrap();
+        deserialize(&rbitcoin_primitives::hex_decode(raw.as_str().unwrap()).unwrap()).unwrap()
+    };
+    let height = tip_count(&ctx) as u32 + 1;
+    let easy = rbitcoin_consensus::mine_regtest_paying(
+        tip.block_hash(),
+        tip.header.time + 1,
+        height,
+        p2wpkh.clone(),
+        vec![],
+    );
+    assert_eq!(easy.header.bits.to_consensus(), LIMIT);
+    assert_eq!(propose(&ctx, &easy), "bad-diffbits");
+    let r = dispatch(&ctx, "submitblock", vec![json!(block_hex(&easy))]).unwrap();
+    assert_eq!(r, "bad-diffbits");
+    assert_eq!(tip_count(&ctx), 3);
+
+    // More than two spacings after its parent a block may use the limit bits.
+    let late = rbitcoin_consensus::mine_regtest_paying(
+        tip.block_hash(),
+        tip.header.time + 2 * 600 + 1,
+        height,
+        p2wpkh,
+        vec![],
+    );
+    let r = dispatch(&ctx, "submitblock", vec![json!(block_hex(&late))]).unwrap();
+    assert!(r.is_null(), "min-difficulty gap block: {r}");
+    // The next block is back at the overlay.
+    let more = dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
+    let hdr = dispatch(&ctx, "getblockheader", vec![more[0].clone()]).unwrap();
+    assert_eq!(hdr["bits"], format!("{OVERLAY:08x}"));
+    assert_eq!(tip_count(&ctx), 5);
+    let _ = std::fs::remove_dir_all(&dir);
+}

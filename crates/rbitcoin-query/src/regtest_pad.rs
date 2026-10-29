@@ -1,6 +1,6 @@
 //! Regtest helpers that open a [`Query`].
 
-use rbitcoin_consensus::{mine_empty_regtest, ChainParams, Milestone};
+use rbitcoin_consensus::{mine_regtest_paying_bits, ChainParams, Milestone};
 
 use crate::accept_and_connect_block;
 use rbitcoin_primitives::Height;
@@ -21,7 +21,16 @@ pub fn pad_empty_from(
     let ms = Milestone::NONE;
     let mut cbs = Vec::new();
     for h in from_h..=last {
-        let b = mine_empty_regtest(tip, tip_time + 600, h);
+        let time = tip_time + 600;
+        let bits = crate::expected_next_bits(query, params, Height(h), time).unwrap();
+        let b = mine_regtest_paying_bits(
+            tip,
+            time,
+            h,
+            bitcoin::ScriptBuf::from_bytes(vec![0x51]),
+            Vec::new(),
+            bits,
+        );
         if h >= 1 && h <= collect_coinbases {
             cbs.push(b.txdata[0].compute_txid());
         }

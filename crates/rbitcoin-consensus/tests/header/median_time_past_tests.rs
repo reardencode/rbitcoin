@@ -502,3 +502,57 @@ fn h9_version_floors_at_bip34_66_65() {
         check_header_version_and_future_time(&main, Height(bip65), &mh).unwrap();
     });
 }
+
+/// Pure next-work arithmetic over a scripted ancestry; no session reaches the
+/// 2016 boundary without mining 2016 blocks.
+#[test]
+fn regtest_pow_overlay_follows_next_work() {
+    let mut params = ChainParams::regtest();
+    let limit = params.pow_limit.to_compact_lossy();
+    let overlay = CompactTarget::from_consensus(0x200f_ffff);
+    params
+        .apply_regtest_pow_bits(overlay.to_consensus())
+        .unwrap();
+    let plain = ChainParams::regtest();
+    let spacing = params.btc.pow_target_spacing as u32;
+    let t = 1_000_000u32;
+    let no_ancestors = |_: u32| None;
+
+    // Height 1 after genesis, and after a run of overlay blocks.
+    let at = |p: &ChainParams, h, prev, dt, first| {
+        next_work_bits(p, h, prev, t, t + dt, first, |_| Some(limit)).unwrap()
+    };
+    assert_eq!(at(&params, 1, limit, 1, None), overlay);
+    assert_eq!(at(&params, 2, overlay, 1, None), overlay);
+    assert_eq!(at(&params, 1000, overlay, spacing, None), overlay);
+    // Without the overlay the bits are unchanged.
+    assert_eq!(at(&plain, 1, limit, 1, None), limit);
+
+    // 2016 boundary: regtest keeps the parent's bits, a limit parent becomes
+    // the overlay, and the time gap does not apply there.
+    assert_eq!(at(&params, 2016, overlay, 1, Some(t - 5)), overlay);
+    assert_eq!(at(&params, 2016, limit, 1, Some(t - 5)), overlay);
+    assert_eq!(at(&params, 2016, limit, 10 * spacing, Some(t - 5)), overlay);
+
+    // More than two spacings after the parent: the limit bits stay.
+    assert_eq!(at(&params, 5, overlay, 2 * spacing + 1, None), limit);
+    assert_eq!(at(&params, 5, overlay, 2 * spacing, None), overlay);
+    // The next normal block after that min-difficulty block is overlay again:
+    // the walk-back reaches genesis, whose limit bits are not a difficulty.
+    let walked = next_work_bits(&params, 6, limit, t, t + 1, None, |_| Some(limit)).unwrap();
+    assert_eq!(walked, overlay);
+    // The walk-back finds an overlay ancestor below the gap block.
+    let walked = next_work_bits(&params, 6, limit, t, t + 1, None, |h| {
+        Some(if h == 4 { overlay } else { limit })
+    })
+    .unwrap();
+    assert_eq!(walked, overlay);
+    assert!(next_work_bits(&params, 6, limit, t, t + 1, None, no_ancestors).is_none());
+
+    // A chain already carrying harder bits keeps them: unset or a new value
+    // only replaces pow-limit bits.
+    let mut other = ChainParams::regtest();
+    other.apply_regtest_pow_bits(0x1f7f_ffff).unwrap();
+    assert_eq!(at(&plain, 7, overlay, 1, None), overlay);
+    assert_eq!(at(&other, 7, overlay, 1, None), overlay);
+}
