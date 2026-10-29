@@ -296,7 +296,7 @@ pub fn opcode_byte(name: &str) -> Option<u8> {
 pub fn assemble_script_pubkey(src: &str, tap_out: Option<[u8; 32]>) -> Result<Vec<u8>, String> {
     if src.trim() == "0x51 0x20 #TAPROOTOUTPUT#" {
         let out = tap_out.ok_or_else(|| "#TAPROOTOUTPUT# without control block".to_string())?;
-        let mut b = vec![0x51, 0x20];
+        let mut b = rbitcoin_primitives::P2TR_PREFIX.to_vec();
         b.extend_from_slice(&out);
         return Ok(b);
     }

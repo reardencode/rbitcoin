@@ -15,7 +15,7 @@ pub fn verify(
     pre: &TxScriptPrecompute,
 ) -> Result<(), ConsensusError> {
     let spk = job.prevout_script(input_index)?;
-    debug_assert!(spk.len() == 22 && spk[0] == 0x00 && spk[1] == 0x14);
+    debug_assert!(spk.len() == 22 && spk.starts_with(&rbitcoin_primitives::P2WPKH_PREFIX));
     let mut keyhash = [0u8; 20];
     keyhash.copy_from_slice(&spk[2..22]);
 
@@ -108,9 +108,9 @@ pub fn verify_interpreted(
         return Err(ConsensusError::Script("p2wpkh witness len".into()));
     }
     let mut script_code = Vec::with_capacity(25);
-    script_code.extend_from_slice(&[0x76, 0xa9, 0x14]);
+    script_code.extend_from_slice(&rbitcoin_primitives::P2PKH_PREFIX);
     script_code.extend_from_slice(keyhash);
-    script_code.extend_from_slice(&[0x88, 0xac]);
+    script_code.extend_from_slice(&rbitcoin_primitives::P2PKH_SUFFIX);
     p2wsh::execute_witness_v0(
         job,
         input_index,

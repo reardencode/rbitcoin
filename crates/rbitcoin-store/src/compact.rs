@@ -4,7 +4,11 @@
 //! constant cases (final sequence, empty script/witness).
 
 use crate::error::StoreError;
-use rbitcoin_primitives::{read_compact_size, read_uleb128, write_compact_size};
+use rbitcoin_primitives::{
+    read_compact_size, read_uleb128, write_compact_size, OP_EQUAL, OP_PUSHBYTES_75, OP_PUSHDATA1,
+    OP_RETURN, OP_TRUE, P2A_SCRIPT, P2PKH_PREFIX, P2PKH_SUFFIX, P2SH_PREFIX, P2TR_PREFIX,
+    P2WPKH_PREFIX, P2WSH_PREFIX,
+};
 
 /// Trailing decimal zeros stripped from a satoshi amount, capped at 9.
 /// Nibble values 10–15 are Corrupt (soft-extend), not extra exponent.
@@ -123,31 +127,25 @@ pub fn classify_script(script: &[u8]) -> (u8, &[u8]) {
     if script.is_empty() {
         return (SCRIPT_KIND_V17_EMPTY, &[]);
     }
-    if script == [0x51] {
+    if script == [OP_TRUE] {
         return (SCRIPT_KIND_V17_OP_TRUE, &[]);
     }
-    if script == [0x51, 0x02, 0x4e, 0x73] {
+    if script == P2A_SCRIPT {
         return (SCRIPT_KIND_V17_P2A, &[]);
     }
-    if script.len() == 25
-        && script[0] == 0x76
-        && script[1] == 0xa9
-        && script[2] == 0x14
-        && script[23] == 0x88
-        && script[24] == 0xac
-    {
+    if script.len() == 25 && script.starts_with(&P2PKH_PREFIX) && script.ends_with(&P2PKH_SUFFIX) {
         return (SCRIPT_KIND_V17_P2PKH, &script[3..23]);
     }
-    if script.len() == 23 && script[0] == 0xa9 && script[1] == 0x14 && script[22] == 0x87 {
+    if script.len() == 23 && script.starts_with(&P2SH_PREFIX) && script[22] == OP_EQUAL {
         return (SCRIPT_KIND_V17_P2SH, &script[2..22]);
     }
-    if script.len() == 22 && script[0] == 0x00 && script[1] == 0x14 {
+    if script.len() == 22 && script.starts_with(&P2WPKH_PREFIX) {
         return (SCRIPT_KIND_V17_P2WPKH, &script[2..]);
     }
-    if script.len() == 34 && script[0] == 0x00 && script[1] == 0x20 {
+    if script.len() == 34 && script.starts_with(&P2WSH_PREFIX) {
         return (SCRIPT_KIND_V17_P2WSH, &script[2..]);
     }
-    if script.len() == 34 && script[0] == 0x51 && script[1] == 0x20 {
+    if script.len() == 34 && script.starts_with(&P2TR_PREFIX) {
         return (SCRIPT_KIND_V17_P2TR, &script[2..]);
     }
     if let Some(data) = canonical_op_return_push(script) {
@@ -170,37 +168,37 @@ pub fn expand_script_kind(kind: u8, payload: &[u8]) -> Result<Vec<u8>, StoreErro
             if !payload.is_empty() {
                 return Err(StoreError::Corrupt("v17 OP_TRUE kind has payload"));
             }
-            Ok(vec![0x51])
+            Ok(vec![OP_TRUE])
         }
         SCRIPT_KIND_V17_P2PKH => {
             let h = hash160_payload(payload)?;
-            let mut s = vec![0x76, 0xa9, 0x14];
+            let mut s = P2PKH_PREFIX.to_vec();
             s.extend_from_slice(h);
-            s.extend_from_slice(&[0x88, 0xac]);
+            s.extend_from_slice(&P2PKH_SUFFIX);
             Ok(s)
         }
         SCRIPT_KIND_V17_P2SH => {
             let h = hash160_payload(payload)?;
-            let mut s = vec![0xa9, 0x14];
+            let mut s = P2SH_PREFIX.to_vec();
             s.extend_from_slice(h);
-            s.push(0x87);
+            s.push(OP_EQUAL);
             Ok(s)
         }
         SCRIPT_KIND_V17_P2WPKH => {
             let h = hash160_payload(payload)?;
-            let mut s = vec![0x00, 0x14];
+            let mut s = P2WPKH_PREFIX.to_vec();
             s.extend_from_slice(h);
             Ok(s)
         }
         SCRIPT_KIND_V17_P2WSH => {
             let h = hash256_payload(payload)?;
-            let mut s = vec![0x00, 0x20];
+            let mut s = P2WSH_PREFIX.to_vec();
             s.extend_from_slice(h);
             Ok(s)
         }
         SCRIPT_KIND_V17_P2TR => {
             let h = hash256_payload(payload)?;
-            let mut s = vec![0x51, 0x20];
+            let mut s = P2TR_PREFIX.to_vec();
             s.extend_from_slice(h);
             Ok(s)
         }
@@ -209,7 +207,7 @@ pub fn expand_script_kind(kind: u8, payload: &[u8]) -> Result<Vec<u8>, StoreErro
             if !payload.is_empty() {
                 return Err(StoreError::Corrupt("v17 P2A kind has payload"));
             }
-            Ok(vec![0x51, 0x02, 0x4e, 0x73])
+            Ok(P2A_SCRIPT.to_vec())
         }
         _ => Err(StoreError::Corrupt("v17 reserved script kind")),
     }
@@ -288,19 +286,19 @@ pub fn hash256_payload(payload: &[u8]) -> Result<&[u8], StoreError> {
 /// Canonical single-push `OP_RETURN`: direct push 1..=75, or PUSHDATA1 only when n≥76.
 #[doc(hidden)]
 pub fn canonical_op_return_push(script: &[u8]) -> Option<&[u8]> {
-    if script.first() != Some(&0x6a) {
+    if script.first() != Some(&OP_RETURN) {
         return None;
     }
     let rest = &script[1..];
     let n0 = *rest.first()?;
-    if (1..=75).contains(&n0) {
+    if (1..=OP_PUSHBYTES_75).contains(&n0) {
         let n = n0 as usize;
         if rest.len() == 1 + n {
             return Some(&rest[1..]);
         }
         return None;
     }
-    if n0 == 0x4c && rest.len() >= 2 {
+    if n0 == OP_PUSHDATA1 && rest.len() >= 2 {
         let n = rest[1] as usize;
         if n >= 76 && rest.len() == 2 + n {
             return Some(&rest[2..]);
@@ -314,11 +312,11 @@ pub fn encode_op_return_push(data: &[u8]) -> Result<Vec<u8>, StoreError> {
     if data.is_empty() || data.len() > 255 {
         return Err(StoreError::Corrupt("v17 OP_RETURN push length"));
     }
-    let mut s = vec![0x6a];
-    if data.len() <= 75 {
+    let mut s = vec![OP_RETURN];
+    if data.len() <= usize::from(OP_PUSHBYTES_75) {
         s.push(data.len() as u8);
     } else {
-        s.push(0x4c);
+        s.push(OP_PUSHDATA1);
         s.push(data.len() as u8);
     }
     s.extend_from_slice(data);

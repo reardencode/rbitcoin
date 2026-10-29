@@ -221,7 +221,7 @@ pub fn witness_items_no_annex(witness: &Witness) -> Vec<&[u8]> {
     let mut items: Vec<&[u8]> = witness.iter().collect();
     if items.len() >= 2 {
         if let Some(last) = items.last() {
-            if !last.is_empty() && last[0] == 0x50 {
+            if !last.is_empty() && last[0] == rbitcoin_primitives::OP_RESERVED {
                 items.pop();
             }
         }
@@ -288,5 +288,5 @@ pub fn is_p2sh_p2wpkh_redeem(script_sig: &Script) -> bool {
     let Some(r) = push else {
         return false;
     };
-    r.len() == 22 && r[0] == 0x00 && r[1] == 0x14
+    r.len() == 22 && r.starts_with(&rbitcoin_primitives::P2WPKH_PREFIX)
 }

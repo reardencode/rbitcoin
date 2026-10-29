@@ -151,7 +151,7 @@ pub fn mine_empty_regtest(prev: BlockHash, time: u32, height: u32) -> Block {
         prev,
         time,
         height,
-        ScriptBuf::from_bytes(vec![0x51]),
+        ScriptBuf::from_bytes(vec![rbitcoin_primitives::OP_TRUE]),
         Vec::new(),
     )
 }
@@ -268,12 +268,12 @@ pub fn coinbase_paying_params(
 /// BIP34 coinbase (scriptSig padded to at least 2 bytes) paying `value` to `script_pubkey`.
 pub fn regtest_coinbase(height: u32, value: Amount, script_pubkey: ScriptBuf) -> Transaction {
     let mut ss = if height == 0 {
-        vec![0x00]
+        vec![rbitcoin_primitives::OP_0]
     } else {
         bip34_height_script(height)
     };
     while ss.len() < 2 {
-        ss.push(0x00);
+        ss.push(rbitcoin_primitives::OP_0);
     }
     Transaction {
         version: TxVersion::ONE,

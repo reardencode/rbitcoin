@@ -9,6 +9,7 @@ mod core_vectors;
 mod der_tests;
 mod interpreter;
 mod nested;
+mod opcode_bytes;
 mod p2pkh;
 mod p2tr;
 mod p2wpkh;

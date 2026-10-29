@@ -2347,7 +2347,7 @@ impl ChainHub {
             .params
             .signet_challenge
             .as_ref()
-            .is_some_and(|s| s.as_bytes() == [0x51]);
+            .is_some_and(|s| s.as_bytes() == [rbitcoin_primitives::OP_TRUE]);
         if !op_true {
             return Ok(mine_regtest_paying(
                 prev,
@@ -4959,7 +4959,7 @@ pub fn sixty_four_byte_body(prev: BlockHash, time: u32) -> Block {
         }],
         output: vec![TxOut {
             value: Amount::ZERO,
-            script_pubkey: ScriptBuf::from_bytes(vec![0x51; 4]),
+            script_pubkey: ScriptBuf::from_bytes(vec![rbitcoin_primitives::OP_TRUE; 4]),
         }],
     };
     assert_eq!(bitcoin::consensus::serialize(&inner_node).len(), 64);
@@ -4969,7 +4969,7 @@ pub fn sixty_four_byte_body(prev: BlockHash, time: u32) -> Block {
             prev_blockhash: prev,
             merkle_root: bitcoin::TxMerkleNode::from_byte_array([0u8; 32]),
             time,
-            bits: CompactTarget::from_consensus(0x207f_ffff),
+            bits: CompactTarget::from_consensus(rbitcoin_consensus::REGTEST_POW_BITS),
             nonce: 0,
         },
         txdata: vec![inner_node],

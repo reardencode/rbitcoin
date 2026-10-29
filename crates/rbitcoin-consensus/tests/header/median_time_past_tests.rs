@@ -28,7 +28,7 @@ fn validate_header_on_parent_uses_the_caller_digest() {
     let mut header = rbitcoin_consensus::params::genesis_block(&params).header;
     header.version = Version::from_consensus(4);
     header.time = 1_700_000_000;
-    header.bits = CompactTarget::from_consensus(0x207f_ffff);
+    header.bits = CompactTarget::from_consensus(rbitcoin_consensus::REGTEST_POW_BITS);
     header.nonce = 0;
     rbitcoin_consensus::grind_regtest_pow(&mut header);
     let hash = header.block_hash().to_byte_array();
@@ -57,7 +57,7 @@ fn validate_header_on_parent_uses_the_caller_digest() {
 #[test]
 fn pow_hash_meets_target_meet_miss_and_limit() {
     let rt = ChainParams::regtest();
-    let easy = CompactTarget::from_consensus(0x207f_ffff);
+    let easy = CompactTarget::from_consensus(rbitcoin_consensus::REGTEST_POW_BITS);
     pow_hash_meets_target([0u8; 32], easy, rt.pow_limit).unwrap();
     let mainnet_bits = CompactTarget::from_consensus(0x1d00_ffff);
     let miss = pow_hash_meets_target([0xff; 32], mainnet_bits, Target::MAX_ATTAINABLE_MAINNET)

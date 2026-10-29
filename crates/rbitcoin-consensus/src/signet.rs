@@ -109,7 +109,7 @@ pub fn signet_challenge_transactions(
 
     // Core: `vin.emplace_back(COutPoint(), CScript(OP_0), 0)` then `scriptSig << block_data`.
     // scriptSig must be OP_0 + push(block_data) or the to_spend txid (and sighash) is wrong.
-    let mut ss = vec![0x00];
+    let mut ss = vec![rbitcoin_primitives::OP_0];
     crate::script::interpreter::encode_push(&mut ss, &block_data);
     let to_spend = Transaction {
         version: bitcoin::transaction::Version::non_standard(0),
@@ -141,7 +141,7 @@ pub fn signet_challenge_transactions(
         }],
         output: vec![TxOut {
             value: Amount::ZERO,
-            script_pubkey: ScriptBuf::from_bytes(vec![0x6a]),
+            script_pubkey: ScriptBuf::from_bytes(vec![rbitcoin_primitives::OP_RETURN]),
         }],
     };
 
@@ -160,18 +160,18 @@ pub fn next_script_op<'a>(spk: &'a [u8], pc: &mut usize) -> Option<(u8, &'a [u8]
     let op = *spk.get(*pc)?;
     let mut at = *pc + 1;
     let len = match op {
-        0x01..=0x4b => usize::from(op),
-        0x4c => {
+        0x01..=rbitcoin_primitives::OP_PUSHBYTES_75 => usize::from(op),
+        rbitcoin_primitives::OP_PUSHDATA1 => {
             let n = *spk.get(at)?;
             at += 1;
             usize::from(n)
         }
-        0x4d => {
+        rbitcoin_primitives::OP_PUSHDATA2 => {
             let n = spk.get(at..at + 2)?;
             at += 2;
             usize::from(u16::from_le_bytes([n[0], n[1]]))
         }
-        0x4e => {
+        rbitcoin_primitives::OP_PUSHDATA4 => {
             let n = spk.get(at..at + 4)?;
             at += 4;
             usize::try_from(u32::from_le_bytes([n[0], n[1], n[2], n[3]])).ok()?

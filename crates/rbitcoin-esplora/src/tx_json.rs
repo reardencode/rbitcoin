@@ -561,7 +561,7 @@ pub fn tapscript_leaf(witness: &[Vec<u8>]) -> Option<&[u8]> {
     if n == 0 {
         return None;
     }
-    if witness[n - 1].first() == Some(&0x50) {
+    if witness[n - 1].first() == Some(&rbitcoin_primitives::OP_RESERVED) {
         n -= 1;
     }
     if n < 2 {
@@ -577,14 +577,14 @@ pub fn last_push_data(script: &[u8]) -> Option<&[u8]> {
     while i < script.len() {
         let op = script[i];
         i += 1;
-        if op <= 0x4b {
+        if op <= rbitcoin_primitives::OP_PUSHBYTES_75 {
             let n = op as usize;
             if i + n > script.len() {
                 break;
             }
             last = Some(&script[i..i + n]);
             i += n;
-        } else if op == 0x4c {
+        } else if op == rbitcoin_primitives::OP_PUSHDATA1 {
             if i >= script.len() {
                 break;
             }
@@ -595,7 +595,7 @@ pub fn last_push_data(script: &[u8]) -> Option<&[u8]> {
             }
             last = Some(&script[i..i + n]);
             i += n;
-        } else if op == 0x4d {
+        } else if op == rbitcoin_primitives::OP_PUSHDATA2 {
             if i + 2 > script.len() {
                 break;
             }

@@ -14,7 +14,7 @@ pub fn verify(
     tx: &Transaction,
 ) -> Result<(), ConsensusError> {
     let spk = job.prevout_script(input_index)?;
-    debug_assert!(spk.len() == 34 && spk[0] == 0x00 && spk[1] == 0x20);
+    debug_assert!(spk.len() == 34 && spk.starts_with(&rbitcoin_primitives::P2WSH_PREFIX));
     let mut scripthash = [0u8; 32];
     scripthash.copy_from_slice(&spk[2..34]);
     verify_with_scripthash(job, input_index, tx, &scripthash)
