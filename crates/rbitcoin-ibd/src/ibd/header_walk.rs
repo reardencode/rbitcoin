@@ -3077,6 +3077,7 @@ pub fn batch_context_ok(
             hdr,
             mtp,
             bits,
+            hash.to_byte_array(),
         ) {
             stopped = Some((height, hash.to_byte_array(), e));
             accepted = false;
