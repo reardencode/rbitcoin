@@ -966,6 +966,54 @@ pub fn repair_class_a_count_skew(
     class_a_skew_assert_aligned(&stems, prune_seqsigwit_mode)
 }
 
+fn class_a_loc_pairs(
+    n: usize,
+    n_outs: &[u32],
+    p_out: &crate::var_table::PreparedAppend,
+    p_sp: &crate::var_table::PreparedAppend,
+) -> (
+    Vec<crate::create_loc::CreateLocAppend>,
+    Vec<crate::create_loc::CreateLocPair>,
+) {
+    let tx_lens = p_out.aligned_lens();
+    let mut recs = Vec::with_capacity(n);
+    let mut loc = Vec::with_capacity(n);
+    for i in 0..n {
+        let spent_len = spent_record_len(n_outs[i]);
+        recs.push(crate::create_loc::CreateLocAppend {
+            txout_start: p_out.starts[i],
+            txout_len: tx_lens[i],
+            spent_start: p_sp.starts[i],
+            n_out: n_outs[i],
+        });
+        loc.push(crate::create_loc::CreateLocPair {
+            txout: (p_out.starts[i], tx_lens[i]),
+            spent: (p_sp.starts[i], spent_len),
+            n_out: n_outs[i],
+        });
+    }
+    (recs, loc)
+}
+
+fn publish_prepared_body(
+    table: &VarTable,
+    prep: crate::var_table::PreparedAppend,
+    durable: bool,
+) -> Result<Vec<Fk>, StoreError> {
+    let end = prep.start.saturating_add(prep.body_blob.len() as u64);
+    table.note_body_end(end, durable);
+    table.finish_prepared(prep)
+}
+
+fn expect_same_fks(left: &[Fk], right: &[Fk]) -> Result<(), StoreError> {
+    if left != right {
+        return Err(StoreError::Corrupt(
+            "Class A append fk mismatch across stems",
+        ));
+    }
+    Ok(())
+}
+
 impl TxTable {
     pub fn create(dir: &Path) -> Result<Self, StoreError> {
         Self::create_with_opts(dir, HeadOpenOpts::MAINNET)
@@ -2724,46 +2772,43 @@ impl TxTable {
         let Some(p_sp) = self.spent.prepare_batch_encode(n, est_spent, encode_sp)? else {
             return Err(StoreError::Corrupt("Class A spent prepare empty"));
         };
-        let tx_lens = p_out.aligned_lens();
-        let mut recs = Vec::with_capacity(n);
-        let mut loc = Vec::with_capacity(n);
-        for i in 0..n {
-            let spent_len = spent_record_len(n_outs[i]);
-            recs.push(crate::create_loc::CreateLocAppend {
-                txout_start: p_out.starts[i],
-                txout_len: tx_lens[i],
-                spent_start: p_sp.starts[i],
-                n_out: n_outs[i],
-            });
-            loc.push(crate::create_loc::CreateLocPair {
-                txout: (p_out.starts[i], tx_lens[i]),
-                spent: (p_sp.starts[i], spent_len),
-                n_out: n_outs[i],
-            });
-        }
-
+        let (recs, loc) = class_a_loc_pairs(n, n_outs, &p_out, &p_sp);
         let staged_loc = self.create_loc.stage(&recs)?;
-        if self.prune_seqsigwit_mode() {
-            crate::var_table::write_prepared_bodies_one_wave(
-                &[(&self.body, &p_out), (&self.spent, &p_sp)],
-                self.datadir_hdd(),
-            )?;
-            self.create_loc.write_staged(&staged_loc)?;
-            let durable = self.create_loc.commit_staged(staged_loc, true);
-            self.body
-                .note_body_end(p_out.start + p_out.body_blob.len() as u64, durable);
-            self.spent
-                .note_body_end(p_sp.start + p_sp.body_blob.len() as u64, durable);
-            let fks = self.body.finish_prepared(p_out)?;
-            let fks_sp = self.spent.finish_prepared(p_sp)?;
-            if fks != fks_sp {
-                return Err(StoreError::Corrupt(
-                    "Class A append fk mismatch across stems",
-                ));
-            }
-            return Ok((fks, loc));
-        }
+        let fks = if self.prune_seqsigwit_mode() {
+            self.commit_pruned_wave(p_out, p_sp, staged_loc)?
+        } else {
+            self.commit_seq_wave(n, est_seqsigwit, encode_in, p_out, p_sp, staged_loc)?
+        };
+        Ok((fks, loc))
+    }
 
+    fn commit_pruned_wave(
+        &self,
+        p_out: crate::var_table::PreparedAppend,
+        p_sp: crate::var_table::PreparedAppend,
+        staged_loc: crate::create_loc::StagedCreate,
+    ) -> Result<Vec<Fk>, StoreError> {
+        crate::var_table::write_prepared_bodies_one_wave(
+            &[(&self.body, &p_out), (&self.spent, &p_sp)],
+            self.datadir_hdd(),
+        )?;
+        self.create_loc.write_staged(&staged_loc)?;
+        let durable = self.create_loc.commit_staged(staged_loc, true);
+        let fks = publish_prepared_body(&self.body, p_out, durable)?;
+        let fks_sp = publish_prepared_body(&self.spent, p_sp, durable)?;
+        expect_same_fks(&fks, &fks_sp)?;
+        Ok(fks)
+    }
+
+    fn commit_seq_wave(
+        &self,
+        n: usize,
+        est_seqsigwit: usize,
+        encode_in: impl FnMut(usize, &mut Vec<u8>),
+        p_out: crate::var_table::PreparedAppend,
+        p_sp: crate::var_table::PreparedAppend,
+        staged_loc: crate::create_loc::StagedCreate,
+    ) -> Result<Vec<Fk>, StoreError> {
         let Some(p_in) = self
             .seqsigwit
             .prepare_batch_encode(n, est_seqsigwit, encode_in)?
@@ -2784,21 +2829,12 @@ impl TxTable {
         self.seqsigwit_loc.write_staged(&staged_seq)?;
         let durable = self.create_loc.commit_staged(staged_loc, true);
         let durable = self.seqsigwit_loc.commit_staged(staged_seq, durable);
-        self.body
-            .note_body_end(p_out.start + p_out.body_blob.len() as u64, durable);
-        self.seqsigwit
-            .note_body_end(p_in.start + p_in.body_blob.len() as u64, durable);
-        self.spent
-            .note_body_end(p_sp.start + p_sp.body_blob.len() as u64, durable);
-        let fks = self.body.finish_prepared(p_out)?;
-        let fks_in = self.seqsigwit.finish_prepared(p_in)?;
-        let fks_sp = self.spent.finish_prepared(p_sp)?;
-        if fks != fks_in || fks != fks_sp {
-            return Err(StoreError::Corrupt(
-                "Class A append fk mismatch across stems",
-            ));
-        }
-        Ok((fks, loc))
+        let fks = publish_prepared_body(&self.body, p_out, durable)?;
+        let fks_in = publish_prepared_body(&self.seqsigwit, p_in, durable)?;
+        let fks_sp = publish_prepared_body(&self.spent, p_sp, durable)?;
+        expect_same_fks(&fks, &fks_in)?;
+        expect_same_fks(&fks, &fks_sp)?;
+        Ok(fks)
     }
 
     pub fn get_by_txid(&self, txid: &[u8; 32]) -> Result<Option<(Fk, TxRecord)>, StoreError> {
