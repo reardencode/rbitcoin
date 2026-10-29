@@ -103,6 +103,8 @@ pub struct AssembleMeters {
 ///
 /// `pending_spent`: pack-local double-spend (early reject before scripts).
 /// `pending_creates`: pack-local `txid → create_fk` (not per-vout).
+/// `spent_txids`: parents spent in this write batch. A later copy releases
+/// that txid's outputs even when the first copy connected before the batch.
 /// Same-block outs use `txid_index` when the create index is earlier than
 /// the spender; meters flush
 /// once per block (no per-input Instant / atomics).
@@ -126,6 +128,7 @@ pub fn assemble_block_prevouts(
     archived_tx_fks: Option<&[rbitcoin_primitives::Fk]>,
     pending_spent: &mut rbitcoin_consensus::OutPointSet,
     pending_creates: &mut PendingCreates,
+    spent_txids: &mut rbitcoin_consensus::TxidSet,
     batch_parents: &crate::BatchParents,
     spend_edges: &crate::SpendEdges,
     create_txids: &[[u8; 32]],
@@ -219,6 +222,7 @@ pub fn assemble_block_prevouts(
                 pres,
                 &txid_index,
                 pending_spent,
+                spent_txids,
                 pending_creates,
                 batch_parents,
                 spend_edges,
@@ -235,7 +239,12 @@ pub fn assemble_block_prevouts(
         }
 
         let create_fk = spend_fk.unwrap_or(rbitcoin_primitives::Fk::NULL);
-        if !create_fk.is_null() && pending_creates.insert(txid, create_fk).is_some() {
+        let repeated_here =
+            !create_fk.is_null() && pending_creates.insert(txid, create_fk).is_some();
+        // A unique txid that this batch has not spent does not walk outputs.
+        // A second copy in the batch, or the first copy after an earlier
+        // spend of the same txid, clears those outpoints.
+        if repeated_here || spent_txids.contains(&txid) {
             release_repeated_outputs(pending_spent, txid, tx.output.len());
         }
     }
@@ -298,6 +307,7 @@ pub fn assemble_non_cb_tx(
     pres: Option<&Arc<[rbitcoin_consensus::TxPrecompute]>>,
     txid_index: &TxidMap<usize>,
     pending_spent: &mut rbitcoin_consensus::OutPointSet,
+    spent_txids: &mut rbitcoin_consensus::TxidSet,
     pending_creates: &PendingCreates,
     batch_parents: &crate::BatchParents,
     spend_edges: &crate::SpendEdges,
@@ -328,6 +338,7 @@ pub fn assemble_non_cb_tx(
         bip16_active,
         txid_index,
         pending_spent,
+        spent_txids,
         pending_creates,
         batch_parents,
         spend_edges,
@@ -408,6 +419,7 @@ pub fn assemble_non_cb_inputs(
     bip16_active: bool,
     txid_index: &TxidMap<usize>,
     pending_spent: &mut rbitcoin_consensus::OutPointSet,
+    spent_txids: &mut rbitcoin_consensus::TxidSet,
     pending_creates: &PendingCreates,
     batch_parents: &crate::BatchParents,
     spend_edges: &crate::SpendEdges,
@@ -444,6 +456,7 @@ pub fn assemble_non_cb_inputs(
             params.is_genesis_coinbase(&key.0),
         )?;
         rbitcoin_consensus::block::reject_duplicate_input(pending_spent.insert(key))?;
+        spent_txids.insert(key.0);
         let (skip_fee, residue, same_block) = if let Some(&pj) = txid_index.get(&key.0) {
             let skip_fee = rbitcoin_consensus::block::reject_same_block_create(pj, ti)?;
             let residue = if skip_fee {

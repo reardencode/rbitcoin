@@ -152,6 +152,7 @@ pub fn assemble_run(
     // Provisional same-run double-spend only (not durable spentness).
     let mut pending_spent: crate::OutPointSet = Default::default();
     let mut pending_creates = rbitcoin_consensus::block::PendingCreates::default();
+    let mut spent_txids = rbitcoin_consensus::TxidSet::default();
     let mut time_window: Vec<u32> = Vec::with_capacity(11);
     let mut prepared: Vec<Prepared> = Vec::with_capacity(metas.len());
     let mut tx_fees: Vec<u64> = Vec::new();
@@ -218,6 +219,7 @@ pub fn assemble_run(
             Some(&meta.tx_fks),
             &mut pending_spent,
             &mut pending_creates,
+            &mut spent_txids,
             batch_parents,
             spend_edges,
             &meta.txids,

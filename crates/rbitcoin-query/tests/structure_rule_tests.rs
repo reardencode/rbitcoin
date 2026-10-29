@@ -1305,6 +1305,7 @@ fn assemble_rejects_empty_and_fk_mismatch() {
     let thin = SpendEdges::default();
     let mut spent = OutPointSet::default();
     let mut creates = PendingCreates::default();
+    let mut spent_txids = rbitcoin_consensus::TxidSet::default();
     let zero = [0u8; 32];
     let err = assemble_block_prevouts(
         &empty,
@@ -1312,6 +1313,7 @@ fn assemble_rejects_empty_and_fk_mismatch() {
         None,
         &mut spent,
         &mut creates,
+        &mut spent_txids,
         &parents,
         &thin,
         &[],
@@ -1342,6 +1344,7 @@ fn assemble_rejects_empty_and_fk_mismatch() {
         Some(&[]),
         &mut spent,
         &mut creates,
+        &mut spent_txids,
         &parents,
         &thin,
         &tids,
@@ -1371,6 +1374,7 @@ fn assemble_rejects_empty_and_fk_mismatch() {
         None,
         &mut spent,
         &mut creates,
+        &mut spent_txids,
         &parents,
         &thin,
         &tids3,
@@ -1399,6 +1403,7 @@ fn assemble_pending_creates_is_txid_map_and_meters_flush() {
     let thin = SpendEdges::default();
     let mut spent = OutPointSet::default();
     let mut creates = PendingCreates::default();
+    let mut spent_txids = rbitcoin_consensus::TxidSet::default();
     let b = block_with(vec![coinbase(1)]);
     let tids: Vec<[u8; 32]> = b
         .txdata
@@ -1414,6 +1419,7 @@ fn assemble_pending_creates_is_txid_map_and_meters_flush() {
         Some(&[Fk(1)]),
         &mut spent,
         &mut creates,
+        &mut spent_txids,
         &parents,
         &thin,
         &tids,
@@ -1447,6 +1453,7 @@ fn release_repeated_outputs_only_for_a_repeated_txid() {
     let thin = SpendEdges::default();
     let mut spent = OutPointSet::default();
     let mut creates = PendingCreates::default();
+    let mut spent_txids = rbitcoin_consensus::TxidSet::default();
     let first = block_with(vec![coinbase(1)]);
     let first_txid = first.txdata[0].compute_txid().to_byte_array();
     let mut unique_cb = coinbase(1);
@@ -1457,7 +1464,11 @@ fn release_repeated_outputs_only_for_a_repeated_txid() {
     let unique_txid = unique.txdata[0].compute_txid().to_byte_array();
     assert_ne!(first_txid, unique_txid);
     let other = [0xabu8; 32];
-    let run = |block: &Block, fk: Fk, spent: &mut OutPointSet, creates: &mut PendingCreates| {
+    let run = |block: &Block,
+               fk: Fk,
+               spent: &mut OutPointSet,
+               creates: &mut PendingCreates,
+               spent_txids: &mut rbitcoin_consensus::TxidSet| {
         let tids: Vec<[u8; 32]> = block
             .txdata
             .iter()
@@ -1471,6 +1482,7 @@ fn release_repeated_outputs_only_for_a_repeated_txid() {
             Some(&[fk]),
             spent,
             creates,
+            spent_txids,
             &parents,
             &thin,
             &tids,
@@ -1484,15 +1496,31 @@ fn release_repeated_outputs_only_for_a_repeated_txid() {
         )
         .expect("assemble");
     };
-    run(&first, Fk(1), &mut spent, &mut creates);
+    run(&first, Fk(1), &mut spent, &mut creates, &mut spent_txids);
     assert!(spent.insert((first_txid, 0)));
     assert!(spent.insert((other, 0)));
-    run(&unique, Fk(2), &mut spent, &mut creates);
+    run(&unique, Fk(2), &mut spent, &mut creates, &mut spent_txids);
     assert!(spent.contains(&(first_txid, 0)));
     assert!(spent.contains(&(other, 0)));
-    run(&first, Fk(3), &mut spent, &mut creates);
+    run(&first, Fk(3), &mut spent, &mut creates, &mut spent_txids);
     assert!(!spent.contains(&(first_txid, 0)));
     assert!(spent.contains(&(other, 0)));
+
+    // The first copy connected before this batch. Its spend is in the batch,
+    // and the new copy is the first time this txid enters `pending_creates`.
+    let mut prior_spent = OutPointSet::default();
+    let mut prior_creates = PendingCreates::default();
+    let mut prior_ids = rbitcoin_consensus::TxidSet::default();
+    assert!(prior_spent.insert((first_txid, 0)));
+    prior_ids.insert(first_txid);
+    run(
+        &first,
+        Fk(4),
+        &mut prior_spent,
+        &mut prior_creates,
+        &mut prior_ids,
+    );
+    assert!(!prior_spent.contains(&(first_txid, 0)));
 }
 
 /// Confirm jobs keep prevout scripts in the wire block or the pin Arc.
@@ -1584,12 +1612,14 @@ fn script_job_shares_prevout_script() {
     );
     let mut spent = OutPointSet::default();
     let mut creates = PendingCreates::default();
+    let mut spent_txids = rbitcoin_consensus::TxidSet::default();
     let (jobs, _, _, _, _) = assemble_block_prevouts(
         &wire,
         &ctx,
         Some(&[Fk(1), Fk(2), Fk(3)]),
         &mut spent,
         &mut creates,
+        &mut spent_txids,
         &parents,
         &edges,
         &tids,
@@ -1677,6 +1707,7 @@ fn optimistic_assemble_unstamped_parent_is_invariant() {
     let thin = SpendEdges::default();
     let mut spent = OutPointSet::default();
     let mut creates = PendingCreates::default();
+    let mut spent_txids = rbitcoin_consensus::TxidSet::default();
     let create_txids: Vec<[u8; 32]> = block
         .txdata
         .iter()
@@ -1690,6 +1721,7 @@ fn optimistic_assemble_unstamped_parent_is_invariant() {
         Some(&spend_fks),
         &mut spent,
         &mut creates,
+        &mut spent_txids,
         &parents,
         &thin,
         &create_txids,
@@ -2375,6 +2407,7 @@ fn assemble_milestone_pin_still_rejects_bad_blk_sigops() {
     );
     let mut spent = OutPointSet::default();
     let mut creates = PendingCreates::default();
+    let mut spent_txids = rbitcoin_consensus::TxidSet::default();
     let tids: Vec<[u8; 32]> = b
         .txdata
         .iter()
@@ -2387,6 +2420,7 @@ fn assemble_milestone_pin_still_rejects_bad_blk_sigops() {
         Some(&[Fk::NULL, spend_fk]),
         &mut spent,
         &mut creates,
+        &mut spent_txids,
         &parents,
         &thin,
         &tids,
@@ -2482,12 +2516,14 @@ fn signet_low_work_fork_runs_scripts(q: &rbitcoin_query::Query) {
     let run = |q: &rbitcoin_query::Query| {
         let mut spent = OutPointSet::default();
         let mut creates = PendingCreates::default();
+        let mut spent_txids = rbitcoin_consensus::TxidSet::default();
         assemble_block_prevouts(
             &b,
             &ctx,
             Some(&[Fk::NULL, spend_fk]),
             &mut spent,
             &mut creates,
+            &mut spent_txids,
             &parents,
             &thin,
             &tids,
