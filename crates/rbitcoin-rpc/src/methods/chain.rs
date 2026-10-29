@@ -936,6 +936,24 @@ struct ActiveAt {
 }
 
 impl ActiveAt {
+    /// `confirmations` and `nextblockhash` read heights above this block, which
+    /// a connect or reorg can move without touching this slot. They are read
+    /// again right before the membership check.
+    fn refresh_above(&self, ctx: &RpcContext, obj: &mut Value) {
+        let next = nextblockhash_at(ctx, self.height);
+        let Some(o) = obj.as_object_mut() else {
+            return;
+        };
+        o.insert(
+            "confirmations".into(),
+            json!(confirmations(ctx, self.height)),
+        );
+        match next {
+            Some(n) => o.insert("nextblockhash".into(), json!(n)),
+            None => o.remove("nextblockhash"),
+        };
+    }
+
     fn still_active(&self, ctx: &RpcContext) -> bool {
         ctx.query.store().confirmed.get(self.height).ok().flatten() == Some(self.header_fk)
     }
@@ -997,6 +1015,7 @@ fn getblock_v1(
             Err(e) => return Err(misc(e)),
         }
     }
+    at.refresh_above(ctx, &mut obj);
     if !at.still_active(ctx) {
         return getblock_unknown_hash(ctx, at.hash, 1);
     }
@@ -1078,6 +1097,7 @@ fn getblock_body(
         };
         obj["tx"] = json!(getblock_tx_json(ctx, &block, Some(&undo), verbosity)?);
     }
+    at.refresh_above(ctx, &mut obj);
     if !at.still_active(ctx) {
         return disconnected_block_value(ctx, &at.hash, &block, verbosity);
     }
