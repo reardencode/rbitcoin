@@ -235,10 +235,9 @@ pub fn assemble_block_prevouts(
         }
 
         let create_fk = spend_fk.unwrap_or(rbitcoin_primitives::Fk::NULL);
-        if !create_fk.is_null() {
-            pending_creates.insert(txid, create_fk);
+        if !create_fk.is_null() && pending_creates.insert(txid, create_fk).is_some() {
+            release_repeated_outputs(pending_spent, txid, tx.output.len());
         }
-        release_repeated_outputs(pending_spent, txid, tx.output.len());
     }
 
     let clk_prev = t_loop.elapsed().as_nanos() as u64;

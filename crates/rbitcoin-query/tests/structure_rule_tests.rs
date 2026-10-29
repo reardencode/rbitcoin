@@ -1383,6 +1383,65 @@ fn assemble_pending_creates_is_txid_map_and_meters_flush() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
+/// A unique txid does not clear spends. A later copy of the same txid clears
+/// only that txid's outputs.
+#[test]
+fn release_repeated_outputs_only_for_a_repeated_txid() {
+    use rbitcoin_primitives::Fk;
+    use rbitcoin_query::{BatchParents, OutPointSet, SpendEdges};
+    let ctx = ctx_h(1);
+    let parents = BatchParents::new();
+    let thin = SpendEdges::default();
+    let mut spent = OutPointSet::default();
+    let mut creates = PendingCreates::default();
+    let first = block_with(vec![coinbase(1)]);
+    let first_txid = first.txdata[0].compute_txid().to_byte_array();
+    let mut unique_cb = coinbase(1);
+    let mut ss = unique_cb.input[0].script_sig.to_bytes();
+    ss.push(0x00);
+    unique_cb.input[0].script_sig = ScriptBuf::from_bytes(ss);
+    let unique = block_with(vec![unique_cb]);
+    let unique_txid = unique.txdata[0].compute_txid().to_byte_array();
+    assert_ne!(first_txid, unique_txid);
+    let other = [0xabu8; 32];
+    let run = |block: &Block, fk: Fk, spent: &mut OutPointSet, creates: &mut PendingCreates| {
+        let tids: Vec<[u8; 32]> = block
+            .txdata
+            .iter()
+            .map(|t| t.compute_txid().to_byte_array())
+            .collect();
+        let bh = block.header.block_hash().to_byte_array();
+        let bip16 = bip16_active_from_prev_mtp(ctx.params, ctx.height.0, &bh, 0);
+        assemble_block_prevouts(
+            block,
+            &ctx,
+            Some(&[fk]),
+            spent,
+            creates,
+            &parents,
+            &thin,
+            &tids,
+            0,
+            &bh,
+            bip16,
+            None,
+            None,
+            false,
+            &std::collections::HashSet::new(),
+        )
+        .expect("assemble");
+    };
+    run(&first, Fk(1), &mut spent, &mut creates);
+    assert!(spent.insert((first_txid, 0)));
+    assert!(spent.insert((other, 0)));
+    run(&unique, Fk(2), &mut spent, &mut creates);
+    assert!(spent.contains(&(first_txid, 0)));
+    assert!(spent.contains(&(other, 0)));
+    run(&first, Fk(3), &mut spent, &mut creates);
+    assert!(!spent.contains(&(first_txid, 0)));
+    assert!(spent.contains(&(other, 0)));
+}
+
 /// Confirm jobs keep prevout scripts in the wire block or the pin Arc.
 #[test]
 fn script_job_shares_prevout_script() {
