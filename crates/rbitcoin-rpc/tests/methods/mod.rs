@@ -1927,6 +1927,350 @@ fn getblock_verbosity_2_size_weight_and_tx_fee() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Core `coinbase_tx` from a verbosity 2 coinbase row.
+fn expected_coinbase_tx(cb: &Value) -> Value {
+    let vin = &cb["vin"][0];
+    let mut want = json!({
+        "version": cb["version"],
+        "locktime": cb["locktime"],
+        "sequence": vin["sequence"],
+        "coinbase": vin["coinbase"],
+    });
+    if let Some(w) = vin["txinwitness"].as_array().and_then(|s| s.first()) {
+        want["witness"] = w.clone();
+    }
+    want
+}
+
+/// Core 32.1 on regtest: verbosity >= 3 adds `vin[].prevout` from undo, for an
+/// active block and for one disconnected by `invalidateblock`. Verbosity 2
+/// keeps only `fee`. Every verbosity >= 1 carries `coinbase_tx`.
+#[test]
+fn getblock_verbosity_3_vin_prevout_and_coinbase_tx() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let parent_sat = generated_coinbase_value(&ctx, 1);
+    let (hex, _) =
+        mature_coinbase_spend(&ctx, parent_sat - 1_000, ScriptBuf::from_bytes(vec![0x51]));
+    dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
+    let tip = dispatch(&ctx, "generate", vec![json!(1)]).unwrap()[0].clone();
+    let parent_hash = dispatch(&ctx, "getblockhash", vec![json!(1)]).unwrap();
+    let parent = dispatch(&ctx, "getblock", vec![parent_hash, json!(2)]).unwrap();
+
+    let v2 = dispatch(&ctx, "getblock", vec![tip.clone(), json!(2)]).unwrap();
+    assert_btc_amount(&v2["tx"][1]["fee"], 1_000.0 / 1e8);
+    assert!(v2["tx"][1]["vin"][0].get("prevout").is_none(), "{v2}");
+    let want_cb = expected_coinbase_tx(&v2["tx"][0]);
+    for verbosity in [1, 2, 3] {
+        let blk = dispatch(&ctx, "getblock", vec![tip.clone(), json!(verbosity)]).unwrap();
+        assert_eq!(blk["coinbase_tx"], want_cb, "verbosity {verbosity}: {blk}");
+    }
+    for verbosity in [3, 4] {
+        let v3 = dispatch(&ctx, "getblock", vec![tip.clone(), json!(verbosity)]).unwrap();
+        assert_no_fee_or_prevout(&v3["tx"][0]);
+        assert_confirmed_spend_v2(&v3["tx"][1], &parent);
+    }
+
+    dispatch(&ctx, "invalidateblock", vec![tip.clone()]).unwrap();
+    let stale = dispatch(&ctx, "getblock", vec![tip, json!(3)]).unwrap();
+    assert_eq!(stale["confirmations"], json!(-1), "{stale}");
+    assert_eq!(stale["coinbase_tx"], want_cb, "{stale}");
+    assert_confirmed_spend_v2(&stale["tx"][1], &parent);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A reorg can seat another block at the requested hash's height between the
+/// height lookup and the body read. The answer must still be that hash's own
+/// body, prevouts, and coinbase, not the block now at that height, and it is
+/// no longer an active-chain block.
+#[test]
+fn getblock_mid_reorg_answers_for_the_requested_hash() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let parent_sat = generated_coinbase_value(&ctx, 1);
+    let (hex, spend) =
+        mature_coinbase_spend(&ctx, parent_sat - 1_000, ScriptBuf::from_bytes(vec![0x51]));
+    dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
+    let tip = dispatch(&ctx, "generate", vec![json!(1)]).unwrap()[0].clone();
+    let before = dispatch(&ctx, "getblock", vec![tip.clone(), json!(3)]).unwrap();
+    let height = Height(before["height"].as_u64().unwrap() as u32);
+    let (other_fk, _) = ctx
+        .query
+        .header_at_height(Height(height.0 - 1))
+        .unwrap()
+        .unwrap();
+    ctx.query
+        .store()
+        .confirmed
+        .set(&rbitcoin_store::ClassCWrite::for_test(), height, other_fk)
+        .unwrap();
+    let spend_txid = hash_hex_display(&spend.compute_txid().to_byte_array());
+    for verbosity in [1, 3] {
+        let mid = dispatch(&ctx, "getblock", vec![tip.clone(), json!(verbosity)]).unwrap();
+        assert_eq!(mid["hash"], tip, "{mid}");
+        // The slot no longer holds this block: it is reported off-chain.
+        assert_eq!(mid["confirmations"], json!(-1), "{mid}");
+        assert_eq!(mid["merkleroot"], before["merkleroot"], "{mid}");
+        assert_eq!(mid["coinbase_tx"], before["coinbase_tx"], "{mid}");
+        let txs = mid["tx"].as_array().unwrap();
+        let second = if verbosity == 1 {
+            txs[1].clone()
+        } else {
+            txs[1]["txid"].clone()
+        };
+        assert_eq!(second, json!(spend_txid), "{mid}");
+        if verbosity == 3 {
+            assert_eq!(
+                mid["tx"][1]["vin"][0]["prevout"],
+                before["tx"][1]["vin"][0]["prevout"]
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Undo that is stored but unreadable is an error (Core `blockToJSON`), not a
+/// tx row quietly missing its `fee` and `prevout`.
+#[test]
+fn getblock_unreadable_undo_is_an_error() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let parent_sat = generated_coinbase_value(&ctx, 1);
+    let (hex, _) =
+        mature_coinbase_spend(&ctx, parent_sat - 1_000, ScriptBuf::from_bytes(vec![0x51]));
+    dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
+    let tip = dispatch(&ctx, "generate", vec![json!(1)]).unwrap()[0].clone();
+    // Claim 255 outputs for the parent coinbase in its `create.loc` slot
+    // (`txout_strides:u8`, `n_out:u8`). Strides are kept, so every later
+    // create, this block included, still reads; only the parent's outputs
+    // no longer decode.
+    let parent_cb = generated_coinbase_txid(&ctx, 1);
+    set_create_n_out(&ctx, &dir, &parent_cb, 0xff);
+    assert_undo_unreadable(&ctx, &tip);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Overwrite one create's `n_out` byte in `create.loc` (`txout_strides:u8`,
+/// `n_out:u8`). Strides are kept, so every later create still reads.
+fn set_create_n_out(ctx: &RpcContext, dir: &TempDir, txid: &[u8; 32], n_out: u8) {
+    let (fk, _) = ctx.query.get_tx_by_txid(txid).unwrap().unwrap();
+    let loc = walk_for(&dir.join("store"), "create.loc").expect("create.loc");
+    let n_out_at = rbitcoin_store::delta_loc::loc_file_off(fk.0, 2) + 1;
+    let f = std::fs::OpenOptions::new().write(true).open(loc).unwrap();
+    std::os::unix::fs::FileExt::write_all_at(&f, &[n_out], n_out_at).unwrap();
+}
+
+/// Core `blockToJSON`: undo that does not read fails the whole call with
+/// `RPC_INTERNAL_ERROR`. Verbosity 0 needs no undo and still answers.
+fn assert_undo_unreadable(ctx: &RpcContext, tip: &Value) {
+    for verbosity in [2, 3] {
+        let e = dispatch(ctx, "getblock", vec![tip.clone(), json!(verbosity)])
+            .expect_err("unreadable undo must fail the call");
+        assert_eq!(e["code"], ERR_INTERNAL, "verbosity {verbosity}: {e}");
+        assert_eq!(
+            e["message"],
+            "Undo data expected but can't be read. This could be due to disk corruption or a conflict with a pruning event.",
+            "{e}"
+        );
+    }
+    let raw = dispatch(ctx, "getblock", vec![tip.clone(), json!(0)]);
+    assert!(raw.is_ok(), "the block's own body still reads: {raw:?}");
+}
+
+/// A stored edge that names a parent output past the parent's outputs is
+/// Core's undo error, not a row without `fee` and `prevout`.
+#[test]
+fn getblock_unresolved_prevout_edge_is_an_error() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let parent_sat = generated_coinbase_value(&ctx, 1);
+    let (hex, _) =
+        mature_coinbase_spend(&ctx, parent_sat - 1_000, ScriptBuf::from_bytes(vec![0x51]));
+    dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
+    let tip = dispatch(&ctx, "generate", vec![json!(1)]).unwrap()[0].clone();
+    // `input.body` is 8 bytes per input: parent fk u40 LE, vout u24 LE. Only
+    // this spend names the height-1 coinbase, so its edge is the one match.
+    let (parent_fk, _) = ctx
+        .query
+        .get_tx_by_txid(&generated_coinbase_txid(&ctx, 1))
+        .unwrap()
+        .unwrap();
+    let mut edge = parent_fk.0.to_le_bytes();
+    edge[5..].fill(0);
+    let path = walk_for(&dir.join("store"), "input.body").expect("input.body");
+    let bytes = std::fs::read(&path).unwrap();
+    let hits: Vec<usize> = bytes
+        .windows(8)
+        .enumerate()
+        .filter(|(_, w)| *w == edge)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(hits.len(), 1, "one edge names the coinbase: {hits:?}");
+    let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    std::os::unix::fs::FileExt::write_all_at(&f, &[7], hits[0] as u64 + 5).unwrap();
+    assert_undo_unreadable(&ctx, &tip);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// One-input spend of `prev:vout` to OP_TRUE, paying `fee` sats.
+fn spend_outpoint(prev: &Transaction, vout: u32, fee: u64) -> (String, Transaction) {
+    use bitcoin::{OutPoint, Sequence, TxIn, TxOut, Witness};
+    let spend = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: prev.compute_txid(),
+                vout,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: prev.output[vout as usize].value - Amount::from_sat(fee),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    (
+        rbitcoin_primitives::hex_encode(bitcoin::consensus::encode::serialize(&spend)),
+        spend,
+    )
+}
+
+/// Core keeps undo for a block a reorg disconnected, so a spend of an output
+/// created earlier in that same block keeps its `fee` and `prevout`
+/// (`generated: false`, this block's height), active and after
+/// `invalidateblock`, from `getblock` and `getrawtransaction`.
+#[test]
+fn getblock_same_block_spend_prevout_active_and_disconnected() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let (addr, _) = p2wpkh_regtest();
+    let parent_sat = generated_coinbase_value(&ctx, 1);
+    let (parent_hex, parent) =
+        mature_coinbase_spend(&ctx, parent_sat - 1_000, ScriptBuf::from_bytes(vec![0x51]));
+    let (child_hex, child) = spend_outpoint(&parent, 0, 1_000);
+    let tip = dispatch(
+        &ctx,
+        "generateblock",
+        vec![json!(addr), json!([parent_hex, child_hex])],
+    )
+    .unwrap()["hash"]
+        .clone();
+    let height = dispatch(&ctx, "getblock", vec![tip.clone(), json!(1)]).unwrap()["height"].clone();
+    let child_txid = hash_hex_display(&child.compute_txid().to_byte_array());
+    let check = |label: &str| {
+        let blk = dispatch(&ctx, "getblock", vec![tip.clone(), json!(3)]).unwrap();
+        let row = &blk["tx"][2];
+        assert_eq!(row["txid"], json!(child_txid), "{label}: {blk}");
+        assert_btc_amount(&row["fee"], 1_000.0 / 1e8);
+        let prevout = &row["vin"][0]["prevout"];
+        assert_eq!(prevout["generated"], json!(false), "{label}: {prevout}");
+        assert_eq!(prevout["height"], height, "{label}: {prevout}");
+        assert_btc_amount(&prevout["value"], (parent_sat - 1_000) as f64 / 1e8);
+        assert_eq!(
+            prevout["scriptPubKey"]["hex"],
+            json!("51"),
+            "{label}: {prevout}"
+        );
+        let raw = dispatch(
+            &ctx,
+            "getrawtransaction",
+            vec![json!(child_txid), json!(2), tip.clone()],
+        )
+        .unwrap();
+        assert_eq!(raw["vin"][0]["prevout"], *prevout, "{label}: {raw}");
+        assert_eq!(raw["fee"], row["fee"], "{label}: {raw}");
+        blk["confirmations"].clone()
+    };
+    assert_eq!(check("active"), json!(1));
+    dispatch(&ctx, "invalidateblock", vec![tip.clone()]).unwrap();
+    assert_eq!(check("disconnected"), json!(-1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The fence can miss a parent whose block the walk then finds active (a
+/// reconnect between the two reads). The walk places it from that block.
+#[test]
+fn getblock_same_block_parent_placed_when_the_fence_misses() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let (addr, _) = p2wpkh_regtest();
+    let parent_sat = generated_coinbase_value(&ctx, 1);
+    let (parent_hex, parent) =
+        mature_coinbase_spend(&ctx, parent_sat - 1_000, ScriptBuf::from_bytes(vec![0x51]));
+    let (child_hex, _) = spend_outpoint(&parent, 0, 1_000);
+    let tip = dispatch(
+        &ctx,
+        "generateblock",
+        vec![json!(addr), json!([parent_hex, child_hex])],
+    )
+    .unwrap()["hash"]
+        .clone();
+    let height = dispatch(&ctx, "getblock", vec![tip.clone(), json!(1)]).unwrap()["height"].clone();
+    let h = Height(height.as_u64().unwrap() as u32);
+    ctx.query.store().height_fence_pop_tip(h);
+    let blk = dispatch(&ctx, "getblock", vec![tip, json!(3)])
+        .unwrap_or_else(|e| panic!("readable undo must not fail: {e}"));
+    assert_eq!(blk["tx"][2]["vin"][0]["prevout"]["height"], height, "{blk}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `previousblockhash` is the header's own parent, not whatever header the
+/// height below now holds.
+#[test]
+fn getblock_previousblockhash_is_the_header_parent() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let tip = dispatch(&ctx, "generate", vec![json!(1)]).unwrap()[0].clone();
+    let before = dispatch(&ctx, "getblock", vec![tip.clone(), json!(1)]).unwrap();
+    let height = Height(before["height"].as_u64().unwrap() as u32);
+    let (other_fk, _) = ctx
+        .query
+        .header_at_height(Height(height.0 - 2))
+        .unwrap()
+        .unwrap();
+    ctx.query
+        .store()
+        .confirmed
+        .set(
+            &rbitcoin_store::ClassCWrite::for_test(),
+            Height(height.0 - 1),
+            other_fk,
+        )
+        .unwrap();
+    for verbosity in [1, 2] {
+        let blk = dispatch(&ctx, "getblock", vec![tip.clone(), json!(verbosity)]).unwrap();
+        assert_eq!(
+            blk["previousblockhash"], before["previousblockhash"],
+            "verbosity {verbosity}: {blk}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A segwit coinbase's reserved value is `coinbase_tx.witness`; the version
+/// is Core's uint32_t.
+#[test]
+fn coinbase_tx_json_witness_and_unsigned_version() {
+    use bitcoin::{Sequence, TxIn, Witness};
+    let cb = Transaction {
+        version: bitcoin::transaction::Version(-1),
+        lock_time: bitcoin::absolute::LockTime::from_consensus(7),
+        input: vec![TxIn {
+            script_sig: ScriptBuf::from_bytes(vec![0x01, 0x66]),
+            sequence: Sequence(0xffff_fffe),
+            witness: Witness::from_slice(&[[0u8; 32]]),
+            ..Default::default()
+        }],
+        output: vec![],
+    };
+    assert_eq!(
+        coinbase_tx_json(&cb),
+        json!({
+            "version": 0xffff_ffffu32,
+            "locktime": 7,
+            "sequence": 0xffff_fffeu32,
+            "coinbase": "0166",
+            "witness": "00".repeat(32),
+        })
+    );
+}
+
 fn object_keys(v: &serde_json::Value) -> Vec<&str> {
     v.as_object()
         .expect("header object")
@@ -2684,6 +3028,12 @@ fn spend_generated_coinbase(
 
 fn mature_coinbase_spend_hex(ctx: &RpcContext, keep_sat: u64) -> (String, Transaction) {
     mature_coinbase_spend(ctx, keep_sat, ScriptBuf::from_bytes(vec![0x51]))
+}
+
+fn generated_coinbase_txid(ctx: &RpcContext, height: u32) -> [u8; 32] {
+    let hash = dispatch(ctx, "getblockhash", vec![json!(height)]).unwrap();
+    let blk = dispatch(ctx, "getblock", vec![hash, json!(1)]).unwrap();
+    parse_hash32_display(blk["tx"][0].as_str().unwrap()).unwrap()
 }
 
 fn generated_coinbase_value(ctx: &RpcContext, height: u32) -> u64 {

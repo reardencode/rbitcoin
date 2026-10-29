@@ -2,7 +2,7 @@ use super::*;
 use bitcoin::consensus::{deserialize, Encodable};
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, Block, BlockHash, ScriptBuf, Txid};
-use rbitcoin_primitives::{median_time_past_times, Height, MedianWindow};
+use rbitcoin_primitives::{median_time_past_times, Fk, Height, MedianWindow};
 
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
@@ -813,22 +813,78 @@ pub fn insert_size_weight(obj: &mut Value, size: u64, weight: u64) {
     );
 }
 
+/// Core `coinbase_tx` (verbosity >= 1): the coinbase's version and locktime,
+/// and its one input's sequence, script, and first witness item.
 #[doc(hidden)]
-pub fn getblock_v2_tx_json(ctx: &RpcContext, block: &Block) -> Vec<Value> {
+pub fn coinbase_tx_json(cb: &Transaction) -> Value {
+    let Some(vin) = cb.input.first() else {
+        return Value::Null;
+    };
+    let mut obj = json!({
+        // Core prints the version as uint32_t.
+        "version": cb.version.0 as u32,
+        "locktime": cb.lock_time.to_consensus_u32(),
+        "sequence": vin.sequence.0,
+        "coinbase": rbitcoin_primitives::hex_encode(vin.script_sig.as_bytes()),
+    });
+    if let Some(w) = vin.witness.iter().next() {
+        obj["witness"] = json!(rbitcoin_primitives::hex_encode(w));
+    }
+    obj
+}
+
+/// Header fk and Class A tx fks of the stored body for `hash`, active or
+/// disconnected. Their prevout edges are Core's undo data. A held body has
+/// none.
+fn stored_block_fks(ctx: &RpcContext, hash: &[u8; 32]) -> Option<BlockUndo> {
+    let (header_fk, rec) = ctx.query.get_header_by_hash(hash).ok().flatten()?;
+    if rec.hash != *hash {
+        return None;
+    }
+    let fks = ctx
+        .query
+        .header_tx_fks(header_fk, Some(hash))
+        .ok()
+        .flatten()?;
+    Some(BlockUndo { header_fk, fks })
+}
+
+/// A stored body's header fk and its tx fks, in block order.
+#[doc(hidden)]
+pub struct BlockUndo {
+    pub header_fk: Fk,
+    pub fks: Vec<Fk>,
+}
+
+/// Verbosity >= 2 `tx` rows. With undo (`fks`), a non-coinbase carries `fee`,
+/// and at verbosity >= 3 each input carries `prevout`. Undo that is present
+/// but unreadable is an error, as Core.
+#[doc(hidden)]
+pub fn getblock_tx_json(
+    ctx: &RpcContext,
+    block: &Block,
+    undo: Option<&BlockUndo>,
+    verbosity: u32,
+) -> Result<Vec<Value>, Value> {
     let net = rpc_btc_network(ctx.network);
+    let undo = undo.filter(|u| u.fks.len() == block.txdata.len());
     block
         .txdata
         .iter()
-        .map(|tx| {
-            let extra = if tx.is_coinbase() {
-                None
-            } else {
-                match tx_fee_sat_from_prevouts(ctx, tx) {
-                    TxFeeLook::Fee(fee) => Some(json!({ "fee": sat_btc_json(fee as i64) })),
-                    TxFeeLook::MissingPrevout | TxFeeLook::Overflow => None,
-                }
+        .enumerate()
+        .map(|(i, tx)| {
+            let row = match undo {
+                Some(u) => raw_tx_prevouts(ctx, tx, u.fks[i], Some(u.header_fk))?,
+                None => None,
             };
-            tx_to_json(tx, extra, net)
+            let Some((fee, prevouts)) = row else {
+                return Ok(tx_to_json(tx, None, net));
+            };
+            let mut obj = tx_to_json(tx, Some(json!({ "fee": sat_btc_json(fee) })), net);
+            if verbosity >= 3 {
+                insert_vin_prevouts(&mut obj, &prevouts);
+            }
+            Ok(obj)
         })
         .collect()
 }
@@ -849,55 +905,152 @@ pub fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
         Some(h) => h,
         None => return getblock_unknown_hash(ctx, hash, verbosity),
     };
-    let prev = if height.0 > 0 {
-        ctx.query
-            .header_at_height(Height(height.0 - 1))
-            .ok()
-            .flatten()
-            .map(|(_, r)| hash_hex_display(&r.hash))
-            .unwrap_or_default()
-    } else {
-        String::new()
+    // Every read below goes through this hash's own header fk, so a reorg
+    // after the height lookup cannot mix this block with another. The block
+    // is reported as active only while `confirmed[height]` still holds it.
+    let (header_fk, rec) = ctx
+        .query
+        .get_header_by_hash(&hash)
+        .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?
+        .filter(|(_, r)| r.hash == hash)
+        .ok_or_else(|| rpc_error(ERR_MISC, "header missing"))?;
+    let at = ActiveAt {
+        hash,
+        height,
+        header_fk,
     };
     if verbosity == 1 {
-        let (header_fk, rec) = ctx
-            .query
-            .header_at_height(height)
-            .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?
-            .ok_or_else(|| rpc_error(ERR_MISC, "header missing"))?;
-        let ids = ctx
-            .query
-            .block_txids(height)
-            .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?;
-        let txids: Vec<String> = ids.iter().map(hash_hex_display).collect();
-        let mut obj = json!({
-            "hash": hash_hex_display(&hash),
-            "confirmations": confirmations(ctx, height),
-            "height": height.0,
-            "version": rec.version,
-            "merkleroot": hash_hex_display(&rec.merkle_root),
-            "time": rec.timestamp,
-            "mediantime": rbitcoin_query::median_time_past(ctx.query.as_ref(), height)
-                .unwrap_or(rec.timestamp),
-            "nonce": rec.nonce,
-            "bits": format!("{:08x}", rec.bits),
-            "nTx": txids.len(),
-            "tx": txids,
-        });
-        insert_previousblockhash(&mut obj, &prev);
-        enrich_block_header_json(&mut obj, ctx, rec.version, rec.bits, Some(height), None);
-        // Core verbosity 1 carries size/strippedsize/weight (mempool's block
-        // indexer stores them NOT NULL). txstat answers without a reconstruct;
-        // if the body is gone the fields are left out rather than failing.
-        if let Ok(Some((size, weight))) = ctx.query.block_size_weight(header_fk) {
-            insert_size_weight(&mut obj, u64::from(size), u64::from(weight));
-        }
-        return Ok(obj);
+        return getblock_v1(ctx, &at, rec);
     }
+    getblock_body(ctx, &at, rec, verbosity)
+}
+
+/// A block `height_of_hash` placed on the active chain, and its header fk.
+/// The fields read by height are this block's only if `confirmed[height]`
+/// still holds it after they are read: a disconnect clears that slot before
+/// it pops the fence, and a lower slot is cleared only after this one.
+struct ActiveAt {
+    hash: [u8; 32],
+    height: Height,
+    header_fk: Fk,
+}
+
+impl ActiveAt {
+    /// `confirmations` and `nextblockhash` read heights above this block, which
+    /// a connect or reorg can move without touching this slot. They are read
+    /// again right before the membership check.
+    fn refresh_above(&self, ctx: &RpcContext, obj: &mut Value) {
+        let next = nextblockhash_at(ctx, self.height);
+        let Some(o) = obj.as_object_mut() else {
+            return;
+        };
+        o.insert(
+            "confirmations".into(),
+            json!(confirmations(ctx, self.height)),
+        );
+        match next {
+            Some(n) => o.insert("nextblockhash".into(), json!(n)),
+            None => o.remove("nextblockhash"),
+        };
+    }
+
+    fn still_active(&self, ctx: &RpcContext) -> bool {
+        ctx.query.store().confirmed.get(self.height).ok().flatten() == Some(self.header_fk)
+    }
+}
+
+/// `previousblockhash` from the header's own `prev_fk`, not the live height.
+fn prev_hash_of(ctx: &RpcContext, rec: &rbitcoin_store::HeaderRecord) -> Result<String, Value> {
+    if rec.prev_fk.is_null() {
+        return Ok(String::new());
+    }
+    let prev = ctx
+        .query
+        .get_header(rec.prev_fk)
+        .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?;
+    Ok(hash_hex_display(&prev.hash))
+}
+
+/// Verbosity 1: txids without a body reconstruct, so it still answers below
+/// `pruneheight`; that body has no coinbase to show.
+fn getblock_v1(
+    ctx: &RpcContext,
+    at: &ActiveAt,
+    rec: rbitcoin_store::HeaderRecord,
+) -> Result<Value, Value> {
+    let misc = |e: rbitcoin_query::QueryError| rpc_error(ERR_MISC, e.to_string());
+    let ids = ctx.query.header_txids(at.header_fk).map_err(misc)?;
+    let txids: Vec<String> = ids.iter().map(hash_hex_display).collect();
+    let mut obj = json!({
+        "hash": hash_hex_display(&at.hash),
+        "confirmations": confirmations(ctx, at.height),
+        "height": at.height.0,
+        "version": rec.version,
+        "merkleroot": hash_hex_display(&rec.merkle_root),
+        "time": rec.timestamp,
+        "mediantime": rbitcoin_query::median_time_past(ctx.query.as_ref(), at.height)
+            .unwrap_or(rec.timestamp),
+        "nonce": rec.nonce,
+        "bits": format!("{:08x}", rec.bits),
+        "nTx": txids.len(),
+        "tx": txids,
+    });
+    insert_previousblockhash(&mut obj, &prev_hash_of(ctx, &rec)?);
+    enrich_block_header_json(&mut obj, ctx, rec.version, rec.bits, Some(at.height), None);
+    // Core verbosity 1 carries size/strippedsize/weight (mempool's block
+    // indexer stores them NOT NULL). txstat answers without a reconstruct;
+    // if the body is gone the fields are left out rather than failing.
+    if let Ok(Some((size, weight))) = ctx.query.block_size_weight(at.header_fk) {
+        insert_size_weight(&mut obj, u64::from(size), u64::from(weight));
+    }
+    let cb_fk = ctx
+        .query
+        .header_tx_fks(at.header_fk, Some(&at.hash))
+        .map_err(misc)?
+        .and_then(|fks| fks.first().copied());
+    if let Some(fk) = cb_fk {
+        match ctx.query.reconstruct_tx(fk) {
+            Ok(cb) => obj["coinbase_tx"] = coinbase_tx_json(&cb),
+            Err(rbitcoin_store::StoreError::Pruned { .. }) => {}
+            Err(e) => return Err(misc(e)),
+        }
+    }
+    at.refresh_above(ctx, &mut obj);
+    if !at.still_active(ctx) {
+        return getblock_unknown_hash(ctx, at.hash, 1);
+    }
+    Ok(obj)
+}
+
+/// Verbosity 0 and >= 2: the body and its prevout edges from one header fk.
+fn getblock_body(
+    ctx: &RpcContext,
+    at: &ActiveAt,
+    rec: rbitcoin_store::HeaderRecord,
+    verbosity: u32,
+) -> Result<Value, Value> {
+    let misc = |e: rbitcoin_query::QueryError| rpc_error(ERR_MISC, e.to_string());
+    let pruned = |e| map_query(e, "Block not available (pruned data)");
+    ctx.query.require_seqsigwit_at(at.height).map_err(pruned)?;
+    let prev = prev_hash_of(ctx, &rec)?;
+    let fks = ctx
+        .query
+        .header_tx_fks(at.header_fk, Some(&at.hash))
+        .map_err(misc)?
+        .ok_or_else(|| {
+            misc(rbitcoin_store::StoreError::Corrupt(
+                "confirmed header missing body list",
+            ))
+        })?;
     let block = ctx
         .query
-        .reconstruct_block_at_height(height)
-        .map_err(|e| map_query(e, "Block not available (pruned data)"))?;
+        .reconstruct_archived_block_from_parts(rec, fks.clone())
+        .map_err(pruned)?;
+    if block.block_hash().to_byte_array() != at.hash {
+        return Err(misc(rbitcoin_store::StoreError::Corrupt(
+            "reconstruct hash mismatch",
+        )));
+    }
     if verbosity == 0 {
         let mut raw = Vec::new();
         block
@@ -911,13 +1064,13 @@ pub fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
         .map(|tx| hash_hex_display(&tx.compute_txid().to_byte_array()))
         .collect();
     let mut obj = json!({
-        "hash": hash_hex_display(&hash),
-        "confirmations": confirmations(ctx, height),
-        "height": height.0,
+        "hash": hash_hex_display(&at.hash),
+        "confirmations": confirmations(ctx, at.height),
+        "height": at.height.0,
         "version": block.header.version.to_consensus(),
         "merkleroot": hash_hex_display(&block.header.merkle_root.to_byte_array()),
         "time": block.header.time,
-        "mediantime": rbitcoin_query::median_time_past(ctx.query.as_ref(), height)
+        "mediantime": rbitcoin_query::median_time_past(ctx.query.as_ref(), at.height)
             .unwrap_or(block.header.time),
         "nonce": block.header.nonce,
         "bits": format!("{:08x}", block.header.bits.to_consensus()),
@@ -930,12 +1083,23 @@ pub fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
         ctx,
         block.header.version.to_consensus(),
         block.header.bits.to_consensus(),
-        Some(height),
+        Some(at.height),
         None,
     );
+    if let Some(cb) = block.txdata.first() {
+        obj["coinbase_tx"] = coinbase_tx_json(cb);
+    }
     if verbosity >= 2 {
         insert_block_size_fields(&mut obj, &block);
-        obj["tx"] = json!(getblock_v2_tx_json(ctx, &block));
+        let undo = BlockUndo {
+            header_fk: at.header_fk,
+            fks,
+        };
+        obj["tx"] = json!(getblock_tx_json(ctx, &block, Some(&undo), verbosity)?);
+    }
+    at.refresh_above(ctx, &mut obj);
+    if !at.still_active(ctx) {
+        return disconnected_block_value(ctx, &at.hash, &block, verbosity);
     }
     Ok(obj)
 }
@@ -990,9 +1154,13 @@ pub fn disconnected_block_value(
         insert_previousblockhash(&mut obj, &hash_hex_display(&prev));
     }
     enrich_block_header_json(&mut obj, ctx, version, bits, None, Some(chainwork));
+    if let Some(cb) = block.txdata.first() {
+        obj["coinbase_tx"] = coinbase_tx_json(cb);
+    }
     if verbosity >= 2 {
         insert_block_size_fields(&mut obj, block);
-        obj["tx"] = json!(getblock_v2_tx_json(ctx, block));
+        let undo = stored_block_fks(ctx, hash);
+        obj["tx"] = json!(getblock_tx_json(ctx, block, undo.as_ref(), verbosity)?);
     }
     Ok(obj)
 }
