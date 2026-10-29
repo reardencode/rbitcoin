@@ -25,7 +25,7 @@ pub fn verify(
     tap_spent: &crypto::TapSpentHashes,
 ) -> Result<(), ConsensusError> {
     let spk = job.prevout_script(input_index)?;
-    debug_assert!(spk.len() == 34 && spk[0] == 0x51 && spk[1] == 0x20);
+    debug_assert!(spk.len() == 34 && spk.starts_with(&rbitcoin_primitives::P2TR_PREFIX));
     let output_key = &spk[2..34];
 
     let input = &tx.input[input_index.get()];
@@ -49,7 +49,7 @@ pub fn bip341_annex(witness: &Witness) -> Option<&[u8]> {
         return None;
     }
     let last = witness.last()?;
-    if !last.is_empty() && last[0] == 0x50 {
+    if !last.is_empty() && last[0] == rbitcoin_primitives::OP_RESERVED {
         Some(last)
     } else {
         None

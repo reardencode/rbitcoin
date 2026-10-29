@@ -6,7 +6,7 @@ use bitcoin::{
     TxMerkleNode, TxOut, Txid, Witness,
 };
 use rbitcoin_consensus::block::validate_block_structure;
-use rbitcoin_consensus::{ChainParams, ConsensusError, ValidationContext};
+use rbitcoin_consensus::{ChainParams, ConsensusError, ValidationContext, REGTEST_POW_BITS};
 
 fn ctx() -> ValidationContext<'static> {
     let params = Box::leak(Box::new(ChainParams::regtest()));
@@ -20,7 +20,7 @@ fn block_with(txs: Vec<Transaction>) -> Block {
             prev_blockhash: BlockHash::from_byte_array([0; 32]),
             merkle_root: TxMerkleNode::from_byte_array([0; 32]),
             time: 1_290_000_000,
-            bits: CompactTarget::from_consensus(0x207f_ffff),
+            bits: CompactTarget::from_consensus(REGTEST_POW_BITS),
             nonce: 0,
         },
         txdata: txs,

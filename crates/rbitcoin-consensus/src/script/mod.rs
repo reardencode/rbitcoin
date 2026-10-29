@@ -169,9 +169,9 @@ pub fn verify_input<'a>(
     }
 }
 
-/// Core `IsPayToAnchor`: witness v1 program `0x4e73`.
+/// Core `IsPayToAnchor`: witness v1 program `Ns`.
 #[doc(hidden)]
-pub const PAY_TO_ANCHOR_PROGRAM: [u8; 2] = [0x4e, 0x73];
+pub const PAY_TO_ANCHOR_PROGRAM: [u8; 2] = rbitcoin_primitives::P2A_PROGRAM;
 
 /// BIP141 native witness program (any version). `scriptSig` must be empty.
 ///

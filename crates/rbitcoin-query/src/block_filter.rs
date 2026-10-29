@@ -95,10 +95,9 @@ pub fn basic_filter_from_scripts<'a>(
     output_scripts: impl IntoIterator<Item = &'a [u8]>,
     spent_scripts: impl IntoIterator<Item = &'a [u8]>,
 ) -> Result<BlockFilter, QueryError> {
-    const OP_RETURN: u8 = 0x6a;
     let elements = output_scripts
         .into_iter()
-        .filter(|script| script.first() != Some(&OP_RETURN))
+        .filter(|script| script.first() != Some(&rbitcoin_primitives::OP_RETURN))
         .chain(spent_scripts);
     encode_basic_filter(block_hash, elements)
 }

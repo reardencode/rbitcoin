@@ -105,7 +105,7 @@ pub fn is_annex_standard(annex: &[u8]) -> bool {
     if annex.is_empty() {
         return true;
     }
-    if annex[0] != 0x50 {
+    if annex[0] != rbitcoin_primitives::OP_RESERVED {
         return true;
     }
     annex.len() == 1 || annex[1] == 0x00
@@ -134,7 +134,7 @@ pub fn check_libre_annex(tx: &Transaction) -> PolicyResult {
 
 /// Core `CScript::IsUnspendable`: leading `OP_RETURN`, or over `MAX_SCRIPT_SIZE`.
 pub fn is_unspendable(script: &[u8]) -> bool {
-    script.first() == Some(&0x6a)
+    script.first() == Some(&rbitcoin_primitives::OP_RETURN)
         || script.len() > crate::script::interpreter::MAX_SCRIPT_SIZE_LEGACY
 }
 
@@ -160,7 +160,8 @@ pub fn check_libre_shape(tx: &Transaction, weight: u64) -> PolicyResult {
     }
     if tx.output.iter().any(|o| {
         let spk = o.script_pubkey.as_bytes();
-        spk.len() > crate::script::interpreter::MAX_SCRIPT_SIZE_LEGACY && spk.first() != Some(&0x6a)
+        spk.len() > crate::script::interpreter::MAX_SCRIPT_SIZE_LEGACY
+            && spk.first() != Some(&rbitcoin_primitives::OP_RETURN)
     }) {
         return PolicyResult::NonStandard("scriptpubkey");
     }

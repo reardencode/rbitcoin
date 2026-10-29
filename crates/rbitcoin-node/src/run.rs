@@ -224,7 +224,7 @@ pub async fn start_rpc_listener(
         && config
             .signet_challenge
             .as_ref()
-            .is_some_and(|s| s.as_bytes() == [0x51]);
+            .is_some_and(|s| s.as_bytes() == [rbitcoin_primitives::OP_TRUE]);
     let miner: Option<Arc<dyn RpcRegtest>> = if config.network == Network::Regtest || op_true_signet
     {
         Some(Arc::new(HubRegtest(Arc::clone(&node.hub))))

@@ -14,6 +14,8 @@ pub mod median_time;
 #[doc(hidden)]
 pub mod merkle;
 #[doc(hidden)]
+pub mod script_opcode;
+#[doc(hidden)]
 pub mod script_sigops;
 #[doc(hidden)]
 pub mod script_worker;
@@ -32,6 +34,15 @@ pub use loc_simd::{deinterleave_pairs_u8x8, inclusive_u8x8_times_8};
 pub use median_time::{median_time_past_times, MedianWindow};
 pub use merkle::{
     merkle_branch, merkle_root_from_branch, merkle_root_from_txids, merkle_root_mutated,
+};
+pub use script_opcode::{
+    OP_0, OP_1NEGATE, OP_2DIV, OP_2MUL, OP_AND, OP_CAT, OP_CHECKMULTISIG, OP_CHECKMULTISIGVERIFY,
+    OP_CHECKSIG, OP_CHECKSIGVERIFY, OP_CODESEPARATOR, OP_DIV, OP_DUP, OP_EQUAL, OP_EQUALVERIFY,
+    OP_HASH160, OP_INVERT, OP_LEFT, OP_LSHIFT, OP_MOD, OP_MUL, OP_OR, OP_PUSHBYTES_2,
+    OP_PUSHBYTES_20, OP_PUSHBYTES_32, OP_PUSHBYTES_75, OP_PUSHDATA1, OP_PUSHDATA2, OP_PUSHDATA4,
+    OP_PUSHNUM_16, OP_RESERVED, OP_RETURN, OP_RIGHT, OP_RSHIFT, OP_SUBSTR, OP_TRUE, OP_VERIF,
+    OP_VERNOTIF, OP_XOR, P2A_PROGRAM, P2A_SCRIPT, P2PKH_PREFIX, P2PKH_SUFFIX, P2SH_PREFIX,
+    P2TR_PREFIX, P2WPKH_PREFIX, P2WSH_PREFIX,
 };
 pub use script_sigops::script_sigop_count;
 pub use script_worker::{assert_not_script_worker, on_script_worker, set_script_worker};

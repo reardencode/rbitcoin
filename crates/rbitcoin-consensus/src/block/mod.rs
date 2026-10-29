@@ -433,17 +433,17 @@ pub fn last_script_push(script: &[u8]) -> Option<&[u8]> {
     while i < script.len() {
         let opcode = script[i];
         i += 1;
-        if opcode > 0x60 {
+        if opcode > rbitcoin_primitives::OP_PUSHNUM_16 {
             return None;
         }
-        if opcode <= 0x4b {
+        if opcode <= rbitcoin_primitives::OP_PUSHBYTES_75 {
             let push = opcode as usize;
             if i.saturating_add(push) > script.len() {
                 return None;
             }
             last = &script[i..i + push];
             i += push;
-        } else if opcode == 0x4c {
+        } else if opcode == rbitcoin_primitives::OP_PUSHDATA1 {
             if i >= script.len() {
                 return None;
             }
@@ -454,7 +454,7 @@ pub fn last_script_push(script: &[u8]) -> Option<&[u8]> {
             }
             last = &script[i..i + push];
             i += push;
-        } else if opcode == 0x4d {
+        } else if opcode == rbitcoin_primitives::OP_PUSHDATA2 {
             if i + 1 >= script.len() {
                 return None;
             }
@@ -465,7 +465,7 @@ pub fn last_script_push(script: &[u8]) -> Option<&[u8]> {
             }
             last = &script[i..i + push];
             i += push;
-        } else if opcode == 0x4e {
+        } else if opcode == rbitcoin_primitives::OP_PUSHDATA4 {
             if i + 3 >= script.len() {
                 return None;
             }
@@ -626,10 +626,10 @@ pub fn check_bip34_coinbase(coinbase: &Transaction, height: u32) -> Result<(), C
 #[must_use]
 pub fn bip34_height_script(height: u32) -> Vec<u8> {
     if height == 0 {
-        return vec![0x00];
+        return vec![rbitcoin_primitives::OP_0];
     }
     if (1..=16).contains(&height) {
-        return vec![0x50 + height as u8];
+        return vec![rbitcoin_primitives::OP_RESERVED + height as u8];
     }
     // Height is at least 17, so the little-endian body is never empty.
     let num = rbitcoin_primitives::scriptnum_encode(i64::from(height));

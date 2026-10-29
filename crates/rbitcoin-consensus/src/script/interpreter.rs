@@ -23,6 +23,11 @@ use bitcoin::{Amount, Sequence, Transaction};
 
 use super::crypto;
 use crate::error::ConsensusError;
+use rbitcoin_primitives::script_opcode::{
+    OP_1NEGATE, OP_2DIV, OP_2MUL, OP_AND, OP_CAT, OP_CODESEPARATOR, OP_DIV, OP_INVERT, OP_LEFT,
+    OP_LSHIFT, OP_MOD, OP_MUL, OP_OR, OP_PUSHBYTES_75, OP_PUSHDATA1, OP_PUSHDATA2, OP_PUSHDATA4,
+    OP_RESERVED, OP_RIGHT, OP_RSHIFT, OP_SUBSTR, OP_VERIF, OP_VERNOTIF, OP_XOR,
+};
 use rbitcoin_primitives::{scriptnum_decode_width, scriptnum_encode};
 
 /// Stack element cap (main + alt).
@@ -101,20 +106,21 @@ impl PreTapscript {
 pub fn is_disabled_legacy(code: u8) -> bool {
     matches!(
         code,
-        0x7e | 0x7f
-            | 0x80
-            | 0x81
-            | 0x83
-            | 0x84
-            | 0x85
-            | 0x86
-            | 0x8d
-            | 0x8e
-            | 0x95
-            | 0x96
-            | 0x97
-            | 0x98
-            | 0x99
+        OP_CAT
+            | OP_SUBSTR
+            | OP_LEFT
+            | OP_RIGHT
+            | OP_INVERT
+            | OP_AND
+            | OP_OR
+            | OP_XOR
+            | OP_2MUL
+            | OP_2DIV
+            | OP_MUL
+            | OP_DIV
+            | OP_MOD
+            | OP_LSHIFT
+            | OP_RSHIFT
     )
 }
 
@@ -151,27 +157,27 @@ pub fn tapscript_has_op_success(script: &Script) -> bool {
     let mut i = 0usize;
     while i < bytes.len() {
         let op = bytes[i];
-        if (1..=75).contains(&op) {
+        if (1..=OP_PUSHBYTES_75).contains(&op) {
             let n = op as usize;
             i = i.saturating_add(1).saturating_add(n);
             continue;
         }
         match op {
-            0x4c => {
+            OP_PUSHDATA1 => {
                 if i + 1 >= bytes.len() {
                     break;
                 }
                 let n = bytes[i + 1] as usize;
                 i = i.saturating_add(2).saturating_add(n);
             }
-            0x4d => {
+            OP_PUSHDATA2 => {
                 if i + 2 >= bytes.len() {
                     break;
                 }
                 let n = u16::from_le_bytes([bytes[i + 1], bytes[i + 2]]) as usize;
                 i = i.saturating_add(3).saturating_add(n);
             }
-            0x4e => {
+            OP_PUSHDATA4 => {
                 if i + 4 >= bytes.len() {
                     break;
                 }
@@ -641,7 +647,7 @@ pub fn eval_script(
                 }
 
                 // Core: OP_VERIF / OP_VERNOTIF always fail (even unexecuted).
-                if code == 0x65 || code == 0x66 {
+                if code == OP_VERIF || code == OP_VERNOTIF {
                     return Err(ConsensusError::Script("OP_VERIF".into()));
                 }
                 // Core: disabled opcodes fail even in unexecuted branches (legacy/v0).
@@ -651,7 +657,10 @@ pub fn eval_script(
                     )));
                 }
                 // CONST_SCRIPTCODE: OP_CODESEPARATOR rejected in Base even unexecuted.
-                if code == 0xab && ctx.const_scriptcode && ctx.sig_version == SigVersion::Base {
+                if code == OP_CODESEPARATOR
+                    && ctx.const_scriptcode
+                    && ctx.sig_version == SigVersion::Base
+                {
                     return Err(ConsensusError::Script("OP_CODESEPARATOR".into()));
                 }
 
@@ -1259,16 +1268,16 @@ pub fn checkmultisig_pairs(
 #[doc(hidden)]
 pub fn encode_push(out: &mut Vec<u8>, data: &[u8]) {
     let n = data.len();
-    if n < 0x4c {
+    if n < usize::from(OP_PUSHDATA1) {
         out.push(n as u8);
     } else if n <= 0xff {
-        out.push(0x4c);
+        out.push(OP_PUSHDATA1);
         out.push(n as u8);
     } else if n <= 0xffff {
-        out.push(0x4d);
+        out.push(OP_PUSHDATA2);
         out.extend_from_slice(&(n as u16).to_le_bytes());
     } else {
-        out.push(0x4e);
+        out.push(OP_PUSHDATA4);
         out.extend_from_slice(&(n as u32).to_le_bytes());
     }
     out.extend_from_slice(data);
@@ -1365,7 +1374,7 @@ fn legacy_script_code_needles<'a>(
                 break;
             }
             Some(end) => {
-                if drop_sep && op == 0xab {
+                if drop_sep && op == OP_CODESEPARATOR {
                     if out.is_none() {
                         out = Some(script[..i].to_vec());
                     }
@@ -1387,23 +1396,23 @@ fn legacy_script_code_needles<'a>(
 fn instruction_end(script: &[u8], i: usize) -> Option<usize> {
     let op = script[i];
     let mut j = i + 1;
-    let n = if (1..=75).contains(&op) {
+    let n = if (1..=OP_PUSHBYTES_75).contains(&op) {
         op as usize
-    } else if op == 0x4c {
+    } else if op == OP_PUSHDATA1 {
         if j >= script.len() {
             return None;
         }
         let n = script[j] as usize;
         j += 1;
         n
-    } else if op == 0x4d {
+    } else if op == OP_PUSHDATA2 {
         if j + 1 >= script.len() {
             return None;
         }
         let n = u16::from_le_bytes([script[j], script[j + 1]]) as usize;
         j += 2;
         n
-    } else if op == 0x4e {
+    } else if op == OP_PUSHDATA4 {
         if j + 3 >= script.len() {
             return None;
         }
@@ -1640,22 +1649,22 @@ pub fn bool_encode(b: bool) -> Vec<u8> {
 pub fn check_minimal_push(data: ScriptElem<'_>, opcode: u8) -> bool {
     let data = data.as_bytes();
     if data.is_empty() {
-        return opcode == 0x00;
+        return opcode == rbitcoin_primitives::OP_0;
     }
     if data.len() == 1 && data[0] >= 1 && data[0] <= 16 {
-        return opcode == 0x50 + data[0];
+        return opcode == OP_RESERVED + data[0];
     }
     if data.len() == 1 && data[0] == 0x81 {
-        return opcode == 0x4f;
+        return opcode == OP_1NEGATE;
     }
-    if data.len() <= 75 {
+    if data.len() <= usize::from(OP_PUSHBYTES_75) {
         return opcode as usize == data.len();
     }
     if data.len() <= 255 {
-        return opcode == 0x4c;
+        return opcode == OP_PUSHDATA1;
     }
     // 256..=520. PUSHDATA4 cannot be minimal: the element type stops at 520.
-    opcode == 0x4d
+    opcode == OP_PUSHDATA2
 }
 
 #[doc(hidden)]
