@@ -47,52 +47,18 @@ pub struct CreateLocAppend {
     pub n_out: u32,
 }
 
-/// Locator files and RAM rows before one `append`. The count store is last,
-/// so a later disk-full write has already published overflow rows that
-/// `truncate_to_count` will not see.
-struct CreateSideSnap {
-    loc_len: u64,
-    ovf_len: u64,
-    off_len: u64,
-    ovf_n: usize,
-    cp_n: usize,
-}
-
-impl CreateSideSnap {
-    fn capture(loc: &CreateLoc) -> Self {
-        Self {
-            loc_len: loc.loc.logical_len(),
-            ovf_len: loc.ovf.logical_len(),
-            off_len: loc.off.logical_len(),
-            ovf_n: loc.ovf_rows.read().unwrap_or_else(|e| e.into_inner()).len(),
-            cp_n: loc
-                .checkpoints
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .len(),
-        }
-    }
-
-    fn restore(self, loc: &CreateLoc) -> Result<(), StoreError> {
-        if loc.loc.logical_len() != self.loc_len {
-            loc.loc.set_logical_len(self.loc_len)?;
-        }
-        if loc.ovf.logical_len() != self.ovf_len {
-            loc.ovf.set_logical_len(self.ovf_len)?;
-        }
-        if loc.off.logical_len() != self.off_len {
-            loc.off.set_logical_len(self.off_len)?;
-        }
-        loc.ovf_rows
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .truncate(self.ovf_n);
-        loc.checkpoints
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .truncate(self.cp_n);
-        Ok(())
-    }
+/// One create-loc append, encoded and not yet published.
+pub(crate) struct StagedCreate {
+    base: u64,
+    n: u64,
+    loc_off: u64,
+    loc_bytes: Vec<u8>,
+    ovf_at: u64,
+    ovf_bytes: Vec<u8>,
+    new_ovf: Vec<(u64, u32, u32)>,
+    off_at: u64,
+    off_bytes: Vec<u8>,
+    new_offs: Vec<(u64, u64, u64)>,
 }
 
 pub struct CreateLoc {
@@ -201,18 +167,13 @@ impl CreateLoc {
         if recs.is_empty() {
             return Ok(());
         }
-        let snap = CreateSideSnap::capture(self);
-        let outcome = self.append_writes(recs);
-        if outcome.is_err() {
-            snap.restore(self)?;
-        }
-        outcome
+        let staged = self.stage(recs)?;
+        self.write_staged(&staged)?;
+        let _ = self.commit_staged(staged, true);
+        Ok(())
     }
 
-    fn append_writes(&self, recs: &[CreateLocAppend]) -> Result<(), StoreError> {
-        if recs.is_empty() {
-            return Ok(());
-        }
+    pub(crate) fn stage(&self, recs: &[CreateLocAppend]) -> Result<StagedCreate, StoreError> {
         let base = self.count.load(Ordering::Acquire);
         let mut loc_bytes = Vec::with_capacity(recs.len() * 2);
         let mut ovf_bytes = Vec::new();
@@ -248,44 +209,83 @@ impl CreateLoc {
                 ));
             }
         }
-        self.loc
-            .write_at(loc_file_off(base + 1, SLOT), &loc_bytes)?;
-        if !ovf_bytes.is_empty() {
-            let ovf_at = FILE_HEADER_LEN as u64 + self.ovf.data_len();
-            self.ovf.write_at(ovf_at, &ovf_bytes)?;
-            let mut rows = self.ovf_rows.write().unwrap_or_else(|e| e.into_inner());
+        let off_at = new_offs
+            .first()
+            .map(|(w, _, _)| FILE_HEADER_LEN as u64 + w * OFF_SLOT)
+            .unwrap_or(0);
+        let mut off_bytes = Vec::with_capacity(new_offs.len() * OFF_SLOT as usize);
+        for &(_, txout_abs, spent_abs) in &new_offs {
+            off_bytes.extend_from_slice(&txout_abs.to_le_bytes());
+            off_bytes.extend_from_slice(&spent_abs.to_le_bytes());
+        }
+        Ok(StagedCreate {
+            base,
+            n: recs.len() as u64,
+            loc_off: loc_file_off(base + 1, SLOT),
+            loc_bytes,
+            ovf_at: FILE_HEADER_LEN as u64 + self.ovf.data_len(),
+            ovf_bytes,
+            new_ovf,
+            off_at,
+            off_bytes,
+            new_offs,
+        })
+    }
+
+    pub(crate) fn write_staged(&self, staged: &StagedCreate) -> Result<(), StoreError> {
+        if let Some(&(fk, _, _)) = staged.new_ovf.first() {
+            let rows = self.ovf_rows.read().unwrap_or_else(|e| e.into_inner());
             if let Some(&(last, _, _)) = rows.last() {
-                if new_ovf[0].0 <= last {
+                if fk <= last {
                     return Err(StoreError::Corrupt("invariant: create.loc ovf order"));
                 }
             }
-            rows.extend_from_slice(&new_ovf);
         }
-        if !new_offs.is_empty() {
-            {
-                let cps = self.checkpoints.read().unwrap_or_else(|e| e.into_inner());
-                if new_offs[0].0 as usize != cps.len() {
-                    return Err(StoreError::Corrupt("invariant: create.off index"));
-                }
+        if let Some(&(w, _, _)) = staged.new_offs.first() {
+            let cps = self.checkpoints.read().unwrap_or_else(|e| e.into_inner());
+            if w as usize != cps.len() {
+                return Err(StoreError::Corrupt("invariant: create.off index"));
             }
-            let mut blob = Vec::with_capacity(new_offs.len() * OFF_SLOT as usize);
-            for &(_, txout_abs, spent_abs) in &new_offs {
-                blob.extend_from_slice(&txout_abs.to_le_bytes());
-                blob.extend_from_slice(&spent_abs.to_le_bytes());
-            }
-            let off_at = FILE_HEADER_LEN as u64 + new_offs[0].0 * OFF_SLOT;
-            self.off.write_at(off_at, &blob)?;
+        }
+        self.loc
+            .write_uncommitted(staged.loc_off, &staged.loc_bytes)?;
+        if !staged.ovf_bytes.is_empty() {
+            self.ovf
+                .write_uncommitted(staged.ovf_at, &staged.ovf_bytes)?;
+        }
+        if !staged.off_bytes.is_empty() {
+            self.off
+                .write_uncommitted(staged.off_at, &staged.off_bytes)?;
+        }
+        Ok(())
+    }
+
+    /// Publish RAM for this append. Header pwrites run only while `durable`
+    /// is still true, one per grown file. A failed header pwrite returns
+    /// false and skips the rest. RAM still advances.
+    #[must_use]
+    pub(crate) fn commit_staged(&self, staged: StagedCreate, mut durable: bool) -> bool {
+        let loc_end = staged.loc_off + staged.loc_bytes.len() as u64;
+        durable = self.loc.publish_end(loc_end, durable);
+        if !staged.ovf_bytes.is_empty() {
+            let ovf_end = staged.ovf_at + staged.ovf_bytes.len() as u64;
+            durable = self.ovf.publish_end(ovf_end, durable);
+            self.ovf_rows
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(&staged.new_ovf);
+        }
+        if !staged.off_bytes.is_empty() {
+            let off_end = staged.off_at + staged.off_bytes.len() as u64;
+            durable = self.off.publish_end(off_end, durable);
             let mut cps = self.checkpoints.write().unwrap_or_else(|e| e.into_inner());
-            for &(w, txout_abs, spent_abs) in &new_offs {
-                if w as usize != cps.len() {
-                    return Err(StoreError::Corrupt("invariant: create.off index"));
-                }
+            for &(w, txout_abs, spent_abs) in &staged.new_offs {
+                debug_assert_eq!(w as usize, cps.len());
                 cps.push((txout_abs, spent_abs));
             }
         }
-        self.count
-            .store(base + recs.len() as u64, Ordering::Release);
-        Ok(())
+        self.count.store(staged.base + staged.n, Ordering::Release);
+        durable
     }
 
     pub fn range_batch(&self, fks: &[Fk]) -> Result<Vec<Option<CreateLocPair>>, StoreError> {

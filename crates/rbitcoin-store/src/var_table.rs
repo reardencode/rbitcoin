@@ -157,7 +157,7 @@ impl VarTable {
         len: u64,
         f: impl FnOnce(&[u8]) -> Result<R, StoreError>,
     ) -> Result<R, StoreError> {
-        // HWM, not `published_meta`. The locator publish can trail `publish_body_hwm`.
+        // File HWM, not the seqlock end. Locator publish can trail the body.
         self.with_bytes_at_published(self.body.logical_len(), offset, len, f)
     }
 
@@ -285,12 +285,12 @@ pub fn class_a_body_waves(serial: bool, n_stems: usize) -> Vec<std::ops::Range<u
     std::iter::once(0..n_stems).collect()
 }
 
-/// Submit prepared Class A body blobs.
+/// Submit prepared Class A body blobs without moving `published_len`.
 ///
 /// `serial` (`--datadir-hdd`) is one `pwrite_batch` per stem. Otherwise every
-/// stem is one wave. Publish order is still body → loc → HWM: callers must
-/// [`VarTable::finish_prepared`] after this returns. Falls back to per-stem
-/// [`VarTable::write_body_blob_bulk`] if a wave is short or fails.
+/// stem is one wave. The caller publishes body ends after locator strides
+/// that cover these bytes. Falls back to per-stem `pwrite` if a wave is short
+/// or fails.
 pub fn write_prepared_bodies_one_wave(
     jobs: &[(&VarTable, &PreparedAppend)],
     serial: bool,
@@ -332,14 +332,9 @@ pub fn write_prepared_bodies_one_wave(
         }
         if !all_ok {
             for (table, prep) in jobs {
-                table.write_body_blob_bulk(prep.start, &prep.body_blob)?;
+                table.body.write_uncommitted(prep.start, &prep.body_blob)?;
             }
-            return Ok(());
         }
-    }
-    for (table, prep) in jobs {
-        let end = prep.start.saturating_add(prep.body_blob.len() as u64);
-        table.publish_body_hwm(end)?;
     }
     Ok(())
 }
@@ -424,8 +419,11 @@ impl VarTable {
         self.body.ensure_capacity(end)
     }
 
-    pub fn publish_body_hwm(&self, end: u64) -> Result<(), StoreError> {
-        self.body.set_logical_len(end.max(self.body.logical_len()))
+    /// Body end after locator headers. `durable` is one header pwrite, the
+    /// same cost as `write_at`. Otherwise RAM moves and `flush` keeps the
+    /// previous header.
+    pub fn note_body_end(&self, end: u64, durable: bool) {
+        let _ = self.body.publish_end(end, durable);
     }
 
     /// Count + body-end publish after the body blob is already on disk (and HWM set).

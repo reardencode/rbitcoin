@@ -1,4 +1,6 @@
 //! Tx table unit tests (peeled).
+mod publish;
+
 use rbitcoin_primitives::{read_uleb128, write_uleb128, Fk};
 use rbitcoin_store::address_head::HeadLayout;
 use rbitcoin_store::compact::{

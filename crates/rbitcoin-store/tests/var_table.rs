@@ -117,9 +117,9 @@ fn body_read_uses_the_caller_published_end() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `publish_body_hwm` stores the file end before `finish_prepared` releases
-/// the locator count. Point reads follow that HWM. A caller-supplied
-/// seqlock end still rejects the same bytes.
+/// The file end moves before `finish_prepared` releases the locator count.
+/// Point reads follow that end. A caller-supplied seqlock end still rejects
+/// the same bytes.
 #[test]
 fn point_read_follows_body_hwm_ahead_of_the_locator_seqlock() {
     static N: AtomicU64 = AtomicU64::new(0);
