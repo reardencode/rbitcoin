@@ -1014,6 +1014,19 @@ fn expect_same_fks(left: &[Fk], right: &[Fk]) -> Result<(), StoreError> {
     Ok(())
 }
 
+fn publish_body_pair(
+    left: &VarTable,
+    left_prep: crate::var_table::PreparedAppend,
+    right: &VarTable,
+    right_prep: crate::var_table::PreparedAppend,
+    durable: bool,
+) -> Result<Vec<Fk>, StoreError> {
+    let fks = publish_prepared_body(left, left_prep, durable)?;
+    let other = publish_prepared_body(right, right_prep, durable)?;
+    expect_same_fks(&fks, &other)?;
+    Ok(fks)
+}
+
 impl TxTable {
     pub fn create(dir: &Path) -> Result<Self, StoreError> {
         Self::create_with_opts(dir, HeadOpenOpts::MAINNET)
@@ -2794,10 +2807,7 @@ impl TxTable {
         )?;
         self.create_loc.write_staged(&staged_loc)?;
         let durable = self.create_loc.commit_staged(staged_loc, true);
-        let fks = publish_prepared_body(&self.body, p_out, durable)?;
-        let fks_sp = publish_prepared_body(&self.spent, p_sp, durable)?;
-        expect_same_fks(&fks, &fks_sp)?;
-        Ok(fks)
+        publish_body_pair(&self.body, p_out, &self.spent, p_sp, durable)
     }
 
     fn commit_seq_wave(
@@ -2829,11 +2839,9 @@ impl TxTable {
         self.seqsigwit_loc.write_staged(&staged_seq)?;
         let durable = self.create_loc.commit_staged(staged_loc, true);
         let durable = self.seqsigwit_loc.commit_staged(staged_seq, durable);
-        let fks = publish_prepared_body(&self.body, p_out, durable)?;
         let fks_in = publish_prepared_body(&self.seqsigwit, p_in, durable)?;
-        let fks_sp = publish_prepared_body(&self.spent, p_sp, durable)?;
+        let fks = publish_body_pair(&self.body, p_out, &self.spent, p_sp, durable)?;
         expect_same_fks(&fks, &fks_in)?;
-        expect_same_fks(&fks, &fks_sp)?;
         Ok(fks)
     }
 
