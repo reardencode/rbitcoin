@@ -127,6 +127,11 @@ impl Query {
             .confirmed
             .get(height)?
             .ok_or(StoreError::NotFound)?;
+        self.header_txids(header_fk)
+    }
+
+    /// [`Self::block_txids`] for one stored header, active or not.
+    pub fn header_txids(&self, header_fk: Fk) -> Result<Vec<[u8; 32]>, QueryError> {
         let (first, n) = self
             .store
             .header_txs

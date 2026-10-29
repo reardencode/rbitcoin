@@ -905,20 +905,20 @@ pub fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     } else {
         String::new()
     };
+    // Every read below goes through this hash's own header fk, so a reorg
+    // after the height lookup cannot mix this block with another. The block
+    // is reported as active only while `confirmed[height]` still holds it.
+    let misc = |e: rbitcoin_query::QueryError| rpc_error(ERR_MISC, e.to_string());
+    let (header_fk, rec) = ctx
+        .query
+        .get_header_by_hash(&hash)
+        .map_err(misc)?
+        .filter(|(_, r)| r.hash == hash)
+        .ok_or_else(|| rpc_error(ERR_MISC, "header missing"))?;
+    let active = || ctx.query.store().confirmed.get(height).ok().flatten() == Some(header_fk);
     if verbosity == 1 {
-        let (header_fk, rec) = ctx
-            .query
-            .header_at_height(height)
-            .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?
-            .ok_or_else(|| rpc_error(ERR_MISC, "header missing"))?;
-        let ids = ctx
-            .query
-            .block_txids(height)
-            .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?;
-        // A reorg can seat another header at `height` after the hash lookup.
-        // Reads by height are this block's only while the slot still holds it.
-        let still = ctx.query.store().confirmed.get(height).ok().flatten();
-        if rec.hash != hash || still != Some(header_fk) {
+        let ids = ctx.query.header_txids(header_fk).map_err(misc)?;
+        if !active() {
             return getblock_unknown_hash(ctx, hash, verbosity);
         }
         let txids: Vec<String> = ids.iter().map(hash_hex_display).collect();
@@ -949,7 +949,7 @@ pub fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
         let cb_fk = ctx
             .query
             .header_tx_fks(header_fk, Some(&hash))
-            .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?
+            .map_err(misc)?
             .and_then(|fks| fks.first().copied());
         if let Some(fk) = cb_fk {
             match ctx.query.reconstruct_tx(fk) {
@@ -960,27 +960,28 @@ pub fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
         }
         return Ok(obj);
     }
-    // One header fk gives the header, the body, and the prevout edges, so a
-    // reorg after the hash lookup cannot mix this block with another.
     let pruned = |e| map_query(e, "Block not available (pruned data)");
     ctx.query.require_seqsigwit_at(height).map_err(pruned)?;
-    let (header_fk, rec) = ctx
-        .query
-        .get_header_by_hash(&hash)
-        .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?
-        .filter(|(_, r)| r.hash == hash)
-        .ok_or_else(|| rpc_error(ERR_MISC, "header missing"))?;
     let fks = ctx
         .query
         .header_tx_fks(header_fk, Some(&hash))
-        .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?
-        .ok_or_else(|| rpc_error(ERR_MISC, "block body missing"))?;
+        .map_err(misc)?
+        .ok_or_else(|| {
+            misc(rbitcoin_store::StoreError::Corrupt(
+                "confirmed header missing body list",
+            ))
+        })?;
     let block = ctx
         .query
         .reconstruct_archived_block_from_parts(rec, fks.clone())
         .map_err(pruned)?;
     if block.block_hash().to_byte_array() != hash {
-        return Err(rpc_error(ERR_MISC, "reconstruct hash mismatch"));
+        return Err(misc(rbitcoin_store::StoreError::Corrupt(
+            "reconstruct hash mismatch",
+        )));
+    }
+    if !active() {
+        return disconnected_block_value(ctx, &hash, &block, verbosity);
     }
     if verbosity == 0 {
         let mut raw = Vec::new();

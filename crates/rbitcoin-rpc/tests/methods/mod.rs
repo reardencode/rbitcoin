@@ -1980,7 +1980,8 @@ fn getblock_verbosity_3_vin_prevout_and_coinbase_tx() {
 
 /// A reorg can seat another block at the requested hash's height between the
 /// height lookup and the body read. The answer must still be that hash's own
-/// body, prevouts, and coinbase, not the block now at that height.
+/// body, prevouts, and coinbase, not the block now at that height, and it is
+/// no longer an active-chain block.
 #[test]
 fn getblock_mid_reorg_answers_for_the_requested_hash() {
     let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
@@ -2005,6 +2006,8 @@ fn getblock_mid_reorg_answers_for_the_requested_hash() {
     for verbosity in [1, 3] {
         let mid = dispatch(&ctx, "getblock", vec![tip.clone(), json!(verbosity)]).unwrap();
         assert_eq!(mid["hash"], tip, "{mid}");
+        // The slot no longer holds this block: it is reported off-chain.
+        assert_eq!(mid["confirmations"], json!(-1), "{mid}");
         assert_eq!(mid["merkleroot"], before["merkleroot"], "{mid}");
         assert_eq!(mid["coinbase_tx"], before["coinbase_tx"], "{mid}");
         let txs = mid["tx"].as_array().unwrap();
