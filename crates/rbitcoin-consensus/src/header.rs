@@ -106,6 +106,7 @@ pub fn validate_header_on_parent(
     header: &Header,
     parent_mtp: u32,
     expected_bits: CompactTarget,
+    hash: [u8; 32],
 ) -> Result<(), ConsensusError> {
     if header.time <= parent_mtp {
         crate::trust::soften_at(
@@ -119,11 +120,7 @@ pub fn validate_header_on_parent(
     if header.bits != expected_bits {
         return Err(ConsensusError::BadHeader("incorrect proof of work bits"));
     }
-    pow_hash_meets_target(
-        header.block_hash().to_byte_array(),
-        header.bits,
-        params.pow_limit,
-    )?;
+    pow_hash_meets_target(hash, header.bits, params.pow_limit)?;
     Ok(())
 }
 

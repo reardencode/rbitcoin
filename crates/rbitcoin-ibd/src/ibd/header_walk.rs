@@ -3038,7 +3038,12 @@ pub fn batch_context_ok(
         && !rbitcoin_consensus::collecting();
     let guard = own_guard.then(rbitcoin_consensus::TrustCollect::enter);
     let mut stopped: Option<(u32, [u8; 32], rbitcoin_consensus::ConsensusError)> = None;
-    let mut seen: Vec<(u32, [u8; 32])> = Vec::with_capacity(headers.len());
+    // Warning lines are the only reader. Default mainnet leaves trust-peer off.
+    let mut seen: Vec<(u32, [u8; 32])> = if own_guard {
+        Vec::with_capacity(headers.len())
+    } else {
+        Vec::new()
+    };
     let mut accepted = true;
     for hdr in headers {
         let hash = hdr.block_hash();
@@ -3052,7 +3057,9 @@ pub fn batch_context_ok(
             break;
         }
         height = height.saturating_add(1);
-        seen.push((height, hash.to_byte_array()));
+        if own_guard {
+            seen.push((height, hash.to_byte_array()));
+        }
         let mtp = if times.len() < 11 {
             0
         } else {
@@ -3077,6 +3084,7 @@ pub fn batch_context_ok(
             hdr,
             mtp,
             bits,
+            hash.to_byte_array(),
         ) {
             stopped = Some((height, hash.to_byte_array(), e));
             accepted = false;
@@ -3212,13 +3220,15 @@ pub fn header_on_store(st: &IbdWorkState, hub: &ChainHub, height: u32) -> Option
 
 #[doc(hidden)]
 pub fn pow_linked(headers: &[Header]) -> bool {
-    for (i, hdr) in headers.iter().enumerate() {
-        if hdr.validate_pow(hdr.target()).is_err() {
+    let mut prev_hash = None;
+    for hdr in headers {
+        let Ok(hash) = hdr.validate_pow(hdr.target()) else {
+            return false;
+        };
+        if prev_hash.is_some_and(|prev| hdr.prev_blockhash != prev) {
             return false;
         }
-        if i > 0 && hdr.prev_blockhash != headers[i - 1].block_hash() {
-            return false;
-        }
+        prev_hash = Some(hash);
     }
     true
 }

@@ -579,6 +579,108 @@ fn load_from_plan_inner(
     })
 }
 
+struct ResolvedPrev {
+    fk: rbitcoin_primitives::Fk,
+    hash: [u8; 32],
+}
+
+fn header_fields_match(
+    header: &bitcoin::block::Header,
+    rec: &rbitcoin_store::HeaderRecord,
+) -> bool {
+    rec.version == header.version.to_consensus()
+        && rec.timestamp == header.time
+        && rec.bits == header.bits.to_consensus()
+        && rec.nonce == header.nonce
+        && rec.merkle_root == header.merkle_root.to_byte_array()
+}
+
+fn prev_link_for_block(
+    query: &Query,
+    i: usize,
+    header: &bitcoin::block::Header,
+    metas: &[BodyMeta],
+) -> Result<ResolvedPrev, ConfirmError> {
+    if i > 0 {
+        let prev = &metas[i - 1];
+        return Ok(ResolvedPrev {
+            fk: prev.header_fk,
+            hash: prev.hash,
+        });
+    }
+    let prev_bytes = header.prev_blockhash.to_byte_array();
+    if prev_bytes == [0u8; 32] {
+        return Ok(ResolvedPrev {
+            fk: rbitcoin_primitives::Fk::NULL,
+            hash: [0u8; 32],
+        });
+    }
+    let (fk, rec) = rbitcoin_consensus::block::require_linked_parent(
+        query
+            .get_header_by_hash(&prev_bytes)
+            .map_err(ConfirmError::from)?,
+    )?;
+    Ok(ResolvedPrev { fk, hash: rec.hash })
+}
+
+struct CarriedHeaderProof {
+    hash: [u8; 32],
+    proven: Option<rbitcoin_store::HeaderRecord>,
+    prev_fk: Option<rbitcoin_primitives::Fk>,
+}
+
+/// Carried digest when the stored row is this header. A disagreeing row hashes.
+///
+/// Insert already checked `rec.hash` against these fields and the parent
+/// (`HeaderTable::check_parent_edge`). The success path reads that row once
+/// and does not hash the 80-byte header again. A mismatch, a different prev,
+/// or a missing parent hashes and keeps `reject_carried_header_hash`.
+fn resolve_carried_header_hash(
+    query: &Query,
+    i: usize,
+    header: &bitcoin::block::Header,
+    carried: (rbitcoin_primitives::Fk, [u8; 32]),
+    metas: &[BodyMeta],
+) -> Result<CarriedHeaderProof, ConfirmError> {
+    let (fk, expect) = carried;
+    let matched = match query.store().get_header(fk) {
+        Ok(rec) if rec.hash == expect && header_fields_match(header, &rec) => Some(rec),
+        Ok(_) | Err(StoreError::NotFound) => None,
+        Err(e) => return Err(ConfirmError::from(e)),
+    };
+    let Some(rec) = matched else {
+        let hash = header.block_hash().to_byte_array();
+        rbitcoin_consensus::block::reject_carried_header_hash(&hash, &expect)?;
+        return Ok(CarriedHeaderProof {
+            hash,
+            proven: None,
+            prev_fk: None,
+        });
+    };
+    let prev = match prev_link_for_block(query, i, header, metas) {
+        Ok(prev) => prev,
+        Err(e) => {
+            let hash = header.block_hash().to_byte_array();
+            rbitcoin_consensus::block::reject_carried_header_hash(&hash, &expect)?;
+            return Err(e);
+        }
+    };
+    if rec.prev_fk == prev.fk && header.prev_blockhash.to_byte_array() == prev.hash {
+        return Ok(CarriedHeaderProof {
+            hash: expect,
+            proven: Some(rec),
+            prev_fk: Some(prev.fk),
+        });
+    }
+    let hash = header.block_hash().to_byte_array();
+    rbitcoin_consensus::block::reject_carried_header_hash(&hash, &expect)?;
+    Ok(CarriedHeaderProof {
+        hash,
+        proven: None,
+        prev_fk: Some(prev.fk),
+    })
+}
+
 /// Structure + prepare + plan_batch only (stamp create_fk). Shared by lookup stage.
 pub fn wire_lookup_phase(
     query: &Query,
@@ -606,7 +708,6 @@ pub fn wire_lookup_phase(
 
     for (i, (height, block, caller_pres)) in blocks.iter().enumerate() {
         let block = Arc::clone(block);
-        let hash = block.block_hash().to_byte_array();
         let ctx = ValidationContext::at(params, *height, milestone);
         rbitcoin_consensus::note_block_height(height.0);
         let t_struct = Instant::now();
@@ -623,6 +724,14 @@ pub fn wire_lookup_phase(
         let txids: Vec<[u8; 32]> = pres.iter().map(|p| p.txid).collect();
         struct_ns = struct_ns.saturating_add(t_struct.elapsed().as_nanos() as u64);
         let carried = carried_header_at(pipeline, i);
+        let proof = match carried {
+            Some(row) => resolve_carried_header_hash(query, i, &block.header, row, &metas)?,
+            None => CarriedHeaderProof {
+                hash: block.block_hash().to_byte_array(),
+                proven: None,
+                prev_fk: None,
+            },
+        };
         let t_header = Instant::now();
         stamp_check_header_link(
             query,
@@ -633,36 +742,32 @@ pub fn wire_lookup_phase(
             path_lo,
             store_path_lo,
             &block.header,
-            hash,
+            proof.hash,
             carried,
             (i > 0).then(|| metas[i - 1].hash),
         )?;
         header_ns = header_ns.saturating_add(t_header.elapsed().as_nanos() as u64);
 
         let t_prep = Instant::now();
-        let prev_fk = if i == 0 {
-            if block.header.prev_blockhash.to_byte_array() == [0u8; 32] {
-                rbitcoin_primitives::Fk::NULL
-            } else {
-                rbitcoin_consensus::block::require_linked_parent(
-                    query
-                        .get_header_by_hash(block.header.prev_blockhash.as_byte_array())
-                        .map_err(ConfirmError::from)?
-                        .map(|(fk, _)| fk),
-                )?
-            }
+        let prev_fk = if let Some(fk) = proof.prev_fk {
+            fk
         } else {
-            metas[i - 1].header_fk
+            prev_link_for_block(query, i, &block.header, &metas)?.fk
         };
-        let header_rec = crate::convert::header_to_record(prev_fk, &block.header, hash);
+        let header_rec = crate::convert::header_to_record(prev_fk, &block.header, proof.hash);
         prepare_ns = prepare_ns.saturating_add(t_prep.elapsed().as_nanos() as u64);
         let t_put = Instant::now();
-        let header_fk = stamp_header_fk(query, &header_rec, carried.map(|(fk, _)| fk))?;
+        let header_fk = stamp_header_fk(
+            query,
+            &header_rec,
+            carried.map(|(fk, _)| fk),
+            proof.proven.as_ref(),
+        )?;
         header_ns = header_ns.saturating_add(t_put.elapsed().as_nanos() as u64);
         wire_blocks.push(block);
         metas.push(BodyMeta {
             height: *height,
-            hash,
+            hash: proof.hash,
             header_fk,
             header_rec,
             tx_fks: Vec::new(),
@@ -766,8 +871,16 @@ pub fn stamp_header_fk(
     query: &Query,
     header_rec: &rbitcoin_store::HeaderRecord,
     carried: Option<rbitcoin_primitives::Fk>,
+    proven: Option<&rbitcoin_store::HeaderRecord>,
 ) -> Result<rbitcoin_primitives::Fk, ConfirmError> {
     if let Some(fk) = carried {
+        if proven.is_some_and(|rec| rec.hash == header_rec.hash) {
+            crate::note_confirm(&query.confirm_stats().phase_prep_header_skip_n, 1);
+            return Ok(fk);
+        }
+        // No later connect read compares this row to the header hash. Keep the
+        // pread for a row that failed the field match: bind it only when its
+        // stored hash equals the digest lookup just computed.
         match query.store().get_header(fk) {
             Ok(rec) if rec.hash == header_rec.hash => {
                 crate::note_confirm(&query.confirm_stats().phase_prep_header_skip_n, 1);

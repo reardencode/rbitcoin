@@ -1469,6 +1469,34 @@ fn plan_batch_spend_between_repeated_txid_binds_the_earlier_copy() {
 }
 
 #[test]
+fn archive_plan_dup_is_in_block_only() {
+    let (dir, q) = temp_query("archive-plan-dup");
+    let normal = vec![(Fk(1), vec![coinbase_apply(1)])];
+    let plan = plan_applies(&q, &normal, 1, &rbitcoin_query::InFlight::new(), None)
+        .expect("one txid plans");
+    assert_eq!(plan.planned_fks, vec![Fk(1)]);
+
+    let intra = vec![(Fk(1), vec![coinbase_apply(1), coinbase_apply(1)])];
+    let err = plan_applies(&q, &intra, 1, &rbitcoin_query::InFlight::new(), None)
+        .expect_err("in-block duplicate");
+    assert!(
+        err.to_string()
+            .contains("duplicate txid in block body (consensus violation)"),
+        "{err}"
+    );
+
+    let cross = vec![
+        (Fk(1), vec![coinbase_apply(1)]),
+        (Fk(2), vec![coinbase_apply(1)]),
+    ];
+    let plan = plan_applies(&q, &cross, 1, &rbitcoin_query::InFlight::new(), None)
+        .expect("cross-block repeat");
+    let txid = coinbase_apply(1).tx.txid;
+    assert_eq!(plan.batch_creates, vec![(txid, Fk(1)), (txid, Fk(2))]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn plan_batch_from_wire_duplicate_txid_in_one_block_is_corrupt() {
     let (dir, q) = temp_query("dup-txid-in-block");
     let need = vec![(Fk(1), vec![coinbase_apply(1), coinbase_apply(1)])];

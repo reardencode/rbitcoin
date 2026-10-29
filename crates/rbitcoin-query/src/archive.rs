@@ -1464,17 +1464,16 @@ impl Query {
             }
             let first_tx_fk = Fk(next_tx);
             let n_txs = block.txdata.len() as u32;
-            let mut in_block =
-                crate::TxidSet::with_capacity_and_hasher(txids.len(), Default::default());
+            let span_hi = first_tx_fk.0.saturating_add(u64::from(n_txs));
             for (tx_index, (tx, txid)) in block.txdata.iter().zip(txids.iter()).enumerate() {
-                if !in_block.insert(*txid) {
-                    return Err(StoreError::Corrupt(
-                        "duplicate txid in block body (consensus violation)",
-                    ));
-                }
                 let tx_fk = Fk(next_tx);
                 next_tx += 1;
                 if let Some(prev) = batch_map.insert(*txid, tx_fk) {
+                    if prev.0 >= first_tx_fk.0 && prev.0 < span_hi {
+                        return Err(StoreError::Corrupt(
+                            "duplicate txid in block body (consensus violation)",
+                        ));
+                    }
                     batch_repeats
                         .entry(*txid)
                         .or_insert_with(|| vec![prev])

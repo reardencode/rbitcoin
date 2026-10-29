@@ -179,7 +179,8 @@ fn structure_with_pres_skips_from_tx() {
 #[test]
 fn script_jobs_from_same_pres_slice_share_pre() {
     use TxPrecompute;
-    let spend = non_coinbase_spend(1);
+    let mut spend = non_coinbase_spend(1);
+    spend.input[0].witness = Witness::from_slice(&[vec![0x00]]);
     let pres: std::sync::Arc<[TxPrecompute]> =
         std::sync::Arc::from([TxPrecompute::from_tx(&spend)]);
     let prevouts = vec![
@@ -377,6 +378,48 @@ fn padded_spend(data_len: usize) -> Transaction {
 /// An unspent connected coinbase with the same txid is BIP30 on regtest (no
 /// 91842/91880 grandfather). Signet activates BIP34 at height 1, and Core's
 /// empty BIP34 hash still enforces BIP30 on every signet block.
+#[test]
+fn bip30_queries_the_given_txids() {
+    let (path, q, first) = plant_unspent_coinbase("bip30-given-txids");
+    let dup = block_with(vec![first.clone()]);
+    let real = block_txids(&dup);
+    let parents = rbitcoin_query::BatchParents::new();
+    let abs_jobs = parents
+        .spend_abs_jobs(std::iter::empty::<(
+            rbitcoin_primitives::Fk,
+            u32,
+            rbitcoin_primitives::Fk,
+            u32,
+        )>())
+        .expect("no spend edges");
+    let check = |txids: &[[u8; 32]]| {
+        structural_validate_spends(
+            &q,
+            &dup,
+            &ctx_h(10),
+            &[],
+            0,
+            &mut rbitcoin_query::block_pipeline::BatchSpent::default(),
+            &parents,
+            &mut rbitcoin_query::U32Map::default(),
+            &RunCreateHeight::Spans(Vec::new()),
+            &ClassAWave::default(),
+            &mut StructuralScratch::default(),
+            &abs_jobs,
+            None,
+            txids,
+        )
+        .err()
+        .map(|e| format!("{e}"))
+        .unwrap_or_default()
+    };
+    let hit = check(&real);
+    assert!(hit.contains("bad-txns-BIP30"), "{hit}");
+    let miss = check(&[[0x5au8; 32]]);
+    assert!(!miss.contains("bad-txns-BIP30"), "{miss}");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
 fn rejects_unspent_overwrite(q: &rbitcoin_query::Query, first: &Transaction) {
     use rbitcoin_primitives::Fk;
     use rbitcoin_query::{BatchParents, U32Map};
@@ -408,6 +451,7 @@ fn rejects_unspent_overwrite(q: &rbitcoin_query::Query, first: &Transaction) {
             &mut StructuralScratch::default(),
             &abs_jobs,
             None,
+            &block_txids(&dup),
         )
         .expect_err("an unspent overwrite must trip BIP30");
         let msg = format!("{err}");
@@ -416,6 +460,14 @@ fn rejects_unspent_overwrite(q: &rbitcoin_query::Query, first: &Transaction) {
             "{net}: expected BIP30 reject, got {msg}"
         );
     }
+}
+
+fn block_txids(block: &Block) -> Vec<[u8; 32]> {
+    block
+        .txdata
+        .iter()
+        .map(|tx| tx.compute_txid().to_byte_array())
+        .collect()
 }
 
 fn plant_unspent_coinbase(
@@ -534,6 +586,7 @@ fn bip30_message_at_mainnet_above_bip34(
         &mut StructuralScratch::default(),
         &abs_jobs,
         q.confirmed_bip34_ancestor(main.btc.bip34_height),
+        &block_txids(block),
     )
     .map(|_| ())
 }
@@ -1252,6 +1305,7 @@ fn assemble_rejects_empty_and_fk_mismatch() {
     let thin = SpendEdges::default();
     let mut spent = OutPointSet::default();
     let mut creates = PendingCreates::default();
+    let mut spent_txids = rbitcoin_consensus::TxidSet::default();
     let zero = [0u8; 32];
     let err = assemble_block_prevouts(
         &empty,
@@ -1259,6 +1313,7 @@ fn assemble_rejects_empty_and_fk_mismatch() {
         None,
         &mut spent,
         &mut creates,
+        &mut spent_txids,
         &parents,
         &thin,
         &[],
@@ -1289,6 +1344,7 @@ fn assemble_rejects_empty_and_fk_mismatch() {
         Some(&[]),
         &mut spent,
         &mut creates,
+        &mut spent_txids,
         &parents,
         &thin,
         &tids,
@@ -1318,6 +1374,7 @@ fn assemble_rejects_empty_and_fk_mismatch() {
         None,
         &mut spent,
         &mut creates,
+        &mut spent_txids,
         &parents,
         &thin,
         &tids3,
@@ -1346,6 +1403,7 @@ fn assemble_pending_creates_is_txid_map_and_meters_flush() {
     let thin = SpendEdges::default();
     let mut spent = OutPointSet::default();
     let mut creates = PendingCreates::default();
+    let mut spent_txids = rbitcoin_consensus::TxidSet::default();
     let b = block_with(vec![coinbase(1)]);
     let tids: Vec<[u8; 32]> = b
         .txdata
@@ -1361,6 +1419,7 @@ fn assemble_pending_creates_is_txid_map_and_meters_flush() {
         Some(&[Fk(1)]),
         &mut spent,
         &mut creates,
+        &mut spent_txids,
         &parents,
         &thin,
         &tids,
@@ -1381,6 +1440,87 @@ fn assemble_pending_creates_is_txid_map_and_meters_flush() {
     assert_eq!(w.asm_prev_batch_n, 0);
     assert_eq!(w.asm_prev_same_n, 0);
     let _ = std::fs::remove_dir_all(&path);
+}
+
+/// A unique txid does not clear spends. A later copy of the same txid clears
+/// only that txid's outputs.
+#[test]
+fn release_repeated_outputs_only_for_a_repeated_txid() {
+    use rbitcoin_primitives::Fk;
+    use rbitcoin_query::{BatchParents, OutPointSet, SpendEdges};
+    let ctx = ctx_h(1);
+    let parents = BatchParents::new();
+    let thin = SpendEdges::default();
+    let mut spent = OutPointSet::default();
+    let mut creates = PendingCreates::default();
+    let mut spent_txids = rbitcoin_consensus::TxidSet::default();
+    let first = block_with(vec![coinbase(1)]);
+    let first_txid = first.txdata[0].compute_txid().to_byte_array();
+    let mut unique_cb = coinbase(1);
+    let mut ss = unique_cb.input[0].script_sig.to_bytes();
+    ss.push(0x00);
+    unique_cb.input[0].script_sig = ScriptBuf::from_bytes(ss);
+    let unique = block_with(vec![unique_cb]);
+    let unique_txid = unique.txdata[0].compute_txid().to_byte_array();
+    assert_ne!(first_txid, unique_txid);
+    let other = [0xabu8; 32];
+    let run = |block: &Block,
+               fk: Fk,
+               spent: &mut OutPointSet,
+               creates: &mut PendingCreates,
+               spent_txids: &mut rbitcoin_consensus::TxidSet| {
+        let tids: Vec<[u8; 32]> = block
+            .txdata
+            .iter()
+            .map(|t| t.compute_txid().to_byte_array())
+            .collect();
+        let bh = block.header.block_hash().to_byte_array();
+        let bip16 = bip16_active_from_prev_mtp(ctx.params, ctx.height.0, &bh, 0);
+        assemble_block_prevouts(
+            block,
+            &ctx,
+            Some(&[fk]),
+            spent,
+            creates,
+            spent_txids,
+            &parents,
+            &thin,
+            &tids,
+            0,
+            &bh,
+            bip16,
+            None,
+            None,
+            false,
+            &std::collections::HashSet::new(),
+        )
+        .expect("assemble");
+    };
+    run(&first, Fk(1), &mut spent, &mut creates, &mut spent_txids);
+    assert!(spent.insert((first_txid, 0)));
+    assert!(spent.insert((other, 0)));
+    run(&unique, Fk(2), &mut spent, &mut creates, &mut spent_txids);
+    assert!(spent.contains(&(first_txid, 0)));
+    assert!(spent.contains(&(other, 0)));
+    run(&first, Fk(3), &mut spent, &mut creates, &mut spent_txids);
+    assert!(!spent.contains(&(first_txid, 0)));
+    assert!(spent.contains(&(other, 0)));
+
+    // The first copy connected before this batch. Its spend is in the batch,
+    // and the new copy is the first time this txid enters `pending_creates`.
+    let mut prior_spent = OutPointSet::default();
+    let mut prior_creates = PendingCreates::default();
+    let mut prior_ids = rbitcoin_consensus::TxidSet::default();
+    assert!(prior_spent.insert((first_txid, 0)));
+    prior_ids.insert(first_txid);
+    run(
+        &first,
+        Fk(4),
+        &mut prior_spent,
+        &mut prior_creates,
+        &mut prior_ids,
+    );
+    assert!(!prior_spent.contains(&(first_txid, 0)));
 }
 
 /// Confirm jobs keep prevout scripts in the wire block or the pin Arc.
@@ -1472,12 +1612,14 @@ fn script_job_shares_prevout_script() {
     );
     let mut spent = OutPointSet::default();
     let mut creates = PendingCreates::default();
+    let mut spent_txids = rbitcoin_consensus::TxidSet::default();
     let (jobs, _, _, _, _) = assemble_block_prevouts(
         &wire,
         &ctx,
         Some(&[Fk(1), Fk(2), Fk(3)]),
         &mut spent,
         &mut creates,
+        &mut spent_txids,
         &parents,
         &edges,
         &tids,
@@ -1565,6 +1707,7 @@ fn optimistic_assemble_unstamped_parent_is_invariant() {
     let thin = SpendEdges::default();
     let mut spent = OutPointSet::default();
     let mut creates = PendingCreates::default();
+    let mut spent_txids = rbitcoin_consensus::TxidSet::default();
     let create_txids: Vec<[u8; 32]> = block
         .txdata
         .iter()
@@ -1578,6 +1721,7 @@ fn optimistic_assemble_unstamped_parent_is_invariant() {
         Some(&spend_fks),
         &mut spent,
         &mut creates,
+        &mut spent_txids,
         &parents,
         &thin,
         &create_txids,
@@ -1713,9 +1857,15 @@ fn accept_rejects_connect_spend_rules() {
 
 /// A tip-follow connect row is the preverified set. Assemble must not fail
 /// the block on that row; the spend rule still runs.
+///
+/// A legacy connect row has no BIP143 midstates, so leaving it out of the
+/// preverified set still reaches the spend rule. A segwit connect row that
+/// is not preverified fails closed: script verify needs those midstates.
 #[test]
 fn preverified_connect_row_reaches_the_spend_rule() {
-    use rbitcoin_consensus::{mine_empty_regtest, prepare_regtest_candidate, pres_for_tip};
+    use rbitcoin_consensus::{
+        grind_regtest_pow, mine_empty_regtest, prepare_regtest_candidate, pres_for_tip,
+    };
     use rbitcoin_query::accept_and_connect_block_preverified;
     use std::sync::Arc;
 
@@ -1753,7 +1903,7 @@ fn preverified_connect_row_reaches_the_spend_rule() {
     };
     let spend_id = spend.compute_txid().to_byte_array();
     let mut b2 = mine_empty_regtest(b1.block_hash(), b1.header.time + 600, 2);
-    b2.txdata.push(spend);
+    b2.txdata.push(spend.clone());
     prepare_regtest_candidate(&mut b2, b1.block_hash(), b1.header.time + 600);
 
     let (pres, skip) = pres_for_tip(&b2.txdata, false, |id| id == spend_id);
@@ -1769,10 +1919,10 @@ fn preverified_connect_row_reaches_the_spend_rule() {
         &Default::default(),
         Some(Arc::clone(&pres)),
     )
-    .expect_err("a connect row that will be verified still fails closed");
+    .expect_err("a legacy connect row still hits the spend rule");
     assert!(
-        bare.to_string().contains("sighash midstate"),
-        "unskipped connect row: {bare}"
+        matches!(bare, ConfirmError::Rules(ConsensusError::BadTx(s)) if s.contains("immature")),
+        "legacy connect row does not need midstates, got {bare:?}"
     );
     assert_eq!(q.tip_height(), Some(Height(1)));
 
@@ -1789,6 +1939,56 @@ fn preverified_connect_row_reaches_the_spend_rule() {
     assert!(
         matches!(err, ConfirmError::Rules(ConsensusError::BadTx(s)) if s.contains("immature")),
         "preverified connect row must reach the spend rule, got {err:?}"
+    );
+    assert_eq!(q.tip_height(), Some(Height(1)));
+
+    let mut segwit = spend;
+    segwit.input[0].witness.push([1u8]);
+    let segwit_id = segwit.compute_txid().to_byte_array();
+    let mut b3 = mine_empty_regtest(b1.block_hash(), b1.header.time + 600, 2);
+    b3.txdata.push(segwit);
+    prepare_regtest_candidate(&mut b3, b1.block_hash(), b1.header.time + 600);
+    apply_witness_commitment(&mut b3);
+    grind_regtest_pow(&mut b3.header);
+    let (seg_pres, seg_skip) = pres_for_tip(&b3.txdata, false, |id| id == segwit_id);
+    assert!(
+        seg_pres[1].as_script().is_none(),
+        "live segwit tx is connect-only"
+    );
+    assert!(
+        rbitcoin_consensus::tx_precompute::sighash_midstates_for(&b3.txdata[1]),
+        "a witness marks the tx as needing BIP143 midstates"
+    );
+
+    let closed = accept_and_connect_block_preverified(
+        &q,
+        &params,
+        Height(2),
+        Arc::new(b3.clone()),
+        Milestone::NONE,
+        &Default::default(),
+        Some(Arc::clone(&seg_pres)),
+    )
+    .expect_err("a segwit connect row that will be verified fails closed");
+    assert!(
+        closed.to_string().contains("sighash midstate"),
+        "unskipped segwit connect row: {closed}"
+    );
+    assert_eq!(q.tip_height(), Some(Height(1)));
+
+    let seg_err = accept_and_connect_block_preverified(
+        &q,
+        &params,
+        Height(2),
+        Arc::new(b3),
+        Milestone::NONE,
+        &seg_skip,
+        Some(seg_pres),
+    )
+    .expect_err("the preverified segwit spend still rejects as immature");
+    assert!(
+        matches!(seg_err, ConfirmError::Rules(ConsensusError::BadTx(s)) if s.contains("immature")),
+        "preverified segwit connect row must reach the spend rule, got {seg_err:?}"
     );
     assert_eq!(q.tip_height(), Some(Height(1)));
 }
@@ -2207,6 +2407,7 @@ fn assemble_milestone_pin_still_rejects_bad_blk_sigops() {
     );
     let mut spent = OutPointSet::default();
     let mut creates = PendingCreates::default();
+    let mut spent_txids = rbitcoin_consensus::TxidSet::default();
     let tids: Vec<[u8; 32]> = b
         .txdata
         .iter()
@@ -2219,6 +2420,7 @@ fn assemble_milestone_pin_still_rejects_bad_blk_sigops() {
         Some(&[Fk::NULL, spend_fk]),
         &mut spent,
         &mut creates,
+        &mut spent_txids,
         &parents,
         &thin,
         &tids,
@@ -2314,12 +2516,14 @@ fn signet_low_work_fork_runs_scripts(q: &rbitcoin_query::Query) {
     let run = |q: &rbitcoin_query::Query| {
         let mut spent = OutPointSet::default();
         let mut creates = PendingCreates::default();
+        let mut spent_txids = rbitcoin_consensus::TxidSet::default();
         assemble_block_prevouts(
             &b,
             &ctx,
             Some(&[Fk::NULL, spend_fk]),
             &mut spent,
             &mut creates,
+            &mut spent_txids,
             &parents,
             &thin,
             &tids,
@@ -2493,6 +2697,7 @@ fn bip30_ignores_unspendable_outputs() {
             &mut StructuralScratch::default(),
             &abs_jobs,
             None,
+            &block_txids(&dup),
         )
         .err()
         .map(|e| format!("{e}"))
@@ -3278,7 +3483,8 @@ fn s17_many_unique_outpoints_accept() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    check_tx_local(&many, many.base_size()).expect("64 unique inputs");
+    validate_block_structure(&block_with(vec![coinbase(0), many]), &ctx_h(0))
+        .expect("64 unique inputs");
 }
 
 #[test]

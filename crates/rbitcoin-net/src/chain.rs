@@ -1882,7 +1882,14 @@ impl ChainHub {
         expected: CompactTarget,
     ) -> Result<(), NetError> {
         soften_parent_header(query, header, height, || {
-            validate_header_on_parent(params, Height(height), header, mtp, expected)
+            validate_header_on_parent(
+                params,
+                Height(height),
+                header,
+                mtp,
+                expected,
+                header.block_hash().to_byte_array(),
+            )
         })
         .map_err(|e| header_reject(header, &rbitcoin_query::ConfirmError::from(e)))
     }
@@ -3213,6 +3220,7 @@ impl ChainHub {
                                     &b.header,
                                     mtp,
                                     expected,
+                                    hash.to_byte_array(),
                                 )
                             })
                             .map_err(|e| {

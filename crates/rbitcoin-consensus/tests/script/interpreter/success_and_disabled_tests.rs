@@ -7,7 +7,7 @@ use rbitcoin_consensus::error::ConsensusError;
 use rbitcoin_consensus::script::interpreter::*;
 
 fn fad(script: &[u8], data: &[u8]) -> Vec<u8> {
-    find_and_delete(script, ScriptElem::new(data).unwrap())
+    find_and_delete(script, ScriptElem::new(data).unwrap()).into_owned()
 }
 
 fn eval(script_bytes: &[u8], sig_version: SigVersion) -> Result<bool, ConsensusError> {
@@ -966,6 +966,40 @@ fn stack_and_altstack_share_max_size_on_pushdata() {
     shared.extend(std::iter::repeat_n(0x51, 501));
     shared.push(0x61);
     eval(&shared, SigVersion::WitnessV0).expect("sum under the shared limit");
+}
+
+/// A script with no signature push and no bare `OP_CODESEPARATOR` hashes as
+/// the original bytes. A push of `0xab` is not a separator.
+#[test]
+fn find_and_delete_clean_script_matches_the_input() {
+    use bitcoin::hashes::Hash;
+    use bitcoin::sighash::SighashCache;
+    let script = vec![0x51, 0x01, 0xab, 0x52];
+    assert_eq!(fad(&script, &[0xff, 0xee]), script);
+    assert_eq!(strip_op_codeseparator(&script).as_ref(), script.as_slice());
+    let sep = [0x51, 0xab, 0x52];
+    assert_eq!(strip_op_codeseparator(&sep).as_ref(), &[0x51, 0x52]);
+
+    let tx = Transaction {
+        version: bitcoin::transaction::Version::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![],
+    };
+    let code = Script::from_bytes(&script);
+    let ctx = EvalContext::new(&tx, 0, Amount::from_sat(1), code, SigVersion::Base);
+    let ours = sighash_for_script(&ctx, 1, &script, PreTapscript::Base).expect("sighash");
+    let cache = SighashCache::new(&tx);
+    let theirs = cache
+        .legacy_signature_hash(0, code, 1)
+        .expect("rust-bitcoin")
+        .to_byte_array();
+    assert_eq!(ours, theirs);
 }
 
 /// Short `OP_PUSHDATA4` inside a legacy scriptCode. The payload must not be

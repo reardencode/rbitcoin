@@ -32,6 +32,21 @@ fn mine(prev: BlockHash, n: u32) -> Header {
     h
 }
 
+#[test]
+fn pow_linked_accepts_a_chain_and_rejects_a_bad_link_or_pow() {
+    let a = mine(BlockHash::from_byte_array([0; 32]), 1);
+    let b = mine(a.block_hash(), 2);
+    let c = mine(b.block_hash(), 3);
+    assert!(pow_linked(&[a, b, c]));
+    assert!(pow_linked(&[a]));
+    let mislink = mine(a.block_hash(), 9);
+    assert!(!pow_linked(&[a, b, mislink]));
+    // Regtest 0x207fffff accepts every hash, so a nonce bump is not a pow miss.
+    let mut bad_pow = c;
+    bad_pow.bits = CompactTarget::from_consensus(0x1d00ffff);
+    assert!(!pow_linked(&[a, b, bad_pow]));
+}
+
 fn slot(id: usize) -> (PeerSlot, mpsc::UnboundedReceiver<PeerCmd>) {
     let (cmd_tx, rx) = mpsc::unbounded_channel();
     let task = tokio::runtime::Builder::new_current_thread()

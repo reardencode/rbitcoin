@@ -337,8 +337,8 @@ fn bq_resolve_wave_attaches_tiponly_hits_multi_height() {
     assert!(!q.block_queue_has_height(2));
     let spend_pre = &wave.items[0].2.pres[1];
     assert!(
-        spend_pre.sha_prevouts().is_some(),
-        "Milestone::NONE must from_tx_wire (sighash midstates present)"
+        spend_pre.sha_prevouts().is_none(),
+        "a legacy spend stores no bip143 midstates"
     );
     assert_eq!(spend_pre.txid, b1.txdata[1].compute_txid().to_byte_array());
     let _ = std::fs::remove_dir_all(&path);

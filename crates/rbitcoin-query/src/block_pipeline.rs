@@ -103,6 +103,8 @@ pub struct AssembleMeters {
 ///
 /// `pending_spent`: pack-local double-spend (early reject before scripts).
 /// `pending_creates`: pack-local `txid → create_fk` (not per-vout).
+/// `spent_txids`: parents spent in this write batch. A later copy releases
+/// that txid's outputs even when the first copy connected before the batch.
 /// Same-block outs use `txid_index` when the create index is earlier than
 /// the spender; meters flush
 /// once per block (no per-input Instant / atomics).
@@ -126,6 +128,7 @@ pub fn assemble_block_prevouts(
     archived_tx_fks: Option<&[rbitcoin_primitives::Fk]>,
     pending_spent: &mut rbitcoin_consensus::OutPointSet,
     pending_creates: &mut PendingCreates,
+    spent_txids: &mut rbitcoin_consensus::TxidSet,
     batch_parents: &crate::BatchParents,
     spend_edges: &crate::SpendEdges,
     create_txids: &[[u8; 32]],
@@ -219,6 +222,7 @@ pub fn assemble_block_prevouts(
                 pres,
                 &txid_index,
                 pending_spent,
+                spent_txids,
                 pending_creates,
                 batch_parents,
                 spend_edges,
@@ -235,10 +239,14 @@ pub fn assemble_block_prevouts(
         }
 
         let create_fk = spend_fk.unwrap_or(rbitcoin_primitives::Fk::NULL);
-        if !create_fk.is_null() {
-            pending_creates.insert(txid, create_fk);
+        let repeated_here =
+            !create_fk.is_null() && pending_creates.insert(txid, create_fk).is_some();
+        // A unique txid that this batch has not spent does not walk outputs.
+        // A second copy in the batch, or the first copy after an earlier
+        // spend of the same txid, clears those outpoints.
+        if repeated_here || spent_txids.contains(&txid) {
+            release_repeated_outputs(pending_spent, txid, tx.output.len());
         }
-        release_repeated_outputs(pending_spent, txid, tx.output.len());
     }
 
     let clk_prev = t_loop.elapsed().as_nanos() as u64;
@@ -299,6 +307,7 @@ pub fn assemble_non_cb_tx(
     pres: Option<&Arc<[rbitcoin_consensus::TxPrecompute]>>,
     txid_index: &TxidMap<usize>,
     pending_spent: &mut rbitcoin_consensus::OutPointSet,
+    spent_txids: &mut rbitcoin_consensus::TxidSet,
     pending_creates: &PendingCreates,
     batch_parents: &crate::BatchParents,
     spend_edges: &crate::SpendEdges,
@@ -329,6 +338,7 @@ pub fn assemble_non_cb_tx(
         bip16_active,
         txid_index,
         pending_spent,
+        spent_txids,
         pending_creates,
         batch_parents,
         spend_edges,
@@ -378,10 +388,15 @@ pub fn assemble_non_cb_tx(
         };
         if let Some(ps) = pres {
             if rbitcoin_consensus::block::should_use_pres(ti, ps.len()) {
-                // A preverified connect row has no midstates. The script stage
-                // drops that job, so attaching it would fail the block first.
+                // A connect-only row has no BIP143 midstates. The script stage
+                // drops a preverified job, so attaching that row would fail
+                // the block before the spend rule. A legacy row never reads
+                // those midstates. A segwit row that is still verified must
+                // attach, and that fails closed while the row is connect-only.
                 let connect_only = ps[ti].as_script().is_none();
-                if !(connect_only && preverified.contains(&txid)) {
+                let legacy_midstates =
+                    connect_only && !rbitcoin_consensus::tx_precompute::sighash_midstates_for(tx);
+                if !(legacy_midstates || connect_only && preverified.contains(&txid)) {
                     job = job.with_pre_slice(Arc::clone(ps), ti)?;
                 }
             }
@@ -404,6 +419,7 @@ pub fn assemble_non_cb_inputs(
     bip16_active: bool,
     txid_index: &TxidMap<usize>,
     pending_spent: &mut rbitcoin_consensus::OutPointSet,
+    spent_txids: &mut rbitcoin_consensus::TxidSet,
     pending_creates: &PendingCreates,
     batch_parents: &crate::BatchParents,
     spend_edges: &crate::SpendEdges,
@@ -440,6 +456,7 @@ pub fn assemble_non_cb_inputs(
             params.is_genesis_coinbase(&key.0),
         )?;
         rbitcoin_consensus::block::reject_duplicate_input(pending_spent.insert(key))?;
+        spent_txids.insert(key.0);
         let (skip_fee, residue, same_block) = if let Some(&pj) = txid_index.get(&key.0) {
             let skip_fee = rbitcoin_consensus::block::reject_same_block_create(pj, ti)?;
             let residue = if skip_fee {
@@ -620,11 +637,6 @@ pub struct StructuralScratch {
     pub abs_jobs: Vec<StructuralAbsJob>,
     pub unique_fks: Vec<rbitcoin_primitives::Fk>,
     pub height_by_id: U64Map<u32>,
-    pub skip_n: std::collections::HashMap<
-        (u64, u32),
-        u32,
-        BuildHasherDefault<rbitcoin_consensus::OutPointHasher>,
-    >,
     pub skip: OverlayMetaSkip,
     pub disk_jobs: Vec<StructuralAbsJob>,
     pub abs_offs: Vec<u64>,
@@ -647,7 +659,6 @@ impl Default for StructuralScratch {
             abs_jobs: Vec::new(),
             unique_fks: Vec::new(),
             height_by_id: U64Map::default(),
-            skip_n: std::collections::HashMap::with_hasher(Default::default()),
             skip: OverlayMetaSkip::with_hasher(Default::default()),
             disk_jobs: Vec::new(),
             abs_offs: Vec::new(),
@@ -679,7 +690,6 @@ impl StructuralScratch {
         self.abs_jobs.clear();
         self.unique_fks.clear();
         self.height_by_id.clear();
-        self.skip_n.clear();
         self.skip.clear();
         self.disk_jobs.clear();
         self.abs_offs.clear();
@@ -718,6 +728,7 @@ pub fn structural_validate_spends(
     scratch: &mut StructuralScratch,
     abs_jobs: &[StructuralAbsJob],
     bip34_ancestor: Option<bitcoin::BlockHash>,
+    create_txids: &[[u8; 32]],
 ) -> Result<StructuralPhaseNs, ConfirmError> {
     use std::time::Instant;
 
@@ -733,6 +744,7 @@ pub fn structural_validate_spends(
         run_create_height,
         scratch,
         bip34_ancestor,
+        create_txids,
     )?;
     let t_abs = Instant::now();
     structural_abs_heights(query, run_create_height, scratch, abs_jobs)?;
@@ -897,7 +909,7 @@ pub type DurableSpentSet =
 #[doc(hidden)]
 pub type OverlayMetaSkip = std::collections::HashMap<
     (u64, u32),
-    (rbitcoin_primitives::Fk, u32),
+    Option<(rbitcoin_primitives::Fk, u32)>,
     BuildHasherDefault<rbitcoin_consensus::OutPointHasher>,
 >;
 
@@ -913,6 +925,7 @@ pub fn fill_overlay_skip(
     class_a_wave: &ClassAWave,
     scratch: &mut StructuralScratch,
 ) {
+    use std::collections::hash_map::Entry;
     for &(_, vout, sfk, cfk, vin) in spends {
         if !class_a_wave.contains(cfk) {
             continue;
@@ -920,14 +933,16 @@ pub fn fill_overlay_skip(
         let Some(id) = cfk.get() else {
             continue;
         };
-        let key = (id, vout);
-        *scratch.skip_n.entry(key).or_insert(0) += 1;
-        scratch.skip.entry(key).or_insert((sfk, vin));
+        // None stays. Dropping the key would make a later sight look like the first.
+        match scratch.skip.entry((id, vout)) {
+            Entry::Vacant(slot) => {
+                slot.insert(Some((sfk, vin)));
+            }
+            Entry::Occupied(mut slot) => {
+                slot.insert(None);
+            }
+        }
     }
-    let skip_n = &scratch.skip_n;
-    scratch
-        .skip
-        .retain(|k, _| skip_n.get(k).copied() == Some(1));
 }
 
 #[doc(hidden)]
@@ -938,7 +953,7 @@ pub fn overlay_meta_is_skip(
     vin: u32,
     skip: &OverlayMetaSkip,
 ) -> bool {
-    skip.get(&(id, vout)) == Some(&(sfk, vin))
+    skip.get(&(id, vout)).copied().flatten() == Some((sfk, vin))
 }
 
 #[doc(hidden)]
@@ -1235,11 +1250,8 @@ pub fn structural_bip68(
     }
     const DISABLE: u32 = 1 << 31;
     const TYPE_FLAG: u32 = 1 << 22;
-    let prev_mtp = if ctx.height.0 == 0 {
-        0
-    } else {
-        mtp_at(query, Height(ctx.height.0 - 1), mtp_cache)?
-    };
+    // Median time is only needed when some input enforces a relative lock.
+    let mut prev_mtp_slot: Option<u32> = None;
     let mut si = 0usize;
     let mut prev_heights: Vec<u32> = Vec::new();
     let mut coin_mtps: Vec<u32> = Vec::new();
@@ -1251,6 +1263,24 @@ pub fn structural_bip68(
         if !rbitcoin_consensus::block::bip68_active_for_tx(tx) {
             continue;
         }
+        if tx
+            .input
+            .iter()
+            .all(|inp| inp.sequence.to_consensus_u32() & DISABLE != 0)
+        {
+            continue;
+        }
+        let prev_mtp = if let Some(t) = prev_mtp_slot {
+            t
+        } else {
+            let t = if ctx.height.0 == 0 {
+                0
+            } else {
+                mtp_at(query, Height(ctx.height.0 - 1), mtp_cache)?
+            };
+            prev_mtp_slot = Some(t);
+            t
+        };
         prev_heights.clear();
         coin_mtps.clear();
         prev_heights.reserve(n_in);
@@ -1296,6 +1326,7 @@ pub fn structural_bip68(
 /// [`crate::params::BIP34_IMPLIES_BIP30_LIMIT`]. Signet and regtest have no
 /// BIP34 hash, so every block is checked. Just-archived self is unconnected.
 #[doc(hidden)]
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 pub fn reject_bip30_unspent_overwrite(
     query: &Query,
     block: &Block,
@@ -1304,20 +1335,19 @@ pub fn reject_bip30_unspent_overwrite(
     run_create_height: &RunCreateHeight,
     scratch: &mut StructuralScratch,
     bip34_ancestor: Option<bitcoin::BlockHash>,
+    create_txids: &[[u8; 32]],
 ) -> Result<(), ConfirmError> {
-    if ctx.params.is_bip30_repeat(ctx.height.0, block.block_hash())
-        || bip34_ancestry_skips_bip30(ctx, bip34_ancestor)
+    if ctx.params.bip30_exception_height(ctx.height.0)
+        && ctx.params.is_bip30_repeat(ctx.height.0, block.block_hash())
     {
         return Ok(());
     }
-    let create_txids: Vec<[u8; 32]> = block
-        .txdata
-        .iter()
-        .map(|tx| tx.compute_txid().to_byte_array())
-        .collect();
+    if bip34_ancestry_skips_bip30(ctx, bip34_ancestor) {
+        return Ok(());
+    }
     // An earlier block of this batch is not connected yet, so the store
     // lookup below cannot see its creates.
-    for txid in &create_txids {
+    for txid in create_txids {
         let Some(&(prior_height, lo, hi)) = scratch.batch_creates.get(txid) else {
             continue;
         };
@@ -1333,7 +1363,7 @@ pub fn reject_bip30_unspent_overwrite(
     }
     let hits = query
         .store()
-        .get_fk_by_txid_batch(&create_txids)
+        .get_fk_by_txid_batch(create_txids)
         .map_err(ConfirmError::from)?;
     for (txid, row) in hits {
         let Some((old_fk, _)) = row else {
@@ -1379,7 +1409,7 @@ pub fn reject_bip30_unspent_overwrite(
             )?;
         }
     }
-    for (txid, tx) in create_txids.into_iter().zip(&block.txdata) {
+    for (txid, tx) in create_txids.iter().zip(&block.txdata) {
         let lo = scratch.batch_vouts.len() as u32;
         scratch.batch_vouts.extend(
             (0u32..)
@@ -1390,7 +1420,7 @@ pub fn reject_bip30_unspent_overwrite(
                 .map(|(v, _)| v),
         );
         let hi = scratch.batch_vouts.len() as u32;
-        scratch.batch_creates.insert(txid, (ctx.height.0, lo, hi));
+        scratch.batch_creates.insert(*txid, (ctx.height.0, lo, hi));
     }
     Ok(())
 }

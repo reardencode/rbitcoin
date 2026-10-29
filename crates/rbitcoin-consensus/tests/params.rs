@@ -83,6 +83,10 @@ fn is_bip30_repeat_matches_core() {
         "batch-first height 91859 is not an exception"
     );
     assert!(!ChainParams::regtest().is_bip30_repeat(91880, h91880));
+    assert!(main.bip30_exception_height(91_842));
+    assert!(main.bip30_exception_height(91_880));
+    assert!(!main.bip30_exception_height(91_859));
+    assert!(!ChainParams::signet().bip30_exception_height(91_842));
 }
 
 #[test]

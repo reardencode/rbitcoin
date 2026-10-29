@@ -456,6 +456,7 @@ fn index_block(
         time: block.header.time,
         bits: block.header.bits,
         hash: [height as u8; 32],
+        txids: Vec::new(),
         prev_mtp: 0,
     };
     (block, prep)

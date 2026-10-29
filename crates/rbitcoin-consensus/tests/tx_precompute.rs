@@ -52,25 +52,32 @@ fn assert_matches_rust_bitcoin(tx: &Transaction) {
     assert_eq!(p.total_size, tx.total_size(), "total_size");
     assert_eq!(p.weight_wu(), tx.weight().to_wu(), "weight");
     assert_eq!(p.sigops, oracle_sigops(tx), "sigops");
-    assert_eq!(
-        p.sha_prevouts(),
-        Some(oracle_sha_prevouts(tx)),
-        "sha_prevouts"
-    );
-    assert_eq!(
-        p.sha_sequences(),
-        Some(oracle_sha_sequences(tx)),
-        "sha_sequences"
-    );
-    assert_eq!(p.sha_outputs(), Some(oracle_sha_outputs(tx)), "sha_outputs");
-    assert_eq!(
-        p.hash_prevouts(),
-        Some(
-            sha256::Hash::from_byte_array(p.sha_prevouts().unwrap())
-                .hash_again()
-                .to_byte_array()
-        )
-    );
+    if sighash_midstates_for(tx) {
+        assert_eq!(
+            p.sha_prevouts(),
+            Some(oracle_sha_prevouts(tx)),
+            "sha_prevouts"
+        );
+        assert_eq!(
+            p.sha_sequences(),
+            Some(oracle_sha_sequences(tx)),
+            "sha_sequences"
+        );
+        assert_eq!(p.sha_outputs(), Some(oracle_sha_outputs(tx)), "sha_outputs");
+        assert_eq!(
+            p.hash_prevouts(),
+            Some(
+                sha256::Hash::from_byte_array(p.sha_prevouts().unwrap())
+                    .hash_again()
+                    .to_byte_array()
+            )
+        );
+    } else {
+        assert_eq!(p.sha_prevouts(), None, "sha_prevouts");
+        assert_eq!(p.sha_sequences(), None, "sha_sequences");
+        assert_eq!(p.sha_outputs(), None, "sha_outputs");
+        assert_eq!(p.hash_prevouts(), None);
+    }
 }
 
 fn assert_connect_matches_ids(tx: &Transaction) {
@@ -264,6 +271,42 @@ fn flag_zero_wire_is_one_slice() {
 }
 
 #[test]
+fn sighash_midstates_skip_legacy_and_coinbase() {
+    use bitcoin::consensus::encode::serialize;
+    for tx in [legacy_1in(), coinbase_witness_nonce()] {
+        let raw = serialize(&tx);
+        let w = TxPrecompute::from_tx_wire(&tx, &raw, true).expect("wire");
+        assert!(w.sha_prevouts().is_none());
+        assert!(w.sha_sequences().is_none());
+        assert!(w.sha_outputs().is_none());
+        assert_eq!(w.txid, tx.compute_txid().to_byte_array());
+        let full = TxPrecompute::from_tx(&tx);
+        assert!(full.sha_prevouts().is_none());
+        assert_eq!(full.txid, w.txid);
+        assert_eq!(full.wtxid, w.wtxid);
+    }
+    let tx = p2wpkh_like();
+    let raw = serialize(&tx);
+    let w = TxPrecompute::from_tx_wire(&tx, &raw, true).expect("wire");
+    assert_eq!(w.sha_prevouts(), Some(oracle_sha_prevouts(&tx)));
+    assert_eq!(w.sha_sequences(), Some(oracle_sha_sequences(&tx)));
+    assert_eq!(w.sha_outputs(), Some(oracle_sha_outputs(&tx)));
+    let mut prevouts = Vec::new();
+    for input in &tx.input {
+        input
+            .previous_output
+            .consensus_encode(&mut prevouts)
+            .unwrap();
+    }
+    assert_eq!(
+        w.hash_prevouts().unwrap(),
+        sha256d::Hash::hash(&prevouts).to_byte_array()
+    );
+    let off = TxPrecompute::from_tx_wire(&tx, &raw, false).expect("wire");
+    assert!(off.sha_prevouts().is_none());
+}
+
+#[test]
 fn sighash_midstates_come_from_wire_spans() {
     use bitcoin::consensus::encode::serialize;
     let tx = two_input_witness();
@@ -443,8 +486,8 @@ fn pres_for_tip_connects_live_and_hashes_the_rest() {
     );
     assert_eq!(
         pres[1].sha_prevouts(),
-        Some(oracle_sha_prevouts(&other)),
-        "non-live must keep midstates"
+        None,
+        "legacy non-live stores no bip143 midstates"
     );
     assert_eq!(skip.len(), 1);
     assert!(skip.contains(&live_id));

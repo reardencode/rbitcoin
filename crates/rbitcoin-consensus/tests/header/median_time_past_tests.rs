@@ -23,6 +23,38 @@ fn mainnet_32256_difficulty_is_frozen() {
 }
 
 #[test]
+fn validate_header_on_parent_uses_the_caller_digest() {
+    let params = ChainParams::regtest();
+    let mut header = rbitcoin_consensus::params::genesis_block(&params).header;
+    header.version = Version::from_consensus(4);
+    header.time = 1_700_000_000;
+    header.bits = CompactTarget::from_consensus(0x207f_ffff);
+    header.nonce = 0;
+    rbitcoin_consensus::grind_regtest_pow(&mut header);
+    let hash = header.block_hash().to_byte_array();
+    rbitcoin_consensus::clock::with_now(1_700_000_000, || {
+        validate_header_on_parent(&params, Height(1), &header, 0, header.bits, hash).unwrap();
+        let err =
+            validate_header_on_parent(&params, Height(1), &header, 0, header.bits, [0xff; 32])
+                .unwrap_err();
+        assert!(matches!(err, ConsensusError::InvalidPow), "{err:?}");
+        let err = validate_header_on_parent(
+            &params,
+            Height(1),
+            &header,
+            0,
+            CompactTarget::from_consensus(0x1d00_ffff),
+            hash,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ConsensusError::BadHeader(s) if s.contains("proof of work bits")),
+            "{err:?}"
+        );
+    });
+}
+
+#[test]
 fn pow_hash_meets_target_meet_miss_and_limit() {
     let rt = ChainParams::regtest();
     let easy = CompactTarget::from_consensus(0x207f_ffff);

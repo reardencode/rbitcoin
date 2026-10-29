@@ -231,6 +231,7 @@ fn stamp_skips_header_ensure_when_pipeline_carries_fk() {
     );
     assert_eq!(q.store().headers.count(), n_headers);
     assert_eq!(stamped.metas[0].header_fk, hfk);
+    assert_eq!(stamped.metas[0].hash, hash);
     let plan = stamped.plan.as_ref().expect("plan");
     assert_eq!(plan.per_header_ranges[0].0, hfk);
 
@@ -248,6 +249,68 @@ fn stamp_skips_header_ensure_when_pipeline_carries_fk() {
         Err(ConfirmError::Rules(ConsensusError::BadBlock("carried header hash mismatch"))) => {}
         Err(e) => panic!("expected hash mismatch, got {e}"),
         Ok(_) => panic!("expected hash mismatch, got Ok"),
+    }
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[test]
+fn wire_lookup_uses_carried_header_hash() {
+    use rbitcoin_consensus::mine_empty_regtest;
+    use rbitcoin_query::accept_and_connect_block;
+
+    let (path, q) = tmp_query();
+    let params = ChainParams::regtest();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+    let b1 = mine_empty_regtest(genesis.block_hash(), genesis.header.time + 600, 1);
+    let hash = b1.block_hash().to_byte_array();
+    let genesis_fk = q
+        .get_header_by_hash(&genesis.block_hash().to_byte_array())
+        .unwrap()
+        .unwrap()
+        .0;
+    let rec = rbitcoin_query::header_to_record(genesis_fk, &b1.header, hash);
+    let hfk = q.store().put_header(&rec).unwrap();
+    let inflight = rbitcoin_query::InFlight::new();
+    let pipe = |hashes: Vec<[u8; 32]>, fks: Vec<rbitcoin_primitives::Fk>| WireLoadPipeline {
+        path_lo: 1,
+        parent_hash: None,
+        next_tx_start: q.tx_body_count().saturating_add(1).max(1),
+        in_flight: &inflight,
+        skeleton: None,
+        carried_need: Vec::new(),
+        carried_header_fks: fks,
+        carried_header_hashes: hashes,
+    };
+    let items = [(Height(1), Arc::new(b1.clone()), None)];
+    let stamped = confirm_wire_lookup_stamp(
+        &q,
+        &params,
+        Milestone::NONE,
+        &items,
+        Some(&pipe(vec![hash], vec![hfk])),
+    )
+    .expect("carried header");
+    assert_eq!(stamped.metas[0].hash, hash);
+    assert_eq!(stamped.metas[0].header_fk, hfk);
+
+    let bare = confirm_wire_lookup_stamp(&q, &params, Milestone::NONE, &items, None)
+        .expect("no carried hash still stamps");
+    assert_eq!(bare.metas[0].hash, hash);
+
+    let mut tweaked = b1;
+    tweaked.header.prev_blockhash = bitcoin::BlockHash::from_byte_array([0x22; 32]);
+    let tweaked_items = [(Height(1), Arc::new(tweaked), None)];
+    match confirm_wire_lookup_stamp(
+        &q,
+        &params,
+        Milestone::NONE,
+        &tweaked_items,
+        Some(&pipe(vec![hash], vec![hfk])),
+    ) {
+        Err(ConfirmError::Rules(ConsensusError::BadBlock("carried header hash mismatch"))) => {}
+        Err(e) => panic!("prev change must stay a carried-hash mismatch, got {e}"),
+        Ok(_) => panic!("prev change must not adopt the stored header hash"),
     }
     let _ = std::fs::remove_dir_all(&path);
 }

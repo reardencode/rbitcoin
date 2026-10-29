@@ -143,7 +143,9 @@ pub fn is_op_success(code: u8) -> bool {
     ) || (187..=254).contains(&code)
 }
 
-/// BIP342: scan tapscript for OP_SUCCESSx. Returns true if script is immediately valid.
+/// BIP342: scan tapscript for OP_SUCCESSx. Returns true if the script is valid
+/// before resource limits. This stays a separate walk: an `OP_SUCCESS` after a
+/// prefix that would blow a limit is still valid, and those limits must not run.
 pub fn tapscript_has_op_success(script: &Script) -> bool {
     let bytes = script.as_bytes();
     let mut i = 0usize;
@@ -236,6 +238,34 @@ pub struct EvalContext<'a> {
     pub validation_weight_left: Cell<i64>,
     /// Tapscript only: per-input sighash facts from the script-path spend.
     pub tapscript: Option<crypto::TapscriptExecData<'a>>,
+}
+
+/// Placeholder row for a base sighash. Legacy `CHECKSIG` hashes through
+/// `SighashCache` and does not read these midstates. A witness spend never
+/// borrows this row.
+#[doc(hidden)]
+pub fn base_sig_precompute() -> &'static crate::TxScriptPrecompute {
+    use std::sync::OnceLock;
+    static ROW: OnceLock<crate::TxScriptPrecompute> = OnceLock::new();
+    ROW.get_or_init(|| crate::TxScriptPrecompute {
+        connect: crate::TxConnectPrecompute {
+            txid: [0; 32],
+            wtxid: [0; 32],
+            base_size: 0,
+            total_size: 0,
+            sigops: 0,
+            out_sum: 0,
+            has_witness: false,
+        },
+        sha_prevouts: [0; 32],
+        sha_sequences: [0; 32],
+        sha_outputs: [0; 32],
+        sha_amounts: None,
+        sha_scriptpubkeys: None,
+        prevouts_d: OnceLock::new(),
+        sequences_d: OnceLock::new(),
+        outputs_d: OnceLock::new(),
+    })
 }
 
 impl<'a> EvalContext<'a> {
@@ -364,6 +394,11 @@ impl<'a> EvalContext<'a> {
         sig_version: SigVersion,
     ) -> Result<Self, ConsensusError> {
         let amount = job.prevout_amount(input_index)?;
+        let pre = if sig_version == SigVersion::Base {
+            Cow::Borrowed(base_sig_precompute())
+        } else {
+            Cow::Borrowed(job.pre()?)
+        };
         Ok(Self::from_eval_parts(
             tx,
             input_index.get(),
@@ -373,7 +408,7 @@ impl<'a> EvalContext<'a> {
             job.bip65_active,
             job.bip112_active,
             job.bip66_active,
-            Cow::Borrowed(job.pre()?),
+            pre,
         )?
         .apply_job_flags(job))
     }
@@ -1158,17 +1193,16 @@ pub fn op_checkmultisig(
         return Err(ConsensusError::Script("NULLDUMMY".into()));
     }
 
-    // Core Base: FindAndDelete **all** sigs from scriptCode before the loop.
+    // Core Base: FindAndDelete every sig, and drop bare OP_CODESEPARATOR,
+    // before the key walk. One pass. A script with neither borrows.
     let original = script_code_bytes(ctx);
     let script_code: Cow<'_, [u8]> = if ver == PreTapscript::Base {
-        let mut sc = original.to_vec();
-        for sig in &sigs {
-            sc = find_and_delete(&sc, ScriptElem::new(sig)?);
-        }
-        if ctx.const_scriptcode && sc != original {
+        let refs: Vec<&[u8]> = sigs.iter().map(|sig| sig.as_slice()).collect();
+        let (code, deleted) = legacy_script_code(original, &refs)?;
+        if ctx.const_scriptcode && deleted {
             return Err(ConsensusError::Script("SIG_FINDANDDELETE".into()));
         }
-        Cow::Owned(sc)
+        code
     } else {
         Cow::Borrowed(original)
     };
@@ -1246,59 +1280,13 @@ pub fn encode_push(out: &mut Vec<u8>, data: &[u8]) {
 /// when it appears inside scriptCode (mainnet block 290329: P2SH redeem embeds a sig).
 ///
 /// Consensus: empty `data` is Core's `CScript() << vchSig` = the push `0x00`,
-/// so an empty signature deletes every OP_0 opcode.
-pub fn find_and_delete(script: &[u8], data: ScriptElem<'_>) -> Vec<u8> {
+/// so an empty signature deletes every OP_0 opcode. The script is borrowed when
+/// the push does not occur.
+pub fn find_and_delete<'a>(script: &'a [u8], data: ScriptElem<'_>) -> Cow<'a, [u8]> {
     let raw = data.as_bytes();
     let mut needle = Vec::with_capacity(raw.len() + 5);
     encode_push(&mut needle, raw);
-
-    let mut out = Vec::with_capacity(script.len());
-    let mut i = 0usize;
-    while i < script.len() {
-        if i + needle.len() <= script.len() && script[i..i + needle.len()] == needle[..] {
-            i += needle.len();
-            continue;
-        }
-        let op = script[i];
-        out.push(op);
-        i += 1;
-        let n = if (1..=75).contains(&op) {
-            op as usize
-        } else if op == 0x4c {
-            if i >= script.len() {
-                break;
-            }
-            let n = script[i] as usize;
-            out.push(script[i]);
-            i += 1;
-            n
-        } else if op == 0x4d {
-            if i + 1 >= script.len() {
-                break;
-            }
-            let n = u16::from_le_bytes([script[i], script[i + 1]]) as usize;
-            out.extend_from_slice(&script[i..i + 2]);
-            i += 2;
-            n
-        } else if op == 0x4e {
-            if i + 3 >= script.len() {
-                break;
-            }
-            let n = u32::from_le_bytes([script[i], script[i + 1], script[i + 2], script[i + 3]])
-                as usize;
-            out.extend_from_slice(&script[i..i + 4]);
-            i += 4;
-            n
-        } else {
-            0
-        };
-        if n > 0 {
-            let end = (i + n).min(script.len());
-            out.extend_from_slice(&script[i..end]);
-            i = end;
-        }
-    }
-    out
+    legacy_script_code_needles(script, false, &[&needle]).0
 }
 
 /// Script bytes used as Base/WitnessV0 scriptCode (after OP_CODESEPARATOR).
@@ -1320,53 +1308,116 @@ pub fn script_code_bytes<'a>(ctx: &'a EvalContext<'_>) -> &'a [u8] {
 /// that point are still omitted from the serialized scriptCode. Without this,
 /// redeem scripts that embed CODESEPARATOR (e.g. mainnet block 443992 P2SH
 /// multi-condition contracts) produce a wrong sighash and fail CHECKSIGVERIFY.
-pub fn strip_op_codeseparator(script: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(script.len());
+pub fn strip_op_codeseparator(script: &[u8]) -> Cow<'_, [u8]> {
+    legacy_script_code_needles(script, true, &[]).0
+}
+
+/// One walk of a base scriptCode.
+///
+/// Drops a direct push of any signature when `drop_sig` is set by the needles,
+/// and drops a bare `OP_CODESEPARATOR` when `drop_sep` is set. Push payloads
+/// are not opcodes. The original bytes are returned when the walk drops nothing.
+/// The bool is true when a signature push was dropped.
+fn legacy_script_code<'a>(
+    script: &'a [u8],
+    sigs: &[&[u8]],
+) -> Result<(Cow<'a, [u8]>, bool), ConsensusError> {
+    let mut encoded = Vec::with_capacity(sigs.len());
+    for sig in sigs {
+        let raw = ScriptElem::new(sig)?.as_bytes();
+        let mut needle = Vec::with_capacity(raw.len() + 5);
+        encode_push(&mut needle, raw);
+        encoded.push(needle);
+    }
+    let refs: Vec<&[u8]> = encoded.iter().map(|n| n.as_slice()).collect();
+    Ok(legacy_script_code_needles(script, true, &refs))
+}
+
+fn legacy_script_code_needles<'a>(
+    script: &'a [u8],
+    drop_sep: bool,
+    needles: &[&[u8]],
+) -> (Cow<'a, [u8]>, bool) {
+    let mut out: Option<Vec<u8>> = None;
+    let mut deleted_sig = false;
     let mut i = 0usize;
     while i < script.len() {
-        let op = script[i];
-        i += 1;
-        if op == 0xab {
+        if let Some(needle) = needles
+            .iter()
+            .copied()
+            .find(|needle| !needle.is_empty() && script[i..].starts_with(needle))
+        {
+            if out.is_none() {
+                out = Some(script[..i].to_vec());
+            }
+            i += needle.len();
+            deleted_sig = true;
             continue;
         }
-        out.push(op);
-        let n = if (1..=75).contains(&op) {
-            op as usize
-        } else if op == 0x4c {
-            if i >= script.len() {
+        let op = script[i];
+        match instruction_end(script, i) {
+            None => {
+                if let Some(buf) = out.as_mut() {
+                    buf.push(op);
+                } else if i + 1 < script.len() {
+                    out = Some(script[..=i].to_vec());
+                }
                 break;
             }
-            let n = script[i] as usize;
-            out.push(script[i]);
-            i += 1;
-            n
-        } else if op == 0x4d {
-            if i + 1 >= script.len() {
-                break;
+            Some(end) => {
+                if drop_sep && op == 0xab {
+                    if out.is_none() {
+                        out = Some(script[..i].to_vec());
+                    }
+                } else if let Some(buf) = out.as_mut() {
+                    buf.extend_from_slice(&script[i..end]);
+                }
+                i = end;
             }
-            let n = u16::from_le_bytes([script[i], script[i + 1]]) as usize;
-            out.extend_from_slice(&script[i..i + 2]);
-            i += 2;
-            n
-        } else if op == 0x4e {
-            if i + 3 >= script.len() {
-                break;
-            }
-            let n = u32::from_le_bytes([script[i], script[i + 1], script[i + 2], script[i + 3]])
-                as usize;
-            out.extend_from_slice(&script[i..i + 4]);
-            i += 4;
-            n
-        } else {
-            0
-        };
-        if n > 0 {
-            let end = (i + n).min(script.len());
-            out.extend_from_slice(&script[i..end]);
-            i = end;
         }
     }
-    out
+    (
+        out.map(Cow::Owned).unwrap_or(Cow::Borrowed(script)),
+        deleted_sig,
+    )
+}
+
+/// End of the instruction at `i`, or `None` when a push length is truncated.
+/// A short payload still ends at the last available byte.
+fn instruction_end(script: &[u8], i: usize) -> Option<usize> {
+    let op = script[i];
+    let mut j = i + 1;
+    let n = if (1..=75).contains(&op) {
+        op as usize
+    } else if op == 0x4c {
+        if j >= script.len() {
+            return None;
+        }
+        let n = script[j] as usize;
+        j += 1;
+        n
+    } else if op == 0x4d {
+        if j + 1 >= script.len() {
+            return None;
+        }
+        let n = u16::from_le_bytes([script[j], script[j + 1]]) as usize;
+        j += 2;
+        n
+    } else if op == 0x4e {
+        if j + 3 >= script.len() {
+            return None;
+        }
+        let n =
+            u32::from_le_bytes([script[j], script[j + 1], script[j + 2], script[j + 3]]) as usize;
+        j += 4;
+        n
+    } else {
+        0
+    };
+    if n > 0 {
+        j = (j + n).min(script.len());
+    }
+    Some(j)
 }
 
 /// Legacy / witness-v0 OP_CHECKSIG (Core `EvalChecksigPreTapscript`).
@@ -1381,16 +1432,16 @@ pub fn checksig_legacy(
     ver: PreTapscript,
 ) -> Result<bool, ConsensusError> {
     let base = script_code_bytes(ctx);
-    let deleted: Vec<u8>;
-    let script_code: &[u8] = if ver == PreTapscript::Base {
-        deleted = find_and_delete(base, ScriptElem::new(sig)?);
-        if ctx.const_scriptcode && deleted.as_slice() != base {
+    let prepared = if ver == PreTapscript::Base {
+        let (code, deleted) = legacy_script_code(base, &[sig])?;
+        if ctx.const_scriptcode && deleted {
             return Err(ConsensusError::Script("SIG_FINDANDDELETE".into()));
         }
-        &deleted
+        code
     } else {
-        base
+        Cow::Borrowed(base)
     };
+    let script_code = prepared.as_ref();
     let ok = ecdsa_sig_matches(sig, pubkey, ctx, script_code, ver)?;
     if !ok && ctx.nullfail && !sig.is_empty() {
         return Err(ConsensusError::Script("NULLFAIL".into()));
@@ -1517,9 +1568,8 @@ pub fn sighash_for_script(
     let script_code = Script::from_bytes(script_bytes);
     match ver {
         PreTapscript::Base => {
-            // Raw hashtype 0 is not SIGHASH_ALL=1.
-            let stripped = strip_op_codeseparator(script_bytes);
-            let script_code = Script::from_bytes(&stripped);
+            // Raw hashtype 0 is not SIGHASH_ALL=1. The caller already dropped
+            // a bare OP_CODESEPARATOR.
             let mut slot = ctx.cache.borrow_mut();
             let cache = slot.get_or_insert_with(|| SighashCache::new(ctx.tx));
             let h = cache
