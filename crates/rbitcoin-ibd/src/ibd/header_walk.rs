@@ -3038,7 +3038,12 @@ pub fn batch_context_ok(
         && !rbitcoin_consensus::collecting();
     let guard = own_guard.then(rbitcoin_consensus::TrustCollect::enter);
     let mut stopped: Option<(u32, [u8; 32], rbitcoin_consensus::ConsensusError)> = None;
-    let mut seen: Vec<(u32, [u8; 32])> = Vec::with_capacity(headers.len());
+    // Warning lines are the only reader. Default mainnet leaves trust-peer off.
+    let mut seen: Vec<(u32, [u8; 32])> = if own_guard {
+        Vec::with_capacity(headers.len())
+    } else {
+        Vec::new()
+    };
     let mut accepted = true;
     for hdr in headers {
         let hash = hdr.block_hash();
@@ -3052,7 +3057,9 @@ pub fn batch_context_ok(
             break;
         }
         height = height.saturating_add(1);
-        seen.push((height, hash.to_byte_array()));
+        if own_guard {
+            seen.push((height, hash.to_byte_array()));
+        }
         let mtp = if times.len() < 11 {
             0
         } else {
