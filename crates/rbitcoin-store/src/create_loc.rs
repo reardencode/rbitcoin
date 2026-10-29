@@ -6,7 +6,8 @@ use crate::bulk_io::ReadOp;
 use crate::delta_loc::{
     checkpoint_fit, create_table_file, decode_create_pair, encode_create_ovf_row, load_create_ovf,
     loc_file_off, loc_window, loc_within, migrate_create_ovf_v22_if_needed, open_table_file,
-    pack_create_pair, strides_from_aligned_len, CREATE_OVF_SLOT, IDX_STRIDE, LOC_WINDOW,
+    pack_create_pair, strides_from_aligned_len, unresolved_ovf_cut, CREATE_OVF_SLOT, IDX_STRIDE,
+    LOC_WINDOW,
 };
 use crate::error::StoreError;
 use crate::file::{TableFile, FILE_HEADER_LEN};
@@ -124,6 +125,19 @@ impl CreateLoc {
         };
         if count < full {
             opened.truncate_to_count(count)?;
+        }
+        // A row past the overflow header belongs to a create this file does not name.
+        let last_ovf = opened
+            .ovf_rows
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .last()
+            .map(|row| row.0)
+            .unwrap_or(0);
+        if let Some(cut) =
+            unresolved_ovf_cut(&opened.loc, &opened.ovf, opened.count(), last_ovf, true)?
+        {
+            opened.truncate_to_count(cut)?;
         }
         Ok(opened)
     }
@@ -265,15 +279,20 @@ impl CreateLoc {
     }
 
     /// Publish RAM for this append. Header pwrites run only while `durable`
-    /// is still true, one per grown file. A failed header pwrite returns
-    /// false and skips the rest. RAM still advances.
+    /// is still true, one per grown file. A file whose header is behind its
+    /// RAM end is persisted first, including an overflow file this batch
+    /// does not append. A failed header pwrite returns false and skips the
+    /// rest. RAM still advances.
     #[must_use]
     pub(crate) fn commit_staged(&self, staged: StagedCreate, mut durable: bool) -> bool {
+        if durable && !TableFile::catch_up_locator_headers(&self.loc, &self.ovf, &self.off) {
+            durable = false;
+        }
         let loc_end = staged.loc_off + staged.loc_bytes.len() as u64;
-        durable = self.loc.publish_end(loc_end, durable);
+        durable = self.loc.publish_locator_end(loc_end, durable);
         if !staged.ovf_bytes.is_empty() {
             let ovf_end = staged.ovf_at + staged.ovf_bytes.len() as u64;
-            durable = self.ovf.publish_end(ovf_end, durable);
+            durable = self.ovf.publish_locator_end(ovf_end, durable);
             self.ovf_rows
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
@@ -281,7 +300,7 @@ impl CreateLoc {
         }
         if !staged.off_bytes.is_empty() {
             let off_end = staged.off_at + staged.off_bytes.len() as u64;
-            durable = self.off.publish_end(off_end, durable);
+            durable = self.off.publish_locator_end(off_end, durable);
             let mut cps = self.checkpoints.write().unwrap_or_else(|e| e.into_inner());
             for &(w, txout_abs, spent_abs) in &staged.new_offs {
                 debug_assert_eq!(w as usize, cps.len());

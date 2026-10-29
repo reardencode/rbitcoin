@@ -21,7 +21,9 @@
 //! Readers never consume past `published_len`. A crash mid-payload leaves HWM
 //! at the previous value; re-drive rebuilds from body queue / re-append.
 //! A multi-file append can advance RAM without that pwrite when an earlier
-//! header pwrite failed. `flush` then keeps the previous header.
+//! header pwrite failed. `flush` then keeps the previous header. A locator
+//! file remembers that previous end and retries it before a later append
+//! publishes.
 //!
 //! # Concurrency
 //!
@@ -734,6 +736,95 @@ impl TableFile {
             self.header_cap.store(0, Ordering::Release);
         }
         self.persist_hwm(end).is_ok()
+    }
+
+    /// Locator publish. Same one header pwrite as [`Self::publish_end`] when
+    /// the write lands. A miss keeps the previous durable end so a later
+    /// [`Self::catch_up_header`] can store it. The success path does not take
+    /// the flush lock.
+    #[must_use]
+    pub fn publish_locator_end(&self, end: u64, durable: bool) -> bool {
+        if !durable {
+            self.publish_ram_only(end);
+            return false;
+        }
+        let prior = self.published_len.load(Ordering::Relaxed);
+        if !self.advance_published(end) {
+            let cap = self.header_cap.load(Ordering::Relaxed);
+            return cap == 0 || cap >= end;
+        }
+        if self.persist_hwm(end).is_ok() {
+            self.clear_header_cap();
+            return true;
+        }
+        self.withhold_locator_header(prior)
+    }
+
+    /// Persist a locator header that an earlier pwrite missed.
+    ///
+    /// No IO when the header already matches RAM. A miss leaves the cap in
+    /// place and returns false.
+    #[must_use]
+    pub fn catch_up_header(&self) -> bool {
+        let end = self.published_len.load(Ordering::Acquire);
+        let cap = self.header_cap.load(Ordering::Acquire);
+        if cap == 0 || cap >= end {
+            return true;
+        }
+        let _hold = self.flush_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let end = self.published_len.load(Ordering::Acquire);
+        let cap = self.header_cap.load(Ordering::Relaxed);
+        if cap == 0 || cap >= end {
+            return true;
+        }
+        if self.persist_hwm(end).is_err() {
+            return false;
+        }
+        self.header_cap.store(0, Ordering::Release);
+        true
+    }
+
+    /// Loc, overflow, and checkpoint headers for one locator family.
+    #[must_use]
+    pub(crate) fn catch_up_locator_headers(loc: &Self, ovf: &Self, off: &Self) -> bool {
+        loc.catch_up_header() && ovf.catch_up_header() && off.catch_up_header()
+    }
+
+    fn clear_header_cap(&self) {
+        if self.header_cap.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        let _hold = self.flush_lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.header_cap.store(0, Ordering::Release);
+    }
+
+    /// `prior` is the RAM end from before this publish. The header stays at
+    /// the last end that is actually on disk.
+    fn withhold_locator_header(&self, prior: u64) -> bool {
+        debug_assert!(!self.trailing_header);
+        let _hold = self.flush_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let published = self.published_len.load(Ordering::Acquire);
+        let mut buf = [0u8; 8];
+        let disk = match self.pread_all(8, &mut buf) {
+            Ok(()) => u64::from_le_bytes(buf),
+            Err(_) => prior,
+        };
+        if disk == published {
+            self.header_cap.store(0, Ordering::Release);
+            return true;
+        }
+        let durable_end = if disk >= FILE_HEADER_LEN as u64 && disk < published {
+            disk
+        } else {
+            prior
+        };
+        if durable_end < published {
+            let cap = self.header_cap.load(Ordering::Relaxed);
+            if cap == 0 || durable_end < cap {
+                self.header_cap.store(durable_end, Ordering::Release);
+            }
+        }
+        false
     }
 
     fn advance_published(&self, end: u64) -> bool {

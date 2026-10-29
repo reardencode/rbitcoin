@@ -5,5 +5,7 @@ Fixed
   output's value or script, the block is not marked invalid, and a later
   connect of that block succeeds once writes work. A crash that leaves a
   locator ahead of its body, or a checkpoint file short of the locator,
-  reopens at the last create those files still name. A real consensus failure
+  reopens at the last create those files still name. A missed overflow
+  header is retried before a later block publishes. A create whose overflow
+  row is not in that header is dropped on open. A real consensus failure
   is still kept in `store/block.invalid`.

@@ -54,7 +54,7 @@ Open revalidation runs in `Query::open_or_create` **before** P2P can extend tip.
 
 - Append-oriented; re-archive is **idempotent** when `header_txs` already present.
 - **Never leads tip** on a clean run: Class A is published only on the confirm-write path with tip advance in the same era (no dual-track archive-ahead). A crash between the Class A write and the tip advance can leave bodies above the tip. IBD gets them again through the tip-hole cover.
-- Kill mid-archive without a complete body association ⇒ not treated as archived; re-getdata. Open treats a locator prefix the body high-water marks do not cover, a `create.loc` count ahead of `seqsigwit.loc`, or a short `create.off` / `seqsigwit.off` as that unpublished tail and truncates to the last create those files still name.
+- Kill mid-archive without a complete body association ⇒ not treated as archived; re-getdata. Open treats a locator prefix the body high-water marks do not cover, a `create.loc` count ahead of `seqsigwit.loc`, a short `create.off` / `seqsigwit.off`, or an overflow row sitting past the overflow header as that unpublished tail and truncates to the last create those files still name.
 
 ## Spends (v5: annotation on create outputs)
 

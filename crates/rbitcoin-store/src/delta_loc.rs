@@ -40,6 +40,59 @@ pub(crate) fn checkpoint_fit(loc_count: u64, off_len: u64, off_slot: u64) -> Opt
             .saturating_sub(1),
     )
 }
+
+/// Count to keep when the next overflow row was written and its header was not.
+///
+/// That row sits at the ovf file's published end. A create slot is 16 bytes;
+/// a seqsigwit slot is 12. It counts only when the loc slot at its fk is the
+/// matching overflow marker. Anything else is spare capacity, not a row.
+pub(crate) fn unresolved_ovf_cut(
+    loc: &TableFile,
+    ovf: &TableFile,
+    count: u64,
+    last_ovf_fk: u64,
+    pair: bool,
+) -> Result<Option<u64>, StoreError> {
+    if last_ovf_fk >= count {
+        return Ok(None);
+    }
+    let width = if pair { 16 } else { 12 };
+    let mut row = [0u8; 16];
+    if ovf.pread_all(ovf.logical_len(), &mut row[..width]).is_err() {
+        return Ok(None);
+    }
+    let fk = u64::from_le_bytes(row[0..8].try_into().unwrap());
+    if fk == 0 || fk <= last_ovf_fk || fk > count {
+        return Ok(None);
+    }
+    let mut slot = [0u8; 2];
+    loc.read_at(loc_file_off(fk, 2), &mut slot)?;
+    if !ovf_row_matches_slot(&row, &slot, pair) {
+        return Ok(None);
+    }
+    Ok(Some(fk.saturating_sub(1)))
+}
+
+fn ovf_row_matches_slot(row: &[u8], slot: &[u8; 2], pair: bool) -> bool {
+    if pair {
+        let strides = u32::from_le_bytes(row[8..12].try_into().unwrap());
+        let n_out = u32::from_le_bytes(row[12..16].try_into().unwrap());
+        if slot[0] != 0 && u32::from(slot[0]) != strides {
+            return false;
+        }
+        if slot[1] != 0 && u32::from(slot[1]) != n_out {
+            return false;
+        }
+        let strides_ovf = slot[0] == 0 && strides >= 256;
+        let n_out_ovf = slot[1] == 0 && n_out >= 256;
+        return strides_ovf || n_out_ovf;
+    }
+    if slot[0] != 0 || slot[1] != 0 {
+        return false;
+    }
+    u32::from_le_bytes(row[8..12].try_into().unwrap()) >= 65536
+}
+
 #[doc(hidden)]
 pub const CREATE_OVF_MISSING: &str = "invariant: create.loc overflow missing";
 #[doc(hidden)]
@@ -200,6 +253,19 @@ impl DeltaLoc {
         if count < full {
             opened.truncate_to_count(count)?;
         }
+        // A row past the overflow header belongs to a create this file does not name.
+        let last_ovf = opened
+            .ovf_rows
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .last()
+            .map(|row| row.0)
+            .unwrap_or(0);
+        if let Some(cut) =
+            unresolved_ovf_cut(&opened.loc, &opened.ovf, opened.count(), last_ovf, false)?
+        {
+            opened.truncate_to_count(cut)?;
+        }
         Ok(opened)
     }
 
@@ -340,15 +406,20 @@ impl DeltaLoc {
     }
 
     /// Publish RAM for this append. Header pwrites run only while `durable`
-    /// is still true, one per grown file. A failed header pwrite returns
-    /// false and skips the rest. RAM still advances.
+    /// is still true, one per grown file. A file whose header is behind its
+    /// RAM end is persisted first, including an overflow file this batch
+    /// does not append. A failed header pwrite returns false and skips the
+    /// rest. RAM still advances.
     #[must_use]
     pub(crate) fn commit_staged(&self, staged: StagedDelta, mut durable: bool) -> bool {
+        if durable && !TableFile::catch_up_locator_headers(&self.loc, &self.ovf, &self.off) {
+            durable = false;
+        }
         let loc_end = staged.loc_off + staged.loc_bytes.len() as u64;
-        durable = self.loc.publish_end(loc_end, durable);
+        durable = self.loc.publish_locator_end(loc_end, durable);
         if !staged.ovf_bytes.is_empty() {
             let ovf_end = staged.ovf_at + staged.ovf_bytes.len() as u64;
-            durable = self.ovf.publish_end(ovf_end, durable);
+            durable = self.ovf.publish_locator_end(ovf_end, durable);
             self.ovf_rows
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
@@ -356,7 +427,7 @@ impl DeltaLoc {
         }
         if !staged.off_bytes.is_empty() {
             let off_end = staged.off_at + staged.off_bytes.len() as u64;
-            durable = self.off.publish_end(off_end, durable);
+            durable = self.off.publish_locator_end(off_end, durable);
             let mut cps = self.checkpoints.write().unwrap_or_else(|e| e.into_inner());
             for &(w, abs) in &staged.new_offs {
                 debug_assert_eq!(w as usize, cps.len());

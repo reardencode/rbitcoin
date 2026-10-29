@@ -201,3 +201,65 @@ fn locator_header_miss_does_not_publish_the_body_header() {
     let t = TxTable::open_tiny(&dir).unwrap();
     assert_eq!(t.count(), 2);
 }
+
+fn wide(n: u8) -> (TxRecord, Vec<InputRecord>, Vec<OutputRecord>) {
+    let mut txid = [0u8; 32];
+    txid[0] = n;
+    txid[1] = 0xff;
+    let outs = (0..256)
+        .map(|i| OutputRecord::unspent(1000, vec![n, i as u8]))
+        .collect();
+    (
+        TxRecord {
+            txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 256,
+        },
+        vec![InputRecord::coinbase(u32::MAX, vec![], vec![])],
+        outs,
+    )
+}
+
+/// The overflow header misses, then a later block with no overflow row
+/// commits. Reopen still returns that create's outputs.
+#[test]
+fn ovf_header_miss_then_plain_block_reopens_the_create() {
+    let dir = super::tempfile_dir("ovf-header-retry");
+    let t = TxTable::create_tiny(&dir).unwrap();
+    t.put_full_batch_indexed(&[wide(1)], false).unwrap();
+    let ovf_fd = t.create_loc.ovf.io_handle();
+    rbitcoin_store::io_handle::arm_fail_hwm_pwrites(ovf_fd, 1);
+    let disarm = Disarm(ovf_fd);
+    t.put_full_batch_indexed(&[wide(2)], false).unwrap();
+    drop(disarm);
+    t.put_full_batch_indexed(&[one(3)], false).unwrap();
+    drop(t);
+    let t = TxTable::open_tiny(&dir).unwrap();
+    assert_eq!(t.count(), 3);
+    assert_eq!(outs(&t, 2).len(), 256);
+    assert_eq!(outs(&t, 2)[0].script, vec![2, 0]);
+    assert_eq!(outs(&t, 3)[0].script, vec![3]);
+}
+
+/// Every overflow header pwrite fails, including the later block's retry.
+/// Reopen drops the unpublished create instead of keeping one that cannot
+/// be decoded.
+#[test]
+fn ovf_header_miss_does_not_seal_the_create() {
+    let dir = super::tempfile_dir("ovf-header-seal");
+    let t = TxTable::create_tiny(&dir).unwrap();
+    t.put_full_batch_indexed(&[wide(1)], false).unwrap();
+    let ovf_fd = t.create_loc.ovf.io_handle();
+    rbitcoin_store::io_handle::arm_fail_hwm_pwrites(ovf_fd, 8);
+    let disarm = Disarm(ovf_fd);
+    t.put_full_batch_indexed(&[wide(2)], false).unwrap();
+    t.put_full_batch_indexed(&[one(3)], false).unwrap();
+    drop(disarm);
+    drop(t);
+    let t = TxTable::open_tiny(&dir).unwrap();
+    assert_eq!(t.count(), 1);
+    assert_eq!(outs(&t, 1).len(), 256);
+    assert!(t.get_meta_and_outputs(rbitcoin_primitives::Fk(2)).is_err());
+}
