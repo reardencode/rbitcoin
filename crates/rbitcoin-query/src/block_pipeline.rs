@@ -377,12 +377,15 @@ pub fn assemble_non_cb_tx(
         };
         if let Some(ps) = pres {
             if rbitcoin_consensus::block::should_use_pres(ti, ps.len()) {
-                // A preverified connect row has no midstates. The script stage
-                // drops that job, so attaching it would fail the block first.
+                // A connect-only row has no BIP143 midstates. The script stage
+                // drops a preverified job, so attaching that row would fail
+                // the block before the spend rule. A legacy row never reads
+                // those midstates. A segwit row that is still verified must
+                // attach, and that fails closed while the row is connect-only.
                 let connect_only = ps[ti].as_script().is_none();
                 let legacy_midstates =
                     connect_only && !rbitcoin_consensus::tx_precompute::sighash_midstates_for(tx);
-                if !(connect_only && preverified.contains(&txid)) && !legacy_midstates {
+                if !(legacy_midstates || connect_only && preverified.contains(&txid)) {
                     job = job.with_pre_slice(Arc::clone(ps), ti)?;
                 }
             }
@@ -1310,6 +1313,7 @@ pub fn structural_bip68(
 /// [`crate::params::BIP34_IMPLIES_BIP30_LIMIT`]. Signet and regtest have no
 /// BIP34 hash, so every block is checked. Just-archived self is unconnected.
 #[doc(hidden)]
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 pub fn reject_bip30_unspent_overwrite(
     query: &Query,
     block: &Block,
@@ -1346,7 +1350,7 @@ pub fn reject_bip30_unspent_overwrite(
     }
     let hits = query
         .store()
-        .get_fk_by_txid_batch(&create_txids)
+        .get_fk_by_txid_batch(create_txids)
         .map_err(ConfirmError::from)?;
     for (txid, row) in hits {
         let Some((old_fk, _)) = row else {

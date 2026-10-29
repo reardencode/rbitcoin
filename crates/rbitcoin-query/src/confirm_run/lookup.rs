@@ -623,6 +623,12 @@ fn prev_link_for_block(
     Ok(ResolvedPrev { fk, hash: rec.hash })
 }
 
+struct CarriedHeaderProof {
+    hash: [u8; 32],
+    proven: Option<rbitcoin_store::HeaderRecord>,
+    prev_fk: Option<rbitcoin_primitives::Fk>,
+}
+
 /// Carried digest when the stored row is this header. A disagreeing row hashes.
 ///
 /// Insert already checked `rec.hash` against these fields and the parent
@@ -635,14 +641,7 @@ fn resolve_carried_header_hash(
     header: &bitcoin::block::Header,
     carried: (rbitcoin_primitives::Fk, [u8; 32]),
     metas: &[BodyMeta],
-) -> Result<
-    (
-        [u8; 32],
-        Option<rbitcoin_store::HeaderRecord>,
-        Option<rbitcoin_primitives::Fk>,
-    ),
-    ConfirmError,
-> {
+) -> Result<CarriedHeaderProof, ConfirmError> {
     let (fk, expect) = carried;
     let matched = match query.store().get_header(fk) {
         Ok(rec) if rec.hash == expect && header_fields_match(header, &rec) => Some(rec),
@@ -652,7 +651,11 @@ fn resolve_carried_header_hash(
     let Some(rec) = matched else {
         let hash = header.block_hash().to_byte_array();
         rbitcoin_consensus::block::reject_carried_header_hash(&hash, &expect)?;
-        return Ok((hash, None, None));
+        return Ok(CarriedHeaderProof {
+            hash,
+            proven: None,
+            prev_fk: None,
+        });
     };
     let prev = match prev_link_for_block(query, i, header, metas) {
         Ok(prev) => prev,
@@ -663,11 +666,19 @@ fn resolve_carried_header_hash(
         }
     };
     if rec.prev_fk == prev.fk && header.prev_blockhash.to_byte_array() == prev.hash {
-        return Ok((expect, Some(rec), Some(prev.fk)));
+        return Ok(CarriedHeaderProof {
+            hash: expect,
+            proven: Some(rec),
+            prev_fk: Some(prev.fk),
+        });
     }
     let hash = header.block_hash().to_byte_array();
     rbitcoin_consensus::block::reject_carried_header_hash(&hash, &expect)?;
-    Ok((hash, None, Some(prev.fk)))
+    Ok(CarriedHeaderProof {
+        hash,
+        proven: None,
+        prev_fk: Some(prev.fk),
+    })
 }
 
 /// Structure + prepare + plan_batch only (stamp create_fk). Shared by lookup stage.
@@ -713,9 +724,13 @@ pub fn wire_lookup_phase(
         let txids: Vec<[u8; 32]> = pres.iter().map(|p| p.txid).collect();
         struct_ns = struct_ns.saturating_add(t_struct.elapsed().as_nanos() as u64);
         let carried = carried_header_at(pipeline, i);
-        let (hash, proven, carried_prev) = match carried {
+        let proof = match carried {
             Some(row) => resolve_carried_header_hash(query, i, &block.header, row, &metas)?,
-            None => (block.block_hash().to_byte_array(), None, None),
+            None => CarriedHeaderProof {
+                hash: block.block_hash().to_byte_array(),
+                proven: None,
+                prev_fk: None,
+            },
         };
         let t_header = Instant::now();
         stamp_check_header_link(
@@ -727,32 +742,32 @@ pub fn wire_lookup_phase(
             path_lo,
             store_path_lo,
             &block.header,
-            hash,
+            proof.hash,
             carried,
             (i > 0).then(|| metas[i - 1].hash),
         )?;
         header_ns = header_ns.saturating_add(t_header.elapsed().as_nanos() as u64);
 
         let t_prep = Instant::now();
-        let prev_fk = if let Some(fk) = carried_prev {
+        let prev_fk = if let Some(fk) = proof.prev_fk {
             fk
         } else {
             prev_link_for_block(query, i, &block.header, &metas)?.fk
         };
-        let header_rec = crate::convert::header_to_record(prev_fk, &block.header, hash);
+        let header_rec = crate::convert::header_to_record(prev_fk, &block.header, proof.hash);
         prepare_ns = prepare_ns.saturating_add(t_prep.elapsed().as_nanos() as u64);
         let t_put = Instant::now();
         let header_fk = stamp_header_fk(
             query,
             &header_rec,
             carried.map(|(fk, _)| fk),
-            proven.as_ref(),
+            proof.proven.as_ref(),
         )?;
         header_ns = header_ns.saturating_add(t_put.elapsed().as_nanos() as u64);
         wire_blocks.push(block);
         metas.push(BodyMeta {
             height: *height,
-            hash,
+            hash: proof.hash,
             header_fk,
             header_rec,
             tx_fks: Vec::new(),

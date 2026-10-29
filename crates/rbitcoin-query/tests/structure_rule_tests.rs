@@ -1825,9 +1825,15 @@ fn accept_rejects_connect_spend_rules() {
 
 /// A tip-follow connect row is the preverified set. Assemble must not fail
 /// the block on that row; the spend rule still runs.
+///
+/// A legacy connect row has no BIP143 midstates, so leaving it out of the
+/// preverified set still reaches the spend rule. A segwit connect row that
+/// is not preverified fails closed: script verify needs those midstates.
 #[test]
 fn preverified_connect_row_reaches_the_spend_rule() {
-    use rbitcoin_consensus::{mine_empty_regtest, prepare_regtest_candidate, pres_for_tip};
+    use rbitcoin_consensus::{
+        grind_regtest_pow, mine_empty_regtest, prepare_regtest_candidate, pres_for_tip,
+    };
     use rbitcoin_query::accept_and_connect_block_preverified;
     use std::sync::Arc;
 
@@ -1865,7 +1871,7 @@ fn preverified_connect_row_reaches_the_spend_rule() {
     };
     let spend_id = spend.compute_txid().to_byte_array();
     let mut b2 = mine_empty_regtest(b1.block_hash(), b1.header.time + 600, 2);
-    b2.txdata.push(spend);
+    b2.txdata.push(spend.clone());
     prepare_regtest_candidate(&mut b2, b1.block_hash(), b1.header.time + 600);
 
     let (pres, skip) = pres_for_tip(&b2.txdata, false, |id| id == spend_id);
@@ -1881,10 +1887,10 @@ fn preverified_connect_row_reaches_the_spend_rule() {
         &Default::default(),
         Some(Arc::clone(&pres)),
     )
-    .expect_err("a connect row that will be verified still fails closed");
+    .expect_err("a legacy connect row still hits the spend rule");
     assert!(
-        bare.to_string().contains("sighash midstate"),
-        "unskipped connect row: {bare}"
+        matches!(bare, ConfirmError::Rules(ConsensusError::BadTx(s)) if s.contains("immature")),
+        "legacy connect row does not need midstates, got {bare:?}"
     );
     assert_eq!(q.tip_height(), Some(Height(1)));
 
@@ -1901,6 +1907,56 @@ fn preverified_connect_row_reaches_the_spend_rule() {
     assert!(
         matches!(err, ConfirmError::Rules(ConsensusError::BadTx(s)) if s.contains("immature")),
         "preverified connect row must reach the spend rule, got {err:?}"
+    );
+    assert_eq!(q.tip_height(), Some(Height(1)));
+
+    let mut segwit = spend;
+    segwit.input[0].witness.push([1u8]);
+    let segwit_id = segwit.compute_txid().to_byte_array();
+    let mut b3 = mine_empty_regtest(b1.block_hash(), b1.header.time + 600, 2);
+    b3.txdata.push(segwit);
+    prepare_regtest_candidate(&mut b3, b1.block_hash(), b1.header.time + 600);
+    apply_witness_commitment(&mut b3);
+    grind_regtest_pow(&mut b3.header);
+    let (seg_pres, seg_skip) = pres_for_tip(&b3.txdata, false, |id| id == segwit_id);
+    assert!(
+        seg_pres[1].as_script().is_none(),
+        "live segwit tx is connect-only"
+    );
+    assert!(
+        rbitcoin_consensus::tx_precompute::sighash_midstates_for(&b3.txdata[1]),
+        "a witness marks the tx as needing BIP143 midstates"
+    );
+
+    let closed = accept_and_connect_block_preverified(
+        &q,
+        &params,
+        Height(2),
+        Arc::new(b3.clone()),
+        Milestone::NONE,
+        &Default::default(),
+        Some(Arc::clone(&seg_pres)),
+    )
+    .expect_err("a segwit connect row that will be verified fails closed");
+    assert!(
+        closed.to_string().contains("sighash midstate"),
+        "unskipped segwit connect row: {closed}"
+    );
+    assert_eq!(q.tip_height(), Some(Height(1)));
+
+    let seg_err = accept_and_connect_block_preverified(
+        &q,
+        &params,
+        Height(2),
+        Arc::new(b3),
+        Milestone::NONE,
+        &seg_skip,
+        Some(seg_pres),
+    )
+    .expect_err("the preverified segwit spend still rejects as immature");
+    assert!(
+        matches!(seg_err, ConfirmError::Rules(ConsensusError::BadTx(s)) if s.contains("immature")),
+        "preverified segwit connect row must reach the spend rule, got {seg_err:?}"
     );
     assert_eq!(q.tip_height(), Some(Height(1)));
 }
