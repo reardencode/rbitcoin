@@ -699,6 +699,33 @@ fn cleared_header_txs_anchor_reopen_drops_the_tip() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Shrink landed and `class_a_cut` still says empty. The `header_txs` rows
+/// were not flushed yet, so the next open has to clear them with no tip left
+/// to name the header fks.
+#[test]
+fn empty_class_a_cut_reopen_clears_leftover_bodies() {
+    let dir = tmp();
+    let (s, height_one) = write_withheld_tail(&dir);
+    let write = rbitcoin_store::ClassCWrite::for_test();
+    let genesis = s.confirmed.get(Height(0)).unwrap().unwrap();
+    assert!(s.header_txs.has_body(genesis).unwrap());
+    assert!(s.header_txs.has_body(height_one).unwrap());
+    let mut report = TipRevalidateReport::default();
+    s.shrink_tip_to(&write, None, &mut report).unwrap();
+    assert_eq!(s.confirmed.tip_height(), None);
+    assert!(s.header_txs.has_body(genesis).unwrap());
+    let cut = s.path().join(CLASS_A_CUT_NAME);
+    std::fs::write(&cut, u32::MAX.to_le_bytes()).unwrap();
+    drop(s);
+
+    let s = Store::open_tiny(&dir).unwrap();
+    assert_eq!(s.confirmed.tip_height(), None);
+    assert!(!s.header_txs.has_body(genesis).unwrap());
+    assert!(!s.header_txs.has_body(height_one).unwrap());
+    assert!(!s.path().join(CLASS_A_CUT_NAME).exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The tip shrink is durable after `header_txs` is cleared. A kill between
 /// those two flushes reopens with the high tip and no tx range on the tail.
 #[test]
