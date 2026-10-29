@@ -342,7 +342,7 @@ pub fn operator_usage() -> String {
     [--tor-control [HOST:PORT]] [--tor-control-cookie PATH] [--tor-control-password PASS] \\\n\
     [--i2p-sam [HOST:PORT]] [--i2p-accept-incoming] \\\n\
     [--electrum-listen ADDR] [--esplora-listen ADDR] [--esplora-onion[=0|1]] [--health-listen [ADDR]] [--metrics] \\\n\
-    [--sv2-tp-listen ADDR] [--sv2-tp-authority-sec KEY] [--sv2-tp-authority-sec-file PATH] [--sv2-tp-cert-validity SECS] [--sv2-tp-stale-grace SECS] [--sv2-tp-fee-delta SATS] [--sv2-tp-template-interval SECS] \\\n\
+    [--sv2-tp-listen ADDR] [--sv2-tp-authority-sec KEY] [--sv2-tp-authority-sec-file PATH] [--sv2-tp-cert-validity SECS] [--sv2-tp-stale-grace SECS] [--sv2-tp-idle-timeout SECS] [--sv2-tp-fee-delta SATS] [--sv2-tp-template-interval SECS] \\\n\
     [--sh-index] [--block-filter-index] [--prune-seqsigwit] [--prune-seqsigwit-ram-threshold-bytes N] [--datadir-hdd] [--sp-tweaks] [--sp-tweaks-dust SATS] [--max-sh-creates N] [--heavy-sh-creates N] [--electrum-max-subs N] [--esplora-max-inflight N] [--esplora-block-template] \\\n\
     [--rpc] [--rpc-listen [ADDR]] [--rest] [--rpc-socket PATH] [--rpc-token-file PATH] [--rpc-cookie-file PATH] [--rpc-cookie-perms owner|group|all] [--rpc-work-queue N] \\\n\
     [--milestone HEIGHT] \\\n\
@@ -412,6 +412,8 @@ SV2: --sv2-tp-listen ADDR serves the Stratum v2 Template Distribution Protocol (
   (the same hex in a file). The x-only pubkey is logged.\n\
   --sv2-tp-cert-validity SECS per-connection certificate lifetime, at most 4294967295 (default 3600).\n\
   --sv2-tp-stale-grace SECS keeps a replaced tip's templates answering for SECS, at most 86400 (default 10).\n\
+  --sv2-tp-idle-timeout SECS drops a client that sends no frame for SECS after its first CoinbaseOutputConstraints,\n\
+    at most 86400 (default 0: never; SRI pools and JDCs stay silent between shares).\n\
   --sv2-tp-fee-delta SATS pushes a same-tip template once its fees gain SATS over the last one sent (default 1000).\n\
   --sv2-tp-template-interval SECS checks for that gain every SECS, 1 to 86400 (default 5).\n\
 RPC: --rpc unix socket {{datadir}}/rpc.sock; --rpc-listen [ADDR] adds TCP (default 127.0.0.1 and Core-matching port). Token {{datadir}}/rpc.token (Bearer), created mode 0600; an existing token must be owner-only on Unix. Delete a wider file and start again so the node mints a new token (Windows has no mode bits). --rpc-cookie-file opts TCP into Core cookie HTTP Basic. --rpc-cookie-perms owner|group|all (default owner) is the widest Unix mode that file may have (owner 0600, group 0640, all 0644); the node never creates or chmods it. Windows has no mode bits. No --rpcuser. --rest turns on unauthenticated /rest/ on those listeners (off unless set).\n\

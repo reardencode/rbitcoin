@@ -105,6 +105,7 @@ fn operator_conf_and_argv() {
         "--sv2-tp-authority-sec-file",
         "--sv2-tp-cert-validity",
         "--sv2-tp-stale-grace",
+        "--sv2-tp-idle-timeout",
         "--sv2-tp-fee-delta",
         "--sv2-tp-template-interval",
         "--rpc",
@@ -547,6 +548,33 @@ fn esplora_max_inflight_cli_conf_and_bounds() {
         rbitcoin_electrum::DEFAULT_MAX_CONNECTIONS,
         "a refused value leaves the default"
     );
+}
+
+#[test]
+fn sv2_tp_idle_timeout_argv_default_off() {
+    use std::time::Duration;
+    assert_eq!(
+        ready_config(["rbitcoin-node"]).sv2_tp_idle_timeout,
+        Duration::ZERO
+    );
+    assert_eq!(
+        ready_config(["rbitcoin-node", "--sv2-tp-idle-timeout", "90"]).sv2_tp_idle_timeout,
+        Duration::from_secs(90)
+    );
+    assert_eq!(
+        ready_config(["rbitcoin-node", "--sv2-tp-idle-timeout=0"]).sv2_tp_idle_timeout,
+        Duration::ZERO
+    );
+    for bad in ["86401", "-1", "x"] {
+        assert!(
+            operator_config_from_args(
+                ["rbitcoin-node", "--sv2-tp-idle-timeout", bad],
+                &NodeEnv::default()
+            )
+            .is_err(),
+            "{bad}"
+        );
+    }
 }
 
 #[test]

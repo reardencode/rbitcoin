@@ -180,12 +180,14 @@ fn sv2_tp_apply_kv_and_listen_requires_authority() {
     assert_eq!(c.sv2_tp_listen, None);
     assert_eq!(c.sv2_tp_cert_validity_secs, 3600);
     assert_eq!(c.sv2_tp_stale_grace, Duration::from_secs(10));
+    assert_eq!(c.sv2_tp_idle_timeout, Duration::ZERO);
     assert_eq!(c.sv2_tp_fee_delta, 1000);
     assert_eq!(c.sv2_tp_template_interval, Duration::from_secs(5));
     for (k, v) in [
         ("sv2_tp_listen", "127.0.0.1:8442"),
         ("sv2_tp_cert_validity", "600"),
         ("sv2_tp_stale_grace", "0"),
+        ("sv2_tp_idle_timeout", "86400"),
         ("sv2_tp_fee_delta", "0"),
         ("sv2_tp_template_interval", "86400"),
     ] {
@@ -194,6 +196,7 @@ fn sv2_tp_apply_kv_and_listen_requires_authority() {
     assert_eq!(c.sv2_tp_listen, Some("127.0.0.1:8442".parse().unwrap()));
     assert_eq!(c.sv2_tp_cert_validity_secs, 600);
     assert_eq!(c.sv2_tp_stale_grace, Duration::ZERO);
+    assert_eq!(c.sv2_tp_idle_timeout, Duration::from_secs(86400));
     assert_eq!(c.sv2_tp_fee_delta, 0);
     assert_eq!(c.sv2_tp_template_interval, Duration::from_secs(86400));
     let no_auth = c.validate().unwrap_err();
@@ -219,6 +222,8 @@ fn sv2_tp_apply_kv_and_listen_requires_authority() {
         ("sv2_tp_cert_validity", "0"),
         ("sv2_tp_stale_grace", "-1"),
         ("sv2_tp_stale_grace", "86401"),
+        ("sv2_tp_idle_timeout", "-1"),
+        ("sv2_tp_idle_timeout", "86401"),
         ("sv2_tp_cert_validity", "4294967296"),
         ("sv2_tp_fee_delta", "-1"),
         ("sv2_tp_template_interval", "0"),

@@ -286,6 +286,7 @@ is no plaintext mode.
 | `--sv2-tp-authority-sec KEY` (`sv2_tp_authority_sec`) | — | The same secret inline. Argv shows in `ps`; prefer the file or the conf file |
 | `--sv2-tp-cert-validity SECS` (`sv2_tp_cert_validity`) | 3600 | Lifetime of each per-connection Noise certificate; 1 to 4294967295 (`u32::MAX`, the Noise cert field) |
 | `--sv2-tp-stale-grace SECS` (`sv2_tp_stale_grace`) | 10 | How long templates on a replaced tip still answer; 0 to 86400 (one day), `0` retires them at once |
+| `--sv2-tp-idle-timeout SECS` (`sv2_tp_idle_timeout`) | 0 | Drops a session that sends no frame for SECS after its first `CoinbaseOutputConstraints`; 0 to 86400, `0` never. Only a frame the client sends moves it; template pushes do not. SRI pools and JDCs send nothing between shares, so leave it off for them |
 | `--sv2-tp-fee-delta SATS` (`sv2_tp_fee_delta`) | 1000 | Fee gain over a client's last template that pushes a new one on the same tip; `0` pushes any rebuild after a mempool change that did not lower the fees |
 | `--sv2-tp-template-interval SECS` (`sv2_tp_template_interval`) | 5 | Check period: each session checks for that gain every SECS, and a fee push never comes sooner than this after the client's last template. A gain can wait up to one more period than on sv2-tp, which rechecks every second after its interval; `1` matches that. 1 to 86400 |
 
@@ -296,7 +297,7 @@ client. No templates are sent while the node is in IBD.
 At most 8 sessions run at once. A connection that has not finished the
 Noise handshake and `SetupConnection` and sent its first
 `CoinbaseOutputConstraints` within 10 s is closed; after that a client may
-stay silent indefinitely. A client that stops reading is closed
+stay silent indefinitely unless `--sv2-tp-idle-timeout` is set. A client that stops reading is closed
 once a write to it makes no progress for 30 s.
 A changed `CoinbaseOutputConstraints` within 1 s of the last template waits
 out the rest of that second; a client that keeps replacing a queued budget
