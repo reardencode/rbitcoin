@@ -863,6 +863,9 @@ pub fn stamp_header_fk(
             crate::note_confirm(&query.confirm_stats().phase_prep_header_skip_n, 1);
             return Ok(fk);
         }
+        // No later connect read compares this row to the header hash. Keep the
+        // pread for a row that failed the field match: bind it only when its
+        // stored hash equals the digest lookup just computed.
         match query.store().get_header(fk) {
             Ok(rec) if rec.hash == header_rec.hash => {
                 crate::note_confirm(&query.confirm_stats().phase_prep_header_skip_n, 1);
