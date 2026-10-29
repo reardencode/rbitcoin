@@ -701,12 +701,14 @@ pub fn decode_block_precomputes(
     let t = Instant::now();
     for _ in 0..n {
         let start = cur.position() as usize;
-        let tx = match decode_flag_zero_tx(&payload[start..]) {
-            Some(tx) => {
+        let tx = match Transaction::consensus_decode(&mut cur) {
+            Ok(tx) => tx,
+            Err(_) => {
+                cur.set_position(start as u64);
+                let tx = decode_flag_zero_tx(&payload[start..])?;
                 cur.set_position((start + FLAG_ZERO_TX_LEN) as u64);
                 tx
             }
-            None => Transaction::consensus_decode(&mut cur).ok()?,
         };
         let end = cur.position() as usize;
         let wire = payload.get(start..end)?;
