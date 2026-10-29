@@ -873,8 +873,13 @@ pub fn getblock_tx_json(
         .iter()
         .enumerate()
         .map(|(i, tx)| {
+            let read = if verbosity >= 3 {
+                UndoRead::Prevouts
+            } else {
+                UndoRead::Fee
+            };
             let row = match undo {
-                Some(u) => raw_tx_prevouts(ctx, tx, u.fks[i], Some(u.header_fk))?,
+                Some(u) => raw_tx_prevouts(ctx, tx, u.fks[i], Some(u.header_fk), read)?,
                 None => None,
             };
             let Some((fee, prevouts)) = row else {

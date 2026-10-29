@@ -376,16 +376,27 @@ fn undo_unreadable() -> Value {
     rpc_error(ERR_INTERNAL, UNDO_UNREADABLE)
 }
 
-/// Undo for verbosity >= 2: the fee and each input's `prevout`. `None` is a
-/// coinbase, or a parent the connected fence does not place when no block is
-/// given to walk. `block` is the header fk of the block holding `fk`; it
-/// places a parent created in that block or an off-chain ancestor of it.
-/// Stored edges or outputs that do not read are Core's `-32603`.
+/// What a verbosity >= 2 reader takes from undo.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UndoRead {
+    /// `fee` only: each parent output's value, no placement or `prevout`.
+    Fee,
+    /// `fee` and each input's `prevout`.
+    Prevouts,
+}
+
+/// Undo for verbosity >= 2: the fee, and with [`UndoRead::Prevouts`] each
+/// input's `prevout`. `None` is a coinbase, or a parent the connected fence
+/// does not place when no block is given to walk. `block` is the header fk
+/// of the block holding `fk`; it places a parent created in that block or an
+/// off-chain ancestor of it. Stored edges or outputs that do not read are
+/// Core's `-32603`.
 pub(crate) fn raw_tx_prevouts(
     ctx: &RpcContext,
     tx: &Transaction,
     fk: Fk,
     block: Option<Fk>,
+    read: UndoRead,
 ) -> Result<Option<(i64, Vec<Value>)>, Value> {
     if tx.is_coinbase() {
         return Ok(None);
@@ -399,32 +410,27 @@ pub(crate) fn raw_tx_prevouts(
     }
     let net = rpc_btc_network(ctx.network);
     let mut in_sum = 0u64;
-    let mut rows = Vec::with_capacity(edges.len());
+    let mut rows = Vec::new();
     for (create_fk, vout) in edges {
         if create_fk.is_null() {
             return Err(undo_unreadable());
         }
-        let height = match store
-            .tx_height_get(create_fk)
-            .map_err(|_| undo_unreadable())?
-        {
-            Some(h) => h,
-            None => match block {
-                Some(header_fk) => off_chain_create_height(ctx, header_fk, create_fk)?
-                    .ok_or_else(undo_unreadable)?,
+        let placed = match read {
+            UndoRead::Fee => None,
+            UndoRead::Prevouts => match prevout_place(ctx, create_fk, block)? {
+                Some(p) => Some(p),
                 None => return Ok(None),
             },
         };
-        let (_, prevs) = store
-            .get_tx_meta_and_prevouts(create_fk)
-            .map_err(|_| undo_unreadable())?;
-        let generated = prevs.len() == 1 && prevs[0].0.is_null();
         let out = ctx
             .query
             .tx_output_at_fk(create_fk, vout)
             .map_err(|_| undo_unreadable())?;
-        let value = i64::try_from(out.value).map_err(|_| undo_unreadable())?;
         in_sum = in_sum.checked_add(out.value).ok_or_else(undo_unreadable)?;
+        let Some((height, generated)) = placed else {
+            continue;
+        };
+        let value = i64::try_from(out.value).map_err(|_| undo_unreadable())?;
         rows.push(json!({
             "generated": generated,
             "height": height,
@@ -437,6 +443,31 @@ pub(crate) fn raw_tx_prevouts(
         .and_then(|fee| i64::try_from(fee).ok())
         .ok_or_else(undo_unreadable)?;
     Ok(Some((fee, rows)))
+}
+
+/// A parent's `prevout.height` and `prevout.generated`. `None` when the
+/// connected fence does not place it and there is no block to walk.
+fn prevout_place(
+    ctx: &RpcContext,
+    create_fk: Fk,
+    block: Option<Fk>,
+) -> Result<Option<(u32, bool)>, Value> {
+    let store = ctx.query.store();
+    let height = match store
+        .tx_height_get(create_fk)
+        .map_err(|_| undo_unreadable())?
+    {
+        Some(h) => h,
+        None => match block {
+            Some(header_fk) => off_chain_create_height(ctx, header_fk, create_fk)?
+                .ok_or_else(undo_unreadable)?,
+            None => return Ok(None),
+        },
+    };
+    let (_, prevs) = store
+        .get_tx_meta_and_prevouts(create_fk)
+        .map_err(|_| undo_unreadable())?;
+    Ok(Some((height, prevs.len() == 1 && prevs[0].0.is_null())))
 }
 
 /// Height of a parent the connected fence does not place: a create in the
@@ -500,7 +531,7 @@ fn finish_verbose_tx(
 ) -> Result<Value, Value> {
     let net = rpc_btc_network(ctx.network);
     if verbosity >= 2 {
-        if let Some((fee, prevouts)) = raw_tx_prevouts(ctx, tx, fk, block)? {
+        if let Some((fee, prevouts)) = raw_tx_prevouts(ctx, tx, fk, block, UndoRead::Prevouts)? {
             extra.insert("fee".into(), sat_btc_json(fee));
             let mut obj = tx_to_json(tx, Some(Value::Object(extra)), net);
             insert_vin_prevouts(&mut obj, &prevouts);

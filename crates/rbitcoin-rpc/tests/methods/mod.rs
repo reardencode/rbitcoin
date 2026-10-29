@@ -2086,25 +2086,65 @@ fn getblock_unresolved_prevout_edge_is_an_error() {
     let tip = dispatch(&ctx, "generate", vec![json!(1)]).unwrap()[0].clone();
     // `input.body` is 8 bytes per input: parent fk u40 LE, vout u24 LE. Only
     // this spend names the height-1 coinbase, so its edge is the one match.
-    let (parent_fk, _) = ctx
-        .query
-        .get_tx_by_txid(&generated_coinbase_txid(&ctx, 1))
-        .unwrap()
-        .unwrap();
-    let mut edge = parent_fk.0.to_le_bytes();
-    edge[5..].fill(0);
+    let cb_fk = generated_coinbase_fk(&ctx, 1);
+    let mut edge = cb_fk.0.to_le_bytes();
+    edge[5..].copy_from_slice(&[7, 0, 0]);
+    rewrite_edge_naming(&dir, cb_fk, edge);
+    assert_undo_unreadable(&ctx, &tip);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn generated_coinbase_fk(ctx: &RpcContext, height: u32) -> rbitcoin_primitives::Fk {
+    let txid = generated_coinbase_txid(ctx, height);
+    ctx.query.get_tx_by_txid(&txid).unwrap().unwrap().0
+}
+
+/// Overwrite the one `input.body` edge that names `parent:0` (8 bytes per
+/// input: parent fk u40 LE, vout u24 LE). The file is pre-allocated with
+/// trailing zeros, so the edge is found by its bytes.
+fn rewrite_edge_naming(dir: &TempDir, parent: rbitcoin_primitives::Fk, edge: [u8; 8]) {
+    let mut want = parent.0.to_le_bytes();
+    want[5..].fill(0);
     let path = walk_for(&dir.join("store"), "input.body").expect("input.body");
     let bytes = std::fs::read(&path).unwrap();
     let hits: Vec<usize> = bytes
         .windows(8)
         .enumerate()
-        .filter(|(_, w)| *w == edge)
+        .filter(|(_, w)| *w == want)
         .map(|(i, _)| i)
         .collect();
-    assert_eq!(hits.len(), 1, "one edge names the coinbase: {hits:?}");
+    assert_eq!(hits.len(), 1, "one edge names {parent:?}: {hits:?}");
     let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
-    std::os::unix::fs::FileExt::write_all_at(&f, &[7], hits[0] as u64 + 5).unwrap();
-    assert_undo_unreadable(&ctx, &tip);
+    std::os::unix::fs::FileExt::write_all_at(&f, &edge, hits[0] as u64).unwrap();
+}
+
+/// Verbosity 2 needs each parent output's value for `fee`, and nothing else.
+/// A parent whose own prevout edge does not decode still gives the fee.
+/// Verbosity 3 and `getrawtransaction` verbosity 2 print `prevout.generated`
+/// from that edge, so they fail with Core's undo error.
+#[test]
+fn getblock_verbosity_2_reads_only_parent_outputs() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let (addr, _) = p2wpkh_regtest();
+    let parent_sat = generated_coinbase_value(&ctx, 1);
+    let (parent_hex, parent) =
+        mature_coinbase_spend(&ctx, parent_sat - 1_000, ScriptBuf::from_bytes(vec![0x51]));
+    dispatch(&ctx, "generateblock", vec![json!(addr), json!([parent_hex])]).unwrap();
+    let (child_hex, child) = spend_outpoint(&parent, 0, 2_000);
+    let tip = dispatch(&ctx, "generateblock", vec![json!(addr), json!([child_hex])]).unwrap()
+        ["hash"]
+        .clone();
+    // A null parent with a nonzero vout does not decode.
+    rewrite_edge_naming(&dir, generated_coinbase_fk(&ctx, 1), [0, 0, 0, 0, 0, 7, 0, 0]);
+
+    let v2 = dispatch(&ctx, "getblock", vec![tip.clone(), json!(2)])
+        .unwrap_or_else(|e| panic!("the fee reads only parent outputs: {e}"));
+    assert_btc_amount(&v2["tx"][1]["fee"], 2_000.0 / 1e8);
+    let v3 = dispatch(&ctx, "getblock", vec![tip.clone(), json!(3)]).unwrap_err();
+    assert_eq!(v3["code"], ERR_INTERNAL, "{v3}");
+    let txid = hash_hex_display(&child.compute_txid().to_byte_array());
+    let raw = dispatch(&ctx, "getrawtransaction", vec![json!(txid), json!(2), tip]).unwrap_err();
+    assert_eq!(raw["code"], ERR_INTERNAL, "{raw}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
