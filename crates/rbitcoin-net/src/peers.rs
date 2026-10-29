@@ -401,6 +401,10 @@ pub struct LivePeer {
     pub addr_rate_limited: AtomicU64,
     /// Unix seconds when this session was registered.
     pub connected_at: AtomicU64,
+    /// Unix seconds of the last message read from this peer (`getpeerinfo.lastrecv`).
+    pub last_recv: AtomicU64,
+    /// Unix seconds the writer last finished a message (`getpeerinfo.lastsend`).
+    pub last_send: AtomicU64,
     /// Netgroup fixed at accept. Inbound eviction compares this integer
     /// and does not read asmap.
     pub netgroup: u64,
@@ -428,6 +432,8 @@ pub struct LivePeer {
     pub next_local_addr_send: AtomicU64,
     /// VERSION timestamp (unix seconds; `0` on the connecting placeholder).
     pub version_timestamp: i64,
+    /// VERSION protocol version (`0` on the connecting placeholder).
+    pub version: u32,
 }
 
 #[cfg(target_os = "linux")]
@@ -482,6 +488,7 @@ impl LivePeer {
     }
 
     pub fn note_recv(&self, cmd: &str, nbytes: u64) {
+        self.last_recv.store(self.clock_now(), Ordering::Relaxed);
         let n = acct_bytes(cmd, nbytes);
         *self
             .recv
@@ -493,6 +500,7 @@ impl LivePeer {
 
     /// Store an already-computed wire size (v2 `*other*` = contents + expansion).
     pub fn note_recv_raw(&self, cmd: &str, nbytes: u64) {
+        self.last_recv.store(self.clock_now(), Ordering::Relaxed);
         *self
             .recv
             .lock()
@@ -941,6 +949,7 @@ impl LivePeer {
     /// is freed before the bytes: [`Self::note_send_written`] wakes a paused
     /// getdata tail, which must see the slot.
     pub fn note_out_written(&self, serve_slot: bool, bytes: usize) {
+        self.last_send.store(self.clock_now(), Ordering::Relaxed);
         if serve_slot {
             self.free_serve_slot();
         }
@@ -1326,6 +1335,10 @@ impl LivePeer {
                 0
             },
             best_known: self.best_known(),
+            version: self.version,
+            conntime: self.connected_at.load(Ordering::Relaxed),
+            last_send: self.last_send.load(Ordering::Relaxed),
+            last_recv: self.last_recv.load(Ordering::Relaxed),
         }
     }
 }
@@ -1434,6 +1447,14 @@ pub struct PeerInfo {
     pub time_offset_secs: i64,
     /// Best block this peer advertised (`None` until they send a header/block).
     pub best_known: Option<BlockHash>,
+    /// VERSION protocol version (`0` before handshake).
+    pub version: u32,
+    /// Unix seconds when this session was registered.
+    pub conntime: u64,
+    /// Unix seconds the writer last finished a message.
+    pub last_send: u64,
+    /// Unix seconds of the last message read from this peer.
+    pub last_recv: u64,
 }
 
 /// In-memory misbehavior key. Clearnet and CJDNS are the IP. Onion and I2P
@@ -2398,7 +2419,7 @@ impl PeerHub {
         use bitcoin::p2p::address::Address;
         use bitcoin::p2p::ServiceFlags;
         let ver = VersionMessage {
-            version: bitcoin::p2p::PROTOCOL_VERSION,
+            version: 0,
             services: ServiceFlags::NONE,
             timestamp: 0,
             receiver: Address::new(&addr, ServiceFlags::NONE),
@@ -2557,6 +2578,9 @@ impl PeerHub {
             addr_processed: AtomicU64::new(0),
             addr_rate_limited: AtomicU64::new(0),
             connected_at: AtomicU64::new(connected_at),
+            // A handshaken session registers right after VERSION/VERACK.
+            last_recv: AtomicU64::new(connected_at),
+            last_send: AtomicU64::new(connected_at),
             netgroup: crate::eviction::eviction_netgroup(endpoint.addr),
             inv_gen_floor: AtomicU64::new(0),
             age_inv_seen_due: AtomicU64::new(0),
@@ -2570,6 +2594,7 @@ impl PeerHub {
             wtxid_relay: AtomicBool::new(false),
             next_local_addr_send: AtomicU64::new(0),
             version_timestamp: ver.timestamp,
+            version: ver.version,
         });
         self.live
             .write()

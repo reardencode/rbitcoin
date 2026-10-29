@@ -4608,6 +4608,7 @@ fn getpeerinfo_connecting_has_unknown_sync_and_zero_offset() {
     assert_eq!(row["synced_blocks"], json!(-1));
     assert_eq!(row["timeoffset"], json!(0));
     assert_eq!(row["startingheight"], json!(-1));
+    assert_eq!(row["version"], json!(0));
     let net = dispatch(&ctx, "getnetworkinfo", vec![]).unwrap();
     assert_eq!(net["timeoffset"], json!(0));
     let _ = std::fs::remove_dir_all(&dir);
@@ -4844,15 +4845,24 @@ fn getpeerinfo_sent_pingwait_and_limited_services() {
     let row = &info.as_array().unwrap()[0];
     assert!(row["bytessent_per_msg"]["version"].as_u64().unwrap() >= 124);
     assert!(row.get("pingwait").is_some(), "{row}");
+    assert_eq!(row["version"], json!(70016));
+    assert_eq!(row["conntime"], json!(1_700_000_000));
+    assert_eq!(row["lastsend"], json!(1_700_000_000));
+    assert_eq!(row["lastrecv"], json!(1_700_000_000));
     let names = row["servicesnames"].as_array().unwrap();
     assert!(names.iter().any(|n| n == "NETWORK_LIMITED"), "{names:?}");
 
     assert!(live.on_pong(&nonce.to_le_bytes(), 1_700_000_029).is_none());
     hub.set_mock_now(1_700_000_029);
+    live.note_recv("pong", 8);
+    live.note_out_written(false, 32);
     let info = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
     let row = &info.as_array().unwrap()[0];
     assert_eq!(row["pingtime"], json!(29.0));
     assert_eq!(row["minping"], json!(29.0));
+    assert_eq!(row["lastrecv"], json!(1_700_000_029));
+    assert_eq!(row["lastsend"], json!(1_700_000_029));
+    assert_eq!(row["conntime"], json!(1_700_000_000));
     hub.set_noban(true);
     let info = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
     assert_eq!(
