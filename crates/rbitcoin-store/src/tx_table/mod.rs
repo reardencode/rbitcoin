@@ -993,6 +993,21 @@ pub fn class_a_body_covered_count(
     )
 }
 
+fn stem_ends_fit(
+    stems: &ClassASkewStems<'_>,
+    prune_seqsigwit_mode: bool,
+    n: u64,
+    tx_lim: u64,
+    sp_lim: u64,
+    in_lim: u64,
+) -> Result<bool, StoreError> {
+    if n == 0 {
+        return Ok(true);
+    }
+    let (tx_end, sp_end, in_end) = class_a_skew_stem_ends(stems, n, prune_seqsigwit_mode)?;
+    Ok(tx_end <= tx_lim && sp_end <= sp_lim && (prune_seqsigwit_mode || in_end <= in_lim))
+}
+
 fn covered_within(
     stems: &ClassASkewStems<'_>,
     prune_seqsigwit_mode: bool,
@@ -1001,13 +1016,15 @@ fn covered_within(
     sp_lim: u64,
     in_lim: u64,
 ) -> Result<u64, StoreError> {
+    // The last create fits on a healthy open: one locator read, no search.
+    if stem_ends_fit(stems, prune_seqsigwit_mode, hi, tx_lim, sp_lim, in_lim)? {
+        return Ok(hi);
+    }
+    hi = hi.saturating_sub(1);
     let mut lo = 0u64;
     while lo < hi {
         let mid = lo + (hi - lo).div_ceil(2);
-        let (tx_end, sp_end, in_end) = class_a_skew_stem_ends(stems, mid, prune_seqsigwit_mode)?;
-        let fits =
-            tx_end <= tx_lim && sp_end <= sp_lim && (prune_seqsigwit_mode || in_end <= in_lim);
-        if fits {
+        if stem_ends_fit(stems, prune_seqsigwit_mode, mid, tx_lim, sp_lim, in_lim)? {
             lo = mid;
         } else {
             hi = mid - 1;
