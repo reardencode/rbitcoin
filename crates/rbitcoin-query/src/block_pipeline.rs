@@ -619,11 +619,6 @@ pub struct StructuralScratch {
     pub abs_jobs: Vec<StructuralAbsJob>,
     pub unique_fks: Vec<rbitcoin_primitives::Fk>,
     pub height_by_id: U64Map<u32>,
-    pub skip_n: std::collections::HashMap<
-        (u64, u32),
-        u32,
-        BuildHasherDefault<rbitcoin_consensus::OutPointHasher>,
-    >,
     pub skip: OverlayMetaSkip,
     pub disk_jobs: Vec<StructuralAbsJob>,
     pub abs_offs: Vec<u64>,
@@ -646,7 +641,6 @@ impl Default for StructuralScratch {
             abs_jobs: Vec::new(),
             unique_fks: Vec::new(),
             height_by_id: U64Map::default(),
-            skip_n: std::collections::HashMap::with_hasher(Default::default()),
             skip: OverlayMetaSkip::with_hasher(Default::default()),
             disk_jobs: Vec::new(),
             abs_offs: Vec::new(),
@@ -678,7 +672,6 @@ impl StructuralScratch {
         self.abs_jobs.clear();
         self.unique_fks.clear();
         self.height_by_id.clear();
-        self.skip_n.clear();
         self.skip.clear();
         self.disk_jobs.clear();
         self.abs_offs.clear();
@@ -898,7 +891,7 @@ pub type DurableSpentSet =
 #[doc(hidden)]
 pub type OverlayMetaSkip = std::collections::HashMap<
     (u64, u32),
-    (rbitcoin_primitives::Fk, u32),
+    Option<(rbitcoin_primitives::Fk, u32)>,
     BuildHasherDefault<rbitcoin_consensus::OutPointHasher>,
 >;
 
@@ -914,6 +907,7 @@ pub fn fill_overlay_skip(
     class_a_wave: &ClassAWave,
     scratch: &mut StructuralScratch,
 ) {
+    use std::collections::hash_map::Entry;
     for &(_, vout, sfk, cfk, vin) in spends {
         if !class_a_wave.contains(cfk) {
             continue;
@@ -921,14 +915,16 @@ pub fn fill_overlay_skip(
         let Some(id) = cfk.get() else {
             continue;
         };
-        let key = (id, vout);
-        *scratch.skip_n.entry(key).or_insert(0) += 1;
-        scratch.skip.entry(key).or_insert((sfk, vin));
+        // None stays. Dropping the key would make a later sight look like the first.
+        match scratch.skip.entry((id, vout)) {
+            Entry::Vacant(slot) => {
+                slot.insert(Some((sfk, vin)));
+            }
+            Entry::Occupied(mut slot) => {
+                slot.insert(None);
+            }
+        }
     }
-    let skip_n = &scratch.skip_n;
-    scratch
-        .skip
-        .retain(|k, _| skip_n.get(k).copied() == Some(1));
 }
 
 #[doc(hidden)]
@@ -939,7 +935,7 @@ pub fn overlay_meta_is_skip(
     vin: u32,
     skip: &OverlayMetaSkip,
 ) -> bool {
-    skip.get(&(id, vout)) == Some(&(sfk, vin))
+    skip.get(&(id, vout)).copied().flatten() == Some((sfk, vin))
 }
 
 #[doc(hidden)]

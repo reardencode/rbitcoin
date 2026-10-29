@@ -31,11 +31,16 @@ fn overlay_meta_skip_keeps_conflicting_spender_on_disk_list() {
     map.insert(Fk(10), (5, false));
     let run = RunCreateHeight::Map(map);
     assert_eq!(run.create(Fk(10)), Some((5, false)));
-    let spends = spends(&[(0, Fk(11), Fk(10), 0), (0, Fk(12), Fk(10), 0)]);
+    let spends = spends(&[
+        (0, Fk(11), Fk(10), 0),
+        (0, Fk(12), Fk(10), 0),
+        (0, Fk(13), Fk(10), 1),
+    ]);
     let mut scratch = StructuralScratch::default();
     fill_overlay_skip(&spends, &wave, &mut scratch);
     assert!(!overlay_meta_is_skip(10, 0, Fk(11), 0, &scratch.skip));
     assert!(!overlay_meta_is_skip(10, 0, Fk(12), 0, &scratch.skip));
+    assert!(!overlay_meta_is_skip(10, 0, Fk(13), 1, &scratch.skip));
 }
 
 #[test]
