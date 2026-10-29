@@ -25,7 +25,7 @@ env:
 # fmt/clippy do not drift with GitHub Actions “stable”. The runner image's
 # rustup auto-installs that toolchain and its components on first cargo.
 #
-# `qc` is one Ubuntu runner: fmt, ast-grep, unwrap-ratchet, deny, scripts, clippy, then
+# `qc` is one Ubuntu runner: fmt, ast-grep, unwrap-ratchet, hex-ratchet, deny, scripts, clippy, then
 # nixos-module-eval. test, windows, and macos each have their own runner.
 # coverage and pread wait for qc and test so a red test does not start them.
 # pread is the Linux libc backend (`RBITCOIN_IO=pread`) for store and query.
@@ -66,6 +66,10 @@ jobs:
         run: ./scripts/unwrap-ratchet.test.sh
       - name: unwrap ratchet
         run: ./scripts/unwrap-ratchet.sh
+      - name: hex ratchet self-test
+        run: ./scripts/hex-ratchet.test.sh
+      - name: hex ratchet
+        run: ./scripts/hex-ratchet.sh
       # Prebuilt cargo-deny — do not cargo install. Pin the action commit.
       # 0.18.x cannot parse rustsec CVSS 4.0 advisories (2026).
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31

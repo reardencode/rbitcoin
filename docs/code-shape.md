@@ -114,6 +114,16 @@ counts as one. The count skips `#[cfg(test)]` items, `tests/`,
 and a call broken onto the previous line. A later method on that value
 still counts. `.expect(reason)` is not counted.
 
+Production `0x` integer literals are frozen the same way in
+[`lint/hex-baseline.txt`](../lint/hex-baseline.txt).
+`./scripts/hex-ratchet.sh` fails when a file grows, when a new file
+gains one, and when a cleanup leaves the old count in place. Each
+literal counts as one, including `0x207f_ffff`. Comments, strings, and
+char literals do not count. The skip list matches the unwrap ratchet.
+A new opcode byte belongs in `script_opcode.rs`; that file's line moves
+with the constant. Any other new literal is a baseline edit in the
+same commit.
+
 **Goal:** no `[workspace.lints.clippy]` `= "allow"`. A lint that is wrong
 for one item is `#[allow(clippy::lint)]` on **that item**, with a one-line
 reason (Core-faithful opcode loop, wire layout, dispatch bag,
