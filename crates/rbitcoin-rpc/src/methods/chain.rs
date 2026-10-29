@@ -847,14 +847,15 @@ fn stored_block_fks(ctx: &RpcContext, hash: &[u8; 32]) -> Option<Vec<Fk>> {
 }
 
 /// Verbosity >= 2 `tx` rows. With undo (`fks`), a non-coinbase carries `fee`,
-/// and at verbosity >= 3 each input carries `prevout`.
+/// and at verbosity >= 3 each input carries `prevout`. Undo that is present
+/// but unreadable is an error, as Core.
 #[doc(hidden)]
 pub fn getblock_tx_json(
     ctx: &RpcContext,
     block: &Block,
     fks: Option<&[Fk]>,
     verbosity: u32,
-) -> Vec<Value> {
+) -> Result<Vec<Value>, Value> {
     let net = rpc_btc_network(ctx.network);
     let fks = fks.filter(|f| f.len() == block.txdata.len());
     block
@@ -862,15 +863,18 @@ pub fn getblock_tx_json(
         .iter()
         .enumerate()
         .map(|(i, tx)| {
-            let undo = fks.and_then(|f| raw_tx_prevouts(ctx, tx, f[i]).ok().flatten());
+            let undo = match fks {
+                Some(f) => raw_tx_prevouts(ctx, tx, f[i])?,
+                None => None,
+            };
             let Some((fee, prevouts)) = undo else {
-                return tx_to_json(tx, None, net);
+                return Ok(tx_to_json(tx, None, net));
             };
             let mut obj = tx_to_json(tx, Some(json!({ "fee": sat_btc_json(fee) })), net);
             if verbosity >= 3 {
                 insert_vin_prevouts(&mut obj, &prevouts);
             }
-            obj
+            Ok(obj)
         })
         .collect()
 }
@@ -911,6 +915,12 @@ pub fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
             .query
             .block_txids(height)
             .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?;
+        // A reorg can seat another header at `height` after the hash lookup.
+        // Reads by height are this block's only while the slot still holds it.
+        let still = ctx.query.store().confirmed.get(height).ok().flatten();
+        if rec.hash != hash || still != Some(header_fk) {
+            return getblock_unknown_hash(ctx, hash, verbosity);
+        }
         let txids: Vec<String> = ids.iter().map(hash_hex_display).collect();
         let mut obj = json!({
             "hash": hash_hex_display(&hash),
@@ -934,12 +944,19 @@ pub fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
         if let Ok(Some((size, weight))) = ctx.query.block_size_weight(header_fk) {
             insert_size_weight(&mut obj, u64::from(size), u64::from(weight));
         }
-        let cb = stored_block_fks(ctx, &hash).and_then(|fks| {
-            fks.first()
-                .and_then(|fk| ctx.query.reconstruct_tx(*fk).ok())
-        });
-        if let Some(cb) = cb {
-            obj["coinbase_tx"] = coinbase_tx_json(&cb);
+        // Verbosity 1 still answers below `pruneheight`; that body has no
+        // coinbase to show.
+        let cb_fk = ctx
+            .query
+            .header_tx_fks(header_fk, Some(&hash))
+            .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?
+            .and_then(|fks| fks.first().copied());
+        if let Some(fk) = cb_fk {
+            match ctx.query.reconstruct_tx(fk) {
+                Ok(cb) => obj["coinbase_tx"] = coinbase_tx_json(&cb),
+                Err(rbitcoin_store::StoreError::Pruned { .. }) => {}
+                Err(e) => return Err(rpc_error(ERR_MISC, e.to_string())),
+            }
         }
         return Ok(obj);
     }
@@ -947,6 +964,9 @@ pub fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
         .query
         .reconstruct_block_at_height(height)
         .map_err(|e| map_query(e, "Block not available (pruned data)"))?;
+    if block.block_hash().to_byte_array() != hash {
+        return getblock_unknown_hash(ctx, hash, verbosity);
+    }
     if verbosity == 0 {
         let mut raw = Vec::new();
         block
@@ -988,7 +1008,7 @@ pub fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     if verbosity >= 2 {
         insert_block_size_fields(&mut obj, &block);
         let fks = stored_block_fks(ctx, &hash);
-        obj["tx"] = json!(getblock_tx_json(ctx, &block, fks.as_deref(), verbosity));
+        obj["tx"] = json!(getblock_tx_json(ctx, &block, fks.as_deref(), verbosity)?);
     }
     Ok(obj)
 }
@@ -1049,7 +1069,7 @@ pub fn disconnected_block_value(
     if verbosity >= 2 {
         insert_block_size_fields(&mut obj, block);
         let fks = stored_block_fks(ctx, hash);
-        obj["tx"] = json!(getblock_tx_json(ctx, block, fks.as_deref(), verbosity));
+        obj["tx"] = json!(getblock_tx_json(ctx, block, fks.as_deref(), verbosity)?);
     }
     Ok(obj)
 }
