@@ -931,8 +931,11 @@ pub fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
 }
 
 #[cfg(debug_assertions)]
+type GetblockHook = Box<dyn FnOnce(&RpcContext)>;
+
+#[cfg(debug_assertions)]
 thread_local! {
-    static BEFORE_GETBLOCK_FINISH: std::cell::RefCell<Option<Box<dyn FnOnce(&RpcContext)>>> =
+    static BEFORE_GETBLOCK_FINISH: std::cell::RefCell<Option<GetblockHook>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -959,8 +962,9 @@ impl ActiveAt {
     /// `nextblockhash` read heights above this block, which a connect or
     /// reorg can move without touching this slot, so they come from one
     /// sample of the tip. Then the membership check: `false` when
-    /// `confirmed[height]` no longer holds this block. A read that fails is
-    /// Core's `-32603`, not a disconnected block.
+    /// `confirmed[height]` no longer holds this block, or when the sampled
+    /// next block is not its child (a reorg away and back between the two
+    /// reads). A read that fails is Core's `-32603`, not a disconnected block.
     fn finish(&self, ctx: &RpcContext, obj: &mut Value) -> Result<bool, Value> {
         #[cfg(debug_assertions)]
         if let Some(f) = BEFORE_GETBLOCK_FINISH.with(|h| h.borrow_mut().take()) {
@@ -970,7 +974,11 @@ impl ActiveAt {
             .query
             .slots_around(self.height)
             .map_err(|e| rpc_error(ERR_INTERNAL, e.to_string()))?;
-        if slots.at != Some(self.header_fk) {
+        let child = slots
+            .next
+            .as_ref()
+            .is_none_or(|next| next.prev_fk == self.header_fk);
+        if slots.at != Some(self.header_fk) || !child {
             return Ok(false);
         }
         let Some(o) = obj.as_object_mut() else {

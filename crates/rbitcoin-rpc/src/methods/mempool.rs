@@ -459,8 +459,10 @@ fn prevout_place(
     {
         Some(h) => h,
         None => match block {
-            Some(header_fk) => off_chain_create_height(ctx, header_fk, create_fk, OFF_CHAIN_WALK_MAX)?
-                .ok_or_else(undo_unreadable)?,
+            Some(header_fk) => {
+                off_chain_create_height(ctx, header_fk, create_fk, OFF_CHAIN_WALK_MAX)?
+                    .ok_or_else(undo_unreadable)?
+            }
             None => return Ok(None),
         },
     };

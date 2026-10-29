@@ -2034,7 +2034,10 @@ fn getblock_mid_reorg_answers_for_the_requested_hash() {
 fn getblock_reads_the_tip_after_the_body() {
     let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
     let hash = dispatch(&ctx, "getbestblockhash", vec![]).unwrap();
-    let height = dispatch(&ctx, "getblockcount", vec![]).unwrap().as_u64().unwrap();
+    let height = dispatch(&ctx, "getblockcount", vec![])
+        .unwrap()
+        .as_u64()
+        .unwrap();
     for (n, verbosity) in [1, 2].into_iter().enumerate() {
         before_next_getblock_finish(|ctx: &RpcContext| {
             dispatch(ctx, "generate", vec![json!(1)]).unwrap();
@@ -2042,7 +2045,37 @@ fn getblock_reads_the_tip_after_the_body() {
         let blk = dispatch(&ctx, "getblock", vec![hash.clone(), json!(verbosity)]).unwrap();
         let next = dispatch(&ctx, "getblockhash", vec![json!(height + 1)]).unwrap();
         assert_eq!(blk["nextblockhash"], next, "verbosity {verbosity}: {blk}");
-        assert_eq!(blk["confirmations"], json!(n + 2), "verbosity {verbosity}: {blk}");
+        assert_eq!(
+            blk["confirmations"],
+            json!(n + 2),
+            "verbosity {verbosity}: {blk}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A reorg away and back between the tip sample and the membership read can
+/// leave this block in its slot while the sampled next block is another
+/// branch's. That next block is not this block's child, so the answer is the
+/// disconnected one, not this block with a foreign `nextblockhash`.
+#[test]
+fn getblock_next_block_from_another_branch_is_not_active() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let hash = dispatch(&ctx, "getblockhash", vec![json!(1)]).unwrap();
+    let (foreign, _) = ctx.query.header_at_height(Height(3)).unwrap().unwrap();
+    ctx.query
+        .store()
+        .confirmed
+        .set(&rbitcoin_store::ClassCWrite::for_test(), Height(2), foreign)
+        .unwrap();
+    for verbosity in [1, 2] {
+        let blk = dispatch(&ctx, "getblock", vec![hash.clone(), json!(verbosity)]).unwrap();
+        assert_eq!(
+            blk["confirmations"],
+            json!(-1),
+            "verbosity {verbosity}: {blk}"
+        );
+        assert!(blk.get("nextblockhash").is_none(), "{blk}");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2165,13 +2198,22 @@ fn getblock_verbosity_2_reads_only_parent_outputs() {
     let parent_sat = generated_coinbase_value(&ctx, 1);
     let (parent_hex, parent) =
         mature_coinbase_spend(&ctx, parent_sat - 1_000, ScriptBuf::from_bytes(vec![0x51]));
-    dispatch(&ctx, "generateblock", vec![json!(addr), json!([parent_hex])]).unwrap();
+    dispatch(
+        &ctx,
+        "generateblock",
+        vec![json!(addr), json!([parent_hex])],
+    )
+    .unwrap();
     let (child_hex, child) = spend_outpoint(&parent, 0, 2_000);
     let tip = dispatch(&ctx, "generateblock", vec![json!(addr), json!([child_hex])]).unwrap()
         ["hash"]
         .clone();
     // A null parent with a nonzero vout does not decode.
-    rewrite_edge_naming(&dir, generated_coinbase_fk(&ctx, 1), [0, 0, 0, 0, 0, 7, 0, 0]);
+    rewrite_edge_naming(
+        &dir,
+        generated_coinbase_fk(&ctx, 1),
+        [0, 0, 0, 0, 0, 7, 0, 0],
+    );
 
     let v2 = dispatch(&ctx, "getblock", vec![tip.clone(), json!(2)])
         .unwrap_or_else(|e| panic!("the fee reads only parent outputs: {e}"));
@@ -2297,8 +2339,12 @@ fn off_chain_create_height_walk_reaches_the_cap() {
     let parent_sat = generated_coinbase_value(&ctx, 1);
     let (parent_hex, parent) =
         mature_coinbase_spend(&ctx, parent_sat - 1_000, ScriptBuf::from_bytes(vec![0x51]));
-    let first = dispatch(&ctx, "generateblock", vec![json!(addr), json!([parent_hex])]).unwrap()
-        ["hash"]
+    let first = dispatch(
+        &ctx,
+        "generateblock",
+        vec![json!(addr), json!([parent_hex])],
+    )
+    .unwrap()["hash"]
         .clone();
     let height = dispatch(&ctx, "getblock", vec![first.clone(), json!(1)]).unwrap()["height"]
         .as_u64()
