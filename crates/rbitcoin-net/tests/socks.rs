@@ -500,7 +500,7 @@ async fn onion_only_dialer_keeps_clearnet_direct() {
 }
 
 #[tokio::test]
-async fn connect_isolated_net_dials_ip_and_onion_and_rejects_the_rest() {
+async fn connect_isolated_net_never_dials_direct() {
     use bitcoin::absolute::LockTime;
     use bitcoin::transaction::Version;
     use rbitcoin_net::ephemeral::send_tx_isolated;
@@ -554,16 +554,17 @@ async fn connect_isolated_net_dials_ip_and_onion_and_rejects_the_rest() {
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ip = listener.local_addr().unwrap();
-    let accept = tokio::spawn(async move {
-        let _ = listener.accept().await;
-    });
-    let stream = Dialer::Direct
-        .connect_isolated_net(NetAddr::Ip(ip))
-        .await
-        .unwrap();
-    assert_eq!(stream.peer_addr().unwrap(), ip);
-    drop(stream);
-    accept.await.unwrap();
+    let onion_only = Dialer::with_proxies(None, Some(ip), true);
+    for dialer in [&Dialer::Direct, &onion_only] {
+        let err = dialer
+            .connect_isolated_net(NetAddr::Ip(ip))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("isolated broadcast needs --proxy"),
+            "{dialer:?}: {err}"
+        );
+    }
 
     let onion = NetAddr::Onion {
         pk: [0x44; 32],
@@ -583,18 +584,26 @@ async fn connect_isolated_net_dials_ip_and_onion_and_rejects_the_rest() {
     let cjdns_listener = TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0))
         .await
         .unwrap();
-    let cjdns_addr = cjdns_listener.local_addr().unwrap();
-    let cjdns_accept = tokio::spawn(async move {
-        let _ = cjdns_listener.accept().await;
-    });
-    let stream = Dialer::Direct
-        .connect_isolated_net(NetAddr::Cjdns {
-            ip: std::net::Ipv6Addr::LOCALHOST,
-            port: cjdns_addr.port(),
-        })
-        .await
-        .unwrap();
-    assert_eq!(stream.peer_addr().unwrap(), cjdns_addr);
-    drop(stream);
-    cjdns_accept.await.unwrap();
+    let cjdns = NetAddr::Cjdns {
+        ip: std::net::Ipv6Addr::LOCALHOST,
+        port: cjdns_listener.local_addr().unwrap().port(),
+    };
+    for dialer in [&Dialer::Direct, &Dialer::socks(proxy, true)] {
+        let err = dialer.connect_isolated_net(cjdns).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("isolated broadcast never dials cjdns"),
+            "{dialer:?}: {err}"
+        );
+    }
+
+    for listener in [listener, cjdns_listener] {
+        assert!(
+            tokio::time::timeout(std::time::Duration::ZERO, listener.accept())
+                .await
+                .is_err(),
+            "a direct connection reached {:?}",
+            listener.local_addr()
+        );
+    }
 }

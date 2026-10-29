@@ -166,7 +166,9 @@ on) uses a fresh SOCKS username per peer so Tor isolates circuits.
 `POST /tx` (and packages) are not INV'd on standing peers. After mempool
 accept the node opens a short-lived SOCKS circuit (fresh isolation
 credentials), BIP324-handshakes one or two AddrMan peers (onion first),
-sends `tx`, and disconnects. This is **not** Dandelion++. If that
+sends `tx`, and disconnects. An IPv4/IPv6 peer is only reached through
+`--proxy`, never directly: with `--onion` alone, only onion peers get the
+tx. CJDNS peers are never used. This is **not** Dandelion++. If that
 one-shot fails, the tx stays in the mempool and is still not INV'd;
 confirmation can still arrive in a block.
 `--onion HOST:PORT` stores a separate SOCKS endpoint for onion destinations.

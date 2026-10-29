@@ -342,11 +342,19 @@ async fn ephemeral_broadcast_known_tx_one_shot() {
         );
         true
     });
+    let socks_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = socks_l.local_addr().unwrap();
+    let (accepted_tx, mut accepted_rx) = tokio::sync::oneshot::channel();
+    let splice = tokio::spawn(async move {
+        let (s, _) = socks_l.accept().await.unwrap();
+        let _ = accepted_tx.send(());
+        splice_after_userpass(s, peer_addr).await;
+    });
     let mut am = AddrMan::new();
     am.add(peer_addr);
     let tx = dummy_tx();
     isolated_broadcast_known_tx(
-        &Dialer::Direct,
+        &Dialer::socks(proxy, true),
         &Mutex::new(am),
         Magic::REGTEST,
         "/rbitcoin:test/",
@@ -355,4 +363,35 @@ async fn ephemeral_broadcast_known_tx_one_shot() {
     )
     .await;
     assert!(inbound.await.unwrap(), "one-shot reached the peer");
+    accepted_rx
+        .try_recv()
+        .expect("the one-shot went through the SOCKS proxy");
+    splice.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn onion_only_isolated_broadcast_never_reaches_clearnet() {
+    let clearnet = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let onion_proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut am = AddrMan::new();
+    am.add(clearnet.local_addr().unwrap());
+    let tx = dummy_tx();
+    isolated_broadcast_known_tx(
+        &Dialer::with_proxies(None, Some(onion_proxy.local_addr().unwrap()), true),
+        &Mutex::new(am),
+        Magic::REGTEST,
+        "/rbitcoin:test/",
+        tx.compute_txid(),
+        tx,
+    )
+    .await;
+    for listener in [clearnet, onion_proxy] {
+        assert!(
+            tokio::time::timeout(Duration::ZERO, listener.accept())
+                .await
+                .is_err(),
+            "the onion-only broadcast reached {:?}",
+            listener.local_addr()
+        );
+    }
 }

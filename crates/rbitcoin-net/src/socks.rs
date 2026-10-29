@@ -258,19 +258,14 @@ impl Dialer {
         }
     }
 
-    pub async fn connect_isolated(&self, target: SocketAddr) -> Result<TcpStream, NetError> {
-        match self {
-            Dialer::Direct => self.connect(target).await,
-            Dialer::Socks { proxy, .. } => match proxy {
-                Some(proxy) => dial_isolated(*proxy, target).await,
-                None => self.connect(target).await,
-            },
-        }
-    }
-
     pub async fn connect_isolated_net(&self, addr: crate::NetAddr) -> Result<TcpStream, NetError> {
         match addr {
-            crate::NetAddr::Ip(s) => self.connect_isolated(s).await,
+            crate::NetAddr::Ip(s) => {
+                let proxy = self.proxy_for(crate::OnlyNet::of(addr)).ok_or_else(|| {
+                    NetError::Encode("isolated broadcast needs --proxy for an IP peer".into())
+                })?;
+                dial_isolated(proxy, s).await
+            }
             crate::NetAddr::Onion { port, .. } => {
                 let socks = self.proxy_for(crate::OnlyNet::Onion).ok_or_else(|| {
                     NetError::Encode("onion dial requires SOCKS (--proxy or --onion)".into())
@@ -280,9 +275,9 @@ impl Dialer {
             crate::NetAddr::I2p { .. } => {
                 Err(NetError::Encode("i2p dial requires SAM (--i2p-sam)".into()))
             }
-            crate::NetAddr::Cjdns { ip, port } => {
-                Ok(TcpStream::connect(SocketAddr::from((ip, port))).await?)
-            }
+            crate::NetAddr::Cjdns { .. } => Err(NetError::Encode(
+                "isolated broadcast never dials cjdns".into(),
+            )),
         }
     }
 
