@@ -308,6 +308,7 @@ fn raw_tx_blockhash(params: &RpcParams) -> Result<Option<[u8; 32]>, Value> {
 }
 
 struct RawTxBlock {
+    header_fk: Fk,
     active: bool,
     height: Option<u32>,
     timestamp: u32,
@@ -343,6 +344,7 @@ fn raw_tx_block(ctx: &RpcContext, hash: [u8; 32]) -> Result<RawTxBlock, Value> {
         None => false,
     };
     Ok(RawTxBlock {
+        header_fk,
         active,
         height: located.filter(|_| active).map(|h| h.0),
         timestamp: header.timestamp,
@@ -366,56 +368,63 @@ fn fk_in_block(ctx: &RpcContext, fks: &[Fk], want: &[u8; 32]) -> Result<Option<F
     Ok(None)
 }
 
-/// Undo for verbosity >= 2. `None` means the inputs are not a confirmed spend
-/// (coinbase, or a parent height the connected fence does not know).
+/// Core's message when a block's undo data is expected but does not read.
+pub(crate) const UNDO_UNREADABLE: &str =
+    "Undo data expected but can't be read. This could be due to disk corruption or a conflict with a pruning event.";
+
+fn undo_unreadable() -> Value {
+    rpc_error(ERR_INTERNAL, UNDO_UNREADABLE)
+}
+
+/// Undo for verbosity >= 2: the fee and each input's `prevout`. `None` is a
+/// coinbase, or a parent the connected fence does not place when no block is
+/// given to walk. `block` is the header fk of the block holding `fk`; it
+/// places a parent created in that block or an off-chain ancestor of it.
+/// Stored edges or outputs that do not read are Core's `-32603`.
 pub(crate) fn raw_tx_prevouts(
     ctx: &RpcContext,
     tx: &Transaction,
     fk: Fk,
+    block: Option<Fk>,
 ) -> Result<Option<(i64, Vec<Value>)>, Value> {
     if tx.is_coinbase() {
         return Ok(None);
     }
-    let (_, edges) = match ctx.query.store().get_tx_meta_and_prevouts(fk) {
-        Ok(v) => v,
-        Err(rbitcoin_store::StoreError::NotFound) => return Ok(None),
-        Err(e) => return Err(map_query(e, RAW_TX_PRUNED)),
-    };
+    let store = ctx.query.store();
+    let (_, edges) = store
+        .get_tx_meta_and_prevouts(fk)
+        .map_err(|_| undo_unreadable())?;
     if edges.len() != tx.input.len() {
-        return Ok(None);
+        return Err(undo_unreadable());
     }
     let net = rpc_btc_network(ctx.network);
     let mut in_sum = 0u64;
     let mut rows = Vec::with_capacity(edges.len());
     for (create_fk, vout) in edges {
         if create_fk.is_null() {
-            return Ok(None);
+            return Err(undo_unreadable());
         }
-        let Some(height) = ctx
-            .query
-            .store()
+        let height = match store
             .tx_height_get(create_fk)
-            .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?
-        else {
-            return Ok(None);
+            .map_err(|_| undo_unreadable())?
+        {
+            Some(h) => h,
+            None => match block {
+                Some(header_fk) => off_chain_create_height(ctx, header_fk, create_fk)?
+                    .ok_or_else(undo_unreadable)?,
+                None => return Ok(None),
+            },
         };
-        let generated = match ctx.query.store().get_tx_meta_and_prevouts(create_fk) {
-            Ok((_, prevs)) => prevs.len() == 1 && prevs[0].0.is_null(),
-            Err(rbitcoin_store::StoreError::NotFound) => return Ok(None),
-            Err(e) => return Err(map_query(e, RAW_TX_PRUNED)),
-        };
-        let out = match ctx.query.tx_output_at_fk(create_fk, vout) {
-            Ok(out) => out,
-            Err(rbitcoin_store::StoreError::NotFound) => return Ok(None),
-            Err(e) => return Err(map_query(e, RAW_TX_PRUNED)),
-        };
-        let Some(value) = i64::try_from(out.value).ok() else {
-            return Ok(None);
-        };
-        in_sum = match in_sum.checked_add(out.value) {
-            Some(s) => s,
-            None => return Ok(None),
-        };
+        let (_, prevs) = store
+            .get_tx_meta_and_prevouts(create_fk)
+            .map_err(|_| undo_unreadable())?;
+        let generated = prevs.len() == 1 && prevs[0].0.is_null();
+        let out = ctx
+            .query
+            .tx_output_at_fk(create_fk, vout)
+            .map_err(|_| undo_unreadable())?;
+        let value = i64::try_from(out.value).map_err(|_| undo_unreadable())?;
+        in_sum = in_sum.checked_add(out.value).ok_or_else(undo_unreadable)?;
         rows.push(json!({
             "generated": generated,
             "height": height,
@@ -423,16 +432,49 @@ pub(crate) fn raw_tx_prevouts(
             "scriptPubKey": script_pubkey_json(&ScriptBuf::from_bytes(out.script), net),
         }));
     }
-    let Some(out_sum) = tx_output_sum_sat(tx) else {
-        return Ok(None);
-    };
-    let Some(fee) = in_sum.checked_sub(out_sum) else {
-        return Ok(None);
-    };
-    let Some(fee) = i64::try_from(fee).ok() else {
-        return Ok(None);
-    };
+    let fee = tx_output_sum_sat(tx)
+        .and_then(|out_sum| in_sum.checked_sub(out_sum))
+        .and_then(|fee| i64::try_from(fee).ok())
+        .ok_or_else(undo_unreadable)?;
     Ok(Some((fee, rows)))
+}
+
+/// Height of a parent the connected fence does not place: a create in the
+/// off-chain block `header_fk` or one of its off-chain ancestors. Counted up
+/// from the first active ancestor. `None` when the walk does not find it.
+fn off_chain_create_height(
+    ctx: &RpcContext,
+    header_fk: Fk,
+    create_fk: Fk,
+) -> Result<Option<u32>, Value> {
+    let q = ctx.query.as_ref();
+    let mut cur = header_fk;
+    let mut found = None;
+    for depth in 0..OFF_CHAIN_WALK_MAX {
+        let rec = q.get_header(cur).map_err(|_| undo_unreadable())?;
+        if let Some(h) = q
+            .confirmed_height_of_hash(&rec.hash)
+            .map_err(|_| undo_unreadable())?
+        {
+            return Ok(found.map(|d| h.0 + depth - d));
+        }
+        let span = q
+            .store()
+            .header_txs
+            .get_range(cur)
+            .map_err(|_| undo_unreadable())?;
+        if found.is_none()
+            && span
+                .is_some_and(|(first, n)| (first.0..first.0 + u64::from(n)).contains(&create_fk.0))
+        {
+            found = Some(depth);
+        }
+        if rec.prev_fk.is_null() {
+            return Ok(None);
+        }
+        cur = rec.prev_fk;
+    }
+    Ok(None)
 }
 
 pub(crate) fn insert_vin_prevouts(obj: &mut Value, prevouts: &[Value]) {
@@ -450,12 +492,13 @@ fn finish_verbose_tx(
     ctx: &RpcContext,
     tx: &Transaction,
     fk: Fk,
+    block: Option<Fk>,
     verbosity: u32,
     mut extra: serde_json::Map<String, Value>,
 ) -> Result<Value, Value> {
     let net = rpc_btc_network(ctx.network);
     if verbosity >= 2 {
-        if let Some((fee, prevouts)) = raw_tx_prevouts(ctx, tx, fk)? {
+        if let Some((fee, prevouts)) = raw_tx_prevouts(ctx, tx, fk, block)? {
             extra.insert("fee".into(), sat_btc_json(fee));
             let mut obj = tx_to_json(tx, Some(Value::Object(extra)), net);
             insert_vin_prevouts(&mut obj, &prevouts);
@@ -499,7 +542,7 @@ fn getrawtransaction_in_block(
     } else {
         extra.insert("confirmations".into(), json!(0));
     }
-    finish_verbose_tx(ctx, &tx, fk, verbosity, extra)
+    finish_verbose_tx(ctx, &tx, fk, Some(block.header_fk), verbosity, extra)
 }
 
 pub fn getrawtransaction(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
@@ -559,7 +602,7 @@ pub fn getrawtransaction(ctx: &RpcContext, params: &RpcParams) -> Result<Value, 
         extra.insert("blocktime".into(), json!(header.timestamp));
         extra.insert("time".into(), json!(header.timestamp));
     }
-    finish_verbose_tx(ctx, &tx, fk, verbosity, extra)
+    finish_verbose_tx(ctx, &tx, fk, None, verbosity, extra)
 }
 
 /// Header of the active block that still holds `fk`, plus that height and the tip.

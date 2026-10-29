@@ -833,17 +833,27 @@ pub fn coinbase_tx_json(cb: &Transaction) -> Value {
     obj
 }
 
-/// Class A tx fks of the stored body for `hash`, active or disconnected.
-/// Their prevout edges are Core's undo data. A held body has none.
-fn stored_block_fks(ctx: &RpcContext, hash: &[u8; 32]) -> Option<Vec<Fk>> {
+/// Header fk and Class A tx fks of the stored body for `hash`, active or
+/// disconnected. Their prevout edges are Core's undo data. A held body has
+/// none.
+fn stored_block_fks(ctx: &RpcContext, hash: &[u8; 32]) -> Option<BlockUndo> {
     let (header_fk, rec) = ctx.query.get_header_by_hash(hash).ok().flatten()?;
     if rec.hash != *hash {
         return None;
     }
-    ctx.query
+    let fks = ctx
+        .query
         .header_tx_fks(header_fk, Some(hash))
         .ok()
-        .flatten()
+        .flatten()?;
+    Some(BlockUndo { header_fk, fks })
+}
+
+/// A stored body's header fk and its tx fks, in block order.
+#[doc(hidden)]
+pub struct BlockUndo {
+    pub header_fk: Fk,
+    pub fks: Vec<Fk>,
 }
 
 /// Verbosity >= 2 `tx` rows. With undo (`fks`), a non-coinbase carries `fee`,
@@ -853,21 +863,21 @@ fn stored_block_fks(ctx: &RpcContext, hash: &[u8; 32]) -> Option<Vec<Fk>> {
 pub fn getblock_tx_json(
     ctx: &RpcContext,
     block: &Block,
-    fks: Option<&[Fk]>,
+    undo: Option<&BlockUndo>,
     verbosity: u32,
 ) -> Result<Vec<Value>, Value> {
     let net = rpc_btc_network(ctx.network);
-    let fks = fks.filter(|f| f.len() == block.txdata.len());
+    let undo = undo.filter(|u| u.fks.len() == block.txdata.len());
     block
         .txdata
         .iter()
         .enumerate()
         .map(|(i, tx)| {
-            let undo = match fks {
-                Some(f) => raw_tx_prevouts(ctx, tx, f[i])?,
+            let row = match undo {
+                Some(u) => raw_tx_prevouts(ctx, tx, u.fks[i], Some(u.header_fk))?,
                 None => None,
             };
-            let Some((fee, prevouts)) = undo else {
+            let Some((fee, prevouts)) = row else {
                 return Ok(tx_to_json(tx, None, net));
             };
             let mut obj = tx_to_json(tx, Some(json!({ "fee": sat_btc_json(fee) })), net);
@@ -916,6 +926,9 @@ pub fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
 }
 
 /// A block `height_of_hash` placed on the active chain, and its header fk.
+/// The fields read by height are this block's only if `confirmed[height]`
+/// still holds it after they are read: a disconnect clears that slot before
+/// it pops the fence, and a lower slot is cleared only after this one.
 struct ActiveAt {
     hash: [u8; 32],
     height: Height,
@@ -926,18 +939,18 @@ impl ActiveAt {
     fn still_active(&self, ctx: &RpcContext) -> bool {
         ctx.query.store().confirmed.get(self.height).ok().flatten() == Some(self.header_fk)
     }
+}
 
-    fn prev_hash(&self, ctx: &RpcContext) -> String {
-        if self.height.0 == 0 {
-            return String::new();
-        }
-        ctx.query
-            .header_at_height(Height(self.height.0 - 1))
-            .ok()
-            .flatten()
-            .map(|(_, r)| hash_hex_display(&r.hash))
-            .unwrap_or_default()
+/// `previousblockhash` from the header's own `prev_fk`, not the live height.
+fn prev_hash_of(ctx: &RpcContext, rec: &rbitcoin_store::HeaderRecord) -> Result<String, Value> {
+    if rec.prev_fk.is_null() {
+        return Ok(String::new());
     }
+    let prev = ctx
+        .query
+        .get_header(rec.prev_fk)
+        .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?;
+    Ok(hash_hex_display(&prev.hash))
 }
 
 /// Verbosity 1: txids without a body reconstruct, so it still answers below
@@ -949,9 +962,6 @@ fn getblock_v1(
 ) -> Result<Value, Value> {
     let misc = |e: rbitcoin_query::QueryError| rpc_error(ERR_MISC, e.to_string());
     let ids = ctx.query.header_txids(at.header_fk).map_err(misc)?;
-    if !at.still_active(ctx) {
-        return getblock_unknown_hash(ctx, at.hash, 1);
-    }
     let txids: Vec<String> = ids.iter().map(hash_hex_display).collect();
     let mut obj = json!({
         "hash": hash_hex_display(&at.hash),
@@ -967,7 +977,7 @@ fn getblock_v1(
         "nTx": txids.len(),
         "tx": txids,
     });
-    insert_previousblockhash(&mut obj, &at.prev_hash(ctx));
+    insert_previousblockhash(&mut obj, &prev_hash_of(ctx, &rec)?);
     enrich_block_header_json(&mut obj, ctx, rec.version, rec.bits, Some(at.height), None);
     // Core verbosity 1 carries size/strippedsize/weight (mempool's block
     // indexer stores them NOT NULL). txstat answers without a reconstruct;
@@ -987,6 +997,9 @@ fn getblock_v1(
             Err(e) => return Err(misc(e)),
         }
     }
+    if !at.still_active(ctx) {
+        return getblock_unknown_hash(ctx, at.hash, 1);
+    }
     Ok(obj)
 }
 
@@ -1000,6 +1013,7 @@ fn getblock_body(
     let misc = |e: rbitcoin_query::QueryError| rpc_error(ERR_MISC, e.to_string());
     let pruned = |e| map_query(e, "Block not available (pruned data)");
     ctx.query.require_seqsigwit_at(at.height).map_err(pruned)?;
+    let prev = prev_hash_of(ctx, &rec)?;
     let fks = ctx
         .query
         .header_tx_fks(at.header_fk, Some(&at.hash))
@@ -1017,9 +1031,6 @@ fn getblock_body(
         return Err(misc(rbitcoin_store::StoreError::Corrupt(
             "reconstruct hash mismatch",
         )));
-    }
-    if !at.still_active(ctx) {
-        return disconnected_block_value(ctx, &at.hash, &block, verbosity);
     }
     if verbosity == 0 {
         let mut raw = Vec::new();
@@ -1047,7 +1058,7 @@ fn getblock_body(
         "nTx": block.txdata.len(),
         "tx": txids,
     });
-    insert_previousblockhash(&mut obj, &at.prev_hash(ctx));
+    insert_previousblockhash(&mut obj, &prev);
     enrich_block_header_json(
         &mut obj,
         ctx,
@@ -1061,7 +1072,14 @@ fn getblock_body(
     }
     if verbosity >= 2 {
         insert_block_size_fields(&mut obj, &block);
-        obj["tx"] = json!(getblock_tx_json(ctx, &block, Some(&fks), verbosity)?);
+        let undo = BlockUndo {
+            header_fk: at.header_fk,
+            fks,
+        };
+        obj["tx"] = json!(getblock_tx_json(ctx, &block, Some(&undo), verbosity)?);
+    }
+    if !at.still_active(ctx) {
+        return disconnected_block_value(ctx, &at.hash, &block, verbosity);
     }
     Ok(obj)
 }
@@ -1121,8 +1139,8 @@ pub fn disconnected_block_value(
     }
     if verbosity >= 2 {
         insert_block_size_fields(&mut obj, block);
-        let fks = stored_block_fks(ctx, hash);
-        obj["tx"] = json!(getblock_tx_json(ctx, block, fks.as_deref(), verbosity)?);
+        let undo = stored_block_fks(ctx, hash);
+        obj["tx"] = json!(getblock_tx_json(ctx, block, undo.as_ref(), verbosity)?);
     }
     Ok(obj)
 }

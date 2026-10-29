@@ -7,4 +7,6 @@ Fixed
   in Core, also for a block disconnected by a reorg. Every verbosity >= 1
   now carries Core's `coinbase_tx` object. Verbosity 2 `fee` comes from the
   same stored prevouts, so a held never-connected body omits it, as Core
-  does without undo data.
+  does without undo data. Stored prevouts that do not read are Core's
+  `-32603` undo error in `getblock` and `getrawtransaction` verbosity 2,
+  not a row without `fee` and `prevout`.

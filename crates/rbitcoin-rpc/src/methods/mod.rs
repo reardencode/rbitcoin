@@ -302,6 +302,8 @@ pub const ERR_INVALID_PARAMETER: i64 = -8;
 /// Core `RPC_VERIFY_REJECTED` (sendrawtransaction / testmempoolaccept).
 pub const ERR_VERIFY_REJECTED: i64 = -26;
 pub const ERR_INVALID_PARAMS: i64 = -32602;
+/// Core `RPC_INTERNAL_ERROR` (undo data that does not read).
+pub const ERR_INTERNAL: i64 = -32603;
 pub const ERR_METHOD_NOT_FOUND: i64 = -32601;
 
 pub fn map_query(e: rbitcoin_query::QueryError, pruned: &'static str) -> Value {
