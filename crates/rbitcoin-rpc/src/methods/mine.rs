@@ -32,7 +32,7 @@ pub fn allow_local_miner(ctx: &RpcContext) -> bool {
             c.params
                 .signet_challenge
                 .as_ref()
-                .is_some_and(|s| s.as_bytes() == [0x51])
+                .is_some_and(|s| s.as_bytes() == [rbitcoin_primitives::OP_TRUE])
         })
 }
 
@@ -108,7 +108,7 @@ pub fn script_core_type(script: &bitcoin::Script) -> &'static str {
 #[doc(hidden)]
 pub fn is_p2anchor(script: &bitcoin::Script) -> bool {
     let b = script.as_bytes();
-    b.len() == 4 && b[0] == 0x51 && b[1] == 0x02 && b[2] == 0x4e && b[3] == 0x73
+    b == rbitcoin_primitives::P2A_SCRIPT
 }
 
 pub fn decode_output_script(ctx: &RpcContext, s: &str) -> Result<ScriptBuf, Value> {
@@ -368,7 +368,7 @@ pub fn generate(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     let _miner = require_regtest_miner(ctx, "generate")?;
     let nblocks = params.req_u64(0, "nblocks")? as u32;
     let _maxtries = params.opt_u64(1, "maxtries")?;
-    let script = ScriptBuf::from_bytes(vec![0x51]);
+    let script = ScriptBuf::from_bytes(vec![rbitcoin_primitives::OP_TRUE]);
     generate_with_mempool(ctx, nblocks, script)
 }
 
@@ -983,7 +983,7 @@ pub fn getmininginfo(ctx: &RpcContext) -> Result<Value, Value> {
         .as_ref()
         .map(|m| m.list_live_meta().len())
         .unwrap_or(0);
-    let bits = tip_bits(ctx).unwrap_or(0x207f_ffff);
+    let bits = tip_bits(ctx).unwrap_or(rbitcoin_consensus::REGTEST_POW_BITS);
     let target = bitcoin::Target::from_compact(bitcoin::CompactTarget::from_consensus(bits));
     let difficulty = difficulty_from_bits(bits);
     let mut m = serde_json::Map::new();

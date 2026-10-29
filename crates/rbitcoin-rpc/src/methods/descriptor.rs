@@ -50,7 +50,7 @@ pub(super) fn p2pk_key(script: &Script) -> Option<&[u8]> {
     let (&len, rest) = b.split_first()?;
     let (&last, key) = rest.split_last()?;
     let sized = (len == 33 || len == 65) && key.len() == usize::from(len);
-    (sized && last == 0xac && has_key_size(key)).then_some(key)
+    (sized && last == rbitcoin_primitives::OP_CHECKSIG && has_key_size(key)).then_some(key)
 }
 
 pub(super) fn bare_multisig(script: &Script) -> Option<(usize, Vec<&[u8]>)> {

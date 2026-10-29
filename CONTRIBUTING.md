@@ -268,7 +268,7 @@ Do not edit [`CHANGELOG.md`](./CHANGELOG.md) on a feature branch. The release
 cut folds those files in. Owner: [`docs/releases.md`](./docs/releases.md).
 
 Required **jobs** match [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)
-(`qc`, `test`, `windows`, `macos`, `coverage`, `pread`, `rust-forward`). `qc` is fmt, ast-grep, deny, the script self-tests,
+(`qc`, `test`, `windows`, `macos`, `coverage`, `pread`, `rust-forward`). `qc` is fmt, ast-grep, unwrap-ratchet, hex-ratchet, deny, the script self-tests,
 clippy, then nixos-module-eval, in that order on one runner. `pread` is the
 Linux libc backend for `rbitcoin-store` and `rbitcoin-query`
 (`RBITCOIN_IO=pread`). `rust-forward` is `cargo check --workspace --all-targets`

@@ -24,7 +24,7 @@ pub enum ScriptKind {
 /// **Not** a short-circuit past scriptSig: scriptSig still runs (CLTV/CSV may
 /// live there). Callers must evaluate scriptSig first or use the bare path.
 pub fn is_anyone_can_spend(script: &Script) -> bool {
-    script.as_bytes() == [0x51]
+    script.as_bytes() == [rbitcoin_primitives::OP_TRUE]
 }
 
 /// BIP141 witness program: `OP_0`/`OP_1`..`OP_16` + a single push of 2..=40 bytes.

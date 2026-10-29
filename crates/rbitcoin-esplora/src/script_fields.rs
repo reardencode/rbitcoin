@@ -62,5 +62,8 @@ pub fn is_bare_multisig(s: &Script) -> bool {
     if b.len() < 3 {
         return false;
     }
-    matches!(b[b.len() - 1], 0xae | 0xaf)
+    matches!(
+        b[b.len() - 1],
+        rbitcoin_primitives::OP_CHECKMULTISIG | rbitcoin_primitives::OP_CHECKMULTISIGVERIFY
+    )
 }

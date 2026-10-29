@@ -130,7 +130,7 @@ pub fn store_include_hwm(store_dir: &Path, max_create_fk: u64) -> Result<(), Sto
 /// P2TR scriptPubKey: `OP_1` then a 32-byte x-only key.
 #[doc(hidden)]
 pub fn is_p2tr(spk: &[u8]) -> bool {
-    spk.len() == 34 && spk[0] == 0x51 && spk[1] == 0x20
+    spk.len() == 34 && spk.starts_with(&rbitcoin_primitives::P2TR_PREFIX)
 }
 
 /// Electrum scripthash = SHA256(scriptPubKey) (binary; API often reverses for hex).

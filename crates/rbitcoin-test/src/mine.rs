@@ -16,7 +16,11 @@ pub fn bip34_script(height: u32) -> ScriptBuf {
 }
 
 pub fn coinbase_tx(height: u32, value: Amount) -> Transaction {
-    rbitcoin_consensus::regtest_coinbase(height, value, ScriptBuf::from_bytes(vec![0x51]))
+    rbitcoin_consensus::regtest_coinbase(
+        height,
+        value,
+        ScriptBuf::from_bytes(vec![rbitcoin_primitives::OP_TRUE]),
+    )
 }
 
 /// Simple P2WPKH-like anyone-can-spend spend of a previous OP_TRUE output is not needed;
@@ -36,7 +40,7 @@ pub fn spend_anyone_can_spend(prev_txid: bitcoin::Txid, vout: u32, value: Amount
         }],
         output: vec![TxOut {
             value,
-            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            script_pubkey: ScriptBuf::from_bytes(vec![rbitcoin_primitives::OP_TRUE]),
         }],
     }
 }
@@ -63,7 +67,7 @@ pub fn split_anyone_can_spend(
             .iter()
             .map(|value| TxOut {
                 value: *value,
-                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+                script_pubkey: ScriptBuf::from_bytes(vec![rbitcoin_primitives::OP_TRUE]),
             })
             .collect(),
     }
@@ -88,7 +92,7 @@ pub fn spend_many_anyone_can_spend(prevs: &[(bitcoin::Txid, u32)], value: Amount
             .collect(),
         output: vec![TxOut {
             value,
-            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            script_pubkey: ScriptBuf::from_bytes(vec![rbitcoin_primitives::OP_TRUE]),
         }],
     }
 }
@@ -104,7 +108,7 @@ pub fn mine_regtest_block(
         prev_hash,
         time,
         height,
-        CompactTarget::from_consensus(0x207f_ffff),
+        CompactTarget::from_consensus(rbitcoin_consensus::REGTEST_POW_BITS),
         extra_txs,
     )
 }
