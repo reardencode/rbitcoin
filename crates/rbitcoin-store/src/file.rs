@@ -44,6 +44,9 @@ use std::sync::Mutex;
 
 pub const FILE_HEADER_LEN: usize = 16;
 
+/// Bytes [`TableFile::create`] leaves past the header. A longer file is payload.
+pub(crate) const CREATE_FILE_SLACK: u64 = 64;
+
 /// Sibling `{filename}.tmp` next to `path` (keeps compound suffixes like `.idx`).
 pub fn tmp_sidecar_path(path: &Path) -> PathBuf {
     let mut name = path
@@ -283,7 +286,7 @@ impl TableFile {
             .map_err(|e| StoreError::io(&path, e))?;
 
         let header = encode_leading_header(kind, FILE_HEADER_LEN as u64);
-        let initial = FILE_HEADER_LEN as u64 + 64;
+        let initial = FILE_HEADER_LEN as u64 + CREATE_FILE_SLACK;
         // Capacity first, then header via overlapped-safe pwrite (not std Write).
         set_file_len(&file, &path, initial)?;
         handle_pwrite_all(&file, &path, 0, &header)?;

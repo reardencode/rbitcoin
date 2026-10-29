@@ -654,6 +654,51 @@ fn withheld_class_a_header_does_not_keep_confirmed_blocks() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The cut included height 0, so the flush cleared the only `header_txs`
+/// anchor and died before the confirmed shrink. Count is already 0 and this
+/// open did not truncate, which is the image the next open sees.
+#[test]
+fn cleared_header_txs_anchor_reopen_drops_the_tip() {
+    let dir = tmp();
+    let (s, _) = write_withheld_tail(&dir);
+    let write = rbitcoin_store::ClassCWrite::for_test();
+    let genesis = s.confirmed.get(Height(0)).unwrap().unwrap();
+    for h in 0u32..=8 {
+        let fk = s.confirmed.get(Height(h)).unwrap().unwrap();
+        s.header_txs.clear_body(&write, fk).unwrap();
+    }
+    s.header_txs.flush().unwrap();
+    let header = rbitcoin_store::file::FILE_HEADER_LEN as u64;
+    s.txs.body.truncate_body_to(0, header).unwrap();
+    s.txs.spent.truncate_body_to(0, header).unwrap();
+    s.txs.seqsigwit.truncate_body_to(0, header).unwrap();
+    s.txs.create_loc.truncate_to_count(0).unwrap();
+    s.txs.seqsigwit_loc.truncate_to_count(0).unwrap();
+    s.txs.txids.truncate_to_count(0).unwrap();
+    s.txs.txstat.truncate_to_count(0).unwrap();
+    s.txs.input.truncate_to_count(0).unwrap();
+    rbitcoin_store::spend_durable::SpendDurable::new(8, 8)
+        .store(s.path())
+        .unwrap();
+    assert_eq!(s.txs.count(), 0);
+    drop(s);
+
+    let s = Store::open_tiny(&dir).unwrap();
+    assert_eq!(
+        s.confirmed.tip_height(),
+        None,
+        "a tip with no header_txs anchor and no creates is not header-only"
+    );
+    assert!(!s.header_txs.has_body(genesis).unwrap());
+    let r = s.revalidate_tip_window_n(6).unwrap();
+    assert_eq!(s.confirmed.tip_height(), None, "{r:?}");
+    let marker = rbitcoin_store::spend_durable::SpendDurable::load(s.path())
+        .unwrap()
+        .unwrap();
+    assert_eq!(marker.durable_through(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The tip shrink is durable after `header_txs` is cleared. A kill between
 /// those two flushes reopens with the high tip and no tx range on the tail.
 #[test]

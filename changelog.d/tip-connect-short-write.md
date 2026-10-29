@@ -10,5 +10,6 @@ Fixed
   row is not in that header is dropped on open. A withheld Class A header
   does not publish `spend_durable` at the new tip. Open drops confirmed
   blocks whose outputs are no longer in that prefix, including blocks
-  below the checkblocks window. A real consensus failure
+  below the checkblocks window. A confirmed tip whose `header_txs` anchor
+  was cleared before that drop is not left in place. A real consensus failure
   is still kept in `store/block.invalid`.

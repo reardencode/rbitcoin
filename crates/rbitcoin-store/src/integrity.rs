@@ -6,7 +6,8 @@
 //!
 //! Soft sidecar [`TIP_SEAL_NAME`]: written after a successful connect/disconnect
 //! Class C barrier so a kill that advanced `confirmed` without a complete seal
-//! can be clamped before revalidation.
+//! can be clamped before revalidation. [`CLASS_A_CUT_NAME`] is the same kind
+//! of sidecar for a Class A tip cut that has not finished.
 
 use crate::error::StoreError;
 use crate::header_table::block_header_hash;
@@ -81,6 +82,87 @@ impl TipRevalidateLog {
 
 /// Soft tip seal file under `store/` (not a SCHEMA_VERSION bump).
 pub const TIP_SEAL_NAME: &str = "tip_seal";
+
+/// Soft cut file under `store/` (not a SCHEMA_VERSION bump).
+///
+/// Present only while open is dropping confirmed heights past the Class A
+/// prefix. `0xffff_ffff` means the tip becomes empty. Any other `u32` is the
+/// height that stays.
+pub const CLASS_A_CUT_NAME: &str = "class_a_cut";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClassACut {
+    Empty,
+    Keep(u32),
+}
+
+impl ClassACut {
+    const EMPTY_MARK: u32 = u32::MAX;
+
+    fn path(dir: &Path) -> std::path::PathBuf {
+        dir.join(CLASS_A_CUT_NAME)
+    }
+
+    fn load(dir: &Path) -> Result<Option<Self>, StoreError> {
+        let p = Self::path(dir);
+        if !p.exists() {
+            return Ok(None);
+        }
+        let mut f = OpenOptions::new()
+            .read(true)
+            .open(&p)
+            .map_err(|e| StoreError::io(&p, e))?;
+        let mut buf = [0u8; 4];
+        f.read_exact(&mut buf).map_err(|e| StoreError::io(&p, e))?;
+        let raw = u32::from_le_bytes(buf);
+        Ok(Some(if raw == Self::EMPTY_MARK {
+            Self::Empty
+        } else {
+            Self::Keep(raw)
+        }))
+    }
+
+    fn store(self, dir: &Path) -> Result<(), StoreError> {
+        let raw = match self {
+            Self::Empty => Self::EMPTY_MARK,
+            Self::Keep(h) => h,
+        };
+        let p = Self::path(dir);
+        let tmp = p.with_extension("class_a_cut.tmp");
+        {
+            let mut f = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&tmp)
+                .map_err(|e| StoreError::io(&tmp, e))?;
+            f.write_all(&raw.to_le_bytes())
+                .map_err(|e| StoreError::io(&tmp, e))?;
+            f.sync_all().map_err(|e| StoreError::io(&tmp, e))?;
+        }
+        std::fs::rename(&tmp, &p).map_err(|e| StoreError::io(&p, e))?;
+        if let Some(parent) = p.parent() {
+            crate::file::fsync_parent_dir(parent).map_err(|e| StoreError::io(parent, e))?;
+        }
+        Ok(())
+    }
+
+    fn remove(dir: &Path) -> Result<(), StoreError> {
+        let p = Self::path(dir);
+        match std::fs::remove_file(&p) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(StoreError::io(&p, e)),
+        }
+    }
+
+    fn bad_height(self) -> u32 {
+        match self {
+            Self::Empty => 0,
+            Self::Keep(h) => h.saturating_add(1),
+        }
+    }
+}
 
 /// On-disk tip seal after a complete Class C barrier.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -605,35 +687,125 @@ impl Store {
     /// Drop confirmed heights whose tx range ends past the opened Class A prefix.
     ///
     /// One range read when the tip already fits. A marker at the tip does not
-    /// narrow this cut: the prefix is the create count open kept.
+    /// narrow this cut: the prefix is the create count open kept. A cut that
+    /// includes height 0 persists the empty tip before it clears the last
+    /// `header_txs` row. [`CLASS_A_CUT_NAME`] is already on disk, so a kill
+    /// on either side of that flush reopens at the same tip.
     pub(crate) fn align_confirmed_to_class_a(&self) -> Result<(), StoreError> {
-        let Some(bad) = self.class_a_confirmed_cut(self.txs.count())? else {
+        if let Some(cut) = ClassACut::load(self.path())? {
+            return self.finish_class_a_cut(cut);
+        }
+        let covered = self.txs.count();
+        let Some(bad) = self.discovered_class_a_bad(covered)? else {
             return Ok(());
         };
+        let cut = match bad.checked_sub(1) {
+            Some(h) => ClassACut::Keep(h),
+            None => ClassACut::Empty,
+        };
+        cut.store(self.path())?;
+        self.finish_class_a_cut(cut)
+    }
+
+    fn discovered_class_a_bad(&self, covered: u64) -> Result<Option<u32>, StoreError> {
+        if let Some(bad) = self.class_a_confirmed_cut(covered)? {
+            return Ok(Some(bad));
+        }
+        self.anchorless_bad(covered)
+    }
+
+    /// Confirmed tip, no tx range anywhere, and no creates left.
+    ///
+    /// Header-only chains have no body allocation past the create slack, so
+    /// they never reach this. The image is a cut that already cleared height
+    /// 0's row and died before `shrink_tip_to`.
+    fn anchorless_bad(&self, covered: u64) -> Result<Option<u32>, StoreError> {
+        if covered != 0 || !self.txs.bodies_allocated_past_header() {
+            return Ok(None);
+        }
         let Some(tip) = self.confirmed.tip_height() else {
-            return Ok(());
+            return Ok(None);
         };
+        if self.header_tx_end(tip)?.is_some() || self.header_tx_end(Height(0))?.is_some() {
+            return Ok(None);
+        }
+        Ok(Some(0))
+    }
+
+    fn finish_class_a_cut(&self, cut: ClassACut) -> Result<(), StoreError> {
+        let bad = cut.bad_height();
         let write = crate::array_table::ClassCWrite::new();
+        let Some(tip) = self.confirmed.tip_height() else {
+            if cut == ClassACut::Empty {
+                self.clear_bodies_still_linked(&write)?;
+            }
+            return ClassACut::remove(self.path());
+        };
+        if bad > tip.0 {
+            return ClassACut::remove(self.path());
+        }
+        let mut fks = Vec::new();
         for h in bad..=tip.0 {
             if let Some(fk) = self.confirmed.get(Height(h))? {
-                let _ = self.header_txs.clear_body(&write, fk)?;
+                fks.push(fk);
             }
         }
-        self.header_txs.flush()?;
         let kept = bad.checked_sub(1);
+        if bad == 0 {
+            self.warn_class_a_cut(tip.0, kept);
+            let mut report = TipRevalidateReport::default();
+            self.shrink_tip_to(&write, None, &mut report)?;
+            self.clear_header_fks(&write, &fks)?;
+        } else {
+            self.clear_header_fks(&write, &fks)?;
+            self.warn_class_a_cut(tip.0, kept);
+            let mut report = TipRevalidateReport::default();
+            self.shrink_tip_to(&write, kept, &mut report)?;
+        }
+        ClassACut::remove(self.path())
+    }
+
+    fn warn_class_a_cut(&self, tip: u32, kept: Option<u32>) {
         let covered = self.txs.count();
         match kept {
             Some(h) => rbitcoin_log::warn!(
-                "store: confirmed tip {} extends past {covered} creates — truncating to {h}",
-                tip.0
+                "store: confirmed tip {tip} extends past {covered} creates — truncating to {h}"
             ),
             None => rbitcoin_log::warn!(
-                "store: confirmed tip {} extends past {covered} creates — truncating to empty",
-                tip.0
+                "store: confirmed tip {tip} extends past {covered} creates — truncating to empty"
             ),
         }
-        let mut report = TipRevalidateReport::default();
-        self.shrink_tip_to(&write, kept, &mut report)
+    }
+
+    fn clear_header_fks(
+        &self,
+        write: &crate::array_table::ClassCWrite,
+        fks: &[Fk],
+    ) -> Result<(), StoreError> {
+        for fk in fks {
+            let _ = self.header_txs.clear_body(write, *fk)?;
+        }
+        self.header_txs.flush()
+    }
+
+    /// Heights already disconnected no longer name these header fks.
+    fn clear_bodies_still_linked(
+        &self,
+        write: &crate::array_table::ClassCWrite,
+    ) -> Result<(), StoreError> {
+        let n = self.headers.count();
+        let mut any = false;
+        for id in 1..=n {
+            let fk = Fk(id);
+            if self.header_txs.has_body(fk)? {
+                let _ = self.header_txs.clear_body(write, fk)?;
+                any = true;
+            }
+        }
+        if any {
+            self.header_txs.flush()?;
+        }
+        Ok(())
     }
 
     /// Height a spend checkpoint may call durable, or `None` when no create is.

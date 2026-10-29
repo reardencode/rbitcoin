@@ -1656,12 +1656,25 @@ impl TxTable {
         self.body.count()
     }
 
-    /// Open shortened Class A, or the archive already has creates.
+    /// Open shortened Class A, the archive has creates, or a body file is
+    /// still larger than the header it publishes.
     ///
-    /// A store with no creates and no cut is a Class C fixture. A chain with
-    /// creates checks the tip once: the range is one RAM read when it fits.
+    /// A store with no creates, no cut, and only the create slack is a Class C
+    /// fixture. A chain with creates checks the tip once.
     pub(crate) fn should_align_confirmed(&self) -> bool {
-        self.open_cut || self.count() > 0
+        self.open_cut || self.count() > 0 || self.bodies_allocated_past_header()
+    }
+
+    /// `create` leaves [`crate::file::CREATE_FILE_SLACK`] bytes. Anything past
+    /// that was a payload, including after a truncate that did not shrink the
+    /// allocation. Header-only and Class C stores stay at the slack.
+    pub(crate) fn bodies_allocated_past_header(&self) -> bool {
+        fn past(file: &crate::file::TableFile) -> bool {
+            let published = file.logical_len();
+            let cap = file.file_cap.load(std::sync::atomic::Ordering::Acquire);
+            cap > published.saturating_add(crate::file::CREATE_FILE_SLACK)
+        }
+        past(&self.body.body) || past(&self.spent.body) || past(&self.seqsigwit.body)
     }
 
     /// Creates whose Class A headers have landed.
