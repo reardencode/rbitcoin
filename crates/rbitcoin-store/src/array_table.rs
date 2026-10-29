@@ -635,11 +635,11 @@ impl ArrayTable {
         FILE_HEADER_LEN as u64 + index * ELEM
     }
 
-    pub(crate) fn begin_store(&self) -> Result<Option<SeqOdd>, StoreError> {
+    pub(crate) fn begin_store(&self) -> Result<SeqOdd, StoreError> {
         if self.in_ram {
-            return seq_begin(&self.seq, &self.flushing).map(Some);
+            return seq_begin(&self.seq, &self.flushing);
         }
-        Ok(None)
+        Ok(seq_odd(&self.seq))
     }
 
     fn mark_unstored(&self, index: u64) {
@@ -670,10 +670,26 @@ impl ArrayTable {
         }))
     }
 
+    /// One even generation of [`Self::pread_sample`]. A result read while a
+    /// store ran, error or not, is read again.
+    fn get_sample_fd(&self, index: u64) -> Result<(u64, u64), StoreError> {
+        loop {
+            let g1 = self.seq.load(Ordering::Acquire);
+            if g1 & 1 != 0 {
+                crate::sync::spin();
+                continue;
+            }
+            let sample = self.pread_sample(index);
+            if seq_holds(&self.seq, g1) {
+                return sample;
+            }
+        }
+    }
+
     /// A truncate may shorten `len` and the file after the first load. The
     /// slot is empty when the reloaded length no longer covers it. A past-end
     /// pread whose length still covers the index stays an error.
-    fn get_sample_fd(&self, index: u64) -> Result<(u64, u64), StoreError> {
+    fn pread_sample(&self, index: u64) -> Result<(u64, u64), StoreError> {
         let len = self.len.load(Ordering::Acquire);
         if index >= len {
             return Ok((0, len));

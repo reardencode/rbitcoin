@@ -85,3 +85,32 @@ fn fd_only_get_during_truncate_is_absent_or_present() {
         let _ = std::fs::remove_dir_all(&dir);
     });
 }
+
+/// A reorg shape against one sample: truncate below a slot, then append a
+/// new value there. The sample is one generation: the old value with the old
+/// length, absent, or the new value with a length that covers it. Not the
+/// old value with the new length.
+#[test]
+fn fd_only_sample_is_one_generation() {
+    super::engine::check_at_most(2, || {
+        let dir = std::env::temp_dir().join("rbtc-fd-gen");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let slots = std::sync::Arc::new(open_fd_only(&dir, 3));
+        for (index, value) in [(0, 1), (1, 2), (2, 3)] {
+            slots.set(&ClassCWrite::for_test(), index, value).unwrap();
+        }
+        let slots_w = std::sync::Arc::clone(&slots);
+        let writer = loom::thread::spawn(move || {
+            slots_w.truncate(&ClassCWrite::for_test(), 1).unwrap();
+            slots_w.set(&ClassCWrite::for_test(), 1, 20).unwrap();
+        });
+        let reader = loom::thread::spawn(move || match slots.get_sample(1).unwrap() {
+            (2, 3) | (0, 1) | (20, 2) => {}
+            (value, len) => panic!("sample {value} at len {len}"),
+        });
+        writer.join().unwrap();
+        reader.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    });
+}
