@@ -368,7 +368,7 @@ fn fk_in_block(ctx: &RpcContext, fks: &[Fk], want: &[u8; 32]) -> Result<Option<F
 
 /// Undo for verbosity >= 2. `None` means the inputs are not a confirmed spend
 /// (coinbase, or a parent height the connected fence does not know).
-fn raw_tx_prevouts(
+pub(crate) fn raw_tx_prevouts(
     ctx: &RpcContext,
     tx: &Transaction,
     fk: Fk,
@@ -435,7 +435,7 @@ fn raw_tx_prevouts(
     Ok(Some((fee, rows)))
 }
 
-fn insert_vin_prevouts(obj: &mut Value, prevouts: &[Value]) {
+pub(crate) fn insert_vin_prevouts(obj: &mut Value, prevouts: &[Value]) {
     let Some(vins) = obj.get_mut("vin").and_then(Value::as_array_mut) else {
         return;
     };

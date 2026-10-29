@@ -2,7 +2,7 @@ use super::*;
 use bitcoin::consensus::{deserialize, Encodable};
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, Block, BlockHash, ScriptBuf, Txid};
-use rbitcoin_primitives::{median_time_past_times, Height, MedianWindow};
+use rbitcoin_primitives::{median_time_past_times, Fk, Height, MedianWindow};
 
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
@@ -813,22 +813,64 @@ pub fn insert_size_weight(obj: &mut Value, size: u64, weight: u64) {
     );
 }
 
+/// Core `coinbase_tx` (verbosity >= 1): the coinbase's version and locktime,
+/// and its one input's sequence, script, and first witness item.
 #[doc(hidden)]
-pub fn getblock_v2_tx_json(ctx: &RpcContext, block: &Block) -> Vec<Value> {
+pub fn coinbase_tx_json(cb: &Transaction) -> Value {
+    let Some(vin) = cb.input.first() else {
+        return Value::Null;
+    };
+    let mut obj = json!({
+        // Core prints the version as uint32_t.
+        "version": cb.version.0 as u32,
+        "locktime": cb.lock_time.to_consensus_u32(),
+        "sequence": vin.sequence.0,
+        "coinbase": rbitcoin_primitives::hex_encode(vin.script_sig.as_bytes()),
+    });
+    if let Some(w) = vin.witness.iter().next() {
+        obj["witness"] = json!(rbitcoin_primitives::hex_encode(w));
+    }
+    obj
+}
+
+/// Class A tx fks of the stored body for `hash`, active or disconnected.
+/// Their prevout edges are Core's undo data. A held body has none.
+fn stored_block_fks(ctx: &RpcContext, hash: &[u8; 32]) -> Option<Vec<Fk>> {
+    let (header_fk, rec) = ctx.query.get_header_by_hash(hash).ok().flatten()?;
+    if rec.hash != *hash {
+        return None;
+    }
+    ctx.query
+        .header_tx_fks(header_fk, Some(hash))
+        .ok()
+        .flatten()
+}
+
+/// Verbosity >= 2 `tx` rows. With undo (`fks`), a non-coinbase carries `fee`,
+/// and at verbosity >= 3 each input carries `prevout`.
+#[doc(hidden)]
+pub fn getblock_tx_json(
+    ctx: &RpcContext,
+    block: &Block,
+    fks: Option<&[Fk]>,
+    verbosity: u32,
+) -> Vec<Value> {
     let net = rpc_btc_network(ctx.network);
+    let fks = fks.filter(|f| f.len() == block.txdata.len());
     block
         .txdata
         .iter()
-        .map(|tx| {
-            let extra = if tx.is_coinbase() {
-                None
-            } else {
-                match tx_fee_sat_from_prevouts(ctx, tx) {
-                    TxFeeLook::Fee(fee) => Some(json!({ "fee": sat_btc_json(fee as i64) })),
-                    TxFeeLook::MissingPrevout | TxFeeLook::Overflow => None,
-                }
+        .enumerate()
+        .map(|(i, tx)| {
+            let undo = fks.and_then(|f| raw_tx_prevouts(ctx, tx, f[i]).ok().flatten());
+            let Some((fee, prevouts)) = undo else {
+                return tx_to_json(tx, None, net);
             };
-            tx_to_json(tx, extra, net)
+            let mut obj = tx_to_json(tx, Some(json!({ "fee": sat_btc_json(fee) })), net);
+            if verbosity >= 3 {
+                insert_vin_prevouts(&mut obj, &prevouts);
+            }
+            obj
         })
         .collect()
 }
@@ -892,6 +934,13 @@ pub fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
         if let Ok(Some((size, weight))) = ctx.query.block_size_weight(header_fk) {
             insert_size_weight(&mut obj, u64::from(size), u64::from(weight));
         }
+        let cb = stored_block_fks(ctx, &hash).and_then(|fks| {
+            fks.first()
+                .and_then(|fk| ctx.query.reconstruct_tx(*fk).ok())
+        });
+        if let Some(cb) = cb {
+            obj["coinbase_tx"] = coinbase_tx_json(&cb);
+        }
         return Ok(obj);
     }
     let block = ctx
@@ -933,9 +982,13 @@ pub fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
         Some(height),
         None,
     );
+    if let Some(cb) = block.txdata.first() {
+        obj["coinbase_tx"] = coinbase_tx_json(cb);
+    }
     if verbosity >= 2 {
         insert_block_size_fields(&mut obj, &block);
-        obj["tx"] = json!(getblock_v2_tx_json(ctx, &block));
+        let fks = stored_block_fks(ctx, &hash);
+        obj["tx"] = json!(getblock_tx_json(ctx, &block, fks.as_deref(), verbosity));
     }
     Ok(obj)
 }
@@ -990,9 +1043,13 @@ pub fn disconnected_block_value(
         insert_previousblockhash(&mut obj, &hash_hex_display(&prev));
     }
     enrich_block_header_json(&mut obj, ctx, version, bits, None, Some(chainwork));
+    if let Some(cb) = block.txdata.first() {
+        obj["coinbase_tx"] = coinbase_tx_json(cb);
+    }
     if verbosity >= 2 {
         insert_block_size_fields(&mut obj, block);
-        obj["tx"] = json!(getblock_v2_tx_json(ctx, block));
+        let fks = stored_block_fks(ctx, hash);
+        obj["tx"] = json!(getblock_tx_json(ctx, block, fks.as_deref(), verbosity));
     }
     Ok(obj)
 }

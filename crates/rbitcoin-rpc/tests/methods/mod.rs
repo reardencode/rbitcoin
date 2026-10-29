@@ -1927,6 +1927,85 @@ fn getblock_verbosity_2_size_weight_and_tx_fee() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Core `coinbase_tx` from a verbosity 2 coinbase row.
+fn expected_coinbase_tx(cb: &Value) -> Value {
+    let vin = &cb["vin"][0];
+    let mut want = json!({
+        "version": cb["version"],
+        "locktime": cb["locktime"],
+        "sequence": vin["sequence"],
+        "coinbase": vin["coinbase"],
+    });
+    if let Some(w) = vin["txinwitness"].as_array().and_then(|s| s.first()) {
+        want["witness"] = w.clone();
+    }
+    want
+}
+
+/// Core 32.1 on regtest: verbosity >= 3 adds `vin[].prevout` from undo, for an
+/// active block and for one disconnected by `invalidateblock`. Verbosity 2
+/// keeps only `fee`. Every verbosity >= 1 carries `coinbase_tx`.
+#[test]
+fn getblock_verbosity_3_vin_prevout_and_coinbase_tx() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let parent_sat = generated_coinbase_value(&ctx, 1);
+    let (hex, _) =
+        mature_coinbase_spend(&ctx, parent_sat - 1_000, ScriptBuf::from_bytes(vec![0x51]));
+    dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
+    let tip = dispatch(&ctx, "generate", vec![json!(1)]).unwrap()[0].clone();
+    let parent_hash = dispatch(&ctx, "getblockhash", vec![json!(1)]).unwrap();
+    let parent = dispatch(&ctx, "getblock", vec![parent_hash, json!(2)]).unwrap();
+
+    let v2 = dispatch(&ctx, "getblock", vec![tip.clone(), json!(2)]).unwrap();
+    assert_btc_amount(&v2["tx"][1]["fee"], 1_000.0 / 1e8);
+    assert!(v2["tx"][1]["vin"][0].get("prevout").is_none(), "{v2}");
+    let want_cb = expected_coinbase_tx(&v2["tx"][0]);
+    for verbosity in [1, 2, 3] {
+        let blk = dispatch(&ctx, "getblock", vec![tip.clone(), json!(verbosity)]).unwrap();
+        assert_eq!(blk["coinbase_tx"], want_cb, "verbosity {verbosity}: {blk}");
+    }
+    for verbosity in [3, 4] {
+        let v3 = dispatch(&ctx, "getblock", vec![tip.clone(), json!(verbosity)]).unwrap();
+        assert_no_fee_or_prevout(&v3["tx"][0]);
+        assert_confirmed_spend_v2(&v3["tx"][1], &parent);
+    }
+
+    dispatch(&ctx, "invalidateblock", vec![tip.clone()]).unwrap();
+    let stale = dispatch(&ctx, "getblock", vec![tip, json!(3)]).unwrap();
+    assert_eq!(stale["confirmations"], json!(-1), "{stale}");
+    assert_eq!(stale["coinbase_tx"], want_cb, "{stale}");
+    assert_confirmed_spend_v2(&stale["tx"][1], &parent);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A segwit coinbase's reserved value is `coinbase_tx.witness`; the version
+/// is Core's uint32_t.
+#[test]
+fn coinbase_tx_json_witness_and_unsigned_version() {
+    use bitcoin::{Sequence, TxIn, Witness};
+    let cb = Transaction {
+        version: bitcoin::transaction::Version(-1),
+        lock_time: bitcoin::absolute::LockTime::from_consensus(7),
+        input: vec![TxIn {
+            script_sig: ScriptBuf::from_bytes(vec![0x01, 0x66]),
+            sequence: Sequence(0xffff_fffe),
+            witness: Witness::from_slice(&[[0u8; 32]]),
+            ..Default::default()
+        }],
+        output: vec![],
+    };
+    assert_eq!(
+        coinbase_tx_json(&cb),
+        json!({
+            "version": 0xffff_ffffu32,
+            "locktime": 7,
+            "sequence": 0xffff_fffeu32,
+            "coinbase": "0166",
+            "witness": "00".repeat(32),
+        })
+    );
+}
+
 fn object_keys(v: &serde_json::Value) -> Vec<&str> {
     v.as_object()
         .expect("header object")
