@@ -273,3 +273,35 @@ fn bip68_skips_a_coinbase_whose_relative_lock_would_fail() {
         "{err:?}"
     );
 }
+
+#[test]
+fn structural_bip68_skips_when_every_sequence_is_disabled() {
+    let (_dir, query) = rbitcoin_query::testutil::tiny_query_labeled("bip68-disabled");
+    let params = Box::leak(Box::new(rbitcoin_consensus::ChainParams::regtest()));
+    let ctx = ValidationContext::at(
+        params,
+        rbitcoin_primitives::Height(1),
+        rbitcoin_consensus::Milestone::NONE,
+    );
+    let rbf = Sequence::from_consensus(0xffff_fffd);
+    let block = csv_block(vec![
+        bare_tx(1, LockTime::ZERO, Sequence::MAX),
+        bare_tx(2, LockTime::ZERO, rbf),
+    ]);
+    let spends = [(
+        [0u8; 32],
+        0u32,
+        rbitcoin_primitives::Fk::NULL,
+        rbitcoin_primitives::Fk(9),
+        0u32,
+    )];
+    rbitcoin_query::block_pipeline::structural_bip68(
+        &query,
+        &block,
+        &ctx,
+        &spends,
+        &rbitcoin_query::FkMap::default(),
+        &mut rbitcoin_query::U32Map::default(),
+    )
+    .expect("disabled sequences do not read create heights or medians");
+}

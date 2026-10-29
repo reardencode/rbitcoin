@@ -1236,11 +1236,8 @@ pub fn structural_bip68(
     }
     const DISABLE: u32 = 1 << 31;
     const TYPE_FLAG: u32 = 1 << 22;
-    let prev_mtp = if ctx.height.0 == 0 {
-        0
-    } else {
-        mtp_at(query, Height(ctx.height.0 - 1), mtp_cache)?
-    };
+    // Median time is only needed when some input enforces a relative lock.
+    let mut prev_mtp_slot: Option<u32> = None;
     let mut si = 0usize;
     let mut prev_heights: Vec<u32> = Vec::new();
     let mut coin_mtps: Vec<u32> = Vec::new();
@@ -1252,6 +1249,24 @@ pub fn structural_bip68(
         if !rbitcoin_consensus::block::bip68_active_for_tx(tx) {
             continue;
         }
+        if tx
+            .input
+            .iter()
+            .all(|inp| inp.sequence.to_consensus_u32() & DISABLE != 0)
+        {
+            continue;
+        }
+        let prev_mtp = if let Some(t) = prev_mtp_slot {
+            t
+        } else {
+            let t = if ctx.height.0 == 0 {
+                0
+            } else {
+                mtp_at(query, Height(ctx.height.0 - 1), mtp_cache)?
+            };
+            prev_mtp_slot = Some(t);
+            t
+        };
         prev_heights.clear();
         coin_mtps.clear();
         prev_heights.reserve(n_in);
