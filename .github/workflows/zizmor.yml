@@ -24,7 +24,8 @@ on:
     - cron: "23 5 * * 1"
 
 concurrency:
-  group: zizmor-${{ github.workflow }}-${{ github.ref }}
+  # Schedule has its own group. A push on this ref must not cancel the weekly scan.
+  group: zizmor-${{ github.workflow }}-${{ github.event_name == 'schedule' && 'schedule-' || '' }}${{ github.ref }}
   cancel-in-progress: true
 
 permissions: {}

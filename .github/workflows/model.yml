@@ -21,7 +21,9 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: model-${{ github.ref }}
+  # Schedule has its own group. A push or workflow_dispatch on this ref
+  # must not cancel the nightly deep run.
+  group: model-${{ github.event_name == 'schedule' && 'schedule-' || '' }}${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
