@@ -2937,9 +2937,9 @@ impl TxTable {
     #[allow(clippy::too_many_arguments)] // IO/session args stay unbundled
     /// Encode and write `txout` + `seqsigwit` + `spent` bodies as one pwrite wave.
     ///
-    /// Payloads land past the published ends. Locator strides are published
-    /// before body lengths, so a crash cannot leave body bytes ahead of the
-    /// prefix sum. Not the spend-annotate machine.
+    /// Payloads land past the published ends. Body lengths move only after
+    /// the locator strides for those creates are published. Not the
+    /// spend-annotate machine.
     #[doc(hidden)]
     pub fn append_stems_one_wave(
         &self,

@@ -691,11 +691,9 @@ impl Store {
 
     /// Drop confirmed heights whose tx range ends past the opened Class A prefix.
     ///
-    /// One range read when the tip already fits. A marker at the tip does not
-    /// narrow this cut: the prefix is the create count open kept. A cut that
-    /// includes height 0 persists the empty tip before it clears the last
-    /// `header_txs` row. [`CLASS_A_CUT_NAME`] is already on disk, so a kill
-    /// on either side of that flush reopens at the same tip.
+    /// The prefix is the create count open kept. A marker at the tip does not
+    /// narrow it. Returns with `class_a_cut` gone only once the tip and the
+    /// `header_txs` rows match that prefix.
     pub(crate) fn align_confirmed_to_class_a(&self) -> Result<(), StoreError> {
         if let Some(cut) = ClassACut::load(self.path())? {
             return self.finish_class_a_cut(cut);
@@ -719,11 +717,10 @@ impl Store {
         self.anchorless_bad(covered)
     }
 
-    /// Confirmed tip, no tx range anywhere, and no creates left.
+    /// Confirmed tip, no tx range on the tip or height 0, and no creates left.
     ///
-    /// Header-only chains have no body allocation past the create slack, so
-    /// they never reach this. The image is a cut that already cleared height
-    /// 0's row and died before `shrink_tip_to`.
+    /// Header-only chains stay within the create slack, so they never reach
+    /// this. A body file past that slack is the empty cut.
     fn anchorless_bad(&self, covered: u64) -> Result<Option<u32>, StoreError> {
         if covered != 0 || !self.txs.bodies_allocated_past_header() {
             return Ok(None);
