@@ -377,6 +377,48 @@ fn padded_spend(data_len: usize) -> Transaction {
 /// An unspent connected coinbase with the same txid is BIP30 on regtest (no
 /// 91842/91880 grandfather). Signet activates BIP34 at height 1, and Core's
 /// empty BIP34 hash still enforces BIP30 on every signet block.
+#[test]
+fn bip30_queries_the_given_txids() {
+    let (path, q, first) = plant_unspent_coinbase("bip30-given-txids");
+    let dup = block_with(vec![first.clone()]);
+    let real = block_txids(&dup);
+    let parents = rbitcoin_query::BatchParents::new();
+    let abs_jobs = parents
+        .spend_abs_jobs(std::iter::empty::<(
+            rbitcoin_primitives::Fk,
+            u32,
+            rbitcoin_primitives::Fk,
+            u32,
+        )>())
+        .expect("no spend edges");
+    let check = |txids: &[[u8; 32]]| {
+        structural_validate_spends(
+            &q,
+            &dup,
+            &ctx_h(10),
+            &[],
+            0,
+            &mut rbitcoin_query::block_pipeline::BatchSpent::default(),
+            &parents,
+            &mut rbitcoin_query::U32Map::default(),
+            &RunCreateHeight::Spans(Vec::new()),
+            &ClassAWave::default(),
+            &mut StructuralScratch::default(),
+            &abs_jobs,
+            None,
+            txids,
+        )
+        .err()
+        .map(|e| format!("{e}"))
+        .unwrap_or_default()
+    };
+    let hit = check(&real);
+    assert!(hit.contains("bad-txns-BIP30"), "{hit}");
+    let miss = check(&[[0x5au8; 32]]);
+    assert!(!miss.contains("bad-txns-BIP30"), "{miss}");
+    let _ = std::fs::remove_dir_all(&path);
+}
+
 fn rejects_unspent_overwrite(q: &rbitcoin_query::Query, first: &Transaction) {
     use rbitcoin_primitives::Fk;
     use rbitcoin_query::{BatchParents, U32Map};
@@ -408,6 +450,7 @@ fn rejects_unspent_overwrite(q: &rbitcoin_query::Query, first: &Transaction) {
             &mut StructuralScratch::default(),
             &abs_jobs,
             None,
+            &block_txids(&dup),
         )
         .expect_err("an unspent overwrite must trip BIP30");
         let msg = format!("{err}");
@@ -416,6 +459,14 @@ fn rejects_unspent_overwrite(q: &rbitcoin_query::Query, first: &Transaction) {
             "{net}: expected BIP30 reject, got {msg}"
         );
     }
+}
+
+fn block_txids(block: &Block) -> Vec<[u8; 32]> {
+    block
+        .txdata
+        .iter()
+        .map(|tx| tx.compute_txid().to_byte_array())
+        .collect()
 }
 
 fn plant_unspent_coinbase(
@@ -534,6 +585,7 @@ fn bip30_message_at_mainnet_above_bip34(
         &mut StructuralScratch::default(),
         &abs_jobs,
         q.confirmed_bip34_ancestor(main.btc.bip34_height),
+        &block_txids(block),
     )
     .map(|_| ())
 }
@@ -2552,6 +2604,7 @@ fn bip30_ignores_unspendable_outputs() {
             &mut StructuralScratch::default(),
             &abs_jobs,
             None,
+            &block_txids(&dup),
         )
         .err()
         .map(|e| format!("{e}"))

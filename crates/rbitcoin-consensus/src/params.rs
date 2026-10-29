@@ -224,6 +224,13 @@ impl ChainParams {
         ancestor_at_bip34 == Some(expect)
     }
 
+    /// Mainnet heights whose BIP30 exception depends on the block hash.
+    /// Every other height can skip hashing the header.
+    #[inline]
+    pub fn bip30_exception_height(&self, height: u32) -> bool {
+        self.network == Network::Bitcoin && matches!(height, 91_842 | 91_880)
+    }
+
     /// Core `IsBIP30Repeat`: the two mainnet blocks that overwrite an earlier
     /// **unspent** coinbase (not the spent-duplicate rule).
     ///
@@ -233,7 +240,7 @@ impl ChainParams {
     /// overwrite of an unspent sibling is still `bad-txns-BIP30`.
     #[inline]
     pub fn is_bip30_repeat(&self, height: u32, block_hash: BlockHash) -> bool {
-        if self.network != Network::Bitcoin {
+        if !self.bip30_exception_height(height) {
             return false;
         }
         match height {

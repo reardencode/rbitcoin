@@ -80,6 +80,7 @@ fn script_ok_append_contiguous_and_gap() {
             time: 0,
             bits: CompactTarget::from_consensus(0x207f_ffff),
             hash: [hash_byte; 32],
+            txids: Vec::new(),
             prev_mtp: 0,
         }
     }
@@ -387,6 +388,7 @@ fn prepared_at(
         time: 1,
         bits: CompactTarget::from_consensus(0x207f_ffff),
         hash,
+        txids: Vec::new(),
         prev_mtp: 0,
     }
 }
@@ -794,6 +796,7 @@ fn script_wave_skips_preverified_txids() {
         time: 1,
         bits: CompactTarget::from_consensus(0x207f_ffff),
         hash: [1u8; 32],
+        txids: Vec::new(),
         prev_mtp: 0,
     };
     let batch = LoadedBatch {
@@ -912,6 +915,7 @@ fn pin_and_ensure_journey() {
         time: 1,
         bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
         hash: [3u8; 32],
+        txids: Vec::new(),
         prev_mtp: 0,
     }];
     let bp = BatchParents::new();
@@ -1021,6 +1025,7 @@ fn pin_and_ensure_journey() {
         time: 1,
         bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
         hash: [4u8; 32],
+        txids: Vec::new(),
         prev_mtp: 0,
     }];
 
@@ -1051,6 +1056,7 @@ fn pin_and_ensure_journey() {
         time: 1,
         bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
         hash: [5u8; 32],
+        txids: Vec::new(),
         prev_mtp: 0,
     }];
     let bp_cold = BatchParents::new();
@@ -1157,6 +1163,7 @@ fn pin_and_ensure_journey() {
         time: 1,
         bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
         hash: [6u8; 32],
+        txids: Vec::new(),
         prev_mtp: 0,
     }];
 
@@ -1232,6 +1239,7 @@ fn fill_same_batch_abs_from_append_loc_ram() {
         time: 1,
         bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
         hash: [7u8; 32],
+        txids: Vec::new(),
         prev_mtp: 0,
     }];
     let mut bp = BatchParents::new();
@@ -1280,6 +1288,7 @@ fn fill_same_batch_abs_from_append_loc_ram() {
         time: 1,
         bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
         hash: [9u8; 32],
+        txids: Vec::new(),
         prev_mtp: 0,
     }];
     let mut bp_multi = BatchParents::new();
@@ -1321,6 +1330,7 @@ fn fill_same_batch_abs_from_append_loc_ram() {
         time: 1,
         bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
         hash: [8u8; 32],
+        txids: Vec::new(),
         prev_mtp: 0,
     }];
 
@@ -1512,6 +1522,11 @@ fn structural_same_batch_overlay_skips_meta_pread() {
         &mut scratch,
         &abs_jobs,
         None,
+        &block
+            .txdata
+            .iter()
+            .map(|tx| tx.compute_txid().to_byte_array())
+            .collect::<Vec<_>>(),
     )
     .expect("overlay spend is not durable-spent before tip");
     let meta_n = q
@@ -1673,6 +1688,11 @@ fn structural_scratch_second_block_does_not_replay_first_slots() {
             &mut scratch,
             &abs_jobs,
             None,
+            &block
+                .txdata
+                .iter()
+                .map(|tx| tx.compute_txid().to_byte_array())
+                .collect::<Vec<_>>(),
         )
         .unwrap();
     }
@@ -1797,6 +1817,7 @@ fn fill_just_written_survives_until_last_started_write() {
         time: 1,
         bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
         hash: [9u8; 32],
+        txids: Vec::new(),
         prev_mtp: 0,
     }];
 
@@ -1884,6 +1905,7 @@ fn fill_stamp_spent_hole_from_write_tls() {
         time: 1,
         bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
         hash: [9u8; 32],
+        txids: Vec::new(),
         prev_mtp: 0,
     }];
 
@@ -1978,6 +2000,7 @@ fn pin_and_ensure_from_pin_loc_without_tls() {
         time: 1,
         bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
         hash: [8u8; 32],
+        txids: Vec::new(),
         prev_mtp: 0,
     }];
     ensure_spend_abs_layouts(&parents, &child).expect("abs from pin loc");
@@ -3213,6 +3236,7 @@ fn collect_spend_abs_after_fill_is_one_walk() {
         time: 1,
         bits,
         hash: [1u8; 32],
+        txids: Vec::new(),
         prev_mtp: 0,
     }];
     let jobs = collect_spend_abs_after_fill(&bp, &prepared_ok).expect("in-range vout 0");
@@ -3238,6 +3262,7 @@ fn collect_spend_abs_after_fill_is_one_walk() {
         time: 1,
         bits,
         hash: [1u8; 32],
+        txids: Vec::new(),
         prev_mtp: 0,
     }];
     let err =
@@ -3363,6 +3388,7 @@ fn structural_run_clears_reused_scratch_between_batches() {
         time: 1_300_000_000,
         bits,
         hash: [2u8; 32],
+        txids: Vec::new(),
         prev_mtp: 1_300_000_000,
     }];
     let jobs = collect_spend_abs_after_fill(&bp, &prepared).expect("parent abs");

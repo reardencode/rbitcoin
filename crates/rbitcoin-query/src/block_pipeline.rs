@@ -717,6 +717,7 @@ pub fn structural_validate_spends(
     scratch: &mut StructuralScratch,
     abs_jobs: &[StructuralAbsJob],
     bip34_ancestor: Option<bitcoin::BlockHash>,
+    create_txids: &[[u8; 32]],
 ) -> Result<StructuralPhaseNs, ConfirmError> {
     use std::time::Instant;
 
@@ -732,6 +733,7 @@ pub fn structural_validate_spends(
         run_create_height,
         scratch,
         bip34_ancestor,
+        create_txids,
     )?;
     let t_abs = Instant::now();
     structural_abs_heights(query, run_create_height, scratch, abs_jobs)?;
@@ -1303,20 +1305,19 @@ pub fn reject_bip30_unspent_overwrite(
     run_create_height: &RunCreateHeight,
     scratch: &mut StructuralScratch,
     bip34_ancestor: Option<bitcoin::BlockHash>,
+    create_txids: &[[u8; 32]],
 ) -> Result<(), ConfirmError> {
-    if ctx.params.is_bip30_repeat(ctx.height.0, block.block_hash())
-        || bip34_ancestry_skips_bip30(ctx, bip34_ancestor)
+    if ctx.params.bip30_exception_height(ctx.height.0)
+        && ctx.params.is_bip30_repeat(ctx.height.0, block.block_hash())
     {
         return Ok(());
     }
-    let create_txids: Vec<[u8; 32]> = block
-        .txdata
-        .iter()
-        .map(|tx| tx.compute_txid().to_byte_array())
-        .collect();
+    if bip34_ancestry_skips_bip30(ctx, bip34_ancestor) {
+        return Ok(());
+    }
     // An earlier block of this batch is not connected yet, so the store
     // lookup below cannot see its creates.
-    for txid in &create_txids {
+    for txid in create_txids {
         let Some(&(prior_height, lo, hi)) = scratch.batch_creates.get(txid) else {
             continue;
         };
@@ -1378,7 +1379,7 @@ pub fn reject_bip30_unspent_overwrite(
             )?;
         }
     }
-    for (txid, tx) in create_txids.into_iter().zip(&block.txdata) {
+    for (txid, tx) in create_txids.iter().zip(&block.txdata) {
         let lo = scratch.batch_vouts.len() as u32;
         scratch.batch_vouts.extend(
             (0u32..)
@@ -1389,7 +1390,7 @@ pub fn reject_bip30_unspent_overwrite(
                 .map(|(v, _)| v),
         );
         let hi = scratch.batch_vouts.len() as u32;
-        scratch.batch_creates.insert(txid, (ctx.height.0, lo, hi));
+        scratch.batch_creates.insert(*txid, (ctx.height.0, lo, hi));
     }
     Ok(())
 }

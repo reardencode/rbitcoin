@@ -269,6 +269,7 @@ pub fn assemble_run(
             time: block.header.time,
             bits: block.header.bits,
             hash: block_hash,
+            txids: meta.txids,
             prev_mtp,
         });
     }
@@ -390,6 +391,7 @@ pub fn structural_run(
             &mut reuse.scratch,
             &abs_jobs[i],
             bip34_ancestor,
+            &p.txids,
         )?;
         tot.spent_ns = tot.spent_ns.saturating_add(ph.spent_ns);
         tot.spent_abs_ns = tot.spent_abs_ns.saturating_add(ph.spent_abs_ns);

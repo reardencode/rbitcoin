@@ -137,6 +137,8 @@ pub struct Prepared {
     pub bits: bitcoin::CompactTarget,
     /// Header hash of this block (prev-link for the next height in the run).
     pub hash: [u8; 32],
+    /// Create txids from structure. BIP30 looks these up and does not hash again.
+    pub txids: Vec<[u8; 32]>,
     /// Prev-block MTP from assemble (`mtp_at(height-1)`). Write BIP68 uses this
     /// instead of `ConfirmParentCache::get_header_plan`.
     pub prev_mtp: u32,
