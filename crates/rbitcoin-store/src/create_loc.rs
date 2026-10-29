@@ -179,8 +179,7 @@ impl CreateLoc {
             .iter()
             .filter(|r| r.0 <= new_count)
             .count();
-        // Kept overflow rows are a prefix. A rewrite of that prefix is the
-        // write that used to fail after the locator file was already short.
+        // Kept overflow rows are a prefix.
         self.loc.set_logical_len(loc_end)?;
         self.off
             .set_logical_len(FILE_HEADER_LEN as u64 + n_win * OFF_SLOT)?;
