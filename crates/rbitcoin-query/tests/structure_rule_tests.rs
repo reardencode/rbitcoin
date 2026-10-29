@@ -3278,7 +3278,8 @@ fn s17_many_unique_outpoints_accept() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    check_tx_local(&many, many.base_size()).expect("64 unique inputs");
+    validate_block_structure(&block_with(vec![coinbase(0), many]), &ctx_h(0))
+        .expect("64 unique inputs");
 }
 
 #[test]

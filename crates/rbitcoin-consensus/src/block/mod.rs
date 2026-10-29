@@ -72,12 +72,24 @@ pub fn check_tx_local(tx: &Transaction, base_size: usize) -> Result<(), Consensu
     if base_size > MAX_BLOCK_STRIPPED_SIZE {
         return Err(ConsensusError::BadTx("bad-txns-oversize"));
     }
-    let mut seen: crate::OutPointSet =
-        crate::OutPointSet::with_capacity_and_hasher(tx.input.len(), Default::default());
+    if tx.is_coinbase() {
+        return Ok(());
+    }
     for inp in &tx.input {
-        if !tx.is_coinbase() && inp.previous_output.is_null() {
+        if inp.previous_output.is_null() {
             return Err(ConsensusError::BadTx("bad-txns-prevout-null"));
         }
+    }
+    Ok(())
+}
+
+fn reject_duplicate_outpoints(
+    tx: &Transaction,
+    seen: &mut crate::OutPointSet,
+) -> Result<(), ConsensusError> {
+    seen.clear();
+    seen.reserve(tx.input.len());
+    for inp in &tx.input {
         let key = (
             inp.previous_output.txid.to_byte_array(),
             inp.previous_output.vout,
@@ -194,6 +206,19 @@ pub fn validate_block_structure_with_pres(
         return Err(ConsensusError::BadBlock("merkle root mismatch"));
     } else if mutated {
         return Err(ConsensusError::BadBlock("bad-txns-duplicate"));
+    }
+    // One set for the block. A one-input tx cannot repeat an outpoint, so it
+    // does not allocate. Runs before the coinbase layout check: two null
+    // coinbase inputs are `bad-txns-inputs-duplicate`, not "first tx not coinbase".
+    let mut block_outs: Option<crate::OutPointSet> = None;
+    for tx in &block.txdata {
+        if tx.input.len() < 2 {
+            continue;
+        }
+        let seen = block_outs.get_or_insert_with(|| {
+            crate::OutPointSet::with_capacity_and_hasher(tx.input.len(), Default::default())
+        });
+        reject_duplicate_outpoints(tx, seen)?;
     }
     reject_bad_block_tx_layout(block, &pres)?;
 
