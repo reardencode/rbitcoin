@@ -3212,13 +3212,15 @@ pub fn header_on_store(st: &IbdWorkState, hub: &ChainHub, height: u32) -> Option
 
 #[doc(hidden)]
 pub fn pow_linked(headers: &[Header]) -> bool {
-    for (i, hdr) in headers.iter().enumerate() {
-        if hdr.validate_pow(hdr.target()).is_err() {
+    let mut prev_hash = None;
+    for hdr in headers {
+        let Ok(hash) = hdr.validate_pow(hdr.target()) else {
+            return false;
+        };
+        if prev_hash.is_some_and(|prev| hdr.prev_blockhash != prev) {
             return false;
         }
-        if i > 0 && hdr.prev_blockhash != headers[i - 1].block_hash() {
-            return false;
-        }
+        prev_hash = Some(hash);
     }
     true
 }
