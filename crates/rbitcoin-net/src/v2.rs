@@ -75,11 +75,36 @@ pub fn v2_packet_decryption_failure_log() -> &'static str {
     "p2p: V2 transport error: packet decryption failure"
 }
 
-/// Raw TCP bytes observed after connect.
-#[derive(Clone, Debug)]
+/// Unix seconds for [`WireBytes`] stamps.
+pub type WireClock = Arc<dyn Fn() -> u64 + Send + Sync>;
+
+pub(crate) fn system_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Raw TCP bytes observed after connect, and the unix seconds they last
+/// moved (`0` = never, Core `m_last_recv` / `m_last_send`).
+#[derive(Clone)]
 pub struct WireBytes {
     pub recv: Arc<AtomicU64>,
     pub sent: Arc<AtomicU64>,
+    pub last_recv: Arc<AtomicU64>,
+    pub last_sent: Arc<AtomicU64>,
+    clock: WireClock,
+}
+
+impl std::fmt::Debug for WireBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WireBytes")
+            .field("recv", &self.recv)
+            .field("sent", &self.sent)
+            .field("last_recv", &self.last_recv)
+            .field("last_sent", &self.last_sent)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for WireBytes {
@@ -90,16 +115,43 @@ impl Default for WireBytes {
 
 impl WireBytes {
     pub fn new() -> Self {
+        Self::with_clock(Arc::new(system_secs))
+    }
+
+    pub fn with_clock(clock: WireClock) -> Self {
         Self {
             recv: Arc::new(AtomicU64::new(0)),
             sent: Arc::new(AtomicU64::new(0)),
+            last_recv: Arc::new(AtomicU64::new(0)),
+            last_sent: Arc::new(AtomicU64::new(0)),
+            clock,
+        }
+    }
+
+    pub fn count_read<R>(&self, inner: R) -> CountRead<R> {
+        CountRead {
+            inner,
+            n: Arc::clone(&self.recv),
+            at: Arc::clone(&self.last_recv),
+            clock: Arc::clone(&self.clock),
+        }
+    }
+
+    pub fn count_write<W>(&self, inner: W) -> CountWrite<W> {
+        CountWrite {
+            inner,
+            n: Arc::clone(&self.sent),
+            at: Arc::clone(&self.last_sent),
+            clock: Arc::clone(&self.clock),
         }
     }
 }
 
 pub struct CountRead<R> {
-    pub inner: R,
-    pub n: Arc<AtomicU64>,
+    inner: R,
+    n: Arc<AtomicU64>,
+    at: Arc<AtomicU64>,
+    clock: WireClock,
 }
 
 impl<R: AsyncRead + Unpin> AsyncRead for CountRead<R> {
@@ -112,7 +164,10 @@ impl<R: AsyncRead + Unpin> AsyncRead for CountRead<R> {
         match Pin::new(&mut self.inner).poll_read(cx, buf) {
             Poll::Ready(Ok(())) => {
                 let added = buf.filled().len().saturating_sub(before);
-                self.n.fetch_add(added as u64, Ordering::Relaxed);
+                if added > 0 {
+                    self.n.fetch_add(added as u64, Ordering::Relaxed);
+                    self.at.store((self.clock)(), Ordering::Relaxed);
+                }
                 Poll::Ready(Ok(()))
             }
             other => other,
@@ -121,8 +176,10 @@ impl<R: AsyncRead + Unpin> AsyncRead for CountRead<R> {
 }
 
 pub struct CountWrite<W> {
-    pub inner: W,
-    pub n: Arc<AtomicU64>,
+    inner: W,
+    n: Arc<AtomicU64>,
+    at: Arc<AtomicU64>,
+    clock: WireClock,
 }
 
 impl<W: AsyncWrite + Unpin> AsyncWrite for CountWrite<W> {
@@ -133,7 +190,10 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for CountWrite<W> {
     ) -> Poll<std::io::Result<usize>> {
         match Pin::new(&mut self.inner).poll_write(cx, buf) {
             Poll::Ready(Ok(n)) => {
-                self.n.fetch_add(n as u64, Ordering::Relaxed);
+                if n > 0 {
+                    self.n.fetch_add(n as u64, Ordering::Relaxed);
+                    self.at.store((self.clock)(), Ordering::Relaxed);
+                }
                 Poll::Ready(Ok(n))
             }
             other => other,
@@ -610,14 +670,8 @@ pub async fn open_v2_with_wire(
     };
     let magic_bytes = magic.to_bytes();
     let (rh, wh) = stream.into_split();
-    let reader = BufReader::new(CountRead {
-        inner: rh,
-        n: Arc::clone(&wire.recv),
-    });
-    let writer = CountWrite {
-        inner: wh,
-        n: Arc::clone(&wire.sent),
-    };
+    let reader = BufReader::new(wire.count_read(rh));
+    let writer = wire.count_write(wh);
     // Protocol performs many small reads; BufReader is required for performance.
     let mut reader = reader;
     let prefix = if inbound {

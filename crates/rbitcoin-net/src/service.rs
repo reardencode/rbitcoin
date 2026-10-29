@@ -730,6 +730,7 @@ pub async fn prepare_outbound_session(
     };
     let wants_addrv2 = provisional.wants_addrv2();
     let wtxid_relay = provisional.wtxid_relay();
+    let conntime = provisional.conntime.load(Ordering::Relaxed);
     peers.unregister(provisional_id);
     let sess = peers.register_with_id_net(
         provisional_id,
@@ -742,6 +743,7 @@ pub async fn prepare_outbound_session(
         false,
         typ,
     );
+    sess.conntime.store(conntime, Ordering::Relaxed);
     sess.mark_handshake_complete();
     if wants_addrv2 {
         sess.set_wants_addrv2();

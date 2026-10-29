@@ -385,8 +385,7 @@ pub struct LivePeer {
     /// Last BIP133 feefilter we sent (`-1` = none yet).
     pub sent_feefilter_sat_kvb: AtomicI64,
     /// Shared with the TCP reader so split-header bytes count (`p2p_invalid_messages`).
-    pub wire_recv: Mutex<Option<std::sync::Arc<AtomicU64>>>,
-    pub wire_sent: Mutex<Option<std::sync::Arc<AtomicU64>>>,
+    pub wire: Mutex<Option<crate::v2::WireBytes>>,
     /// Compact hashes whose first `blocktxn` reconstruct already failed.
     pub failed_cmpct: Mutex<HashSet<BlockHash>>,
     /// Heights of blocks we have requested from this peer and not yet received
@@ -401,10 +400,9 @@ pub struct LivePeer {
     pub addr_rate_limited: AtomicU64,
     /// Unix seconds when this session was registered.
     pub connected_at: AtomicU64,
-    /// Unix seconds of the last message read from this peer (`getpeerinfo.lastrecv`).
-    pub last_recv: AtomicU64,
-    /// Unix seconds the writer last finished a message (`getpeerinfo.lastsend`).
-    pub last_send: AtomicU64,
+    /// Unix seconds the connection was created (Core `m_connected`). The
+    /// post-VERSION row carries the connecting row's value.
+    pub conntime: AtomicU64,
     /// Netgroup fixed at accept. Inbound eviction compares this integer
     /// and does not read asmap.
     pub netgroup: u64,
@@ -456,39 +454,52 @@ pub fn tcp_has_peer_fin(_tcp: &std::net::TcpStream) -> bool {
     false
 }
 
+/// Hub clock (mock-aware), or system time once the hub is gone.
+fn hub_secs(owner: &Weak<PeerHub>) -> u64 {
+    owner
+        .upgrade()
+        .map(|h| h.now_secs())
+        .unwrap_or_else(crate::v2::system_secs)
+}
+
 impl LivePeer {
     pub fn attach_wire(&self, wire: crate::v2::WireBytes) {
-        *self.wire_recv.lock().unwrap_or_else(|e| e.into_inner()) = Some(wire.recv);
-        *self.wire_sent.lock().unwrap_or_else(|e| e.into_inner()) = Some(wire.sent);
+        *self.wire.lock().unwrap_or_else(|e| e.into_inner()) = Some(wire);
+    }
+
+    /// Socket counters stamped with the hub clock, attached to this row.
+    pub fn new_wire(&self) -> crate::v2::WireBytes {
+        let owner = self.owner.clone();
+        let wire = crate::v2::WireBytes::with_clock(Arc::new(move || hub_secs(&owner)));
+        self.attach_wire(wire.clone());
+        wire
     }
 
     pub fn has_wire(&self) -> bool {
-        self.wire_recv
+        self.wire
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .is_some()
     }
 
-    pub fn raw_recv(&self) -> u64 {
-        self.wire_recv
+    fn wire_load(&self, field: fn(&crate::v2::WireBytes) -> &Arc<AtomicU64>) -> u64 {
+        self.wire
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
-            .map(|a| a.load(Ordering::Relaxed))
+            .map(|w| field(w).load(Ordering::Relaxed))
             .unwrap_or(0)
+    }
+
+    pub fn raw_recv(&self) -> u64 {
+        self.wire_load(|w| &w.recv)
     }
 
     pub fn raw_sent(&self) -> u64 {
-        self.wire_sent
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .map(|a| a.load(Ordering::Relaxed))
-            .unwrap_or(0)
+        self.wire_load(|w| &w.sent)
     }
 
     pub fn note_recv(&self, cmd: &str, nbytes: u64) {
-        self.last_recv.store(self.clock_now(), Ordering::Relaxed);
         let n = acct_bytes(cmd, nbytes);
         *self
             .recv
@@ -500,7 +511,6 @@ impl LivePeer {
 
     /// Store an already-computed wire size (v2 `*other*` = contents + expansion).
     pub fn note_recv_raw(&self, cmd: &str, nbytes: u64) {
-        self.last_recv.store(self.clock_now(), Ordering::Relaxed);
         *self
             .recv
             .lock()
@@ -949,7 +959,6 @@ impl LivePeer {
     /// is freed before the bytes: [`Self::note_send_written`] wakes a paused
     /// getdata tail, which must see the slot.
     pub fn note_out_written(&self, serve_slot: bool, bytes: usize) {
-        self.last_send.store(self.clock_now(), Ordering::Relaxed);
         if serve_slot {
             self.free_serve_slot();
         }
@@ -1094,15 +1103,7 @@ impl LivePeer {
     }
 
     pub fn clock_now(&self) -> u64 {
-        self.owner
-            .upgrade()
-            .map(|h| h.now_secs())
-            .unwrap_or_else(|| {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0)
-            })
+        hub_secs(&self.owner)
     }
 
     pub fn connected_at(&self) -> u64 {
@@ -1336,9 +1337,9 @@ impl LivePeer {
             },
             best_known: self.best_known(),
             version: self.version,
-            conntime: self.connected_at.load(Ordering::Relaxed),
-            last_send: self.last_send.load(Ordering::Relaxed),
-            last_recv: self.last_recv.load(Ordering::Relaxed),
+            conntime: self.conntime.load(Ordering::Relaxed),
+            last_send: self.wire_load(|w| &w.last_sent),
+            last_recv: self.wire_load(|w| &w.last_recv),
         }
     }
 }
@@ -1449,11 +1450,11 @@ pub struct PeerInfo {
     pub best_known: Option<BlockHash>,
     /// VERSION protocol version (`0` before handshake).
     pub version: u32,
-    /// Unix seconds when this session was registered.
+    /// Unix seconds the connection was created.
     pub conntime: u64,
-    /// Unix seconds the writer last finished a message.
+    /// Unix seconds of the last byte written (`0` = never).
     pub last_send: u64,
-    /// Unix seconds of the last message read from this peer.
+    /// Unix seconds of the last byte read (`0` = never).
     pub last_recv: u64,
 }
 
@@ -2312,10 +2313,7 @@ impl PeerHub {
         if mock != 0 {
             return mock;
         }
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
+        crate::v2::system_secs()
     }
 
     /// Ask every live session to flush due tx INVs (`p2p_blocksonly` RPC relay).
@@ -2567,8 +2565,7 @@ impl PeerHub {
             last_transaction: AtomicU64::new(0),
             minfeefilter_sat_kvb: AtomicU64::new(0),
             sent_feefilter_sat_kvb: AtomicI64::new(-1),
-            wire_recv: Mutex::new(None),
-            wire_sent: Mutex::new(None),
+            wire: Mutex::new(None),
             failed_cmpct: Mutex::new(HashSet::new()),
             inflight: Mutex::new(Vec::new()),
             out_tx: Mutex::new(None),
@@ -2578,9 +2575,7 @@ impl PeerHub {
             addr_processed: AtomicU64::new(0),
             addr_rate_limited: AtomicU64::new(0),
             connected_at: AtomicU64::new(connected_at),
-            // A handshaken session registers right after VERSION/VERACK.
-            last_recv: AtomicU64::new(connected_at),
-            last_send: AtomicU64::new(connected_at),
+            conntime: AtomicU64::new(connected_at),
             netgroup: crate::eviction::eviction_netgroup(endpoint.addr),
             inv_gen_floor: AtomicU64::new(0),
             age_inv_seen_due: AtomicU64::new(0),

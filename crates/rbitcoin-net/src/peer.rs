@@ -787,7 +787,9 @@ pub async fn connect_and_handshake(
     ),
     NetError,
 > {
-    let (mut reader, mut writer, wire, tcp_shutdown) = open_v2(stream, magic, inbound).await?;
+    let wire = policy.session.map(|s| s.new_wire()).unwrap_or_default();
+    let (mut reader, mut writer, wire, tcp_shutdown) =
+        open_v2_with_wire(stream, magic, inbound, wire).await?;
     let their_version = application_handshake(
         &mut reader,
         &mut writer,
@@ -832,10 +834,9 @@ pub async fn inbound_connect_and_handshake(
     std.set_nonblocking(true).map_err(NetError::Io)?;
     let tcp_pre = std.try_clone().map_err(NetError::Io)?;
     let stream = TcpStream::from_std(std).map_err(NetError::Io)?;
-    let wire = crate::v2::WireBytes::new();
     let sess =
         peers.register_connecting(their_addr, bind, true, crate::peers::PeerConnType::Inbound);
-    sess.attach_wire(wire.clone());
+    let wire = sess.new_wire();
     sess.attach_tcp_shutdown(tcp_pre);
     let (mut reader, mut writer, wire, tcp_shutdown) =
         match open_v2_with_wire(stream, magic, true, wire).await {
@@ -891,6 +892,7 @@ pub async fn inbound_connect_and_handshake(
     let id = sess.id;
     let wants_addrv2 = sess.wants_addrv2();
     let wtxid_relay = sess.wtxid_relay();
+    let conntime = sess.conntime.load(Ordering::Relaxed);
     peers.unregister(id);
     let sess = peers.register_with_id(
         id,
@@ -900,6 +902,7 @@ pub async fn inbound_connect_and_handshake(
         true,
         crate::peers::PeerConnType::Inbound,
     );
+    sess.conntime.store(conntime, Ordering::Relaxed);
     sess.mark_handshake_complete();
     if wants_addrv2 {
         sess.set_wants_addrv2();
