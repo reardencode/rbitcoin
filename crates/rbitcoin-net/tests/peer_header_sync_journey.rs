@@ -654,7 +654,7 @@ fn a_mutated_block_drops_the_sender_not_a_noban_neighbor() {
     let (noban_slot, _noban_rx) = slot_at(1, Ipv4Addr::new(127, 0, 0, 1), 10);
     let (sender, mut sender_rx) = slot_at(2, Ipv4Addr::new(10, 1, 1, 2), 10);
     let mut st = IbdWorkState::new(vec![noban_slot, sender], hub.tip_hash(), hub.tip_height());
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let mut table = rbitcoin_net::net_permissions::NetPermTable::default();
     table
         .whitelist

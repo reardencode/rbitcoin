@@ -116,7 +116,8 @@ fn getdata_txs(rx: &mut mpsc::UnboundedReceiver<PeerOut>) -> Vec<Inventory> {
 }
 
 fn set_relay_clock(hub: &rbitcoin_net::chain::ChainHub, peers: &rbitcoin_net::peers::PeerHub, now: u64) {
-    peers.set_mock_now(now);
+    peers.clock.set_mock((now) as i64);
+        peers.on_clock_jump();
     hub.mempool().unwrap().note_mock_now(now);
 }
 
@@ -738,7 +739,7 @@ fn peer_blocksonly_and_orphan_tx() {
         assert!(!hub.in_ibd(), "blocksonly is not IBD");
         let mp = rbitcoin_net::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
         mp.set_relay_enabled(false);
-        let peers = rbitcoin_net::peers::PeerHub::new();
+        let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
         peers.attach_mempool(&mp);
         assert!(hub.attach_mempool(mp).is_ok());
         let t0 = 1_700_000_000u64;

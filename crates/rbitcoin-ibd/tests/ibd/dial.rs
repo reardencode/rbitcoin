@@ -988,8 +988,9 @@ fn dial_batch_empty_count_or_book() {
 /// IBD dials do not go through `prepare_outbound_session`.
 #[tokio::test]
 async fn ibd_dial_refuses_a_discouraged_net() {
-    let peers = rbitcoin_net::peers::PeerHub::new();
-    peers.set_mock_now(1_700_000_000);
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
+    peers.clock.set_mock(1_700_000_000_i64);
+    peers.on_clock_jump();
     let onion = rbitcoin_net::NetAddr::Onion {
         pk: [4; 32],
         port: 8333,

@@ -503,7 +503,10 @@ async fn p2p_timeout_getaddr_and_keepalive_ping() {
         assert!(stall_at > 0, "headers sync deadline must be armed");
         // Past that deadline on this call. Under llvm-cov the session task
         // can take longer than fifteen seconds to leave the table.
-        seed.peers.set_mock_now(stall_at.saturating_add(1));
+        seed.peers
+            .clock
+            .set_mock((stall_at.saturating_add(1)) as i64);
+        seed.peers.on_clock_jump();
         wait_ms_until(
             llvm_cov_wall(15, 45).as_millis() as u64,
             || {
@@ -522,7 +525,8 @@ async fn p2p_timeout_getaddr_and_keepalive_ping() {
             },
         )
         .await;
-        seed.peers.set_mock_now(0);
+        seed.peers.clock.set_mock(0_i64);
+        seed.peers.on_clock_jump();
 
         seed.peers
             .addconnection(seed.local_addr, PeerConnType::OutboundFullRelay)
@@ -683,7 +687,8 @@ async fn p2p_timeout_getaddr_and_keepalive_ping() {
         }
 
         let t = seed.peers.now_secs();
-        seed.peers.set_mock_now(t + 24 * 60 * 60 + 1);
+        seed.peers.clock.set_mock((t + 24 * 60 * 60 + 1) as i64);
+        seed.peers.on_clock_jump();
         peer.peers
             .addconnection(seed.local_addr, PeerConnType::AddrFetch)
             .expect("addrfetch dial");
@@ -736,7 +741,8 @@ async fn p2p_timeout_getaddr_and_keepalive_ping() {
             peer.peers.snapshot()
         );
         let t = peer.peers.now_secs();
-        peer.peers.set_mock_now(t + 301);
+        peer.peers.clock.set_mock((t + 301) as i64);
+        peer.peers.on_clock_jump();
         wait_ms_until(
             2_000,
             || {
@@ -754,7 +760,8 @@ async fn p2p_timeout_getaddr_and_keepalive_ping() {
             },
         )
         .await;
-        peer.peers.set_mock_now(0);
+        peer.peers.clock.set_mock(0_i64);
+        peer.peers.on_clock_jump();
 
         let mut many = AddrMan::new();
         for i in 0..20u8 {
@@ -762,7 +769,8 @@ async fn p2p_timeout_getaddr_and_keepalive_ping() {
         }
         seed.peers.set_addrman(Arc::new(Mutex::new(many)));
         let t = seed.peers.now_secs();
-        seed.peers.set_mock_now(t + 24 * 60 * 60 + 1);
+        seed.peers.clock.set_mock((t + 24 * 60 * 60 + 1) as i64);
+        seed.peers.on_clock_jump();
         // The counter moves in the same turn that asks the session to
         // disconnect. The live row can be gone before the next snapshot.
         let replies = peer.peers.addrfetch_replies();
@@ -1518,7 +1526,7 @@ async fn pin_feeler_handshake_timeout_after_silence() {
         peer,
         0,
         "/rbitcoin:test/",
-        rbitcoin_net::PeerHub::new().as_ref(),
+        rbitcoin_net::PeerHub::new(rbitcoin_consensus::NodeClock::new()).as_ref(),
     )
     .await
     {
@@ -3537,7 +3545,10 @@ async fn pong_first_ping_then_go_silent(node: &P2PNode) -> rbitcoin_net::V2Plain
     )
     .await;
 
-    node.peers.set_mock_now(node.peers.now_secs() + 121);
+    node.peers
+        .clock
+        .set_mock((node.peers.now_secs() + 121) as i64);
+    node.peers.on_clock_jump();
     next_ping(&mut raw).await;
     assert!(row().pingwait.is_some(), "{:?}", row());
     raw.write_contents(&pong(0)).await.expect("write pong");
@@ -3581,7 +3592,8 @@ async fn mocktime_generate_keeps_ponging_peer() {
         let t0 = a.peers.now_secs();
         let script = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
         for i in 1..=10u64 {
-            a.peers.set_mock_now(t0 + i * 600);
+            a.peers.clock.set_mock((t0 + i * 600) as i64);
+            a.peers.on_clock_jump();
             let hub = a.hub.clone();
             let script = script.clone();
             tokio::task::spawn_blocking(move || {

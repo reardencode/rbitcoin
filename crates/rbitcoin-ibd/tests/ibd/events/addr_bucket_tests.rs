@@ -34,7 +34,7 @@ fn ibd_addr_permission_peer_is_not_rate_limited() {
     slot.connected_ms = ibd_mono_ms();
     let ip = slot.addr.ip();
     let mut st = IbdWorkState::new(vec![slot], None, Some(0));
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let mut table = rbitcoin_net::net_permissions::NetPermTable::default();
     table
         .whitelist

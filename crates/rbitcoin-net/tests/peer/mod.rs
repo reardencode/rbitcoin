@@ -182,7 +182,7 @@ fn ibd_connect_does_not_start_headers_sync() {
     let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("ibd-no-sync");
     hub.ensure_genesis().unwrap();
     assert!(hub.in_ibd(), "regtest genesis is older than 24h");
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
     let ver = VersionMessage {
         version: 70016,
@@ -238,7 +238,8 @@ fn ibd_connect_does_not_start_headers_sync() {
     // during IBD does not start again.
     let tip_time = u64::from(hub.tip_header().unwrap().time);
     let fresh = tip_time.saturating_add(60);
-    peers.set_mock_now(fresh);
+    peers.clock.set_mock((fresh) as i64);
+    peers.on_clock_jump();
     hub.clock.set_mock(i64::try_from(fresh).unwrap());
     assert!(!hub.in_ibd(), "a fresh tip leaves IBD");
     let addr3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8335);
@@ -434,8 +435,8 @@ fn local_service_flags_pruned_are_limited_not_network() {
 #[test]
 fn compact_filter_bit_stays_on_the_node_that_caught_up() {
     use bitcoin::p2p::ServiceFlags;
-    let quiet = crate::peers::PeerHub::new();
-    let caught_up = crate::peers::PeerHub::new();
+    let quiet = crate::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
+    let caught_up = crate::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     caught_up.set_compact_filters_service(true);
     assert!(
         !local_service_flags(false, Some(&quiet)).has(ServiceFlags::COMPACT_FILTERS),
@@ -640,7 +641,7 @@ async fn partial_for_a_block_connected_elsewhere_frees_the_slot() {
         vec![spend(1)],
     );
 
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18447);
     let ver = VersionMessage {
         version: 70016,
@@ -809,7 +810,7 @@ fn same_peer_pending_cmpct_does_not_getblocktxn_again() {
         rbitcoin_consensus::grind_regtest_pow(&mut block.header);
         let hsi = HeaderAndShortIds::from_block(&block, 0xbeef, 2, &[]).unwrap();
         let hash = block.block_hash();
-        let peers = rbitcoin_net::peers::PeerHub::new();
+        let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18446);
         let ver = VersionMessage {
             version: 70016,
@@ -1662,7 +1663,7 @@ fn recent_reject_skips_atmp_on_second_send(via_cidr: bool) {
         mp.set_relay_enabled(true);
         assert!(hub.attach_mempool(mp).is_ok());
 
-        let peers = rbitcoin_net::peers::PeerHub::new();
+        let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
         if via_cidr {
             let mut table = rbitcoin_net::net_permissions::NetPermTable::default();
             table.whitelist.push(
@@ -2510,7 +2511,7 @@ fn serve_session(label: &str, blocks: u32) -> ServeSession {
         .generate_to_script(blocks, bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![])
         .unwrap();
     assert_eq!(hashes.len(), blocks as usize);
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
     let ver = bitcoin::p2p::message_network::VersionMessage {
         version: 70016,
@@ -3042,7 +3043,8 @@ async fn paused_serve(label: &str, blocks: u32, agents: &[&str]) -> PausedServe 
         .hub
         .generate_to_script(blocks, bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![])
         .unwrap();
-    node.peers.set_mock_now(node.peers.now_secs());
+    node.peers.clock.set_mock((node.peers.now_secs()) as i64);
+    node.peers.on_clock_jump();
     let mut clients = Vec::new();
     for agent in agents {
         let stream = TcpStream::connect(node.local_addr).await.unwrap();
@@ -3282,7 +3284,8 @@ async fn paused_session_still_times_out_a_silent_peer() {
     tokio::time::sleep(4 * SESSION_HEARTBEAT).await;
 
     let now = t.node.peers.now_secs();
-    t.node.peers.set_mock_now(now + 20 * 60 + 61);
+    t.node.peers.clock.set_mock((now + 20 * 60 + 61) as i64);
+    t.node.peers.on_clock_jump();
     for (raw, sess) in &mut t.clients {
         let closed = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -3329,7 +3332,8 @@ async fn paused_getdata_tail_is_served_before_the_next_getdata() {
     wait_session_read(&t.node, sess, "getdata").await;
 
     let now = t.node.peers.now_secs();
-    t.node.peers.set_mock_now(now + 121);
+    t.node.peers.clock.set_mock((now + 121) as i64);
+    t.node.peers.on_clock_jump();
     let pinged = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             match next_peer_msg(raw).await.unwrap() {
@@ -3455,7 +3459,7 @@ async fn handshake_timeout_after_silence() {
                 addr,
                 0,
                 "/rbitcoin:test/",
-                crate::peers::PeerHub::new().as_ref(),
+                crate::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new()).as_ref(),
             )
             .await
         }),
@@ -3510,7 +3514,7 @@ fn snapshot_omits_peer_after_tcp_fin() {
     use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
     use std::time::Duration;
 
-    let hub = PeerHub::new();
+    let hub = PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
     let ver = VersionMessage {
         version: 70016,
@@ -3984,7 +3988,7 @@ async fn inv_and_getdata_at_cap_stay_one_past_disconnects() {
 }
 #[tokio::test]
 async fn over_budget_reader_waits_until_one_byte_is_written() {
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 1));
     let ver = bitcoin::p2p::message_network::VersionMessage {
         version: 70016,
@@ -4078,7 +4082,7 @@ fn inbound_peer(
 
 #[test]
 fn inbound_netgroup_is_fixed_at_accept() {
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let mk = |ip: [u8; 4]| {
         let addr = std::net::SocketAddr::from((ip, 1));
         let ver = bitcoin::p2p::message_network::VersionMessage {
@@ -4117,9 +4121,10 @@ fn inbound_netgroup_is_fixed_at_accept() {
 
 #[test]
 fn misbehavior_disconnect_refuses_the_same_address() {
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let now = 1_700_000_000u64;
-    peers.set_mock_now(now);
+    peers.clock.set_mock((now) as i64);
+    peers.on_clock_jump();
     let addr = std::net::SocketAddr::from(([9, 9, 9, 9], 8333));
     let ver = bitcoin::p2p::message_network::VersionMessage {
         version: 70016,
@@ -4146,9 +4151,11 @@ fn misbehavior_disconnect_refuses_the_same_address() {
         peers.inbound_discouraged(other_port),
         "a misbehavior disconnect refuses that address"
     );
-    peers.set_mock_now(now + 86_400 - 1);
+    peers.clock.set_mock((now + 86_400 - 1) as i64);
+    peers.on_clock_jump();
     assert!(peers.inbound_discouraged(addr), "the refusal lasts a day");
-    peers.set_mock_now(now + 86_400);
+    peers.clock.set_mock((now + 86_400) as i64);
+    peers.on_clock_jump();
     assert!(
         !peers.inbound_discouraged(addr),
         "the refusal ends after a day"
@@ -4157,8 +4164,9 @@ fn misbehavior_disconnect_refuses_the_same_address() {
 
 #[test]
 fn misbehavior_disconnect_does_not_refuse_loopback() {
-    let peers = rbitcoin_net::peers::PeerHub::new();
-    peers.set_mock_now(1_700_000_000);
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
+    peers.clock.set_mock(1_700_000_000_i64);
+    peers.on_clock_jump();
     let addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 8333));
     let ver = bitcoin::p2p::message_network::VersionMessage {
         version: 70016,
@@ -4195,8 +4203,9 @@ fn misbehavior_disconnect_does_not_refuse_loopback() {
 /// `NetAddr`, and a later session with that net is discouraged.
 #[test]
 fn overlay_misbehavior_discourages_that_net() {
-    let peers = rbitcoin_net::peers::PeerHub::new();
-    peers.set_mock_now(1_700_000_000);
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
+    peers.clock.set_mock(1_700_000_000_i64);
+    peers.on_clock_jump();
     let onion = rbitcoin_net::NetAddr::Onion {
         pk: [9; 32],
         port: 8333,
@@ -4236,8 +4245,9 @@ fn overlay_misbehavior_discourages_that_net() {
 /// The refusal is the onion or I2P identity. Another port is the same peer.
 #[test]
 fn overlay_refusal_ignores_the_port() {
-    let peers = rbitcoin_net::peers::PeerHub::new();
-    peers.set_mock_now(1_700_000_000);
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
+    peers.clock.set_mock(1_700_000_000_i64);
+    peers.on_clock_jump();
     let onion = |port| rbitcoin_net::NetAddr::Onion { pk: [9; 32], port };
     let key = rbitcoin_net::peers::DiscourageKey::from_net(onion(8333)).unwrap();
     peers.note_misbehavior_key(key);
@@ -4263,9 +4273,10 @@ fn overlay_refusal_ignores_the_port() {
 
 #[test]
 fn threshold_exit_refuses_the_address_without_punish_disconnect() {
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let now = 1_700_000_100u64;
-    peers.set_mock_now(now);
+    peers.clock.set_mock((now) as i64);
+    peers.on_clock_jump();
     let addr = std::net::SocketAddr::from(([8, 8, 4, 4], 8333));
     let ver = bitcoin::p2p::message_network::VersionMessage {
         version: 70016,
@@ -4335,9 +4346,10 @@ fn threshold_exit_refuses_the_address_without_punish_disconnect() {
 
 #[test]
 fn second_rate_limit_disconnect_from_an_address_discourages_it() {
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let now = 1_700_000_200u64;
-    peers.set_mock_now(now);
+    peers.clock.set_mock((now) as i64);
+    peers.on_clock_jump();
     let ver = bitcoin::p2p::message_network::VersionMessage {
         version: 70016,
         services: bitcoin::p2p::ServiceFlags::NETWORK,
@@ -4386,7 +4398,10 @@ fn second_rate_limit_disconnect_from_an_address_discourages_it() {
 
     let slow = std::net::SocketAddr::from(([7, 7, 7, 8], 8333));
     let _ = flood(slow);
-    peers.set_mock_now(now + rbitcoin_net::peers::PeerHub::RATE_STRIKE_SECS);
+    peers
+        .clock
+        .set_mock((now + rbitcoin_net::peers::PeerHub::RATE_STRIKE_SECS) as i64);
+    peers.on_clock_jump();
     let _ = flood(slow);
     assert!(
         !peers.inbound_discouraged(slow),
@@ -4396,8 +4411,9 @@ fn second_rate_limit_disconnect_from_an_address_discourages_it() {
 
 #[test]
 fn exempt_peer_rate_limit_leaves_no_strike_on_its_address() {
-    let peers = rbitcoin_net::peers::PeerHub::new();
-    peers.set_mock_now(1_700_000_300);
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
+    peers.clock.set_mock(1_700_000_300_i64);
+    peers.on_clock_jump();
     let ver = bitcoin::p2p::message_network::VersionMessage {
         version: 70016,
         services: bitcoin::p2p::ServiceFlags::NETWORK,
@@ -4441,9 +4457,10 @@ fn exempt_peer_rate_limit_leaves_no_strike_on_its_address() {
 
 #[test]
 fn evicted_netgroup_waits_less_than_a_day_and_the_set_is_capped() {
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let now = 1_800_000_000u64;
-    peers.set_mock_now(now);
+    peers.clock.set_mock((now) as i64);
+    peers.on_clock_jump();
     let group = rbitcoin_net::eviction::eviction_netgroup("8.8.1.1:1".parse().unwrap());
     peers.note_slot_evict(group);
     let same = "8.8.9.9:8333".parse().unwrap();
@@ -4451,17 +4468,20 @@ fn evicted_netgroup_waits_less_than_a_day_and_the_set_is_capped() {
         peers.inbound_discouraged(same),
         "a netgroup that just lost a slot is refused"
     );
-    peers.set_mock_now(now + 600 - 1);
+    peers.clock.set_mock((now + 600 - 1) as i64);
+    peers.on_clock_jump();
     assert!(
         peers.inbound_discouraged(same),
         "the netgroup wait holds until ten minutes"
     );
-    peers.set_mock_now(now + 600);
+    peers.clock.set_mock((now + 600) as i64);
+    peers.on_clock_jump();
     assert!(
         !peers.inbound_discouraged(same),
         "the netgroup wait is ten minutes"
     );
-    peers.set_mock_now(now);
+    peers.clock.set_mock((now) as i64);
+    peers.on_clock_jump();
     for i in 0..rbitcoin_net::peers::PeerHub::DISCOURAGE_CAP {
         let a = (i / 256) as u8;
         let b = (i % 256) as u8;
@@ -4474,15 +4494,18 @@ fn evicted_netgroup_waits_less_than_a_day_and_the_set_is_capped() {
         !peers.inbound_discouraged(overflow),
         "a new netgroup past the cap is not stored"
     );
-    peers.set_mock_now(now + 100);
+    peers.clock.set_mock((now + 100) as i64);
+    peers.on_clock_jump();
     let refreshed = std::net::SocketAddr::from(([0, 0, 1, 1], 1));
     peers.note_slot_evict(rbitcoin_net::eviction::eviction_netgroup(refreshed));
-    peers.set_mock_now(now + 600);
+    peers.clock.set_mock((now + 600) as i64);
+    peers.on_clock_jump();
     assert!(
         peers.inbound_discouraged(refreshed),
         "a netgroup already stored is refreshed at the cap"
     );
-    peers.set_mock_now(now);
+    peers.clock.set_mock((now) as i64);
+    peers.on_clock_jump();
     for i in 0..rbitcoin_net::peers::PeerHub::DISCOURAGE_CAP {
         let ip = std::net::Ipv4Addr::from(i as u32);
         peers.note_misbehavior_addr(std::net::IpAddr::V4(ip));
@@ -4504,8 +4527,9 @@ fn evicted_netgroup_waits_less_than_a_day_and_the_set_is_capped() {
 /// must not refuse outbound dials to the rest of the prefix.
 #[test]
 fn slot_evict_does_not_block_an_outbound_dial() {
-    let peers = rbitcoin_net::peers::PeerHub::new();
-    peers.set_mock_now(1_800_000_000);
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
+    peers.clock.set_mock(1_800_000_000_i64);
+    peers.on_clock_jump();
     let evicted = "8.8.1.1:8333".parse().unwrap();
     peers.note_slot_evict(rbitcoin_net::eviction::eviction_netgroup(evicted));
     let neighbor: std::net::SocketAddr = "8.8.9.9:8333".parse().unwrap();
@@ -4553,7 +4577,7 @@ async fn inv_getdata_charges_send_budget() {
             .unwrap();
     mp.set_relay_enabled(true);
     assert!(hub.attach_mempool(mp).is_ok());
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let peer = inbound_peer(&peers);
     let (out_tx, _rx) = mpsc::unbounded_channel();
     let mut follow = PeerFollowState::new();
@@ -4580,7 +4604,7 @@ async fn notfound_makes_the_waiting_wtxid_peer_due() {
             .unwrap();
     mp.set_relay_enabled(true);
     assert!(hub.attach_mempool(mp).is_ok());
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let peer1 = inbound_peer(&peers);
     let peer2 = inbound_peer(&peers);
     let wtxid = bitcoin::Wtxid::from_byte_array([0xef; 32]);
@@ -4629,7 +4653,7 @@ async fn notfound_for_txid_inventory_wakes_the_waiter() {
             .unwrap();
     mp.set_relay_enabled(true);
     assert!(hub.attach_mempool(mp).is_ok());
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     for (n, witness) in [(0xab_u8, false), (0xcd, true)] {
         let peer1 = inbound_peer(&peers);
         let peer2 = inbound_peer(&peers);
@@ -4684,7 +4708,7 @@ async fn second_wtxid_inv_waits_while_first_request_is_inflight() {
             .unwrap();
     mp.set_relay_enabled(true);
     assert!(hub.attach_mempool(mp).is_ok());
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let peer1 = inbound_peer(&peers);
     let peer2 = inbound_peer(&peers);
     let wtxid = bitcoin::Wtxid::from_byte_array([0xee; 32]);
@@ -4738,7 +4762,7 @@ async fn full_parent_table_keeps_headers_and_collected_getdata() {
     mp.set_relay_enabled(true);
     assert!(hub.attach_mempool(mp).is_ok());
     let mp = hub.mempool().unwrap();
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let peer = inbound_peer(&peers);
     let keep = [0x42; 32];
     assert_eq!(
@@ -4884,7 +4908,7 @@ async fn tx_inv_over_one_thousand_is_two_messages() {
             .accept_tx(&child)
             .unwrap_or_else(|e| panic!("accept vout {vout}: {e}"));
     }
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 9));
     let ver = bitcoin::p2p::message_network::VersionMessage {
         version: 70016,
@@ -5124,7 +5148,7 @@ async fn cmpct_relay_join_failure_is_protocol() {
 async fn over_budget_headers_are_stored_without_a_follow_up() {
     let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hdr-over-budget");
     hub.ensure_genesis().unwrap();
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let peer = live_peer(&peers, 18510, 31, false);
     peer.note_awaiting_headers();
     peer.note_send_queued(rbitcoin_net::peers::PEER_SEND_BUDGET + 1);
@@ -5171,7 +5195,7 @@ async fn over_budget_headers_are_stored_without_a_follow_up() {
 async fn failed_body_queue_releases_the_ask() {
     let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hdr-ask-release");
     hub.ensure_genesis().unwrap();
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let peer = live_peer(&peers, 18511, 32, false);
     let header = rbitcoin_consensus::mine_regtest_paying(
         hub.tip_hash().unwrap(),
@@ -5213,7 +5237,7 @@ fn hb_relay_skips_the_build_when_no_peer_is_offered_it() {
     let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hb-relay-no-peer");
     hub.ensure_genesis().unwrap();
     hub.set_prefill_compact(true);
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let from = live_peer(&peers, 18520, 41, false);
     let quiet = live_peer(&peers, 18521, 42, false);
     quiet.note_best_known(hub.tip_hash().unwrap());
@@ -5250,7 +5274,7 @@ async fn compact_push_follows_tx_relay() {
     assert!(!mp.relay_enabled());
     let genesis = hub.tip_hash().unwrap();
     let block = hb_tip_child(&hub);
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let from = live_peer(&peers, 18530, 51, false);
     let target = live_peer(&peers, 18531, 52, false);
     target.set_hb_from(true);
@@ -5300,7 +5324,7 @@ async fn compact_push_follows_tx_relay() {
     assert!(bo.attach_mempool(std::sync::Arc::clone(&bo_mp)).is_ok());
     let bo_tip = bo.tip_hash().unwrap();
     let bo_block = hb_tip_child(&bo);
-    let bo_peers = rbitcoin_net::peers::PeerHub::new();
+    let bo_peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let bo_from = live_peer(&bo_peers, 18532, 53, false);
     let bo_target = live_peer(&bo_peers, 18533, 54, false);
     bo_target.set_hb_from(true);
@@ -5325,7 +5349,7 @@ fn hb_relay_offered_build_runs_off_the_reactor() {
     let genesis = hub.tip_hash().unwrap();
     let block = hb_tip_child(&hub);
     let hub = hub.into_arc();
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let from = live_peer(&peers, 18522, 43, false);
     let target = live_peer(&peers, 18523, 44, false);
     target.set_hb_from(true);
@@ -5407,7 +5431,7 @@ fn compact_and_wtxid_serve_run_off_the_reactor() {
         .unwrap()
         .expect("genesis body");
     let wtxid = block.txdata[0].compute_wtxid();
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let session = live_peer(&peers, 18450, 11, false);
     session.note_announced_wtx(wtxid);
 
@@ -5621,7 +5645,7 @@ async fn addrfetch_learns_the_getaddr_reply_then_disconnects() {
     use std::sync::atomic::Ordering;
 
     let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("addrfetch-reply");
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let book = std::sync::Arc::new(std::sync::Mutex::new(rbitcoin_net::seeds::AddrMan::new()));
     peers.set_addrman(std::sync::Arc::clone(&book));
     let register = |port: u16, typ: rbitcoin_net::peers::PeerConnType| {

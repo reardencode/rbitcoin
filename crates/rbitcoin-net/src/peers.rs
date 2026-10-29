@@ -1507,8 +1507,8 @@ pub struct PeerHub {
     pub dial_tx: Mutex<Option<mpsc::UnboundedSender<DialRequest>>>,
     /// Peers we asked to send us compact (BIP152 HB, max 3, prefer outbound).
     pub hb_selected: Mutex<Vec<u64>>,
-    /// `setmocktime` seconds; `0` means wall clock.
-    pub mock_now: AtomicU64,
+    /// Shared with ChainHub; `setmocktime` writes this clock and `on_clock_jump` reacts.
+    pub clock: std::sync::Arc<rbitcoin_consensus::NodeClock>,
     /// Count of sessions currently in headers-sync.
     pub headers_sync_peers: AtomicU64,
     /// Last inv hash that started headers sync with a not-yet-sync peer.
@@ -1616,7 +1616,7 @@ pub fn ip_is_advertisable(ip: &IpAddr, cjdns_reachable: bool) -> bool {
 }
 
 impl PeerHub {
-    pub fn new() -> Arc<Self> {
+    pub fn new(clock: std::sync::Arc<rbitcoin_consensus::NodeClock>) -> Arc<Self> {
         Arc::new(Self {
             next_id: AtomicU64::new(0),
             live: RwLock::new(HashMap::new()),
@@ -1634,7 +1634,7 @@ impl PeerHub {
             connect_default_port: AtomicU16::new(0),
             dial_tx: Mutex::new(None),
             hb_selected: Mutex::new(Vec::new()),
-            mock_now: AtomicU64::new(0),
+            clock,
             headers_sync_peers: AtomicU64::new(0),
             last_inv_headers_sync: Mutex::new(None),
             noban: AtomicBool::new(false),
@@ -2287,14 +2287,7 @@ impl PeerHub {
     }
 
     pub fn now_secs(&self) -> u64 {
-        let mock = self.mock_now.load(Ordering::Acquire);
-        if mock != 0 {
-            return mock;
-        }
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
+        self.clock.now_secs()
     }
 
     /// Ask every live session to flush due tx INVs (`p2p_blocksonly` RPC relay).
@@ -2305,14 +2298,14 @@ impl PeerHub {
         }
     }
 
-    pub fn set_mock_now(&self, ts: u64) {
-        self.mock_now.store(ts, Ordering::Release);
-        let g = self.live.read().unwrap_or_else(|e| e.into_inner());
-        for p in g.values() {
-            p.request_tx_inv();
-            p.queue_self_announce_if_due();
+    pub fn on_clock_jump(&self) {
+        self.request_all_tx_inv();
+        {
+            let g = self.live.read().unwrap_or_else(|e| e.into_inner());
+            for peer in g.values() {
+                peer.queue_self_announce_if_due();
+            }
         }
-        drop(g);
         self.on_session_heartbeat();
     }
 
@@ -3567,7 +3560,7 @@ mod addrfetch_notify {
 
     #[tokio::test]
     async fn reply_wakes_tip_follow() {
-        let hub = PeerHub::new();
+        let hub = PeerHub::new(rbitcoin_consensus::NodeClock::new());
         let notified = hub.addrfetch_learned().notified();
         hub.note_addrfetch_reply();
         tokio::time::timeout(std::time::Duration::from_secs(1), notified)

@@ -1225,7 +1225,7 @@ async fn ancient_weaker_fork_disconnects(
 /// beat checks, and the onion address stays set for the i2p beat.
 #[test]
 fn self_announce_clearnet_then_overlay() {
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     self_announce_clearnet(&peers);
     self_announce_overlay(&peers);
 }
@@ -1346,7 +1346,7 @@ async fn peer_header_dos_and_self_announce() {
     params.apply_test_activation_height("cltv", 111).unwrap();
     let hub = ChainHub::new(q, params, Milestone::NONE);
     hub.ensure_genesis().unwrap();
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
 
     handshake_verack_and_addrv2(&hub, &peers).await;
     unknown_parent_bodies(&hub, &peers).await;
@@ -1404,7 +1404,7 @@ async fn bad_pow_cmpct_does_not_scan_mempool() {
         .unwrap();
     mp.set_relay_enabled(true);
     assert!(hub.attach_mempool(std::sync::Arc::clone(&mp)).is_ok());
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let (out_tx, mut out_rx) = mpsc::unbounded_channel();
 
     let bad = bad_pow_cmpct_on_tip(&hub);
@@ -1593,7 +1593,7 @@ async fn below_floor_headers_do_not_walk_parents() {
     let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("below-floor");
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let (src_dir, src) = rbitcoin_net::chain::tiny_regtest_hub_labeled("below-floor-src");
     src.ensure_genesis().unwrap();
     src.generate_to_script(3, op_true(), vec![]).unwrap();
@@ -1688,7 +1688,7 @@ async fn below_floor_disconnected_header_does_not_walk_parents() {
     hub.ensure_genesis().unwrap();
     hub.set_minimum_chain_work(Some(work_floor(0xff)));
     assert!(!hub.meets_minimum_chain_work());
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let peer = live_peer(&peers, 18621, 61, false);
     let (out_tx, mut out_rx) = mpsc::unbounded_channel();
     let mut follow = PeerFollowState::new();
@@ -1722,7 +1722,7 @@ async fn full_pending_below_floor_does_not_walk_parents() {
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
     hub.set_minimum_chain_work(Some([0xff; 32]));
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let peer = live_peer(&peers, 18622, 62, false);
     let (out_tx, _out_rx) = mpsc::unbounded_channel();
     let mut follow = PeerFollowState::new();
@@ -1790,7 +1790,7 @@ async fn below_floor_full_batch_does_not_page() {
     let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("below-floor-full");
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let n = MAX_HEADERS_RESULTS as u32;
     let chain = regtest_header_chain(hub.tip_hash().unwrap(), n + 1);
     let base = hub.chain_work().unwrap();
@@ -1907,7 +1907,7 @@ fn getheaders_serves_cached_bodies_when_the_store_has_no_tip() {
 async fn a_later_ask_keeps_the_earlier_block() {
     let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("asked-keep");
     hub.ensure_genesis().unwrap();
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let gen = hub.tip_hash().unwrap();
     let t = hub.tip_header().unwrap().time.saturating_add(1);
     let a = rbitcoin_consensus::mine_regtest_paying(gen, t, 1, op_true(), vec![]);

@@ -5258,7 +5258,7 @@ fn review_trust_recent_reject_does_not_drop_session_tx() {
 
     let trusted_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 18444);
     let other_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 18444);
-    let peers = PeerHub::new();
+    let peers = PeerHub::new(rbitcoin_consensus::NodeClock::new());
     peers.set_trust_peer(Some(NetAddr::from_socket(trusted_addr)), None);
     let ver = |addr: SocketAddr| VersionMessage {
         version: 70016,

@@ -291,7 +291,7 @@ async fn ephemeral_broadcast() {
         relay: true,
     };
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let sess = peers.register(
         addr,
         addr,

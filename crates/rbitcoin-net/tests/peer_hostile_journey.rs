@@ -17,7 +17,7 @@ async fn addrv2_gossip_drops_unroutable_clearnet() {
     use bitcoin::p2p::message::NetworkMessage;
     use std::sync::{Arc, Mutex};
 
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let book = Arc::new(Mutex::new(rbitcoin_net::seeds::AddrMan::new()));
     peers.set_addrman(Arc::clone(&book));
     let src_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8333);
@@ -41,7 +41,8 @@ async fn addrv2_gossip_drops_unroutable_clearnet() {
     dst.set_wants_addrv2();
     let (_dst_tx, mut dst_rx) = mpsc::unbounded_channel();
     dst.attach_out(_dst_tx);
-    peers.set_mock_now(peer.connected_at_secs() + 10_000);
+    peers.clock.set_mock((peer.connected_at_secs() + 10_000) as i64);
+        peers.on_clock_jump();
 
     let public = AddrV2Message {
         time: 1,
@@ -163,7 +164,7 @@ async fn hostile_peer_session() {
         .unwrap()
         .block_hash();
 
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
     let ver = hostile_ver(bind);
     let peer = peers.register(
@@ -427,7 +428,8 @@ async fn hostile_addr_relay(
             "refill stops at the cap"
         );
         // A quiet peer refills its bucket: let 10_000 s of node time pass.
-        peers.set_mock_now(peer.connected_at_secs() + 10_000);
+        peers.clock.set_mock((peer.connected_at_secs() + 10_000) as i64);
+        peers.on_clock_jump();
 
         let list: Vec<AddrV2Message> = (1..=3u8)
             .map(|i| AddrV2Message {
@@ -577,7 +579,7 @@ fn addr_flood(first_octet: u8) -> Vec<AddrV2Message> {
 #[test]
 fn addrv2_flood_is_rate_limited_before_addrman() {
     for (perm, want_learned) in [(false, 1usize), (true, MAX_ADDR_TO_SEND)] {
-        let peers = rbitcoin_net::peers::PeerHub::new();
+        let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
         if perm {
             let mut t = rbitcoin_net::NetPermTable::default();
             t.whitelist

@@ -42,8 +42,9 @@ fn custom_signet_uses_challenge_derived_magic() {
 /// open a socket to an address that misbehaved.
 #[tokio::test]
 async fn feeler_does_not_dial_a_discouraged_address() {
-    let peers = rbitcoin_net::peers::PeerHub::new();
-    peers.set_mock_now(1_700_000_000);
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
+    peers.clock.set_mock(1_700_000_000_i64);
+    peers.on_clock_jump();
     let addr = std::net::SocketAddr::from(([1, 2, 3, 4], 8333));
     peers.note_misbehavior_addr(addr.ip());
     let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("feeler-discouraged");
@@ -113,7 +114,7 @@ async fn proxied_dns_seed_dials_by_name_through_socks() {
         s.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await.unwrap();
         (String::from_utf8(host).unwrap(), u16::from_be_bytes(port))
     });
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("proxied-dns-seed");
     let (_tx, rx) = tokio::sync::oneshot::channel();
     let result = tokio::time::timeout(

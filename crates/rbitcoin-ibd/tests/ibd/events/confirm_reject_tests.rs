@@ -2658,7 +2658,7 @@ fn ibd_mutated_body_is_refetched_not_blacklisted() {
     witness[1].input[0].witness = Witness::from_slice(&[[0x01]]);
     rig.plant(&[&honest]);
     rig.start_engine();
-    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peers = rbitcoin_net::peers::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let mut noban = rbitcoin_net::net_permissions::NetPermTable::default();
     noban
         .whitelist

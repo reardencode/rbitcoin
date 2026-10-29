@@ -820,7 +820,9 @@ fn follow_targets_refresh_after_catch_up_learns_peers() {
 async fn empty_book_waits_for_a_discovered_target() {
     let shared = Arc::new(std::sync::Mutex::new(AddrMan::new()));
     let shutdown = Shutdown::new();
-    let peers = Arc::new(rbitcoin_net::PeerHub::new());
+    let peers = Arc::new(rbitcoin_net::PeerHub::new(
+        rbitcoin_consensus::NodeClock::new(),
+    ));
     let shared_task = Arc::clone(&shared);
     let shutdown_task = Arc::clone(&shutdown);
     let peers_task = Arc::clone(&peers);
@@ -856,7 +858,9 @@ async fn empty_book_waits_for_a_discovered_target() {
 
     let shutdown = Shutdown::new();
     shutdown.request();
-    let peers = Arc::new(rbitcoin_net::PeerHub::new());
+    let peers = Arc::new(rbitcoin_net::PeerHub::new(
+        rbitcoin_consensus::NodeClock::new(),
+    ));
     let shared = Arc::new(std::sync::Mutex::new(AddrMan::new()));
     let mut book = AddrMan::new();
     assert!(
@@ -898,7 +902,7 @@ fn dns_seeds_not_resolved_locally_when_proxy() {
 
 #[test]
 fn proxy_seed_bootstrap_queues_domain_addrfetch() {
-    let peers = rbitcoin_net::PeerHub::new();
+    let peers = rbitcoin_net::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<rbitcoin_net::DialRequest>();
     peers.set_dialer(tx);
     let n = queue_proxy_seed_addrfetch(&peers, rbitcoin_primitives::Network::Signet);
@@ -1329,7 +1333,7 @@ async fn max_run_deadline_wakes_without_the_perf_tick() {
 async fn proxy_seed_wait_ends_on_a_learned_reply_shutdown_or_deadline() {
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    let peers = rbitcoin_net::PeerHub::new();
+    let peers = rbitcoin_net::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<rbitcoin_net::DialRequest>();
     peers.set_dialer(tx);
     let signet = rbitcoin_primitives::Network::Signet;
@@ -1519,7 +1523,7 @@ fn book_of(addrs: &[SocketAddr]) -> Arc<std::sync::Mutex<AddrMan>> {
 /// consume the only open outbound slot forever.
 #[test]
 fn refill_skips_an_address_that_is_already_live() {
-    let peers = rbitcoin_net::PeerHub::new();
+    let peers = rbitcoin_net::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     peers.set_dialer(tx);
     let taken: SocketAddr = "45.1.0.1:18444".parse().unwrap();
@@ -1553,7 +1557,7 @@ fn refill_skips_an_address_that_is_already_live() {
 /// hub already at the cap does not queue another wave.
 #[test]
 fn trusted_noban_fills_to_max_outbound_and_stops() {
-    let peers = rbitcoin_net::PeerHub::new();
+    let peers = rbitcoin_net::PeerHub::new(rbitcoin_consensus::NodeClock::new());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     peers.set_dialer(tx);
     peers.set_noban(true);
