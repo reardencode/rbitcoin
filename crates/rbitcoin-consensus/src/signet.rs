@@ -160,7 +160,7 @@ pub fn next_script_op<'a>(spk: &'a [u8], pc: &mut usize) -> Option<(u8, &'a [u8]
     let op = *spk.get(*pc)?;
     let mut at = *pc + 1;
     let len = match op {
-        0x01..=rbitcoin_primitives::OP_PUSHBYTES_75 => usize::from(op),
+        1..=rbitcoin_primitives::OP_PUSHBYTES_75 => usize::from(op),
         rbitcoin_primitives::OP_PUSHDATA1 => {
             let n = *spk.get(at)?;
             at += 1;

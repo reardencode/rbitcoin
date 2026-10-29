@@ -172,7 +172,7 @@ def bare_on_line(code: str, prev: str) -> int:
     return n
 
 
-def file_count(path: str) -> int:
+def file_count(path: str, line_fn=bare_on_line) -> int:
     lines = blank_non_code(open(path, encoding="utf-8", errors="replace").read()).splitlines()
     depth = 0
     test_stack: list[int] = []
@@ -210,7 +210,7 @@ def file_count(path: str) -> int:
                 elif not saw_item:
                     pending = False
         if not in_test:
-            n += bare_on_line(code, prev)
+            n += line_fn(code, prev)
         depth += code.count("{") - code.count("}")
         while test_stack and depth <= test_stack[-1]:
             test_stack.pop()
@@ -220,7 +220,7 @@ def file_count(path: str) -> int:
     return n
 
 
-def scan(root: str) -> dict[str, int]:
+def scan(root: str, line_fn=bare_on_line) -> dict[str, int]:
     crates = os.path.join(root, "crates")
     counts: dict[str, int] = {}
     for dirpath, dirnames, filenames in os.walk(crates):
@@ -235,7 +235,7 @@ def scan(root: str) -> dict[str, int]:
             if not name.endswith(".rs") or name.endswith("tests.rs"):
                 continue
             rel = f"{rel_dir}/{name}"
-            got = file_count(os.path.join(dirpath, name))
+            got = file_count(os.path.join(dirpath, name), line_fn)
             if got:
                 counts[rel] = got
     return counts
@@ -261,18 +261,18 @@ def write_baseline(path: str, counts: dict[str, int]) -> None:
         handle.writelines(lines)
 
 
-def check(counts: dict[str, int], base: dict[str, int]) -> list[str]:
+def check(counts: dict[str, int], base: dict[str, int], noun: str = "unwraps") -> list[str]:
     errors = []
     for path in sorted(set(counts) | set(base)):
         got = counts.get(path, 0)
         if path not in base:
-            errors.append(f"{path}: {got} unwraps, baseline has no line")
+            errors.append(f"{path}: {got} {noun}, baseline has no line")
             continue
         want = base[path]
         if got > want:
-            errors.append(f"{path}: {got} unwraps, baseline {want}")
+            errors.append(f"{path}: {got} {noun}, baseline {want}")
         elif got < want:
-            errors.append(f"{path}: {got} unwraps, baseline {want} (lower the line)")
+            errors.append(f"{path}: {got} {noun}, baseline {want} (lower the line)")
     return errors
 
 
