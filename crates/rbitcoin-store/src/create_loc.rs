@@ -4,9 +4,9 @@
 
 use crate::bulk_io::ReadOp;
 use crate::delta_loc::{
-    create_table_file, decode_create_pair, encode_create_ovf_row, load_create_ovf, loc_file_off,
-    loc_window, loc_within, migrate_create_ovf_v22_if_needed, open_table_file, pack_create_pair,
-    strides_from_aligned_len, CREATE_OVF_SLOT, IDX_STRIDE, LOC_WINDOW,
+    checkpoint_fit, create_table_file, decode_create_pair, encode_create_ovf_row, load_create_ovf,
+    loc_file_off, loc_window, loc_within, migrate_create_ovf_v22_if_needed, open_table_file,
+    pack_create_pair, strides_from_aligned_len, CREATE_OVF_SLOT, IDX_STRIDE, LOC_WINDOW,
 };
 use crate::error::StoreError;
 use crate::file::{TableFile, FILE_HEADER_LEN};
@@ -98,11 +98,11 @@ impl CreateLoc {
         if data % SLOT != 0 {
             return Err(StoreError::Corrupt("invariant: create.loc size"));
         }
-        let count = data / SLOT;
-        let n_win = count / LOC_WINDOW;
-        if off.data_len() != n_win * OFF_SLOT {
+        let full = data / SLOT;
+        let Some(count) = checkpoint_fit(full, off.data_len(), OFF_SLOT) else {
             return Err(StoreError::Corrupt("invariant: create.off size"));
-        }
+        };
+        let n_win = count / LOC_WINDOW;
         let mut checkpoints = vec![(0u64, 0u64); n_win as usize];
         if n_win > 0 {
             let mut bytes = vec![0u8; (n_win * OFF_SLOT) as usize];
@@ -114,14 +114,18 @@ impl CreateLoc {
             }
         }
         let ovf_rows = load_create_ovf(&ovf)?;
-        Ok(Self {
+        let opened = Self {
             loc,
             ovf,
             off,
             checkpoints: RwLock::new(checkpoints),
             ovf_rows: RwLock::new(ovf_rows),
-            count: AtomicU64::new(count),
-        })
+            count: AtomicU64::new(full),
+        };
+        if count < full {
+            opened.truncate_to_count(count)?;
+        }
+        Ok(opened)
     }
 
     pub fn count(&self) -> u64 {

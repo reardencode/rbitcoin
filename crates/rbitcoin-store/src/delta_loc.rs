@@ -16,6 +16,30 @@ use std::sync::RwLock;
 pub const IDX_STRIDE: u64 = 8;
 /// Creates per loc window / checkpoint grain.
 pub const LOC_WINDOW: u64 = 1024;
+
+/// How many creates `off_len` checkpoint bytes can name.
+///
+/// A short checkpoint file keeps the last create that does not need a
+/// missing window. A long or mis-sized file does not open.
+pub(crate) fn checkpoint_fit(loc_count: u64, off_len: u64, off_slot: u64) -> Option<u64> {
+    if off_slot == 0 || !off_len.is_multiple_of(off_slot) {
+        return None;
+    }
+    let n_off = off_len / off_slot;
+    let n_need = loc_count / LOC_WINDOW;
+    if n_off > n_need {
+        return None;
+    }
+    if n_off == n_need {
+        return Some(loc_count);
+    }
+    Some(
+        n_off
+            .saturating_add(1)
+            .saturating_mul(LOC_WINDOW)
+            .saturating_sub(1),
+    )
+}
 #[doc(hidden)]
 pub const CREATE_OVF_MISSING: &str = "invariant: create.loc overflow missing";
 #[doc(hidden)]
@@ -146,33 +170,37 @@ impl DeltaLoc {
         if data % 2 != 0 {
             return Err(StoreError::Corrupt("invariant: loc size"));
         }
-        let count = data / 2;
-        let expect_off = (count / LOC_WINDOW) * 8;
-        if off.data_len() != expect_off {
+        let full = data / 2;
+        let Some(count) = checkpoint_fit(full, off.data_len(), 8) else {
             return Err(StoreError::Corrupt("invariant: loc checkpoint count"));
-        }
-        let mut checkpoints = vec![0u64; (count / LOC_WINDOW) as usize];
-        if !checkpoints.is_empty() {
-            let mut bytes = vec![0u8; expect_off as usize];
+        };
+        let n_win = count / LOC_WINDOW;
+        let mut checkpoints = vec![0u64; n_win as usize];
+        if n_win > 0 {
+            let mut bytes = vec![0u8; (n_win * 8) as usize];
             off.read_at(FILE_HEADER_LEN as u64, &mut bytes)?;
             for (i, chunk) in bytes.chunks_exact(8).enumerate() {
                 checkpoints[i] = u64::from_le_bytes(chunk.try_into().unwrap());
             }
         }
         let ovf_rows = load_u16_ovf(&ovf)?;
-        Ok(Self {
+        let opened = Self {
             loc,
             ovf,
             off,
             checkpoints: RwLock::new(checkpoints),
             ovf_rows: RwLock::new(ovf_rows),
-            count: AtomicU64::new(count),
+            count: AtomicU64::new(full),
             missing: if stem == "seqsigwit" {
                 SEQSIGWIT_OVF_MISSING
             } else {
                 CREATE_OVF_MISSING
             },
-        })
+        };
+        if count < full {
+            opened.truncate_to_count(count)?;
+        }
+        Ok(opened)
     }
 
     pub fn count(&self) -> u64 {

@@ -939,13 +939,16 @@ pub fn repair_class_a_count_skew(
         prune_seqsigwit_mode,
         input_existed,
     )?;
+    let covered = class_a_body_covered_count(&stems, prune_seqsigwit_mode)?;
     let Some(n) = class_a_skew_target_count(
         n_loc,
         n_txids,
         n_seqsigwit_loc,
         prune_seqsigwit_mode,
         short_input,
-    ) else {
+    )
+    .map(|n| n.min(covered))
+    .or_else(|| (covered < n_loc).then_some(covered)) else {
         return Ok(());
     };
     let n_input = stems.input.count();
@@ -964,6 +967,33 @@ pub fn repair_class_a_count_skew(
         prune_seqsigwit_mode,
     )?;
     class_a_skew_assert_aligned(&stems, prune_seqsigwit_mode)
+}
+
+/// Largest create whose txout, spent, and seqsigwit ranges sit inside the
+/// opened body high-water marks. A locator prefix past that is uncommitted.
+#[doc(hidden)]
+pub fn class_a_body_covered_count(
+    stems: &ClassASkewStems<'_>,
+    prune_seqsigwit_mode: bool,
+) -> Result<u64, StoreError> {
+    let mut hi = stems.create_loc.count();
+    if !prune_seqsigwit_mode {
+        hi = hi.min(stems.seqsigwit_loc.count());
+    }
+    let mut lo = 0u64;
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        let (tx_end, sp_end, in_end) = class_a_skew_stem_ends(stems, mid, prune_seqsigwit_mode)?;
+        let fits = tx_end <= stems.body.body_logical_len()
+            && sp_end <= stems.spent.body_logical_len()
+            && (prune_seqsigwit_mode || in_end <= stems.seqsigwit.body_logical_len());
+        if fits {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    Ok(lo)
 }
 
 fn class_a_loc_pairs(
@@ -1157,9 +1187,6 @@ impl TxTable {
         let create_loc = open_or_create_create_loc(dir)?;
         let seqsigwit_loc = open_or_create_seqsigwit_loc(seqsigwit_dir)?;
         let loc_count = create_loc.count();
-        if !prune_seqsigwit_mode && seqsigwit_loc.count() != loc_count {
-            return Err(StoreError::Corrupt("invariant: seqsigwit.loc count"));
-        }
         let body = if had_txout {
             VarTable::open_body_only(dir, "txout", TableKind::TxOut, loc_count)?
         } else {
