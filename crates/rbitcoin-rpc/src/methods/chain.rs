@@ -960,12 +960,27 @@ pub fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
         }
         return Ok(obj);
     }
+    // One header fk gives the header, the body, and the prevout edges, so a
+    // reorg after the hash lookup cannot mix this block with another.
+    let pruned = |e| map_query(e, "Block not available (pruned data)");
+    ctx.query.require_seqsigwit_at(height).map_err(pruned)?;
+    let (header_fk, rec) = ctx
+        .query
+        .get_header_by_hash(&hash)
+        .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?
+        .filter(|(_, r)| r.hash == hash)
+        .ok_or_else(|| rpc_error(ERR_MISC, "header missing"))?;
+    let fks = ctx
+        .query
+        .header_tx_fks(header_fk, Some(&hash))
+        .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?
+        .ok_or_else(|| rpc_error(ERR_MISC, "block body missing"))?;
     let block = ctx
         .query
-        .reconstruct_block_at_height(height)
-        .map_err(|e| map_query(e, "Block not available (pruned data)"))?;
+        .reconstruct_archived_block_from_parts(rec, fks.clone())
+        .map_err(pruned)?;
     if block.block_hash().to_byte_array() != hash {
-        return getblock_unknown_hash(ctx, hash, verbosity);
+        return Err(rpc_error(ERR_MISC, "reconstruct hash mismatch"));
     }
     if verbosity == 0 {
         let mut raw = Vec::new();
@@ -1007,8 +1022,7 @@ pub fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     }
     if verbosity >= 2 {
         insert_block_size_fields(&mut obj, &block);
-        let fks = stored_block_fks(ctx, &hash);
-        obj["tx"] = json!(getblock_tx_json(ctx, &block, fks.as_deref(), verbosity)?);
+        obj["tx"] = json!(getblock_tx_json(ctx, &block, Some(&fks), verbosity)?);
     }
     Ok(obj)
 }
