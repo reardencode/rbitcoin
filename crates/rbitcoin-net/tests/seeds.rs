@@ -1029,6 +1029,27 @@ fn net_addr(s: &str) -> NetAddr {
 
 #[test]
 fn fixed_seeds_are_core_v32_tables() {
+    use bitcoin::hashes::{sha256, Hash};
+    // `scripts/core-fixed-seeds.sh` prints these after a refresh.
+    for (file, bytes, want) in [
+        (
+            "nodes_main.txt",
+            include_bytes!("../seeds/nodes_main.txt").as_slice(),
+            "9607d27cd55aaff7422213f57f2797acedc65a34b0c018c7f57f274c2ca88dcb",
+        ),
+        (
+            "nodes_test.txt",
+            include_bytes!("../seeds/nodes_test.txt").as_slice(),
+            "b2b359f05c3965811ee34a2594d49984e74b164007ffb2221c8a572db033f110",
+        ),
+        (
+            "nodes_signet.txt",
+            include_bytes!("../seeds/nodes_signet.txt").as_slice(),
+            "1544288fcd05ebf48d7c1a8df2e39e3d20958ebac6b9a5b825b74fcd733ed075",
+        ),
+    ] {
+        assert_eq!(sha256::Hash::hash(bytes).to_string(), want, "{file}");
+    }
     let main = fixed_seeds(Network::Mainnet);
     assert_eq!(per_net(main.iter().copied()), [512, 512, 512, 512, 9]);
     for want in [

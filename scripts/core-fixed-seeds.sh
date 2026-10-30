@@ -3,7 +3,8 @@
 # Core's contrib/seeds at COMMIT. Core's generate-seeds.py builds
 # src/chainparamsseeds.h from these same files. rbitcoin has no testnet4.
 # The DNS seed list is hand-copied from src/kernel/chainparams.cpp into
-# dns_seeds() in crates/rbitcoin-net/src/seeds.rs.
+# dns_seeds() in crates/rbitcoin-net/src/seeds.rs. It prints each file's
+# SHA-256; copy them into fixed_seeds_are_core_v32_tables.
 # Usage: scripts/core-fixed-seeds.sh COMMIT   (40-hex bitcoin/bitcoin commit)
 set -euo pipefail
 
@@ -28,3 +29,5 @@ for net in main test signet; do
   } >"$OUT/nodes_$net.txt"
   echo "$OUT/nodes_$net.txt: $(grep -cv '^#' "$OUT/nodes_$net.txt") lines"
 done
+echo "SHA-256 for fixed_seeds_are_core_v32_tables (crates/rbitcoin-net/tests/seeds.rs):"
+(cd "$OUT" && sha256sum nodes_main.txt nodes_test.txt nodes_signet.txt)
