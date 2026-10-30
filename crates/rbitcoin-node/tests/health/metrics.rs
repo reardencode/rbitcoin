@@ -52,7 +52,7 @@ async fn ibd_header_height_survives_resume() {
         let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-metrics");
         let hub = Arc::new(hub);
         HubRegtest(Arc::clone(&hub))
-            .generate_to_script(1, bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![])
+            .generate_to_script(1, bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![], true)
             .unwrap();
         hub.clock
             .set_mock(i64::from(hub.tip_header().unwrap().time) + 172_800);

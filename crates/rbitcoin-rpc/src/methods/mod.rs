@@ -163,11 +163,13 @@ pub enum SubmitBlockOutcome {
 
 /// Regtest-only mine + accept. Implemented by the node (not a mining product).
 pub trait RpcRegtest: Send + Sync {
+    /// `record_assembly`: each block is a pool assembly for `getmininginfo`.
     fn generate_to_script(
         &self,
         nblocks: u32,
         script_pubkey: ScriptBuf,
         extra_txs: Vec<Transaction>,
+        record_assembly: bool,
     ) -> Result<Vec<BlockHash>, String>;
 
     fn assemble_block_to_script(
@@ -191,9 +193,10 @@ impl RpcRegtest for HubRegtest {
         nblocks: u32,
         script_pubkey: ScriptBuf,
         extra_txs: Vec<Transaction>,
+        record_assembly: bool,
     ) -> Result<Vec<BlockHash>, String> {
         self.0
-            .generate_to_script_for_rpc(nblocks, script_pubkey, extra_txs)
+            .generate_to_script_for_rpc(nblocks, script_pubkey, extra_txs, record_assembly)
             .map_err(|e| mine::submit_reject_reason(&e))
     }
 

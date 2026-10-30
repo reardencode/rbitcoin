@@ -174,7 +174,7 @@ pub fn generate_with_mempool(
             .unwrap_or_default()
     };
     let hashes = miner
-        .generate_to_script(nblocks, script, extras)
+        .generate_to_script(nblocks, script, extras, true)
         .map_err(|e| rpc_error(ERR_MISC, e))?;
     Ok(hashes_json(&hashes))
 }
@@ -241,21 +241,11 @@ pub fn generateblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Valu
         return Err(rpc_error(ERR_INVALID_PARAMS, "transactions required"));
     }
     let submit = params.opt_bool(2, "submit")?.unwrap_or(true);
-    let generated = generateblock_with(miner, script, extra, submit);
     // Core assembles an empty block (`use_mempool = false`) before it adds
-    // the given transactions, so that is the last assembly either way.
+    // the given transactions.
     if let Some(c) = ctx.chain.as_ref() {
         c.note_block_assembled(0, 0);
     }
-    generated
-}
-
-fn generateblock_with(
-    miner: &dyn RpcRegtest,
-    script: ScriptBuf,
-    extra: Vec<Transaction>,
-    submit: bool,
-) -> Result<Value, Value> {
     if !submit {
         let block = miner
             .assemble_block_to_script(script, extra)
@@ -266,7 +256,7 @@ fn generateblock_with(
         }));
     }
     let hashes = miner
-        .generate_to_script(1, script, extra.clone())
+        .generate_to_script(1, script, extra.clone(), false)
         .map_err(|e| generateblock_missing_input_error(&e.to_string(), &extra))?;
     let hash = hashes
         .first()
@@ -1014,21 +1004,32 @@ pub fn gbt_check_proposal(ctx: &RpcContext, block: &Block) -> Result<(), String>
     priced.map(|_fees| ())
 }
 
+/// Where a [`during_next_mininginfo`] hook runs in each sample.
 #[cfg(debug_assertions)]
-type MininginfoHook = Box<dyn FnOnce(&RpcContext)>;
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MininginfoPoint {
+    /// After the tip read, before the reads by height.
+    BeforeNext,
+    /// After the reads by height, before the tip is checked again.
+    BeforeRecheck,
+}
+
+#[cfg(debug_assertions)]
+type MininginfoHook = Box<dyn FnMut(&RpcContext, MininginfoPoint)>;
 
 #[cfg(debug_assertions)]
 thread_local! {
-    static BEFORE_MININGINFO_NEXT: std::cell::RefCell<Option<MininginfoHook>> =
+    static MININGINFO_HOOK: std::cell::RefCell<Option<MininginfoHook>> =
         const { std::cell::RefCell::new(None) };
 }
 
-/// Run `f` once in the next `getmininginfo` on this thread, after the tip
-/// read and before the reads that compute `next`.
+/// Run `f` at each [`MininginfoPoint`] of the next `getmininginfo` on this
+/// thread.
 #[cfg(debug_assertions)]
 #[doc(hidden)]
-pub fn before_next_mininginfo_next(f: impl FnOnce(&RpcContext) + 'static) {
-    BEFORE_MININGINFO_NEXT.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+pub fn during_next_mininginfo(f: impl FnMut(&RpcContext, MininginfoPoint) + 'static) {
+    MININGINFO_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(f)));
 }
 
 fn tip_header(ctx: &RpcContext) -> Result<(Height, rbitcoin_store::HeaderRecord), Value> {
@@ -1047,17 +1048,34 @@ fn tip_header(ctx: &RpcContext) -> Result<(Height, rbitcoin_store::HeaderRecord)
 /// Core `getmininginfo`. `blocks`, `bestblockhash`, `bits`, `next`, and
 /// `networkhashps` describe one tip, as Core's under `cs_main`.
 pub fn getmininginfo(ctx: &RpcContext) -> Result<Value, Value> {
+    #[cfg(debug_assertions)]
+    let mut hook = MININGINFO_HOOK.with(|h| h.borrow_mut().take());
+    #[cfg(debug_assertions)]
+    let mut at = |point| {
+        if let Some(f) = hook.as_mut() {
+            f(ctx, point);
+        }
+    };
+    // Odd while a connect, disconnect, or reorg holds the pool, so one even
+    // value before and after the reads means the chain did not move, even
+    // away and back.
+    let settle = || ctx.mempool.as_ref().map(|m| m.pool_settle_gen());
     let (tip, rec, next, hashps) = loop {
+        let gen = settle();
+        if gen.is_some_and(|g| g % 2 == 1) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            continue;
+        }
         let (tip, rec) = tip_header(ctx)?;
         #[cfg(debug_assertions)]
-        if let Some(f) = BEFORE_MININGINFO_NEXT.with(|h| h.borrow_mut().take()) {
-            f(ctx);
-        }
+        at(MininginfoPoint::BeforeNext);
         let next = next_block(ctx, &gbt_params(ctx), tip.0, rec.bits)?;
         let hashps = network_hash_ps(ctx, 120, i64::from(tip.0)).unwrap_or(0.0);
+        #[cfg(debug_assertions)]
+        at(MininginfoPoint::BeforeRecheck);
         // Those reads are by height, so they are `rec`'s chain only if it
-        // is still the tip.
-        if tip_header(ctx)?.1.hash == rec.hash {
+        // is still the tip. Without a pool the hash is the only check.
+        if settle() == gen && tip_header(ctx)?.1.hash == rec.hash {
             break (tip, rec, next, hashps);
         }
     };

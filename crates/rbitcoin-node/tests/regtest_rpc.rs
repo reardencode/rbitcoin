@@ -22,7 +22,7 @@ fn hub_regtest_generate_one() {
     ));
     let miner = HubRegtest(hub);
     let hashes = miner
-        .generate_to_script(1, ScriptBuf::from_bytes(vec![0x51]), vec![])
+        .generate_to_script(1, ScriptBuf::from_bytes(vec![0x51]), vec![], true)
         .unwrap();
     assert_eq!(hashes.len(), 1);
     assert_eq!(miner.0.tip_height(), Some(1));
@@ -46,7 +46,7 @@ fn hub_op_true_signet_generate_one() {
     ));
     let miner = HubRegtest(hub);
     let hashes = miner
-        .generate_to_script(1, ScriptBuf::from_bytes(vec![0x51]), vec![])
+        .generate_to_script(1, ScriptBuf::from_bytes(vec![0x51]), vec![], true)
         .unwrap();
     assert_eq!(hashes.len(), 1);
     assert_eq!(miner.0.tip_height(), Some(1));

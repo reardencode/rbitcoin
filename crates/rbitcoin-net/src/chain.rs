@@ -2407,18 +2407,22 @@ impl ChainHub {
             extra_txs,
             Self::GENERATE_MAX_BLOCKS,
             false,
+            false,
         )
     }
 
     /// RPC `generate` / `generateblock`. Same mine as [`Self::generate_to_script`],
     /// and the pool txids in an accepted block are removed before the next
     /// block of this call is mined. A relay-off connect does not remove them.
+    /// `record_assembly` records each block for `getmininginfo` before it is
+    /// mined: `generate` builds from the pool, `generateblock` does not.
     #[doc(hidden)]
     pub fn generate_to_script_for_rpc(
         &self,
         nblocks: u32,
         script_pubkey: ScriptBuf,
         extra_txs: Vec<Transaction>,
+        record_assembly: bool,
     ) -> Result<Vec<BlockHash>, NetError> {
         self.generate_paying(
             nblocks,
@@ -2426,6 +2430,7 @@ impl ChainHub {
             extra_txs,
             Self::GENERATE_MAX_BLOCKS,
             true,
+            record_assembly,
         )
     }
 
@@ -2440,7 +2445,7 @@ impl ChainHub {
         extra_txs: Vec<Transaction>,
         limit: u32,
     ) -> Result<Vec<BlockHash>, NetError> {
-        self.generate_paying(nblocks, script_pubkey, extra_txs, limit, false)
+        self.generate_paying(nblocks, script_pubkey, extra_txs, limit, false, false)
     }
 
     fn generate_paying(
@@ -2450,6 +2455,7 @@ impl ChainHub {
         extra_txs: Vec<Transaction>,
         limit: u32,
         commit_on_accept: bool,
+        record_assembly: bool,
     ) -> Result<Vec<BlockHash>, NetError> {
         if nblocks == 0 {
             return Ok(Vec::new());
@@ -2482,8 +2488,10 @@ impl ChainHub {
                     .map(|tx| tx.compute_txid())
                     .collect::<Vec<Txid>>()
             });
-            let weight = txs.iter().map(|tx| tx.weight().to_wu()).sum();
-            self.note_block_assembled(weight, txs.len());
+            if record_assembly {
+                let weight = txs.iter().map(|tx| tx.weight().to_wu()).sum();
+                self.note_block_assembled(weight, txs.len());
+            }
             hashes.push(self.mine_and_accept_paying(script_pubkey.clone(), txs)?);
             if let Some(ids) = ids.filter(|ids| !ids.is_empty()) {
                 let Some(mp) = self.mempool() else {

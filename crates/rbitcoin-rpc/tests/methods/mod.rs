@@ -5724,11 +5724,15 @@ fn getmininginfo_names_the_tip_and_the_next_block_work() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A reorg between the tip read and the `next` reads restarts the sample, so
-/// `bestblockhash` and `next.bits` name one branch. Period 4: `A3` and `B3`
-/// have different times, so block 4's work differs between the branches.
-#[test]
-fn getmininginfo_reorg_mid_sample_keeps_one_branch() {
+/// Period 4 with two competing block 3s. `A3` and `B3` have different times,
+/// so block 4's work differs between the branches. `A3` is the tip.
+fn period4_fork() -> (
+    RpcContext,
+    TempDir,
+    Arc<rbitcoin_net::ChainHub>,
+    BlockHash,
+    Block,
+) {
     let mut params = rbitcoin_consensus::ChainParams::regtest();
     params.btc.no_pow_retargeting = false;
     params.btc.allow_min_difficulty_blocks = false;
@@ -5744,26 +5748,72 @@ fn getmininginfo_reorg_mid_sample_keeps_one_branch() {
     let a3 = hub.tip_hash().unwrap();
     let prev = hub.tip_header().unwrap().prev_blockhash;
     let b3 = rbitcoin_consensus::mine_regtest_paying(prev, genesis + 86_400, 3, true_spk(), vec![]);
+    (ctx, dir, hub, a3, b3)
+}
+
+/// A child of `info.bestblockhash` at `info.next.bits` is accepted.
+fn assert_next_bits_extend_best(ctx: &RpcContext, info: &Value) {
+    let best = BlockHash::from_str(info["bestblockhash"].as_str().unwrap()).unwrap();
+    let header = dispatch(ctx, "getblockheader", vec![json!(best.to_string())]).unwrap();
+    let time = header["time"].as_u64().unwrap() as u32 + 1;
+    let mut b4 = rbitcoin_consensus::mine_regtest_paying(best, time, 4, true_spk(), vec![]);
+    let bits = u32::from_str_radix(info["next"]["bits"].as_str().unwrap(), 16).unwrap();
+    b4.header.bits = bitcoin::CompactTarget::from_consensus(bits);
+    rbitcoin_consensus::grind_regtest_pow(&mut b4.header);
+    let r = dispatch(ctx, "submitblock", vec![json!(block_hex(&b4))]).unwrap();
+    assert!(
+        r.is_null(),
+        "a child of bestblockhash meets next.bits: {r} {info}"
+    );
+}
+
+/// A reorg between the tip read and the `next` reads restarts the sample, so
+/// `bestblockhash` and `next.bits` name one branch.
+#[test]
+fn getmininginfo_reorg_mid_sample_keeps_one_branch() {
+    let (ctx, dir, _hub, a3, b3) = period4_fork();
     let b3_hex = block_hex(&b3);
-    before_next_mininginfo_next(move |ctx: &RpcContext| {
+    let mut done = false;
+    during_next_mininginfo(move |ctx: &RpcContext, point| {
+        if done || point != MininginfoPoint::BeforeNext {
+            return;
+        }
+        done = true;
         dispatch(ctx, "invalidateblock", vec![json!(a3.to_string())]).unwrap();
         let r = dispatch(ctx, "submitblock", vec![json!(b3_hex)]).unwrap();
         assert!(r.is_null(), "{r}");
     });
     let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
     assert_eq!(info["bestblockhash"], b3.block_hash().to_string(), "{info}");
-    let bits = u32::from_str_radix(info["next"]["bits"].as_str().unwrap(), 16).unwrap();
-    let mut b4 = rbitcoin_consensus::mine_regtest_paying(
-        b3.block_hash(),
-        genesis + 86_401,
-        4,
-        true_spk(),
-        vec![],
-    );
-    b4.header.bits = bitcoin::CompactTarget::from_consensus(bits);
-    rbitcoin_consensus::grind_regtest_pow(&mut b4.header);
-    let r = dispatch(&ctx, "submitblock", vec![json!(block_hex(&b4))]).unwrap();
-    assert!(r.is_null(), "B3's child meets next.bits: {r} {info}");
+    assert_next_bits_extend_best(&ctx, &info);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A reorg away and back during the `next` reads leaves the tip hash as it
+/// was, but those reads were the other branch's. The sample starts over.
+#[test]
+fn getmininginfo_reorg_away_and_back_restarts() {
+    let (ctx, dir, _hub, a3, b3) = period4_fork();
+    let b3_hash = b3.block_hash().to_string();
+    let b3_hex = block_hex(&b3);
+    let mut step = 0;
+    during_next_mininginfo(move |ctx: &RpcContext, point| match (step, point) {
+        (0, MininginfoPoint::BeforeNext) => {
+            step = 1;
+            dispatch(ctx, "invalidateblock", vec![json!(a3.to_string())]).unwrap();
+            let r = dispatch(ctx, "submitblock", vec![json!(b3_hex.clone())]).unwrap();
+            assert!(r.is_null(), "{r}");
+        }
+        (1, MininginfoPoint::BeforeRecheck) => {
+            step = 2;
+            dispatch(ctx, "reconsiderblock", vec![json!(a3.to_string())]).unwrap();
+            dispatch(ctx, "invalidateblock", vec![json!(b3_hash.clone())]).unwrap();
+        }
+        _ => {}
+    });
+    let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    assert_eq!(info["bestblockhash"], a3.to_string(), "{info}");
+    assert_next_bits_extend_best(&ctx, &info);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -5810,6 +5860,20 @@ fn getmininginfo_reports_the_last_assembled_block() {
         "Core assembles generateblock empty: {info}"
     );
     assert_eq!(info["currentblocktx"], 0, "{info}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `generateblock` mines the transactions it was given, not a pool
+/// assembly, so mining them leaves the last assembly as it was.
+#[test]
+fn generateblock_mine_leaves_the_last_assembly() {
+    let (ctx, dir, hub) = ctx_from_mature_pad(300_000_000);
+    let (_, spend) = mature_coinbase_spend_hex(&ctx, generated_coinbase_value(&ctx, 1) - 1_000);
+    dispatch(&ctx, "getblocktemplate", vec![json!({"rules": ["segwit"]})]).unwrap();
+    assert_eq!(hub.last_block_assembled(), Some((8_000, 0)));
+    hub.generate_to_script_for_rpc(1, true_spk(), vec![spend], false)
+        .unwrap();
+    assert_eq!(hub.last_block_assembled(), Some((8_000, 0)));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
