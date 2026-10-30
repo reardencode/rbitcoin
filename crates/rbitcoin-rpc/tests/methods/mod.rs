@@ -1507,60 +1507,48 @@ fn mempool_txid_lookups_do_not_list_live() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Graph fields come from the cluster, not stub 1/0. Local sendraw is
-/// unbroadcast until a peer getdata completes.
-#[test]
-fn mempool_graph_fields_follow_cluster_and_unbroadcast() {
+/// One `OP_TRUE` output spending `prev:0`.
+fn op_true_spend(prev: Txid, sequence: bitcoin::Sequence, value: u64) -> Transaction {
     use bitcoin::absolute::LockTime;
-    use bitcoin::script::ScriptBuf;
     use bitcoin::transaction::Version as TxVersion;
-    use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
-    let (ctx, dir, coinbase_txids) = ctx_from_empty_102();
-    let mp = ctx.mempool.as_ref().expect("mempool");
-    mp.set_relay_enabled(true);
-    let spk = ScriptBuf::from_bytes(vec![0x51]);
+    use bitcoin::{OutPoint, TxIn, TxOut, Witness};
+    Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: prev,
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(value),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    }
+}
 
-    let parent = Transaction {
-        version: TxVersion::TWO,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint {
-                txid: coinbase_txids[0],
-                vout: 0,
-            },
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-            witness: Witness::new(),
-        }],
-        output: vec![TxOut {
-            value: Amount::from_sat(50_0000_0000 - 1_000),
-            script_pubkey: spk.clone(),
-        }],
-    };
+/// A signaling parent and an opt-out child. Graph fields follow the cluster,
+/// and the child inherits `bip125-replaceable` from its in-mempool parent.
+/// Returns `(parent txid, child txid hex)`.
+fn cluster_entries_beat(ctx: &RpcContext, mp: &MempoolHub, coinbase: Txid) -> (Txid, String) {
+    use bitcoin::Sequence;
+    let parent = op_true_spend(
+        coinbase,
+        Sequence::ENABLE_RBF_NO_LOCKTIME,
+        50_0000_0000 - 1_000,
+    );
     mp.accept_tx(&parent).expect("parent");
-    let child = Transaction {
-        version: TxVersion::TWO,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint {
-                txid: parent.compute_txid(),
-                vout: 0,
-            },
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-            witness: Witness::new(),
-        }],
-        output: vec![TxOut {
-            value: Amount::from_sat(50_0000_0000 - 1_000 - 2_000),
-            script_pubkey: spk.clone(),
-        }],
-    };
+    let child = op_true_spend(parent.compute_txid(), Sequence::MAX, 50_0000_0000 - 3_000);
     mp.accept_tx(&child).expect("child");
 
     let parent_hex = hash_hex_display(&parent.compute_txid().to_byte_array());
     let child_hex = hash_hex_display(&child.compute_txid().to_byte_array());
-    let parent_entry = dispatch(&ctx, "getmempoolentry", vec![json!(parent_hex.clone())]).unwrap();
-    let child_entry = dispatch(&ctx, "getmempoolentry", vec![json!(child_hex.clone())]).unwrap();
+    let parent_entry = dispatch(ctx, "getmempoolentry", vec![json!(parent_hex.clone())]).unwrap();
+    let child_entry = dispatch(ctx, "getmempoolentry", vec![json!(child_hex.clone())]).unwrap();
     assert_eq!(parent_entry["ancestorcount"], 1);
     assert_eq!(parent_entry["descendantcount"], 2);
     assert_eq!(child_entry["ancestorcount"], 2);
@@ -1571,57 +1559,91 @@ fn mempool_graph_fields_follow_cluster_and_unbroadcast() {
     assert_eq!(parent_entry["spentby"], json!([child_hex.clone()]));
     assert_eq!(child_entry["depends"], json!([parent_hex.clone()]));
     assert_eq!(child_entry["spentby"], json!([]));
+    assert_eq!(parent_entry["bip125-replaceable"], true);
+    assert_eq!(
+        child_entry["bip125-replaceable"], true,
+        "an opt-out child of a signaling parent is replaceable"
+    );
 
-    let verbose = dispatch(&ctx, "getrawmempool", vec![json!(true)]).unwrap();
-    assert_eq!(verbose[&child_hex]["ancestorcount"], 2);
-    assert_eq!(verbose[&parent_hex]["descendantcount"], 2);
-    assert_eq!(verbose[&child_hex]["depends"], json!([parent_hex.clone()]));
-    assert_eq!(verbose[&parent_hex]["spentby"], json!([child_hex.clone()]));
+    let verbose = dispatch(ctx, "getrawmempool", vec![json!(true)]).unwrap();
+    assert_eq!(verbose[&parent_hex], parent_entry);
+    assert_eq!(verbose[&child_hex], child_entry);
+    let ancestors = dispatch(
+        ctx,
+        "getmempoolancestors",
+        vec![json!(child_hex.clone()), json!(true)],
+    )
+    .unwrap();
+    assert_eq!(ancestors[&parent_hex], parent_entry);
+    (parent.compute_txid(), child_hex)
+}
 
+/// Local opt-out sendraw: unbroadcast until a peer getdata completes, and
+/// `bip125-replaceable` is false. Full RBF still replaces it.
+fn opt_out_local_beat(ctx: &RpcContext, mp: &MempoolHub, coinbase: Txid, p2p_parent: Txid) {
+    let local = op_true_spend(coinbase, bitcoin::Sequence::MAX, 50_0000_0000 - 3_000);
+    let sent = dispatch(
+        ctx,
+        "sendrawtransaction",
+        vec![json!(serialize_hex(&local))],
+    )
+    .unwrap();
+    let local_hex = hash_hex_display(&local.compute_txid().to_byte_array());
+    assert_eq!(sent, json!(local_hex.clone()));
+    assert!(mp.is_local_origin(&local.compute_txid()));
+    assert!(!mp.is_local_origin(&p2p_parent));
+
+    let info = dispatch(ctx, "getmempoolinfo", vec![]).unwrap();
+    assert_eq!(info["unbroadcastcount"], 1);
+    let local_entry = dispatch(ctx, "getmempoolentry", vec![json!(local_hex.clone())]).unwrap();
+    assert_eq!(local_entry["unbroadcast"], true);
+    assert_eq!(local_entry["ancestorcount"], 1);
+    assert_eq!(local_entry["bip125-replaceable"], false);
+
+    mp.mark_broadcast(&local.compute_txid());
+    let info = dispatch(ctx, "getmempoolinfo", vec![]).unwrap();
+    assert_eq!(
+        info["unbroadcastcount"], 0,
+        "getdata/serve must clear unbroadcast"
+    );
+    let local_entry = dispatch(ctx, "getmempoolentry", vec![json!(local_hex.clone())]).unwrap();
+    assert_eq!(local_entry["unbroadcast"], false);
+
+    let replacement = op_true_spend(coinbase, bitcoin::Sequence::MAX, 50_0000_0000 - 6_000);
+    let replaced = dispatch(
+        ctx,
+        "sendrawtransaction",
+        vec![json!(serialize_hex(&replacement))],
+    )
+    .unwrap();
+    assert_eq!(
+        replaced,
+        json!(hash_hex_display(
+            &replacement.compute_txid().to_byte_array()
+        ))
+    );
+    let gone = dispatch(ctx, "getmempoolentry", vec![json!(local_hex)]).unwrap_err();
+    assert_eq!(gone["code"], ERR_INVALID_ADDRESS_OR_KEY);
+}
+
+/// Graph fields come from the cluster, not stub 1/0. Local sendraw is
+/// unbroadcast until a peer getdata completes. `bip125-replaceable` is Core's
+/// signal: the tx or an in-mempool ancestor has a sequence at or below
+/// `0xfffffffd`. Full RBF still replaces an opt-out tx.
+#[test]
+fn mempool_graph_fields_follow_cluster_and_unbroadcast() {
+    let (ctx, dir, coinbase_txids) = ctx_from_empty_102();
+    let mp = ctx.mempool.as_ref().expect("mempool");
+    mp.set_relay_enabled(true);
+
+    let (parent, child_hex) = cluster_entries_beat(&ctx, mp, coinbase_txids[0]);
     let info = dispatch(&ctx, "getmempoolinfo", vec![]).unwrap();
     assert_eq!(
         info["unbroadcastcount"], 0,
         "P2P-style accept is not a local unbroadcast"
     );
 
-    let local = Transaction {
-        version: TxVersion::TWO,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint {
-                txid: coinbase_txids[1],
-                vout: 0,
-            },
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-            witness: Witness::new(),
-        }],
-        output: vec![TxOut {
-            value: Amount::from_sat(50_0000_0000 - 3_000),
-            script_pubkey: spk,
-        }],
-    };
-    let local_hex_tx = serialize_hex(&local);
-    let sent = dispatch(&ctx, "sendrawtransaction", vec![json!(local_hex_tx)]).unwrap();
-    let local_hex = hash_hex_display(&local.compute_txid().to_byte_array());
-    assert_eq!(sent, json!(local_hex.clone()));
-    assert!(mp.is_local_origin(&local.compute_txid()));
-    assert!(!mp.is_local_origin(&parent.compute_txid()));
-
-    let info = dispatch(&ctx, "getmempoolinfo", vec![]).unwrap();
-    assert_eq!(info["unbroadcastcount"], 1);
-    let local_entry = dispatch(&ctx, "getmempoolentry", vec![json!(local_hex.clone())]).unwrap();
-    assert_eq!(local_entry["unbroadcast"], true);
-    assert_eq!(local_entry["ancestorcount"], 1);
-
-    mp.mark_broadcast(&local.compute_txid());
-    let info = dispatch(&ctx, "getmempoolinfo", vec![]).unwrap();
-    assert_eq!(
-        info["unbroadcastcount"], 0,
-        "getdata/serve must clear unbroadcast"
-    );
-    let local_entry = dispatch(&ctx, "getmempoolentry", vec![json!(local_hex)]).unwrap();
-    assert_eq!(local_entry["unbroadcast"], false);
+    opt_out_local_beat(&ctx, mp, coinbase_txids[1], parent);
 
     let _ = mp.sample_reset_perf();
     let _ = dispatch(&ctx, "getmempoolentry", vec![json!(child_hex)]).unwrap();
