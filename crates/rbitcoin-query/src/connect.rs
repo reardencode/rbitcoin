@@ -137,6 +137,9 @@ pub struct TipFlushWorker {
     /// Linux tid of this worker. Zero until the thread publishes it.
     #[cfg(all(debug_assertions, target_os = "linux"))]
     os_tid: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Set when `join_tip_flush` is blocked on the in-flight barrier.
+    #[cfg(debug_assertions)]
+    blocked: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
 }
 
 impl Default for TipFlushWorker {
@@ -148,6 +151,8 @@ impl Default for TipFlushWorker {
             alive: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(all(debug_assertions, target_os = "linux"))]
             os_tid: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(debug_assertions)]
+            blocked: std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new())),
         }
     }
 }
@@ -267,6 +272,8 @@ impl Query {
                 std::io::Error::other("an earlier IBD tip flush failed; restart the node"),
             )),
             TipFlush::Running(flush) => {
+                #[cfg(debug_assertions)]
+                self.note_tip_commit_blocked();
                 let t = std::time::Instant::now();
                 let r = flush
                     .rx
@@ -454,10 +461,43 @@ impl Query {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    #[cfg(debug_assertions)]
+    fn note_tip_commit_blocked(&self) {
+        let (lock, cv) = &*self.tip_flush_worker.blocked;
+        let mut blocked = lock.lock().unwrap_or_else(|e| e.into_inner());
+        *blocked = true;
+        cv.notify_all();
+    }
+
+    /// `true` once a commit is inside [`Self::join_tip_flush`] for a running barrier.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn wait_tip_commit_blocked(&self, timeout: std::time::Duration) -> bool {
+        let (lock, cv) = &*self.tip_flush_worker.blocked;
+        let mut blocked = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if *blocked {
+                return true;
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            let (guard, status) = cv
+                .wait_timeout(blocked, left)
+                .unwrap_or_else(|e| e.into_inner());
+            blocked = guard;
+            if status.timed_out() && !*blocked {
+                return false;
+            }
+        }
+    }
+
     /// IBD tip flush threads pause after they exclude stores, until this flag clears.
     #[cfg(debug_assertions)]
     #[doc(hidden)]
-    pub fn hold_tip_flushes(&self) -> Arc<std::sync::atomic::AtomicBool> {
+    pub fn hold_tip_flushes(&self) -> Arc<rbitcoin_store::TipFlushHold> {
         self.tip_flush_hold.store(true, Ordering::SeqCst);
         Arc::clone(&self.tip_flush_hold)
     }

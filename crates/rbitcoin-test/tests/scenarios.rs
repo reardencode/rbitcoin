@@ -1187,7 +1187,7 @@ fn ibd_query_on_genesis(td: &TestDatadir) -> Query {
 /// Clears `hold` after 100 ms. `released` is set first, so a call that
 /// returned while the flush was held still sees it false.
 fn release_after(
-    hold: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    hold: std::sync::Arc<rbitcoin_store::TipFlushHold>,
 ) -> (
     std::sync::Arc<std::sync::atomic::AtomicBool>,
     std::thread::JoinHandle<()>,

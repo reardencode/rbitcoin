@@ -16,21 +16,22 @@ use crate::sync::atomic::{self, AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, O
 use rbitcoin_primitives::TableKind;
 use std::marker::PhantomData;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 
 /// Debug builds pause the IBD tip-flush thread here when a test armed the hold.
 /// The pause is after `seq_arm`, so a store on another thread sees `flushing`.
 #[cfg(debug_assertions)]
 mod flush_hold {
     use std::cell::RefCell;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
+    use super::TipFlushHold;
+
     thread_local! {
-        static HOLD: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+        static HOLD: RefCell<Option<Arc<TipFlushHold>>> = const { RefCell::new(None) };
     }
 
-    pub(super) fn bind(hold: Option<Arc<AtomicBool>>) {
+    pub(super) fn bind(hold: Option<Arc<TipFlushHold>>) {
         HOLD.with(|slot| *slot.borrow_mut() = hold);
     }
 
@@ -38,8 +39,42 @@ mod flush_hold {
         let Some(hold) = HOLD.with(|slot| slot.borrow().clone()) else {
             return;
         };
-        while hold.load(Ordering::Acquire) {
-            std::thread::sleep(std::time::Duration::from_millis(1));
+        hold.wait_while_set();
+    }
+}
+
+/// Test hold for the IBD tip flush. Clearing it wakes the flush thread.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub struct TipFlushHold {
+    flag: AtomicBool,
+    lock: Mutex<()>,
+    cv: Condvar,
+}
+
+#[cfg(debug_assertions)]
+impl TipFlushHold {
+    pub fn new(held: bool) -> Self {
+        Self {
+            flag: AtomicBool::new(held),
+            lock: Mutex::new(()),
+            cv: Condvar::new(),
+        }
+    }
+
+    /// Same order argument as [`AtomicBool::store`]. A clear notifies the flush.
+    pub fn store(&self, value: bool, order: Ordering) {
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.flag.store(value, order);
+        if !value {
+            self.cv.notify_all();
+        }
+    }
+
+    fn wait_while_set(&self) {
+        let mut guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        while self.flag.load(Ordering::Acquire) {
+            guard = self.cv.wait(guard).unwrap_or_else(|e| e.into_inner());
         }
     }
 }
@@ -48,7 +83,7 @@ mod flush_hold {
 /// after it excludes stores. Release builds have no hold.
 #[doc(hidden)]
 #[cfg(debug_assertions)]
-pub fn bind_tip_flush_hold(hold: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) {
+pub fn bind_tip_flush_hold(hold: Option<std::sync::Arc<TipFlushHold>>) {
     flush_hold::bind(hold);
 }
 
