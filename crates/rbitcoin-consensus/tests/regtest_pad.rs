@@ -61,13 +61,18 @@ fn mine_empty_regtest_uses_regtest_halving_subsidy() {
 /// `generatetoaddress` must return that miss instead of scanning 2^32 nonces.
 #[test]
 fn regtest_grind_past_one_nonce_span_is_an_error() {
-    let limit = ChainParams::regtest().pow_limit;
     let hard = CompactTarget::from_consensus(0x1b7f_ffff);
     let easy = CompactTarget::from_consensus(0x200f_ffff);
     let changelog = CompactTarget::from_consensus(0x1f7f_ffff);
-    assert!(!regtest_grind_fits_one_nonce_span(hard, limit));
-    assert!(regtest_grind_fits_one_nonce_span(easy, limit));
-    assert!(regtest_grind_fits_one_nonce_span(changelog, limit));
+    // Just over 2^31 times the regtest pow limit. Regtest generate refuses
+    // it. A signet retarget at these bits is still under the signet pow
+    // limit, and the shared search does not apply this cutoff.
+    let signet_retarget = CompactTarget::from_consensus(0x1d00_ffff);
+    assert!(!regtest_mine_fits_one_nonce_span(hard));
+    assert!(regtest_mine_fits_one_nonce_span(easy));
+    assert!(regtest_mine_fits_one_nonce_span(changelog));
+    assert!(!regtest_mine_fits_one_nonce_span(signet_retarget));
+    assert!(Target::from_compact(signet_retarget) <= ChainParams::signet().pow_limit);
 
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     let err = try_mine_regtest_paying_bits(

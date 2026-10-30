@@ -30,14 +30,9 @@ pub fn grind_regtest_pow(header: &mut Header) {
 
 /// [`grind_regtest_pow`] that reports a miss instead of panicking.
 ///
-/// One nonce span is 2^32 hashes. A target more than 2^31 times harder than
-/// `pow_limit` is a miss up front, so `generatetoaddress` can return an error
-/// without scanning.
+/// Searches one nonce span and does not judge the target. The regtest miner
+/// refuses an ungrindable target before it calls this ([`regtest_mine_fits_one_nonce_span`]).
 pub fn try_grind_regtest_pow(header: &mut Header) -> bool {
-    let limit = crate::ChainParams::regtest().pow_limit;
-    if !regtest_grind_fits_one_nonce_span(header.bits, limit) {
-        return false;
-    }
     let target = Target::from_compact(header.bits);
     const QUICK: u32 = 4096;
     for nonce in 0..QUICK {
@@ -54,13 +49,19 @@ pub fn try_grind_regtest_pow(header: &mut Header) -> bool {
     true
 }
 
-/// `true` when one nonce span is expected to hit `bits`.
+/// `true` when one nonce span is expected to hit `bits` on regtest.
 ///
-/// The ratio of `pow_limit` to the target is at most 2^31. Compared in the
-/// compact exponent (8 bits per step) and the 23-bit mantissa.
+/// The ratio of the regtest pow limit to the target is at most 2^31.
+/// Compared in the compact exponent (8 bits per step) and the 23-bit
+/// mantissa. Signet does not use this: its pow limit is already far below
+/// the regtest limit, and [`grind_regtest_pow`] searches whatever target
+/// the signet header carries.
 #[doc(hidden)]
-pub fn regtest_grind_fits_one_nonce_span(bits: CompactTarget, pow_limit: Target) -> bool {
-    let limit = pow_limit.to_compact_lossy().to_consensus();
+pub fn regtest_mine_fits_one_nonce_span(bits: CompactTarget) -> bool {
+    let limit = ChainParams::regtest()
+        .pow_limit
+        .to_compact_lossy()
+        .to_consensus();
     let got = bits.to_consensus();
     let sign = 1u32 << 23;
     let limit_mant = u64::from(limit & (sign - 1));
@@ -229,6 +230,11 @@ pub fn try_mine_regtest_paying_bits(
     extra_txs: Vec<Transaction>,
     bits: CompactTarget,
 ) -> Result<Block, &'static str> {
+    // The nonce search is shared with signet. Only regtest generate refuses
+    // a target one span cannot meet, and it does that before searching.
+    if !regtest_mine_fits_one_nonce_span(bits) {
+        return Err("regtest pow grind exhausted");
+    }
     let mut block =
         assemble_regtest_paying_bits(prev, time, height, script_pubkey, extra_txs, bits);
     if !try_grind_regtest_pow(&mut block.header) {
