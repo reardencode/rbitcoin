@@ -4324,12 +4324,9 @@ impl MempoolHub {
         let d = |id: Txid| deltas.get(&id).copied().unwrap_or(0);
         let g = self.lock_read();
         let mut scored: Vec<(u64, i64, u64)> = Vec::new();
-        for ch in g.graph.mining_chunks_best_first() {
-            let mut fee = 0i64;
-            for t in &ch.txids {
-                let base = g.graph.get(t).map(|e| e.fee_sat as i64).unwrap_or(0);
-                fee = fee.saturating_add(base.saturating_add(d(*t)));
-            }
+        for ch in g.graph.mining_chunks_for_delta(&d) {
+            let ids: std::collections::BTreeSet<_> = ch.txids.iter().copied().collect();
+            let fee = g.graph.set_modified_fee(&ids, &d);
             if fee <= 0 {
                 continue;
             }
@@ -4466,11 +4463,15 @@ impl MempoolHub {
         let deltas = self.fee_deltas.lock().unwrap().clone();
         let d = |id: Txid| deltas.get(&id).copied().unwrap_or(0);
         let g = self.lock_read();
-        let c = g.graph.cluster_of_delta(txid, d)?;
+        let c = g.graph.cluster_of_delta(txid, &d)?;
         let chunks: Vec<_> = c
             .chunks
             .iter()
-            .map(|ch| (ch.fee_sat as i64, ch.weight, ch.txids.clone()))
+            .map(|ch| {
+                let ids: std::collections::BTreeSet<_> = ch.txids.iter().copied().collect();
+                let fee = g.graph.set_modified_fee(&ids, &d);
+                (fee, ch.weight, ch.txids.clone())
+            })
             .collect();
         // Core `clusterweight` is sigop-adjusted; `total_weight` is the raw
         // cluster-limit basis, chunk weights are adjusted.
