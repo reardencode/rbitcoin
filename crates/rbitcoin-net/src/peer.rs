@@ -192,6 +192,10 @@ pub async fn accept_received_from_peer(
     // Compact selection reads that bit afterwards.
     let peers = session.and_then(|s| s.peer_hub());
     let hb = session.and_then(|s| s.peer_hub().map(|ph| (ph, s.id)));
+    // The tip is visible before this await returns. Stamp the clock from
+    // before the wait so a caller that moves time once it sees the tip does
+    // not extend the post-block ping grace.
+    let received_at = session.map(|s| s.clock_now());
     let r = if let Some(hub) = hub.shared_arc() {
         crate::tip_accept::run_on_tip_accept_async(move || {
             let r = hub.accept_received_on_lane(block, waive);
@@ -212,8 +216,8 @@ pub async fn accept_received_from_peer(
             r
         })
     };
-    if let (Some(s), Ok(AcceptOutcome::Accepted { .. })) = (session, &r) {
-        s.note_last_block();
+    if let (Some(s), Some(at), Ok(AcceptOutcome::Accepted { .. })) = (session, received_at, &r) {
+        s.note_last_block_at(at);
     }
     r
 }

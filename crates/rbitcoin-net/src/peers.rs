@@ -1066,7 +1066,11 @@ impl LivePeer {
     /// Core `m_last_block_time`: stamped only when a block from this peer
     /// is new to us, not for one we already had.
     pub fn note_last_block(&self) {
-        self.last_block.store(self.clock_now(), Ordering::Relaxed);
+        self.note_last_block_at(self.clock_now());
+    }
+
+    pub fn note_last_block_at(&self, now: u64) {
+        self.last_block.store(now, Ordering::Relaxed);
     }
 
     pub fn note_last_transaction(&self) {
