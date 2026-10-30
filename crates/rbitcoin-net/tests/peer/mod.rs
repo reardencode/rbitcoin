@@ -569,26 +569,23 @@ fn cmpct_helpers_without_mempool_and_queue_out_closed() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// `p2p_compactblocks.py` stalling peer: a peer's partial for a block that
-/// connected through another peer must not hold its one pending slot, or the
-/// peer's next compact becomes a full getdata and its blocktxn is ignored.
-/// Core drops every peer's in-flight entry once the block is received.
-#[tokio::test]
-async fn partial_for_a_block_connected_elsewhere_frees_the_slot() {
-    use bitcoin::bip152::{BlockTransactions, HeaderAndShortIds};
-    use bitcoin::p2p::address::Address;
-    use bitcoin::p2p::message_compact_blocks::CmpctBlock;
-    use bitcoin::p2p::message_network::VersionMessage;
-    use bitcoin::p2p::ServiceFlags;
+/// A regtest hub with a mempool and 102 blocks to OP_TRUE, so blocks
+/// 103 and 104 can each spend a mature coinbase: block `n` spends
+/// coinbase `n`. Their spends are not in the mempool, so a compact
+/// announce of either waits on `blocktxn`.
+fn compact_spend_pair(
+    label: &str,
+) -> (
+    rbitcoin_query::testutil::TempDir,
+    ChainHub,
+    [bitcoin::Block; 2],
+) {
     use bitcoin::transaction::Version as TxVersion;
     use bitcoin::{
-        absolute::LockTime, Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
-        Witness,
+        absolute::LockTime, Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness,
     };
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-    use std::sync::Arc;
 
-    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("cmpct-stale-partial");
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled(label);
     hub.ensure_genesis().unwrap();
     let mp =
         rbitcoin_net::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
@@ -639,6 +636,23 @@ async fn partial_for_a_block_connected_elsewhere_frees_the_slot() {
         op_true.clone(),
         vec![spend(1)],
     );
+    (dir, hub, [a, b])
+}
+
+/// `p2p_compactblocks.py` stalling peer: a peer's partial for a block that
+/// connected through another peer must not hold its one pending slot, or the
+/// peer's next compact becomes a full getdata and its blocktxn is ignored.
+/// Core drops every peer's in-flight entry once the block is received.
+#[tokio::test]
+async fn partial_for_a_block_connected_elsewhere_frees_the_slot() {
+    use bitcoin::bip152::{BlockTransactions, HeaderAndShortIds};
+    use bitcoin::p2p::address::Address;
+    use bitcoin::p2p::message_compact_blocks::CmpctBlock;
+    use bitcoin::p2p::message_network::VersionMessage;
+    use bitcoin::p2p::ServiceFlags;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let (dir, hub, [a, b]) = compact_spend_pair("cmpct-stale-partial");
 
     let peers = rbitcoin_net::peers::PeerHub::new();
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18447);
@@ -719,6 +733,88 @@ async fn partial_for_a_block_connected_elsewhere_frees_the_slot() {
     .await
     .unwrap();
     assert_eq!(hub.tip_hash(), Some(b.block_hash()), "blocktxn completes B");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+async fn heartbeat_once(
+    hub: &ChainHub,
+    out_tx: &mpsc::UnboundedSender<PeerOut>,
+    follow: &mut PeerFollowState,
+    peer: &rbitcoin_net::peers::LivePeer,
+) {
+    on_heartbeat(
+        hub,
+        out_tx,
+        follow,
+        Some(peer),
+        &mut None,
+        &mut None,
+        &mut None,
+    )
+    .await
+    .unwrap();
+}
+
+/// Core keeps a compact block that waits on `blocktxn` in the peer's
+/// blocks in flight, so it holds the ping timeout like a `getdata` does.
+#[tokio::test]
+async fn compact_block_waiting_on_blocktxn_holds_the_ping_timeout() {
+    use bitcoin::bip152::HeaderAndShortIds;
+    use bitcoin::p2p::address::Address;
+    use bitcoin::p2p::message_compact_blocks::CmpctBlock;
+    use bitcoin::p2p::message_network::VersionMessage;
+    use bitcoin::p2p::ServiceFlags;
+
+    let (dir, hub, [a, _]) = compact_spend_pair("cmpct-ping-timeout");
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    peers.set_mock_now(1_700_000_000);
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18448);
+    let ver = VersionMessage {
+        version: 70016,
+        services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        timestamp: 0,
+        receiver: Address::new(&addr, ServiceFlags::NONE),
+        sender: Address::new(&addr, ServiceFlags::NONE),
+        nonce: 1,
+        user_agent: "/rbitcoin:test/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    let peer = peers.register(
+        addr,
+        addr,
+        &ver,
+        true,
+        rbitcoin_net::peers::PeerConnType::Inbound,
+    );
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let mut follow = PeerFollowState::new();
+    follow.cmpct_version = 2;
+    peer.hb_to.store(true, Ordering::Relaxed);
+    heartbeat_once(&hub, &out_tx, &mut follow, &peer).await;
+    let mut pinged = false;
+    while let Ok(m) = out_rx.try_recv() {
+        pinged |= matches!(m.expect_msg(), NetworkMessage::Ping(_));
+    }
+    assert!(pinged, "the first heartbeat pings the peer");
+
+    let compact = CmpctBlock {
+        compact_block: HeaderAndShortIds::from_block(&a, 0xbeef, 2, &[]).unwrap(),
+    };
+    on_cmpctblock(&hub, &out_tx, &mut follow, Some(peer.as_ref()), &compact)
+        .await
+        .unwrap();
+    assert!(matches!(
+        out_rx.try_recv().unwrap().expect_msg(),
+        NetworkMessage::GetBlockTxn(_)
+    ));
+    assert!(follow.requested_blocks.is_empty());
+    peers.set_mock_now(1_700_000_000 + 20 * 60 + 61);
+    heartbeat_once(&hub, &out_tx, &mut follow, &peer).await;
+    assert!(
+        !peer.stop.load(Ordering::SeqCst),
+        "a peer whose compact block waits on blocktxn hit the ping timeout"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -3121,9 +3217,19 @@ async fn serve_with_open_ask(label: &str) -> (PausedServe, BlockHash) {
         nonce: 0,
     };
     rbitcoin_consensus::grind_regtest_pow(&mut child);
-    let hash = child.block_hash();
+    let hash = announce_and_wait_for_ask(&mut t, child).await;
+    (t, hash)
+}
+
+/// The first client announces `header`; returns once the node asks it for
+/// the body.
+async fn announce_and_wait_for_ask(
+    t: &mut PausedServe,
+    header: bitcoin::block::Header,
+) -> BlockHash {
+    let hash = header.block_hash();
     let (raw, _) = &mut t.clients[0];
-    write_peer_msg(raw, NetworkMessage::Headers(vec![child])).await;
+    write_peer_msg(raw, NetworkMessage::Headers(vec![header])).await;
     let asked = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             if let NetworkMessage::GetData(inv) = next_peer_msg(raw).await.unwrap() {
@@ -3138,7 +3244,7 @@ async fn serve_with_open_ask(label: &str) -> (PausedServe, BlockHash) {
     .await;
     assert!(asked.is_ok(), "the header announce must ask for its body");
     assert!(t.node.hub.already_have_or_asked_block(&hash));
-    (t, hash)
+    hash
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3304,6 +3410,106 @@ async fn paused_session_still_times_out_a_silent_peer() {
     }
     t.node.shutdown().await;
     let _ = std::fs::remove_dir_all(&t.dir);
+}
+
+const PING_TIMEOUT_SECS: u64 = 20 * 60;
+const POST_BLOCK_PONG_GRACE_SECS: u64 = 60;
+
+/// Proves the session is still up: it answers a ping after some heartbeats.
+async fn assert_session_answers(raw: &mut V2PlainSession, nonce: u64, why: &str) {
+    tokio::time::sleep(10 * SESSION_HEARTBEAT).await;
+    write_peer_msg(raw, NetworkMessage::Ping(nonce)).await;
+    let pong = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match next_peer_msg(raw).await {
+                Ok(NetworkMessage::Pong(n)) if n == nonce => return true,
+                Ok(_) => {}
+                Err(_) => return false,
+            }
+        }
+    })
+    .await;
+    assert!(matches!(pong, Ok(true)), "{why}: {pong:?}");
+}
+
+async fn session_closes(raw: &mut V2PlainSession) -> bool {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while next_peer_msg(raw).await.is_ok() {}
+    })
+    .await
+    .is_ok()
+}
+
+/// bitcoin/bitcoin#36080: a peer answers our block requests before our
+/// ping, so on a slow link it can miss the ping timeout without being at
+/// fault. While a block is in flight from it, the ping timeout waits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ping_timeout_waits_while_a_block_is_in_flight() {
+    let (mut t, _) = serve_with_open_ask("ping-inflight").await;
+    let now = t.node.peers.now_secs();
+    t.node
+        .peers
+        .set_mock_now(now + PING_TIMEOUT_SECS + POST_BLOCK_PONG_GRACE_SECS + 1);
+    let (raw, _) = &mut t.clients[0];
+    assert_session_answers(raw, 7, "a peer with a block in flight hit the ping timeout").await;
+    t.node.shutdown().await;
+    let _ = std::fs::remove_dir_all(&t.dir);
+}
+
+/// Core does not restart the twenty minutes once the peer's blocks are in.
+/// The peer gets one minute after the last block it delivered to answer
+/// the ping, and is disconnected after that.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ping_timeout_applies_a_minute_after_the_last_block() {
+    let mut t = paused_serve("ping-grace", 1, &["/rbitcoin:test(grace)/"]).await;
+    let tip = t.node.hub.tip_header().unwrap();
+    let height = t.node.hub.tip_height().unwrap();
+    let block = rbitcoin_consensus::mine_empty_regtest(tip.block_hash(), tip.time + 1, height + 1);
+    let hash = announce_and_wait_for_ask(&mut t, block.header).await;
+    let now = t.node.peers.now_secs();
+    t.node.peers.set_mock_now(now + PING_TIMEOUT_SECS + 1);
+    let (raw, _) = &mut t.clients[0];
+    assert_session_answers(raw, 7, "a peer with a block in flight hit the ping timeout").await;
+
+    write_peer_msg(raw, NetworkMessage::Block(block)).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while t.node.hub.tip_hash() != Some(hash) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "served block connects"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_session_answers(raw, 8, "the peer lost its minute to answer the ping").await;
+
+    let delivered = t.node.peers.now_secs();
+    t.node
+        .peers
+        .set_mock_now(delivered + POST_BLOCK_PONG_GRACE_SECS + 1);
+    let closed = session_closes(raw).await;
+    t.node.shutdown().await;
+    let _ = std::fs::remove_dir_all(&t.dir);
+    assert!(
+        closed,
+        "the unanswered ping must time out after the grace minute"
+    );
+}
+
+/// With nothing in flight the ping timeout is the twenty minutes alone; the
+/// grace minute only follows a delivered block.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ping_timeout_without_blocks_in_flight_is_twenty_minutes() {
+    let mut t = paused_serve("ping-idle", 1, &["/rbitcoin:test(idle)/"]).await;
+    let now = t.node.peers.now_secs();
+    t.node.peers.set_mock_now(now + PING_TIMEOUT_SECS + 1);
+    let (raw, _) = &mut t.clients[0];
+    let closed = session_closes(raw).await;
+    t.node.shutdown().await;
+    let _ = std::fs::remove_dir_all(&t.dir);
+    assert!(
+        closed,
+        "an idle peer that never answers the ping must time out"
+    );
 }
 
 /// Core appends a second getdata behind the paused one and serves both in
