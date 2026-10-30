@@ -31,8 +31,10 @@ fn io_loop_lines(
                 stages,
                 tx,
                 PROGRESS_EVERY,
-                || {},
-                on_caught,
+                IoHooks {
+                    before_send: || {},
+                    on_filters_caught_up: on_caught,
+                },
             );
             let logs = rbitcoin_log::take_logs();
             rbitcoin_log::capture_logs(false);
@@ -98,22 +100,24 @@ fn drive_index_pass(query: &Query, hold_first: bool, progress_every: Duration) -
                 stages,
                 &tx,
                 progress_every,
-                || {
-                    if !hold_first || first.swap(true, Ordering::SeqCst) {
-                        return;
-                    }
-                    {
-                        let (lock, cv) = &*parked_io;
-                        *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
-                        cv.notify_all();
-                    }
-                    let (lock, cv) = &*open_io;
-                    let mut gate = lock.lock().unwrap_or_else(|e| e.into_inner());
-                    while !*gate {
-                        gate = cv.wait(gate).unwrap_or_else(|e| e.into_inner());
-                    }
+                IoHooks {
+                    before_send: || {
+                        if !hold_first || first.swap(true, Ordering::SeqCst) {
+                            return;
+                        }
+                        {
+                            let (lock, cv) = &*parked_io;
+                            *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+                            cv.notify_all();
+                        }
+                        let (lock, cv) = &*open_io;
+                        let mut gate = lock.lock().unwrap_or_else(|e| e.into_inner());
+                        while !*gate {
+                            gate = cv.wait(gate).unwrap_or_else(|e| e.into_inner());
+                        }
+                    },
+                    on_filters_caught_up: || stop.store(true, Ordering::Relaxed),
                 },
-                || stop.store(true, Ordering::Relaxed),
             );
             drop(tx);
             let logs = rbitcoin_log::take_logs();
@@ -708,8 +712,10 @@ fn writebehind_registers_a_stage_for_a_wide_gap() {
         &stages,
         &tx,
         PROGRESS_EVERY,
-        || {},
-        || {},
+        IoHooks {
+            before_send: || {},
+            on_filters_caught_up: || {},
+        },
     )
     .unwrap();
     let fin = finished_index_stages();
