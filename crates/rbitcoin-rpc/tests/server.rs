@@ -303,6 +303,146 @@ async fn post_raw(
     (status, parsed)
 }
 
+async fn exchange_rpc(addr: SocketAddr, auth: &RpcAuth, body: &[u8]) -> (u16, String, Vec<u8>) {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    let auth_h = auth_header(auth);
+    let req = format!(
+        "POST / HTTP/1.1\r\nHost: {addr}\r\nAuthorization: {auth_h}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    stream.write_all(req.as_bytes()).await.unwrap();
+    stream.write_all(body).await.unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let status: u16 = line.split_whitespace().nth(1).unwrap().parse().unwrap();
+    let mut content_type = String::new();
+    let mut len = None;
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line).await.unwrap();
+        assert_ne!(n, 0, "response headers ended early");
+        if line == "\r\n" {
+            break;
+        }
+        let lower = line.to_ascii_lowercase();
+        if let Some(value) = lower.strip_prefix("content-type:") {
+            content_type = value.trim().to_string();
+        }
+        if let Some(value) = lower.strip_prefix("content-length:") {
+            len = Some(value.trim().parse::<usize>().unwrap());
+        }
+    }
+    let mut raw = vec![0; len.unwrap_or(0)];
+    if !raw.is_empty() {
+        reader.read_exact(&mut raw).await.unwrap();
+    }
+    (status, content_type, raw)
+}
+
+fn assert_json_line(raw: &[u8], expect: &str) {
+    let text = std::str::from_utf8(raw).unwrap_or("not utf-8");
+    assert_eq!(text, expect);
+}
+
+#[tokio::test]
+async fn jsonrpc_http_body_matches_core_line() {
+    let dir = rbitcoin_store::testutil::TempDir::labeled("rpc-nl").expect("temp dir");
+    let q = Arc::new(Query::open_or_create_tiny(dir.join("store")).unwrap());
+    let cfg = RpcConfig {
+        listen: Some("127.0.0.1:0".parse().unwrap()),
+        socket_path: None,
+        socket_shared: false,
+        datadir: dir.path().to_path_buf(),
+        network: Network::Regtest,
+        token_path: None,
+        cookie_path: None,
+        cookie_perms: RpcCookiePerms::Owner,
+        subversion: None,
+        work_queue: None,
+        rest: false,
+        alert_notify: None,
+        blocksonly: false,
+        package_dialect: false,
+    };
+    let handle = run_rpc(cfg, q, None, None, None, None, None).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    let addr = tcp_addr(&handle);
+    let auth = &handle.auth;
+
+    let (st, ct, raw) = exchange_rpc(
+        addr,
+        auth,
+        br#"{"jsonrpc":"1.0","id":1,"method":"getblockcount","params":[]}"#,
+    )
+    .await;
+    assert_eq!(st, 200, "{}", String::from_utf8_lossy(&raw));
+    assert!(ct.starts_with("application/json"), "content-type {ct}");
+    assert_json_line(&raw, "{\"result\":0,\"error\":null,\"id\":1}\n");
+
+    let (st, _, raw) = exchange_rpc(
+        addr,
+        auth,
+        br#"{"jsonrpc":"1.0","id":9,"method":"no-such-method","params":[]}"#,
+    )
+    .await;
+    assert_eq!(st, 404);
+    assert_json_line(
+        &raw,
+        "{\"result\":null,\"error\":{\"code\":-32601,\"message\":\"Method not found\"},\"id\":9}\n",
+    );
+
+    let (st, _, raw) = exchange_rpc(addr, auth, b"").await;
+    assert_eq!(st, 500);
+    assert_json_line(
+        &raw,
+        "{\"result\":null,\"error\":{\"code\":-32700,\"message\":\"Parse error\"},\"id\":null}\n",
+    );
+
+    let (st, _, raw) = exchange_rpc(addr, auth, b"true").await;
+    assert_eq!(st, 500);
+    assert_json_line(
+        &raw,
+        "{\"result\":null,\"error\":{\"code\":-32700,\"message\":\"Parse error\"},\"id\":null}\n",
+    );
+
+    let (st, _, raw) = exchange_rpc(
+        addr,
+        auth,
+        br#"{"jsonrpc":2,"id":7,"method":"getblockcount"}"#,
+    )
+    .await;
+    assert_eq!(st, 400);
+    assert_json_line(
+        &raw,
+        "{\"result\":null,\"error\":{\"code\":-32600,\"message\":\"jsonrpc field must be a string\"},\"id\":7}\n",
+    );
+
+    let (st, _, raw) = exchange_rpc(
+        addr,
+        auth,
+        br#"[{"jsonrpc":"2.0","id":1,"method":"getblockcount"},{"jsonrpc":"2.0","id":2,"method":"no-such-method"},{"jsonrpc":2,"id":4,"method":"getblockcount"}]"#,
+    )
+    .await;
+    assert_eq!(st, 200);
+    assert_json_line(
+        &raw,
+        "[{\"jsonrpc\":\"2.0\",\"result\":0,\"id\":1},{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32601,\"message\":\"Method not found\"},\"id\":2},{\"result\":null,\"error\":{\"code\":-32600,\"message\":\"jsonrpc field must be a string\"},\"id\":4}]\n",
+    );
+
+    let (st, _, raw) = exchange_rpc(addr, auth, b"[]").await;
+    assert_eq!(st, 200);
+    assert_json_line(&raw, "[]\n");
+
+    let (st, _, raw) =
+        exchange_rpc(addr, auth, br#"{"jsonrpc":"2.0","method":"getblockcount"}"#).await;
+    assert_eq!(st, 204);
+    assert!(raw.is_empty(), "{}", String::from_utf8_lossy(&raw));
+
+    handle.shutdown().await;
+}
+
 #[tokio::test]
 async fn jsonrpc_v2_batch_and_http_codes() {
     let dir = rbitcoin_store::testutil::TempDir::labeled("rpc-v2").expect("temp dir");

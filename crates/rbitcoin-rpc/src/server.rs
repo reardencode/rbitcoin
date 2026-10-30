@@ -628,7 +628,7 @@ pub async fn rpc_post(State(state): State<AppState>, req: Request) -> Response {
     })
     .await;
     match joined {
-        Ok(HttpRpcOut::Json(status, body)) => (status, axum::Json(body)).into_response(),
+        Ok(HttpRpcOut::Json(status, body)) => json_rpc_response(status, body),
         Ok(HttpRpcOut::Empty(status)) => status.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("rpc join: {e}")).into_response(),
     }
@@ -636,12 +636,78 @@ pub async fn rpc_post(State(state): State<AppState>, req: Request) -> Response {
 
 #[doc(hidden)]
 pub fn parse_error_response() -> Response {
-    let err = serde_json::json!({
-        "id": null,
-        "result": null,
-        "error": { "code": -32700, "message": "Parse error" },
-    });
-    (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(err)).into_response()
+    json_rpc_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        reply_v1(
+            Some(serde_json::Value::Null),
+            None,
+            Some(serde_json::json!({ "code": -32700, "message": "Parse error" })),
+        ),
+    )
+}
+
+/// `serde_json` maps sort keys. The wire order is `jsonrpc`, `result`,
+/// `error`, `id`, and the body ends with `\n`.
+fn json_rpc_response(status: StatusCode, value: serde_json::Value) -> Response {
+    (
+        status,
+        [(header::CONTENT_TYPE, "application/json")],
+        json_rpc_body(&value),
+    )
+        .into_response()
+}
+
+fn json_rpc_body(value: &serde_json::Value) -> Vec<u8> {
+    let mut out = Vec::new();
+    write_json_rpc_top(&mut out, value);
+    out.push(b'\n');
+    out
+}
+
+fn write_json_rpc_top(out: &mut Vec<u8>, value: &serde_json::Value) {
+    if let Some(items) = value.as_array() {
+        out.push(b'[');
+        for (i, item) in items.iter().enumerate() {
+            if i > 0 {
+                out.push(b',');
+            }
+            write_json_rpc_envelope(out, item);
+        }
+        out.push(b']');
+        return;
+    }
+    write_json_rpc_envelope(out, value);
+}
+
+fn write_json_rpc_envelope(out: &mut Vec<u8>, value: &serde_json::Value) {
+    let Some(obj) = value.as_object() else {
+        serde_json::to_writer(&mut *out, value).expect("json value");
+        return;
+    };
+    out.push(b'{');
+    let mut first = true;
+    for key in ["jsonrpc", "result", "error", "id"] {
+        if let Some(field) = obj.get(key) {
+            write_json_key(out, &mut first, key, field);
+        }
+    }
+    for (key, field) in obj {
+        if matches!(key.as_str(), "jsonrpc" | "result" | "error" | "id") {
+            continue;
+        }
+        write_json_key(out, &mut first, key, field);
+    }
+    out.push(b'}');
+}
+
+fn write_json_key(out: &mut Vec<u8>, first: &mut bool, key: &str, value: &serde_json::Value) {
+    if !*first {
+        out.push(b',');
+    }
+    *first = false;
+    serde_json::to_writer(&mut *out, key).expect("json key");
+    out.push(b':');
+    serde_json::to_writer(&mut *out, value).expect("json value");
 }
 
 #[doc(hidden)]
@@ -718,11 +784,11 @@ pub fn exec_http_rpc(ctx: &RpcContext, parsed: serde_json::Value) -> HttpRpcOut 
                 OneOut::Reply(body) => out.push(body),
                 OneOut::Notification => {}
                 OneOut::BadVersion { error } => {
-                    out.push(serde_json::json!({
-                        "id": req.get("id").cloned().unwrap_or(serde_json::Value::Null),
-                        "result": null,
-                        "error": error,
-                    }));
+                    out.push(reply_v1(
+                        Some(req.get("id").cloned().unwrap_or(serde_json::Value::Null)),
+                        None,
+                        Some(error),
+                    ));
                 }
             }
         }
@@ -747,20 +813,17 @@ pub fn exec_http_rpc(ctx: &RpcContext, parsed: serde_json::Value) -> HttpRpcOut 
             OneOut::Notification => HttpRpcOut::Empty(StatusCode::NO_CONTENT),
             OneOut::BadVersion { error } => HttpRpcOut::Json(
                 StatusCode::BAD_REQUEST,
-                serde_json::json!({
-                    "result": null,
-                    "error": error,
-                }),
+                reply_v1(parsed.get("id").cloned(), None, Some(error)),
             ),
         };
     }
     HttpRpcOut::Json(
         StatusCode::INTERNAL_SERVER_ERROR,
-        serde_json::json!({
-            "id": null,
-            "result": null,
-            "error": { "code": -32700, "message": "Parse error" },
-        }),
+        reply_v1(
+            Some(serde_json::Value::Null),
+            None,
+            Some(serde_json::json!({ "code": -32700, "message": "Parse error" })),
+        ),
     )
 }
 
