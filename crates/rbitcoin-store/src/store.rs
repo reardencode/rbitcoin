@@ -552,11 +552,10 @@ impl Store {
     /// within [`DATADIR_BYTES_TTL`] returns the previous sum.
     pub fn datadir_bytes(&self) -> u64 {
         let now = std::time::Instant::now();
-        let cached = self
+        let cached = *self
             .datadir_bytes_cache
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+            .unwrap_or_else(|e| e.into_inner());
         let (at, n) = cached_dir_bytes(cached, now, DATADIR_BYTES_TTL, || {
             let mut n = dir_file_bytes(&self.path);
             if let Some(cold) = &self.cold_path {
