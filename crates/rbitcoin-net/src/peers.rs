@@ -1633,6 +1633,10 @@ pub struct PeerHub {
     /// Bumped by [`Self::set_mock_now`] so a live session runs its heartbeat
     /// on that call. A `watch` keeps the jump if it lands between waits.
     session_heartbeat: watch::Sender<u64>,
+    /// Times a session has entered `on_heartbeat`. The wait, not the contract.
+    heartbeat_laps: AtomicU64,
+    /// Outbound version nonces registered. Stays after the nonce is cleared.
+    outbound_attempts: AtomicU64,
     /// Count of sessions currently in headers-sync.
     pub headers_sync_peers: AtomicU64,
     /// Last inv hash that started headers sync with a not-yet-sync peer.
@@ -1762,6 +1766,8 @@ impl PeerHub {
             hb_selected: Mutex::new(Vec::new()),
             mock_now: AtomicU64::new(0),
             session_heartbeat: watch::channel(0).0,
+            heartbeat_laps: AtomicU64::new(0),
+            outbound_attempts: AtomicU64::new(0),
             headers_sync_peers: AtomicU64::new(0),
             last_inv_headers_sync: Mutex::new(None),
             noban: AtomicBool::new(false),
@@ -2116,10 +2122,27 @@ impl PeerHub {
 
     /// Core: register local version nonce while an outbound handshake is open.
     pub fn note_outbound_nonce(&self, nonce: u64) {
+        self.outbound_attempts.fetch_add(1, Ordering::Release);
         self.pending_outbound_nonces
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(nonce);
+    }
+
+    /// Outbound handshakes that registered a version nonce.
+    #[doc(hidden)]
+    pub fn outbound_attempts(&self) -> u64 {
+        self.outbound_attempts.load(Ordering::Acquire)
+    }
+
+    /// How many times a live session has entered its heartbeat.
+    #[doc(hidden)]
+    pub fn heartbeat_laps(&self) -> u64 {
+        self.heartbeat_laps.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn note_heartbeat_lap(&self) {
+        self.heartbeat_laps.fetch_add(1, Ordering::Release);
     }
 
     pub fn clear_outbound_nonce(&self, nonce: u64) {

@@ -1441,6 +1441,9 @@ pub async fn on_heartbeat(
     let Some(s) = session else {
         return Ok(());
     };
+    if let Some(ph) = s.peer_hub() {
+        ph.note_heartbeat_lap();
+    }
     maybe_queue_feefilter(hub, out_tx, s);
     if addrfetch_timed_out(s) {
         rbitcoin_log::debug!("addrfetch connection timeout");
