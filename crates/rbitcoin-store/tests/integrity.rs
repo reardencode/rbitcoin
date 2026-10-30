@@ -584,198 +584,62 @@ fn connect_coinbase(
     (header_fk, hash)
 }
 
-/// Genesis plus eight connects whose locator header does not land.
-/// Returns the header fk of height 1. The process image is still at tip 8.
-fn write_withheld_tail(dir: &std::path::Path) -> (Store, Fk) {
-    let s = Store::create_tiny(dir).unwrap();
+fn on_disk_hwm(path: &std::path::Path) -> u64 {
+    let mut buf = [0u8; 8];
+    let f = std::fs::File::open(path).unwrap();
+    use std::os::unix::fs::FileExt;
+    f.read_exact_at(&mut buf, 8).unwrap();
+    u64::from_le_bytes(buf)
+}
+
+/// Genesis is sealed. The next connect's locator header does not land.
+/// The sealed tip and the spend marker stay at genesis. Reopen's create
+/// count is that prefix, and the withheld height has no body association.
+#[test]
+fn withheld_locator_header_does_not_seal_the_tip() {
+    let dir = tmp();
+    let s = Store::create_tiny(&dir).unwrap();
     let write = rbitcoin_store::ClassCWrite::for_test();
-    let (mut prev, mut parent_hash) = connect_coinbase(&s, &write, 0, Fk::NULL, [0u8; 32]);
+    let (prev, parent_hash) = connect_coinbase(&s, &write, 0, Fk::NULL, [0u8; 32]);
+    s.flush_class_c_tip().unwrap();
+    s.note_spend_snapshot(0);
+    s.checkpoint_spend_through(0).unwrap();
+    let sealed = on_disk_hwm(&dir.join("confirmed.body"));
+    let seal = std::fs::read(dir.join("tip_seal")).unwrap();
+    let genesis = s.confirmed.get(Height(0)).unwrap().unwrap();
+
     let loc = s.txs.create_loc.loc.read_fd();
-    rbitcoin_store::io_handle::arm_fail_hwm_pwrites(loc, 64);
+    rbitcoin_store::io_handle::arm_fail_hwm_pwrites(loc, 8);
     let disarm = Disarm(loc);
-    let mut dropped_header = Fk::NULL;
-    for h in 1u8..=8 {
-        let (header_fk, hash) = connect_coinbase(&s, &write, h, prev, parent_hash);
-        prev = header_fk;
-        parent_hash = hash;
-        if h == 1 {
-            dropped_header = header_fk;
-        }
-    }
+    let (withheld, _) = connect_coinbase(&s, &write, 1, prev, parent_hash);
     drop(disarm);
     s.flush_class_c_tip().unwrap();
     s.txs.flush().unwrap();
-    assert_eq!(s.confirmed.tip_height(), Some(Height(8)));
-    (s, dropped_header)
-}
-
-/// Eight connects withhold the locator header. The tip stays up. The spend
-/// marker must not call those heights durable, and a marker that already
-/// does must not keep them confirmed across open. Heights 1 and 2 sit below
-/// a six-block window from tip 8.
-#[test]
-fn withheld_class_a_header_does_not_keep_confirmed_blocks() {
-    let dir = tmp();
-    let (s, dropped_header) = write_withheld_tail(&dir);
-    s.note_spend_snapshot(8);
-    s.checkpoint_spend_through(8).unwrap();
+    s.note_spend_snapshot(1);
+    s.checkpoint_spend_through(1).unwrap();
+    assert_eq!(s.confirmed.tip_height(), Some(Height(1)));
+    assert_eq!(
+        on_disk_hwm(&dir.join("confirmed.body")),
+        sealed,
+        "a withheld locator header does not seal the new tip"
+    );
+    assert_eq!(std::fs::read(dir.join("tip_seal")).unwrap(), seal);
     let marker = rbitcoin_store::spend_durable::SpendDurable::load(s.path())
         .unwrap()
         .expect("checkpoint publishes");
-    assert_eq!(
-        marker.durable_through(),
-        0,
-        "a withheld Class A header is not durable through the new tip"
-    );
-    assert_eq!(s.confirmed.tip_height(), Some(Height(8)));
-    rbitcoin_store::spend_durable::SpendDurable::new(8, 8)
-        .store(s.path())
-        .unwrap();
-    drop(s);
-
-    let s = Store::open_tiny(&dir).unwrap();
-    assert_eq!(
-        s.confirmed.tip_height(),
-        Some(Height(0)),
-        "open drops confirmed heights below the checkblocks window"
-    );
-    assert!(
-        !s.header_txs.has_body(dropped_header).unwrap(),
-        "a dropped height must archive again"
-    );
-    assert!(s.txs.get_meta_and_outputs(Fk(1)).is_ok());
-    assert!(s.txs.get_meta_and_outputs(Fk(2)).is_err());
-    let r = s.revalidate_tip_window_n(6).unwrap();
-    assert_eq!(s.confirmed.tip_height(), Some(Height(0)), "{r:?}");
-    let marker = rbitcoin_store::spend_durable::SpendDurable::load(s.path())
-        .unwrap()
-        .unwrap();
     assert_eq!(marker.durable_through(), 0);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// The cut included height 0, so the flush cleared the only `header_txs`
-/// anchor and died before the confirmed shrink. Count is already 0 and this
-/// open did not truncate, which is the image the next open sees.
-#[test]
-fn cleared_header_txs_anchor_reopen_drops_the_tip() {
-    let dir = tmp();
-    let (s, _) = write_withheld_tail(&dir);
-    let write = rbitcoin_store::ClassCWrite::for_test();
-    let genesis = s.confirmed.get(Height(0)).unwrap().unwrap();
-    for h in 0u32..=8 {
-        let fk = s.confirmed.get(Height(h)).unwrap().unwrap();
-        s.header_txs.clear_body(&write, fk).unwrap();
-    }
-    s.header_txs.flush().unwrap();
-    let header = rbitcoin_store::file::FILE_HEADER_LEN as u64;
-    s.txs.body.truncate_body_to(0, header).unwrap();
-    s.txs.spent.truncate_body_to(0, header).unwrap();
-    s.txs.seqsigwit.truncate_body_to(0, header).unwrap();
-    s.txs.create_loc.truncate_to_count(0).unwrap();
-    s.txs.seqsigwit_loc.truncate_to_count(0).unwrap();
-    s.txs.txids.truncate_to_count(0).unwrap();
-    s.txs.txstat.truncate_to_count(0).unwrap();
-    s.txs.input.truncate_to_count(0).unwrap();
-    rbitcoin_store::spend_durable::SpendDurable::new(8, 8)
-        .store(s.path())
-        .unwrap();
-    assert_eq!(s.txs.count(), 0);
-    drop(s);
-
-    let s = Store::open_tiny(&dir).unwrap();
-    assert_eq!(
-        s.confirmed.tip_height(),
-        None,
-        "a tip with no header_txs anchor and no creates is not header-only"
-    );
-    assert!(!s.header_txs.has_body(genesis).unwrap());
-    let r = s.revalidate_tip_window_n(6).unwrap();
-    assert_eq!(s.confirmed.tip_height(), None, "{r:?}");
-    let marker = rbitcoin_store::spend_durable::SpendDurable::load(s.path())
-        .unwrap()
-        .unwrap();
-    assert_eq!(marker.durable_through(), 0);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// Shrink landed and `class_a_cut` still says empty. The `header_txs` rows
-/// were not flushed yet, so the next open has to clear them with no tip left
-/// to name the header fks.
-#[test]
-fn empty_class_a_cut_reopen_clears_leftover_bodies() {
-    let dir = tmp();
-    let (s, height_one) = write_withheld_tail(&dir);
-    let write = rbitcoin_store::ClassCWrite::for_test();
-    let genesis = s.confirmed.get(Height(0)).unwrap().unwrap();
-    assert!(s.header_txs.has_body(genesis).unwrap());
-    assert!(s.header_txs.has_body(height_one).unwrap());
-    let mut report = TipRevalidateReport::default();
-    s.shrink_tip_to(&write, None, &mut report).unwrap();
-    assert_eq!(s.confirmed.tip_height(), None);
-    assert!(s.header_txs.has_body(genesis).unwrap());
-    let cut = s.path().join(CLASS_A_CUT_NAME);
-    std::fs::write(&cut, u32::MAX.to_le_bytes()).unwrap();
-    drop(s);
-
-    let s = Store::open_tiny(&dir).unwrap();
-    assert_eq!(s.confirmed.tip_height(), None);
-    assert!(!s.header_txs.has_body(genesis).unwrap());
-    assert!(!s.header_txs.has_body(height_one).unwrap());
-    assert!(!s.path().join(CLASS_A_CUT_NAME).exists());
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-fn dir_syncs_to_reopen_empty_tip(with_cut: bool) -> u32 {
-    let dir = tmp();
-    let (s, _) = write_withheld_tail(&dir);
-    let write = rbitcoin_store::ClassCWrite::for_test();
-    let mut report = TipRevalidateReport::default();
-    s.shrink_tip_to(&write, None, &mut report).unwrap();
-    if with_cut {
-        std::fs::write(s.path().join(CLASS_A_CUT_NAME), u32::MAX.to_le_bytes()).unwrap();
-    }
-    drop(s);
-    let before = rbitcoin_store::file::dir_syncs();
-    Store::open_tiny(&dir).unwrap();
-    let delta = rbitcoin_store::file::dir_syncs().wrapping_sub(before);
-    let _ = std::fs::remove_dir_all(&dir);
-    delta
-}
-
-/// The empty tip is already durable and `class_a_cut` is still there. Open
-/// must sync the store directory when it unlinks that file. Otherwise a later
-/// tip flush can make a new tip durable and a power loss puts the cut back.
-#[test]
-fn class_a_cut_unlink_syncs_the_store_directory() {
-    let plain = dir_syncs_to_reopen_empty_tip(false);
-    let cut = dir_syncs_to_reopen_empty_tip(true);
-    assert_eq!(
-        cut,
-        plain + 1,
-        "removing class_a_cut syncs the store directory once more than an open with no cut"
-    );
-}
-
-/// The tip shrink is durable after `header_txs` is cleared. A kill between
-/// those two flushes reopens with the high tip and no tx range on the tail.
-#[test]
-fn cleared_header_txs_suffix_reopen_drops_the_tip() {
-    let dir = tmp();
-    let (s, dropped_header) = write_withheld_tail(&dir);
-    let write = rbitcoin_store::ClassCWrite::for_test();
-    for h in 1u32..=8 {
-        let fk = s.confirmed.get(Height(h)).unwrap().unwrap();
-        s.header_txs.clear_body(&write, fk).unwrap();
-    }
-    s.header_txs.flush().unwrap();
-    rbitcoin_store::spend_durable::SpendDurable::new(8, 8)
-        .store(s.path())
-        .unwrap();
     drop(s);
 
     let s = Store::open_tiny(&dir).unwrap();
     assert_eq!(s.confirmed.tip_height(), Some(Height(0)));
-    assert!(!s.header_txs.has_body(dropped_header).unwrap());
+    assert_eq!(s.txs.count(), 1);
+    assert!(s.header_txs.has_body(genesis).unwrap());
+    assert!(!s.header_txs.has_body(withheld).unwrap());
+    assert!(s.txs.get_meta_and_outputs(Fk(1)).is_ok());
+    assert!(s.txs.get_meta_and_outputs(Fk(2)).is_err());
+    let marker = rbitcoin_store::spend_durable::SpendDurable::load(s.path())
+        .unwrap()
+        .unwrap();
+    assert_eq!(marker.durable_through(), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -69,8 +69,6 @@ pub struct CreateLoc {
     pub checkpoints: RwLock<Vec<(u64, u64)>>,
     pub ovf_rows: RwLock<Vec<(u64, u32, u32)>>,
     pub count: AtomicU64,
-    /// Open dropped a locator prefix. Later truncates do not set this.
-    pub(crate) cut_on_open: bool,
 }
 
 impl CreateLoc {
@@ -82,7 +80,6 @@ impl CreateLoc {
             checkpoints: RwLock::new(Vec::new()),
             ovf_rows: RwLock::new(Vec::new()),
             count: AtomicU64::new(0),
-            cut_on_open: false,
         })
     }
 
@@ -118,18 +115,16 @@ impl CreateLoc {
             }
         }
         let ovf_rows = load_create_ovf(&ovf)?;
-        let mut opened = Self {
+        let opened = Self {
             loc,
             ovf,
             off,
             checkpoints: RwLock::new(checkpoints),
             ovf_rows: RwLock::new(ovf_rows),
             count: AtomicU64::new(full),
-            cut_on_open: false,
         };
         if count < full {
             opened.truncate_to_count(count)?;
-            opened.cut_on_open = true;
         }
         // A row past the overflow header belongs to a create this file does not name.
         let last_ovf = opened
@@ -143,7 +138,6 @@ impl CreateLoc {
             unresolved_ovf_cut(&opened.loc, &opened.ovf, opened.count(), last_ovf, true)?
         {
             opened.truncate_to_count(cut)?;
-            opened.cut_on_open = true;
         }
         Ok(opened)
     }
@@ -290,23 +284,22 @@ impl CreateLoc {
     /// does not append. A failed header pwrite returns false and skips the
     /// rest. RAM still advances.
     #[must_use]
-    pub(crate) fn commit_staged(&self, staged: StagedCreate, mut durable: bool) -> bool {
-        if durable && !TableFile::catch_up_locator_headers(&self.loc, &self.ovf, &self.off) {
-            durable = false;
-        }
+    pub(crate) fn commit_staged(&self, staged: StagedCreate, durable: bool) -> bool {
         let loc_end = staged.loc_off + staged.loc_bytes.len() as u64;
-        durable = self.loc.publish_locator_end(loc_end, durable);
+        let ovf_end =
+            (!staged.ovf_bytes.is_empty()).then(|| staged.ovf_at + staged.ovf_bytes.len() as u64);
+        let off_end =
+            (!staged.off_bytes.is_empty()).then(|| staged.off_at + staged.off_bytes.len() as u64);
+        let durable = TableFile::commit_locator_file_ends(
+            &self.loc, &self.ovf, &self.off, durable, loc_end, ovf_end, off_end,
+        );
         if !staged.ovf_bytes.is_empty() {
-            let ovf_end = staged.ovf_at + staged.ovf_bytes.len() as u64;
-            durable = self.ovf.publish_locator_end(ovf_end, durable);
             self.ovf_rows
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
                 .extend_from_slice(&staged.new_ovf);
         }
         if !staged.off_bytes.is_empty() {
-            let off_end = staged.off_at + staged.off_bytes.len() as u64;
-            durable = self.off.publish_locator_end(off_end, durable);
             let mut cps = self.checkpoints.write().unwrap_or_else(|e| e.into_inner());
             for &(w, txout_abs, spent_abs) in &staged.new_offs {
                 debug_assert_eq!(w as usize, cps.len());

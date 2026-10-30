@@ -113,25 +113,11 @@ where
     Ok(())
 }
 
-#[cfg(debug_assertions)]
-std::thread_local! {
-    static DIR_SYNC_COUNT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-}
-
-/// Directory syncs attempted on this thread.
-#[cfg(debug_assertions)]
-#[doc(hidden)]
-pub fn dir_syncs() -> u32 {
-    DIR_SYNC_COUNT.with(|c| c.get())
-}
-
 /// `fsync` the directory so a renamed dirent survives a crash.
 ///
 /// Windows denies a directory handle (`ERROR_ACCESS_DENIED`), including with
 /// backup semantics. The file itself was already `sync_all`'d before rename.
 pub fn fsync_parent_dir(dir: &Path) -> std::io::Result<()> {
-    #[cfg(debug_assertions)]
-    DIR_SYNC_COUNT.with(|c| c.set(c.get().saturating_add(1)));
     #[cfg(unix)]
     {
         std::fs::File::open(dir)?.sync_all()
@@ -812,6 +798,33 @@ impl TableFile {
         loc.catch_up_header() && ovf.catch_up_header() && off.catch_up_header()
     }
 
+    /// Catch up a withheld header, then publish each end this batch grew.
+    ///
+    /// `None` skips a file this batch did not append. A failed pwrite stops
+    /// the rest and returns false. RAM for a grown file still advances.
+    #[must_use]
+    pub(crate) fn commit_locator_file_ends(
+        loc: &Self,
+        ovf: &Self,
+        off: &Self,
+        mut durable: bool,
+        loc_end: u64,
+        ovf_end: Option<u64>,
+        off_end: Option<u64>,
+    ) -> bool {
+        if durable && !Self::catch_up_locator_headers(loc, ovf, off) {
+            durable = false;
+        }
+        durable = loc.publish_locator_end(loc_end, durable);
+        if let Some(end) = ovf_end {
+            durable = ovf.publish_locator_end(end, durable);
+        }
+        if let Some(end) = off_end {
+            durable = off.publish_locator_end(end, durable);
+        }
+        durable
+    }
+
     fn clear_header_cap(&self) {
         if self.header_cap.load(Ordering::Relaxed) == 0 {
             return;
@@ -820,31 +833,20 @@ impl TableFile {
         self.header_cap.store(0, Ordering::Release);
     }
 
-    /// `prior` is the RAM end from before this publish. The header stays at
-    /// the last end that is actually on disk.
+    /// `prior` is the RAM end from before this publish. The header stays there
+    /// until a later [`Self::catch_up_header`]. No read: the failed pwrite is
+    /// the proof the new end is not durable.
     fn withhold_locator_header(&self, prior: u64) -> bool {
         debug_assert!(!self.trailing_header);
         let _hold = self.flush_lock.lock().unwrap_or_else(|e| e.into_inner());
         let published = self.published_len.load(Ordering::Acquire);
-        let mut buf = [0u8; 8];
-        let disk = match self.pread_all(8, &mut buf) {
-            Ok(()) => u64::from_le_bytes(buf),
-            Err(_) => prior,
-        };
-        if disk == published {
+        if prior >= published {
             self.header_cap.store(0, Ordering::Release);
             return true;
         }
-        let durable_end = if disk >= FILE_HEADER_LEN as u64 && disk < published {
-            disk
-        } else {
-            prior
-        };
-        if durable_end < published {
-            let cap = self.header_cap.load(Ordering::Relaxed);
-            if cap == 0 || durable_end < cap {
-                self.header_cap.store(durable_end, Ordering::Release);
-            }
+        let cap = self.header_cap.load(Ordering::Relaxed);
+        if cap == 0 || prior < cap {
+            self.header_cap.store(prior, Ordering::Release);
         }
         false
     }

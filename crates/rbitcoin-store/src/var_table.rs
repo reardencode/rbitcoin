@@ -419,11 +419,13 @@ impl VarTable {
         self.body.ensure_capacity(end)
     }
 
-    /// Body end after locator headers. `durable` is one header pwrite, the
-    /// same cost as `write_at`. Otherwise RAM moves and `flush` keeps the
-    /// previous header.
-    pub fn note_body_end(&self, end: u64, durable: bool) {
-        let _ = self.body.publish_end(end, durable);
+    /// Body end before the locator header of the same commit. `durable` is
+    /// one header pwrite, the same cost as `write_at`. Otherwise RAM moves
+    /// and `flush` keeps the previous header. Returns whether the on-disk
+    /// header names `end`.
+    #[must_use]
+    pub fn note_body_end(&self, end: u64, durable: bool) -> bool {
+        self.body.publish_end(end, durable)
     }
 
     /// Count + body-end publish after the body blob is already on disk (and HWM set).

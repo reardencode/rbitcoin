@@ -1,4 +1,4 @@
-//! Class A append publishes locator headers before body headers.
+//! Class A append publishes body headers, then the locator header last.
 use rbitcoin_store::file::FILE_HEADER_LEN;
 use rbitcoin_store::tx_table::{InputRecord, OutputRecord, TxRecord, TxTable};
 
@@ -58,11 +58,9 @@ fn numbered(n: u16) -> (TxRecord, Vec<InputRecord>, Vec<OutputRecord>) {
     )
 }
 
-/// The body high-water marks stayed at the previous create, and the locator
-/// and txid counts moved. Reopen drops that unpublished create. The next
-/// append does not replace the kept output.
+/// A body header short of the locator count is not a prefix to recover.
 #[test]
-fn body_header_behind_the_locator_reopens_at_the_covered_prefix() {
+fn body_header_short_of_the_locator_is_corrupt() {
     let dir = super::tempfile_dir("body-behind-loc");
     let t = TxTable::create_tiny(&dir).unwrap();
     t.put_full_batch_indexed(&[one(1)], false).unwrap();
@@ -75,13 +73,12 @@ fn body_header_behind_the_locator_reopens_at_the_covered_prefix() {
     set_disk_hwm(&t.seqsigwit.body, in_end);
     set_disk_hwm(&t.spent.body, sp_end);
     drop(t);
-    let t = TxTable::open_tiny(&dir).unwrap();
-    assert_eq!(t.count(), 1);
-    assert_eq!(outs(&t, 1)[0].script, vec![1]);
-    t.put_full_batch_indexed(&[one(3)], false).unwrap();
-    assert_eq!(t.count(), 2);
-    assert_eq!(outs(&t, 1)[0].script, vec![1]);
-    assert_eq!(outs(&t, 2)[0].script, vec![3]);
+    match TxTable::open_tiny(&dir) {
+        Err(rbitcoin_store::StoreError::Corrupt(m))
+            if m.contains("body header short of locator") => {}
+        Err(e) => panic!("open returned {e}"),
+        Ok(_) => panic!("open kept a body header short of the locator"),
+    }
 }
 
 /// `create.loc` landed and `seqsigwit.loc` did not. Open cuts back to the
@@ -124,21 +121,23 @@ fn short_create_off_reopens_at_the_last_complete_window() {
         .is_err());
 }
 
-/// A spend slot write must not store the body end that a missed locator
-/// header left unpublished. Flush keeps that same end.
+/// A spend slot write must not extend the body header a missed locator left
+/// as the commit. The body header of that wave may already be ahead; flush
+/// keeps it, and the locator header stays at the previous create.
 #[test]
 fn spend_annotation_does_not_publish_a_withheld_body_end() {
     let dir = super::tempfile_dir("spend-withheld-body");
     let t = TxTable::create_tiny(&dir).unwrap();
     t.put_full_batch_indexed(&[one(1)], false).unwrap();
-    let spent_end = on_disk_hwm(&t.spent.body);
+    let loc_end = on_disk_hwm(&t.create_loc.loc);
     let loc_fd = t.create_loc.loc.io_handle();
     rbitcoin_store::io_handle::arm_fail_hwm_pwrites(loc_fd, 1);
     let disarm = Disarm(loc_fd);
     t.put_full_batch_indexed(&[one(2)], false).unwrap();
     drop(disarm);
-    assert_eq!(on_disk_hwm(&t.spent.body), spent_end);
-    assert!(t.spent.body_logical_len() > spent_end);
+    let spent_end = on_disk_hwm(&t.spent.body);
+    assert!(t.spent.body_logical_len() >= spent_end);
+    assert_eq!(on_disk_hwm(&t.create_loc.loc), loc_end);
     let pair = t
         .create_loc
         .range_batch(&[rbitcoin_primitives::Fk(1)])
@@ -156,13 +155,14 @@ fn spend_annotation_does_not_publish_a_withheld_body_end() {
     assert_eq!(on_disk_hwm(&t.spent.body), spent_end);
     t.spent.body.flush().unwrap();
     assert_eq!(on_disk_hwm(&t.spent.body), spent_end);
+    assert_eq!(on_disk_hwm(&t.create_loc.loc), loc_end);
 }
 
-/// A locator header pwrite that misses still publishes RAM, and it does not
-/// store the body header. Flush keeps that old body header. The next connect
-/// writes each header once and reopen sees both creates.
+/// A locator header pwrite that misses still publishes RAM. The body header
+/// of that wave may land first. Flush does not then store the locator header.
+/// The next connect retries it, and reopen sees both creates.
 #[test]
-fn locator_header_miss_does_not_publish_the_body_header() {
+fn locator_header_miss_retries_on_the_next_append() {
     let dir = super::tempfile_dir("loc-header-miss");
     let t = TxTable::create_tiny(&dir).unwrap();
     let loc_fd = t.create_loc.loc.io_handle();
@@ -175,22 +175,15 @@ fn locator_header_miss_does_not_publish_the_body_header() {
     assert_eq!(t.create_loc.count(), 1);
     assert!(t.body.body_logical_len() > before);
     assert_eq!(on_disk_hwm(&t.create_loc.loc), before);
-    assert_eq!(on_disk_hwm(&t.body.body), before);
-    assert_eq!(on_disk_hwm(&t.seqsigwit.body), before);
-    assert_eq!(on_disk_hwm(&t.spent.body), before);
-    t.body.flush().unwrap();
-    t.seqsigwit.flush().unwrap();
-    t.spent.flush().unwrap();
-    assert_eq!(
-        on_disk_hwm(&t.body.body),
-        before,
-        "flush stored a body header the locator header does not cover"
-    );
-    assert_eq!(on_disk_hwm(&t.seqsigwit.body), before);
-    assert_eq!(on_disk_hwm(&t.spent.body), before);
     t.body
         .with_bytes_at(before, 1, |_| Ok(()))
         .expect("in-process readers follow the RAM end");
+    t.create_loc.loc.flush().unwrap();
+    assert_eq!(
+        on_disk_hwm(&t.create_loc.loc),
+        before,
+        "flush stored a locator header the pwrite had missed"
+    );
 
     t.put_full_batch_indexed(&[one(2)], false).unwrap();
     assert!(on_disk_hwm(&t.create_loc.loc) > before);

@@ -482,9 +482,7 @@ impl Store {
             cold_path,
             head_scale: layout.head_scale,
         };
-        if store.txs.should_align_confirmed() {
-            store.align_confirmed_to_class_a()?;
-        }
+        store.refuse_sealed_tip_past_creates()?;
         store.rebuild_mtp_ring()?;
         Ok(store)
     }
@@ -1984,6 +1982,11 @@ impl Store {
     }
 
     pub fn flush_class_c_tip(&self) -> Result<(), StoreError> {
+        // A withheld locator header is not a commit. Skip the whole barrier
+        // so header_txs is not left naming creates open will truncate.
+        if !self.tip_fits_durable_creates()? {
+            return Ok(());
+        }
         self.flush_class_c_pre_tip()?;
         // Commit point on disk: tip advance only after strong/header_txs.
         self.confirmed.flush()?;

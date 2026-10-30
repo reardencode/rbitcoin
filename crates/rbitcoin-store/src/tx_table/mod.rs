@@ -685,8 +685,6 @@ pub struct TxTable {
     pub prune_seqsigwit_mode: std::sync::atomic::AtomicBool,
     /// `--datadir-hdd`: Class A body stems are one pwrite wave each.
     pub datadir_hdd: std::sync::atomic::AtomicBool,
-    /// This open shortened a Class A prefix. Empty synthetic stores stay false.
-    open_cut: bool,
     /// Per-fk packed `txout` decodes for an outs reader
     /// ([`Self::get_meta_and_outputs`], and [`Self::get`] through it), the
     /// decode the mempool and block-proposal pins count. [`Self::get_full`] is
@@ -941,24 +939,33 @@ pub fn repair_class_a_count_skew(
         prune_seqsigwit_mode,
         input_existed,
     )?;
-    let covered = class_a_body_covered_count(&stems, prune_seqsigwit_mode)?;
-    let Some(n) = class_a_skew_target_count(
+    let skewed = class_a_skew_target_count(
         n_loc,
         n_txids,
         n_seqsigwit_loc,
         prune_seqsigwit_mode,
         short_input,
-    )
-    .map(|n| n.min(covered))
-    .or_else(|| (covered < n_loc).then_some(covered)) else {
+    );
+    let n = skewed.unwrap_or(n_loc);
+    let (tx_end, sp_end, in_end) = class_a_skew_stem_ends(&stems, n, prune_seqsigwit_mode)?;
+    // The locator count is the commit. A body header ahead of it is the crash
+    // before the locator pwrite. A body header short of it was not published.
+    require_body_header(stems.body.body_logical_len(), tx_end)?;
+    require_body_header(stems.spent.body_logical_len(), sp_end)?;
+    if !prune_seqsigwit_mode {
+        require_body_header(stems.seqsigwit.body_logical_len(), in_end)?;
+    }
+    let ahead = stems.body.body_logical_len() > tx_end
+        || stems.spent.body_logical_len() > sp_end
+        || (!prune_seqsigwit_mode && stems.seqsigwit.body_logical_len() > in_end);
+    if skewed.is_none() && !ahead {
         return Ok(false);
-    };
+    }
     let n_input = stems.input.count();
     rbitcoin_log::warn!(
         "store: Class A count skew loc={n_loc} seqsigwit.loc={n_seqsigwit_loc} \
          txid.body={n_txids} input={n_input} — truncating to {n}"
     );
-    let (tx_end, sp_end, in_end) = class_a_skew_stem_ends(&stems, n, prune_seqsigwit_mode)?;
     class_a_skew_apply_truncate(
         &stems,
         n,
@@ -972,65 +979,14 @@ pub fn repair_class_a_count_skew(
     Ok(true)
 }
 
-/// Largest create whose txout, spent, and seqsigwit ranges sit inside the
-/// opened body high-water marks. A locator prefix past that is uncommitted.
-#[doc(hidden)]
-pub fn class_a_body_covered_count(
-    stems: &ClassASkewStems<'_>,
-    prune_seqsigwit_mode: bool,
-) -> Result<u64, StoreError> {
-    let mut hi = stems.create_loc.count();
-    if !prune_seqsigwit_mode {
-        hi = hi.min(stems.seqsigwit_loc.count());
+fn require_body_header(header: u64, end: u64) -> Result<(), StoreError> {
+    if header < end {
+        Err(StoreError::Corrupt(
+            "invariant: body header short of locator",
+        ))
+    } else {
+        Ok(())
     }
-    covered_within(
-        stems,
-        prune_seqsigwit_mode,
-        hi,
-        stems.body.body_logical_len(),
-        stems.spent.body_logical_len(),
-        stems.seqsigwit.body_logical_len(),
-    )
-}
-
-fn stem_ends_fit(
-    stems: &ClassASkewStems<'_>,
-    prune_seqsigwit_mode: bool,
-    n: u64,
-    tx_lim: u64,
-    sp_lim: u64,
-    in_lim: u64,
-) -> Result<bool, StoreError> {
-    if n == 0 {
-        return Ok(true);
-    }
-    let (tx_end, sp_end, in_end) = class_a_skew_stem_ends(stems, n, prune_seqsigwit_mode)?;
-    Ok(tx_end <= tx_lim && sp_end <= sp_lim && (prune_seqsigwit_mode || in_end <= in_lim))
-}
-
-fn covered_within(
-    stems: &ClassASkewStems<'_>,
-    prune_seqsigwit_mode: bool,
-    mut hi: u64,
-    tx_lim: u64,
-    sp_lim: u64,
-    in_lim: u64,
-) -> Result<u64, StoreError> {
-    // The last create fits on a healthy open: one locator read, no search.
-    if stem_ends_fit(stems, prune_seqsigwit_mode, hi, tx_lim, sp_lim, in_lim)? {
-        return Ok(hi);
-    }
-    hi = hi.saturating_sub(1);
-    let mut lo = 0u64;
-    while lo < hi {
-        let mid = lo + (hi - lo).div_ceil(2);
-        if stem_ends_fit(stems, prune_seqsigwit_mode, mid, tx_lim, sp_lim, in_lim)? {
-            lo = mid;
-        } else {
-            hi = mid - 1;
-        }
-    }
-    Ok(lo)
 }
 
 fn file_header_behind(file: &crate::file::TableFile) -> bool {
@@ -1088,10 +1044,11 @@ fn publish_prepared_body(
     table: &VarTable,
     prep: crate::var_table::PreparedAppend,
     durable: bool,
-) -> Result<Vec<Fk>, StoreError> {
+) -> Result<(Vec<Fk>, bool), StoreError> {
     let end = prep.start.saturating_add(prep.body_blob.len() as u64);
-    table.note_body_end(end, durable);
-    table.finish_prepared(prep)
+    let landed = table.note_body_end(end, durable);
+    let fks = table.finish_prepared(prep)?;
+    Ok((fks, landed))
 }
 
 fn expect_same_fks(left: &[Fk], right: &[Fk]) -> Result<(), StoreError> {
@@ -1109,11 +1066,11 @@ fn publish_body_pair(
     right: &VarTable,
     right_prep: crate::var_table::PreparedAppend,
     durable: bool,
-) -> Result<Vec<Fk>, StoreError> {
-    let fks = publish_prepared_body(left, left_prep, durable)?;
-    let other = publish_prepared_body(right, right_prep, durable)?;
+) -> Result<(Vec<Fk>, bool), StoreError> {
+    let (fks, left_ok) = publish_prepared_body(left, left_prep, durable)?;
+    let (other, right_ok) = publish_prepared_body(right, right_prep, durable && left_ok)?;
     expect_same_fks(&fks, &other)?;
-    Ok(fks)
+    Ok((fks, left_ok && right_ok))
 }
 
 impl TxTable {
@@ -1176,7 +1133,6 @@ impl TxTable {
             rebuild_workers: workers,
             prune_seqsigwit_mode: std::sync::atomic::AtomicBool::new(false),
             datadir_hdd: std::sync::atomic::AtomicBool::new(false),
-            open_cut: false,
         })
     }
 
@@ -1307,7 +1263,7 @@ impl TxTable {
         } else {
             crate::input::Input::create(seqsigwit_dir)?
         };
-        let repair_cut = repair_class_a_count_skew(
+        repair_class_a_count_skew(
             ClassASkewStems {
                 create_loc: &create_loc,
                 seqsigwit_loc: &seqsigwit_loc,
@@ -1321,7 +1277,6 @@ impl TxTable {
             prune_seqsigwit_mode,
             input_existed,
         )?;
-        let open_cut = repair_cut || create_loc.cut_on_open || seqsigwit_loc.cut_on_open;
         let n_bodies = create_loc.count();
         if txstat.count() != n_bodies {
             rbitcoin_log::warn!(
@@ -1409,7 +1364,6 @@ impl TxTable {
             rebuild_workers: workers,
             prune_seqsigwit_mode: std::sync::atomic::AtomicBool::new(prune_seqsigwit_mode),
             datadir_hdd: std::sync::atomic::AtomicBool::new(false),
-            open_cut,
         };
         match input_open_tail(t.input.count(), n_bodies, t.seqsigwit.count()) {
             InputOpenTail::Backfill { from } => {
@@ -1673,15 +1627,6 @@ impl TxTable {
         self.body.count()
     }
 
-    /// Open shortened Class A, the archive has creates, or a body file is
-    /// still larger than the header it publishes.
-    ///
-    /// A store with no creates, no cut, and only the create slack is a Class C
-    /// fixture. A chain with creates checks the tip once.
-    pub(crate) fn should_align_confirmed(&self) -> bool {
-        self.open_cut || self.count() > 0 || self.bodies_allocated_past_header()
-    }
-
     /// `create` leaves [`crate::file::CREATE_FILE_SLACK`] bytes. Anything past
     /// that was a payload, including after a truncate that did not shrink the
     /// allocation. Header-only and Class C stores stay at the slack.
@@ -1694,14 +1639,21 @@ impl TxTable {
         past(&self.body.body) || past(&self.spent.body) || past(&self.seqsigwit.body)
     }
 
-    /// Creates whose Class A headers have landed.
+    /// Creates whose locator headers have landed.
     ///
     /// No header is behind: two loads per file and the RAM count. A withheld
-    /// header searches the prefix that flush will keep.
+    /// header is the length those headers still name.
     pub(crate) fn durable_create_count(&self) -> Result<u64, StoreError> {
         if !self.class_a_header_behind() {
             return Ok(self.count());
         }
+        Ok(self.locator_header_count())
+    }
+
+    /// Create count named by the locator headers. A body header is not part
+    /// of this count: open truncates a body that ran ahead and refuses one
+    /// that fell short.
+    fn locator_header_count(&self) -> u64 {
         let prune = self.prune_seqsigwit_mode();
         let mut hi = durable_loc_count(
             &self.create_loc.loc,
@@ -1719,17 +1671,10 @@ impl TxTable {
             ));
             hi = hi.min(self.seqsigwit_loc.count());
         }
-        covered_within(
-            &self.skew_stems(),
-            prune,
-            hi,
-            self.body.body.header_persist_len(),
-            self.spent.body.header_persist_len(),
-            self.seqsigwit.body.header_persist_len(),
-        )
+        hi
     }
 
-    fn class_a_header_behind(&self) -> bool {
+    pub(crate) fn class_a_header_behind(&self) -> bool {
         let loc = file_header_behind(&self.create_loc.loc)
             || file_header_behind(&self.create_loc.ovf)
             || file_header_behind(&self.create_loc.off)
@@ -1745,19 +1690,6 @@ impl TxTable {
             || file_header_behind(&self.seqsigwit_loc.ovf)
             || file_header_behind(&self.seqsigwit_loc.off)
             || file_header_behind(&self.seqsigwit.body)
-    }
-
-    fn skew_stems(&self) -> ClassASkewStems<'_> {
-        ClassASkewStems {
-            create_loc: &self.create_loc,
-            seqsigwit_loc: &self.seqsigwit_loc,
-            body: &self.body,
-            spent: &self.spent,
-            seqsigwit: &self.seqsigwit,
-            txids: &self.txids,
-            txstat: &self.txstat,
-            input: &self.input,
-        }
     }
 
     /// Current `tx.body` logical length (including file header).
@@ -2937,9 +2869,9 @@ impl TxTable {
     #[allow(clippy::too_many_arguments)] // IO/session args stay unbundled
     /// Encode and write `txout` + `seqsigwit` + `spent` bodies as one pwrite wave.
     ///
-    /// Payloads land past the published ends. Body lengths move only after
-    /// the locator strides for those creates are published. Not the
-    /// spend-annotate machine.
+    /// Payloads land past the published ends. Body headers are persisted
+    /// before the locator header of the same commit. Not the spend-annotate
+    /// machine.
     #[doc(hidden)]
     pub fn append_stems_one_wave(
         &self,
@@ -2982,8 +2914,9 @@ impl TxTable {
             self.datadir_hdd(),
         )?;
         self.create_loc.write_staged(&staged_loc)?;
-        let durable = self.create_loc.commit_staged(staged_loc, true);
-        publish_body_pair(&self.body, p_out, &self.spent, p_sp, durable)
+        let (fks, bodies) = publish_body_pair(&self.body, p_out, &self.spent, p_sp, true)?;
+        let _durable = self.create_loc.commit_staged(staged_loc, bodies);
+        Ok(fks)
     }
 
     fn commit_seq_wave(
@@ -3013,11 +2946,11 @@ impl TxTable {
         )?;
         self.create_loc.write_staged(&staged_loc)?;
         self.seqsigwit_loc.write_staged(&staged_seq)?;
-        let durable = self.create_loc.commit_staged(staged_loc, true);
-        let durable = self.seqsigwit_loc.commit_staged(staged_seq, durable);
-        let fks_in = publish_prepared_body(&self.seqsigwit, p_in, durable)?;
-        let fks = publish_body_pair(&self.body, p_out, &self.spent, p_sp, durable)?;
+        let (fks_in, in_ok) = publish_prepared_body(&self.seqsigwit, p_in, true)?;
+        let (fks, pair_ok) = publish_body_pair(&self.body, p_out, &self.spent, p_sp, in_ok)?;
         expect_same_fks(&fks, &fks_in)?;
+        let durable = self.create_loc.commit_staged(staged_loc, in_ok && pair_ok);
+        let _durable = self.seqsigwit_loc.commit_staged(staged_seq, durable);
         Ok(fks)
     }
 
