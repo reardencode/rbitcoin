@@ -307,8 +307,10 @@ still on an older job after fee pushes can submit its solution; templates
 on a replaced tip retire after `--sv2-tp-stale-grace`. The templates share
 the mempool's transaction bodies, so each costs little until its
 transactions leave the mempool. A request for a template id no longer kept
-answers `stale-template-id`. Each check after a mempool change is one
-template build per session. An undecodable
+answers `stale-template-id`. Each check after a mempool change builds
+once for that previous-block hash, coinbase budget, and template-update
+counter. Another session with the same key waits and reuses that build. A
+different coinbase budget builds again. An undecodable
 `SubmitSolution` or one
 that misses the template target is logged and dropped. A `header_timestamp`
 outside the sv2 rolling window (a miner clock running ahead) is logged and

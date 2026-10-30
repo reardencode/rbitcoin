@@ -239,6 +239,16 @@ held until the read returns. P2P decode does not take it. Confirm's spindle
 gate is unchanged, and these reads do not take that gate. An Electrum
 read-only batch with a budget of 1 still completes, one read at a time.
 
+**Fixed.** SV2 runs one template build at a time for the same previous-block
+hash, coinbase size, coinbase sigops, and `template_updates`. A second
+session with that key waits on its task and reuses the template. A different
+coinbase budget or a bumped counter builds again. `None` (IBD, or the pool
+not yet maintained) is not cached, so the next interval tries again.
+Esplora's 15-second block-template cache is a separate path.
+`MempoolHub::select_block_template` clones fee deltas, drops that lock, then
+holds the mempool read lock for the whole selection. That lock is not held
+across `.await`. The read spans selection.
+
 **Deferred.** Block and header decode, compact reconstruct, header persist,
 and full-block serve stay on Tokio's blocking pool (nCPU, minimum 4). The
 cap stays there while block decode still occupies that pool. A private pool

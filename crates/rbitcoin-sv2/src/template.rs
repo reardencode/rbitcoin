@@ -12,8 +12,9 @@ use rbitcoin_net::{ChainHub, SelectBudget};
 use rbitcoin_primitives::Height;
 use rbitcoin_query::{expected_next_bits, next_block_mintime};
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use template_distribution_sv2::{NewTemplate, SetNewPrevHash};
+use tokio::sync::Semaphore;
 
 /// Coinbase witness reserved value the template's witness commitment is
 /// built with (BIP141).
@@ -26,6 +27,7 @@ pub const COINBASE_BASE_WU: u64 = 1168;
 #[doc(hidden)]
 pub const MIN_COINBASE_RESERVE_WU: u64 = 2000;
 
+#[derive(Clone)]
 pub struct Template {
     pub version: u32,
     pub coinbase_prefix: Vec<u8>,
@@ -155,4 +157,75 @@ pub fn build(
         target: Target::from_compact(bits).to_le_bytes(),
         txs: selected.into_iter().map(|(tx, _)| tx).collect(),
     }))
+}
+
+/// One template build. `prev_hash` is the stripped tip, or all zeros when
+/// that tip has not been recorded. Sessions that share this key share one
+/// build.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct TemplateKey {
+    pub prev_hash: [u8; 32],
+    pub max_additional_size: u32,
+    pub max_additional_sigops: u16,
+    pub template_updates: u64,
+}
+
+/// One [`build`] at a time for this listener. The permit is taken on the
+/// caller's task before `spawn_blocking`, so a second session waits without
+/// a blocking-pool thread. The last `Ok(Some)` is kept and reused for that
+/// same [`TemplateKey`]. A different key builds once the permit is free.
+/// `Ok(None)` is not stored: IBD and an unmaintained pool retry.
+pub struct TemplateFlight {
+    one: Semaphore,
+    slot: Mutex<Option<(TemplateKey, Template)>>,
+}
+
+impl TemplateFlight {
+    pub fn new() -> Self {
+        Self {
+            one: Semaphore::new(1),
+            slot: Mutex::new(None),
+        }
+    }
+
+    fn cached(&self, key: &TemplateKey) -> Option<Template> {
+        let g = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        g.as_ref().filter(|(k, _)| k == key).map(|(_, t)| t.clone())
+    }
+
+    /// Run `build` off the reactor when `key` is not already stored.
+    /// `build` is the mempool selection; it runs only while this flight
+    /// holds its single permit.
+    pub async fn get_or_build<F>(&self, key: TemplateKey, build: F) -> io::Result<Option<Template>>
+    where
+        F: FnOnce() -> io::Result<Option<Template>> + Send + 'static,
+    {
+        if let Some(hit) = self.cached(&key) {
+            return Ok(Some(hit));
+        }
+        let permit = self.one.acquire().await.expect("sv2 template flight");
+        if let Some(hit) = self.cached(&key) {
+            drop(permit);
+            return Ok(Some(hit));
+        }
+        let built = match tokio::task::spawn_blocking(build).await {
+            Ok(built) => built,
+            Err(e) => {
+                drop(permit);
+                return Err(io::Error::other(e));
+            }
+        };
+        let built = match built {
+            Ok(t) => t,
+            Err(e) => {
+                drop(permit);
+                return Err(e);
+            }
+        };
+        if let Some(t) = built.clone() {
+            *self.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, t));
+        }
+        drop(permit);
+        Ok(built)
+    }
 }
