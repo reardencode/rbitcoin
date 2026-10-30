@@ -48,6 +48,22 @@ fn datadir_bytes_cache_skips_the_walk_inside_thirty_seconds() {
 }
 
 #[test]
+fn publish_dir_bytes_keeps_the_newer_sample() {
+    use std::time::{Duration, Instant};
+    let t0 = Instant::now();
+    let later = t0 + Duration::from_millis(1);
+    let mut slot = None;
+    assert_eq!(publish_dir_bytes(&mut slot, t0, 10), 10);
+    assert_eq!(publish_dir_bytes(&mut slot, later, 40), 40);
+    assert_eq!(
+        publish_dir_bytes(&mut slot, t0, 10),
+        40,
+        "a slower walk must not replace a newer total"
+    );
+    assert_eq!(slot, Some((later, 40)));
+}
+
+#[test]
 fn spindle_wait_blocks_only_while_datadir_hdd_is_held() {
     use std::sync::mpsc;
     use std::time::Duration;

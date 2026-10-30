@@ -263,6 +263,23 @@ pub fn cached_dir_bytes(
     (now, walk())
 }
 
+/// Install `(at, n)` when `at` is not older than the stored sample.
+/// A walk that started earlier must not hide a total sampled later.
+#[doc(hidden)]
+pub fn publish_dir_bytes(
+    slot: &mut Option<(std::time::Instant, u64)>,
+    at: std::time::Instant,
+    n: u64,
+) -> u64 {
+    if let Some((prev_at, prev_n)) = *slot {
+        if prev_at > at {
+            return prev_n;
+        }
+    }
+    *slot = Some((at, n));
+    n
+}
+
 #[doc(hidden)]
 pub fn dir_file_bytes(root: &Path) -> u64 {
     fn walk(p: &Path, acc: &mut u64) {
@@ -563,11 +580,11 @@ impl Store {
             }
             n
         });
-        *self
+        let mut slot = self
             .datadir_bytes_cache
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some((at, n));
-        n
+            .unwrap_or_else(|e| e.into_inner());
+        publish_dir_bytes(&mut slot, at, n)
     }
 
     pub fn tip_height(&self) -> Option<Height> {

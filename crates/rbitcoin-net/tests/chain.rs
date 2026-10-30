@@ -5732,3 +5732,50 @@ fn connect_finishes_while_the_blocking_pool_is_parked() {
         "precious ran on tip-accept: {pr}"
     );
 }
+
+/// `commit_generated_txids` takes the mempool write lock. The async generate
+/// path runs on a Tokio worker, so that lock has to move to `rbtc-off-pool`.
+/// Maintenance is off, so connect does not strip the tx itself.
+#[test]
+fn async_generate_commits_mined_txids_off_the_request_task() {
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    hub.generate_to_script(101, ScriptBuf::from_bytes(vec![0x51]), vec![])
+        .unwrap();
+    let mp =
+        rbitcoin_net::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
+    assert!(
+        !mp.pool_maintained(),
+        "connect must not strip; the commit is what drops the tx"
+    );
+    let hub = ChainHub::into_arc(hub);
+    assert!(hub.attach_mempool(Arc::clone(&mp)).is_ok());
+    let tx = mature_spend_tx(&hub, 1);
+    let txid = tx.compute_txid();
+    mp.accept_tx(&tx).expect("admit");
+    assert!(mp.contains(&txid));
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let hub_gen = Arc::clone(&hub);
+    let hashes = rt
+        .block_on(async move {
+            tokio::spawn(async move {
+                hub_gen
+                    .generate_to_script_for_rpc_async(
+                        1,
+                        ScriptBuf::from_bytes(vec![0x51]),
+                        vec![tx],
+                        false,
+                    )
+                    .await
+            })
+            .await
+            .expect("generate task")
+        })
+        .expect("generate");
+    assert_eq!(hashes.len(), 1);
+    assert!(!mp.contains(&txid), "the mined tx is still in the pool");
+}

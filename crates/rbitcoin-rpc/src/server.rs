@@ -447,19 +447,19 @@ pub async fn reject_unauthorized(
 pub async fn satisfy_http_wait(
     ctx: &Arc<crate::methods::RpcContext>,
     parsed: &serde_json::Value,
-) -> bool {
+) -> Vec<bool> {
     // A batch has no top-level method. Wait each long-poll here, before the
     // disk permit, or the blocking dispatch sleeps while holding it.
+    // One flag per call: a sibling `getblocktemplate` must still run its
+    // peer and IBD checks.
     if let Some(batch) = parsed.as_array() {
-        let mut any = false;
+        let mut flags = Vec::with_capacity(batch.len());
         for item in batch {
-            if Box::pin(satisfy_http_wait(ctx, item)).await {
-                any = true;
-            }
+            flags.push(satisfy_one_http_wait(ctx, item).await);
         }
-        return any;
+        return flags;
     }
-    satisfy_one_http_wait(ctx, parsed).await
+    vec![satisfy_one_http_wait(ctx, parsed).await]
 }
 
 async fn satisfy_one_http_wait(
@@ -656,12 +656,7 @@ pub async fn rpc_post(State(state): State<AppState>, req: Request) -> Response {
     let joined = tokio::task::spawn_blocking(move || {
         let _g = BlockingRegion::enter();
         let _store = store_permit;
-        if waited {
-            crate::methods::set_http_wait_satisfied(true);
-        }
-        let out = exec_http_rpc(&ctx, parsed);
-        crate::methods::set_http_wait_satisfied(false);
-        out
+        exec_http_rpc(&ctx, parsed, &waited)
     })
     .await;
     match joined {
@@ -828,12 +823,13 @@ fn http_body_awaits_tip(parsed: &serde_json::Value) -> bool {
 async fn exec_http_rpc_async(
     ctx: Arc<RpcContext>,
     parsed: serde_json::Value,
-    waited: bool,
+    waited: Vec<bool>,
 ) -> HttpRpcOut {
     if let Some(arr) = parsed.as_array() {
         let mut out = Vec::new();
-        for req in arr {
-            match exec_one_async(&ctx, req, waited).await {
+        for (i, req) in arr.iter().enumerate() {
+            let slot = waited.get(i).copied().unwrap_or(false);
+            match exec_one_async(&ctx, req, slot).await {
                 OneOut::Reply(body) => out.push(body),
                 OneOut::Notification => {}
                 OneOut::BadVersion { error } => {
@@ -851,7 +847,7 @@ async fn exec_http_rpc_async(
         return HttpRpcOut::Json(StatusCode::OK, serde_json::Value::Array(out));
     }
     if parsed.is_object() {
-        return match exec_one_async(&ctx, &parsed, waited).await {
+        return match exec_one_async(&ctx, &parsed, waited.first().copied().unwrap_or(false)).await {
             OneOut::Reply(body) => {
                 let ver = parse_jsonrpc_ver(&parsed).unwrap_or(JsonRpcVer::V1);
                 let status = if ver == JsonRpcVer::V2 {
@@ -976,11 +972,19 @@ async fn exec_one_async(ctx: &Arc<RpcContext>, req: &serde_json::Value, waited: 
 }
 
 #[doc(hidden)]
-pub fn exec_http_rpc(ctx: &RpcContext, parsed: serde_json::Value) -> HttpRpcOut {
+pub fn exec_http_rpc(ctx: &RpcContext, parsed: serde_json::Value, waited: &[bool]) -> HttpRpcOut {
     if let Some(arr) = parsed.as_array() {
         let mut out = Vec::new();
-        for req in arr {
-            match exec_one(ctx, req) {
+        for (i, req) in arr.iter().enumerate() {
+            let slot = waited.get(i).copied().unwrap_or(false);
+            if slot {
+                crate::methods::set_http_wait_satisfied(true);
+            }
+            let one = exec_one(ctx, req);
+            if slot {
+                crate::methods::set_http_wait_satisfied(false);
+            }
+            match one {
                 OneOut::Reply(body) => out.push(body),
                 OneOut::Notification => {}
                 OneOut::BadVersion { error } => {
@@ -998,7 +1002,15 @@ pub fn exec_http_rpc(ctx: &RpcContext, parsed: serde_json::Value) -> HttpRpcOut 
         return HttpRpcOut::Json(StatusCode::OK, serde_json::Value::Array(out));
     }
     if parsed.is_object() {
-        return match exec_one(ctx, &parsed) {
+        let slot = waited.first().copied().unwrap_or(false);
+        if slot {
+            crate::methods::set_http_wait_satisfied(true);
+        }
+        let one = exec_one(ctx, &parsed);
+        if slot {
+            crate::methods::set_http_wait_satisfied(false);
+        }
+        return match one {
             OneOut::Reply(body) => {
                 let ver = parse_jsonrpc_ver(&parsed).unwrap_or(JsonRpcVer::V1);
                 let status = if ver == JsonRpcVer::V2 {

@@ -2535,11 +2535,11 @@ impl ChainHub {
                     .await?,
             );
             if let Some(ids) = ids.filter(|ids| !ids.is_empty()) {
-                let Some(mp) = self.mempool() else {
-                    continue;
-                };
-                mp.commit_generated_txids(&ids)
-                    .map_err(|e| NetError::Consensus(e.to_string()))?;
+                if let Some(mp) = self.mempool().cloned() {
+                    crate::reactor::off_pool(move || mp.commit_generated_txids(&ids))
+                        .await
+                        .map_err(|e| NetError::Consensus(e.to_string()))?;
+                }
             }
         }
         let hub = std::sync::Arc::clone(self);

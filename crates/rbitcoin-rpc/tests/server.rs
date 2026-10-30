@@ -2379,6 +2379,15 @@ fn http_wait_ctx() -> (
     Arc<rbitcoin_rpc::methods::RpcContext>,
     rbitcoin_store::testutil::TempDir,
 ) {
+    http_wait_ctx_on(Network::Regtest)
+}
+
+fn http_wait_ctx_on(
+    network: Network,
+) -> (
+    Arc<rbitcoin_rpc::methods::RpcContext>,
+    rbitcoin_store::testutil::TempDir,
+) {
     let dir = rbitcoin_store::testutil::TempDir::labeled("rpc-http-wait").expect("temp dir");
     let hub = Arc::new(rbitcoin_net::ChainHub::new(
         Query::open_or_create_tiny(dir.join("store")).unwrap(),
@@ -2389,7 +2398,7 @@ fn http_wait_ctx() -> (
     let ctx = Arc::new(rbitcoin_rpc::methods::RpcContext {
         query: Arc::clone(&hub.query),
         mempool: None,
-        network: Network::Regtest,
+        network,
         start: Instant::now(),
         stop: Arc::new(AtomicBool::new(false)),
         connections: Arc::new(AtomicU64::new(0)),
@@ -2442,7 +2451,7 @@ async fn http_wait_is_an_active_command_while_it_waits() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     ctx.stop.store(true, Ordering::SeqCst);
-    assert!(waiter.await.unwrap());
+    assert_eq!(waiter.await.unwrap(), vec![true]);
     assert!(ctx.active.lock().unwrap().is_empty(), "the wait left");
 }
 
@@ -2456,8 +2465,9 @@ async fn http_longpoll_logs_the_request_once_before_it_waits() {
         "params": [{ "rules": ["segwit"], "longpollid": "x" }],
         "id": 1
     });
-    assert!(
-        !satisfy_http_wait(&ctx, &malformed).await,
+    assert_eq!(
+        satisfy_http_wait(&ctx, &malformed).await,
+        vec![false],
         "a longpollid Core cannot parse is the request's error, not a wait"
     );
     let current = format!(
@@ -2484,7 +2494,7 @@ async fn http_longpoll_logs_the_request_once_before_it_waits() {
         "logged before the wait ends: {lines:?}"
     );
     ctx.stop.store(true, Ordering::SeqCst);
-    assert!(waiter.await.unwrap());
+    assert_eq!(waiter.await.unwrap(), vec![true]);
     rbitcoin_rpc::methods::set_http_wait_satisfied(true);
     let _ = exec_one(&ctx, &req);
     rbitcoin_rpc::methods::set_http_wait_satisfied(false);
@@ -2533,7 +2543,7 @@ async fn http_wait_stop_returns_before_the_timeout() {
         "params": [99, 2_000]
     });
     let t0 = Instant::now();
-    assert!(satisfy_http_wait(&ctx, &body).await);
+    assert_eq!(satisfy_http_wait(&ctx, &body).await, vec![true]);
     assert!(
         t0.elapsed() < std::time::Duration::from_millis(200),
         "stop is enough; the deadline is still ahead"
@@ -2548,7 +2558,7 @@ async fn http_wait_met_height_does_not_sleep() {
         "params": [0, 2_000]
     });
     let t0 = Instant::now();
-    assert!(satisfy_http_wait(&ctx, &body).await);
+    assert_eq!(satisfy_http_wait(&ctx, &body).await, vec![true]);
     assert!(
         t0.elapsed() < std::time::Duration::from_millis(200),
         "genesis height already meets 0"
@@ -2563,7 +2573,7 @@ async fn http_wait_unmet_height_and_same_tip_use_the_timeout() {
         "params": [1, 160]
     });
     let t0 = Instant::now();
-    assert!(satisfy_http_wait(&ctx, &height).await);
+    assert_eq!(satisfy_http_wait(&ctx, &height).await, vec![true]);
     let dt = t0.elapsed();
     assert!(
         dt >= std::time::Duration::from_millis(100),
@@ -2575,10 +2585,33 @@ async fn http_wait_unmet_height_and_same_tip_use_the_timeout() {
         "params": [160]
     });
     let t0 = Instant::now();
-    assert!(satisfy_http_wait(&ctx, &fresh).await);
+    assert_eq!(satisfy_http_wait(&ctx, &fresh).await, vec![true]);
     let dt = t0.elapsed();
     assert!(
         dt >= std::time::Duration::from_millis(100),
         "the tip did not move, waited {dt:?}"
     );
+}
+
+/// A waited sibling must not mark the whole batch satisfied. On mainnet
+/// with no peers, `getblocktemplate` still returns "not connected".
+#[tokio::test]
+async fn batch_wait_does_not_skip_a_sibling_getblocktemplate() {
+    let (ctx, _dir) = http_wait_ctx_on(Network::Mainnet);
+    let body = serde_json::json!([
+        { "method": "waitfornewblock", "params": [0], "id": 1 },
+        {
+            "method": "getblocktemplate",
+            "params": [{ "rules": ["segwit"] }],
+            "id": 2
+        }
+    ]);
+    let flags = satisfy_http_wait(&ctx, &body).await;
+    assert_eq!(flags, vec![true, false]);
+    let HttpRpcOut::Json(_, value) = exec_http_rpc(&ctx, body, &flags) else {
+        panic!("expected a json body");
+    };
+    let err = &value.as_array().expect("batch")[1]["error"];
+    assert_eq!(err["code"], -9, "{err}");
+    assert_eq!(err["message"], "Bitcoin Core is not connected!");
 }
