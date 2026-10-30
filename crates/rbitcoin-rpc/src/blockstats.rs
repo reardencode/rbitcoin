@@ -4,11 +4,12 @@ use crate::methods::{
     map_query, parse_hash32_display, rpc_error, RpcContext, RpcParams, ERR_INVALID_ADDRESS_OR_KEY,
     ERR_INVALID_PARAMETER, ERR_MISC,
 };
+use bitcoin::consensus::encode::VarInt;
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, Block, BlockHash, OutPoint, ScriptBuf, TxOut};
-use rbitcoin_primitives::Height;
+use rbitcoin_primitives::{Fk, Height};
 use rbitcoin_query::StampedTxstatBlock;
-use rbitcoin_store::{HeaderRecord, TxStatRow};
+use rbitcoin_store::{HeaderRecord, OutputRecord, TxStatRow};
 use serde_json::{json, Map, Value};
 
 /// Weight percentiles reported by `getblockstats` (10 / 25 / 50 / 75 / 90).
@@ -28,6 +29,51 @@ pub struct StampedExtras {
     pub total_out: i64,
     pub spendable_outs: i64,
     pub n_ins: Vec<u32>,
+    pub utxo_size: Option<UtxoSizeInc>,
+}
+
+/// Core v32.1 `PER_UTXO_OVERHEAD`: `sizeof(COutPoint) + sizeof(uint32_t)`, the
+/// outpoint plus the packed height and coinbase flag.
+const PER_UTXO_OVERHEAD: i64 = 40;
+
+/// Core `utxo_size_inc` / `utxo_size_inc_actual`. Each created coin adds its
+/// serialized `CTxOut` plus [`PER_UTXO_OVERHEAD`]; each spent prevout
+/// subtracts the same. `actual` adds only coins that enter the UTXO set.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UtxoSizeInc {
+    pub inc: i64,
+    pub actual: i64,
+}
+
+impl UtxoSizeInc {
+    fn coin_size(script: &[u8]) -> i64 {
+        let len = script.len();
+        (Amount::SIZE + VarInt::from(len).size() + len) as i64 + PER_UTXO_OVERHEAD
+    }
+
+    fn create(&mut self, script: &[u8], enters_utxo_set: bool) {
+        let size = Self::coin_size(script);
+        self.inc += size;
+        if enters_utxo_set {
+            self.actual += size;
+        }
+    }
+
+    fn spend(&mut self, script: &[u8]) {
+        let size = Self::coin_size(script);
+        self.inc -= size;
+        self.actual -= size;
+    }
+}
+
+/// Only the two size stats need the stamped prevout reads. An empty `stats`
+/// selects every stat.
+fn selects_utxo_size(want: &[String]) -> bool {
+    want.is_empty()
+        || want
+            .iter()
+            .any(|s| matches!(s.as_str(), "utxo_size_inc" | "utxo_size_inc_actual"))
 }
 
 /// Outputs Core counts in `utxo_increase_actual`: not height 0, not a
@@ -126,6 +172,8 @@ pub struct BlockStats {
     pub utxo_increase: i64,
     /// Spendable outputs minus non-coinbase inputs.
     pub utxo_increase_actual: i64,
+    /// `None` when the selected stats skip the stamped prevout reads.
+    pub utxo_size: Option<UtxoSizeInc>,
 }
 
 impl BlockStats {
@@ -171,6 +219,10 @@ impl BlockStats {
             "utxo_increase_actual".into(),
             json!(self.utxo_increase_actual),
         );
+        if let Some(size) = self.utxo_size {
+            m.insert("utxo_size_inc".into(), json!(size.inc));
+            m.insert("utxo_size_inc_actual".into(), json!(size.actual));
+        }
         m
     }
 
@@ -226,13 +278,17 @@ pub fn compute_block_stats(
     let mut maxfeerate = 0i64;
     let mut mintxsize = i64::MAX;
     let mut maxtxsize = 0i64;
+    let mut utxo_size = UtxoSizeInc::default();
 
     for tx in &block.txdata {
         let is_cb = tx.is_coinbase();
         for o in &tx.output {
-            if output_enters_utxo_set(height, &block_hash, is_cb, o.script_pubkey.as_bytes()) {
+            let script = o.script_pubkey.as_bytes();
+            let enters = output_enters_utxo_set(height, &block_hash, is_cb, script);
+            if enters {
                 spendable_outs += 1;
             }
+            utxo_size.create(script, enters);
         }
         let tx_size = tx.total_size() as i64;
         let tx_weight = tx.weight().to_wu() as i64;
@@ -252,6 +308,7 @@ pub fn compute_block_stats(
                 let po = prevout(&inp.previous_output)
                     .ok_or_else(|| format!("missing prevout {}", inp.previous_output))?;
                 input_value += po.value.to_sat() as i64;
+                utxo_size.spend(po.script_pubkey.as_bytes());
             }
             let mut output_value = 0i64;
             for o in &tx.output {
@@ -327,6 +384,7 @@ pub fn compute_block_stats(
         txs: block.txdata.len() as i64,
         utxo_increase: outs - ins,
         utxo_increase_actual: spendable_outs - ins,
+        utxo_size: Some(utxo_size),
     })
 }
 
@@ -441,26 +499,99 @@ pub fn stats_from_txstat(
         txs: rows.len() as i64,
         utxo_increase: outs - ins,
         utxo_increase_actual: extras.spendable_outs - ins,
+        utxo_size: extras.utxo_size,
     }
 }
 
-#[doc(hidden)]
-pub fn spendable_output_count(
-    query: &rbitcoin_query::Query,
-    height: u32,
-    block_hash: &[u8; 32],
-    fks: &[rbitcoin_primitives::Fk],
-) -> Result<i64, rbitcoin_query::QueryError> {
-    let mut n = 0i64;
-    for (i, fk) in fks.iter().enumerate() {
-        let (_meta, outs) = query.store().get_tx_meta_and_outputs(*fk)?;
-        for o in &outs {
-            if output_enters_utxo_set(height, block_hash, i == 0, &o.script) {
-                n += 1;
+/// Non-coinbase output value, spendable output count, and the created half
+/// of [`UtxoSizeInc`] from one read of each stamped tx's outputs.
+#[derive(Default)]
+struct StampedOutputs {
+    total_out: i64,
+    spendable: i64,
+    created: UtxoSizeInc,
+}
+
+impl StampedOutputs {
+    fn read(
+        query: &rbitcoin_query::Query,
+        height: u32,
+        block_hash: &[u8; 32],
+        fks: &[Fk],
+    ) -> Result<Self, rbitcoin_query::QueryError> {
+        let mut tally = Self::default();
+        for (i, fk) in fks.iter().enumerate() {
+            let is_coinbase = i == 0;
+            let (_meta, outs) = query.store().get_tx_meta_and_outputs(*fk)?;
+            for o in &outs {
+                if !is_coinbase {
+                    tally.total_out = tally.total_out.saturating_add(o.value as i64);
+                }
+                let enters = output_enters_utxo_set(height, block_hash, is_coinbase, &o.script);
+                if enters {
+                    tally.spendable += 1;
+                }
+                tally.created.create(&o.script, enters);
             }
         }
+        Ok(tally)
     }
-    Ok(n)
+}
+
+/// Subtract every non-coinbase input's parent coin from `size`. The parent
+/// edges are one `input.body` span read; each parent's outputs are read once.
+fn spend_stamped_prevouts(
+    ctx: &RpcContext,
+    height: Height,
+    fks: &[Fk],
+    mut size: UtxoSizeInc,
+) -> Result<UtxoSizeInc, Value> {
+    let store_err = |e: rbitcoin_store::StoreError| rpc_error(ERR_MISC, e.to_string());
+    let broken = |what: String| {
+        rpc_error(
+            ERR_MISC,
+            format!("invariant: getblockstats height {} {what}", height.0),
+        )
+    };
+    let Some((first, last)) = fks.get(1).zip(fks.last()) else {
+        return Ok(size);
+    };
+    let spans = ctx
+        .query
+        .store()
+        .input_edges_span(first.0, last.0)
+        .map_err(store_err)?;
+    if spans.len() != fks.len() - 1 {
+        return Err(broken("input edge span length".into()));
+    }
+    let mut prevouts = Vec::new();
+    for (fk, edges) in fks[1..].iter().zip(spans) {
+        let edges = edges.ok_or_else(|| broken(format!("create {} has no input edges", fk.0)))?;
+        for edge in edges {
+            if edge.parent.is_null() {
+                return Err(broken(format!("create {} input has no parent edge", fk.0)));
+            }
+            prevouts.push((edge.parent.0, edge.vout));
+        }
+    }
+    prevouts.sort_unstable();
+    let mut parent: Option<(u64, Vec<OutputRecord>)> = None;
+    for (parent_fk, vout) in prevouts {
+        if parent.as_ref().is_none_or(|(fk, _)| *fk != parent_fk) {
+            let (_, outs) = ctx
+                .query
+                .store()
+                .get_tx_meta_and_outputs(Fk(parent_fk))
+                .map_err(store_err)?;
+            parent = Some((parent_fk, outs));
+        }
+        let out = parent
+            .as_ref()
+            .and_then(|(_, outs)| outs.get(vout as usize))
+            .ok_or_else(|| broken(format!("parent {parent_fk} has no output {vout}")))?;
+        size.spend(&out.script);
+    }
+    Ok(size)
 }
 
 #[doc(hidden)]
@@ -590,6 +721,7 @@ pub fn stats_for_stamped(
     ctx: &RpcContext,
     height: Height,
     stamped: &StampedTxstatBlock,
+    want: &[String],
 ) -> Result<BlockStats, Value> {
     let mediantime = rbitcoin_query::median_time_past(ctx.query.as_ref(), height)
         .unwrap_or(stamped.rec.timestamp);
@@ -598,18 +730,26 @@ pub fn stats_for_stamped(
         None => rbitcoin_consensus::ChainParams::for_network(ctx.network),
     };
     let subsidy = rbitcoin_consensus::block_subsidy(height.0, &params);
-    let extras = StampedExtras {
-        total_out: ctx
-            .query
-            .non_coinbase_total_out(&stamped.fks)
-            .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?,
-        spendable_outs: spendable_output_count(
-            ctx.query.as_ref(),
-            height.0,
-            &stamped.rec.hash,
+    let outputs = StampedOutputs::read(
+        ctx.query.as_ref(),
+        height.0,
+        &stamped.rec.hash,
+        &stamped.fks,
+    )
+    .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?;
+    let utxo_size = if selects_utxo_size(want) {
+        Some(spend_stamped_prevouts(
+            ctx,
+            height,
             &stamped.fks,
-        )
-        .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?,
+            outputs.created,
+        )?)
+    } else {
+        None
+    };
+    let extras = StampedExtras {
+        total_out: outputs.total_out,
+        spendable_outs: outputs.spendable,
         n_ins: {
             let mut v = Vec::with_capacity(stamped.fks.len());
             for &fk in &stamped.fks {
@@ -623,6 +763,7 @@ pub fn stats_for_stamped(
             }
             v
         },
+        utxo_size,
     };
     Ok(stats_from_txstat(
         height.0,
@@ -713,7 +854,7 @@ pub fn getblockstats(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Valu
         .stamped_txstat_block(height)
         .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?
     {
-        let stats = stats_for_stamped(ctx, height, &stamped)?;
+        let stats = stats_for_stamped(ctx, height, &stamped, &want)?;
         return stats.select(&want);
     }
 

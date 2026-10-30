@@ -4373,8 +4373,11 @@ fn getblockstats_coinbase_only_and_op_return_match_helper() {
     );
     assert_eq!(genesis["utxo_increase"], 1);
     assert_eq!(genesis["utxo_increase_actual"], 0);
-    assert!(genesis.get("utxo_size_inc").is_none());
-    assert!(genesis.get("utxo_size_inc_actual").is_none());
+    assert_eq!(
+        genesis["utxo_size_inc"], 116,
+        "one 67-byte P2PK output: 8 + 1 + 67 + 40"
+    );
+    assert_eq!(genesis["utxo_size_inc_actual"], 0);
 
     dispatch(&ctx, "generate", vec![json!(100)]).unwrap();
     let h1 = dispatch(&ctx, "getblockhash", vec![json!(1)]).unwrap();
@@ -4457,6 +4460,7 @@ fn getblockstats_coinbase_only_and_op_return_match_helper() {
         Some(got["utxo_increase"].as_i64().unwrap() - 1)
     );
     assert_eq!(got["totalfee"], 2_000);
+    getblockstats_utxo_size_beat(&ctx, h, &got);
 
     let mut named = serde_json::Map::new();
     named.insert("hash_or_height".into(), got["blockhash"].clone());
@@ -4474,6 +4478,84 @@ fn getblockstats_coinbase_only_and_op_return_match_helper() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Core `getblockstats` size stats from `getblock` verbosity 3: each output's
+/// serialized `CTxOut` plus Core v32.1 `PER_UTXO_OVERHEAD` (40), minus the same per
+/// prevout. `actual` leaves out OP_RETURN outputs. Not for height 0, where no
+/// output enters the UTXO set.
+fn utxo_size_stats_from_getblock(ctx: &RpcContext, hash: &Value) -> (i64, i64) {
+    let coin = |spk: &Value| {
+        let n = spk["hex"].as_str().expect("scriptPubKey hex").len() as i64 / 2;
+        assert!(n < 0xfd, "one-byte CompactSize");
+        8 + 1 + n + 40
+    };
+    let block = dispatch(ctx, "getblock", vec![hash.clone(), json!(3)]).unwrap();
+    let (mut inc, mut actual) = (0, 0);
+    for tx in block["tx"].as_array().expect("tx") {
+        for out in tx["vout"].as_array().expect("vout") {
+            let spk = &out["scriptPubKey"];
+            inc += coin(spk);
+            if !spk["hex"].as_str().unwrap().starts_with("6a") {
+                actual += coin(spk);
+            }
+        }
+        let vins = tx["vin"].as_array().expect("vin");
+        for prevout in vins.iter().filter_map(|vin| vin.get("prevout")) {
+            inc -= coin(&prevout["scriptPubKey"]);
+            actual -= coin(&prevout["scriptPubKey"]);
+        }
+    }
+    (inc, actual)
+}
+
+/// Size stats match the `getblock` tally on the stamped path and on the
+/// reconstruct path, and a selected size stat comes back with the others asked.
+fn getblockstats_utxo_size_beat(ctx: &RpcContext, height: u32, got: &Value) {
+    use rbitcoin_store::TxStatRow;
+    let (inc, actual) = utxo_size_stats_from_getblock(ctx, &got["blockhash"]);
+    assert_eq!(got["utxo_size_inc"], inc, "{got}");
+    assert_eq!(got["utxo_size_inc_actual"], actual, "{got}");
+    assert!(actual < inc, "the OP_RETURN output stays out of actual");
+
+    assert!(ctx
+        .query
+        .stamped_txstat_block(Height(height))
+        .unwrap()
+        .is_some());
+    let stamped = dispatch(ctx, "getblockstats", vec![json!(height)]).unwrap();
+    assert_eq!(&stamped, got);
+    let spend_fk = ctx.query.block_tx_fks(Height(height)).unwrap()[1];
+    ctx.query
+        .store()
+        .write_txstat_row(
+            spend_fk,
+            &TxStatRow {
+                fee_sat: 0,
+                base: 0,
+                wit_extra: 0,
+            },
+        )
+        .unwrap();
+    assert!(ctx
+        .query
+        .stamped_txstat_block(Height(height))
+        .unwrap()
+        .is_none());
+    let reconstructed = dispatch(ctx, "getblockstats", vec![json!(height)]).unwrap();
+    assert_eq!(&reconstructed, got);
+
+    let picked = dispatch(
+        ctx,
+        "getblockstats",
+        vec![json!(height), json!(["utxo_size_inc_actual", "minfee"])],
+    )
+    .unwrap();
+    assert_eq!(
+        picked,
+        json!({ "minfee": got["minfee"], "utxo_size_inc_actual": actual })
+    );
+}
+
 fn prune_life_blockstats(ctx: &RpcContext) {
     use rbitcoin_store::TxStatRow;
     let genesis = dispatch(ctx, "getblockstats", vec![json!(0)]).unwrap();
@@ -4492,15 +4574,17 @@ fn prune_life_blockstats(ctx: &RpcContext) {
     assert_eq!(got["utxo_increase_actual"], 1, "{got}");
     assert_eq!(got["total_size"], 0);
     assert_eq!(got["swtxs"], 0);
-    assert!(got.get("utxo_size_inc").is_none(), "{got}");
-    let e = dispatch(
+    let h1 = dispatch(ctx, "getblockhash", vec![json!(1)]).unwrap();
+    let (inc, actual) = utxo_size_stats_from_getblock(ctx, &h1);
+    assert_eq!(got["utxo_size_inc"], inc, "{got}");
+    assert_eq!(got["utxo_size_inc_actual"], actual, "{got}");
+    let one = dispatch(
         ctx,
         "getblockstats",
         vec![json!(1), json!(["utxo_size_inc"])],
     )
-    .unwrap_err();
-    assert_eq!(e["code"], ERR_INVALID_PARAMETER);
-    assert_eq!(e["message"], "Invalid selected statistic 'utxo_size_inc'");
+    .unwrap();
+    assert_eq!(one, json!({ "utxo_size_inc": inc }));
     let fk = ctx.query.block_tx_fks(Height(0)).unwrap()[0];
     ctx.query
         .store()
