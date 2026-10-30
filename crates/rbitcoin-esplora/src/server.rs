@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::{Notify, Semaphore};
@@ -599,22 +599,21 @@ pub struct InflightJoin {
     pub cv: std::sync::Condvar,
     /// Start order of the leader. Waiters publish this stamp.
     pub seq: u64,
-    /// Set under `done` before a waiter sleeps. The wait, not the join result.
-    queued: AtomicBool,
-    queued_mu: Mutex<()>,
-    queued_cv: std::sync::Condvar,
+    /// Set under this mutex before a waiter sleeps. The wait, not the join result.
+    queued: Mutex<bool>,
+    queued_cv: Condvar,
 }
 
 impl InflightJoin {
     /// `true` once a waiter has observed an unfinished leader and is in `cv.wait`.
     #[doc(hidden)]
     pub fn wait_queued(&self, timeout: std::time::Duration) -> bool {
-        let g = self.queued_mu.lock().unwrap_or_else(|p| p.into_inner());
-        let (_g, status) = self
+        let g = self.queued.lock().unwrap_or_else(|p| p.into_inner());
+        let (g, _) = self
             .queued_cv
-            .wait_timeout_while(g, timeout, |_| !self.queued.load(Ordering::SeqCst))
+            .wait_timeout_while(g, timeout, |queued| !*queued)
             .unwrap_or_else(|p| p.into_inner());
-        !status.timed_out()
+        *g
     }
 
     #[doc(hidden)]
@@ -844,9 +843,8 @@ impl AppState {
                     done: Mutex::new(None),
                     cv: std::sync::Condvar::new(),
                     seq,
-                    queued: AtomicBool::new(false),
-                    queued_mu: Mutex::new(()),
-                    queued_cv: std::sync::Condvar::new(),
+                    queued: Mutex::new(false),
+                    queued_cv: Condvar::new(),
                 });
                 c.inflight.insert(*sh, Arc::clone(&inf));
                 Ok((inf, seq))
@@ -856,8 +854,11 @@ impl AppState {
             Err((inf, seq)) => {
                 let mut d = inf.done.lock().unwrap_or_else(|p| p.into_inner());
                 while d.is_none() {
-                    inf.queued.store(true, Ordering::SeqCst);
-                    inf.queued_cv.notify_all();
+                    {
+                        let mut queued = inf.queued.lock().unwrap_or_else(|p| p.into_inner());
+                        *queued = true;
+                        inf.queued_cv.notify_all();
+                    }
                     d = inf.cv.wait(d).unwrap_or_else(|p| p.into_inner());
                 }
                 let mut slot = (*d).clone().flatten();
@@ -1428,4 +1429,52 @@ pub fn encode_header_hex(hdr: &bitcoin::block::Header) -> Result<String, String>
     hdr.consensus_encode(&mut buf)
         .map_err(|_| "header encode".to_string())?;
     Ok(rbitcoin_primitives::hex_encode(&(buf)))
+}
+
+#[cfg(test)]
+mod queued_flag {
+    use super::InflightJoin;
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::thread;
+    use std::time::Duration;
+
+    fn join() -> InflightJoin {
+        InflightJoin {
+            done: Mutex::new(None),
+            cv: Condvar::new(),
+            seq: 1,
+            queued: Mutex::new(false),
+            queued_cv: Condvar::new(),
+        }
+    }
+
+    #[test]
+    fn a_flag_set_before_the_waiter_arms_is_still_visible() {
+        let inf = join();
+        {
+            let mut queued = inf.queued.lock().unwrap_or_else(|p| p.into_inner());
+            *queued = true;
+            inf.queued_cv.notify_all();
+        }
+        assert!(
+            inf.wait_queued(Duration::from_millis(20)),
+            "a notify with no waiter must still be visible on the flag"
+        );
+    }
+
+    #[test]
+    fn a_waiter_that_locks_first_wakes_when_the_flag_is_stored() {
+        let inf = Arc::new(join());
+        let waiting = Arc::clone(&inf);
+        let waiter = thread::spawn(move || waiting.wait_queued(Duration::from_secs(2)));
+        {
+            let mut queued = inf.queued.lock().unwrap_or_else(|p| p.into_inner());
+            *queued = true;
+            inf.queued_cv.notify_all();
+        }
+        assert!(
+            waiter.join().expect("waiter"),
+            "the queued flag is under the mutex the waiter holds"
+        );
+    }
 }
