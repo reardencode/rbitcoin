@@ -1,0 +1,16 @@
+Fixed
+
+- **Isolated broadcast no longer drops local transactions in a burst.**
+  With `--proxy` or `--onion`, local transactions wait for the one-shot
+  sender in a 32-slot queue. Each send can wait up to 60 seconds for each
+  peer's handshake. Past 32 waiting, the oldest were dropped without a log
+  line. Standing peers are never told about them, so they never left the
+  node. Now every local transaction still in the mempool is sent once, in
+  submit order. A transaction that leaves the mempool first is not sent,
+  and one that leaves while its first peer is being reached is not sent
+  to the second.
+  A transaction whose turn came while the mempool was busy, such as during
+  a block connect, was also skipped for good. The sender now waits for the
+  mempool instead.
+  The sender logs a warning when 32 or more wait, and an info line for
+  each peer that took a transaction.

@@ -80,6 +80,9 @@ pub async fn send_tx_isolated_timed(
     Ok(())
 }
 
+/// Send `tx` one-shot to each target while `in_pool()` holds. It is asked
+/// before every dial: one send can take [`HANDSHAKE_TIMEOUT`], and a tx that
+/// left the mempool meanwhile must not reach the next peer.
 pub async fn isolated_broadcast_known_tx(
     dialer: &Dialer,
     addrman: &Mutex<AddrMan>,
@@ -87,6 +90,7 @@ pub async fn isolated_broadcast_known_tx(
     user_agent: &str,
     txid: bitcoin::Txid,
     tx: Transaction,
+    in_pool: impl Fn() -> bool,
 ) {
     let targets = {
         let am = addrman.lock().unwrap_or_else(|e| e.into_inner());
@@ -97,8 +101,13 @@ pub async fn isolated_broadcast_known_tx(
         return;
     }
     for t in targets {
-        if let Err(e) = send_tx_isolated(dialer, t, magic, tx.clone(), user_agent).await {
-            rbitcoin_log::warn!("isolated broadcast {txid} to {t}: {e}");
+        if !in_pool() {
+            rbitcoin_log::info!("isolated broadcast {txid}: left the mempool, not sent to {t}");
+            return;
+        }
+        match send_tx_isolated(dialer, t, magic, tx.clone(), user_agent).await {
+            Ok(()) => rbitcoin_log::info!("isolated broadcast {txid} to {t}: sent"),
+            Err(e) => rbitcoin_log::warn!("isolated broadcast {txid} to {t}: {e}"),
         }
     }
 }
@@ -113,26 +122,39 @@ pub fn spawn_isolated_broadcast_loop(
     if !mp.isolated_broadcast() {
         return tokio::spawn(async {});
     }
-    let mut rx = mp.subscribe_isolated();
+    // Each send can spend `HANDSHAKE_TIMEOUT` per peer, so a queue this deep
+    // waits minutes.
+    const BACKLOG_WARN: usize = 32;
     tokio::spawn(async move {
+        let mut warned = false;
         loop {
-            let txid = match rx.recv().await {
-                Ok(txid) => txid,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            };
-            // `get_tx` refuses the reactor thread. This task is a tokio worker.
-            let tx = match mp.try_get_tx(&txid) {
-                Some(tx) => Some(tx),
-                None => {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                    mp.try_get_tx(&txid)
-                }
-            };
+            let (txid, behind) = mp.next_isolated().await;
+            if behind < BACKLOG_WARN {
+                warned = false;
+            } else if !warned {
+                warned = true;
+                rbitcoin_log::warn!(
+                    "isolated broadcast is behind: {behind} local txs wait after {txid}"
+                );
+            }
+            // A real read: `try_read` cannot tell a held write from a tx that
+            // left, and `take` already marked this txid taken.
+            let hub = Arc::clone(&mp);
+            let tx = tokio::task::spawn_blocking(move || {
+                let _g = crate::reactor::BlockingRegion::enter();
+                hub.get_tx(&txid)
+            })
+            .await
+            .expect("isolated broadcast get_tx join");
             let Some(tx) = tx else {
+                rbitcoin_log::debug!("isolated broadcast {txid}: left the mempool before its turn");
                 continue;
             };
-            isolated_broadcast_known_tx(&dialer, &addrman, magic, &user_agent, txid, tx).await;
+            // `unindex_txid` drops the local-origin entry on every removal,
+            // and this check never waits on the mempool lock.
+            let in_pool = || mp.is_local_origin(&txid);
+            isolated_broadcast_known_tx(&dialer, &addrman, magic, &user_agent, txid, tx, in_pool)
+                .await;
         }
     })
 }

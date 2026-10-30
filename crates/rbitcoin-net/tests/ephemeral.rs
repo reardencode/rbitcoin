@@ -188,14 +188,61 @@ async fn ephemeral_broadcast_one_shot_tx_and_new_socks_creds() {
     splice.abort();
 }
 
-/// One hub with a mempool and a local tx. The isolated-broadcast loop is
-/// idle until isolation is on, then survives unknown txids read off the
-/// reactor, a burst that lags its kick channel, and a local tx with no
+/// A SOCKS proxy that is itself the one peer: every circuit handshakes and
+/// reports the tx it carries on `got`. The first circuit stops after SOCKS,
+/// says so on `busy`, and holds the sender until `gate` fires.
+async fn gated_recipient(
+    socks: TcpListener,
+    busy: tokio::sync::oneshot::Sender<()>,
+    gate: tokio::sync::oneshot::Receiver<()>,
+    got: tokio::sync::mpsc::UnboundedSender<bitcoin::Txid>,
+) {
+    let mut first = Some((busy, gate));
+    loop {
+        let (mut s, from) = socks.accept().await.unwrap();
+        socks_userpass(&mut s).await;
+        if let Some((busy, gate)) = first.take() {
+            busy.send(()).unwrap();
+            gate.await.unwrap();
+        }
+        let here = s.local_addr().unwrap();
+        let (_ver, mut reader, _writer, _wire, _tcp) = connect_and_handshake_timed(
+            Duration::from_secs(5),
+            s,
+            Magic::REGTEST,
+            here,
+            from,
+            0,
+            true,
+            "/rbitcoin:test/",
+            HandshakePolicy::plain(),
+        )
+        .await
+        .unwrap();
+        let frame = read_v2_frame(&mut reader, Magic::REGTEST).await.unwrap();
+        let msg = decode_framed_offload(frame).await.unwrap();
+        let NetworkMessage::Tx(tx) = msg.payload() else {
+            panic!("expected tx, got {:?}", msg.payload());
+        };
+        got.send(tx.compute_txid()).unwrap();
+    }
+}
+
+async fn next_sent(rx: &mut tokio::sync::mpsc::UnboundedReceiver<bitcoin::Txid>) -> bitcoin::Txid {
+    tokio::time::timeout(Duration::from_secs(30), rx.recv())
+        .await
+        .expect("the isolated loop stopped sending")
+        .expect("recipient alive")
+}
+
+/// One hub with a mempool and local txs. The isolated-broadcast loop is
+/// idle until isolation is on. A burst of local txs behind one stuck send
+/// all go out once, in order, except one mined first. The loop then
+/// survives an unknown txid read off the reactor and a local tx with no
 /// address to send to. A one-shot send that fails does not fall back to
 /// INV on a standing peer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ephemeral_broadcast() {
-    use bitcoin::hashes::Hash;
     use bitcoin::p2p::address::Address;
     use bitcoin::p2p::message_network::VersionMessage;
     use bitcoin::p2p::ServiceFlags;
@@ -225,6 +272,214 @@ async fn ephemeral_broadcast() {
         .expect("idle loop returns while isolation is off");
 
     mp.set_isolated_broadcast(true);
+
+    // More local txs than the loop can send while one send is stuck. One
+    // block fans a mature coinbase out to a coin per tx.
+    let spend = |prev: OutPoint, sats: u64| Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: prev,
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(sats),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    const BURST: u32 = 44;
+    let cb2 = hub
+        .query
+        .reconstruct_block_at_height(Height(2))
+        .unwrap()
+        .txdata[0]
+        .compute_txid();
+    let mut fan = spend(OutPoint { txid: cb2, vout: 0 }, 90_000_000);
+    fan.output = vec![fan.output[0].clone(); BURST as usize + 9];
+    let fan_id = fan.compute_txid();
+    hub.generate_to_script(1, ScriptBuf::from_bytes(vec![0x51]), vec![fan])
+        .expect("fan-out block");
+    let locals: Vec<Transaction> = (0..BURST + 9)
+        .map(|vout| spend(OutPoint { txid: fan_id, vout }, 89_990_000))
+        .collect();
+    let submit = |tx: &Transaction| {
+        mp.accept_tx(tx).expect("local");
+        mp.mark_local_origin(tx.compute_txid());
+    };
+
+    let socks = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = socks.local_addr().unwrap();
+    let mut am = AddrMan::new();
+    am.add(SocketAddr::from((Ipv4Addr::new(10, 0, 0, 1), 18444)));
+    let (busy_tx, busy_rx) = tokio::sync::oneshot::channel();
+    let (gate_tx, gate_rx) = tokio::sync::oneshot::channel();
+    let (got_tx, mut got_rx) = mpsc::unbounded_channel();
+    let recipient = tokio::spawn(gated_recipient(socks, busy_tx, gate_rx, got_tx));
+    let sender = spawn_isolated_broadcast_loop(
+        mp.clone(),
+        Dialer::socks(proxy, true),
+        Arc::new(Mutex::new(am)),
+        Magic::REGTEST,
+        "/rbitcoin:test/".into(),
+    );
+    submit(&locals[0]);
+    tokio::time::timeout(Duration::from_secs(30), busy_rx)
+        .await
+        .expect("the first send reaches the recipient")
+        .unwrap();
+    for tx in &locals[1..=BURST as usize] {
+        submit(tx);
+    }
+    let mined = locals[5].compute_txid();
+    hub.generate_to_script(
+        1,
+        ScriptBuf::from_bytes(vec![0x51]),
+        vec![locals[5].clone()],
+    )
+    .expect("mine a queued local tx");
+    assert!(!mp.contains(&mined), "the block took it from the mempool");
+    let last = &locals[BURST as usize + 1];
+    submit(last);
+    gate_tx.send(()).unwrap();
+
+    let want: Vec<Txid> = locals[..=BURST as usize + 1]
+        .iter()
+        .map(Transaction::compute_txid)
+        .filter(|t| *t != mined)
+        .collect();
+    let mut sent = Vec::new();
+    while sent.last() != Some(&last.compute_txid()) {
+        sent.push(next_sent(&mut got_rx).await);
+    }
+    assert_eq!(
+        sent, want,
+        "every queued local tx still in the mempool goes out once, in submit order"
+    );
+    let late = locals[BURST as usize + 2].compute_txid();
+    submit(&locals[BURST as usize + 2]);
+    assert_eq!(
+        next_sent(&mut got_rx).await,
+        late,
+        "an idle loop wakes for the next local tx and resends nothing"
+    );
+    sender.abort();
+    recipient.abort();
+
+    // Two peers per tx. A tx that leaves the mempool while its first send
+    // is in flight is not dialed to the second peer.
+    let socks = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = socks.local_addr().unwrap();
+    let mut am = AddrMan::new();
+    am.add(SocketAddr::from((Ipv4Addr::new(10, 0, 0, 1), 18444)));
+    am.add(SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 18444)));
+    let (busy_tx, busy_rx) = tokio::sync::oneshot::channel();
+    let (gate_tx, gate_rx) = tokio::sync::oneshot::channel();
+    let (got_tx, mut got_rx) = mpsc::unbounded_channel();
+    let recipient = tokio::spawn(gated_recipient(socks, busy_tx, gate_rx, got_tx));
+    let sender = spawn_isolated_broadcast_loop(
+        mp.clone(),
+        Dialer::socks(proxy, true),
+        Arc::new(Mutex::new(am)),
+        Magic::REGTEST,
+        "/rbitcoin:test/".into(),
+    );
+    let gone = &locals[BURST as usize + 3];
+    let kept = &locals[BURST as usize + 4];
+    submit(gone);
+    tokio::time::timeout(Duration::from_secs(30), busy_rx)
+        .await
+        .expect("the first send reaches the recipient")
+        .unwrap();
+    hub.generate_to_script(1, ScriptBuf::from_bytes(vec![0x51]), vec![gone.clone()])
+        .expect("mine the tx in flight");
+    gate_tx.send(()).unwrap();
+    assert_eq!(
+        next_sent(&mut got_rx).await,
+        gone.compute_txid(),
+        "the send already dialed completes"
+    );
+    submit(kept);
+    assert_eq!(
+        [next_sent(&mut got_rx).await, next_sent(&mut got_rx).await],
+        [kept.compute_txid(); 2],
+        "a mined tx is not dialed to its second peer; a live one reaches both"
+    );
+    sender.abort();
+    recipient.abort();
+
+    // A mempool write held across the loop's fetch (a block connect holds
+    // it through persist) delays a local tx; it does not drop it. A marked
+    // txid that was never admitted is read as gone and skipped once.
+    let socks = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = socks.local_addr().unwrap();
+    let mut am = AddrMan::new();
+    am.add(SocketAddr::from((Ipv4Addr::new(10, 0, 0, 1), 18444)));
+    let (busy_tx, busy_rx) = tokio::sync::oneshot::channel();
+    let (gate_tx, gate_rx) = tokio::sync::oneshot::channel();
+    let (got_tx, mut got_rx) = mpsc::unbounded_channel();
+    let recipient = tokio::spawn(gated_recipient(socks, busy_tx, gate_rx, got_tx));
+    let sender = spawn_isolated_broadcast_loop(
+        mp.clone(),
+        Dialer::socks(proxy, true),
+        Arc::new(Mutex::new(am)),
+        Magic::REGTEST,
+        "/rbitcoin:test/".into(),
+    );
+    let [first, held, after, idle] = [5, 6, 7, 8].map(|i| &locals[BURST as usize + i]);
+    let never_admitted = spend(
+        OutPoint {
+            txid: fan_id,
+            vout: 999,
+        },
+        1,
+    )
+    .compute_txid();
+    submit(first);
+    tokio::time::timeout(Duration::from_secs(30), busy_rx)
+        .await
+        .expect("the first send reaches the recipient")
+        .unwrap();
+    mp.mark_local_origin(never_admitted);
+    submit(held);
+    submit(after);
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn({
+        let mp = mp.clone();
+        move || {
+            let _write = mp.lock_write();
+            held_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }
+    });
+    held_rx.recv().unwrap();
+    gate_tx.send(()).unwrap();
+    assert_eq!(next_sent(&mut got_rx).await, first.compute_txid());
+    // Only how long the old `try_read` path has to give up. The loop under
+    // test sends `held` whatever this is.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    assert_eq!(
+        [next_sent(&mut got_rx).await, next_sent(&mut got_rx).await],
+        [held.compute_txid(), after.compute_txid()],
+        "a busy mempool write delays the next local txs; it does not drop them"
+    );
+    submit(idle);
+    assert_eq!(
+        next_sent(&mut got_rx).await,
+        idle.compute_txid(),
+        "the never-admitted txid was skipped once and the loop went idle"
+    );
+    assert!(
+        mp.is_local_origin(&never_admitted),
+        "a skipped txid stays marked, so it is not queued again"
+    );
+    sender.abort();
+    recipient.abort();
+
     let h = spawn_loop(AddrMan::new());
     tokio::time::sleep(Duration::from_millis(20)).await;
     mp.mark_local_origin(dummy_tx().compute_txid());
@@ -233,11 +488,6 @@ async fn ephemeral_broadcast() {
         !h.is_finished(),
         "an unknown txid is skipped without panicking on a tokio worker"
     );
-    for i in 0..40u8 {
-        mp.mark_local_origin(Txid::from_byte_array([i; 32]));
-    }
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(!h.is_finished(), "Lagged kicks must not stop isolated send");
 
     let cb = hub
         .query
@@ -360,6 +610,7 @@ async fn ephemeral_broadcast_known_tx_one_shot() {
         "/rbitcoin:test/",
         tx.compute_txid(),
         tx,
+        || true,
     )
     .await;
     assert!(inbound.await.unwrap(), "one-shot reached the peer");
@@ -383,6 +634,7 @@ async fn onion_only_isolated_broadcast_never_reaches_clearnet() {
         "/rbitcoin:test/",
         tx.compute_txid(),
         tx,
+        || true,
     )
     .await;
     for listener in [clearnet, onion_proxy] {

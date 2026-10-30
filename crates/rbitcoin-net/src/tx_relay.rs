@@ -718,6 +718,54 @@ pub struct AdmitSpec {
     pub waive: bool,
 }
 
+/// Local-origin txids. With isolated broadcast on, each is queued once for
+/// the one-shot loop, in submit order. An entry leaves with its tx
+/// ([`MempoolHub::unindex_txid`]), so the queue never outgrows the set and
+/// never hands out a tx that left the mempool.
+#[derive(Default)]
+struct LocalOrigin {
+    txs: HashMap<Txid, IsolatedTurn>,
+    next: u64,
+}
+
+#[derive(Clone, Copy)]
+enum IsolatedTurn {
+    /// Waiting for the isolated loop. The number is submit order.
+    Waiting(u64),
+    /// The loop took it, or isolated broadcast was off at submit.
+    Taken,
+}
+
+impl LocalOrigin {
+    fn insert(&mut self, txid: Txid, queue: bool) {
+        let turn = if queue {
+            self.next += 1;
+            IsolatedTurn::Waiting(self.next)
+        } else {
+            IsolatedTurn::Taken
+        };
+        self.txs.entry(txid).or_insert(turn);
+    }
+
+    /// The oldest waiting txid, now taken, and how many still wait.
+    fn take(&mut self) -> Option<(Txid, usize)> {
+        let mut oldest: Option<(u64, Txid)> = None;
+        let mut waiting = 0usize;
+        for (txid, turn) in &self.txs {
+            let IsolatedTurn::Waiting(n) = *turn else {
+                continue;
+            };
+            waiting += 1;
+            if oldest.is_none_or(|(m, _)| n < m) {
+                oldest = Some((n, *txid));
+            }
+        }
+        let (_, txid) = oldest?;
+        self.txs.insert(txid, IsolatedTurn::Taken);
+        Some((txid, waiting - 1))
+    }
+}
+
 /// Shared mempool + relay gate used by peer sessions and tip confirm.
 pub struct MempoolHub {
     pub inner: RwLock<ActiveMempool>,
@@ -794,9 +842,10 @@ pub struct MempoolHub {
     pub dir: PathBuf,
     /// Locally submitted txids not yet requested by a peer (`getmempoolinfo.unbroadcastcount`).
     pub unbroadcast: Mutex<HashSet<Txid>>,
-    pub local_origin: Mutex<HashSet<Txid>>,
+    local_origin: Mutex<LocalOrigin>,
     pub isolated_broadcast: AtomicBool,
-    pub isolated_kick: broadcast::Sender<Txid>,
+    /// Wakes the isolated loop when [`Self::mark_local_origin`] queues a tx.
+    isolated_wake: tokio::sync::Notify,
     /// Wtxids re-admitted from a disconnected block. Core serves these
     /// even if this peer has not been INV'd yet (`mempool_reorg`).
     pub reorg_servable: Mutex<HashSet<Wtxid>>,
@@ -984,7 +1033,6 @@ impl MempoolHub {
         }
         let (announce, _) = broadcast::channel(256);
         let (inv_flush, _) = broadcast::channel(16);
-        let (isolated_kick, _) = broadcast::channel(32);
         let unbroadcast = if persist {
             load_unbroadcast_file(&dir_buf)
         } else {
@@ -1044,9 +1092,9 @@ impl MempoolHub {
             meter_cmpct_avail: AtomicU64::new(0),
             sh_index: Mutex::new(MempoolShIndex::new()),
             unbroadcast: Mutex::new(unbroadcast),
-            local_origin: Mutex::new(HashSet::new()),
+            local_origin: Mutex::new(LocalOrigin::default()),
             isolated_broadcast: AtomicBool::new(false),
-            isolated_kick,
+            isolated_wake: tokio::sync::Notify::new(),
             reorg_servable: Mutex::new(HashSet::new()),
             relay_seq: Mutex::new(HashMap::new()),
             wtxid_by_txid: Mutex::new(HashMap::new()),
@@ -1231,7 +1279,7 @@ impl MempoolHub {
     pub fn unindex_txid(&self, txid: &Txid) {
         self.sh_index.lock().unwrap().remove(txid);
         self.remove_relay_maps(txid);
-        self.local_origin.lock().unwrap().remove(txid);
+        self.local_origin.lock().unwrap().txs.remove(txid);
         let mut u = self.unbroadcast.lock().unwrap();
         if u.remove(txid) {
             persist_unbroadcast_file(&self.dir, &u);
@@ -4438,18 +4486,29 @@ impl MempoolHub {
     }
 
     pub fn mark_local_origin(&self, txid: Txid) {
-        self.local_origin.lock().unwrap().insert(txid);
-        if self.isolated_broadcast() {
-            let _ = self.isolated_kick.send(txid);
+        let queue = self.isolated_broadcast();
+        self.local_origin.lock().unwrap().insert(txid, queue);
+        if queue {
+            self.isolated_wake.notify_one();
         }
     }
 
-    pub fn subscribe_isolated(&self) -> broadcast::Receiver<Txid> {
-        self.isolated_kick.subscribe()
+    /// The oldest local tx waiting for isolated broadcast, and how many wait
+    /// behind it. Each queued tx is returned once, and only while it is in
+    /// the mempool.
+    pub async fn next_isolated(&self) -> (Txid, usize) {
+        loop {
+            if let Some(next) = self.local_origin.lock().unwrap().take() {
+                return next;
+            }
+            // A `notify_one` with no waiter leaves a permit, so a mark
+            // between `take` and here still wakes this await.
+            self.isolated_wake.notified().await;
+        }
     }
 
     pub fn is_local_origin(&self, txid: &Txid) -> bool {
-        self.local_origin.lock().unwrap().contains(txid)
+        self.local_origin.lock().unwrap().txs.contains_key(txid)
     }
 
     pub fn set_isolated_broadcast(&self, on: bool) {
