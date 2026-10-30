@@ -129,8 +129,10 @@ child-with-parents remainder (package feerate). Esplora `POST /txs/package`
 is atomic `accept_package`. No P2P package command. BIP331 `NetworkMessage`
 needs a rust-bitcoin upgrade.
 
-**Misbehavior:** per-session disconnect score (threshold 100) for unsolicited/bad compact
-payloads and oversized pending-cmpct pressure; disconnects the peer.
+**Misbehavior:** per-session disconnect score (threshold 100) for malformed or bad compact
+payloads and oversized pending-cmpct pressure; disconnects the peer. An unsolicited compact
+block from a peer that is not high-bandwidth is not misbehavior: it is a header announcement,
+and any body that header path makes fetchable is asked as a full block (Core #32606).
 
 **BIP324 v2 only** — discovery is v2-filtered (`x809` DNS + `P2P_V2` gossip);
 see [`OPERATOR.md`](../OPERATOR.md) § P2P transport. Expect fewer usable

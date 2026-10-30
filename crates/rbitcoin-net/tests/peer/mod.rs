@@ -2069,6 +2069,7 @@ fn cmpct_helpers_with_mempool_skip_list_live() {
     rt.block_on(async {
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
         let mut follow = PeerFollowState::new();
+        follow.cmpct_version = 2;
         handle_peer_frame(
             frame_for(NetworkMessage::CmpctBlock(CmpctBlock {
                 compact_block: hsi_fail,
@@ -2128,6 +2129,7 @@ fn cmpct_helpers_with_mempool_skip_list_live() {
     rt.block_on(async {
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
         let mut follow = PeerFollowState::new();
+        follow.cmpct_version = 2;
         handle_peer_frame(
             frame_for(NetworkMessage::CmpctBlock(CmpctBlock {
                 compact_block: hsi_ok,
@@ -5573,7 +5575,7 @@ fn inbound_cmpct_reconstruct_runs_off_the_reactor() {
             let (out_tx, _rx) = mpsc::unbounded_channel();
             let mut follow = PeerFollowState::new();
             follow.requested_blocks.insert(hash);
-            on_cmpctblock_reconstruct(&hub, &out_tx, &mut follow, None, &hsi, hash, true)
+            on_cmpctblock_reconstruct(&hub, &out_tx, &mut follow, None, &hsi, hash)
                 .await
                 .expect("reconstruct");
         })

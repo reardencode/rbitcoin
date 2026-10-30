@@ -1413,6 +1413,7 @@ async fn bad_pow_cmpct_does_not_scan_mempool() {
     let scans = mp.cmpct_avail_scans();
     let plain = live_peer(&peers, 18510, 30, true);
     let mut follow = PeerFollowState::new();
+    follow.cmpct_version = 2;
     push(
         &hub,
         &out_tx,
@@ -1461,6 +1462,7 @@ async fn bad_pow_cmpct_does_not_scan_mempool() {
     peers.set_noban(true);
     let noban = live_peer(&peers, 18511, 31, true);
     let mut follow = PeerFollowState::new();
+    follow.cmpct_version = 2;
     let scans = mp.cmpct_avail_scans();
     push(
         &hub,
@@ -1479,6 +1481,7 @@ async fn bad_pow_cmpct_does_not_scan_mempool() {
 
     let manual = live_peer_as(&peers, 18512, 32, rbitcoin_net::peers::PeerConnType::Manual);
     let mut follow = PeerFollowState::new();
+    follow.cmpct_version = 2;
     let scans = mp.cmpct_avail_scans();
     push(
         &hub,
@@ -1531,7 +1534,9 @@ async fn bad_pow_cmpct_does_not_scan_mempool() {
     assert!(hub.header_claimed_pow_ok(&hsi.header));
     let scans = mp.cmpct_avail_scans();
     let peer = live_peer(&peers, 18513, 33, true);
+    peer.set_hb_to(true);
     let mut follow = PeerFollowState::new();
+    follow.cmpct_version = 2;
     push(
         &hub,
         &out_tx,

@@ -124,6 +124,16 @@ unless `--prefill-compact=0`. A pending compact owns the first-pass slot
 bodies (mempool / extra / orphan hits). `blocktxn` overlays only the missing
 indexes; apply does not re-walk a live short-id map.
 
+As in Core ([bitcoin/bitcoin#32606](https://github.com/bitcoin/bitcoin/pull/32606)),
+a `cmpctblock` is ignored before its header is read under `-blocksonly` or
+from a peer that never sent `sendcmpct` version 2. An unsolicited one is
+reconstructed only from a peer we sent `sendcmpct(1)`. From any other peer
+it is a header announcement: the header path is stored, the bodies that
+path makes fetchable (a path with more work than the tip, not yet held or
+asked by any session) are a full-block `getdata`, and no `getblocktxn` is
+sent. A header below the anti-DoS work floor is dropped. "Unsolicited" means
+this session did not ask for the block. Neither case is misbehavior.
+
 ## Core-class JSON-RPC (subset)
 
 Per-method notes, auth, and the shindex matrix live in
