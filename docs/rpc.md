@@ -74,6 +74,9 @@ body must finish within 30 seconds; waiting for the next keep-alive request
 uses the same header deadline. Expiry closes the connection and releases its
 slot. These read deadlines do not limit execution of a complete RPC request,
 including long-poll calls. The deadlines are fixed, with no operator knob.
+Each JSON-RPC body is one JSON value and a trailing newline. Object keys
+are `jsonrpc` (2.0 only), then `result`, then `error`, then `id`, and a
+key the response does not carry is omitted.
 
 The Core-functional proxy still
 speaks TestNode cookie + HTTP Basic on the public port and forwards Bearer
