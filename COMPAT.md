@@ -106,7 +106,11 @@ orphanage + a recent-confirmed txid/wtxid ring (filled at tip connect and IBD wr
 Class A `tx_fk_by_txid_tip`. Re-delivery of an already-parked orphan still
 GETDATAs missing parents (TTL) but does not log a second `txrelay: park`.
 
-Inbound `cmpctblock` may prefill any well-formed indexes (BIP152). We always
+Inbound `cmpctblock` may prefill any well-formed indexes (BIP152). A
+`cmpctblock` that fails Core `InitData` disconnects, requested or not: no txs,
+more than `MAX_BLOCK_TX_COUNT` (100,000), or a prefilled index that is out of
+range or past 16 bits. Core's decoder already drops one above 65,535 txs with
+no score. We decode up to the cap, so 65,536–100,000 still reconstructs. We always
 log reconstruct fill sources and `fetched=` `blocktxn` bytes, and outbound
 `cmpct announce … prefill=N/bytes` when we send `cmpctblock` (tip announce or
 `MSG_CMPCT_BLOCK` getdata). **Sending** extra prefills (beyond coinbase) is on

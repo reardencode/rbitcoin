@@ -81,9 +81,12 @@ pub fn v2_header_hashes(contents: &[u8]) -> Option<Vec<BlockHash>> {
 /// Prefill indexes must decode in-range. Out-of-range is a malformed `cmpctblock`.
 pub fn prefilled_indexes_ok(hsi: &HeaderAndShortIds) -> bool {
     let total = hsi.short_ids.len().saturating_add(hsi.prefilled_txs.len());
+    if total == 0 || total > rbitcoin_consensus::MAX_BLOCK_TX_COUNT {
+        return false;
+    }
     let mut last: Option<usize> = None;
     for (abs, _) in prefilled_absolute_indexes(hsi) {
-        if abs >= total {
+        if abs >= total || abs > usize::from(u16::MAX) {
             return false;
         }
         if last.is_some_and(|p| abs <= p) {
