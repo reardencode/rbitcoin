@@ -81,7 +81,8 @@ pub fn v2_header_hashes(contents: &[u8]) -> Option<Vec<BlockHash>> {
 /// Core `PartiallyDownloadedBlock::InitData` shape. A failure is a malformed
 /// `cmpctblock`: no txs, more than [`rbitcoin_consensus::MAX_BLOCK_TX_COUNT`],
 /// a null prefilled tx (no inputs and no outputs), or a prefilled index that
-/// is out of range, not increasing, or past 16 bits.
+/// is out of range or not increasing. The 16-bit limits belong to the
+/// `cmpctblock` decoder, as in Core.
 pub fn cmpct_init_data_ok(hsi: &HeaderAndShortIds) -> bool {
     let total = hsi.short_ids.len().saturating_add(hsi.prefilled_txs.len());
     if total == 0 || total > rbitcoin_consensus::MAX_BLOCK_TX_COUNT {
@@ -96,7 +97,7 @@ pub fn cmpct_init_data_ok(hsi: &HeaderAndShortIds) -> bool {
     }
     let mut last: Option<usize> = None;
     for (abs, _) in prefilled_absolute_indexes(hsi) {
-        if abs >= total || abs > usize::from(u16::MAX) {
+        if abs >= total {
             return false;
         }
         if last.is_some_and(|p| abs <= p) {

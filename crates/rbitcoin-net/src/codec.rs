@@ -478,8 +478,10 @@ pub fn tx_family_too_large(command: &[u8; 12], payload: &[u8]) -> Option<usize> 
     }
 }
 
-/// BIP152 `HeaderAndShortIds` as Core reads it. Only a prefilled tx differs
-/// from rust-bitcoin: see [`take_core_null_tx`].
+/// BIP152 `HeaderAndShortIds` as Core reads it. Beyond rust-bitcoin, a
+/// prefilled null tx decodes ([`take_core_null_tx`]), and like Core's
+/// deserializer a prefilled index or tx count past 16 bits fails the decode,
+/// which the session drops with no score.
 fn decode_header_and_short_ids(
     d: &mut &[u8],
 ) -> Result<bitcoin::bip152::HeaderAndShortIds, bitcoin::consensus::encode::Error> {
@@ -488,7 +490,10 @@ fn decode_header_and_short_ids(
     let nonce = u64::consensus_decode(d)?;
     let short_ids = Vec::<ShortId>::consensus_decode(d)?;
     let n = bitcoin::consensus::encode::VarInt::consensus_decode(d)?.0;
+    let overflow =
+        bitcoin::consensus::encode::Error::ParseFailed("BIP152 indexes overflowed 16 bits");
     let mut prefilled_txs = Vec::new();
+    let mut next_abs: u64 = 0;
     for _ in 0..n {
         let idx = bitcoin::consensus::encode::VarInt::consensus_decode(d)?.0;
         let idx = u16::try_from(idx).map_err(|_| {
@@ -496,11 +501,19 @@ fn decode_header_and_short_ids(
                 "BIP152 prefilled tx index out of bounds",
             )
         })?;
+        next_abs += u64::from(idx);
+        if next_abs > u64::from(u16::MAX) {
+            return Err(overflow);
+        }
+        next_abs += 1;
         let tx = match take_core_null_tx(d) {
             Some(tx) => tx,
             None => bitcoin::Transaction::consensus_decode(d)?,
         };
         prefilled_txs.push(PrefilledTransaction { idx, tx });
+    }
+    if short_ids.len().saturating_add(prefilled_txs.len()) > usize::from(u16::MAX) {
+        return Err(overflow);
     }
     Ok(HeaderAndShortIds {
         header,
