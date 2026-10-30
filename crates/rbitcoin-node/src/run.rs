@@ -742,7 +742,6 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             config.listen.isolated_dialer(),
             std::sync::Arc::clone(&shared_peers),
             node.magic(),
-            node.user_agent().to_string(),
         );
     }
     if proxy_seeds_queued && addrman.is_empty() {

@@ -171,8 +171,12 @@ disconnects. Each transaction draws its own peers, as Core's private
 broadcast does: a network at random, then a peer in it at random, so two
 of your transactions do not share recipients by rule. An IPv4/IPv6 peer is
 only reached through `--proxy`, never directly: with `--onion` alone, only
-onion peers get the tx. I2P and CJDNS peers are never used. This is **not** Dandelion++. If that
-one-shot fails, the tx stays in the mempool and is still not INV'd;
+onion peers get the tx. I2P and CJDNS peers are never used. That
+handshake sends Bitcoin Core's private-broadcast VERSION, the same from
+every sender: no service bits, time 0, no addresses, user agent
+`/pynode:0.0.1/`, height 0, and relay off. It sends no `wtxidrelay` or
+`sendaddrv2`, and it skips a peer whose own VERSION has relay off. This
+is **not** Dandelion++. If that one-shot fails, the tx stays in the mempool and is still not INV'd;
 confirmation can still arrive in a block.
 `--onion HOST:PORT` stores a separate SOCKS endpoint for onion destinations.
 `--only-net onion` (repeatable with `ipv4`/`ipv6`/`i2p`/`cjdns`) filters dial and learn;

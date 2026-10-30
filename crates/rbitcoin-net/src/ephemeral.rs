@@ -1,7 +1,9 @@
 //! One-shot isolated SOCKS broadcast of locally submitted transactions.
 
 use crate::error::NetError;
-use crate::peer::{connect_and_handshake_timed, HandshakePolicy, HANDSHAKE_TIMEOUT};
+use crate::peer::{
+    connect_and_handshake_timed, HandshakePolicy, HANDSHAKE_TIMEOUT, PRIVATE_BROADCAST_USER_AGENT,
+};
 use crate::seeds::AddrMan;
 use crate::socks::Dialer;
 use crate::tx_relay::MempoolHub;
@@ -59,9 +61,8 @@ pub async fn send_tx_isolated(
     target: NetAddr,
     magic: Magic,
     tx: Transaction,
-    user_agent: &str,
 ) -> Result<(), NetError> {
-    send_tx_isolated_timed(dialer, target, magic, tx, user_agent, HANDSHAKE_TIMEOUT).await
+    send_tx_isolated_timed(dialer, target, magic, tx, HANDSHAKE_TIMEOUT).await
 }
 
 pub async fn send_tx_isolated_timed(
@@ -69,7 +70,6 @@ pub async fn send_tx_isolated_timed(
     target: NetAddr,
     magic: Magic,
     tx: Transaction,
-    user_agent: &str,
     limit: Duration,
 ) -> Result<(), NetError> {
     let stream = dialer.connect_isolated_net(target).await?;
@@ -87,8 +87,8 @@ pub async fn send_tx_isolated_timed(
         their,
         0,
         false,
-        user_agent,
-        HandshakePolicy::plain(),
+        PRIVATE_BROADCAST_USER_AGENT,
+        HandshakePolicy::private_broadcast(),
     )
     .await?;
     write_v2_msg(&mut writer, NetworkMessage::Tx(tx)).await?;
@@ -103,7 +103,6 @@ pub async fn isolated_broadcast_known_tx(
     dialer: &Dialer,
     addrman: &Mutex<AddrMan>,
     magic: Magic,
-    user_agent: &str,
     txid: bitcoin::Txid,
     tx: Transaction,
     in_pool: impl Fn() -> bool,
@@ -125,7 +124,7 @@ pub async fn isolated_broadcast_known_tx(
             rbitcoin_log::info!("isolated broadcast {txid}: left the mempool, not sent to {t}");
             return;
         }
-        match send_tx_isolated(dialer, t, magic, tx.clone(), user_agent).await {
+        match send_tx_isolated(dialer, t, magic, tx.clone()).await {
             Ok(()) => rbitcoin_log::info!("isolated broadcast {txid} to {t}: sent"),
             Err(e) => rbitcoin_log::warn!("isolated broadcast {txid} to {t}: {e}"),
         }
@@ -137,7 +136,6 @@ pub fn spawn_isolated_broadcast_loop(
     dialer: Dialer,
     addrman: Arc<Mutex<AddrMan>>,
     magic: Magic,
-    user_agent: String,
 ) -> JoinHandle<()> {
     if !mp.isolated_broadcast() {
         return tokio::spawn(async {});
@@ -173,8 +171,7 @@ pub fn spawn_isolated_broadcast_loop(
             // `unindex_txid` drops the local-origin entry on every removal,
             // and this check never waits on the mempool lock.
             let in_pool = || mp.is_local_origin(&txid);
-            isolated_broadcast_known_tx(&dialer, &addrman, magic, &user_agent, txid, tx, in_pool)
-                .await;
+            isolated_broadcast_known_tx(&dialer, &addrman, magic, txid, tx, in_pool).await;
         }
     })
 }
