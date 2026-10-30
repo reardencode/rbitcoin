@@ -644,3 +644,79 @@ fn withheld_locator_header_does_not_seal_the_tip() {
     assert_eq!(marker.durable_through(), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn shorten_creates(s: &Store, n: u64) {
+    let txs = &s.txs;
+    let stems = rbitcoin_store::tx_table::ClassASkewStems {
+        create_loc: &txs.create_loc,
+        seqsigwit_loc: &txs.seqsigwit_loc,
+        body: &txs.body,
+        spent: &txs.spent,
+        seqsigwit: &txs.seqsigwit,
+        txids: &txs.txids,
+        txstat: &txs.txstat,
+        input: &txs.input,
+    };
+    let (tx_end, sp_end, in_end) =
+        rbitcoin_store::tx_table::class_a_skew_stem_ends(&stems, n, false).unwrap();
+    rbitcoin_store::tx_table::class_a_skew_apply_truncate(
+        &stems,
+        n,
+        txs.txids.count(),
+        tx_end,
+        sp_end,
+        in_end,
+        false,
+    )
+    .unwrap();
+}
+
+/// The tail's header range was cleared and flushed. The tip shrink did not
+/// land. Reopen still drops that tip. Genesis keeps its body.
+#[test]
+fn cleared_tail_range_still_drops_the_sealed_tip() {
+    let dir = tmp();
+    let s = Store::create_tiny(&dir).unwrap();
+    let write = rbitcoin_store::ClassCWrite::for_test();
+    let (genesis, parent) = connect_coinbase(&s, &write, 0, Fk::NULL, [0u8; 32]);
+    let (tail, _) = connect_coinbase(&s, &write, 1, genesis, parent);
+    s.flush_class_c_tip().unwrap();
+    s.txs.flush().unwrap();
+    shorten_creates(&s, 1);
+    s.header_txs.clear_body(&write, tail).unwrap();
+    s.header_txs.flush().unwrap();
+    assert_eq!(s.confirmed.tip_height(), Some(Height(1)));
+    drop(s);
+
+    let s = Store::open_tiny(&dir).unwrap();
+    assert_eq!(s.confirmed.tip_height(), Some(Height(0)));
+    assert!(s.header_txs.has_body(genesis).unwrap());
+    assert!(!s.header_txs.has_body(tail).unwrap());
+    assert_eq!(s.txs.count(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Every header range was cleared, including genesis, and the empty-tip
+/// shrink did not land. Reopen drops the tip and leaves no body association.
+#[test]
+fn cleared_anchor_range_still_drops_the_tip() {
+    let dir = tmp();
+    let s = Store::create_tiny(&dir).unwrap();
+    let write = rbitcoin_store::ClassCWrite::for_test();
+    let (genesis, parent) = connect_coinbase(&s, &write, 0, Fk::NULL, [0u8; 32]);
+    let (tail, _) = connect_coinbase(&s, &write, 1, genesis, parent);
+    s.flush_class_c_tip().unwrap();
+    s.txs.flush().unwrap();
+    shorten_creates(&s, 0);
+    s.header_txs.clear_body(&write, genesis).unwrap();
+    s.header_txs.clear_body(&write, tail).unwrap();
+    s.header_txs.flush().unwrap();
+    assert_eq!(s.confirmed.tip_height(), Some(Height(1)));
+    drop(s);
+
+    let s = Store::open_tiny(&dir).unwrap();
+    assert_eq!(s.confirmed.tip_height(), None);
+    assert!(!s.header_txs.has_body(genesis).unwrap());
+    assert!(!s.header_txs.has_body(tail).unwrap());
+    let _ = std::fs::remove_dir_all(&dir);
+}

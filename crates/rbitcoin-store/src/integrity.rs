@@ -8,7 +8,8 @@
 //! Class C barrier so a kill that advanced `confirmed` without a complete seal
 //! can be clamped before revalidation. The barrier does not seal a tip whose
 //! tx range ends past the durable create count. Open still drops a tip that
-//! a later Class A truncate left past that count.
+//! a later Class A truncate left past that count, including when the header
+//! clear landed and the tip shrink did not.
 
 use crate::error::StoreError;
 use crate::header_table::block_header_hash;
@@ -616,40 +617,54 @@ impl Store {
     }
 
     /// After open truncates Class A, drop confirmed heights whose tx range
-    /// ends past that count. A tip with no such range (trailing nulls,
-    /// header-only) stays. A Class C fixture has a range and no archive.
+    /// ends past that count. The header clear is flushed before the tip
+    /// shrink. A crash after that clear still shrinks: the strong bit past
+    /// the count is set and the range is already gone. Trailing nulls, a
+    /// header-only tip, and a Class C fixture are not this drop.
     pub(crate) fn drop_confirmed_past_creates(&self) -> Result<(), StoreError> {
         let covered = self.txs.count();
-        let Some(bad) = self.class_a_confirmed_cut(covered)? else {
-            return Ok(());
-        };
-        match self.header_tx_end(Height(bad))? {
-            Some(end) if end > covered => {}
-            _ => return Ok(()),
-        }
-        if covered == 0 && !self.txs.bodies_allocated_past_header() {
-            return Ok(());
-        }
         let Some(tip) = self.confirmed.tip_height() else {
             return Ok(());
         };
         let write = crate::array_table::ClassCWrite::new();
-        let mut fks = Vec::new();
-        for h in bad..=tip.0 {
-            if let Some(fk) = self.confirmed.get(Height(h))? {
-                fks.push(fk);
-            }
-        }
-        let kept = bad.checked_sub(1);
         let mut report = TipRevalidateReport::default();
-        if bad == 0 {
-            self.shrink_tip_to(&write, None, &mut report)?;
-            self.clear_header_fks(&write, &fks)?;
-        } else {
-            self.clear_header_fks(&write, &fks)?;
-            self.shrink_tip_to(&write, kept, &mut report)?;
+        if let Some(bad) = self.class_a_confirmed_cut(covered)? {
+            let kept = bad.checked_sub(1);
+            match self.header_tx_end(Height(bad))? {
+                Some(end) if end > covered => {
+                    if covered == 0 && !self.txs.bodies_allocated_past_header() {
+                        return Ok(());
+                    }
+                    let mut fks = Vec::new();
+                    for h in bad..=tip.0 {
+                        if let Some(fk) = self.confirmed.get(Height(h))? {
+                            fks.push(fk);
+                        }
+                    }
+                    self.clear_header_fks(&write, &fks)?;
+                    self.shrink_tip_to(&write, kept, &mut report)?;
+                }
+                None if self.strong_past_covered(covered)? => {
+                    self.shrink_tip_to(&write, kept, &mut report)?;
+                }
+                _ => {}
+            }
+            return Ok(());
         }
-        Ok(())
+        if self.header_tx_end(tip)?.is_some() || !self.strong_past_covered(covered)? {
+            return Ok(());
+        }
+        if self.highest_height_with_tx_range(tip.0)?.is_some() {
+            return Ok(());
+        }
+        self.shrink_tip_to(&write, None, &mut report)
+    }
+
+    fn strong_past_covered(&self, covered: u64) -> Result<bool, StoreError> {
+        let Some(fk) = Fk::new(covered.saturating_add(1)) else {
+            return Ok(false);
+        };
+        self.strong_tx.is_strong(fk)
     }
 
     fn clear_header_fks(
