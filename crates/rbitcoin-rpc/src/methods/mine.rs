@@ -179,6 +179,154 @@ pub fn generate_with_mempool(
     Ok(hashes_json(&hashes))
 }
 
+pub async fn generate_with_mempool_async(
+    ctx: &RpcContext,
+    nblocks: u32,
+    script: ScriptBuf,
+) -> Result<Value, Value> {
+    let Some(chain) = ctx.chain.clone() else {
+        return Err(rpc_error(ERR_MISC, "generate requires a live chain hub"));
+    };
+    if nblocks == 0 {
+        return Ok(hashes_json(&[]));
+    }
+    let blocksonly = ctx.blocksonly;
+    let mempool = ctx.mempool.clone();
+    let min = chain.block_min_tx_fee_sat_kvb();
+    let extras = crate::methods::off_pool(move || -> Vec<Transaction> {
+        let downloading = !blocksonly && mempool.as_ref().is_some_and(|m| !m.pool_maintained());
+        if downloading {
+            return Vec::new();
+        }
+        mempool
+            .as_ref()
+            .map(|mp| mp.select_generate_txs(min))
+            .unwrap_or_default()
+    })
+    .await;
+    let hashes = chain
+        .generate_to_script_for_rpc_async(nblocks, script, extras, true)
+        .await
+        .map_err(|e| rpc_error(ERR_MISC, submit_reject_reason(&e)))?;
+    Ok(hashes_json(&hashes))
+}
+
+pub async fn generate_async(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
+    params.reject_unknown(&["nblocks", "maxtries"])?;
+    if params.get(0, "nblocks").is_none() {
+        return Err(rpc_error(ERR_METHOD_NOT_FOUND, GENERATE_REPLACED));
+    }
+    let _miner = require_regtest_miner(ctx, "generate")?;
+    let nblocks = params.req_u64(0, "nblocks")? as u32;
+    let _maxtries = params.opt_u64(1, "maxtries")?;
+    let script = ScriptBuf::from_bytes(vec![rbitcoin_primitives::OP_TRUE]);
+    generate_with_mempool_async(ctx, nblocks, script).await
+}
+
+pub async fn generatetoaddress_async(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
+    params.reject_unknown(&["nblocks", "address", "maxtries"])?;
+    let _miner = require_regtest_miner(ctx, "generatetoaddress")?;
+    let nblocks = params.req_u64(0, "nblocks")? as u32;
+    let addr = params.req_str(1, "address")?;
+    let _maxtries = params.opt_u64(2, "maxtries")?;
+    let script = decode_output_script(ctx, addr)?;
+    generate_with_mempool_async(ctx, nblocks, script).await
+}
+
+pub async fn generatetodescriptor_async(
+    ctx: &RpcContext,
+    params: &RpcParams,
+) -> Result<Value, Value> {
+    params.reject_unknown(&["num_blocks", "descriptor", "maxtries"])?;
+    let _miner = require_regtest_miner(ctx, "generatetodescriptor")?;
+    let nblocks = params.req_u64(0, "num_blocks")? as u32;
+    let desc = params.req_str(1, "descriptor")?;
+    let _maxtries = params.opt_u64(2, "maxtries")?;
+    let script = parse_output_descriptor(ctx, desc)?;
+    generate_with_mempool_async(ctx, nblocks, script).await
+}
+
+pub async fn generateblock_async(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
+    params.reject_unknown(&["output", "transactions", "submit"])?;
+    let miner_name = "generateblock";
+    let _miner = require_regtest_miner(ctx, miner_name)?;
+    let output = params.req_str(0, "output")?.to_string();
+    let script = parse_generateblock_output(ctx, &output)?;
+    let submit = params.opt_bool(2, "submit")?.unwrap_or(true);
+    let tx_params = params.get(1, "transactions").cloned();
+    let mempool = ctx.mempool.clone();
+    let chain = ctx
+        .chain
+        .clone()
+        .ok_or_else(|| rpc_error(ERR_MISC, "generateblock requires a live chain hub"))?;
+    let extra = crate::methods::off_pool(move || -> Result<Vec<Transaction>, Value> {
+        chain.note_block_assembled(0, 0);
+        let Some(v) = tx_params else {
+            return Err(rpc_error(ERR_INVALID_PARAMS, "transactions required"));
+        };
+        let Some(arr) = v.as_array() else {
+            return Err(rpc_error(ERR_INVALID_PARAMS, "transactions must be an array"));
+        };
+        let mut extra = Vec::new();
+        for v in arr {
+            let s = v.as_str().ok_or_else(|| {
+                rpc_error(ERR_INVALID_PARAMS, "transactions entries must be hex or txid")
+            })?;
+            if s.len() == 64 {
+                if let Ok(tid) = parse_hash32_display(s) {
+                    let txid = Txid::from_byte_array(tid);
+                    if let Some(mp) = mempool.as_ref() {
+                        if let Some(tx) = mp.get_tx(&txid) {
+                            extra.push(tx);
+                            continue;
+                        }
+                    }
+                    return Err(rpc_error(
+                        ERR_INVALID_ADDRESS_OR_KEY,
+                        format!("Transaction {s} not in mempool."),
+                    ));
+                }
+            }
+            match decode_tx_hex(s) {
+                Ok(tx) => extra.push(tx),
+                Err(_) => {
+                    return Err(rpc_error(
+                        ERR_DESERIALIZATION,
+                        format!(
+                            "Transaction decode failed for {s}. Make sure the tx has at least one input."
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(extra)
+    })
+    .await?;
+    if !submit {
+        let chain = ctx.chain.clone().unwrap();
+        let block = crate::methods::off_pool(move || {
+            chain
+                .assemble_block_to_script(script, extra)
+                .map_err(|e| generateblock_validity_error(&e.to_string()))
+        })
+        .await?;
+        return Ok(json!({
+            "hash": block.block_hash().to_string(),
+            "hex": serialize_hex(&block),
+        }));
+    }
+    let chain = ctx.chain.clone().unwrap();
+    let extra_for_err = extra.clone();
+    let hashes = chain
+        .generate_to_script_for_rpc_async(1, script, extra, false)
+        .await
+        .map_err(|e| generateblock_missing_input_error(&e.to_string(), &extra_for_err))?;
+    let hash = hashes
+        .first()
+        .ok_or_else(|| rpc_error(ERR_MISC, "generateblock produced no block"))?;
+    Ok(json!({ "hash": hash.to_string() }))
+}
+
 pub fn generatetoaddress(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["nblocks", "address", "maxtries"])?;
     let _miner = require_regtest_miner(ctx, "generatetoaddress")?;
@@ -1268,33 +1416,40 @@ pub fn fill_witness_reserved_value(hub: &rbitcoin_net::ChainHub, block: &mut Blo
     }
 }
 
-/// Same receive path as P2P `block` (all networks).
-pub fn submit_received_block(hub: &rbitcoin_net::ChainHub, mut block: Block) -> SubmitBlockOutcome {
+enum SubmitPrep {
+    Done(SubmitBlockOutcome),
+    Ready { block: Block, already_held: bool },
+}
+
+/// Cheap `submitblock` checks. The connect itself is separate so HTTP can await
+/// it off the blocking pool.
+fn prepare_submit(hub: &rbitcoin_net::ChainHub, mut block: Block) -> SubmitPrep {
     use bitcoin::Target;
-    use rbitcoin_net::AcceptOutcome;
     let hash = block.block_hash();
     if hub.is_block_invalid(&hash) {
-        return SubmitBlockOutcome::Rejected("duplicate-invalid".into());
+        return SubmitPrep::Done(SubmitBlockOutcome::Rejected("duplicate-invalid".into()));
     }
     // Read before accept parks a first-time side block. A block we already
     // hold, and that still does not beat the tip, is Core's `duplicate`.
     let already_held = hub.held_body(&hash).is_some();
     let target = Target::from_compact(block.header.bits);
     if block.header.validate_pow(target).is_err() {
-        return SubmitBlockOutcome::Rejected("high-hash".into());
+        return SubmitPrep::Done(SubmitBlockOutcome::Rejected("high-hash".into()));
     }
     let prev = block.header.prev_blockhash.to_byte_array();
     let prev_header = match hub.query.get_header_by_hash(&prev) {
         Ok(h) => h.is_some(),
         Err(rbitcoin_store::StoreError::NotFound) => false,
-        Err(e) => return SubmitBlockOutcome::Error(format!("store: {e}")),
+        Err(e) => {
+            return SubmitPrep::Done(SubmitBlockOutcome::Error(format!("store: {e}")));
+        }
     };
     let known = prev_header
         || hub
             .held_body(&bitcoin::BlockHash::from_byte_array(prev))
             .is_some();
     if !known {
-        return SubmitBlockOutcome::Rejected("prev-blk-not-found".into());
+        return SubmitPrep::Done(SubmitBlockOutcome::Rejected("prev-blk-not-found".into()));
     }
     fill_witness_reserved_value(hub, &mut block);
     match cheap_submit_tx_reject(
@@ -1304,7 +1459,7 @@ pub fn submit_received_block(hub: &rbitcoin_net::ChainHub, mut block: Block) -> 
         &hub.params,
         hub.milestone,
     ) {
-        Err(e) => return SubmitBlockOutcome::Error(format!("store: {e}")),
+        Err(e) => SubmitPrep::Done(SubmitBlockOutcome::Error(format!("store: {e}"))),
         Ok(Some(reason)) => {
             // Merkle and witness bytes are not the block hash. A coinbase-less
             // 64-byte body can be the header's inner nodes. Those reasons must
@@ -1315,21 +1470,33 @@ pub fn submit_received_block(hub: &rbitcoin_net::ChainHub, mut block: Block) -> 
                 hub.note_invalid_block(hash);
                 let _ = hub.ensure_header(&block.header);
             }
-            return SubmitBlockOutcome::Rejected(reason);
+            SubmitPrep::Done(SubmitBlockOutcome::Rejected(reason))
         }
-        Ok(None) => {}
+        Ok(None) => SubmitPrep::Ready {
+            block,
+            already_held,
+        },
     }
-    match hub.accept_received_block(block.clone()) {
+}
+
+fn finish_submit(
+    hub: &rbitcoin_net::ChainHub,
+    already_held: bool,
+    block: &Block,
+    result: Result<rbitcoin_net::AcceptOutcome, rbitcoin_net::NetError>,
+) -> SubmitBlockOutcome {
+    use rbitcoin_net::AcceptOutcome;
+    let hash = block.block_hash();
+    match result {
         Ok(AcceptOutcome::Accepted { .. }) => SubmitBlockOutcome::Accepted,
         Ok(AcceptOutcome::AlreadyHave) => SubmitBlockOutcome::Duplicate,
         Ok(AcceptOutcome::IgnoredWeaker) if already_held => SubmitBlockOutcome::Duplicate,
         Ok(AcceptOutcome::IgnoredWeaker) => SubmitBlockOutcome::IgnoredWeaker,
-        // Core: an interrupted ProcessNewBlock never fires BlockChecked.
         Err(rbitcoin_net::NetError::Cancelled) => SubmitBlockOutcome::IgnoredWeaker,
         Err(e) if e.is_local_fault() => SubmitBlockOutcome::Error(e.to_string()),
         Err(e) => {
             let reason = submit_reject_reason(&e);
-            if submit_reason_sticks(hub, &block, &reason)
+            if submit_reason_sticks(hub, block, &reason)
                 && !(hub.query.trust_peer()
                     && rbitcoin_net::chain::accept_err_is_warn_and_apply(&e))
             {
@@ -1338,6 +1505,31 @@ pub fn submit_received_block(hub: &rbitcoin_net::ChainHub, mut block: Block) -> 
             }
             SubmitBlockOutcome::Rejected(reason)
         }
+    }
+}
+
+/// Same receive path as P2P `block` (all networks). Sync: stack hubs and
+/// in-process `dispatch()`. HTTP uses [`submitblock_async`].
+pub fn submit_received_block(hub: &rbitcoin_net::ChainHub, block: Block) -> SubmitBlockOutcome {
+    match prepare_submit(hub, block) {
+        SubmitPrep::Done(outcome) => outcome,
+        SubmitPrep::Ready {
+            block,
+            already_held,
+        } => {
+            let result = hub.accept_received_block(block.clone());
+            finish_submit(hub, already_held, &block, result)
+        }
+    }
+}
+
+fn submit_outcome_json(outcome: SubmitBlockOutcome) -> Result<Value, Value> {
+    match outcome {
+        SubmitBlockOutcome::Accepted => Ok(Value::Null),
+        SubmitBlockOutcome::Duplicate => Ok(json!("duplicate")),
+        SubmitBlockOutcome::IgnoredWeaker => Ok(json!("inconclusive")),
+        SubmitBlockOutcome::Rejected(reason) => Ok(json!(reason)),
+        SubmitBlockOutcome::Error(msg) => Err(rpc_error(ERR_VERIFY_ERROR, msg)),
     }
 }
 
@@ -1639,13 +1831,35 @@ pub fn submitblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value>
     } else {
         return Err(rpc_error(ERR_MISC, "submitblock requires a live chain hub"));
     };
-    match outcome {
-        SubmitBlockOutcome::Accepted => Ok(Value::Null),
-        SubmitBlockOutcome::Duplicate => Ok(json!("duplicate")),
-        SubmitBlockOutcome::IgnoredWeaker => Ok(json!("inconclusive")),
-        SubmitBlockOutcome::Rejected(reason) => Ok(json!(reason)),
-        SubmitBlockOutcome::Error(msg) => Err(rpc_error(ERR_VERIFY_ERROR, msg)),
-    }
+    submit_outcome_json(outcome)
+}
+
+pub async fn submitblock_async(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
+    params.reject_unknown(&["hexdata", "dummy"])?;
+    let hex = params.req_str(0, "hexdata")?.to_string();
+    let Some(chain) = ctx.chain.clone() else {
+        return Err(rpc_error(ERR_MISC, "submitblock requires a live chain hub"));
+    };
+    let chain_prep = std::sync::Arc::clone(&chain);
+    let prepared = crate::methods::off_pool(move || -> Result<SubmitPrep, Value> {
+        let raw = rbitcoin_primitives::hex_decode(&hex)
+            .map_err(|_| rpc_error(ERR_DESERIALIZATION, "Block decode failed"))?;
+        let block: Block =
+            deserialize(&raw).map_err(|_| rpc_error(ERR_DESERIALIZATION, "Block decode failed"))?;
+        Ok(prepare_submit(&chain_prep, block))
+    })
+    .await?;
+    let outcome = match prepared {
+        SubmitPrep::Done(outcome) => outcome,
+        SubmitPrep::Ready {
+            block,
+            already_held,
+        } => {
+            let result = chain.accept_received_block_async(block.clone()).await;
+            finish_submit(&chain, already_held, &block, result)
+        }
+    };
+    submit_outcome_json(outcome)
 }
 
 pub fn decode_tx_hex(hex: &str) -> Result<Transaction, Value> {

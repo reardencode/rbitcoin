@@ -5645,3 +5645,90 @@ fn review_trust_merkle_mismatch_stays_refetchable() {
         "hash was marked permanently failed"
     );
 }
+
+#[test]
+fn connect_finishes_while_the_blocking_pool_is_parked() {
+    let (_dir, hub) = tmp_hub();
+    let hub = ChainHub::into_arc(hub);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    rt.spawn(async move {
+        tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
+            let _ = release_rx.recv();
+        });
+    });
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("pool thread did not park");
+    let hub_gen = Arc::clone(&hub);
+    let generated = rt.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            hub_gen.generate_to_script_for_rpc_async(
+                2,
+                ScriptBuf::from_bytes(vec![0x51]),
+                Vec::new(),
+                false,
+            ),
+        )
+        .await
+    });
+    let bogus = BlockHash::from_byte_array([0x44; 32]);
+    let hub_inv = Arc::clone(&hub);
+    let invalidated = rt.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            hub_inv.invalidate_block_async(bogus),
+        )
+        .await
+    });
+    let hub_re = Arc::clone(&hub);
+    let reconsidered = rt.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            hub_re.reconsider_block_async(bogus),
+        )
+        .await
+    });
+    let hub_pr = Arc::clone(&hub);
+    let precious = rt.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            hub_pr.precious_block_async(bogus),
+        )
+        .await
+    });
+    let _ = release_tx.send(());
+    let hashes = generated
+        .expect("generate timed out while the blocking pool was parked")
+        .expect("generate");
+    assert_eq!(hashes.len(), 2, "await between two connects");
+    let inv = invalidated
+        .expect("invalidate timed out")
+        .expect_err("unknown hash");
+    assert!(
+        inv.to_string().contains("Block not found"),
+        "invalidate ran on tip-accept: {inv}"
+    );
+    let re = reconsidered
+        .expect("reconsider timed out")
+        .expect_err("unknown hash");
+    assert!(
+        re.to_string().contains("Block not found"),
+        "reconsider ran on tip-accept: {re}"
+    );
+    let pr = precious
+        .expect("precious timed out")
+        .expect_err("unknown hash");
+    assert!(
+        pr.to_string().contains("Block not found"),
+        "precious ran on tip-accept: {pr}"
+    );
+}

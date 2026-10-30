@@ -17,6 +17,52 @@ pub use chain::{tip_hash_height, wait_timeout_ms};
 /// Cap for `waitfor*` and `getblocktemplate` long-poll. Not a knob.
 pub const RPC_WAIT_TIMEOUT_MS: u64 = 120_000;
 pub use mine::{gbt_template, submit_received_block};
+
+/// HTTP methods whose connect runs on `tip-accept` and must be awaited on the
+/// request task. In-process [`dispatch`] stays synchronous.
+pub fn tip_connect_method(name: &str) -> bool {
+    matches!(
+        name,
+        "submitblock"
+            | "generate"
+            | "generatetoaddress"
+            | "generatetodescriptor"
+            | "generateblock"
+            | "invalidateblock"
+            | "reconsiderblock"
+            | "preciousblock"
+    )
+}
+
+/// Run `f` on a fresh OS thread. Not the Tokio blocking pool.
+pub async fn off_pool<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("rbtc-off-pool".into())
+        .spawn(move || {
+            let _ = tx.send(f());
+        })
+        .expect("rbtc-off-pool");
+    rx.await.expect("rbtc-off-pool dropped")
+}
+
+pub async fn dispatch_tip_connect(
+    ctx: &RpcContext,
+    method: &str,
+    params: RpcParams,
+) -> Result<Value, Value> {
+    match method {
+        "submitblock" => mine::submitblock_async(ctx, &params).await,
+        "generate" => mine::generate_async(ctx, &params).await,
+        "generatetoaddress" => mine::generatetoaddress_async(ctx, &params).await,
+        "generatetodescriptor" => mine::generatetodescriptor_async(ctx, &params).await,
+        "generateblock" => mine::generateblock_async(ctx, &params).await,
+        "invalidateblock" => chain::invalidateblock_async(ctx, &params).await,
+        "reconsiderblock" => chain::reconsiderblock_async(ctx, &params).await,
+        "preciousblock" => chain::preciousblock_async(ctx, &params).await,
+        other => Err(rpc_error(ERR_METHOD_NOT_FOUND, other)),
+    }
+}
 pub use rest::{dispatch_rest, RestReply};
 thread_local! {
     static HTTP_WAIT_SATISFIED: Cell<bool> = const { Cell::new(false) };

@@ -587,13 +587,7 @@ impl Session {
         txdata.extend(r.t.txs.iter().map(|tx| Transaction::clone(tx)));
         let block = Block { header, txdata };
         let hash = block.block_hash();
-        let c = Arc::clone(&self.chain);
-        let outcome = tokio::task::spawn_blocking(move || {
-            let _g = BlockingRegion::enter();
-            c.accept_block(block)
-        })
-        .await
-        .map_err(io::Error::other)?;
+        let outcome = self.chain.accept_block_async(block).await;
         match outcome {
             Ok(o) => rbitcoin_log::info!("sv2: SubmitSolution {hash}: {o:?}"),
             Err(e) => rbitcoin_log::info!("sv2: SubmitSolution {hash} rejected: {e}"),

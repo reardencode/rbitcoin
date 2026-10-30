@@ -617,6 +617,13 @@ pub async fn rpc_post(State(state): State<AppState>, req: Request) -> Response {
                 .into_response();
         }
     };
+    if http_body_awaits_tip(&parsed) {
+        let out = exec_http_rpc_async(ctx, parsed, waited).await;
+        return match out {
+            HttpRpcOut::Json(status, body) => json_rpc_response(status, body),
+            HttpRpcOut::Empty(status) => status.into_response(),
+        };
+    }
     let joined = tokio::task::spawn_blocking(move || {
         let _g = BlockingRegion::enter();
         if waited {
@@ -773,6 +780,167 @@ pub fn v1_http_status(error: &serde_json::Value) -> StatusCode {
         Some(-32601) => StatusCode::NOT_FOUND,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
+}
+
+fn http_body_awaits_tip(parsed: &serde_json::Value) -> bool {
+    let method_awaits = |req: &serde_json::Value| {
+        req.get("method")
+            .and_then(|m| m.as_str())
+            .is_some_and(crate::methods::tip_connect_method)
+    };
+    if let Some(arr) = parsed.as_array() {
+        arr.iter().any(method_awaits)
+    } else {
+        method_awaits(parsed)
+    }
+}
+
+async fn exec_http_rpc_async(
+    ctx: Arc<RpcContext>,
+    parsed: serde_json::Value,
+    waited: bool,
+) -> HttpRpcOut {
+    if let Some(arr) = parsed.as_array() {
+        let mut out = Vec::new();
+        for req in arr {
+            match exec_one_async(&ctx, &req, waited).await {
+                OneOut::Reply(body) => out.push(body),
+                OneOut::Notification => {}
+                OneOut::BadVersion { error } => {
+                    out.push(reply_v1(
+                        Some(req.get("id").cloned().unwrap_or(serde_json::Value::Null)),
+                        None,
+                        Some(error),
+                    ));
+                }
+            }
+        }
+        if out.is_empty() && !arr.is_empty() {
+            return HttpRpcOut::Empty(StatusCode::NO_CONTENT);
+        }
+        return HttpRpcOut::Json(StatusCode::OK, serde_json::Value::Array(out));
+    }
+    if parsed.is_object() {
+        return match exec_one_async(&ctx, &parsed, waited).await {
+            OneOut::Reply(body) => {
+                let ver = parse_jsonrpc_ver(&parsed).unwrap_or(JsonRpcVer::V1);
+                let status = if ver == JsonRpcVer::V2 {
+                    StatusCode::OK
+                } else if let Some(err) = body.get("error").filter(|e| !e.is_null()) {
+                    v1_http_status(err)
+                } else {
+                    StatusCode::OK
+                };
+                HttpRpcOut::Json(status, body)
+            }
+            OneOut::Notification => HttpRpcOut::Empty(StatusCode::NO_CONTENT),
+            OneOut::BadVersion { error } => HttpRpcOut::Json(
+                StatusCode::BAD_REQUEST,
+                reply_v1(parsed.get("id").cloned(), None, Some(error)),
+            ),
+        };
+    }
+    HttpRpcOut::Json(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        reply_v1(
+            Some(serde_json::Value::Null),
+            None,
+            Some(serde_json::json!({ "code": -32700, "message": "Parse error" })),
+        ),
+    )
+}
+
+async fn exec_one_async(ctx: &Arc<RpcContext>, req: &serde_json::Value, waited: bool) -> OneOut {
+    let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    if !crate::methods::tip_connect_method(method) {
+        let id = req.get("id").cloned();
+        let req = req.clone();
+        let ctx = Arc::clone(ctx);
+        return match tokio::task::spawn_blocking(move || {
+            let _g = BlockingRegion::enter();
+            if waited {
+                crate::methods::set_http_wait_satisfied(true);
+            }
+            let out = exec_one(&ctx, &req);
+            crate::methods::set_http_wait_satisfied(false);
+            out
+        })
+        .await
+        {
+            Ok(out) => out,
+            Err(e) => OneOut::Reply(reply_v1(
+                id,
+                None,
+                Some(serde_json::json!({ "code": -1, "message": format!("rpc join: {e}") })),
+            )),
+        };
+    }
+    let ver = match parse_jsonrpc_ver(req) {
+        Ok(v) => v,
+        Err((code, msg)) => {
+            return OneOut::BadVersion {
+                error: serde_json::json!({ "code": code, "message": msg }),
+            };
+        }
+    };
+    let has_id = req.as_object().is_some_and(|m| m.contains_key("id"));
+    let notification = ver == JsonRpcVer::V2 && !has_id;
+    let id = if has_id {
+        Some(req.get("id").cloned().unwrap_or(serde_json::Value::Null))
+    } else {
+        None
+    };
+    let params = match req.get("params") {
+        None | Some(serde_json::Value::Null) => crate::methods::RpcParams::empty(),
+        Some(v) => match crate::methods::RpcParams::from_json(v) {
+            Some(p) => p,
+            None => {
+                let err = serde_json::json!({
+                    "code": -32602,
+                    "message": "params must be array or object",
+                });
+                if notification {
+                    return OneOut::Notification;
+                }
+                return OneOut::Reply(match ver {
+                    JsonRpcVer::V2 => {
+                        reply_v2(id.unwrap_or(serde_json::Value::Null), None, Some(err))
+                    }
+                    JsonRpcVer::V1 => reply_v1(id, None, Some(err)),
+                });
+            }
+        },
+    };
+    let params_s = req
+        .get("params")
+        .map(|p| serde_json::to_string(p).unwrap_or_else(|_| "[]".into()))
+        .unwrap_or_else(|| "[]".into());
+    let t0 = Instant::now();
+    let dispatched = crate::methods::dispatch_tip_connect(ctx, method, params).await;
+    let wall_ms = t0.elapsed().as_millis() as u64;
+    let err_s = match &dispatched {
+        Err(e) => e
+            .get("message")
+            .and_then(|m| m.as_str())
+            .map(str::to_string),
+        Ok(_) => None,
+    };
+    rbitcoin_log::api_call("rpc", "-", method, &params_s, wall_ms, err_s.as_deref());
+    if notification {
+        return OneOut::Notification;
+    }
+    let id_v1 = id.clone();
+    let id_v2 = id.unwrap_or(serde_json::Value::Null);
+    OneOut::Reply(match dispatched {
+        Ok(result) => match ver {
+            JsonRpcVer::V2 => reply_v2(id_v2, Some(result), None),
+            JsonRpcVer::V1 => reply_v1(id_v1, Some(result), None),
+        },
+        Err(error) => match ver {
+            JsonRpcVer::V2 => reply_v2(id_v2, None, Some(error)),
+            JsonRpcVer::V1 => reply_v1(id_v1, None, Some(error)),
+        },
+    })
 }
 
 #[doc(hidden)]

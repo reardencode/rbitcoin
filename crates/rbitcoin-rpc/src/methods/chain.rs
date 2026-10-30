@@ -1546,6 +1546,19 @@ pub fn invalidateblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Va
     Ok(Value::Null)
 }
 
+pub async fn invalidateblock_async(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
+    params.reject_unknown(&["blockhash"])?;
+    let hub = ctx
+        .chain
+        .clone()
+        .ok_or_else(|| rpc_error(ERR_MISC, "chain hub not attached"))?;
+    let hash = parse_blockhash_param(params)?;
+    hub.invalidate_block_async(hash)
+        .await
+        .map_err(block_missing_or_misc)?;
+    Ok(Value::Null)
+}
+
 pub fn submitheader(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["hexdata"])?;
     let hub = require_chain(ctx)?;
@@ -1578,10 +1591,36 @@ pub fn reconsiderblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Va
     Ok(Value::Null)
 }
 
+pub async fn reconsiderblock_async(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
+    params.reject_unknown(&["blockhash"])?;
+    let hub = ctx
+        .chain
+        .clone()
+        .ok_or_else(|| rpc_error(ERR_MISC, "chain hub not attached"))?;
+    let hash = parse_blockhash_param(params)?;
+    hub.reconsider_block_async(hash)
+        .await
+        .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?;
+    Ok(Value::Null)
+}
+
 pub fn preciousblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["blockhash"])?;
     let hub = require_chain(ctx)?;
     let hash = parse_blockhash_param(params)?;
     hub.precious_block(hash).map_err(block_missing_or_misc)?;
+    Ok(Value::Null)
+}
+
+pub async fn preciousblock_async(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
+    params.reject_unknown(&["blockhash"])?;
+    let hub = ctx
+        .chain
+        .clone()
+        .ok_or_else(|| rpc_error(ERR_MISC, "chain hub not attached"))?;
+    let hash = parse_blockhash_param(params)?;
+    hub.precious_block_async(hash)
+        .await
+        .map_err(block_missing_or_misc)?;
     Ok(Value::Null)
 }

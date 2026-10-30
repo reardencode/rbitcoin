@@ -51,7 +51,10 @@ fn decode_permit_pools_are_wider_than_one_slot() {
     let ctrl = ctrl_decode_permits();
     let pool = blocking_pool_size();
     assert_eq!(blocks, pool, "block decodes match the blocking pool");
-    assert!(ctrl <= pool, "header decodes cannot exceed the pool, got {ctrl}");
+    assert!(
+        ctrl <= pool,
+        "header decodes cannot exceed the pool, got {ctrl}"
+    );
     assert!(ctrl >= 1);
 }
 

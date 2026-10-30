@@ -653,7 +653,10 @@ pub struct ChainHub {
     /// Serializes tip connect / reorg so multi-peer accept cannot double Class A+C.
     pub connect_lock: std::sync::Mutex<()>,
     /// Serializes regtest generate so concurrent generateblock cannot race one tip.
-    pub generate_lock: std::sync::Mutex<()>,
+    /// Serializes one block's tip read, mine, and accept. Async generate holds
+    /// this across `.await`, so it is a Tokio mutex. Sync generate uses
+    /// `blocking_lock` off the reactor.
+    pub generate_lock: tokio::sync::Mutex<()>,
     /// Tests stop one `generate` before this 0-based block index. `0` mines
     /// the whole call. Production never sets it.
     #[doc(hidden)]
@@ -779,6 +782,19 @@ pub fn remember_stored_header(
     in_batch.insert(hash, HeaderSyncNode { fk, header, height });
 }
 
+/// Run `f` on a fresh OS thread and await the result. Not the Tokio blocking
+/// pool: a parked pool must still be able to mine and to finish a connect.
+async fn on_std_thread<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("rbtc-off-pool".into())
+        .spawn(move || {
+            let _ = tx.send(f());
+        })
+        .expect("rbtc-off-pool");
+    rx.await.expect("rbtc-off-pool dropped")
+}
+
 impl ChainHub {
     pub fn new(query: Query, params: ChainParams, milestone: Milestone) -> Self {
         let (tip_tx, _) = broadcast::channel(64);
@@ -798,7 +814,7 @@ impl ChainHub {
             tip_tx,
             confirmed,
             connect_lock: std::sync::Mutex::new(()),
-            generate_lock: std::sync::Mutex::new(()),
+            generate_lock: tokio::sync::Mutex::new(()),
             generate_fail_before: AtomicU32::new(0),
             mempool: std::sync::OnceLock::new(),
             self_weak: std::sync::OnceLock::new(),
@@ -2462,6 +2478,97 @@ impl ChainHub {
         )
     }
 
+    /// HTTP `generate*`. Mines off the blocking pool and awaits each connect
+    /// on `tip-accept`, so a pool thread is not held across the block.
+    pub async fn generate_to_script_for_rpc_async(
+        self: &std::sync::Arc<Self>,
+        nblocks: u32,
+        script_pubkey: ScriptBuf,
+        extra_txs: Vec<Transaction>,
+        record_assembly: bool,
+    ) -> Result<Vec<BlockHash>, NetError> {
+        self.generate_paying_async(
+            nblocks,
+            script_pubkey,
+            extra_txs,
+            Self::GENERATE_MAX_BLOCKS,
+            true,
+            record_assembly,
+        )
+        .await
+    }
+
+    async fn generate_paying_async(
+        self: &std::sync::Arc<Self>,
+        nblocks: u32,
+        script_pubkey: ScriptBuf,
+        extra_txs: Vec<Transaction>,
+        limit: u32,
+        commit_on_accept: bool,
+        record_assembly: bool,
+    ) -> Result<Vec<BlockHash>, NetError> {
+        if nblocks == 0 {
+            return Ok(Vec::new());
+        }
+        if nblocks > limit {
+            return Err(NetError::Consensus(format!(
+                "nblocks too large (max {limit})"
+            )));
+        }
+        if self.tip_height().is_none() {
+            let hub = std::sync::Arc::clone(self);
+            crate::tip_accept::run_on_tip_accept_async(move || hub.ensure_genesis_inner()).await?;
+        }
+        let _guard = self.generate_lock.lock().await;
+        let mut hashes = Vec::with_capacity(nblocks as usize);
+        let mut extras = extra_txs;
+        for i in 0..nblocks {
+            let stop = self.generate_fail_before.load(Ordering::Relaxed);
+            if stop > 0 && i == stop {
+                return Err(NetError::Consensus(
+                    "generate lost the tip during proof-of-work".into(),
+                ));
+            }
+            let txs = if i == 0 {
+                std::mem::take(&mut extras)
+            } else {
+                Vec::new()
+            };
+            let ids = commit_on_accept.then(|| {
+                txs.iter()
+                    .map(|tx| tx.compute_txid())
+                    .collect::<Vec<Txid>>()
+            });
+            if record_assembly {
+                let weight = txs.iter().map(|tx| tx.weight().to_wu()).sum();
+                self.note_block_assembled(weight, txs.len());
+            }
+            hashes.push(
+                self.mine_and_accept_paying_async(&script_pubkey, txs)
+                    .await?,
+            );
+            if let Some(ids) = ids.filter(|ids| !ids.is_empty()) {
+                let Some(mp) = self.mempool() else {
+                    continue;
+                };
+                mp.commit_generated_txids(&ids)
+                    .map_err(|e| NetError::Consensus(e.to_string()))?;
+            }
+        }
+        let hub = std::sync::Arc::clone(self);
+        on_std_thread(move || hub.drain_generate_indexes()).await;
+        Ok(hashes)
+    }
+
+    fn drain_generate_indexes(&self) {
+        if let Err(e) = self.query.apply_sh_pending() {
+            rbitcoin_log::warn!("generate: SH write-behind drain: {e}");
+        }
+        if let Err(e) = rbitcoin_query::build_indexes_released(&self.query) {
+            rbitcoin_log::warn!("generate: index write-behind drain: {e}");
+        }
+    }
+
     /// [`Self::generate_to_script`] with an explicit cap. Production passes
     /// [`Self::GENERATE_MAX_BLOCKS`]. Tests pass a small cap so the same
     /// comparison is pinned without mining ten thousand blocks.
@@ -2496,7 +2603,7 @@ impl ChainHub {
         self.ensure_genesis()?;
         // Serialize tip-read + mine + accept so concurrent generateblock
         // (rpc_generate.py parallel) cannot race the same tip into AlreadyHave.
-        let _guard = self.generate_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self.generate_lock.blocking_lock();
         let mut hashes = Vec::with_capacity(nblocks as usize);
         let mut extras = extra_txs;
         for i in 0..nblocks {
@@ -2520,7 +2627,7 @@ impl ChainHub {
                 let weight = txs.iter().map(|tx| tx.weight().to_wu()).sum();
                 self.note_block_assembled(weight, txs.len());
             }
-            hashes.push(self.mine_and_accept_paying(script_pubkey.clone(), txs)?);
+            hashes.push(self.mine_and_accept_paying(&script_pubkey, txs)?);
             if let Some(ids) = ids.filter(|ids| !ids.is_empty()) {
                 let Some(mp) = self.mempool() else {
                     continue;
@@ -2529,49 +2636,82 @@ impl ChainHub {
                     .map_err(|e| NetError::Consensus(e.to_string()))?;
             }
         }
-        if let Err(e) = self.query.apply_sh_pending() {
-            rbitcoin_log::warn!("generate: SH write-behind drain: {e}");
-        }
-        if let Err(e) = rbitcoin_query::build_indexes_released(&self.query) {
-            rbitcoin_log::warn!("generate: index write-behind drain: {e}");
-        }
+        self.drain_generate_indexes();
         Ok(hashes)
+    }
+
+    fn prepare_mined_block(
+        &self,
+        script_pubkey: &ScriptBuf,
+        txs: Vec<Transaction>,
+    ) -> Result<(Block, BlockHash), NetError> {
+        let tip_h = self
+            .tip_height()
+            .ok_or(NetError::Protocol("generate: no tip"))?;
+        let prev = self
+            .tip_hash()
+            .ok_or(NetError::Protocol("generate: no tip hash"))?;
+        let time = self.generate_block_time(tip_h)?;
+        let block = self.mine_paying_block(
+            prev,
+            time,
+            tip_h.saturating_add(1),
+            script_pubkey.clone(),
+            txs,
+        )?;
+        Ok((block, prev))
+    }
+
+    fn accept_mined_block(&self, block: Block, prev: BlockHash) -> Result<bool, NetError> {
+        if self.tip_hash() != Some(prev) {
+            return Ok(false);
+        }
+        match self.accept_block_inner(std::sync::Arc::new(block))? {
+            AcceptOutcome::Accepted { .. } => Ok(true),
+            other => Err(NetError::Consensus(format!(
+                "generate did not extend tip: {other:?}"
+            ))),
+        }
+    }
+
+    async fn mine_and_accept_paying_async(
+        self: &std::sync::Arc<Self>,
+        script_pubkey: &ScriptBuf,
+        txs: Vec<Transaction>,
+    ) -> Result<BlockHash, NetError> {
+        for _attempt in 0..4 {
+            let hub = std::sync::Arc::clone(self);
+            let script_pubkey = script_pubkey.clone();
+            let txs = txs.clone();
+            let (block, prev) =
+                on_std_thread(move || hub.prepare_mined_block(&script_pubkey, txs)).await?;
+            let hash = block.block_hash();
+            let hub = std::sync::Arc::clone(self);
+            let accepted = crate::tip_accept::run_on_tip_accept_async(move || {
+                hub.accept_mined_block(block, prev)
+            })
+            .await?;
+            if accepted {
+                return Ok(hash);
+            }
+        }
+        Err(NetError::Consensus(
+            "generate lost the tip during proof-of-work".into(),
+        ))
     }
 
     /// Mine one block on this thread, then accept it on `tip-accept`.
     #[doc(hidden)]
     pub fn mine_and_accept_paying(
         &self,
-        script_pubkey: ScriptBuf,
+        script_pubkey: &ScriptBuf,
         txs: Vec<Transaction>,
     ) -> Result<BlockHash, NetError> {
         for _attempt in 0..4 {
-            let tip_h = self
-                .tip_height()
-                .ok_or(NetError::Protocol("generate: no tip"))?;
-            let prev = self
-                .tip_hash()
-                .ok_or(NetError::Protocol("generate: no tip hash"))?;
-            let time = self.generate_block_time(tip_h)?;
-            let block = self.mine_paying_block(
-                prev,
-                time,
-                tip_h.saturating_add(1),
-                script_pubkey.clone(),
-                txs.clone(),
-            )?;
+            let (block, prev) = self.prepare_mined_block(script_pubkey, txs.clone())?;
             let hash = block.block_hash();
-            let accepted = crate::tip_accept::run_on_tip_accept(|| {
-                if self.tip_hash() != Some(prev) {
-                    return Ok(false);
-                }
-                match self.accept_block_inner(std::sync::Arc::new(block))? {
-                    AcceptOutcome::Accepted { .. } => Ok(true),
-                    other => Err(NetError::Consensus(format!(
-                        "generate did not extend tip: {other:?}"
-                    ))),
-                }
-            })?;
+            let accepted =
+                crate::tip_accept::run_on_tip_accept(|| self.accept_mined_block(block, prev))?;
             if accepted {
                 return Ok(hash);
             }
@@ -2587,6 +2727,15 @@ impl ChainHub {
     /// on the stump").
     pub fn invalidate_block(&self, hash: BlockHash) -> Result<(), NetError> {
         crate::tip_accept::run_on_tip_accept(|| self.invalidate_block_inner(hash))
+    }
+
+    /// HTTP `invalidateblock`. The connect waits on the request task.
+    pub async fn invalidate_block_async(
+        self: &std::sync::Arc<Self>,
+        hash: BlockHash,
+    ) -> Result<(), NetError> {
+        let hub = std::sync::Arc::clone(self);
+        crate::tip_accept::run_on_tip_accept_async(move || hub.invalidate_block_inner(hash)).await
     }
 
     #[doc(hidden)]
@@ -2662,6 +2811,15 @@ impl ChainHub {
     /// tips.
     pub fn reconsider_block(&self, hash: BlockHash) -> Result<(), NetError> {
         crate::tip_accept::run_on_tip_accept(|| self.reconsider_block_inner(hash))
+    }
+
+    /// HTTP `reconsiderblock`. The connect waits on the request task.
+    pub async fn reconsider_block_async(
+        self: &std::sync::Arc<Self>,
+        hash: BlockHash,
+    ) -> Result<(), NetError> {
+        let hub = std::sync::Arc::clone(self);
+        crate::tip_accept::run_on_tip_accept_async(move || hub.reconsider_block_inner(hash)).await
     }
 
     #[doc(hidden)]
@@ -2904,6 +3062,15 @@ impl ChainHub {
         crate::tip_accept::run_on_tip_accept(|| self.precious_block_inner(hash))
     }
 
+    /// HTTP `preciousblock`. The connect waits on the request task.
+    pub async fn precious_block_async(
+        self: &std::sync::Arc<Self>,
+        hash: BlockHash,
+    ) -> Result<(), NetError> {
+        let hub = std::sync::Arc::clone(self);
+        crate::tip_accept::run_on_tip_accept_async(move || hub.precious_block_inner(hash)).await
+    }
+
     #[doc(hidden)]
     pub fn precious_block_inner(&self, hash: BlockHash) -> Result<(), NetError> {
         if self.is_block_invalid(&hash) {
@@ -2933,6 +3100,18 @@ impl ChainHub {
     /// Accept a block that extends the tip, or reorg to a stronger competing tip / branch.
     pub fn accept_block(&self, block: Block) -> Result<AcceptOutcome, NetError> {
         crate::tip_accept::run_on_tip_accept(|| self.accept_incoming(Arc::new(block), false, false))
+    }
+
+    /// SV2 solution submit. Connect runs on `tip-accept`; the caller awaits.
+    pub async fn accept_block_async(
+        self: &std::sync::Arc<Self>,
+        block: Block,
+    ) -> Result<AcceptOutcome, NetError> {
+        let hub = std::sync::Arc::clone(self);
+        crate::tip_accept::run_on_tip_accept_async(move || {
+            hub.accept_incoming(std::sync::Arc::new(block), false, false)
+        })
+        .await
     }
 
     #[doc(hidden)]
@@ -3513,8 +3692,9 @@ impl ChainHub {
 
     /// Production "we received a full block" (P2P `block` / compact, RPC
     /// `submitblock`). Runs on the process-wide `tip-accept` thread (lookup →
-    /// load → `rbtc-scripts-*` steal → write). Peer sessions should
-    /// [`Self::accept_received_block_async`].
+    /// load → `rbtc-scripts-*` steal → write). Peer sessions and HTTP
+    /// `submitblock` use [`Self::accept_received_block_async`]. This sync
+    /// wrapper is for stack hubs and in-process `dispatch()` tests.
     ///
     /// Tip-extend via [`Self::accept_block`]; otherwise hold the body by hash
     /// and [`Self::accept_branch`] when a held (or archived) path has more
