@@ -523,6 +523,32 @@ pub struct RecentAccept {
     pub value_sat: u64,
 }
 
+/// Who handed a tx to [`MempoolHub::accept_tx_from`].
+///
+/// A `Local` admit is marked local origin under the write lock that commits
+/// it, so with isolated broadcast on no session can see the tx live, in the
+/// relay maps, or on the announce channel before
+/// [`MempoolHub::skip_standing_inv`] is true. A package
+/// ([`MempoolHub::accept_package`], `submitpackage`) is always `Local`: there
+/// is no P2P package command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxOrigin {
+    /// RPC, Esplora, BlindBit, or Electrum submit on this node.
+    Local,
+    /// Relayed, or re-entered from the orphanage. `Some` is the peer session
+    /// that sent it (orphan announcer, trusted-peer waive).
+    Relay(Option<u64>),
+}
+
+impl TxOrigin {
+    fn peer(self) -> Option<u64> {
+        match self {
+            TxOrigin::Local => None,
+            TxOrigin::Relay(from) => from,
+        }
+    }
+}
+
 /// Broadcast unit for mempool accepts (P2P inv, Electrum status, Esplora WS).
 ///
 /// `replaced` lists conflict txids removed by full-RBF/RBFR when admitting `txid`
@@ -730,21 +756,32 @@ struct LocalOrigin {
 
 #[derive(Clone, Copy)]
 enum IsolatedTurn {
+    /// Marked under the admit write lock, not yet handed to the loop, or
+    /// isolated broadcast was off when its submit finished.
+    Held,
     /// Waiting for the isolated loop. The number is submit order.
     Waiting(u64),
-    /// The loop took it, or isolated broadcast was off at submit.
+    /// The loop took it.
     Taken,
 }
 
 impl LocalOrigin {
-    fn insert(&mut self, txid: Txid, queue: bool) {
-        let turn = if queue {
-            self.next += 1;
-            IsolatedTurn::Waiting(self.next)
-        } else {
-            IsolatedTurn::Taken
+    fn mark(&mut self, txid: Txid) {
+        self.txs.entry(txid).or_insert(IsolatedTurn::Held);
+    }
+
+    /// Queue a held txid for the loop. False when it is not held: never
+    /// marked, gone with its tx, or already queued once.
+    fn queue(&mut self, txid: &Txid) -> bool {
+        let Some(turn) = self.txs.get_mut(txid) else {
+            return false;
         };
-        self.txs.entry(txid).or_insert(turn);
+        if !matches!(turn, IsolatedTurn::Held) {
+            return false;
+        }
+        self.next += 1;
+        *turn = IsolatedTurn::Waiting(self.next);
+        true
     }
 
     /// The oldest waiting txid, now taken, and how many still wait.
@@ -844,7 +881,7 @@ pub struct MempoolHub {
     pub unbroadcast: Mutex<HashSet<Txid>>,
     local_origin: Mutex<LocalOrigin>,
     pub isolated_broadcast: AtomicBool,
-    /// Wakes the isolated loop when [`Self::mark_local_origin`] queues a tx.
+    /// Wakes the isolated loop when a local tx is queued for it.
     isolated_wake: tokio::sync::Notify,
     /// Wtxids re-admitted from a disconnected block. Core serves these
     /// even if this peer has not been INV'd yet (`mempool_reorg`).
@@ -1979,6 +2016,8 @@ impl MempoolHub {
         self.announce.subscribe()
     }
 
+    /// Publish one admit. A tx standing peers skip goes to the isolated
+    /// broadcast loop instead, once per admit.
     #[doc(hidden)]
     pub fn publish_announce(&self, r: &AcceptResult, scripthashes: Vec<[u8; 32]>) {
         let _ = self.announce.send(MempoolAnnounce {
@@ -1988,6 +2027,9 @@ impl MempoolHub {
             scripthashes,
         });
         self.meter_announce.fetch_add(1, Ordering::Relaxed);
+        if self.skip_standing_inv(&r.txid) {
+            self.kick_isolated(&r.txid);
+        }
     }
 
     pub fn live_count(&self) -> usize {
@@ -2218,26 +2260,35 @@ impl MempoolHub {
     }
 
     pub fn accept_tx(&self, tx: &Transaction) -> Result<AcceptResult, AcceptError> {
-        self.accept_tx_from(tx, None)
+        self.accept_tx_from(tx, TxOrigin::Relay(None))
     }
 
-    /// Accept, recording `from` as an orphan announcer when parked.
+    /// Accept from `origin`. A relayed tx that parks records its peer as an
+    /// orphan announcer.
     pub fn accept_tx_from(
         &self,
         tx: &Transaction,
-        from: Option<u64>,
+        origin: TxOrigin,
     ) -> Result<AcceptResult, AcceptError> {
         crate::reactor::assert_not_reactor("mempool accept");
-        self.accept_with_utxo(tx, &self.utxo_provider(), from, false, &[])
+        self.accept_with_utxo(tx, &self.utxo_provider(), origin, false, &[])
     }
 
-    /// Admit one `submitpackage` member without trimming and without parking.
+    /// Admit one `submitpackage` member, local origin, without trimming and
+    /// without parking.
     ///
     /// The package trims once at the end. A missing-input child stays a
     /// reconsiderable error so the parent can be retried with it.
     #[doc(hidden)]
     pub fn accept_tx_defer_trim(&self, tx: &Transaction) -> Result<AcceptResult, AcceptError> {
-        self.accept_with_utxo(tx, &self.utxo_provider(), None, true, &[])
+        self.accept_with_utxo(tx, &self.utxo_provider(), TxOrigin::Local, true, &[])
+    }
+
+    /// Runs under the write lock that commits `result`.
+    fn note_origin(&self, origin: TxOrigin, result: &Result<AcceptResult, AcceptError>) {
+        if let (TxOrigin::Local, Ok(r)) = (origin, result) {
+            self.local_origin.lock().unwrap().mark(r.txid);
+        }
     }
 
     /// Prepare under read lock; scripts off-lock. Parking is the caller's job.
@@ -2457,11 +2508,12 @@ impl MempoolHub {
         &self,
         tx: &Transaction,
         utxo: &impl rbitcoin_mempool::UtxoProvider,
-        from: Option<u64>,
+        origin: TxOrigin,
         defer_trim: bool,
         announcers: &[u64],
     ) -> Result<AcceptResult, AcceptError> {
         utxo.note_spender(tx);
+        let from = origin.peer();
         let t0 = Instant::now();
 
         let mut stages = rbitcoin_mempool::AcceptStageUs::default();
@@ -2504,7 +2556,7 @@ impl MempoolHub {
                         );
                     }
                     if from.is_none() {
-                        if let Some(r) = self.admit_1p1c(tx, utxo, missing) {
+                        if let Some(r) = self.admit_1p1c(tx, utxo, missing, origin) {
                             let us = t0.elapsed().as_micros() as u64;
                             self.meter_accept_wall(us, true);
                             return Ok(r);
@@ -2535,6 +2587,7 @@ impl MempoolHub {
             let mut g = self.lock_write();
             g.last_accept_stages = stages;
             let committed = Self::commit_rechecked(&mut g, tx, prep, utxo, defer_trim, &sample);
+            self.note_origin(origin, &committed.result);
             stages = g.last_accept_stages;
             lock_us = lock_us.saturating_add(t_lock.elapsed().as_micros() as u64);
             committed
@@ -2566,6 +2619,7 @@ impl MempoolHub {
         child: &Transaction,
         utxo: &impl rbitcoin_mempool::UtxoProvider,
         missing: &std::collections::BTreeSet<Txid>,
+        origin: TxOrigin,
     ) -> Option<AcceptResult> {
         let parent = {
             let g = self.lock_read();
@@ -2622,7 +2676,9 @@ impl MempoolHub {
         let sample_c = self.sample_chain_coins(child, utxo);
         let child_commit = {
             let mut g = self.lock_write();
-            Self::commit_rechecked(&mut g, child, prep_c, utxo, true, &sample_c)
+            let committed = Self::commit_rechecked(&mut g, child, prep_c, utxo, true, &sample_c);
+            self.note_origin(origin, &committed.result);
+            committed
         };
         self.meter_accept_stages(lock_us, stages);
         match child_commit.result {
@@ -2702,7 +2758,13 @@ impl MempoolHub {
                 .copied()
                 .find(|&peer| self.tx_from_trusted(Some(peer)))
                 .or_else(|| item.announcers.first().copied());
-            let _ = self.accept_with_utxo(&item.tx, &utxo, from, false, &item.announcers);
+            let _ = self.accept_with_utxo(
+                &item.tx,
+                &utxo,
+                TxOrigin::Relay(from),
+                false,
+                &item.announcers,
+            );
             self.forget_taken_orphan(id, item.taken_gen);
         }
     }
@@ -2908,7 +2970,13 @@ impl MempoolHub {
                 .iter()
                 .copied()
                 .find(|&id| self.tx_from_trusted(Some(id)));
-            let _ = self.accept_with_utxo(&child.tx, utxo, from, false, &child.announcers);
+            let _ = self.accept_with_utxo(
+                &child.tx,
+                utxo,
+                TxOrigin::Relay(from),
+                false,
+                &child.announcers,
+            );
             // Admitted or rejected without a repark. A repark already consumed
             // this generation. A newer take of the same txid keeps its own.
             self.forget_taken_orphan(txid, child.taken_gen);
@@ -2938,22 +3006,15 @@ impl MempoolHub {
     }
 
     /// Accept on the tokio blocking pool (never on `tokio-rt-worker`).
-    pub async fn accept_tx_async(
-        self: &Arc<Self>,
-        tx: Transaction,
-    ) -> Result<AcceptResult, AcceptError> {
-        self.accept_tx_from_async(tx, None).await
-    }
-
     pub async fn accept_tx_from_async(
         self: &Arc<Self>,
         tx: Transaction,
-        from: Option<u64>,
+        origin: TxOrigin,
     ) -> Result<AcceptResult, AcceptError> {
         let hub = Arc::clone(self);
         tokio::task::spawn_blocking(move || {
             let _g = crate::reactor::BlockingRegion::enter();
-            hub.accept_tx_from(&tx, from)
+            hub.accept_tx_from(&tx, origin)
         })
         .await
         .expect("mempool accept join")
@@ -3252,7 +3313,8 @@ impl MempoolHub {
         MAX_PACKAGE_COUNT
     }
 
-    /// Accept an ancestor package (local / Electrum path; BIP331 wire later).
+    /// Accept an ancestor package. Every member is [`TxOrigin::Local`]: this is
+    /// the RPC, Esplora, and Electrum path (BIP331 wire later).
     pub fn accept_package(&self, txs: &[Transaction]) -> Result<Vec<AcceptResult>, AcceptError> {
         crate::reactor::assert_not_reactor("mempool accept");
         Self::check_package_shape(txs)?;
@@ -3307,6 +3369,7 @@ impl MempoolHub {
                 let mut g = self.lock_write();
                 g.last_accept_stages = stages;
                 let committed = Self::commit_rechecked(&mut g, tx, prep, &utxo, true, &sample);
+                self.note_origin(TxOrigin::Local, &committed.result);
                 stages = g.last_accept_stages;
                 committed
             };
@@ -4486,12 +4549,24 @@ impl MempoolHub {
         persist_unbroadcast_file(&self.dir, &u);
     }
 
-    pub fn mark_local_origin(&self, txid: Txid) {
-        let queue = self.isolated_broadcast();
-        self.local_origin.lock().unwrap().insert(txid, queue);
-        if queue {
+    fn kick_isolated(&self, txid: &Txid) {
+        if self.isolated_broadcast() && self.local_origin.lock().unwrap().queue(txid) {
             self.isolated_wake.notify_one();
         }
+    }
+
+    /// Mark `txid` local origin and queue it for the isolated loop without an
+    /// admit. Tests only: a txid the loop must skip.
+    #[doc(hidden)]
+    pub fn queue_isolated(&self, txid: Txid) {
+        self.local_origin.lock().unwrap().mark(txid);
+        self.kick_isolated(&txid);
+    }
+
+    /// How many txids were ever queued for the isolated loop.
+    #[doc(hidden)]
+    pub fn isolated_queued(&self) -> u64 {
+        self.local_origin.lock().unwrap().next
     }
 
     /// The oldest local tx waiting for isolated broadcast, and how many wait
@@ -4502,7 +4577,7 @@ impl MempoolHub {
             if let Some(next) = self.local_origin.lock().unwrap().take() {
                 return next;
             }
-            // A `notify_one` with no waiter leaves a permit, so a mark
+            // A `notify_one` with no waiter leaves a permit, so a queue
             // between `take` and here still wakes this await.
             self.isolated_wake.notified().await;
         }

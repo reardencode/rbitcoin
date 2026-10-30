@@ -5073,7 +5073,10 @@ pub async fn on_tx(
             if trusted {
                 mp.set_trusted_session(from);
             }
-            match mp.accept_tx_from_async(tx.clone(), from).await {
+            match mp
+                .accept_tx_from_async(tx.clone(), crate::tx_relay::TxOrigin::Relay(from))
+                .await
+            {
                 Ok(r) => {
                     mp.resolve_tx_request(&txid, &wtxid, true);
                     if let Some(s) = session {

@@ -411,8 +411,8 @@ fn force_announce_picks_peers(
     );
 
     mp.set_isolated_broadcast(true);
-    mp.accept_tx(&local).expect("local");
-    mp.mark_local_origin(local.compute_txid());
+    mp.accept_tx_from(&local, rbitcoin_net::TxOrigin::Local)
+        .expect("local");
     mp.accept_tx(&from_p2p).expect("p2p");
     rbitcoin_net::force_announce_txid(hub, peers, local.compute_txid());
     assert!(

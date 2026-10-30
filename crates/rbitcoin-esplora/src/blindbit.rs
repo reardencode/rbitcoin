@@ -529,12 +529,11 @@ pub async fn forward_tx(
     };
     // The admit runs inside `held`, so a timeout or disconnect that drops
     // this handler does not free the permit while it is still running.
-    held(permit, move || match mp.accept_tx_from(&tx, None) {
-        Ok(r) => {
-            mp.mark_local_origin(r.txid);
-            json_reply_here(block_hash_hex(&r.txid.to_byte_array()))
+    held(permit, move || {
+        match mp.accept_tx_from(&tx, rbitcoin_net::TxOrigin::Local) {
+            Ok(r) => json_reply_here(block_hash_hex(&r.txid.to_byte_array())),
+            Err(e) => error(StatusCode::BAD_REQUEST, &e.to_string()),
         }
-        Err(e) => error(StatusCode::BAD_REQUEST, &e.to_string()),
     })
     .await
 }

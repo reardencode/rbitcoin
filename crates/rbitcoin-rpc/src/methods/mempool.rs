@@ -1002,10 +1002,9 @@ pub fn sendrawtransaction(ctx: &RpcContext, params: &RpcParams) -> Result<Value,
     }
     // `-blocksonly` leaves P2P relay off but RPC still accepts
     // (`p2p_blocksonly.py` sendrawtransaction).
-    match mp.accept_tx(&tx) {
+    match mp.accept_tx_from(&tx, rbitcoin_net::TxOrigin::Local) {
         Ok(r) => {
             mp.note_unbroadcast(r.txid);
-            mp.mark_local_origin(r.txid);
             // `-blocksonly`: accept-time announce is skipped (relay off + not
             // yet unbroadcast). Re-announce after noting so inbound peers INV
             // (`p2p_blocksonly.py:48`). When relay is on, leave the 30s inbound
@@ -1913,7 +1912,6 @@ pub fn submitpackage_admit(
         match row.result {
             Ok(ok) => {
                 mp.note_unbroadcast(ok.txid);
-                mp.mark_local_origin(ok.txid);
                 for old in &ok.replaced {
                     replaced.push(hash_hex_display(&old.to_byte_array()));
                 }
