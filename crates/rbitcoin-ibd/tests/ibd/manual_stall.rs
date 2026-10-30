@@ -377,6 +377,91 @@ fn paused_connect_peer_late_blocks_are_accepted_not_scored() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Peer `id` sends `blocks` through its reader, each frame past the 16 MB/s
+/// unsolicited cap, and the coordinator applies what the reader forwards.
+/// Returns that reader's ban score and whether it stopped.
+fn answer_at_lan_speed(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    id: usize,
+    blocks: &[bitcoin::Block],
+) -> (u32, bool) {
+    let (mut ctx, mut body_rx) = reader_of(st, id);
+    let mut dead = false;
+    for b in blocks {
+        dead |= ctx.handle(Ok(lan_frame(b)));
+    }
+    let write_next = AtomicU32::new(0);
+    while let Ok(ev) = body_rx.try_recv() {
+        if matches!(ev, PeerEvent::BlockFramed { .. }) {
+            apply_block_framed(st, hub, &write_next, None, framed_body(ev));
+        }
+    }
+    (ctx.ban_score, dead)
+}
+
+/// The paused peer's late copies arrive first. The peer those blocks were
+/// reassigned to still has their getdata on the wire, so its answer is a
+/// body too: no score, kept, and each block queued once.
+#[test]
+fn reassigned_peer_answer_after_the_paused_peer_is_not_scored() {
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    hub.clock.set_mock(T0);
+    let (mut slots, mut wire) = wired_slots(2);
+    for s in &mut slots {
+        s.conn_type = PeerConnType::Manual;
+    }
+    let mut st = IbdWorkState::new(slots, hub.tip_hash(), hub.tip_height());
+    let blocks = real_path(&hub, &mut st);
+    for b in &blocks {
+        owe_on_wire(&mut st, 0, b.block_hash(), 0);
+    }
+    stall_pass(&mut st, &hub, 30_001);
+    assign(&mut st, &hub);
+    let sent = drain_wire(&mut wire);
+    assert!(blocks.iter().all(|b| sent[1].0.contains(&b.block_hash())));
+
+    assert_eq!(answer_at_lan_speed(&mut st, &hub, 0, &blocks), (0, false));
+    assert_eq!(hub.query.block_queue_stats().1, 2);
+    assign(&mut st, &hub);
+
+    assert_eq!(
+        answer_at_lan_speed(&mut st, &hub, 1, &blocks),
+        (0, false),
+        "the reassigned peer answering its own getdata is not unsolicited"
+    );
+    assert_eq!(hub.query.block_queue_stats().1, 2, "each block queued once");
+    assert!(st.slots.iter().all(|s| s.alive));
+    assert!(drain_wire(&mut wire).iter().all(|(_, shut)| !shut));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Two outbound peers race the same two blocks. Peer 0 delivers first; peer
+/// 1's copies are answers to getdata it was sent, so they are not scored.
+#[test]
+fn race_loser_answer_is_not_scored() {
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    let (slots, mut wire) = wired_slots(2);
+    let mut st = IbdWorkState::new(slots, hub.tip_hash(), hub.tip_height());
+    let blocks = real_path(&hub, &mut st);
+    for b in &blocks {
+        owe_on_wire(&mut st, 0, b.block_hash(), 0);
+        owe_on_wire(&mut st, 1, b.block_hash(), 0);
+    }
+    assert_eq!(answer_at_lan_speed(&mut st, &hub, 0, &blocks), (0, false));
+    assign(&mut st, &hub);
+    assert_eq!(
+        answer_at_lan_speed(&mut st, &hub, 1, &blocks),
+        (0, false),
+        "a race loser's answer is not unsolicited"
+    );
+    assert_eq!(hub.query.block_queue_stats().1, 2, "each block queued once");
+    assert!(drain_wire(&mut wire).iter().all(|(_, shut)| !shut));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// The sole `--connect` peer stalls, so its released blocks have no other
 /// owner. When it answers them during the pause, both are queued from it,
 /// as Core processes a block it no longer has in flight.
