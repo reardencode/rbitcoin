@@ -688,8 +688,9 @@ pub fn note_misbehavior_dead(
 /// the same host under a new peer id (log spam + wasted slots).
 ///
 /// A manual (`--connect`) peer is kept, as in Core (bitcoin/bitcoin#34743).
-/// Its block requests are released and it is sent no block getdata for
-/// [`MANUAL_PEER_BLOCK_DOWNLOAD_COOLDOWN`] on the node clock.
+/// When another peer could take its blocks, its block requests are released
+/// and it is sent no block getdata for [`MANUAL_PEER_BLOCK_DOWNLOAD_COOLDOWN`]
+/// on the node clock. Otherwise it keeps them and gets a new stall window.
 ///
 /// The status thread sends that shutdown without this lock. The coordination
 /// loop records the kick and releases in-flight blocks when the task ends.
@@ -767,10 +768,31 @@ pub fn disconnect_stalled_block_peers_at(
     let Some((why, (id, n_work, addr, stream))) = picked else {
         return Vec::new();
     };
-    if let Some(s) = slots
-        .iter_mut()
-        .find(|s| s.id == id && s.conn_type == PeerConnType::Manual)
+    if let Some(at) = slots
+        .iter()
+        .position(|s| s.id == id && s.conn_type == PeerConnType::Manual)
     {
+        // Core only declares a stall when another peer waits on the window,
+        // so a sole manual peer is never paused there. Here a sole peer can
+        // trip this, and releasing its blocks with no taker would leave
+        // nothing downloading for the whole cooldown. Another peer counts
+        // when `may_serve` could hand it one of the owed blocks at all:
+        // alive, not paused itself, and no recent `notfound` for it. A dial
+        // still handshaking has no slot yet. Without one, the peer keeps its
+        // requests and the window restarts, so the next check is a full
+        // stall window away and can hand off to a peer that joined since.
+        let owed = &slots[at].in_flight;
+        let handoff = slots
+            .iter()
+            .any(|o| o.id != id && owed.iter().any(|h| o.may_take_block(h, now_ms)));
+        if !handoff {
+            slots[at].getdata_wire.restart_window(now_ms);
+            debug!(
+                "ibd: keeping stalling manual peer={id} ({addr} {why}, {stall:?}, {n_work} in-flight, stream={stream}): no other peer can take its blocks"
+            );
+            return Vec::new();
+        }
+        let s = &mut slots[at];
         let cool = MANUAL_PEER_BLOCK_DOWNLOAD_COOLDOWN.as_secs();
         info!(
             "ibd: Pausing block downloads from stalling manual peer={id} for {cool} seconds ({addr} {why}, {stall:?}, {n_work} in-flight, stream={stream})"

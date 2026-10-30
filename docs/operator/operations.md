@@ -366,9 +366,13 @@ NotFound after the last getdata write. Time with an empty window, and time
 a new getdata spends queued before that write, does not count. A later
 getdata write starts a new 30s even when older hashes are still outstanding.
 A `--connect` (or `--trust-peer`) peer that stalls is not disconnected, as in
-Core: INFO `ibd: Pausing block downloads from stalling manual peer=… for 120
-seconds` hands its block getdata to the other peers, and it is sent none for
-two minutes on the node clock. It stays connected and still serves headers.
+Core. When another connected peer could fetch its blocks, INFO `ibd: Pausing
+block downloads from stalling manual peer=… for 120 seconds` hands its block
+getdata to the other peers, and it is sent none for two minutes on the node
+clock. With no such peer (a sole `--connect` or `--trust-peer`, or every
+other peer paused), it keeps its getdata and is not paused; the check runs
+again after another 30s. Either way it stays connected and still serves
+headers.
 WARN
 `ibd: peer[…] relative-slow` is a quarter-median outlier (cluster gate keeps a
 uniformly slow pack). Every IBD disconnect (stall, relative-slow, a second

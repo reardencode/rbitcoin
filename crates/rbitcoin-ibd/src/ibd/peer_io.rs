@@ -265,6 +265,12 @@ impl GetdataWire {
         );
     }
 
+    /// Open a new stall window at `now_ms` for what is already on the wire.
+    pub fn restart_window(&self, now_ms: u64) {
+        let opened = i64::try_from(now_ms).unwrap_or(i64::MAX);
+        self.window_ms.store(opened, Ordering::Relaxed);
+    }
+
     /// Drop the stall deadline. The next [`Self::wrote`] starts a new one.
     pub fn disarm_window(&self) {
         self.window_ms.store(WINDOW_DISARMED, Ordering::Relaxed);
@@ -352,6 +358,12 @@ impl PeerSlot {
     /// Alive and not paused: assign may send this peer block getdata.
     pub fn takes_block_requests(&self) -> bool {
         self.alive && self.block_download_paused_until.is_none()
+    }
+
+    /// Assign may ask this peer for `hash`: it takes block requests and did
+    /// not answer `notfound` for it recently.
+    pub fn may_take_block(&self, hash: &BlockHash, now_ms: u64) -> bool {
+        self.takes_block_requests() && !self.chain.lacks(hash, now_ms)
     }
 
     /// Pause block download until `until` and withdraw what this peer owed.
