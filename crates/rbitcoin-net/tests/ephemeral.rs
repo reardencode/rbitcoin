@@ -89,20 +89,111 @@ async fn splice_after_userpass(mut c: TcpStream, dest: SocketAddr) -> Vec<u8> {
     user
 }
 
-#[test]
-fn isolated_broadcast_targets_prefers_onion() {
+/// splitmix64, so a target pick is the same on every run.
+fn seeded_draw(seed: u64) -> impl FnMut(usize) -> usize {
+    let mut s = seed;
+    move |n| {
+        s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = s;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        ((z ^ (z >> 31)) % n as u64) as usize
+    }
+}
+
+fn every_network_addrman(per_net: u8) -> AddrMan {
     let mut am = AddrMan::new();
-    am.add(SocketAddr::from((Ipv4Addr::new(1, 2, 3, 4), 8333)));
-    let onion: NetAddr = "pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion:8333"
-        .parse()
-        .unwrap();
     am.set_onion_reachable(true);
-    am.add_addr(onion);
-    let got = isolated_broadcast_targets(&am, 1);
-    assert_eq!(got, vec![onion]);
-    let got = isolated_broadcast_targets(&am, 2);
-    assert_eq!(got[0], onion);
-    assert!(matches!(got[1], NetAddr::Ip(_)));
+    am.set_i2p_reachable(true);
+    am.set_cjdns_reachable(true);
+    for i in 1..=per_net {
+        am.add_addr(NetAddr::Onion {
+            pk: [i; 32],
+            port: 8333,
+        });
+        am.add(SocketAddr::from((Ipv4Addr::new(1, 2, 3, i), 8333)));
+        am.add(SocketAddr::from((
+            std::net::Ipv6Addr::new(0x2001, 0xdb9, 0, 0, 0, 0, 0, u16::from(i)),
+            8333,
+        )));
+        am.add_addr(NetAddr::I2p {
+            dest: [i; 32],
+            port: 0,
+        });
+        am.add_addr(NetAddr::Cjdns {
+            ip: std::net::Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, u16::from(i)),
+            port: 8333,
+        });
+    }
+    am
+}
+
+/// Each tx gets its own targets, drawn like Core's `PickNetwork`: a network
+/// the dialer reaches privately, then a row in it. Never I2P or CJDNS, and
+/// an IPv4/IPv6 row only through `--proxy`.
+#[test]
+fn isolated_broadcast_targets_are_fresh_per_tx_and_private() {
+    use rbitcoin_net::OnlyNet;
+    use std::collections::HashSet;
+
+    let am = every_network_addrman(12);
+    let socks = SocketAddr::from(([127, 0, 0, 1], 9050));
+    let proxy = Dialer::with_proxies(Some(socks), None, true);
+    let onion_only = Dialer::with_proxies(None, Some(socks), true);
+
+    let mut draw = seeded_draw(1275);
+    let mut pairs = HashSet::new();
+    let mut nets = Vec::new();
+    for _ in 0..20 {
+        let got = isolated_broadcast_targets(&am, &proxy, ISOLATED_BROADCAST_PEERS, &mut draw);
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_ne!(got[0], got[1], "one tx never goes to the same peer twice");
+        for a in &got {
+            assert!(
+                !matches!(a, NetAddr::I2p { .. } | NetAddr::Cjdns { .. }),
+                "{a} is not reachable through SOCKS"
+            );
+            if !nets.contains(&OnlyNet::of(*a)) {
+                nets.push(OnlyNet::of(*a));
+            }
+        }
+        pairs.insert((got[0], got[1]));
+    }
+    assert!(pairs.len() >= 18, "txs share targets: {pairs:?}");
+    for net in [OnlyNet::Onion, OnlyNet::Ipv4, OnlyNet::Ipv6] {
+        assert!(nets.contains(&net), "{net:?} never drawn: {nets:?}");
+    }
+
+    let mut onions = HashSet::new();
+    for _ in 0..20 {
+        for a in isolated_broadcast_targets(&am, &onion_only, ISOLATED_BROADCAST_PEERS, &mut draw) {
+            assert!(
+                matches!(a, NetAddr::Onion { .. }),
+                "--onion alone picked {a}"
+            );
+            onions.insert(a);
+        }
+    }
+    assert!(onions.len() >= 8, "onion picks repeat: {onions:?}");
+
+    assert!(
+        isolated_broadcast_targets(&am, &Dialer::Direct, ISOLATED_BROADCAST_PEERS, &mut draw)
+            .is_empty(),
+        "a direct dialer reaches nothing privately"
+    );
+
+    let mut one_onion = every_network_addrman(0);
+    let lone = NetAddr::Onion {
+        pk: [7; 32],
+        port: 8333,
+    };
+    one_onion.add_addr(lone);
+    one_onion.add(SocketAddr::from((Ipv4Addr::new(1, 2, 3, 4), 8333)));
+    assert_eq!(
+        isolated_broadcast_targets(&one_onion, &onion_only, ISOLATED_BROADCAST_PEERS, &mut draw),
+        vec![lone],
+        "one eligible row is the whole pick"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -171,7 +262,6 @@ async fn ephemeral_broadcast_one_shot_tx_and_new_socks_creds() {
         NetAddr::Ip(peer_addr),
         Magic::REGTEST,
         tx,
-        "/rbitcoin:test/",
         Duration::from_secs(5),
     )
     .await
@@ -263,7 +353,6 @@ async fn ephemeral_broadcast() {
             Dialer::Direct,
             Arc::new(Mutex::new(am)),
             Magic::REGTEST,
-            "/rbitcoin:test/".into(),
         )
     };
 
@@ -322,7 +411,6 @@ async fn ephemeral_broadcast() {
         Dialer::socks(proxy, true),
         Arc::new(Mutex::new(am)),
         Magic::REGTEST,
-        "/rbitcoin:test/".into(),
     );
     submit(&locals[0]);
     tokio::time::timeout(Duration::from_secs(30), busy_rx)
@@ -383,7 +471,6 @@ async fn ephemeral_broadcast() {
         Dialer::socks(proxy, true),
         Arc::new(Mutex::new(am)),
         Magic::REGTEST,
-        "/rbitcoin:test/".into(),
     );
     let gone = &locals[BURST as usize + 3];
     let kept = &locals[BURST as usize + 4];
@@ -425,7 +512,6 @@ async fn ephemeral_broadcast() {
         Dialer::socks(proxy, true),
         Arc::new(Mutex::new(am)),
         Magic::REGTEST,
-        "/rbitcoin:test/".into(),
     );
     let [first, held, after, idle] = [5, 6, 7, 8].map(|i| &locals[BURST as usize + i]);
     let never_admitted = spend(
@@ -523,7 +609,6 @@ async fn ephemeral_broadcast() {
         NetAddr::Ip(dest),
         Magic::REGTEST,
         local.clone(),
-        "/rbitcoin:test/",
         Duration::from_millis(200),
     )
     .await;
@@ -607,7 +692,6 @@ async fn ephemeral_broadcast_known_tx_one_shot() {
         &Dialer::socks(proxy, true),
         &Mutex::new(am),
         Magic::REGTEST,
-        "/rbitcoin:test/",
         tx.compute_txid(),
         tx,
         || true,
@@ -631,7 +715,6 @@ async fn onion_only_isolated_broadcast_never_reaches_clearnet() {
         &Dialer::with_proxies(None, Some(onion_proxy.local_addr().unwrap()), true),
         &Mutex::new(am),
         Magic::REGTEST,
-        "/rbitcoin:test/",
         tx.compute_txid(),
         tx,
         || true,
@@ -646,4 +729,175 @@ async fn onion_only_isolated_broadcast_never_reaches_clearnet() {
             listener.local_addr()
         );
     }
+}
+
+/// A BIP324 recipient that answers our VERSION with its own (`relay` as
+/// given) and VERACK, then records every message until we hang up.
+async fn recording_recipient(l: TcpListener, relay: bool) -> Vec<NetworkMessage> {
+    use bitcoin::p2p::address::Address;
+    use bitcoin::p2p::message_network::VersionMessage;
+    use bitcoin::p2p::ServiceFlags;
+    use rbitcoin_net::v2::{open_v2, write_v2_msg};
+
+    let (stream, from) = l.accept().await.unwrap();
+    let (mut reader, mut writer, _wire, _tcp) =
+        open_v2(stream, Magic::REGTEST, true).await.unwrap();
+    let mut seen = Vec::new();
+    while let Ok(Ok(frame)) = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_v2_frame(&mut reader, Magic::REGTEST),
+    )
+    .await
+    {
+        let msg = decode_framed_offload(frame)
+            .await
+            .unwrap()
+            .payload()
+            .clone();
+        if matches!(msg, NetworkMessage::Version(_)) {
+            let services = ServiceFlags::NETWORK | ServiceFlags::WITNESS | ServiceFlags::P2P_V2;
+            let ours = VersionMessage {
+                version: 70016,
+                services,
+                timestamp: 1_700_000_000,
+                receiver: Address::new(&from, ServiceFlags::NONE),
+                sender: Address::new(&from, services),
+                nonce: 7,
+                user_agent: "/Satoshi:31.0.0/".into(),
+                start_height: 0,
+                relay,
+            };
+            write_v2_msg(&mut writer, NetworkMessage::Version(ours))
+                .await
+                .unwrap();
+            write_v2_msg(&mut writer, NetworkMessage::Verack)
+                .await
+                .unwrap();
+        }
+        seen.push(msg);
+    }
+    seen
+}
+
+/// One SOCKS hop from the isolated dialer to `dest`.
+async fn socks_to(dest: SocketAddr) -> (Dialer, tokio::task::JoinHandle<Vec<u8>>) {
+    let socks_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = socks_l.local_addr().unwrap();
+    let splice = tokio::spawn(async move {
+        let (s, _) = socks_l.accept().await.unwrap();
+        splice_after_userpass(s, dest).await
+    });
+    (Dialer::socks(proxy, true), splice)
+}
+
+fn commands(seen: &[NetworkMessage]) -> Vec<&'static str> {
+    seen.iter()
+        .map(|m| match m {
+            NetworkMessage::Version(_) => "version",
+            NetworkMessage::Verack => "verack",
+            NetworkMessage::WtxidRelay => "wtxidrelay",
+            NetworkMessage::SendAddrV2 => "sendaddrv2",
+            NetworkMessage::Tx(_) => "tx",
+            _ => "other",
+        })
+        .collect()
+}
+
+/// Core #29415 `PushNodeVersion` for a private broadcast connection: no
+/// services, time 0, both addresses unset, `/pynode:0.0.1/`, height 0,
+/// relay off. Then VERACK and the tx, with no WTXIDRELAY or SENDADDRV2. An
+/// ordinary outbound handshake still sends this node's own VERSION.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn isolated_broadcast_sends_core_private_broadcast_version() {
+    use bitcoin::p2p::address::Address;
+    use bitcoin::p2p::ServiceFlags;
+
+    let peer_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer_addr = peer_l.local_addr().unwrap();
+    let recipient = tokio::spawn(recording_recipient(peer_l, true));
+    let (dialer, splice) = socks_to(peer_addr).await;
+    send_tx_isolated_timed(
+        &dialer,
+        NetAddr::Ip(peer_addr),
+        Magic::REGTEST,
+        dummy_tx(),
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    let seen = recipient.await.unwrap();
+    splice.abort();
+    assert_eq!(commands(&seen), ["version", "verack", "tx"]);
+    let NetworkMessage::Version(v) = &seen[0] else {
+        unreachable!()
+    };
+    let unset = Address {
+        services: ServiceFlags::NONE,
+        address: [0; 8],
+        port: 0,
+    };
+    assert_eq!(v.version, 70016);
+    assert_eq!(v.services, ServiceFlags::NONE);
+    assert_eq!(v.timestamp, 0);
+    assert_eq!(v.receiver, unset);
+    assert_eq!(v.sender, unset);
+    assert_eq!(v.user_agent, "/pynode:0.0.1/");
+    assert_eq!(v.start_height, 0);
+    assert!(!v.relay);
+
+    let normal_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let normal_addr = normal_l.local_addr().unwrap();
+    let recipient = tokio::spawn(recording_recipient(normal_l, true));
+    let stream = TcpStream::connect(normal_addr).await.unwrap();
+    let our = stream.local_addr().unwrap();
+    let (_ver, reader, writer, _wire, tcp) = connect_and_handshake_timed(
+        Duration::from_secs(5),
+        stream,
+        Magic::REGTEST,
+        our,
+        normal_addr,
+        7,
+        false,
+        "/rbitcoin:test/",
+        HandshakePolicy::plain(),
+    )
+    .await
+    .unwrap();
+    let _ = tcp.shutdown(std::net::Shutdown::Both);
+    drop((reader, writer));
+    let seen = recipient.await.unwrap();
+    assert_eq!(
+        commands(&seen),
+        ["version", "wtxidrelay", "sendaddrv2", "verack"]
+    );
+    let NetworkMessage::Version(v) = &seen[0] else {
+        unreachable!()
+    };
+    assert!(v.services.has(ServiceFlags::WITNESS | ServiceFlags::P2P_V2));
+    assert!(v.timestamp > 0);
+    assert_eq!(v.user_agent, "/rbitcoin:test/");
+    assert_eq!(v.start_height, 7);
+    assert!(v.relay);
+}
+
+/// Core drops a private broadcast peer whose own VERSION has relay off
+/// ("connected in vain"): no VERACK, no tx.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn isolated_broadcast_skips_a_peer_that_does_not_relay() {
+    let peer_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer_addr = peer_l.local_addr().unwrap();
+    let recipient = tokio::spawn(recording_recipient(peer_l, false));
+    let (dialer, splice) = socks_to(peer_addr).await;
+    let sent = send_tx_isolated_timed(
+        &dialer,
+        NetAddr::Ip(peer_addr),
+        Magic::REGTEST,
+        dummy_tx(),
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(sent.is_err(), "a peer with relay off must not get the tx");
+    let seen = recipient.await.unwrap();
+    splice.abort();
+    assert_eq!(commands(&seen), ["version"]);
 }

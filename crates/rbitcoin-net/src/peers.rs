@@ -152,6 +152,9 @@ pub enum PeerConnType {
     BlockRelay,
     AddrFetch,
     Feeler,
+    /// Isolated local-tx broadcast. Never in the peer table, and not an
+    /// `addconnection` type (Core's is not either).
+    PrivateBroadcast,
 }
 
 impl PeerConnType {
@@ -163,6 +166,7 @@ impl PeerConnType {
             Self::BlockRelay => "block-relay-only",
             Self::AddrFetch => "addr-fetch",
             Self::Feeler => "feeler",
+            Self::PrivateBroadcast => "private-broadcast",
         }
     }
 
@@ -3430,8 +3434,8 @@ impl PeerHub {
     }
 
     pub fn addconnection(&self, addr: SocketAddr, typ: PeerConnType) -> Result<(), String> {
-        if matches!(typ, PeerConnType::Inbound) {
-            return Err("addconnection cannot create inbound".into());
+        if matches!(typ, PeerConnType::Inbound | PeerConnType::PrivateBroadcast) {
+            return Err(format!("addconnection cannot create {}", typ.as_str()));
         }
         self.dial(addr, typ)
     }

@@ -541,14 +541,14 @@ async fn connect_isolated_net_never_dials_direct() {
         dest: [0x22; 32],
         port: 0,
     };
-    let err = send_tx_isolated(&Dialer::Direct, onion, magic, tx.clone(), "/rbitcoin-test/")
+    let err = send_tx_isolated(&Dialer::Direct, onion, magic, tx.clone())
         .await
         .unwrap_err();
     assert!(
         err.to_string().contains("onion dial requires SOCKS"),
         "{err}"
     );
-    let err = send_tx_isolated(&Dialer::Direct, i2p, magic, tx, "/rbitcoin-test/")
+    let err = send_tx_isolated(&Dialer::Direct, i2p, magic, tx)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("i2p dial requires SAM"), "{err}");
