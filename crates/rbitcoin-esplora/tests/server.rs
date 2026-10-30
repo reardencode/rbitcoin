@@ -26,6 +26,28 @@ use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 
 use rbitcoin_query::testutil::FixtureChain;
+
+/// `store(true)` ends the serve task without waiting out the shutdown poll.
+#[tokio::test]
+async fn esplora_shutdown_wakes_without_the_fifty_ms_poll() {
+    tokio::time::pause();
+    let (_dir, q) = temp_query("esplora-stop-wake");
+    let (h0, cb0) = coinbase(0, Fk::NULL, None);
+    q.connect_block(Height(0), &h0, &[cb0]).unwrap();
+    let cfg = EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), Network::Regtest);
+    let mut handle = run_esplora(cfg, Arc::new(q), None).await.expect("listen");
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
+    handle.shutdown.store(true);
+    tokio::task::yield_now().await;
+    let joined = tokio::time::timeout(Duration::ZERO, &mut handle.task).await;
+    tokio::time::resume();
+    joined
+        .expect("esplora stayed in the 50 ms shutdown poll")
+        .expect("serve task");
+}
+
 fn temp_query(label: &str) -> (rbitcoin_query::testutil::TempDir, Query) {
     rbitcoin_query::testutil::tiny_query_labeled(label)
 }
@@ -948,11 +970,17 @@ impl ScriptHold {
         assert!(n >= 1, "script pool did not start");
         let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
         let entered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let parked = Arc::new((Mutex::new(()), std::sync::Condvar::new()));
         for _ in 0..n {
             let entered = Arc::clone(&entered);
             let gate = Arc::clone(&gate);
+            let parked = Arc::clone(&parked);
             rbitcoin_consensus::script_pool::spawn_detached(move || {
-                entered.fetch_add(1, Ordering::SeqCst);
+                {
+                    let _g = parked.0.lock().unwrap_or_else(|p| p.into_inner());
+                    entered.fetch_add(1, Ordering::SeqCst);
+                    parked.1.notify_all();
+                }
                 let (lock, cv) = &*gate;
                 let mut g = lock.lock().unwrap_or_else(|p| p.into_inner());
                 while !*g {
@@ -961,12 +989,14 @@ impl ScriptHold {
             });
         }
         let start = Instant::now();
+        let (lock, cv) = &*parked;
+        let mut g = lock.lock().unwrap_or_else(|p| p.into_inner());
         while entered.load(Ordering::SeqCst) < n {
-            assert!(
-                start.elapsed() < Duration::from_secs(2),
-                "script workers did not park"
-            );
-            std::thread::sleep(Duration::from_millis(1));
+            let left = Duration::from_secs(2).saturating_sub(start.elapsed());
+            assert!(!left.is_zero(), "script workers did not park");
+            let (next, timeout) = cv.wait_timeout(g, left).unwrap_or_else(|p| p.into_inner());
+            g = next;
+            assert!(!timeout.timed_out(), "script workers did not park");
         }
         Self { gate }
     }

@@ -22,13 +22,12 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinHandle;
-use tower::limit::GlobalConcurrencyLimitLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 
@@ -442,17 +441,131 @@ impl EsploraConfig {
     }
 }
 
+/// Stop bit for the HTTP serve task. `store(true)` wakes the accept loop.
+pub struct EsploraStop {
+    flag: AtomicBool,
+    wake: Notify,
+}
+
+impl EsploraStop {
+    pub fn new(initial: bool) -> Arc<Self> {
+        Arc::new(Self {
+            flag: AtomicBool::new(initial),
+            wake: Notify::new(),
+        })
+    }
+
+    pub fn load(&self) -> bool {
+        self.flag.load(Ordering::SeqCst)
+    }
+
+    pub fn store(&self, value: bool) {
+        self.flag.store(value, Ordering::SeqCst);
+        if value {
+            self.wake.notify_waiters();
+        }
+    }
+
+    fn notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.wake.notified()
+    }
+}
+
+/// Listener admission. `waiting` counts requests that found the limit full.
+#[doc(hidden)]
+pub struct AdmitGate {
+    sem: Arc<Semaphore>,
+    arrived: AtomicUsize,
+    waiting: AtomicUsize,
+    holding: AtomicUsize,
+    wake: Notify,
+}
+
+impl AdmitGate {
+    fn new(max: usize) -> Arc<Self> {
+        Arc::new(Self {
+            sem: Arc::new(Semaphore::new(max.max(1))),
+            arrived: AtomicUsize::new(0),
+            waiting: AtomicUsize::new(0),
+            holding: AtomicUsize::new(0),
+            wake: Notify::new(),
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn arrived(&self) -> usize {
+        self.arrived.load(Ordering::SeqCst)
+    }
+
+    #[doc(hidden)]
+    pub fn waiting(&self) -> usize {
+        self.waiting.load(Ordering::SeqCst)
+    }
+
+    #[doc(hidden)]
+    pub fn holding(&self) -> usize {
+        self.holding.load(Ordering::SeqCst)
+    }
+
+    #[doc(hidden)]
+    pub fn notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.wake.notified()
+    }
+}
+
+async fn admit_connection(
+    State(gate): State<Arc<AdmitGate>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    gate.arrived.fetch_add(1, Ordering::SeqCst);
+    gate.wake.notify_waiters();
+    let permit = match gate.sem.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            gate.waiting.fetch_add(1, Ordering::SeqCst);
+            gate.wake.notify_waiters();
+            let Ok(permit) = gate.sem.clone().acquire_owned().await else {
+                gate.waiting.fetch_sub(1, Ordering::SeqCst);
+                gate.wake.notify_waiters();
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            };
+            gate.waiting.fetch_sub(1, Ordering::SeqCst);
+            gate.wake.notify_waiters();
+            permit
+        }
+    };
+    gate.holding.fetch_add(1, Ordering::SeqCst);
+    gate.wake.notify_waiters();
+    let _permit = permit;
+    struct Hold(Arc<AdmitGate>);
+    impl Drop for Hold {
+        fn drop(&mut self) {
+            self.0.holding.fetch_sub(1, Ordering::SeqCst);
+            self.0.wake.notify_waiters();
+        }
+    }
+    let _hold = Hold(Arc::clone(&gate));
+    next.run(req).await
+}
+
 pub struct EsploraHandle {
     /// Bound TCP address. Unix listen leaves this as `127.0.0.1:0`.
     pub local_addr: SocketAddr,
     pub socket_path: Option<PathBuf>,
-    pub shutdown: Arc<AtomicBool>,
+    pub shutdown: Arc<EsploraStop>,
+    /// Listener slot gate. Tests wait on `waiting` instead of a settle sleep.
+    #[doc(hidden)]
+    pub admit: Arc<AdmitGate>,
+    /// `/blindbit/v1/` permit gate, mounted only while tweaks are on.
+    #[doc(hidden)]
+    pub blindbit: Arc<crate::blindbit::BlindbitLimit>,
     pub task: JoinHandle<()>,
 }
 
 impl EsploraHandle {
     pub async fn shutdown(self) {
-        self.shutdown.store(true, Ordering::SeqCst);
+        self.shutdown.store(true);
         self.task.abort();
         let _ = self.task.await;
     }
@@ -869,8 +982,8 @@ pub async fn run_esplora(
     query: Arc<Query>,
     mempool: Option<Arc<MempoolHub>>,
 ) -> Result<EsploraHandle, std::io::Error> {
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_c = shutdown.clone();
+    let shutdown = EsploraStop::new(false);
+    let shutdown_c = Arc::clone(&shutdown);
 
     let max_conn = config.limits.max_connections.max(1);
     let max_body = config.limits.max_request_bytes.max(1);
@@ -1019,7 +1132,8 @@ pub async fn run_esplora(
     // Outer → inner: timeout → concurrency → body → meter → chain-view stamp
     // → heavy JSON encode. The timeout goes on last, outside the limit, so
     // the wait for a slot counts against it.
-    let conn_limit = GlobalConcurrencyLimitLayer::new(max_conn);
+    let admit = AdmitGate::new(max_conn);
+    let blindbit_limit = crate::blindbit::BlindbitLimit::new(config.blindbit_max_inflight.max(1));
     let listener_layers = |r: Router<AppState>| {
         r.layer(middleware::from_fn(finish_heavy_json))
             .layer(middleware::from_fn_with_state(
@@ -1028,9 +1142,11 @@ pub async fn run_esplora(
             ))
             .layer(middleware::from_fn(meter_rest))
             .layer(RequestBodyLimitLayer::new(max_body))
-            // `Router::layer` wraps each route on its own; one global limit, cloned,
-            // shares its semaphore, so `max_conn` bounds the listener.
-            .layer(conn_limit.clone())
+            // One gate, cloned, shares its semaphore, so `max_conn` bounds the listener.
+            .layer(middleware::from_fn_with_state(
+                Arc::clone(&admit),
+                admit_connection,
+            ))
     };
     let request_timeout = || TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, timeout);
     let rest = listener_layers(rest.fallback(fallback_404)).layer(request_timeout());
@@ -1038,10 +1154,9 @@ pub async fn run_esplora(
     // on it holds no slot. One timeout covers both waits. Merged after the
     // listener layers, so they wrap these routes once.
     let rest = if state.query.sptweaks_enabled() {
-        let sem = Arc::new(Semaphore::new(config.blindbit_max_inflight.max(1)));
         let blindbit = listener_layers(crate::blindbit::blindbit_routes())
             .layer(middleware::from_fn_with_state(
-                sem,
+                Arc::clone(&blindbit_limit),
                 crate::blindbit::blindbit_permit_mw,
             ))
             .layer(request_timeout());
@@ -1061,8 +1176,12 @@ pub async fn run_esplora(
             let task = tokio::spawn(async move {
                 let make = app.into_make_service_with_connect_info::<SocketAddr>();
                 let serve = axum::serve(listener, make).with_graceful_shutdown(async move {
-                    while !shutdown_c.load(Ordering::SeqCst) {
-                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    loop {
+                        let wake = shutdown_c.notified();
+                        if shutdown_c.load() {
+                            break;
+                        }
+                        wake.await;
                     }
                 });
                 if let Err(e) = serve.await {
@@ -1073,6 +1192,8 @@ pub async fn run_esplora(
                 local_addr,
                 socket_path: None,
                 shutdown,
+                admit: Arc::clone(&admit),
+                blindbit: Arc::clone(&blindbit_limit),
                 task,
             })
         }
@@ -1087,8 +1208,12 @@ pub async fn run_esplora(
             let listener = bind_unix_mode(&path, 0o660)?;
             let task = tokio::spawn(async move {
                 let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
-                    while !shutdown_c.load(Ordering::SeqCst) {
-                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    loop {
+                        let wake = shutdown_c.notified();
+                        if shutdown_c.load() {
+                            break;
+                        }
+                        wake.await;
                     }
                 });
                 if let Err(e) = serve.await {
@@ -1099,6 +1224,8 @@ pub async fn run_esplora(
                 local_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
                 socket_path: Some(path),
                 shutdown,
+                admit: Arc::clone(&admit),
+                blindbit: Arc::clone(&blindbit_limit),
                 task,
             })
         }

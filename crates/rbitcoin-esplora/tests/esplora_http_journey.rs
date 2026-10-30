@@ -842,10 +842,28 @@ async fn esplora_max_connections_spans_every_route() {
     // full. Retry while the held requests may not all be admitted yet.
     let mut tip = None;
     for _ in 0..20 {
+        let before = handle.admit.waiting();
         let get = tokio::spawn(async move { http_get(addr, "/blocks/tip/height").await });
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        if !get.is_finished() {
-            tip = Some(get);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let notified = handle.admit.notified();
+            if !get.is_finished() && handle.admit.waiting() > before {
+                tip = Some(get);
+                break;
+            }
+            if get.is_finished() {
+                break;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !left.is_zero(),
+                "a full listener did not queue the request"
+            );
+            if tokio::time::timeout(left, notified).await.is_err() {
+                panic!("a full listener did not queue the request");
+            }
+        }
+        if tip.is_some() {
             break;
         }
     }
@@ -883,7 +901,28 @@ async fn esplora_request_timeout_covers_the_wait_for_a_slot() {
         let req = "POST /tx HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 64\r\n\r\n";
         stream.write_all(req.as_bytes()).await.unwrap();
         held.push(stream);
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        let want = held.len();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let notified = handle.admit.notified();
+            if handle.admit.arrived() >= want {
+                break;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !left.is_zero(),
+                "held request never reached the listener ({}/{})",
+                handle.admit.arrived(),
+                want
+            );
+            if tokio::time::timeout(left, notified).await.is_err() {
+                panic!(
+                    "held request never reached the listener ({}/{})",
+                    handle.admit.arrived(),
+                    want
+                );
+            }
+        }
     }
     let sent = Instant::now();
     let (st, _) = tokio::time::timeout(

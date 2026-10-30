@@ -443,17 +443,58 @@ async fn blindbit_v1_routes_share_one_inflight_limit() {
         stream.write_all(req.as_bytes()).await.unwrap();
         held.push(stream);
     }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let notified = handle.blindbit.notified();
+        if handle.blindbit.held() >= MAX {
+            break;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !left.is_zero(),
+            "forward-tx did not take a BlindBit permit (held={} waiting={} arrived={} holding={})",
+            handle.blindbit.held(),
+            handle.blindbit.waiting(),
+            handle.admit.arrived(),
+            handle.admit.holding()
+        );
+        if tokio::time::timeout(left, notified).await.is_err() {
+            panic!(
+                "forward-tx did not take a BlindBit permit (held={} waiting={} arrived={} holding={})",
+                handle.blindbit.held(),
+                handle.blindbit.waiting(),
+                handle.admit.arrived(),
+                handle.admit.holding()
+            );
+        }
+    }
     // Asks queued on BlindBit; one must stay unanswered.
     let mut queued = Vec::new();
     for _ in 0..20 {
+        let before = handle.blindbit.waiting();
         let ask = tokio::spawn(async move { http_get(addr, "/blindbit/v1/tweak-index/0").await });
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        if ask.is_finished() {
-            continue;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut parked = false;
+        loop {
+            let notified = handle.blindbit.notified();
+            if !ask.is_finished() && handle.blindbit.waiting() > before {
+                parked = true;
+                break;
+            }
+            if ask.is_finished() {
+                break;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(!left.is_zero(), "a full BlindBit limit did not queue the ask");
+            if tokio::time::timeout(left, notified).await.is_err() {
+                panic!("a full BlindBit limit did not queue the ask");
+            }
         }
-        queued.push(ask);
-        if queued.len() == 3 {
-            break;
+        if parked {
+            queued.push(ask);
+            if queued.len() == 3 {
+                break;
+            }
         }
     }
     assert_eq!(queued.len(), 3, "a full BlindBit limit makes the next asks wait");
@@ -472,10 +513,28 @@ async fn blindbit_v1_routes_share_one_inflight_limit() {
     spare.write_all(req.as_bytes()).await.unwrap();
     let mut waiting = None;
     for _ in 0..20 {
+        let before = handle.admit.waiting();
         let get = tokio::spawn(async move { http_get(addr, "/blocks/tip/height").await });
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        if !get.is_finished() {
-            waiting = Some(get);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let notified = handle.admit.notified();
+            if !get.is_finished() && handle.admit.waiting() > before {
+                waiting = Some(get);
+                break;
+            }
+            if get.is_finished() {
+                break;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !left.is_zero(),
+                "a full listener did not queue the request"
+            );
+            if tokio::time::timeout(left, notified).await.is_err() {
+                panic!("a full listener did not queue the request");
+            }
+        }
+        if waiting.is_some() {
             break;
         }
     }
@@ -559,14 +618,19 @@ async fn blindbit_forward_tx_holds_its_permit_through_the_admit() {
 
     release_tx.send(()).unwrap();
     locker.join().unwrap();
-    let mut st = 0;
-    for _ in 0..20 {
-        st = http_get(addr, "/blindbit/v1/tweak-index/0").await.0;
-        if st == 200 {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let notified = handle.blindbit.notified();
+        if handle.blindbit.held() == 0 {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(!left.is_zero(), "forward-tx permit was not released");
+        if tokio::time::timeout(left, notified).await.is_err() {
+            panic!("forward-tx permit was not released");
+        }
     }
+    let (st, _) = http_get(addr, "/blindbit/v1/tweak-index/0").await;
     assert_eq!(st, 200, "the permit frees once the admit returns");
     handle.shutdown().await;
 }
