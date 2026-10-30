@@ -338,6 +338,21 @@ pub fn getdata_on_wire_quiet(slot: &PeerSlot, now_ms: u64, stall_ms: u64) -> boo
 pub const LIGHT_DECODE_PERMITS: usize = 32;
 
 impl PeerSlot {
+    /// Alive and not paused: assign may send this peer block getdata.
+    pub fn takes_block_requests(&self) -> bool {
+        self.alive && self.block_download_paused_until.is_none()
+    }
+
+    /// Lift the block-download pause once the node clock reaches it.
+    pub fn resume_block_download_if_due(&mut self, now_secs: u64) {
+        if self
+            .block_download_paused_until
+            .is_some_and(|until| now_secs >= until)
+        {
+            self.block_download_paused_until = None;
+        }
+    }
+
     #[doc(hidden)]
     pub fn requested_set(&self) -> std::sync::MutexGuard<'_, HashSet<BlockHash>> {
         self.requested.lock().unwrap_or_else(|e| e.into_inner())

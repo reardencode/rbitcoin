@@ -242,7 +242,16 @@ pub fn assign_work_ordered(
 ) {
     let t0 = Instant::now();
     let mut issued = 0u64;
-    let alive: Vec<usize> = st.slots.iter().filter(|s| s.alive).map(|s| s.id).collect();
+    let now_secs = hub.clock.now_secs();
+    for s in &mut st.slots {
+        s.resume_block_download_if_due(now_secs);
+    }
+    let alive: Vec<usize> = st
+        .slots
+        .iter()
+        .filter(|s| s.takes_block_requests())
+        .map(|s| s.id)
+        .collect();
     if alive.is_empty() {
         return;
     }

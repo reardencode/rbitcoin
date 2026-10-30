@@ -5,7 +5,7 @@ use super::rate::{PROGRESS_STEP, RELSLOW_ACTIVE_MS};
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::Magic;
 use bitcoin::BlockHash;
-use rbitcoin_log::{debug, error, warn};
+use rbitcoin_log::{debug, error, info, warn};
 use rbitcoin_net::chain::ChainHub;
 use rbitcoin_net::error::NetError;
 use rbitcoin_net::peers::{trying_connection_log, PeerConnType};
@@ -23,6 +23,9 @@ pub const STALL_ADDR_COOLDOWN: Duration = Duration::from_secs(10 * 60);
 pub const STALL_ADDR_COOLDOWN_2: Duration = Duration::from_secs(30 * 60);
 /// Third and later kicks this process.
 pub const STALL_ADDR_COOLDOWN_3: Duration = Duration::from_secs(2 * 60 * 60);
+/// Core `MANUAL_PEER_BLOCK_DOWNLOAD_COOLDOWN`: a manual peer that stalls block
+/// download is sent no block getdata for this long on the node clock.
+pub const MANUAL_PEER_BLOCK_DOWNLOAD_COOLDOWN: Duration = Duration::from_secs(2 * 60);
 
 /// Bulk cluster: `median <= min * this` → tight pack, never relative-disconnect.
 /// Uses median/min (not max/min) so one fast peer does not open the gate.
@@ -308,10 +311,7 @@ pub async fn dial_batch(
         let sinks = sinks.clone();
         clock.note_connection_attempt();
         let conn_type = ibd_conn_type(connect, addr);
-        debug!(
-            "{}",
-            trying_connection_log(PeerConnType::OutboundFullRelay, addr)
-        );
+        debug!("{}", trying_connection_log(conn_type, addr));
         let dialer = dialer.clone();
         let to = dialer.connect_timeout(addr, connect_timeout);
         let dial_perms = perms.clone();
@@ -481,9 +481,21 @@ pub fn release_peer_block_work(
     body: &mut super::body::BodyPresence,
     peer: usize,
 ) -> Vec<bitcoin::BlockHash> {
-    let mut freed = Vec::new();
     if let Some(s) = slots.iter_mut().find(|s| s.id == peer) {
         s.alive = false;
+    }
+    release_block_requests(slots, inflight, body, peer)
+}
+
+/// [`release_peer_block_work`] for a peer that stays connected.
+fn release_block_requests(
+    slots: &mut [PeerSlot],
+    inflight: &mut HashMap<bitcoin::BlockHash, super::state::InflightReq>,
+    body: &mut super::body::BodyPresence,
+    peer: usize,
+) -> Vec<bitcoin::BlockHash> {
+    let mut freed = Vec::new();
+    if let Some(s) = slots.iter_mut().find(|s| s.id == peer) {
         for h in s.track_drain() {
             let empty = inflight
                 .get_mut(&h)
@@ -674,6 +686,10 @@ pub fn note_misbehavior_dead(
 /// Stalled addresses enter a cooldown so redial does not immediately re-open
 /// the same host under a new peer id (log spam + wasted slots).
 ///
+/// A manual (`--connect`) peer is kept, as in Core (bitcoin/bitcoin#34743).
+/// Its block requests are released and it is sent no block getdata for
+/// [`MANUAL_PEER_BLOCK_DOWNLOAD_COOLDOWN`] on the node clock.
+///
 /// The status thread sends that shutdown without this lock. The coordination
 /// loop records the kick and releases in-flight blocks when the task ends.
 /// This lock-holding form is what the stall tests drive.
@@ -713,7 +729,7 @@ pub fn disconnect_stalled_block_peers_at(
     now: Instant,
     stall: Duration,
     now_ms: u64,
-    _now_secs: u64,
+    now_secs: u64,
 ) -> Vec<bitcoin::BlockHash> {
     let stall = stall.max(Duration::from_secs(30));
     let stall_ms = stall.as_millis() as u64;
@@ -750,6 +766,17 @@ pub fn disconnect_stalled_block_peers_at(
     let Some((why, (id, n_work, addr, stream))) = picked else {
         return Vec::new();
     };
+    if let Some(s) = slots
+        .iter_mut()
+        .find(|s| s.id == id && s.conn_type == PeerConnType::Manual)
+    {
+        let cool = MANUAL_PEER_BLOCK_DOWNLOAD_COOLDOWN.as_secs();
+        info!(
+            "ibd: Pausing block downloads from stalling manual peer={id} for {cool} seconds ({addr} {why}, {stall:?}, {n_work} in-flight, stream={stream})"
+        );
+        s.block_download_paused_until = Some(now_secs.saturating_add(cool));
+        return release_block_requests(slots, inflight, body, id);
+    }
     let mut freed = Vec::new();
     let cool = record_stall_kick(addr_cooldown, addr_strikes, addr, now);
     warn!(
