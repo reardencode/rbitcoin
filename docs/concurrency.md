@@ -217,6 +217,12 @@ guest.
 `run_cpu_panic_keeps_the_worker`, and `script_worker_cannot_pread` are the
 pins.
 
+Block-decode permits equal that pool. Header-decode permits are
+`min(max(cores * 2, 8), pool)`, so a header storm cannot take block permits
+or outnumber pool threads. Frames already requested still sit in the async
+task until a permit is free; the getdata window, not the semaphore, bounds
+that RAM. The reader does not await a decode permit before the next TCP read.
+
 **Deferred.** Mempool accept, Electrum, Esplora, and RPC store joins, block
 and header decode, compact reconstruct, header persist, and full-block
 serve stay on Tokio's blocking pool (nCPU, minimum 4). The cap stays there

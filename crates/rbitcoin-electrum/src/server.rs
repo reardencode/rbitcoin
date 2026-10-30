@@ -655,7 +655,7 @@ where
 }
 
 /// Smallest blocking pool the node builds (`max(cores, 4)` threads).
-pub const MIN_BLOCKING_POOL: usize = 4;
+pub use rbitcoin_net::MIN_BLOCKING_POOL;
 
 /// Read-only batch items one connection may have in flight for a blocking
 /// pool of `blocking_pool` threads: half of it, at least one. Each item holds

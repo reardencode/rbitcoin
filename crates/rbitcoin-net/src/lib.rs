@@ -75,6 +75,10 @@ pub use error::NetError;
 pub use eviction::{select_inbound_eviction, InboundEvictCandidate};
 pub use i2p_sam::{i2p_addr_from_sam_b64, I2pSam, SAM_RETRY, SAM_RETRY_TEST};
 pub use most_work::{sum_work, WorkOverflow};
+pub use msg_decode::{
+    block_decode_permits, block_decode_permits_for, blocking_pool_size, blocking_pool_size_for,
+    ctrl_decode_permits, ctrl_decode_permits_for, MIN_BLOCKING_POOL,
+};
 pub use net_permissions::{
     apply_implicit, parse_whitebind, parse_whitelist, NetPermTable, NetPermissionFlags,
     WhitebindGrant, WhitelistGrant, DEFAULT_WHITELISTFORCERELAY, DEFAULT_WHITELISTRELAY,

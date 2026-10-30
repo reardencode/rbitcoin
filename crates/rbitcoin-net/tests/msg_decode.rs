@@ -49,7 +49,29 @@ fn decode_offload_light_and_spawn() {
 fn decode_permit_pools_are_wider_than_one_slot() {
     let blocks = block_decode_permits();
     let ctrl = ctrl_decode_permits();
-    assert!(blocks >= 64, "block decodes keep a wide pool, got {blocks}");
-    assert!(ctrl >= 8, "header decodes keep their own pool, got {ctrl}");
-    assert!(blocks > ctrl);
+    let pool = blocking_pool_size();
+    assert_eq!(blocks, pool, "block decodes match the blocking pool");
+    assert!(ctrl <= pool, "header decodes cannot exceed the pool, got {ctrl}");
+    assert!(ctrl >= 1);
+}
+
+#[test]
+fn decode_permits_follow_the_pool_for_a_fixed_core_count() {
+    // 4 cores: pool floor is 4, so both permits are 4 (header formula is 8, capped).
+    assert_eq!(blocking_pool_size_for(Some(4)), 4);
+    assert_eq!(block_decode_permits_for(Some(4)), 4);
+    assert_eq!(ctrl_decode_permits_for(Some(4)), 4);
+    // 1 core still floors the pool at 4. Header permits stay within that floor
+    // and within max(cores * 2, 8).
+    assert_eq!(blocking_pool_size_for(Some(1)), 4);
+    assert_eq!(block_decode_permits_for(Some(1)), 4);
+    assert_eq!(ctrl_decode_permits_for(Some(1)), 4);
+    assert!(ctrl_decode_permits_for(Some(1)) <= 1usize.saturating_mul(2).max(8));
+    // 16 cores: block permits are the pool (16). Header permits are min(32, 16).
+    assert_eq!(block_decode_permits_for(Some(16)), 16);
+    assert_eq!(ctrl_decode_permits_for(Some(16)), 16);
+    assert!(ctrl_decode_permits_for(Some(16)) <= 16usize.saturating_mul(2).max(8));
+    // Unknown parallelism uses the pool floor, not the old 64-wide block queue.
+    assert_eq!(block_decode_permits_for(None), 4);
+    assert_eq!(ctrl_decode_permits_for(None), 4);
 }

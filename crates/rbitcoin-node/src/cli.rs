@@ -592,10 +592,7 @@ pub fn cli_apply_err(e: crate::error::NodeError) -> ExitCode {
 
 #[doc(hidden)]
 pub fn blocking_pool_size() -> usize {
-    std::thread::available_parallelism()
-        .map(|p| p.get())
-        .unwrap_or(rbitcoin_electrum::MIN_BLOCKING_POOL)
-        .max(rbitcoin_electrum::MIN_BLOCKING_POOL)
+    rbitcoin_net::blocking_pool_size()
 }
 
 #[doc(hidden)]
