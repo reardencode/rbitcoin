@@ -242,6 +242,17 @@ async fn peer_rows(rpc: SocketAddr) -> Vec<Value> {
     v["result"].as_array().cloned().unwrap_or_default()
 }
 
+/// One kind from `outboundpass`. `0` until that pass has been recorded.
+async fn outbound_pass_count(rpc: SocketAddr, key: &str) -> u64 {
+    let Ok(v) = rbitcoin_test::jsonrpc::try_jsonrpc(rpc, "outboundpass", json!([])).await else {
+        return 0;
+    };
+    if !v["error"].is_null() {
+        return 0;
+    }
+    v["result"][key].as_u64().unwrap_or(0)
+}
+
 fn conn_type(row: &Value) -> &str {
     row["connection_type"].as_str().unwrap_or("")
 }
@@ -433,14 +444,29 @@ async fn stale_rotation(root: &Path, addrs: &[SocketAddr], seeds: bool) {
     write_book(&dir, addrs);
     let mut cfg = base_cfg(&dir);
     cfg.listen.use_seeds = seeds;
-    cfg.stale_tip = Duration::from_secs(1);
+    // Seeds on: once the quota is full the next stale poll may rotate.
+    // Seeds off stays at 1s so the decline is a stagnant pass, not the
+    // first poll of the run.
+    cfg.stale_tip = if seeds {
+        Duration::from_millis(1)
+    } else {
+        Duration::from_secs(1)
+    };
     cfg.stale_poll = Duration::from_millis(200);
     let mut join = spawn_run(cfg);
     let rpc = published_listener(&dir, "rpc", Duration::from_secs(40), &mut join).await;
-    let rows = wait_full_relay(rpc, MAX_OUT as usize, MAX_OUT as usize).await;
-    let before = ids_of(&full_relay(&rows));
-    let deadline = Instant::now() + Duration::from_secs(if seeds { 8 } else { 4 });
+    let _ = wait_full_relay(rpc, MAX_OUT as usize, MAX_OUT as usize).await;
+    let pass_key = if seeds {
+        "rotated"
+    } else {
+        "skipped_seeds_off"
+    };
+    // A rotation drops one row before the replacement connects. Only a full
+    // quota is a snapshot. The next full quota is the pass under test.
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut prev: Option<(u64, BTreeSet<u64>)> = None;
     loop {
+        let pass = outbound_pass_count(rpc, pass_key).await;
         let rows = peer_rows(rpc).await;
         let live = full_relay(&rows);
         let ids = ids_of(&live);
@@ -449,35 +475,40 @@ async fn stale_rotation(root: &Path, addrs: &[SocketAddr], seeds: bool) {
             "stale rotation grew past --max-outbound: {}",
             type_list(&rows)
         );
-        let rotated = live.len() == MAX_OUT as usize
-            && before.difference(&ids).count() == 1
-            && ids.difference(&before).count() == 1;
-        if seeds && rotated {
-            break;
+        if live.len() == MAX_OUT as usize {
+            if let Some((seen, before)) = &prev {
+                if pass > *seen {
+                    if seeds {
+                        let replaced = before.difference(&ids).count() == 1
+                            && ids.difference(before).count() == 1;
+                        if replaced {
+                            break;
+                        }
+                    } else {
+                        assert_eq!(
+                            ids, *before,
+                            "seeds off must not rotate an outbound-full-relay"
+                        );
+                        break;
+                    }
+                }
+            }
+            prev = Some((pass, ids));
         }
         if Instant::now() >= deadline {
-            if seeds {
-                panic!(
-                    "stale tip did not replace one outbound-full-relay; before={before:?} now={ids:?} types=[{}]",
-                    type_list(&rows)
-                );
-            }
-            assert_eq!(
-                ids, before,
-                "seeds off must not rotate an outbound-full-relay"
+            panic!(
+                "stale tip pass {pass_key} did not settle (last {prev:?}); types=[{}]",
+                type_list(&rows)
             );
-            assert_eq!(live.len(), MAX_OUT as usize);
-            break;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     stop_node(rpc, join).await;
 }
 
 async fn assert_no_book_peers(rpc: SocketAddr, book: &[SocketAddr], label: &str) {
     let deadline = Instant::now() + Duration::from_secs(15);
-    let mut saw_manual = false;
-    let mut manual_at = None;
+    let mut pinned_at = None;
     loop {
         let rows = peer_rows(rpc).await;
         if !full_relay(&rows).is_empty() {
@@ -486,20 +517,23 @@ async fn assert_no_book_peers(rpc: SocketAddr, book: &[SocketAddr], label: &str)
                 type_list(&rows)
             );
         }
+        let mut manual = false;
         for row in &rows {
             let addr = row["addr"].as_str().unwrap_or("");
             if book.iter().any(|b| b.to_string() == addr) {
                 panic!("{label} dialed book address {addr}: {}", type_list(&rows));
             }
             if conn_type(row) == "manual" {
-                saw_manual = true;
+                manual = true;
             }
         }
-        if saw_manual && manual_at.is_none() {
-            manual_at = Some(Instant::now());
+        if manual && pinned_at.is_none() {
+            pinned_at = Some(outbound_pass_count(rpc, "skipped_pinned").await);
         }
-        if manual_at.is_some_and(|t| t.elapsed() >= Duration::from_secs(2)) {
-            return;
+        if let Some(at) = pinned_at {
+            if outbound_pass_count(rpc, "skipped_pinned").await > at {
+                return;
+            }
         }
         if Instant::now() >= deadline {
             panic!(

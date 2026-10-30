@@ -10,7 +10,8 @@ use rbitcoin_ibd::{
 use rbitcoin_log::{debug, enabled, info, warn, Level};
 use rbitcoin_net::{
     default_port, netgroup, sample_reset_serve_perf, socks_dns_seed_dests, AddrMan, AsMap,
-    BlockingRegion, ChainHub, Dialer, MempoolHub, NetAddr, P2PNode, PeerConnType, TipEvent,
+    BlockingRegion, ChainHub, Dialer, MempoolHub, NetAddr, OutboundPass, P2PNode, PeerConnType,
+    TipEvent,
 };
 use rbitcoin_primitives::Network;
 use rbitcoin_query::{spawn_sh_writebehind, Query, SpendSync};
@@ -1481,7 +1482,16 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             }
 
             let stagnant = last_tip_change.elapsed() >= stale_tip;
-            if !stagnant || config.listen.has_pinned_connect() || !config.listen.use_seeds {
+            if !stagnant {
+                node.peers.note_outbound_pass(OutboundPass::NotStagnant);
+                continue;
+            }
+            if config.listen.has_pinned_connect() {
+                node.peers.note_outbound_pass(OutboundPass::SkippedPinned);
+                continue;
+            }
+            if !config.listen.use_seeds {
+                node.peers.note_outbound_pass(OutboundPass::SkippedSeedsOff);
                 continue;
             }
             if shutdown.requested() {
@@ -1491,6 +1501,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             // only rotates one full-relay session once the quota is full.
             let rows = node.peers.outbound_full_relay_rows();
             if !stale_follow_needs_room(rows.len(), max_out) {
+                node.peers.note_outbound_pass(OutboundPass::NoSpare);
                 continue;
             }
             let ids: Vec<u64> = rows.iter().map(|(id, _)| *id).collect();
@@ -1501,17 +1512,20 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 .collect();
             let salt = node.hub.clock.now_secs();
             let Some(evict_id) = rbitcoin_net::pick_stale_follow_evict(&ids, salt, &groups) else {
+                node.peers.note_outbound_pass(OutboundPass::NoSpare);
                 continue;
             };
             let (occupied, _, _) = outbound_slots(&node.peers);
             let replacement = outbound_full_relay_candidates(&shared_peers, 1, &occupied);
             if replacement.is_empty() {
+                node.peers.note_outbound_pass(OutboundPass::NoSpare);
                 continue;
             }
             last_tip_change = Instant::now();
             node.peers.disconnect_id(evict_id);
             info!("node: stale tip — replacing outbound {evict_id}");
             queue_outbound_full_relay(&node.peers, &shared_peers, &replacement);
+            node.peers.note_outbound_pass(OutboundPass::Rotated);
         }
     }
 
@@ -2955,14 +2969,20 @@ pub fn refill_outbound_full_relay(
     max_out: usize,
 ) {
     if config.trust_peer_set() || config.listen.has_pinned_connect() {
+        peers.note_outbound_pass(OutboundPass::SkippedPinned);
         return;
     }
     let (occupied, live, pending) = outbound_slots(peers);
     if live >= max_out {
+        peers.note_outbound_pass(OutboundPass::NoSpare);
         return;
     }
     let room = max_out.saturating_sub(live).saturating_sub(pending);
     let picked = outbound_full_relay_candidates(shared_peers, room, &occupied);
+    if picked.is_empty() {
+        peers.note_outbound_pass(OutboundPass::NoSpare);
+        return;
+    }
     queue_outbound_full_relay(peers, shared_peers, &picked);
 }
 
