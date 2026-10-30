@@ -53,20 +53,24 @@ pub fn bind_unix_mode(
 }
 use tokio::task::JoinHandle;
 
-async fn serve_rpc<L>(mut listener: L, app: Router, sem: Arc<Semaphore>, shutdown: Arc<AtomicBool>)
-where
+async fn serve_rpc<L>(
+    mut listener: L,
+    app: Router,
+    sem: Arc<Semaphore>,
+    shutdown: Arc<AtomicBool>,
+    shutdown_tx: tokio::sync::watch::Sender<()>,
+) where
     L: axum::serve::Listener,
     L::Addr: std::fmt::Debug,
 {
-    let (shutdown_tx, _) = tokio::sync::watch::channel(());
-    let mut shutdown_tick = tokio::time::interval(std::time::Duration::from_millis(50));
+    let mut stop_rx = shutdown_tx.subscribe();
     loop {
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
         tokio::select! {
-            _ = shutdown_tick.tick() => {
-                if shutdown.load(Ordering::SeqCst) {
-                    break;
-                }
-            }
+            biased;
+            _ = stop_rx.changed() => break,
             (io, addr) = listener.accept() => {
                 let Ok(permit) = sem.clone().try_acquire_owned() else {
                     info!("rpc: reject {addr:?} (at max connections={RPC_MAX_CONNECTIONS})");
@@ -137,12 +141,14 @@ pub struct RpcHandle {
     /// handlers before tearing down the RPC server (`feature_shutdown.py`).
     pub active: Arc<std::sync::Mutex<crate::methods::RpcActive>>,
     pub shutdown: Arc<AtomicBool>,
+    shutdown_tx: tokio::sync::watch::Sender<()>,
     pub tasks: Vec<JoinHandle<()>>,
 }
 
 impl RpcHandle {
     pub async fn shutdown(self) {
         self.shutdown.store(true, Ordering::SeqCst);
+        let _ = self.shutdown_tx.send(());
         for task in self.tasks {
             task.abort();
             let _ = task.await;
@@ -230,6 +236,7 @@ pub async fn run_rpc(
     let work_queue = Arc::new(tokio::sync::Semaphore::new(n));
     let rest_queue = Arc::new(tokio::sync::Semaphore::new(DEFAULT_RPC_WORK_QUEUE));
     let shutdown = Arc::new(AtomicBool::new(false));
+    let (shutdown_tx, _) = tokio::sync::watch::channel(());
     let accept_sem = Arc::new(Semaphore::new(RPC_MAX_CONNECTIONS));
     let mut tasks = Vec::new();
     let mut local_addr = None;
@@ -266,7 +273,11 @@ pub async fn run_rpc(
         let shutdown_w = Arc::clone(&shutdown);
         let accept_sem = Arc::clone(&accept_sem);
         tasks.push(tokio::spawn(serve_rpc(
-            listener, app, accept_sem, shutdown_w,
+            listener,
+            app,
+            accept_sem,
+            shutdown_w,
+            shutdown_tx.clone(),
         )));
         info!(
             "rpc: HTTP JSON-RPC on {bound} (bearer token {})",
@@ -298,6 +309,7 @@ pub async fn run_rpc(
                     initial_block_download: ibd,
                     active,
                     shutdown,
+                    shutdown_tx,
                     tasks,
                 });
             }
@@ -316,7 +328,11 @@ pub async fn run_rpc(
         let shutdown_w = Arc::clone(&shutdown);
         let accept_sem = Arc::clone(&accept_sem);
         tasks.push(tokio::spawn(serve_rpc(
-            listener, app, accept_sem, shutdown_w,
+            listener,
+            app,
+            accept_sem,
+            shutdown_w,
+            shutdown_tx.clone(),
         )));
         info!("rpc: unix JSON-RPC on {}", sock.display());
         Some(sock.clone())
@@ -348,6 +364,7 @@ pub async fn run_rpc(
         initial_block_download: ibd,
         active,
         shutdown,
+        shutdown_tx,
         tasks,
     })
 }
@@ -926,4 +943,41 @@ pub fn authorized(auth: &RpcAuth, cookie: Option<&RpcCookie>, headers: &HeaderMa
         return false;
     };
     parse_basic_auth(value).is_some_and(|credentials| cookie.matches_credentials(&credentials))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The accept loop leaves when shutdown is stored, without the 50 ms tick.
+    #[tokio::test]
+    async fn accept_loop_leaves_when_shutdown_is_signaled() {
+        tokio::time::pause();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (tx, _) = tokio::sync::watch::channel(());
+        let flag = Arc::clone(&shutdown);
+        let tx_task = tx.clone();
+        let task = tokio::spawn(async move {
+            serve_rpc(
+                listener,
+                Router::new(),
+                Arc::new(Semaphore::new(4)),
+                flag,
+                tx_task,
+            )
+            .await;
+        });
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+        shutdown.store(true, Ordering::SeqCst);
+        tx.send(()).unwrap();
+        tokio::task::yield_now().await;
+        let joined = tokio::time::timeout(std::time::Duration::ZERO, task).await;
+        tokio::time::resume();
+        joined
+            .expect("accept loop stayed in the 50 ms shutdown poll")
+            .expect("serve task");
+    }
 }
