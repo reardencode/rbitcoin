@@ -204,45 +204,16 @@ fn any_port() -> SocketAddr {
 /// The address `run_p2p` bound for `name`, from `{datadir}/run/{name}.addr`.
 /// A bind-then-drop reserve races another test onto the same port.
 async fn published_listener(datadir: &std::path::Path, name: &str) -> SocketAddr {
-    let path = datadir.join("run").join(format!("{name}.addr"));
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
-    loop {
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            if let Ok(addr) = text.trim().parse::<SocketAddr>() {
-                if addr.port() != 0 {
-                    return addr;
-                }
-            }
-        }
-        if std::time::Instant::now() >= deadline {
-            panic!(
-                "bound {name} address was not published at {}",
-                path.display()
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    rbitcoin_node::run::wait_published_listener(datadir, name, Duration::from_secs(20)).await
 }
 
 async fn wait_listeners(addrs: &[SocketAddr]) {
-    use std::time::Instant;
     use tokio::net::TcpStream;
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        let mut missing = None;
-        for addr in addrs {
-            if TcpStream::connect(addr).await.is_err() {
-                missing = Some(*addr);
-                break;
-            }
-        }
-        if missing.is_none() {
-            return;
-        }
-        if Instant::now() >= deadline {
-            panic!("listeners not up ({missing:?}): {addrs:?}");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    for addr in addrs {
+        tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(*addr))
+            .await
+            .unwrap_or_else(|_| panic!("connect {addr} after publish"))
+            .unwrap_or_else(|e| panic!("connect {addr} after publish: {e}"));
     }
 }
 

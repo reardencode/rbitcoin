@@ -156,20 +156,7 @@ fn published_path(dir: &Path, name: &str) -> PathBuf {
 
 /// The address `run_p2p` bound for `name`, from `{datadir}/run/{name}.addr`.
 async fn published_listener(dir: &Path, name: &str, wait: Duration) -> SocketAddr {
-    let path = published_path(dir, name);
-    let deadline = Instant::now() + wait;
-    loop {
-        let bound = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|text| text.trim().parse::<SocketAddr>().ok());
-        if let Some(addr) = bound {
-            return addr;
-        }
-        if Instant::now() >= deadline {
-            panic!("{name} listener not up at {}", path.display());
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    rbitcoin_node::run::wait_published_listener(dir, name, wait).await
 }
 
 async fn wait_listeners(dir: &Path) -> (SocketAddr, SocketAddr) {
@@ -507,7 +494,6 @@ async fn ibd_then_restart(miner: P2PNode, miner_addr: SocketAddr, synced: &mut S
     assert_tip_view(rpc, synced.height, &synced.hash).await;
 
     miner.shutdown().await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
     assert_tip_view(rpc, synced.height, &synced.hash).await;
     assert_eq!(history_txids(electrum, &[0x51]).await, synced.script_a);
     assert_eq!(history_txids(electrum, &[0x52]).await, synced.script_b);

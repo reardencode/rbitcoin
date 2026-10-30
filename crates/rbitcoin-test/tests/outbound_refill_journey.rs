@@ -197,28 +197,14 @@ async fn published_listener(
     join: &mut JoinHandle<Result<(), NodeError>>,
 ) -> SocketAddr {
     let path = published(dir, name);
-    let deadline = Instant::now() + wait;
-    loop {
-        if join.is_finished() {
-            match join.await {
-                Ok(Ok(())) => panic!("{name} exited before publishing {}", path.display()),
-                Ok(Err(e)) => panic!("{name} exited before publishing {}: {e}", path.display()),
-                Err(e) => panic!(
-                    "{name} task ended before publishing {}: {e}",
-                    path.display()
-                ),
-            }
-        }
-        if let Some(addr) = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|text| text.trim().parse().ok())
-        {
-            return addr;
-        }
-        if Instant::now() >= deadline {
-            panic!("{name} listener not up at {}", path.display());
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::select! {
+        biased;
+        addr = rbitcoin_node::run::wait_published_listener(dir, name, wait) => addr,
+        result = &mut *join => match result {
+            Ok(Ok(())) => panic!("{name} exited before publishing {}", path.display()),
+            Ok(Err(e)) => panic!("{name} exited before publishing {}: {e}", path.display()),
+            Err(e) => panic!("{name} task ended before publishing {}: {e}", path.display()),
+        },
     }
 }
 
