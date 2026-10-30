@@ -1702,6 +1702,10 @@ impl TxTable {
         self.body.advise_body_dont_need(offset, len);
     }
 
+    pub fn advise_body_will_need(&self, offset: u64, len: u64) {
+        self.body.advise_body_will_need(offset, len);
+    }
+
     /// Absolute `(offset, len)` of packed body for `fk`.
     pub fn body_range(&self, fk: Fk) -> Result<(u64, u64), StoreError> {
         self.create_loc_range_batch(&[fk])?

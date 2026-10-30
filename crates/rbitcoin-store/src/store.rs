@@ -888,6 +888,10 @@ impl Store {
     }
 
     /// Absolute body `(offset, len)` for `fk` (for cache idx cache).
+    pub fn advise_tx_body_will_need(&self, offset: u64, len: u64) {
+        self.txs.advise_body_will_need(offset, len);
+    }
+
     pub fn tx_body_range(&self, fk: Fk) -> Result<(u64, u64), StoreError> {
         self.txs.body_range(fk)
     }

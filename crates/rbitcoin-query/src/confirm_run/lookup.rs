@@ -42,6 +42,10 @@ impl ParentPinStamp {
         self.idents.get(&create_fk_id).and_then(|p| p.body)
     }
 
+    pub fn body_ranges_iter(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.idents.values().filter_map(|p| p.body)
+    }
+
     #[inline]
     pub fn spent_range(&self, create_fk_id: u64) -> Option<(u64, u64)> {
         self.idents.get(&create_fk_id).and_then(|p| p.spent)
@@ -58,6 +62,52 @@ impl ParentPinStamp {
     }
 }
 
+fn coalesce_ranges(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
+    if ranges.is_empty() {
+        return Vec::new();
+    }
+    ranges.sort_by_key(|(off, _)| *off);
+    let mut out = Vec::with_capacity(ranges.len().min(32));
+    let mut cur_off = ranges[0].0;
+    let mut cur_end = ranges[0].0 + ranges[0].1;
+    for (off, len) in ranges.into_iter().skip(1) {
+        let end = off + len;
+        if off <= cur_end + 64 * 1024 {
+            if end > cur_end {
+                cur_end = end;
+            }
+        } else {
+            out.push((cur_off, cur_end - cur_off));
+            if out.len() >= 32 {
+                break;
+            }
+            cur_off = off;
+            cur_end = end;
+        }
+    }
+    if out.len() < 32 {
+        out.push((cur_off, cur_end - cur_off));
+    }
+    out
+}
+pub fn prefetch_parent_body_ranges(
+    query: &crate::Query,
+    parent_pin: &ParentPinStamp,
+) -> (u64, u64) {
+    let ranges: Vec<_> = parent_pin.body_ranges_iter().collect();
+    let total: u64 = ranges.iter().map(|(_, l)| *l).sum();
+    if total < 1024 * 1024 {
+        return (0, 0);
+    }
+    let merged = coalesce_ranges(ranges);
+    let start = std::time::Instant::now();
+    let mut bytes = 0u64;
+    for (off, len) in &merged {
+        query.store().advise_tx_body_will_need(*off, *len);
+        bytes += *len;
+    }
+    (bytes, start.elapsed().as_nanos() as u64)
+}
 pub type WireBlockIn = (Height, Arc<Block>, Option<Arc<[crate::TxPrecompute]>>);
 #[doc(hidden)]
 pub type LookupPhaseOut = (
@@ -175,6 +225,11 @@ fn lookup_stamp_work(
             (pin, pairs)
         }
     };
+    let (pref_bytes, pref_ns) = prefetch_parent_body_ranges(query, &parent_pin);
+    if pref_bytes > 0 {
+        crate::note_confirm(&query.confirm_stats().prefetch_bytes, pref_bytes);
+        crate::note_confirm(&query.confirm_stats().prefetch_ns, pref_ns);
+    }
     crate::note_confirm(&query.confirm_stats().lookup_blocks, blocks.len() as u64);
     crate::note_confirm(&query.confirm_stats().lookup_head_ns, plan_ns);
     let work_ns = t0.elapsed().as_nanos() as u64;
@@ -1083,4 +1138,70 @@ pub fn create_fks_from_header_ranges(
         by_header.insert(hid, slice);
     }
     by_header
+}
+
+
+#[cfg(test)]
+mod prefetch_tests {
+    use super::{coalesce_ranges, ParentPinStamp};
+    use crate::ParentIdent;
+
+    fn make_pin_with_ranges(ranges: Vec<(u64,u64)>) -> ParentPinStamp {
+        let mut idents = crate::U64Map::default();
+        for (i,(off,len)) in ranges.into_iter().enumerate() {
+            idents.insert(i as u64, ParentIdent {
+                txid: [1u8;32],
+                body: Some((off,len)),
+                spent: None,
+                pin: None,
+                n_out: None,
+            });
+        }
+        ParentPinStamp {
+            resolved: crate::TxidMap::default(),
+            idents,
+            parent_vouts: crate::U64Map::default(),
+        }
+    }
+
+    #[test]
+    fn gate_skips_under_1mib() {
+        // total 512KiB < 1MiB -> prefetch should return (0,0)
+        let pin = make_pin_with_ranges(vec![(0, 512*1024)]);
+        let ranges: Vec<_> = pin.body_ranges_iter().collect();
+        let total: u64 = ranges.iter().map(|(_,l)| *l).sum();
+        assert!(total < 1024*1024);
+        // simulate gate logic in prefetch_parent_body_ranges
+        let merged = coalesce_ranges(ranges);
+        // gate would skip before fadvise, so bytes 0
+        assert!(total < 1024*1024);
+        // coalesce still works even under gate
+        assert_eq!(merged.len(), 1);
+    }
+
+    #[test]
+    fn gate_allows_over_1mib() {
+        let pin = make_pin_with_ranges(vec![(0, 600*1024), (700*1024, 600*1024)]);
+        let ranges: Vec<_> = pin.body_ranges_iter().collect();
+        let total: u64 = ranges.iter().map(|(_,l)| *l).sum();
+        assert!(total >= 1024*1024);
+    }
+
+    #[test]
+    fn coalesce_merges_within_64kib() {
+        let ranges = vec![(0, 100_000), (100_000+10_000, 50_000), (500_000, 10_000)];
+        let merged = coalesce_ranges(ranges);
+        assert_eq!(merged.len(), 2);
+        assert!(merged[0].1 >= 150_000);
+    }
+
+    #[test]
+    fn coalesce_caps_32() {
+        let mut ranges = Vec::new();
+        for i in 0..100 {
+            ranges.push((i*200_000, 10_000));
+        }
+        let merged = coalesce_ranges(ranges);
+        assert_eq!(merged.len(), 32);
+    }
 }

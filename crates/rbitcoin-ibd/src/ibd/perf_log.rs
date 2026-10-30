@@ -296,6 +296,8 @@ pub struct IbdPerfSample {
     /// Wire plan / in-flight parent pins (not denserels hits).
     pub load_pin_plan: u64,
     pub load_pin_new: u64,
+    pub prefetch_bytes: u64,
+    pub prefetch_ns: u64,
     pub load_pin_body_ms: u64,
     pub load_plan_pin_ms: u64,
     /// Pin residual sub-walls (recent-outs / range-fill insert / contract).
@@ -556,6 +558,8 @@ impl Default for IbdPerfSample {
             load_pin_cache_body: 0,
             load_pin_plan: 0,
             load_pin_new: 0,
+            prefetch_bytes: 0,
+            prefetch_ns: 0,
             load_pin_body_ms: 0,
             load_plan_pin_ms: 0,
             load_pin_range_fill_ms: 0,
@@ -1058,6 +1062,8 @@ pub fn sample(
         load_pin_cache_body: w.pin_cache_body,
         load_pin_plan: w.pin_plan,
         load_pin_new: w.pin_new,
+        prefetch_bytes: w.prefetch_bytes,
+        prefetch_ns: ns_ms(w.prefetch_ns),
         load_pin_body_ms: ns_ms(w.pin_body_ns),
         load_plan_pin_ms: ns_ms(w.plan_pin_ns),
         load_pin_range_fill_ms: ns_ms(w.pin_range_fill_ns),

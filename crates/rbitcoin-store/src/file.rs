@@ -1169,6 +1169,37 @@ impl TableFile {
             let _ = (offset, len);
         }
     }
+
+    pub fn advise_will_need(&self, offset: u64, len: u64) {
+        if len == 0 {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::io::AsRawFd;
+            let file = self.file.lock().unwrap();
+            let fd = file.as_raw_fd();
+            let rc = unsafe {
+                libc::posix_fadvise(
+                    fd,
+                    offset as libc::off_t,
+                    len as libc::off_t,
+                    libc::POSIX_FADV_WILLNEED,
+                )
+            };
+            if rc != 0 {
+                rbitcoin_log::trace!(
+                    "store: posix_fadvise(WILLNEED) failed path={} off={offset} len={len}: {}",
+                    self.path.display(),
+                    std::io::Error::from_raw_os_error(rc)
+                );
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (offset, len);
+        }
+    }
 }
 
 pub const NOFILE_SOFT_TARGET: u64 = 16_384;
