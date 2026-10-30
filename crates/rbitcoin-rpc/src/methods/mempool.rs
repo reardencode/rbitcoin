@@ -200,6 +200,7 @@ pub fn mempool_graph_json(mp: &MempoolHub, txid: &Txid, fee: u64, weight: u64) -
         "ancestorfees": afee,
         "chunkweight": chunk_w,
         "unbroadcast": mp.is_unbroadcast(txid),
+        "bip125-replaceable": mp.signals_bip125(txid),
         "depends": depends,
         "spentby": spentby,
         "fees": {

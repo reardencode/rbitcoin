@@ -26,7 +26,6 @@ import time
 from pathlib import Path
 
 from map_debuglog import apply_line, load_rules, map_error_stderr
-from rpc_blockstats import fetch_esplora_json, getblockstats_with_sizes
 from rpc_proxy import RpcProxy, esplora_port, node_rpc_port
 from rpc_util import register_utility
 from rpc_wallet import register_wallet
@@ -1029,18 +1028,11 @@ def main(argv: list[str] | None = None) -> int:
 
         if not blk0.is_file():
             raise RpcError(-1, "Block not found on disk")
-
-        def forward(p: list[object]) -> object:
-            reply = proxy.forward({"method": "getblockstats", "params": p, "id": 0})
-            if reply.get("error"):
-                err = reply["error"]
-                raise RpcError(err.get("code", -1), err.get("message", "error"))
-            return reply.get("result")
-
-        def esplora(path: str) -> object:
-            return fetch_esplora_json(esplora_url, path)
-
-        return getblockstats_with_sizes(params, forward, esplora)
+        reply = proxy.forward({"method": "getblockstats", "params": params, "id": 0})
+        if reply.get("error"):
+            err = reply["error"]
+            raise RpcError(err.get("code", -1), err.get("message", "error"))
+        return reply.get("result")
 
     proxy.register("getblockstats", _getblockstats)
     try:

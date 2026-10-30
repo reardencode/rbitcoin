@@ -4350,6 +4350,20 @@ impl MempoolHub {
         self.min_relay_sat_kvb.load(Ordering::Acquire)
     }
 
+    /// Core `IsRBFOptIn` for a live tx: it or an in-mempool ancestor has an
+    /// input sequence at or below `0xfffffffd`. Full RBF replaces either way.
+    /// `false` when `txid` is not live.
+    pub fn signals_bip125(&self, txid: &Txid) -> bool {
+        let g = self.lock_read();
+        let signals = |id: &Txid| g.get_tx(id).is_some_and(Transaction::is_explicitly_rbf);
+        if signals(txid) {
+            return true;
+        }
+        g.graph
+            .ancestor_set(txid)
+            .is_some_and(|ancestors| ancestors.iter().any(signals))
+    }
+
     /// In-mempool ancestors of `txid`, **excluding** itself (Core RPC).
     pub fn ancestor_txids(&self, txid: &Txid) -> Option<Vec<Txid>> {
         let g = self.lock_read();
