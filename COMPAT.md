@@ -111,7 +111,8 @@ Inbound `cmpctblock` may prefill any well-formed indexes (BIP152). A
 a null prefilled tx, or a prefilled index that is out of range. The
 `cmpctblock` decoder follows Core's deserializer, not rust-bitcoin's: it reads
 a prefilled tx of version, empty vin, flags 0, and locktime as a null tx, and
-it fails on more than 65,535 txs or a prefilled index past 65,535. A failed
+it fails on more than 65,535 txs (an absolute prefill index past that is then
+out of range and scored). A failed
 decode is dropped with no score, as Core swallows the exception, so
 `InitData`'s `MAX_BLOCK_TX_COUNT` (100,000) cap is never reached from the wire
 here either. We always
