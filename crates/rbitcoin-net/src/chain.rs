@@ -2616,11 +2616,10 @@ impl ChainHub {
             disconnected?;
             drop(_guard);
         } else if self.knows_header(&hash) || self.held_body(&hash).is_some() {
-            // Side-branch / held header (feature_chain_tiebreaks B10): mark
-            // invalid without a tip disconnect.
+            // Side branch: mark it and keep the body. The mark keeps it off
+            // the chain. The body is what reconsider and a child still need.
             self.invalidated.set.write().unwrap().insert(hash);
             self.revalidate_header_report();
-            self.drop_held(hash);
             self.invalidated.paths.write().unwrap().push(InvalidPath {
                 hashes: vec![hash],
                 connected: false,
@@ -2663,15 +2662,16 @@ impl ChainHub {
 
     #[doc(hidden)]
     pub fn reconsider_block_inner(&self, hash: BlockHash) -> Result<(), NetError> {
-        // Connected, header-only, and invalidated blocks have a header row.
-        // A parked body may not.
+        // A header row, a parked body, or a mark this process set. The body
+        // may already be gone; the mark still has to clear.
         let known = self
             .query
             .get_header_by_hash(&hash.to_byte_array())
             .ok()
             .flatten()
             .is_some()
-            || self.load_side_body(&hash).is_some();
+            || self.load_side_body(&hash).is_some()
+            || self.invalidated.set.read().unwrap().contains(&hash);
         if !known {
             return Err(NetError::Consensus("Block not found".into()));
         }

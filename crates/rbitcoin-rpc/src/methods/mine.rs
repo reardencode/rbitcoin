@@ -1276,6 +1276,9 @@ pub fn submit_received_block(hub: &rbitcoin_net::ChainHub, mut block: Block) -> 
     if hub.is_block_invalid(&hash) {
         return SubmitBlockOutcome::Rejected("duplicate-invalid".into());
     }
+    // Read before accept parks a first-time side block. A block we already
+    // hold, and that still does not beat the tip, is Core's `duplicate`.
+    let already_held = hub.held_body(&hash).is_some();
     let target = Target::from_compact(block.header.bits);
     if block.header.validate_pow(target).is_err() {
         return SubmitBlockOutcome::Rejected("high-hash".into());
@@ -1319,6 +1322,7 @@ pub fn submit_received_block(hub: &rbitcoin_net::ChainHub, mut block: Block) -> 
     match hub.accept_received_block(block.clone()) {
         Ok(AcceptOutcome::Accepted { .. }) => SubmitBlockOutcome::Accepted,
         Ok(AcceptOutcome::AlreadyHave) => SubmitBlockOutcome::Duplicate,
+        Ok(AcceptOutcome::IgnoredWeaker) if already_held => SubmitBlockOutcome::Duplicate,
         Ok(AcceptOutcome::IgnoredWeaker) => SubmitBlockOutcome::IgnoredWeaker,
         // Core: an interrupted ProcessNewBlock never fires BlockChecked.
         Err(rbitcoin_net::NetError::Cancelled) => SubmitBlockOutcome::IgnoredWeaker,
