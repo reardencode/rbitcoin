@@ -297,11 +297,11 @@ async fn ephemeral_broadcast() {
         .txdata[0]
         .compute_txid();
     let mut fan = spend(OutPoint { txid: cb2, vout: 0 }, 100_000_000);
-    fan.output = vec![fan.output[0].clone(); BURST as usize + 3];
+    fan.output = vec![fan.output[0].clone(); BURST as usize + 5];
     let fan_id = fan.compute_txid();
     hub.generate_to_script(1, ScriptBuf::from_bytes(vec![0x51]), vec![fan])
         .expect("fan-out block");
-    let locals: Vec<Transaction> = (0..BURST + 3)
+    let locals: Vec<Transaction> = (0..BURST + 5)
         .map(|vout| spend(OutPoint { txid: fan_id, vout }, 99_990_000))
         .collect();
     let submit = |tx: &Transaction| {
@@ -363,6 +363,48 @@ async fn ephemeral_broadcast() {
         next_sent(&mut got_rx).await,
         late,
         "an idle loop wakes for the next local tx and resends nothing"
+    );
+    sender.abort();
+    recipient.abort();
+
+    // Two peers per tx. A tx that leaves the mempool while its first send
+    // is in flight is not dialed to the second peer.
+    let socks = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = socks.local_addr().unwrap();
+    let mut am = AddrMan::new();
+    am.add(SocketAddr::from((Ipv4Addr::new(10, 0, 0, 1), 18444)));
+    am.add(SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 18444)));
+    let (busy_tx, busy_rx) = tokio::sync::oneshot::channel();
+    let (gate_tx, gate_rx) = tokio::sync::oneshot::channel();
+    let (got_tx, mut got_rx) = mpsc::unbounded_channel();
+    let recipient = tokio::spawn(gated_recipient(socks, busy_tx, gate_rx, got_tx));
+    let sender = spawn_isolated_broadcast_loop(
+        mp.clone(),
+        Dialer::socks(proxy, true),
+        Arc::new(Mutex::new(am)),
+        Magic::REGTEST,
+        "/rbitcoin:test/".into(),
+    );
+    let gone = &locals[BURST as usize + 3];
+    let kept = &locals[BURST as usize + 4];
+    submit(gone);
+    tokio::time::timeout(Duration::from_secs(30), busy_rx)
+        .await
+        .expect("the first send reaches the recipient")
+        .unwrap();
+    hub.generate_to_script(1, ScriptBuf::from_bytes(vec![0x51]), vec![gone.clone()])
+        .expect("mine the tx in flight");
+    gate_tx.send(()).unwrap();
+    assert_eq!(
+        next_sent(&mut got_rx).await,
+        gone.compute_txid(),
+        "the send already dialed completes"
+    );
+    submit(kept);
+    assert_eq!(
+        [next_sent(&mut got_rx).await, next_sent(&mut got_rx).await],
+        [kept.compute_txid(); 2],
+        "a mined tx is not dialed to its second peer; a live one reaches both"
     );
     sender.abort();
     recipient.abort();
