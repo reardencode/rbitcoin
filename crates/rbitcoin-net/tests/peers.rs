@@ -1378,22 +1378,21 @@ fn block_download_window_follows_the_oldest_block_in_flight() {
 fn ping_timeout_waits_for_the_peer_timeout() {
     let hub = PeerHub::new();
     hub.set_mock_now(1_700_000_000);
-    let idle = rbitcoin_net::peer::PeerFollowState::new();
     let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
     let p = hub.register(a, a, &ver("/rbitcoin:0.1.0/"), true, PeerConnType::Inbound);
     let now = hub.now_secs();
     assert!(p.take_ping_send(now).is_some(), "expected send");
     hub.set_peer_timeout_secs(999_999_999);
     assert!(
-        p.ping_timeout(now + 6_000, &idle).is_none(),
+        p.ping_timeout(now + 6_000).is_none(),
         "inside the peer timeout the ping does not time out"
     );
     hub.set_peer_timeout_secs(60);
     assert!(
-        p.ping_timeout(now + 20 * 60, &idle).is_none(),
+        p.ping_timeout(now + 20 * 60).is_none(),
         "the ping timeout starts the second after twenty minutes"
     );
-    assert!(p.ping_timeout(now + 20 * 60 + 1, &idle).is_some());
+    assert!(p.ping_timeout(now + 20 * 60 + 1).is_some());
 
     let late = hub.register(
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18445),
@@ -1405,10 +1404,10 @@ fn ping_timeout_waits_for_the_peer_timeout() {
     assert!(late.take_ping_send(now).is_some(), "expected send");
     hub.set_peer_timeout_secs(2_000);
     assert!(
-        late.ping_timeout(now + 2_000, &idle).is_none(),
+        late.ping_timeout(now + 2_000).is_none(),
         "inactivity checks start the second after the peer timeout"
     );
-    assert!(late.ping_timeout(now + 2_001, &idle).is_some());
+    assert!(late.ping_timeout(now + 2_001).is_some());
 }
 
 #[test]
