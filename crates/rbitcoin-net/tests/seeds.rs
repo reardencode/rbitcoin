@@ -536,28 +536,15 @@ fn peers_file_roundtrip_preserves_flags() {
 #[test]
 fn seed_lookup_names_x_filter_before_unfiltered() {
     let names = seed_lookup_names(Network::Mainnet);
-    assert!(!names.is_empty());
     assert_eq!(names[0][0], "x809.dnsseed.bluematt.me");
     assert_eq!(names[0][1], "dnsseed.bluematt.me");
-    for pair in &names {
-        assert_eq!(pair.len(), 2);
-        assert!(pair[0].starts_with("x809."), "{pair:?}");
-        assert!(!pair[1].starts_with("x809."), "{pair:?}");
+    for net in [Network::Mainnet, Network::Testnet, Network::Signet] {
+        let names = seed_lookup_names(net);
+        assert_eq!(names.len(), dns_seeds(net).len());
+        for (pair, seed) in names.iter().zip(dns_seeds(net)) {
+            assert_eq!(pair, &[format!("x809.{seed}"), seed.to_string()]);
+        }
     }
-    let signet = seed_lookup_names(Network::Signet);
-    assert_eq!(
-        signet,
-        vec![
-            vec![
-                "x809.seed.signet.bitcoin.sprovoost.nl".to_string(),
-                "seed.signet.bitcoin.sprovoost.nl".to_string(),
-            ],
-            vec![
-                "x809.seed.signet.achownodes.xyz".to_string(),
-                "seed.signet.achownodes.xyz".to_string(),
-            ],
-        ]
-    );
     assert!(seed_lookup_names(Network::Regtest).is_empty());
 }
 
@@ -580,8 +567,8 @@ fn dns_seed_query_host_matches_core_x_filter() {
     assert!(bits.has(ServiceFlags::P2P_V2));
     assert_eq!(bits.to_u64(), 0x809);
     assert_eq!(
-        dns_seed_query_host("seed.bitcoin.sipa.be", bits),
-        "x809.seed.bitcoin.sipa.be"
+        dns_seed_query_host("seed.mainnet.achownodes.xyz", bits),
+        "x809.seed.mainnet.achownodes.xyz"
     );
     assert_eq!(
         dns_seed_query_host("seed.signet.bitcoin.sprovoost.nl", bits),
