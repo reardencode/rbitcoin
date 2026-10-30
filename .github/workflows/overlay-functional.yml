@@ -17,7 +17,10 @@ on:
     types: [opened, synchronize, reopened, labeled, unlabeled]
 
 concurrency:
-  group: overlay-functional-${{ inputs.gate && 'gate-' || '' }}${{ github.event.pull_request.number || github.ref }}
+  # Schedule has its own group. workflow_dispatch on the default branch
+  # must not cancel the nightly run. Label and ship-gate runs stay on the
+  # pull-request number.
+  group: overlay-functional-${{ github.event_name == 'schedule' && 'schedule-' || '' }}${{ inputs.gate && 'gate-' || '' }}${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:

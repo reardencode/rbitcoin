@@ -17,7 +17,8 @@ on:
         default: ""
 
 concurrency:
-  group: fuzz-${{ github.ref }}
+  # Schedule has its own group. workflow_dispatch must not cancel the nightly run.
+  group: fuzz-${{ github.event_name == 'schedule' && 'schedule-' || '' }}${{ github.ref }}
   cancel-in-progress: true
 
 permissions:

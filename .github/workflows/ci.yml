@@ -111,6 +111,8 @@ jobs:
         run: ./scripts/pr-checks-watch.test.sh
       - name: mutants queue self-test
         run: ./scripts/mutants-queue.test.sh
+      - name: workflow concurrency self-test
+        run: ./scripts/workflow-concurrency.test.sh
       - name: tmpfs test runner self-test
         run: ./scripts/tmpfs-test-runner.test.sh
       - name: overlay-functional runner self-test
