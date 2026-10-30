@@ -196,6 +196,28 @@ fn socket_bytes_refresh_the_quiet_clock_only() {
 }
 
 #[test]
+fn on_wire_window_owns_stall_and_quiet() {
+    let mut idle = dummy_slot(1);
+    idle.rate.note_rx(0);
+    idle.rate.note_any_rx(0);
+    assert!(!getdata_on_wire_stalled(&idle, 100_000, 30_000));
+    assert!(!getdata_on_wire_quiet(&idle, 100_000, 30_000));
+
+    let mut asked = dummy_slot(2);
+    asked
+        .in_flight
+        .insert(BlockHash::from_byte_array([9u8; 32]));
+    asked.getdata_wire.queue(1);
+    asked.getdata_wire.wrote(1, 0);
+    asked.rate.note_rx(0);
+    asked.rate.note_any_rx(0);
+    assert!(!getdata_on_wire_stalled(&asked, 30_000, 30_000));
+    assert!(!getdata_on_wire_quiet(&asked, 30_000, 30_000));
+    assert!(getdata_on_wire_stalled(&asked, 30_001, 30_000));
+    assert!(getdata_on_wire_quiet(&asked, 30_001, 30_000));
+}
+
+#[test]
 fn light_decode_permit_does_not_wait() {
     let sem = Arc::new(Semaphore::new(1));
     let first = try_light_decode_permit(&sem);

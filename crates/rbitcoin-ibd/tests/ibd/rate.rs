@@ -62,15 +62,8 @@ fn stalled_ignores_getdata_write_time() {
     // Last real receive is t=0. A getdata write at t=20s is us, not the peer.
     r.note_rx(0);
     r.note_work_started(20_000);
-    assert!(r.stalled(30_001, 30_000, true));
-    assert!(r.stalled(40_000, 30_000, true));
-}
-
-#[test]
-fn stalled_false_when_idle_inflight_empty() {
-    let mut r = PeerRate::default();
-    r.note_work_started(0);
-    assert!(!r.stalled(40_000, 30_000, false));
+    assert!(r.stalled(30_001, 30_000));
+    assert!(r.stalled(40_000, 30_000));
 }
 
 #[test]
@@ -78,11 +71,11 @@ fn stalled_false_when_rx_within_grace() {
     let mut r = PeerRate::default();
     r.note_work_started(0);
     r.note_rx(20_000);
-    assert!(!r.stalled(45_000, 30_000, true));
-    assert!(r.stalled(50_001, 30_000, true));
+    assert!(!r.stalled(45_000, 30_000));
+    assert!(r.stalled(50_001, 30_000));
     assert!(r.has_recent_rx(45_000, 30_000));
     assert!(!r.has_recent_rx(50_001, 30_000));
-    assert!(!r.quiet(45_000, 30_000, true));
+    assert!(!r.quiet(45_000, 30_000));
 }
 
 #[test]
@@ -92,7 +85,6 @@ fn any_rx_does_not_move_block_progress() {
     r.note_any_rx(40_000);
     assert_eq!(r.progress_ms, 1_000);
     assert_eq!(r.any_rx_ms, 40_000);
-    assert!(r.stalled(40_000, 30_000, true));
-    assert!(!r.quiet(40_000, 30_000, true));
-    assert!(!r.quiet(40_000, 30_000, false));
+    assert!(r.stalled(40_000, 30_000));
+    assert!(!r.quiet(40_000, 30_000));
 }
