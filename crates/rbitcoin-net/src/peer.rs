@@ -4189,30 +4189,44 @@ fn apply_headers(
     }
     // Claim on this session, next to the queue. The header job only
     // filters. An aborted join never publishes an ask that was not sent.
-    let mut claimed = Vec::new();
-    for hash in &apply.want_bodies {
-        if hub.claim_block_ask(hash) {
-            claimed.push(*hash);
-        }
-    }
-    if let Err(e) = queue_block_getdata(
+    queue_claimed_block_getdata(
         hub,
         out_tx,
         session,
         &mut follow.requested_blocks,
-        &claimed,
+        &apply.want_bodies,
         getdata_use_compact(hub, follow.cmpct_version),
-    ) {
-        for hash in &claimed {
-            follow.requested_blocks.remove(hash);
-            hub.forget_asked_block(hash);
-        }
-        return Err(e);
-    }
+    )?;
     if let Some(locator) = apply.getheaders {
         queue_headers_locator(out_tx, session, locator)?;
     }
     Ok(())
+}
+
+/// Claim each body on the hub, then queue one `getdata` on this session.
+/// A body another session already claimed is skipped. A failed send
+/// releases every claim it took, so the next announcement can ask.
+fn queue_claimed_block_getdata(
+    hub: &ChainHub,
+    out_tx: &mpsc::UnboundedSender<PeerOut>,
+    session: Option<&crate::peers::LivePeer>,
+    requested_blocks: &mut HashSet<BlockHash>,
+    want: &[BlockHash],
+    compact: bool,
+) -> Result<(), NetError> {
+    let claimed: Vec<BlockHash> = want
+        .iter()
+        .copied()
+        .filter(|hash| hub.claim_block_ask(hash))
+        .collect();
+    let sent = queue_block_getdata(hub, out_tx, session, requested_blocks, &claimed, compact);
+    if sent.is_err() {
+        for hash in &claimed {
+            requested_blocks.remove(hash);
+            hub.forget_asked_block(hash);
+        }
+    }
+    sent
 }
 
 /// Send a locator the header job already built. Same in-flight gate as
@@ -4493,9 +4507,11 @@ pub async fn on_cmpctblock(
 }
 
 /// An unsolicited compact block we do not reconstruct is a header
-/// announcement. The header path is stored and the bodies it makes
-/// fetchable are a full-block `getdata` to this peer, as Core's block
-/// download asks once the announcement moved the peer's best block.
+/// announcement. The header path is stored and the bodies
+/// [`fetchable_header_path_bodies`] returns are a full-block `getdata` to
+/// this peer, as Core's block download asks once the announcement moved
+/// the peer's best block. The ask follows the headers path: a spent send
+/// budget asks nothing, and each body is one hub claim.
 async fn on_cmpctblock_header_announce(
     hub: &ChainHub,
     out_tx: &mpsc::UnboundedSender<PeerOut>,
@@ -4508,6 +4524,9 @@ async fn on_cmpctblock_header_announce(
         persist_pending_header_path(hub, &pending, hash);
     })
     .await?;
+    if session.is_some_and(|s| s.send_over_budget()) {
+        return Ok(());
+    }
     let mut want = fetchable_header_path_bodies(
         hub,
         &follow.pending_headers,
@@ -4516,7 +4535,7 @@ async fn on_cmpctblock_header_announce(
         &follow.requested_blocks,
     );
     want.truncate(MAX_SERVE_BLOCKS.saturating_sub(follow.requested_blocks.len()));
-    queue_block_getdata(
+    queue_claimed_block_getdata(
         hub,
         out_tx,
         session,
