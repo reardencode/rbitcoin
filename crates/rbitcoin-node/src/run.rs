@@ -717,9 +717,10 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             config.network.as_str()
         );
         let n_before = addrman.len();
-        addrman.inject(rbitcoin_net::resolve_all_seeds(config.network));
+        addrman.inject(rbitcoin_net::resolve_dns_seeds(config.network));
+        let fixed = addrman.add_fixed_seeds(config.network);
         info!(
-            "ibd: seeds resolved (+{} new, book={})",
+            "ibd: seeds resolved (+{} new, {fixed} fixed, book={})",
             addrman.len().saturating_sub(n_before),
             addrman.len()
         );

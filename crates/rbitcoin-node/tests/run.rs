@@ -902,16 +902,22 @@ fn proxy_seed_bootstrap_queues_domain_addrfetch() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<rbitcoin_net::DialRequest>();
     peers.set_dialer(tx);
     let n = queue_proxy_seed_addrfetch(&peers, rbitcoin_primitives::Network::Signet);
-    assert_eq!(n, 1, "signet has one default DNS seed");
-    let req = rx.try_recv().expect("queued dial request");
-    assert_eq!(req.typ, PeerConnType::AddrFetch);
-    match req.target {
-        rbitcoin_net::DialTarget::Domain { host, port } => {
-            assert_eq!(host, "seed.signet.bitcoin.sprovoost.nl");
-            assert_eq!(port, 38333);
+    assert_eq!(n, 2, "signet has two default DNS seeds");
+    for want in [
+        "seed.signet.bitcoin.sprovoost.nl.",
+        "seed.signet.achownodes.xyz.",
+    ] {
+        let req = rx.try_recv().expect("queued dial request");
+        assert_eq!(req.typ, PeerConnType::AddrFetch);
+        match req.target {
+            rbitcoin_net::DialTarget::Domain { host, port } => {
+                assert_eq!(host, want);
+                assert_eq!(port, 38333);
+            }
+            other => panic!("expected domain target, got {other:?}"),
         }
-        other => panic!("expected domain target, got {other:?}"),
     }
+    assert!(rx.try_recv().is_err(), "no third seed dial");
 }
 
 #[test]
