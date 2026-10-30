@@ -43,6 +43,8 @@ fn dummy_slot(id: usize) -> PeerSlot {
         bytes_rx_total: Arc::new(AtomicU64::new(0)),
         rate: Default::default(),
         chain: Default::default(),
+        conn_type: rbitcoin_net::peers::PeerConnType::OutboundFullRelay,
+        block_download_paused_until: None,
         alive: true,
         task,
     }

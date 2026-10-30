@@ -245,10 +245,21 @@ pub fn next_peer_id() -> usize {
     NEXT_PEER_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Core dials `-connect` as a manual connection. Every other IBD dial is
+/// outbound full relay.
+fn ibd_conn_type(connect: &[NetAddr], addr: NetAddr) -> PeerConnType {
+    if connect.contains(&addr) {
+        PeerConnType::Manual
+    } else {
+        PeerConnType::OutboundFullRelay
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 /// Dial up to `count` ranked candidates from `book`. `already` is exclude
 /// (slots + cooldown). `occupied` is live addrs whose netgroups are skipped
-/// while unused-group candidates remain.
+/// while unused-group candidates remain. A `connect` target is dialled as
+/// [`PeerConnType::Manual`].
 pub async fn dial_batch(
     book: &AddrMan,
     count: usize,
@@ -263,6 +274,7 @@ pub async fn dial_batch(
     dialer: rbitcoin_net::socks::Dialer,
     clock: &rbitcoin_consensus::NodeClock,
     perms: Option<Arc<rbitcoin_net::peers::PeerHub>>,
+    connect: &[NetAddr],
 ) -> DialBatchResult {
     let mut out = DialBatchResult {
         slots: Vec::new(),
@@ -295,6 +307,7 @@ pub async fn dial_batch(
         let id = next_peer_id();
         let sinks = sinks.clone();
         clock.note_connection_attempt();
+        let conn_type = ibd_conn_type(connect, addr);
         debug!(
             "{}",
             trying_connection_log(PeerConnType::OutboundFullRelay, addr)
@@ -304,7 +317,7 @@ pub async fn dial_batch(
         let dial_perms = perms.clone();
         handles.push(tokio::spawn(async move {
             let fut = spawn_peer(
-                id, addr, magic, local_addr, tip_h, sinks, dialer, dial_perms,
+                id, addr, magic, local_addr, tip_h, sinks, dialer, dial_perms, conn_type,
             );
             match tokio::time::timeout(to, fut).await {
                 Ok(Ok(slot)) => Ok(slot),
@@ -665,6 +678,7 @@ pub fn note_misbehavior_dead(
 /// loop records the kick and releases in-flight blocks when the task ends.
 /// This lock-holding form is what the stall tests drive.
 #[cfg_attr(not(debug_assertions), allow(dead_code))]
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 pub fn disconnect_stalled_block_peers(
     slots: &mut [PeerSlot],
     inflight: &mut HashMap<bitcoin::BlockHash, super::state::InflightReq>,
@@ -673,6 +687,7 @@ pub fn disconnect_stalled_block_peers(
     addr_strikes: &mut HashMap<NetAddr, u8>,
     now: Instant,
     stall: Duration,
+    clock: &rbitcoin_consensus::NodeClock,
 ) -> Vec<bitcoin::BlockHash> {
     disconnect_stalled_block_peers_at(
         slots,
@@ -683,6 +698,7 @@ pub fn disconnect_stalled_block_peers(
         now,
         stall,
         ibd_mono_ms(),
+        clock.now_secs(),
     )
 }
 
@@ -697,6 +713,7 @@ pub fn disconnect_stalled_block_peers_at(
     now: Instant,
     stall: Duration,
     now_ms: u64,
+    _now_secs: u64,
 ) -> Vec<bitcoin::BlockHash> {
     let stall = stall.max(Duration::from_secs(30));
     let stall_ms = stall.as_millis() as u64;

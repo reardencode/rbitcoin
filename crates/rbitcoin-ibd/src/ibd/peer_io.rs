@@ -162,6 +162,10 @@ pub struct PeerSlot {
     pub rate: PeerRate,
     /// What this peer has shown of its chain. IBD main thread only.
     pub chain: super::peer_chain::PeerChain,
+    /// `Manual` for a `--connect` target, as Core dials `-connect`.
+    pub conn_type: rbitcoin_net::peers::PeerConnType,
+    /// Node-clock seconds until which this peer is sent no block getdata.
+    pub block_download_paused_until: Option<u64>,
     pub alive: bool,
     pub task: JoinHandle<()>,
 }
@@ -951,6 +955,7 @@ pub async fn spawn_peer(
     sinks: PeerEventSinks,
     dialer: rbitcoin_net::socks::Dialer,
     perms: Option<Arc<rbitcoin_net::peers::PeerHub>>,
+    conn_type: rbitcoin_net::peers::PeerConnType,
 ) -> Result<PeerSlot, NetError> {
     if perms.as_ref().is_some_and(|p| p.net_discouraged(addr)) {
         return Err(NetError::Protocol("discouraged"));
@@ -1069,6 +1074,8 @@ pub async fn spawn_peer(
             rate
         },
         chain: Default::default(),
+        conn_type,
+        block_download_paused_until: None,
         alive: true,
         task,
     })
