@@ -2475,6 +2475,7 @@ pub async fn start_sv2_tp(
         cert_validity: Duration::from_secs(config.sv2_tp_cert_validity_secs),
         stale_grace: config.sv2_tp_stale_grace,
         setup_timeout: rbitcoin_sv2::SETUP_TIMEOUT,
+        idle_timeout: (!config.sv2_tp_idle_timeout.is_zero()).then_some(config.sv2_tp_idle_timeout),
         write_timeout: rbitcoin_sv2::WRITE_TIMEOUT,
         fee_delta: config.sv2_tp_fee_delta,
         template_interval: config.sv2_tp_template_interval,

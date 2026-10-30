@@ -460,6 +460,9 @@ pub struct NodeConfig {
     /// How long a template on a replaced tip still answers. Default 10 s.
     /// Conf and CLI set whole seconds; tests may set a shorter duration.
     pub sv2_tp_stale_grace: Duration,
+    /// Drops a session that handles no frame for this long after its first
+    /// `CoinbaseOutputConstraints`. Default zero: no idle deadline.
+    pub sv2_tp_idle_timeout: Duration,
     /// Fee gain over a session's last template that pushes a rebuild on the
     /// same tip. Default 1000 sat.
     pub sv2_tp_fee_delta: u64,
@@ -591,6 +594,7 @@ impl Default for NodeConfig {
             sv2_tp_authority_sec: None,
             sv2_tp_cert_validity_secs: 3600,
             sv2_tp_stale_grace: Duration::from_secs(10),
+            sv2_tp_idle_timeout: Duration::ZERO,
             sv2_tp_fee_delta: rbitcoin_sv2::FEE_DELTA,
             sv2_tp_template_interval: rbitcoin_sv2::TEMPLATE_INTERVAL,
             sv2_tp_constraints_cooldown: rbitcoin_sv2::CONSTRAINTS_COOLDOWN,
@@ -1495,6 +1499,19 @@ impl NodeConfig {
                         NodeError::Config(format!("conf sv2_tp_stale_grace: want seconds <= {max}"))
                     })?;
                 self.sv2_tp_stale_grace = Duration::from_secs(secs);
+            }
+            "sv2_tp_idle_timeout" => {
+                let max = rbitcoin_sv2::MAX_IDLE_TIMEOUT.as_secs();
+                let secs = val
+                    .parse()
+                    .ok()
+                    .filter(|&s: &u64| s <= max)
+                    .ok_or_else(|| {
+                        NodeError::Config(format!(
+                            "conf sv2_tp_idle_timeout: want seconds <= {max}"
+                        ))
+                    })?;
+                self.sv2_tp_idle_timeout = Duration::from_secs(secs);
             }
             "sv2_tp_fee_delta" => {
                 self.sv2_tp_fee_delta = val

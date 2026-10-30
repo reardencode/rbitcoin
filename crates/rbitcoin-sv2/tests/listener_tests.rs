@@ -5,8 +5,9 @@ use common_messages_sv2::{
 };
 use rbitcoin_sv2::testutil::TpClient;
 use rbitcoin_sv2::{
-    run_sv2_tp, Sv2TpConfig, CONSTRAINTS_COOLDOWN_TEST, FEE_DELTA, MAX_SESSIONS, MAX_STALE_GRACE,
-    MAX_TEMPLATE_INTERVAL, MIN_TEMPLATE_INTERVAL, SETUP_TIMEOUT, TEMPLATE_INTERVAL, WRITE_TIMEOUT,
+    run_sv2_tp, Sv2TpConfig, CONSTRAINTS_COOLDOWN_TEST, FEE_DELTA, MAX_IDLE_TIMEOUT, MAX_SESSIONS,
+    MAX_STALE_GRACE, MAX_TEMPLATE_INTERVAL, MIN_TEMPLATE_INTERVAL, SETUP_TIMEOUT,
+    TEMPLATE_INTERVAL, WRITE_TIMEOUT,
 };
 use std::io;
 use std::net::SocketAddr;
@@ -53,6 +54,7 @@ async fn setup_connection_success_errors_and_session_cap() {
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
+        idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
@@ -117,6 +119,7 @@ async fn authority_key_prints_in_key_utils_base58check() {
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
+        idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
@@ -155,6 +158,7 @@ async fn silent_sockets_are_dropped_at_the_setup_deadline() {
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
         setup_timeout,
+        idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
@@ -199,6 +203,7 @@ async fn session_without_constraints_is_dropped_at_the_setup_deadline() {
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
         setup_timeout,
+        idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
@@ -266,7 +271,7 @@ async fn session_without_constraints_is_dropped_at_the_setup_deadline() {
 }
 
 /// One `CoinbaseOutputConstraints` then silence. The setup deadline has
-/// already passed, so only a post-setup idle deadline frees the slot.
+/// already passed, so only the opt-in idle deadline frees the slot.
 #[tokio::test]
 async fn session_silent_after_constraints_is_dropped_at_the_idle_deadline() {
     let tc = shared_regtest(0);
@@ -279,6 +284,7 @@ async fn session_silent_after_constraints_is_dropped_at_the_idle_deadline() {
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
         setup_timeout,
+        idle_timeout: Some(setup_timeout),
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
@@ -318,6 +324,7 @@ async fn client_that_stops_reading_is_dropped_at_the_write_deadline() {
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
+        idle_timeout: None,
         write_timeout,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
@@ -382,6 +389,7 @@ async fn oversized_client_frame_closes_the_session() {
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
+        idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
@@ -443,6 +451,7 @@ async fn out_of_range_timing_refuses_to_start() {
             cert_validity,
             stale_grace,
             setup_timeout: SETUP_TIMEOUT,
+            idle_timeout: None,
             write_timeout: WRITE_TIMEOUT,
             fee_delta: FEE_DELTA,
             template_interval,
@@ -453,4 +462,21 @@ async fn out_of_range_timing_refuses_to_start() {
         .expect("out-of-range config must not start");
         assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{e}");
     }
+    let e = run_sv2_tp(Sv2TpConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        chain,
+        authority_secret: [7; 32],
+        cert_validity: hour,
+        stale_grace: Duration::ZERO,
+        setup_timeout: SETUP_TIMEOUT,
+        idle_timeout: Some(MAX_IDLE_TIMEOUT + over),
+        write_timeout: WRITE_TIMEOUT,
+        fee_delta: FEE_DELTA,
+        template_interval: TEMPLATE_INTERVAL,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+    })
+    .await
+    .err()
+    .expect("out-of-range idle timeout must not start");
+    assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{e}");
 }

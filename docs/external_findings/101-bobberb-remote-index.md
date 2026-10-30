@@ -10,7 +10,7 @@ regression. No reproduction steps.
 | D2 | — | Declared vector length preallocates | false | rust-bitcoin 0.32.102 caps `MAX_VEC_SIZE` at 4,000,000 |
 | D3 | high | History catch-up scans every block in the window | fixed | `history_window_wider_than_eight_weeks_is_refused` ([093](./093-history-window.md)) |
 | D4 | high | Electrum writes have no deadline | fixed | `stalled_electrum_write_is_closed`, `stalled_scripthash_push_ends_the_connection` ([094](./094-electrum-write-deadline.md)) |
-| D5 | high | SV2 session has no idle deadline after setup | fixed | `session_silent_after_constraints_is_dropped_at_the_idle_deadline` ([095](./095-sv2-idle-deadline.md)) |
+| D5 | high | SV2 session has no idle deadline after setup | opt-in | `session_silent_after_constraints_is_dropped_at_the_idle_deadline` ([095](./095-sv2-idle-deadline.md)) |
 | D6 | — | Replacement feerate uses the full descendant set | won't-fix | Direct-set pricing stays. See [051](./051-rbfr-direct-set.md) |
 | D7 | medium | Replacement may add an unconfirmed input | fixed | `replacement_unconfirmed_inputs_follow_libre_rule` ([096](./096-unconfirmed-rbf-input.md)) |
 | D8 | low | Invalid-txid set clears at 4096 | fixed | `recent_invalid_keeps_the_oldest` ([097](./097-recent-invalid-cap.md)) |

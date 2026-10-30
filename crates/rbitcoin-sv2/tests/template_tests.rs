@@ -190,6 +190,7 @@ async fn template_budget_fees_coinbase_and_merkle_path() {
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
+        idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
@@ -242,6 +243,7 @@ async fn holding_session_publishes_when_the_pool_is_maintained() {
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
         setup_timeout: Duration::from_secs(30),
+        idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: interval,
@@ -294,6 +296,7 @@ async fn constraints_cooldown_publishes_the_next_budget() {
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
+        idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
@@ -340,6 +343,7 @@ async fn template_resent_constraints_do_not_rebuild() {
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
+        idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
@@ -383,6 +387,7 @@ async fn template_constraint_rebuilds_are_rate_limited() {
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
+        idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
@@ -421,6 +426,7 @@ async fn sync_gate_holds_constraints_until_a_fresh_tip() {
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
+        idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
@@ -476,6 +482,7 @@ async fn constraints_while_ibd_keep_the_last_budget() {
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
+        idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
@@ -546,6 +553,7 @@ async fn first_template_every(tc: &TestChain, template_interval: Duration) -> Fi
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
+        idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval,
@@ -781,6 +789,7 @@ async fn constraints_flood_closes_the_session() {
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
+        idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
@@ -834,6 +843,7 @@ async fn tip_event_rebuilds_a_template_built_on_its_prev_hash() {
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
+        idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
@@ -868,6 +878,56 @@ async fn tip_event_rebuilds_a_template_built_on_its_prev_hash() {
     let on_y = expect_template(&mut c, &tc, &[], true).await;
     let rebuilt = expect_template(&mut c, &tc, &[], false).await;
     assert!(rebuilt > on_y, "y's event must rebuild the template on y");
+
+    tp.shutdown().await;
+}
+
+/// With no idle deadline, a client silent past the setup timeout after its
+/// first `CoinbaseOutputConstraints` stays connected and gets the next tip.
+#[tokio::test(flavor = "multi_thread")]
+async fn silent_session_outlives_the_setup_timeout_and_gets_the_next_tip() {
+    let tc = shared_regtest(1);
+    mock_live_tip(&tc);
+    let setup_timeout = Duration::from_millis(40);
+    let tp = run_sv2_tp(Sv2TpConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        chain: Arc::clone(&tc.chain),
+        authority_secret: [7; 32],
+        cert_validity: Duration::from_secs(3600),
+        stale_grace: Duration::from_secs(10),
+        setup_timeout,
+        idle_timeout: None,
+        write_timeout: WRITE_TIMEOUT,
+        fee_delta: FEE_DELTA,
+        template_interval: TEMPLATE_INTERVAL,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+    })
+    .await
+    .expect("listen");
+    let mut c = TpClient::connect(tp.local_addr, tp.authority_pubkey)
+        .await
+        .expect("handshake");
+    c.setup_connection(2, 2, 2, 0).await.unwrap();
+    c.recv().await.expect("setup reply");
+    c.coinbase_output_constraints(0, 0).await.unwrap();
+    let first = expect_template(&mut c, &tc, &[], true).await;
+
+    tokio::time::sleep(setup_timeout * 4).await;
+
+    let tip = tc.chain.tip_header().expect("tip").block_hash();
+    let h = tc.chain.query.tip_height().expect("tip height").0;
+    let now = tc.chain.tip_header().expect("tip").time;
+    let next = mine_empty_regtest(tip, now + 1, h + 1);
+    let loaded = tc
+        .chain
+        .confirm_wire_load_phase(&[(Height(h + 1), next)])
+        .expect("load")
+        .expect("contiguous");
+    let scripted = confirm_scripts_phase(loaded.batch).expect("scripts");
+    tc.chain.confirm_write(scripted.batch).expect("write");
+
+    let after = expect_template(&mut c, &tc, &[], true).await;
+    assert!(after > first, "the new tip must get a new template");
 
     tp.shutdown().await;
 }
@@ -933,6 +993,7 @@ async fn fee_push_after_the_interval_past_the_delta() {
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
+        idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
         fee_delta: 1_000,
         template_interval: interval,
@@ -1124,6 +1185,7 @@ async fn fee_pushes_stay_an_interval_apart_under_steady_admission() {
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
+        idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: interval,

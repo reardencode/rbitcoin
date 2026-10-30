@@ -98,7 +98,7 @@ rbitcoin reference, or redteam static analysis). Numbered reports live beside th
 | [092](./092-orphan-promote-stack.md) | medium | Orphan promotion recurses down the parked chain | fixed | `orphan_chain_promotes_to_the_cluster_cap`, `parked_chain_promotes_in_one_frame`, `package_inside_promote_admits_parent_orphans` |
 | [093](./093-history-window.md) | high | History catch-up scans every block in the window | fixed | `history_window_wider_than_eight_weeks_is_refused` |
 | [094](./094-electrum-write-deadline.md) | high | Electrum writes have no deadline | fixed | `stalled_electrum_write_is_closed`, `stalled_scripthash_push_ends_the_connection` |
-| [095](./095-sv2-idle-deadline.md) | high | SV2 session has no idle deadline after setup | fixed | `session_silent_after_constraints_is_dropped_at_the_idle_deadline` |
+| [095](./095-sv2-idle-deadline.md) | high | SV2 session has no idle deadline after setup | opt-in | `session_silent_after_constraints_is_dropped_at_the_idle_deadline` |
 | [096](./096-unconfirmed-rbf-input.md) | medium | Replacement may add an unconfirmed input | fixed | `replacement_unconfirmed_inputs_follow_libre_rule` |
 | [097](./097-recent-invalid-cap.md) | low | Invalid-txid set clears at 4096 | fixed | `recent_invalid_keeps_the_oldest` |
 | [098](./098-overlay-discourage.md) | medium | Overlay misbehavior is not remembered | fixed | `overlay_misbehavior_discourages_that_net`, `overlay_refusal_ignores_the_port`, `slot_evict_does_not_block_an_outbound_dial`, `feeler_does_not_dial_a_discouraged_address`, `ibd_dial_refuses_a_discouraged_net` |

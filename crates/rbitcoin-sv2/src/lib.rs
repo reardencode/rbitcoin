@@ -35,6 +35,10 @@ pub const MAX_SESSIONS: usize = 8;
 /// accept, so without it `MAX_SESSIONS` silent sockets lock clients out.
 pub const SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Upper bound on [`Sv2TpConfig::idle_timeout`]; the idle deadline is
+/// `Instant + idle_timeout`, which panics on overflow.
+pub const MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// Default [`Sv2TpConfig::write_timeout`].
 pub const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -81,10 +85,12 @@ pub struct Sv2TpConfig {
     /// How long a template on a replaced prev hash still answers requests.
     pub stale_grace: Duration,
     /// Deadline from TCP accept through the Noise handshake,
-    /// `SetupConnection`, and the first `CoinbaseOutputConstraints`. After
-    /// that frame, the same duration is the idle deadline: it moves only
-    /// when another frame arrives. Tip and fee pushes do not refresh it.
+    /// `SetupConnection`, and the first `CoinbaseOutputConstraints`.
     pub setup_timeout: Duration,
+    /// After the first `CoinbaseOutputConstraints`, a session that handles no
+    /// frame for this long is dropped. It moves only when a frame arrives;
+    /// tip and fee pushes do not refresh it. `None`: no idle deadline.
+    pub idle_timeout: Option<Duration>,
     /// A socket write that makes no progress this long closes the session,
     /// so a client that stops reading cannot hold a slot.
     pub write_timeout: Duration,
@@ -161,6 +167,12 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
             format!("sv2 stale_grace: over {}s", MAX_STALE_GRACE.as_secs()),
         ));
     }
+    if config.idle_timeout.is_some_and(|t| t > MAX_IDLE_TIMEOUT) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("sv2 idle_timeout: over {}s", MAX_IDLE_TIMEOUT.as_secs()),
+        ));
+    }
     if !(MIN_TEMPLATE_INTERVAL..=MAX_TEMPLATE_INTERVAL).contains(&config.template_interval) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -183,6 +195,7 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
     let cert_validity = config.cert_validity;
     let stale_grace = config.stale_grace;
     let setup_timeout = config.setup_timeout;
+    let idle_timeout = config.idle_timeout;
     let write_timeout = config.write_timeout;
     let fee_push = session::FeePush {
         delta: config.fee_delta,
@@ -241,6 +254,7 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
                     chain,
                     stale_grace,
                     setup_timeout,
+                    idle_timeout,
                     write_timeout,
                     fee_push,
                     constraints_cooldown,
