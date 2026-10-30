@@ -9,6 +9,27 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 
+/// First handshaken row in the table, polled without sleeping so a row
+/// published before its fields are set is the one seen.
+fn first_handshaken(
+    peers: Arc<rbitcoin_net::peers::PeerHub>,
+    inbound: bool,
+) -> tokio::task::JoinHandle<Option<rbitcoin_net::peers::PeerInfo>> {
+    tokio::task::spawn_blocking(move || {
+        let end = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < end {
+            let row = peers
+                .snapshot()
+                .into_iter()
+                .find(|p| p.inbound == inbound && p.handshake_complete);
+            if row.is_some() {
+                return row;
+            }
+        }
+        None
+    })
+}
+
 #[test]
 fn magic_for_all_networks() {
     assert_eq!(
@@ -290,6 +311,77 @@ async fn p2p_outbound_only_dials_without_listener() {
     assert!(linked, "outbound-only follower must handshake the seeder");
 }
 
+/// Outbound half of the `getpeerinfo` time fields: the dialing row keeps
+/// `conntime` across the post-VERSION swap, and its counters see the
+/// responder's handshake bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn outbound_row_keeps_conntime_through_handshake() {
+    use rbitcoin_net::peer::{connect_and_handshake_timed, HandshakePolicy};
+
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("rbitcoin-outbound-conntime-{n}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let q = Query::open_or_create_tiny(&dir).unwrap();
+    let node = P2PNode::start_outbound_only(
+        q,
+        ChainParams::regtest(),
+        Milestone::NONE,
+        "/rbitcoin:0.1.0(dialer)/".into(),
+        0,
+        rbitcoin_net::socks::Dialer::Direct,
+        rbitcoin_net::REDIAL_INTERVAL_TEST,
+    )
+    .await
+    .unwrap();
+    let far = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let far_addr = far.local_addr().unwrap();
+    const T0: u64 = 1_700_000_000;
+    node.peers.set_mock_now(T0);
+    node.peers
+        .addconnection(far_addr, PeerConnType::OutboundFullRelay)
+        .unwrap();
+    let (stream, _) = far.accept().await.unwrap();
+    let mut connecting = None;
+    for _ in 0..200 {
+        connecting = node.peers.snapshot().into_iter().find(|p| !p.inbound);
+        if connecting.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let connecting = connecting.expect("connecting outbound row");
+    assert!(!connecting.handshake_complete);
+    assert_eq!(connecting.conntime, T0);
+    assert_eq!(connecting.last_recv, 0, "the responder has sent nothing");
+    assert_eq!(connecting.version, 0);
+    node.peers.set_mock_now(T0 + 30);
+    let watch = first_handshaken(node.peers.clone(), false);
+    let _hs = connect_and_handshake_timed(
+        Duration::from_secs(5),
+        stream,
+        Magic::REGTEST,
+        far_addr,
+        far_addr,
+        0,
+        true,
+        "/rbitcoin:test/",
+        HandshakePolicy::plain(),
+    )
+    .await
+    .unwrap();
+    let done = watch.await.unwrap();
+    node.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    let done = done.expect("handshaken outbound row");
+    assert_eq!(done.id, connecting.id);
+    assert_eq!(done.conntime, T0, "the handshaken row keeps conntime");
+    assert_eq!(done.last_recv, T0 + 30);
+    assert_eq!(done.version, rbitcoin_net::peer::OUR_PROTOCOL_VERSION);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn listen_onion_loopback_inbound_handshake() {
     use bitcoin::p2p::Magic;
@@ -315,7 +407,26 @@ async fn listen_onion_loopback_inbound_handshake() {
     )
     .await
     .unwrap();
+    // Core `rpc_net.py`: conntime is set once at connect, lastsend and
+    // lastrecv stay 0 until bytes move, and v2 handshake bytes move them.
+    const T0: u64 = 1_700_000_000;
+    node.peers.set_mock_now(T0);
     let stream = TcpStream::connect(node.local_addr).await.unwrap();
+    let mut connecting = None;
+    for _ in 0..200 {
+        connecting = node.peers.snapshot().into_iter().find(|p| p.inbound);
+        if connecting.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let connecting = connecting.expect("connecting inbound row");
+    assert!(!connecting.handshake_complete);
+    assert_eq!(connecting.conntime, T0);
+    assert_eq!((connecting.last_send, connecting.last_recv), (0, 0));
+    assert_eq!(connecting.version, 0);
+    node.peers.set_mock_now(T0 + 30);
+    let watch = first_handshaken(node.peers.clone(), true);
     let _hs = connect_and_handshake_timed(
         Duration::from_secs(5),
         stream,
@@ -329,20 +440,14 @@ async fn listen_onion_loopback_inbound_handshake() {
     )
     .await
     .unwrap();
-    let mut inbound = false;
-    for _ in 0..200 {
-        if node.peers.snapshot().iter().any(|p| p.inbound) {
-            inbound = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    let inbound = watch.await.unwrap();
     node.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(
-        inbound,
-        "loopback client must show as inbound in getpeerinfo"
-    );
+    let inbound = inbound.expect("loopback client must show as inbound in getpeerinfo");
+    assert_eq!(inbound.id, connecting.id);
+    assert_eq!(inbound.conntime, T0, "the handshaken row keeps conntime");
+    assert_eq!((inbound.last_send, inbound.last_recv), (T0 + 30, T0 + 30));
+    assert_eq!(inbound.version, rbitcoin_net::peer::OUR_PROTOCOL_VERSION);
 }
 
 /// The 2 s redial pass must not stack a dial that is still connecting,

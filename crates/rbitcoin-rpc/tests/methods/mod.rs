@@ -4763,6 +4763,9 @@ fn getpeerinfo_connecting_has_unknown_sync_and_zero_offset() {
     assert_eq!(row["synced_blocks"], json!(-1));
     assert_eq!(row["timeoffset"], json!(0));
     assert_eq!(row["startingheight"], json!(-1));
+    assert_eq!(row["version"], json!(0));
+    assert_eq!(row["lastsend"], json!(0));
+    assert_eq!(row["lastrecv"], json!(0));
     let net = dispatch(&ctx, "getnetworkinfo", vec![]).unwrap();
     assert_eq!(net["timeoffset"], json!(0));
     let _ = std::fs::remove_dir_all(&dir);
@@ -4999,15 +5002,38 @@ fn getpeerinfo_sent_pingwait_and_limited_services() {
     let row = &info.as_array().unwrap()[0];
     assert!(row["bytessent_per_msg"]["version"].as_u64().unwrap() >= 124);
     assert!(row.get("pingwait").is_some(), "{row}");
+    assert_eq!(row["version"], json!(70016));
+    assert_eq!(row["conntime"], json!(1_700_000_000));
+    assert_eq!(row["lastsend"], json!(0), "no byte written yet");
+    assert_eq!(row["lastrecv"], json!(0), "no byte read yet");
     let names = row["servicesnames"].as_array().unwrap();
     assert!(names.iter().any(|n| n == "NETWORK_LIMITED"), "{names:?}");
 
     assert!(live.on_pong(&nonce.to_le_bytes(), 1_700_000_029).is_none());
     hub.set_mock_now(1_700_000_029);
+    let wire = live.new_wire();
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(async {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut buf = [0u8; 4];
+            wire.count_read(&b"pong"[..])
+                .read_exact(&mut buf)
+                .await
+                .unwrap();
+            wire.count_write(Vec::new())
+                .write_all(b"ping")
+                .await
+                .unwrap();
+        });
     let info = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
     let row = &info.as_array().unwrap()[0];
     assert_eq!(row["pingtime"], json!(29.0));
     assert_eq!(row["minping"], json!(29.0));
+    assert_eq!(row["lastrecv"], json!(1_700_000_029));
+    assert_eq!(row["lastsend"], json!(1_700_000_029));
+    assert_eq!(row["conntime"], json!(1_700_000_000));
     hub.set_noban(true);
     let info = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
     assert_eq!(

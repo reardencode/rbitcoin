@@ -184,6 +184,10 @@ integer fails NBXplorer's version gate. Raising it would claim wallet
 RPC this node does not serve. BTCPay works against this node when
 NBXplorer accepts the `subversion` (`/rbitcoin:<semver>/`) and keeps
 using the block and transaction calls.
+NBXplorer also reads `version`, `lastsend`, `lastrecv` and `conntime`
+from `getpeerinfo`; those are served. It opens a v1 P2P connection as
+well, which this node refuses, so its P2P endpoint has to be another
+node.
 
 ## Compact-filter and SPV wallets
 
