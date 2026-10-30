@@ -1452,6 +1452,7 @@ async fn start_esplora_applies_max_inflight() {
     .await
     .unwrap();
     let addr = handles[0].local_addr;
+    let admit = Arc::clone(&handles[0].admit);
 
     let get = |addr| async move {
         let mut s = TcpStream::connect(addr).await.unwrap();
@@ -1467,12 +1468,29 @@ async fn start_esplora_applies_max_inflight() {
         .write_all(b"POST /tx HTTP/1.1\r\nHost: x\r\nContent-Length: 64\r\n\r\n")
         .await
         .unwrap();
+    // The stall may not hold the slot yet. Wait until this GET is counted
+    // as waiting, and retry if it was served before the slot filled.
     let mut waiting = None;
     for _ in 0..20 {
+        let before = admit.waiting();
         let g = tokio::spawn(get(addr));
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        if !g.is_finished() {
-            waiting = Some(g);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let notified = admit.notified();
+            if !g.is_finished() && admit.waiting() > before {
+                waiting = Some(g);
+                break;
+            }
+            if g.is_finished() {
+                break;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(!left.is_zero(), "a limit of one did not queue the request");
+            if tokio::time::timeout(left, notified).await.is_err() {
+                panic!("a limit of one did not queue the request");
+            }
+        }
+        if waiting.is_some() {
             break;
         }
     }
