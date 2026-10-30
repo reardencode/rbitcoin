@@ -45,7 +45,7 @@ pub struct ChainParams {
     pub subsidy_halving_overlay: Option<u32>,
     /// Regtest fixed difficulty for every block at height >= 1 (`None` = the
     /// network `pow_limit` bits). `header::apply_regtest_pow_overlay` applies
-    /// it from `next_work_bits` and from the off-tip header check.
+    /// it on regtest only, from `next_work_bits` and the off-tip header check.
     pub regtest_pow_bits_overlay: Option<CompactTarget>,
     /// Header hash at BIP34 height that turns BIP30 off. `None` on signet and
     /// regtest (Core's null hash), so BIP30 stays on at every height.

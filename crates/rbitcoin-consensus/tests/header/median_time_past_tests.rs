@@ -528,11 +528,17 @@ fn regtest_pow_overlay_follows_next_work() {
     // Without the overlay the bits are unchanged.
     assert_eq!(at(&plain, 1, limit, 1, None), limit);
 
-    // 2016 boundary: regtest keeps the parent's bits, a limit parent becomes
-    // the overlay, and the time gap does not apply there.
+    // 2016 boundary: regtest does not retarget, so the parent bits stand.
+    // A pow-limit parent stays the pow limit, gap or not.
     assert_eq!(at(&params, 2016, overlay, 1, Some(t - 5)), overlay);
-    assert_eq!(at(&params, 2016, limit, 1, Some(t - 5)), overlay);
-    assert_eq!(at(&params, 2016, limit, 10 * spacing, Some(t - 5)), overlay);
+    assert_eq!(at(&params, 2016, limit, 1, Some(t - 5)), limit);
+    assert_eq!(at(&params, 2016, limit, 10 * spacing, Some(t - 5)), limit);
+
+    // A hand-set field on mainnet does not replace the first period's bits.
+    let mut main = ChainParams::mainnet();
+    let main_limit = main.pow_limit.to_compact_lossy();
+    main.regtest_pow_bits_overlay = Some(overlay);
+    assert_eq!(at(&main, 1, main_limit, 1, None), main_limit);
 
     // More than two spacings after the parent: the limit bits stay.
     assert_eq!(at(&params, 5, overlay, 2 * spacing + 1, None), limit);

@@ -241,8 +241,10 @@ pub fn min_diff_gap(params: &ChainParams, prev_time: u32, header_time: u32) -> b
 }
 
 /// With the regtest difficulty overlay set, `bits` equal to the `pow_limit`
-/// bits become the overlay unless the min-difficulty time gap applies. That gap
-/// never applies at a retarget boundary. Every next-work path must end here.
+/// bits become the overlay unless Core would still require those bits. That is
+/// the min-difficulty time gap, or a retarget boundary: regtest does not
+/// retarget, so the parent bits stand, including the pow limit. Ignored unless
+/// `params` is regtest. Every next-work path must end here.
 #[doc(hidden)]
 pub fn apply_regtest_pow_overlay(
     params: &ChainParams,
@@ -254,15 +256,17 @@ pub fn apply_regtest_pow_overlay(
     let Some(overlay) = params.regtest_pow_bits_overlay else {
         return bits;
     };
+    if params.network != bitcoin::Network::Regtest {
+        return bits;
+    }
     if height == 0 || bits != params.pow_limit.to_compact_lossy() {
         return bits;
     }
     let interval = params.difficulty_adjustment_interval();
-    let on_boundary = interval != 0 && height.is_multiple_of(interval);
-    if !on_boundary
-        && params.allow_min_difficulty_blocks()
-        && min_diff_gap(params, prev_time, header_time)
-    {
+    if interval != 0 && height.is_multiple_of(interval) {
+        return bits;
+    }
+    if params.allow_min_difficulty_blocks() && min_diff_gap(params, prev_time, header_time) {
         return bits;
     }
     overlay
