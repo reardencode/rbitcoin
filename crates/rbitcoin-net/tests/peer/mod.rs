@@ -4003,12 +4003,14 @@ async fn paused_getdata_tail_is_served_before_the_next_getdata() {
     let _ = std::fs::remove_dir_all(&t.dir);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn handshake_timeout_after_silence() {
     use std::net::SocketAddr;
     use tokio::net::{TcpListener, TcpStream};
 
     assert_eq!(HANDSHAKE_TIMEOUT, Duration::from_secs(60));
+    // The bound is `tokio::time::timeout`. Pause so the clock, not a sleep, is the wait.
+    tokio::time::pause();
 
     async fn bind_pair() -> (TcpStream, TcpStream, SocketAddr, SocketAddr) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -4018,90 +4020,88 @@ async fn handshake_timeout_after_silence() {
         (client, server, addr, peer)
     }
 
-    async fn join_timeout<T>(
-        handle: tokio::task::JoinHandle<Result<T, NetError>>,
+    async fn expect_handshake_timeout<T>(
+        fut: impl std::future::Future<Output = Result<T, NetError>>,
+        limit: Duration,
         still: &str,
         done: &str,
-        succeeded: &str,
     ) {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        assert!(!handle.is_finished(), "{still}");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(handle.is_finished(), "{done}");
-        match handle.await.unwrap() {
+        tokio::pin!(fut);
+        std::future::poll_fn(|cx| match fut.as_mut().poll(cx) {
+            std::task::Poll::Pending => std::task::Poll::Ready(()),
+            std::task::Poll::Ready(_) => panic!("{still}"),
+        })
+        .await;
+        // Paused clock. The handshake bound was armed by the poll above.
+        tokio::time::sleep(limit).await;
+        match std::future::poll_fn(|cx| fut.as_mut().poll(cx)).await {
             Err(NetError::Timeout) => {}
-            Err(e) => panic!("expected Timeout, got {e}"),
-            Ok(_) => panic!("{succeeded}"),
+            Err(e) => panic!("{done}: expected Timeout, got {e}"),
+            Ok(_) => panic!("{done}"),
         }
     }
 
+    let limit = Duration::from_millis(50);
     let (client, server, addr, peer) = bind_pair().await;
     let _silent_in = client;
-    join_timeout(
-        tokio::spawn(async move {
-            connect_and_handshake_timed(
-                Duration::from_millis(50),
-                server,
-                Magic::REGTEST,
-                addr,
-                peer,
-                0,
-                true,
-                "/rbitcoin:test/",
-                HandshakePolicy::plain(),
-            )
-            .await
-        }),
+    expect_handshake_timeout(
+        connect_and_handshake_timed(
+            limit,
+            server,
+            Magic::REGTEST,
+            addr,
+            peer,
+            0,
+            true,
+            "/rbitcoin:test/",
+            HandshakePolicy::plain(),
+        ),
+        limit,
         "must still wait during inbound handshake",
         "silence past the bound must end inbound handshake",
-        "inbound handshake succeeded on a silent peer",
     )
     .await;
 
     let (client, server, addr, _) = bind_pair().await;
     let _silent_out = server;
-    join_timeout(
-        tokio::spawn(async move {
-            connect_and_handshake_timed(
-                Duration::from_millis(50),
-                client,
-                Magic::REGTEST,
-                addr,
-                addr,
-                0,
-                false,
-                "/rbitcoin:test/",
-                HandshakePolicy::plain(),
-            )
-            .await
-        }),
+    expect_handshake_timeout(
+        connect_and_handshake_timed(
+            limit,
+            client,
+            Magic::REGTEST,
+            addr,
+            addr,
+            0,
+            false,
+            "/rbitcoin:test/",
+            HandshakePolicy::plain(),
+        ),
+        limit,
         "must still wait during outbound handshake",
         "silence past the bound must end outbound handshake",
-        "outbound handshake succeeded on a silent peer",
     )
     .await;
 
     let (client, server, addr, _) = bind_pair().await;
     let _silent_feeler = server;
-    join_timeout(
-        tokio::spawn(async move {
-            run_feeler_timed(
-                Duration::from_millis(50),
-                client,
-                Magic::REGTEST,
-                addr,
-                addr,
-                0,
-                "/rbitcoin:test/",
-                crate::peers::PeerHub::new().as_ref(),
-            )
-            .await
-        }),
+    let feeler_peers = crate::peers::PeerHub::new();
+    expect_handshake_timeout(
+        run_feeler_timed(
+            limit,
+            client,
+            Magic::REGTEST,
+            addr,
+            addr,
+            0,
+            "/rbitcoin:test/",
+            feeler_peers.as_ref(),
+        ),
+        limit,
         "must still wait during feeler",
         "silence past the bound must end feeler",
-        "feeler succeeded on a silent peer",
     )
     .await;
+    tokio::time::resume();
 
     let (client, server, _, _) = bind_pair().await;
     let _silent_plain = server;
