@@ -234,13 +234,15 @@ impl Query {
     /// L2 write-behind barrier: the complete-or-fail Class C image to disk.
     /// Tip mode returns after it. IBD returns before it and may dequeue the
     /// RAM body queue: a kill then loses at most one more batch to download
-    /// again. Returns the tip that is durable now (`before` while the IBD
-    /// flush runs), which seqsigwit prune keeps its window below.
+    /// again. Returns the tip that is durable now. IBD returns `before`
+    /// while the flush runs. Tip mode returns `before` when a withheld
+    /// locator header skips the seal. Seqsigwit prune keeps its window
+    /// below that tip.
     #[doc(hidden)]
     pub fn flush_tip(&self, before: Option<Height>) -> Result<Option<Height>, QueryError> {
         if self.index_mode()?.is_tip() {
-            self.store.flush_class_c_tip()?;
-            return Ok(self.tip_height());
+            let sealed = self.store.flush_class_c_tip()?;
+            return Ok(if sealed { self.tip_height() } else { before });
         }
         self.spawn_tip_flush()?;
         Ok(before)
@@ -283,7 +285,7 @@ impl Query {
     fn flush_tip_inline(&self, why: &str) -> Result<(), QueryError> {
         rbitcoin_log::warn!("store: no IBD tip flush thread ({why}); flushing inline");
         let mut state = self.tip_flush.lock().unwrap_or_else(|e| e.into_inner());
-        let inline = self.store.flush_class_c_tip();
+        let inline = self.store.flush_class_c_tip().map(|_| ());
         if inline.is_err() {
             *state = TipFlush::Failed;
         }
@@ -327,7 +329,7 @@ impl Query {
                     // Pause after the flush excludes stores, not before it starts.
                     #[cfg(debug_assertions)]
                     rbitcoin_store::bind_tip_flush_hold(Some(Arc::clone(&hold)));
-                    let result = store.flush_class_c_tip();
+                    let result = store.flush_class_c_tip().map(|_| ());
                     #[cfg(debug_assertions)]
                     rbitcoin_store::bind_tip_flush_hold(None);
                     let _ = job.reply.send(result);

@@ -8,6 +8,7 @@ Fixed
   its header reopens at the last create those files still name. A missed
   overflow header is retried before a later block publishes. A withheld
   locator header does not seal the new tip and does not publish
-  `spend_durable` there. Open truncates a body header that ran ahead of
+  `spend_durable` there. Tip mode keeps `--prune-seqsigwit` on that
+  sealed tip. Open truncates a body header that ran ahead of
   that count. A body header short of the locator count is corrupt. A
   real consensus failure is still kept in `store/block.invalid`.

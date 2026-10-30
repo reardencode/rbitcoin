@@ -43,9 +43,10 @@ pub(crate) fn checkpoint_fit(loc_count: u64, off_len: u64, off_slot: u64) -> Opt
 
 /// Count to keep when the next overflow row was written and its header was not.
 ///
-/// That row sits at the ovf file's published end. A create slot is 16 bytes;
-/// a seqsigwit slot is 12. It counts only when the loc slot at its fk is the
-/// matching overflow marker. Anything else is spare capacity, not a row.
+/// That row sits at the ovf file's published end. The overflow row is 16
+/// bytes for a create and 12 for seqsigwit. The locator slot is 2 bytes.
+/// It counts only when the loc slot at its fk is the matching overflow
+/// marker. Anything else is spare capacity, not a row.
 pub(crate) fn unresolved_ovf_cut(
     loc: &TableFile,
     ovf: &TableFile,
