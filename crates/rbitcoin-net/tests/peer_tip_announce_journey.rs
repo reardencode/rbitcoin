@@ -1026,7 +1026,8 @@ async fn tip_announce_far_compact_is_header_only() {
 /// Same-hash cached invalid stays connected. A child of a cached-invalid
 /// parent disconnects. Every Core `InitData` invalid shape disconnects,
 /// requested or unsolicited: an out-of-range prefilled index, no txs at all,
-/// more txs than `MAX_BLOCK_TX_COUNT`, and a prefilled index past 16 bits.
+/// more txs than `MAX_BLOCK_TX_COUNT`, a prefilled index past 16 bits, and a
+/// prefilled null tx sent as wire bytes.
 /// Exactly `MAX_BLOCK_TX_COUNT` stays connected and asks for its txs.
 #[tokio::test]
 async fn tip_announce_invalid_compact_disconnects() {
@@ -1146,6 +1147,39 @@ async fn tip_announce_invalid_compact_disconnects() {
     assert!(
         follow.ban_score >= BAN_SCORE_THRESHOLD,
         "a prefilled index past 16 bits must disconnect"
+    );
+
+    let with_coinbase = child_hsi(1, &[0]);
+    let mut payload = bitcoin::consensus::serialize(&HeaderAndShortIds {
+        prefilled_txs: vec![],
+        ..with_coinbase.clone()
+    });
+    assert_eq!(payload.pop(), Some(0), "the prefilled count is the last byte");
+    payload.extend_from_slice(&[2, 0]);
+    // Core reads an empty vin, then flags 0, and leaves vout empty: IsNull.
+    payload.extend_from_slice(&[2, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    payload.push(0);
+    payload.extend(bitcoin::consensus::serialize(&with_coinbase.prefilled_txs[0].tx));
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let session = live_peer(&peers, 18631, 71, true);
+    let (out_tx, _out_rx) = mpsc::unbounded_channel();
+    let mut follow = hb_follow();
+    handle_peer_frame(
+        FramedMessage {
+            magic: Magic::from(Network::Regtest),
+            command: *b"cmpctblock\0\0",
+            payload,
+        },
+        hub,
+        &out_tx,
+        &mut follow,
+        Some(&session),
+    )
+    .await
+    .unwrap();
+    assert!(
+        follow.ban_score >= BAN_SCORE_THRESHOLD,
+        "a prefilled null tx on the wire must disconnect"
     );
 }
 
