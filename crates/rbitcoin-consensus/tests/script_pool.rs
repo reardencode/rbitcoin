@@ -35,22 +35,28 @@ impl OccupyGate {
             let entered = Arc::clone(&entered);
             let gate = Arc::clone(&gate);
             spawn_detached(move || {
-                entered.fetch_add(1, Ordering::SeqCst);
                 let (lock, cv) = &*gate;
                 let mut g = lock.lock().unwrap_or_else(|p| p.into_inner());
+                entered.fetch_add(1, Ordering::SeqCst);
+                cv.notify_all();
                 while !*g {
                     g = cv.wait(g).unwrap_or_else(|p| p.into_inner());
                 }
             });
         }
+        let (lock, cv) = &*gate;
+        let mut g = lock.lock().unwrap_or_else(|p| p.into_inner());
         let start = Instant::now();
         while entered.load(Ordering::SeqCst) < k {
-            assert!(
-                start.elapsed() < Duration::from_secs(2),
-                "failed to occupy steal workers"
-            );
-            thread::sleep(Duration::from_millis(1));
+            let left = Duration::from_secs(2).saturating_sub(start.elapsed());
+            assert!(!left.is_zero(), "failed to occupy steal workers");
+            let (g2, status) = cv.wait_timeout(g, left).unwrap_or_else(|p| p.into_inner());
+            g = g2;
+            if status.timed_out() {
+                panic!("failed to occupy steal workers");
+            }
         }
+        drop(g);
         me
     }
 
@@ -154,25 +160,10 @@ fn pool_waiters_run_concurrently() {
     let _gate = STEAL_TEST.lock().unwrap_or_else(|p| p.into_inner());
     let n = worker_spawn_count();
     assert!(n >= 1);
-    let start = Instant::now();
-    while idle_waiter_count() < n {
-        assert!(
-            start.elapsed() < Duration::from_secs(1),
-            "only {} of {n} workers idle-waiting",
-            idle_waiter_count()
-        );
-        thread::sleep(Duration::from_millis(1));
-    }
+    wait_until("workers idle before occupy", || idle_waiter_count() >= n);
     let occupy = OccupyGate::occupy_all();
     occupy.release();
-    let start = Instant::now();
-    while idle_waiter_count() < n {
-        assert!(
-            start.elapsed() < Duration::from_secs(1),
-            "workers did not finish after release"
-        );
-        thread::sleep(Duration::from_millis(1));
-    }
+    wait_until("workers idle after release", || idle_waiter_count() >= n);
 }
 
 struct DelayParkArm;
@@ -209,36 +200,17 @@ fn wave_published_before_park_is_not_missed() {
     let _gate = STEAL_TEST.lock().unwrap_or_else(|p| p.into_inner());
     let n = worker_spawn_count();
     let occupy = OccupyGate::occupy_n(n.saturating_sub(1));
-    let start = Instant::now();
-    while idle_waiter_count() == 0 {
-        assert!(
-            start.elapsed() < Duration::from_secs(2),
-            "free worker did not park"
-        );
-        thread::sleep(Duration::from_millis(1));
-    }
+    wait_until("free worker did not park", || idle_waiter_count() != 0);
     let arm = DelayParkArm::arm();
     // One empty job pulls the parked worker into the park delay. The wave
     // is published only after that, so the worker has already missed steal.
     spawn_detached(|| {});
-    let start = Instant::now();
-    while DELAY_PARK_ENTERED.load(Ordering::SeqCst) == 0 {
-        assert!(
-            start.elapsed() < Duration::from_secs(2),
-            "free worker did not reach park gate"
-        );
-        thread::sleep(Duration::from_millis(1));
-    }
+    wait_until("free worker did not reach park gate", || {
+        DELAY_PARK_ENTERED.load(Ordering::SeqCst) != 0
+    });
     ALL_HITS.store(0, Ordering::Relaxed);
     let wave = thread::spawn(|| run_owned((0..64).collect(), count_all));
-    let start = Instant::now();
-    while waves_snap().load().is_empty() {
-        assert!(
-            start.elapsed() < Duration::from_secs(2),
-            "wave was not published"
-        );
-        thread::sleep(Duration::from_millis(1));
-    }
+    wait_until("wave was not published", || !waves_snap().load().is_empty());
     arm.go();
     wave.join().expect("wave thread").expect("wave ok");
     assert_eq!(ALL_HITS.load(Ordering::Relaxed), 64);
@@ -257,6 +229,7 @@ fn reset_hold() {
 
 fn hold_chunk(_: &u32) -> Result<(), ConsensusError> {
     HOLD_ENTERED.fetch_add(1, Ordering::SeqCst);
+    note_script_progress();
     let mut g = HOLD_MU.lock().unwrap_or_else(|p| p.into_inner());
     while !HOLD_GO.load(Ordering::SeqCst) {
         g = HOLD_CV.wait(g).unwrap_or_else(|p| p.into_inner());
@@ -307,15 +280,28 @@ impl Drop for HeldWave {
 
 fn wait_until(label: &str, pred: impl Fn() -> bool) {
     let start = Instant::now();
+    let mut g = SCRIPT_PROGRESS_MU.lock().unwrap_or_else(|p| p.into_inner());
     while !pred() {
+        let left = Duration::from_secs(2).saturating_sub(start.elapsed());
         assert!(
-            start.elapsed() < Duration::from_secs(2),
+            !left.is_zero(),
             "{label} idle={} entered={} unparks={}",
             idle_waiter_count(),
             HOLD_ENTERED.load(Ordering::SeqCst),
             STEAL_UNPARKS.load(Ordering::Relaxed)
         );
-        thread::sleep(Duration::from_millis(1));
+        let (g2, status) = SCRIPT_PROGRESS_CV
+            .wait_timeout(g, left)
+            .unwrap_or_else(|p| p.into_inner());
+        g = g2;
+        if status.timed_out() {
+            panic!(
+                "{label}: timed out without a signal idle={} entered={} unparks={}",
+                idle_waiter_count(),
+                HOLD_ENTERED.load(Ordering::SeqCst),
+                STEAL_UNPARKS.load(Ordering::Relaxed)
+            );
+        }
     }
 }
 
@@ -346,21 +332,30 @@ fn publish_waking(n: usize, k: usize, items: Vec<u32>) -> HeldWave {
         }
         let wave = HeldWave::publish(items.clone());
         let spin = Instant::now();
+        let mut g = SCRIPT_PROGRESS_MU.lock().unwrap_or_else(|p| p.into_inner());
         loop {
             let entered = HOLD_ENTERED.load(Ordering::SeqCst);
             let unparks = STEAL_UNPARKS.load(Ordering::Relaxed);
             if entered >= k {
+                drop(g);
                 if unparks == k {
                     return wave;
                 }
                 wave.finish().expect("retry wave");
                 break;
             }
+            let left = Duration::from_secs(2).saturating_sub(spin.elapsed());
             assert!(
-                spin.elapsed() < Duration::from_secs(2),
+                !left.is_zero(),
                 "claim of {k} stalled: entered={entered} unparks={unparks}"
             );
-            thread::sleep(Duration::from_millis(1));
+            let (g2, status) = SCRIPT_PROGRESS_CV
+                .wait_timeout(g, left)
+                .unwrap_or_else(|p| p.into_inner());
+            g = g2;
+            if status.timed_out() {
+                panic!("claim of {k} stalled: entered={entered} unparks={unparks}");
+            }
         }
     }
 }
@@ -593,11 +588,17 @@ fn panic_while_workers_occupied_does_not_deadlock_pool() {
 static HOLD_JOBS: AtomicBool = AtomicBool::new(false);
 static HOLD_IN: AtomicUsize = AtomicUsize::new(0);
 
+static HOLD_JOB_THREADS: Mutex<Vec<thread::Thread>> = Mutex::new(Vec::new());
+
 fn hold_job(_: &u32) -> Result<(), ConsensusError> {
     HOLD_IN.fetch_add(1, Ordering::SeqCst);
-    let t0 = Instant::now();
-    while HOLD_JOBS.load(Ordering::SeqCst) && t0.elapsed() < Duration::from_secs(3) {
-        thread::park_timeout(Duration::from_millis(1));
+    HOLD_JOB_THREADS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push(thread::current());
+    note_script_progress();
+    while HOLD_JOBS.load(Ordering::SeqCst) {
+        thread::park();
     }
     Ok(())
 }
@@ -613,6 +614,11 @@ impl HoldJobs {
 impl Drop for HoldJobs {
     fn drop(&mut self) {
         HOLD_JOBS.store(false, Ordering::SeqCst);
+        let threads =
+            std::mem::take(&mut *HOLD_JOB_THREADS.lock().unwrap_or_else(|p| p.into_inner()));
+        for t in threads {
+            t.unpark();
+        }
     }
 }
 
@@ -624,14 +630,7 @@ fn second_wave_publishes_when_first_is_claimed() {
     let a = start_for_each_owned((0..64u32).collect(), hold_job)
         .unwrap()
         .expect("wave a");
-    let start = Instant::now();
-    while a.has_unclaimed() {
-        assert!(
-            start.elapsed() < Duration::from_secs(2),
-            "first wave not fully claimed"
-        );
-        thread::sleep(Duration::from_millis(1));
-    }
+    wait_until("first wave not fully claimed", || !a.has_unclaimed());
     assert!(!fg_has_unclaimed());
     let b = start_for_each_owned((0..64u32).collect(), hold_job)
         .unwrap()
@@ -710,14 +709,9 @@ fn last_claim_holds_in_wave_before_next() {
             .expect("wave")
             .finish()
     });
-    let start = Instant::now();
-    while DELAY_CLAIM_ENTERED.load(Ordering::SeqCst) == 0 {
-        assert!(
-            start.elapsed() < Duration::from_secs(2),
-            "claimer did not enter in_wave delay"
-        );
-        thread::sleep(Duration::from_millis(1));
-    }
+    wait_until("claimer did not enter in_wave delay", || {
+        DELAY_CLAIM_ENTERED.load(Ordering::SeqCst) != 0
+    });
     let snap = waves_snap().load();
     assert!(!snap.is_empty(), "wave not published");
     assert!(
@@ -728,6 +722,8 @@ fn last_claim_holds_in_wave_before_next() {
     wave.join().expect("join").expect("wave ok");
     occupy.release();
 }
+
+static STAGE_PARKED: AtomicBool = AtomicBool::new(false);
 
 /// Two script stages park in one process. The second registration must
 /// not steal wakes from the first, and clearing the second must leave
@@ -755,24 +751,24 @@ fn second_stage_keeps_the_first_publisher_wake() {
         set_script_publisher(Some(thread::current()));
         let _clear = Clear;
         a_flag.store(true, Ordering::Release);
-        let start = Instant::now();
-        while !b_flag_for_a.load(Ordering::Acquire) {
-            assert!(
-                start.elapsed() < Duration::from_secs(2),
-                "second stage did not register"
-            );
-            thread::sleep(Duration::from_millis(1));
-        }
+        note_script_progress();
+        wait_until("second stage did not register", || {
+            b_flag_for_a.load(Ordering::Acquire)
+        });
         for _ in 0..2 {
             let attempt = Instant::now();
             loop {
                 // Drop a stale unpark permit so the next park waits for this round.
                 thread::park_timeout(Duration::ZERO);
                 phase_a.store(1, Ordering::Release);
-                thread::park_timeout(Duration::from_millis(400));
+                STAGE_PARKED.store(true, Ordering::Release);
+                note_script_progress();
+                thread::park();
+                STAGE_PARKED.store(false, Ordering::Release);
                 if phase_a.load(Ordering::Acquire) == 2 {
                     phase_a.store(0, Ordering::Release);
                     wakes_a.fetch_add(1, Ordering::Release);
+                    note_script_progress();
                     break;
                 }
                 assert!(
@@ -794,61 +790,38 @@ fn second_stage_keeps_the_first_publisher_wake() {
                 set_script_publisher(None);
             }
         }
-        let start = Instant::now();
-        while !start_b.load(Ordering::Acquire) {
-            assert!(
-                start.elapsed() < Duration::from_secs(2),
-                "first stage did not register"
-            );
-            thread::sleep(Duration::from_millis(1));
-        }
+        wait_until("first stage did not register", || {
+            start_b.load(Ordering::Acquire)
+        });
         set_script_publisher(Some(thread::current()));
         let _clear = Clear;
         b_flag.store(true, Ordering::Release);
+        note_script_progress();
         while !release.load(Ordering::Acquire) {
-            thread::park_timeout(Duration::from_millis(20));
+            thread::park();
         }
         set_script_publisher(None);
         cleared.store(true, Ordering::Release);
+        note_script_progress();
     });
 
     let drive = |want: usize| {
-        let start = Instant::now();
-        loop {
-            if phase.load(Ordering::Acquire) == 1 {
-                thread::sleep(Duration::from_millis(20));
-                if phase.load(Ordering::Acquire) == 1 {
-                    break;
-                }
-            }
-            assert!(
-                start.elapsed() < Duration::from_secs(2),
-                "stage did not park"
-            );
-            thread::sleep(Duration::from_millis(1));
-        }
+        wait_until("stage did not park", || {
+            phase.load(Ordering::Acquire) == 1 && STAGE_PARKED.load(Ordering::Acquire)
+        });
         phase.store(2, Ordering::Release);
         unpark_script_publisher();
-        let start = Instant::now();
-        while wakes.load(Ordering::Acquire) < want {
-            assert!(
-                start.elapsed() < Duration::from_secs(1),
-                "wake {want} did not land"
-            );
-            thread::sleep(Duration::from_millis(1));
-        }
+        wait_until("wake did not land", || {
+            wakes.load(Ordering::Acquire) >= want
+        });
     };
 
     drive(1);
     release_b.store(true, Ordering::Release);
-    let start = Instant::now();
-    while !b_cleared.load(Ordering::Acquire) {
-        assert!(
-            start.elapsed() < Duration::from_secs(2),
-            "second stage did not clear"
-        );
-        thread::sleep(Duration::from_millis(1));
-    }
+    unpark_script_publisher();
+    wait_until("second stage did not clear", || {
+        b_cleared.load(Ordering::Acquire)
+    });
     drive(2);
     a.join().expect("stage a");
     b.join().expect("stage b");
