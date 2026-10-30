@@ -105,7 +105,6 @@ def main() -> int:
                 break
             except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
                 last_err = e
-                time.sleep(0.1)
         if height != 0:
             print(f"getblockcount={height!r} last_err={last_err}", file=sys.stderr)
             return 1
