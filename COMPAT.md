@@ -108,8 +108,10 @@ GETDATAs missing parents (TTL) but does not log a second `txrelay: park`.
 
 Inbound `cmpctblock` may prefill any well-formed indexes (BIP152). A
 `cmpctblock` that fails Core `InitData` disconnects, requested or not: no txs,
-more than `MAX_BLOCK_TX_COUNT` (100,000), or a prefilled index that is out of
-range or past 16 bits. Core's decoder already drops one above 65,535 txs with
+more than `MAX_BLOCK_TX_COUNT` (100,000), a null prefilled tx, or a prefilled
+index that is out of range or past 16 bits. The `cmpctblock` decoder reads a
+prefilled tx of version, empty vin, flags 0, and locktime as Core does (no
+inputs, no outputs); rust-bitcoin alone rejects those bytes. Core's decoder already drops one above 65,535 txs with
 no score. We decode up to the cap, so 65,536–100,000 still reconstructs. We always
 log reconstruct fill sources and `fetched=` `blocktxn` bytes, and outbound
 `cmpct announce … prefill=N/bytes` when we send `cmpctblock` (tip announce or

@@ -478,6 +478,58 @@ pub fn tx_family_too_large(command: &[u8; 12], payload: &[u8]) -> Option<usize> 
     }
 }
 
+/// BIP152 `HeaderAndShortIds` as Core reads it. Only a prefilled tx differs
+/// from rust-bitcoin: see [`take_core_null_tx`].
+fn decode_header_and_short_ids(
+    d: &mut &[u8],
+) -> Result<bitcoin::bip152::HeaderAndShortIds, bitcoin::consensus::encode::Error> {
+    use bitcoin::bip152::{HeaderAndShortIds, PrefilledTransaction, ShortId};
+    let header = bitcoin::block::Header::consensus_decode(d)?;
+    let nonce = u64::consensus_decode(d)?;
+    let short_ids = Vec::<ShortId>::consensus_decode(d)?;
+    let n = bitcoin::consensus::encode::VarInt::consensus_decode(d)?.0;
+    let mut prefilled_txs = Vec::new();
+    for _ in 0..n {
+        let idx = bitcoin::consensus::encode::VarInt::consensus_decode(d)?.0;
+        let idx = u16::try_from(idx).map_err(|_| {
+            bitcoin::consensus::encode::Error::ParseFailed(
+                "BIP152 prefilled tx index out of bounds",
+            )
+        })?;
+        let tx = match take_core_null_tx(d) {
+            Some(tx) => tx,
+            None => bitcoin::Transaction::consensus_decode(d)?,
+        };
+        prefilled_txs.push(PrefilledTransaction { idx, tx });
+    }
+    Ok(HeaderAndShortIds {
+        header,
+        nonce,
+        short_ids,
+        prefilled_txs,
+    })
+}
+
+/// Core `UnserializeTransaction` reads an empty vin, then flags 0, and leaves
+/// vout empty: `CTransaction::IsNull`. rust-bitcoin rejects those bytes as
+/// segwit flag 0, so a compact block carrying one would decode as `Unknown`
+/// instead of reaching the `InitData` reject.
+fn take_core_null_tx(d: &mut &[u8]) -> Option<bitcoin::Transaction> {
+    let (b, rest) = d.split_first_chunk::<10>()?;
+    if b[4] != 0 || b[5] != 0 {
+        return None;
+    }
+    let version = i32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+    let lock_time = u32::from_le_bytes([b[6], b[7], b[8], b[9]]);
+    *d = rest;
+    Some(bitcoin::Transaction {
+        version: bitcoin::transaction::Version(version),
+        lock_time: bitcoin::absolute::LockTime::from_consensus(lock_time),
+        input: Vec::new(),
+        output: Vec::new(),
+    })
+}
+
 #[doc(hidden)]
 pub fn decode_cmd_payload(
     cmd: &str,
@@ -522,7 +574,11 @@ pub fn decode_cmd_payload(
         "reject" => one(d, NetworkMessage::Reject)?,
         "alert" => one(d, NetworkMessage::Alert)?,
         "sendcmpct" => one(d, NetworkMessage::SendCmpct)?,
-        "cmpctblock" => one(d, NetworkMessage::CmpctBlock)?,
+        "cmpctblock" => {
+            NetworkMessage::CmpctBlock(bitcoin::p2p::message_compact_blocks::CmpctBlock {
+                compact_block: decode_header_and_short_ids(d)?,
+            })
+        }
         "getblocktxn" => one(d, NetworkMessage::GetBlockTxn)?,
         "blocktxn" => one(d, NetworkMessage::BlockTxn)?,
         "addrv2" => one(d, NetworkMessage::AddrV2)?,
