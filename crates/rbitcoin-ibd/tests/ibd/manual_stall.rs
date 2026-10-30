@@ -3,16 +3,20 @@
 //! bitcoin/bitcoin#34743). Any other stalling peer is still disconnected.
 
 use super::assign::{h, plant_work_path, tmp_hub, wired_slots};
+use bitcoin::hashes::Hash;
 use bitcoin::BlockHash;
 use rbitcoin_ibd::ibd::assign::{assign_work_ordered, inflight_add_peer, AssignDepth};
 use rbitcoin_ibd::ibd::dial::{dial_batch, disconnect_stalled_block_peers_at};
-use rbitcoin_ibd::ibd::peer_io::{PeerCmd, PeerEventSinks};
+use rbitcoin_ibd::ibd::events::{apply_block_framed, FramedBody};
+use rbitcoin_ibd::ibd::peer_io::{IbdReadCtx, LightDecodes, PeerCmd, PeerEvent, PeerEventSinks};
 use rbitcoin_ibd::ibd::state::IbdWorkState;
 use rbitcoin_ibd::ibd::status::LoopStats;
 use rbitcoin_ibd::ibd::IbdConfig;
 use rbitcoin_net::chain::ChainHub;
+use rbitcoin_net::codec::FramedMessage;
 use rbitcoin_net::peers::PeerConnType;
 use std::collections::HashSet;
+use std::sync::atomic::AtomicU32;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -186,15 +190,179 @@ fn resumed_connect_peer_gets_a_fresh_stall_window() {
 
     hub.clock.set_mock(T0 + COOLDOWN_SECS);
     assign(&mut st, &hub);
-    let asked = drain_wire(&mut wire)[0].0.len();
-    assert!(asked > 0, "the resumed peer is asked again");
-    st.slots[0].getdata_wire.wrote(asked, 151_000);
+    let asked: HashSet<BlockHash> = drain_wire(&mut wire)[0].0.iter().copied().collect();
+    assert!(!asked.is_empty(), "the resumed peer is asked again");
+    assert_eq!(st.slots[0].in_flight, asked);
+    assert_eq!(
+        st.slots[0].getdata_wire.window_ms(),
+        None,
+        "the late write's window does not carry over to the new asks"
+    );
+    st.slots[0].getdata_wire.wrote(asked.len(), 151_000);
+    assert_eq!(st.slots[0].getdata_wire.window_ms(), Some(151_000));
 
     stall_pass(&mut st, &hub, 151_500);
     assert!(
-        !st.slots[0].in_flight.is_empty(),
+        st.slots[0].alive && st.slots[0].takes_block_requests(),
         "half a second after the new write is not a stall"
     );
+    assert_eq!(
+        st.slots[0].in_flight, asked,
+        "the new asks stay with the peer"
+    );
+    assert!(asked
+        .iter()
+        .all(|h| st.inflight.get(h).is_some_and(|r| r.peers.contains(&0))));
+    assert_eq!(st.slots[0].getdata_wire.window_ms(), Some(151_000));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Two real blocks at heights 1 and 2 on the path, each with a stored fk.
+fn real_path(hub: &ChainHub, st: &mut IbdWorkState) -> Vec<bitcoin::Block> {
+    let mut prev = hub.tip_hash().unwrap();
+    let mut blocks = Vec::new();
+    for ht in 1..=2u32 {
+        let b = rbitcoin_consensus::mine_empty_regtest(prev, 1_500_030_000 + ht * 600, ht);
+        let hash = b.block_hash();
+        st.record_height(hash, ht);
+        st.height_to_hash.insert(ht, hash);
+        st.ordered_set.insert(hash);
+        st.ordered.push_back(hash);
+        st.max_ordered_height = ht;
+        st.body.mark_missing(hash);
+        st.header_fks
+            .insert(hash, rbitcoin_primitives::Fk(u64::from(ht)));
+        prev = hash;
+        blocks.push(b);
+    }
+    blocks
+}
+
+/// The reader of peer `id`, on that slot's shared solicited set.
+fn reader_of(st: &IbdWorkState, id: usize) -> (IbdReadCtx, mpsc::UnboundedReceiver<PeerEvent>) {
+    let slot = st.slots.iter().find(|s| s.id == id).unwrap();
+    let (out_tx, _out_rx) = mpsc::unbounded_channel();
+    let (body_tx, body_rx) = mpsc::unbounded_channel();
+    let (ctrl_tx, _ctrl_rx) = mpsc::unbounded_channel();
+    let ctx = IbdReadCtx {
+        id,
+        out_tx,
+        sinks: PeerEventSinks {
+            body: body_tx,
+            ctrl: ctrl_tx,
+            header_fks: rbitcoin_ibd::ibd::peer_io::empty_header_fk_bus(),
+        },
+        requested: std::sync::Arc::clone(&slot.requested),
+        solicited_bytes: std::sync::Arc::clone(&slot.solicited_bytes),
+        solicited_ms: std::sync::Arc::clone(&slot.solicited_ms),
+        light_decode: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+        light: LightDecodes { tasks: Vec::new() },
+        rate: rbitcoin_net::peer_dos::PeerRateLimiter::default_limits(),
+        logged_invalid_v2: false,
+        ban_score: 0,
+    };
+    (ctx, body_rx)
+}
+
+/// `block` on the wire, padded past the 16 MB/s unsolicited cap. The hash
+/// is the first 80 bytes, so it is still that block's hash.
+fn lan_frame(block: &bitcoin::Block) -> FramedMessage {
+    let mut payload = bitcoin::consensus::encode::serialize(block);
+    payload.resize(
+        rbitcoin_net::peer_dos::DEFAULT_MAX_BYTES_PER_SEC as usize + 1,
+        0,
+    );
+    FramedMessage {
+        magic: bitcoin::p2p::Magic::from(bitcoin::Network::Regtest),
+        command: *b"block\0\0\0\0\0\0\0",
+        payload,
+    }
+}
+
+fn framed_body(ev: PeerEvent) -> FramedBody {
+    match ev {
+        PeerEvent::BlockFramed {
+            peer,
+            hash,
+            payload,
+            header_fk,
+        } => FramedBody {
+            peer,
+            hash,
+            payload,
+            header_fk,
+        },
+        _ => panic!("expected a framed block"),
+    }
+}
+
+/// Core removes a released block from the staller's in-flight list and still
+/// processes it when that peer sends it (`IsBlockRequested` is any peer's
+/// request, and an unrequested block is not misbehavior).
+///
+/// A paused `--connect` peer answers both released blocks at LAN speed,
+/// each frame past the 16 MB/s unsolicited cap. Its reader forwards both
+/// as solicited and scores nothing. The block the other peer already
+/// delivered is a harmless duplicate; the other is queued. The peer stays.
+#[test]
+fn paused_connect_peer_late_blocks_are_accepted_not_scored() {
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    hub.clock.set_mock(T0);
+    let (mut slots, mut wire) = wired_slots(2);
+    for s in &mut slots {
+        s.conn_type = PeerConnType::Manual;
+    }
+    let mut st = IbdWorkState::new(slots, hub.tip_hash(), hub.tip_height());
+    let blocks = real_path(&hub, &mut st);
+    let (b1, b2) = (blocks[0].block_hash(), blocks[1].block_hash());
+    owe_on_wire(&mut st, 0, b1, 0);
+    owe_on_wire(&mut st, 0, b2, 0);
+    stall_pass(&mut st, &hub, 30_001);
+    assign(&mut st, &hub);
+    let sent = drain_wire(&mut wire);
+    assert!(sent[0].0.is_empty() && sent[1].0.contains(&b1));
+
+    let write_next = AtomicU32::new(0);
+    apply_block_framed(
+        &mut st,
+        &hub,
+        &write_next,
+        None,
+        FramedBody {
+            peer: 1,
+            hash: b1,
+            payload: bitcoin::consensus::encode::serialize(&blocks[0]),
+            header_fk: None,
+        },
+    );
+    let queued = hub.query.block_queue_stats().1;
+    assert_eq!(queued, 1, "the other peer's copy of block 1 is queued");
+
+    let (mut ctx, mut body_rx) = reader_of(&st, 0);
+    for b in &blocks {
+        assert!(!ctx.handle(Ok(lan_frame(b))), "the reader keeps the peer");
+    }
+    assert_eq!(ctx.ban_score, 0, "a late answer is not misbehavior");
+    let late: Vec<FramedBody> = std::iter::from_fn(|| body_rx.try_recv().ok())
+        .map(framed_body)
+        .collect();
+    assert_eq!(
+        late.iter().map(|b| b.hash).collect::<Vec<_>>(),
+        vec![b1, b2],
+        "both late bodies reach the coordinator"
+    );
+    for body in late {
+        apply_block_framed(&mut st, &hub, &write_next, None, body);
+    }
+    assert_eq!(
+        hub.query.block_queue_stats().1,
+        2,
+        "block 1 is not queued twice; block 2 is queued from the paused peer"
+    );
+    assert!(hub.query.block_queue_has_hash(&b2.to_byte_array()));
+    assert!(st.slots[0].alive && !drain_wire(&mut wire)[0].1);
+    assert!(st.addr_cooldown.is_empty());
     let _ = std::fs::remove_dir_all(dir);
 }
 
