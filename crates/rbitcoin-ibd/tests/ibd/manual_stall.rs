@@ -521,6 +521,102 @@ fn paused_connect_peer_late_blocks_are_queued_after_the_other_peer_leaves() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Peer 0 is paused and its blocks go to peer 1, which then disconnects.
+/// With no other peer taking block requests, waiting out the cooldown
+/// would leave nobody downloading, so the next assign pass lifts the pause
+/// and asks peer 0 for the blocks long before two minutes. A getdata still
+/// in its writer at the pause goes out during it; the new asks still get a
+/// fresh stall window, and its answer is a body.
+#[test]
+fn paused_connect_peer_resumes_when_the_other_peer_leaves() {
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    hub.clock.set_mock(T0);
+    let (mut slots, mut wire) = wired_slots(2);
+    for s in &mut slots {
+        s.conn_type = PeerConnType::Manual;
+    }
+    let mut st = IbdWorkState::new(slots, hub.tip_hash(), hub.tip_height());
+    let blocks = real_path(&hub, &mut st);
+    let owed: HashSet<BlockHash> = blocks.iter().map(|b| b.block_hash()).collect();
+    for b in &blocks {
+        owe_on_wire(&mut st, 0, b.block_hash(), 0);
+    }
+    stall_pass(&mut st, &hub, 30_001);
+    st.slots[0].getdata_wire.wrote(1, 30_500);
+    assign(&mut st, &hub);
+    let sent = drain_wire(&mut wire);
+    assert!(sent[0].0.is_empty() && owed.iter().all(|h| sent[1].0.contains(h)));
+
+    let freed = release_peer_block_work(&mut st.slots, &mut st.inflight, &mut st.body, 1);
+    st.reopen_for_densify(&freed);
+    st.slots.retain(|s| s.alive);
+    hub.clock.set_mock(T0 + 1);
+    assign(&mut st, &hub);
+    assert!(
+        st.slots[0].takes_block_requests(),
+        "the pause is lifted once no other peer takes block requests"
+    );
+    let asked: HashSet<BlockHash> = drain_wire(&mut wire)[0].0.iter().copied().collect();
+    assert!(
+        asked.is_superset(&owed),
+        "the resumed peer is asked for the released blocks; got {asked:?}"
+    );
+    assert_eq!(
+        st.slots[0].getdata_wire.window_ms(),
+        None,
+        "a getdata written during the pause does not open the new window"
+    );
+    st.slots[0].getdata_wire.wrote(asked.len(), 60_000);
+    assert!(stall_pass(&mut st, &hub, 61_000).is_empty());
+    assert!(
+        st.slots[0].takes_block_requests() && st.slots[0].in_flight.is_superset(&owed),
+        "the new asks are not an instant stall"
+    );
+
+    assert_eq!(answer_at_lan_speed(&mut st, &hub, 0, &blocks), (0, false));
+    for b in &blocks {
+        assert!(hub
+            .query
+            .block_queue_has_hash(&b.block_hash().to_byte_array()));
+    }
+    assert!(st.slots[0].alive && !drain_wire(&mut wire)[0].1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Peers 0 and 1 are both paused and peer 2, the only one still taking
+/// block requests, disconnects. Every paused peer is resumed, not just one.
+/// A pause stays while another peer still takes block requests.
+#[test]
+fn every_paused_peer_resumes_when_nobody_else_takes_blocks() {
+    let (dir, hub) = tmp_hub();
+    let (mut st, mut wire) = connect_peers(&hub, 3, PeerConnType::Manual);
+    owe_on_wire(&mut st, 0, h(1), 0);
+    owe_on_wire(&mut st, 1, h(2), 0);
+    stall_pass(&mut st, &hub, 30_001);
+    stall_pass(&mut st, &hub, 30_002);
+    assert!(!st.slots[0].takes_block_requests() && !st.slots[1].takes_block_requests());
+    assign(&mut st, &hub);
+    assert!(
+        !st.slots[0].takes_block_requests() && !st.slots[1].takes_block_requests(),
+        "peer 2 still takes block requests, so the pauses stay"
+    );
+    let sent = drain_wire(&mut wire);
+    assert!(sent[0].0.is_empty() && sent[1].0.is_empty());
+
+    let freed = release_peer_block_work(&mut st.slots, &mut st.inflight, &mut st.body, 2);
+    st.reopen_for_densify(&freed);
+    st.slots.retain(|s| s.alive);
+    assign(&mut st, &hub);
+    assert!(st.slots.iter().all(|s| s.takes_block_requests()));
+    let sent = drain_wire(&mut wire);
+    assert!(
+        !sent[0].0.is_empty() && !sent[1].0.is_empty(),
+        "both resumed peers are asked"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// The only peer is a `--connect` (or `--trust-peer`) peer and it stalls.
 /// No other peer could take its blocks, so releasing them and pausing it
 /// would leave nobody downloading for two minutes. It keeps its requests,
