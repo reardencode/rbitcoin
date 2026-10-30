@@ -241,18 +241,54 @@ async fn pin_silentpayments_1_6(stream: &mut TcpStream) {
     assert!(bad.get("error").is_some(), "{bad}");
 }
 
-async fn rpc(stream: &mut TcpStream, id: u64, method: &str, params: Value) -> Value {
+/// One JSON line, read a byte at a time. A `BufReader` that lives for one
+/// call takes every line already in the socket and drops all but the first.
+async fn read_json_line<R: tokio::io::AsyncRead + Unpin>(stream: &mut R, label: &str) -> Value {
+    let mut line = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match stream.read_u8().await? {
+                b'\n' => return Ok::<_, std::io::Error>(()),
+                b => line.push(b),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("electrum {label}: read_line timed out"))
+    .unwrap_or_else(|e| panic!("electrum {label}: io {e}"));
+    serde_json::from_slice(&line).unwrap_or_else(|e| panic!("electrum {label}: {e}"))
+}
+
+/// A subscribe answer and its notification can both be in the socket before
+/// the client reads. The second read must still return the second line.
+#[tokio::test]
+async fn read_json_line_keeps_the_line_already_behind_it() {
+    let (mut server, mut client) = tokio::io::duplex(1024);
+    server
+        .write_all(b"{\"id\":1}\n{\"method\":\"note\"}\n")
+        .await
+        .unwrap();
+    drop(server);
+    assert_eq!(
+        read_json_line(&mut client, "answer").await,
+        json!({"id": 1})
+    );
+    assert_eq!(
+        read_json_line(&mut client, "notification").await,
+        json!({"method": "note"})
+    );
+}
+
+async fn send_rpc(stream: &mut TcpStream, id: u64, method: &str, params: Value) {
     let req = json!({"jsonrpc":"2.0","id": id, "method": method, "params": params});
     let mut line = serde_json::to_string(&req).unwrap();
     line.push('\n');
     stream.write_all(line.as_bytes()).await.unwrap();
-    let mut reader = BufReader::new(&mut *stream);
-    let mut resp_line = String::new();
-    tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut resp_line))
-        .await
-        .unwrap_or_else(|_| panic!("electrum rpc {method}: read_line timed out"))
-        .unwrap_or_else(|e| panic!("electrum rpc {method}: io {e}"));
-    serde_json::from_str(&resp_line).unwrap()
+}
+
+async fn rpc(stream: &mut TcpStream, id: u64, method: &str, params: Value) -> Value {
+    send_rpc(stream, id, method, params).await;
+    read_json_line(stream, &format!("rpc {method}")).await
 }
 
 fn dotted_at_least(version: &str, min: &[u64]) -> bool {
@@ -339,13 +375,7 @@ async fn sparrow_batch_matches_single_calls(stream: &mut TcpStream) {
 }
 
 async fn read_notify(stream: &mut TcpStream, label: &str) -> Value {
-    let mut reader = BufReader::new(&mut *stream);
-    let mut resp_line = String::new();
-    tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut resp_line))
-        .await
-        .unwrap_or_else(|_| panic!("electrum {label}: read_line timed out"))
-        .unwrap_or_else(|e| panic!("electrum {label}: io {e}"));
-    serde_json::from_str(&resp_line).unwrap()
+    read_json_line(stream, label).await
 }
 
 fn http_header_value(text: &str, name: &str) -> Option<String> {
