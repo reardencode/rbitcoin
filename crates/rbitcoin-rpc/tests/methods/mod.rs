@@ -2027,6 +2027,75 @@ fn getblock_mid_reorg_answers_for_the_requested_hash() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A block that connects while `getblock` reads the body shows in that
+/// answer's `confirmations` and `nextblockhash`: they are read after every
+/// other field.
+#[test]
+fn getblock_reads_the_tip_after_the_body() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let hash = dispatch(&ctx, "getbestblockhash", vec![]).unwrap();
+    let height = dispatch(&ctx, "getblockcount", vec![])
+        .unwrap()
+        .as_u64()
+        .unwrap();
+    for (n, verbosity) in [1, 2].into_iter().enumerate() {
+        before_next_getblock_finish(|ctx: &RpcContext| {
+            dispatch(ctx, "generate", vec![json!(1)]).unwrap();
+        });
+        let blk = dispatch(&ctx, "getblock", vec![hash.clone(), json!(verbosity)]).unwrap();
+        let next = dispatch(&ctx, "getblockhash", vec![json!(height + 1)]).unwrap();
+        assert_eq!(blk["nextblockhash"], next, "verbosity {verbosity}: {blk}");
+        assert_eq!(
+            blk["confirmations"],
+            json!(n + 2),
+            "verbosity {verbosity}: {blk}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A reorg away and back between the tip sample and the membership read can
+/// leave this block in its slot while the sampled next block is another
+/// branch's. That next block is not this block's child, so the answer is the
+/// disconnected one, not this block with a foreign `nextblockhash`.
+#[test]
+fn getblock_next_block_from_another_branch_is_not_active() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let hash = dispatch(&ctx, "getblockhash", vec![json!(1)]).unwrap();
+    let (foreign, _) = ctx.query.header_at_height(Height(3)).unwrap().unwrap();
+    ctx.query
+        .store()
+        .confirmed
+        .set(&rbitcoin_store::ClassCWrite::for_test(), Height(2), foreign)
+        .unwrap();
+    for verbosity in [1, 2] {
+        let blk = dispatch(&ctx, "getblock", vec![hash.clone(), json!(verbosity)]).unwrap();
+        assert_eq!(
+            blk["confirmations"],
+            json!(-1),
+            "verbosity {verbosity}: {blk}"
+        );
+        assert!(blk.get("nextblockhash").is_none(), "{blk}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The reads `getblock` makes last (the tip, the next header, and this
+/// block's own `confirmed` slot) are Core's `-32603` when they fail, not a
+/// disconnected block or an answer without `nextblockhash`.
+#[test]
+fn getblock_unreadable_tip_read_is_an_error() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let hash = dispatch(&ctx, "getblockhash", vec![json!(1)]).unwrap();
+    for verbosity in [1, 2] {
+        before_next_getblock_finish(|ctx: &RpcContext| ctx.query.fail_next_header_read_cancelled());
+        let e = dispatch(&ctx, "getblock", vec![hash.clone(), json!(verbosity)])
+            .expect_err("a failed tip read must fail the call");
+        assert_eq!(e["code"], ERR_INTERNAL, "verbosity {verbosity}: {e}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Undo that is stored but unreadable is an error (Core `blockToJSON`), not a
 /// tx row quietly missing its `fee` and `prevout`.
 #[test]
@@ -2086,25 +2155,74 @@ fn getblock_unresolved_prevout_edge_is_an_error() {
     let tip = dispatch(&ctx, "generate", vec![json!(1)]).unwrap()[0].clone();
     // `input.body` is 8 bytes per input: parent fk u40 LE, vout u24 LE. Only
     // this spend names the height-1 coinbase, so its edge is the one match.
-    let (parent_fk, _) = ctx
-        .query
-        .get_tx_by_txid(&generated_coinbase_txid(&ctx, 1))
-        .unwrap()
-        .unwrap();
-    let mut edge = parent_fk.0.to_le_bytes();
-    edge[5..].fill(0);
+    let cb_fk = generated_coinbase_fk(&ctx, 1);
+    let mut edge = cb_fk.0.to_le_bytes();
+    edge[5..].copy_from_slice(&[7, 0, 0]);
+    rewrite_edge_naming(&dir, cb_fk, edge);
+    assert_undo_unreadable(&ctx, &tip);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn generated_coinbase_fk(ctx: &RpcContext, height: u32) -> rbitcoin_primitives::Fk {
+    let txid = generated_coinbase_txid(ctx, height);
+    ctx.query.get_tx_by_txid(&txid).unwrap().unwrap().0
+}
+
+/// Overwrite the one `input.body` edge that names `parent:0` (8 bytes per
+/// input: parent fk u40 LE, vout u24 LE). The file is pre-allocated with
+/// trailing zeros, so the edge is found by its bytes.
+fn rewrite_edge_naming(dir: &TempDir, parent: rbitcoin_primitives::Fk, edge: [u8; 8]) {
+    let mut want = parent.0.to_le_bytes();
+    want[5..].fill(0);
     let path = walk_for(&dir.join("store"), "input.body").expect("input.body");
     let bytes = std::fs::read(&path).unwrap();
     let hits: Vec<usize> = bytes
         .windows(8)
         .enumerate()
-        .filter(|(_, w)| *w == edge)
+        .filter(|(_, w)| *w == want)
         .map(|(i, _)| i)
         .collect();
-    assert_eq!(hits.len(), 1, "one edge names the coinbase: {hits:?}");
+    assert_eq!(hits.len(), 1, "one edge names {parent:?}: {hits:?}");
     let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
-    std::os::unix::fs::FileExt::write_all_at(&f, &[7], hits[0] as u64 + 5).unwrap();
-    assert_undo_unreadable(&ctx, &tip);
+    std::os::unix::fs::FileExt::write_all_at(&f, &edge, hits[0] as u64).unwrap();
+}
+
+/// Verbosity 2 needs each parent output's value for `fee`, and nothing else.
+/// A parent whose own prevout edge does not decode still gives the fee.
+/// Verbosity 3 and `getrawtransaction` verbosity 2 print `prevout.generated`
+/// from that edge, so they fail with Core's undo error.
+#[test]
+fn getblock_verbosity_2_reads_only_parent_outputs() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let (addr, _) = p2wpkh_regtest();
+    let parent_sat = generated_coinbase_value(&ctx, 1);
+    let (parent_hex, parent) =
+        mature_coinbase_spend(&ctx, parent_sat - 1_000, ScriptBuf::from_bytes(vec![0x51]));
+    dispatch(
+        &ctx,
+        "generateblock",
+        vec![json!(addr), json!([parent_hex])],
+    )
+    .unwrap();
+    let (child_hex, child) = spend_outpoint(&parent, 0, 2_000);
+    let tip = dispatch(&ctx, "generateblock", vec![json!(addr), json!([child_hex])]).unwrap()
+        ["hash"]
+        .clone();
+    // A null parent with a nonzero vout does not decode.
+    rewrite_edge_naming(
+        &dir,
+        generated_coinbase_fk(&ctx, 1),
+        [0, 0, 0, 0, 0, 7, 0, 0],
+    );
+
+    let v2 = dispatch(&ctx, "getblock", vec![tip.clone(), json!(2)])
+        .unwrap_or_else(|e| panic!("the fee reads only parent outputs: {e}"));
+    assert_btc_amount(&v2["tx"][1]["fee"], 2_000.0 / 1e8);
+    let v3 = dispatch(&ctx, "getblock", vec![tip.clone(), json!(3)]).unwrap_err();
+    assert_eq!(v3["code"], ERR_INTERNAL, "{v3}");
+    let txid = hash_hex_display(&child.compute_txid().to_byte_array());
+    let raw = dispatch(&ctx, "getrawtransaction", vec![json!(txid), json!(2), tip]).unwrap_err();
+    assert_eq!(raw["code"], ERR_INTERNAL, "{raw}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2208,6 +2326,43 @@ fn getblock_same_block_parent_placed_when_the_fence_misses() {
     let blk = dispatch(&ctx, "getblock", vec![tip, json!(3)])
         .unwrap_or_else(|e| panic!("readable undo must not fail: {e}"));
     assert_eq!(blk["tx"][2]["vin"][0]["prevout"]["height"], height, "{blk}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The stale-branch walk counts `walk_max` blocks below the requested one. A
+/// branch exactly that deep still reaches its active ancestor; one block
+/// deeper does not place the parent, which callers report as Core's `-32603`.
+#[test]
+fn off_chain_create_height_walk_reaches_the_cap() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let (addr, _) = p2wpkh_regtest();
+    let parent_sat = generated_coinbase_value(&ctx, 1);
+    let (parent_hex, parent) =
+        mature_coinbase_spend(&ctx, parent_sat - 1_000, ScriptBuf::from_bytes(vec![0x51]));
+    let first = dispatch(
+        &ctx,
+        "generateblock",
+        vec![json!(addr), json!([parent_hex])],
+    )
+    .unwrap()["hash"]
+        .clone();
+    let height = dispatch(&ctx, "getblock", vec![first.clone(), json!(1)]).unwrap()["height"]
+        .as_u64()
+        .unwrap() as u32;
+    let (child_hex, _) = spend_outpoint(&parent, 0, 1_000);
+    let second = dispatch(&ctx, "generateblock", vec![json!(addr), json!([child_hex])]).unwrap()
+        ["hash"]
+        .clone();
+    dispatch(&ctx, "invalidateblock", vec![first]).unwrap();
+    let hash = parse_hash32_display(second.as_str().unwrap()).unwrap();
+    let (second_fk, _) = ctx.query.get_header_by_hash(&hash).unwrap().unwrap();
+    let parent_txid = parent.compute_txid().to_byte_array();
+    let (parent_fk, _) = ctx.query.get_tx_by_txid(&parent_txid).unwrap().unwrap();
+    // Two stale blocks, then the active ancestor two blocks down.
+    let at_cap = off_chain_create_height(&ctx, second_fk, parent_fk, 2).unwrap();
+    assert_eq!(at_cap, Some(height));
+    let past_cap = off_chain_create_height(&ctx, second_fk, parent_fk, 1).unwrap();
+    assert_eq!(past_cap, None);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

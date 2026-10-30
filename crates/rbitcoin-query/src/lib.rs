@@ -299,7 +299,7 @@ pub use block_filter::{basic_filter_from_scripts, basic_filter_of};
 pub use catchup::IndexMode;
 pub use chain_view::{
     header_lookup_count, header_lookups_under_coord_lock, reset_header_lookups_under_coord_lock,
-    ChainView, ChainViewKind,
+    ChainView, ChainViewKind, SlotsAround,
 };
 pub use confirm_load::SpendEdges;
 pub use connect::{spawn_sh_writebehind, ConfirmPrepared};
@@ -1399,7 +1399,8 @@ impl Query {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// The next [`Self::header_at_height`] returns [`StoreError::Cancelled`].
+    /// The next [`Self::header_at_height`] or [`Self::slots_around`] returns
+    /// [`StoreError::Cancelled`].
     #[cfg(debug_assertions)]
     #[doc(hidden)]
     pub fn fail_next_header_read_cancelled(&self) {

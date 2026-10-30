@@ -273,7 +273,36 @@ impl Query {
     }
 }
 
+/// `confirmed` around one height. See [`Query::slots_around`].
+pub struct SlotsAround {
+    /// `confirmed[height]`.
+    pub at: Option<Fk>,
+    /// The header at `height + 1`.
+    pub next: Option<HeaderRecord>,
+    pub tip: Option<Height>,
+}
+
 impl Query {
+    /// What an answer about the block at `height` reads last.
+    /// `confirmed[height]`, the header at `height + 1`, and the tip come from
+    /// one sample of `confirmed`, so a reorg cannot pair this slot or the
+    /// next block with another tip.
+    pub fn slots_around(&self, height: Height) -> Result<SlotsAround, QueryError> {
+        #[cfg(debug_assertions)]
+        if self
+            .header_read_cancel
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(StoreError::Cancelled("header read"));
+        }
+        note_header_lookup();
+        #[cfg(debug_assertions)]
+        note_header_io_under_index_lock();
+        let ([at, next], tip) = self.store.confirmed.get_pair_with_tip(height)?;
+        let next = next.map(|fk| self.store.get_header(fk)).transpose()?;
+        Ok(SlotsAround { at, next, tip })
+    }
+
     pub fn header_at_height(
         &self,
         height: Height,

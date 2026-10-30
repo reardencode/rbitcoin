@@ -291,7 +291,9 @@ counter, so a get during the flush does not retry because of the flush. Readers 
 during IBD. Slot-table growth keeps the previous buffer until the table is dropped. `strong_tx` is one anonymous reservation of the 256 MiB cap: a grow commits the used prefix and does not keep a second image. A
 get retries when the length it sampled does not fit the buffer it loaded. A
 bulk bit scan rechecks the counter once at the end. A table past the RAM cap
-is fd write-through and has no sequence counter. An append pwrites the new
+is fd write-through. Its stores take the same sequence counter with no
+flush flag, and a get retries a pread taken while a store ran, so a sample's
+slot (or two adjacent slots) and length are one generation. An append pwrites the new
 slots, then the file length, then `len`, so a get that sees the new length
 has those bytes. A zero gap pwrites zeros across that new span before the
 named slots. A get that sampled a length a truncate has since shortened

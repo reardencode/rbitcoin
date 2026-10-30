@@ -873,8 +873,13 @@ pub fn getblock_tx_json(
         .iter()
         .enumerate()
         .map(|(i, tx)| {
+            let read = if verbosity >= 3 {
+                UndoRead::Prevouts
+            } else {
+                UndoRead::Fee
+            };
             let row = match undo {
-                Some(u) => raw_tx_prevouts(ctx, tx, u.fks[i], Some(u.header_fk))?,
+                Some(u) => raw_tx_prevouts(ctx, tx, u.fks[i], Some(u.header_fk), read)?,
                 None => None,
             };
             let Some((fee, prevouts)) = row else {
@@ -925,6 +930,23 @@ pub fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     getblock_body(ctx, &at, rec, verbosity)
 }
 
+#[cfg(debug_assertions)]
+type GetblockHook = Box<dyn FnOnce(&RpcContext)>;
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static BEFORE_GETBLOCK_FINISH: std::cell::RefCell<Option<GetblockHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` once in the next `getblock` on this thread, after the body and
+/// before the reads `ActiveAt::finish` makes last.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn before_next_getblock_finish(f: impl FnOnce(&RpcContext) + 'static) {
+    BEFORE_GETBLOCK_FINISH.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+}
+
 /// A block `height_of_hash` placed on the active chain, and its header fk.
 /// The fields read by height are this block's only if `confirmed[height]`
 /// still holds it after they are read: a disconnect clears that slot before
@@ -936,26 +958,40 @@ struct ActiveAt {
 }
 
 impl ActiveAt {
-    /// `confirmations` and `nextblockhash` read heights above this block, which
-    /// a connect or reorg can move without touching this slot. They are read
-    /// again right before the membership check.
-    fn refresh_above(&self, ctx: &RpcContext, obj: &mut Value) {
-        let next = nextblockhash_at(ctx, self.height);
+    /// The reads made after every other field. `confirmations`,
+    /// `nextblockhash`, and membership come from one sample of the tip, this
+    /// slot, and the one above it. `false` when `confirmed[height]` no longer
+    /// holds this block or the next block is not its child, as Core checks.
+    /// A read that fails is Core's `-32603`, not a disconnected block.
+    fn finish(&self, ctx: &RpcContext, obj: &mut Value) -> Result<bool, Value> {
+        #[cfg(debug_assertions)]
+        if let Some(f) = BEFORE_GETBLOCK_FINISH.with(|h| h.borrow_mut().take()) {
+            f(ctx);
+        }
+        let slots = ctx
+            .query
+            .slots_around(self.height)
+            .map_err(|e| rpc_error(ERR_INTERNAL, e.to_string()))?;
+        let child = slots
+            .next
+            .as_ref()
+            .is_none_or(|next| next.prev_fk == self.header_fk);
+        if slots.at != Some(self.header_fk) || !child {
+            return Ok(false);
+        }
         let Some(o) = obj.as_object_mut() else {
-            return;
+            return Ok(true);
         };
+        let tip = slots.tip.map_or(0, |h| h.0);
         o.insert(
             "confirmations".into(),
-            json!(confirmations(ctx, self.height)),
+            json!(tip.saturating_sub(self.height.0).saturating_add(1)),
         );
-        match next {
-            Some(n) => o.insert("nextblockhash".into(), json!(n)),
+        match slots.next {
+            Some(next) => o.insert("nextblockhash".into(), json!(hash_hex_display(&next.hash))),
             None => o.remove("nextblockhash"),
         };
-    }
-
-    fn still_active(&self, ctx: &RpcContext) -> bool {
-        ctx.query.store().confirmed.get(self.height).ok().flatten() == Some(self.header_fk)
+        Ok(true)
     }
 }
 
@@ -1015,8 +1051,7 @@ fn getblock_v1(
             Err(e) => return Err(misc(e)),
         }
     }
-    at.refresh_above(ctx, &mut obj);
-    if !at.still_active(ctx) {
+    if !at.finish(ctx, &mut obj)? {
         return getblock_unknown_hash(ctx, at.hash, 1);
     }
     Ok(obj)
@@ -1097,8 +1132,7 @@ fn getblock_body(
         };
         obj["tx"] = json!(getblock_tx_json(ctx, &block, Some(&undo), verbosity)?);
     }
-    at.refresh_above(ctx, &mut obj);
-    if !at.still_active(ctx) {
+    if !at.finish(ctx, &mut obj)? {
         return disconnected_block_value(ctx, &at.hash, &block, verbosity);
     }
     Ok(obj)
