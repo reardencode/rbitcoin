@@ -22,12 +22,13 @@ pub fn pad_empty_from(
     let mut cbs = Vec::new();
     for h in from_h..=last {
         let time = tip_time + 600;
-        let bits = crate::expected_next_bits(query, params, Height(h), time).unwrap();
+        let bits = crate::expected_next_bits(query, params, Height(h), time)
+            .expect("pad parent is linked");
         let b = mine_regtest_paying_bits(
             tip,
             time,
             h,
-            bitcoin::ScriptBuf::from_bytes(vec![0x51]),
+            bitcoin::ScriptBuf::from_bytes(vec![rbitcoin_primitives::OP_TRUE]),
             Vec::new(),
             bits,
         );

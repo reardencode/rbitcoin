@@ -44,7 +44,8 @@ pub struct ChainParams {
     /// Subsidy halving interval overlay (`None` = network default).
     pub subsidy_halving_overlay: Option<u32>,
     /// Regtest fixed difficulty for every block at height >= 1 (`None` = the
-    /// network `pow_limit` bits). Only `header::next_work_bits` applies it.
+    /// network `pow_limit` bits). `header::apply_regtest_pow_overlay` applies
+    /// it from `next_work_bits` and from the off-tip header check.
     pub regtest_pow_bits_overlay: Option<CompactTarget>,
     /// Header hash at BIP34 height that turns BIP30 off. `None` on signet and
     /// regtest (Core's null hash), so BIP30 stays on at every height.
@@ -357,14 +358,16 @@ impl ChainParams {
         }
         let bits = CompactTarget::from_consensus(bits);
         let raw = bits.to_consensus();
+        // Core `SetCompact`: 8-bit exponent, then a sign bit and a 23-bit mantissa.
         let exp = raw >> 24;
-        let mantissa = raw & 0x007f_ffff;
-        if mantissa != 0
-            && (raw & 0x0080_0000 != 0
-                || exp > 34
-                || (mantissa > 0xff && exp > 33)
-                || (mantissa > 0xffff && exp > 32))
-        {
+        let sign = 1u32 << 23;
+        let mantissa = raw & (sign - 1);
+        let negative = mantissa != 0 && (raw & sign) != 0;
+        let overflows = mantissa != 0
+            && (exp > 34
+                || (mantissa > u32::from(u8::MAX) && exp > 33)
+                || (mantissa > u32::from(u16::MAX) && exp > 32));
+        if negative || overflows {
             return Err("regtest_pow_bits is negative or overflows");
         }
         let target = Target::from_compact(bits);

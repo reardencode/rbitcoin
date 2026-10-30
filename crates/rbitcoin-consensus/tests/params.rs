@@ -190,6 +190,7 @@ fn regtest_pow_bits_overlay_is_regtest_only_and_bounded() {
         0x0300_0000,
         0x0100_3456, // shifts to a zero target
         0x2080_0001, // negative
+        0x0280_0002, // negative, low bit clear
         0x2300_0001, // overflow
     ] {
         let mut p = ChainParams::regtest();
