@@ -7,5 +7,7 @@ Changed
   to the other peers, and it is sent no block `getdata` for two minutes on
   the node clock, then it is asked again. With no other peer, catch-up
   waits out those two minutes. INFO `ibd: Pausing block downloads from
-  stalling manual peer=<id> for 120 seconds` marks the pause. Any other
+  stalling manual peer=<id> for 120 seconds` marks the pause. If the peer
+  then sends the blocks it was released from, they are accepted (or
+  dropped as duplicates) and do not count as unsolicited. Any other
   stalling peer is still disconnected.

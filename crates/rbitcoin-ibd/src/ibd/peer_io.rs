@@ -164,10 +164,20 @@ pub struct PeerSlot {
     pub chain: super::peer_chain::PeerChain,
     /// `Manual` for a `--connect` target, as Core dials `-connect`.
     pub conn_type: rbitcoin_net::peers::PeerConnType,
-    /// Node-clock seconds until which this peer is sent no block getdata.
-    pub block_download_paused_until: Option<u64>,
+    /// Set while a stalled manual peer sits out block download.
+    pub block_download_pause: Option<BlockDownloadPause>,
     pub alive: bool,
     pub task: JoinHandle<()>,
+}
+
+/// A manual peer that stalled: it is sent no block getdata until `until`
+/// (node-clock seconds). Core removes the released blocks from that peer's
+/// in-flight list and still processes them if it sends them, so each
+/// `released` hash stays solicited on its reader for one late answer.
+#[derive(Debug, Default)]
+pub struct BlockDownloadPause {
+    pub until: u64,
+    pub released: HashSet<BlockHash>,
 }
 
 /// Empty side-set and solicited counters for a new [`PeerSlot`].
@@ -340,17 +350,48 @@ pub const LIGHT_DECODE_PERMITS: usize = 32;
 impl PeerSlot {
     /// Alive and not paused: assign may send this peer block getdata.
     pub fn takes_block_requests(&self) -> bool {
-        self.alive && self.block_download_paused_until.is_none()
+        self.alive && self.block_download_pause.is_none()
     }
 
-    /// Lift the block-download pause once the node clock reaches it.
+    /// Pause block download until `until` and hand back what this peer
+    /// owed. Those hashes stay solicited on the reader.
+    pub fn pause_block_download(&mut self, until: u64) -> Vec<BlockHash> {
+        let released: Vec<BlockHash> = self.in_flight.drain().collect();
+        self.disarm_stall_if_idle();
+        self.block_download_pause = Some(BlockDownloadPause {
+            until,
+            released: released.iter().copied().collect(),
+        });
+        released
+    }
+
+    /// Lift the pause once the node clock reaches it. A released hash that
+    /// was never answered is no longer solicited.
     pub fn resume_block_download_if_due(&mut self, now_secs: u64) {
-        if self
-            .block_download_paused_until
-            .is_some_and(|until| now_secs >= until)
+        let Some(pause) = self.block_download_pause.take_if(|p| now_secs >= p.until) else {
+            return;
+        };
+        let mut set = self.requested_set();
+        for h in pause
+            .released
+            .iter()
+            .filter(|h| !self.in_flight.contains(*h))
         {
-            self.block_download_paused_until = None;
+            set.remove(h);
         }
+    }
+
+    /// `true` once for a late answer to a hash this pause released.
+    pub fn take_late_release(&mut self, hash: &BlockHash) -> bool {
+        self.block_download_pause
+            .as_mut()
+            .is_some_and(|p| p.released.remove(hash))
+    }
+
+    fn holds_late_release(&self, hash: &BlockHash) -> bool {
+        self.block_download_pause
+            .as_ref()
+            .is_some_and(|p| p.released.contains(hash))
     }
 
     #[doc(hidden)]
@@ -365,7 +406,9 @@ impl PeerSlot {
 
     pub fn track_remove(&mut self, hash: &BlockHash) -> bool {
         let removed = self.in_flight.remove(hash);
-        self.requested_set().remove(hash);
+        if !self.holds_late_release(hash) {
+            self.requested_set().remove(hash);
+        }
         self.disarm_stall_if_idle();
         removed
     }
@@ -384,6 +427,10 @@ impl PeerSlot {
         let mut set = self.requested_set();
         set.clear();
         set.extend(self.in_flight.iter().copied());
+        if let Some(p) = &self.block_download_pause {
+            set.extend(p.released.iter().copied());
+        }
+        drop(set);
         self.disarm_stall_if_idle();
     }
 
@@ -1090,7 +1137,7 @@ pub async fn spawn_peer(
         },
         chain: Default::default(),
         conn_type,
-        block_download_paused_until: None,
+        block_download_pause: None,
         alive: true,
         task,
     })

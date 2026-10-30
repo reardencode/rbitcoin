@@ -816,9 +816,14 @@ pub fn apply_block_framed(
     } = body;
     let wire_bytes = payload.len();
     // Unsolicited wire is not a body we asked for. Drop it before any copy
-    // and before it can move this peer's progress clock.
-    let requested = st.inflight.contains_key(&hash);
-    if !requested {
+    // and before it can move this peer's progress clock. A paused peer's
+    // late answer to a released getdata is a body, as in Core.
+    let late = st
+        .slots
+        .iter_mut()
+        .find(|s| s.id == peer)
+        .is_some_and(|s| s.take_late_release(&hash));
+    if !late && !st.inflight.contains_key(&hash) {
         return;
     }
     note_block_rx(&mut st.slots, peer, wire_bytes);

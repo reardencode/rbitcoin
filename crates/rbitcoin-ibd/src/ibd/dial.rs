@@ -481,33 +481,34 @@ pub fn release_peer_block_work(
     body: &mut super::body::BodyPresence,
     peer: usize,
 ) -> Vec<bitcoin::BlockHash> {
-    if let Some(s) = slots.iter_mut().find(|s| s.id == peer) {
-        s.alive = false;
-    }
-    release_block_requests(slots, inflight, body, peer)
+    let Some(s) = slots.iter_mut().find(|s| s.id == peer) else {
+        return Vec::new();
+    };
+    s.alive = false;
+    let owed = s.track_drain();
+    release_block_requests(inflight, body, peer, owed)
 }
 
-/// [`release_peer_block_work`] for a peer that stays connected.
+/// Drop `peer` from each of `owed`. A disconnect and a manual-peer pause
+/// both release through here.
 fn release_block_requests(
-    slots: &mut [PeerSlot],
     inflight: &mut HashMap<bitcoin::BlockHash, super::state::InflightReq>,
     body: &mut super::body::BodyPresence,
     peer: usize,
+    owed: Vec<bitcoin::BlockHash>,
 ) -> Vec<bitcoin::BlockHash> {
     let mut freed = Vec::new();
-    if let Some(s) = slots.iter_mut().find(|s| s.id == peer) {
-        for h in s.track_drain() {
-            let empty = inflight
-                .get_mut(&h)
-                .map(|e| e.remove_peer(peer))
-                .unwrap_or(false);
-            if empty {
-                inflight.remove(&h);
-                if body.is_pending(&h) {
-                    body.mark_missing(h);
-                }
-                freed.push(h);
+    for h in owed {
+        let empty = inflight
+            .get_mut(&h)
+            .map(|e| e.remove_peer(peer))
+            .unwrap_or(false);
+        if empty {
+            inflight.remove(&h);
+            if body.is_pending(&h) {
+                body.mark_missing(h);
             }
+            freed.push(h);
         }
     }
     freed
@@ -774,8 +775,8 @@ pub fn disconnect_stalled_block_peers_at(
         info!(
             "ibd: Pausing block downloads from stalling manual peer={id} for {cool} seconds ({addr} {why}, {stall:?}, {n_work} in-flight, stream={stream})"
         );
-        s.block_download_paused_until = Some(now_secs.saturating_add(cool));
-        return release_block_requests(slots, inflight, body, id);
+        let owed = s.pause_block_download(now_secs.saturating_add(cool));
+        return release_block_requests(inflight, body, id, owed);
     }
     let mut freed = Vec::new();
     let cool = record_stall_kick(addr_cooldown, addr_strikes, addr, now);

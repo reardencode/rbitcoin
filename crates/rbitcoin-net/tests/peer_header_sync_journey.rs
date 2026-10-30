@@ -70,7 +70,7 @@ fn slot_at(id: usize, ip: Ipv4Addr, height: u32) -> (PeerSlot, mpsc::UnboundedRe
             rate: Default::default(),
             chain: Default::default(),
             conn_type: rbitcoin_net::peers::PeerConnType::OutboundFullRelay,
-            block_download_paused_until: None,
+            block_download_pause: None,
             alive: true,
             task,
         },

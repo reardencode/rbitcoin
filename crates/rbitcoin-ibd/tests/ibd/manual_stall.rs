@@ -161,12 +161,23 @@ fn stalling_connect_peer_stays_and_its_blocks_go_to_the_other_peer() {
         drain_wire(&mut wire)[0].0.is_empty(),
         "one second before the cooldown ends the peer is still paused"
     );
+    assert!(
+        st.slots[0]
+            .requested_set()
+            .is_superset(&owed.iter().copied().collect()),
+        "during the pause its released blocks stay solicited"
+    );
 
     hub.clock.set_mock(T0 + COOLDOWN_SECS);
     assign(&mut st, &hub);
     assert!(
         !drain_wire(&mut wire)[0].0.is_empty(),
         "after the cooldown the peer is asked for blocks again"
+    );
+    assert_eq!(
+        *st.slots[0].requested_set(),
+        st.slots[0].in_flight,
+        "after the cooldown only what it is asked for now is solicited"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -363,6 +374,46 @@ fn paused_connect_peer_late_blocks_are_accepted_not_scored() {
     assert!(hub.query.block_queue_has_hash(&b2.to_byte_array()));
     assert!(st.slots[0].alive && !drain_wire(&mut wire)[0].1);
     assert!(st.addr_cooldown.is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The sole `--connect` peer stalls, so its released blocks have no other
+/// owner. When it answers them during the pause, both are queued from it,
+/// as Core processes a block it no longer has in flight.
+#[test]
+fn sole_paused_connect_peer_late_blocks_are_queued() {
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    hub.clock.set_mock(T0);
+    let (mut slots, mut wire) = wired_slots(1);
+    slots[0].conn_type = PeerConnType::Manual;
+    let mut st = IbdWorkState::new(slots, hub.tip_hash(), hub.tip_height());
+    let blocks = real_path(&hub, &mut st);
+    for b in &blocks {
+        owe_on_wire(&mut st, 0, b.block_hash(), 0);
+    }
+    stall_pass(&mut st, &hub, 30_001);
+    assign(&mut st, &hub);
+    assert!(drain_wire(&mut wire)[0].0.is_empty());
+    assert!(st.inflight.is_empty(), "no other peer took the blocks");
+
+    let (mut ctx, mut body_rx) = reader_of(&st, 0);
+    for b in &blocks {
+        assert!(!ctx.handle(Ok(lan_frame(b))));
+    }
+    assert_eq!(ctx.ban_score, 0);
+    let write_next = AtomicU32::new(0);
+    while let Ok(ev) = body_rx.try_recv() {
+        apply_block_framed(&mut st, &hub, &write_next, None, framed_body(ev));
+    }
+    for b in &blocks {
+        assert!(
+            hub.query
+                .block_queue_has_hash(&b.block_hash().to_byte_array()),
+            "a late block with no other owner is queued"
+        );
+    }
+    assert!(st.slots[0].alive && !drain_wire(&mut wire)[0].1);
     let _ = std::fs::remove_dir_all(dir);
 }
 
