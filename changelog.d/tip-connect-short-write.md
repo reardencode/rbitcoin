@@ -10,6 +10,7 @@ Fixed
   locator header does not seal the new tip and does not publish
   `spend_durable` there. `--prune-seqsigwit` stays on the last sealed
   tip when a later locator header is withheld, in tip mode and on the
-  next IBD batch. Open truncates a body header that ran ahead of
+  next IBD batch. Disconnecting a block that was never sealed does not
+  move that tip. Open truncates a body header that ran ahead of
   that count. A body header short of the locator count is corrupt. A
   real consensus failure is still kept in `store/block.invalid`.

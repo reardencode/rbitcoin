@@ -517,9 +517,8 @@ pub struct Query {
     pub uring_recover_tip: AtomicU32,
     /// Highest height whose seqsigwit was dropped (`u32::MAX` = none dropped).
     pub pruneheight: AtomicU32,
-    /// Last tip a seal made durable (`u32::MAX` = none). Prune stays here
-    /// when a later locator header is withheld. Open starts at the repaired tip.
-    pub sealed_tip: AtomicU32,
+    /// Last tip a Class A seal made durable. A shrink cannot raise it.
+    pub sealed_tip: connect::SealedTip,
     /// Highest spill height already unlinked (`u32::MAX` = none yet).
     pub spill_unlinked_through: AtomicU32,
     /// Operator `--prune-seqsigwit` (advertise NETWORK_LIMITED even before a drop).
@@ -621,11 +620,7 @@ impl Query {
             (None, 0)
         };
         let (ph, prune_on) = Self::load_pruneheight(&store_path)?;
-        let sealed_tip = store
-            .confirmed
-            .tip_height()
-            .map(|h| h.0)
-            .unwrap_or(u32::MAX);
+        let sealed_tip = connect::SealedTip::at_open(store.confirmed.tip_height());
         // Open rebuilt or backfilled `tx.head` through every Class A create,
         // and nothing is queued: the drain starts there.
         let head_drained = store.txs.head_last_inserted_fk();
@@ -686,7 +681,7 @@ impl Query {
             confirm_stats: Arc::new(ConfirmStats::default()),
             uring_recover_tip: AtomicU32::new(u32::MAX),
             pruneheight: AtomicU32::new(ph),
-            sealed_tip: AtomicU32::new(sealed_tip),
+            sealed_tip,
             spill_unlinked_through: AtomicU32::new(u32::MAX),
             prune_seqsigwit: AtomicBool::new(prune_on),
             ibd_mode: AtomicBool::new(false),

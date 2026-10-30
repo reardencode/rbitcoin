@@ -1981,19 +1981,19 @@ impl Store {
         crate::spend_durable::SpendDurable::new(annotated, durable).store(self.path())
     }
 
-    /// `Ok(true)` when this call sealed the tip. A withheld locator header
-    /// skips the barrier and returns `Ok(false)`.
-    pub fn flush_class_c_tip(&self) -> Result<bool, StoreError> {
+    /// The tip this call sealed. A withheld locator header skips the barrier
+    /// and returns `Ok(None)`, so a caller cannot treat the RAM tip as sealed.
+    pub fn flush_class_c_tip(&self) -> Result<Option<Height>, StoreError> {
         // A withheld locator header is not a commit. Skip the whole barrier
         // so header_txs is not left naming creates open will truncate.
         if !self.tip_fits_durable_creates()? {
-            return Ok(false);
+            return Ok(None);
         }
         self.flush_class_c_pre_tip()?;
         // Commit point on disk: tip advance only after strong/header_txs.
         self.confirmed.flush()?;
         self.publish_tip_seal()?;
-        Ok(true)
+        Ok(self.confirmed.tip_height())
     }
 
     /// Flush only `confirmed[]` (tip length / tip header map).

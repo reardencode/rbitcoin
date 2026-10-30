@@ -178,6 +178,23 @@ fn withheld_locator_keeps_prune(direct: bool) {
     );
     q.clear_seqsigwit_ram_window();
     assert_eq!(witness_of(&q, kept), vec![vec![0x55; 8]]);
+    if !direct {
+        // Drop one unsealed block. The shrink flush must not become the
+        // prune anchor, and the next withheld connect must not move it.
+        q.disconnect_tip().unwrap();
+        assert_eq!(q.tip_height(), Some(Height(290)));
+        rbitcoin_store::io_handle::arm_fail_hwm_pwrites(loc, 16);
+        let (prev, parent) = resume(&q, &mut hashes);
+        connect_range(&q, prev, Some(parent), 1, &[0x77; 8], &mut hashes);
+        assert_eq!(q.tip_height(), Some(Height(291)));
+        assert_eq!(
+            q.pruneheight(),
+            Some(Height(1)),
+            "disconnect of an unsealed tip does not move seqsigwit.prune"
+        );
+        q.clear_seqsigwit_ram_window();
+        assert_eq!(witness_of(&q, kept), vec![vec![0x55; 8]]);
+    }
     let _ = dir;
 }
 
