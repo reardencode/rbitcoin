@@ -1268,3 +1268,184 @@ fn tip_announce_reorg_inv_until_caught_up() {
     );
 }
 
+/// A tip child with a tx no mempool holds, so a reconstruct must ask for it.
+fn tip_child_missing_tx(hub: &rbitcoin_net::chain::ChainHub, time_offset: u32) -> bitcoin::Block {
+    use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
+    let spend = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: bitcoin::Txid::from_byte_array([0x33; 32]),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::from_slice(&[vec![1]]),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(1000),
+            script_pubkey: op_true(),
+        }],
+    };
+    mine_child(hub, time_offset, vec![spend])
+}
+
+/// One `cmpctblock` (coinbase prefilled) from `peer`. `requested` marks the
+/// block as asked for from this session; otherwise it arrives unsolicited.
+async fn cmpct_from_peer(
+    hub: &rbitcoin_net::chain::ChainHub,
+    peer: &rbitcoin_net::peers::LivePeer,
+    mut follow: PeerFollowState,
+    block: &bitcoin::Block,
+    requested: bool,
+) -> (PeerFollowState, Vec<NetworkMessage>) {
+    use bitcoin::bip152::HeaderAndShortIds;
+    let hsi = HeaderAndShortIds::from_block(block, 0xbeef, 2, &[0]).unwrap();
+    if requested {
+        follow.requested_blocks.insert(block.block_hash());
+    }
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    handle_peer_frame(
+        frame_for(NetworkMessage::CmpctBlock(CmpctBlock {
+            compact_block: hsi,
+        })),
+        hub,
+        &out_tx,
+        &mut follow,
+        Some(peer),
+    )
+    .await
+    .unwrap();
+    (follow, take_msgs(&mut out_rx))
+}
+
+fn asks_blocktxn(msgs: &[NetworkMessage]) -> bool {
+    msgs.iter()
+        .any(|m| matches!(m, NetworkMessage::GetBlockTxn(_)))
+}
+
+/// Core #32606: an unsolicited compact block from a peer we did not send
+/// `sendcmpct(1)` is a header announcement. The header is stored and the
+/// body is fetched with a full-block `getdata`. Nothing is reconstructed:
+/// no `getblocktxn`, and a complete compact block does not connect.
+#[tokio::test]
+async fn tip_announce_unsolicited_cmpct_from_lb_peer_is_header_announce() {
+    let (_dir, hub) = open_tip_announce_hub("tip-unsolicited-cmpct-lb-peer");
+    let hub = &hub;
+    let tip = hub.tip_hash().unwrap();
+    let tip_h = hub.tip_height().unwrap();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let lb = live_peer(&peers, 18600, 60, false);
+    assert!(!lb.hb_to.load(Ordering::Relaxed));
+    for (why, block) in [
+        ("missing tx", tip_child_missing_tx(hub, 61)),
+        ("complete", mine_child(hub, 62, vec![])),
+    ] {
+        let hash = block.block_hash();
+        let (follow, msgs) = cmpct_from_peer(hub, &lb, hb_follow(), &block, false).await;
+        assert!(!asks_blocktxn(&msgs), "{why}: non-HB unsolicited must not getblocktxn: {msgs:?}");
+        assert!(follow.pending_cmpct.is_empty(), "{why}: no partial block kept");
+        assert_eq!(hub.tip_hash(), Some(tip), "{why}: the compact block must not connect");
+        assert!(hub.held_body(&hash).is_none(), "{why}: no reconstructed body held");
+        assert_eq!(
+            hub.header_height(&hash),
+            Some(tip_h + 1),
+            "{why}: the header is stored like a headers announcement"
+        );
+        assert_eq!(
+            getdata_of(&msgs),
+            vec![(hash, false)],
+            "{why}: the body is a full-block getdata to this peer"
+        );
+        assert!(follow.requested_blocks.contains(&hash), "{why}: the getdata is in flight");
+        assert_eq!(follow.ban_score, 0, "{why}: an unsolicited compact block is not misbehavior");
+    }
+}
+
+/// A peer we selected with `sendcmpct(1)` still pushes compact blocks we
+/// reconstruct: a missing tx is a `getblocktxn`, a complete block connects.
+#[tokio::test]
+async fn tip_announce_unsolicited_cmpct_from_hb_peer_reconstructs() {
+    let (_dir, hub) = open_tip_announce_hub("tip-unsolicited-cmpct-hb-peer");
+    let hub = &hub;
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let hb = live_peer(&peers, 18601, 61, false);
+    hb.set_hb_to(true);
+    let missing = tip_child_missing_tx(hub, 63);
+    let (follow, msgs) = cmpct_from_peer(hub, &hb, hb_follow(), &missing, false).await;
+    assert!(asks_blocktxn(&msgs), "HB unsolicited missing a tx asks for it: {msgs:?}");
+    assert!(follow.pending_cmpct.contains_key(&missing.block_hash()));
+    let complete = mine_child(hub, 64, vec![]);
+    let (_, msgs) = cmpct_from_peer(hub, &hb, hb_follow(), &complete, false).await;
+    assert!(getdata_of(&msgs).is_empty(), "a complete HB compact block needs no getdata: {msgs:?}");
+    assert_eq!(hub.tip_hash(), Some(complete.block_hash()), "HB compact block connects");
+}
+
+/// A compact block this session asked for is reconstructed from any peer,
+/// selected for high-bandwidth or not.
+#[tokio::test]
+async fn tip_announce_requested_cmpct_from_lb_peer_reconstructs() {
+    let (_dir, hub) = open_tip_announce_hub("tip-requested-cmpct-lb-peer");
+    let hub = &hub;
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let lb = live_peer(&peers, 18602, 62, false);
+    let missing = tip_child_missing_tx(hub, 65);
+    let (follow, msgs) = cmpct_from_peer(hub, &lb, hb_follow(), &missing, true).await;
+    assert!(asks_blocktxn(&msgs), "requested compact missing a tx asks for it: {msgs:?}");
+    assert!(follow.pending_cmpct.contains_key(&missing.block_hash()));
+    let complete = mine_child(hub, 66, vec![]);
+    let (_, msgs) = cmpct_from_peer(hub, &lb, hb_follow(), &complete, true).await;
+    assert!(getdata_of(&msgs).is_empty(), "a complete requested compact needs no getdata: {msgs:?}");
+    assert_eq!(hub.tip_hash(), Some(complete.block_hash()), "requested compact block connects");
+}
+
+/// `-blocksonly` ignores every compact block, even a push from a peer
+/// marked high-bandwidth and even one this session asked for. The header is
+/// not read either (Core returns before header processing).
+#[tokio::test]
+async fn tip_announce_blocksonly_ignores_hb_cmpct() {
+    let (_dir, hub) = open_tip_announce_hub("tip-blocksonly-ignores-hb-cmpct");
+    let hub = &hub;
+    hub.set_blocks_only(true);
+    let tip = hub.tip_hash().unwrap();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let hb = live_peer(&peers, 18603, 63, false);
+    hb.set_hb_to(true);
+    for requested in [false, true] {
+        for block in [tip_child_missing_tx(hub, 67), mine_child(hub, 68, vec![])] {
+            let hash = block.block_hash();
+            let (follow, msgs) = cmpct_from_peer(hub, &hb, hb_follow(), &block, requested).await;
+            assert!(msgs.is_empty(), "requested={requested}: blocksonly sends nothing: {msgs:?}");
+            assert!(follow.pending_cmpct.is_empty());
+            assert_eq!(hub.tip_hash(), Some(tip), "requested={requested}: no connect");
+            assert!(!hub.knows_header(&hash), "requested={requested}: header not read");
+        }
+    }
+}
+
+/// Core #32606: a peer that never sent `sendcmpct` version 2 gets its
+/// `cmpctblock` ignored before the header is read, requested or not, even
+/// if it holds a high-bandwidth slot.
+#[tokio::test]
+async fn tip_announce_cmpct_without_sendcmpct_is_ignored() {
+    let (_dir, hub) = open_tip_announce_hub("tip-cmpct-without-sendcmpct");
+    let hub = &hub;
+    let tip = hub.tip_hash().unwrap();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let hb = live_peer(&peers, 18604, 64, false);
+    hb.set_hb_to(true);
+    for requested in [false, true] {
+        for block in [tip_child_missing_tx(hub, 69), mine_child(hub, 70, vec![])] {
+            let hash = block.block_hash();
+            let (follow, msgs) =
+                cmpct_from_peer(hub, &hb, PeerFollowState::new(), &block, requested).await;
+            assert!(msgs.is_empty(), "requested={requested}: nothing sent: {msgs:?}");
+            assert!(follow.pending_cmpct.is_empty());
+            assert_eq!(follow.ban_score, 0, "requested={requested}: not misbehavior");
+            assert_eq!(hub.tip_hash(), Some(tip), "requested={requested}: no connect");
+            assert!(!hub.knows_header(&hash), "requested={requested}: header not read");
+        }
+    }
+}
+
