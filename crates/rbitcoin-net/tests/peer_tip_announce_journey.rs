@@ -1027,8 +1027,8 @@ async fn tip_announce_far_compact_is_header_only() {
 /// parent disconnects. Every Core `InitData` invalid shape disconnects,
 /// requested or unsolicited: an out-of-range prefilled index, no txs at all,
 /// a prefilled null tx sent as wire bytes, and differentials whose absolute
-/// index passes 65,535. Core's decoder drops more than 65,535 txs with no
-/// score; so do we. 65,535 txs stays connected and asks for its txs.
+/// index passes 65,535. Core's decoder drops more than 65,535 txs, or a
+/// witness-flag prefill with no inputs, with no score; so do we. 65,535 txs stays connected and asks for its txs.
 #[tokio::test]
 async fn tip_announce_invalid_compact_disconnects() {
     let (_dir, hub) = open_tip_announce_hub("tip-invalid-compact-disconnects");
@@ -1149,21 +1149,50 @@ async fn tip_announce_invalid_compact_disconnects() {
         "differentials 0 and 65,535 in a 3-tx block decode and must disconnect"
     );
 
-    let with_coinbase = child_hsi(1, &[0]);
+    // Core reads an empty vin, then flags 0, and leaves vout empty: IsNull.
+    let null_tx = [2, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let (follow, _) = send_cmpct_raw_first_prefill(hub, child_hsi(1, &[0]), &null_tx, false).await;
+    assert!(
+        follow.ban_score >= BAN_SCORE_THRESHOLD,
+        "a prefilled null tx on the wire must disconnect"
+    );
+    // Flag 1 with an empty vin: Core throws "Superfluous witness record".
+    let witness_flag_empty = [2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    let (follow, msgs) =
+        send_cmpct_raw_first_prefill(hub, child_hsi(1, &[0]), &witness_flag_empty, true).await;
+    assert_eq!(follow.ban_score, 0, "flag 1 with no inputs and no outputs is dropped with no score");
+    assert!(msgs.is_empty(), "flag 1 with no inputs and no outputs is dropped silently");
+    let witness_flag_one_out = [2, 0, 0, 0, 0, 1, 0, 1, 232, 3, 0, 0, 0, 0, 0, 0, 1, 81, 0, 0, 0, 0];
+    let (follow, msgs) =
+        send_cmpct_raw_first_prefill(hub, child_hsi(1, &[0]), &witness_flag_one_out, true).await;
+    assert_eq!(follow.ban_score, 0, "flag 1 with no inputs is dropped with no score");
+    assert!(msgs.is_empty(), "flag 1 with no inputs is dropped silently, got {} messages", msgs.len());
+}
+
+/// `hsi`'s header and short ids as `cmpctblock` payload bytes on a live
+/// session, with `raw` as prefill 0 and `hsi`'s coinbase as prefill 1.
+async fn send_cmpct_raw_first_prefill(
+    hub: &rbitcoin_net::chain::ChainHub,
+    hsi: HeaderAndShortIds,
+    raw: &[u8],
+    requested: bool,
+) -> (PeerFollowState, Vec<NetworkMessage>) {
     let mut payload = bitcoin::consensus::serialize(&HeaderAndShortIds {
         prefilled_txs: vec![],
-        ..with_coinbase.clone()
+        ..hsi.clone()
     });
     assert_eq!(payload.pop(), Some(0), "the prefilled count is the last byte");
     payload.extend_from_slice(&[2, 0]);
-    // Core reads an empty vin, then flags 0, and leaves vout empty: IsNull.
-    payload.extend_from_slice(&[2, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    payload.extend_from_slice(raw);
     payload.push(0);
-    payload.extend(bitcoin::consensus::serialize(&with_coinbase.prefilled_txs[0].tx));
+    payload.extend(bitcoin::consensus::serialize(&hsi.prefilled_txs[0].tx));
     let peers = rbitcoin_net::peers::PeerHub::new();
     let session = live_peer(&peers, 18631, 71, true);
-    let (out_tx, _out_rx) = mpsc::unbounded_channel();
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
     let mut follow = hb_follow();
+    if requested {
+        follow.requested_blocks.insert(hsi.header.block_hash());
+    }
     handle_peer_frame(
         FramedMessage {
             magic: Magic::from(Network::Regtest),
@@ -1177,10 +1206,7 @@ async fn tip_announce_invalid_compact_disconnects() {
     )
     .await
     .unwrap();
-    assert!(
-        follow.ban_score >= BAN_SCORE_THRESHOLD,
-        "a prefilled null tx on the wire must disconnect"
-    );
+    (follow, take_msgs(&mut out_rx))
 }
 
 /// One `cmpctblock` on a fresh follow state. `requested` marks the block as
