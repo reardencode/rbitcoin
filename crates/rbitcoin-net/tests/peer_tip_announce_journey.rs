@@ -1024,7 +1024,10 @@ async fn tip_announce_far_compact_is_header_only() {
 }
 
 /// Same-hash cached invalid stays connected. A child of a cached-invalid
-/// parent disconnects. An out-of-range prefilled index disconnects.
+/// parent disconnects. Every Core `InitData` invalid shape disconnects,
+/// requested or unsolicited: an out-of-range prefilled index, no txs at all,
+/// more txs than `MAX_BLOCK_TX_COUNT`, and a prefilled index past 16 bits.
+/// Exactly `MAX_BLOCK_TX_COUNT` stays connected and asks for its txs.
 #[tokio::test]
 async fn tip_announce_invalid_compact_disconnects() {
     let (_dir, hub) = open_tip_announce_hub("tip-invalid-compact-disconnects");
@@ -1099,6 +1102,77 @@ async fn tip_announce_invalid_compact_disconnects() {
         follow.ban_score >= BAN_SCORE_THRESHOLD,
         "out-of-range prefilled index must disconnect"
     );
+
+    let cap = rbitcoin_consensus::MAX_BLOCK_TX_COUNT;
+    let zero = bitcoin::bip152::ShortId::from([0u8; 6]);
+    let mut offset = 100u32;
+    let mut child_hsi = |short_n: usize, prefill_idx: &[u16]| {
+        offset += 1;
+        let child = mine_child(hub, offset, vec![]);
+        HeaderAndShortIds {
+            header: child.header,
+            nonce: 0,
+            short_ids: vec![zero; short_n],
+            prefilled_txs: prefill_idx
+                .iter()
+                .map(|&idx| PrefilledTransaction {
+                    idx,
+                    tx: child.txdata[0].clone(),
+                })
+                .collect(),
+        }
+    };
+    for requested in [true, false] {
+        let path = if requested { "requested" } else { "unsolicited tip child" };
+        let (follow, _) = send_cmpct_once(hub, child_hsi(0, &[]), requested).await;
+        assert!(
+            follow.ban_score >= BAN_SCORE_THRESHOLD,
+            "{path}: no short ids and no prefilled txs must disconnect"
+        );
+        let (follow, _) = send_cmpct_once(hub, child_hsi(cap, &[0]), requested).await;
+        assert!(
+            follow.ban_score >= BAN_SCORE_THRESHOLD,
+            "{path}: one tx above MAX_BLOCK_TX_COUNT must disconnect"
+        );
+        let (follow, msgs) = send_cmpct_once(hub, child_hsi(cap - 1, &[0]), requested).await;
+        assert_eq!(follow.ban_score, 0, "{path}: exactly MAX_BLOCK_TX_COUNT stays connected");
+        assert!(
+            msgs.iter().any(|m| matches!(m, NetworkMessage::GetBlockTxn(_))),
+            "{path}: a compact block at the cap still asks for its missing txs"
+        );
+    }
+    let past_u16 = usize::from(u16::MAX) + 1;
+    let (follow, _) = send_cmpct_once(hub, child_hsi(past_u16, &[0, u16::MAX]), true).await;
+    assert!(
+        follow.ban_score >= BAN_SCORE_THRESHOLD,
+        "a prefilled index past 16 bits must disconnect"
+    );
+}
+
+/// One `cmpctblock` on a fresh follow state. `requested` marks the block as
+/// asked for; otherwise it arrives unsolicited.
+async fn send_cmpct_once(
+    hub: &rbitcoin_net::chain::ChainHub,
+    hsi: bitcoin::bip152::HeaderAndShortIds,
+    requested: bool,
+) -> (PeerFollowState, Vec<NetworkMessage>) {
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let mut follow = hb_follow();
+    if requested {
+        follow.requested_blocks.insert(hsi.header.block_hash());
+    }
+    handle_peer_frame(
+        frame_for(NetworkMessage::CmpctBlock(CmpctBlock {
+            compact_block: hsi,
+        })),
+        hub,
+        &out_tx,
+        &mut follow,
+        None,
+    )
+    .await
+    .unwrap();
+    (follow, take_msgs(&mut out_rx))
 }
 
 /// First merkle-mutated unique fill asks for the block and does not
