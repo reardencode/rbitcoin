@@ -3432,6 +3432,19 @@ async fn assert_session_answers(raw: &mut V2PlainSession, nonce: u64, why: &str)
     assert!(matches!(pong, Ok(true)), "{why}: {pong:?}");
 }
 
+/// The session is listed before it sends its handshake ping. A clock jump
+/// that lands first stamps that ping at the jumped time, so wait for it.
+async fn wait_ping_outstanding(sess: &rbitcoin_net::peers::LivePeer) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while sess.ping_nonce_sent.load(Ordering::Relaxed) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the session never sent its ping"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 async fn session_closes(raw: &mut V2PlainSession) -> bool {
     tokio::time::timeout(Duration::from_secs(10), async {
         while next_peer_msg(raw).await.is_ok() {}
@@ -3446,6 +3459,7 @@ async fn session_closes(raw: &mut V2PlainSession) -> bool {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ping_timeout_waits_while_a_block_is_in_flight() {
     let (mut t, _) = serve_with_open_ask("ping-inflight").await;
+    wait_ping_outstanding(&t.clients[0].1).await;
     let now = t.node.peers.now_secs();
     t.node
         .peers
@@ -3466,6 +3480,7 @@ async fn ping_timeout_applies_a_minute_after_the_last_block() {
     let height = t.node.hub.tip_height().unwrap();
     let block = rbitcoin_consensus::mine_empty_regtest(tip.block_hash(), tip.time + 1, height + 1);
     let hash = announce_and_wait_for_ask(&mut t, block.header).await;
+    wait_ping_outstanding(&t.clients[0].1).await;
     let now = t.node.peers.now_secs();
     t.node.peers.set_mock_now(now + PING_TIMEOUT_SECS + 1);
     let (raw, _) = &mut t.clients[0];
@@ -3505,6 +3520,7 @@ async fn ping_timeout_applies_a_minute_after_the_last_block() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ping_timeout_without_blocks_in_flight_is_twenty_minutes() {
     let mut t = paused_serve("ping-idle", 1, &["/rbitcoin:test(idle)/"]).await;
+    wait_ping_outstanding(&t.clients[0].1).await;
     let now = t.node.peers.now_secs();
     t.node.peers.set_mock_now(now + PING_TIMEOUT_SECS + 1);
     let (raw, _) = &mut t.clients[0];
