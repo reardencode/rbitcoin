@@ -331,6 +331,87 @@ fn select_block_txids_empty_parent_before_child_and_weight_cap() {
     );
 }
 
+/// Base-fee chunking merges a paying parent with a hotter child. A negative
+/// `prioritisetransaction` on the child splits that chunk: the parent stays
+/// in the template and `chunk_of` reports the parent's own modified fee.
+/// A positive delta on a cheap child does the reverse and reports one chunk.
+#[test]
+fn modified_fee_rechunks_parent_and_child() {
+    let mut g = TxGraph::new();
+    let parent = spend_op([0x51u8; 32], 0, 40_000);
+    let pid = parent.compute_txid();
+    let child = make_tx(Some((pid, 0)), 1, 0x52);
+    let cid = child.compute_txid();
+    g.insert(entry_for(&parent, 1_000, 0), &parent);
+    g.insert(entry_for(&child, 50_000, 1), &child);
+    assert_eq!(
+        g.cluster_of(&pid).unwrap().chunks.len(),
+        1,
+        "base fees merge the paying parent with the hotter child"
+    );
+    let drop = |id: Txid| {
+        if id == cid {
+            -(50_000 + 1_000 + 1)
+        } else {
+            0
+        }
+    };
+    assert_eq!(
+        select_ids(&g, budget(TxGraph::template_tx_weight()), drop),
+        vec![pid],
+        "a negative child delta drops the child and keeps the parent"
+    );
+    let (fee, weight, txs) = g.chunk_of(&pid, drop).unwrap();
+    assert_eq!(txs, vec![pid]);
+    assert_eq!(fee, 1_000);
+    assert_eq!(weight, parent.weight().to_wu());
+    let (cfee, _, ctxs) = g.chunk_of(&cid, drop).unwrap();
+    assert_eq!(ctxs, vec![cid]);
+    assert_eq!(cfee, 50_000 - (50_000 + 1_000 + 1));
+
+    let mut g = TxGraph::new();
+    let parent = spend_op([0x71u8; 32], 0, 40_000);
+    let pid = parent.compute_txid();
+    let child = make_tx(Some((pid, 0)), 1, 0x72);
+    let cid = child.compute_txid();
+    g.insert(entry_for(&parent, 0, 0), &parent);
+    g.insert(entry_for(&child, 100_000, 1), &child);
+    let floor = SelectBudget {
+        min_sat_kvb: 1_000,
+        ..budget(TxGraph::template_tx_weight())
+    };
+    assert_eq!(select_ids(&g, floor, |_| 0), vec![pid, cid]);
+    let drop = |id: Txid| if id == cid { -100_001 } else { 0 };
+    assert_eq!(
+        select_ids(&g, floor, drop),
+        Vec::<Txid>::new(),
+        "a deprioritised child no longer carries a parent under the floor"
+    );
+
+    let mut g = TxGraph::new();
+    let parent = spend_op([0x61u8; 32], 0, 40_000);
+    let pid = parent.compute_txid();
+    let child = make_tx(Some((pid, 0)), 1, 0x62);
+    let cid = child.compute_txid();
+    let rival = spend_op([0x63u8; 32], 0, 30_000);
+    let rid = rival.compute_txid();
+    g.insert(entry_for(&parent, 1_000, 0), &parent);
+    g.insert(entry_for(&child, 100, 1), &child);
+    g.insert(entry_for(&rival, 5_000, 2), &rival);
+    let alone = select_ids(&g, budget(TxGraph::template_tx_weight()), |_| 0);
+    assert_eq!(
+        alone.first().copied(),
+        Some(rid),
+        "without a delta the rival outranks the parent: {alone:?}"
+    );
+    let boost = |id: Txid| if id == cid { 80_000 } else { 0 };
+    let picked = select_ids(&g, budget(TxGraph::template_tx_weight()), boost);
+    assert_eq!(picked[..2], [pid, cid]);
+    let (fee, _, txs) = g.chunk_of(&pid, boost).unwrap();
+    assert_eq!(txs, vec![pid, cid]);
+    assert_eq!(fee, 1_000 + 100 + 80_000);
+}
+
 /// Core `TestChunkBlockLimits`: a chunk that would overflow weight is
 /// skipped and later, smaller chunks still fill the block.
 #[test]

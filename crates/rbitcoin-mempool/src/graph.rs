@@ -109,6 +109,14 @@ impl Chunk {
     }
 }
 
+fn sort_chunks_best_first(chunks: &mut [Chunk]) {
+    chunks.sort_by(|a, b| {
+        b.fee_rate_sat_per_kvb()
+            .cmp(&a.fee_rate_sat_per_kvb())
+            .then_with(|| b.fee_sat.cmp(&a.fee_sat))
+    });
+}
+
 /// Frontier feerate from a **best-first** chunk list (no graph walk).
 ///
 /// Used by fee snapshot refresh so multi-target estimates share one linearize.
@@ -541,16 +549,20 @@ impl TxGraph {
         fee.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
     }
 
-    /// Chunk containing `txid` (mining linearization), with modified chunk fee.
+    /// Chunk containing `txid` after linearising on `base + delta`.
+    ///
+    /// The fee is that chunk's signed modified fee, so a deprioritised child
+    /// is its own chunk and does not change its parent's fee.
     pub fn chunk_of(
         &self,
         txid: &Txid,
         delta: impl Fn(Txid) -> i64,
     ) -> Option<(i64, u64, Vec<Txid>)> {
-        let c = self.cluster_of(txid)?;
+        let delta = &delta;
+        let c = self.cluster_of_delta(txid, delta)?;
         for ch in c.chunks {
             if ch.txids.contains(txid) {
-                let fee = self.set_modified_fee(&ch.txids.iter().copied().collect(), &delta);
+                let fee = self.set_modified_fee(&ch.txids.iter().copied().collect(), delta);
                 return Some((fee, ch.weight, ch.txids));
             }
         }
@@ -800,7 +812,7 @@ impl TxGraph {
     }
 
     /// Connected component containing `txid` (undirected parent/child).
-    pub fn cluster_of(&self, txid: &Txid) -> Option<Cluster> {
+    fn component_members(&self, txid: &Txid) -> Option<(BTreeSet<Txid>, u64)> {
         if !self.entries.contains_key(txid) {
             return None;
         }
@@ -817,14 +829,19 @@ impl TxGraph {
             }
         }
         let total_weight = self.raw_weight_of(&members);
+        Some((members, total_weight))
+    }
+
+    /// Connected component containing `txid`, chunked on base fee.
+    pub fn cluster_of(&self, txid: &Txid) -> Option<Cluster> {
+        let (members, total_weight) = self.component_members(txid)?;
         self.cluster_from_members(members, total_weight, |_| 0)
     }
 
     /// Same as [`Self::cluster_of`] ranking/chunking by `base_fee + delta(txid)`.
-    pub fn cluster_of_delta(&self, txid: &Txid, delta: impl Fn(Txid) -> i64) -> Option<Cluster> {
-        let c = self.cluster_of(txid)?;
-        let total_weight = c.total_weight;
-        self.cluster_from_members(c.members, total_weight, delta)
+    pub fn cluster_of_delta(&self, txid: &Txid, delta: &impl Fn(Txid) -> i64) -> Option<Cluster> {
+        let (members, total_weight) = self.component_members(txid)?;
+        self.cluster_from_members(members, total_weight, delta)
     }
 
     #[doc(hidden)]
@@ -1001,12 +1018,53 @@ impl TxGraph {
             }
             chunks.extend(c.chunks);
         }
-        chunks.sort_by(|a, b| {
-            b.fee_rate_sat_per_kvb()
-                .cmp(&a.fee_rate_sat_per_kvb())
-                .then_with(|| b.fee_sat.cmp(&a.fee_sat))
-        });
+        sort_chunks_best_first(&mut chunks);
         *self.chunk_cache.lock().unwrap_or_else(|p| p.into_inner()) = Some(chunks.clone());
+        chunks
+    }
+
+    /// Mining chunks under `prioritisetransaction` deltas.
+    ///
+    /// No nonzero delta reuses [`Self::mining_chunks_best_first`]. A cluster
+    /// with a nonzero delta is linearised on `base + delta`; every other
+    /// cluster keeps its cached base-fee chunk. Fee estimation keeps reading
+    /// the unmodified cache.
+    pub fn mining_chunks_for_delta(&self, delta: &impl Fn(Txid) -> i64) -> Vec<Chunk> {
+        let mut pending: Vec<Txid> = self
+            .entries
+            .keys()
+            .copied()
+            .filter(|id| delta(*id) != 0)
+            .collect();
+        if pending.is_empty() {
+            return self.mining_chunks_best_first();
+        }
+        let mut touched = HashSet::new();
+        let mut clusters = Vec::new();
+        while let Some(id) = pending.pop() {
+            if touched.contains(&id) {
+                continue;
+            }
+            let Some((members, total_weight)) = self.component_members(&id) else {
+                continue;
+            };
+            for member in &members {
+                touched.insert(*member);
+            }
+            clusters.push((members, total_weight));
+        }
+        let mut chunks: Vec<Chunk> = self
+            .mining_chunks_best_first()
+            .into_iter()
+            .filter(|ch| ch.txids.iter().all(|id| !touched.contains(id)))
+            .collect();
+        for (members, total_weight) in clusters {
+            let Some(cluster) = self.cluster_from_members(members, total_weight, delta) else {
+                continue;
+            };
+            chunks.extend(cluster.chunks);
+        }
+        sort_chunks_best_first(&mut chunks);
         chunks
     }
 
@@ -1020,10 +1078,11 @@ impl TxGraph {
         Self::MAX_BLOCK_WEIGHT.saturating_sub(Self::DEFAULT_BLOCK_RESERVED_WEIGHT)
     }
 
-    /// Mining-order txs that fit `budget` (best chunks first), ranking by
-    /// `base_fee + delta(txid)`.
+    /// Mining-order txs that fit `budget` (best modified-fee chunks first).
     ///
-    /// Empty pool or zero weight → `[]`. A high-feerate child chunk pulls in
+    /// Chunk boundaries are the linearisation on `base_fee + delta`. A pool
+    /// with no nonzero delta reuses the cached base-fee chunks. Empty pool
+    /// or zero weight → `[]`. A high-feerate child chunk pulls in
     /// still-unselected in-mempool ancestors so the block is topological.
     /// A chunk (plus those ancestors) that would exceed
     /// `budget.max_weight_wu` or the block sigop limit is skipped; later
@@ -1050,8 +1109,9 @@ impl TxGraph {
         if max_weight_wu == 0 {
             return Vec::new();
         }
+        let delta = &delta;
         let mut scored: Vec<(u64, u64, Chunk)> = Vec::new();
-        for ch in self.mining_chunks_best_first() {
+        for ch in self.mining_chunks_for_delta(delta) {
             let mut mf = 0i128;
             for t in &ch.txids {
                 let base = self.entries.get(t).map(|e| e.fee_sat as i128).unwrap_or(0);
@@ -1075,10 +1135,6 @@ impl TxGraph {
             }
             let mut add = Vec::new();
             for t in &ch.txids {
-                let base = self.entries.get(t).map(|e| e.fee_sat as i128).unwrap_or(0);
-                if base.saturating_add(i128::from(delta(*t))) < 0 {
-                    continue;
-                }
                 self.collect_selected_with_ancestors(*t, &selected, &mut add);
             }
             if add.is_empty() || add.iter().any(&skip) {

@@ -576,6 +576,7 @@ fn rpc_regtest_mature_chain_ops() {
     chain_ops_big_sigops_cluster(&ctx, &mut cbs);
     chain_ops_prioritise(&ctx, &mut cbs);
     chain_ops_template_orders_rate_then_fee(&ctx, &mut cbs);
+    chain_ops_deprioritised_child_keeps_parent(&ctx, &mut cbs);
     let fee_block = chain_ops_generateblock_and_parent_first(&ctx, &mut cbs);
     chain_ops_proposal_spends(&ctx, &mut cbs);
     chain_ops_submit_repeated_txids(&ctx, &hub, &mut cbs);
@@ -2466,6 +2467,78 @@ fn chain_ops_template_orders_rate_then_fee(ctx: &RpcContext, cbs: &mut TrueCoinb
     let lo_id = send_tx(ctx, &lo);
     let ids = gbt_txids(ctx);
     assert_template_before(&ids, &hi_id, &lo_id);
+    chain_ops_mine_pool_empty(ctx);
+}
+
+/// A hotter child shares the parent's base-fee chunk. Deprioritising that
+/// child below zero splits the chunk: the template and `fees.chunk` keep
+/// the parent, and the diagram drops the negative child.
+fn chain_ops_deprioritised_child_keeps_parent(ctx: &RpcContext, cbs: &mut TrueCoinbases) {
+    assert_eq!(
+        dispatch(ctx, "getrawmempool", vec![]).unwrap(),
+        json!([]),
+        "pool is empty before the deprioritised-child case"
+    );
+    let h = cbs.take();
+    let cb = generated_coinbase_value(ctx, h);
+    let parent_fee = 1_000u64;
+    let child_fee = 50_000u64;
+    let (parent_hex, parent) =
+        spend_generated_coinbase(ctx, h, cb - parent_fee, true_spk());
+    let pid = dispatch(ctx, "sendrawtransaction", vec![json!(parent_hex)])
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+    let cid = send_tx(ctx, &op_true_child(&parent, 0, child_fee, 1));
+    let before = dispatch(ctx, "getmempoolcluster", vec![json!(pid.clone())]).unwrap();
+    assert_eq!(
+        before["chunks"].as_array().unwrap().len(),
+        1,
+        "base fees merge parent and child: {before}"
+    );
+    let delta = -((parent_fee + child_fee + 1) as i64);
+    dispatch(
+        ctx,
+        "prioritisetransaction",
+        vec![json!(cid.clone()), json!(0), json!(delta)],
+    )
+    .unwrap();
+    let ids = gbt_txids(ctx);
+    assert!(
+        ids.iter().any(|t| t == &pid),
+        "paying parent stays in the template: {ids:?}"
+    );
+    assert!(
+        !ids.iter().any(|t| t == &cid),
+        "deprioritised child leaves the template: {ids:?}"
+    );
+    let parent_entry = dispatch(ctx, "getmempoolentry", vec![json!(pid.clone())]).unwrap();
+    assert_eq!(parent_entry["fees"]["chunk"], parent_entry["fees"]["base"]);
+    assert_eq!(parent_entry["chunkweight"], parent_entry["weight"]);
+    let child_entry = dispatch(ctx, "getmempoolentry", vec![json!(cid.clone())]).unwrap();
+    assert!(
+        child_entry["fees"]["chunk"].as_f64().unwrap() < 0.0,
+        "child chunk fee is its own negative modified fee: {child_entry}"
+    );
+    let cluster = dispatch(ctx, "getmempoolcluster", vec![json!(pid.clone())]).unwrap();
+    let chunks = cluster["chunks"].as_array().unwrap();
+    assert_eq!(chunks.len(), 2, "{cluster}");
+    assert_eq!(chunks[0]["txs"], json!([pid]));
+    assert_eq!(chunks[1]["txs"], json!([cid]));
+    assert_eq!(chunks[0]["chunkfee"], parent_entry["fees"]["base"]);
+    assert!(chunks[1]["chunkfee"].as_f64().unwrap() < 0.0, "{cluster}");
+    let diagram = dispatch(ctx, "getmempoolfeeratediagram", vec![]).unwrap();
+    let points = diagram.as_array().unwrap();
+    assert_eq!(points.len(), 1, "{diagram}");
+    assert_eq!(points[0]["fee"], parent_entry["fees"]["base"]);
+    assert_eq!(points[0]["weight"], parent_entry["weight"]);
+    dispatch(
+        ctx,
+        "prioritisetransaction",
+        vec![json!(cid), json!(0), json!(-delta)],
+    )
+    .unwrap();
     chain_ops_mine_pool_empty(ctx);
 }
 
