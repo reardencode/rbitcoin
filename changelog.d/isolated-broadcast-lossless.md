@@ -6,6 +6,8 @@ Fixed
   peer's handshake. Past 32 waiting, the oldest were dropped without a log
   line. Standing peers are never told about them, so they never left the
   node. Now every local transaction still in the mempool is sent once, in
-  submit order. A transaction that leaves the mempool first is not sent.
+  submit order. A transaction that leaves the mempool first is not sent,
+  and one that leaves while its first peer is being reached is not sent
+  to the second.
   The sender logs a warning when 32 or more wait, and an info line for
   each peer that took a transaction.

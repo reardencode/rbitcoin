@@ -80,6 +80,9 @@ pub async fn send_tx_isolated_timed(
     Ok(())
 }
 
+/// Send `tx` one-shot to each target while `in_pool()` holds. It is asked
+/// before every dial: one send can take [`HANDSHAKE_TIMEOUT`], and a tx that
+/// left the mempool meanwhile must not reach the next peer.
 pub async fn isolated_broadcast_known_tx(
     dialer: &Dialer,
     addrman: &Mutex<AddrMan>,
@@ -87,6 +90,7 @@ pub async fn isolated_broadcast_known_tx(
     user_agent: &str,
     txid: bitcoin::Txid,
     tx: Transaction,
+    in_pool: impl Fn() -> bool,
 ) {
     let targets = {
         let am = addrman.lock().unwrap_or_else(|e| e.into_inner());
@@ -97,6 +101,10 @@ pub async fn isolated_broadcast_known_tx(
         return;
     }
     for t in targets {
+        if !in_pool() {
+            rbitcoin_log::info!("isolated broadcast {txid}: left the mempool, not sent to {t}");
+            return;
+        }
         match send_tx_isolated(dialer, t, magic, tx.clone(), user_agent).await {
             Ok(()) => rbitcoin_log::info!("isolated broadcast {txid} to {t}: sent"),
             Err(e) => rbitcoin_log::warn!("isolated broadcast {txid} to {t}: {e}"),
@@ -140,7 +148,11 @@ pub fn spawn_isolated_broadcast_loop(
             let Some(tx) = tx else {
                 continue;
             };
-            isolated_broadcast_known_tx(&dialer, &addrman, magic, &user_agent, txid, tx).await;
+            // `unindex_txid` drops the local-origin entry on every removal,
+            // and this check never waits on the mempool lock.
+            let in_pool = || mp.is_local_origin(&txid);
+            isolated_broadcast_known_tx(&dialer, &addrman, magic, &user_agent, txid, tx, in_pool)
+                .await;
         }
     })
 }

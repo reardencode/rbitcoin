@@ -539,6 +539,7 @@ async fn ephemeral_broadcast_known_tx_one_shot() {
         "/rbitcoin:test/",
         tx.compute_txid(),
         tx,
+        || true,
     )
     .await;
     assert!(inbound.await.unwrap(), "one-shot reached the peer");
@@ -562,6 +563,7 @@ async fn onion_only_isolated_broadcast_never_reaches_clearnet() {
         "/rbitcoin:test/",
         tx.compute_txid(),
         tx,
+        || true,
     )
     .await;
     for listener in [clearnet, onion_proxy] {
