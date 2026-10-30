@@ -1295,3 +1295,47 @@ async fn template_target_follows_the_regtest_pow_overlay() {
 
     tp.shutdown().await;
 }
+
+/// The template pinned the overlay bits for this prev hash. A timestamp past
+/// the min-difficulty gap needs the pow-limit bits, and `nBits` is inside the
+/// hash, so the solution is dropped before `accept_block`.
+#[tokio::test(flavor = "multi_thread")]
+async fn submit_solution_past_the_min_diff_gap_is_dropped() {
+    use template_distribution_sv2::MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS;
+
+    const OVERLAY: u32 = 0x200f_ffff;
+    let mut params = ChainParams::regtest();
+    params.apply_regtest_pow_bits(OVERLAY).unwrap();
+    let tc = padded_chain_with("sv2-pow-gap-drop", 0, params);
+    tc.chain.set_prefill_compact(true);
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id,
+        version,
+        mut header,
+        coinbase,
+    } = first_template(&tc).await;
+    assert_eq!(header.bits.to_consensus(), OVERLAY);
+    let tip = header.prev_blockhash;
+    let spacing = tc.chain.params.btc.pow_target_spacing as u32;
+    header.time = header.time.saturating_add(spacing.saturating_mul(2) + 1);
+    while header.validate_pow(header.target()).is_err() {
+        header.nonce = header.nonce.wrapping_add(1);
+    }
+    c.submit_solution(template_id, version, header.time, header.nonce, &coinbase)
+        .await
+        .unwrap();
+    c.request_transaction_data(template_id).await.unwrap();
+    let f = recv_in_time(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS);
+    assert_eq!(tc.chain.tip_header().unwrap().block_hash(), tip);
+    assert_eq!(
+        tc.chain.cmpct_prefill_indexes(&header.block_hash()),
+        None,
+        "a gap timestamp must not reach accept_block"
+    );
+    tc.chain.set_prefill_compact(false);
+
+    tp.shutdown().await;
+}
