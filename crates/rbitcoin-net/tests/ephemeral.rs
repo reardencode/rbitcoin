@@ -296,13 +296,13 @@ async fn ephemeral_broadcast() {
         .unwrap()
         .txdata[0]
         .compute_txid();
-    let mut fan = spend(OutPoint { txid: cb2, vout: 0 }, 100_000_000);
-    fan.output = vec![fan.output[0].clone(); BURST as usize + 5];
+    let mut fan = spend(OutPoint { txid: cb2, vout: 0 }, 90_000_000);
+    fan.output = vec![fan.output[0].clone(); BURST as usize + 9];
     let fan_id = fan.compute_txid();
     hub.generate_to_script(1, ScriptBuf::from_bytes(vec![0x51]), vec![fan])
         .expect("fan-out block");
-    let locals: Vec<Transaction> = (0..BURST + 5)
-        .map(|vout| spend(OutPoint { txid: fan_id, vout }, 99_990_000))
+    let locals: Vec<Transaction> = (0..BURST + 9)
+        .map(|vout| spend(OutPoint { txid: fan_id, vout }, 89_990_000))
         .collect();
     let submit = |tx: &Transaction| {
         mp.accept_tx(tx).expect("local");
@@ -405,6 +405,77 @@ async fn ephemeral_broadcast() {
         [next_sent(&mut got_rx).await, next_sent(&mut got_rx).await],
         [kept.compute_txid(); 2],
         "a mined tx is not dialed to its second peer; a live one reaches both"
+    );
+    sender.abort();
+    recipient.abort();
+
+    // A mempool write held across the loop's fetch (a block connect holds
+    // it through persist) delays a local tx; it does not drop it. A marked
+    // txid that was never admitted is read as gone and skipped once.
+    let socks = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = socks.local_addr().unwrap();
+    let mut am = AddrMan::new();
+    am.add(SocketAddr::from((Ipv4Addr::new(10, 0, 0, 1), 18444)));
+    let (busy_tx, busy_rx) = tokio::sync::oneshot::channel();
+    let (gate_tx, gate_rx) = tokio::sync::oneshot::channel();
+    let (got_tx, mut got_rx) = mpsc::unbounded_channel();
+    let recipient = tokio::spawn(gated_recipient(socks, busy_tx, gate_rx, got_tx));
+    let sender = spawn_isolated_broadcast_loop(
+        mp.clone(),
+        Dialer::socks(proxy, true),
+        Arc::new(Mutex::new(am)),
+        Magic::REGTEST,
+        "/rbitcoin:test/".into(),
+    );
+    let [first, held, after, idle] = [5, 6, 7, 8].map(|i| &locals[BURST as usize + i]);
+    let never_admitted = spend(
+        OutPoint {
+            txid: fan_id,
+            vout: 999,
+        },
+        1,
+    )
+    .compute_txid();
+    submit(first);
+    tokio::time::timeout(Duration::from_secs(30), busy_rx)
+        .await
+        .expect("the first send reaches the recipient")
+        .unwrap();
+    mp.mark_local_origin(never_admitted);
+    submit(held);
+    submit(after);
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn({
+        let mp = mp.clone();
+        move || {
+            let _write = mp.lock_write();
+            held_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }
+    });
+    held_rx.recv().unwrap();
+    gate_tx.send(()).unwrap();
+    assert_eq!(next_sent(&mut got_rx).await, first.compute_txid());
+    // Only how long the old `try_read` path has to give up. The loop under
+    // test sends `held` whatever this is.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    assert_eq!(
+        [next_sent(&mut got_rx).await, next_sent(&mut got_rx).await],
+        [held.compute_txid(), after.compute_txid()],
+        "a busy mempool write delays the next local txs; it does not drop them"
+    );
+    submit(idle);
+    assert_eq!(
+        next_sent(&mut got_rx).await,
+        idle.compute_txid(),
+        "the never-admitted txid was skipped once and the loop went idle"
+    );
+    assert!(
+        mp.is_local_origin(&never_admitted),
+        "a skipped txid stays marked, so it is not queued again"
     );
     sender.abort();
     recipient.abort();
