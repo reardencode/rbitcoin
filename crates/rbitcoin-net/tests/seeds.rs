@@ -537,8 +537,8 @@ fn peers_file_roundtrip_preserves_flags() {
 fn seed_lookup_names_x_filter_before_unfiltered() {
     let names = seed_lookup_names(Network::Mainnet);
     assert!(!names.is_empty());
-    assert_eq!(names[0][0], "x809.seed.bitcoin.sipa.be");
-    assert_eq!(names[0][1], "seed.bitcoin.sipa.be");
+    assert_eq!(names[0][0], "x809.dnsseed.bluematt.me");
+    assert_eq!(names[0][1], "dnsseed.bluematt.me");
     for pair in &names {
         assert_eq!(pair.len(), 2);
         assert!(pair[0].starts_with("x809."), "{pair:?}");
@@ -547,10 +547,16 @@ fn seed_lookup_names_x_filter_before_unfiltered() {
     let signet = seed_lookup_names(Network::Signet);
     assert_eq!(
         signet,
-        vec![vec![
-            "x809.seed.signet.bitcoin.sprovoost.nl".to_string(),
-            "seed.signet.bitcoin.sprovoost.nl".to_string(),
-        ]]
+        vec![
+            vec![
+                "x809.seed.signet.bitcoin.sprovoost.nl".to_string(),
+                "seed.signet.bitcoin.sprovoost.nl".to_string(),
+            ],
+            vec![
+                "x809.seed.signet.achownodes.xyz".to_string(),
+                "seed.signet.achownodes.xyz".to_string(),
+            ],
+        ]
     );
     assert!(seed_lookup_names(Network::Regtest).is_empty());
 }
@@ -593,18 +599,10 @@ fn network_ports_and_seed_lists() {
     assert_eq!(default_rpc_port(Network::Testnet), 18332);
     assert_eq!(default_rpc_port(Network::Signet), 38332);
     assert_eq!(default_rpc_port(Network::Regtest), 18443);
-    assert!(!dns_seeds(Network::Mainnet).is_empty());
-    assert!(!dns_seeds(Network::Testnet).is_empty());
-    assert_eq!(dns_seeds(Network::Signet).len(), 1);
     assert!(dns_seeds(Network::Regtest).is_empty());
-    assert!(!fixed_seed_hosts(Network::Mainnet).is_empty());
-    assert!(!fixed_seed_hosts(Network::Testnet).is_empty());
-    assert!(!fixed_seed_hosts(Network::Signet).is_empty());
-    assert!(fixed_seed_hosts(Network::Regtest).is_empty());
+    assert!(fixed_seeds(Network::Regtest).is_empty());
     // Regtest has no seeds → resolve paths stay empty (no network I/O).
     assert!(resolve_dns_seeds(Network::Regtest).is_empty());
-    assert!(resolve_fixed_seeds(Network::Regtest).is_empty());
-    assert!(resolve_all_seeds(Network::Regtest).is_empty());
 }
 
 #[test]
@@ -975,5 +973,149 @@ fn full_clearnet_batch_does_not_reserve_an_unreachable_overlay() {
     assert!(
         got.iter().all(|a| matches!(a, NetAddr::Ip(_))),
         "an onion this process cannot dial must not take a clearnet slot: {got:?}"
+    );
+}
+
+#[test]
+fn dns_seeds_match_core_v32() {
+    assert_eq!(
+        dns_seeds(Network::Mainnet),
+        [
+            "dnsseed.bluematt.me",
+            "seed.bitcoin.jonasschnelli.ch",
+            "seed.btc.petertodd.net",
+            "seed.bitcoin.sprovoost.nl",
+            "dnsseed.emzy.de",
+            "seed.bitcoin.wiz.biz",
+            "seed.mainnet.achownodes.xyz",
+        ]
+    );
+    assert_eq!(
+        dns_seeds(Network::Testnet),
+        [
+            "testnet-seed.bitcoin.jonasschnelli.ch",
+            "seed.tbtc.petertodd.net",
+            "testnet-seed.bluematt.me",
+            "seed.testnet.achownodes.xyz",
+        ]
+    );
+    assert_eq!(
+        dns_seeds(Network::Signet),
+        [
+            "seed.signet.bitcoin.sprovoost.nl",
+            "seed.signet.achownodes.xyz",
+        ]
+    );
+    let removed = [
+        "seed.bitcoin.sipa.be",
+        "seed.testnet.bitcoin.sprovoost.nl",
+        "seed.bitcoinstats.com",
+        "dnsseed.bitcoin.dashjr-list-of-p2p-nodes.us",
+        "testnet-seed.bitcoin.schildbach.de",
+    ];
+    for net in [Network::Mainnet, Network::Testnet, Network::Signet] {
+        for host in dns_seeds(net) {
+            assert!(!removed.contains(host), "{net}: Core dropped {host}");
+        }
+    }
+}
+
+/// Counts in [`OnlyNet::ALL`] order: ipv4, ipv6, onion, i2p, cjdns.
+fn per_net(addrs: impl IntoIterator<Item = NetAddr>) -> [usize; 5] {
+    let mut n = [0usize; 5];
+    for a in addrs {
+        let i = OnlyNet::ALL
+            .iter()
+            .position(|net| *net == OnlyNet::of(a))
+            .unwrap();
+        n[i] += 1;
+    }
+    n
+}
+
+fn net_addr(s: &str) -> NetAddr {
+    s.parse().unwrap()
+}
+
+#[test]
+fn fixed_seeds_are_core_v32_tables() {
+    let main = fixed_seeds(Network::Mainnet);
+    assert_eq!(per_net(main.iter().copied()), [512, 512, 512, 512, 9]);
+    for want in [
+        "3.11.75.34:8333",
+        "[2001:1284:f502:9104:419d:b3ea:216:61eb]:8333",
+        "24yjwaf2ni6wz44pmqpw3jyjhksoko7wxzelp6uyep2pdlgb5epbnoqd.onion:8333",
+        "22qtnewwrxin6r77r4h4qttospl5rkmoljpbuedx4w33virx46sq.b32.i2p:0",
+        "[fc10:efa7:ca6:1548:f8c:6bb9:1cc4:63ae]:8333",
+    ] {
+        assert!(
+            main.contains(&net_addr(want)),
+            "mainnet fixed seeds lack {want}"
+        );
+    }
+    assert!(
+        main.iter()
+            .all(|a| a.port() == 8333 || matches!(a, NetAddr::I2p { port: 0, .. })),
+        "a mainnet fixed seed has a port Core does not use"
+    );
+    let test = fixed_seeds(Network::Testnet);
+    assert_eq!(per_net(test.iter().copied()), [67, 37, 76, 6, 4]);
+    assert!(test.contains(&net_addr("3.253.163.14:18333")));
+    let signet = fixed_seeds(Network::Signet);
+    assert_eq!(per_net(signet.iter().copied()), [75, 57, 72, 7, 3]);
+    assert!(signet.contains(&net_addr(
+        "2uqd5pbaxn26o7fl7nqtm2khetqocislppxtxrpqg55wtbcqdrf2y5qd.onion:38333"
+    )));
+    assert!(fixed_seeds(Network::Regtest).is_empty());
+}
+
+#[test]
+fn fixed_seeds_fill_only_reachable_nets_the_book_lacks() {
+    let mut clear = AddrMan::new();
+    assert_eq!(clear.add_fixed_seeds(Network::Mainnet), 1024);
+    assert_eq!(
+        per_net(clear.dial_order().iter().copied()),
+        [512, 512, 0, 0, 0]
+    );
+
+    let mut all = AddrMan::new();
+    all.set_onion_reachable(true);
+    all.set_i2p_reachable(true);
+    all.set_cjdns_reachable(true);
+    assert_eq!(all.add_fixed_seeds(Network::Mainnet), 2057);
+
+    let mut onion_no_dns = AddrMan::new();
+    onion_no_dns.set_onion_reachable(true);
+    assert_eq!(
+        onion_no_dns.add_fixed_seeds(Network::Mainnet),
+        1536,
+        "`--onion` alone keeps clearnet reachable (direct), as in Core"
+    );
+
+    let mut dns_answered = AddrMan::new();
+    dns_answered.set_onion_reachable(true);
+    let v6: SocketAddr = "[2001:4860::1]:8333".parse().unwrap();
+    dns_answered.inject([addr(1), v6]);
+    assert_eq!(dns_answered.add_fixed_seeds(Network::Mainnet), 512);
+    assert_eq!(
+        per_net(dns_answered.dial_order().iter().copied()),
+        [1, 1, 512, 0, 0],
+        "`--onion` with a DNS answer adds onion seeds and no clearnet seed"
+    );
+    assert_eq!(dns_answered.add_fixed_seeds(Network::Mainnet), 0);
+}
+
+#[test]
+fn onion_only_fixed_seed_fallback_never_offers_clearnet() {
+    let mut am = AddrMan::new();
+    am.set_onion_reachable(true);
+    am.set_only_net(vec![OnlyNet::Onion]);
+    assert_eq!(am.add_fixed_seeds(Network::Mainnet), 512);
+    assert_eq!(per_net(am.dial_order().iter().copied()), [0, 0, 512, 0, 0]);
+    let got = am.take_dial_candidates_net(16, &HashSet::new(), &[]);
+    assert_eq!(got.len(), 16);
+    assert!(
+        got.iter().all(|a| matches!(a, NetAddr::Onion { .. })),
+        "{got:?}"
     );
 }

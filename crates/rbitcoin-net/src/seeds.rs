@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::asmap::AsMap;
-use crate::netaddr::{NetAddr, OnlyNet};
+use crate::netaddr::{parse_net_addr, NetAddr, OnlyNet};
 use crate::netgroup::{netgroup, select_diverse};
 
 #[doc(hidden)]
@@ -48,38 +48,57 @@ pub fn dns_seed_query_host(seed: &str, services: ServiceFlags) -> String {
 }
 
 /// DNS seed hostnames (resolve at runtime with default port).
+///
+/// Core `vSeeds` in `src/kernel/chainparams.cpp`, in Core's order.
 pub fn dns_seeds(network: Network) -> &'static [&'static str] {
     match network {
         Network::Mainnet => &[
-            "seed.bitcoin.sipa.be",
             "dnsseed.bluematt.me",
-            "dnsseed.bitcoin.dashjr-list-of-p2p-nodes.us",
-            "seed.bitcoinstats.com",
             "seed.bitcoin.jonasschnelli.ch",
             "seed.btc.petertodd.net",
             "seed.bitcoin.sprovoost.nl",
             "dnsseed.emzy.de",
             "seed.bitcoin.wiz.biz",
+            "seed.mainnet.achownodes.xyz",
         ],
         Network::Testnet => &[
             "testnet-seed.bitcoin.jonasschnelli.ch",
             "seed.tbtc.petertodd.net",
             "testnet-seed.bluematt.me",
-            "testnet-seed.bitcoin.schildbach.de",
+            "seed.testnet.achownodes.xyz",
         ],
-        Network::Signet => &["seed.signet.bitcoin.sprovoost.nl"],
+        Network::Signet => &[
+            "seed.signet.bitcoin.sprovoost.nl",
+            "seed.signet.achownodes.xyz",
+        ],
         Network::Regtest => &[],
     }
 }
 
-/// Hard-coded fallback seed addresses (host:port). Sparse; DNS is preferred.
-pub fn fixed_seed_hosts(network: Network) -> &'static [&'static str] {
+/// Core `contrib/seeds/nodes_<net>.txt`, the input to Core's
+/// `chainparamsseeds.h`. Refresh with `scripts/core-fixed-seeds.sh COMMIT`.
+fn fixed_seed_text(network: Network) -> &'static str {
     match network {
-        Network::Mainnet => &["seed.bitcoin.sipa.be:8333", "dnsseed.emzy.de:8333"],
-        Network::Testnet => &["testnet-seed.bitcoin.jonasschnelli.ch:18333"],
-        Network::Signet => &["seed.signet.bitcoin.sprovoost.nl:38333"],
-        Network::Regtest => &[],
+        Network::Mainnet => include_str!("../seeds/nodes_main.txt"),
+        Network::Testnet => include_str!("../seeds/nodes_test.txt"),
+        Network::Signet => include_str!("../seeds/nodes_signet.txt"),
+        Network::Regtest => "",
     }
+}
+
+/// Core's fixed seeds for `network` (IPv4, IPv6, Tor v3, I2P, CJDNS), in
+/// Core's order.
+///
+/// The table stays Core's text so a refresh is a byte copy that diffs
+/// against Core. The parse runs once per start, over about 2,000 lines.
+#[doc(hidden)]
+pub fn fixed_seeds(network: Network) -> Vec<NetAddr> {
+    fixed_seed_text(network)
+        .lines()
+        .map(|line| line.split_once('#').map_or(line, |(addr, _)| addr).trim())
+        .filter(|addr| !addr.is_empty())
+        .map(|addr| parse_net_addr(addr).expect("Core fixed seed parses"))
+        .collect()
 }
 
 /// Default P2P port for a network.
@@ -90,17 +109,6 @@ pub fn default_port(network: Network) -> u16 {
 /// Default JSON-RPC TCP port for a network (Core-matching).
 pub fn default_rpc_port(network: Network) -> u16 {
     network.default_rpc_port()
-}
-
-/// Resolve fixed seed host strings to socket addresses (best-effort).
-pub fn resolve_fixed_seeds(network: Network) -> Vec<SocketAddr> {
-    let mut out = Vec::new();
-    for host in fixed_seed_hosts(network) {
-        if let Ok(iter) = host.to_socket_addrs() {
-            out.extend(iter);
-        }
-    }
-    out
 }
 
 /// Per listed seed: Core `x<hex>.` filter hostname first, then the bare seed.
@@ -155,17 +163,6 @@ pub fn resolve_dns_seeds(network: Network) -> Vec<SocketAddr> {
             if !out.contains(&a) {
                 out.push(a);
             }
-        }
-    }
-    out
-}
-
-/// Resolve DNS + fixed seeds (DNS first, then fixed fallbacks). Deduplicated.
-pub fn resolve_all_seeds(network: Network) -> Vec<SocketAddr> {
-    let mut out = resolve_dns_seeds(network);
-    for a in resolve_fixed_seeds(network) {
-        if !out.contains(&a) {
-            out.push(a);
         }
     }
     out
@@ -342,6 +339,27 @@ impl AddrMan {
             self.add(a);
         }
         self.sort_order_ipv4_first();
+    }
+
+    /// Core's fixed-seed fallback (`ThreadOpenConnections`): add `network`'s
+    /// [`fixed_seeds`] for each net this process can dial that has no row in
+    /// the book. Returns how many rows were added.
+    pub fn add_fixed_seeds(&mut self, network: Network) -> usize {
+        let present: Vec<OnlyNet> = OnlyNet::ALL
+            .into_iter()
+            .filter(|net| self.order.iter().any(|a| OnlyNet::of(*a) == *net))
+            .collect();
+        let mut added = 0;
+        for addr in fixed_seeds(network) {
+            let net = OnlyNet::of(addr);
+            if present.contains(&net) || !self.reachable(net) || self.by_addr.contains_key(&addr) {
+                continue;
+            }
+            self.add_addr(addr);
+            added += 1;
+        }
+        self.sort_order_ipv4_first();
+        added
     }
 
     pub fn set_only_net(&mut self, only: Vec<OnlyNet>) {
