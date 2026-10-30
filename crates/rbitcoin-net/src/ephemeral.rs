@@ -17,10 +17,6 @@ use tokio::task::JoinHandle;
 
 pub const ISOLATED_BROADCAST_PEERS: usize = 2;
 
-/// Local txs waiting behind one send before the loop warns. Each send can
-/// spend [`HANDSHAKE_TIMEOUT`] per peer, so a queue this deep waits minutes.
-pub const ISOLATED_BACKLOG_WARN: usize = 32;
-
 pub fn isolated_broadcast_targets(am: &AddrMan, max: usize) -> Vec<NetAddr> {
     let mut onions = Vec::new();
     let mut ips = Vec::new();
@@ -118,11 +114,14 @@ pub fn spawn_isolated_broadcast_loop(
     if !mp.isolated_broadcast() {
         return tokio::spawn(async {});
     }
+    // Each send can spend `HANDSHAKE_TIMEOUT` per peer, so a queue this deep
+    // waits minutes.
+    const BACKLOG_WARN: usize = 32;
     tokio::spawn(async move {
         let mut warned = false;
         loop {
             let (txid, behind) = mp.next_isolated().await;
-            if behind < ISOLATED_BACKLOG_WARN {
+            if behind < BACKLOG_WARN {
                 warned = false;
             } else if !warned {
                 warned = true;
