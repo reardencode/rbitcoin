@@ -38,7 +38,7 @@ fn need_any_valid_body_download_empty_and_missing_tip_child() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-fn h(n: u32) -> BlockHash {
+pub(crate) fn h(n: u32) -> BlockHash {
     let mut b = [0u8; 32];
     b[0..4].copy_from_slice(&n.to_le_bytes());
     BlockHash::from_byte_array(b)
@@ -71,12 +71,15 @@ pub(crate) fn dummy_slot(id: usize) -> PeerSlot {
         bytes_rx_total: Arc::new(AtomicU64::new(0)),
         rate: Default::default(),
         chain: Default::default(),
+        conn_type: rbitcoin_net::peers::PeerConnType::OutboundFullRelay,
+        block_download_paused_until: None,
+        late_answers: Default::default(),
         alive: true,
         task,
     }
 }
 
-fn plant_work_path(st: &mut IbdWorkState, lo: u32, hi: u32) {
+pub(crate) fn plant_work_path(st: &mut IbdWorkState, lo: u32, hi: u32) {
     for ht in lo..=hi {
         let hash = h(ht);
         st.record_height(hash, ht);
@@ -99,7 +102,7 @@ fn seed_ewma(slot: &mut PeerSlot, bytes_per_sec: u64) {
     slot.rate.progress_ms = progress_ms;
 }
 
-fn wired_slots(n: usize) -> (Vec<PeerSlot>, Vec<mpsc::UnboundedReceiver<PeerCmd>>) {
+pub(crate) fn wired_slots(n: usize) -> (Vec<PeerSlot>, Vec<mpsc::UnboundedReceiver<PeerCmd>>) {
     (0..n)
         .map(|id| {
             let mut slot = dummy_slot(id);
@@ -186,7 +189,7 @@ fn plant_quarter_window(hub: &ChainHub, path_lo: u32) {
     }
 }
 
-fn tmp_hub() -> (rbitcoin_query::testutil::TempDir, ChainHub) {
+pub(crate) fn tmp_hub() -> (rbitcoin_query::testutil::TempDir, ChainHub) {
     rbitcoin_net::chain::tiny_regtest_hub_labeled("assign")
 }
 

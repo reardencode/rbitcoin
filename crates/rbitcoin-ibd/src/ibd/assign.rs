@@ -178,7 +178,9 @@ pub fn prune_satisfied_inflight(
     hub: &ChainHub,
 ) {
     inflight.retain(|h, _| !hub.has_block(h));
+    let now_ms = ibd_mono_ms();
     for s in slots.iter_mut() {
+        s.expire_late_answers(now_ms);
         s.track_retain(|h| !hub.has_block(h));
     }
 }
@@ -242,7 +244,30 @@ pub fn assign_work_ordered(
 ) {
     let t0 = Instant::now();
     let mut issued = 0u64;
-    let alive: Vec<usize> = st.slots.iter().filter(|s| s.alive).map(|s| s.id).collect();
+    let now_secs = hub.clock.now_secs();
+    for s in &mut st.slots {
+        s.resume_block_download_if_due(now_secs);
+    }
+    // A pause only helps while another peer fetches. Once no slot takes
+    // block requests (the others left, or are paused too), waiting out the
+    // cooldown downloads nothing, so every paused peer resumes now: all of
+    // them, not one, so the choice does not depend on slot order.
+    if !st.slots.iter().any(|s| s.takes_block_requests()) {
+        for s in st.slots.iter_mut().filter(|s| s.alive) {
+            if s.block_download_paused_until.take().is_some() {
+                rbitcoin_log::info!(
+                    "ibd: Resuming block downloads from manual peer={}: no other peer takes block requests",
+                    s.id
+                );
+            }
+        }
+    }
+    let alive: Vec<usize> = st
+        .slots
+        .iter()
+        .filter(|s| s.takes_block_requests())
+        .map(|s| s.id)
+        .collect();
     if alive.is_empty() {
         return;
     }

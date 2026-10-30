@@ -816,9 +816,14 @@ pub fn apply_block_framed(
     } = body;
     let wire_bytes = payload.len();
     // Unsolicited wire is not a body we asked for. Drop it before any copy
-    // and before it can move this peer's progress clock.
-    let requested = st.inflight.contains_key(&hash);
-    if !requested {
+    // and before it can move this peer's progress clock. An answer to a
+    // getdata that was withdrawn from this peer is a body, as in Core.
+    let late = st
+        .slots
+        .iter_mut()
+        .find(|s| s.id == peer)
+        .is_some_and(|s| s.note_answer(&hash));
+    if !late && !st.inflight.contains_key(&hash) {
         return;
     }
     note_block_rx(&mut st.slots, peer, wire_bytes);
@@ -1024,7 +1029,7 @@ pub fn apply_notfound(st: &mut IbdWorkState, peer: usize, hashes: Vec<BlockHash>
     let mut freed = Vec::new();
     if let Some(s) = st.slots.iter_mut().find(|s| s.id == peer) {
         for h in &hashes {
-            s.track_remove(h);
+            s.note_answer(h);
             s.chain.note_notfound(*h, super::peer_io::ibd_mono_ms());
             let empty = st
                 .inflight

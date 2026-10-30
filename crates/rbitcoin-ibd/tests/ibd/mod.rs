@@ -9,6 +9,7 @@ mod dial;
 mod events;
 mod exit;
 mod header_walk;
+mod manual_stall;
 mod path;
 mod peer_book_and_config_tests;
 mod peer_chain;

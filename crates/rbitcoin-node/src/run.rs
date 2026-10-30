@@ -2069,6 +2069,7 @@ pub async fn run_ibd_or_skip(
         peers: ibd_shared_peers(node.hub.query.trust_peer(), shared_peers),
         dialer: node.dialer(),
         assign_stop_bytes,
+        connect: pinned.to_vec(),
         ..IbdConfig::default()
     };
     info!(
