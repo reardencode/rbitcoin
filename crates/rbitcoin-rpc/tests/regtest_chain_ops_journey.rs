@@ -95,6 +95,7 @@ fn rpc_regtest_from_genesis() {
     chain_ops_coinbase_script_and_sigops(&ctx, &hub, &p2wpkh);
     chain_ops_submit_tx_shape(&ctx, &hub, &p2wpkh);
     chain_ops_echo_overlap(&ctx);
+    chain_ops_reconsider_invalidated_side_block(&ctx, &hub);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1654,6 +1655,56 @@ fn chain_ops_equal_work_sibling_checkblock(ctx: &RpcContext, hub: &rbitcoin_net:
     assert_eq!(r, "inconclusive", "a valid equal-work sibling is held");
     assert!(!hub.is_block_invalid(&valid.block_hash()));
     assert_eq!(hub.tip_hash(), Some(tip.block_hash()));
+}
+
+/// `invalidateblock` on a held side block keeps the body. `reconsiderblock`
+/// clears the mark. A resubmit is `duplicate`, and a heavier child of that
+/// block becomes the tip.
+fn chain_ops_reconsider_invalidated_side_block(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub) {
+    let tip = hub.tip_header().unwrap();
+    let height = hub.tip_height().unwrap();
+    let op_true = ScriptBuf::from_bytes(vec![0x51]);
+    let side = rbitcoin_consensus::mine_regtest_paying(
+        tip.prev_blockhash,
+        tip.time.saturating_add(20),
+        height,
+        op_true.clone(),
+        vec![],
+    );
+    let side_hash = side.block_hash();
+    assert_ne!(side_hash, tip.block_hash());
+    let first = dispatch(ctx, "submitblock", vec![json!(block_hex(&side))]).unwrap();
+    assert_eq!(first, "inconclusive", "equal-work side block is held");
+    assert_eq!(best_hash(ctx), json!(tip.block_hash().to_string()));
+
+    let hex = json!(side_hash.to_string());
+    dispatch(ctx, "invalidateblock", vec![hex.clone()]).unwrap();
+    let stuck = dispatch(ctx, "submitblock", vec![json!(block_hex(&side))]).unwrap();
+    assert_eq!(stuck, "duplicate-invalid", "the mark rejects a resubmit");
+    assert_eq!(best_hash(ctx), json!(tip.block_hash().to_string()));
+
+    dispatch(ctx, "reconsiderblock", vec![hex]).unwrap();
+    assert!(
+        !hub.is_block_invalid(&side_hash),
+        "reconsider clears the side-block mark"
+    );
+    let again = dispatch(ctx, "submitblock", vec![json!(block_hex(&side))]).unwrap();
+    assert_eq!(again, "duplicate", "the block is still known: {again}");
+    assert_eq!(best_hash(ctx), json!(tip.block_hash().to_string()));
+
+    let child = rbitcoin_consensus::mine_regtest_paying(
+        side_hash,
+        tip.time.saturating_add(21),
+        height.saturating_add(1),
+        op_true,
+        vec![],
+    );
+    let child_r = dispatch(ctx, "submitblock", vec![json!(block_hex(&child))]).unwrap();
+    assert!(
+        child_r.is_null(),
+        "heavier child of the reconsidered side block connects: {child_r}"
+    );
+    assert_eq!(best_hash(ctx), json!(child.block_hash().to_string()));
 }
 
 /// Coinbase scriptSig length, BIP34 height, and the legacy sigop cap on the
