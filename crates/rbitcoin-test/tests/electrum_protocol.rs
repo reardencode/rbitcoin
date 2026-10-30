@@ -244,13 +244,19 @@ async fn pin_silentpayments_1_6(stream: &mut TcpStream) {
 /// One JSON line, read a byte at a time. A `BufReader` that lives for one
 /// call takes every line already in the socket and drops all but the first.
 async fn read_json_line<R: tokio::io::AsyncRead + Unpin>(stream: &mut R, label: &str) -> Value {
-    let mut reader = BufReader::new(&mut *stream);
-    let mut line = String::new();
-    tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
-        .await
-        .unwrap_or_else(|_| panic!("electrum {label}: read_line timed out"))
-        .unwrap_or_else(|e| panic!("electrum {label}: io {e}"));
-    serde_json::from_str(&line).unwrap_or_else(|e| panic!("electrum {label}: {e}: {line:?}"))
+    let mut line = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match stream.read_u8().await? {
+                b'\n' => return Ok::<_, std::io::Error>(()),
+                b => line.push(b),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("electrum {label}: read_line timed out"))
+    .unwrap_or_else(|e| panic!("electrum {label}: io {e}"));
+    serde_json::from_slice(&line).unwrap_or_else(|e| panic!("electrum {label}: {e}"))
 }
 
 /// A subscribe answer and its notification can both be in the socket before
