@@ -3472,7 +3472,9 @@ async fn ping_timeout_applies_a_minute_after_the_last_block() {
     assert_session_answers(raw, 7, "a peer with a block in flight hit the ping timeout").await;
 
     write_peer_msg(raw, NetworkMessage::Block(block)).await;
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    // The tip-accept lane is one per process, so this connect queues behind
+    // other tests' jobs (a 10k-header invalidate holds it for seconds on CI).
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
     while t.node.hub.tip_hash() != Some(hash) {
         assert!(
             std::time::Instant::now() < deadline,
