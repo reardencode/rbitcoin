@@ -3467,6 +3467,37 @@ async fn wait_session_read(
     }
 }
 
+/// A mock-time jump runs the session heartbeat without waiting out
+/// [`SESSION_HEARTBEAT`]. The runtime clock is paused after the first ping,
+/// so that 50 ms sleep cannot complete on its own.
+#[tokio::test(flavor = "current_thread")]
+async fn mock_time_wakes_the_session_heartbeat() {
+    let mut t = paused_serve("mock-wakes-heartbeat", 0, &["/rbitcoin:test(wake)/"]).await;
+    let (raw, sess) = &mut t.clients[0];
+    loop {
+        if let NetworkMessage::Ping(_) = next_peer_msg(raw).await.unwrap() {
+            break;
+        }
+    }
+    let now = t.node.peers.now_secs();
+    tokio::time::pause();
+    t.node.peers.set_mock_now(now + 20 * 60 + 61);
+    let started = std::time::Instant::now();
+    let woke = loop {
+        if sess.stop.load(Ordering::SeqCst) {
+            break true;
+        }
+        if started.elapsed() >= Duration::from_millis(30) {
+            break false;
+        }
+        tokio::task::yield_now().await;
+    };
+    tokio::time::resume();
+    assert!(woke, "mock time did not wake the session heartbeat");
+    t.node.shutdown().await;
+    let _ = std::fs::remove_dir_all(&t.dir);
+}
+
 /// Core's ping timeout runs while `ProcessGetData` is paused on
 /// `fPauseSend`. A session paused on a getdata tail, or on its send budget,
 /// still runs the heartbeat: a peer that never reads hits the ping timeout
@@ -3645,7 +3676,23 @@ async fn ping_timeout_applies_a_minute_after_the_last_block() {
     assert_session_answers(raw, 7, "a peer with a block in flight hit the ping timeout").await;
 
     deliver(&mut t, 0, block).await;
-    let delivered = t.node.peers.now_secs();
+    // The tip is published on the accept lane before this session records
+    // `last_block`. A mock jump in that gap would start the grace minute at
+    // the jumped clock.
+    let sess = Arc::clone(&t.clients[0].1);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let delivered = loop {
+        let now = t.node.peers.now_secs();
+        let stamped = sess.last_block.load(Ordering::Relaxed);
+        if stamped == now && stamped != 0 {
+            break stamped;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the delivered block was not stamped on the peer"
+        );
+        tokio::task::yield_now().await;
+    };
     t.node
         .peers
         .set_mock_now(delivered + POST_BLOCK_PONG_GRACE_SECS);

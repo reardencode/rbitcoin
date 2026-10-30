@@ -34,6 +34,7 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpStream;
+use tokio::sync::watch;
 use tokio::sync::{broadcast, mpsc};
 
 /// Protocol version we advertise (BIP339 wtxidrelay needs ≥70016; rust-bitcoin's
@@ -48,6 +49,21 @@ pub const HEADERS_POLL_SECS: u64 = 120;
 
 #[doc(hidden)]
 pub const SESSION_HEARTBEAT: Duration = Duration::from_millis(50);
+
+async fn session_heartbeat_due(rx: &mut Option<watch::Receiver<u64>>, wait: Duration) {
+    tokio::select! {
+        biased;
+        _ = async {
+            match rx.as_mut() {
+                Some(rx) => {
+                    let _ = rx.changed().await;
+                }
+                None => std::future::pending::<()>().await,
+            }
+        } => {}
+        _ = tokio::time::sleep(wait) => {}
+    }
+}
 
 /// Addr-fetch sessions expire after this many seconds.
 #[doc(hidden)]
@@ -1833,6 +1849,10 @@ pub async fn peer_session_with(
 
     let session = meta.session.clone();
     let mut last_hb = std::time::Instant::now();
+    let mut heartbeat_rx = session
+        .as_ref()
+        .and_then(|s| s.peer_hub())
+        .map(|peers| peers.subscribe_session_heartbeat());
     let mut pending_tip: Option<Result<crate::chain::TipEvent, broadcast::error::RecvError>> = None;
     let mut tip_deadline: Option<tokio::time::Instant> = None;
     let result = async {
@@ -2068,7 +2088,7 @@ pub async fn peer_session_with(
                     );
                 }
                 // Inbound is biased first so a queued pong beats ping-timeout.
-                _ = tokio::time::sleep(hb_wait), if session.is_some() => {
+                _ = session_heartbeat_due(&mut heartbeat_rx, hb_wait), if session.is_some() => {
                     on_heartbeat(
                         hub.as_ref(),
                         &out_tx,

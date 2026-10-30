@@ -13,7 +13,7 @@ use std::sync::atomic::{
     AtomicBool, AtomicI64, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering,
 };
 use std::sync::{Arc, Mutex, RwLock, Weak};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, watch, Notify};
 
 /// Per-peer outbound queue cap (a few megabytes). Not a configuration knob.
 ///
@@ -1630,6 +1630,9 @@ pub struct PeerHub {
     pub hb_selected: Mutex<Vec<u64>>,
     /// `setmocktime` seconds; `0` means wall clock.
     pub mock_now: AtomicU64,
+    /// Bumped by [`Self::set_mock_now`] so a live session runs its heartbeat
+    /// on that call. A `watch` keeps the jump if it lands between waits.
+    session_heartbeat: watch::Sender<u64>,
     /// Count of sessions currently in headers-sync.
     pub headers_sync_peers: AtomicU64,
     /// Last inv hash that started headers sync with a not-yet-sync peer.
@@ -1758,6 +1761,7 @@ impl PeerHub {
             dial_tx: Mutex::new(None),
             hb_selected: Mutex::new(Vec::new()),
             mock_now: AtomicU64::new(0),
+            session_heartbeat: watch::channel(0).0,
             headers_sync_peers: AtomicU64::new(0),
             last_inv_headers_sync: Mutex::new(None),
             noban: AtomicBool::new(false),
@@ -2435,6 +2439,12 @@ impl PeerHub {
         }
         drop(g);
         self.on_session_heartbeat();
+        self.session_heartbeat
+            .send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    pub(crate) fn subscribe_session_heartbeat(&self) -> watch::Receiver<u64> {
+        self.session_heartbeat.subscribe()
     }
 
     /// Session 50ms heartbeat: replace a stalling initial-headers-sync peer.
