@@ -672,8 +672,10 @@ fn wait_tip_accept_idle_blocks_until_the_job_finishes() {
         });
     });
     started_rx.recv().unwrap();
+    let seen = rbitcoin_net::tip_accept::subscribe_wait_seen();
     let waiter = thread::spawn(move || hub.wait_tip_accept_idle());
-    thread::sleep(Duration::from_millis(30));
+    seen.recv_timeout(Duration::from_secs(2))
+        .expect("wait_tip_accept_idle did not observe the running job");
     assert!(
         !waiter.is_finished(),
         "wait_tip_accept_idle returned while a tip-accept job was running"
