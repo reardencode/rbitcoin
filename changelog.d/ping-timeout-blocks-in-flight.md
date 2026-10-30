@@ -6,8 +6,9 @@ Changed
   wrong. As in Core
   ([bitcoin/bitcoin#36080](https://github.com/bitcoin/bitcoin/pull/36080)),
   the timeout is skipped while a requested block or a compact block that
-  waits on `blocktxn` is in flight from that peer. After the last block it
-  sent, the peer has one minute to answer before the timeout applies again.
+  waits on `blocktxn` is in flight from that peer. After the last new block
+  it sent, the peer has one minute to answer before the timeout applies
+  again.
 - **A tip-follow peer that stops delivering requested blocks is
   disconnected.** As in Core, a peer that keeps a block in flight for one
   block interval (10 minutes on mainnet), plus half of one for each other
