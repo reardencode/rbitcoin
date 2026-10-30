@@ -337,6 +337,8 @@ pub struct LivePeer {
     pub send_queued: AtomicUsize,
     /// Wakes the reader after the writer drains under [`PEER_SEND_BUDGET`].
     pub send_resume: tokio::sync::Notify,
+    /// Times [`Self::wait_send_budget`] armed that wait. The wait, not the contract.
+    send_budget_parks: AtomicUsize,
     /// Inbound `getaddr` is answered once per connection.
     pub getaddr_answered: AtomicBool,
     /// We sent `sendcmpct(1)`: this peer should announce compact blocks to us.
@@ -979,6 +981,12 @@ impl LivePeer {
             });
     }
 
+    /// Times this peer has armed [`Self::wait_send_budget`]. The wait, not the contract.
+    #[doc(hidden)]
+    pub fn send_budget_parks(&self) -> usize {
+        self.send_budget_parks.load(Ordering::Acquire)
+    }
+
     /// Reader pause. Registers the waiter before the budget check.
     pub async fn wait_send_budget(&self) {
         loop {
@@ -986,6 +994,7 @@ impl LivePeer {
             if !self.send_over_budget() {
                 return;
             }
+            self.send_budget_parks.fetch_add(1, Ordering::Release);
             notified.await;
         }
     }
@@ -2785,6 +2794,7 @@ impl PeerHub {
             serve_inflight: AtomicUsize::new(0),
             send_queued: AtomicUsize::new(0),
             send_resume: tokio::sync::Notify::new(),
+            send_budget_parks: AtomicUsize::new(0),
             getaddr_answered: AtomicBool::new(false),
             hb_to: AtomicBool::new(false),
             hb_from: AtomicBool::new(false),

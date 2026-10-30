@@ -3518,7 +3518,7 @@ async fn paused_session_still_times_out_a_silent_peer() {
     wait_session_read(&t.node, slots, "getdata").await;
     let (_, budget) = &t.clients[1];
     budget.note_send_queued(2 * rbitcoin_net::peers::PEER_SEND_BUDGET);
-    tokio::time::sleep(4 * SESSION_HEARTBEAT).await;
+    wait_heartbeat_lap(&t.node.peers, "paused session did not heartbeat").await;
 
     let now = t.node.peers.now_secs();
     t.node.peers.set_mock_now(now + 20 * 60 + 61);
@@ -3548,9 +3548,34 @@ async fn paused_session_still_times_out_a_silent_peer() {
 const PING_TIMEOUT_SECS: u64 = 20 * 60;
 const POST_BLOCK_PONG_GRACE_SECS: u64 = 60;
 
-/// Proves the session is still up: it answers a ping after some heartbeats.
-async fn assert_session_answers(raw: &mut V2PlainSession, nonce: u64, why: &str) {
-    tokio::time::sleep(10 * SESSION_HEARTBEAT).await;
+/// The next `on_heartbeat` is the wait. The caller asserts the peer row.
+async fn wait_heartbeat_lap(peers: &rbitcoin_net::peers::PeerHub, why: &str) {
+    let laps = peers.heartbeat_laps();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while peers.heartbeat_laps() <= laps {
+        assert!(std::time::Instant::now() < deadline, "{why}");
+        tokio::task::yield_now().await;
+    }
+}
+
+/// `wait_send_budget` has armed `send_resume` and is still over budget.
+async fn wait_send_parked(peer: &rbitcoin_net::peers::LivePeer, why: &str) {
+    let parked = peer.send_budget_parks();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while peer.send_budget_parks() == parked {
+        assert!(std::time::Instant::now() < deadline, "{why}");
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Proves the session is still up: one heartbeat has run, then it answers a ping.
+async fn assert_session_answers(
+    peers: &rbitcoin_net::peers::PeerHub,
+    raw: &mut V2PlainSession,
+    nonce: u64,
+    why: &str,
+) {
+    wait_heartbeat_lap(peers, why).await;
     write_peer_msg(raw, NetworkMessage::Ping(nonce)).await;
     let pong = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -3653,8 +3678,15 @@ async fn ping_timeout_waits_while_a_block_is_in_flight() {
     t.node.peers.set_mock_now(start + PING_TIMEOUT_SECS - 200);
     deliver(&mut t, 0, blocks[0].clone()).await;
     t.node.peers.set_mock_now(start + PING_TIMEOUT_SECS + 1);
+    let peers = Arc::clone(&t.node.peers);
     let (raw, _) = &mut t.clients[0];
-    assert_session_answers(raw, 7, "a peer with a block in flight hit the ping timeout").await;
+    assert_session_answers(
+        &peers,
+        raw,
+        7,
+        "a peer with a block in flight hit the ping timeout",
+    )
+    .await;
     t.node.shutdown().await;
     let _ = std::fs::remove_dir_all(&t.dir);
 }
@@ -3672,8 +3704,15 @@ async fn ping_timeout_applies_a_minute_after_the_last_block() {
     let block = chain_on_tip(&t, 1).remove(0);
     announce_and_wait_for_ask(&mut t, block.header).await;
     t.node.peers.set_mock_now(start + PING_TIMEOUT_SECS + 1);
+    let peers = Arc::clone(&t.node.peers);
     let (raw, _) = &mut t.clients[0];
-    assert_session_answers(raw, 7, "a peer with a block in flight hit the ping timeout").await;
+    assert_session_answers(
+        &peers,
+        raw,
+        7,
+        "a peer with a block in flight hit the ping timeout",
+    )
+    .await;
 
     deliver(&mut t, 0, block).await;
     // The tip is published on the accept lane before this session records
@@ -3697,7 +3736,13 @@ async fn ping_timeout_applies_a_minute_after_the_last_block() {
         .peers
         .set_mock_now(delivered + POST_BLOCK_PONG_GRACE_SECS);
     let (raw, _) = &mut t.clients[0];
-    assert_session_answers(raw, 8, "the peer lost its minute to answer the ping").await;
+    assert_session_answers(
+        &peers,
+        raw,
+        8,
+        "the peer lost its minute to answer the ping",
+    )
+    .await;
 
     t.node
         .peers
@@ -4600,7 +4645,7 @@ async fn over_budget_reader_waits_until_one_byte_is_written() {
     peer.note_send_queued(rbitcoin_net::peers::PEER_SEND_BUDGET + 1);
     let waiting = std::sync::Arc::clone(&peer);
     let wait = tokio::spawn(async move { waiting.wait_send_budget().await });
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    wait_send_parked(&peer, "an over-budget reader never parked").await;
     assert!(
         !wait.is_finished(),
         "an over-budget reader must be parked before the writer drains"
@@ -4620,17 +4665,17 @@ async fn over_budget_session_does_not_read_a_ping() {
     let mut t = paused_serve("serve-pause-read", 1, &["/rbitcoin:test(budget-read)/"]).await;
     let (raw, sess) = &mut t.clients[0];
     sess.note_send_queued(2 * rbitcoin_net::peers::PEER_SEND_BUDGET);
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    wait_send_parked(sess, "over-budget session never paused").await;
     write_peer_msg(raw, NetworkMessage::Ping(7)).await;
-    let early = tokio::time::timeout(Duration::from_millis(200), async {
-        loop {
-            if let NetworkMessage::Pong(7) = next_peer_msg(raw).await.unwrap() {
-                return;
-            }
-        }
-    })
-    .await;
-    assert!(early.is_err(), "over-budget session must not read the ping");
+    let peers = sess.peer_hub().expect("session hub");
+    wait_heartbeat_lap(&peers, "paused session did not heartbeat after the ping").await;
+    let ping = sess
+        .snapshot(0)
+        .bytesrecv_per_msg
+        .get("ping")
+        .copied()
+        .unwrap_or(0);
+    assert_eq!(ping, 0, "over-budget session must not read the ping");
     sess.note_send_written(2 * rbitcoin_net::peers::PEER_SEND_BUDGET);
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
