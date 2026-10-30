@@ -902,6 +902,8 @@ pub struct MempoolHub {
     pub fee_deltas: Mutex<HashMap<Txid, i64>>,
     /// Monotonic template generation (admit / remove / prioritise). GBT longpoll.
     template_updates: AtomicU64,
+    /// Same generation as [`Self::template_updates`]. Long-poll subscribes.
+    template_watch: tokio::sync::watch::Sender<u64>,
     /// Tip whose mempool strip has finished. Block templates build on this.
     /// The query tip is visible earlier, before `remove_for_block_spent`.
     template_prev: Mutex<Option<[u8; 32]>>,
@@ -992,6 +994,7 @@ pub struct CommitOutcome {
 #[doc(hidden)]
 pub struct TemplateHold<'a> {
     updates: &'a AtomicU64,
+    watch: &'a tokio::sync::watch::Sender<u64>,
     settle: &'a AtomicU64,
     slot: std::sync::MutexGuard<'a, Option<[u8; 32]>>,
     commit: Option<[u8; 32]>,
@@ -1007,7 +1010,8 @@ impl Drop for TemplateHold<'_> {
     fn drop(&mut self) {
         if let Some(hash) = self.commit {
             *self.slot = Some(hash);
-            self.updates.fetch_add(1, Ordering::Relaxed);
+            let next = self.updates.fetch_add(1, Ordering::Relaxed) + 1;
+            self.watch.send_replace(next);
         }
         self.settle.fetch_add(1, Ordering::SeqCst);
     }
@@ -1182,6 +1186,7 @@ impl MempoolHub {
             ),
             fee_deltas: Mutex::new(HashMap::new()),
             template_updates: AtomicU64::new(0),
+            template_watch: tokio::sync::watch::channel(0).0,
             template_prev: Mutex::new(None),
             pool_settle: AtomicU64::new(0),
             age_inv: Mutex::new(BTreeMap::new()),
@@ -4026,7 +4031,14 @@ impl MempoolHub {
 
     #[doc(hidden)]
     pub fn note_template_update(&self) {
-        self.template_updates.fetch_add(1, Ordering::Relaxed);
+        let next = self.template_updates.fetch_add(1, Ordering::Relaxed) + 1;
+        self.template_watch.send_replace(next);
+    }
+
+    /// Wakes when [`Self::note_template_update`] bumps the generation.
+    #[doc(hidden)]
+    pub fn subscribe_template(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.template_watch.subscribe()
     }
 
     /// The pool has been stripped for `hash`. Templates build on this tip.
@@ -4044,6 +4056,7 @@ impl MempoolHub {
         self.pool_settle.fetch_add(1, Ordering::SeqCst);
         TemplateHold {
             updates: &self.template_updates,
+            watch: &self.template_watch,
             settle: &self.pool_settle,
             slot,
             commit: None,

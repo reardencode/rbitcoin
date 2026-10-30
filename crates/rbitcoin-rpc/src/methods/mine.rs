@@ -719,13 +719,12 @@ fn locale_independent_atoi(s: &[u8]) -> i64 {
 /// still hold. Tip change (P2P / generate) wakes within one poll tick. A new
 /// mempool tx or `prioritisetransaction` does too.
 fn gbt_longpoll_wait(ctx: &RpcContext, want: &LongpollWant) {
-    const TICK: std::time::Duration = std::time::Duration::from_millis(50);
     if super::http_wait_satisfied() {
         return;
     }
-    while !ctx.stop.load(Ordering::Relaxed) && !want.changed(ctx) {
-        std::thread::sleep(TICK);
-    }
+    super::block_on_rpc_wait(ctx, super::RPC_WAIT_TIMEOUT_MS, || {
+        ctx.stop.load(Ordering::Relaxed) || want.changed(ctx)
+    });
 }
 
 /// Where a template may build. The stripped tip wins. The query tip is only
