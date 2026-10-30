@@ -913,7 +913,7 @@ pub const NAMED_HELP: &[(&str, &str)] = &[
     ),
     (
         "getmininginfo",
-        "getmininginfo\nTip height, difficulty, pooledtx, blockmintxfee (BTC/kvB). All networks.",
+        "getmininginfo\nTip height and hash, difficulty, next block bits, pooledtx, blockmintxfee (BTC/kvB). All networks.",
     ),
     (
         "getnetworkhashps",

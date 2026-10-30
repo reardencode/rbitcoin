@@ -182,10 +182,8 @@ pub fn rpc_warnings(ctx: &RpcContext) -> Vec<String> {
 /// with `0xff`. Size `35` is a shift of `0`, so the mantissa stays and
 /// the difficulty is huge where the old loop is small.
 ///
-/// `format_core_double` prints a non-finite result as `0`. Block and chain
-/// RPCs use that. `getmininginfo` puts this float straight into JSON, which
-/// is `null` when it is non-finite. A connected tip cannot have a zero
-/// target.
+/// `format_core_double` prints a non-finite result as `0`. Block, chain,
+/// and mining RPCs use that. A connected tip cannot have a zero target.
 pub fn difficulty_from_bits(bits: u32) -> f64 {
     bitcoin::Target::from_compact(bitcoin::CompactTarget::from_consensus(bits)).difficulty_float()
 }

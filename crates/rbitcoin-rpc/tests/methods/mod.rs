@@ -5677,6 +5677,99 @@ fn template_and_generate_hold_the_period_time_floors() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Core `getmininginfo` (bitcoin/bitcoin#36081): `bestblockhash` names the
+/// tip that `blocks` and `bits` describe, and `next` is the work the next
+/// block must meet. Period 4 with one-second blocks: block 4 retargets harder.
+#[test]
+fn getmininginfo_names_the_tip_and_the_next_block_work() {
+    let mut params = rbitcoin_consensus::ChainParams::regtest();
+    params.btc.no_pow_retargeting = false;
+    params.btc.allow_min_difficulty_blocks = false;
+    params.btc.pow_target_timespan = 4 * params.btc.pow_target_spacing;
+    assert_eq!(params.difficulty_adjustment_interval(), 4);
+    let (ctx, dir, hub) = ctx_regtest_hub_on(params, 300_000_000);
+    let genesis = hub.tip_header().unwrap().time;
+    let block_at = |h: u32| {
+        let prev = hub.tip_hash().unwrap();
+        rbitcoin_consensus::mine_regtest_paying(prev, genesis + h, h, true_spk(), vec![])
+    };
+    for h in 1..=3 {
+        let r = dispatch(&ctx, "submitblock", vec![json!(block_hex(&block_at(h)))]).unwrap();
+        assert!(r.is_null(), "height {h}: {r}");
+    }
+    let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    let best = dispatch(&ctx, "getbestblockhash", vec![]).unwrap();
+    assert_eq!(info["blocks"], 3, "{info}");
+    assert_eq!(info["bestblockhash"], best, "{info}");
+    let tip = dispatch(&ctx, "getblockheader", vec![best]).unwrap();
+    assert_eq!(info["bits"], tip["bits"], "{info}");
+
+    let next = &info["next"];
+    assert_eq!(next["height"], 4, "{info}");
+    assert_ne!(next["bits"], info["bits"], "block 4 retargets: {info}");
+    let mut b = block_at(4);
+    let bits = u32::from_str_radix(next["bits"].as_str().unwrap(), 16).unwrap();
+    b.header.bits = bitcoin::CompactTarget::from_consensus(bits);
+    rbitcoin_consensus::grind_regtest_pow(&mut b.header);
+    let r = dispatch(&ctx, "submitblock", vec![json!(block_hex(&b))]).unwrap();
+    assert!(r.is_null(), "the node accepts next.bits: {r}");
+    let mined = dispatch(
+        &ctx,
+        "getblockheader",
+        vec![json!(b.block_hash().to_string())],
+    )
+    .unwrap();
+    assert_eq!(next["target"], mined["target"], "{info}");
+    assert_eq!(next["difficulty"], mined["difficulty"], "{info}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Core `BlockAssembler::m_last_block_weight` / `m_last_block_num_txs`: the
+/// reserved 8000 plus the selected transactions of the last block a template
+/// or `generate` assembled.
+#[test]
+fn getmininginfo_reports_the_last_assembled_block() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let (hex, spend) = mature_coinbase_spend_hex(&ctx, generated_coinbase_value(&ctx, 1) - 1_000);
+    dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
+    let weight = 8_000 + spend.weight().to_wu();
+
+    dispatch(&ctx, "getblocktemplate", vec![json!({"rules": ["segwit"]})]).unwrap();
+    let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    assert_eq!(info["currentblockweight"], weight, "{info}");
+    assert_eq!(info["currentblocktx"], 1, "{info}");
+
+    dispatch(&ctx, "generate", vec![json!(2)]).unwrap();
+    let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    assert_eq!(
+        info["currentblockweight"], 8_000,
+        "the second block is empty: {info}"
+    );
+    assert_eq!(info["currentblocktx"], 0, "{info}");
+
+    let (hex, spend) = spend_outpoint(&spend, 0, 1_000);
+    dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
+    dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
+    let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    assert_eq!(
+        info["currentblockweight"],
+        8_000 + spend.weight().to_wu(),
+        "{info}"
+    );
+    assert_eq!(info["currentblocktx"], 1, "{info}");
+
+    let (hex, _) = spend_outpoint(&spend, 0, 1_000);
+    let (addr, _) = p2wpkh_regtest();
+    dispatch(&ctx, "generateblock", vec![json!(addr), json!([hex])]).unwrap();
+    let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    assert_eq!(
+        info["currentblockweight"], 8_000,
+        "Core assembles generateblock empty: {info}"
+    );
+    assert_eq!(info["currentblocktx"], 0, "{info}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A sibling that spends the coin the current tip also spent is a competing
 /// block, not a permanent `duplicate-invalid`.
 #[test]
