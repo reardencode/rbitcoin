@@ -482,7 +482,7 @@ impl Store {
             cold_path,
             head_scale: layout.head_scale,
         };
-        store.refuse_sealed_tip_past_creates()?;
+        store.drop_confirmed_past_creates()?;
         store.rebuild_mtp_ring()?;
         Ok(store)
     }

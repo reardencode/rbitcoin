@@ -6,8 +6,9 @@
 //!
 //! Soft sidecar [`TIP_SEAL_NAME`]: written after a successful connect/disconnect
 //! Class C barrier so a kill that advanced `confirmed` without a complete seal
-//! can be clamped before revalidation. A sealed tip whose tx range ends past
-//! the durable create count is corrupt: the barrier does not write that tip.
+//! can be clamped before revalidation. The barrier does not seal a tip whose
+//! tx range ends past the durable create count. Open still drops a tip that
+//! a later Class A truncate left past that count.
 
 use crate::error::StoreError;
 use crate::header_table::block_header_hash;
@@ -614,20 +615,52 @@ impl Store {
         Ok(self.class_a_confirmed_cut(covered)?.is_none())
     }
 
-    /// A sealed tip past the durable create count means the barrier wrote a
-    /// height it does not allow. Class C fixtures have a tx range and no
-    /// archive; they stay.
-    pub(crate) fn refuse_sealed_tip_past_creates(&self) -> Result<(), StoreError> {
+    /// After open truncates Class A, drop confirmed heights whose tx range
+    /// ends past that count. A tip with no such range (trailing nulls,
+    /// header-only) stays. A Class C fixture has a range and no archive.
+    pub(crate) fn drop_confirmed_past_creates(&self) -> Result<(), StoreError> {
         let covered = self.txs.count();
-        if self.class_a_confirmed_cut(covered)?.is_none() {
+        let Some(bad) = self.class_a_confirmed_cut(covered)? else {
             return Ok(());
+        };
+        match self.header_tx_end(Height(bad))? {
+            Some(end) if end > covered => {}
+            _ => return Ok(()),
         }
         if covered == 0 && !self.txs.bodies_allocated_past_header() {
             return Ok(());
         }
-        Err(StoreError::Corrupt(
-            "invariant: sealed tip past durable creates",
-        ))
+        let Some(tip) = self.confirmed.tip_height() else {
+            return Ok(());
+        };
+        let write = crate::array_table::ClassCWrite::new();
+        let mut fks = Vec::new();
+        for h in bad..=tip.0 {
+            if let Some(fk) = self.confirmed.get(Height(h))? {
+                fks.push(fk);
+            }
+        }
+        let kept = bad.checked_sub(1);
+        let mut report = TipRevalidateReport::default();
+        if bad == 0 {
+            self.shrink_tip_to(&write, None, &mut report)?;
+            self.clear_header_fks(&write, &fks)?;
+        } else {
+            self.clear_header_fks(&write, &fks)?;
+            self.shrink_tip_to(&write, kept, &mut report)?;
+        }
+        Ok(())
+    }
+
+    fn clear_header_fks(
+        &self,
+        write: &crate::array_table::ClassCWrite,
+        fks: &[Fk],
+    ) -> Result<(), StoreError> {
+        for fk in fks {
+            let _ = self.header_txs.clear_body(write, *fk)?;
+        }
+        self.header_txs.flush()
     }
 
     /// Height a spend checkpoint may call durable, or `None` when no create is.
