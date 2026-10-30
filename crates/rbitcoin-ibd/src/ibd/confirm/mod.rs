@@ -3250,6 +3250,7 @@ pub fn lookup_bulk_wave(
     max_blocks: usize,
     max_inputs: u32,
 ) -> Result<rbitcoin_query::BqResolveWave, rbitcoin_query::ConfirmError> {
+    note_confirm_bulk_read();
     query.store().spindle_wait();
     note_confirm_bulk_read();
     rbitcoin_query::confirm_bq_resolve_wave_capped(
@@ -3270,6 +3271,7 @@ pub fn load_bulk_stamp(
             load_bulk_stamp(query, params, milestone, blocks, pipeline)
         });
     }
+    note_confirm_bulk_read();
     query.store().spindle_wait();
     note_confirm_bulk_read();
     rbitcoin_query::confirm_wire_lookup_stamp(query, params, milestone, blocks, pipeline)
