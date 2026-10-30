@@ -478,8 +478,8 @@ pub fn tx_family_too_large(command: &[u8; 12], payload: &[u8]) -> Option<usize> 
     }
 }
 
-/// BIP152 `HeaderAndShortIds` as Core reads it. Beyond rust-bitcoin, a
-/// prefilled null tx decodes ([`take_core_null_tx`]), and like Core's
+/// BIP152 `HeaderAndShortIds` as Core reads it. A prefilled tx follows
+/// [`decode_core_prefilled_tx`], and like Core's
 /// deserializer a tx count past 16 bits fails the decode, which the session
 /// drops with no score.
 fn decode_header_and_short_ids(
@@ -498,10 +498,7 @@ fn decode_header_and_short_ids(
                 "BIP152 prefilled tx index out of bounds",
             )
         })?;
-        let tx = match take_core_null_tx(d) {
-            Some(tx) => tx,
-            None => bitcoin::Transaction::consensus_decode(d)?,
-        };
+        let tx = decode_core_prefilled_tx(d)?;
         prefilled_txs.push(PrefilledTransaction { idx, tx });
     }
     if short_ids.len().saturating_add(prefilled_txs.len()) > usize::from(u16::MAX) {
@@ -515,6 +512,24 @@ fn decode_header_and_short_ids(
         short_ids,
         prefilled_txs,
     })
+}
+
+/// A prefilled tx as Core's `UnserializeTransaction` reads it. Only an empty
+/// vin differs from rust-bitcoin: flags 0 is [`take_core_null_tx`], and flag 1
+/// followed by a second empty vin carries no witness, which Core refuses as a
+/// superfluous witness record and rust-bitcoin accepts.
+fn decode_core_prefilled_tx(
+    d: &mut &[u8],
+) -> Result<bitcoin::Transaction, bitcoin::consensus::encode::Error> {
+    if d.get(4..7) == Some(&[0u8, 1, 0][..]) {
+        return Err(bitcoin::consensus::encode::Error::ParseFailed(
+            "superfluous witness record",
+        ));
+    }
+    match take_core_null_tx(d) {
+        Some(tx) => Ok(tx),
+        None => bitcoin::Transaction::consensus_decode(d),
+    }
 }
 
 /// Core `UnserializeTransaction` reads an empty vin, then flags 0, and leaves
