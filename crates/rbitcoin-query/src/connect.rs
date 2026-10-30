@@ -137,6 +137,9 @@ pub struct TipFlushWorker {
     /// Linux tid of this worker. Zero until the thread publishes it.
     #[cfg(all(debug_assertions, target_os = "linux"))]
     os_tid: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Set after `os_tid` is stored. The name is already the builder name.
+    #[cfg(all(debug_assertions, target_os = "linux"))]
+    published: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
     /// Set when `join_tip_flush` is blocked on the in-flight barrier.
     #[cfg(debug_assertions)]
     blocked: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
@@ -151,6 +154,11 @@ impl Default for TipFlushWorker {
             alive: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(all(debug_assertions, target_os = "linux"))]
             os_tid: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(all(debug_assertions, target_os = "linux"))]
+            published: std::sync::Arc::new((
+                std::sync::Mutex::new(false),
+                std::sync::Condvar::new(),
+            )),
             #[cfg(debug_assertions)]
             blocked: std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new())),
         }
@@ -389,6 +397,8 @@ impl Query {
         let alive = Arc::clone(&self.tip_flush_worker.alive);
         #[cfg(all(debug_assertions, target_os = "linux"))]
         let os_tid = Arc::clone(&self.tip_flush_worker.os_tid);
+        #[cfg(all(debug_assertions, target_os = "linux"))]
+        let published = Arc::clone(&self.tip_flush_worker.published);
         let handle = std::thread::Builder::new()
             .name("rbtc-tip-flush".into())
             .spawn(move || {
@@ -397,6 +407,9 @@ impl Query {
                 #[cfg(all(debug_assertions, target_os = "linux"))]
                 if let Some(tid) = linux_task_id() {
                     os_tid.store(tid, Ordering::Release);
+                    let (lock, cv) = &*published;
+                    *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+                    cv.notify_all();
                 }
                 while let Ok(job) = rx.recv() {
                     // Pause after the flush excludes stores, not before it starts.
@@ -450,6 +463,32 @@ impl Query {
         self.tip_flush_worker
             .alive
             .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Linux tid once the barrier thread has published it and its name.
+    #[cfg(all(debug_assertions, target_os = "linux"))]
+    #[doc(hidden)]
+    pub fn wait_tip_flush_published(&self, timeout: std::time::Duration) -> Option<u64> {
+        let (lock, cv) = &*self.tip_flush_worker.published;
+        let mut ready = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if *ready {
+                let tid = self.tip_flush_os_tid();
+                return (tid != 0).then_some(tid);
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            let (guard, status) = cv
+                .wait_timeout(ready, left)
+                .unwrap_or_else(|e| e.into_inner());
+            ready = guard;
+            if status.timed_out() && !*ready {
+                return None;
+            }
+        }
     }
 
     /// Linux tid of this query's barrier thread, or zero before it publishes.
