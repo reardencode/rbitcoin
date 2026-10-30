@@ -864,7 +864,8 @@ fn apply_peer_event_body_and_control_surface() {
             rate: Default::default(),
             chain: Default::default(),
             conn_type: rbitcoin_net::peers::PeerConnType::OutboundFullRelay,
-            block_download_pause: None,
+            block_download_paused_until: None,
+            late_answers: Default::default(),
             alive: true,
             task,
         }
@@ -1195,7 +1196,8 @@ fn apply_peer_event_block_framed_bq_horizon_and_headers_done() {
             rate: Default::default(),
             chain: Default::default(),
             conn_type: rbitcoin_net::peers::PeerConnType::OutboundFullRelay,
-            block_download_pause: None,
+            block_download_paused_until: None,
+            late_answers: Default::default(),
             alive: true,
             task,
         }
@@ -4549,7 +4551,8 @@ fn coord_loop_body_and_reject_do_not_read_headers() {
             rate: Default::default(),
             chain: Default::default(),
             conn_type: rbitcoin_net::peers::PeerConnType::OutboundFullRelay,
-            block_download_pause: None,
+            block_download_paused_until: None,
+            late_answers: Default::default(),
             alive: true,
             task,
         }

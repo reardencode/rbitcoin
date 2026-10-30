@@ -178,7 +178,9 @@ pub fn prune_satisfied_inflight(
     hub: &ChainHub,
 ) {
     inflight.retain(|h, _| !hub.has_block(h));
+    let now_ms = ibd_mono_ms();
     for s in slots.iter_mut() {
+        s.expire_late_answers(now_ms);
         s.track_retain(|h| !hub.has_block(h));
     }
 }

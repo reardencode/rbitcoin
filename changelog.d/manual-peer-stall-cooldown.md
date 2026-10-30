@@ -11,3 +11,9 @@ Changed
   then sends the blocks it was released from, they are accepted (or
   dropped as duplicates) and do not count as unsolicited. Any other
   stalling peer is still disconnected.
+- **An IBD peer's answer to a block it was asked for is not unsolicited.**
+  When another peer's copy landed first, or the request was moved off a
+  paused peer, a later answer from the peer that was asked counted against
+  the 16 MB/s unsolicited cap, and a fast peer could be disconnected for
+  it. For two minutes after its request is withdrawn, that answer is now
+  taken as a body and dropped if it is a duplicate, as in Core.

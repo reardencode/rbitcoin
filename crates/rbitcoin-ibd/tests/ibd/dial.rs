@@ -94,7 +94,8 @@ fn dummy_slot(id: usize, a: SocketAddr, alive: bool) -> PeerSlot {
         rate: Default::default(),
         chain: Default::default(),
         conn_type: rbitcoin_net::peers::PeerConnType::OutboundFullRelay,
-        block_download_pause: None,
+        block_download_paused_until: None,
+        late_answers: Default::default(),
         alive,
         task,
     }

@@ -19,7 +19,7 @@ use rbitcoin_net::peer::{
 };
 use rbitcoin_net::peer_dos::{PeerRateLimiter, RATE_LIMIT_BAN_SCORE};
 use rbitcoin_net::v2::{read_v2_frame_with_progress, write_v2_msg_offload, V2Reader, V2Writer};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -164,21 +164,22 @@ pub struct PeerSlot {
     pub chain: super::peer_chain::PeerChain,
     /// `Manual` for a `--connect` target, as Core dials `-connect`.
     pub conn_type: rbitcoin_net::peers::PeerConnType,
-    /// Set while a stalled manual peer sits out block download.
-    pub block_download_pause: Option<BlockDownloadPause>,
+    /// Node-clock seconds until which this peer is sent no block getdata.
+    pub block_download_paused_until: Option<u64>,
+    /// Getdata this peer was sent and has not answered, withdrawn from
+    /// `in_flight` at the mono ms stored. It stays solicited on the reader
+    /// for [`LATE_ANSWER_MS`].
+    pub late_answers: HashMap<BlockHash, u64>,
     pub alive: bool,
     pub task: JoinHandle<()>,
 }
 
-/// A manual peer that stalled: it is sent no block getdata until `until`
-/// (node-clock seconds). Core removes the released blocks from that peer's
-/// in-flight list and still processes them if it sends them, so each
-/// `released` hash stays solicited on its reader for one late answer.
-#[derive(Debug, Default)]
-pub struct BlockDownloadPause {
-    pub until: u64,
-    pub released: HashSet<BlockHash>,
-}
+/// How long a withdrawn getdata stays solicited. Core processes a block a
+/// peer sends after its request was removed, and it is not misbehavior; an
+/// answer inside this window is a body, not unsolicited bytes. Two minutes,
+/// the manual-peer cooldown, so a paused peer's released blocks stay
+/// answerable through its pause.
+pub const LATE_ANSWER_MS: u64 = 120_000;
 
 /// Empty side-set and solicited counters for a new [`PeerSlot`].
 pub fn solicit_track() -> (
@@ -350,48 +351,45 @@ pub const LIGHT_DECODE_PERMITS: usize = 32;
 impl PeerSlot {
     /// Alive and not paused: assign may send this peer block getdata.
     pub fn takes_block_requests(&self) -> bool {
-        self.alive && self.block_download_pause.is_none()
+        self.alive && self.block_download_paused_until.is_none()
     }
 
-    /// Pause block download until `until` and hand back what this peer
-    /// owed. Those hashes stay solicited on the reader.
+    /// Pause block download until `until` and withdraw what this peer owed.
     pub fn pause_block_download(&mut self, until: u64) -> Vec<BlockHash> {
+        let now = ibd_mono_ms();
         let released: Vec<BlockHash> = self.in_flight.drain().collect();
+        for h in &released {
+            self.late_answers.insert(*h, now);
+        }
         self.disarm_stall_if_idle();
-        self.block_download_pause = Some(BlockDownloadPause {
-            until,
-            released: released.iter().copied().collect(),
-        });
+        self.block_download_paused_until = Some(until);
         released
     }
 
-    /// Lift the pause once the node clock reaches it. A released hash that
-    /// was never answered is no longer solicited.
+    /// Lift the pause once the node clock reaches it.
     pub fn resume_block_download_if_due(&mut self, now_secs: u64) {
-        let Some(pause) = self.block_download_pause.take_if(|p| now_secs >= p.until) else {
-            return;
-        };
-        let mut set = self.requested_set();
-        for h in pause
-            .released
-            .iter()
-            .filter(|h| !self.in_flight.contains(*h))
+        if self
+            .block_download_paused_until
+            .is_some_and(|until| now_secs >= until)
         {
-            set.remove(h);
+            self.block_download_paused_until = None;
         }
     }
 
-    /// `true` once for a late answer to a hash this pause released.
-    pub fn take_late_release(&mut self, hash: &BlockHash) -> bool {
-        self.block_download_pause
-            .as_mut()
-            .is_some_and(|p| p.released.remove(hash))
+    /// This peer answered `hash` with a block or `notfound`. `true` when the
+    /// getdata had been withdrawn and the answer was still owed.
+    pub fn note_answer(&mut self, hash: &BlockHash) -> bool {
+        self.in_flight.remove(hash);
+        self.requested_set().remove(hash);
+        self.disarm_stall_if_idle();
+        self.late_answers.remove(hash).is_some()
     }
 
-    fn holds_late_release(&self, hash: &BlockHash) -> bool {
-        self.block_download_pause
-            .as_ref()
-            .is_some_and(|p| p.released.contains(hash))
+    /// Forget withdrawn getdata older than [`LATE_ANSWER_MS`]. The next
+    /// [`Self::track_retain`] drops them from the reader.
+    pub fn expire_late_answers(&mut self, now_ms: u64) {
+        self.late_answers
+            .retain(|_, at| now_ms.saturating_sub(*at) <= LATE_ANSWER_MS);
     }
 
     #[doc(hidden)]
@@ -404,9 +402,12 @@ impl PeerSlot {
         self.requested_set().insert(hash);
     }
 
+    /// Withdraw `hash`. A getdata this peer still owes stays answerable.
     pub fn track_remove(&mut self, hash: &BlockHash) -> bool {
         let removed = self.in_flight.remove(hash);
-        if !self.holds_late_release(hash) {
+        if removed {
+            self.late_answers.insert(*hash, ibd_mono_ms());
+        } else if !self.late_answers.contains_key(hash) {
             self.requested_set().remove(hash);
         }
         self.disarm_stall_if_idle();
@@ -415,6 +416,7 @@ impl PeerSlot {
 
     pub fn track_clear(&mut self) {
         self.in_flight.clear();
+        self.late_answers.clear();
         self.requested_set().clear();
         self.disarm_stall_if_idle();
     }
@@ -423,19 +425,27 @@ impl PeerSlot {
         // Judge each hash once, before taking the reader mutex. The shared
         // set then matches that decision. `has_block` does not run while the
         // IBD reader is blocked in `note_solicited_block`.
-        self.in_flight.retain(|h| keep(h));
-        let mut set = self.requested_set();
+        let now = ibd_mono_ms();
+        let late = &mut self.late_answers;
+        self.in_flight.retain(|h| {
+            let kept = keep(h);
+            if !kept {
+                late.insert(*h, now);
+            }
+            kept
+        });
+        let requested = Arc::clone(&self.requested);
+        let mut set = requested.lock().unwrap_or_else(|e| e.into_inner());
         set.clear();
         set.extend(self.in_flight.iter().copied());
-        if let Some(p) = &self.block_download_pause {
-            set.extend(p.released.iter().copied());
-        }
+        set.extend(self.late_answers.keys().copied());
         drop(set);
         self.disarm_stall_if_idle();
     }
 
     pub fn track_drain(&mut self) -> Vec<BlockHash> {
         let drained: Vec<BlockHash> = self.in_flight.drain().collect();
+        self.late_answers.clear();
         self.requested_set().clear();
         self.disarm_stall_if_idle();
         drained
@@ -1137,7 +1147,8 @@ pub async fn spawn_peer(
         },
         chain: Default::default(),
         conn_type,
-        block_download_pause: None,
+        block_download_paused_until: None,
+        late_answers: HashMap::new(),
         alive: true,
         task,
     })

@@ -8,7 +8,9 @@ use bitcoin::BlockHash;
 use rbitcoin_ibd::ibd::assign::{assign_work_ordered, inflight_add_peer, AssignDepth};
 use rbitcoin_ibd::ibd::dial::{dial_batch, disconnect_stalled_block_peers_at};
 use rbitcoin_ibd::ibd::events::{apply_block_framed, FramedBody};
-use rbitcoin_ibd::ibd::peer_io::{IbdReadCtx, LightDecodes, PeerCmd, PeerEvent, PeerEventSinks};
+use rbitcoin_ibd::ibd::peer_io::{
+    IbdReadCtx, LightDecodes, PeerCmd, PeerEvent, PeerEventSinks, LATE_ANSWER_MS,
+};
 use rbitcoin_ibd::ibd::state::IbdWorkState;
 use rbitcoin_ibd::ibd::status::LoopStats;
 use rbitcoin_ibd::ibd::IbdConfig;
@@ -174,10 +176,15 @@ fn stalling_connect_peer_stays_and_its_blocks_go_to_the_other_peer() {
         !drain_wire(&mut wire)[0].0.is_empty(),
         "after the cooldown the peer is asked for blocks again"
     );
+    let released_at = st.slots[0].late_answers[&h(1)];
+    st.slots[0].expire_late_answers(released_at + LATE_ANSWER_MS);
+    assert!(st.slots[0].late_answers.contains_key(&h(1)));
+    st.slots[0].expire_late_answers(released_at + LATE_ANSWER_MS + 1);
+    assign(&mut st, &hub);
     assert_eq!(
         *st.slots[0].requested_set(),
         st.slots[0].in_flight,
-        "after the cooldown only what it is asked for now is solicited"
+        "once the late-answer window ends only what it is asked for now is solicited"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
