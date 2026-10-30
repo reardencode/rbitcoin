@@ -26,23 +26,56 @@
 }:
 
 let
-  # Keep cargo's own files plus the bundled data the code includes via
-  # include_str!/include_bytes! (seed lists, corpora, test fixtures: .txt/.bin/.hex)
-  # — cleanCargoSource alone drops all of them and the build cannot find them.
+  # Keep whole trees rather than an extension list so `cargo test` in a later
+  # check phase finds every fixture, seed list and corpus (.json, .zst, .bin, …):
+  # - root Cargo.toml / Cargo.lock / rust-toolchain.toml (+ .cargo/config*)
+  # - crates/: every workspace crate with its tests/fixtures, seeds and corpora
+  # - fuzz/: rbitcoin-log's Cargo.toml names fuzz/src/lib.rs and
+  #   fuzz/fuzz_targets/*.rs as test targets; fuzz/fixtures feeds fuzz/src tests
+  # Docs, scripts, lint, third_party etc. stay out so edits there keep the hash.
+  # Core's own test data (third_party/bitcoin) is not vendored; point
+  # RBITCOIN_CORE_DATA at it for a check phase.
+  root = toString ../.;
   src = lib.cleanSourceWith {
     src = lib.cleanSource ../.;
     filter =
       path: type:
       let
+        rel = lib.removePrefix "${root}/" (toString path);
         base = baseNameOf path;
+        under = dir: rel == dir || lib.hasPrefix "${dir}/" rel;
+        # Local scratch that would bust the source hash.
+        noise =
+          base == "datadir"
+          || lib.hasPrefix "datadir-" base
+          || lib.hasSuffix ".log" base
+          || base == "result"
+          || lib.hasPrefix "result-" base
+          || builtins.elem base [
+            "target"
+            "coverage"
+            ".coverage"
+            ".repro-out"
+            "mutants.out"
+          ]
+          || builtins.elem rel [
+            "fuzz/corpus"
+            "fuzz/artifacts"
+          ];
       in
-      type == "directory"
-      || lib.hasSuffix ".rs" base
-      || lib.hasSuffix ".toml" base
-      || lib.hasSuffix ".txt" base
-      || lib.hasSuffix ".bin" base
-      || lib.hasSuffix ".hex" base
-      || base == "Cargo.lock";
+      !noise
+      && (
+        builtins.elem rel [
+          "Cargo.toml"
+          "Cargo.lock"
+          "rust-toolchain.toml"
+          ".cargo"
+          ".cargo/config.toml"
+          ".cargo/config"
+        ]
+        || under "crates"
+        || under "fuzz"
+      );
   };
 
   # Deterministic flags. Do **not** embed `${src}` in RUSTFLAGS — that would
