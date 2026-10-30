@@ -3434,8 +3434,8 @@ impl PeerHub {
     }
 
     pub fn addconnection(&self, addr: SocketAddr, typ: PeerConnType) -> Result<(), String> {
-        if matches!(typ, PeerConnType::Inbound) {
-            return Err("addconnection cannot create inbound".into());
+        if matches!(typ, PeerConnType::Inbound | PeerConnType::PrivateBroadcast) {
+            return Err(format!("addconnection cannot create {}", typ.as_str()));
         }
         self.dial(addr, typ)
     }
