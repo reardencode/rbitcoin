@@ -160,7 +160,7 @@ async fn pin_outpoint_1_6(stream: &mut TcpStream) {
 }
 
 async fn pin_silentpayments_1_6(stream: &mut TcpStream) {
-    let sp = rpc(
+    let sp = rpc_late_read(
         stream,
         45,
         "blockchain.silentpayments.subscribe",
@@ -218,7 +218,7 @@ async fn pin_silentpayments_1_6(stream: &mut TcpStream) {
     )
     .await;
     let tip_h = headers["result"]["count"].as_u64().expect("header count") - 1;
-    let clamped = rpc(
+    let clamped = rpc_late_read(
         stream,
         55,
         "blockchain.silentpayments.subscribe",
@@ -239,6 +239,24 @@ async fn pin_silentpayments_1_6(stream: &mut TcpStream) {
     )
     .await;
     assert!(bad.get("error").is_some(), "{bad}");
+}
+
+/// [`rpc`] for a call the server follows with a notification: the answer is
+/// read only after the server has had time to send both lines, as a slow
+/// client (an instrumented CI build) sees them.
+async fn rpc_late_read(stream: &mut TcpStream, id: u64, method: &str, params: Value) -> Value {
+    let req = json!({"jsonrpc":"2.0","id": id, "method": method, "params": params});
+    let mut line = serde_json::to_string(&req).unwrap();
+    line.push('\n');
+    stream.write_all(line.as_bytes()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut reader = BufReader::new(&mut *stream);
+    let mut resp_line = String::new();
+    tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut resp_line))
+        .await
+        .unwrap_or_else(|_| panic!("electrum rpc {method}: read_line timed out"))
+        .unwrap_or_else(|e| panic!("electrum rpc {method}: io {e}"));
+    serde_json::from_str(&resp_line).unwrap()
 }
 
 async fn rpc(stream: &mut TcpStream, id: u64, method: &str, params: Value) -> Value {
