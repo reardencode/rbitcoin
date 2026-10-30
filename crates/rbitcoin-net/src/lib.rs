@@ -67,7 +67,7 @@ pub use asmap::{
 pub use cache::BlockCache;
 pub use chain::{check_block_proposal_with, AcceptOutcome, ChainHub, ChainTipInfo, TipEvent};
 pub use compact::{
-    classify_v2_cmpct_peer, prefilled_indexes_ok, shortid_map_from_txs, try_reconstruct,
+    classify_v2_cmpct_peer, cmpct_init_data_ok, shortid_map_from_txs, try_reconstruct,
     v2_header_hashes, CmpctPeerFrame,
 };
 pub use ephemeral::spawn_isolated_broadcast_loop;

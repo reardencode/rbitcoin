@@ -4523,8 +4523,8 @@ pub fn on_cmpctblock_reject_early(
         misbehaving(&mut follow.ban_score, session);
         return Ok(true);
     }
-    if !crate::compact::prefilled_indexes_ok(hsi) {
-        rbitcoin_log::info!("p2p: invalid index in cmpctblock message");
+    if !crate::compact::cmpct_init_data_ok(hsi) {
+        rbitcoin_log::info!("p2p: invalid compact block");
         misbehaving(&mut follow.ban_score, session);
         return Ok(true);
     }

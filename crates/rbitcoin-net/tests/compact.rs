@@ -490,7 +490,7 @@ fn empty_compact_and_ambiguous_shortid() {
     let idxs = prefilled_absolute_indexes(&hsi);
     assert!(!idxs.is_empty());
     assert_eq!(idxs[0].0, 0); // coinbase at abs 0
-    assert!(prefilled_indexes_ok(&hsi));
+    assert!(cmpct_init_data_ok(&hsi));
 
     let oob = HeaderAndShortIds {
         header: dummy_header(),
@@ -501,7 +501,7 @@ fn empty_compact_and_ambiguous_shortid() {
             tx: coinbase(),
         }],
     };
-    assert!(!prefilled_indexes_ok(&oob));
+    assert!(!cmpct_init_data_ok(&oob));
 }
 
 fn mined_h1_two_tx_hsi() -> HeaderAndShortIds {
