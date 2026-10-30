@@ -1,12 +1,16 @@
 //! A `--connect` peer that stalls block download is kept and sits out block
 //! requests for two minutes (Core `MANUAL_PEER_BLOCK_DOWNLOAD_COOLDOWN`,
-//! bitcoin/bitcoin#34743). Any other stalling peer is still disconnected.
+//! bitcoin/bitcoin#34743) when another peer can take its blocks. With no
+//! such peer it keeps its requests. Any other stalling peer is still
+//! disconnected.
 
 use super::assign::{h, plant_work_path, tmp_hub, wired_slots};
 use bitcoin::hashes::Hash;
 use bitcoin::BlockHash;
 use rbitcoin_ibd::ibd::assign::{assign_work_ordered, inflight_add_peer, AssignDepth};
-use rbitcoin_ibd::ibd::dial::{dial_batch, disconnect_stalled_block_peers_at};
+use rbitcoin_ibd::ibd::dial::{
+    dial_batch, disconnect_stalled_block_peers_at, release_peer_block_work,
+};
 use rbitcoin_ibd::ibd::events::{apply_block_framed, FramedBody};
 use rbitcoin_ibd::ibd::peer_io::{
     IbdReadCtx, LightDecodes, PeerCmd, PeerEvent, PeerEventSinks, LATE_ANSWER_MS,
@@ -191,11 +195,12 @@ fn stalling_connect_peer_stays_and_its_blocks_go_to_the_other_peer() {
 
 /// A getdata still in the writer when the peer was paused goes out after
 /// its requests are released. That late write must not open the stall
-/// window for the blocks asked after the cooldown.
+/// window for the blocks asked after the cooldown. Peer 1 is the other
+/// `--connect` peer that takes the released blocks.
 #[test]
 fn resumed_connect_peer_gets_a_fresh_stall_window() {
     let (dir, hub) = tmp_hub();
-    let (mut st, mut wire) = connect_peers(&hub, 1, PeerConnType::Manual);
+    let (mut st, mut wire) = connect_peers(&hub, 2, PeerConnType::Manual);
     owe_on_wire(&mut st, 0, h(1), 0);
     owe_on_wire(&mut st, 0, h(2), 0);
     st.slots[0].track_insert(h(3));
@@ -469,25 +474,32 @@ fn race_loser_answer_is_not_scored() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// The sole `--connect` peer stalls, so its released blocks have no other
-/// owner. When it answers them during the pause, both are queued from it,
-/// as Core processes a block it no longer has in flight.
+/// Peer 0 is paused and its blocks go to peer 1, which then disconnects, so
+/// the released blocks have no owner. When peer 0 answers them during the
+/// pause, both are queued from it, as Core processes a block it no longer
+/// has in flight.
 #[test]
-fn sole_paused_connect_peer_late_blocks_are_queued() {
+fn paused_connect_peer_late_blocks_are_queued_after_the_other_peer_leaves() {
     let (dir, hub) = tmp_hub();
     hub.ensure_genesis().unwrap();
     hub.clock.set_mock(T0);
-    let (mut slots, mut wire) = wired_slots(1);
-    slots[0].conn_type = PeerConnType::Manual;
+    let (mut slots, mut wire) = wired_slots(2);
+    for s in &mut slots {
+        s.conn_type = PeerConnType::Manual;
+    }
     let mut st = IbdWorkState::new(slots, hub.tip_hash(), hub.tip_height());
     let blocks = real_path(&hub, &mut st);
     for b in &blocks {
         owe_on_wire(&mut st, 0, b.block_hash(), 0);
     }
     stall_pass(&mut st, &hub, 30_001);
+    assert!(!st.slots[0].takes_block_requests(), "peer 0 is paused");
     assign(&mut st, &hub);
     assert!(drain_wire(&mut wire)[0].0.is_empty());
-    assert!(st.inflight.is_empty(), "no other peer took the blocks");
+    let freed = release_peer_block_work(&mut st.slots, &mut st.inflight, &mut st.body, 1);
+    st.reopen_for_densify(&freed);
+    st.slots.retain(|s| s.alive);
+    assert!(st.inflight.is_empty(), "no peer owns the blocks");
 
     let (mut ctx, mut body_rx) = reader_of(&st, 0);
     for b in &blocks {
@@ -509,30 +521,135 @@ fn sole_paused_connect_peer_late_blocks_are_queued() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// The only peer is a `--connect` peer and it stalls. Catch-up has no other
-/// peer to ask, waits out the cooldown, and asks that peer again.
+/// The only peer is a `--connect` (or `--trust-peer`) peer and it stalls.
+/// No other peer could take its blocks, so releasing them and pausing it
+/// would leave nobody downloading for two minutes. It keeps its requests,
+/// is not paused, cooled, or disconnected, and the stall check does not
+/// fire again until a full new stall window has passed. When it finally
+/// answers, its blocks are queued.
 #[test]
-fn sole_connect_peer_is_retried_after_the_cooldown() {
+fn sole_manual_peer_that_stalls_keeps_its_requests() {
+    for trust_peer in [false, true] {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        hub.clock.set_mock(T0);
+        hub.query.set_trust_peer(trust_peer);
+        let (mut slots, mut wire) = wired_slots(1);
+        slots[0].conn_type = PeerConnType::Manual;
+        let mut st = IbdWorkState::new(slots, hub.tip_hash(), hub.tip_height());
+        let blocks = real_path(&hub, &mut st);
+        let owed: HashSet<BlockHash> = blocks.iter().map(|b| b.block_hash()).collect();
+        for b in &blocks {
+            owe_on_wire(&mut st, 0, b.block_hash(), 0);
+        }
+        rbitcoin_log::capture_logs(true);
+        let mut stall_lines = 0;
+        for now_ms in [30_001, 30_002, 45_000, 60_001] {
+            let freed = stall_pass(&mut st, &hub, now_ms);
+            assert!(
+                freed.is_empty(),
+                "trust_peer={trust_peer}: nothing is released"
+            );
+            stall_lines += rbitcoin_log::take_logs()
+                .iter()
+                .filter(|(_, l)| l.contains("peer=0") || l.contains("peer[0]"))
+                .count();
+        }
+        assert_eq!(
+            stall_lines, 1,
+            "trust_peer={trust_peer}: one stall window trips the check once"
+        );
+        let _ = stall_pass(&mut st, &hub, 60_002);
+        let logs: Vec<String> = rbitcoin_log::take_logs()
+            .into_iter()
+            .map(|(_, l)| l)
+            .collect();
+        rbitcoin_log::capture_logs(false);
+        assert!(
+            logs.iter().any(|l| l.contains("peer=0")),
+            "trust_peer={trust_peer}: the next full window checks again; logs={logs:?}"
+        );
+        assert!(
+            !logs.iter().any(|l| l.contains("Pausing")),
+            "trust_peer={trust_peer}: a sole peer is never paused; logs={logs:?}"
+        );
+
+        let s = &st.slots[0];
+        assert!(s.alive && s.takes_block_requests());
+        assert_eq!(s.block_download_paused_until, None);
+        assert_eq!(s.in_flight, owed, "trust_peer={trust_peer}: requests kept");
+        assert!(owed
+            .iter()
+            .all(|h| st.inflight.get(h).is_some_and(|r| r.peers.contains(&0))));
+        assert!(st.addr_cooldown.is_empty() && st.addr_strikes.is_empty());
+        assert!(!drain_wire(&mut wire)[0].1, "not told to shut down");
+
+        assert_eq!(
+            answer_at_lan_speed(&mut st, &hub, 0, &blocks),
+            (0, false),
+            "trust_peer={trust_peer}: its late answer is a body"
+        );
+        for b in &blocks {
+            assert!(hub
+                .query
+                .block_queue_has_hash(&b.block_hash().to_byte_array()));
+        }
+        assert!(st.slots[0].alive && !drain_wire(&mut wire)[0].1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// Two `--connect` peers both stall. Peer 0 is paused and its blocks go to
+/// peer 1. When peer 1 then trips the check, the only other peer is paused,
+/// so nobody could take peer 1's blocks: peer 1 keeps them and is not
+/// paused.
+#[test]
+fn manual_staller_beside_a_paused_peer_keeps_its_requests() {
     let (dir, hub) = tmp_hub();
-    let (mut st, mut wire) = connect_peers(&hub, 1, PeerConnType::Manual);
+    let (mut st, mut wire) = connect_peers(&hub, 2, PeerConnType::Manual);
     owe_on_wire(&mut st, 0, h(1), 0);
+    owe_on_wire(&mut st, 1, h(2), 0);
 
-    stall_pass(&mut st, &hub, 30_001);
-    assert!(st.slots[0].alive && !drain_wire(&mut wire)[0].1);
+    let freed = stall_pass(&mut st, &hub, 30_001);
+    assert_eq!(freed, vec![h(1)], "peer 0 is paused while peer 1 can serve");
+    assert!(!st.slots[0].takes_block_requests());
 
-    hub.clock.set_mock(T0 + 60);
-    assign(&mut st, &hub);
+    rbitcoin_log::capture_logs(true);
+    let freed = stall_pass(&mut st, &hub, 30_002);
+    let logs: Vec<String> = rbitcoin_log::take_logs()
+        .into_iter()
+        .map(|(_, l)| l)
+        .collect();
+    rbitcoin_log::capture_logs(false);
+    assert!(freed.is_empty(), "peer 1 has nobody to hand off to");
     assert!(
-        drain_wire(&mut wire)[0].0.is_empty() && st.inflight.is_empty(),
-        "inside the cooldown nothing is asked"
+        !logs.iter().any(|l| l.contains("Pausing")),
+        "peer 1 is not paused; logs={logs:?}"
     );
+    let s = &st.slots[1];
+    assert!(s.alive && s.takes_block_requests());
+    assert!(s.in_flight.contains(&h(2)));
+    assert!(st.inflight.get(&h(2)).is_some_and(|r| r.peers.contains(&1)));
+    assert!(st.addr_cooldown.is_empty());
+    assert!(drain_wire(&mut wire).iter().all(|(_, shut)| !shut));
+    let _ = std::fs::remove_dir_all(dir);
+}
 
-    hub.clock.set_mock(T0 + COOLDOWN_SECS);
-    assign(&mut st, &hub);
-    assert!(
-        drain_wire(&mut wire)[0].0.contains(&h(1)),
-        "the sole peer is asked for the released block again"
-    );
+/// The other `--connect` peer just answered `notfound` for the block the
+/// staller owes, so assign would not ask it for that block: nobody could
+/// take it, and the staller keeps it.
+#[test]
+fn manual_staller_keeps_a_block_the_other_peer_lacks() {
+    let (dir, hub) = tmp_hub();
+    let (mut st, mut wire) = connect_peers(&hub, 2, PeerConnType::Manual);
+    owe_on_wire(&mut st, 0, h(1), 0);
+    st.slots[1].chain.note_notfound(h(1), 29_000);
+
+    let freed = stall_pass(&mut st, &hub, 30_001);
+    assert!(freed.is_empty(), "peer 1 cannot take h(1)");
+    assert!(st.slots[0].takes_block_requests());
+    assert!(st.slots[0].in_flight.contains(&h(1)));
+    assert!(drain_wire(&mut wire).iter().all(|(_, shut)| !shut));
     let _ = std::fs::remove_dir_all(dir);
 }
 
