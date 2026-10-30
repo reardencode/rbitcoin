@@ -2065,8 +2065,9 @@ async fn elapsed_tweaks_chunk_seals_while_heights_remain() {
     let last = 3_000u32;
 
     let (client, server) = tokio::io::duplex(1024 * 1024);
-    let (server_r, mut server_w) = tokio::io::split(server);
+    let (server_r, server_w) = tokio::io::split(server);
     let mut server_r = BufReader::new(server_r);
+    let mut server_w = rbitcoin_electrum::server::ConnWrite::new(server_w, idle);
     let mut next = 0u32;
     tokio::time::timeout(
         Duration::from_secs(3),
@@ -2079,7 +2080,6 @@ async fn elapsed_tweaks_chunk_seals_while_heights_remain() {
             last,
             limits,
             0,
-            idle,
             max_line,
             started,
             &mut next,
@@ -2106,8 +2106,9 @@ async fn elapsed_tweaks_chunk_seals_while_heights_remain() {
     );
 
     let (client, server) = tokio::io::duplex(1024 * 1024);
-    let (server_r, mut server_w) = tokio::io::split(server);
+    let (server_r, server_w) = tokio::io::split(server);
     let mut server_r = BufReader::new(server_r);
+    let mut server_w = rbitcoin_electrum::server::ConnWrite::new(server_w, idle);
     let mut next = 0u32;
     tokio::time::timeout(
         Duration::from_secs(3),
@@ -2120,7 +2121,6 @@ async fn elapsed_tweaks_chunk_seals_while_heights_remain() {
             last,
             limits,
             0,
-            idle,
             max_line,
             started,
             &mut next,

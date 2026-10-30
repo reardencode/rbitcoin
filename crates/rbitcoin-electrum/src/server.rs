@@ -398,13 +398,13 @@ pub async fn handle_client<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let (reader, mut writer) = tokio::io::split(stream);
+    let (reader, writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
     let mut conn = ElectrumConn::new();
     let mut last_sent_status: HashMap<[u8; 32], String> = HashMap::new();
     let notify = Arc::new(Notify::new());
     let mut mempool_rx = mempool.as_ref().map(|m| m.subscribe_announces());
-    let idle = config.idle_timeout();
+    let mut writer = ConnWrite::new(writer, config.idle_timeout());
     let max_line = config.max_line_bytes();
     let mut sh_seen = query.sh_indexed_through_height();
     // A status read overlapped a held pool, so the tick reads every sub again.
@@ -432,7 +432,7 @@ where
                                 "method": "blockchain.headers.subscribe",
                                 "params": [{ "hex": t.header_hex, "height": t.height }]
                             });
-                            write_line(&mut writer, msg, idle).await?;
+                            writer.line(msg).await?;
                         }
                         if !conn.outpoint_subs.is_empty() {
                             emit_outpoint_notes(
@@ -440,20 +440,11 @@ where
                                 &query,
                                 mempool.clone(),
                                 &conn.outpoint_subs,
-                                idle,
                             )
                             .await?;
                         }
                         if let Some(sub) = conn.sp_sub.as_ref() {
-                            emit_sp_tip(
-                                &mut writer,
-                                &query,
-                                &params,
-                                sub,
-                                t.height,
-                                idle,
-                            )
-                            .await?;
+                            emit_sp_tip(&mut writer, &query, &params, sub, t.height).await?;
                         }
                         if !conn.sh_subs.is_empty() {
                             let heights = if t.reorg_from_height.is_some() {
@@ -468,7 +459,6 @@ where
                                 &conn.sh_subs,
                                 &mut last_sent_status,
                                 heights,
-                                idle,
                             )
                             .await?;
                         }
@@ -482,7 +472,6 @@ where
                                 &conn.sh_subs,
                                 &mut last_sent_status,
                                 None,
-                                idle,
                             )
                             .await?;
                         }
@@ -517,7 +506,6 @@ where
                     &conn.sh_subs,
                     &mut last_sent_status,
                     scan,
-                    idle,
                 )
                 .await?;
                 if !sh_rescan {
@@ -571,18 +559,12 @@ where
                             sh_rescan = true;
                             continue;
                         };
-                        push_sh_notes(
-                            &mut writer,
-                            &conn.sh_subs,
-                            &mut last_sent_status,
-                            statuses,
-                            idle,
-                        )
-                        .await?;
+                        push_sh_notes(&mut writer, &conn.sh_subs, &mut last_sent_status, statuses)
+                            .await?;
                     }
                 }
             }
-            line = tokio::time::timeout(idle, read_line_capped(&mut reader, max_line)) => {
+            line = tokio::time::timeout(writer.idle(), read_line_capped(&mut reader, max_line)) => {
                 let line = match line {
                     Ok(Ok(Some(l))) => l,
                     Ok(Ok(None)) => {
@@ -594,7 +576,7 @@ where
                                 "jsonrpc":"2.0","id": null,
                                 "error": {"code": -32600, "message": "request line too long"}
                             });
-                            let _ = write_line(&mut writer, resp, idle).await;
+                            let _ = writer.line(resp).await;
                             return Err(e);
                         }
                         return Err(e);
@@ -622,14 +604,7 @@ where
                 };
                 let resp = match req {
                     Value::Array(items) => {
-                        answer_batch(
-                            &ctx,
-                            &mut conn,
-                            &mut last_sent_status,
-                            &mut writer,
-                            idle,
-                            items,
-                        )
+                        answer_batch(&ctx, &mut conn, &mut last_sent_status, &mut writer, items)
                         .await?;
                         continue;
                     }
@@ -647,7 +622,6 @@ where
                                         &peer,
                                         id,
                                         &params_v,
-                                        idle,
                                         &mut conn,
                                     )
                                     .await?
@@ -661,7 +635,6 @@ where
                                         &peer,
                                         id,
                                         &params_v,
-                                        idle,
                                         max_line,
                                         config.tweaks_min_dust,
                                     )
@@ -673,7 +646,7 @@ where
                         None => answer_one(&ctx, &mut conn, &mut last_sent_status, &req).await?,
                     },
                 };
-                write_line(&mut writer, resp, idle).await?;
+                writer.line(resp).await?;
                 let _ = &notify;
             }
         }
@@ -849,8 +822,7 @@ fn batch_item(item: &Value) -> BatchItem {
 
 /// The reply array, written slot by slot as one line.
 struct BatchOut<'w, W> {
-    writer: &'w mut W,
-    idle: Duration,
+    writer: &'w mut ConnWrite<W>,
     opened: bool,
 }
 
@@ -864,14 +836,14 @@ impl<W: AsyncWrite + Unpin> BatchOut<'_, W> {
                 .map_err(|_| std::io::Error::other("json encode join failed"))?,
         );
         self.opened = true;
-        write_bytes_within(self.writer, &slot, self.idle).await
+        self.writer.bytes(&slot).await
     }
 
     async fn close(self) -> Result<(), std::io::Error> {
         if !self.opened {
             return Ok(());
         }
-        write_bytes_within(self.writer, b"]\n", self.idle).await
+        self.writer.bytes(b"]\n").await
     }
 }
 
@@ -902,24 +874,21 @@ async fn answer_batch<W: AsyncWrite + Unpin>(
     ctx: &RequestCtx<'_>,
     conn: &mut ElectrumConn,
     last_sent: &mut HashMap<[u8; 32], String>,
-    writer: &mut W,
-    idle: Duration,
+    writer: &mut ConnWrite<W>,
     items: Vec<Value>,
 ) -> Result<(), std::io::Error> {
     if items.is_empty() {
-        return write_line(writer, invalid_request(Value::Null, "empty batch"), idle).await;
+        return writer
+            .line(invalid_request(Value::Null, "empty batch"))
+            .await;
     }
     if items.len() > MAX_BATCH_ITEMS {
-        return write_line(
-            writer,
-            invalid_request(Value::Null, "batch too large"),
-            idle,
-        )
-        .await;
+        return writer
+            .line(invalid_request(Value::Null, "batch too large"))
+            .await;
     }
     let mut out = BatchOut {
         writer,
-        idle,
         opened: false,
     };
     let limit = ctx.config.batch_window.max(1);
@@ -1199,13 +1168,12 @@ fn finish_reply(
 /// Answer `server.ping` while computing.
 pub async fn serve_sp_subscribe<R, W>(
     reader: &mut R,
-    writer: &mut W,
+    writer: &mut ConnWrite<W>,
     query: &Arc<Query>,
     chain: &Arc<ChainParams>,
     peer: &SocketAddr,
     id: Value,
     params_v: &Value,
-    idle: Duration,
     conn: &mut ElectrumConn,
 ) -> Result<(), std::io::Error>
 where
@@ -1216,22 +1184,16 @@ where
     let sub = match crate::silent_scan::parse_sub(params_v, chain.network, tip) {
         Ok(s) => s,
         Err(e) => {
-            write_line(
-                writer,
-                json!({"jsonrpc":"2.0","id": id, "error": {"code": 1, "message": e}}),
-                idle,
-            )
-            .await?;
+            writer
+                .line(json!({"jsonrpc":"2.0","id": id, "error": {"code": 1, "message": e}}))
+                .await?;
             return Ok(());
         }
     };
     if conn.sp_scan_busy {
-        write_line(
-            writer,
-            json!({"jsonrpc":"2.0","id": id, "error": {"code": 1, "message": "silent payment scan already running"}}),
-            idle,
-        )
-        .await?;
+        writer
+            .line(json!({"jsonrpc":"2.0","id": id, "error": {"code": 1, "message": "silent payment scan already running"}}))
+            .await?;
         return Ok(());
     }
     let result = crate::silent_scan::subscribe_result(&sub);
@@ -1243,7 +1205,7 @@ where
         0,
         None,
     );
-    write_line(writer, rpc_result(&id, &result, None), idle).await?;
+    writer.line(rpc_result(&id, &result, None)).await?;
     conn.sp_scan_busy = true;
     let last = tip.unwrap_or(sub.start);
     let scanned = scan_sp_off_connection(reader, query, chain, &sub, last).await;
@@ -1262,7 +1224,7 @@ where
             "history": hits,
         }
     });
-    write_line(writer, note, idle).await?;
+    writer.line(note).await?;
     conn.sp_sub = Some(sub);
     Ok(())
 }
@@ -1287,12 +1249,11 @@ pub fn silentpayments_unsubscribe(
 }
 
 pub async fn emit_sp_tip<W: AsyncWrite + Unpin>(
-    writer: &mut W,
+    writer: &mut ConnWrite<W>,
     query: &Query,
     chain: &ChainParams,
     sub: &crate::silent_scan::SpSub,
     height: u32,
-    idle: Duration,
 ) -> Result<(), std::io::Error> {
     let hits = crate::silent_scan::scan_hits(query, chain, sub, height, height).unwrap_or_default();
     if hits.is_empty() {
@@ -1307,15 +1268,14 @@ pub async fn emit_sp_tip<W: AsyncWrite + Unpin>(
             "history": hits,
         }
     });
-    write_line(writer, note, idle).await
+    writer.line(note).await
 }
 
 pub async fn emit_outpoint_notes<W: AsyncWrite + Unpin>(
-    writer: &mut W,
+    writer: &mut ConnWrite<W>,
     query: &Arc<Query>,
     mempool: Option<Arc<MempoolHub>>,
     subs: &HashSet<([u8; 32], u32)>,
-    idle: Duration,
 ) -> Result<(), std::io::Error> {
     let keys: Vec<([u8; 32], u32)> = subs.iter().copied().collect();
     let q = Arc::clone(query);
@@ -1338,7 +1298,7 @@ pub async fn emit_outpoint_notes<W: AsyncWrite + Unpin>(
             "method": "blockchain.outpoint.subscribe",
             "params": [txid_hex(&txid), vout, status],
         });
-        write_line(writer, note, idle).await?;
+        writer.line(note).await?;
     }
     Ok(())
 }
@@ -1434,13 +1394,12 @@ pub async fn scan_sp_off_connection<R: AsyncBufRead + Unpin>(
 #[allow(clippy::too_many_arguments)] // matches handle_client call-site
 pub async fn serve_tweaks_subscribe<R, W>(
     reader: &mut R,
-    writer: &mut W,
+    writer: &mut ConnWrite<W>,
     query: &Arc<Query>,
     chain: &Arc<ChainParams>,
     peer: &SocketAddr,
     id: Value,
     params_v: &Value,
-    idle: Duration,
     max_line: usize,
     min_dust: u64,
 ) -> Result<(), std::io::Error>
@@ -1451,7 +1410,7 @@ where
     let req = match crate::tweaks::parse_req(params_v) {
         Ok(r) => r,
         Err(e) => {
-            tweaks_sub_err(writer, peer, &id, params_v, 0, &e, idle).await?;
+            tweaks_sub_err(writer, peer, &id, params_v, 0, &e).await?;
             return Ok(());
         }
     };
@@ -1460,7 +1419,7 @@ where
     let t0 = Instant::now();
     let Some(last) = last else {
         return serve_tweaks_empty_last(
-            writer, query, chain, peer, &id, params_v, req, t0, min_dust, idle,
+            writer, query, chain, peer, &id, params_v, req, t0, min_dust,
         )
         .await;
     };
@@ -1485,7 +1444,6 @@ where
                 params_v,
                 t0.elapsed().as_millis() as u64,
                 &e,
-                idle,
             )
             .await?;
             return Ok(());
@@ -1494,12 +1452,12 @@ where
     let wall_ms = t0.elapsed().as_millis() as u64;
     meter_dispatch_wall(t0.elapsed().as_micros() as u64);
     tweaks_sub_ok_log(peer, params_v, wall_ms);
-    write_rpc_result(writer, &id, &wave.result_json, idle).await?;
-    write_raw_lines(writer, &wave.rest_notifies, idle).await?;
+    writer.rpc_result(&id, &wave.result_json).await?;
+    writer.raw_lines(&wave.rest_notifies).await?;
     let mut next = req.start.saturating_add(wave.consumed.max(1));
     let limits = crate::tweaks::subscribe_serve_limits(req.historical);
     serve_tweaks_rest(
-        reader, writer, query, chain, peer, last, limits, min_dust, idle, max_line, t0, &mut next,
+        reader, writer, query, chain, peer, last, limits, min_dust, max_line, t0, &mut next,
     )
     .await
 }
@@ -1508,14 +1466,13 @@ where
 #[allow(clippy::too_many_arguments)]
 pub async fn serve_tweaks_rest<R, W>(
     reader: &mut R,
-    writer: &mut W,
+    writer: &mut ConnWrite<W>,
     query: &Arc<Query>,
     chain: &Arc<ChainParams>,
     peer: &SocketAddr,
     last: u32,
     limits: rbitcoin_query::ThinTweakRangeLimits,
     min_dust: u64,
-    idle: Duration,
     max_line: usize,
     t0: Instant,
     next: &mut u32,
@@ -1527,22 +1484,21 @@ where
     let more = *next <= last;
     if crate::tweaks::chunk_still_open(t0.elapsed(), more) {
         serve_tweaks_follow_waves(
-            reader, writer, query, chain, peer, last, limits, min_dust, idle, max_line, t0, next,
+            reader, writer, query, chain, peer, last, limits, min_dust, max_line, t0, next,
         )
         .await?;
     }
-    write_line(writer, crate::tweaks::done_notify(), idle).await?;
+    writer.line(crate::tweaks::done_notify()).await?;
     Ok(())
 }
 
 pub async fn tweaks_sub_err<W: AsyncWrite + Unpin>(
-    writer: &mut W,
+    writer: &mut ConnWrite<W>,
     peer: &SocketAddr,
     id: &Value,
     params_v: &Value,
     wall_ms: u64,
     e: &str,
-    idle: Duration,
 ) -> Result<(), std::io::Error> {
     rbitcoin_log::api_call(
         "electrum",
@@ -1552,12 +1508,9 @@ pub async fn tweaks_sub_err<W: AsyncWrite + Unpin>(
         wall_ms,
         Some(e),
     );
-    write_line(
-        writer,
-        json!({"jsonrpc":"2.0","id": id, "error": {"code": 1, "message": e}}),
-        idle,
-    )
-    .await
+    writer
+        .line(json!({"jsonrpc":"2.0","id": id, "error": {"code": 1, "message": e}}))
+        .await
 }
 
 #[doc(hidden)]
@@ -1574,7 +1527,7 @@ pub fn tweaks_sub_ok_log(peer: &SocketAddr, params_v: &Value, wall_ms: u64) {
 
 #[allow(clippy::too_many_arguments)]
 pub async fn serve_tweaks_empty_last<W: AsyncWrite + Unpin>(
-    writer: &mut W,
+    writer: &mut ConnWrite<W>,
     query: &Arc<Query>,
     chain: &Arc<ChainParams>,
     peer: &SocketAddr,
@@ -1583,7 +1536,6 @@ pub async fn serve_tweaks_empty_last<W: AsyncWrite + Unpin>(
     req: crate::tweaks::TweakReq,
     t0: Instant,
     min_dust: u64,
-    idle: Duration,
 ) -> Result<(), std::io::Error> {
     let first =
         match crate::tweaks::height_map_json(query, chain, req.start, !req.historical, min_dust) {
@@ -1596,42 +1548,39 @@ pub async fn serve_tweaks_empty_last<W: AsyncWrite + Unpin>(
                     params_v,
                     t0.elapsed().as_millis() as u64,
                     &e,
-                    idle,
                 )
                 .await?;
                 return Ok(());
             }
         };
-    serve_tweaks_empty_ok(writer, peer, id, params_v, t0, &first, idle).await
+    serve_tweaks_empty_ok(writer, peer, id, params_v, t0, &first).await
 }
 
 pub async fn serve_tweaks_empty_ok<W: AsyncWrite + Unpin>(
-    writer: &mut W,
+    writer: &mut ConnWrite<W>,
     peer: &SocketAddr,
     id: &Value,
     params_v: &Value,
     t0: Instant,
     first: &str,
-    idle: Duration,
 ) -> Result<(), std::io::Error> {
     let wall_ms = t0.elapsed().as_millis() as u64;
     meter_dispatch_wall(t0.elapsed().as_micros() as u64);
     tweaks_sub_ok_log(peer, params_v, wall_ms);
-    write_rpc_result(writer, id, first, idle).await?;
-    write_line(writer, crate::tweaks::done_notify(), idle).await
+    writer.rpc_result(id, first).await?;
+    writer.line(crate::tweaks::done_notify()).await
 }
 
 #[allow(clippy::too_many_arguments)]
 pub async fn serve_tweaks_follow_waves<R, W>(
     reader: &mut R,
-    writer: &mut W,
+    writer: &mut ConnWrite<W>,
     query: &Arc<Query>,
     chain: &Arc<ChainParams>,
     peer: &SocketAddr,
     last: u32,
     limits: rbitcoin_query::ThinTweakRangeLimits,
     min_dust: u64,
-    idle: Duration,
     max_line: usize,
     t0: Instant,
     next: &mut u32,
@@ -1653,7 +1602,7 @@ where
     let mut handle = spawn_wave(batch_start);
     loop {
         let batch = loop {
-            match tweaks_wait_wave_or_ping(reader, writer, idle, max_line, &mut handle).await? {
+            match tweaks_wait_wave_or_ping(reader, writer, max_line, &mut handle).await? {
                 TweaksWait::Wave(map) => break map,
                 TweaksWait::Continue => continue,
                 TweaksWait::Eof => return Ok(()),
@@ -1680,7 +1629,7 @@ where
         if open {
             handle = spawn_wave(*next);
         }
-        write_raw_lines(writer, &batch.lines, idle).await?;
+        writer.raw_lines(&batch.lines).await?;
         if !open {
             break;
         }
@@ -1698,8 +1647,7 @@ pub enum TweaksWait {
 
 pub async fn tweaks_wait_wave_or_ping<R, W>(
     reader: &mut R,
-    writer: &mut W,
-    idle: Duration,
+    writer: &mut ConnWrite<W>,
     max_line: usize,
     handle: &mut tokio::task::JoinHandle<Result<crate::tweaks::NotifyWave, String>>,
 ) -> Result<TweaksWait, std::io::Error>
@@ -1707,6 +1655,7 @@ where
     R: AsyncBufReadExt + Unpin,
     W: AsyncWrite + Unpin,
 {
+    let idle = writer.idle();
     tokio::select! {
         biased;
         line = tokio::time::timeout(idle, read_line_capped(reader, max_line)) => {
@@ -1716,12 +1665,9 @@ where
                         if let Ok(req) = serde_json::from_str::<Value>(&l) {
                             let ping_id = req.get("id").cloned().unwrap_or(Value::Null);
                             if req.get("method").and_then(|m| m.as_str()) == Some("server.ping") {
-                                write_line(
-                                    writer,
-                                    json!({"jsonrpc":"2.0","id": ping_id, "result": null}),
-                                    idle,
-                                )
-                                .await?;
+                                writer
+                                    .line(json!({"jsonrpc":"2.0","id": ping_id, "result": null}))
+                                    .await?;
                             }
                         }
                     }
@@ -1738,6 +1684,44 @@ where
         map = &mut *handle => {
             Ok(TweaksWait::Wave(map.unwrap_or_else(|e| Err(e.to_string()))))
         }
+    }
+}
+
+/// One connection's writes. Each write takes a fresh `idle` timeout.
+pub struct ConnWrite<W> {
+    inner: W,
+    idle: Duration,
+}
+
+impl<W> ConnWrite<W> {
+    pub fn new(inner: W, idle: Duration) -> Self {
+        Self { inner, idle }
+    }
+
+    pub fn idle(&self) -> Duration {
+        self.idle
+    }
+}
+
+impl<W: AsyncWrite + Unpin> ConnWrite<W> {
+    pub async fn line(&mut self, msg: Value) -> Result<(), std::io::Error> {
+        write_line(&mut self.inner, msg, self.idle).await
+    }
+
+    pub async fn bytes(&mut self, bytes: &[u8]) -> Result<(), std::io::Error> {
+        write_bytes_within(&mut self.inner, bytes, self.idle).await
+    }
+
+    pub async fn raw_lines(&mut self, lines: &[String]) -> Result<(), std::io::Error> {
+        write_raw_lines(&mut self.inner, lines, self.idle).await
+    }
+
+    pub async fn rpc_result(
+        &mut self,
+        id: &Value,
+        result_json: &str,
+    ) -> Result<(), std::io::Error> {
+        write_rpc_result(&mut self.inner, id, result_json, self.idle).await
     }
 }
 
@@ -1921,13 +1905,12 @@ pub fn take_new_status(
 /// Push the statuses that changed. `false` when a connect or reorg held the
 /// pool during the read: nothing was pushed, and the caller reads again.
 pub async fn emit_sh_notes<W: AsyncWrite + Unpin>(
-    writer: &mut W,
+    writer: &mut ConnWrite<W>,
     query: &Arc<Query>,
     mempool: Option<Arc<MempoolHub>>,
     sh_subs: &HashSet<[u8; 32]>,
     last_sent: &mut HashMap<[u8; 32], String>,
     heights: Option<Vec<u32>>,
-    idle: Duration,
 ) -> Result<bool, std::io::Error> {
     let q = Arc::clone(query);
     let subs: Vec<[u8; 32]> = sh_subs.iter().copied().collect();
@@ -1940,18 +1923,17 @@ pub async fn emit_sh_notes<W: AsyncWrite + Unpin>(
     let Some(notes) = notes else {
         return Ok(false);
     };
-    push_sh_notes(writer, sh_subs, last_sent, notes, idle).await?;
+    push_sh_notes(writer, sh_subs, last_sent, notes).await?;
     Ok(true)
 }
 
 /// Push each status in `notes` that differs from the last one sent.
 #[doc(hidden)]
 pub async fn push_sh_notes<W: AsyncWrite + Unpin>(
-    writer: &mut W,
+    writer: &mut ConnWrite<W>,
     sh_subs: &HashSet<[u8; 32]>,
     last_sent: &mut HashMap<[u8; 32], String>,
     notes: Vec<([u8; 32], String)>,
-    idle: Duration,
 ) -> Result<(), std::io::Error> {
     for (sh, status) in notes {
         let Some(status) = take_new_status(last_sent, sh_subs, sh, status) else {
@@ -1962,7 +1944,7 @@ pub async fn push_sh_notes<W: AsyncWrite + Unpin>(
             "method": "blockchain.scripthash.subscribe",
             "params": [hash_hex_rev(&sh), status_json(status)]
         });
-        write_line(writer, msg, idle).await?;
+        writer.line(msg).await?;
     }
     Ok(())
 }
