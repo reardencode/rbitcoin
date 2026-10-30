@@ -5,7 +5,7 @@ use rbitcoin_query::index_writebehind::*;
 use rbitcoin_query::Query;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::sync_channel;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 /// Info lines from one `io_loop`. A loop that waits out `budget` is the
@@ -17,92 +17,154 @@ fn io_loop_lines(
     stages: &IndexStageMs,
     tx: &std::sync::mpsc::SyncSender<ReadyWindow>,
     budget: Duration,
-    on_caught: impl FnOnce(),
+    on_caught: impl FnOnce() + Send,
 ) -> Vec<String> {
-    let forced = AtomicBool::new(false);
-    let started = Instant::now();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
     let logs = std::thread::scope(|scope| {
-        scope.spawn(|| {
-            while !stop.load(Ordering::Relaxed) {
-                if started.elapsed() >= budget {
-                    forced.store(true, Ordering::Relaxed);
-                    stop.store(true, Ordering::Relaxed);
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
+        scope.spawn(move || {
+            rbitcoin_log::capture_logs(false);
+            rbitcoin_log::capture_logs(true);
+            let result = io_loop(
+                query,
+                stop,
+                resync,
+                stages,
+                tx,
+                PROGRESS_EVERY,
+                || {},
+                on_caught,
+            );
+            let logs = rbitcoin_log::take_logs();
+            rbitcoin_log::capture_logs(false);
+            let _ = done_tx.send((result, logs));
         });
-        rbitcoin_log::capture_logs(false);
-        rbitcoin_log::capture_logs(true);
-        io_loop(query, stop, resync, stages, tx, PROGRESS_EVERY, on_caught).unwrap();
-        let logs = rbitcoin_log::take_logs();
-        rbitcoin_log::capture_logs(false);
-        stop.store(true, Ordering::Relaxed);
-        logs
+        match done_rx.recv_timeout(budget) {
+            Ok((result, logs)) => {
+                result.expect("io_loop");
+                stop.store(true, Ordering::Relaxed);
+                logs
+            }
+            Err(_) => {
+                stop.store(true, Ordering::Relaxed);
+                panic!("io_loop waited instead of sealing the height that equals the target");
+            }
+        }
     });
-    assert!(
-        !forced.load(Ordering::Relaxed),
-        "io_loop waited instead of sealing the height that equals the target"
-    );
     logs.into_iter().map(|(_, line)| line).collect()
 }
 
 /// Seal from the current watermarks through the released tip.
-/// `hold_first` blocks the first window so a later window in the same
-/// pass can cross `progress_every`.
-fn drive_index_pass(query: &Query, hold_first: Duration, progress_every: Duration) -> Vec<String> {
+/// `hold_first` parks the first offer. This function opens that gate
+/// after `progress_every` has elapsed, so a later window in the pass logs.
+fn drive_index_pass(query: &Query, hold_first: bool, progress_every: Duration) -> Vec<String> {
     let stop = AtomicBool::new(false);
     let resync = AtomicBool::new(false);
     let stages = IndexStageMs::default();
     let (tx, rx) = sync_channel(0);
     let (worker_tx, worker_rx) = sync_channel(2);
-    let forced = AtomicBool::new(false);
-    let started = Instant::now();
+    let parked = Arc::new((Mutex::new(false), Condvar::new()));
+    let open = Arc::new((Mutex::new(!hold_first), Condvar::new()));
+    let first = AtomicBool::new(false);
+    let budget = Duration::from_secs(120);
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let stop = &stop;
+    let resync = &resync;
+    let stages = &stages;
     let logs = std::thread::scope(|scope| {
-        scope.spawn(|| {
-            while !stop.load(Ordering::Relaxed) {
-                if started.elapsed() >= Duration::from_secs(120) {
-                    forced.store(true, Ordering::Relaxed);
-                    stop.store(true, Ordering::Relaxed);
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-        });
-        let worker = scope.spawn(|| {
+        let worker = scope.spawn(move || {
             rbitcoin_log::capture_logs(false);
             rbitcoin_log::capture_logs(true);
-            cpu_worker(query, worker_rx, &resync, &stages).unwrap();
-            rbitcoin_log::take_logs()
+            cpu_worker(query, worker_rx, resync, stages).unwrap();
+            let logs = rbitcoin_log::take_logs();
+            rbitcoin_log::capture_logs(false);
+            logs
         });
-        let forward = scope.spawn(move || {
-            if !hold_first.is_zero() {
-                std::thread::sleep(hold_first);
-            }
+        scope.spawn(move || {
             while let Ok(window) = rx.recv() {
                 if worker_tx.send(window).is_err() {
                     break;
                 }
             }
         });
-        rbitcoin_log::capture_logs(false);
-        rbitcoin_log::capture_logs(true);
-        io_loop(query, &stop, &resync, &stages, &tx, progress_every, || {
-            stop.store(true, Ordering::Relaxed);
-        })
-        .unwrap();
-        let mut logs = rbitcoin_log::take_logs();
-        rbitcoin_log::capture_logs(false);
+        let parked_io = Arc::clone(&parked);
+        let open_io = Arc::clone(&open);
+        scope.spawn(move || {
+            rbitcoin_log::capture_logs(false);
+            rbitcoin_log::capture_logs(true);
+            let result = io_loop(
+                query,
+                stop,
+                resync,
+                stages,
+                &tx,
+                progress_every,
+                || {
+                    if !hold_first || first.swap(true, Ordering::SeqCst) {
+                        return;
+                    }
+                    {
+                        let (lock, cv) = &*parked_io;
+                        *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+                        cv.notify_all();
+                    }
+                    let (lock, cv) = &*open_io;
+                    let mut gate = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    while !*gate {
+                        gate = cv.wait(gate).unwrap_or_else(|e| e.into_inner());
+                    }
+                },
+                || stop.store(true, Ordering::Relaxed),
+            );
+            drop(tx);
+            let logs = rbitcoin_log::take_logs();
+            rbitcoin_log::capture_logs(false);
+            let _ = done_tx.send((result, logs));
+        });
+        if hold_first {
+            let (lock, cv) = &*parked;
+            let mut seen = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !*seen {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    stop.store(true, Ordering::Relaxed);
+                    panic!("first window was not queued");
+                }
+                let (guard, status) = cv
+                    .wait_timeout(seen, left)
+                    .unwrap_or_else(|e| e.into_inner());
+                seen = guard;
+                if status.timed_out() && !*seen {
+                    stop.store(true, Ordering::Relaxed);
+                    panic!("first window was not queued");
+                }
+            }
+            drop(seen);
+            let started = Instant::now();
+            let (lock, cv) = &*open;
+            let mut gate = lock.lock().unwrap_or_else(|e| e.into_inner());
+            while started.elapsed() < progress_every {
+                let left = progress_every - started.elapsed();
+                let (guard, _) = cv
+                    .wait_timeout(gate, left)
+                    .unwrap_or_else(|e| e.into_inner());
+                gate = guard;
+            }
+            *gate = true;
+            cv.notify_all();
+        }
+        let (result, mut logs) = match done_rx.recv_timeout(budget) {
+            Ok(done) => done,
+            Err(_) => {
+                stop.store(true, Ordering::Relaxed);
+                panic!("io_loop waited instead of sealing the height that equals the target");
+            }
+        };
+        result.expect("io_loop");
         stop.store(true, Ordering::Relaxed);
-        drop(tx);
-        forward.join().unwrap();
         logs.extend(worker.join().unwrap());
         logs
     });
-    assert!(
-        !forced.load(Ordering::Relaxed),
-        "io_loop waited instead of sealing the height that equals the target"
-    );
     logs.into_iter().map(|(_, line)| line).collect()
 }
 
@@ -373,11 +435,7 @@ fn released_builder_crosses_a_full_window_and_success_does_not_resync() {
     q.release_index_writebehind(Height(pass_tip));
     assert_eq!(PROGRESS_EVERY.as_secs(), 10);
     let progress_every = Duration::from_secs(1);
-    let lines = drive_index_pass(
-        &q,
-        progress_every + Duration::from_millis(50),
-        progress_every,
-    );
+    let lines = drive_index_pass(&q, true, progress_every);
     let heights = pass_tip + 1 - resume;
     assert!(
         lines
@@ -401,7 +459,7 @@ fn released_builder_crosses_a_full_window_and_success_does_not_resync() {
     let short_tip = short_from + 10;
     connect_coinbases(&q, short_from, short_tip, &mut prev_fk, &mut prev_hash);
     q.release_index_writebehind(Height(short_tip));
-    let lines = drive_index_pass(&q, Duration::ZERO, PROGRESS_EVERY);
+    let lines = drive_index_pass(&q, false, PROGRESS_EVERY);
     assert!(
         lines
             .iter()
@@ -643,7 +701,17 @@ fn writebehind_registers_a_stage_for_a_wide_gap() {
     let stages = IndexStageMs::default();
     let (tx, rx) = sync_channel(1);
     drop(rx);
-    io_loop(&q, &stop, &resync, &stages, &tx, PROGRESS_EVERY, || {}).unwrap();
+    io_loop(
+        &q,
+        &stop,
+        &resync,
+        &stages,
+        &tx,
+        PROGRESS_EVERY,
+        || {},
+        || {},
+    )
+    .unwrap();
     let fin = finished_index_stages();
     progress::capture_finished(false);
     assert_eq!(fin, [("blockfilter build", 0, 0, u64::from(tip) + 1)]);

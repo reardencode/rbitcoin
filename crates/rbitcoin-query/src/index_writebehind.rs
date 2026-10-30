@@ -589,6 +589,7 @@ pub fn run_writebehind(
             &stages,
             &tx,
             PROGRESS_EVERY,
+            || {},
             on_filters_caught_up,
         );
         drop(tx);
@@ -612,6 +613,7 @@ pub fn io_loop(
     stages: &IndexStageMs,
     tx: &std::sync::mpsc::SyncSender<ReadyWindow>,
     progress_every: Duration,
+    mut before_send: impl FnMut(),
     on_filters_caught_up: impl FnOnce(),
 ) -> Result<(), ConfirmError> {
     let mut on_filters_caught_up = Some(on_filters_caught_up);
@@ -687,6 +689,7 @@ pub fn io_loop(
         let window = read_window(query, start, end)?;
         let read_ns = t_read.elapsed().as_nanos() as u64;
         stages.add_read(read_ns);
+        before_send();
         if tx
             .send(ReadyWindow {
                 window,
