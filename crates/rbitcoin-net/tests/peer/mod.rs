@@ -3641,6 +3641,71 @@ async fn ping_timeout_applies_a_minute_after_the_last_block() {
     );
 }
 
+/// Sends `msg`, then a ping; returns once the pong shows `msg` was read.
+async fn send_and_sync(raw: &mut V2PlainSession, msg: NetworkMessage, nonce: u64) {
+    write_peer_msg(raw, msg).await;
+    write_peer_msg(raw, NetworkMessage::Ping(nonce)).await;
+    let pong = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match next_peer_msg(raw).await {
+                Ok(NetworkMessage::Pong(n)) if n == nonce => return true,
+                Ok(_) => {}
+                Err(_) => return false,
+            }
+        }
+    })
+    .await;
+    assert!(
+        matches!(pong, Ok(true)),
+        "session read the message: {pong:?}"
+    );
+}
+
+/// Core starts the grace minute at the last **new** block. A peer that
+/// re-sends the tip it already gave us, as a compact block or a full one,
+/// with nothing in flight, does not hold off the twenty-minute timeout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resent_tip_does_not_hold_off_the_ping_timeout() {
+    use bitcoin::bip152::HeaderAndShortIds;
+
+    let mut t = paused_serve(
+        "ping-resent-tip",
+        1,
+        &[
+            "/rbitcoin:test(resend-cmpct)/",
+            "/rbitcoin:test(resend-block)/",
+        ],
+    )
+    .await;
+    for (_, sess) in &t.clients {
+        wait_ping_outstanding(sess).await;
+    }
+    let tip = t.node.hub.block_at_height(1).unwrap().unwrap();
+    let start = t.node.peers.now_secs();
+    t.node
+        .peers
+        .set_mock_now(start + PING_TIMEOUT_SECS - POST_BLOCK_PONG_GRACE_SECS / 2);
+    let compact = NetworkMessage::CmpctBlock(CmpctBlock {
+        compact_block: HeaderAndShortIds::from_block(&tip, 0xbeef, 2, &[]).unwrap(),
+    });
+    send_and_sync(&mut t.clients[0].0, compact, 7).await;
+    send_and_sync(&mut t.clients[1].0, NetworkMessage::Block(tip), 8).await;
+
+    t.node.peers.set_mock_now(start + PING_TIMEOUT_SECS + 1);
+    let mut held = Vec::new();
+    for (raw, sess) in &mut t.clients {
+        if !session_closes(raw).await {
+            held.push(sess.subver.clone());
+        }
+    }
+    assert!(
+        held.is_empty(),
+        "re-sending the tip held off the ping timeout: {held:?}"
+    );
+    t.node.shutdown().await;
+    let _ = std::fs::remove_dir_all(&t.dir);
+}
+
 /// With nothing in flight the ping timeout is the twenty minutes alone; the
 /// grace minute only follows a delivered block.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
