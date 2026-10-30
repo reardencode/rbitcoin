@@ -220,6 +220,26 @@ async fn dialer_connect_domain_covers_socks_and_direct() {
     server.await.unwrap();
 }
 
+#[tokio::test]
+async fn proxy_dns_seed_reaches_socks_as_core_fqdn() {
+    let (host, port) = rbitcoin_net::socks_dns_seed_dests(rbitcoin_primitives::Network::Mainnet)
+        .into_iter()
+        .next()
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = listener.local_addr().unwrap();
+    let server = tokio::spawn(accept_domain_connect(
+        listener,
+        b"dnsseed.bluematt.me.",
+        8333,
+    ));
+    Dialer::socks(proxy, true)
+        .connect_domain(&host, port)
+        .await
+        .unwrap();
+    server.await.unwrap();
+}
+
 async fn serve_userpass_ipv4(
     s: &mut tokio::net::TcpStream,
     want_ip: [u8; 4],

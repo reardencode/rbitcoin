@@ -904,8 +904,8 @@ fn proxy_seed_bootstrap_queues_domain_addrfetch() {
     let n = queue_proxy_seed_addrfetch(&peers, rbitcoin_primitives::Network::Signet);
     assert_eq!(n, 2, "signet has two default DNS seeds");
     for want in [
-        "seed.signet.bitcoin.sprovoost.nl",
-        "seed.signet.achownodes.xyz",
+        "seed.signet.bitcoin.sprovoost.nl.",
+        "seed.signet.achownodes.xyz.",
     ] {
         let req = rx.try_recv().expect("queued dial request");
         assert_eq!(req.typ, PeerConnType::AddrFetch);

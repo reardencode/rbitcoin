@@ -536,8 +536,8 @@ fn peers_file_roundtrip_preserves_flags() {
 #[test]
 fn seed_lookup_names_x_filter_before_unfiltered() {
     let names = seed_lookup_names(Network::Mainnet);
-    assert_eq!(names[0][0], "x809.dnsseed.bluematt.me");
-    assert_eq!(names[0][1], "dnsseed.bluematt.me");
+    assert_eq!(names[0][0], "x809.dnsseed.bluematt.me.");
+    assert_eq!(names[0][1], "dnsseed.bluematt.me.");
     for net in [Network::Mainnet, Network::Testnet, Network::Signet] {
         let names = seed_lookup_names(net);
         assert_eq!(names.len(), dns_seeds(net).len());
@@ -567,8 +567,8 @@ fn dns_seed_query_host_matches_core_x_filter() {
     assert!(bits.has(ServiceFlags::P2P_V2));
     assert_eq!(bits.to_u64(), 0x809);
     assert_eq!(
-        dns_seed_query_host("seed.mainnet.achownodes.xyz", bits),
-        "x809.seed.mainnet.achownodes.xyz"
+        dns_seed_query_host("seed.mainnet.achownodes.xyz.", bits),
+        "x809.seed.mainnet.achownodes.xyz."
     );
     assert_eq!(
         dns_seed_query_host("seed.signet.bitcoin.sprovoost.nl", bits),
@@ -968,29 +968,29 @@ fn dns_seeds_match_core_v32() {
     assert_eq!(
         dns_seeds(Network::Mainnet),
         [
-            "dnsseed.bluematt.me",
-            "seed.bitcoin.jonasschnelli.ch",
-            "seed.btc.petertodd.net",
-            "seed.bitcoin.sprovoost.nl",
-            "dnsseed.emzy.de",
-            "seed.bitcoin.wiz.biz",
-            "seed.mainnet.achownodes.xyz",
+            "dnsseed.bluematt.me.",
+            "seed.bitcoin.jonasschnelli.ch.",
+            "seed.btc.petertodd.net.",
+            "seed.bitcoin.sprovoost.nl.",
+            "dnsseed.emzy.de.",
+            "seed.bitcoin.wiz.biz.",
+            "seed.mainnet.achownodes.xyz.",
         ]
     );
     assert_eq!(
         dns_seeds(Network::Testnet),
         [
-            "testnet-seed.bitcoin.jonasschnelli.ch",
-            "seed.tbtc.petertodd.net",
-            "testnet-seed.bluematt.me",
-            "seed.testnet.achownodes.xyz",
+            "testnet-seed.bitcoin.jonasschnelli.ch.",
+            "seed.tbtc.petertodd.net.",
+            "testnet-seed.bluematt.me.",
+            "seed.testnet.achownodes.xyz.",
         ]
     );
     assert_eq!(
         dns_seeds(Network::Signet),
         [
-            "seed.signet.bitcoin.sprovoost.nl",
-            "seed.signet.achownodes.xyz",
+            "seed.signet.bitcoin.sprovoost.nl.",
+            "seed.signet.achownodes.xyz.",
         ]
     );
     let removed = [
@@ -1002,7 +1002,10 @@ fn dns_seeds_match_core_v32() {
     ];
     for net in [Network::Mainnet, Network::Testnet, Network::Signet] {
         for host in dns_seeds(net) {
-            assert!(!removed.contains(host), "{net}: Core dropped {host}");
+            assert!(
+                !removed.contains(&host.trim_end_matches('.')),
+                "{net}: Core dropped {host}"
+            );
         }
     }
 }

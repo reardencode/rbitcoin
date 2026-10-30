@@ -49,27 +49,29 @@ pub fn dns_seed_query_host(seed: &str, services: ServiceFlags) -> String {
 
 /// DNS seed hostnames (resolve at runtime with default port).
 ///
-/// Core `vSeeds` in `src/kernel/chainparams.cpp`, in Core's order.
+/// Core `vSeeds` in `src/kernel/chainparams.cpp`, in Core's order. The
+/// trailing dot keeps each name absolute, so the resolver never tries the
+/// search domain first.
 pub fn dns_seeds(network: Network) -> &'static [&'static str] {
     match network {
         Network::Mainnet => &[
-            "dnsseed.bluematt.me",
-            "seed.bitcoin.jonasschnelli.ch",
-            "seed.btc.petertodd.net",
-            "seed.bitcoin.sprovoost.nl",
-            "dnsseed.emzy.de",
-            "seed.bitcoin.wiz.biz",
-            "seed.mainnet.achownodes.xyz",
+            "dnsseed.bluematt.me.",
+            "seed.bitcoin.jonasschnelli.ch.",
+            "seed.btc.petertodd.net.",
+            "seed.bitcoin.sprovoost.nl.",
+            "dnsseed.emzy.de.",
+            "seed.bitcoin.wiz.biz.",
+            "seed.mainnet.achownodes.xyz.",
         ],
         Network::Testnet => &[
-            "testnet-seed.bitcoin.jonasschnelli.ch",
-            "seed.tbtc.petertodd.net",
-            "testnet-seed.bluematt.me",
-            "seed.testnet.achownodes.xyz",
+            "testnet-seed.bitcoin.jonasschnelli.ch.",
+            "seed.tbtc.petertodd.net.",
+            "testnet-seed.bluematt.me.",
+            "seed.testnet.achownodes.xyz.",
         ],
         Network::Signet => &[
-            "seed.signet.bitcoin.sprovoost.nl",
-            "seed.signet.achownodes.xyz",
+            "seed.signet.bitcoin.sprovoost.nl.",
+            "seed.signet.achownodes.xyz.",
         ],
         Network::Regtest => &[],
     }

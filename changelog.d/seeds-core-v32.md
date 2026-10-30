@@ -5,7 +5,10 @@ Changed
   `seed.bitcoin.sipa.be`, `seed.bitcoinstats.com`,
   `dnsseed.bitcoin.dashjr-list-of-p2p-nodes.us`, and
   `testnet-seed.bitcoin.schildbach.de` are gone; the `achownodes.xyz` seeds
-  are new. The fixed seeds were two hostnames resolved through DNS. They are
+  are new. Each name keeps Core's trailing dot (`dnsseed.bluematt.me.`),
+  so a resolver with a search list and a high `ndots` (Kubernetes) does
+  not try the search domain first, and the `--proxy` addr-fetch sends
+  the same name to SOCKS that Core does. The fixed seeds were two hostnames resolved through DNS. They are
   now Core's `contrib/seeds` lists (IPv4, IPv6, Tor v3, I2P, CJDNS; 2,057
   mainnet entries), embedded under `crates/rbitcoin-net/seeds/` and
   refreshed with `scripts/core-fixed-seeds.sh COMMIT`. As in Core, after the
