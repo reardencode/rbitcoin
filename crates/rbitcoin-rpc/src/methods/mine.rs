@@ -1011,7 +1011,7 @@ pub fn gbt_check_proposal(ctx: &RpcContext, block: &Block) -> Result<(), String>
 pub enum MininginfoPoint {
     /// After the tip read, before the reads by height.
     BeforeNext,
-    /// After the reads by height, before the tip is checked again.
+    /// After the reads by height, before the sample is checked.
     BeforeRecheck,
 }
 
@@ -1045,6 +1045,9 @@ fn tip_header(ctx: &RpcContext) -> Result<(Height, rbitcoin_store::HeaderRecord)
     Ok((tip, rec))
 }
 
+/// Samples before `getmininginfo` gives up on a chain that keeps reorging.
+const MININGINFO_SAMPLES: u32 = 8;
+
 /// Core `getmininginfo`. `blocks`, `bestblockhash`, `bits`, `next`, and
 /// `networkhashps` describe one tip, as Core's under `cs_main`.
 pub fn getmininginfo(ctx: &RpcContext) -> Result<Value, Value> {
@@ -1056,16 +1059,8 @@ pub fn getmininginfo(ctx: &RpcContext) -> Result<Value, Value> {
             f(ctx, point);
         }
     };
-    // Odd while a connect, disconnect, or reorg holds the pool, so one even
-    // value before and after the reads means the chain did not move, even
-    // away and back.
-    let settle = || ctx.mempool.as_ref().map(|m| m.pool_settle_gen());
-    let (tip, rec, next, hashps) = loop {
-        let gen = settle();
-        if gen.is_some_and(|g| g % 2 == 1) {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            continue;
-        }
+    #[cfg_attr(not(debug_assertions), allow(unused_mut))]
+    let mut sample = || -> Result<_, Value> {
         let (tip, rec) = tip_header(ctx)?;
         #[cfg(debug_assertions)]
         at(MininginfoPoint::BeforeNext);
@@ -1073,11 +1068,34 @@ pub fn getmininginfo(ctx: &RpcContext) -> Result<Value, Value> {
         let hashps = network_hash_ps(ctx, 120, i64::from(tip.0)).unwrap_or(0.0);
         #[cfg(debug_assertions)]
         at(MininginfoPoint::BeforeRecheck);
-        // Those reads are by height, so they are `rec`'s chain only if it
-        // is still the tip. Without a pool the hash is the only check.
-        if settle() == gen && tip_header(ctx)?.1.hash == rec.hash {
-            break (tip, rec, next, hashps);
+        Ok((tip, rec, next, hashps))
+    };
+    let disconnects = || ctx.query.disconnect_gen.load(Ordering::Acquire);
+    let mut samples = 0;
+    let (tip, rec, next, hashps) = loop {
+        let gen = disconnects();
+        let sampled = sample();
+        // Every read is at or below the sampled tip, so a connect above it
+        // changes none of them and a syncing node keeps its first sample. A
+        // disconnect can change them, and one that was undone leaves the slot as
+        // it was. The generation moves after the slot is popped, so read the
+        // slot first.
+        let held = sampled.as_ref().is_ok_and(|(tip, rec, ..)| {
+            matches!(ctx.query.header_at_height(*tip), Ok(Some((_, now))) if now.hash == rec.hash)
+                && disconnects() == gen
+        });
+        samples += 1;
+        match sampled {
+            Ok(sampled) if held => break sampled,
+            Err(e) if samples == MININGINFO_SAMPLES => return Err(e),
+            Ok(_) if samples == MININGINFO_SAMPLES => {
+                return Err(rpc_error(ERR_MISC, "the chain kept reorging"));
+            }
+            // A failed read is what a disconnect below the sample looks like.
+            _ => {}
         }
+        wait_chain_tip(ctx);
+        std::thread::sleep(std::time::Duration::from_millis(1 << samples));
     };
     let pooledtx = ctx
         .mempool

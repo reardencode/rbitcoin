@@ -5817,6 +5817,71 @@ fn getmininginfo_reorg_away_and_back_restarts() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A disconnect that drops the tip below the sampled height fails the reads
+/// at that height. That is a moved tip, so the answer is the new tip.
+#[test]
+fn getmininginfo_disconnect_below_the_sample_reads_the_new_tip() {
+    let (ctx, dir, _hub) = ctx_regtest_hub();
+    let hashes = dispatch(&ctx, "generate", vec![json!(3)]).unwrap();
+    let block2 = hashes[1].clone();
+    let mut done = false;
+    during_next_mininginfo(move |ctx: &RpcContext, point| {
+        if !done && point == MininginfoPoint::BeforeNext {
+            done = true;
+            dispatch(ctx, "invalidateblock", vec![block2.clone()]).unwrap();
+        }
+    });
+    let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    assert_eq!(info["blocks"], 1, "{info}");
+    assert_eq!(info["bestblockhash"], hashes_at(&ctx, 1), "{info}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn hashes_at(ctx: &RpcContext, height: u32) -> Value {
+    dispatch(ctx, "getblockhash", vec![json!(height)]).unwrap()
+}
+
+/// A connect above the sampled tip changes no read at or below it, so a node
+/// that is syncing answers from its first sample.
+#[test]
+fn getmininginfo_connect_mid_sample_keeps_the_sample() {
+    let (ctx, dir, _hub) = ctx_regtest_hub();
+    let hashes = dispatch(&ctx, "generate", vec![json!(2)]).unwrap();
+    let samples = Arc::new(AtomicU64::new(0));
+    let seen = Arc::clone(&samples);
+    during_next_mininginfo(move |ctx: &RpcContext, point| {
+        if point == MininginfoPoint::BeforeNext {
+            assert!(seen.fetch_add(1, Ordering::Relaxed) < 16, "sampled forever");
+            dispatch(ctx, "generate", vec![json!(1)]).unwrap();
+        }
+    });
+    let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    assert_eq!(samples.load(Ordering::Relaxed), 1, "{info}");
+    assert_eq!(info["blocks"], 2, "{info}");
+    assert_eq!(info["bestblockhash"], hashes[1], "{info}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A chain that disconnects during every sample ends the call with an error
+/// after a fixed number of samples.
+#[test]
+fn getmininginfo_gives_up_on_a_chain_that_keeps_reorging() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let samples = Arc::new(AtomicU64::new(0));
+    let seen = Arc::clone(&samples);
+    during_next_mininginfo(move |ctx: &RpcContext, point| {
+        if point == MininginfoPoint::BeforeNext {
+            assert!(seen.fetch_add(1, Ordering::Relaxed) < 16, "sampled forever");
+            let tip = dispatch(ctx, "getbestblockhash", vec![]).unwrap();
+            dispatch(ctx, "invalidateblock", vec![tip]).unwrap();
+        }
+    });
+    let err = dispatch(&ctx, "getmininginfo", vec![]).unwrap_err();
+    assert_eq!(err["code"], ERR_MISC, "{err}");
+    assert_eq!(samples.load(Ordering::Relaxed), 8, "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Core `BlockAssembler::m_last_block_weight` / `m_last_block_num_txs`: the
 /// reserved 8000 plus the selected transactions of the last block a template
 /// or `generate` assembled.
