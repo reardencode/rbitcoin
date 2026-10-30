@@ -12,7 +12,7 @@ use crate::codec::{
 use crate::error::NetError;
 use crate::msg_decode::decode_framed_offload;
 use crate::peer_dos::{PeerRateLimiter, OVERSIZE_BAN_SCORE, RATE_LIMIT_BAN_SCORE};
-use crate::peers::{CappedSet, PeerOut, PingAction};
+use crate::peers::{CappedSet, PeerOut};
 use crate::v2::{
     open_v2, open_v2_with_wire, read_v2_contents, read_v2_frame, read_v2_frame_with_progress,
     write_v2_contents, write_v2_msg, write_v2_msg_offload, V2Reader, V2Writer,
@@ -1389,15 +1389,12 @@ pub async fn on_heartbeat(
         rbitcoin_log::debug!("addrfetch connection timeout");
         s.request_disconnect();
     }
-    match s.take_ping_action(s.clock_now()) {
-        Some(PingAction::Send { nonce }) => {
-            let _ = queue_out(out_tx, NetworkMessage::Ping(nonce));
-        }
-        Some(PingAction::Timeout { elapsed_secs }) => {
-            rbitcoin_log::info!("{}", ping_timeout_log(elapsed_secs));
-            s.request_disconnect();
-        }
-        None => {}
+    let now = s.clock_now();
+    if let Some(elapsed_secs) = s.ping_timeout(now, follow) {
+        rbitcoin_log::info!("{}", ping_timeout_log(elapsed_secs));
+        s.request_disconnect();
+    } else if let Some(nonce) = s.take_ping_send(now) {
+        let _ = queue_out(out_tx, NetworkMessage::Ping(nonce));
     }
     if let Some(ph) = s.peer_hub() {
         ph.on_session_heartbeat();
@@ -1729,10 +1726,7 @@ pub async fn peer_session_with(
     // Handshake-writer ping, same nonce as LivePeer: connect_nodes needs pong
     // bytes before the writer task; a second ping makes the first pong mismatch.
     let keepalive = if let Some(s) = meta.session.as_ref() {
-        match s.take_ping_action(s.clock_now()) {
-            Some(PingAction::Send { nonce }) => Some(nonce),
-            _ => None,
-        }
+        s.take_ping_send(s.clock_now())
     } else {
         Some(rand_nonce())
     };
@@ -2755,6 +2749,12 @@ impl Drop for SessionFollow {
 }
 
 impl PeerFollowState {
+    /// Core `vBlocksInFlight`: a body asked by `getdata`, or a compact
+    /// block waiting on `blocktxn`.
+    pub fn has_blocks_in_flight(&self) -> bool {
+        !self.requested_blocks.is_empty() || !self.pending_cmpct.is_empty()
+    }
+
     #[doc(hidden)]
     pub fn new() -> Self {
         Self {

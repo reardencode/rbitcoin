@@ -4970,7 +4970,7 @@ fn getpeerinfo_sent_pingwait_and_limited_services() {
     use bitcoin::p2p::address::Address;
     use bitcoin::p2p::message_network::VersionMessage;
     use bitcoin::p2p::ServiceFlags;
-    use rbitcoin_net::{PeerConnType, PeerHub, PingAction};
+    use rbitcoin_net::{PeerConnType, PeerHub};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     let (mut ctx, dir) = ctx_empty();
@@ -4991,9 +4991,9 @@ fn getpeerinfo_sent_pingwait_and_limited_services() {
     };
     let live = hub.register(addr, bind, &ver, false, PeerConnType::OutboundFullRelay);
     live.note_sent("version", 100);
-    let PingAction::Send { nonce } = live.take_ping_action(hub.now_secs()).unwrap() else {
-        panic!("expected ping send");
-    };
+    let nonce = live
+        .take_ping_send(hub.now_secs())
+        .expect("expected ping send");
     ctx.peers = Some(hub.clone());
     let info = dispatch(&ctx, "getpeerinfo", vec![]).unwrap();
     let row = &info.as_array().unwrap()[0];

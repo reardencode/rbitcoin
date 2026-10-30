@@ -1302,32 +1302,22 @@ async fn slow_redial_resolve_does_not_stall_runtime() {
 fn ping_timeout_waits_for_the_peer_timeout() {
     let hub = PeerHub::new();
     hub.set_mock_now(1_700_000_000);
+    let idle = rbitcoin_net::peer::PeerFollowState::new();
     let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
     let p = hub.register(a, a, &ver("/rbitcoin:0.1.0/"), true, PeerConnType::Inbound);
     let now = hub.now_secs();
-    let Some(PingAction::Send { .. }) = p.take_ping_action(now) else {
-        panic!("expected send");
-    };
+    assert!(p.take_ping_send(now).is_some(), "expected send");
     hub.set_peer_timeout_secs(999_999_999);
     assert!(
-        !matches!(
-            p.take_ping_action(now + 6_000),
-            Some(PingAction::Timeout { .. })
-        ),
+        p.ping_timeout(now + 6_000, &idle).is_none(),
         "inside the peer timeout the ping does not time out"
     );
     hub.set_peer_timeout_secs(60);
     assert!(
-        !matches!(
-            p.take_ping_action(now + 20 * 60),
-            Some(PingAction::Timeout { .. })
-        ),
+        p.ping_timeout(now + 20 * 60, &idle).is_none(),
         "the ping timeout starts the second after twenty minutes"
     );
-    assert!(matches!(
-        p.take_ping_action(now + 20 * 60 + 1),
-        Some(PingAction::Timeout { .. })
-    ));
+    assert!(p.ping_timeout(now + 20 * 60 + 1, &idle).is_some());
 
     let late = hub.register(
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18445),
@@ -1336,21 +1326,13 @@ fn ping_timeout_waits_for_the_peer_timeout() {
         true,
         PeerConnType::Inbound,
     );
-    let Some(PingAction::Send { .. }) = late.take_ping_action(now) else {
-        panic!("expected send");
-    };
+    assert!(late.take_ping_send(now).is_some(), "expected send");
     hub.set_peer_timeout_secs(2_000);
     assert!(
-        !matches!(
-            late.take_ping_action(now + 2_000),
-            Some(PingAction::Timeout { .. })
-        ),
+        late.ping_timeout(now + 2_000, &idle).is_none(),
         "inactivity checks start the second after the peer timeout"
     );
-    assert!(matches!(
-        late.take_ping_action(now + 2_001),
-        Some(PingAction::Timeout { .. })
-    ));
+    assert!(late.ping_timeout(now + 2_001, &idle).is_some());
 }
 
 #[test]

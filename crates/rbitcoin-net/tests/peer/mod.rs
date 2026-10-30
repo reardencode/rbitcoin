@@ -3480,9 +3480,12 @@ async fn ping_timeout_applies_a_minute_after_the_last_block() {
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    let delivered = t.node.peers.now_secs();
+    t.node
+        .peers
+        .set_mock_now(delivered + POST_BLOCK_PONG_GRACE_SECS);
     assert_session_answers(raw, 8, "the peer lost its minute to answer the ping").await;
 
-    let delivered = t.node.peers.now_secs();
     t.node
         .peers
         .set_mock_now(delivered + POST_BLOCK_PONG_GRACE_SECS + 1);

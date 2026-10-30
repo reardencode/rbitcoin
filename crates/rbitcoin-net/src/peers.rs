@@ -1168,15 +1168,24 @@ impl LivePeer {
         self.age_inv_seen_gen.store(gen, Ordering::Relaxed);
     }
 
-    /// Timeout first, then RPC-queued / interval probe.
-    ///
-    /// Never-sent peers keep `ping_start_secs == 0`, so any `now_secs` above
-    /// 120 is interval-due (same comparison as a last ping at Unix epoch 0).
-    pub fn take_ping_action(&self, now_secs: u64) -> Option<PingAction> {
-        const PING_INTERVAL: u64 = 120;
+    /// Core's ping timeout, which bitcoin/bitcoin#36080 moved out of
+    /// `MaybeSendPing`. A peer serves our block requests before our ping, so
+    /// blocks in flight from it suspend the timeout, and the last block it
+    /// delivered leaves it a minute to answer. Returns the seconds waited.
+    pub fn ping_timeout(
+        &self,
+        now_secs: u64,
+        follow: &crate::peer::PeerFollowState,
+    ) -> Option<f64> {
         const TIMEOUT_INTERVAL: u64 = 20 * 60;
-        let nonce = self.ping_nonce_sent.load(Ordering::Relaxed);
-        let start = self.ping_start_secs.load(Ordering::Relaxed);
+        const POST_BLOCK_PONG_GRACE: u64 = 60;
+        if follow.has_blocks_in_flight() {
+            return None;
+        }
+        let last_block = self.last_block.load(Ordering::Relaxed);
+        if now_secs <= last_block.saturating_add(POST_BLOCK_PONG_GRACE) {
+            return None;
+        }
         // Core `RunInactivityChecks`: no ping timeout until `-peertimeout`
         // has passed since connect (both on the mockable clock).
         let inactivity_checks = self.peer_hub().is_none_or(|h| {
@@ -1185,12 +1194,21 @@ impl LivePeer {
                     .connected_at_secs()
                     .saturating_add(h.peer_timeout_secs())
         });
-        if inactivity_checks && nonce != 0 && now_secs > start.saturating_add(TIMEOUT_INTERVAL) {
-            let elapsed = now_secs.saturating_sub(start) as f64;
-            return Some(PingAction::Timeout {
-                elapsed_secs: elapsed,
-            });
-        }
+        let nonce = self.ping_nonce_sent.load(Ordering::Relaxed);
+        let start = self.ping_start_secs.load(Ordering::Relaxed);
+        (inactivity_checks && nonce != 0 && now_secs > start.saturating_add(TIMEOUT_INTERVAL))
+            .then(|| now_secs.saturating_sub(start) as f64)
+    }
+
+    /// Core `MaybeSendPing`: the nonce of an RPC-queued ping, or of the
+    /// interval probe once the last ping was answered.
+    ///
+    /// Never-sent peers keep `ping_start_secs == 0`, so any `now_secs` above
+    /// 120 is interval-due (same comparison as a last ping at Unix epoch 0).
+    pub fn take_ping_send(&self, now_secs: u64) -> Option<u64> {
+        const PING_INTERVAL: u64 = 120;
+        let nonce = self.ping_nonce_sent.load(Ordering::Relaxed);
+        let start = self.ping_start_secs.load(Ordering::Relaxed);
         let queued = self.ping_queued.load(Ordering::Relaxed);
         let interval_due = nonce == 0 && now_secs > start.saturating_add(PING_INTERVAL);
         if !queued && !interval_due {
@@ -1203,7 +1221,7 @@ impl LivePeer {
         self.ping_queued.store(false, Ordering::Relaxed);
         self.ping_start_secs.store(now_secs, Ordering::Relaxed);
         self.ping_nonce_sent.store(n, Ordering::Relaxed);
-        Some(PingAction::Send { nonce: n })
+        Some(n)
     }
 
     /// Core pong handling (`p2p_ping.py` needles).
@@ -1328,13 +1346,6 @@ impl LivePeer {
             best_known: self.best_known(),
         }
     }
-}
-
-/// Result of [`LivePeer::take_ping_action`].
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum PingAction {
-    Send { nonce: u64 },
-    Timeout { elapsed_secs: f64 },
 }
 
 #[doc(hidden)]
