@@ -585,10 +585,11 @@ fn connect_coinbase(
 }
 
 fn on_disk_hwm(path: &std::path::Path) -> u64 {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).unwrap();
+    f.seek(SeekFrom::Start(8)).unwrap();
     let mut buf = [0u8; 8];
-    let f = std::fs::File::open(path).unwrap();
-    use std::os::unix::fs::FileExt;
-    f.read_exact_at(&mut buf, 8).unwrap();
+    f.read_exact(&mut buf).unwrap();
     u64::from_le_bytes(buf)
 }
 
