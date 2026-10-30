@@ -1,7 +1,7 @@
 # 095 — SV2 session has no idle deadline after setup
 
 **Severity:** high
-**Status:** fixed (now opt-in)
+**Status:** opt-in
 **Found by:** bobberb and muse, 2026-10-18
 
 The setup deadline covered the handshake and the first `CoinbaseOutputConstraints`. After that frame, `frames.recv` waited with no deadline, so a client that went silent held one of eight session slots. An idle deadline now drops such a client. It moves only when a frame is handled. Tip and fee-check wakes do not refresh it.
