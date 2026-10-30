@@ -1026,9 +1026,9 @@ async fn tip_announce_far_compact_is_header_only() {
 /// Same-hash cached invalid stays connected. A child of a cached-invalid
 /// parent disconnects. Every Core `InitData` invalid shape disconnects,
 /// requested or unsolicited: an out-of-range prefilled index, no txs at all,
-/// more txs than `MAX_BLOCK_TX_COUNT`, a prefilled index past 16 bits, and a
-/// prefilled null tx sent as wire bytes.
-/// Exactly `MAX_BLOCK_TX_COUNT` stays connected and asks for its txs.
+/// and a prefilled null tx sent as wire bytes. Core's decoder drops more
+/// than 65,535 txs, or a prefilled index past 16 bits, with no score; so do
+/// we. 65,535 txs stays connected and asks for its txs.
 #[tokio::test]
 async fn tip_announce_invalid_compact_disconnects() {
     let (_dir, hub) = open_tip_announce_hub("tip-invalid-compact-disconnects");
@@ -1104,7 +1104,7 @@ async fn tip_announce_invalid_compact_disconnects() {
         "out-of-range prefilled index must disconnect"
     );
 
-    let cap = rbitcoin_consensus::MAX_BLOCK_TX_COUNT;
+    let u16_max = usize::from(u16::MAX);
     let zero = bitcoin::bip152::ShortId::from([0u8; 6]);
     let mut offset = 100u32;
     let mut child_hsi = |short_n: usize, prefill_idx: &[u16]| {
@@ -1130,24 +1130,22 @@ async fn tip_announce_invalid_compact_disconnects() {
             follow.ban_score >= BAN_SCORE_THRESHOLD,
             "{path}: no short ids and no prefilled txs must disconnect"
         );
-        let (follow, _) = send_cmpct_once(hub, child_hsi(cap, &[0]), requested).await;
-        assert!(
-            follow.ban_score >= BAN_SCORE_THRESHOLD,
-            "{path}: one tx above MAX_BLOCK_TX_COUNT must disconnect"
-        );
-        let (follow, msgs) = send_cmpct_once(hub, child_hsi(cap - 1, &[0]), requested).await;
-        assert_eq!(follow.ban_score, 0, "{path}: exactly MAX_BLOCK_TX_COUNT stays connected");
+        let (follow, msgs) = send_cmpct_once(hub, child_hsi(u16_max - 1, &[0]), requested).await;
+        assert_eq!(follow.ban_score, 0, "{path}: 65,535 txs stays connected");
         assert!(
             msgs.iter().any(|m| matches!(m, NetworkMessage::GetBlockTxn(_))),
-            "{path}: a compact block at the cap still asks for its missing txs"
+            "{path}: 65,535 txs still asks for its missing txs"
         );
+        let (follow, msgs) = send_cmpct_once(hub, child_hsi(u16_max, &[0]), requested).await;
+        assert_eq!(follow.ban_score, 0, "{path}: 65,536 txs is dropped with no score");
+        assert!(msgs.is_empty(), "{path}: 65,536 txs is dropped silently, got {} messages", msgs.len());
     }
-    let past_u16 = usize::from(u16::MAX) + 1;
-    let (follow, _) = send_cmpct_once(hub, child_hsi(past_u16, &[0, u16::MAX]), true).await;
-    assert!(
-        follow.ban_score >= BAN_SCORE_THRESHOLD,
-        "a prefilled index past 16 bits must disconnect"
-    );
+    let (follow, msgs) = send_cmpct_once(hub, child_hsi(u16_max + 1, &[0, u16::MAX]), true).await;
+    assert_eq!(follow.ban_score, 0, "65,538 txs with a prefill at 65,536 is dropped with no score");
+    assert!(msgs.is_empty(), "65,538 txs is dropped silently, got {} messages", msgs.len());
+    let (follow, msgs) = send_cmpct_once(hub, child_hsi(1, &[0, u16::MAX]), true).await;
+    assert_eq!(follow.ban_score, 0, "a prefilled index past 16 bits is dropped with no score");
+    assert!(msgs.is_empty(), "a prefilled index past 16 bits is dropped silently, got {} messages", msgs.len());
 
     let with_coinbase = child_hsi(1, &[0]);
     let mut payload = bitcoin::consensus::serialize(&HeaderAndShortIds {
