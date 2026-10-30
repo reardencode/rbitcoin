@@ -419,7 +419,7 @@ async fn i2p_accept_incoming_forwards_to_loopback() {
         creates.iter().any(|c| {
             c.contains("DESTINATION=TRANSIENT")
                 && c.contains("SIGNATURE_TYPE=7")
-                && c.contains("i2cp.leaseSetEncType=4,0")
+                && c.contains("i2cp.leaseSetEncType=6,4")
                 && c.contains("inbound.length=1")
         }),
         "{creates:?}"
@@ -433,7 +433,7 @@ async fn i2p_accept_incoming_forwards_to_loopback() {
     assert!(
         creates.iter().any(|c| {
             c.contains(&format!("DESTINATION={FAKE_DEST}"))
-                && c.contains("i2cp.leaseSetEncType=4,0")
+                && c.contains("i2cp.leaseSetEncType=6,4")
                 && !c.contains("SIGNATURE_TYPE=")
         }),
         "{creates:?}"
