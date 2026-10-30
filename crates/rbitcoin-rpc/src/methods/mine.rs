@@ -1094,8 +1094,9 @@ pub fn getmininginfo(ctx: &RpcContext) -> Result<Value, Value> {
             // A failed read is what a disconnect below the sample looks like.
             _ => {}
         }
+        // Every disconnect runs as a tip job, so this paces the samples. An
+        // idle lane means nothing is reorging, and the next sample can start.
         wait_chain_tip(ctx);
-        std::thread::sleep(std::time::Duration::from_millis(1 << samples));
     };
     let pooledtx = ctx
         .mempool

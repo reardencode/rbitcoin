@@ -5863,22 +5863,37 @@ fn getmininginfo_connect_mid_sample_keeps_the_sample() {
 }
 
 /// A chain that disconnects during every sample ends the call with an error
-/// after a fixed number of samples.
+/// after a fixed number of samples. The tip job paces the samples, so an idle
+/// lane adds no wait. The clock check takes the fastest of up to three calls,
+/// outside the hook, so a loaded runner does not fail it.
 #[test]
 fn getmininginfo_gives_up_on_a_chain_that_keeps_reorging() {
     let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
-    let samples = Arc::new(AtomicU64::new(0));
-    let seen = Arc::clone(&samples);
-    during_next_mininginfo(move |ctx: &RpcContext, point| {
-        if point == MininginfoPoint::BeforeNext {
-            assert!(seen.fetch_add(1, Ordering::Relaxed) < 16, "sampled forever");
-            let tip = dispatch(ctx, "getbestblockhash", vec![]).unwrap();
-            dispatch(ctx, "invalidateblock", vec![tip]).unwrap();
+    let mut fastest = Duration::MAX;
+    for _ in 0..3 {
+        let samples = Arc::new(AtomicU64::new(0));
+        let hook_micros = Arc::new(AtomicU64::new(0));
+        let (seen, spent) = (Arc::clone(&samples), Arc::clone(&hook_micros));
+        during_next_mininginfo(move |ctx: &RpcContext, point| {
+            if point == MininginfoPoint::BeforeNext {
+                let t0 = Instant::now();
+                assert!(seen.fetch_add(1, Ordering::Relaxed) < 16, "sampled forever");
+                let tip = dispatch(ctx, "getbestblockhash", vec![]).unwrap();
+                dispatch(ctx, "invalidateblock", vec![tip]).unwrap();
+                spent.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
+            }
+        });
+        let t0 = Instant::now();
+        let err = dispatch(&ctx, "getmininginfo", vec![]).unwrap_err();
+        let hook = Duration::from_micros(hook_micros.load(Ordering::Relaxed));
+        fastest = fastest.min(t0.elapsed().saturating_sub(hook));
+        assert_eq!(err["code"], ERR_MISC, "{err}");
+        assert_eq!(samples.load(Ordering::Relaxed), 8, "{err}");
+        if fastest < Duration::from_millis(200) {
+            break;
         }
-    });
-    let err = dispatch(&ctx, "getmininginfo", vec![]).unwrap_err();
-    assert_eq!(err["code"], ERR_MISC, "{err}");
-    assert_eq!(samples.load(Ordering::Relaxed), 8, "{err}");
+    }
+    assert!(fastest < Duration::from_millis(200), "{fastest:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
