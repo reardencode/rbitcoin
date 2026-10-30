@@ -57,7 +57,7 @@ pub enum TipFlush {
 }
 
 pub struct InflightFlush {
-    rx: std::sync::mpsc::Receiver<Result<(), StoreError>>,
+    rx: std::sync::mpsc::Receiver<Result<bool, StoreError>>,
     done: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -68,7 +68,7 @@ impl InflightFlush {
 }
 
 pub struct TipFlushJob {
-    reply: std::sync::mpsc::Sender<Result<(), StoreError>>,
+    reply: std::sync::mpsc::Sender<Result<bool, StoreError>>,
     done: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -222,7 +222,14 @@ impl Query {
                     &self.confirm_stats().write_tip_flush_wait_ns,
                     t.elapsed().as_nanos() as u64,
                 );
-                r
+                match r {
+                    Ok(true) => {
+                        self.note_sealed_tip();
+                        Ok(())
+                    }
+                    Ok(false) => Ok(()),
+                    Err(e) => Err(e),
+                }
             }
         };
         if joined.is_err() {
@@ -231,21 +238,52 @@ impl Query {
         joined
     }
 
+    fn sealed_tip_height(&self) -> Option<Height> {
+        match self.sealed_tip.load(Ordering::Acquire) {
+            u32::MAX => None,
+            h => Some(Height(h)),
+        }
+    }
+
+    fn remember_sealed_tip(&self, height: Option<Height>) {
+        let v = height.map(|h| h.0).unwrap_or(u32::MAX);
+        self.sealed_tip.store(v, Ordering::Release);
+    }
+
+    /// The tip just sealed is the RAM tip. Disconnect calls this after its
+    /// shrink flush, which is the durable tip then.
+    fn note_sealed_tip(&self) {
+        self.remember_sealed_tip(self.tip_height());
+    }
+
+    /// Height seqsigwit prune may advance to. A skipped seal keeps the last
+    /// one. `before` is that height only when this process has not sealed yet.
+    fn durable_tip_for_prune(&self, before: Option<Height>, sealed_now: bool) -> Option<Height> {
+        if sealed_now {
+            self.note_sealed_tip();
+            return self.tip_height();
+        }
+        if let Some(h) = self.sealed_tip_height() {
+            return Some(h);
+        }
+        self.remember_sealed_tip(before);
+        before
+    }
+
     /// L2 write-behind barrier: the complete-or-fail Class C image to disk.
     /// Tip mode returns after it. IBD returns before it and may dequeue the
     /// RAM body queue: a kill then loses at most one more batch to download
-    /// again. Returns the tip that is durable now. IBD returns `before`
-    /// while the flush runs. Tip mode returns `before` when a withheld
-    /// locator header skips the seal. Seqsigwit prune keeps its window
-    /// below that tip.
+    /// again. Returns the last sealed tip. IBD returns that height while
+    /// this batch's flush is still running. A withheld locator header does
+    /// not move it. Seqsigwit prune keeps its window below that tip.
     #[doc(hidden)]
     pub fn flush_tip(&self, before: Option<Height>) -> Result<Option<Height>, QueryError> {
         if self.index_mode()?.is_tip() {
             let sealed = self.store.flush_class_c_tip()?;
-            return Ok(if sealed { self.tip_height() } else { before });
+            return Ok(self.durable_tip_for_prune(before, sealed));
         }
         self.spawn_tip_flush()?;
-        Ok(before)
+        Ok(self.durable_tip_for_prune(before, false))
     }
 
     /// IBD: the next batch's archive and checks run while this batch's
@@ -285,11 +323,17 @@ impl Query {
     fn flush_tip_inline(&self, why: &str) -> Result<(), QueryError> {
         rbitcoin_log::warn!("store: no IBD tip flush thread ({why}); flushing inline");
         let mut state = self.tip_flush.lock().unwrap_or_else(|e| e.into_inner());
-        let inline = self.store.flush_class_c_tip().map(|_| ());
-        if inline.is_err() {
-            *state = TipFlush::Failed;
+        match self.store.flush_class_c_tip() {
+            Ok(true) => {
+                self.note_sealed_tip();
+                Ok(())
+            }
+            Ok(false) => Ok(()),
+            Err(e) => {
+                *state = TipFlush::Failed;
+                Err(e)
+            }
         }
-        inline
     }
 
     /// Start the IBD barrier thread if this query does not already have one.
@@ -329,7 +373,7 @@ impl Query {
                     // Pause after the flush excludes stores, not before it starts.
                     #[cfg(debug_assertions)]
                     rbitcoin_store::bind_tip_flush_hold(Some(Arc::clone(&hold)));
-                    let result = store.flush_class_c_tip().map(|_| ());
+                    let result = store.flush_class_c_tip();
                     #[cfg(debug_assertions)]
                     rbitcoin_store::bind_tip_flush_hold(None);
                     let _ = job.reply.send(result);
@@ -1256,6 +1300,7 @@ impl Query {
             self.invalidate_height_by_hash_index();
         }
         self.store.flush_confirmed_only()?;
+        self.note_sealed_tip();
         self.store.scripthash.commit_deferred_empty_heads()?;
         self.store.clamp_spend_durable()?;
         log_disconnect_tip(height.0, &hash, tx_fks.len());
