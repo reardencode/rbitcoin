@@ -26,22 +26,23 @@
 }:
 
 let
-  # Cargo-aware source (crane) + drop local noise that would bust the NAR hash.
+  # Keep cargo's own files plus the bundled data the code includes via
+  # include_str!/include_bytes! (seed lists, corpora, test fixtures: .txt/.bin/.hex)
+  # — cleanCargoSource alone drops all of them and the build cannot find them.
   src = lib.cleanSourceWith {
-    src = craneLib.cleanCargoSource ../.;
+    src = lib.cleanSource ../.;
     filter =
       path: type:
       let
         base = baseNameOf path;
       in
-      !(lib.hasPrefix "datadir" base)
-      && !(lib.hasSuffix ".log" base)
-      && base != "coverage"
-      && base != ".coverage"
-      && base != "result"
-      && base != "result-1"
-      && base != "result-2"
-      && base != ".repro-out";
+      type == "directory"
+      || lib.hasSuffix ".rs" base
+      || lib.hasSuffix ".toml" base
+      || lib.hasSuffix ".txt" base
+      || lib.hasSuffix ".bin" base
+      || lib.hasSuffix ".hex" base
+      || base == "Cargo.lock";
   };
 
   # Deterministic flags. Do **not** embed `${src}` in RUSTFLAGS — that would
