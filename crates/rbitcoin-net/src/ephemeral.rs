@@ -17,6 +17,10 @@ use tokio::task::JoinHandle;
 
 pub const ISOLATED_BROADCAST_PEERS: usize = 2;
 
+/// Local txs waiting behind one send before the loop warns. Each send can
+/// spend [`HANDSHAKE_TIMEOUT`] per peer, so a queue this deep waits minutes.
+pub const ISOLATED_BACKLOG_WARN: usize = 32;
+
 pub fn isolated_broadcast_targets(am: &AddrMan, max: usize) -> Vec<NetAddr> {
     let mut onions = Vec::new();
     let mut ips = Vec::new();
@@ -97,8 +101,9 @@ pub async fn isolated_broadcast_known_tx(
         return;
     }
     for t in targets {
-        if let Err(e) = send_tx_isolated(dialer, t, magic, tx.clone(), user_agent).await {
-            rbitcoin_log::warn!("isolated broadcast {txid} to {t}: {e}");
+        match send_tx_isolated(dialer, t, magic, tx.clone(), user_agent).await {
+            Ok(()) => rbitcoin_log::info!("isolated broadcast {txid} to {t}: sent"),
+            Err(e) => rbitcoin_log::warn!("isolated broadcast {txid} to {t}: {e}"),
         }
     }
 }
@@ -113,14 +118,18 @@ pub fn spawn_isolated_broadcast_loop(
     if !mp.isolated_broadcast() {
         return tokio::spawn(async {});
     }
-    let mut rx = mp.subscribe_isolated();
     tokio::spawn(async move {
+        let mut warned = false;
         loop {
-            let txid = match rx.recv().await {
-                Ok(txid) => txid,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            };
+            let (txid, behind) = mp.next_isolated().await;
+            if behind < ISOLATED_BACKLOG_WARN {
+                warned = false;
+            } else if !warned {
+                warned = true;
+                rbitcoin_log::warn!(
+                    "isolated broadcast is behind: {behind} local txs wait after {txid}"
+                );
+            }
             // `get_tx` refuses the reactor thread. This task is a tokio worker.
             let tx = match mp.try_get_tx(&txid) {
                 Some(tx) => Some(tx),
