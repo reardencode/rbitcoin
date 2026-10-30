@@ -459,7 +459,7 @@ async fn ephemeral_broadcast() {
     assert_eq!(next_sent(&mut got_rx).await, first.compute_txid());
     // Only how long the old `try_read` path has to give up. The loop under
     // test sends `held` whatever this is.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
     release_tx.send(()).unwrap();
     holder.join().unwrap();
     assert_eq!(
