@@ -888,7 +888,7 @@ async fn tip_event_rebuilds_a_template_built_on_its_prev_hash() {
 async fn silent_session_outlives_the_setup_timeout_and_gets_the_next_tip() {
     let tc = shared_regtest(1);
     mock_live_tip(&tc);
-    let setup_timeout = Duration::from_millis(300);
+    let setup_timeout = Duration::from_millis(40);
     let tp = run_sv2_tp(Sv2TpConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         chain: Arc::clone(&tc.chain),
