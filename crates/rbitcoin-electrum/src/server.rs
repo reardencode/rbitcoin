@@ -1018,12 +1018,30 @@ fn spawn_dispatch(
     let mp = ctx.mempool.clone();
     let method = asked.method.clone();
     let params = asked.params.clone();
-    tokio::task::spawn_blocking(move || {
-        let _g = BlockingRegion::enter();
-        let t0 = Instant::now();
-        let (r, work, view) =
-            dispatch_off_worker(&q, &cfg, &p, mp.as_deref(), &method, &params, work);
-        (r, work, view, t0.elapsed())
+    let reads = method_reads_only(&method);
+    // The permit wait stays on this task. The blocking pool is taken only
+    // after a slot is free, so a budget of 1 serializes the reads.
+    tokio::spawn(async move {
+        let permit = if reads {
+            Some(
+                q.api_read_budget()
+                    .acquire_owned()
+                    .await
+                    .expect("store budget"),
+            )
+        } else {
+            None
+        };
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let _g = BlockingRegion::enter();
+            let t0 = Instant::now();
+            let (r, work, view) =
+                dispatch_off_worker(&q, &cfg, &p, mp.as_deref(), &method, &params, work);
+            (r, work, view, t0.elapsed())
+        })
+        .await
+        .unwrap_or_else(|e| panic!("electrum dispatch join: {e}"))
     })
 }
 
@@ -2251,8 +2269,8 @@ pub async fn broadcast_raw_tx_async(
     let mp = mempool
         .ok_or_else(|| "mempool not available".to_string())?
         .clone();
-    let r = mp
-        .accept_tx_async(tx)
+    let budget = mp.query.api_read_budget();
+    let r = rbitcoin_net::with_store_budget(budget, mp.accept_tx_async(tx))
         .await
         .map_err(|e| format!("broadcast reject: {e}"))?;
     let txid = r.txid;
@@ -2356,8 +2374,8 @@ pub async fn broadcast_package_async(
     let mp = mempool
         .ok_or_else(|| "mempool not available".to_string())?
         .clone();
-    let accepted = mp
-        .accept_package_async(txs)
+    let budget = mp.query.api_read_budget();
+    let accepted = rbitcoin_net::with_store_budget(budget, mp.accept_package_async(txs))
         .await
         .map_err(|e| format!("broadcast_package reject: {e}"))?;
     let ids: Vec<_> = accepted.iter().map(|r| r.txid).collect();

@@ -4,7 +4,14 @@
 //! `tokio-rt-worker`. Blocking-pool work must enter [`BlockingRegion`].
 
 use std::cell::Cell;
+use std::future::Future;
+use std::sync::Arc;
 use std::thread;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+tokio::task_local! {
+    static API_STORE_BUDGET: Arc<Semaphore>;
+}
 
 thread_local! {
     static BLOCKING_DEPTH: Cell<u32> = const { Cell::new(0) };
@@ -50,6 +57,33 @@ pub async fn off_pool<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static)
         })
         .expect("rbtc-off-pool");
     rx.await.expect("rbtc-off-pool dropped")
+}
+
+/// Run `fut` with the API store-read budget armed. Prepare takes one permit
+/// and drops it before script verify. A task that never calls this does not
+/// take the budget (P2P decode, and admits that are not an API read).
+pub async fn with_store_budget<R>(budget: Arc<Semaphore>, fut: impl Future<Output = R>) -> R {
+    API_STORE_BUDGET.scope(budget, fut).await
+}
+
+/// One permit of the armed budget, or `None` when this task has no budget.
+/// The wait is async. The caller moves the permit into the read so a dropped
+/// request does not release it while the read still runs.
+pub async fn acquire_armed_store_budget() -> Option<OwnedSemaphorePermit> {
+    let Ok(sem) = API_STORE_BUDGET.try_with(Arc::clone) else {
+        return None;
+    };
+    Some(sem.acquire_owned().await.expect("store budget"))
+}
+
+/// [`off_pool`] that holds one armed store-read permit for `f` only.
+pub async fn off_pool_budgeted<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    let permit = acquire_armed_store_budget().await;
+    off_pool(move || {
+        let _permit = permit;
+        f()
+    })
+    .await
 }
 
 pub fn assert_not_reactor(what: &'static str) {

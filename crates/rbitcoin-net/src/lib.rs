@@ -98,7 +98,9 @@ pub use peers::{
 pub use perf_meter::RequestMeter;
 pub use rbitcoin_mempool::MempoolGraphStats;
 pub use rbitcoin_mempool::{AcceptError, AcceptResult, SelectBudget, Selected};
-pub use reactor::{off_pool, BlockingRegion};
+pub use reactor::{
+    acquire_armed_store_budget, off_pool, off_pool_budgeted, with_store_budget, BlockingRegion,
+};
 pub use seeds::{
     default_port, default_rpc_port, dns_seeds, resolve_dns_seeds, socks_dns_seed_dests, AddrMan,
     PeerEntry, PeerFlags, MAX_ADDR_MAN,

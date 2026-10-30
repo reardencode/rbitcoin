@@ -1665,6 +1665,166 @@ async fn empty_work_queue_is_http_503() {
     let _ = std::fs::remove_dir_all(dir.path());
 }
 
+/// A closed store budget must not be reached when the work queue is already
+/// empty. Acquiring that semaphore would wait forever.
+#[tokio::test]
+async fn full_work_queue_is_503_before_the_store_budget() {
+    let (ctx, dir) = http_wait_ctx();
+    ctx.query.set_api_read_budget(0);
+    let state = AppState {
+        ctx,
+        auth: RpcAuth::new("test-token"),
+        cookie: None,
+        work_queue: Arc::new(Semaphore::new(0)),
+        rest_queue: Arc::new(Semaphore::new(1)),
+        rest: false,
+        require_auth: true,
+    };
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        rpc_post(
+            State(state),
+            axum::extract::Request::new(Body::from(
+                br#"{"jsonrpc":"1.0","id":1,"method":"getblockcount"}"#.as_slice(),
+            )),
+        ),
+    )
+    .await
+    .expect("503 must not wait on the store budget");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let _ = std::fs::remove_dir_all(dir.path());
+}
+
+/// One store permit: the second read waits on the async task. A parked
+/// blocking thread is not what it is waiting on. Releasing the permit lets
+/// the request take it while that thread is still parked.
+#[test]
+fn store_budget_wait_does_not_need_a_pool_thread() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let (ctx, dir) = http_wait_ctx();
+        ctx.query.set_api_read_budget(1);
+        let budget = ctx.query.api_read_budget();
+        let hold = budget.clone().acquire_owned().await.expect("permit");
+        let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
+        let parked = tokio::task::spawn_blocking(move || {
+            let _ = gate_rx.blocking_recv();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let state = AppState {
+            ctx: Arc::clone(&ctx),
+            auth: RpcAuth::new("test-token"),
+            cookie: None,
+            work_queue: Arc::new(Semaphore::new(4)),
+            rest_queue: Arc::new(Semaphore::new(1)),
+            rest: false,
+            require_auth: false,
+        };
+        let call = tokio::spawn(async move {
+            rpc_post(
+                State(state),
+                axum::extract::Request::new(Body::from(
+                    br#"{"jsonrpc":"1.0","id":1,"method":"getblockcount"}"#.as_slice(),
+                )),
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(
+            !call.is_finished(),
+            "the read ran while the only permit was held"
+        );
+        assert_eq!(budget.available_permits(), 0);
+        drop(hold);
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        assert_eq!(
+            budget.available_permits(),
+            0,
+            "the request took the permit while the pool thread stayed parked"
+        );
+        assert!(
+            !call.is_finished(),
+            "the store read still needs the parked pool thread"
+        );
+        let _ = gate_tx.send(());
+        let response = tokio::time::timeout(std::time::Duration::from_secs(2), call)
+            .await
+            .expect("read finishes once the pool thread is free")
+            .expect("join");
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = parked.await;
+        let _ = std::fs::remove_dir_all(dir.path());
+    });
+}
+
+/// A long-poll waits without the disk permit, so one HDD slot still serves
+/// `getblockcount`.
+#[tokio::test]
+async fn long_poll_does_not_hold_the_store_budget() {
+    let dir = rbitcoin_store::testutil::TempDir::labeled("rpc-wait-budget").expect("dir");
+    let hub = rbitcoin_net::ChainHub::new(
+        Query::open_or_create_tiny(dir.join("store")).unwrap(),
+        rbitcoin_consensus::ChainParams::regtest(),
+        rbitcoin_consensus::Milestone::NONE,
+    );
+    hub.ensure_genesis().unwrap();
+    let query = Arc::clone(&hub.query);
+    query.set_api_read_budget(1);
+    let cfg = RpcConfig {
+        listen: Some("127.0.0.1:0".parse().unwrap()),
+        socket_path: None,
+        socket_shared: false,
+        datadir: dir.path().to_path_buf(),
+        network: Network::Regtest,
+        token_path: None,
+        cookie_path: None,
+        cookie_perms: RpcCookiePerms::Owner,
+        subversion: None,
+        work_queue: Some(4),
+        rest: false,
+        alert_notify: None,
+        blocksonly: false,
+        package_dialect: false,
+    };
+    let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    let addr = tcp_addr(&handle);
+    let auth = handle.auth.clone();
+    let waiter = tokio::spawn(async move {
+        let body = serde_json::json!({
+            "jsonrpc": "1.0",
+            "id": "w",
+            "method": "waitfornewblock",
+            "params": [5_000]
+        })
+        .to_string();
+        post_raw(addr, &auth, body.as_bytes()).await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let (st, body) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        post_raw(
+            tcp_addr(&handle),
+            &handle.auth,
+            br#"{"jsonrpc":"1.0","id":1,"method":"getblockcount"}"#,
+        ),
+    )
+    .await
+    .expect("getblockcount while a long-poll holds no disk permit");
+    assert_eq!(st, 200, "{body:?}");
+    assert!(!waiter.is_finished(), "long-poll returned before the probe");
+    waiter.abort();
+    handle.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[allow(clippy::cognitive_complexity)] // one listener, envelope junk table
 #[tokio::test]
 async fn jsonrpc_envelope_junk_and_auth() {

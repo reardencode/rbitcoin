@@ -392,8 +392,16 @@ pub async fn rest_entry(State(state): State<AppState>, req: axum::extract::Reque
         }
     };
     let ctx = Arc::clone(&state.ctx);
+    let store_permit = state
+        .ctx
+        .query
+        .api_read_budget()
+        .acquire_owned()
+        .await
+        .expect("store budget");
     let reply = tokio::task::spawn_blocking(move || {
         let _g = BlockingRegion::enter();
+        let _store = store_permit;
         crate::methods::dispatch_rest(&ctx, &path, &query, &body)
     })
     .await
@@ -605,7 +613,7 @@ pub async fn rpc_post(State(state): State<AppState>, req: Request) -> Response {
         }
     };
     let ctx = Arc::clone(&state.ctx);
-    // The long-poll must not sit on the only work-queue slot.
+    // The long-poll must not sit on the only work-queue slot or the disk slot.
     let waited = satisfy_http_wait(&ctx, &parsed).await;
     let _permit = match state.work_queue.try_acquire() {
         Ok(p) => p,
@@ -617,15 +625,19 @@ pub async fn rpc_post(State(state): State<AppState>, req: Request) -> Response {
                 .into_response();
         }
     };
+    let budget = state.ctx.query.api_read_budget();
     if http_body_awaits_tip(&parsed) {
-        let out = exec_http_rpc_async(ctx, parsed, waited).await;
+        let out =
+            rbitcoin_net::with_store_budget(budget, exec_http_rpc_async(ctx, parsed, waited)).await;
         return match out {
             HttpRpcOut::Json(status, body) => json_rpc_response(status, body),
             HttpRpcOut::Empty(status) => status.into_response(),
         };
     }
+    let store_permit = budget.acquire_owned().await.expect("store budget");
     let joined = tokio::task::spawn_blocking(move || {
         let _g = BlockingRegion::enter();
+        let _store = store_permit;
         if waited {
             crate::methods::set_http_wait_satisfied(true);
         }
@@ -856,8 +868,10 @@ async fn exec_one_async(ctx: &Arc<RpcContext>, req: &serde_json::Value, waited: 
         let id = req.get("id").cloned();
         let req = req.clone();
         let ctx = Arc::clone(ctx);
+        let store_permit = rbitcoin_net::acquire_armed_store_budget().await;
         return match tokio::task::spawn_blocking(move || {
             let _g = BlockingRegion::enter();
+            let _store = store_permit;
             if waited {
                 crate::methods::set_http_wait_satisfied(true);
             }

@@ -3072,7 +3072,7 @@ impl MempoolHub {
         let note_p = note.clone();
         let stages_in = *stages;
         let lock_in = *lock_us;
-        let (prepared, stages_out, lock_out) = crate::reactor::off_pool(move || {
+        let (prepared, stages_out, lock_out) = crate::reactor::off_pool_budgeted(move || {
             let utxo = hub.utxo_provider();
             utxo.note_spender(&note_p);
             let mut stages = stages_in;

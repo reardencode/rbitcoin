@@ -1016,6 +1016,35 @@ fn heavy_template_encode_waits_for_a_script_worker() {
     assert_eq!(bytes.as_ref(), serde_json::to_vec(body.as_ref()).unwrap());
 }
 
+/// `/blocks` takes the shared store budget. A held permit stalls the GET.
+/// Releasing it lets the handler finish. The route uses `spawn_join`.
+#[tokio::test]
+async fn esplora_blocks_waits_on_the_store_budget() {
+    let (dir, q) = temp_query("esplora-budget");
+    q.set_api_read_budget(1);
+    let q = Arc::new(q);
+    let cfg = EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), Network::Regtest);
+    let handle = run_esplora(cfg, Arc::clone(&q), None)
+        .await
+        .expect("listen");
+    let hold = q.api_read_budget().acquire_owned().await.expect("permit");
+    let addr = handle.local_addr;
+    let stalled = tokio::spawn(async move { http_get(addr, "/blocks").await });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !stalled.is_finished(),
+        "GET /blocks ran while the only store permit was held"
+    );
+    drop(hold);
+    let (st, body) = tokio::time::timeout(Duration::from_secs(5), stalled)
+        .await
+        .expect("GET finishes after the permit")
+        .expect("join");
+    assert_eq!(st, 200, "{body}");
+    handle.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 include!("esplora_sh_journey.rs");
 include!("esplora_http_journey.rs");
 include!("blindbit_journey.rs");

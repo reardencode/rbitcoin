@@ -298,6 +298,13 @@ pub fn powered_by_header() -> HeaderValue {
     .clone()
 }
 
+/// Arm the process store-read budget for this request. `spawn_join` and
+/// mempool admit then take one permit on the async task.
+pub async fn arm_store_budget(State(st): State<AppState>, req: Request, next: Next) -> Response {
+    let budget = st.query.api_read_budget();
+    rbitcoin_net::with_store_budget(budget, next.run(req)).await
+}
+
 pub async fn stamp_powered_by_mw(req: Request, next: Next) -> Response {
     let mut resp = next.run(req).await;
     resp.headers_mut()
@@ -1032,6 +1039,10 @@ pub async fn run_esplora(
 
     let app = rest
         .layer(middleware::from_fn(stamp_powered_by_mw))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            arm_store_budget,
+        ))
         .with_state(state);
 
     match config.listen {

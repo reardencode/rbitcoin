@@ -150,11 +150,11 @@ pub async fn block_json(State(st): State<AppState>, Path(hash_hex): Path<String>
         return not_found();
     };
     let q = std::sync::Arc::clone(&st.query);
-    match tokio::task::spawn_blocking(move || block_summary_json(&q, &hash)).await {
-        Ok(Ok(v)) => json_reply_here(v),
-        Ok(Err(e)) => store_err(e),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
+    spawn_join(move || match block_summary_json(&q, &hash) {
+        Ok(v) => json_reply_here(v),
+        Err(e) => store_err(e),
+    })
+    .await
 }
 
 pub async fn block_raw(State(st): State<AppState>, Path(hash_hex): Path<String>) -> Response {
@@ -162,8 +162,8 @@ pub async fn block_raw(State(st): State<AppState>, Path(hash_hex): Path<String>)
         return not_found();
     };
     let q = std::sync::Arc::clone(&st.query);
-    match tokio::task::spawn_blocking(move || best_chain_block(&q, &hash)).await {
-        Ok(Ok((_h, block))) => {
+    spawn_join(move || match best_chain_block(&q, &hash) {
+        Ok((_h, block)) => {
             let raw = serialize(&block);
             (
                 StatusCode::OK,
@@ -172,9 +172,9 @@ pub async fn block_raw(State(st): State<AppState>, Path(hash_hex): Path<String>)
             )
                 .into_response()
         }
-        Ok(Err(e)) => store_err(e),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
+        Err(e) => store_err(e),
+    })
+    .await
 }
 
 pub async fn block_status(State(st): State<AppState>, Path(hash_hex): Path<String>) -> Response {
@@ -237,16 +237,12 @@ pub async fn block_txid_at(
 
 /// `GET /blocks` — 10 newest from tip.
 pub async fn blocks_tip(State(st): State<AppState>) -> Response {
-    tokio::task::spawn_blocking(move || blocks_from(&st, None))
-        .await
-        .unwrap_or_else(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())
+    spawn_join(move || blocks_from(&st, None)).await
 }
 
 /// `GET /blocks/:start_height` — 10 blocks starting at `start_height` downward.
 pub async fn blocks_from_height(State(st): State<AppState>, Path(start): Path<u32>) -> Response {
-    tokio::task::spawn_blocking(move || blocks_from(&st, Some(start)))
-        .await
-        .unwrap_or_else(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())
+    spawn_join(move || blocks_from(&st, Some(start))).await
 }
 
 #[doc(hidden)]
@@ -851,8 +847,10 @@ pub fn gbt_json(body: &Arc<Value>) -> Response {
 }
 
 pub async fn spawn_join(f: impl FnOnce() -> Response + Send + 'static) -> Response {
+    let store_permit = rbitcoin_net::acquire_armed_store_budget().await;
     match tokio::task::spawn_blocking(move || {
         let _g = rbitcoin_net::BlockingRegion::enter();
+        let _store = store_permit;
         f()
     })
     .await
@@ -2136,7 +2134,8 @@ pub async fn admit_broadcast(st: AppState, tx: bitcoin::Transaction) -> Response
     let Some(mp) = st.mempool.as_ref() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "mempool not available").into_response();
     };
-    match mp.accept_tx_async(tx).await {
+    let budget = st.query.api_read_budget();
+    match rbitcoin_net::with_store_budget(budget, mp.accept_tx_async(tx)).await {
         Ok(r) => {
             mp.mark_local_origin(r.txid);
             let tid = r.txid.to_byte_array();
@@ -2251,7 +2250,12 @@ pub async fn post_txs_test(
         for tx in decoded {
             let txid = format!("{}", tx.compute_txid());
             let wtxid = format!("{}", tx.compute_wtxid());
-            match mp.test_accept_async(tx.clone()).await {
+            match rbitcoin_net::with_store_budget(
+                st.query.api_read_budget(),
+                mp.test_accept_async(tx.clone()),
+            )
+            .await
+            {
                 Ok(r) => {
                     if rbitcoin_consensus::policy::fee_exceeds_max(r.fee_sat, r.weight, max_sat_kvb)
                     {
@@ -2344,7 +2348,9 @@ pub async fn post_tx_package(State(st): State<AppState>, body: Bytes) -> Respons
             }
         }
     }
-    match mp.accept_package_async(txs).await {
+    match rbitcoin_net::with_store_budget(st.query.api_read_budget(), mp.accept_package_async(txs))
+        .await
+    {
         Ok(results) => {
             for r in &results {
                 mp.mark_local_origin(r.txid);

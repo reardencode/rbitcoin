@@ -617,6 +617,56 @@ async fn batch_line_answers_every_item_in_one_array() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A read-only batch still completes when the node-wide budget is 1.
+/// Holding that permit stalls the batch; releasing it lets the batch finish.
+#[tokio::test]
+async fn read_only_batch_completes_when_the_store_budget_is_one() {
+    let (dir, q) = tmp_store();
+    q.set_api_read_budget(1);
+    let q = Arc::new(q);
+    let params = ChainParams::regtest();
+    let (tip_tx, _) = broadcast::channel(4);
+    let mut cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+    cfg.batch_window = 4;
+    let handle = run_electrum(cfg, Arc::clone(&q), params, tip_tx, None)
+        .await
+        .expect("listen");
+    let items: Vec<Value> = (0..3)
+        .map(|id| {
+            json!({"jsonrpc":"2.0","id":id,"method":"blockchain.scripthash.get_balance",
+                   "params":[format!("{id:064x}")]})
+        })
+        .collect();
+    let mut stream = TcpStream::connect(handle.local_addr).await.unwrap();
+    let reply = tokio::time::timeout(
+        Duration::from_secs(5),
+        electrum_tcp_batch(&mut stream, &items),
+    )
+    .await
+    .expect("budget 1 serializes the batch; it must not fail")
+    .as_array()
+    .expect("batch array")
+    .clone();
+    assert_eq!(reply.len(), 3, "{reply:?}");
+
+    let hold = q.api_read_budget().acquire_owned().await.expect("permit");
+    let mut stalled = TcpStream::connect(handle.local_addr).await.unwrap();
+    let mut line = serde_json::to_string(&items).unwrap();
+    line.push('\n');
+    stalled.write_all(line.as_bytes()).await.unwrap();
+    let early =
+        tokio::time::timeout(Duration::from_millis(200), read_exact_line(&mut stalled)).await;
+    assert!(early.is_err(), "the batch must wait for the held permit");
+    drop(hold);
+    let late = tokio::time::timeout(Duration::from_secs(5), read_exact_line(&mut stalled))
+        .await
+        .expect("batch finishes after the permit is released");
+    let parsed: Value = serde_json::from_str(&late).unwrap();
+    assert_eq!(parsed.as_array().expect("array").len(), 3, "{parsed}");
+    handle.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[cfg(debug_assertions)]
 fn get_balance(id: usize) -> Value {
     json!({"jsonrpc":"2.0","id":id,"method":"blockchain.scripthash.get_balance",

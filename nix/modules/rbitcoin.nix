@@ -124,6 +124,8 @@ let
   ++ optional (cfg.milestone != null) (toString cfg.milestone)
   ++ optional (cfg.heavyShCreates != null) "--heavy-sh-creates"
   ++ optional (cfg.heavyShCreates != null) (toString cfg.heavyShCreates)
+  ++ optional (cfg.storeReadBudget != null) "--store-read-budget"
+  ++ optional (cfg.storeReadBudget != null) (toString cfg.storeReadBudget)
   ++ optional (cfg.trustPeer != null) "--trust-peer"
   ++ optional (cfg.trustPeer != null) cfg.trustPeer
   ++ lib.optionals cfg.sv2.tp.enable [
@@ -245,6 +247,18 @@ in
         join with more than N creates waits until no other such join is running
         on the node. Null omits the flag and leaves the node default (10000).
         0 turns the wait off. It matters once `--max-sh-creates` is raised past it.
+      '';
+    };
+
+    storeReadBudget = mkOption {
+      type = types.nullOr types.ints.positive;
+      default = null;
+      example = 8;
+      description = ''
+        Pass `--store-read-budget N`. Concurrent API store reads across RPC,
+        REST, Electrum, Esplora, and BlindBit. Null omits the flag. The node
+        then allows 1 read when `datadirHdd` is set, otherwise one less than
+        the core count (minimum 1). An explicit N overrides `datadirHdd`.
       '';
     };
 

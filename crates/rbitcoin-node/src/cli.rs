@@ -343,7 +343,7 @@ pub fn operator_usage() -> String {
     [--i2p-sam [HOST:PORT]] [--i2p-accept-incoming] \\\n\
     [--electrum-listen ADDR] [--esplora-listen ADDR] [--esplora-onion[=0|1]] [--health-listen [ADDR]] [--metrics] \\\n\
     [--sv2-tp-listen ADDR] [--sv2-tp-authority-sec KEY] [--sv2-tp-authority-sec-file PATH] [--sv2-tp-cert-validity SECS] [--sv2-tp-stale-grace SECS] [--sv2-tp-idle-timeout SECS] [--sv2-tp-fee-delta SATS] [--sv2-tp-template-interval SECS] \\\n\
-    [--sh-index] [--block-filter-index] [--prune-seqsigwit] [--prune-seqsigwit-ram-threshold-bytes N] [--datadir-hdd] [--sp-tweaks] [--sp-tweaks-dust SATS] [--max-sh-creates N] [--heavy-sh-creates N] [--electrum-max-subs N] [--esplora-max-inflight N] [--esplora-block-template] \\\n\
+    [--sh-index] [--block-filter-index] [--prune-seqsigwit] [--prune-seqsigwit-ram-threshold-bytes N] [--datadir-hdd] [--store-read-budget N] [--sp-tweaks] [--sp-tweaks-dust SATS] [--max-sh-creates N] [--heavy-sh-creates N] [--electrum-max-subs N] [--esplora-max-inflight N] [--esplora-block-template] \\\n\
     [--rpc] [--rpc-listen [ADDR]] [--rest] [--rpc-socket PATH] [--rpc-token-file PATH] [--rpc-cookie-file PATH] [--rpc-cookie-perms owner|group|all] [--rpc-work-queue N] \\\n\
     [--milestone HEIGHT] \\\n\
     [--max-outbound N] [--max-inbound N] \\\n\
@@ -398,6 +398,7 @@ Block filters: --block-filter-index (default off) builds BIP158 basic filters. I
   --heavy-sh-creates N runs unpaged Electrum/Esplora joins with more than N creates one at a time across the node (default 10000; 0 = no limit). Lighter joins stay parallel.\n\
   --electrum-max-subs N caps blockchain.scripthash.subscribe per Electrum connection (default 10000; >= 1). Wallets subscribe every address up to their gap limit.\n\
   --esplora-max-inflight N caps Esplora requests in flight across the whole listener (default 256; >= 1). Further requests wait for a slot; the wait counts against the request timeout (408).\n\
+  --store-read-budget N caps concurrent API store reads across RPC, REST, Electrum, Esplora, and BlindBit (N >= 1). Omitted or 0 uses the default: 1 when --datadir-hdd is set, otherwise one less than the core count, minimum 1. An explicit N overrides --datadir-hdd. Waiters do not hold a blocking-pool thread.\n\
   --esplora-block-template enables GET /block-template (GBT template JSON; default off).\n\
   --esplora-onion (default on) ADD_ONION for --esplora-listen when --tor-control is set.\n\
 Silent payments: --sp-tweaks (default off) writes/serves the thin BIP-352 tweak index.\n\
@@ -421,7 +422,7 @@ Cold files: --datadir-cold PATH puts append-only IBD files under PATH/store\n\
   (seqsigwit, txstat, input, and blockfilter / sp_tweaks once enabled).\n\
   Default (flag omitted): those files live under --datadir. --prune-seqsigwit\n\
   is separate: it drops old seqsigwit and keeps a 288-height window on the hot store.\n\
-  --datadir-hdd says the main datadir is rotating media. The node does not probe the device.\n\
+  --datadir-hdd says the main datadir is rotating media. The node does not probe the device. When --store-read-budget is omitted or 0, API store reads are limited to 1.\n\
   Default off keeps the SSD confirm schedule.\n\
 Conf: --conf FILE (snake_case key=value; CLI kebab overrides conf). See OPERATOR.md and docs/rpc.md.\n\
 Advanced debug/IO knobs remain RBITCOIN_* env (not required for normal sync; preserved if CLI omits).\n\
@@ -593,6 +594,17 @@ pub fn cli_apply_err(e: crate::error::NodeError) -> ExitCode {
 #[doc(hidden)]
 pub fn blocking_pool_size() -> usize {
     rbitcoin_net::blocking_pool_size()
+}
+
+/// API store-read slots. `flag` of `N >= 1` wins over `hdd`. Omitted or `0`
+/// with `hdd` is 1. Otherwise one less than `parallelism`, and at least 1.
+#[doc(hidden)]
+pub fn store_read_budget(hdd: bool, parallelism: usize, flag: Option<usize>) -> usize {
+    match flag {
+        Some(n) if n >= 1 => n,
+        _ if hdd => 1,
+        _ => parallelism.saturating_sub(1).max(1),
+    }
 }
 
 #[doc(hidden)]

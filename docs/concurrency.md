@@ -45,7 +45,7 @@ Three thread kinds only. **Tokio workers must not wait on a `std` mutex/rwlock, 
 |------|-----|--------|
 | Reactor | `tokio-rt-worker` × nCPU | epoll, timers, framing. Node caps `spawn_blocking` at nCPU (min 4), not tokio’s 512. |
 | Role | `tip-accept`, `ibd-header`, `ibd-confirm-*`, `rbtc-tip-flush`, `rbtc-sh-wb`, `rbtc-idx-wb` | Sole writer for a resource. Not a job pool. |
-| Work pool | `rbtc-scripts-*` steal; tokio blocking pool | Independent jobs. Mempool script verify is awaited on the request task (`run_cpu`); prepare and commit run on `rbtc-off-pool`, not the blocking pool. Electrum / Esplora / RPC store joins still use the blocking pool. Heavy v2 encode, compact short ids, and JSON of at least 4 KiB run on `rbtc-scripts-*`. |
+| Work pool | `rbtc-scripts-*` steal; tokio blocking pool | Independent jobs. Mempool script verify is awaited on the request task (`run_cpu`); prepare and commit run on `rbtc-off-pool`, not the blocking pool. Prepare takes one `--store-read-budget` permit and drops it before script verify. Electrum / Esplora / RPC / REST / BlindBit store joins still use the blocking pool, and they share that one budget. A waiter does not occupy a pool thread. Heavy v2 encode, compact short ids, and JSON of at least 4 KiB run on `rbtc-scripts-*`. |
 
 | Role | Notes |
 |------|--------|
@@ -231,11 +231,19 @@ admit. Sync `accept_tx_from` remains for stack hubs and in-process
 `dispatch()`. Orphan promotion after a commit still runs on the off-pool
 thread that publishes the parent.
 
-**Deferred.** Electrum, Esplora, and RPC store joins, block and header
-decode, compact reconstruct, header persist, and full-block serve stay on
-Tokio's blocking pool (nCPU, minimum 4). The cap stays there while block
-decode still occupies that pool. A private pool would be a second pool.
-RPC can delay a reconstruct until one replacement lane exists.
+**Fixed.** RPC, REST, Electrum, Esplora, and BlindBit store reads share one
+semaphore sized at listen. Omitted or `0` with `--datadir-hdd` is 1.
+Otherwise it is one less than the core count, minimum 1. `--store-read-budget N`
+(`N >= 1`) overrides that. The permit is acquired on the request task and
+held until the read returns. P2P decode does not take it. Confirm's spindle
+gate is unchanged, and these reads do not take that gate. An Electrum
+read-only batch with a budget of 1 still completes, one read at a time.
+
+**Deferred.** Block and header decode, compact reconstruct, header persist,
+and full-block serve stay on Tokio's blocking pool (nCPU, minimum 4). The
+cap stays there while block decode still occupies that pool. A private pool
+would be a second pool. RPC can delay a reconstruct until one replacement
+lane exists.
 
 **Fixed.** Each failed async `try_send` on a full tip-accept queue
 increments `FULL_QUEUE_SPINS`, then the sender parks on `Notify`. A yield

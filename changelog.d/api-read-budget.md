@@ -1,0 +1,3 @@
+Added
+
+- **API store reads share one budget.** RPC, REST, Electrum, Esplora, and BlindBit take permits from one semaphore. The default is 1 when `--datadir-hdd` is set and `--store-read-budget` is omitted, otherwise one less than the core count (minimum 1). `--store-read-budget N` / `store_read_budget=` overrides that, including on rotating media. `--datadir-hdd` selects 1 only when the budget flag is omitted or `0`. Esplora's in-flight cap and the RPC work queue are queues in front of this budget. A full RPC work queue is still HTTP 503. A long-poll does not hold a disk permit while it waits.
