@@ -9,5 +9,8 @@ Fixed
   submit order. A transaction that leaves the mempool first is not sent,
   and one that leaves while its first peer is being reached is not sent
   to the second.
+  A transaction whose turn came while the mempool was busy, such as during
+  a block connect, was also skipped for good. The sender now waits for the
+  mempool instead.
   The sender logs a warning when 32 or more wait, and an info line for
   each peer that took a transaction.

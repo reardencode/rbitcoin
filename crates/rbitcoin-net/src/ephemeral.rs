@@ -137,15 +137,17 @@ pub fn spawn_isolated_broadcast_loop(
                     "isolated broadcast is behind: {behind} local txs wait after {txid}"
                 );
             }
-            // `get_tx` refuses the reactor thread. This task is a tokio worker.
-            let tx = match mp.try_get_tx(&txid) {
-                Some(tx) => Some(tx),
-                None => {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                    mp.try_get_tx(&txid)
-                }
-            };
+            // A real read: `try_read` cannot tell a held write from a tx that
+            // left, and `take` already marked this txid taken.
+            let hub = Arc::clone(&mp);
+            let tx = tokio::task::spawn_blocking(move || {
+                let _g = crate::reactor::BlockingRegion::enter();
+                hub.get_tx(&txid)
+            })
+            .await
+            .expect("isolated broadcast get_tx join");
             let Some(tx) = tx else {
+                rbitcoin_log::debug!("isolated broadcast {txid}: left the mempool before its turn");
                 continue;
             };
             // `unindex_txid` drops the local-origin entry on every removal,
