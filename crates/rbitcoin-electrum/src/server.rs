@@ -1013,7 +1013,9 @@ fn method_reads_store(method: &str) -> bool {
     method_reads_only(method)
         || matches!(
             method,
-            "blockchain.headers.subscribe" | "blockchain.scripthash.subscribe"
+            "blockchain.headers.subscribe"
+                | "blockchain.scripthash.subscribe"
+                | "blockchain.outpoint.subscribe"
         )
 }
 
@@ -2044,9 +2046,6 @@ pub async fn write_rpc_result<W: AsyncWrite + Unpin>(
     write_raw_line(writer, &s, deadline).await
 }
 
-/// Instant methods that must stay on the connection task so a 1-worker runtime
-/// can answer `server.ping` while another socket is in `spawn_blocking`.
-#[doc(hidden)]
 /// Broadcast runs scripts on `rbtc-scripts-*` and must not take a blocking thread.
 fn method_awaits_scripts(method: &str) -> bool {
     matches!(
@@ -2055,6 +2054,9 @@ fn method_awaits_scripts(method: &str) -> bool {
     )
 }
 
+/// Instant methods that must stay on the connection task so a 1-worker runtime
+/// can answer `server.ping` while another socket is in `spawn_blocking`.
+#[doc(hidden)]
 pub fn method_stays_on_worker(method: &str) -> bool {
     matches!(
         method,

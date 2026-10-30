@@ -1497,7 +1497,10 @@ pub fn wait_for_tip(
     pred: impl Fn(&str, u32) -> bool,
 ) -> Result<Value, Value> {
     if super::http_wait_satisfied() {
-        let (hash, height) = tip_hash_height(ctx)?;
+        let (hash, height) = match super::take_http_wait_snap() {
+            Some(snap) => snap,
+            None => tip_hash_height(ctx)?,
+        };
         return Ok(json!({ "hash": hash, "height": height }));
     }
     let deadline = Instant::now() + std::time::Duration::from_millis(timeout_ms);

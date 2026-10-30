@@ -2153,9 +2153,10 @@ pub async fn admit_broadcast(st: AppState, tx: bitcoin::Transaction) -> Response
     let budget = st.query.api_read_budget();
     match rbitcoin_net::with_store_budget(budget, mp.accept_tx_async(tx)).await {
         Ok(r) => {
-            mp.mark_local_origin(r.txid);
-            let tid = r.txid.to_byte_array();
-            plain_ok(block_hash_hex(&tid))
+            let marked = Arc::clone(mp);
+            let tid = r.txid;
+            rbitcoin_net::off_pool(move || marked.mark_local_origin(tid)).await;
+            plain_ok(block_hash_hex(&tid.to_byte_array()))
         }
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     }
@@ -2368,9 +2369,14 @@ pub async fn post_tx_package(State(st): State<AppState>, body: Bytes) -> Respons
         .await
     {
         Ok(results) => {
-            for r in &results {
-                mp.mark_local_origin(r.txid);
-            }
+            let marked = Arc::clone(mp);
+            let ids: Vec<_> = results.iter().map(|r| r.txid).collect();
+            rbitcoin_net::off_pool(move || {
+                for tid in ids {
+                    marked.mark_local_origin(tid);
+                }
+            })
+            .await;
             let txids: Vec<String> = results
                 .iter()
                 .map(|r| block_hash_hex(&r.txid.to_byte_array()))

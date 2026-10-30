@@ -2615,3 +2615,53 @@ async fn batch_wait_does_not_skip_a_sibling_getblocktemplate() {
     assert_eq!(err["code"], -9, "{err}");
     assert_eq!(err["message"], "Bitcoin Core is not connected!");
 }
+
+/// The first `waitfornewblock` in a batch returns the tip from when that
+/// wait ended. A block mined during the second wait stays on the second result.
+#[tokio::test]
+async fn earlier_wait_reports_the_tip_from_when_it_finished() {
+    let (ctx, _dir) = http_wait_ctx();
+    let genesis = rbitcoin_rpc::methods::tip_hash_height(&ctx).unwrap().0;
+    let hub = Arc::clone(ctx.chain.as_ref().expect("hub"));
+    let state = AppState {
+        ctx,
+        auth: RpcAuth::new("test-token"),
+        cookie: None,
+        work_queue: Arc::new(Semaphore::new(4)),
+        rest_queue: Arc::new(Semaphore::new(1)),
+        rest: false,
+        require_auth: false,
+    };
+    let body = serde_json::json!([
+        {"jsonrpc":"1.0","id":1,"method":"waitfornewblock","params":[80]},
+        {"jsonrpc":"1.0","id":2,"method":"waitfornewblock","params":[5_000]}
+    ])
+    .to_string();
+    let call = tokio::spawn(async move {
+        rpc_post(State(state), axum::extract::Request::new(Body::from(body))).await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let miner = std::thread::spawn(move || {
+        hub.generate_to_script(1, bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![])
+            .expect("mine");
+    });
+    miner.join().expect("miner");
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), call)
+        .await
+        .expect("the second wait ends when the block connects")
+        .expect("join");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
+        .await
+        .expect("body");
+    let v: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    let arr = v.as_array().expect("batch");
+    assert_eq!(
+        arr[0]["result"]["hash"], genesis,
+        "the first wait ended before the block: {arr:?}"
+    );
+    assert_ne!(
+        arr[1]["result"]["hash"], genesis,
+        "the second wait saw the block: {arr:?}"
+    );
+}

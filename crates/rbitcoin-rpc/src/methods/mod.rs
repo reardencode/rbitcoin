@@ -5,7 +5,7 @@ use rbitcoin_net::MempoolHub;
 use rbitcoin_primitives::Network;
 use rbitcoin_query::Query;
 use serde_json::{json, Value};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -47,16 +47,10 @@ pub fn request_task_method(name: &str) -> bool {
     tip_connect_method(name) || script_admit_method(name)
 }
 
-/// Run `f` on a fresh OS thread. Not the Tokio blocking pool.
+/// Run `f` on `rbtc-off-pool`, holding one armed store-read permit for `f`.
+/// Unscoped callers (in-process tests) take no permit.
 pub async fn off_pool<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    std::thread::Builder::new()
-        .name("rbtc-off-pool".into())
-        .spawn(move || {
-            let _ = tx.send(f());
-        })
-        .expect("rbtc-off-pool");
-    rx.await.expect("rbtc-off-pool dropped")
+    rbitcoin_net::off_pool_budgeted(f).await
 }
 
 pub async fn dispatch_tip_connect(
@@ -83,6 +77,7 @@ pub async fn dispatch_tip_connect(
 pub use rest::{dispatch_rest, RestReply};
 thread_local! {
     static HTTP_WAIT_SATISFIED: Cell<bool> = const { Cell::new(false) };
+    static HTTP_WAIT_SNAP: RefCell<Option<(String, u32)>> = const { RefCell::new(None) };
 }
 
 /// The HTTP task already waited. The blocking dispatch must not sleep again.
@@ -92,6 +87,16 @@ pub fn set_http_wait_satisfied(v: bool) {
 
 pub fn http_wait_satisfied() -> bool {
     HTTP_WAIT_SATISFIED.with(|c| c.get())
+}
+
+/// Tip observed when this call's wait ended. Later calls in the batch must
+/// not replace it.
+pub fn set_http_wait_snap(v: Option<(String, u32)>) {
+    HTTP_WAIT_SNAP.with(|c| *c.borrow_mut() = v);
+}
+
+pub fn take_http_wait_snap() -> Option<(String, u32)> {
+    HTTP_WAIT_SNAP.with(|c| c.borrow_mut().take())
 }
 
 pub fn sat_kvb_to_btc(sat_kvb: u64) -> f64 {
