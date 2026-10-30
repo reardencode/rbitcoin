@@ -470,7 +470,8 @@ impl HeaderTips {
 #[doc(hidden)]
 pub struct MiningKnobs {
     pub block_version: AtomicI32,
-    pub gbt_assembled: AtomicBool,
+    /// Last assembled block: `weight << 32 | txs`. Zero until one is built.
+    pub last_block: AtomicU64,
     pub block_min_tx_fee_sat_kvb: AtomicU64,
 }
 
@@ -479,7 +480,7 @@ impl MiningKnobs {
     pub fn new() -> Self {
         Self {
             block_version: AtomicI32::new(0),
-            gbt_assembled: AtomicBool::new(false),
+            last_block: AtomicU64::new(0),
             block_min_tx_fee_sat_kvb: AtomicU64::new(1),
         }
     }
@@ -865,12 +866,22 @@ impl ChainHub {
             || self.asked_blocks.read().unwrap().contains(hash)
     }
 
-    pub fn note_gbt_assembled(&self) {
-        self.mining.gbt_assembled.store(true, Ordering::Relaxed);
+    /// Core `BlockAssembler::m_last_block_weight` and `m_last_block_num_txs`:
+    /// the reserved weight plus `tx_weight` of `txs` non-coinbase txs.
+    pub fn note_block_assembled(&self, tx_weight: u64, txs: usize) {
+        let weight = rbitcoin_mempool::TxGraph::DEFAULT_BLOCK_RESERVED_WEIGHT
+            .saturating_add(tx_weight)
+            .min(u64::from(u32::MAX));
+        let txs = (txs as u64).min(u64::from(u32::MAX));
+        self.mining
+            .last_block
+            .store(weight << 32 | txs, Ordering::Relaxed);
     }
 
-    pub fn gbt_assembled(&self) -> bool {
-        self.mining.gbt_assembled.load(Ordering::Relaxed)
+    /// `(weight, txs)` of the last assembled block, if one was built.
+    pub fn last_block_assembled(&self) -> Option<(u64, u64)> {
+        let packed = self.mining.last_block.load(Ordering::Relaxed);
+        (packed != 0).then_some((packed >> 32, packed & u64::from(u32::MAX)))
     }
 
     /// Non-zero overrides GBT `version`.
@@ -2396,18 +2407,22 @@ impl ChainHub {
             extra_txs,
             Self::GENERATE_MAX_BLOCKS,
             false,
+            false,
         )
     }
 
     /// RPC `generate` / `generateblock`. Same mine as [`Self::generate_to_script`],
     /// and the pool txids in an accepted block are removed before the next
     /// block of this call is mined. A relay-off connect does not remove them.
+    /// `record_assembly` records each block for `getmininginfo` before it is
+    /// mined: `generate` builds from the pool, `generateblock` does not.
     #[doc(hidden)]
     pub fn generate_to_script_for_rpc(
         &self,
         nblocks: u32,
         script_pubkey: ScriptBuf,
         extra_txs: Vec<Transaction>,
+        record_assembly: bool,
     ) -> Result<Vec<BlockHash>, NetError> {
         self.generate_paying(
             nblocks,
@@ -2415,6 +2430,7 @@ impl ChainHub {
             extra_txs,
             Self::GENERATE_MAX_BLOCKS,
             true,
+            record_assembly,
         )
     }
 
@@ -2429,7 +2445,7 @@ impl ChainHub {
         extra_txs: Vec<Transaction>,
         limit: u32,
     ) -> Result<Vec<BlockHash>, NetError> {
-        self.generate_paying(nblocks, script_pubkey, extra_txs, limit, false)
+        self.generate_paying(nblocks, script_pubkey, extra_txs, limit, false, false)
     }
 
     fn generate_paying(
@@ -2439,6 +2455,7 @@ impl ChainHub {
         extra_txs: Vec<Transaction>,
         limit: u32,
         commit_on_accept: bool,
+        record_assembly: bool,
     ) -> Result<Vec<BlockHash>, NetError> {
         if nblocks == 0 {
             return Ok(Vec::new());
@@ -2471,6 +2488,10 @@ impl ChainHub {
                     .map(|tx| tx.compute_txid())
                     .collect::<Vec<Txid>>()
             });
+            if record_assembly {
+                let weight = txs.iter().map(|tx| tx.weight().to_wu()).sum();
+                self.note_block_assembled(weight, txs.len());
+            }
             hashes.push(self.mine_and_accept_paying(script_pubkey.clone(), txs)?);
             if let Some(ids) = ids.filter(|ids| !ids.is_empty()) {
                 let Some(mp) = self.mempool() else {

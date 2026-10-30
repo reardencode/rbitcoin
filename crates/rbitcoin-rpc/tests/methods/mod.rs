@@ -5677,6 +5677,300 @@ fn template_and_generate_hold_the_period_time_floors() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Core `getmininginfo` (bitcoin/bitcoin#36081): `bestblockhash` names the
+/// tip that `blocks` and `bits` describe, and `next` is the work the next
+/// block must meet. Period 4 with one-second blocks: block 4 retargets harder.
+#[test]
+fn getmininginfo_names_the_tip_and_the_next_block_work() {
+    let mut params = rbitcoin_consensus::ChainParams::regtest();
+    params.btc.no_pow_retargeting = false;
+    params.btc.allow_min_difficulty_blocks = false;
+    params.btc.pow_target_timespan = 4 * params.btc.pow_target_spacing;
+    assert_eq!(params.difficulty_adjustment_interval(), 4);
+    let (ctx, dir, hub) = ctx_regtest_hub_on(params, 300_000_000);
+    let genesis = hub.tip_header().unwrap().time;
+    let block_at = |h: u32| {
+        let prev = hub.tip_hash().unwrap();
+        rbitcoin_consensus::mine_regtest_paying(prev, genesis + h, h, true_spk(), vec![])
+    };
+    for h in 1..=3 {
+        let r = dispatch(&ctx, "submitblock", vec![json!(block_hex(&block_at(h)))]).unwrap();
+        assert!(r.is_null(), "height {h}: {r}");
+    }
+    let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    let best = dispatch(&ctx, "getbestblockhash", vec![]).unwrap();
+    assert_eq!(info["blocks"], 3, "{info}");
+    assert_eq!(info["bestblockhash"], best, "{info}");
+    let tip = dispatch(&ctx, "getblockheader", vec![best]).unwrap();
+    assert_eq!(info["bits"], tip["bits"], "{info}");
+
+    let next = &info["next"];
+    assert_eq!(next["height"], 4, "{info}");
+    assert_ne!(next["bits"], info["bits"], "block 4 retargets: {info}");
+    let mut b = block_at(4);
+    let bits = u32::from_str_radix(next["bits"].as_str().unwrap(), 16).unwrap();
+    b.header.bits = bitcoin::CompactTarget::from_consensus(bits);
+    rbitcoin_consensus::grind_regtest_pow(&mut b.header);
+    let r = dispatch(&ctx, "submitblock", vec![json!(block_hex(&b))]).unwrap();
+    assert!(r.is_null(), "the node accepts next.bits: {r}");
+    let mined = dispatch(
+        &ctx,
+        "getblockheader",
+        vec![json!(b.block_hash().to_string())],
+    )
+    .unwrap();
+    assert_eq!(next["target"], mined["target"], "{info}");
+    assert_eq!(next["difficulty"], mined["difficulty"], "{info}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Period 4 with two competing block 3s. `A3` and `B3` have different times,
+/// so block 4's work differs between the branches. `A3` is the tip.
+fn period4_fork() -> (
+    RpcContext,
+    TempDir,
+    Arc<rbitcoin_net::ChainHub>,
+    BlockHash,
+    Block,
+) {
+    let mut params = rbitcoin_consensus::ChainParams::regtest();
+    params.btc.no_pow_retargeting = false;
+    params.btc.allow_min_difficulty_blocks = false;
+    params.btc.pow_target_timespan = 4 * params.btc.pow_target_spacing;
+    let (ctx, dir, hub) = ctx_regtest_hub_on(params, 300_000_000);
+    let genesis = hub.tip_header().unwrap().time;
+    for h in 1..=3 {
+        let prev = hub.tip_hash().unwrap();
+        let b = rbitcoin_consensus::mine_regtest_paying(prev, genesis + h, h, true_spk(), vec![]);
+        let r = dispatch(&ctx, "submitblock", vec![json!(block_hex(&b))]).unwrap();
+        assert!(r.is_null(), "height {h}: {r}");
+    }
+    let a3 = hub.tip_hash().unwrap();
+    let prev = hub.tip_header().unwrap().prev_blockhash;
+    let b3 = rbitcoin_consensus::mine_regtest_paying(prev, genesis + 86_400, 3, true_spk(), vec![]);
+    (ctx, dir, hub, a3, b3)
+}
+
+/// A child of `info.bestblockhash` at `info.next.bits` is accepted.
+fn assert_next_bits_extend_best(ctx: &RpcContext, info: &Value) {
+    let best = BlockHash::from_str(info["bestblockhash"].as_str().unwrap()).unwrap();
+    let header = dispatch(ctx, "getblockheader", vec![json!(best.to_string())]).unwrap();
+    let time = header["time"].as_u64().unwrap() as u32 + 1;
+    let mut b4 = rbitcoin_consensus::mine_regtest_paying(best, time, 4, true_spk(), vec![]);
+    let bits = u32::from_str_radix(info["next"]["bits"].as_str().unwrap(), 16).unwrap();
+    b4.header.bits = bitcoin::CompactTarget::from_consensus(bits);
+    rbitcoin_consensus::grind_regtest_pow(&mut b4.header);
+    let r = dispatch(ctx, "submitblock", vec![json!(block_hex(&b4))]).unwrap();
+    assert!(
+        r.is_null(),
+        "a child of bestblockhash meets next.bits: {r} {info}"
+    );
+}
+
+/// A reorg between the tip read and the `next` reads restarts the sample, so
+/// `bestblockhash` and `next.bits` name one branch.
+#[test]
+fn getmininginfo_reorg_mid_sample_keeps_one_branch() {
+    let (ctx, dir, _hub, a3, b3) = period4_fork();
+    let b3_hex = block_hex(&b3);
+    let mut done = false;
+    during_next_mininginfo(move |ctx: &RpcContext, point| {
+        if done || point != MininginfoPoint::BeforeNext {
+            return;
+        }
+        done = true;
+        dispatch(ctx, "invalidateblock", vec![json!(a3.to_string())]).unwrap();
+        let r = dispatch(ctx, "submitblock", vec![json!(b3_hex)]).unwrap();
+        assert!(r.is_null(), "{r}");
+    });
+    let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    assert_eq!(info["bestblockhash"], b3.block_hash().to_string(), "{info}");
+    assert_next_bits_extend_best(&ctx, &info);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A reorg away and back during the `next` reads leaves the tip hash as it
+/// was, but those reads were the other branch's. The sample starts over.
+#[test]
+fn getmininginfo_reorg_away_and_back_restarts() {
+    let (ctx, dir, _hub, a3, b3) = period4_fork();
+    let b3_hash = b3.block_hash().to_string();
+    let b3_hex = block_hex(&b3);
+    let mut step = 0;
+    during_next_mininginfo(move |ctx: &RpcContext, point| match (step, point) {
+        (0, MininginfoPoint::BeforeNext) => {
+            step = 1;
+            dispatch(ctx, "invalidateblock", vec![json!(a3.to_string())]).unwrap();
+            let r = dispatch(ctx, "submitblock", vec![json!(b3_hex.clone())]).unwrap();
+            assert!(r.is_null(), "{r}");
+        }
+        (1, MininginfoPoint::BeforeRecheck) => {
+            step = 2;
+            dispatch(ctx, "reconsiderblock", vec![json!(a3.to_string())]).unwrap();
+            dispatch(ctx, "invalidateblock", vec![json!(b3_hash.clone())]).unwrap();
+        }
+        _ => {}
+    });
+    let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    assert_eq!(info["bestblockhash"], a3.to_string(), "{info}");
+    assert_next_bits_extend_best(&ctx, &info);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A disconnect that drops the tip below the sampled height fails the reads
+/// at that height. That is a moved tip, so the answer is the new tip.
+#[test]
+fn getmininginfo_disconnect_below_the_sample_reads_the_new_tip() {
+    let (ctx, dir, _hub) = ctx_regtest_hub();
+    let hashes = dispatch(&ctx, "generate", vec![json!(3)]).unwrap();
+    let block2 = hashes[1].clone();
+    let mut done = false;
+    during_next_mininginfo(move |ctx: &RpcContext, point| {
+        if !done && point == MininginfoPoint::BeforeNext {
+            done = true;
+            dispatch(ctx, "invalidateblock", vec![block2.clone()]).unwrap();
+        }
+    });
+    let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    assert_eq!(info["blocks"], 1, "{info}");
+    assert_eq!(info["bestblockhash"], hashes_at(&ctx, 1), "{info}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn hashes_at(ctx: &RpcContext, height: u32) -> Value {
+    dispatch(ctx, "getblockhash", vec![json!(height)]).unwrap()
+}
+
+/// A connect above the sampled tip changes no read at or below it, so a node
+/// that is syncing answers from its first sample.
+#[test]
+fn getmininginfo_connect_mid_sample_keeps_the_sample() {
+    let (ctx, dir, _hub) = ctx_regtest_hub();
+    let hashes = dispatch(&ctx, "generate", vec![json!(2)]).unwrap();
+    let samples = Arc::new(AtomicU64::new(0));
+    let seen = Arc::clone(&samples);
+    during_next_mininginfo(move |ctx: &RpcContext, point| {
+        if point == MininginfoPoint::BeforeNext {
+            assert!(seen.fetch_add(1, Ordering::Relaxed) < 16, "sampled forever");
+            dispatch(ctx, "generate", vec![json!(1)]).unwrap();
+        }
+    });
+    let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    assert_eq!(samples.load(Ordering::Relaxed), 1, "{info}");
+    assert_eq!(info["blocks"], 2, "{info}");
+    assert_eq!(info["bestblockhash"], hashes[1], "{info}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A chain that disconnects during every sample ends the call with an error
+/// after a fixed number of samples.
+#[test]
+fn getmininginfo_gives_up_on_a_chain_that_keeps_reorging() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let samples = Arc::new(AtomicU64::new(0));
+    let seen = Arc::clone(&samples);
+    during_next_mininginfo(move |ctx: &RpcContext, point| {
+        if point == MininginfoPoint::BeforeNext {
+            assert!(seen.fetch_add(1, Ordering::Relaxed) < 16, "sampled forever");
+            let tip = dispatch(ctx, "getbestblockhash", vec![]).unwrap();
+            dispatch(ctx, "invalidateblock", vec![tip]).unwrap();
+        }
+    });
+    let err = dispatch(&ctx, "getmininginfo", vec![]).unwrap_err();
+    assert_eq!(err["code"], ERR_MISC, "{err}");
+    assert_eq!(samples.load(Ordering::Relaxed), 8, "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Core `BlockAssembler::m_last_block_weight` / `m_last_block_num_txs`: the
+/// reserved 8000 plus the selected transactions of the last block a template
+/// or `generate` assembled.
+#[test]
+fn getmininginfo_reports_the_last_assembled_block() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let (hex, spend) = mature_coinbase_spend_hex(&ctx, generated_coinbase_value(&ctx, 1) - 1_000);
+    dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
+    let weight = 8_000 + spend.weight().to_wu();
+
+    dispatch(&ctx, "getblocktemplate", vec![json!({"rules": ["segwit"]})]).unwrap();
+    let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    assert_eq!(info["currentblockweight"], weight, "{info}");
+    assert_eq!(info["currentblocktx"], 1, "{info}");
+
+    dispatch(&ctx, "generate", vec![json!(2)]).unwrap();
+    let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    assert_eq!(
+        info["currentblockweight"], 8_000,
+        "the second block is empty: {info}"
+    );
+    assert_eq!(info["currentblocktx"], 0, "{info}");
+
+    let (hex, spend) = spend_outpoint(&spend, 0, 1_000);
+    dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
+    dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
+    let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    assert_eq!(
+        info["currentblockweight"],
+        8_000 + spend.weight().to_wu(),
+        "{info}"
+    );
+    assert_eq!(info["currentblocktx"], 1, "{info}");
+
+    let (hex, _) = spend_outpoint(&spend, 0, 1_000);
+    let (addr, _) = p2wpkh_regtest();
+    dispatch(&ctx, "generateblock", vec![json!(addr), json!([hex])]).unwrap();
+    let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    assert_eq!(
+        info["currentblockweight"], 8_000,
+        "Core assembles generateblock empty: {info}"
+    );
+    assert_eq!(info["currentblocktx"], 0, "{info}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `generateblock` mines the transactions it was given, not a pool
+/// assembly, so mining them leaves the last assembly as it was.
+#[test]
+fn generateblock_mine_leaves_the_last_assembly() {
+    let (ctx, dir, hub) = ctx_from_mature_pad(300_000_000);
+    let (_, spend) = mature_coinbase_spend_hex(&ctx, generated_coinbase_value(&ctx, 1) - 1_000);
+    dispatch(&ctx, "getblocktemplate", vec![json!({"rules": ["segwit"]})]).unwrap();
+    assert_eq!(hub.last_block_assembled(), Some((8_000, 0)));
+    hub.generate_to_script_for_rpc(1, true_spk(), vec![spend], false)
+        .unwrap();
+    assert_eq!(hub.last_block_assembled(), Some((8_000, 0)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Each block of `generate` records its own assembly, so a request that
+/// fails after its first block still reports that block. A `generateblock`
+/// with a bad `submit` assembles nothing.
+#[test]
+fn getmininginfo_assembly_is_per_block() {
+    let (ctx, dir, hub) = ctx_from_mature_pad(300_000_000);
+    let (hex, spend) = mature_coinbase_spend_hex(&ctx, generated_coinbase_value(&ctx, 1) - 1_000);
+    dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
+    let weight = 8_000 + spend.weight().to_wu();
+    hub.generate_fail_before.store(1, Ordering::Relaxed);
+    dispatch(&ctx, "generate", vec![json!(2)]).unwrap_err();
+    hub.generate_fail_before.store(0, Ordering::Relaxed);
+    let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    assert_eq!(info["currentblockweight"], weight, "{info}");
+    assert_eq!(info["currentblocktx"], 1, "{info}");
+
+    let (addr, _) = p2wpkh_regtest();
+    dispatch(
+        &ctx,
+        "generateblock",
+        vec![json!(addr), json!([]), json!("yes")],
+    )
+    .unwrap_err();
+    let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    assert_eq!(info["currentblockweight"], weight, "{info}");
+    assert_eq!(info["currentblocktx"], 1, "{info}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A sibling that spends the coin the current tip also spent is a competing
 /// block, not a permanent `duplicate-invalid`.
 #[test]

@@ -174,11 +174,8 @@ pub fn generate_with_mempool(
             .unwrap_or_default()
     };
     let hashes = miner
-        .generate_to_script(nblocks, script, extras)
+        .generate_to_script(nblocks, script, extras, true)
         .map_err(|e| rpc_error(ERR_MISC, e))?;
-    if let Some(c) = ctx.chain.as_ref() {
-        c.note_gbt_assembled();
-    }
     Ok(hashes_json(&hashes))
 }
 
@@ -244,6 +241,11 @@ pub fn generateblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Valu
         return Err(rpc_error(ERR_INVALID_PARAMS, "transactions required"));
     }
     let submit = params.opt_bool(2, "submit")?.unwrap_or(true);
+    // Core assembles an empty block (`use_mempool = false`) before it adds
+    // the given transactions.
+    if let Some(c) = ctx.chain.as_ref() {
+        c.note_block_assembled(0, 0);
+    }
     if !submit {
         let block = miner
             .assemble_block_to_script(script, extra)
@@ -254,7 +256,7 @@ pub fn generateblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Valu
         }));
     }
     let hashes = miner
-        .generate_to_script(1, script, extra.clone())
+        .generate_to_script(1, script, extra.clone(), false)
         .map_err(|e| generateblock_missing_input_error(&e.to_string(), &extra))?;
     let hash = hashes
         .first()
@@ -771,6 +773,44 @@ fn gbt_tip(ctx: &RpcContext) -> Result<GbtTip, Value> {
     Ok(anchor_of(h.0, rec.hash, rec.bits))
 }
 
+/// Core `NextEmptyBlockIndex`: the next block's time floor, its `UpdateTime`
+/// time, and the work it must meet at that time.
+struct NextBlock {
+    mintime: u32,
+    curtime: u32,
+    bits: u32,
+}
+
+fn next_block(
+    ctx: &RpcContext,
+    params: &rbitcoin_consensus::ChainParams,
+    tip_h: u32,
+    tip_bits: u32,
+) -> Result<NextBlock, Value> {
+    let now = ctx
+        .chain
+        .as_ref()
+        .map(|c| c.clock.now_secs() as u32)
+        .unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as u32)
+                .unwrap_or(0)
+        });
+    let mintime = rbitcoin_query::next_block_mintime(ctx.query.as_ref(), params, Height(tip_h))
+        .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?;
+    let curtime = mintime.max(now);
+    let next_h = Height(tip_h.saturating_add(1));
+    let bits = rbitcoin_query::expected_next_bits(ctx.query.as_ref(), params, next_h, curtime)
+        .map(|c| c.to_consensus())
+        .unwrap_or(tip_bits);
+    Ok(NextBlock {
+        mintime,
+        curtime,
+        bits,
+    })
+}
+
 fn gbt_params(ctx: &RpcContext) -> rbitcoin_consensus::ChainParams {
     ctx.chain
         .as_ref()
@@ -796,23 +836,11 @@ pub fn gbt_template(ctx: &RpcContext) -> Result<Value, Value> {
         .query
         .testdummy_state(&params, Height(tip_h))
         .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?;
-    let now = ctx
-        .chain
-        .as_ref()
-        .map(|c| c.clock.now_secs() as u32)
-        .unwrap_or_else(|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as u32)
-                .unwrap_or(0)
-        });
-    let mintime = rbitcoin_query::next_block_mintime(ctx.query.as_ref(), &params, Height(tip_h))
-        .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?;
-    let curtime = mintime.max(now);
-    let bits =
-        rbitcoin_query::expected_next_bits(ctx.query.as_ref(), &params, Height(next_h), curtime)
-            .map(|c| c.to_consensus())
-            .unwrap_or(tip_bits);
+    let NextBlock {
+        mintime,
+        curtime,
+        bits,
+    } = next_block(ctx, &params, tip_h, tip_bits)?;
     let selected = mempool_block_txs(ctx);
     let mut fees = 0u64;
     let mut tx_json = Vec::with_capacity(selected.len());
@@ -839,7 +867,8 @@ pub fn gbt_template(ctx: &RpcContext) -> Result<Value, Value> {
     let longpollid = format!("{prev_hex}{updates}");
     let target = bitcoin::Target::from_compact(bitcoin::CompactTarget::from_consensus(bits));
     if let Some(c) = ctx.chain.as_ref() {
-        c.note_gbt_assembled();
+        let weight = selected.iter().map(|(tx, _)| tx.weight().to_wu()).sum();
+        c.note_block_assembled(weight, selected.len());
     }
     let wtxids = selected
         .iter()
@@ -975,28 +1004,124 @@ pub fn gbt_check_proposal(ctx: &RpcContext, block: &Block) -> Result<(), String>
     priced.map(|_fees| ())
 }
 
-/// Tip height, difficulty, pooledtx, and `blockmintxfee` (BTC/kvB, `sat_btc_json`).
+/// Where a [`during_next_mininginfo`] hook runs in each sample.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MininginfoPoint {
+    /// After the tip read, before the reads by height.
+    BeforeNext,
+    /// After the reads by height, before the sample is checked.
+    BeforeRecheck,
+}
+
+#[cfg(debug_assertions)]
+type MininginfoHook = Box<dyn FnMut(&RpcContext, MininginfoPoint)>;
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static MININGINFO_HOOK: std::cell::RefCell<Option<MininginfoHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` at each [`MininginfoPoint`] of the next `getmininginfo` on this
+/// thread.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn during_next_mininginfo(f: impl FnMut(&RpcContext, MininginfoPoint) + 'static) {
+    MININGINFO_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+}
+
+fn tip_header(ctx: &RpcContext) -> Result<(Height, rbitcoin_store::HeaderRecord), Value> {
+    let tip = ctx
+        .query
+        .tip_height()
+        .ok_or_else(|| rpc_error(ERR_MISC, "no tip"))?;
+    let (_, rec) = ctx
+        .query
+        .header_at_height(tip)
+        .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?
+        .ok_or_else(|| rpc_error(ERR_MISC, "tip header missing"))?;
+    Ok((tip, rec))
+}
+
+/// Samples before `getmininginfo` gives up on a chain that keeps reorging.
+const MININGINFO_SAMPLES: u32 = 8;
+
+/// Core `getmininginfo`. `blocks`, `bestblockhash`, `bits`, `next`, and
+/// `networkhashps` describe one tip, as Core's under `cs_main`.
 pub fn getmininginfo(ctx: &RpcContext) -> Result<Value, Value> {
-    let tip = ctx.query.tip_height().map(|h| h.0).unwrap_or(0);
+    #[cfg(debug_assertions)]
+    let mut hook = MININGINFO_HOOK.with(|h| h.borrow_mut().take());
+    #[cfg(debug_assertions)]
+    let mut at = |point| {
+        if let Some(f) = hook.as_mut() {
+            f(ctx, point);
+        }
+    };
+    #[cfg_attr(not(debug_assertions), allow(unused_mut))]
+    let mut sample = || -> Result<_, Value> {
+        let (tip, rec) = tip_header(ctx)?;
+        #[cfg(debug_assertions)]
+        at(MininginfoPoint::BeforeNext);
+        let next = next_block(ctx, &gbt_params(ctx), tip.0, rec.bits)?;
+        let hashps = network_hash_ps(ctx, 120, i64::from(tip.0)).unwrap_or(0.0);
+        #[cfg(debug_assertions)]
+        at(MininginfoPoint::BeforeRecheck);
+        Ok((tip, rec, next, hashps))
+    };
+    let disconnects = || ctx.query.disconnect_gen.load(Ordering::Acquire);
+    let mut samples = 0;
+    let (tip, rec, next, hashps) = loop {
+        let gen = disconnects();
+        let sampled = sample();
+        // Every read is at or below the sampled tip, so a connect above it
+        // changes none of them and a syncing node keeps its first sample. A
+        // disconnect can change them, and one that was undone leaves the slot as
+        // it was. The generation moves after the slot is popped, so read the
+        // slot first.
+        let held = sampled.as_ref().is_ok_and(|(tip, rec, ..)| {
+            matches!(ctx.query.header_at_height(*tip), Ok(Some((_, now))) if now.hash == rec.hash)
+                && disconnects() == gen
+        });
+        samples += 1;
+        match sampled {
+            Ok(sampled) if held => break sampled,
+            Err(e) if samples == MININGINFO_SAMPLES => return Err(e),
+            Ok(_) if samples == MININGINFO_SAMPLES => {
+                return Err(rpc_error(ERR_MISC, "the chain kept reorging"));
+            }
+            // A failed read is what a disconnect below the sample looks like.
+            _ => {}
+        }
+        // Every disconnect runs as a tip job, so this paces the samples. An
+        // idle lane means nothing is reorging, and the next sample can start.
+        wait_chain_tip(ctx);
+    };
     let pooledtx = ctx
         .mempool
         .as_ref()
         .map(|m| m.list_live_meta().len())
         .unwrap_or(0);
-    let bits = tip_bits(ctx).unwrap_or(rbitcoin_consensus::REGTEST_POW_BITS);
-    let target = bitcoin::Target::from_compact(bitcoin::CompactTarget::from_consensus(bits));
-    let difficulty = difficulty_from_bits(bits);
+    let work = |bits: u32| {
+        let target = bitcoin::Target::from_compact(bitcoin::CompactTarget::from_consensus(bits));
+        (
+            format!("{bits:08x}"),
+            format!("{target:064x}"),
+            core_f64_json(difficulty_from_bits(bits)),
+        )
+    };
+    let (bits, target, difficulty) = work(rec.bits);
+    let (next_bits, next_target, next_difficulty) = work(next.bits);
     let mut m = serde_json::Map::new();
-    m.insert("blocks".into(), json!(tip));
-    if ctx.chain.as_ref().is_some_and(|c| c.gbt_assembled()) {
-        m.insert("currentblockweight".into(), json!(8_000));
-        m.insert("currentblocktx".into(), json!(0));
+    m.insert("blocks".into(), json!(tip.0));
+    m.insert("bestblockhash".into(), json!(hash_hex_display(&rec.hash)));
+    if let Some((weight, txs)) = ctx.chain.as_ref().and_then(|c| c.last_block_assembled()) {
+        m.insert("currentblockweight".into(), json!(weight));
+        m.insert("currentblocktx".into(), json!(txs));
     }
-    m.insert("difficulty".into(), json!(difficulty));
-    m.insert(
-        "networkhashps".into(),
-        json!(network_hash_ps(ctx, 120, -1).unwrap_or(0.0)),
-    );
+    m.insert("difficulty".into(), difficulty);
+    m.insert("networkhashps".into(), core_f64_json(hashps));
     m.insert("pooledtx".into(), json!(pooledtx));
     let min_sat = ctx
         .chain
@@ -1008,25 +1133,19 @@ pub fn getmininginfo(ctx: &RpcContext) -> Result<Value, Value> {
     if let Some(challenge) = super::chain::signet_challenge_hex(ctx) {
         m.insert("signet_challenge".into(), json!(challenge));
     }
-    m.insert("bits".into(), json!(format!("{bits:08x}")));
-    m.insert("target".into(), json!(format!("{target:064x}")));
+    m.insert("bits".into(), json!(bits));
+    m.insert("target".into(), json!(target));
     m.insert(
         "next".into(),
         json!({
-            "height": tip.saturating_add(1),
-            "bits": format!("{bits:08x}"),
-            "target": format!("{target:064x}"),
-            "difficulty": difficulty,
+            "height": tip.0.saturating_add(1),
+            "bits": next_bits,
+            "target": next_target,
+            "difficulty": next_difficulty,
         }),
     );
     m.insert("warnings".into(), json!(rpc_warnings(ctx)));
     Ok(Value::Object(m))
-}
-
-pub fn tip_bits(ctx: &RpcContext) -> Option<u32> {
-    let tip = ctx.query.tip_height()?;
-    let (_, rec) = ctx.query.header_at_height(tip).ok().flatten()?;
-    Some(rec.bits)
 }
 
 pub fn getnetworkhashps(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
