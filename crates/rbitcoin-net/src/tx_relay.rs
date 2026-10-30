@@ -2016,8 +2016,6 @@ impl MempoolHub {
         self.announce.subscribe()
     }
 
-    /// Publish one admit. A tx standing peers skip goes to the isolated
-    /// broadcast loop instead, once per admit.
     #[doc(hidden)]
     pub fn publish_announce(&self, r: &AcceptResult, scripthashes: Vec<[u8; 32]>) {
         let _ = self.announce.send(MempoolAnnounce {
@@ -2027,9 +2025,6 @@ impl MempoolHub {
             scripthashes,
         });
         self.meter_announce.fetch_add(1, Ordering::Relaxed);
-        if self.skip_standing_inv(&r.txid) {
-            self.kick_isolated(&r.txid);
-        }
     }
 
     pub fn live_count(&self) -> usize {
@@ -2271,7 +2266,11 @@ impl MempoolHub {
         origin: TxOrigin,
     ) -> Result<AcceptResult, AcceptError> {
         crate::reactor::assert_not_reactor("mempool accept");
-        self.accept_with_utxo(tx, &self.utxo_provider(), origin, false, &[])
+        let result = self.accept_with_utxo(tx, &self.utxo_provider(), origin, false, &[]);
+        if let (TxOrigin::Local, Ok(r)) = (origin, &result) {
+            self.kick_isolated_if_live(&[r.txid]);
+        }
+        result
     }
 
     /// Admit one `submitpackage` member, local origin, without trimming and
@@ -2282,6 +2281,18 @@ impl MempoolHub {
     #[doc(hidden)]
     pub fn accept_tx_defer_trim(&self, tx: &Transaction) -> Result<AcceptResult, AcceptError> {
         self.accept_with_utxo(tx, &self.utxo_provider(), TxOrigin::Local, true, &[])
+    }
+
+    /// Hand each local tx still in the pool to the isolated broadcast loop.
+    ///
+    /// Runs once per submit, after its last trim: a member that trim drops
+    /// was already published, and must not reach the wire.
+    fn kick_isolated_if_live(&self, txids: &[Txid]) {
+        for txid in txids {
+            if self.contains(txid) {
+                self.kick_isolated(txid);
+            }
+        }
     }
 
     /// Runs under the write lock that commits `result`.
@@ -3316,6 +3327,15 @@ impl MempoolHub {
     /// Accept an ancestor package. Every member is [`TxOrigin::Local`]: this is
     /// the RPC, Esplora, and Electrum path (BIP331 wire later).
     pub fn accept_package(&self, txs: &[Transaction]) -> Result<Vec<AcceptResult>, AcceptError> {
+        let accepted = self.admit_package(txs)?;
+        let txids: Vec<Txid> = accepted.iter().map(|r| r.txid).collect();
+        self.kick_isolated_if_live(&txids);
+        Ok(accepted)
+    }
+
+    /// [`Self::accept_package`] without the isolated kick, for a caller that
+    /// trims again afterwards.
+    fn admit_package(&self, txs: &[Transaction]) -> Result<Vec<AcceptResult>, AcceptError> {
         crate::reactor::assert_not_reactor("mempool accept");
         Self::check_package_shape(txs)?;
         let t0 = Instant::now();
@@ -4434,9 +4454,13 @@ impl MempoolHub {
             })
             .map(|(tx, _)| tx.clone())
             .collect();
+        let mut admitted: Vec<Txid> = out
+            .iter()
+            .filter_map(|r| r.as_ref().ok().map(|r| r.txid))
+            .collect();
         if package_eval && rest.len() >= 2 {
-            match self.accept_package(&rest) {
-                Ok(_) => {}
+            match self.admit_package(&rest) {
+                Ok(accepted) => admitted.extend(accepted.iter().map(|r| r.txid)),
                 Err(AcceptError::Policy("mempool full")) => {
                     let rest_ids: std::collections::BTreeSet<Txid> =
                         rest.iter().map(|t| t.compute_txid()).collect();
@@ -4450,6 +4474,7 @@ impl MempoolHub {
             }
         }
         self.trim_over_budget();
+        self.kick_isolated_if_live(&admitted);
         let package_kept =
             rest.len() >= 2 && rest.iter().all(|tx| self.try_contains(&tx.compute_txid()));
         let fee_with = package_kept.then(|| rest.iter().map(|tx| tx.compute_txid()).collect());

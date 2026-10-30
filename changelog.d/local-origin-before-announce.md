@@ -9,5 +9,6 @@ Fixed
   an INV for our own tx to that peer, which ties the tx to our IP. Accept
   now takes the origin and marks a local tx under the write lock that
   admits it, so no session sees the tx before it is known to be local. The
-  isolated broadcast loop still gets each local tx once, from the same
-  publish.
+  isolated broadcast loop gets each local tx once, after the submit's last
+  mempool trim, and only if the tx is still in the pool: a package member
+  the trim drops is reported `mempool full` and is never sent.
