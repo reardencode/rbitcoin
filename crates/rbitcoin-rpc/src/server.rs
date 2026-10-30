@@ -786,7 +786,7 @@ fn http_body_awaits_tip(parsed: &serde_json::Value) -> bool {
     let method_awaits = |req: &serde_json::Value| {
         req.get("method")
             .and_then(|m| m.as_str())
-            .is_some_and(crate::methods::tip_connect_method)
+            .is_some_and(crate::methods::request_task_method)
     };
     if let Some(arr) = parsed.as_array() {
         arr.iter().any(method_awaits)
@@ -852,7 +852,7 @@ async fn exec_http_rpc_async(
 
 async fn exec_one_async(ctx: &Arc<RpcContext>, req: &serde_json::Value, waited: bool) -> OneOut {
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
-    if !crate::methods::tip_connect_method(method) {
+    if !crate::methods::request_task_method(method) {
         let id = req.get("id").cloned();
         let req = req.clone();
         let ctx = Arc::clone(ctx);

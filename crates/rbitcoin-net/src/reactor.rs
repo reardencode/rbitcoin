@@ -36,6 +36,22 @@ pub fn in_blocking_region() -> bool {
     BLOCKING_DEPTH.with(|d| d.get() > 0)
 }
 
+/// Run `f` on a fresh OS thread and await it. Not the Tokio blocking pool.
+///
+/// A parked pool must still finish a connect or a mempool admit. The thread
+/// is held only for `f`. Script verify is awaited on the caller via
+/// `run_cpu`, not inside `f`.
+pub async fn off_pool<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    thread::Builder::new()
+        .name("rbtc-off-pool".into())
+        .spawn(move || {
+            let _ = tx.send(f());
+        })
+        .expect("rbtc-off-pool");
+    rx.await.expect("rbtc-off-pool dropped")
+}
+
 pub fn assert_not_reactor(what: &'static str) {
     assert!(
         !on_tokio_worker() || in_blocking_region(),

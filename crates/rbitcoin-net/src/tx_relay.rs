@@ -709,6 +709,7 @@ impl RecentConfirmed {
 }
 
 #[doc(hidden)]
+#[derive(Clone, Copy)]
 pub struct AdmitSpec {
     pub report_orphans: bool,
     pub fee_delta: i64,
@@ -2240,9 +2241,9 @@ impl MempoolHub {
         self.accept_with_utxo(tx, &self.utxo_provider(), None, true, &[])
     }
 
-    /// Prepare under read lock; scripts off-lock. Parking is the caller's job.
+    /// Prepare under the read lock. Scripts are the caller's next step.
     #[doc(hidden)]
-    pub fn admit_staged(
+    pub fn prepare_admit_only(
         &self,
         tx: &Transaction,
         utxo: &impl rbitcoin_mempool::UtxoProvider,
@@ -2269,20 +2270,29 @@ impl MempoolHub {
         if spec.time_prepare_lock {
             *lock_us = lock_us.saturating_add(t_prep.elapsed().as_micros() as u64);
         }
-        let mut prep = match prep {
+        match prep {
             Ok(p) => {
                 stages.utxo_us = stages.utxo_us.saturating_add(p.utxo_us);
-                p
+                Ok(p)
             }
-            Err(e) => return Err(e),
-        };
-        let t_script = Instant::now();
-        if let Err(e) =
-            rbitcoin_consensus::verify_tx_scripts_detached(prep.prevouts.clone(), tx.clone())
-        {
-            stages.script_us = stages
-                .script_us
-                .saturating_add(t_script.elapsed().as_micros() as u64);
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Record script time and a warn-and-apply waiver. A hard failure stays an error.
+    ///
+    /// A waived failure counts the script time twice, matching the previous
+    /// inline path.
+    #[doc(hidden)]
+    pub fn apply_script_admit(
+        mut prep: rbitcoin_mempool::PreparedAdmit,
+        verified: Result<(), rbitcoin_consensus::ConsensusError>,
+        script_us: u64,
+        spec: &AdmitSpec,
+        stages: &mut rbitcoin_mempool::AcceptStageUs,
+    ) -> Result<rbitcoin_mempool::PreparedAdmit, AcceptError> {
+        if let Err(e) = verified {
+            stages.script_us = stages.script_us.saturating_add(script_us);
             let err = AcceptError::Script(e.to_string());
             let reason = err.mempool_reject_reason();
             if spec.waive && rbitcoin_consensus::reason_is_warn_and_apply(&reason) {
@@ -2291,10 +2301,29 @@ impl MempoolHub {
                 return Err(err);
             }
         }
-        stages.script_us = stages
-            .script_us
-            .saturating_add(t_script.elapsed().as_micros() as u64);
+        stages.script_us = stages.script_us.saturating_add(script_us);
         Ok(prep)
+    }
+
+    /// Prepare under read lock; scripts off-lock. Parking is the caller's job.
+    ///
+    /// Sync callers block in [`rbitcoin_consensus::verify_tx_scripts_detached`].
+    /// The async admit awaits [`rbitcoin_consensus::verify_tx_scripts_cpu`].
+    #[doc(hidden)]
+    pub fn admit_staged(
+        &self,
+        tx: &Transaction,
+        utxo: &impl rbitcoin_mempool::UtxoProvider,
+        spec: AdmitSpec,
+        stages: &mut rbitcoin_mempool::AcceptStageUs,
+        lock_us: &mut u64,
+    ) -> Result<rbitcoin_mempool::PreparedAdmit, AcceptError> {
+        let prep = self.prepare_admit_only(tx, utxo, spec, stages, lock_us)?;
+        let t_script = Instant::now();
+        let verified =
+            rbitcoin_consensus::verify_tx_scripts_detached(prep.prevouts.clone(), tx.clone());
+        let script_us = t_script.elapsed().as_micros() as u64;
+        Self::apply_script_admit(prep, verified, script_us, &spec, stages)
     }
 
     /// Confirmed coins are read again before commit. A spend that lands while
@@ -2529,6 +2558,20 @@ impl MempoolHub {
             }
         };
 
+        self.commit_admitted(tx, prep, utxo, defer_trim, stages, lock_us, t0)
+    }
+
+    /// Recheck coins, commit, and publish. The caller already ran scripts.
+    fn commit_admitted(
+        &self,
+        tx: &Transaction,
+        prep: rbitcoin_mempool::PreparedAdmit,
+        utxo: &impl rbitcoin_mempool::UtxoProvider,
+        defer_trim: bool,
+        mut stages: rbitcoin_mempool::AcceptStageUs,
+        mut lock_us: u64,
+        t0: Instant,
+    ) -> Result<AcceptResult, AcceptError> {
         let sample = self.sample_chain_coins(tx, utxo);
         let committed = {
             let t_lock = Instant::now();
@@ -2937,7 +2980,11 @@ impl MempoolHub {
         }
     }
 
-    /// Accept on the tokio blocking pool (never on `tokio-rt-worker`).
+    /// Accept without holding a Tokio blocking thread across script verify.
+    ///
+    /// Prepare and commit run on `rbtc-off-pool`. Scripts are awaited here via
+    /// [`rbitcoin_consensus::verify_tx_scripts_cpu`]. Sync [`Self::accept_tx_from`]
+    /// stays for stack hubs and in-process dispatch.
     pub async fn accept_tx_async(
         self: &Arc<Self>,
         tx: Transaction,
@@ -2950,27 +2997,505 @@ impl MempoolHub {
         tx: Transaction,
         from: Option<u64>,
     ) -> Result<AcceptResult, AcceptError> {
-        let hub = Arc::clone(self);
-        tokio::task::spawn_blocking(move || {
-            let _g = crate::reactor::BlockingRegion::enter();
-            hub.accept_tx_from(&tx, from)
-        })
-        .await
-        .expect("mempool accept join")
+        self.accept_with_utxo_async(tx, from, false, Vec::new())
+            .await
     }
 
-    /// Package accept on the tokio blocking pool (never on `tokio-rt-worker`).
+    /// [`Self::accept_tx_defer_trim`] without a blocking thread across scripts.
+    pub async fn accept_tx_defer_trim_async(
+        self: &Arc<Self>,
+        tx: Transaction,
+    ) -> Result<AcceptResult, AcceptError> {
+        self.accept_with_utxo_async(tx, None, true, Vec::new())
+            .await
+    }
+
+    async fn accept_with_utxo_async(
+        self: &Arc<Self>,
+        tx: Transaction,
+        from: Option<u64>,
+        defer_trim: bool,
+        announcers: Vec<u64>,
+    ) -> Result<AcceptResult, AcceptError> {
+        let t0 = Instant::now();
+        let hub = Arc::clone(self);
+        let tx_fee = tx.clone();
+        let spec = crate::reactor::off_pool(move || {
+            let delta = hub.fee_delta(&tx_fee.compute_txid());
+            let waive = hub.tx_from_trusted(from);
+            AdmitSpec {
+                report_orphans: true,
+                fee_delta: delta,
+                time_prepare_lock: false,
+                min_relay: None,
+                waive,
+            }
+        })
+        .await;
+        let mut stages = rbitcoin_mempool::AcceptStageUs::default();
+        let mut lock_us = 0u64;
+        let prep = match self
+            .stage_scripts(&tx, &tx, spec, &mut stages, &mut lock_us)
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                return self
+                    .accept_prepare_failed_async(
+                        tx, from, defer_trim, announcers, e, stages, lock_us, t0,
+                    )
+                    .await;
+            }
+        };
+        let hub = Arc::clone(self);
+        let tx_c = tx;
+        crate::reactor::off_pool(move || {
+            let utxo = hub.utxo_provider();
+            utxo.note_spender(&tx_c);
+            hub.commit_admitted(&tx_c, prep, &utxo, defer_trim, stages, lock_us, t0)
+        })
+        .await
+    }
+
+    /// Script verify for one admit. `note` is the tx whose BIP68 flag the coin
+    /// read uses (the admit itself, or the child during 1p1c).
+    async fn stage_scripts(
+        self: &Arc<Self>,
+        tx: &Transaction,
+        note: &Transaction,
+        spec: AdmitSpec,
+        stages: &mut rbitcoin_mempool::AcceptStageUs,
+        lock_us: &mut u64,
+    ) -> Result<rbitcoin_mempool::PreparedAdmit, AcceptError> {
+        let hub = Arc::clone(self);
+        let tx_p = tx.clone();
+        let note_p = note.clone();
+        let stages_in = *stages;
+        let lock_in = *lock_us;
+        let (prepared, stages_out, lock_out) = crate::reactor::off_pool(move || {
+            let utxo = hub.utxo_provider();
+            utxo.note_spender(&note_p);
+            let mut stages = stages_in;
+            let mut lock_us = lock_in;
+            let prep = hub.prepare_admit_only(&tx_p, &utxo, spec, &mut stages, &mut lock_us);
+            (prep, stages, lock_us)
+        })
+        .await;
+        *stages = stages_out;
+        *lock_us = lock_out;
+        let prep = prepared?;
+        let t_script = Instant::now();
+        let verified =
+            rbitcoin_consensus::verify_tx_scripts_cpu(prep.prevouts.clone(), tx.clone()).await;
+        let script_us = t_script.elapsed().as_micros() as u64;
+        Self::apply_script_admit(prep, verified, script_us, &spec, stages)
+    }
+
+    async fn accept_prepare_failed_async(
+        self: &Arc<Self>,
+        tx: Transaction,
+        from: Option<u64>,
+        defer_trim: bool,
+        announcers: Vec<u64>,
+        e: AcceptError,
+        stages: rbitcoin_mempool::AcceptStageUs,
+        lock_us: u64,
+        t0: Instant,
+    ) -> Result<AcceptResult, AcceptError> {
+        if defer_trim && matches!(e, AcceptError::Orphaned { .. }) {
+            let hub = Arc::clone(self);
+            return crate::reactor::off_pool(move || {
+                let us = t0.elapsed().as_micros() as u64;
+                hub.meter_accept_stages(lock_us, stages);
+                hub.finish_accept_err(us, e)
+            })
+            .await;
+        }
+        if let AcceptError::Orphaned { missing, .. } = &e {
+            let missing = missing.clone();
+            let hub = Arc::clone(self);
+            let missing_rej = missing.clone();
+            let recent = crate::reactor::off_pool(move || {
+                missing_rej
+                    .iter()
+                    .any(|p| hub.try_recent_reject(&Wtxid::from_byte_array(p.to_byte_array())))
+            })
+            .await;
+            if recent {
+                let hub = Arc::clone(self);
+                let tx_r = tx.clone();
+                return crate::reactor::off_pool(move || {
+                    hub.note_recent_reject(tx_r.compute_wtxid());
+                    hub.note_recent_reject(Wtxid::from_byte_array(
+                        tx_r.compute_txid().to_byte_array(),
+                    ));
+                    let us = t0.elapsed().as_micros() as u64;
+                    hub.meter_accept_stages(lock_us, stages);
+                    hub.finish_accept_err(
+                        us,
+                        AcceptError::Orphaned {
+                            txid: tx_r.compute_txid(),
+                            missing: BTreeSet::new(),
+                            fresh: false,
+                        },
+                    )
+                })
+                .await;
+            }
+            if from.is_none() {
+                if let Some(r) = self.admit_1p1c_async(&tx, &missing).await {
+                    let hub = Arc::clone(self);
+                    return crate::reactor::off_pool(move || {
+                        let us = t0.elapsed().as_micros() as u64;
+                        hub.meter_accept_wall(us, true);
+                        Ok(r)
+                    })
+                    .await;
+                }
+            }
+            let hub = Arc::clone(self);
+            let tx_p = tx;
+            let missing_p = missing;
+            return crate::reactor::off_pool(move || {
+                let parked = {
+                    let mut g = hub.lock_write();
+                    if announcers.is_empty() {
+                        g.park_orphan_from(&tx_p, missing_p, from)
+                    } else {
+                        g.park_announced(&tx_p, missing_p, &announcers)
+                    }
+                };
+                let us = t0.elapsed().as_micros() as u64;
+                hub.meter_accept_stages(lock_us, stages);
+                hub.finish_accept_err(us, parked)
+            })
+            .await;
+        }
+        let hub = Arc::clone(self);
+        crate::reactor::off_pool(move || {
+            hub.note_if_accept_failure(&tx, &e);
+            let us = t0.elapsed().as_micros() as u64;
+            hub.meter_accept_stages(lock_us, stages);
+            hub.finish_accept_err(us, e)
+        })
+        .await
+    }
+
+    /// 1p1c without holding a blocking-pool thread across either script verify.
+    async fn admit_1p1c_async(
+        self: &Arc<Self>,
+        child: &Transaction,
+        missing: &BTreeSet<Txid>,
+    ) -> Option<AcceptResult> {
+        let hub = Arc::clone(self);
+        let child_c = child.clone();
+        let missing_c = missing.clone();
+        let parent = crate::reactor::off_pool(move || {
+            let utxo = hub.utxo_provider();
+            utxo.note_spender(&child_c);
+            let g = hub.lock_read();
+            g.try_one_parent_package(&child_c, &missing_c, &utxo)
+        })
+        .await?;
+        let mut stages = rbitcoin_mempool::AcceptStageUs::default();
+        let mut lock_us = 0u64;
+        let hub = Arc::clone(self);
+        let parent_id = parent.compute_txid();
+        let spec_p = crate::reactor::off_pool(move || AdmitSpec {
+            report_orphans: false,
+            fee_delta: hub.fee_delta(&parent_id),
+            time_prepare_lock: false,
+            min_relay: Some(0),
+            waive: false,
+        })
+        .await;
+        let prep_p = match self
+            .stage_scripts(&parent, child, spec_p, &mut stages, &mut lock_us)
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                let hub = Arc::clone(self);
+                let parent_f = parent.clone();
+                crate::reactor::off_pool(move || hub.note_if_accept_failure(&parent_f, &e)).await;
+                return None;
+            }
+        };
+        let hub = Arc::clone(self);
+        let parent_c = parent.clone();
+        let child_note = child.clone();
+        let parent_commit = crate::reactor::off_pool(move || {
+            let utxo = hub.utxo_provider();
+            utxo.note_spender(&child_note);
+            let sample = hub.sample_chain_coins(&parent_c, &utxo);
+            let mut g = hub.lock_write();
+            Self::commit_rechecked(&mut g, &parent_c, prep_p, &utxo, true, &sample)
+        })
+        .await;
+        let (parent_res, prevouts_p) = match parent_commit.result {
+            Ok(r) => (r, parent_commit.prevouts),
+            Err(_) => {
+                let hub = Arc::clone(self);
+                let failed = parent_commit.failed_evict;
+                let undone = parent_commit.undone;
+                crate::reactor::off_pool(move || {
+                    hub.unindex_evicted(&failed);
+                    hub.restore_replaced(&undone);
+                    hub.publish_fee_floor();
+                })
+                .await;
+                return None;
+            }
+        };
+        let hub = Arc::clone(self);
+        let child_id = child.compute_txid();
+        let spec_c = crate::reactor::off_pool(move || AdmitSpec {
+            report_orphans: false,
+            fee_delta: hub.fee_delta(&child_id),
+            time_prepare_lock: false,
+            min_relay: None,
+            waive: false,
+        })
+        .await;
+        let prep_c = match self
+            .stage_scripts(child, child, spec_c, &mut stages, &mut lock_us)
+            .await
+        {
+            Ok(p) => p,
+            Err(_) => {
+                let hub = Arc::clone(self);
+                let stages_f = stages;
+                let lock_f = lock_us;
+                let txid = parent_res.txid;
+                let evicted = parent_res.evicted.clone();
+                crate::reactor::off_pool(move || {
+                    hub.meter_accept_stages(lock_f, stages_f);
+                    hub.rollback_1p1c_parent(&txid, &evicted);
+                })
+                .await;
+                return None;
+            }
+        };
+        let hub = Arc::clone(self);
+        let child_c = child.clone();
+        let child_commit = crate::reactor::off_pool(move || {
+            let utxo = hub.utxo_provider();
+            utxo.note_spender(&child_c);
+            let sample = hub.sample_chain_coins(&child_c, &utxo);
+            let mut g = hub.lock_write();
+            Self::commit_rechecked(&mut g, &child_c, prep_c, &utxo, true, &sample)
+        })
+        .await;
+        let hub = Arc::clone(self);
+        crate::reactor::off_pool(move || hub.meter_accept_stages(lock_us, stages)).await;
+        match child_commit.result {
+            Ok(r) => {
+                let hub = Arc::clone(self);
+                let parent_pub = parent;
+                let child_pub = child.clone();
+                let parent_res_c = parent_res;
+                let prevouts_c = child_commit.prevouts;
+                crate::reactor::off_pool(move || {
+                    hub.trim_over_budget();
+                    if !hub.try_contains(&parent_res_c.txid) || !hub.try_contains(&r.txid) {
+                        hub.rollback_package_accepted(&[parent_res_c, r]);
+                        hub.publish_fee_floor();
+                        return None;
+                    }
+                    let utxo = hub.utxo_provider();
+                    utxo.note_spender(&child_pub);
+                    hub.publish_admitted(&parent_pub, &parent_res_c, &prevouts_p, &utxo);
+                    hub.publish_admitted(&child_pub, &r, &prevouts_c, &utxo);
+                    let _ = hub.expire_stale();
+                    hub.publish_fee_floor();
+                    Some(r)
+                })
+                .await
+            }
+            Err(_) => {
+                let hub = Arc::clone(self);
+                let failed = child_commit.failed_evict;
+                let undone = child_commit.undone;
+                let txid = parent_res.txid;
+                let evicted = parent_res.evicted;
+                crate::reactor::off_pool(move || {
+                    hub.unindex_evicted(&failed);
+                    hub.restore_replaced(&undone);
+                    hub.rollback_1p1c_parent(&txid, &evicted);
+                    hub.publish_fee_floor();
+                })
+                .await;
+                None
+            }
+        }
+    }
+
+    /// Package accept. Each member's scripts are awaited on the caller.
     pub async fn accept_package_async(
         self: &Arc<Self>,
         txs: Vec<Transaction>,
     ) -> Result<Vec<AcceptResult>, AcceptError> {
         let hub = Arc::clone(self);
-        tokio::task::spawn_blocking(move || {
-            let _g = crate::reactor::BlockingRegion::enter();
-            hub.accept_package(&txs)
+        let txs_shape = txs.clone();
+        let member_min = crate::reactor::off_pool(move || {
+            Self::check_package_shape(&txs_shape)?;
+            let utxo = hub.utxo_provider();
+            let sat_kvb = hub.min_relay_sat_kvb();
+            let g = hub.lock_read();
+            let bps = g.graph.bytes_per_sigop();
+            let member_min = if g.package_meets_min_relay(&txs_shape, &utxo, sat_kvb, bps) {
+                Some(0)
+            } else {
+                None
+            };
+            Ok::<_, AcceptError>(member_min)
+        })
+        .await?;
+        let t0 = Instant::now();
+        let mut stages = rbitcoin_mempool::AcceptStageUs::default();
+        let mut lock_us = 0u64;
+        let mut accepted: Vec<AcceptResult> = Vec::with_capacity(txs.len());
+        let mut prevouts: Vec<Vec<TxOut>> = Vec::with_capacity(txs.len());
+        let mut lifted: Vec<rbitcoin_mempool::LiftedOrphan> = Vec::new();
+        for tx in &txs {
+            let hub = Arc::clone(self);
+            let tx_l = tx.clone();
+            if let Some(parked) = crate::reactor::off_pool(move || {
+                let mut g = hub.lock_write();
+                g.lift_parked_member(&tx_l)
+            })
+            .await
+            {
+                lifted.push(parked);
+            }
+            let hub = Arc::clone(self);
+            let id = tx.compute_txid();
+            let delta = crate::reactor::off_pool(move || hub.fee_delta(&id)).await;
+            let spec = AdmitSpec {
+                report_orphans: true,
+                fee_delta: delta,
+                time_prepare_lock: true,
+                min_relay: member_min,
+                waive: false,
+            };
+            let prep = match self
+                .stage_scripts(tx, tx, spec, &mut stages, &mut lock_us)
+                .await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    let hub = Arc::clone(self);
+                    let accepted_f = accepted;
+                    let lifted_f = lifted;
+                    let stages_f = stages;
+                    let lock_f = lock_us;
+                    return crate::reactor::off_pool(move || {
+                        hub.abandon_package(&accepted_f, &lifted_f);
+                        let us = t0.elapsed().as_micros() as u64;
+                        hub.meter_accept_stages(lock_f, stages_f);
+                        Err(hub.finish_accept_err(us, e).unwrap_err())
+                    })
+                    .await;
+                }
+            };
+            let hub = Arc::clone(self);
+            let tx_c = tx.clone();
+            let committed = crate::reactor::off_pool(move || {
+                let utxo = hub.utxo_provider();
+                utxo.note_spender(&tx_c);
+                let sample = hub.sample_chain_coins(&tx_c, &utxo);
+                let t_lock = Instant::now();
+                let mut g = hub.lock_write();
+                g.last_accept_stages = stages;
+                let committed = Self::commit_rechecked(&mut g, &tx_c, prep, &utxo, true, &sample);
+                let stages = g.last_accept_stages;
+                (committed, stages, t_lock.elapsed().as_micros() as u64)
+            })
+            .await;
+            let (committed, stages_c, lock_add) = committed;
+            stages = stages_c;
+            lock_us = lock_us.saturating_add(lock_add);
+            match committed.result {
+                Ok(r) => {
+                    prevouts.push(committed.prevouts);
+                    accepted.push(r);
+                }
+                Err(e) => {
+                    let hub = Arc::clone(self);
+                    let failed = committed.failed_evict;
+                    let undone = committed.undone;
+                    let accepted_f = accepted;
+                    let lifted_f = lifted;
+                    let stages_f = stages;
+                    let lock_f = lock_us;
+                    return crate::reactor::off_pool(move || {
+                        hub.unindex_evicted(&failed);
+                        hub.restore_replaced(&undone);
+                        hub.abandon_package(&accepted_f, &lifted_f);
+                        hub.publish_fee_floor();
+                        let us = t0.elapsed().as_micros() as u64;
+                        hub.meter_accept_stages(lock_f, stages_f);
+                        Err(hub.finish_accept_err(us, e).unwrap_err())
+                    })
+                    .await;
+                }
+            }
+        }
+        let hub = Arc::clone(self);
+        crate::reactor::off_pool(move || {
+            hub.finish_accepted_package(&txs, accepted, prevouts, lifted, stages, lock_us, t0)
         })
         .await
-        .expect("mempool accept join")
+    }
+
+    /// Prepare + scripts + RBF checks, with scripts awaited on the caller.
+    pub async fn test_accept_async(
+        self: &Arc<Self>,
+        tx: Transaction,
+    ) -> Result<AcceptResult, AcceptError> {
+        let t0 = Instant::now();
+        let hub = Arc::clone(self);
+        let id = tx.compute_txid();
+        let delta = crate::reactor::off_pool(move || hub.fee_delta(&id)).await;
+        let spec = AdmitSpec {
+            report_orphans: false,
+            fee_delta: delta,
+            time_prepare_lock: false,
+            min_relay: None,
+            waive: false,
+        };
+        let mut stages = rbitcoin_mempool::AcceptStageUs::default();
+        let mut lock_us = 0u64;
+        let prep = match self
+            .stage_scripts(&tx, &tx, spec, &mut stages, &mut lock_us)
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                let hub = Arc::clone(self);
+                return crate::reactor::off_pool(move || {
+                    let us = t0.elapsed().as_micros() as u64;
+                    hub.meter_accept_stages(lock_us, stages);
+                    hub.finish_accept_err(us, e)
+                })
+                .await;
+            }
+        };
+        let hub = Arc::clone(self);
+        crate::reactor::off_pool(move || {
+            let t_lock = Instant::now();
+            let g = hub.lock_read();
+            let result = g.evaluate_after_script(&tx, prep);
+            lock_us = lock_us.saturating_add(t_lock.elapsed().as_micros() as u64);
+            drop(g);
+            let us = t0.elapsed().as_micros() as u64;
+            hub.meter_accept_stages(lock_us, stages);
+            match result {
+                Ok(r) => Ok(r),
+                Err(e) => hub.finish_accept_err(us, e),
+            }
+        })
+        .await
     }
 
     /// Prepare + scripts + RBF/cluster checks with no mempool mutation.
@@ -3329,6 +3854,21 @@ impl MempoolHub {
                 }
             }
         }
+        self.finish_accepted_package(txs, accepted, prevouts, lifted, stages, lock_us, t0)
+    }
+
+    /// Trim, index, and promote after every member committed.
+    fn finish_accepted_package(
+        &self,
+        txs: &[Transaction],
+        accepted: Vec<AcceptResult>,
+        prevouts: Vec<Vec<TxOut>>,
+        lifted: Vec<rbitcoin_mempool::LiftedOrphan>,
+        stages: rbitcoin_mempool::AcceptStageUs,
+        lock_us: u64,
+        t0: Instant,
+    ) -> Result<Vec<AcceptResult>, AcceptError> {
+        let utxo = self.utxo_provider();
         self.trim_over_budget();
         if accepted.iter().any(|r| !self.try_contains(&r.txid)) {
             // Trim dropped a member that had already replaced its conflicts.
@@ -4372,20 +4912,68 @@ impl MempoolHub {
             .map(|(tx, _)| tx.clone())
             .collect();
         if package_eval && rest.len() >= 2 {
-            match self.accept_package(&rest) {
-                Ok(_) => {}
-                Err(AcceptError::Policy("mempool full")) => {
-                    let rest_ids: std::collections::BTreeSet<Txid> =
-                        rest.iter().map(|t| t.compute_txid()).collect();
-                    for (tx, slot) in txs.iter().zip(out.iter_mut()) {
-                        if package_full_slot(rest_ids.contains(&tx.compute_txid()), slot.is_err()) {
-                            *slot = Err(AcceptError::Policy("mempool full"));
-                        }
-                    }
+            Self::note_package_full(&txs, &rest, &mut out, self.accept_package(&rest));
+        }
+        self.package_rows_after_eval(txs, out, rest)
+    }
+
+    /// [`Self::submit_package_rpc_eval`] with scripts awaited on the caller.
+    pub async fn submit_package_rpc_eval_async(
+        self: &Arc<Self>,
+        txs: Vec<Transaction>,
+        package_eval: bool,
+    ) -> Vec<SubmitPackageRow> {
+        let mut out = Vec::with_capacity(txs.len());
+        for tx in &txs {
+            out.push(self.accept_tx_defer_trim_async(tx.clone()).await);
+        }
+        let hub = Arc::clone(self);
+        let txs_f = txs.clone();
+        let (out, rest) = crate::reactor::off_pool(move || {
+            let rest: Vec<Transaction> = txs_f
+                .iter()
+                .zip(out.iter())
+                .filter(|(tx, r)| {
+                    r.as_ref().err().is_some_and(package_rpc_retry)
+                        && !hub.contains(&tx.compute_txid())
+                })
+                .map(|(tx, _)| tx.clone())
+                .collect();
+            (out, rest)
+        })
+        .await;
+        let mut out = out;
+        if package_eval && rest.len() >= 2 {
+            let admitted = self.accept_package_async(rest.clone()).await;
+            Self::note_package_full(&txs, &rest, &mut out, admitted);
+        }
+        let hub = Arc::clone(self);
+        crate::reactor::off_pool(move || hub.package_rows_after_eval(&txs, out, rest)).await
+    }
+
+    fn note_package_full(
+        txs: &[Transaction],
+        rest: &[Transaction],
+        out: &mut [Result<AcceptResult, AcceptError>],
+        admitted: Result<Vec<AcceptResult>, AcceptError>,
+    ) {
+        if let Err(AcceptError::Policy("mempool full")) = admitted {
+            let rest_ids: std::collections::BTreeSet<Txid> =
+                rest.iter().map(|t| t.compute_txid()).collect();
+            for (tx, slot) in txs.iter().zip(out.iter_mut()) {
+                if package_full_slot(rest_ids.contains(&tx.compute_txid()), slot.is_err()) {
+                    *slot = Err(AcceptError::Policy("mempool full"));
                 }
-                Err(_) => {}
             }
         }
+    }
+
+    fn package_rows_after_eval(
+        &self,
+        txs: &[Transaction],
+        out: Vec<Result<AcceptResult, AcceptError>>,
+        rest: Vec<Transaction>,
+    ) -> Vec<SubmitPackageRow> {
         self.trim_over_budget();
         let package_kept =
             rest.len() >= 2 && rest.iter().all(|tx| self.try_contains(&tx.compute_txid()));

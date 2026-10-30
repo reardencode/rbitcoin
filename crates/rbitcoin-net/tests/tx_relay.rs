@@ -4489,6 +4489,72 @@ async fn try_contains_does_not_panic_on_tokio_worker() {
     let _ = std::fs::remove_dir_all(&store_dir);
 }
 
+/// A script-bearing admit must finish while the one blocking thread is parked.
+#[test]
+fn script_admit_finishes_while_the_blocking_pool_is_parked() {
+    let (_store, q, cbs) = pad_cbs(3);
+    let mp_dir = tmp();
+    let hub = Arc::new(MempoolHub::open(&mp_dir, Arc::clone(&q)).unwrap());
+    hub.set_relay_enabled(true);
+    let spend = spend_true(cbs[0], 1_000, ScriptBuf::from_bytes(vec![0x51]));
+    let parent = spend_true(cbs[1], 1_000, ScriptBuf::from_bytes(vec![0x51]));
+    let child = spend_vout(
+        OutPoint {
+            txid: parent.compute_txid(),
+            vout: 0,
+        },
+        parent.output[0].value.to_sat() - 1_000,
+    );
+    let probed = spend_true(cbs[2], 1_000, ScriptBuf::from_bytes(vec![0x51]));
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    rt.spawn(async move {
+        tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
+            let _ = release_rx.recv();
+        });
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("pool thread did not park");
+    let hub_tx = Arc::clone(&hub);
+    let admitted = rt.block_on(async {
+        tokio::time::timeout(Duration::from_secs(10), hub_tx.accept_tx_async(spend)).await
+    });
+    let hub_pkg = Arc::clone(&hub);
+    let packaged = rt.block_on(async {
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            hub_pkg.accept_package_async(vec![parent, child]),
+        )
+        .await
+    });
+    let hub_test = Arc::clone(&hub);
+    let tested = rt.block_on(async {
+        tokio::time::timeout(Duration::from_secs(10), hub_test.test_accept_async(probed)).await
+    });
+    let _ = release_tx.send(());
+    let one = admitted
+        .expect("accept timed out while the blocking pool was parked")
+        .expect("script admit");
+    assert!(hub.contains(&one.txid));
+    let pkg = packaged
+        .expect("package timed out while the blocking pool was parked")
+        .expect("script package");
+    assert_eq!(pkg.len(), 2);
+    let row = tested
+        .expect("test accept timed out while the blocking pool was parked")
+        .expect("script test accept");
+    assert!(!hub.contains(&row.txid), "test accept must not admit");
+    let _ = std::fs::remove_dir_all(&mp_dir);
+}
+
 fn parked_orphan_tx() -> Transaction {
     Transaction {
         version: Version::TWO,

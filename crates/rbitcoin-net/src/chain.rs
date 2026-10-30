@@ -782,19 +782,6 @@ pub fn remember_stored_header(
     in_batch.insert(hash, HeaderSyncNode { fk, header, height });
 }
 
-/// Run `f` on a fresh OS thread and await the result. Not the Tokio blocking
-/// pool: a parked pool must still be able to mine and to finish a connect.
-async fn on_std_thread<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    std::thread::Builder::new()
-        .name("rbtc-off-pool".into())
-        .spawn(move || {
-            let _ = tx.send(f());
-        })
-        .expect("rbtc-off-pool");
-    rx.await.expect("rbtc-off-pool dropped")
-}
-
 impl ChainHub {
     pub fn new(query: Query, params: ChainParams, milestone: Milestone) -> Self {
         let (tip_tx, _) = broadcast::channel(64);
@@ -2556,7 +2543,7 @@ impl ChainHub {
             }
         }
         let hub = std::sync::Arc::clone(self);
-        on_std_thread(move || hub.drain_generate_indexes()).await;
+        crate::reactor::off_pool(move || hub.drain_generate_indexes()).await;
         Ok(hashes)
     }
 
@@ -2684,7 +2671,8 @@ impl ChainHub {
             let script_pubkey = script_pubkey.clone();
             let txs = txs.clone();
             let (block, prev) =
-                on_std_thread(move || hub.prepare_mined_block(&script_pubkey, txs)).await?;
+                crate::reactor::off_pool(move || hub.prepare_mined_block(&script_pubkey, txs))
+                    .await?;
             let hash = block.block_hash();
             let hub = std::sync::Arc::clone(self);
             let accepted = crate::tip_accept::run_on_tip_accept_async(move || {

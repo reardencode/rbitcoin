@@ -527,14 +527,22 @@ pub async fn forward_tx(
         Ok(t) => t,
         Err(_) => return error(StatusCode::BAD_REQUEST, "invalid tx"),
     };
-    // The admit runs inside `held`, so a timeout or disconnect that drops
-    // this handler does not free the permit while it is still running.
-    held(permit, move || match mp.accept_tx_from(&tx, None) {
-        Ok(r) => {
-            mp.mark_local_origin(r.txid);
-            json_reply_here(block_hash_hex(&r.txid.to_byte_array()))
+    // The spawned task keeps the permit until the admit finishes, including
+    // when this handler is dropped. Scripts are awaited off the blocking pool.
+    let handle = tokio::spawn(async move {
+        let _permit = permit;
+        match mp.accept_tx_async(tx).await {
+            Ok(r) => {
+                let tid = r.txid;
+                let marked = mp.clone();
+                rbitcoin_net::off_pool(move || marked.mark_local_origin(tid)).await;
+                json_reply_here(block_hash_hex(&tid.to_byte_array()))
+            }
+            Err(e) => error(StatusCode::BAD_REQUEST, &e.to_string()),
         }
-        Err(e) => error(StatusCode::BAD_REQUEST, &e.to_string()),
-    })
-    .await
+    });
+    match handle.await {
+        Ok(resp) => resp,
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
 }

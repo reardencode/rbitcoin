@@ -2198,10 +2198,10 @@ pub async fn post_txs_test(
     if body.len() > st.max_body {
         return (StatusCode::PAYLOAD_TOO_LARGE, "body too large").into_response();
     }
-    spawn_join(move || {
-        let Some(mp) = st.mempool.as_ref() else {
-            return (StatusCode::SERVICE_UNAVAILABLE, "mempool not available").into_response();
-        };
+    let Some(mp) = st.mempool.as_ref() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "mempool not available").into_response();
+    };
+    {
         let hexes: Vec<String> = match serde_json::from_slice(&body) {
             Ok(v) => v,
             Err(e) => {
@@ -2251,7 +2251,7 @@ pub async fn post_txs_test(
         for tx in decoded {
             let txid = format!("{}", tx.compute_txid());
             let wtxid = format!("{}", tx.compute_wtxid());
-            match mp.test_accept(&tx) {
+            match mp.test_accept_async(tx.clone()).await {
                 Ok(r) => {
                     if rbitcoin_consensus::policy::fee_exceeds_max(r.fee_sat, r.weight, max_sat_kvb)
                     {
@@ -2281,9 +2281,8 @@ pub async fn post_txs_test(
                 }
             }
         }
-        json_reply_here(out)
-    })
-    .await
+        return json_reply_here(out);
+    }
 }
 
 /// `POST /txs/package` — JSON array of hex txs → `MempoolHub::accept_package`.

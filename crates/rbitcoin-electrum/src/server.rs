@@ -1057,6 +1057,26 @@ async fn answer_one(
 ) -> Result<Value, std::io::Error> {
     let asked = Asked::of(req);
     let t0 = Instant::now();
+    if method_awaits_scripts(&asked.method) {
+        let result = match asked.method.as_str() {
+            "blockchain.transaction.broadcast" => {
+                broadcast_raw_tx_async(&asked.params, ctx.config, ctx.mempool.as_ref()).await
+            }
+            "blockchain.transaction.broadcast_package" => {
+                broadcast_package_async(&asked.params, ctx.config, ctx.mempool.as_ref()).await
+            }
+            _ => Err("unknown broadcast".into()),
+        };
+        return Ok(finish_reply(
+            ctx,
+            conn,
+            last_sent,
+            asked,
+            result,
+            None,
+            Took::Since(t0),
+        ));
+    }
     if method_stays_on_worker(&asked.method) {
         let result = dispatch_with_join(
             &asked.method,
@@ -1999,6 +2019,14 @@ pub async fn write_rpc_result<W: AsyncWrite + Unpin>(
 /// Instant methods that must stay on the connection task so a 1-worker runtime
 /// can answer `server.ping` while another socket is in `spawn_blocking`.
 #[doc(hidden)]
+/// Broadcast runs scripts on `rbtc-scripts-*` and must not take a blocking thread.
+fn method_awaits_scripts(method: &str) -> bool {
+    matches!(
+        method,
+        "blockchain.transaction.broadcast" | "blockchain.transaction.broadcast_package"
+    )
+}
+
 pub fn method_stays_on_worker(method: &str) -> bool {
     matches!(
         method,
@@ -2201,6 +2229,38 @@ pub fn broadcast_raw_tx(
     Ok(json!(format!("{}", r.txid)))
 }
 
+/// [`broadcast_raw_tx`] with script verify awaited on the connection task.
+pub async fn broadcast_raw_tx_async(
+    params: &Value,
+    config: &ElectrumConfig,
+    mempool: Option<&Arc<MempoolHub>>,
+) -> Result<Value, String> {
+    let raw_hex = param_str(params, 0)?;
+    if raw_hex.len() > config.max_broadcast_hex {
+        return Err(format!(
+            "transaction hex too large (max {} chars)",
+            config.max_broadcast_hex
+        ));
+    }
+    let raw = decode_hex_bytes(raw_hex)?;
+    if raw.len() > 4_000_000 {
+        return Err("transaction too large".into());
+    }
+    let tx: bitcoin::Transaction =
+        bitcoin::consensus::deserialize(&raw).map_err(|e| e.to_string())?;
+    let mp = mempool
+        .ok_or_else(|| "mempool not available".to_string())?
+        .clone();
+    let r = mp
+        .accept_tx_async(tx)
+        .await
+        .map_err(|e| format!("broadcast reject: {e}"))?;
+    let txid = r.txid;
+    let marked = Arc::clone(&mp);
+    rbitcoin_net::off_pool(move || marked.mark_local_origin(txid)).await;
+    Ok(json!(format!("{}", txid)))
+}
+
 #[doc(hidden)]
 pub fn broadcast_package(
     params: &Value,
@@ -2242,6 +2302,72 @@ pub fn broadcast_package(
     for r in &accepted {
         mp.mark_local_origin(r.txid);
     }
+    if verbose {
+        let mut tx_results = serde_json::Map::new();
+        for r in &accepted {
+            tx_results.insert(
+                r.txid.to_string(),
+                json!({"txid": r.txid.to_string(), "allowed": true}),
+            );
+        }
+        Ok(json!({
+            "package_msg": "success",
+            "tx-results": tx_results,
+        }))
+    } else {
+        Ok(json!("success"))
+    }
+}
+
+/// [`broadcast_package`] with each member's scripts awaited on the connection task.
+pub async fn broadcast_package_async(
+    params: &Value,
+    config: &ElectrumConfig,
+    mempool: Option<&Arc<MempoolHub>>,
+) -> Result<Value, String> {
+    let arr = params
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "broadcast_package expected array of hex txs".to_string())?;
+    let verbose = params
+        .as_array()
+        .and_then(|a| a.get(1))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mut txs = Vec::with_capacity(arr.len());
+    let mut total_hex = 0usize;
+    for h in arr {
+        let raw_hex = h
+            .as_str()
+            .ok_or_else(|| "broadcast_package tx must be hex".to_string())?;
+        total_hex = total_hex.saturating_add(raw_hex.len());
+        if total_hex > config.max_broadcast_hex {
+            return Err("package hex too large".into());
+        }
+        let raw = decode_hex_bytes(raw_hex)?;
+        if raw.len() > 4_000_000 {
+            return Err("transaction too large".into());
+        }
+        let tx: bitcoin::Transaction =
+            bitcoin::consensus::deserialize(&raw).map_err(|e| e.to_string())?;
+        txs.push(tx);
+    }
+    let mp = mempool
+        .ok_or_else(|| "mempool not available".to_string())?
+        .clone();
+    let accepted = mp
+        .accept_package_async(txs)
+        .await
+        .map_err(|e| format!("broadcast_package reject: {e}"))?;
+    let ids: Vec<_> = accepted.iter().map(|r| r.txid).collect();
+    let marked = Arc::clone(&mp);
+    rbitcoin_net::off_pool(move || {
+        for id in ids {
+            marked.mark_local_origin(id);
+        }
+    })
+    .await;
     if verbose {
         let mut tx_results = serde_json::Map::new();
         for r in &accepted {

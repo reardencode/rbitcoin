@@ -34,6 +34,19 @@ pub fn tip_connect_method(name: &str) -> bool {
     )
 }
 
+/// Mempool admits whose script verify must be awaited on the request task.
+pub fn script_admit_method(name: &str) -> bool {
+    matches!(
+        name,
+        "sendrawtransaction" | "testmempoolaccept" | "submitpackage"
+    )
+}
+
+/// HTTP methods that must not run inside `spawn_blocking`.
+pub fn request_task_method(name: &str) -> bool {
+    tip_connect_method(name) || script_admit_method(name)
+}
+
 /// Run `f` on a fresh OS thread. Not the Tokio blocking pool.
 pub async fn off_pool<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -47,19 +60,23 @@ pub async fn off_pool<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static)
 }
 
 pub async fn dispatch_tip_connect(
-    ctx: &RpcContext,
+    ctx: &Arc<RpcContext>,
     method: &str,
     params: RpcParams,
 ) -> Result<Value, Value> {
+    let ctx_ref = ctx.as_ref();
     match method {
-        "submitblock" => mine::submitblock_async(ctx, &params).await,
-        "generate" => mine::generate_async(ctx, &params).await,
-        "generatetoaddress" => mine::generatetoaddress_async(ctx, &params).await,
-        "generatetodescriptor" => mine::generatetodescriptor_async(ctx, &params).await,
-        "generateblock" => mine::generateblock_async(ctx, &params).await,
-        "invalidateblock" => chain::invalidateblock_async(ctx, &params).await,
-        "reconsiderblock" => chain::reconsiderblock_async(ctx, &params).await,
-        "preciousblock" => chain::preciousblock_async(ctx, &params).await,
+        "submitblock" => mine::submitblock_async(ctx_ref, &params).await,
+        "generate" => mine::generate_async(ctx_ref, &params).await,
+        "generatetoaddress" => mine::generatetoaddress_async(ctx_ref, &params).await,
+        "generatetodescriptor" => mine::generatetodescriptor_async(ctx_ref, &params).await,
+        "generateblock" => mine::generateblock_async(ctx_ref, &params).await,
+        "invalidateblock" => chain::invalidateblock_async(ctx_ref, &params).await,
+        "reconsiderblock" => chain::reconsiderblock_async(ctx_ref, &params).await,
+        "preciousblock" => chain::preciousblock_async(ctx_ref, &params).await,
+        "sendrawtransaction" => mempool::sendrawtransaction_async(ctx, &params).await,
+        "testmempoolaccept" => mempool::testmempoolaccept_async(ctx, &params).await,
+        "submitpackage" => mempool::submitpackage_async(ctx, &params).await,
         other => Err(rpc_error(ERR_METHOD_NOT_FOUND, other)),
     }
 }
