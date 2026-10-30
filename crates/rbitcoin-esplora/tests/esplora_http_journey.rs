@@ -299,6 +299,10 @@ async fn mempool_spend_is_full_json(pad: &HttpPad) -> bitcoin::Transaction {
     let txid_hex = display_txid(spend.compute_txid());
     assert_eq!(body, txid_hex);
     assert!(pad.hub.contains(&spend.compute_txid()));
+    assert!(
+        pad.hub.is_local_origin(&spend.compute_txid()),
+        "POST /tx is a local submit"
+    );
     let sh_hex = block_hash_hex(&script_hash(&[0x51]));
 
     let (st, body) = http_get(addr, &format!("/scripthash/{sh_hex}/txs/mempool")).await;

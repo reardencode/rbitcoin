@@ -238,6 +238,7 @@ async fn blindbit_v1_routes_serve_the_thin_tweak_index() {
     let txid: String = serde_json::from_str(&resp).unwrap();
     assert_eq!(txid, fwd.compute_txid().to_string());
     assert!(hub.contains(&fwd.compute_txid()));
+    assert!(hub.is_local_origin(&fwd.compute_txid()), "forward-tx is a local submit");
     // A consensus-valid conflict without the RBF fee: the mempool refuses it.
     let mut low = fwd.clone();
     low.output[0].value = bitcoin::Amount::from_sat(99_500);

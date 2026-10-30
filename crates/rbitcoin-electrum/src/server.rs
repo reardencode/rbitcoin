@@ -2195,9 +2195,8 @@ pub fn broadcast_raw_tx(
         bitcoin::consensus::deserialize(&raw).map_err(|e| e.to_string())?;
     let mp = mempool.ok_or_else(|| "mempool not available".to_string())?;
     let r = mp
-        .accept_tx(&tx)
+        .accept_tx_from(&tx, rbitcoin_net::TxOrigin::Local)
         .map_err(|e| format!("broadcast reject: {e}"))?;
-    mp.mark_local_origin(r.txid);
     Ok(json!(format!("{}", r.txid)))
 }
 
@@ -2239,9 +2238,6 @@ pub fn broadcast_package(
     let accepted = mp
         .accept_package(&txs)
         .map_err(|e| format!("broadcast_package reject: {e}"))?;
-    for r in &accepted {
-        mp.mark_local_origin(r.txid);
-    }
     if verbose {
         let mut tx_results = serde_json::Map::new();
         for r in &accepted {

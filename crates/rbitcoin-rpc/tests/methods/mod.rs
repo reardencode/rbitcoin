@@ -575,7 +575,9 @@ fn getorphantxs_is_hidden_and_lists_parked() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    let err = mp.accept_tx_from(&tx, Some(3)).unwrap_err();
+    let err = mp
+        .accept_tx_from(&tx, rbitcoin_net::TxOrigin::Relay(Some(3)))
+        .unwrap_err();
     assert!(
         matches!(err, rbitcoin_net::AcceptError::Orphaned { .. }),
         "{err}"

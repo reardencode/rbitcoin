@@ -1702,6 +1702,10 @@ async fn electrum_leftover_mempool_does_not_double_count() {
         Some("success"),
         "{packed}"
     );
+    assert!(
+        mp.is_local_origin(&pkg.compute_txid()),
+        "broadcast_package is a local submit"
+    );
     let cb = cb2.to_string();
     let spent = rpc(
         &mut stream,

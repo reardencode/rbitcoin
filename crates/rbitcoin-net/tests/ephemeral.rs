@@ -394,8 +394,8 @@ async fn ephemeral_broadcast() {
         .map(|vout| spend(OutPoint { txid: fan_id, vout }, 89_990_000))
         .collect();
     let submit = |tx: &Transaction| {
-        mp.accept_tx(tx).expect("local");
-        mp.mark_local_origin(tx.compute_txid());
+        mp.accept_tx_from(tx, rbitcoin_net::TxOrigin::Local)
+            .expect("local");
     };
 
     let socks = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -527,7 +527,7 @@ async fn ephemeral_broadcast() {
         .await
         .expect("the first send reaches the recipient")
         .unwrap();
-    mp.mark_local_origin(never_admitted);
+    mp.queue_isolated(never_admitted);
     submit(held);
     submit(after);
     let (held_tx, held_rx) = std::sync::mpsc::channel();
@@ -568,7 +568,7 @@ async fn ephemeral_broadcast() {
 
     let h = spawn_loop(AddrMan::new());
     tokio::time::sleep(Duration::from_millis(20)).await;
-    mp.mark_local_origin(dummy_tx().compute_txid());
+    mp.queue_isolated(dummy_tx().compute_txid());
     tokio::time::sleep(Duration::from_millis(80)).await;
     assert!(
         !h.is_finished(),
@@ -595,8 +595,8 @@ async fn ephemeral_broadcast() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    mp.accept_tx(&local).expect("local");
-    mp.mark_local_origin(local.compute_txid());
+    mp.accept_tx_from(&local, rbitcoin_net::TxOrigin::Local)
+        .expect("local");
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!h.is_finished(), "a local tx with no targets is a no-op");
     h.abort();
