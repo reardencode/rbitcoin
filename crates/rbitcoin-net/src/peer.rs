@@ -3574,7 +3574,6 @@ pub fn compact_serve_outcome(
     ver: u32,
     pref: Vec<usize>,
 ) -> Result<CompactServe, NetError> {
-    crate::reactor::assert_not_reactor("compact serve");
     let Some(block) = block_for_peer(cache, query, hash)? else {
         return Ok(CompactServe::Missing);
     };
@@ -3784,7 +3783,6 @@ pub fn getblocktxn_reply(
     txs_request: BlockTransactionsRequest,
     tip_h: u32,
 ) -> Result<Option<GetBlockTxnServe>, NetError> {
-    crate::reactor::assert_not_reactor("getblocktxn reconstruct");
     let hash = txs_request.block_hash;
     let block = match block_for_peer(cache, query, &hash) {
         Ok(b) => b,
@@ -6381,7 +6379,6 @@ pub fn tx_from_stored_block(
     hash: &BlockHash,
     wtxid: &bitcoin::Wtxid,
 ) -> Result<Option<Transaction>, NetError> {
-    crate::reactor::assert_not_reactor("tip wtxid serve");
     let Some(block) = block_for_peer(cache, query, hash)? else {
         return Ok(None);
     };

@@ -1779,13 +1779,17 @@ impl ChainHub {
     /// Output fks align with `headers`.
     pub fn ensure_headers_batch(&self, headers: &[Header]) -> Result<Vec<Fk>, NetError> {
         crate::reactor::assert_not_reactor("header persist");
-        // Headers from the network. Flag-off does not write the cell.
-        // A caller that already opted in (the recursive call) falls through.
+        self.persist_headers_batch(headers)
+    }
+
+    fn persist_headers_batch(&self, headers: &[Header]) -> Result<Vec<Fk>, NetError> {
+        // Flag-off does not write the cell. A caller that already opted in
+        // falls through.
         if self.query.trust_peer()
             && !rbitcoin_query::confirm_run::confirm_waive(self.query.as_ref())
         {
             return rbitcoin_query::confirm_run::waive_batch(true, || {
-                self.ensure_headers_batch(headers)
+                self.persist_headers_batch(headers)
             });
         }
         ENSURE_HEADERS_BATCH_N.with(|c| c.set(c.get().saturating_add(1)));
