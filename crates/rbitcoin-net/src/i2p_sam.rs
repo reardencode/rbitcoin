@@ -395,7 +395,8 @@ impl I2pDialer {
     }
 }
 
-// Ed25519 (7), not the SAM DSA_SHA1 default. leaseSetEncType 4 is ECIES.
+// Ed25519 (7), not the SAM DSA_SHA1 default. leaseSetEncType 6 is ML-KEM-768
+// hybrid and 4 is ECIES-X25519, as in Core. Java I2P rejects a third type (6,4,0).
 #[doc(hidden)]
 pub fn session_create_line(session_id: &str, dest_arg: &str) -> String {
     let sig = if dest_arg.eq_ignore_ascii_case("TRANSIENT") {
@@ -405,7 +406,7 @@ pub fn session_create_line(session_id: &str, dest_arg: &str) -> String {
     };
     format!(
         "SESSION CREATE STYLE=STREAM ID={session_id} DESTINATION={dest_arg}{sig} \
-         i2cp.leaseSetEncType=4,0 inbound.length=1 outbound.length=1 \
+         i2cp.leaseSetEncType=6,4 inbound.length=1 outbound.length=1 \
          inbound.quantity=1 outbound.quantity=1"
     )
 }
