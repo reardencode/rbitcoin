@@ -821,6 +821,8 @@ async fn empty_book_waits_for_a_discovered_target() {
     let shared = Arc::new(std::sync::Mutex::new(AddrMan::new()));
     let shutdown = Shutdown::new();
     let peers = Arc::new(rbitcoin_net::PeerHub::new());
+    let parked = peers.dial_parked().notified();
+    tokio::pin!(parked);
     let shared_task = Arc::clone(&shared);
     let shutdown_task = Arc::clone(&shutdown);
     let peers_task = Arc::clone(&peers);
@@ -839,19 +841,27 @@ async fn empty_book_waits_for_a_discovered_target() {
         )
         .await
     });
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    tokio::time::timeout(Duration::from_secs(2), parked)
+        .await
+        .expect("empty book parks before a discovered address");
     assert!(
         !task.is_finished(),
         "an empty book with discovery in flight must stay in catch-up"
     );
+    let started = Instant::now();
     shared
         .lock()
         .unwrap()
         .add_addr(rbitcoin_net::NetAddr::Ip("127.0.0.1:1".parse().unwrap()));
-    let found = tokio::time::timeout(Duration::from_secs(2), task)
+    let found = tokio::time::timeout(Duration::from_millis(50), task)
         .await
-        .expect("learned target wakes catch-up")
+        .expect("learned target wakes catch-up within 50ms")
         .expect("wait task");
+    assert!(
+        started.elapsed() < Duration::from_millis(50),
+        "join took {:?}",
+        started.elapsed()
+    );
     assert_eq!(found.expect("dial targets").len(), 1);
 
     let shutdown = Shutdown::new();

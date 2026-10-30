@@ -1814,35 +1814,59 @@ pub async fn wait_for_dialable_targets(
     network: Network,
 ) -> Option<Vec<rbitcoin_net::NetAddr>> {
     let candidate_n = max_out.saturating_mul(2).clamp(16, 48);
-    let mut next_requeue = Instant::now();
+    let queue_seeds = || {
+        if !proxy_seeds {
+            return;
+        }
+        let answering = peers
+            .snapshot()
+            .iter()
+            .any(|p| p.conn_type == PeerConnType::AddrFetch);
+        if !answering {
+            let n = queue_proxy_seed_addrfetch(peers, network);
+            if n > 0 {
+                info!("ibd: no dialable address yet — re-queued {n} seed hostname(s)");
+            }
+        }
+    };
+    queue_seeds();
+    let mut requeue = tokio::time::interval(PROXY_SEED_RETRY);
+    requeue.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    requeue.tick().await;
     loop {
         if shutdown.requested() {
             return None;
         }
-        if proxy_seeds && Instant::now() >= next_requeue {
-            let answering = peers
-                .snapshot()
-                .iter()
-                .any(|p| p.conn_type == PeerConnType::AddrFetch);
-            if !answering {
-                let n = queue_proxy_seed_addrfetch(peers, network);
-                if n > 0 {
-                    info!("ibd: no dialable address yet — re-queued {n} seed hostname(s)");
+        let mut sample = || {
+            {
+                let g = shared_peers.lock().unwrap_or_else(|e| e.into_inner());
+                if !g.is_empty() {
+                    *addrman = g.clone();
                 }
             }
-            next_requeue = Instant::now() + PROXY_SEED_RETRY;
-        }
-        {
-            let g = shared_peers.lock().unwrap_or_else(|e| e.into_inner());
-            if !g.is_empty() {
-                *addrman = g.clone();
-            }
-        }
-        let targets = follow_dial_targets(pinned, addrman, candidate_n, occupied);
+            follow_dial_targets(pinned, addrman, candidate_n, occupied)
+        };
+        let targets = sample();
         if !targets.is_empty() {
             return Some(targets);
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        peers.note_dial_parked();
+        let added = shared_peers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .added();
+        let wake = added.notified();
+        tokio::pin!(wake);
+        let targets = sample();
+        if !targets.is_empty() {
+            return Some(targets);
+        }
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return None,
+            _ = &mut wake => {}
+            _ = requeue.tick() => queue_seeds(),
+        }
     }
 }
 
