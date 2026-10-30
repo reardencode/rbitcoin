@@ -89,20 +89,111 @@ async fn splice_after_userpass(mut c: TcpStream, dest: SocketAddr) -> Vec<u8> {
     user
 }
 
-#[test]
-fn isolated_broadcast_targets_prefers_onion() {
+/// splitmix64, so a target pick is the same on every run.
+fn seeded_draw(seed: u64) -> impl FnMut(usize) -> usize {
+    let mut s = seed;
+    move |n| {
+        s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = s;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        ((z ^ (z >> 31)) % n as u64) as usize
+    }
+}
+
+fn every_network_addrman(per_net: u8) -> AddrMan {
     let mut am = AddrMan::new();
-    am.add(SocketAddr::from((Ipv4Addr::new(1, 2, 3, 4), 8333)));
-    let onion: NetAddr = "pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion:8333"
-        .parse()
-        .unwrap();
     am.set_onion_reachable(true);
-    am.add_addr(onion);
-    let got = isolated_broadcast_targets(&am, 1);
-    assert_eq!(got, vec![onion]);
-    let got = isolated_broadcast_targets(&am, 2);
-    assert_eq!(got[0], onion);
-    assert!(matches!(got[1], NetAddr::Ip(_)));
+    am.set_i2p_reachable(true);
+    am.set_cjdns_reachable(true);
+    for i in 1..=per_net {
+        am.add_addr(NetAddr::Onion {
+            pk: [i; 32],
+            port: 8333,
+        });
+        am.add(SocketAddr::from((Ipv4Addr::new(1, 2, 3, i), 8333)));
+        am.add(SocketAddr::from((
+            std::net::Ipv6Addr::new(0x2001, 0xdb9, 0, 0, 0, 0, 0, u16::from(i)),
+            8333,
+        )));
+        am.add_addr(NetAddr::I2p {
+            dest: [i; 32],
+            port: 0,
+        });
+        am.add_addr(NetAddr::Cjdns {
+            ip: std::net::Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, u16::from(i)),
+            port: 8333,
+        });
+    }
+    am
+}
+
+/// Each tx gets its own targets, drawn like Core's `PickNetwork`: a network
+/// the dialer reaches privately, then a row in it. Never I2P or CJDNS, and
+/// an IPv4/IPv6 row only through `--proxy`.
+#[test]
+fn isolated_broadcast_targets_are_fresh_per_tx_and_private() {
+    use rbitcoin_net::OnlyNet;
+    use std::collections::HashSet;
+
+    let am = every_network_addrman(12);
+    let socks = SocketAddr::from(([127, 0, 0, 1], 9050));
+    let proxy = Dialer::with_proxies(Some(socks), None, true);
+    let onion_only = Dialer::with_proxies(None, Some(socks), true);
+
+    let mut draw = seeded_draw(1275);
+    let mut pairs = HashSet::new();
+    let mut nets = Vec::new();
+    for _ in 0..20 {
+        let got = isolated_broadcast_targets(&am, &proxy, ISOLATED_BROADCAST_PEERS, &mut draw);
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_ne!(got[0], got[1], "one tx never goes to the same peer twice");
+        for a in &got {
+            assert!(
+                !matches!(a, NetAddr::I2p { .. } | NetAddr::Cjdns { .. }),
+                "{a} is not reachable through SOCKS"
+            );
+            if !nets.contains(&OnlyNet::of(*a)) {
+                nets.push(OnlyNet::of(*a));
+            }
+        }
+        pairs.insert((got[0], got[1]));
+    }
+    assert!(pairs.len() >= 18, "txs share targets: {pairs:?}");
+    for net in [OnlyNet::Onion, OnlyNet::Ipv4, OnlyNet::Ipv6] {
+        assert!(nets.contains(&net), "{net:?} never drawn: {nets:?}");
+    }
+
+    let mut onions = HashSet::new();
+    for _ in 0..20 {
+        for a in isolated_broadcast_targets(&am, &onion_only, ISOLATED_BROADCAST_PEERS, &mut draw) {
+            assert!(
+                matches!(a, NetAddr::Onion { .. }),
+                "--onion alone picked {a}"
+            );
+            onions.insert(a);
+        }
+    }
+    assert!(onions.len() >= 8, "onion picks repeat: {onions:?}");
+
+    assert!(
+        isolated_broadcast_targets(&am, &Dialer::Direct, ISOLATED_BROADCAST_PEERS, &mut draw)
+            .is_empty(),
+        "a direct dialer reaches nothing privately"
+    );
+
+    let mut one_onion = every_network_addrman(0);
+    let lone = NetAddr::Onion {
+        pk: [7; 32],
+        port: 8333,
+    };
+    one_onion.add_addr(lone);
+    one_onion.add(SocketAddr::from((Ipv4Addr::new(1, 2, 3, 4), 8333)));
+    assert_eq!(
+        isolated_broadcast_targets(&one_onion, &onion_only, ISOLATED_BROADCAST_PEERS, &mut draw),
+        vec![lone],
+        "one eligible row is the whole pick"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
