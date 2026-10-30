@@ -13,8 +13,8 @@ use bitcoin::{
     Work,
 };
 use rbitcoin_consensus::{
-    genesis_block, mine_op_true_signet_paying, mine_regtest_paying_bits, validate_header_on_parent,
-    ChainParams, Milestone,
+    genesis_block, mine_op_true_signet_paying, try_mine_regtest_paying_bits,
+    validate_header_on_parent, ChainParams, Milestone,
 };
 use rbitcoin_log::{debug, info, warn};
 use rbitcoin_primitives::{Fk, Height};
@@ -2382,14 +2382,15 @@ impl ChainHub {
                 time,
             )
             .map_err(NetError::from_confirm)?;
-            return Ok(mine_regtest_paying_bits(
+            return try_mine_regtest_paying_bits(
                 prev,
                 time,
                 height,
                 script_pubkey,
                 extra_txs,
                 bits,
-            ));
+            )
+            .map_err(|e| NetError::Consensus(e.into()));
         }
         let bits = self
             .tip_header()
