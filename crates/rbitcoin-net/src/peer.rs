@@ -4485,24 +4485,45 @@ pub async fn on_cmpctblock(
         return Ok(());
     }
     if !follow.requested_blocks.contains(&hash)
-        && !compact_unsolicited_reconstruct(hub, &hsi.header)
+        && !compact_unsolicited_reconstruct(hub, session, &hsi.header)
     {
-        let pending = follow.pending_headers.clone();
-        run_header_job(hub, move |hub| {
-            persist_pending_header_path(hub, &pending, hash);
-        })
-        .await?;
-        return Ok(());
+        return on_cmpctblock_header_announce(hub, out_tx, follow, session, hash).await;
     }
-    // getblocktxn only after SENDCMPCT version 2, and only when this node
-    // asked for the block or selected the peer for high-bandwidth. A live
-    // peer who has not negotiated that does not get a round trip. Callers
-    // with no session (in-tree compact helpers) still fetch.
-    let fetch_missing = session.is_none()
-        || (follow.cmpct_version == 2
-            && (follow.requested_blocks.contains(&hash)
-                || session.is_some_and(|s| s.hb_to.load(Ordering::Relaxed))));
-    on_cmpctblock_reconstruct(hub, out_tx, follow, session, &hsi, hash, fetch_missing).await
+    on_cmpctblock_reconstruct(hub, out_tx, follow, session, &hsi, hash).await
+}
+
+/// An unsolicited compact block we do not reconstruct is a header
+/// announcement. The header path is stored and the bodies it makes
+/// fetchable are a full-block `getdata` to this peer, as Core's block
+/// download asks once the announcement moved the peer's best block.
+async fn on_cmpctblock_header_announce(
+    hub: &ChainHub,
+    out_tx: &mpsc::UnboundedSender<PeerOut>,
+    follow: &mut PeerFollowState,
+    session: Option<&crate::peers::LivePeer>,
+    hash: BlockHash,
+) -> Result<(), NetError> {
+    let pending = follow.pending_headers.clone();
+    run_header_job(hub, move |hub| {
+        persist_pending_header_path(hub, &pending, hash);
+    })
+    .await?;
+    let mut want = fetchable_header_path_bodies(
+        hub,
+        &follow.pending_headers,
+        hash,
+        &follow.pending_blocks,
+        &follow.requested_blocks,
+    );
+    want.truncate(MAX_SERVE_BLOCKS.saturating_sub(follow.requested_blocks.len()));
+    queue_block_getdata(
+        hub,
+        out_tx,
+        session,
+        &mut follow.requested_blocks,
+        &want,
+        false,
+    )
 }
 
 #[doc(hidden)]
@@ -4516,6 +4537,10 @@ pub fn on_cmpctblock_reject_early(
     // `-blocksonly` does not reconstruct compact blocks, solicited or not.
     // The peer still gets a full-block getdata from the headers path.
     if hub.blocks_only.load(Ordering::Acquire) {
+        return Ok(true);
+    }
+    if follow.cmpct_version != 2 {
+        rbitcoin_log::debug!("p2p: cmpctblock from a peer that never sent sendcmpct version 2");
         return Ok(true);
     }
     if session.is_some_and(|s| s.has_failed_cmpct(&hash)) {
@@ -4589,7 +4614,6 @@ pub async fn on_cmpctblock_reconstruct(
     session: Option<&crate::peers::LivePeer>,
     hsi: &HeaderAndShortIds,
     hash: BlockHash,
-    fetch_missing: bool,
 ) -> Result<(), NetError> {
     // Reconstruct after the message is in hand. The permit is the same
     // budget as block decode and compact serve. Session state stays here.
@@ -4603,9 +4627,6 @@ pub async fn on_cmpctblock_reconstruct(
     })
     .await
     .map_err(|_| NetError::Protocol("compact reconstruct join failed"))?;
-    if !fetch_missing && matches!(outcome, Some(CmpctReconstruct::NeedTxn(_, _))) {
-        return Ok(());
-    }
     match outcome {
         Some(CmpctReconstruct::Block(block, fill)) => {
             on_cmpct_got_block(hub, out_tx, follow, session, hsi, hash, block, fill).await
@@ -5907,11 +5928,21 @@ pub fn compact_getdata_near_tip(hub: &ChainHub, hash: &BlockHash) -> bool {
         .is_some_and(|hdr| hub.tip_hash() == Some(hdr.prev_blockhash))
 }
 
-/// Core CMPCTBLOCK: reconstruct unsolicited compact only when claimed work
+/// Core CMPCTBLOCK: reconstruct unsolicited compact only from a peer we sent
+/// `sendcmpct(1)` (BIP152 high-bandwidth, Core #32606), when claimed work
 /// beats the tip and `nHeight <= tipHeight + 2`. The next block (prev is
 /// tip) is always near-tip even if the header is not yet in the work prefix.
+/// In-tree callers with no session are not a peer and skip the
+/// high-bandwidth rule.
 #[doc(hidden)]
-pub fn compact_unsolicited_reconstruct(hub: &ChainHub, header: &bitcoin::block::Header) -> bool {
+pub fn compact_unsolicited_reconstruct(
+    hub: &ChainHub,
+    session: Option<&crate::peers::LivePeer>,
+    header: &bitcoin::block::Header,
+) -> bool {
+    if !session.is_none_or(|s| s.hb_to.load(Ordering::Relaxed)) {
+        return false;
+    }
     if hub.tip_hash() == Some(header.prev_blockhash) || hub.tip_hash() == Some(header.block_hash())
     {
         return true;

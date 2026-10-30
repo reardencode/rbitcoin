@@ -723,6 +723,7 @@ async fn tip_announce_hb_relays_before_connect() {
     let parent = hub.tip_hash().unwrap();
     let peers = rbitcoin_net::peers::PeerHub::new();
     let a = live_peer(&peers, 18449, 6, false);
+    a.set_hb_to(true);
     let asked = live_peer(&peers, 18450, 7, false);
     asked.set_hb_from(true);
     asked.note_best_known(parent);
@@ -1035,7 +1036,7 @@ async fn tip_announce_invalid_compact_disconnects() {
     let failed = BlockHash::from_byte_array([0x11; 32]);
     hub.note_invalid_block(failed);
     let (out_tx, _out_rx) = mpsc::unbounded_channel();
-    let mut follow = PeerFollowState::new();
+    let mut follow = hb_follow();
     let gen = hub
         .query
         .reconstruct_block_at_height(Height(0))
@@ -1130,8 +1131,9 @@ async fn tip_announce_merkle_second_cmpct_disconnects() {
     assert!(!hub.has_block(&hash));
     let peers = rbitcoin_net::peers::PeerHub::new();
     let session = live_peer(&peers, 18451, 8, true);
+    session.set_hb_to(true);
     let (out_tx, _out_rx) = mpsc::unbounded_channel();
-    let mut follow = PeerFollowState::new();
+    let mut follow = hb_follow();
     let frame = frame_for(NetworkMessage::CmpctBlock(CmpctBlock {
         compact_block: hsi,
     }));
