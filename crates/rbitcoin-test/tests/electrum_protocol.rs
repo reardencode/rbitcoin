@@ -160,7 +160,7 @@ async fn pin_outpoint_1_6(stream: &mut TcpStream) {
 }
 
 async fn pin_silentpayments_1_6(stream: &mut TcpStream) {
-    let sp = rpc_late_read(
+    let sp = rpc(
         stream,
         45,
         "blockchain.silentpayments.subscribe",
@@ -218,7 +218,7 @@ async fn pin_silentpayments_1_6(stream: &mut TcpStream) {
     )
     .await;
     let tip_h = headers["result"]["count"].as_u64().expect("header count") - 1;
-    let clamped = rpc_late_read(
+    let clamped = rpc(
         stream,
         55,
         "blockchain.silentpayments.subscribe",
@@ -243,20 +243,34 @@ async fn pin_silentpayments_1_6(stream: &mut TcpStream) {
 
 /// One JSON line, read a byte at a time. A `BufReader` that lives for one
 /// call takes every line already in the socket and drops all but the first.
-async fn read_json_line(stream: &mut TcpStream, label: &str) -> Value {
-    let mut line = Vec::new();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            match stream.read_u8().await? {
-                b'\n' => return Ok::<_, std::io::Error>(()),
-                b => line.push(b),
-            }
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("electrum {label}: read_line timed out"))
-    .unwrap_or_else(|e| panic!("electrum {label}: io {e}"));
-    serde_json::from_slice(&line).unwrap()
+async fn read_json_line<R: tokio::io::AsyncRead + Unpin>(stream: &mut R, label: &str) -> Value {
+    let mut reader = BufReader::new(&mut *stream);
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+        .await
+        .unwrap_or_else(|_| panic!("electrum {label}: read_line timed out"))
+        .unwrap_or_else(|e| panic!("electrum {label}: io {e}"));
+    serde_json::from_str(&line).unwrap_or_else(|e| panic!("electrum {label}: {e}: {line:?}"))
+}
+
+/// A subscribe answer and its notification can both be in the socket before
+/// the client reads. The second read must still return the second line.
+#[tokio::test]
+async fn read_json_line_keeps_the_line_already_behind_it() {
+    let (mut server, mut client) = tokio::io::duplex(1024);
+    server
+        .write_all(b"{\"id\":1}\n{\"method\":\"note\"}\n")
+        .await
+        .unwrap();
+    drop(server);
+    assert_eq!(
+        read_json_line(&mut client, "answer").await,
+        json!({"id": 1})
+    );
+    assert_eq!(
+        read_json_line(&mut client, "notification").await,
+        json!({"method": "note"})
+    );
 }
 
 async fn send_rpc(stream: &mut TcpStream, id: u64, method: &str, params: Value) {
@@ -264,15 +278,6 @@ async fn send_rpc(stream: &mut TcpStream, id: u64, method: &str, params: Value) 
     let mut line = serde_json::to_string(&req).unwrap();
     line.push('\n');
     stream.write_all(line.as_bytes()).await.unwrap();
-}
-
-/// [`rpc`] for a call the server follows with a notification: the answer is
-/// read only after the server has had time to send both lines, as a slow
-/// client (an instrumented CI build) sees them.
-async fn rpc_late_read(stream: &mut TcpStream, id: u64, method: &str, params: Value) -> Value {
-    send_rpc(stream, id, method, params).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    read_json_line(stream, &format!("rpc {method}")).await
 }
 
 async fn rpc(stream: &mut TcpStream, id: u64, method: &str, params: Value) -> Value {
