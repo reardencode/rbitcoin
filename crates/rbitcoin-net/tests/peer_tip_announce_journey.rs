@@ -1024,7 +1024,11 @@ async fn tip_announce_far_compact_is_header_only() {
 }
 
 /// Same-hash cached invalid stays connected. A child of a cached-invalid
-/// parent disconnects. An out-of-range prefilled index disconnects.
+/// parent disconnects. Every Core `InitData` invalid shape disconnects,
+/// requested or unsolicited: an out-of-range prefilled index, no txs at all,
+/// a prefilled null tx sent as wire bytes, and differentials whose absolute
+/// index passes 65,535. Core's decoder drops more than 65,535 txs, or a
+/// witness-flag prefill with no inputs, with no score; so do we. 65,535 txs stays connected and asks for its txs.
 #[tokio::test]
 async fn tip_announce_invalid_compact_disconnects() {
     let (_dir, hub) = open_tip_announce_hub("tip-invalid-compact-disconnects");
@@ -1099,6 +1103,136 @@ async fn tip_announce_invalid_compact_disconnects() {
         follow.ban_score >= BAN_SCORE_THRESHOLD,
         "out-of-range prefilled index must disconnect"
     );
+
+    let u16_max = usize::from(u16::MAX);
+    let zero = bitcoin::bip152::ShortId::from([0u8; 6]);
+    let mut offset = 100u32;
+    let mut child_hsi = |short_n: usize, prefill_idx: &[u16]| {
+        offset += 1;
+        let child = mine_child(hub, offset, vec![]);
+        HeaderAndShortIds {
+            header: child.header,
+            nonce: 0,
+            short_ids: vec![zero; short_n],
+            prefilled_txs: prefill_idx
+                .iter()
+                .map(|&idx| PrefilledTransaction {
+                    idx,
+                    tx: child.txdata[0].clone(),
+                })
+                .collect(),
+        }
+    };
+    for requested in [true, false] {
+        let path = if requested { "requested" } else { "unsolicited tip child" };
+        let (follow, _) = send_cmpct_once(hub, child_hsi(0, &[]), requested).await;
+        assert!(
+            follow.ban_score >= BAN_SCORE_THRESHOLD,
+            "{path}: no short ids and no prefilled txs must disconnect"
+        );
+        let (follow, msgs) = send_cmpct_once(hub, child_hsi(u16_max - 1, &[0]), requested).await;
+        assert_eq!(follow.ban_score, 0, "{path}: 65,535 txs stays connected");
+        assert!(
+            msgs.iter().any(|m| matches!(m, NetworkMessage::GetBlockTxn(_))),
+            "{path}: 65,535 txs still asks for its missing txs"
+        );
+        let (follow, msgs) = send_cmpct_once(hub, child_hsi(u16_max, &[0]), requested).await;
+        assert_eq!(follow.ban_score, 0, "{path}: 65,536 txs is dropped with no score");
+        assert!(msgs.is_empty(), "{path}: 65,536 txs is dropped silently, got {} messages", msgs.len());
+    }
+    let (follow, msgs) = send_cmpct_once(hub, child_hsi(u16_max + 1, &[0, u16::MAX]), true).await;
+    assert_eq!(follow.ban_score, 0, "65,538 txs with a prefill at 65,536 is dropped with no score");
+    assert!(msgs.is_empty(), "65,538 txs is dropped silently, got {} messages", msgs.len());
+    let (follow, _) = send_cmpct_once(hub, child_hsi(1, &[0, u16::MAX]), true).await;
+    assert!(
+        follow.ban_score >= BAN_SCORE_THRESHOLD,
+        "differentials 0 and 65,535 in a 3-tx block decode and must disconnect"
+    );
+
+    // Core reads an empty vin, then flags 0, and leaves vout empty: IsNull.
+    let null_tx = [2, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let (follow, _) = send_cmpct_raw_first_prefill(hub, child_hsi(1, &[0]), &null_tx, false).await;
+    assert!(
+        follow.ban_score >= BAN_SCORE_THRESHOLD,
+        "a prefilled null tx on the wire must disconnect"
+    );
+    // Flag 1 with an empty vin: Core throws "Superfluous witness record".
+    let witness_flag_empty = [2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    let (follow, msgs) =
+        send_cmpct_raw_first_prefill(hub, child_hsi(1, &[0]), &witness_flag_empty, true).await;
+    assert_eq!(follow.ban_score, 0, "flag 1 with no inputs and no outputs is dropped with no score");
+    assert!(msgs.is_empty(), "flag 1 with no inputs and no outputs is dropped silently");
+    let witness_flag_one_out = [2, 0, 0, 0, 0, 1, 0, 1, 232, 3, 0, 0, 0, 0, 0, 0, 1, 81, 0, 0, 0, 0];
+    let (follow, msgs) =
+        send_cmpct_raw_first_prefill(hub, child_hsi(1, &[0]), &witness_flag_one_out, true).await;
+    assert_eq!(follow.ban_score, 0, "flag 1 with no inputs is dropped with no score");
+    assert!(msgs.is_empty(), "flag 1 with no inputs is dropped silently, got {} messages", msgs.len());
+}
+
+/// `hsi`'s header and short ids as `cmpctblock` payload bytes on a live
+/// session, with `raw` as prefill 0 and `hsi`'s coinbase as prefill 1.
+async fn send_cmpct_raw_first_prefill(
+    hub: &rbitcoin_net::chain::ChainHub,
+    hsi: HeaderAndShortIds,
+    raw: &[u8],
+    requested: bool,
+) -> (PeerFollowState, Vec<NetworkMessage>) {
+    let mut payload = bitcoin::consensus::serialize(&HeaderAndShortIds {
+        prefilled_txs: vec![],
+        ..hsi.clone()
+    });
+    assert_eq!(payload.pop(), Some(0), "the prefilled count is the last byte");
+    payload.extend_from_slice(&[2, 0]);
+    payload.extend_from_slice(raw);
+    payload.push(0);
+    payload.extend(bitcoin::consensus::serialize(&hsi.prefilled_txs[0].tx));
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let session = live_peer(&peers, 18631, 71, true);
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let mut follow = hb_follow();
+    if requested {
+        follow.requested_blocks.insert(hsi.header.block_hash());
+    }
+    handle_peer_frame(
+        FramedMessage {
+            magic: Magic::from(Network::Regtest),
+            command: *b"cmpctblock\0\0",
+            payload,
+        },
+        hub,
+        &out_tx,
+        &mut follow,
+        Some(&session),
+    )
+    .await
+    .unwrap();
+    (follow, take_msgs(&mut out_rx))
+}
+
+/// One `cmpctblock` on a fresh follow state. `requested` marks the block as
+/// asked for; otherwise it arrives unsolicited.
+async fn send_cmpct_once(
+    hub: &rbitcoin_net::chain::ChainHub,
+    hsi: bitcoin::bip152::HeaderAndShortIds,
+    requested: bool,
+) -> (PeerFollowState, Vec<NetworkMessage>) {
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let mut follow = hb_follow();
+    if requested {
+        follow.requested_blocks.insert(hsi.header.block_hash());
+    }
+    handle_peer_frame(
+        frame_for(NetworkMessage::CmpctBlock(CmpctBlock {
+            compact_block: hsi,
+        })),
+        hub,
+        &out_tx,
+        &mut follow,
+        None,
+    )
+    .await
+    .unwrap();
+    (follow, take_msgs(&mut out_rx))
 }
 
 /// First merkle-mutated unique fill asks for the block and does not

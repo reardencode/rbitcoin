@@ -182,7 +182,7 @@ fn cmpct_drain_harness(err: &NetError) -> bool {
 
 /// Full local reconstruct, when the compact case has one.
 pub fn reconstructed_cmpct_block(case: &CmpctFuzzCase) -> Option<bitcoin::Block> {
-    if !rbitcoin_net::prefilled_indexes_ok(&case.hsi) {
+    if !rbitcoin_net::cmpct_init_data_ok(&case.hsi) {
         return None;
     }
     let avail = shortid_map_from_txs(&case.hsi.header, case.hsi.nonce, 2, &case.fill_txs);
@@ -337,7 +337,7 @@ pub fn follow_reconstructed_cmpct(
 
 /// Missing indexes using the case fill set (empty = mempool-cold).
 pub fn cmpct_missing_for_case(case: &CmpctFuzzCase) -> Option<Vec<u64>> {
-    if !rbitcoin_net::prefilled_indexes_ok(&case.hsi) {
+    if !rbitcoin_net::cmpct_init_data_ok(&case.hsi) {
         return None;
     }
     let avail = shortid_map_from_txs(&case.hsi.header, case.hsi.nonce, 2, &case.fill_txs);

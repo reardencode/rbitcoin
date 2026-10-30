@@ -106,7 +106,17 @@ orphanage + a recent-confirmed txid/wtxid ring (filled at tip connect and IBD wr
 Class A `tx_fk_by_txid_tip`. Re-delivery of an already-parked orphan still
 GETDATAs missing parents (TTL) but does not log a second `txrelay: park`.
 
-Inbound `cmpctblock` may prefill any well-formed indexes (BIP152). We always
+Inbound `cmpctblock` may prefill any well-formed indexes (BIP152). A
+`cmpctblock` that fails Core `InitData` disconnects, requested or not: no txs,
+a null prefilled tx, or a prefilled index that is out of range. The
+`cmpctblock` decoder follows Core's deserializer, not rust-bitcoin's: it reads
+a prefilled tx of version, empty vin, flags 0, and locktime as a null tx,
+refuses flag 1 followed by an empty vin (superfluous witness record), and
+it fails on more than 65,535 txs (an absolute prefill index past that is then
+out of range and scored). A failed
+decode is dropped with no score, as Core swallows the exception, so
+`InitData`'s `MAX_BLOCK_TX_COUNT` (100,000) cap is never reached from the wire
+here either. We always
 log reconstruct fill sources and `fetched=` `blocktxn` bytes, and outbound
 `cmpct announce … prefill=N/bytes` when we send `cmpctblock` (tip announce or
 `MSG_CMPCT_BLOCK` getdata). **Sending** extra prefills (beyond coinbase) is on

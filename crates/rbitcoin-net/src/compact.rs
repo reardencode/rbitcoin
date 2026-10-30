@@ -78,9 +78,23 @@ pub fn v2_header_hashes(contents: &[u8]) -> Option<Vec<BlockHash>> {
     }
 }
 
-/// Prefill indexes must decode in-range. Out-of-range is a malformed `cmpctblock`.
-pub fn prefilled_indexes_ok(hsi: &HeaderAndShortIds) -> bool {
+/// Core `PartiallyDownloadedBlock::InitData` shape. A failure is a malformed
+/// `cmpctblock`: no txs, more than [`rbitcoin_consensus::MAX_BLOCK_TX_COUNT`],
+/// a null prefilled tx (no inputs and no outputs), or a prefilled index that
+/// is out of range or not increasing. The 65,535 tx-count limit belongs to
+/// the `cmpctblock` decoder, as in Core.
+pub fn cmpct_init_data_ok(hsi: &HeaderAndShortIds) -> bool {
     let total = hsi.short_ids.len().saturating_add(hsi.prefilled_txs.len());
+    if total == 0 || total > rbitcoin_consensus::MAX_BLOCK_TX_COUNT {
+        return false;
+    }
+    if hsi
+        .prefilled_txs
+        .iter()
+        .any(|p| p.tx.input.is_empty() && p.tx.output.is_empty())
+    {
+        return false;
+    }
     let mut last: Option<usize> = None;
     for (abs, _) in prefilled_absolute_indexes(hsi) {
         if abs >= total {
@@ -150,20 +164,15 @@ pub fn reconstruct<T: Borrow<Transaction>>(
     hsi: &HeaderAndShortIds,
     available: &HashMap<ShortId, Vec<T>>,
 ) -> Reconstruct {
-    let n_short = hsi.short_ids.len();
-    let n_pref = hsi.prefilled_txs.len();
-    let total = n_short.saturating_add(n_pref);
-    if total == 0 || total > rbitcoin_consensus::MAX_BLOCK_TX_COUNT {
+    if !cmpct_init_data_ok(hsi) {
         return Reconstruct::Fail;
     }
+    let total = hsi.short_ids.len() + hsi.prefilled_txs.len();
 
     let mut slots: Vec<Option<Transaction>> = vec![None; total];
     let mut prefilled_set = std::collections::HashSet::new();
     let mut placed: std::collections::HashSet<bitcoin::Txid> = std::collections::HashSet::new();
     for (abs, tx) in prefilled_absolute_indexes(hsi) {
-        if abs >= total {
-            return Reconstruct::Fail;
-        }
         placed.insert(tx.compute_txid());
         slots[abs] = Some(tx.clone());
         prefilled_set.insert(abs);
