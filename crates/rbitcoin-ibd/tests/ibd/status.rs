@@ -1,8 +1,6 @@
 use rbitcoin_ibd::ibd::status::*;
 use std::sync::atomic::Ordering;
 
-use std::time::Duration;
-
 #[test]
 fn loop_stats_sample_dominant_and_live() {
     let s = LoopStats::default();
@@ -12,7 +10,7 @@ fn loop_stats_sample_dominant_and_live() {
     assert_eq!(live.0, 10);
     assert_eq!(live.1, 4);
     assert_eq!(live.2, 100);
-    std::thread::sleep(Duration::from_millis(2));
+    rbitcoin_ibd::ibd::peer_io::wait_past_mono_sentinel();
     let sample = s.sample_and_reset();
     assert!(sample.confirm_live.is_some());
     assert_eq!(sample.dominant(), "confirm"); // live with 0 ns → confirm
