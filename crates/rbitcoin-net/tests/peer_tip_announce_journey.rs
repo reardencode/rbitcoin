@@ -1339,6 +1339,7 @@ async fn tip_announce_unsolicited_cmpct_from_lb_peer_is_header_announce() {
     let tip_h = hub.tip_height().unwrap();
     let peers = rbitcoin_net::peers::PeerHub::new();
     let lb = live_peer(&peers, 18600, 60, false);
+    let lb2 = live_peer(&peers, 18608, 68, false);
     assert!(!lb.hb_to.load(Ordering::Relaxed));
     for (why, block) in [
         ("missing tx", tip_child_missing_tx(hub, 61)),
@@ -1362,7 +1363,60 @@ async fn tip_announce_unsolicited_cmpct_from_lb_peer_is_header_announce() {
         );
         assert!(follow.requested_blocks.contains(&hash), "{why}: the getdata is in flight");
         assert_eq!(follow.ban_score, 0, "{why}: an unsolicited compact block is not misbehavior");
+        let (second, msgs) = cmpct_from_peer(hub, &lb2, hb_follow(), &block, false).await;
+        assert!(
+            getdata_of(&msgs).is_empty(),
+            "{why}: a second peer's copy does not ask again: {msgs:?}"
+        );
+        assert!(!second.requested_blocks.contains(&hash));
     }
+}
+
+/// The full-block ask from an unsolicited compact block is one claim on the
+/// hub. A session over its send budget neither sends nor claims it, and a
+/// send that fails releases the claim, so the next peer's copy asks.
+#[tokio::test]
+async fn tip_announce_unsolicited_cmpct_ask_is_one_claim() {
+    use bitcoin::bip152::HeaderAndShortIds;
+    let (_dir, hub) = open_tip_announce_hub("tip-unsolicited-cmpct-ask-claim");
+    let hub = &hub;
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let full = live_peer(&peers, 18605, 65, false);
+    let closed = live_peer(&peers, 18606, 66, false);
+    let open = live_peer(&peers, 18607, 67, false);
+    let block = mine_child(hub, 71, vec![]);
+    let hash = block.block_hash();
+
+    full.note_send_queued(rbitcoin_net::peers::PEER_SEND_BUDGET + 1);
+    assert!(full.send_over_budget());
+    let (follow, msgs) = cmpct_from_peer(hub, &full, hb_follow(), &block, false).await;
+    assert!(getdata_of(&msgs).is_empty(), "spent send budget sends no getdata: {msgs:?}");
+    assert!(!follow.requested_blocks.contains(&hash));
+    assert!(!hub.already_have_or_asked_block(&hash), "spent budget claims nothing");
+    assert!(hub.knows_header(&hash), "the header is still stored");
+    full.note_send_written(full.send_queued());
+
+    let hsi = HeaderAndShortIds::from_block(&block, 0xbeef, 2, &[0]).unwrap();
+    let (closed_tx, closed_rx) = mpsc::unbounded_channel();
+    drop(closed_rx);
+    let mut follow = hb_follow();
+    let sent = handle_peer_frame(
+        frame_for(NetworkMessage::CmpctBlock(CmpctBlock {
+            compact_block: hsi,
+        })),
+        hub,
+        &closed_tx,
+        &mut follow,
+        Some(&closed),
+    )
+    .await;
+    assert!(sent.is_err(), "a closed writer fails the send");
+    assert!(!follow.requested_blocks.contains(&hash));
+    assert!(!hub.already_have_or_asked_block(&hash), "a failed send releases the claim");
+
+    let (follow, msgs) = cmpct_from_peer(hub, &open, hb_follow(), &block, false).await;
+    assert_eq!(getdata_of(&msgs), vec![(hash, false)], "the next peer's copy asks");
+    assert!(follow.requested_blocks.contains(&hash));
 }
 
 /// A peer we selected with `sendcmpct(1)` still pushes compact blocks we
