@@ -89,6 +89,53 @@ async fn splice_after_userpass(mut c: TcpStream, dest: SocketAddr) -> Vec<u8> {
     user
 }
 
+/// A SOCKS proxy that is itself the one peer: every circuit handshakes and
+/// reports the tx it carries on `got`. The first circuit stops after SOCKS,
+/// says so on `busy`, and holds the sender until `gate` fires.
+async fn gated_recipient(
+    socks: TcpListener,
+    busy: tokio::sync::oneshot::Sender<()>,
+    gate: tokio::sync::oneshot::Receiver<()>,
+    got: tokio::sync::mpsc::UnboundedSender<bitcoin::Txid>,
+) {
+    let mut first = Some((busy, gate));
+    loop {
+        let (mut s, from) = socks.accept().await.unwrap();
+        socks_userpass(&mut s).await;
+        if let Some((busy, gate)) = first.take() {
+            busy.send(()).unwrap();
+            gate.await.unwrap();
+        }
+        let here = s.local_addr().unwrap();
+        let (_ver, mut reader, _writer, _wire, _tcp) = connect_and_handshake_timed(
+            Duration::from_secs(5),
+            s,
+            Magic::REGTEST,
+            here,
+            from,
+            0,
+            true,
+            "/rbitcoin:test/",
+            HandshakePolicy::plain(),
+        )
+        .await
+        .unwrap();
+        let frame = read_v2_frame(&mut reader, Magic::REGTEST).await.unwrap();
+        let msg = decode_framed_offload(frame).await.unwrap();
+        let NetworkMessage::Tx(tx) = msg.payload() else {
+            panic!("expected tx, got {:?}", msg.payload());
+        };
+        got.send(tx.compute_txid()).unwrap();
+    }
+}
+
+async fn next_sent(rx: &mut tokio::sync::mpsc::UnboundedReceiver<bitcoin::Txid>) -> bitcoin::Txid {
+    tokio::time::timeout(Duration::from_secs(30), rx.recv())
+        .await
+        .expect("the isolated loop stopped sending")
+        .expect("recipient alive")
+}
+
 #[test]
 fn isolated_broadcast_targets_prefers_onion() {
     let mut am = AddrMan::new();
@@ -225,6 +272,101 @@ async fn ephemeral_broadcast() {
         .expect("idle loop returns while isolation is off");
 
     mp.set_isolated_broadcast(true);
+
+    // More local txs than the loop can send while one send is stuck. One
+    // block fans a mature coinbase out to a coin per tx.
+    let spend = |prev: OutPoint, sats: u64| Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: prev,
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(sats),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    const BURST: u32 = 44;
+    let cb2 = hub
+        .query
+        .reconstruct_block_at_height(Height(2))
+        .unwrap()
+        .txdata[0]
+        .compute_txid();
+    let mut fan = spend(OutPoint { txid: cb2, vout: 0 }, 100_000_000);
+    fan.output = vec![fan.output[0].clone(); BURST as usize + 3];
+    let fan_id = fan.compute_txid();
+    hub.generate_to_script(1, ScriptBuf::from_bytes(vec![0x51]), vec![fan])
+        .expect("fan-out block");
+    let locals: Vec<Transaction> = (0..BURST + 3)
+        .map(|vout| spend(OutPoint { txid: fan_id, vout }, 99_990_000))
+        .collect();
+    let submit = |tx: &Transaction| {
+        mp.accept_tx(tx).expect("local");
+        mp.mark_local_origin(tx.compute_txid());
+    };
+
+    let socks = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = socks.local_addr().unwrap();
+    let mut am = AddrMan::new();
+    am.add(SocketAddr::from((Ipv4Addr::new(10, 0, 0, 1), 18444)));
+    let (busy_tx, busy_rx) = tokio::sync::oneshot::channel();
+    let (gate_tx, gate_rx) = tokio::sync::oneshot::channel();
+    let (got_tx, mut got_rx) = mpsc::unbounded_channel();
+    let recipient = tokio::spawn(gated_recipient(socks, busy_tx, gate_rx, got_tx));
+    let sender = spawn_isolated_broadcast_loop(
+        mp.clone(),
+        Dialer::socks(proxy, true),
+        Arc::new(Mutex::new(am)),
+        Magic::REGTEST,
+        "/rbitcoin:test/".into(),
+    );
+    submit(&locals[0]);
+    tokio::time::timeout(Duration::from_secs(30), busy_rx)
+        .await
+        .expect("the first send reaches the recipient")
+        .unwrap();
+    for tx in &locals[1..=BURST as usize] {
+        submit(tx);
+    }
+    let mined = locals[5].compute_txid();
+    hub.generate_to_script(
+        1,
+        ScriptBuf::from_bytes(vec![0x51]),
+        vec![locals[5].clone()],
+    )
+    .expect("mine a queued local tx");
+    assert!(!mp.contains(&mined), "the block took it from the mempool");
+    let last = &locals[BURST as usize + 1];
+    submit(last);
+    gate_tx.send(()).unwrap();
+
+    let want: Vec<Txid> = locals[..=BURST as usize + 1]
+        .iter()
+        .map(Transaction::compute_txid)
+        .filter(|t| *t != mined)
+        .collect();
+    let mut sent = Vec::new();
+    while sent.last() != Some(&last.compute_txid()) {
+        sent.push(next_sent(&mut got_rx).await);
+    }
+    assert_eq!(
+        sent, want,
+        "every queued local tx still in the mempool goes out once, in submit order"
+    );
+    let late = locals[BURST as usize + 2].compute_txid();
+    submit(&locals[BURST as usize + 2]);
+    assert_eq!(
+        next_sent(&mut got_rx).await,
+        late,
+        "an idle loop wakes for the next local tx and resends nothing"
+    );
+    sender.abort();
+    recipient.abort();
+
     let h = spawn_loop(AddrMan::new());
     tokio::time::sleep(Duration::from_millis(20)).await;
     mp.mark_local_origin(dummy_tx().compute_txid());
