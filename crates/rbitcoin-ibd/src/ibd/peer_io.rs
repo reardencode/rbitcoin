@@ -317,7 +317,7 @@ pub fn getdata_on_wire_stalled(slot: &PeerSlot, now_ms: u64, stall_ms: u64) -> b
     let Some(open) = prepare_stall_window(slot) else {
         return false;
     };
-    rate_in_window(slot, open, true).stalled(now_ms, stall_ms, true)
+    rate_in_window(slot, open, true).stalled(now_ms, stall_ms)
 }
 
 /// True when getdata is on the wire and this peer has sent no bytes at all
@@ -326,7 +326,7 @@ pub fn getdata_on_wire_quiet(slot: &PeerSlot, now_ms: u64, stall_ms: u64) -> boo
     let Some(open) = prepare_stall_window(slot) else {
         return false;
     };
-    rate_in_window(slot, open, false).quiet(now_ms, stall_ms, true)
+    rate_in_window(slot, open, false).quiet(now_ms, stall_ms)
 }
 
 /// In-flight light decodes (inv, addr, tx, cmpct) per IBD peer. Not a knob.

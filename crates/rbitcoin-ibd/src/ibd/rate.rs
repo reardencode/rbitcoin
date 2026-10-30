@@ -136,19 +136,19 @@ impl PeerRate {
         Some(bps.saturating_mul(TAU_MS) / TAU_MS.saturating_add(age))
     }
 
-    /// No solicited block progress inside `stall_ms` while getdata is in flight.
-    pub fn stalled(&self, now_ms: u64, stall_ms: u64, inflight: bool) -> bool {
-        if !inflight {
-            return false;
-        }
+    /// No solicited block progress inside `stall_ms`.
+    ///
+    /// The on-wire window decides whether a getdata is outstanding.
+    /// This is only the clock.
+    pub fn stalled(&self, now_ms: u64, stall_ms: u64) -> bool {
         now_ms.saturating_sub(self.progress_ms) > stall_ms
     }
 
-    /// No socket bytes at all inside `stall_ms` while getdata is in flight.
-    pub fn quiet(&self, now_ms: u64, stall_ms: u64, inflight: bool) -> bool {
-        if !inflight {
-            return false;
-        }
+    /// No socket bytes at all inside `stall_ms`.
+    ///
+    /// The on-wire window decides whether a getdata is outstanding.
+    /// This is only the clock.
+    pub fn quiet(&self, now_ms: u64, stall_ms: u64) -> bool {
         now_ms.saturating_sub(self.any_rx_ms) > stall_ms
     }
 

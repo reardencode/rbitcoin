@@ -6027,6 +6027,76 @@ fn cmpct_tip_announce_shortids_run_off_the_reactor() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn panic_text(err: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = err.downcast_ref::<String>() {
+        return s.clone();
+    }
+    if let Some(s) = err.downcast_ref::<&str>() {
+        return (*s).to_string();
+    }
+    String::new()
+}
+
+/// Compact serve, getblocktxn, and an announced tip wtxid each read the
+/// block on the worker. That read is the reactor check.
+#[test]
+fn served_block_read_is_the_reactor_check() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("serve-reactor-check");
+    hub.ensure_genesis().unwrap();
+    let hash = hub.tip_hash().unwrap();
+    let cache = Arc::clone(&hub.cache);
+    let query = Arc::clone(&hub.query);
+    let wtxid = bitcoin::Wtxid::from_byte_array([1u8; 32]);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .thread_name("tokio-rt-worker")
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async move {
+        tokio::spawn(async move {
+            let name = std::thread::current().name().unwrap_or("").to_string();
+            assert!(
+                name.starts_with("tokio-rt-worker"),
+                "spawned task must run on a tokio worker, got {name:?}"
+            );
+            let assert_block_read = |err: Box<dyn std::any::Any + Send>| {
+                let text = panic_text(err);
+                assert!(
+                    text.contains("block reconstruct"),
+                    "the block read is the reactor check, got {text}"
+                );
+            };
+            let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = compact_serve_outcome(cache.as_ref(), query.as_ref(), &hash, 0, 2, vec![0]);
+            }))
+            .expect_err("compact serve on tokio-rt-worker panics");
+            assert_block_read(err);
+            let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = getblocktxn_reply(
+                    cache.as_ref(),
+                    query.as_ref(),
+                    BlockTransactionsRequest {
+                        block_hash: hash,
+                        indexes: vec![0],
+                    },
+                    0,
+                );
+            }))
+            .expect_err("getblocktxn on tokio-rt-worker panics");
+            assert_block_read(err);
+            let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = tx_from_stored_block(cache.as_ref(), query.as_ref(), &hash, &wtxid);
+            }))
+            .expect_err("tip wtxid on tokio-rt-worker panics");
+            assert_block_read(err);
+        })
+        .await
+        .expect("worker")
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Compact getdata and an announced tip wtxid reconstruct off the reactor.
 /// `assert_not_reactor` panics when `block_for_peer` runs on `tokio-rt-worker`.
 #[test]

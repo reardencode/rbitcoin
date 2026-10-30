@@ -1390,10 +1390,16 @@ pub async fn on_heartbeat(
     }
     let now = s.clock_now();
     s.sync_block_download(now, |h| follow.block_in_flight(h));
+    // Blocks in flight suspend the ping timeout. A due ping still sends.
+    let ping_elapsed = if follow.has_blocks_in_flight() {
+        None
+    } else {
+        s.ping_timeout(now)
+    };
     if let Some(hash) = s.block_download_timed_out(now, hub.params.btc.pow_target_spacing) {
         rbitcoin_log::info!("{}", block_download_timeout_log(hash, s.id));
         s.request_disconnect();
-    } else if let Some(elapsed_secs) = s.ping_timeout(now, follow) {
+    } else if let Some(elapsed_secs) = ping_elapsed {
         rbitcoin_log::info!("{}", ping_timeout_log(elapsed_secs));
         s.request_disconnect();
     } else if let Some(nonce) = s.take_ping_send(now) {
@@ -3568,7 +3574,6 @@ pub fn compact_serve_outcome(
     ver: u32,
     pref: Vec<usize>,
 ) -> Result<CompactServe, NetError> {
-    crate::reactor::assert_not_reactor("compact serve");
     let Some(block) = block_for_peer(cache, query, hash)? else {
         return Ok(CompactServe::Missing);
     };
@@ -3778,7 +3783,6 @@ pub fn getblocktxn_reply(
     txs_request: BlockTransactionsRequest,
     tip_h: u32,
 ) -> Result<Option<GetBlockTxnServe>, NetError> {
-    crate::reactor::assert_not_reactor("getblocktxn reconstruct");
     let hash = txs_request.block_hash;
     let block = match block_for_peer(cache, query, &hash) {
         Ok(b) => b,
@@ -6375,7 +6379,6 @@ pub fn tx_from_stored_block(
     hash: &BlockHash,
     wtxid: &bitcoin::Wtxid,
 ) -> Result<Option<Transaction>, NetError> {
-    crate::reactor::assert_not_reactor("tip wtxid serve");
     let Some(block) = block_for_peer(cache, query, hash)? else {
         return Ok(None);
     };

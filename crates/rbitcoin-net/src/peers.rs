@@ -1261,19 +1261,12 @@ impl LivePeer {
     }
 
     /// Core's ping timeout, which bitcoin/bitcoin#36080 moved out of
-    /// `MaybeSendPing`. A peer serves our block requests before our ping, so
-    /// blocks in flight from it suspend the timeout, and the last block it
-    /// delivered leaves it a minute to answer. Returns the seconds waited.
-    pub fn ping_timeout(
-        &self,
-        now_secs: u64,
-        follow: &crate::peer::PeerFollowState,
-    ) -> Option<f64> {
+    /// `MaybeSendPing`. The caller suspends this while the peer still has
+    /// blocks in flight. The last block it delivered leaves it a minute to
+    /// answer. Returns the seconds waited.
+    pub fn ping_timeout(&self, now_secs: u64) -> Option<f64> {
         const TIMEOUT_INTERVAL: u64 = 20 * 60;
         const POST_BLOCK_PONG_GRACE: u64 = 60;
-        if follow.has_blocks_in_flight() {
-            return None;
-        }
         let last_block = self.last_block.load(Ordering::Relaxed);
         if now_secs <= last_block.saturating_add(POST_BLOCK_PONG_GRACE) {
             return None;
