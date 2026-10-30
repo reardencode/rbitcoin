@@ -392,6 +392,7 @@ pub struct LivePeer {
     /// Heights of blocks we have requested from this peer and not yet received
     /// (`getpeerinfo.inflight`).
     pub inflight: Mutex<Vec<u32>>,
+    pub block_download: Mutex<BlockDownload>,
     /// Session writer. RPC/accept flushes tx INVs onto this (`p2p_blocksonly`).
     pub out_tx: Mutex<Option<mpsc::UnboundedSender<PeerOut>>>,
     /// Addresses this peer may still send us (Core `m_addr_token_bucket`).
@@ -1168,6 +1169,85 @@ impl LivePeer {
         self.age_inv_seen_gen.store(gen, Ordering::Relaxed);
     }
 
+    /// Core `BlockRequested`: the first block in flight from this peer
+    /// starts its download window. A re-ask of a block already in flight
+    /// keeps its place and does not restart the window.
+    pub fn note_blocks_requested(&self, hashes: &[BlockHash]) {
+        let now = self.clock_now();
+        let mut d = self
+            .block_download
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if d.since.is_none() {
+            d.since = Some(now);
+            if let Some(h) = self.peer_hub() {
+                h.peers_downloading_from.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        for h in hashes {
+            if !d.queue.contains(h) {
+                d.queue.push_back(*h);
+            }
+        }
+    }
+
+    /// Core `RemoveBlockRequest`: once the oldest block in flight is gone
+    /// the window restarts at `now`, and once none is left it ends.
+    pub fn sync_block_download(&self, now: u64, in_flight: impl Fn(&BlockHash) -> bool) {
+        let mut d = self
+            .block_download
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(since) = d.since else {
+            return;
+        };
+        let mut front_left = false;
+        while d.queue.front().is_some_and(|h| !in_flight(h)) {
+            d.queue.pop_front();
+            front_left = true;
+        }
+        if d.queue.is_empty() {
+            drop(d);
+            self.end_block_download();
+        } else if front_left {
+            d.since = Some(since.max(now));
+        }
+    }
+
+    pub fn end_block_download(&self) {
+        let mut d = self
+            .block_download
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        d.queue.clear();
+        if d.since.take().is_some() {
+            if let Some(h) = self.peer_hub() {
+                h.peers_downloading_from.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Core's block download timeout: the oldest block in flight, once the
+    /// window has been open longer than one block interval plus half of one
+    /// per other peer we are downloading from.
+    pub fn block_download_timed_out(&self, now: u64, block_interval: u64) -> Option<BlockHash> {
+        let d = self
+            .block_download
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let since = d.since?;
+        let downloading = self
+            .peer_hub()
+            .map_or(1, |h| h.peers_downloading_from.load(Ordering::Relaxed))
+            .max(1) as u64;
+        let timeout = block_interval.saturating_mul(downloading + 1) / 2;
+        if now > since.saturating_add(timeout) {
+            d.queue.front().copied()
+        } else {
+            None
+        }
+    }
+
     /// Core's ping timeout, which bitcoin/bitcoin#36080 moved out of
     /// `MaybeSendPing`. A peer serves our block requests before our ping, so
     /// blocks in flight from it suspend the timeout, and the last block it
@@ -1346,6 +1426,15 @@ impl LivePeer {
             best_known: self.best_known(),
         }
     }
+}
+
+/// Core `m_downloading_since` (`None` while nothing is in flight) and the
+/// request order of `vBlocksInFlight` for one peer.
+#[doc(hidden)]
+#[derive(Default)]
+pub struct BlockDownload {
+    since: Option<u64>,
+    queue: VecDeque<BlockHash>,
 }
 
 #[doc(hidden)]
@@ -1540,6 +1629,8 @@ pub struct PeerHub {
     pub addr_response_cache: Mutex<HashMap<(SocketAddr, bool), (u64, Vec<(u32, crate::NetAddr)>)>>,
     /// VERSION/VERACK handshake timeout seconds. Default 60.
     pub peer_timeout_secs: AtomicU64,
+    /// Core `m_peers_downloading_from`: sessions with a block in flight.
+    pub peers_downloading_from: AtomicUsize,
     /// Addresses we advertise (`getnetworkinfo.localaddresses`).
     pub external_ips: Mutex<Vec<IpAddr>>,
     pub wallet_onions: Mutex<Vec<(String, u16)>>,
@@ -1656,6 +1747,7 @@ impl PeerHub {
             addrman: Mutex::new(None),
             addr_response_cache: Mutex::new(HashMap::new()),
             peer_timeout_secs: AtomicU64::new(60),
+            peers_downloading_from: AtomicUsize::new(0),
             external_ips: Mutex::new(Vec::new()),
             wallet_onions: Mutex::new(Vec::new()),
             p2p_onion: Mutex::new(None),
@@ -2561,6 +2653,7 @@ impl PeerHub {
             wire_sent: Mutex::new(None),
             failed_cmpct: Mutex::new(HashSet::new()),
             inflight: Mutex::new(Vec::new()),
+            block_download: Mutex::new(BlockDownload::default()),
             out_tx: Mutex::new(None),
             addr_bucket: Mutex::new(crate::peer::AddrTokenBucket::new(
                 connected_at.saturating_mul(1000),
@@ -2607,6 +2700,7 @@ impl PeerHub {
             .remove(&id);
         if let Some(p) = removed {
             p.release_all_cmpct();
+            p.end_block_download();
             self.end_headers_sync(&p);
         }
         self.hb_selected

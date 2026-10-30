@@ -550,6 +550,10 @@ pub fn sending_addrv2_log(nbytes: usize, peer: u64) -> String {
     format!("p2p: sending addrv2 ({nbytes} bytes) peer={peer}")
 }
 
+pub fn block_download_timeout_log(hash: BlockHash, peer: u64) -> String {
+    format!("p2p: Timeout downloading block {hash}, disconnecting peer={peer}")
+}
+
 pub fn ping_timeout_log(elapsed_secs: f64) -> String {
     format!("p2p: ping timeout: {elapsed_secs:.6}s")
 }
@@ -1390,7 +1394,11 @@ pub async fn on_heartbeat(
         s.request_disconnect();
     }
     let now = s.clock_now();
-    if let Some(elapsed_secs) = s.ping_timeout(now, follow) {
+    s.sync_block_download(now, |h| follow.block_in_flight(h));
+    if let Some(hash) = s.block_download_timed_out(now, hub.params.btc.pow_target_spacing) {
+        rbitcoin_log::info!("{}", block_download_timeout_log(hash, s.id));
+        s.request_disconnect();
+    } else if let Some(elapsed_secs) = s.ping_timeout(now, follow) {
         rbitcoin_log::info!("{}", ping_timeout_log(elapsed_secs));
         s.request_disconnect();
     } else if let Some(nonce) = s.take_ping_send(now) {
@@ -2334,6 +2342,9 @@ pub fn queue_block_getdata(
         requested_blocks.insert(*h);
         hub.note_asked_block(*h);
     }
+    if let Some(s) = session {
+        s.note_blocks_requested(want);
+    }
     for chunk in inv.chunks(MAX_INV_SIZE.min(500)) {
         queue_accounted(session, out, NetworkMessage::GetData(chunk.to_vec()))?;
     }
@@ -2753,6 +2764,10 @@ impl PeerFollowState {
     /// block waiting on `blocktxn`.
     pub fn has_blocks_in_flight(&self) -> bool {
         !self.requested_blocks.is_empty() || !self.pending_cmpct.is_empty()
+    }
+
+    pub fn block_in_flight(&self, hash: &BlockHash) -> bool {
+        self.requested_blocks.contains(hash) || self.pending_cmpct.contains_key(hash)
     }
 
     #[doc(hidden)]
@@ -4735,6 +4750,7 @@ pub fn on_cmpct_need_txn(
             .map(|ht| ht.0.saturating_add(1))
             .unwrap_or_else(|| hub.tip_height().unwrap_or(0).saturating_add(1));
         s.note_block_inflight(h);
+        s.note_blocks_requested(&[hash]);
     }
     queue_out(
         out_tx,

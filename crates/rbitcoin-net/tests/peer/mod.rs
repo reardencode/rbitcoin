@@ -755,6 +755,87 @@ async fn heartbeat_once(
     .unwrap();
 }
 
+/// Our asks expire after `BLOCK_GETDATA_TIMEOUT` and are sent again on the
+/// same session. Core has no such re-ask, so it must not restart the
+/// block download window, or a peer that never serves is never dropped.
+#[tokio::test]
+async fn block_reask_keeps_the_download_window() {
+    use bitcoin::p2p::address::Address;
+    use bitcoin::p2p::message_network::VersionMessage;
+    use bitcoin::p2p::ServiceFlags;
+
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("reask-window");
+    hub.ensure_genesis().unwrap();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let start = 1_700_000_000;
+    peers.set_mock_now(start);
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18449);
+    let ver = VersionMessage {
+        version: 70016,
+        services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        timestamp: 0,
+        receiver: Address::new(&addr, ServiceFlags::NONE),
+        sender: Address::new(&addr, ServiceFlags::NONE),
+        nonce: 1,
+        user_agent: "/rbitcoin:test/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    let peer = peers.register(
+        addr,
+        addr,
+        &ver,
+        true,
+        rbitcoin_net::peers::PeerConnType::Inbound,
+    );
+    let (out_tx, _out_rx) = mpsc::unbounded_channel();
+    let mut follow = PeerFollowState::new();
+    let body = BlockHash::from_byte_array([0x44; 32]);
+    queue_block_getdata(
+        &hub,
+        &out_tx,
+        Some(peer.as_ref()),
+        &mut follow.requested_blocks,
+        &[body],
+        false,
+    )
+    .unwrap();
+    peers.set_mock_now(start + BLOCK_INTERVAL_SECS / 2);
+    let mut since = None;
+    let later = std::time::Instant::now();
+    assert!(!maybe_expire_block_requests(
+        &hub,
+        &mut follow.requested_blocks,
+        &mut since,
+        later,
+        Some(peer.as_ref())
+    ));
+    let expired = maybe_expire_block_requests(
+        &hub,
+        &mut follow.requested_blocks,
+        &mut since,
+        later + BLOCK_GETDATA_TIMEOUT,
+        Some(peer.as_ref()),
+    );
+    assert!(expired, "the unanswered ask expires");
+    queue_block_getdata(
+        &hub,
+        &out_tx,
+        Some(peer.as_ref()),
+        &mut follow.requested_blocks,
+        &[body],
+        false,
+    )
+    .unwrap();
+    peers.set_mock_now(start + BLOCK_INTERVAL_SECS + 1);
+    heartbeat_once(&hub, &out_tx, &mut follow, &peer).await;
+    assert!(
+        peer.stop.load(Ordering::SeqCst),
+        "a re-ask restarted the block download window"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Core keeps a compact block that waits on `blocktxn` in the peer's
 /// blocks in flight, so it holds the ping timeout like a `getdata` does.
 #[tokio::test]
@@ -3589,6 +3670,19 @@ async fn wait_unregistered(t: &PausedServe, sess: &rbitcoin_net::peers::LivePeer
     }
 }
 
+/// Client `client` answers the node's outstanding ping.
+async fn answer_ping(t: &mut PausedServe, client: usize) {
+    let (raw, sess) = &mut t.clients[client];
+    let nonce = sess.ping_nonce_sent.load(Ordering::Relaxed);
+    assert_ne!(nonce, 0, "no ping to answer");
+    write_peer_msg(raw, NetworkMessage::Pong(nonce)).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while sess.ping_nonce_sent.load(Ordering::Relaxed) == nonce {
+        assert!(std::time::Instant::now() < deadline, "pong not read");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// `server` announces `block` and serves it; returns once it connects.
 async fn serve_from(t: &mut PausedServe, server: usize, block: bitcoin::Block) {
     let hash = block.block_hash();
@@ -3608,6 +3702,7 @@ async fn block_download_timeout_hands_the_body_to_another_peer() {
         &[
             "/rbitcoin:test(holder-a)/",
             "/rbitcoin:test(holder-b)/",
+            "/rbitcoin:test(late-holder)/",
             "/rbitcoin:test(server)/",
         ],
     )
@@ -3651,8 +3746,21 @@ async fn block_download_timeout_hands_the_body_to_another_peer() {
         wait_unregistered(&t, &sess).await;
     }
 
-    serve_from(&mut t, 2, x).await;
-    serve_from(&mut t, 2, y).await;
+    // The dropped holders no longer count: one peer downloading is one interval.
+    answer_ping(&mut t, 3).await;
+    announce_and_wait_for(&mut t, 2, vec![x.header], x.block_hash()).await;
+    let asked = t.node.peers.now_secs();
+    t.node.peers.set_mock_now(asked + BLOCK_INTERVAL_SECS + 1);
+    let (raw, late) = &mut t.clients[2];
+    let late = Arc::clone(late);
+    assert!(
+        session_closes(raw).await,
+        "a lone holder outlived one interval"
+    );
+    wait_unregistered(&t, &late).await;
+
+    serve_from(&mut t, 3, x).await;
+    serve_from(&mut t, 3, y).await;
     t.node.shutdown().await;
     let _ = std::fs::remove_dir_all(&t.dir);
 }
