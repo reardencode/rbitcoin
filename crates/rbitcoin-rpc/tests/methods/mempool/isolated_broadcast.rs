@@ -174,3 +174,40 @@ fn submitpackage_is_local_before_its_announces() {
     isolated_submit_reaches_no_standing_peer(ctx, "submitpackage", params, &[parent, child]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A member the final trim drops was published before that trim. It must
+/// never reach the isolated loop: the RPC reports it `mempool full`.
+#[test]
+fn submitpackage_kicks_only_members_that_survive_the_trim() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let mp = Arc::clone(ctx.mempool.as_ref().unwrap());
+    mp.set_isolated_broadcast(true);
+    let (parent_hex, parent) = mature_coinbase_spend_hex(&ctx, 50_0000_0000 - 10_000);
+    let cheap_child = child_of(&parent, 1_000);
+    mp.set_max_weight(parent.weight().to_wu() + cheap_child.weight().to_wu() / 2);
+    let queued = mp.isolated_queued();
+    let reply = dispatch(
+        &ctx,
+        "submitpackage",
+        vec![json!([parent_hex, serialize_hex(&cheap_child)])],
+    )
+    .unwrap();
+    assert!(mp.contains(&parent.compute_txid()), "{reply}");
+    assert!(
+        !mp.contains(&cheap_child.compute_txid()),
+        "the lower-feerate child is trimmed: {reply}"
+    );
+    // The queue drops a trimmed member with its tx, so only the count shows
+    // that it was queued before the trim.
+    assert_eq!(
+        mp.isolated_queued() - queued,
+        1,
+        "the trimmed member is never queued for the isolated loop"
+    );
+    assert_eq!(
+        drain_isolated(&mp),
+        vec![parent.compute_txid()],
+        "only the surviving member goes to the isolated loop, once"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
