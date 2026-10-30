@@ -1271,34 +1271,18 @@ fn sh_writebehind_starts_only_after_tip_entry() {
     );
     #[cfg(target_os = "linux")]
     {
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let mut comms = linux_task_comms();
-        while Instant::now() < deadline
-            && comms.iter().filter(|name| *name == "rbtc-sh-wb").count() < 1
-        {
-            std::thread::sleep(Duration::from_millis(10));
-            comms = linux_task_comms();
-        }
-        let n = comms.iter().filter(|name| *name == "rbtc-sh-wb").count();
-        assert_eq!(n, 1, "one rbtc-sh-wb, saw {comms:?}");
+        let tid = slot
+            .as_ref()
+            .expect("durable tip")
+            .wait_published(Duration::from_secs(1))
+            .expect("rbtc-sh-wb published its tid");
+        let comm =
+            std::fs::read_to_string(format!("/proc/self/task/{tid}/comm")).unwrap_or_default();
+        assert_eq!(comm.trim_end_matches('\n'), "rbtc-sh-wb");
     }
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
     slot.take().expect("rbtc-sh-wb").join().expect("rbtc-sh-wb");
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[cfg(target_os = "linux")]
-fn linux_task_comms() -> Vec<String> {
-    let mut names = Vec::new();
-    let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
-        return names;
-    };
-    for task in tasks.flatten() {
-        if let Ok(raw) = std::fs::read_to_string(task.path().join("comm")) {
-            names.push(raw.trim_end_matches('\n').to_string());
-        }
-    }
-    names
 }
 
 #[tokio::test]

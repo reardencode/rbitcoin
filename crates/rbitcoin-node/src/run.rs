@@ -14,6 +14,7 @@ use rbitcoin_net::{
     TipEvent,
 };
 use rbitcoin_primitives::Network;
+use rbitcoin_query::connect::ShWritebehind;
 use rbitcoin_query::{spawn_sh_writebehind, Query, SpendSync};
 use rbitcoin_rpc::{
     gbt_template, run_rpc, HubRegtest, RpcActive, RpcConfig, RpcContext, RpcHandle, RpcRegtest,
@@ -2628,7 +2629,7 @@ pub fn sh_tip_ready_gates(query: &Query) -> TipModeGates {
 
 /// Start the Class B appender once. A second call does not spawn another thread.
 pub fn ensure_sh_writebehind(
-    slot: &mut Option<std::thread::JoinHandle<()>>,
+    slot: &mut Option<ShWritebehind>,
     query: Arc<Query>,
     stop: Arc<AtomicBool>,
     on_fatal: impl FnOnce() + Send + 'static,
@@ -2644,7 +2645,7 @@ pub fn sh_writebehind_at_tip_entry(
     query: Arc<Query>,
     stop: Arc<AtomicBool>,
     on_fatal: impl FnOnce() + Send + 'static,
-) -> Option<std::thread::JoinHandle<()>> {
+) -> Option<ShWritebehind> {
     if !query.enqueues_sh_writebehind() {
         return None;
     }
