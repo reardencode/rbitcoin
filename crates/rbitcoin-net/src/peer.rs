@@ -190,25 +190,30 @@ pub async fn accept_received_from_peer(
     // Compact selection reads that bit afterwards.
     let peers = session.and_then(|s| s.peer_hub());
     let hb = session.and_then(|s| s.peer_hub().map(|ph| (ph, s.id)));
-    if let Some(hub) = hub.shared_arc() {
-        return crate::tip_accept::run_on_tip_accept_async(move || {
+    let r = if let Some(hub) = hub.shared_arc() {
+        crate::tip_accept::run_on_tip_accept_async(move || {
             let r = hub.accept_received_on_lane(block, waive);
             start_relay_after_tip_connect(&hub, peers.as_deref());
             let chosen = if compact_blocks_ok(&hub) { hb } else { None };
             note_accepted_hb(&r, &chosen);
             r
         })
-        .await;
+        .await
+    } else {
+        // A stack hub (unit tests) has no `Arc`. Join before return so the
+        // borrow outlives the job.
+        crate::tip_accept::run_on_tip_accept(|| {
+            let r = hub.accept_received_on_lane(block, waive);
+            start_relay_after_tip_connect(hub, peers.as_deref());
+            let chosen = if compact_blocks_ok(hub) { hb } else { None };
+            note_accepted_hb(&r, &chosen);
+            r
+        })
+    };
+    if let (Some(s), Ok(AcceptOutcome::Accepted { .. })) = (session, &r) {
+        s.note_last_block();
     }
-    // A stack hub (unit tests) has no `Arc`. Join before return so the
-    // borrow outlives the job.
-    crate::tip_accept::run_on_tip_accept(|| {
-        let r = hub.accept_received_on_lane(block, waive);
-        start_relay_after_tip_connect(hub, peers.as_deref());
-        let chosen = if compact_blocks_ok(hub) { hb } else { None };
-        note_accepted_hb(&r, &chosen);
-        r
-    })
+    r
 }
 
 /// The hub and key a misbehavior exit may record. Noban and manual peers
@@ -4298,7 +4303,6 @@ pub async fn on_block(
     if let Some(s) = session {
         s.note_block_from_peer(hash);
         s.note_best_known(hash);
-        s.note_last_block();
     }
     let prev = block.header.prev_blockhash;
     if prev.to_byte_array() != [0u8; 32]
@@ -4563,7 +4567,6 @@ pub fn on_cmpctblock_reject_early(
     if let Some(s) = session {
         s.note_block_from_peer(hash);
         s.note_best_known(hash);
-        s.note_last_block();
     }
     Ok(false)
 }

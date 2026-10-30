@@ -14,3 +14,7 @@ Changed
   peer we are downloading from, is dropped and its requests go to other
   peers. Before, an announced body the peer never sent was asked again
   every 10 seconds from that peer alone.
+- **`getpeerinfo` `last_block` counts new blocks only.** As in Core, it
+  is set when a block from that peer is new to us, not when the peer
+  re-sends one we already have. The ping timeout's one-minute grace and
+  inbound eviction read the same time.
