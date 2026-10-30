@@ -248,6 +248,20 @@ pub fn assign_work_ordered(
     for s in &mut st.slots {
         s.resume_block_download_if_due(now_secs);
     }
+    // A pause only helps while another peer fetches. Once no slot takes
+    // block requests (the others left, or are paused too), waiting out the
+    // cooldown downloads nothing, so every paused peer resumes now: all of
+    // them, not one, so the choice does not depend on slot order.
+    if !st.slots.iter().any(|s| s.takes_block_requests()) {
+        for s in st.slots.iter_mut().filter(|s| s.alive) {
+            if s.block_download_paused_until.take().is_some() {
+                rbitcoin_log::info!(
+                    "ibd: Resuming block downloads from manual peer={}: no other peer takes block requests",
+                    s.id
+                );
+            }
+        }
+    }
     let alive: Vec<usize> = st
         .slots
         .iter()

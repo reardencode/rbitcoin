@@ -371,8 +371,10 @@ block downloads from stalling manual peer=… for 120 seconds` hands its block
 getdata to the other peers, and it is sent none for two minutes on the node
 clock. With no such peer (a sole `--connect` or `--trust-peer`, or every
 other peer paused), it keeps its getdata and is not paused; the check runs
-again after another 30s. Either way it stays connected and still serves
-headers.
+again after another 30s. When no peer is left taking block requests (the
+others disconnected or are paused), every paused peer resumes at once with
+INFO `ibd: Resuming block downloads from manual peer=…: no other peer takes
+block requests`. Either way it stays connected and still serves headers.
 WARN
 `ibd: peer[…] relative-slow` is a quarter-median outlier (cluster gate keeps a
 uniformly slow pack). Every IBD disconnect (stall, relative-slow, a second

@@ -10,7 +10,11 @@ Changed
   from stalling manual peer=<id> for 120 seconds` marks the pause. With no
   such peer (a sole `--connect` or `--trust-peer`, or every other peer is
   paused), it keeps its requests and is not paused, and the stall check
-  looks again after another 30 seconds. If a paused peer then sends the blocks it was released from, they are accepted (or
+  looks again after another 30 seconds. If every peer still taking block
+  requests leaves while a peer is paused, the pause ends at once (INFO
+  `ibd: Resuming block downloads from manual peer=<id>: no other peer
+  takes block requests`) instead of after two minutes. If a paused peer
+  then sends the blocks it was released from, they are accepted (or
   dropped as duplicates) and do not count as unsolicited. Any other
   stalling peer is still disconnected.
 - **An IBD peer's answer to a block it was asked for is not unsolicited.**
