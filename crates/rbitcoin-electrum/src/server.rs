@@ -1688,6 +1688,7 @@ where
 }
 
 /// One connection's writes. Each write takes a fresh `idle` timeout.
+#[doc(hidden)]
 pub struct ConnWrite<W> {
     inner: W,
     idle: Duration,
