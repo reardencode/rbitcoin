@@ -172,14 +172,11 @@ pub fn spawn_isolated_broadcast_loop(
             }
             // A real read: `try_read` cannot tell a held write from a tx that
             // left, and `take` already marked this txid taken. A failed try
-            // is the lagged lap; the read then waits.
+            // is the lagged lap; the read then waits on the same guard.
             let hub = Arc::clone(&mp);
             let tx = tokio::task::spawn_blocking(move || {
                 let _g = crate::reactor::BlockingRegion::enter();
-                if hub.isolated_read_blocked() {
-                    hub.note_isolated_lap(IsolatedLap::Lagged);
-                }
-                hub.get_tx(&txid)
+                hub.read_tx_for_isolated(&txid)
             })
             .await
             .expect("isolated broadcast get_tx join");
