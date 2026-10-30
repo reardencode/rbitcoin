@@ -1295,6 +1295,82 @@ async fn slow_redial_resolve_does_not_stall_runtime() {
     slow.await.unwrap();
 }
 
+/// Core's block download window (`BlockRequested`, `RemoveBlockRequest`,
+/// the `SendMessages` timeout): one block interval plus half of one per
+/// other downloading peer, restarted when the oldest block in flight
+/// leaves, ended when none is left. Our 10 s re-ask of a block already in
+/// flight keeps its place and does not restart the window.
+#[test]
+fn block_download_window_follows_the_oldest_block_in_flight() {
+    const INTERVAL: u64 = 600;
+    let hub = PeerHub::new();
+    let t = 1_700_000_000;
+    hub.set_mock_now(t);
+    let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18460);
+    let p = hub.register(a, a, &ver("/rbitcoin:0.1.0/"), true, PeerConnType::Inbound);
+    let [x, y, z] = [1u8, 2, 3].map(|b| BlockHash::from_byte_array([b; 32]));
+
+    p.note_blocks_requested(&[x, y]);
+    assert_eq!(hub.peers_downloading_from.load(Ordering::Relaxed), 1);
+    assert_eq!(p.block_download_timed_out(t + INTERVAL, INTERVAL), None);
+    assert_eq!(
+        p.block_download_timed_out(t + INTERVAL + 1, INTERVAL),
+        Some(x)
+    );
+
+    hub.set_mock_now(t + 300);
+    p.note_blocks_requested(&[x, z]);
+    p.sync_block_download(t + 300, |h| [x, y, z].contains(h));
+    assert_eq!(
+        p.block_download_timed_out(t + INTERVAL + 1, INTERVAL),
+        Some(x),
+        "a re-ask of a block in flight restarted the window"
+    );
+    p.sync_block_download(t + 400, |h| [x, z].contains(h));
+    assert_eq!(
+        p.block_download_timed_out(t + INTERVAL + 1, INTERVAL),
+        Some(x),
+        "a newer block leaving restarted the window"
+    );
+    p.sync_block_download(t + 500, |h| *h == z);
+    assert_eq!(
+        p.block_download_timed_out(t + 500 + INTERVAL, INTERVAL),
+        None
+    );
+    assert_eq!(
+        p.block_download_timed_out(t + 500 + INTERVAL + 1, INTERVAL),
+        Some(z),
+        "the oldest block leaving restarts the window at that time"
+    );
+
+    let b = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18461);
+    let q = hub.register(b, b, &ver("/rbitcoin:0.1.0/"), true, PeerConnType::Inbound);
+    q.note_blocks_requested(&[x]);
+    assert_eq!(hub.peers_downloading_from.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        p.block_download_timed_out(t + 500 + INTERVAL * 3 / 2, INTERVAL),
+        None,
+        "each other downloading peer adds half an interval"
+    );
+    assert_eq!(
+        p.block_download_timed_out(t + 500 + INTERVAL * 3 / 2 + 1, INTERVAL),
+        Some(z)
+    );
+
+    p.sync_block_download(t + 600, |_| false);
+    assert_eq!(hub.peers_downloading_from.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        p.block_download_timed_out(t + 100 * INTERVAL, INTERVAL),
+        None
+    );
+    hub.unregister(q.id);
+    assert_eq!(
+        hub.peers_downloading_from.load(Ordering::Relaxed),
+        0,
+        "a dropped session still counted as downloading"
+    );
+}
+
 /// Core runs the ping timeout only once `-peertimeout` has passed since
 /// connect. Core's functional framework sets `peertimeout=999999999` so a
 /// `setmocktime` jump cannot drop peers (`feature_bip68_sequence.py`).
@@ -1302,32 +1378,22 @@ async fn slow_redial_resolve_does_not_stall_runtime() {
 fn ping_timeout_waits_for_the_peer_timeout() {
     let hub = PeerHub::new();
     hub.set_mock_now(1_700_000_000);
+    let idle = rbitcoin_net::peer::PeerFollowState::new();
     let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
     let p = hub.register(a, a, &ver("/rbitcoin:0.1.0/"), true, PeerConnType::Inbound);
     let now = hub.now_secs();
-    let Some(PingAction::Send { .. }) = p.take_ping_action(now) else {
-        panic!("expected send");
-    };
+    assert!(p.take_ping_send(now).is_some(), "expected send");
     hub.set_peer_timeout_secs(999_999_999);
     assert!(
-        !matches!(
-            p.take_ping_action(now + 6_000),
-            Some(PingAction::Timeout { .. })
-        ),
+        p.ping_timeout(now + 6_000, &idle).is_none(),
         "inside the peer timeout the ping does not time out"
     );
     hub.set_peer_timeout_secs(60);
     assert!(
-        !matches!(
-            p.take_ping_action(now + 20 * 60),
-            Some(PingAction::Timeout { .. })
-        ),
+        p.ping_timeout(now + 20 * 60, &idle).is_none(),
         "the ping timeout starts the second after twenty minutes"
     );
-    assert!(matches!(
-        p.take_ping_action(now + 20 * 60 + 1),
-        Some(PingAction::Timeout { .. })
-    ));
+    assert!(p.ping_timeout(now + 20 * 60 + 1, &idle).is_some());
 
     let late = hub.register(
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18445),
@@ -1336,21 +1402,13 @@ fn ping_timeout_waits_for_the_peer_timeout() {
         true,
         PeerConnType::Inbound,
     );
-    let Some(PingAction::Send { .. }) = late.take_ping_action(now) else {
-        panic!("expected send");
-    };
+    assert!(late.take_ping_send(now).is_some(), "expected send");
     hub.set_peer_timeout_secs(2_000);
     assert!(
-        !matches!(
-            late.take_ping_action(now + 2_000),
-            Some(PingAction::Timeout { .. })
-        ),
+        late.ping_timeout(now + 2_000, &idle).is_none(),
         "inactivity checks start the second after the peer timeout"
     );
-    assert!(matches!(
-        late.take_ping_action(now + 2_001),
-        Some(PingAction::Timeout { .. })
-    ));
+    assert!(late.ping_timeout(now + 2_001, &idle).is_some());
 }
 
 #[test]

@@ -12,7 +12,7 @@ use crate::codec::{
 use crate::error::NetError;
 use crate::msg_decode::decode_framed_offload;
 use crate::peer_dos::{PeerRateLimiter, OVERSIZE_BAN_SCORE, RATE_LIMIT_BAN_SCORE};
-use crate::peers::{CappedSet, PeerOut, PingAction};
+use crate::peers::{CappedSet, PeerOut};
 use crate::v2::{
     open_v2, open_v2_with_wire, read_v2_contents, read_v2_frame, read_v2_frame_with_progress,
     write_v2_contents, write_v2_msg, write_v2_msg_offload, V2Reader, V2Writer,
@@ -190,25 +190,30 @@ pub async fn accept_received_from_peer(
     // Compact selection reads that bit afterwards.
     let peers = session.and_then(|s| s.peer_hub());
     let hb = session.and_then(|s| s.peer_hub().map(|ph| (ph, s.id)));
-    if let Some(hub) = hub.shared_arc() {
-        return crate::tip_accept::run_on_tip_accept_async(move || {
+    let r = if let Some(hub) = hub.shared_arc() {
+        crate::tip_accept::run_on_tip_accept_async(move || {
             let r = hub.accept_received_on_lane(block, waive);
             start_relay_after_tip_connect(&hub, peers.as_deref());
             let chosen = if compact_blocks_ok(&hub) { hb } else { None };
             note_accepted_hb(&r, &chosen);
             r
         })
-        .await;
+        .await
+    } else {
+        // A stack hub (unit tests) has no `Arc`. Join before return so the
+        // borrow outlives the job.
+        crate::tip_accept::run_on_tip_accept(|| {
+            let r = hub.accept_received_on_lane(block, waive);
+            start_relay_after_tip_connect(hub, peers.as_deref());
+            let chosen = if compact_blocks_ok(hub) { hb } else { None };
+            note_accepted_hb(&r, &chosen);
+            r
+        })
+    };
+    if let (Some(s), Ok(AcceptOutcome::Accepted { .. })) = (session, &r) {
+        s.note_last_block();
     }
-    // A stack hub (unit tests) has no `Arc`. Join before return so the
-    // borrow outlives the job.
-    crate::tip_accept::run_on_tip_accept(|| {
-        let r = hub.accept_received_on_lane(block, waive);
-        start_relay_after_tip_connect(hub, peers.as_deref());
-        let chosen = if compact_blocks_ok(hub) { hb } else { None };
-        note_accepted_hb(&r, &chosen);
-        r
-    })
+    r
 }
 
 /// The hub and key a misbehavior exit may record. Noban and manual peers
@@ -548,6 +553,10 @@ pub fn received_addrv2_log(nbytes: usize, peer: u64) -> String {
 
 pub fn sending_addrv2_log(nbytes: usize, peer: u64) -> String {
     format!("p2p: sending addrv2 ({nbytes} bytes) peer={peer}")
+}
+
+pub fn block_download_timeout_log(hash: BlockHash, peer: u64) -> String {
+    format!("p2p: Timeout downloading block {hash}, disconnecting peer={peer}")
 }
 
 pub fn ping_timeout_log(elapsed_secs: f64) -> String {
@@ -1389,15 +1398,16 @@ pub async fn on_heartbeat(
         rbitcoin_log::debug!("addrfetch connection timeout");
         s.request_disconnect();
     }
-    match s.take_ping_action(s.clock_now()) {
-        Some(PingAction::Send { nonce }) => {
-            let _ = queue_out(out_tx, NetworkMessage::Ping(nonce));
-        }
-        Some(PingAction::Timeout { elapsed_secs }) => {
-            rbitcoin_log::info!("{}", ping_timeout_log(elapsed_secs));
-            s.request_disconnect();
-        }
-        None => {}
+    let now = s.clock_now();
+    s.sync_block_download(now, |h| follow.block_in_flight(h));
+    if let Some(hash) = s.block_download_timed_out(now, hub.params.btc.pow_target_spacing) {
+        rbitcoin_log::info!("{}", block_download_timeout_log(hash, s.id));
+        s.request_disconnect();
+    } else if let Some(elapsed_secs) = s.ping_timeout(now, follow) {
+        rbitcoin_log::info!("{}", ping_timeout_log(elapsed_secs));
+        s.request_disconnect();
+    } else if let Some(nonce) = s.take_ping_send(now) {
+        let _ = queue_out(out_tx, NetworkMessage::Ping(nonce));
     }
     if let Some(ph) = s.peer_hub() {
         ph.on_session_heartbeat();
@@ -1729,10 +1739,7 @@ pub async fn peer_session_with(
     // Handshake-writer ping, same nonce as LivePeer: connect_nodes needs pong
     // bytes before the writer task; a second ping makes the first pong mismatch.
     let keepalive = if let Some(s) = meta.session.as_ref() {
-        match s.take_ping_action(s.clock_now()) {
-            Some(PingAction::Send { nonce }) => Some(nonce),
-            _ => None,
-        }
+        s.take_ping_send(s.clock_now())
     } else {
         Some(rand_nonce())
     };
@@ -2340,6 +2347,9 @@ pub fn queue_block_getdata(
         requested_blocks.insert(*h);
         hub.note_asked_block(*h);
     }
+    if let Some(s) = session {
+        s.note_blocks_requested(want);
+    }
     for chunk in inv.chunks(MAX_INV_SIZE.min(500)) {
         queue_accounted(session, out, NetworkMessage::GetData(chunk.to_vec()))?;
     }
@@ -2755,6 +2765,16 @@ impl Drop for SessionFollow {
 }
 
 impl PeerFollowState {
+    /// Core `vBlocksInFlight`: a body asked by `getdata`, or a compact
+    /// block waiting on `blocktxn`.
+    pub fn has_blocks_in_flight(&self) -> bool {
+        !self.requested_blocks.is_empty() || !self.pending_cmpct.is_empty()
+    }
+
+    pub fn block_in_flight(&self, hash: &BlockHash) -> bool {
+        self.requested_blocks.contains(hash) || self.pending_cmpct.contains_key(hash)
+    }
+
     #[doc(hidden)]
     pub fn new() -> Self {
         Self {
@@ -4283,7 +4303,6 @@ pub async fn on_block(
     if let Some(s) = session {
         s.note_block_from_peer(hash);
         s.note_best_known(hash);
-        s.note_last_block();
     }
     let prev = block.header.prev_blockhash;
     if prev.to_byte_array() != [0u8; 32]
@@ -4548,7 +4567,6 @@ pub fn on_cmpctblock_reject_early(
     if let Some(s) = session {
         s.note_block_from_peer(hash);
         s.note_best_known(hash);
-        s.note_last_block();
     }
     Ok(false)
 }
@@ -4735,6 +4753,7 @@ pub fn on_cmpct_need_txn(
             .map(|ht| ht.0.saturating_add(1))
             .unwrap_or_else(|| hub.tip_height().unwrap_or(0).saturating_add(1));
         s.note_block_inflight(h);
+        s.note_blocks_requested(&[hash]);
     }
     queue_out(
         out_tx,
