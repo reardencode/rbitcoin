@@ -16,10 +16,14 @@
 //! 1. Ensure capacity (fallocate).
 //! 2. Write full payload bytes (`pwrite` loop until complete or error).
 //! 3. Publish `published_len` (Release) only after payload is fully written.
-//! 4. Persist HWM (8-byte logical length in header/trailer) via complete pwrite.
+//! 4. Persist HWM (one 8-byte pwrite of that length).
 //!
 //! Readers never consume past `published_len`. A crash mid-payload leaves HWM
 //! at the previous value; re-drive rebuilds from body queue / re-append.
+//! A multi-file append can advance RAM without that pwrite when an earlier
+//! header pwrite failed. `flush` then keeps the previous header. A locator
+//! file remembers that previous end and retries it before a later append
+//! publishes.
 //!
 //! # Concurrency
 //!
@@ -39,6 +43,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 
 pub const FILE_HEADER_LEN: usize = 16;
+
+/// Bytes [`TableFile::create`] leaves past the header. A longer file is payload.
+pub(crate) const CREATE_FILE_SLACK: u64 = 64;
 
 /// Sibling `{filename}.tmp` next to `path` (keeps compound suffixes like `.idx`).
 pub fn tmp_sidecar_path(path: &Path) -> PathBuf {
@@ -135,6 +142,10 @@ pub struct TableFile {
     pub read_file: File,
     /// Logical length including header/trailer (published HWM).
     pub published_len: AtomicU64,
+    /// Non-zero: `flush` persists this length instead of `published_len`.
+    /// Set when RAM advances without a header write, so a later flush cannot
+    /// name bytes whose locator header did not land. Zero follows `published_len`.
+    header_cap: AtomicU64,
     /// File capacity. Always ≥ published; grown via fallocate without mapping.
     pub file_cap: AtomicU64,
     /// When true: [`TRAILING_FOOTER_LEN`]-byte magic+HWM+layout trailer is at
@@ -145,6 +156,9 @@ pub struct TableFile {
     pub kind: TableKind,
     /// Payload/HWM written since last successful `sync_data` (Class C barrier skip).
     pub needs_sync: AtomicBool,
+    /// Header still names a longer end than `published_len`. A grow must store
+    /// the short end before it extends the file, or open loads the old end.
+    hwm_behind: AtomicBool,
     /// One flusher at a time, so a second never returns before the first's sync.
     pub flush_lock: Mutex<()>,
     /// [`GrowPolicy`] as u8. Idx uses 1 MiB; SH body uses 64 KiB; Class A slabs.
@@ -272,7 +286,7 @@ impl TableFile {
             .map_err(|e| StoreError::io(&path, e))?;
 
         let header = encode_leading_header(kind, FILE_HEADER_LEN as u64);
-        let initial = FILE_HEADER_LEN as u64 + 64;
+        let initial = FILE_HEADER_LEN as u64 + CREATE_FILE_SLACK;
         // Capacity first, then header via overlapped-safe pwrite (not std Write).
         set_file_len(&file, &path, initial)?;
         handle_pwrite_all(&file, &path, 0, &header)?;
@@ -283,11 +297,13 @@ impl TableFile {
             file: Mutex::new(file),
             read_file,
             published_len: AtomicU64::new(FILE_HEADER_LEN as u64),
+            header_cap: AtomicU64::new(0),
             file_cap: AtomicU64::new(initial),
             trailing_header: false,
             trailing_ext: [0u8; 16],
             kind,
             needs_sync: AtomicBool::new(false),
+            hwm_behind: AtomicBool::new(false),
             flush_lock: Mutex::new(()),
             grow_policy: AtomicU8::new(GrowPolicy::Slab as u8),
         })
@@ -312,11 +328,13 @@ impl TableFile {
             file: Mutex::new(file),
             read_file,
             published_len: AtomicU64::new(initial),
+            header_cap: AtomicU64::new(0),
             file_cap: AtomicU64::new(initial),
             trailing_header: true,
             trailing_ext: [0u8; 16],
             kind,
             needs_sync: AtomicBool::new(false),
+            hwm_behind: AtomicBool::new(false),
             flush_lock: Mutex::new(()),
             grow_policy: AtomicU8::new(GrowPolicy::Slab as u8),
         };
@@ -364,11 +382,13 @@ impl TableFile {
                 file: Mutex::new(file),
                 read_file,
                 published_len: AtomicU64::new(logical),
+                header_cap: AtomicU64::new(0),
                 file_cap: AtomicU64::new(file_len.max(logical)),
                 trailing_header: true,
                 trailing_ext,
                 kind,
                 needs_sync: AtomicBool::new(false),
+                hwm_behind: AtomicBool::new(false),
                 flush_lock: Mutex::new(()),
                 grow_policy: AtomicU8::new(GrowPolicy::Slab as u8),
             },
@@ -481,7 +501,8 @@ impl TableFile {
         if logical < FILE_HEADER_LEN as u64 {
             logical = FILE_HEADER_LEN as u64;
         }
-        if logical > file_len {
+        let hwm_behind = logical > file_len;
+        if hwm_behind {
             logical = file_len;
         }
 
@@ -491,11 +512,13 @@ impl TableFile {
             file: Mutex::new(file),
             read_file,
             published_len: AtomicU64::new(logical),
+            header_cap: AtomicU64::new(0),
             file_cap: AtomicU64::new(file_len.max(logical)),
             trailing_header: false,
             trailing_ext: [0u8; 16],
             kind,
-            needs_sync: AtomicBool::new(false),
+            needs_sync: AtomicBool::new(hwm_behind),
+            hwm_behind: AtomicBool::new(hwm_behind),
             flush_lock: Mutex::new(()),
             grow_policy: AtomicU8::new(GrowPolicy::Slab as u8),
         })
@@ -503,6 +526,11 @@ impl TableFile {
 
     pub fn logical_len(&self) -> u64 {
         self.published_len.load(Ordering::Acquire)
+    }
+
+    /// Length a flush will store. A withheld header stays at the last landed end.
+    pub(crate) fn header_persist_len(&self) -> u64 {
+        self.header_len_to_persist()
     }
 
     pub fn path(&self) -> &std::path::Path {
@@ -533,14 +561,80 @@ impl TableFile {
         }
         self.ensure_capacity(logical)?;
         if self.trailing_header {
+            let _hold = self.flush_lock.lock().unwrap_or_else(|e| e.into_inner());
             // Trailer rewrite includes HWM; publish after full trailer write.
             self.write_trailer(logical)?;
             self.published_len.store(logical, Ordering::Release);
+            self.header_cap.store(0, Ordering::Release);
         } else {
-            self.published_len.store(logical, Ordering::Release);
-            self.persist_hwm(logical)?;
+            self.publish_prefixed_len(logical)?;
         }
         self.needs_sync.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Store `logical` as the prefixed-header length.
+    ///
+    /// A non-zero `header_cap` is a body end whose locator header did not
+    /// land. A slot patch must not persist or extend past that cap. The
+    /// flush lock covers the length and the cap so flush cannot observe a
+    /// cleared cap with the withheld end.
+    fn publish_prefixed_len(&self, logical: u64) -> Result<(), StoreError> {
+        let _hold = self.flush_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = self.published_len.load(Ordering::Relaxed);
+        let cap = self.header_cap.load(Ordering::Relaxed);
+        if cap != 0 && logical > cap {
+            if logical < prev {
+                self.published_len.store(logical, Ordering::Release);
+            }
+            return Ok(());
+        }
+        // Readers use this length as the next append start. A grow that
+        // does not persist must not stay published. A shrink that fails
+        // must stay the shorter length: putting the longer value back
+        // makes the next flush record bytes the locators do not own.
+        self.published_len.store(logical, Ordering::Release);
+        let attempts = if logical < prev { 4 } else { 1 };
+        let mut persist_err = None;
+        for _ in 0..attempts {
+            match self.persist_hwm(logical) {
+                Ok(()) => {
+                    persist_err = None;
+                    break;
+                }
+                Err(e) => persist_err = Some(e),
+            }
+        }
+        if let Some(e) = persist_err {
+            if logical > prev {
+                self.published_len.store(prev, Ordering::Release);
+                return Err(e);
+            }
+            if logical == prev {
+                return Err(e);
+            }
+            // Readers already append from `logical`. The header still
+            // names `prev`. End the file here so open cannot load `prev`.
+            self.keep_short_end(logical)?;
+        }
+        if cap != 0 {
+            self.header_cap.store(0, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    /// `logical` is the published shorter end. The 8-byte header write did
+    /// not land. Cutting the file makes open's length clamp keep this end
+    /// until a grow stores that end.
+    fn keep_short_end(&self, logical: u64) -> Result<(), StoreError> {
+        let file = self.file.lock().unwrap_or_else(|e| e.into_inner());
+        set_file_len(&file, &self.path, logical)?;
+        drop(file);
+        self.file_cap.store(logical, Ordering::Release);
+        match self.persist_hwm(logical) {
+            Ok(()) => self.hwm_behind.store(false, Ordering::Release),
+            Err(_) => self.hwm_behind.store(true, Ordering::Release),
+        }
         Ok(())
     }
 
@@ -601,6 +695,19 @@ impl TableFile {
         self.write_at_pwrite(offset, bytes)
     }
 
+    /// Payload past the published end. `published_len` stays put until the
+    /// caller commits, so a later failed write does not move readers.
+    pub fn write_uncommitted(&self, offset: u64, bytes: &[u8]) -> Result<(), StoreError> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let end = offset.saturating_add(bytes.len() as u64);
+        self.ensure_capacity(end)?;
+        self.pwrite_all(offset, bytes)?;
+        self.needs_sync.store(true, Ordering::Release);
+        Ok(())
+    }
+
     /// Write `bytes` at `offset` via complete **`pwrite`**, then publish HWM.
     ///
     /// Complete-or-fail: either all bytes are written and HWM advances to cover
@@ -613,14 +720,138 @@ impl TableFile {
         let end = offset.saturating_add(bytes.len() as u64);
         self.ensure_capacity(end)?;
         self.pwrite_all(offset, bytes)?;
-        self.publish_logical_end(end);
+        let _ = self.publish_end(end, true);
         self.needs_sync.store(true, Ordering::Release);
         Ok(())
     }
 
-    /// Extend published HWM to at least `end` (Release) and persist on-disk HWM.
-    #[doc(hidden)]
-    pub fn publish_logical_end(&self, end: u64) {
+    /// Advance `published_len` to `end`.
+    ///
+    /// `durable` persists the header with one 8-byte pwrite, the same cost as
+    /// [`Self::write_at`]. Otherwise only RAM moves, and `flush` keeps the
+    /// previous header. A failed header pwrite does not roll RAM back.
+    /// Returns whether the on-disk header names `end` or already covered it.
+    #[must_use]
+    pub fn publish_end(&self, end: u64, durable: bool) -> bool {
+        if !durable {
+            self.publish_ram_only(end);
+            return false;
+        }
+        if !self.advance_published(end) {
+            return true;
+        }
+        if self.header_cap.load(Ordering::Relaxed) != 0 {
+            self.header_cap.store(0, Ordering::Release);
+        }
+        self.persist_hwm(end).is_ok()
+    }
+
+    /// Locator publish. Same one header pwrite as [`Self::publish_end`] when
+    /// the write lands. A miss keeps the previous durable end so a later
+    /// [`Self::catch_up_header`] can store it. The success path does not take
+    /// the flush lock.
+    #[must_use]
+    pub fn publish_locator_end(&self, end: u64, durable: bool) -> bool {
+        if !durable {
+            self.publish_ram_only(end);
+            return false;
+        }
+        let prior = self.published_len.load(Ordering::Relaxed);
+        if !self.advance_published(end) {
+            let cap = self.header_cap.load(Ordering::Relaxed);
+            return cap == 0 || cap >= end;
+        }
+        if self.persist_hwm(end).is_ok() {
+            self.clear_header_cap();
+            return true;
+        }
+        self.withhold_locator_header(prior)
+    }
+
+    /// Persist a locator header that an earlier pwrite missed.
+    ///
+    /// No IO when the header already matches RAM. A miss leaves the cap in
+    /// place and returns false.
+    #[must_use]
+    pub fn catch_up_header(&self) -> bool {
+        let end = self.published_len.load(Ordering::Acquire);
+        let cap = self.header_cap.load(Ordering::Acquire);
+        if cap == 0 || cap >= end {
+            return true;
+        }
+        let _hold = self.flush_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let end = self.published_len.load(Ordering::Acquire);
+        let cap = self.header_cap.load(Ordering::Relaxed);
+        if cap == 0 || cap >= end {
+            return true;
+        }
+        if self.persist_hwm(end).is_err() {
+            return false;
+        }
+        self.header_cap.store(0, Ordering::Release);
+        true
+    }
+
+    /// Loc, overflow, and checkpoint headers for one locator family.
+    #[must_use]
+    pub(crate) fn catch_up_locator_headers(loc: &Self, ovf: &Self, off: &Self) -> bool {
+        loc.catch_up_header() && ovf.catch_up_header() && off.catch_up_header()
+    }
+
+    /// Catch up a withheld header, then publish each end this batch grew.
+    ///
+    /// `None` skips a file this batch did not append. A failed pwrite stops
+    /// the rest and returns false. RAM for a grown file still advances.
+    #[must_use]
+    pub(crate) fn commit_locator_file_ends(
+        loc: &Self,
+        ovf: &Self,
+        off: &Self,
+        mut durable: bool,
+        loc_end: u64,
+        ovf_end: Option<u64>,
+        off_end: Option<u64>,
+    ) -> bool {
+        if durable && !Self::catch_up_locator_headers(loc, ovf, off) {
+            durable = false;
+        }
+        durable = loc.publish_locator_end(loc_end, durable);
+        if let Some(end) = ovf_end {
+            durable = ovf.publish_locator_end(end, durable);
+        }
+        if let Some(end) = off_end {
+            durable = off.publish_locator_end(end, durable);
+        }
+        durable
+    }
+
+    fn clear_header_cap(&self) {
+        if self.header_cap.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        let _hold = self.flush_lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.header_cap.store(0, Ordering::Release);
+    }
+
+    /// `prior` is the RAM end from before this publish. The header stays there
+    /// until a later [`Self::catch_up_header`]. No read: the failed pwrite is
+    /// the proof the new end is not durable.
+    fn withhold_locator_header(&self, prior: u64) -> bool {
+        debug_assert!(!self.trailing_header);
+        let _hold = self.flush_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let published = self.published_len.load(Ordering::Acquire);
+        if prior >= published {
+            self.header_cap.store(0, Ordering::Release);
+            return true;
+        }
+        let cap = self.header_cap.load(Ordering::Relaxed);
+        if cap == 0 || prior < cap {
+            self.header_cap.store(prior, Ordering::Release);
+        }
+        false
+    }
+
+    fn advance_published(&self, end: u64) -> bool {
         let mut cur = self.published_len.load(Ordering::Relaxed);
         while end > cur {
             match self.published_len.compare_exchange_weak(
@@ -629,13 +860,31 @@ impl TableFile {
                 Ordering::Release,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => {
-                    // Best-effort HWM persist on steady path; `flush` hardens it.
-                    let _ = self.persist_hwm(end);
-                    break;
-                }
+                Ok(_) => return true,
                 Err(c) => cur = c,
             }
+        }
+        false
+    }
+
+    /// RAM length only. Holds the flush lock across the cap store and the
+    /// RAM publish so `flush` cannot observe the new end with no cap.
+    fn publish_ram_only(&self, end: u64) {
+        let _hold = self.flush_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = self.published_len.load(Ordering::Acquire);
+        if end > prior && self.header_cap.load(Ordering::Relaxed) == 0 {
+            self.header_cap.store(prior, Ordering::Release);
+        }
+        let _ = self.advance_published(end);
+    }
+
+    fn header_len_to_persist(&self) -> u64 {
+        let published = self.published_len.load(Ordering::Acquire);
+        let cap = self.header_cap.load(Ordering::Acquire);
+        if cap == 0 {
+            published
+        } else {
+            cap.min(published)
         }
     }
 
@@ -724,6 +973,16 @@ impl TableFile {
     /// Fallocate/`set_len` to `new_cap` and publish `file_cap`.
     #[doc(hidden)]
     pub fn grow_to(&self, new_cap: u64) -> Result<(), StoreError> {
+        if new_cap <= self.file_cap.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        // A cut file can still carry the pre-shrink header. Extending it
+        // makes that longer value loadable again.
+        if self.hwm_behind.load(Ordering::Acquire) {
+            let published = self.published_len.load(Ordering::Acquire);
+            self.persist_hwm(published)?;
+            self.hwm_behind.store(false, Ordering::Release);
+        }
         let file = self.file.lock().unwrap();
         if new_cap <= self.file_cap.load(Ordering::Acquire) {
             return Ok(());
@@ -825,7 +1084,7 @@ impl TableFile {
 
     #[doc(hidden)]
     pub fn persist_and_sync(&self) -> Result<(), StoreError> {
-        let logical = self.published_len.load(Ordering::Acquire);
+        let logical = self.header_len_to_persist();
         self.persist_logical_len(logical)?;
         self.file
             .lock()
@@ -836,8 +1095,8 @@ impl TableFile {
 
     /// Persist HWM / trailer without waiting on `sync_data`.
     pub fn flush_async(&self) -> Result<(), StoreError> {
-        let logical = self.published_len.load(Ordering::Acquire);
-        self.persist_logical_len(logical)?;
+        let _one = self.flush_lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.persist_logical_len(self.header_len_to_persist())?;
         Ok(())
     }
 

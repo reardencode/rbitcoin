@@ -482,6 +482,7 @@ impl Store {
             cold_path,
             head_scale: layout.head_scale,
         };
+        store.drop_confirmed_past_creates()?;
         store.rebuild_mtp_ring()?;
         Ok(store)
     }
@@ -1921,6 +1922,9 @@ impl Store {
             },
             _ => height,
         };
+        let Some(height) = self.spend_height_within_class_a(height)? else {
+            return Ok(());
+        };
         self.store_spend_marker(height, height, gen)
     }
 
@@ -1977,12 +1981,19 @@ impl Store {
         crate::spend_durable::SpendDurable::new(annotated, durable).store(self.path())
     }
 
-    pub fn flush_class_c_tip(&self) -> Result<(), StoreError> {
+    /// The tip this call sealed. A withheld locator header skips the barrier
+    /// and returns `Ok(None)`, so a caller cannot treat the RAM tip as sealed.
+    pub fn flush_class_c_tip(&self) -> Result<Option<Height>, StoreError> {
+        // A withheld locator header is not a commit. Skip the whole barrier
+        // so header_txs is not left naming creates open will truncate.
+        if !self.tip_fits_durable_creates()? {
+            return Ok(None);
+        }
         self.flush_class_c_pre_tip()?;
         // Commit point on disk: tip advance only after strong/header_txs.
         self.confirmed.flush()?;
         self.publish_tip_seal()?;
-        Ok(())
+        Ok(self.confirmed.tip_height())
     }
 
     /// Flush only `confirmed[]` (tip length / tip header map).

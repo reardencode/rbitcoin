@@ -4035,6 +4035,170 @@ fn store_fault_on_block_releases_the_body_ask() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Coinbase outputs with distinct values and scripts. Sum is the subsidy.
+fn mine_split(prev: BlockHash, time: u32, height: u32, scripts: &[u8]) -> Block {
+    let subsidy = rbitcoin_consensus::block_subsidy(height, &ChainParams::regtest()) as u64;
+    let mut outputs = Vec::with_capacity(scripts.len());
+    let mut used = 0u64;
+    for (i, script) in scripts.iter().enumerate() {
+        let value = if i + 1 == scripts.len() {
+            subsidy - used
+        } else {
+            10_000 * (i as u64 + 1)
+        };
+        used += value;
+        outputs.push(TxOut {
+            value: Amount::from_sat(value),
+            script_pubkey: ScriptBuf::from_bytes(vec![*script]),
+        });
+    }
+    let mut tx =
+        rbitcoin_consensus::regtest_coinbase(height, Amount::from_sat(0), ScriptBuf::new());
+    tx.output = outputs;
+    let header = Header {
+        version: Version::from_consensus(4),
+        prev_blockhash: prev,
+        merkle_root: bitcoin::TxMerkleNode::from_byte_array([0u8; 32]),
+        time,
+        bits: CompactTarget::from_consensus(rbitcoin_consensus::REGTEST_POW_BITS),
+        nonce: 0,
+    };
+    let mut block = Block {
+        header,
+        txdata: vec![tx],
+    };
+    block.header.merkle_root = block.compute_merkle_root().unwrap();
+    rbitcoin_consensus::grind_regtest_pow(&mut block.header);
+    block
+}
+
+fn connected_outputs(hub: &ChainHub, txid: &bitcoin::Txid) -> Vec<(u64, Vec<u8>)> {
+    let Some(fk) = hub.query.tx_fk_by_txid_tip(txid.as_byte_array()).unwrap() else {
+        return Vec::new();
+    };
+    let meta = hub.query.get_tx(fk).unwrap();
+    (0..meta.output_count)
+        .map(|vout| {
+            let out = hub.query.tx_output_at_fk(fk, vout).unwrap();
+            (out.value, out.script)
+        })
+        .collect()
+}
+
+fn expect_outputs(block: &Block, got: &[(u64, Vec<u8>)]) {
+    let want: Vec<(u64, Vec<u8>)> = block.txdata[0]
+        .output
+        .iter()
+        .map(|o| (o.value.to_sat(), o.script_pubkey.to_bytes()))
+        .collect();
+    assert_eq!(got, want, "gettxout value/script");
+}
+
+/// A short body write during tip connect is a store fault. It must not mark
+/// the block or the next valid block invalid, and a later connect must not
+/// make `gettxout` return another output. A real consensus failure still
+/// persists.
+#[test]
+fn short_pwrite_on_tip_connect_does_not_swap_gettxout() {
+    let (dir, mut hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let t0 = hub.tip_header().unwrap().time;
+    let base = mine(gen, t0 + 1, 1);
+    let base_txid = base.txdata[0].compute_txid();
+    hub.accept_received_block(base.clone()).unwrap();
+    let base_outs = connected_outputs(&hub, &base_txid);
+
+    let failed = mine_split(base.block_hash(), t0 + 2, 2, &[0x51, 0x52, 0x53, 0x54]);
+    let failed_hash = failed.block_hash();
+    let failed_txid = failed.txdata[0].compute_txid();
+    let err = {
+        // Tip connect runs on another thread. Disarm on drop so a panic
+        // cannot leave later tests in this process short-writing.
+        struct Disarm<'a>(&'a ChainHub);
+        impl Drop for Disarm<'_> {
+            fn drop(&mut self) {
+                self.0.query.store().txs.disarm_short_body_pwrite();
+            }
+        }
+        hub.query.store().txs.arm_short_body_pwrite("spent");
+        let _disarm = Disarm(&hub);
+        hub.accept_received_block(failed.clone())
+    };
+    let err = err.expect_err("short spent.body write");
+    assert!(matches!(err, NetError::Store(_)), "tip extend: {err:?}");
+    assert!(
+        !hub.is_block_invalid(&failed_hash),
+        "store fault is not a verdict"
+    );
+    assert_eq!(hub.tip_hash(), Some(base.block_hash()));
+    assert_eq!(connected_outputs(&hub, &base_txid), base_outs);
+    assert!(
+        connected_outputs(&hub, &failed_txid).is_empty(),
+        "the failed block is not served as another output"
+    );
+    let marks = dir.path().join("block.invalid");
+    let file_has = |hash: &BlockHash| {
+        std::fs::read(&marks)
+            .unwrap_or_default()
+            .windows(32)
+            .any(|w| w == hash.as_byte_array())
+    };
+    assert!(
+        !file_has(&failed_hash),
+        "block.invalid gained the store fault"
+    );
+
+    drop(hub);
+    let q = rbitcoin_query::Query::open_or_create_tiny(dir.path()).unwrap();
+    hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    assert!(!hub.is_block_invalid(&failed_hash));
+    assert!(!file_has(&failed_hash));
+    assert_eq!(connected_outputs(&hub, &base_txid), base_outs);
+
+    hub.accept_received_block(failed.clone()).unwrap();
+    expect_outputs(&failed, &connected_outputs(&hub, &failed_txid));
+    let next = mine_split(failed_hash, t0 + 3, 3, &[0x61, 0x62, 0x63, 0x64]);
+    let next_hash = next.block_hash();
+    let next_txid = next.txdata[0].compute_txid();
+    hub.accept_received_block(next.clone()).unwrap();
+    expect_outputs(&next, &connected_outputs(&hub, &next_txid));
+    expect_outputs(&failed, &connected_outputs(&hub, &failed_txid));
+    assert!(!hub.is_block_invalid(&failed_hash));
+    assert!(!hub.is_block_invalid(&next_hash));
+    assert!(!file_has(&failed_hash));
+    assert!(!file_has(&next_hash));
+
+    drop(hub);
+    let q = rbitcoin_query::Query::open_or_create_tiny(dir.path()).unwrap();
+    hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    expect_outputs(&failed, &connected_outputs(&hub, &failed_txid));
+    expect_outputs(&next, &connected_outputs(&hub, &next_txid));
+    assert!(!file_has(&failed_hash));
+    assert!(!file_has(&next_hash));
+
+    let mut bad = mine(next_hash, t0 + 4, 4);
+    let cb = &mut bad.txdata[0].output[0].value;
+    *cb = Amount::from_sat(cb.to_sat() + 1);
+    bad.header.merkle_root = bad.compute_merkle_root().unwrap();
+    rbitcoin_consensus::grind_regtest_pow(&mut bad.header);
+    let bad_hash = bad.block_hash();
+    let err = hub.accept_received_block(bad).expect_err("excess coinbase");
+    assert!(
+        matches!(err, NetError::Rules(_) | NetError::Consensus(_)),
+        "consensus reject: {err:?}"
+    );
+    assert!(hub.is_block_invalid(&bad_hash));
+    assert!(
+        file_has(&bad_hash),
+        "a consensus connect failure is persisted"
+    );
+    assert!(!file_has(&failed_hash));
+    assert!(!file_has(&next_hash));
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A reconstructed compact block takes the same tip-connect read fault.
 /// The hub ask must come back so a later getdata can claim the hash.
 #[test]

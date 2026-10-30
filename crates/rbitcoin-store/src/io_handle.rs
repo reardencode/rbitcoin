@@ -83,6 +83,27 @@ impl IoHandle {
         if buf.is_empty() {
             return 0;
         }
+        // A tip-connect test arms one body fd. The prefix is a real pwrite;
+        // the error is what a full filesystem returns after that prefix.
+        // Eight-byte HWM updates stay real unless `arm_fail_hwm_pwrites` is set.
+        // An armed one fails before any byte is stored, so a header retry
+        // cannot observe a short length.
+        #[cfg(debug_assertions)]
+        if buf.len() == 8 && take_fail_hwm(self) {
+            return -disk_full_errno();
+        }
+        #[cfg(debug_assertions)]
+        if buf.len() > 8 && short_pwrite_armed(self) {
+            let n = self.pwrite_sys(offset, &buf[..8]);
+            if n < 0 {
+                return n;
+            }
+            return -disk_full_errno();
+        }
+        self.pwrite_sys(offset, buf)
+    }
+
+    fn pwrite_sys(self, offset: u64, buf: &[u8]) -> i32 {
         #[cfg(unix)]
         {
             // SAFETY: `buf` is the caller's slice. `self.fd` is open.
@@ -105,6 +126,107 @@ impl IoHandle {
             win_pwrite(self.handle, offset, buf)
         }
     }
+}
+
+/// Process-wide: tip connect runs on the tip-accept thread, not the test thread.
+#[cfg(debug_assertions)]
+static SHORT_PWRITE: std::sync::Mutex<Vec<IoHandle>> = std::sync::Mutex::new(Vec::new());
+
+/// Next N eight-byte pwrites on these fds fail before any byte is stored.
+#[cfg(debug_assertions)]
+static FAIL_HWM: std::sync::Mutex<Vec<(IoHandle, u32)>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(debug_assertions)]
+fn disk_full_errno() -> i32 {
+    #[cfg(unix)]
+    {
+        libc::ENOSPC
+    }
+    #[cfg(windows)]
+    {
+        112
+    }
+}
+
+/// Arm `handle` so later pwrites longer than the HWM unit write 8 bytes and
+/// return disk-full. Stays armed until [`disarm_short_pwrite`].
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn arm_short_pwrite(handle: IoHandle) {
+    let mut slots = SHORT_PWRITE.lock().unwrap_or_else(|e| e.into_inner());
+    if !slots.contains(&handle) {
+        slots.push(handle);
+    }
+}
+
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn disarm_short_pwrite() {
+    SHORT_PWRITE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    FAIL_HWM.lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
+/// Drop one fd's arms. A process-wide clear races another test in this binary.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn disarm_pwrite(handle: IoHandle) {
+    SHORT_PWRITE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|h| *h != handle);
+    FAIL_HWM
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(h, _)| *h != handle);
+}
+
+/// Fail the next `n` eight-byte pwrites on `handle` without storing a byte.
+///
+/// A shrink retries the high-water persist. The first failure must not count
+/// as a stored length.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn arm_fail_hwm_pwrites(handle: IoHandle, n: u32) {
+    let mut slots = FAIL_HWM.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(slot) = slots.iter_mut().find(|(h, _)| *h == handle) {
+        slot.1 = n;
+    } else {
+        slots.push((handle, n));
+    }
+}
+
+#[cfg(debug_assertions)]
+fn take_fail_hwm(handle: IoHandle) -> bool {
+    let mut slots = FAIL_HWM.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(i) = slots.iter().position(|(h, _)| *h == handle) else {
+        return false;
+    };
+    if slots[i].1 == 0 {
+        slots.swap_remove(i);
+        return false;
+    }
+    slots[i].1 -= 1;
+    if slots[i].1 == 0 {
+        slots.swap_remove(i);
+    }
+    true
+}
+
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn would_short_pwrite(handle: IoHandle, len: usize) -> bool {
+    len > 8 && short_pwrite_armed(handle)
+}
+
+#[cfg(debug_assertions)]
+fn short_pwrite_armed(handle: IoHandle) -> bool {
+    SHORT_PWRITE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&handle)
 }
 
 #[cfg(unix)]

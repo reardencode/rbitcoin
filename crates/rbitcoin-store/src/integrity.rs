@@ -6,7 +6,10 @@
 //!
 //! Soft sidecar [`TIP_SEAL_NAME`]: written after a successful connect/disconnect
 //! Class C barrier so a kill that advanced `confirmed` without a complete seal
-//! can be clamped before revalidation.
+//! can be clamped before revalidation. The barrier does not seal a tip whose
+//! tx range ends past the durable create count. Open still drops a tip that
+//! a later Class A truncate left past that count, including when the header
+//! clear landed and the tip shrink did not.
 
 use crate::error::StoreError;
 use crate::header_table::block_header_hash;
@@ -600,6 +603,185 @@ impl Store {
         report.tip_shrunk = true;
         report.tip_after = self.confirmed.tip_height().map(|h| h.0);
         Ok(())
+    }
+
+    /// The connect barrier may seal this tip. A withheld Class A header whose
+    /// tip range ends past the locator count skips the flush. No header behind
+    /// means the RAM count is the commit, including a Class C fixture.
+    pub(crate) fn tip_fits_durable_creates(&self) -> Result<bool, StoreError> {
+        if !self.txs.class_a_header_behind() {
+            return Ok(true);
+        }
+        let covered = self.txs.durable_create_count()?;
+        Ok(self.class_a_confirmed_cut(covered)?.is_none())
+    }
+
+    /// After open truncates Class A, drop confirmed heights whose tx range
+    /// ends past that count. The header clear is flushed before the tip
+    /// shrink. A crash after that clear still shrinks: the strong bit past
+    /// the count is set and the range is already gone. Trailing nulls, a
+    /// header-only tip, and a Class C fixture are not this drop.
+    pub(crate) fn drop_confirmed_past_creates(&self) -> Result<(), StoreError> {
+        let covered = self.txs.count();
+        let Some(tip) = self.confirmed.tip_height() else {
+            return Ok(());
+        };
+        let write = crate::array_table::ClassCWrite::new();
+        let mut report = TipRevalidateReport::default();
+        if let Some(bad) = self.class_a_confirmed_cut(covered)? {
+            let kept = bad.checked_sub(1);
+            match self.header_tx_end(Height(bad))? {
+                Some(end) if end > covered => {
+                    if covered == 0 && !self.txs.bodies_allocated_past_header() {
+                        return Ok(());
+                    }
+                    let mut fks = Vec::new();
+                    for h in bad..=tip.0 {
+                        if let Some(fk) = self.confirmed.get(Height(h))? {
+                            fks.push(fk);
+                        }
+                    }
+                    self.clear_header_fks(&write, &fks)?;
+                    self.shrink_tip_to(&write, kept, &mut report)?;
+                }
+                None if self.strong_past_covered(covered)? => {
+                    self.shrink_tip_to(&write, kept, &mut report)?;
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+        if self.header_tx_end(tip)?.is_some() || !self.strong_past_covered(covered)? {
+            return Ok(());
+        }
+        if self.highest_height_with_tx_range(tip.0)?.is_some() {
+            return Ok(());
+        }
+        self.shrink_tip_to(&write, None, &mut report)
+    }
+
+    fn strong_past_covered(&self, covered: u64) -> Result<bool, StoreError> {
+        let Some(fk) = Fk::new(covered.saturating_add(1)) else {
+            return Ok(false);
+        };
+        self.strong_tx.is_strong(fk)
+    }
+
+    fn clear_header_fks(
+        &self,
+        write: &crate::array_table::ClassCWrite,
+        fks: &[Fk],
+    ) -> Result<(), StoreError> {
+        for fk in fks {
+            let _ = self.header_txs.clear_body(write, *fk)?;
+        }
+        self.header_txs.flush()
+    }
+
+    /// Height a spend checkpoint may call durable, or `None` when no create is.
+    pub(crate) fn spend_height_within_class_a(
+        &self,
+        height: u32,
+    ) -> Result<Option<u32>, StoreError> {
+        let covered = self.txs.durable_create_count()?;
+        let Some(bad) = self.class_a_confirmed_cut(covered)? else {
+            return Ok(Some(height));
+        };
+        Ok(bad.checked_sub(1).map(|good| good.min(height)))
+    }
+
+    /// First confirmed height whose tx range ends past `covered`, if any.
+    fn class_a_confirmed_cut(&self, covered: u64) -> Result<Option<u32>, StoreError> {
+        let Some(tip) = self.confirmed.tip_height() else {
+            return Ok(None);
+        };
+        if let Some(end) = self.header_tx_end(tip)? {
+            if end <= covered {
+                return Ok(None);
+            }
+            return Ok(Some(self.first_height_past_creates(tip.0, covered)?));
+        }
+        if self.header_tx_end(Height(0))?.is_none() {
+            return Ok(None);
+        }
+        let Some(last) = self.highest_height_with_tx_range(tip.0)? else {
+            return Ok(None);
+        };
+        let Some(end) = self.header_tx_end(Height(last))? else {
+            return Ok(None);
+        };
+        if end > covered {
+            return Ok(Some(self.first_height_past_creates(last, covered)?));
+        }
+        if last < tip.0 {
+            return Ok(Some(last + 1));
+        }
+        Ok(None)
+    }
+
+    fn header_tx_end(&self, height: Height) -> Result<Option<u64>, StoreError> {
+        let Some(fk) = self.confirmed.get(height)? else {
+            return Ok(None);
+        };
+        let Some((first, n)) = self.header_txs.get_range(fk)? else {
+            return Ok(None);
+        };
+        if n == 0 || first.is_null() {
+            return Ok(None);
+        }
+        Ok(Some(first.0.saturating_add(u64::from(n)).saturating_sub(1)))
+    }
+
+    /// `hi` itself ends past `covered`. Heights above `hi` are not searched.
+    fn first_height_past_creates(&self, hi: u32, covered: u64) -> Result<u32, StoreError> {
+        let mut lo = 0u32;
+        let mut hi = hi;
+        let mut found = hi;
+        loop {
+            let mid = lo + (hi - lo) / 2;
+            let past = self
+                .header_tx_end(Height(mid))?
+                .is_some_and(|end| end > covered);
+            if past {
+                found = mid;
+                if mid == lo {
+                    break;
+                }
+                hi = mid - 1;
+            } else if mid == hi {
+                break;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        Ok(found)
+    }
+
+    fn highest_height_with_tx_range(&self, tip: u32) -> Result<Option<u32>, StoreError> {
+        if self.header_tx_end(Height(tip))?.is_some() {
+            return Ok(Some(tip));
+        }
+        let mut lo = 0u32;
+        let mut hi = tip;
+        let mut found = None;
+        loop {
+            let mid = lo + (hi - lo) / 2;
+            if self.header_tx_end(Height(mid))?.is_some() {
+                found = Some(mid);
+                if mid == tip {
+                    break;
+                }
+                lo = mid + 1;
+            } else if mid == 0 {
+                break;
+            } else {
+                hi = mid - 1;
+            }
+            if lo > hi {
+                break;
+            }
+        }
+        Ok(found)
     }
 
     #[doc(hidden)]

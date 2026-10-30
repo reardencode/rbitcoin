@@ -927,7 +927,7 @@ pub fn repair_class_a_count_skew(
     stems: ClassASkewStems<'_>,
     prune_seqsigwit_mode: bool,
     input_existed: bool,
-) -> Result<(), StoreError> {
+) -> Result<bool, StoreError> {
     let n_loc = stems.create_loc.count();
     let n_txids = stems.txids.count();
     let n_seqsigwit_loc = stems.seqsigwit_loc.count();
@@ -939,21 +939,33 @@ pub fn repair_class_a_count_skew(
         prune_seqsigwit_mode,
         input_existed,
     )?;
-    let Some(n) = class_a_skew_target_count(
+    let skewed = class_a_skew_target_count(
         n_loc,
         n_txids,
         n_seqsigwit_loc,
         prune_seqsigwit_mode,
         short_input,
-    ) else {
-        return Ok(());
-    };
+    );
+    let n = skewed.unwrap_or(n_loc);
+    let (tx_end, sp_end, in_end) = class_a_skew_stem_ends(&stems, n, prune_seqsigwit_mode)?;
+    // The locator count is the commit. A body header ahead of it is the crash
+    // before the locator pwrite. A body header short of it was not published.
+    require_body_header(stems.body.body_logical_len(), tx_end)?;
+    require_body_header(stems.spent.body_logical_len(), sp_end)?;
+    if !prune_seqsigwit_mode {
+        require_body_header(stems.seqsigwit.body_logical_len(), in_end)?;
+    }
+    let ahead = stems.body.body_logical_len() > tx_end
+        || stems.spent.body_logical_len() > sp_end
+        || (!prune_seqsigwit_mode && stems.seqsigwit.body_logical_len() > in_end);
+    if skewed.is_none() && !ahead {
+        return Ok(false);
+    }
     let n_input = stems.input.count();
     rbitcoin_log::warn!(
         "store: Class A count skew loc={n_loc} seqsigwit.loc={n_seqsigwit_loc} \
          txid.body={n_txids} input={n_input} — truncating to {n}"
     );
-    let (tx_end, sp_end, in_end) = class_a_skew_stem_ends(&stems, n, prune_seqsigwit_mode)?;
     class_a_skew_apply_truncate(
         &stems,
         n,
@@ -963,7 +975,102 @@ pub fn repair_class_a_count_skew(
         in_end,
         prune_seqsigwit_mode,
     )?;
-    class_a_skew_assert_aligned(&stems, prune_seqsigwit_mode)
+    class_a_skew_assert_aligned(&stems, prune_seqsigwit_mode)?;
+    Ok(true)
+}
+
+fn require_body_header(header: u64, end: u64) -> Result<(), StoreError> {
+    if header < end {
+        Err(StoreError::Corrupt(
+            "invariant: body header short of locator",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn file_header_behind(file: &crate::file::TableFile) -> bool {
+    file.header_persist_len() < file.logical_len()
+}
+
+fn durable_loc_count(
+    loc: &crate::file::TableFile,
+    off: &crate::file::TableFile,
+    slot: u64,
+    off_slot: u64,
+) -> u64 {
+    let data = loc
+        .header_persist_len()
+        .saturating_sub(crate::file::FILE_HEADER_LEN as u64);
+    if slot == 0 || !data.is_multiple_of(slot) {
+        return 0;
+    }
+    let off_data = off
+        .header_persist_len()
+        .saturating_sub(crate::file::FILE_HEADER_LEN as u64);
+    crate::delta_loc::checkpoint_fit(data / slot, off_data, off_slot).unwrap_or(0)
+}
+
+fn class_a_loc_pairs(
+    n: usize,
+    n_outs: &[u32],
+    p_out: &crate::var_table::PreparedAppend,
+    p_sp: &crate::var_table::PreparedAppend,
+) -> (
+    Vec<crate::create_loc::CreateLocAppend>,
+    Vec<crate::create_loc::CreateLocPair>,
+) {
+    let tx_lens = p_out.aligned_lens();
+    let mut recs = Vec::with_capacity(n);
+    let mut loc = Vec::with_capacity(n);
+    for i in 0..n {
+        let spent_len = spent_record_len(n_outs[i]);
+        recs.push(crate::create_loc::CreateLocAppend {
+            txout_start: p_out.starts[i],
+            txout_len: tx_lens[i],
+            spent_start: p_sp.starts[i],
+            n_out: n_outs[i],
+        });
+        loc.push(crate::create_loc::CreateLocPair {
+            txout: (p_out.starts[i], tx_lens[i]),
+            spent: (p_sp.starts[i], spent_len),
+            n_out: n_outs[i],
+        });
+    }
+    (recs, loc)
+}
+
+fn publish_prepared_body(
+    table: &VarTable,
+    prep: crate::var_table::PreparedAppend,
+    durable: bool,
+) -> Result<(Vec<Fk>, bool), StoreError> {
+    let end = prep.start.saturating_add(prep.body_blob.len() as u64);
+    let landed = table.note_body_end(end, durable);
+    let fks = table.finish_prepared(prep)?;
+    Ok((fks, landed))
+}
+
+fn expect_same_fks(left: &[Fk], right: &[Fk]) -> Result<(), StoreError> {
+    if left != right {
+        return Err(StoreError::Corrupt(
+            "Class A append fk mismatch across stems",
+        ));
+    }
+    Ok(())
+}
+
+fn publish_body_pair(
+    left: &VarTable,
+    left_prep: crate::var_table::PreparedAppend,
+    right: &VarTable,
+    right_prep: crate::var_table::PreparedAppend,
+    durable: bool,
+) -> Result<(Vec<Fk>, bool), StoreError> {
+    let (fks, left_ok) = publish_prepared_body(left, left_prep, durable)?;
+    let (other, right_ok) = publish_prepared_body(right, right_prep, durable && left_ok)?;
+    expect_same_fks(&fks, &other)?;
+    Ok((fks, left_ok && right_ok))
 }
 
 impl TxTable {
@@ -1096,9 +1203,6 @@ impl TxTable {
         let create_loc = open_or_create_create_loc(dir)?;
         let seqsigwit_loc = open_or_create_seqsigwit_loc(seqsigwit_dir)?;
         let loc_count = create_loc.count();
-        if !prune_seqsigwit_mode && seqsigwit_loc.count() != loc_count {
-            return Err(StoreError::Corrupt("invariant: seqsigwit.loc count"));
-        }
         let body = if had_txout {
             VarTable::open_body_only(dir, "txout", TableKind::TxOut, loc_count)?
         } else {
@@ -1521,6 +1625,71 @@ impl TxTable {
 
     pub fn count(&self) -> u64 {
         self.body.count()
+    }
+
+    /// `create` leaves [`crate::file::CREATE_FILE_SLACK`] bytes. Anything past
+    /// that was a payload, including after a truncate that did not shrink the
+    /// allocation. Header-only and Class C stores stay at the slack.
+    pub(crate) fn bodies_allocated_past_header(&self) -> bool {
+        fn past(file: &crate::file::TableFile) -> bool {
+            let published = file.logical_len();
+            let cap = file.file_cap.load(std::sync::atomic::Ordering::Acquire);
+            cap > published.saturating_add(crate::file::CREATE_FILE_SLACK)
+        }
+        past(&self.body.body) || past(&self.spent.body) || past(&self.seqsigwit.body)
+    }
+
+    /// Creates whose locator headers have landed.
+    ///
+    /// No header is behind: two loads per file and the RAM count. A withheld
+    /// header is the length those headers still name.
+    pub(crate) fn durable_create_count(&self) -> Result<u64, StoreError> {
+        if !self.class_a_header_behind() {
+            return Ok(self.count());
+        }
+        Ok(self.locator_header_count())
+    }
+
+    /// Create count named by the locator headers. A body header is not part
+    /// of this count: open truncates a body that ran ahead and refuses one
+    /// that fell short.
+    fn locator_header_count(&self) -> u64 {
+        let prune = self.prune_seqsigwit_mode();
+        let mut hi = durable_loc_count(
+            &self.create_loc.loc,
+            &self.create_loc.off,
+            crate::create_loc::SLOT,
+            crate::create_loc::OFF_SLOT,
+        );
+        hi = hi.min(self.create_loc.count());
+        if !prune {
+            hi = hi.min(durable_loc_count(
+                &self.seqsigwit_loc.loc,
+                &self.seqsigwit_loc.off,
+                2,
+                8,
+            ));
+            hi = hi.min(self.seqsigwit_loc.count());
+        }
+        hi
+    }
+
+    pub(crate) fn class_a_header_behind(&self) -> bool {
+        let loc = file_header_behind(&self.create_loc.loc)
+            || file_header_behind(&self.create_loc.ovf)
+            || file_header_behind(&self.create_loc.off)
+            || file_header_behind(&self.body.body)
+            || file_header_behind(&self.spent.body);
+        if loc {
+            return true;
+        }
+        if self.prune_seqsigwit_mode() {
+            return false;
+        }
+        file_header_behind(&self.seqsigwit_loc.loc)
+            || file_header_behind(&self.seqsigwit_loc.ovf)
+            || file_header_behind(&self.seqsigwit_loc.off)
+            || file_header_behind(&self.seqsigwit.body)
     }
 
     /// Current `tx.body` logical length (including file header).
@@ -2674,11 +2843,35 @@ impl TxTable {
         Ok((fks, loc))
     }
 
+    /// Arm short pwrites on one Class A body (`txout`, `seqsigwit`, or `spent`).
+    ///
+    /// The next long writes to that file store an 8-byte prefix and return
+    /// disk-full, and they stay failing until [`Self::disarm_short_body_pwrite`].
+    /// Lengths are unpublished until every payload write has succeeded.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn arm_short_body_pwrite(&self, stem: &str) {
+        let handle = match stem {
+            "txout" => self.body.body_write_fd(),
+            "seqsigwit" => self.seqsigwit.body_write_fd(),
+            "spent" => self.spent.body_write_fd(),
+            _ => panic!("arm_short_body_pwrite: unknown stem {stem}"),
+        };
+        crate::io_handle::arm_short_pwrite(handle);
+    }
+
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn disarm_short_body_pwrite(&self) {
+        crate::io_handle::disarm_short_pwrite();
+    }
+
     #[allow(clippy::too_many_arguments)] // IO/session args stay unbundled
     /// Encode and write `txout` + `seqsigwit` + `spent` bodies as one pwrite wave.
     ///
-    /// Order is still body → loc → HWM per stem. Not the spend-annotate machine.
-    /// Loc pairs are the append starts (write keeps them in RAM; no loc pread).
+    /// Payloads land past the published ends. Body headers are persisted
+    /// before the locator header of the same commit. Not the spend-annotate
+    /// machine.
     #[doc(hidden)]
     pub fn append_stems_one_wave(
         &self,
@@ -2700,46 +2893,49 @@ impl TxTable {
         let Some(p_sp) = self.spent.prepare_batch_encode(n, est_spent, encode_sp)? else {
             return Err(StoreError::Corrupt("Class A spent prepare empty"));
         };
-        let tx_lens = p_out.aligned_lens();
-        let mut recs = Vec::with_capacity(n);
-        let mut loc = Vec::with_capacity(n);
-        for i in 0..n {
-            let spent_len = spent_record_len(n_outs[i]);
-            recs.push(crate::create_loc::CreateLocAppend {
-                txout_start: p_out.starts[i],
-                txout_len: tx_lens[i],
-                spent_start: p_sp.starts[i],
-                n_out: n_outs[i],
-            });
-            loc.push(crate::create_loc::CreateLocPair {
-                txout: (p_out.starts[i], tx_lens[i]),
-                spent: (p_sp.starts[i], spent_len),
-                n_out: n_outs[i],
-            });
-        }
+        let (recs, loc) = class_a_loc_pairs(n, n_outs, &p_out, &p_sp);
+        let staged_loc = self.create_loc.stage(&recs)?;
+        let fks = if self.prune_seqsigwit_mode() {
+            self.commit_pruned_wave(p_out, p_sp, staged_loc)?
+        } else {
+            self.commit_seq_wave(n, est_seqsigwit, encode_in, p_out, p_sp, staged_loc)?
+        };
+        Ok((fks, loc))
+    }
 
-        if self.prune_seqsigwit_mode() {
-            crate::var_table::write_prepared_bodies_one_wave(
-                &[(&self.body, &p_out), (&self.spent, &p_sp)],
-                self.datadir_hdd(),
-            )?;
-            self.create_loc.append(&recs)?;
-            let fks = self.body.finish_prepared(p_out)?;
-            let fks_sp = self.spent.finish_prepared(p_sp)?;
-            if fks != fks_sp {
-                return Err(StoreError::Corrupt(
-                    "Class A append fk mismatch across stems",
-                ));
-            }
-            return Ok((fks, loc));
-        }
+    fn commit_pruned_wave(
+        &self,
+        p_out: crate::var_table::PreparedAppend,
+        p_sp: crate::var_table::PreparedAppend,
+        staged_loc: crate::create_loc::StagedCreate,
+    ) -> Result<Vec<Fk>, StoreError> {
+        crate::var_table::write_prepared_bodies_one_wave(
+            &[(&self.body, &p_out), (&self.spent, &p_sp)],
+            self.datadir_hdd(),
+        )?;
+        self.create_loc.write_staged(&staged_loc)?;
+        let (fks, bodies) = publish_body_pair(&self.body, p_out, &self.spent, p_sp, true)?;
+        let _durable = self.create_loc.commit_staged(staged_loc, bodies);
+        Ok(fks)
+    }
 
+    fn commit_seq_wave(
+        &self,
+        n: usize,
+        est_seqsigwit: usize,
+        encode_in: impl FnMut(usize, &mut Vec<u8>),
+        p_out: crate::var_table::PreparedAppend,
+        p_sp: crate::var_table::PreparedAppend,
+        staged_loc: crate::create_loc::StagedCreate,
+    ) -> Result<Vec<Fk>, StoreError> {
         let Some(p_in) = self
             .seqsigwit
             .prepare_batch_encode(n, est_seqsigwit, encode_in)?
         else {
             return Err(StoreError::Corrupt("Class A seqsigwit prepare empty"));
         };
+        let seq_lens = p_in.aligned_lens();
+        let staged_seq = self.seqsigwit_loc.stage(&p_in.starts, &seq_lens)?;
         crate::var_table::write_prepared_bodies_one_wave(
             &[
                 (&self.body, &p_out),
@@ -2748,18 +2944,14 @@ impl TxTable {
             ],
             self.datadir_hdd(),
         )?;
-        self.create_loc.append(&recs)?;
-        self.seqsigwit_loc
-            .append(&p_in.starts, &p_in.aligned_lens())?;
-        let fks = self.body.finish_prepared(p_out)?;
-        let fks_in = self.seqsigwit.finish_prepared(p_in)?;
-        let fks_sp = self.spent.finish_prepared(p_sp)?;
-        if fks != fks_in || fks != fks_sp {
-            return Err(StoreError::Corrupt(
-                "Class A append fk mismatch across stems",
-            ));
-        }
-        Ok((fks, loc))
+        self.create_loc.write_staged(&staged_loc)?;
+        self.seqsigwit_loc.write_staged(&staged_seq)?;
+        let (fks_in, in_ok) = publish_prepared_body(&self.seqsigwit, p_in, true)?;
+        let (fks, pair_ok) = publish_body_pair(&self.body, p_out, &self.spent, p_sp, in_ok)?;
+        expect_same_fks(&fks, &fks_in)?;
+        let durable = self.create_loc.commit_staged(staged_loc, in_ok && pair_ok);
+        let _durable = self.seqsigwit_loc.commit_staged(staged_seq, durable);
+        Ok(fks)
     }
 
     pub fn get_by_txid(&self, txid: &[u8; 32]) -> Result<Option<(Fk, TxRecord)>, StoreError> {

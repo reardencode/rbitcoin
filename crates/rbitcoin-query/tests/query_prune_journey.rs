@@ -143,6 +143,79 @@ fn prune_life_watermark(q: Query, dir: &rbitcoin_query::testutil::TempDir, hashe
     let _ = (prev, std::fs::remove_dir_all(dir));
 }
 
+/// Chain taller than the keep window. Two withheld locator headers leave
+/// the new blocks confirmed in RAM. Prune must stay on the last sealed tip,
+/// so the block at `sealed - 288` still has its witness.
+fn withheld_locator_keeps_prune(direct: bool) {
+    let (dir, q) = temp_query(if direct {
+        "withheld-locator-prune-ibd"
+    } else {
+        "withheld-locator-prune"
+    });
+    let mut hashes = Vec::new();
+    connect_range(&q, Fk::NULL, None, 290, &[0x55; 8], &mut hashes);
+    assert_eq!(q.tip_height(), Some(Height(289)));
+    q.set_prune_seqsigwit(true).unwrap();
+    q.apply_prune_seqsigwit_tip().unwrap();
+    assert_eq!(q.pruneheight(), Some(Height(1)));
+    let kept = q.block_tx_fks(Height(2)).unwrap()[0];
+    q.clear_seqsigwit_ram_window();
+    assert_eq!(witness_of(&q, kept), vec![vec![0x55; 8]]);
+    if direct {
+        q.enter_direct_index_mode_sh(false).unwrap();
+    }
+
+    let loc = q.store().txs.create_loc.loc.read_fd();
+    rbitcoin_store::io_handle::arm_fail_hwm_pwrites(loc, 16);
+    let _disarm = Disarm(loc);
+    let (prev, parent) = resume(&q, &mut hashes);
+    connect_range(&q, prev, Some(parent), 2, &[0x66; 8], &mut hashes);
+    assert_eq!(q.tip_height(), Some(Height(291)));
+    assert_eq!(
+        q.pruneheight(),
+        Some(Height(1)),
+        "a second withheld locator header does not move seqsigwit.prune"
+    );
+    q.clear_seqsigwit_ram_window();
+    assert_eq!(witness_of(&q, kept), vec![vec![0x55; 8]]);
+    if !direct {
+        // Drop one unsealed block. The shrink flush must not become the
+        // prune anchor, and the next withheld connect must not move it.
+        q.disconnect_tip().unwrap();
+        assert_eq!(q.tip_height(), Some(Height(290)));
+        rbitcoin_store::io_handle::arm_fail_hwm_pwrites(loc, 16);
+        let (prev, parent) = resume(&q, &mut hashes);
+        connect_range(&q, prev, Some(parent), 1, &[0x77; 8], &mut hashes);
+        assert_eq!(q.tip_height(), Some(Height(291)));
+        assert_eq!(
+            q.pruneheight(),
+            Some(Height(1)),
+            "disconnect of an unsealed tip does not move seqsigwit.prune"
+        );
+        q.clear_seqsigwit_ram_window();
+        assert_eq!(witness_of(&q, kept), vec![vec![0x55; 8]]);
+    }
+    let _ = dir;
+}
+
+#[test]
+fn withheld_locator_does_not_prune_a_confirmed_witness() {
+    withheld_locator_keeps_prune(false);
+}
+
+#[test]
+fn withheld_locator_during_ibd_does_not_prune_a_confirmed_witness() {
+    withheld_locator_keeps_prune(true);
+}
+
+struct Disarm(rbitcoin_store::io_handle::IoHandle);
+
+impl Drop for Disarm {
+    fn drop(&mut self) {
+        rbitcoin_store::io_handle::disarm_pwrite(self.0);
+    }
+}
+
 #[test]
 fn pruned_seqsigwit_life() {
     let (dir, q) = temp_query("pruned-seqsigwit-life");

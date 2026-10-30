@@ -60,6 +60,56 @@ fn pack_create_pair_past_u16_is_ok() {
     assert_eq!(no, 65535);
 }
 
+/// Seqsigwit checkpoint is 8 bytes. A disk-full write there must drop the
+/// overflow row so the same batch can be appended again and reopened.
+#[test]
+fn delta_loc_checkpoint_enospc_drops_the_ovf_row() {
+    let dir = TempDir::labeled("delta-ovf-rewind").unwrap();
+    let loc = DeltaLoc::create(dir.path(), "seqsigwit").unwrap();
+    let fat = 65536 * IDX_STRIDE;
+    let mut starts = Vec::with_capacity(1024);
+    let mut lens = Vec::with_capacity(1024);
+    let mut cursor = FILE_HEADER_LEN as u64;
+    for i in 0..1024 {
+        let len = if i == 1023 { fat } else { 8 };
+        starts.push(cursor);
+        lens.push(len);
+        cursor += len;
+    }
+    let off = loc.off.io_handle();
+    struct Disarm(rbitcoin_store::io_handle::IoHandle);
+    impl Drop for Disarm {
+        fn drop(&mut self) {
+            rbitcoin_store::io_handle::disarm_pwrite(self.0);
+        }
+    }
+    rbitcoin_store::io_handle::arm_fail_hwm_pwrites(off, 1);
+    let _disarm = Disarm(off);
+    let err = loc
+        .append(&starts, &lens)
+        .expect_err("seqsigwit.off disk full");
+    assert!(matches!(err, StoreError::Io { .. }), "{err}");
+    drop(_disarm);
+    assert!(
+        loc.ovf_rows
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty(),
+        "ovf row survived the failed checkpoint"
+    );
+    assert_eq!(loc.count(), 0);
+    loc.append(&starts, &lens)
+        .expect("retry once the checkpoint write works");
+    assert_eq!(loc.count(), 1024);
+    let path = dir.path().to_path_buf();
+    drop(loc);
+    let loc = DeltaLoc::open(&path, "seqsigwit").unwrap();
+    assert_eq!(
+        loc.range_batch(&[Fk(1024)]).unwrap()[0],
+        Some((FILE_HEADER_LEN as u64 + 1023 * 8, fat))
+    );
+}
+
 #[test]
 fn delta_loc_append_and_batch_order() {
     let dir = TempDir::labeled("delta-loc").unwrap();

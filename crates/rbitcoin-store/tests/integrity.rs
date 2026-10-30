@@ -537,3 +537,186 @@ fn missing_marker_revalidates_from_genesis() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+struct Disarm(rbitcoin_store::io_handle::IoHandle);
+
+impl Drop for Disarm {
+    fn drop(&mut self) {
+        rbitcoin_store::io_handle::disarm_pwrite(self.0);
+    }
+}
+
+fn coinbase(salt: u8) -> (TxRecord, Vec<InputRecord>, Vec<OutputRecord>) {
+    (
+        TxRecord {
+            txid: [salt; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
+        vec![InputRecord::coinbase(u32::MAX, vec![salt], vec![])],
+        vec![OutputRecord::unspent(50, vec![0x51])],
+    )
+}
+
+fn connect_coinbase(
+    s: &Store,
+    write: &rbitcoin_store::ClassCWrite,
+    h: u8,
+    prev: Fk,
+    parent_hash: [u8; 32],
+) -> (Fk, [u8; 32]) {
+    let txid = [h; 32];
+    let (rec, ins, outs) = coinbase(h);
+    let tx_fk = s
+        .put_tx_full_batch_indexed(&[(rec, ins, outs)], false)
+        .unwrap()[0];
+    let merkle = rbitcoin_primitives::merkle_root_from_txids(&[txid]);
+    let header = hdr_merkle(prev, parent_hash, h, merkle);
+    let hash = header.hash;
+    let header_fk = s.put_header(&header).unwrap();
+    s.header_txs.put_range(write, header_fk, tx_fk, 1).unwrap();
+    s.strong_tx.set_strong(write, tx_fk, header_fk).unwrap();
+    s.confirmed
+        .set(write, Height(u32::from(h)), header_fk)
+        .unwrap();
+    (header_fk, hash)
+}
+
+fn on_disk_hwm(path: &std::path::Path) -> u64 {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).unwrap();
+    f.seek(SeekFrom::Start(8)).unwrap();
+    let mut buf = [0u8; 8];
+    f.read_exact(&mut buf).unwrap();
+    u64::from_le_bytes(buf)
+}
+
+/// Genesis is sealed. The next connect's locator header does not land.
+/// The sealed tip and the spend marker stay at genesis. Reopen's create
+/// count is that prefix, and the withheld height has no body association.
+#[test]
+fn withheld_locator_header_does_not_seal_the_tip() {
+    let dir = tmp();
+    let s = Store::create_tiny(&dir).unwrap();
+    let write = rbitcoin_store::ClassCWrite::for_test();
+    let (prev, parent_hash) = connect_coinbase(&s, &write, 0, Fk::NULL, [0u8; 32]);
+    s.flush_class_c_tip().unwrap();
+    s.note_spend_snapshot(0);
+    s.checkpoint_spend_through(0).unwrap();
+    let sealed = on_disk_hwm(&dir.join("confirmed.body"));
+    let seal = std::fs::read(dir.join("tip_seal")).unwrap();
+    let genesis = s.confirmed.get(Height(0)).unwrap().unwrap();
+
+    let loc = s.txs.create_loc.loc.read_fd();
+    rbitcoin_store::io_handle::arm_fail_hwm_pwrites(loc, 8);
+    let disarm = Disarm(loc);
+    let (withheld, _) = connect_coinbase(&s, &write, 1, prev, parent_hash);
+    drop(disarm);
+    s.flush_class_c_tip().unwrap();
+    s.txs.flush().unwrap();
+    s.note_spend_snapshot(1);
+    s.checkpoint_spend_through(1).unwrap();
+    assert_eq!(s.confirmed.tip_height(), Some(Height(1)));
+    assert_eq!(
+        on_disk_hwm(&dir.join("confirmed.body")),
+        sealed,
+        "a withheld locator header does not seal the new tip"
+    );
+    assert_eq!(std::fs::read(dir.join("tip_seal")).unwrap(), seal);
+    let marker = rbitcoin_store::spend_durable::SpendDurable::load(s.path())
+        .unwrap()
+        .expect("checkpoint publishes");
+    assert_eq!(marker.durable_through(), 0);
+    drop(s);
+
+    let s = Store::open_tiny(&dir).unwrap();
+    assert_eq!(s.confirmed.tip_height(), Some(Height(0)));
+    assert_eq!(s.txs.count(), 1);
+    assert!(s.header_txs.has_body(genesis).unwrap());
+    assert!(!s.header_txs.has_body(withheld).unwrap());
+    assert!(s.txs.get_meta_and_outputs(Fk(1)).is_ok());
+    assert!(s.txs.get_meta_and_outputs(Fk(2)).is_err());
+    let marker = rbitcoin_store::spend_durable::SpendDurable::load(s.path())
+        .unwrap()
+        .unwrap();
+    assert_eq!(marker.durable_through(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn shorten_creates(s: &Store, n: u64) {
+    let txs = &s.txs;
+    let stems = rbitcoin_store::tx_table::ClassASkewStems {
+        create_loc: &txs.create_loc,
+        seqsigwit_loc: &txs.seqsigwit_loc,
+        body: &txs.body,
+        spent: &txs.spent,
+        seqsigwit: &txs.seqsigwit,
+        txids: &txs.txids,
+        txstat: &txs.txstat,
+        input: &txs.input,
+    };
+    let (tx_end, sp_end, in_end) =
+        rbitcoin_store::tx_table::class_a_skew_stem_ends(&stems, n, false).unwrap();
+    rbitcoin_store::tx_table::class_a_skew_apply_truncate(
+        &stems,
+        n,
+        txs.txids.count(),
+        tx_end,
+        sp_end,
+        in_end,
+        false,
+    )
+    .unwrap();
+}
+
+/// The tail's header range was cleared and flushed. The tip shrink did not
+/// land. Reopen still drops that tip. Genesis keeps its body.
+#[test]
+fn cleared_tail_range_still_drops_the_sealed_tip() {
+    let dir = tmp();
+    let s = Store::create_tiny(&dir).unwrap();
+    let write = rbitcoin_store::ClassCWrite::for_test();
+    let (genesis, parent) = connect_coinbase(&s, &write, 0, Fk::NULL, [0u8; 32]);
+    let (tail, _) = connect_coinbase(&s, &write, 1, genesis, parent);
+    s.flush_class_c_tip().unwrap();
+    s.txs.flush().unwrap();
+    shorten_creates(&s, 1);
+    s.header_txs.clear_body(&write, tail).unwrap();
+    s.header_txs.flush().unwrap();
+    assert_eq!(s.confirmed.tip_height(), Some(Height(1)));
+    drop(s);
+
+    let s = Store::open_tiny(&dir).unwrap();
+    assert_eq!(s.confirmed.tip_height(), Some(Height(0)));
+    assert!(s.header_txs.has_body(genesis).unwrap());
+    assert!(!s.header_txs.has_body(tail).unwrap());
+    assert_eq!(s.txs.count(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Every header range was cleared, including genesis, and the empty-tip
+/// shrink did not land. Reopen drops the tip and leaves no body association.
+#[test]
+fn cleared_anchor_range_still_drops_the_tip() {
+    let dir = tmp();
+    let s = Store::create_tiny(&dir).unwrap();
+    let write = rbitcoin_store::ClassCWrite::for_test();
+    let (genesis, parent) = connect_coinbase(&s, &write, 0, Fk::NULL, [0u8; 32]);
+    let (tail, _) = connect_coinbase(&s, &write, 1, genesis, parent);
+    s.flush_class_c_tip().unwrap();
+    s.txs.flush().unwrap();
+    shorten_creates(&s, 0);
+    s.header_txs.clear_body(&write, genesis).unwrap();
+    s.header_txs.clear_body(&write, tail).unwrap();
+    s.header_txs.flush().unwrap();
+    assert_eq!(s.confirmed.tip_height(), Some(Height(1)));
+    drop(s);
+
+    let s = Store::open_tiny(&dir).unwrap();
+    assert_eq!(s.confirmed.tip_height(), None);
+    assert!(!s.header_txs.has_body(genesis).unwrap());
+    assert!(!s.header_txs.has_body(tail).unwrap());
+    let _ = std::fs::remove_dir_all(&dir);
+}
