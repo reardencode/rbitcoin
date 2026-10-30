@@ -173,22 +173,62 @@ fn connect_precompute_is_rejected_before_verify() {
     let msg = format!("{err}");
     assert!(msg.contains("sighash midstate"), "{msg}");
 
-    let past = match rbitcoin_consensus::script::interpreter::EvalContext::from_eval_parts(
-        &tx,
-        1,
-        Amount::ZERO,
-        bitcoin::script::Script::from_bytes(&[]),
-        rbitcoin_consensus::script::interpreter::SigVersion::Base,
-        false,
-        false,
-        false,
-        std::borrow::Cow::Owned(rbitcoin_consensus::TxScriptPrecompute::from_tx(&tx)),
-    ) {
+    let past = match rbitcoin_consensus::block::InputIndex::in_tx(&tx, 1) {
         Err(err) => err,
         Ok(_) => panic!("input 1 is past vin"),
     };
     let msg = format!("{past}");
     assert!(msg.contains("input index"), "{msg}");
+}
+
+/// `inputs` yields one index per vin, and none when vin is empty.
+#[test]
+fn job_inputs_stay_inside_vin() {
+    let flags =
+        rbitcoin_consensus::block::ScriptVerifyFlags::buried(false, false, false, false, false);
+    let empty = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![],
+        output: vec![],
+    };
+    let none = ScriptCheckJob::new(vec![], empty, flags);
+    assert!(none.inputs().next().is_none(), "empty vin yields no index");
+
+    let tx = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![
+            TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            },
+            TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            },
+        ],
+        output: vec![],
+    };
+    let prevouts = vec![
+        TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::new(),
+        },
+        TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::new(),
+        },
+    ];
+    let n = tx.input.len();
+    let job = ScriptCheckJob::new(prevouts, tx, flags);
+    let got: Vec<usize> = job.inputs().map(|i| i.get()).collect();
+    assert_eq!(got, vec![0, 1]);
+    assert!(got.iter().all(|i| *i < n));
 }
 
 #[test]

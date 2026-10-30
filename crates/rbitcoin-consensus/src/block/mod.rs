@@ -948,7 +948,7 @@ impl InputIndex {
 
     /// Index `i` of `tx`. Out of range is a caller bug, not a script result.
     #[inline]
-    pub(crate) fn in_tx(tx: &Transaction, i: usize) -> Result<Self, ConsensusError> {
+    pub fn in_tx(tx: &Transaction, i: usize) -> Result<Self, ConsensusError> {
         if i >= tx.input.len() {
             return Err(ConsensusError::Script("input index".into()));
         }
