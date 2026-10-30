@@ -5724,6 +5724,49 @@ fn getmininginfo_names_the_tip_and_the_next_block_work() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A reorg between the tip read and the `next` reads restarts the sample, so
+/// `bestblockhash` and `next.bits` name one branch. Period 4: `A3` and `B3`
+/// have different times, so block 4's work differs between the branches.
+#[test]
+fn getmininginfo_reorg_mid_sample_keeps_one_branch() {
+    let mut params = rbitcoin_consensus::ChainParams::regtest();
+    params.btc.no_pow_retargeting = false;
+    params.btc.allow_min_difficulty_blocks = false;
+    params.btc.pow_target_timespan = 4 * params.btc.pow_target_spacing;
+    let (ctx, dir, hub) = ctx_regtest_hub_on(params, 300_000_000);
+    let genesis = hub.tip_header().unwrap().time;
+    for h in 1..=3 {
+        let prev = hub.tip_hash().unwrap();
+        let b = rbitcoin_consensus::mine_regtest_paying(prev, genesis + h, h, true_spk(), vec![]);
+        let r = dispatch(&ctx, "submitblock", vec![json!(block_hex(&b))]).unwrap();
+        assert!(r.is_null(), "height {h}: {r}");
+    }
+    let a3 = hub.tip_hash().unwrap();
+    let prev = hub.tip_header().unwrap().prev_blockhash;
+    let b3 = rbitcoin_consensus::mine_regtest_paying(prev, genesis + 86_400, 3, true_spk(), vec![]);
+    let b3_hex = block_hex(&b3);
+    before_next_mininginfo_next(move |ctx: &RpcContext| {
+        dispatch(ctx, "invalidateblock", vec![json!(a3.to_string())]).unwrap();
+        let r = dispatch(ctx, "submitblock", vec![json!(b3_hex)]).unwrap();
+        assert!(r.is_null(), "{r}");
+    });
+    let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    assert_eq!(info["bestblockhash"], b3.block_hash().to_string(), "{info}");
+    let bits = u32::from_str_radix(info["next"]["bits"].as_str().unwrap(), 16).unwrap();
+    let mut b4 = rbitcoin_consensus::mine_regtest_paying(
+        b3.block_hash(),
+        genesis + 86_401,
+        4,
+        true_spk(),
+        vec![],
+    );
+    b4.header.bits = bitcoin::CompactTarget::from_consensus(bits);
+    rbitcoin_consensus::grind_regtest_pow(&mut b4.header);
+    let r = dispatch(&ctx, "submitblock", vec![json!(block_hex(&b4))]).unwrap();
+    assert!(r.is_null(), "B3's child meets next.bits: {r} {info}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Core `BlockAssembler::m_last_block_weight` / `m_last_block_num_txs`: the
 /// reserved 8000 plus the selected transactions of the last block a template
 /// or `generate` assembled.
@@ -5767,6 +5810,35 @@ fn getmininginfo_reports_the_last_assembled_block() {
         "Core assembles generateblock empty: {info}"
     );
     assert_eq!(info["currentblocktx"], 0, "{info}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Each block of `generate` records its own assembly, so a request that
+/// fails after its first block still reports that block. A `generateblock`
+/// with a bad `submit` assembles nothing.
+#[test]
+fn getmininginfo_assembly_is_per_block() {
+    let (ctx, dir, hub) = ctx_from_mature_pad(300_000_000);
+    let (hex, spend) = mature_coinbase_spend_hex(&ctx, generated_coinbase_value(&ctx, 1) - 1_000);
+    dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
+    let weight = 8_000 + spend.weight().to_wu();
+    hub.generate_fail_before.store(1, Ordering::Relaxed);
+    dispatch(&ctx, "generate", vec![json!(2)]).unwrap_err();
+    hub.generate_fail_before.store(0, Ordering::Relaxed);
+    let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    assert_eq!(info["currentblockweight"], weight, "{info}");
+    assert_eq!(info["currentblocktx"], 1, "{info}");
+
+    let (addr, _) = p2wpkh_regtest();
+    dispatch(
+        &ctx,
+        "generateblock",
+        vec![json!(addr), json!([]), json!("yes")],
+    )
+    .unwrap_err();
+    let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    assert_eq!(info["currentblockweight"], weight, "{info}");
+    assert_eq!(info["currentblocktx"], 1, "{info}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

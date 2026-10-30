@@ -173,16 +173,9 @@ pub fn generate_with_mempool(
             .map(|mp| mp.select_generate_txs(min))
             .unwrap_or_default()
     };
-    // The extras go in the first block, so a later last block is empty.
-    let last = if nblocks == 1 { extras.as_slice() } else { &[] };
-    let last_weight = last.iter().map(|tx| tx.weight().to_wu()).sum::<u64>();
-    let last_txs = last.len();
     let hashes = miner
         .generate_to_script(nblocks, script, extras)
         .map_err(|e| rpc_error(ERR_MISC, e))?;
-    if let Some(c) = ctx.chain.as_ref() {
-        c.note_block_assembled(last_weight, last_txs);
-    }
     Ok(hashes_json(&hashes))
 }
 
@@ -247,12 +240,22 @@ pub fn generateblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Valu
     } else {
         return Err(rpc_error(ERR_INVALID_PARAMS, "transactions required"));
     }
+    let submit = params.opt_bool(2, "submit")?.unwrap_or(true);
+    let generated = generateblock_with(miner, script, extra, submit);
     // Core assembles an empty block (`use_mempool = false`) before it adds
-    // the given transactions.
+    // the given transactions, so that is the last assembly either way.
     if let Some(c) = ctx.chain.as_ref() {
         c.note_block_assembled(0, 0);
     }
-    let submit = params.opt_bool(2, "submit")?.unwrap_or(true);
+    generated
+}
+
+fn generateblock_with(
+    miner: &dyn RpcRegtest,
+    script: ScriptBuf,
+    extra: Vec<Transaction>,
+    submit: bool,
+) -> Result<Value, Value> {
     if !submit {
         let block = miner
             .assemble_block_to_script(script, extra)
@@ -1011,9 +1014,24 @@ pub fn gbt_check_proposal(ctx: &RpcContext, block: &Block) -> Result<(), String>
     priced.map(|_fees| ())
 }
 
-/// Core `getmininginfo`. `blocks`, `bestblockhash`, `bits`, and `next` come
-/// from one tip header read.
-pub fn getmininginfo(ctx: &RpcContext) -> Result<Value, Value> {
+#[cfg(debug_assertions)]
+type MininginfoHook = Box<dyn FnOnce(&RpcContext)>;
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static BEFORE_MININGINFO_NEXT: std::cell::RefCell<Option<MininginfoHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` once in the next `getmininginfo` on this thread, after the tip
+/// read and before the reads that compute `next`.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn before_next_mininginfo_next(f: impl FnOnce(&RpcContext) + 'static) {
+    BEFORE_MININGINFO_NEXT.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+}
+
+fn tip_header(ctx: &RpcContext) -> Result<(Height, rbitcoin_store::HeaderRecord), Value> {
     let tip = ctx
         .query
         .tip_height()
@@ -1023,7 +1041,26 @@ pub fn getmininginfo(ctx: &RpcContext) -> Result<Value, Value> {
         .header_at_height(tip)
         .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?
         .ok_or_else(|| rpc_error(ERR_MISC, "tip header missing"))?;
-    let next = next_block(ctx, &gbt_params(ctx), tip.0, rec.bits)?;
+    Ok((tip, rec))
+}
+
+/// Core `getmininginfo`. `blocks`, `bestblockhash`, `bits`, `next`, and
+/// `networkhashps` describe one tip, as Core's under `cs_main`.
+pub fn getmininginfo(ctx: &RpcContext) -> Result<Value, Value> {
+    let (tip, rec, next, hashps) = loop {
+        let (tip, rec) = tip_header(ctx)?;
+        #[cfg(debug_assertions)]
+        if let Some(f) = BEFORE_MININGINFO_NEXT.with(|h| h.borrow_mut().take()) {
+            f(ctx);
+        }
+        let next = next_block(ctx, &gbt_params(ctx), tip.0, rec.bits)?;
+        let hashps = network_hash_ps(ctx, 120, i64::from(tip.0)).unwrap_or(0.0);
+        // Those reads are by height, so they are `rec`'s chain only if it
+        // is still the tip.
+        if tip_header(ctx)?.1.hash == rec.hash {
+            break (tip, rec, next, hashps);
+        }
+    };
     let pooledtx = ctx
         .mempool
         .as_ref()
@@ -1047,10 +1084,7 @@ pub fn getmininginfo(ctx: &RpcContext) -> Result<Value, Value> {
         m.insert("currentblocktx".into(), json!(txs));
     }
     m.insert("difficulty".into(), difficulty);
-    m.insert(
-        "networkhashps".into(),
-        core_f64_json(network_hash_ps(ctx, 120, i64::from(tip.0)).unwrap_or(0.0)),
-    );
+    m.insert("networkhashps".into(), core_f64_json(hashps));
     m.insert("pooledtx".into(), json!(pooledtx));
     let min_sat = ctx
         .chain

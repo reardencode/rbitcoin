@@ -2482,6 +2482,8 @@ impl ChainHub {
                     .map(|tx| tx.compute_txid())
                     .collect::<Vec<Txid>>()
             });
+            let weight = txs.iter().map(|tx| tx.weight().to_wu()).sum();
+            self.note_block_assembled(weight, txs.len());
             hashes.push(self.mine_and_accept_paying(script_pubkey.clone(), txs)?);
             if let Some(ids) = ids.filter(|ids| !ids.is_empty()) {
                 let Some(mp) = self.mempool() else {
