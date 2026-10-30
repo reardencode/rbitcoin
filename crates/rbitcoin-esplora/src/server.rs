@@ -331,14 +331,22 @@ pub async fn stamp_chain_view_mw(State(st): State<AppState>, req: Request, next:
     let pre_view = if path_never_pins(&path) || asof.is_some() {
         None
     } else if path_uses_sh_view(&path) {
-        match st.query.pin_sh_chain_view() {
-            Ok(v) => v,
-            Err(e) => return store_err(e),
+        let q = std::sync::Arc::clone(&st.query);
+        match crate::handlers::store_blocking(move || q.pin_sh_chain_view()).await {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return store_err(e),
+            Err(e) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            }
         }
     } else {
-        match st.query.pin_chain_view() {
-            Ok(v) => v,
-            Err(e) => return store_err(e),
+        let q = std::sync::Arc::clone(&st.query);
+        match crate::handlers::store_blocking(move || q.pin_chain_view()).await {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return store_err(e),
+            Err(e) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            }
         }
     };
     let mut resp = next.run(req).await;
@@ -346,14 +354,16 @@ pub async fn stamp_chain_view_mw(State(st): State<AppState>, req: Request, next:
     let Some(view) = view else {
         return resp;
     };
-    match view.still_live(&st.query) {
-        Ok(true) => {
+    let q = std::sync::Arc::clone(&st.query);
+    match crate::handlers::store_blocking(move || view.still_live(&q)).await {
+        Ok(Ok(true)) => {
             stamp_chain_view_headers(&mut resp, &view);
             resp
         }
-        Ok(false) if asof.is_some() => not_found(),
-        Ok(false) => (StatusCode::SERVICE_UNAVAILABLE, "chain view moved").into_response(),
-        Err(e) => store_err(e),
+        Ok(Ok(false)) if asof.is_some() => not_found(),
+        Ok(Ok(false)) => (StatusCode::SERVICE_UNAVAILABLE, "chain view moved").into_response(),
+        Ok(Err(e)) => store_err(e),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 

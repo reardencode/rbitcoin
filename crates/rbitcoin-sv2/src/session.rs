@@ -430,11 +430,16 @@ impl Session {
         // past this, so the next check rebuilds. Stored only once the build
         // returns: a failed one leaves the generation for the next check.
         let updates = self.chain.mempool().map_or(0, |m| m.template_updates());
-        let prev = self
-            .chain
-            .mempool()
-            .and_then(|m| m.template_prev())
-            .unwrap_or([0u8; 32]);
+        // `template_prev` shares its mutex with the connect hold. Take it on
+        // a std thread so a connect does not park this Tokio worker.
+        let chain = Arc::clone(&self.chain);
+        let prev = rbitcoin_net::off_pool(move || {
+            chain
+                .mempool()
+                .and_then(|m| m.template_prev())
+                .unwrap_or([0u8; 32])
+        })
+        .await;
         let key = template::TemplateKey {
             prev_hash: prev,
             max_additional_size: size,

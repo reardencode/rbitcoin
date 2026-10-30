@@ -43,7 +43,7 @@ fn runtime(blocking: usize) -> tokio::runtime::Runtime {
 #[test]
 fn one_build_serves_the_same_key_and_a_different_budget_builds_again() {
     runtime(4).block_on(async {
-        let flight = TemplateFlight::new();
+        let flight = Arc::new(TemplateFlight::new());
         let builds = Arc::new(AtomicUsize::new(0));
         let same = key(10, 1);
 
@@ -105,6 +105,77 @@ fn one_build_serves_the_same_key_and_a_different_budget_builds_again() {
             .await
             .expect("ibd retry");
         assert_eq!(builds.load(Ordering::SeqCst), 5);
+
+        let n = Arc::clone(&builds);
+        let odd = TemplateKey {
+            prev_hash: [9u8; 32],
+            ..key(3, 9)
+        };
+        flight
+            .get_or_build(odd, move || {
+                n.fetch_add(1, Ordering::SeqCst);
+                let mut built = dummy();
+                built.prev_hash = [1u8; 32];
+                Ok(Some(built))
+            })
+            .await
+            .expect("mismatched tip");
+        let n = Arc::clone(&builds);
+        flight
+            .get_or_build(odd, move || {
+                n.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(dummy()))
+            })
+            .await
+            .expect("mismatch is not reused");
+        assert_eq!(builds.load(Ordering::SeqCst), 7);
+    });
+}
+
+#[test]
+fn dropped_caller_keeps_the_flight_until_the_build_finishes() {
+    runtime(1).block_on(async {
+        let flight = Arc::new(TemplateFlight::new());
+        let (release, gate) = tokio::sync::oneshot::channel::<()>();
+        let builds = Arc::new(AtomicUsize::new(0));
+        let started = Arc::clone(&builds);
+        let building = Arc::clone(&flight);
+        let first = tokio::spawn(async move {
+            building
+                .get_or_build(key(4, 8), move || {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    let _ = gate.blocking_recv();
+                    Ok(Some(dummy()))
+                })
+                .await
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while builds.load(Ordering::SeqCst) == 0 {
+            assert!(std::time::Instant::now() < deadline, "build never started");
+            tokio::task::yield_now().await;
+        }
+        first.abort();
+        let _ = first.await;
+
+        let waiting = Arc::clone(&flight);
+        let second = tokio::spawn(async move {
+            waiting
+                .get_or_build(key(4, 8), || panic!("waiter must not build"))
+                .await
+                .expect("waiter")
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !second.is_finished(),
+            "waiter finished while the dropped caller's build still held the flight"
+        );
+        release.send(()).expect("release");
+        let reused = tokio::time::timeout(Duration::from_secs(2), second)
+            .await
+            .expect("waiter finishes after the build")
+            .expect("join");
+        assert!(reused.is_some());
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
     });
 }
 

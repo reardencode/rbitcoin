@@ -1825,6 +1825,78 @@ async fn long_poll_does_not_hold_the_store_budget() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[tokio::test]
+async fn batched_long_poll_does_not_hold_the_store_budget() {
+    let dir = rbitcoin_store::testutil::TempDir::labeled("rpc-batch-wait-budget").expect("dir");
+    let hub = rbitcoin_net::ChainHub::new(
+        Query::open_or_create_tiny(dir.join("store")).unwrap(),
+        rbitcoin_consensus::ChainParams::regtest(),
+        rbitcoin_consensus::Milestone::NONE,
+    );
+    hub.ensure_genesis().unwrap();
+    let query = Arc::clone(&hub.query);
+    query.set_api_read_budget(1);
+    let cfg = RpcConfig {
+        listen: Some("127.0.0.1:0".parse().unwrap()),
+        socket_path: None,
+        socket_shared: false,
+        datadir: dir.path().to_path_buf(),
+        network: Network::Regtest,
+        token_path: None,
+        cookie_path: None,
+        cookie_perms: RpcCookiePerms::Owner,
+        subversion: None,
+        work_queue: Some(4),
+        rest: false,
+        alert_notify: None,
+        blocksonly: false,
+        package_dialect: false,
+    };
+    let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    let addr = tcp_addr(&handle);
+    let auth = handle.auth.clone();
+    let waiter = tokio::spawn(async move {
+        let body = serde_json::json!([
+            {
+                "jsonrpc": "1.0",
+                "id": "w",
+                "method": "waitfornewblock",
+                "params": [5_000]
+            },
+            {
+                "jsonrpc": "1.0",
+                "id": "c",
+                "method": "getblockcount",
+                "params": []
+            }
+        ])
+        .to_string();
+        post_raw(addr, &auth, body.as_bytes()).await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let (st, body) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        post_raw(
+            tcp_addr(&handle),
+            &handle.auth,
+            br#"{"jsonrpc":"1.0","id":1,"method":"getblockcount"}"#,
+        ),
+    )
+    .await
+    .expect("getblockcount while a batched long-poll holds no disk permit");
+    assert_eq!(st, 200, "{body:?}");
+    assert!(
+        !waiter.is_finished(),
+        "batched long-poll returned before the probe"
+    );
+    waiter.abort();
+    handle.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[allow(clippy::cognitive_complexity)] // one listener, envelope junk table
 #[tokio::test]
 async fn jsonrpc_envelope_junk_and_auth() {

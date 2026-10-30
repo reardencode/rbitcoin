@@ -1841,7 +1841,7 @@ pub async fn submitblock_async(ctx: &RpcContext, params: &RpcParams) -> Result<V
         return Err(rpc_error(ERR_MISC, "submitblock requires a live chain hub"));
     };
     let chain_prep = std::sync::Arc::clone(&chain);
-    let prepared = crate::methods::off_pool(move || -> Result<SubmitPrep, Value> {
+    let prepared = rbitcoin_net::off_pool_budgeted(move || -> Result<SubmitPrep, Value> {
         let raw = rbitcoin_primitives::hex_decode(&hex)
             .map_err(|_| rpc_error(ERR_DESERIALIZATION, "Block decode failed"))?;
         let block: Block =
@@ -1856,7 +1856,11 @@ pub async fn submitblock_async(ctx: &RpcContext, params: &RpcParams) -> Result<V
             already_held,
         } => {
             let result = chain.accept_received_block_async(block.clone()).await;
-            finish_submit(&chain, already_held, &block, result)
+            let chain_fin = std::sync::Arc::clone(&chain);
+            rbitcoin_net::off_pool_budgeted(move || {
+                finish_submit(&chain_fin, already_held, &block, result)
+            })
+            .await
         }
     };
     submit_outcome_json(outcome)

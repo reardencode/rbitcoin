@@ -1029,7 +1029,11 @@ pub async fn sendrawtransaction_async(
     }
     let ctx_fee = Arc::clone(ctx);
     let tx_fee = tx.clone();
-    if super::off_pool(move || rpc_tx_fee_exceeds_max(&ctx_fee, &tx_fee, max_feerate)).await {
+    if rbitcoin_net::off_pool_budgeted(move || {
+        rpc_tx_fee_exceeds_max(&ctx_fee, &tx_fee, max_feerate)
+    })
+    .await
+    {
         return Err(rpc_error(
             ERR_VERIFY_ERROR,
             "Fee exceeds maximum configured by user (e.g. -maxtxfee, maxfeerate)",

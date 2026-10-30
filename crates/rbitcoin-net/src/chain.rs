@@ -2547,6 +2547,21 @@ impl ChainHub {
         Ok(hashes)
     }
 
+    /// Sync generate runs on stack hubs, `dispatch()` tests, and some
+    /// `#[tokio::test]` tasks. `blocking_lock` panics on a Tokio worker even
+    /// when the lock is free, so a worker only uses `try_lock`.
+    fn lock_generate_sync(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return self.generate_lock.blocking_lock();
+        }
+        loop {
+            if let Ok(guard) = self.generate_lock.try_lock() {
+                return guard;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     fn drain_generate_indexes(&self) {
         if let Err(e) = self.query.apply_sh_pending() {
             rbitcoin_log::warn!("generate: SH write-behind drain: {e}");
@@ -2590,7 +2605,7 @@ impl ChainHub {
         self.ensure_genesis()?;
         // Serialize tip-read + mine + accept so concurrent generateblock
         // (rpc_generate.py parallel) cannot race the same tip into AlreadyHave.
-        let _guard = self.generate_lock.blocking_lock();
+        let _guard = self.lock_generate_sync();
         let mut hashes = Vec::with_capacity(nblocks as usize);
         let mut extras = extra_txs;
         for i in 0..nblocks {

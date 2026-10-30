@@ -181,36 +181,52 @@ pub async fn block_status(State(st): State<AppState>, Path(hash_hex): Path<Strin
     let Ok(hash) = parse_hash32(&hash_hex) else {
         return not_found();
     };
-    if st.query.get_header_by_hash(&hash).ok().flatten().is_none() {
-        return not_found();
-    }
-    match st.query.height_of_hash(&hash) {
-        Ok(None) => json_reply_here(json!({
-            "in_best_chain": false,
-            "height": null,
-            "next_best": null,
-        })),
-        Ok(Some(h)) => {
-            let next_best = if let Some(tip) = st.query.tip_height() {
-                if h.0 < tip.0 {
-                    match st.query.header_at_height(Height(h.0 + 1)) {
-                        Ok(Some((_fk, rec))) => json!(block_hash_hex(&rec.hash)),
-                        _ => Value::Null,
+    let q = std::sync::Arc::clone(&st.query);
+    spawn_join(move || {
+        if q.get_header_by_hash(&hash).ok().flatten().is_none() {
+            return not_found();
+        }
+        match q.height_of_hash(&hash) {
+            Ok(None) => json_reply_here(json!({
+                "in_best_chain": false,
+                "height": null,
+                "next_best": null,
+            })),
+            Ok(Some(h)) => {
+                let next_best = if let Some(tip) = st.query.tip_height() {
+                    if h.0 < tip.0 {
+                        match st.query.header_at_height(Height(h.0 + 1)) {
+                            Ok(Some((_fk, rec))) => json!(block_hash_hex(&rec.hash)),
+                            _ => Value::Null,
+                        }
+                    } else {
+                        Value::Null
                     }
                 } else {
                     Value::Null
-                }
-            } else {
-                Value::Null
-            };
-            json_reply_here(json!({
-                "in_best_chain": true,
-                "height": h.0,
-                "next_best": next_best,
-            }))
+                };
+                json_reply_here(json!({
+                    "in_best_chain": true,
+                    "height": h.0,
+                    "next_best": next_best,
+                }))
+            }
+            Err(e) => store_err(e),
         }
-        Err(e) => store_err(e),
-    }
+    })
+    .await
+}
+
+pub(crate) async fn store_blocking<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, tokio::task::JoinError> {
+    let store_permit = rbitcoin_net::acquire_armed_store_budget().await;
+    tokio::task::spawn_blocking(move || {
+        let _g = rbitcoin_net::BlockingRegion::enter();
+        let _store = store_permit;
+        f()
+    })
+    .await
 }
 
 pub async fn block_txid_at(
@@ -2285,7 +2301,7 @@ pub async fn post_txs_test(
                 }
             }
         }
-        return json_reply_here(out);
+        json_reply_here(out)
     }
 }
 

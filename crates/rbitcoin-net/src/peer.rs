@@ -29,9 +29,11 @@ use bitcoin::{Block, BlockHash, Transaction};
 use rbitcoin_primitives::Height;
 use rbitcoin_query::Query;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
@@ -1781,6 +1783,14 @@ pub async fn peer_session_with(
         follow.wtxid_relay = s.wtxid_relay();
     }
     let mut requested_since: Option<std::time::Instant> = None;
+    // Heavy decodes wait for a pool-sized permit. That wait stays off this
+    // loop so the next TCP read is not behind it. Frames that arrive while
+    // a decode is queued stay in order behind it. The cap bounds framed
+    // bodies sitting in front of a full permit set.
+    const DECODE_AHEAD: usize = 8;
+    let mut decode_q: VecDeque<
+        tokio::sync::oneshot::Receiver<Result<RawNetworkMessage, NetError>>,
+    > = VecDeque::new();
     let mut rate = PeerRateLimiter::default_limits();
     let decoy_score = AtomicU32::new(0);
     let mut logged_invalid_v2 = false;
@@ -1808,13 +1818,47 @@ pub async fn peer_session_with(
             let over_budget = session.as_ref().is_some_and(|s| s.send_over_budget());
             let tail_pending =
                 !follow.getdata_tail.is_empty() || !follow.getblocktxn_tail.is_empty();
-            let reading = !over_budget && !tail_pending;
+            let reading = !over_budget && !tail_pending && decode_q.len() < DECODE_AHEAD;
             let hb_wait = SESSION_HEARTBEAT.saturating_sub(last_hb.elapsed());
             decoy_score.store(follow.ban_score, Ordering::Relaxed);
             tokio::select! {
                 biased;
                 // Peer half-close / write failure: tear down so getpeerinfo
                 // clears without waiting on a stuck read/decode arm.
+                decoded = std::future::poll_fn(|cx| {
+                    let Some(rx) = decode_q.front_mut() else {
+                        return Poll::Pending;
+                    };
+                    std::pin::Pin::new(rx).poll(cx)
+                }), if !decode_q.is_empty() => {
+                    decode_q.pop_front();
+                    let decoded = match decoded {
+                        Ok(r) => r,
+                        Err(_) => return Err(NetError::Protocol("decode task dropped")),
+                    };
+                    let n_req = follow.requested_blocks.len();
+                    apply_decoded_peer_msg(
+                        decoded,
+                        hub.as_ref(),
+                        &out_tx,
+                        follow,
+                        session.as_deref(),
+                    )
+                    .await?;
+                    let n_after = follow.requested_blocks.len();
+                    if n_after == 0 {
+                        requested_since = None;
+                    } else if n_after < n_req || n_req == 0 {
+                        requested_since = Some(std::time::Instant::now());
+                    }
+                    if misbehavior_disconnects(follow.ban_score, session.as_deref()) {
+                        rbitcoin_log::warn!(
+                            "{}",
+                            misbehavior_disconnect_log(&peer_s, follow.ban_score)
+                        );
+                        return Err(threshold_disconnect(session.as_deref()));
+                    }
+                }
                 writer_done = &mut writer_task => {
                     let _ = writer_done;
                     return Ok(());
@@ -1915,6 +1959,24 @@ pub async fn peer_session_with(
                         continue;
                     }
                     let n_req = follow.requested_blocks.len();
+                    if frame.is_block() || frame.decode_is_cpu_heavy() {
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        tokio::spawn(async move {
+                            let _ = tx.send(decode_framed_offload(frame).await);
+                        });
+                        decode_q.push_back(rx);
+                        continue;
+                    }
+                    if !decode_q.is_empty() {
+                        // A heavy decode is still in flight. This frame is
+                        // cheap (no permit). Hold it behind the frames already
+                        // queued so a block is not overtaken by the tx or inv
+                        // that followed it on the wire.
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        let _ = tx.send(frame.try_decode());
+                        decode_q.push_back(rx);
+                        continue;
+                    }
                     handle_peer_frame(
                         frame,
                         hub.as_ref(),
@@ -2812,6 +2874,24 @@ pub fn serve_mempool_getdata(
         return Ok(true);
     }
     Ok(false)
+}
+
+async fn apply_decoded_peer_msg(
+    decoded: Result<RawNetworkMessage, NetError>,
+    hub: &ChainHub,
+    out_tx: &mpsc::UnboundedSender<PeerOut>,
+    follow: &mut PeerFollowState,
+    session: Option<&crate::peers::LivePeer>,
+) -> Result<(), NetError> {
+    let msg = match decoded {
+        Ok(m) => m,
+        Err(NetError::MessageTooLarge(n)) => {
+            follow.ban_score = follow.ban_score.saturating_add(OVERSIZE_BAN_SCORE);
+            return Err(NetError::MessageTooLarge(n));
+        }
+        Err(e) => return Err(e),
+    };
+    handle_decoded_peer_msg(msg, hub, out_tx, follow, session).await
 }
 
 pub async fn handle_peer_frame(

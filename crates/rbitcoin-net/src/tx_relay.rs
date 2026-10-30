@@ -2562,6 +2562,7 @@ impl MempoolHub {
     }
 
     /// Recheck coins, commit, and publish. The caller already ran scripts.
+    #[allow(clippy::too_many_arguments)] // one call site; stage inputs stay unbundled
     fn commit_admitted(
         &self,
         tx: &Transaction,
@@ -3091,6 +3092,7 @@ impl MempoolHub {
         Self::apply_script_admit(prep, verified, script_us, &spec, stages)
     }
 
+    #[allow(clippy::too_many_arguments)] // one call site; stage inputs stay unbundled
     async fn accept_prepare_failed_async(
         self: &Arc<Self>,
         tx: Transaction,
@@ -3858,6 +3860,7 @@ impl MempoolHub {
     }
 
     /// Trim, index, and promote after every member committed.
+    #[allow(clippy::too_many_arguments)] // one call site; stage inputs stay unbundled
     fn finish_accepted_package(
         &self,
         txs: &[Transaction],
@@ -4912,7 +4915,7 @@ impl MempoolHub {
             .map(|(tx, _)| tx.clone())
             .collect();
         if package_eval && rest.len() >= 2 {
-            Self::note_package_full(&txs, &rest, &mut out, self.accept_package(&rest));
+            Self::note_package_full(txs, &rest, &mut out, self.accept_package(&rest));
         }
         self.package_rows_after_eval(txs, out, rest)
     }

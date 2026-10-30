@@ -176,14 +176,20 @@ pub struct TemplateKey {
 /// same [`TemplateKey`]. A different key builds once the permit is free.
 /// `Ok(None)` is not stored: IBD and an unmaintained pool retry.
 pub struct TemplateFlight {
-    one: Semaphore,
+    one: Arc<Semaphore>,
     slot: Mutex<Option<(TemplateKey, Template)>>,
+}
+
+impl Default for TemplateFlight {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TemplateFlight {
     pub fn new() -> Self {
         Self {
-            one: Semaphore::new(1),
+            one: Arc::new(Semaphore::new(1)),
             slot: Mutex::new(None),
         }
     }
@@ -194,38 +200,52 @@ impl TemplateFlight {
     }
 
     /// Run `build` off the reactor when `key` is not already stored.
-    /// `build` is the mempool selection; it runs only while this flight
-    /// holds its single permit.
-    pub async fn get_or_build<F>(&self, key: TemplateKey, build: F) -> io::Result<Option<Template>>
-    where
-        F: FnOnce() -> io::Result<Option<Template>> + Send + 'static,
-    {
+    /// The permit lives in a task that outlives this call, so a dropped
+    /// session does not let a second build start, and the result is stored
+    /// when the build finishes. A template whose `prev_hash` is not `key`'s
+    /// is not stored.
+    pub async fn get_or_build(
+        self: &Arc<Self>,
+        key: TemplateKey,
+        build: impl FnOnce() -> io::Result<Option<Template>> + Send + 'static,
+    ) -> io::Result<Option<Template>> {
         if let Some(hit) = self.cached(&key) {
             return Ok(Some(hit));
         }
-        let permit = self.one.acquire().await.expect("sv2 template flight");
+        let permit = Arc::clone(&self.one)
+            .acquire_owned()
+            .await
+            .expect("sv2 template flight");
         if let Some(hit) = self.cached(&key) {
             drop(permit);
             return Ok(Some(hit));
         }
-        let built = match tokio::task::spawn_blocking(build).await {
-            Ok(built) => built,
-            Err(e) => {
-                drop(permit);
-                return Err(io::Error::other(e));
+        let flight = Arc::clone(self);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let built = match tokio::task::spawn_blocking(build).await {
+                Ok(built) => built,
+                Err(e) => {
+                    let _ = tx.send(Err(io::Error::other(e)));
+                    return;
+                }
+            };
+            let built = match built {
+                Ok(t) => t,
+                Err(e) => {
+                    let _ = tx.send(Err(e));
+                    return;
+                }
+            };
+            if let Some(t) = built.clone() {
+                if t.prev_hash == key.prev_hash {
+                    *flight.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, t));
+                }
             }
-        };
-        let built = match built {
-            Ok(t) => t,
-            Err(e) => {
-                drop(permit);
-                return Err(e);
-            }
-        };
-        if let Some(t) = built.clone() {
-            *self.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, t));
-        }
-        drop(permit);
-        Ok(built)
+            let _ = tx.send(Ok(built));
+        });
+        rx.await
+            .map_err(|_| io::Error::other("sv2 template flight dropped"))?
     }
 }

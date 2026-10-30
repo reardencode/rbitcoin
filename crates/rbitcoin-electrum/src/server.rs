@@ -1007,6 +1007,16 @@ fn dispatch_join_error(e: tokio::task::JoinError) -> std::io::Error {
     std::io::Error::other(format!("electrum dispatch join: {e}"))
 }
 
+/// Store reads that also change connection state. They stay serial in a
+/// batch, and they still take the shared disk budget.
+fn method_reads_store(method: &str) -> bool {
+    method_reads_only(method)
+        || matches!(
+            method,
+            "blockchain.headers.subscribe" | "blockchain.scripthash.subscribe"
+        )
+}
+
 fn spawn_dispatch(
     ctx: &RequestCtx<'_>,
     work: ElectrumConn,
@@ -1018,7 +1028,7 @@ fn spawn_dispatch(
     let mp = ctx.mempool.clone();
     let method = asked.method.clone();
     let params = asked.params.clone();
-    let reads = method_reads_only(&method);
+    let reads = method_reads_store(&method);
     // The permit wait stays on this task. The blocking pool is taken only
     // after a slot is free, so a budget of 1 serializes the reads.
     tokio::spawn(async move {

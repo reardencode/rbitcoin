@@ -448,6 +448,24 @@ pub async fn satisfy_http_wait(
     ctx: &Arc<crate::methods::RpcContext>,
     parsed: &serde_json::Value,
 ) -> bool {
+    // A batch has no top-level method. Wait each long-poll here, before the
+    // disk permit, or the blocking dispatch sleeps while holding it.
+    if let Some(batch) = parsed.as_array() {
+        let mut any = false;
+        for item in batch {
+            if Box::pin(satisfy_http_wait(ctx, item)).await {
+                any = true;
+            }
+        }
+        return any;
+    }
+    satisfy_one_http_wait(ctx, parsed).await
+}
+
+async fn satisfy_one_http_wait(
+    ctx: &Arc<crate::methods::RpcContext>,
+    parsed: &serde_json::Value,
+) -> bool {
     use crate::methods::mine::{gbt_request, GbtRequest};
     use crate::methods::{tip_hash_height, wait_timeout_ms, RpcParams};
     let Some(method) = parsed.get("method").and_then(|m| m.as_str()) else {
@@ -815,7 +833,7 @@ async fn exec_http_rpc_async(
     if let Some(arr) = parsed.as_array() {
         let mut out = Vec::new();
         for req in arr {
-            match exec_one_async(&ctx, &req, waited).await {
+            match exec_one_async(&ctx, req, waited).await {
                 OneOut::Reply(body) => out.push(body),
                 OneOut::Notification => {}
                 OneOut::BadVersion { error } => {
