@@ -156,7 +156,6 @@ async fn rpc_smoke_getblockcount_and_help() {
     let handle = run_rpc(cfg, q, Some(mp), None, None, None, None)
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
 
     let count = post_rpc(
         tcp_addr(&handle),
@@ -256,7 +255,6 @@ async fn rest_is_404_without_the_flag() {
         package_dialect: false,
     };
     let handle = run_rpc(cfg, q, None, None, None, None, None).await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut rest = tokio::net::TcpStream::connect(tcp_addr(&handle))
         .await
@@ -471,7 +469,6 @@ async fn jsonrpc_v2_batch_and_http_codes() {
     let handle = run_rpc(cfg, q, Some(mp), None, None, None, None)
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
 
     let batch = serde_json::json!([
         {"jsonrpc":"2.0","id":1,"method":"getblockcount"},
@@ -554,7 +551,6 @@ async fn unauthorized_large_content_length_is_401_before_body() {
         package_dialect: false,
     };
     let handle = run_rpc(cfg, q, None, None, None, None, None).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(40)).await;
     let mut stream = tokio::net::TcpStream::connect(tcp_addr(&handle))
         .await
         .unwrap();
@@ -599,7 +595,6 @@ async fn oversized_bearer_body_is_413_and_small_body_still_runs() {
         package_dialect: false,
     };
     let handle = run_rpc(cfg, q, None, None, None, None, None).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(40)).await;
     let (st, body) = post_raw(
         tcp_addr(&handle),
         &handle.auth,
@@ -869,7 +864,6 @@ async fn large_block_submit_and_proposal_clear_http_413() {
     let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
     let token = handle.auth.token.clone();
 
     let proposal_tcp = post_authed(
@@ -1059,7 +1053,6 @@ async fn waitforblock_positional_hash_returns_current_tip() {
     let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
     let (st, body) = post_raw(
         tcp_addr(&handle),
         &handle.auth,
@@ -1312,7 +1305,6 @@ async fn stalled_rpc_connections_expire_and_free_capacity() {
     let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
     let addr = tcp_addr(&handle);
     let request = br#"{"jsonrpc":"1.0","id":1,"method":"getblockcount"}"#;
     let keepalive = format!(
@@ -1430,8 +1422,7 @@ fn waitfor_does_not_hold_the_blocking_pool() {
         let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
             .await
             .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-        let addr = tcp_addr(&handle);
+            let addr = tcp_addr(&handle);
         let auth = handle.auth.clone();
         let waiter = tokio::spawn(async move {
             let body = serde_json::json!({
@@ -1454,8 +1445,7 @@ fn waitfor_does_not_hold_the_blocking_pool() {
             let mut buf = Vec::new();
             let _ = stream.read_to_end(&mut buf).await;
         });
-        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-        let t0 = std::time::Instant::now();
+            let t0 = std::time::Instant::now();
         tokio::task::spawn_blocking(|| ()).await.unwrap();
         assert!(
             t0.elapsed() < std::time::Duration::from_millis(400),
@@ -1504,7 +1494,6 @@ async fn long_poll_does_not_hold_the_work_queue() {
     let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
     let addr = tcp_addr(&handle);
     let auth = handle.auth.clone();
     let waiter = tokio::spawn(async move {
@@ -1603,7 +1592,6 @@ async fn rpc_work_queue_exceeded() {
     let handle = run_rpc(cfg, q, Some(mp), None, None, None, None)
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
     let (st, body) = post_raw(
         tcp_addr(&handle),
         &handle.auth,
@@ -1692,7 +1680,6 @@ async fn jsonrpc_envelope_junk_and_auth() {
     let handle = run_rpc(cfg, q, Some(mp), None, None, None, None)
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
     let addr = tcp_addr(&handle);
     let auth = &handle.auth;
 
@@ -2117,7 +2104,6 @@ async fn unix_socket_needs_no_http_auth() {
         package_dialect: false,
     };
     let handle = run_rpc(cfg, q, None, None, None, None, None).await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
     assert!(sock.exists(), "socket file");
     {
         use std::os::unix::fs::PermissionsExt;
