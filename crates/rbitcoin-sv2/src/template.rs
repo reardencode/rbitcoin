@@ -178,6 +178,10 @@ pub struct TemplateKey {
 pub struct TemplateFlight {
     one: Arc<Semaphore>,
     slot: Mutex<Option<(TemplateKey, Template)>>,
+    /// The build task owns the flight permit. The handle stays here so the
+    /// task is not detached at the call, and so a dropped session cannot
+    /// abort a build that later sessions still share.
+    inflight: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Default for TemplateFlight {
@@ -191,6 +195,7 @@ impl TemplateFlight {
         Self {
             one: Arc::new(Semaphore::new(1)),
             slot: Mutex::new(None),
+            inflight: Mutex::new(None),
         }
     }
 
@@ -222,7 +227,7 @@ impl TemplateFlight {
         }
         let flight = Arc::clone(self);
         let (tx, rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let _permit = permit;
             let built = match tokio::task::spawn_blocking(build).await {
                 Ok(built) => built,
@@ -245,6 +250,7 @@ impl TemplateFlight {
             }
             let _ = tx.send(Ok(built));
         });
+        *self.inflight.lock().unwrap_or_else(|e| e.into_inner()) = Some(task);
         rx.await
             .map_err(|_| io::Error::other("sv2 template flight dropped"))?
     }

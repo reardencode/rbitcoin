@@ -1791,6 +1791,7 @@ pub async fn peer_session_with(
     let mut decode_q: VecDeque<
         tokio::sync::oneshot::Receiver<Result<RawNetworkMessage, NetError>>,
     > = VecDeque::new();
+    let mut decode_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     let mut rate = PeerRateLimiter::default_limits();
     let decoy_score = AtomicU32::new(0);
     let mut logged_invalid_v2 = false;
@@ -1961,9 +1962,11 @@ pub async fn peer_session_with(
                     let n_req = follow.requested_blocks.len();
                     if frame.is_block() || frame.decode_is_cpu_heavy() {
                         let (tx, rx) = tokio::sync::oneshot::channel();
-                        tokio::spawn(async move {
+                        let task = tokio::spawn(async move {
                             let _ = tx.send(decode_framed_offload(frame).await);
                         });
+                        decode_tasks.retain(|t| !t.is_finished());
+                        decode_tasks.push(task);
                         decode_q.push_back(rx);
                         continue;
                     }
