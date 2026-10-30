@@ -13,8 +13,8 @@ use bitcoin::{
     Work,
 };
 use rbitcoin_consensus::{
-    genesis_block, mine_op_true_signet_paying, mine_regtest_paying, validate_header_on_parent,
-    ChainParams, Milestone,
+    genesis_block, mine_op_true_signet_paying, try_mine_regtest_paying_bits,
+    validate_header_on_parent, ChainParams, Milestone,
 };
 use rbitcoin_log::{debug, info, warn};
 use rbitcoin_primitives::{Fk, Height};
@@ -2027,6 +2027,23 @@ impl ChainHub {
         parent_height: u32,
         in_batch: &HashMap<[u8; 32], HeaderSyncNode>,
     ) -> Result<CompactTarget, NetError> {
+        let bits = self.expected_bits_off_tip_base(header, parent, parent_height, in_batch)?;
+        Ok(rbitcoin_consensus::header::apply_regtest_pow_overlay(
+            &self.params,
+            parent_height.saturating_add(1),
+            bits,
+            parent.time,
+            header.time,
+        ))
+    }
+
+    fn expected_bits_off_tip_base(
+        &self,
+        header: &Header,
+        parent: &Header,
+        parent_height: u32,
+        in_batch: &HashMap<[u8; 32], HeaderSyncNode>,
+    ) -> Result<CompactTarget, NetError> {
         let height = parent_height.saturating_add(1);
         let interval = self.params.difficulty_adjustment_interval();
         if height == 0 {
@@ -2062,9 +2079,7 @@ impl ChainHub {
             return parent.bits;
         }
         let limit = self.params.pow_limit.to_compact_lossy();
-        let spacing = self.params.btc.pow_target_spacing;
-        if u64::from(header.time) > u64::from(parent.time).saturating_add(spacing.saturating_mul(2))
-        {
+        if rbitcoin_consensus::header::min_diff_gap(&self.params, parent.time, header.time) {
             return limit;
         }
         let interval = self.params.difficulty_adjustment_interval();
@@ -2342,7 +2357,7 @@ impl ChainHub {
         )
     }
 
-    /// Regtest uses the trivial-bits miner. An `OP_TRUE` signet uses signet
+    /// Regtest mines at the next-work bits. An `OP_TRUE` signet uses signet
     /// bits and an empty BIP325 solution so `generatetoaddress` can extend
     /// that challenge the way Bitcoin Core's miner does.
     #[doc(hidden)]
@@ -2360,13 +2375,22 @@ impl ChainHub {
             .as_ref()
             .is_some_and(|s| s.as_bytes() == [rbitcoin_primitives::OP_TRUE]);
         if !op_true {
-            return Ok(mine_regtest_paying(
+            let bits = rbitcoin_query::expected_next_bits(
+                self.query.as_ref(),
+                &self.params,
+                Height(height),
+                time,
+            )
+            .map_err(NetError::from_confirm)?;
+            return try_mine_regtest_paying_bits(
                 prev,
                 time,
                 height,
                 script_pubkey,
                 extra_txs,
-            ));
+                bits,
+            )
+            .map_err(|e| NetError::Consensus(e.into()));
         }
         let bits = self
             .tip_header()

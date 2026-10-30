@@ -606,6 +606,27 @@ fn generate_accepts_its_cap_and_refuses_one_more() {
     assert_eq!(hub.tip_height(), Some(2));
 }
 
+/// Block 1 on a real clock is still the pow limit (the min-difficulty gap).
+/// Block 2 takes the overlay. `0x1b7fffff` does not fit one nonce span, so
+/// generate returns instead of panicking inside the grind.
+#[test]
+fn generate_returns_when_regtest_pow_does_not_fit_one_nonce_span() {
+    let (_dir, mut hub) = tmp_hub();
+    hub.params.apply_regtest_pow_bits(0x1b7f_ffff).unwrap();
+    let err = hub
+        .generate_to_script(2, ScriptBuf::from_bytes(vec![0x51]), vec![])
+        .expect_err("block 2 cannot be ground");
+    assert!(
+        err.to_string().contains("regtest pow grind exhausted"),
+        "{err}"
+    );
+    assert_eq!(hub.tip_height(), Some(1));
+    assert_eq!(
+        hub.tip_header().unwrap().bits,
+        CompactTarget::from_consensus(0x207f_ffff)
+    );
+}
+
 #[test]
 fn rewind_defers_while_a_tip_commit_is_open() {
     let (dir, hub) = tmp_hub();

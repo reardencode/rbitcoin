@@ -491,6 +491,8 @@ pub struct NodeConfig {
     pub uacomments: Vec<String>,
     /// `--test-activation-height=name@height` (regtest).
     pub test_activation_heights: Vec<(String, u32)>,
+    /// `--regtest-pow-bits` compact bits fixed for every regtest block >= 1.
+    pub regtest_pow_bits: Option<u32>,
     /// Do not evict/ban inbound (`--trusted`; Core functional `-whitelist=noban`).
     pub trusted: bool,
     /// Always announce inbound txs (`--always-relay`; Core `forcerelay`).
@@ -607,6 +609,7 @@ impl Default for NodeConfig {
             asmap: None,
             uacomments: Vec::new(),
             test_activation_heights: Vec::new(),
+            regtest_pow_bits: None,
             trusted: false,
             always_relay: false,
             relay: false,
@@ -766,6 +769,11 @@ impl NodeConfig {
                 .map_err(|e| {
                     NodeError::Config(format!("test_activation_height {name}@{height}: {e}"))
                 })?;
+        }
+        if let Some(bits) = self.regtest_pow_bits {
+            params
+                .apply_regtest_pow_bits(bits)
+                .map_err(|e| NodeError::Config(format!("regtest_pow_bits: {e}")))?;
         }
         Ok(params)
     }
@@ -1599,6 +1607,12 @@ impl NodeConfig {
                     .map_err(|e| NodeError::Config(format!("conf test_activation_height: {e}")))?;
                 self.test_activation_heights
                     .push((name.to_string(), height));
+            }
+            "regtest_pow_bits" => {
+                self.regtest_pow_bits = Some(
+                    ChainParams::parse_regtest_pow_bits(val)
+                        .map_err(|e| NodeError::Config(format!("conf regtest_pow_bits: {e}")))?,
+                );
             }
             "persist_mempool" => {
                 self.mempool.persist = parse_conf_bool(val)

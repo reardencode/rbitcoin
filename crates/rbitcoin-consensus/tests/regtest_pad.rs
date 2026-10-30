@@ -57,6 +57,51 @@ fn mine_empty_regtest_uses_regtest_halving_subsidy() {
     );
 }
 
+/// `0x1b7fffff` is about 2^40 times the regtest pow limit, past one nonce span.
+/// `generatetoaddress` must return that miss instead of scanning 2^32 nonces.
+#[test]
+fn regtest_grind_past_one_nonce_span_is_an_error() {
+    let hard = CompactTarget::from_consensus(0x1b7f_ffff);
+    let easy = CompactTarget::from_consensus(0x200f_ffff);
+    let changelog = CompactTarget::from_consensus(0x1f7f_ffff);
+    // Just over 2^31 times the regtest pow limit. Regtest generate refuses
+    // it. A signet retarget at these bits is still under the signet pow
+    // limit, and the shared search does not apply this cutoff.
+    let signet_retarget = CompactTarget::from_consensus(0x1d00_ffff);
+    assert!(!regtest_mine_fits_one_nonce_span(hard));
+    assert!(regtest_mine_fits_one_nonce_span(easy));
+    assert!(regtest_mine_fits_one_nonce_span(changelog));
+    assert!(!regtest_mine_fits_one_nonce_span(signet_retarget));
+    assert!(Target::from_compact(signet_retarget) <= ChainParams::signet().pow_limit);
+
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let err = try_mine_regtest_paying_bits(
+        genesis.block_hash(),
+        genesis.header.time + 1,
+        1,
+        ScriptBuf::new(),
+        vec![],
+        hard,
+    )
+    .expect_err("one nonce span cannot meet 0x1b7fffff");
+    assert_eq!(err, "regtest pow grind exhausted");
+
+    let block = try_mine_regtest_paying_bits(
+        genesis.block_hash(),
+        genesis.header.time + 1,
+        1,
+        ScriptBuf::new(),
+        vec![],
+        easy,
+    )
+    .expect("0x200fffff fits one nonce span");
+    assert_eq!(block.header.bits, easy);
+    assert!(block
+        .header
+        .validate_pow(Target::from_compact(easy))
+        .is_ok());
+}
+
 #[test]
 fn grind_regtest_pow_changes_nonce_only() {
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);

@@ -25,17 +25,62 @@ pub const REGTEST_BLOCK_SPACING: u32 = 600;
 /// cores; on `tip-accept` it stays on one core so the lane cannot join
 /// workers that wait for the lane.
 pub fn grind_regtest_pow(header: &mut Header) {
+    assert!(try_grind_regtest_pow(header), "regtest pow grind exhausted");
+}
+
+/// [`grind_regtest_pow`] that reports a miss instead of panicking.
+///
+/// Searches one nonce span and does not judge the target. The regtest miner
+/// refuses an ungrindable target before it calls this ([`regtest_mine_fits_one_nonce_span`]).
+pub fn try_grind_regtest_pow(header: &mut Header) -> bool {
     let target = Target::from_compact(header.bits);
     const QUICK: u32 = 4096;
     for nonce in 0..QUICK {
         header.nonce = nonce;
         if header.validate_pow(target).is_ok() {
-            return;
+            return true;
         }
     }
-    let nonce = grind_header_midstate(header, target, QUICK);
+    let Some(nonce) = grind_header_midstate(header, target, QUICK) else {
+        return false;
+    };
     header.nonce = nonce;
     debug_assert!(header.validate_pow(target).is_ok());
+    true
+}
+
+/// `true` when one nonce span is expected to hit `bits` on regtest.
+///
+/// The ratio of the regtest pow limit to the target is at most 2^31.
+/// Compared in the compact exponent (8 bits per step) and the 23-bit
+/// mantissa. Signet does not use this: its pow limit is already far below
+/// the regtest limit, and [`grind_regtest_pow`] searches whatever target
+/// the signet header carries.
+#[doc(hidden)]
+pub fn regtest_mine_fits_one_nonce_span(bits: CompactTarget) -> bool {
+    let limit = ChainParams::regtest()
+        .pow_limit
+        .to_compact_lossy()
+        .to_consensus();
+    let got = bits.to_consensus();
+    let sign = 1u32 << 23;
+    let limit_mant = u64::from(limit & (sign - 1));
+    let got_mant = u64::from(got & (sign - 1));
+    if limit_mant == 0 || got_mant == 0 {
+        return false;
+    }
+    let limit_exp = limit >> 24;
+    let got_exp = got >> 24;
+    if got_exp > limit_exp {
+        return true;
+    }
+    let delta = limit_exp - got_exp;
+    if delta >= 8 {
+        return false;
+    }
+    let left = limit_mant << (8 * delta);
+    let right = got_mant << 31;
+    left <= right
 }
 
 #[doc(hidden)]
@@ -46,7 +91,7 @@ pub fn on_tip_accept_thread() -> bool {
 /// SHA256 midstate after the first 64 header bytes. Nonce is the last 4
 /// bytes. No heap per nonce.
 #[doc(hidden)]
-pub fn grind_header_midstate(header: &Header, target: Target, start: u32) -> u32 {
+pub fn grind_header_midstate(header: &Header, target: Target, start: u32) -> Option<u32> {
     use bitcoin::consensus::Encodable;
 
     let mut raw = Vec::with_capacity(80);
@@ -63,8 +108,7 @@ pub fn grind_header_midstate(header: &Header, target: Target, start: u32) -> u32
             .clamp(1, 4)
     };
     if workers == 1 {
-        return grind_header_midstate_one(&raw, target, start, 1, None)
-            .expect("regtest pow grind exhausted");
+        return grind_header_midstate_one(&raw, target, start, 1, None);
     }
     let stop = std::sync::atomic::AtomicBool::new(false);
     let hit = std::sync::atomic::AtomicBool::new(false);
@@ -88,9 +132,9 @@ pub fn grind_header_midstate(header: &Header, target: Target, start: u32) -> u32
         }
     });
     if !hit.load(std::sync::atomic::Ordering::Relaxed) {
-        panic!("regtest pow grind exhausted");
+        return None;
     }
-    found.load(std::sync::atomic::Ordering::Relaxed)
+    Some(found.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 /// Search `start, start+step, …`. `step == 1` is the single-core scan.
@@ -167,6 +211,59 @@ pub fn mine_regtest_paying(
     script_pubkey: ScriptBuf,
     extra_txs: Vec<Transaction>,
 ) -> Block {
+    mine_regtest_paying_bits(
+        prev,
+        time,
+        height,
+        script_pubkey,
+        extra_txs,
+        CompactTarget::from_consensus(REGTEST_POW_BITS),
+    )
+}
+
+/// [`mine_regtest_paying_bits`] that returns an error when the nonce span misses.
+pub fn try_mine_regtest_paying_bits(
+    prev: BlockHash,
+    time: u32,
+    height: u32,
+    script_pubkey: ScriptBuf,
+    extra_txs: Vec<Transaction>,
+    bits: CompactTarget,
+) -> Result<Block, &'static str> {
+    // The nonce search is shared with signet. Only regtest generate refuses
+    // a target one span cannot meet, and it does that before searching.
+    if !regtest_mine_fits_one_nonce_span(bits) {
+        return Err("regtest pow grind exhausted");
+    }
+    let mut block =
+        assemble_regtest_paying_bits(prev, time, height, script_pubkey, extra_txs, bits);
+    if !try_grind_regtest_pow(&mut block.header) {
+        return Err("regtest pow grind exhausted");
+    }
+    Ok(block)
+}
+
+/// [`mine_regtest_paying`] at caller-chosen `bits` (the next-work result).
+pub fn mine_regtest_paying_bits(
+    prev: BlockHash,
+    time: u32,
+    height: u32,
+    script_pubkey: ScriptBuf,
+    extra_txs: Vec<Transaction>,
+    bits: CompactTarget,
+) -> Block {
+    try_mine_regtest_paying_bits(prev, time, height, script_pubkey, extra_txs, bits)
+        .expect("regtest pow grind exhausted")
+}
+
+fn assemble_regtest_paying_bits(
+    prev: BlockHash,
+    time: u32,
+    height: u32,
+    script_pubkey: ScriptBuf,
+    extra_txs: Vec<Transaction>,
+    bits: CompactTarget,
+) -> Block {
     // Post-BIP65 (regtest height 1) requires nVersion ≥ 4. Core generate uses
     // VERSIONBITS_TOP_BITS; 4 is the buried minimum and enough for dersig/cltv.
     let header = Header {
@@ -174,7 +271,7 @@ pub fn mine_regtest_paying(
         prev_blockhash: prev,
         merkle_root: TxMerkleNode::from_byte_array([0u8; 32]),
         time,
-        bits: CompactTarget::from_consensus(REGTEST_POW_BITS),
+        bits,
         nonce: 0,
     };
     let mut txdata = Vec::with_capacity(1 + extra_txs.len());
@@ -186,7 +283,6 @@ pub fn mine_regtest_paying(
     } else if let Some(root) = block.compute_merkle_root() {
         block.header.merkle_root = root;
     }
-    grind_regtest_pow(&mut block.header);
     block
 }
 

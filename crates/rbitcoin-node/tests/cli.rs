@@ -79,6 +79,7 @@ fn operator_conf_and_argv() {
         "--alert-notify",
         "--startup-notify",
         "--test-activation-height",
+        "--regtest-pow-bits",
         "--rpc-work-queue",
         "--peer-timeout",
         "--blocks-only",
@@ -149,6 +150,7 @@ fn operator_conf_and_argv() {
         "--alertnotify",
         "--startupnotify",
         "--testactivationheight",
+        "--regtestpowbits",
         "--rpcworkqueue",
         "--checkblocks",
         "--blocksdir",
@@ -1090,4 +1092,50 @@ fn trust_peer_clashing_flags() {
     sealed.listen.seednodes.push("seed.example".into());
     let err = sealed.validate().unwrap_err().to_string();
     assert!(err.contains("--seed-node"), "{err}");
+}
+
+#[test]
+fn regtest_pow_bits_from_argv_and_conf() {
+    let bits = |cfg: &NodeConfig| cfg.chain_params().map(|p| p.regtest_pow_bits_overlay);
+    assert_eq!(
+        bits(&ready_config(["rbitcoin-node", "--network=regtest"])).unwrap(),
+        None
+    );
+    for (arg, want) in [
+        ("--regtest-pow-bits=0x200fffff", 0x200f_ffff),
+        ("--regtest-pow-bits=200fffff", 0x200f_ffff),
+    ] {
+        let cfg = ready_config(["rbitcoin-node", "--network=regtest", arg]);
+        assert_eq!(cfg.regtest_pow_bits, Some(want));
+        assert_eq!(bits(&cfg).unwrap().map(|b| b.to_consensus()), Some(want));
+    }
+
+    let dir = tmp_datadir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let conf = dir.join("pow.conf");
+    std::fs::write(&conf, "regtest\nregtest_pow_bits=0x1f7fffff\n").unwrap();
+    let cfg = ready_config(["rbitcoin-node", "--conf", conf.to_str().unwrap()]);
+    assert_eq!(cfg.regtest_pow_bits, Some(0x1f7f_ffff));
+    assert!(cfg.chain_params().is_ok());
+
+    // Off regtest, or with a value that is not a harder regtest target.
+    let off = ready_config([
+        "rbitcoin-node",
+        "--network=signet",
+        "--regtest-pow-bits=0x200fffff",
+    ]);
+    let err = off.chain_params().unwrap_err().to_string();
+    assert!(err.contains("regtest only"), "{err}");
+    let easy = ready_config([
+        "rbitcoin-node",
+        "--network=regtest",
+        "--regtest-pow-bits=0x2100ffff",
+    ]);
+    assert!(easy.chain_params().is_err());
+    assert!(operator_config_from_args(
+        ["rbitcoin-node", "--regtest-pow-bits=nothex"],
+        &NodeEnv::default()
+    )
+    .is_err());
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -4,7 +4,7 @@ use bitcoin::blockdata::constants;
 use bitcoin::consensus::Params as BtcParams;
 use bitcoin::hashes::Hash;
 use bitcoin::script::ScriptBuf;
-use bitcoin::{BlockHash, Network, Target};
+use bitcoin::{BlockHash, CompactTarget, Network, Target};
 /// Height from which BIP34's ancestry no longer turns BIP30 off (Core).
 pub const BIP34_IMPLIES_BIP30_LIMIT: u32 = 1_983_702;
 
@@ -43,6 +43,10 @@ pub struct ChainParams {
     pub segwit_height_overlay: Option<u32>,
     /// Subsidy halving interval overlay (`None` = network default).
     pub subsidy_halving_overlay: Option<u32>,
+    /// Regtest fixed difficulty for every block at height >= 1 (`None` = the
+    /// network `pow_limit` bits). `header::apply_regtest_pow_overlay` applies
+    /// it on regtest only, from `next_work_bits` and the off-tip header check.
+    pub regtest_pow_bits_overlay: Option<CompactTarget>,
     /// Header hash at BIP34 height that turns BIP30 off. `None` on signet and
     /// regtest (Core's null hash), so BIP30 stays on at every height.
     pub bip34_hash: Option<BlockHash>,
@@ -79,6 +83,7 @@ impl ChainParams {
             csv_height_overlay: None,
             segwit_height_overlay: None,
             subsidy_halving_overlay: None,
+            regtest_pow_bits_overlay: None,
             bip34_hash: None,
             testdummy: Some(Bip9Deployment {
                 bit: 28,
@@ -100,6 +105,7 @@ impl ChainParams {
             csv_height_overlay: None,
             segwit_height_overlay: None,
             subsidy_halving_overlay: None,
+            regtest_pow_bits_overlay: None,
             bip34_hash: Some(bip34_block_hash(
                 // Core `consensus.BIP34Hash`: mainnet block 227931.
                 "000000000000024b89b42a942fe0d9fea3bb44ab7bd1b19115dd6a759c0808b8",
@@ -120,6 +126,7 @@ impl ChainParams {
             csv_height_overlay: None,
             segwit_height_overlay: None,
             subsidy_halving_overlay: None,
+            regtest_pow_bits_overlay: None,
             bip34_hash: Some(bip34_block_hash(
                 "0000000023b3a96d3484e5abb3755c413e7d41500f8e2a5c3f0dd01299cd8ef8",
             )),
@@ -153,6 +160,7 @@ impl ChainParams {
             csv_height_overlay: None,
             segwit_height_overlay: None,
             subsidy_halving_overlay: None,
+            regtest_pow_bits_overlay: None,
             bip34_hash: None,
             testdummy: None,
         })
@@ -338,6 +346,51 @@ impl ChainParams {
             _ => return Err("invalid testactivationheight name"),
         }
         Ok(())
+    }
+
+    /// Fix regtest difficulty at `bits` for every block at height >= 1.
+    ///
+    /// Refuses other networks, a zero, negative or overflowing target, and a
+    /// target not harder than `pow_limit` (a no-op). Not a Bitcoin Core option.
+    pub fn apply_regtest_pow_bits(&mut self, bits: u32) -> Result<(), &'static str> {
+        if self.network != Network::Regtest {
+            return Err("regtest_pow_bits is regtest only");
+        }
+        let bits = CompactTarget::from_consensus(bits);
+        let raw = bits.to_consensus();
+        // Core `SetCompact`: 8-bit exponent, then a sign bit and a 23-bit mantissa.
+        let exp = raw >> 24;
+        let sign = 1u32 << 23;
+        let mantissa = raw & (sign - 1);
+        let negative = mantissa != 0 && (raw & sign) != 0;
+        let overflows = mantissa != 0
+            && (exp > 34
+                || (mantissa > u32::from(u8::MAX) && exp > 33)
+                || (mantissa > u32::from(u16::MAX) && exp > 32));
+        if negative || overflows {
+            return Err("regtest_pow_bits is negative or overflows");
+        }
+        let target = Target::from_compact(bits);
+        if target == Target::ZERO {
+            return Err("regtest_pow_bits target is zero");
+        }
+        if target >= self.pow_limit {
+            return Err("regtest_pow_bits is not harder than the regtest pow limit");
+        }
+        self.regtest_pow_bits_overlay = Some(bits);
+        Ok(())
+    }
+
+    /// Parse compact bits as hex, `0x` optional (`0x1e0fffff`).
+    pub fn parse_regtest_pow_bits(spec: &str) -> Result<u32, &'static str> {
+        let hex = spec
+            .strip_prefix("0x")
+            .or_else(|| spec.strip_prefix("0X"))
+            .unwrap_or(spec);
+        if hex.is_empty() || hex.len() > 8 {
+            return Err("invalid compact bits (hex, up to 8 digits)");
+        }
+        u32::from_str_radix(hex, 16).map_err(|_| "invalid compact bits (hex, up to 8 digits)")
     }
 
     /// Parse one Core `name@height` token.

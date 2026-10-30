@@ -493,8 +493,10 @@ impl Session {
         Ok(())
     }
 
-    /// A bad solution is logged and dropped; a decodable one on a retained
-    /// template that meets its target always goes to `ChainHub::accept_block`.
+    /// A bad solution is logged and dropped. A decodable one on a retained
+    /// template that meets its target goes to `ChainHub::accept_block`,
+    /// unless that timestamp needs different `nBits` than the template
+    /// pinned for this prev hash. Those bits are inside the hash.
     pub async fn on_submit_solution(&mut self, mut frame: Frame) -> io::Result<()> {
         let Ok(m) = binary_sv2::from_bytes::<SubmitSolution>(&mut frame.payload) else {
             rbitcoin_log::info!("sv2: undecodable SubmitSolution");
@@ -545,6 +547,26 @@ impl Session {
             );
             return Ok(());
         }
+        // nBits was pinned when this prev hash was sent. A timestamp past the
+        // min-difficulty gap needs the pow-limit bits instead, and rewriting
+        // them would change the hash the miner found.
+        let bits_chain = Arc::clone(&self.chain);
+        let prev = header.prev_blockhash;
+        let stamp = header.time;
+        let pinned = header.bits;
+        let other_bits = tokio::task::spawn_blocking(move || {
+            let _g = BlockingRegion::enter();
+            submit_timestamp_needs_other_bits(&bits_chain, prev, stamp, pinned)
+        })
+        .await
+        .map_err(io::Error::other)?;
+        if other_bits {
+            rbitcoin_log::info!(
+                "sv2: SubmitSolution {} timestamp needs different bits; dropping",
+                header.block_hash()
+            );
+            return Ok(());
+        }
         // Diagnostic only: a miner clock ahead of ours rolls past the wall
         // time since SetNewPrevHash. accept_block enforces the consensus
         // bounds (> MTP, < now + 2h), so the block is still submitted.
@@ -578,6 +600,31 @@ impl Session {
         }
         Ok(())
     }
+}
+
+/// `true` when `header_time` at `prev`'s child expects compact bits other
+/// than the ones pinned on the template.
+fn submit_timestamp_needs_other_bits(
+    chain: &ChainHub,
+    prev: BlockHash,
+    header_time: u32,
+    pinned: CompactTarget,
+) -> bool {
+    let Ok(Some(parent)) = chain.query.height_of_hash(&prev.to_byte_array()) else {
+        return false;
+    };
+    let Some(next) = parent.0.checked_add(1) else {
+        return false;
+    };
+    let Ok(bits) = rbitcoin_query::expected_next_bits(
+        chain.query.as_ref(),
+        &chain.params,
+        rbitcoin_primitives::Height(next),
+        header_time,
+    ) else {
+        return false;
+    };
+    bits != pinned
 }
 
 #[doc(hidden)]
