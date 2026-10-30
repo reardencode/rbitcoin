@@ -788,6 +788,7 @@ async fn stalled_reader_in_window(window: usize) {
     struct OneWrite {
         took: bool,
         stalled: Arc<AtomicBool>,
+        wake: Arc<tokio::sync::Notify>,
     }
     impl AsyncWrite for OneWrite {
         fn poll_write(
@@ -798,6 +799,7 @@ async fn stalled_reader_in_window(window: usize) {
             let this = self.get_mut();
             if this.took {
                 this.stalled.store(true, Ordering::SeqCst);
+                this.wake.notify_waiters();
                 return Poll::Pending;
             }
             this.took = true;
@@ -844,6 +846,7 @@ async fn stalled_reader_in_window(window: usize) {
     let mut line = serde_json::to_vec(&items).unwrap();
     line.push(b'\n');
     let stalled = Arc::new(AtomicBool::new(false));
+    let wake = Arc::new(tokio::sync::Notify::new());
     let (_tip_tx, tip_rx) = broadcast::channel(1);
     batch_trace_arm();
     let task = tokio::spawn(handle_client(
@@ -852,6 +855,7 @@ async fn stalled_reader_in_window(window: usize) {
             OneWrite {
                 took: false,
                 stalled: Arc::clone(&stalled),
+                wake: Arc::clone(&wake),
             },
         ),
         "127.0.0.1:9".parse().unwrap(),
@@ -860,15 +864,19 @@ async fn stalled_reader_in_window(window: usize) {
         Arc::new(params),
         tip_rx,
         None,
-        Arc::new(AtomicBool::new(false)),
+        ElectrumStop::new(false),
     ));
     let deadline = Instant::now() + Duration::from_secs(5);
-    while !stalled.load(Ordering::SeqCst) {
+    loop {
+        let notified = wake.notified();
+        if stalled.load(Ordering::SeqCst) {
+            break;
+        }
         assert!(
             Instant::now() < deadline,
             "the second slot was never written"
         );
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        notified.await;
     }
     let trace = batch_trace_snapshot();
     batch_trace_clear();
@@ -913,16 +921,22 @@ async fn batch_reply_is_written_one_slot_at_a_time() {
         bytes: Vec<u8>,
         largest_write: usize,
     }
-    struct Recorder(Arc<Mutex<Seen>>);
+    struct Recorder {
+        seen: Arc<Mutex<Seen>>,
+        wake: Arc<tokio::sync::Notify>,
+    }
     impl AsyncWrite for Recorder {
         fn poll_write(
             self: Pin<&mut Self>,
             _cx: &mut Context<'_>,
             buf: &[u8],
         ) -> Poll<std::io::Result<usize>> {
-            let mut seen = self.0.lock().unwrap();
+            let this = self.get_mut();
+            let mut seen = this.seen.lock().unwrap();
             seen.largest_write = seen.largest_write.max(buf.len());
             seen.bytes.extend_from_slice(buf);
+            drop(seen);
+            this.wake.notify_waiters();
             Poll::Ready(Ok(buf.len()))
         }
         fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
@@ -969,21 +983,32 @@ async fn batch_reply_is_written_one_slot_at_a_time() {
     let mut line = serde_json::to_vec(&batch).unwrap();
     line.push(b'\n');
     let seen = Arc::new(Mutex::new(Seen::default()));
+    let wake = Arc::new(tokio::sync::Notify::new());
     let (_tip_tx, tip_rx) = broadcast::channel(1);
     let task = tokio::spawn(handle_client(
-        Duplex(OnceRead(line), Recorder(Arc::clone(&seen))),
+        Duplex(
+            OnceRead(line),
+            Recorder {
+                seen: Arc::clone(&seen),
+                wake: Arc::clone(&wake),
+            },
+        ),
         "127.0.0.1:9".parse().unwrap(),
         Arc::new(q),
         Arc::new(cfg),
         Arc::new(params),
         tip_rx,
         None,
-        Arc::new(AtomicBool::new(false)),
+        ElectrumStop::new(false),
     ));
     let deadline = Instant::now() + Duration::from_secs(5);
-    while !seen.lock().unwrap().bytes.ends_with(b"]\n") {
+    loop {
+        let notified = wake.notified();
+        if seen.lock().unwrap().bytes.ends_with(b"]\n") {
+            break;
+        }
         assert!(Instant::now() < deadline, "batch reply never finished");
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        notified.await;
     }
     task.abort();
     let seen = seen.lock().unwrap();
@@ -1502,7 +1527,7 @@ async fn held_pool_pad() -> HeldPoolPad {
         Arc::new(params),
         tip_rx,
         Some(Arc::clone(&mp)),
-        Arc::new(AtomicBool::new(false)),
+        ElectrumStop::new(false),
     ));
     let mut pad = HeldPoolPad {
         dir,
@@ -2640,6 +2665,7 @@ async fn stalled_scripthash_push_ends_the_connection() {
     struct StallWriter {
         got: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
         stall: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        wake: std::sync::Arc<tokio::sync::Notify>,
     }
     impl AsyncWrite for StallWriter {
         fn poll_write(
@@ -2651,6 +2677,7 @@ async fn stalled_scripthash_push_ends_the_connection() {
                 return Poll::Pending;
             }
             self.got.lock().unwrap().extend_from_slice(buf);
+            self.wake.notify_waiters();
             Poll::Ready(Ok(buf.len()))
         }
         fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
@@ -2723,6 +2750,7 @@ async fn stalled_scripthash_push_ends_the_connection() {
     );
     let stall = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let wake = std::sync::Arc::new(tokio::sync::Notify::new());
     let stream = Pair {
         reader: ScriptedRead {
             data: line.into_bytes(),
@@ -2731,12 +2759,13 @@ async fn stalled_scripthash_push_ends_the_connection() {
         writer: StallWriter {
             got: std::sync::Arc::clone(&got),
             stall: std::sync::Arc::clone(&stall),
+            wake: std::sync::Arc::clone(&wake),
         },
     };
     let mut cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
     cfg.limits.idle_timeout = std::time::Duration::from_millis(80);
     let (tip_tx, tip_rx) = tokio::sync::broadcast::channel(1);
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop = ElectrumStop::new(false);
     let task = tokio::spawn(handle_client(
         stream,
         "127.0.0.1:9".parse().unwrap(),
@@ -2749,20 +2778,19 @@ async fn stalled_scripthash_push_ends_the_connection() {
     ));
     let _tip_tx = tip_tx;
 
-    let mut saw_reply = false;
-    for _ in 0..50 {
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let notified = wake.notified();
         let buf = got.lock().unwrap().clone();
         if String::from_utf8_lossy(&buf).contains("\"id\":1") {
-            saw_reply = true;
             break;
         }
+        assert!(
+            deadline > std::time::Instant::now(),
+            "subscribe reply must land before the push stalls"
+        );
+        notified.await;
     }
-    assert!(
-        saw_reply,
-        "subscribe reply must land before the push stalls"
-    );
-    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
     stall.store(true, std::sync::atomic::Ordering::SeqCst);
 
     let tx = bitcoin::Transaction {
@@ -2795,6 +2823,41 @@ async fn stalled_scripthash_push_ends_the_connection() {
         err.to_string().contains("write timeout"),
         "the push timeout must end the task, got {err}"
     );
+    let _ = dir;
+}
+
+/// `store(true)` ends a parked client without waiting out the stop poll.
+#[tokio::test]
+async fn client_stop_wakes_without_the_hundred_ms_poll() {
+    tokio::time::pause();
+    let (client, server) = tokio::io::duplex(64);
+    let stop = ElectrumStop::new(false);
+    let params = ChainParams::regtest();
+    let (dir, q) = tmp_store();
+    let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+    let (_tip_tx, tip_rx) = broadcast::channel(1);
+    let task = tokio::spawn(handle_client(
+        server,
+        "127.0.0.1:9".parse().unwrap(),
+        Arc::new(q),
+        Arc::new(cfg),
+        Arc::new(params),
+        tip_rx,
+        None,
+        Arc::clone(&stop),
+    ));
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
+    stop.store(true);
+    tokio::task::yield_now().await;
+    let joined = tokio::time::timeout(Duration::ZERO, task).await;
+    tokio::time::resume();
+    joined
+        .expect("client stayed in the 100 ms stop poll")
+        .expect("client task")
+        .expect("stop ends the client");
+    drop(client);
     let _ = dir;
 }
 
