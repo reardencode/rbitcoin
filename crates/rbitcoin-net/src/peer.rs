@@ -3839,6 +3839,8 @@ pub fn on_inv(
     let mut parent_capped = false;
     let mut need_headers = false;
     let mut tx_inv_hex: Option<String> = None;
+    let mut seen_txids: HashSet<bitcoin::Txid> = HashSet::new();
+    let mut seen_wtxids: HashSet<bitcoin::Wtxid> = HashSet::new();
     let relay = !hub.in_ibd()
         && (hub.mempool().map(|m| m.relay_enabled()).unwrap_or(false)
             || session.is_some_and(|s| s.session_relay_perm()));
@@ -3857,6 +3859,9 @@ pub fn on_inv(
                 if tx_inv_hex.is_none() {
                     tx_inv_hex = Some(txid.to_string());
                 }
+                if !seen_txids.insert(*txid) {
+                    continue;
+                }
                 if let Some(inv) = on_inv_txid(hub, session, relay, txid, &mut parent_capped) {
                     want.push(inv);
                     inv_tx_n = inv_tx_n.saturating_add(1);
@@ -3865,6 +3870,9 @@ pub fn on_inv(
             Inventory::WTx(wtxid) => {
                 if tx_inv_hex.is_none() {
                     tx_inv_hex = Some(wtxid.to_string());
+                }
+                if !seen_wtxids.insert(*wtxid) {
+                    continue;
                 }
                 if let Some(inv) = on_inv_wtxid(hub, session, relay, wtxid, &mut parent_capped) {
                     want.push(inv);

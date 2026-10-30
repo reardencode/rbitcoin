@@ -5112,6 +5112,91 @@ async fn inv_getdata_charges_send_budget() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+fn relay_hub(label: &str) -> (rbitcoin_query::testutil::TempDir, ChainHub) {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled(label);
+    hub.ensure_genesis().unwrap();
+    let t = hub.tip_header().unwrap().time;
+    hub.clock.set_mock(i64::from(t) + 1);
+    let mp =
+        rbitcoin_net::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
+    mp.set_relay_enabled(true);
+    assert!(hub.attach_mempool(mp).is_ok());
+    (dir, hub)
+}
+
+fn sole_getdata(rx: &mut mpsc::UnboundedReceiver<PeerOut>) -> Vec<Inventory> {
+    let NetworkMessage::GetData(items) = rx.try_recv().expect("one getdata").expect_msg() else {
+        panic!("expected getdata");
+    };
+    assert!(rx.try_recv().is_err(), "one inv sends one getdata");
+    items
+}
+
+/// Core #35878: a tx id repeated inside one INV is handled once. `tx` and
+/// `witness-tx` share the txid set; a `wtx` with the same bytes is a
+/// different id and is kept.
+#[tokio::test]
+async fn inv_drops_repeated_tx_ids_within_one_message() {
+    use bitcoin::{Txid, Wtxid};
+
+    let (dir, hub) = relay_hub("inv-dedupe");
+    let t = Txid::from_byte_array([0x61; 32]);
+    let w = Wtxid::from_byte_array([0x77; 32]);
+    let w_same_bytes = Wtxid::from_byte_array([0x61; 32]);
+    let (out_tx, mut rx) = mpsc::unbounded_channel();
+    let mut follow = PeerFollowState::new();
+    let _ = hub.mempool().unwrap().sample_reset_perf();
+    on_inv(
+        &hub,
+        &out_tx,
+        &mut follow,
+        None,
+        &[
+            Inventory::WitnessTransaction(t),
+            Inventory::Transaction(t),
+            Inventory::WTx(w),
+            Inventory::WTx(w),
+            Inventory::WTx(w_same_bytes),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        sole_getdata(&mut rx),
+        vec![
+            Inventory::WitnessTransaction(t),
+            Inventory::WTx(w),
+            Inventory::WTx(w_same_bytes),
+        ],
+        "each id once; a wtxid equal to a txid's bytes is still asked"
+    );
+    assert_eq!(
+        hub.mempool().unwrap().sample_reset_perf().inv_tx,
+        3,
+        "the inv meter counts each id once"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The repeat filter is scoped to one INV message.
+#[tokio::test]
+async fn inv_repeat_filter_resets_per_message() {
+    use bitcoin::Wtxid;
+
+    let (dir, hub) = relay_hub("inv-dedupe-scope");
+    let w = Wtxid::from_byte_array([0x78; 32]);
+    let (out_tx, mut rx) = mpsc::unbounded_channel();
+    let mut follow = PeerFollowState::new();
+    for round in 0..2 {
+        on_inv(&hub, &out_tx, &mut follow, None, &[Inventory::WTx(w)]).unwrap();
+        assert_eq!(
+            sole_getdata(&mut rx),
+            vec![Inventory::WTx(w)],
+            "round {round}: a later inv asks again"
+        );
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A notfound for the in-flight wtxid makes the waiting announcer due now.
 #[tokio::test]
 async fn notfound_makes_the_waiting_wtxid_peer_due() {
