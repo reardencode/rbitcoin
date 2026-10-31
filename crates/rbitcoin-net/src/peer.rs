@@ -1440,8 +1440,10 @@ pub async fn on_heartbeat(
     }
     let now = s.clock_now();
     s.sync_block_download(now, |h| follow.block_in_flight(h));
-    // Blocks in flight suspend the ping timeout. A due ping still sends.
-    let ping_elapsed = if follow.has_blocks_in_flight() {
+    // Blocks in flight, or a frame already read and waiting to decode,
+    // suspend the ping timeout. A due ping still sends. The next TCP read
+    // stays armed, so this is the heartbeat side of that same wait.
+    let ping_elapsed = if decode_queued || follow.has_blocks_in_flight() {
         None
     } else {
         s.ping_timeout(now)
@@ -1842,11 +1844,11 @@ pub async fn peer_session_with(
         follow.wtxid_relay = s.wtxid_relay();
     }
     let mut requested_since: Option<std::time::Instant> = None;
-    // Heavy decodes wait for a pool-sized permit. That wait stays off this
-    // loop so the next TCP read is not behind it. Frames that arrive while
-    // a decode is queued stay in order behind it. The cap bounds framed
-    // bodies sitting in front of a full permit set.
-    const DECODE_AHEAD: usize = 8;
+    // Heavy decodes wait for a pool-sized permit on the decode task. This
+    // loop keeps reading: a ping or pong already on the socket must not sit
+    // in the kernel buffer until a permit frees. Later frames stay behind
+    // earlier ones in `decode_q`. Inbound bytes are bounded by the rate
+    // limiter and by not assigning more getdata, not by pausing the read.
     let mut decode_q: VecDeque<
         tokio::sync::oneshot::Receiver<Result<RawNetworkMessage, NetError>>,
     > = VecDeque::new();
@@ -1888,7 +1890,7 @@ pub async fn peer_session_with(
             let over_budget = session.as_ref().is_some_and(|s| s.send_over_budget());
             let tail_pending =
                 !follow.getdata_tail.is_empty() || !follow.getblocktxn_tail.is_empty();
-            let reading = !over_budget && !tail_pending && decode_q.len() < DECODE_AHEAD;
+            let reading = !over_budget && !tail_pending;
             let hb_wait = SESSION_HEARTBEAT.saturating_sub(last_hb.elapsed());
             decoy_score.store(follow.ban_score, Ordering::Relaxed);
             tokio::select! {

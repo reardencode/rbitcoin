@@ -876,6 +876,59 @@ async fn queued_decode_holds_the_block_download_window() {
     let _ = std::fs::remove_dir_all(dir.path());
 }
 
+/// A pong the peer already sent can sit unread while heavy frames wait on
+/// a decode permit. That wait must not trip the ping timeout.
+#[tokio::test]
+async fn queued_decode_holds_the_ping_timeout() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("decode-hold-ping");
+    hub.ensure_genesis().unwrap();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let start = 1_700_000_000_u64;
+    peers.set_mock_now(start);
+    let peer = outbound_test_peer(&peers, 18451);
+    peer.ping_nonce_sent.store(1, Ordering::Relaxed);
+    peer.ping_start_secs.store(start, Ordering::Relaxed);
+    // Past `-peertimeout`, the post-block minute, and the twenty-minute
+    // ping, with nothing in the block-download window.
+    peers.set_mock_now(start + 20 * 60 + 61);
+    let (out_tx, _out_rx) = mpsc::unbounded_channel();
+    let mut follow = PeerFollowState::new();
+    let mut since = None;
+    on_heartbeat(
+        &hub,
+        &out_tx,
+        &mut follow,
+        Some(peer.as_ref()),
+        &mut since,
+        &mut None,
+        &mut None,
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !peer.stop.load(Ordering::Relaxed),
+        "a queued decode must not trip the ping timeout"
+    );
+    on_heartbeat(
+        &hub,
+        &out_tx,
+        &mut follow,
+        Some(peer.as_ref()),
+        &mut since,
+        &mut None,
+        &mut None,
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(
+        peer.stop.load(Ordering::Relaxed),
+        "an empty decode queue still times the ping out"
+    );
+    let _ = std::fs::remove_dir_all(dir.path());
+}
+
 /// A ping that arrives while a block is still in `decode_q` must not send
 /// pong until that block has been applied.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

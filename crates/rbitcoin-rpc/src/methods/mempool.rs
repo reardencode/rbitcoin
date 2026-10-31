@@ -1399,6 +1399,21 @@ async fn testmempoolaccept_package_rows_async(
     decoded: Vec<Transaction>,
     max_feerate: u64,
 ) -> Value {
+    // Inserts are real until `remove_for_block`. A dropped `testmempoolaccept`
+    // must not leave them in the pool.
+    let mp = Arc::clone(mp);
+    tokio::spawn(
+        async move { testmempoolaccept_package_rows_work(&mp, decoded, max_feerate).await },
+    )
+    .await
+    .expect("testmempoolaccept package")
+}
+
+async fn testmempoolaccept_package_rows_work(
+    mp: &Arc<MempoolHub>,
+    decoded: Vec<Transaction>,
+    max_feerate: u64,
+) -> Value {
     let mut added = Vec::new();
     let mut out = Vec::new();
     for tx in decoded {

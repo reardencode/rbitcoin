@@ -3303,7 +3303,25 @@ impl MempoolHub {
     }
 
     /// 1p1c without holding a blocking-pool thread across either script verify.
+    ///
+    /// The body runs on its own task. Dropping the request (HTTP timeout,
+    /// client disconnect, session abort) must not skip `rollback_1p1c_parent`
+    /// after the parent is already committed.
     async fn admit_1p1c_async(
+        self: &Arc<Self>,
+        child: &Transaction,
+        missing: &BTreeSet<Txid>,
+        origin: TxOrigin,
+    ) -> Option<AcceptResult> {
+        let hub = Arc::clone(self);
+        let child = child.clone();
+        let missing = missing.clone();
+        tokio::spawn(async move { hub.admit_1p1c_work(&child, &missing, origin).await })
+            .await
+            .expect("1p1c admit")
+    }
+
+    async fn admit_1p1c_work(
         self: &Arc<Self>,
         child: &Transaction,
         missing: &BTreeSet<Txid>,
@@ -3456,20 +3474,28 @@ impl MempoolHub {
 
     /// Package accept. Each member's scripts are awaited on the caller.
     /// Isolated broadcast is queued after this function's trim.
+    ///
+    /// The whole admit, including `abandon_package` and the isolated kick,
+    /// runs on a task the request cannot cancel.
     pub async fn accept_package_async(
         self: &Arc<Self>,
         txs: Vec<Transaction>,
     ) -> Result<Vec<AcceptResult>, AcceptError> {
-        let accepted = self.admit_package_async(txs).await?;
         let hub = Arc::clone(self);
-        let ids: Vec<Txid> = accepted.iter().map(|r| r.txid).collect();
-        crate::reactor::off_pool(move || hub.kick_isolated_if_live(&ids)).await;
-        Ok(accepted)
+        tokio::spawn(async move {
+            let accepted = hub.admit_package_work(txs).await?;
+            let ids: Vec<Txid> = accepted.iter().map(|r| r.txid).collect();
+            let hub_k = Arc::clone(&hub);
+            crate::reactor::off_pool(move || hub_k.kick_isolated_if_live(&ids)).await;
+            Ok(accepted)
+        })
+        .await
+        .expect("package accept")
     }
 
     /// [`Self::accept_package_async`] without the isolated kick, for a caller
-    /// that trims again afterwards.
-    async fn admit_package_async(
+    /// that trims again afterwards. Callers spawn this with their own cleanup.
+    async fn admit_package_work(
         self: &Arc<Self>,
         txs: Vec<Transaction>,
     ) -> Result<Vec<AcceptResult>, AcceptError> {
@@ -5091,7 +5117,20 @@ impl MempoolHub {
     }
 
     /// [`Self::submit_package_rpc_eval`] with scripts awaited on the caller.
+    ///
+    /// Trim in `package_rows_after_eval` still runs when the RPC task is dropped.
     pub async fn submit_package_rpc_eval_async(
+        self: &Arc<Self>,
+        txs: Vec<Transaction>,
+        package_eval: bool,
+    ) -> Vec<SubmitPackageRow> {
+        let hub = Arc::clone(self);
+        tokio::spawn(async move { hub.submit_package_rpc_eval_work(txs, package_eval).await })
+            .await
+            .expect("submitpackage")
+    }
+
+    async fn submit_package_rpc_eval_work(
         self: &Arc<Self>,
         txs: Vec<Transaction>,
         package_eval: bool,
@@ -5119,7 +5158,7 @@ impl MempoolHub {
         if package_eval && rest.len() >= 2 {
             // `accept_package_async` kicks. This path trims once more below,
             // so use the admit that does not kick and kick after that trim.
-            let admitted = self.admit_package_async(rest.clone()).await;
+            let admitted = self.admit_package_work(rest.clone()).await;
             Self::note_package_full(&txs, &rest, &mut out, admitted);
         }
         let hub = Arc::clone(self);

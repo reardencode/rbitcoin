@@ -222,12 +222,18 @@ Block-decode permits equal that pool. Header-decode permits are
 or outnumber pool threads. Frames already requested still sit in the async
 task until a permit is free; the getdata window, not the semaphore, bounds
 that RAM. The reader does not await a decode permit before the next TCP read.
+A heartbeat does not apply the ping timeout while a frame is still queued
+for decode.
 
 **Fixed.** Production mempool admit (HTTP `sendrawtransaction`,
 `testmempoolaccept`, `submitpackage`, Electrum broadcast and package,
 Esplora `POST /tx` and package, BlindBit `forward-tx`, and P2P `tx`)
-awaits script verify on the request task. A parked blocking pool can still
-admit. Sync `accept_tx_from` remains for stack hubs and in-process
+awaits script verify off the blocking pool. Package accept, 1p1c,
+`submitpackage`, and a multi-tx `testmempoolaccept` run that work on a task
+the request cannot cancel, so a dropped caller still rolls back, trims, and
+removes the test inserts. A single-tx admit still awaits on the request
+task. BlindBit `forward-tx` already spawns its admit. A parked blocking pool
+can still admit. Sync `accept_tx_from` remains for stack hubs and in-process
 `dispatch()`. Orphan promotion after a commit still runs on the off-pool
 thread that publishes the parent.
 
