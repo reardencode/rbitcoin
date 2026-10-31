@@ -2677,6 +2677,61 @@ fn invalidate_wakes_a_tip_wait_without_a_mempool() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Invalidating the tip must not publish the stump when a heavier held
+/// branch is still applied afterwards. A one-shot wait returns that first
+/// event and then stops listening.
+#[test]
+fn invalidate_publishes_the_replacement_fork_not_the_stump() {
+    use std::time::{Duration, Instant};
+    let (ctx, dir, hub) = ctx_regtest_hub();
+    dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
+    let start = hub.tip_hash().expect("tip");
+    let start_hex = rbitcoin_rpc::methods::hash_hex_display(&start.to_byte_array());
+    let genesis = hub.block_at_height(0).unwrap().unwrap().block_hash();
+    let t0 = hub.tip_header().unwrap().time;
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+    let side = rbitcoin_consensus::mine_regtest_paying(genesis, t0 + 10, 1, spk.clone(), vec![]);
+    let side_tip =
+        rbitcoin_consensus::mine_regtest_paying(side.block_hash(), t0 + 11, 2, spk, vec![]);
+    let fork_tip = side_tip.block_hash();
+    assert_ne!(side.block_hash(), start);
+    hub.hold_body(Arc::new(side), false);
+    hub.hold_body(Arc::new(side_tip), false);
+    let mut tips = hub.subscribe_tips();
+    let bare = ctx_without_mempool(&ctx);
+    let parked = Arc::new(AtomicU64::new(0));
+    rbitcoin_rpc::methods::set_rpc_wait_park_note(Some(Arc::clone(&parked)));
+    let _clear = ClearParkNote;
+    std::thread::scope(|scope| {
+        let hub = Arc::clone(&hub);
+        scope.spawn(move || {
+            wait_until_parked(&parked);
+            hub.invalidate_block(start).expect("invalidate tip");
+        });
+        let t0 = Instant::now();
+        let got =
+            rbitcoin_rpc::methods::chain::wait_for_tip(&bare, 2_000, |hash, _| hash != start_hex)
+                .unwrap();
+        assert!(
+            t0.elapsed() < Duration::from_millis(500),
+            "invalidate left the tip wait parked: {:?}",
+            t0.elapsed()
+        );
+        let fork_hex = rbitcoin_rpc::methods::hash_hex_display(&fork_tip.to_byte_array());
+        assert_eq!(got["hash"], fork_hex, "{got}");
+    });
+    let mut saw = Vec::new();
+    while let Ok(ev) = tips.try_recv() {
+        saw.push(ev.hash);
+    }
+    assert!(
+        !saw.contains(&genesis),
+        "invalidate published the stump before the replacement fork: {saw:?}"
+    );
+    assert_eq!(saw.last().copied(), Some(fork_tip), "{saw:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn wait_until_parked(parked: &AtomicU64) {
     let start = Instant::now();
     while parked.load(Ordering::SeqCst) == 0 {

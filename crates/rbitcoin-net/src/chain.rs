@@ -2597,6 +2597,7 @@ impl ChainHub {
             .height_of_hash(&hash.to_byte_array())
             .map_err(NetError::store)?
             .filter(|h| h.0 <= tip);
+        let mut disconnected_to: Option<(u32, BlockHash)> = None;
         if let Some(h) = on_tip {
             let _guard = self.connect_lock.lock().unwrap_or_else(|e| e.into_inner());
             let mut path = Vec::new();
@@ -2615,10 +2616,15 @@ impl ChainHub {
                 });
             }
             let keep = h.0.saturating_sub(1);
+            let removed = tip.saturating_sub(keep);
             let disconnected = self.disconnect_to(keep);
             self.revalidate_header_report();
             disconnected?;
+            let stump = self.tip_hash();
             drop(_guard);
+            if let Some(stump) = stump {
+                disconnected_to = Some((removed, stump));
+            }
         } else if self.knows_header(&hash) || self.held_body(&hash).is_some() {
             // Side branch: mark it and keep the body. The mark keeps it off
             // the chain. The body is what reconsider and a child still need.
@@ -2631,7 +2637,27 @@ impl ChainHub {
         } else {
             return Err(NetError::Consensus("Block not found".into()));
         }
-        let _ = self.try_apply_after_invalidate()?;
+        let applied = self.try_apply_after_invalidate();
+        // A replacement fork publishes from its branch reorg. Sending the
+        // stump before that wakes a one-shot wait, which then drops the
+        // subscription and misses the fork. With no fork, the stump is the
+        // tip a waiter has to see.
+        if let Some((removed, stump)) = disconnected_to {
+            if removed > 0 && self.tip_hash() == Some(stump) {
+                if let (Some(height), Some(tip_hash), Some(header)) =
+                    (self.tip_height(), self.tip_hash(), self.tip_header())
+                {
+                    let _ = self.tip_tx.send(TipEvent {
+                        height,
+                        hash: tip_hash,
+                        header,
+                        reorg_branch_len: removed,
+                    });
+                    self.notify.notify_waiters();
+                }
+            }
+        }
+        applied?;
         if let Some(mp) = self.mempool() {
             mp.evict_after_reorg();
         }
@@ -4039,10 +4065,6 @@ impl ChainHub {
         // Before the commit lock: the relay-on purge takes this same mutex
         // and then reads the query. The pool matches `keep_height` once the
         // disconnected transactions are back in it.
-        let removed = self
-            .tip_height()
-            .map(|h| h.saturating_sub(keep_height))
-            .unwrap_or(0);
         let mp_hold = self.mempool().cloned();
         let mut template_hold = mp_hold.as_ref().map(|mp| mp.template_hold());
         let _commit = self
@@ -4056,24 +4078,6 @@ impl ChainHub {
             }
         }
         drop(template_hold);
-        // Invalidate is the only caller. A branch reorg disconnects in the
-        // commit and publishes its own tip. With no replacement fork, nothing
-        // else sends one, so a waiter that has this hub and no mempool stays
-        // parked until its deadline. `removed` is the reorg length so Electrum
-        // reads every status again and a long disconnect announces by inv.
-        if removed > 0 {
-            if let (Some(height), Some(hash), Some(header)) =
-                (self.tip_height(), self.tip_hash(), self.tip_header())
-            {
-                let _ = self.tip_tx.send(TipEvent {
-                    height,
-                    hash,
-                    header,
-                    reorg_branch_len: removed,
-                });
-                self.notify.notify_waiters();
-            }
-        }
         Ok(())
     }
 

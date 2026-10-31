@@ -6,5 +6,5 @@ Fixed
   poll that sees it.** A missing tip or a failed header read no longer
   holds the call until the timeout.
 - **`invalidateblock` wakes `waitforblock`, `waitforblockheight`, and
-  `waitfornewblock`.** The new tip is published even when that RPC context
-  has no mempool.
+  `waitfornewblock`.** The tip left after that call, including a replacement
+  fork, is published even when that RPC context has no mempool.
