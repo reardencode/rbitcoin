@@ -6121,6 +6121,106 @@ fn getmininginfo_assembly_is_per_block() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Aborting the request after the tx is published still records it
+/// unbroadcast. The note shares the admit task, so dropping the handler
+/// during that wait does not skip it.
+#[test]
+fn dropped_sendraw_still_notes_unbroadcast() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let (hex, tx) = spend_generated_coinbase(
+        &ctx,
+        1,
+        50_0000_0000 - 1_000,
+        ScriptBuf::from_bytes(vec![0x51]),
+    );
+    let txid = tx.compute_txid();
+    let ctx = std::sync::Arc::new(ctx);
+    let mp = std::sync::Arc::clone(ctx.mempool.as_ref().unwrap());
+    let params = rbitcoin_rpc::methods::RpcParams::positional(vec![json!(hex)]);
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async move {
+            let ctx_job = std::sync::Arc::clone(&ctx);
+            let job = tokio::spawn(async move {
+                rbitcoin_rpc::methods::mempool::sendrawtransaction_async(&ctx_job, &params).await
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !mp.contains(&txid) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "sendraw did not publish"
+                );
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                mp.unbroadcast_count(),
+                0,
+                "abort landed after the note; the drop was not the waiter"
+            );
+            job.abort();
+            let _ = job.await;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while mp.unbroadcast_count() == 0 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "dropped sendraw skipped the unbroadcast note"
+                );
+                tokio::task::yield_now().await;
+            }
+        });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Same drop as `dropped_sendraw_still_notes_unbroadcast` for one package member.
+#[test]
+fn dropped_submitpackage_still_notes_unbroadcast() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let (hex, tx) = spend_generated_coinbase(
+        &ctx,
+        1,
+        50_0000_0000 - 1_000,
+        ScriptBuf::from_bytes(vec![0x51]),
+    );
+    let txid = tx.compute_txid();
+    let ctx = std::sync::Arc::new(ctx);
+    let mp = std::sync::Arc::clone(ctx.mempool.as_ref().unwrap());
+    let params = rbitcoin_rpc::methods::RpcParams::positional(vec![json!([hex])]);
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async move {
+            let ctx_job = std::sync::Arc::clone(&ctx);
+            let job = tokio::spawn(async move {
+                rbitcoin_rpc::methods::mempool::submitpackage_async(&ctx_job, &params).await
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !mp.contains(&txid) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "submitpackage did not publish"
+                );
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(mp.unbroadcast_count(), 0, "note ran before the drop");
+            job.abort();
+            let _ = job.await;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while mp.unbroadcast_count() == 0 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "dropped submitpackage skipped the unbroadcast note"
+                );
+                tokio::task::yield_now().await;
+            }
+        });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// HTTP `generatetoaddress`, `generatetodescriptor`, `generateblock`, and a
 /// two-tx `testmempoolaccept` are the request-task methods. The package rows
 /// are removed after the reply.

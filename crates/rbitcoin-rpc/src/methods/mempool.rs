@@ -1044,11 +1044,19 @@ pub async fn sendrawtransaction_async(
             "Fee exceeds maximum configured by user (e.g. -maxtxfee, maxfeerate)",
         ));
     }
-    let accepted = mp
-        .accept_tx_from_async(tx.clone(), rbitcoin_net::TxOrigin::Local)
-        .await;
     let ctx_done = Arc::clone(ctx);
-    super::off_pool(move || sendraw_after_accept(&ctx_done, &tx, accepted)).await
+    let tx_done = tx;
+    let mp_done = mp;
+    // The note and the blocksonly rebroadcast sit on the admit task. Dropping
+    // this request must not skip them after the tx is already published.
+    rbitcoin_net::spawn_with_store_budget(async move {
+        let accepted = mp_done
+            .accept_tx_from_async(tx_done.clone(), rbitcoin_net::TxOrigin::Local)
+            .await;
+        super::off_pool(move || sendraw_after_accept(&ctx_done, &tx_done, accepted)).await
+    })
+    .await
+    .expect("sendrawtransaction")
 }
 
 fn sendraw_after_accept(
@@ -2198,22 +2206,29 @@ pub async fn submitpackage_admit_async(
     let txs_p = txs;
     let plan =
         super::off_pool(move || submitpackage_plan(&ctx_p, &mp_p, &txs_p, max_feerate)).await;
-    let rows = mp
-        .submit_package_rpc_eval_async(plan.eval_txs.clone(), plan.package_eval)
-        .await;
     let mp_a = Arc::clone(mp);
-    super::off_pool(move || {
-        submitpackage_apply(
-            &mp_a,
-            plan.tx_results,
-            plan.replaced,
-            plan.any_fail,
-            &plan.eval_txs,
-            plan.over_max,
-            rows,
-        )
+    // `note_unbroadcast` is inside `submitpackage_apply`. That call shares
+    // the admit task so a dropped request still records each published member.
+    rbitcoin_net::spawn_with_store_budget(async move {
+        let rows = mp_a
+            .submit_package_rpc_eval_async(plan.eval_txs.clone(), plan.package_eval)
+            .await;
+        let mp_b = Arc::clone(&mp_a);
+        super::off_pool(move || {
+            submitpackage_apply(
+                &mp_b,
+                plan.tx_results,
+                plan.replaced,
+                plan.any_fail,
+                &plan.eval_txs,
+                plan.over_max,
+                rows,
+            )
+        })
+        .await
     })
     .await
+    .expect("submitpackage")
 }
 
 fn submitpackage_plan(

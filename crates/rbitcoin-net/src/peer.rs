@@ -5523,30 +5523,35 @@ pub async fn on_tx(
             if trusted {
                 mp.set_trusted_session(from);
             }
-            match mp
-                .accept_tx_from_async(tx.clone(), crate::tx_relay::TxOrigin::Relay(from))
-                .await
-            {
-                Ok(r) => {
+            let mp_task = Arc::clone(mp);
+            let tx_task = tx.clone();
+            let peers = session.and_then(|s| s.peer_hub());
+            let hub_arc = hub.shared_arc();
+            // The blocksonly note shares the admit task. Aborting this
+            // session during script verify must not skip the rebroadcast.
+            let admitted = crate::reactor::spawn_with_store_budget(async move {
+                let result = mp_task
+                    .accept_tx_from_async(tx_task, crate::tx_relay::TxOrigin::Relay(from))
+                    .await;
+                if let Ok(r) = &result {
+                    if !mp_task.relay_enabled() {
+                        mp_task.note_unbroadcast(r.txid);
+                        mp_task.rebroadcast_unbroadcast();
+                        mp_task.notify_inv_flush();
+                        if let (Some(h), Some(ph)) = (hub_arc.as_ref(), peers.as_ref()) {
+                            flush_tx_invs(h, ph.as_ref());
+                        }
+                    }
+                }
+                result
+            })
+            .await
+            .expect("tx admit");
+            match admitted {
+                Ok(_r) => {
                     mp.resolve_tx_request(&txid, &wtxid, true);
                     if let Some(s) = session {
                         s.note_last_transaction();
-                    }
-                    // Only when P2P relay is off: accept-time announce
-                    // is skipped (not yet unbroadcast). Re-announce so
-                    // other tx-relay peers INV (`p2p_blocksonly` :74).
-                    // Do not do this when relay is on — that INVs every
-                    // accepted tx back at the sender and broke
-                    // feature_csv_activation (P2PInterface getdata storm).
-                    if !mp.relay_enabled() {
-                        mp.note_unbroadcast(r.txid);
-                        mp.rebroadcast_unbroadcast();
-                        mp.notify_inv_flush();
-                        if let Some(s) = session {
-                            if let Some(ph) = s.peer_hub() {
-                                flush_tx_invs(hub, ph.as_ref());
-                            }
-                        }
                     }
                 }
                 Err(e) => {
