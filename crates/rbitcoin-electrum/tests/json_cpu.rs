@@ -41,9 +41,8 @@ impl ScriptHold {
         while entered.load(Ordering::SeqCst) < n {
             let left = Duration::from_secs(2).saturating_sub(start.elapsed());
             assert!(!left.is_zero(), "script workers did not park");
-            let (next, timeout) = cv.wait_timeout(g, left).unwrap_or_else(|p| p.into_inner());
+            let (next, _timeout) = cv.wait_timeout(g, left).unwrap_or_else(|p| p.into_inner());
             g = next;
-            assert!(!timeout.timed_out(), "script workers did not park");
         }
         Self { gate }
     }

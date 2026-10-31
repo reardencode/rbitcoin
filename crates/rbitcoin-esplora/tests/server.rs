@@ -994,9 +994,8 @@ impl ScriptHold {
         while entered.load(Ordering::SeqCst) < n {
             let left = Duration::from_secs(2).saturating_sub(start.elapsed());
             assert!(!left.is_zero(), "script workers did not park");
-            let (next, timeout) = cv.wait_timeout(g, left).unwrap_or_else(|p| p.into_inner());
+            let (next, _timeout) = cv.wait_timeout(g, left).unwrap_or_else(|p| p.into_inner());
             g = next;
-            assert!(!timeout.timed_out(), "script workers did not park");
         }
         Self { gate }
     }
@@ -1066,6 +1065,46 @@ fn heavy_template_encode_waits_for_a_script_worker() {
         }
     };
     assert_eq!(bytes.as_ref(), serde_json::to_vec(body.as_ref()).unwrap());
+}
+
+fn queued_join() -> InflightJoin {
+    InflightJoin {
+        done: Mutex::new(None),
+        cv: std::sync::Condvar::new(),
+        seq: 1,
+        queued: Mutex::new(false),
+        queued_cv: std::sync::Condvar::new(),
+    }
+}
+
+#[test]
+fn a_flag_set_before_the_waiter_arms_is_still_visible() {
+    let inf = queued_join();
+    {
+        let mut queued = inf.queued.lock().unwrap_or_else(|p| p.into_inner());
+        *queued = true;
+        inf.queued_cv.notify_all();
+    }
+    assert!(
+        inf.wait_queued(Duration::from_millis(20)),
+        "a notify with no waiter must still be visible on the flag"
+    );
+}
+
+#[test]
+fn a_waiter_that_locks_first_wakes_when_the_flag_is_stored() {
+    let inf = Arc::new(queued_join());
+    let waiting = Arc::clone(&inf);
+    let waiter = std::thread::spawn(move || waiting.wait_queued(Duration::from_secs(2)));
+    {
+        let mut queued = inf.queued.lock().unwrap_or_else(|p| p.into_inner());
+        *queued = true;
+        inf.queued_cv.notify_all();
+    }
+    assert!(
+        waiter.join().expect("waiter"),
+        "the queued flag is under the mutex the waiter holds"
+    );
 }
 
 include!("esplora_sh_journey.rs");
