@@ -445,12 +445,15 @@ fn invalid_child_missing_parent_and_linked_reconsider() {
         hub.is_block_invalid(&child.block_hash()),
         "a held child of an invalid block is invalid"
     );
-    let status = hub
-        .chaintips()
-        .into_iter()
-        .find(|t| t.hash == on_tip.block_hash())
-        .map(|t| t.status.to_string());
-    assert_eq!(status.as_deref(), Some("invalid"));
+    // As in Core, the held child is the `invalid` tip and its parent is not.
+    let status = |h: BlockHash| {
+        hub.chaintips()
+            .into_iter()
+            .find(|t| t.hash == h)
+            .map(|t| t.status.to_string())
+    };
+    assert_eq!(status(child.block_hash()).as_deref(), Some("invalid"));
+    assert_eq!(status(on_tip.block_hash()), None);
 
     let b = mine(gen, t0.saturating_add(4), 1);
     let c = mine(b.block_hash(), t0.saturating_add(5), 2);
@@ -5088,7 +5091,35 @@ fn invalidate_skips_a_fork_that_fails() {
     assert_eq!(hub.tip_hash(), Some(p4_hash));
     assert!(hub.is_block_invalid(&bad5_hash));
     assert_eq!(status(bad5_hash), Some("invalid"));
-    assert_eq!(status(w[1]), Some("valid-fork"));
+
+    // q5 <- q6 loses to r5 <- r6 <- r7 and stays a fork tip. Core lists q6
+    // `invalid` once q5 is, and q5 not at all.
+    let q5 = mine(p4_hash, t0 + 40, 5);
+    let q5_hash = q5.block_hash();
+    hub.accept_block(q5).unwrap();
+    let q6 = mine(q5_hash, t0 + 41, 6);
+    let q6_hash = q6.block_hash();
+    hub.accept_block(q6).unwrap();
+    let mut r = vec![p4_hash];
+    for (i, h) in (5..=7u32).enumerate() {
+        let b = if i == 0 {
+            mine_distinct(p4_hash, t0 + 50, h, &[q5_hash, bad5_hash])
+        } else {
+            mine(r[r.len() - 1], t0 + 50 + h, h)
+        };
+        r.push(b.block_hash());
+        let _ = hub.accept_received_block(b);
+    }
+    assert_eq!(hub.tip_hash(), Some(r[3]));
+    assert_eq!(status(q6_hash), Some("valid-fork"));
+    hub.invalidate_block(q5_hash).unwrap();
+    assert_eq!(hub.tip_hash(), Some(r[3]));
+    assert_eq!(status(q6_hash), Some("invalid"));
+    assert_eq!(status(q5_hash), None, "q6 builds on it");
+
+    // `reconsiderblock` clears the mark before it prunes the kept failure.
+    hub.invalidated.set.write().unwrap().remove(&bad5_hash);
+    assert_ne!(status(bad5_hash), Some("invalid"));
     let _ = std::fs::remove_dir_all(dir);
 }
 

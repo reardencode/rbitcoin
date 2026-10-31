@@ -1390,8 +1390,15 @@ impl ChainHub {
                 }
             };
 
-        for h in self.fork_tips.read().unwrap().iter() {
-            record(&mut out, h, "valid-fork");
+        let forks: Vec<BlockHash> = self.fork_tips.read().unwrap().iter().collect();
+        for h in forks {
+            // Core's `SetBlockFailureFlags` fails every descendant.
+            let status = if self.header_ancestry_invalid(h) {
+                "invalid"
+            } else {
+                "valid-fork"
+            };
+            record(&mut out, h, status);
         }
         // The header and held walks below re-read `header_tips` and
         // `held_bodies` (`prev_of`, `load_side_body`), so each set is copied
@@ -1427,7 +1434,10 @@ impl ChainHub {
                 if parents.contains(&hash) {
                     continue;
                 }
-                let status = if self.held_path_has_body_gap(hash) {
+                // Core's `SetBlockFailureFlags` fails every descendant.
+                let status = if self.header_ancestry_invalid(hash) {
+                    "invalid"
+                } else if self.held_path_has_body_gap(hash) {
                     "headers-only"
                 } else {
                     "valid-headers"
@@ -1435,8 +1445,41 @@ impl ChainHub {
                 record(&mut out, hash, status);
             }
         }
-        for path in self.invalidated.paths.read().unwrap().iter() {
-            if let Some(h) = path.hashes.last().copied() {
+        // An invalidated block or a connect failure is an `invalid` tip, as in
+        // Core. `reconsiderblock` clears the set before it prunes `failed`, so
+        // read `failed` first and keep only hashes still marked.
+        let mut marked = self.invalidated.failed.read().unwrap().clone();
+        if !marked.is_empty() {
+            let set = self.invalidated.set.read().unwrap();
+            marked.retain(|h| set.contains(h));
+        }
+        marked.extend(
+            self.invalidated
+                .paths
+                .read()
+                .unwrap()
+                .iter()
+                .filter_map(|path| path.hashes.last().copied()),
+        );
+        // As in Core, a mark that another tip or mark builds on is not a tip.
+        let mut below = HashSet::new();
+        for start in out.keys().chain(&marked) {
+            let mut h = *start;
+            for _ in 0..10_000 {
+                let Some(prev) = self.prev_of(&h) else {
+                    break;
+                };
+                if prev.to_byte_array() == [0u8; 32]
+                    || self.is_connected(&prev)
+                    || !below.insert(prev)
+                {
+                    break;
+                }
+                h = prev;
+            }
+        }
+        for h in marked {
+            if !below.contains(&h) {
                 record(&mut out, h, "invalid");
             }
         }
@@ -2631,30 +2674,13 @@ impl ChainHub {
         } else {
             return Err(NetError::Consensus("Block not found".into()));
         }
-        let _ = self.try_apply_after_invalidate()?;
+        let activated = self.activate_best_side_branch(&[], &HashSet::new());
+        // Activation may move the tip before a fault, so evict before it is
+        // returned.
         if let Some(mp) = self.mempool() {
             mp.evict_after_reorg();
         }
-        Ok(())
-    }
-
-    /// After invalidate, activate the remaining fork (held or archive) with
-    /// the most total chain work. Equal work prefers precious, then the
-    /// first-seen held tip.
-    #[doc(hidden)]
-    pub fn try_apply_after_invalidate(&self) -> Result<Option<AcceptOutcome>, NetError> {
-        let none = HashSet::new();
-        let Some(branch) = self.most_work_branch(self.side_branches(&[], &none, &none), &mut None)
-        else {
-            return Ok(None);
-        };
-        match self.accept_branch_inner(&branch) {
-            Ok(AcceptOutcome::Accepted { height }) => Ok(Some(AcceptOutcome::Accepted { height })),
-            Ok(AcceptOutcome::IgnoredWeaker) => Ok(None),
-            Ok(other) => Ok(Some(other)),
-            Err(NetError::Protocol(s)) if s.contains("branch parent not on chain") => Ok(None),
-            Err(e) => Err(e),
-        }
+        activated
     }
 
     /// Clear the invalid mark on `hash`, its invalidated paths, and ancestors,
@@ -2729,14 +2755,29 @@ impl ChainHub {
         applied
     }
 
-    /// Core `ActivateBestChain` after `reconsiderblock`: connect the most-work
-    /// side branch, and try the next one when a block fails. Then keep the
-    /// restored leaves that lost as fork tips.
+    /// Core `ActivateBestChain` after `reconsiderblock`: activate the most-work
+    /// side branch. Then keep the restored leaves that lost as fork tips.
     fn apply_after_reconsider(
         &self,
         leaves: &[BlockHash],
         restored: &HashSet<BlockHash>,
         validated: &HashSet<BlockHash>,
+    ) -> Result<(), NetError> {
+        let activated = self.activate_best_side_branch(leaves, restored);
+        // The paths that named these leaves are gone, so park before a fault
+        // is returned.
+        self.park_restored_leaves(leaves, restored, validated);
+        activated
+    }
+
+    /// Core `ActivateBestChain` after `invalidateblock` or `reconsiderblock`:
+    /// connect the most-work side branch, and try the next one when a block
+    /// fails. The failed block is marked invalid, as Core's `InvalidBlockFound`
+    /// does; it is not the caller's error. A store fault is.
+    fn activate_best_side_branch(
+        &self,
+        leaves: &[BlockHash],
+        restored: &HashSet<BlockHash>,
     ) -> Result<(), NetError> {
         // A failed tip may stay a candidate (a time reject is not a mark), so
         // each tip is tried once.
@@ -2764,9 +2805,6 @@ impl ChainHub {
                 Err(e) => self.remember_failed_accept(branch_tip, &e),
             }
         }
-        // The paths that named these leaves are gone, so park before a fault
-        // is returned.
-        self.park_restored_leaves(leaves, restored, validated);
         fault.map_or(Ok(()), Err)
     }
 
