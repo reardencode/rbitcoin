@@ -50,6 +50,38 @@ fn spindle_wait_blocks_only_while_datadir_hdd_is_held() {
 }
 
 #[test]
+fn spindle_park_hook_runs_while_the_hold_still_owns_the_lock() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let dir = tmp();
+    let store = Store::create_tiny(&dir).unwrap();
+    store.set_datadir_hdd(true);
+    let (park_tx, park_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let _hold = store.spindle_hold();
+        scope.spawn(|| {
+            store.spindle_wait_with(|| {
+                let _ = park_tx.send(());
+            });
+            let _ = done_tx.send(());
+        });
+        park_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("park hook");
+        assert!(
+            done_rx.try_recv().is_err(),
+            "wait returned while the hold was alive"
+        );
+        drop(_hold);
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("waiter finishes after the hold drops");
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn open_tiny_reopen_still_works() {
     let dir = tmp();
     {

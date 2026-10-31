@@ -310,12 +310,39 @@ pub struct Store {
     pub utxo_view: crate::sync::atomic::AtomicU64,
     /// Confirm readers wait here while a `--datadir-hdd` write holds the spindle.
     /// Flag off never locks, so [`Self::spindle_wait`] returns immediately.
-    pub spindle: std::sync::Mutex<()>,
+    pub spindle: Spindle,
+}
+
+/// `--datadir-hdd` write burst. The holder sets the flag; a reader waits.
+pub struct Spindle {
+    held: std::sync::Mutex<bool>,
+    cv: std::sync::Condvar,
+}
+
+impl Spindle {
+    fn new() -> Self {
+        Self {
+            held: std::sync::Mutex::new(false),
+            cv: std::sync::Condvar::new(),
+        }
+    }
 }
 
 /// Held across one rotating-media write burst. Drop releases [`Store::spindle_wait`].
 pub struct SpindleHold<'a> {
-    pub _guard: Option<std::sync::MutexGuard<'a, ()>>,
+    spindle: Option<&'a Spindle>,
+}
+
+impl Drop for SpindleHold<'_> {
+    fn drop(&mut self) {
+        let Some(spindle) = self.spindle.take() else {
+            return;
+        };
+        let mut held = spindle.held.lock().unwrap_or_else(|p| p.into_inner());
+        *held = false;
+        drop(held);
+        spindle.cv.notify_all();
+    }
 }
 
 /// Holds [`Store::utxo_view`] odd until drop.
@@ -414,7 +441,7 @@ impl Store {
             spend_reorg_gen: std::sync::atomic::AtomicU64::new(0),
             utxo_view: crate::sync::atomic::AtomicU64::new(0),
             spend_marker: std::sync::Mutex::new(()),
-            spindle: std::sync::Mutex::new(()),
+            spindle: Spindle::new(),
             path,
             cold_path,
             head_scale: layout.head_scale,
@@ -477,7 +504,7 @@ impl Store {
             spend_reorg_gen: std::sync::atomic::AtomicU64::new(0),
             utxo_view: crate::sync::atomic::AtomicU64::new(0),
             spend_marker: std::sync::Mutex::new(()),
-            spindle: std::sync::Mutex::new(()),
+            spindle: Spindle::new(),
             path,
             cold_path,
             head_scale: layout.head_scale,
@@ -923,20 +950,50 @@ impl Store {
     /// Flag off returns a guard that does not take the lock.
     pub fn spindle_hold(&self) -> SpindleHold<'_> {
         if !self.datadir_hdd() {
-            return SpindleHold { _guard: None };
+            return SpindleHold { spindle: None };
+        }
+        {
+            let mut held = self.spindle.held.lock().unwrap_or_else(|p| p.into_inner());
+            while *held {
+                held = self
+                    .spindle
+                    .cv
+                    .wait(held)
+                    .unwrap_or_else(|p| p.into_inner());
+            }
+            *held = true;
         }
         SpindleHold {
-            _guard: Some(self.spindle.lock().unwrap_or_else(|p| p.into_inner())),
+            spindle: Some(&self.spindle),
         }
     }
 
     /// Wait until the write thread drops [`Self::spindle_hold`]. No-op when the flag is off.
     /// The write thread must not call this.
     pub fn spindle_wait(&self) {
+        self.spindle_wait_with(|| {});
+    }
+
+    /// [`Self::spindle_wait`], and `on_park` runs once under the spindle lock
+    /// after this thread has seen the hold and before it waits. The holder
+    /// cannot drop until the wait releases that lock. `on_park` must not
+    /// call [`Self::spindle_hold`] or [`Self::spindle_wait`].
+    pub fn spindle_wait_with(&self, on_park: impl FnOnce()) {
         if !self.datadir_hdd() {
             return;
         }
-        let _guard = self.spindle.lock().unwrap_or_else(|p| p.into_inner());
+        let mut held = self.spindle.held.lock().unwrap_or_else(|p| p.into_inner());
+        if !*held {
+            return;
+        }
+        on_park();
+        while *held {
+            held = self
+                .spindle
+                .cv
+                .wait(held)
+                .unwrap_or_else(|p| p.into_inner());
+        }
     }
 
     pub fn clear_durable_seqsigwit(&self) -> Result<(), StoreError> {
