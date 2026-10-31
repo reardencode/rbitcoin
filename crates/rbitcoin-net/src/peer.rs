@@ -2378,6 +2378,23 @@ pub async fn peer_session_with(
     }
     .await;
 
+    // A `?` in the tip or tx-announce arm leaves frames that were already
+    // read. Apply them before `SessionFollow` forgets their getdata.
+    let drained = apply_queued_decodes(
+        &mut decode_q,
+        hub.as_ref(),
+        &out_tx,
+        follow,
+        session.as_deref(),
+        &mut requested_since,
+        &peer_s,
+    )
+    .await;
+    let result = match (result, drained) {
+        (Err(e), _) => Err(e),
+        (Ok(()), drained) => drained,
+    };
+
     drop(out_tx);
     // If select! already joined the writer, do not await again (would pend).
     if writer_task.is_finished() {

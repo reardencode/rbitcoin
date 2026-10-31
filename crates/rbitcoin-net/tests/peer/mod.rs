@@ -1064,6 +1064,115 @@ async fn disconnect_applies_a_block_already_queued() {
     let _ = std::fs::remove_dir_all(dir.path());
 }
 
+/// A tip announce that fails because disconnect closed the writer must
+/// still apply a block already sitting in `decode_q`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disconnect_during_tip_announce_applies_a_queued_block() {
+    use bitcoin::blockdata::constants::genesis_block;
+    use rbitcoin_net::chain::TipEvent;
+    use rbitcoin_net::v2::{open_v2, read_v2_frame, write_v2_msg};
+    use tokio::net::TcpListener;
+
+    let n = rbitcoin_net::block_decode_permits();
+    let sem = rbitcoin_net::msg_decode::block_decode_semaphore().clone();
+    let mut held = Vec::with_capacity(n);
+    for _ in 0..n {
+        held.push(sem.clone().acquire_owned().await.expect("decode permit"));
+    }
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("decode-tip-disconnect");
+    hub.ensure_genesis().unwrap();
+    let hub = hub.into_arc();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let live = outbound_test_peer(&peers, 18452);
+    let magic = Magic::from(Network::Regtest);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let client_magic = magic;
+    let client = tokio::spawn(async move {
+        let stream = TcpStream::connect(addr).await.unwrap();
+        open_v2(stream, client_magic, false).await.unwrap()
+    });
+    let (server_stream, _) = listener.accept().await.unwrap();
+    let (reader, writer, _wire, _shutdown) = open_v2(server_stream, magic, true).await.unwrap();
+    let (mut c_reader, mut c_writer, _wire, _shutdown) = client.await.unwrap();
+    let tip_rx = hub.subscribe_tips();
+    let session_peer = Arc::clone(&live);
+    let session_hub = Arc::clone(&hub);
+    let session = tokio::spawn(async move {
+        let _ = peer_session_with(
+            reader,
+            writer,
+            magic,
+            session_hub,
+            tip_rx,
+            FollowSessionMeta {
+                peer: Some(addr),
+                live: None,
+                session: Some(session_peer),
+            },
+        )
+        .await;
+    });
+    live.set_session_abort(session.abort_handle());
+    let drain_startup = async {
+        while let Ok(Ok(_)) = tokio::time::timeout(
+            Duration::from_millis(40),
+            read_v2_frame(&mut c_reader, magic),
+        )
+        .await
+        {}
+    };
+    tokio::time::timeout(Duration::from_secs(2), drain_startup)
+        .await
+        .expect("startup frames drain");
+    write_v2_msg(
+        &mut c_writer,
+        NetworkMessage::SendCmpct(SendCmpct {
+            send_compact: true,
+            version: 2,
+        }),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut block = genesis_block(Network::Regtest);
+    block.header.prev_blockhash = BlockHash::from_byte_array([0x11; 32]);
+    let hash = block.block_hash();
+    write_v2_msg(&mut c_writer, NetworkMessage::Block(block))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let tip_hash = hub.tip_hash().expect("genesis tip");
+    let header = hub.tip_header().expect("genesis header");
+    let _ = hub.tip_tx.send(TipEvent {
+        height: 0,
+        hash: tip_hash,
+        header,
+        reorg_branch_len: 0,
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(peers.disconnect_id(live.id), "the peer is registered");
+    assert!(
+        !live.take_block_from_peer(&hash),
+        "the body stays queued while every decode permit is held"
+    );
+    drop(held);
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut applied = false;
+    while std::time::Instant::now() < deadline {
+        if live.take_block_from_peer(&hash) {
+            applied = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        applied,
+        "a failed tip announce must still apply a block already read"
+    );
+    let _ = std::fs::remove_dir_all(dir.path());
+}
+
 fn outbound_test_peer(
     peers: &Arc<rbitcoin_net::peers::PeerHub>,
     port: u16,
