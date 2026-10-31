@@ -1665,6 +1665,69 @@ async fn empty_work_queue_is_http_503() {
     let _ = std::fs::remove_dir_all(dir.path());
 }
 
+/// A later long-poll drops the work-queue slot. If that slot is taken before
+/// the wait ends, calls that already ran stay in the JSON-RPC array. Calls
+/// that never started are errors. A POST that has not run a call is still 503.
+#[tokio::test]
+async fn batch_keeps_finished_calls_when_the_queue_cannot_be_retaken() {
+    let (ctx, dir) = http_wait_ctx();
+    let work_queue = Arc::new(Semaphore::new(1));
+    let state = AppState {
+        ctx,
+        auth: RpcAuth::new("test-token"),
+        cookie: None,
+        work_queue: Arc::clone(&work_queue),
+        rest_queue: Arc::new(Semaphore::new(1)),
+        rest: false,
+        require_auth: true,
+    };
+    let batch = serde_json::json!([
+        {"jsonrpc":"1.0","id":1,"method":"getblockcount"},
+        {"jsonrpc":"1.0","id":2,"method":"waitfornewblock","params":[1500]},
+        {"jsonrpc":"1.0","id":3,"method":"getblockcount"}
+    ]);
+    let waiter = tokio::spawn(async move {
+        rpc_post(
+            State(state),
+            axum::extract::Request::new(Body::from(batch.to_string())),
+        )
+        .await
+    });
+    // getblockcount is the first call. It takes the only slot and drops it
+    // when waitfornewblock (1500 ms) starts. 80 ms is past that handoff.
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    let _held = work_queue
+        .clone()
+        .try_acquire_owned()
+        .expect("slot free during the long-poll");
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+        .await
+        .expect("batch finishes after the long-poll")
+        .expect("rpc task");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a batch that already ran getblockcount must not be HTTP 503"
+    );
+    let bytes = axum::body::to_bytes(response.into_body(), 8 * 1024)
+        .await
+        .expect("body");
+    let v: serde_json::Value = serde_json::from_slice(&bytes).expect("json array");
+    let arr = v.as_array().expect("array");
+    assert_eq!(arr.len(), 3, "{v}");
+    assert_eq!(arr[0]["result"], 0, "{v}");
+    assert!(arr[0]["error"].is_null(), "{v}");
+    for call in &arr[1..] {
+        let msg = call["error"]["message"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("Work queue depth exceeded"),
+            "unstarted call must be a queue error: {v}"
+        );
+        assert!(call["result"].is_null(), "{v}");
+    }
+    let _ = std::fs::remove_dir_all(dir.path());
+}
+
 /// A closed store budget must not be reached when the work queue is already
 /// empty. Acquiring that semaphore would wait forever.
 #[tokio::test]

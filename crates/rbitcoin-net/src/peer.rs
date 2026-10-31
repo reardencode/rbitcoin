@@ -1371,6 +1371,7 @@ pub async fn run_writer_task(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 pub async fn on_heartbeat(
     hub: &ChainHub,
     out_tx: &mpsc::UnboundedSender<PeerOut>,
@@ -1379,6 +1380,7 @@ pub async fn on_heartbeat(
     requested_since: &mut Option<std::time::Instant>,
     tx_announce_rx: &mut Option<broadcast::Receiver<crate::tx_relay::MempoolAnnounce>>,
     inv_flush_rx: &mut Option<broadcast::Receiver<()>>,
+    decode_queued: bool,
 ) -> Result<(), NetError> {
     if tx_announce_rx.is_none() {
         *tx_announce_rx = hub.mempool().map(|m| m.subscribe_announces());
@@ -1414,28 +1416,32 @@ pub async fn on_heartbeat(
     if let Some(ph) = s.peer_hub() {
         ph.on_session_heartbeat();
     }
-    if maybe_expire_block_requests(
-        hub,
-        &mut follow.requested_blocks,
-        requested_since,
-        std::time::Instant::now(),
-        session,
-    ) {
-        drain_pending(
+    // A block or compact frame already sits in `decode_q`. Expiring the
+    // ask here forgets it before that frame is applied.
+    if !decode_queued {
+        if maybe_expire_block_requests(
             hub,
-            out_tx,
-            &mut follow.pending_blocks,
-            &mut follow.pending_headers,
             &mut follow.requested_blocks,
-            getdata_use_compact(hub, follow.cmpct_version),
+            requested_since,
+            std::time::Instant::now(),
             session,
-        )
-        .await?;
-        if !follow.requested_blocks.is_empty() {
-            *requested_since = Some(std::time::Instant::now());
+        ) {
+            drain_pending(
+                hub,
+                out_tx,
+                &mut follow.pending_blocks,
+                &mut follow.pending_headers,
+                &mut follow.requested_blocks,
+                getdata_use_compact(hub, follow.cmpct_version),
+                session,
+            )
+            .await?;
+            if !follow.requested_blocks.is_empty() {
+                *requested_since = Some(std::time::Instant::now());
+            }
         }
+        maybe_expire_pending_cmpct(hub, follow, session, out_tx, std::time::Instant::now())?;
     }
-    maybe_expire_pending_cmpct(hub, follow, session, out_tx, std::time::Instant::now())?;
     queue_due_tx_invs(hub, s, &follow.from_this_peer, out_tx);
     queue_due_parent_getdata(hub, s, out_tx);
     let _ = maybe_queue_local_addr(hub, s, out_tx);
@@ -2104,6 +2110,7 @@ pub async fn peer_session_with(
                         &mut requested_since,
                         &mut tx_announce_rx,
                         &mut inv_flush_rx,
+                        !decode_q.is_empty(),
                     )
                     .await?;
                     last_hb = std::time::Instant::now();

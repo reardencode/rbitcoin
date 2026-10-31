@@ -750,9 +750,72 @@ async fn heartbeat_once(
         &mut None,
         &mut None,
         &mut None,
+        false,
     )
     .await
     .unwrap();
+}
+
+/// A block frame already read, still waiting on a decode permit, must not
+/// lose its getdata. The heartbeat used to drain `requested_blocks` on the
+/// 10s stall clock before that frame was applied.
+#[tokio::test]
+async fn queued_decode_holds_block_requests_across_heartbeat() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("decode-hold-getdata");
+    hub.ensure_genesis().unwrap();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peer = outbound_test_peer(&peers, 18449);
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let hash = BlockHash::from_byte_array([0x44; 32]);
+    hub.note_asked_block(hash);
+    let mut follow = PeerFollowState::new();
+    follow.requested_blocks.insert(hash);
+    let mut since =
+        Some(std::time::Instant::now() - BLOCK_GETDATA_TIMEOUT - Duration::from_secs(1));
+    on_heartbeat(
+        &hub,
+        &out_tx,
+        &mut follow,
+        Some(peer.as_ref()),
+        &mut since,
+        &mut None,
+        &mut None,
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(
+        follow.requested_blocks.contains(&hash),
+        "a queued decode must keep the getdata"
+    );
+    assert!(
+        hub.already_have_or_asked_block(&hash),
+        "asked_blocks must stay until the frame is applied"
+    );
+    assert!(
+        sent(&mut out_rx)
+            .iter()
+            .all(|m| !matches!(m, NetworkMessage::GetData(_))),
+        "the stall path must not send another getdata"
+    );
+    on_heartbeat(
+        &hub,
+        &out_tx,
+        &mut follow,
+        Some(peer.as_ref()),
+        &mut since,
+        &mut None,
+        &mut None,
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(
+        follow.requested_blocks.is_empty(),
+        "once the decode queue is empty the stall clock still expires"
+    );
+    assert!(!hub.already_have_or_asked_block(&hash));
+    let _ = std::fs::remove_dir_all(dir.path());
 }
 
 fn outbound_test_peer(

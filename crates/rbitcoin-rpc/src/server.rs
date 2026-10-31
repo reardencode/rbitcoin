@@ -877,6 +877,23 @@ fn http_body_has_longpoll(parsed: &serde_json::Value) -> bool {
     }
 }
 
+fn work_queue_exceeded_reply(req: &serde_json::Value) -> Option<serde_json::Value> {
+    let ver = parse_jsonrpc_ver(req).unwrap_or(JsonRpcVer::V1);
+    let has_id = req.as_object().is_some_and(|m| m.contains_key("id"));
+    if ver == JsonRpcVer::V2 && !has_id {
+        return None;
+    }
+    let err = serde_json::json!({
+        "code": -32603,
+        "message": "Work queue depth exceeded",
+    });
+    let id = req.get("id").cloned();
+    Some(match ver {
+        JsonRpcVer::V2 => reply_v2(id.unwrap_or(serde_json::Value::Null), None, Some(err)),
+        JsonRpcVer::V1 => reply_v1(id, None, Some(err)),
+    })
+}
+
 async fn prepare_ordered_call(
     ctx: &Arc<RpcContext>,
     req: &serde_json::Value,
@@ -904,8 +921,26 @@ async fn exec_http_rpc_async(
     if let Some(arr) = parsed.as_array() {
         let mut hold = None;
         let mut out = Vec::new();
-        for req in arr.iter() {
-            let prep = prepare_ordered_call(&ctx, req, &mut hold, work_queue).await?;
+        let mut ran = false;
+        for (i, req) in arr.iter().enumerate() {
+            let prep = match prepare_ordered_call(&ctx, req, &mut hold, work_queue).await {
+                Ok(prep) => prep,
+                Err(()) if !ran => return Err(()),
+                Err(()) => {
+                    for rest in &arr[i..] {
+                        if let Some(body) = work_queue_exceeded_reply(rest) {
+                            out.push(body);
+                        }
+                    }
+                    if out.is_empty() {
+                        return Ok(HttpRpcOut::Empty(StatusCode::NO_CONTENT));
+                    }
+                    return Ok(HttpRpcOut::Json(
+                        StatusCode::OK,
+                        serde_json::Value::Array(out),
+                    ));
+                }
+            };
             match exec_one_async(&ctx, req, prep.satisfied, prep.snap).await {
                 OneOut::Reply(body) => out.push(body),
                 OneOut::Notification => {}
@@ -917,6 +952,7 @@ async fn exec_http_rpc_async(
                     ));
                 }
             }
+            ran = true;
         }
         if out.is_empty() && !arr.is_empty() {
             return Ok(HttpRpcOut::Empty(StatusCode::NO_CONTENT));
