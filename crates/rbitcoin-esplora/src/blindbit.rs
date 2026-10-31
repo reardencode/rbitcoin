@@ -106,18 +106,22 @@ pub async fn blindbit_permit_mw(
     mut req: Request,
     next: Next,
 ) -> Response {
+    struct Waiting(Arc<BlindbitLimit>);
+    impl Drop for Waiting {
+        fn drop(&mut self) {
+            self.0.waiting.fetch_sub(1, Ordering::SeqCst);
+            self.0.wake.notify_waiters();
+        }
+    }
     let permit = match limit.sem.clone().try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
             limit.waiting.fetch_add(1, Ordering::SeqCst);
             limit.wake.notify_waiters();
+            let _waiting = Waiting(Arc::clone(&limit));
             let Ok(permit) = limit.sem.clone().acquire_owned().await else {
-                limit.waiting.fetch_sub(1, Ordering::SeqCst);
-                limit.wake.notify_waiters();
                 return error(StatusCode::SERVICE_UNAVAILABLE, "shutting down");
             };
-            limit.waiting.fetch_sub(1, Ordering::SeqCst);
-            limit.wake.notify_waiters();
             permit
         }
     };

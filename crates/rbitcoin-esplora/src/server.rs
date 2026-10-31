@@ -518,6 +518,13 @@ async fn admit_connection(
     req: Request,
     next: Next,
 ) -> Response {
+    struct Waiting(Arc<AdmitGate>);
+    impl Drop for Waiting {
+        fn drop(&mut self) {
+            self.0.waiting.fetch_sub(1, Ordering::SeqCst);
+            self.0.wake.notify_waiters();
+        }
+    }
     gate.arrived.fetch_add(1, Ordering::SeqCst);
     gate.wake.notify_waiters();
     let permit = match gate.sem.clone().try_acquire_owned() {
@@ -525,13 +532,10 @@ async fn admit_connection(
         Err(_) => {
             gate.waiting.fetch_add(1, Ordering::SeqCst);
             gate.wake.notify_waiters();
+            let _waiting = Waiting(Arc::clone(&gate));
             let Ok(permit) = gate.sem.clone().acquire_owned().await else {
-                gate.waiting.fetch_sub(1, Ordering::SeqCst);
-                gate.wake.notify_waiters();
                 return StatusCode::SERVICE_UNAVAILABLE.into_response();
             };
-            gate.waiting.fetch_sub(1, Ordering::SeqCst);
-            gate.wake.notify_waiters();
             permit
         }
     };
@@ -600,8 +604,8 @@ pub struct InflightJoin {
     /// Start order of the leader. Waiters publish this stamp.
     pub seq: u64,
     /// Set under this mutex before a waiter sleeps. The wait, not the join result.
-    queued: Mutex<bool>,
-    queued_cv: Condvar,
+    pub queued: Mutex<bool>,
+    pub queued_cv: Condvar,
 }
 
 impl InflightJoin {
@@ -1429,52 +1433,4 @@ pub fn encode_header_hex(hdr: &bitcoin::block::Header) -> Result<String, String>
     hdr.consensus_encode(&mut buf)
         .map_err(|_| "header encode".to_string())?;
     Ok(rbitcoin_primitives::hex_encode(&(buf)))
-}
-
-#[cfg(test)]
-mod queued_flag {
-    use super::InflightJoin;
-    use std::sync::{Arc, Condvar, Mutex};
-    use std::thread;
-    use std::time::Duration;
-
-    fn join() -> InflightJoin {
-        InflightJoin {
-            done: Mutex::new(None),
-            cv: Condvar::new(),
-            seq: 1,
-            queued: Mutex::new(false),
-            queued_cv: Condvar::new(),
-        }
-    }
-
-    #[test]
-    fn a_flag_set_before_the_waiter_arms_is_still_visible() {
-        let inf = join();
-        {
-            let mut queued = inf.queued.lock().unwrap_or_else(|p| p.into_inner());
-            *queued = true;
-            inf.queued_cv.notify_all();
-        }
-        assert!(
-            inf.wait_queued(Duration::from_millis(20)),
-            "a notify with no waiter must still be visible on the flag"
-        );
-    }
-
-    #[test]
-    fn a_waiter_that_locks_first_wakes_when_the_flag_is_stored() {
-        let inf = Arc::new(join());
-        let waiting = Arc::clone(&inf);
-        let waiter = thread::spawn(move || waiting.wait_queued(Duration::from_secs(2)));
-        {
-            let mut queued = inf.queued.lock().unwrap_or_else(|p| p.into_inner());
-            *queued = true;
-            inf.queued_cv.notify_all();
-        }
-        assert!(
-            waiter.join().expect("waiter"),
-            "the queued flag is under the mutex the waiter holds"
-        );
-    }
 }
