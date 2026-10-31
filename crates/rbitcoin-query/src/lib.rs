@@ -480,7 +480,7 @@ pub struct Query {
     /// 0 = off. An unpaged SH join above this create count holds
     /// [`Self::heavy_sh_join`] for its whole walk.
     pub heavy_sh_creates: AtomicU32,
-    /// Shared API store-read slots. Tests leave this at [`Semaphore::MAX_PERMITS`].
+    /// Shared API store-read slots. Tests leave this at `tokio::sync::Semaphore::MAX_PERMITS`.
     /// The node replaces it once at listen from `--store-read-budget`.
     pub api_read_budget: std::sync::Mutex<Arc<tokio::sync::Semaphore>>,
     /// One heavy unpaged SH join at a time across every Electrum and Esplora
