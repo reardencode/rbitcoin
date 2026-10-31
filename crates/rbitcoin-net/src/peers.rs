@@ -841,10 +841,19 @@ impl LivePeer {
     }
 
     pub fn note_announced_wtx(&self, wtxid: Wtxid) {
-        self.announced_wtx
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(wtxid, 50_000);
+        let _ = self.claim_announced_wtx(wtxid);
+    }
+
+    /// `true` when this call recorded `wtxid`. A flush and an announce can
+    /// both pass a separate `has_announced_wtx` check; only the claim that
+    /// wins may queue the INV.
+    pub fn claim_announced_wtx(&self, wtxid: Wtxid) -> bool {
+        let mut announced = self.announced_wtx.lock().unwrap_or_else(|e| e.into_inner());
+        if announced.contains(&wtxid) {
+            return false;
+        }
+        announced.insert(wtxid, 50_000);
+        true
     }
 
     pub fn has_announced_wtx(&self, wtxid: &Wtxid) -> bool {

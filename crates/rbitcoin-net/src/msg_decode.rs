@@ -6,9 +6,9 @@
 //! multi-thread runtime workers to poll other sockets.
 //!
 //! A process-wide semaphore bounds how many decodes enter the blocking pool.
-//! It does not bound RAM of frames already sitting in async tasks: the getdata
-//! window limits how many bodies are requested. The permit is acquired after
-//! the frame is already owned by this task.
+//! Frames already read and waiting on a permit are capped per peer in the
+//! session loop. The permit is acquired after the frame is already owned by
+//! the decode task, so the reader does not wait before the next TCP read.
 
 use crate::codec::FramedMessage;
 use crate::error::NetError;

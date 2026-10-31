@@ -225,6 +225,7 @@ async fn blocksonly_relay_perm_tx_invs_other_inbound(
     let other = relay_peer(peers, [127, 0, 0, 1], rbitcoin_net::peers::PeerConnType::Inbound);
     assert!(listed.session_relay_perm());
     assert!(!other.session_relay_perm());
+    let mut listed_rx = writer_of(&listed);
     let mut other_rx = writer_of(&other);
 
     let (out_tx, _rx) = mpsc::unbounded_channel();
@@ -245,6 +246,10 @@ async fn blocksonly_relay_perm_tx_invs_other_inbound(
         tx_invs(&mut other_rx),
         vec![tx.compute_wtxid()],
         "second inbound gets only the unbroadcast wtx"
+    );
+    assert!(
+        tx_invs(&mut listed_rx).is_empty(),
+        "blocksonly flush must not inv the peer that sent the tx"
     );
     // The admit publishes an announce at accept time and again from
     // `rebroadcast_unbroadcast`. A live session applies both after the flush

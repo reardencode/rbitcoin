@@ -1030,6 +1030,96 @@ async fn ping_behind_a_queued_block_does_not_pong_early() {
     let _ = std::fs::remove_dir_all(dir.path());
 }
 
+/// A peer that keeps sending while every decode permit is held must not
+/// grow `decode_q` without a bound. Past the cap the session drops it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn decode_queue_full_disconnects() {
+    use bitcoin::blockdata::constants::genesis_block;
+    use rbitcoin_net::v2::{open_v2, read_v2_frame, write_v2_msg};
+    use tokio::net::TcpListener;
+
+    let n = rbitcoin_net::block_decode_permits();
+    let sem = rbitcoin_net::msg_decode::block_decode_semaphore().clone();
+    let mut held = Vec::with_capacity(n);
+    for _ in 0..n {
+        held.push(sem.clone().acquire_owned().await.expect("decode permit"));
+    }
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("decode-queue-cap");
+    hub.ensure_genesis().unwrap();
+    hub.set_minimum_chain_work(Some([0xff; 32]));
+    let magic = Magic::from(Network::Regtest);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let client_magic = magic;
+    let client = tokio::spawn(async move {
+        let stream = TcpStream::connect(addr).await.unwrap();
+        open_v2(stream, client_magic, false).await.unwrap()
+    });
+    let (server_stream, _) = listener.accept().await.unwrap();
+    let (reader, writer, _wire, _shutdown) = open_v2(server_stream, magic, true).await.unwrap();
+    let (mut c_reader, mut c_writer, _wire, _shutdown) = client.await.unwrap();
+    let tip_rx = hub.subscribe_tips();
+    let session = tokio::spawn(async move {
+        let _ = peer_session_with(
+            reader,
+            writer,
+            magic,
+            Arc::new(hub),
+            tip_rx,
+            FollowSessionMeta::default(),
+        )
+        .await;
+    });
+    let drain_startup = async {
+        while let Ok(Ok(_)) = tokio::time::timeout(
+            Duration::from_millis(40),
+            read_v2_frame(&mut c_reader, magic),
+        )
+        .await
+        {}
+    };
+    tokio::time::timeout(Duration::from_secs(2), drain_startup)
+        .await
+        .expect("startup frames drain");
+    write_v2_msg(
+        &mut c_writer,
+        NetworkMessage::Block(genesis_block(Network::Regtest)),
+    )
+    .await
+    .unwrap();
+    let extra = rbitcoin_net::peer::DECODE_Q_MAX_FRAMES + 5;
+    for i in 0..extra {
+        write_v2_msg(&mut c_writer, NetworkMessage::Ping(0x5100_0000 + i as u64))
+            .await
+            .unwrap();
+    }
+    drop(held);
+    let mut pongs = 0usize;
+    let mut closed = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match tokio::time::timeout(left, read_v2_frame(&mut c_reader, magic)).await {
+            Ok(Ok(frame)) if frame.is_pong() => pongs += 1,
+            Ok(Ok(_)) => {}
+            _ => {
+                closed = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        closed,
+        "a full decode queue must drop the peer, pongs={pongs}"
+    );
+    assert!(
+        pongs < extra,
+        "every ping was applied ({pongs}); the queue was not capped"
+    );
+    session.abort();
+    let _ = std::fs::remove_dir_all(dir.path());
+}
+
 /// `disconnect_id` must not abort a session that still has a frame in
 /// `decode_q`. The body is applied once a decode permit is free.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

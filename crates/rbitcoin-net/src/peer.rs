@@ -262,6 +262,65 @@ pub fn rate_limit_disconnect(session: Option<&crate::peers::LivePeer>) -> NetErr
     NetError::Protocol("peer rate limit")
 }
 
+/// Frames already read while a decode permit is held. One max message plus
+/// a short tail of messages that must stay behind it. Past this the peer
+/// is dropped. The rate limiter does not bound a peer that stays under it.
+pub const DECODE_Q_MAX_FRAMES: usize = 32;
+pub const DECODE_Q_MAX_BYTES: usize = crate::codec::MAX_PROTOCOL_MESSAGE_LENGTH + 64 * 1024;
+
+/// Disconnect a peer that queued more decoded-or-waiting frames than
+/// [`DECODE_Q_MAX_FRAMES`] or [`DECODE_Q_MAX_BYTES`].
+#[doc(hidden)]
+pub fn decode_queue_disconnect(session: Option<&crate::peers::LivePeer>) -> NetError {
+    if let Some(s) = session {
+        s.request_disconnect();
+    }
+    NetError::Protocol("decode queue full")
+}
+
+type DecodeRx = tokio::sync::oneshot::Receiver<Result<RawNetworkMessage, NetError>>;
+
+struct DecodeQueue {
+    q: VecDeque<DecodeRx>,
+    nbytes: VecDeque<usize>,
+    bytes: usize,
+}
+
+impl DecodeQueue {
+    fn new() -> Self {
+        Self {
+            q: VecDeque::new(),
+            nbytes: VecDeque::new(),
+            bytes: 0,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.q.is_empty()
+    }
+
+    fn front_mut(&mut self) -> Option<&mut DecodeRx> {
+        self.q.front_mut()
+    }
+
+    fn pop_front(&mut self) -> Option<DecodeRx> {
+        let rx = self.q.pop_front()?;
+        if let Some(n) = self.nbytes.pop_front() {
+            self.bytes = self.bytes.saturating_sub(n);
+        }
+        Some(rx)
+    }
+
+    /// Queue one frame already taken off the socket. `true` when the peer
+    /// has now passed the cap and must be disconnected after a drain.
+    fn push(&mut self, rx: DecodeRx, n: usize) -> bool {
+        self.q.push_back(rx);
+        self.nbytes.push_back(n);
+        self.bytes = self.bytes.saturating_add(n);
+        self.q.len() > DECODE_Q_MAX_FRAMES || self.bytes > DECODE_Q_MAX_BYTES
+    }
+}
+
 /// Core `MaybeDiscourageAndDisconnect`: misbehavior never disconnects or
 /// discourages a noban peer or a manual one (`--connect`, `addnode`).
 #[doc(hidden)]
@@ -1632,10 +1691,10 @@ pub fn on_tx_announce_ok(
         return Ok(());
     }
     let inv = tx_announce_inv(mp, &txid);
-    // Flush already recorded this wtxid. A later rebroadcast, including the
-    // 15-minute unbroadcast pass, still reaches a peer that has not heard it.
+    // A later rebroadcast still reaches a peer that has not heard this
+    // wtxid. The claim is shared with flush, so the two cannot both queue.
     if let Inventory::WTx(w) = inv {
-        if session.is_some_and(|s| s.has_announced_wtx(&w)) {
+        if session.is_some_and(|s| !s.claim_announced_wtx(w)) {
             return Ok(());
         }
     }
@@ -1879,11 +1938,10 @@ pub async fn peer_session_with(
     // Heavy decodes wait for a pool-sized permit on the decode task. This
     // loop keeps reading: a ping or pong already on the socket must not sit
     // in the kernel buffer until a permit frees. Later frames stay behind
-    // earlier ones in `decode_q`. Inbound bytes are bounded by the rate
-    // limiter and by not assigning more getdata, not by pausing the read.
-    let mut decode_q: VecDeque<
-        tokio::sync::oneshot::Receiver<Result<RawNetworkMessage, NetError>>,
-    > = VecDeque::new();
+    // earlier ones in `decode_q`. The queue is capped; a peer that fills it
+    // is disconnected. Timeouts stay suspended only while that capped queue
+    // still holds a frame, so a pong already read is not dropped.
+    let mut decode_q = DecodeQueue::new();
     let mut decode_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     let mut rate = PeerRateLimiter::default_limits();
     let decoy_score = AtomicU32::new(0);
@@ -1935,7 +1993,7 @@ pub async fn peer_session_with(
                     };
                     std::pin::Pin::new(rx).poll(cx)
                 }), if !decode_q.is_empty() => {
-                    decode_q.pop_front();
+                    let _ = decode_q.pop_front();
                     let mut slot = ReadyDecode {
                         queue: &mut decode_q,
                         requested_since: &mut requested_since,
@@ -2123,9 +2181,21 @@ pub async fn peer_session_with(
                     // frame already in `decode_q` must be applied first, or a
                     // later pong updates the clock ahead of an earlier block.
                     if (frame.is_ping() || frame.is_pong()) && !decode_q.is_empty() {
+                        let n = frame.payload_len();
                         let (tx, rx) = tokio::sync::oneshot::channel();
                         let _ = tx.send(frame.try_decode());
-                        decode_q.push_back(rx);
+                        if decode_q.push(rx, n) {
+                            return finish_decode_queue_full(
+                                &mut decode_q,
+                                hub.as_ref(),
+                                &out_tx,
+                                follow,
+                                session.as_deref(),
+                                &mut requested_since,
+                                &peer_s,
+                            )
+                            .await;
+                        }
                         continue;
                     }
                     if frame.is_ping() {
@@ -2144,13 +2214,25 @@ pub async fn peer_session_with(
                     }
                     let n_req = follow.requested_blocks.len();
                     if frame.is_block() || frame.decode_is_cpu_heavy() {
+                        let n = frame.payload_len();
                         let (tx, rx) = tokio::sync::oneshot::channel();
                         let task = tokio::spawn(async move {
                             let _ = tx.send(decode_framed_offload(frame).await);
                         });
                         decode_tasks.retain(|t| !t.is_finished());
                         decode_tasks.push(task);
-                        decode_q.push_back(rx);
+                        if decode_q.push(rx, n) {
+                            return finish_decode_queue_full(
+                                &mut decode_q,
+                                hub.as_ref(),
+                                &out_tx,
+                                follow,
+                                session.as_deref(),
+                                &mut requested_since,
+                                &peer_s,
+                            )
+                            .await;
+                        }
                         continue;
                     }
                     if !decode_q.is_empty() {
@@ -2158,9 +2240,21 @@ pub async fn peer_session_with(
                         // cheap (no permit). Hold it behind the frames already
                         // queued so a block is not overtaken by the tx or inv
                         // that followed it on the wire.
+                        let n = frame.payload_len();
                         let (tx, rx) = tokio::sync::oneshot::channel();
                         let _ = tx.send(frame.try_decode());
-                        decode_q.push_back(rx);
+                        if decode_q.push(rx, n) {
+                            return finish_decode_queue_full(
+                                &mut decode_q,
+                                hub.as_ref(),
+                                &out_tx,
+                                follow,
+                                session.as_deref(),
+                                &mut requested_since,
+                                &peer_s,
+                            )
+                            .await;
+                        }
                         continue;
                     }
                     handle_peer_frame(
@@ -2822,7 +2916,9 @@ pub fn force_announce_txid(hub: &ChainHub, peers: &crate::peers::PeerHub, txid: 
         let Some(out) = s.writer() else {
             continue;
         };
-        s.note_announced_wtx(w);
+        if !s.claim_announced_wtx(w) {
+            continue;
+        }
         queue_tx_inv_batches(&s, &out, vec![Inventory::WTx(w)]);
         if let Some(seq) = mp.relay_seq_of(&w) {
             s.note_tx_inv_seq(s.last_inv_sequence().max(seq.saturating_add(1)));
@@ -2967,7 +3063,9 @@ pub fn queue_due_tx_invs(
             ) {
                 continue;
             }
-            session.note_announced_wtx(w);
+            if !session.claim_announced_wtx(w) {
+                continue;
+            }
             due.push(Inventory::WTx(w));
             n += 1;
             if let Some(seq) = mp.relay_seq_of(&w) {
@@ -2996,7 +3094,9 @@ pub fn queue_due_tx_invs(
             ) {
                 continue;
             }
-            session.note_announced_wtx(w);
+            if !session.claim_announced_wtx(w) {
+                continue;
+            }
             due.push(Inventory::WTx(w));
             n += 1;
             if let Some(seq) = mp.relay_seq_of(&w) {
@@ -3135,9 +3235,32 @@ fn note_block_request_window(
 }
 
 struct ReadyDecode<'a> {
-    queue: &'a mut VecDeque<tokio::sync::oneshot::Receiver<Result<RawNetworkMessage, NetError>>>,
+    queue: &'a mut DecodeQueue,
     requested_since: &'a mut Option<std::time::Instant>,
     peer: &'a str,
+}
+
+async fn finish_decode_queue_full(
+    decode_q: &mut DecodeQueue,
+    hub: &ChainHub,
+    out_tx: &mpsc::UnboundedSender<PeerOut>,
+    follow: &mut PeerFollowState,
+    session: Option<&crate::peers::LivePeer>,
+    requested_since: &mut Option<std::time::Instant>,
+    peer_s: &str,
+) -> Result<(), NetError> {
+    rbitcoin_log::warn!("p2p: {peer_s} decode queue full");
+    apply_queued_decodes(
+        decode_q,
+        hub,
+        out_tx,
+        follow,
+        session,
+        requested_since,
+        peer_s,
+    )
+    .await?;
+    Err(decode_queue_disconnect(session))
 }
 
 /// Apply one frame that already left the socket. A dropped decode task or a
@@ -3207,7 +3330,7 @@ async fn apply_ready_decode(
 /// error tears the session down. `SessionFollow`'s drop would otherwise
 /// forget getdata for a block that is still sitting in `decode_q`.
 async fn apply_queued_decodes(
-    decode_q: &mut VecDeque<tokio::sync::oneshot::Receiver<Result<RawNetworkMessage, NetError>>>,
+    decode_q: &mut DecodeQueue,
     hub: &ChainHub,
     out_tx: &mpsc::UnboundedSender<PeerOut>,
     follow: &mut PeerFollowState,
@@ -5529,6 +5652,13 @@ pub async fn on_tx(
             }
             if trusted {
                 mp.set_trusted_session(from);
+            }
+            // Flush walks every writer with an empty from-this-peer set.
+            // The sender already has the tx, so that INV must not come back.
+            if !mp.relay_enabled() {
+                if let Some(s) = session {
+                    s.note_announced_wtx(wtxid);
+                }
             }
             let mp_task = Arc::clone(mp);
             let tx_task = tx.clone();
