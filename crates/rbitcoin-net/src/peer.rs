@@ -1904,28 +1904,63 @@ pub async fn peer_session_with(
                     decode_q.pop_front();
                     let decoded = match decoded {
                         Ok(r) => r,
-                        Err(_) => return Err(NetError::Protocol("decode task dropped")),
+                        Err(_) => {
+                            let _ = apply_queued_decodes(
+                                &mut decode_q,
+                                hub.as_ref(),
+                                &out_tx,
+                                follow,
+                                session.as_deref(),
+                                &mut requested_since,
+                                &peer_s,
+                            )
+                            .await;
+                            return Err(NetError::Protocol("decode task dropped"));
+                        }
                     };
                     let n_req = follow.requested_blocks.len();
-                    apply_decoded_peer_msg(
+                    let applied = apply_decoded_peer_msg(
                         decoded,
                         hub.as_ref(),
                         &out_tx,
                         follow,
                         session.as_deref(),
                     )
-                    .await?;
+                    .await;
                     let n_after = follow.requested_blocks.len();
                     if n_after == 0 {
                         requested_since = None;
                     } else if n_after < n_req || n_req == 0 {
                         requested_since = Some(std::time::Instant::now());
                     }
+                    if let Err(e) = applied {
+                        let _ = apply_queued_decodes(
+                            &mut decode_q,
+                            hub.as_ref(),
+                            &out_tx,
+                            follow,
+                            session.as_deref(),
+                            &mut requested_since,
+                            &peer_s,
+                        )
+                        .await;
+                        return Err(e);
+                    }
                     if misbehavior_disconnects(follow.ban_score, session.as_deref()) {
                         rbitcoin_log::warn!(
                             "{}",
                             misbehavior_disconnect_log(&peer_s, follow.ban_score)
                         );
+                        let _ = apply_queued_decodes(
+                            &mut decode_q,
+                            hub.as_ref(),
+                            &out_tx,
+                            follow,
+                            session.as_deref(),
+                            &mut requested_since,
+                            &peer_s,
+                        )
+                        .await;
                         return Err(threshold_disconnect(session.as_deref()));
                     }
                 }
@@ -2281,20 +2316,61 @@ pub async fn peer_session_with(
                     }
                 }, if tail_pending => {
                     if !room {
+                        apply_queued_decodes(
+                            &mut decode_q,
+                            hub.as_ref(),
+                            &out_tx,
+                            follow,
+                            session.as_deref(),
+                            &mut requested_since,
+                            &peer_s,
+                        )
+                        .await?;
                         return Ok(());
                     }
                     if !follow.getdata_tail.is_empty() {
-                        serve_getdata_tail(hub.as_ref(), &out_tx, follow, session.as_deref())
-                            .await?;
-                    }
-                    if !follow.getblocktxn_tail.is_empty() {
-                        serve_getblocktxn_tail(
+                        if let Err(e) = serve_getdata_tail(
                             hub.as_ref(),
                             &out_tx,
                             follow,
                             session.as_deref(),
                         )
-                        .await?;
+                        .await
+                        {
+                            let _ = apply_queued_decodes(
+                                &mut decode_q,
+                                hub.as_ref(),
+                                &out_tx,
+                                follow,
+                                session.as_deref(),
+                                &mut requested_since,
+                                &peer_s,
+                            )
+                            .await;
+                            return Err(e);
+                        }
+                    }
+                    if !follow.getblocktxn_tail.is_empty() {
+                        if let Err(e) = serve_getblocktxn_tail(
+                            hub.as_ref(),
+                            &out_tx,
+                            follow,
+                            session.as_deref(),
+                        )
+                        .await
+                        {
+                            let _ = apply_queued_decodes(
+                                &mut decode_q,
+                                hub.as_ref(),
+                                &out_tx,
+                                follow,
+                                session.as_deref(),
+                                &mut requested_since,
+                                &peer_s,
+                            )
+                            .await;
+                            return Err(e);
+                        }
                     }
                 }
             }
@@ -3053,25 +3129,38 @@ async fn apply_queued_decodes(
     requested_since: &mut Option<std::time::Instant>,
     peer_s: &str,
 ) -> Result<(), NetError> {
+    let mut first_err: Option<NetError> = None;
     while let Some(rx) = decode_q.pop_front() {
         let decoded = match rx.await {
             Ok(r) => r,
-            Err(_) => return Err(NetError::Protocol("decode task dropped")),
+            Err(_) => {
+                if first_err.is_none() {
+                    first_err = Some(NetError::Protocol("decode task dropped"));
+                }
+                continue;
+            }
         };
         let n_req = follow.requested_blocks.len();
-        apply_decoded_peer_msg(decoded, hub, out_tx, follow, session).await?;
+        if let Err(e) = apply_decoded_peer_msg(decoded, hub, out_tx, follow, session).await {
+            if first_err.is_none() {
+                first_err = Some(e);
+            }
+        }
         let n_after = follow.requested_blocks.len();
         if n_after == 0 {
             *requested_since = None;
         } else if n_after < n_req || n_req == 0 {
             *requested_since = Some(std::time::Instant::now());
         }
-        if misbehavior_disconnects(follow.ban_score, session) {
+        if misbehavior_disconnects(follow.ban_score, session) && first_err.is_none() {
             rbitcoin_log::warn!("{}", misbehavior_disconnect_log(peer_s, follow.ban_score));
-            return Err(threshold_disconnect(session));
+            first_err = Some(threshold_disconnect(session));
         }
     }
-    Ok(())
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 async fn apply_decoded_peer_msg(
