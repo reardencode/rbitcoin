@@ -5553,6 +5553,16 @@ pub async fn on_tx(
                     if let Some(s) = session {
                         s.note_last_transaction();
                     }
+                    // A hub that is not `into_arc` has no detached handle.
+                    // Flush here so the other inbound still sees the INV.
+                    // An `into_arc` hub already flushed inside the admit task.
+                    if !mp.relay_enabled() && hub.shared_arc().is_none() {
+                        if let Some(s) = session {
+                            if let Some(ph) = s.peer_hub() {
+                                flush_tx_invs(hub, ph.as_ref());
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     let extra_from = matches!(
