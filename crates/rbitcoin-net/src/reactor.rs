@@ -60,10 +60,26 @@ pub async fn off_pool<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static)
 }
 
 /// Run `fut` with the API store-read budget armed. Prepare takes one permit
-/// and drops it before script verify. A task that never calls this does not
-/// take the budget (P2P decode, and admits that are not an API read).
+/// and drops it before script verify. The commit coin re-read takes one
+/// again. A task that never calls this does not take the budget (P2P decode,
+/// and admits that are not an API read).
 pub async fn with_store_budget<R>(budget: Arc<Semaphore>, fut: impl Future<Output = R>) -> R {
     API_STORE_BUDGET.scope(budget, fut).await
+}
+
+/// `tokio::spawn` does not keep the task-local budget. Copy it into the
+/// child so a detached admit still waits for a store permit.
+pub fn spawn_with_store_budget<T: Send + 'static>(
+    fut: impl Future<Output = T> + Send + 'static,
+) -> tokio::task::JoinHandle<T> {
+    let budget = API_STORE_BUDGET.try_with(Arc::clone).ok();
+    tokio::spawn(async move {
+        if let Some(budget) = budget {
+            with_store_budget(budget, fut).await
+        } else {
+            fut.await
+        }
+    })
 }
 
 /// One permit of the armed budget, or `None` when this task has no budget.

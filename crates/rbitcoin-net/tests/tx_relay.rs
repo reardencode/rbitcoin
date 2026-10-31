@@ -4566,6 +4566,51 @@ fn script_admit_finishes_while_the_blocking_pool_is_parked() {
     let _ = std::fs::remove_dir_all(&mp_dir);
 }
 
+/// Package admit runs on a spawned task. That task must still wait for the
+/// caller's store-read permit before it reads coins.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn package_admit_waits_on_the_store_budget() {
+    let (store_dir, q, cbs) = pad_cbs(2);
+    q.set_api_read_budget(1);
+    let budget = q.api_read_budget();
+    let mp_dir = tmp();
+    let hub = Arc::new(MempoolHub::open(&mp_dir, Arc::clone(&q)).unwrap());
+    hub.set_relay_enabled(true);
+    let parent = spend_true(cbs[0], 1_000, ScriptBuf::from_bytes(vec![0x51]));
+    let parent_id = parent.compute_txid();
+    let child = spend_vout(
+        OutPoint {
+            txid: parent_id,
+            vout: 0,
+        },
+        parent.output[0].value.to_sat() - 1_000,
+    );
+    let hold = budget.clone().acquire_owned().await.expect("permit");
+    let hub_pkg = Arc::clone(&hub);
+    let admit = tokio::spawn(async move {
+        rbitcoin_net::with_store_budget(
+            hub_pkg.query.api_read_budget(),
+            hub_pkg.accept_package_async(vec![parent, child]),
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !admit.is_finished(),
+        "package read coins while the only store permit was held"
+    );
+    drop(hold);
+    let accepted = tokio::time::timeout(Duration::from_secs(5), admit)
+        .await
+        .expect("package finished")
+        .expect("package task")
+        .expect("package admit");
+    assert_eq!(accepted.len(), 2);
+    assert!(hub.contains(&parent_id));
+    let _ = std::fs::remove_dir_all(&mp_dir);
+    let _ = std::fs::remove_dir_all(&store_dir);
+}
+
 fn parked_orphan_tx() -> Transaction {
     Transaction {
         version: Version::TWO,

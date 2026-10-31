@@ -3168,7 +3168,9 @@ impl MempoolHub {
         };
         let hub = Arc::clone(self);
         let tx_c = tx;
-        crate::reactor::off_pool(move || {
+        // `sample_chain_coins` reads the coin DB again after scripts drop
+        // the prepare permit.
+        crate::reactor::off_pool_budgeted(move || {
             let utxo = hub.utxo_provider();
             utxo.note_spender(&tx_c);
             hub.commit_admitted(&tx_c, prep, &utxo, origin, defer_trim, stages, lock_us, t0)
@@ -3316,9 +3318,11 @@ impl MempoolHub {
         let hub = Arc::clone(self);
         let child = child.clone();
         let missing = missing.clone();
-        tokio::spawn(async move { hub.admit_1p1c_work(&child, &missing, origin).await })
-            .await
-            .expect("1p1c admit")
+        crate::reactor::spawn_with_store_budget(async move {
+            hub.admit_1p1c_work(&child, &missing, origin).await
+        })
+        .await
+        .expect("1p1c admit")
     }
 
     async fn admit_1p1c_work(
@@ -3330,7 +3334,7 @@ impl MempoolHub {
         let hub = Arc::clone(self);
         let child_c = child.clone();
         let missing_c = missing.clone();
-        let parent = crate::reactor::off_pool(move || {
+        let parent = crate::reactor::off_pool_budgeted(move || {
             let utxo = hub.utxo_provider();
             utxo.note_spender(&child_c);
             let g = hub.lock_read();
@@ -3364,7 +3368,7 @@ impl MempoolHub {
         let hub = Arc::clone(self);
         let parent_c = parent.clone();
         let child_note = child.clone();
-        let parent_commit = crate::reactor::off_pool(move || {
+        let parent_commit = crate::reactor::off_pool_budgeted(move || {
             let utxo = hub.utxo_provider();
             utxo.note_spender(&child_note);
             let sample = hub.sample_chain_coins(&parent_c, &utxo);
@@ -3418,7 +3422,7 @@ impl MempoolHub {
         };
         let hub = Arc::clone(self);
         let child_c = child.clone();
-        let child_commit = crate::reactor::off_pool(move || {
+        let child_commit = crate::reactor::off_pool_budgeted(move || {
             let utxo = hub.utxo_provider();
             utxo.note_spender(&child_c);
             let sample = hub.sample_chain_coins(&child_c, &utxo);
@@ -3482,7 +3486,7 @@ impl MempoolHub {
         txs: Vec<Transaction>,
     ) -> Result<Vec<AcceptResult>, AcceptError> {
         let hub = Arc::clone(self);
-        tokio::spawn(async move {
+        crate::reactor::spawn_with_store_budget(async move {
             let accepted = hub.admit_package_work(txs).await?;
             let ids: Vec<Txid> = accepted.iter().map(|r| r.txid).collect();
             let hub_k = Arc::clone(&hub);
@@ -3501,7 +3505,7 @@ impl MempoolHub {
     ) -> Result<Vec<AcceptResult>, AcceptError> {
         let hub = Arc::clone(self);
         let txs_shape = txs.clone();
-        let member_min = crate::reactor::off_pool(move || {
+        let member_min = crate::reactor::off_pool_budgeted(move || {
             Self::check_package_shape(&txs_shape)?;
             let utxo = hub.utxo_provider();
             let sat_kvb = hub.min_relay_sat_kvb();
@@ -3564,7 +3568,7 @@ impl MempoolHub {
             };
             let hub = Arc::clone(self);
             let tx_c = tx.clone();
-            let committed = crate::reactor::off_pool(move || {
+            let committed = crate::reactor::off_pool_budgeted(move || {
                 let utxo = hub.utxo_provider();
                 utxo.note_spender(&tx_c);
                 let sample = hub.sample_chain_coins(&tx_c, &utxo);
@@ -5125,9 +5129,11 @@ impl MempoolHub {
         package_eval: bool,
     ) -> Vec<SubmitPackageRow> {
         let hub = Arc::clone(self);
-        tokio::spawn(async move { hub.submit_package_rpc_eval_work(txs, package_eval).await })
-            .await
-            .expect("submitpackage")
+        crate::reactor::spawn_with_store_budget(async move {
+            hub.submit_package_rpc_eval_work(txs, package_eval).await
+        })
+        .await
+        .expect("submitpackage")
     }
 
     async fn submit_package_rpc_eval_work(

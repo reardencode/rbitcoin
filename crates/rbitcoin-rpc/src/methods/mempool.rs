@@ -1402,9 +1402,9 @@ async fn testmempoolaccept_package_rows_async(
     // Inserts are real until `remove_for_block`. A dropped `testmempoolaccept`
     // must not leave them in the pool.
     let mp = Arc::clone(mp);
-    tokio::spawn(
-        async move { testmempoolaccept_package_rows_work(&mp, decoded, max_feerate).await },
-    )
+    rbitcoin_net::spawn_with_store_budget(async move {
+        testmempoolaccept_package_rows_work(&mp, decoded, max_feerate).await
+    })
     .await
     .expect("testmempoolaccept package")
 }
