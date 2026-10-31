@@ -1222,7 +1222,20 @@ async fn fee_pushes_stay_an_interval_apart_under_steady_admission() {
         // One millisecond past the deadline: an exact advance leaves the
         // timer due but not fired.
         tokio::time::advance(interval + Duration::from_millis(1)).await;
-        let mut f = recv.await.expect("one advance produces one push");
+        // Poll. An unbounded await would auto-advance the paused clock to a
+        // later timer and accept a push this interval did not produce.
+        let mut pushed = None;
+        for _ in 0..64 {
+            match tokio::time::timeout(Duration::ZERO, &mut recv).await {
+                Ok(Ok(frame)) => {
+                    pushed = Some(frame);
+                    break;
+                }
+                Ok(Err(e)) => panic!("fee push failed: {e}"),
+                Err(_) => tokio::task::yield_now().await,
+            }
+        }
+        let mut f = pushed.expect("one advance produces one push");
         assert_eq!(f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE);
         let t: NewTemplate = binary_sv2::from_bytes(&mut f.payload).expect("decode");
         assert!(!t.future_template, "fee push");
