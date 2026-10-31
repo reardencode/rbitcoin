@@ -1521,6 +1521,9 @@ async fn stop_logged(
     rpc: SocketAddr,
     node: tokio::task::JoinHandle<(Result<(), rbitcoin_node::NodeError>, StartupLogs)>,
 ) -> StartupLogs {
+    // RPC answers before startup chooses skip or catch-up. A chain already at
+    // the target height is not that choice. The choice logs, then dials.
+    wait_peer(rpc).await;
     let _ = jsonrpc(rpc, "stop", json!([])).await;
     match tokio::time::timeout(Duration::from_secs(20), node).await {
         Ok(Ok((Ok(()), logs))) => logs,
@@ -1544,6 +1547,24 @@ async fn wait_height(rpc: SocketAddr, height: u32) {
     }
 }
 
+/// One live peer: startup has logged its choice and dialed.
+async fn wait_peer(rpc: SocketAddr) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let info = jsonrpc(rpc, "getpeerinfo", json!([])).await;
+        if info["result"]
+            .as_array()
+            .is_some_and(|peers| !peers.is_empty())
+        {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!("no peer before stop: {info}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 fn assert_startup(logs: &StartupLogs, skip: bool) {
     let skipped = logs
         .iter()
@@ -1557,7 +1578,12 @@ fn assert_startup(logs: &StartupLogs, skip: bool) {
         "skip={skip} lines={:?}",
         logs.iter().map(|(_, line)| line).collect::<Vec<_>>()
     );
-    assert_eq!(catch_up, !skip, "catch-up log did not match skip={skip}");
+    assert_eq!(
+        catch_up,
+        !skip,
+        "catch-up log did not match skip={skip} lines={:?}",
+        logs.iter().map(|(_, line)| line).collect::<Vec<_>>()
+    );
 }
 
 /// Restart above genesis with the miner ahead: tip follow, no catch-up dial.
