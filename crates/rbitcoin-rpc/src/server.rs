@@ -53,7 +53,8 @@ pub fn bind_unix_mode(
 }
 use tokio::task::JoinHandle;
 
-async fn serve_rpc<L>(
+#[doc(hidden)]
+pub async fn serve_rpc<L>(
     mut listener: L,
     app: Router,
     sem: Arc<Semaphore>,
@@ -943,41 +944,4 @@ pub fn authorized(auth: &RpcAuth, cookie: Option<&RpcCookie>, headers: &HeaderMa
         return false;
     };
     parse_basic_auth(value).is_some_and(|credentials| cookie.matches_credentials(&credentials))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The accept loop leaves when shutdown is stored, without the 50 ms tick.
-    #[tokio::test]
-    async fn accept_loop_leaves_when_shutdown_is_signaled() {
-        tokio::time::pause();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let (tx, _) = tokio::sync::watch::channel(());
-        let flag = Arc::clone(&shutdown);
-        let tx_task = tx.clone();
-        let task = tokio::spawn(async move {
-            serve_rpc(
-                listener,
-                Router::new(),
-                Arc::new(Semaphore::new(4)),
-                flag,
-                tx_task,
-            )
-            .await;
-        });
-        for _ in 0..32 {
-            tokio::task::yield_now().await;
-        }
-        shutdown.store(true, Ordering::SeqCst);
-        tx.send(()).unwrap();
-        tokio::task::yield_now().await;
-        let joined = tokio::time::timeout(std::time::Duration::ZERO, task).await;
-        tokio::time::resume();
-        joined
-            .expect("accept loop stayed in the 50 ms shutdown poll")
-            .expect("serve task");
-    }
 }
