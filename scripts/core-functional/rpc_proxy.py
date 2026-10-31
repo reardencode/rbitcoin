@@ -312,9 +312,11 @@ def _sat_btc(sats: int) -> float:
 # Esplora binds after the scripthash collect. The old 4s retry gave up
 # while the listener was still down and the wallet reported a zero balance.
 ESPLORA_READY_S = 60.0
+_ESPLORA_POLL_S = 0.1
 # How long one RPC may sit after IBD, waiting for tx relay, before -28.
 # Core retries -28 only inside wait_for_rpc_connection. Later calls do not.
 RPC_WARMUP_S = 60.0
+_WARMUP_POLL_S = 0.05
 
 
 def wait_esplora_tip(esplora: Callable[[str], Any], tip_height: int) -> None:
@@ -331,6 +333,7 @@ def wait_esplora_tip(esplora: Callable[[str], Any], tip_height: int) -> None:
             last = exc
         if time.monotonic() >= deadline:
             raise RpcError(-1, f"esplora unreachable: {last}")
+        time.sleep(_ESPLORA_POLL_S)
 
 
 def shim_miniwallet_scantxoutset(
@@ -652,6 +655,7 @@ class RpcProxy:
                 return True
             if state == "down" or time.monotonic() >= deadline:
                 return False
+            time.sleep(_WARMUP_POLL_S)
 
     def forward_raw(self, raw: bytes) -> tuple[int, bytes]:
         cookie = self.cookie_line() or ""

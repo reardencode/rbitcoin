@@ -62,10 +62,12 @@ def rpc_until(url: str, cookie: str, method: str, params=None, deadline: float |
             )
         except Exception as exc:  # noqa: BLE001 — node or proxy not up yet
             last = exc
+            time.sleep(0.1)
             continue
         err = resp.get("error") if isinstance(resp, dict) else None
         if isinstance(err, dict) and err.get("code") == -28:
             last = err
+            time.sleep(0.1)
             continue
         return resp
 
@@ -226,7 +228,7 @@ def build_cache(cache: Path) -> int:
                 if height == 199:
                     break
             except Exception:  # noqa: BLE001
-                continue
+                time.sleep(0.1)
         else:
             print("create_cache: tip never reached 199", file=sys.stderr)
             return 1

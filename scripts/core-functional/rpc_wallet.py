@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -207,6 +208,7 @@ class WalletHub:
                 return self._esplora_once(path, timeout=timeout)
             except RpcError as e:
                 last = e
+                time.sleep(0.1)
         raise RpcError(ERR_MISC, f"esplora unreachable: {last}")
 
     def _tip(self) -> int:
