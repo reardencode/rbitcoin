@@ -16,7 +16,9 @@ use crate::sync::atomic::{self, AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, O
 use rbitcoin_primitives::TableKind;
 use std::marker::PhantomData;
 use std::path::Path;
-use std::sync::{Condvar, Mutex};
+#[cfg(debug_assertions)]
+use std::sync::Condvar;
+use std::sync::Mutex;
 
 /// Debug builds pause the IBD tip-flush thread here when a test armed the hold.
 /// The pause is after `seq_arm`, so a store on another thread sees `flushing`.
