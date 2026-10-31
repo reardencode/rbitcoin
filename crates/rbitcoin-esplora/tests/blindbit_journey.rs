@@ -570,6 +570,90 @@ async fn blindbit_v1_routes_share_one_inflight_limit() {
     handle.shutdown().await;
 }
 
+/// A client that leaves while queued on BlindBit is no longer waiting.
+/// The permit stays with the forward-tx that holds it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropped_blindbit_waiter_clears_waiting() {
+    let (_dir, q) = temp_query("blindbit-drop-waiter");
+    q.set_sptweaks_enabled(true, Height(0)).unwrap();
+    let (h0, cb0) = coinbase(0, Fk::NULL, None);
+    let fk0 = q.connect_block(Height(0), &h0, &[cb0]).unwrap();
+    q.put_sp_tweaks_block(Height(0), fk0, &[None]).unwrap();
+    let mut cfg = EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), Network::Regtest);
+    cfg.blindbit_max_inflight = 1;
+    cfg.limits.max_connections = 2;
+    let handle = run_esplora(cfg, Arc::new(q), None)
+        .await
+        .expect("listen");
+    let addr = handle.local_addr;
+
+    let mut held = TcpStream::connect(addr).await.unwrap();
+    held.write_all(
+        b"POST /blindbit/v1/forward-tx HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+          Content-Type: application/json\r\nContent-Length: 64\r\n\r\n",
+    )
+    .await
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let notified = handle.blindbit.notified();
+        if handle.blindbit.held() >= 1 {
+            break;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(!left.is_zero(), "forward-tx did not take a BlindBit permit");
+        if tokio::time::timeout(left, notified).await.is_err() {
+            panic!("forward-tx did not take a BlindBit permit");
+        }
+    }
+    let before = handle.blindbit.waiting();
+    let mut waiter = TcpStream::connect(addr).await.unwrap();
+    waiter
+        .write_all(
+            b"GET /blindbit/v1/tweak-index/0 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let notified = handle.blindbit.notified();
+        if handle.blindbit.waiting() > before {
+            break;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !left.is_zero(),
+            "a full BlindBit limit did not queue the ask"
+        );
+        if tokio::time::timeout(left, notified).await.is_err() {
+            panic!("a full BlindBit limit did not queue the ask");
+        }
+    }
+    drop(waiter);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let notified = handle.blindbit.notified();
+        if handle.blindbit.waiting() == before {
+            break;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !left.is_zero(),
+            "dropped ask left waiting at {}",
+            handle.blindbit.waiting()
+        );
+        if tokio::time::timeout(left, notified).await.is_err() {
+            panic!(
+                "dropped ask left waiting at {}",
+                handle.blindbit.waiting()
+            );
+        }
+    }
+    assert_eq!(handle.blindbit.held(), 1);
+    drop(held);
+    handle.shutdown().await;
+}
+
 /// A forward-tx keeps its permit until the admit returns, not until the
 /// request ends: one that times out mid-admit still fills the limit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

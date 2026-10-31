@@ -838,36 +838,41 @@ async fn esplora_max_connections_spans_every_route() {
         stream.write_all(req.as_bytes()).await.unwrap();
         held.push(stream);
     }
-    // One GET on another route must stay unanswered while the slots are
-    // full. Retry while the held requests may not all be admitted yet.
-    let mut tip = None;
-    for _ in 0..20 {
-        let before = handle.admit.waiting();
-        let get = tokio::spawn(async move { http_get(addr, "/blocks/tip/height").await });
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let notified = handle.admit.notified();
-            if !get.is_finished() && handle.admit.waiting() > before {
-                tip = Some(get);
-                break;
-            }
-            if get.is_finished() {
-                break;
-            }
-            let left = deadline.saturating_duration_since(Instant::now());
-            assert!(
-                !left.is_zero(),
-                "a full listener did not queue the request"
-            );
-            if tokio::time::timeout(left, notified).await.is_err() {
-                panic!("a full listener did not queue the request");
-            }
-        }
-        if tip.is_some() {
+    // Every held POST has a slot before the GET starts. A late POST must
+    // not be the request that bumps `waiting`.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let notified = handle.admit.notified();
+        if handle.admit.holding() >= MAX {
             break;
         }
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(!left.is_zero(), "stalled POSTs did not fill the listener");
+        if tokio::time::timeout(left, notified).await.is_err() {
+            panic!("stalled POSTs did not fill the listener");
+        }
     }
-    let tip = tip.expect("a full listener makes a request on another route wait");
+    let before = handle.admit.waiting();
+    let get = tokio::spawn(async move { http_get(addr, "/blocks/tip/height").await });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let notified = handle.admit.notified();
+        if !get.is_finished() && handle.admit.waiting() > before {
+            break;
+        }
+        if get.is_finished() {
+            panic!("GET was served while the listener slots were held");
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !left.is_zero(),
+            "a full listener did not queue the request"
+        );
+        if tokio::time::timeout(left, notified).await.is_err() {
+            panic!("a full listener did not queue the request");
+        }
+    }
+    let tip = get;
     // Freeing one slot serves that same request.
     drop(held.pop());
     let (st, body) = tokio::time::timeout(Duration::from_secs(10), tip)
@@ -942,6 +947,82 @@ async fn esplora_request_timeout_covers_the_wait_for_a_slot() {
         took < Duration::from_millis(2500),
         "a request waited {took:?} behind the queue, past one 1s timeout"
     );
+    drop(held);
+    handle.shutdown().await;
+}
+
+/// A client that leaves while queued is no longer waiting. The slot stays
+/// with the request that holds it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropped_admit_waiter_clears_waiting() {
+    let (_dir, q) = temp_query("esplora-drop-waiter");
+    let (h0, cb0) = coinbase(0, Fk::NULL, None);
+    q.connect_block(Height(0), &h0, &[cb0]).unwrap();
+    let mut cfg = EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), Network::Regtest);
+    cfg.limits.max_connections = 1;
+    let handle = run_esplora(cfg, Arc::new(q), None)
+        .await
+        .expect("listen");
+    let addr = handle.local_addr;
+
+    let mut held = TcpStream::connect(addr).await.unwrap();
+    held.write_all(b"POST /tx HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 64\r\n\r\n")
+        .await
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let notified = handle.admit.notified();
+        if handle.admit.holding() >= 1 {
+            break;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(!left.is_zero(), "stalled POST did not take the listener slot");
+        if tokio::time::timeout(left, notified).await.is_err() {
+            panic!("stalled POST did not take the listener slot");
+        }
+    }
+    let before = handle.admit.waiting();
+    let mut waiter = TcpStream::connect(addr).await.unwrap();
+    waiter
+        .write_all(b"GET /blocks/tip/height HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let notified = handle.admit.notified();
+        if handle.admit.waiting() > before {
+            break;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !left.is_zero(),
+            "a full listener did not queue the request"
+        );
+        if tokio::time::timeout(left, notified).await.is_err() {
+            panic!("a full listener did not queue the request");
+        }
+    }
+    drop(waiter);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let notified = handle.admit.notified();
+        if handle.admit.waiting() == before {
+            break;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !left.is_zero(),
+            "dropped request left waiting at {}",
+            handle.admit.waiting()
+        );
+        if tokio::time::timeout(left, notified).await.is_err() {
+            panic!(
+                "dropped request left waiting at {}",
+                handle.admit.waiting()
+            );
+        }
+    }
+    assert_eq!(handle.admit.holding(), 1);
     drop(held);
     handle.shutdown().await;
 }
