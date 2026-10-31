@@ -2908,6 +2908,40 @@ fn invalidate_admit_during_fork_selection_returns_the_fork() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Relay is still off, so the pool is catching up and maintenance has not
+/// started. The reorg hold must publish the fork tip. The fork point is an
+/// ancestor, and `getblocktemplate` builds on it.
+#[test]
+fn invalidate_on_a_catch_up_pool_builds_on_the_fork() {
+    let (ctx, dir, hub) = ctx_from_mature_pad_relay(300_000_000, false);
+    let mp = Arc::clone(ctx.mempool.as_ref().expect("mempool"));
+    assert!(!mp.pool_maintained());
+    assert!(!mp.relay_enabled());
+    let parent = hub.block_at_height(99).unwrap().unwrap();
+    let parent_hash = parent.block_hash();
+    let t0 = parent.header.time;
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+    let b0 =
+        rbitcoin_consensus::mine_regtest_paying(parent_hash, t0 + 10, 100, spk.clone(), vec![]);
+    let b1 =
+        rbitcoin_consensus::mine_regtest_paying(b0.block_hash(), t0 + 11, 101, spk.clone(), vec![]);
+    let b2 = rbitcoin_consensus::mine_regtest_paying(b1.block_hash(), t0 + 12, 102, spk, vec![]);
+    let fork_tip = b2.block_hash();
+    hub.hold_body(Arc::new(b0), false);
+    hub.hold_body(Arc::new(b1), false);
+    hub.hold_body(Arc::new(b2), false);
+    let cut = hub.block_at_height(100).unwrap().unwrap().block_hash();
+    hub.invalidate_block(cut).expect("invalidate");
+    assert_eq!(hub.tip_hash(), Some(fork_tip));
+    assert!(!mp.pool_maintained(), "maintenance hid the fork point");
+    let gbt = dispatch(&ctx, "getblocktemplate", vec![json!({"rules": ["segwit"]})]).unwrap();
+    let fork_hex = rbitcoin_rpc::methods::hash_hex_display(&fork_tip.to_byte_array());
+    assert_eq!(gbt["previousblockhash"], fork_hex, "{gbt}");
+    assert_eq!(gbt["height"].as_u64(), Some(103), "{gbt}");
+    assert_eq!(mp.template_prev(), Some(fork_tip.to_byte_array()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 struct ClearInvalidateGapHook;
 
 impl Drop for ClearInvalidateGapHook {

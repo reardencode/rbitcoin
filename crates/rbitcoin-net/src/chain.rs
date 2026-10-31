@@ -4068,13 +4068,18 @@ impl ChainHub {
             let spent = spent_outpoints(&block.txdata);
             let n = mp.remove_for_block_spent(&ids, &spent);
             rbitcoin_log::debug!("mempool: removed {n} confirmed tx(s) @ height {height}");
-            if mp.pool_maintained() {
-                mp.note_block_fee_history(Height(height));
-                if let Some(hold) = reorg.as_deref_mut().and_then(|r| r.hold.as_mut()) {
-                    hold.commit(hash.to_byte_array());
-                } else if let Some(hold) = own_hold.as_mut() {
+            // Disconnect committed the fork point. Keep committing the
+            // connected block, or the drop publishes that ancestor and a
+            // template builds on it while the pool is still catching up.
+            if let Some(hold) = reorg.as_deref_mut().and_then(|r| r.hold.as_mut()) {
+                hold.commit(hash.to_byte_array());
+            } else if mp.pool_maintained() {
+                if let Some(hold) = own_hold.as_mut() {
                     hold.commit(hash.to_byte_array());
                 }
+            }
+            if mp.pool_maintained() {
+                mp.note_block_fee_history(Height(height));
             }
         }
         let mp_strip_ns = t_mp.elapsed().as_nanos() as u64;

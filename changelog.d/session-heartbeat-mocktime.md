@@ -9,4 +9,5 @@ Fixed
   `waitfornewblock`, and a `getblocktemplate` longpoll.** The tip that call
   leaves, including a replacement fork, is what those waits see. A mempool
   eviction or admit while that call is still choosing the tip does not
-  publish the stump.
+  publish the stump. A pool that is still catching up publishes that same
+  fork tip.
