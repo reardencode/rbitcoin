@@ -507,38 +507,53 @@ async fn blindbit_v1_routes_share_one_inflight_limit() {
     .expect("asks queued on BlindBit hold no listener slot");
     assert_eq!(st, 200);
     // A stalled POST /tx takes that last slot. The held BlindBit bodies hold
-    // the rest, so a GET waits: the two routers share one limit.
+    // the rest, so a GET waits: the two routers share one limit. The POST has
+    // to be holding before the GET starts, or the GET is served on the free
+    // slot and the queue counter never moves.
     let mut spare = TcpStream::connect(addr).await.unwrap();
     let req = "POST /tx HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 64\r\n\r\n";
+    let arrived = handle.admit.arrived();
     spare.write_all(req.as_bytes()).await.unwrap();
-    let mut waiting = None;
-    for _ in 0..20 {
-        let before = handle.admit.waiting();
-        let get = tokio::spawn(async move { http_get(addr, "/blocks/tip/height").await });
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let notified = handle.admit.notified();
-            if !get.is_finished() && handle.admit.waiting() > before {
-                waiting = Some(get);
-                break;
-            }
-            if get.is_finished() {
-                break;
-            }
-            let left = deadline.saturating_duration_since(Instant::now());
-            assert!(
-                !left.is_zero(),
-                "a full listener did not queue the request"
-            );
-            if tokio::time::timeout(left, notified).await.is_err() {
-                panic!("a full listener did not queue the request");
-            }
-        }
-        if waiting.is_some() {
+    let slots = MAX + 1;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let notified = handle.admit.notified();
+        if handle.admit.arrived() > arrived && handle.admit.holding() >= slots {
             break;
         }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            panic!(
+                "stalled POST did not take the last listener slot (arrived={} holding={} waiting={})",
+                handle.admit.arrived(),
+                handle.admit.holding(),
+                handle.admit.waiting()
+            );
+        }
+        let _ = tokio::time::timeout(left, notified).await;
     }
-    let waiting = waiting.expect("BlindBit and the other routes share the listener limit");
+    let before = handle.admit.waiting();
+    let waiting = tokio::spawn(async move { http_get(addr, "/blocks/tip/height").await });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let notified = handle.admit.notified();
+        if !waiting.is_finished() && handle.admit.waiting() > before {
+            break;
+        }
+        if waiting.is_finished() {
+            panic!("GET was served while the listener slots were held");
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            panic!(
+                "a full listener did not queue the request (waiting={} arrived={} holding={})",
+                handle.admit.waiting(),
+                handle.admit.arrived(),
+                handle.admit.holding()
+            );
+        }
+        let _ = tokio::time::timeout(left, notified).await;
+    }
     drop(spare);
     let (st, _) = tokio::time::timeout(Duration::from_secs(10), waiting)
         .await
