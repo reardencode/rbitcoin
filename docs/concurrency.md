@@ -231,8 +231,9 @@ Esplora `POST /tx` and package, BlindBit `forward-tx`, and P2P `tx`)
 awaits script verify off the blocking pool. Package accept, 1p1c,
 `submitpackage`, and a multi-tx `testmempoolaccept` run that work on a task
 the request cannot cancel, so a dropped caller still rolls back, trims, and
-removes the test inserts. A single-tx admit still awaits on the request
-task. BlindBit `forward-tx` already spawns its admit. A parked blocking pool
+removes the test inserts. A single-tx admit is awaited by the caller and
+runs on a task that caller cannot cancel, so a dropped request still
+publishes or restores after the commit. BlindBit `forward-tx` already spawns its admit. A parked blocking pool
 can still admit. Sync `accept_tx_from` remains for stack hubs and in-process
 `dispatch()`. An async admit promotes orphans on that admit task. A package
 that fails re-admits its parked members there too, and puts replaced

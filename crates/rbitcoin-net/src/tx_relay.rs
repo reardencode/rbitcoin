@@ -3373,20 +3373,28 @@ impl MempoolHub {
         self.accept_tx_from_async(tx, TxOrigin::Relay(None)).await
     }
 
+    /// The body runs on its own task. The caller still awaits it. Dropping the
+    /// request must not skip publish or restore after the commit has started:
+    /// those steps are separate awaits from the mempool write.
     pub async fn accept_tx_from_async(
         self: &Arc<Self>,
         tx: Transaction,
         origin: TxOrigin,
     ) -> Result<AcceptResult, AcceptError> {
-        let result = self
-            .accept_with_utxo_async(tx, origin, false, Vec::new())
-            .await;
-        if let (TxOrigin::Local, Ok(r)) = (origin, &result) {
-            let hub = Arc::clone(self);
-            let txid = r.txid;
-            crate::reactor::off_pool(move || hub.kick_isolated_if_live(&[txid])).await;
-        }
-        result
+        let hub = Arc::clone(self);
+        crate::reactor::spawn_with_store_budget(async move {
+            let result = hub
+                .accept_with_utxo_async(tx, origin, false, Vec::new())
+                .await;
+            if let (TxOrigin::Local, Ok(r)) = (origin, &result) {
+                let txid = r.txid;
+                let hub_k = Arc::clone(&hub);
+                crate::reactor::off_pool(move || hub_k.kick_isolated_if_live(&[txid])).await;
+            }
+            result
+        })
+        .await
+        .expect("tx admit")
     }
 
     /// [`Self::accept_tx_defer_trim`] without a blocking thread across scripts.
