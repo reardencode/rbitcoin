@@ -872,11 +872,11 @@ async fn stalled_reader_in_window(window: usize) {
         if stalled.load(Ordering::SeqCst) {
             break;
         }
-        assert!(
-            Instant::now() < deadline,
-            "the second slot was never written"
-        );
-        notified.await;
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(!left.is_zero(), "the second slot was never written");
+        if tokio::time::timeout(left, notified).await.is_err() {
+            panic!("the second slot was never written");
+        }
     }
     let trace = batch_trace_snapshot();
     batch_trace_clear();
@@ -1007,8 +1007,11 @@ async fn batch_reply_is_written_one_slot_at_a_time() {
         if seen.lock().unwrap().bytes.ends_with(b"]\n") {
             break;
         }
-        assert!(Instant::now() < deadline, "batch reply never finished");
-        notified.await;
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(!left.is_zero(), "batch reply never finished");
+        if tokio::time::timeout(left, notified).await.is_err() {
+            panic!("batch reply never finished");
+        }
     }
     task.abort();
     let seen = seen.lock().unwrap();
@@ -2785,11 +2788,14 @@ async fn stalled_scripthash_push_ends_the_connection() {
         if String::from_utf8_lossy(&buf).contains("\"id\":1") {
             break;
         }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
         assert!(
-            deadline > std::time::Instant::now(),
+            !left.is_zero(),
             "subscribe reply must land before the push stalls"
         );
-        notified.await;
+        if tokio::time::timeout(left, notified).await.is_err() {
+            panic!("subscribe reply must land before the push stalls");
+        }
     }
     stall.store(true, std::sync::atomic::Ordering::SeqCst);
 

@@ -532,11 +532,11 @@ async fn redial_skips_a_connect_target_still_dialling() {
         if accepts.load(Ordering::SeqCst) > 0 {
             break;
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the first dial never reached the proxy"
-        );
-        notified.await;
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        assert!(!left.is_zero(), "the first dial never reached the proxy");
+        if tokio::time::timeout(left, notified).await.is_err() {
+            panic!("the first dial never reached the proxy");
+        }
     }
     assert!(
         !node.peers.in_flight_nets().is_empty(),
@@ -566,11 +566,14 @@ async fn redial_skips_a_connect_target_still_dialling() {
         if accepts.load(Ordering::SeqCst) >= 2 {
             break;
         }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
         assert!(
-            std::time::Instant::now() < deadline,
+            !left.is_zero(),
             "a connect that never finishes must time out and be redialled"
         );
-        notified.await;
+        if tokio::time::timeout(left, notified).await.is_err() {
+            panic!("a connect that never finishes must time out and be redialled");
+        }
     }
     stall.abort();
     drop(node);
