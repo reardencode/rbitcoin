@@ -2184,18 +2184,20 @@ pub async fn peer_session_with(
                         let n = frame.payload_len();
                         let (tx, rx) = tokio::sync::oneshot::channel();
                         let _ = tx.send(frame.try_decode());
-                        if decode_q.push(rx, n) {
-                            return finish_decode_queue_full(
-                                &mut decode_q,
-                                hub.as_ref(),
-                                &out_tx,
+                        push_decode_frame(
+                            &mut decode_q,
+                            rx,
+                            n,
+                            DecodeDrain {
+                                hub: hub.as_ref(),
+                                out_tx: &out_tx,
                                 follow,
-                                session.as_deref(),
-                                &mut requested_since,
-                                &peer_s,
-                            )
-                            .await;
-                        }
+                                session: session.as_deref(),
+                                requested_since: &mut requested_since,
+                                peer: &peer_s,
+                            },
+                        )
+                        .await?;
                         continue;
                     }
                     if frame.is_ping() {
@@ -2221,18 +2223,20 @@ pub async fn peer_session_with(
                         });
                         decode_tasks.retain(|t| !t.is_finished());
                         decode_tasks.push(task);
-                        if decode_q.push(rx, n) {
-                            return finish_decode_queue_full(
-                                &mut decode_q,
-                                hub.as_ref(),
-                                &out_tx,
+                        push_decode_frame(
+                            &mut decode_q,
+                            rx,
+                            n,
+                            DecodeDrain {
+                                hub: hub.as_ref(),
+                                out_tx: &out_tx,
                                 follow,
-                                session.as_deref(),
-                                &mut requested_since,
-                                &peer_s,
-                            )
-                            .await;
-                        }
+                                session: session.as_deref(),
+                                requested_since: &mut requested_since,
+                                peer: &peer_s,
+                            },
+                        )
+                        .await?;
                         continue;
                     }
                     if !decode_q.is_empty() {
@@ -2243,18 +2247,20 @@ pub async fn peer_session_with(
                         let n = frame.payload_len();
                         let (tx, rx) = tokio::sync::oneshot::channel();
                         let _ = tx.send(frame.try_decode());
-                        if decode_q.push(rx, n) {
-                            return finish_decode_queue_full(
-                                &mut decode_q,
-                                hub.as_ref(),
-                                &out_tx,
+                        push_decode_frame(
+                            &mut decode_q,
+                            rx,
+                            n,
+                            DecodeDrain {
+                                hub: hub.as_ref(),
+                                out_tx: &out_tx,
                                 follow,
-                                session.as_deref(),
-                                &mut requested_since,
-                                &peer_s,
-                            )
-                            .await;
-                        }
+                                session: session.as_deref(),
+                                requested_since: &mut requested_since,
+                                peer: &peer_s,
+                            },
+                        )
+                        .await?;
                         continue;
                     }
                     handle_peer_frame(
@@ -2905,9 +2911,6 @@ pub fn force_announce_txid(hub: &ChainHub, peers: &crate::peers::PeerHub, txid: 
         if !tx_inv_peer_ok(&s, mp, &txid) {
             continue;
         }
-        if s.has_announced_wtx(&w) {
-            continue;
-        }
         let peer_min = s.minfeefilter_sat_kvb();
         if peer_min > 0 && announce_fee_rate_sat_kvb(mp, &txid).is_some_and(|rate| rate < peer_min)
         {
@@ -2992,9 +2995,6 @@ pub fn tx_inv_candidate_ok(
     if !mp.relay_enabled() && !mp.is_unbroadcast(&txid) {
         return false;
     }
-    if session.has_announced_wtx(&w) {
-        return false;
-    }
     if mp
         .accept_gen(&w)
         .is_some_and(|g| g < session.inv_gen_floor())
@@ -3014,7 +3014,9 @@ pub fn tx_inv_candidate_ok(
     } else if !clock_due && !local && !age_due_this {
         return false;
     }
-    true
+    // Every `true` is queued. The claim is the only insert, so a flush and
+    // an announce cannot both pass and each send an INV.
+    session.claim_announced_wtx(w)
 }
 
 #[doc(hidden)]
@@ -3063,9 +3065,6 @@ pub fn queue_due_tx_invs(
             ) {
                 continue;
             }
-            if !session.claim_announced_wtx(w) {
-                continue;
-            }
             due.push(Inventory::WTx(w));
             n += 1;
             if let Some(seq) = mp.relay_seq_of(&w) {
@@ -3092,9 +3091,6 @@ pub fn queue_due_tx_invs(
                 false,
                 inbound_age_gate,
             ) {
-                continue;
-            }
-            if !session.claim_announced_wtx(w) {
                 continue;
             }
             due.push(Inventory::WTx(w));
@@ -3238,6 +3234,36 @@ struct ReadyDecode<'a> {
     queue: &'a mut DecodeQueue,
     requested_since: &'a mut Option<std::time::Instant>,
     peer: &'a str,
+}
+
+struct DecodeDrain<'a> {
+    hub: &'a ChainHub,
+    out_tx: &'a mpsc::UnboundedSender<PeerOut>,
+    follow: &'a mut PeerFollowState,
+    session: Option<&'a crate::peers::LivePeer>,
+    requested_since: &'a mut Option<std::time::Instant>,
+    peer: &'a str,
+}
+
+async fn push_decode_frame(
+    decode_q: &mut DecodeQueue,
+    rx: DecodeRx,
+    n: usize,
+    drain: DecodeDrain<'_>,
+) -> Result<(), NetError> {
+    if !decode_q.push(rx, n) {
+        return Ok(());
+    }
+    finish_decode_queue_full(
+        decode_q,
+        drain.hub,
+        drain.out_tx,
+        drain.follow,
+        drain.session,
+        drain.requested_since,
+        drain.peer,
+    )
+    .await
 }
 
 async fn finish_decode_queue_full(
@@ -5616,6 +5642,21 @@ pub fn queue_due_parent_getdata(
     let _ = queue_accounted(Some(session), out_tx, NetworkMessage::GetData(inv));
 }
 
+/// Flush walks every writer with an empty from-this-peer set. The sender
+/// already has the tx, so that INV must not come back.
+fn note_blocksonly_sender(
+    mp: &crate::tx_relay::MempoolHub,
+    session: Option<&crate::peers::LivePeer>,
+    wtxid: bitcoin::Wtxid,
+) {
+    if mp.relay_enabled() {
+        return;
+    }
+    if let Some(s) = session {
+        s.note_announced_wtx(wtxid);
+    }
+}
+
 pub async fn on_tx(
     hub: &ChainHub,
     _out_tx: &mpsc::UnboundedSender<PeerOut>,
@@ -5653,13 +5694,7 @@ pub async fn on_tx(
             if trusted {
                 mp.set_trusted_session(from);
             }
-            // Flush walks every writer with an empty from-this-peer set.
-            // The sender already has the tx, so that INV must not come back.
-            if !mp.relay_enabled() {
-                if let Some(s) = session {
-                    s.note_announced_wtx(wtxid);
-                }
-            }
+            note_blocksonly_sender(mp, session, wtxid);
             let mp_task = Arc::clone(mp);
             let tx_task = tx.clone();
             let peers = session.and_then(|s| s.peer_hub());
