@@ -1219,7 +1219,9 @@ async fn fee_pushes_stay_an_interval_apart_under_steady_admission() {
                 .is_err(),
             "admit {vout} pushed before the interval"
         );
-        tokio::time::advance(interval).await;
+        // One millisecond past the deadline: an exact advance leaves the
+        // timer due but not fired.
+        tokio::time::advance(interval + Duration::from_millis(1)).await;
         let mut f = recv.await.expect("one advance produces one push");
         assert_eq!(f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE);
         let t: NewTemplate = binary_sv2::from_bytes(&mut f.payload).expect("decode");
