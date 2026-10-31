@@ -502,7 +502,7 @@ fn unbroadcast_survives_reopen_and_logs_confirm_before_broadcast() {
     let hub = MempoolHub::open(&mp, Arc::clone(&q)).unwrap();
     hub.set_relay_enabled(true);
     let tx = spend_true(cbs[1], 1_000, spk.clone());
-    hub.accept_tx(&tx).expect("accept");
+    hub.accept_tx_from(&tx, TxOrigin::Local).expect("accept");
     let extra = Transaction {
         version: Version::TWO,
         lock_time: LockTime::ZERO,
@@ -523,7 +523,6 @@ fn unbroadcast_survives_reopen_and_logs_confirm_before_broadcast() {
     );
     let wire = spend_true(cbs[8], 1_000, spk.clone());
     hub.accept_tx(&wire).expect("peer tx");
-    hub.mark_local_origin(tx.compute_txid());
     hub.note_unbroadcast(tx.compute_txid());
     assert_eq!(hub.unbroadcast_count(), 1);
     assert!(hub.is_local_origin(&tx.compute_txid()));
@@ -765,10 +764,15 @@ fn live_pool_recent_accepts_and_1p1c_rollback() {
     ));
     assert_eq!(hub.orphan_count(), 1);
     let payer = spend_vout(OutPoint::new(lpid, 1), 1_000);
-    hub.accept_tx(&payer)
+    hub.accept_tx_from(&payer, TxOrigin::Local)
         .expect("hub 1p1c must admit parent+child");
     assert!(hub.contains(&lpid));
     assert!(hub.contains(&payer.compute_txid()));
+    assert!(hub.is_local_origin(&payer.compute_txid()));
+    assert!(
+        !hub.is_local_origin(&lpid),
+        "the remembered parent came from the network, not this submit"
+    );
     assert!(
         !hub.contains(&one_sat.compute_txid()),
         "1-sat sibling must not ride 1p1c promote at floor 0"
@@ -783,6 +787,7 @@ fn live_pool_recent_accepts_and_1p1c_rollback() {
     hub.rollback_1p1c_parent(&lpid, &[]);
     assert!(!hub.contains(&lpid));
     assert!(!hub.contains(&sib_id));
+    assert!(!hub.is_local_origin(&payer.compute_txid()));
     assert!(
         hub.relay_seq_of(&sib_w).is_none(),
         "published spender must leave wtxid/relay maps"
@@ -1357,7 +1362,7 @@ fn commit_refuses_a_coin_spent_during_script_check() {
         hits: AtomicUsize::new(0),
     };
     let err = hub
-        .accept_with_utxo(&tx, &utxo, None, false, &[])
+        .accept_with_utxo(&tx, &utxo, TxOrigin::Relay(None), false, &[])
         .unwrap_err();
     assert!(
         matches!(err, AcceptError::MissingPrevout(missing) if missing == op),
@@ -2059,7 +2064,9 @@ fn accept_from_peer_erase_drops_orphan() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    let err = hub.accept_tx_from(&tx, Some(4)).unwrap_err();
+    let err = hub
+        .accept_tx_from(&tx, TxOrigin::Relay(Some(4)))
+        .unwrap_err();
     assert!(matches!(err, AcceptError::Orphaned { .. }), "{err}");
     assert_eq!(hub.orphan_snapshot()[0].announcers, vec![4]);
     hub.add_orphan_announcer(&tx.compute_txid(), 8);
@@ -3650,7 +3657,9 @@ fn package_inside_promote_admits_parent_orphans() {
         },
         50_0000_0000 - 1 - half - 20_000,
     );
-    let err = hub.accept_tx_from(&sibling, Some(1)).unwrap_err();
+    let err = hub
+        .accept_tx_from(&sibling, TxOrigin::Relay(Some(1)))
+        .unwrap_err();
     assert!(
         matches!(err, AcceptError::Orphaned { .. }),
         "sibling waits on the low parent, got {err:?}"
@@ -3684,7 +3693,9 @@ fn package_inside_promote_admits_parent_orphans() {
             script_pubkey: spk.clone(),
         }],
     };
-    let err = hub.accept_tx_from(&child, Some(1)).unwrap_err();
+    let err = hub
+        .accept_tx_from(&child, TxOrigin::Relay(Some(1)))
+        .unwrap_err();
     assert!(
         matches!(err, AcceptError::Orphaned { .. }),
         "child waits on the confirmed parent and the low parent, got {err:?}"
@@ -3809,7 +3820,7 @@ fn mempool_under_pressure() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    let err = hub.accept_tx_from(&child, Some(7));
+    let err = hub.accept_tx_from(&child, TxOrigin::Relay(Some(7)));
     assert!(
         matches!(err, Err(AcceptError::Orphaned { .. })),
         "P2P child of min-relay parent must orphan, got {err:?}"
@@ -4454,7 +4465,7 @@ async fn accept_tx_async_runs_off_reactor() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    let r = hub.accept_tx_async(tx).await;
+    let r = hub.accept_tx_from_async(tx, TxOrigin::Relay(None)).await;
     assert!(
         matches!(
             r,
@@ -4612,7 +4623,9 @@ async fn add_orphan_announcer_does_not_panic_on_tokio_worker() {
     let hub = MempoolHub::open(&mp_dir, Arc::new(q)).unwrap();
     hub.set_relay_enabled(true);
     let tx = parked_orphan_tx();
-    let err = hub.accept_tx_from(&tx, Some(4)).unwrap_err();
+    let err = hub
+        .accept_tx_from(&tx, TxOrigin::Relay(Some(4)))
+        .unwrap_err();
     assert!(matches!(err, AcceptError::Orphaned { .. }), "{err}");
     let txid = tx.compute_txid();
     let wtxid = tx.compute_wtxid();
@@ -4728,7 +4741,7 @@ fn accept_rechecks_confirmed_input_under_write() {
         write_hits: Arc::clone(&hits),
     };
     let tx = spend_true(cbs[0], 1_000, ScriptBuf::from_bytes(vec![0x51]));
-    hub.accept_with_utxo(&tx, &probe, None, false, &[])
+    hub.accept_with_utxo(&tx, &probe, TxOrigin::Relay(None), false, &[])
         .expect("accept");
     assert_eq!(
         hits.load(Ordering::Relaxed),
@@ -4738,7 +4751,7 @@ fn accept_rechecks_confirmed_input_under_write() {
     hits.store(0, Ordering::Relaxed);
     let held = spend_true(cbs[1], 1_000, ScriptBuf::from_bytes(vec![0x52]));
     let _view = q.store().hold_utxo_view();
-    hub.accept_with_utxo(&held, &probe, None, false, &[])
+    hub.accept_with_utxo(&held, &probe, TxOrigin::Relay(None), false, &[])
         .expect("accept while the view is held");
     assert_eq!(
         hits.load(Ordering::Relaxed),
@@ -4801,7 +4814,8 @@ fn contains_wtxid_during_slow_utxo_prepare() {
         }],
     };
     let h = Arc::clone(&hub);
-    let join = thread::spawn(move || h.accept_with_utxo(&tx, &stall, None, false, &[]));
+    let join =
+        thread::spawn(move || h.accept_with_utxo(&tx, &stall, TxOrigin::Relay(None), false, &[]));
     let start = Instant::now();
     while !entered.load(Ordering::Acquire) {
         assert!(
@@ -4925,7 +4939,7 @@ fn trust_peer_reorg_evict_keeps_nonfinal() {
     let mut tx = spend_true(cbs[0], 1_000, ScriptBuf::from_bytes(vec![0x51]));
     tx.lock_time = LockTime::from_height(tip + 10).unwrap();
     tx.input[0].sequence = Sequence::from_consensus(0xfffffffe);
-    hub.accept_tx_from(&tx, Some(session))
+    hub.accept_tx_from(&tx, TxOrigin::Relay(Some(session)))
         .expect("non-final from the trusted session");
     let txid = tx.compute_txid();
     assert!(hub.try_contains(&txid));
@@ -4976,7 +4990,7 @@ fn review_trust_flag_off_open_drops_marked_tree() {
     let mut parent = spend_true(cbs[0], 1_000, ScriptBuf::from_bytes(vec![0x51]));
     parent.lock_time = LockTime::from_height(tip + 10).unwrap();
     parent.input[0].sequence = Sequence::from_consensus(0xfffffffe);
-    hub.accept_tx_from(&parent, Some(session))
+    hub.accept_tx_from(&parent, TxOrigin::Relay(Some(session)))
         .expect("non-final from the trusted session");
     let parent_id = parent.compute_txid();
     let child = spend_vout(
@@ -5053,9 +5067,13 @@ fn review_trust_orphan_keeps_session_waiver() {
     );
     other.lock_time = LockTime::from_height(tip + 10).unwrap();
     other.input[0].sequence = Sequence::from_consensus(0xfffffffe);
-    let parked = hub.accept_tx_from(&trusted, Some(session)).unwrap_err();
+    let parked = hub
+        .accept_tx_from(&trusted, TxOrigin::Relay(Some(session)))
+        .unwrap_err();
     assert!(matches!(parked, AcceptError::Orphaned { .. }), "{parked}");
-    let parked_other = hub.accept_tx_from(&other, Some(99)).unwrap_err();
+    let parked_other = hub
+        .accept_tx_from(&other, TxOrigin::Relay(Some(99)))
+        .unwrap_err();
     assert!(
         matches!(parked_other, AcceptError::Orphaned { .. }),
         "{parked_other}"
@@ -5081,7 +5099,9 @@ fn review_trust_orphan_keeps_session_waiver() {
         },
         script_parent.output[0].value.to_sat() - 1_000,
     );
-    let parked_bad = hub.accept_tx_from(&bad, Some(session)).unwrap_err();
+    let parked_bad = hub
+        .accept_tx_from(&bad, TxOrigin::Relay(Some(session)))
+        .unwrap_err();
     assert!(
         matches!(parked_bad, AcceptError::Orphaned { .. }),
         "{parked_bad}"
@@ -5135,7 +5155,7 @@ fn trust_peer_admit_from_peer_only() {
     rbitcoin_log::capture_logs(false);
     rbitcoin_log::capture_logs(true);
     let got = hub
-        .accept_tx_from(&child, Some(session))
+        .accept_tx_from(&child, TxOrigin::Relay(Some(session)))
         .expect("trusted session admits the script fault");
     assert_eq!(got.fee_sat, 1_000);
     let txid = child.compute_txid();
@@ -5167,7 +5187,9 @@ fn trust_peer_admit_from_peer_only() {
         }],
         ..child.clone()
     };
-    let other_err = hub.accept_tx_from(&other, Some(session + 1)).unwrap_err();
+    let other_err = hub
+        .accept_tx_from(&other, TxOrigin::Relay(Some(session + 1)))
+        .unwrap_err();
     assert!(matches!(other_err, AcceptError::Script(_)), "{other_err}");
     assert!(!hub.try_contains(&other.compute_txid()));
     rbitcoin_log::capture_logs(false);
@@ -5224,7 +5246,7 @@ fn trust_peer_admit_staged_script() {
     rbitcoin_log::capture_logs(false);
     rbitcoin_log::capture_logs(true);
     let off = hub
-        .accept_with_utxo(&tx, &utxos, None, false, &[])
+        .accept_with_utxo(&tx, &utxos, TxOrigin::Relay(None), false, &[])
         .unwrap_err();
     assert!(matches!(off, AcceptError::Script(_)), "{off}");
     let off_log = rbitcoin_log::take_logs()
@@ -5240,7 +5262,7 @@ fn trust_peer_admit_staged_script() {
     hub.set_trusted_session(Some(session));
     rbitcoin_log::capture_logs(true);
     let got = hub
-        .accept_with_utxo(&tx, &utxos, Some(session), false, &[])
+        .accept_with_utxo(&tx, &utxos, TxOrigin::Relay(Some(session)), false, &[])
         .expect("peer admit");
     assert_eq!(got.fee_sat, 1_000);
     let txid = tx.compute_txid();

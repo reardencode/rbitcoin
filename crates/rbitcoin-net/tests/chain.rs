@@ -5412,7 +5412,7 @@ fn review_trust_local_block_rechecks_marked_script() {
     let mp = attach_mp(dir.path(), &hub);
     let session = 7u64;
     mp.set_trusted_session(Some(session));
-    mp.accept_tx_from(&bad, Some(session))
+    mp.accept_tx_from(&bad, rbitcoin_net::TxOrigin::Relay(Some(session)))
         .expect("trusted script admit");
     mp.accept_tx(&clean).expect("clean spend");
     assert!(mp.lock_read().trust_kept.contains(&bad_id));

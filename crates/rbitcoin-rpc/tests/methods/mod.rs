@@ -575,7 +575,9 @@ fn getorphantxs_is_hidden_and_lists_parked() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    let err = mp.accept_tx_from(&tx, Some(3)).unwrap_err();
+    let err = mp
+        .accept_tx_from(&tx, rbitcoin_net::TxOrigin::Relay(Some(3)))
+        .unwrap_err();
     assert!(
         matches!(err, rbitcoin_net::AcceptError::Orphaned { .. }),
         "{err}"
@@ -1505,60 +1507,48 @@ fn mempool_txid_lookups_do_not_list_live() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Graph fields come from the cluster, not stub 1/0. Local sendraw is
-/// unbroadcast until a peer getdata completes.
-#[test]
-fn mempool_graph_fields_follow_cluster_and_unbroadcast() {
+/// One `OP_TRUE` output spending `prev:0`.
+fn op_true_spend(prev: Txid, sequence: bitcoin::Sequence, value: u64) -> Transaction {
     use bitcoin::absolute::LockTime;
-    use bitcoin::script::ScriptBuf;
     use bitcoin::transaction::Version as TxVersion;
-    use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
-    let (ctx, dir, coinbase_txids) = ctx_from_empty_102();
-    let mp = ctx.mempool.as_ref().expect("mempool");
-    mp.set_relay_enabled(true);
-    let spk = ScriptBuf::from_bytes(vec![0x51]);
+    use bitcoin::{OutPoint, TxIn, TxOut, Witness};
+    Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: prev,
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(value),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    }
+}
 
-    let parent = Transaction {
-        version: TxVersion::TWO,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint {
-                txid: coinbase_txids[0],
-                vout: 0,
-            },
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-            witness: Witness::new(),
-        }],
-        output: vec![TxOut {
-            value: Amount::from_sat(50_0000_0000 - 1_000),
-            script_pubkey: spk.clone(),
-        }],
-    };
+/// A signaling parent and an opt-out child. Graph fields follow the cluster,
+/// and the child inherits `bip125-replaceable` from its in-mempool parent.
+/// Returns `(parent txid, child txid hex)`.
+fn cluster_entries_beat(ctx: &RpcContext, mp: &MempoolHub, coinbase: Txid) -> (Txid, String) {
+    use bitcoin::Sequence;
+    let parent = op_true_spend(
+        coinbase,
+        Sequence::ENABLE_RBF_NO_LOCKTIME,
+        50_0000_0000 - 1_000,
+    );
     mp.accept_tx(&parent).expect("parent");
-    let child = Transaction {
-        version: TxVersion::TWO,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint {
-                txid: parent.compute_txid(),
-                vout: 0,
-            },
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-            witness: Witness::new(),
-        }],
-        output: vec![TxOut {
-            value: Amount::from_sat(50_0000_0000 - 1_000 - 2_000),
-            script_pubkey: spk.clone(),
-        }],
-    };
+    let child = op_true_spend(parent.compute_txid(), Sequence::MAX, 50_0000_0000 - 3_000);
     mp.accept_tx(&child).expect("child");
 
     let parent_hex = hash_hex_display(&parent.compute_txid().to_byte_array());
     let child_hex = hash_hex_display(&child.compute_txid().to_byte_array());
-    let parent_entry = dispatch(&ctx, "getmempoolentry", vec![json!(parent_hex.clone())]).unwrap();
-    let child_entry = dispatch(&ctx, "getmempoolentry", vec![json!(child_hex.clone())]).unwrap();
+    let parent_entry = dispatch(ctx, "getmempoolentry", vec![json!(parent_hex.clone())]).unwrap();
+    let child_entry = dispatch(ctx, "getmempoolentry", vec![json!(child_hex.clone())]).unwrap();
     assert_eq!(parent_entry["ancestorcount"], 1);
     assert_eq!(parent_entry["descendantcount"], 2);
     assert_eq!(child_entry["ancestorcount"], 2);
@@ -1569,57 +1559,91 @@ fn mempool_graph_fields_follow_cluster_and_unbroadcast() {
     assert_eq!(parent_entry["spentby"], json!([child_hex.clone()]));
     assert_eq!(child_entry["depends"], json!([parent_hex.clone()]));
     assert_eq!(child_entry["spentby"], json!([]));
+    assert_eq!(parent_entry["bip125-replaceable"], true);
+    assert_eq!(
+        child_entry["bip125-replaceable"], true,
+        "an opt-out child of a signaling parent is replaceable"
+    );
 
-    let verbose = dispatch(&ctx, "getrawmempool", vec![json!(true)]).unwrap();
-    assert_eq!(verbose[&child_hex]["ancestorcount"], 2);
-    assert_eq!(verbose[&parent_hex]["descendantcount"], 2);
-    assert_eq!(verbose[&child_hex]["depends"], json!([parent_hex.clone()]));
-    assert_eq!(verbose[&parent_hex]["spentby"], json!([child_hex.clone()]));
+    let verbose = dispatch(ctx, "getrawmempool", vec![json!(true)]).unwrap();
+    assert_eq!(verbose[&parent_hex], parent_entry);
+    assert_eq!(verbose[&child_hex], child_entry);
+    let ancestors = dispatch(
+        ctx,
+        "getmempoolancestors",
+        vec![json!(child_hex.clone()), json!(true)],
+    )
+    .unwrap();
+    assert_eq!(ancestors[&parent_hex], parent_entry);
+    (parent.compute_txid(), child_hex)
+}
 
+/// Local opt-out sendraw: unbroadcast until a peer getdata completes, and
+/// `bip125-replaceable` is false. Full RBF still replaces it.
+fn opt_out_local_beat(ctx: &RpcContext, mp: &MempoolHub, coinbase: Txid, p2p_parent: Txid) {
+    let local = op_true_spend(coinbase, bitcoin::Sequence::MAX, 50_0000_0000 - 3_000);
+    let sent = dispatch(
+        ctx,
+        "sendrawtransaction",
+        vec![json!(serialize_hex(&local))],
+    )
+    .unwrap();
+    let local_hex = hash_hex_display(&local.compute_txid().to_byte_array());
+    assert_eq!(sent, json!(local_hex.clone()));
+    assert!(mp.is_local_origin(&local.compute_txid()));
+    assert!(!mp.is_local_origin(&p2p_parent));
+
+    let info = dispatch(ctx, "getmempoolinfo", vec![]).unwrap();
+    assert_eq!(info["unbroadcastcount"], 1);
+    let local_entry = dispatch(ctx, "getmempoolentry", vec![json!(local_hex.clone())]).unwrap();
+    assert_eq!(local_entry["unbroadcast"], true);
+    assert_eq!(local_entry["ancestorcount"], 1);
+    assert_eq!(local_entry["bip125-replaceable"], false);
+
+    mp.mark_broadcast(&local.compute_txid());
+    let info = dispatch(ctx, "getmempoolinfo", vec![]).unwrap();
+    assert_eq!(
+        info["unbroadcastcount"], 0,
+        "getdata/serve must clear unbroadcast"
+    );
+    let local_entry = dispatch(ctx, "getmempoolentry", vec![json!(local_hex.clone())]).unwrap();
+    assert_eq!(local_entry["unbroadcast"], false);
+
+    let replacement = op_true_spend(coinbase, bitcoin::Sequence::MAX, 50_0000_0000 - 6_000);
+    let replaced = dispatch(
+        ctx,
+        "sendrawtransaction",
+        vec![json!(serialize_hex(&replacement))],
+    )
+    .unwrap();
+    assert_eq!(
+        replaced,
+        json!(hash_hex_display(
+            &replacement.compute_txid().to_byte_array()
+        ))
+    );
+    let gone = dispatch(ctx, "getmempoolentry", vec![json!(local_hex)]).unwrap_err();
+    assert_eq!(gone["code"], ERR_INVALID_ADDRESS_OR_KEY);
+}
+
+/// Graph fields come from the cluster, not stub 1/0. Local sendraw is
+/// unbroadcast until a peer getdata completes. `bip125-replaceable` is Core's
+/// signal: the tx or an in-mempool ancestor has a sequence at or below
+/// `0xfffffffd`. Full RBF still replaces an opt-out tx.
+#[test]
+fn mempool_graph_fields_follow_cluster_and_unbroadcast() {
+    let (ctx, dir, coinbase_txids) = ctx_from_empty_102();
+    let mp = ctx.mempool.as_ref().expect("mempool");
+    mp.set_relay_enabled(true);
+
+    let (parent, child_hex) = cluster_entries_beat(&ctx, mp, coinbase_txids[0]);
     let info = dispatch(&ctx, "getmempoolinfo", vec![]).unwrap();
     assert_eq!(
         info["unbroadcastcount"], 0,
         "P2P-style accept is not a local unbroadcast"
     );
 
-    let local = Transaction {
-        version: TxVersion::TWO,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint {
-                txid: coinbase_txids[1],
-                vout: 0,
-            },
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-            witness: Witness::new(),
-        }],
-        output: vec![TxOut {
-            value: Amount::from_sat(50_0000_0000 - 3_000),
-            script_pubkey: spk,
-        }],
-    };
-    let local_hex_tx = serialize_hex(&local);
-    let sent = dispatch(&ctx, "sendrawtransaction", vec![json!(local_hex_tx)]).unwrap();
-    let local_hex = hash_hex_display(&local.compute_txid().to_byte_array());
-    assert_eq!(sent, json!(local_hex.clone()));
-    assert!(mp.is_local_origin(&local.compute_txid()));
-    assert!(!mp.is_local_origin(&parent.compute_txid()));
-
-    let info = dispatch(&ctx, "getmempoolinfo", vec![]).unwrap();
-    assert_eq!(info["unbroadcastcount"], 1);
-    let local_entry = dispatch(&ctx, "getmempoolentry", vec![json!(local_hex.clone())]).unwrap();
-    assert_eq!(local_entry["unbroadcast"], true);
-    assert_eq!(local_entry["ancestorcount"], 1);
-
-    mp.mark_broadcast(&local.compute_txid());
-    let info = dispatch(&ctx, "getmempoolinfo", vec![]).unwrap();
-    assert_eq!(
-        info["unbroadcastcount"], 0,
-        "getdata/serve must clear unbroadcast"
-    );
-    let local_entry = dispatch(&ctx, "getmempoolentry", vec![json!(local_hex)]).unwrap();
-    assert_eq!(local_entry["unbroadcast"], false);
+    opt_out_local_beat(&ctx, mp, coinbase_txids[1], parent);
 
     let _ = mp.sample_reset_perf();
     let _ = dispatch(&ctx, "getmempoolentry", vec![json!(child_hex)]).unwrap();
@@ -4349,8 +4373,11 @@ fn getblockstats_coinbase_only_and_op_return_match_helper() {
     );
     assert_eq!(genesis["utxo_increase"], 1);
     assert_eq!(genesis["utxo_increase_actual"], 0);
-    assert!(genesis.get("utxo_size_inc").is_none());
-    assert!(genesis.get("utxo_size_inc_actual").is_none());
+    assert_eq!(
+        genesis["utxo_size_inc"], 116,
+        "one 67-byte P2PK output: 8 + 1 + 67 + 40"
+    );
+    assert_eq!(genesis["utxo_size_inc_actual"], 0);
 
     dispatch(&ctx, "generate", vec![json!(100)]).unwrap();
     let h1 = dispatch(&ctx, "getblockhash", vec![json!(1)]).unwrap();
@@ -4433,6 +4460,7 @@ fn getblockstats_coinbase_only_and_op_return_match_helper() {
         Some(got["utxo_increase"].as_i64().unwrap() - 1)
     );
     assert_eq!(got["totalfee"], 2_000);
+    getblockstats_utxo_size_beat(&ctx, h, &got);
 
     let mut named = serde_json::Map::new();
     named.insert("hash_or_height".into(), got["blockhash"].clone());
@@ -4450,6 +4478,84 @@ fn getblockstats_coinbase_only_and_op_return_match_helper() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Core `getblockstats` size stats from `getblock` verbosity 3: each output's
+/// serialized `CTxOut` plus Core v32.1 `PER_UTXO_OVERHEAD` (40), minus the same per
+/// prevout. `actual` leaves out OP_RETURN outputs. Not for height 0, where no
+/// output enters the UTXO set.
+fn utxo_size_stats_from_getblock(ctx: &RpcContext, hash: &Value) -> (i64, i64) {
+    let coin = |spk: &Value| {
+        let n = spk["hex"].as_str().expect("scriptPubKey hex").len() as i64 / 2;
+        assert!(n < 0xfd, "one-byte CompactSize");
+        8 + 1 + n + 40
+    };
+    let block = dispatch(ctx, "getblock", vec![hash.clone(), json!(3)]).unwrap();
+    let (mut inc, mut actual) = (0, 0);
+    for tx in block["tx"].as_array().expect("tx") {
+        for out in tx["vout"].as_array().expect("vout") {
+            let spk = &out["scriptPubKey"];
+            inc += coin(spk);
+            if !spk["hex"].as_str().unwrap().starts_with("6a") {
+                actual += coin(spk);
+            }
+        }
+        let vins = tx["vin"].as_array().expect("vin");
+        for prevout in vins.iter().filter_map(|vin| vin.get("prevout")) {
+            inc -= coin(&prevout["scriptPubKey"]);
+            actual -= coin(&prevout["scriptPubKey"]);
+        }
+    }
+    (inc, actual)
+}
+
+/// Size stats match the `getblock` tally on the stamped path and on the
+/// reconstruct path, and a selected size stat comes back with the others asked.
+fn getblockstats_utxo_size_beat(ctx: &RpcContext, height: u32, got: &Value) {
+    use rbitcoin_store::TxStatRow;
+    let (inc, actual) = utxo_size_stats_from_getblock(ctx, &got["blockhash"]);
+    assert_eq!(got["utxo_size_inc"], inc, "{got}");
+    assert_eq!(got["utxo_size_inc_actual"], actual, "{got}");
+    assert!(actual < inc, "the OP_RETURN output stays out of actual");
+
+    assert!(ctx
+        .query
+        .stamped_txstat_block(Height(height))
+        .unwrap()
+        .is_some());
+    let stamped = dispatch(ctx, "getblockstats", vec![json!(height)]).unwrap();
+    assert_eq!(&stamped, got);
+    let spend_fk = ctx.query.block_tx_fks(Height(height)).unwrap()[1];
+    ctx.query
+        .store()
+        .write_txstat_row(
+            spend_fk,
+            &TxStatRow {
+                fee_sat: 0,
+                base: 0,
+                wit_extra: 0,
+            },
+        )
+        .unwrap();
+    assert!(ctx
+        .query
+        .stamped_txstat_block(Height(height))
+        .unwrap()
+        .is_none());
+    let reconstructed = dispatch(ctx, "getblockstats", vec![json!(height)]).unwrap();
+    assert_eq!(&reconstructed, got);
+
+    let picked = dispatch(
+        ctx,
+        "getblockstats",
+        vec![json!(height), json!(["utxo_size_inc_actual", "minfee"])],
+    )
+    .unwrap();
+    assert_eq!(
+        picked,
+        json!({ "minfee": got["minfee"], "utxo_size_inc_actual": actual })
+    );
+}
+
 fn prune_life_blockstats(ctx: &RpcContext) {
     use rbitcoin_store::TxStatRow;
     let genesis = dispatch(ctx, "getblockstats", vec![json!(0)]).unwrap();
@@ -4468,15 +4574,17 @@ fn prune_life_blockstats(ctx: &RpcContext) {
     assert_eq!(got["utxo_increase_actual"], 1, "{got}");
     assert_eq!(got["total_size"], 0);
     assert_eq!(got["swtxs"], 0);
-    assert!(got.get("utxo_size_inc").is_none(), "{got}");
-    let e = dispatch(
+    let h1 = dispatch(ctx, "getblockhash", vec![json!(1)]).unwrap();
+    let (inc, actual) = utxo_size_stats_from_getblock(ctx, &h1);
+    assert_eq!(got["utxo_size_inc"], inc, "{got}");
+    assert_eq!(got["utxo_size_inc_actual"], actual, "{got}");
+    let one = dispatch(
         ctx,
         "getblockstats",
         vec![json!(1), json!(["utxo_size_inc"])],
     )
-    .unwrap_err();
-    assert_eq!(e["code"], ERR_INVALID_PARAMETER);
-    assert_eq!(e["message"], "Invalid selected statistic 'utxo_size_inc'");
+    .unwrap();
+    assert_eq!(one, json!({ "utxo_size_inc": inc }));
     let fk = ctx.query.block_tx_fks(Height(0)).unwrap()[0];
     ctx.query
         .store()

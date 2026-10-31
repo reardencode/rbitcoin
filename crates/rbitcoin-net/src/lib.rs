@@ -112,7 +112,7 @@ pub use service::{P2PNode, REDIAL_INTERVAL, REDIAL_INTERVAL_TEST};
 pub use socks::{install_i2p_dialer, Dialer, NetProxies};
 pub use tx_relay::{
     ElectrumMempoolItem, FeeHistoryBackfillStats, MempoolAnnounce, MempoolHub, MempoolPerfSample,
-    MempoolTxSnapEntry, MempoolTxSnapshot,
+    MempoolTxSnapEntry, MempoolTxSnapshot, TxOrigin,
 };
 pub use v2::{encode_v2_contents, parse_v2_regtest, parse_v2_regtest_named, WireBytes};
 pub use versionbits_warn::{trust_warning_line, versionbit_warning_strings};

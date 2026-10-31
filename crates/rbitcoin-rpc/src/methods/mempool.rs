@@ -200,6 +200,7 @@ pub fn mempool_graph_json(mp: &MempoolHub, txid: &Txid, fee: u64, weight: u64) -
         "ancestorfees": afee,
         "chunkweight": chunk_w,
         "unbroadcast": mp.is_unbroadcast(txid),
+        "bip125-replaceable": mp.signals_bip125(txid),
         "depends": depends,
         "spentby": spentby,
         "fees": {
@@ -1000,7 +1001,11 @@ pub fn sendrawtransaction(ctx: &RpcContext, params: &RpcParams) -> Result<Value,
             "Fee exceeds maximum configured by user (e.g. -maxtxfee, maxfeerate)",
         ));
     }
-    sendraw_after_accept(ctx, &tx, mp.accept_tx(&tx))
+    sendraw_after_accept(
+        ctx,
+        &tx,
+        mp.accept_tx_from(&tx, rbitcoin_net::TxOrigin::Local),
+    )
 }
 
 /// HTTP `sendrawtransaction`. Script verify is awaited on the request task.
@@ -1039,7 +1044,9 @@ pub async fn sendrawtransaction_async(
             "Fee exceeds maximum configured by user (e.g. -maxtxfee, maxfeerate)",
         ));
     }
-    let accepted = mp.accept_tx_async(tx.clone()).await;
+    let accepted = mp
+        .accept_tx_from_async(tx.clone(), rbitcoin_net::TxOrigin::Local)
+        .await;
     let ctx_done = Arc::clone(ctx);
     super::off_pool(move || sendraw_after_accept(&ctx_done, &tx, accepted)).await
 }
@@ -1058,7 +1065,6 @@ fn sendraw_after_accept(
     match accepted {
         Ok(r) => {
             mp.note_unbroadcast(r.txid);
-            mp.mark_local_origin(r.txid);
             // `-blocksonly`: accept-time announce is skipped (relay off + not
             // yet unbroadcast). Re-announce after noting so inbound peers INV
             // (`p2p_blocksonly.py:48`). When relay is on, leave the 30s inbound
@@ -2282,7 +2288,6 @@ fn submitpackage_apply(
         match row.result {
             Ok(ok) => {
                 mp.note_unbroadcast(ok.txid);
-                mp.mark_local_origin(ok.txid);
                 for old in &ok.replaced {
                     replaced.push(hash_hex_display(&old.to_byte_array()));
                 }

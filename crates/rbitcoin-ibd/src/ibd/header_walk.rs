@@ -721,7 +721,7 @@ pub fn may_serve(st: &IbdWorkState, peer: usize, hash: &BlockHash) -> bool {
     let height = st.hash_height.get(hash).copied();
     let now = super::peer_io::ibd_mono_ms();
     let path = &st.height_to_hash;
-    let askable = |s: &PeerSlot| s.alive && !s.chain.lacks(hash, now);
+    let askable = |s: &PeerSlot| s.may_take_block(hash, now);
     let shows = |s: &PeerSlot| askable(s) && height.is_some_and(|ht| s.chain.shows(path, ht));
     let open =
         |s: &PeerSlot| askable(s) && !height.is_some_and(|ht| s.chain.left_path_by(path, ht));

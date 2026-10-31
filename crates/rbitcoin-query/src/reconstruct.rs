@@ -559,18 +559,6 @@ impl Query {
         }))
     }
 
-    /// Sum of non-coinbase output values (first fk is coinbase). Reads `txout` only.
-    pub fn non_coinbase_total_out(&self, fks: &[Fk]) -> Result<i64, QueryError> {
-        let mut sum = 0i64;
-        for &fk in fks.iter().skip(1) {
-            let (_, outs) = self.store.get_tx_meta_and_outputs(fk)?;
-            for o in outs {
-                sum = sum.saturating_add(o.value as i64);
-            }
-        }
-        Ok(sum)
-    }
-
     /// Fill unstamped `txstat` rows from a reconstructed wire block.
     pub fn stamp_txstat_from_block(&self, height: Height, block: &Block) -> Result<(), QueryError> {
         let Some((header_fk, _)) = self.header_at_height(height)? else {

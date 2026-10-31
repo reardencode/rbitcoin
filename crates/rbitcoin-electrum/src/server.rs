@@ -2253,9 +2253,8 @@ pub fn broadcast_raw_tx(
         bitcoin::consensus::deserialize(&raw).map_err(|e| e.to_string())?;
     let mp = mempool.ok_or_else(|| "mempool not available".to_string())?;
     let r = mp
-        .accept_tx(&tx)
+        .accept_tx_from(&tx, rbitcoin_net::TxOrigin::Local)
         .map_err(|e| format!("broadcast reject: {e}"))?;
-    mp.mark_local_origin(r.txid);
     Ok(json!(format!("{}", r.txid)))
 }
 
@@ -2282,13 +2281,13 @@ pub async fn broadcast_raw_tx_async(
         .ok_or_else(|| "mempool not available".to_string())?
         .clone();
     let budget = mp.query.api_read_budget();
-    let r = rbitcoin_net::with_store_budget(budget, mp.accept_tx_async(tx))
-        .await
-        .map_err(|e| format!("broadcast reject: {e}"))?;
-    let txid = r.txid;
-    let marked = Arc::clone(&mp);
-    rbitcoin_net::off_pool(move || marked.mark_local_origin(txid)).await;
-    Ok(json!(format!("{}", txid)))
+    let r = rbitcoin_net::with_store_budget(
+        budget,
+        mp.accept_tx_from_async(tx, rbitcoin_net::TxOrigin::Local),
+    )
+    .await
+    .map_err(|e| format!("broadcast reject: {e}"))?;
+    Ok(json!(format!("{}", r.txid)))
 }
 
 #[doc(hidden)]
@@ -2329,9 +2328,6 @@ pub fn broadcast_package(
     let accepted = mp
         .accept_package(&txs)
         .map_err(|e| format!("broadcast_package reject: {e}"))?;
-    for r in &accepted {
-        mp.mark_local_origin(r.txid);
-    }
     if verbose {
         let mut tx_results = serde_json::Map::new();
         for r in &accepted {
@@ -2390,14 +2386,6 @@ pub async fn broadcast_package_async(
     let accepted = rbitcoin_net::with_store_budget(budget, mp.accept_package_async(txs))
         .await
         .map_err(|e| format!("broadcast_package reject: {e}"))?;
-    let ids: Vec<_> = accepted.iter().map(|r| r.txid).collect();
-    let marked = Arc::clone(&mp);
-    rbitcoin_net::off_pool(move || {
-        for id in ids {
-            marked.mark_local_origin(id);
-        }
-    })
-    .await;
     if verbose {
         let mut tx_results = serde_json::Map::new();
         for r in &accepted {

@@ -373,6 +373,8 @@ pub struct IbdConfig {
     /// Densify assign-stop in bytes. `u64::MAX` is unlimited. The node sets
     /// it from `RBITCOIN_BLOCK_QUEUE_BYTES` / `RBITCOIN_BLOCK_QUEUE_GB`.
     pub assign_stop_bytes: u64,
+    /// `--connect` targets. A session to one is a manual peer.
+    pub connect: Vec<rbitcoin_net::NetAddr>,
 }
 
 impl Default for IbdConfig {
@@ -389,6 +391,7 @@ impl Default for IbdConfig {
             peers: None,
             dialer: rbitcoin_net::socks::Dialer::Direct,
             assign_stop_bytes: rbitcoin_query::BQ_ASSIGN_STOP_BYTES,
+            connect: Vec::new(),
         }
     }
 }
@@ -408,6 +411,7 @@ impl IbdConfig {
             peers: None,
             dialer: rbitcoin_net::socks::Dialer::Direct,
             assign_stop_bytes: rbitcoin_query::BQ_ASSIGN_STOP_BYTES,
+            connect: Vec::new(),
         }
     }
 }
@@ -579,6 +583,7 @@ pub async fn ibd_cancellable(
             cfg.dialer.clone(),
             &hub.clock,
             perms.clone(),
+            &cfg.connect,
         )
         .await;
         apply_dial_result(
@@ -995,6 +1000,7 @@ pub async fn ibd_cancellable(
                     &mut st.addr_strikes,
                     now,
                     cfg.stall,
+                    &hub.clock,
                 ));
                 freed.extend(disconnect_relative_slow_block_peers(
                     &mut st.slots,
@@ -1125,10 +1131,11 @@ pub async fn ibd_cancellable(
                 let dialer_c = cfg.dialer.clone();
                 let clock_c = Arc::clone(&hub.clock);
                 let perms_c = st.perms.clone();
+                let connect_c = cfg.connect.clone();
                 redial_handle = Some(tokio::spawn(async move {
                     dial_batch(
                         &book, want, already, &occupied, magic, local_addr, tip_h, sinks_r, cto,
-                        cancel_c, dialer_c, &clock_c, perms_c,
+                        cancel_c, dialer_c, &clock_c, perms_c, &connect_c,
                     )
                     .await
                 }));

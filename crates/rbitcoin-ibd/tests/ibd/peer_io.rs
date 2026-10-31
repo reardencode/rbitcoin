@@ -43,6 +43,9 @@ fn dummy_slot(id: usize) -> PeerSlot {
         bytes_rx_total: Arc::new(AtomicU64::new(0)),
         rate: Default::default(),
         chain: Default::default(),
+        conn_type: rbitcoin_net::peers::PeerConnType::OutboundFullRelay,
+        block_download_paused_until: None,
+        late_answers: Default::default(),
         alive: true,
         task,
     }
@@ -119,8 +122,12 @@ fn track_retain_judges_each_hash_once() {
     assert_eq!(calls, 2, "one judgment per in-flight hash");
     assert!(slot.in_flight.contains(&keep_hash));
     assert!(!slot.in_flight.contains(&drop_hash));
+    assert!(
+        slot.late_answers.contains_key(&drop_hash),
+        "a withdrawn getdata is still owed an answer"
+    );
     let requested = slot.requested.lock().unwrap().clone();
-    assert_eq!(requested, slot.in_flight);
+    assert_eq!(requested, HashSet::from([keep_hash, drop_hash]));
 }
 
 #[test]

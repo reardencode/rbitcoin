@@ -710,6 +710,41 @@ impl HandshakePolicy<'static> {
             conn_type: crate::peers::PeerConnType::OutboundFullRelay,
         }
     }
+
+    /// Core's private broadcast handshake: one constant VERSION
+    /// (`private_broadcast_version`), no WTXIDRELAY or SENDADDRV2, and a peer
+    /// whose own VERSION has relay off is dropped before VERACK.
+    pub(crate) fn private_broadcast() -> Self {
+        Self {
+            conn_type: crate::peers::PeerConnType::PrivateBroadcast,
+            ..Self::plain()
+        }
+    }
+}
+
+/// Core's user agent on a private broadcast connection (#29415).
+pub(crate) const PRIVATE_BROADCAST_USER_AGENT: &str = "/pynode:0.0.1/";
+
+/// Core `PushNodeVersion` on a private broadcast connection. Every such
+/// connection sends these bytes, the nonce aside, so they say nothing about us.
+/// Both addresses are Core's `CService{}` (16 zero bytes, port 0).
+fn private_broadcast_version(nonce: u64) -> VersionMessage {
+    let unset = Address {
+        services: ServiceFlags::NONE,
+        address: [0; 8],
+        port: 0,
+    };
+    VersionMessage {
+        version: OUR_PROTOCOL_VERSION.max(PROTOCOL_VERSION),
+        services: ServiceFlags::NONE,
+        timestamp: 0,
+        receiver: unset.clone(),
+        sender: unset,
+        nonce,
+        user_agent: PRIVATE_BROADCAST_USER_AGENT.to_string(),
+        start_height: 0,
+        relay: false,
+    }
 }
 
 /// Outbound BIP324 session. [`Self::outbound_regtest`] completes VERSION/VERACK;
@@ -1106,23 +1141,28 @@ pub async fn application_handshake(
     user_agent: &str,
     policy: HandshakePolicy<'_>,
 ) -> Result<VersionMessage, NetError> {
-    let pruned = policy.peers.map(|p| p.is_pruned()).unwrap_or(false);
-    let services = local_service_flags(pruned, policy.peers);
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let private = policy.conn_type == crate::peers::PeerConnType::PrivateBroadcast;
     let our_nonce = rand_nonce();
-    let version = VersionMessage {
-        version: OUR_PROTOCOL_VERSION.max(PROTOCOL_VERSION),
-        services,
-        timestamp: now,
-        receiver: Address::new(&their_addr, ServiceFlags::NONE),
-        sender: hidden_addr_from(),
-        nonce: our_nonce,
-        user_agent: user_agent.to_string(),
-        start_height,
-        relay: true,
+    let version = if private {
+        private_broadcast_version(our_nonce)
+    } else {
+        let pruned = policy.peers.map(|p| p.is_pruned()).unwrap_or(false);
+        let services = local_service_flags(pruned, policy.peers);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        VersionMessage {
+            version: OUR_PROTOCOL_VERSION.max(PROTOCOL_VERSION),
+            services,
+            timestamp: now,
+            receiver: Address::new(&their_addr, ServiceFlags::NONE),
+            sender: hidden_addr_from(),
+            nonce: our_nonce,
+            user_agent: user_agent.to_string(),
+            start_height,
+            relay: true,
+        }
     };
 
     struct OutboundNonceGuard<'a> {
@@ -1163,6 +1203,8 @@ pub async fn application_handshake(
             }
         }
         write_v2_msg(writer, NetworkMessage::Version(version)).await?;
+    } else if private && !their_version.relay {
+        return Err(NetError::Protocol("peer does not relay transactions"));
     } else if expect_services_from_conn(policy.conn_type) {
         if let Some(hub) = policy.hub {
             let depth = approximate_best_block_depth(hub);
@@ -1181,7 +1223,7 @@ pub async fn application_handshake(
     }
 
     // BIP339 / BIP155 feature negotiation starts at 70016 (`p2p_leak` pre-wtxid).
-    if their_version.version >= 70016 {
+    if !private && their_version.version >= 70016 {
         write_v2_msg(writer, NetworkMessage::WtxidRelay).await?;
         write_v2_msg(writer, NetworkMessage::SendAddrV2).await?;
     }
@@ -5167,7 +5209,10 @@ pub async fn on_tx(
             if trusted {
                 mp.set_trusted_session(from);
             }
-            match mp.accept_tx_from_async(tx.clone(), from).await {
+            match mp
+                .accept_tx_from_async(tx.clone(), crate::tx_relay::TxOrigin::Relay(from))
+                .await
+            {
                 Ok(r) => {
                     mp.resolve_tx_request(&txid, &wtxid, true);
                     if let Some(s) = session {

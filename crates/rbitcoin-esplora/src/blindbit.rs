@@ -528,18 +528,18 @@ pub async fn forward_tx(
         Err(_) => return error(StatusCode::BAD_REQUEST, "invalid tx"),
     };
     // The spawned task keeps the BlindBit permit until the admit finishes,
-    // including when this handler is dropped. The store-read permit is taken
-    // only around prepare and commit, not across script verify.
+    // including when this handler is dropped. Local origin is marked under
+    // the admit write. The store-read permit covers prepare and commit only.
     let budget = st.query.api_read_budget();
     let handle = tokio::spawn(async move {
         let _permit = permit;
-        match rbitcoin_net::with_store_budget(budget, mp.accept_tx_async(tx)).await {
-            Ok(r) => {
-                let tid = r.txid;
-                let marked = mp.clone();
-                rbitcoin_net::off_pool(move || marked.mark_local_origin(tid)).await;
-                json_reply_here(block_hash_hex(&tid.to_byte_array()))
-            }
+        match rbitcoin_net::with_store_budget(
+            budget,
+            mp.accept_tx_from_async(tx, rbitcoin_net::TxOrigin::Local),
+        )
+        .await
+        {
+            Ok(r) => json_reply_here(block_hash_hex(&r.txid.to_byte_array())),
             Err(e) => error(StatusCode::BAD_REQUEST, &e.to_string()),
         }
     });

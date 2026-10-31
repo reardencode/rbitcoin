@@ -1270,6 +1270,22 @@ fn a_queued_feeler_does_not_hold_off_a_manual_dial() {
     drop(feeler);
 }
 
+/// A private-broadcast type would run the bland VERSION and then a full
+/// peer session, so `addconnection` refuses it like `Inbound`.
+#[test]
+fn addconnection_refuses_types_it_cannot_open() {
+    let hub = PeerHub::new();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    hub.set_dialer(tx);
+    let ip = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18448);
+    for typ in [PeerConnType::Inbound, PeerConnType::PrivateBroadcast] {
+        let err = hub.addconnection(ip, typ).unwrap_err();
+        assert!(err.contains(typ.as_str()), "{typ:?}: {err}");
+    }
+    let got = take_dials(&mut rx);
+    assert!(got.is_empty(), "a refused type was dialed: {got:?}");
+}
+
 #[tokio::test]
 async fn slow_redial_resolve_does_not_stall_runtime() {
     let hub = PeerHub::new();

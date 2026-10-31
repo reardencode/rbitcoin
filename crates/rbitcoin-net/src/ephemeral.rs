@@ -1,12 +1,14 @@
 //! One-shot isolated SOCKS broadcast of locally submitted transactions.
 
 use crate::error::NetError;
-use crate::peer::{connect_and_handshake_timed, HandshakePolicy, HANDSHAKE_TIMEOUT};
+use crate::peer::{
+    connect_and_handshake_timed, HandshakePolicy, HANDSHAKE_TIMEOUT, PRIVATE_BROADCAST_USER_AGENT,
+};
 use crate::seeds::AddrMan;
 use crate::socks::Dialer;
 use crate::tx_relay::MempoolHub;
 use crate::v2::write_v2_msg;
-use crate::NetAddr;
+use crate::{NetAddr, OnlyNet};
 use bitcoin::p2p::message::NetworkMessage;
 use bitcoin::p2p::Magic;
 use bitcoin::Transaction;
@@ -17,23 +19,39 @@ use tokio::task::JoinHandle;
 
 pub const ISOLATED_BROADCAST_PEERS: usize = 2;
 
-pub fn isolated_broadcast_targets(am: &AddrMan, max: usize) -> Vec<NetAddr> {
-    let mut onions = Vec::new();
-    let mut ips = Vec::new();
-    for e in am.entries() {
-        match e.addr {
-            NetAddr::Onion { .. } => onions.push(e.addr),
-            NetAddr::Ip(_) => ips.push(e.addr),
-            NetAddr::I2p { .. } => {}
-            NetAddr::Cjdns { .. } => {}
+/// Core `PrivateBroadcast::PickNetwork` then `AddrMan::Select`, once per target:
+/// draw a network uniformly among those with a row left that `dialer` reaches
+/// privately (onion; IPv4/IPv6 only through `--proxy`), then a row uniformly
+/// within it. So one tx's targets say nothing about another's. `draw(n)` is
+/// an index below `n`.
+pub fn isolated_broadcast_targets(
+    am: &AddrMan,
+    dialer: &Dialer,
+    max: usize,
+    mut draw: impl FnMut(usize) -> usize,
+) -> Vec<NetAddr> {
+    let mut out: Vec<NetAddr> = Vec::with_capacity(max);
+    for _ in 0..max {
+        let left = || {
+            am.order
+                .iter()
+                .copied()
+                .filter(|a| dialer.proxy_for(OnlyNet::of(*a)).is_some() && !out.contains(a))
+        };
+        let mut nets: Vec<(OnlyNet, usize)> = Vec::new();
+        for a in left() {
+            let net = OnlyNet::of(a);
+            match nets.iter_mut().find(|(n, _)| *n == net) {
+                Some((_, rows)) => *rows += 1,
+                None => nets.push((net, 1)),
+            }
         }
-    }
-    let mut out = Vec::new();
-    for a in onions.into_iter().chain(ips) {
-        if out.len() >= max {
+        if nets.is_empty() {
             break;
         }
-        out.push(a);
+        let (net, rows) = nets[draw(nets.len())];
+        let pick = left().filter(|a| OnlyNet::of(*a) == net).nth(draw(rows));
+        out.extend(pick);
     }
     out
 }
@@ -43,9 +61,8 @@ pub async fn send_tx_isolated(
     target: NetAddr,
     magic: Magic,
     tx: Transaction,
-    user_agent: &str,
 ) -> Result<(), NetError> {
-    send_tx_isolated_timed(dialer, target, magic, tx, user_agent, HANDSHAKE_TIMEOUT).await
+    send_tx_isolated_timed(dialer, target, magic, tx, HANDSHAKE_TIMEOUT).await
 }
 
 pub async fn send_tx_isolated_timed(
@@ -53,7 +70,6 @@ pub async fn send_tx_isolated_timed(
     target: NetAddr,
     magic: Magic,
     tx: Transaction,
-    user_agent: &str,
     limit: Duration,
 ) -> Result<(), NetError> {
     let stream = dialer.connect_isolated_net(target).await?;
@@ -71,8 +87,8 @@ pub async fn send_tx_isolated_timed(
         their,
         0,
         false,
-        user_agent,
-        HandshakePolicy::plain(),
+        PRIVATE_BROADCAST_USER_AGENT,
+        HandshakePolicy::private_broadcast(),
     )
     .await?;
     write_v2_msg(&mut writer, NetworkMessage::Tx(tx)).await?;
@@ -87,17 +103,20 @@ pub async fn isolated_broadcast_known_tx(
     dialer: &Dialer,
     addrman: &Mutex<AddrMan>,
     magic: Magic,
-    user_agent: &str,
     txid: bitcoin::Txid,
     tx: Transaction,
     in_pool: impl Fn() -> bool,
 ) {
     let targets = {
         let am = addrman.lock().unwrap_or_else(|e| e.into_inner());
-        isolated_broadcast_targets(&am, ISOLATED_BROADCAST_PEERS)
+        isolated_broadcast_targets(&am, dialer, ISOLATED_BROADCAST_PEERS, |n| {
+            (crate::peer::rand_nonce() % n as u64) as usize
+        })
     };
     if targets.is_empty() {
-        rbitcoin_log::warn!("isolated broadcast {txid}: no AddrMan targets");
+        rbitcoin_log::warn!(
+            "isolated broadcast {txid}: no AddrMan peer reachable through the proxy"
+        );
         return;
     }
     for t in targets {
@@ -105,7 +124,7 @@ pub async fn isolated_broadcast_known_tx(
             rbitcoin_log::info!("isolated broadcast {txid}: left the mempool, not sent to {t}");
             return;
         }
-        match send_tx_isolated(dialer, t, magic, tx.clone(), user_agent).await {
+        match send_tx_isolated(dialer, t, magic, tx.clone()).await {
             Ok(()) => rbitcoin_log::info!("isolated broadcast {txid} to {t}: sent"),
             Err(e) => rbitcoin_log::warn!("isolated broadcast {txid} to {t}: {e}"),
         }
@@ -117,7 +136,6 @@ pub fn spawn_isolated_broadcast_loop(
     dialer: Dialer,
     addrman: Arc<Mutex<AddrMan>>,
     magic: Magic,
-    user_agent: String,
 ) -> JoinHandle<()> {
     if !mp.isolated_broadcast() {
         return tokio::spawn(async {});
@@ -153,8 +171,7 @@ pub fn spawn_isolated_broadcast_loop(
             // `unindex_txid` drops the local-origin entry on every removal,
             // and this check never waits on the mempool lock.
             let in_pool = || mp.is_local_origin(&txid);
-            isolated_broadcast_known_tx(&dialer, &addrman, magic, &user_agent, txid, tx, in_pool)
-                .await;
+            isolated_broadcast_known_tx(&dialer, &addrman, magic, txid, tx, in_pool).await;
         }
     })
 }

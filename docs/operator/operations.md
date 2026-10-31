@@ -167,11 +167,17 @@ on) uses a fresh SOCKS username per peer so Tor isolates circuits.
 `sendrawtransaction`, Electrum `transaction.broadcast`, and Esplora
 `POST /tx` (and packages) are not INV'd on standing peers. After mempool
 accept the node opens a short-lived SOCKS circuit (fresh isolation
-credentials), BIP324-handshakes one or two AddrMan peers (onion first),
-sends `tx`, and disconnects. An IPv4/IPv6 peer is only reached through
-`--proxy`, never directly: with `--onion` alone, only onion peers get the
-tx. CJDNS peers are never used. This is **not** Dandelion++. If that
-one-shot fails, the tx stays in the mempool and is still not INV'd;
+credentials), BIP324-handshakes one or two AddrMan peers, sends `tx`, and
+disconnects. Each transaction draws its own peers, as Core's private
+broadcast does: a network at random, then a peer in it at random, so two
+of your transactions do not share recipients by rule. An IPv4/IPv6 peer is
+only reached through `--proxy`, never directly: with `--onion` alone, only
+onion peers get the tx. I2P and CJDNS peers are never used. That
+handshake sends Bitcoin Core's private-broadcast VERSION, the same from
+every sender: no service bits, time 0, no addresses, user agent
+`/pynode:0.0.1/`, height 0, and relay off. It sends no `wtxidrelay` or
+`sendaddrv2`, and it skips a peer whose own VERSION has relay off. This
+is **not** Dandelion++. If that one-shot fails, the tx stays in the mempool and is still not INV'd;
 confirmation can still arrive in a block.
 `--onion HOST:PORT` stores a separate SOCKS endpoint for onion destinations.
 `--only-net onion` (repeatable with `ipv4`/`ipv6`/`i2p`/`cjdns`) filters dial and learn;
@@ -366,6 +372,16 @@ queues can drain for tip+1); 64 only for an EWMA outlier at ≥ 2× pack median.
 NotFound after the last getdata write. Time with an empty window, and time
 a new getdata spends queued before that write, does not count. A later
 getdata write starts a new 30s even when older hashes are still outstanding.
+A `--connect` (or `--trust-peer`) peer that stalls is not disconnected, as in
+Core. When another connected peer could fetch its blocks, INFO `ibd: Pausing
+block downloads from stalling manual peer=… for 120 seconds` hands its block
+getdata to the other peers, and it is sent none for two minutes on the node
+clock. With no such peer (a sole `--connect` or `--trust-peer`, or every
+other peer paused), it keeps its getdata and is not paused; the check runs
+again after another 30s. When no peer is left taking block requests (the
+others disconnected or are paused), every paused peer resumes at once with
+INFO `ibd: Resuming block downloads from manual peer=…: no other peer takes
+block requests`. Either way it stays connected and still serves headers.
 WARN
 `ibd: peer[…] relative-slow` is a quarter-median outlier (cluster gate keeps a
 uniformly slow pack). Every IBD disconnect (stall, relative-slow, a second

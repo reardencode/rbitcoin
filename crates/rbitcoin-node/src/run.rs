@@ -742,7 +742,6 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             config.listen.isolated_dialer(),
             std::sync::Arc::clone(&shared_peers),
             node.magic(),
-            node.user_agent().to_string(),
         );
     }
     if proxy_seeds_queued && addrman.is_empty() {
@@ -2078,6 +2077,7 @@ pub async fn run_ibd_or_skip(
         peers: ibd_shared_peers(node.hub.query.trust_peer(), shared_peers),
         dialer: node.dialer(),
         assign_stop_bytes,
+        connect: pinned.to_vec(),
         ..IbdConfig::default()
     };
     info!(
