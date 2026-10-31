@@ -2887,21 +2887,26 @@ impl MempoolHub {
         )
     }
 
-    /// [`Self::abandon_package`] whose re-admit awaits scripts. The coin read
-    /// takes a store permit and drops it before those scripts.
+    /// [`Self::abandon_package`] whose re-admit awaits scripts. Restoring a
+    /// replaced conflict and reparking a lifted member each take a store
+    /// permit only around their coin reads.
     async fn abandon_package_async(
         self: &Arc<Self>,
         accepted: Vec<AcceptResult>,
         lifted: Vec<rbitcoin_mempool::LiftedOrphan>,
     ) {
         let hub = Arc::clone(self);
-        let ready = crate::reactor::off_pool_budgeted(move || {
-            if !accepted.is_empty() {
-                hub.rollback_package_accepted(&accepted);
+        let victims = crate::reactor::off_pool(move || {
+            if accepted.is_empty() {
+                Vec::new()
+            } else {
+                hub.unlink_package_accepted(&accepted)
             }
-            hub.lifted_ready(&lifted)
         })
         .await;
+        self.restore_replaced_async(victims).await;
+        let hub = Arc::clone(self);
+        let ready = crate::reactor::off_pool_budgeted(move || hub.lifted_ready(&lifted)).await;
         for item in ready {
             let id = item.tx.compute_txid();
             let from = item
@@ -2919,8 +2924,9 @@ impl MempoolHub {
         }
     }
 
-    #[doc(hidden)]
-    pub fn rollback_package_accepted(&self, accepted: &[AcceptResult]) {
+    /// Drop the package members and return the conflicts they replaced.
+    /// Does not put those conflicts back.
+    fn unlink_package_accepted(&self, accepted: &[AcceptResult]) -> Vec<Transaction> {
         let victims: Vec<Transaction> = accepted
             .iter()
             .flat_map(|r| r.replaced_txs.iter().cloned())
@@ -2939,6 +2945,12 @@ impl MempoolHub {
             }
         }
         self.unindex_evicted(&gone);
+        victims
+    }
+
+    #[doc(hidden)]
+    pub fn rollback_package_accepted(&self, accepted: &[AcceptResult]) {
+        let victims = self.unlink_package_accepted(accepted);
         self.restore_replaced(&victims);
     }
 
@@ -3616,6 +3628,49 @@ impl MempoolHub {
         .expect("1p1c admit")
     }
 
+    /// Index a committed 1p1c pair, or put its conflicts back when trim drops one.
+    async fn publish_1p1c(
+        self: &Arc<Self>,
+        parent: Transaction,
+        child: Transaction,
+        parent_res: AcceptResult,
+        child_res: AcceptResult,
+        prevouts_p: Vec<TxOut>,
+        prevouts_c: Vec<TxOut>,
+    ) -> Option<AcceptResult> {
+        let hub = Arc::clone(self);
+        let parent_id = parent_res.txid;
+        let child_id = child_res.txid;
+        let parent_pub_res = parent_res.clone();
+        let child_pub_res = child_res.clone();
+        let trimmed = crate::reactor::off_pool(move || {
+            hub.trim_over_budget();
+            if !hub.try_contains(&parent_id) || !hub.try_contains(&child_id) {
+                return true;
+            }
+            hub.publish_indexed(&parent, &parent_pub_res, &prevouts_p);
+            hub.publish_indexed(&child, &child_pub_res, &prevouts_c);
+            let _ = hub.expire_stale();
+            hub.publish_fee_floor();
+            false
+        })
+        .await;
+        if trimmed {
+            let hub = Arc::clone(self);
+            let victims = crate::reactor::off_pool(move || {
+                hub.unlink_package_accepted(&[parent_res, child_res])
+            })
+            .await;
+            self.restore_replaced_async(victims).await;
+            let hub = Arc::clone(self);
+            crate::reactor::off_pool(move || hub.publish_fee_floor()).await;
+            return None;
+        }
+        self.promote_orphans_async(parent_id).await;
+        self.promote_orphans_async(child_id).await;
+        Some(child_res)
+    }
+
     async fn admit_1p1c_work(
         self: &Arc<Self>,
         child: &Transaction,
@@ -3725,29 +3780,11 @@ impl MempoolHub {
         crate::reactor::off_pool(move || hub.meter_accept_stages(lock_us, stages)).await;
         match child_commit.result {
             Ok(r) => {
-                let hub = Arc::clone(self);
                 let parent_pub = parent;
                 let child_pub = child.clone();
-                let parent_res_c = parent_res;
                 let prevouts_c = child_commit.prevouts;
-                let published = crate::reactor::off_pool(move || {
-                    hub.trim_over_budget();
-                    if !hub.try_contains(&parent_res_c.txid) || !hub.try_contains(&r.txid) {
-                        hub.rollback_package_accepted(&[parent_res_c, r]);
-                        hub.publish_fee_floor();
-                        return None;
-                    }
-                    hub.publish_indexed(&parent_pub, &parent_res_c, &prevouts_p);
-                    hub.publish_indexed(&child_pub, &r, &prevouts_c);
-                    let _ = hub.expire_stale();
-                    hub.publish_fee_floor();
-                    Some((r, parent_res_c.txid))
-                })
-                .await;
-                let (r, parent_id) = published?;
-                self.promote_orphans_async(parent_id).await;
-                self.promote_orphans_async(r.txid).await;
-                Some(r)
+                self.publish_1p1c(parent_pub, child_pub, parent_res, r, prevouts_p, prevouts_c)
+                    .await
             }
             Err(_) => {
                 let hub = Arc::clone(self);
@@ -4498,25 +4535,59 @@ impl MempoolHub {
             return 0;
         }
         let utxo = self.utxo_provider();
-        let n = {
-            let mut g = self.lock_write();
-            let bps = g.graph.bytes_per_sigop();
-            for tid in txids {
-                if let Some(e) = g.graph.get(tid) {
-                    // Core `CBlockPolicyEstimator` records fee over the
-                    // sigop-adjusted size, like the chunk frontier.
-                    let rate = rbitcoin_consensus::policy::fee_rate_sat_per_kvb(
-                        e.fee_sat,
-                        e.adjusted_weight(bps),
-                    );
-                    self.push_confirm_memory(rate);
-                }
-            }
-            g.remove_live_txids(txids).unwrap_or(0)
-        };
+        let n = self.unlink_block_txids(txids);
         for tid in txids {
             self.promote_orphans_staged(*tid, &utxo);
         }
+        self.finish_block_removal(txids, n);
+        n
+    }
+
+    /// [`Self::remove_for_block`] for an armed task. Orphan promotion takes a
+    /// store permit per coin read and drops it before script verify.
+    pub async fn remove_for_block_async(self: &Arc<Self>, txids: Vec<Txid>) -> usize {
+        let hub = Arc::clone(self);
+        let ids = txids.clone();
+        let n = crate::reactor::off_pool(move || {
+            if !hub.pool_maintained() {
+                hub.drop_mined_fee_deltas(&ids);
+                None
+            } else {
+                Some(hub.unlink_block_txids(&ids))
+            }
+        })
+        .await;
+        let Some(n) = n else {
+            return 0;
+        };
+        for tid in &txids {
+            self.promote_orphans_async(*tid).await;
+        }
+        let hub = Arc::clone(self);
+        crate::reactor::off_pool(move || hub.finish_block_removal(&txids, n)).await;
+        n
+    }
+
+    /// Pull mined txids out of the live set. Does not promote or unindex.
+    fn unlink_block_txids(&self, txids: &[Txid]) -> usize {
+        let mut g = self.lock_write();
+        let bps = g.graph.bytes_per_sigop();
+        for tid in txids {
+            if let Some(e) = g.graph.get(tid) {
+                // Core `CBlockPolicyEstimator` records fee over the
+                // sigop-adjusted size, like the chunk frontier.
+                let rate = rbitcoin_consensus::policy::fee_rate_sat_per_kvb(
+                    e.fee_sat,
+                    e.adjusted_weight(bps),
+                );
+                self.push_confirm_memory(rate);
+            }
+        }
+        g.remove_live_txids(txids).unwrap_or(0)
+    }
+
+    /// Drop orphans the block spent, then the relay rows and fee deltas.
+    fn finish_block_removal(&self, txids: &[Txid], n: usize) {
         {
             let mut g = self.lock_write();
             g.erase_orphans_for_block(txids);
@@ -4525,7 +4596,6 @@ impl MempoolHub {
             self.unindex_evicted(txids);
         }
         self.drop_mined_fee_deltas(txids);
-        n
     }
 
     /// Remove confirmed txids, then evict mempool txs that spend `spent`

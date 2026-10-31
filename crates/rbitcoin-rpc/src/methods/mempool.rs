@@ -1483,11 +1483,7 @@ async fn testmempoolaccept_package_rows_work(
         }
     }
     if !added.is_empty() {
-        let mp_r = Arc::clone(mp);
-        super::off_pool(move || {
-            mp_r.remove_for_block(&added);
-        })
-        .await;
+        mp.remove_for_block_async(added).await;
     }
     json!(out)
 }

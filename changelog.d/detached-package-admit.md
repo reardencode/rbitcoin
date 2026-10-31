@@ -1,5 +1,5 @@
 Fixed
 
 - **A dropped package or test-accept request still rolls the mempool back.** Package accept, a one-parent-one-child admit, `submitpackage`, and a multi-tx `testmempoolaccept` finish abandon, parent rollback, the final trim, and removal of the test inserts after the caller is gone. That task keeps the caller's store-read budget. The coin re-read after script verify takes a permit again.
-- **Orphan promotion does not hold that permit across script checks.** After an async admit commits, each promoted orphan, each package member put back after a failed package, and each replaced conflict put back takes a permit only for its coin read. The sync admit path still walks orphans on the caller.
+- **Orphan promotion does not hold that permit across script checks.** After an async admit commits, each promoted orphan, each package member put back after a failed package, and each replaced conflict put back takes a permit only for its coin read. Removing the transactions a multi-tx `testmempoolaccept` inserted promotes the same way. The sync admit path still walks orphans on the caller.
 - **A queued decode does not pause the next TCP read or trip the ping timeout.** Bytes already on the socket, including a ping or a pong, are read while earlier frames wait for a decode permit. The ping timeout stays suspended until that queue is empty.
