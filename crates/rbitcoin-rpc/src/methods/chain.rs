@@ -1497,12 +1497,18 @@ pub fn wait_for_tip(
         let (hash, height) = tip_hash_height(ctx)?;
         return Ok(json!({ "hash": hash, "height": height }));
     }
-    super::block_on_rpc_wait(ctx, timeout_ms, || {
-        ctx.stop.load(Ordering::SeqCst)
-            || tip_hash_height(ctx)
-                .ok()
-                .is_some_and(|(hash, height)| pred(&hash, height))
+    // Keep the error from the poll that failed. A later read must not replace it.
+    let failed = std::cell::RefCell::new(None);
+    super::block_on_rpc_wait(ctx, timeout_ms, || match tip_hash_height(ctx) {
+        Ok((hash, height)) => ctx.stop.load(Ordering::SeqCst) || pred(&hash, height),
+        Err(err) => {
+            *failed.borrow_mut() = Some(err);
+            true
+        }
     });
+    if let Some(err) = failed.into_inner() {
+        return Err(err);
+    }
     let (hash, height) = tip_hash_height(ctx)?;
     Ok(json!({ "hash": hash, "height": height }))
 }
