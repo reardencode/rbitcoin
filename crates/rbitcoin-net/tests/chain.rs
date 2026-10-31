@@ -4935,7 +4935,7 @@ fn reconsider_skips_a_branch_that_fails() {
         let _ = hub.accept_received_block(b);
     }
     assert_eq!(hub.tip_hash(), Some(a[3]));
-    let _ = hub.invalidate_block(a[1]);
+    hub.invalidate_block(a[1]).unwrap();
     assert_eq!(hub.tip_hash(), Some(a[0]));
     hub.reconsider_block(a[1]).unwrap();
     assert_eq!(hub.tip_hash(), Some(a[3]));
@@ -5015,6 +5015,80 @@ fn reconsider_skips_a_branch_that_fails() {
     let err = hub.reconsider_block(tip).unwrap_err();
     assert!(err.is_local_fault(), "{err}");
     assert!(hub.fork_tips.read().unwrap().iter().any(|h| h == tip));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Core `ActivateBestChainStep` after `invalidateblock`: a fork block that
+/// fails connect is marked invalid with its descendants, the next fork is
+/// tried, and the call succeeds (#1258).
+#[test]
+fn invalidate_skips_a_fork_that_fails() {
+    fn bad_coinbase(prev: BlockHash, time: u32, height: u32) -> Block {
+        let mut b = mine(prev, time, height);
+        let cb = &mut b.txdata[0].output[0].value;
+        *cb = Amount::from_sat(cb.to_sat() + 1);
+        b.header.merkle_root = b.compute_merkle_root().unwrap();
+        rbitcoin_consensus::grind_regtest_pow(&mut b.header);
+        b
+    }
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    let t0 = hub.tip_header().unwrap().time;
+    let mut a = vec![hub.tip_hash().unwrap()];
+    for h in 1..=3u32 {
+        let b = mine(a[a.len() - 1], t0 + h, h);
+        a.push(b.block_hash());
+        hub.accept_block(b).unwrap();
+    }
+    // From a1: bad2 <- c3, the most work once a2 is invalid, and v2.
+    let bad2 = bad_coinbase(a[1], t0 + 10, 2);
+    let bad2_hash = bad2.block_hash();
+    let c3 = mine(bad2_hash, t0 + 11, 3);
+    let c3_hash = c3.block_hash();
+    let v2 = mine_distinct(a[1], t0 + 12, 2, &[a[2], bad2_hash]);
+    let v2_hash = v2.block_hash();
+    for b in [bad2, c3, v2] {
+        let _ = hub.accept_received_block(b);
+    }
+    assert_eq!(hub.tip_hash(), Some(a[3]));
+    let status = |h: BlockHash| {
+        hub.chaintips()
+            .into_iter()
+            .find(|t| t.hash == h)
+            .map(|t| t.status)
+    };
+
+    hub.invalidate_block(a[2]).unwrap();
+    assert_eq!(hub.tip_hash(), Some(v2_hash));
+    assert!(hub.is_block_invalid(&bad2_hash));
+    assert_eq!(status(c3_hash), Some("invalid"));
+    assert_eq!(status(bad2_hash), None, "c3 builds on it");
+    assert_eq!(status(a[3]), Some("invalid"));
+
+    // From v2: w3 <- w4 <- w5 active, and p3 <- p4 <- bad5 held at equal
+    // work. With w4 invalid, p3 and p4 connect and outweigh w3, so they
+    // stay the tip when bad5 fails.
+    let mut w = vec![v2_hash];
+    for h in 3..=5u32 {
+        let b = mine(w[w.len() - 1], t0 + 20 + h, h);
+        w.push(b.block_hash());
+        hub.accept_block(b).unwrap();
+    }
+    let p3 = mine_distinct(v2_hash, t0 + 30, 3, &[w[1]]);
+    let p4 = mine(p3.block_hash(), t0 + 31, 4);
+    let p4_hash = p4.block_hash();
+    let bad5 = bad_coinbase(p4_hash, t0 + 32, 5);
+    let bad5_hash = bad5.block_hash();
+    for b in [p3, p4, bad5] {
+        let _ = hub.accept_received_block(b);
+    }
+    assert_eq!(hub.tip_hash(), Some(w[3]));
+
+    hub.invalidate_block(w[2]).unwrap();
+    assert_eq!(hub.tip_hash(), Some(p4_hash));
+    assert!(hub.is_block_invalid(&bad5_hash));
+    assert_eq!(status(bad5_hash), Some("invalid"));
+    assert_eq!(status(w[1]), Some("valid-fork"));
     let _ = std::fs::remove_dir_all(dir);
 }
 
