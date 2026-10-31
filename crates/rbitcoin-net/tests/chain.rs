@@ -5779,3 +5779,71 @@ fn async_generate_commits_mined_txids_off_the_request_task() {
     assert_eq!(hashes.len(), 1);
     assert!(!mp.contains(&txid), "the mined tx is still in the pool");
 }
+
+/// Dropping the request after the block is accepted still removes the mined
+/// tx. Maintenance is off, so only `commit_generated_txids` can do that, and
+/// that commit shares the generate task rather than the request.
+#[test]
+fn dropped_generate_still_commits_mined_txids() {
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    hub.generate_to_script(101, ScriptBuf::from_bytes(vec![0x51]), vec![])
+        .unwrap();
+    let mp =
+        rbitcoin_net::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
+    assert!(!mp.pool_maintained());
+    let hub = ChainHub::into_arc(hub);
+    assert!(hub.attach_mempool(Arc::clone(&mp)).is_ok());
+    let tx = mature_spend_tx(&hub, 1);
+    let txid = tx.compute_txid();
+    mp.accept_tx(&tx).expect("admit");
+    let before = hub.tip_height().unwrap();
+    hub.pause_before_generate_commit
+        .store(true, Ordering::Release);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let hub_gen = Arc::clone(&hub);
+    rt.block_on(async move {
+        let job = tokio::spawn(async move {
+            hub_gen
+                .generate_to_script_for_rpc_async(
+                    1,
+                    ScriptBuf::from_bytes(vec![0x51]),
+                    vec![tx],
+                    false,
+                )
+                .await
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while hub.tip_height() == Some(before)
+            || !hub.generate_commit_parked.load(Ordering::Acquire)
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "generate did not park after accept"
+            );
+            tokio::task::yield_now().await;
+        }
+        assert!(mp.contains(&txid), "commit ran before the drop");
+        job.abort();
+        let _ = job.await;
+        assert!(mp.contains(&txid), "abort removed the mined tx");
+        assert!(
+            hub.generate_commit_parked.load(Ordering::Acquire),
+            "abort cancelled the generate task"
+        );
+        hub.pause_before_generate_commit
+            .store(false, Ordering::Release);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while mp.contains(&txid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "dropped generate left the mined tx in the pool"
+            );
+            tokio::task::yield_now().await;
+        }
+    });
+}

@@ -652,15 +652,21 @@ pub struct ChainHub {
     pub confirmed: Arc<RwLock<HashSet<BlockHash>>>,
     /// Serializes tip connect / reorg so multi-peer accept cannot double Class A+C.
     pub connect_lock: std::sync::Mutex<()>,
-    /// Serializes regtest generate so concurrent generateblock cannot race one tip.
-    /// Serializes one block's tip read, mine, and accept. Async generate holds
-    /// this across `.await`, so it is a Tokio mutex. Sync generate uses
-    /// `blocking_lock` off the reactor.
+    /// Serializes one `generate` call, every block in the loop. Async generate
+    /// holds it across `.await`. Sync generate uses `blocking_lock` only when
+    /// the thread has no runtime handle; otherwise it spins on `try_lock`.
     pub generate_lock: tokio::sync::Mutex<()>,
     /// Tests stop one `generate` before this 0-based block index. `0` mines
     /// the whole call. Production never sets it.
     #[doc(hidden)]
     pub generate_fail_before: AtomicU32,
+    /// Test latch. Async generate parks after accept and before
+    /// `commit_generated_txids` while this is set. Production leaves it clear.
+    #[doc(hidden)]
+    pub pause_before_generate_commit: AtomicBool,
+    /// Set while async generate is parked on [`Self::pause_before_generate_commit`].
+    #[doc(hidden)]
+    pub generate_commit_parked: AtomicBool,
     /// Optional cluster mempool (tip-mode tx relay + confirm remove).
     ///
     /// Attached once via [`Self::attach_mempool`] after the hub is in an `Arc`.
@@ -803,6 +809,8 @@ impl ChainHub {
             connect_lock: std::sync::Mutex::new(()),
             generate_lock: tokio::sync::Mutex::new(()),
             generate_fail_before: AtomicU32::new(0),
+            pause_before_generate_commit: AtomicBool::new(false),
+            generate_commit_parked: AtomicBool::new(false),
             mempool: std::sync::OnceLock::new(),
             self_weak: std::sync::OnceLock::new(),
             clock: rbitcoin_consensus::NodeClock::new(),
@@ -2502,49 +2510,72 @@ impl ChainHub {
                 "nblocks too large (max {limit})"
             )));
         }
-        if self.tip_height().is_none() {
-            let hub = std::sync::Arc::clone(self);
-            crate::tip_accept::run_on_tip_accept_async(move || hub.ensure_genesis_inner()).await?;
-        }
-        let _guard = self.generate_lock.lock().await;
-        let mut hashes = Vec::with_capacity(nblocks as usize);
-        let mut extras = extra_txs;
-        for i in 0..nblocks {
-            let stop = self.generate_fail_before.load(Ordering::Relaxed);
-            if stop > 0 && i == stop {
-                return Err(NetError::Consensus(
-                    "generate lost the tip during proof-of-work".into(),
-                ));
+        // Accept and the blocksonly pool removal share this task. Dropping
+        // the request must not leave a connected block's txs in the pool.
+        let hub = std::sync::Arc::clone(self);
+        crate::reactor::spawn_with_store_budget(async move {
+            if hub.tip_height().is_none() {
+                let hub_g = std::sync::Arc::clone(&hub);
+                crate::tip_accept::run_on_tip_accept_async(move || hub_g.ensure_genesis_inner())
+                    .await?;
             }
-            let txs = if i == 0 {
-                std::mem::take(&mut extras)
-            } else {
-                Vec::new()
-            };
-            let ids = commit_on_accept.then(|| {
-                txs.iter()
-                    .map(|tx| tx.compute_txid())
-                    .collect::<Vec<Txid>>()
-            });
-            if record_assembly {
-                let weight = txs.iter().map(|tx| tx.weight().to_wu()).sum();
-                self.note_block_assembled(weight, txs.len());
-            }
-            hashes.push(
-                self.mine_and_accept_paying_async(&script_pubkey, txs)
-                    .await?,
-            );
-            if let Some(ids) = ids.filter(|ids| !ids.is_empty()) {
-                if let Some(mp) = self.mempool().cloned() {
-                    crate::reactor::off_pool(move || mp.commit_generated_txids(&ids))
-                        .await
-                        .map_err(|e| NetError::Consensus(e.to_string()))?;
+            let _guard = hub.generate_lock.lock().await;
+            let mut hashes = Vec::with_capacity(nblocks as usize);
+            let mut extras = extra_txs;
+            for i in 0..nblocks {
+                let stop = hub.generate_fail_before.load(Ordering::Relaxed);
+                if stop > 0 && i == stop {
+                    return Err(NetError::Consensus(
+                        "generate lost the tip during proof-of-work".into(),
+                    ));
+                }
+                let txs = if i == 0 {
+                    std::mem::take(&mut extras)
+                } else {
+                    Vec::new()
+                };
+                let ids = commit_on_accept.then(|| {
+                    txs.iter()
+                        .map(|tx| tx.compute_txid())
+                        .collect::<Vec<Txid>>()
+                });
+                if record_assembly {
+                    let weight = txs.iter().map(|tx| tx.weight().to_wu()).sum();
+                    hub.note_block_assembled(weight, txs.len());
+                }
+                hashes.push(
+                    hub.mine_and_accept_paying_async(&script_pubkey, txs)
+                        .await?,
+                );
+                if let Some(ids) = ids.filter(|ids| !ids.is_empty()) {
+                    Self::park_before_generate_commit(&hub).await;
+                    if let Some(mp) = hub.mempool().cloned() {
+                        crate::reactor::off_pool(move || mp.commit_generated_txids(&ids))
+                            .await
+                            .map_err(|e| NetError::Consensus(e.to_string()))?;
+                    }
                 }
             }
+            let hub_d = std::sync::Arc::clone(&hub);
+            crate::reactor::off_pool(move || hub_d.drain_generate_indexes()).await;
+            Ok(hashes)
+        })
+        .await
+        .expect("generate")
+    }
+
+    /// Test latch between accept and `commit_generated_txids`. Clear in
+    /// production, so this returns without yielding. The wait is on the
+    /// generate task: aborting the request does not cancel it.
+    async fn park_before_generate_commit(hub: &ChainHub) {
+        if !hub.pause_before_generate_commit.load(Ordering::Acquire) {
+            return;
         }
-        let hub = std::sync::Arc::clone(self);
-        crate::reactor::off_pool(move || hub.drain_generate_indexes()).await;
-        Ok(hashes)
+        hub.generate_commit_parked.store(true, Ordering::Release);
+        while hub.pause_before_generate_commit.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+        hub.generate_commit_parked.store(false, Ordering::Release);
     }
 
     /// Sync generate runs on stack hubs, `dispatch()` tests, and some
