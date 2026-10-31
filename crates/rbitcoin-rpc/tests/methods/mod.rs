@@ -6169,6 +6169,7 @@ fn http_request_task_methods_mine_and_accept_a_package() {
             parsed["result"].clone()
         }
     };
+    let starved_ctx = std::sync::Arc::clone(&ctx);
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -6187,6 +6188,129 @@ fn http_request_task_methods_mine_and_accept_a_package() {
             assert!(
                 block["hex"].as_str().is_some_and(|h| h.len() > 20),
                 "{block}"
+            );
+            // A template is not a request-task method. HTTP still runs it on
+            // the async executor so the build can sample the tip before the
+            // store permit.
+            let tmpl = call("getblocktemplate", json!([{"rules": ["segwit"]}])).await;
+            assert!(tmpl.get("height").is_some(), "{tmpl}");
+            assert!(tmpl.get("bits").is_some(), "{tmpl}");
+            let raw = |body: serde_json::Value| {
+                let state = state();
+                async move {
+                    let response = rbitcoin_rpc::server::rpc_post(
+                        axum::extract::State(state),
+                        axum::extract::Request::new(axum::body::Body::from(body.to_string())),
+                    )
+                    .await;
+                    let status = response.status();
+                    let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
+                        .await
+                        .expect("body");
+                    (status, bytes)
+                }
+            };
+            let (status, bytes) = raw(json!({
+                "jsonrpc": "2.0",
+                "method": "generatetoaddress",
+                "params": [0, addr],
+            }))
+            .await;
+            assert_eq!(status, axum::http::StatusCode::NO_CONTENT, "{bytes:?}");
+            let (status, bytes) = raw(json!({
+                "jsonrpc": "1.0",
+                "id": 1,
+                "method": "generateblock",
+                "params": "nope",
+            }))
+            .await;
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(
+                text.contains("params must be array or object"),
+                "{status} {text}"
+            );
+            let (status, bytes) = raw(json!({
+                "jsonrpc": 2,
+                "id": 1,
+                "method": "generate",
+                "params": [1],
+            }))
+            .await;
+            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{bytes:?}");
+            let (status, bytes) = raw(json!([
+                {"jsonrpc":"1.0","id":1,"method":"generatetoaddress","params":[1, addr]},
+                {"jsonrpc":2,"id":2,"method":"generate","params":[1]},
+                {"jsonrpc":"1.0","id":3,"method":"getblockcount","params":[]},
+            ]))
+            .await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{bytes:?}");
+            let batch: serde_json::Value = serde_json::from_slice(&bytes).expect("batch");
+            assert!(batch[1]["error"].is_object(), "{batch}");
+            assert!(batch[0]["result"].is_array(), "{batch}");
+            assert!(batch[2]["result"].is_number(), "{batch}");
+            let (status, bytes) = raw(json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "generatetoaddress",
+                "params": [0, addr],
+            }))
+            .await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{bytes:?}");
+            let v2: serde_json::Value = serde_json::from_slice(&bytes).expect("v2");
+            assert_eq!(v2["result"], json!([]), "{v2}");
+            let (status, bytes) = raw(json!({
+                "jsonrpc": "2.0",
+                "id": 8,
+                "method": "generatetoaddress",
+                "params": [1, "not-an-address"],
+            }))
+            .await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{bytes:?}");
+            let v2_err: serde_json::Value = serde_json::from_slice(&bytes).expect("v2 err");
+            assert!(v2_err["error"].is_object(), "{v2_err}");
+            let (status, bytes) = raw(json!({
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "generate",
+                "params": "nope",
+            }))
+            .await;
+            let v2_params = String::from_utf8_lossy(&bytes);
+            assert_eq!(status, axum::http::StatusCode::OK, "{v2_params}");
+            assert!(
+                v2_params.contains("params must be array or object"),
+                "{v2_params}"
+            );
+            let (status, bytes) = raw(json!([
+                {"jsonrpc":"2.0","method":"generatetoaddress","params":[0, addr]},
+            ]))
+            .await;
+            assert_eq!(status, axum::http::StatusCode::NO_CONTENT, "{bytes:?}");
+            let starved = rbitcoin_rpc::server::AppState {
+                ctx: starved_ctx,
+                auth: rbitcoin_rpc::RpcAuth::new("test-token"),
+                cookie: None,
+                work_queue: std::sync::Arc::new(tokio::sync::Semaphore::new(0)),
+                rest_queue: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+                rest: false,
+                require_auth: false,
+            };
+            let response = rbitcoin_rpc::server::rpc_post(
+                axum::extract::State(starved),
+                axum::extract::Request::new(axum::body::Body::from(
+                    json!({
+                        "jsonrpc": "1.0",
+                        "id": 1,
+                        "method": "generate",
+                        "params": [0],
+                    })
+                    .to_string(),
+                )),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                axum::http::StatusCode::SERVICE_UNAVAILABLE
             );
         });
     assert!(

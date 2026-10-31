@@ -983,72 +983,10 @@ async fn exec_http_rpc_async(
     work_queue: &Arc<tokio::sync::Semaphore>,
 ) -> Result<HttpRpcOut, ()> {
     if let Some(arr) = parsed.as_array() {
-        let mut hold = None;
-        let mut out = Vec::new();
-        let mut ran = false;
-        for (i, req) in arr.iter().enumerate() {
-            let prep = match prepare_ordered_call(&ctx, req, &mut hold, work_queue).await {
-                Ok(prep) => prep,
-                Err(()) if !ran => return Err(()),
-                Err(()) => {
-                    for rest in &arr[i..] {
-                        if let Some(body) = work_queue_exceeded_reply(rest) {
-                            out.push(body);
-                        }
-                    }
-                    if out.is_empty() {
-                        return Ok(HttpRpcOut::Empty(StatusCode::NO_CONTENT));
-                    }
-                    return Ok(HttpRpcOut::Json(
-                        StatusCode::OK,
-                        serde_json::Value::Array(out),
-                    ));
-                }
-            };
-            match exec_one_async(&ctx, req, prep.satisfied, prep.snap).await {
-                OneOut::Reply(body) => out.push(body),
-                OneOut::Notification => {}
-                OneOut::BadVersion { error } => {
-                    out.push(reply_v1(
-                        Some(req.get("id").cloned().unwrap_or(serde_json::Value::Null)),
-                        None,
-                        Some(error),
-                    ));
-                }
-            }
-            ran = true;
-        }
-        if out.is_empty() && !arr.is_empty() {
-            return Ok(HttpRpcOut::Empty(StatusCode::NO_CONTENT));
-        }
-        return Ok(HttpRpcOut::Json(
-            StatusCode::OK,
-            serde_json::Value::Array(out),
-        ));
+        return exec_http_batch_async(ctx, arr, work_queue).await;
     }
     if parsed.is_object() {
-        let mut hold = None;
-        let prep = prepare_ordered_call(&ctx, &parsed, &mut hold, work_queue).await?;
-        return Ok(
-            match exec_one_async(&ctx, &parsed, prep.satisfied, prep.snap).await {
-                OneOut::Reply(body) => {
-                    let ver = parse_jsonrpc_ver(&parsed).unwrap_or(JsonRpcVer::V1);
-                    let status = if ver == JsonRpcVer::V2 {
-                        StatusCode::OK
-                    } else if let Some(err) = body.get("error").filter(|e| !e.is_null()) {
-                        v1_http_status(err)
-                    } else {
-                        StatusCode::OK
-                    };
-                    HttpRpcOut::Json(status, body)
-                }
-                OneOut::Notification => HttpRpcOut::Empty(StatusCode::NO_CONTENT),
-                OneOut::BadVersion { error } => HttpRpcOut::Json(
-                    StatusCode::BAD_REQUEST,
-                    reply_v1(parsed.get("id").cloned(), None, Some(error)),
-                ),
-            },
-        );
+        return exec_http_object_async(ctx, parsed, work_queue).await;
     }
     Ok(HttpRpcOut::Json(
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -1060,6 +998,126 @@ async fn exec_http_rpc_async(
     ))
 }
 
+async fn exec_http_batch_async(
+    ctx: Arc<RpcContext>,
+    arr: &[serde_json::Value],
+    work_queue: &Arc<tokio::sync::Semaphore>,
+) -> Result<HttpRpcOut, ()> {
+    let mut hold = None;
+    let mut out = Vec::new();
+    let mut ran = false;
+    for (i, req) in arr.iter().enumerate() {
+        let prep = match prepare_ordered_call(&ctx, req, &mut hold, work_queue).await {
+            Ok(prep) => prep,
+            Err(()) if !ran => return Err(()),
+            Err(()) => {
+                for rest in &arr[i..] {
+                    if let Some(body) = work_queue_exceeded_reply(rest) {
+                        out.push(body);
+                    }
+                }
+                if out.is_empty() {
+                    return Ok(HttpRpcOut::Empty(StatusCode::NO_CONTENT));
+                }
+                return Ok(HttpRpcOut::Json(
+                    StatusCode::OK,
+                    serde_json::Value::Array(out),
+                ));
+            }
+        };
+        match exec_one_async(&ctx, req, prep.satisfied, prep.snap).await {
+            OneOut::Reply(body) => out.push(body),
+            OneOut::Notification => {}
+            OneOut::BadVersion { error } => {
+                out.push(reply_v1(
+                    Some(req.get("id").cloned().unwrap_or(serde_json::Value::Null)),
+                    None,
+                    Some(error),
+                ));
+            }
+        }
+        ran = true;
+    }
+    if out.is_empty() && !arr.is_empty() {
+        return Ok(HttpRpcOut::Empty(StatusCode::NO_CONTENT));
+    }
+    Ok(HttpRpcOut::Json(
+        StatusCode::OK,
+        serde_json::Value::Array(out),
+    ))
+}
+
+async fn exec_http_object_async(
+    ctx: Arc<RpcContext>,
+    parsed: serde_json::Value,
+    work_queue: &Arc<tokio::sync::Semaphore>,
+) -> Result<HttpRpcOut, ()> {
+    let mut hold = None;
+    let prep = prepare_ordered_call(&ctx, &parsed, &mut hold, work_queue).await?;
+    Ok(
+        match exec_one_async(&ctx, &parsed, prep.satisfied, prep.snap).await {
+            OneOut::Reply(body) => {
+                let ver = parse_jsonrpc_ver(&parsed).unwrap_or(JsonRpcVer::V1);
+                let status = if ver == JsonRpcVer::V2 {
+                    StatusCode::OK
+                } else if let Some(err) = body.get("error").filter(|e| !e.is_null()) {
+                    v1_http_status(err)
+                } else {
+                    StatusCode::OK
+                };
+                HttpRpcOut::Json(status, body)
+            }
+            OneOut::Notification => HttpRpcOut::Empty(StatusCode::NO_CONTENT),
+            OneOut::BadVersion { error } => HttpRpcOut::Json(
+                StatusCode::BAD_REQUEST,
+                reply_v1(parsed.get("id").cloned(), None, Some(error)),
+            ),
+        },
+    )
+}
+
+async fn exec_blocking_method(
+    ctx: &Arc<RpcContext>,
+    req: &serde_json::Value,
+    method: &str,
+    waited: bool,
+    snap: Option<(String, u32)>,
+) -> OneOut {
+    let id = req.get("id").cloned();
+    let req = req.clone();
+    let ctx = Arc::clone(ctx);
+    // Sample before the permit. The build then uses the sample, so the
+    // permit covers header and mempool reads and not the connect mutex.
+    let template_prev = if method == "getblocktemplate" {
+        Some(sample_template_prev(&ctx).await)
+    } else {
+        None
+    };
+    let store_permit = rbitcoin_net::acquire_armed_store_budget().await;
+    match tokio::task::spawn_blocking(move || {
+        let _g = BlockingRegion::enter();
+        let _store = store_permit;
+        let _prev = template_prev.map(rbitcoin_net::arm_template_prev_sample);
+        if waited {
+            crate::methods::set_http_wait_satisfied(true);
+            crate::methods::set_http_wait_snap(snap);
+        }
+        let out = exec_one(&ctx, &req);
+        crate::methods::set_http_wait_satisfied(false);
+        crate::methods::set_http_wait_snap(None);
+        out
+    })
+    .await
+    {
+        Ok(out) => out,
+        Err(e) => OneOut::Reply(reply_v1(
+            id,
+            None,
+            Some(serde_json::json!({ "code": -1, "message": format!("rpc join: {e}") })),
+        )),
+    }
+}
+
 async fn exec_one_async(
     ctx: &Arc<RpcContext>,
     req: &serde_json::Value,
@@ -1068,39 +1126,7 @@ async fn exec_one_async(
 ) -> OneOut {
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
     if !crate::methods::request_task_method(method) {
-        let id = req.get("id").cloned();
-        let req = req.clone();
-        let ctx = Arc::clone(ctx);
-        // Sample before the permit. The build then uses the sample, so the
-        // permit covers header and mempool reads and not the connect mutex.
-        let template_prev = if method == "getblocktemplate" {
-            Some(sample_template_prev(&ctx).await)
-        } else {
-            None
-        };
-        let store_permit = rbitcoin_net::acquire_armed_store_budget().await;
-        return match tokio::task::spawn_blocking(move || {
-            let _g = BlockingRegion::enter();
-            let _store = store_permit;
-            let _prev = template_prev.map(rbitcoin_net::arm_template_prev_sample);
-            if waited {
-                crate::methods::set_http_wait_satisfied(true);
-                crate::methods::set_http_wait_snap(snap);
-            }
-            let out = exec_one(&ctx, &req);
-            crate::methods::set_http_wait_satisfied(false);
-            crate::methods::set_http_wait_snap(None);
-            out
-        })
-        .await
-        {
-            Ok(out) => out,
-            Err(e) => OneOut::Reply(reply_v1(
-                id,
-                None,
-                Some(serde_json::json!({ "code": -1, "message": format!("rpc join: {e}") })),
-            )),
-        };
+        return exec_blocking_method(ctx, req, method, waited, snap).await;
     }
     let ver = match parse_jsonrpc_ver(req) {
         Ok(v) => v,

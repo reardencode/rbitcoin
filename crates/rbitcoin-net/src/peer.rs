@@ -1771,15 +1771,19 @@ pub fn on_inv_flush(
     }
 }
 
-pub async fn peer_session_with(
-    mut reader: V2Reader,
+struct OpenedPeerWriter {
+    peer_s: String,
+    out_tx: mpsc::UnboundedSender<PeerOut>,
+    writer_task: tokio::task::JoinHandle<()>,
+}
+
+/// Handshake bytes and the writer task. The read loop starts only after this
+/// returns, so a pong can land before the first inbound frame is applied.
+async fn open_peer_writer(
     mut writer: V2Writer,
-    magic: Magic,
-    hub: Arc<ChainHub>,
-    mut tip_rx: broadcast::Receiver<crate::chain::TipEvent>,
-    meta: FollowSessionMeta,
-) -> Result<(), NetError> {
-    let _live_dec = LiveFollowDec(meta.live.clone());
+    hub: &ChainHub,
+    meta: &FollowSessionMeta,
+) -> OpenedPeerWriter {
     let peer_s = meta
         .peer
         .map(|p| p.to_string())
@@ -1805,7 +1809,7 @@ pub async fn peer_session_with(
     if let Some(n) = keepalive {
         let _ = write_v2_msg(&mut writer, NetworkMessage::Ping(n)).await;
     }
-    if let Some(fee_sat) = outbound_feefilter_sats(&hub, meta.session.as_deref()) {
+    if let Some(fee_sat) = outbound_feefilter_sats(hub, meta.session.as_deref()) {
         if write_v2_msg(&mut writer, NetworkMessage::FeeFilter(fee_sat))
             .await
             .is_ok()
@@ -1819,21 +1823,42 @@ pub async fn peer_session_with(
     let (out_tx, out_rx) = mpsc::unbounded_channel::<PeerOut>();
     if let Some(s) = meta.session.as_ref() {
         s.attach_out(out_tx.clone());
-        let _ = maybe_queue_local_addr(hub.as_ref(), s, &out_tx);
+        let _ = maybe_queue_local_addr(hub, s, &out_tx);
     }
 
     let writer_session = meta.session.clone();
-    let mut writer_task = tokio::spawn(run_writer_task(writer, out_rx, writer_session));
+    let writer_task = tokio::spawn(run_writer_task(writer, out_rx, writer_session));
     if let Some(s) = meta.session.as_ref() {
         s.set_writer_abort(writer_task.abort_handle());
     }
 
     if let Some(s) = meta.session.as_ref() {
         let _ = maybe_queue_addrfetch_getaddr(&out_tx, s);
-        let _ = maybe_queue_initial_getheaders(&out_tx, hub.as_ref(), s);
-    } else if let Err(e) = queue_getheaders(&out_tx, hub.as_ref(), None, true, None) {
+        let _ = maybe_queue_initial_getheaders(&out_tx, hub, s);
+    } else if let Err(e) = queue_getheaders(&out_tx, hub, None, true, None) {
         rbitcoin_log::warn!("p2p: {peer_s} initial getheaders queue failed: {e}");
     }
+
+    OpenedPeerWriter {
+        peer_s,
+        out_tx,
+        writer_task,
+    }
+}
+
+pub async fn peer_session_with(
+    mut reader: V2Reader,
+    writer: V2Writer,
+    magic: Magic,
+    hub: Arc<ChainHub>,
+    mut tip_rx: broadcast::Receiver<crate::chain::TipEvent>,
+    meta: FollowSessionMeta,
+) -> Result<(), NetError> {
+    let _live_dec = LiveFollowDec(meta.live.clone());
+    let opened = open_peer_writer(writer, hub.as_ref(), &meta).await;
+    let peer_s = opened.peer_s;
+    let out_tx = opened.out_tx;
+    let mut writer_task = opened.writer_task;
 
     let mut owned_follow = SessionFollow {
         hub: hub.clone(),
@@ -1904,67 +1929,20 @@ pub async fn peer_session_with(
                     std::pin::Pin::new(rx).poll(cx)
                 }), if !decode_q.is_empty() => {
                     decode_q.pop_front();
-                    let decoded = match decoded {
-                        Ok(r) => r,
-                        Err(_) => {
-                            let _ = apply_queued_decodes(
-                                &mut decode_q,
-                                hub.as_ref(),
-                                &out_tx,
-                                follow,
-                                session.as_deref(),
-                                &mut requested_since,
-                                &peer_s,
-                            )
-                            .await;
-                            return Err(NetError::Protocol("decode task dropped"));
-                        }
+                    let mut slot = ReadyDecode {
+                        queue: &mut decode_q,
+                        requested_since: &mut requested_since,
+                        peer: &peer_s,
                     };
-                    let n_req = follow.requested_blocks.len();
-                    let applied = apply_decoded_peer_msg(
+                    apply_ready_decode(
                         decoded,
+                        &mut slot,
                         hub.as_ref(),
                         &out_tx,
                         follow,
                         session.as_deref(),
                     )
-                    .await;
-                    let n_after = follow.requested_blocks.len();
-                    if n_after == 0 {
-                        requested_since = None;
-                    } else if n_after < n_req || n_req == 0 {
-                        requested_since = Some(std::time::Instant::now());
-                    }
-                    if let Err(e) = applied {
-                        let _ = apply_queued_decodes(
-                            &mut decode_q,
-                            hub.as_ref(),
-                            &out_tx,
-                            follow,
-                            session.as_deref(),
-                            &mut requested_since,
-                            &peer_s,
-                        )
-                        .await;
-                        return Err(e);
-                    }
-                    if misbehavior_disconnects(follow.ban_score, session.as_deref()) {
-                        rbitcoin_log::warn!(
-                            "{}",
-                            misbehavior_disconnect_log(&peer_s, follow.ban_score)
-                        );
-                        let _ = apply_queued_decodes(
-                            &mut decode_q,
-                            hub.as_ref(),
-                            &out_tx,
-                            follow,
-                            session.as_deref(),
-                            &mut requested_since,
-                            &peer_s,
-                        )
-                        .await;
-                        return Err(threshold_disconnect(session.as_deref()));
-                    }
+                    .await?;
                 }
                 writer_done = &mut writer_task => {
                     let _ = writer_done;
@@ -3136,6 +3114,88 @@ pub fn serve_mempool_getdata(
     Ok(false)
 }
 
+fn note_block_request_window(
+    follow: &PeerFollowState,
+    n_req: usize,
+    requested_since: &mut Option<std::time::Instant>,
+) {
+    let n_after = follow.requested_blocks.len();
+    if n_after == 0 {
+        *requested_since = None;
+    } else if n_after < n_req || n_req == 0 {
+        *requested_since = Some(std::time::Instant::now());
+    }
+}
+
+struct ReadyDecode<'a> {
+    queue: &'a mut VecDeque<tokio::sync::oneshot::Receiver<Result<RawNetworkMessage, NetError>>>,
+    requested_since: &'a mut Option<std::time::Instant>,
+    peer: &'a str,
+}
+
+/// Apply one frame that already left the socket. A dropped decode task or a
+/// failed apply still drains frames behind it, so `SessionFollow` does not
+/// forget their getdata.
+async fn apply_ready_decode(
+    decoded: Result<Result<RawNetworkMessage, NetError>, tokio::sync::oneshot::error::RecvError>,
+    slot: &mut ReadyDecode<'_>,
+    hub: &ChainHub,
+    out_tx: &mpsc::UnboundedSender<PeerOut>,
+    follow: &mut PeerFollowState,
+    session: Option<&crate::peers::LivePeer>,
+) -> Result<(), NetError> {
+    let decoded = match decoded {
+        Ok(r) => r,
+        Err(_) => {
+            let _ = apply_queued_decodes(
+                slot.queue,
+                hub,
+                out_tx,
+                follow,
+                session,
+                slot.requested_since,
+                slot.peer,
+            )
+            .await;
+            return Err(NetError::Protocol("decode task dropped"));
+        }
+    };
+    let n_req = follow.requested_blocks.len();
+    let applied = apply_decoded_peer_msg(decoded, hub, out_tx, follow, session).await;
+    note_block_request_window(follow, n_req, slot.requested_since);
+    if let Err(e) = applied {
+        let _ = apply_queued_decodes(
+            slot.queue,
+            hub,
+            out_tx,
+            follow,
+            session,
+            slot.requested_since,
+            slot.peer,
+        )
+        .await;
+        return Err(e);
+    }
+    if misbehavior_disconnects(follow.ban_score, session) {
+        rbitcoin_log::warn!(
+            "{}",
+            misbehavior_disconnect_log(slot.peer, follow.ban_score)
+        );
+        let _ = apply_queued_decodes(
+            slot.queue,
+            hub,
+            out_tx,
+            follow,
+            session,
+            slot.requested_since,
+            slot.peer,
+        )
+        .await;
+        return Err(threshold_disconnect(session));
+    }
+    Ok(())
+}
+
 /// Apply frames already taken off the socket, in order, before a later read
 /// error tears the session down. `SessionFollow`'s drop would otherwise
 /// forget getdata for a block that is still sitting in `decode_q`.
@@ -3165,12 +3225,7 @@ async fn apply_queued_decodes(
                 first_err = Some(e);
             }
         }
-        let n_after = follow.requested_blocks.len();
-        if n_after == 0 {
-            *requested_since = None;
-        } else if n_after < n_req || n_req == 0 {
-            *requested_since = Some(std::time::Instant::now());
-        }
+        note_block_request_window(follow, n_req, requested_since);
         if misbehavior_disconnects(follow.ban_score, session) && first_err.is_none() {
             rbitcoin_log::warn!("{}", misbehavior_disconnect_log(peer_s, follow.ban_score));
             first_err = Some(threshold_disconnect(session));
