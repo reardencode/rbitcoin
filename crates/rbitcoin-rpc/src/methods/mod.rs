@@ -5,7 +5,7 @@ use rbitcoin_net::MempoolHub;
 use rbitcoin_primitives::Network;
 use rbitcoin_query::Query;
 use serde_json::{json, Value};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -20,6 +20,7 @@ pub use mine::{gbt_template, submit_received_block};
 pub use rest::{dispatch_rest, RestReply};
 thread_local! {
     static HTTP_WAIT_SATISFIED: Cell<bool> = const { Cell::new(false) };
+    static RPC_WAIT_PARK: RefCell<Option<Arc<AtomicU64>>> = const { RefCell::new(None) };
 }
 
 /// The HTTP task already waited. The blocking dispatch must not sleep again.
@@ -29,6 +30,22 @@ pub fn set_http_wait_satisfied(v: bool) {
 
 pub fn http_wait_satisfied() -> bool {
     HTTP_WAIT_SATISFIED.with(|c| c.get())
+}
+
+/// Tests wait on this counter instead of a settle sleep. The note runs on
+/// the waiter thread, after a poll found the wait is not done and before
+/// `RpcWake::next` parks.
+#[doc(hidden)]
+pub fn set_rpc_wait_park_note(note: Option<Arc<AtomicU64>>) {
+    RPC_WAIT_PARK.with(|c| *c.borrow_mut() = note);
+}
+
+fn note_rpc_wait_park() {
+    RPC_WAIT_PARK.with(|c| {
+        if let Some(note) = c.borrow().as_ref() {
+            note.fetch_add(1, Ordering::SeqCst);
+        }
+    });
 }
 
 /// Tip, stop, and template subscriptions for one long-poll.
@@ -90,6 +107,7 @@ pub fn block_on_rpc_wait(ctx: &RpcContext, timeout_ms: u64, ready: impl Fn() -> 
             {
                 return;
             }
+            note_rpc_wait_park();
             wake.next(deadline).await;
         }
     });
@@ -677,7 +695,9 @@ pub fn dispatch_inner(ctx: &RpcContext, method: &str, params: RpcParams) -> Resu
             };
             Ok(getpeerinfo(ctx, hub))
         }
-        // Journey wait. Left off METHOD_LIST so `help` stays the operator catalog.
+        // Journey wait. Debug builds only, and left off METHOD_LIST, so a
+        // release node answers -32601 like Core.
+        #[cfg(debug_assertions)]
         "outboundpass" => {
             params.reject_unknown(&[])?;
             Ok(outbound_pass(ctx))
