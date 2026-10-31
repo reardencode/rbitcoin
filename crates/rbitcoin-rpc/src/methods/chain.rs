@@ -1497,7 +1497,10 @@ pub fn wait_for_tip(
     pred: impl Fn(&str, u32) -> bool,
 ) -> Result<Value, Value> {
     if super::http_wait_satisfied() {
-        let (hash, height) = tip_hash_height(ctx)?;
+        let (hash, height) = match super::take_http_wait_snap() {
+            Some(snap) => snap,
+            None => tip_hash_height(ctx)?,
+        };
         return Ok(json!({ "hash": hash, "height": height }));
     }
     let deadline = Instant::now() + std::time::Duration::from_millis(timeout_ms);
@@ -1546,6 +1549,19 @@ pub fn invalidateblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Va
     Ok(Value::Null)
 }
 
+pub async fn invalidateblock_async(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
+    params.reject_unknown(&["blockhash"])?;
+    let hub = ctx
+        .chain
+        .clone()
+        .ok_or_else(|| rpc_error(ERR_MISC, "chain hub not attached"))?;
+    let hash = parse_blockhash_param(params)?;
+    hub.invalidate_block_async(hash)
+        .await
+        .map_err(block_missing_or_misc)?;
+    Ok(Value::Null)
+}
+
 pub fn submitheader(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["hexdata"])?;
     let hub = require_chain(ctx)?;
@@ -1578,10 +1594,36 @@ pub fn reconsiderblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Va
     Ok(Value::Null)
 }
 
+pub async fn reconsiderblock_async(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
+    params.reject_unknown(&["blockhash"])?;
+    let hub = ctx
+        .chain
+        .clone()
+        .ok_or_else(|| rpc_error(ERR_MISC, "chain hub not attached"))?;
+    let hash = parse_blockhash_param(params)?;
+    hub.reconsider_block_async(hash)
+        .await
+        .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?;
+    Ok(Value::Null)
+}
+
 pub fn preciousblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["blockhash"])?;
     let hub = require_chain(ctx)?;
     let hash = parse_blockhash_param(params)?;
     hub.precious_block(hash).map_err(block_missing_or_misc)?;
+    Ok(Value::Null)
+}
+
+pub async fn preciousblock_async(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
+    params.reject_unknown(&["blockhash"])?;
+    let hub = ctx
+        .chain
+        .clone()
+        .ok_or_else(|| rpc_error(ERR_MISC, "chain hub not attached"))?;
+    let hash = parse_blockhash_param(params)?;
+    hub.precious_block_async(hash)
+        .await
+        .map_err(block_missing_or_misc)?;
     Ok(Value::Null)
 }

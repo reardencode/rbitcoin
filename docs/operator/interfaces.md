@@ -110,7 +110,7 @@ slot, and the wait counts against the request timeout (**408** when it runs out)
 | Max scripthash subs / conn | 10000 (`--electrum-max-subs`) | Notify fan-out cap. A wallet subscribes every address up to its gap limit; each sub is ~170 B (≈0.45 GB worst case at 256 connections) plus one posting check per block against that block's shared touch set; a reorg restatuses every sub |
 | Max broadcast hex | ~8 MiB | `transaction.broadcast` hex length |
 | Max batch items | 345 | Requests in one JSON-RPC batch line; more is one `-32600`. The reply is written one slot at a time, so a slow reader holds back the server, not RAM |
-| Batch reads at once | half the blocking pool, at least 1 (2 at 4 threads) | Read-only batch items in flight per connection (blocking threads and unwritten replies). The pool is `max(cores, 4)` threads and also runs block decode, compact reconstruct, header jobs and mempool accept, so one batch leaves them the other half |
+| Batch reads at once | half the blocking pool, at least 1 (2 at 4 threads) | Read-only batch items in flight per connection (tasks and unwritten replies). Node-wide disk slots are `--store-read-budget`, not half the pool. One batch no longer keeps half the pool by occupying it. The tasks wait asynchronously when the budget is taken |
 | Heavy SH joins at once | 1 (`--heavy-sh-creates`, default 10000) | Node-wide: an unpaged Electrum/Esplora join above N creates waits for any other such join, from any connection or batch. Lighter joins stay parallel. **0** turns it off |
 
 Edge rate-limits, auth, and TLS cipher policy stay on the proxy. See
@@ -307,8 +307,10 @@ still on an older job after fee pushes can submit its solution; templates
 on a replaced tip retire after `--sv2-tp-stale-grace`. The templates share
 the mempool's transaction bodies, so each costs little until its
 transactions leave the mempool. A request for a template id no longer kept
-answers `stale-template-id`. Each check after a mempool change is one
-template build per session. An undecodable
+answers `stale-template-id`. Each check after a mempool change builds
+once for that previous-block hash, coinbase budget, and template-update
+counter. Another session with the same key waits and reuses that build. A
+different coinbase budget builds again. An undecodable
 `SubmitSolution` or one
 that misses the template target is logged and dropped. A `header_timestamp`
 outside the sv2 rolling window (a miner clock running ahead) is logged and

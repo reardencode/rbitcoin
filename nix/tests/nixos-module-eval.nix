@@ -72,6 +72,7 @@ let
           health.enable = true;
           metrics = true;
           heavyShCreates = 20000;
+          storeReadBudget = 8;
           sv2.tp = {
             enable = true;
             port = 18447;
@@ -272,6 +273,7 @@ assert defaultCfg.tor.controlCookie == null;
 assert defaultCfg.electrum.hiddenService == false;
 assert defaultCfg.electrum.maxSubs == null;
 assert defaultCfg.heavyShCreates == null;
+assert defaultCfg.storeReadBudget == null;
 assert defaultCfg.esplora.hiddenService == false;
 assert defaultCfg.esplora.maxInflight == null;
 assert defaultCfg.i2p.sam == null;
@@ -380,6 +382,10 @@ assert builtins.match ".*--electrum-max-subs.*" listenOffExec == null;
 assert builtins.match ".*--heavy-sh-creates 20000.*" execStart != null;
 assert builtins.match ".*--heavy-sh-creates 0.*" listenOffExec != null;
 assert builtins.match ".*--heavy-sh-creates.*" (
+  defaultSystem.config.systemd.services.rbitcoin.serviceConfig.ExecStart
+) == null;
+assert builtins.match ".*--store-read-budget 8.*" execStart != null;
+assert builtins.match ".*--store-read-budget.*" (
   defaultSystem.config.systemd.services.rbitcoin.serviceConfig.ExecStart
 ) == null;
 assert builtins.match ".*--esplora-listen 127.0.0.1:3000.*" execStart != null;

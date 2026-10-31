@@ -544,9 +544,9 @@ where
                         // region has to be entered there.
                         let q = Arc::clone(&query);
                         let hub = Arc::clone(mp);
-                        let statuses = tokio::task::spawn_blocking(move || {
-                            let _g = BlockingRegion::enter();
-                            settled_restatus_notes(&q, Some(&hub), &touched, None)
+                        let q_read = Arc::clone(&q);
+                        let statuses = budgeted_blocking(&q, move || {
+                            settled_restatus_notes(&q_read, Some(&hub), &touched, None)
                         })
                         .await
                         .unwrap_or_else(|e| {
@@ -655,7 +655,7 @@ where
 }
 
 /// Smallest blocking pool the node builds (`max(cores, 4)` threads).
-pub const MIN_BLOCKING_POOL: usize = 4;
+pub use rbitcoin_net::MIN_BLOCKING_POOL;
 
 /// Read-only batch items one connection may have in flight for a blocking
 /// pool of `blocking_pool` threads: half of it, at least one. Each item holds
@@ -1007,6 +1007,18 @@ fn dispatch_join_error(e: tokio::task::JoinError) -> std::io::Error {
     std::io::Error::other(format!("electrum dispatch join: {e}"))
 }
 
+/// Store reads that also change connection state. They stay serial in a
+/// batch, and they still take the shared disk budget.
+fn method_reads_store(method: &str) -> bool {
+    method_reads_only(method)
+        || matches!(
+            method,
+            "blockchain.headers.subscribe"
+                | "blockchain.scripthash.subscribe"
+                | "blockchain.outpoint.subscribe"
+        )
+}
+
 fn spawn_dispatch(
     ctx: &RequestCtx<'_>,
     work: ElectrumConn,
@@ -1018,13 +1030,51 @@ fn spawn_dispatch(
     let mp = ctx.mempool.clone();
     let method = asked.method.clone();
     let params = asked.params.clone();
-    tokio::task::spawn_blocking(move || {
-        let _g = BlockingRegion::enter();
-        let t0 = Instant::now();
-        let (r, work, view) =
-            dispatch_off_worker(&q, &cfg, &p, mp.as_deref(), &method, &params, work);
-        (r, work, view, t0.elapsed())
+    let reads = method_reads_store(&method);
+    // The permit wait stays on this task. The blocking pool is taken only
+    // after a slot is free, so a budget of 1 serializes the reads.
+    tokio::spawn(async move {
+        let permit = if reads {
+            Some(
+                q.api_read_budget()
+                    .acquire_owned()
+                    .await
+                    .expect("store budget"),
+            )
+        } else {
+            None
+        };
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let _g = BlockingRegion::enter();
+            let t0 = Instant::now();
+            let (r, work, view) =
+                dispatch_off_worker(&q, &cfg, &p, mp.as_deref(), &method, &params, work);
+            (r, work, view, t0.elapsed())
+        })
+        .await
+        .unwrap_or_else(|e| panic!("electrum dispatch join: {e}"))
     })
+}
+
+/// Wait for one store-read permit on this task, then run `f` on the blocking
+/// pool. The permit stays inside `f` until the walk returns, so a waiter does
+/// not occupy a pool thread.
+async fn budgeted_blocking<T: Send + 'static>(
+    query: &Query,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, tokio::task::JoinError> {
+    let permit = query
+        .api_read_budget()
+        .acquire_owned()
+        .await
+        .expect("store budget");
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let _g = BlockingRegion::enter();
+        f()
+    })
+    .await
 }
 
 /// The blocking half of a request, run with `work` moved in and handed back.
@@ -1057,6 +1107,26 @@ async fn answer_one(
 ) -> Result<Value, std::io::Error> {
     let asked = Asked::of(req);
     let t0 = Instant::now();
+    if method_awaits_scripts(&asked.method) {
+        let result = match asked.method.as_str() {
+            "blockchain.transaction.broadcast" => {
+                broadcast_raw_tx_async(&asked.params, ctx.config, ctx.mempool.as_ref()).await
+            }
+            "blockchain.transaction.broadcast_package" => {
+                broadcast_package_async(&asked.params, ctx.config, ctx.mempool.as_ref()).await
+            }
+            _ => Err("unknown broadcast".into()),
+        };
+        return Ok(finish_reply(
+            ctx,
+            conn,
+            last_sent,
+            asked,
+            result,
+            None,
+            Took::Since(t0),
+        ));
+    }
     if method_stays_on_worker(&asked.method) {
         let result = dispatch_with_join(
             &asked.method,
@@ -1250,12 +1320,19 @@ pub fn silentpayments_unsubscribe(
 
 pub async fn emit_sp_tip<W: AsyncWrite + Unpin>(
     writer: &mut ConnWrite<W>,
-    query: &Query,
+    query: &Arc<Query>,
     chain: &ChainParams,
     sub: &crate::silent_scan::SpSub,
     height: u32,
 ) -> Result<(), std::io::Error> {
-    let hits = crate::silent_scan::scan_hits(query, chain, sub, height, height).unwrap_or_default();
+    let q = Arc::clone(query);
+    let c = chain.clone();
+    let piece = sub.clone();
+    let hits = budgeted_blocking(query, move || {
+        crate::silent_scan::scan_hits(&q, &c, &piece, height, height).unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default();
     if hits.is_empty() {
         return Ok(());
     }
@@ -1279,8 +1356,7 @@ pub async fn emit_outpoint_notes<W: AsyncWrite + Unpin>(
 ) -> Result<(), std::io::Error> {
     let keys: Vec<([u8; 32], u32)> = subs.iter().copied().collect();
     let q = Arc::clone(query);
-    let looked = tokio::task::spawn_blocking(move || {
-        let _g = BlockingRegion::enter();
+    let looked = budgeted_blocking(query, move || {
         let mut out = Vec::with_capacity(keys.len());
         for (txid, vout) in keys {
             let params = json!([txid_hex(&txid), vout]);
@@ -1378,13 +1454,12 @@ pub async fn scan_sp_off_connection<R: AsyncBufRead + Unpin>(
         let q = Arc::clone(query);
         let c = Arc::clone(chain);
         let piece = sub.clone();
-        let chunk = tokio::task::spawn_blocking(move || {
-            let _g = BlockingRegion::enter();
+        let chunk = budgeted_blocking(query, move || {
+            let _sp = permit;
             crate::silent_scan::scan_hits(&q, &c, &piece, from, end).unwrap_or_default()
         })
         .await
         .unwrap_or_default();
-        drop(permit);
         hits.extend(chunk);
         chunks += 1;
     }
@@ -1427,14 +1502,12 @@ where
     let q = Arc::clone(query);
     let c = Arc::clone(chain);
     let start_h = req.start;
-    let wave_fut = async move {
-        tokio::task::spawn_blocking(move || {
-            crate::tweaks::first_subscribe_wave(&q, &c, start_h, last, limits, min_dust)
-        })
-        .await
-        .unwrap_or_else(|e| Err(e.to_string()))
-    };
-    let wave = match wave_fut.await {
+    let q_read = Arc::clone(&q);
+    let c_read = Arc::clone(&c);
+    let wave_fut = budgeted_blocking(&q, move || {
+        crate::tweaks::first_subscribe_wave(&q_read, &c_read, start_h, last, limits, min_dust)
+    });
+    let wave = match wave_fut.await.unwrap_or_else(|e| Err(e.to_string())) {
         Ok(v) => v,
         Err(e) => {
             tweaks_sub_err(
@@ -1594,8 +1667,22 @@ where
         let c = Arc::clone(chain);
         let lim = limits;
         let last_h = last;
-        tokio::task::spawn_blocking(move || {
-            crate::tweaks::remaining_notify_lines(&q, &c, batch_start, last_h, lim, min_dust)
+        tokio::spawn(async move {
+            let permit = q
+                .api_read_budget()
+                .acquire_owned()
+                .await
+                .expect("store budget");
+            match tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                let _g = BlockingRegion::enter();
+                crate::tweaks::remaining_notify_lines(&q, &c, batch_start, last_h, lim, min_dust)
+            })
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => Err(e.to_string()),
+            }
         })
     };
     let mut batch_start = *next;
@@ -1915,8 +2002,7 @@ pub async fn emit_sh_notes<W: AsyncWrite + Unpin>(
 ) -> Result<bool, std::io::Error> {
     let q = Arc::clone(query);
     let subs: Vec<[u8; 32]> = sh_subs.iter().copied().collect();
-    let notes = tokio::task::spawn_blocking(move || {
-        let _g = BlockingRegion::enter();
+    let notes = budgeted_blocking(query, move || {
         settled_restatus_notes(&q, mempool.as_deref(), &subs, heights.as_deref())
     })
     .await
@@ -1994,6 +2080,14 @@ pub async fn write_rpc_result<W: AsyncWrite + Unpin>(
     s.push_str(result_json);
     s.push('}');
     write_raw_line(writer, &s, deadline).await
+}
+
+/// Broadcast runs scripts on `rbtc-scripts-*` and must not take a blocking thread.
+fn method_awaits_scripts(method: &str) -> bool {
+    matches!(
+        method,
+        "blockchain.transaction.broadcast" | "blockchain.transaction.broadcast_package"
+    )
 }
 
 /// Instant methods that must stay on the connection task so a 1-worker runtime
@@ -2200,6 +2294,38 @@ pub fn broadcast_raw_tx(
     Ok(json!(format!("{}", r.txid)))
 }
 
+/// [`broadcast_raw_tx`] with script verify awaited on the connection task.
+pub async fn broadcast_raw_tx_async(
+    params: &Value,
+    config: &ElectrumConfig,
+    mempool: Option<&Arc<MempoolHub>>,
+) -> Result<Value, String> {
+    let raw_hex = param_str(params, 0)?;
+    if raw_hex.len() > config.max_broadcast_hex {
+        return Err(format!(
+            "transaction hex too large (max {} chars)",
+            config.max_broadcast_hex
+        ));
+    }
+    let raw = decode_hex_bytes(raw_hex)?;
+    if raw.len() > 4_000_000 {
+        return Err("transaction too large".into());
+    }
+    let tx: bitcoin::Transaction =
+        bitcoin::consensus::deserialize(&raw).map_err(|e| e.to_string())?;
+    let mp = mempool
+        .ok_or_else(|| "mempool not available".to_string())?
+        .clone();
+    let budget = mp.query.api_read_budget();
+    let r = rbitcoin_net::with_store_budget(
+        budget,
+        mp.accept_tx_from_async(tx, rbitcoin_net::TxOrigin::Local),
+    )
+    .await
+    .map_err(|e| format!("broadcast reject: {e}"))?;
+    Ok(json!(format!("{}", r.txid)))
+}
+
 #[doc(hidden)]
 pub fn broadcast_package(
     params: &Value,
@@ -2237,6 +2363,64 @@ pub fn broadcast_package(
     let mp = mempool.ok_or_else(|| "mempool not available".to_string())?;
     let accepted = mp
         .accept_package(&txs)
+        .map_err(|e| format!("broadcast_package reject: {e}"))?;
+    if verbose {
+        let mut tx_results = serde_json::Map::new();
+        for r in &accepted {
+            tx_results.insert(
+                r.txid.to_string(),
+                json!({"txid": r.txid.to_string(), "allowed": true}),
+            );
+        }
+        Ok(json!({
+            "package_msg": "success",
+            "tx-results": tx_results,
+        }))
+    } else {
+        Ok(json!("success"))
+    }
+}
+
+/// [`broadcast_package`] with each member's scripts awaited on the connection task.
+pub async fn broadcast_package_async(
+    params: &Value,
+    config: &ElectrumConfig,
+    mempool: Option<&Arc<MempoolHub>>,
+) -> Result<Value, String> {
+    let arr = params
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "broadcast_package expected array of hex txs".to_string())?;
+    let verbose = params
+        .as_array()
+        .and_then(|a| a.get(1))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mut txs = Vec::with_capacity(arr.len());
+    let mut total_hex = 0usize;
+    for h in arr {
+        let raw_hex = h
+            .as_str()
+            .ok_or_else(|| "broadcast_package tx must be hex".to_string())?;
+        total_hex = total_hex.saturating_add(raw_hex.len());
+        if total_hex > config.max_broadcast_hex {
+            return Err("package hex too large".into());
+        }
+        let raw = decode_hex_bytes(raw_hex)?;
+        if raw.len() > 4_000_000 {
+            return Err("transaction too large".into());
+        }
+        let tx: bitcoin::Transaction =
+            bitcoin::consensus::deserialize(&raw).map_err(|e| e.to_string())?;
+        txs.push(tx);
+    }
+    let mp = mempool
+        .ok_or_else(|| "mempool not available".to_string())?
+        .clone();
+    let budget = mp.query.api_read_budget();
+    let accepted = rbitcoin_net::with_store_budget(budget, mp.accept_package_async(txs))
+        .await
         .map_err(|e| format!("broadcast_package reject: {e}"))?;
     if verbose {
         let mut tx_results = serde_json::Map::new();

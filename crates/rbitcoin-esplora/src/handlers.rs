@@ -150,11 +150,11 @@ pub async fn block_json(State(st): State<AppState>, Path(hash_hex): Path<String>
         return not_found();
     };
     let q = std::sync::Arc::clone(&st.query);
-    match tokio::task::spawn_blocking(move || block_summary_json(&q, &hash)).await {
-        Ok(Ok(v)) => json_reply_here(v),
-        Ok(Err(e)) => store_err(e),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
+    spawn_join(move || match block_summary_json(&q, &hash) {
+        Ok(v) => json_reply_here(v),
+        Err(e) => store_err(e),
+    })
+    .await
 }
 
 pub async fn block_raw(State(st): State<AppState>, Path(hash_hex): Path<String>) -> Response {
@@ -162,8 +162,8 @@ pub async fn block_raw(State(st): State<AppState>, Path(hash_hex): Path<String>)
         return not_found();
     };
     let q = std::sync::Arc::clone(&st.query);
-    match tokio::task::spawn_blocking(move || best_chain_block(&q, &hash)).await {
-        Ok(Ok((_h, block))) => {
+    spawn_join(move || match best_chain_block(&q, &hash) {
+        Ok((_h, block)) => {
             let raw = serialize(&block);
             (
                 StatusCode::OK,
@@ -172,45 +172,61 @@ pub async fn block_raw(State(st): State<AppState>, Path(hash_hex): Path<String>)
             )
                 .into_response()
         }
-        Ok(Err(e)) => store_err(e),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
+        Err(e) => store_err(e),
+    })
+    .await
 }
 
 pub async fn block_status(State(st): State<AppState>, Path(hash_hex): Path<String>) -> Response {
     let Ok(hash) = parse_hash32(&hash_hex) else {
         return not_found();
     };
-    if st.query.get_header_by_hash(&hash).ok().flatten().is_none() {
-        return not_found();
-    }
-    match st.query.height_of_hash(&hash) {
-        Ok(None) => json_reply_here(json!({
-            "in_best_chain": false,
-            "height": null,
-            "next_best": null,
-        })),
-        Ok(Some(h)) => {
-            let next_best = if let Some(tip) = st.query.tip_height() {
-                if h.0 < tip.0 {
-                    match st.query.header_at_height(Height(h.0 + 1)) {
-                        Ok(Some((_fk, rec))) => json!(block_hash_hex(&rec.hash)),
-                        _ => Value::Null,
+    let q = std::sync::Arc::clone(&st.query);
+    spawn_join(move || {
+        if q.get_header_by_hash(&hash).ok().flatten().is_none() {
+            return not_found();
+        }
+        match q.height_of_hash(&hash) {
+            Ok(None) => json_reply_here(json!({
+                "in_best_chain": false,
+                "height": null,
+                "next_best": null,
+            })),
+            Ok(Some(h)) => {
+                let next_best = if let Some(tip) = st.query.tip_height() {
+                    if h.0 < tip.0 {
+                        match st.query.header_at_height(Height(h.0 + 1)) {
+                            Ok(Some((_fk, rec))) => json!(block_hash_hex(&rec.hash)),
+                            _ => Value::Null,
+                        }
+                    } else {
+                        Value::Null
                     }
                 } else {
                     Value::Null
-                }
-            } else {
-                Value::Null
-            };
-            json_reply_here(json!({
-                "in_best_chain": true,
-                "height": h.0,
-                "next_best": next_best,
-            }))
+                };
+                json_reply_here(json!({
+                    "in_best_chain": true,
+                    "height": h.0,
+                    "next_best": next_best,
+                }))
+            }
+            Err(e) => store_err(e),
         }
-        Err(e) => store_err(e),
-    }
+    })
+    .await
+}
+
+pub(crate) async fn store_blocking<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, tokio::task::JoinError> {
+    let store_permit = rbitcoin_net::acquire_armed_store_budget().await;
+    tokio::task::spawn_blocking(move || {
+        let _g = rbitcoin_net::BlockingRegion::enter();
+        let _store = store_permit;
+        f()
+    })
+    .await
 }
 
 pub async fn block_txid_at(
@@ -237,16 +253,12 @@ pub async fn block_txid_at(
 
 /// `GET /blocks` — 10 newest from tip.
 pub async fn blocks_tip(State(st): State<AppState>) -> Response {
-    tokio::task::spawn_blocking(move || blocks_from(&st, None))
-        .await
-        .unwrap_or_else(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())
+    spawn_join(move || blocks_from(&st, None)).await
 }
 
 /// `GET /blocks/:start_height` — 10 blocks starting at `start_height` downward.
 pub async fn blocks_from_height(State(st): State<AppState>, Path(start): Path<u32>) -> Response {
-    tokio::task::spawn_blocking(move || blocks_from(&st, Some(start)))
-        .await
-        .unwrap_or_else(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())
+    spawn_join(move || blocks_from(&st, Some(start))).await
 }
 
 #[doc(hidden)]
@@ -800,7 +812,20 @@ pub async fn block_template(State(st): State<AppState>) -> Response {
     if st.block_template.is_none() {
         return not_found();
     }
-    spawn_join(move || block_template_sync(&st)).await
+    // Sample before the store permit and before `gbt_cache`. Connect holds
+    // `template_prev` for the whole tip update. The 15s cache TTL is unchanged.
+    let prev = match st.mempool.as_ref() {
+        Some(mp) => {
+            let mp = Arc::clone(mp);
+            rbitcoin_net::off_pool(move || mp.template_prev()).await
+        }
+        None => None,
+    };
+    spawn_join(move || {
+        let _prev = rbitcoin_net::arm_template_prev_sample(prev);
+        block_template_sync(&st)
+    })
+    .await
 }
 
 #[doc(hidden)]
@@ -830,12 +855,20 @@ pub fn block_template_sync(st: &AppState) -> Response {
     match (fun.0)() {
         Ok(body) => {
             let body = Arc::new(body);
-            *cache = Some(GbtCache {
-                at: Instant::now(),
-                tip,
-                updates,
-                body: Arc::clone(&body),
-            });
+            // The sample can be one connect behind the query tip. Do not
+            // pin that body on the new tip for the rest of the 15s TTL.
+            let same_tip = match body.get("previousblockhash").and_then(Value::as_str) {
+                Some(prev) => prev == block_hash_hex(&tip),
+                None => true,
+            };
+            if same_tip {
+                *cache = Some(GbtCache {
+                    at: Instant::now(),
+                    tip,
+                    updates,
+                    body: Arc::clone(&body),
+                });
+            }
             gbt_json(&body)
         }
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e).into_response(),
@@ -851,8 +884,10 @@ pub fn gbt_json(body: &Arc<Value>) -> Response {
 }
 
 pub async fn spawn_join(f: impl FnOnce() -> Response + Send + 'static) -> Response {
+    let store_permit = rbitcoin_net::acquire_armed_store_budget().await;
     match tokio::task::spawn_blocking(move || {
         let _g = rbitcoin_net::BlockingRegion::enter();
+        let _store = store_permit;
         f()
     })
     .await
@@ -2136,14 +2171,14 @@ pub async fn admit_broadcast(st: AppState, tx: bitcoin::Transaction) -> Response
     let Some(mp) = st.mempool.as_ref() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "mempool not available").into_response();
     };
-    match mp
-        .accept_tx_from_async(tx, rbitcoin_net::TxOrigin::Local)
-        .await
+    let budget = st.query.api_read_budget();
+    match rbitcoin_net::with_store_budget(
+        budget,
+        mp.accept_tx_from_async(tx, rbitcoin_net::TxOrigin::Local),
+    )
+    .await
     {
-        Ok(r) => {
-            let tid = r.txid.to_byte_array();
-            plain_ok(block_hash_hex(&tid))
-        }
+        Ok(r) => plain_ok(block_hash_hex(&r.txid.to_byte_array())),
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     }
 }
@@ -2200,10 +2235,10 @@ pub async fn post_txs_test(
     if body.len() > st.max_body {
         return (StatusCode::PAYLOAD_TOO_LARGE, "body too large").into_response();
     }
-    spawn_join(move || {
-        let Some(mp) = st.mempool.as_ref() else {
-            return (StatusCode::SERVICE_UNAVAILABLE, "mempool not available").into_response();
-        };
+    let Some(mp) = st.mempool.as_ref() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "mempool not available").into_response();
+    };
+    {
         let hexes: Vec<String> = match serde_json::from_slice(&body) {
             Ok(v) => v,
             Err(e) => {
@@ -2253,7 +2288,12 @@ pub async fn post_txs_test(
         for tx in decoded {
             let txid = format!("{}", tx.compute_txid());
             let wtxid = format!("{}", tx.compute_wtxid());
-            match mp.test_accept(&tx) {
+            match rbitcoin_net::with_store_budget(
+                st.query.api_read_budget(),
+                mp.test_accept_async(tx.clone()),
+            )
+            .await
+            {
                 Ok(r) => {
                     if rbitcoin_consensus::policy::fee_exceeds_max(r.fee_sat, r.weight, max_sat_kvb)
                     {
@@ -2284,8 +2324,7 @@ pub async fn post_txs_test(
             }
         }
         json_reply_here(out)
-    })
-    .await
+    }
 }
 
 /// `POST /txs/package` — JSON array of hex txs → `MempoolHub::accept_package`.
@@ -2347,7 +2386,9 @@ pub async fn post_tx_package(State(st): State<AppState>, body: Bytes) -> Respons
             }
         }
     }
-    match mp.accept_package_async(txs).await {
+    match rbitcoin_net::with_store_budget(st.query.api_read_budget(), mp.accept_package_async(txs))
+        .await
+    {
         Ok(results) => {
             let txids: Vec<String> = results
                 .iter()

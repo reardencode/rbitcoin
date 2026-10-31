@@ -392,8 +392,16 @@ pub async fn rest_entry(State(state): State<AppState>, req: axum::extract::Reque
         }
     };
     let ctx = Arc::clone(&state.ctx);
+    let store_permit = state
+        .ctx
+        .query
+        .api_read_budget()
+        .acquire_owned()
+        .await
+        .expect("store budget");
     let reply = tokio::task::spawn_blocking(move || {
         let _g = BlockingRegion::enter();
+        let _store = store_permit;
         crate::methods::dispatch_rest(&ctx, &path, &query, &body)
     })
     .await
@@ -436,20 +444,78 @@ pub async fn reject_unauthorized(
     next.run(req).await
 }
 
+/// One HTTP call's long-poll, finished before that call runs.
+#[doc(hidden)]
+pub struct HttpWaitPrep {
+    pub satisfied: bool,
+    /// Tip at the end of a `waitfor*` call. Absent for a template long-poll.
+    pub snap: Option<(String, u32)>,
+}
+
+impl HttpWaitPrep {
+    fn skip() -> Self {
+        Self {
+            satisfied: false,
+            snap: None,
+        }
+    }
+
+    fn gbt() -> Self {
+        Self {
+            satisfied: true,
+            snap: None,
+        }
+    }
+
+    async fn tip(ctx: &Arc<crate::methods::RpcContext>) -> Self {
+        let ctx = Arc::clone(ctx);
+        let snap =
+            rbitcoin_net::off_pool_budgeted(move || crate::methods::tip_hash_height(&ctx).ok())
+                .await;
+        Self {
+            satisfied: true,
+            snap,
+        }
+    }
+}
+
+/// `template_prev` on `rbtc-off-pool`, with no store permit. `None` when this
+/// context has no mempool (the same answer as the lock).
+async fn sample_template_prev(ctx: &Arc<crate::methods::RpcContext>) -> Option<[u8; 32]> {
+    let mp = ctx.mempool.as_ref().map(Arc::clone)?;
+    rbitcoin_net::off_pool(move || mp.template_prev()).await
+}
+
 pub async fn satisfy_http_wait(
     ctx: &Arc<crate::methods::RpcContext>,
     parsed: &serde_json::Value,
-) -> bool {
+) -> Vec<bool> {
+    // Tests probe which calls waited. Production waits immediately before
+    // each call so an earlier method is not stuck behind a later long-poll.
+    if let Some(batch) = parsed.as_array() {
+        let mut flags = Vec::with_capacity(batch.len());
+        for item in batch {
+            flags.push(satisfy_one_http_wait(ctx, item).await.satisfied);
+        }
+        return flags;
+    }
+    vec![satisfy_one_http_wait(ctx, parsed).await.satisfied]
+}
+
+async fn satisfy_one_http_wait(
+    ctx: &Arc<crate::methods::RpcContext>,
+    parsed: &serde_json::Value,
+) -> HttpWaitPrep {
     use crate::methods::mine::{gbt_request, GbtRequest};
     use crate::methods::{tip_hash_height, wait_timeout_ms, RpcParams};
     let Some(method) = parsed.get("method").and_then(|m| m.as_str()) else {
-        return false;
+        return HttpWaitPrep::skip();
     };
     if !matches!(
         method,
         "waitforblock" | "waitforblockheight" | "waitfornewblock" | "getblocktemplate"
     ) {
-        return false;
+        return HttpWaitPrep::skip();
     }
     let params = match parsed.get("params") {
         Some(v) => RpcParams::from_json(v).unwrap_or_else(RpcParams::empty),
@@ -457,19 +523,21 @@ pub async fn satisfy_http_wait(
     };
     let mut tips = ctx.chain.as_ref().map(|c| c.subscribe_tips());
     if method == "getblocktemplate" {
+        let prev = sample_template_prev(ctx).await;
         let want = {
             let ctx = Arc::clone(ctx);
             let params = params.clone();
-            tokio::task::spawn_blocking(move || match gbt_request(&ctx, &params) {
-                Ok(GbtRequest::Template { longpoll, .. }) => longpoll,
-                _ => None,
+            rbitcoin_net::off_pool_budgeted(move || {
+                let _prev = rbitcoin_net::arm_template_prev_sample(prev);
+                match gbt_request(&ctx, &params) {
+                    Ok(GbtRequest::Template { longpoll, .. }) => longpoll,
+                    _ => None,
+                }
             })
             .await
-            .ok()
-            .flatten()
         };
         let Some(want) = want else {
-            return false;
+            return HttpWaitPrep::skip();
         };
         rbitcoin_log::info!("ThreadRPCServer method=getblocktemplate");
         let _active = crate::methods::ActiveCall::enter(&ctx.active, method);
@@ -478,19 +546,20 @@ pub async fn satisfy_http_wait(
             + std::time::Duration::from_millis(crate::methods::RPC_WAIT_TIMEOUT_MS);
         loop {
             if ctx.stop.load(Ordering::SeqCst) || tokio::time::Instant::now() >= deadline {
-                return true;
+                return HttpWaitPrep::gbt();
             }
+            let prev = sample_template_prev(&ctx).await;
             let ready = {
                 let ctx = Arc::clone(&ctx);
                 let want = want.clone();
-                tokio::task::spawn_blocking(move || {
+                rbitcoin_net::off_pool_budgeted(move || {
+                    let _prev = rbitcoin_net::arm_template_prev_sample(prev);
                     ctx.stop.load(Ordering::SeqCst) || want.changed(&ctx)
                 })
                 .await
-                .unwrap_or(true)
             };
             if ready || tokio::time::Instant::now() >= deadline {
-                return true;
+                return HttpWaitPrep::gbt();
             }
             let slice = deadline
                 .saturating_duration_since(tokio::time::Instant::now())
@@ -506,44 +575,42 @@ pub async fn satisfy_http_wait(
         _ => wait_timeout_ms(&params, 1, "timeout"),
     };
     let Ok(timeout_ms) = timeout_ms else {
-        return false;
+        return HttpWaitPrep::skip();
     };
     let kind = match method {
         "waitforblock" => {
             let Ok(want) = params.req_str(0, "blockhash") else {
-                return false;
+                return HttpWaitPrep::skip();
             };
             WaitKind::Block(want.to_string())
         }
         "waitforblockheight" => {
             let Ok(h) = params.req_u64(0, "height") else {
-                return false;
+                return HttpWaitPrep::skip();
             };
             WaitKind::Height(h as u32)
         }
         "waitfornewblock" => {
             let ctx_b = Arc::clone(ctx);
-            let start = tokio::task::spawn_blocking(move || tip_hash_height(&ctx_b).ok())
-                .await
-                .unwrap_or(None);
+            let start = rbitcoin_net::off_pool_budgeted(move || tip_hash_height(&ctx_b).ok()).await;
             let Some((hash, _)) = start else {
-                return true;
+                return HttpWaitPrep::tip(ctx).await;
             };
             WaitKind::New(hash)
         }
-        _ => return false,
+        _ => return HttpWaitPrep::skip(),
     };
     let _active = crate::methods::ActiveCall::enter(&ctx.active, method);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     let ctx = Arc::clone(ctx);
     loop {
         if ctx.stop.load(Ordering::SeqCst) || tokio::time::Instant::now() >= deadline {
-            return true;
+            return HttpWaitPrep::tip(&ctx).await;
         }
         let ready = {
             let ctx = Arc::clone(&ctx);
             let kind = kind.clone();
-            tokio::task::spawn_blocking(move || {
+            rbitcoin_net::off_pool_budgeted(move || {
                 let Ok((hash, height)) = tip_hash_height(&ctx) else {
                     return true;
                 };
@@ -554,10 +621,9 @@ pub async fn satisfy_http_wait(
                 }
             })
             .await
-            .unwrap_or(true)
         };
         if ready || tokio::time::Instant::now() >= deadline {
-            return true;
+            return HttpWaitPrep::tip(&ctx).await;
         }
         let slice = deadline.saturating_duration_since(tokio::time::Instant::now());
         let slice = slice.min(std::time::Duration::from_millis(50));
@@ -605,8 +671,30 @@ pub async fn rpc_post(State(state): State<AppState>, req: Request) -> Response {
         }
     };
     let ctx = Arc::clone(&state.ctx);
-    // The long-poll must not sit on the only work-queue slot.
-    let waited = satisfy_http_wait(&ctx, &parsed).await;
+    let budget = state.ctx.query.api_read_budget();
+    // A long-poll, a template, or a tip connect is ordered per call. A
+    // long-poll drops the work-queue slot and the disk permit while it
+    // waits. A template that will not wait still takes the slot before any
+    // store read, then samples `template_prev` before the disk permit.
+    if http_body_awaits_tip(&parsed)
+        || http_body_has_longpoll(&parsed)
+        || http_body_has_template(&parsed)
+    {
+        let out = rbitcoin_net::with_store_budget(
+            budget,
+            exec_http_rpc_async(ctx, parsed, &state.work_queue),
+        )
+        .await;
+        return match out {
+            Err(()) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Work queue depth exceeded\n",
+            )
+                .into_response(),
+            Ok(HttpRpcOut::Json(status, body)) => json_rpc_response(status, body),
+            Ok(HttpRpcOut::Empty(status)) => status.into_response(),
+        };
+    }
     let _permit = match state.work_queue.try_acquire() {
         Ok(p) => p,
         Err(_) => {
@@ -617,14 +705,11 @@ pub async fn rpc_post(State(state): State<AppState>, req: Request) -> Response {
                 .into_response();
         }
     };
+    let store_permit = budget.acquire_owned().await.expect("store budget");
     let joined = tokio::task::spawn_blocking(move || {
         let _g = BlockingRegion::enter();
-        if waited {
-            crate::methods::set_http_wait_satisfied(true);
-        }
-        let out = exec_http_rpc(&ctx, parsed);
-        crate::methods::set_http_wait_satisfied(false);
-        out
+        let _store = store_permit;
+        exec_http_rpc(&ctx, parsed, &[])
     })
     .await;
     match joined {
@@ -775,12 +860,356 @@ pub fn v1_http_status(error: &serde_json::Value) -> StatusCode {
     }
 }
 
+fn http_body_awaits_tip(parsed: &serde_json::Value) -> bool {
+    let method_awaits = |req: &serde_json::Value| {
+        req.get("method")
+            .and_then(|m| m.as_str())
+            .is_some_and(crate::methods::request_task_method)
+    };
+    if let Some(arr) = parsed.as_array() {
+        arr.iter().any(method_awaits)
+    } else {
+        method_awaits(parsed)
+    }
+}
+
+fn http_call_is_longpoll(req: &serde_json::Value) -> bool {
+    match req.get("method").and_then(|m| m.as_str()) {
+        Some("waitforblock" | "waitforblockheight" | "waitfornewblock") => true,
+        // A template with no longpollid returns immediately. Dropping the
+        // slot first lets another POST take it, and `gbt_request` would run
+        // before the queue check.
+        Some("getblocktemplate") => gbt_request_will_wait(req),
+        _ => false,
+    }
+}
+
+/// `true` when `getblocktemplate` will park on a longpollid. Proposal mode
+/// and an invalid mode return without waiting. A non-string id still waits.
+fn gbt_request_will_wait(req: &serde_json::Value) -> bool {
+    let Some(params) = req.get("params") else {
+        return false;
+    };
+    let Some(parsed) = crate::methods::RpcParams::from_json(params) else {
+        return false;
+    };
+    let Some(obj) = parsed
+        .get(0, "template_request")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return false;
+    };
+    match obj.get("mode") {
+        None | Some(serde_json::Value::Null) => {}
+        Some(serde_json::Value::String(mode)) if mode == "template" => {}
+        Some(_) => return false,
+    }
+    match obj.get("longpollid") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(_) => true,
+    }
+}
+
+fn http_call_is_template(req: &serde_json::Value) -> bool {
+    req.get("method").and_then(|m| m.as_str()) == Some("getblocktemplate")
+}
+
+fn http_body_has_template(parsed: &serde_json::Value) -> bool {
+    if let Some(arr) = parsed.as_array() {
+        arr.iter().any(http_call_is_template)
+    } else {
+        http_call_is_template(parsed)
+    }
+}
+
+/// The call drops its work-queue slot before it runs, because it may wait.
 #[doc(hidden)]
-pub fn exec_http_rpc(ctx: &RpcContext, parsed: serde_json::Value) -> HttpRpcOut {
+pub fn call_waits_without_work_queue(req: &serde_json::Value) -> bool {
+    http_call_is_longpoll(req)
+}
+
+fn http_body_has_longpoll(parsed: &serde_json::Value) -> bool {
+    if let Some(arr) = parsed.as_array() {
+        arr.iter().any(http_call_is_longpoll)
+    } else {
+        http_call_is_longpoll(parsed)
+    }
+}
+
+fn work_queue_exceeded_reply(req: &serde_json::Value) -> Option<serde_json::Value> {
+    let ver = parse_jsonrpc_ver(req).unwrap_or(JsonRpcVer::V1);
+    let has_id = req.as_object().is_some_and(|m| m.contains_key("id"));
+    if ver == JsonRpcVer::V2 && !has_id {
+        return None;
+    }
+    let err = serde_json::json!({
+        "code": -32603,
+        "message": "Work queue depth exceeded",
+    });
+    let id = req.get("id").cloned();
+    Some(match ver {
+        JsonRpcVer::V2 => reply_v2(id.unwrap_or(serde_json::Value::Null), None, Some(err)),
+        JsonRpcVer::V1 => reply_v1(id, None, Some(err)),
+    })
+}
+
+async fn prepare_ordered_call(
+    ctx: &Arc<RpcContext>,
+    req: &serde_json::Value,
+    hold: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    work_queue: &Arc<tokio::sync::Semaphore>,
+) -> Result<HttpWaitPrep, ()> {
+    if http_call_is_longpoll(req) {
+        // The queue check is before any tip poll. A full queue is HTTP 503
+        // when this POST has not run a call, and it must not wait on the
+        // store budget first. The slot is then dropped for the wait itself.
+        if hold.is_none() {
+            *hold = Some(Arc::clone(work_queue).try_acquire_owned().map_err(|_| ())?);
+        }
+        drop(hold.take());
+        let prep = satisfy_one_http_wait(ctx, req).await;
+        *hold = Some(Arc::clone(work_queue).try_acquire_owned().map_err(|_| ())?);
+        return Ok(prep);
+    }
+    if hold.is_none() {
+        *hold = Some(Arc::clone(work_queue).try_acquire_owned().map_err(|_| ())?);
+    }
+    Ok(HttpWaitPrep::skip())
+}
+
+async fn exec_http_rpc_async(
+    ctx: Arc<RpcContext>,
+    parsed: serde_json::Value,
+    work_queue: &Arc<tokio::sync::Semaphore>,
+) -> Result<HttpRpcOut, ()> {
+    if let Some(arr) = parsed.as_array() {
+        return exec_http_batch_async(ctx, arr, work_queue).await;
+    }
+    if parsed.is_object() {
+        return exec_http_object_async(ctx, parsed, work_queue).await;
+    }
+    Ok(HttpRpcOut::Json(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        reply_v1(
+            Some(serde_json::Value::Null),
+            None,
+            Some(serde_json::json!({ "code": -32700, "message": "Parse error" })),
+        ),
+    ))
+}
+
+async fn exec_http_batch_async(
+    ctx: Arc<RpcContext>,
+    arr: &[serde_json::Value],
+    work_queue: &Arc<tokio::sync::Semaphore>,
+) -> Result<HttpRpcOut, ()> {
+    let mut hold = None;
+    let mut out = Vec::new();
+    let mut ran = false;
+    for (i, req) in arr.iter().enumerate() {
+        let prep = match prepare_ordered_call(&ctx, req, &mut hold, work_queue).await {
+            Ok(prep) => prep,
+            Err(()) if !ran => return Err(()),
+            Err(()) => {
+                for rest in &arr[i..] {
+                    if let Some(body) = work_queue_exceeded_reply(rest) {
+                        out.push(body);
+                    }
+                }
+                if out.is_empty() {
+                    return Ok(HttpRpcOut::Empty(StatusCode::NO_CONTENT));
+                }
+                return Ok(HttpRpcOut::Json(
+                    StatusCode::OK,
+                    serde_json::Value::Array(out),
+                ));
+            }
+        };
+        match exec_one_async(&ctx, req, prep.satisfied, prep.snap).await {
+            OneOut::Reply(body) => out.push(body),
+            OneOut::Notification => {}
+            OneOut::BadVersion { error } => {
+                out.push(reply_v1(
+                    Some(req.get("id").cloned().unwrap_or(serde_json::Value::Null)),
+                    None,
+                    Some(error),
+                ));
+            }
+        }
+        ran = true;
+    }
+    if out.is_empty() && !arr.is_empty() {
+        return Ok(HttpRpcOut::Empty(StatusCode::NO_CONTENT));
+    }
+    Ok(HttpRpcOut::Json(
+        StatusCode::OK,
+        serde_json::Value::Array(out),
+    ))
+}
+
+async fn exec_http_object_async(
+    ctx: Arc<RpcContext>,
+    parsed: serde_json::Value,
+    work_queue: &Arc<tokio::sync::Semaphore>,
+) -> Result<HttpRpcOut, ()> {
+    let mut hold = None;
+    let prep = prepare_ordered_call(&ctx, &parsed, &mut hold, work_queue).await?;
+    Ok(
+        match exec_one_async(&ctx, &parsed, prep.satisfied, prep.snap).await {
+            OneOut::Reply(body) => {
+                let ver = parse_jsonrpc_ver(&parsed).unwrap_or(JsonRpcVer::V1);
+                let status = if ver == JsonRpcVer::V2 {
+                    StatusCode::OK
+                } else if let Some(err) = body.get("error").filter(|e| !e.is_null()) {
+                    v1_http_status(err)
+                } else {
+                    StatusCode::OK
+                };
+                HttpRpcOut::Json(status, body)
+            }
+            OneOut::Notification => HttpRpcOut::Empty(StatusCode::NO_CONTENT),
+            OneOut::BadVersion { error } => HttpRpcOut::Json(
+                StatusCode::BAD_REQUEST,
+                reply_v1(parsed.get("id").cloned(), None, Some(error)),
+            ),
+        },
+    )
+}
+
+async fn exec_blocking_method(
+    ctx: &Arc<RpcContext>,
+    req: &serde_json::Value,
+    method: &str,
+    waited: bool,
+    snap: Option<(String, u32)>,
+) -> OneOut {
+    let id = req.get("id").cloned();
+    let req = req.clone();
+    let ctx = Arc::clone(ctx);
+    // Sample before the permit. The build then uses the sample, so the
+    // permit covers header and mempool reads and not the connect mutex.
+    let template_prev = if method == "getblocktemplate" {
+        Some(sample_template_prev(&ctx).await)
+    } else {
+        None
+    };
+    let store_permit = rbitcoin_net::acquire_armed_store_budget().await;
+    match tokio::task::spawn_blocking(move || {
+        let _g = BlockingRegion::enter();
+        let _store = store_permit;
+        let _prev = template_prev.map(rbitcoin_net::arm_template_prev_sample);
+        if waited {
+            crate::methods::set_http_wait_satisfied(true);
+            crate::methods::set_http_wait_snap(snap);
+        }
+        let out = exec_one(&ctx, &req);
+        crate::methods::set_http_wait_satisfied(false);
+        crate::methods::set_http_wait_snap(None);
+        out
+    })
+    .await
+    {
+        Ok(out) => out,
+        Err(e) => OneOut::Reply(reply_v1(
+            id,
+            None,
+            Some(serde_json::json!({ "code": -1, "message": format!("rpc join: {e}") })),
+        )),
+    }
+}
+
+async fn exec_one_async(
+    ctx: &Arc<RpcContext>,
+    req: &serde_json::Value,
+    waited: bool,
+    snap: Option<(String, u32)>,
+) -> OneOut {
+    let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    if !crate::methods::request_task_method(method) {
+        return exec_blocking_method(ctx, req, method, waited, snap).await;
+    }
+    let ver = match parse_jsonrpc_ver(req) {
+        Ok(v) => v,
+        Err((code, msg)) => {
+            return OneOut::BadVersion {
+                error: serde_json::json!({ "code": code, "message": msg }),
+            };
+        }
+    };
+    let has_id = req.as_object().is_some_and(|m| m.contains_key("id"));
+    let notification = ver == JsonRpcVer::V2 && !has_id;
+    let id = if has_id {
+        Some(req.get("id").cloned().unwrap_or(serde_json::Value::Null))
+    } else {
+        None
+    };
+    let params = match req.get("params") {
+        None | Some(serde_json::Value::Null) => crate::methods::RpcParams::empty(),
+        Some(v) => match crate::methods::RpcParams::from_json(v) {
+            Some(p) => p,
+            None => {
+                let err = serde_json::json!({
+                    "code": -32602,
+                    "message": "params must be array or object",
+                });
+                if notification {
+                    return OneOut::Notification;
+                }
+                return OneOut::Reply(match ver {
+                    JsonRpcVer::V2 => {
+                        reply_v2(id.unwrap_or(serde_json::Value::Null), None, Some(err))
+                    }
+                    JsonRpcVer::V1 => reply_v1(id, None, Some(err)),
+                });
+            }
+        },
+    };
+    let params_s = req
+        .get("params")
+        .map(|p| serde_json::to_string(p).unwrap_or_else(|_| "[]".into()))
+        .unwrap_or_else(|| "[]".into());
+    let t0 = Instant::now();
+    let dispatched = crate::methods::dispatch_tip_connect(ctx, method, params).await;
+    let wall_ms = t0.elapsed().as_millis() as u64;
+    let err_s = match &dispatched {
+        Err(e) => e
+            .get("message")
+            .and_then(|m| m.as_str())
+            .map(str::to_string),
+        Ok(_) => None,
+    };
+    rbitcoin_log::api_call("rpc", "-", method, &params_s, wall_ms, err_s.as_deref());
+    if notification {
+        return OneOut::Notification;
+    }
+    let id_v1 = id.clone();
+    let id_v2 = id.unwrap_or(serde_json::Value::Null);
+    OneOut::Reply(match dispatched {
+        Ok(result) => match ver {
+            JsonRpcVer::V2 => reply_v2(id_v2, Some(result), None),
+            JsonRpcVer::V1 => reply_v1(id_v1, Some(result), None),
+        },
+        Err(error) => match ver {
+            JsonRpcVer::V2 => reply_v2(id_v2, None, Some(error)),
+            JsonRpcVer::V1 => reply_v1(id_v1, None, Some(error)),
+        },
+    })
+}
+
+#[doc(hidden)]
+pub fn exec_http_rpc(ctx: &RpcContext, parsed: serde_json::Value, waited: &[bool]) -> HttpRpcOut {
     if let Some(arr) = parsed.as_array() {
         let mut out = Vec::new();
-        for req in arr {
-            match exec_one(ctx, req) {
+        for (i, req) in arr.iter().enumerate() {
+            let slot = waited.get(i).copied().unwrap_or(false);
+            if slot {
+                crate::methods::set_http_wait_satisfied(true);
+            }
+            let one = exec_one(ctx, req);
+            if slot {
+                crate::methods::set_http_wait_satisfied(false);
+            }
+            match one {
                 OneOut::Reply(body) => out.push(body),
                 OneOut::Notification => {}
                 OneOut::BadVersion { error } => {
@@ -798,7 +1227,15 @@ pub fn exec_http_rpc(ctx: &RpcContext, parsed: serde_json::Value) -> HttpRpcOut 
         return HttpRpcOut::Json(StatusCode::OK, serde_json::Value::Array(out));
     }
     if parsed.is_object() {
-        return match exec_one(ctx, &parsed) {
+        let slot = waited.first().copied().unwrap_or(false);
+        if slot {
+            crate::methods::set_http_wait_satisfied(true);
+        }
+        let one = exec_one(ctx, &parsed);
+        if slot {
+            crate::methods::set_http_wait_satisfied(false);
+        }
+        return match one {
             OneOut::Reply(body) => {
                 let ver = parse_jsonrpc_ver(&parsed).unwrap_or(JsonRpcVer::V1);
                 let status = if ver == JsonRpcVer::V2 {

@@ -17,6 +17,7 @@ rbitcoin-consensus = { workspace = true }
 rbitcoin-primitives = { workspace = true }
 rbitcoin-store = { workspace = true }
 rbitcoin-log = { workspace = true }
+tokio = { workspace = true }
 bitcoin = { workspace = true }
 arc-swap = { workspace = true }
 # Attribute only. cargo-mutants reads it; it does not change compiled code.

@@ -5,7 +5,7 @@ use rbitcoin_net::MempoolHub;
 use rbitcoin_primitives::Network;
 use rbitcoin_query::Query;
 use serde_json::{json, Value};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -17,9 +17,67 @@ pub use chain::{tip_hash_height, wait_timeout_ms};
 /// Cap for `waitfor*` and `getblocktemplate` long-poll. Not a knob.
 pub const RPC_WAIT_TIMEOUT_MS: u64 = 120_000;
 pub use mine::{gbt_template, submit_received_block};
+
+/// HTTP methods whose connect runs on `tip-accept` and must be awaited on the
+/// request task. In-process [`dispatch`] stays synchronous.
+pub fn tip_connect_method(name: &str) -> bool {
+    matches!(
+        name,
+        "submitblock"
+            | "generate"
+            | "generatetoaddress"
+            | "generatetodescriptor"
+            | "generateblock"
+            | "invalidateblock"
+            | "reconsiderblock"
+            | "preciousblock"
+    )
+}
+
+/// Mempool admits whose script verify must be awaited on the request task.
+pub fn script_admit_method(name: &str) -> bool {
+    matches!(
+        name,
+        "sendrawtransaction" | "testmempoolaccept" | "submitpackage"
+    )
+}
+
+/// HTTP methods that must not run inside `spawn_blocking`.
+pub fn request_task_method(name: &str) -> bool {
+    tip_connect_method(name) || script_admit_method(name)
+}
+
+/// Run `f` on `rbtc-off-pool`, holding one armed store-read permit for `f`.
+/// Unscoped callers (in-process tests) take no permit.
+pub async fn off_pool<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    rbitcoin_net::off_pool_budgeted(f).await
+}
+
+pub async fn dispatch_tip_connect(
+    ctx: &Arc<RpcContext>,
+    method: &str,
+    params: RpcParams,
+) -> Result<Value, Value> {
+    let ctx_ref = ctx.as_ref();
+    match method {
+        "submitblock" => mine::submitblock_async(ctx_ref, &params).await,
+        "generate" => mine::generate_async(ctx_ref, &params).await,
+        "generatetoaddress" => mine::generatetoaddress_async(ctx_ref, &params).await,
+        "generatetodescriptor" => mine::generatetodescriptor_async(ctx_ref, &params).await,
+        "generateblock" => mine::generateblock_async(ctx_ref, &params).await,
+        "invalidateblock" => chain::invalidateblock_async(ctx_ref, &params).await,
+        "reconsiderblock" => chain::reconsiderblock_async(ctx_ref, &params).await,
+        "preciousblock" => chain::preciousblock_async(ctx_ref, &params).await,
+        "sendrawtransaction" => mempool::sendrawtransaction_async(ctx, &params).await,
+        "testmempoolaccept" => mempool::testmempoolaccept_async(ctx, &params).await,
+        "submitpackage" => mempool::submitpackage_async(ctx, &params).await,
+        other => Err(rpc_error(ERR_METHOD_NOT_FOUND, other)),
+    }
+}
 pub use rest::{dispatch_rest, RestReply};
 thread_local! {
     static HTTP_WAIT_SATISFIED: Cell<bool> = const { Cell::new(false) };
+    static HTTP_WAIT_SNAP: RefCell<Option<(String, u32)>> = const { RefCell::new(None) };
 }
 
 /// The HTTP task already waited. The blocking dispatch must not sleep again.
@@ -29,6 +87,16 @@ pub fn set_http_wait_satisfied(v: bool) {
 
 pub fn http_wait_satisfied() -> bool {
     HTTP_WAIT_SATISFIED.with(|c| c.get())
+}
+
+/// Tip observed when this call's wait ended. Later calls in the batch must
+/// not replace it.
+pub fn set_http_wait_snap(v: Option<(String, u32)>) {
+    HTTP_WAIT_SNAP.with(|c| *c.borrow_mut() = v);
+}
+
+pub fn take_http_wait_snap() -> Option<(String, u32)> {
+    HTTP_WAIT_SNAP.with(|c| c.borrow_mut().take())
 }
 
 pub fn sat_kvb_to_btc(sat_kvb: u64) -> f64 {

@@ -1946,6 +1946,14 @@ pub fn apply_startup_index_mode(
     taproot_height: u32,
 ) -> Result<(), NodeError> {
     query.store().set_datadir_hdd(config.datadir_hdd);
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    query.set_api_read_budget(crate::cli::store_read_budget(
+        config.datadir_hdd,
+        cores,
+        config.store_read_budget,
+    ));
     query.set_sh_index_enabled(config.shindex);
     query.set_sh_force_rebuild(config.sh_force_rebuild);
     query.set_block_filter_index(config.block_filter_index)?;

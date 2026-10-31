@@ -243,6 +243,43 @@ pub fn resolve_seqsigwit_dir(layout: &StoreLayout) -> Result<PathBuf, StoreError
     }
 }
 
+/// How long `getblockchaininfo` `size_on_disk` reuses a directory walk.
+pub const DATADIR_BYTES_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Return the cached byte sum when `now` is still inside `ttl` of the sample.
+/// Otherwise call `walk` and return that sum stamped at `now`.
+#[doc(hidden)]
+pub fn cached_dir_bytes(
+    cached: Option<(std::time::Instant, u64)>,
+    now: std::time::Instant,
+    ttl: std::time::Duration,
+    walk: impl FnOnce() -> u64,
+) -> (std::time::Instant, u64) {
+    if let Some((at, n)) = cached {
+        if now.saturating_duration_since(at) < ttl {
+            return (at, n);
+        }
+    }
+    (now, walk())
+}
+
+/// Install `(at, n)` when `at` is not older than the stored sample.
+/// A walk that started earlier must not hide a total sampled later.
+#[doc(hidden)]
+pub fn publish_dir_bytes(
+    slot: &mut Option<(std::time::Instant, u64)>,
+    at: std::time::Instant,
+    n: u64,
+) -> u64 {
+    if let Some((prev_at, prev_n)) = *slot {
+        if prev_at > at {
+            return prev_n;
+        }
+    }
+    *slot = Some((at, n));
+    n
+}
+
 #[doc(hidden)]
 pub fn dir_file_bytes(root: &Path) -> u64 {
     fn walk(p: &Path, acc: &mut u64) {
@@ -311,6 +348,8 @@ pub struct Store {
     /// Confirm readers wait here while a `--datadir-hdd` write holds the spindle.
     /// Flag off never locks, so [`Self::spindle_wait`] returns immediately.
     pub spindle: std::sync::Mutex<()>,
+    /// Last `size_on_disk` walk. Reused for [`DATADIR_BYTES_TTL`].
+    pub datadir_bytes_cache: std::sync::Mutex<Option<(std::time::Instant, u64)>>,
 }
 
 /// Held across one rotating-media write burst. Drop releases [`Store::spindle_wait`].
@@ -415,6 +454,7 @@ impl Store {
             utxo_view: crate::sync::atomic::AtomicU64::new(0),
             spend_marker: std::sync::Mutex::new(()),
             spindle: std::sync::Mutex::new(()),
+            datadir_bytes_cache: std::sync::Mutex::new(None),
             path,
             cold_path,
             head_scale: layout.head_scale,
@@ -478,6 +518,7 @@ impl Store {
             utxo_view: crate::sync::atomic::AtomicU64::new(0),
             spend_marker: std::sync::Mutex::new(()),
             spindle: std::sync::Mutex::new(()),
+            datadir_bytes_cache: std::sync::Mutex::new(None),
             path,
             cold_path,
             head_scale: layout.head_scale,
@@ -524,13 +565,26 @@ impl Store {
     }
 
     /// Sum of regular file lengths under the hot store and, when split, the
-    /// cold store. Used by `getblockchaininfo.size_on_disk`.
+    /// cold store. Used by `getblockchaininfo.size_on_disk`. A second call
+    /// within [`DATADIR_BYTES_TTL`] returns the previous sum.
     pub fn datadir_bytes(&self) -> u64 {
-        let mut n = dir_file_bytes(&self.path);
-        if let Some(cold) = &self.cold_path {
-            n = n.saturating_add(dir_file_bytes(cold));
-        }
-        n
+        let now = std::time::Instant::now();
+        let cached = *self
+            .datadir_bytes_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (at, n) = cached_dir_bytes(cached, now, DATADIR_BYTES_TTL, || {
+            let mut n = dir_file_bytes(&self.path);
+            if let Some(cold) = &self.cold_path {
+                n = n.saturating_add(dir_file_bytes(cold));
+            }
+            n
+        });
+        let mut slot = self
+            .datadir_bytes_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        publish_dir_bytes(&mut slot, at, n)
     }
 
     pub fn tip_height(&self) -> Option<Height> {

@@ -207,6 +207,7 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
     let local_addr = listener.local_addr()?;
     let stats = Arc::new(Sv2TpStats::default());
     let slots = Arc::new(Semaphore::new(MAX_SESSIONS));
+    let flight = Arc::new(template::TemplateFlight::new());
     let sessions: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
     let sessions_c = sessions.clone();
     let stats_c = Arc::clone(&stats);
@@ -246,6 +247,7 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
             rbitcoin_log::info!("sv2: connect {peer}");
             let chain = Arc::clone(&chain);
             let stats = Arc::clone(&stats_c);
+            let flight = Arc::clone(&flight);
             let h = tokio::spawn(async move {
                 let _slot = slot;
                 match session::serve(
@@ -259,6 +261,7 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
                     fee_push,
                     constraints_cooldown,
                     stats,
+                    flight,
                 )
                 .await
                 {

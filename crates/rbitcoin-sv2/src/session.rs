@@ -157,6 +157,7 @@ pub async fn serve(
     fee_push: FeePush,
     constraints_cooldown: Duration,
     stats: Arc<Sv2TpStats>,
+    flight: Arc<template::TemplateFlight>,
 ) -> io::Result<()> {
     let deadline = Instant::now() + setup_timeout;
     let setup = async {
@@ -190,6 +191,7 @@ pub async fn serve(
         fee_push,
         constraints_cooldown,
         stats,
+        flight,
         constraints: None,
         templates: Templates::default(),
         built_at: None,
@@ -222,6 +224,8 @@ pub struct Session {
     pub fee_push: FeePush,
     pub constraints_cooldown: Duration,
     pub stats: Arc<Sv2TpStats>,
+    /// Shared with every session on this listener.
+    flight: Arc<template::TemplateFlight>,
     /// Last `CoinbaseOutputConstraints`: `(max_additional_size, sigops)`.
     pub constraints: Option<(u32, u16)>,
     pub templates: Templates,
@@ -283,9 +287,9 @@ impl Session {
                     self.publish().await?;
                 }
                 // CPU trade: `template_updates` is a counter, not a notifier,
-                // so each session polls it once per interval and a moved
-                // counter costs one build under the mempool read lock: at
-                // most MAX_SESSIONS builds per interval.
+                // so each session polls it once per interval. Sessions that
+                // share a prev hash, coinbase budget, and this counter share
+                // one build. The waiter parks on the session task.
                 _ = tokio::time::sleep_until(self.fee_check_at.unwrap_or_else(Instant::now)),
                     if self.fee_check_at.is_some() =>
                 {
@@ -426,23 +430,40 @@ impl Session {
         // past this, so the next check rebuilds. Stored only once the build
         // returns: a failed one leaves the generation for the next check.
         let updates = self.chain.mempool().map_or(0, |m| m.template_updates());
+        // `template_prev` shares its mutex with the connect hold. Take it on
+        // a std thread so a connect does not park this Tokio worker.
+        let chain = Arc::clone(&self.chain);
+        let prev = rbitcoin_net::off_pool(move || {
+            chain
+                .mempool()
+                .and_then(|m| m.template_prev())
+                .unwrap_or([0u8; 32])
+        })
+        .await;
+        let key = template::TemplateKey {
+            prev_hash: prev,
+            max_additional_size: size,
+            max_additional_sigops: sigops,
+            template_updates: updates,
+        };
         let c = Arc::clone(&self.chain);
         let stats = Arc::clone(&self.stats);
-        let t = tokio::task::spawn_blocking(move || {
-            let _g = BlockingRegion::enter();
-            let unmaintained = c.mempool().is_none_or(|m| !m.pool_maintained());
-            if c.in_ibd() || unmaintained {
-                return Ok(None);
-            }
-            let started = std::time::Instant::now();
-            let t = template::build(&c, size, sigops)?;
-            if t.is_some() {
-                stats.builds.note(micros(started.elapsed()));
-            }
-            Ok::<_, io::Error>(t)
-        })
-        .await
-        .map_err(io::Error::other)??;
+        let t = self
+            .flight
+            .get_or_build(key, move || {
+                let _g = BlockingRegion::enter();
+                let unmaintained = c.mempool().is_none_or(|m| !m.pool_maintained());
+                if c.in_ibd() || unmaintained {
+                    return Ok(None);
+                }
+                let started = std::time::Instant::now();
+                let t = template::build(&c, size, sigops)?;
+                if t.is_some() {
+                    stats.builds.note(micros(started.elapsed()));
+                }
+                Ok(t)
+            })
+            .await?;
         self.seen_updates = updates;
         if t.is_none() {
             self.holding = true;
@@ -587,13 +608,7 @@ impl Session {
         txdata.extend(r.t.txs.iter().map(|tx| Transaction::clone(tx)));
         let block = Block { header, txdata };
         let hash = block.block_hash();
-        let c = Arc::clone(&self.chain);
-        let outcome = tokio::task::spawn_blocking(move || {
-            let _g = BlockingRegion::enter();
-            c.accept_block(block)
-        })
-        .await
-        .map_err(io::Error::other)?;
+        let outcome = self.chain.accept_block_async(block).await;
         match outcome {
             Ok(o) => rbitcoin_log::info!("sv2: SubmitSolution {hash}: {o:?}"),
             Err(e) => rbitcoin_log::info!("sv2: SubmitSolution {hash} rejected: {e}"),

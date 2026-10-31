@@ -21,6 +21,49 @@ fn sh_put_create(s: &Store, rec: rbitcoin_store::scripthash::ScriptHashRecord) {
 }
 
 #[test]
+fn datadir_bytes_cache_skips_the_walk_inside_thirty_seconds() {
+    use std::time::{Duration, Instant};
+    let t0 = Instant::now();
+    let ttl = Duration::from_secs(30);
+    let mut walks = 0u32;
+    let (at, n) = cached_dir_bytes(None, t0, ttl, || {
+        walks += 1;
+        10
+    });
+    assert_eq!((at, n, walks), (t0, 10, 1));
+    let (at2, n2) = cached_dir_bytes(Some((at, n)), t0 + Duration::from_secs(29), ttl, || {
+        walks += 1;
+        99
+    });
+    assert_eq!(at2, at);
+    assert_eq!(n2, 10);
+    assert_eq!(walks, 1, "a new file inside the ttl must not be walked");
+    let (at3, n3) = cached_dir_bytes(Some((at2, n2)), t0 + ttl, ttl, || {
+        walks += 1;
+        99
+    });
+    assert_eq!(at3, t0 + ttl);
+    assert_eq!(n3, 99);
+    assert_eq!(walks, 2);
+}
+
+#[test]
+fn publish_dir_bytes_keeps_the_newer_sample() {
+    use std::time::{Duration, Instant};
+    let t0 = Instant::now();
+    let later = t0 + Duration::from_millis(1);
+    let mut slot = None;
+    assert_eq!(publish_dir_bytes(&mut slot, t0, 10), 10);
+    assert_eq!(publish_dir_bytes(&mut slot, later, 40), 40);
+    assert_eq!(
+        publish_dir_bytes(&mut slot, t0, 10),
+        40,
+        "a slower walk must not replace a newer total"
+    );
+    assert_eq!(slot, Some((later, 40)));
+}
+
+#[test]
 fn spindle_wait_blocks_only_while_datadir_hdd_is_held() {
     use std::sync::mpsc;
     use std::time::Duration;

@@ -44,6 +44,15 @@ pub fn verify_tx_scripts_detached(
     verify_tx_scripts_detached_forks(prevouts, tx, true, true, true, true, true)
 }
 
+fn verify_scripts_with_flags(
+    prevouts: Vec<bitcoin::TxOut>,
+    tx: bitcoin::Transaction,
+    flags: crate::block::ScriptVerifyFlags,
+) -> Result<(), ConsensusError> {
+    let job = ScriptCheckJob::try_new(prevouts, tx, flags)?;
+    crate::script::verify_job_all_inputs(&job)
+}
+
 /// Same worker path as [`verify_tx_scripts_detached`] with explicit buried-fork flags.
 pub fn verify_tx_scripts_detached_forks(
     prevouts: Vec<bitcoin::TxOut>,
@@ -55,7 +64,7 @@ pub fn verify_tx_scripts_detached_forks(
     taproot_active: bool,
 ) -> Result<(), ConsensusError> {
     script_pool::run_detached_join(move || {
-        let job = ScriptCheckJob::try_new(
+        verify_scripts_with_flags(
             prevouts,
             tx,
             crate::block::ScriptVerifyFlags::buried(
@@ -65,9 +74,27 @@ pub fn verify_tx_scripts_detached_forks(
                 bip16_active,
                 taproot_active,
             ),
-        )?;
-        crate::script::verify_job_all_inputs(&job)
+        )
     })
+    .unwrap_or(Err(ConsensusError::BadBlock("script worker disconnected")))
+}
+
+/// Await [`verify_tx_scripts_detached`] on `rbtc-scripts-*` without a blocking thread.
+///
+/// The caller parks. Mempool admit uses this from the request task. Sync admit
+/// keeps [`verify_tx_scripts_detached`].
+pub async fn verify_tx_scripts_cpu(
+    prevouts: Vec<bitcoin::TxOut>,
+    tx: bitcoin::Transaction,
+) -> Result<(), ConsensusError> {
+    script_pool::run_cpu(move || {
+        verify_scripts_with_flags(
+            prevouts,
+            tx,
+            crate::block::ScriptVerifyFlags::buried(true, true, true, true, true),
+        )
+    })
+    .await
     .unwrap_or(Err(ConsensusError::BadBlock("script worker disconnected")))
 }
 
@@ -81,11 +108,8 @@ pub fn verify_tx_scripts_with_flags(
     tx: bitcoin::Transaction,
     flags: crate::block::ScriptVerifyFlags,
 ) -> Result<(), ConsensusError> {
-    script_pool::run_detached_join(move || {
-        let job = ScriptCheckJob::try_new(prevouts, tx, flags)?;
-        crate::script::verify_job_all_inputs(&job)
-    })
-    .unwrap_or(Err(ConsensusError::BadBlock("script worker disconnected")))
+    script_pool::run_detached_join(move || verify_scripts_with_flags(prevouts, tx, flags))
+        .unwrap_or(Err(ConsensusError::BadBlock("script worker disconnected")))
 }
 
 pub use block::validate_block_structure_hashed;

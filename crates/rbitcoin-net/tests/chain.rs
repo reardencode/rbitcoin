@@ -5645,3 +5645,205 @@ fn review_trust_merkle_mismatch_stays_refetchable() {
         "hash was marked permanently failed"
     );
 }
+
+#[test]
+fn connect_finishes_while_the_blocking_pool_is_parked() {
+    let (_dir, hub) = tmp_hub();
+    let hub = ChainHub::into_arc(hub);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    rt.spawn(async move {
+        tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
+            let _ = release_rx.recv();
+        });
+    });
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("pool thread did not park");
+    let hub_gen = Arc::clone(&hub);
+    let generated = rt.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            hub_gen.generate_to_script_for_rpc_async(
+                2,
+                ScriptBuf::from_bytes(vec![0x51]),
+                Vec::new(),
+                false,
+            ),
+        )
+        .await
+    });
+    let bogus = BlockHash::from_byte_array([0x44; 32]);
+    let hub_inv = Arc::clone(&hub);
+    let invalidated = rt.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            hub_inv.invalidate_block_async(bogus),
+        )
+        .await
+    });
+    let hub_re = Arc::clone(&hub);
+    let reconsidered = rt.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            hub_re.reconsider_block_async(bogus),
+        )
+        .await
+    });
+    let hub_pr = Arc::clone(&hub);
+    let precious = rt.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            hub_pr.precious_block_async(bogus),
+        )
+        .await
+    });
+    let _ = release_tx.send(());
+    let hashes = generated
+        .expect("generate timed out while the blocking pool was parked")
+        .expect("generate");
+    assert_eq!(hashes.len(), 2, "await between two connects");
+    let inv = invalidated
+        .expect("invalidate timed out")
+        .expect_err("unknown hash");
+    assert!(
+        inv.to_string().contains("Block not found"),
+        "invalidate ran on tip-accept: {inv}"
+    );
+    let re = reconsidered
+        .expect("reconsider timed out")
+        .expect_err("unknown hash");
+    assert!(
+        re.to_string().contains("Block not found"),
+        "reconsider ran on tip-accept: {re}"
+    );
+    let pr = precious
+        .expect("precious timed out")
+        .expect_err("unknown hash");
+    assert!(
+        pr.to_string().contains("Block not found"),
+        "precious ran on tip-accept: {pr}"
+    );
+}
+
+/// `commit_generated_txids` takes the mempool write lock. The async generate
+/// path runs on a Tokio worker, so that lock has to move to `rbtc-off-pool`.
+/// Maintenance is off, so connect does not strip the tx itself.
+#[test]
+fn async_generate_commits_mined_txids_off_the_request_task() {
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    hub.generate_to_script(101, ScriptBuf::from_bytes(vec![0x51]), vec![])
+        .unwrap();
+    let mp =
+        rbitcoin_net::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
+    assert!(
+        !mp.pool_maintained(),
+        "connect must not strip; the commit is what drops the tx"
+    );
+    let hub = ChainHub::into_arc(hub);
+    assert!(hub.attach_mempool(Arc::clone(&mp)).is_ok());
+    let tx = mature_spend_tx(&hub, 1);
+    let txid = tx.compute_txid();
+    mp.accept_tx(&tx).expect("admit");
+    assert!(mp.contains(&txid));
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let hub_gen = Arc::clone(&hub);
+    let hashes = rt
+        .block_on(async move {
+            tokio::spawn(async move {
+                hub_gen
+                    .generate_to_script_for_rpc_async(
+                        1,
+                        ScriptBuf::from_bytes(vec![0x51]),
+                        vec![tx],
+                        false,
+                    )
+                    .await
+            })
+            .await
+            .expect("generate task")
+        })
+        .expect("generate");
+    assert_eq!(hashes.len(), 1);
+    assert!(!mp.contains(&txid), "the mined tx is still in the pool");
+}
+
+/// Dropping the request after the block is accepted still removes the mined
+/// tx. Maintenance is off, so only `commit_generated_txids` can do that, and
+/// that commit shares the generate task rather than the request.
+#[test]
+fn dropped_generate_still_commits_mined_txids() {
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    hub.generate_to_script(101, ScriptBuf::from_bytes(vec![0x51]), vec![])
+        .unwrap();
+    let mp =
+        rbitcoin_net::tx_relay::MempoolHub::open(dir.join("mp"), Arc::clone(&hub.query)).unwrap();
+    assert!(!mp.pool_maintained());
+    let hub = ChainHub::into_arc(hub);
+    assert!(hub.attach_mempool(Arc::clone(&mp)).is_ok());
+    let tx = mature_spend_tx(&hub, 1);
+    let txid = tx.compute_txid();
+    mp.accept_tx(&tx).expect("admit");
+    let before = hub.tip_height().unwrap();
+    hub.pause_before_generate_commit
+        .store(true, Ordering::Release);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let hub_gen = Arc::clone(&hub);
+    rt.block_on(async move {
+        let job = tokio::spawn(async move {
+            hub_gen
+                .generate_to_script_for_rpc_async(
+                    1,
+                    ScriptBuf::from_bytes(vec![0x51]),
+                    vec![tx],
+                    false,
+                )
+                .await
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while hub.tip_height() == Some(before)
+            || !hub.generate_commit_parked.load(Ordering::Acquire)
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "generate did not park after accept"
+            );
+            tokio::task::yield_now().await;
+        }
+        assert!(mp.contains(&txid), "commit ran before the drop");
+        job.abort();
+        let _ = job.await;
+        assert!(mp.contains(&txid), "abort removed the mined tx");
+        assert!(
+            hub.generate_commit_parked.load(Ordering::Acquire),
+            "abort cancelled the generate task"
+        );
+        hub.pause_before_generate_commit
+            .store(false, Ordering::Release);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while mp.contains(&txid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "dropped generate left the mined tx in the pool"
+            );
+            tokio::task::yield_now().await;
+        }
+    });
+}

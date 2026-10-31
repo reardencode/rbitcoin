@@ -75,6 +75,10 @@ pub use error::NetError;
 pub use eviction::{select_inbound_eviction, InboundEvictCandidate};
 pub use i2p_sam::{i2p_addr_from_sam_b64, I2pSam, SAM_RETRY, SAM_RETRY_TEST};
 pub use most_work::{sum_work, WorkOverflow};
+pub use msg_decode::{
+    block_decode_permits, block_decode_permits_for, blocking_pool_size, blocking_pool_size_for,
+    ctrl_decode_permits, ctrl_decode_permits_for, MIN_BLOCKING_POOL,
+};
 pub use net_permissions::{
     apply_implicit, parse_whitebind, parse_whitelist, NetPermTable, NetPermissionFlags,
     WhitebindGrant, WhitelistGrant, DEFAULT_WHITELISTFORCERELAY, DEFAULT_WHITELISTRELAY,
@@ -93,8 +97,11 @@ pub use peers::{
 };
 pub use perf_meter::RequestMeter;
 pub use rbitcoin_mempool::MempoolGraphStats;
-pub use rbitcoin_mempool::{AcceptError, SelectBudget, Selected};
-pub use reactor::BlockingRegion;
+pub use rbitcoin_mempool::{AcceptError, AcceptResult, SelectBudget, Selected};
+pub use reactor::{
+    acquire_armed_store_budget, off_pool, off_pool_budgeted, spawn_with_store_budget,
+    with_store_budget, BlockingRegion,
+};
 pub use seeds::{
     default_port, default_rpc_port, dns_seeds, resolve_dns_seeds, socks_dns_seed_dests, AddrMan,
     PeerEntry, PeerFlags, MAX_ADDR_MAN,
@@ -105,8 +112,8 @@ pub use serve_perf::{
 pub use service::{P2PNode, REDIAL_INTERVAL, REDIAL_INTERVAL_TEST};
 pub use socks::{install_i2p_dialer, Dialer, NetProxies};
 pub use tx_relay::{
-    ElectrumMempoolItem, FeeHistoryBackfillStats, MempoolAnnounce, MempoolHub, MempoolPerfSample,
-    MempoolTxSnapEntry, MempoolTxSnapshot, TxOrigin,
+    arm_template_prev_sample, ElectrumMempoolItem, FeeHistoryBackfillStats, MempoolAnnounce,
+    MempoolHub, MempoolPerfSample, MempoolTxSnapEntry, MempoolTxSnapshot, TxOrigin,
 };
 pub use v2::{encode_v2_contents, parse_v2_regtest, parse_v2_regtest_named, WireBytes};
 pub use versionbits_warn::{trust_warning_line, versionbit_warning_strings};

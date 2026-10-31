@@ -6102,6 +6102,350 @@ fn getmininginfo_assembly_is_per_block() {
     let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
     assert_eq!(info["currentblockweight"], weight, "{info}");
     assert_eq!(info["currentblocktx"], 1, "{info}");
+    // HTTP generateblock lists transactions on the async path. A rejected
+    // list must leave the assembly the failed generate already recorded.
+    let ctx = std::sync::Arc::new(ctx);
+    let params = rbitcoin_rpc::methods::RpcParams::positional(vec![json!(addr), json!("nope")]);
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(rbitcoin_rpc::methods::mine::generateblock_async(
+            &ctx, &params,
+        ))
+        .unwrap_err();
+    let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    assert_eq!(info["currentblockweight"], weight, "{info}");
+    assert_eq!(info["currentblocktx"], 1, "{info}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Aborting the request after the tx is published still records it
+/// unbroadcast. The note shares the admit task. The latch holds that task
+/// between publish and the note, so the abort is the thing under test.
+#[test]
+fn dropped_sendraw_still_notes_unbroadcast() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let (hex, tx) = spend_generated_coinbase(
+        &ctx,
+        1,
+        50_0000_0000 - 1_000,
+        ScriptBuf::from_bytes(vec![0x51]),
+    );
+    let txid = tx.compute_txid();
+    let ctx = std::sync::Arc::new(ctx);
+    let mp = std::sync::Arc::clone(ctx.mempool.as_ref().unwrap());
+    mp.pause_before_unbroadcast_note
+        .store(true, Ordering::Release);
+    let params = rbitcoin_rpc::methods::RpcParams::positional(vec![json!(hex)]);
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async move {
+            let ctx_job = std::sync::Arc::clone(&ctx);
+            let job = tokio::spawn(async move {
+                rbitcoin_rpc::methods::mempool::sendrawtransaction_async(&ctx_job, &params).await
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !mp.contains(&txid) || !mp.unbroadcast_note_parked.load(Ordering::Acquire) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "sendraw did not park between publish and the note"
+                );
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                mp.unbroadcast_count(),
+                0,
+                "abort landed after the note; the drop was not the waiter"
+            );
+            job.abort();
+            let _ = job.await;
+            assert_eq!(
+                mp.unbroadcast_count(),
+                0,
+                "abort ran the note on the request"
+            );
+            assert!(
+                mp.unbroadcast_note_parked.load(Ordering::Acquire),
+                "abort cancelled the admit task"
+            );
+            mp.pause_before_unbroadcast_note
+                .store(false, Ordering::Release);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while mp.unbroadcast_count() == 0 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "dropped sendraw skipped the unbroadcast note"
+                );
+                tokio::task::yield_now().await;
+            }
+        });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Same drop as `dropped_sendraw_still_notes_unbroadcast` for one package member.
+#[test]
+fn dropped_submitpackage_still_notes_unbroadcast() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let (hex, tx) = spend_generated_coinbase(
+        &ctx,
+        1,
+        50_0000_0000 - 1_000,
+        ScriptBuf::from_bytes(vec![0x51]),
+    );
+    let txid = tx.compute_txid();
+    let ctx = std::sync::Arc::new(ctx);
+    let mp = std::sync::Arc::clone(ctx.mempool.as_ref().unwrap());
+    mp.pause_before_unbroadcast_note
+        .store(true, Ordering::Release);
+    let params = rbitcoin_rpc::methods::RpcParams::positional(vec![json!([hex])]);
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async move {
+            let ctx_job = std::sync::Arc::clone(&ctx);
+            let job = tokio::spawn(async move {
+                rbitcoin_rpc::methods::mempool::submitpackage_async(&ctx_job, &params).await
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !mp.contains(&txid) || !mp.unbroadcast_note_parked.load(Ordering::Acquire) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "submitpackage did not park between publish and the note"
+                );
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(mp.unbroadcast_count(), 0, "note ran before the drop");
+            job.abort();
+            let _ = job.await;
+            assert_eq!(
+                mp.unbroadcast_count(),
+                0,
+                "abort ran the note on the request"
+            );
+            assert!(
+                mp.unbroadcast_note_parked.load(Ordering::Acquire),
+                "abort cancelled the admit task"
+            );
+            mp.pause_before_unbroadcast_note
+                .store(false, Ordering::Release);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while mp.unbroadcast_count() == 0 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "dropped submitpackage skipped the unbroadcast note"
+                );
+                tokio::task::yield_now().await;
+            }
+        });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// HTTP `generatetoaddress`, `generatetodescriptor`, `generateblock`, and a
+/// two-tx `testmempoolaccept` are the request-task methods. The package rows
+/// are removed after the reply.
+#[test]
+fn http_request_task_methods_mine_and_accept_a_package() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let (addr, _) = p2wpkh_regtest();
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+    let (parent_hex, parent) = spend_generated_coinbase(&ctx, 1, 50_0000_0000 - 1_000, spk);
+    let child_hex = rbitcoin_primitives::hex_encode(bitcoin::consensus::encode::serialize(
+        &child_of(&parent, 1_000),
+    ));
+    let ctx = std::sync::Arc::new(ctx);
+    let state = || rbitcoin_rpc::server::AppState {
+        ctx: std::sync::Arc::clone(&ctx),
+        auth: rbitcoin_rpc::RpcAuth::new("test-token"),
+        cookie: None,
+        work_queue: std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+        rest_queue: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+        rest: false,
+        require_auth: false,
+    };
+    let call = |method: &'static str, params: serde_json::Value| {
+        let state = state();
+        async move {
+            let body = json!({
+                "jsonrpc": "1.0",
+                "id": 1,
+                "method": method,
+                "params": params,
+            });
+            let response = rbitcoin_rpc::server::rpc_post(
+                axum::extract::State(state),
+                axum::extract::Request::new(axum::body::Body::from(body.to_string())),
+            )
+            .await;
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
+                .await
+                .expect("body");
+            let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(json!({
+                "raw": String::from_utf8_lossy(&bytes),
+            }));
+            assert_eq!(status, axum::http::StatusCode::OK, "{method} {parsed}");
+            assert!(parsed.get("error").is_none_or(|e| e.is_null()), "{parsed}");
+            parsed["result"].clone()
+        }
+    };
+    let starved_ctx = std::sync::Arc::clone(&ctx);
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async move {
+            let rows = call("testmempoolaccept", json!([[parent_hex, child_hex]])).await;
+            assert_eq!(rows.as_array().map(|a| a.len()), Some(2), "{rows}");
+            assert_eq!(rows[0]["allowed"], json!(true), "{rows}");
+            assert_eq!(rows[1]["allowed"], json!(true), "{rows}");
+            let mined = call("generatetoaddress", json!([1, addr])).await;
+            assert_eq!(mined.as_array().map(|a| a.len()), Some(1), "{mined}");
+            let desc = call("generatetodescriptor", json!([1, "raw(51)"])).await;
+            assert_eq!(desc.as_array().map(|a| a.len()), Some(1), "{desc}");
+            let block = call("generateblock", json!([addr, [], false])).await;
+            assert!(
+                block["hex"].as_str().is_some_and(|h| h.len() > 20),
+                "{block}"
+            );
+            // A template is not a request-task method. HTTP still runs it on
+            // the async executor so the build can sample the tip before the
+            // store permit.
+            let tmpl = call("getblocktemplate", json!([{"rules": ["segwit"]}])).await;
+            assert!(tmpl.get("height").is_some(), "{tmpl}");
+            assert!(tmpl.get("bits").is_some(), "{tmpl}");
+            let raw = |body: serde_json::Value| {
+                let state = state();
+                async move {
+                    let response = rbitcoin_rpc::server::rpc_post(
+                        axum::extract::State(state),
+                        axum::extract::Request::new(axum::body::Body::from(body.to_string())),
+                    )
+                    .await;
+                    let status = response.status();
+                    let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
+                        .await
+                        .expect("body");
+                    (status, bytes)
+                }
+            };
+            let (status, bytes) = raw(json!({
+                "jsonrpc": "2.0",
+                "method": "generatetoaddress",
+                "params": [0, addr],
+            }))
+            .await;
+            assert_eq!(status, axum::http::StatusCode::NO_CONTENT, "{bytes:?}");
+            let (status, bytes) = raw(json!({
+                "jsonrpc": "1.0",
+                "id": 1,
+                "method": "generateblock",
+                "params": "nope",
+            }))
+            .await;
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(
+                text.contains("params must be array or object"),
+                "{status} {text}"
+            );
+            let (status, bytes) = raw(json!({
+                "jsonrpc": 2,
+                "id": 1,
+                "method": "generate",
+                "params": [1],
+            }))
+            .await;
+            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{bytes:?}");
+            let (status, bytes) = raw(json!([
+                {"jsonrpc":"1.0","id":1,"method":"generatetoaddress","params":[1, addr]},
+                {"jsonrpc":2,"id":2,"method":"generate","params":[1]},
+                {"jsonrpc":"1.0","id":3,"method":"getblockcount","params":[]},
+            ]))
+            .await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{bytes:?}");
+            let batch: serde_json::Value = serde_json::from_slice(&bytes).expect("batch");
+            assert!(batch[1]["error"].is_object(), "{batch}");
+            assert!(batch[0]["result"].is_array(), "{batch}");
+            assert!(batch[2]["result"].is_number(), "{batch}");
+            let (status, bytes) = raw(json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "generatetoaddress",
+                "params": [0, addr],
+            }))
+            .await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{bytes:?}");
+            let v2: serde_json::Value = serde_json::from_slice(&bytes).expect("v2");
+            assert_eq!(v2["result"], json!([]), "{v2}");
+            let (status, bytes) = raw(json!({
+                "jsonrpc": "2.0",
+                "id": 8,
+                "method": "generatetoaddress",
+                "params": [1, "not-an-address"],
+            }))
+            .await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{bytes:?}");
+            let v2_err: serde_json::Value = serde_json::from_slice(&bytes).expect("v2 err");
+            assert!(v2_err["error"].is_object(), "{v2_err}");
+            let (status, bytes) = raw(json!({
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "generate",
+                "params": "nope",
+            }))
+            .await;
+            let v2_params = String::from_utf8_lossy(&bytes);
+            assert_eq!(status, axum::http::StatusCode::OK, "{v2_params}");
+            assert!(
+                v2_params.contains("params must be array or object"),
+                "{v2_params}"
+            );
+            let (status, bytes) = raw(json!([
+                {"jsonrpc":"2.0","method":"generatetoaddress","params":[0, addr]},
+            ]))
+            .await;
+            assert_eq!(status, axum::http::StatusCode::NO_CONTENT, "{bytes:?}");
+            let starved = rbitcoin_rpc::server::AppState {
+                ctx: starved_ctx,
+                auth: rbitcoin_rpc::RpcAuth::new("test-token"),
+                cookie: None,
+                work_queue: std::sync::Arc::new(tokio::sync::Semaphore::new(0)),
+                rest_queue: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+                rest: false,
+                require_auth: false,
+            };
+            let response = rbitcoin_rpc::server::rpc_post(
+                axum::extract::State(starved),
+                axum::extract::Request::new(axum::body::Body::from(
+                    json!({
+                        "jsonrpc": "1.0",
+                        "id": 1,
+                        "method": "generate",
+                        "params": [0],
+                    })
+                    .to_string(),
+                )),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                axum::http::StatusCode::SERVICE_UNAVAILABLE
+            );
+        });
+    assert!(
+        !ctx.mempool
+            .as_ref()
+            .unwrap()
+            .contains(&parent.compute_txid()),
+        "testmempoolaccept must remove the package"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

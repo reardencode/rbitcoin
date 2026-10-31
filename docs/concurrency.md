@@ -45,12 +45,12 @@ Three thread kinds only. **Tokio workers must not wait on a `std` mutex/rwlock, 
 |------|-----|--------|
 | Reactor | `tokio-rt-worker` × nCPU | epoll, timers, framing. Node caps `spawn_blocking` at nCPU (min 4), not tokio’s 512. |
 | Role | `tip-accept`, `ibd-header`, `ibd-confirm-*`, `rbtc-tip-flush`, `rbtc-sh-wb`, `rbtc-idx-wb` | Sole writer for a resource. Not a job pool. |
-| Work pool | `rbtc-scripts-*` steal; tokio blocking pool | Independent jobs. Mempool accept / Electrum / Esplora / RPC store joins run on the blocking pool. Heavy v2 encode, compact short ids, and JSON of at least 4 KiB run on `rbtc-scripts-*`. |
+| Work pool | `rbtc-scripts-*` steal; tokio blocking pool | Independent jobs. Mempool script verify is awaited on the request task (`run_cpu`); prepare and commit run on `rbtc-off-pool`, not the blocking pool. Prepare takes one `--store-read-budget` permit and drops it before script verify. The commit coin re-read takes one again and drops it before orphan promotion. Each promoted orphan, each package member put back after a failed package, each replaced conflict put back, and the orphan walk after a multi-tx `testmempoolaccept` removes its inserts takes a permit only for its coin read. A task spawned so package cleanup survives a dropped request keeps that budget. Electrum / Esplora / RPC / REST / BlindBit store joins still use the blocking pool, and they share that one budget. A waiter does not occupy a pool thread. `getblocktemplate` and Esplora `GET /block-template` sample the template tip on `rbtc-off-pool` before a store-read permit (Esplora also before its 15-second cache lock). Long-poll tip polls do the same and drop the permit before they sleep. Heavy v2 encode, compact short ids, and JSON of at least 4 KiB run on `rbtc-scripts-*`. |
 
 | Role | Notes |
 |------|--------|
-| `peer_session` (split read/write) | Serve getdata. Full-block, compact, and `getblocktxn` reconstruct run on the blocking pool (block-decode permit). Inbound `cmpctblock` reconstruct uses that same permit. `headers` persist and `getheaders` / `getblocks` replies run on the blocking pool under the header-decode permit. The session applies notes, ban, and queued `getdata` after that join. Offers reconstructed blocks to **`tip-accept`** (does **not** take `connect_lock` or run confirm on the tokio worker). A reconstructed/received body whose header has valid PoW and **extends the current tip** is announced as `cmpctblock` to peers who sent `sendcmpct` announce=1 and already have the parent **before** connect (Core `NewPoWValidBlock`). That is not a connected tip. P2P `tx` is `accept_tx_async` (blocking pool). INV / getdata / compact **first-pass** fill use mempool **`try_read` only** (busy write → skip that item; never park). A pending compact owns those clones; `blocktxn` apply does not `try_read` again. Handshake `FeeFilter` reads the **atomic** published fee floor (no `inner`). 50 ms tick: age-INV is a due-log cursor (newly due only); `clock_due` / unbroadcast may full-walk ≤1/30 s. `any_tx_inv_due` is min live `accept_at`, not a map walk. `PeerHub::on_session_heartbeat` (headers-sync stall timeout). While the writer is past the 4 MiB send budget, or a paused `getdata` tail waits for serve room, the reader reads no frame; the heartbeat still runs, so the ping timeout still fires. Inbound accept is `inbound_connect_and_handshake` (60 s VERSION/VERACK); timeout drops the `max_inbound` permit. |
-| `tip-accept` | **One** process-wide OS thread. Queue depth 8. Sole production thread for `accept_block` / `accept_branch` / `accept_received_block` / `generate_to_script` / `connect_lock` at tip. Mints `ClassCWrite` for that connect's Class C stores. Confirm is **`confirm_wire_run_preverified`** (lookup stamp, load pin/assemble, `confirm_scripts_phase` → `rbtc-scripts-*`, write + `ibd-confirm-head` drain). TLS uring is this thread’s `with_thread_local` session. SIGINT stays on tokio; the current job finishes, then the session sees shutdown. Dropping the session’s join future **detaches** (does not condvar-wait on the worker). |
+| `peer_session` (split read/write) | Serve getdata. Full-block, compact, and `getblocktxn` reconstruct run on the blocking pool (block-decode permit). Inbound `cmpctblock` reconstruct uses that same permit. `headers` persist and `getheaders` / `getblocks` replies run on the blocking pool under the header-decode permit. The session applies notes, ban, and queued `getdata` after that join. Offers reconstructed blocks to **`tip-accept`** (does **not** take `connect_lock` or run confirm on the tokio worker). A reconstructed/received body whose header has valid PoW and **extends the current tip** is announced as `cmpctblock` to peers who sent `sendcmpct` announce=1 and already have the parent **before** connect (Core `NewPoWValidBlock`). That is not a connected tip. P2P `tx` is `accept_tx_from_async`: scripts are awaited on the session task, and prepare/commit run on `rbtc-off-pool`. INV / getdata / compact **first-pass** fill use mempool **`try_read` only** (busy write → skip that item; never park). A pending compact owns those clones; `blocktxn` apply does not `try_read` again. Handshake `FeeFilter` reads the **atomic** published fee floor (no `inner`). 50 ms tick: age-INV is a due-log cursor (newly due only); `clock_due` / unbroadcast may full-walk ≤1/30 s. `any_tx_inv_due` is min live `accept_at`, not a map walk. `PeerHub::on_session_heartbeat` (headers-sync stall timeout). While the writer is past the 4 MiB send budget, or a paused `getdata` tail waits for serve room, the reader reads no frame; the heartbeat still runs, so the ping timeout still fires. Inbound accept is `inbound_connect_and_handshake` (60 s VERSION/VERACK); timeout drops the `max_inbound` permit. |
+| `tip-accept` | **One** process-wide OS thread. Queue depth 8. Sole production thread for `accept_block` / `accept_branch` / `accept_received_block` / `generate_to_script` / `connect_lock` at tip. HTTP `submitblock`, `generate*`, `invalidateblock`, `reconsiderblock`, `preciousblock`, and an SV2 solution await that thread. They do not occupy the work pool. A full queue waits on the request task. Mints `ClassCWrite` for that connect's Class C stores. Confirm is **`confirm_wire_run_preverified`** (lookup stamp, load pin/assemble, `confirm_scripts_phase` → `rbtc-scripts-*`, write + `ibd-confirm-head` drain). TLS uring is this thread’s `with_thread_local` session. SIGINT stays on tokio; the current job finishes, then the session sees shutdown. Dropping the session’s join future **detaches** (does not condvar-wait on the worker). |
 | `ibd-header` | **One** thread for the catch-up. Persists header batches, loads the walk origin, and reseeds. Joined when IBD stops. |
 | `rbtc-tip-flush` | **One** thread for the IBD confirm engine. Runs the Class C barrier. The next commit waits for the in-flight barrier. Joined when the engine stops. Tip mode flushes that barrier inline on `tip-accept`. |
 | `rbtc-sh-wb` | **One** Class B scripthash appender. A durable `--sh-index` head starts it before catch-up. Direct catch-up starts it only after materialize enters Tip. Absent for the whole Direct catch-up, including a cancelled or failed materialize. Confirm enqueues RAM records; `connect_at` / `note_confirmed_tip` **release** after `tip_tx`. This thread `put_create_batch_append` only for released heights, then advances `sh_indexed_through`. Apply errors re-queue and halt. The Class A tail holds `sh.appender` and finishes inside tip entry before this thread starts. The same lock is the exclusion if a tail and the worker ever overlap. There is no process-local head map. |
@@ -217,11 +217,52 @@ guest.
 `run_cpu_panic_keeps_the_worker`, and `script_worker_cannot_pread` are the
 pins.
 
-**Deferred.** Mempool accept, Electrum, Esplora, and RPC store joins, block
-and header decode, compact reconstruct, header persist, and full-block
-serve stay on Tokio's blocking pool (nCPU, minimum 4). The cap stays there
-while block decode still occupies that pool. A private pool would be a
-second pool. RPC can delay a reconstruct until one replacement lane exists.
+Block-decode permits equal that pool. Header-decode permits are
+`min(max(cores * 2, 8), pool)`, so a header storm cannot take block permits
+or outnumber pool threads. Frames already requested still sit in the async
+task until a permit is free; the getdata window, not the semaphore, bounds
+that RAM. The reader does not await a decode permit before the next TCP read.
+A heartbeat does not apply the ping timeout while a frame is still queued
+for decode.
+
+**Fixed.** Production mempool admit (HTTP `sendrawtransaction`,
+`testmempoolaccept`, `submitpackage`, Electrum broadcast and package,
+Esplora `POST /tx` and package, BlindBit `forward-tx`, and P2P `tx`)
+awaits script verify off the blocking pool. Package accept, 1p1c,
+`submitpackage`, and a multi-tx `testmempoolaccept` run that work on a task
+the request cannot cancel, so a dropped caller still rolls back, trims, and
+removes the test inserts. A single-tx admit is awaited by the caller and
+runs on a task that caller cannot cancel, so a dropped request still
+publishes or restores after the commit. BlindBit `forward-tx` already spawns its admit. A parked blocking pool
+can still admit. Sync `accept_tx_from` remains for stack hubs and in-process
+`dispatch()`. An async admit promotes orphans on that admit task. A package
+that fails re-admits its parked members there too, and puts replaced
+conflicts back the same way. A multi-tx `testmempoolaccept` promotes after
+it removes the inserts. The sync publish path still walks orphans on the caller.
+
+**Fixed.** RPC, REST, Electrum, Esplora, and BlindBit store reads share one
+semaphore sized at listen. Omitted or `0` with `--datadir-hdd` is 1.
+Otherwise it is one less than the core count, minimum 1. `--store-read-budget N`
+(`N >= 1`) overrides that. The permit is acquired on the request task and
+held until the read returns. P2P decode does not take it. Confirm's spindle
+gate is unchanged, and these reads do not take that gate. An Electrum
+read-only batch with a budget of 1 still completes, one read at a time.
+
+**Fixed.** SV2 runs one template build at a time for the same previous-block
+hash, coinbase size, coinbase sigops, and `template_updates`. A second
+session with that key waits on its task and reuses the template. A different
+coinbase budget or a bumped counter builds again. `None` (IBD, or the pool
+not yet maintained) is not cached, so the next interval tries again.
+Esplora's 15-second block-template cache is a separate path.
+`MempoolHub::select_block_template` clones fee deltas, drops that lock, then
+holds the mempool read lock for the whole selection. That lock is not held
+across `.await`. The read spans selection.
+
+**Deferred.** Block and header decode, compact reconstruct, header persist,
+and full-block serve stay on Tokio's blocking pool (nCPU, minimum 4). The
+cap stays there while block decode still occupies that pool. A private pool
+would be a second pool. RPC can delay a reconstruct until one replacement
+lane exists.
 
 **Fixed.** Each failed async `try_send` on a full tip-accept queue
 increments `FULL_QUEUE_SPINS`, then the sender parks on `Notify`. A yield

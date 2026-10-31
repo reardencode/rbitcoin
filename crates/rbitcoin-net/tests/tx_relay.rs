@@ -797,6 +797,39 @@ fn live_pool_recent_accepts_and_1p1c_rollback() {
         hub.template_updates() > tmpl,
         "template must bump like remove_for_block_spent"
     );
+    // The local submit path is async. A child of a below-relay parent still
+    // brings that parent in without a blocking-pool thread.
+    let hub = Arc::new(hub);
+    hub.set_min_relay_sat_kvb(50_000);
+    let lp2 = Transaction {
+        output: vec![
+            TxOut {
+                value: Amount::from_sat(25_0000_0000),
+                script_pubkey: spk.clone(),
+            },
+            TxOut {
+                value: Amount::from_sat(25_0000_0000 - 200),
+                script_pubkey: spk.clone(),
+            },
+        ],
+        ..spend_true(cbs[8], 0, spk.clone())
+    };
+    let lp2_id = lp2.compute_txid();
+    assert!(matches!(
+        hub.accept_tx(&lp2),
+        Err(AcceptError::Policy("min relay fee"))
+    ));
+    let payer2 = spend_vout(OutPoint::new(lp2_id, 1), 1_000);
+    let payer2_id = payer2.compute_txid();
+    let admitted = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(hub.accept_tx_from_async(payer2, TxOrigin::Local))
+        .expect("async 1p1c");
+    assert_eq!(admitted.txid, payer2_id);
+    assert!(hub.contains(&lp2_id));
+    assert!(hub.contains(&payer2_id));
     let _ = std::fs::remove_dir_all(&mp);
 }
 
@@ -4496,6 +4529,117 @@ async fn try_contains_does_not_panic_on_tokio_worker() {
         "spawned task must run on a tokio worker, got {name:?}"
     );
     assert!(!hit);
+    let _ = std::fs::remove_dir_all(&mp_dir);
+    let _ = std::fs::remove_dir_all(&store_dir);
+}
+
+/// A script-bearing admit must finish while the one blocking thread is parked.
+#[test]
+fn script_admit_finishes_while_the_blocking_pool_is_parked() {
+    let (_store, q, cbs) = pad_cbs(3);
+    let mp_dir = tmp();
+    let hub = Arc::new(MempoolHub::open(&mp_dir, Arc::clone(&q)).unwrap());
+    hub.set_relay_enabled(true);
+    let spend = spend_true(cbs[0], 1_000, ScriptBuf::from_bytes(vec![0x51]));
+    let parent = spend_true(cbs[1], 1_000, ScriptBuf::from_bytes(vec![0x51]));
+    let child = spend_vout(
+        OutPoint {
+            txid: parent.compute_txid(),
+            vout: 0,
+        },
+        parent.output[0].value.to_sat() - 1_000,
+    );
+    let probed = spend_true(cbs[2], 1_000, ScriptBuf::from_bytes(vec![0x51]));
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    rt.spawn(async move {
+        tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
+            let _ = release_rx.recv();
+        });
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("pool thread did not park");
+    let hub_tx = Arc::clone(&hub);
+    let admitted = rt.block_on(async {
+        tokio::time::timeout(Duration::from_secs(10), hub_tx.accept_tx_async(spend)).await
+    });
+    let hub_pkg = Arc::clone(&hub);
+    let packaged = rt.block_on(async {
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            hub_pkg.accept_package_async(vec![parent, child]),
+        )
+        .await
+    });
+    let hub_test = Arc::clone(&hub);
+    let tested = rt.block_on(async {
+        tokio::time::timeout(Duration::from_secs(10), hub_test.test_accept_async(probed)).await
+    });
+    let _ = release_tx.send(());
+    let one = admitted
+        .expect("accept timed out while the blocking pool was parked")
+        .expect("script admit");
+    assert!(hub.contains(&one.txid));
+    let pkg = packaged
+        .expect("package timed out while the blocking pool was parked")
+        .expect("script package");
+    assert_eq!(pkg.len(), 2);
+    let row = tested
+        .expect("test accept timed out while the blocking pool was parked")
+        .expect("script test accept");
+    assert!(!hub.contains(&row.txid), "test accept must not admit");
+    let _ = std::fs::remove_dir_all(&mp_dir);
+}
+
+/// Package admit runs on a spawned task. That task must still wait for the
+/// caller's store-read permit before it reads coins.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn package_admit_waits_on_the_store_budget() {
+    let (store_dir, q, cbs) = pad_cbs(2);
+    q.set_api_read_budget(1);
+    let budget = q.api_read_budget();
+    let mp_dir = tmp();
+    let hub = Arc::new(MempoolHub::open(&mp_dir, Arc::clone(&q)).unwrap());
+    hub.set_relay_enabled(true);
+    let parent = spend_true(cbs[0], 1_000, ScriptBuf::from_bytes(vec![0x51]));
+    let parent_id = parent.compute_txid();
+    let child = spend_vout(
+        OutPoint {
+            txid: parent_id,
+            vout: 0,
+        },
+        parent.output[0].value.to_sat() - 1_000,
+    );
+    let hold = budget.clone().acquire_owned().await.expect("permit");
+    let hub_pkg = Arc::clone(&hub);
+    let admit = tokio::spawn(async move {
+        rbitcoin_net::with_store_budget(
+            hub_pkg.query.api_read_budget(),
+            hub_pkg.accept_package_async(vec![parent, child]),
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !admit.is_finished(),
+        "package read coins while the only store permit was held"
+    );
+    drop(hold);
+    let accepted = tokio::time::timeout(Duration::from_secs(5), admit)
+        .await
+        .expect("package finished")
+        .expect("package task")
+        .expect("package admit");
+    assert_eq!(accepted.len(), 2);
+    assert!(hub.contains(&parent_id));
     let _ = std::fs::remove_dir_all(&mp_dir);
     let _ = std::fs::remove_dir_all(&store_dir);
 }

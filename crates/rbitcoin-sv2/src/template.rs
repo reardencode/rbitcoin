@@ -12,8 +12,9 @@ use rbitcoin_net::{ChainHub, SelectBudget};
 use rbitcoin_primitives::Height;
 use rbitcoin_query::{expected_next_bits, next_block_mintime};
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use template_distribution_sv2::{NewTemplate, SetNewPrevHash};
+use tokio::sync::Semaphore;
 
 /// Coinbase witness reserved value the template's witness commitment is
 /// built with (BIP141).
@@ -26,6 +27,7 @@ pub const COINBASE_BASE_WU: u64 = 1168;
 #[doc(hidden)]
 pub const MIN_COINBASE_RESERVE_WU: u64 = 2000;
 
+#[derive(Clone)]
 pub struct Template {
     pub version: u32,
     pub coinbase_prefix: Vec<u8>,
@@ -155,4 +157,98 @@ pub fn build(
         target: Target::from_compact(bits).to_le_bytes(),
         txs: selected.into_iter().map(|(tx, _)| tx).collect(),
     }))
+}
+
+/// One template build. `prev_hash` is the stripped tip, or all zeros when
+/// that tip has not been recorded. Sessions that share this key share one
+/// build.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct TemplateKey {
+    pub prev_hash: [u8; 32],
+    pub max_additional_size: u32,
+    pub max_additional_sigops: u16,
+    pub template_updates: u64,
+}
+
+/// One [`build`] at a time for this listener. The permit is taken on the
+/// caller's task before `rbtc-off-pool`, so a second session waits without
+/// a blocking-pool thread, and the build itself does not sit on that pool
+/// while connect holds `template_prev`. The last `Ok(Some)` is kept and
+/// reused for that same [`TemplateKey`]. A different key builds once the
+/// permit is free. `Ok(None)` is not stored: IBD and an unmaintained pool
+/// retry.
+pub struct TemplateFlight {
+    one: Arc<Semaphore>,
+    slot: Mutex<Option<(TemplateKey, Template)>>,
+    /// The build task owns the flight permit. The handle stays here so the
+    /// task is not detached at the call, and so a dropped session cannot
+    /// abort a build that later sessions still share.
+    inflight: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl Default for TemplateFlight {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TemplateFlight {
+    pub fn new() -> Self {
+        Self {
+            one: Arc::new(Semaphore::new(1)),
+            slot: Mutex::new(None),
+            inflight: Mutex::new(None),
+        }
+    }
+
+    fn cached(&self, key: &TemplateKey) -> Option<Template> {
+        let g = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        g.as_ref().filter(|(k, _)| k == key).map(|(_, t)| t.clone())
+    }
+
+    /// Run `build` off the reactor when `key` is not already stored.
+    /// The permit lives in a task that outlives this call, so a dropped
+    /// session does not let a second build start, and the result is stored
+    /// when the build finishes. A template whose `prev_hash` is not `key`'s
+    /// is not stored.
+    pub async fn get_or_build(
+        self: &Arc<Self>,
+        key: TemplateKey,
+        build: impl FnOnce() -> io::Result<Option<Template>> + Send + 'static,
+    ) -> io::Result<Option<Template>> {
+        if let Some(hit) = self.cached(&key) {
+            return Ok(Some(hit));
+        }
+        let permit = Arc::clone(&self.one)
+            .acquire_owned()
+            .await
+            .expect("sv2 template flight");
+        if let Some(hit) = self.cached(&key) {
+            drop(permit);
+            return Ok(Some(hit));
+        }
+        let flight = Arc::clone(self);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _permit = permit;
+            // Connect holds `template_prev` for the whole tip update.
+            let built = rbitcoin_net::off_pool(build).await;
+            let built = match built {
+                Ok(t) => t,
+                Err(e) => {
+                    let _ = tx.send(Err(e));
+                    return;
+                }
+            };
+            if let Some(t) = built.clone() {
+                if t.prev_hash == key.prev_hash {
+                    *flight.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, t));
+                }
+            }
+            let _ = tx.send(Ok(built));
+        });
+        *self.inflight.lock().unwrap_or_else(|e| e.into_inner()) = Some(task);
+        rx.await
+            .map_err(|_| io::Error::other("sv2 template flight dropped"))?
+    }
 }
