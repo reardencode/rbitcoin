@@ -812,7 +812,20 @@ pub async fn block_template(State(st): State<AppState>) -> Response {
     if st.block_template.is_none() {
         return not_found();
     }
-    spawn_join(move || block_template_sync(&st)).await
+    // Sample before the store permit and before `gbt_cache`. Connect holds
+    // `template_prev` for the whole tip update. The 15s cache TTL is unchanged.
+    let prev = match st.mempool.as_ref() {
+        Some(mp) => {
+            let mp = Arc::clone(mp);
+            rbitcoin_net::off_pool(move || mp.template_prev()).await
+        }
+        None => None,
+    };
+    spawn_join(move || {
+        let _prev = rbitcoin_net::arm_template_prev_sample(prev);
+        block_template_sync(&st)
+    })
+    .await
 }
 
 #[doc(hidden)]
@@ -842,12 +855,20 @@ pub fn block_template_sync(st: &AppState) -> Response {
     match (fun.0)() {
         Ok(body) => {
             let body = Arc::new(body);
-            *cache = Some(GbtCache {
-                at: Instant::now(),
-                tip,
-                updates,
-                body: Arc::clone(&body),
-            });
+            // The sample can be one connect behind the query tip. Do not
+            // pin that body on the new tip for the rest of the 15s TTL.
+            let same_tip = match body.get("previousblockhash").and_then(Value::as_str) {
+                Some(prev) => prev == block_hash_hex(&tip),
+                None => true,
+            };
+            if same_tip {
+                *cache = Some(GbtCache {
+                    at: Instant::now(),
+                    tip,
+                    updates,
+                    body: Arc::clone(&body),
+                });
+            }
             gbt_json(&body)
         }
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e).into_response(),

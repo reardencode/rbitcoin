@@ -1960,6 +1960,259 @@ async fn batched_long_poll_does_not_hold_the_store_budget() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn plain_getblocktemplate_keeps_the_work_queue() {
+    let plain = serde_json::json!({
+        "method": "getblocktemplate",
+        "params": [{ "rules": ["segwit"] }]
+    });
+    assert!(!call_waits_without_work_queue(&plain));
+    let named = serde_json::json!({
+        "method": "getblocktemplate",
+        "params": { "template_request": { "rules": ["segwit"] } }
+    });
+    assert!(!call_waits_without_work_queue(&named));
+    let null_id = serde_json::json!({
+        "method": "getblocktemplate",
+        "params": [{ "longpollid": null, "rules": ["segwit"] }]
+    });
+    assert!(!call_waits_without_work_queue(&null_id));
+    let proposal = serde_json::json!({
+        "method": "getblocktemplate",
+        "params": [{ "mode": "proposal", "longpollid": "aa", "data": "00" }]
+    });
+    assert!(!call_waits_without_work_queue(&proposal));
+    let bad_mode = serde_json::json!({
+        "method": "getblocktemplate",
+        "params": [{ "mode": 1, "longpollid": "aa" }]
+    });
+    assert!(!call_waits_without_work_queue(&bad_mode));
+    let waiting = serde_json::json!({
+        "method": "getblocktemplate",
+        "params": [{ "longpollid": "ab" }]
+    });
+    assert!(call_waits_without_work_queue(&waiting));
+    let named_wait = serde_json::json!({
+        "method": "getblocktemplate",
+        "params": { "template_request": { "longpollid": 1 } }
+    });
+    assert!(call_waits_without_work_queue(&named_wait));
+    let height = serde_json::json!({ "method": "waitforblockheight", "params": [1] });
+    assert!(call_waits_without_work_queue(&height));
+    let count = serde_json::json!({ "method": "getblockcount" });
+    assert!(!call_waits_without_work_queue(&count));
+}
+
+fn gbt_prev_ctx() -> (
+    Arc<rbitcoin_rpc::methods::RpcContext>,
+    rbitcoin_store::testutil::TempDir,
+    Arc<MempoolHub>,
+) {
+    let dir = rbitcoin_store::testutil::TempDir::labeled("rpc-gbt-prev").expect("temp dir");
+    let hub = Arc::new(rbitcoin_net::ChainHub::new(
+        Query::open_or_create_tiny(dir.path().join("store")).unwrap(),
+        rbitcoin_consensus::ChainParams::regtest(),
+        rbitcoin_consensus::Milestone::NONE,
+    ));
+    hub.ensure_genesis().unwrap();
+    let mp = MempoolHub::open_with_weight(
+        dir.path().join("mempool"),
+        Arc::clone(&hub.query),
+        300_000_000,
+    )
+    .unwrap();
+    let ctx = Arc::new(rbitcoin_rpc::methods::RpcContext {
+        query: Arc::clone(&hub.query),
+        mempool: Some(Arc::clone(&mp)),
+        network: Network::Regtest,
+        start: Instant::now(),
+        stop: Arc::new(AtomicBool::new(false)),
+        connections: Arc::new(AtomicU64::new(0)),
+        initial_block_download: Arc::new(AtomicBool::new(false)),
+        subversion: "/rbitcoin:test/".into(),
+        regtest: None,
+        peers: None,
+        chain: Some(hub),
+        addrman: None,
+        logpath: String::new(),
+        active: Arc::new(std::sync::Mutex::new(
+            rbitcoin_rpc::methods::RpcActive::default(),
+        )),
+        alert_notify: None,
+        alert_fired: Arc::new(AtomicBool::new(false)),
+        blocksonly: false,
+        package_dialect: false,
+    });
+    (ctx, dir, mp)
+}
+
+fn hold_template_prev(
+    mp: Arc<MempoolHub>,
+) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Sender<()>) {
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let hold = mp.template_hold();
+        held_tx.send(()).expect("held");
+        let _ = release_rx.recv();
+        drop(hold);
+    });
+    held_rx.recv().expect("template hold");
+    (worker, release_tx)
+}
+
+fn gbt_app(ctx: Arc<rbitcoin_rpc::methods::RpcContext>) -> AppState {
+    AppState {
+        ctx,
+        auth: RpcAuth::new("test-token"),
+        cookie: None,
+        work_queue: Arc::new(Semaphore::new(4)),
+        rest_queue: Arc::new(Semaphore::new(1)),
+        rest: false,
+        require_auth: false,
+    }
+}
+
+/// A plain template blocks in `template_prev` without the disk permit and
+/// without the one blocking-pool thread. `getblockcount` still finishes.
+#[test]
+fn plain_getblocktemplate_samples_template_prev_off_the_pool() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let (ctx, dir, mp) = gbt_prev_ctx();
+        ctx.query.set_api_read_budget(1);
+        let (holder, release) = hold_template_prev(mp);
+        let gbt_state = gbt_app(Arc::clone(&ctx));
+        let body = serde_json::json!({
+            "jsonrpc": "1.0",
+            "id": 1,
+            "method": "getblocktemplate",
+            "params": [{ "rules": ["segwit"] }]
+        });
+        let gbt = tokio::spawn(async move {
+            rpc_post(
+                State(gbt_state),
+                axum::extract::Request::new(Body::from(body.to_string())),
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(
+            !gbt.is_finished(),
+            "template returned while template_prev was held"
+        );
+        let count_state = gbt_app(Arc::clone(&ctx));
+        let count = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            rpc_post(
+                State(count_state),
+                axum::extract::Request::new(Body::from(
+                    br#"{"jsonrpc":"1.0","id":2,"method":"getblockcount"}"#.as_slice(),
+                )),
+            ),
+        )
+        .await
+        .expect("getblockcount while template_prev is held");
+        assert_eq!(count.status(), StatusCode::OK);
+        let t0 = std::time::Instant::now();
+        tokio::task::spawn_blocking(|| ()).await.unwrap();
+        assert!(
+            t0.elapsed() < std::time::Duration::from_millis(400),
+            "plain getblocktemplate held the blocking pool for {:?}",
+            t0.elapsed()
+        );
+        release.send(()).unwrap();
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), gbt)
+            .await
+            .expect("template finishes after the hold")
+            .expect("join");
+        assert_eq!(response.status(), StatusCode::OK);
+        holder.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir.path());
+    });
+}
+
+/// A real long-poll's tip poll blocks in `template_prev` on `rbtc-off-pool`.
+/// The disk permit and the blocking pool stay free for `getblockcount`.
+#[test]
+fn gbt_longpoll_poll_does_not_hold_pool_or_budget() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let (ctx, dir, mp) = gbt_prev_ctx();
+        ctx.query.set_api_read_budget(1);
+        let tip = rbitcoin_rpc::methods::tip_hash_height(&ctx).unwrap().0;
+        let updates = mp.template_updates();
+        let state = gbt_app(Arc::clone(&ctx));
+        let body = serde_json::json!({
+            "jsonrpc": "1.0",
+            "id": 1,
+            "method": "getblocktemplate",
+            "params": [{ "rules": ["segwit"], "longpollid": format!("{tip}{updates}") }]
+        });
+        let waiter = tokio::spawn(async move {
+            rpc_post(
+                State(state),
+                axum::extract::Request::new(Body::from(body.to_string())),
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!waiter.is_finished(), "long-poll returned before the hold");
+        // The poll loop is running. The next `template_prev` sample blocks
+        // here, off the pool and off the disk permit.
+        let (holder, release) = hold_template_prev(Arc::clone(&mp));
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            !waiter.is_finished(),
+            "long-poll returned while the tip was held"
+        );
+        let count_state = gbt_app(Arc::clone(&ctx));
+        let count = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            rpc_post(
+                State(count_state),
+                axum::extract::Request::new(Body::from(
+                    br#"{"jsonrpc":"1.0","id":2,"method":"getblockcount"}"#.as_slice(),
+                )),
+            ),
+        )
+        .await
+        .expect("getblockcount while a template long-poll is blocked on template_prev");
+        assert_eq!(count.status(), StatusCode::OK);
+        let t0 = std::time::Instant::now();
+        tokio::task::spawn_blocking(|| ()).await.unwrap();
+        assert!(
+            t0.elapsed() < std::time::Duration::from_millis(400),
+            "template long-poll held the blocking pool for {:?}",
+            t0.elapsed()
+        );
+        ctx.stop.store(true, Ordering::SeqCst);
+        release.send(()).unwrap();
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+            .await
+            .expect("long-poll finishes after stop")
+            .expect("join");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = axum::body::to_bytes(response.into_body(), 8 * 1024)
+            .await
+            .expect("body");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(v["error"]["message"], "Shutting down", "{v}");
+        holder.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir.path());
+    });
+}
+
 #[allow(clippy::cognitive_complexity)] // one listener, envelope junk table
 #[tokio::test]
 async fn jsonrpc_envelope_junk_and_auth() {

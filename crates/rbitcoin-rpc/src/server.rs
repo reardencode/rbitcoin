@@ -469,15 +469,21 @@ impl HttpWaitPrep {
 
     async fn tip(ctx: &Arc<crate::methods::RpcContext>) -> Self {
         let ctx = Arc::clone(ctx);
-        let snap = tokio::task::spawn_blocking(move || crate::methods::tip_hash_height(&ctx).ok())
-            .await
-            .ok()
-            .flatten();
+        let snap =
+            rbitcoin_net::off_pool_budgeted(move || crate::methods::tip_hash_height(&ctx).ok())
+                .await;
         Self {
             satisfied: true,
             snap,
         }
     }
+}
+
+/// `template_prev` on `rbtc-off-pool`, with no store permit. `None` when this
+/// context has no mempool (the same answer as the lock).
+async fn sample_template_prev(ctx: &Arc<crate::methods::RpcContext>) -> Option<[u8; 32]> {
+    let mp = ctx.mempool.as_ref().map(Arc::clone)?;
+    rbitcoin_net::off_pool(move || mp.template_prev()).await
 }
 
 pub async fn satisfy_http_wait(
@@ -517,16 +523,18 @@ async fn satisfy_one_http_wait(
     };
     let mut tips = ctx.chain.as_ref().map(|c| c.subscribe_tips());
     if method == "getblocktemplate" {
+        let prev = sample_template_prev(ctx).await;
         let want = {
             let ctx = Arc::clone(ctx);
             let params = params.clone();
-            tokio::task::spawn_blocking(move || match gbt_request(&ctx, &params) {
-                Ok(GbtRequest::Template { longpoll, .. }) => longpoll,
-                _ => None,
+            rbitcoin_net::off_pool_budgeted(move || {
+                let _prev = rbitcoin_net::arm_template_prev_sample(prev);
+                match gbt_request(&ctx, &params) {
+                    Ok(GbtRequest::Template { longpoll, .. }) => longpoll,
+                    _ => None,
+                }
             })
             .await
-            .ok()
-            .flatten()
         };
         let Some(want) = want else {
             return HttpWaitPrep::skip();
@@ -540,14 +548,15 @@ async fn satisfy_one_http_wait(
             if ctx.stop.load(Ordering::SeqCst) || tokio::time::Instant::now() >= deadline {
                 return HttpWaitPrep::gbt();
             }
+            let prev = sample_template_prev(&ctx).await;
             let ready = {
                 let ctx = Arc::clone(&ctx);
                 let want = want.clone();
-                tokio::task::spawn_blocking(move || {
+                rbitcoin_net::off_pool_budgeted(move || {
+                    let _prev = rbitcoin_net::arm_template_prev_sample(prev);
                     ctx.stop.load(Ordering::SeqCst) || want.changed(&ctx)
                 })
                 .await
-                .unwrap_or(true)
             };
             if ready || tokio::time::Instant::now() >= deadline {
                 return HttpWaitPrep::gbt();
@@ -583,9 +592,7 @@ async fn satisfy_one_http_wait(
         }
         "waitfornewblock" => {
             let ctx_b = Arc::clone(ctx);
-            let start = tokio::task::spawn_blocking(move || tip_hash_height(&ctx_b).ok())
-                .await
-                .unwrap_or(None);
+            let start = rbitcoin_net::off_pool_budgeted(move || tip_hash_height(&ctx_b).ok()).await;
             let Some((hash, _)) = start else {
                 return HttpWaitPrep::tip(ctx).await;
             };
@@ -603,7 +610,7 @@ async fn satisfy_one_http_wait(
         let ready = {
             let ctx = Arc::clone(&ctx);
             let kind = kind.clone();
-            tokio::task::spawn_blocking(move || {
+            rbitcoin_net::off_pool_budgeted(move || {
                 let Ok((hash, height)) = tip_hash_height(&ctx) else {
                     return true;
                 };
@@ -614,7 +621,6 @@ async fn satisfy_one_http_wait(
                 }
             })
             .await
-            .unwrap_or(true)
         };
         if ready || tokio::time::Instant::now() >= deadline {
             return HttpWaitPrep::tip(&ctx).await;
@@ -666,9 +672,14 @@ pub async fn rpc_post(State(state): State<AppState>, req: Request) -> Response {
     };
     let ctx = Arc::clone(&state.ctx);
     let budget = state.ctx.query.api_read_budget();
-    // A long-poll or a tip connect is ordered per call. The work-queue slot
-    // and the disk permit are dropped while that call waits.
-    if http_body_awaits_tip(&parsed) || http_body_has_longpoll(&parsed) {
+    // A long-poll, a template, or a tip connect is ordered per call. A
+    // long-poll drops the work-queue slot and the disk permit while it
+    // waits. A template that will not wait still takes the slot before any
+    // store read, then samples `template_prev` before the disk permit.
+    if http_body_awaits_tip(&parsed)
+        || http_body_has_longpoll(&parsed)
+        || http_body_has_template(&parsed)
+    {
         let out = rbitcoin_net::with_store_budget(
             budget,
             exec_http_rpc_async(ctx, parsed, &state.work_queue),
@@ -863,10 +874,58 @@ fn http_body_awaits_tip(parsed: &serde_json::Value) -> bool {
 }
 
 fn http_call_is_longpoll(req: &serde_json::Value) -> bool {
-    matches!(
-        req.get("method").and_then(|m| m.as_str()),
-        Some("waitforblock" | "waitforblockheight" | "waitfornewblock" | "getblocktemplate")
-    )
+    match req.get("method").and_then(|m| m.as_str()) {
+        Some("waitforblock" | "waitforblockheight" | "waitfornewblock") => true,
+        // A template with no longpollid returns immediately. Dropping the
+        // slot first lets another POST take it, and `gbt_request` would run
+        // before the queue check.
+        Some("getblocktemplate") => gbt_request_will_wait(req),
+        _ => false,
+    }
+}
+
+/// `true` when `getblocktemplate` will park on a longpollid. Proposal mode
+/// and an invalid mode return without waiting. A non-string id still waits.
+fn gbt_request_will_wait(req: &serde_json::Value) -> bool {
+    let Some(params) = req.get("params") else {
+        return false;
+    };
+    let Some(parsed) = crate::methods::RpcParams::from_json(params) else {
+        return false;
+    };
+    let Some(obj) = parsed
+        .get(0, "template_request")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return false;
+    };
+    match obj.get("mode") {
+        None | Some(serde_json::Value::Null) => {}
+        Some(serde_json::Value::String(mode)) if mode == "template" => {}
+        Some(_) => return false,
+    }
+    match obj.get("longpollid") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(_) => true,
+    }
+}
+
+fn http_call_is_template(req: &serde_json::Value) -> bool {
+    req.get("method").and_then(|m| m.as_str()) == Some("getblocktemplate")
+}
+
+fn http_body_has_template(parsed: &serde_json::Value) -> bool {
+    if let Some(arr) = parsed.as_array() {
+        arr.iter().any(http_call_is_template)
+    } else {
+        http_call_is_template(parsed)
+    }
+}
+
+/// The call drops its work-queue slot before it runs, because it may wait.
+#[doc(hidden)]
+pub fn call_waits_without_work_queue(req: &serde_json::Value) -> bool {
+    http_call_is_longpoll(req)
 }
 
 fn http_body_has_longpoll(parsed: &serde_json::Value) -> bool {
@@ -1007,10 +1066,18 @@ async fn exec_one_async(
         let id = req.get("id").cloned();
         let req = req.clone();
         let ctx = Arc::clone(ctx);
+        // Sample before the permit. The build then uses the sample, so the
+        // permit covers header and mempool reads and not the connect mutex.
+        let template_prev = if method == "getblocktemplate" {
+            Some(sample_template_prev(&ctx).await)
+        } else {
+            None
+        };
         let store_permit = rbitcoin_net::acquire_armed_store_budget().await;
         return match tokio::task::spawn_blocking(move || {
             let _g = BlockingRegion::enter();
             let _store = store_permit;
+            let _prev = template_prev.map(rbitcoin_net::arm_template_prev_sample);
             if waited {
                 crate::methods::set_http_wait_satisfied(true);
                 crate::methods::set_http_wait_snap(snap);

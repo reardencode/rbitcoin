@@ -21,6 +21,7 @@ use rbitcoin_mempool::{
 };
 use rbitcoin_primitives::{Fk, Height};
 use rbitcoin_query::Query;
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
@@ -33,6 +34,33 @@ use tokio::sync::broadcast;
 thread_local! {
     static PROMOTE_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static PROMOTE_DEPTH_MAX: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+thread_local! {
+    /// `None` locks [`MempoolHub::template_prev`]. `Some` is a sample taken
+    /// before the store-read permit: `Some(None)` is a pool with no stripped tip.
+    static TEMPLATE_PREV_SAMPLE: Cell<Option<Option<[u8; 32]>>> = const { Cell::new(None) };
+}
+
+/// This thread's [`MempoolHub::template_prev`] returns `sample` and does not lock.
+///
+/// Connect holds that mutex from before the tip moves until the strip is
+/// recorded. Callers sample on `rbtc-off-pool` with no store permit, then arm
+/// the sample around the header and mempool reads.
+#[doc(hidden)]
+pub fn arm_template_prev_sample(sample: Option<[u8; 32]>) -> TemplatePrevSample {
+    TEMPLATE_PREV_SAMPLE.with(|c| c.set(Some(sample)));
+    TemplatePrevSample(())
+}
+
+/// Clears [`arm_template_prev_sample`] on drop.
+#[doc(hidden)]
+pub struct TemplatePrevSample(());
+
+impl Drop for TemplatePrevSample {
+    fn drop(&mut self) {
+        TEMPLATE_PREV_SAMPLE.with(|c| c.set(None));
+    }
 }
 
 #[cfg(debug_assertions)]
@@ -4599,6 +4627,12 @@ impl MempoolHub {
     }
 
     pub fn template_prev(&self) -> Option<[u8; 32]> {
+        // An armed sample was taken on `rbtc-off-pool` before the store
+        // permit. Do not lock again: connect holds this mutex for the whole
+        // tip update.
+        if let Some(sample) = TEMPLATE_PREV_SAMPLE.with(Cell::get) {
+            return sample;
+        }
         *self.template_prev.lock().unwrap()
     }
 

@@ -45,7 +45,7 @@ Three thread kinds only. **Tokio workers must not wait on a `std` mutex/rwlock, 
 |------|-----|--------|
 | Reactor | `tokio-rt-worker` × nCPU | epoll, timers, framing. Node caps `spawn_blocking` at nCPU (min 4), not tokio’s 512. |
 | Role | `tip-accept`, `ibd-header`, `ibd-confirm-*`, `rbtc-tip-flush`, `rbtc-sh-wb`, `rbtc-idx-wb` | Sole writer for a resource. Not a job pool. |
-| Work pool | `rbtc-scripts-*` steal; tokio blocking pool | Independent jobs. Mempool script verify is awaited on the request task (`run_cpu`); prepare and commit run on `rbtc-off-pool`, not the blocking pool. Prepare takes one `--store-read-budget` permit and drops it before script verify. Electrum / Esplora / RPC / REST / BlindBit store joins still use the blocking pool, and they share that one budget. A waiter does not occupy a pool thread. Heavy v2 encode, compact short ids, and JSON of at least 4 KiB run on `rbtc-scripts-*`. |
+| Work pool | `rbtc-scripts-*` steal; tokio blocking pool | Independent jobs. Mempool script verify is awaited on the request task (`run_cpu`); prepare and commit run on `rbtc-off-pool`, not the blocking pool. Prepare takes one `--store-read-budget` permit and drops it before script verify. Electrum / Esplora / RPC / REST / BlindBit store joins still use the blocking pool, and they share that one budget. A waiter does not occupy a pool thread. `getblocktemplate` and Esplora `GET /block-template` sample the template tip on `rbtc-off-pool` before a store-read permit (Esplora also before its 15-second cache lock). Long-poll tip polls do the same and drop the permit before they sleep. Heavy v2 encode, compact short ids, and JSON of at least 4 KiB run on `rbtc-scripts-*`. |
 
 | Role | Notes |
 |------|--------|
