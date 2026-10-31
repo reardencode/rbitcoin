@@ -50,11 +50,8 @@ impl OccupyGate {
         while entered.load(Ordering::SeqCst) < k {
             let left = Duration::from_secs(2).saturating_sub(start.elapsed());
             assert!(!left.is_zero(), "failed to occupy steal workers");
-            let (g2, status) = cv.wait_timeout(g, left).unwrap_or_else(|p| p.into_inner());
+            let (g2, _) = cv.wait_timeout(g, left).unwrap_or_else(|p| p.into_inner());
             g = g2;
-            if status.timed_out() {
-                panic!("failed to occupy steal workers");
-            }
         }
         drop(g);
         me
@@ -290,18 +287,10 @@ fn wait_until(label: &str, pred: impl Fn() -> bool) {
             HOLD_ENTERED.load(Ordering::SeqCst),
             STEAL_UNPARKS.load(Ordering::Relaxed)
         );
-        let (g2, status) = SCRIPT_PROGRESS_CV
+        let (g2, _) = SCRIPT_PROGRESS_CV
             .wait_timeout(g, left)
             .unwrap_or_else(|p| p.into_inner());
         g = g2;
-        if status.timed_out() {
-            panic!(
-                "{label}: timed out without a signal idle={} entered={} unparks={}",
-                idle_waiter_count(),
-                HOLD_ENTERED.load(Ordering::SeqCst),
-                STEAL_UNPARKS.load(Ordering::Relaxed)
-            );
-        }
     }
 }
 
@@ -349,13 +338,10 @@ fn publish_waking(n: usize, k: usize, items: Vec<u32>) -> HeldWave {
                 !left.is_zero(),
                 "claim of {k} stalled: entered={entered} unparks={unparks}"
             );
-            let (g2, status) = SCRIPT_PROGRESS_CV
+            let (g2, _) = SCRIPT_PROGRESS_CV
                 .wait_timeout(g, left)
                 .unwrap_or_else(|p| p.into_inner());
             g = g2;
-            if status.timed_out() {
-                panic!("claim of {k} stalled: entered={entered} unparks={unparks}");
-            }
         }
     }
 }
