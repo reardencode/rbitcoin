@@ -4039,6 +4039,10 @@ impl ChainHub {
         // Before the commit lock: the relay-on purge takes this same mutex
         // and then reads the query. The pool matches `keep_height` once the
         // disconnected transactions are back in it.
+        let removed = self
+            .tip_height()
+            .map(|h| h.saturating_sub(keep_height))
+            .unwrap_or(0);
         let mp_hold = self.mempool().cloned();
         let mut template_hold = mp_hold.as_ref().map(|mp| mp.template_hold());
         let _commit = self
@@ -4052,6 +4056,24 @@ impl ChainHub {
             }
         }
         drop(template_hold);
+        // Invalidate is the only caller. A branch reorg disconnects in the
+        // commit and publishes its own tip. With no replacement fork, nothing
+        // else sends one, so a waiter that has this hub and no mempool stays
+        // parked until its deadline. `removed` is the reorg length so Electrum
+        // reads every status again and a long disconnect announces by inv.
+        if removed > 0 {
+            if let (Some(height), Some(hash), Some(header)) =
+                (self.tip_height(), self.tip_hash(), self.tip_header())
+            {
+                let _ = self.tip_tx.send(TipEvent {
+                    height,
+                    hash,
+                    header,
+                    reorg_branch_len: removed,
+                });
+                self.notify.notify_waiters();
+            }
+        }
         Ok(())
     }
 
