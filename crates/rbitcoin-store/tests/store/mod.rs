@@ -61,6 +61,45 @@ fn open_tiny_reopen_still_works() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An `--assumehot` source opens only as it is: another schema and a missing
+/// table are refused, and the missing table is not created.
+#[test]
+fn open_source_refuses_another_schema_and_a_missing_table() {
+    let closed = || {
+        let dir = tmp();
+        Store::create_tiny(&dir).unwrap().flush().unwrap();
+        dir
+    };
+    let dir = closed();
+    Store::open_source(&dir).unwrap();
+    let mut meta = std::fs::read(dir.join("meta")).unwrap();
+    meta[4..6].copy_from_slice(&(SCHEMA_VERSION - 1).to_le_bytes());
+    std::fs::write(dir.join("meta"), meta).unwrap();
+    assert!(matches!(
+        Store::open_source(&dir),
+        Err(StoreError::BadSchema(v)) if v == SCHEMA_VERSION - 1
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    for table in ["scripthash.body", "header_txs_first.body"] {
+        let dir = closed();
+        let gone = dir.join(table);
+        if gone.is_dir() {
+            std::fs::remove_dir_all(&gone).unwrap();
+        } else {
+            std::fs::remove_file(&gone).unwrap();
+        }
+        match Store::open_source(&dir) {
+            Err(StoreError::Io { path, source }) => {
+                assert_eq!(path, dir.join(table));
+                assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+            }
+            other => panic!("{table}: {:?}", other.map(drop)),
+        }
+        assert!(!dir.join(table).exists(), "{table} must not be created");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 #[test]
 fn occupied_schema23_header_body_opens_as_24() {
     use rbitcoin_store::file::{TableFile, FILE_HEADER_LEN};

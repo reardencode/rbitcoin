@@ -430,14 +430,32 @@ impl Store {
     }
 
     pub fn open_layout(layout: StoreLayout) -> Result<Self, StoreError> {
+        Self::open_layout_as(layout, false)
+    }
+
+    /// Open a closed store at `dir` to read it, for an `--assumehot` source.
+    ///
+    /// The store must be on the current schema. No leftover is dropped (a
+    /// current binary already dropped them), a missing table is refused
+    /// instead of created, and `header.head` keeps the slots its file has, so
+    /// no head scale or `RBITCOIN_HEAD_SLOTS_HEADER` resizes it.
+    pub fn open_source(dir: &Path) -> Result<Self, StoreError> {
+        Self::open_layout_as(StoreLayout::single(dir), true)
+    }
+
+    fn open_layout_as(layout: StoreLayout, source: bool) -> Result<Self, StoreError> {
         crate::file::ensure_nofile_budget();
         let path = layout.dir.clone();
         if !path.is_dir() {
             return Err(StoreError::NotDirectory(path));
         }
         let meta_ver = check_meta(&path)?;
-        open_layout_refuse_old(&path, meta_ver)?;
-        drop_unread_store_leftovers(&path);
+        if source {
+            refuse_unopenable_source(&path, meta_ver)?;
+        } else {
+            open_layout_refuse_old(&path, meta_ver)?;
+            drop_unread_store_leftovers(&path);
+        }
         let scripthash = if path.join("scripthash.body").exists() {
             ScriptHashTable::open_with_scale(&path, layout.head_scale)?
         } else {
@@ -450,20 +468,18 @@ impl Store {
         };
         let confirmed = ConfirmedTable::open(&path)?;
         let height_fence = HeightFence::from_confirmed(&confirmed, &header_txs)?;
-        drop_leftover_tx_height(&path);
-        crate::scripthash::unlink_scripthash_run_leftovers(&path)?;
-        open_layout_rewrite_current(&path, meta_ver)?;
-        let seqsigwit_dir = resolve_seqsigwit_dir(&layout)?;
-        if layout.is_split() {
-            refuse_cold_index_dirs(&path, &seqsigwit_dir)?;
+        if !source {
+            drop_leftover_tx_height(&path);
+            crate::scripthash::unlink_scripthash_run_leftovers(&path)?;
+            open_layout_rewrite_current(&path, meta_ver)?;
         }
-        let txs = TxTable::open_seqsigwit(&path, &seqsigwit_dir, layout.open_opts())?;
-        if layout.is_split() {
-            write_seqsigwit_reloc(&path)?;
-        }
-        let cold_path = layout.is_split().then_some(seqsigwit_dir);
+        let (txs, cold_path) = open_layout_txs(&layout)?;
         let store = Self {
-            headers: HeaderTable::open_with_scale(&path, layout.head_scale)?,
+            headers: if source {
+                HeaderTable::open_source(&path)?
+            } else {
+                HeaderTable::open_with_scale(&path, layout.head_scale)?
+            },
             txs,
             spenders: SpenderTable::open(&path)?,
             scripthash,
@@ -1533,16 +1549,20 @@ impl Store {
         Ok(out)
     }
 
-    /// Spender tx fks for a create outpoint (no `tx.head`; includes non-strong).
-    pub fn spenders_create(&self, create_tx_fk: Fk, out_index: u32) -> Result<Vec<Fk>, StoreError> {
+    /// Spender `(tx fk, vin)` pairs for a create outpoint (no `tx.head`; includes non-strong).
+    pub fn spenders_create(
+        &self,
+        create_tx_fk: Fk,
+        out_index: u32,
+    ) -> Result<Vec<(Fk, u32)>, StoreError> {
         let mut out = Vec::new();
         point_table::for_each_spender_create(
             &self.txs,
             &self.spenders,
             create_tx_fk,
             out_index,
-            |spending_tx_fk, _vin| {
-                out.push(spending_tx_fk);
+            |spending_tx_fk, vin| {
+                out.push((spending_tx_fk, vin));
                 Ok(true)
             },
         )?;
@@ -2098,6 +2118,38 @@ pub fn unlink_leftover_spent_off(dir: &Path) -> Result<(), StoreError> {
         std::fs::remove_file(&path).map_err(|e| StoreError::io(&path, e))?;
     }
     rbitcoin_log::warn!("store: dropping leftover spent.off (schema 22 uses create.loc)");
+    Ok(())
+}
+
+/// The tx table, with its append-only files on the cold dir when `layout` is
+/// split; that dir is returned for `cold_path`.
+fn open_layout_txs(layout: &StoreLayout) -> Result<(TxTable, Option<PathBuf>), StoreError> {
+    let path = &layout.dir;
+    let seqsigwit_dir = resolve_seqsigwit_dir(layout)?;
+    if layout.is_split() {
+        refuse_cold_index_dirs(path, &seqsigwit_dir)?;
+    }
+    let txs = TxTable::open_seqsigwit(path, &seqsigwit_dir, layout.open_opts())?;
+    if layout.is_split() {
+        write_seqsigwit_reloc(path)?;
+    }
+    Ok((txs, layout.is_split().then_some(seqsigwit_dir)))
+}
+
+/// An `--assumehot` source opens as it is: on the current schema, with the
+/// tables a normal open would create already there.
+fn refuse_unopenable_source(path: &Path, meta_ver: u16) -> Result<(), StoreError> {
+    if meta_ver != SCHEMA_VERSION {
+        return Err(StoreError::BadSchema(meta_ver));
+    }
+    for table in ["scripthash.body", "header_txs_first.body"] {
+        if !path.join(table).exists() {
+            return Err(StoreError::io(
+                path.join(table),
+                std::io::Error::from(std::io::ErrorKind::NotFound),
+            ));
+        }
+    }
     Ok(())
 }
 
