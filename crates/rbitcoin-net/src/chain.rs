@@ -2638,12 +2638,15 @@ impl ChainHub {
             return Err(NetError::Consensus("Block not found".into()));
         }
         let applied = self.try_apply_after_invalidate();
-        // A replacement fork publishes from its branch reorg. Sending the
-        // stump before that wakes a one-shot wait, which then drops the
-        // subscription and misses the fork. With no fork, the stump is the
-        // tip a waiter has to see.
+        // A replacement fork publishes from its branch reorg, including the
+        // template watch. Sending the stump before that wakes a one-shot
+        // wait, which then drops the subscription and misses the fork. With
+        // no fork, the stump is the tip a waiter has to see.
         if let Some((removed, stump)) = disconnected_to {
             if removed > 0 && self.tip_hash() == Some(stump) {
+                if let Some(mp) = self.mempool() {
+                    mp.note_template_prev(stump.to_byte_array());
+                }
                 if let (Some(height), Some(tip_hash), Some(header)) =
                     (self.tip_height(), self.tip_hash(), self.tip_header())
                 {
@@ -4066,17 +4069,16 @@ impl ChainHub {
         // and then reads the query. The pool matches `keep_height` once the
         // disconnected transactions are back in it.
         let mp_hold = self.mempool().cloned();
-        let mut template_hold = mp_hold.as_ref().map(|mp| mp.template_hold());
+        // Hold the mark so a template cannot observe the pool mid-disconnect.
+        // Do not commit this height. The drop would publish it on
+        // template_watch before invalidate applies a heavier fork, and a
+        // one-shot wait would return the stump.
+        let template_hold = mp_hold.as_ref().map(|mp| mp.template_hold());
         let _commit = self
             .query
             .lock_tip_commit()
             .map_err(|e| NetError::Store(e.to_string()))?;
         self.disconnect_to_in_commit(keep_height)?;
-        if let Some(hold) = template_hold.as_mut() {
-            if let Ok(Some((_, rec))) = self.query.header_at_height(Height(keep_height)) {
-                hold.commit(rec.hash);
-            }
-        }
         drop(template_hold);
         Ok(())
     }
