@@ -52,6 +52,41 @@ pub fn ensure_header_fk_count() -> u64 {
 }
 
 #[cfg(debug_assertions)]
+type InvalidateGapFn = Box<dyn FnOnce() + Send>;
+#[cfg(debug_assertions)]
+type InvalidateGapSlot = std::sync::Mutex<Option<InvalidateGapFn>>;
+
+/// One call after the disconnect hold drops and before the replacement
+/// fork is selected. A test admits here. Unset in production.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn set_invalidate_gap_hook(hook: Option<InvalidateGapFn>) {
+    let mut slot = invalidate_gap_hook()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *slot = hook;
+}
+
+#[cfg(debug_assertions)]
+fn invalidate_gap_hook() -> &'static InvalidateGapSlot {
+    static HOOK: std::sync::OnceLock<InvalidateGapSlot> = std::sync::OnceLock::new();
+    HOOK.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(debug_assertions)]
+fn fire_invalidate_gap_hook() {
+    let hook = {
+        let mut slot = invalidate_gap_hook()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        slot.take()
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(debug_assertions)]
 pub fn header_store_counts() -> (u64, u64, u64) {
     (
         ENSURE_HEADERS_BATCH_N.with(|c| c.get()),
@@ -2598,7 +2633,14 @@ impl ChainHub {
             .map_err(NetError::store)?
             .filter(|h| h.0 <= tip);
         let mut disconnected_to: Option<(u32, BlockHash)> = None;
+        // The disconnect hold ends before the replacement hold begins. Stay
+        // quiet across that gap so an admit cannot publish the stump.
+        let mut template_pause = None;
         if let Some(h) = on_tip {
+            template_pause = self
+                .mempool()
+                .cloned()
+                .map(|mp| mp.pause_template_publish());
             let _guard = self.connect_lock.lock().unwrap_or_else(|e| e.into_inner());
             let mut path = Vec::new();
             for ht in h.0..=tip {
@@ -2625,6 +2667,10 @@ impl ChainHub {
             if let Some(stump) = stump {
                 disconnected_to = Some((removed, stump));
             }
+            // The disconnect hold is gone and the replacement hold is not
+            // taken yet. An admit here publishes the stump.
+            #[cfg(debug_assertions)]
+            fire_invalidate_gap_hook();
         } else if self.knows_header(&hash) || self.held_body(&hash).is_some() {
             // Side branch: mark it and keep the body. The mark keeps it off
             // the chain. The body is what reconsider and a child still need.
@@ -2638,6 +2684,7 @@ impl ChainHub {
             return Err(NetError::Consensus("Block not found".into()));
         }
         let applied = self.try_apply_after_invalidate();
+        drop(template_pause);
         // A replacement fork publishes from its branch reorg, including the
         // template watch. Sending the stump before that wakes a one-shot
         // wait, which then drops the subscription and misses the fork. With

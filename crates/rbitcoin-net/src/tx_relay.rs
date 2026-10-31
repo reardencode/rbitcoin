@@ -920,6 +920,9 @@ pub struct MempoolHub {
     template_prev: Mutex<Option<[u8; 32]>>,
     /// Odd while a [`TemplateHold`] is out, so the pool may not match the tip.
     pool_settle: AtomicU64,
+    /// Nonzero from an invalidate disconnect until the replacement attempt
+    /// finishes. An admit in that gap must not publish the stump.
+    template_publish_pause: AtomicU64,
     /// INV immediately instead of waiting on mocktime.
     pub immediate_relay: AtomicBool,
     /// Last `setmocktime` (0 = wall). Used to age mempool txs for delayed INV.
@@ -1014,6 +1017,20 @@ pub struct TemplateHold<'a> {
 impl TemplateHold<'_> {
     pub(crate) fn commit(&mut self, hash: [u8; 32]) {
         self.commit = Some(hash);
+    }
+}
+
+/// Pauses [`MempoolHub::note_template_update`] for one invalidate.
+#[doc(hidden)]
+pub struct TemplatePublishPause {
+    mp: Arc<MempoolHub>,
+}
+
+impl Drop for TemplatePublishPause {
+    fn drop(&mut self) {
+        self.mp
+            .template_publish_pause
+            .fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -1200,6 +1217,7 @@ impl MempoolHub {
             template_watch: tokio::sync::watch::channel(0).0,
             template_prev: Mutex::new(None),
             pool_settle: AtomicU64::new(0),
+            template_publish_pause: AtomicU64::new(0),
             age_inv: Mutex::new(BTreeMap::new()),
             min_live_accept_at: AtomicU64::new(u64::MAX),
             tip_ctx: Mutex::new(None),
@@ -4049,9 +4067,21 @@ impl MempoolHub {
         let next = self.template_updates.fetch_add(1, Ordering::Relaxed) + 1;
         // A hold publishes once, on drop, for the tip it commits. Sending
         // here would wake a one-shot wait on the stump, or on an
-        // intermediate block of a fork that is still connecting.
-        if self.pool_settle.load(Ordering::SeqCst) & 1 == 0 {
+        // intermediate block of a fork that is still connecting. The pause
+        // covers the gap between the disconnect hold and the next one.
+        if self.template_publish_pause.load(Ordering::SeqCst) == 0
+            && self.pool_settle.load(Ordering::SeqCst) & 1 == 0
+        {
             self.template_watch.send_replace(next);
+        }
+    }
+
+    /// Suppress [`Self::note_template_update`] until this guard drops.
+    #[doc(hidden)]
+    pub fn pause_template_publish(self: &Arc<Self>) -> TemplatePublishPause {
+        self.template_publish_pause.fetch_add(1, Ordering::SeqCst);
+        TemplatePublishPause {
+            mp: Arc::clone(self),
         }
     }
 

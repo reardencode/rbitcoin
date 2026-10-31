@@ -8,4 +8,5 @@ Fixed
 - **`invalidateblock` wakes `waitforblock`, `waitforblockheight`,
   `waitfornewblock`, and a `getblocktemplate` longpoll.** The tip that call
   leaves, including a replacement fork, is what those waits see. A mempool
-  eviction while the old tip is coming off does not publish the stump.
+  eviction or admit while that call is still choosing the tip does not
+  publish the stump.

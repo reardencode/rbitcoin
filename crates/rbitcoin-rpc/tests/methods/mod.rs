@@ -2854,6 +2854,68 @@ fn invalidate_evicting_a_mempool_tx_returns_the_replacement_fork() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An admit after the disconnect hold drops, and before the replacement
+/// fork's hold, must not be the event a one-shot wait returns.
+#[test]
+fn invalidate_admit_during_fork_selection_returns_the_fork() {
+    use std::time::{Duration, Instant};
+    let (ctx, dir, hub) = ctx_regtest_hub();
+    dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
+    let start = hub.tip_hash().expect("tip");
+    let start_hex = rbitcoin_rpc::methods::hash_hex_display(&start.to_byte_array());
+    let mp = Arc::clone(ctx.mempool.as_ref().expect("mempool"));
+    assert!(mp.begin_pool_maintenance());
+    let genesis = hub.block_at_height(0).unwrap().unwrap().block_hash();
+    let t0 = hub.tip_header().unwrap().time;
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+    let side = rbitcoin_consensus::mine_regtest_paying(genesis, t0 + 10, 1, spk.clone(), vec![]);
+    let side_tip =
+        rbitcoin_consensus::mine_regtest_paying(side.block_hash(), t0 + 11, 2, spk, vec![]);
+    let fork_tip = side_tip.block_hash();
+    hub.hold_body(Arc::new(side), false);
+    hub.hold_body(Arc::new(side_tip), false);
+    let noted = Arc::new(AtomicBool::new(false));
+    let mp_hook = Arc::clone(&mp);
+    let noted_hook = Arc::clone(&noted);
+    rbitcoin_net::chain::set_invalidate_gap_hook(Some(Box::new(move || {
+        noted_hook.store(true, Ordering::SeqCst);
+        mp_hook.note_template_update();
+    })));
+    let _clear_hook = ClearInvalidateGapHook;
+    let parked = Arc::new(AtomicU64::new(0));
+    rbitcoin_rpc::methods::set_rpc_wait_park_note(Some(Arc::clone(&parked)));
+    let _clear = ClearParkNote;
+    std::thread::scope(|scope| {
+        let hub = Arc::clone(&hub);
+        scope.spawn(move || {
+            wait_until_parked(&parked);
+            hub.invalidate_block(start).expect("invalidate tip");
+        });
+        let t0 = Instant::now();
+        let got =
+            rbitcoin_rpc::methods::chain::wait_for_tip(&ctx, 2_000, |hash, _| hash != start_hex)
+                .unwrap();
+        assert!(
+            t0.elapsed() < Duration::from_millis(500),
+            "invalidate left the tip wait parked: {:?}",
+            t0.elapsed()
+        );
+        let fork_hex = rbitcoin_rpc::methods::hash_hex_display(&fork_tip.to_byte_array());
+        assert_eq!(got["hash"], fork_hex, "{got}");
+    });
+    assert!(noted.load(Ordering::SeqCst), "gap hook did not run");
+    assert_eq!(hub.tip_hash(), Some(fork_tip));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+struct ClearInvalidateGapHook;
+
+impl Drop for ClearInvalidateGapHook {
+    fn drop(&mut self) {
+        rbitcoin_net::chain::set_invalidate_gap_hook(None);
+    }
+}
+
 fn wait_until_parked(parked: &AtomicU64) {
     let start = Instant::now();
     while parked.load(Ordering::SeqCst) == 0 {
