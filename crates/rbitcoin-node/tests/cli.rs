@@ -103,7 +103,10 @@ fn operator_conf_and_argv() {
         "--sp-tweaks",
         "--sp-tweaks-dust",
         "--esplora-block-template",
+        "--electrum-onion",
         "--esplora-onion",
+        "--electrum-i2p",
+        "--esplora-i2p",
         "--sv2-tp-listen",
         "--sv2-tp-authority-sec",
         "--sv2-tp-authority-sec-file",
@@ -666,9 +669,17 @@ fn max_sh_creates_and_esplora_block_template_cli_hyphens() {
     assert!(gbt_eq.esplora_block_template);
     let off = ready_config(["rbitcoin-node", "--esplora-block-template=0"]);
     assert!(!off.esplora_block_template);
-    assert!(NodeConfig::default().esplora_onion);
+    let d = NodeConfig::default();
+    assert!(d.electrum_onion && d.esplora_onion && d.electrum_i2p && d.esplora_i2p);
     let onion_off = ready_config(["rbitcoin-node", "--esplora-onion=0"]);
     assert!(!onion_off.esplora_onion);
+    assert!(onion_off.electrum_onion && onion_off.electrum_i2p && onion_off.esplora_i2p);
+    let off = ready_config(["rbitcoin-node", "--electrum-onion=0"]);
+    assert!(!off.electrum_onion && off.esplora_onion && off.electrum_i2p && off.esplora_i2p);
+    let off = ready_config(["rbitcoin-node", "--electrum-i2p=0"]);
+    assert!(!off.electrum_i2p && off.esplora_i2p && off.electrum_onion && off.esplora_onion);
+    let off = ready_config(["rbitcoin-node", "--esplora-i2p=0"]);
+    assert!(!off.esplora_i2p && off.electrum_i2p && off.electrum_onion && off.esplora_onion);
 }
 
 include!("overlay_config_journey.rs");

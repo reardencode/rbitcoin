@@ -103,7 +103,10 @@ Clean smoke:
 | `--sp-tweaks-dust SATS` | `sp_tweaks_dust=` | **1000** — omit served P2TR outs with `value <= SATS` (`0` = serve all; **546** matches Cake electrs) |
 | `--electrum-listen [ADDR]` | `electrum_listen=` | disabled; omit ADDR → `127.0.0.1:50001`. Address/scripthash methods need `--sh-index` |
 | `--esplora-listen [ADDR\|PATH]` | `esplora_listen=` | disabled (Esplora REST); omit ADDR → `127.0.0.1:3000`; a filesystem path is unix HTTP (mode **0660**, dummy `Host: api` is fine). Address/scripthash methods need `--sh-index` |
+| `--electrum-onion[=0\|1]` | `electrum_onion=` | **on** — `ADD_ONION` for Electrum when `--tor-control` is set |
 | `--esplora-onion[=0\|1]` | `esplora_onion=` | **on** — `ADD_ONION` for Esplora when `--tor-control` is set |
+| `--electrum-i2p[=0\|1]` | `electrum_i2p=` | **on** — I2P destination for Electrum (`{datadir}/i2p/electrum.priv`) with `--i2p-accept-incoming` |
+| `--esplora-i2p[=0\|1]` | `esplora_i2p=` | **on** — I2P destination for Esplora (`{datadir}/i2p/esplora.priv`) with `--i2p-accept-incoming` |
 | `--health-listen [ADDR]` | `health_listen=` | disabled; omit ADDR → `127.0.0.1:9332`. Unauthenticated `GET /healthz`, `/readyz`, and `/progress`, bound before the store opens ([Health probes and metrics](#health-probes-and-metrics)). A bind failure stops the node |
 | `--metrics[=0\|1]` | `metrics=` | **off** — Prometheus `GET /metrics` on the health listener. Refused without `--health-listen` |
 | `--esplora-max-inflight N` | `esplora_max_inflight=` | **256** — Esplora requests in flight across the whole listener (>= 1, at most tokio's semaphore limit). Further requests wait for a slot rather than being refused; the wait counts against the 120 s request timeout (**408**). One wallet rescan can fill it; raise it for a busy public listener. |
@@ -232,8 +235,9 @@ socket. With `--electrum-listen`, the node `ADD_ONION`s that TCP port to
 `{datadir}/onion/electrum.priv` (0600). `server.features.hosts` is
 `{ "<id>.onion": { "tcp_port": N } }` with no `ssl_port`. With
 `--esplora-listen`, the same control port `ADD_ONION`s Esplora (`{datadir}/onion/esplora.priv`);
-REST is on that TCP port (`http://….onion:<port>`). `--esplora-onion=0`
-skips Esplora HS. `getnetworkinfo.localaddresses` lists those onion hostnames
+REST is on that TCP port (`http://….onion:<port>`). `--electrum-onion=0`
+or `--esplora-onion=0` keeps that service off Tor (with Electrum off,
+`server.features.hosts` is `{}`); P2P and the other service are unchanged. `getnetworkinfo.localaddresses` lists those onion hostnames
 even with `--no-discover`. Sparrow: `tcp://<id>.onion:50001` (plain TCP; no
 in-binary TLS). JSON-RPC stays off the onion (`rpc.sock` / `--rpc-listen` only).
 Cookie path differs by distro; pass `--tor-control-cookie` rather than globbing.
@@ -243,7 +247,9 @@ Omit ADDR for `127.0.0.1:7656`. Failed HELLO / `SESSION CREATE` is a start
 error. Unset: I2P rows may still load from `peers` v2 but are not dialed.
 `--only-net i2p` without `--i2p-sam` is a start error. `--i2p-accept-incoming`
 creates a persistent local destination (`{datadir}/i2p/p2p.priv`, 0600) and
-`STREAM FORWARD`s to the P2P bind. That destination is published as
+`STREAM FORWARD`s to the P2P bind. A listening Electrum or Esplora gets its
+own destination and forward (`i2p/electrum.priv`, `i2p/esplora.priv`) unless
+`--electrum-i2p=0` / `--esplora-i2p=0`. The P2P destination is published as
 `{52}.b32.i2p:0` (SAM 3.1 has no ports; Core refuses any other I2P port)
 on `getnetworkinfo.localaddresses` and in addrv2, including with
 `--no-discover`. With `--listen=0` that is a start error

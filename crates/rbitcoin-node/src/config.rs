@@ -459,8 +459,14 @@ pub struct NodeConfig {
     pub esplora_block_template: bool,
     /// Prometheus `GET /metrics` on the health listener. Default off.
     pub metrics: bool,
+    /// ADD_ONION for `--electrum-listen` when `--tor-control` is set. Default on.
+    pub electrum_onion: bool,
     /// ADD_ONION for `--esplora-listen` when `--tor-control` is set. Default on.
     pub esplora_onion: bool,
+    /// SAM `STREAM FORWARD` to `--electrum-listen` with `--i2p-accept-incoming`. Default on.
+    pub electrum_i2p: bool,
+    /// SAM `STREAM FORWARD` to `--esplora-listen` with `--i2p-accept-incoming`. Default on.
+    pub esplora_i2p: bool,
     /// SV2 Template Provider bind (`--sv2-tp-listen`). Default off.
     pub sv2_tp_listen: Option<SocketAddr>,
     /// Authority secret key the TP signs its Noise certificates with.
@@ -607,7 +613,10 @@ impl Default for NodeConfig {
             store_read_budget: None,
             esplora_block_template: false,
             metrics: false,
+            electrum_onion: true,
             esplora_onion: true,
+            electrum_i2p: true,
+            esplora_i2p: true,
             sv2_tp_listen: None,
             sv2_tp_authority_sec: None,
             sv2_tp_cert_validity_secs: 3600,
@@ -1558,9 +1567,21 @@ impl NodeConfig {
                 self.esplora_block_template = parse_conf_bool(val)
                     .map_err(|e| NodeError::Config(format!("conf esplora_block_template: {e}")))?;
             }
+            "electrum_onion" => {
+                self.electrum_onion = parse_conf_bool(val)
+                    .map_err(|e| NodeError::Config(format!("conf electrum_onion: {e}")))?;
+            }
             "esplora_onion" => {
                 self.esplora_onion = parse_conf_bool(val)
                     .map_err(|e| NodeError::Config(format!("conf esplora_onion: {e}")))?;
+            }
+            "electrum_i2p" => {
+                self.electrum_i2p = parse_conf_bool(val)
+                    .map_err(|e| NodeError::Config(format!("conf electrum_i2p: {e}")))?;
+            }
+            "esplora_i2p" => {
+                self.esplora_i2p = parse_conf_bool(val)
+                    .map_err(|e| NodeError::Config(format!("conf esplora_i2p: {e}")))?;
             }
             "sv2_tp_listen" => {
                 self.sv2_tp_listen = Some(

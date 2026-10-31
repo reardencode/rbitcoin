@@ -3373,6 +3373,45 @@ async fn tor_control_onion_lifecycle() {
         assert!(creates.iter().any(|c| c.contains(&needle)), "{creates:?}");
     }
 
+    // Each wallet service's onion and I2P switch is its own: a service
+    // switched off is not published on that overlay, and the others still are.
+    for (electrum_on, esplora_on) in [(false, true), (true, false)] {
+        let mut cfg = services_cfg();
+        cfg.tor.cookie = Some(cookie.clone());
+        cfg.electrum_onion = electrum_on;
+        cfg.esplora_onion = esplora_on;
+        cfg.electrum_i2p = esplora_on;
+        cfg.esplora_i2p = electrum_on;
+        start_and_exit(cfg).await.expect("wallet overlay switches");
+        let onion_lines = starts_with_any(&tor.take_log(), "ADD_ONION ");
+        let onions: Vec<&str> = onion_lines
+            .iter()
+            .map(|l| l.rsplit(' ').next().unwrap())
+            .collect();
+        let want: Vec<&str> = [true, electrum_on, esplora_on]
+            .into_iter()
+            .zip(&targets)
+            .filter(|(on, _)| *on)
+            .map(|(_, t)| t.as_str())
+            .collect();
+        assert_eq!(
+            onions, want,
+            "electrum_onion={electrum_on} esplora_onion={esplora_on}"
+        );
+        let forwards = starts_with_any(&sam.take_log(), "STREAM FORWARD");
+        for (on, port) in [
+            (true, p2p.port()),
+            (esplora_on, electrum.port()),
+            (electrum_on, esplora.port()),
+        ] {
+            let found = forwards
+                .iter()
+                .any(|f| f.contains(&format!("PORT={port} ")));
+            assert_eq!(found, on, "i2p forward to {port}: {forwards:?}");
+        }
+        let _ = (tor.take_replies(), sam.take_replies());
+    }
+
     // A saved Electrum onion key Tor refuses, then an Electrum I2P
     // destination that cannot be read, ends the start after Electrum bound.
     // The run still tears down, so that port is closed once run_p2p returns.

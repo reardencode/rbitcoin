@@ -345,7 +345,7 @@ pub fn operator_usage() -> String {
     [--listen ADDR] [--no-listen] [--connect ADDR]... [--trust-peer ADDR] [--seed-node HOST]... [--proxy HOST:PORT] [--onion HOST:PORT] [--proxy-randomize[=0|1]] [--only-net NET]... \\\n\
     [--tor-control [HOST:PORT]] [--tor-control-cookie PATH] [--tor-control-password PASS] \\\n\
     [--i2p-sam [HOST:PORT]] [--i2p-accept-incoming] \\\n\
-    [--electrum-listen ADDR] [--esplora-listen ADDR] [--esplora-onion[=0|1]] [--health-listen [ADDR]] [--metrics] \\\n\
+    [--electrum-listen ADDR] [--esplora-listen ADDR] [--electrum-onion[=0|1]] [--esplora-onion[=0|1]] [--electrum-i2p[=0|1]] [--esplora-i2p[=0|1]] [--health-listen [ADDR]] [--metrics] \\\n\
     [--sv2-tp-listen ADDR] [--sv2-tp-authority-sec KEY] [--sv2-tp-authority-sec-file PATH] [--sv2-tp-cert-validity SECS] [--sv2-tp-stale-grace SECS] [--sv2-tp-idle-timeout SECS] [--sv2-tp-fee-delta SATS] [--sv2-tp-template-interval SECS] \\\n\
     [--sh-index] [--block-filter-index] [--prune-seqsigwit] [--prune-seqsigwit-ram-threshold-bytes N] [--datadir-hdd] [--store-read-budget N] [--sp-tweaks] [--sp-tweaks-dust SATS] [--max-sh-creates N] [--heavy-sh-creates N] [--electrum-max-subs N] [--esplora-max-inflight N] [--esplora-block-template] \\\n\
     [--rpc] [--rpc-listen [ADDR]] [--rest] [--rpc-socket PATH] [--rpc-token-file PATH] [--rpc-cookie-file PATH] [--rpc-cookie-perms owner|group|all] [--rpc-work-queue N] [--rpc-client-version N] \\\n\
@@ -406,7 +406,9 @@ Block filters: --block-filter-index (default off) builds BIP158 basic filters. I
   --esplora-max-inflight N caps Esplora requests in flight across the whole listener (default 256; >= 1). Further requests wait for a slot; the wait counts against the request timeout (408).\n\
   --store-read-budget N caps concurrent API store reads across RPC, REST, Electrum, Esplora, and BlindBit (N >= 1). Omitted or 0 uses the default: 1 when --datadir-hdd is set, otherwise one less than the core count, minimum 1. An explicit N overrides --datadir-hdd. Waiters do not hold a blocking-pool thread.\n\
   --esplora-block-template enables GET /block-template (GBT template JSON; default off).\n\
+  --electrum-onion (default on) ADD_ONION for --electrum-listen when --tor-control is set.\n\
   --esplora-onion (default on) ADD_ONION for --esplora-listen when --tor-control is set.\n\
+  --electrum-i2p / --esplora-i2p (default on) STREAM FORWARD that listener with --i2p-accept-incoming.\n\
 Silent payments: --sp-tweaks (default off) writes/serves the thin BIP-352 tweak index.\n\
   Not with --prune-seqsigwit (tweaks read scriptSig and witness).\n\
   --sp-tweaks-dust SATS omits served P2TR outs with value <= SATS (default 1000; 0 = all; 546 = Cake electrs).\n\
@@ -474,7 +476,10 @@ pub fn is_bool_key(key: &str) -> bool {
             | "datadir_hdd"
             | "sp_tweaks"
             | "esplora_block_template"
+            | "electrum_onion"
             | "esplora_onion"
+            | "electrum_i2p"
+            | "esplora_i2p"
             | "blocks_only"
             | "prefill_compact"
             | "persist_mempool"
