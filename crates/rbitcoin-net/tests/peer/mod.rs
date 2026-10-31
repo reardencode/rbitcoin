@@ -818,6 +818,64 @@ async fn queued_decode_holds_block_requests_across_heartbeat() {
     let _ = std::fs::remove_dir_all(dir.path());
 }
 
+/// The block-download window must not drop a peer whose body is already in
+/// `decode_q`. That frame is still the oldest block in flight.
+#[tokio::test]
+async fn queued_decode_holds_the_block_download_window() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("decode-hold-download");
+    hub.ensure_genesis().unwrap();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let start = 1_700_000_000_u64;
+    peers.set_mock_now(start);
+    let peer = outbound_test_peer(&peers, 18450);
+    let hash = BlockHash::from_byte_array([0x45; 32]);
+    hub.note_asked_block(hash);
+    peer.note_blocks_requested(&[hash]);
+    let interval = hub.params.btc.pow_target_spacing;
+    peers.set_mock_now(start + interval + 1);
+    let (out_tx, _out_rx) = mpsc::unbounded_channel();
+    let mut follow = PeerFollowState::new();
+    follow.requested_blocks.insert(hash);
+    let mut since = None;
+    on_heartbeat(
+        &hub,
+        &out_tx,
+        &mut follow,
+        Some(peer.as_ref()),
+        &mut since,
+        &mut None,
+        &mut None,
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !peer.stop.load(Ordering::Relaxed),
+        "a queued body must not trip the download timeout"
+    );
+    assert!(
+        hub.already_have_or_asked_block(&hash),
+        "the ask stays until the frame is applied"
+    );
+    on_heartbeat(
+        &hub,
+        &out_tx,
+        &mut follow,
+        Some(peer.as_ref()),
+        &mut since,
+        &mut None,
+        &mut None,
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(
+        peer.stop.load(Ordering::Relaxed),
+        "an empty decode queue still times the window out"
+    );
+    let _ = std::fs::remove_dir_all(dir.path());
+}
+
 /// A ping that arrives while a block is still in `decode_q` must not send
 /// pong until that block has been applied.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

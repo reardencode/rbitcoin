@@ -1446,7 +1446,14 @@ pub async fn on_heartbeat(
     } else {
         s.ping_timeout(now)
     };
-    if let Some(hash) = s.block_download_timed_out(now, hub.params.btc.pow_target_spacing) {
+    // A body already in `decode_q` is still the oldest block in flight.
+    // Timing that window out would drop the frame before it is applied.
+    let download_timed_out = if decode_queued {
+        None
+    } else {
+        s.block_download_timed_out(now, hub.params.btc.pow_target_spacing)
+    };
+    if let Some(hash) = download_timed_out {
         rbitcoin_log::info!("{}", block_download_timeout_log(hash, s.id));
         s.request_disconnect();
     } else if let Some(elapsed_secs) = ping_elapsed {
@@ -1862,6 +1869,16 @@ pub async fn peer_session_with(
                 .as_ref()
                 .is_some_and(|s| s.stop.load(Ordering::Relaxed))
             {
+                apply_queued_decodes(
+                    &mut decode_q,
+                    hub.as_ref(),
+                    &out_tx,
+                    follow,
+                    session.as_deref(),
+                    &mut requested_since,
+                    &peer_s,
+                )
+                .await?;
                 return Ok(());
             }
             // Core `fPauseSend`: no inbound message is read while the writer
@@ -1914,6 +1931,16 @@ pub async fn peer_session_with(
                 }
                 writer_done = &mut writer_task => {
                     let _ = writer_done;
+                    apply_queued_decodes(
+                        &mut decode_q,
+                        hub.as_ref(),
+                        &out_tx,
+                        follow,
+                        session.as_deref(),
+                        &mut requested_since,
+                        &peer_s,
+                    )
+                    .await?;
                     return Ok(());
                 }
                 // Inbound before local tip announce so GetData during a
