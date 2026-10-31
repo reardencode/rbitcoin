@@ -797,6 +797,39 @@ fn live_pool_recent_accepts_and_1p1c_rollback() {
         hub.template_updates() > tmpl,
         "template must bump like remove_for_block_spent"
     );
+    // The local submit path is async. A child of a below-relay parent still
+    // brings that parent in without a blocking-pool thread.
+    let hub = Arc::new(hub);
+    hub.set_min_relay_sat_kvb(50_000);
+    let lp2 = Transaction {
+        output: vec![
+            TxOut {
+                value: Amount::from_sat(25_0000_0000),
+                script_pubkey: spk.clone(),
+            },
+            TxOut {
+                value: Amount::from_sat(25_0000_0000 - 200),
+                script_pubkey: spk.clone(),
+            },
+        ],
+        ..spend_true(cbs[8], 0, spk.clone())
+    };
+    let lp2_id = lp2.compute_txid();
+    assert!(matches!(
+        hub.accept_tx(&lp2),
+        Err(AcceptError::Policy("min relay fee"))
+    ));
+    let payer2 = spend_vout(OutPoint::new(lp2_id, 1), 1_000);
+    let payer2_id = payer2.compute_txid();
+    let admitted = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(hub.accept_tx_from_async(payer2, TxOrigin::Local))
+        .expect("async 1p1c");
+    assert_eq!(admitted.txid, payer2_id);
+    assert!(hub.contains(&lp2_id));
+    assert!(hub.contains(&payer2_id));
     let _ = std::fs::remove_dir_all(&mp);
 }
 

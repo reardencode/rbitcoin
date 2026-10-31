@@ -6102,6 +6102,100 @@ fn getmininginfo_assembly_is_per_block() {
     let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
     assert_eq!(info["currentblockweight"], weight, "{info}");
     assert_eq!(info["currentblocktx"], 1, "{info}");
+    // HTTP generateblock lists transactions on the async path. A rejected
+    // list must leave the assembly the failed generate already recorded.
+    let ctx = std::sync::Arc::new(ctx);
+    let params = rbitcoin_rpc::methods::RpcParams::positional(vec![json!(addr), json!("nope")]);
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(rbitcoin_rpc::methods::mine::generateblock_async(
+            &ctx, &params,
+        ))
+        .unwrap_err();
+    let info = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    assert_eq!(info["currentblockweight"], weight, "{info}");
+    assert_eq!(info["currentblocktx"], 1, "{info}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// HTTP `generatetoaddress`, `generatetodescriptor`, `generateblock`, and a
+/// two-tx `testmempoolaccept` are the request-task methods. The package rows
+/// are removed after the reply.
+#[test]
+fn http_request_task_methods_mine_and_accept_a_package() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let (addr, _) = p2wpkh_regtest();
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+    let (parent_hex, parent) = spend_generated_coinbase(&ctx, 1, 50_0000_0000 - 1_000, spk);
+    let child_hex = rbitcoin_primitives::hex_encode(bitcoin::consensus::encode::serialize(
+        &child_of(&parent, 1_000),
+    ));
+    let ctx = std::sync::Arc::new(ctx);
+    let state = || rbitcoin_rpc::server::AppState {
+        ctx: std::sync::Arc::clone(&ctx),
+        auth: rbitcoin_rpc::RpcAuth::new("test-token"),
+        cookie: None,
+        work_queue: std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+        rest_queue: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+        rest: false,
+        require_auth: false,
+    };
+    let call = |method: &'static str, params: serde_json::Value| {
+        let state = state();
+        async move {
+            let body = json!({
+                "jsonrpc": "1.0",
+                "id": 1,
+                "method": method,
+                "params": params,
+            });
+            let response = rbitcoin_rpc::server::rpc_post(
+                axum::extract::State(state),
+                axum::extract::Request::new(axum::body::Body::from(body.to_string())),
+            )
+            .await;
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
+                .await
+                .expect("body");
+            let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(json!({
+                "raw": String::from_utf8_lossy(&bytes),
+            }));
+            assert_eq!(status, axum::http::StatusCode::OK, "{method} {parsed}");
+            assert!(parsed.get("error").is_none_or(|e| e.is_null()), "{parsed}");
+            parsed["result"].clone()
+        }
+    };
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async move {
+            let rows = call("testmempoolaccept", json!([[parent_hex, child_hex]])).await;
+            assert_eq!(rows.as_array().map(|a| a.len()), Some(2), "{rows}");
+            assert_eq!(rows[0]["allowed"], json!(true), "{rows}");
+            assert_eq!(rows[1]["allowed"], json!(true), "{rows}");
+            let mined = call("generatetoaddress", json!([1, addr])).await;
+            assert_eq!(mined.as_array().map(|a| a.len()), Some(1), "{mined}");
+            let desc = call("generatetodescriptor", json!([1, "raw(51)"])).await;
+            assert_eq!(desc.as_array().map(|a| a.len()), Some(1), "{desc}");
+            let block = call("generateblock", json!([addr, [], false])).await;
+            assert!(
+                block["hex"].as_str().is_some_and(|h| h.len() > 20),
+                "{block}"
+            );
+        });
+    assert!(
+        !ctx.mempool
+            .as_ref()
+            .unwrap()
+            .contains(&parent.compute_txid()),
+        "testmempoolaccept must remove the package"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -259,9 +259,7 @@ pub async fn generateblock_async(ctx: &RpcContext, params: &RpcParams) -> Result
         .chain
         .clone()
         .ok_or_else(|| rpc_error(ERR_MISC, "generateblock requires a live chain hub"))?;
-    let chain_list = Arc::clone(&chain);
     let extra = crate::methods::off_pool(move || -> Result<Vec<Transaction>, Value> {
-        chain_list.note_block_assembled(0, 0);
         let Some(v) = tx_params else {
             return Err(rpc_error(ERR_INVALID_PARAMS, "transactions required"));
         };
@@ -303,6 +301,8 @@ pub async fn generateblock_async(ctx: &RpcContext, params: &RpcParams) -> Result
         Ok(extra)
     })
     .await?;
+    // A rejected list returns above and must not replace the last assembly.
+    chain.note_block_assembled(0, 0);
     if !submit {
         let block = crate::methods::off_pool(move || {
             chain
