@@ -1938,8 +1938,30 @@ pub async fn peer_session_with(
                         Ok(f) => f,
                         // Any socket Io means the peer is gone — exit cleanly so
                         // unregister runs inside the Core disconnect_nodes 5s wait.
-                        Err(NetError::Io(_)) => return Ok(()),
+                        Err(NetError::Io(_)) => {
+                            apply_queued_decodes(
+                                &mut decode_q,
+                                hub.as_ref(),
+                                &out_tx,
+                                follow,
+                                session.as_deref(),
+                                &mut requested_since,
+                                &peer_s,
+                            )
+                            .await?;
+                            return Ok(());
+                        }
                         Err(NetError::Protocol("peer misbehavior threshold")) => {
+                            apply_queued_decodes(
+                                &mut decode_q,
+                                hub.as_ref(),
+                                &out_tx,
+                                follow,
+                                session.as_deref(),
+                                &mut requested_since,
+                                &peer_s,
+                            )
+                            .await?;
                             return Err(threshold_disconnect(session.as_deref()));
                         }
                         Err(NetError::MessageTooLarge(n)) => {
@@ -1948,6 +1970,16 @@ pub async fn peer_session_with(
                                 "p2p: {peer_s} oversize frame ({n}) misbehavior={}",
                                 follow.ban_score
                             );
+                            apply_queued_decodes(
+                                &mut decode_q,
+                                hub.as_ref(),
+                                &out_tx,
+                                follow,
+                                session.as_deref(),
+                                &mut requested_since,
+                                &peer_s,
+                            )
+                            .await?;
                             if follow.ban_score >= BAN_SCORE_THRESHOLD {
                                 return Err(threshold_disconnect(session.as_deref()));
                             }
@@ -1973,12 +2005,34 @@ pub async fn peer_session_with(
                                     follow.ban_score
                                 );
                                 if follow.ban_score >= BAN_SCORE_THRESHOLD {
+                                    apply_queued_decodes(
+                                        &mut decode_q,
+                                        hub.as_ref(),
+                                        &out_tx,
+                                        follow,
+                                        session.as_deref(),
+                                        &mut requested_since,
+                                        &peer_s,
+                                    )
+                                    .await?;
                                     return Err(threshold_disconnect(session.as_deref()));
                                 }
                             }
                             continue;
                         }
-                        Err(e) => return Err(e),
+                        Err(e) => {
+                            apply_queued_decodes(
+                                &mut decode_q,
+                                hub.as_ref(),
+                                &out_tx,
+                                follow,
+                                session.as_deref(),
+                                &mut requested_since,
+                                &peer_s,
+                            )
+                            .await?;
+                            return Err(e);
+                        }
                     };
                     if let Some(ref sess) = session {
                         sess.note_recv(&framed_cmd(&frame), frame.payload_len() as u64);
@@ -1991,12 +2045,40 @@ pub async fn peer_session_with(
                             follow.ban_score
                         );
                         if follow.ban_score >= BAN_SCORE_THRESHOLD {
+                            apply_queued_decodes(
+                                &mut decode_q,
+                                hub.as_ref(),
+                                &out_tx,
+                                follow,
+                                session.as_deref(),
+                                &mut requested_since,
+                                &peer_s,
+                            )
+                            .await?;
                             return Err(threshold_disconnect(session.as_deref()));
                         }
+                        apply_queued_decodes(
+                            &mut decode_q,
+                            hub.as_ref(),
+                            &out_tx,
+                            follow,
+                            session.as_deref(),
+                            &mut requested_since,
+                            &peer_s,
+                        )
+                        .await?;
                         // Close to free this session's asks. A second strike refuses the address.
                         return Err(rate_limit_disconnect(session.as_deref()));
                     }
-                    // Ping/pong: cheap 8-byte path — never leave the I/O task for decode.
+                    // Ping/pong stays on this task when nothing is queued. A
+                    // frame already in `decode_q` must be applied first, or a
+                    // later pong updates the clock ahead of an earlier block.
+                    if (frame.is_ping() || frame.is_pong()) && !decode_q.is_empty() {
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        let _ = tx.send(frame.try_decode());
+                        decode_q.push_back(rx);
+                        continue;
+                    }
                     if frame.is_ping() {
                         if let Some(n) = frame.ping_nonce() {
                             queue_out(&out_tx, NetworkMessage::Pong(n))?;
@@ -2932,6 +3014,39 @@ pub fn serve_mempool_getdata(
     Ok(false)
 }
 
+/// Apply frames already taken off the socket, in order, before a later read
+/// error tears the session down. `SessionFollow`'s drop would otherwise
+/// forget getdata for a block that is still sitting in `decode_q`.
+async fn apply_queued_decodes(
+    decode_q: &mut VecDeque<tokio::sync::oneshot::Receiver<Result<RawNetworkMessage, NetError>>>,
+    hub: &ChainHub,
+    out_tx: &mpsc::UnboundedSender<PeerOut>,
+    follow: &mut PeerFollowState,
+    session: Option<&crate::peers::LivePeer>,
+    requested_since: &mut Option<std::time::Instant>,
+    peer_s: &str,
+) -> Result<(), NetError> {
+    while let Some(rx) = decode_q.pop_front() {
+        let decoded = match rx.await {
+            Ok(r) => r,
+            Err(_) => return Err(NetError::Protocol("decode task dropped")),
+        };
+        let n_req = follow.requested_blocks.len();
+        apply_decoded_peer_msg(decoded, hub, out_tx, follow, session).await?;
+        let n_after = follow.requested_blocks.len();
+        if n_after == 0 {
+            *requested_since = None;
+        } else if n_after < n_req || n_req == 0 {
+            *requested_since = Some(std::time::Instant::now());
+        }
+        if misbehavior_disconnects(follow.ban_score, session) {
+            rbitcoin_log::warn!("{}", misbehavior_disconnect_log(peer_s, follow.ban_score));
+            return Err(threshold_disconnect(session));
+        }
+    }
+    Ok(())
+}
+
 async fn apply_decoded_peer_msg(
     decoded: Result<RawNetworkMessage, NetError>,
     hub: &ChainHub,
@@ -3035,7 +3150,16 @@ pub fn handle_peer_control_msg(
         NetworkMessage::Version(_) => on_redundant_version(session),
         NetworkMessage::Verack => on_redundant_verack(session),
         NetworkMessage::Ping(n) => on_ping(hub, out_tx, follow, session, *n)?,
-        NetworkMessage::Pong(_) => {}
+        // A pong that waited behind `decode_q` is applied here. The read arm
+        // only handles a pong when that queue is empty.
+        NetworkMessage::Pong(n) => {
+            if let Some(s) = session {
+                let payload = n.to_le_bytes();
+                if let Some(line) = s.on_pong(&payload, s.clock_now()) {
+                    rbitcoin_log::info!("{line}");
+                }
+            }
+        }
         NetworkMessage::FeeFilter(amt) => on_feefilter(session, *amt),
         NetworkMessage::SendHeaders => on_sendheaders(follow),
         NetworkMessage::SendCmpct(sc) => on_sendcmpct(follow, session, sc),

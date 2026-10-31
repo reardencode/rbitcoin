@@ -959,17 +959,22 @@ async fn prepare_ordered_call(
     hold: &mut Option<tokio::sync::OwnedSemaphorePermit>,
     work_queue: &Arc<tokio::sync::Semaphore>,
 ) -> Result<HttpWaitPrep, ()> {
-    let prep = if http_call_is_longpoll(req) {
-        // A later wait must not keep the slot taken by an earlier call.
+    if http_call_is_longpoll(req) {
+        // The queue check is before any tip poll. A full queue is HTTP 503
+        // when this POST has not run a call, and it must not wait on the
+        // store budget first. The slot is then dropped for the wait itself.
+        if hold.is_none() {
+            *hold = Some(Arc::clone(work_queue).try_acquire_owned().map_err(|_| ())?);
+        }
         drop(hold.take());
-        satisfy_one_http_wait(ctx, req).await
-    } else {
-        HttpWaitPrep::skip()
-    };
+        let prep = satisfy_one_http_wait(ctx, req).await;
+        *hold = Some(Arc::clone(work_queue).try_acquire_owned().map_err(|_| ())?);
+        return Ok(prep);
+    }
     if hold.is_none() {
         *hold = Some(Arc::clone(work_queue).try_acquire_owned().map_err(|_| ())?);
     }
-    Ok(prep)
+    Ok(HttpWaitPrep::skip())
 }
 
 async fn exec_http_rpc_async(

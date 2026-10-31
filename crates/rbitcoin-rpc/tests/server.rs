@@ -1758,6 +1758,37 @@ async fn full_work_queue_is_503_before_the_store_budget() {
     let _ = std::fs::remove_dir_all(dir.path());
 }
 
+/// A long-poll whose work queue is already full is HTTP 503 before it waits
+/// on the store budget. Budget 0 would otherwise park the tip poll forever.
+#[tokio::test]
+async fn long_poll_queue_full_is_503_before_the_store_budget() {
+    let (ctx, dir) = http_wait_ctx();
+    ctx.query.set_api_read_budget(0);
+    let state = AppState {
+        ctx,
+        auth: RpcAuth::new("test-token"),
+        cookie: None,
+        work_queue: Arc::new(Semaphore::new(0)),
+        rest_queue: Arc::new(Semaphore::new(1)),
+        rest: false,
+        require_auth: true,
+    };
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        rpc_post(
+            State(state),
+            axum::extract::Request::new(Body::from(
+                br#"{"jsonrpc":"1.0","id":1,"method":"waitfornewblock","params":[5000]}"#
+                    .as_slice(),
+            )),
+        ),
+    )
+    .await
+    .expect("503 must not wait on the store budget");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let _ = std::fs::remove_dir_all(dir.path());
+}
+
 /// One store permit: the second read waits on the async task. A parked
 /// blocking thread is not what it is waiting on. Releasing the permit lets
 /// the request take it while that thread is still parked.
