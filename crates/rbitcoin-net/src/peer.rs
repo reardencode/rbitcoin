@@ -262,11 +262,14 @@ pub fn rate_limit_disconnect(session: Option<&crate::peers::LivePeer>) -> NetErr
     NetError::Protocol("peer rate limit")
 }
 
-/// Frames already read while a decode permit is held. One max message plus
-/// a short tail of messages that must stay behind it. Past this the peer
-/// is dropped. The rate limiter does not bound a peer that stays under it.
+/// Frames already read while a decode permit is held. Tip-follow asks for
+/// [`MAX_SERVE_BLOCKS`] bodies, and the reader can take one more message
+/// before that front decode is popped. A smaller byte cap drops the peer
+/// that answered the getdata. Past the window the peer is dropped. The
+/// rate limiter does not bound a peer that stays under it.
 pub const DECODE_Q_MAX_FRAMES: usize = 32;
-pub const DECODE_Q_MAX_BYTES: usize = crate::codec::MAX_PROTOCOL_MESSAGE_LENGTH + 64 * 1024;
+pub const DECODE_Q_MAX_BYTES: usize =
+    (MAX_SERVE_BLOCKS + 1) * crate::codec::MAX_PROTOCOL_MESSAGE_LENGTH;
 
 /// Disconnect a peer that queued more decoded-or-waiting frames than
 /// [`DECODE_Q_MAX_FRAMES`] or [`DECODE_Q_MAX_BYTES`].
@@ -318,6 +321,40 @@ impl DecodeQueue {
         self.nbytes.push_back(n);
         self.bytes = self.bytes.saturating_add(n);
         self.q.len() > DECODE_Q_MAX_FRAMES || self.bytes > DECODE_Q_MAX_BYTES
+    }
+}
+
+#[cfg(test)]
+mod decode_queue_cap {
+    use super::{DecodeQueue, DECODE_Q_MAX_FRAMES, MAX_SERVE_BLOCKS};
+
+    fn parked() -> super::DecodeRx {
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        rx
+    }
+
+    /// Tip-follow asks for [`MAX_SERVE_BLOCKS`] bodies and can read one more
+    /// message before the front decode is popped. That window must not be
+    /// treated as a flood.
+    #[test]
+    fn byte_cap_fits_the_serve_window() {
+        let one = crate::codec::MAX_PROTOCOL_MESSAGE_LENGTH;
+        let mut q = DecodeQueue::new();
+        for i in 0..(MAX_SERVE_BLOCKS + 1) {
+            assert!(
+                !q.push(parked(), one),
+                "message {i} of a serve window overflowed the decode queue"
+            );
+        }
+        assert!(
+            q.push(parked(), 1),
+            "one byte past the serve window must disconnect"
+        );
+        let mut frames = DecodeQueue::new();
+        for _ in 0..DECODE_Q_MAX_FRAMES {
+            assert!(!frames.push(parked(), 1));
+        }
+        assert!(frames.push(parked(), 1));
     }
 }
 
