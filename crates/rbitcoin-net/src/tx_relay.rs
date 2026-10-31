@@ -3896,7 +3896,7 @@ impl MempoolHub {
                     return crate::reactor::off_pool(move || {
                         let us = t0.elapsed().as_micros() as u64;
                         hub.meter_accept_stages(lock_f, stages_f);
-                        Err(hub.finish_accept_err(us, e).unwrap_err())
+                        Err(hub.note_accept_failure(us, e))
                     })
                     .await;
                 }
@@ -3939,7 +3939,7 @@ impl MempoolHub {
                     return crate::reactor::off_pool(move || {
                         let us = t0.elapsed().as_micros() as u64;
                         hub.meter_accept_stages(lock_f, stages_f);
-                        Err(hub.finish_accept_err(us, e).unwrap_err())
+                        Err(hub.note_accept_failure(us, e))
                     })
                     .await;
                 }
@@ -4265,9 +4265,9 @@ impl MempoolHub {
         (snap.count, snap.vsize, snap.total_fee)
     }
 
-    #[doc(hidden)]
-    pub fn finish_accept_err(&self, us: u64, e: AcceptError) -> Result<AcceptResult, AcceptError> {
-        // Soft outcomes (already in pool / orphan / full) are not "rejects".
+    /// Meter a failed admit and hand the error back. Soft outcomes (already
+    /// in the pool, orphan, full) are not rejects.
+    fn note_accept_failure(&self, us: u64, e: AcceptError) -> AcceptError {
         let hard = !matches!(
             e,
             AcceptError::Duplicate(_)
@@ -4279,7 +4279,12 @@ impl MempoolHub {
         } else {
             self.meter_accept_us.fetch_add(us, Ordering::Relaxed);
         }
-        Err(e)
+        e
+    }
+
+    #[doc(hidden)]
+    pub fn finish_accept_err(&self, us: u64, e: AcceptError) -> Result<AcceptResult, AcceptError> {
+        Err(self.note_accept_failure(us, e))
     }
 
     /// Count / weight / topo checks for `submitpackage` / `POST /txs/package`.

@@ -259,8 +259,9 @@ pub async fn generateblock_async(ctx: &RpcContext, params: &RpcParams) -> Result
         .chain
         .clone()
         .ok_or_else(|| rpc_error(ERR_MISC, "generateblock requires a live chain hub"))?;
+    let chain_list = Arc::clone(&chain);
     let extra = crate::methods::off_pool(move || -> Result<Vec<Transaction>, Value> {
-        chain.note_block_assembled(0, 0);
+        chain_list.note_block_assembled(0, 0);
         let Some(v) = tx_params else {
             return Err(rpc_error(ERR_INVALID_PARAMS, "transactions required"));
         };
@@ -303,7 +304,6 @@ pub async fn generateblock_async(ctx: &RpcContext, params: &RpcParams) -> Result
     })
     .await?;
     if !submit {
-        let chain = ctx.chain.clone().unwrap();
         let block = crate::methods::off_pool(move || {
             chain
                 .assemble_block_to_script(script, extra)
@@ -315,7 +315,6 @@ pub async fn generateblock_async(ctx: &RpcContext, params: &RpcParams) -> Result
             "hex": serialize_hex(&block),
         }));
     }
-    let chain = ctx.chain.clone().unwrap();
     let extra_for_err = extra.clone();
     let hashes = chain
         .generate_to_script_for_rpc_async(1, script, extra, false)
