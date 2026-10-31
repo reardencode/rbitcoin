@@ -544,9 +544,9 @@ where
                         // region has to be entered there.
                         let q = Arc::clone(&query);
                         let hub = Arc::clone(mp);
-                        let statuses = tokio::task::spawn_blocking(move || {
-                            let _g = BlockingRegion::enter();
-                            settled_restatus_notes(&q, Some(&hub), &touched, None)
+                        let q_read = Arc::clone(&q);
+                        let statuses = budgeted_blocking(&q, move || {
+                            settled_restatus_notes(&q_read, Some(&hub), &touched, None)
                         })
                         .await
                         .unwrap_or_else(|e| {
@@ -1057,6 +1057,26 @@ fn spawn_dispatch(
     })
 }
 
+/// Wait for one store-read permit on this task, then run `f` on the blocking
+/// pool. The permit stays inside `f` until the walk returns, so a waiter does
+/// not occupy a pool thread.
+async fn budgeted_blocking<T: Send + 'static>(
+    query: &Query,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, tokio::task::JoinError> {
+    let permit = query
+        .api_read_budget()
+        .acquire_owned()
+        .await
+        .expect("store budget");
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let _g = BlockingRegion::enter();
+        f()
+    })
+    .await
+}
+
 /// The blocking half of a request, run with `work` moved in and handed back.
 fn dispatch_off_worker(
     q: &Query,
@@ -1300,12 +1320,19 @@ pub fn silentpayments_unsubscribe(
 
 pub async fn emit_sp_tip<W: AsyncWrite + Unpin>(
     writer: &mut ConnWrite<W>,
-    query: &Query,
+    query: &Arc<Query>,
     chain: &ChainParams,
     sub: &crate::silent_scan::SpSub,
     height: u32,
 ) -> Result<(), std::io::Error> {
-    let hits = crate::silent_scan::scan_hits(query, chain, sub, height, height).unwrap_or_default();
+    let q = Arc::clone(query);
+    let c = chain.clone();
+    let piece = sub.clone();
+    let hits = budgeted_blocking(query, move || {
+        crate::silent_scan::scan_hits(&q, &c, &piece, height, height).unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default();
     if hits.is_empty() {
         return Ok(());
     }
@@ -1329,8 +1356,7 @@ pub async fn emit_outpoint_notes<W: AsyncWrite + Unpin>(
 ) -> Result<(), std::io::Error> {
     let keys: Vec<([u8; 32], u32)> = subs.iter().copied().collect();
     let q = Arc::clone(query);
-    let looked = tokio::task::spawn_blocking(move || {
-        let _g = BlockingRegion::enter();
+    let looked = budgeted_blocking(query, move || {
         let mut out = Vec::with_capacity(keys.len());
         for (txid, vout) in keys {
             let params = json!([txid_hex(&txid), vout]);
@@ -1428,13 +1454,12 @@ pub async fn scan_sp_off_connection<R: AsyncBufRead + Unpin>(
         let q = Arc::clone(query);
         let c = Arc::clone(chain);
         let piece = sub.clone();
-        let chunk = tokio::task::spawn_blocking(move || {
-            let _g = BlockingRegion::enter();
+        let chunk = budgeted_blocking(query, move || {
+            let _sp = permit;
             crate::silent_scan::scan_hits(&q, &c, &piece, from, end).unwrap_or_default()
         })
         .await
         .unwrap_or_default();
-        drop(permit);
         hits.extend(chunk);
         chunks += 1;
     }
@@ -1477,14 +1502,12 @@ where
     let q = Arc::clone(query);
     let c = Arc::clone(chain);
     let start_h = req.start;
-    let wave_fut = async move {
-        tokio::task::spawn_blocking(move || {
-            crate::tweaks::first_subscribe_wave(&q, &c, start_h, last, limits, min_dust)
-        })
-        .await
-        .unwrap_or_else(|e| Err(e.to_string()))
-    };
-    let wave = match wave_fut.await {
+    let q_read = Arc::clone(&q);
+    let c_read = Arc::clone(&c);
+    let wave_fut = budgeted_blocking(&q, move || {
+        crate::tweaks::first_subscribe_wave(&q_read, &c_read, start_h, last, limits, min_dust)
+    });
+    let wave = match wave_fut.await.unwrap_or_else(|e| Err(e.to_string())) {
         Ok(v) => v,
         Err(e) => {
             tweaks_sub_err(
@@ -1644,8 +1667,22 @@ where
         let c = Arc::clone(chain);
         let lim = limits;
         let last_h = last;
-        tokio::task::spawn_blocking(move || {
-            crate::tweaks::remaining_notify_lines(&q, &c, batch_start, last_h, lim, min_dust)
+        tokio::spawn(async move {
+            let permit = q
+                .api_read_budget()
+                .acquire_owned()
+                .await
+                .expect("store budget");
+            match tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                let _g = BlockingRegion::enter();
+                crate::tweaks::remaining_notify_lines(&q, &c, batch_start, last_h, lim, min_dust)
+            })
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => Err(e.to_string()),
+            }
         })
     };
     let mut batch_start = *next;
@@ -1965,8 +2002,7 @@ pub async fn emit_sh_notes<W: AsyncWrite + Unpin>(
 ) -> Result<bool, std::io::Error> {
     let q = Arc::clone(query);
     let subs: Vec<[u8; 32]> = sh_subs.iter().copied().collect();
-    let notes = tokio::task::spawn_blocking(move || {
-        let _g = BlockingRegion::enter();
+    let notes = budgeted_blocking(query, move || {
         settled_restatus_notes(&q, mempool.as_deref(), &subs, heights.as_deref())
     })
     .await

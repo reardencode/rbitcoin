@@ -667,6 +667,53 @@ async fn read_only_batch_completes_when_the_store_budget_is_one() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A subscription restatus waits for the store budget on the connection task.
+/// The only blocking-pool thread stays free for other work during that wait.
+#[test]
+fn subscription_restatus_waits_without_a_pool_thread() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let (dir, q) = tmp_store();
+        q.set_api_read_budget(1);
+        let q = Arc::new(q);
+        let hold = q.api_read_budget().acquire_owned().await.expect("permit");
+        let (_read, write) = tokio::io::duplex(256);
+        let mut writer = ConnWrite::new(write, Duration::from_secs(2));
+        let subs = HashSet::new();
+        let mut last = HashMap::new();
+        let q2 = Arc::clone(&q);
+        let notes = tokio::spawn(async move {
+            emit_sh_notes(&mut writer, &q2, None, &subs, &mut last, None).await
+        });
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(
+            !notes.is_finished(),
+            "restatus ran while the store permit was held"
+        );
+        let probe = tokio::time::timeout(Duration::from_secs(2), tokio::task::spawn_blocking(|| 7))
+            .await
+            .expect("the budget wait must leave the blocking pool free")
+            .expect("probe join");
+        assert_eq!(probe, 7);
+        assert!(
+            !notes.is_finished(),
+            "restatus took the pool thread to wait"
+        );
+        drop(hold);
+        tokio::time::timeout(Duration::from_secs(2), notes)
+            .await
+            .expect("restatus finishes after the permit is released")
+            .expect("join")
+            .expect("restatus");
+        let _ = std::fs::remove_dir_all(&dir);
+    });
+}
+
 #[cfg(debug_assertions)]
 fn get_balance(id: usize) -> Value {
     json!({"jsonrpc":"2.0","id":id,"method":"blockchain.scripthash.get_balance",

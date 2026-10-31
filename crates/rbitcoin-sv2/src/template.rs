@@ -171,10 +171,12 @@ pub struct TemplateKey {
 }
 
 /// One [`build`] at a time for this listener. The permit is taken on the
-/// caller's task before `spawn_blocking`, so a second session waits without
-/// a blocking-pool thread. The last `Ok(Some)` is kept and reused for that
-/// same [`TemplateKey`]. A different key builds once the permit is free.
-/// `Ok(None)` is not stored: IBD and an unmaintained pool retry.
+/// caller's task before `rbtc-off-pool`, so a second session waits without
+/// a blocking-pool thread, and the build itself does not sit on that pool
+/// while connect holds `template_prev`. The last `Ok(Some)` is kept and
+/// reused for that same [`TemplateKey`]. A different key builds once the
+/// permit is free. `Ok(None)` is not stored: IBD and an unmaintained pool
+/// retry.
 pub struct TemplateFlight {
     one: Arc<Semaphore>,
     slot: Mutex<Option<(TemplateKey, Template)>>,
@@ -229,13 +231,8 @@ impl TemplateFlight {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
             let _permit = permit;
-            let built = match tokio::task::spawn_blocking(build).await {
-                Ok(built) => built,
-                Err(e) => {
-                    let _ = tx.send(Err(io::Error::other(e)));
-                    return;
-                }
-            };
+            // Connect holds `template_prev` for the whole tip update.
+            let built = rbitcoin_net::off_pool(build).await;
             let built = match built {
                 Ok(t) => t,
                 Err(e) => {

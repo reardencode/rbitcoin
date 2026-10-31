@@ -232,3 +232,35 @@ fn same_key_waiter_does_not_take_a_pool_thread() {
         assert_eq!(builds.load(Ordering::SeqCst), 1);
     });
 }
+
+/// The build runs while every blocking-pool thread is parked. Connect holds
+/// `template_prev` for the whole tip update, so the build cannot sit on that
+/// pool waiting for the mutex.
+#[test]
+fn template_build_runs_while_the_blocking_pool_is_parked() {
+    runtime(1).block_on(async {
+        let (release, gate) = tokio::sync::oneshot::channel::<()>();
+        let parked = tokio::task::spawn_blocking(move || {
+            let _ = gate.blocking_recv();
+        });
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        let flight = Arc::new(TemplateFlight::new());
+        let built = tokio::time::timeout(
+            Duration::from_secs(2),
+            flight.get_or_build(key(1, 0), || {
+                assert_eq!(
+                    std::thread::current().name(),
+                    Some("rbtc-off-pool"),
+                    "template build must not use the blocking pool"
+                );
+                Ok(Some(dummy()))
+            }),
+        )
+        .await
+        .expect("build finished while the blocking pool was parked");
+        assert!(built.expect("build").is_some());
+        release.send(()).expect("release");
+        parked.await.expect("parked");
+    });
+}
