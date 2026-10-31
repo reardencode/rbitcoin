@@ -1632,6 +1632,13 @@ pub fn on_tx_announce_ok(
         return Ok(());
     }
     let inv = tx_announce_inv(mp, &txid);
+    // Flush already recorded this wtxid. A later rebroadcast, including the
+    // 15-minute unbroadcast pass, still reaches a peer that has not heard it.
+    if let Inventory::WTx(w) = inv {
+        if session.is_some_and(|s| s.has_announced_wtx(&w)) {
+            return Ok(());
+        }
+    }
     tx_announce_note_wtx(session, mp, inv);
     queue_out(out_tx, NetworkMessage::Inv(vec![inv]))
 }

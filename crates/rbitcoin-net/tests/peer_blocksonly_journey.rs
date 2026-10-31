@@ -220,6 +220,7 @@ async fn blocksonly_relay_perm_tx_invs_other_inbound(
         .whitelist
         .push(rbitcoin_net::net_permissions::parse_whitelist("relay@127.0.0.2").unwrap());
     peers.set_net_perms(table);
+    let mut ann_rx = hub.mempool().unwrap().subscribe_announces();
     let listed = relay_peer(peers, [127, 0, 0, 2], rbitcoin_net::peers::PeerConnType::Inbound);
     let other = relay_peer(peers, [127, 0, 0, 1], rbitcoin_net::peers::PeerConnType::Inbound);
     assert!(listed.session_relay_perm());
@@ -245,8 +246,50 @@ async fn blocksonly_relay_perm_tx_invs_other_inbound(
         vec![tx.compute_wtxid()],
         "second inbound gets only the unbroadcast wtx"
     );
+    // The admit publishes an announce at accept time and again from
+    // `rebroadcast_unbroadcast`. A live session applies both after the flush
+    // has already queued the INV. That peer must stay at one INV. A peer that
+    // was not flushed still gets the later rebroadcast.
+    let other_out = other.writer().expect("other writer");
+    let other_follow = PeerFollowState::new();
+    let mut applied = 0u32;
+    while let Ok(ann) = ann_rx.try_recv() {
+        if ann.txid != tx.compute_txid() {
+            continue;
+        }
+        applied += 1;
+        on_tx_announce_ok(hub, &other_out, &other_follow, Some(other.as_ref()), ann).unwrap();
+    }
+    assert!(
+        applied >= 1,
+        "blocksonly admit must publish an announce the other session can apply"
+    );
+    assert!(
+        other_rx.try_recv().is_err(),
+        "rebroadcast must not INV a peer the flush already told"
+    );
+    let late = relay_peer(peers, [127, 0, 0, 1], rbitcoin_net::peers::PeerConnType::Inbound);
+    let mut late_rx = writer_of(&late);
+    let late_out = late.writer().expect("late writer");
+    hub.mempool().unwrap().rebroadcast_unbroadcast();
+    let late_follow = PeerFollowState::new();
+    let mut late_applied = false;
+    while let Ok(ann) = ann_rx.try_recv() {
+        if ann.txid != tx.compute_txid() {
+            continue;
+        }
+        late_applied = true;
+        on_tx_announce_ok(hub, &late_out, &late_follow, Some(late.as_ref()), ann).unwrap();
+    }
+    assert!(late_applied, "a later rebroadcast still publishes");
+    assert_eq!(
+        tx_invs(&mut late_rx),
+        vec![tx.compute_wtxid()],
+        "a peer not yet told still gets the unbroadcast rebroadcast"
+    );
     peers.unregister(listed.id);
     peers.unregister(other.id);
+    peers.unregister(late.id);
 }
 
 /// `p2p_getdata.py`: inv type 0 is ignored without a reply or a ban, and
