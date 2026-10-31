@@ -7,5 +7,5 @@ Fixed
   holds the call until the timeout.
 - **`invalidateblock` wakes `waitforblock`, `waitforblockheight`,
   `waitfornewblock`, and a `getblocktemplate` longpoll.** The tip that call
-  leaves, including a replacement fork, is what those waits see. The stump
-  is published only when no fork replaces it.
+  leaves, including a replacement fork, is what those waits see. A mempool
+  eviction while the old tip is coming off does not publish the stump.

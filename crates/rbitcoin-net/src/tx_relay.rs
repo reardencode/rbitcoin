@@ -4047,7 +4047,12 @@ impl MempoolHub {
     #[doc(hidden)]
     pub fn note_template_update(&self) {
         let next = self.template_updates.fetch_add(1, Ordering::Relaxed) + 1;
-        self.template_watch.send_replace(next);
+        // A hold publishes once, on drop, for the tip it commits. Sending
+        // here would wake a one-shot wait on the stump, or on an
+        // intermediate block of a fork that is still connecting.
+        if self.pool_settle.load(Ordering::SeqCst) & 1 == 0 {
+            self.template_watch.send_replace(next);
+        }
     }
 
     /// Wakes when [`Self::note_template_update`] bumps the generation.

@@ -2799,6 +2799,61 @@ fn invalidate_with_a_mempool_returns_the_replacement_fork() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Dropping a mempool tx on the stump must not wake a one-shot wait.
+/// The spend is mature at the tip and immature once the disconnect passes
+/// height 99, which is before the heavier held branch connects.
+#[test]
+fn invalidate_evicting_a_mempool_tx_returns_the_replacement_fork() {
+    use std::time::{Duration, Instant};
+    let (ctx, dir, hub) = ctx_from_mature_pad(300_000_000);
+    let start = hub.tip_hash().expect("tip");
+    let start_hex = rbitcoin_rpc::methods::hash_hex_display(&start.to_byte_array());
+    let mp = Arc::clone(ctx.mempool.as_ref().expect("mempool"));
+    assert!(mp.begin_pool_maintenance());
+    let parent = hub.block_at_height(99).unwrap().unwrap();
+    let parent_hash = parent.block_hash();
+    let t0 = parent.header.time;
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+    let b0 =
+        rbitcoin_consensus::mine_regtest_paying(parent_hash, t0 + 10, 100, spk.clone(), vec![]);
+    let b1 =
+        rbitcoin_consensus::mine_regtest_paying(b0.block_hash(), t0 + 11, 101, spk.clone(), vec![]);
+    let b2 =
+        rbitcoin_consensus::mine_regtest_paying(b1.block_hash(), t0 + 12, 102, spk.clone(), vec![]);
+    let fork_tip = b2.block_hash();
+    hub.hold_body(Arc::new(b0), false);
+    hub.hold_body(Arc::new(b1), false);
+    hub.hold_body(Arc::new(b2), false);
+    let spend = mature_coinbase_spend(&ctx, 49_9999_0000, spk).1;
+    mp.accept_tx(&spend).expect("mature coinbase spend");
+    let cut = hub.block_at_height(100).unwrap().unwrap().block_hash();
+    let parked = Arc::new(AtomicU64::new(0));
+    rbitcoin_rpc::methods::set_rpc_wait_park_note(Some(Arc::clone(&parked)));
+    let _clear = ClearParkNote;
+    std::thread::scope(|scope| {
+        let hub = Arc::clone(&hub);
+        scope.spawn(move || {
+            wait_until_parked(&parked);
+            hub.invalidate_block(cut)
+                .expect("invalidate below maturity");
+        });
+        let t0 = Instant::now();
+        let got =
+            rbitcoin_rpc::methods::chain::wait_for_tip(&ctx, 2_000, |hash, _| hash != start_hex)
+                .unwrap();
+        assert!(
+            t0.elapsed() < Duration::from_millis(500),
+            "invalidate left the tip wait parked: {:?}",
+            t0.elapsed()
+        );
+        let fork_hex = rbitcoin_rpc::methods::hash_hex_display(&fork_tip.to_byte_array());
+        assert_eq!(got["hash"], fork_hex, "{got}");
+    });
+    assert_eq!(hub.tip_hash(), Some(fork_tip));
+    assert_eq!(mp.template_prev(), Some(fork_tip.to_byte_array()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn wait_until_parked(parked: &AtomicU64) {
     let start = Instant::now();
     while parked.load(Ordering::SeqCst) == 0 {
