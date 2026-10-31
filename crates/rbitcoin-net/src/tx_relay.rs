@@ -915,6 +915,13 @@ pub struct MempoolHub {
     pub dir: PathBuf,
     /// Locally submitted txids not yet requested by a peer (`getmempoolinfo.unbroadcastcount`).
     pub unbroadcast: Mutex<HashSet<Txid>>,
+    /// Test latch. Async admits park before `note_unbroadcast` while this is set.
+    /// Production leaves it clear. Each hub has its own latch.
+    #[doc(hidden)]
+    pub pause_before_unbroadcast_note: AtomicBool,
+    /// Set while an async admit is parked on [`Self::pause_before_unbroadcast_note`].
+    #[doc(hidden)]
+    pub unbroadcast_note_parked: AtomicBool,
     local_origin: Mutex<LocalOrigin>,
     pub isolated_broadcast: AtomicBool,
     /// Wakes the isolated loop when a local tx is queued for it.
@@ -1165,6 +1172,8 @@ impl MempoolHub {
             meter_cmpct_avail: AtomicU64::new(0),
             sh_index: Mutex::new(MempoolShIndex::new()),
             unbroadcast: Mutex::new(unbroadcast),
+            pause_before_unbroadcast_note: AtomicBool::new(false),
+            unbroadcast_note_parked: AtomicBool::new(false),
             local_origin: Mutex::new(LocalOrigin::default()),
             isolated_broadcast: AtomicBool::new(false),
             isolated_wake: tokio::sync::Notify::new(),

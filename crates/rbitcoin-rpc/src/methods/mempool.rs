@@ -1053,10 +1053,35 @@ pub async fn sendrawtransaction_async(
         let accepted = mp_done
             .accept_tx_from_async(tx_done.clone(), rbitcoin_net::TxOrigin::Local)
             .await;
+        // After publish, before the note. A dropped request stays here only
+        // when a test armed the latch. The note still runs on this task.
+        park_before_unbroadcast_note(&mp_done).await;
         super::off_pool(move || sendraw_after_accept(&ctx_done, &tx_done, accepted)).await
     })
     .await
     .expect("sendrawtransaction")
+}
+
+/// Test latch between publish and `note_unbroadcast`. Clear in production,
+/// so this returns without yielding. The wait is on the admit task: aborting
+/// the request does not cancel it.
+async fn park_before_unbroadcast_note(mp: &MempoolHub) {
+    if !mp
+        .pause_before_unbroadcast_note
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return;
+    }
+    mp.unbroadcast_note_parked
+        .store(true, std::sync::atomic::Ordering::Release);
+    while mp
+        .pause_before_unbroadcast_note
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        tokio::task::yield_now().await;
+    }
+    mp.unbroadcast_note_parked
+        .store(false, std::sync::atomic::Ordering::Release);
 }
 
 fn sendraw_after_accept(
@@ -2213,6 +2238,7 @@ pub async fn submitpackage_admit_async(
         let rows = mp_a
             .submit_package_rpc_eval_async(plan.eval_txs.clone(), plan.package_eval)
             .await;
+        park_before_unbroadcast_note(&mp_a).await;
         let mp_b = Arc::clone(&mp_a);
         super::off_pool(move || {
             submitpackage_apply(

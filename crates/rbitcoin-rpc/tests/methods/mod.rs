@@ -6122,8 +6122,8 @@ fn getmininginfo_assembly_is_per_block() {
 }
 
 /// Aborting the request after the tx is published still records it
-/// unbroadcast. The note shares the admit task, so dropping the handler
-/// during that wait does not skip it.
+/// unbroadcast. The note shares the admit task. The latch holds that task
+/// between publish and the note, so the abort is the thing under test.
 #[test]
 fn dropped_sendraw_still_notes_unbroadcast() {
     let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
@@ -6136,6 +6136,8 @@ fn dropped_sendraw_still_notes_unbroadcast() {
     let txid = tx.compute_txid();
     let ctx = std::sync::Arc::new(ctx);
     let mp = std::sync::Arc::clone(ctx.mempool.as_ref().unwrap());
+    mp.pause_before_unbroadcast_note
+        .store(true, Ordering::Release);
     let params = rbitcoin_rpc::methods::RpcParams::positional(vec![json!(hex)]);
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -6148,10 +6150,10 @@ fn dropped_sendraw_still_notes_unbroadcast() {
                 rbitcoin_rpc::methods::mempool::sendrawtransaction_async(&ctx_job, &params).await
             });
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while !mp.contains(&txid) {
+            while !mp.contains(&txid) || !mp.unbroadcast_note_parked.load(Ordering::Acquire) {
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "sendraw did not publish"
+                    "sendraw did not park between publish and the note"
                 );
                 tokio::task::yield_now().await;
             }
@@ -6162,6 +6164,17 @@ fn dropped_sendraw_still_notes_unbroadcast() {
             );
             job.abort();
             let _ = job.await;
+            assert_eq!(
+                mp.unbroadcast_count(),
+                0,
+                "abort ran the note on the request"
+            );
+            assert!(
+                mp.unbroadcast_note_parked.load(Ordering::Acquire),
+                "abort cancelled the admit task"
+            );
+            mp.pause_before_unbroadcast_note
+                .store(false, Ordering::Release);
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while mp.unbroadcast_count() == 0 {
                 assert!(
@@ -6187,6 +6200,8 @@ fn dropped_submitpackage_still_notes_unbroadcast() {
     let txid = tx.compute_txid();
     let ctx = std::sync::Arc::new(ctx);
     let mp = std::sync::Arc::clone(ctx.mempool.as_ref().unwrap());
+    mp.pause_before_unbroadcast_note
+        .store(true, Ordering::Release);
     let params = rbitcoin_rpc::methods::RpcParams::positional(vec![json!([hex])]);
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -6199,16 +6214,27 @@ fn dropped_submitpackage_still_notes_unbroadcast() {
                 rbitcoin_rpc::methods::mempool::submitpackage_async(&ctx_job, &params).await
             });
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while !mp.contains(&txid) {
+            while !mp.contains(&txid) || !mp.unbroadcast_note_parked.load(Ordering::Acquire) {
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "submitpackage did not publish"
+                    "submitpackage did not park between publish and the note"
                 );
                 tokio::task::yield_now().await;
             }
             assert_eq!(mp.unbroadcast_count(), 0, "note ran before the drop");
             job.abort();
             let _ = job.await;
+            assert_eq!(
+                mp.unbroadcast_count(),
+                0,
+                "abort ran the note on the request"
+            );
+            assert!(
+                mp.unbroadcast_note_parked.load(Ordering::Acquire),
+                "abort cancelled the admit task"
+            );
+            mp.pause_before_unbroadcast_note
+                .store(false, Ordering::Release);
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while mp.unbroadcast_count() == 0 {
                 assert!(
