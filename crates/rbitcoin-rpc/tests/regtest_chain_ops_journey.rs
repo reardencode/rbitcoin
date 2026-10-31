@@ -135,7 +135,7 @@ fn chain_ops_waiters_return_on_stop(ctx: &RpcContext) {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    let wake = |stop: std::sync::Arc<std::sync::atomic::AtomicBool>| {
+    let wake = |stop: std::sync::Arc<rbitcoin_rpc::methods::StopFlag>| {
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(30));
             stop.store(true, Ordering::SeqCst);

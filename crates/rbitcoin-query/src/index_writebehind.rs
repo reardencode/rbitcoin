@@ -589,7 +589,10 @@ pub fn run_writebehind(
             &stages,
             &tx,
             PROGRESS_EVERY,
-            on_filters_caught_up,
+            IoHooks {
+                before_send: || {},
+                on_filters_caught_up,
+            },
         );
         drop(tx);
         let cpu = worker.join().expect("index cpu worker");
@@ -604,6 +607,14 @@ pub struct Pass {
     pub last_log: Instant,
 }
 
+/// Test and production callbacks for [`io_loop`]. One argument keeps the
+/// function under the argument-count lint.
+#[doc(hidden)]
+pub struct IoHooks<B, F> {
+    pub before_send: B,
+    pub on_filters_caught_up: F,
+}
+
 #[doc(hidden)]
 pub fn io_loop(
     query: &Query,
@@ -612,9 +623,9 @@ pub fn io_loop(
     stages: &IndexStageMs,
     tx: &std::sync::mpsc::SyncSender<ReadyWindow>,
     progress_every: Duration,
-    on_filters_caught_up: impl FnOnce(),
+    mut hooks: IoHooks<impl FnMut(), impl FnOnce()>,
 ) -> Result<(), ConfirmError> {
-    let mut on_filters_caught_up = Some(on_filters_caught_up);
+    let mut on_filters_caught_up = Some(hooks.on_filters_caught_up);
     let mut cursor: Option<u32> = None;
     let mut pass: Option<Pass> = None;
     let mut live = IndexStages::default();
@@ -687,6 +698,7 @@ pub fn io_loop(
         let window = read_window(query, start, end)?;
         let read_ns = t_read.elapsed().as_nanos() as u64;
         stages.add_read(read_ns);
+        (hooks.before_send)();
         if tx
             .send(ReadyWindow {
                 window,

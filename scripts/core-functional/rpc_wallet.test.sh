@@ -337,6 +337,8 @@ class Esplora(BaseHTTPRequestHandler):
 
 
 def listen_later(port: int, delay_s: float) -> HTTPServer:
+    # Stay down across the old 4s esplora retry. The wallet then waits
+    # until this socket accepts. delay_s is that stayed-down interval.
     time.sleep(delay_s)
     httpd = HTTPServer(("127.0.0.1", port), Esplora)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()

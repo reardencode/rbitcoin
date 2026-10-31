@@ -13,7 +13,7 @@ use std::sync::atomic::{
     AtomicBool, AtomicI64, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering,
 };
 use std::sync::{Arc, Mutex, RwLock, Weak};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, watch, Notify};
 
 /// Per-peer outbound queue cap (a few megabytes). Not a configuration knob.
 ///
@@ -337,6 +337,8 @@ pub struct LivePeer {
     pub send_queued: AtomicUsize,
     /// Wakes the reader after the writer drains under [`PEER_SEND_BUDGET`].
     pub send_resume: tokio::sync::Notify,
+    /// Times [`Self::wait_send_budget`] armed that wait. The wait, not the contract.
+    send_budget_parks: AtomicUsize,
     /// Inbound `getaddr` is answered once per connection.
     pub getaddr_answered: AtomicBool,
     /// We sent `sendcmpct(1)`: this peer should announce compact blocks to us.
@@ -979,6 +981,12 @@ impl LivePeer {
             });
     }
 
+    /// Times this peer has armed [`Self::wait_send_budget`]. The wait, not the contract.
+    #[doc(hidden)]
+    pub fn send_budget_parks(&self) -> usize {
+        self.send_budget_parks.load(Ordering::Acquire)
+    }
+
     /// Reader pause. Registers the waiter before the budget check.
     pub async fn wait_send_budget(&self) {
         loop {
@@ -986,6 +994,7 @@ impl LivePeer {
             if !self.send_over_budget() {
                 return;
             }
+            self.send_budget_parks.fetch_add(1, Ordering::Release);
             notified.await;
         }
     }
@@ -1623,6 +1632,8 @@ pub struct PeerHub {
     /// One stored permit when an addr-fetch reply is learned, so tip-follow
     /// can dial a book that was empty at catch-up.
     addrfetch_learned: Notify,
+    /// Catch-up has seen an empty book and is about to wait for a row.
+    dial_parked: Notify,
     /// Network P2P port used when a remembered host omits `:port`. `0` = unset.
     pub connect_default_port: AtomicU16,
     pub dial_tx: Mutex<Option<mpsc::UnboundedSender<DialRequest>>>,
@@ -1630,6 +1641,19 @@ pub struct PeerHub {
     pub hb_selected: Mutex<Vec<u64>>,
     /// `setmocktime` seconds; `0` means wall clock.
     pub mock_now: AtomicU64,
+    /// Bumped by [`Self::set_mock_now`] so a live session runs its heartbeat
+    /// on that call. A `watch` keeps the jump if it lands between waits.
+    session_heartbeat: watch::Sender<u64>,
+    /// Times a session has entered `on_heartbeat`. The wait, not the contract.
+    heartbeat_laps: AtomicU64,
+    /// Outbound version nonces registered. Stays after the nonce is cleared.
+    outbound_attempts: AtomicU64,
+    /// Refill and stale-tip passes. The wait, not the peer-row contract.
+    pass_skipped_pinned: AtomicU64,
+    pass_not_stagnant: AtomicU64,
+    pass_skipped_seeds_off: AtomicU64,
+    pass_rotated: AtomicU64,
+    pass_no_spare: AtomicU64,
     /// Count of sessions currently in headers-sync.
     pub headers_sync_peers: AtomicU64,
     /// Last inv hash that started headers sync with a not-yet-sync peer.
@@ -1684,6 +1708,29 @@ pub struct PeerHub {
     /// Per hub, not process-wide: one process runs many nodes in tests, and
     /// only the node whose filters reached the tip may advertise the bit.
     pub compact_filters: AtomicBool,
+}
+
+/// Why one outbound refill or stale-tip pass declined, or that it rotated
+/// one full-relay peer. The count is only the wait.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutboundPass {
+    SkippedPinned,
+    NotStagnant,
+    SkippedSeedsOff,
+    Rotated,
+    NoSpare,
+}
+
+/// Per-kind totals from [`PeerHub::note_outbound_pass`].
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OutboundPassCounts {
+    pub skipped_pinned: u64,
+    pub not_stagnant: u64,
+    pub skipped_seeds_off: u64,
+    pub rotated: u64,
+    pub no_spare: u64,
 }
 
 #[doc(hidden)]
@@ -1754,10 +1801,19 @@ impl PeerHub {
             dials_in_flight: Arc::new(Mutex::new(HashMap::new())),
             addrfetch_replies: AtomicU64::new(0),
             addrfetch_learned: Notify::new(),
+            dial_parked: Notify::new(),
             connect_default_port: AtomicU16::new(0),
             dial_tx: Mutex::new(None),
             hb_selected: Mutex::new(Vec::new()),
             mock_now: AtomicU64::new(0),
+            session_heartbeat: watch::channel(0).0,
+            heartbeat_laps: AtomicU64::new(0),
+            outbound_attempts: AtomicU64::new(0),
+            pass_skipped_pinned: AtomicU64::new(0),
+            pass_not_stagnant: AtomicU64::new(0),
+            pass_skipped_seeds_off: AtomicU64::new(0),
+            pass_rotated: AtomicU64::new(0),
+            pass_no_spare: AtomicU64::new(0),
             headers_sync_peers: AtomicU64::new(0),
             last_inv_headers_sync: Mutex::new(None),
             noban: AtomicBool::new(false),
@@ -2011,6 +2067,18 @@ impl PeerHub {
         &self.addrfetch_learned
     }
 
+    /// Catch-up is parked on an empty book. The wait, not the dial target.
+    #[doc(hidden)]
+    pub fn note_dial_parked(&self) {
+        self.dial_parked.notify_one();
+    }
+
+    /// Wakes once catch-up is inside the empty-book wait.
+    #[doc(hidden)]
+    pub fn dial_parked(&self) -> &Notify {
+        &self.dial_parked
+    }
+
     pub fn set_addrman(&self, am: std::sync::Arc<Mutex<crate::seeds::AddrMan>>) {
         let on = self.i2p_reachable.load(Ordering::Relaxed);
         am.lock()
@@ -2112,10 +2180,52 @@ impl PeerHub {
 
     /// Core: register local version nonce while an outbound handshake is open.
     pub fn note_outbound_nonce(&self, nonce: u64) {
+        self.outbound_attempts.fetch_add(1, Ordering::Release);
         self.pending_outbound_nonces
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(nonce);
+    }
+
+    /// Outbound handshakes that registered a version nonce.
+    #[doc(hidden)]
+    pub fn outbound_attempts(&self) -> u64 {
+        self.outbound_attempts.load(Ordering::Acquire)
+    }
+
+    /// How many times a live session has entered its heartbeat.
+    #[doc(hidden)]
+    pub fn heartbeat_laps(&self) -> u64 {
+        self.heartbeat_laps.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn note_heartbeat_lap(&self) {
+        self.heartbeat_laps.fetch_add(1, Ordering::Release);
+    }
+
+    /// One refill or stale-tip decision. Callers in the tip-follow loop.
+    #[doc(hidden)]
+    pub fn note_outbound_pass(&self, kind: OutboundPass) {
+        let slot = match kind {
+            OutboundPass::SkippedPinned => &self.pass_skipped_pinned,
+            OutboundPass::NotStagnant => &self.pass_not_stagnant,
+            OutboundPass::SkippedSeedsOff => &self.pass_skipped_seeds_off,
+            OutboundPass::Rotated => &self.pass_rotated,
+            OutboundPass::NoSpare => &self.pass_no_spare,
+        };
+        slot.fetch_add(1, Ordering::Release);
+    }
+
+    /// How many times each outbound pass has been recorded.
+    #[doc(hidden)]
+    pub fn outbound_pass_counts(&self) -> OutboundPassCounts {
+        OutboundPassCounts {
+            skipped_pinned: self.pass_skipped_pinned.load(Ordering::Acquire),
+            not_stagnant: self.pass_not_stagnant.load(Ordering::Acquire),
+            skipped_seeds_off: self.pass_skipped_seeds_off.load(Ordering::Acquire),
+            rotated: self.pass_rotated.load(Ordering::Acquire),
+            no_spare: self.pass_no_spare.load(Ordering::Acquire),
+        }
     }
 
     pub fn clear_outbound_nonce(&self, nonce: u64) {
@@ -2435,6 +2545,12 @@ impl PeerHub {
         }
         drop(g);
         self.on_session_heartbeat();
+        self.session_heartbeat
+            .send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    pub(crate) fn subscribe_session_heartbeat(&self) -> watch::Receiver<u64> {
+        self.session_heartbeat.subscribe()
     }
 
     /// Session 50ms heartbeat: replace a stalling initial-headers-sync peer.
@@ -2678,6 +2794,7 @@ impl PeerHub {
             serve_inflight: AtomicUsize::new(0),
             send_queued: AtomicUsize::new(0),
             send_resume: tokio::sync::Notify::new(),
+            send_budget_parks: AtomicUsize::new(0),
             getaddr_answered: AtomicBool::new(false),
             hb_to: AtomicBool::new(false),
             hb_from: AtomicBool::new(false),

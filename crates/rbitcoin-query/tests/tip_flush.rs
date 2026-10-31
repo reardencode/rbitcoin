@@ -18,25 +18,21 @@ fn two_ibd_flushes_share_one_named_thread() {
 
     q.enter_direct_index_mode_sh(false).unwrap();
     let hold = q.hold_tip_flushes();
+    let _release = ReleaseHold(&hold);
     q.spawn_tip_flush().unwrap();
     q.spawn_tip_flush().unwrap();
-    let deadline = Instant::now() + Duration::from_millis(200);
-    let mut tid = 0u64;
-    while Instant::now() < deadline {
-        let alive = q.tip_flush_alive();
-        let published = q.tip_flush_os_tid();
-        if tid == 0 {
-            assert!(alive <= 1, "two IBD barriers use one rbtc-tip-flush thread");
-            if alive == 1 && published != 0 {
-                tid = published;
-            }
-        } else {
-            assert_eq!(alive, 1, "two IBD barriers use one rbtc-tip-flush thread");
-            assert_eq!(published, tid, "the second barrier starts another thread");
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert_ne!(tid, 0, "rbtc-tip-flush published its tid");
+    let published = q.wait_tip_flush_published(Duration::from_millis(200));
+    assert_eq!(
+        q.tip_flush_alive(),
+        1,
+        "two IBD barriers use one rbtc-tip-flush thread"
+    );
+    let tid = published.expect("rbtc-tip-flush published its tid");
+    assert_eq!(
+        q.tip_flush_os_tid(),
+        tid,
+        "the second barrier starts another thread"
+    );
     assert_eq!(
         task_comm(tid).as_deref(),
         Some("rbtc-tip-flush"),
@@ -57,6 +53,14 @@ fn two_ibd_flushes_share_one_named_thread() {
     while task_comm(tid).is_some() {
         assert!(Instant::now() < deadline, "drop joins rbtc-tip-flush");
         std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+struct ReleaseHold<'a>(&'a rbitcoin_store::TipFlushHold);
+
+impl Drop for ReleaseHold<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 

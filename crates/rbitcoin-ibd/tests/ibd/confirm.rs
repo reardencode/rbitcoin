@@ -71,10 +71,11 @@ fn spindle_hold_blocks_lookup_and_load_bulk_reads() {
                     );
                 }
             });
-            std::thread::sleep(Duration::from_millis(300));
+            rx.recv_timeout(Duration::from_secs(2))
+                .expect("bulk read parks while the spindle is held");
             assert!(
                 matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
-                "bulk read started while the spindle was held"
+                "bulk read finished while the spindle was held"
             );
             drop(_hold);
             rx.recv_timeout(Duration::from_secs(5))

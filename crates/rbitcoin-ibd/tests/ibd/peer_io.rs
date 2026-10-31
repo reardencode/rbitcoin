@@ -94,9 +94,7 @@ fn stream_bytes_sample_and_first_data() {
     sample_peer_rates(std::slice::from_mut(&mut s), 5_000);
     assert!(s.rate.bps().is_some());
 
-    while ibd_mono_ms() == 0 {
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
+    wait_past_mono_sentinel();
     note_block_rx(std::slice::from_mut(&mut s), 7, 0);
     assert_eq!(s.first_data_ms, 0);
     note_block_progress(std::slice::from_mut(&mut s), 7);
@@ -143,9 +141,7 @@ fn unsolicited_block_does_not_refresh_progress() {
     assert_eq!(bytes.load(Ordering::Relaxed), 0);
     assert_eq!(ms.load(Ordering::Relaxed), 0);
 
-    while ibd_mono_ms() == 0 {
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
+    wait_past_mono_sentinel();
     requested.lock().unwrap().insert(hash);
     let len = rbitcoin_ibd::ibd::rate::PROGRESS_STEP as usize;
     assert!(
@@ -191,9 +187,7 @@ fn socket_bytes_refresh_the_quiet_clock_only() {
     let hash = BlockHash::from_byte_array([4u8; 32]);
     slot.in_flight.insert(hash);
     slot.rate.note_connected(0);
-    while ibd_mono_ms() == 0 {
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
+    wait_past_mono_sentinel();
     let mut mark = 0usize;
     note_read_progress(&slot.bytes_rx_total, &slot.any_rx_ms, &mut mark, 32);
     sample_peer_rates(std::slice::from_mut(&mut slot), 5_000);
@@ -321,8 +315,8 @@ fn read_progress_counts_the_delta_from_the_mark() {
     let bytes = AtomicU64::new(0);
     let mut mark = 0usize;
     let rx_ms = AtomicU64::new(0);
-    // The process clock starts at 0. Wait so a stamp is distinguishable.
-    std::thread::sleep(std::time::Duration::from_millis(2));
+    // The process clock starts at 0. A stamp of 0 is "no read yet".
+    wait_past_mono_sentinel();
     note_read_progress(&bytes, &rx_ms, &mut mark, 10);
     note_read_progress(&bytes, &rx_ms, &mut mark, 25);
     assert_eq!(bytes.load(Ordering::Relaxed), 25);

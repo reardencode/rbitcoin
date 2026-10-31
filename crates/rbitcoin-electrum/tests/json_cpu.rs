@@ -17,11 +17,17 @@ impl ScriptHold {
         assert!(n >= 1, "script pool did not start");
         let gate = Arc::new((Mutex::new(false), Condvar::new()));
         let entered = Arc::new(AtomicUsize::new(0));
+        let parked = Arc::new((Mutex::new(()), Condvar::new()));
         for _ in 0..n {
             let entered = Arc::clone(&entered);
             let gate = Arc::clone(&gate);
+            let parked = Arc::clone(&parked);
             rbitcoin_consensus::script_pool::spawn_detached(move || {
-                entered.fetch_add(1, Ordering::SeqCst);
+                {
+                    let _g = parked.0.lock().unwrap_or_else(|p| p.into_inner());
+                    entered.fetch_add(1, Ordering::SeqCst);
+                    parked.1.notify_all();
+                }
                 let (lock, cv) = &*gate;
                 let mut g = lock.lock().unwrap_or_else(|p| p.into_inner());
                 while !*g {
@@ -30,12 +36,13 @@ impl ScriptHold {
             });
         }
         let start = Instant::now();
+        let (lock, cv) = &*parked;
+        let mut g = lock.lock().unwrap_or_else(|p| p.into_inner());
         while entered.load(Ordering::SeqCst) < n {
-            assert!(
-                start.elapsed() < Duration::from_secs(2),
-                "script workers did not park"
-            );
-            std::thread::sleep(Duration::from_millis(1));
+            let left = Duration::from_secs(2).saturating_sub(start.elapsed());
+            assert!(!left.is_zero(), "script workers did not park");
+            let (next, _timeout) = cv.wait_timeout(g, left).unwrap_or_else(|p| p.into_inner());
+            g = next;
         }
         Self { gate }
     }

@@ -137,6 +137,12 @@ pub struct TipFlushWorker {
     /// Linux tid of this worker. Zero until the thread publishes it.
     #[cfg(all(debug_assertions, target_os = "linux"))]
     os_tid: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Set after `os_tid` is stored. The name is already the builder name.
+    #[cfg(all(debug_assertions, target_os = "linux"))]
+    published: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    /// Set when `join_tip_flush` is blocked on the in-flight barrier.
+    #[cfg(debug_assertions)]
+    blocked: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
 }
 
 impl Default for TipFlushWorker {
@@ -148,6 +154,13 @@ impl Default for TipFlushWorker {
             alive: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(all(debug_assertions, target_os = "linux"))]
             os_tid: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(all(debug_assertions, target_os = "linux"))]
+            published: std::sync::Arc::new((
+                std::sync::Mutex::new(false),
+                std::sync::Condvar::new(),
+            )),
+            #[cfg(debug_assertions)]
+            blocked: std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new())),
         }
     }
 }
@@ -171,7 +184,7 @@ impl Drop for TipFlushAlive {
     }
 }
 
-#[cfg(all(debug_assertions, target_os = "linux"))]
+#[cfg(target_os = "linux")]
 fn linux_task_id() -> Option<u64> {
     let path = std::fs::read_link("/proc/thread-self").ok()?;
     path.file_name()?.to_str()?.parse().ok()
@@ -267,6 +280,8 @@ impl Query {
                 std::io::Error::other("an earlier IBD tip flush failed; restart the node"),
             )),
             TipFlush::Running(flush) => {
+                #[cfg(debug_assertions)]
+                self.note_tip_commit_blocked();
                 let t = std::time::Instant::now();
                 let r = flush
                     .rx
@@ -382,6 +397,8 @@ impl Query {
         let alive = Arc::clone(&self.tip_flush_worker.alive);
         #[cfg(all(debug_assertions, target_os = "linux"))]
         let os_tid = Arc::clone(&self.tip_flush_worker.os_tid);
+        #[cfg(all(debug_assertions, target_os = "linux"))]
+        let published = Arc::clone(&self.tip_flush_worker.published);
         let handle = std::thread::Builder::new()
             .name("rbtc-tip-flush".into())
             .spawn(move || {
@@ -390,6 +407,9 @@ impl Query {
                 #[cfg(all(debug_assertions, target_os = "linux"))]
                 if let Some(tid) = linux_task_id() {
                     os_tid.store(tid, Ordering::Release);
+                    let (lock, cv) = &*published;
+                    *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+                    cv.notify_all();
                 }
                 while let Ok(job) = rx.recv() {
                     // Pause after the flush excludes stores, not before it starts.
@@ -445,6 +465,32 @@ impl Query {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// Linux tid once the barrier thread has published it and its name.
+    #[cfg(all(debug_assertions, target_os = "linux"))]
+    #[doc(hidden)]
+    pub fn wait_tip_flush_published(&self, timeout: std::time::Duration) -> Option<u64> {
+        let (lock, cv) = &*self.tip_flush_worker.published;
+        let mut ready = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if *ready {
+                let tid = self.tip_flush_os_tid();
+                return (tid != 0).then_some(tid);
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            let (guard, status) = cv
+                .wait_timeout(ready, left)
+                .unwrap_or_else(|e| e.into_inner());
+            ready = guard;
+            if status.timed_out() && !*ready {
+                return None;
+            }
+        }
+    }
+
     /// Linux tid of this query's barrier thread, or zero before it publishes.
     #[cfg(all(debug_assertions, target_os = "linux"))]
     #[doc(hidden)]
@@ -454,10 +500,43 @@ impl Query {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    #[cfg(debug_assertions)]
+    fn note_tip_commit_blocked(&self) {
+        let (lock, cv) = &*self.tip_flush_worker.blocked;
+        let mut blocked = lock.lock().unwrap_or_else(|e| e.into_inner());
+        *blocked = true;
+        cv.notify_all();
+    }
+
+    /// `true` once a commit is inside [`Self::join_tip_flush`] for a running barrier.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn wait_tip_commit_blocked(&self, timeout: std::time::Duration) -> bool {
+        let (lock, cv) = &*self.tip_flush_worker.blocked;
+        let mut blocked = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if *blocked {
+                return true;
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            let (guard, status) = cv
+                .wait_timeout(blocked, left)
+                .unwrap_or_else(|e| e.into_inner());
+            blocked = guard;
+            if status.timed_out() && !*blocked {
+                return false;
+            }
+        }
+    }
+
     /// IBD tip flush threads pause after they exclude stores, until this flag clears.
     #[cfg(debug_assertions)]
     #[doc(hidden)]
-    pub fn hold_tip_flushes(&self) -> Arc<std::sync::atomic::AtomicBool> {
+    pub fn hold_tip_flushes(&self) -> Arc<rbitcoin_store::TipFlushHold> {
         self.tip_flush_hold.store(true, Ordering::SeqCst);
         Arc::clone(&self.tip_flush_hold)
     }
@@ -1388,6 +1467,51 @@ pub fn request_sh_writebehind_halt(
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// Class B scripthash appender. The builder name is `rbtc-sh-wb`.
+pub struct ShWritebehind {
+    join: std::thread::JoinHandle<()>,
+    #[cfg(target_os = "linux")]
+    os_tid: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    #[cfg(target_os = "linux")]
+    published: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+}
+
+impl ShWritebehind {
+    pub fn join(self) -> std::thread::Result<()> {
+        self.join.join()
+    }
+
+    pub fn thread(&self) -> &std::thread::Thread {
+        self.join.thread()
+    }
+
+    /// Linux tid after the appender has published it. The name is already set.
+    #[cfg(target_os = "linux")]
+    #[doc(hidden)]
+    pub fn wait_published(&self, timeout: std::time::Duration) -> Option<u64> {
+        let (lock, cv) = &*self.published;
+        let mut ready = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if *ready {
+                let tid = self.os_tid.load(std::sync::atomic::Ordering::Acquire);
+                return (tid != 0).then_some(tid);
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            let (guard, status) = cv
+                .wait_timeout(ready, left)
+                .unwrap_or_else(|e| e.into_inner());
+            ready = guard;
+            if status.timed_out() && !*ready {
+                return None;
+            }
+        }
+    }
+}
+
 /// One Class B appender for SH write-behind. Tests drain via [`Query::apply_sh_pending`].
 ///
 /// Apply errors request `stop` and `on_fatal` so the process exits instead of
@@ -1396,10 +1520,25 @@ pub fn spawn_sh_writebehind(
     query: std::sync::Arc<Query>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     on_fatal: impl FnOnce() + Send + 'static,
-) -> std::thread::JoinHandle<()> {
-    std::thread::Builder::new()
+) -> ShWritebehind {
+    #[cfg(target_os = "linux")]
+    let os_tid = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    #[cfg(target_os = "linux")]
+    let published = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    #[cfg(target_os = "linux")]
+    let thread_tid = std::sync::Arc::clone(&os_tid);
+    #[cfg(target_os = "linux")]
+    let thread_published = std::sync::Arc::clone(&published);
+    let join = std::thread::Builder::new()
         .name("rbtc-sh-wb".into())
         .spawn(move || {
+            #[cfg(target_os = "linux")]
+            if let Some(tid) = linux_task_id() {
+                thread_tid.store(tid, std::sync::atomic::Ordering::Release);
+                let (lock, cv) = &*thread_published;
+                *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+                cv.notify_all();
+            }
             let mut on_fatal = Some(on_fatal);
             loop {
                 if stop.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1442,5 +1581,12 @@ pub fn spawn_sh_writebehind(
                 rbitcoin_log::info!("sh: apply h={h} wall={wall_ms}ms lag={lag}");
             }
         })
-        .expect("spawn sh write-behind")
+        .expect("spawn sh write-behind");
+    ShWritebehind {
+        join,
+        #[cfg(target_os = "linux")]
+        os_tid,
+        #[cfg(target_os = "linux")]
+        published,
+    }
 }

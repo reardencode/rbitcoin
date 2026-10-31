@@ -53,20 +53,25 @@ pub fn bind_unix_mode(
 }
 use tokio::task::JoinHandle;
 
-async fn serve_rpc<L>(mut listener: L, app: Router, sem: Arc<Semaphore>, shutdown: Arc<AtomicBool>)
-where
+#[doc(hidden)]
+pub async fn serve_rpc<L>(
+    mut listener: L,
+    app: Router,
+    sem: Arc<Semaphore>,
+    shutdown: Arc<AtomicBool>,
+    shutdown_tx: tokio::sync::watch::Sender<()>,
+) where
     L: axum::serve::Listener,
     L::Addr: std::fmt::Debug,
 {
-    let (shutdown_tx, _) = tokio::sync::watch::channel(());
-    let mut shutdown_tick = tokio::time::interval(std::time::Duration::from_millis(50));
+    let mut stop_rx = shutdown_tx.subscribe();
     loop {
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
         tokio::select! {
-            _ = shutdown_tick.tick() => {
-                if shutdown.load(Ordering::SeqCst) {
-                    break;
-                }
-            }
+            biased;
+            _ = stop_rx.changed() => break,
             (io, addr) = listener.accept() => {
                 let Ok(permit) = sem.clone().try_acquire_owned() else {
                     info!("rpc: reject {addr:?} (at max connections={RPC_MAX_CONNECTIONS})");
@@ -130,19 +135,21 @@ pub struct RpcHandle {
     pub socket_path: Option<PathBuf>,
     pub token_path: PathBuf,
     pub auth: RpcAuth,
-    pub stop: Arc<AtomicBool>,
+    pub stop: Arc<crate::methods::StopFlag>,
     pub connections: Arc<AtomicU64>,
     pub initial_block_download: Arc<AtomicBool>,
     /// Shared with [`RpcContext::active`] so tip-follow can drain in-flight
     /// handlers before tearing down the RPC server (`feature_shutdown.py`).
     pub active: Arc<std::sync::Mutex<crate::methods::RpcActive>>,
     pub shutdown: Arc<AtomicBool>,
+    shutdown_tx: tokio::sync::watch::Sender<()>,
     pub tasks: Vec<JoinHandle<()>>,
 }
 
 impl RpcHandle {
     pub async fn shutdown(self) {
         self.shutdown.store(true, Ordering::SeqCst);
+        let _ = self.shutdown_tx.send(());
         for task in self.tasks {
             task.abort();
             let _ = task.await;
@@ -198,7 +205,7 @@ pub async fn run_rpc(
         .map(|path| read_cookie_file(path, config.cookie_perms))
         .transpose()?;
 
-    let stop = Arc::new(AtomicBool::new(false));
+    let stop = crate::methods::StopFlag::new(false);
     let connections = Arc::new(AtomicU64::new(0));
     let ibd = Arc::new(AtomicBool::new(false));
     let active = Arc::new(std::sync::Mutex::new(crate::methods::RpcActive::default()));
@@ -230,6 +237,7 @@ pub async fn run_rpc(
     let work_queue = Arc::new(tokio::sync::Semaphore::new(n));
     let rest_queue = Arc::new(tokio::sync::Semaphore::new(DEFAULT_RPC_WORK_QUEUE));
     let shutdown = Arc::new(AtomicBool::new(false));
+    let (shutdown_tx, _) = tokio::sync::watch::channel(());
     let accept_sem = Arc::new(Semaphore::new(RPC_MAX_CONNECTIONS));
     let mut tasks = Vec::new();
     let mut local_addr = None;
@@ -266,7 +274,11 @@ pub async fn run_rpc(
         let shutdown_w = Arc::clone(&shutdown);
         let accept_sem = Arc::clone(&accept_sem);
         tasks.push(tokio::spawn(serve_rpc(
-            listener, app, accept_sem, shutdown_w,
+            listener,
+            app,
+            accept_sem,
+            shutdown_w,
+            shutdown_tx.clone(),
         )));
         info!(
             "rpc: HTTP JSON-RPC on {bound} (bearer token {})",
@@ -298,6 +310,7 @@ pub async fn run_rpc(
                     initial_block_download: ibd,
                     active,
                     shutdown,
+                    shutdown_tx,
                     tasks,
                 });
             }
@@ -316,7 +329,11 @@ pub async fn run_rpc(
         let shutdown_w = Arc::clone(&shutdown);
         let accept_sem = Arc::clone(&accept_sem);
         tasks.push(tokio::spawn(serve_rpc(
-            listener, app, accept_sem, shutdown_w,
+            listener,
+            app,
+            accept_sem,
+            shutdown_w,
+            shutdown_tx.clone(),
         )));
         info!("rpc: unix JSON-RPC on {}", sock.display());
         Some(sock.clone())
@@ -348,6 +365,7 @@ pub async fn run_rpc(
         initial_block_download: ibd,
         active,
         shutdown,
+        shutdown_tx,
         tasks,
     })
 }
@@ -455,7 +473,6 @@ pub async fn satisfy_http_wait(
         Some(v) => RpcParams::from_json(v).unwrap_or_else(RpcParams::empty),
         _ => RpcParams::empty(),
     };
-    let mut tips = ctx.chain.as_ref().map(|c| c.subscribe_tips());
     if method == "getblocktemplate" {
         let want = {
             let ctx = Arc::clone(ctx);
@@ -476,6 +493,7 @@ pub async fn satisfy_http_wait(
         let ctx = Arc::clone(ctx);
         let deadline = tokio::time::Instant::now()
             + std::time::Duration::from_millis(crate::methods::RPC_WAIT_TIMEOUT_MS);
+        let mut wake = crate::methods::RpcWake::arm(&ctx);
         loop {
             if ctx.stop.load(Ordering::SeqCst) || tokio::time::Instant::now() >= deadline {
                 return true;
@@ -492,13 +510,7 @@ pub async fn satisfy_http_wait(
             if ready || tokio::time::Instant::now() >= deadline {
                 return true;
             }
-            let slice = deadline
-                .saturating_duration_since(tokio::time::Instant::now())
-                .min(std::time::Duration::from_millis(50));
-            tokio::select! {
-                _ = tokio::time::sleep(slice) => {}
-                _ = recv_tip(&mut tips) => {}
-            }
+            wake.next(deadline).await;
         }
     }
     let timeout_ms = match method {
@@ -536,6 +548,7 @@ pub async fn satisfy_http_wait(
     let _active = crate::methods::ActiveCall::enter(&ctx.active, method);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     let ctx = Arc::clone(ctx);
+    let mut wake = crate::methods::RpcWake::arm(&ctx);
     loop {
         if ctx.stop.load(Ordering::SeqCst) || tokio::time::Instant::now() >= deadline {
             return true;
@@ -559,12 +572,7 @@ pub async fn satisfy_http_wait(
         if ready || tokio::time::Instant::now() >= deadline {
             return true;
         }
-        let slice = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let slice = slice.min(std::time::Duration::from_millis(50));
-        tokio::select! {
-            _ = tokio::time::sleep(slice) => {}
-            _ = recv_tip(&mut tips) => {}
-        }
+        wake.next(deadline).await;
     }
 }
 
@@ -574,14 +582,6 @@ pub enum WaitKind {
     Block(String),
     Height(u32),
     New(String),
-}
-
-pub async fn recv_tip(tips: &mut Option<tokio::sync::broadcast::Receiver<rbitcoin_net::TipEvent>>) {
-    if let Some(rx) = tips.as_mut() {
-        let _ = rx.recv().await;
-    } else {
-        std::future::pending::<()>().await;
-    }
 }
 
 async fn read_http_body(req: Request) -> Result<Bytes, Response> {

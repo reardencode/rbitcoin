@@ -595,6 +595,8 @@ path = sys.argv[1]
 s = socket.socket()
 s.bind(("127.0.0.1", 0))
 open(path, "w").write(str(s.getsockname()[1]))
+# The process stays up so this port remains bound until the parent kills it.
+# 60s is the cap if that kill does not arrive.
 time.sleep(60)
 PY
 HOLD_PY=$!
@@ -837,6 +839,8 @@ for a in "$@"; do
   prev="$a"
 done
 printf '%s\n' 'staytok' >"$ddir/rpc.token"
+# The process stays up so the parent can read the cookie and the warmup RPC.
+# 30s is the cap if that kill does not arrive.
 exec sleep 30
 EOF
 chmod +x "$STAY"

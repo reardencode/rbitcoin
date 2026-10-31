@@ -52,6 +52,41 @@ pub fn ensure_header_fk_count() -> u64 {
 }
 
 #[cfg(debug_assertions)]
+type InvalidateGapFn = Box<dyn FnOnce() + Send>;
+#[cfg(debug_assertions)]
+type InvalidateGapSlot = std::sync::Mutex<Option<InvalidateGapFn>>;
+
+/// One call after the disconnect hold drops and before the replacement
+/// fork is selected. A test admits here. Unset in production.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn set_invalidate_gap_hook(hook: Option<InvalidateGapFn>) {
+    let mut slot = invalidate_gap_hook()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *slot = hook;
+}
+
+#[cfg(debug_assertions)]
+fn invalidate_gap_hook() -> &'static InvalidateGapSlot {
+    static HOOK: std::sync::OnceLock<InvalidateGapSlot> = std::sync::OnceLock::new();
+    HOOK.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(debug_assertions)]
+fn fire_invalidate_gap_hook() {
+    let hook = {
+        let mut slot = invalidate_gap_hook()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        slot.take()
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(debug_assertions)]
 pub fn header_store_counts() -> (u64, u64, u64) {
     (
         ENSURE_HEADERS_BATCH_N.with(|c| c.get()),
@@ -2597,7 +2632,15 @@ impl ChainHub {
             .height_of_hash(&hash.to_byte_array())
             .map_err(NetError::store)?
             .filter(|h| h.0 <= tip);
+        let mut disconnected_to: Option<(u32, BlockHash)> = None;
+        // The disconnect hold ends before the replacement hold begins. Stay
+        // quiet across that gap so an admit cannot publish the stump.
+        let mut template_pause = None;
         if let Some(h) = on_tip {
+            template_pause = self
+                .mempool()
+                .cloned()
+                .map(|mp| mp.pause_template_publish());
             let _guard = self.connect_lock.lock().unwrap_or_else(|e| e.into_inner());
             let mut path = Vec::new();
             for ht in h.0..=tip {
@@ -2615,10 +2658,19 @@ impl ChainHub {
                 });
             }
             let keep = h.0.saturating_sub(1);
+            let removed = tip.saturating_sub(keep);
             let disconnected = self.disconnect_to(keep);
             self.revalidate_header_report();
             disconnected?;
+            let stump = self.tip_hash();
             drop(_guard);
+            if let Some(stump) = stump {
+                disconnected_to = Some((removed, stump));
+            }
+            // The disconnect hold is gone and the replacement hold is not
+            // taken yet. An admit here publishes the stump.
+            #[cfg(debug_assertions)]
+            fire_invalidate_gap_hook();
         } else if self.knows_header(&hash) || self.held_body(&hash).is_some() {
             // Side branch: mark it and keep the body. The mark keeps it off
             // the chain. The body is what reconsider and a child still need.
@@ -2631,7 +2683,31 @@ impl ChainHub {
         } else {
             return Err(NetError::Consensus("Block not found".into()));
         }
-        let _ = self.try_apply_after_invalidate()?;
+        let applied = self.try_apply_after_invalidate();
+        drop(template_pause);
+        // A replacement fork publishes from its branch reorg, including the
+        // template watch. Sending the stump before that wakes a one-shot
+        // wait, which then drops the subscription and misses the fork. With
+        // no fork, the stump is the tip a waiter has to see.
+        if let Some((removed, stump)) = disconnected_to {
+            if removed > 0 && self.tip_hash() == Some(stump) {
+                if let Some(mp) = self.mempool() {
+                    mp.note_template_prev(stump.to_byte_array());
+                }
+                if let (Some(height), Some(tip_hash), Some(header)) =
+                    (self.tip_height(), self.tip_hash(), self.tip_header())
+                {
+                    let _ = self.tip_tx.send(TipEvent {
+                        height,
+                        hash: tip_hash,
+                        header,
+                        reorg_branch_len: removed,
+                    });
+                    self.notify.notify_waiters();
+                }
+            }
+        }
+        applied?;
         if let Some(mp) = self.mempool() {
             mp.evict_after_reorg();
         }
@@ -3992,13 +4068,18 @@ impl ChainHub {
             let spent = spent_outpoints(&block.txdata);
             let n = mp.remove_for_block_spent(&ids, &spent);
             rbitcoin_log::debug!("mempool: removed {n} confirmed tx(s) @ height {height}");
-            if mp.pool_maintained() {
-                mp.note_block_fee_history(Height(height));
-                if let Some(hold) = reorg.as_deref_mut().and_then(|r| r.hold.as_mut()) {
-                    hold.commit(hash.to_byte_array());
-                } else if let Some(hold) = own_hold.as_mut() {
+            // Disconnect committed the fork point. Keep committing the
+            // connected block, or the drop publishes that ancestor and a
+            // template builds on it while the pool is still catching up.
+            if let Some(hold) = reorg.as_deref_mut().and_then(|r| r.hold.as_mut()) {
+                hold.commit(hash.to_byte_array());
+            } else if mp.pool_maintained() {
+                if let Some(hold) = own_hold.as_mut() {
                     hold.commit(hash.to_byte_array());
                 }
+            }
+            if mp.pool_maintained() {
+                mp.note_block_fee_history(Height(height));
             }
         }
         let mp_strip_ns = t_mp.elapsed().as_nanos() as u64;
@@ -4040,17 +4121,16 @@ impl ChainHub {
         // and then reads the query. The pool matches `keep_height` once the
         // disconnected transactions are back in it.
         let mp_hold = self.mempool().cloned();
-        let mut template_hold = mp_hold.as_ref().map(|mp| mp.template_hold());
+        // Hold the mark so a template cannot observe the pool mid-disconnect.
+        // Do not commit this height. The drop would publish it on
+        // template_watch before invalidate applies a heavier fork, and a
+        // one-shot wait would return the stump.
+        let template_hold = mp_hold.as_ref().map(|mp| mp.template_hold());
         let _commit = self
             .query
             .lock_tip_commit()
             .map_err(|e| NetError::Store(e.to_string()))?;
         self.disconnect_to_in_commit(keep_height)?;
-        if let Some(hold) = template_hold.as_mut() {
-            if let Ok(Some((_, rec))) = self.query.header_at_height(Height(keep_height)) {
-                hold.commit(rec.hash);
-            }
-        }
         drop(template_hold);
         Ok(())
     }

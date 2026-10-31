@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 fn coinbase_block(
     h: u32,
@@ -185,24 +185,21 @@ fn class_a_header_store_waits_out_the_tip_flush() {
     let (h1, ta1) = coinbase_block(1, prev, Some(h0.hash));
     let prev = q.commit_class_a_only(&h1, &[ta1]).unwrap();
     q.flush_tip(Some(Height(0))).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while !q.store.header_txs.first.flushing.load(Ordering::SeqCst) {
-        assert!(
-            Instant::now() < deadline,
-            "tip flush did not exclude header_txs stores"
-        );
-        thread::sleep(Duration::from_millis(1));
-    }
-    let hold2 = Arc::clone(&hold);
-    let releaser = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(50));
-        hold2.store(false, Ordering::SeqCst);
-    });
     let (h2, ta2) = coinbase_block(2, prev, Some(h1.hash));
-    let h2_fk = q
-        .commit_class_a_only(&h2, &[ta2])
-        .expect("header range put waits for the tip flush");
-    releaser.join().unwrap();
+    let h2_fk = thread::scope(|scope| {
+        let put = scope.spawn(|| q.commit_class_a_only(&h2, &[ta2]));
+        let blocked = q.wait_tip_commit_blocked(Duration::from_secs(2));
+        hold.store(false, Ordering::SeqCst);
+        let h2_fk = put
+            .join()
+            .unwrap()
+            .expect("header range put waits for the tip flush");
+        assert!(
+            blocked,
+            "the header put must block on the in-flight tip flush"
+        );
+        h2_fk
+    });
     assert!(q.store.header_txs.has_body(h2_fk).unwrap());
     drop(q);
     let _ = std::fs::remove_dir_all(&dir);

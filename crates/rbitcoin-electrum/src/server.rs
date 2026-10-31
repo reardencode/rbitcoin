@@ -184,16 +184,46 @@ impl ElectrumConfig {
     }
 }
 
+/// Stop bit for the accept loop and each client. `store(true)` wakes waiters.
+pub struct ElectrumStop {
+    flag: AtomicBool,
+    wake: Notify,
+}
+
+impl ElectrumStop {
+    pub fn new(initial: bool) -> Arc<Self> {
+        Arc::new(Self {
+            flag: AtomicBool::new(initial),
+            wake: Notify::new(),
+        })
+    }
+
+    pub fn load(&self) -> bool {
+        self.flag.load(Ordering::SeqCst)
+    }
+
+    pub fn store(&self, value: bool) {
+        self.flag.store(value, Ordering::SeqCst);
+        if value {
+            self.wake.notify_waiters();
+        }
+    }
+
+    fn notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.wake.notified()
+    }
+}
+
 pub struct ElectrumHandle {
     pub local_addr: SocketAddr,
-    pub shutdown: Arc<AtomicBool>,
+    pub shutdown: Arc<ElectrumStop>,
     pub tasks: Vec<JoinHandle<()>>,
     pub clients: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
 impl ElectrumHandle {
     pub async fn shutdown(mut self) {
-        self.shutdown.store(true, Ordering::SeqCst);
+        self.shutdown.store(true);
         for t in self.tasks.drain(..) {
             t.abort();
         }
@@ -237,8 +267,8 @@ pub async fn run_electrum(
 ) -> Result<ElectrumHandle, std::io::Error> {
     let listener = TcpListener::bind(config.listen).await?;
     let local_addr = listener.local_addr()?;
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_c = shutdown.clone();
+    let shutdown = ElectrumStop::new(false);
+    let shutdown_c = Arc::clone(&shutdown);
     let max_conn = config.max_connections().max(1);
     let conn_sem = Arc::new(Semaphore::new(max_conn));
     let config = Arc::new(config);
@@ -248,12 +278,16 @@ pub async fn run_electrum(
 
     let task = tokio::spawn(async move {
         loop {
-            if shutdown_c.load(Ordering::SeqCst) {
+            let wake = shutdown_c.notified();
+            if shutdown_c.load() {
                 break;
             }
-            let accept = tokio::time::timeout(Duration::from_millis(200), listener.accept()).await;
+            tokio::select! {
+                biased;
+                _ = wake => break,
+                accept = listener.accept() => {
             match accept {
-                Ok(Ok((stream, peer))) => {
+                Ok((stream, peer)) => {
                     let Ok(permit) = conn_sem.clone().try_acquire_owned() else {
                         rbitcoin_log::warn!(
                             "electrum: reject {peer} (at max_connections={max_conn})"
@@ -287,8 +321,9 @@ pub async fn run_electrum(
                     g.retain(|t| !t.is_finished());
                     g.push(h);
                 }
-                Ok(Err(_)) => break,
-                Err(_) => continue,
+                Err(_) => break,
+            }
+                }
             }
         }
     });
@@ -393,7 +428,7 @@ pub async fn handle_client<S>(
     params: Arc<ChainParams>,
     mut tip_rx: broadcast::Receiver<TipNotify>,
     mempool: Option<Arc<MempoolHub>>,
-    stop: Arc<AtomicBool>,
+    stop: Arc<ElectrumStop>,
 ) -> Result<(), std::io::Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -413,16 +448,13 @@ where
     sh_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
-        if stop.load(Ordering::SeqCst) {
+        let stop_wait = stop.notified();
+        if stop.load() {
             break;
         }
         tokio::select! {
             biased;
-            _ = async {
-                while !stop.load(Ordering::SeqCst) {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            } => break,
+            _ = stop_wait => break,
             tip = tip_rx.recv() => {
                 match tip {
                     Ok(t) => {

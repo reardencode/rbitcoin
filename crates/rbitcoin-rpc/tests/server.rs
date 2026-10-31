@@ -156,7 +156,6 @@ async fn rpc_smoke_getblockcount_and_help() {
     let handle = run_rpc(cfg, q, Some(mp), None, None, None, None)
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
 
     let count = post_rpc(
         tcp_addr(&handle),
@@ -256,7 +255,6 @@ async fn rest_is_404_without_the_flag() {
         package_dialect: false,
     };
     let handle = run_rpc(cfg, q, None, None, None, None, None).await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut rest = tokio::net::TcpStream::connect(tcp_addr(&handle))
         .await
@@ -471,7 +469,6 @@ async fn jsonrpc_v2_batch_and_http_codes() {
     let handle = run_rpc(cfg, q, Some(mp), None, None, None, None)
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
 
     let batch = serde_json::json!([
         {"jsonrpc":"2.0","id":1,"method":"getblockcount"},
@@ -554,7 +551,6 @@ async fn unauthorized_large_content_length_is_401_before_body() {
         package_dialect: false,
     };
     let handle = run_rpc(cfg, q, None, None, None, None, None).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(40)).await;
     let mut stream = tokio::net::TcpStream::connect(tcp_addr(&handle))
         .await
         .unwrap();
@@ -599,7 +595,6 @@ async fn oversized_bearer_body_is_413_and_small_body_still_runs() {
         package_dialect: false,
     };
     let handle = run_rpc(cfg, q, None, None, None, None, None).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(40)).await;
     let (st, body) = post_raw(
         tcp_addr(&handle),
         &handle.auth,
@@ -869,7 +864,6 @@ async fn large_block_submit_and_proposal_clear_http_413() {
     let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
     let token = handle.auth.token.clone();
 
     let proposal_tcp = post_authed(
@@ -1038,6 +1032,7 @@ async fn waitforblock_positional_hash_returns_current_tip() {
         rbitcoin_consensus::Milestone::NONE,
     );
     hub.ensure_genesis().unwrap();
+    let hub = Arc::new(hub);
     let query = Arc::clone(&hub.query);
     let cfg = RpcConfig {
         listen: Some("127.0.0.1:0".parse().unwrap()),
@@ -1056,10 +1051,9 @@ async fn waitforblock_positional_hash_returns_current_tip() {
         blocksonly: false,
         package_dialect: false,
     };
-    let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
+    let handle = run_rpc(cfg, query, None, None, None, Some(Arc::clone(&hub)), None)
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
     let (st, body) = post_raw(
         tcp_addr(&handle),
         &handle.auth,
@@ -1158,6 +1152,7 @@ async fn waitforblock_positional_hash_returns_current_tip() {
         "stale getblocktemplate longpoll slept {:?}",
         t3.elapsed()
     );
+    published_tip_wakes_waitfornewblock(&handle, &hub).await;
     handle.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1174,6 +1169,7 @@ async fn long_poll_deadline_returns_the_tip() {
         rbitcoin_consensus::Milestone::NONE,
     );
     hub.ensure_genesis().unwrap();
+    let hub = Arc::new(hub);
     let query = Arc::clone(&hub.query);
     let cfg = RpcConfig {
         listen: Some("127.0.0.1:0".parse().unwrap()),
@@ -1192,7 +1188,7 @@ async fn long_poll_deadline_returns_the_tip() {
         blocksonly: false,
         package_dialect: false,
     };
-    let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
+    let handle = run_rpc(cfg, query, None, None, None, Some(Arc::clone(&hub)), None)
         .await
         .unwrap();
     let missing = "00".repeat(32);
@@ -1259,7 +1255,7 @@ async fn long_poll_deadline_returns_the_tip() {
     tokio::time::pause();
     tokio::time::advance(std::time::Duration::from_secs(31)).await;
     tokio::time::resume();
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    tokio::task::yield_now().await;
     assert!(
         !waiter.is_finished(),
         "read timeout interrupted a complete RPC request"
@@ -1274,8 +1270,43 @@ async fn long_poll_deadline_returns_the_tip() {
         .unwrap();
     assert_eq!(reply["result"]["height"], 0, "{reply}");
     assert!(reply["error"].is_null(), "{reply}");
+    published_tip_wakes_waitfornewblock(&handle, &hub).await;
     handle.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+async fn published_tip_wakes_waitfornewblock(handle: &RpcHandle, hub: &rbitcoin_net::ChainHub) {
+    let addr = tcp_addr(handle);
+    let auth = handle.auth.clone();
+    let waiter = tokio::spawn(async move {
+        post_rpc(addr, &auth, "waitfornewblock", serde_json::json!([5_000])).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let info = post_rpc(addr, &handle.auth, "getrpcinfo", serde_json::json!([]))
+                .await
+                .unwrap();
+            if info["result"]["active_commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|cmd| cmd["method"] == "waitfornewblock")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("waitfornewblock parks before the tip");
+    hub.generate_to_script(1, bitcoin::ScriptBuf::from_bytes(vec![0x51]), Vec::new())
+        .expect("publish a tip");
+    let body = tokio::time::timeout(std::time::Duration::from_millis(40), waiter)
+        .await
+        .expect("published tip wakes waitfornewblock within a few ms")
+        .unwrap()
+        .unwrap();
+    assert!(body["result"]["height"].as_u64().unwrap() >= 1, "{body}");
 }
 
 #[tokio::test]
@@ -1312,7 +1343,6 @@ async fn stalled_rpc_connections_expire_and_free_capacity() {
     let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
     let addr = tcp_addr(&handle);
     let request = br#"{"jsonrpc":"1.0","id":1,"method":"getblockcount"}"#;
     let keepalive = format!(
@@ -1430,8 +1460,7 @@ fn waitfor_does_not_hold_the_blocking_pool() {
         let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
             .await
             .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-        let addr = tcp_addr(&handle);
+            let addr = tcp_addr(&handle);
         let auth = handle.auth.clone();
         let waiter = tokio::spawn(async move {
             let body = serde_json::json!({
@@ -1454,7 +1483,24 @@ fn waitfor_does_not_hold_the_blocking_pool() {
             let mut buf = Vec::new();
             let _ = stream.read_to_end(&mut buf).await;
         });
-        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let parked = handle
+                .active
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .snapshot()
+                .iter()
+                .any(|(method, _)| method == "waitforblock");
+            if parked {
+                break;
+            }
+            assert!(
+                !waiter.is_finished() && std::time::Instant::now() < deadline,
+                "waitforblock never reached the server"
+            );
+            tokio::task::yield_now().await;
+        }
         let t0 = std::time::Instant::now();
         tokio::task::spawn_blocking(|| ()).await.unwrap();
         assert!(
@@ -1504,7 +1550,6 @@ async fn long_poll_does_not_hold_the_work_queue() {
     let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
     let addr = tcp_addr(&handle);
     let auth = handle.auth.clone();
     let waiter = tokio::spawn(async move {
@@ -1523,7 +1568,29 @@ async fn long_poll_does_not_hold_the_work_queue() {
         "POST / HTTP/1.1\r\nHost: rpc\r\nAuthorization: {}\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{{",
         auth_header(&handle.auth)
     ).as_bytes()).await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let info = post_rpc(
+                tcp_addr(&handle),
+                &handle.auth,
+                "getrpcinfo",
+                serde_json::json!([]),
+            )
+            .await
+            .unwrap();
+            if info["result"]["active_commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|cmd| cmd["method"] == "waitfornewblock")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("waitfornewblock parks");
     let (st, body) = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         post_raw(
@@ -1603,7 +1670,6 @@ async fn rpc_work_queue_exceeded() {
     let handle = run_rpc(cfg, q, Some(mp), None, None, None, None)
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
     let (st, body) = post_raw(
         tcp_addr(&handle),
         &handle.auth,
@@ -1692,7 +1758,6 @@ async fn jsonrpc_envelope_junk_and_auth() {
     let handle = run_rpc(cfg, q, Some(mp), None, None, None, None)
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
     let addr = tcp_addr(&handle);
     let auth = &handle.auth;
 
@@ -2117,7 +2182,6 @@ async fn unix_socket_needs_no_http_auth() {
         package_dialect: false,
     };
     let handle = run_rpc(cfg, q, None, None, None, None, None).await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
     assert!(sock.exists(), "socket file");
     {
         use std::os::unix::fs::PermissionsExt;
@@ -2159,7 +2223,7 @@ fn http_wait_ctx() -> (
         mempool: None,
         network: Network::Regtest,
         start: Instant::now(),
-        stop: Arc::new(AtomicBool::new(false)),
+        stop: rbitcoin_rpc::methods::StopFlag::new(false),
         connections: Arc::new(AtomicU64::new(0)),
         initial_block_download: Arc::new(AtomicBool::new(false)),
         subversion: "/rbitcoin:test/".into(),
@@ -2243,7 +2307,24 @@ async fn http_longpoll_logs_the_request_once_before_it_waits() {
         let req = req.clone();
         tokio::spawn(async move { satisfy_http_wait(&ctx, &req).await })
     };
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let t0 = Instant::now();
+    loop {
+        let parked = ctx
+            .active
+            .lock()
+            .unwrap()
+            .snapshot()
+            .iter()
+            .any(|(method, _)| method == "getblocktemplate");
+        if parked {
+            break;
+        }
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(2),
+            "getblocktemplate longpoll never parked"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     assert!(!waiter.is_finished(), "the longpoll id has not changed");
     let mut lines = rbitcoin_log::take_logs();
     let needle = "ThreadRPCServer method=getblocktemplate";
@@ -2349,4 +2430,39 @@ async fn http_wait_unmet_height_and_same_tip_use_the_timeout() {
         dt >= std::time::Duration::from_millis(100),
         "the tip did not move, waited {dt:?}"
     );
+}
+
+/// The accept loop leaves when shutdown is stored, without the 50 ms tick.
+#[tokio::test]
+async fn accept_loop_leaves_when_shutdown_is_signaled() {
+    use axum::Router;
+    use tokio::net::TcpListener;
+
+    tokio::time::pause();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let (tx, _) = tokio::sync::watch::channel(());
+    let flag = Arc::clone(&shutdown);
+    let tx_task = tx.clone();
+    let task = tokio::spawn(async move {
+        serve_rpc(
+            listener,
+            Router::new(),
+            Arc::new(Semaphore::new(4)),
+            flag,
+            tx_task,
+        )
+        .await;
+    });
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+    shutdown.store(true, Ordering::SeqCst);
+    tx.send(()).unwrap();
+    tokio::task::yield_now().await;
+    let joined = tokio::time::timeout(std::time::Duration::ZERO, task).await;
+    tokio::time::resume();
+    joined
+        .expect("accept loop stayed in the 50 ms shutdown poll")
+        .expect("serve task");
 }
