@@ -1189,9 +1189,9 @@ fn same_height_rebuilds_the_tail(
         .expect("the same-height ask stored a tail");
     assert_eq!(tail.height, Some(tip_h));
     assert_eq!(tail.hash, Some(*same_h_tip.as_byte_array()));
-    assert!(tail.hashes.contains(&same_h_tip));
+    assert!(tail.entries.contains(&(tip_h, same_h_tip)));
     assert!(
-        !tail.hashes.contains(&tip),
+        !tail.entries.iter().any(|(_, hash)| *hash == tip),
         "the replaced tip hash leaves the confirmed tail"
     );
     same_h_tip
@@ -5559,4 +5559,269 @@ fn note_stored_candidate_ignores_a_dead_end_tip() {
     note_stored_candidate(&mut st, &hub, &[broken]);
     assert_eq!(st.header_walk.tip_hash(), Some(gen));
     assert!(st.header_walk.checkpoints.is_empty());
+}
+
+const LOCATOR_FIXTURE_TIP: u32 = 30;
+
+/// A confirmed chain with a candidate above it whose bodies nobody serves.
+/// Blocks have confirmed past the checkpoints at 10 and 20, and the walk's
+/// exponential stepping names them. `confirmed` is indexed by height.
+struct WithheldCandidate {
+    _dir: rbitcoin_query::testutil::TempDir,
+    hub: ChainHub,
+    st: IbdWorkState,
+    rx: mpsc::UnboundedReceiver<PeerCmd>,
+    confirmed: Vec<Header>,
+    candidate: Vec<Header>,
+}
+
+impl WithheldCandidate {
+    fn new(label: &str) -> Self {
+        let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled(label);
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let mined = hub
+            .generate_to_script(
+                LOCATOR_FIXTURE_TIP,
+                bitcoin::ScriptBuf::from_bytes(vec![0x51]),
+                vec![],
+            )
+            .unwrap();
+        let confirmed: Vec<Header> = std::iter::once(gen)
+            .chain(mined)
+            .map(|hash| hub.header_of(&hash).expect("a mined header"))
+            .collect();
+        let tip = *confirmed.last().unwrap();
+        let candidate = headers_on(tip, 1..=3);
+        let (s0, rx) = slot(0);
+        let mut st = IbdWorkState::new(vec![s0], Some(tip.block_hash()), Some(LOCATOR_FIXTURE_TIP));
+        ensure_origin(&mut st, &hub);
+        let mut work = hub.chain_work().unwrap();
+        for hdr in &candidate {
+            work = work + hdr.work();
+        }
+        let top = WalkTip {
+            hash: Some(candidate[2].block_hash()),
+            height: LOCATOR_FIXTURE_TIP + 3,
+            work,
+            header: Some(candidate[2]),
+            ..WalkTip::default()
+        };
+        let below = |height: u32| {
+            checkpoint_at(&WalkTip {
+                hash: Some(confirmed[height as usize].block_hash()),
+                height,
+                work: hub.work_through_height(height).unwrap(),
+                header: Some(confirmed[height as usize]),
+                ..WalkTip::default()
+            })
+        };
+        st.header_walk.checkpoints = vec![below(10), below(20), below(28), checkpoint_at(&top)];
+        st.header_walk.tip = top;
+        st.header_walk.proven = true;
+        let mut built = Self {
+            _dir: dir,
+            hub,
+            st,
+            rx,
+            confirmed,
+            candidate,
+        };
+        built.queue_candidate(3);
+        built
+    }
+
+    fn queue_candidate(&mut self, through: usize) {
+        for (at, hdr) in self.candidate[..through].iter().enumerate() {
+            let hash = hdr.block_hash();
+            let height = LOCATOR_FIXTURE_TIP + 1 + at as u32;
+            self.st.ordered.push_back(hash);
+            self.st.ordered_set.insert(hash);
+            self.st.hash_height.insert(hash, height);
+            self.st.height_to_hash.insert(height, hash);
+        }
+    }
+
+    fn ask(&mut self) -> Vec<BlockHash> {
+        assert!(send_getheaders(&mut self.st, &self.hub).unwrap());
+        take_locator(&mut self.rx)
+    }
+
+    fn at(&self, height: u32) -> BlockHash {
+        self.confirmed[height as usize].block_hash()
+    }
+
+    /// Confirmed heights, the candidate above them, in locator order.
+    fn heights(&self, locator: &[BlockHash]) -> Vec<u32> {
+        let known: std::collections::HashMap<BlockHash, u32> = self
+            .confirmed
+            .iter()
+            .chain(self.candidate.iter())
+            .enumerate()
+            .map(|(height, hdr)| (hdr.block_hash(), height as u32))
+            .collect();
+        locator.iter().map(|hash| known[hash]).collect()
+    }
+}
+
+fn headers_on(parent: Header, salts: std::ops::RangeInclusive<u32>) -> Vec<Header> {
+    let mut prev = parent.block_hash();
+    let mut out = Vec::new();
+    for n in salts {
+        let hdr = mine_at(prev, n, parent.time + n);
+        prev = hdr.block_hash();
+        out.push(hdr);
+    }
+    out
+}
+
+/// What Bitcoin Core sends: the headers after the first locator hash on its
+/// chain (`FindForkInGlobalIndex`), up to a reply window.
+fn core_reply(chain: &[Header], locator: &[BlockHash], window: usize) -> Vec<Header> {
+    let from = locator
+        .iter()
+        .find_map(|hash| chain.iter().position(|hdr| hdr.block_hash() == *hash))
+        .map_or(0, |at| at + 1);
+    chain[from..].iter().take(window).copied().collect()
+}
+
+#[test]
+fn a_peer_on_a_heavier_fork_answers_from_the_confirmed_tip() {
+    let mut f = WithheldCandidate::new("locator-heavier-fork");
+    let tip = f.at(LOCATOR_FIXTURE_TIP);
+    let fork = headers_on(*f.confirmed.last().unwrap(), 11..=14);
+    let fork_tip = fork[3].block_hash();
+    let peer_chain: Vec<Header> = f.confirmed.iter().chain(fork.iter()).copied().collect();
+    let locator = f.ask();
+    // Shorter than the gap to the next checkpoint, as 2,000 is on a real chain.
+    let reply = core_reply(&peer_chain, &locator, 5);
+    assert_eq!(
+        reply.first().map(|hdr| hdr.prev_blockhash),
+        Some(tip),
+        "the peer answers from the highest hash it shares"
+    );
+    apply(&mut f.st, &f.hub, 0, reply);
+    assert_eq!(
+        f.st.header_walk.tip_hash(),
+        Some(fork_tip),
+        "the reply replaces the candidate"
+    );
+    assert!(!f.st.header_walk.walk_quiet.contains(&0));
+}
+
+/// The peer shares one candidate header above the confirmed tip, which the
+/// locator does not name. Its reply starts below the fork and is not extending
+/// the walk at its first header.
+#[test]
+fn a_reply_that_starts_below_the_fork_is_adopted() {
+    let mut f = WithheldCandidate::new("locator-below-fork");
+    let tip = f.at(LOCATOR_FIXTURE_TIP);
+    let shared = f.candidate[0];
+    let fork = headers_on(shared, 11..=14);
+    let fork_tip = fork[3].block_hash();
+    let peer_chain: Vec<Header> = f
+        .confirmed
+        .iter()
+        .chain(std::iter::once(&shared))
+        .chain(fork.iter())
+        .copied()
+        .collect();
+    let locator = f.ask();
+    let reply = core_reply(&peer_chain, &locator, 5);
+    assert_eq!(reply[0], shared);
+    assert_eq!(reply[0].prev_blockhash, tip);
+    apply(&mut f.st, &f.hub, 0, reply);
+    assert_eq!(f.st.header_walk.tip_hash(), Some(fork_tip));
+    assert!(!f.st.header_walk.walk_quiet.contains(&0));
+}
+
+#[test]
+fn the_locator_descends_by_height_after_the_candidate() {
+    let mut f = WithheldCandidate::new("locator-descends");
+    let locator = f.ask();
+    assert_eq!(
+        f.heights(&locator),
+        [33, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 15, 10, 7, 0],
+        "candidate, then the confirmed tail with the checkpoints merged in"
+    );
+}
+
+#[test]
+fn a_full_queue_merges_a_lighter_fork_by_height() {
+    let mut f = WithheldCandidate::new("locator-full-queue");
+    let fork = headers_on(f.confirmed[15], 21..=22);
+    let lighter = fork[1].block_hash();
+    f.st.header_walk.challenger = Some(Challenger {
+        fork_hash: f.at(15),
+        fork_height: 15,
+        tip: WalkTip {
+            hash: Some(lighter),
+            height: 17,
+            ..WalkTip::default()
+        },
+        checkpoints: Vec::new(),
+    });
+    while f.st.ordered.len() < ORDERED_HEADERS_SOFT_CAP {
+        let mut b = [0x77; 32];
+        b[..8].copy_from_slice(&(f.st.ordered.len() as u64).to_le_bytes());
+        let filler = BlockHash::from_byte_array(b);
+        f.st.ordered.push_front(filler);
+        f.st.ordered_set.insert(filler);
+    }
+    let locator = f.ask();
+    let lighter_at = locator.iter().position(|hash| *hash == lighter).unwrap();
+    assert_eq!(
+        locator[lighter_at - 1],
+        f.at(19),
+        "the lighter fork follows the higher confirmed hash"
+    );
+    assert_eq!(
+        locator[lighter_at + 1],
+        f.at(15),
+        "and comes before the lower one"
+    );
+    let on_fork: Vec<Header> = f.confirmed[..=15]
+        .iter()
+        .chain(fork.iter())
+        .copied()
+        .collect();
+    assert!(
+        core_reply(&on_fork, &locator, 5).is_empty(),
+        "a peer on the lighter fork answers from that fork's tip"
+    );
+}
+
+#[test]
+fn a_refill_still_asks_after_the_stored_tip_first() {
+    let mut f = WithheldCandidate::new("locator-refill-first");
+    let stored = f.candidate[0].block_hash();
+    let walk_tip = f.candidate[2].block_hash();
+    let anchor = f.at(28);
+    f.st.ordered.clear();
+    f.st.ordered_set.clear();
+    f.st.hash_height.clear();
+    f.st.height_to_hash.clear();
+    f.queue_candidate(1);
+    let locator = f.ask();
+    assert_eq!(
+        locator[..3],
+        [stored, anchor, walk_tip],
+        "the stored tip and its anchor come before the candidate"
+    );
+    let rest = f.heights(&locator[3..]);
+    assert!(
+        rest.windows(2).all(|pair| pair[0] > pair[1]),
+        "what follows descends by height, got {rest:?}"
+    );
+    let on_candidate: Vec<Header> = f
+        .confirmed
+        .iter()
+        .chain(f.candidate.iter())
+        .copied()
+        .collect();
+    assert_eq!(
+        core_reply(&on_candidate, &locator, 5)[0].prev_blockhash,
+        stored,
+        "a peer on the candidate sends what the queue can take"
+    );
 }

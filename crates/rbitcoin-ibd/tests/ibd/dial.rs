@@ -1470,8 +1470,30 @@ fn request_headers_no_alive_returns_false() {
     dead.alive = false;
     assert!(!request_headers_from(&[dead], 1, &mut seq, vec![]).unwrap());
     // Locator alone (empty work tips + no tip) still returns genesis zero.
-    let loc = ibd_header_locator(&hub, &[], &[]);
+    let loc = ibd_header_locator(&hub, &[], &[], &[]);
     assert!(!loc.is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The protocol maximum drops the lowest heights. A hash named twice counts once.
+#[test]
+fn the_locator_cap_keeps_the_refill_and_the_highest_hashes() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("dial-loc-cap");
+    let max = rbitcoin_net::codec::MAX_LOCATOR_SZ as u32;
+    let at = |height: u32| {
+        let mut bytes = [0u8; 32];
+        bytes[..4].copy_from_slice(&height.to_le_bytes());
+        BlockHash::from_byte_array(bytes)
+    };
+    let refill = at(0);
+    let walk: Vec<(u32, BlockHash)> = (1..=max + 5).map(|height| (height, at(height))).collect();
+    let tail = [(max + 5, at(max + 5)), (1, at(1))];
+    let loc = ibd_header_locator(&hub, &[refill], &walk, &tail);
+    assert_eq!(loc.len(), max as usize);
+    assert_eq!(loc[0], refill);
+    assert_eq!(loc[1], at(max + 5));
+    assert_eq!(loc[2], at(max + 4));
+    assert_eq!(loc.last().copied(), Some(at(7)));
     let _ = std::fs::remove_dir_all(dir);
 }
 

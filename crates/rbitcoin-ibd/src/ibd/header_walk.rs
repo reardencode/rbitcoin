@@ -3,10 +3,11 @@
 //! The ordered queue is a window over headers already written. One peer, the
 //! lowest time to a first block byte among peers that have not failed the
 //! walk, is asked for the next header that is not already stored. While the
-//! queue has room the locator starts at the stored tip, then the candidate,
-//! then a lighter fork, then earlier checkpoints, so the reply can be
-//! enqueued. A full queue asks from the candidate. Headers already written
-//! are appended locally while the queue is under [`ORDERED_HEADERS_SOFT_CAP`].
+//! queue has room the locator starts at the stored tip, so the reply can be
+//! enqueued. The candidate, a lighter fork, the checkpoints, and the confirmed
+//! chain follow by descending height. A full queue starts with those. Headers
+//! already written are appended locally while the queue is under
+//! [`ORDERED_HEADERS_SOFT_CAP`].
 //! An accepted batch is written and recorded as a checkpoint.
 //! Above the work floor, one short reply that leaves the candidate
 //! unextended retires that peer and the reservation moves. A full
@@ -203,16 +204,17 @@ impl HeaderWalk {
         !self.checkpoints.is_empty()
     }
 
-    /// Candidate tip, then a lighter fork, then earlier checkpoints.
-    pub fn locator_hashes(&self) -> Vec<BlockHash> {
+    /// Candidate tip, a lighter fork, and checkpoints stepping back, each with
+    /// its height.
+    pub fn locator_entries(&self) -> Vec<(u32, BlockHash)> {
         let mut out = Vec::new();
         if let Some(h) = self.tip.hash {
-            out.push(h);
+            out.push((self.tip.height, h));
         }
         if let Some(ch) = &self.challenger {
             if let Some(h) = ch.tip.hash {
-                if !out.contains(&h) {
-                    out.push(h);
+                if !out.iter().any(|(_, seen)| *seen == h) {
+                    out.push((ch.tip.height, h));
                 }
             }
         }
@@ -220,9 +222,9 @@ impl HeaderWalk {
         let mut i = self.checkpoints.len();
         while i > 0 && out.len() < 8 {
             i = i.saturating_sub(step);
-            let h = self.checkpoints[i].hash;
-            if !out.contains(&h) {
-                out.push(h);
+            let c = &self.checkpoints[i];
+            if !out.iter().any(|(_, seen)| *seen == c.hash) {
+                out.push((c.height, c.hash));
             }
             step = step.saturating_mul(2);
         }
@@ -2670,33 +2672,36 @@ pub fn send_getheaders(
     arm_header_ask(st, hub)
 }
 
-/// Locator for one headers ask.
+/// What one headers ask names, before the confirmed chain joins it.
+#[doc(hidden)]
+#[derive(Debug, Default)]
+pub struct AskTips {
+    /// Named first and in this order, at any height.
+    pub refill: Vec<BlockHash>,
+    /// Ranked by height with the confirmed chain.
+    pub walk: Vec<(u32, BlockHash)>,
+}
+
+/// Locator hashes for one headers ask.
 ///
 /// Bitcoin answers after the first locator hash the peer knows. While the
-/// queue can take headers, that hash is the stored tip. An unproved queue
-/// also names the proved anchor under it, so a peer that does not have the
-/// guess still sends the gap. The candidate and its checkpoints follow. A
-/// full queue is look-ahead and starts at the candidate.
+/// queue can take headers, that hash is the stored tip, which can sit below
+/// the candidate. An unproved queue also names the proved anchor under it, so
+/// a peer that does not have the guess still sends the gap. A full queue is
+/// look-ahead and names neither.
 #[doc(hidden)]
-pub fn header_ask_locator(st: &IbdWorkState, hub: &ChainHub) -> Vec<BlockHash> {
-    let mut tips = Vec::new();
+pub fn header_ask_locator(st: &IbdWorkState, hub: &ChainHub) -> AskTips {
+    let mut tips = AskTips {
+        refill: Vec::new(),
+        walk: st.header_walk.locator_entries(),
+    };
     if st.ordered.len() < ORDERED_HEADERS_SOFT_CAP {
-        if let Some(stored) = stored_top_hash(st, hub) {
-            tips.push(stored);
-        }
-        if let Some((anchor, _)) = unproved_anchor(st, hub) {
-            if !tips.contains(&anchor) {
-                tips.push(anchor);
-            }
-        }
+        tips.refill.extend(stored_top_hash(st, hub));
+        tips.refill
+            .extend(unproved_anchor(st, hub).map(|(anchor, _)| anchor));
     }
-    for hash in st.header_walk.locator_hashes() {
-        if !tips.contains(&hash) {
-            tips.push(hash);
-        }
-    }
-    if tips.is_empty() {
-        tips = super::path::work_path_tips(st);
+    if tips.refill.is_empty() && tips.walk.is_empty() {
+        tips.refill = super::path::work_path_tips(st);
     }
     tips
 }
@@ -2746,7 +2751,7 @@ pub fn arm_header_ask(
             }
             None => {
                 st.header_walk.probe_top = None;
-                ask_header_peer(st, hub, peer, &[])?
+                ask_header_peer(st, hub, peer, &AskTips::default())?
             }
         };
         if sent {
@@ -2907,10 +2912,10 @@ pub fn ask_header_peer(
     st: &mut IbdWorkState,
     hub: &ChainHub,
     peer: usize,
-    tips: &[BlockHash],
+    tips: &AskTips,
 ) -> Result<bool, rbitcoin_net::error::NetError> {
     let tail = confirmed_chain_tail(st, hub)?;
-    let locator = super::dial::ibd_header_locator(hub, tips, &tail);
+    let locator = super::dial::ibd_header_locator(hub, &tips.refill, &tips.walk, &tail);
     if !super::dial::request_headers_from(&st.slots, peer, &mut st.header_req_seq, locator)? {
         return Ok(false);
     }
@@ -2918,7 +2923,7 @@ pub fn ask_header_peer(
     Ok(true)
 }
 
-/// Confirmed-chain tail for `getheaders`.
+/// Confirmed-chain tail for `getheaders`, each hash with its height.
 ///
 /// Rebuilt when `published_tip` height or hash changes. The work-path prefix
 /// is not part of this vec.
@@ -2926,25 +2931,36 @@ pub fn ask_header_peer(
 pub fn confirmed_chain_tail(
     st: &mut IbdWorkState,
     hub: &ChainHub,
-) -> Result<Vec<BlockHash>, rbitcoin_net::error::NetError> {
+) -> Result<Vec<(u32, BlockHash)>, rbitcoin_net::error::NetError> {
     let published = hub.query.published_tip();
     let height = published.map(|tip| tip.height);
     let hash = published.map(|tip| tip.hash);
     if let Some(cached) = &st.confirmed_locator_tail {
         if cached.height == height && cached.hash == hash {
-            return Ok(cached.hashes.clone());
+            return Ok(cached.entries.clone());
         }
     }
-    let tail = hub
-        .query
-        .locator_hashes()
-        .map_err(|e| rbitcoin_net::error::NetError::Consensus(e.to_string()))?;
+    let read_failed =
+        |e: rbitcoin_query::QueryError| rbitcoin_net::error::NetError::Consensus(e.to_string());
+    let hashes = hub.query.locator_hashes().map_err(read_failed)?;
+    let mut entries = Vec::with_capacity(hashes.len());
+    for block in hashes {
+        // A reorg since that walk took the hash off the chain. So does the
+        // null hash an empty store answers with.
+        let at = hub
+            .query
+            .height_of_hash(block.as_byte_array())
+            .map_err(read_failed)?;
+        if let Some(at) = at {
+            entries.push((at.0, block));
+        }
+    }
     st.confirmed_locator_tail = Some(ConfirmedLocatorTail {
         height,
         hash,
-        hashes: tail.clone(),
+        entries: entries.clone(),
     });
-    Ok(tail)
+    Ok(entries)
 }
 
 #[doc(hidden)]
